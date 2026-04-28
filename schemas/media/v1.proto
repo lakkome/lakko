@@ -1,0 +1,40 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+syntax = "proto3";
+
+package lakko.media.v1;
+
+// SFrame (RFC 9605) headers and call-control structures for Lakko.
+//
+// Note: per-frame SFrame headers on the wire follow the binary layout in
+// RFC 9605 directly, NOT this protobuf message. This proto exists for
+// configuration, key-rotation messages, and observability — not for
+// per-frame metadata which must be byte-efficient.
+//
+// Generated Rust code lives in `crates/lakko-proto/src/generated/media/`.
+
+// Per-call key configuration derived from MLS exporter.
+//
+// Sent over the call's MLS group as an application message to inform
+// participants of the current SFrame key generation.
+message CallKeyEpoch {
+    bytes call_id = 1;
+    uint32 mls_epoch = 2;
+    uint32 sframe_key_id = 3;
+
+    // Time at which this key becomes active. Used for the 1-second
+    // overlap window during rekey on Add/Remove.
+    uint64 activation_unix_ms = 4;
+
+    reserved 5 to 15;
+}
+
+// Codec preference advertised by a participant on join.
+message CodecCapability {
+    repeated string audio_codecs = 1;  // "opus" etc.
+    repeated string video_codecs = 2;  // "av1", "vp9", "h264"
+    bool supports_svc = 3;
+    bool hardware_aes = 4;
+    reserved 5 to 15;
+}

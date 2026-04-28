@@ -1,0 +1,29 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+syntax = "proto3";
+
+package lakko.wire.v1;
+
+// Outer envelope used between client and edge endpoints.
+//
+// All payloads are encrypted at the application layer (MLS / HPKE);
+// transport ciphers (TLS / QUIC / SFrame) wrap this envelope as a whole.
+//
+// This file is the SOURCE OF TRUTH for wire format. Generated Rust code
+// lives in `crates/lakko-proto/src/generated/wire/`.
+message Envelope {
+    // Logical version of the wire protocol. Bumped on breaking changes;
+    // older clients must reject envelopes with version > supported.
+    uint32 version = 1;
+
+    // Routing pseudonym (per-relationship, rotating). Server uses this
+    // to dispatch without learning real identity.
+    bytes routing_pseudonym = 2;
+
+    // Opaque ciphertext payload. Contents are MLS / HPKE encrypted.
+    bytes ciphertext = 3;
+
+    // Reserved for future use — never re-purpose.
+    reserved 4 to 15;
+}

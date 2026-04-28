@@ -1,0 +1,7 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy", "rust-src"]
+profile = "minimal"

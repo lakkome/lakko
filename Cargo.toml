@@ -1,0 +1,104 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+[workspace]
+resolver = "2"
+members = [
+    "crates/lakko-core",
+    "crates/lakko-crypto",
+    "crates/lakko-mls",
+    "crates/lakko-proto",
+    "crates/lakko-transport",
+    "crates/lakko-storage",
+    "crates/lakko-sync",
+    "crates/lakko-calls",
+    "crates/lakko-contacts",
+    "crates/lakko-presence",
+    "crates/lakko-push",
+    "crates/lakko-ffi-uniffi",
+    "crates/lakko-ffi-wasm",
+    "services/auth",
+    "services/ds",
+    "services/storage",
+    "services/edge",
+    "services/discovery",
+    "services/push-gw",
+    "services/transport-rendezvous",
+]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.79"
+license = "AGPL-3.0-or-later"
+authors = ["Lakko Contributors"]
+repository = "https://github.com/lakkome/lakko"
+homepage = "https://github.com/lakkome/lakko"
+publish = false
+
+[workspace.dependencies]
+# Error handling
+thiserror = "1"
+anyhow = "1"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+futures = "0.3"
+
+# Tracing
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Internal crates — пути для cross-crate зависимостей
+lakko-core = { path = "crates/lakko-core" }
+lakko-crypto = { path = "crates/lakko-crypto" }
+lakko-mls = { path = "crates/lakko-mls" }
+lakko-proto = { path = "crates/lakko-proto" }
+lakko-transport = { path = "crates/lakko-transport" }
+lakko-storage = { path = "crates/lakko-storage" }
+lakko-sync = { path = "crates/lakko-sync" }
+lakko-calls = { path = "crates/lakko-calls" }
+lakko-contacts = { path = "crates/lakko-contacts" }
+lakko-presence = { path = "crates/lakko-presence" }
+lakko-push = { path = "crates/lakko-push" }
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+unreachable_pub = "warn"
+trivial_casts = "warn"
+trivial_numeric_casts = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+# Слишком pedantic — отключаем
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+needless_pass_by_value = "allow"
+# doc_markdown требует backticks вокруг каждого CamelCase / акронима
+# (MLS, OPRF, FIPS, BIP39, FoundationDB, …) — слишком шумно для security-домена.
+doc_markdown = "allow"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = "debuginfo"
+panic = "abort"
+overflow-checks = true
+
+[profile.release-with-debug]
+inherits = "release"
+strip = "none"
+debug = true
+
+[profile.dev]
+opt-level = 0
+debug = true
+overflow-checks = true

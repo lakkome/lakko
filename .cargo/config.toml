@@ -1,0 +1,9 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+[net]
+git-fetch-with-cli = true
+
+[build]
+# rustc wrapper можно подключить через sccache позже:
+# rustc-wrapper = "sccache"

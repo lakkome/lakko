@@ -1,0 +1,14 @@
+version = 1
+
+SPDX-PackageName = "Lakko"
+SPDX-PackageSupplier = "Lakko Contributors <noreply@lakko.app>"
+SPDX-PackageDownloadLocation = "https://github.com/lakkome/lakko"
+
+# Default for files that cannot carry an SPDX header (binary fixtures,
+# generated code, JSON, lockfiles). Files that DO carry a header take
+# precedence over this fallback.
+[[annotations]]
+path = "**"
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2026 Lakko Contributors"
+SPDX-License-Identifier = "AGPL-3.0-or-later"

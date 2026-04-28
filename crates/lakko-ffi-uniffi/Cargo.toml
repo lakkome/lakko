@@ -1,0 +1,19 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+[package]
+name = "lakko-ffi-uniffi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+description = "UniFFI bindings — Swift (iOS/iPadOS/macOS/watchOS) and Kotlin (Android) surface"
+
+[lib]
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[lints]
+workspace = true

@@ -1,0 +1,75 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+syntax = "proto3";
+
+package lakko.mls_app.v1;
+
+// MLS application message payload.
+//
+// Payloads inside MLS application messages (encrypted under the group's
+// epoch keys) follow this schema. They are opaque to the Delivery Service.
+//
+// Generated Rust code lives in `crates/lakko-proto/src/generated/mls_app/`.
+message ApplicationPayload {
+    // Hybrid logical clock timestamp, monotonic per group.
+    // Encodes physical time + counter for total ordering on edits/deletes.
+    uint64 hlc = 1;
+
+    // Sender device leaf index in the MLS group.
+    uint32 sender_leaf = 2;
+
+    // Concrete payload type — one of these is set per message.
+    oneof body {
+        ChatMessage chat = 10;
+        EditMessage edit = 11;
+        DeleteMessage delete = 12;
+        Reaction reaction = 13;
+        TypingIndicator typing = 14;
+        ReadReceipt read_receipt = 15;
+    }
+
+    reserved 16 to 31;
+}
+
+message ChatMessage {
+    string text = 1;
+    repeated Attachment attachments = 2;
+    bytes reply_to_id = 3;
+    reserved 4 to 15;
+}
+
+message Attachment {
+    bytes blob_id = 1;
+    string mime_type = 2;
+    uint64 size_bytes = 3;
+    bytes content_key = 4;
+    reserved 5 to 15;
+}
+
+message EditMessage {
+    bytes target_message_id = 1;
+    string new_text = 2;
+    reserved 3 to 15;
+}
+
+message DeleteMessage {
+    bytes target_message_id = 1;
+    reserved 2 to 15;
+}
+
+message Reaction {
+    bytes target_message_id = 1;
+    string emoji = 2;
+    reserved 3 to 15;
+}
+
+message TypingIndicator {
+    bool is_typing = 1;
+    reserved 2 to 15;
+}
+
+message ReadReceipt {
+    bytes up_to_message_id = 1;
+    reserved 2 to 15;
+}

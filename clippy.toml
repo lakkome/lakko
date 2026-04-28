@@ -1,0 +1,14 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+# Threshold для clippy::too_many_arguments
+too-many-arguments-threshold = 8
+
+# Threshold для clippy::cognitive_complexity
+cognitive-complexity-threshold = 30
+
+# Threshold для clippy::type_complexity
+type-complexity-threshold = 250
+
+# Disallowed methods — добавим security-sensitive по мере появления реального кода.
+disallowed-methods = []
