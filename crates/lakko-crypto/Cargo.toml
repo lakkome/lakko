@@ -14,3 +14,37 @@ description = "Cryptographic primitives for Lakko (HPKE, HKDF, AEAD, OPRF, BLAKE
 
 [lints]
 workspace = true
+
+[dependencies]
+thiserror.workspace = true
+
+# Memory hygiene
+zeroize = { version = "1", features = ["derive"] }
+subtle = "2"
+
+# Randomness
+rand_core = { version = "0.6", features = ["getrandom"] }
+
+# Hashing
+blake3 = "1"
+sha2 = "0.10"
+
+# Key derivation / MAC
+hkdf = "0.12"
+hmac = "0.12"
+
+# AEAD
+aead = "0.5"
+chacha20poly1305 = "0.10"
+aes-gcm = "0.10"
+
+# Signing / agreement
+ed25519-dalek = { version = "2", default-features = false, features = ["std", "rand_core", "zeroize"] }
+x25519-dalek = { version = "2", default-features = false, features = ["zeroize", "static_secrets"] }
+
+# Password-based KDF (Argon2id) — used for backup-encryption KEK
+argon2 = "0.5"
+
+[dev-dependencies]
+proptest = "1"
+hex = "0.4"
