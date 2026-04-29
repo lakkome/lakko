@@ -17,10 +17,10 @@ workspace = true
 
 [dependencies]
 thiserror.workspace = true
-openmls = "0.6"
-openmls_basic_credential = "0.3"
-openmls_rust_crypto = "0.3"
-openmls_traits = "0.3"
+openmls = "0.8"
+openmls_basic_credential = "0.5"
+openmls_rust_crypto = "0.5"
+openmls_traits = "0.5"
 tls_codec = "0.4"
 zeroize = "1"
 

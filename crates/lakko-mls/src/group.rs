@@ -260,7 +260,7 @@ impl Group {
     ) -> Result<Zeroizing<Vec<u8>>> {
         let secret = self
             .inner
-            .export_secret(&identity.provider, label, context, length)
+            .export_secret(identity.provider.crypto(), label, context, length)
             .map_err(|e| Error::Exporter(format!("{e:?}")))?;
         Ok(Zeroizing::new(secret))
     }
