@@ -53,18 +53,19 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
-# Internal crates — пути для cross-crate зависимостей
-lakko-core = { path = "crates/lakko-core" }
-lakko-crypto = { path = "crates/lakko-crypto" }
-lakko-mls = { path = "crates/lakko-mls" }
-lakko-proto = { path = "crates/lakko-proto" }
-lakko-transport = { path = "crates/lakko-transport" }
-lakko-storage = { path = "crates/lakko-storage" }
-lakko-sync = { path = "crates/lakko-sync" }
-lakko-calls = { path = "crates/lakko-calls" }
-lakko-contacts = { path = "crates/lakko-contacts" }
-lakko-presence = { path = "crates/lakko-presence" }
-lakko-push = { path = "crates/lakko-push" }
+# Internal crates — путь + версия (cargo-deny отвергает wildcard-only deps).
+# Версия совпадает с workspace.package.version и передвигается атомарно.
+lakko-core = { path = "crates/lakko-core", version = "0.0.0" }
+lakko-crypto = { path = "crates/lakko-crypto", version = "0.0.0" }
+lakko-mls = { path = "crates/lakko-mls", version = "0.0.0" }
+lakko-proto = { path = "crates/lakko-proto", version = "0.0.0" }
+lakko-transport = { path = "crates/lakko-transport", version = "0.0.0" }
+lakko-storage = { path = "crates/lakko-storage", version = "0.0.0" }
+lakko-sync = { path = "crates/lakko-sync", version = "0.0.0" }
+lakko-calls = { path = "crates/lakko-calls", version = "0.0.0" }
+lakko-contacts = { path = "crates/lakko-contacts", version = "0.0.0" }
+lakko-presence = { path = "crates/lakko-presence", version = "0.0.0" }
+lakko-push = { path = "crates/lakko-push", version = "0.0.0" }
 
 [workspace.lints.rust]
 unsafe_code = "deny"

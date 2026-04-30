@@ -22,7 +22,8 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 | [0005](docs/adr/0005-contact-invitations.md) | Capability-based invites + 6 сценариев + pseudonym lifecycle |
 | [0006](docs/adr/0006-licensing.md) | AGPLv3 monorepo + CLA |
 
-Полный roadmap и trade-offs — в `~/.claude/plans/1-nested-wreath.md`.
+Полный стратегический план и trade-offs — в `~/.claude/plans/1-nested-wreath.md`.
+Тактическая декомпозиция всех 6 фаз с sprint-breakdown — в [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 ## Карта модулей
 
