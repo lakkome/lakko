@@ -91,17 +91,35 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 ## Команды (через justfile)
 
 ```
-just check          # cargo check --workspace --all-targets
-just test           # cargo test --workspace
-just lint           # cargo clippy --workspace --all-targets -- -D warnings
-just fmt            # cargo fmt --all
-just fmt-check      # cargo fmt --all --check
-just audit          # cargo audit + cargo deny
-just reuse          # reuse lint
-just regen-proto    # перегенерация типов из schemas/
-just fuzz <target>  # cargo fuzz run <target>
-just ci             # всё что делает CI локально
+just check                     # cargo check --workspace --all-targets
+just test                      # cargo test --workspace
+just lint                      # cargo clippy --workspace -- -D warnings
+just fmt                       # cargo fmt --all
+just fmt-check                 # cargo fmt --all --check
+just audit                     # cargo deny check
+just reuse                     # reuse lint
+just regen-proto               # перегенерация типов из schemas/
+just regen-bindings            # Swift + Kotlin биндинги из lakko-ffi-uniffi
+just fuzz-check                # smoke-build всех fuzz-targets на stable
+just fuzz <crate> <target>     # запуск конкретного target-а на nightly + cargo-fuzz
+just fuzz-list                 # все доступные fuzz-targets
+just ci                        # всё что делает CI локально
 ```
+
+## Fuzz harnesses
+
+`crates/lakko-mls/fuzz/` и `crates/lakko-proto/fuzz/` — отдельные крейты вне основного workspace (нужен nightly + libfuzzer-sys). Targets живут в `fuzz/fuzz_targets/*.rs`.
+
+Текущие targets:
+- **`lakko-mls/mls_message`** — `MlsMessageIn` wire-format parser (TLS codec)
+- **`lakko-mls/key_package`** — `KeyPackage` wire-format parser
+- **`lakko-proto/wire_envelope`** — `wire::v1::Envelope` prost decoder
+- **`lakko-proto/mls_app_payload`** — `mls_app::v1::ApplicationPayload` prost decoder
+- **`lakko-proto/media_call_key`** — `media::v1::CallKeyEpoch` + `CodecCapability` decoders
+
+`fuzz_api` модуль в `lakko-mls` (помечен `#[doc(hidden)]`) — единственный публичный entry-point для harness-ов; не часть supported public API.
+
+Фуззинг-corpus не коммитится (`fuzz/corpus/`, `fuzz/artifacts/` в `.gitignore`); поднимается локально.
 
 ## Чеклист перед коммитом
 

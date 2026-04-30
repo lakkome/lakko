@@ -13,6 +13,12 @@ target
 # Contains mutation testing data
 **/mutants.out*/
 
+# cargo-fuzz: corpus files and crashes are local artifacts, not committed.
+# Targets and harnesses themselves ARE committed (under `fuzz/fuzz_targets/`).
+**/fuzz/corpus/
+**/fuzz/artifacts/
+**/fuzz/coverage/
+
 # RustRover
 #  JetBrains specific template is maintained in a separate JetBrains.gitignore that can
 #  be found at https://github.com/github/gitignore/blob/main/Global/JetBrains.gitignore

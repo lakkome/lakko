@@ -28,3 +28,30 @@ pub use identity::Identity;
 /// Re-exported MLS leaf-node index. Surfaced so callers do not need to
 /// depend on `openmls` directly.
 pub use openmls::prelude::LeafNodeIndex;
+
+/// Parser entry points for fuzz harnesses.
+///
+/// These are **not** part of the supported public API. They exist so
+/// `cargo fuzz` targets in `crates/lakko-mls/fuzz/` can drive bytes through
+/// the wire-format parsers without setting up real Identity / Group state.
+/// Each function is panic-safe by contract — fuzzing failures should
+/// surface as `false` (parse rejected), never as a panic.
+#[doc(hidden)]
+pub mod fuzz_api {
+    use openmls::framing::MlsMessageIn;
+    use tls_codec::Deserialize as _;
+
+    /// Try to parse a wire-format `MlsMessageIn`. Returns `true` on success.
+    #[must_use]
+    pub fn parse_mls_message(bytes: &[u8]) -> bool {
+        let mut slice = bytes;
+        MlsMessageIn::tls_deserialize(&mut slice).is_ok()
+    }
+
+    /// Try to parse and validate a wire-format `KeyPackage`. Returns `true`
+    /// on successful TLS-codec parse.
+    #[must_use]
+    pub fn parse_key_package(bytes: &[u8]) -> bool {
+        crate::key_package::deserialize(bytes).is_ok()
+    }
+}

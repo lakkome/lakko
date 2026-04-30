@@ -25,6 +25,12 @@ members = [
     "services/push-gw",
     "services/transport-rendezvous",
 ]
+# fuzz crates require nightly + libfuzzer-sys; они opt-out из workspace
+# через свой `[workspace]` блок и не учитываются здесь.
+exclude = [
+    "crates/lakko-mls/fuzz",
+    "crates/lakko-proto/fuzz",
+]
 
 [workspace.package]
 version = "0.0.0"

@@ -1,0 +1,33 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+[package]
+name = "lakko-mls-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+# Opt out of the parent workspace — cargo-fuzz crates require nightly
+# and libfuzzer-sys, which we don't want as a workspace-wide dep.
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+lakko-mls = { path = ".." }
+
+[[bin]]
+name = "mls_message"
+path = "fuzz_targets/mls_message.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "key_package"
+path = "fuzz_targets/key_package.rs"
+test = false
+doc = false
+bench = false

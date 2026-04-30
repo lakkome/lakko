@@ -1,0 +1,40 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+[package]
+name = "lakko-proto-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+# Opt out of the parent workspace.
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+lakko-proto = { path = ".." }
+prost = "0.13"
+
+[[bin]]
+name = "wire_envelope"
+path = "fuzz_targets/wire_envelope.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "mls_app_payload"
+path = "fuzz_targets/mls_app_payload.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "media_call_key"
+path = "fuzz_targets/media_call_key.rs"
+test = false
+doc = false
+bench = false

@@ -86,3 +86,61 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: fsfe/reuse-action@v5
+
+  fuzz-check:
+    name: fuzz harnesses (smoke-build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Smoke-build lakko-mls fuzz crate
+        run: cargo check --manifest-path crates/lakko-mls/fuzz/Cargo.toml
+      - name: Smoke-build lakko-proto fuzz crate
+        run: cargo check --manifest-path crates/lakko-proto/fuzz/Cargo.toml
+
+  repro-build:
+    name: reproducible build verifier
+    runs-on: ubuntu-latest
+    # Тестовая job — проверяет, что workspace собирается воспроизводимо
+    # (byte-identical между двумя независимыми build-ами на чистой машине).
+    # Полная reproducibility Rust требует тонкой настройки флагов; пока что
+    # job некритичный — failures не блокируют merge. Снимем continue-on-error
+    # когда reach byte-identical стабильно.
+    continue-on-error: true
+    env:
+      # Фиксируем path prefix чтобы absolute-paths в debuginfo не расходились
+      # между независимыми checkout-ами. `/github/workspace` — стандартный
+      # путь на ubuntu-runner-ах.
+      RUSTFLAGS: --remap-path-prefix=/github/workspace=. -C symbol-mangling-version=v0
+      SOURCE_DATE_EPOCH: "1735689600"  # 2025-01-01 UTC, fixed
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - name: First build
+        run: |
+          cargo build --workspace --release --locked
+          mkdir -p /tmp/build-a
+          find target/release -maxdepth 1 -type f \( -name 'lakko-svc-*' -o -name '*.rlib' \) \
+            | sort | xargs -I{} cp {} /tmp/build-a/
+          (cd /tmp/build-a && sha256sum * | sort) > /tmp/build-a-hashes.txt
+          echo "===== Build A hashes =====" && cat /tmp/build-a-hashes.txt
+      - name: Clean target
+        run: cargo clean
+      - name: Second build
+        run: |
+          cargo build --workspace --release --locked
+          mkdir -p /tmp/build-b
+          find target/release -maxdepth 1 -type f \( -name 'lakko-svc-*' -o -name '*.rlib' \) \
+            | sort | xargs -I{} cp {} /tmp/build-b/
+          (cd /tmp/build-b && sha256sum * | sort) > /tmp/build-b-hashes.txt
+          echo "===== Build B hashes =====" && cat /tmp/build-b-hashes.txt
+      - name: Compare hashes
+        run: |
+          if diff -u /tmp/build-a-hashes.txt /tmp/build-b-hashes.txt; then
+            echo "✅ Reproducible: byte-identical artifacts"
+          else
+            echo "⚠️ Non-reproducible: artifacts differ between builds"
+            echo "(this job is non-blocking until we tune flags for stable byte-identicality)"
+            exit 1
+          fi

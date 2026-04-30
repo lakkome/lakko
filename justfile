@@ -51,12 +51,31 @@ regen-bindings:
         --language kotlin \
         --out-dir target/bindings/kotlin
 
-# Run a single fuzz target (cargo-fuzz). Example: `just fuzz mls-parse`.
-fuzz target:
-    cargo fuzz run {{target}} -- -max_total_time=300
+# Smoke-build all fuzz targets on stable (verifies harnesses compile).
+# Real fuzzing requires nightly + cargo-fuzz; see `just fuzz <crate> <target>`.
+fuzz-check:
+    cargo check --manifest-path crates/lakko-mls/fuzz/Cargo.toml
+    cargo check --manifest-path crates/lakko-proto/fuzz/Cargo.toml
+
+# Run a single fuzz target with cargo-fuzz on nightly.
+# Prerequisites (one-time):
+#   rustup toolchain install nightly
+#   cargo install cargo-fuzz
+# Examples:
+#   just fuzz lakko-mls mls_message
+#   just fuzz lakko-proto wire_envelope
+fuzz crate target:
+    cd crates/{{crate}}/fuzz && cargo +nightly fuzz run {{target}} -- -max_total_time=300
+
+# List all available fuzz targets.
+fuzz-list:
+    @echo "lakko-mls:"
+    @ls crates/lakko-mls/fuzz/fuzz_targets/ | sed 's/\.rs$//' | sed 's/^/  /'
+    @echo "lakko-proto:"
+    @ls crates/lakko-proto/fuzz/fuzz_targets/ | sed 's/\.rs$//' | sed 's/^/  /'
 
 # Everything CI does — run locally before pushing.
-ci: fmt-check lint test audit reuse
+ci: fmt-check lint test audit reuse fuzz-check
 
 # Build for all release targets (host platform only here; cross-builds via Nix).
 build:
