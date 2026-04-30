@@ -4,11 +4,12 @@
 //! MLS Delivery Service for Lakko.
 //!
 //! Append-only per-group log with FIFO ordering by `(epoch, seq)`.
-//! Stateless front, stateful storage layer (FoundationDB). Per-device
-//! mailboxes with cursor pull and QUIC long-stream push. Server stores
-//! ciphertext only — no message keys, no chain keys, no plaintext.
+//! Stateless front, MariaDB-backed storage layer. Per-device mailboxes
+//! with cursor pull and QUIC long-stream push. Server stores ciphertext
+//! only — no message keys, no chain keys, no plaintext.
 //!
-//! See `~/.claude/plans/1-nested-wreath.md` §4 (Delivery Service).
+//! See `~/.claude/plans/1-nested-wreath.md` §4 (Delivery Service) and
+//! `docs/ROADMAP.md` Phase 1 for the solo-bootstrap stack choice.
 
 #![forbid(unsafe_code)]
 

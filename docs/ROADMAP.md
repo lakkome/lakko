@@ -3,40 +3,43 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 SPDX-FileCopyrightText: 2026 Lakko Contributors
 -->
 
-# Lakko — Roadmap по фазам
+# Lakko — Roadmap
 
-Полная декомпозиция шести фаз от пустого репо до публичного запуска (~36 месяцев). Кратко-табличная сводка живёт в `~/.claude/plans/1-nested-wreath.md` §9; этот документ — расширенная, исполнительная версия.
-
-ADR в `docs/adr/` — авторитативный источник архитектурных решений. План — стратегия. Этот файл — **тактика**.
+Полная декомпозиция фаз — что строится и в каком порядке. Стратегия живёт в `~/.claude/plans/1-nested-wreath.md`; ADR в `docs/adr/` — авторитативный источник архитектурных решений; этот документ — **тактика разработки фич**.
 
 ---
 
-## Сводка
+## Контекст исполнения
 
-| Фаза | Месяцы | Цель | Внешний аудит |
-|---|---|---|---|
-| **0** Foundations | 0–4 | Workspace, ADR, CI, MLS end-to-end в тестах, FFI surface | — |
-| **1** 1×1 Alpha | 4–9 | Реальный 1×1 messaging на iOS + Android | — |
-| **2** Groups + Multi-device | 9–15 | Группы до 1k, sync, desktop + web | **Перед public beta** |
-| **3** Calls | 15–22 | P2P, group calls (link и in-chat) с E2EE медиа | SFrame integration |
-| **4** Channels + Broadcasts + Rooms | 22–30 | Telegram-parity content surfaces | Scaling crypto |
-| **5** Anti-censorship + Launch | 30–36 | RU/IR/CN-устойчивость + публичный релиз | **Final pre-launch** |
+**Этот roadmap не календарный.** Ни один deliverable не привязан к неделям / месяцам / годам.
 
-Размер команды растёт ~5 → ~25 от Phase 0 к Phase 5; Phase 0 — критический путь, не параллелится.
+- Код пишет AI-агент (Claude Code) в рамках сессий, инициированных maintainer-ом
+- **Sprint** = atomic deliverable, который умещается в 1-3 когерентных сессии и заканчивается зелёным CI
+- Темп фаз определяется тем, когда maintainer садится работать
+- **Phase N+1 не стартует** пока exit criteria Phase N не зелёные — это единственная зависимость
+- Stack: Rust core + native UI per platform; MariaDB; Hetzner Cloud как hosting
+
+Решения про launch / audit / branding / pricing — за maintainer-ом. Этот roadmap занимается **только тем что и в каком порядке писать**.
 
 ---
 
-## Cross-cutting (через все фазы)
+## Сводка фаз
 
-### Внешние аудиты
-- **Phase 0 → 2:** только внутреннее ревью; OpenMLS upstream tracking
-- **Phase 2 exit:** crypto + MLS state machine + auth + KT log — обязателен перед public beta
-- **Phase 3 exit:** SFrame integration с MLS exporter
-- **Phase 4 exit:** scaling crypto (sender-keys, content-key rotation, revocation семантика)
-- **Phase 5 exit:** **финальный pre-launch** — full surface, findings публикуются после remediation
-- **Post-launch:** ежегодный third-party + bug bounty (HackerOne)
+| Фаза | Что добавляется |
+|---|---|
+| **0** Foundations | Workspace, ADR, CI, MLS end-to-end в тестах, FFI surface, fuzz harnesses |
+| **1** 1×1 Messaging | services/auth, services/ds, services/storage, services/discovery, services/push-gw, apps/ios, apps/android |
+| **2** Groups + Multi-device | X.509 + KT log, DeviceGroup, encrypted backup, ≤50-членные группы, apps/web, apps/desktop, apps/macos |
+| **3** Calls | lakko-calls (SFrame), services/sfu (self-hosted LiveKit), P2P + group calls (link и in-chat) + audio rooms, CallKit / ConnectionService, coturn |
+| **4** Channels / Broadcasts | PublisherGroup, sender-key broadcast, services/edge, medium-scale broadcasts |
+| **5** Anti-censorship + Scale | REALITY, MASQUE, Shadowsocks-2022, transport-rendezvous, multi-region edge cascade, apps/watchos, localization |
+
+---
+
+## Cross-cutting
 
 ### Code quality gates
+
 | Gate | С какой фазы | Тип |
 |---|---|---|
 | `cargo fmt --check` | 0 | blocking PR |
@@ -46,536 +49,389 @@ ADR в `docs/adr/` — авторитативный источник архит�
 | `cargo deny check` | 0 | blocking PR |
 | `reuse lint` | 0 | blocking PR |
 | `cargo audit` | 0 | blocking PR (vulnerability) |
-| `cargo fuzz` парсеров | 1 | continuous |
-| `kani` model checking MLS | 2 | nightly |
-| Coverage ≥80% (crypto+mls) | 2 | blocking PR |
-| Mutation testing crypto | 2 | nightly |
-| Hax / F* formal verification | 4 | aspirational |
-| SLSA L3 build provenance | 2 | release |
-| Reproducible build verifier | 1 | release |
+| `cargo fuzz` парсеров | 0.4 | continuous (OSS-Fuzz integration) |
+| `kani` model checking MLS state machine | 2 | nightly |
+| Coverage ≥80% (crypto + mls) | 2 | blocking PR |
+| Mutation testing crypto (`cargo-mutants`) | 2 | nightly |
+| Hax / F* formal verification critical paths | 4+ | aspirational |
+| SLSA L3 build provenance | 1 | release |
+| Reproducible build verifier (dual runner) | 0.4 | release |
 
-### Инфраструктура — масштабирование
-- **Phase 0:** локальные тесты, нет deployed-сервисов
-- **Phase 1:** single-region staging (Hetzner / Hetzner Cloud), Let's Encrypt
-- **Phase 2:** multi-region (US East + EU West), DS shards, FoundationDB cluster
-- **Phase 3:** региональные edge SFU
-- **Phase 4:** глобальный edge cascade для broadcasts
-- **Phase 5:** multi-CDN bootstrap, edge в censorship-регионах
+### Hosting / infra
 
-### Команда (ориентировочно)
-- **Phase 0:** 5 (Rust core + infra)
-- **Phase 1:** 8–10 (+ iOS / Android / backend leads)
-- **Phase 2:** 15 (+ web / desktop / больше backend)
-- **Phase 3:** 18–20 (+ WebRTC engineer)
-- **Phase 4:** 22–25 (+ scaling engineers)
-- **Phase 5:** 25 + comms / legal / security ops
+Всё self-hosted на Hetzner Cloud. Стартуем с одного VPS, разносим когда упёрлись в потолок (CPU / RAM / bandwidth ceiling). Object storage — Hetzner Storage Box или local disk.
+
+| Фаза | Что нужно технически |
+|---|---|
+| 0 | — (нет prod) |
+| 1 | 1× VPS со всеми services + MariaDB + nginx + coturn co-located |
+| 2 | scale-up VPS или 2× VPS (backend + DB) когда упрёмся |
+| 3 | + 1× CCX-tier VPS под SFU (LiveKit / mediasoup-rs / pion / str0m), 20 TB transfer |
+| 4 | scale-up SFU при росте broadcast viewer load |
+| 5 | multi-region edges (для 100k+ viewer broadcasts с low-latency глобально) |
 
 ---
 
-## Phase 0 — Foundations (months 0–4)
+## Phase 0 — Foundations
 
 ### Цель
 
-Из пустого репо к workspace, где MLS-группы работают end-to-end в тестах и FFI-surface стабилен достаточно для генерации Swift / Kotlin биндингов.
+Из пустого репо к workspace, где MLS-группы работают end-to-end в тестах, и FFI-surface стабилен достаточно для генерации Swift / Kotlin биндингов.
 
-### Статус
+### Pre-flight
 
-Sprint 0.3 закрыт (transport + FFI). Phase 0 фактически на финише — остаются только подчищающие задачи (см. ниже).
+— (стартовая фаза).
 
 ### Sprint breakdown
 
 | Sprint | Содержимое | Статус |
 |---|---|---|
-| 0.0 | Cargo workspace + ADR-0001…0006 + CI workflow + Nix flake + justfile + REUSE compliance | ✅ done |
-| 0.1 | CI gates на GitHub Actions + lakko-proto codegen + lakko-crypto primitives (32 тестов) | ✅ done |
-| 0.2 | lakko-mls поверх OpenMLS (identity / key_package / group / exporter) + end-to-end Alice ↔ Bob ↔ Charlie | ✅ done |
-| 0.3 | lakko-transport (QUIC + in-memory) + lakko-ffi-uniffi (Identity / Group surface) | ✅ done |
-| 0.4 | Fuzz harnesses (cargo-fuzz) на парсеры; reproducible build verifier (dual runner) | pending |
-| 0.5 | KeyTransparency log skeleton + X.509 credentials в lakko-mls (FIPS suite unblocking) | pending |
-
-### Что **не** в скоупе Phase 0
-- Сервисы (DS, auth, storage) — Phase 1
-- Реальные клиенты (iOS / Android / web / desktop) — Phase 1+
-- Production cert management — Phase 1
-- Anti-censorship транспорты — Phase 5
-- Channels / broadcasts / calls — Phase 3+
+| **0.0** | Cargo workspace + ADR-0001…0006 + CI workflow + Nix flake + justfile + REUSE compliance | ✅ done |
+| **0.1** | CI gates на GitHub Actions + lakko-proto codegen (protox + prost-build) + lakko-crypto primitives | ✅ done |
+| **0.2** | lakko-mls поверх OpenMLS (identity / key_package / group / exporter) + end-to-end Alice ↔ Bob ↔ Charlie | ✅ done |
+| **0.3** | lakko-transport (QUIC + in-memory) + lakko-ffi-uniffi (Identity / Group surface) | ✅ done |
+| **0.4** | Fuzz harnesses (cargo-fuzz) на парсеры (MLS wire, prost, SFrame); OSS-Fuzz integration; reproducible build verifier (dual runner в CI) | pending |
+| **0.5** | X.509 credentials в lakko-mls + KT log skeleton (CONIKS-style append-only); FIPS suite unblock | pending |
 
 ### Exit criteria
-- ✅ MLS groups работают end-to-end в integration тестах
-- ✅ FFI surface стабилен (lakko-ffi-uniffi компилируется, three-party test через FFI зелёный)
+- ✅ MLS groups end-to-end в integration тестах
+- ✅ FFI surface стабилен (lakko-ffi-uniffi компилируется, three-party FFI test зелёный)
 - ✅ CI gates все зелёные
-- ⏳ Reproducible build verifier — два независимых runner-а в CI сходятся в byte-identical
-- ⏳ Fuzz harnesses на каждый парсер (MLS wire, protobuf, SFrame)
-
-### Audits
-Нет. Первый внешний аудит — Phase 2 exit.
+- ⏳ Fuzz harnesses на каждый парсер (MLS wire, protobuf, SFrame); хотя бы один OSS-Fuzz integration
+- ⏳ Reproducible build verifier — два независимых runner-а сходятся в byte-identical artifact
+- ⏳ X.509 credentials + KT log skeleton (real validation в Phase 2)
 
 ### Top risks
 - **OpenMLS upstream churn** — митигировано: fast-follow upgrades (мы уже сделали 0.6 → 0.8 при появлении hpke-rs CVE)
-- **iOS reproducible builds** — Apple App Store re-signing ломает byte-identicality; решаем через Phase 5 (публикуем reproducible **unsigned** IPA как proof + signed App Store-артефакт как отдельный trust root)
 - **uniffi 0.28 stale deps** (`paste`, `bincode`) — отмечены в `deny.toml` как ignore с привязкой к upstream
 
 ---
 
-## Phase 1 — 1×1 Alpha (months 4–9)
+## Phase 1 — 1×1 Messaging
 
 ### Цель
 
-Первый продуктовый срез: два реальных устройства (iOS и Android) обмениваются 1×1-сообщениями через настоящий backend, с push-уведомлениями и ContactRequest-flow.
+Первый реальный функциональный срез: два устройства (iOS и Android) обмениваются 1×1-сообщениями через настоящий backend, self-hosted на одном Hetzner VPS.
 
-### Скоуп
-
-#### Backend services
-- **`services/auth`** — OPAQUE-PAKE (RFC draft `opaque`) + WebAuthn passkey, signup/signin без хранения PII; PoW (Equix) + Privacy Pass (RFC 9576) anti-spam
-- **`services/ds`** — MLS Delivery Service: append-only журнал per-group, FIFO по `(epoch, seq)`, mailbox per device, FoundationDB или ScyllaDB (выбор внутри Phase 1)
-- **`services/storage`** — ciphertext blob proxy перед SeaweedFS / S3, content-addressable
-- **`services/discovery`** — username table + OPRF (RFC 9497) blinded lookup, exact-match only, PoW per-query
-- **`services/push-gw`** — APNs + FCM + UnifiedPush envelope routing, payload только `(group_pseudonym, envelope_pointer)`
-
-#### Crates (расширение)
-- **`lakko-storage`** — SQLCipher-backed local store, ключ из HKDF от device root key (Secure Enclave / StrongBox)
-- **`lakko-transport`** — production QUIC client wired через `services/ds`, cert pinning skeleton
-- **`lakko-contacts`** — ContactRequest end-to-end, capability-based invite links (см. ADR-0005)
-- **`lakko-push`** — encrypted push payload framing
-- **`lakko-presence`** — blinded per-conversation presence tokens (минимальная версия)
-- **`lakko-sync`** — hybrid logical clock + draft sync (single-device variant)
-
-#### Apps
-- **`apps/ios`** — SwiftUI: signup/signin (passkey + OPAQUE), contact list, 1×1 chat, attachments, push, recovery (BIP39 24-word)
-- **`apps/android`** — Compose: тот же surface, ConnectionService и FCM integration
-
-#### Infra
-- Internal staging environment (Hetzner Cloud или Bare Metal), TLS via Let's Encrypt
-- Build pipeline: XCFramework (Apple) + AAR (Android) генерация в CI, подписанные релизы (cosign + Sigstore)
-
-#### Bootstrapping
-- Key Transparency log — skeleton implementation (CONIKS-style фундамент); пока stub validation, реальные inclusion proofs в Phase 2
-- X.509 credentials в lakko-mls (если не закрыто в Phase 0.5) — обязательно для KT log integration
-
-### Что **не** в скоупе Phase 1
-- Multi-device per user (Phase 2)
-- Группы (Phase 2)
-- Голос / видео (Phase 3)
-- Каналы / broadcasts (Phase 4)
-- Anti-censorship транспорты (Phase 5)
-- Desktop / web клиенты (Phase 2)
-- watchOS (Phase 5)
+### Pre-flight
+- Phase 0 exit criteria зелёные (включая 0.4 fuzz и 0.5 X.509 + KT skeleton)
 
 ### Sprint breakdown
 
-| Sprint | Содержимое |
-|---|---|
-| 1.1 | Auth service skeleton (OPAQUE + WebAuthn) + storage service + DS skeleton |
-| 1.2 | iOS app: signup → key store → first chat skeleton (mock DS) |
-| 1.3 | Android app: signup → key store → first chat skeleton |
-| 1.4 | DS production: FoundationDB integration, mailbox protocol, fanout |
-| 1.5 | ContactRequest end-to-end через DS, invite links (capability blobs) |
-| 1.6 | 1×1 chat через MLS over DS, encrypted attachments через storage service |
-| 1.7 | Push notifications: encrypted envelopes на APNs / FCM, UnifiedPush self-host для CN/RU prep |
-| 1.8 | Recovery flow: BIP39 mnemonic + Shamir 3-of-5 social recovery (опционально) |
-| 1.9 | Internal staging deployment + dogfooding 4+ недели |
-| 1.10 | Hardening + crypto audit prep (документация инвариантов, threat model доделать) |
+#### Backend infra
+- **1.0** Hetzner VPS bootstrap: nginx + Let's Encrypt + MariaDB + базовая ansible/podman setup; всё в одном `infra/` каталоге через Terraform или ansible
+- **1.1** `services/auth` — OPAQUE-PAKE + WebAuthn passkey, MariaDB-backed signup/signin без хранения PII; PoW (Equix) + Privacy Pass (RFC 9576) anti-spam
+- **1.2** `services/storage` — простой ciphertext blob proxy на Hetzner Storage Box (или local disk + nginx); content-addressable, ciphertext-only policy
+- **1.3** `services/ds` skeleton — MariaDB-backed append-only журнал per-group (FIFO по `(epoch, seq)`), mailbox per device, axum + tokio
+- **1.4** `services/ds` production — fanout, long-poll или QUIC stream push для real-time delivery
+- **1.5** `services/discovery` — username table + OPRF (RFC 9497) blinded lookup, exact-match only, PoW per-query, MariaDB-backed
+- **1.6** `services/push-gw` — APNs + FCM envelope routing, payload только `(group_pseudonym, envelope_pointer)`; UnifiedPush self-host (на том же VPS, для CN/RU prep)
+
+#### Crates (расширение)
+- **1.7** `lakko-storage` — SQLCipher-backed local store, ключ из HKDF от device root key (Secure Enclave / StrongBox)
+- **1.8** `lakko-transport` production wiring — QUIC client wired через `services/ds`, cert pinning skeleton
+- **1.9** `lakko-contacts` — ContactRequest end-to-end, capability-based invite links (см. ADR-0005); pseudonym lifecycle minimum
+- **1.10** `lakko-push` — encrypted push payload framing
+- **1.11** `lakko-presence` — blinded per-conversation presence tokens (минимальная версия)
+- **1.12** `lakko-sync` — hybrid logical clock + draft sync (single-device variant)
+
+#### Apps
+- **1.13** `apps/ios` skeleton — SwiftUI: signup/signin (passkey + OPAQUE), contact list UI, 1×1 chat UI; integration с XCFramework из lakko-ffi-uniffi
+- **1.14** `apps/android` skeleton — Compose: тот же surface; AAR-integration
+- **1.15** Apps: ContactRequest end-to-end через DS, invite links flow
+- **1.16** Apps: 1×1 chat — encrypted text + attachments через storage service
+- **1.17** Apps: push notifications (APNs / FCM) — encrypted envelopes
+- **1.18** Apps: recovery flow — BIP39 24-word mnemonic, optional Shamir 3-of-5 social recovery (если хватит сил в этой фазе)
+
+#### Готовность
+- **1.19** Staging deployment — один Hetzner VPS, nginx + MariaDB + все services co-located, Let's Encrypt
 
 ### Exit criteria
-- 1×1 messaging работает end-to-end на реальных iOS + Android устройствах
-- Внутренняя команда использует Lakko как daily messenger ≥4 недели
+- 1×1 messaging работает end-to-end на реальных iOS + Android устройствах через Hetzner backend
 - Push delivery p50 < 5s
-- Message send→delivered p50 < 500ms regional
-- Reproducible build artifacts проверены на двух независимых runner-ах
-- DS выдерживает 10k одновременных connection-ов в load test
-- Recovery работает: можно потерять устройство и восстановить аккаунт по mnemonic
-
-### Audits
-Нет внешнего. Внутренний security review перед Phase 1 → 2 переходом обязателен.
+- Message send → delivered p50 < 1s regional
+- DS выдерживает 1k одновременных connection-ов в local load test
+- Recovery: можно потерять устройство и восстановить аккаунт по mnemonic
+- Reproducible build artifacts проверены (XCFramework + AAR byte-identical между runner-ами)
 
 ### Top risks
 - **iOS background limitations** — APNs delivery надёжность; MLS state machine recovery после долгой spavnki
-- **DS storage layer choice** — FoundationDB ops complexity vs ScyllaDB familiarity; решаем эмпирически в 1.4
-- **Hardware-backed key APIs** — iOS Secure Enclave vs Android StrongBox vs Android Keystore TEE-only; разные failure modes
 - **OPAQUE production maturity** — RFC ещё draft; track upstream
+- **Hardware-backed key APIs differ** между iOS / Android — разные failure modes
 
 ---
 
-## Phase 2 — Groups + Multi-device + Desktop/Web (months 9–15)
+## Phase 2 — Groups + Multi-device + Web/Desktop
 
 ### Цель
 
-Feature-complete messaging до 1000-человек групп, работает на всех 5 платформах (iOS / Android / macOS / Linux / Web), multi-device sync без plaintext на сервере.
+Группы до ~50 человек (vanilla MLS), multi-device sync без plaintext на сервере, клиенты на всех 5 платформах (iOS / Android / macOS / Linux / Web).
 
-### Скоуп
-
-#### Crypto / protocol
-- **X.509 credentials с KT log inclusion proofs** (replacing BasicCredential) — обязательно
-- **Key Transparency log** — реальная CONIKS-style implementation, append-only, signed roots
-- **FIPS ciphersuite** (P-384 + AES-256-GCM + ECDSA-P384) wired через X.509 credentials
-- **DeviceGroup** — каждое устройство = leaf в личной MLS-группе пользователя
-- **Identity rotation** через KT log supersession proof + 30-day bridge для старых invite links
-
-#### Multi-device sync
-- DeviceGroup как substrate для read-receipts, drafts, conversation order
-- History catch-up bundle: HPKE-encrypted ciphertext от старого устройства новому
-- Encrypted backups в SeaweedFS, KEK = Argon2id от recovery passphrase
-- Optional Shamir 3-of-5 social recovery — guardian shares зашифрованы на identity key guardian-а
-
-#### Группы
-- Vanilla MLS до 1000 членов
-- Group invite links (capability-based, ADR-0005)
-- Approval flow для приватных групп
-- Group settings (название, аватар — всё зашифрованное)
-
-#### Discovery / privacy
-- Все 6 уровней discoverability scope: Open / ContactsOfContacts / Contacts / InviteOnly / Allowlist / VerifiedNetwork
-- Mutual-contact attestation chain для ContactsOfContacts
-- Block list (зашифрован под identity, server применяет hashed match)
-
-#### Apps (новые)
-- **`apps/desktop`** — Tauri 2.x + Solid.js, Windows / macOS / Linux native binaries
-- **`apps/web`** — Solid.js + WASM core, service worker для offline, IndexedDB cache
-- **`apps/macos`** — отдельная Mac Catalyst-free сборка через SwiftUI XCFramework (общий с iOS core)
-
-#### QR / safety numbers
-- Signal-style safety numbers
-- QR sharing для add-contact OOB-secure
-- TOFU pinning через KT log + QR override
-
-#### Pre-audit hardening
-- `cargo fuzz` continuous integration (OSS-Fuzz)
-- `kani` model checking на MLS state machine
-- `proptest` свойства на crypto primitives
-- Coverage ≥80% на lakko-crypto + lakko-mls
-
-### Что **не** в скоупе Phase 2
-- Каналы > 50k (Phase 4)
-- Звонки (Phase 3)
-- watchOS (Phase 5)
-- Recording (Phase 4 или позже)
+### Pre-flight
+- Phase 1 exit criteria зелёные
 
 ### Sprint breakdown
 
-| Sprint | Содержимое |
-|---|---|
-| 2.1 | X.509 credentials + KT log skeleton (CONIKS-style append-only log) + FIPS suite unblock |
-| 2.2 | DeviceGroup + multi-device sync substrate (read receipts, drafts) |
-| 2.3 | History catch-up bundle exchange + encrypted backup в SeaweedFS |
-| 2.4 | Shamir 3-of-5 social recovery |
-| 2.5 | Desktop app: Tauri 2 + Solid.js + WASM core integration |
-| 2.6 | Web app: Solid.js + service worker + IndexedDB cache |
-| 2.7 | macOS app (XCFramework reuse) |
-| 2.8 | Группы до 1000 + group invite links + approval flow |
-| 2.9 | Все 6 discoverability scopes + mutual-contact attestation chain |
-| 2.10 | QR safety numbers + block list (encrypted ACL) |
-| 2.11 | Pre-audit hardening: cargo-fuzz, kani, coverage, mutation testing |
-| 2.12 | **Внешний аудит + remediation** перед public beta |
+#### Crypto / protocol
+- **2.0** X.509 credentials production-grade (full validation) + KT log production (CONIKS-style append-only с signed roots)
+- **2.1** Identity rotation через KT log supersession proof + 30-day bridge для старых invite links
+- **2.2** FIPS ciphersuite (P-384 + AES-256-GCM + ECDSA-P384) wired через X.509 credentials end-to-end
+
+#### Multi-device
+- **2.3** DeviceGroup в lakko-mls + lakko-sync — каждое устройство = leaf в личной MLS-группе пользователя
+- **2.4** Multi-device sync substrate — read receipts, drafts, conversation order через DeviceGroup application messages
+- **2.5** History catch-up bundle exchange — HPKE-encrypted ciphertext от старого устройства новому при добавлении
+- **2.6** Encrypted backup в Hetzner Storage Box, KEK = Argon2id от recovery passphrase
+- **2.7** Optional Shamir 3-of-5 social recovery (если не закрыто в Phase 1)
+
+#### Группы
+- **2.8** Group creation с ≥3 членами (vanilla MLS до ~50)
+- **2.9** Group invite links (capability-based, ADR-0005) + approval flow для приватных групп
+- **2.10** Group settings: encrypted name / avatar / description
+
+#### Discovery / privacy
+- **2.11** Все 6 уровней discoverability scope: Open / ContactsOfContacts / Contacts / InviteOnly / Allowlist / VerifiedNetwork
+- **2.12** Mutual-contact attestation chain для ContactsOfContacts scope
+- **2.13** Block list (encrypted под identity, server применяет hashed match)
+
+#### Apps (новые)
+- **2.14** `apps/desktop` — Tauri 2.x + Solid.js, Windows / macOS / Linux native binaries
+- **2.15** `apps/web` — Solid.js + WASM core, service worker для offline, IndexedDB cache; bundle target <2 MB gzipped
+- **2.16** `apps/macos` — отдельная сборка через SwiftUI XCFramework (общий core с iOS)
+
+#### Verification & QR
+- **2.17** QR safety numbers — Signal-style fingerprint scan, добавление контакта OOB-secure
+- **2.18** TOFU pinning через KT log + QR override
+
+#### Hardening
+- **2.19** `kani` model checking на MLS state machine
+- **2.20** `cargo-mutants` mutation testing на lakko-crypto + lakko-mls
+- **2.21** Coverage ≥80% на lakko-crypto + lakko-mls
+- **2.22** End-to-end тесты на iOS / Android / Web в CI (matrix)
 
 ### Exit criteria
-- Feature-complete messaging на всех 5 платформах (iOS / Android / macOS / Linux / Web)
-- Группа на 1000 членов стабильна в load test (Add/Remove под нагрузкой)
-- Multi-device sync convergent в p95 < 5s
+- Feature-complete messaging на 5 платформах (iOS / Android / macOS / Linux / Web)
+- Группа на 50 членов стабильна в load test (Add/Remove под нагрузкой, 100+ commit-ов в час)
+- Multi-device sync convergent в p95 < 5s между двумя устройствами
 - ≥80% statement coverage на lakko-crypto + lakko-mls
-- End-to-end тесты на iOS / Android / Web в CI зелёные
-- WASM bundle <2MB gzipped
-- **Внешний аудит проведён, все findings закрыты или с задокументированной mitigation**
-
-### Audits
-**Первый внешний аудит** — обязателен перед public beta. Покрывает: lakko-crypto, lakko-mls, lakko-storage, auth flows, KT log integration, recovery flows. Phase 2 не закрывается до remediation findings. Findings публикуются на сайте после fix.
+- WASM bundle <2 MB gzipped
+- KT log validates inclusion proofs end-to-end
 
 ### Top risks
 - **KT log spec ещё draft** — возможен fork / patch upstream
-- **WASM bundle size** для web (target <2MB gzipped) — может потребовать code splitting
+- **WASM bundle size** для web (target <2 MB gzipped) — может потребовать code splitting
 - **Cross-device sync convergence** под flaky networks
 - **OpenMLS X.509 credential maturity** — может потребовать upstream contributions
-- **Audit findings блокируют timeline** — резервируем 2-3 sprint-а на remediation
 
 ---
 
-## Phase 3 — Calls (months 15–22)
+## Phase 3 — Calls
 
 ### Цель
 
-Аудио / видео-звонки (P2P + групповые, по линку и в чате), качество **на уровне Telegram / Zoom / Yandex Telemost**.
+P2P 1×1 + group audio/video звонки + audio rooms. Self-hosted SFU (LiveKit upstream без форка для начала, либо mediasoup-rs / pion / str0m) на одном Hetzner VPS. Media-keys из MLS exporter, SFrame для frame-level encryption.
 
-### Скоуп
+Multi-region edge cascade и broadcasts на 100k+ viewers — Phase 5 (там действительно нужны geographically distributed edges).
+
+### Pre-flight
+- Phase 2 exit criteria зелёные
+
+### Sprint breakdown
 
 #### Backend
-- **`services/sfu`** — форк LiveKit (Go), модифицирован под MLS-aware SFrame routing, ALPN `lakko-sfu/0`
-- ICE / STUN / TURN с TURN-over-TLS fallback
-- coturn self-hosted в каждом регионе
-- Регионально распределённые SFU для low-latency
+- **3.0** coturn self-hosted на том же Hetzner VPS — STUN + TURN-over-TLS
+- **3.1** Сигналинг для call setup через `services/ds` (специальный тип MLS-application-message в группе звонка)
+- **3.2** `services/sfu` — self-hosted LiveKit (Apache 2.0 upstream) или альтернатива (mediasoup-rs / pion / str0m); JWT-auth интеграция с `services/auth`; отдельный VPS
 
 #### Crates
-- **`lakko-calls`** — SFrame (RFC 9605) implementation, jitter buffer (NetEQ-style), codec negotiation, ICE/STUN/TURN client
-- **`lakko-mls::group`** — расширение exporter API для call media keys
-- **`lakko-transport`** — UDP-friendly path для STUN/TURN
+- **3.3** `lakko-calls` skeleton — SFrame (RFC 9605) implementation, jitter buffer (NetEQ-style), codec negotiation
+- **3.4** `lakko-calls` ICE/STUN/TURN client integration (через webrtc-rs или str0m)
+- **3.5** `lakko-mls::group` exporter API расширение для call media keys (`mls_exporter("lakko/call/v1", call_id, 32)`)
 
-#### Топологии звонков
-- **P2P 1×1** — pure WebRTC + ICE/STUN/TURN, никакого SFU
-- **Групповой по линку** — SFU + ad-hoc MLS group, join по embedded one-time KeyPackage
-- **Групповой в чате** — SFU + reuse существующей chat MLS group, exporter `("lakko/call/{id}", member_idx, 32)`
+#### Топологии
+- **3.6** P2P 1×1 setup: WebRTC + ICE/STUN/TURN, никакого SFU; media keys из 1×1 MLS group exporter
+- **3.7** Group call по линку: SFU + ad-hoc MLS group, join по embedded one-time KeyPackage
+- **3.8** Group call внутри чата: SFU + reuse существующей chat MLS group; exporter context = `call_id`
+- **3.9** Audio room: Speakers MLS subgroup (vanilla, ≤50 speakers) + Audience через SFU subscribe-only
+- **3.10** Encrypted media: SFrame keys из exporter, AES-128-GCM на frame, hardware AES-NI / ARM Crypto Extensions; key rotation на Add/Remove с 1s overlap
 
-#### Кодеки и качество
-- Audio: Opus 32-64 kbps + DTX + FEC
-- Video: AV1-SVC (modern hardware) / VP9-SVC (fallback) / H.264 (Apple legacy)
-- Adaptive bitrate by SFU based on receiver BWE
-- Бюджет: audio p50 < 80 ms regional / < 200 ms cross-continental, p95 < 250 ms
-- Jitter buffer 20–120 ms adaptive
+#### Кодеки
+- **3.11** Audio: Opus 32-64 kbps + DTX + FEC
+- **3.12** Video: AV1-SVC (modern), VP9-SVC (fallback), H.264 (Apple legacy)
+- **3.13** Adaptive bitrate by receiver BWE feedback (через LiveKit/SFU-side logic)
 
 #### Apple integration
-- CallKit для нативного UI входящих
-- PushKit для wake-up на incoming call
-- Live Activities для in-progress call indicator
+- **3.14** CallKit для нативного UI входящих
+- **3.15** PushKit для wake-up на incoming call
+- **3.16** Live Activities для in-progress call indicator
 
 #### Android integration
-- ConnectionService для system-managed incoming UI
-- MediaSession для controls
-- ForegroundService для long-running call
+- **3.17** ConnectionService для system-managed incoming UI
+- **3.18** MediaSession для controls
+- **3.19** ForegroundService для long-running call
 
-#### Дополнительно
-- Screen sharing — один screen producer, pinned layout
-- In-call chat — обычные MLS application messages в group call's MLS group
-
-### Что **не** в скоупе Phase 3
-- Broadcasts (Phase 4)
-- Audio rooms (Phase 4)
-- Recording (Phase 4 или позже)
-- Streaming (Phase 4)
-
-### Sprint breakdown
-
-| Sprint | Содержимое |
-|---|---|
-| 3.1 | LiveKit fork: ALPN, MLS-aware E2EE plumbing замена их default schema |
-| 3.2 | P2P 1×1 calls: WebRTC + ICE/STUN/TURN, никакого SFU; integration с MLS exporter |
-| 3.3 | SFU group calls по линку: ad-hoc MLS group, join по KeyPackage |
-| 3.4 | SFU group calls в чате: reuse существующей chat MLS group |
-| 3.5 | SFrame integration end-to-end с MLS exporter, key rotation на Add/Remove с 1s overlap |
-| 3.6 | CallKit / PushKit / Live Activities (iOS) |
-| 3.7 | ConnectionService / MediaSession / ForegroundService (Android) |
-| 3.8 | Screen sharing |
-| 3.9 | Codec optimization + adaptive bitrate + BWE feedback loop |
-| 3.10 | Регионально распределённые SFU |
-| 3.11 | Quality A/B test против Telegram / Zoom / Telemost в lab |
-| 3.12 | Pre-audit hardening + SFrame integration аудит |
+#### Доп
+- **3.20** Screen sharing — один screen producer, pinned layout
+- **3.21** In-call chat — обычные MLS application messages в группе звонка (existing flow)
+- **3.22** Promotion / demotion в audio room: Add/Remove на Speakers MLS subgroup + key rotation
 
 ### Exit criteria
-- P2P + group call quality A/B-tested против Telegram/Zoom/Telemost в lab; результат не хуже p50 metric
-- Audio p50 < 80 ms regional, p95 < 250 ms
-- 50-человек group call стабилен ≥1 час
-- Screen sharing работает на всех платформах
-- Все типы звонков **strict E2EE** (никакого silent fallback)
-- Pre-launch audit findings закрыты
+- P2P 1×1 audio + video call работает end-to-end на iOS + Android + Web + Desktop
+- Group call (link и in-chat) — до 30 участников через single self-hosted SFU
+- Audio room — до 30 speakers + ≤500 listeners через single SFU
+- Audio quality A/B протестировано против Telegram / WhatsApp / Discord в lab; не хуже p50
+- Audio p50 latency < 100 ms regional (P2P) / < 150 ms (через SFU)
+- Screen sharing работает на macOS / Linux / Windows
+- E2EE strict — никакого silent fallback (включая медиа в group call)
+- CallKit / ConnectionService integration корректные (incoming UI работает в background)
+- SFU выдерживает 5 одновременных group calls по 10 участников в local load test
 
-### Audits
-**Targeted SFrame integration audit** — покрывает MLS exporter → SFrame key derivation → key rotation семантика → wire format. Не полный re-audit крипто, только интеграционный слой.
+### Что НЕ в скоупе Phase 3
+- Каналы / sender-key broadcast (Phase 4)
+- 100k+ viewer broadcasts (Phase 5 — нужен multi-region cascade)
+- Recording (отдельный отложенный вопрос — policy-clarity)
 
 ### Top risks
-- **AV1 hardware decode** на старых устройствах (fallback на H.264)
 - **iOS background CPU limits** во время длинных звонков
-- **Cascade SFU latency** в дальних регионах
+- **AV1 hardware decode** на старых устройствах (fallback на H.264)
 - **TURN abuse** — self-hosted coturn нужен rate-limit + auth
 - **CallKit / ConnectionService** API differences create UX inconsistency между iOS и Android
+- **SFU bandwidth ceiling** — single VPS на CCX-tier даёт ~60 Mbps sustained; ~30 одновременных 4-человек видео-call-ов; scale-up при необходимости
 
 ---
 
-## Phase 4 — Channels + Broadcasts + Audio Rooms (months 22–30)
+## Phase 4 — Channels + Medium Broadcasts
 
 ### Цель
 
-Telegram-parity content surfaces: каналы (1M+ подписчиков), broadcasts (1-to-many звонки), audio rooms (Clubhouse-style).
+Channels (sender-key broadcast через DS) и medium-scale broadcasts (≤10k одновременных viewers через single SFU).
 
-### Скоуп
+Audio rooms уже сделаны в Phase 3. Multi-region edge cascade для 100k-1M viewers — Phase 5 (там действительно нужны geographically distributed edges и multi-CDN).
 
-#### Channels (>50k подписчиков)
-Vanilla MLS не масштабируется к миллионам — реализуем **two-tier** архитектуру (см. план §3 / ADR-0001):
-
-- **PublisherGroup** — vanilla MLS, ≤500 владельцев + модераторов + проверенных авторов; здесь происходят commit-ы и ротация **content key**
-- **Sender-key broadcast** — подписчики получают current content key через HPKE-envelope на свой KeyPackage; контент канала шифруется этим ключом (AES-256-GCM + per-message nonce из sender-key chain)
-- Подписчики **не являются** криптографическими членами группы
-- Ротация content key — на membership change PublisherGroup и по расписанию (24h / N сообщений)
-- Best-effort revoke подписчика — до следующей ротации
-- **Документируется публично:** канал не имеет backward secrecy для контента (та же модель что Telegram/Slack/Discord, но мы делаем ротацию агрессивной)
-
-#### Broadcasts (1-to-many звонки)
-- Origin SFU + cascade на geographically distributed edge SFUs
-- Аудитория получает encrypted media frames; не является членом MLS-группы звонка
-- Reactions через отдельный канал-подобный sender-key flow
-- Late-joiners получают current content key
-
-#### Audio Rooms (Clubhouse-style)
-- **Speakers** subgroup — vanilla MLS (≤50 speakers), частые rekey-и при role changes
-- **Audience** — sender-key recipients (как в каналах)
-- Promotion audience → speaker = MLS Add to Speakers + key rotation
-- Demotion speaker → audience = MLS Remove + новый content key для audience
-
-#### Reactions / comments в каналах
-- Каждый high-engagement post — отдельная динамически создаваемая small MLS group для комментариев
-- PublisherGroup как bootstrap для подписи initial commit
-
-#### Backend
-- **`services/edge`** — broadcast cascade origin → edge fan-out, audio room signaling
-- Глобальная edge SFU топология (region-affinity routing)
-- Sender-key envelope distribution через DS
-
-### Что **не** в скоупе Phase 4
-- Federation (post-launch)
-- Recording channels / broadcasts (post-launch если будет policy-clarity)
-- Streaming в external platforms (post-launch)
+### Pre-flight
+- Phase 3 exit criteria зелёные
 
 ### Sprint breakdown
 
-| Sprint | Содержимое |
-|---|---|
-| 4.1 | PublisherGroup в lakko-mls + content-key derivation API |
-| 4.2 | Sender-key envelope distribution через DS (HPKE-to-KeyPackage) |
-| 4.3 | Channel subscribe / unsubscribe flow + content-key rotation на schedule + membership change |
-| 4.4 | Broadcast origin SFU + edge cascade topology в `services/edge` |
-| 4.5 | Audio room: Speakers MLS subgroup + Audience sender-key |
-| 4.6 | Audience ↔ Speaker promotion / demotion с key rotation |
-| 4.7 | Reactions + comments на channel posts (per-post small MLS group) |
-| 4.8 | Late-joiner flow для broadcasts |
-| 4.9 | Load testing: 100k-subscriber канал, 1M-viewer broadcast, 100-speaker audio room |
-| 4.10 | Pre-audit: scaling cryptography (sender-key, content-key rotation, revocation семантика) |
-| 4.11 | **Внешний scaling crypto audit + remediation** |
+#### Channels (sender-key broadcast)
+Vanilla MLS не масштабируется к 1M — реализуем **two-tier** архитектуру (см. план §3 / ADR-0001):
+
+- **4.0** PublisherGroup в lakko-mls — vanilla MLS, ≤500 mods/admins, content-key derivation API
+- **4.1** Sender-key envelope distribution через DS — HPKE-to-KeyPackage envelope для каждого нового подписчика
+- **4.2** Content-key rotation — на schedule (24h / N сообщений) + на membership change PublisherGroup
+- **4.3** Channel subscribe / unsubscribe flow + best-effort revoke
+- **4.4** Reactions + comments на channel posts (per-post small MLS group, дин. создаётся)
+- **4.5** Public channel discovery (`@channel-username`) через `services/discovery` extension
+
+#### Medium broadcasts (single-region SFU)
+- **4.6** `services/edge` — broadcast origin handler; reuse-ит SFU из Phase 3 для media-pipe
+- **4.7** Late-joiner flow для broadcasts — viewer получает current content key через HPKE-envelope
+- **4.8** Reactions от viewers (через тот же sender-key broadcast back-channel)
+
+#### Public posture
+- **4.9** Документировать публично: backward-secrecy property каналов (то же что Telegram/Slack/Discord; мы делаем ротацию агрессивной)
+
+#### Load testing
+- **4.10** 50k-subscriber channel stable (rotation event + delivery)
+- **4.11** 10k-viewer broadcast end-to-end через single SFU
 
 ### Exit criteria
-- 100k-subscriber channel стабилен под нагрузкой
-- 1M-viewer broadcast протестирован end-to-end
-- Audio room: 100 speakers + 10k audience стабилен
-- Документировано публично: backward-secrecy property каналов (no forward secrecy для контента)
-- Promotion / demotion в audio room < 500 ms p95
-- Scaling crypto audit findings закрыты
+- Channel до 50k подписчиков стабилен (rotation events не валят DS)
+- Broadcast до 10k viewers через single SFU стабилен (scale-up VPS если упрёмся)
+- Public channels находятся через `@username`
+- Documented publicly: backward-secrecy свойство каналов
 
-### Audits
-**Scaling crypto audit** — фокус на: sender-key model security, content-key rotation policy, revocation semantics (best-effort vs cryptographic), audience size limits, edge cascade integrity.
+### Что НЕ в скоупе Phase 4
+- 100k-1M viewer broadcasts (Phase 5 — нужен multi-region edge cascade)
+- Channel federation (вне roadmap)
+- Recording channels / broadcasts (отдельный policy-вопрос, не функциональный)
 
 ### Top risks
-- **Sender-key distribution scaling** — большой канал = много HPKE-envelope-ов на ротации; bandwidth budget на DS
-- **Audio room latency** для глобальной аудитории (cascade hop добавляет ~50-100ms)
+- **Sender-key distribution scaling** — большой канал = много HPKE-envelope-ов на ротации; DS bandwidth budget; митигируется staggered rollout
 - **Revocation после раздачи content key** — best-effort до ротации; community reaction на этот факт
-- **DS load** при rotation event для крупных каналов (можем нуждаться в throttling / staggered rollout)
+- **DS load** при rotation event для крупных каналов (нужен throttling)
+- **Single-SFU broadcast ceiling** — после ~10k viewers начинается degradation, дальше нужен cascade (Phase 5)
 
 ---
 
-## Phase 5 — Anti-censorship + Telegram-parity Launch (months 30–36)
+## Phase 5 — Anti-censorship + Scale
 
 ### Цель
 
-Публичный запуск с anti-censorship hardening для пользователей в Russia / Iran / China.
+Anti-censorship transport stack (для пользователей в RU / IR / CN) + multi-region edge cascade для broadcasts на 100k+ одновременных viewers + watchOS + локализация.
 
-### Скоуп
+### Pre-flight
+- Phase 4 exit criteria зелёные
+
+### Sprint breakdown
 
 #### Pluggable transports (см. ADR-0004)
-- **REALITY** (xtls/REALITY) — TLS-in-TLS под чужой сертификат; defeats SNI-blocking + active probing
-- **MASQUE / CONNECT-UDP** (RFC 9298) — туннель QUIC внутри HTTP/3
-- **Shadowsocks-2022** с AEAD-2022 ciphers
-- **VLESS + XTLS-Vision** — альтернатива REALITY
-- **WebTransport** для web-клиента
-- **obfs4** — legacy compatibility
-- **Domain fronting** через Cloudflare / Fastly / Akamai / CloudFront — multi-CDN, considered deprecated
+- **5.0** REALITY (xtls/REALITY) в lakko-transport — TLS-in-TLS под чужой сертификат
+- **5.1** MASQUE / CONNECT-UDP (RFC 9298) — туннель QUIC внутри HTTP/3
+- **5.2** Shadowsocks-2022 (AEAD-2022)
+- **5.3** VLESS + XTLS-Vision
+- **5.4** WebTransport для web-клиента
+- **5.5** obfs4 — legacy compatibility
 
 #### Bootstrap rendezvous
-- Hardcoded DoH (Cloudflare 1.1.1.1, Google, Quad9, Mullvad) → ротирующийся пул innocuous-looking доменов
-- ECH-protected (RFC 9460/9525) подписанные bootstrap configs (Ed25519, JSON: endpoints + working PT configs)
-- Fallback: DNS-over-Tor → static anycast IP крупных CDN → out-of-band QR-код
-- TUF (The Update Framework) signed transport configs — новые транспорты как **данные**, не код
-- Auto-discovery: happy-eyeballs racing, top-2 рабочих держим warm, переключение на деградации, бюджет ≤10s cold start
+- **5.6** ECH (RFC 9460/9525) на edge endpoint-ах
+- **5.7** `services/transport-rendezvous` — производит signed bootstrap configs (Ed25519, JSON: endpoints + working PT configs)
+- **5.8** DoH-resolved (Cloudflare 1.1.1.1, Google, Quad9, Mullvad) ротирующийся пул innocuous-looking доменов
+- **5.9** TUF (The Update Framework) signed transport configs — новые транспорты как **данные**, не код
+- **5.10** Auto-discovery: happy-eyeballs racing, top-2 рабочих держим warm, бюджет ≤10 s cold start
 
-#### Backend
-- **`services/transport-rendezvous`** — производит signed bootstrap configs
-- Multi-CDN edges (Cloudflare / Fastly / Akamai)
-- Edge nodes в censorship-friendly регионах (Iran-adjacent, Hong Kong, Russia-adjacent jurisdictions)
+#### Mobile transport integration
+- **5.11** iOS: pluggable transports встраиваем в URLSession+QUIC (не через NEPacketTunnelProvider)
+- **5.12** Android: VpnService доступен опционально, default — in-app
 
-#### Mobile constraints
-- iOS — pluggable transports встраиваем в URLSession+QUIC, **не** через NEPacketTunnelProvider (50MB cap, нет фонового CPU)
-- Опциональный VPN-mode возможен, но не default
-- Android — VpnService доступен, но default тоже in-app
+#### Multi-region broadcast cascade (для broadcasts на 100k+ viewers)
+- **5.13** `services/edge` extension — origin SFU → edge SFU cascade с region-affinity routing
+- **5.14** Edge nodes deployment в нескольких Hetzner регионах (Helsinki / Falkenstein / Nuremberg / Ashburn) или multi-CDN
+- **5.15** Late-joiner flow для cascade broadcasts
+- **5.16** Load testing: 100k+ concurrent viewers распределённых по регионам
 
 #### watchOS
-- Thin presenter, общается с phone через paired secure channel
-- Показывает уведомления, краткие чаты, голосовые сообщения
-- Самостоятельно MLS для групп >50 не запускает
+- **5.17** `apps/watchos` — thin presenter, paired secure channel с phone
 
 #### Localization
-- 10+ языков (русский, английский, фарси, китайский упрощённый, арабский, испанский, португальский, немецкий, французский, японский, корейский, украинский, …)
-- RTL layouts
+- **5.18** Translation pipeline (Crowdin или self-hosted) для всех клиентов
+- **5.19** 10+ языков (ru / en / fa / zh-CN / ar / es / pt / de / fr / ja / ko / uk / …)
+- **5.20** RTL layouts
 
 #### Polish
-- Onboarding flow (минимум friction, secure-by-default galage)
-- Accessibility (VoiceOver / TalkBack полная поддержка)
-- Анимации, переходы, восприятие "instant" UI
-
-#### Launch infrastructure
-- Public website (lakko.app)
-- Landing page + signup
-- Docs site
-- Status page
-- Bug bounty program (HackerOne или self-hosted)
-
-### Что **не** в скоупе Phase 5
-- Federation (post-launch)
-- Post-quantum migration (track ML-KEM IETF work)
-- Recording / streaming (post-launch policy review)
-
-### Sprint breakdown
-
-| Sprint | Содержимое |
-|---|---|
-| 5.1 | REALITY + Shadowsocks-2022 в lakko-transport как pluggable transport adapters |
-| 5.2 | MASQUE / CONNECT-UDP (RFC 9298) |
-| 5.3 | VLESS + XTLS-Vision; WebTransport для web |
-| 5.4 | ECH (RFC 9460) + bootstrap rendezvous service |
-| 5.5 | TUF-signed transport config distribution |
-| 5.6 | Multi-CDN fronting glue (Cloudflare / Fastly / Akamai) |
-| 5.7 | Happy-eyeballs racing logic + transport health monitoring |
-| 5.8 | watchOS app (thin presenter) |
-| 5.9 | Localization для 10+ языков, RTL support |
-| 5.10 | UX polish: onboarding, accessibility, animations |
-| 5.11 | Censorship lab testing — GFW emulation (gfw.report tools), RU TSPU emulation, IR DPI emulation |
-| 5.12 | **Финальный pre-launch external audit** + remediation |
-| 5.13 | Bug bounty launch (4+ недели pre-public) |
-| 5.14 | Soft launch (invite-only) — 2-4 недели наблюдения |
-| 5.15 | Public launch + press + scaling readiness |
+- **5.21** Onboarding flow (минимум friction, secure-by-default)
+- **5.22** Accessibility (VoiceOver / TalkBack полная поддержка)
+- **5.23** Анимации, переходы
 
 ### Exit criteria
-- Успешные подключения из ≥5 censorship-emulating environments (GFW / TSPU / IR DPI / VR-restricted / aggressive corporate firewall)
-- 99.9% uptime в pre-launch staging ≥30 дней
-- Все audit findings закрыты или с публично disclosed mitigation
-- Bug bounty live ≥4 недель без critical findings
-- WatchOS app shipped
-- Localization 10+ языков с native review
-- Public launch ready: web, docs, status, support
-
-### Audits
-**Финальный pre-launch full-surface audit** — покрывает все: crypto, transport, infra, mobile apps, web, KT log, recovery flows, anti-censorship transport stack. Findings публично disclosed после remediation.
+- Успешные подключения из ≥5 censorship-emulating environments (GFW / TSPU / IR DPI / corporate firewall) в lab
+- Broadcast 100k+ concurrent viewers стабилен через cascade
+- WatchOS app работает
+- Localization для 10+ языков с native review
+- Auto-discovery транспортов выбирает рабочий в ≤10 s cold start
 
 ### Top risks
-- **Censorship arms race after launch** — нужны rapid TUF-signed transport rollouts (operational readiness)
-- **Press attention attracts state-level adversaries** — ops-sec posture для команды (отдельный SECURITY.md процесс)
-- **Legal pressure** в странах с key disclosure laws (UK IPA, AU AA Act, India CERT-In, RU Yarovaya) — архитектура такая что компания **не может** исполнить требование под принуждением, но компанию могут терроризировать
-- **iOS Network Extension limitations** ограничивают anti-censorship на iOS — fallback на in-app transports
-- **Multi-CDN fronting deprecation** — Cloudflare / Fastly / Akamai периодически прикрывают; multi-CDN + planning for fronting death
-- **DPRK-style allowlist-only internet** — сервис там недоступен; **abandon plan**: не инженерим под этот кейс
+- **Censorship arms race** — нужны быстрые TUF-signed transport rollouts (новые транспорты как data, не code)
+- **iOS Network Extension limitations** ограничивают anti-censorship — fallback на in-app transports
+- **Hetzner multi-region** — все hetzner DC в EU; для US / APAC users придётся либо терпеть latency, либо подключать другие провайдеры
+- **DPRK-style allowlist-only internet** — сервис там недоступен; **abandon plan**: не инженерим
 
 ---
 
-## Post-Launch (вне скоупа этого roadmap)
+## Post-Phase-5 (вне скоупа этого roadmap)
 
-После Phase 5 normal product roadmap takes over. Известные направления, которые нужно отслеживать:
+После Phase 5 normal product evolution. Технические направления, которые имеет смысл отслеживать:
 
-- **Federation** — между Lakko-инстансами; на этапе launch не делаем (single-tenant)
-- **Post-quantum** — MLS extensions для ML-KEM в работе IETF; следить, мигрировать когда зрелое и доступно в OpenMLS
-- **libcrux replacement** — переход на формально верифицированный crypto provider (формально верифицирован vs OpenMlsRustCrypto который полагается на audited-but-not-formally-verified RustCrypto)
-- **OpenMLS upstream contributions** — резерв 1 FTE на upstream после launch
-- **SDK split** — выделить `lakko-mls` / `lakko-crypto` / `lakko-proto` под Apache 2.0 в отдельный sub-repo если индустрия востребует embedded MLS implementation; благодаря CLA это возможно без переподписания контрибьюторов
-- **Annual third-party audit** — обязателен после launch
-- **Bug bounty** — продолжается без перерывов
-- **Compliance certifications** — потенциально SOC 2, ISO 27001 если требуется enterprise customers (с осторожностью — каждый certification = audit-овой surface)
+- **Federation** между Lakko-инстансами
+- **Post-quantum** — MLS extensions для ML-KEM в работе IETF; мигрируем когда зрелое и доступно в OpenMLS
+- **libcrux replacement** — переход на формально верифицированный crypto provider
+- **OpenMLS upstream contributions** — резерв capacity на upstream
+- **SDK split** — выделить `lakko-mls` / `lakko-crypto` / `lakko-proto` под Apache 2.0 в отдельный sub-repo если индустрия востребует embedded MLS implementation; благодаря CLA это возможно
 
 ---
 
-## Что важно помнить про этот документ
+## Что важно помнить
 
-- **Сроки приблизительные** — реальный темп зависит от размера команды и сложности интеграции с upstream (OpenMLS, LiveKit, RustCrypto)
-- **Audit timing критичен** — нельзя выходить в public beta или launch без external audit
-- **Sprint breakdown** — это ориентир, не контракт; реальные sprint-ы планируются ad-hoc на 2-недельных циклах внутри фазы
-- **Cross-phase dependencies** — нельзя начинать Phase N+1 пока exit criteria Phase N не зелёные
-- **Документ обновляется** — после закрытия каждой фазы добавляем `### Retrospective` секцию с тем что прошло как планировалось vs что нет
+- **Roadmap не календарный** — sprint = atomic deliverable, не временной слот
+- **Phase N+1 не стартует** пока exit criteria Phase N не зелёные — единственное жёсткое правило
+- **Документ обновляется** — после закрытия каждой фазы добавляем `### Retrospective` секцию с тем что прошло как ожидалось vs что нет
