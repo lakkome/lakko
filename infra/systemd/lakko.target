@@ -1,0 +1,28 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+# Group target — start/stop/restart all Lakko backend services together.
+#
+# Install:  sudo cp infra/systemd/*.service infra/systemd/lakko.target /etc/systemd/system/
+#           sudo systemctl daemon-reload
+#           sudo systemctl enable lakko.target
+#           sudo systemctl start lakko.target
+#
+# Common ops:
+#   sudo systemctl status lakko.target        # show all member services
+#   sudo systemctl restart lakko.target       # rolling restart of all
+#   sudo systemctl stop lakko.target          # stop all
+#   sudo journalctl -u lakko-svc-auth -f      # follow one service
+
+[Unit]
+Description=Lakko backend services
+Documentation=https://github.com/lakkome/lakko
+Wants=lakko-svc-auth.service \
+      lakko-svc-ds.service \
+      lakko-svc-storage.service \
+      lakko-svc-discovery.service \
+      lakko-svc-push-gw.service
+After=network-online.target
+
+[Install]
+WantedBy=multi-user.target

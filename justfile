@@ -80,3 +80,34 @@ ci: fmt-check lint test audit reuse fuzz-check
 # Build for all release targets (host platform only here; cross-builds via Nix).
 build:
     cargo build --workspace --release
+
+# ---- Deployment (systemd + system-nginx + system-MariaDB на Hetzner) -----
+# See infra/README.md для полного migration / deploy workflow-а.
+
+# Default deploy target — переменные среды переопределяют:
+#   LAKKO_VPS_USER (default: lakkome)
+#   LAKKO_VPS_HOST (default: lakko.me)
+vps_user := env_var_or_default("LAKKO_VPS_USER", "lakkome")
+vps_host := env_var_or_default("LAKKO_VPS_HOST", "lakko.me")
+
+# Deploy: ssh на VPS и запустить infra/scripts/deploy.sh.
+# Скрипт делает git pull + cargo build --release + install в /usr/local/bin
+# + systemctl restart lakko.target.
+deploy:
+    ssh {{vps_user}}@{{vps_host}} '~/lakko/infra/scripts/deploy.sh'
+
+# Restart всех Lakko services через systemd target.
+restart:
+    ssh {{vps_user}}@{{vps_host}} 'sudo systemctl restart lakko.target'
+
+# Restart одного service. Example: just restart-svc auth
+restart-svc service:
+    ssh {{vps_user}}@{{vps_host}} 'sudo systemctl restart lakko-svc-{{service}}'
+
+# Tail логов одного service. Example: just logs auth
+logs service:
+    ssh {{vps_user}}@{{vps_host}} 'journalctl -u lakko-svc-{{service}} -f'
+
+# Status всего.
+status:
+    ssh {{vps_user}}@{{vps_host}} 'sudo systemctl status lakko.target --no-pager'

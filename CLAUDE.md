@@ -62,8 +62,9 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 - `schemas/` — protobuf-схемы; **single source of truth** для wire format
 - `apps/` — клиенты (iOS/iPadOS/macOS/watchOS/Android/desktop/web), появятся к Phase 1
-- `infra/` — Terraform + Nomad/k8s manifests
+- `infra/` — single-VPS Hetzner deployment через systemd + system-nginx + system-MariaDB; см. `infra/README.md` (миграция с lakko_me и daily ops)
 - `docs/adr/` — Architecture Decision Records
+- `docs/ROADMAP.md` — тактическая декомпозиция всех фаз
 - `tools/` — codegen, fuzz harnesses, бенчмарки
 - `ci/` — GitHub Actions + self-hosted SLSA L3 builders
 
@@ -104,6 +105,11 @@ just regen-bindings            # Swift + Kotlin биндинги из lakko-ffi-
 just fuzz-check                # smoke-build всех fuzz-targets на stable
 just fuzz <crate> <target>     # запуск конкретного target-а на nightly + cargo-fuzz
 just fuzz-list                 # все доступные fuzz-targets
+just deploy                    # build + install + systemctl restart на VPS (ssh lakkome@lakko.me)
+just restart                   # systemctl restart lakko.target
+just restart-svc <svc>         # systemctl restart lakko-svc-<svc>
+just logs <svc>                # journalctl -u lakko-svc-<svc> -f
+just status                    # systemctl status lakko.target
 just ci                        # всё что делает CI локально
 ```
 

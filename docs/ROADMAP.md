@@ -120,7 +120,7 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 ### Sprint breakdown
 
 #### Backend infra
-- **1.0** Hetzner VPS bootstrap: nginx + Let's Encrypt + MariaDB + базовая ansible/podman setup; всё в одном `infra/` каталоге через Terraform или ansible
+- **1.0** Hetzner deployment skeleton (✅ done): миграция от lakko_me Node.js stack → новый Rust stack на ТОЙ ЖЕ VPS. systemd unit-ы для 5 services (auth/ds/storage/discovery/push-gw) + group target; system-nginx config с reverse-proxy на 127.0.0.1:808X для существующих доменов lakko.me / api.lakko.me; system-MariaDB (drop старой `lakko_me` БД, новая `lakko`); `/etc/lakko/lakko.env` для shared config; `infra/scripts/deploy.sh` (git pull → cargo build --release → install → systemctl restart); пошаговый migration guide в `infra/README.md`. Контейнеризация (podman/compose) намеренно отложена — overkill для solo + 1 VPS, добавим когда понадобится horizontal scaling
 - **1.1** `services/auth` — OPAQUE-PAKE + WebAuthn passkey, MariaDB-backed signup/signin без хранения PII; PoW (Equix) + Privacy Pass (RFC 9576) anti-spam
 - **1.2** `services/storage` — простой ciphertext blob proxy на Hetzner Storage Box (или local disk + nginx); content-addressable, ciphertext-only policy
 - **1.3** `services/ds` skeleton — MariaDB-backed append-only журнал per-group (FIFO по `(epoch, seq)`), mailbox per device, axum + tokio
