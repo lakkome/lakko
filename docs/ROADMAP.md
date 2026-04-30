@@ -28,8 +28,8 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 | Фаза | Что добавляется |
 |---|---|
 | **0** Foundations | Workspace, ADR, CI, MLS end-to-end в тестах, FFI surface, fuzz harnesses |
-| **1** 1×1 Messaging | services/auth, services/ds, services/storage, services/discovery, services/push-gw, apps/ios, apps/android |
-| **2** Groups + Multi-device | X.509 + KT log, DeviceGroup, encrypted backup, ≤50-членные группы, apps/web, apps/desktop, apps/macos |
+| **1** 1×1 Messaging | services/auth, services/ds, services/storage, services/discovery, services/push-gw, lakko-ffi-wasm, apps/ios, apps/android, apps/web |
+| **2** Groups + Multi-device | X.509 + KT log, DeviceGroup, encrypted backup, ≤50-членные группы, apps/desktop, apps/macos |
 | **3** Calls | lakko-calls (SFrame), services/sfu (self-hosted LiveKit), P2P + group calls (link и in-chat) + audio rooms, CallKit / ConnectionService, coturn |
 | **4** Channels / Broadcasts | PublisherGroup, sender-key broadcast, services/edge, medium-scale broadcasts |
 | **5** Anti-censorship + Scale | REALITY, MASQUE, Shadowsocks-2022, transport-rendezvous, multi-region edge cascade, apps/watchos, localization |
@@ -111,7 +111,7 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 ### Цель
 
-Первый реальный функциональный срез: два устройства (iOS и Android) обмениваются 1×1-сообщениями через настоящий backend, self-hosted на одном Hetzner VPS.
+Первый реальный функциональный срез: три устройства (iOS, Android, web) обмениваются 1×1-сообщениями через настоящий backend, self-hosted на одном Hetzner VPS. Web-клиент — параллельный track к нативным mobile, чтобы dogfooding не упирался в Apple/Google аккаунты и review-пайплайны.
 
 ### Pre-flight
 - Phase 0 exit criteria зелёные (включая 0.4 fuzz и 0.5 X.509 + KT skeleton)
@@ -125,47 +125,58 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 - **1.3** `services/ds` skeleton — MariaDB-backed append-only журнал per-group (FIFO по `(epoch, seq)`), mailbox per device, axum + tokio
 - **1.4** `services/ds` production — fanout, long-poll или QUIC stream push для real-time delivery
 - **1.5** `services/discovery` — username table + OPRF (RFC 9497) blinded lookup, exact-match only, PoW per-query, MariaDB-backed
-- **1.6** `services/push-gw` — APNs + FCM envelope routing, payload только `(group_pseudonym, envelope_pointer)`; UnifiedPush self-host (на том же VPS, для CN/RU prep)
+- **1.6** `services/push-gw` — APNs + FCM + Web Push (VAPID) envelope routing, payload только `(group_pseudonym, envelope_pointer)`; UnifiedPush self-host (на том же VPS, для CN/RU prep)
 
 #### Crates (расширение)
-- **1.7** `lakko-storage` — SQLCipher-backed local store, ключ из HKDF от device root key (Secure Enclave / StrongBox)
-- **1.8** `lakko-transport` production wiring — QUIC client wired через `services/ds`, cert pinning skeleton
+- **1.7** `lakko-storage` — SQLCipher-backed local store (native), IndexedDB-backed для web; ключ из HKDF от device root key (Secure Enclave / StrongBox / non-extractable WebCrypto)
+- **1.8** `lakko-transport` production wiring — QUIC client (native) + WebTransport-fallback / WebSocket (web) через `services/ds`, cert pinning skeleton
 - **1.9** `lakko-contacts` — ContactRequest end-to-end, capability-based invite links (см. ADR-0005); pseudonym lifecycle minimum
-- **1.10** `lakko-push` — encrypted push payload framing
+- **1.10** `lakko-push` — encrypted push payload framing (APNs / FCM / Web Push форматы)
 - **1.11** `lakko-presence` — blinded per-conversation presence tokens (минимальная версия)
 - **1.12** `lakko-sync` — hybrid logical clock + draft sync (single-device variant)
+- **1.13** `lakko-ffi-wasm` — wasm-bindgen surface зеркало UniFFI (Identity / Group / KeyPackage / процессинг сообщений)
 
-#### Apps
-- **1.13** `apps/ios` skeleton — SwiftUI: signup/signin (passkey + OPAQUE), contact list UI, 1×1 chat UI; integration с XCFramework из lakko-ffi-uniffi
-- **1.14** `apps/android` skeleton — Compose: тот же surface; AAR-integration
-- **1.15** Apps: ContactRequest end-to-end через DS, invite links flow
-- **1.16** Apps: 1×1 chat — encrypted text + attachments через storage service
-- **1.17** Apps: push notifications (APNs / FCM) — encrypted envelopes
-- **1.18** Apps: recovery flow — BIP39 24-word mnemonic, optional Shamir 3-of-5 social recovery (если хватит сил в этой фазе)
+#### Native apps (iOS + Android)
+- **1.14** `apps/ios` skeleton — SwiftUI: signup/signin (passkey + OPAQUE), contact list UI, 1×1 chat UI; integration с XCFramework из lakko-ffi-uniffi
+- **1.15** `apps/android` skeleton — Compose: тот же surface; AAR-integration
+
+#### Web app
+- **1.16** `apps/web` skeleton — Solid.js + WASM core (через lakko-ffi-wasm); signup/signin (WebAuthn passkey + OPAQUE через WebCrypto-derived OPRF), contact list UI, 1×1 chat UI; service worker для offline; bundle target <2 MB gzipped
+- **1.17** `apps/web` static-host pipeline — GitHub Pages или Hetzner static behind nginx; SRI hashes для security; build artefacts reproducible
+
+#### Cross-platform features
+- **1.18** Apps: ContactRequest end-to-end через DS, invite links flow (iOS + Android + Web)
+- **1.19** Apps: 1×1 chat — encrypted text + attachments через storage service
+- **1.20** Apps: push notifications — APNs (iOS) / FCM (Android) / Web Push VAPID (browsers); encrypted envelopes на всех путях
+- **1.21** Apps: recovery flow — BIP39 24-word mnemonic, optional Shamir 3-of-5 social recovery (если хватит сил в этой фазе)
 
 #### Готовность
-- **1.19** Staging deployment — один Hetzner VPS, nginx + MariaDB + все services co-located, Let's Encrypt
+- **1.22** Staging deployment — один Hetzner VPS, nginx + MariaDB + все services co-located, Let's Encrypt; web-клиент развёрнут на том же домене или на статике
 
 ### Exit criteria
-- 1×1 messaging работает end-to-end на реальных iOS + Android устройствах через Hetzner backend
-- Push delivery p50 < 5s
+- 1×1 messaging работает end-to-end на реальных iOS + Android устройствах **и в браузере** через Hetzner backend
+- Cross-platform взаимодействие: web-клиент и mobile decrypt-ят сообщения друг от друга идентично
+- Push delivery p50 < 5s (на всех трёх каналах: APNs / FCM / Web Push)
 - Message send → delivered p50 < 1s regional
 - DS выдерживает 1k одновременных connection-ов в local load test
 - Recovery: можно потерять устройство и восстановить аккаунт по mnemonic
-- Reproducible build artifacts проверены (XCFramework + AAR byte-identical между runner-ами)
+- Reproducible build artifacts проверены (XCFramework + AAR + WASM bundle byte-identical между runner-ами)
+- Web bundle < 2 MB gzipped
 
 ### Top risks
 - **iOS background limitations** — APNs delivery надёжность; MLS state machine recovery после долгой spavnki
 - **OPAQUE production maturity** — RFC ещё draft; track upstream
-- **Hardware-backed key APIs differ** между iOS / Android — разные failure modes
+- **Hardware-backed key APIs differ** между iOS / Android / WebCrypto — разные failure modes
+- **WASM bundle size** для web — OpenMLS + RustCrypto могут давать heavy bundle; готовность к code splitting и lazy-loading нечастых code paths
+- **Web Push VAPID setup** — нужны VAPID ключи + сервер-сайд push-вызовы через `services/push-gw`
 
 ---
 
-## Phase 2 — Groups + Multi-device + Web/Desktop
+## Phase 2 — Groups + Multi-device + Desktop
 
 ### Цель
 
-Группы до ~50 человек (vanilla MLS), multi-device sync без plaintext на сервере, клиенты на всех 5 платформах (iOS / Android / macOS / Linux / Web).
+Группы до ~50 человек (vanilla MLS), multi-device sync без plaintext на сервере, добавляются desktop (Windows / Linux) и macOS клиенты. iOS / Android / Web уже шипятся в Phase 1.
 
 ### Pre-flight
 - Phase 1 exit criteria зелёные
@@ -195,9 +206,9 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 - **2.13** Block list (encrypted под identity, server применяет hashed match)
 
 #### Apps (новые)
-- **2.14** `apps/desktop` — Tauri 2.x + Solid.js, Windows / macOS / Linux native binaries
-- **2.15** `apps/web` — Solid.js + WASM core, service worker для offline, IndexedDB cache; bundle target <2 MB gzipped
-- **2.16** `apps/macos` — отдельная сборка через SwiftUI XCFramework (общий core с iOS)
+- **2.14** `apps/desktop` — Tauri 2.x + Solid.js (UI re-use из apps/web), Windows / Linux native binaries
+- **2.15** `apps/macos` — отдельная сборка через SwiftUI XCFramework (общий core с iOS)
+- **2.16** Расширение apps/web под групповой UX (member-list, group settings, etc.)
 
 #### Verification & QR
 - **2.17** QR safety numbers — Signal-style fingerprint scan, добавление контакта OOB-secure
