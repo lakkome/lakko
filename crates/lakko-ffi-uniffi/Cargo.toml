@@ -17,3 +17,12 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [lints]
 workspace = true
+
+[dependencies]
+thiserror.workspace = true
+lakko-mls.workspace = true
+
+uniffi = { version = "0.28", features = ["build"] }
+
+[build-dependencies]
+uniffi = { version = "0.28", features = ["build"] }

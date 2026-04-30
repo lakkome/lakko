@@ -34,9 +34,22 @@ reuse:
     reuse lint
 
 # Regenerate prost-generated Rust types from `schemas/`.
-# (Implementation will land with `lakko-proto` build script in Phase 1.)
+# Wired via `crates/lakko-proto/build.rs` (uses `protox`, no protoc required).
 regen-proto:
-    @echo "TODO: wire up prost-build invocation in crates/lakko-proto/build.rs"
+    cargo build -p lakko-proto
+
+# Regenerate Swift + Kotlin bindings from lakko-ffi-uniffi.
+# Requires uniffi-bindgen — install once with: cargo install uniffi-bindgen
+regen-bindings:
+    cargo build -p lakko-ffi-uniffi --release
+    uniffi-bindgen generate \
+        --library target/release/liblakko_ffi_uniffi.dylib \
+        --language swift \
+        --out-dir target/bindings/swift
+    uniffi-bindgen generate \
+        --library target/release/liblakko_ffi_uniffi.dylib \
+        --language kotlin \
+        --out-dir target/bindings/kotlin
 
 # Run a single fuzz target (cargo-fuzz). Example: `just fuzz mls-parse`.
 fuzz target:

@@ -3,11 +3,25 @@
 
 //! Transport layer for Lakko.
 //!
-//! Provides `Transport` and `Listener` traits implemented over QUIC (`quinn`),
-//! WebSocket-over-TLS, and WebTransport. Pluggable obfuscation transports
-//! (REALITY, Shadowsocks-2022, MASQUE, obfs4) are wired in as adapters
-//! satisfying the same trait, and selected at runtime via happy-eyeballs racing.
+//! Provides:
 //!
-//! See `docs/adr/0004-anti-censorship.md`.
+//! - [`Transport`], [`Listener`], [`Connection`] message-oriented traits
+//! - [`Endpoint`] type for direct + hostname targets
+//! - [`in_memory`] backend (mpsc) for tests and local IPC
+//! - [`quic`] backend (`quinn`) for production traffic
+//!
+//! Pluggable obfuscation transports (REALITY, Shadowsocks-2022, MASQUE,
+//! obfs4) plug in as adapters satisfying [`Transport`] and are selected at
+//! runtime via happy-eyeballs racing — wired in Phase 5 per ADR-0004.
 
 #![forbid(unsafe_code)]
+
+pub mod endpoint;
+pub mod error;
+pub mod in_memory;
+pub mod quic;
+pub mod transport;
+
+pub use endpoint::Endpoint;
+pub use error::{Error, Result};
+pub use transport::{Connection, Listener, Transport, MAX_FRAME_BYTES};
