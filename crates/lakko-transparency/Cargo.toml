@@ -1,0 +1,24 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+[package]
+name = "lakko-transparency"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+description = "CONIKS-style key transparency log for Lakko (RFC 6962 Merkle tree, BLAKE3, Ed25519-signed roots)"
+
+[lints]
+workspace = true
+
+[dependencies]
+thiserror.workspace = true
+lakko-crypto.workspace = true
+
+[dev-dependencies]
+proptest = "1"
+hex = "0.4"

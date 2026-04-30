@@ -1174,6 +1174,16 @@ name = "lakko-sync"
 version = "0.0.0"
 
 [[package]]
+name = "lakko-transparency"
+version = "0.0.0"
+dependencies = [
+ "hex",
+ "lakko-crypto",
+ "proptest",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "lakko-transport"
 version = "0.0.0"
 dependencies = [

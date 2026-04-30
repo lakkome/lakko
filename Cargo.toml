@@ -15,6 +15,7 @@ members = [
     "crates/lakko-contacts",
     "crates/lakko-presence",
     "crates/lakko-push",
+    "crates/lakko-transparency",
     "crates/lakko-ffi-uniffi",
     "crates/lakko-ffi-wasm",
     "services/auth",
@@ -72,6 +73,7 @@ lakko-calls = { path = "crates/lakko-calls", version = "0.0.0" }
 lakko-contacts = { path = "crates/lakko-contacts", version = "0.0.0" }
 lakko-presence = { path = "crates/lakko-presence", version = "0.0.0" }
 lakko-push = { path = "crates/lakko-push", version = "0.0.0" }
+lakko-transparency = { path = "crates/lakko-transparency", version = "0.0.0" }
 
 [workspace.lints.rust]
 unsafe_code = "deny"

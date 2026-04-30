@@ -42,6 +42,7 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 | `lakko-contacts` | Username discovery (OPRF), invite capabilities, pseudonym lifecycle |
 | `lakko-presence` | Blinded per-conversation presence tokens |
 | `lakko-push` | Encrypted APNs / FCM / UnifiedPush envelopes |
+| `lakko-transparency` | CONIKS-style key transparency log (Merkle tree, signed roots, inclusion proofs) |
 | `lakko-ffi-uniffi` | UniFFI surface для Swift / Kotlin биндингов |
 | `lakko-ffi-wasm` | wasm-bindgen surface для Web/Tauri |
 

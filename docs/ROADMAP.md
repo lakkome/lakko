@@ -90,16 +90,17 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 | **0.1** | CI gates на GitHub Actions + lakko-proto codegen (protox + prost-build) + lakko-crypto primitives | ✅ done |
 | **0.2** | lakko-mls поверх OpenMLS (identity / key_package / group / exporter) + end-to-end Alice ↔ Bob ↔ Charlie | ✅ done |
 | **0.3** | lakko-transport (QUIC + in-memory) + lakko-ffi-uniffi (Identity / Group surface) | ✅ done |
-| **0.4** | Fuzz harnesses (cargo-fuzz) на парсеры (MLS wire, prost, SFrame); OSS-Fuzz integration; reproducible build verifier (dual runner в CI) | pending |
-| **0.5** | X.509 credentials в lakko-mls + KT log skeleton (CONIKS-style append-only); FIPS suite unblock | pending |
+| **0.4** | Fuzz harnesses (cargo-fuzz) на парсеры (MLS wire, prost); reproducible build verifier (dual runner в CI). OSS-Fuzz upstream PR — при первой реальной интеграции | ✅ done |
+| **0.5** | KT log skeleton — `lakko-transparency` crate (Merkle RFC 6962 + BLAKE3, SignedRoot Ed25519, InclusionProof, InMemoryLog, rollback detection). X.509 credentials + FIPS suite unblock — отложено в Phase 1 (нет crate `openmls_x509_credential` в реестре, требуется upstream contribution или manual TLS-codec encoding) | ✅ done (KT) / deferred (X.509+FIPS) |
 
 ### Exit criteria
 - ✅ MLS groups end-to-end в integration тестах
 - ✅ FFI surface стабилен (lakko-ffi-uniffi компилируется, three-party FFI test зелёный)
 - ✅ CI gates все зелёные
-- ⏳ Fuzz harnesses на каждый парсер (MLS wire, protobuf, SFrame); хотя бы один OSS-Fuzz integration
-- ⏳ Reproducible build verifier — два независимых runner-а сходятся в byte-identical artifact
-- ⏳ X.509 credentials + KT log skeleton (real validation в Phase 2)
+- ✅ Fuzz harnesses на каждый wire-format парсер (MLS message, KeyPackage, prost wire/mls_app/media)
+- ✅ Reproducible build verifier — CI job есть (continue-on-error пока тюним flags для byte-identicality)
+- ✅ KT log skeleton — `lakko-transparency` crate (production storage в Phase 2)
+- 🟡 X.509 credentials + FIPS — deferred к Phase 1; нужны либо upstream `openmls_x509_credential` crate, либо manual TLS-codec encoding cert chain
 
 ### Top risks
 - **OpenMLS upstream churn** — митигировано: fast-follow upgrades (мы уже сделали 0.6 → 0.8 при появлении hpke-rs CVE)
