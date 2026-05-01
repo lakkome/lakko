@@ -81,6 +81,38 @@ ci: fmt-check lint test audit reuse fuzz-check
 build:
     cargo build --workspace --release
 
+# ---- Local dev (на твоей машине) ------------------------------------------
+
+# Поднять ephemeral MariaDB через docker/podman для local dev.
+# Останавливается через `just dev-mariadb-stop`. Данные не персистятся.
+# Нужен docker ИЛИ podman в PATH.
+dev-mariadb:
+    @command -v docker >/dev/null 2>&1 && CONTAINER=docker || CONTAINER=podman; \
+    $CONTAINER run -d --rm --name lakko-mariadb-dev \
+        -p 3306:3306 \
+        -e MARIADB_ROOT_PASSWORD=dev \
+        -e MARIADB_DATABASE=lakko \
+        -e MARIADB_USER=lakko \
+        -e MARIADB_PASSWORD=devpass \
+        docker.io/library/mariadb:11
+    @echo ""
+    @echo "MariaDB stating on 127.0.0.1:3306. Жди ~5s, потом:"
+    @echo '  export DATABASE_URL="mysql://lakko:devpass@127.0.0.1:3306/lakko"'
+    @echo "  just dev-auth"
+
+# Остановить локальный dev-MariaDB.
+dev-mariadb-stop:
+    @command -v docker >/dev/null 2>&1 && CONTAINER=docker || CONTAINER=podman; \
+    $CONTAINER stop lakko-mariadb-dev || true
+
+# Запустить auth service локально (cargo run, не сборка binary).
+# Требует DATABASE_URL — либо из shell env, либо подхватит default ниже.
+dev-auth:
+    DATABASE_URL="${DATABASE_URL:-mysql://lakko:devpass@127.0.0.1:3306/lakko}" \
+    LAKKO_BIND="${LAKKO_BIND:-127.0.0.1:8081}" \
+    RUST_LOG="${RUST_LOG:-info,sqlx=warn,lakko_svc_auth=debug}" \
+    cargo run -p lakko-svc-auth
+
 # ---- Deployment (systemd + system-nginx + system-MariaDB на Hetzner) -----
 # See infra/README.md для полного migration / deploy workflow-а.
 

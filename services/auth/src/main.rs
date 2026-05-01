@@ -3,26 +3,235 @@
 
 //! Auth service for Lakko.
 //!
-//! Implements OPAQUE-PAKE password-based auth, WebAuthn passkey, and recovery
-//! flows (BIP39 / Shamir 3-of-5 social recovery). No phone or email is ever
-//! persisted.
+//! Phase 1.1a: HTTP server skeleton (axum) + MariaDB pool (sqlx) +
+//! liveness/readiness probes + graceful shutdown. OPAQUE-PAKE auth flows,
+//! WebAuthn passkey registration, PoW + Privacy Pass anti-spam — landing in
+//! sprints 1.1b, 1.1c, 1.1d respectively.
 //!
-//! See `~/.claude/plans/1-nested-wreath.md` §4 (Auth).
+//! Configuration via environment variables (loaded by systemd from
+//! `/etc/lakko/lakko.env`):
+//!
+//! - `LAKKO_BIND` — `host:port` to listen on (default `127.0.0.1:8081`)
+//! - `DATABASE_URL` — sqlx-style MariaDB DSN
+//! - `RUST_LOG` — `tracing-subscriber` env-filter spec
+//!
+//! Endpoints (Phase 1.1a):
+//!
+//! - `GET /health` — liveness (no DB), 200 OK
+//! - `GET /ready` — readiness (pings DB), 200 OK or 503
+//! - `GET /version` — `{"service": "...", "version": "...", "git_sha": "..."}`
 
 #![forbid(unsafe_code)]
 
-use anyhow::Result;
+use std::net::SocketAddr;
+use std::time::Duration;
+
+use anyhow::{Context, Result};
+use axum::extract::State;
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Json};
+use axum::routing::get;
+use axum::Router;
+use serde_json::json;
+use sqlx::mysql::MySqlPoolOptions;
+use sqlx::MySqlPool;
+use tokio::signal;
+use tower_http::trace::TraceLayer;
+
+/// Default bind address if `LAKKO_BIND` is not set.
+const DEFAULT_BIND: &str = "127.0.0.1:8081";
+
+/// Migrations directory (relative to crate root). `sqlx::migrate!` reads it
+/// at compile time and embeds the SQL in the binary.
+const MIGRATIONS: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
+
+/// Shared application state.
+#[derive(Clone)]
+struct AppState {
+    db: MySqlPool,
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
+    init_tracing();
 
-    tracing::info!("auth service starting (Phase 0 stub)");
+    let bind: SocketAddr = std::env::var("LAKKO_BIND")
+        .unwrap_or_else(|_| DEFAULT_BIND.to_string())
+        .parse()
+        .context("parse LAKKO_BIND as host:port")?;
 
+    let db_url = std::env::var("DATABASE_URL").context("DATABASE_URL env var must be set")?;
+
+    let pool = MySqlPoolOptions::new()
+        .max_connections(16)
+        .acquire_timeout(Duration::from_secs(5))
+        .connect(&db_url)
+        .await
+        .context("connect to MariaDB")?;
+
+    // Apply embedded migrations on startup. Idempotent.
+    MIGRATIONS.run(&pool).await.context("run sqlx migrations")?;
+
+    let state = AppState { db: pool.clone() };
+    let app = build_app(state);
+
+    let listener = tokio::net::TcpListener::bind(bind)
+        .await
+        .with_context(|| format!("bind {bind}"))?;
+    tracing::info!(addr = %bind, "auth service listening");
+
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await
+        .context("axum serve")?;
+
+    pool.close().await;
+    tracing::info!("auth service stopped cleanly");
     Ok(())
+}
+
+/// Build the public router. Extracted so tests can drive it directly without
+/// binding a TCP listener.
+fn build_app(state: AppState) -> Router {
+    Router::new()
+        .route("/health", get(health))
+        .route("/ready", get(ready))
+        .route("/version", get(version))
+        .layer(TraceLayer::new_for_http())
+        .with_state(state)
+}
+
+/// Liveness — service process is alive. Does **not** check the DB; nginx /
+/// systemd watchdog should poll this for restart decisions.
+async fn health() -> impl IntoResponse {
+    (StatusCode::OK, "ok\n")
+}
+
+/// Readiness — service can serve traffic, including DB-backed endpoints.
+/// Pings the connection pool with `SELECT 1`.
+async fn ready(State(state): State<AppState>) -> impl IntoResponse {
+    match sqlx::query_scalar::<_, i64>("SELECT 1")
+        .fetch_one(&state.db)
+        .await
+    {
+        Ok(_) => (StatusCode::OK, "ready\n").into_response(),
+        Err(e) => {
+            tracing::warn!(error = %e, "readiness probe: db ping failed");
+            (StatusCode::SERVICE_UNAVAILABLE, "not ready\n").into_response()
+        },
+    }
+}
+
+/// Service version metadata.
+async fn version() -> impl IntoResponse {
+    Json(json!({
+        "service": "lakko-svc-auth",
+        "version": env!("CARGO_PKG_VERSION"),
+        "git_sha": option_env!("LAKKO_GIT_SHA").unwrap_or("unknown"),
+    }))
+}
+
+/// Initialize tracing-subscriber from `RUST_LOG`. Falls back to `info`.
+fn init_tracing() {
+    use tracing_subscriber::{fmt, EnvFilter};
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    fmt()
+        .with_env_filter(filter)
+        .with_target(true)
+        .with_level(true)
+        .compact()
+        .init();
+}
+
+/// Wait for SIGTERM (systemd stop) or SIGINT (Ctrl-C).
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        let _ = signal::ctrl_c().await;
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        if let Ok(mut sig) = signal::unix::signal(signal::unix::SignalKind::terminate()) {
+            sig.recv().await;
+        }
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        () = ctrl_c => tracing::info!("received SIGINT, shutting down"),
+        () = terminate => tracing::info!("received SIGTERM, shutting down"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::Request;
+    use http_body_util::BodyExt as _;
+    use tower::ServiceExt as _;
+
+    /// Build a router suitable for testing endpoints that don't touch the DB.
+    /// `/health` and `/version` work without a live connection; `/ready`
+    /// requires a real pool and is covered by integration tests.
+    fn test_app_no_db() -> Router {
+        Router::new()
+            .route("/health", get(health))
+            .route("/version", get(version))
+    }
+
+    #[tokio::test]
+    async fn health_returns_200_ok() {
+        let app = test_app_no_db();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&body[..], b"ok\n");
+    }
+
+    #[tokio::test]
+    async fn version_returns_json_with_service_name() {
+        let app = test_app_no_db();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/version")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(parsed["service"], "lakko-svc-auth");
+        assert_eq!(parsed["version"], env!("CARGO_PKG_VERSION"));
+    }
+
+    #[tokio::test]
+    async fn unknown_path_returns_404() {
+        let app = test_app_no_db();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/does-not-exist")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
 }
