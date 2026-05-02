@@ -128,6 +128,64 @@ just ci                        # всё что делает CI локально
 
 Фуззинг-corpus не коммитится (`fuzz/corpus/`, `fuzz/artifacts/` в `.gitignore`); поднимается локально.
 
+## Local dev
+
+### Первый раз
+
+```bash
+# 1. Workspace .env (грузится через dotenvy в каждом service main() в debug)
+cp .env.example .env
+# при необходимости поменять DATABASE_URL / RUST_LOG
+
+# 2. MariaDB локально — общий docker-контейнер `mariadb:latest` на 3306
+docker exec -it mariadb mariadb -u root -p -e "
+  CREATE DATABASE IF NOT EXISTS lakko;
+  CREATE USER IF NOT EXISTS 'lakko'@'%' IDENTIFIED BY 'devpass';
+  GRANT ALL ON lakko.* TO 'lakko'@'%';
+  FLUSH PRIVILEGES;
+"
+```
+
+### Запуск service
+
+| Способ | Команда |
+|---|---|
+| CLI / justfile | `just dev-auth` |
+| `cargo run` напрямую | `cargo run -p lakko-svc-auth` |
+| RustRover | локальный Run Config (Cargo command `run --package lakko-svc-auth`) |
+
+Все три пути идентичны — env vars в любом случае приходят из `.env` через `dotenvy::dotenv()` в `main()` (debug-сборка). RustRover Run Configurations лежат в `.run/` (gitignored) — каждый создаёт у себя локально через GUI или копирует пример ниже.
+
+Production использует совершенно другой механизм (systemd `EnvironmentFile=` / `/etc/lakko/lakko.env`), `dotenvy` под `#[cfg(debug_assertions)]` и в release не вызывается.
+
+#### Пример RustRover Run Config
+
+Run → Edit Configurations → `+` → Cargo. Заполнить:
+
+| Поле | Значение |
+|---|---|
+| Name | `lakko-svc-auth (dev)` |
+| Command | `run --package lakko-svc-auth --bin lakko-svc-auth` |
+| Working directory | `$PROJECT_DIR$` |
+| Environment variables | (опционально, можно оставить пустым — `.env` подхватывается) |
+
+Если хочешь продублировать env vars inline (RustRover устанавливает их **до** dotenvy и переопределяет `.env`):
+
+```
+DATABASE_URL=mysql://lakko:devpass@127.0.0.1:3306/lakko
+LAKKO_BIND=127.0.0.1:8081
+RUST_LOG=info,sqlx=warn,lakko_svc_auth=debug,lakko_mls=debug
+RUST_BACKTRACE=1
+```
+
+### Verify
+
+```bash
+curl -i http://127.0.0.1:8081/health   # → 200, "ok"
+curl -i http://127.0.0.1:8081/ready    # → 200, "ready" (если БД ОК)
+curl -i http://127.0.0.1:8081/version  # → 200, JSON
+```
+
 ## Чеклист перед коммитом
 
 - [ ] `just fmt` прошёл

@@ -53,6 +53,16 @@ struct AppState {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Грузим `.env` из workspace root (или ближайшего родителя) — только
+    // в debug-сборке. Production-сборка ничего не грузит: systemd
+    // монтирует `/etc/lakko/lakko.env` через EnvironmentFile= .
+    #[cfg(debug_assertions)]
+    {
+        if let Ok(path) = dotenvy::dotenv() {
+            eprintln!("dotenv loaded from {}", path.display());
+        }
+    }
+
     init_tracing();
 
     let bind: SocketAddr = std::env::var("LAKKO_BIND")

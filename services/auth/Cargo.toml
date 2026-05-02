@@ -40,6 +40,10 @@ sqlx = { version = "0.8", default-features = false, features = [
     "chrono",
 ] }
 
+# .env loading — debug builds only; production использует systemd
+# EnvironmentFile= /etc/lakko/lakko.env, см. infra/systemd/*.service.
+dotenvy = "0.15"
+
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"

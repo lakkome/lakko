@@ -106,11 +106,9 @@ dev-mariadb-stop:
     $CONTAINER stop lakko-mariadb-dev || true
 
 # Запустить auth service локально (cargo run, не сборка binary).
-# Требует DATABASE_URL — либо из shell env, либо подхватит default ниже.
+# Env-переменные грузятся через dotenvy из `.env` в workspace root —
+# скопируй `.env.example` → `.env` перед первым запуском.
 dev-auth:
-    DATABASE_URL="${DATABASE_URL:-mysql://lakko:devpass@127.0.0.1:3306/lakko}" \
-    LAKKO_BIND="${LAKKO_BIND:-127.0.0.1:8081}" \
-    RUST_LOG="${RUST_LOG:-info,sqlx=warn,lakko_svc_auth=debug}" \
     cargo run -p lakko-svc-auth
 
 # ---- Deployment (systemd + system-nginx + system-MariaDB на Hetzner) -----
