@@ -137,8 +137,18 @@ jobs:
           echo "===== Build B hashes =====" && cat /tmp/build-b-hashes.txt
       - name: Compare hashes
         run: |
-          if diff -u /tmp/build-a-hashes.txt /tmp/build-b-hashes.txt; then
-            echo "✅ Reproducible: byte-identical artifacts"
+          # Known non-reproducible artifacts — фильтруем перед сравнением,
+          # чтобы реальные regression-ы не тонули в фоновом шуме.
+          # liblakko_ffi_uniffi.rlib: uniffi 0.28 proc-macro embeds
+          # non-deterministic state (track upstream). Все остальные .rlib
+          # и bin'ы должны совпадать byte-for-byte.
+          KNOWN_FLAKY='liblakko_ffi_uniffi\.rlib'
+
+          grep -v -E "$KNOWN_FLAKY" /tmp/build-a-hashes.txt > /tmp/a-filtered.txt
+          grep -v -E "$KNOWN_FLAKY" /tmp/build-b-hashes.txt > /tmp/b-filtered.txt
+
+          if diff -u /tmp/a-filtered.txt /tmp/b-filtered.txt; then
+            echo "✅ Reproducible: byte-identical artifacts (excluding known flaky: $KNOWN_FLAKY)"
           else
             echo "⚠️ Non-reproducible: artifacts differ between builds"
             echo "(this job is non-blocking until we tune flags for stable byte-identicality)"

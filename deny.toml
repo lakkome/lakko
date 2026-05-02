@@ -44,6 +44,10 @@ allow = [
     "AGPL-3.0",
     "AGPL-3.0-or-later",
     "OpenSSL",
+    # CDLA-Permissive-2.0 — Community Data License Agreement (permissive).
+    # Используется webpki-roots (Mozilla CA trust store) — это data, не code.
+    # FSF-considered free, OSI-style permissive. Транзитивно через sqlx-core.
+    "CDLA-Permissive-2.0",
 ]
 confidence-threshold = 0.9
 exceptions = []
