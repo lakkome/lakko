@@ -10,7 +10,7 @@ authors.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 publish = false
-description = "Discovery — username lookup via OPRF blinded queries, KeyPackage bundle delivery"
+description = "Discovery — username lookup via OPRF blinded queries"
 
 [lints]
 workspace = true
@@ -24,3 +24,43 @@ tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+axum = { version = "0.8", features = ["macros", "http2"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["trace", "limit"] }
+sqlx = { version = "0.8", default-features = false, features = [
+    "runtime-tokio",
+    "tls-rustls-ring",
+    "mysql",
+    "migrate",
+    "macros",
+    "chrono",
+] }
+
+# .env loading — debug builds only; production uses systemd
+# `EnvironmentFile=/etc/lakko/lakko.env`.
+dotenvy = "0.15"
+
+# VOPRF (RFC 9497) — server stores the username table keyed by
+# `OPRF(K, normalize(username))` so plaintext usernames are never
+# present in the database or on the wire. Ristretto255-SHA512
+# ciphersuite — matches the OPAQUE-PAKE choice in services/auth.
+voprf = { version = "0.5", default-features = false, features = [
+    "ristretto255-ciphersuite",
+] }
+generic-array = "0.14"
+
+# PoW infrastructure mirrored from services/auth — Equix puzzle, SHA-256
+# effort filter. Phase 2 should DRY this into a shared `lakko-pow` crate.
+equix = { version = "0.6", features = ["compiler"] }
+sha2 = "0.10"
+
+base64 = "0.22"
+hex = "0.4"
+rand = "0.8"
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"

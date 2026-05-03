@@ -17,6 +17,8 @@ Group=lakkome
 EnvironmentFile=/etc/lakko/lakko.env
 Environment=RUST_LOG=info
 Environment=LAKKO_BIND=127.0.0.1:8084
+# `LAKKO_DISCOVERY_DATABASE_URL` is read from /etc/lakko/lakko.env above.
+# Each service has its own DB — sqlx migration tracking does not collide.
 
 ExecStart=/usr/local/bin/lakko-svc-discovery
 Restart=on-failure

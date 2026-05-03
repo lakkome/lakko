@@ -1678,9 +1678,24 @@ name = "lakko-svc-discovery"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "axum",
+ "base64",
+ "dotenvy",
+ "equix",
+ "generic-array",
+ "hex",
+ "http-body-util",
+ "rand 0.8.6",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sqlx",
  "tokio",
+ "tower",
+ "tower-http",
  "tracing",
  "tracing-subscriber",
+ "voprf",
 ]
 
 [[package]]

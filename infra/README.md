@@ -137,15 +137,18 @@ sudo mariadb <<'SQL'
         CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
     CREATE DATABASE IF NOT EXISTS lakko_ds
         CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-    -- (lakko_discovery, lakko_push_gw — added in their sprints)
+    CREATE DATABASE IF NOT EXISTS lakko_discovery
+        CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+    -- (lakko_push_gw — added in its sprint)
 SQL
 
 # Create the service user — password is NOT in git.
 LAKKO_DB_PASS=$(openssl rand -hex 32)
 sudo mariadb -e "
     CREATE USER 'lakko'@'localhost' IDENTIFIED BY '$LAKKO_DB_PASS';
-    GRANT ALL PRIVILEGES ON lakko_auth.* TO 'lakko'@'localhost';
-    GRANT ALL PRIVILEGES ON lakko_ds.*   TO 'lakko'@'localhost';
+    GRANT ALL PRIVILEGES ON lakko_auth.*      TO 'lakko'@'localhost';
+    GRANT ALL PRIVILEGES ON lakko_ds.*        TO 'lakko'@'localhost';
+    GRANT ALL PRIVILEGES ON lakko_discovery.* TO 'lakko'@'localhost';
     FLUSH PRIVILEGES;
 "
 echo "DB password: $LAKKO_DB_PASS"  # save it — needed in step 7
@@ -160,9 +163,10 @@ on first start (`sqlx::migrate!()` embeds the SQL into the binary).
 sudo mkdir -p /etc/lakko
 sudo cp ~/lakko/infra/etc-lakko/lakko.env.example /etc/lakko/lakko.env
 sudo nano /etc/lakko/lakko.env
-# Replace CHANGE-ME with $LAKKO_DB_PASS in BOTH:
+# Replace CHANGE-ME with $LAKKO_DB_PASS in:
 #   LAKKO_AUTH_DATABASE_URL=mysql://lakko:$LAKKO_DB_PASS@127.0.0.1:3306/lakko_auth
 #   LAKKO_DS_DATABASE_URL=mysql://lakko:$LAKKO_DB_PASS@127.0.0.1:3306/lakko_ds
+#   LAKKO_DISCOVERY_DATABASE_URL=mysql://lakko:$LAKKO_DB_PASS@127.0.0.1:3306/lakko_discovery
 
 sudo chown root:lakkome /etc/lakko/lakko.env
 sudo chmod 640 /etc/lakko/lakko.env

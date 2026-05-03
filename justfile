@@ -121,6 +121,12 @@ dev-ds:
 dev-storage:
     cargo run -p lakko-svc-storage
 
+# Run the discovery service locally. Reads
+# `LAKKO_DISCOVERY_DATABASE_URL` from `.env` (separate database
+# `lakko_discovery` — see `.env.example`).
+dev-discovery:
+    cargo run -p lakko-svc-discovery
+
 # ---- Deployment (systemd + system-nginx + system-MariaDB on Hetzner) -----
 # See infra/README.md for the full migration / deploy workflow.
 
