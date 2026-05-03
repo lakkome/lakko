@@ -221,6 +221,9 @@ fn opaque_registration_start(
 /// second `RegistrationRequest` derived from the BIP39 seed.
 #[derive(Deserialize)]
 pub(crate) struct SignupStartRequest {
+    /// PoW proof obtained via `POST /pow/challenge`. Verified and
+    /// consumed before any expensive work.
+    pub(crate) pow: crate::pow::PowProof,
     /// Base64-encoded raw bytes of `account_id` (16 bytes, UUIDv7).
     pub(crate) account_id: String,
     /// Base64-encoded `RegistrationRequest` from the password flow.
@@ -258,6 +261,8 @@ pub(crate) async fn signup_start(
     State(state): State<crate::AppState>,
     Json(payload): Json<SignupStartRequest>,
 ) -> Result<Json<SignupStartResponse>, (StatusCode, String)> {
+    crate::pow::verify_proof(&state.db, &payload.pow).await?;
+
     let account_id = decode_account_id(&payload.account_id)?;
 
     let password_request = decode_registration_request(&payload.password_request)?;
@@ -295,6 +300,9 @@ pub(crate) async fn signup_start(
 /// started both flows in `/signup/start`.
 #[derive(Deserialize)]
 pub(crate) struct SignupFinishRequest {
+    /// PoW proof — separate from the one consumed by `/signup/start`.
+    /// Both endpoints write to MariaDB; both need anti-spam.
+    pub(crate) pow: crate::pow::PowProof,
     pub(crate) account_id: String,
     /// Base64-encoded `RegistrationUpload` for the password flow.
     pub(crate) password_upload: String,
@@ -328,6 +336,8 @@ pub(crate) async fn signup_finish(
     State(state): State<crate::AppState>,
     Json(payload): Json<SignupFinishRequest>,
 ) -> Result<Json<SignupFinishResponse>, (StatusCode, String)> {
+    crate::pow::verify_proof(&state.db, &payload.pow).await?;
+
     let account_id = decode_account_id(&payload.account_id)?;
 
     let password_upload = decode_registration_upload(&payload.password_upload)?;
@@ -554,6 +564,11 @@ pub(crate) fn spawn_login_state_pruner(pool: MySqlPool) -> tokio::task::JoinHand
 
 #[derive(Deserialize)]
 pub(crate) struct LoginStartRequest {
+    /// PoW proof obtained via `POST /pow/challenge`. Required on both
+    /// `/login/start` and `/recovery/login/start`. The `*/finish`
+    /// endpoints don't need it — they consume an existing session_id
+    /// that the server only issues after a verified PoW.
+    pub(crate) pow: crate::pow::PowProof,
     pub(crate) account_id: String,
     /// Base64-encoded `CredentialRequest` from `ClientLogin::start`.
     pub(crate) request: String,
@@ -596,6 +611,8 @@ async fn login_start_inner(
     payload: LoginStartRequest,
     kind: u8,
 ) -> Result<Json<LoginStartResponse>, (StatusCode, String)> {
+    crate::pow::verify_proof(&state.db, &payload.pow).await?;
+
     let account_id = decode_account_id(&payload.account_id)?;
     let credential_id = build_credential_id(&account_id, kind);
 

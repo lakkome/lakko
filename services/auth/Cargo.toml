@@ -53,6 +53,13 @@ rand = "0.8"
 base64 = "0.22"
 uuid = { version = "1", features = ["v7", "serde"] }
 
+# Equix proof-of-work (LGPL-3.0-only — AGPL-compatible). Memory-hard PoW
+# from the Tor Project, used in onion services. Server only verifies;
+# clients (lakko-ffi-uniffi / lakko-ffi-wasm) will need solve later.
+# `compiler` feature speeds up solve via runtime JIT (used in tests).
+equix = { version = "0.6", features = ["compiler"] }
+sha2 = "0.10"
+
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"

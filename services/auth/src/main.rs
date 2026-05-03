@@ -10,7 +10,10 @@
 //! Phase 1.1d: BIP39 mnemonic recovery — a parallel OPAQUE registration
 //! kind, bundled into signup and exposed for re-authentication via
 //! `/recovery/login/{start,finish}`.
-//! PoW + Privacy Pass anti-spam — sprint 1.1e.
+//! Phase 1.1e: Equix proof-of-work anti-spam (`/pow/challenge`) gating
+//! the four expensive endpoints. Privacy Pass tokens (RFC 9576) are
+//! deferred until we have App Attest / Play Integrity issuers; IP rate
+//! limit with rotating salts lands in Phase 2 hardening.
 //!
 //! Configuration via environment variables (loaded by systemd from
 //! `/etc/lakko/lakko.env`):
@@ -18,22 +21,25 @@
 //! - `LAKKO_BIND` — `host:port` to listen on (default `127.0.0.1:8081`)
 //! - `DATABASE_URL` — sqlx-style MariaDB DSN
 //! - `RUST_LOG` — `tracing-subscriber` env-filter spec
+//! - `LAKKO_POW_EFFORT_BITS` — PoW difficulty (default 8; 0 in tests)
 //!
 //! Endpoints:
 //!
 //! - `GET  /health`                  — liveness (no DB), 200 OK
 //! - `GET  /ready`                   — readiness (pings DB), 200 OK or 503
 //! - `GET  /version`                 — `{"service", "version", "git_sha"}`
-//! - `POST /signup/start`            — OPAQUE registration step 1 (Phase 1.1b/d)
-//! - `POST /signup/finish`           — OPAQUE registration step 2 (Phase 1.1b/d)
-//! - `POST /login/start`             — OPAQUE login step 1, password (Phase 1.1c)
+//! - `POST /pow/challenge`           — issue Equix PoW challenge (Phase 1.1e)
+//! - `POST /signup/start`            — OPAQUE registration step 1 (Phase 1.1b/d/e)
+//! - `POST /signup/finish`           — OPAQUE registration step 2 (Phase 1.1b/d/e)
+//! - `POST /login/start`             — OPAQUE login step 1, password (Phase 1.1c/e)
 //! - `POST /login/finish`            — OPAQUE login step 2, password (Phase 1.1c)
-//! - `POST /recovery/login/start`    — OPAQUE login step 1, BIP39 (Phase 1.1d)
+//! - `POST /recovery/login/start`    — OPAQUE login step 1, BIP39 (Phase 1.1d/e)
 //! - `POST /recovery/login/finish`   — OPAQUE login step 2, BIP39 (Phase 1.1d)
 
 #![forbid(unsafe_code)]
 
 mod opaque;
+mod pow;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -117,9 +123,11 @@ async fn main() -> Result<()> {
         opaque_setup: Arc::new(opaque_setup),
     };
 
-    // Background task: periodically deletes expired login states (TTL 2
-    // minutes) from `opaque_login_states`. Aborted when the service stops.
-    let _pruner = opaque::spawn_login_state_pruner(pool.clone());
+    // Background tasks: periodically delete expired rows from the
+    // `opaque_login_states` and `pow_challenges` tables. Aborted when
+    // the service stops.
+    let _login_pruner = opaque::spawn_login_state_pruner(pool.clone());
+    let _pow_pruner = pow::spawn_pruner(pool.clone());
 
     let app = build_app(state);
 
@@ -145,6 +153,7 @@ fn build_app(state: AppState) -> Router {
         .route("/health", get(health))
         .route("/ready", get(ready))
         .route("/version", get(version))
+        .route("/pow/challenge", post(pow::issue_challenge))
         .route("/signup/start", post(opaque::signup_start))
         .route("/signup/finish", post(opaque::signup_finish))
         .route("/login/start", post(opaque::login_start))

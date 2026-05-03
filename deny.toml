@@ -44,6 +44,11 @@ allow = [
     "BSL-1.0",
     "AGPL-3.0",
     "AGPL-3.0-or-later",
+    # GPL family — compatible with AGPL-3.0-or-later (AGPL inherits GPL terms).
+    # Reaches us via:
+    #   * equix (Tor Project)         — Phase 1.1e PoW anti-spam
+    #   * tor-rtcompat / hashx (deps) — Phase 5 anti-censorship transports
+    "LGPL-3.0-only",
     "OpenSSL",
     # CDLA-Permissive-2.0 — Community Data License Agreement (permissive).
     # Used by webpki-roots (Mozilla CA trust store) — this is data, not
