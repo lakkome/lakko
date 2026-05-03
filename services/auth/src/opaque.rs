@@ -1,27 +1,27 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! OPAQUE-PAKE (RFC draft `opaque`) auth flows для auth service.
+//! OPAQUE-PAKE (RFC draft `opaque`) auth flows for the auth service.
 //!
-//! Сервер никогда не видит plaintext password — клиент и сервер
-//! обмениваются OPRF-blinded сообщениями, в результате на сервере остаётся
-//! "envelope" из которого нельзя выкачать пароль без MITM на момент
-//! регистрации (защищено OPAQUE-математикой).
+//! The server never sees the plaintext password — client and server exchange
+//! OPRF-blinded messages, and the server stores only an "envelope" from
+//! which the password cannot be recovered without an MITM at registration
+//! time (guaranteed by OPAQUE math).
 //!
 //! Phase 1.1b: registration (`/signup/start` + `/signup/finish`) — server
-//! stateless между start и finish.
+//! is stateless between start and finish.
 //!
-//! Phase 1.1c: login (`/login/start` + `/login/finish`) — server **statefull**
-//! между start и finish. `ServerLogin<CS>` сериализуется и хранится в
-//! `opaque_login_states` таблице под session_id (UUIDv7) с TTL 2 минуты.
-//! Background pruner периодически удаляет просроченные записи.
-//! DB-backed (не in-memory) чтобы пережить рестарт сервиса и работать
-//! корректно при horizontal scale-апе.
+//! Phase 1.1c: login (`/login/start` + `/login/finish`) — server is
+//! **stateful** between start and finish. `ServerLogin<CS>` is serialized
+//! and stored in the `opaque_login_states` table keyed by session_id
+//! (UUIDv7), TTL 2 minutes. A background pruner periodically deletes
+//! expired rows. DB-backed (not in-memory) so the state survives service
+//! restarts and works correctly under horizontal scale-out.
 //!
-//! Серверный static-state (OPRF + AKE keypairs) генерится один раз на
-//! первом старте и persisted в `opaque_server_setup` таблице. Per-account
-//! registration material — в `opaque_registrations`, key-ed по
-//! `account_id` (UUIDv7 raw bytes), с FK на `accounts(id)`.
+//! The server-static state (OPRF + AKE keypairs) is generated once on
+//! first start and persisted in the `opaque_server_setup` table.
+//! Per-account registration material lives in `opaque_registrations`,
+//! keyed by `account_id` (UUIDv7 raw bytes), with FK on `accounts(id)`.
 
 use std::time::Duration;
 
@@ -44,11 +44,11 @@ use uuid::Uuid;
 
 /// Lakko OPAQUE-PAKE ciphersuite.
 ///
-/// - **OPRF**: Ristretto255 (constant-time, software, no hardware-deps)
-/// - **KE group**: Ristretto255 (same — TripleDH)
+/// - **OPRF**: Ristretto255 (constant-time, software, no hardware deps)
+/// - **KE group**: Ristretto255 (matches OPRF for TripleDH)
 /// - **KE**: TripleDH (3-message authenticated key exchange)
-/// - **KSF**: Argon2id (key-stretching на client side; защищает password
-///   против brute-force даже если server-state утёк)
+/// - **KSF**: Argon2id (client-side key stretching; protects the password
+///   against brute force even if the server-side state leaks)
 pub(crate) struct LakkoCipherSuite;
 
 impl CipherSuite for LakkoCipherSuite {
@@ -58,20 +58,20 @@ impl CipherSuite for LakkoCipherSuite {
     type Ksf = argon2::Argon2<'static>;
 }
 
-/// Длина account_id в байтах (UUIDv7 raw form).
+/// `account_id` length in bytes (UUIDv7 raw form).
 const ACCOUNT_ID_LEN: usize = 16;
 
-/// Загрузить server-static OPAQUE setup из DB; на первом старте сгенерить
-/// и persisted-сохранить.
+/// Load the server-static OPAQUE setup from the DB; on first start,
+/// generate a fresh one and persist it.
 ///
-/// Singleton-row pattern — таблица `opaque_server_setup` имеет CHECK(id=1)
-/// constraint, физически не может содержать больше одной записи.
+/// Singleton-row pattern — the `opaque_server_setup` table has a
+/// CHECK(id=1) constraint, so it physically cannot hold more than one row.
 ///
 /// # Errors
 ///
-/// Любая DB-ошибка или OPAQUE-deserialization failure пробрасывается
-/// наверх через `anyhow::Error`. На критических путях fail-fast — service
-/// не должен стартовать с broken setup.
+/// Any DB error or OPAQUE deserialization failure propagates via
+/// `anyhow::Error`. This is a fail-fast critical path — the service must
+/// not start with a broken setup.
 pub(crate) async fn load_or_init_server_setup(
     pool: &MySqlPool,
 ) -> Result<ServerSetup<LakkoCipherSuite>> {
@@ -99,7 +99,7 @@ pub(crate) async fn load_or_init_server_setup(
     Ok(setup)
 }
 
-/// Декодировать base64 `account_id` и валидировать длину.
+/// Decode a base64 `account_id` and validate its length.
 fn decode_account_id(b64: &str) -> Result<Vec<u8>, (StatusCode, String)> {
     let bytes = B64.decode(b64).map_err(|e| {
         (
@@ -110,7 +110,7 @@ fn decode_account_id(b64: &str) -> Result<Vec<u8>, (StatusCode, String)> {
     if bytes.len() != ACCOUNT_ID_LEN {
         return Err((
             StatusCode::BAD_REQUEST,
-            format!("account_id must be {ACCOUNT_ID_LEN} bytes after base64-decode"),
+            format!("account_id must be {ACCOUNT_ID_LEN} bytes after base64 decode"),
         ));
     }
     Ok(bytes)
@@ -120,33 +120,34 @@ fn decode_account_id(b64: &str) -> Result<Vec<u8>, (StatusCode, String)> {
 // /signup/start
 // ============================================================================
 
-/// Запрос на начало регистрации. Клиент уже сгенерил `account_id`
-/// (typically UUIDv7) и `RegistrationRequest` через `ClientRegistration::start`.
+/// Registration-start request. The client has already generated an
+/// `account_id` (typically UUIDv7) and a `RegistrationRequest` via
+/// `ClientRegistration::start`.
 #[derive(Deserialize)]
 pub(crate) struct SignupStartRequest {
-    /// Base64-encoded raw bytes of `account_id` (16 bytes UUIDv7).
+    /// Base64-encoded raw bytes of `account_id` (16 bytes, UUIDv7).
     pub(crate) account_id: String,
-    /// Base64-encoded `RegistrationRequest` from `opaque-ke` client.
+    /// Base64-encoded `RegistrationRequest` from the opaque-ke client.
     pub(crate) request: String,
 }
 
-/// Ответ на `/signup/start` — `RegistrationResponse` для передачи в
+/// Response to `/signup/start` — `RegistrationResponse` to be passed to
 /// `ClientRegistration::finish`.
 #[derive(Serialize)]
 pub(crate) struct SignupStartResponse {
-    /// Base64-encoded `RegistrationResponse` от opaque-ke сервера.
+    /// Base64-encoded `RegistrationResponse` from the opaque-ke server.
     pub(crate) response: String,
 }
 
-/// `POST /signup/start` — первый шаг регистрации.
+/// `POST /signup/start` — first step of registration.
 ///
-/// Server берёт client-у `RegistrationRequest`, прогоняет через
-/// `ServerRegistration::start` со server-static setup-ом и
-/// credential_id=account_id, возвращает `RegistrationResponse`.
+/// The server takes the client's `RegistrationRequest`, runs it through
+/// `ServerRegistration::start` with the server-static setup and
+/// credential_id=account_id, and returns the `RegistrationResponse`.
 ///
-/// **Server остаётся stateless** между start и finish — OPAQUE-математика
-/// биндит upload (приходит в /signup/finish) к response через сам
-/// account_id и password, server-state не нужен.
+/// **The server stays stateless** between start and finish — OPAQUE math
+/// binds the upload (which arrives in `/signup/finish`) to the response
+/// via account_id and password, so no server-side state is required.
 pub(crate) async fn signup_start(
     State(state): State<crate::AppState>,
     Json(payload): Json<SignupStartRequest>,
@@ -189,8 +190,8 @@ pub(crate) async fn signup_start(
 // /signup/finish
 // ============================================================================
 
-/// Запрос на финализацию регистрации. Клиент завершил `ClientRegistration`
-/// математикой, получил `RegistrationUpload` — отправляет нам.
+/// Registration-finish request. The client has finished
+/// `ClientRegistration` math and produced a `RegistrationUpload`.
 #[derive(Deserialize)]
 pub(crate) struct SignupFinishRequest {
     pub(crate) account_id: String,
@@ -203,11 +204,11 @@ pub(crate) struct SignupFinishResponse {
     pub(crate) ok: bool,
 }
 
-/// `POST /signup/finish` — финализация регистрации.
+/// `POST /signup/finish` — finalize registration.
 ///
-/// В одной DB-транзакции: создать `accounts(id=account_id)` row + сохранить
-/// сериализованный `ServerRegistration` в `opaque_registrations`. Если
-/// account_id уже зарегистрирован — `409 Conflict`.
+/// In a single DB transaction: create an `accounts(id=account_id)` row and
+/// store the serialized `ServerRegistration` in `opaque_registrations`. If
+/// `account_id` is already registered, returns `409 Conflict`.
 pub(crate) async fn signup_finish(
     State(state): State<crate::AppState>,
     Json(payload): Json<SignupFinishRequest>,
@@ -239,7 +240,7 @@ pub(crate) async fn signup_finish(
         )
     })?;
 
-    // Создать account row. Дубликат по PK = account_id уже занят.
+    // Insert account row. PK collision means account_id is already taken.
     let account_insert = sqlx::query("INSERT INTO accounts (id) VALUES (?)")
         .bind(&account_id_bytes)
         .execute(&mut *tx)
@@ -291,16 +292,17 @@ pub(crate) async fn signup_finish(
 // Login state — DB-backed
 // ============================================================================
 
-/// TTL для in-flight login state. Клиент должен завершить /login/finish в
-/// течение этого окна. Защита от утечек памяти + replay-атак.
-/// `i64` чтобы напрямую пробрасывать в SQL `INTERVAL ? SECOND` без cast.
+/// TTL for in-flight login state. The client must complete `/login/finish`
+/// within this window. Mitigates memory growth and replay attacks.
+/// Typed as `i64` so it can be passed directly to SQL `INTERVAL ? SECOND`
+/// without a cast.
 const LOGIN_STATE_TTL_SECS: i64 = 120;
 
-/// Период между прогонами pruner-а — раз в 30 секунд DELETE просроченные.
+/// Period between pruner runs that delete expired rows.
 const LOGIN_STATE_PRUNE_INTERVAL: Duration = Duration::from_secs(30);
 
-/// Положить ServerLogin state в `opaque_login_states`, вернуть свежий
-/// session_id (UUIDv7).
+/// Insert a `ServerLogin` state into `opaque_login_states`, returning a
+/// fresh session_id (UUIDv7).
 async fn insert_login_state(
     pool: &MySqlPool,
     state: &ServerLogin<LakkoCipherSuite>,
@@ -320,15 +322,17 @@ async fn insert_login_state(
     Ok(session_id)
 }
 
-/// Достать ServerLogin state по session_id и **сразу удалить запись**
-/// (one-shot — повторный /login/finish с тем же session_id даст 401).
-/// Возвращает `None` если session_id неизвестен или просрочен (TTL истёк).
+/// Fetch a `ServerLogin` state by session_id and **delete the row in the
+/// same transaction** (one-shot — replaying the same session_id on a second
+/// `/login/finish` returns 401).
+///
+/// Returns `None` if session_id is unknown or expired (TTL elapsed).
 async fn take_login_state(
     pool: &MySqlPool,
     session_id: Uuid,
 ) -> Result<Option<(ServerLogin<LakkoCipherSuite>, [u8; ACCOUNT_ID_LEN])>, sqlx::Error> {
-    // Атомарно: достать запись (с проверкой TTL) и удалить. В MySQL/MariaDB
-    // нет нативного DELETE ... RETURNING, поэтому делаем в транзакции:
+    // Atomically: fetch the row (with TTL check) and delete it.
+    // MySQL/MariaDB has no `DELETE ... RETURNING`, so we use a transaction:
     //   1. SELECT ... FOR UPDATE
     //   2. DELETE
     let mut tx = pool.begin().await?;
@@ -345,8 +349,9 @@ async fn take_login_state(
     .await?;
 
     let Some((state_bytes, account_id_vec)) = row else {
-        // Нет записи (или просрочена) — но всё равно делаем DELETE на случай
-        // если запись есть, но просрочена: pruner уберёт, мы тоже уберём.
+        // No row, or expired. DELETE anyway in case the row exists and is
+        // simply past its TTL (the pruner will eventually clean it up too,
+        // but doing it here keeps the table tight).
         sqlx::query("DELETE FROM opaque_login_states WHERE session_id = ?")
             .bind(session_id.as_bytes().as_slice())
             .execute(&mut *tx)
@@ -371,13 +376,13 @@ async fn take_login_state(
     Ok(Some((server_login, acct)))
 }
 
-/// Запустить background-task который раз в `LOGIN_STATE_PRUNE_INTERVAL`
-/// удаляет просроченные login-state-ы из DB.
+/// Spawn a background task that runs every `LOGIN_STATE_PRUNE_INTERVAL` and
+/// deletes expired login states from the DB.
 pub(crate) fn spawn_login_state_pruner(pool: MySqlPool) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(LOGIN_STATE_PRUNE_INTERVAL);
-        // Первый tick срабатывает сразу — пропускаем (на старте таблица
-        // пустая или почти пустая).
+        // The first tick fires immediately — skip it (the table is usually
+        // empty or near-empty on startup).
         interval.tick().await;
         loop {
             interval.tick().await;
@@ -409,30 +414,29 @@ pub(crate) fn spawn_login_state_pruner(pool: MySqlPool) -> tokio::task::JoinHand
 #[derive(Deserialize)]
 pub(crate) struct LoginStartRequest {
     pub(crate) account_id: String,
-    /// Base64-encoded `CredentialRequest` от `ClientLogin::start`.
+    /// Base64-encoded `CredentialRequest` from `ClientLogin::start`.
     pub(crate) request: String,
 }
 
 #[derive(Serialize)]
 pub(crate) struct LoginStartResponse {
-    /// Session ID для `/login/finish` (UUIDv7, время + случайные биты).
+    /// Session ID used in `/login/finish` (UUIDv7 — embeds timestamp + random).
     pub(crate) session_id: String,
-    /// Base64-encoded `CredentialResponse` от `ServerLogin::start`.
+    /// Base64-encoded `CredentialResponse` from `ServerLogin::start`.
     pub(crate) response: String,
 }
 
-/// `POST /login/start` — первый шаг login.
+/// `POST /login/start` — first login step.
 ///
-/// Server берёт `CredentialRequest`, ищет `ServerRegistration` по account_id
-/// в `opaque_registrations`, прогоняет через `ServerLogin::start`,
-/// возвращает `CredentialResponse` + session_id. State кэшируется in-memory.
+/// The server takes the client's `CredentialRequest`, looks up the
+/// corresponding `ServerRegistration` in `opaque_registrations`, runs
+/// `ServerLogin::start`, and returns `CredentialResponse` plus a session_id.
+/// The state is stored in DB so any instance can answer `/login/finish`.
 ///
-/// Если account_id неизвестен — возвращаем 401 Unauthorized без раскрытия
-/// "это пользователь существует, но пароль не подошёл" vs "пользователь
-/// не существует". OPAQUE сам по себе одинаково отвечает в обоих случаях
-/// через "fake credentials" path, но мы добавляем early-return до того как
-/// дойдём до реальной криптографии — это нормально, потому что timing-канал
-/// здесь не помогает атакующему (он всё равно не может различить).
+/// If the account is unknown, we still go through the motions
+/// (`ServerLogin::start` with `password_file=None` produces a
+/// cryptographically plausible response — the "fake credentials" path).
+/// This prevents a username-enumeration timing channel.
 pub(crate) async fn login_start(
     State(state): State<crate::AppState>,
     Json(payload): Json<LoginStartRequest>,
@@ -453,10 +457,10 @@ pub(crate) async fn login_start(
             )
         })?;
 
-    // Достать сохранённый ServerRegistration. Если row нет — fake credentials
-    // path: opaque-ke 3.0 ServerLogin::start с password_file = None даёт
-    // криптографически правдоподобный ответ (нельзя отличить от валидного
-    // login для существующего user-а с неправильным паролем).
+    // Fetch stored ServerRegistration. If no row exists (unknown account),
+    // pass `None` to ServerLogin::start — opaque-ke 3.0 takes the
+    // fake-credentials path and produces a plausible response that can't
+    // be distinguished from a real login with the wrong password.
     let stored: Option<ServerRegistration<LakkoCipherSuite>> = sqlx::query_as::<_, (Vec<u8>,)>(
         "SELECT registration_bytes FROM opaque_registrations WHERE account_id = ?",
     )
@@ -492,7 +496,7 @@ pub(crate) async fn login_start(
         )
     })?;
 
-    // Конвертируем Vec<u8> в [u8; 16] для DB (validated to be 16 above).
+    // Convert Vec<u8> to [u8; 16] for DB (length validated above).
     let mut acct = [0u8; ACCOUNT_ID_LEN];
     acct.copy_from_slice(&account_id_bytes);
 
@@ -519,29 +523,29 @@ pub(crate) async fn login_start(
 #[derive(Deserialize)]
 pub(crate) struct LoginFinishRequest {
     pub(crate) session_id: String,
-    /// Base64-encoded `CredentialFinalization` от `ClientLogin::finish`.
+    /// Base64-encoded `CredentialFinalization` from `ClientLogin::finish`.
     pub(crate) finalize: String,
 }
 
 #[derive(Serialize)]
 pub(crate) struct LoginFinishResponse {
     pub(crate) ok: bool,
-    /// Base64-encoded account_id (16 raw UUIDv7 bytes) — клиент пинит для
-    /// последующих запросов. Реальный session token (JWT / DB-backed
-    /// session) — Phase 1.1e+.
+    /// Base64-encoded account_id (16 raw UUIDv7 bytes) — the client pins
+    /// this for follow-up requests. A real session token (JWT or DB-backed
+    /// session) is a separate sub-sprint after 1.1c.
     pub(crate) account_id: String,
 }
 
-/// `POST /login/finish` — финализация login.
+/// `POST /login/finish` — finalize login.
 ///
-/// Берёт `CredentialFinalization` от клиента, прогоняет через
-/// `ServerLogin::finish`. Если математика сходится — пароль верный, server
-/// и client получили matching session_key. Возвращаем account_id; реальный
-/// session token (JWT с подписью / row в `sessions` таблице) — отдельный
-/// под-sprint после anti-spam.
+/// Takes `CredentialFinalization` from the client and runs
+/// `ServerLogin::finish`. If the math checks out, the password is correct,
+/// and both sides have derived the same session_key. We return account_id;
+/// proper session-token machinery (JWT signed by the auth-service key, or
+/// a DB-backed `sessions` table) is a separate sub-sprint.
 ///
-/// Если session_id неизвестен или просрочен (TTL 2 минуты) — 401.
-/// Если CredentialFinalization не валидируется — 401 (неверный пароль).
+/// If session_id is unknown or expired (TTL 2 minutes), returns 401.
+/// If `CredentialFinalization` doesn't validate, returns 401 (wrong password).
 pub(crate) async fn login_finish(
     State(state): State<crate::AppState>,
     Json(payload): Json<LoginFinishRequest>,
@@ -583,11 +587,11 @@ pub(crate) async fn login_finish(
             )
         })?;
 
-    // ServerLogin::finish валидирует AKE proof клиента — если пароль
-    // неверный, finish вернёт error.
+    // ServerLogin::finish validates the client's AKE proof. Wrong password
+    // means finish returns an error.
     let _result = server_login.finish(finalize_message).map_err(|e| {
-        // Логируем только internally — клиенту не палим был ли пользователь
-        // зарегистрирован vs пароль неверный.
+        // Internal-only log — we never leak "user exists but wrong password"
+        // vs "user doesn't exist" to the client.
         tracing::debug!(error = ?e, account_id = %B64.encode(account_id), "login finalization failed");
         (
             StatusCode::UNAUTHORIZED,
@@ -595,9 +599,10 @@ pub(crate) async fn login_finish(
         )
     })?;
 
-    // На этом этапе server и client получили совпадающий session_key
-    // (оба производят одинаковый key из AKE-handshake). Phase 1.1c НЕ
-    // выпускает session token — это deferred. Просто отвечаем что login OK.
+    // At this point the server and client have derived a matching
+    // session_key (both derive identically from the AKE handshake). Phase
+    // 1.1c does NOT issue a session token — that's deferred. We just
+    // confirm login succeeded.
     tracing::info!(account_id = %B64.encode(account_id), "login completed");
 
     Ok(Json(LoginFinishResponse {
@@ -618,8 +623,8 @@ mod tests {
         ClientRegistrationFinishParameters,
     };
 
-    /// End-to-end OPAQUE registration math, без HTTP / DB.
-    /// Гарантирует что наш CipherSuite консистентен между client и server.
+    /// End-to-end OPAQUE registration math, no HTTP / DB. Confirms our
+    /// CipherSuite is consistent between client and server.
     #[test]
     fn registration_roundtrip_in_memory() {
         let mut rng = OsRng;
@@ -654,7 +659,7 @@ mod tests {
         let server_registration =
             ServerRegistration::<LakkoCipherSuite>::finish(client_finish.message);
 
-        // Sanity: serialize + deserialize round-trip the stored registration.
+        // Sanity: serialize/deserialize round-trip the stored registration.
         let bytes = server_registration.serialize();
         let restored = ServerRegistration::<LakkoCipherSuite>::deserialize(&bytes)
             .expect("deserialize stored registration");
@@ -678,8 +683,8 @@ mod tests {
         assert_eq!(err.0, StatusCode::BAD_REQUEST);
     }
 
-    /// Полный flow: register → login с правильным паролем. Должны получить
-    /// matching session_keys на обеих сторонах.
+    /// Full flow: register → login with the correct password. Both sides
+    /// must end up with matching session_keys.
     #[test]
     fn login_with_correct_password_succeeds() {
         let mut rng = OsRng;
@@ -687,7 +692,7 @@ mod tests {
         let credential_id = b"0123456789abcdef";
         let password = b"correct horse battery staple";
 
-        // ----- Регистрация (получаем stored ServerRegistration) -----
+        // ----- Registration (produces a stored ServerRegistration) -----
         let cs = ClientRegistration::<LakkoCipherSuite>::start(&mut rng, password).unwrap();
         let ss =
             ServerRegistration::<LakkoCipherSuite>::start(&server_setup, cs.message, credential_id)
@@ -707,7 +712,7 @@ mod tests {
         // Client: start.
         let cl_start = ClientLogin::<LakkoCipherSuite>::start(&mut rng, password).unwrap();
 
-        // Server: start (с найденным registration).
+        // Server: start (with the stored registration).
         let sl_start = ServerLogin::<LakkoCipherSuite>::start(
             &mut rng,
             &server_setup,
@@ -718,7 +723,7 @@ mod tests {
         )
         .unwrap();
 
-        // Client: finish — выдаёт client session_key.
+        // Client: finish — produces the client session_key.
         let cl_finish = cl_start
             .state
             .finish(
@@ -728,19 +733,19 @@ mod tests {
             )
             .unwrap();
 
-        // Server: finish — выдаёт server session_key.
+        // Server: finish — produces the server session_key.
         let sl_finish = sl_start.state.finish(cl_finish.message).unwrap();
 
-        // Главная инвариант: клиент и сервер получили один и тот же
-        // session_key. Если эта проверка проходит — auth удался.
+        // Core invariant: client and server agree on the session_key. If
+        // this passes, authentication succeeded.
         assert_eq!(
             cl_finish.session_key.as_slice(),
             sl_finish.session_key.as_slice(),
         );
     }
 
-    /// Login с неверным паролем должен фейлится на ClientLogin::finish (или
-    /// на ServerLogin::finish — зависит от того где AKE-proof развалился).
+    /// Login with the wrong password must fail at `ClientLogin::finish`
+    /// (or `ServerLogin::finish`, depending on where the AKE proof breaks).
     #[test]
     fn login_with_wrong_password_fails() {
         let mut rng = OsRng;
@@ -749,7 +754,7 @@ mod tests {
         let real_password = b"correct horse battery staple";
         let wrong_password = b"hunter2";
 
-        // ----- Регистрация на real_password -----
+        // ----- Register with real_password -----
         let cs = ClientRegistration::<LakkoCipherSuite>::start(&mut rng, real_password).unwrap();
         let ss =
             ServerRegistration::<LakkoCipherSuite>::start(&server_setup, cs.message, credential_id)
@@ -765,7 +770,7 @@ mod tests {
             .unwrap();
         let stored = ServerRegistration::<LakkoCipherSuite>::finish(cf.message);
 
-        // ----- Login с wrong_password -----
+        // ----- Login with wrong_password -----
         let cl_start = ClientLogin::<LakkoCipherSuite>::start(&mut rng, wrong_password).unwrap();
         let sl_start = ServerLogin::<LakkoCipherSuite>::start(
             &mut rng,
@@ -777,9 +782,9 @@ mod tests {
         )
         .unwrap();
 
-        // ClientLogin::finish обычно фейлится здесь когда server's
-        // CredentialResponse не совпадает с тем что клиент ожидал — envelope
-        // не расшифровывается без правильного пароля.
+        // ClientLogin::finish typically fails here when the server's
+        // CredentialResponse doesn't match what the client expected — the
+        // envelope can't be decrypted without the right password.
         let result = cl_start.state.finish(
             wrong_password,
             sl_start.message,
@@ -788,10 +793,10 @@ mod tests {
         assert!(result.is_err(), "login with wrong password must fail");
     }
 
-    /// ServerLogin сериализуется + десериализуется в byte-identical виде —
-    /// proxy для того что DB-roundtrip (`insert_login_state` →
-    /// `take_login_state`) не теряет state. Реальный DB-roundtrip
-    /// проверяется в integration test-ах против настоящей MariaDB.
+    /// `ServerLogin` serializes and deserializes byte-identically — proxy
+    /// for the DB roundtrip (`insert_login_state` → `take_login_state`)
+    /// without needing a real MariaDB. Real DB roundtrip is covered by
+    /// integration tests against a live database.
     #[test]
     fn server_login_state_serializes_roundtrip() {
         let mut rng = OsRng;
@@ -799,7 +804,7 @@ mod tests {
         let cred = b"0123456789abcdef";
         let pw = b"x";
 
-        // Mini-registration чтобы получить stored ServerRegistration.
+        // Mini-registration to produce a stored ServerRegistration.
         let cs = ClientRegistration::<LakkoCipherSuite>::start(&mut rng, pw).unwrap();
         let ss = ServerRegistration::<LakkoCipherSuite>::start(&setup, cs.message, cred).unwrap();
         let cf = cs
@@ -813,7 +818,7 @@ mod tests {
             .unwrap();
         let stored = ServerRegistration::<LakkoCipherSuite>::finish(cf.message);
 
-        // Login start, получаем ServerLogin state.
+        // Login start, capturing the ServerLogin state.
         let cl = ClientLogin::<LakkoCipherSuite>::start(&mut rng, pw).unwrap();
         let sl = ServerLogin::<LakkoCipherSuite>::start(
             &mut rng,

@@ -80,6 +80,7 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 ## Правила кодстайла
 
+- **Язык: только английский** в коде, comment-ах, doc-string-ах, commit-message-ах и документации (`docs/`, `README.md`, ADR-ах, migration headers). Русский — только в чате между maintainer и AI-агентом. AI-агенты переписывают свой output на английском когда commit-ят / редактируют файлы.
 - **Каждый файл** имеет `SPDX-License-Identifier: AGPL-3.0-or-later` header. Rust: `// SPDX-…`; Markdown: `<!-- SPDX-… -->`. Без исключений. CI блокирует.
 - **`#![forbid(unsafe_code)]`** на каждой crate, кроме `lakko-ffi-uniffi` и `lakko-ffi-wasm` (там обоснованный unsafe — задокументировать `// SAFETY:` комментарием).
 - **Без `unwrap()` / `expect()`** в production-коде — только в тестах и benchmarks. Используем `?` и `thiserror` для ошибок.

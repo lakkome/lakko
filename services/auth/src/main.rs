@@ -57,23 +57,23 @@ const MIGRATIONS: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
 /// Shared application state.
 ///
-/// Все поля — `Clone`-able (либо primitive, либо `Arc<...>`). axum требует
-/// `Clone + Send + Sync` для extractor `State<AppState>`.
+/// Every field must be `Clone`-able (primitive or `Arc<...>`); axum
+/// requires `Clone + Send + Sync` for the `State<AppState>` extractor.
 #[derive(Clone)]
 pub(crate) struct AppState {
     pub(crate) db: MySqlPool,
-    /// Серверная статическая OPAQUE-настройка — один на весь instance,
-    /// загружена / создана при bootstrap. `Arc` чтобы избежать клонирования
-    /// (внутри есть scalar / point данные, не bigger чем сотни байт, но
-    /// `Arc` всё равно дешевле).
+    /// Server-static OPAQUE setup — one per service instance, loaded (or
+    /// generated on first run) at bootstrap. Wrapped in `Arc` to avoid
+    /// cloning the inner scalar / point material on every request.
     pub(crate) opaque_setup: Arc<ServerSetup<LakkoCipherSuite>>,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Грузим `.env` из workspace root (или ближайшего родителя) — только
-    // в debug-сборке. Production-сборка ничего не грузит: systemd
-    // монтирует `/etc/lakko/lakko.env` через EnvironmentFile= .
+    // Load `.env` from the workspace root (or nearest parent) — debug
+    // builds only. Release builds skip dotenv entirely; production picks
+    // up env vars from the systemd `EnvironmentFile=/etc/lakko/lakko.env`
+    // directive instead.
     #[cfg(debug_assertions)]
     {
         if let Ok(path) = dotenvy::dotenv() {
@@ -111,8 +111,8 @@ async fn main() -> Result<()> {
         opaque_setup: Arc::new(opaque_setup),
     };
 
-    // Background task: периодически чистит просроченные login-state-ы
-    // (TTL 2 минуты) из opaque_login_states. Abort-ится при service stop.
+    // Background task: periodically deletes expired login states (TTL 2
+    // minutes) from `opaque_login_states`. Aborted when the service stops.
     let _pruner = opaque::spawn_login_state_pruner(pool.clone());
 
     let app = build_app(state);
