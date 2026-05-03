@@ -3,99 +3,99 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 SPDX-FileCopyrightText: 2026 Lakko Contributors
 -->
 
-# ADR-0002: Shared Rust core + native UI на каждой платформе
+# ADR-0002: Shared Rust core + native UI on every platform
 
-- **Статус:** Accepted
-- **Дата:** 2026-04-28
-- **Контекст:** Phase 0
+- **Status:** Accepted
+- **Date:** 2026-04-28
+- **Context:** Phase 0
 
-## Контекст
+## Context
 
-Lakko должен работать на iOS, iPadOS, macOS, watchOS, Android, Windows, Linux и Web с одинаковым поведением крипто, протокола, network-стека и хранилища. Параллельно — нативный UX на каждой платформе (CallKit, Live Activities, MediaSession, Compose, SwiftUI), чтобы качество и отзывчивость были на уровне Telegram/Zoom.
+Lakko must run on iOS, iPadOS, macOS, watchOS, Android, Windows, Linux and Web with identical crypto, protocol, network and storage behaviour. At the same time, the UX must be native on every platform (CallKit, Live Activities, MediaSession, Compose, SwiftUI), so that quality and responsiveness match Telegram / Zoom.
 
-Любое расхождение в crypto/MLS-логике между платформами = риск protocol-level баг, ломающий interop или вводящий security regression.
+Any divergence in the crypto / MLS logic between platforms is a risk of a protocol-level bug breaking interop or introducing a security regression.
 
-## Решение
+## Decision
 
 **Shared Rust core (Cargo workspace) + native UI per platform**.
 
 ### Core
 
-Все crates в `crates/`:
+All crates in `crates/`:
 
-- `lakko-core` (umbrella) re-exports публичный API
+- `lakko-core` (umbrella) re-exports the public API
 - `lakko-crypto`, `lakko-mls`, `lakko-proto`, `lakko-transport`, `lakko-storage`, `lakko-sync`, `lakko-calls`, `lakko-contacts`, `lakko-presence`, `lakko-push` — domain crates
-- `lakko-ffi-uniffi` — Swift / Kotlin биндинги через [UniFFI](https://github.com/mozilla/uniffi-rs)
-- `lakko-ffi-wasm` — Web/Tauri биндинги через [wasm-bindgen](https://rustwasm.github.io/wasm-bindgen/)
+- `lakko-ffi-uniffi` — Swift / Kotlin bindings via [UniFFI](https://github.com/mozilla/uniffi-rs)
+- `lakko-ffi-wasm` — Web / Tauri bindings via [wasm-bindgen](https://rustwasm.github.io/wasm-bindgen/)
 
-`#![forbid(unsafe_code)]` на всех domain crates; unsafe разрешён только в `lakko-ffi-*` с обязательным `// SAFETY:` комментарием.
+`#![forbid(unsafe_code)]` on all domain crates; unsafe is allowed only inside `lakko-ffi-*` and must carry an explicit `// SAFETY:` comment.
 
 ### Per-platform UI
 
-| Платформа | UI-стек | Биндинг |
+| Platform | UI stack | Binding |
 |---|---|---|
-| iOS / iPadOS / macOS / watchOS | SwiftUI + платформенные API (CallKit, Live Activities, PushKit, AVFoundation) | XCFramework через UniFFI |
-| Android | Jetpack Compose + платформенные API (MediaSession, ConnectionService, FCM) | AAR через UniFFI |
-| Windows / macOS / Linux desktop | Tauri 2.x + Solid.js | Native Rust integration в host process |
+| iOS / iPadOS / macOS / watchOS | SwiftUI + platform APIs (CallKit, Live Activities, PushKit, AVFoundation) | XCFramework via UniFFI |
+| Android | Jetpack Compose + platform APIs (MediaSession, ConnectionService, FCM) | AAR via UniFFI |
+| Windows / macOS / Linux desktop | Tauri 2.x + Solid.js | Native Rust integration in the host process |
 | Web | Solid.js + WASM | wasm-bindgen |
 
-Solid.js выбран и для desktop, и для web из-за fine-grained reactivity (signals) — точечные обновления UI без перерисовок, что соответствует security-критичному инварианту "no full-screen reloads" (силок для phishing/UI redress).
+Solid.js was picked for both desktop and web because of its fine-grained reactivity (signals) — surgical UI updates without full re-renders, which matches the security-critical "no full-screen reloads" invariant (a well-known phishing / UI-redress vector).
 
-### watchOS — частный случай
+### watchOS — special case
 
-Полное MLS-состояние для многих групп тяжело держать на ватче. `apps/watchos` будет thin presenter, общающийся с phone через paired secure channel; самостоятельно MLS для групп >50 не запускает. Подробности — отдельный ADR в Phase 5.
+Carrying the full MLS state for many groups is too heavy for a watch. `apps/watchos` will be a thin presenter talking to the phone via a paired secure channel; it will not run MLS itself for groups > 50. Details — separate ADR in Phase 5.
 
-## Альтернативы
+## Alternatives
 
 ### Flutter + Rust core
 
-Flutter для всех клиентов + Rust core. Плюс: единый UI-код для iOS/Android/desktop. Минусы: компромиссный нативный UX, watchOS вообще не поддерживается, проблемы с Live Activities / CallKit / MediaSession (всё через platform channels).
+Flutter for all clients + Rust core. Pro: a single UI codebase for iOS / Android / desktop. Cons: compromised native UX, watchOS not supported at all, Live Activities / CallKit / MediaSession all mediated through platform channels.
 
-**Отброшено:** требование "качество UX на уровне Telegram" с нативной интеграцией в системные сервисы перевешивает экономию на UI-коде.
+**Rejected:** the requirement of "Telegram-grade UX" with deep native integration with system services outweighs the savings on UI code.
 
-### React Native + Electron + Web (общий TypeScript)
+### React Native + Electron + Web (shared TypeScript)
 
-Максимум переиспользования TS-кода. Минусы: JS-крипто на клиенте, Electron-overhead, watchOS отдельной кодобазой, security-аудит сложнее (V8 + Node attack surface).
+Maximum reuse of TS code. Cons: JS crypto on the client, Electron overhead, watchOS as a separate codebase, harder security audit (V8 + Node attack surface).
 
-**Отброшено:** для security-проекта неприемлемо иметь крипто на JS, и Electron-десктоп проигрывает по памяти и нативности.
+**Rejected:** for a security project, JS crypto is unacceptable, and Electron-based desktop loses on memory footprint and nativeness.
 
-### Полностью native (Swift / Kotlin / C++)
+### Fully native (Swift / Kotlin / C++)
 
-Лучший UX, но дублирование крипто/протокол-логики на 3+ языках — недопустимый риск protocol-level расхождений и удвоение audit-овой поверхности.
+Best UX, but duplicating the crypto / protocol logic in 3+ languages is an unacceptable risk of protocol-level divergence and doubles the audit surface.
 
-**Отброшено:** unified core критичен для security; UX обеспечивается тем, что **UI** native, а не всё.
+**Rejected:** a unified core is critical for security; UX is achieved by keeping **the UI** native, not everything.
 
-## Последствия
+## Consequences
 
-### Положительные
+### Positive
 
-- Единая крипто-логика → одна точка аудита и формальной верификации
-- Невозможны inter-platform protocol-divergence баги (single source of truth — `lakko-mls`)
-- Нативный UX на каждой платформе через свой native UI-стек
-- Tauri вместо Electron → 30× меньшие бинарники, нет лишнего runtime
-- AI-агентный workflow (см. CLAUDE.md) хорошо ложится на Cargo workspace
+- A single crypto codebase → one audit point and one formal-verification target
+- No inter-platform protocol-divergence bugs (single source of truth — `lakko-mls`)
+- Native UX on every platform via a per-platform native UI stack
+- Tauri instead of Electron → 30× smaller binaries, no extra runtime
+- The AI-agent workflow (see CLAUDE.md) maps cleanly onto a Cargo workspace
 
-### Отрицательные
+### Negative
 
-- FFI-границы (UniFFI, wasm-bindgen) — поверхность ошибок, которые сложно поймать в тестах
-- Каждое breaking-изменение публичного API core → перегенерация биндингов и обновление всех клиентов
-- Команда нуждается в Rust + Swift/Kotlin/TS экспертизе одновременно
-- Билд-pipeline сложнее: XCFramework + AAR + WASM + Tauri target — 4 разных артефакта на каждый релиз core
+- FFI boundaries (UniFFI, wasm-bindgen) — a surface for bugs that are hard to catch in tests
+- Every breaking change to the core public API → regenerate bindings and update every client
+- The team needs Rust + Swift / Kotlin / TS expertise simultaneously
+- The build pipeline is more complex: XCFramework + AAR + WASM + Tauri target — 4 different artefacts per core release
 
-### Нейтральные
+### Neutral
 
-- watchOS как thin presenter — компромисс по функциональности, нормальный для smart-watch формата
+- watchOS as a thin presenter — a functionality compromise, normal for the smart-watch form factor
 
-## Открытые вопросы
+## Open questions
 
-- Как версионировать FFI surface — semver или содержательный contract test? (Phase 1 решит)
-- Десктоп: Tauri 2.x достаточно зрелый? Если упрёмся — fallback на native Win32/Cocoa/GTK + Rust biz-logic. Решим к концу Phase 2
+- How to version the FFI surface — semver, or a meaningful contract test? (Phase 1 will decide)
+- Desktop: is Tauri 2.x mature enough? If we hit a wall, fallback to native Win32 / Cocoa / GTK + Rust business logic. Decide by the end of Phase 2
 
-## Ссылки
+## References
 
-- [UniFFI — Rust → Swift/Kotlin/Python](https://github.com/mozilla/uniffi-rs)
+- [UniFFI — Rust → Swift / Kotlin / Python](https://github.com/mozilla/uniffi-rs)
 - [wasm-bindgen](https://rustwasm.github.io/wasm-bindgen/)
 - [Tauri 2.0](https://tauri.app/)
 - [Solid.js — fine-grained reactivity](https://www.solidjs.com/)
 - ADR-0001 — MLS as crypto core
-- ADR-0006 — лицензирование (AGPL влияет на FFI-границы)
+- ADR-0006 — licensing (AGPL affects FFI boundaries)

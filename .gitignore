@@ -23,8 +23,8 @@ target
 infra/secrets/
 infra/etc-lakko/lakko.env
 
-# Local dev env — пароли / DSN / прочее. Шаблон в .env.example.
-# Production использует systemd EnvironmentFile= /etc/lakko/lakko.env.
+# Local dev env — passwords / DSN / etc. Template lives in .env.example.
+# Production uses systemd EnvironmentFile=/etc/lakko/lakko.env.
 .env
 **/.env
 
@@ -33,6 +33,6 @@ infra/etc-lakko/lakko.env
 
 # RustRover / IntelliJ
 .idea/
-# Shared Run Configurations: оставляем локально, не коммитим.
-# Дефолтный шаблон env-vars живёт в .env.example + CLAUDE.md "Local dev".
+# Shared Run Configurations: kept local, not committed.
+# The default env-vars template lives in .env.example + CLAUDE.md "Local dev".
 .run/

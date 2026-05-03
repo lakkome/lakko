@@ -3,53 +3,53 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 SPDX-FileCopyrightText: 2026 Lakko Contributors
 -->
 
-# ADR-0005: Capability-based contact invitations + 6 сценариев + pseudonym lifecycle
+# ADR-0005: Capability-based contact invitations + 6 scenarios + pseudonym lifecycle
 
-- **Статус:** Accepted
-- **Дата:** 2026-04-28
-- **Контекст:** Phase 0
+- **Status:** Accepted
+- **Date:** 2026-04-28
+- **Context:** Phase 0
 
-## Контекст
+## Context
 
-Discovery в Lakko работает только по `@username` — phone/email никогда не сохраняются (см. ADR-0001). Социальный граф **не материализуется** на сервере: server маршрутизирует ContactRequest по encrypted envelope, не видя identity отправителя/получателя.
+Discovery in Lakko works only by `@username` — phone / email are never stored (see ADR-0001). The social graph is **not materialised** on the server: the server routes ContactRequests by encrypted envelope without seeing the identity of either sender or recipient.
 
-Нужна полная схема приглашений, покрывающая 6 сценариев:
+We need a complete invitation scheme that covers six scenarios:
 
-| # | Сценарий | Кто инициирует |
+| # | Scenario | Initiator |
 |---|---|---|
-| A | Знаю `@username` — хочу добавить | Initiator |
-| B | Дать кому-то "карточку" себя | Owner |
-| C | Пригласить **нового** пользователя в Lakko | Owner |
-| D | Личная встреча (in-person scan) | Both |
-| E | Пригласить в **группу** | Group admin |
-| F | Подписаться на **канал** | Subscriber |
+| A | I know `@username` — want to add | Initiator |
+| B | Hand someone a "card" of myself | Owner |
+| C | Invite a **new** user into Lakko | Owner |
+| D | In-person meeting (in-person scan) | Both |
+| E | Invite into a **group** | Group admin |
+| F | Subscribe to a **channel** | Subscriber |
 
-При этом анти-stalking, анти-spam и privacy инварианты должны соблюдаться.
+While preserving the anti-stalking, anti-spam and privacy invariants.
 
-## Решение
+## Decision
 
-Полная спецификация — в `~/.claude/plans/1-nested-wreath.md` §13 (раздел "Contact Invitations"). Здесь — ключевые архитектурные решения.
+The full specification lives in `~/.claude/plans/1-nested-wreath.md` §13 ("Contact Invitations"). This ADR captures the key architectural decisions.
 
-### Базовый flow ContactRequest (сценарий A)
+### Base ContactRequest flow (scenario A)
 
 ```
 Alice → OPRF(@bob) → discovery service → KeyPackageBundle(Bob) + KT proof
-Alice строит ContactRequest {
+Alice builds ContactRequest {
     from_pubkey, from_pseudonym (fresh per recipient),
     HPKE_seal(B_pubkey, intro_message),
     PoW (Equix), Privacy Pass token,
     signature
 }
-→ DS на Bob's stranger-inbox mailbox.
+→ DS into Bob's stranger-inbox mailbox.
 Bob: pending UI → Accept | Decline | Block | Ignore
-On Accept: обе стороны открывают MLS group of 2.
+On Accept: both sides open an MLS group of 2.
 ```
 
-Сервер видит только `(pseudonym_A → pseudonym_B, opaque_envelope, PoW_token)`.
+The server only sees `(pseudonym_A → pseudonym_B, opaque_envelope, PoW_token)`.
 
-### Capability-based invite links (сценарии B/C)
+### Capability-based invite links (scenarios B/C)
 
-URL: `https://lakko.app/i/<base64url-pointer>` — в URL только pointer + MAC, **сама** capability — encrypted blob в SeaweedFS:
+URL: `https://lakko.app/i/<base64url-pointer>` — only a pointer + MAC are in the URL; the **capability itself** is an encrypted blob in SeaweedFS:
 
 ```rust
 struct InviteCapability {
@@ -65,15 +65,15 @@ struct InviteCapability {
 }
 ```
 
-Преимущества: revocable (delete blob), скриншот URL не выдаёт identity, server считает downloads без знания content.
+Benefits: revocable (delete the blob), a screenshot of the URL does not leak identity, the server counts downloads without knowing the content.
 
-UI-варианты ссылки:
-- "Одноразовая, 7 дней" — default
-- "До 10 использований, 7 дней" — для команд
-- "До 30 дней" — для bio в соцсетях
-- "Бессрочная" — заблокирована до verified-аккаунта (anti-stalking)
+UI variants of a link:
+- "Single-use, 7 days" — default
+- "Up to 10 uses, 7 days" — for teams
+- "Up to 30 days" — for a social-media bio
+- "Permanent" — locked behind a verified account (anti-stalking)
 
-### QR / safety numbers (сценарий D)
+### QR / safety numbers (scenario D)
 
 ```rust
 struct QrPayload {
@@ -84,100 +84,100 @@ struct QrPayload {
 }
 ```
 
-Двойное назначение: add new contact OOB-secure + verify existing contact (Signal-style safety numbers).
+Dual purpose: add a new contact OOB-secure + verify an existing contact (Signal-style safety numbers).
 
-### Group invite (сценарий E)
+### Group invite (scenario E)
 
 ```rust
 struct GroupInvite {
     group_id_pseudonym,
-    group_name_ciphertext,            // HPKE_seal с invite-key
-    welcome_blob_id,                   // ephemeral KeyPackage от admin
+    group_name_ciphertext,            // HPKE_seal with invite-key
+    welcome_blob_id,                   // ephemeral KeyPackage from the admin
     inviter_signature,
     expiry, max_uses,
 }
 ```
 
-При accept: joiner скачивает Welcome → MLS Add proposal → joiner становится leaf.
+On accept: the joiner downloads the Welcome → MLS Add proposal → the joiner becomes a leaf.
 
 ### Pseudonym lifecycle
 
-| Тип | Lifecycle | Назначение |
+| Type | Lifecycle | Purpose |
 |---|---|---|
-| Identity pubkey | Постоянный | Основной ключ, в KT log; ротация — supersession proof |
-| Per-relationship pseudonym | На время существования контакта | Server маршрутизирует им; ротируется по запросу |
-| Stranger-inbox pseudonym | Долгоживущий, опционально-ротируемый | Приём cold ContactRequest; ротация рвёт недополученные приглашения |
-| Per-invite-link pseudonym | Жизнь capability | Привязан к blob_id |
+| Identity pubkey | Permanent | Primary key, recorded in KT log; rotation via supersession proof |
+| Per-relationship pseudonym | Lifetime of the contact | Used by the server for routing; rotates on demand |
+| Stranger-inbox pseudonym | Long-lived, optionally rotatable | Receives cold ContactRequests; rotation tears down undelivered invites |
+| Per-invite-link pseudonym | Lifetime of the capability | Tied to blob_id |
 
-### Зафиксированные решения по развилкам
+### Settled trade-offs
 
-| Вопрос | Решение |
+| Question | Decision |
 |---|---|
-| Cancel pending ContactRequest | Можно до accept (клиентская "delete-for-everyone" на pending) |
-| Default discoverability scope для новичков | **InviteOnly** — secure-by-default |
-| Глобальный "online" / "last seen" | **Нет.** Presence только в MLS-группах через blinded tokens |
-| Auto-import адресной книги | **Запрещено.** Адресная книга = PII; никогда не загружается |
-| Контактные подгруппы ("коллеги", "семья") | DeviceGroup-encrypted list (server blind) |
-| Identity key compromise / rotation | KT log supersession proof + 30-day bridge для старых invites |
+| Cancel pending ContactRequest | Allowed before accept (client "delete-for-everyone" on pending) |
+| Default discoverability scope for new users | **InviteOnly** — secure by default |
+| Global "online" / "last seen" | **None.** Presence only inside MLS groups via blinded tokens |
+| Auto-import of the device address book | **Forbidden.** The address book = PII; never uploaded |
+| Contact subgroups ("colleagues", "family") | DeviceGroup-encrypted list (server-blind) |
+| Identity key compromise / rotation | KT log supersession proof + 30-day bridge for old invites |
 
 ### Anti-abuse pipeline
 
-- Cold-contact rate per sender: ≤5/день для нового, ≤50/день для прогретого; PoW difficulty экспоненциально растёт
-- Privacy Pass token (App Attest / Play Integrity) на каждый ContactRequest и каждую генерацию InviteCapability
-- Receiver-side priority binning: незнакомцы — в low-priority inbox без push
-- Per-recipient silent mute (sender не знает о блоке)
-- Mass-complaint signal: N жалоб → server поднимает PoW для исходящих от pseudonym
+- Cold-contact rate per sender: ≤5/day for new accounts, ≤50/day for warmed-up; PoW difficulty grows exponentially
+- Privacy Pass token (App Attest / Play Integrity) on every ContactRequest and every InviteCapability generation
+- Receiver-side priority binning: strangers go into a low-priority inbox without push
+- Per-recipient silent mute (the sender is not aware of the block)
+- Mass-complaint signal: N complaints → the server raises PoW for outgoing requests from that pseudonym
 
-## Альтернативы
+## Alternatives
 
-### Phone-number-based discovery (как Signal/WhatsApp)
+### Phone-number-based discovery (à la Signal / WhatsApp)
 
-Phone — strong identity, network effect через автоматическое определение контактов. Минусы: PII на сервере, легко связать с личностью, social graph reconstruction через intersection attacks, требует SIM-карту (problem в RU/IR/CN).
+Phone is a strong identity and gives a network effect via automatic contact resolution. Cons: PII on the server, easy linkage to a real identity, social-graph reconstruction via intersection attacks, requires a SIM card (a problem in RU / IR / CN).
 
-**Отброшено:** прямое нарушение security invariants Lakko (no PII).
+**Rejected:** direct violation of Lakko's security invariants (no PII).
 
-### Username + phone-hash для recovery
+### Username + phone-hash for recovery
 
-Гибрид: phone-hash хранится для recovery. Минусы: hash легко brute-force-ится (10^9 номеров), социальный граф восстанавливается через intersection.
+Hybrid: a phone hash is stored for recovery. Cons: hashes are easy to brute force (10^9 numbers), the social graph is reconstructible via intersection.
 
-**Отброшено:** hash phone-номеров — не security primitive, security theatre.
+**Rejected:** hashing phone numbers is not a security primitive — it is security theatre.
 
-### Public key как identity (DID-style)
+### Public key as identity (DID-style)
 
-Identity = pubkey, никаких usernames. Плюсы: zero PII. Минусы: UX для поиска ужасный (32-байтный hash вместо @alice).
+Identity = pubkey, no usernames. Pros: zero PII. Cons: discovery UX is terrible (a 32-byte hash instead of @alice).
 
-**Отброшено:** username-as-handle важен для UX; делаем username table с OPRF lookup (ADR-0001 + текущий ADR).
+**Rejected:** a username handle matters for UX; we keep a username table with OPRF lookup (ADR-0001 + this ADR).
 
-## Последствия
+## Consequences
 
-### Положительные
+### Positive
 
-- Server видит **только** pseudonym → pseudonym маршрутизацию; социальный граф не реконструируется даже при полной компрометации
-- 6 сценариев приглашений покрывают все realistic UX-кейсы
-- Capability-based links revocable и rate-controlled
-- Anti-abuse multi-layered (PoW + Privacy Pass + complaint signal)
+- The server only sees pseudonym → pseudonym routing; the social graph cannot be reconstructed even on full compromise
+- Six invitation scenarios cover every realistic UX case
+- Capability-based links are revocable and rate-limited
+- Anti-abuse is multi-layered (PoW + Privacy Pass + complaint signal)
 
-### Отрицательные
+### Negative
 
-- Cold-contact UX медленнее чем "phone autofind" — пользователь должен знать `@username`
-- Pseudonym ротация stranger-inbox рвёт недополученные приглашения — fair trade-off
-- "InviteOnly by default" может выглядеть как "никто не может меня найти" — нужен onboarding hint
+- Cold-contact UX is slower than "phone autofind" — the user has to know the `@username`
+- Stranger-inbox pseudonym rotation tears down undelivered invites — fair trade-off
+- "InviteOnly by default" can feel like "no one can find me" — needs an onboarding hint
 
-### Нейтральные
+### Neutral
 
-- KT log inclusion proofs на каждый KeyPackage fetch — мелкие сетевые накладные расходы (~150-300 байт/lookup)
+- KT log inclusion proofs on every KeyPackage fetch — modest network overhead (~150–300 bytes per lookup)
 
-## Открытые вопросы
+## Open questions
 
-- Как реализовать **mutual-contact attestation chain** для `ContactsOfContacts` scope без leak-а transitive contacts на сервере? Cryptographic proof + client-side verification — детали в Phase 2
-- Cross-device sync списка отправленных ContactRequest-ов через DeviceGroup — Phase 2
-- Спам-detection при mass-complaint signal без знания identity — risk: targeted brigading. Митигировать proof-of-personhood (зрелые webauthn-аккаунты)?
+- How to implement a **mutual-contact attestation chain** for the `ContactsOfContacts` scope without leaking transitive contacts to the server? Cryptographic proof + client-side verification — details in Phase 2
+- Cross-device sync of the list of sent ContactRequests via DeviceGroup — Phase 2
+- Spam detection on the mass-complaint signal without identity knowledge — risk: targeted brigading. Mitigate via proof-of-personhood (mature WebAuthn accounts)?
 
-## Ссылки
+## References
 
 - [RFC 9497 — Oblivious Pseudorandom Functions (OPRF)](https://www.rfc-editor.org/rfc/rfc9497)
 - [RFC 9576 — Privacy Pass](https://www.rfc-editor.org/rfc/rfc9576)
 - [draft-ietf-keytrans-architecture](https://datatracker.ietf.org/doc/draft-ietf-keytrans-architecture/)
 - [Equix proof-of-work (Tor onion services)](https://gitlab.torproject.org/tpo/core/tor/-/issues/40729)
 - ADR-0001 — MLS / OPRF discovery
-- Полная спецификация — `~/.claude/plans/1-nested-wreath.md` §13
+- Full specification — `~/.claude/plans/1-nested-wreath.md` §13

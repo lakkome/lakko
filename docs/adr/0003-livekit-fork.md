@@ -3,111 +3,111 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 SPDX-FileCopyrightText: 2026 Lakko Contributors
 -->
 
-# ADR-0003: Форк LiveKit как SFU; SFrame для медиа
+# ADR-0003: LiveKit fork as the SFU; SFrame for media
 
-- **Статус:** Accepted
-- **Дата:** 2026-04-28
-- **Контекст:** Phase 0 (решение фиксируется заранее, реализация — Phase 3)
+- **Status:** Accepted
+- **Date:** 2026-04-28
+- **Context:** Phase 0 (decision pinned in advance, implementation lands in Phase 3)
 
-## Контекст
+## Context
 
-Lakko должен поддерживать звонки сравнимого с Telegram/Zoom/Yandex Telemost качества: P2P 1×1, групповые (до десятков участников), broadcasts (миллионы зрителей), audio rooms (несколько speakers + аудитория). Все звонки — E2EE-защищены: сервер видит только зашифрованные frame-ы.
+Lakko must support calls of a quality comparable to Telegram / Zoom / Yandex Telemost: P2P 1×1, group (up to dozens of participants), broadcasts (millions of viewers), audio rooms (a few speakers + audience). Every call is E2EE-protected: the server only sees encrypted frames.
 
-Нужен production-grade Selective Forwarding Unit с simulcast/SVC и интеграцией E2EE-keys из MLS.
+We need a production-grade Selective Forwarding Unit with simulcast / SVC and integration of E2EE keys derived from MLS.
 
-## Решение
+## Decision
 
-### SFU — форк [LiveKit](https://github.com/livekit/livekit) (Go, Apache 2.0 → форк под AGPLv3)
+### SFU — fork of [LiveKit](https://github.com/livekit/livekit) (Go, Apache 2.0 → forked under AGPLv3)
 
-Используется как база; форкаем под AGPLv3 в `services/sfu/`. Модифицируем для:
+Used as a base; we fork it under AGPLv3 into `services/sfu/`. We modify it to:
 
-- Привязки SFrame ключей к MLS exporter (вместо out-of-band ключей LiveKit)
-- Нашего auth/handshake протокола (через QUIC или WebTransport)
-- Cascade-топологии для broadcasts (Phase 4)
+- Bind SFrame keys to an MLS exporter (instead of LiveKit's out-of-band keys)
+- Use our auth / handshake protocol (over QUIC or WebTransport)
+- Support a cascade topology for broadcasts (Phase 4)
 
-### Шифрование медиа — SFrame (RFC 9605)
+### Media encryption — SFrame (RFC 9605)
 
-Per-frame AES-128-GCM с nonce из counter. Hardware AES-acceleration (AES-NI / ARMv8 Crypto Extensions) — overhead <0.001% CPU на 60fps@1080p.
+Per-frame AES-128-GCM with a counter-derived nonce. Hardware AES acceleration (AES-NI / ARMv8 Crypto Extensions) — overhead < 0.001% CPU at 60fps@1080p.
 
-Ключи получаются один раз в начале звонка через `mls_exporter("lakko/call/v1", call_id, 32)` → HKDF → per-participant SFrame keys по leaf index. Ротация при Add/Remove с 1-секундным overlap (старый ключ дослушивается).
+Keys are derived once at the start of a call via `mls_exporter("lakko/call/v1", call_id, 32)` → HKDF → per-participant SFrame keys keyed by leaf index. Rotation on Add/Remove with a 1-second overlap (the old key remains accepted briefly).
 
-### Топологии звонков
+### Call topologies
 
-| Тип | Топология | MLS group | Media keys |
+| Type | Topology | MLS group | Media keys |
 |---|---|---|---|
-| P2P 1×1 | Pure WebRTC + ICE/STUN/TURN | Существующая 1×1 group | exporter из неё |
-| Групповой по линку | LiveKit SFU | Ad-hoc group, join по embedded one-time KeyPackage | exporter call group |
-| Групповой в чате | LiveKit SFU | Reuse существующей chat MLS group | `exporter("lakko/call/{id}", idx, 32)` |
-| Broadcast | Origin SFU + cascade на edge SFU | PublisherGroup (presenter) + sender-key для аудитории | content key, ротация на membership change |
+| P2P 1×1 | Pure WebRTC + ICE/STUN/TURN | Existing 1×1 group | exporter from it |
+| Group via link | LiveKit SFU | Ad-hoc group, join via embedded one-time KeyPackage | exporter call group |
+| Group inside chat | LiveKit SFU | Reuse the existing chat MLS group | `exporter("lakko/call/{id}", idx, 32)` |
+| Broadcast | Origin SFU + cascade onto edge SFUs | PublisherGroup (presenter) + sender-key for audience | content key, rotation on membership change |
 | Audio room | LiveKit SFU | `Speakers` MLS subgroup + `Audience` (sender-key) | promotion = MLS Add = key rotation |
 
-### Кодеки
+### Codecs
 
 - **Audio:** Opus 32-64 kbps + DTX + FEC
 - **Video:** AV1-SVC (modern), VP9-SVC (fallback), H.264 (Apple legacy)
 
-### Бюджет качества
+### Quality budget
 
 - Audio p50 < 80 ms regional / < 200 ms cross-continental, p95 < 250 ms
-- Video 30 fps @ 720p baseline, 60 fps @ 1080p при ширине канала
+- Video 30 fps @ 720p baseline, 60 fps @ 1080p when bandwidth allows
 - Adaptive jitter buffer 20-120 ms (NetEQ-style)
-- SVC layer drop на SFU по BWE-репортам receiver-а
+- SVC layer drop at the SFU based on receiver BWE reports
 
-## Альтернативы
+## Alternatives
 
 ### mediasoup
 
-Зрелый Node.js SFU. Отлично работает, но Node.js-rooted ecosystem не вяжется с Rust/Go стеком; интеграция в наш auth/control plane потребует постоянных мостов.
+A mature Node.js SFU. Works well, but a Node.js-rooted ecosystem does not match our Rust / Go stack; integrating it into our auth / control plane would require permanent bridges.
 
-**Отброшено:** в долгосрочной перспективе heterogeneity backend-стека дороже форка одного компонента.
+**Rejected:** in the long run, a heterogeneous backend stack costs more than forking a single component.
 
 ### Janus / Jitsi Videobridge
 
-Зрелые SFU. Минусы: C (Janus) или Java (Jitsi); архитектура заточена под room-based модель Jitsi Meet, наши broadcast-topologies требуют значительных изменений.
+Mature SFUs. Cons: C (Janus) or Java (Jitsi); the architecture is built around Jitsi Meet's room model, our broadcast topologies would require substantial changes.
 
-**Отброшено:** меньше совпадает с нашей моделью звонков чем LiveKit.
+**Rejected:** less aligned with our call model than LiveKit.
 
-### Кастомный SFU с нуля на Rust
+### A custom SFU written from scratch in Rust
 
-Свобода дизайна. Минусы: 2 человеко-года до production-grade, простая E2EE через SFrame не оправдывает написание собственного SFU.
+Design freedom. Cons: ~2 person-years to production grade; simple E2EE via SFrame does not justify writing our own SFU.
 
-**Отброшено:** не наш core differentiator. Форк LiveKit с заменой E2EE-плумбинга на MLS — несколько человеко-месяцев.
+**Rejected:** not our core differentiator. Forking LiveKit and replacing the E2EE plumbing with MLS takes several person-months.
 
-### Использовать LiveKit как библиотеку, без форка
+### Use LiveKit as a library, without forking
 
-LiveKit Cloud SaaS или self-host upstream. Минусы: их license (Apache 2.0) не даёт защиты от proprietary-форка; их E2EE-плумбинг не привязан к MLS.
+LiveKit Cloud SaaS or self-host upstream. Cons: their licence (Apache 2.0) does not protect against a proprietary fork; their E2EE plumbing is not tied to MLS.
 
-**Отброшено:** AGPLv3-форк необходим для consistency лицензии (см. ADR-0006); MLS-интеграция в любом случае требует наших изменений.
+**Rejected:** an AGPLv3 fork is needed for licence consistency (see ADR-0006); MLS integration requires our changes anyway.
 
-## Последствия
+## Consequences
 
-### Положительные
+### Positive
 
-- Production-grade SFU с simulcast/SVC, ICE/TURN, network resilience — за счёт upstream LiveKit code
-- E2EE через стандарт SFrame (RFC 9605) — interop возможен с другими SFrame-совместимыми клиентами
-- MLS exporter → SFrame keys — единая identity и group management между chat и call
-- Hardware AES → нулевая CPU-нагрузка на крипто во время звонка
-- Cascade-friendly архитектура для broadcast scaling
+- Production-grade SFU with simulcast / SVC, ICE / TURN, network resilience — courtesy of upstream LiveKit code
+- E2EE via the SFrame standard (RFC 9605) — interop is possible with other SFrame-compatible clients
+- MLS exporter → SFrame keys — unified identity and group management between chat and call
+- Hardware AES → near-zero CPU cost for crypto during a call
+- Cascade-friendly architecture for broadcast scaling
 
-### Отрицательные
+### Negative
 
-- Форк требует поддержки upstream-changes (cherry-pick fixes) или дивергенции
-- Go в backend-стеке (LiveKit) добавляется к Rust → две toolchain в CI
-- Наша AGPL-версия SFU не сможет потреблять proprietary LiveKit Cloud features
+- A fork has to track upstream changes (cherry-pick fixes) or accept divergence
+- Go is added to the backend stack (LiveKit) alongside Rust → two toolchains in CI
+- Our AGPL fork of the SFU cannot consume proprietary LiveKit Cloud features
 
-### Нейтральные
+### Neutral
 
-- Дополнительная задержка от SFU forwarding (5-15 ms) приемлема для всех типов звонков
+- Extra latency from SFU forwarding (5-15 ms) is acceptable for every call type
 
-## Открытые вопросы
+## Open questions
 
-- Упростимся ли мы (Phase 3+) до single-codec AV1 везде, или fallback к H.264 для Apple останется навсегда?
-- Recording звонков — как это должно работать с E2EE? Открытый вопрос на Phase 4
-- TURN-as-a-Service vs self-hosted coturn — Phase 3 решит
+- Will we (Phase 3+) simplify to single-codec AV1 everywhere, or will the H.264 fallback for Apple stay forever?
+- Call recording — how should it work with E2EE? Open question for Phase 4
+- TURN-as-a-Service vs self-hosted coturn — Phase 3 will decide
 
-## Ссылки
+## References
 
 - [LiveKit](https://github.com/livekit/livekit)
 - [RFC 9605 — Secure Frame (SFrame)](https://www.rfc-editor.org/rfc/rfc9605)
-- ADR-0001 — MLS exporter для media keys
-- ADR-0006 — лицензирование (объясняет необходимость форка)
+- ADR-0001 — MLS exporter for media keys
+- ADR-0006 — licensing (explains why a fork is required)

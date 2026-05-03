@@ -3,36 +3,36 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 SPDX-FileCopyrightText: 2026 Lakko Contributors
 -->
 
-# ADR-000X: Заголовок решения
+# ADR-000X: Decision title
 
-- **Статус:** Proposed | Accepted | Deprecated | Superseded by ADR-000Y
-- **Дата:** YYYY-MM-DD
-- **Контекст:** Phase N
+- **Status:** Proposed | Accepted | Deprecated | Superseded by ADR-000Y
+- **Date:** YYYY-MM-DD
+- **Context:** Phase N
 
-## Контекст
+## Context
 
-Какую проблему решаем. Какие силы действуют (требования, ограничения, опасения). Почему вообще нужно решать сейчас.
+What problem are we solving? Which forces are at play (requirements, constraints, concerns)? Why does this need to be decided now?
 
-## Решение
+## Decision
 
-Что выбрано — одной фразой. Затем — конкретика реализации.
+What was chosen — in a single sentence. Then the implementation specifics.
 
-## Альтернативы
+## Alternatives
 
-Что рассматривали и почему отбросили. Обязательно — хотя бы 2 альтернативы; если их нет, решение тривиальное и ADR не нужен.
+What we considered and why we rejected it. Mandatory — at least two alternatives; if there are none, the decision is trivial and an ADR is not needed.
 
-## Последствия
+## Consequences
 
-- **Положительные:** что выигрываем
-- **Отрицательные:** что теряем / какие новые риски
-- **Нейтральные:** что меняется без явного знака
+- **Positive:** what we gain
+- **Negative:** what we lose / new risks
+- **Neutral:** what changes without a clear sign
 
-## Открытые вопросы
+## Open questions
 
-То, что осталось нерешённым и требует следующих ADR-ов или будет уточнено опытом.
+What is still unresolved and either needs follow-up ADRs or will be clarified by experience.
 
-## Ссылки
+## References
 
-- Связанные ADR
-- RFC / спецификации
-- Прецеденты в индустрии
+- Related ADRs
+- RFCs / specifications
+- Industry precedents

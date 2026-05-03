@@ -18,12 +18,13 @@ ignore = [
     # paste 1.0.x → uniffi_core / uniffi_bindgen (RUSTSEC-2024-0436, unmaintained).
     "RUSTSEC-2024-0436",
     # Marvin Attack — rsa 0.9.x, NO fixed upgrade available upstream.
-    # Transitive через sqlx-mysql 0.8.x для MySQL caching_sha2_password
-    # authentication handshake. Attack требует MITM на DB-соединении +
-    # измерение timing-а на тысячах RSA decryption-ов; у нас Auth ↔ MariaDB
-    # — localhost only (через unix socket или 127.0.0.1), MITM невозможен.
-    # Track: https://github.com/launchbadge/sqlx/issues/2911 — sqlx ждёт
-    # rsa 0.10.0 release.
+    # Transitive through sqlx-mysql 0.8.x for the MySQL caching_sha2_password
+    # authentication handshake. The attack needs an MITM on the DB
+    # connection plus timing measurements over thousands of RSA decryptions;
+    # in our deployment Auth ↔ MariaDB is localhost-only (Unix socket or
+    # 127.0.0.1), so MITM is not in the threat model.
+    # Track: https://github.com/launchbadge/sqlx/issues/2911 — sqlx is
+    # waiting on the rsa 0.10.0 release.
     "RUSTSEC-2023-0071",
 ]
 
@@ -45,8 +46,9 @@ allow = [
     "AGPL-3.0-or-later",
     "OpenSSL",
     # CDLA-Permissive-2.0 — Community Data License Agreement (permissive).
-    # Используется webpki-roots (Mozilla CA trust store) — это data, не code.
-    # FSF-considered free, OSI-style permissive. Транзитивно через sqlx-core.
+    # Used by webpki-roots (Mozilla CA trust store) — this is data, not
+    # code. FSF-considered free, OSI-style permissive. Reaches us
+    # transitively through sqlx-core.
     "CDLA-Permissive-2.0",
 ]
 confidence-threshold = 0.9

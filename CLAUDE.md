@@ -3,38 +3,38 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 SPDX-FileCopyrightText: 2026 Lakko Contributors
 -->
 
-# Lakko — навигация для AI-агента
+# Lakko — AI-agent navigation
 
-Этот файл автоматически загружается в контекст каждой сессии. Держим его коротким и точным; детали — в `docs/adr/` и в плане `~/.claude/plans/1-nested-wreath.md`.
+This file is loaded into the context of every session automatically. Keep it short and precise; details live in `docs/adr/` and in the plan at `~/.claude/plans/1-nested-wreath.md`.
 
-## Что такое Lakko
+## What Lakko is
 
-Защищённый мессенджер уровня Telegram с **E2EE по умолчанию для всего** (1×1, группы, каналы, audio/video звонки, broadcasts, audio rooms). Zero-trust сервер. Все клиенты — единое Rust-ядро + нативный UI.
+A Telegram-class secure messenger with **E2EE by default for everything** (1×1, groups, channels, audio / video calls, broadcasts, audio rooms). Zero-trust server. All clients share a single Rust core + native UI.
 
-## Архитектурные решения (single source of truth — `docs/adr/`)
+## Architectural decisions (single source of truth — `docs/adr/`)
 
-| ADR | Решение |
+| ADR | Decision |
 |---|---|
-| [0001](docs/adr/0001-mls-only.md) | MLS (RFC 9420) для всего — 1×1, группы, каналы, медиа-ключи звонков |
-| [0002](docs/adr/0002-rust-core.md) | Shared Rust core + native UI на каждой платформе |
-| [0003](docs/adr/0003-livekit-fork.md) | Форк LiveKit как SFU; SFrame (RFC 9605) для медиа |
+| [0001](docs/adr/0001-mls-only.md) | MLS (RFC 9420) for everything — 1×1, groups, channels, call media keys |
+| [0002](docs/adr/0002-rust-core.md) | Shared Rust core + native UI on every platform |
+| [0003](docs/adr/0003-livekit-fork.md) | LiveKit fork as the SFU; SFrame (RFC 9605) for media |
 | [0004](docs/adr/0004-anti-censorship.md) | REALITY + MASQUE + Shadowsocks-2022 + WebTransport |
-| [0005](docs/adr/0005-contact-invitations.md) | Capability-based invites + 6 сценариев + pseudonym lifecycle |
+| [0005](docs/adr/0005-contact-invitations.md) | Capability-based invites + 6 scenarios + pseudonym lifecycle |
 | [0006](docs/adr/0006-licensing.md) | AGPLv3 monorepo + CLA |
 
-Полный стратегический план и trade-offs — в `~/.claude/plans/1-nested-wreath.md`.
-Тактическая декомпозиция всех 6 фаз с sprint-breakdown — в [`docs/ROADMAP.md`](docs/ROADMAP.md).
+The full strategic plan and trade-offs live in `~/.claude/plans/1-nested-wreath.md`.
+The tactical decomposition of all 6 phases with sprint breakdowns lives in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
-## Карта модулей
+## Module map
 
 ### `crates/` — Rust core
 
-| Crate | Назначение |
+| Crate | Purpose |
 |---|---|
-| `lakko-core` | Umbrella, re-exports публичного API |
+| `lakko-core` | Umbrella, re-exports the public API |
 | `lakko-crypto` | HPKE, HKDF, AEAD, Argon2id, OPRF, BLAKE3 |
-| `lakko-mls` | OpenMLS wrapper, group state, exporters для звонков |
-| `lakko-proto` | Сгенерированные типы из `schemas/`, общие со server-ом |
+| `lakko-mls` | OpenMLS wrapper, group state, exporters for calls |
+| `lakko-proto` | Generated types from `schemas/`, shared with the server |
 | `lakko-transport` | quinn (QUIC) + tungstenite (WS) + pluggable obfs trait |
 | `lakko-storage` | SQLCipher abstraction, blob store, WAL |
 | `lakko-sync` | Multi-device sync, hybrid logical clock, edit CRDT |
@@ -43,55 +43,55 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 | `lakko-presence` | Blinded per-conversation presence tokens |
 | `lakko-push` | Encrypted APNs / FCM / UnifiedPush envelopes |
 | `lakko-transparency` | CONIKS-style key transparency log (Merkle tree, signed roots, inclusion proofs) |
-| `lakko-ffi-uniffi` | UniFFI surface для Swift / Kotlin биндингов |
-| `lakko-ffi-wasm` | wasm-bindgen surface для Web/Tauri |
+| `lakko-ffi-uniffi` | UniFFI surface for Swift / Kotlin bindings |
+| `lakko-ffi-wasm` | wasm-bindgen surface for Web / Tauri |
 
 ### `services/` — Backend (Rust)
 
-| Service | Назначение |
+| Service | Purpose |
 |---|---|
-| `auth` | OPAQUE-PAKE + WebAuthn passkey, без хранения PII |
-| `ds` | MLS Delivery Service (FIFO журнал per-group) |
-| `storage` | Ciphertext blob proxy перед SeaweedFS |
+| `auth` | OPAQUE-PAKE + WebAuthn passkey, no PII stored |
+| `ds` | MLS Delivery Service (FIFO journal per group) |
+| `storage` | Ciphertext blob proxy in front of SeaweedFS |
 | `edge` | Broadcast cascade + audio room signaling |
-| `discovery` | Username lookup через OPRF |
-| `push-gw` | Fanout APNs / FCM / UnifiedPush |
-| `transport-rendezvous` | Подписанный bootstrap config для anti-censorship |
+| `discovery` | Username lookup via OPRF |
+| `push-gw` | Fan-out APNs / FCM / UnifiedPush |
+| `transport-rendezvous` | Signed bootstrap config for anti-censorship |
 
-### Прочее
+### Other
 
-- `schemas/` — protobuf-схемы; **single source of truth** для wire format
-- `apps/` — клиенты (iOS/iPadOS/macOS/watchOS/Android/desktop/web), появятся к Phase 1
-- `infra/` — single-VPS Hetzner deployment через systemd + system-nginx + system-MariaDB; см. `infra/README.md` (миграция с lakko_me и daily ops)
+- `schemas/` — protobuf schemas; **single source of truth** for the wire format
+- `apps/` — clients (iOS / iPadOS / macOS / watchOS / Android / desktop / web), arrive in Phase 1
+- `infra/` — single-VPS Hetzner deployment via systemd + system-nginx + system-MariaDB; see `infra/README.md` (migration from lakko_me and daily ops)
 - `docs/adr/` — Architecture Decision Records
-- `docs/ROADMAP.md` — тактическая декомпозиция всех фаз
-- `tools/` — codegen, fuzz harnesses, бенчмарки
+- `docs/ROADMAP.md` — tactical decomposition of every phase
+- `tools/` — codegen, fuzz harnesses, benchmarks
 - `ci/` — GitHub Actions + self-hosted SLSA L3 builders
 
-## Security invariants — нарушать запрещено
+## Security invariants — must not be violated
 
-1. **Никакого plaintext PII на сервере.** Phone/email **никогда** не сохраняются — даже в зашифрованном виде. Только OPAQUE-blinded записи и hash для recovery.
-2. **Сервер видит только ciphertext + публичные артефакты** (KeyPackages, transparency log entries). Никаких message keys, chain keys, root keys, media keys.
-3. **MLS state machine sacrosanct.** Любое изменение `lakko-mls` требует ADR + property tests + (после Phase 2) внешний крипто-аудит.
-4. **No fallback на не-E2EE.** Strict E2EE-only — handshake не завершился → connection не открывается. Никакого silent downgrade.
-5. **Социальный граф не материализуется на сервере.** Add-contact = encrypted envelope на pseudonym; presence — blinded per-conversation tokens; discovery — OPRF blinded lookup.
-6. **Identity rotation** — только через KT log supersession proof. Старые ключи не возвращаются.
-7. **Hardware-backed device keys** обязательны на всех платформах (Secure Enclave / StrongBox / TPM 2.0 / non-extractable WebCrypto).
+1. **No plaintext PII on the server.** Phone / email are **never** stored — not even encrypted. Only OPAQUE-blinded records and a hash for recovery.
+2. **The server only sees ciphertext + public artefacts** (KeyPackages, transparency-log entries). No message keys, chain keys, root keys, media keys.
+3. **The MLS state machine is sacrosanct.** Any change to `lakko-mls` requires an ADR + property tests + (after Phase 2) an external crypto audit.
+4. **No fallback to non-E2EE.** Strict E2EE only — if the handshake does not complete, the connection does not open. No silent downgrade.
+5. **The social graph is not materialised on the server.** Add-contact = encrypted envelope to a pseudonym; presence — blinded per-conversation tokens; discovery — OPRF blinded lookup.
+6. **Identity rotation** — only via a KT log supersession proof. Old keys do not come back.
+7. **Hardware-backed device keys** are mandatory on every platform (Secure Enclave / StrongBox / TPM 2.0 / non-extractable WebCrypto).
 
-## Правила кодстайла
+## Code-style rules
 
-- **Язык: только английский** в коде, comment-ах, doc-string-ах, commit-message-ах и документации (`docs/`, `README.md`, ADR-ах, migration headers). Русский — только в чате между maintainer и AI-агентом. AI-агенты переписывают свой output на английском когда commit-ят / редактируют файлы.
-- **Каждый файл** имеет `SPDX-License-Identifier: AGPL-3.0-or-later` header. Rust: `// SPDX-…`; Markdown: `<!-- SPDX-… -->`. Без исключений. CI блокирует.
-- **`#![forbid(unsafe_code)]`** на каждой crate, кроме `lakko-ffi-uniffi` и `lakko-ffi-wasm` (там обоснованный unsafe — задокументировать `// SAFETY:` комментарием).
-- **Без `unwrap()` / `expect()`** в production-коде — только в тестах и benchmarks. Используем `?` и `thiserror` для ошибок.
-- **Без `panic!()`** в либ-коде (можно в bin при unrecoverable startup error).
-- **Без `println!` / `eprintln!`** — логирование через `tracing` crate.
-- **`clippy::all`, `clippy::pedantic`, `clippy::nursery`** — все warning. `-D warnings` в CI.
-- **`cargo fmt`** обязателен — pre-commit hook + CI gate.
-- **Документация** на публичные элементы — `missing_docs` warning.
-- **Не добавлять зависимости** без необходимости. Каждая dep — потенциальная supply-chain уязвимость. `cargo deny` блокирует unknown licenses.
+- **Language: English only** in code, comments, doc strings, commit messages, and documentation (`docs/`, `README.md`, ADRs, migration headers). Russian is allowed only in interactive chat between the maintainer and the AI agent. AI agents must produce English when committing or editing files.
+- **Every file** carries the `SPDX-License-Identifier: AGPL-3.0-or-later` header. Rust: `// SPDX-…`; Markdown: `<!-- SPDX-… -->`. No exceptions. CI blocks otherwise.
+- **`#![forbid(unsafe_code)]`** on every crate, except `lakko-ffi-uniffi` and `lakko-ffi-wasm` (which carry justified unsafe — document it with a `// SAFETY:` comment).
+- **No `unwrap()` / `expect()`** in production code — only in tests and benchmarks. Use `?` and `thiserror` for errors.
+- **No `panic!()`** in library code (allowed in `bin` for unrecoverable startup errors).
+- **No `println!` / `eprintln!`** — log via the `tracing` crate.
+- **`clippy::all`, `clippy::pedantic`, `clippy::nursery`** — all warnings on. `-D warnings` in CI.
+- **`cargo fmt`** is mandatory — pre-commit hook + CI gate.
+- **Documentation** on public items — `missing_docs` warning on.
+- **Do not add dependencies** without need. Every dep is a potential supply-chain vulnerability. `cargo deny` blocks unknown licences.
 
-## Команды (через justfile)
+## Commands (via the justfile)
 
 ```
 just check                     # cargo check --workspace --all-targets
@@ -101,44 +101,44 @@ just fmt                       # cargo fmt --all
 just fmt-check                 # cargo fmt --all --check
 just audit                     # cargo deny check
 just reuse                     # reuse lint
-just regen-proto               # перегенерация типов из schemas/
-just regen-bindings            # Swift + Kotlin биндинги из lakko-ffi-uniffi
-just fuzz-check                # smoke-build всех fuzz-targets на stable
-just fuzz <crate> <target>     # запуск конкретного target-а на nightly + cargo-fuzz
-just fuzz-list                 # все доступные fuzz-targets
-just deploy                    # build + install + systemctl restart на VPS (ssh lakkome@lakko.me)
+just regen-proto               # regenerate types from schemas/
+just regen-bindings            # Swift + Kotlin bindings from lakko-ffi-uniffi
+just fuzz-check                # smoke-build all fuzz targets on stable
+just fuzz <crate> <target>     # run a specific target on nightly + cargo-fuzz
+just fuzz-list                 # list all available fuzz targets
+just deploy                    # build + install + systemctl restart on the VPS (ssh lakkome@lakko.me)
 just restart                   # systemctl restart lakko.target
 just restart-svc <svc>         # systemctl restart lakko-svc-<svc>
 just logs <svc>                # journalctl -u lakko-svc-<svc> -f
 just status                    # systemctl status lakko.target
-just ci                        # всё что делает CI локально
+just ci                        # everything CI does, locally
 ```
 
 ## Fuzz harnesses
 
-`crates/lakko-mls/fuzz/` и `crates/lakko-proto/fuzz/` — отдельные крейты вне основного workspace (нужен nightly + libfuzzer-sys). Targets живут в `fuzz/fuzz_targets/*.rs`.
+`crates/lakko-mls/fuzz/` and `crates/lakko-proto/fuzz/` are separate crates outside the main workspace (they need nightly + libfuzzer-sys). Targets live in `fuzz/fuzz_targets/*.rs`.
 
-Текущие targets:
+Current targets:
 - **`lakko-mls/mls_message`** — `MlsMessageIn` wire-format parser (TLS codec)
 - **`lakko-mls/key_package`** — `KeyPackage` wire-format parser
 - **`lakko-proto/wire_envelope`** — `wire::v1::Envelope` prost decoder
 - **`lakko-proto/mls_app_payload`** — `mls_app::v1::ApplicationPayload` prost decoder
 - **`lakko-proto/media_call_key`** — `media::v1::CallKeyEpoch` + `CodecCapability` decoders
 
-`fuzz_api` модуль в `lakko-mls` (помечен `#[doc(hidden)]`) — единственный публичный entry-point для harness-ов; не часть supported public API.
+The `fuzz_api` module in `lakko-mls` (marked `#[doc(hidden)]`) is the only public entry point for harnesses; it is not part of the supported public API.
 
-Фуззинг-corpus не коммитится (`fuzz/corpus/`, `fuzz/artifacts/` в `.gitignore`); поднимается локально.
+Fuzzing corpora are not committed (`fuzz/corpus/`, `fuzz/artifacts/` are gitignored); they are spun up locally.
 
 ## Local dev
 
-### Первый раз
+### First time
 
 ```bash
-# 1. Workspace .env (грузится через dotenvy в каждом service main() в debug)
+# 1. Workspace .env (loaded via dotenvy in each service main() in debug)
 cp .env.example .env
-# при необходимости поменять DATABASE_URL / RUST_LOG
+# tweak DATABASE_URL / RUST_LOG if needed
 
-# 2. MariaDB локально — общий docker-контейнер `mariadb:latest` на 3306
+# 2. MariaDB locally — a shared docker container `mariadb:latest` on 3306
 docker exec -it mariadb mariadb -u root -p -e "
   CREATE DATABASE IF NOT EXISTS lakko;
   CREATE USER IF NOT EXISTS 'lakko'@'%' IDENTIFIED BY 'devpass';
@@ -147,30 +147,30 @@ docker exec -it mariadb mariadb -u root -p -e "
 "
 ```
 
-### Запуск service
+### Running a service
 
-| Способ | Команда |
+| Method | Command |
 |---|---|
 | CLI / justfile | `just dev-auth` |
-| `cargo run` напрямую | `cargo run -p lakko-svc-auth` |
-| RustRover | локальный Run Config (Cargo command `run --package lakko-svc-auth`) |
+| `cargo run` directly | `cargo run -p lakko-svc-auth` |
+| RustRover | local Run Config (Cargo command `run --package lakko-svc-auth`) |
 
-Все три пути идентичны — env vars в любом случае приходят из `.env` через `dotenvy::dotenv()` в `main()` (debug-сборка). RustRover Run Configurations лежат в `.run/` (gitignored) — каждый создаёт у себя локально через GUI или копирует пример ниже.
+All three paths are identical — env vars come from `.env` via `dotenvy::dotenv()` in `main()` (debug build) either way. RustRover Run Configurations live in `.run/` (gitignored) — every developer creates one locally via the GUI or copies the example below.
 
-Production использует совершенно другой механизм (systemd `EnvironmentFile=` / `/etc/lakko/lakko.env`), `dotenvy` под `#[cfg(debug_assertions)]` и в release не вызывается.
+Production uses a completely different mechanism (systemd `EnvironmentFile=` / `/etc/lakko/lakko.env`); `dotenvy` is gated by `#[cfg(debug_assertions)]` and is not called in release.
 
-#### Пример RustRover Run Config
+#### Example RustRover Run Config
 
-Run → Edit Configurations → `+` → Cargo. Заполнить:
+Run → Edit Configurations → `+` → Cargo. Fill in:
 
-| Поле | Значение |
+| Field | Value |
 |---|---|
 | Name | `lakko-svc-auth (dev)` |
 | Command | `run --package lakko-svc-auth --bin lakko-svc-auth` |
 | Working directory | `$PROJECT_DIR$` |
-| Environment variables | (опционально, можно оставить пустым — `.env` подхватывается) |
+| Environment variables | (optional, can stay empty — `.env` is picked up) |
 
-Если хочешь продублировать env vars inline (RustRover устанавливает их **до** dotenvy и переопределяет `.env`):
+If you want to duplicate env vars inline (RustRover sets them **before** dotenvy and overrides `.env`):
 
 ```
 DATABASE_URL=mysql://lakko:devpass@127.0.0.1:3306/lakko
@@ -183,32 +183,32 @@ RUST_BACKTRACE=1
 
 ```bash
 curl -i http://127.0.0.1:8081/health   # → 200, "ok"
-curl -i http://127.0.0.1:8081/ready    # → 200, "ready" (если БД ОК)
+curl -i http://127.0.0.1:8081/ready    # → 200, "ready" (if the DB is up)
 curl -i http://127.0.0.1:8081/version  # → 200, JSON
 ```
 
-## Чеклист перед коммитом
+## Pre-commit checklist
 
-- [ ] `just fmt` прошёл
-- [ ] `just lint` прошёл (zero warnings)
-- [ ] `just test` прошёл
-- [ ] `just reuse` прошёл (SPDX headers на месте)
-- [ ] Изменения в crypto/mls/proto имеют ADR-ссылку в commit message
-- [ ] Изменения в schemas/ обратно совместимы (proto reserved fields, не удалять номера)
-- [ ] Если security-relevant — добавлен property test или fuzz target
+- [ ] `just fmt` is clean
+- [ ] `just lint` is clean (zero warnings)
+- [ ] `just test` is clean
+- [ ] `just reuse` is clean (SPDX headers in place)
+- [ ] Changes in crypto / mls / proto include an ADR reference in the commit message
+- [ ] Changes in `schemas/` are backwards-compatible (proto reserved fields, never delete numbers)
+- [ ] If security-relevant — a property test or fuzz target has been added
 
-## Workflow для AI-агента
+## Workflow for the AI agent
 
-- **Plan mode** для архитектурных задач (новый crate, изменение протокола, schema migration)
-- **TodoWrite** для multi-step задач (>3 шага)
-- **Не закладывайся на будущие фичи** — пишем под конкретную задачу. Spec roadmap — в плане, реализуем по Phase
-- **При сомнении про security-критичный код** — остановись, спроси, не угадывай
-- **Subagents** (Explore, Plan) — для broad research, не для тривиальных правок
-- **Не коммить без подписи** — `commit.gpgsign = true` обязателен на этом репо
+- **Plan mode** for architectural tasks (a new crate, a protocol change, a schema migration)
+- **TodoWrite** for multi-step tasks (>3 steps)
+- **Do not bake in future features** — write for the concrete task at hand. The spec roadmap lives in the plan; we implement phase by phase
+- **When in doubt about security-critical code** — stop, ask, do not guess
+- **Subagents** (Explore, Plan) — for broad research, not for trivial edits
+- **Do not commit without a signature** — `commit.gpgsign = true` is required on this repo
 
-## Технические инварианты
+## Technical invariants
 
-- **Rust edition 2021**, MSRV закреплён в `rust-toolchain.toml`
-- **Cargo workspace** — один `Cargo.toml` в корне, все crates и services внутри
-- **Workspace dependencies** — версии общих deps пинятся в `[workspace.dependencies]`, crates наследуют через `dep.workspace = true`
-- **Reproducible builds** — Nix flake пинит весь toolchain; CI проверяет byte-identicality между runner-ами
+- **Rust edition 2021**, MSRV pinned in `rust-toolchain.toml`
+- **Cargo workspace** — a single `Cargo.toml` at the root, all crates and services live inside it
+- **Workspace dependencies** — versions of shared deps pinned in `[workspace.dependencies]`, crates inherit via `dep.workspace = true`
+- **Reproducible builds** — the Nix flake pins the entire toolchain; CI checks byte-identicality between runners

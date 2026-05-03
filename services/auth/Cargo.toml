@@ -40,13 +40,13 @@ sqlx = { version = "0.8", default-features = false, features = [
     "chrono",
 ] }
 
-# .env loading — debug builds only; production использует systemd
-# EnvironmentFile= /etc/lakko/lakko.env, см. infra/systemd/*.service.
+# .env loading — debug builds only; production uses systemd
+# `EnvironmentFile=/etc/lakko/lakko.env` (see infra/systemd/*.service).
 dotenvy = "0.15"
 
-# OPAQUE-PAKE (RFC draft `opaque`) — password auth without server seeing
-# plaintext. Ristretto255 + TripleDH + Argon2id ciphersuite. opaque-ke
-# имплементация от Facebook/Meta — единственная зрелая Rust-крата.
+# OPAQUE-PAKE (RFC draft `opaque`) — password auth without the server
+# seeing the plaintext. Ristretto255 + TripleDH + Argon2id ciphersuite.
+# `opaque-ke` (by Meta/Novi) is the only mature Rust implementation.
 opaque-ke = { version = "3", features = ["argon2"] }
 argon2 = "0.5"
 rand = "0.8"

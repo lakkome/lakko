@@ -5,28 +5,28 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 # Lakko
 
-Защищённый мессенджер с **E2EE по умолчанию** для всего: 1×1 чатов, групп, каналов, аудио/видео-звонков, audio rooms и broadcasts. Сервер zero-trust — даже при полной компрометации не позволяет расшифровать сообщения, историю, звонки и не раскрывает социальный граф.
+A secure messenger with **E2EE by default** for everything: 1×1 chats, groups, channels, audio / video calls, audio rooms and broadcasts. The server is zero-trust — even on full compromise it cannot decrypt messages, history or calls, and does not expose the social graph.
 
-> **Статус: Phase 0 — Foundations.** Репозиторий в активной разработке. Не используйте для реальных коммуникаций.
+> **Status: Phase 0 — Foundations.** The repository is under active development. Do not use it for real communication.
 
-## Ключевые свойства
+## Key properties
 
-- **MLS (RFC 9420)** для всех видов разговоров — единый E2EE-протокол
-- **SFrame (RFC 9605)** для шифрования медиа в звонках, ключи через MLS exporter
-- **Zero PII** — телефоны и email не сохраняются вообще; только usernames для discovery
-- **Discovery без раскрытия графа** — username lookup через OPRF blinded queries
-- **Hardware-backed device keys** на всех платформах
+- **MLS (RFC 9420)** for every conversation type — a single E2EE protocol
+- **SFrame (RFC 9605)** for media encryption in calls, keys derived from an MLS exporter
+- **Zero PII** — phone numbers and emails are never stored; only usernames for discovery
+- **Discovery without exposing the graph** — username lookup via OPRF blinded queries
+- **Hardware-backed device keys** on every platform
 - **Anti-censorship transport** — REALITY, MASQUE, Shadowsocks-2022, WebTransport
-- **Все клиенты** на одном Rust core: iOS / iPadOS / macOS / watchOS / Android / Windows / Linux / Web
+- **All clients** sharing one Rust core: iOS / iPadOS / macOS / watchOS / Android / Windows / Linux / Web
 
-## Архитектура
+## Architecture
 
-Полный план — `~/.claude/plans/1-nested-wreath.md`. Архитектурные решения — в `docs/adr/`. Навигация по репо — `CLAUDE.md`.
+The full plan lives in `~/.claude/plans/1-nested-wreath.md`. Architectural decisions live in `docs/adr/`. Repo navigation lives in `CLAUDE.md`.
 
-## Лицензия
+## License
 
-[AGPLv3](LICENSE). Все вклады принимаются под [CLA](CLA.md).
+[AGPLv3](LICENSE). All contributions are accepted under a [CLA](CLA.md).
 
-## Безопасность
+## Security
 
-Уязвимости — только через GPG-encrypted email, **не** через публичные issues. Адрес и ключ — в `SECURITY.md` (появится к Phase 1).
+Vulnerabilities — only via GPG-encrypted email, **not** via public issues. The address and the key live in `SECURITY.md` (lands by Phase 1).

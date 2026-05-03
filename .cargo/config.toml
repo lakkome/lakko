@@ -5,5 +5,5 @@
 git-fetch-with-cli = true
 
 [build]
-# rustc wrapper можно подключить через sccache позже:
+# An rustc wrapper can be wired in here later (e.g. sccache):
 # rustc-wrapper = "sccache"

@@ -2,17 +2,17 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # SPDX-FileCopyrightText: 2026 Lakko Contributors
 #
-# Deploy script — runs ON the VPS, invoked by `just deploy` (which ssh-ит
-# сюда) или вручную: `sudo -u lakkome /home/lakkome/lakko/infra/scripts/deploy.sh`
+# Deploy script — runs ON the VPS, invoked by `just deploy` (which ssh-es
+# in) or manually: `sudo -u lakkome /home/lakkome/lakko/infra/scripts/deploy.sh`
 #
-# Что делает:
-#   1. git pull в /home/lakkome/lakko
-#   2. cargo build --release всех 5 service-bin-ов (auth, ds, storage,
+# What it does:
+#   1. git pull in /home/lakkome/lakko
+#   2. cargo build --release for all 5 service binaries (auth, ds, storage,
 #      discovery, push-gw)
-#   3. install бинарей в /usr/local/bin/ (требует sudo, см. sudoers ниже)
+#   3. install binaries into /usr/local/bin/ (requires sudo, see sudoers below)
 #   4. systemctl restart lakko.target
 #
-# Sudoers config на VPS (для passwordless restart):
+# Sudoers config on the VPS (for passwordless restart):
 #   /etc/sudoers.d/lakko-deploy:
 #     lakkome ALL=(root) NOPASSWD: /usr/bin/install -m 755 /tmp/lakko-svc-* /usr/local/bin/, /usr/bin/systemctl restart lakko.target, /usr/bin/systemctl status lakko.target
 
@@ -22,7 +22,7 @@ REPO=/home/lakkome/lakko
 SERVICES=(auth ds storage discovery push-gw)
 
 if [[ "${EUID}" -eq 0 ]]; then
-    echo "ERROR: запускай как lakkome, а не root. Скрипт сам делает sudo для нужных шагов." >&2
+    echo "ERROR: run as lakkome, not as root. The script invokes sudo only for the steps that need it." >&2
     exit 1
 fi
 

@@ -81,11 +81,11 @@ ci: fmt-check lint test audit reuse fuzz-check
 build:
     cargo build --workspace --release
 
-# ---- Local dev (на твоей машине) ------------------------------------------
+# ---- Local dev (on your machine) ------------------------------------------
 
-# Поднять ephemeral MariaDB через docker/podman для local dev.
-# Останавливается через `just dev-mariadb-stop`. Данные не персистятся.
-# Нужен docker ИЛИ podman в PATH.
+# Bring up an ephemeral MariaDB via docker/podman for local dev. Stop it
+# with `just dev-mariadb-stop`. Data is not persisted across stops.
+# Requires `docker` OR `podman` on PATH.
 dev-mariadb:
     @command -v docker >/dev/null 2>&1 && CONTAINER=docker || CONTAINER=podman; \
     $CONTAINER run -d --rm --name lakko-mariadb-dev \
@@ -96,48 +96,48 @@ dev-mariadb:
         -e MARIADB_PASSWORD=devpass \
         docker.io/library/mariadb:11
     @echo ""
-    @echo "MariaDB stating on 127.0.0.1:3306. Жди ~5s, потом:"
+    @echo "MariaDB starting on 127.0.0.1:3306. Wait ~5s, then:"
     @echo '  export DATABASE_URL="mysql://lakko:devpass@127.0.0.1:3306/lakko"'
     @echo "  just dev-auth"
 
-# Остановить локальный dev-MariaDB.
+# Stop the local dev-MariaDB container.
 dev-mariadb-stop:
     @command -v docker >/dev/null 2>&1 && CONTAINER=docker || CONTAINER=podman; \
     $CONTAINER stop lakko-mariadb-dev || true
 
-# Запустить auth service локально (cargo run, не сборка binary).
-# Env-переменные грузятся через dotenvy из `.env` в workspace root —
-# скопируй `.env.example` → `.env` перед первым запуском.
+# Run auth service locally via `cargo run` (not the release binary).
+# Env vars come from `.env` in the workspace root via dotenvy — copy
+# `.env.example` → `.env` before the first run.
 dev-auth:
     cargo run -p lakko-svc-auth
 
-# ---- Deployment (systemd + system-nginx + system-MariaDB на Hetzner) -----
-# See infra/README.md для полного migration / deploy workflow-а.
+# ---- Deployment (systemd + system-nginx + system-MariaDB on Hetzner) -----
+# See infra/README.md for the full migration / deploy workflow.
 
-# Default deploy target — переменные среды переопределяют:
+# Deploy target — override via env vars:
 #   LAKKO_VPS_USER (default: lakkome)
 #   LAKKO_VPS_HOST (default: lakko.me)
 vps_user := env_var_or_default("LAKKO_VPS_USER", "lakkome")
 vps_host := env_var_or_default("LAKKO_VPS_HOST", "lakko.me")
 
-# Deploy: ssh на VPS и запустить infra/scripts/deploy.sh.
-# Скрипт делает git pull + cargo build --release + install в /usr/local/bin
-# + systemctl restart lakko.target.
+# Deploy: ssh into the VPS and run infra/scripts/deploy.sh.
+# That script does `git pull` + `cargo build --release` + install into
+# /usr/local/bin + `systemctl restart lakko.target`.
 deploy:
     ssh {{vps_user}}@{{vps_host}} '~/lakko/infra/scripts/deploy.sh'
 
-# Restart всех Lakko services через systemd target.
+# Restart all Lakko services via the systemd target.
 restart:
     ssh {{vps_user}}@{{vps_host}} 'sudo systemctl restart lakko.target'
 
-# Restart одного service. Example: just restart-svc auth
+# Restart a single service. Example: just restart-svc auth
 restart-svc service:
     ssh {{vps_user}}@{{vps_host}} 'sudo systemctl restart lakko-svc-{{service}}'
 
-# Tail логов одного service. Example: just logs auth
+# Tail a single service's logs. Example: just logs auth
 logs service:
     ssh {{vps_user}}@{{vps_host}} 'journalctl -u lakko-svc-{{service}} -f'
 
-# Status всего.
+# Status of the whole stack.
 status:
     ssh {{vps_user}}@{{vps_host}} 'sudo systemctl status lakko.target --no-pager'
