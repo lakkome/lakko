@@ -10,7 +10,7 @@ authors.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 publish = false
-description = "Ciphertext blob proxy in front of SeaweedFS — content-addressable, ciphertext-only"
+description = "Ciphertext blob proxy — content-addressable, ciphertext-only"
 
 [lints]
 workspace = true
@@ -24,3 +24,29 @@ tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+axum = { version = "0.8", features = ["macros", "http2"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["trace", "limit"] }
+
+# .env loading — debug builds only; production uses systemd
+# `EnvironmentFile=/etc/lakko/lakko.env`.
+dotenvy = "0.15"
+
+# Streaming SHA-256 for content-addressable PUT.
+sha2 = "0.10"
+hex = "0.4"
+
+# Atomic file persist (write to tempfile, rename into place).
+tempfile = "3"
+
+# Body streaming via futures Stream.
+futures = "0.3"
+bytes = "1"
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+tempfile = "3"
