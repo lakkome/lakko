@@ -10,7 +10,7 @@ authors.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 publish = false
-description = "MLS Delivery Service — append-only per-group log, FIFO fanout, ciphertext-only"
+description = "MLS Delivery Service — append-only per-group log + per-device mailbox, ciphertext-only"
 
 [lints]
 workspace = true
@@ -24,3 +24,36 @@ tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+axum = { version = "0.8", features = ["macros", "http2"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["trace", "limit"] }
+sqlx = { version = "0.8", default-features = false, features = [
+    "runtime-tokio",
+    "tls-rustls-ring",
+    "mysql",
+    "migrate",
+    "macros",
+    "chrono",
+] }
+
+# .env loading — debug builds only; production uses systemd
+# `EnvironmentFile=/etc/lakko/lakko.env`.
+dotenvy = "0.15"
+
+# Path params are 32-byte pseudonyms encoded as 64 hex chars; payloads
+# travel through JSON as base64.
+base64 = "0.22"
+hex = "0.4"
+
+# Timestamp serialization for JSON responses (the `chrono` feature on
+# sqlx gives us the type but not the Serialize impl).
+chrono = { version = "0.4", default-features = false, features = ["serde"] }
+
+# Body collection helper (BodyExt::collect on axum's Body).
+http-body-util = "0.1"
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }

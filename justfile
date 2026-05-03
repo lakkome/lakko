@@ -111,6 +111,16 @@ dev-mariadb-stop:
 dev-auth:
     cargo run -p lakko-svc-auth
 
+# Run the Delivery Service locally. Reads `LAKKO_DS_DATABASE_URL` from
+# `.env` (separate database `lakko_ds` — see `.env.example`).
+dev-ds:
+    cargo run -p lakko-svc-ds
+
+# Run the storage service locally. Filesystem-backed; default blob root
+# is `./target/dev-blobs` (override via `LAKKO_BLOB_DIR`).
+dev-storage:
+    cargo run -p lakko-svc-storage
+
 # ---- Deployment (systemd + system-nginx + system-MariaDB on Hetzner) -----
 # See infra/README.md for the full migration / deploy workflow.
 

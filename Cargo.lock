@@ -430,6 +430,7 @@ checksum = "c673075a2e0e5f4a1dde27ce9dee1ea4558c7ffe648f576438a20ca1d2acc4b0"
 dependencies = [
  "iana-time-zone",
  "num-traits",
+ "serde",
  "windows-link",
 ]
 
@@ -1687,7 +1688,18 @@ name = "lakko-svc-ds"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "axum",
+ "base64",
+ "chrono",
+ "dotenvy",
+ "hex",
+ "http-body-util",
+ "serde",
+ "serde_json",
+ "sqlx",
  "tokio",
+ "tower",
+ "tower-http",
  "tracing",
  "tracing-subscriber",
 ]

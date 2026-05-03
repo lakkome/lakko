@@ -3,28 +3,267 @@
 
 //! MLS Delivery Service for Lakko.
 //!
-//! Append-only per-group log with FIFO ordering by `(epoch, seq)`.
-//! Stateless front, MariaDB-backed storage layer. Per-device mailboxes
-//! with cursor pull and QUIC long-stream push. Server stores ciphertext
-//! only — no message keys, no chain keys, no plaintext.
+//! Phase 1.3 — skeleton: append-only MariaDB-backed journals for both
+//! per-group fan-out and per-device direct mailboxes. Cursor-pull only;
+//! long-poll and QUIC stream push land in 1.4.
 //!
-//! See `~/.claude/plans/1-nested-wreath.md` §4 (Delivery Service) and
-//! `docs/ROADMAP.md` Phase 1 for the solo-bootstrap stack choice.
+//! The server is **blind**:
+//!
+//!   * It sees only the group's / device's pseudonym (a 32-byte
+//!     identifier the client picks; the server cannot link it to a
+//!     real identity).
+//!   * Payloads are opaque MLS ciphertext. The server does not parse
+//!     them, does not interpret epoch / seq / sender — just stores the
+//!     bytes and assigns a per-row monotonic id.
+//!   * Fan-out is implicit: clients with the group's pseudonym poll
+//!     the journal. The server doesn't know who is in the group.
+//!
+//! No authentication on Phase 1.3 — anyone with the right pseudonym
+//! can publish or fetch. Pseudonyms are 32 bytes random; guessing one
+//! is infeasible. Anti-DoS is nginx-layer rate limit; PoW gating is
+//! deferred to Phase 2 (same plan as `services/storage`).
+//!
+//! Configuration via environment variables (loaded by systemd from
+//! `/etc/lakko/lakko.env`):
+//!
+//! - `LAKKO_BIND` — `host:port` to listen on (default `127.0.0.1:8082`)
+//! - `DATABASE_URL` — sqlx-style MariaDB DSN
+//! - `RUST_LOG` — `tracing-subscriber` env-filter spec
+//!
+//! Endpoints:
+//!
+//! - `GET    /health`                              — liveness, 200 OK
+//! - `GET    /ready`                               — readiness (DB ping), 200 / 503
+//! - `GET    /version`
+//! - `POST   /ds/group/{group_id_hex}/messages`    — publish to group (1 MB cap)
+//! - `GET    /ds/group/{group_id_hex}/messages`    — `?after=<id>&limit=<n>`
+//! - `POST   /ds/mailbox/{device_id_hex}/messages` — publish to device mailbox
+//! - `GET    /ds/mailbox/{device_id_hex}/messages` — `?after=<id>&limit=<n>`
+//!
+//! See `~/.claude/plans/1-nested-wreath.md` §4 (MLS Delivery Service).
 
 #![forbid(unsafe_code)]
 
-use anyhow::Result;
+mod journal;
+
+use std::net::SocketAddr;
+use std::time::Duration;
+
+use anyhow::{Context, Result};
+use axum::extract::{DefaultBodyLimit, State};
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Json};
+use axum::routing::{get, post};
+use axum::Router;
+use serde_json::json;
+use sqlx::mysql::MySqlPoolOptions;
+use sqlx::MySqlPool;
+use tokio::signal;
+use tower_http::trace::TraceLayer;
+
+/// Default bind address if `LAKKO_BIND` is not set. Distinct from auth
+/// (8081) and storage (8083).
+const DEFAULT_BIND: &str = "127.0.0.1:8082";
+
+/// Migrations directory (relative to crate root). `sqlx::migrate!`
+/// reads it at compile time and embeds the SQL in the binary.
+const MIGRATIONS: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
+
+/// Shared application state.
+#[derive(Clone)]
+pub(crate) struct AppState {
+    pub(crate) db: MySqlPool,
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
+    #[cfg(debug_assertions)]
+    {
+        if let Ok(path) = dotenvy::dotenv() {
+            eprintln!("dotenv loaded from {}", path.display());
+        }
+    }
 
-    tracing::info!("ds service starting (Phase 0 stub)");
+    init_tracing();
 
+    let bind: SocketAddr = std::env::var("LAKKO_BIND")
+        .unwrap_or_else(|_| DEFAULT_BIND.to_string())
+        .parse()
+        .context("parse LAKKO_BIND as host:port")?;
+
+    // Per-service database — see `services/auth/src/main.rs` for the
+    // rationale. DS reads its own `LAKKO_DS_DATABASE_URL` first.
+    let db_url = std::env::var("LAKKO_DS_DATABASE_URL")
+        .or_else(|_| std::env::var("DATABASE_URL"))
+        .context("LAKKO_DS_DATABASE_URL or DATABASE_URL env var must be set")?;
+
+    let pool = MySqlPoolOptions::new()
+        .max_connections(32)
+        .acquire_timeout(Duration::from_secs(5))
+        .connect(&db_url)
+        .await
+        .context("connect to MariaDB")?;
+
+    MIGRATIONS.run(&pool).await.context("run sqlx migrations")?;
+
+    let state = AppState { db: pool.clone() };
+
+    let _pruner = journal::spawn_pruner(pool.clone());
+
+    let app = build_app(state);
+
+    let listener = tokio::net::TcpListener::bind(bind)
+        .await
+        .with_context(|| format!("bind {bind}"))?;
+    tracing::info!(addr = %bind, "ds service listening");
+
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await
+        .context("axum serve")?;
+
+    pool.close().await;
+    tracing::info!("ds service stopped cleanly");
     Ok(())
+}
+
+/// Build the public router. Extracted so tests can drive it directly
+/// without binding a TCP listener.
+pub(crate) fn build_app(state: AppState) -> Router {
+    Router::new()
+        .route("/health", get(health))
+        .route("/ready", get(ready))
+        .route("/version", get(version))
+        .route(
+            "/ds/group/{group_hex}/messages",
+            post(journal::post_group).get(journal::get_group),
+        )
+        .route(
+            "/ds/mailbox/{device_hex}/messages",
+            post(journal::post_mailbox).get(journal::get_mailbox),
+        )
+        .layer(DefaultBodyLimit::max(journal::MAX_MESSAGE_BYTES))
+        .layer(TraceLayer::new_for_http())
+        .with_state(state)
+}
+
+async fn health() -> impl IntoResponse {
+    (StatusCode::OK, "ok\n")
+}
+
+async fn ready(State(state): State<AppState>) -> impl IntoResponse {
+    match sqlx::query_scalar::<_, i64>("SELECT 1")
+        .fetch_one(&state.db)
+        .await
+    {
+        Ok(_) => (StatusCode::OK, "ready\n").into_response(),
+        Err(e) => {
+            tracing::warn!(error = %e, "readiness probe: db ping failed");
+            (StatusCode::SERVICE_UNAVAILABLE, "not ready\n").into_response()
+        },
+    }
+}
+
+async fn version() -> impl IntoResponse {
+    Json(json!({
+        "service": "lakko-svc-ds",
+        "version": env!("CARGO_PKG_VERSION"),
+        "git_sha": option_env!("LAKKO_GIT_SHA").unwrap_or("unknown"),
+    }))
+}
+
+fn init_tracing() {
+    use tracing_subscriber::{fmt, EnvFilter};
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    fmt()
+        .with_env_filter(filter)
+        .with_target(true)
+        .with_level(true)
+        .compact()
+        .init();
+}
+
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        let _ = signal::ctrl_c().await;
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        if let Ok(mut sig) = signal::unix::signal(signal::unix::SignalKind::terminate()) {
+            sig.recv().await;
+        }
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        () = ctrl_c => tracing::info!("received SIGINT, shutting down"),
+        () = terminate => tracing::info!("received SIGTERM, shutting down"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::Request;
+    use http_body_util::BodyExt as _;
+    use tower::ServiceExt as _;
+
+    /// Build a router that doesn't touch the DB — for /health,
+    /// /version, /not-found probes that work without a live pool.
+    fn test_app_no_db() -> Router {
+        Router::new()
+            .route("/health", get(health))
+            .route("/version", get(version))
+    }
+
+    #[tokio::test]
+    async fn health_returns_200_ok() {
+        let response = test_app_no_db()
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&body[..], b"ok\n");
+    }
+
+    #[tokio::test]
+    async fn version_returns_json_with_service_name() {
+        let response = test_app_no_db()
+            .oneshot(
+                Request::builder()
+                    .uri("/version")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(parsed["service"], "lakko-svc-ds");
+    }
+
+    #[tokio::test]
+    async fn unknown_path_returns_404() {
+        let response = test_app_no_db()
+            .oneshot(
+                Request::builder()
+                    .uri("/does-not-exist")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
 }

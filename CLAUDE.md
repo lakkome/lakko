@@ -136,26 +136,36 @@ Fuzzing corpora are not committed (`fuzz/corpus/`, `fuzz/artifacts/` are gitigno
 ```bash
 # 1. Workspace .env (loaded via dotenvy in each service main() in debug)
 cp .env.example .env
-# tweak DATABASE_URL / RUST_LOG if needed
+# tweak per-service DATABASE_URLs / RUST_LOG if needed
 
-# 2. MariaDB locally — a shared docker container `mariadb:latest` on 3306
-docker exec -it mariadb mariadb -u root -p -e "
-  CREATE DATABASE IF NOT EXISTS lakko;
+# 2. MariaDB locally — a shared docker container `mariadb:latest` on 3306.
+# Each service has its OWN database — sqlx tracks applied migrations in a
+# hardcoded `_sqlx_migrations` table per DB, so two services on the same DB
+# see each other's migrations as "missing" and refuse to start.
+docker exec -i mariadb mariadb -u root -p<root_pw> <<'SQL'
+  CREATE DATABASE IF NOT EXISTS lakko_auth
+    CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+  CREATE DATABASE IF NOT EXISTS lakko_ds
+    CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
   CREATE USER IF NOT EXISTS 'lakko'@'%' IDENTIFIED BY 'devpass';
-  GRANT ALL ON lakko.* TO 'lakko'@'%';
+  GRANT ALL ON lakko_auth.* TO 'lakko'@'%';
+  GRANT ALL ON lakko_ds.*   TO 'lakko'@'%';
   FLUSH PRIVILEGES;
-"
+SQL
+# Find the root password with `docker inspect mariadb | grep ROOT_PASSWORD`.
 ```
 
 ### Running a service
 
 | Method | Command |
 |---|---|
-| CLI / justfile | `just dev-auth` |
+| CLI / justfile | `just dev-auth` / `just dev-ds` / `just dev-storage` |
 | `cargo run` directly | `cargo run -p lakko-svc-auth` |
 | RustRover | local Run Config (Cargo command `run --package lakko-svc-auth`) |
 
 All three paths are identical — env vars come from `.env` via `dotenvy::dotenv()` in `main()` (debug build) either way. RustRover Run Configurations live in `.run/` (gitignored) — every developer creates one locally via the GUI or copies the example below.
+
+Each service reads its own `LAKKO_<NAME>_DATABASE_URL` first, falls back to the generic `DATABASE_URL` if unset. The fallback is for the case of running a single service in isolation; the canonical `.env` has all per-service URLs set.
 
 Production uses a completely different mechanism (systemd `EnvironmentFile=` / `/etc/lakko/lakko.env`); `dotenvy` is gated by `#[cfg(debug_assertions)]` and is not called in release.
 
@@ -173,7 +183,7 @@ Run → Edit Configurations → `+` → Cargo. Fill in:
 If you want to duplicate env vars inline (RustRover sets them **before** dotenvy and overrides `.env`):
 
 ```
-DATABASE_URL=mysql://lakko:devpass@127.0.0.1:3306/lakko
+LAKKO_AUTH_DATABASE_URL=mysql://lakko:devpass@127.0.0.1:3306/lakko_auth
 LAKKO_BIND=127.0.0.1:8081
 RUST_LOG=info,sqlx=warn,lakko_svc_auth=debug,lakko_mls=debug
 RUST_BACKTRACE=1

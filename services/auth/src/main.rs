@@ -100,7 +100,13 @@ async fn main() -> Result<()> {
         .parse()
         .context("parse LAKKO_BIND as host:port")?;
 
-    let db_url = std::env::var("DATABASE_URL").context("DATABASE_URL env var must be set")?;
+    // Per-service database — read `LAKKO_AUTH_DATABASE_URL` first, fall
+    // back to the generic `DATABASE_URL`. Each service uses its own DB
+    // because sqlx's migration tracking lives in a hardcoded
+    // `_sqlx_migrations` table per database.
+    let db_url = std::env::var("LAKKO_AUTH_DATABASE_URL")
+        .or_else(|_| std::env::var("DATABASE_URL"))
+        .context("LAKKO_AUTH_DATABASE_URL or DATABASE_URL env var must be set")?;
 
     let pool = MySqlPoolOptions::new()
         .max_connections(16)

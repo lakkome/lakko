@@ -122,21 +122,37 @@ cd lakko
 cargo build --release --bins  # first build is slow — ~10 minutes on a CPX22
 ```
 
-### 6. Database and user in MariaDB
+### 6. Databases and user in MariaDB
+
+Each service has its own database. sqlx tracks applied migrations in a
+hardcoded `_sqlx_migrations` table per database, so two services on the
+same DB would see each other's migrations as "missing" and refuse to
+start. Per-service DBs are also nicer for blast-radius — a compromised
+service can only see / modify its own tables.
 
 ```bash
-# Apply the init migration (creates database `lakko`)
-sudo mariadb < ~/lakko/infra/mariadb/migrations/0001-init.sql
+# One-time: create the per-service databases.
+sudo mariadb <<'SQL'
+    CREATE DATABASE IF NOT EXISTS lakko_auth
+        CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+    CREATE DATABASE IF NOT EXISTS lakko_ds
+        CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+    -- (lakko_discovery, lakko_push_gw — added in their sprints)
+SQL
 
-# Create the service user — password is NOT in git
+# Create the service user — password is NOT in git.
 LAKKO_DB_PASS=$(openssl rand -hex 32)
 sudo mariadb -e "
     CREATE USER 'lakko'@'localhost' IDENTIFIED BY '$LAKKO_DB_PASS';
-    GRANT ALL PRIVILEGES ON lakko.* TO 'lakko'@'localhost';
+    GRANT ALL PRIVILEGES ON lakko_auth.* TO 'lakko'@'localhost';
+    GRANT ALL PRIVILEGES ON lakko_ds.*   TO 'lakko'@'localhost';
     FLUSH PRIVILEGES;
 "
 echo "DB password: $LAKKO_DB_PASS"  # save it — needed in step 7
 ```
+
+Schema migrations themselves are applied automatically by each service
+on first start (`sqlx::migrate!()` embeds the SQL into the binary).
 
 ### 7. /etc/lakko/lakko.env
 
@@ -144,7 +160,9 @@ echo "DB password: $LAKKO_DB_PASS"  # save it — needed in step 7
 sudo mkdir -p /etc/lakko
 sudo cp ~/lakko/infra/etc-lakko/lakko.env.example /etc/lakko/lakko.env
 sudo nano /etc/lakko/lakko.env
-# fill in DATABASE_URL=mysql://lakko:$LAKKO_DB_PASS@127.0.0.1:3306/lakko
+# Replace CHANGE-ME with $LAKKO_DB_PASS in BOTH:
+#   LAKKO_AUTH_DATABASE_URL=mysql://lakko:$LAKKO_DB_PASS@127.0.0.1:3306/lakko_auth
+#   LAKKO_DS_DATABASE_URL=mysql://lakko:$LAKKO_DB_PASS@127.0.0.1:3306/lakko_ds
 
 sudo chown root:lakkome /etc/lakko/lakko.env
 sudo chmod 640 /etc/lakko/lakko.env
