@@ -4,9 +4,13 @@
 //! Auth service for Lakko.
 //!
 //! Phase 1.1a: HTTP server skeleton (axum) + MariaDB pool (sqlx) +
-//! liveness/readiness probes + graceful shutdown. OPAQUE-PAKE auth flows,
-//! WebAuthn passkey registration, PoW + Privacy Pass anti-spam — landing in
-//! sprints 1.1b, 1.1c, 1.1d respectively.
+//! liveness/readiness probes + graceful shutdown.
+//! Phase 1.1b: OPAQUE-PAKE registration (`/signup/{start,finish}`).
+//! Phase 1.1c: OPAQUE-PAKE login (`/login/{start,finish}`).
+//! Phase 1.1d: BIP39 mnemonic recovery — a parallel OPAQUE registration
+//! kind, bundled into signup and exposed for re-authentication via
+//! `/recovery/login/{start,finish}`.
+//! PoW + Privacy Pass anti-spam — sprint 1.1e.
 //!
 //! Configuration via environment variables (loaded by systemd from
 //! `/etc/lakko/lakko.env`):
@@ -15,15 +19,17 @@
 //! - `DATABASE_URL` — sqlx-style MariaDB DSN
 //! - `RUST_LOG` — `tracing-subscriber` env-filter spec
 //!
-//! Endpoints (Phase 1.1a + 1.1b + 1.1c):
+//! Endpoints:
 //!
-//! - `GET  /health`        — liveness (no DB), 200 OK
-//! - `GET  /ready`         — readiness (pings DB), 200 OK or 503
-//! - `GET  /version`       — `{"service", "version", "git_sha"}`
-//! - `POST /signup/start`  — OPAQUE-PAKE registration step 1 (Phase 1.1b)
-//! - `POST /signup/finish` — OPAQUE-PAKE registration step 2 (Phase 1.1b)
-//! - `POST /login/start`   — OPAQUE-PAKE login step 1 (Phase 1.1c)
-//! - `POST /login/finish`  — OPAQUE-PAKE login step 2 (Phase 1.1c)
+//! - `GET  /health`                  — liveness (no DB), 200 OK
+//! - `GET  /ready`                   — readiness (pings DB), 200 OK or 503
+//! - `GET  /version`                 — `{"service", "version", "git_sha"}`
+//! - `POST /signup/start`            — OPAQUE registration step 1 (Phase 1.1b/d)
+//! - `POST /signup/finish`           — OPAQUE registration step 2 (Phase 1.1b/d)
+//! - `POST /login/start`             — OPAQUE login step 1, password (Phase 1.1c)
+//! - `POST /login/finish`            — OPAQUE login step 2, password (Phase 1.1c)
+//! - `POST /recovery/login/start`    — OPAQUE login step 1, BIP39 (Phase 1.1d)
+//! - `POST /recovery/login/finish`   — OPAQUE login step 2, BIP39 (Phase 1.1d)
 
 #![forbid(unsafe_code)]
 
@@ -143,6 +149,11 @@ fn build_app(state: AppState) -> Router {
         .route("/signup/finish", post(opaque::signup_finish))
         .route("/login/start", post(opaque::login_start))
         .route("/login/finish", post(opaque::login_finish))
+        .route("/recovery/login/start", post(opaque::recovery_login_start))
+        .route(
+            "/recovery/login/finish",
+            post(opaque::recovery_login_finish),
+        )
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }

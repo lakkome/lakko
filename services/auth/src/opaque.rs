@@ -8,20 +8,35 @@
 //! which the password cannot be recovered without an MITM at registration
 //! time (guaranteed by OPAQUE math).
 //!
-//! Phase 1.1b: registration (`/signup/start` + `/signup/finish`) — server
-//! is stateless between start and finish.
+//! ## Two parallel registrations per account
 //!
-//! Phase 1.1c: login (`/login/start` + `/login/finish`) — server is
-//! **stateful** between start and finish. `ServerLogin<CS>` is serialized
-//! and stored in the `opaque_login_states` table keyed by session_id
-//! (UUIDv7), TTL 2 minutes. A background pruner periodically deletes
-//! expired rows. DB-backed (not in-memory) so the state survives service
-//! restarts and works correctly under horizontal scale-out.
+//! Phase 1.1d adds a second OPAQUE registration kind alongside the
+//! password one:
+//!
+//!   * **`KIND_PASSWORD`** — derived from the user-typed password
+//!     (Phase 1.1b/c).
+//!   * **`KIND_RECOVERY`** — derived from a BIP39 24-word mnemonic seed
+//!     (Phase 1.1d). Lets the user re-authenticate after losing every
+//!     device on which the password is cached. The mnemonic itself is
+//!     generated and held by the client; the server only ever sees the
+//!     OPAQUE-blinded envelope, exactly as for the password.
+//!
+//! Both envelopes are stored in `opaque_registrations` keyed by
+//! `(account_id, kind)`. To prevent cross-flow attacks (e.g. replaying a
+//! password envelope at a recovery login challenge), the OPAQUE
+//! `credential_id` is domain-separated as `account_id || kind_byte`.
+//!
+//! ## State machine
+//!
+//! Registration is stateless on the server between `/start` and `/finish`.
+//! Login is **stateful**: `ServerLogin<CS>` is serialized and stored in
+//! `opaque_login_states` keyed by `session_id` (UUIDv7), with TTL 2
+//! minutes and a periodic pruner. The row also stores `kind`, and the
+//! `/login/finish` (`KIND_PASSWORD`) and `/recovery/login/finish`
+//! (`KIND_RECOVERY`) handlers refuse a state created for the wrong flow.
 //!
 //! The server-static state (OPRF + AKE keypairs) is generated once on
-//! first start and persisted in the `opaque_server_setup` table.
-//! Per-account registration material lives in `opaque_registrations`,
-//! keyed by `account_id` (UUIDv7 raw bytes), with FK on `accounts(id)`.
+//! first start and persisted in `opaque_server_setup`.
 
 use std::time::Duration;
 
@@ -61,11 +76,30 @@ impl CipherSuite for LakkoCipherSuite {
 /// `account_id` length in bytes (UUIDv7 raw form).
 const ACCOUNT_ID_LEN: usize = 16;
 
+/// Length of the domain-separated OPAQUE credential_id (account_id + kind).
+const CREDENTIAL_ID_LEN: usize = ACCOUNT_ID_LEN + 1;
+
+/// OPAQUE registration kind: derived from the user-typed password.
+const KIND_PASSWORD: u8 = 1;
+
+/// OPAQUE registration kind: derived from the BIP39 mnemonic seed.
+const KIND_RECOVERY: u8 = 2;
+
+/// Build the OPAQUE credential_id by appending the registration kind to
+/// `account_id`. Domain-separates the password and recovery flows so an
+/// envelope from one flow cannot answer a challenge in the other.
+fn build_credential_id(account_id: &[u8; ACCOUNT_ID_LEN], kind: u8) -> [u8; CREDENTIAL_ID_LEN] {
+    let mut out = [0u8; CREDENTIAL_ID_LEN];
+    out[..ACCOUNT_ID_LEN].copy_from_slice(account_id);
+    out[ACCOUNT_ID_LEN] = kind;
+    out
+}
+
 /// Load the server-static OPAQUE setup from the DB; on first start,
 /// generate a fresh one and persist it.
 ///
 /// Singleton-row pattern — the `opaque_server_setup` table has a
-/// CHECK(id=1) constraint, so it physically cannot hold more than one row.
+/// `CHECK(id=1)` constraint, so it physically cannot hold more than one row.
 ///
 /// # Errors
 ///
@@ -100,7 +134,7 @@ pub(crate) async fn load_or_init_server_setup(
 }
 
 /// Decode a base64 `account_id` and validate its length.
-fn decode_account_id(b64: &str) -> Result<Vec<u8>, (StatusCode, String)> {
+fn decode_account_id(b64: &str) -> Result<[u8; ACCOUNT_ID_LEN], (StatusCode, String)> {
     let bytes = B64.decode(b64).map_err(|e| {
         (
             StatusCode::BAD_REQUEST,
@@ -113,7 +147,67 @@ fn decode_account_id(b64: &str) -> Result<Vec<u8>, (StatusCode, String)> {
             format!("account_id must be {ACCOUNT_ID_LEN} bytes after base64 decode"),
         ));
     }
-    Ok(bytes)
+    let mut out = [0u8; ACCOUNT_ID_LEN];
+    out.copy_from_slice(&bytes);
+    Ok(out)
+}
+
+/// Decode a base64-encoded OPAQUE `RegistrationRequest`.
+fn decode_registration_request(
+    b64: &str,
+) -> Result<RegistrationRequest<LakkoCipherSuite>, (StatusCode, String)> {
+    let bytes = B64.decode(b64).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("invalid base64 in RegistrationRequest: {e}"),
+        )
+    })?;
+    RegistrationRequest::<LakkoCipherSuite>::deserialize(&bytes).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("invalid RegistrationRequest: {e:?}"),
+        )
+    })
+}
+
+/// Decode a base64-encoded OPAQUE `RegistrationUpload`.
+fn decode_registration_upload(
+    b64: &str,
+) -> Result<RegistrationUpload<LakkoCipherSuite>, (StatusCode, String)> {
+    let bytes = B64.decode(b64).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("invalid base64 in RegistrationUpload: {e}"),
+        )
+    })?;
+    RegistrationUpload::<LakkoCipherSuite>::deserialize(&bytes).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("invalid RegistrationUpload: {e:?}"),
+        )
+    })
+}
+
+/// Run `ServerRegistration::start` for the given kind and return the
+/// base64-encoded response. Pure function — no DB interaction.
+fn opaque_registration_start(
+    setup: &ServerSetup<LakkoCipherSuite>,
+    account_id: &[u8; ACCOUNT_ID_LEN],
+    kind: u8,
+    request: RegistrationRequest<LakkoCipherSuite>,
+) -> Result<String, (StatusCode, String)> {
+    let credential_id = build_credential_id(account_id, kind);
+    let server_start =
+        ServerRegistration::<LakkoCipherSuite>::start(setup, request, &credential_id).map_err(
+            |e| {
+                tracing::error!(kind, error = ?e, "ServerRegistration::start failed");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal opaque error".to_string(),
+                )
+            },
+        )?;
+    Ok(B64.encode(server_start.message.serialize()))
 }
 
 // ============================================================================
@@ -122,67 +216,74 @@ fn decode_account_id(b64: &str) -> Result<Vec<u8>, (StatusCode, String)> {
 
 /// Registration-start request. The client has already generated an
 /// `account_id` (typically UUIDv7) and a `RegistrationRequest` via
-/// `ClientRegistration::start`.
+/// `ClientRegistration::start` for the password. If the user is also
+/// enrolling a recovery mnemonic in the same signup flow, they include a
+/// second `RegistrationRequest` derived from the BIP39 seed.
 #[derive(Deserialize)]
 pub(crate) struct SignupStartRequest {
     /// Base64-encoded raw bytes of `account_id` (16 bytes, UUIDv7).
     pub(crate) account_id: String,
-    /// Base64-encoded `RegistrationRequest` from the opaque-ke client.
-    pub(crate) request: String,
+    /// Base64-encoded `RegistrationRequest` from the password flow.
+    pub(crate) password_request: String,
+    /// Optional base64-encoded `RegistrationRequest` from the BIP39
+    /// mnemonic seed flow. Recommended — clients SHOULD always enrol a
+    /// recovery mnemonic at signup. Made optional so test / fixture
+    /// callers can opt out.
+    #[serde(default)]
+    pub(crate) recovery_request: Option<String>,
 }
 
-/// Response to `/signup/start` — `RegistrationResponse` to be passed to
-/// `ClientRegistration::finish`.
+/// Response to `/signup/start`. The client passes each response back into
+/// the matching `ClientRegistration::finish` call.
 #[derive(Serialize)]
 pub(crate) struct SignupStartResponse {
-    /// Base64-encoded `RegistrationResponse` from the opaque-ke server.
-    pub(crate) response: String,
+    /// Base64-encoded `RegistrationResponse` for the password flow.
+    pub(crate) password_response: String,
+    /// Base64-encoded `RegistrationResponse` for the recovery flow, if
+    /// the request included `recovery_request`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) recovery_response: Option<String>,
 }
 
 /// `POST /signup/start` — first step of registration.
 ///
-/// The server takes the client's `RegistrationRequest`, runs it through
-/// `ServerRegistration::start` with the server-static setup and
-/// credential_id=account_id, and returns the `RegistrationResponse`.
+/// Runs `ServerRegistration::start` for the password flow and, if the
+/// caller included `recovery_request`, also for the recovery flow. Both
+/// run with the same server-static setup but distinct `credential_id`
+/// values (`account_id || 0x01` vs `account_id || 0x02`).
 ///
 /// **The server stays stateless** between start and finish — OPAQUE math
-/// binds the upload (which arrives in `/signup/finish`) to the response
-/// via account_id and password, so no server-side state is required.
+/// binds each upload (which arrives in `/signup/finish`) to its response.
 pub(crate) async fn signup_start(
     State(state): State<crate::AppState>,
     Json(payload): Json<SignupStartRequest>,
 ) -> Result<Json<SignupStartResponse>, (StatusCode, String)> {
-    let account_id_bytes = decode_account_id(&payload.account_id)?;
+    let account_id = decode_account_id(&payload.account_id)?;
 
-    let request_bytes = B64.decode(&payload.request).map_err(|e| {
-        (
-            StatusCode::BAD_REQUEST,
-            format!("invalid request base64: {e}"),
-        )
-    })?;
-    let request_message = RegistrationRequest::<LakkoCipherSuite>::deserialize(&request_bytes)
-        .map_err(|e| {
-            (
-                StatusCode::BAD_REQUEST,
-                format!("invalid RegistrationRequest: {e:?}"),
-            )
-        })?;
-
-    let server_start = ServerRegistration::<LakkoCipherSuite>::start(
+    let password_request = decode_registration_request(&payload.password_request)?;
+    let password_response = opaque_registration_start(
         &state.opaque_setup,
-        request_message,
-        &account_id_bytes,
-    )
-    .map_err(|e| {
-        tracing::error!(error = ?e, "ServerRegistration::start failed");
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "internal opaque error".to_string(),
-        )
-    })?;
+        &account_id,
+        KIND_PASSWORD,
+        password_request,
+    )?;
+
+    let recovery_response = match payload.recovery_request {
+        Some(req_b64) => {
+            let req = decode_registration_request(&req_b64)?;
+            Some(opaque_registration_start(
+                &state.opaque_setup,
+                &account_id,
+                KIND_RECOVERY,
+                req,
+            )?)
+        },
+        None => None,
+    };
 
     Ok(Json(SignupStartResponse {
-        response: B64.encode(server_start.message.serialize()),
+        password_response,
+        recovery_response,
     }))
 }
 
@@ -190,13 +291,17 @@ pub(crate) async fn signup_start(
 // /signup/finish
 // ============================================================================
 
-/// Registration-finish request. The client has finished
-/// `ClientRegistration` math and produced a `RegistrationUpload`.
+/// Registration-finish request. Includes both uploads if the caller
+/// started both flows in `/signup/start`.
 #[derive(Deserialize)]
 pub(crate) struct SignupFinishRequest {
     pub(crate) account_id: String,
-    /// Base64-encoded `RegistrationUpload` (envelope + masking_key + client AKE pubkey).
-    pub(crate) upload: String,
+    /// Base64-encoded `RegistrationUpload` for the password flow.
+    pub(crate) password_upload: String,
+    /// Base64-encoded `RegistrationUpload` for the recovery flow. Must
+    /// be present iff `signup_start` was called with `recovery_request`.
+    #[serde(default)]
+    pub(crate) recovery_upload: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -206,31 +311,37 @@ pub(crate) struct SignupFinishResponse {
 
 /// `POST /signup/finish` — finalize registration.
 ///
-/// In a single DB transaction: create an `accounts(id=account_id)` row and
-/// store the serialized `ServerRegistration` in `opaque_registrations`. If
-/// `account_id` is already registered, returns `409 Conflict`.
+/// In a single DB transaction:
+///
+///   1. INSERT `accounts(id = account_id)` — uniqueness here is the
+///      anti-replay check.
+///   2. INSERT the password envelope into `opaque_registrations` with
+///      `kind = KIND_PASSWORD`.
+///   3. If `recovery_upload` is present, INSERT the recovery envelope
+///      with `kind = KIND_RECOVERY`.
+///
+/// All-or-nothing: if step 3 fails, step 1 and 2 are rolled back so the
+/// account is not half-registered.
+///
+/// If `account_id` is already registered, returns `409 Conflict`.
 pub(crate) async fn signup_finish(
     State(state): State<crate::AppState>,
     Json(payload): Json<SignupFinishRequest>,
 ) -> Result<Json<SignupFinishResponse>, (StatusCode, String)> {
-    let account_id_bytes = decode_account_id(&payload.account_id)?;
+    let account_id = decode_account_id(&payload.account_id)?;
 
-    let upload_bytes = B64.decode(&payload.upload).map_err(|e| {
-        (
-            StatusCode::BAD_REQUEST,
-            format!("invalid upload base64: {e}"),
-        )
-    })?;
-    let upload_message = RegistrationUpload::<LakkoCipherSuite>::deserialize(&upload_bytes)
-        .map_err(|e| {
-            (
-                StatusCode::BAD_REQUEST,
-                format!("invalid RegistrationUpload: {e:?}"),
-            )
-        })?;
+    let password_upload = decode_registration_upload(&payload.password_upload)?;
+    let password_registration = ServerRegistration::<LakkoCipherSuite>::finish(password_upload);
+    let password_bytes = password_registration.serialize().to_vec();
 
-    let registration = ServerRegistration::<LakkoCipherSuite>::finish(upload_message);
-    let registration_bytes = registration.serialize().to_vec();
+    let recovery_bytes = match payload.recovery_upload {
+        Some(b64) => {
+            let upload = decode_registration_upload(&b64)?;
+            let registration = ServerRegistration::<LakkoCipherSuite>::finish(upload);
+            Some(registration.serialize().to_vec())
+        },
+        None => None,
+    };
 
     let mut tx = state.db.begin().await.map_err(|e| {
         tracing::error!(error = %e, "begin tx");
@@ -242,7 +353,7 @@ pub(crate) async fn signup_finish(
 
     // Insert account row. PK collision means account_id is already taken.
     let account_insert = sqlx::query("INSERT INTO accounts (id) VALUES (?)")
-        .bind(&account_id_bytes)
+        .bind(&account_id[..])
         .execute(&mut *tx)
         .await;
 
@@ -263,18 +374,42 @@ pub(crate) async fn signup_finish(
         },
     }
 
-    sqlx::query("INSERT INTO opaque_registrations (account_id, registration_bytes) VALUES (?, ?)")
-        .bind(&account_id_bytes)
-        .bind(&registration_bytes)
+    sqlx::query(
+        "INSERT INTO opaque_registrations (account_id, kind, registration_bytes) \
+         VALUES (?, ?, ?)",
+    )
+    .bind(&account_id[..])
+    .bind(KIND_PASSWORD)
+    .bind(&password_bytes)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| {
+        tracing::error!(error = %e, "insert opaque_registrations (password)");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal db error".to_string(),
+        )
+    })?;
+
+    let with_recovery = recovery_bytes.is_some();
+    if let Some(bytes) = recovery_bytes {
+        sqlx::query(
+            "INSERT INTO opaque_registrations (account_id, kind, registration_bytes) \
+             VALUES (?, ?, ?)",
+        )
+        .bind(&account_id[..])
+        .bind(KIND_RECOVERY)
+        .bind(&bytes)
         .execute(&mut *tx)
         .await
         .map_err(|e| {
-            tracing::error!(error = %e, "insert opaque_registrations");
+            tracing::error!(error = %e, "insert opaque_registrations (recovery)");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "internal db error".to_string(),
             )
         })?;
+    }
 
     tx.commit().await.map_err(|e| {
         tracing::error!(error = %e, "commit tx");
@@ -284,7 +419,11 @@ pub(crate) async fn signup_finish(
         )
     })?;
 
-    tracing::info!(account_id = %B64.encode(&account_id_bytes), "signup completed");
+    tracing::info!(
+        account_id = %B64.encode(account_id),
+        with_recovery,
+        "signup completed",
+    );
     Ok(Json(SignupFinishResponse { ok: true }))
 }
 
@@ -307,15 +446,17 @@ async fn insert_login_state(
     pool: &MySqlPool,
     state: &ServerLogin<LakkoCipherSuite>,
     account_id: &[u8; ACCOUNT_ID_LEN],
+    kind: u8,
 ) -> Result<Uuid, sqlx::Error> {
     let session_id = Uuid::now_v7();
     let state_bytes = state.serialize().to_vec();
     sqlx::query(
-        "INSERT INTO opaque_login_states (session_id, account_id, state_bytes) \
-         VALUES (?, ?, ?)",
+        "INSERT INTO opaque_login_states (session_id, account_id, kind, state_bytes) \
+         VALUES (?, ?, ?, ?)",
     )
     .bind(session_id.as_bytes().as_slice())
     .bind(&account_id[..])
+    .bind(kind)
     .bind(&state_bytes)
     .execute(pool)
     .await?;
@@ -330,15 +471,15 @@ async fn insert_login_state(
 async fn take_login_state(
     pool: &MySqlPool,
     session_id: Uuid,
-) -> Result<Option<(ServerLogin<LakkoCipherSuite>, [u8; ACCOUNT_ID_LEN])>, sqlx::Error> {
+) -> Result<Option<(ServerLogin<LakkoCipherSuite>, [u8; ACCOUNT_ID_LEN], u8)>, sqlx::Error> {
     // Atomically: fetch the row (with TTL check) and delete it.
     // MySQL/MariaDB has no `DELETE ... RETURNING`, so we use a transaction:
     //   1. SELECT ... FOR UPDATE
     //   2. DELETE
     let mut tx = pool.begin().await?;
 
-    let row: Option<(Vec<u8>, Vec<u8>)> = sqlx::query_as(
-        "SELECT state_bytes, account_id FROM opaque_login_states \
+    let row: Option<(Vec<u8>, Vec<u8>, u8)> = sqlx::query_as(
+        "SELECT state_bytes, account_id, kind FROM opaque_login_states \
          WHERE session_id = ? \
            AND created_at >= NOW(3) - INTERVAL ? SECOND \
          FOR UPDATE",
@@ -348,7 +489,7 @@ async fn take_login_state(
     .fetch_optional(&mut *tx)
     .await?;
 
-    let Some((state_bytes, account_id_vec)) = row else {
+    let Some((state_bytes, account_id_vec, kind)) = row else {
         // No row, or expired. DELETE anyway in case the row exists and is
         // simply past its TTL (the pruner will eventually clean it up too,
         // but doing it here keeps the table tight).
@@ -373,7 +514,7 @@ async fn take_login_state(
         return Ok(None);
     }
     acct.copy_from_slice(&account_id_vec);
-    Ok(Some((server_login, acct)))
+    Ok(Some((server_login, acct, kind)))
 }
 
 /// Spawn a background task that runs every `LOGIN_STATE_PRUNE_INTERVAL` and
@@ -408,7 +549,7 @@ pub(crate) fn spawn_login_state_pruner(pool: MySqlPool) -> tokio::task::JoinHand
 }
 
 // ============================================================================
-// /login/start
+// Login: shared inner flow
 // ============================================================================
 
 #[derive(Deserialize)]
@@ -426,22 +567,37 @@ pub(crate) struct LoginStartResponse {
     pub(crate) response: String,
 }
 
-/// `POST /login/start` — first login step.
+#[derive(Deserialize)]
+pub(crate) struct LoginFinishRequest {
+    pub(crate) session_id: String,
+    /// Base64-encoded `CredentialFinalization` from `ClientLogin::finish`.
+    pub(crate) finalize: String,
+}
+
+#[derive(Serialize)]
+pub(crate) struct LoginFinishResponse {
+    pub(crate) ok: bool,
+    /// Base64-encoded account_id (16 raw UUIDv7 bytes) — the client pins
+    /// this for follow-up requests. A real session token (JWT or DB-backed
+    /// session) is a separate sub-sprint.
+    pub(crate) account_id: String,
+}
+
+/// Shared `/login/start` handler parameterised by `kind`.
 ///
-/// The server takes the client's `CredentialRequest`, looks up the
-/// corresponding `ServerRegistration` in `opaque_registrations`, runs
-/// `ServerLogin::start`, and returns `CredentialResponse` plus a session_id.
-/// The state is stored in DB so any instance can answer `/login/finish`.
-///
-/// If the account is unknown, we still go through the motions
-/// (`ServerLogin::start` with `password_file=None` produces a
-/// cryptographically plausible response — the "fake credentials" path).
-/// This prevents a username-enumeration timing channel.
-pub(crate) async fn login_start(
-    State(state): State<crate::AppState>,
-    Json(payload): Json<LoginStartRequest>,
+/// Looks up `opaque_registrations(account_id, kind)`. If no row is found
+/// (unknown account or no recovery enrolled), passes `None` to
+/// `ServerLogin::start` — opaque-ke 3.0 takes the fake-credentials path
+/// and produces a plausible response that cannot be distinguished from a
+/// real login with the wrong secret. This blocks both account enumeration
+/// AND recovery-enrolment enumeration.
+async fn login_start_inner(
+    state: &crate::AppState,
+    payload: LoginStartRequest,
+    kind: u8,
 ) -> Result<Json<LoginStartResponse>, (StatusCode, String)> {
-    let account_id_bytes = decode_account_id(&payload.account_id)?;
+    let account_id = decode_account_id(&payload.account_id)?;
+    let credential_id = build_credential_id(&account_id, kind);
 
     let request_bytes = B64.decode(&payload.request).map_err(|e| {
         (
@@ -457,14 +613,12 @@ pub(crate) async fn login_start(
             )
         })?;
 
-    // Fetch stored ServerRegistration. If no row exists (unknown account),
-    // pass `None` to ServerLogin::start — opaque-ke 3.0 takes the
-    // fake-credentials path and produces a plausible response that can't
-    // be distinguished from a real login with the wrong password.
     let stored: Option<ServerRegistration<LakkoCipherSuite>> = sqlx::query_as::<_, (Vec<u8>,)>(
-        "SELECT registration_bytes FROM opaque_registrations WHERE account_id = ?",
+        "SELECT registration_bytes FROM opaque_registrations \
+         WHERE account_id = ? AND kind = ?",
     )
-    .bind(&account_id_bytes[..])
+    .bind(&account_id[..])
+    .bind(kind)
     .fetch_optional(&state.db)
     .await
     .map_err(|e| {
@@ -485,22 +639,18 @@ pub(crate) async fn login_start(
         &state.opaque_setup,
         stored,
         request_message,
-        &account_id_bytes,
+        &credential_id,
         ServerLoginStartParameters::default(),
     )
     .map_err(|e| {
-        tracing::error!(error = ?e, "ServerLogin::start failed");
+        tracing::error!(kind, error = ?e, "ServerLogin::start failed");
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             "internal opaque error".to_string(),
         )
     })?;
 
-    // Convert Vec<u8> to [u8; 16] for DB (length validated above).
-    let mut acct = [0u8; ACCOUNT_ID_LEN];
-    acct.copy_from_slice(&account_id_bytes);
-
-    let session_id = insert_login_state(&state.db, &server_start.state, &acct)
+    let session_id = insert_login_state(&state.db, &server_start.state, &account_id, kind)
         .await
         .map_err(|e| {
             tracing::error!(error = %e, "insert opaque_login_states");
@@ -516,39 +666,16 @@ pub(crate) async fn login_start(
     }))
 }
 
-// ============================================================================
-// /login/finish
-// ============================================================================
-
-#[derive(Deserialize)]
-pub(crate) struct LoginFinishRequest {
-    pub(crate) session_id: String,
-    /// Base64-encoded `CredentialFinalization` from `ClientLogin::finish`.
-    pub(crate) finalize: String,
-}
-
-#[derive(Serialize)]
-pub(crate) struct LoginFinishResponse {
-    pub(crate) ok: bool,
-    /// Base64-encoded account_id (16 raw UUIDv7 bytes) — the client pins
-    /// this for follow-up requests. A real session token (JWT or DB-backed
-    /// session) is a separate sub-sprint after 1.1c.
-    pub(crate) account_id: String,
-}
-
-/// `POST /login/finish` — finalize login.
+/// Shared `/login/finish` handler parameterised by `expected_kind`.
 ///
-/// Takes `CredentialFinalization` from the client and runs
-/// `ServerLogin::finish`. If the math checks out, the password is correct,
-/// and both sides have derived the same session_key. We return account_id;
-/// proper session-token machinery (JWT signed by the auth-service key, or
-/// a DB-backed `sessions` table) is a separate sub-sprint.
-///
-/// If session_id is unknown or expired (TTL 2 minutes), returns 401.
-/// If `CredentialFinalization` doesn't validate, returns 401 (wrong password).
-pub(crate) async fn login_finish(
-    State(state): State<crate::AppState>,
-    Json(payload): Json<LoginFinishRequest>,
+/// The login state row carries the kind it was created for; we refuse to
+/// finalize if it doesn't match the endpoint that's serving the request
+/// (anti confused-deputy: a session started at `/login/start` cannot be
+/// finalized at `/recovery/login/finish`, and vice versa).
+async fn login_finish_inner(
+    state: &crate::AppState,
+    payload: LoginFinishRequest,
+    expected_kind: u8,
 ) -> Result<Json<LoginFinishResponse>, (StatusCode, String)> {
     let session_id = Uuid::parse_str(&payload.session_id).map_err(|e| {
         (
@@ -571,7 +698,23 @@ pub(crate) async fn login_finish(
             "session_id unknown or expired".to_string(),
         ))?;
 
-    let (server_login, account_id) = cached;
+    let (server_login, account_id, kind) = cached;
+
+    if kind != expected_kind {
+        // The session was started for a different flow. Treat as 401 —
+        // we already deleted the row in `take_login_state`, so an attacker
+        // gets one shot at most.
+        tracing::warn!(
+            session_kind = kind,
+            expected_kind,
+            account_id = %B64.encode(account_id),
+            "login_finish: session kind mismatch (cross-flow attempt)",
+        );
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            "session_id was started for a different flow".to_string(),
+        ));
+    }
 
     let finalize_bytes = B64.decode(&payload.finalize).map_err(|e| {
         (
@@ -587,28 +730,70 @@ pub(crate) async fn login_finish(
             )
         })?;
 
-    // ServerLogin::finish validates the client's AKE proof. Wrong password
-    // means finish returns an error.
     let _result = server_login.finish(finalize_message).map_err(|e| {
-        // Internal-only log — we never leak "user exists but wrong password"
+        // Internal-only log — we never leak "user exists but wrong secret"
         // vs "user doesn't exist" to the client.
-        tracing::debug!(error = ?e, account_id = %B64.encode(account_id), "login finalization failed");
-        (
-            StatusCode::UNAUTHORIZED,
-            "invalid credentials".to_string(),
-        )
+        tracing::debug!(
+            kind,
+            error = ?e,
+            account_id = %B64.encode(account_id),
+            "login finalization failed",
+        );
+        (StatusCode::UNAUTHORIZED, "invalid credentials".to_string())
     })?;
 
-    // At this point the server and client have derived a matching
-    // session_key (both derive identically from the AKE handshake). Phase
-    // 1.1c does NOT issue a session token — that's deferred. We just
-    // confirm login succeeded.
-    tracing::info!(account_id = %B64.encode(account_id), "login completed");
+    tracing::info!(kind, account_id = %B64.encode(account_id), "login completed");
 
     Ok(Json(LoginFinishResponse {
         ok: true,
         account_id: B64.encode(account_id),
     }))
+}
+
+// ============================================================================
+// /login/{start,finish} — password flow
+// ============================================================================
+
+/// `POST /login/start` — first login step (password flow).
+pub(crate) async fn login_start(
+    State(state): State<crate::AppState>,
+    Json(payload): Json<LoginStartRequest>,
+) -> Result<Json<LoginStartResponse>, (StatusCode, String)> {
+    login_start_inner(&state, payload, KIND_PASSWORD).await
+}
+
+/// `POST /login/finish` — finalize login (password flow).
+pub(crate) async fn login_finish(
+    State(state): State<crate::AppState>,
+    Json(payload): Json<LoginFinishRequest>,
+) -> Result<Json<LoginFinishResponse>, (StatusCode, String)> {
+    login_finish_inner(&state, payload, KIND_PASSWORD).await
+}
+
+// ============================================================================
+// /recovery/login/{start,finish} — BIP39 mnemonic flow
+// ============================================================================
+
+/// `POST /recovery/login/start` — first step of recovery login.
+///
+/// The "password" input on the client side is a 64-byte seed derived
+/// from a 24-word BIP39 mnemonic via PBKDF2-HMAC-SHA512 per the BIP39
+/// spec. The server treats the seed as opaque bytes and runs the same
+/// OPAQUE math as the password flow, only with a different stored
+/// envelope (kind = `KIND_RECOVERY`).
+pub(crate) async fn recovery_login_start(
+    State(state): State<crate::AppState>,
+    Json(payload): Json<LoginStartRequest>,
+) -> Result<Json<LoginStartResponse>, (StatusCode, String)> {
+    login_start_inner(&state, payload, KIND_RECOVERY).await
+}
+
+/// `POST /recovery/login/finish` — finalize recovery login.
+pub(crate) async fn recovery_login_finish(
+    State(state): State<crate::AppState>,
+    Json(payload): Json<LoginFinishRequest>,
+) -> Result<Json<LoginFinishResponse>, (StatusCode, String)> {
+    login_finish_inner(&state, payload, KIND_RECOVERY).await
 }
 
 // ============================================================================
@@ -629,7 +814,7 @@ mod tests {
     fn registration_roundtrip_in_memory() {
         let mut rng = OsRng;
         let server_setup = ServerSetup::<LakkoCipherSuite>::new(&mut rng);
-        let credential_id = b"0123456789abcdef"; // 16 bytes — pretend UUIDv7
+        let credential_id = b"0123456789abcdef\x01"; // 17 bytes — account_id || KIND_PASSWORD
         let password = b"correct horse battery staple";
 
         // Client: start.
@@ -683,157 +868,220 @@ mod tests {
         assert_eq!(err.0, StatusCode::BAD_REQUEST);
     }
 
-    /// Full flow: register → login with the correct password. Both sides
-    /// must end up with matching session_keys.
     #[test]
-    fn login_with_correct_password_succeeds() {
-        let mut rng = OsRng;
-        let server_setup = ServerSetup::<LakkoCipherSuite>::new(&mut rng);
-        let credential_id = b"0123456789abcdef";
-        let password = b"correct horse battery staple";
-
-        // ----- Registration (produces a stored ServerRegistration) -----
-        let cs = ClientRegistration::<LakkoCipherSuite>::start(&mut rng, password).unwrap();
-        let ss =
-            ServerRegistration::<LakkoCipherSuite>::start(&server_setup, cs.message, credential_id)
-                .unwrap();
-        let cf = cs
-            .state
-            .finish(
-                &mut rng,
-                password,
-                ss.message,
-                ClientRegistrationFinishParameters::default(),
-            )
-            .unwrap();
-        let stored = ServerRegistration::<LakkoCipherSuite>::finish(cf.message);
-
-        // ----- Login -----
-        // Client: start.
-        let cl_start = ClientLogin::<LakkoCipherSuite>::start(&mut rng, password).unwrap();
-
-        // Server: start (with the stored registration).
-        let sl_start = ServerLogin::<LakkoCipherSuite>::start(
-            &mut rng,
-            &server_setup,
-            Some(stored),
-            cl_start.message,
-            credential_id,
-            ServerLoginStartParameters::default(),
-        )
-        .unwrap();
-
-        // Client: finish — produces the client session_key.
-        let cl_finish = cl_start
-            .state
-            .finish(
-                password,
-                sl_start.message,
-                ClientLoginFinishParameters::default(),
-            )
-            .unwrap();
-
-        // Server: finish — produces the server session_key.
-        let sl_finish = sl_start.state.finish(cl_finish.message).unwrap();
-
-        // Core invariant: client and server agree on the session_key. If
-        // this passes, authentication succeeded.
-        assert_eq!(
-            cl_finish.session_key.as_slice(),
-            sl_finish.session_key.as_slice(),
-        );
+    fn build_credential_id_includes_kind_byte() {
+        let acct = [0xABu8; ACCOUNT_ID_LEN];
+        let pw = build_credential_id(&acct, KIND_PASSWORD);
+        let rc = build_credential_id(&acct, KIND_RECOVERY);
+        assert_eq!(pw.len(), CREDENTIAL_ID_LEN);
+        assert_eq!(rc.len(), CREDENTIAL_ID_LEN);
+        assert_eq!(&pw[..ACCOUNT_ID_LEN], &acct[..]);
+        assert_eq!(&rc[..ACCOUNT_ID_LEN], &acct[..]);
+        assert_eq!(pw[ACCOUNT_ID_LEN], KIND_PASSWORD);
+        assert_eq!(rc[ACCOUNT_ID_LEN], KIND_RECOVERY);
+        assert_ne!(pw, rc, "password and recovery must domain-separate");
     }
 
-    /// Login with the wrong password must fail at `ClientLogin::finish`
-    /// (or `ServerLogin::finish`, depending on where the AKE proof breaks).
-    #[test]
-    fn login_with_wrong_password_fails() {
-        let mut rng = OsRng;
-        let server_setup = ServerSetup::<LakkoCipherSuite>::new(&mut rng);
-        let credential_id = b"0123456789abcdef";
-        let real_password = b"correct horse battery staple";
-        let wrong_password = b"hunter2";
-
-        // ----- Register with real_password -----
-        let cs = ClientRegistration::<LakkoCipherSuite>::start(&mut rng, real_password).unwrap();
-        let ss =
-            ServerRegistration::<LakkoCipherSuite>::start(&server_setup, cs.message, credential_id)
-                .unwrap();
+    /// Helper: full OPAQUE registration round-trip, returns the stored
+    /// `ServerRegistration` for use in a subsequent login.
+    fn register(
+        setup: &ServerSetup<LakkoCipherSuite>,
+        rng: &mut OsRng,
+        credential_id: &[u8],
+        password: &[u8],
+    ) -> ServerRegistration<LakkoCipherSuite> {
+        let cs = ClientRegistration::<LakkoCipherSuite>::start(rng, password).unwrap();
+        let ss = ServerRegistration::<LakkoCipherSuite>::start(setup, cs.message, credential_id)
+            .unwrap();
         let cf = cs
             .state
             .finish(
-                &mut rng,
-                real_password,
+                rng,
+                password,
                 ss.message,
                 ClientRegistrationFinishParameters::default(),
             )
             .unwrap();
-        let stored = ServerRegistration::<LakkoCipherSuite>::finish(cf.message);
+        ServerRegistration::<LakkoCipherSuite>::finish(cf.message)
+    }
 
-        // ----- Login with wrong_password -----
-        let cl_start = ClientLogin::<LakkoCipherSuite>::start(&mut rng, wrong_password).unwrap();
+    /// Helper: full OPAQUE login round-trip; returns whether the session
+    /// keys agree (i.e. authentication succeeded).
+    fn try_login(
+        setup: &ServerSetup<LakkoCipherSuite>,
+        rng: &mut OsRng,
+        credential_id: &[u8],
+        password: &[u8],
+        stored: Option<ServerRegistration<LakkoCipherSuite>>,
+    ) -> bool {
+        let cl_start = ClientLogin::<LakkoCipherSuite>::start(rng, password).unwrap();
         let sl_start = ServerLogin::<LakkoCipherSuite>::start(
-            &mut rng,
-            &server_setup,
-            Some(stored),
+            rng,
+            setup,
+            stored,
             cl_start.message,
             credential_id,
             ServerLoginStartParameters::default(),
         )
         .unwrap();
-
-        // ClientLogin::finish typically fails here when the server's
-        // CredentialResponse doesn't match what the client expected — the
-        // envelope can't be decrypted without the right password.
-        let result = cl_start.state.finish(
-            wrong_password,
+        let cl_finish = cl_start.state.finish(
+            password,
             sl_start.message,
             ClientLoginFinishParameters::default(),
         );
-        assert!(result.is_err(), "login with wrong password must fail");
+        let Ok(cl_finish) = cl_finish else {
+            return false;
+        };
+        let Ok(sl_finish) = sl_start.state.finish(cl_finish.message) else {
+            return false;
+        };
+        cl_finish.session_key.as_slice() == sl_finish.session_key.as_slice()
+    }
+
+    /// Full flow: register → login with the correct password.
+    #[test]
+    fn login_with_correct_password_succeeds() {
+        let mut rng = OsRng;
+        let setup = ServerSetup::<LakkoCipherSuite>::new(&mut rng);
+        let acct = [0u8; ACCOUNT_ID_LEN];
+        let cred = build_credential_id(&acct, KIND_PASSWORD);
+        let password = b"correct horse battery staple";
+
+        let stored = register(&setup, &mut rng, &cred, password);
+        assert!(try_login(&setup, &mut rng, &cred, password, Some(stored)));
+    }
+
+    /// Login with the wrong password must fail at one of the AKE finish
+    /// steps (envelope decryption produces the wrong session_key).
+    #[test]
+    fn login_with_wrong_password_fails() {
+        let mut rng = OsRng;
+        let setup = ServerSetup::<LakkoCipherSuite>::new(&mut rng);
+        let acct = [0u8; ACCOUNT_ID_LEN];
+        let cred = build_credential_id(&acct, KIND_PASSWORD);
+        let real = b"correct horse battery staple";
+        let wrong = b"hunter2";
+
+        let stored = register(&setup, &mut rng, &cred, real);
+        assert!(!try_login(&setup, &mut rng, &cred, wrong, Some(stored)));
     }
 
     /// `ServerLogin` serializes and deserializes byte-identically — proxy
-    /// for the DB roundtrip (`insert_login_state` → `take_login_state`)
-    /// without needing a real MariaDB. Real DB roundtrip is covered by
-    /// integration tests against a live database.
+    /// for the DB roundtrip without needing a real MariaDB.
     #[test]
     fn server_login_state_serializes_roundtrip() {
         let mut rng = OsRng;
         let setup = ServerSetup::<LakkoCipherSuite>::new(&mut rng);
-        let cred = b"0123456789abcdef";
+        let acct = [0u8; ACCOUNT_ID_LEN];
+        let cred = build_credential_id(&acct, KIND_PASSWORD);
         let pw = b"x";
 
-        // Mini-registration to produce a stored ServerRegistration.
-        let cs = ClientRegistration::<LakkoCipherSuite>::start(&mut rng, pw).unwrap();
-        let ss = ServerRegistration::<LakkoCipherSuite>::start(&setup, cs.message, cred).unwrap();
-        let cf = cs
-            .state
-            .finish(
-                &mut rng,
-                pw,
-                ss.message,
-                ClientRegistrationFinishParameters::default(),
-            )
-            .unwrap();
-        let stored = ServerRegistration::<LakkoCipherSuite>::finish(cf.message);
-
-        // Login start, capturing the ServerLogin state.
+        let stored = register(&setup, &mut rng, &cred, pw);
         let cl = ClientLogin::<LakkoCipherSuite>::start(&mut rng, pw).unwrap();
         let sl = ServerLogin::<LakkoCipherSuite>::start(
             &mut rng,
             &setup,
             Some(stored),
             cl.message,
-            cred,
+            &cred,
             ServerLoginStartParameters::default(),
         )
         .unwrap();
 
-        // Serialize + deserialize.
         let bytes = sl.state.serialize().to_vec();
         let restored =
             ServerLogin::<LakkoCipherSuite>::deserialize(&bytes).expect("ServerLogin deserialize");
         assert_eq!(bytes.as_slice(), restored.serialize().as_slice());
+    }
+
+    /// Phase 1.1d: an account can carry parallel password and recovery
+    /// envelopes. Each unlocks only with its own secret AND only via its
+    /// own credential_id.
+    #[test]
+    fn recovery_envelope_unlocks_with_seed() {
+        let mut rng = OsRng;
+        let setup = ServerSetup::<LakkoCipherSuite>::new(&mut rng);
+        let acct = [0xAB; ACCOUNT_ID_LEN];
+
+        let pw_cred = build_credential_id(&acct, KIND_PASSWORD);
+        let rc_cred = build_credential_id(&acct, KIND_RECOVERY);
+
+        let password = b"swordfish";
+        // 64-byte BIP39 seed (real clients derive this from a 24-word
+        // mnemonic via PBKDF2-HMAC-SHA512; the server only sees opaque
+        // bytes here, so the test uses a constant byte string).
+        let seed: &[u8; 64] = b"\
+            0123456789abcdef0123456789abcdef\
+            0123456789abcdef0123456789abcdef";
+
+        let pw_stored = register(&setup, &mut rng, &pw_cred, password);
+        let rc_stored = register(&setup, &mut rng, &rc_cred, seed);
+
+        // Each envelope unlocks with its own secret on its own credential_id.
+        assert!(try_login(
+            &setup,
+            &mut rng,
+            &pw_cred,
+            password,
+            Some(pw_stored.clone())
+        ));
+        assert!(try_login(
+            &setup,
+            &mut rng,
+            &rc_cred,
+            seed,
+            Some(rc_stored.clone())
+        ));
+    }
+
+    /// Phase 1.1d: a stolen password envelope cannot answer a recovery
+    /// challenge — the credential_id mismatch (kind byte) breaks the AKE.
+    #[test]
+    fn password_envelope_rejected_at_recovery_endpoint() {
+        let mut rng = OsRng;
+        let setup = ServerSetup::<LakkoCipherSuite>::new(&mut rng);
+        let acct = [0xCD; ACCOUNT_ID_LEN];
+
+        let pw_cred = build_credential_id(&acct, KIND_PASSWORD);
+        let rc_cred = build_credential_id(&acct, KIND_RECOVERY);
+        let password = b"hunter2";
+
+        let pw_stored = register(&setup, &mut rng, &pw_cred, password);
+
+        // Try to authenticate at the RECOVERY credential_id with the
+        // password envelope and the password itself. Must fail because
+        // the credential_id used to seal the envelope (kind=password)
+        // differs from the credential_id presented at login (kind=recovery).
+        assert!(
+            !try_login(&setup, &mut rng, &rc_cred, password, Some(pw_stored)),
+            "cross-kind login must be rejected by AKE",
+        );
+    }
+
+    /// Phase 1.1d: a wrong BIP39 seed against the correct recovery
+    /// envelope must fail.
+    #[test]
+    fn recovery_login_with_wrong_seed_fails() {
+        let mut rng = OsRng;
+        let setup = ServerSetup::<LakkoCipherSuite>::new(&mut rng);
+        let acct = [0xEF; ACCOUNT_ID_LEN];
+        let cred = build_credential_id(&acct, KIND_RECOVERY);
+
+        let real_seed: &[u8; 64] = b"\
+            0000000000000000000000000000000\
+            00000000000000000000000000000000\
+            0";
+        let wrong_seed: &[u8; 64] = b"\
+            ffffffffffffffffffffffffffffffff\
+            ffffffffffffffffffffffffffffffff";
+
+        let stored = register(&setup, &mut rng, &cred, real_seed);
+        assert!(!try_login(
+            &setup,
+            &mut rng,
+            &cred,
+            wrong_seed,
+            Some(stored)
+        ));
     }
 }
