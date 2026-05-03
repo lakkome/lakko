@@ -15,28 +15,36 @@
 //! - `DATABASE_URL` — sqlx-style MariaDB DSN
 //! - `RUST_LOG` — `tracing-subscriber` env-filter spec
 //!
-//! Endpoints (Phase 1.1a):
+//! Endpoints (Phase 1.1a + 1.1b):
 //!
-//! - `GET /health` — liveness (no DB), 200 OK
-//! - `GET /ready` — readiness (pings DB), 200 OK or 503
-//! - `GET /version` — `{"service": "...", "version": "...", "git_sha": "..."}`
+//! - `GET  /health`        — liveness (no DB), 200 OK
+//! - `GET  /ready`         — readiness (pings DB), 200 OK or 503
+//! - `GET  /version`       — `{"service", "version", "git_sha"}`
+//! - `POST /signup/start`  — OPAQUE-PAKE registration step 1 (Phase 1.1b)
+//! - `POST /signup/finish` — OPAQUE-PAKE registration step 2 (Phase 1.1b)
 
 #![forbid(unsafe_code)]
 
+mod opaque;
+
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::Router;
+use opaque_ke::ServerSetup;
 use serde_json::json;
 use sqlx::mysql::MySqlPoolOptions;
 use sqlx::MySqlPool;
 use tokio::signal;
 use tower_http::trace::TraceLayer;
+
+use crate::opaque::LakkoCipherSuite;
 
 /// Default bind address if `LAKKO_BIND` is not set.
 const DEFAULT_BIND: &str = "127.0.0.1:8081";
@@ -46,9 +54,17 @@ const DEFAULT_BIND: &str = "127.0.0.1:8081";
 const MIGRATIONS: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
 /// Shared application state.
+///
+/// Все поля — `Clone`-able (либо primitive, либо `Arc<...>`). axum требует
+/// `Clone + Send + Sync` для extractor `State<AppState>`.
 #[derive(Clone)]
-struct AppState {
-    db: MySqlPool,
+pub(crate) struct AppState {
+    pub(crate) db: MySqlPool,
+    /// Серверная статическая OPAQUE-настройка — один на весь instance,
+    /// загружена / создана при bootstrap. `Arc` чтобы избежать клонирования
+    /// (внутри есть scalar / point данные, не bigger чем сотни байт, но
+    /// `Arc` всё равно дешевле).
+    pub(crate) opaque_setup: Arc<ServerSetup<LakkoCipherSuite>>,
 }
 
 #[tokio::main]
@@ -82,7 +98,16 @@ async fn main() -> Result<()> {
     // Apply embedded migrations on startup. Idempotent.
     MIGRATIONS.run(&pool).await.context("run sqlx migrations")?;
 
-    let state = AppState { db: pool.clone() };
+    // Load (or initialize on first run) the server-static OPAQUE setup.
+    // Runs AFTER migrations so opaque_server_setup table exists.
+    let opaque_setup = opaque::load_or_init_server_setup(&pool)
+        .await
+        .context("load OPAQUE ServerSetup")?;
+
+    let state = AppState {
+        db: pool.clone(),
+        opaque_setup: Arc::new(opaque_setup),
+    };
     let app = build_app(state);
 
     let listener = tokio::net::TcpListener::bind(bind)
@@ -107,6 +132,8 @@ fn build_app(state: AppState) -> Router {
         .route("/health", get(health))
         .route("/ready", get(ready))
         .route("/version", get(version))
+        .route("/signup/start", post(opaque::signup_start))
+        .route("/signup/finish", post(opaque::signup_finish))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }

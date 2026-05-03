@@ -44,6 +44,15 @@ sqlx = { version = "0.8", default-features = false, features = [
 # EnvironmentFile= /etc/lakko/lakko.env, см. infra/systemd/*.service.
 dotenvy = "0.15"
 
+# OPAQUE-PAKE (RFC draft `opaque`) — password auth without server seeing
+# plaintext. Ristretto255 + TripleDH + Argon2id ciphersuite. opaque-ke
+# имплементация от Facebook/Meta — единственная зрелая Rust-крата.
+opaque-ke = { version = "3", features = ["argon2"] }
+argon2 = "0.5"
+rand = "0.8"
+base64 = "0.22"
+uuid = { version = "1", features = ["v7", "serde"] }
+
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
