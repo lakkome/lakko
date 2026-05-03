@@ -4,8 +4,13 @@
 //! MLS Delivery Service for Lakko.
 //!
 //! Phase 1.3 — skeleton: append-only MariaDB-backed journals for both
-//! per-group fan-out and per-device direct mailboxes. Cursor-pull only;
-//! long-poll and QUIC stream push land in 1.4.
+//! per-group fan-out and per-device direct mailboxes.
+//! Phase 1.4 — long-poll fanout. GET endpoints accept `?wait=<secs>`;
+//! POST handlers wake any in-flight long-polls on the same `(queue,
+//! owner_id)` key via an in-process `tokio::sync::Notify` map. Real-time
+//! delivery without WebSocket/SSE complexity. Multi-instance fanout
+//! (NATS / Redis pub/sub) is Phase 2 horizontal-scaling work; QUIC
+//! stream push is Phase 5.
 //!
 //! The server is **blind**:
 //!
@@ -36,9 +41,9 @@
 //! - `GET    /ready`                               — readiness (DB ping), 200 / 503
 //! - `GET    /version`
 //! - `POST   /ds/group/{group_id_hex}/messages`    — publish to group (1 MB cap)
-//! - `GET    /ds/group/{group_id_hex}/messages`    — `?after=<id>&limit=<n>`
+//! - `GET    /ds/group/{group_id_hex}/messages`    — `?after=<id>&limit=<n>&wait=<secs>`
 //! - `POST   /ds/mailbox/{device_id_hex}/messages` — publish to device mailbox
-//! - `GET    /ds/mailbox/{device_id_hex}/messages` — `?after=<id>&limit=<n>`
+//! - `GET    /ds/mailbox/{device_id_hex}/messages` — `?after=<id>&limit=<n>&wait=<secs>`
 //!
 //! See `~/.claude/plans/1-nested-wreath.md` §4 (MLS Delivery Service).
 
@@ -73,6 +78,12 @@ const MIGRATIONS: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 #[derive(Clone)]
 pub(crate) struct AppState {
     pub(crate) db: MySqlPool,
+    /// Per-pseudonym notifiers for long-poll fanout. POST handlers call
+    /// `notify_waiters()` for the matching key; GET handlers with
+    /// `?wait=<secs>` register on `Notify::notified()` and wake up.
+    /// In-process only — multi-instance fanout (NATS / Redis pub/sub)
+    /// is Phase 2 horizontal-scaling work.
+    pub(crate) notifiers: journal::Notifiers,
 }
 
 #[tokio::main]
@@ -106,7 +117,10 @@ async fn main() -> Result<()> {
 
     MIGRATIONS.run(&pool).await.context("run sqlx migrations")?;
 
-    let state = AppState { db: pool.clone() };
+    let state = AppState {
+        db: pool.clone(),
+        notifiers: journal::Notifiers::default(),
+    };
 
     let _pruner = journal::spawn_pruner(pool.clone());
 

@@ -14,6 +14,8 @@
 //! bytes, assigns a global-monotonic `id` via AUTO_INCREMENT, and
 //! returns it as the cursor for the client's next fetch.
 
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use axum::body::Body;
@@ -26,6 +28,7 @@ use http_body_util::BodyExt as _;
 use serde::{Deserialize, Serialize};
 use sqlx::types::chrono::{DateTime, Utc};
 use sqlx::MySqlPool;
+use tokio::sync::Notify;
 
 use crate::AppState;
 
@@ -45,6 +48,17 @@ const DEFAULT_LIMIT: u32 = 100;
 /// Hard cap on a single GET response.
 const MAX_LIMIT: u32 = 1000;
 
+/// Hard cap on `?wait=<secs>` long-poll. Reverse proxies (nginx default,
+/// Cloudflare Free) cut idle HTTP at ~100s; 60s is a safe upper bound
+/// that also keeps fd-resource use bounded.
+const MAX_WAIT_SECS: u32 = 60;
+
+/// While long-polling we periodically re-fetch as a belt-and-suspenders
+/// against a missed notify (in-process Notify can lose a race against a
+/// reader that's currently in `fetch`). 5s is fine — under load the
+/// notify path takes over and this rarely fires.
+const LONG_POLL_REFETCH_INTERVAL: Duration = Duration::from_secs(5);
+
 /// Retention window — messages older than this are deleted by the
 /// pruner. A device offline longer than this loses old messages.
 const RETENTION_SECS: i64 = 30 * 24 * 60 * 60;
@@ -56,7 +70,7 @@ const PRUNE_INTERVAL: Duration = Duration::from_secs(3600);
 /// stay parameterised on the *exact* identifier names — avoids any
 /// chance of bind-string SQL injection (we never substitute the
 /// `owner_col` from user input).
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, Hash, Eq, PartialEq)]
 pub(crate) enum Queue {
     /// `ds_group_messages`, `(group_id, ...)`.
     Group,
@@ -77,6 +91,43 @@ impl Queue {
             Queue::Group => "group_id",
             Queue::Mailbox => "device_id",
         }
+    }
+}
+
+// ============================================================================
+// Long-poll fanout: in-process Notify per (queue, owner_id)
+// ============================================================================
+
+type NotifyKey = (Queue, [u8; PSEUDONYM_LEN]);
+
+/// Concurrent map of per-pseudonym notifiers. Cheap clone: it's just an
+/// `Arc<Mutex<HashMap<...>>>`. Insert-on-first-access; entries persist
+/// for the process lifetime — bounded by the count of active groups
+/// times two journals. TTL-based eviction is Phase 2 work.
+#[derive(Clone, Default)]
+pub(crate) struct Notifiers {
+    inner: Arc<Mutex<HashMap<NotifyKey, Arc<Notify>>>>,
+}
+
+impl Notifiers {
+    /// Get-or-insert the `Notify` handle for a key. The `Mutex` guard
+    /// is held only for the HashMap lookup — we clone the `Arc<Notify>`
+    /// out before any awaiting.
+    fn get_or_create(&self, key: NotifyKey) -> Arc<Notify> {
+        let mut guard = self.inner.lock().expect("notifiers mutex poisoned");
+        guard
+            .entry(key)
+            .or_insert_with(|| Arc::new(Notify::new()))
+            .clone()
+    }
+
+    /// Wake every task currently registered on the matching key. New
+    /// tasks that subscribe after this call do **not** see the event —
+    /// they must double-check via a fresh fetch first (see
+    /// `fetch_with_wait`'s loop).
+    fn wake(&self, key: NotifyKey) {
+        let arc = self.get_or_create(key);
+        arc.notify_waiters();
     }
 }
 
@@ -122,10 +173,12 @@ pub(crate) struct PublishResponse {
 
 /// Handler shared by `POST /ds/group/{...}/messages` and `POST
 /// /ds/mailbox/{...}/messages`. Reads the request body (capped by the
-/// `RequestBodyLimit` layer), inserts into the right table, returns
-/// the assigned id.
+/// `RequestBodyLimit` layer), inserts into the right table, wakes up
+/// any in-flight long-poll GETs on the same `(queue, owner_id)` key,
+/// and returns the assigned id.
 async fn publish(
     pool: &MySqlPool,
+    notifiers: &Notifiers,
     queue: Queue,
     owner_id: &[u8; PSEUDONYM_LEN],
     body: Body,
@@ -179,6 +232,12 @@ async fn publish(
             )
         })?;
 
+    // Wake any long-poll waiters on this (queue, owner_id) before
+    // returning to the publisher. The wake happens AFTER the row is
+    // visible (committed by execute() above), so a notified reader
+    // doing a fresh fetch will see the new row.
+    notifiers.wake((queue, *owner_id));
+
     Ok(Json(PublishResponse {
         id,
         created_at: row.0,
@@ -198,6 +257,13 @@ pub(crate) struct FetchQuery {
     /// Page size; clamped to `MAX_LIMIT`.
     #[serde(default)]
     pub(crate) limit: Option<u32>,
+    /// Long-poll: if zero or absent, return whatever's there
+    /// immediately. If non-zero, hold the connection for up to that
+    /// many seconds (clamped to `MAX_WAIT_SECS`) waiting for new
+    /// messages. Returns as soon as there's at least one row past
+    /// `after`, or empty on timeout.
+    #[serde(default)]
+    pub(crate) wait: Option<u32>,
 }
 
 #[derive(Serialize)]
@@ -270,6 +336,69 @@ async fn fetch(
     Ok(Json(FetchResponse { messages, has_more }))
 }
 
+/// Fetch with optional long-poll. If `wait_secs` is zero we behave like
+/// `fetch` directly. Otherwise:
+///
+///   1. Try `fetch` once — if it returns rows, ship them.
+///   2. Subscribe to the per-`(queue, owner_id)` `Notify` BEFORE the
+///      next fetch — this is the standard double-check pattern that
+///      avoids missing a notify that fires between the SELECT and the
+///      `notified()` registration.
+///   3. `select!` between (a) the notify firing, (b) a periodic
+///      re-fetch tick (defence-in-depth), and (c) the deadline.
+///   4. On any wakeup do a fresh `fetch`; ship rows if any. On
+///      deadline, ship the empty response.
+async fn fetch_with_wait(
+    pool: &MySqlPool,
+    notifiers: &Notifiers,
+    queue: Queue,
+    owner_id: &[u8; PSEUDONYM_LEN],
+    after: u64,
+    limit: u32,
+    wait_secs: u32,
+) -> Result<Json<FetchResponse>, (StatusCode, String)> {
+    // Fast path — no long-poll requested, or rows are already there.
+    let initial = fetch(pool, queue, owner_id, after, limit).await?;
+    if wait_secs == 0 || !initial.messages.is_empty() {
+        return Ok(initial);
+    }
+
+    let wait_secs = wait_secs.min(MAX_WAIT_SECS);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(u64::from(wait_secs));
+    let notify = notifiers.get_or_create((queue, *owner_id));
+
+    loop {
+        // Register on the notifier BEFORE we re-check — `notified()` is
+        // edge-triggered, so this guarantees no notification fires
+        // between the check below and our subscription.
+        let notified = notify.notified();
+        tokio::pin!(notified);
+
+        // Double-check: a publish could have landed between the
+        // top-of-function fetch and our notify subscription. Cheap
+        // re-query covers that race.
+        let resp = fetch(pool, queue, owner_id, after, limit).await?;
+        if !resp.messages.is_empty() {
+            return Ok(resp);
+        }
+
+        // Wait for one of: notify fires, periodic tick (belt-and-
+        // suspenders against a missed notify), or deadline.
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            return Ok(resp);
+        }
+        let until_deadline = deadline - now;
+        let sleep_for = until_deadline.min(LONG_POLL_REFETCH_INTERVAL);
+
+        tokio::select! {
+            () = &mut notified => {},
+            () = tokio::time::sleep(sleep_for) => {},
+        }
+        // Loop iterates: another fetch + register-then-check.
+    }
+}
+
 // ============================================================================
 // Public route handlers
 // ============================================================================
@@ -280,7 +409,7 @@ pub(crate) async fn post_group(
     body: Body,
 ) -> Result<Response, (StatusCode, String)> {
     let owner = decode_pseudonym(&group_hex)?;
-    let resp = publish(&state.db, Queue::Group, &owner, body).await?;
+    let resp = publish(&state.db, &state.notifiers, Queue::Group, &owner, body).await?;
     Ok((StatusCode::CREATED, resp).into_response())
 }
 
@@ -291,7 +420,17 @@ pub(crate) async fn get_group(
 ) -> Result<Response, (StatusCode, String)> {
     let owner = decode_pseudonym(&group_hex)?;
     let limit = q.limit.unwrap_or(DEFAULT_LIMIT);
-    let resp = fetch(&state.db, Queue::Group, &owner, q.after, limit).await?;
+    let wait = q.wait.unwrap_or(0);
+    let resp = fetch_with_wait(
+        &state.db,
+        &state.notifiers,
+        Queue::Group,
+        &owner,
+        q.after,
+        limit,
+        wait,
+    )
+    .await?;
     let mut response = resp.into_response();
     response.headers_mut().insert(
         header::CACHE_CONTROL,
@@ -306,7 +445,7 @@ pub(crate) async fn post_mailbox(
     body: Body,
 ) -> Result<Response, (StatusCode, String)> {
     let owner = decode_pseudonym(&device_hex)?;
-    let resp = publish(&state.db, Queue::Mailbox, &owner, body).await?;
+    let resp = publish(&state.db, &state.notifiers, Queue::Mailbox, &owner, body).await?;
     Ok((StatusCode::CREATED, resp).into_response())
 }
 
@@ -317,7 +456,17 @@ pub(crate) async fn get_mailbox(
 ) -> Result<Response, (StatusCode, String)> {
     let owner = decode_pseudonym(&device_hex)?;
     let limit = q.limit.unwrap_or(DEFAULT_LIMIT);
-    let resp = fetch(&state.db, Queue::Mailbox, &owner, q.after, limit).await?;
+    let wait = q.wait.unwrap_or(0);
+    let resp = fetch_with_wait(
+        &state.db,
+        &state.notifiers,
+        Queue::Mailbox,
+        &owner,
+        q.after,
+        limit,
+        wait,
+    )
+    .await?;
     let mut response = resp.into_response();
     response.headers_mut().insert(
         header::CACHE_CONTROL,
@@ -398,5 +547,58 @@ mod tests {
         assert_eq!(Queue::Group.owner_col(), "group_id");
         assert_eq!(Queue::Mailbox.table(), "ds_mailbox_messages");
         assert_eq!(Queue::Mailbox.owner_col(), "device_id");
+    }
+
+    #[test]
+    fn notifiers_share_handle_for_same_key() {
+        let n = Notifiers::default();
+        let key: NotifyKey = (Queue::Group, [0xAB; PSEUDONYM_LEN]);
+        let a = n.get_or_create(key);
+        let b = n.get_or_create(key);
+        assert!(Arc::ptr_eq(&a, &b), "same key must yield same Notify");
+    }
+
+    #[test]
+    fn notifiers_separate_handles_per_queue() {
+        let n = Notifiers::default();
+        let owner = [0u8; PSEUDONYM_LEN];
+        let g = n.get_or_create((Queue::Group, owner));
+        let m = n.get_or_create((Queue::Mailbox, owner));
+        assert!(
+            !Arc::ptr_eq(&g, &m),
+            "Group and Mailbox with same pseudonym must NOT share a notifier",
+        );
+    }
+
+    #[tokio::test]
+    async fn wake_unblocks_a_waiting_task() {
+        let n = Notifiers::default();
+        let key: NotifyKey = (Queue::Group, [1u8; PSEUDONYM_LEN]);
+        let arc = n.get_or_create(key);
+
+        // Spawn a task that registers on `notified()` and waits.
+        let h = tokio::spawn(async move {
+            arc.notified().await;
+        });
+
+        // Give the spawned task a tick to actually subscribe.
+        tokio::task::yield_now().await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        // Wake — the spawned task should complete promptly.
+        n.wake(key);
+
+        tokio::time::timeout(Duration::from_secs(1), h)
+            .await
+            .expect("wake must unblock notified() within 1 s")
+            .expect("spawned task panicked");
+    }
+
+    #[tokio::test]
+    async fn wake_with_no_waiters_is_noop() {
+        let n = Notifiers::default();
+        let key: NotifyKey = (Queue::Mailbox, [2u8; PSEUDONYM_LEN]);
+        // Should not panic even though nobody is waiting.
+        n.wake(key);
     }
 }
