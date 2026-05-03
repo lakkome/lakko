@@ -15,13 +15,15 @@
 //! - `DATABASE_URL` — sqlx-style MariaDB DSN
 //! - `RUST_LOG` — `tracing-subscriber` env-filter spec
 //!
-//! Endpoints (Phase 1.1a + 1.1b):
+//! Endpoints (Phase 1.1a + 1.1b + 1.1c):
 //!
 //! - `GET  /health`        — liveness (no DB), 200 OK
 //! - `GET  /ready`         — readiness (pings DB), 200 OK or 503
 //! - `GET  /version`       — `{"service", "version", "git_sha"}`
 //! - `POST /signup/start`  — OPAQUE-PAKE registration step 1 (Phase 1.1b)
 //! - `POST /signup/finish` — OPAQUE-PAKE registration step 2 (Phase 1.1b)
+//! - `POST /login/start`   — OPAQUE-PAKE login step 1 (Phase 1.1c)
+//! - `POST /login/finish`  — OPAQUE-PAKE login step 2 (Phase 1.1c)
 
 #![forbid(unsafe_code)]
 
@@ -108,6 +110,11 @@ async fn main() -> Result<()> {
         db: pool.clone(),
         opaque_setup: Arc::new(opaque_setup),
     };
+
+    // Background task: периодически чистит просроченные login-state-ы
+    // (TTL 2 минуты) из opaque_login_states. Abort-ится при service stop.
+    let _pruner = opaque::spawn_login_state_pruner(pool.clone());
+
     let app = build_app(state);
 
     let listener = tokio::net::TcpListener::bind(bind)
@@ -134,6 +141,8 @@ fn build_app(state: AppState) -> Router {
         .route("/version", get(version))
         .route("/signup/start", post(opaque::signup_start))
         .route("/signup/finish", post(opaque::signup_finish))
+        .route("/login/start", post(opaque::login_start))
+        .route("/login/finish", post(opaque::login_finish))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }

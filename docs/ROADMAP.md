@@ -121,7 +121,7 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 #### Backend infra
 - **1.0** Hetzner deployment skeleton (✅ done): миграция от lakko_me Node.js stack → новый Rust stack на ТОЙ ЖЕ VPS. systemd unit-ы для 5 services (auth/ds/storage/discovery/push-gw) + group target; system-nginx config с reverse-proxy на 127.0.0.1:808X для существующих доменов lakko.me / api.lakko.me; system-MariaDB (drop старой `lakko_me` БД, новая `lakko`); `/etc/lakko/lakko.env` для shared config; `infra/scripts/deploy.sh` (git pull → cargo build --release → install → systemctl restart); пошаговый migration guide в `infra/README.md`. Контейнеризация (podman/compose) намеренно отложена — overkill для solo + 1 VPS, добавим когда понадобится horizontal scaling
-- **1.1** `services/auth` — OPAQUE-PAKE + WebAuthn passkey, MariaDB-backed signup/signin без хранения PII; PoW (Equix) + Privacy Pass (RFC 9576) anti-spam
+- **1.1** `services/auth` — OPAQUE-PAKE password auth (primary), MariaDB-backed signup/login без хранения PII; BIP39 mnemonic recovery; PoW (Equix) + Privacy Pass (RFC 9576) anti-spam. WebAuthn passkey **отложен в Phase 2+** как opt-in second factor — passkey UX в 2026 ещё проблематичен для mass-market (cross-ecosystem sync issues, recovery friction, mental-model confusion); password-flow закрывает 100% юзеров без friction. Sub-sprint-ы: 1.1a (✅ axum + sqlx + probes), 1.1b (✅ OPAQUE registration), 1.1c (OPAQUE login), 1.1d (BIP39 recovery), 1.1e (PoW + Privacy Pass)
 - **1.2** `services/storage` — простой ciphertext blob proxy на Hetzner Storage Box (или local disk + nginx); content-addressable, ciphertext-only policy
 - **1.3** `services/ds` skeleton — MariaDB-backed append-only журнал per-group (FIFO по `(epoch, seq)`), mailbox per device, axum + tokio
 - **1.4** `services/ds` production — fanout, long-poll или QUIC stream push для real-time delivery
@@ -138,11 +138,11 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 - **1.13** `lakko-ffi-wasm` — wasm-bindgen surface зеркало UniFFI (Identity / Group / KeyPackage / процессинг сообщений)
 
 #### Native apps (iOS + Android)
-- **1.14** `apps/ios` skeleton — SwiftUI: signup/signin (passkey + OPAQUE), contact list UI, 1×1 chat UI; integration с XCFramework из lakko-ffi-uniffi
+- **1.14** `apps/ios` skeleton — SwiftUI: signup/signin (OPAQUE-PAKE), contact list UI, 1×1 chat UI; integration с XCFramework из lakko-ffi-uniffi
 - **1.15** `apps/android` skeleton — Compose: тот же surface; AAR-integration
 
 #### Web app
-- **1.16** `apps/web` skeleton — Solid.js + WASM core (через lakko-ffi-wasm); signup/signin (WebAuthn passkey + OPAQUE через WebCrypto-derived OPRF), contact list UI, 1×1 chat UI; service worker для offline; bundle target <2 MB gzipped
+- **1.16** `apps/web` skeleton — Solid.js + WASM core (через lakko-ffi-wasm); signup/signin (OPAQUE-PAKE через WebCrypto-derived OPRF), contact list UI, 1×1 chat UI; service worker для offline; bundle target <2 MB gzipped
 - **1.17** `apps/web` static-host pipeline — GitHub Pages или Hetzner static behind nginx; SRI hashes для security; build artefacts reproducible
 
 #### Cross-platform features
