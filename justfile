@@ -57,6 +57,13 @@ fuzz-check:
     cargo check --manifest-path crates/lakko-mls/fuzz/Cargo.toml
     cargo check --manifest-path crates/lakko-proto/fuzz/Cargo.toml
 
+# Build `lakko-ffi-wasm` for `wasm32-unknown-unknown`. CI runs this
+# too; keep it locally for fast feedback when changing the
+# wasm-bindgen surface or any dep in the wasm graph.
+# Requires `rustup target add wasm32-unknown-unknown` once.
+wasm-build:
+    cargo build -p lakko-ffi-wasm --target wasm32-unknown-unknown
+
 # Run a single fuzz target with cargo-fuzz on nightly.
 # Prerequisites (one-time):
 #   rustup toolchain install nightly

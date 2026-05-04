@@ -99,6 +99,22 @@ jobs:
       - name: Smoke-build lakko-proto fuzz crate
         run: cargo check --manifest-path crates/lakko-proto/fuzz/Cargo.toml
 
+  wasm-build:
+    # Phase 1.13 — confirm `lakko-ffi-wasm` (and its full dep graph
+    # including OpenMLS, RustCrypto, lakko-mls) actually builds for
+    # `wasm32-unknown-unknown`. Catches regressions where someone
+    # adds a dep that's host-only.
+    name: wasm32 build (lakko-ffi-wasm)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo build --target wasm32-unknown-unknown
+        run: cargo build -p lakko-ffi-wasm --target wasm32-unknown-unknown
+
   repro-build:
     name: reproducible build verifier
     runs-on: ubuntu-latest
