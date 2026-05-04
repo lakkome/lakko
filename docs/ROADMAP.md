@@ -152,7 +152,9 @@ The first real functional slice: three devices (iOS, Android, web) exchanging 1�
 - **1.15** `apps/android` skeleton — Compose: same surface; AAR integration
 
 #### Web app
-- **1.16** `apps/web` skeleton — Solid.js + WASM core (via lakko-ffi-wasm); signup / signin (OPAQUE-PAKE via WebCrypto-derived OPRF), contact list UI, 1×1 chat UI; service worker for offline; bundle target < 2 MB gzipped
+- **1.16a** ✅ `apps/web` skeleton — Solid.js + Vite + TypeScript scaffold under `apps/web/`. `wasm-pack` integration that builds `crates/lakko-ffi-wasm` into `apps/web/wasm/` (release bundles to dev / prod via `npm run dev` / `npm run build`). Typed WASM loader wrapper (`src/wasm.ts`) with cached `loadWasm()` promise. "Hello core" `App.tsx` round-trip — instantiates `Identity` + `Group` from the Rust core inside the browser and renders the signature-public-key prefix, KeyPackage size, and member count to confirm the JS↔WASM bridge works. Bundle measurement after `npm run build`: WASM ≈ 574 kB gzipped, app JS ≈ 5 kB gzipped — well inside the < 2 MB Phase 1.16c target. New CI job (`web-build`) runs `wasm-pack` + `tsc --noEmit` + `vite build` on every push. Justfile recipes `dev-web` / `build-web`. **No router, no signup, no chat yet** — those land in 1.16b.
+- **1.16b** `apps/web` UI flows — solid-router routing skeleton, signup (OPAQUE-PAKE client via the WASM `Auth` surface), signin, contact list, 1×1 chat plumbed through `lakko-ffi-wasm` against the existing `lakko-svc-auth` / `lakko-svc-ds` / `lakko-svc-discovery` / `lakko-svc-storage` services. Service worker for offline cache deferred to 1.16c.
+- **1.16c** `apps/web` follow-up — service worker + IndexedDB persistence (lands together with `lakko-ffi-wasm` 1.13c IndexedDB store), bundle optimisation (target < 2 MB gzipped, currently ~580 kB so the headroom is large), `wasm-bindgen-test` runner against the FFI error paths.
 - **1.17** `apps/web` static-host pipeline — GitHub Pages or Hetzner static behind nginx; SRI hashes for security; reproducible build artefacts
 
 #### Cross-platform features

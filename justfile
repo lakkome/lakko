@@ -140,6 +140,21 @@ dev-discovery:
 dev-push-gw:
     cargo run -p lakko-svc-push-gw
 
+# Run the web client (apps/web) dev server. Drives `wasm-pack` in
+# `--dev` mode against `crates/lakko-ffi-wasm` first, then starts
+# Vite on http://127.0.0.1:5173.
+# Prerequisites (one-time):
+#   rustup target add wasm32-unknown-unknown
+#   cargo install wasm-pack
+#   cd apps/web && npm install
+dev-web:
+    cd apps/web && npm run dev
+
+# Production build of apps/web — wasm-pack release + tsc --noEmit +
+# `vite build`. Output lands in `apps/web/dist/`.
+build-web:
+    cd apps/web && npm run build
+
 # ---- Deployment (systemd + system-nginx + system-MariaDB on Hetzner) -----
 # See infra/README.md for the full migration / deploy workflow.
 

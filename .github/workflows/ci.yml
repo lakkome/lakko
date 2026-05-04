@@ -115,6 +115,45 @@ jobs:
       - name: cargo build --target wasm32-unknown-unknown
         run: cargo build -p lakko-ffi-wasm --target wasm32-unknown-unknown
 
+  web-build:
+    # Phase 1.16a — confirm `apps/web` (Solid.js + Vite + WASM core)
+    # builds end-to-end: wasm-pack against `lakko-ffi-wasm`, TS
+    # type-check, and a Vite production bundle. Catches breakage in
+    # the FFI surface, the wasm-bindgen exports, or the Vite/Solid
+    # configuration.
+    name: web build (apps/web)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/web
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+      - name: Install wasm-pack
+        # Pin to a known-good release; bump together with the
+        # toolchain in apps/web/README.md.
+        run: cargo install wasm-pack --version ^0.13 --locked
+      - name: npm install
+        run: npm ci
+      - name: npm run build
+        # Drives wasm-pack (release) + tsc --noEmit + vite build.
+        run: npm run build
+      - name: Report bundle size
+        # Phase 1.16c bundle target is < 2 MB gzipped — the report
+        # is informational here so we can watch the trend, not a
+        # hard gate yet.
+        run: |
+          du -sh dist
+          find dist -type f -name '*.js' -o -name '*.wasm' | xargs -I{} sh -c 'gzip -c "{}" | wc -c | awk -v f="{}" "{printf \"%s\\t%d bytes gz\\n\", f, \$1}"'
+
   repro-build:
     name: reproducible build verifier
     runs-on: ubuntu-latest
