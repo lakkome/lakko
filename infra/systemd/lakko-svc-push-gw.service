@@ -5,8 +5,9 @@
 Description=Lakko push gateway (APNs / FCM / Web Push VAPID)
 Documentation=https://github.com/lakkome/lakko
 PartOf=lakko.target
-After=network-online.target
+After=network-online.target mariadb.service
 Wants=network-online.target
+Requires=mariadb.service
 
 [Service]
 Type=simple
@@ -16,8 +17,12 @@ Group=lakkome
 EnvironmentFile=/etc/lakko/lakko.env
 Environment=RUST_LOG=info
 Environment=LAKKO_BIND=127.0.0.1:8085
-# Push providers' credentials live in /etc/lakko/secrets/ (mode 0700, owned
-# by lakkome). Service reads them at startup; never writes.
+# `LAKKO_PUSH_GW_DATABASE_URL` is read from /etc/lakko/lakko.env above.
+# Each service has its own DB — sqlx migration tracking does not collide.
+#
+# Phase 1.6 ships only `LogOnlyProvider`; the .p8 / service-account /
+# VAPID env vars below are placeholders for Phase 1.6b drop-in real
+# providers. Until then they're unused.
 Environment=APNS_KEY_PATH=/etc/lakko/secrets/apns_key.p8
 Environment=FCM_SERVICE_ACCOUNT=/etc/lakko/secrets/fcm_sa.json
 Environment=VAPID_PRIVATE_KEY=/etc/lakko/secrets/vapid_priv.pem

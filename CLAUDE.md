@@ -149,10 +149,13 @@ docker exec -i mariadb mariadb -u root -p<root_pw> <<'SQL'
     CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
   CREATE DATABASE IF NOT EXISTS lakko_discovery
     CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+  CREATE DATABASE IF NOT EXISTS lakko_push_gw
+    CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
   CREATE USER IF NOT EXISTS 'lakko'@'%' IDENTIFIED BY 'devpass';
   GRANT ALL ON lakko_auth.*      TO 'lakko'@'%';
   GRANT ALL ON lakko_ds.*        TO 'lakko'@'%';
   GRANT ALL ON lakko_discovery.* TO 'lakko'@'%';
+  GRANT ALL ON lakko_push_gw.*   TO 'lakko'@'%';
   FLUSH PRIVILEGES;
 SQL
 # Find the root password with `docker inspect mariadb | grep ROOT_PASSWORD`.

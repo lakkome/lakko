@@ -127,6 +127,12 @@ dev-storage:
 dev-discovery:
     cargo run -p lakko-svc-discovery
 
+# Run the push gateway locally. Reads `LAKKO_PUSH_GW_DATABASE_URL`
+# from `.env` (separate database `lakko_push_gw`). Phase 1.6 ships
+# only `LogOnlyProvider` — no real APNs / FCM / VAPID delivery yet.
+dev-push-gw:
+    cargo run -p lakko-svc-push-gw
+
 # ---- Deployment (systemd + system-nginx + system-MariaDB on Hetzner) -----
 # See infra/README.md for the full migration / deploy workflow.
 
