@@ -10,7 +10,15 @@ authors.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 publish = false
-description = "Username discovery (OPRF), invite capabilities, pseudonym lifecycle, QR safety numbers"
+description = "Pseudonym lifecycle + ContactRequest envelopes (Phase 1.9a). Invite capabilities, QR safety numbers — Phase 1.9b."
 
 [lints]
 workspace = true
+
+[dependencies]
+thiserror.workspace = true
+tracing.workspace = true
+
+# Crypto building blocks: Ed25519 sign / verify, X25519 ECDH, HKDF,
+# ChaCha20-Poly1305 AEAD, BLAKE3.
+lakko-crypto.workspace = true
