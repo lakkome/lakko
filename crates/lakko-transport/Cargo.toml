@@ -20,15 +20,34 @@ thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 futures.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 
 async-trait = "0.1"
 bytes = "1"
 
-# QUIC
+# QUIC — used by the message-oriented mesh transport (Phase 0.3).
 quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
 rustls = { version = "0.23", default-features = false, features = ["std", "ring"] }
 rustls-pki-types = "1"
 rcgen = { version = "0.13", default-features = false, features = ["pem", "ring"] }
+
+# HTTP REST client (Phase 1.8) — talks to auth / ds / storage /
+# discovery / push-gw. `rustls-tls-manual-roots` lets us plug a
+# custom `ServerCertVerifier` that does SPKI pinning (see pinning.rs)
+# instead of going through the system CA bundle.
+reqwest = { version = "0.12", default-features = false, features = [
+    "rustls-tls-manual-roots",
+    "json",
+    "stream",
+    "http2",
+    "gzip",
+] }
+url = "2"
+sha2 = "0.10"
+# Parses leaf certificate DER to extract the SubjectPublicKeyInfo
+# bytes for SPKI pin computation.
+x509-parser = "0.16"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }
