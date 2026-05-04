@@ -10,7 +10,26 @@ authors.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 publish = false
-description = "Encrypted local storage (SQLCipher) and ciphertext blob abstraction"
+description = "Encrypted local storage for Lakko clients (KV abstraction + AEAD value cipher + SQLite/InMemory backends)"
 
 [lints]
 workspace = true
+
+[dependencies]
+thiserror.workspace = true
+tracing.workspace = true
+serde.workspace = true
+
+# AEAD primitives — values are encrypted at the application layer with
+# ChaCha20-Poly1305 keyed by a per-table subkey derived from the
+# device root key via HKDF. See `cipher.rs`.
+lakko-crypto.workspace = true
+
+# rusqlite with `bundled` feature so we don't depend on a system
+# libsqlite3 (matters for cross-compile targets — iOS, Android, the
+# Tauri desktop bundle). The `blob` feature gives us streaming I/O
+# for big values.
+rusqlite = { version = "0.32", features = ["bundled", "blob"] }
+
+[dev-dependencies]
+tempfile = "3"
