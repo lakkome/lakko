@@ -10,7 +10,11 @@ authors.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 publish = false
-description = "Blinded per-conversation presence tokens"
+description = "Blinded per-conversation presence tokens — no global online indicator"
 
 [lints]
 workspace = true
+
+[dependencies]
+# BLAKE3-keyed for token derivation; SecretBytes for the seed type.
+lakko-crypto.workspace = true

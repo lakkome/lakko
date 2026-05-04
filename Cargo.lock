@@ -1829,6 +1829,9 @@ dependencies = [
 [[package]]
 name = "lakko-presence"
 version = "0.0.0"
+dependencies = [
+ "lakko-crypto",
+]
 
 [[package]]
 name = "lakko-proto"
