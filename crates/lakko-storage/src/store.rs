@@ -22,9 +22,11 @@
 //!     cross-compile against (iOS / Android / Tauri desktop / …).
 
 use std::collections::HashMap;
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
 use std::sync::Mutex;
 
+#[cfg(not(target_arch = "wasm32"))]
 use rusqlite::Connection;
 
 use crate::error::Result;
@@ -59,7 +61,9 @@ impl Table {
         }
     }
 
-    /// All known tables. Used for schema bootstrap on `SqliteStore::open`.
+    /// All known tables. Used for schema bootstrap on `SqliteStore::open`
+    /// (host targets only — wasm32 has no `SqliteStore`).
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) const ALL: &'static [Table] = &[
         Table::Messages,
         Table::GroupState,
@@ -157,11 +161,14 @@ impl Store for InMemoryStore {
 }
 
 // ============================================================================
-// SqliteStore
+// SqliteStore — host targets only (libsqlite3-sys does not build for
+// `wasm32-unknown-unknown`; Web persistent storage will land in
+// 1.13c via an IndexedDB-backed `Store` impl.)
 // ============================================================================
 
 /// rusqlite-backed store. One SQLite table per [`Table`] variant —
 /// schema is bootstrapped on [`SqliteStore::open`] / [`SqliteStore::open_in_memory`].
+#[cfg(not(target_arch = "wasm32"))]
 pub struct SqliteStore {
     /// Wrapped in `Mutex` because `rusqlite::Connection` is `!Sync`.
     /// Contention is fine — one writer + one reader is the common
@@ -169,6 +176,7 @@ pub struct SqliteStore {
     conn: Mutex<Connection>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl SqliteStore {
     /// Open or create a SQLite database at `path`. If the schema is
     /// missing it is created.
@@ -227,6 +235,7 @@ impl SqliteStore {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl Store for SqliteStore {
     fn put(&self, table: Table, key: &[u8], value: &[u8]) -> Result<()> {
         let conn = self.conn.lock().expect("SqliteStore mutex poisoned");
@@ -301,6 +310,10 @@ impl Store for SqliteStore {
 /// Compute the smallest byte string that's strictly greater than every
 /// string starting with `prefix`. Returns `None` if no such string
 /// exists in the byte universe (i.e. `prefix` is `[0xFF, 0xFF, ...]`).
+///
+/// Only used by `SqliteStore::range` (the in-memory store doesn't
+/// need the upper-bound trick because it iterates on a `HashMap`).
+#[cfg(not(target_arch = "wasm32"))]
 fn next_byte_after(prefix: &[u8]) -> Option<Vec<u8>> {
     let mut out = prefix.to_vec();
     while let Some(last) = out.last_mut() {
@@ -377,12 +390,14 @@ mod tests {
         run_store_conformance_suite(&InMemoryStore::new());
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn sqlite_in_memory_passes_conformance() {
         let s = SqliteStore::open_in_memory().expect("open in-memory sqlite");
         run_store_conformance_suite(&s);
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn sqlite_persists_across_reopen() {
         let dir = tempfile::tempdir().unwrap();
@@ -400,6 +415,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn next_byte_after_increments_last_byte() {
         assert_eq!(next_byte_after(b"abc"), Some(b"abd".to_vec()));

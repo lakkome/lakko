@@ -29,6 +29,12 @@ lakko-crypto.workspace = true
 # libsqlite3 (matters for cross-compile targets — iOS, Android, the
 # Tauri desktop bundle). The `blob` feature gives us streaming I/O
 # for big values.
+#
+# Excluded on wasm32 — `libsqlite3-sys` requires C system headers
+# (<stdio.h>, <pthread.h> …) which `wasm32-unknown-unknown` doesn't
+# ship. Web builds get only `InMemoryStore` for now; persistent
+# storage on Web lands in 1.13c via an IndexedDB-backed `Store` impl.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 rusqlite = { version = "0.32", features = ["bundled", "blob"] }
 
 [dev-dependencies]

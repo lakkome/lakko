@@ -26,6 +26,14 @@ lakko-contacts.workspace = true
 lakko-sync.workspace = true
 lakko-push.workspace = true
 lakko-presence.workspace = true
+# `lakko-storage` is included for the in-memory + encrypted-value
+# layers; the rusqlite-backed `SqliteStore` it ships does not build
+# on wasm32 (requires libsqlite C source) and is suppressed from the
+# wasm-bindgen surface in `storage.rs`. IndexedDB persistence lands
+# in 1.13c.
+lakko-storage.workspace = true
+# Re-exposed for `Hlc`, `Draft`, etc. that take `lakko_crypto::secret::SecretBytes`.
+lakko-crypto.workspace = true
 
 # JS bindings.
 wasm-bindgen = "0.2"

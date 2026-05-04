@@ -77,4 +77,10 @@ pub use cipher::EncryptedStore;
 pub use error::{Result, StorageError};
 pub use groups::GroupStateStore;
 pub use messages::{LocalMessage, MessageKind, MessageStore};
-pub use store::{InMemoryStore, SqliteStore, Store, Table};
+pub use store::{InMemoryStore, Store, Table};
+
+/// `SqliteStore` is host-only — `libsqlite3-sys` cannot build for
+/// `wasm32-unknown-unknown`. Web persistence will arrive in 1.13c
+/// via an IndexedDB-backed `Store` impl.
+#[cfg(not(target_arch = "wasm32"))]
+pub use store::SqliteStore;

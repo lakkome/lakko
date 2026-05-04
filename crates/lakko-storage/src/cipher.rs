@@ -56,6 +56,12 @@ const AAD_PREFIX: &[u8] = b"lakko-storage/v1/";
 /// Cloning is cheap — the inner store is held behind `Arc` and the
 /// per-table subkey cache is a small `Mutex<HashMap>` shared between
 /// clones.
+/// Clone-friendly: every field is `Arc`-wrapped (the inner store, the
+/// per-table subkey cache) or `Clone` (the root key). The new
+/// `EncryptedStore` shares state with the original — multiple
+/// high-level facades (`MessageStore`, `GroupStateStore`, …) can
+/// hold their own clones without duplicating the underlying KV.
+#[derive(Clone)]
 pub struct EncryptedStore {
     inner: Arc<dyn Store>,
     /// Per-table subkey cache. The HKDF derivation is cheap (~µs)

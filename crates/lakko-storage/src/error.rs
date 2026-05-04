@@ -39,6 +39,11 @@ pub enum StorageError {
 /// Result alias used throughout the crate.
 pub type Result<T> = std::result::Result<T, StorageError>;
 
+/// `From<rusqlite::Error>` is host-only — `rusqlite` itself is not
+/// compiled for `wasm32-unknown-unknown` (libsqlite3-sys requires C
+/// system headers). Web persistence will arrive in 1.13c via an
+/// IndexedDB-backed `Store` impl.
+#[cfg(not(target_arch = "wasm32"))]
 impl From<rusqlite::Error> for StorageError {
     fn from(e: rusqlite::Error) -> Self {
         StorageError::Backend(Box::new(e))
