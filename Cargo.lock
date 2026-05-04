@@ -2006,6 +2006,9 @@ dependencies = [
 [[package]]
 name = "lakko-sync"
 version = "0.0.0"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "lakko-transparency"

@@ -10,7 +10,10 @@ authors.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 publish = false
-description = "Multi-device sync — DeviceGroup, hybrid logical clock, edit CRDT"
+description = "Hybrid logical clock + edit chain + drafts (single-device Phase 1.12). DeviceGroup multi-device sync arrives in Phase 2."
 
 [lints]
 workspace = true
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
