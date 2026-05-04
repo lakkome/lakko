@@ -1842,6 +1842,12 @@ dependencies = [
 [[package]]
 name = "lakko-push"
 version = "0.0.0"
+dependencies = [
+ "base64",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+]
 
 [[package]]
 name = "lakko-storage"
