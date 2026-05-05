@@ -60,6 +60,48 @@ export interface SendResult {
   createdAt: string;
 }
 
+/**
+ * One verified incoming `ContactRequest` decoded out of the
+ * mailbox. The signature has already been checked; the intro
+ * envelope is unsealed when present (and `null` when the
+ * envelope didn't decode for our X25519 secret — typically a
+ * malformed request that we'll just drop).
+ */
+export interface IncomingContactRequest {
+  /** DS-assigned monotonic id — also serves as the cursor for
+   *  the next poll. */
+  messageId: number;
+  /** Sender's Ed25519 identity public key (32 bytes). The
+   *  signature on the request was verified against this. */
+  fromPubkey: Uint8Array;
+  /** Sender's per-recipient pseudonym (32 bytes). UI doesn't
+   *  display this directly; carry it forward in case future
+   *  ContactAck flows need it. */
+  fromPseudonym: Uint8Array;
+  /** `valid_after_ms` from the request. */
+  validAfterMs: bigint;
+  /** UTF-8-decoded intro message, or `null` when there was no
+   *  intro / it didn't decrypt. Empty string is a valid
+   *  payload (means "no intro" in `compose`). */
+  intro: string | null;
+  /** ISO-8601 timestamp the DS recorded on receive. */
+  createdAt: string;
+}
+
+/** Result of `ContactsClient.pollMailbox`. */
+export interface PollResult {
+  /** Verified contact requests, in the order DS returned them
+   *  (oldest first by message id). */
+  requests: IncomingContactRequest[];
+  /** New cursor — the message id of the last processed entry,
+   *  or the input `after` if the poll returned nothing. Use as
+   *  the next `after` to skip already-seen rows. */
+  cursor: number;
+  /** `true` if the DS reported `has_more` — the caller should
+   *  loop and poll again with the new cursor. */
+  hasMore: boolean;
+}
+
 export type ContactsClientError =
   | { kind: "no-identity-secrets" }
   | { kind: "username-unknown"; username: string }
@@ -219,5 +261,98 @@ export class ContactsClient {
       messageId: publish.id,
       createdAt: publish.createdAt,
     };
+  }
+
+  /**
+   * Poll the user's stranger-inbox mailbox for new
+   * ContactRequests, decode + verify each, return the
+   * processed list plus a fresh cursor.
+   *
+   * @param identity   Current session secrets — used to derive
+   *                   the mailbox pseudonym (from the sender's
+   *                   own Ed25519 pubkey via
+   *                   `IdentityPseudonym.fromIdentity`) and
+   *                   the X25519 secret needed to unseal each
+   *                   envelope.
+   * @param after      Cursor from the previous poll. Pass `0`
+   *                   on first call to fetch the entire
+   *                   backlog.
+   * @param waitSecs   Long-poll budget in seconds (default 0 —
+   *                   immediate return). The DS clamps to its
+   *                   own ceiling.
+   *
+   * Malformed entries on the wire are **dropped silently** —
+   * the verifier rejects bad signatures, decoding errors are
+   * logged via `console.warn` and skipped. We don't surface a
+   * "garbage on the wire" error to the UI because every honest
+   * client just wants to keep moving past corrupted entries.
+   */
+  async pollMailbox(
+    identity: IdentitySecrets | null,
+    after: number,
+    waitSecs = 0,
+  ): Promise<PollResult> {
+    if (identity === null) {
+      throw ContactsError.noIdentitySecrets();
+    }
+
+    const wasm = await loadWasm();
+    const myIdentity = wasm.Identity.fromSeed(identity.exportKey);
+    const myPseudonym = wasm.IdentityPseudonym.fromIdentity(
+      myIdentity.signaturePublicKey,
+    ).asBytes();
+    const myX25519Secret = myIdentity.x25519SecretKey;
+
+    let raw;
+    try {
+      raw = await this.ds.fetchMailbox(myPseudonym, { after, waitSecs });
+    } catch (err) {
+      throw ContactsError.wrap(err);
+    }
+
+    const requests: IncomingContactRequest[] = [];
+    let cursor = after;
+    for (const message of raw.messages) {
+      cursor = message.id;
+      let parsed;
+      try {
+        parsed = wasm.ContactRequest.decodeAndVerify(message.payload);
+      } catch (err) {
+        // Bad signature, malformed wire bytes, or some other
+        // verifier failure. Drop and move on — the cursor
+        // advances so we won't re-process the same row.
+        // eslint-disable-next-line no-console
+        console.warn("ContactRequest verify failed", message.id, err);
+        continue;
+      }
+
+      let intro: string | null = null;
+      try {
+        const introBytes = parsed.openEnvelope(myX25519Secret);
+        intro = new TextDecoder("utf-8", { fatal: false }).decode(introBytes);
+      } catch (err) {
+        // Envelope didn't decrypt for our X25519 secret. Could
+        // be a malicious request, could be a bug; either way
+        // we still surface the request to the user (signature
+        // is verified) but with no intro body.
+        // eslint-disable-next-line no-console
+        console.warn(
+          "ContactRequest envelope unseal failed",
+          message.id,
+          err,
+        );
+      }
+
+      requests.push({
+        messageId: message.id,
+        fromPubkey: parsed.fromPubkey,
+        fromPseudonym: parsed.fromPseudonym,
+        validAfterMs: parsed.validAfterMs,
+        intro,
+        createdAt: message.createdAt,
+      });
+    }
+
+    return { requests, cursor, hasMore: raw.hasMore };
   }
 }

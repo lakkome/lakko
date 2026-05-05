@@ -58,6 +58,7 @@ import {
   DiscoveryClient,
   DiscoveryHttpError,
 } from "../discovery/client";
+import { clearAll as clearContactsStore } from "../contacts/local-store";
 
 /** Account record exposed to the UI when a session is active. */
 export interface SessionAccount {
@@ -460,6 +461,10 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         }
       }
       clearPersisted();
+      // 1.16d3d: drop the on-device contacts cache too —
+      // "forget device" should leave nothing per-account
+      // behind on this browser.
+      clearContactsStore();
       setIdentitySecrets(null);
       setState({ kind: "anon" });
     },
