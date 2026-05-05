@@ -2,10 +2,14 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * Signup route — sibling of `Login`. Same stub-driven UX; 1.16c
- * replaces the body of `auth.signup(...)` with the real
- * OPAQUE-PAKE registration round-trip + recovery-passphrase
- * generation.
+ * Signup route — drives a real OPAQUE-PAKE registration through
+ * `AuthContext.signup` (1.16c3b). Server: `lakko-svc-auth` on
+ * `127.0.0.1:8081` via Vite's `/api/auth/*` dev proxy.
+ *
+ * Generates a fresh UUIDv7 `account_id` client-side, persists
+ * `(accountId, username)` in `localStorage` so subsequent logins
+ * on this device work. BIP39 recovery passphrase generation lands
+ * in 1.16c3c.
  */
 import { createSignal, type JSX } from "solid-js";
 import { A, useNavigate } from "@solidjs/router";
@@ -51,9 +55,9 @@ export default function Signup(): JSX.Element {
       <section class="auth-card">
         <h1>Create a Lakko account</h1>
         <p style={{ color: "var(--surface-muted)", "margin-top": 0 }}>
-          Phase 1.16b skeleton — accounts are <em>not</em> created on the
-          server yet; 1.16c wires OPAQUE-PAKE registration + recovery
-          passphrase generation.
+          OPAQUE-PAKE registration. The password never leaves your
+          browser — the server only sees an OPRF-blinded envelope.
+          BIP39 recovery passphrase generation arrives in 1.16c3c.
         </p>
         <form onSubmit={onSubmit}>
           <label>

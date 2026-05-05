@@ -16,9 +16,25 @@ export default defineConfig({
   // Phase 1.16a: dev server runs on 5173 (Vite default). Production
   // build target is < 2 MB gzipped — measured against `dist/` after
   // `npm run build`. Bundle optimisation is 1.16c.
+  //
+  // Phase 1.16c3b: dev proxy for the Lakko services. The auth
+  // service has no CORS layer (no need — production terminates
+  // everything at nginx and routes by path). Calling the Rust
+  // service directly from the browser would hit a same-origin
+  // wall, so the dev server forwards `/api/auth/*` →
+  // `http://127.0.0.1:8081/*` (the auth service's default bind).
+  // Production nginx will route the same `/api/auth/*` path; the
+  // client-side `AuthClient` uses a single relative base URL.
   server: {
     port: 5173,
     strictPort: true,
+    proxy: {
+      "/api/auth": {
+        target: "http://127.0.0.1:8081",
+        changeOrigin: true,
+        rewrite: (p) => p.replace(/^\/api\/auth/, ""),
+      },
+    },
   },
 
   build: {
