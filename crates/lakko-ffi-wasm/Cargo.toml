@@ -29,6 +29,15 @@ lakko-presence.workspace = true
 # OPAQUE-PAKE client surface — wraps `RegistrationSession` and
 # `LoginSession` into wasm-bindgen classes for `apps/web`.
 lakko-auth-client.workspace = true
+# Equix proof-of-work solver — exposed as a JS class so the web
+# client can produce the `pow` field every expensive auth endpoint
+# demands.
+lakko-pow.workspace = true
+# Base64 framing for the PoW JS surface (binary seed/nonce/solution
+# fields → base64 strings on the JSON request body). The auth-client
+# surface uses base64 internally; we don't re-export that, so we
+# pull our own dep here.
+base64 = "0.22"
 # `lakko-storage` is included for the in-memory + encrypted-value
 # layers; the rusqlite-backed `SqliteStore` it ships does not build
 # on wasm32 (requires libsqlite C source) and is suppressed from the

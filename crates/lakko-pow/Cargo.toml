@@ -1,0 +1,44 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+[package]
+name = "lakko-pow"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Equix proof-of-work client (solver) for the Lakko anti-spam gate"
+
+[lints]
+workspace = true
+
+[dependencies]
+thiserror.workspace = true
+
+# Equix — Tor Project's Equix PoW. The `compiler` feature pulls in
+# `dynasm`/`dynasmrt` for an x86_64 JIT solver and is NOT portable
+# to wasm32 (no executable memory). We deliberately keep the
+# default-feature build (interpreter mode) so the same crate runs
+# on host AND in the browser. The server side currently keeps the
+# `compiler` feature for its 5–10× speedup on verify; that is a
+# separate dep, no conflict here.
+equix = { version = "0.6", default-features = false }
+
+# SHA-256 for the leading-zero-bits gate.
+sha2 = "0.10"
+
+# CSPRNG for nonce selection. The `js` feature is enabled below
+# only on wasm32 so the random source becomes WebCrypto.
+rand = "0.8"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.2", features = ["js"] }
+
+[dev-dependencies]
+# Round-trip tests verify our solution passes equix's own
+# `verify_bytes` — the same check the server runs.
+equix = { version = "0.6", default-features = false }
+base64 = "0.22"
