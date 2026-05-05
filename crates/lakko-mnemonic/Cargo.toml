@@ -1,0 +1,40 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+[package]
+name = "lakko-mnemonic"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+description = "BIP39 24-word mnemonic for Lakko's account recovery flow"
+
+[lints]
+workspace = true
+
+[dependencies]
+thiserror.workspace = true
+
+# Canonical Rust BIP39. We pin to 2.x for the stable wordlist API.
+# Features:
+#   * `std`  — needed for the PBKDF2 seed implementation.
+#   * `rand` — enables the OS-RNG-backed `Mnemonic::generate_in`
+#     constructor we use at signup. Without it the crate exposes
+#     only `from_entropy`, which would force callers to bring
+#     their own randomness.
+# `default-features = false` keeps the crate slim — we deliberately
+# do NOT pull in the non-English wordlists.
+bip39 = { version = "2", default-features = false, features = ["std", "rand"] }
+
+# Zeroize-on-drop wrapper for the 64-byte seed and the recovered
+# mnemonic phrase string. Same `zeroize` major version as the rest
+# of the workspace.
+zeroize = { version = "1", features = ["zeroize_derive"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# Pulled in by `bip39 → rand_core → rand`. Needs `js` to route the
+# CSPRNG through WebCrypto on `wasm32-unknown-unknown`.
+getrandom = { version = "0.2", features = ["js"] }

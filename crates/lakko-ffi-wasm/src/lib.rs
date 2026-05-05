@@ -31,6 +31,9 @@
 //! - [`pow_solver`] — Equix PoW solver from `lakko-pow`
 //!   (`PowSolver`, `PowProof`) for the anti-spam gate on the
 //!   expensive auth endpoints (Phase 1.16c3a).
+//! - [`mnemonic`] — BIP39 24-word recovery passphrase from
+//!   `lakko-mnemonic` (`RecoveryMnemonic`) for the parallel
+//!   OPAQUE recovery enrollment at signup (Phase 1.16c3c1).
 //!
 //! ## Naming convention
 //!
@@ -65,6 +68,7 @@
 pub mod auth;
 pub mod contacts;
 pub mod mls;
+pub mod mnemonic;
 pub mod pow_solver;
 pub mod presence;
 pub mod push;
@@ -77,6 +81,7 @@ pub mod sync;
 pub use auth::{OpaqueLogin, OpaqueLoginOutput, OpaqueRegister, OpaqueRegisterOutput};
 pub use contacts::{ContactRequest, Direction, IdentityPseudonym, PerRelationship, StrangerInbox};
 pub use mls::{AddMember, Group, Identity, ProcessedMessage, ProcessedMessageKind};
+pub use mnemonic::RecoveryMnemonic;
 pub use pow_solver::{PowProof, PowSolver};
 pub use presence::{current_epoch, derive_token, PresenceToken, PresenceTracker};
 pub use push::PushPayload;

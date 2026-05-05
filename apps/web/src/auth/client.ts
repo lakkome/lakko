@@ -45,7 +45,7 @@ import type {
 export const DEFAULT_BASE_URL = "/api/auth";
 
 /** Result of `AuthClient.signup`. `exportKey` is the OPAQUE export
- *  key the device root key gets derived from in 1.16c3c — the
+ *  key the device root key gets derived from in 1.16c3c2 — the
  *  caller MUST handle it carefully (no console.log, no plain
  *  storage). */
 export interface SignupResult {
@@ -54,6 +54,20 @@ export interface SignupResult {
   accountId: Uint8Array;
   /** OPAQUE export key bytes (64 for `LakkoCipherSuite`). */
   exportKey: Uint8Array;
+  /** The 24-word recovery phrase, present when signup was called
+   *  with `enrolRecovery: true` (the default). The UI MUST
+   *  display this exactly once and ask the user to record it
+   *  somewhere safe — losing it means losing the only way back
+   *  into the account if the password is forgotten. */
+  recoveryPhrase?: string;
+}
+
+/** Options for `AuthClient.signup`. */
+export interface SignupOptions {
+  /** Generate a BIP39 mnemonic and enrol it as a parallel OPAQUE
+   *  recovery envelope alongside the password. Defaults to `true`
+   *  — every new account SHOULD have a recovery passphrase. */
+  enrolRecovery?: boolean;
 }
 
 /** Result of `AuthClient.login`. */
@@ -156,27 +170,34 @@ export class AuthClient {
    * Drive the full signup flow:
    *
    * ```text
-   *   POST /pow/challenge  →  seed₁
-   *   client: solve PoW + OPAQUE start
-   *   POST /signup/start   →  password_response
-   *   client: OPAQUE finish
-   *   POST /pow/challenge  →  seed₂
+   *   POST /pow/challenge   →  seed₁
+   *   client: solve PoW + OPAQUE password start [+ recovery start]
+   *   POST /signup/start    →  password_response [+ recovery_response]
+   *   client: OPAQUE finish (both flows)
+   *   POST /pow/challenge   →  seed₂
    *   client: solve PoW
-   *   POST /signup/finish  →  ok
+   *   POST /signup/finish   →  ok
    * ```
    *
-   * The recovery (BIP39) parallel registration is **not** included
-   * yet — that's 1.16c3c. The server treats `recovery_request` as
-   * optional, so omitting it does not break the flow.
+   * When `options.enrolRecovery !== false` (default), this method
+   * also generates a fresh BIP39 24-word mnemonic, enrols it as
+   * a parallel OPAQUE envelope under `KIND_RECOVERY` server-side,
+   * and returns the phrase in `result.recoveryPhrase` for the UI
+   * to display **once**. Both envelopes commit atomically inside
+   * `/signup/finish` (server transaction).
    *
-   * Throws if `password` is empty (programmer error caught early).
-   * Throws `AuthHttpError` on a non-2xx response and
+   * Throws `AuthClientArgError` on programmer error (empty
+   * password). `AuthHttpError` on a non-2xx response and
    * `AuthNetworkError` on a transport failure.
    */
-  async signup(password: Uint8Array): Promise<SignupResult> {
+  async signup(
+    password: Uint8Array,
+    options: SignupOptions = {},
+  ): Promise<SignupResult> {
     if (password.length === 0) {
       throw new AuthClientArgError("password must be non-empty");
     }
+    const enrolRecovery = options.enrolRecovery !== false;
 
     const wasm = await loadWasm();
     const accountId = generateAccountId();
@@ -186,17 +207,63 @@ export class AuthClient {
     const challenge1 = await this.powChallenge();
     const pow1 = await solvePow(challenge1.seed, challenge1.effort_bits);
 
-    const reg = wasm.OpaqueRegister.startPassword(password);
-    const passwordRequestB64 = reg.requestB64;
+    // Password OPAQUE start.
+    const passwordReg = wasm.OpaqueRegister.startPassword(password);
+
+    // Recovery side: generate a fresh mnemonic + derive the
+    // BIP39 64-byte seed; that seed is the OPAQUE secret for the
+    // KIND_RECOVERY envelope. We hold the seed + the
+    // OPAQUE state in a typed bundle so the conditional flow
+    // doesn't need awkward null re-checks later.
+    interface RecoveryBundle {
+      readonly mnemonicPhrase: string;
+      readonly seed: Uint8Array;
+      readonly opaque: ReturnType<typeof wasm.OpaqueRegister.startRecovery>;
+    }
+    let recovery: RecoveryBundle | null = null;
+    if (enrolRecovery) {
+      const mnemonic = wasm.RecoveryMnemonic.generate();
+      const seed = mnemonic.toSeed();
+      recovery = {
+        mnemonicPhrase: mnemonic.phrase,
+        seed,
+        opaque: wasm.OpaqueRegister.startRecovery(seed),
+      };
+    }
 
     const startResp = await this.signupStart({
       pow: pow1,
       account_id: accountIdB64,
-      password_request: passwordRequestB64,
+      password_request: passwordReg.requestB64,
+      ...(recovery !== null
+        ? { recovery_request: recovery.opaque.requestB64 }
+        : {}),
     });
 
-    // ------------- finish
-    const out = reg.finish(password, startResp.password_response);
+    if (recovery !== null && startResp.recovery_response === undefined) {
+      // The server should always echo back a recovery_response
+      // when we set recovery_request. Treat the missing field as
+      // a server-side wiring bug rather than crashing later in
+      // OPAQUE finish.
+      throw new AuthHttpError(
+        200,
+        "/signup/start",
+        "missing recovery_response despite recovery_request being set",
+      );
+    }
+
+    // ------------- finish (OPAQUE math)
+    const passwordOut = passwordReg.finish(password, startResp.password_response);
+
+    // The recovery export key has a different domain (KIND_RECOVERY)
+    // and is only useful when the user re-authenticates via the
+    // mnemonic. The PASSWORD export key is what the device root
+    // key gets derived from for day-to-day use, so we throw the
+    // recovery-side export key away here.
+    const recoveryUploadB64: string | undefined =
+      recovery !== null && startResp.recovery_response !== undefined
+        ? recovery.opaque.finish(recovery.seed, startResp.recovery_response).uploadB64
+        : undefined;
 
     const challenge2 = await this.powChallenge();
     const pow2 = await solvePow(challenge2.seed, challenge2.effort_bits);
@@ -204,7 +271,10 @@ export class AuthClient {
     const finishResp = await this.signupFinish({
       pow: pow2,
       account_id: accountIdB64,
-      password_upload: out.uploadB64,
+      password_upload: passwordOut.uploadB64,
+      ...(recoveryUploadB64 !== undefined
+        ? { recovery_upload: recoveryUploadB64 }
+        : {}),
     });
     if (!finishResp.ok) {
       throw new AuthHttpError(
@@ -214,7 +284,11 @@ export class AuthClient {
       );
     }
 
-    return { accountId, exportKey: out.exportKey };
+    return {
+      accountId,
+      exportKey: passwordOut.exportKey,
+      ...(recovery !== null ? { recoveryPhrase: recovery.mnemonicPhrase } : {}),
+    };
   }
 
   /**

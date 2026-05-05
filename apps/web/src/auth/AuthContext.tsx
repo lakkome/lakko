@@ -70,6 +70,15 @@ export type AuthState =
     }
   | { readonly kind: "session"; readonly account: SessionAccount };
 
+/** Result handed back to the signup form so it can display the
+ *  freshly-generated 24-word recovery passphrase exactly once. */
+export interface SignupOutcome {
+  /** The 24-word BIP39 recovery phrase. The form must show this
+   *  to the user and require an explicit "I have written it down"
+   *  acknowledgement before navigating away. */
+  recoveryPhrase: string;
+}
+
 /** Public surface of the auth context. */
 export interface AuthApi {
   readonly state: Accessor<AuthState>;
@@ -77,8 +86,10 @@ export interface AuthApi {
    *
    *  Throws on network / server errors (the form surfaces them).
    *  On success, persists `(accountId, username)` to localStorage
-   *  and flips state to `session`. */
-  signup(username: string, password: string): Promise<void>;
+   *  and flips state to `session`. The returned [`SignupOutcome`]
+   *  carries the BIP39 recovery phrase that the UI MUST display
+   *  exactly once. */
+  signup(username: string, password: string): Promise<SignupOutcome>;
   /** Run the OPAQUE-PAKE login flow.
    *
    *  In 1.16c3b, login is only available for the cached account
@@ -183,6 +194,16 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         kind: "session",
         account: { accountId: accountIdB64, username: trimmed },
       });
+      if (result.recoveryPhrase === undefined) {
+        // 1.16c3c1 always enrols recovery — a missing phrase here
+        // means a code-path bypass we want to fail loud on, not
+        // silently navigate the user past their only recovery
+        // option.
+        throw new Error(
+          "internal: signup completed without a recovery phrase",
+        );
+      }
+      return { recoveryPhrase: result.recoveryPhrase };
     },
     async login(username, password) {
       const trimmed = username.trim();

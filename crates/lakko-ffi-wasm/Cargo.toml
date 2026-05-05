@@ -33,6 +33,10 @@ lakko-auth-client.workspace = true
 # client can produce the `pow` field every expensive auth endpoint
 # demands.
 lakko-pow.workspace = true
+# BIP39 mnemonic — exposed as a JS class for the signup-time
+# recovery passphrase (1.16c3c1) and the future recover-from-words
+# flow (1.16c3c3).
+lakko-mnemonic.workspace = true
 # Base64 framing for the PoW JS surface (binary seed/nonce/solution
 # fields → base64 strings on the JSON request body). The auth-client
 # surface uses base64 internally; we don't re-export that, so we

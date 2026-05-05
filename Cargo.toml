@@ -18,6 +18,7 @@ members = [
     "crates/lakko-transparency",
     "crates/lakko-auth-client",
     "crates/lakko-pow",
+    "crates/lakko-mnemonic",
     "crates/lakko-ffi-uniffi",
     "crates/lakko-ffi-wasm",
     "services/auth",
@@ -80,6 +81,7 @@ lakko-push = { path = "crates/lakko-push", version = "0.0.0" }
 lakko-transparency = { path = "crates/lakko-transparency", version = "0.0.0" }
 lakko-auth-client = { path = "crates/lakko-auth-client", version = "0.0.0" }
 lakko-pow = { path = "crates/lakko-pow", version = "0.0.0" }
+lakko-mnemonic = { path = "crates/lakko-mnemonic", version = "0.0.0" }
 
 [workspace.lints.rust]
 unsafe_code = "deny"
