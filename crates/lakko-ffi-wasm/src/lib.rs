@@ -25,6 +25,9 @@
 //!   (`InMemoryStore`, `EncryptedStore`, `MessageStore`,
 //!   `GroupStateStore`). Web persistent storage (`IndexedDbStore`)
 //!   ships in 1.13c.
+//! - [`auth`] — OPAQUE-PAKE client from `lakko-auth-client`
+//!   (`OpaqueRegister`, `OpaqueLogin`) for `apps/web` signup /
+//!   login (Phase 1.16c2).
 //!
 //! ## Naming convention
 //!
@@ -56,6 +59,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod auth;
 pub mod contacts;
 pub mod mls;
 pub mod presence;
@@ -66,6 +70,7 @@ pub mod sync;
 // Re-export top-level public items so JS callers don't see the
 // module path (wasm-bindgen flattens by default; explicit re-exports
 // keep the rustdoc surface tidy).
+pub use auth::{OpaqueLogin, OpaqueLoginOutput, OpaqueRegister, OpaqueRegisterOutput};
 pub use contacts::{ContactRequest, Direction, IdentityPseudonym, PerRelationship, StrangerInbox};
 pub use mls::{AddMember, Group, Identity, ProcessedMessage, ProcessedMessageKind};
 pub use presence::{current_epoch, derive_token, PresenceToken, PresenceTracker};
