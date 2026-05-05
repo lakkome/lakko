@@ -54,6 +54,10 @@ import { base64Decode, base64Encode } from "./account-id";
 import { deriveDeviceRootKey } from "./device-key";
 import { deleteDeviceKey, getDeviceKey, putDeviceKey } from "./key-store";
 import { loadWasm } from "../wasm";
+import {
+  DiscoveryClient,
+  DiscoveryHttpError,
+} from "../discovery/client";
 
 /** Account record exposed to the UI when a session is active. */
 export interface SessionAccount {
@@ -186,6 +190,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
   const [state, setState] = createSignal<AuthState>({ kind: "loading" });
 
   const client = new AuthClient();
+  const discovery = new DiscoveryClient();
 
   onMount(() => {
     void hydrateFromStorage().then(setState);
@@ -200,7 +205,37 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       }
       const result = await client.signup(utf8(password));
       const accountIdB64 = base64Encode(result.accountId);
-      savePersisted({ v: 1, accountIdB64, username: trimmed });
+
+      // 1.16d2: claim the username server-side. We do this AFTER
+      // the OPAQUE flow commits — if /discovery/register fails
+      // the account still exists but the username is unbound,
+      // which is recoverable on a future signup attempt with the
+      // same desired handle (the user picks a different name)
+      // or via a "set username" UI later. We ALSO surface the
+      // failure rather than silently continuing — a 409 (taken)
+      // is meaningful for the form.
+      let normalisedUsername: string;
+      try {
+        const reg = await discovery.registerUsername(
+          result.accountId,
+          trimmed,
+        );
+        normalisedUsername = reg.normalisedUsername;
+      } catch (err) {
+        // Re-throw a friendlier message for the common case.
+        if (err instanceof DiscoveryHttpError && err.status === 409) {
+          throw new Error(
+            `username @${trimmed} is already taken — pick another`,
+          );
+        }
+        throw err;
+      }
+
+      savePersisted({
+        v: 1,
+        accountIdB64,
+        username: normalisedUsername,
+      });
       // Derive the device root key right after signup and persist
       // it — failing this AFTER the server commit would leave the
       // user with a working server-side account but no on-device
@@ -210,7 +245,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       await putDeviceKey(accountIdB64, deviceKey);
       setState({
         kind: "session",
-        account: { accountId: accountIdB64, username: trimmed },
+        account: { accountId: accountIdB64, username: normalisedUsername },
       });
       if (result.recoveryPhrase === undefined) {
         // 1.16c3c1 always enrols recovery — a missing phrase here
@@ -226,34 +261,47 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     async login(username, password) {
       const trimmed = username.trim();
       const cached = loadPersisted();
-      if (cached === null) {
-        throw new Error(
-          "no account on this device — sign up first " +
-            "(cross-device login arrives in 1.16d)",
-        );
+
+      // Resolve the typed username to an account_id. Two paths:
+      //   1. Cache hit on this device — same username as cached:
+      //      use the cached id directly. Saves one round-trip
+      //      and works offline (well, against a cached id; the
+      //      OPAQUE flow itself still needs the server).
+      //   2. Cache miss OR mismatch — call discovery.lookup. The
+      //      result either binds the typed username to its
+      //      account_id (cross-device login from a fresh browser)
+      //      or returns null (unknown username).
+      let accountIdBytes: Uint8Array;
+      let resolvedUsername: string;
+      if (cached !== null && cached.username === trimmed) {
+        accountIdBytes = base64Decode(cached.accountIdB64);
+        resolvedUsername = cached.username;
+      } else {
+        const lookup = await discovery.lookup(trimmed);
+        if (lookup.account === null) {
+          // Indistinguishable from "wrong password" — we don't
+          // help an attacker probe the username space.
+          throw new Error("invalid credentials");
+        }
+        accountIdBytes = lookup.account;
+        resolvedUsername = lookup.normalisedUsername;
       }
-      if (cached.username !== trimmed) {
-        throw new Error(
-          `this device only knows @${cached.username}; sign up @${trimmed} first`,
-        );
-      }
-      const accountIdBytes = base64Decode(cached.accountIdB64);
+
       const result = await client.login(accountIdBytes, utf8(password));
+      const accountIdB64 = base64Encode(accountIdBytes);
+
       // OPAQUE export_key is deterministic for the same password,
       // so re-deriving the device root key here yields identical
       // bytes (and an equivalent CryptoKey). Persisting it again
-      // is harmless — the IDB `put` upserts.
-      const deviceKey = await deriveDeviceRootKey(
-        result.exportKey,
-        cached.accountIdB64,
-      );
-      await putDeviceKey(cached.accountIdB64, deviceKey);
+      // is harmless — the IDB `put` upserts. We also persist the
+      // (accountId, username) marker so subsequent reloads on
+      // this device skip the lookup round-trip.
+      const deviceKey = await deriveDeviceRootKey(result.exportKey, accountIdB64);
+      await putDeviceKey(accountIdB64, deviceKey);
+      savePersisted({ v: 1, accountIdB64, username: resolvedUsername });
       setState({
         kind: "session",
-        account: {
-          accountId: cached.accountIdB64,
-          username: cached.username,
-        },
+        account: { accountId: accountIdB64, username: resolvedUsername },
       });
     },
     async recover(mnemonicPhrase, newPassword) {

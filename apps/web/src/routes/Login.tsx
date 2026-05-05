@@ -3,12 +3,15 @@
 
 /**
  * Login route — drives a real OPAQUE-PAKE round-trip through
- * `AuthContext.login` (1.16c3b). Server: `lakko-svc-auth` on
- * `127.0.0.1:8081` via Vite's `/api/auth/*` dev proxy.
+ * `AuthContext.login`. Servers: `lakko-svc-auth` (OPAQUE) +
+ * `lakko-svc-discovery` (username → account_id resolution),
+ * via Vite's `/api/auth/*` and `/api/discovery/*` dev proxies.
  *
- * Single-device limitation: until `lakko-svc-discovery` lands in
- * 1.16d, the form can only log in as the username that signed
- * up on this device. The cached username pre-fills the input.
+ * 1.16d2 lifted the single-device limitation: the form now
+ * resolves the typed username via `/discovery/lookup` when the
+ * local cache misses, so a fresh browser can log in to any
+ * account whose username is registered. Cache hits (re-login on
+ * the same device) skip the lookup round-trip.
  */
 import { createSignal, type JSX } from "solid-js";
 import { A, useNavigate } from "@solidjs/router";
@@ -53,9 +56,9 @@ export default function Login(): JSX.Element {
       <section class="auth-card">
         <h1>Log in to Lakko</h1>
         <p style={{ color: "var(--surface-muted)", "margin-top": 0 }}>
-          OPAQUE-PAKE login. Single-device only until 1.16d brings
-          cross-device discovery — the cached username on this
-          device pre-fills the form below.
+          OPAQUE-PAKE login + OPRF username lookup. Wrong
+          username and wrong password produce the same error —
+          by design.
         </p>
         <form onSubmit={onSubmit}>
           <label>

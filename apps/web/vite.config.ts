@@ -34,6 +34,15 @@ export default defineConfig({
         changeOrigin: true,
         rewrite: (p) => p.replace(/^\/api\/auth/, ""),
       },
+      // 1.16d2: lakko-svc-discovery defaults to 127.0.0.1:8084.
+      // Same routing principle as /api/auth — production nginx
+      // will forward the same path; the relative client base
+      // URL works in both environments.
+      "/api/discovery": {
+        target: "http://127.0.0.1:8084",
+        changeOrigin: true,
+        rewrite: (p) => p.replace(/^\/api\/discovery/, ""),
+      },
     },
   },
 
