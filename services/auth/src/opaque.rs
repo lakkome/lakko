@@ -85,6 +85,15 @@ const KIND_PASSWORD: u8 = 1;
 /// OPAQUE registration kind: derived from the BIP39 mnemonic seed.
 const KIND_RECOVERY: u8 = 2;
 
+/// Flow tag for `opaque_login_states` rows created during a password
+/// reset. The OPAQUE math underneath uses `KIND_RECOVERY`'s
+/// credential_id (the user is proving knowledge of the recovery
+/// secret), but the row tag is distinct so neither `/login/finish`
+/// nor `/recovery/login/finish` can consume a state created for a
+/// reset (anti confused-deputy, mirrors the existing kind guard
+/// between `/login/finish` and `/recovery/login/finish`).
+const KIND_PASSWORD_RESET: u8 = 3;
+
 /// Build the OPAQUE credential_id by appending the registration kind to
 /// `account_id`. Domain-separates the password and recovery flows so an
 /// envelope from one flow cannot answer a challenge in the other.
@@ -814,6 +823,315 @@ pub(crate) async fn recovery_login_finish(
 }
 
 // ============================================================================
+// /password/reset/{start,finish} — replace the password envelope after the
+// user proves ownership via the BIP39 recovery mnemonic.
+// ============================================================================
+//
+// Flow (one user-facing operation, two HTTP round-trips):
+//
+//   1. Client computes:
+//        - recovery_request   = ClientLogin::start(seed)            (KIND_RECOVERY)
+//        - new_password_request = ClientRegistration::start(newpw)  (KIND_PASSWORD)
+//      Sends both to /password/reset/start.
+//
+//   2. Server:
+//        - verifies PoW,
+//        - looks up the stored KIND_RECOVERY envelope (or None),
+//        - runs ServerLogin::start with KIND_RECOVERY credential_id (proves the
+//          user knows the recovery secret, no real password yet),
+//        - runs ServerRegistration::start with KIND_PASSWORD credential_id
+//          (begins enrolling the new password envelope),
+//        - persists the ServerLogin state in `opaque_login_states` with
+//          kind = KIND_PASSWORD_RESET (3) so the existing /login/finish and
+//          /recovery/login/finish handlers refuse to consume it.
+//
+//   3. Client computes:
+//        - recovery_finalize = ClientLogin::finish(...)
+//        - new_password_upload = ClientRegistration::finish(...)
+//      Sends both with the same session_id to /password/reset/finish.
+//
+//   4. Server:
+//        - takes the KIND_PASSWORD_RESET row (one-shot, deletes it),
+//        - verifies the recovery finalization (this is the moment the user
+//          actually proves ownership of the mnemonic),
+//        - builds the new ServerRegistration from the upload,
+//        - REPLACES `opaque_registrations(account_id, kind=KIND_PASSWORD)` —
+//          the existing recovery envelope stays untouched, so the same
+//          mnemonic continues to work after this operation.
+//
+// PoW lives only on /password/reset/start (matches the rest of the
+// expensive endpoints: PoW gates the start, the start consumes the
+// challenge, finish runs against an already-issued session_id).
+
+#[derive(Deserialize)]
+pub(crate) struct PasswordResetStartRequest {
+    pub(crate) pow: crate::pow::PowProof,
+    pub(crate) account_id: String,
+    /// Base64-encoded `CredentialRequest` from
+    /// `ClientLogin::start(recovery_seed)`. The server feeds this to
+    /// `ServerLogin::start` against the KIND_RECOVERY envelope.
+    pub(crate) recovery_request: String,
+    /// Base64-encoded `RegistrationRequest` from
+    /// `ClientRegistration::start(new_password)`. The server begins a
+    /// fresh password registration with this.
+    pub(crate) new_password_request: String,
+}
+
+#[derive(Serialize)]
+pub(crate) struct PasswordResetStartResponse {
+    /// UUIDv7 the server assigned. Echoed back in `/password/reset/finish`.
+    pub(crate) session_id: String,
+    /// Base64-encoded `CredentialResponse` from `ServerLogin::start`.
+    pub(crate) recovery_response: String,
+    /// Base64-encoded `RegistrationResponse` from `ServerRegistration::start`.
+    pub(crate) new_password_response: String,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct PasswordResetFinishRequest {
+    pub(crate) session_id: String,
+    /// Base64-encoded `CredentialFinalization` proving recovery ownership.
+    pub(crate) recovery_finalize: String,
+    /// Base64-encoded `RegistrationUpload` for the new password envelope.
+    pub(crate) new_password_upload: String,
+}
+
+#[derive(Serialize)]
+pub(crate) struct PasswordResetFinishResponse {
+    pub(crate) ok: bool,
+    /// Base64-encoded `account_id` echo, same shape as
+    /// [`LoginFinishResponse::account_id`].
+    pub(crate) account_id: String,
+}
+
+/// `POST /password/reset/start`.
+///
+/// Mirrors the math in `login_start_inner` (KIND_RECOVERY) plus the
+/// math in `signup_start` (KIND_PASSWORD), folded into one round trip.
+/// The two operations are independent — the `ServerLogin` state is
+/// what we persist; the `ServerRegistration` step is stateless.
+pub(crate) async fn password_reset_start(
+    State(state): State<crate::AppState>,
+    Json(payload): Json<PasswordResetStartRequest>,
+) -> Result<Json<PasswordResetStartResponse>, (StatusCode, String)> {
+    crate::pow::verify_proof(&state.db, &payload.pow).await?;
+
+    let account_id = decode_account_id(&payload.account_id)?;
+
+    // Decode both client messages up-front; surfaces wire errors as
+    // 400 before we touch the DB.
+    let recovery_request_bytes = B64.decode(&payload.recovery_request).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("invalid recovery_request base64: {e}"),
+        )
+    })?;
+    let recovery_request_message = CredentialRequest::<LakkoCipherSuite>::deserialize(
+        &recovery_request_bytes,
+    )
+    .map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("invalid recovery_request: {e:?}"),
+        )
+    })?;
+    let new_password_request = decode_registration_request(&payload.new_password_request)?;
+
+    // Look up the stored KIND_RECOVERY envelope. None → unknown account
+    // (or no recovery enrolled); ServerLogin::start takes the
+    // fake-credentials path and produces a plausible response that
+    // can't be distinguished from a real one without the seed.
+    let recovery_credential_id = build_credential_id(&account_id, KIND_RECOVERY);
+    let stored: Option<ServerRegistration<LakkoCipherSuite>> = sqlx::query_as::<_, (Vec<u8>,)>(
+        "SELECT registration_bytes FROM opaque_registrations \
+         WHERE account_id = ? AND kind = ?",
+    )
+    .bind(&account_id[..])
+    .bind(KIND_RECOVERY)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| {
+        tracing::error!(error = %e, "query opaque_registrations (recovery)");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal db error".to_string(),
+        )
+    })?
+    .map(|(bytes,)| {
+        ServerRegistration::<LakkoCipherSuite>::deserialize(&bytes)
+            .expect("ServerRegistration deserialize failed — DB row corrupted")
+    });
+
+    let mut rng = OsRng;
+    let recovery_start = ServerLogin::<LakkoCipherSuite>::start(
+        &mut rng,
+        &state.opaque_setup,
+        stored,
+        recovery_request_message,
+        &recovery_credential_id,
+        ServerLoginStartParameters::default(),
+    )
+    .map_err(|e| {
+        tracing::error!(error = ?e, "ServerLogin::start (password_reset) failed");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal opaque error".to_string(),
+        )
+    })?;
+
+    // Begin the new password registration. Stateless — we keep the
+    // response and forget; the `RegistrationUpload` arriving on the
+    // finish endpoint embeds enough state for ServerRegistration::finish.
+    let password_credential_id = build_credential_id(&account_id, KIND_PASSWORD);
+    let password_start = ServerRegistration::<LakkoCipherSuite>::start(
+        &state.opaque_setup,
+        new_password_request,
+        &password_credential_id,
+    )
+    .map_err(|e| {
+        tracing::error!(error = ?e, "ServerRegistration::start (password_reset) failed");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal opaque error".to_string(),
+        )
+    })?;
+
+    // Persist the recovery ServerLogin state under the password-reset
+    // flow tag — confused-deputy guard.
+    let session_id = insert_login_state(
+        &state.db,
+        &recovery_start.state,
+        &account_id,
+        KIND_PASSWORD_RESET,
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!(error = %e, "insert opaque_login_states (password_reset)");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal db error".to_string(),
+        )
+    })?;
+
+    Ok(Json(PasswordResetStartResponse {
+        session_id: session_id.to_string(),
+        recovery_response: B64.encode(recovery_start.message.serialize()),
+        new_password_response: B64.encode(password_start.message.serialize()),
+    }))
+}
+
+/// `POST /password/reset/finish`.
+///
+/// Verifies the recovery finalization (this is when ownership of the
+/// mnemonic is actually proven), builds the new password envelope, and
+/// REPLACES `opaque_registrations(account_id, kind=KIND_PASSWORD)`.
+/// The recovery envelope stays untouched — the same mnemonic keeps
+/// working for future resets.
+pub(crate) async fn password_reset_finish(
+    State(state): State<crate::AppState>,
+    Json(payload): Json<PasswordResetFinishRequest>,
+) -> Result<Json<PasswordResetFinishResponse>, (StatusCode, String)> {
+    let session_id = Uuid::parse_str(&payload.session_id).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("invalid session_id (not a UUID): {e}"),
+        )
+    })?;
+
+    let cached = take_login_state(&state.db, session_id)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "take opaque_login_states (password_reset)");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal db error".to_string(),
+            )
+        })?
+        .ok_or((
+            StatusCode::UNAUTHORIZED,
+            "session_id unknown or expired".to_string(),
+        ))?;
+
+    let (server_login, account_id, kind) = cached;
+
+    if kind != KIND_PASSWORD_RESET {
+        // Caller tried to finalize a regular login session via the
+        // password-reset endpoint. The row is already deleted, so an
+        // attacker gets one shot at most; surface 401.
+        tracing::warn!(
+            session_kind = kind,
+            account_id = %B64.encode(account_id),
+            "password_reset_finish: session kind mismatch (cross-flow attempt)",
+        );
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            "session_id was started for a different flow".to_string(),
+        ));
+    }
+
+    // 1. Verify the recovery proof (mnemonic ownership).
+    let finalize_bytes = B64.decode(&payload.recovery_finalize).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("invalid recovery_finalize base64: {e}"),
+        )
+    })?;
+    let finalize_message = CredentialFinalization::<LakkoCipherSuite>::deserialize(&finalize_bytes)
+        .map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                format!("invalid recovery CredentialFinalization: {e:?}"),
+            )
+        })?;
+    let _ = server_login.finish(finalize_message).map_err(|e| {
+        // Same indistinguishable-failure policy as login_finish_inner.
+        tracing::debug!(
+            error = ?e,
+            account_id = %B64.encode(account_id),
+            "password_reset finalization failed",
+        );
+        (StatusCode::UNAUTHORIZED, "invalid credentials".to_string())
+    })?;
+
+    // 2. Build the new password envelope.
+    let new_password_upload = decode_registration_upload(&payload.new_password_upload)?;
+    let new_registration = ServerRegistration::<LakkoCipherSuite>::finish(new_password_upload);
+    let new_bytes = new_registration.serialize().to_vec();
+
+    // 3. Replace the password envelope. ON DUPLICATE KEY UPDATE relies
+    //    on the (account_id, kind) composite primary key; the
+    //    `updated_at` column auto-bumps via the table's
+    //    `ON UPDATE CURRENT_TIMESTAMP` clause.
+    sqlx::query(
+        "INSERT INTO opaque_registrations (account_id, kind, registration_bytes) \
+         VALUES (?, ?, ?) \
+         ON DUPLICATE KEY UPDATE registration_bytes = VALUES(registration_bytes)",
+    )
+    .bind(&account_id[..])
+    .bind(KIND_PASSWORD)
+    .bind(&new_bytes)
+    .execute(&state.db)
+    .await
+    .map_err(|e| {
+        tracing::error!(error = %e, "upsert opaque_registrations (password_reset)");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal db error".to_string(),
+        )
+    })?;
+
+    tracing::info!(
+        account_id = %B64.encode(account_id),
+        "password reset completed (mnemonic-driven)",
+    );
+
+    Ok(Json(PasswordResetFinishResponse {
+        ok: true,
+        account_id: B64.encode(account_id),
+    }))
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
@@ -1073,6 +1391,176 @@ mod tests {
             !try_login(&setup, &mut rng, &rc_cred, password, Some(pw_stored)),
             "cross-kind login must be rejected by AKE",
         );
+    }
+
+    /// Phase 1.16c3c3a: end-to-end password-reset math. Walks the
+    /// same primitives `password_reset_start` / `password_reset_finish`
+    /// drive in the live handler — minus the DB and HTTP plumbing —
+    /// and asserts the canonical post-reset properties:
+    ///
+    ///   1. The mnemonic still works (recovery envelope untouched).
+    ///   2. The NEW password works against the password envelope.
+    ///   3. The OLD password no longer works.
+    #[test]
+    fn password_reset_replaces_password_envelope() {
+        let mut rng = OsRng;
+        let setup = ServerSetup::<LakkoCipherSuite>::new(&mut rng);
+        let acct = [0x55; ACCOUNT_ID_LEN];
+
+        let pw_cred = build_credential_id(&acct, KIND_PASSWORD);
+        let rc_cred = build_credential_id(&acct, KIND_RECOVERY);
+
+        let old_password = b"correct horse battery staple";
+        let new_password = b"hunter2-rotated";
+        let seed: &[u8; 64] = b"\
+            0123456789abcdef0123456789abcdef\
+            0123456789abcdef0123456789abcdef";
+
+        // Initial signup: enrol both envelopes.
+        let _pw_stored_initial = register(&setup, &mut rng, &pw_cred, old_password);
+        let rc_stored = register(&setup, &mut rng, &rc_cred, seed);
+
+        // ============= /password/reset/start =============
+        // Client: ClientLogin::start(seed) — proves recovery secret.
+        let recovery_client_start = ClientLogin::<LakkoCipherSuite>::start(&mut rng, seed).unwrap();
+        // Client: ClientRegistration::start(new_password) — begins
+        // enrolling the new password envelope.
+        let new_pw_client_start =
+            ClientRegistration::<LakkoCipherSuite>::start(&mut rng, new_password).unwrap();
+
+        // Server: ServerLogin against the recovery envelope.
+        let recovery_server_start = ServerLogin::<LakkoCipherSuite>::start(
+            &mut rng,
+            &setup,
+            Some(rc_stored.clone()),
+            recovery_client_start.message,
+            &rc_cred,
+            ServerLoginStartParameters::default(),
+        )
+        .unwrap();
+        // Server: ServerRegistration::start for the new password.
+        let new_pw_server_start = ServerRegistration::<LakkoCipherSuite>::start(
+            &setup,
+            new_pw_client_start.message,
+            &pw_cred,
+        )
+        .unwrap();
+
+        // ============= /password/reset/finish =============
+        // Client: ClientLogin::finish (recovery proof).
+        let recovery_client_finish = recovery_client_start
+            .state
+            .finish(
+                seed,
+                recovery_server_start.message,
+                ClientLoginFinishParameters::default(),
+            )
+            .unwrap();
+        // Client: ClientRegistration::finish for the new password.
+        let new_pw_client_finish = new_pw_client_start
+            .state
+            .finish(
+                &mut rng,
+                new_password,
+                new_pw_server_start.message,
+                ClientRegistrationFinishParameters::default(),
+            )
+            .unwrap();
+
+        // Server: verify the recovery proof.
+        let recovery_server_finish = recovery_server_start
+            .state
+            .finish(recovery_client_finish.message)
+            .expect("recovery proof must verify");
+        // Sanity: keys agreed on the recovery side.
+        assert_eq!(
+            recovery_client_finish.session_key.as_slice(),
+            recovery_server_finish.session_key.as_slice(),
+        );
+
+        // Server: build the new password envelope, REPLACING the old.
+        let new_pw_stored =
+            ServerRegistration::<LakkoCipherSuite>::finish(new_pw_client_finish.message);
+
+        // ============= post-reset assertions =============
+        // 1. Recovery envelope still works with the same seed.
+        assert!(
+            try_login(&setup, &mut rng, &rc_cred, seed, Some(rc_stored)),
+            "recovery envelope must survive password reset",
+        );
+        // 2. NEW password works against the rotated envelope.
+        assert!(
+            try_login(
+                &setup,
+                &mut rng,
+                &pw_cred,
+                new_password,
+                Some(new_pw_stored.clone())
+            ),
+            "new password must unlock the rotated envelope",
+        );
+        // 3. OLD password no longer works against the rotated envelope.
+        assert!(
+            !try_login(
+                &setup,
+                &mut rng,
+                &pw_cred,
+                old_password,
+                Some(new_pw_stored)
+            ),
+            "old password must NOT unlock the rotated envelope",
+        );
+    }
+
+    /// Phase 1.16c3c3a: a wrong mnemonic seed at reset time fails the
+    /// AKE finalization — same indistinguishable failure as
+    /// `/recovery/login/finish` with a wrong seed.
+    #[test]
+    fn password_reset_with_wrong_seed_fails_at_finish() {
+        let mut rng = OsRng;
+        let setup = ServerSetup::<LakkoCipherSuite>::new(&mut rng);
+        let acct = [0x66; ACCOUNT_ID_LEN];
+        let pw_cred = build_credential_id(&acct, KIND_PASSWORD);
+        let rc_cred = build_credential_id(&acct, KIND_RECOVERY);
+
+        let real_seed: &[u8; 64] = b"\
+            aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\
+            aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let wrong_seed: &[u8; 64] = b"\
+            bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\
+            bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+        let _pw_stored = register(&setup, &mut rng, &pw_cred, b"oldpw");
+        let rc_stored = register(&setup, &mut rng, &rc_cred, real_seed);
+
+        // Client uses the WRONG seed for the recovery proof.
+        let recovery_client_start =
+            ClientLogin::<LakkoCipherSuite>::start(&mut rng, wrong_seed).unwrap();
+        let recovery_server_start = ServerLogin::<LakkoCipherSuite>::start(
+            &mut rng,
+            &setup,
+            Some(rc_stored),
+            recovery_client_start.message,
+            &rc_cred,
+            ServerLoginStartParameters::default(),
+        )
+        .unwrap();
+
+        // The handler typically rejects at the client's `.finish`
+        // because the AKE no longer produces matching keys; if the
+        // client somehow gets past that, the server's own
+        // `state.finish(...)` rejects. Both paths produce an Err that
+        // the handler maps to 401.
+        let client_finish = recovery_client_start.state.finish(
+            wrong_seed,
+            recovery_server_start.message,
+            ClientLoginFinishParameters::default(),
+        );
+        let rejected = match client_finish {
+            Err(_) => true,
+            Ok(cf) => recovery_server_start.state.finish(cf.message).is_err(),
+        };
+        assert!(rejected, "wrong seed must fail at the AKE finalization");
     }
 
     /// Phase 1.1d: a wrong BIP39 seed against the correct recovery

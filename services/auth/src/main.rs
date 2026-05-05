@@ -35,6 +35,8 @@
 //! - `POST /login/finish`            — OPAQUE login step 2, password (Phase 1.1c)
 //! - `POST /recovery/login/start`    — OPAQUE login step 1, BIP39 (Phase 1.1d/e)
 //! - `POST /recovery/login/finish`   — OPAQUE login step 2, BIP39 (Phase 1.1d)
+//! - `POST /password/reset/start`    — replace password via mnemonic, step 1 (Phase 1.16c3c3a)
+//! - `POST /password/reset/finish`   — replace password via mnemonic, step 2 (Phase 1.16c3c3a)
 
 #![forbid(unsafe_code)]
 
@@ -168,6 +170,11 @@ fn build_app(state: AppState) -> Router {
         .route(
             "/recovery/login/finish",
             post(opaque::recovery_login_finish),
+        )
+        .route("/password/reset/start", post(opaque::password_reset_start))
+        .route(
+            "/password/reset/finish",
+            post(opaque::password_reset_finish),
         )
         .layer(TraceLayer::new_for_http())
         .with_state(state)
