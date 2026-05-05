@@ -8,12 +8,12 @@
 //!   * [`LoginSession::start_password`] /
 //!     [`LoginSession::start_recovery`] — produce the
 //!     `CredentialRequest` blob (`request` field of
-//!     [`wire::LoginStartRequest`](crate::wire::LoginStartRequest)).
+//!     [`wire::LoginStartFields`](crate::wire::LoginStartFields)).
 //!
 //!   * [`LoginSession::finish`] — consume the server's
 //!     `CredentialResponse` and produce a `CredentialFinalization`
 //!     (`finalize` field of
-//!     [`wire::LoginFinishRequest`](crate::wire::LoginFinishRequest))
+//!     [`wire::LoginFinishFields`](crate::wire::LoginFinishFields))
 //!     plus the symmetric `session_key` and the deterministic
 //!     `export_key`.
 //!
@@ -53,7 +53,7 @@ pub struct LoginSession {
 #[derive(Debug)]
 pub struct LoginOutput {
     /// Base64-encoded `CredentialFinalization`. Goes into the
-    /// `finalize` field of [`wire::LoginFinishRequest`](crate::wire::LoginFinishRequest).
+    /// `finalize` field of [`wire::LoginFinishFields`](crate::wire::LoginFinishFields).
     pub finalize_b64: String,
     /// Symmetric session key shared with the server. Length is
     /// [`crate::SESSION_KEY_LEN`] bytes. Used to bind a follow-up
@@ -70,7 +70,7 @@ impl LoginSession {
     ///
     /// Returns the session and the base64-encoded
     /// `CredentialRequest` ready for
-    /// [`wire::LoginStartRequest`](crate::wire::LoginStartRequest).
+    /// [`wire::LoginStartFields`](crate::wire::LoginStartFields).
     ///
     /// # Errors
     ///

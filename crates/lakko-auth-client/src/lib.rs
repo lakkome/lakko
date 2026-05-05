@@ -34,11 +34,11 @@
 //! ## Cipher suite
 //!
 //! [`LakkoCipherSuite`] is a verbatim copy of the server's type
-//! ([`services/auth/src/opaque.rs`]). Any change to the server-side
-//! cipher suite must land in the same commit as the matching
-//! change here — the OPAQUE math is bound to the suite and a
-//! mismatch produces "invalid credentials" with no recoverable
-//! diagnostic.
+//! (see `services/auth/src/opaque.rs`). Any change to the
+//! server-side cipher suite must land in the same commit as the
+//! matching change here — the OPAQUE math is bound to the suite
+//! and a mismatch produces "invalid credentials" with no
+//! recoverable diagnostic.
 //!
 //! ## Wire format
 //!

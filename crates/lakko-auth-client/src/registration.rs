@@ -77,7 +77,7 @@ impl RegistrationSession {
     /// Returns the session (to be passed back into `finish` along
     /// with the server's `password_response`) and the base64-encoded
     /// `RegistrationRequest` that goes into the
-    /// [`wire::SignupStartRequest`](crate::wire::SignupStartRequest)'s
+    /// [`wire::SignupStartFields`](crate::wire::SignupStartFields)'s
     /// `password_request` field.
     ///
     /// # Errors
