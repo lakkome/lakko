@@ -26,7 +26,27 @@ export function AppShell(props: { children?: JSX.Element }): JSX.Element {
   const navigate = useNavigate();
 
   function onLogout(): void {
+    // Keeps localStorage + IDB intact — re-login on this device
+    // remains cheap, and the device key stays usable for any
+    // encrypted local stores.
     auth.logout();
+    navigate(paths.login, { replace: true });
+  }
+
+  async function onForgetDevice(): Promise<void> {
+    // Confirm — this is destructive. After this the account is
+    // only reachable via the recovery passphrase (1.16c3c3
+    // /recover flow).
+    if (
+      !window.confirm(
+        "Forget this device? You'll lose the cached account on " +
+          "this browser. The only way back is the 24-word " +
+          "recovery passphrase you wrote down at signup.",
+      )
+    ) {
+      return;
+    }
+    await auth.forgetDevice();
     navigate(paths.login, { replace: true });
   }
 
@@ -46,9 +66,25 @@ export function AppShell(props: { children?: JSX.Element }): JSX.Element {
         <div class="nav-spacer" />
         <div class="nav-footer">
           <SessionLabel />
-          <div style={{ "margin-top": "0.5rem" }}>
+          <div
+            style={{
+              "margin-top": "0.5rem",
+              display: "flex",
+              "flex-direction": "column",
+              gap: "0.5rem",
+            }}
+          >
             <button type="button" onClick={onLogout}>
               Log out
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                void onForgetDevice();
+              }}
+              style={{ "font-size": "0.85rem" }}
+            >
+              Forget this device
             </button>
           </div>
         </div>

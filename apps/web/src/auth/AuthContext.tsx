@@ -4,37 +4,38 @@
 /**
  * Auth context — single source of truth for "is the user logged in?"
  *
- * 1.16b shipped this as a stub that flipped state in-memory. 1.16c3b
- * replaces the stubs with real OPAQUE-PAKE round-trips through
- * `lakko-ffi-wasm`'s `OpaqueRegister` / `OpaqueLogin` classes,
- * driven by the fetch-based [`AuthClient`].
+ * 1.16b: stub that flipped state in-memory.
+ * 1.16c3b: real OPAQUE-PAKE round-trips through `OpaqueRegister` /
+ *          `OpaqueLogin`.
+ * 1.16c3c1: BIP39 recovery passphrase enrolled at signup.
+ * 1.16c3c2: session persistence via WebCrypto + IndexedDB.
  *
- * ## Account-id model (Phase 1.16c3b minimal scope)
+ * ## Persistence model (1.16c3c2)
  *
- * The Lakko server identifies accounts by an opaque 16-byte
- * UUIDv7 the client picks at signup. There is no `username →
- * account_id` directory until `lakko-svc-discovery` lands in
- * 1.16d. To make signup→logout→login cycles work on a single
- * device today, we cache `(accountId, username)` as plaintext
- * in `localStorage`:
+ * Two layers of state survive a page reload:
  *
- *   * the `accountId` itself is **not secret** — the server
- *     returns it on every successful login, and a network
- *     observer with HTTPS broken sees it anyway;
- *   * the `username` is purely a UI label until 1.16d wires
- *     discovery.
+ *   1. **`localStorage`** — `(accountId, username)`. Plaintext.
+ *      Neither field is secret; both are routine markers.
+ *   2. **IndexedDB** — the device root `CryptoKey`, derived from
+ *      the OPAQUE password export key via HKDF-SHA-512 and
+ *      stored as **non-extractable** AES-256-GCM. Only the
+ *      WebCrypto handle survives the round-trip; the bytes
+ *      never leave the keystore.
  *
- * What is NOT in `localStorage`:
+ * On `AuthProvider` mount we look both up. If both are present,
+ * we restore state directly to `session` — no password re-entry
+ * required. The OPAQUE export key bytes themselves are NOT
+ * persisted; they live in memory only for the duration of the
+ * signup / login call and drop the moment the device key has
+ * been derived.
  *
- *   * The OPAQUE export key. It lives in memory only; the user
- *     re-types the password on every page reload. 1.16c3c will
- *     persist a derived KEK in non-extractable WebCrypto.
- *   * The session key. Same story — single-page-load lifetime.
+ * `logout()` keeps both layers in place — re-auth via password
+ * stays cheap. `forgetDevice()` wipes both — full reset, requires
+ * the recovery passphrase to come back.
  *
- * ## What is NOT here yet (1.16c3c / 1.16d)
+ * ## What is NOT here yet (1.16c3c3 / 1.16d)
  *
- *   * BIP39 recovery passphrase generation on signup.
- *   * Persistent device root key (WebCrypto-backed).
+ *   * Recover-from-mnemonic flow at `/recover`.
  *   * `username → accountId` lookup for first-time login on a
  *     fresh device.
  *   * Multi-account on a single device.
@@ -50,6 +51,8 @@ import {
 
 import { AuthClient } from "./client";
 import { base64Decode, base64Encode } from "./account-id";
+import { deriveDeviceRootKey } from "./device-key";
+import { deleteDeviceKey, getDeviceKey, putDeviceKey } from "./key-store";
 
 /** Account record exposed to the UI when a session is active. */
 export interface SessionAccount {
@@ -85,8 +88,9 @@ export interface AuthApi {
   /** Run the OPAQUE-PAKE registration flow.
    *
    *  Throws on network / server errors (the form surfaces them).
-   *  On success, persists `(accountId, username)` to localStorage
-   *  and flips state to `session`. The returned [`SignupOutcome`]
+   *  On success, persists `(accountId, username)` to localStorage,
+   *  derives the device root key + writes it to IndexedDB, and
+   *  flips state to `session`. The returned [`SignupOutcome`]
    *  carries the BIP39 recovery phrase that the UI MUST display
    *  exactly once. */
   signup(username: string, password: string): Promise<SignupOutcome>;
@@ -97,14 +101,17 @@ export interface AuthApi {
    *  cached one, throws — the user has to sign up first or wait
    *  for 1.16d's discovery service. */
   login(username: string, password: string): Promise<void>;
-  /** Drop the in-memory session. Does NOT erase the cached
-   *  `(accountId, username)` — re-login on the same device
-   *  should work. Use [`forgetDevice`] for a clean wipe. */
+  /** Drop the in-memory session. Does NOT erase the localStorage
+   *  cache or the IDB-stored device key — re-login on the same
+   *  device should be cheap, and the device key remains usable
+   *  for opening any encrypted local stores 1.16f wires up. Use
+   *  [`forgetDevice`] for a clean wipe. */
   logout(): void;
-  /** Erase the localStorage cache for this device, then logout.
-   *  Phase 1.16c3c will extend this to also clear the
-   *  WebCrypto-stored device root key. */
-  forgetDevice(): void;
+  /** Wipe both the localStorage cache and the IDB-stored device
+   *  key for this device, then drop the in-memory session. After
+   *  this the only way back into the account is via the recovery
+   *  passphrase (1.16c3c3 `/recover` flow). */
+  forgetDevice(): Promise<void>;
 }
 
 const AuthContext = createContext<AuthApi>();
@@ -162,22 +169,14 @@ function utf8(s: string): Uint8Array {
 
 export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
   // Start in `loading` so the very first paint doesn't snap to
-  // `/login`; the onMount hook reads localStorage and resolves.
+  // `/login`; the onMount hook reads localStorage + IDB, then
+  // resolves to either `session` (full restore) or `anon`.
   const [state, setState] = createSignal<AuthState>({ kind: "loading" });
 
   const client = new AuthClient();
 
   onMount(() => {
-    // Synchronous localStorage read — no need for a Promise here.
-    const cached = loadPersisted();
-    if (cached === null) {
-      setState({ kind: "anon" });
-    } else {
-      // We have a cached identity but no in-memory secrets — the
-      // user must re-authenticate. Stay anon, expose the cached
-      // username so the login form pre-fills.
-      setState({ kind: "anon", cachedUsername: cached.username });
-    }
+    void hydrateFromStorage().then(setState);
   });
 
   const api: AuthApi = {
@@ -190,6 +189,13 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       const result = await client.signup(utf8(password));
       const accountIdB64 = base64Encode(result.accountId);
       savePersisted({ v: 1, accountIdB64, username: trimmed });
+      // Derive the device root key right after signup and persist
+      // it — failing this AFTER the server commit would leave the
+      // user with a working server-side account but no on-device
+      // session restore. We surface the failure rather than
+      // pretending signup succeeded silently.
+      const deviceKey = await deriveDeviceRootKey(result.exportKey, accountIdB64);
+      await putDeviceKey(accountIdB64, deviceKey);
       setState({
         kind: "session",
         account: { accountId: accountIdB64, username: trimmed },
@@ -220,7 +226,16 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         );
       }
       const accountIdBytes = base64Decode(cached.accountIdB64);
-      await client.login(accountIdBytes, utf8(password));
+      const result = await client.login(accountIdBytes, utf8(password));
+      // OPAQUE export_key is deterministic for the same password,
+      // so re-deriving the device root key here yields identical
+      // bytes (and an equivalent CryptoKey). Persisting it again
+      // is harmless — the IDB `put` upserts.
+      const deviceKey = await deriveDeviceRootKey(
+        result.exportKey,
+        cached.accountIdB64,
+      );
+      await putDeviceKey(cached.accountIdB64, deviceKey);
       setState({
         kind: "session",
         account: {
@@ -230,13 +245,30 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       });
     },
     logout() {
+      // Keep localStorage + IDB intact. Re-login on this device
+      // remains cheap, and the device key stays available for
+      // any encrypted local stores 1.16f wires up.
       const cached = loadPersisted();
       setState({
         kind: "anon",
         ...(cached !== null ? { cachedUsername: cached.username } : {}),
       });
     },
-    forgetDevice() {
+    async forgetDevice() {
+      const cached = loadPersisted();
+      // Order matters: clear the IDB key BEFORE clearing the
+      // localStorage marker. If we crash between, an IDB key
+      // without a localStorage marker is harmless on next mount;
+      // a localStorage marker without an IDB key would loop
+      // through the broken-restore path forever.
+      if (cached !== null) {
+        try {
+          await deleteDeviceKey(cached.accountIdB64);
+        } catch {
+          // Ignore — best-effort wipe; localStorage clear below
+          // is still worth running.
+        }
+      }
       clearPersisted();
       setState({ kind: "anon" });
     },
@@ -245,6 +277,38 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
   return (
     <AuthContext.Provider value={api}>{props.children}</AuthContext.Provider>
   );
+}
+
+/**
+ * Inspect localStorage + IndexedDB and resolve the appropriate
+ * initial `AuthState`:
+ *
+ *   * No localStorage record → fresh device, `anon`.
+ *   * localStorage but no IDB key → cached identity, password
+ *     re-entry required, `anon` with `cachedUsername`.
+ *   * Both present → resume `session` directly, no password.
+ */
+async function hydrateFromStorage(): Promise<AuthState> {
+  const cached = loadPersisted();
+  if (cached === null) {
+    return { kind: "anon" };
+  }
+  let key: CryptoKey | null = null;
+  try {
+    key = await getDeviceKey(cached.accountIdB64);
+  } catch {
+    // IDB unreachable (private mode in some browsers, quota
+    // exhaustion, …). Treat as "no key cached" and ask for the
+    // password again rather than crash the app.
+    key = null;
+  }
+  if (key === null) {
+    return { kind: "anon", cachedUsername: cached.username };
+  }
+  return {
+    kind: "session",
+    account: { accountId: cached.accountIdB64, username: cached.username },
+  };
 }
 
 /**
