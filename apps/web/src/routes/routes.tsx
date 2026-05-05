@@ -1,0 +1,76 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+/**
+ * Route table for `apps/web`.
+ *
+ * The shape mirrors `routes/paths.ts` 1:1 — when this file changes,
+ * `paths.ts` changes in the same commit.
+ *
+ * Two route groups:
+ *
+ *   1. **Public** (`/login`, `/signup`) — wrapped in
+ *      `<RequireAnonymous>` so a signed-in user gets bounced home
+ *      instead of landing on a login form they cannot use.
+ *
+ *   2. **Protected** (`/`, `/contacts`, `/chat/:id`, `/dev`) —
+ *      wrapped in `<RequireSession>` and rendered inside the
+ *      `<AppShell>` layout. The wrapper short-circuits to `/login`
+ *      when the user is anonymous.
+ *
+ * Per-route lazy loading is intentionally NOT used in 1.16b: every
+ * route is tiny, lazy chunks add complexity, and Vite's chunking
+ * behaves better when the wasm chunk is the only big payload. We
+ * revisit lazy loading in 1.16f together with the bundle pass.
+ */
+import type { RouteDefinition } from "@solidjs/router";
+import { AppShell } from "../ui/AppShell";
+import { RequireAnonymous, RequireSession } from "../auth/guards";
+import Login from "./Login";
+import Signup from "./Signup";
+import Home from "./Home";
+import Contacts from "./Contacts";
+import Chat from "./Chat";
+import DevProbe from "./DevProbe";
+import NotFound from "./NotFound";
+import { chatRoutePattern, paths } from "./paths";
+
+/** All app routes. Consumed by `<Router>` in `App.tsx`. */
+export const routes: RouteDefinition[] = [
+  // Public auth pages — bare layout, no shell.
+  {
+    path: paths.login,
+    component: () => (
+      <RequireAnonymous>
+        <Login />
+      </RequireAnonymous>
+    ),
+  },
+  {
+    path: paths.signup,
+    component: () => (
+      <RequireAnonymous>
+        <Signup />
+      </RequireAnonymous>
+    ),
+  },
+
+  // Protected pages — every child renders inside <AppShell />.
+  {
+    path: "/",
+    component: (props) => (
+      <RequireSession>
+        <AppShell>{props.children}</AppShell>
+      </RequireSession>
+    ),
+    children: [
+      { path: paths.home, component: Home },
+      { path: paths.contacts, component: Contacts },
+      { path: chatRoutePattern, component: Chat },
+      { path: paths.dev, component: DevProbe },
+    ],
+  },
+
+  // Catch-all 404.
+  { path: "*", component: NotFound },
+];

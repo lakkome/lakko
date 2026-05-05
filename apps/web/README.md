@@ -3,13 +3,17 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 SPDX-FileCopyrightText: 2026 Lakko Contributors
 -->
 
-# Lakko — Web client (Phase 1.16a skeleton)
+# Lakko — Web client (Phase 1.16b shell)
 
-Minimum viable Solid.js + WASM scaffold that proves the JS&nbsp;↔&nbsp;WASM
-bridge works end-to-end. Routing, signup / login, contacts, and chat
-arrive in Phase 1.16b — this skeleton only confirms that the Rust
-core (via `lakko-ffi-wasm`) loads in a browser and can produce an
-`Identity` + a `KeyPackage`.
+Solid.js + Vite + TypeScript app that loads the Rust core through
+`lakko-ffi-wasm`. Phase 1.16b is a routing + UI shell: `/login`,
+`/signup`, `/`, `/contacts`, `/chat/:id`, `/dev`. Auth is stubbed
+in-memory (sessions reset on reload) — real OPAQUE-PAKE arrives
+in 1.16c, contacts in 1.16d, 1×1 chat in 1.16e.
+
+The original "Hello core" probe from 1.16a moved to `/dev` and
+stays as a smoke surface that verifies the WASM bridge end-to-end
+without going through the auth UI.
 
 ## Toolchain prerequisites
 
@@ -79,33 +83,70 @@ Optimisation work itself lands in 1.16c.
 
 ```
 apps/web/
-├── index.html             — single-page-app entry, security meta
-├── package.json           — npm config + scripts (Solid + Vite + wasm plugin)
-├── tsconfig.json          — strict TS, Solid JSX import source
-├── vite.config.ts         — solid + wasm plugins, ES2022 target
-├── public/                — static assets served as-is (currently empty)
-├── wasm/                  — wasm-pack output (gitignored)
-├── dist/                  — Vite build output (gitignored)
+├── index.html               — SPA entry, security meta
+├── package.json             — npm config + scripts (Solid + Vite + wasm plugin)
+├── tsconfig.json            — strict TS, Solid JSX import source
+├── vite.config.ts           — solid + wasm plugins, ES2022 target
+├── wasm/                    — wasm-pack output (gitignored)
+├── dist/                    — Vite build output (gitignored)
 └── src/
-    ├── main.tsx           — Solid render() entry, mounts App into #root
-    ├── App.tsx            — Phase 1.16a "core probe" component
-    └── wasm.ts            — typed `loadWasm()` wrapper, idempotent init
+    ├── main.tsx             — Solid render() entry, mounts App
+    ├── App.tsx              — <AuthProvider> + <Router> root
+    ├── styles.css           — global stylesheet (light theme primitives)
+    ├── wasm.ts              — typed loadWasm() wrapper, idempotent init
+    ├── auth/
+    │   ├── AuthContext.tsx  — useAuth() / <AuthProvider>; stubbed in 1.16b
+    │   └── guards.tsx       — <RequireSession> / <RequireAnonymous>
+    ├── routes/
+    │   ├── paths.ts         — typed URL helpers (single source of truth)
+    │   ├── routes.tsx       — route table consumed by <Router>
+    │   ├── Login.tsx        — /login (stub form, real OPAQUE in 1.16c)
+    │   ├── Signup.tsx       — /signup (stub form)
+    │   ├── Home.tsx         — / authenticated landing
+    │   ├── Contacts.tsx     — /contacts placeholder (real flow in 1.16d)
+    │   ├── Chat.tsx         — /chat/:id placeholder (real flow in 1.16e)
+    │   ├── DevProbe.tsx     — /dev — original 1.16a "Hello core" probe
+    │   └── NotFound.tsx     — catch-all 404
+    └── ui/
+        └── AppShell.tsx     — sidebar + main layout for protected routes
 ```
+
+## Routing model
+
+- Public auth routes (`/login`, `/signup`) are wrapped in
+  `<RequireAnonymous>` — a signed-in user gets bounced to `/`.
+- Protected routes (`/`, `/contacts`, `/chat/:id`, `/dev`) live
+  inside `<RequireSession>` and render through the `<AppShell>`
+  layout. An anonymous user is redirected to `/login`.
+- All URL strings come from `routes/paths.ts`; never hardcode a
+  route literal in a component.
+- The route table in `routes/routes.tsx` mirrors `paths.ts` 1:1 —
+  add or rename routes in both files in the same commit.
+
+## Auth model (Phase 1.16b)
+
+- `useAuth()` returns `{ state, signup, login, logout }`.
+- `state` is a discriminated union: `loading` / `anon` /
+  `session(account)`.
+- `signup(...)` and `login(...)` are placeholders — they flip
+  state to a fake session in-memory. Sessions do not persist
+  across reloads.
+- 1.16c will replace the placeholders with real OPAQUE-PAKE calls
+  through `lakko-ffi-wasm` and add IndexedDB persistence.
 
 ## Notes for AI agents and contributors
 
-- **No router, no global state yet.** Phase 1.16a is "Hello, core" —
-  do not introduce solid-router, signals stores, or service workers
-  here. They land in 1.16b / 1.16c with the corresponding ADR or
-  ROADMAP bullet.
+- **Do not bake in 1.16c+ scope.** The auth stub is intentionally
+  trivial; do not wire OPAQUE / fetch / IndexedDB into 1.16b.
 - **`src/wasm.ts` is the only place** that calls `init()` from
   `lakko_ffi_wasm`. Other code calls `loadWasm()` and gets the
   cached promise.
-- **No `unwrap()`-style `!` non-null assertions** in TS. Strict
-  null checks are on; use `if (x === null)` and throw with a clear
-  message at the source.
-- **The wasm-pack output path is `apps/web/wasm/`.** Vite picks it up
-  via `vite-plugin-wasm`; do not import directly from
+- **No `!` non-null assertions** in TS. Strict null checks are on;
+  use `if (x === null)` and throw with a clear message at the
+  source.
+- **The wasm-pack output path is `apps/web/wasm/`.** Vite picks it
+  up via `vite-plugin-wasm`; do not import directly from
   `crates/lakko-ffi-wasm/pkg`.
+- **No emoji in code or docs.** House style; CLAUDE.md.
 - **Browser baseline:** evergreen Chromium / Firefox / Safari with
   WebAssembly + ES2022. We do not target legacy browsers.

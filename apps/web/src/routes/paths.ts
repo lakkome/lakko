@@ -1,0 +1,55 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+/**
+ * Typed URL path helpers for `apps/web`.
+ *
+ * Every navigation in the app goes through one of the constants /
+ * builders here, which gives us:
+ *
+ *   1. A single source of truth for the URL surface — when a route
+ *      moves, callers do not silently keep working against a 404.
+ *   2. Type-checked params on builders (`chat(":id")` won't compile
+ *      with the wrong arity).
+ *   3. A grep target. `paths.login` and `paths.chat(...)` are
+ *      trivially searchable.
+ *
+ * The shape mirrors the route table in `routes/routes.tsx` 1:1. If
+ * a route is added or renamed, update both files in the same
+ * commit.
+ *
+ * Phase 1.16b — pure routing scaffold; the screens are stubs that
+ * 1.16c (auth), 1.16d (contacts) and 1.16e (chat) fill in.
+ */
+
+/** Static-path constants. */
+export const paths = {
+  /** Public landing for unauthenticated users — login form. */
+  login: "/login",
+  /** Public landing for unauthenticated users — signup form. */
+  signup: "/signup",
+  /** Authenticated home / inbox. */
+  home: "/",
+  /** Contact list and add-contact entry point. */
+  contacts: "/contacts",
+  /**
+   * Developer probe — runs the "Hello core" round-trip from 1.16a.
+   * Kept off the main shell intentionally; users should never land
+   * here in normal flows.
+   */
+  dev: "/dev",
+  /**
+   * Build a chat URL for a specific conversation id. The id format
+   * is opaque to the router — at the moment we use the MLS group
+   * pseudonym hex; 1.16e revisits this when chat lands.
+   */
+  chat(id: string): string {
+    return `/chat/${encodeURIComponent(id)}`;
+  },
+} as const;
+
+/**
+ * The matchable pattern for the dynamic chat route — must stay in
+ * sync with `paths.chat(...)`. Used in the route table.
+ */
+export const chatRoutePattern = "/chat/:id" as const;
