@@ -46,6 +46,13 @@ import { DiscoveryClient } from "../discovery/client";
 import { base64Decode } from "../auth/account-id";
 import { DsClient } from "../ds/client";
 import type { IdentitySecrets } from "../auth/AuthContext";
+import type { Group as WasmGroup } from "../../wasm/lakko_ffi_wasm";
+import {
+  KIND_CONTACT_REQUEST,
+  KIND_WELCOME,
+  parseEnvelope,
+  wrapEnvelope,
+} from "./envelope";
 
 /** Result of `ContactsClient.sendContactRequest`. */
 export interface SendResult {
@@ -88,11 +95,31 @@ export interface IncomingContactRequest {
   createdAt: string;
 }
 
+/** A verified incoming Welcome (MLS group-join blob) decoded
+ *  out of the mailbox (1.16e3). */
+export interface IncomingWelcome {
+  messageId: number;
+  /** Raw MLS Welcome bytes — feed straight into
+   *  `Group.joinFromWelcome(identity, ...)`. */
+  welcomeBytes: Uint8Array;
+  createdAt: string;
+}
+
+/** Discriminated event returned by `pollMailbox`. The kind tag
+ *  matches the on-the-wire envelope discriminator (Phase
+ *  1.16e3). Callers `switch` on it to dispatch to the right
+ *  handler. */
+export type IncomingMailboxEvent =
+  | { kind: "contact-request"; request: IncomingContactRequest }
+  | { kind: "welcome"; welcome: IncomingWelcome };
+
 /** Result of `ContactsClient.pollMailbox`. */
 export interface PollResult {
-  /** Verified contact requests, in the order DS returned them
-   *  (oldest first by message id). */
-  requests: IncomingContactRequest[];
+  /** Discriminated events, in the order DS returned them
+   *  (oldest first by message id). Mixed kinds are interleaved
+   *  by arrival order — the caller is expected to dispatch on
+   *  `event.kind`. */
+  events: IncomingMailboxEvent[];
   /** New cursor — the message id of the last processed entry,
    *  or the input `after` if the poll returned nothing. Use as
    *  the next `after` to skip already-seen rows. */
@@ -247,10 +274,13 @@ export class ContactsClient {
       throw ContactsError.wrap(err);
     }
 
-    // 4. Publish to the DS.
+    // 4. Publish to the DS, wrapped with the kind discriminator
+    //    so the receiver's pollMailbox can distinguish a
+    //    ContactRequest from a Welcome (1.16e3).
+    const envelope = wrapEnvelope(KIND_CONTACT_REQUEST, wireBytes);
     let publish;
     try {
-      publish = await this.ds.publishMailbox(recipientPseudonym, wireBytes);
+      publish = await this.ds.publishMailbox(recipientPseudonym, envelope);
     } catch (err) {
       throw ContactsError.wrap(err);
     }
@@ -258,6 +288,53 @@ export class ContactsClient {
     return {
       recipientUsername: lookup.normalisedUsername,
       recipientAccountId,
+      messageId: publish.id,
+      createdAt: publish.createdAt,
+    };
+  }
+
+  /**
+   * Send a Welcome (MLS group-join blob) to the recipient via
+   * their stranger-inbox mailbox. Used by `startGroupWith`
+   * once the sender has called `Group.addMember(recipientKp)`
+   * and gotten the welcome bytes back.
+   *
+   * Routing target: same `IdentityPseudonym.fromIdentity(...)`
+   * mailbox the ContactRequest flow uses — the receiver
+   * polls one place and dispatches by the kind byte.
+   *
+   * The Welcome blob is itself authenticated by the sender's
+   * KeyPackage signature (RFC 9420 §12.4); our envelope just
+   * routes it.
+   *
+   * @param recipientSignaturePubkey  Recipient's Ed25519
+   *                                  identity public key (32
+   *                                  bytes) — the same value
+   *                                  the receiver hands to
+   *                                  `Identity.fromSeed`'s
+   *                                  upload bundle. The
+   *                                  mailbox pseudonym is
+   *                                  derived from this pubkey
+   *                                  via `IdentityPseudonym.fromIdentity`.
+   * @param welcomeBytes              `welcome` field of the
+   *                                  `AddMember` result.
+   */
+  async sendWelcome(
+    recipientSignaturePubkey: Uint8Array,
+    welcomeBytes: Uint8Array,
+  ): Promise<{ messageId: number; createdAt: string }> {
+    const wasm = await loadWasm();
+    const recipientPseudonym = wasm.IdentityPseudonym.fromIdentity(
+      recipientSignaturePubkey,
+    ).asBytes();
+    const envelope = wrapEnvelope(KIND_WELCOME, welcomeBytes);
+    let publish;
+    try {
+      publish = await this.ds.publishMailbox(recipientPseudonym, envelope);
+    } catch (err) {
+      throw ContactsError.wrap(err);
+    }
+    return {
       messageId: publish.id,
       createdAt: publish.createdAt,
     };
@@ -310,13 +387,39 @@ export class ContactsClient {
       throw ContactsError.wrap(err);
     }
 
-    const requests: IncomingContactRequest[] = [];
+    const events: IncomingMailboxEvent[] = [];
     let cursor = after;
     for (const message of raw.messages) {
       cursor = message.id;
+
+      // Strip the envelope kind byte (1.16e3) and dispatch on
+      // the discriminator. Unknown kinds are dropped with a
+      // warn; cursor still advances so we don't re-process.
+      const env = parseEnvelope(message.payload);
+      if (env.kind === "unknown") {
+        // eslint-disable-next-line no-console
+        console.warn(
+          "mailbox envelope: unknown kind",
+          message.id,
+          env.rawKind,
+        );
+        continue;
+      }
+      if (env.kind === KIND_WELCOME) {
+        events.push({
+          kind: "welcome",
+          welcome: {
+            messageId: message.id,
+            welcomeBytes: env.body,
+            createdAt: message.createdAt,
+          },
+        });
+        continue;
+      }
+      // env.kind === KIND_CONTACT_REQUEST
       let parsed;
       try {
-        parsed = wasm.ContactRequest.decodeAndVerify(message.payload);
+        parsed = wasm.ContactRequest.decodeAndVerify(env.body);
       } catch (err) {
         // Bad signature, malformed wire bytes, or some other
         // verifier failure. Drop and move on — the cursor
@@ -343,16 +446,191 @@ export class ContactsClient {
         );
       }
 
-      requests.push({
-        messageId: message.id,
-        fromPubkey: parsed.fromPubkey,
-        fromPseudonym: parsed.fromPseudonym,
-        validAfterMs: parsed.validAfterMs,
-        intro,
-        createdAt: message.createdAt,
+      events.push({
+        kind: "contact-request",
+        request: {
+          messageId: message.id,
+          fromPubkey: parsed.fromPubkey,
+          fromPseudonym: parsed.fromPseudonym,
+          validAfterMs: parsed.validAfterMs,
+          intro,
+          createdAt: message.createdAt,
+        },
       });
     }
 
-    return { requests, cursor, hasMore: raw.hasMore };
+    return { events, cursor, hasMore: raw.hasMore };
+  }
+
+  /**
+   * Start a new 1×1 MLS group with the given recipient (the
+   * accepter side of a ContactRequest handshake, or any
+   * unilateral group-creation flow).
+   *
+   * Steps:
+   *   1. Fetch the recipient's KeyPackage from
+   *      `/discovery/keypackage/{acct}` (Phase 1.16e1).
+   *   2. Build our own `Group` with the local Identity
+   *      derived from the OPAQUE export key.
+   *   3. `group.addMember(keyPackageBytes)` produces the
+   *      `(commit, welcome)` pair. Per MLS, `commit` would
+   *      normally be broadcast to all existing members — but
+   *      our group is one-of-one before this call, so there's
+   *      no one to broadcast to. The commit is dropped.
+   *   4. POST the welcome bytes to the recipient's mailbox
+   *      via `sendWelcome`.
+   *
+   * Returns the freshly-created `Group` reference. The caller
+   * is responsible for keeping it alive for the duration of
+   * the chat session — Phase-1 does NOT persist MLS state, so
+   * dropping the reference loses the group on this device
+   * (the recipient still has theirs from `joinFromWelcome`).
+   */
+  async startGroupWith(
+    identity: IdentitySecrets | null,
+    recipientAccountId: Uint8Array,
+    recipientSignaturePubkey: Uint8Array,
+  ): Promise<{ group: WasmGroup; welcomeMessageId: number }> {
+    if (identity === null) {
+      throw ContactsError.noIdentitySecrets();
+    }
+
+    const wasm = await loadWasm();
+
+    // 1. Fetch recipient's KeyPackage.
+    let keyPackageBytes;
+    try {
+      keyPackageBytes = await this.discovery.fetchKeyPackage(
+        recipientAccountId,
+      );
+    } catch (err) {
+      throw ContactsError.wrap(err);
+    }
+    if (keyPackageBytes === null) {
+      throw ContactsError.noIdentityBundle(recipientAccountId);
+    }
+
+    // 2. Build our Identity + a fresh group.
+    const myIdentity = wasm.Identity.fromSeed(identity.exportKey);
+    const group = new wasm.Group(myIdentity);
+
+    // 3. Add the recipient. `addMember` takes the local
+    //    Identity as its first argument (the wasm-bindgen
+    //    surface decouples Group state from the Identity that
+    //    operates on it). The commit would normally fan out to
+    //    existing members; we have none, so we drop it.
+    let added;
+    try {
+      added = group.addMember(myIdentity, keyPackageBytes);
+    } catch (err) {
+      throw ContactsError.wrap(err);
+    }
+    // `commit` returned by addMember — unused in 1-of-1, but
+    // grab it explicitly so the dropped value is documented.
+    void added.commit;
+    const welcomeBytes = added.welcome;
+
+    // 4. Ship the welcome to the recipient via DS.
+    let publish;
+    try {
+      publish = await this.sendWelcome(recipientSignaturePubkey, welcomeBytes);
+    } catch (err) {
+      throw ContactsError.wrap(err);
+    }
+
+    return { group, welcomeMessageId: publish.messageId };
+  }
+
+  /**
+   * Convenience wrapper around `startGroupWith` that resolves
+   * `@username` first.
+   *
+   * Phase-1 the natural Accept-driven path (Bob accepts
+   * Alice's ContactRequest → Bob spins up the group →
+   * Bob ships a Welcome to Alice) is blocked by a missing
+   * piece: the incoming ContactRequest carries Alice's
+   * Ed25519 pubkey but NOT her account_id, so Bob can't
+   * `fetchKeyPackage` to seed the group. Closing that gap
+   * needs either a wire-format extension on ContactRequest
+   * or a server-side reverse lookup
+   * `signature_pubkey → account_id` — both tracked as
+   * **1.16e3b** work.
+   *
+   * Until then this method gives the UI an explicit
+   * "Start group with @bob" button that drives the full flow
+   * from the sender side. The receive side picks up the
+   * Welcome via `pollMailbox` and dispatches via
+   * `joinGroupFromWelcome`.
+   */
+  async startGroupWithUsername(
+    identity: IdentitySecrets | null,
+    username: string,
+  ): Promise<{
+    group: WasmGroup;
+    recipientUsername: string;
+    recipientAccountId: Uint8Array;
+    welcomeMessageId: number;
+  }> {
+    if (identity === null) {
+      throw ContactsError.noIdentitySecrets();
+    }
+    let lookup;
+    try {
+      lookup = await this.discovery.lookup(username);
+    } catch (err) {
+      throw ContactsError.wrap(err);
+    }
+    if (lookup.account === null) {
+      throw ContactsError.usernameUnknown(lookup.normalisedUsername);
+    }
+
+    let bundle;
+    try {
+      bundle = await this.discovery.identityFetch(lookup.account);
+    } catch (err) {
+      throw ContactsError.wrap(err);
+    }
+    if (bundle === null) {
+      throw ContactsError.noIdentityBundle(lookup.account);
+    }
+    const recipientSignaturePubkey = base64Decode(bundle.signature_pubkey);
+
+    const out = await this.startGroupWith(
+      identity,
+      lookup.account,
+      recipientSignaturePubkey,
+    );
+    return {
+      group: out.group,
+      recipientUsername: lookup.normalisedUsername,
+      recipientAccountId: lookup.account,
+      welcomeMessageId: out.welcomeMessageId,
+    };
+  }
+
+  /**
+   * Receive side of `startGroupWith`. Decodes the Welcome
+   * blob into a fully-initialised `Group` for the local
+   * Identity.
+   *
+   * Pure WASM call; no network round-trips. Throws
+   * `ContactsError.wrap(...)` if the Welcome decode fails
+   * (malformed bytes, init_key mismatch, etc.).
+   */
+  async joinGroupFromWelcome(
+    identity: IdentitySecrets | null,
+    welcomeBytes: Uint8Array,
+  ): Promise<WasmGroup> {
+    if (identity === null) {
+      throw ContactsError.noIdentitySecrets();
+    }
+    const wasm = await loadWasm();
+    const myIdentity = wasm.Identity.fromSeed(identity.exportKey);
+    try {
+      // wasm-bindgen surface: `joinFromWelcome(welcome, identity)`.
+      return wasm.Group.joinFromWelcome(welcomeBytes, myIdentity);
+    } catch (err) {
+      throw ContactsError.wrap(err);
+    }
   }
 }

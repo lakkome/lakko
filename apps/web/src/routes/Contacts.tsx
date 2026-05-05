@@ -28,6 +28,7 @@ import { useAuth } from "../auth/AuthContext";
 import { base64Encode } from "../auth/account-id";
 import { ContactsClient, ContactsError } from "../contacts/client";
 import type { IncomingContactRequest, SendResult } from "../contacts/client";
+import type { Group as WasmGroup } from "../../wasm/lakko_ffi_wasm";
 import {
   fingerprintShort,
   loadAccepted,
@@ -123,6 +124,39 @@ function ConnectedContacts(props: ConnectedContactsProps): JSX.Element {
     }
   }
 
+  // ---- start MLS group (1.16e3) ---------------------------------
+  // Sender-driven flow: the user types a handle, we resolve it,
+  // fetch the recipient's KeyPackage, spin up a Group, and ship
+  // the Welcome to the recipient's mailbox. The natural
+  // Accept-driven path is blocked by a missing wire-format /
+  // reverse-lookup primitive (1.16e3b).
+  async function onStartGroup(): Promise<void> {
+    setSendError(null);
+    setSendNotice(null);
+    setSendBusy(true);
+    try {
+      const result = await props.client.startGroupWithUsername(
+        requireIdentity(),
+        searchInput(),
+      );
+      addActiveGroup({
+        kind: "started",
+        peerUsername: result.recipientUsername,
+        group: result.group,
+      });
+      setSendNotice(
+        `Group started with @${result.recipientUsername} ` +
+          `(Welcome shipped, DS id ${result.welcomeMessageId}).`,
+      );
+      setSearchInput("");
+      setIntroInput("");
+    } catch (err) {
+      setSendError(formatError(err));
+    } finally {
+      setSendBusy(false);
+    }
+  }
+
   // ---- pending --------------------------------------------------
   const [pending, setPending] = createSignal<IncomingContactRequest[]>([]);
   const [cursor, setCursor] = createSignal<number>(loadCursor());
@@ -137,14 +171,39 @@ function ConnectedContacts(props: ConnectedContactsProps): JSX.Element {
         requireIdentity(),
         cursor(),
       );
-      // De-dup against existing pending entries (could re-fetch
-      // an old request if the cursor was reset elsewhere).
-      const seen = new Set(pending().map((r) => r.messageId));
-      const fresh = result.requests.filter(
-        (r) => !seen.has(r.messageId),
+      // Dispatch on event kind. ContactRequests pile up in the
+      // pending list (de-duped by messageId); Welcomes turn
+      // straight into active groups via joinGroupFromWelcome.
+      const seenContactRequests = new Set(
+        pending().map((r) => r.messageId),
       );
-      if (fresh.length > 0) {
-        setPending([...pending(), ...fresh]);
+      const freshRequests: IncomingContactRequest[] = [];
+      for (const ev of result.events) {
+        if (ev.kind === "contact-request") {
+          if (!seenContactRequests.has(ev.request.messageId)) {
+            freshRequests.push(ev.request);
+          }
+        } else {
+          // welcome — try to join. On success append to active
+          // groups; on failure log and skip.
+          try {
+            const group = await props.client.joinGroupFromWelcome(
+              requireIdentity(),
+              ev.welcome.welcomeBytes,
+            );
+            addActiveGroup({
+              kind: "joined",
+              welcomeMessageId: ev.welcome.messageId,
+              group,
+            });
+          } catch (err) {
+            // eslint-disable-next-line no-console
+            console.warn("joinGroupFromWelcome failed", err);
+          }
+        }
+      }
+      if (freshRequests.length > 0) {
+        setPending([...pending(), ...freshRequests]);
       }
       setCursor(result.cursor);
       saveCursor(result.cursor);
@@ -153,6 +212,18 @@ function ConnectedContacts(props: ConnectedContactsProps): JSX.Element {
     } finally {
       setPollBusy(false);
     }
+  }
+
+  // ---- active MLS groups ---------------------------------------
+  // In-memory only — Phase-1 doesn't persist MLS state. A
+  // page reload drops every group; the peer still has theirs.
+  // See ROADMAP 1.16e6 for the persistence sub-sprint.
+  type ActiveGroup =
+    | { kind: "started"; peerUsername: string; group: WasmGroup }
+    | { kind: "joined"; welcomeMessageId: number; group: WasmGroup };
+  const [activeGroups, setActiveGroups] = createSignal<ActiveGroup[]>([]);
+  function addActiveGroup(g: ActiveGroup): void {
+    setActiveGroups([...activeGroups(), g]);
   }
 
   function onAccept(req: IncomingContactRequest): void {
@@ -194,6 +265,9 @@ function ConnectedContacts(props: ConnectedContactsProps): JSX.Element {
         error={sendError}
         notice={sendNotice}
         onSubmit={onSend}
+        onStartGroup={() => {
+          void onStartGroup();
+        }}
       />
 
       <PendingPanel
@@ -206,6 +280,8 @@ function ConnectedContacts(props: ConnectedContactsProps): JSX.Element {
         onAccept={onAccept}
         onDecline={onDecline}
       />
+
+      <ActiveGroupsPanel groups={activeGroups} />
 
       <AcceptedPanel
         accepted={accepted}
@@ -228,6 +304,7 @@ interface SendPanelProps {
   readonly error: () => string | null;
   readonly notice: () => string | null;
   readonly onSubmit: (e: SubmitEvent) => void;
+  readonly onStartGroup: () => void;
 }
 
 function SendPanel(props: SendPanelProps): JSX.Element {
@@ -266,10 +343,85 @@ function SendPanel(props: SendPanelProps): JSX.Element {
             {props.notice()}
           </div>
         )}
-        <button class="primary" type="submit" disabled={props.busy()}>
-          {props.busy() ? "Sending…" : "Send contact request"}
-        </button>
+        <div style={{ display: "flex", gap: "0.5rem", "flex-wrap": "wrap" }}>
+          <button class="primary" type="submit" disabled={props.busy()}>
+            {props.busy() ? "Sending…" : "Send contact request"}
+          </button>
+          <button
+            type="button"
+            disabled={props.busy()}
+            onClick={props.onStartGroup}
+            title="Fetch the recipient's KeyPackage, build a 1×1 MLS group, ship the Welcome over DS."
+          >
+            Start MLS group
+          </button>
+        </div>
       </form>
+    </section>
+  );
+}
+
+function ActiveGroupsPanel(props: {
+  groups: () => readonly {
+    readonly kind: "started" | "joined";
+    readonly peerUsername?: string;
+    readonly welcomeMessageId?: number;
+    readonly group: WasmGroup;
+  }[];
+}): JSX.Element {
+  return (
+    <section style={panelStyle()}>
+      <h2 style={{ "margin-top": 0 }}>
+        Active MLS groups
+        <Show when={props.groups().length > 0}>
+          <span
+            style={{
+              "margin-left": "0.5rem",
+              color: "var(--surface-muted)",
+              "font-weight": "normal",
+              "font-size": "0.9rem",
+            }}
+          >
+            ({props.groups().length})
+          </span>
+        </Show>
+      </h2>
+      <Show
+        when={props.groups().length > 0}
+        fallback={
+          <p style={{ color: "var(--surface-muted)" }}>
+            No active groups. Start one above with "Start MLS group", or
+            click Refresh in <em>Pending</em> — incoming Welcomes turn
+            into active groups automatically.
+          </p>
+        }
+      >
+        <ul style={listStyle()}>
+          <For each={props.groups()}>
+            {(g) => (
+              <li style={rowStyle()}>
+                <div style={{ flex: 1 }}>
+                  <strong>
+                    {g.kind === "started"
+                      ? `Group with @${g.peerUsername ?? "?"}`
+                      : `Joined group (Welcome ${g.welcomeMessageId})`}
+                  </strong>
+                  <div
+                    style={{
+                      color: "var(--surface-muted)",
+                      "font-size": "0.85rem",
+                    }}
+                  >
+                    {g.group.memberCount} member
+                    {g.group.memberCount === 1 ? "" : "s"} · seat #
+                    {g.group.ownLeafIndex}
+                  </div>
+                </div>
+              </li>
+            )}
+          </For>
+        </ul>
+      </Show>
     </section>
   );
 }
