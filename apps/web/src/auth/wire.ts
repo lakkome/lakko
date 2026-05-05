@@ -114,3 +114,51 @@ export interface LoginFinishResponse {
   /** base64(account_id) — echoed back so the client can pin it. */
   account_id: string;
 }
+
+// ----------------------------------------------------------------------------
+// Password reset (services/auth/src/opaque.rs — 1.16c3c3a)
+// ----------------------------------------------------------------------------
+
+/**
+ * `POST /password/reset/start` request body. The user is rotating
+ * their password by proving they know the BIP39 recovery
+ * mnemonic; both OPAQUE flows (recovery login + new password
+ * registration) start in this single round trip.
+ */
+export interface PasswordResetStartRequest {
+  pow: PowProofPayload;
+  /** base64(account_id). */
+  account_id: string;
+  /** base64(CredentialRequest) from `OpaqueLogin.startRecovery(seed)`. */
+  recovery_request: string;
+  /** base64(RegistrationRequest) from `OpaqueRegister.startPassword(newPassword)`. */
+  new_password_request: string;
+}
+
+/** `POST /password/reset/start` response body. */
+export interface PasswordResetStartResponse {
+  /** UUIDv7 — used to bind the matching `/password/reset/finish`. */
+  session_id: string;
+  /** base64(CredentialResponse) — feed to `OpaqueLogin.finish`. */
+  recovery_response: string;
+  /** base64(RegistrationResponse) — feed to `OpaqueRegister.finish`. */
+  new_password_response: string;
+}
+
+/** `POST /password/reset/finish` request body. No `pow` field —
+ *  the server only requires PoW on the start endpoints, by analogy
+ *  with `/login/{start,finish}`. */
+export interface PasswordResetFinishRequest {
+  session_id: string;
+  /** base64(CredentialFinalization) — proves recovery ownership. */
+  recovery_finalize: string;
+  /** base64(RegistrationUpload) — the new password envelope. */
+  new_password_upload: string;
+}
+
+/** `POST /password/reset/finish` response body. */
+export interface PasswordResetFinishResponse {
+  ok: boolean;
+  /** base64(account_id) — echoed back, same shape as `LoginFinishResponse`. */
+  account_id: string;
+}

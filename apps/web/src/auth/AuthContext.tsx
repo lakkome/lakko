@@ -53,6 +53,7 @@ import { AuthClient } from "./client";
 import { base64Decode, base64Encode } from "./account-id";
 import { deriveDeviceRootKey } from "./device-key";
 import { deleteDeviceKey, getDeviceKey, putDeviceKey } from "./key-store";
+import { loadWasm } from "../wasm";
 
 /** Account record exposed to the UI when a session is active. */
 export interface SessionAccount {
@@ -101,6 +102,17 @@ export interface AuthApi {
    *  cached one, throws — the user has to sign up first or wait
    *  for 1.16d's discovery service. */
   login(username: string, password: string): Promise<void>;
+  /** Run the recover-from-mnemonic flow.
+   *
+   *  Decodes the typed phrase via `RecoveryMnemonic.fromPhrase`,
+   *  drives `AuthClient.recover` to rotate the server's password
+   *  envelope, derives a fresh device root key from the new
+   *  export key, persists it via the IDB pipeline, and flips
+   *  state to `session`. Same single-device limitation as
+   *  `login` — until 1.16d, the user must already have an
+   *  account_id cached on this device. Throws on any failure —
+   *  bad mnemonic, network, server rejection, etc. */
+  recover(mnemonicPhrase: string, newPassword: string): Promise<void>;
   /** Drop the in-memory session. Does NOT erase the localStorage
    *  cache or the IDB-stored device key — re-login on the same
    *  device should be cheap, and the device key remains usable
@@ -243,6 +255,51 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
           username: cached.username,
         },
       });
+    },
+    async recover(mnemonicPhrase, newPassword) {
+      const cached = loadPersisted();
+      if (cached === null) {
+        throw new Error(
+          "no account on this device — recovery requires the " +
+            "account_id cached locally (cross-device recovery " +
+            "arrives in 1.16d via the discovery service)",
+        );
+      }
+      // Parse the phrase up front so a bad mnemonic surfaces
+      // before we burn a PoW solve. `fromPhrase` collapses
+      // unknown-word and bad-checksum into one error message —
+      // by design (preserves BIP39's no-probing property).
+      const wasm = await loadWasm();
+      const mnemonic = wasm.RecoveryMnemonic.fromPhrase(mnemonicPhrase);
+      const seed = mnemonic.toSeed();
+      try {
+        const accountIdBytes = base64Decode(cached.accountIdB64);
+        const result = await client.recover(
+          accountIdBytes,
+          seed,
+          utf8(newPassword),
+        );
+        // Re-derive the device root key from the NEW export key.
+        // The previous device key (if any) is no longer reachable
+        // from the new password; the upsert in IDB drops it.
+        const deviceKey = await deriveDeviceRootKey(
+          result.exportKey,
+          cached.accountIdB64,
+        );
+        await putDeviceKey(cached.accountIdB64, deviceKey);
+        setState({
+          kind: "session",
+          account: {
+            accountId: cached.accountIdB64,
+            username: cached.username,
+          },
+        });
+      } finally {
+        // Best-effort wipe of the seed buffer. It's a Uint8Array
+        // we own; zeroing it now means the next GC pass cannot
+        // hand it to a leaked closure.
+        seed.fill(0);
+      }
     },
     logout() {
       // Keep localStorage + IDB intact. Re-login on this device

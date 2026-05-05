@@ -28,6 +28,9 @@ export const paths = {
   login: "/login",
   /** Public landing for unauthenticated users — signup form. */
   signup: "/signup",
+  /** Recover-from-mnemonic flow — paste 24 words + new password
+   *  to rotate the password envelope and re-establish a session. */
+  recover: "/recover",
   /** Authenticated home / inbox. */
   home: "/",
   /** Contact list and add-contact entry point. */

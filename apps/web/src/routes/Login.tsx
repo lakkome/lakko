@@ -88,6 +88,9 @@ export default function Login(): JSX.Element {
         <p class="form-footer">
           New to Lakko? <A href={paths.signup}>Create an account</A>.
         </p>
+        <p class="form-footer">
+          Lost your password? <A href={paths.recover}>Recover with your 24-word phrase</A>.
+        </p>
       </section>
     </div>
   );

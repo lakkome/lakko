@@ -31,6 +31,10 @@ import type {
   LoginFinishResponse,
   LoginStartRequest,
   LoginStartResponse,
+  PasswordResetFinishRequest,
+  PasswordResetFinishResponse,
+  PasswordResetStartRequest,
+  PasswordResetStartResponse,
   PowChallengeResponse,
   SignupFinishRequest,
   SignupFinishResponse,
@@ -77,6 +81,16 @@ export interface LoginResult {
   sessionKey: Uint8Array;
   /** Same export key the user got at signup time — deterministic
    *  for the same password. */
+  exportKey: Uint8Array;
+}
+
+/** Result of `AuthClient.recover`. */
+export interface RecoverResult {
+  /** The account whose password was just rotated. */
+  accountId: Uint8Array;
+  /** OPAQUE export key for the **new** password. Use this to
+   *  derive a fresh device root key — the previous device key
+   *  (if any) is no longer reachable from the new password. */
   exportKey: Uint8Array;
 }
 
@@ -162,8 +176,22 @@ export class AuthClient {
     return this.post("/recovery/login/finish", req);
   }
 
+  /** `POST /password/reset/start`. */
+  async passwordResetStart(
+    req: PasswordResetStartRequest,
+  ): Promise<PasswordResetStartResponse> {
+    return this.post("/password/reset/start", req);
+  }
+
+  /** `POST /password/reset/finish`. */
+  async passwordResetFinish(
+    req: PasswordResetFinishRequest,
+  ): Promise<PasswordResetFinishResponse> {
+    return this.post("/password/reset/finish", req);
+  }
+
   // -----------------------------------------------------------------
-  // High-level: full signup / login flows
+  // High-level: full signup / login / recover flows
   // -----------------------------------------------------------------
 
   /**
@@ -345,6 +373,113 @@ export class AuthClient {
       sessionKey: out.sessionKey,
       exportKey: out.exportKey,
     };
+  }
+
+  /**
+   * Drive the full recover-from-mnemonic flow:
+   *
+   * ```text
+   *   POST /pow/challenge          →  seed
+   *   client: solve PoW
+   *   client: OPAQUE recovery start (seed)
+   *   client: OPAQUE password start (newPassword)
+   *   POST /password/reset/start   →  session_id, recovery_response,
+   *                                    new_password_response
+   *   client: OPAQUE recovery finish + OPAQUE password finish
+   *   POST /password/reset/finish  →  ok, account_id
+   * ```
+   *
+   * Drives `lakko-svc-auth`'s `/password/reset/{start,finish}`
+   * endpoint pair (1.16c3c3a). The server proves recovery
+   * ownership via the mnemonic and atomically replaces the
+   * `KIND_PASSWORD` envelope with the new one — the
+   * `KIND_RECOVERY` envelope stays intact, so the same 24 words
+   * work for future resets.
+   *
+   * Note that the recovery flow only requires **one** PoW solve
+   * (gating `/start`), unlike signup which needs two (one per
+   * server-side write). Wrong-mnemonic attempts fail at the AKE
+   * finalization with the same indistinguishable response as
+   * `/recovery/login/finish`.
+   *
+   * @param accountId    Raw 16-byte UUIDv7. The recovery flow can
+   *                     only target an account whose id is known
+   *                     locally; until 1.16d's discovery service
+   *                     lands, that means the account that
+   *                     signed up on this device.
+   * @param mnemonicSeed The 64-byte BIP39 seed derived from the
+   *                     user's typed phrase via
+   *                     `RecoveryMnemonic.fromPhrase(phrase).toSeed()`.
+   *                     Caller is responsible for surfacing
+   *                     mnemonic-parsing errors before reaching
+   *                     this method.
+   * @param newPassword  The replacement password as raw UTF-8
+   *                     bytes.
+   */
+  async recover(
+    accountId: Uint8Array,
+    mnemonicSeed: Uint8Array,
+    newPassword: Uint8Array,
+  ): Promise<RecoverResult> {
+    if (accountId.length !== 16) {
+      throw new AuthClientArgError("accountId must be 16 bytes");
+    }
+    if (mnemonicSeed.length === 0) {
+      throw new AuthClientArgError("mnemonicSeed must be non-empty");
+    }
+    if (newPassword.length === 0) {
+      throw new AuthClientArgError("newPassword must be non-empty");
+    }
+
+    const wasm = await loadWasm();
+    const accountIdB64 = base64Encode(accountId);
+
+    // Single PoW solve — the server only gates /start.
+    const challenge = await this.powChallenge();
+    const pow = await solvePow(challenge.seed, challenge.effort_bits);
+
+    // Two parallel OPAQUE flows: recovery login proves the user
+    // knows the mnemonic; password registration enrols the new
+    // password envelope. Both run independently — neither
+    // depends on the other's intermediate state.
+    const recoveryLogin = wasm.OpaqueLogin.startRecovery(mnemonicSeed);
+    const newPasswordReg = wasm.OpaqueRegister.startPassword(newPassword);
+
+    const startResp = await this.passwordResetStart({
+      pow,
+      account_id: accountIdB64,
+      recovery_request: recoveryLogin.requestB64,
+      new_password_request: newPasswordReg.requestB64,
+    });
+
+    // Both finish steps. A wrong mnemonic seed here surfaces as
+    // an OPAQUE-side error at `recoveryLogin.finish` (the AKE
+    // can't agree on a session key); we surface it to the caller
+    // unchanged so the form can render "invalid recovery
+    // phrase" without distinguishing further.
+    const recoveryOut = recoveryLogin.finish(
+      mnemonicSeed,
+      startResp.recovery_response,
+    );
+    const passwordOut = newPasswordReg.finish(
+      newPassword,
+      startResp.new_password_response,
+    );
+
+    const finishResp = await this.passwordResetFinish({
+      session_id: startResp.session_id,
+      recovery_finalize: recoveryOut.finalizeB64,
+      new_password_upload: passwordOut.uploadB64,
+    });
+    if (!finishResp.ok) {
+      throw new AuthHttpError(
+        200,
+        "/password/reset/finish",
+        "server reported ok=false",
+      );
+    }
+
+    return { accountId, exportKey: passwordOut.exportKey };
   }
 
   // -----------------------------------------------------------------

@@ -27,6 +27,7 @@ import type { RouteDefinition } from "@solidjs/router";
 import { AppShell } from "../ui/AppShell";
 import { RequireAnonymous, RequireSession } from "../auth/guards";
 import Login from "./Login";
+import Recover from "./Recover";
 import Signup from "./Signup";
 import Home from "./Home";
 import Contacts from "./Contacts";
@@ -51,6 +52,14 @@ export const routes: RouteDefinition[] = [
     component: () => (
       <RequireAnonymous>
         <Signup />
+      </RequireAnonymous>
+    ),
+  },
+  {
+    path: paths.recover,
+    component: () => (
+      <RequireAnonymous>
+        <Recover />
       </RequireAnonymous>
     ),
   },
