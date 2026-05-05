@@ -94,6 +94,16 @@ impl Identity {
         self.inner.x25519_secret_bytes().to_vec()
     }
 
+    /// Raw Ed25519 signing-seed bytes (32 bytes). Hand this to
+    /// `ContactRequest.compose(...)` as the
+    /// `senderSigningSeed` argument when sending a contact
+    /// request. Same secret-handling rules as
+    /// [`x25519SecretKey`](Self::x25519_secret_key).
+    #[wasm_bindgen(getter, js_name = ed25519Seed)]
+    pub fn ed25519_seed(&self) -> Vec<u8> {
+        self.inner.ed25519_seed_bytes().to_vec()
+    }
+
     /// Create a fresh KeyPackage in TLS wire form.
     #[wasm_bindgen(js_name = createKeyPackage)]
     pub fn create_key_package(&self) -> Result<Vec<u8>, JsError> {

@@ -43,6 +43,15 @@ export default defineConfig({
         changeOrigin: true,
         rewrite: (p) => p.replace(/^\/api\/discovery/, ""),
       },
+      // 1.16d3c: lakko-svc-ds defaults to 127.0.0.1:8082.
+      // POST /ds/mailbox/{pseudonym_hex}/messages publishes a
+      // raw-bytes payload (ContactRequest wire bytes); GET
+      // returns base64-encoded payloads plus a cursor.
+      "/api/ds": {
+        target: "http://127.0.0.1:8082",
+        changeOrigin: true,
+        rewrite: (p) => p.replace(/^\/api\/ds/, ""),
+      },
     },
   },
 

@@ -87,9 +87,45 @@ export interface SignupOutcome {
   recoveryPhrase: string;
 }
 
+/** Identity secrets held in memory for the current session.
+ *
+ *  Populated whenever the user has just authenticated (signup,
+ *  login, recover) — those flows have the OPAQUE export key in
+ *  scope and can derive the Identity. **Empty after a
+ *  page reload** that restored the session via the IDB device
+ *  root key (1.16c3c2) — the export key is not persisted, so
+ *  the secrets cannot be re-derived without a password.
+ *
+ *  Operations that need to sign on behalf of the user
+ *  (`ContactsClient.sendContactRequest`, MLS commits, …) require
+ *  this to be set; surface a "please re-enter your password"
+ *  prompt when it's `null`.
+ *
+ *  The bytes themselves are held — not a `wasm.Identity`
+ *  instance — because:
+ *   * they're cheap (96 bytes total) and clone-friendly;
+ *   * a WASM instance carries lifetime baggage and a heavy
+ *     `free()` requirement;
+ *   * downstream callers reconstruct an `Identity` on demand
+ *     via `wasm.Identity.fromSeed(exportKey)` when needed —
+ *     each reconstruction is sub-millisecond.
+ */
+export interface IdentitySecrets {
+  /** Raw 16-byte UUIDv7. */
+  readonly accountId: Uint8Array;
+  /** OPAQUE password export key (64 bytes for `LakkoCipherSuite`).
+   *  Used as the seed for `Identity.fromSeed`. */
+  readonly exportKey: Uint8Array;
+}
+
 /** Public surface of the auth context. */
 export interface AuthApi {
   readonly state: Accessor<AuthState>;
+  /** In-memory Identity secrets (1.16d3c). `null` whenever the
+   *  user has not just authenticated in the current page session
+   *  — see [`IdentitySecrets`] for the full shape and lifetime
+   *  story. */
+  readonly identitySecrets: Accessor<IdentitySecrets | null>;
   /** Run the OPAQUE-PAKE registration flow.
    *
    *  Throws on network / server errors (the form surfaces them).
@@ -188,6 +224,11 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
   // `/login`; the onMount hook reads localStorage + IDB, then
   // resolves to either `session` (full restore) or `anon`.
   const [state, setState] = createSignal<AuthState>({ kind: "loading" });
+  // 1.16d3c: in-memory Identity secrets. Filled on signup /
+  // login / recover, dropped on logout, NOT populated on a
+  // session restore from IDB (the export key isn't persisted).
+  const [identitySecrets, setIdentitySecrets] =
+    createSignal<IdentitySecrets | null>(null);
 
   const client = new AuthClient();
   const discovery = new DiscoveryClient();
@@ -198,6 +239,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
 
   const api: AuthApi = {
     state,
+    identitySecrets,
     async signup(username, password) {
       const trimmed = username.trim();
       if (trimmed.length === 0) {
@@ -253,6 +295,12 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       // error rather than a half-broken session.
       await uploadIdentityBundle(discovery, result.accountId, result.exportKey);
 
+      // 1.16d3c: hand off the export key for in-memory use by
+      // ContactsClient + similar. Cleared on logout.
+      setIdentitySecrets({
+        accountId: result.accountId,
+        exportKey: result.exportKey,
+      });
       setState({
         kind: "session",
         account: { accountId: accountIdB64, username: normalisedUsername },
@@ -323,6 +371,11 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         console.warn("identity bundle refresh failed", err);
       }
 
+      // 1.16d3c: stash the export key for ContactsClient.
+      setIdentitySecrets({
+        accountId: accountIdBytes,
+        exportKey: result.exportKey,
+      });
       setState({
         kind: "session",
         account: { accountId: accountIdB64, username: resolvedUsername },
@@ -359,6 +412,12 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
           cached.accountIdB64,
         );
         await putDeviceKey(cached.accountIdB64, deviceKey);
+        // 1.16d3c: stash the new export key so ContactsClient
+        // works without a re-login round-trip.
+        setIdentitySecrets({
+          accountId: accountIdBytes,
+          exportKey: result.exportKey,
+        });
         setState({
           kind: "session",
           account: {
@@ -376,8 +435,10 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     logout() {
       // Keep localStorage + IDB intact. Re-login on this device
       // remains cheap, and the device key stays available for
-      // any encrypted local stores 1.16f wires up.
+      // any encrypted local stores 1.16f wires up. Drop the
+      // in-memory Identity secrets — the user just signed out.
       const cached = loadPersisted();
+      setIdentitySecrets(null);
       setState({
         kind: "anon",
         ...(cached !== null ? { cachedUsername: cached.username } : {}),
@@ -399,6 +460,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         }
       }
       clearPersisted();
+      setIdentitySecrets(null);
       setState({ kind: "anon" });
     },
   };

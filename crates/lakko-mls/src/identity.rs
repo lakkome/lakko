@@ -62,6 +62,17 @@ pub struct Identity {
     /// the per-MLS-group DHKEM keys OpenMLS manages internally;
     /// see the file-level docstring.
     pub(crate) x25519_secret: agreement::SecretKey,
+    /// Raw 32-byte Ed25519 signing seed (Phase 1.16d3c).
+    ///
+    /// Stored alongside `signature_keys` because OpenMLS's
+    /// `SignatureKeyPair::private()` accessor is gated behind a
+    /// `test-utils` feature flag — the upstream design
+    /// intentionally hides the secret. We need the seed for
+    /// `lakko-contacts::compose`, which builds its own
+    /// `SigningKey::from_seed(...)`. Both `generate*()` and
+    /// `from_seed()` produce the SignatureKeyPair via
+    /// `from_raw(seed, pub)` so the seed is always available.
+    pub(crate) ed25519_seed: [u8; 32],
 }
 
 impl Identity {
@@ -95,8 +106,28 @@ impl Identity {
         let provider = OpenMlsRustCrypto::default();
         let scheme = signature_scheme(cs);
 
-        let signature_keys = SignatureKeyPair::new(scheme)
-            .map_err(|e| Error::Identity(format!("keypair generation: {e}")))?;
+        // Generate the Ed25519 seed via lakko-crypto so we can
+        // expose it through `ed25519_seed_bytes()` later. The
+        // FIPS path (P-384) is blocked above by
+        // `is_supported(cs)`, so in practice we always land on
+        // ED25519 here; keep the `signature_scheme` match in
+        // case that gate is ever loosened.
+        let signing = signing::SigningKey::generate();
+        let ed25519_seed = signing.to_seed();
+        let ed25519_public = signing.verifying_key().to_bytes();
+
+        let signature_keys = if scheme == SignatureScheme::ED25519 {
+            SignatureKeyPair::from_raw(
+                SignatureScheme::ED25519,
+                ed25519_seed.to_vec(),
+                ed25519_public.to_vec(),
+            )
+        } else {
+            // Unreachable in Phase 1 (FIPS gated above) — but
+            // keep the path so the FIPS lift is one-line.
+            SignatureKeyPair::new(scheme)
+                .map_err(|e| Error::Identity(format!("keypair generation: {e}")))?
+        };
         signature_keys
             .store(provider.storage())
             .map_err(|e| Error::Identity(format!("keypair storage: {e:?}")))?;
@@ -120,6 +151,7 @@ impl Identity {
             credential,
             ciphersuite: cs,
             x25519_secret,
+            ed25519_seed,
         })
     }
 
@@ -167,7 +199,11 @@ impl Identity {
 
         // 2. Build the Ed25519 keypair via lakko-crypto's
         //    `SigningKey::from_seed`, then hand the raw bytes to
-        //    OpenMLS via `SignatureKeyPair::from_raw`.
+        //    OpenMLS via `SignatureKeyPair::from_raw`. The seed
+        //    bytes are also stashed on `Identity::ed25519_seed`
+        //    so the `ed25519_seed_bytes()` accessor can serve
+        //    them without needing OpenMLS's `test-utils`-gated
+        //    `private()` accessor.
         let signing_key = signing::SigningKey::from_seed(ed25519_seed.as_bytes());
         let ed25519_secret = signing_key.to_seed();
         let ed25519_public = signing_key.verifying_key().to_bytes();
@@ -204,6 +240,11 @@ impl Identity {
             credential,
             ciphersuite: cs,
             x25519_secret,
+            // Store the [u8; 32] copy on the field — the
+            // `SecretBytes<32>` HKDF wrapper drops at scope
+            // exit; we keep the raw bytes so the accessor can
+            // serve them.
+            ed25519_seed: ed25519_secret,
         })
     }
 
@@ -212,6 +253,31 @@ impl Identity {
     #[must_use]
     pub fn signature_public_key(&self) -> &[u8] {
         self.signature_keys.public()
+    }
+
+    /// Raw 32-byte Ed25519 signing seed.
+    ///
+    /// Hands the secret over to higher layers that drive
+    /// signing flows directly (e.g. `lakko-contacts::compose`,
+    /// which builds its own `SigningKey::from_seed(...)` to sign
+    /// the ContactRequest envelope).
+    ///
+    /// **Sensitive.** Same handling rules as
+    /// [`x25519_secret_bytes`](Self::x25519_secret_bytes) — the
+    /// returned bytes MUST NOT touch unencrypted storage. The
+    /// in-Identity copy survives across calls; the returned
+    /// array is a fresh copy each time.
+    ///
+    /// Returns a copy each call; the in-Identity seed is stable
+    /// across reads.
+    ///
+    /// Currently only meaningful for Ed25519 ciphersuites. The
+    /// FIPS path (P-384) is blocked at construction by
+    /// `ciphersuite::is_supported`, so this is unreachable
+    /// outside Ed25519 today.
+    #[must_use]
+    pub fn ed25519_seed_bytes(&self) -> [u8; 32] {
+        self.ed25519_seed
     }
 
     /// Public X25519 key (32 bytes) — the HPKE init_key callers
@@ -327,6 +393,25 @@ mod tests {
             restored.public_key().to_bytes(),
             public_bytes,
             "x25519 secret round-trip must produce the same public key",
+        );
+    }
+
+    /// Phase 1.16d3c — the Ed25519 seed accessor exposes the
+    /// 32-byte signing secret needed by
+    /// `lakko-contacts::compose`. For seed-derived Identities
+    /// the bytes round-trip cleanly back through
+    /// `signing::SigningKey::from_seed` to the same public key.
+    #[test]
+    fn ed25519_seed_round_trips_to_public_for_seed_derived_identity() {
+        let seed = [0x99u8; 64];
+        let alice = Identity::from_seed(&seed).unwrap();
+        let signing_seed = alice.ed25519_seed_bytes();
+        assert_eq!(signing_seed.len(), 32);
+        let restored = lakko_crypto::signing::SigningKey::from_seed(&signing_seed);
+        assert_eq!(
+            restored.verifying_key().to_bytes().as_slice(),
+            alice.signature_public_key(),
+            "Ed25519 seed must reproduce the same public key",
         );
     }
 
