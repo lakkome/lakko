@@ -34,6 +34,9 @@
 //! - [`mnemonic`] — BIP39 24-word recovery passphrase from
 //!   `lakko-mnemonic` (`RecoveryMnemonic`) for the parallel
 //!   OPAQUE recovery enrollment at signup (Phase 1.16c3c1).
+//! - [`discovery`] — VOPRF client from `lakko-discovery-client`
+//!   (`OprfBlinder`, `normalizeUsername`) for username
+//!   register / lookup against `lakko-svc-discovery` (Phase 1.16d1).
 //!
 //! ## Naming convention
 //!
@@ -67,6 +70,7 @@
 
 pub mod auth;
 pub mod contacts;
+pub mod discovery;
 pub mod mls;
 pub mod mnemonic;
 pub mod pow_solver;
@@ -80,6 +84,7 @@ pub mod sync;
 // keep the rustdoc surface tidy).
 pub use auth::{OpaqueLogin, OpaqueLoginOutput, OpaqueRegister, OpaqueRegisterOutput};
 pub use contacts::{ContactRequest, Direction, IdentityPseudonym, PerRelationship, StrangerInbox};
+pub use discovery::{normalize_username, OprfBlinder};
 pub use mls::{AddMember, Group, Identity, ProcessedMessage, ProcessedMessageKind};
 pub use mnemonic::RecoveryMnemonic;
 pub use pow_solver::{PowProof, PowSolver};

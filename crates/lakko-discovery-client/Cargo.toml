@@ -1,0 +1,51 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+[package]
+name = "lakko-discovery-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+description = "VOPRF (RFC 9497) client for Lakko's username discovery service — Ristretto255-SHA512 mirror of services/discovery"
+
+[lints]
+workspace = true
+
+[dependencies]
+thiserror.workspace = true
+
+# VOPRF — must use the SAME version + ciphersuite as the server in
+# services/discovery (Ristretto255-SHA512). The server pins voprf 0.5
+# already; we mirror.
+voprf = { version = "0.5", default-features = false, features = ["ristretto255-ciphersuite"] }
+
+# Username normalisation: NFKC unicode normalisation. Same crate the
+# OPAQUE / OPRF specs reference. The server side is byte-agnostic
+# (it never sees the plaintext), so the client is solely responsible
+# for getting the canonical form right — any drift makes lookups silently
+# return 404 even when the row exists.
+unicode-normalization = "0.1"
+
+# Base64 framing for the wire surface.
+base64 = "0.22"
+
+# CSPRNG. On wasm32 the downstream crate (lakko-ffi-wasm) enables the
+# `js` feature on `getrandom`; here we just consume `OsRng` from
+# `rand_core`.
+rand = "0.8"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# `voprf` pulls in `getrandom` transitively; on wasm32 the random
+# source must be WebCrypto.
+getrandom = { version = "0.2", features = ["js"] }
+
+[dev-dependencies]
+# Round-trip tests instantiate the same `voprf::OprfServer` the
+# discovery service uses, in-memory, and verify byte-identical
+# OPRF output between client.finalize and a direct
+# server.evaluate. Same voprf version.
+voprf = { version = "0.5", default-features = false, features = ["ristretto255-ciphersuite"] }

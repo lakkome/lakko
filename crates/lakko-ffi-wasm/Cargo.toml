@@ -37,6 +37,9 @@ lakko-pow.workspace = true
 # recovery passphrase (1.16c3c1) and the future recover-from-words
 # flow (1.16c3c3).
 lakko-mnemonic.workspace = true
+# VOPRF client — username discovery. Exposes the OPRF blind/finalize
+# dance + the canonical username-normalisation helper (1.16d1).
+lakko-discovery-client.workspace = true
 # Base64 framing for the PoW JS surface (binary seed/nonce/solution
 # fields → base64 strings on the JSON request body). The auth-client
 # surface uses base64 internally; we don't re-export that, so we
