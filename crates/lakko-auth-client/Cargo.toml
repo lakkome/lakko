@@ -1,0 +1,57 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+[package]
+name = "lakko-auth-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+description = "OPAQUE-PAKE client for lakko-svc-auth — mirrors the server-side cipher suite (Ristretto255 + TripleDH + Argon2id)"
+
+[lints]
+workspace = true
+
+[dependencies]
+thiserror.workspace = true
+serde.workspace = true
+
+# OPAQUE-PAKE — must use the SAME version + features as the server in
+# `services/auth/`. The CipherSuite type is identical on both sides;
+# any mismatch breaks the math, so we pin both to the workspace.
+opaque-ke = { version = "3", features = ["argon2"] }
+argon2 = "0.5"
+
+# CSPRNG. On wasm32 the downstream crate (lakko-ffi-wasm) enables the
+# `js` feature on `getrandom`, which routes OsRng through the
+# WebCrypto API.
+rand = "0.8"
+
+# Wire-format framing for the server's HTTP envelope. We keep the
+# OPAQUE math separate from the JSON shape so callers can either go
+# through `wire::*` or hand-build payloads with their own PoW + ids.
+base64 = "0.22"
+
+# Zeroize-on-drop wrapper for the OPAQUE export key + session key.
+# The lakko-crypto crate already standardises on `zeroize` 1.x.
+zeroize = { version = "1", features = ["zeroize_derive"] }
+
+[dev-dependencies]
+# Round-trip tests instantiate the server-side primitives in-memory
+# (no DB, no HTTP) and confirm the client crate negotiates with them
+# byte-for-byte. Same opaque-ke version as the runtime dep — they
+# MUST match.
+opaque-ke = { version = "3", features = ["argon2"] }
+serde_json = "1"
+
+# `getrandom` is pulled in transitively by every crypto dep
+# (rand_core → rand → opaque-ke → voprf → curve25519-dalek). On
+# `wasm32-unknown-unknown` it MUST have the `js` feature so the
+# random source routes through the browser's WebCrypto API; without
+# it the build fails with a hard `compile_error!`. Same pattern as
+# `lakko-ffi-wasm/Cargo.toml`.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.2", features = ["js"] }
