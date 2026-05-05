@@ -44,10 +44,13 @@
 //! - `POST   /discovery/lookup`    — resolve OPRF-hashed username → account_id
 //! - `POST   /discovery/identity`           — upsert public identity bundle (Phase 1.16d3a)
 //! - `GET    /discovery/identity/{acct}`    — fetch public identity bundle (Phase 1.16d3a)
+//! - `POST   /discovery/keypackage`         — upsert public MLS KeyPackage (Phase 1.16e1)
+//! - `GET    /discovery/keypackage/{acct}`  — fetch public MLS KeyPackage (Phase 1.16e1)
 
 #![forbid(unsafe_code)]
 
 mod identity_bundle;
+mod keypackage;
 mod oprf;
 mod pow;
 mod registry;
@@ -164,6 +167,8 @@ pub(crate) fn build_app(state: AppState) -> Router {
             "/discovery/identity/{account_id}",
             get(identity_bundle::fetch),
         )
+        .route("/discovery/keypackage", post(keypackage::upload))
+        .route("/discovery/keypackage/{account_id}", get(keypackage::fetch))
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
