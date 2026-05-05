@@ -23,6 +23,12 @@ openmls_rust_crypto = "0.5"
 openmls_traits = "0.5"
 tls_codec = "0.4"
 zeroize = "1"
+# X25519 keypair for the long-lived HPKE-Base envelope key pinned
+# to each Identity (Phase 1.16d3b). The MLS ciphersuite already
+# uses X25519 internally for DHKEM, but those keys are MLS-group-
+# scoped — the Identity-level X25519 is what `lakko-contacts`
+# sealed envelopes target.
+lakko-crypto.workspace = true
 
 [dev-dependencies]
 proptest = "1"

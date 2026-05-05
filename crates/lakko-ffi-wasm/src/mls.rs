@@ -57,6 +57,29 @@ impl Identity {
         self.inner.signature_public_key().to_vec()
     }
 
+    /// Long-lived X25519 public key (32 bytes) — the HPKE
+    /// init_key callers of `lakko-contacts::compose` target when
+    /// sealing an envelope to this identity. Pair with the bundle
+    /// uploaded to the discovery service via
+    /// `POST /discovery/identity` (Phase 1.16d3a).
+    #[wasm_bindgen(getter, js_name = x25519PublicKey)]
+    pub fn x25519_public_key(&self) -> Vec<u8> {
+        self.inner.x25519_public_key().to_vec()
+    }
+
+    /// Raw X25519 secret bytes (32 bytes). Used as input to
+    /// `ContactRequest.openEnvelope(...)` when decrypting an
+    /// incoming envelope.
+    ///
+    /// **Sensitive.** The caller MUST persist these bytes only
+    /// after wrapping them with the device root key (1.16c3c2's
+    /// `deriveDeviceRootKey` output). They MUST NOT touch
+    /// `localStorage` or any other unencrypted store.
+    #[wasm_bindgen(getter, js_name = x25519SecretKey)]
+    pub fn x25519_secret_key(&self) -> Vec<u8> {
+        self.inner.x25519_secret_bytes().to_vec()
+    }
+
     /// Create a fresh KeyPackage in TLS wire form.
     #[wasm_bindgen(js_name = createKeyPackage)]
     pub fn create_key_package(&self) -> Result<Vec<u8>, JsError> {
@@ -395,6 +418,26 @@ mod tests {
         let id = Identity::new("alice").unwrap();
         let pk = id.signature_public_key();
         assert_eq!(pk.len(), 32, "Ed25519 public key length");
+    }
+
+    /// Phase 1.16d3b — the X25519 envelope keypair surfaces as a
+    /// pair of 32-byte `Vec<u8>` getters. Pubkey copies are fresh
+    /// each call (idempotent, no shared mutable state).
+    #[test]
+    fn identity_x25519_keys_are_32_bytes_each() {
+        let id = Identity::new("alice").unwrap();
+        let pk = id.x25519_public_key();
+        let sk = id.x25519_secret_key();
+        assert_eq!(pk.len(), 32, "X25519 public key length");
+        assert_eq!(sk.len(), 32, "X25519 secret key length");
+        // Sanity: at least one byte non-zero on each — would
+        // catch a default-initialised secret slipping through.
+        assert!(pk.iter().any(|&b| b != 0));
+        assert!(sk.iter().any(|&b| b != 0));
+        // Idempotent reads — getters return copies of the same
+        // underlying secret.
+        assert_eq!(id.x25519_public_key(), pk);
+        assert_eq!(id.x25519_secret_key(), sk);
     }
 
     #[test]

@@ -1925,6 +1925,7 @@ dependencies = [
 name = "lakko-mls"
 version = "0.0.0"
 dependencies = [
+ "lakko-crypto",
  "openmls",
  "openmls_basic_credential",
  "openmls_rust_crypto",
