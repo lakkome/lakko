@@ -77,3 +77,30 @@ export interface LookupRequest {
 export interface LookupResponse {
   account_id: string;
 }
+
+// ----------------------------------------------------------------------------
+// /discovery/identity   (services/discovery/src/identity_bundle.rs — 1.16d3a)
+// ----------------------------------------------------------------------------
+
+/** Body of `POST /discovery/identity`. */
+export interface IdentityUploadRequest {
+  pow: PowProofPayload;
+  account_id: string;
+  /** base64(Ed25519 public key) — 32 bytes after decode. */
+  signature_pubkey: string;
+  /** base64(X25519 public key)  — 32 bytes after decode. */
+  x25519_pubkey: string;
+}
+
+/** Response body of `POST /discovery/identity`. */
+export interface IdentityUploadResponse {
+  ok: boolean;
+}
+
+/** Response body of `GET /discovery/identity/{acct_b64url}`.
+ *  The server returns 404 when no bundle exists for the account
+ *  — the high-level client surfaces that as a `null`. */
+export interface IdentityFetchResponse {
+  signature_pubkey: string;
+  x25519_pubkey: string;
+}

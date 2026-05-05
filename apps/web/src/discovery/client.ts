@@ -26,9 +26,16 @@
  * failures.
  */
 import { loadWasm } from "../wasm";
-import { base64Decode, base64Encode } from "../auth/account-id";
+import {
+  base64Decode,
+  base64Encode,
+  base64UrlEncodeNoPad,
+} from "../auth/account-id";
 import { solvePow } from "../auth/pow";
 import type {
+  IdentityFetchResponse,
+  IdentityUploadRequest,
+  IdentityUploadResponse,
   LookupRequest,
   LookupResponse,
   OprfRequest,
@@ -102,6 +109,48 @@ export class DiscoveryClient {
 
   async register(req: RegisterRequest): Promise<RegisterResponse> {
     return this.post("/discovery/register", req);
+  }
+
+  /** `POST /discovery/identity` — upsert the identity bundle. */
+  async identityUpload(
+    req: IdentityUploadRequest,
+  ): Promise<IdentityUploadResponse> {
+    return this.post("/discovery/identity", req);
+  }
+
+  /**
+   * `GET /discovery/identity/{accountId_b64url}`. Returns the
+   * raw bundle on 200, `null` on 404 (typed not-found path),
+   * throws on any other non-2xx.
+   *
+   * The path uses **base64url-without-padding** because axum
+   * rejects `+` and `/` in path segments; the rest of the wire
+   * format uses standard-alphabet base64.
+   */
+  async identityFetch(
+    accountId: Uint8Array,
+  ): Promise<IdentityFetchResponse | null> {
+    if (accountId.length !== 16) {
+      throw new DiscoveryClientArgError("accountId must be 16 bytes");
+    }
+    const accountIdB64Url = base64UrlEncodeNoPad(accountId);
+    const url = `${this.baseUrl}/discovery/identity/${accountIdB64Url}`;
+    let response: Response;
+    try {
+      response = await fetch(url, { method: "GET" });
+    } catch (err) {
+      throw new DiscoveryNetworkError("/discovery/identity (GET)", err);
+    }
+    if (response.status === 404) return null;
+    if (!response.ok) {
+      const text = await safeReadBody(response);
+      throw new DiscoveryHttpError(
+        response.status,
+        "/discovery/identity (GET)",
+        text,
+      );
+    }
+    return (await response.json()) as IdentityFetchResponse;
   }
 
   /**
@@ -194,6 +243,52 @@ export class DiscoveryClient {
       );
     }
     return { normalisedUsername };
+  }
+
+  /**
+   * Upload (or replace) the identity bundle for the given
+   * account. Drives one PoW solve + `POST /discovery/identity`.
+   *
+   * Idempotent — the server upserts via
+   * `INSERT … ON DUPLICATE KEY UPDATE`. Calling this on every
+   * login with a deterministically-derived Identity (1.16d3b2)
+   * is a cheap no-op when the keys haven't changed.
+   */
+  async uploadIdentityBundle(
+    accountId: Uint8Array,
+    signaturePubkey: Uint8Array,
+    x25519Pubkey: Uint8Array,
+  ): Promise<void> {
+    if (accountId.length !== 16) {
+      throw new DiscoveryClientArgError("accountId must be 16 bytes");
+    }
+    if (signaturePubkey.length !== 32) {
+      throw new DiscoveryClientArgError(
+        "signaturePubkey must be 32 bytes (Ed25519)",
+      );
+    }
+    if (x25519Pubkey.length !== 32) {
+      throw new DiscoveryClientArgError(
+        "x25519Pubkey must be 32 bytes (HPKE init_key)",
+      );
+    }
+
+    const challenge = await this.fetchChallenge();
+    const pow = await solvePow(challenge.seed, challenge.effort_bits);
+
+    const resp = await this.identityUpload({
+      pow,
+      account_id: base64Encode(accountId),
+      signature_pubkey: base64Encode(signaturePubkey),
+      x25519_pubkey: base64Encode(x25519Pubkey),
+    });
+    if (!resp.ok) {
+      throw new DiscoveryHttpError(
+        200,
+        "/discovery/identity",
+        "server reported ok=false",
+      );
+    }
   }
 
   /**

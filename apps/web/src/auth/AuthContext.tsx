@@ -243,6 +243,16 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       // pretending signup succeeded silently.
       const deviceKey = await deriveDeviceRootKey(result.exportKey, accountIdB64);
       await putDeviceKey(accountIdB64, deviceKey);
+
+      // 1.16d3b2: derive the Identity deterministically from the
+      // OPAQUE export key, upload its public bundle to the
+      // discovery directory. Because Identity::fromSeed is
+      // deterministic, the SAME bytes will be uploaded on every
+      // future login — the server upserts. We do this BEFORE
+      // flipping state so a failure here surfaces as a signup
+      // error rather than a half-broken session.
+      await uploadIdentityBundle(discovery, result.accountId, result.exportKey);
+
       setState({
         kind: "session",
         account: { accountId: accountIdB64, username: normalisedUsername },
@@ -299,6 +309,20 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       const deviceKey = await deriveDeviceRootKey(result.exportKey, accountIdB64);
       await putDeviceKey(accountIdB64, deviceKey);
       savePersisted({ v: 1, accountIdB64, username: resolvedUsername });
+
+      // 1.16d3b2: refresh the identity bundle on every login.
+      // Best-effort — a network blip here shouldn't block the
+      // user from getting into a session they already
+      // authenticated. The bundle is deterministic, so the
+      // next login will retry naturally.
+      try {
+        await uploadIdentityBundle(discovery, accountIdBytes, result.exportKey);
+      } catch (err) {
+        // Surface as a console warning, not a thrown error.
+        // eslint-disable-next-line no-console
+        console.warn("identity bundle refresh failed", err);
+      }
+
       setState({
         kind: "session",
         account: { accountId: accountIdB64, username: resolvedUsername },
@@ -414,6 +438,28 @@ async function hydrateFromStorage(): Promise<AuthState> {
     kind: "session",
     account: { accountId: cached.accountIdB64, username: cached.username },
   };
+}
+
+/**
+ * Build an Identity deterministically from the OPAQUE export key,
+ * extract the two public keys, push them to
+ * `/discovery/identity`. The Identity instance itself is dropped
+ * at the end of the call — its keys are reproducible at any time
+ * via the same export key, so we don't keep it in memory beyond
+ * the upload.
+ */
+async function uploadIdentityBundle(
+  discovery: DiscoveryClient,
+  accountId: Uint8Array,
+  exportKey: Uint8Array,
+): Promise<void> {
+  const wasm = await loadWasm();
+  const identity = wasm.Identity.fromSeed(exportKey);
+  await discovery.uploadIdentityBundle(
+    accountId,
+    identity.signaturePublicKey,
+    identity.x25519PublicKey,
+  );
 }
 
 /**

@@ -51,6 +51,20 @@ impl Identity {
         Ok(Self { inner })
     }
 
+    /// Derive an identity **deterministically** from a seed.
+    ///
+    /// Same `seed` ⇒ byte-identical Ed25519 + X25519 keys. The
+    /// expected caller is the `apps/web` auth layer, which
+    /// seeds this with the OPAQUE password export key so a
+    /// fresh login on any device reproduces the user's
+    /// long-lived public keys without persisting Identity bytes
+    /// anywhere.
+    #[wasm_bindgen(js_name = fromSeed)]
+    pub fn from_seed(seed: &[u8]) -> Result<Identity, JsError> {
+        let inner = MlsIdentity::from_seed(seed).map_err(mls_err)?;
+        Ok(Self { inner })
+    }
+
     /// Public signature key bytes.
     #[wasm_bindgen(getter, js_name = signaturePublicKey)]
     pub fn signature_public_key(&self) -> Vec<u8> {
@@ -418,6 +432,17 @@ mod tests {
         let id = Identity::new("alice").unwrap();
         let pk = id.signature_public_key();
         assert_eq!(pk.len(), 32, "Ed25519 public key length");
+    }
+
+    /// Phase 1.16d3b2 — `Identity.fromSeed` is deterministic.
+    /// Same seed bytes ⇒ same Ed25519 + X25519 public keys.
+    #[test]
+    fn identity_from_seed_is_deterministic() {
+        let seed = [0x77u8; 64];
+        let a = Identity::from_seed(&seed).unwrap();
+        let b = Identity::from_seed(&seed).unwrap();
+        assert_eq!(a.signature_public_key(), b.signature_public_key());
+        assert_eq!(a.x25519_public_key(), b.x25519_public_key());
     }
 
     /// Phase 1.16d3b — the X25519 envelope keypair surfaces as a

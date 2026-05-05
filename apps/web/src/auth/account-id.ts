@@ -97,3 +97,23 @@ export function base64Decode(b64: string): Uint8Array {
   }
   return out;
 }
+
+/**
+ * base64url-encode raw bytes WITHOUT padding (RFC 4648 §5).
+ *
+ * Used by URL path segments — axum rejects the standard-alphabet
+ * `+` and `/`, so the discovery service's
+ * `GET /discovery/identity/{account_id}` path expects this shape.
+ *
+ * Implementation: standard-alphabet encode, then substitute the
+ * URL-unsafe characters (`+` → `-`, `/` → `_`) and strip the
+ * trailing `=` padding. Decode is the reverse, but we don't
+ * need it on the client (responses always come back as standard
+ * base64 in JSON bodies).
+ */
+export function base64UrlEncodeNoPad(bytes: Uint8Array): string {
+  return base64Encode(bytes)
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
+}

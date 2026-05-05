@@ -25,10 +25,23 @@ use openmls_rust_crypto::OpenMlsRustCrypto;
 use openmls_traits::types::SignatureScheme;
 use openmls_traits::OpenMlsProvider as _;
 
-use lakko_crypto::agreement;
+use lakko_crypto::{agreement, kdf, signing};
 
 use crate::ciphersuite;
 use crate::error::{Error, Result};
+
+/// HKDF salt for deterministic Identity derivation. Pinned ASCII;
+/// the value is a constant of the protocol and changing it is a
+/// breaking change to every existing account.
+const IDENTITY_HKDF_SALT: &[u8] = b"lakko-identity-v1";
+
+/// HKDF info for the Ed25519 sub-secret. Distinct from the
+/// X25519 info below so the two keys are domain-separated even
+/// though they share the same IKM.
+const IDENTITY_HKDF_INFO_ED25519: &[u8] = b"lakko/identity/v1/ed25519";
+
+/// HKDF info for the X25519 sub-secret.
+const IDENTITY_HKDF_INFO_X25519: &[u8] = b"lakko/identity/v1/x25519";
 
 /// A user identity bound to a single device.
 ///
@@ -100,6 +113,90 @@ impl Identity {
         // raw bytes when persisting (encrypted by the device root key
         // — Phase 1.16c3c2 / 1.16d3b client wiring).
         let x25519_secret = agreement::SecretKey::generate();
+
+        Ok(Self {
+            provider,
+            signature_keys,
+            credential,
+            ciphersuite: cs,
+            x25519_secret,
+        })
+    }
+
+    /// Generate a fresh identity **deterministically** from a
+    /// caller-supplied seed.
+    ///
+    /// Both the Ed25519 signing key and the X25519 envelope key
+    /// are derived via HKDF-SHA-256 with a fixed Lakko-pinned
+    /// salt (`"lakko-identity-v1"`) and per-key `info` strings
+    /// (`"lakko/identity/v1/ed25519"` and
+    /// `"lakko/identity/v1/x25519"`). Same `seed` ⇒ byte-identical
+    /// Identity (same Ed25519 pubkey, same X25519 pubkey).
+    ///
+    /// Intended caller: the `apps/web` auth layer, which seeds
+    /// this with the OPAQUE password export key produced at
+    /// signup / login. That makes the user's Identity a
+    /// deterministic function of the password — no separate
+    /// persistence layer required, and a successful login on a
+    /// fresh device reproduces exactly the same on-the-wire
+    /// public keys (and thus the same `identity_bundles` row on
+    /// the discovery service, 1.16d3a).
+    ///
+    /// Currently fixed to the default Lakko ciphersuite
+    /// ([`ciphersuite::DEFAULT`]); the FIPS path waits on
+    /// OpenMLS X.509 credential support.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Identity`] if the underlying HKDF or the
+    /// `SignatureKeyPair` construction / storage fails. HKDF
+    /// failure is unreachable in practice (constant-size output);
+    /// `SignatureKeyPair::from_raw` is infallible at the type
+    /// level (`-> Self`) so the only fallible step is the
+    /// per-provider keypair-storage write.
+    pub fn from_seed(seed: &[u8]) -> Result<Self> {
+        let cs = ciphersuite::DEFAULT;
+
+        // 1. Derive the two 32-byte sub-secrets.
+        let ed25519_seed: lakko_crypto::SecretBytes<32> =
+            kdf::hkdf_sha256::<32>(seed, IDENTITY_HKDF_SALT, IDENTITY_HKDF_INFO_ED25519)
+                .map_err(|e| Error::Identity(format!("HKDF for Ed25519 seed: {e}")))?;
+        let x25519_seed: lakko_crypto::SecretBytes<32> =
+            kdf::hkdf_sha256::<32>(seed, IDENTITY_HKDF_SALT, IDENTITY_HKDF_INFO_X25519)
+                .map_err(|e| Error::Identity(format!("HKDF for X25519 seed: {e}")))?;
+
+        // 2. Build the Ed25519 keypair via lakko-crypto's
+        //    `SigningKey::from_seed`, then hand the raw bytes to
+        //    OpenMLS via `SignatureKeyPair::from_raw`.
+        let signing_key = signing::SigningKey::from_seed(ed25519_seed.as_bytes());
+        let ed25519_secret = signing_key.to_seed();
+        let ed25519_public = signing_key.verifying_key().to_bytes();
+
+        let provider = OpenMlsRustCrypto::default();
+        let signature_keys = SignatureKeyPair::from_raw(
+            SignatureScheme::ED25519,
+            ed25519_secret.to_vec(),
+            ed25519_public.to_vec(),
+        );
+        signature_keys
+            .store(provider.storage())
+            .map_err(|e| Error::Identity(format!("keypair storage: {e:?}")))?;
+
+        // 3. Build the X25519 keypair from the same-shape seed.
+        //    `agreement::SecretKey::from_bytes` is the
+        //    deterministic counterpart of `SecretKey::generate`.
+        let x25519_secret = agreement::SecretKey::from_bytes(*x25519_seed.as_bytes());
+
+        // 4. Wrap the public Ed25519 key in a BasicCredential.
+        //    The display name is empty for seed-derived
+        //    identities — there is no human-typed label here.
+        //    Future work: derive the credential bytes from the
+        //    seed too, so credentials are also reproducible.
+        let basic = BasicCredential::new(Vec::new());
+        let credential = CredentialWithKey {
+            credential: basic.into(),
+            signature_key: signature_keys.public().into(),
+        };
 
         Ok(Self {
             provider,
@@ -242,5 +339,62 @@ mod tests {
         let a = alice.x25519_secret_bytes();
         let b = alice.x25519_secret_bytes();
         assert_eq!(a, b);
+    }
+
+    /// Phase 1.16d3b2 — `from_seed` is deterministic. The same
+    /// seed bytes ALWAYS produce byte-identical Ed25519 and
+    /// X25519 keypairs. This is the property that lets the
+    /// auth layer derive Identity from the OPAQUE export key on
+    /// every login without persisting Identity bytes anywhere.
+    #[test]
+    fn from_seed_is_deterministic() {
+        let seed = [0x11u8; 64];
+        let a = Identity::from_seed(&seed).unwrap();
+        let b = Identity::from_seed(&seed).unwrap();
+        assert_eq!(a.signature_public_key(), b.signature_public_key());
+        assert_eq!(a.x25519_public_key(), b.x25519_public_key());
+        assert_eq!(a.x25519_secret_bytes(), b.x25519_secret_bytes());
+    }
+
+    /// Different seeds produce different keys for both flows
+    /// (Ed25519 and X25519). The HKDF info-string domain
+    /// separation also means the two halves don't accidentally
+    /// collapse to the same key when the seed is short.
+    #[test]
+    fn from_seed_distinct_seeds_yield_distinct_keys() {
+        let a = Identity::from_seed(&[0x11u8; 64]).unwrap();
+        let b = Identity::from_seed(&[0x22u8; 64]).unwrap();
+        assert_ne!(a.signature_public_key(), b.signature_public_key());
+        assert_ne!(a.x25519_public_key(), b.x25519_public_key());
+    }
+
+    /// Within a single seed-derived Identity the Ed25519 and
+    /// X25519 secrets are independent (different HKDF `info`
+    /// strings keep them domain-separated). A fast sanity check
+    /// is that they're not byte-equal — would catch a future
+    /// refactor that accidentally folded them onto the same
+    /// `info`.
+    #[test]
+    fn from_seed_ed25519_and_x25519_are_domain_separated() {
+        let id = Identity::from_seed(&[0x33u8; 64]).unwrap();
+        // Ed25519 secret is wrapped inside the SignatureKeyPair;
+        // we compare the *public* keys plus the X25519 secret /
+        // public to make sure none of the four bytestrings
+        // happen to collide.
+        assert_ne!(id.signature_public_key(), &id.x25519_public_key()[..]);
+        assert_ne!(id.signature_public_key(), &id.x25519_secret_bytes()[..]);
+        assert_ne!(id.x25519_public_key(), id.x25519_secret_bytes());
+    }
+
+    /// Seed length is intentionally not validated — HKDF
+    /// accepts any IKM length. A 64-byte OPAQUE export key, a
+    /// 32-byte raw seed, or anything else should produce some
+    /// Identity. This test confirms a couple of length variants
+    /// don't blow up.
+    #[test]
+    fn from_seed_accepts_arbitrary_length_ikm() {
+        let _ = Identity::from_seed(&[0x44u8; 32]).unwrap();
+        let _ = Identity::from_seed(&[0x44u8; 64]).unwrap();
+        let _ = Identity::from_seed(&[0x44u8; 100]).unwrap();
     }
 }
