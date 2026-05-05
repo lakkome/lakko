@@ -282,6 +282,19 @@ impl Group {
     pub fn member_count(&self) -> usize {
         self.inner.members().count()
     }
+
+    /// MLS `group_id` (RFC 9420 §6.2) — the opaque identifier
+    /// shared by every member of the group at every epoch.
+    ///
+    /// Used as the routing key for the DS group journal at
+    /// `POST /ds/group/{group_id_hex}/messages`. Length is
+    /// implementation-defined by OpenMLS (typically 32 bytes
+    /// of randomness chosen at `Group::create`); callers
+    /// should treat it as opaque bytes.
+    #[must_use]
+    pub fn group_id(&self) -> Vec<u8> {
+        self.inner.group_id().as_slice().to_vec()
+    }
 }
 
 /// Encode any [`MlsMessageOut`] to its TLS wire form.

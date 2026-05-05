@@ -148,6 +148,46 @@ export class DsClient {
     return { id: json.id, createdAt: json.created_at };
   }
 
+  /**
+   * `POST /ds/group/{group_id_hex}/messages` — publish a raw
+   * payload to a group journal. The body is sent as
+   * `application/octet-stream`; the server caps the size at
+   * `MAX_MESSAGE_BYTES`.
+   *
+   * Used by `ChatClient.sendMessage` to ship MLS Application
+   * messages produced by `Group.createApplicationMessage`.
+   */
+  async publishGroup(
+    groupId: Uint8Array,
+    payload: Uint8Array,
+  ): Promise<PublishResult> {
+    if (groupId.length === 0) {
+      throw new DsClientArgError("groupId must be non-empty");
+    }
+    if (payload.length === 0) {
+      throw new DsClientArgError("payload must be non-empty");
+    }
+
+    const endpoint = `/ds/group/${pseudonymHex(groupId)}/messages`;
+    const url = `${this.baseUrl}${endpoint}`;
+    let response: Response;
+    try {
+      response = await fetch(url, {
+        method: "POST",
+        headers: { "content-type": "application/octet-stream" },
+        body: payload.slice(),
+      });
+    } catch (err) {
+      throw new DsNetworkError(endpoint, err);
+    }
+    if (!response.ok) {
+      const text = await safeReadBody(response);
+      throw new DsHttpError(response.status, endpoint, text);
+    }
+    const json = (await response.json()) as { id: number; created_at: string };
+    return { id: json.id, createdAt: json.created_at };
+  }
+
   // -----------------------------------------------------------------
   // Mailbox: GET fetch with cursor
   // -----------------------------------------------------------------
@@ -182,6 +222,62 @@ export class DsClient {
     }
     const qs = params.toString();
     const endpoint = `/ds/mailbox/${pseudonymHex(pseudonym)}/messages${
+      qs.length === 0 ? "" : `?${qs}`
+    }`;
+    const url = `${this.baseUrl}${endpoint}`;
+
+    let response: Response;
+    try {
+      response = await fetch(url, { method: "GET" });
+    } catch (err) {
+      throw new DsNetworkError(endpoint, err);
+    }
+    if (!response.ok) {
+      const text = await safeReadBody(response);
+      throw new DsHttpError(response.status, endpoint, text);
+    }
+    const json = (await response.json()) as {
+      messages: { id: number; payload_b64: string; created_at: string }[];
+      has_more: boolean;
+    };
+    return {
+      messages: json.messages.map((m) => ({
+        id: m.id,
+        payload: base64Decode(m.payload_b64),
+        createdAt: m.created_at,
+      })),
+      hasMore: json.has_more,
+    };
+  }
+
+  /**
+   * `GET /ds/group/{group_id_hex}/messages?after=&limit=&wait=`
+   * — pull all messages newer than `after` for the given
+   * group journal.
+   *
+   * Mirror of `fetchMailbox`; the server uses the same FIFO
+   * journal shape on either side of the `/group/` vs
+   * `/mailbox/` route, so the response decoder is identical.
+   */
+  async fetchGroup(
+    groupId: Uint8Array,
+    options: { after?: number; limit?: number; waitSecs?: number } = {},
+  ): Promise<FetchResult> {
+    if (groupId.length === 0) {
+      throw new DsClientArgError("groupId must be non-empty");
+    }
+    const params = new URLSearchParams();
+    if (options.after !== undefined) {
+      params.set("after", String(options.after));
+    }
+    if (options.limit !== undefined) {
+      params.set("limit", String(options.limit));
+    }
+    if (options.waitSecs !== undefined) {
+      params.set("wait", String(options.waitSecs));
+    }
+    const qs = params.toString();
+    const endpoint = `/ds/group/${pseudonymHex(groupId)}/messages${
       qs.length === 0 ? "" : `?${qs}`
     }`;
     const url = `${this.baseUrl}${endpoint}`;

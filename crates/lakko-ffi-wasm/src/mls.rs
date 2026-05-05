@@ -362,6 +362,20 @@ impl Group {
             .map_err(|_| JsError::new("internal lock poisoned"))?;
         Ok(u32::try_from(g.member_count()).unwrap_or(u32::MAX))
     }
+
+    /// MLS `group_id` (RFC 9420 §6.2). Used by `apps/web` as
+    /// the routing key for `POST /ds/group/{group_id_hex}`. The
+    /// bytes are opaque — typically 32 random bytes chosen by
+    /// OpenMLS at create-time. Identical for every member of
+    /// the group at every epoch.
+    #[wasm_bindgen(getter, js_name = groupId)]
+    pub fn group_id(&self) -> Result<Vec<u8>, JsError> {
+        let g = self
+            .inner
+            .lock()
+            .map_err(|_| JsError::new("internal lock poisoned"))?;
+        Ok(g.group_id())
+    }
 }
 
 // ============================================================================
