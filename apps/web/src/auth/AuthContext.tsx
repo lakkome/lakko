@@ -508,12 +508,16 @@ async function hydrateFromStorage(): Promise<AuthState> {
 }
 
 /**
- * Build an Identity deterministically from the OPAQUE export key,
- * extract the two public keys, push them to
- * `/discovery/identity`. The Identity instance itself is dropped
- * at the end of the call — its keys are reproducible at any time
- * via the same export key, so we don't keep it in memory beyond
- * the upload.
+ * Publish everything the directory needs to know about this
+ * account: the identity bundle (Ed25519 + X25519 pubkeys,
+ * deterministic from the export key — 1.16d3b2) and the MLS
+ * KeyPackage (random per call — 1.16e2). Both upserts run in
+ * parallel; the calls are independent and the server is
+ * idempotent on either side.
+ *
+ * The Identity instance itself is dropped at the end of the
+ * call — its keys are reproducible at any time via the same
+ * export key, so we don't keep it in memory beyond the upload.
  */
 async function uploadIdentityBundle(
   discovery: DiscoveryClient,
@@ -522,11 +526,27 @@ async function uploadIdentityBundle(
 ): Promise<void> {
   const wasm = await loadWasm();
   const identity = wasm.Identity.fromSeed(exportKey);
-  await discovery.uploadIdentityBundle(
-    accountId,
-    identity.signaturePublicKey,
-    identity.x25519PublicKey,
-  );
+
+  // 1.16e2: generate a fresh KeyPackage. RFC 9420 forward
+  // secrecy on new groups argues for one-shot init_keys; in
+  // practice we publish a freshly-randomised one on every
+  // login, and the Phase-1 server just upserts.
+  const keyPackageBytes = identity.createKeyPackage();
+
+  // Run both uploads in parallel. They're independent — the
+  // identity bundle and the KeyPackage live in different
+  // tables, neither depends on the other's success. If one
+  // fails the caller gets the failure (Promise.all rejects on
+  // first); we deliberately do not swallow either error
+  // silently because both are required for a usable account.
+  await Promise.all([
+    discovery.uploadIdentityBundle(
+      accountId,
+      identity.signaturePublicKey,
+      identity.x25519PublicKey,
+    ),
+    discovery.uploadKeyPackage(accountId, keyPackageBytes),
+  ]);
 }
 
 /**

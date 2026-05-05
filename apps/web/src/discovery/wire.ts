@@ -104,3 +104,28 @@ export interface IdentityFetchResponse {
   signature_pubkey: string;
   x25519_pubkey: string;
 }
+
+// ----------------------------------------------------------------------------
+// /discovery/keypackage   (services/discovery/src/keypackage.rs — 1.16e1)
+// ----------------------------------------------------------------------------
+
+/** Body of `POST /discovery/keypackage`. */
+export interface KeyPackageUploadRequest {
+  pow: PowProofPayload;
+  account_id: string;
+  /** base64(TLS-encoded MLS KeyPackage). Server caps decoded
+   *  size at 2048 bytes — mirrors `MAX_KEYPACKAGE_BYTES` in the
+   *  Rust handler. */
+  keypackage: string;
+}
+
+/** Response body of `POST /discovery/keypackage`. */
+export interface KeyPackageUploadResponse {
+  ok: boolean;
+}
+
+/** Response body of `GET /discovery/keypackage/{acct_b64url}`.
+ *  404 surfaces as `null` in the high-level client. */
+export interface KeyPackageFetchResponse {
+  keypackage: string;
+}

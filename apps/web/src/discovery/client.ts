@@ -36,6 +36,9 @@ import type {
   IdentityFetchResponse,
   IdentityUploadRequest,
   IdentityUploadResponse,
+  KeyPackageFetchResponse,
+  KeyPackageUploadRequest,
+  KeyPackageUploadResponse,
   LookupRequest,
   LookupResponse,
   OprfRequest,
@@ -118,6 +121,14 @@ export class DiscoveryClient {
     return this.post("/discovery/identity", req);
   }
 
+  /** `POST /discovery/keypackage` — upsert the user's MLS
+   *  KeyPackage. */
+  async keypackageUpload(
+    req: KeyPackageUploadRequest,
+  ): Promise<KeyPackageUploadResponse> {
+    return this.post("/discovery/keypackage", req);
+  }
+
   /**
    * `GET /discovery/identity/{accountId_b64url}`. Returns the
    * raw bundle on 200, `null` on 404 (typed not-found path),
@@ -151,6 +162,37 @@ export class DiscoveryClient {
       );
     }
     return (await response.json()) as IdentityFetchResponse;
+  }
+
+  /**
+   * `GET /discovery/keypackage/{accountId_b64url}`. Returns the
+   * raw KeyPackage shape on 200, `null` on 404, throws on
+   * other non-2xx.
+   */
+  async keypackageFetch(
+    accountId: Uint8Array,
+  ): Promise<KeyPackageFetchResponse | null> {
+    if (accountId.length !== 16) {
+      throw new DiscoveryClientArgError("accountId must be 16 bytes");
+    }
+    const accountIdB64Url = base64UrlEncodeNoPad(accountId);
+    const url = `${this.baseUrl}/discovery/keypackage/${accountIdB64Url}`;
+    let response: Response;
+    try {
+      response = await fetch(url, { method: "GET" });
+    } catch (err) {
+      throw new DiscoveryNetworkError("/discovery/keypackage (GET)", err);
+    }
+    if (response.status === 404) return null;
+    if (!response.ok) {
+      const text = await safeReadBody(response);
+      throw new DiscoveryHttpError(
+        response.status,
+        "/discovery/keypackage (GET)",
+        text,
+      );
+    }
+    return (await response.json()) as KeyPackageFetchResponse;
   }
 
   /**
@@ -289,6 +331,76 @@ export class DiscoveryClient {
         "server reported ok=false",
       );
     }
+  }
+
+  /**
+   * Upload (or replace) the user's MLS KeyPackage. Drives one
+   * PoW solve + `POST /discovery/keypackage`.
+   *
+   * Unlike the identity bundle, KeyPackages are **not**
+   * deterministic — `Identity::create_key_package()` generates
+   * fresh randomness on every call (RFC 9420 forward-secrecy
+   * property). Calling this on every login refreshes the
+   * `init_key` on the server, so a fresh sender starting a new
+   * 1×1 group gets bytes the recipient hasn't already used.
+   *
+   * The Phase-1 directory only stores ONE KeyPackage per
+   * account at a time (consume-on-use is 1.16e6+ work), so a
+   * sender racing two sessions can in theory seed two groups
+   * with the same `init_key`. Documented MVP trade-off.
+   */
+  async uploadKeyPackage(
+    accountId: Uint8Array,
+    keyPackageBytes: Uint8Array,
+  ): Promise<void> {
+    if (accountId.length !== 16) {
+      throw new DiscoveryClientArgError("accountId must be 16 bytes");
+    }
+    if (keyPackageBytes.length === 0) {
+      throw new DiscoveryClientArgError("keyPackageBytes must be non-empty");
+    }
+    // Hard ceiling mirrors `MAX_KEYPACKAGE_BYTES = 2048` on the
+    // server. Surfacing here saves a round-trip on a
+    // misbehaving caller.
+    const MAX = 2048;
+    if (keyPackageBytes.length > MAX) {
+      throw new DiscoveryClientArgError(
+        `keyPackageBytes exceeds the ${MAX}-byte ceiling ` +
+          `(got ${keyPackageBytes.length} bytes)`,
+      );
+    }
+
+    const challenge = await this.fetchChallenge();
+    const pow = await solvePow(challenge.seed, challenge.effort_bits);
+
+    const resp = await this.keypackageUpload({
+      pow,
+      account_id: base64Encode(accountId),
+      keypackage: base64Encode(keyPackageBytes),
+    });
+    if (!resp.ok) {
+      throw new DiscoveryHttpError(
+        200,
+        "/discovery/keypackage",
+        "server reported ok=false",
+      );
+    }
+  }
+
+  /**
+   * Resolve `accountId → KeyPackage bytes` (TLS-encoded MLS).
+   * Returns `null` when the recipient hasn't published one yet.
+   *
+   * Convenience wrapper around `keypackageFetch` that decodes
+   * the base64 wrapper to `Uint8Array` so the caller can hand
+   * the bytes straight to `wasm.Group.addMember(...)`.
+   */
+  async fetchKeyPackage(
+    accountId: Uint8Array,
+  ): Promise<Uint8Array | null> {
+    const raw = await this.keypackageFetch(accountId);
+    if (raw === null) return null;
+    return base64Decode(raw.keypackage);
   }
 
   /**
