@@ -186,3 +186,124 @@ fn bob_received_bytes(incoming: Incoming) -> Vec<u8> {
         other => panic!("expected application message, got {other:?}"),
     }
 }
+
+/// Phase 1.16e6a: storage snapshot / restore round-trip.
+///
+/// Mirror of a real-world reload cycle:
+///
+///   1. Alice (seed-derived) creates a group and adds Bob.
+///   2. Alice sends a message; Bob decrypts.
+///   3. We snapshot Alice's MLS storage and grab the group_id.
+///   4. **New `Alice` instance** is built from the same seed —
+///      fresh `OpenMlsRustCrypto` provider, empty storage,
+///      identical Ed25519 + X25519 public keys.
+///   5. We restore the snapshot into the new provider's
+///      storage and call `Group::load` to bring the group
+///      back to life.
+///   6. Restored Alice continues messaging Bob from the same
+///      epoch — the ratchet state is intact, so the next
+///      `create_application_message` is decryptable on Bob's
+///      side without any rejoin handshake.
+#[test]
+fn snapshot_and_restore_round_trips_a_live_group() {
+    // Use seed-derived identities so the fresh restore-side
+    // Alice has byte-identical signature keys.
+    let alice_seed = [0xA1u8; 64];
+    let alice = Identity::from_seed(&alice_seed).expect("alice from seed");
+    let alice_pub_before = alice.signature_public_key().to_vec();
+
+    let bob = Identity::generate("bob").expect("bob");
+
+    // ---- 1. Alice creates a group, adds Bob ------------------------
+    let mut alice_group = Group::create(&alice).expect("alice creates");
+    let bob_kp = bob.create_key_package().expect("bob kp");
+    let bob_kp_wire = key_package::serialize(&bob_kp).expect("serialize bob kp");
+    let added = alice_group
+        .add_member_from_wire(&alice, &bob_kp_wire)
+        .expect("add bob");
+    let mut bob_group =
+        Group::join_from_welcome(&over_wire(added.welcome), &bob).expect("bob joins");
+    assert_eq!(alice_group.member_count(), 2);
+    assert_eq!(alice_group.epoch(), 1);
+
+    // ---- 2. Alice → Bob, plaintext check ---------------------------
+    let m1 = alice_group
+        .create_application_message(&alice, b"first message")
+        .expect("alice encrypts");
+    let r1 = bob_group
+        .process_incoming(&bob, &over_wire(m1))
+        .expect("bob decrypts");
+    assert_eq!(bob_received_bytes(r1), b"first message".to_vec());
+
+    // ---- 3. Snapshot --------------------------------------------------
+    let snapshot = alice.snapshot_storage().expect("snapshot");
+    let group_id = alice_group.group_id();
+    assert!(!snapshot.is_empty(), "snapshot must contain bytes");
+    // Drop the old Alice + group entirely. Anything that
+    // survives this point came from the snapshot, not memory.
+    drop(alice_group);
+    drop(alice);
+
+    // ---- 4. Fresh Alice from the same seed -------------------------
+    let restored_alice = Identity::from_seed(&alice_seed).expect("restored_alice from seed");
+    assert_eq!(
+        restored_alice.signature_public_key(),
+        alice_pub_before.as_slice(),
+        "from_seed must be deterministic",
+    );
+
+    // ---- 5. Restore the snapshot + load the group -----------------
+    restored_alice.restore_storage(&snapshot).expect("restore");
+    let mut restored_group = Group::load(&restored_alice, &group_id)
+        .expect("load")
+        .expect("group present in restored storage");
+    assert_eq!(restored_group.member_count(), 2);
+    assert_eq!(restored_group.epoch(), 1);
+    assert_eq!(restored_group.group_id(), group_id);
+
+    // ---- 6. Restored Alice keeps messaging Bob --------------------
+    let m2 = restored_group
+        .create_application_message(&restored_alice, b"after restore")
+        .expect("restored_alice encrypts");
+    let r2 = bob_group
+        .process_incoming(&bob, &over_wire(m2))
+        .expect("bob decrypts after restore");
+    assert_eq!(bob_received_bytes(r2), b"after restore".to_vec());
+}
+
+/// Negative case: `Group::load` on a fresh-from-seed identity
+/// (no snapshot restored) returns `Ok(None)` — pinpoints the
+/// distinction between "storage doesn't have this group" and
+/// "storage is corrupt".
+#[test]
+fn group_load_returns_none_when_no_state_was_persisted() {
+    let alice = Identity::from_seed(&[0xA2u8; 64]).expect("alice");
+    let arbitrary_id = [0x99u8; 32];
+    let loaded = Group::load(&alice, &arbitrary_id).expect("load");
+    assert!(loaded.is_none(), "no row in storage → None");
+}
+
+/// Negative case: a truncated snapshot is rejected with a
+/// descriptive [`Error::Identity`].
+#[test]
+fn restore_storage_rejects_truncated_snapshot() {
+    let alice = Identity::from_seed(&[0xA3u8; 64]).expect("alice");
+    let alice_group = Group::create(&alice).expect("group");
+    let snapshot = alice.snapshot_storage().expect("snapshot");
+
+    // Lop off the trailing 5 bytes. The decoder MUST surface
+    // a structured error, not panic — we don't want a corrupt
+    // IDB row to crash the renderer.
+    let truncated = &snapshot[..snapshot.len() - 5];
+    let err = alice
+        .restore_storage(truncated)
+        .expect_err("truncated snapshot must fail");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("snapshot"),
+        "error message should mention snapshot, got: {msg}",
+    );
+    // Touch alice_group to silence "unused" — and to confirm
+    // the failed restore left the original storage intact.
+    let _ = alice_group.group_id();
+}

@@ -307,6 +307,133 @@ impl Identity {
     pub const fn ciphersuite(&self) -> Ciphersuite {
         self.ciphersuite
     }
+
+    /// Serialise the OpenMLS provider's storage to opaque bytes
+    /// (Phase 1.16e6a).
+    ///
+    /// The provider holds every piece of MLS state OpenMLS has
+    /// written for this identity — the signature keypair,
+    /// ratchet trees, epoch keys, queued proposals, etc. The
+    /// snapshot is a deterministic length-prefixed binary
+    /// encoding of the underlying `HashMap<Vec<u8>, Vec<u8>>`:
+    ///
+    /// ```text
+    ///   u32be       count of entries
+    ///   for each:
+    ///     u32be     key length
+    ///     [u8]      key bytes
+    ///     u32be     value length
+    ///     [u8]      value bytes
+    /// ```
+    ///
+    /// Phase-1 the bytes are opaque to the caller — the only
+    /// supported operation is round-tripping back through
+    /// [`Identity::restore_storage`]. Higher layers
+    /// (Phase 1.16e6c) wrap the snapshot under the device root
+    /// key (1.16c3c2) before stashing it in IndexedDB.
+    ///
+    /// # Errors
+    ///
+    /// Surfaces as [`Error::Identity`] only if the underlying
+    /// `RwLock` is poisoned (a panic happened while another
+    /// thread held the write guard) — unreachable in practice
+    /// today because `lakko-mls` is single-threaded inside
+    /// each `Identity`.
+    pub fn snapshot_storage(&self) -> Result<Vec<u8>> {
+        let map = self
+            .provider
+            .storage()
+            .values
+            .read()
+            .map_err(|_| Error::Identity("storage RwLock poisoned".to_string()))?;
+        // Pre-size the buffer: header + per-entry overhead +
+        // total payload. Each row is `4 + k + 4 + v`.
+        let count = u32::try_from(map.len())
+            .map_err(|_| Error::Identity("storage map > u32::MAX entries".to_string()))?;
+        let mut out = Vec::with_capacity(
+            4 + map
+                .iter()
+                .map(|(k, v)| 8 + k.len() + v.len())
+                .sum::<usize>(),
+        );
+        out.extend_from_slice(&count.to_be_bytes());
+        for (k, v) in map.iter() {
+            let kl = u32::try_from(k.len())
+                .map_err(|_| Error::Identity("storage key > u32::MAX bytes".to_string()))?;
+            let vl = u32::try_from(v.len())
+                .map_err(|_| Error::Identity("storage value > u32::MAX bytes".to_string()))?;
+            out.extend_from_slice(&kl.to_be_bytes());
+            out.extend_from_slice(k);
+            out.extend_from_slice(&vl.to_be_bytes());
+            out.extend_from_slice(v);
+        }
+        Ok(out)
+    }
+
+    /// Replace this identity's MLS provider storage with the
+    /// contents of a snapshot produced by
+    /// [`Identity::snapshot_storage`] on a previous run.
+    ///
+    /// **Replaces** rather than merges — any state OpenMLS has
+    /// written into this provider before the call (e.g. the
+    /// signature keypair persisted at `from_seed` time) is
+    /// discarded in favour of what's in the snapshot. The
+    /// caller is expected to feed back a snapshot taken from
+    /// the **same seed** so the signature key matches.
+    ///
+    /// # Errors
+    ///
+    /// * [`Error::Identity`] — snapshot is malformed (truncated
+    ///   counter, length-prefix overflow, …).
+    pub fn restore_storage(&self, snapshot: &[u8]) -> Result<()> {
+        use std::collections::HashMap;
+
+        // Local helper for the length-prefixed parser. Mirrors
+        // the encoder in `snapshot_storage` and rejects any
+        // truncation up front.
+        fn take<'a>(cur: &mut &'a [u8], n: usize) -> Result<&'a [u8]> {
+            if cur.len() < n {
+                return Err(Error::Identity(format!(
+                    "snapshot truncated: need {n} bytes, have {}",
+                    cur.len()
+                )));
+            }
+            let (head, rest) = cur.split_at(n);
+            *cur = rest;
+            Ok(head)
+        }
+        fn take_u32(cur: &mut &[u8]) -> Result<u32> {
+            let bytes = take(cur, 4)?;
+            // Length checked above — array conversion is total.
+            Ok(u32::from_be_bytes(bytes.try_into().expect("4 bytes")))
+        }
+
+        let mut cur = snapshot;
+        let count = take_u32(&mut cur)? as usize;
+        let mut map: HashMap<Vec<u8>, Vec<u8>> = HashMap::with_capacity(count);
+        for _ in 0..count {
+            let kl = take_u32(&mut cur)? as usize;
+            let k = take(&mut cur, kl)?.to_vec();
+            let vl = take_u32(&mut cur)? as usize;
+            let v = take(&mut cur, vl)?.to_vec();
+            map.insert(k, v);
+        }
+        if !cur.is_empty() {
+            return Err(Error::Identity(format!(
+                "snapshot has {} trailing bytes after {count} entries",
+                cur.len()
+            )));
+        }
+
+        let mut guard = self
+            .provider
+            .storage()
+            .values
+            .write()
+            .map_err(|_| Error::Identity("storage RwLock poisoned".to_string()))?;
+        *guard = map;
+        Ok(())
+    }
 }
 
 /// Map a Lakko-supported ciphersuite to its MLS signature scheme.

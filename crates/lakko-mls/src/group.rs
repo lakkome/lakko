@@ -295,6 +295,37 @@ impl Group {
     pub fn group_id(&self) -> Vec<u8> {
         self.inner.group_id().as_slice().to_vec()
     }
+
+    /// Reconstruct a `Group` from a previously persisted MLS
+    /// state in `identity.provider.storage()`. Pair with
+    /// [`Identity::restore_storage`] to load both halves of
+    /// the snapshot back into a single live `Identity` +
+    /// `Group` pair (Phase 1.16e6a).
+    ///
+    /// Returns:
+    ///
+    /// * `Ok(Some(group))` — the storage contains a group
+    ///   under `group_id`; the loaded ratchet state advances
+    ///   from there as if the process never restarted.
+    /// * `Ok(None)` — no group with that id is in storage
+    ///   (typical case: the snapshot was wiped, or the caller
+    ///   is asking for a different group than was persisted).
+    /// * `Err(Error::Group)` — the storage row exists but
+    ///   OpenMLS rejected its contents (cipher suite mismatch,
+    ///   schema drift on storage upgrade, …).
+    ///
+    /// # Errors
+    ///
+    /// Any `MlsGroup::load` failure surfaces as
+    /// [`Error::Group`] with the underlying OpenMLS message
+    /// preserved.
+    pub fn load(identity: &Identity, group_id: &[u8]) -> Result<Option<Self>> {
+        use openmls::group::GroupId;
+        let id = GroupId::from_slice(group_id);
+        let loaded = MlsGroup::load(identity.provider.storage(), &id)
+            .map_err(|e| Error::Group(format!("load: {e:?}")))?;
+        Ok(loaded.map(|inner| Self { inner }))
+    }
 }
 
 /// Encode any [`MlsMessageOut`] to its TLS wire form.
