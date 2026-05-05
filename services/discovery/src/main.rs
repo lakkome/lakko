@@ -42,9 +42,12 @@
 //! - `POST   /discovery/oprf`      — apply server static `K` to a blinded element
 //! - `POST   /discovery/register`  — bind OPRF-hashed username to account_id
 //! - `POST   /discovery/lookup`    — resolve OPRF-hashed username → account_id
+//! - `POST   /discovery/identity`           — upsert public identity bundle (Phase 1.16d3a)
+//! - `GET    /discovery/identity/{acct}`    — fetch public identity bundle (Phase 1.16d3a)
 
 #![forbid(unsafe_code)]
 
+mod identity_bundle;
 mod oprf;
 mod pow;
 mod registry;
@@ -156,6 +159,11 @@ pub(crate) fn build_app(state: AppState) -> Router {
         .route("/discovery/oprf", post(oprf::evaluate))
         .route("/discovery/register", post(registry::register))
         .route("/discovery/lookup", post(registry::lookup))
+        .route("/discovery/identity", post(identity_bundle::upload))
+        .route(
+            "/discovery/identity/{account_id}",
+            get(identity_bundle::fetch),
+        )
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
