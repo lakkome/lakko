@@ -81,6 +81,13 @@ export interface IncomingContactRequest {
   /** Sender's Ed25519 identity public key (32 bytes). The
    *  signature on the request was verified against this. */
   fromPubkey: Uint8Array;
+  /** Sender's `account_id` (16-byte UUIDv7). Present on every
+   *  v2 envelope (i.e. anything composed by 1.16e3b+ clients);
+   *  `null` for legacy v1 envelopes — the Accept-driven group
+   *  creation path requires this and surfaces a "legacy
+   *  request, please ask the sender to upgrade" UX when it's
+   *  missing. */
+  fromAccountId: Uint8Array | null;
   /** Sender's per-recipient pseudonym (32 bytes). UI doesn't
    *  display this directly; carry it forward in case future
    *  ContactAck flows need it. */
@@ -263,8 +270,12 @@ export class ContactsClient {
     const validAfterMs = BigInt(Date.now());
     let wireBytes: Uint8Array;
     try {
+      // 1.16e3b: pass our own account_id so the receiver can
+      // drive Accept-side group creation without a separate
+      // reverse-lookup round-trip.
       wireBytes = wasm.ContactRequest.compose(
         senderSigningSeed,
+        identity.accountId,
         recipientX25519Pub,
         senderPseudonym,
         validAfterMs,
@@ -446,11 +457,18 @@ export class ContactsClient {
         );
       }
 
+      // `fromAccountId` is `Uint8Array | undefined` on the
+      // wasm-bindgen surface — normalise to `null` for the
+      // discriminated TS API (the UI distinguishes
+      // present-but-empty from absent).
+      const fromAccountId =
+        parsed.fromAccountId === undefined ? null : parsed.fromAccountId;
       events.push({
         kind: "contact-request",
         request: {
           messageId: message.id,
           fromPubkey: parsed.fromPubkey,
+          fromAccountId,
           fromPseudonym: parsed.fromPseudonym,
           validAfterMs: parsed.validAfterMs,
           intro,

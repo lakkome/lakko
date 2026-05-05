@@ -61,4 +61,4 @@ pub mod request;
 
 pub use error::{ContactError, Result};
 pub use pseudonym::{Direction, IdentityPseudonym, PerRelationship, StrangerInbox, PSEUDONYM_LEN};
-pub use request::{compose, decode_and_verify, open_envelope, ContactRequest};
+pub use request::{compose, decode_and_verify, open_envelope, ContactRequest, ACCOUNT_ID_LEN};

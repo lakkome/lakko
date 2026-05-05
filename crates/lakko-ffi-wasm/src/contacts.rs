@@ -185,6 +185,7 @@ impl ContactRequest {
     #[wasm_bindgen]
     pub fn compose(
         sender_signing_seed: &[u8],
+        sender_account_id: &[u8],
         recipient_x25519_pub: &[u8],
         from_pseudonym: &[u8],
         valid_after_ms: u64,
@@ -196,6 +197,15 @@ impl ContactRequest {
         let mut seed = [0u8; 32];
         seed.copy_from_slice(sender_signing_seed);
         let signing = SigningKey::from_seed(&seed);
+
+        if sender_account_id.len() != lakko_contacts::ACCOUNT_ID_LEN {
+            return Err(JsError::new(&format!(
+                "senderAccountId must be {} bytes",
+                lakko_contacts::ACCOUNT_ID_LEN,
+            )));
+        }
+        let mut acct = [0u8; lakko_contacts::ACCOUNT_ID_LEN];
+        acct.copy_from_slice(sender_account_id);
 
         if recipient_x25519_pub.len() != PUBLIC_KEY_LEN {
             return Err(JsError::new(&format!(
@@ -210,6 +220,7 @@ impl ContactRequest {
 
         rust_compose(
             &signing,
+            &acct,
             &recipient_pub,
             pseudonym,
             valid_after_ms,
@@ -230,6 +241,15 @@ impl ContactRequest {
     #[wasm_bindgen(getter, js_name = fromPubkey)]
     pub fn from_pubkey(&self) -> Vec<u8> {
         self.inner.from_pubkey.to_bytes().to_vec()
+    }
+
+    /// Sender's `account_id` (16-byte UUIDv7) — present for v2
+    /// envelopes, `null`/`undefined` for legacy v1 envelopes.
+    /// `Phase 1.16e3b` always sends v2; v1 surfaces only when
+    /// the sender pre-dates the deployment upgrade.
+    #[wasm_bindgen(getter, js_name = fromAccountId)]
+    pub fn from_account_id(&self) -> Option<Vec<u8>> {
+        self.inner.from_account_id.map(|a| a.to_vec())
     }
 
     /// Per-recipient pseudonym chosen by the sender (32 bytes).
@@ -293,12 +313,14 @@ mod tests {
     #[test]
     fn contact_request_roundtrip_happy_path() {
         let sender_seed = [7u8; 32];
+        let sender_account_id = [0x77u8; 16];
         let recipient_x25519 = X25519SecretKey::from_bytes([0xCD; 32]);
         let recipient_pub = recipient_x25519.public_key().to_bytes();
         let pseudonym = [0xAA; 32];
 
         let wire = ContactRequest::compose(
             &sender_seed,
+            &sender_account_id,
             &recipient_pub,
             &pseudonym,
             1_000_000,
@@ -309,6 +331,7 @@ mod tests {
         let req = ContactRequest::decode_and_verify(&wire).unwrap();
         assert_eq!(req.from_pseudonym(), pseudonym.to_vec());
         assert_eq!(req.valid_after_ms(), 1_000_000);
+        assert_eq!(req.from_account_id(), Some(sender_account_id.to_vec()));
 
         let priv_bytes = recipient_x25519.to_bytes();
         let plaintext = req.open_envelope(&priv_bytes).unwrap();

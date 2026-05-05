@@ -22,17 +22,33 @@
 //! 3. Opens the sealed envelope with his identity X25519 private key.
 //! 4. Surfaces the request to UI: Accept / Decline / Block / Ignore.
 //!
-//! ## Wire format (manual codec — frozen at v1)
+//! ## Wire format (manual codec)
+//!
+//! **v2** (current — Phase 1.16e3b):
 //!
 //! ```text
-//! u8           schema version (currently 1)
+//! u8           schema version (= 2)
 //! [32 bytes]   from_pubkey                           — Ed25519 verifying key
+//! [16 bytes]   from_account_id                       — sender's UUIDv7 (v2 only)
 //! [32 bytes]   from_pseudonym                        — fresh per-recipient pseudonym
 //! u64be        valid_after_ms                        — UNIX millis; reject if too old
 //! u32be        sealed_envelope length
 //! [..]         sealed_envelope bytes
 //! [64 bytes]   signature                             — Ed25519 over the prefix above
 //! ```
+//!
+//! **v1** (legacy — accepted on receive only): identical to v2
+//! minus the 16-byte `from_account_id` field. Receivers decode
+//! either version; the resulting [`ContactRequest`] carries
+//! `from_account_id: None` for v1 inputs.
+//!
+//! The `from_account_id` extension lets the receiver drive the
+//! Accept-side of the group-creation handshake (Phase 1.16e3b):
+//! the receiver needs `account_id` to fetch the sender's
+//! KeyPackage, but a v1 ContactRequest only carries the Ed25519
+//! pubkey. Bumping to v2 closes the gap. Senders are always v2;
+//! v1 acceptance is purely a backwards-compat hatch for
+//! envelopes already in flight when a deployment upgrades.
 //!
 //! Signature covers everything from the schema-version byte through
 //! the sealed-envelope bytes — i.e. the entire encoding except the
@@ -57,7 +73,18 @@ use crate::envelope;
 use crate::error::{ContactError, Result};
 use crate::pseudonym::{decode_pseudonym, PSEUDONYM_LEN};
 
-const SCHEMA_VERSION: u8 = 1;
+/// Current `compose`d schema version.
+const SCHEMA_VERSION: u8 = 2;
+
+/// Legacy schema version. Receivers still decode it for
+/// backwards-compat with envelopes in-flight at the moment of a
+/// rolling upgrade; no caller in this codebase should produce v1
+/// any more.
+const LEGACY_SCHEMA_VERSION_V1: u8 = 1;
+
+/// `from_account_id` length in bytes (UUIDv7 raw, matches
+/// `services/auth.accounts.id` and the rest of the Lakko stack).
+pub const ACCOUNT_ID_LEN: usize = 16;
 
 /// AAD bound to the sealed envelope. Domain-separates this envelope
 /// from any future non-contact-request use of the same primitive.
@@ -71,6 +98,13 @@ const ENVELOPE_AAD: &[u8] = b"lakko-contacts/v1/contact-request";
 pub struct ContactRequest {
     /// Sender's long-term Ed25519 identity public key.
     pub from_pubkey: VerifyingKey,
+    /// Sender's `account_id` (UUIDv7 raw bytes). Present for
+    /// v2 wire envelopes, `None` for v1. v1 acceptance exists
+    /// purely for backwards-compat — see the file-level
+    /// docstring; new senders always supply this so the
+    /// receiver can drive Accept-side group creation
+    /// (Phase 1.16e3b).
+    pub from_account_id: Option<[u8; ACCOUNT_ID_LEN]>,
     /// Fresh per-recipient pseudonym chosen by the sender. Server
     /// uses it for routing; recipient stores it as the canonical
     /// pseudonym for any reply they want to send before the contact
@@ -100,6 +134,7 @@ pub struct ContactRequest {
 /// impossible for valid inputs).
 pub fn compose(
     sender_signing: &SigningKey,
+    sender_account_id: &[u8; ACCOUNT_ID_LEN],
     recipient_x25519_pub: &X25519PublicKey,
     from_pseudonym: [u8; PSEUDONYM_LEN],
     valid_after_ms: u64,
@@ -110,6 +145,7 @@ pub fn compose(
     let from_pubkey = sender_signing.verifying_key();
     let mut wire = encode_signing_prefix(
         &from_pubkey,
+        sender_account_id,
         &from_pseudonym,
         valid_after_ms,
         &sealed_envelope,
@@ -135,13 +171,24 @@ pub fn decode_and_verify(wire: &[u8]) -> Result<ContactRequest> {
     let mut cur = wire;
 
     let version = take_u8(&mut cur)?;
-    if version != SCHEMA_VERSION {
+    if version != SCHEMA_VERSION && version != LEGACY_SCHEMA_VERSION_V1 {
         return Err(ContactError::InvalidEncoding(format!(
             "unsupported ContactRequest schema version {version}",
         )));
     }
     let from_pubkey_bytes = take_n(&mut cur, PUBLIC_KEY_LEN)?;
     let from_pubkey = VerifyingKey::from_bytes(from_pubkey_bytes).map_err(ContactError::Crypto)?;
+
+    // v2 inserts the 16-byte sender account_id between
+    // `from_pubkey` and `from_pseudonym`. v1 omits it.
+    let from_account_id: Option<[u8; ACCOUNT_ID_LEN]> = if version == SCHEMA_VERSION {
+        let mut buf = [0u8; ACCOUNT_ID_LEN];
+        buf.copy_from_slice(take_n(&mut cur, ACCOUNT_ID_LEN)?);
+        Some(buf)
+    } else {
+        None
+    };
+
     let from_pseudonym = decode_pseudonym(take_n(&mut cur, PSEUDONYM_LEN)?)?;
     let valid_after_ms = u64::from_be_bytes(take_n(&mut cur, 8)?.try_into().unwrap());
     let sealed_len = u32::from_be_bytes(take_n(&mut cur, 4)?.try_into().unwrap()) as usize;
@@ -157,18 +204,28 @@ pub fn decode_and_verify(wire: &[u8]) -> Result<ContactRequest> {
     }
 
     // Re-encode the prefix exactly as the signer did and verify.
-    let signed_prefix = encode_signing_prefix(
-        &from_pubkey,
-        &from_pseudonym,
-        valid_after_ms,
-        &sealed_envelope,
-    );
+    let signed_prefix = match from_account_id {
+        Some(ref acct) => encode_signing_prefix(
+            &from_pubkey,
+            acct,
+            &from_pseudonym,
+            valid_after_ms,
+            &sealed_envelope,
+        ),
+        None => encode_signing_prefix_v1(
+            &from_pubkey,
+            &from_pseudonym,
+            valid_after_ms,
+            &sealed_envelope,
+        ),
+    };
     from_pubkey
         .verify(&signed_prefix, &signature)
         .map_err(|_| ContactError::BadSignature)?;
 
     Ok(ContactRequest {
         from_pubkey,
+        from_account_id,
         from_pseudonym,
         valid_after_ms,
         sealed_envelope,
@@ -192,9 +249,36 @@ pub fn open_envelope(req: &ContactRequest, recipient_priv: &X25519SecretKey) -> 
 // Codec helpers
 // ============================================================================
 
-/// Encode the bytes that get signed: everything except the trailing
-/// signature itself.
+/// Encode the bytes that get signed for the current (v2) wire
+/// format: everything except the trailing signature itself.
 fn encode_signing_prefix(
+    from_pubkey: &VerifyingKey,
+    from_account_id: &[u8; ACCOUNT_ID_LEN],
+    from_pseudonym: &[u8; PSEUDONYM_LEN],
+    valid_after_ms: u64,
+    sealed_envelope: &[u8],
+) -> Vec<u8> {
+    let sealed_len = u32::try_from(sealed_envelope.len())
+        .expect("sealed envelope under u32::MAX bytes — caller invariant");
+    let mut out = Vec::with_capacity(
+        1 + PUBLIC_KEY_LEN + ACCOUNT_ID_LEN + PSEUDONYM_LEN + 8 + 4 + sealed_envelope.len(),
+    );
+    out.push(SCHEMA_VERSION);
+    out.extend_from_slice(&from_pubkey.to_bytes());
+    out.extend_from_slice(from_account_id);
+    out.extend_from_slice(from_pseudonym);
+    out.extend_from_slice(&valid_after_ms.to_be_bytes());
+    out.extend_from_slice(&sealed_len.to_be_bytes());
+    out.extend_from_slice(sealed_envelope);
+    out
+}
+
+/// Re-encode a legacy v1 signing prefix for signature
+/// verification on receive. Mirrors the pre-1.16e3b encoding
+/// — used only by `decode_and_verify` when the wire byte is
+/// `LEGACY_SCHEMA_VERSION_V1`. No `compose` path produces v1
+/// any more.
+fn encode_signing_prefix_v1(
     from_pubkey: &VerifyingKey,
     from_pseudonym: &[u8; PSEUDONYM_LEN],
     valid_after_ms: u64,
@@ -204,7 +288,7 @@ fn encode_signing_prefix(
         .expect("sealed envelope under u32::MAX bytes — caller invariant");
     let mut out =
         Vec::with_capacity(1 + PUBLIC_KEY_LEN + PSEUDONYM_LEN + 8 + 4 + sealed_envelope.len());
-    out.push(SCHEMA_VERSION);
+    out.push(LEGACY_SCHEMA_VERSION_V1);
     out.extend_from_slice(&from_pubkey.to_bytes());
     out.extend_from_slice(from_pseudonym);
     out.extend_from_slice(&valid_after_ms.to_be_bytes());
@@ -244,6 +328,12 @@ mod tests {
         SigningKey::from_seed(&[7u8; 32])
     }
 
+    /// Stable test `account_id`. Real callers pass a real
+    /// UUIDv7; the wire format is byte-agnostic.
+    fn sender_account_id() -> [u8; ACCOUNT_ID_LEN] {
+        [0x77; ACCOUNT_ID_LEN]
+    }
+
     fn recipient_x25519() -> X25519SecretKey {
         // X25519 keypair (separate from the recipient's Ed25519
         // identity key — in practice the client derives one from
@@ -257,15 +347,87 @@ mod tests {
         let bob = recipient_x25519();
         let pseudonym = [0xAA; PSEUDONYM_LEN];
 
-        let wire = compose(&alice, &bob.public_key(), pseudonym, 1_000_000, b"hi bob").unwrap();
+        let wire = compose(
+            &alice,
+            &sender_account_id(),
+            &bob.public_key(),
+            pseudonym,
+            1_000_000,
+            b"hi bob",
+        )
+        .unwrap();
         let req = decode_and_verify(&wire).unwrap();
 
         assert_eq!(req.from_pubkey.to_bytes(), alice.verifying_key().to_bytes());
+        assert_eq!(req.from_account_id, Some(sender_account_id()));
         assert_eq!(req.from_pseudonym, pseudonym);
         assert_eq!(req.valid_after_ms, 1_000_000);
 
         let intro = open_envelope(&req, &bob).unwrap();
         assert_eq!(intro, b"hi bob");
+    }
+
+    /// Phase 1.16e3b: v2 wire layout. `from_account_id` lands
+    /// between `from_pubkey` (offset 1..33) and `from_pseudonym`
+    /// (offset 1+32+16 = 49 in v2). Pin the offset down with a
+    /// direct byte read so a future schema reshuffle surfaces
+    /// here.
+    #[test]
+    fn v2_wire_carries_account_id_at_fixed_offset() {
+        let alice = sender();
+        let bob = recipient_x25519();
+        let acct = [0xA5u8; ACCOUNT_ID_LEN];
+
+        let wire = compose(
+            &alice,
+            &acct,
+            &bob.public_key(),
+            [0u8; PSEUDONYM_LEN],
+            0,
+            b"",
+        )
+        .unwrap();
+
+        // Byte 0: schema version.
+        assert_eq!(wire[0], SCHEMA_VERSION);
+        // Bytes 1..=32: from_pubkey.
+        assert_eq!(
+            &wire[1..=PUBLIC_KEY_LEN],
+            &alice.verifying_key().to_bytes()[..]
+        );
+        // Bytes 33..=48: from_account_id.
+        let acct_start = 1 + PUBLIC_KEY_LEN;
+        let acct_end = acct_start + ACCOUNT_ID_LEN;
+        assert_eq!(&wire[acct_start..acct_end], &acct[..]);
+    }
+
+    /// Phase 1.16e3b: v1 envelopes (no `from_account_id`) still
+    /// decode for backwards-compat. The synthesised v1 wire is
+    /// produced by stripping the schema-version byte and the
+    /// 16-byte account_id from a v2 wire and re-signing under
+    /// the v1 prefix shape.
+    #[test]
+    fn v1_envelopes_still_decode() {
+        let alice = sender();
+        let bob = recipient_x25519();
+        let pseudonym = [0xBBu8; PSEUDONYM_LEN];
+        let valid_after_ms = 12345_u64;
+        let intro = b"legacy hi";
+
+        let sealed_envelope = envelope::seal(&bob.public_key(), ENVELOPE_AAD, intro).unwrap();
+        let from_pubkey = alice.verifying_key();
+        let signed_prefix =
+            encode_signing_prefix_v1(&from_pubkey, &pseudonym, valid_after_ms, &sealed_envelope);
+        let signature = alice.sign(&signed_prefix);
+        let mut wire = signed_prefix;
+        wire.extend_from_slice(&signature.to_bytes());
+
+        let req = decode_and_verify(&wire).unwrap();
+        assert_eq!(req.from_account_id, None);
+        assert_eq!(req.from_pseudonym, pseudonym);
+        assert_eq!(req.valid_after_ms, valid_after_ms);
+        let opened = open_envelope(&req, &bob).unwrap();
+        assert_eq!(opened, intro);
     }
 
     #[test]
@@ -274,7 +436,15 @@ mod tests {
         let bob = recipient_x25519();
         let pseudonym = [0u8; PSEUDONYM_LEN];
 
-        let wire = compose(&alice, &bob.public_key(), pseudonym, 0, b"").unwrap();
+        let wire = compose(
+            &alice,
+            &sender_account_id(),
+            &bob.public_key(),
+            pseudonym,
+            0,
+            b"",
+        )
+        .unwrap();
         let req = decode_and_verify(&wire).unwrap();
         let intro = open_envelope(&req, &bob).unwrap();
         assert_eq!(intro, b"");
@@ -285,8 +455,15 @@ mod tests {
         let alice = sender();
         let bob = recipient_x25519();
 
-        let mut wire =
-            compose(&alice, &bob.public_key(), [0u8; PSEUDONYM_LEN], 0, b"intro").unwrap();
+        let mut wire = compose(
+            &alice,
+            &sender_account_id(),
+            &bob.public_key(),
+            [0u8; PSEUDONYM_LEN],
+            0,
+            b"intro",
+        )
+        .unwrap();
         // Flip a bit in the trailing signature.
         let last = wire.len() - 1;
         wire[last] ^= 0x01;
@@ -301,10 +478,19 @@ mod tests {
         let bob = recipient_x25519();
         let pseudonym = [0xAB; PSEUDONYM_LEN];
 
-        let mut wire = compose(&alice, &bob.public_key(), pseudonym, 0, b"intro").unwrap();
-        // Flip a byte inside the from_pseudonym field (after the
-        // schema-version byte and the 32-byte from_pubkey).
-        wire[1 + PUBLIC_KEY_LEN] ^= 0xFF;
+        let mut wire = compose(
+            &alice,
+            &sender_account_id(),
+            &bob.public_key(),
+            pseudonym,
+            0,
+            b"intro",
+        )
+        .unwrap();
+        // Flip a byte inside the v2 signed prefix. Offset is
+        // schema-version + from_pubkey + from_account_id, i.e.
+        // the first byte of from_pseudonym.
+        wire[1 + PUBLIC_KEY_LEN + ACCOUNT_ID_LEN] ^= 0xFF;
 
         let err = decode_and_verify(&wire).unwrap_err();
         assert!(matches!(err, ContactError::BadSignature));
@@ -316,7 +502,15 @@ mod tests {
         let bob = recipient_x25519();
         let pseudonym = [0u8; PSEUDONYM_LEN];
 
-        let mut wire = compose(&alice, &bob.public_key(), pseudonym, 0, b"secret").unwrap();
+        let mut wire = compose(
+            &alice,
+            &sender_account_id(),
+            &bob.public_key(),
+            pseudonym,
+            0,
+            b"secret",
+        )
+        .unwrap();
         // The signature covers the envelope, so any tamper is
         // signature-detected first. Confirm that.
         let mid = wire.len() / 2;
@@ -333,6 +527,7 @@ mod tests {
 
         let wire = compose(
             &alice,
+            &sender_account_id(),
             &bob.public_key(),
             [0u8; PSEUDONYM_LEN],
             0,
@@ -349,7 +544,15 @@ mod tests {
         let alice = sender();
         let bob = recipient_x25519();
 
-        let mut wire = compose(&alice, &bob.public_key(), [0u8; PSEUDONYM_LEN], 0, b"x").unwrap();
+        let mut wire = compose(
+            &alice,
+            &sender_account_id(),
+            &bob.public_key(),
+            [0u8; PSEUDONYM_LEN],
+            0,
+            b"x",
+        )
+        .unwrap();
         wire[0] = 99;
 
         let err = decode_and_verify(&wire).unwrap_err();
@@ -361,7 +564,15 @@ mod tests {
         let alice = sender();
         let bob = recipient_x25519();
 
-        let wire = compose(&alice, &bob.public_key(), [0u8; PSEUDONYM_LEN], 0, b"x").unwrap();
+        let wire = compose(
+            &alice,
+            &sender_account_id(),
+            &bob.public_key(),
+            [0u8; PSEUDONYM_LEN],
+            0,
+            b"x",
+        )
+        .unwrap();
         let truncated = &wire[..wire.len() - 5];
         let err = decode_and_verify(truncated).unwrap_err();
         assert!(matches!(err, ContactError::InvalidEncoding(_)));
@@ -372,7 +583,15 @@ mod tests {
         let alice = sender();
         let bob = recipient_x25519();
 
-        let mut wire = compose(&alice, &bob.public_key(), [0u8; PSEUDONYM_LEN], 0, b"x").unwrap();
+        let mut wire = compose(
+            &alice,
+            &sender_account_id(),
+            &bob.public_key(),
+            [0u8; PSEUDONYM_LEN],
+            0,
+            b"x",
+        )
+        .unwrap();
         wire.push(0x00);
         let err = decode_and_verify(&wire).unwrap_err();
         assert!(matches!(err, ContactError::InvalidEncoding(_)));
@@ -386,8 +605,24 @@ mod tests {
         let bob = recipient_x25519();
         let pseudonym = [0u8; PSEUDONYM_LEN];
 
-        let w1 = compose(&alice, &bob.public_key(), pseudonym, 0, b"intro").unwrap();
-        let w2 = compose(&alice, &bob.public_key(), pseudonym, 0, b"intro").unwrap();
+        let w1 = compose(
+            &alice,
+            &sender_account_id(),
+            &bob.public_key(),
+            pseudonym,
+            0,
+            b"intro",
+        )
+        .unwrap();
+        let w2 = compose(
+            &alice,
+            &sender_account_id(),
+            &bob.public_key(),
+            pseudonym,
+            0,
+            b"intro",
+        )
+        .unwrap();
         assert_ne!(w1, w2);
     }
 }

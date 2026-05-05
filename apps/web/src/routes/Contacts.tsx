@@ -226,7 +226,11 @@ function ConnectedContacts(props: ConnectedContactsProps): JSX.Element {
     setActiveGroups([...activeGroups(), g]);
   }
 
-  function onAccept(req: IncomingContactRequest): void {
+  async function onAccept(req: IncomingContactRequest): Promise<void> {
+    // Always upsert into the accepted list first — the user has
+    // explicitly trusted this peer; the group-creation step
+    // below is best-effort and a network blip shouldn't undo
+    // the acceptance.
     const contact: AcceptedContact = {
       signaturePubkeyB64: base64Encode(req.fromPubkey),
       displayName: `@${fingerprintShort(req.fromPubkey)}`,
@@ -234,6 +238,31 @@ function ConnectedContacts(props: ConnectedContactsProps): JSX.Element {
     };
     setAccepted(upsertAccepted(contact));
     setPending(pending().filter((r) => r.messageId !== req.messageId));
+
+    // 1.16e3b: Accept-driven group creation. Requires v2 wire
+    // format — surface a clean error for legacy senders.
+    if (req.fromAccountId === null) {
+      setPollError(
+        "this is a legacy v1 contact request — group creation " +
+          "needs the sender to upgrade to a 1.16e3b+ client",
+      );
+      return;
+    }
+    try {
+      const result = await props.client.startGroupWith(
+        requireIdentity(),
+        req.fromAccountId,
+        req.fromPubkey,
+      );
+      addActiveGroup({
+        kind: "started",
+        peerUsername: `@${fingerprintShort(req.fromPubkey)}`,
+        group: result.group,
+      });
+    } catch (err) {
+      // Don't unwind the acceptance; just surface the error.
+      setPollError(formatError(err));
+    }
   }
 
   function onDecline(req: IncomingContactRequest): void {
@@ -512,7 +541,9 @@ function PendingPanel(props: PendingPanelProps): JSX.Element {
                   <button
                     class="primary"
                     type="button"
-                    onClick={() => props.onAccept(req)}
+                    onClick={() => {
+                      void props.onAccept(req);
+                    }}
                   >
                     Accept
                   </button>
