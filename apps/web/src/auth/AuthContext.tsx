@@ -59,6 +59,7 @@ import {
   DiscoveryHttpError,
 } from "../discovery/client";
 import { clearAll as clearContactsStore } from "../contacts/local-store";
+import { useChats } from "../chat/ChatContext";
 
 /** Account record exposed to the UI when a session is active. */
 export interface SessionAccount {
@@ -233,6 +234,9 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
 
   const client = new AuthClient();
   const discovery = new DiscoveryClient();
+  // 1.16e5: drop active groups on logout/forgetDevice so MLS
+  // state doesn't bleed across user sessions on the same tab.
+  const chats = useChats();
 
   onMount(() => {
     void hydrateFromStorage().then(setState);
@@ -440,6 +444,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       // in-memory Identity secrets — the user just signed out.
       const cached = loadPersisted();
       setIdentitySecrets(null);
+      chats.clear();
       setState({
         kind: "anon",
         ...(cached !== null ? { cachedUsername: cached.username } : {}),
@@ -465,6 +470,8 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       // "forget device" should leave nothing per-account
       // behind on this browser.
       clearContactsStore();
+      // 1.16e5: drop active MLS group state.
+      chats.clear();
       setIdentitySecrets(null);
       setState({ kind: "anon" });
     },

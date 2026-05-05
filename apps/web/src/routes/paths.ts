@@ -42,12 +42,15 @@ export const paths = {
    */
   dev: "/dev",
   /**
-   * Build a chat URL for a specific conversation id. The id format
-   * is opaque to the router — at the moment we use the MLS group
-   * pseudonym hex; 1.16e revisits this when chat lands.
+   * Build a chat URL for a specific MLS group. `groupIdB64Url`
+   * MUST be a URL-safe-base64-no-pad encoding of the group's
+   * `groupId` bytes (use `base64UrlEncodeNoPad` from
+   * `auth/account-id.ts` to compute it). The router segment is
+   * `:id` — the route handler decodes it and looks up the live
+   * group reference in the `<ChatProvider>` registry.
    */
-  chat(id: string): string {
-    return `/chat/${encodeURIComponent(id)}`;
+  chat(groupIdB64Url: string): string {
+    return `/chat/${groupIdB64Url}`;
   },
 } as const;
 

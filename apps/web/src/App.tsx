@@ -22,11 +22,14 @@
 import type { Component } from "solid-js";
 import { Router } from "@solidjs/router";
 import { AuthProvider } from "./auth/AuthContext";
+import { ChatProvider } from "./chat/ChatContext";
 import { routes } from "./routes/routes";
 
 const App: Component = () => (
   <AuthProvider>
-    <Router>{routes}</Router>
+    <ChatProvider>
+      <Router>{routes}</Router>
+    </ChatProvider>
   </AuthProvider>
 );
 

@@ -24,13 +24,13 @@
  * will fail at the WASM boundary.
  */
 import { createMemo, createSignal, For, Show, type JSX } from "solid-js";
+import { A } from "@solidjs/router";
 import { useAuth } from "../auth/AuthContext";
-import { base64Encode } from "../auth/account-id";
+import { base64Encode, base64UrlEncodeNoPad } from "../auth/account-id";
 import { ContactsClient, ContactsError } from "../contacts/client";
 import type { IncomingContactRequest, SendResult } from "../contacts/client";
-import type { Group as WasmGroup } from "../../wasm/lakko_ffi_wasm";
-import { ChatClient } from "../chat/client";
-import type { IncomingChatEvent } from "../chat/client";
+import { useChats, type ActiveGroup } from "../chat/ChatContext";
+import { paths } from "./paths";
 import {
   fingerprintShort,
   loadAccepted,
@@ -80,6 +80,7 @@ interface ConnectedContactsProps {
 
 function ConnectedContacts(props: ConnectedContactsProps): JSX.Element {
   const auth = useAuth();
+  const chats = useChats();
   // The Show wrapper above guarantees identitySecrets() is
   // non-null on every read inside this subtree, but TS doesn't
   // narrow across component boundaries — a tiny accessor that
@@ -141,9 +142,8 @@ function ConnectedContacts(props: ConnectedContactsProps): JSX.Element {
         requireIdentity(),
         searchInput(),
       );
-      addActiveGroup({
-        kind: "started",
-        peerUsername: result.recipientUsername,
+      chats.add({
+        label: `Group with @${result.recipientUsername}`,
         group: result.group,
       });
       setSendNotice(
@@ -193,9 +193,8 @@ function ConnectedContacts(props: ConnectedContactsProps): JSX.Element {
               requireIdentity(),
               ev.welcome.welcomeBytes,
             );
-            addActiveGroup({
-              kind: "joined",
-              welcomeMessageId: ev.welcome.messageId,
+            chats.add({
+              label: `Joined group (Welcome ${ev.welcome.messageId})`,
               group,
             });
           } catch (err) {
@@ -217,16 +216,9 @@ function ConnectedContacts(props: ConnectedContactsProps): JSX.Element {
   }
 
   // ---- active MLS groups ---------------------------------------
-  // In-memory only — Phase-1 doesn't persist MLS state. A
-  // page reload drops every group; the peer still has theirs.
-  // See ROADMAP 1.16e6 for the persistence sub-sprint.
-  type ActiveGroup =
-    | { kind: "started"; peerUsername: string; group: WasmGroup }
-    | { kind: "joined"; welcomeMessageId: number; group: WasmGroup };
-  const [activeGroups, setActiveGroups] = createSignal<ActiveGroup[]>([]);
-  function addActiveGroup(g: ActiveGroup): void {
-    setActiveGroups([...activeGroups(), g]);
-  }
+  // Lifted into the global `<ChatProvider>` (1.16e5) so the
+  // `/chat/:id` route can resolve the URL slug to a live
+  // group. In-memory only — Phase-1 doesn't persist MLS state.
 
   async function onAccept(req: IncomingContactRequest): Promise<void> {
     // Always upsert into the accepted list first — the user has
@@ -256,9 +248,8 @@ function ConnectedContacts(props: ConnectedContactsProps): JSX.Element {
         req.fromAccountId,
         req.fromPubkey,
       );
-      addActiveGroup({
-        kind: "started",
-        peerUsername: `@${fingerprintShort(req.fromPubkey)}`,
+      chats.add({
+        label: `Group with @${fingerprintShort(req.fromPubkey)}`,
         group: result.group,
       });
     } catch (err) {
@@ -312,10 +303,7 @@ function ConnectedContacts(props: ConnectedContactsProps): JSX.Element {
         onDecline={onDecline}
       />
 
-      <ActiveGroupsPanel
-        groups={activeGroups}
-        identity={requireIdentity}
-      />
+      <ActiveGroupsPanel groups={chats.groups} />
 
       <AcceptedPanel
         accepted={accepted}
@@ -395,18 +383,8 @@ function SendPanel(props: SendPanelProps): JSX.Element {
   );
 }
 
-interface ActiveGroupEntry {
-  readonly kind: "started" | "joined";
-  readonly peerUsername?: string;
-  readonly welcomeMessageId?: number;
-  readonly group: WasmGroup;
-}
-
 function ActiveGroupsPanel(props: {
-  groups: () => readonly ActiveGroupEntry[];
-  identity: () => NonNullable<
-    ReturnType<ReturnType<typeof useAuth>["identitySecrets"]>
-  >;
+  groups: () => readonly ActiveGroup[];
 }): JSX.Element {
   return (
     <section style={panelStyle()}>
@@ -437,250 +415,46 @@ function ActiveGroupsPanel(props: {
       >
         <ul style={listStyle()}>
           <For each={props.groups()}>
-            {(g) => <ActiveGroupRow group={g} identity={props.identity} />}
+            {(g) => (
+              <li
+                style={{
+                  ...rowStyle(),
+                  "align-items": "center",
+                }}
+              >
+                <div style={{ flex: 1 }}>
+                  <strong>{g.label}</strong>
+                  <div
+                    style={{
+                      color: "var(--surface-muted)",
+                      "font-size": "0.85rem",
+                    }}
+                  >
+                    {g.group.memberCount} member
+                    {g.group.memberCount === 1 ? "" : "s"} · seat #
+                    {g.group.ownLeafIndex}
+                  </div>
+                </div>
+                <A
+                  href={paths.chat(
+                    base64UrlEncodeNoPad(g.group.groupId),
+                  )}
+                  style={{
+                    padding: "0.4rem 0.8rem",
+                    background: "var(--accent)",
+                    color: "var(--accent-fg)",
+                    "border-radius": "var(--radius-sm)",
+                    "text-decoration": "none",
+                  }}
+                >
+                  Open chat
+                </A>
+              </li>
+            )}
           </For>
         </ul>
       </Show>
     </section>
-  );
-}
-
-function ActiveGroupRow(props: {
-  group: ActiveGroupEntry;
-  identity: () => NonNullable<
-    ReturnType<ReturnType<typeof useAuth>["identitySecrets"]>
-  >;
-}): JSX.Element {
-  const [open, setOpen] = createSignal(false);
-  const title = (): string =>
-    props.group.kind === "started"
-      ? `Group with ${props.group.peerUsername ?? "?"}`
-      : `Joined group (Welcome ${props.group.welcomeMessageId})`;
-  return (
-    <li style={{ ...rowStyle(), "flex-direction": "column", gap: "0.5rem" }}>
-      <div
-        style={{
-          display: "flex",
-          "align-items": "center",
-          gap: "0.75rem",
-          width: "100%",
-        }}
-      >
-        <div style={{ flex: 1 }}>
-          <strong>{title()}</strong>
-          <div
-            style={{
-              color: "var(--surface-muted)",
-              "font-size": "0.85rem",
-            }}
-          >
-            {props.group.group.memberCount} member
-            {props.group.group.memberCount === 1 ? "" : "s"} · seat #
-            {props.group.group.ownLeafIndex}
-          </div>
-        </div>
-        <button type="button" onClick={() => setOpen(!open())}>
-          {open() ? "Close chat" : "Open chat"}
-        </button>
-      </div>
-      <Show when={open()}>
-        <ChatPane group={props.group.group} identity={props.identity} />
-      </Show>
-    </li>
-  );
-}
-
-function ChatPane(props: {
-  group: WasmGroup;
-  identity: () => NonNullable<
-    ReturnType<ReturnType<typeof useAuth>["identitySecrets"]>
-  >;
-}): JSX.Element {
-  const chat = new ChatClient();
-
-  const [history, setHistory] = createSignal<IncomingChatEvent[]>([]);
-  const [cursor, setCursor] = createSignal(0);
-  const [input, setInput] = createSignal("");
-  const [busy, setBusy] = createSignal(false);
-  const [error, setError] = createSignal<string | null>(null);
-
-  async function refresh(): Promise<void> {
-    setError(null);
-    setBusy(true);
-    try {
-      const result = await chat.pollMessages(
-        props.identity(),
-        props.group,
-        cursor(),
-      );
-      if (result.events.length > 0) {
-        // De-dup by messageId — multiple refreshes on the same
-        // cursor are idempotent.
-        const seen = new Set(history().map((e) => e.messageId));
-        const fresh = result.events.filter((e) => !seen.has(e.messageId));
-        if (fresh.length > 0) {
-          setHistory([...history(), ...fresh]);
-        }
-      }
-      setCursor(result.cursor);
-    } catch (err) {
-      setError(formatError(err));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function onSend(e: SubmitEvent): Promise<void> {
-    e.preventDefault();
-    const text = input();
-    if (text.length === 0) return;
-    setError(null);
-    setBusy(true);
-    try {
-      const result = await chat.sendMessage(
-        props.identity(),
-        props.group,
-        new TextEncoder().encode(text),
-      );
-      // Optimistically render — the receive side dedupes on
-      // messageId, so even if a refresh later returns this
-      // entry it'll be filtered.
-      setHistory([
-        ...history(),
-        {
-          kind: "application",
-          messageId: result.messageId,
-          plaintext: text,
-          createdAt: result.createdAt,
-        },
-      ]);
-      setInput("");
-    } catch (err) {
-      setError(formatError(err));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  return (
-    <div
-      style={{
-        width: "100%",
-        background: "var(--surface-bg)",
-        border: "1px solid var(--surface-border)",
-        "border-radius": "var(--radius-sm)",
-        padding: "0.5rem 0.75rem",
-        display: "flex",
-        "flex-direction": "column",
-        gap: "0.5rem",
-      }}
-    >
-      <header
-        style={{
-          display: "flex",
-          "align-items": "center",
-          "justify-content": "space-between",
-        }}
-      >
-        <strong style={{ "font-size": "0.9rem" }}>Timeline</strong>
-        <button
-          type="button"
-          onClick={() => {
-            void refresh();
-          }}
-          disabled={busy()}
-        >
-          {busy() ? "Refreshing…" : "Refresh"}
-        </button>
-      </header>
-      {error() !== null && <div class="form-error">{error()}</div>}
-      <Show
-        when={history().length > 0}
-        fallback={
-          <p
-            style={{
-              color: "var(--surface-muted)",
-              "font-size": "0.85rem",
-              margin: 0,
-            }}
-          >
-            No messages yet. Send the first one below or click Refresh
-            after the peer sends.
-          </p>
-        }
-      >
-        <ol
-          style={{
-            "list-style": "none",
-            padding: 0,
-            margin: 0,
-            display: "flex",
-            "flex-direction": "column",
-            gap: "0.25rem",
-            "max-height": "16rem",
-            "overflow-y": "auto",
-          }}
-        >
-          <For each={history()}>
-            {(ev) =>
-              ev.kind === "application" ? (
-                <li
-                  style={{
-                    padding: "0.4rem 0.6rem",
-                    background: "var(--surface-elevated)",
-                    border: "1px solid var(--surface-border)",
-                    "border-radius": "var(--radius-sm)",
-                  }}
-                >
-                  <div style={{ "white-space": "pre-wrap" }}>{ev.plaintext}</div>
-                  <div
-                    style={{
-                      color: "var(--surface-muted)",
-                      "font-size": "0.75rem",
-                      "margin-top": "0.2rem",
-                    }}
-                  >
-                    #{ev.messageId} · {ev.createdAt}
-                  </div>
-                </li>
-              ) : (
-                <li
-                  style={{
-                    "font-size": "0.8rem",
-                    color: "var(--surface-muted)",
-                    "font-style": "italic",
-                    padding: "0.2rem 0.6rem",
-                  }}
-                >
-                  · {ev.systemKind} #{ev.messageId} ·
-                </li>
-              )
-            }
-          </For>
-        </ol>
-      </Show>
-      <form
-        onSubmit={onSend}
-        style={{ display: "flex", gap: "0.5rem", "margin-top": "0.25rem" }}
-      >
-        <input
-          type="text"
-          placeholder="Message"
-          autocomplete="off"
-          value={input()}
-          onInput={(e) => setInput(e.currentTarget.value)}
-          disabled={busy()}
-          style={{ flex: 1 }}
-        />
-        <button
-          class="primary"
-          type="submit"
-          disabled={busy() || input().length === 0}
-        >
-          Send
-        </button>
-      </form>
-    </div>
   );
 }
 
