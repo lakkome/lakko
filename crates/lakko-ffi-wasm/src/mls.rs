@@ -104,6 +104,33 @@ impl Identity {
         self.inner.ed25519_seed_bytes().to_vec()
     }
 
+    /// Serialise the OpenMLS provider's storage to opaque
+    /// bytes (Phase 1.16e6b). Pair with
+    /// [`Identity::restoreStorage`](Self::restore_storage)
+    /// to round-trip MLS state across a page reload.
+    ///
+    /// The bytes are opaque to the JS caller — the only
+    /// supported operation is feeding them back through
+    /// `restoreStorage` on a fresh `Identity` derived from the
+    /// same seed. apps/web wraps the snapshot under the device
+    /// root key (AES-256-GCM, 1.16c3c2) before stashing in
+    /// IndexedDB so the on-disk bytes can't be lifted by
+    /// page-level JavaScript.
+    #[wasm_bindgen(js_name = snapshotStorage)]
+    pub fn snapshot_storage(&self) -> Result<Vec<u8>, JsError> {
+        self.inner.snapshot_storage().map_err(mls_err)
+    }
+
+    /// Replace this identity's MLS provider storage with the
+    /// contents of a snapshot produced by `snapshotStorage`
+    /// on a previous run. **Replaces** rather than merges —
+    /// see the Rust-side docstring for the seed-pairing
+    /// requirement.
+    #[wasm_bindgen(js_name = restoreStorage)]
+    pub fn restore_storage(&self, snapshot: &[u8]) -> Result<(), JsError> {
+        self.inner.restore_storage(snapshot).map_err(mls_err)
+    }
+
     /// Create a fresh KeyPackage in TLS wire form.
     #[wasm_bindgen(js_name = createKeyPackage)]
     pub fn create_key_package(&self) -> Result<Vec<u8>, JsError> {
@@ -227,6 +254,27 @@ impl Group {
         Ok(Self {
             inner: Mutex::new(inner),
         })
+    }
+
+    /// Load a previously persisted MLS group from `identity`'s
+    /// provider storage (Phase 1.16e6b). Pair with
+    /// [`Identity::restoreStorage`](Identity::restore_storage)
+    /// — call `restoreStorage` first to seed the provider, then
+    /// `Group.load` for each known group_id.
+    ///
+    /// Returns `undefined` (`Option<Group> -> None`) when
+    /// the storage doesn't carry a row for `group_id` —
+    /// distinct from a thrown error so the JS side can
+    /// distinguish "no group with that id" from "corrupt
+    /// storage".
+    #[wasm_bindgen(js_name = load)]
+    pub fn load(identity: &Identity, group_id: &[u8]) -> Result<Option<Group>, JsError> {
+        match MlsGroup::load(&identity.inner, group_id).map_err(mls_err)? {
+            Some(inner) => Ok(Some(Self {
+                inner: Mutex::new(inner),
+            })),
+            None => Ok(None),
+        }
     }
 
     /// Add a member from their published KeyPackage (TLS wire form).
@@ -456,6 +504,52 @@ mod tests {
         let id = Identity::new("alice").unwrap();
         let pk = id.signature_public_key();
         assert_eq!(pk.len(), 32, "Ed25519 public key length");
+    }
+
+    /// Phase 1.16e6b — round-trip a live group through
+    /// `Identity.snapshotStorage` / `Identity.restoreStorage` +
+    /// `Group.load` and confirm the post-restore group reports
+    /// the same `groupId`, `memberCount`, and own leaf index.
+    /// Mirrors the host-only Rust integration test in
+    /// `crates/lakko-mls/tests/end_to_end.rs` — JS-side error
+    /// paths (panics in `JsError::new`) stay in
+    /// `wasm-bindgen-test` per the rest of the FFI suite.
+    #[test]
+    fn snapshot_restore_load_round_trips_a_group() {
+        let seed = [0xE6u8; 64];
+        let alice = Identity::from_seed(&seed).expect("alice");
+        let group = Group::new(&alice).expect("group");
+        let group_id = group.group_id().expect("group_id");
+        let initial_members = group.member_count().expect("count");
+        let initial_leaf = group.own_leaf_index().expect("leaf");
+
+        let snapshot = alice.snapshot_storage().expect("snapshot");
+        assert!(!snapshot.is_empty());
+
+        // Drop the original alice + group entirely; re-derive
+        // alice from the same seed and restore.
+        drop(group);
+        drop(alice);
+
+        let restored_alice = Identity::from_seed(&seed).expect("restored alice");
+        restored_alice.restore_storage(&snapshot).expect("restore");
+
+        let restored_group = Group::load(&restored_alice, &group_id)
+            .expect("load")
+            .expect("group present");
+        assert_eq!(restored_group.group_id().expect("gid"), group_id);
+        assert_eq!(restored_group.member_count().expect("mc"), initial_members);
+        assert_eq!(restored_group.own_leaf_index().expect("li"), initial_leaf);
+    }
+
+    /// `Group.load` returns `None` when no group is persisted
+    /// under that id — the JS side reads `undefined`.
+    #[test]
+    fn group_load_returns_none_for_unknown_id() {
+        let alice = Identity::from_seed(&[0xE7u8; 64]).expect("alice");
+        let arbitrary = [0x99u8; 32];
+        let loaded = Group::load(&alice, &arbitrary).expect("load");
+        assert!(loaded.is_none());
     }
 
     /// Phase 1.16d3b2 — `Identity.fromSeed` is deterministic.
