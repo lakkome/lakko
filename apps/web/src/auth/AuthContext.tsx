@@ -60,6 +60,8 @@ import {
 } from "../discovery/client";
 import { clearAll as clearContactsStore } from "../contacts/local-store";
 import { useChats } from "../chat/ChatContext";
+import { deleteMlsSnapshot } from "../chat/mls-store";
+import type { Identity as WasmIdentity } from "../../wasm/lakko_ffi_wasm";
 
 /** Account record exposed to the UI when a session is active. */
 export interface SessionAccount {
@@ -291,6 +293,16 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       const deviceKey = await deriveDeviceRootKey(result.exportKey, accountIdB64);
       await putDeviceKey(accountIdB64, deviceKey);
 
+      // 1.16e6c1: build the canonical session-wide Identity
+      // before uploading the KeyPackage so the freshly-minted
+      // init/leaf private keys land in the provider we'll
+      // snapshot. ChatProvider holds the reference for the
+      // lifetime of the session and will free() it on
+      // logout/forgetDevice.
+      const wasm = await loadWasm();
+      const canonical = wasm.Identity.fromSeed(result.exportKey);
+      chats.setIdentity(canonical);
+
       // 1.16d3b2: derive the Identity deterministically from the
       // OPAQUE export key, upload its public bundle to the
       // discovery directory. Because Identity::fromSeed is
@@ -298,7 +310,19 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       // future login — the server upserts. We do this BEFORE
       // flipping state so a failure here surfaces as a signup
       // error rather than a half-broken session.
-      await uploadIdentityBundle(discovery, result.accountId, result.exportKey);
+      await uploadIdentityBundle(discovery, result.accountId, canonical);
+
+      // 1.16e6c1: persist the freshly-built provider state
+      // (the just-uploaded KeyPackage's private key material)
+      // so a peer's Welcome can be opened after a reload.
+      // Best-effort — a snapshot failure here shouldn't block
+      // the user from getting into a working session.
+      try {
+        await chats.persistSnapshot(accountIdB64);
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn("initial MLS snapshot failed", err);
+      }
 
       // 1.16d3c: hand off the export key for in-memory use by
       // ContactsClient + similar. Cleared on logout.
@@ -363,17 +387,33 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       await putDeviceKey(accountIdB64, deviceKey);
       savePersisted({ v: 1, accountIdB64, username: resolvedUsername });
 
+      // 1.16e6c1: build the canonical Identity for this session
+      // (see signup() above for the rationale). ChatProvider
+      // free()s any prior canonical Identity automatically.
+      const wasm = await loadWasm();
+      const canonical = wasm.Identity.fromSeed(result.exportKey);
+      chats.setIdentity(canonical);
+
       // 1.16d3b2: refresh the identity bundle on every login.
       // Best-effort — a network blip here shouldn't block the
       // user from getting into a session they already
       // authenticated. The bundle is deterministic, so the
       // next login will retry naturally.
       try {
-        await uploadIdentityBundle(discovery, accountIdBytes, result.exportKey);
+        await uploadIdentityBundle(discovery, accountIdBytes, canonical);
       } catch (err) {
         // Surface as a console warning, not a thrown error.
         // eslint-disable-next-line no-console
         console.warn("identity bundle refresh failed", err);
+      }
+
+      // 1.16e6c1: persist the freshly-uploaded KeyPackage's
+      // private key state. Best-effort.
+      try {
+        await chats.persistSnapshot(accountIdB64);
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn("post-login MLS snapshot failed", err);
       }
 
       // 1.16d3c: stash the export key for ContactsClient.
@@ -417,6 +457,45 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
           cached.accountIdB64,
         );
         await putDeviceKey(cached.accountIdB64, deviceKey);
+
+        // 1.16e6c1: post-recovery the user's password (and so
+        // the export key) has changed, which means any
+        // previously-persisted MLS snapshot was wrapped under
+        // a device key derived from the OLD password and is
+        // now unreadable. Drop it; the user is starting MLS
+        // state fresh on this device. Active groups will
+        // re-bootstrap via the discovery directory's KeyPackage
+        // upserts on the peer's next refresh.
+        try {
+          await deleteMlsSnapshot(cached.accountIdB64);
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.warn("deleteMlsSnapshot during recover failed", err);
+        }
+
+        // 1.16e6c1: build the new canonical Identity from the
+        // rotated export key. ChatProvider free()s the prior
+        // (pre-recovery) Identity if anything was lingering.
+        const canonical = wasm.Identity.fromSeed(result.exportKey);
+        chats.setIdentity(canonical);
+
+        // Re-publish the identity bundle + a fresh KeyPackage
+        // (the recovered Identity has the same long-lived
+        // pubkeys, but the KeyPackage's init key is new and
+        // its private bytes live in the canonical provider).
+        try {
+          await uploadIdentityBundle(discovery, accountIdBytes, canonical);
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.warn("post-recover identity bundle upload failed", err);
+        }
+        try {
+          await chats.persistSnapshot(cached.accountIdB64);
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.warn("post-recover MLS snapshot failed", err);
+        }
+
         // 1.16d3c: stash the new export key so ContactsClient
         // works without a re-login round-trip.
         setIdentitySecrets({
@@ -464,6 +543,18 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
           // Ignore — best-effort wipe; localStorage clear below
           // is still worth running.
         }
+        // 1.16e6c1: drop the encrypted MLS snapshot for this
+        // account. After `deleteDeviceKey` above the snapshot
+        // is unreadable anyway (the wrapping AES-256-GCM key is
+        // gone), but leaving the row behind means a later
+        // signup on the same accountId would surface stale
+        // ciphertext on hydration — clean wipe is the
+        // contract `forgetDevice` advertises.
+        try {
+          await deleteMlsSnapshot(cached.accountIdB64);
+        } catch {
+          // Ignore — same best-effort policy as above.
+        }
       }
       clearPersisted();
       // 1.16d3d: drop the on-device contacts cache too —
@@ -471,6 +562,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       // behind on this browser.
       clearContactsStore();
       // 1.16e5: drop active MLS group state.
+      // 1.16e6c1: also free()s the canonical Identity.
       chats.clear();
       setIdentitySecrets(null);
       setState({ kind: "anon" });
@@ -522,18 +614,24 @@ async function hydrateFromStorage(): Promise<AuthState> {
  * parallel; the calls are independent and the server is
  * idempotent on either side.
  *
- * The Identity instance itself is dropped at the end of the
- * call — its keys are reproducible at any time via the same
- * export key, so we don't keep it in memory beyond the upload.
+ * **Pre-1.16e6c1 footgun fixed.** This used to spin up a
+ * throwaway `Identity.fromSeed(exportKey)` and drop it after
+ * the upload. That worked for the public-key fields (Ed25519
+ * + X25519 are deterministic, so re-derivation reproduces them
+ * byte-for-byte), but `createKeyPackage` mints **new private
+ * key material per call** and writes it into the provider's
+ * storage. Discarding that provider meant any peer who later
+ * sent a Welcome targeting our published KeyPackage would hit
+ * "init key not in keystore" on our side. We now require the
+ * caller to pass the **canonical** Identity that ChatProvider
+ * is holding — so the freshly-generated init / leaf private
+ * keys land in the provider we'll snapshot at persist time.
  */
 async function uploadIdentityBundle(
   discovery: DiscoveryClient,
   accountId: Uint8Array,
-  exportKey: Uint8Array,
+  identity: WasmIdentity,
 ): Promise<void> {
-  const wasm = await loadWasm();
-  const identity = wasm.Identity.fromSeed(exportKey);
-
   // 1.16e2: generate a fresh KeyPackage. RFC 9420 forward
   // secrecy on new groups argues for one-shot init_keys; in
   // practice we publish a freshly-randomised one on every

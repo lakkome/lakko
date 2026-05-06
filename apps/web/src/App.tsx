@@ -16,6 +16,14 @@
  *   - The original "core probe" lives at `/dev` (DevProbe.tsx) and
  *     stays as a smoke surface — real users never land there.
  *
+ * ## Provider order
+ *
+ * `<ChatProvider>` MUST wrap `<AuthProvider>`, not the other way
+ * round. `AuthProvider`'s body synchronously calls `useChats()`
+ * (it owns the canonical `WasmIdentity` and clears MLS state on
+ * logout / forgetDevice — see 1.16e5 / 1.16e6c1), so the chat
+ * context has to be in scope when AuthProvider mounts.
+ *
  * No business logic in this file on purpose: every screen lives in
  * its own module so swapping a route is a single import change.
  */
@@ -26,11 +34,11 @@ import { ChatProvider } from "./chat/ChatContext";
 import { routes } from "./routes/routes";
 
 const App: Component = () => (
-  <AuthProvider>
-    <ChatProvider>
+  <ChatProvider>
+    <AuthProvider>
       <Router>{routes}</Router>
-    </ChatProvider>
-  </AuthProvider>
+    </AuthProvider>
+  </ChatProvider>
 );
 
 export default App;

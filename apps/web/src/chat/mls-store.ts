@@ -1,0 +1,247 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+/**
+ * IndexedDB-backed encrypted store for MLS provider snapshots
+ * (Phase 1.16e6c1).
+ *
+ * The Rust core (1.16e6a) gives us
+ * `Identity.snapshotStorage()` / `Identity.restoreStorage(...)`
+ * — opaque bytes that round-trip the provider's
+ * `HashMap<Vec<u8>, Vec<u8>>` containing every piece of MLS
+ * state OpenMLS has written (signature keypair, ratchet trees,
+ * epoch keys, queued proposals, …). The bytes are sensitive —
+ * they let any reader continue a live MLS session — so we
+ * **MUST** wrap them under the device root key (1.16c3c2's
+ * non-extractable AES-256-GCM `CryptoKey`) before they touch
+ * disk.
+ *
+ * Schema (one row per `accountIdB64`):
+ *
+ * ```text
+ *   db   "lakko-mls"  v1
+ *   ├── store "snapshots"  keyPath: "accountId"  (string)
+ *         row {
+ *           accountId:        <b64-uuidv7>,
+ *           ciphertext:       Uint8Array,    // [12-byte IV | AES-GCM ciphertext+tag]
+ *           knownGroupIds:    string[]       // base64 of MLS group_id bytes
+ *         }
+ * ```
+ *
+ * Why one blob per account rather than per group: the OpenMLS
+ * provider serialises **all** groups + signing keys + key
+ * package state into a single HashMap. There's no clean
+ * per-group split inside the storage. Per-group state can be
+ * pulled out with `Group::load(identity, group_id)` after
+ * the whole HashMap has been restored. We additionally
+ * record the list of `groupIdB64`'s separately so the
+ * rehydration path knows which `Group::load` calls to make
+ * (the snapshot itself is opaque to us — we can't iterate it
+ * without parsing the Rust-side format).
+ *
+ * The known-groups list is **not** wrapped under the device
+ * key: it's just opaque base64 strings of public MLS
+ * `group_id` bytes (already shared with the DS as a routing
+ * address). Encrypting them would buy nothing and cost a
+ * little code.
+ */
+
+const DB_NAME = "lakko-mls";
+const DB_VERSION = 1;
+const STORE = "snapshots";
+
+/** Length of the AES-GCM IV we prepend to each ciphertext. */
+const IV_LEN = 12;
+
+/** One row in the `snapshots` store. */
+export interface MlsSnapshotRecord {
+  /** Encrypted MLS provider snapshot (`[IV | ciphertext]`). */
+  ciphertext: Uint8Array;
+  /** Base64-encoded `group_id`s for every group OpenMLS state
+   *  the snapshot carries. Used by the rehydration path to
+   *  drive `Group.load` per id. */
+  knownGroupIds: string[];
+}
+
+interface PersistedRow extends MlsSnapshotRecord {
+  accountId: string;
+}
+
+function openDb(): Promise<IDBDatabase> {
+  return new Promise((resolve, reject) => {
+    if (typeof indexedDB === "undefined") {
+      reject(new Error("IndexedDB unavailable in this environment"));
+      return;
+    }
+    const req = indexedDB.open(DB_NAME, DB_VERSION);
+    req.onupgradeneeded = (): void => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains(STORE)) {
+        db.createObjectStore(STORE, { keyPath: "accountId" });
+      }
+    };
+    req.onsuccess = (): void => resolve(req.result);
+    req.onerror = (): void =>
+      reject(req.error ?? new Error("indexedDB.open failed"));
+  });
+}
+
+function awaitTx<T>(tx: IDBTransaction, value: T): Promise<T> {
+  return new Promise((resolve, reject) => {
+    tx.oncomplete = (): void => resolve(value);
+    tx.onabort = (): void => reject(tx.error ?? new Error("idb tx aborted"));
+    tx.onerror = (): void => reject(tx.error ?? new Error("idb tx errored"));
+  });
+}
+
+// ---------------------------------------------------------------
+// Encryption helpers — AES-GCM with the device root key
+// ---------------------------------------------------------------
+
+async function encryptSnapshot(
+  deviceKey: CryptoKey,
+  plaintext: Uint8Array,
+): Promise<Uint8Array> {
+  // 12 bytes is the AES-GCM-recommended IV length and matches
+  // WebCrypto's default. Fresh per call — never re-use an IV
+  // under the same key.
+  const iv = crypto.getRandomValues(new Uint8Array(IV_LEN));
+  // `.slice()` to guarantee an `ArrayBuffer` backing for
+  // strict-mode TS (matches the pattern in device-key.ts).
+  const ct = new Uint8Array(
+    await crypto.subtle.encrypt(
+      { name: "AES-GCM", iv: iv.slice() },
+      deviceKey,
+      plaintext.slice(),
+    ),
+  );
+  // Concat: [12-byte IV | ciphertext+tag].
+  const out = new Uint8Array(IV_LEN + ct.length);
+  out.set(iv, 0);
+  out.set(ct, IV_LEN);
+  return out;
+}
+
+async function decryptSnapshot(
+  deviceKey: CryptoKey,
+  blob: Uint8Array,
+): Promise<Uint8Array> {
+  if (blob.length < IV_LEN + 16) {
+    // 16 bytes is the AES-GCM tag floor. Anything shorter than
+    // IV+tag can't be a valid ciphertext.
+    throw new Error("encrypted snapshot is too short to be valid");
+  }
+  const iv = blob.slice(0, IV_LEN);
+  const ct = blob.slice(IV_LEN);
+  const pt = new Uint8Array(
+    await crypto.subtle.decrypt({ name: "AES-GCM", iv }, deviceKey, ct),
+  );
+  return pt;
+}
+
+// ---------------------------------------------------------------
+// Public CRUD
+// ---------------------------------------------------------------
+
+/**
+ * Persist (or replace) the MLS snapshot for an account.
+ *
+ * @param accountIdB64    Same string the rest of the auth
+ *                        layer uses to identify the account.
+ * @param deviceKey       Non-extractable AES-256-GCM key
+ *                        produced by `deriveDeviceRootKey`
+ *                        (1.16c3c2). The plaintext bytes
+ *                        never leave the WebCrypto sandbox.
+ * @param snapshotBytes   Output of
+ *                        `Identity.snapshotStorage()`.
+ * @param knownGroupIds   Base64-encoded `group_id`s the
+ *                        rehydrate path should later drive
+ *                        through `Group.load`.
+ */
+export async function saveMlsSnapshot(
+  accountIdB64: string,
+  deviceKey: CryptoKey,
+  snapshotBytes: Uint8Array,
+  knownGroupIds: readonly string[],
+): Promise<void> {
+  const ciphertext = await encryptSnapshot(deviceKey, snapshotBytes);
+  const row: PersistedRow = {
+    accountId: accountIdB64,
+    ciphertext,
+    knownGroupIds: [...knownGroupIds],
+  };
+  const db = await openDb();
+  try {
+    const tx = db.transaction(STORE, "readwrite");
+    tx.objectStore(STORE).put(row);
+    await awaitTx(tx, undefined);
+  } finally {
+    db.close();
+  }
+}
+
+/**
+ * Read the MLS snapshot for the given account, decrypt it
+ * with `deviceKey`, return the bytes + the known-group-id
+ * list. Returns `null` when there's no row for that account
+ * yet (typical first-ever load). Throws on decrypt failure
+ * (key mismatch / tampered ciphertext).
+ */
+export async function loadMlsSnapshot(
+  accountIdB64: string,
+  deviceKey: CryptoKey,
+): Promise<MlsSnapshotRecord | null> {
+  const db = await openDb();
+  let row: PersistedRow | undefined;
+  try {
+    const tx = db.transaction(STORE, "readonly");
+    const req = tx.objectStore(STORE).get(accountIdB64);
+    row = await new Promise<PersistedRow | undefined>((resolve, reject) => {
+      req.onsuccess = (): void =>
+        resolve(req.result as PersistedRow | undefined);
+      req.onerror = (): void =>
+        reject(req.error ?? new Error("idb get failed"));
+    });
+  } finally {
+    db.close();
+  }
+  if (row === undefined) return null;
+
+  const snapshotBytes = await decryptSnapshot(deviceKey, row.ciphertext);
+  return {
+    ciphertext: snapshotBytes,
+    knownGroupIds: row.knownGroupIds,
+  };
+}
+
+/**
+ * Delete the MLS snapshot for the given account. No-op when
+ * no row exists. Called from `AuthProvider.forgetDevice` so a
+ * device wipe leaves no per-account residue.
+ */
+export async function deleteMlsSnapshot(accountIdB64: string): Promise<void> {
+  const db = await openDb();
+  try {
+    const tx = db.transaction(STORE, "readwrite");
+    tx.objectStore(STORE).delete(accountIdB64);
+    await awaitTx(tx, undefined);
+  } finally {
+    db.close();
+  }
+}
+
+/**
+ * Wipe **every** MLS snapshot, regardless of account. Useful
+ * from a global "delete all data" UX (1.16f+); the regular
+ * `forgetDevice` path stays per-account.
+ */
+export async function clearAllMlsSnapshots(): Promise<void> {
+  const db = await openDb();
+  try {
+    const tx = db.transaction(STORE, "readwrite");
+    tx.objectStore(STORE).clear();
+    await awaitTx(tx, undefined);
+  } finally {
+    db.close();
+  }
+}
