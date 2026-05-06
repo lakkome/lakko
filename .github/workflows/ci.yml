@@ -1,6 +1,27 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # SPDX-FileCopyrightText: 2026 Lakko Contributors
 
+# Per-push / per-PR CI. **Linux-only** through Phase 1.13.
+#
+# We deliberately do not run macOS or Windows in CI right now:
+#
+#   * The codebase has zero `#[cfg(target_os = "macos")]` /
+#     `#[cfg(windows)]` branches. The only platform gate is
+#     `#[cfg(unix)]` on SIGTERM handling, and macOS *is* unix —
+#     the Linux job already exercises that path.
+#   * Every dep we ship (RustCrypto, OpenMLS, opaque-ke, voprf,
+#     quinn, …) is pure-Rust with no platform sysdeps.
+#   * macOS runners cost a 10× minute multiplier on private repos.
+#     A single `cargo test --workspace` on macos-latest burns
+#     ~100 quota-minutes; running the matrix on every push ate
+#     the entire 2,000-minute Free quota in <10 pushes.
+#
+# Bring macOS back when **Phase 1.14** (`apps/ios` skeleton)
+# lands — UniFFI's XCFramework build needs Xcode. Bring Windows
+# back with **Phase 1.16f+** desktop / `apps/tauri-windows`.
+# Until then there is nothing for either runner to catch that
+# the Linux job doesn't already.
+
 name: CI
 
 on:
@@ -32,12 +53,8 @@ jobs:
       - run: cargo fmt --all --check
 
   clippy:
-    name: clippy (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
+    name: clippy
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -47,12 +64,8 @@ jobs:
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
   test:
-    name: cargo test (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
+    name: cargo test
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -139,7 +152,9 @@ jobs:
           cache-dependency-path: apps/web/package-lock.json
       - name: Install wasm-pack
         # Pin to a known-good release; bump together with the
-        # toolchain in apps/web/README.md.
+        # toolchain in apps/web/README.md. `Swatinem/rust-cache`
+        # caches `~/.cargo/bin/wasm-pack` so this is fast on
+        # warm runners.
         run: cargo install wasm-pack --version ^0.13 --locked
       - name: npm install
         run: npm ci
@@ -153,59 +168,3 @@ jobs:
         run: |
           du -sh dist
           find dist -type f -name '*.js' -o -name '*.wasm' | xargs -I{} sh -c 'gzip -c "{}" | wc -c | awk -v f="{}" "{printf \"%s\\t%d bytes gz\\n\", f, \$1}"'
-
-  repro-build:
-    name: reproducible build verifier
-    runs-on: ubuntu-latest
-    # Best-effort job — verifies the workspace builds reproducibly
-    # (byte-identical between two independent clean builds). Full Rust
-    # reproducibility needs careful flag tuning; for now the job is
-    # advisory — failures do not block merge. Drop continue-on-error
-    # once byte-identicality is stable.
-    continue-on-error: true
-    env:
-      # Pin the path prefix so absolute paths in debuginfo do not differ
-      # between independent checkouts. `/github/workspace` is the
-      # standard working directory on ubuntu runners.
-      RUSTFLAGS: --remap-path-prefix=/github/workspace=. -C symbol-mangling-version=v0
-      SOURCE_DATE_EPOCH: "1735689600"  # 2025-01-01 UTC, fixed
-    steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
-      - name: First build
-        run: |
-          cargo build --workspace --release --locked
-          mkdir -p /tmp/build-a
-          find target/release -maxdepth 1 -type f \( -name 'lakko-svc-*' -o -name '*.rlib' \) \
-            | sort | xargs -I{} cp {} /tmp/build-a/
-          (cd /tmp/build-a && sha256sum * | sort) > /tmp/build-a-hashes.txt
-          echo "===== Build A hashes =====" && cat /tmp/build-a-hashes.txt
-      - name: Clean target
-        run: cargo clean
-      - name: Second build
-        run: |
-          cargo build --workspace --release --locked
-          mkdir -p /tmp/build-b
-          find target/release -maxdepth 1 -type f \( -name 'lakko-svc-*' -o -name '*.rlib' \) \
-            | sort | xargs -I{} cp {} /tmp/build-b/
-          (cd /tmp/build-b && sha256sum * | sort) > /tmp/build-b-hashes.txt
-          echo "===== Build B hashes =====" && cat /tmp/build-b-hashes.txt
-      - name: Compare hashes
-        run: |
-          # Filter known non-reproducible artifacts before diffing so
-          # real regressions do not get drowned in noise.
-          # liblakko_ffi_uniffi.rlib: uniffi 0.28 proc-macros embed
-          # non-deterministic state (track upstream). Every other .rlib
-          # and binary must match byte-for-byte.
-          KNOWN_FLAKY='liblakko_ffi_uniffi\.rlib'
-
-          grep -v -E "$KNOWN_FLAKY" /tmp/build-a-hashes.txt > /tmp/a-filtered.txt
-          grep -v -E "$KNOWN_FLAKY" /tmp/build-b-hashes.txt > /tmp/b-filtered.txt
-
-          if diff -u /tmp/a-filtered.txt /tmp/b-filtered.txt; then
-            echo "✅ Reproducible: byte-identical artifacts (excluding known flaky: $KNOWN_FLAKY)"
-          else
-            echo "⚠️ Non-reproducible: artifacts differ between builds"
-            echo "(this job is non-blocking until we tune flags for stable byte-identicality)"
-            exit 1
-          fi
