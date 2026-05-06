@@ -46,13 +46,34 @@ import { DiscoveryClient } from "../discovery/client";
 import { base64Decode } from "../auth/account-id";
 import { DsClient } from "../ds/client";
 import type { IdentitySecrets } from "../auth/AuthContext";
-import type { Group as WasmGroup } from "../../wasm/lakko_ffi_wasm";
+import type {
+  Group as WasmGroup,
+  Identity as WasmIdentity,
+} from "../../wasm/lakko_ffi_wasm";
 import {
   KIND_CONTACT_REQUEST,
   KIND_WELCOME,
   parseEnvelope,
   wrapEnvelope,
 } from "./envelope";
+
+/** Optional wires the route layer hands to ContactsClient
+ *  (Phase 1.16e6c2). See `ChatClientOptions` in
+ *  `chat/client.ts` for the rationale — same shape, same
+ *  semantics, applied to a different surface. */
+export interface ContactsClientOptions {
+  /** Returns the **canonical** `WasmIdentity` for this session.
+   *  See `<ChatProvider>` (1.16e6c1). When unset, the client
+   *  falls back to building a throwaway `Identity.fromSeed` per
+   *  call — only acceptable for tests; production paths MUST
+   *  wire this so MLS state stays coherent across calls. */
+  identityProvider?: () => WasmIdentity | null;
+  /** Fires after every successful MLS state-mutating call so
+   *  the route layer can persist the canonical Identity's
+   *  provider snapshot to disk. Best-effort — exceptions are
+   *  logged and swallowed; the in-memory state stays good. */
+  onPersist?: () => Promise<void>;
+}
 
 /** Result of `ContactsClient.sendContactRequest`. */
 export interface SendResult {
@@ -184,10 +205,57 @@ export class ContactsError extends Error {
 }
 
 export class ContactsClient {
+  private readonly identityProvider: (() => WasmIdentity | null) | undefined;
+  private readonly onPersist: (() => Promise<void>) | undefined;
+
   constructor(
     private readonly discovery: DiscoveryClient = new DiscoveryClient(),
     private readonly ds: DsClient = new DsClient(),
-  ) {}
+    options: ContactsClientOptions = {},
+  ) {
+    this.identityProvider = options.identityProvider;
+    this.onPersist = options.onPersist;
+  }
+
+  /**
+   * Resolve the `WasmIdentity` to drive an operation that needs
+   * Identity material. When the canonical accessor is wired
+   * (production path via `<ChatProvider>`), every call shares
+   * the same provider — MLS state mutations accumulate, and
+   * `onPersist` snapshots them to disk.
+   *
+   * Falls back to a one-shot `Identity.fromSeed(secrets.exportKey)`
+   * when the canonical isn't wired (tests, direct callers). MLS
+   * mutations on the throwaway are **lost on return** — fine for
+   * stateless ops (signing a ContactRequest, opening an HPKE
+   * envelope), broken for `startGroupWith` / `joinGroupFromWelcome`,
+   * which is why production MUST wire the canonical accessor.
+   */
+  private async resolveIdentity(
+    secrets: IdentitySecrets | null,
+  ): Promise<WasmIdentity> {
+    if (this.identityProvider !== undefined) {
+      const canonical = this.identityProvider();
+      if (canonical !== null) return canonical;
+      throw ContactsError.noIdentitySecrets();
+    }
+    if (secrets === null) {
+      throw ContactsError.noIdentitySecrets();
+    }
+    const wasm = await loadWasm();
+    return wasm.Identity.fromSeed(secrets.exportKey);
+  }
+
+  /** Fire the persist hook, swallow + log failures. */
+  private async persistBestEffort(): Promise<void> {
+    if (this.onPersist === undefined) return;
+    try {
+      await this.onPersist();
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("ContactsClient: MLS snapshot persist failed", err);
+    }
+  }
 
   /**
    * Send a `ContactRequest` envelope to `@recipientUsername`,
@@ -212,10 +280,6 @@ export class ContactsClient {
     recipientUsername: string,
     introMessage: Uint8Array,
   ): Promise<SendResult> {
-    if (identity === null) {
-      throw ContactsError.noIdentitySecrets();
-    }
-
     // 1. Resolve the username.
     let lookup;
     try {
@@ -243,11 +307,18 @@ export class ContactsClient {
 
     // 3. Derive the recipient's mailbox pseudonym + the
     //    sender-side per-relationship pseudonym + the wire
-    //    bytes. All three are WASM calls; we reconstruct the
-    //    sender's Identity from the in-memory export key.
+    //    bytes. All three are WASM calls. The canonical
+    //    Identity (1.16e6c2) is the same instance the
+    //    ChatProvider holds — using it here keeps Ed25519 +
+    //    X25519 keys consistent across operations and avoids
+    //    the throwaway-provider trap.
     const wasm = await loadWasm();
-    const senderIdentity = wasm.Identity.fromSeed(identity.exportKey);
+    const senderIdentity = await this.resolveIdentity(identity);
     const senderSigningSeed = senderIdentity.ed25519Seed;
+    const senderAccountId = identity?.accountId ?? null;
+    if (senderAccountId === null) {
+      throw ContactsError.noIdentitySecrets();
+    }
 
     // The recipient's mailbox is keyed by their public-pubkey
     // pseudonym — anyone holding the recipient's Ed25519
@@ -275,7 +346,7 @@ export class ContactsClient {
       // reverse-lookup round-trip.
       wireBytes = wasm.ContactRequest.compose(
         senderSigningSeed,
-        identity.accountId,
+        senderAccountId,
         recipientX25519Pub,
         senderPseudonym,
         validAfterMs,
@@ -380,12 +451,8 @@ export class ContactsClient {
     after: number,
     waitSecs = 0,
   ): Promise<PollResult> {
-    if (identity === null) {
-      throw ContactsError.noIdentitySecrets();
-    }
-
     const wasm = await loadWasm();
-    const myIdentity = wasm.Identity.fromSeed(identity.exportKey);
+    const myIdentity = await this.resolveIdentity(identity);
     const myPseudonym = wasm.IdentityPseudonym.fromIdentity(
       myIdentity.signaturePublicKey,
     ).asBytes();
@@ -509,10 +576,6 @@ export class ContactsClient {
     recipientAccountId: Uint8Array,
     recipientSignaturePubkey: Uint8Array,
   ): Promise<{ group: WasmGroup; welcomeMessageId: number }> {
-    if (identity === null) {
-      throw ContactsError.noIdentitySecrets();
-    }
-
     const wasm = await loadWasm();
 
     // 1. Fetch recipient's KeyPackage.
@@ -528,8 +591,11 @@ export class ContactsClient {
       throw ContactsError.noIdentityBundle(recipientAccountId);
     }
 
-    // 2. Build our Identity + a fresh group.
-    const myIdentity = wasm.Identity.fromSeed(identity.exportKey);
+    // 2. Resolve our canonical Identity (1.16e6c2 — same instance
+    //    every Group on this device shares; mutations to its
+    //    provider survive across calls and get snapshotted to
+    //    IDB after this method returns).
+    const myIdentity = await this.resolveIdentity(identity);
     const group = new wasm.Group(myIdentity);
 
     // 3. Add the recipient. `addMember` takes the local
@@ -555,6 +621,13 @@ export class ContactsClient {
     } catch (err) {
       throw ContactsError.wrap(err);
     }
+
+    // 1.16e6c2: Group::create + addMember mutated the canonical
+    // provider's storage (initial epoch state, leaf private key,
+    // own KeyPackage init key, queued Welcome state). Snapshot
+    // it so the next reload can `Group::load` this group_id and
+    // pick up where we left off.
+    await this.persistBestEffort();
 
     return { group, welcomeMessageId: publish.messageId };
   }
@@ -639,16 +712,22 @@ export class ContactsClient {
     identity: IdentitySecrets | null,
     welcomeBytes: Uint8Array,
   ): Promise<WasmGroup> {
-    if (identity === null) {
-      throw ContactsError.noIdentitySecrets();
-    }
     const wasm = await loadWasm();
-    const myIdentity = wasm.Identity.fromSeed(identity.exportKey);
+    const myIdentity = await this.resolveIdentity(identity);
+    let group: WasmGroup;
     try {
       // wasm-bindgen surface: `joinFromWelcome(welcome, identity)`.
-      return wasm.Group.joinFromWelcome(welcomeBytes, myIdentity);
+      group = wasm.Group.joinFromWelcome(welcomeBytes, myIdentity);
     } catch (err) {
       throw ContactsError.wrap(err);
     }
+
+    // 1.16e6c2: joinFromWelcome bootstrapped a brand-new group
+    // state into the canonical provider (epoch keys, ratchet
+    // tree, our leaf, the queued ack to the welcomer). Snapshot
+    // it so the next reload can `Group::load` this group_id.
+    await this.persistBestEffort();
+
+    return group;
   }
 }

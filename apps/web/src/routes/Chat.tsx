@@ -132,7 +132,21 @@ function ChatView(props: {
   >;
   onLeave: () => void;
 }): JSX.Element {
-  const chat = new ChatClient();
+  // 1.16e6c2: wire the canonical Identity + post-mutation
+  // snapshot persist into ChatClient so `sendMessage` /
+  // `pollMessages` flush MLS state to IDB on every successful
+  // op. Closures read the auth + chat contexts lazily so they
+  // always see the current session.
+  const auth = useAuth();
+  const chats = useChats();
+  const chat = new ChatClient(undefined, {
+    identityProvider: () => chats.identity(),
+    onPersist: async () => {
+      const s = auth.state();
+      if (s.kind !== "session") return;
+      await chats.persistSnapshot(s.account.accountId);
+    },
+  });
 
   const [rows, setRows] = createSignal<TimelineRow[]>([]);
   const [cursor, setCursor] = createSignal(0);

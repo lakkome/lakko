@@ -43,7 +43,21 @@ import {
 
 export default function Contacts(): JSX.Element {
   const auth = useAuth();
-  const client = new ContactsClient();
+  const chats = useChats();
+  // 1.16e6c2: hand the chat-context wires (canonical Identity +
+  // post-mutation snapshot persist) to ContactsClient so every
+  // MLS state mutation in `startGroupWith` / `joinGroupFromWelcome`
+  // flushes to IDB before the call returns. The closures capture
+  // `chats` + `auth` lazily, so they always see the current
+  // session.
+  const client = new ContactsClient(undefined, undefined, {
+    identityProvider: () => chats.identity(),
+    onPersist: async () => {
+      const s = auth.state();
+      if (s.kind !== "session") return;
+      await chats.persistSnapshot(s.account.accountId);
+    },
+  });
 
   // Memoised so consumers re-run when the AuthContext signal
   // changes (e.g. after a fresh login on the same page session).
