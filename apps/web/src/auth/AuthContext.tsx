@@ -61,6 +61,7 @@ import {
 import { clearAll as clearContactsStore } from "../contacts/local-store";
 import { useChats } from "../chat/ChatContext";
 import { deleteMlsSnapshot } from "../chat/mls-store";
+import { rehydrateMlsState } from "../chat/rehydrate";
 import type { Identity as WasmIdentity } from "../../wasm/lakko_ffi_wasm";
 
 /** Account record exposed to the UI when a session is active. */
@@ -303,6 +304,12 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       const canonical = wasm.Identity.fromSeed(result.exportKey);
       chats.setIdentity(canonical);
 
+      // 1.16e6c3: rehydrate prior MLS state if any. For signup
+      // this is a no-op (brand-new accountId, no snapshot row),
+      // but routing it through the same helper keeps the four
+      // auth flows uniform.
+      await rehydrateMlsState(chats, accountIdB64);
+
       // 1.16d3b2: derive the Identity deterministically from the
       // OPAQUE export key, upload its public bundle to the
       // discovery directory. Because Identity::fromSeed is
@@ -394,6 +401,15 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       const canonical = wasm.Identity.fromSeed(result.exportKey);
       chats.setIdentity(canonical);
 
+      // 1.16e6c3: rehydrate prior MLS state from the IDB
+      // snapshot. This is the load case that justifies the
+      // entire 1.16e6 sub-sprint — same accountId on the same
+      // device picks up every active group from the prior
+      // session. Failures inside the helper are logged + best-
+      // effort; the user still gets a working authenticated
+      // session.
+      await rehydrateMlsState(chats, accountIdB64);
+
       // 1.16d3b2: refresh the identity bundle on every login.
       // Best-effort — a network blip here shouldn't block the
       // user from getting into a session they already
@@ -478,6 +494,12 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         // (pre-recovery) Identity if anything was lingering.
         const canonical = wasm.Identity.fromSeed(result.exportKey);
         chats.setIdentity(canonical);
+
+        // 1.16e6c3: rehydrate path is a guaranteed no-op here —
+        // we just deleted the snapshot row above — but routing
+        // through the same helper keeps the auth flows uniform
+        // and resilient to future re-orderings.
+        await rehydrateMlsState(chats, cached.accountIdB64);
 
         // Re-publish the identity bundle + a fresh KeyPackage
         // (the recovered Identity has the same long-lived

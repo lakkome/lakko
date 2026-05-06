@@ -53,18 +53,28 @@ const STORE = "snapshots";
 /** Length of the AES-GCM IV we prepend to each ciphertext. */
 const IV_LEN = 12;
 
-/** One row in the `snapshots` store. */
+/** Result returned by `loadMlsSnapshot` — the decrypted MLS
+ *  provider snapshot ready to feed straight into
+ *  `Identity.restoreStorage(...)`, plus the public list of
+ *  group_ids the rehydrate path should drive through
+ *  `Group.load`. */
 export interface MlsSnapshotRecord {
-  /** Encrypted MLS provider snapshot (`[IV | ciphertext]`). */
-  ciphertext: Uint8Array;
+  /** Decrypted MLS provider snapshot bytes — opaque payload,
+   *  ready to hand to `Identity.restoreStorage(...)`. */
+  snapshotBytes: Uint8Array;
   /** Base64-encoded `group_id`s for every group OpenMLS state
    *  the snapshot carries. Used by the rehydration path to
    *  drive `Group.load` per id. */
   knownGroupIds: string[];
 }
 
-interface PersistedRow extends MlsSnapshotRecord {
+/** Internal on-disk row shape. The `ciphertext` here actually
+ *  contains `[12-byte IV | AES-GCM ciphertext+tag]` — distinct
+ *  from the decrypted-result type returned by `loadMlsSnapshot`. */
+interface PersistedRow {
   accountId: string;
+  ciphertext: Uint8Array;
+  knownGroupIds: string[];
 }
 
 function openDb(): Promise<IDBDatabase> {
@@ -209,7 +219,7 @@ export async function loadMlsSnapshot(
 
   const snapshotBytes = await decryptSnapshot(deviceKey, row.ciphertext);
   return {
-    ciphertext: snapshotBytes,
+    snapshotBytes,
     knownGroupIds: row.knownGroupIds,
   };
 }
