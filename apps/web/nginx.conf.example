@@ -1,0 +1,165 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+# Sample nginx vhost for serving `apps/web/dist/` on the
+# Hetzner VPS. **Drop-in template** — copy to
+# `/etc/nginx/sites-available/lakko-web` on the box, edit
+# `server_name` + `ssl_certificate{,_key}`, symlink into
+# `sites-enabled/`, `nginx -t && systemctl reload nginx`.
+#
+# Phase 1.17a — security headers + caching strategy. The actual
+# deploy automation (rsync + reload) lands in 1.17c.
+
+# Redirect every plain-HTTP hit to HTTPS. CT log policy + HSTS
+# preload below mean we never serve cleartext to a returning
+# user — but a fresh visitor still types `lakko.me`, and this
+# 308 is the only place that case is handled.
+server {
+    listen      80;
+    listen      [::]:80;
+    server_name lakko.me www.lakko.me;
+    return      308 https://lakko.me$request_uri;
+}
+
+server {
+    listen              443 ssl http2;
+    listen              [::]:443 ssl http2;
+    server_name         lakko.me;
+
+    # Let's Encrypt (managed by certbot --nginx). Both certs MUST
+    # be ECDSA P-256 — RSA-2048 doubles handshake bytes for no
+    # security gain on modern browsers.
+    ssl_certificate     /etc/letsencrypt/live/lakko.me/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/lakko.me/privkey.pem;
+
+    ssl_protocols       TLSv1.3;
+    # TLS 1.3 ciphersuites are baked in; no `ssl_ciphers` line
+    # needed. Drop TLS 1.2 entirely — every Lakko-supported
+    # browser speaks 1.3, and 1.2 widens the attack surface
+    # (legacy cipher negotiation, downgrade exposure).
+    ssl_session_cache   shared:LakkoTLS:10m;
+    ssl_session_timeout 1h;
+
+    # ---- Security headers --------------------------------------
+    # Source of truth for the directives a `<meta>` tag cannot
+    # carry (`frame-ancestors`, `report-uri`). Keep the policy in
+    # lock-step with `apps/web/scripts/post-build.mjs::CSP`.
+    add_header Content-Security-Policy
+        "default-src 'self'; \
+         script-src 'self' 'wasm-unsafe-eval'; \
+         style-src 'self' 'unsafe-inline'; \
+         img-src 'self' data:; \
+         font-src 'self'; \
+         connect-src 'self'; \
+         worker-src 'self'; \
+         manifest-src 'self'; \
+         frame-ancestors 'none'; \
+         base-uri 'self'; \
+         form-action 'self'; \
+         object-src 'none'"
+        always;
+
+    # 2 years + preload. After preload submission this is
+    # effectively permanent — only flip it on once we're
+    # confident in the cert renewal path. `includeSubDomains`
+    # commits every future *.lakko.me — fine for a single-domain
+    # operator.
+    add_header Strict-Transport-Security
+        "max-age=63072000; includeSubDomains; preload" always;
+
+    # `X-Frame-Options: DENY` is redundant given CSP
+    # `frame-ancestors 'none'` above (modern browsers prefer the
+    # CSP directive), but keep it as belt-and-suspenders for
+    # caches and middleboxes that strip CSP.
+    add_header X-Frame-Options          "DENY"        always;
+    add_header X-Content-Type-Options   "nosniff"     always;
+    add_header Referrer-Policy          "no-referrer" always;
+    add_header Cross-Origin-Opener-Policy   "same-origin"  always;
+    add_header Cross-Origin-Resource-Policy "same-origin"  always;
+    # Embedder policy: `require-corp` would force every cross-
+    # origin sub-resource to opt in via CORP. We don't load any
+    # cross-origin resources today, but flipping this on now
+    # would also disable shared-array-buffer access if we ever
+    # need it for SIMD WASM. Keep `unsafe-none` until 1.18+ tells
+    # us we want SAB.
+    add_header Cross-Origin-Embedder-Policy "unsafe-none" always;
+
+    # Lock down sensors / DOM features we don't use. The list is
+    # the W3C Permissions-Policy reserved feature set as of 2026;
+    # add new entries here as the spec grows.
+    add_header Permissions-Policy
+        "accelerometer=(), \
+         ambient-light-sensor=(), \
+         autoplay=(), \
+         battery=(), \
+         camera=(), \
+         display-capture=(), \
+         fullscreen=(), \
+         geolocation=(), \
+         gyroscope=(), \
+         magnetometer=(), \
+         microphone=(), \
+         midi=(), \
+         payment=(), \
+         picture-in-picture=(), \
+         publickey-credentials-get=(self), \
+         screen-wake-lock=(), \
+         usb=(), \
+         xr-spatial-tracking=()" always;
+
+    # ---- Routing -----------------------------------------------
+    root /var/www/lakko-web;          # rsync target for dist/
+    index index.html;
+
+    # Hashed assets are content-addressed — cache forever.
+    location /assets/ {
+        access_log off;
+        add_header Cache-Control "public, max-age=31536000, immutable" always;
+        try_files $uri =404;
+    }
+
+    # Service worker MUST NOT be cached past the SW update
+    # cycle: browsers refetch sw.js on every navigation, but if
+    # an intermediate caches it stale we get a deploy-stuck app.
+    location = /sw.js {
+        access_log off;
+        add_header Cache-Control "no-store" always;
+        try_files $uri =404;
+    }
+
+    # Manifest, favicon, robots, etc. — short cache.
+    location ~* ^/(manifest\.webmanifest|robots\.txt|favicon\.ico)$ {
+        access_log off;
+        add_header Cache-Control "public, max-age=3600" always;
+        try_files $uri =404;
+    }
+
+    # Backend services — same-origin proxy (matches the Vite dev
+    # proxy in `vite.config.ts` so the JS layer's relative URLs
+    # work in both environments).
+    location /api/auth/ {
+        proxy_pass http://127.0.0.1:8081/;
+        proxy_set_header Host             $host;
+        proxy_set_header X-Forwarded-For  $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+    location /api/ds/ {
+        proxy_pass http://127.0.0.1:8082/;
+        proxy_set_header Host             $host;
+        proxy_set_header X-Forwarded-For  $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+    location /api/discovery/ {
+        proxy_pass http://127.0.0.1:8084/;
+        proxy_set_header Host             $host;
+        proxy_set_header X-Forwarded-For  $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    # SPA fallback — every unrouted GET serves the app shell so
+    # client-side routing (/chat/:id, /contacts, …) works on a
+    # full reload. The HTML is short (≤2 kB), no need to cache.
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+}
