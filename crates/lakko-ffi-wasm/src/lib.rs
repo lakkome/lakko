@@ -79,6 +79,17 @@ pub mod push;
 pub mod storage;
 pub mod sync;
 
+// Phase 1.16f3 — wasm-bindgen-test smoke suite. Gated on BOTH
+// `cfg(test)` (so the lib build never tries to pull in the
+// `wasm-bindgen-test` dev-dep that isn't on the dependency
+// graph outside test builds) AND `cfg(target_arch = "wasm32")`
+// (so a host `cargo test -p lakko-ffi-wasm` keeps using the
+// regular `#[cfg(test)] mod tests` blocks scattered through the
+// other modules and never tries to load these wasm-only smokes).
+// `wasm-pack test --node` flips both flags on at once.
+#[cfg(all(test, target_arch = "wasm32"))]
+mod wasm_tests;
+
 // Re-export top-level public items so JS callers don't see the
 // module path (wasm-bindgen flattens by default; explicit re-exports
 // keep the rustdoc surface tidy).

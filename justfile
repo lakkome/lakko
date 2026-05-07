@@ -155,6 +155,19 @@ dev-web:
 build-web:
     cd apps/web && npm run build
 
+# Phase 1.16f3 — wasm-bindgen-test smoke suite under Node. Tests
+# in `crates/lakko-ffi-wasm/src/wasm_tests.rs` exercise WASM-shape
+# regressions the host `cargo test` cannot reach: getrandom under
+# wasm32, JsError surface, the snapshot/restore round-trip via
+# the actual WASM bridge. No browser driver required — V8 + the
+# wasm-pack-test Node runner are enough.
+#
+# For browser-only paths (IndexedDB structured-clone, the SW
+# offline cold-start) swap `--node` for `--headless --chrome` /
+# `--firefox` / `--safari` once a driver is on PATH.
+test-wasm:
+    wasm-pack test --node crates/lakko-ffi-wasm
+
 # Phase 1.16f1 — full production build + per-file gzip / brotli
 # size table for `apps/web/dist/`. Useful before / after a
 # dependency bump or feature switch to catch bundle drift.

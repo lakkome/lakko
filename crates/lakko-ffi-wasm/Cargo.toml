@@ -71,6 +71,16 @@ js-sys = "0.3"
 getrandom = { version = "0.2", features = ["js"] }
 openmls = { version = "0.8", features = ["js"], default-features = false }
 
+# Phase 1.16f3 — wasm-bindgen-test runner. Tests in
+# `src/wasm_tests.rs` are gated `#[cfg(target_arch = "wasm32")]`
+# and run via `wasm-pack test --node` (or any browser driver).
+# Host-side `cargo test -p lakko-ffi-wasm` is unaffected — those
+# tests sit in `#[cfg(test)]` modules with regular `#[test]`
+# attributes, while the wasm-bindgen-test ones use
+# `#[wasm_bindgen_test]`.
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test = "0.3"
+
 # Phase 1.16f1 — bundle-size pass. wasm-pack defaults to
 # `wasm-opt -O` (Binaryen's balanced level); we switch to `-Oz`
 # (size-only optimisation) which shaves another ~5-15 % off the

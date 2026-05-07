@@ -128,6 +128,30 @@ jobs:
       - name: cargo build --target wasm32-unknown-unknown
         run: cargo build -p lakko-ffi-wasm --target wasm32-unknown-unknown
 
+  wasm-test:
+    # Phase 1.16f3 — wasm-bindgen-test smoke suite. Runs the
+    # WASM-shape regression tests in `crates/lakko-ffi-wasm/src/wasm_tests.rs`
+    # under Node V8. No browser driver required — `wasm-pack test
+    # --node` uses the Node runtime that ubuntu-latest already
+    # ships with. Catches missing `js` features on `getrandom` /
+    # `openmls`, JsError surface regressions, and the snapshot/
+    # restore round-trip through the actual WASM bridge — none of
+    # which the host-side `cargo test` job can see.
+    name: wasm-bindgen-test (Node)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - name: Install wasm-pack
+        # Same pin as web-build below. Swatinem caches the
+        # ~/.cargo/bin entry across runs.
+        run: cargo install wasm-pack --version ^0.13 --locked
+      - name: wasm-pack test --node
+        run: wasm-pack test --node crates/lakko-ffi-wasm
+
   web-build:
     # Phase 1.16a — confirm `apps/web` (Solid.js + Vite + WASM core)
     # builds end-to-end: wasm-pack against `lakko-ffi-wasm`, TS
