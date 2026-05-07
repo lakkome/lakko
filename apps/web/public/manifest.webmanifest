@@ -1,0 +1,19 @@
+{
+  "//": [
+    "SPDX-License-Identifier: AGPL-3.0-or-later",
+    "SPDX-FileCopyrightText: 2026 Lakko Contributors"
+  ],
+
+  "name": "Lakko",
+  "short_name": "Lakko",
+  "description": "Secure E2EE messenger.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#0a0a0a",
+  "theme_color": "#0a0a0a",
+  "lang": "en",
+  "dir": "ltr",
+  "icons": []
+}

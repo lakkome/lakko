@@ -155,6 +155,17 @@ dev-web:
 build-web:
     cd apps/web && npm run build
 
+# Phase 1.16f1 — full production build + per-file gzip / brotli
+# size table for `apps/web/dist/`. Useful before / after a
+# dependency bump or feature switch to catch bundle drift.
+bundle-report:
+    cd apps/web && npm run report
+
+# Same report against an existing `dist/` (skip the rebuild).
+# Cheap iteration when you're tweaking the report script itself.
+bundle-report-only:
+    cd apps/web && npm run report:no-build
+
 # ---- Deployment (systemd + system-nginx + system-MariaDB on Hetzner) -----
 # See infra/README.md for the full migration / deploy workflow.
 

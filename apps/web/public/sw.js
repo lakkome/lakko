@@ -1,0 +1,200 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+/**
+ * Lakko service worker (Phase 1.16f2).
+ *
+ * Vanilla SW — no Workbox, no third-party deps. The whole flow is
+ * ~150 lines and stays auditable end-to-end. Vite copies this file
+ * verbatim from `apps/web/public/sw.js` into `dist/sw.js` during
+ * production build; `apps/web/scripts/build-sw.mjs` then rewrites
+ * the two placeholders below with the build-specific asset list +
+ * version stamp.
+ *
+ * ## Cache strategy
+ *
+ *   * **Hashed assets** under `/assets/*.{js,css,wasm}` — content-
+ *     addressable filenames change with every release. Cache-first
+ *     with no expiry: a hit means the bytes are immutable.
+ *   * **Navigation** (the HTML shell, `/` and any future routed
+ *     paths served by index.html) — network-first with a cache
+ *     fallback. We MUST hit the network when the user is online so
+ *     a fresh deploy of `index.html` brings in the latest hashed
+ *     asset references; the cache fallback only runs when the
+ *     fetch throws (offline).
+ *   * **`/api/*`** (auth / discovery / DS) — **network-only**. A
+ *     stale OPAQUE round, a cached message journal, or a frozen
+ *     KeyPackage list would all be active footguns. Offline = fail.
+ *   * **Everything else** (manifest, favicons, `sw.js` itself) —
+ *     stale-while-revalidate is fine. Browser default.
+ *
+ * ## Update lifecycle
+ *
+ *   * On `install`, precache every asset in `PRECACHE_MANIFEST`.
+ *   * On `activate`, sweep any cache whose name doesn't match the
+ *     current `BUILD_VERSION` so old releases don't accumulate.
+ *   * `skipWaiting` runs inside `install`, so a new SW activates as
+ *     soon as the prior page session is gone — no manual user
+ *     gesture needed for the first round of updates. A future
+ *     iteration can swap to "wait for user click" once we ship a
+ *     "new version available" banner UI.
+ *
+ * ## Push events (placeholder)
+ *
+ *   * 1.18 (encrypted-push receive path) wires the `push` event
+ *     handler — payload is `(group_pseudonym, envelope_pointer)`,
+ *     SW fetches the ciphertext, hands it off to the WASM core via
+ *     a clients-postMessage round, and renders a local
+ *     notification. We expose the empty handler now so the SW
+ *     subscription surface is in place.
+ */
+
+// Replaced by `scripts/build-sw.mjs` after `vite build`.
+const BUILD_VERSION = "__BUILD_VERSION__";
+const PRECACHE_MANIFEST = __PRECACHE_MANIFEST__;
+
+const CACHE_NAME = `lakko-app-shell-${BUILD_VERSION}`;
+
+// Single source of truth for "is this a backend API call". Keep
+// in lock-step with `vite.config.ts` proxy rewrites — every path
+// listed there must be matched here so we never serve stale.
+const API_PREFIXES = ["/api/auth", "/api/discovery", "/api/ds"];
+
+// ----- install -------------------------------------------------
+
+self.addEventListener("install", (event) => {
+  event.waitUntil(
+    (async () => {
+      const cache = await caches.open(CACHE_NAME);
+      // `addAll` is atomic — if any single fetch fails, the entire
+      // install fails and the SW does not progress to "waiting".
+      // That's intentional: a partially-cached shell would serve
+      // a broken offline experience.
+      await cache.addAll(PRECACHE_MANIFEST);
+      // Promote this SW to active as soon as the install finishes.
+      // Without skipWaiting() the user has to close every Lakko tab
+      // before the new bytes take effect.
+      await self.skipWaiting();
+    })(),
+  );
+});
+
+// ----- activate ------------------------------------------------
+
+self.addEventListener("activate", (event) => {
+  event.waitUntil(
+    (async () => {
+      // Sweep prior versions. We only own caches that begin with
+      // `lakko-app-shell-`; anything else is owned by another SW
+      // (none expected today, but defensive).
+      const names = await caches.keys();
+      await Promise.all(
+        names
+          .filter((n) => n.startsWith("lakko-app-shell-") && n !== CACHE_NAME)
+          .map((n) => caches.delete(n)),
+      );
+      // Take control of any open Lakko tabs immediately so the
+      // first request after activation already routes through
+      // this SW's fetch handler.
+      await self.clients.claim();
+    })(),
+  );
+});
+
+// ----- fetch ---------------------------------------------------
+
+self.addEventListener("fetch", (event) => {
+  const req = event.request;
+
+  // SW only intercepts same-origin GETs. Cross-origin (CDN, third-
+  // party fetches if any) and non-GET (POST to /api/*) skip the SW
+  // and hit the network directly.
+  if (req.method !== "GET") return;
+
+  const url = new URL(req.url);
+  if (url.origin !== self.location.origin) return;
+
+  // Network-only for backend API. Stale auth / DS bytes would be a
+  // security footgun, and we never want to mask a real failure.
+  if (API_PREFIXES.some((p) => url.pathname.startsWith(p))) {
+    return; // implicit network-only — no event.respondWith
+  }
+
+  // Cache-first for hashed assets. Filenames carry a content hash,
+  // so a cache hit is by definition the right bytes.
+  if (url.pathname.startsWith("/assets/")) {
+    event.respondWith(cacheFirst(req));
+    return;
+  }
+
+  // Navigation (and fallthrough HTML) — network-first with cache
+  // fallback. The browser uses `mode === "navigate"` for top-level
+  // documents; routed sub-paths like `/chat/abc` also count.
+  if (req.mode === "navigate" || req.destination === "document") {
+    event.respondWith(networkFirstWithCacheFallback(req));
+    return;
+  }
+
+  // Everything else (manifest, favicons, the SW itself when it
+  // checks for updates) — let the browser default kick in.
+});
+
+async function cacheFirst(req) {
+  const cache = await caches.open(CACHE_NAME);
+  const hit = await cache.match(req);
+  if (hit !== undefined) return hit;
+  // Not in cache — fetch + cache for next time. We do NOT cache
+  // error responses (5xx, opaque CORS failures), only 200-OK.
+  const fresh = await fetch(req);
+  if (fresh.ok) {
+    cache.put(req, fresh.clone());
+  }
+  return fresh;
+}
+
+async function networkFirstWithCacheFallback(req) {
+  try {
+    const fresh = await fetch(req);
+    if (fresh.ok) {
+      const cache = await caches.open(CACHE_NAME);
+      cache.put(req, fresh.clone());
+    }
+    return fresh;
+  } catch (err) {
+    // Offline — fall back to cached HTML if we have it. The
+    // precache always seeds `index.html` so a cold-start offline
+    // load works after the first online visit.
+    const cache = await caches.open(CACHE_NAME);
+    const fallback = (await cache.match(req)) ?? (await cache.match("/index.html"));
+    if (fallback !== undefined) return fallback;
+    throw err;
+  }
+}
+
+// ----- push (1.18 placeholder) ---------------------------------
+
+self.addEventListener("push", (event) => {
+  // Phase 1.16f2 stub. The 1.18 sprint will:
+  //   1. Decode the (group_pseudonym, envelope_pointer) tuple from
+  //      `event.data?.json()`.
+  //   2. Fetch the ciphertext from the DS via a same-origin GET.
+  //   3. Bridge to the WASM core (postMessage to a client, or run
+  //      the lakko-ffi-wasm bundle in the SW global once we ship a
+  //      worker-compatible build target).
+  //   4. Surface a local notification with the decrypted preview.
+  // Until then we no-op so the subscription surface stays available
+  // for early testing.
+  event.waitUntil(Promise.resolve());
+});
+
+// ----- message (skip-waiting handshake) ------------------------
+
+self.addEventListener("message", (event) => {
+  // Reserved for a future "new version available" banner: the page
+  // sends `{ type: "SKIP_WAITING" }` when the user clicks the
+  // banner, the SW activates immediately. No-op today; the install
+  // path already calls skipWaiting() unconditionally.
+  if (event.data && event.data.type === "SKIP_WAITING") {
+    void self.skipWaiting();
+  }
+});

@@ -70,3 +70,18 @@ js-sys = "0.3"
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "0.2", features = ["js"] }
 openmls = { version = "0.8", features = ["js"], default-features = false }
+
+# Phase 1.16f1 — bundle-size pass. wasm-pack defaults to
+# `wasm-opt -O` (Binaryen's balanced level); we switch to `-Oz`
+# (size-only optimisation) which shaves another ~5-15 % off the
+# final bytes. The runtime regression is irrelevant for our
+# workload — the hot path is the underlying crypto crates'
+# generated code, which `[profile.release]` already builds at
+# `opt-level = 3`.
+#
+# `--enable-mutable-globals` is a safety belt: some of our deps
+# emit mutable-globals instructions, and forgetting to flag the
+# feature would cause Binaryen to reject the input. The proposal
+# is in every evergreen browser since 2018.
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = ['-Oz', '--enable-mutable-globals']

@@ -15,9 +15,11 @@
     "build:wasm": "wasm-pack build ../../crates/lakko-ffi-wasm --target web --out-dir ../../apps/web/wasm --release",
     "build:wasm:dev": "wasm-pack build ../../crates/lakko-ffi-wasm --target web --out-dir ../../apps/web/wasm --dev",
     "dev": "npm run build:wasm:dev && vite",
-    "build": "npm run build:wasm && tsc --noEmit && vite build",
+    "build": "npm run build:wasm && tsc --noEmit && vite build && node scripts/build-sw.mjs",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
+    "report": "npm run build && node scripts/bundle-report.mjs",
+    "report:no-build": "node scripts/bundle-report.mjs",
     "clean": "rm -rf wasm dist node_modules/.vite"
   },
 

@@ -8,12 +8,15 @@
  * `App.tsx` or its descendants, not here.
  *
  * Phase 1.16a smoke goal: confirm Solid mounts, the WASM loader runs
- * once, and the Rust core round-trip renders. Phase 1.16b adds
- * routing, signup/login, contacts and 1×1 chat.
+ * once, and the Rust core round-trip renders. Phase 1.16b added
+ * routing, signup/login, contacts and 1×1 chat. Phase 1.16f2 wires
+ * the service worker registration *after* the app mounts so a
+ * registration failure / network blip can't block the first paint.
  */
 import { render } from "solid-js/web";
 import App from "./App";
 import "./styles.css";
+import { registerServiceWorker } from "./sw/register";
 
 const root = document.getElementById("root");
 if (root === null) {
@@ -23,3 +26,8 @@ if (root === null) {
 }
 
 render(() => <App />, root);
+
+// Fire-and-forget — the helper logs and swallows its own errors.
+// Skipped in dev builds (Vite HMR + SW conflict) and in browsers
+// without `navigator.serviceWorker`.
+void registerServiceWorker();
