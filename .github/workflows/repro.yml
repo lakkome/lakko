@@ -79,3 +79,78 @@ jobs:
             echo "(this job is non-blocking until we tune flags for stable byte-identicality)"
             exit 1
           fi
+
+  web-repro:
+    # Phase 1.17b — apps/web reproducibility verifier. Mirror of
+    # the Rust `repro` job above, scoped to the Vite + wasm-pack
+    # pipeline. Catches non-determinism creeping in via:
+    #   * `npm install` not respecting package-lock.json (we run
+    #     `npm ci` to enforce);
+    #   * wasm-pack toolchain drift (pinned to `^0.13` — same pin
+    #     as the per-push web-build job);
+    #   * a Vite plugin baking wall-clock time into `dist/`;
+    #   * `post-build.mjs` / `build-sw.mjs` reading anything other
+    #     than the bytes they hash (they don't today, but a
+    #     regression here is exactly what this job catches).
+    #
+    # Empirically reproducible at 1.17b: two clean local builds
+    # produce a byte-identical `apps/web/dist/`. Unlike the Rust
+    # job above (where uniffi 0.28's proc-macros leave one flaky
+    # rlib), the Vite + wasm-pack pipeline has no known
+    # non-determinism today. Ship it as a real gate; if a future
+    # dep bump or Vite reshape drifts the output, the weekly cron
+    # surfaces it within a week and we either fix the regression
+    # or add a `KNOWN_FLAKY` filter (mirroring the Rust pattern).
+    name: web reproducible build verifier
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/web
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+      - name: Install wasm-pack
+        # Same pin as the per-push web-build / wasm-test jobs.
+        run: cargo install wasm-pack --version ^0.13 --locked
+        working-directory: ${{ github.workspace }}
+      - name: First build
+        run: |
+          npm ci
+          npm run build
+          (cd dist && find . -type f | sort | xargs sha256sum) > /tmp/web-build-a.txt
+          echo "===== Web build A hashes =====" && cat /tmp/web-build-a.txt
+      - name: Wipe build outputs
+        # Drop the npm + Vite caches too — `node_modules/.vite`
+        # and `wasm/` would otherwise short-circuit the second
+        # build into a partial recompile.
+        run: |
+          rm -rf dist wasm node_modules
+      - name: Second build
+        run: |
+          npm ci
+          npm run build
+          (cd dist && find . -type f | sort | xargs sha256sum) > /tmp/web-build-b.txt
+          echo "===== Web build B hashes =====" && cat /tmp/web-build-b.txt
+      - name: Compare hashes
+        run: |
+          # Source maps embed the host file paths of the inputs,
+          # which `vite build` derives relative to `apps/web/`.
+          # Both builds run from the same cwd in the same checkout,
+          # so paths match — but if a future Vite reshape drifts
+          # this, add a filter line here. For now no known-flaky
+          # entries are expected.
+          if diff -u /tmp/web-build-a.txt /tmp/web-build-b.txt; then
+            echo "✅ Reproducible: byte-identical apps/web/dist between two clean builds"
+          else
+            echo "⚠️ Non-reproducible: apps/web/dist differs between builds"
+            echo "(this job is non-blocking until web byte-identicality is stable)"
+            exit 1
+          fi
