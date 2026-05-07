@@ -271,7 +271,7 @@ If it is running, leave it. Phase 3 (calls) will integrate with it.
 
 ## Daily ops
 
-### Deploy
+### Deploy — Rust services
 
 From the Mac:
 
@@ -280,6 +280,70 @@ just deploy
 ```
 
 (needs an ssh key for `lakkome@lakko.me`.) What it does: ssh-es to the VPS and runs `~/lakko/infra/scripts/deploy.sh` as `lakkome`. The script does `git pull` → `cargo build --release` → `sudo install /usr/local/bin/...` → `sudo systemctl restart lakko.target`.
+
+### Deploy — apps/web (Phase 1.17c)
+
+**Primary path:** GitHub Actions. Open the repo → Actions → "Deploy apps/web" → Run workflow. The CI runner builds in a controlled environment, ssh-rsyncs `dist/` into `/var/www/lakko-web/`, and reloads nginx. Artefact is byte-identical to a local build (verified weekly by `web-repro` in `.github/workflows/repro.yml`).
+
+**Fallback** (CI down, unmerged branch, etc.): from the Mac:
+
+```bash
+just deploy-web
+```
+
+Same end-state — local `npm run build` → ssh-rsync → reload — using your own ssh agent.
+
+#### One-time bootstrap on the VPS
+
+The deploy paths assume the following are already in place on `lakko.me`:
+
+```bash
+# 1. Web root, owned by lakkome (writable for the rsync), readable by nginx.
+sudo install -d -o lakkome -g www-data -m 755 /var/www/lakko-web
+
+# 2. Sudoers entry — passwordless atomic install + nginx reload, scoped to
+#    the exact commands the deploy paths invoke (rsync's args matter; sudo
+#    matches them literally).
+sudo tee /etc/sudoers.d/lakko-deploy-web <<'EOF'
+lakkome ALL=(root) NOPASSWD: /usr/bin/rsync -a --delete /tmp/lakko-web-stage/ /var/www/lakko-web/, /usr/bin/systemctl reload nginx
+EOF
+sudo chmod 440 /etc/sudoers.d/lakko-deploy-web
+
+# 3. nginx vhost — drop-in from the repo.
+sudo cp /home/lakkome/lakko/infra/nginx/sites-available/lakko.conf /etc/nginx/sites-available/
+sudo cp /home/lakkome/lakko/infra/nginx/sites-available/lakko-proxy-headers.inc /etc/nginx/sites-available/
+sudo ln -sf /etc/nginx/sites-available/lakko.conf /etc/nginx/sites-enabled/lakko.conf
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+#### One-time bootstrap on GitHub (CI deploy only)
+
+Generate a dedicated Ed25519 deploy key — DO NOT reuse your personal one:
+
+```bash
+ssh-keygen -t ed25519 -f /tmp/lakko_ci_deploy -N "" \
+    -C "lakko-ci-deploy-$(date +%Y%m%d)"
+ssh-keyscan -H lakko.me > /tmp/lakko_known_hosts
+```
+
+Add the public half on the VPS:
+
+```bash
+cat /tmp/lakko_ci_deploy.pub | ssh lakkome@lakko.me 'cat >> ~/.ssh/authorized_keys'
+```
+
+Add **two repository secrets** (Settings → Secrets and variables → Actions → New repository secret):
+
+- `LAKKO_DEPLOY_SSH_KEY` — paste the contents of `/tmp/lakko_ci_deploy` (the **private** half).
+- `LAKKO_DEPLOY_KNOWN_HOSTS` — paste the contents of `/tmp/lakko_known_hosts`.
+
+Wipe the local copies once the secrets are saved:
+
+```bash
+shred -u /tmp/lakko_ci_deploy /tmp/lakko_ci_deploy.pub /tmp/lakko_known_hosts
+```
+
+Smoke the workflow once via "Run workflow" → check the run logs.
 
 ### Restart a single service
 

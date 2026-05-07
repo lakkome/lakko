@@ -1,0 +1,154 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+# Phase 1.17c — apps/web deploy from GitHub Actions to the
+# Hetzner VPS. Runs on **manual dispatch only** today; flip on
+# `push: branches: [main]` later for continuous deploy once the
+# repro verifier (1.17b) has shown a few clean weeks.
+#
+# Why CI-driven instead of `just deploy-web` from the dev box:
+#
+#   * The VPS doesn't need a Node + wasm-pack toolchain. CI
+#     runners have everything; the box stays minimal.
+#   * Reproducibility chain: 1.17b confirms the GH-runner build
+#     produces byte-identical `dist/` to a dev-box build. CI
+#     becomes the single trusted build environment, the dev box
+#     is no longer in the supply chain.
+#   * Every deploy is a tracked workflow run with logs,
+#     attestable timestamps, and a re-runnable artifact. No
+#     interactive ssh sessions in the audit trail.
+#
+# Required secrets (configure under Settings → Secrets and
+# variables → Actions):
+#
+#   * `LAKKO_DEPLOY_SSH_KEY`     — Ed25519 private key. The
+#     matching `*.pub` lives in
+#     `/home/lakkome/.ssh/authorized_keys` on the VPS, restricted
+#     by `command="..."` and `from="<github runner cidr>"` if you
+#     want the extra paranoia (GH publishes their IP ranges).
+#   * `LAKKO_DEPLOY_KNOWN_HOSTS` — output of
+#     `ssh-keyscan -H lakko.me`, captured once and pinned. Stops
+#     a CI runner from MITM-pinning a substituted host key on
+#     first connect.
+#
+# Required VPS-side bootstrap (one-time, see
+# `infra/README.md::Web deploy bootstrap`):
+#
+#   * /var/www/lakko-web/ exists and is writable by `lakkome`.
+#   * `lakkome` has sudoers entries for the rsync + reload pair
+#     (NOPASSWD, scoped to the exact commands).
+#   * nginx config from `infra/nginx/sites-available/lakko.conf`
+#     is installed and active.
+
+name: Deploy apps/web
+
+on:
+  workflow_dispatch:
+    inputs:
+      smoke_url:
+        description: "URL to curl after deploy as a sanity probe."
+        required: false
+        default: "https://lakko.me/health"
+
+concurrency:
+  # Two simultaneous deploys would race on rsync. Serialise.
+  group: deploy-web
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  deploy:
+    name: build + deploy apps/web
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/web
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+
+      - name: Install wasm-pack
+        run: cargo install wasm-pack --version ^0.13 --locked
+        working-directory: ${{ github.workspace }}
+
+      - name: Build apps/web
+        # Full chain: build:wasm (wasm-pack release) → tsc
+        # --noEmit → vite build → post-build.mjs (SRI + CSP) →
+        # build-sw.mjs (precache manifest).
+        run: |
+          npm ci
+          npm run build
+
+      - name: Sanity-check dist/
+        # If post-build.mjs or build-sw.mjs silently broke, the
+        # placeholders survive into dist/. Refusing to deploy on
+        # that signal saves a same-day rollback.
+        run: |
+          grep -q 'integrity="sha384-' dist/index.html
+          if grep -q '__BUILD_VERSION__\|__PRECACHE_MANIFEST__' dist/sw.js; then
+            echo "ERROR: dist/sw.js still carries placeholders"
+            exit 1
+          fi
+
+      - name: Configure SSH
+        # Write the deploy key into ~/.ssh and pin the host key.
+        # Avoids any third-party action — the surface is
+        # auditable from this file alone.
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "${{ secrets.LAKKO_DEPLOY_SSH_KEY }}" > ~/.ssh/lakko_deploy
+          chmod 600 ~/.ssh/lakko_deploy
+          printf '%s\n' "${{ secrets.LAKKO_DEPLOY_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
+          chmod 644 ~/.ssh/known_hosts
+
+      - name: Rsync dist/ to VPS staging
+        # Stage in /tmp first so an interrupted rsync never leaves
+        # /var/www/lakko-web/ in a half-state. The atomic move
+        # happens in the next step under sudo.
+        run: |
+          rsync -a --delete \
+            -e "ssh -i ~/.ssh/lakko_deploy -o BatchMode=yes" \
+            dist/ lakkome@lakko.me:/tmp/lakko-web-stage/
+
+      - name: Atomic install + nginx reload
+        # Pre-reqs in /etc/sudoers.d/lakko-deploy-web:
+        #   lakkome ALL=(root) NOPASSWD: \
+        #     /usr/bin/rsync -a --delete /tmp/lakko-web-stage/ /var/www/lakko-web/, \
+        #     /usr/bin/systemctl reload nginx
+        run: |
+          ssh -i ~/.ssh/lakko_deploy -o BatchMode=yes lakkome@lakko.me '
+            set -euo pipefail
+            sudo /usr/bin/rsync -a --delete /tmp/lakko-web-stage/ /var/www/lakko-web/
+            sudo /usr/bin/systemctl reload nginx
+          '
+
+      - name: Smoke test
+        # Negative cache-busting query string makes sure we hit
+        # the freshly-deployed origin, not a stale CDN edge.
+        run: |
+          curl -fsS --max-time 10 "${{ github.event.inputs.smoke_url }}?cb=${{ github.run_id }}"
+        working-directory: ${{ github.workspace }}
+
+      - name: Wipe deploy key
+        # Defensive — `runs-on: ubuntu-latest` instances are
+        # destroyed after the run, but a no-op here is cheap and
+        # surfaces a key-handling regression if someone changes
+        # the runner shape.
+        if: always()
+        run: rm -f ~/.ssh/lakko_deploy
+        working-directory: ${{ github.workspace }}

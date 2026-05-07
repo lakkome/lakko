@@ -194,6 +194,42 @@ vps_host := env_var_or_default("LAKKO_VPS_HOST", "lakko.me")
 deploy:
     ssh {{vps_user}}@{{vps_host}} '~/lakko/infra/scripts/deploy.sh'
 
+# Phase 1.17c — apps/web deploy fallback for the dev box.
+#
+# **Primary path is the GitHub Actions workflow** (manual
+# dispatch under Actions → "Deploy apps/web"). The CI runner
+# builds in a controlled env, ssh-rsyncs to /var/www/lakko-web/,
+# reloads nginx. This recipe is the **fallback** for when CI is
+# down, you're on a flight, or you want to ship an unmerged
+# branch fast.
+#
+# Both paths converge on the same VPS-side contract:
+#
+#   rsync local-dist/ → /tmp/lakko-web-stage/    (over ssh)
+#   sudo rsync /tmp/staging/ → /var/www/lakko-web/   (atomic)
+#   sudo systemctl reload nginx
+#
+# Pre-reqs:
+#   * Local: Node 20 + wasm-pack ^0.13 in $PATH (same as CI).
+#   * VPS: sudoers entry for the rsync + reload pair (see
+#     infra/README.md::Web deploy bootstrap).
+#   * VPS: /var/www/lakko-web/ exists.
+#   * Your ssh agent has the key matching lakkome's
+#     authorized_keys (the same ssh setup as `just deploy`).
+deploy-web:
+    cd apps/web && npm ci && npm run build
+    # Sanity: post-build SRI/CSP pass + build-sw.mjs must have
+    # touched the artefacts. Refuse to push a half-baked tree.
+    grep -q 'integrity="sha384-' apps/web/dist/index.html
+    ! grep -q '__BUILD_VERSION__\|__PRECACHE_MANIFEST__' apps/web/dist/sw.js
+    rsync -a --delete apps/web/dist/ {{vps_user}}@{{vps_host}}:/tmp/lakko-web-stage/
+    ssh {{vps_user}}@{{vps_host}} 'set -euo pipefail; \
+        sudo /usr/bin/rsync -a --delete /tmp/lakko-web-stage/ /var/www/lakko-web/; \
+        sudo /usr/bin/systemctl reload nginx'
+    # Smoke probe — cache-busting query string forces a hit on
+    # the freshly-deployed origin.
+    curl -fsS --max-time 10 "https://{{vps_host}}/health?cb=$(date +%s)"
+
 # Restart all Lakko services via the systemd target.
 restart:
     ssh {{vps_user}}@{{vps_host}} 'sudo systemctl restart lakko.target'
