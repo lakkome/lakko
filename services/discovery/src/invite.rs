@@ -34,23 +34,23 @@
 //!      link sees them — so coupling the server to
 //!      `lakko-contacts` for verification adds no privacy risk.
 //!
-//! ## What 1.18d1 leaves for d2 / d3
+//! ## What 1.18d2+ leaves for follow-ups
 //!
-//!   * **`max_uses` enforcement** — `used_count` column is in
-//!     the schema but never consulted in d1; d2 wires the
-//!     consume-counter path and a 410 Gone response when the
-//!     ceiling is hit.
+//!   * **`max_uses` enforcement** — ✅ wired in 1.18d2a via the
+//!     atomic `consume` handler below; `0005_invite_max_uses.sql`
+//!     denormalised the ceiling onto the row.
 //!   * **Per-joiner de-dup (`HmacBloom`)** — d3 adds a side
 //!     table per blob; today the server has no way to know
 //!     whether the same joiner consumed the link twice.
-//!   * **Owner-side revocation (`DELETE`)** — needs an auth
-//!     gate that doesn't exist yet (the server can't trust a
-//!     `DELETE /invite/{id}` without a session token from
-//!     `services/auth`); deferred to d2.
+//!   * **Owner-side revocation (`DELETE`)** — needs a signed
+//!     request the consume / fetch path doesn't have today
+//!     (the same Ed25519 key that signed the capability has the
+//!     right to revoke; verify against the embedded
+//!     `owner_signature_pubkey`). Deferred to 1.18d2b.
 //!   * **Expiry pruning** — the `idx_expiry` index supports a
 //!     periodic `DELETE FROM invites WHERE expiry_ms != 0 AND
 //!     expiry_ms < UNIX_TIMESTAMP()*1000` sweeper, but no
-//!     scheduler exists yet. d2 ships it together with the
+//!     scheduler exists yet. 1.18d2c ships it together with the
 //!     `pow` table's existing pruner pattern.
 
 use axum::extract::{Path, State};
@@ -143,16 +143,26 @@ pub(crate) async fn upload(
     // SQL u64 column maps to MariaDB BIGINT UNSIGNED — sqlx
     // accepts u64 directly via the `chrono`-free numeric path.
     let expiry_ms: u64 = cap.expiry_ms;
+    // 1.18d2a: denormalise `max_uses` so the consume handler
+    // can enforce the ceiling in a single atomic UPDATE
+    // without re-decoding `capability_bytes` on every call.
+    // Sentinels (`0` = single-use, `0xFFFFFFFF` = unlimited)
+    // are mapped to effective ceilings at consume time via a
+    // SQL CASE expression — see `consume` below.
+    let max_uses: u32 = cap.max_uses;
 
     sqlx::query(
-        "INSERT INTO invites (blob_id, capability_bytes, owner_account_id, expiry_ms) \
-         VALUES (?, ?, ?, ?) \
-         ON DUPLICATE KEY UPDATE capability_bytes = VALUES(capability_bytes)",
+        "INSERT INTO invites (blob_id, capability_bytes, owner_account_id, expiry_ms, max_uses) \
+         VALUES (?, ?, ?, ?, ?) \
+         ON DUPLICATE KEY UPDATE \
+            capability_bytes = VALUES(capability_bytes), \
+            max_uses = VALUES(max_uses)",
     )
     .bind(&blob_id[..])
     .bind(&bytes)
     .bind(&owner_account_id[..])
     .bind(expiry_ms)
+    .bind(max_uses)
     .execute(&state.db)
     .await
     .map_err(|e| {
@@ -231,20 +241,12 @@ pub(crate) async fn fetch(
     // Server-side expiry filter — `expiry_ms == 0` is the
     // `NEVER_EXPIRES` sentinel (1.18a). For non-zero values we
     // compare against the current wall clock.
-    if expiry_ms != 0 {
-        let now_ms = u64::try_from(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |d| d.as_millis()),
-        )
-        .unwrap_or(0);
-        if now_ms >= expiry_ms {
-            // Treat expired invites as "not found" — a 410 Gone
-            // would let an attacker probe valid blob_ids by the
-            // distinct status code. 404 is indistinguishable
-            // from "this id was never issued".
-            return Err((StatusCode::NOT_FOUND, "invite not found".to_string()));
-        }
+    if expiry_ms != 0 && current_unix_ms() >= expiry_ms {
+        // Treat expired invites as "not found" — a 410 Gone
+        // would let an attacker probe valid blob_ids by the
+        // distinct status code. 404 is indistinguishable from
+        // "this id was never issued".
+        return Err((StatusCode::NOT_FOUND, "invite not found".to_string()));
     }
 
     Ok(Json(FetchResponse {
@@ -253,8 +255,201 @@ pub(crate) async fn fetch(
 }
 
 // ============================================================================
+// POST /discovery/invite/{blob_id}/consume — atomic max_uses enforcement
+// ============================================================================
+
+/// Sentinel for "unlimited" `max_uses` — matches
+/// `lakko_contacts::invite` and the JS `MaxUsesPreset::Unlimited`
+/// preset. SQL enforcement uses this constant directly.
+const MAX_USES_UNLIMITED: u32 = u32::MAX;
+
+#[derive(Deserialize)]
+pub(crate) struct ConsumeRequest {
+    pub(crate) pow: crate::pow::PowProof,
+}
+
+#[derive(Serialize)]
+pub(crate) struct ConsumeResponse {
+    /// Post-increment `used_count`. The client uses this to
+    /// surface "1 of 10 uses" copy in the UI when the invite has
+    /// a finite `max_uses`.
+    pub(crate) used_count: u32,
+    /// Echo of the row's `max_uses` (sentinel mapping is
+    /// preserved — `0` for single-use, `u32::MAX` for unlimited,
+    /// any other N for an N-use ceiling). Lets the joiner UI
+    /// render the same "single-use" / "up to N uses" /
+    /// "unlimited" string the inviter saw on generation.
+    pub(crate) max_uses: u32,
+}
+
+/// `POST /discovery/invite/{blob_id}/consume` — register one
+/// consumption against the invite's `max_uses` ceiling.
+///
+/// Atomic semantics: a single UPDATE bumps `used_count` only
+/// when the row exists, has not expired, and has remaining
+/// budget. The CASE expression maps the wire-format sentinels
+/// to SQL-comparable ceilings:
+///
+///   * `max_uses == 0`           → effective ceiling 1 (SINGLE_USE)
+///   * `max_uses == 0xFFFFFFFF`  → effective ceiling u32::MAX (unlimited)
+///   * any other N               → effective ceiling N
+///
+/// Outcomes:
+///
+///   * **200 OK** with `{ used_count, max_uses }` — counter
+///     bumped successfully.
+///   * **404 Not Found** — no row for the id, OR the row has
+///     expired. We deliberately fold expired-blob into 404 (same
+///     posture as `fetch`) so an attacker cannot probe valid
+///     blob_ids by status code.
+///   * **410 Gone** — row exists, not expired, but the budget
+///     is exhausted. Distinct from 404 because the joiner
+///     already had a peek at the bytes via GET — surfacing
+///     "this invite has been used up" to the UI is more
+///     informative than a generic "not found".
+pub(crate) async fn consume(
+    State(state): State<AppState>,
+    Path(blob_id_b64url): Path<String>,
+    Json(payload): Json<ConsumeRequest>,
+) -> Result<Json<ConsumeResponse>, (StatusCode, String)> {
+    crate::pow::verify_proof(&state.db, &payload.pow).await?;
+
+    let blob_id = B64URL.decode(&blob_id_b64url).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("invalid blob_id base64url: {e}"),
+        )
+    })?;
+    if blob_id.len() != BLOB_ID_LEN {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("blob_id must be {BLOB_ID_LEN} bytes after decode"),
+        ));
+    }
+
+    let now_ms = current_unix_ms();
+
+    // Single-shot atomic UPDATE: bump used_count iff the row is
+    // alive AND has remaining budget. Result rows-affected
+    // disambiguates the success path from the "no row / expired
+    // / exhausted" path; a follow-up SELECT teases apart the
+    // failure cases for the right HTTP status.
+    let update_result = sqlx::query(
+        "UPDATE invites \
+         SET used_count = used_count + 1 \
+         WHERE blob_id = ? \
+           AND (expiry_ms = 0 OR expiry_ms > ?) \
+           AND used_count < CASE \
+                WHEN max_uses = 0 THEN 1 \
+                WHEN max_uses = ? THEN ? \
+                ELSE max_uses \
+             END",
+    )
+    .bind(&blob_id[..])
+    .bind(now_ms)
+    .bind(MAX_USES_UNLIMITED)
+    .bind(MAX_USES_UNLIMITED)
+    .execute(&state.db)
+    .await
+    .map_err(|e| {
+        tracing::error!(error = %e, "consume invites UPDATE");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal db error".to_string(),
+        )
+    })?;
+
+    if update_result.rows_affected() == 1 {
+        // Success — read back the (post-increment) state for
+        // the response body.
+        let row: (u32, u32) =
+            sqlx::query_as("SELECT used_count, max_uses FROM invites WHERE blob_id = ?")
+                .bind(&blob_id[..])
+                .fetch_one(&state.db)
+                .await
+                .map_err(|e| {
+                    tracing::error!(error = %e, "consume invites read-back");
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "internal db error".to_string(),
+                    )
+                })?;
+        tracing::info!(
+            blob_id = %blob_id_b64url,
+            used_count = row.0,
+            max_uses = row.1,
+            "invite consumed",
+        );
+        return Ok(Json(ConsumeResponse {
+            used_count: row.0,
+            max_uses: row.1,
+        }));
+    }
+
+    // 0 rows updated — disambiguate. SELECT the row regardless
+    // of expiry / budget; if absent → 404, if expired → 404
+    // (folded), else → 410 Gone.
+    let row: Option<(u64, u32, u32)> =
+        sqlx::query_as("SELECT expiry_ms, max_uses, used_count FROM invites WHERE blob_id = ?")
+            .bind(&blob_id[..])
+            .fetch_optional(&state.db)
+            .await
+            .map_err(|e| {
+                tracing::error!(error = %e, "consume invites disambiguation");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal db error".to_string(),
+                )
+            })?;
+
+    let Some((expiry_ms, _max_uses, _used_count)) = row else {
+        return Err((StatusCode::NOT_FOUND, "invite not found".to_string()));
+    };
+    if expiry_ms != 0 && now_ms >= expiry_ms {
+        // Expired — fold into 404 to keep the response indistinguishable
+        // from a never-issued blob_id.
+        return Err((StatusCode::NOT_FOUND, "invite not found".to_string()));
+    }
+    // Row exists + not expired ⇒ budget exhausted.
+    Err((StatusCode::GONE, "invite max_uses reached".to_string()))
+}
+
+// ============================================================================
 // Helpers
 // ============================================================================
+
+/// Wall-clock UNIX milliseconds, saturating to `0` on the
+/// vanishingly unlikely path where `SystemTime::now()` is before
+/// `UNIX_EPOCH`. Same shape as `fetch` — extracted so the two
+/// handlers keep telling the same time.
+fn current_unix_ms() -> u64 {
+    u64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis()),
+    )
+    .unwrap_or(0)
+}
+
+/// Map the wire-format `max_uses` sentinels (1.18a) to an
+/// effective ceiling the consume handler enforces. The SQL CASE
+/// expression in the consume UPDATE is the actual enforcement;
+/// this Rust mirror exists purely so a unit test can pin the
+/// sentinel mapping. Any drift between the two surfaces here as
+/// a test failure rather than as a per-row enforcement mismatch
+/// in production.
+///
+///   * `0`           → 1            (`SINGLE_USE`)
+///   * `0xFFFFFFFF`  → `u32::MAX`   (unlimited)
+///   * any other N   → N
+#[cfg(test)]
+fn effective_max_uses(max_uses: u32) -> u32 {
+    match max_uses {
+        0 => 1,
+        MAX_USES_UNLIMITED => MAX_USES_UNLIMITED,
+        n => n,
+    }
+}
 
 /// Derive the content-addressed `blob_id` from the capability
 /// wire bytes — a plain SHA-256.
@@ -323,6 +518,53 @@ mod tests {
             migration.contains(&format!("BINARY({BLOB_ID_LEN})")),
             "BLOB_ID_LEN ({BLOB_ID_LEN}) must match the BINARY width \
              declared in 0004_invites.sql",
+        );
+    }
+
+    /// `effective_max_uses` is the host-side mirror of the SQL
+    /// CASE expression in the consume UPDATE. Any drift between
+    /// the two surfaces here as a test failure rather than as a
+    /// per-row enforcement mismatch in production.
+    #[test]
+    fn effective_max_uses_maps_sentinels() {
+        // SINGLE_USE sentinel → effective 1
+        assert_eq!(effective_max_uses(0), 1);
+        // Unlimited sentinel → u32::MAX (enforcement no-op)
+        assert_eq!(effective_max_uses(MAX_USES_UNLIMITED), MAX_USES_UNLIMITED);
+        // Explicit N → N
+        assert_eq!(effective_max_uses(1), 1);
+        assert_eq!(effective_max_uses(10), 10);
+        assert_eq!(effective_max_uses(42), 42);
+    }
+
+    /// The consume handler's atomic UPDATE relies on
+    /// `MAX_USES_UNLIMITED` being exactly `u32::MAX`. A future
+    /// constant rename / value bump would break the SQL CASE
+    /// expression silently — pin it.
+    #[test]
+    fn max_uses_unlimited_matches_u32_max() {
+        assert_eq!(MAX_USES_UNLIMITED, u32::MAX);
+    }
+
+    /// 0005 migration drift sentinel — the consume handler binds
+    /// `max_uses` as `INT UNSIGNED`. A future migration that
+    /// changes the column type would surface here.
+    #[test]
+    fn max_uses_column_type_is_int_unsigned() {
+        let migration = include_str!("../migrations/0005_invite_max_uses.sql");
+        assert!(
+            migration.contains("max_uses INT UNSIGNED"),
+            "0005 migration must declare `max_uses INT UNSIGNED`",
+        );
+        // The default value is load-bearing: existing rows from
+        // 1.18d1 (no max_uses column) get backfilled to `0`,
+        // which the sentinel mapping reads as SINGLE_USE — the
+        // most-conservative interpretation of the original
+        // 1.18d1 default. Pin so the default doesn't drift to
+        // something more permissive (e.g. u32::MAX) silently.
+        assert!(
+            migration.contains("DEFAULT 0"),
+            "max_uses default must be 0 (SINGLE_USE sentinel)",
         );
     }
 

@@ -48,6 +48,7 @@
 //! - `GET    /discovery/keypackage/{acct}`  — fetch public MLS KeyPackage (Phase 1.16e1)
 //! - `POST   /discovery/invite`             — upload InviteCapability blob (Phase 1.18d1)
 //! - `GET    /discovery/invite/{blob_id}`   — fetch InviteCapability blob (Phase 1.18d1)
+//! - `POST   /discovery/invite/{blob_id}/consume` — atomic max_uses bump (Phase 1.18d2a)
 
 #![forbid(unsafe_code)]
 
@@ -179,6 +180,12 @@ pub(crate) fn build_app(state: AppState) -> Router {
         // follow-up scope.
         .route("/discovery/invite", post(invite::upload))
         .route("/discovery/invite/{blob_id}", get(invite::fetch))
+        // Phase 1.18d2a — atomic max_uses enforcement. Decoupled
+        // from GET so a peek doesn't burn through the counter.
+        .route(
+            "/discovery/invite/{blob_id}/consume",
+            post(invite::consume),
+        )
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
