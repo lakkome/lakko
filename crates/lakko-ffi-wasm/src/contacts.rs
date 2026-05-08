@@ -487,9 +487,7 @@ pub fn sign_invite_revocation(
     let signing = SigningKey::from_seed(&seed);
 
     if blob_id.len() != BLOB_ID_LEN {
-        return Err(JsError::new(
-            &format!("blobId must be {BLOB_ID_LEN} bytes",),
-        ));
+        return Err(JsError::new(&format!("blobId must be {BLOB_ID_LEN} bytes")));
     }
     let mut blob_id_arr = [0u8; BLOB_ID_LEN];
     blob_id_arr.copy_from_slice(blob_id);

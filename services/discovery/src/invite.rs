@@ -48,11 +48,12 @@
 //!     the row. Replay-protected by a `signed_at_ms` window;
 //!     "not found" + "bad signature" both fold into 404 to
 //!     deny status-code probing.
-//!   * **Expiry pruning** — the `idx_expiry` index supports a
-//!     periodic `DELETE FROM invites WHERE expiry_ms != 0 AND
-//!     expiry_ms < UNIX_TIMESTAMP()*1000` sweeper, but no
-//!     scheduler exists yet. 1.18d2c ships it together with the
-//!     `pow` table's existing pruner pattern.
+//!   * **Expiry pruning** — ✅ wired in 1.18d2c via
+//!     `spawn_pruner` below. Hourly `DELETE FROM invites WHERE
+//!     expiry_ms != 0 AND expiry_ms < ?` keeps storage bloat
+//!     contained; `idx_expiry` from `0004_invites.sql` makes
+//!     the recurring sweep cheap. `expiry_ms = 0` rows
+//!     (NEVER_EXPIRES) are preserved by design.
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -632,6 +633,66 @@ fn within_replay_window(signed_at_ms: u64, now_ms: u64) -> bool {
     signed_at_ms.abs_diff(now_ms) <= REVOKE_REPLAY_WINDOW_MS
 }
 
+// ============================================================================
+// Background expiry pruner (Phase 1.18d2c)
+// ============================================================================
+
+/// How often the invite-expiry pruner wakes up. Invites
+/// typically live for hours or days (the UI presets are 1d /
+/// 7d / 30d), so an hourly sweep is proportionate — much
+/// shorter and we'd be hammering the DB for little value, much
+/// longer and the storage-bloat side leaks across deploys.
+/// `pow::PRUNE_INTERVAL` is 60 s for the same crate's
+/// short-lived challenges; the asymmetry is deliberate.
+const PRUNE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+
+/// Spawn a background task that periodically deletes expired
+/// invite blobs (Phase 1.18d2c). Closes the storage-bloat side
+/// of the table; the `idx_expiry` index from
+/// `0004_invites.sql` is the load-bearing piece (without it
+/// the periodic `WHERE expiry_ms != 0 AND expiry_ms < ?`
+/// scan would do a full-table seq each tick).
+///
+/// `expiry_ms = 0` is the `NEVER_EXPIRES` sentinel from
+/// `lakko_contacts::invite` — those rows are deliberately
+/// preserved (the inviter explicitly opted in to a
+/// stalking-risk shape per ADR-0005 §13.3; the codec layer
+/// surfaces a UI warning, the storage layer does not
+/// second-guess).
+///
+/// Mirror of `pow::spawn_pruner` — same shape (interval +
+/// loop + log + carry on), different cadence (1 h vs 60 s) to
+/// match the typical invite lifetime. Aborted when the
+/// service stops; the `_invite_pruner` handle in `main.rs`
+/// owns the abort.
+pub(crate) fn spawn_pruner(pool: sqlx::MySqlPool) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(PRUNE_INTERVAL);
+        // The first tick fires immediately — skip it. We don't
+        // want a startup-time prune racing with the first
+        // upload.
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            let now_ms = current_unix_ms();
+            // `expiry_ms` column is `BIGINT UNSIGNED` —
+            // matching the `u64` binds elsewhere in this
+            // module (upload / fetch / consume).
+            let result = sqlx::query("DELETE FROM invites WHERE expiry_ms != 0 AND expiry_ms < ?")
+                .bind(now_ms)
+                .execute(&pool)
+                .await;
+            match result {
+                Ok(r) if r.rows_affected() > 0 => {
+                    tracing::info!(rows = r.rows_affected(), "pruned expired invites",);
+                },
+                Ok(_) => {},
+                Err(e) => tracing::warn!(error = %e, "invites prune failed"),
+            }
+        }
+    })
+}
+
 /// Derive the content-addressed `blob_id` from the capability
 /// wire bytes — a plain SHA-256.
 fn blob_id_for(capability_bytes: &[u8]) -> [u8; BLOB_ID_LEN] {
@@ -785,6 +846,15 @@ mod tests {
     // server `revoke` handler verifies against the same shared
     // helper; a layout drift surfaces as a `lakko-contacts`
     // test failure first.
+
+    /// 1.18d2c pruner cadence pin. The constant is also
+    /// referenced in the function-level doc above; pin in code
+    /// so a future bump (e.g. shortening to 5 min on a hot
+    /// table) is a deliberate choice, not a silent edit.
+    #[test]
+    fn prune_interval_is_one_hour() {
+        assert_eq!(PRUNE_INTERVAL, std::time::Duration::from_secs(3600));
+    }
 
     /// `within_replay_window` is server-side only — the helper
     /// doesn't exist on the client side at all (the client

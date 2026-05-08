@@ -138,6 +138,13 @@ async fn main() -> Result<()> {
     };
 
     let _pow_pruner = pow::spawn_pruner(pool.clone());
+    // Phase 1.18d2c — hourly sweep of expired invite blobs.
+    // The `idx_expiry` index from migration 0004 keeps the
+    // recurring DELETE cheap; `expiry_ms = 0` (NEVER_EXPIRES)
+    // rows are preserved by design — the codec layer surfaces
+    // the stalking-risk warning, the storage layer doesn't
+    // second-guess.
+    let _invite_pruner = invite::spawn_pruner(pool.clone());
 
     let app = build_app(state);
 
