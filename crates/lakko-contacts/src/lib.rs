@@ -59,8 +59,9 @@ pub mod request;
 
 pub use error::{ContactError, Result};
 pub use invite::{
-    revoke_canonical_bytes, sign_revocation, InviteCapability, BLOB_ID_LEN, MAX_LABEL_LEN,
-    NEVER_EXPIRES, REVOKE_DOMAIN_V1, REVOKE_REPLAY_WINDOW_MS, SINGLE_USE,
+    compute_joiner_tag, revoke_canonical_bytes, sign_revocation, InviteCapability, BLOB_ID_LEN,
+    JOINER_TAG_LEN, JOINER_TAG_SALT_DOMAIN_V1, MAX_LABEL_LEN, NEVER_EXPIRES, REVOKE_DOMAIN_V1,
+    REVOKE_REPLAY_WINDOW_MS, SINGLE_USE,
 };
 pub use pseudonym::{Direction, IdentityPseudonym, PerRelationship, StrangerInbox, PSEUDONYM_LEN};
 pub use request::{compose, decode_and_verify, open_envelope, ContactRequest, ACCOUNT_ID_LEN};

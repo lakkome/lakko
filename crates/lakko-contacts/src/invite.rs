@@ -196,6 +196,87 @@ pub fn sign_revocation(
     signing.sign(&canonical).to_bytes()
 }
 
+// ============================================================================
+// Per-joiner consume tag (Phase 1.18d3a) — server-blind dedup
+// ============================================================================
+
+/// Domain-separator prefix for the salt the joiner-tag HMAC
+/// uses (Phase 1.18d3). Versioned so a future scheme bump
+/// (e.g. switching from HMAC-SHA-256 to HMAC-BLAKE3) gets a
+/// fresh prefix without colliding with old tags.
+pub const JOINER_TAG_SALT_DOMAIN_V1: &[u8] = b"lakko-invite-bloom-salt/v1\x00";
+
+/// Length of a joiner-tag — HMAC-SHA-256 output, 32 bytes.
+pub const JOINER_TAG_LEN: usize = 32;
+
+/// Compute the per-joiner consume-dedup tag for a given
+/// `(capability_bytes, joiner_account_id)` pair.
+///
+/// Layout:
+///
+/// ```text
+/// salt = SHA-256(JOINER_TAG_SALT_DOMAIN_V1 || capability_bytes)   // 32 bytes
+/// tag  = HMAC-SHA-256(salt, joiner_account_id)                    // 32 bytes
+/// ```
+///
+/// The double-stage construction (SHA-256 → HMAC) gives us:
+///
+///   * **Per-blob unique salt** — same joiner against two
+///     different invites yields two different tags; the
+///     server cannot link the two consume events.
+///   * **Server-blindness** — server stores only the 32-byte
+///     `tag` per `(blob_id, tag)` row; it never sees the raw
+///     `joiner_account_id` and cannot reverse the HMAC to
+///     recover it (one-way).
+///   * **Determinism** — same `(capability, account_id)` pair
+///     always produces the same tag, so a re-consume from the
+///     same joiner conflicts on the row's PK and the server
+///     idempotently returns "already consumed" without
+///     bumping the counter.
+///   * **No wire-format bump** — salt is derived from
+///     `capability_bytes` (which the joiner already has after
+///     decoding the URL slug), so 1.18a's wire format stays
+///     unchanged.
+///
+/// Privacy ceiling: an attacker holding the capability bytes
+/// AND a candidate `joiner_account_id` can recompute the tag
+/// and submit it as a consume. The server's PK conflict
+/// disambiguates "joiner X has consumed" from "joiner X has
+/// not consumed", which is a probing oracle. PoW + rate
+/// limits on consume attempts mitigate at scale; full
+/// privacy against a determined attacker requires an OPRF
+/// step the server runs blind, which is the deferred
+/// alternative noted in the ROADMAP.
+///
+/// Pure deterministic helper. Both web client (via wasm-bindgen)
+/// and server (verifying tag uniqueness) drive the same
+/// function — no JS / SQL mirror to drift.
+#[must_use]
+pub fn compute_joiner_tag(
+    capability_bytes: &[u8],
+    joiner_account_id: &[u8],
+) -> [u8; JOINER_TAG_LEN] {
+    use lakko_crypto::hash::{hmac_sha256, sha256};
+
+    // Stage 1: derive a per-blob salt from the capability
+    // bytes. Using `sha256` (not BLAKE3) here keeps the
+    // protocol surface in lock-step with the rest of the
+    // invite codec — `blob_id` is also SHA-256-of-bytes
+    // (server-side, see services/discovery), so the salt and
+    // the id share the same hash family.
+    let mut salt_input =
+        Vec::with_capacity(JOINER_TAG_SALT_DOMAIN_V1.len() + capability_bytes.len());
+    salt_input.extend_from_slice(JOINER_TAG_SALT_DOMAIN_V1);
+    salt_input.extend_from_slice(capability_bytes);
+    let salt = sha256(&salt_input);
+
+    // Stage 2: HMAC the joiner's account_id under the salt.
+    // The `joiner_account_id` is opaque to this helper — UUIDv7
+    // is the documented shape but the function works for any
+    // byte slice.
+    hmac_sha256(&salt, joiner_account_id)
+}
+
 /// A composed invite capability, ready to wire-encode into a URL.
 ///
 /// Sender side: produced by [`compose`].
@@ -718,6 +799,61 @@ mod tests {
         // revocation failures with no distinguishable error
         // code (server folds bad-window into 400). Pin.
         assert_eq!(REVOKE_REPLAY_WINDOW_MS, 600_000);
+    }
+
+    // ----------------------------------------------------------------
+    // Per-joiner consume tag (Phase 1.18d3a)
+    // ----------------------------------------------------------------
+
+    #[test]
+    fn joiner_tag_is_deterministic() {
+        // Same inputs → same output. This is the load-bearing
+        // contract: a re-consume from the same joiner against
+        // the same capability MUST collide on the server's PK
+        // for idempotent dedup to work.
+        let cap = vec![0x01u8; 200];
+        let acct = [0xA1u8; 16];
+        let a = compute_joiner_tag(&cap, &acct);
+        let b = compute_joiner_tag(&cap, &acct);
+        assert_eq!(a, b);
+        assert_eq!(a.len(), JOINER_TAG_LEN);
+    }
+
+    #[test]
+    fn joiner_tag_changes_with_capability() {
+        // Same joiner + different capability → different tag.
+        // Per ADR-0005 §13.7's anti-correlation property: the
+        // server cannot link two consume events from the same
+        // joiner against different invites.
+        let cap_a = vec![0x01u8; 200];
+        let mut cap_b = cap_a.clone();
+        cap_b[0] ^= 0x01;
+        let acct = [0xA1u8; 16];
+        let a = compute_joiner_tag(&cap_a, &acct);
+        let b = compute_joiner_tag(&cap_b, &acct);
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn joiner_tag_changes_with_account_id() {
+        // Same capability + different joiners → different tags.
+        // This is the basic dedup contract: server's PK on
+        // (blob_id, tag) only catches repeats from the *same*
+        // joiner.
+        let cap = vec![0x01u8; 200];
+        let a = compute_joiner_tag(&cap, &[0xA1u8; 16]);
+        let b = compute_joiner_tag(&cap, &[0xA2u8; 16]);
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn joiner_tag_layout_pin() {
+        // Domain prefix 26 bytes + NUL = 27. Salt is SHA-256
+        // (32 bytes); tag is HMAC-SHA-256 (32 bytes). Pin so a
+        // future refactor that drifts the prefix surfaces here.
+        assert_eq!(JOINER_TAG_SALT_DOMAIN_V1.len(), 27);
+        assert_eq!(JOINER_TAG_SALT_DOMAIN_V1, b"lakko-invite-bloom-salt/v1\x00");
+        assert_eq!(JOINER_TAG_LEN, 32);
     }
 
     #[test]

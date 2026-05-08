@@ -34,6 +34,38 @@ pub fn sha256(input: &[u8]) -> [u8; DIGEST_LEN] {
     hasher.finalize().into()
 }
 
+/// HMAC-SHA-256 of `message` under `key` — RFC 2104 with SHA-256 as the
+/// underlying hash. Use for protocol interop where the spec mandates HMAC
+/// over a non-BLAKE3 hash; prefer [`blake3_keyed()`] for new internal
+/// designs.
+///
+/// `key` is accepted as `&[u8]` rather than a fixed 32-byte array because
+/// HMAC's spec admits keys of arbitrary length (RFC 2104 §2 — keys longer
+/// than the block size are pre-hashed; shorter keys are zero-padded). The
+/// caller is responsible for providing a key with at least the security
+/// margin the surrounding protocol requires.
+///
+/// `message.len()` is unbounded — HMAC is streaming-safe.
+///
+/// # Panics
+///
+/// Never. The underlying `Hmac::<Sha256>::new_from_slice` is documented
+/// to accept arbitrary key lengths (its only error variant exists for
+/// fixed-key-size MACs, which HMAC is not). The unwrap is therefore
+/// infallible by construction; we surface it via `expect` rather than
+/// `unwrap` so a future `hmac` API change that adds real failure modes
+/// shows up as a clear error message rather than a generic panic.
+#[must_use]
+pub fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; DIGEST_LEN] {
+    use hmac::{Hmac, Mac as _};
+    use sha2::Sha256;
+
+    let mut mac = Hmac::<Sha256>::new_from_slice(key)
+        .expect("HMAC-SHA-256 accepts arbitrary key lengths per RFC 2104");
+    mac.update(message);
+    mac.finalize().into_bytes().into()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -55,6 +87,33 @@ mod tests {
             hex::encode(digest),
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
         );
+    }
+
+    #[test]
+    fn hmac_sha256_known_vector() {
+        // RFC 4231 test case 1.
+        let key = [0x0bu8; 20];
+        let mac = hmac_sha256(&key, b"Hi There");
+        assert_eq!(
+            hex::encode(mac),
+            "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7",
+        );
+    }
+
+    #[test]
+    fn hmac_sha256_different_key_differs() {
+        let m = b"hello";
+        let a = hmac_sha256(&[0x01u8; 32], m);
+        let b = hmac_sha256(&[0x02u8; 32], m);
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn hmac_sha256_different_message_differs() {
+        let k = [0x42u8; 32];
+        let a = hmac_sha256(&k, b"alpha");
+        let b = hmac_sha256(&k, b"beta");
+        assert_ne!(a, b);
     }
 
     #[test]

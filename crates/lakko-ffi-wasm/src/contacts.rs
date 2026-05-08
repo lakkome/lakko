@@ -6,8 +6,8 @@
 //! ("I know `@username`, add them"). Phase 1.9a only.
 
 use lakko_contacts::invite::{
-    compose as rust_invite_compose, decode_and_verify as rust_invite_decode,
-    sign_revocation as rust_sign_revocation, BLOB_ID_LEN,
+    compose as rust_invite_compose, compute_joiner_tag as rust_compute_joiner_tag,
+    decode_and_verify as rust_invite_decode, sign_revocation as rust_sign_revocation, BLOB_ID_LEN,
 };
 use lakko_contacts::{
     compose as rust_compose, decode_and_verify as rust_decode, open_envelope as rust_open,
@@ -495,6 +495,39 @@ pub fn sign_invite_revocation(
     Ok(rust_sign_revocation(&signing, &blob_id_arr, signed_at_ms).to_vec())
 }
 
+/// Compute the per-joiner consume-dedup tag for an invite-link
+/// `(capability_bytes, joiner_account_id)` pair (Phase 1.18d3).
+///
+/// The web client calls this just before posting
+/// `POST /discovery/invite/{blob_id}/consume` so the server
+/// can dedup repeat consumes from the same joiner without
+/// learning the joiner's `account_id` in plaintext. Layout +
+/// privacy story: see
+/// [`lakko_contacts::invite::compute_joiner_tag`].
+///
+/// Returns the 32-byte HMAC-SHA-256 tag. Caller base64-encodes
+/// for the JSON body.
+///
+/// # Errors
+///
+/// `JsError` if `joinerAccountId` is the wrong length —
+/// 16 bytes is the only supported shape today (UUIDv7 raw).
+/// The capability slice is unbounded by length here; the
+/// 1.18d1 server-side ceiling enforces the actual cap.
+#[wasm_bindgen(js_name = computeJoinerInviteTag)]
+pub fn compute_joiner_invite_tag(
+    capability_bytes: &[u8],
+    joiner_account_id: &[u8],
+) -> Result<Vec<u8>, JsError> {
+    if joiner_account_id.len() != lakko_contacts::ACCOUNT_ID_LEN {
+        return Err(JsError::new(&format!(
+            "joinerAccountId must be {} bytes",
+            lakko_contacts::ACCOUNT_ID_LEN,
+        )));
+    }
+    Ok(rust_compute_joiner_tag(capability_bytes, joiner_account_id).to_vec())
+}
+
 // Tests cover only happy paths — error paths invoke `JsError::new`,
 // which is a wasm-bindgen-imported function and panics with
 // "cannot call wasm-bindgen imported functions on non-wasm targets"
@@ -605,6 +638,29 @@ mod tests {
         let canonical = revoke_canonical_bytes(&blob_id, signed_at_ms);
         let signature = Signature::from_bytes(&sig_bytes).unwrap();
         assert!(pubkey.verify(&canonical, &signature).is_ok());
+    }
+
+    #[test]
+    fn compute_joiner_invite_tag_round_trip() {
+        let cap = vec![0x01u8; 200];
+        let acct = [0xA1u8; 16];
+
+        let tag = compute_joiner_invite_tag(&cap, &acct).unwrap();
+        assert_eq!(tag.len(), 32);
+
+        // Determinism: same inputs → same output.
+        let tag2 = compute_joiner_invite_tag(&cap, &acct).unwrap();
+        assert_eq!(tag, tag2);
+
+        // Injection: tweaking either side yields a different tag.
+        let mut cap_b = cap.clone();
+        cap_b[0] ^= 0x01;
+        let tag_other_cap = compute_joiner_invite_tag(&cap_b, &acct).unwrap();
+        assert_ne!(tag, tag_other_cap);
+
+        let acct_b = [0xA2u8; 16];
+        let tag_other_acct = compute_joiner_invite_tag(&cap, &acct_b).unwrap();
+        assert_ne!(tag, tag_other_acct);
     }
 
     #[test]
