@@ -62,6 +62,12 @@ interface DecodedInvite {
    *  compromise documented in the ROADMAP. The Accept path
    *  branches on this. */
   blobId: Uint8Array | null;
+  /** Raw capability wire bytes (post `fetchInvite` decode for
+   *  the pointer path; the URL slug bytes for the inline
+   *  back-compat path). 1.18d3c needs these for the per-joiner
+   *  dedup-tag derivation: tag = HMAC(SHA-256(domain ‖
+   *  capability_bytes), joiner_account_id). */
+  capabilityBytes: Uint8Array;
 }
 
 export default function Invite(): JSX.Element {
@@ -109,6 +115,7 @@ export default function Invite(): JSX.Element {
         cap,
         fingerprintShort: shortFingerprintFor(cap.ownerSignaturePubkey),
         blobId,
+        capabilityBytes: bytes,
       };
     } catch (err) {
       // eslint-disable-next-line no-console
@@ -214,8 +221,13 @@ function ConnectPanel(props: {
   // into a "this invite has been used up / revoked" state and
   // disable Accept. Decline still works; the user can navigate
   // back to /contacts.
+  // 1.18d3c: `already-consumed` is a fourth terminal state —
+  // the joiner has accepted this invite before, so we lock the
+  // panel + skip the ContactRequest send (re-sending would
+  // land another envelope in the inviter's stranger inbox;
+  // bad UX even if the server idempotency means it's safe).
   const [exhausted, setExhausted] = createSignal<
-    null | "exhausted" | "not-found"
+    null | "exhausted" | "not-found" | "already-consumed"
   >(null);
 
   const nowMs = Date.now();
@@ -233,9 +245,21 @@ function ConnectPanel(props: {
       // documented in ROADMAP 1.18d2a-web. We deliberately do
       // NOT silently fail-open on the inline path; it just
       // bypasses the ceiling, same as a 1.18c client would.
+      // 1.18d3c: also drives the per-joiner dedup tag (HMAC
+      // local) so a repeat from this joiner is caught
+      // server-side and surfaced as `already-consumed`.
       if (props.invite.blobId !== null) {
+        const secrets = auth.identitySecrets();
+        if (secrets === null) {
+          // The Show wrapper above guards against this, but
+          // typescript wants the explicit check before reading
+          // `secrets.accountId`.
+          throw new Error("re-enter your password to accept invites");
+        }
         const result = await props.discovery.consumeInvite(
           props.invite.blobId,
+          props.invite.capabilityBytes,
+          secrets.accountId,
         );
         if (result.kind === "exhausted") {
           setExhausted("exhausted");
@@ -244,11 +268,19 @@ function ConnectPanel(props: {
         if (result.kind === "not-found") {
           // Server's expiry filter folds expired into 404, so a
           // not-found here means either the inviter revoked
-          // (1.18d2b will surface this distinctly) or expiry
-          // landed between page load and consume. Either way
-          // the user-visible copy is the same: this invite is
-          // no longer valid.
+          // (1.18d2b) or expiry landed between page load and
+          // consume. Either way the user-visible copy is the
+          // same: this invite is no longer valid.
           setExhausted("not-found");
+          return;
+        }
+        if (result.kind === "already-consumed") {
+          // Joiner has consumed this invite before; server
+          // returned the existing counter without bumping. We
+          // skip the ContactRequest send (a fresh CR would
+          // duplicate in the inviter's inbox) and surface a
+          // clear "you've already accepted this" state.
+          setExhausted("already-consumed");
           return;
         }
         // result.kind === "consumed" — fall through to send.
@@ -321,6 +353,15 @@ function ConnectPanel(props: {
         <div class="form-error" role="alert">
           This invite is no longer valid — the inviter may have revoked it,
           or it expired between page load and click. Ask for a fresh link.
+        </div>
+      </Show>
+
+      <Show when={exhausted() === "already-consumed"}>
+        <div class="form-notice" role="status">
+          You've already accepted this invite — your ContactRequest is
+          on its way to <strong>{labelOrFingerprint}</strong>. No need
+          to send another one. Check your <strong>Contacts</strong>
+          page for the response.
         </div>
       </Show>
 

@@ -77,24 +77,34 @@ export interface LookupResult {
   account: Uint8Array | null;
 }
 
-/** Result of `DiscoveryClient.consumeInvite` (Phase 1.18d2a).
+/** Result of `DiscoveryClient.consumeInvite` (Phase 1.18d2a +
+ *  1.18d3c).
  *
  *  Discriminated so the joiner UI can branch cleanly:
  *    * `kind: "consumed"` — server bumped `used_count` and
- *      accepted; proceed with `sendContactRequestToBundle`.
+ *      accepted (fresh consume by this joiner); proceed with
+ *      `sendContactRequestToBundle`.
+ *    * `kind: "already-consumed"` — server's PK on
+ *      `(blob_id, joiner_tag)` already had a row, so the
+ *      counter was NOT bumped. UI surfaces "you've already
+ *      accepted this invite" + Decline-only — the joiner has
+ *      done this before; re-sending a ContactRequest would
+ *      land another envelope in the inviter's stranger inbox
+ *      and is bad UX.
  *    * `kind: "exhausted"` — 410 Gone, `max_uses` ceiling hit
- *      before this consume could land. UI shows "this invite
- *      has been used up" + Decline-only.
+ *      by other joiners before this consume could land. UI
+ *      shows "this invite has been used up" + Decline-only.
  *    * `kind: "not-found"` — 404; the blob_id was never issued
  *      OR has expired (server folds expired into 404 to deny
  *      status-code probing). UI surfaces "invite expired or
  *      revoked".
  *
  *  Other non-2xx codes still throw `DiscoveryHttpError` —
- *  reserve the discriminated path for the three response shapes
+ *  reserve the discriminated path for the four response shapes
  *  the joiner is supposed to act on. */
 export type ConsumeInviteResult =
   | { readonly kind: "consumed"; readonly usedCount: number; readonly maxUses: number }
+  | { readonly kind: "already-consumed"; readonly usedCount: number; readonly maxUses: number }
   | { readonly kind: "exhausted" }
   | { readonly kind: "not-found" };
 
@@ -595,31 +605,74 @@ export class DiscoveryClient {
 
   /**
    * Atomically bump the consume counter for the invite at
-   * `blobId` (Phase 1.18d2a). Returns a discriminated
-   * [`ConsumeInviteResult`] so the joiner UI can branch:
+   * `blobId` with per-joiner dedup (Phase 1.18d2a + 1.18d3c).
+   * Returns a discriminated [`ConsumeInviteResult`] so the
+   * joiner UI can branch:
    *
-   *   * `"consumed"` — server accepted and bumped the counter.
+   *   * `"consumed"` — server accepted, bumped the counter,
+   *     and recorded this joiner in the side table.
    *     Caller proceeds with `sendContactRequestToBundle(...)`.
+   *   * `"already-consumed"` — server's `(blob_id, joiner_tag)`
+   *     PK already had a row, so the counter was NOT bumped.
+   *     Caller surfaces "you've already accepted this invite"
+   *     + Decline-only and skips the ContactRequest send (a
+   *     fresh CR would land another envelope in the inviter's
+   *     stranger inbox; bad UX).
    *   * `"exhausted"` — 410 Gone, the `max_uses` ceiling was
-   *     hit before this consume could land. Caller surfaces
-   *     "this invite has been used up" and offers Decline only.
+   *     hit by other joiners before this consume could land.
+   *     Caller surfaces "this invite has been used up" and
+   *     offers Decline only.
    *   * `"not-found"` — 404, never-issued OR expired (server
    *     folds both into the same status). Caller surfaces
    *     "invite expired or revoked".
    *
    * Other non-2xx codes still throw `DiscoveryHttpError` —
-   * the discriminated path is reserved for the three response
+   * the discriminated path is reserved for the four response
    * shapes the joiner is supposed to act on without a developer
    * involved.
    *
    * Drives one PoW solve over `services/discovery`'s
    * `/pow/challenge` (rate-limit on consume; same shape as
-   * upload).
+   * upload), plus one WASM call to compute the per-joiner
+   * dedup tag locally before posting.
+   *
+   * @param blobId            32-byte content-addressed invite id
+   *                          (the same value `uploadInvite`
+   *                          returned).
+   * @param capabilityBytes   The same wire-format bytes the
+   *                          server holds — mandatory for the
+   *                          tag's per-blob salt derivation.
+   *                          The caller already has them after
+   *                          `decodeAndVerify` ran on the
+   *                          /i/:slug landing path.
+   * @param joinerAccountId   The joiner's 16-byte UUIDv7
+   *                          account_id. Never sent to the
+   *                          server in plaintext — only the
+   *                          opaque HMAC tag derived from it
+   *                          crosses the wire.
    */
-  async consumeInvite(blobId: Uint8Array): Promise<ConsumeInviteResult> {
+  async consumeInvite(
+    blobId: Uint8Array,
+    capabilityBytes: Uint8Array,
+    joinerAccountId: Uint8Array,
+  ): Promise<ConsumeInviteResult> {
     if (blobId.length !== 32) {
       throw new DiscoveryClientArgError("blobId must be 32 bytes");
     }
+    if (joinerAccountId.length !== 16) {
+      throw new DiscoveryClientArgError("joinerAccountId must be 16 bytes");
+    }
+
+    // Compute the per-joiner dedup tag locally before any
+    // network call — keeps the joiner_account_id off the wire
+    // and lets a slow PoW solve happen in parallel with the
+    // tag derivation in future iterations.
+    const wasm = await loadWasm();
+    const joinerTag = wasm.computeJoinerInviteTag(
+      capabilityBytes,
+      joinerAccountId,
+    );
+
     const slug = base64UrlEncodeNoPad(blobId);
 
     const challenge = await this.fetchChallenge();
@@ -632,7 +685,10 @@ export class DiscoveryClient {
       response = await fetch(url, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ pow }),
+        body: JSON.stringify({
+          pow,
+          joiner_tag: base64Encode(joinerTag),
+        } satisfies InviteConsumeRequest),
       });
     } catch (err) {
       throw new DiscoveryNetworkError(endpoint, err);
@@ -645,7 +701,7 @@ export class DiscoveryClient {
     }
     const raw = (await response.json()) as InviteConsumeResponse;
     return {
-      kind: "consumed",
+      kind: raw.already_consumed ? "already-consumed" : "consumed",
       usedCount: raw.used_count,
       maxUses: raw.max_uses,
     };

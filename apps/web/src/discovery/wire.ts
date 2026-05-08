@@ -167,18 +167,23 @@ export interface InviteFetchResponse {
 }
 
 /** Body of `POST /discovery/invite/{blob_id_b64url}/consume`
- *  (Phase 1.18d2a). The server bumps `used_count` atomically;
- *  the only payload the joiner needs to surface is the PoW
- *  proof. Phase 1.18d3 will add an additional `joiner_account_id`
- *  field for the per-joiner HmacBloom de-dup. */
+ *  (Phase 1.18d3b mandatory shape). `joiner_tag` is the
+ *  server-blind 32-byte HMAC the joiner computes locally via
+ *  `wasm.computeJoinerInviteTag(capability_bytes,
+ *  joiner_account_id)`; the server stores it keyed by
+ *  `(blob_id, joiner_tag)` to dedup repeats. */
 export interface InviteConsumeRequest {
   pow: PowProofPayload;
+  /** Standard-alphabet base64 of the 32-byte joiner-tag. */
+  joiner_tag: string;
 }
 
 /** Response body of `POST /discovery/invite/{blob_id_b64url}/consume`. */
 export interface InviteConsumeResponse {
   /** Post-increment counter. UI surfaces "1 of 10 uses" copy
-   *  when the invite has a finite `max_uses`. */
+   *  when the invite has a finite `max_uses`. When
+   *  `already_consumed` is `true` the counter was NOT bumped —
+   *  the value reflects pre-call state. */
   used_count: number;
   /** Echo of the row's `max_uses` — sentinel mapping is preserved
    *  (`0` for single-use, `0xFFFFFFFF` for unlimited, any other
@@ -186,6 +191,13 @@ export interface InviteConsumeResponse {
    *  `used_count` to decide between "consumed successfully" and
    *  "this was the last use" copy. */
   max_uses: number;
+  /** `true` when the side-table PK on `(blob_id, joiner_tag)`
+   *  already had a row — i.e. this joiner has consumed the
+   *  invite before (Phase 1.18d3b). The handler returns 200
+   *  with the counter unchanged; the UI surfaces "you've
+   *  already accepted this invite" + Decline-only and skips
+   *  the ContactRequest send. */
+  already_consumed: boolean;
 }
 
 /** Body of `DELETE /discovery/invite/{blob_id_b64url}` (Phase
