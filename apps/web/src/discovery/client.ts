@@ -29,6 +29,7 @@ import { loadWasm } from "../wasm";
 import {
   base64Decode,
   base64Encode,
+  base64UrlDecodeNoPad,
   base64UrlEncodeNoPad,
 } from "../auth/account-id";
 import { solvePow } from "../auth/pow";
@@ -36,6 +37,9 @@ import type {
   IdentityFetchResponse,
   IdentityUploadRequest,
   IdentityUploadResponse,
+  InviteFetchResponse,
+  InviteUploadRequest,
+  InviteUploadResponse,
   KeyPackageFetchResponse,
   KeyPackageUploadRequest,
   KeyPackageUploadResponse,
@@ -127,6 +131,14 @@ export class DiscoveryClient {
     req: KeyPackageUploadRequest,
   ): Promise<KeyPackageUploadResponse> {
     return this.post("/discovery/keypackage", req);
+  }
+
+  /** `POST /discovery/invite` — upload a verified
+   *  `InviteCapability` blob, get the content-addressed
+   *  `blob_id` back (Phase 1.18d1). The high-level
+   *  [`uploadInvite`] wrapper drives the PoW solve. */
+  async inviteUpload(req: InviteUploadRequest): Promise<InviteUploadResponse> {
+    return this.post("/discovery/invite", req);
   }
 
   /**
@@ -401,6 +413,102 @@ export class DiscoveryClient {
     const raw = await this.keypackageFetch(accountId);
     if (raw === null) return null;
     return base64Decode(raw.keypackage);
+  }
+
+  /**
+   * Upload a freshly-composed `InviteCapability` blob and
+   * receive the server-assigned content-addressed `blob_id`
+   * (raw 32-byte SHA-256). Phase 1.18d1: drives one PoW solve
+   * + `POST /discovery/invite`. Idempotent — same bytes yield
+   * the same id, and the server upserts.
+   *
+   * Caller responsibility: feed `capabilityBytes` straight from
+   * `wasm.InviteCapability.compose(...)`. The server runs
+   * `decode_and_verify` server-side, so a junk upload surfaces
+   * as `DiscoveryHttpError(400, "/discovery/invite", …)`.
+   *
+   * @param capabilityBytes  The 1.18a wire-format bytes.
+   * @returns The 32-byte `blob_id`, ready to substitute into a
+   *          pointer URL via `composePointerInviteUrl`.
+   *
+   * @throws `DiscoveryClientArgError` on local input validation,
+   *         `DiscoveryHttpError` on server rejection (PoW /
+   *         malformed bytes / failed verify),
+   *         `DiscoveryNetworkError` on transport failure.
+   */
+  async uploadInvite(capabilityBytes: Uint8Array): Promise<Uint8Array> {
+    if (capabilityBytes.length === 0) {
+      throw new DiscoveryClientArgError(
+        "capabilityBytes must be non-empty",
+      );
+    }
+    // Mirror the server-side `MAX_CAPABILITY_BYTES = 2048`
+    // ceiling so a misbehaving caller fails fast without a
+    // round-trip.
+    const MAX = 2048;
+    if (capabilityBytes.length > MAX) {
+      throw new DiscoveryClientArgError(
+        `capabilityBytes exceeds the ${MAX}-byte ceiling ` +
+          `(got ${capabilityBytes.length} bytes)`,
+      );
+    }
+
+    const challenge = await this.fetchChallenge();
+    const pow = await solvePow(challenge.seed, challenge.effort_bits);
+
+    const resp = await this.inviteUpload({
+      pow,
+      capability: base64Encode(capabilityBytes),
+    });
+
+    // Server returns base64url-no-pad; decode back to raw 32
+    // bytes via the same helper we use for `accountId` slugs.
+    const blobId = base64UrlDecodeNoPad(resp.blob_id);
+    if (blobId.length !== 32) {
+      throw new DiscoveryHttpError(
+        200,
+        "/discovery/invite",
+        `server returned blob_id of ${blobId.length} bytes, expected 32`,
+      );
+    }
+    return blobId;
+  }
+
+  /**
+   * Fetch a previously-uploaded `InviteCapability` by its
+   * content-addressed `blob_id`. Returns `null` on 404 (the
+   * server folds expired blobs into the same status — see
+   * `services/discovery/src/invite.rs::fetch` for why we don't
+   * use 410). Returns the raw capability bytes on 200; the
+   * caller drives `wasm.InviteCapability.decodeAndVerify(...)`
+   * to validate the signature locally (the server already
+   * verified at upload time, but we re-verify so a malicious
+   * server cannot serve substituted bytes — and the joiner can
+   * cross-check `SHA-256(bytes) === blobId` if they want).
+   */
+  async fetchInvite(blobId: Uint8Array): Promise<Uint8Array | null> {
+    if (blobId.length !== 32) {
+      throw new DiscoveryClientArgError("blobId must be 32 bytes");
+    }
+    const slug = base64UrlEncodeNoPad(blobId);
+    const url = `${this.baseUrl}/discovery/invite/${slug}`;
+    let response: Response;
+    try {
+      response = await fetch(url, { method: "GET" });
+    } catch (err) {
+      throw new DiscoveryNetworkError("/discovery/invite (GET)", err);
+    }
+    if (response.status === 404) return null;
+    if (!response.ok) {
+      const text = await safeReadBody(response);
+      throw new DiscoveryHttpError(
+        response.status,
+        "/discovery/invite (GET)",
+        text,
+      );
+    }
+    const raw = (await response.json()) as InviteFetchResponse;
+    return base64Decode(raw.capability);
   }
 
   /**

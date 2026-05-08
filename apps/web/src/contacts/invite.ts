@@ -31,23 +31,100 @@ export const INVITE_URL_PREFIX = "/i/";
  *  must also bump this one. */
 export const INVITE_LABEL_MAX_LEN = 64;
 
-/** Convert capability bytes into a full URL anchored at `origin`.
- *  `origin` defaults to `window.location.origin` so production
- *  builds emit absolute URLs rooted at the deployed host; tests
- *  can override. */
+/** Length of a content-addressed `blob_id` from
+ *  `services/discovery/src/invite.rs` — SHA-256, 32 bytes. */
+export const INVITE_BLOB_ID_LEN = 32;
+
+/** Lower bound on the inline-bytes form. The 1.18a wire format
+ *  is `1 + 32 + 16 + 32 + 8 + 4 + 1 + 2 + label(0..64) + 64 =
+ *  160..224 bytes`; an empty label (the smallest legal payload)
+ *  is 160 bytes. Far above 32, so a slug-byte-length test
+ *  cleanly discriminates inline vs pointer URLs. */
+export const INVITE_INLINE_MIN_LEN = 160;
+
+/** Auto-pick the URL form by argument shape — pointer
+ *  (`blob_id`, 32 bytes) when the caller has uploaded the
+ *  capability and wants the short form, inline-bytes (≥160
+ *  bytes) when the caller is staying server-free.
+ *
+ *  Both produce a `https://<origin>/i/<base64url>` shape; the
+ *  joiner side discriminates via `parseInviteSlug` on the byte
+ *  length — see `INVITE_INLINE_MIN_LEN` for the gap that makes
+ *  this safe.
+ *
+ *  Phase 1.18d1b: prefers the pointer form (shorter URLs, server-
+ *  side max-uses enforcement in 1.18d2). Inline is the back-compat
+ *  fallback for when `/discovery/invite` is unreachable (e.g. the
+ *  censored-region path). */
 export function composeInviteUrl(
-  capabilityBytes: Uint8Array,
-  origin: string = typeof location !== "undefined" ? location.origin : "https://lakko.me",
+  bytes: Uint8Array,
+  origin: string = typeof location !== "undefined"
+    ? location.origin
+    : "https://lakko.me",
 ): string {
-  return `${origin}${INVITE_URL_PREFIX}${base64UrlEncodeNoPad(capabilityBytes)}`;
+  return `${origin}${INVITE_URL_PREFIX}${base64UrlEncodeNoPad(bytes)}`;
 }
 
-/** Decode a URL slug back to the raw capability bytes. The
- *  caller drives `InviteCapability.decodeAndVerify(...)` next —
- *  this helper does only the URL-encoding undo, leaving the
- *  wire-format / signature work to the WASM surface. */
-export function parseInviteSlug(slug: string): Uint8Array {
-  return base64UrlDecodeNoPad(slug);
+/** Builder for the **pointer** URL form — the short
+ *  `https://<host>/i/<blob_id_b64url>` shape backed by
+ *  `/discovery/invite/<blob_id>` lookup. Equivalent to
+ *  `composeInviteUrl` (just a thin name wrapper) but reads
+ *  better at the call site. */
+export function composePointerInviteUrl(
+  blobId: Uint8Array,
+  origin?: string,
+): string {
+  if (blobId.length !== INVITE_BLOB_ID_LEN) {
+    throw new Error(
+      `blobId must be ${INVITE_BLOB_ID_LEN} bytes, got ${blobId.length}`,
+    );
+  }
+  return composeInviteUrl(blobId, origin);
+}
+
+/** Builder for the **inline-bytes** URL form — the long shape
+ *  that carries the capability inside the URL itself, no server
+ *  round-trip on open. 1.18c default; 1.18d1b's back-compat. */
+export function composeInlineInviteUrl(
+  capabilityBytes: Uint8Array,
+  origin?: string,
+): string {
+  if (capabilityBytes.length < INVITE_INLINE_MIN_LEN) {
+    throw new Error(
+      `capabilityBytes must be ≥ ${INVITE_INLINE_MIN_LEN} bytes, got ${capabilityBytes.length}`,
+    );
+  }
+  return composeInviteUrl(capabilityBytes, origin);
+}
+
+/** Discriminated parse of a URL slug. Returns the wire-form +
+ *  the decoded bytes so the caller can dispatch:
+ *
+ *    * `kind: "pointer"` — fetch from
+ *      `DiscoveryClient.fetchInvite(blobId)` → run
+ *      `decodeAndVerify` on the returned bytes.
+ *    * `kind: "inline"` — run `decodeAndVerify` directly on the
+ *      bytes, no server round-trip.
+ *
+ *  The dispatch rule is a clean byte-length test: 32 ⇒ pointer
+ *  (SHA-256), ≥ 160 ⇒ inline (1.18a wire-format minimum).
+ *  Anything else is invalid input. */
+export type ParsedInvite =
+  | { readonly kind: "pointer"; readonly blobId: Uint8Array }
+  | { readonly kind: "inline"; readonly capabilityBytes: Uint8Array };
+
+export function parseInviteSlug(slug: string): ParsedInvite {
+  const bytes = base64UrlDecodeNoPad(slug);
+  if (bytes.length === INVITE_BLOB_ID_LEN) {
+    return { kind: "pointer", blobId: bytes };
+  }
+  if (bytes.length >= INVITE_INLINE_MIN_LEN) {
+    return { kind: "inline", capabilityBytes: bytes };
+  }
+  throw new Error(
+    `invite slug decoded to ${bytes.length} bytes — neither a ${INVITE_BLOB_ID_LEN}-byte pointer ` +
+      `nor a ≥ ${INVITE_INLINE_MIN_LEN}-byte inline capability`,
+  );
 }
 
 /** Discrete UI choices the "Generate invite link" form exposes

@@ -129,3 +129,39 @@ export interface KeyPackageUploadResponse {
 export interface KeyPackageFetchResponse {
   keypackage: string;
 }
+
+// ----------------------------------------------------------------------------
+// /discovery/invite   (services/discovery/src/invite.rs — Phase 1.18d1)
+// ----------------------------------------------------------------------------
+
+/** Body of `POST /discovery/invite`. The server runs
+ *  `lakko_contacts::invite::decode_and_verify` over the decoded
+ *  bytes and rejects junk uploads at ingress, so the only way a
+ *  POST succeeds is if `capability` is a real, signature-valid
+ *  invite the client just composed. */
+export interface InviteUploadRequest {
+  pow: PowProofPayload;
+  /** Standard-alphabet base64 of `wasm.InviteCapability.compose(...)`
+   *  output — same wire format as 1.18a / 1.18b / 1.18c. Server
+   *  caps decoded size at 2048 bytes. */
+  capability: string;
+}
+
+/** Response body of `POST /discovery/invite`. */
+export interface InviteUploadResponse {
+  /** base64url-no-pad of `SHA-256(capability_bytes)` — same
+   *  bytes ⇒ same id, retried upload is a no-op (server-side
+   *  upsert via `INSERT ... ON DUPLICATE KEY UPDATE`). The
+   *  client substitutes this directly into the
+   *  `https://<host>/i/<blob_id>` pointer URL. */
+  blob_id: string;
+}
+
+/** Response body of `GET /discovery/invite/{blob_id_b64url}`.
+ *  404 surfaces as `null` in the high-level client (server-side
+ *  expiry filter folds expired-blob into the same status — see
+ *  `services/discovery/src/invite.rs::fetch` for why we don't
+ *  use 410). */
+export interface InviteFetchResponse {
+  capability: string;
+}

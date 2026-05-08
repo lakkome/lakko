@@ -47,6 +47,7 @@ import {
   describeMaxUses,
   parseInviteSlug,
 } from "../contacts/invite";
+import { DiscoveryClient } from "../discovery/client";
 import { useChats } from "../chat/ChatContext";
 import { loadWasm } from "../wasm";
 import { paths } from "./paths";
@@ -69,9 +70,28 @@ export default function Invite(): JSX.Element {
   // re-runs on navigation, no stale capability across
   // /i/<a> → /i/<b> transitions.
   const slugSignal = createMemo(() => params.slug);
+  // Used for the pointer-form path. Created once per route
+  // mount; reuses the existing fetch defaults (Vite proxy in
+  // dev, same-origin nginx in prod).
+  const discovery = new DiscoveryClient();
   const [decoded] = createResource(slugSignal, async (slug): Promise<DecodedInvite | null> => {
     try {
-      const bytes = parseInviteSlug(slug);
+      const parsed = parseInviteSlug(slug);
+      let bytes: Uint8Array;
+      if (parsed.kind === "pointer") {
+        // 1.18d1b — fetch the bytes from /discovery/invite/{blob_id}.
+        // 404 surfaces as `null` — same as the inline-form
+        // decode failure below; the user-visible "invalid /
+        // not found" panel is identical, by design (an
+        // attacker cannot probe blob_ids by status code).
+        const fetched = await discovery.fetchInvite(parsed.blobId);
+        if (fetched === null) return null;
+        bytes = fetched;
+      } else {
+        // 1.18c back-compat: capability bytes inline in the
+        // URL itself, no server round-trip.
+        bytes = parsed.capabilityBytes;
+      }
       const wasm = await loadWasm();
       const cap = wasm.InviteCapability.decodeAndVerify(bytes);
       return {

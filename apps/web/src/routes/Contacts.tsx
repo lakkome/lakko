@@ -33,13 +33,15 @@ import { useChats, type ActiveGroup } from "../chat/ChatContext";
 import { loadWasm } from "../wasm";
 import { paths } from "./paths";
 import {
-  composeInviteUrl,
+  composeInlineInviteUrl,
+  composePointerInviteUrl,
   expiryPresetToMs,
   INVITE_LABEL_MAX_LEN,
   maxUsesPresetToValue,
   type ExpiryPreset,
   type MaxUsesPreset,
 } from "../contacts/invite";
+import { DiscoveryClient } from "../discovery/client";
 import {
   fingerprintShort,
   loadAccepted,
@@ -424,6 +426,14 @@ function InvitePanel(): JSX.Element {
   // Identity doesn't carry it on the wasm-bindgen surface.
   const chats = useChats();
   const auth = useAuth();
+  // Phase 1.18d1b — uploads compose'd capabilities to
+  // /discovery/invite and gets a content-addressed blob_id back
+  // for the short pointer URL. Falls back to the inline-bytes
+  // form when the discovery service is unreachable (e.g. local
+  // dev without the service running, or a censored region path
+  // where /discovery/* is blocked but the link is still
+  // shareable).
+  const discovery = new DiscoveryClient();
 
   const [label, setLabel] = createSignal("");
   const [expiry, setExpiry] = createSignal<ExpiryPreset>("7d");
@@ -432,12 +442,16 @@ function InvitePanel(): JSX.Element {
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
   const [generatedUrl, setGeneratedUrl] = createSignal<string | null>(null);
+  const [generatedKind, setGeneratedKind] = createSignal<
+    "pointer" | "inline-fallback" | null
+  >(null);
   const [copied, setCopied] = createSignal(false);
 
   async function onGenerate(e: SubmitEvent): Promise<void> {
     e.preventDefault();
     setError(null);
     setGeneratedUrl(null);
+    setGeneratedKind(null);
     setCopied(false);
     setBusy(true);
     try {
@@ -472,7 +486,34 @@ function InvitePanel(): JSX.Element {
         bootstrapReferral(),
         label(),
       );
-      setGeneratedUrl(composeInviteUrl(bytes));
+
+      // 1.18d1b — try the pointer flow first (short URL,
+      // server-side existence + future max_uses enforcement).
+      // Fall back to the inline-bytes form on transport
+      // failure so a censored / temporarily-down discovery
+      // service doesn't take the feature offline. We do NOT
+      // fall back on PoW / decode_and_verify failures — those
+      // mean the server actively rejected the bytes, and
+      // smuggling the same bytes inline would still be a bug
+      // (the joiner would re-verify locally and reject). We
+      // distinguish via DiscoveryNetworkError shape; everything
+      // else surfaces as a real error.
+      try {
+        const blobId = await discovery.uploadInvite(bytes);
+        setGeneratedUrl(composePointerInviteUrl(blobId));
+        setGeneratedKind("pointer");
+      } catch (uploadErr) {
+        const isNetwork =
+          uploadErr instanceof Error && uploadErr.name === "DiscoveryNetworkError";
+        if (!isNetwork) throw uploadErr;
+        // eslint-disable-next-line no-console
+        console.warn(
+          "invite upload network-failed; falling back to inline-bytes URL",
+          uploadErr,
+        );
+        setGeneratedUrl(composeInlineInviteUrl(bytes));
+        setGeneratedKind("inline-fallback");
+      }
     } catch (err) {
       setError(formatError(err));
     } finally {
@@ -494,6 +535,7 @@ function InvitePanel(): JSX.Element {
 
   function reset(): void {
     setGeneratedUrl(null);
+    setGeneratedKind(null);
     setError(null);
     setCopied(false);
     setLabel("");
@@ -504,9 +546,9 @@ function InvitePanel(): JSX.Element {
     <section style={panelStyle()}>
       <h2 style={{ "margin-top": 0 }}>Generate invite link</h2>
       <p style={{ color: "var(--surface-muted)", "margin-top": 0 }}>
-        Anyone holding the link can send you a ContactRequest. The
-        link carries the capability bytes inline — no server
-        round-trip on open.
+        Anyone holding the link can send you a ContactRequest.
+        Short pointer URLs by default; falls back to inline-bytes
+        if the discovery service is unreachable.
       </p>
 
       <Show
@@ -514,6 +556,7 @@ function InvitePanel(): JSX.Element {
         fallback={
           <GeneratedUrlPanel
             url={generatedUrl() ?? ""}
+            kind={generatedKind() ?? "pointer"}
             copied={copied}
             onCopy={() => {
               void onCopy();
@@ -618,6 +661,7 @@ function InvitePanel(): JSX.Element {
 
 function GeneratedUrlPanel(props: {
   url: string;
+  kind: "pointer" | "inline-fallback";
   copied: () => boolean;
   onCopy: () => void;
   onReset: () => void;
@@ -625,9 +669,24 @@ function GeneratedUrlPanel(props: {
   return (
     <div>
       <p style={{ margin: "0 0 0.5rem 0" }}>
-        <strong>Share this URL out-of-band.</strong> The capability
-        bytes are inline — anyone with the link can send you a
-        ContactRequest until it expires.
+        <strong>Share this URL out-of-band.</strong>{" "}
+        <Show
+          when={props.kind === "pointer"}
+          fallback={
+            <span>
+              Discovery service was unreachable — falling back to an
+              <strong> inline-bytes URL</strong>. The capability sits
+              in the URL itself; anyone with the link can send you a
+              ContactRequest until it expires.
+            </span>
+          }
+        >
+          <span>
+            Short pointer URL — the capability lives on the
+            discovery service. Anyone with the link can send you a
+            ContactRequest until it expires.
+          </span>
+        </Show>
       </p>
       <textarea
         readonly
