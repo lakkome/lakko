@@ -59,6 +59,7 @@
 use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_test::wasm_bindgen_test;
 
+use crate::contacts::InviteCapability;
 use crate::mls::Identity;
 
 // `wasm-pack test --node` selects the Node V8 runner; no
@@ -144,4 +145,42 @@ fn restore_storage_returns_helpful_error_for_truncated_snapshot() {
         !message.is_empty(),
         "truncated-snapshot error must carry a non-empty .message; got {message:?}",
     );
+}
+
+/// `InviteCapability::compose` -> `decodeAndVerify` round-trip
+/// through the WASM bridge (1.18b). The host-side test in
+/// `contacts::tests::invite_capability_roundtrip_happy_path`
+/// covers the same shape on the native target; this version
+/// confirms the wasm-bindgen surface (Vec<u8> args / String
+/// args / u64 args / bool args) survives the JS↔WASM boundary
+/// in a real V8 runtime.
+#[wasm_bindgen_test]
+fn invite_capability_round_trips_through_wasm() {
+    let owner_seed = [9u8; 32];
+    let owner_account_id = [0xA1u8; 16];
+    // Build the X25519 pubkey from a known secret to keep the
+    // assertion deterministic.
+    let x25519_secret = lakko_crypto::agreement::SecretKey::from_bytes([0xB2; 32]);
+    let owner_x25519_pubkey = x25519_secret.public_key().to_bytes();
+
+    let wire = InviteCapability::compose(
+        &owner_seed,
+        &owner_account_id,
+        &owner_x25519_pubkey,
+        1_700_000_000_000,
+        0,
+        true,
+        "alice@home",
+    )
+    .expect("compose");
+
+    let cap = InviteCapability::decode_and_verify(&wire).expect("decode");
+    assert_eq!(cap.owner_account_id(), owner_account_id.to_vec());
+    assert_eq!(cap.owner_x25519_pubkey(), owner_x25519_pubkey.to_vec());
+    assert_eq!(cap.expiry_ms(), 1_700_000_000_000);
+    assert_eq!(cap.max_uses(), 0);
+    assert!(cap.bootstrap_referral());
+    assert_eq!(cap.label(), "alice@home");
+    assert!(cap.is_valid_now(0));
+    assert!(!cap.is_valid_now(1_700_000_000_000));
 }

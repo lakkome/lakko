@@ -94,7 +94,9 @@ mod wasm_tests;
 // module path (wasm-bindgen flattens by default; explicit re-exports
 // keep the rustdoc surface tidy).
 pub use auth::{OpaqueLogin, OpaqueLoginOutput, OpaqueRegister, OpaqueRegisterOutput};
-pub use contacts::{ContactRequest, Direction, IdentityPseudonym, PerRelationship, StrangerInbox};
+pub use contacts::{
+    ContactRequest, Direction, IdentityPseudonym, InviteCapability, PerRelationship, StrangerInbox,
+};
 pub use discovery::{normalize_username, OprfBlinder};
 pub use mls::{AddMember, Group, Identity, ProcessedMessage, ProcessedMessageKind};
 pub use mnemonic::RecoveryMnemonic;

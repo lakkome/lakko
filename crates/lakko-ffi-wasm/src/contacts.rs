@@ -5,11 +5,15 @@
 //! [`ContactRequest`] envelope that drives ADR-0005 scenario A
 //! ("I know `@username`, add them"). Phase 1.9a only.
 
+use lakko_contacts::invite::{
+    compose as rust_invite_compose, decode_and_verify as rust_invite_decode,
+};
 use lakko_contacts::{
     compose as rust_compose, decode_and_verify as rust_decode, open_envelope as rust_open,
     ContactError, ContactRequest as RustContactRequest, Direction as RustDirection,
-    IdentityPseudonym as RustIdentityPseudonym, PerRelationship as RustPerRelationship,
-    StrangerInbox as RustStrangerInbox, PSEUDONYM_LEN,
+    IdentityPseudonym as RustIdentityPseudonym, InviteCapability as RustInviteCapability,
+    PerRelationship as RustPerRelationship, StrangerInbox as RustStrangerInbox, MAX_LABEL_LEN,
+    PSEUDONYM_LEN,
 };
 use lakko_crypto::agreement::{PublicKey as X25519PublicKey, SecretKey as X25519SecretKey};
 use lakko_crypto::secret::SecretBytes;
@@ -280,6 +284,174 @@ impl ContactRequest {
     }
 }
 
+// ============================================================================
+// Invite capability (Phase 1.18b)
+// ============================================================================
+
+/// Composed and verified invite capability — capability-based
+/// contact-invite flow per ADR-0005 §13.3 / §13.4. Mirror of
+/// [`lakko_contacts::InviteCapability`].
+///
+/// Owners drive [`InviteCapability::compose`] to produce signed
+/// wire bytes; the JS layer base64url-encodes the bytes into a
+/// `https://lakko.me/i/<...>` URL and shares it OOB. Joiners
+/// drive [`InviteCapability::decodeAndVerify`] on the bytes
+/// recovered from the URL slug, then read the getters to seed
+/// the first ContactRequest back to the inviter.
+///
+/// Phase 1.18b ships the JS surface; the V1 wire format is the
+/// 1.18a Rust struct verbatim — no server dependency, capability
+/// bytes live in the URL itself.
+#[wasm_bindgen]
+pub struct InviteCapability {
+    inner: RustInviteCapability,
+}
+
+#[wasm_bindgen]
+impl InviteCapability {
+    /// Compose a signed invite capability. Returns the wire bytes.
+    /// Caller is responsible for base64url-encoding into a URL.
+    ///
+    /// `ownerSigningSeed` is the 32-byte Ed25519 seed that powers
+    /// the `Identity` (see `mls.rs::Identity::ed25519Seed` for the
+    /// already-wired-up source). `ownerAccountId` is 16 bytes
+    /// (UUIDv7). `ownerX25519Pubkey` is the long-term HPKE init
+    /// key (32 bytes — `Identity::x25519PublicKey`). `expiryMs`
+    /// is UNIX millis; pass `0` for "never expires" (the JS
+    /// layer SHOULD surface a stalking-risk warning before
+    /// allowing this — see ADR-0005 §13.3). `maxUses` is a UI
+    /// hint only in V1 (1.18d wires server-side enforcement);
+    /// pass `0` for "single-use". `bootstrapReferral` flips on
+    /// the signup-deep-link path (ADR-0005 §13.4). `label` is
+    /// optional (empty allowed), capped at
+    /// [`lakko_contacts::MAX_LABEL_LEN`] bytes UTF-8.
+    ///
+    /// # Errors
+    ///
+    /// `JsError` on any input-shape failure.
+    #[wasm_bindgen]
+    pub fn compose(
+        owner_signing_seed: &[u8],
+        owner_account_id: &[u8],
+        owner_x25519_pubkey: &[u8],
+        expiry_ms: u64,
+        max_uses: u32,
+        bootstrap_referral: bool,
+        label: &str,
+    ) -> Result<Vec<u8>, JsError> {
+        if owner_signing_seed.len() != 32 {
+            return Err(JsError::new("ownerSigningSeed must be 32 bytes"));
+        }
+        let mut seed = [0u8; 32];
+        seed.copy_from_slice(owner_signing_seed);
+        let signing = SigningKey::from_seed(&seed);
+
+        if owner_account_id.len() != lakko_contacts::ACCOUNT_ID_LEN {
+            return Err(JsError::new(&format!(
+                "ownerAccountId must be {} bytes",
+                lakko_contacts::ACCOUNT_ID_LEN,
+            )));
+        }
+        let mut acct = [0u8; lakko_contacts::ACCOUNT_ID_LEN];
+        acct.copy_from_slice(owner_account_id);
+
+        if owner_x25519_pubkey.len() != PUBLIC_KEY_LEN {
+            return Err(JsError::new(&format!(
+                "ownerX25519Pubkey must be {PUBLIC_KEY_LEN} bytes",
+            )));
+        }
+        let mut x_arr = [0u8; PUBLIC_KEY_LEN];
+        x_arr.copy_from_slice(owner_x25519_pubkey);
+        let x25519_pub = X25519PublicKey::from_bytes(&x_arr).map_err(crypto_err)?;
+
+        if label.len() > MAX_LABEL_LEN {
+            return Err(JsError::new(&format!(
+                "label is {} bytes, max is {MAX_LABEL_LEN}",
+                label.len(),
+            )));
+        }
+
+        rust_invite_compose(
+            &signing,
+            &acct,
+            &x25519_pub,
+            expiry_ms,
+            max_uses,
+            bootstrap_referral,
+            label,
+        )
+        .map_err(contact_err)
+    }
+
+    /// Joiner-side: decode wire bytes, verify the Ed25519
+    /// signature, return the validated `InviteCapability`. Does
+    /// NOT check expiry — call [`InviteCapability::isValidNow`]
+    /// separately so the UI can render "this invite expired N
+    /// minutes ago" rather than a generic failure.
+    #[wasm_bindgen(js_name = decodeAndVerify)]
+    pub fn decode_and_verify(wire: &[u8]) -> Result<InviteCapability, JsError> {
+        let inner = rust_invite_decode(wire).map_err(contact_err)?;
+        Ok(Self { inner })
+    }
+
+    /// Inviter's long-term Ed25519 verifying key (32 bytes).
+    #[wasm_bindgen(getter, js_name = ownerSignaturePubkey)]
+    pub fn owner_signature_pubkey(&self) -> Vec<u8> {
+        self.inner.owner_signature_pubkey.to_bytes().to_vec()
+    }
+
+    /// Inviter's `account_id` (16-byte UUIDv7).
+    #[wasm_bindgen(getter, js_name = ownerAccountId)]
+    pub fn owner_account_id(&self) -> Vec<u8> {
+        self.inner.owner_account_id.to_vec()
+    }
+
+    /// Inviter's long-term X25519 public key (32 bytes).
+    #[wasm_bindgen(getter, js_name = ownerX25519Pubkey)]
+    pub fn owner_x25519_pubkey(&self) -> Vec<u8> {
+        self.inner.owner_x25519_pubkey.to_bytes().to_vec()
+    }
+
+    /// UNIX milliseconds when the invite stops being valid. `0`
+    /// is the `NEVER_EXPIRES` sentinel — UI must warn before
+    /// honouring (stalking risk, ADR-0005 §13.3).
+    #[wasm_bindgen(getter, js_name = expiryMs)]
+    pub fn expiry_ms(&self) -> u64 {
+        self.inner.expiry_ms
+    }
+
+    /// Max-uses hint. `0` is the `SINGLE_USE` sentinel. V1 is a
+    /// best-effort hint with no server enforcement — that lands
+    /// in 1.18d.
+    #[wasm_bindgen(getter, js_name = maxUses)]
+    pub fn max_uses(&self) -> u32 {
+        self.inner.max_uses
+    }
+
+    /// `true` when this is a referral link for a fresh signup
+    /// (ADR-0005 §13.4).
+    #[wasm_bindgen(getter, js_name = bootstrapReferral)]
+    pub fn bootstrap_referral(&self) -> bool {
+        self.inner.bootstrap_referral
+    }
+
+    /// Optional human-visible label, UTF-8, ≤
+    /// `MAX_LABEL_LEN`. Empty string when the inviter didn't
+    /// set one — UI fills in a default from the inviter's
+    /// display name on lookup.
+    #[wasm_bindgen(getter)]
+    pub fn label(&self) -> String {
+        self.inner.label.clone()
+    }
+
+    /// `true` iff the capability has not expired at `nowMs`.
+    /// `NEVER_EXPIRES` capabilities always return `true`.
+    #[wasm_bindgen(js_name = isValidNow)]
+    pub fn is_valid_now(&self, now_ms: u64) -> bool {
+        self.inner.is_valid_now(now_ms)
+    }
+}
+
 // Tests cover only happy paths — error paths invoke `JsError::new`,
 // which is a wasm-bindgen-imported function and panics with
 // "cannot call wasm-bindgen imported functions on non-wasm targets"
@@ -336,5 +508,64 @@ mod tests {
         let priv_bytes = recipient_x25519.to_bytes();
         let plaintext = req.open_envelope(&priv_bytes).unwrap();
         assert_eq!(plaintext, b"hi bob");
+    }
+
+    #[test]
+    fn invite_capability_roundtrip_happy_path() {
+        let owner_seed = [9u8; 32];
+        let owner_account_id = [0xA1u8; 16];
+        let owner_x25519 = X25519SecretKey::from_bytes([0xB2; 32]);
+        let owner_x25519_pub = owner_x25519.public_key().to_bytes();
+
+        let wire = InviteCapability::compose(
+            &owner_seed,
+            &owner_account_id,
+            &owner_x25519_pub,
+            1_700_000_000_000,
+            5,
+            false,
+            "alice@home",
+        )
+        .unwrap();
+
+        let cap = InviteCapability::decode_and_verify(&wire).unwrap();
+        assert_eq!(cap.owner_account_id(), owner_account_id.to_vec());
+        assert_eq!(cap.owner_x25519_pubkey(), owner_x25519_pub.to_vec());
+        assert_eq!(cap.expiry_ms(), 1_700_000_000_000);
+        assert_eq!(cap.max_uses(), 5);
+        assert!(!cap.bootstrap_referral());
+        assert_eq!(cap.label(), "alice@home");
+        // Ed25519 pubkey is derivable from the seed; assert non-empty.
+        assert_eq!(cap.owner_signature_pubkey().len(), 32);
+        // is_valid_now boundary check.
+        assert!(cap.is_valid_now(0));
+        assert!(!cap.is_valid_now(1_700_000_000_000));
+    }
+
+    #[test]
+    fn invite_capability_never_expires_sentinel() {
+        let owner_seed = [3u8; 32];
+        let owner_account_id = [0x11u8; 16];
+        let owner_x25519 = X25519SecretKey::from_bytes([0x22; 32])
+            .public_key()
+            .to_bytes();
+
+        let wire = InviteCapability::compose(
+            &owner_seed,
+            &owner_account_id,
+            &owner_x25519,
+            0, // NEVER_EXPIRES
+            0, // SINGLE_USE
+            true,
+            "",
+        )
+        .unwrap();
+
+        let cap = InviteCapability::decode_and_verify(&wire).unwrap();
+        assert_eq!(cap.expiry_ms(), 0);
+        assert_eq!(cap.max_uses(), 0);
+        assert!(cap.bootstrap_referral());
+        assert_eq!(cap.label(), "");
+        assert!(cap.is_valid_now(u64::MAX));
     }
 }
