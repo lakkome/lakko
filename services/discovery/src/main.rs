@@ -49,6 +49,7 @@
 //! - `POST   /discovery/invite`             — upload InviteCapability blob (Phase 1.18d1)
 //! - `GET    /discovery/invite/{blob_id}`   — fetch InviteCapability blob (Phase 1.18d1)
 //! - `POST   /discovery/invite/{blob_id}/consume` — atomic max_uses bump (Phase 1.18d2a)
+//! - `DELETE /discovery/invite/{blob_id}`           — owner-signed revocation (Phase 1.18d2b)
 
 #![forbid(unsafe_code)]
 
@@ -186,6 +187,11 @@ pub(crate) fn build_app(state: AppState) -> Router {
             "/discovery/invite/{blob_id}/consume",
             post(invite::consume),
         )
+        // Phase 1.18d2b — owner-side revocation. Same path as
+        // GET, but the DELETE method gates on a body-signed
+        // request the owner produces with the same Ed25519 key
+        // that signed the capability.
+        .route("/discovery/invite/{blob_id}", axum::routing::delete(invite::revoke))
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .layer(TraceLayer::new_for_http())
         .with_state(state)

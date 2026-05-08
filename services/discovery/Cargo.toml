@@ -69,12 +69,19 @@ rand = "0.8"
 # holding a link sees them) so coupling the server to
 # lakko-contacts on this surface adds no privacy risk.
 lakko-contacts.workspace = true
+# Phase 1.18d2b — owner-signed `DELETE /discovery/invite/...`
+# verifies the request body's Ed25519 signature against the
+# capability's embedded `owner_signature_pubkey`. Direct dep on
+# the signing primitives (instead of going through the
+# `lakko_contacts::*` re-exports) keeps the verify call site
+# self-contained and avoids a `pub use` shuffle on the contacts
+# crate.
+lakko-crypto.workspace = true
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
-# Phase 1.18d1 — `invite::tests::server_side_decode_and_verify_round_trip`
-# builds an Ed25519 + X25519 pair to compose a real
-# InviteCapability and exercise the verify path. Test-only —
-# the production code stays scoped to `lakko-contacts`.
-lakko-crypto.workspace = true
+# Note: `lakko-crypto` is now a regular dep (1.18d2b) — no
+# dev-dep override needed. The round-trip test in
+# `invite::tests::server_side_decode_and_verify_round_trip`
+# uses the same dep.
