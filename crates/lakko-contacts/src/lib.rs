@@ -58,6 +58,9 @@ pub mod pseudonym;
 pub mod request;
 
 pub use error::{ContactError, Result};
-pub use invite::{InviteCapability, MAX_LABEL_LEN, NEVER_EXPIRES, SINGLE_USE};
+pub use invite::{
+    revoke_canonical_bytes, sign_revocation, InviteCapability, BLOB_ID_LEN, MAX_LABEL_LEN,
+    NEVER_EXPIRES, REVOKE_DOMAIN_V1, REVOKE_REPLAY_WINDOW_MS, SINGLE_USE,
+};
 pub use pseudonym::{Direction, IdentityPseudonym, PerRelationship, StrangerInbox, PSEUDONYM_LEN};
 pub use request::{compose, decode_and_verify, open_envelope, ContactRequest, ACCOUNT_ID_LEN};

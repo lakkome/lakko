@@ -445,6 +445,14 @@ function InvitePanel(): JSX.Element {
   const [generatedKind, setGeneratedKind] = createSignal<
     "pointer" | "inline-fallback" | null
   >(null);
+  // 1.18d2b-web — track the blob_id of the just-uploaded
+  // capability so the same-session "Revoke this invite" button
+  // can post the signed DELETE without forcing the user to
+  // paste the URL back. `null` on the inline-fallback path
+  // (no server row) and after `reset()`.
+  const [generatedBlobId, setGeneratedBlobId] = createSignal<Uint8Array | null>(
+    null,
+  );
   const [copied, setCopied] = createSignal(false);
 
   async function onGenerate(e: SubmitEvent): Promise<void> {
@@ -502,6 +510,7 @@ function InvitePanel(): JSX.Element {
         const blobId = await discovery.uploadInvite(bytes);
         setGeneratedUrl(composePointerInviteUrl(blobId));
         setGeneratedKind("pointer");
+        setGeneratedBlobId(blobId);
       } catch (uploadErr) {
         const isNetwork =
           uploadErr instanceof Error && uploadErr.name === "DiscoveryNetworkError";
@@ -513,6 +522,7 @@ function InvitePanel(): JSX.Element {
         );
         setGeneratedUrl(composeInlineInviteUrl(bytes));
         setGeneratedKind("inline-fallback");
+        setGeneratedBlobId(null);
       }
     } catch (err) {
       setError(formatError(err));
@@ -536,10 +546,48 @@ function InvitePanel(): JSX.Element {
   function reset(): void {
     setGeneratedUrl(null);
     setGeneratedKind(null);
+    setGeneratedBlobId(null);
     setError(null);
     setCopied(false);
     setLabel("");
     setBootstrapReferral(false);
+  }
+
+  // 1.18d2b-web: same-session revocation. Calls
+  // `discovery.revokeInvite(blobId, ed25519Seed)`; on success
+  // wipes the URL panel and surfaces a notice via the existing
+  // `error` channel (re-purposed as a generic message slot —
+  // the form is in a terminal "URL was here" state at this
+  // point and a real banner UI is overkill).
+  async function onRevoke(): Promise<void> {
+    const blobId = generatedBlobId();
+    if (blobId === null) return;
+    setError(null);
+    setBusy(true);
+    try {
+      const id = chats.identity();
+      if (id === null) {
+        throw new Error("re-enter your password to revoke invites");
+      }
+      const result = await discovery.revokeInvite(blobId, id.ed25519Seed);
+      if (result.kind === "revoked") {
+        // Wipe the panel back to the form. Surface a one-liner
+        // through the `error` channel (no dedicated success
+        // banner — this is a terminal action; the form is
+        // about to re-render).
+        reset();
+        setError("Invite revoked.");
+      } else {
+        // 404 — already gone or someone else's blob. Either
+        // way, wipe the panel.
+        reset();
+        setError("Invite no longer exists.");
+      }
+    } catch (err) {
+      setError(formatError(err));
+    } finally {
+      setBusy(false);
+    }
   }
 
   return (
@@ -558,8 +606,13 @@ function InvitePanel(): JSX.Element {
             url={generatedUrl() ?? ""}
             kind={generatedKind() ?? "pointer"}
             copied={copied}
+            busy={busy}
+            canRevoke={generatedBlobId() !== null}
             onCopy={() => {
               void onCopy();
+            }}
+            onRevoke={() => {
+              void onRevoke();
             }}
             onReset={reset}
           />
@@ -663,7 +716,13 @@ function GeneratedUrlPanel(props: {
   url: string;
   kind: "pointer" | "inline-fallback";
   copied: () => boolean;
+  busy: () => boolean;
+  /** `true` only on the pointer-form path. Inline-bytes URLs
+   *  have no associated server row, so revoke is unavailable
+   *  by construction. */
+  canRevoke: boolean;
   onCopy: () => void;
+  onRevoke: () => void;
   onReset: () => void;
 }): JSX.Element {
   return (
@@ -699,14 +758,44 @@ function GeneratedUrlPanel(props: {
         }}
         onClick={(e) => e.currentTarget.select()}
       />
-      <div style={{ display: "flex", gap: "0.5rem", "margin-top": "0.5rem" }}>
-        <button class="primary" type="button" onClick={props.onCopy}>
+      <div style={{ display: "flex", gap: "0.5rem", "margin-top": "0.5rem", "flex-wrap": "wrap" }}>
+        <button
+          class="primary"
+          type="button"
+          onClick={props.onCopy}
+          disabled={props.busy()}
+        >
           {props.copied() ? "Copied" : "Copy to clipboard"}
         </button>
-        <button type="button" onClick={props.onReset}>
+        <button type="button" onClick={props.onReset} disabled={props.busy()}>
           Generate another
         </button>
+        <Show when={props.canRevoke}>
+          <button
+            type="button"
+            onClick={props.onRevoke}
+            disabled={props.busy()}
+            style={{
+              "margin-left": "auto",
+              color: "var(--danger-fg, currentColor)",
+            }}
+          >
+            {props.busy() ? "Revoking…" : "Revoke this invite"}
+          </button>
+        </Show>
       </div>
+      <Show when={!props.canRevoke}>
+        <p
+          style={{
+            color: "var(--surface-muted)",
+            "font-size": "0.8rem",
+            "margin-top": "0.5rem",
+          }}
+        >
+          (Revoke unavailable on the inline-bytes fallback — no server
+          row to delete.)
+        </p>
+      </Show>
     </div>
   );
 }

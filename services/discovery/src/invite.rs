@@ -59,7 +59,9 @@ use axum::http::StatusCode;
 use axum::Json;
 use base64::engine::general_purpose::{STANDARD as B64, URL_SAFE_NO_PAD as B64URL};
 use base64::Engine as _;
-use lakko_contacts::invite::decode_and_verify;
+use lakko_contacts::invite::{
+    decode_and_verify, revoke_canonical_bytes, BLOB_ID_LEN, REVOKE_REPLAY_WINDOW_MS,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -73,8 +75,9 @@ use crate::AppState;
 /// without another schema bump.
 const MAX_CAPABILITY_BYTES: usize = 2048;
 
-/// `blob_id` length — SHA-256 output, 32 bytes.
-const BLOB_ID_LEN: usize = 32;
+// `BLOB_ID_LEN` is sourced from `lakko_contacts::invite` so the
+// canonical-bytes layout (1.18d2b) and the row schema width
+// stay pinned to the same constant. See the import above.
 
 // ============================================================================
 // POST /discovery/invite — upload + verify + content-address
@@ -419,23 +422,11 @@ pub(crate) async fn consume(
 // DELETE /discovery/invite/{blob_id} — owner-side revocation (Phase 1.18d2b)
 // ============================================================================
 
-/// Domain-separator prefix for the canonical bytes the owner
-/// signs. Includes the version so a future revocation scheme
-/// (e.g. delegated-revoke after KT-log identity rotation) gets
-/// a fresh prefix without breaking existing signatures. The
-/// trailing NUL pin is gratuitous — keeps the prefix's byte
-/// length distinct from any incidental ASCII suffix the
-/// `lakko-invite-…/v1` namespace might grow.
-const REVOKE_DOMAIN_V1: &[u8] = b"lakko-invite-revoke/v1\x00";
-
-/// Replay window for the signed `signed_at_ms` field. Symmetric
-/// (±10 min) so the joiner / owner clock skew tolerance is the
-/// same as the freshness ceiling. A signed body older than this
-/// is rejected; a body claiming to be from the future by more
-/// than this is also rejected. Clients with bad clocks see the
-/// same 404 fold as everyone else (no privileged "your clock is
-/// off" signal).
-const REVOKE_REPLAY_WINDOW_MS: u64 = 10 * 60 * 1_000;
+// `REVOKE_DOMAIN_V1` and `REVOKE_REPLAY_WINDOW_MS` live in
+// `lakko_contacts::invite` (Phase 1.18d2b-web): the canonical
+// layout is a protocol detail the web client and server both
+// need to drive sign/verify against, and a single source of
+// truth keeps them from drifting. Imported above.
 
 #[derive(Deserialize)]
 pub(crate) struct RevokeRequest {
@@ -634,32 +625,6 @@ fn effective_max_uses(max_uses: u32) -> u32 {
     }
 }
 
-/// Build the canonical bytes the owner signs to prove a
-/// revocation request (Phase 1.18d2b).
-///
-/// Layout:
-///
-/// ```text
-/// REVOKE_DOMAIN_V1 (23 bytes)  ‖ blob_id (32 bytes) ‖ signed_at_ms (8 bytes BE)
-/// ```
-///
-/// 63 bytes total. Domain separator binds the signature to the
-/// revocation-v1 use case; `blob_id` binds it to the specific
-/// row; `signed_at_ms` binds it to a freshness window so a
-/// captured signature cannot be replayed past the
-/// `REVOKE_REPLAY_WINDOW_MS` ceiling.
-///
-/// Pure deterministic helper — same inputs always produce the
-/// same bytes. The web client mirrors this layout in
-/// `apps/web/src/contacts/invite.ts` (1.18d2b-web).
-fn revoke_canonical_bytes(blob_id: &[u8; BLOB_ID_LEN], signed_at_ms: u64) -> Vec<u8> {
-    let mut out = Vec::with_capacity(REVOKE_DOMAIN_V1.len() + BLOB_ID_LEN + 8);
-    out.extend_from_slice(REVOKE_DOMAIN_V1);
-    out.extend_from_slice(blob_id);
-    out.extend_from_slice(&signed_at_ms.to_be_bytes());
-    out
-}
-
 /// `true` iff `signed_at_ms` is within `±REVOKE_REPLAY_WINDOW_MS`
 /// of `now_ms`. Symmetric so client / server clock skew is
 /// tolerated equally in both directions.
@@ -814,59 +779,27 @@ mod tests {
         assert!(decode_and_verify(&tampered).is_err());
     }
 
-    /// `revoke_canonical_bytes` is the source of truth for the
-    /// signed-message layout. Pin the byte-for-byte shape so a
-    /// future refactor that drifts the prefix / field order
-    /// surfaces here, not as a server-side reject of every web
-    /// client's revocation attempt.
-    #[test]
-    fn revoke_canonical_bytes_layout() {
-        let blob_id = [0xCDu8; BLOB_ID_LEN];
-        let signed_at_ms: u64 = 0x0123_4567_89AB_CDEF;
+    // The canonical-bytes layout, the replay-window constant
+    // value, and the sign / verify round-trip are owned by
+    // `lakko-contacts::invite::tests` (Phase 1.18d2b-web). The
+    // server `revoke` handler verifies against the same shared
+    // helper; a layout drift surfaces as a `lakko-contacts`
+    // test failure first.
 
-        let canonical = revoke_canonical_bytes(&blob_id, signed_at_ms);
-
-        // Total length: 23 (prefix) + 32 (blob_id) + 8 (u64 BE).
-        assert_eq!(canonical.len(), REVOKE_DOMAIN_V1.len() + BLOB_ID_LEN + 8);
-
-        // Prefix → blob_id → signed_at_ms (big-endian).
-        assert_eq!(&canonical[..REVOKE_DOMAIN_V1.len()], REVOKE_DOMAIN_V1);
-        let blob_start = REVOKE_DOMAIN_V1.len();
-        assert_eq!(
-            &canonical[blob_start..blob_start + BLOB_ID_LEN],
-            &blob_id[..]
-        );
-        let ts_start = blob_start + BLOB_ID_LEN;
-        assert_eq!(
-            &canonical[ts_start..ts_start + 8],
-            &signed_at_ms.to_be_bytes(),
-        );
-    }
-
-    /// Replay window must be exactly ±10 minutes. The web client
-    /// builds the signed body against `Date.now()`; tightening
-    /// or loosening the window here without bumping the client
-    /// would surface as silent revocation failures with no
-    /// distinguishable error code (the response is folded into
-    /// 404). Pin the value.
-    #[test]
-    fn revoke_replay_window_is_10_minutes() {
-        assert_eq!(REVOKE_REPLAY_WINDOW_MS, 600_000);
-    }
-
-    /// `within_replay_window` is symmetric — both past and
-    /// future signatures within ±10 min are accepted, anything
-    /// past the boundary is rejected.
+    /// `within_replay_window` is server-side only — the helper
+    /// doesn't exist on the client side at all (the client
+    /// trusts its own clock, the server is the one filtering),
+    /// so the symmetric-window test belongs here.
     #[test]
     fn within_replay_window_is_symmetric() {
         let now = 1_700_000_000_000u64;
-        // Inside: ±5 minutes
+        // Inside: ±5 minutes.
         assert!(within_replay_window(now - 5 * 60 * 1000, now));
         assert!(within_replay_window(now + 5 * 60 * 1000, now));
         // Boundary: exactly ±10 minutes — accepted (≤).
         assert!(within_replay_window(now - REVOKE_REPLAY_WINDOW_MS, now));
         assert!(within_replay_window(now + REVOKE_REPLAY_WINDOW_MS, now));
-        // Outside: > 10 minutes
+        // Outside: > 10 minutes.
         assert!(!within_replay_window(
             now - REVOKE_REPLAY_WINDOW_MS - 1,
             now
@@ -875,39 +808,5 @@ mod tests {
             now + REVOKE_REPLAY_WINDOW_MS + 1,
             now
         ));
-    }
-
-    /// End-to-end signing round-trip: build canonical bytes,
-    /// sign with the owner key, verify against the same pubkey.
-    /// Tampering with `signed_at_ms` invalidates the signature
-    /// just like tampering with `blob_id` does — both are
-    /// covered by the canonical prefix.
-    #[test]
-    fn revoke_signature_round_trip() {
-        use lakko_crypto::signing::SigningKey;
-
-        let signing = SigningKey::from_seed(&[0xAAu8; 32]);
-        let pubkey = signing.verifying_key();
-        let blob_id = [0xBBu8; BLOB_ID_LEN];
-        let signed_at_ms = 1_700_000_000_000u64;
-
-        let canonical = revoke_canonical_bytes(&blob_id, signed_at_ms);
-        let signature = signing.sign(&canonical);
-        assert!(pubkey.verify(&canonical, &signature).is_ok());
-
-        // Tamper signed_at_ms — must reject.
-        let canonical_tampered = revoke_canonical_bytes(&blob_id, signed_at_ms + 1);
-        assert!(pubkey.verify(&canonical_tampered, &signature).is_err());
-
-        // Tamper blob_id — must reject.
-        let mut blob_id_tampered = blob_id;
-        blob_id_tampered[0] ^= 0x01;
-        let canonical_tampered = revoke_canonical_bytes(&blob_id_tampered, signed_at_ms);
-        assert!(pubkey.verify(&canonical_tampered, &signature).is_err());
-
-        // Different signing key — same canonical bytes — must reject.
-        let attacker = SigningKey::from_seed(&[0xCCu8; 32]);
-        let attacker_sig = attacker.sign(&canonical);
-        assert!(pubkey.verify(&canonical, &attacker_sig).is_err());
     }
 }

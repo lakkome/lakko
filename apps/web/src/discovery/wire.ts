@@ -187,3 +187,23 @@ export interface InviteConsumeResponse {
    *  "this was the last use" copy. */
   max_uses: number;
 }
+
+/** Body of `DELETE /discovery/invite/{blob_id_b64url}` (Phase
+ *  1.18d2b). The `signature` field carries proof that the
+ *  request came from the same Ed25519 key that signed the
+ *  capability — server recovers `owner_signature_pubkey` from
+ *  the stored `capability_bytes` and verifies against the
+ *  canonical bytes built from `blob_id` + `signed_at_ms`.
+ *
+ *  `signed_at_ms` MUST be within `±REVOKE_REPLAY_WINDOW_MS`
+ *  (10 min, mirroring `lakko_contacts::invite`) of the server
+ *  clock or the request is rejected with 400 Bad Request. */
+export interface InviteRevokeRequest {
+  /** UNIX millis at which the body was signed. JSON `number`
+   *  is safe up to 2^53; UNIX millis is ~1.7e12, well within
+   *  the safe range. */
+  signed_at_ms: number;
+  /** Standard-alphabet base64 of the 64-byte Ed25519 signature
+   *  from `wasm.signInviteRevocation(...)`. */
+  signature: string;
+}

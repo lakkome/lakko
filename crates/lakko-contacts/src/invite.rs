@@ -118,6 +118,84 @@ pub const NEVER_EXPIRES: u64 = 0;
 /// Sentinel meaning "single-use".
 pub const SINGLE_USE: u32 = 0;
 
+// ============================================================================
+// Owner-side revocation (Phase 1.18d2b) — protocol-shared helpers
+// ============================================================================
+
+/// Domain-separator prefix for the canonical bytes the inviter
+/// signs to prove a revocation request (Phase 1.18d2b). The
+/// trailing NUL pin keeps the prefix's byte length distinct
+/// from any incidental ASCII suffix the `lakko-invite-…/v1`
+/// namespace might grow. The version is part of the domain so
+/// a future revocation scheme (e.g. delegated-revoke after
+/// KT-log identity rotation) gets a fresh prefix without
+/// breaking existing signatures.
+pub const REVOKE_DOMAIN_V1: &[u8] = b"lakko-invite-revoke/v1\x00";
+
+/// Replay window for the signed `signed_at_ms` field. Symmetric
+/// (±10 min) so client / server clock skew tolerance is the
+/// same as the freshness ceiling. A signed body older than this
+/// is rejected; a body claiming to be from the future by more
+/// than this is also rejected.
+pub const REVOKE_REPLAY_WINDOW_MS: u64 = 10 * 60 * 1_000;
+
+/// Length in bytes of a `blob_id` — SHA-256 of the
+/// capability bytes, mirrors `services/discovery`'s
+/// `BLOB_ID_LEN`. Pinned in the codec layer because the
+/// canonical-bytes layout binds to it.
+pub const BLOB_ID_LEN: usize = 32;
+
+/// Build the canonical bytes the inviter signs to prove a
+/// revocation request.
+///
+/// Layout (63 bytes total):
+///
+/// ```text
+/// REVOKE_DOMAIN_V1 (23 bytes)  ‖ blob_id (32 bytes) ‖ signed_at_ms (8 bytes BE)
+/// ```
+///
+/// Domain separator binds the signature to the revocation-v1
+/// use case; `blob_id` binds it to the specific row;
+/// `signed_at_ms` binds it to a freshness window so a captured
+/// signature cannot be replayed past
+/// [`REVOKE_REPLAY_WINDOW_MS`].
+///
+/// Pure deterministic helper — same inputs always produce the
+/// same bytes. Both the server (`services/discovery`) and the
+/// web client drive verify / sign against the value this
+/// function returns; consolidating the layout here is what
+/// keeps the two sides in sync.
+#[must_use]
+pub fn revoke_canonical_bytes(blob_id: &[u8; BLOB_ID_LEN], signed_at_ms: u64) -> Vec<u8> {
+    let mut out = Vec::with_capacity(REVOKE_DOMAIN_V1.len() + BLOB_ID_LEN + 8);
+    out.extend_from_slice(REVOKE_DOMAIN_V1);
+    out.extend_from_slice(blob_id);
+    out.extend_from_slice(&signed_at_ms.to_be_bytes());
+    out
+}
+
+/// Sign a revocation request — convenience over
+/// [`revoke_canonical_bytes`] + the Ed25519 sign primitive.
+/// Caller supplies the inviter's signing key (the same one
+/// they used to compose the capability) plus the request
+/// timestamp; the helper builds the canonical bytes, signs,
+/// and returns the 64-byte signature.
+///
+/// The web client drives this through wasm-bindgen
+/// (`wasm.signInviteRevocation` in `lakko-ffi-wasm` 1.18d2b);
+/// the server-side `services/discovery::invite::revoke` path
+/// verifies the same bytes against the embedded
+/// `owner_signature_pubkey`.
+#[must_use]
+pub fn sign_revocation(
+    signing: &SigningKey,
+    blob_id: &[u8; BLOB_ID_LEN],
+    signed_at_ms: u64,
+) -> [u8; SIGNATURE_LEN] {
+    let canonical = revoke_canonical_bytes(blob_id, signed_at_ms);
+    signing.sign(&canonical).to_bytes()
+}
+
 /// A composed invite capability, ready to wire-encode into a URL.
 ///
 /// Sender side: produced by [`compose`].
@@ -604,5 +682,71 @@ mod tests {
 
         let err = decode_and_verify(&wire).unwrap_err();
         assert!(matches!(err, ContactError::InvalidEncoding(_)));
+    }
+
+    // ----------------------------------------------------------------
+    // Revocation canonical-bytes + signing helper (Phase 1.18d2b)
+    // ----------------------------------------------------------------
+
+    #[test]
+    fn revoke_canonical_bytes_layout() {
+        // Domain prefix is 23 bytes; blob_id 32; u64 BE 8 → 63
+        // total. Pin so a future refactor that drifts the
+        // prefix surfaces here.
+        assert_eq!(REVOKE_DOMAIN_V1.len(), 23);
+        assert_eq!(REVOKE_DOMAIN_V1, b"lakko-invite-revoke/v1\x00");
+        assert_eq!(BLOB_ID_LEN, 32);
+
+        let blob_id = [0xCDu8; BLOB_ID_LEN];
+        let signed_at_ms: u64 = 0x0123_4567_89AB_CDEF;
+        let canonical = revoke_canonical_bytes(&blob_id, signed_at_ms);
+        assert_eq!(canonical.len(), REVOKE_DOMAIN_V1.len() + BLOB_ID_LEN + 8);
+
+        // Order: prefix, blob_id, signed_at_ms (big-endian).
+        assert_eq!(&canonical[..REVOKE_DOMAIN_V1.len()], REVOKE_DOMAIN_V1);
+        let blob_off = REVOKE_DOMAIN_V1.len();
+        assert_eq!(&canonical[blob_off..blob_off + BLOB_ID_LEN], &blob_id[..]);
+        let ts_off = blob_off + BLOB_ID_LEN;
+        assert_eq!(&canonical[ts_off..ts_off + 8], &signed_at_ms.to_be_bytes());
+    }
+
+    #[test]
+    fn revoke_replay_window_is_10_minutes() {
+        // The web client builds `signed_at_ms` against
+        // `Date.now()`; tightening or loosening this constant
+        // without bumping the client surfaces as silent
+        // revocation failures with no distinguishable error
+        // code (server folds bad-window into 400). Pin.
+        assert_eq!(REVOKE_REPLAY_WINDOW_MS, 600_000);
+    }
+
+    #[test]
+    fn sign_revocation_round_trip() {
+        let signing = SigningKey::from_seed(&[0xAAu8; 32]);
+        let pubkey = signing.verifying_key();
+        let blob_id = [0xBBu8; BLOB_ID_LEN];
+        let signed_at_ms = 1_700_000_000_000u64;
+
+        let signature_bytes = sign_revocation(&signing, &blob_id, signed_at_ms);
+        let signature = Signature::from_bytes(&signature_bytes).unwrap();
+
+        let canonical = revoke_canonical_bytes(&blob_id, signed_at_ms);
+        assert!(pubkey.verify(&canonical, &signature).is_ok());
+
+        // Tamper signed_at_ms — must reject.
+        let canonical_tampered = revoke_canonical_bytes(&blob_id, signed_at_ms + 1);
+        assert!(pubkey.verify(&canonical_tampered, &signature).is_err());
+
+        // Tamper blob_id — must reject.
+        let mut blob_id_tampered = blob_id;
+        blob_id_tampered[0] ^= 0x01;
+        let canonical_tampered = revoke_canonical_bytes(&blob_id_tampered, signed_at_ms);
+        assert!(pubkey.verify(&canonical_tampered, &signature).is_err());
+
+        // Different signing key — must reject.
+        let attacker = SigningKey::from_seed(&[0xCCu8; 32]);
+        let attacker_sig_bytes = sign_revocation(&attacker, &blob_id, signed_at_ms);
+        let attacker_sig = Signature::from_bytes(&attacker_sig_bytes).unwrap();
+        assert!(pubkey.verify(&canonical, &attacker_sig).is_err());
     }
 }

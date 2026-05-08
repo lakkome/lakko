@@ -40,6 +40,7 @@ import type {
   InviteConsumeRequest,
   InviteConsumeResponse,
   InviteFetchResponse,
+  InviteRevokeRequest,
   InviteUploadRequest,
   InviteUploadResponse,
   KeyPackageFetchResponse,
@@ -96,6 +97,24 @@ export type ConsumeInviteResult =
   | { readonly kind: "consumed"; readonly usedCount: number; readonly maxUses: number }
   | { readonly kind: "exhausted" }
   | { readonly kind: "not-found" };
+
+/** Result of `DiscoveryClient.revokeInvite` (Phase 1.18d2b-web).
+ *
+ *  Discriminated so the owner UI can branch cleanly:
+ *    * `kind: "revoked"` — server deleted the row.
+ *    * `kind: "not-found-or-not-owner"` — 404. Server folds
+ *      "no row" / "signature did not verify" / "stored bytes
+ *      failed re-decode" into the same status to deny status-
+ *      code probing of the blob_id space; the UI surfaces a
+ *      generic "this invite no longer exists or you don't own
+ *      it" message.
+ *
+ *  Body-shape failures (bad base64, signed_at_ms outside the
+ *  replay window, …) still throw `DiscoveryHttpError(400, …)`
+ *  — they indicate a buggy client, not a probing attacker. */
+export type RevokeInviteResult =
+  | { readonly kind: "revoked" }
+  | { readonly kind: "not-found-or-not-owner" };
 
 /** Programmer error — empty / invalid inputs caught before any
  *  network round-trip. Distinct from HTTP errors so the UI can
@@ -174,6 +193,34 @@ export class DiscoveryClient {
     req: InviteConsumeRequest,
   ): Promise<InviteConsumeResponse> {
     return this.post(`/discovery/invite/${blobIdSlug}/consume`, req);
+  }
+
+  /** `DELETE /discovery/invite/{blob_id}` — owner-signed
+   *  revocation (Phase 1.18d2b). The high-level
+   *  [`revokeInvite`] wrapper signs the canonical bytes via
+   *  `wasm.signInviteRevocation` and folds the 204 / 404
+   *  response shapes into a discriminated result.
+   *
+   *  Note: not implemented as a `post()` because the verb is
+   *  DELETE and the body shape is distinct enough that
+   *  factoring through the existing JSON helper would obscure
+   *  more than it shares. */
+  async inviteRevoke(blobIdSlug: string, req: InviteRevokeRequest): Promise<void> {
+    const endpoint = `/discovery/invite/${blobIdSlug}`;
+    const url = `${this.baseUrl}${endpoint}`;
+    let response: Response;
+    try {
+      response = await fetch(url, {
+        method: "DELETE",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(req),
+      });
+    } catch (err) {
+      throw new DiscoveryNetworkError(`${endpoint} (DELETE)`, err);
+    }
+    if (response.status === 204) return;
+    const text = await safeReadBody(response);
+    throw new DiscoveryHttpError(response.status, `${endpoint} (DELETE)`, text);
   }
 
   /**
@@ -602,6 +649,74 @@ export class DiscoveryClient {
       usedCount: raw.used_count,
       maxUses: raw.max_uses,
     };
+  }
+
+  /**
+   * Owner-signed revocation of an invite blob (Phase 1.18d2b-web).
+   *
+   * Driven by the same Ed25519 key that signed the capability:
+   * `wasm.signInviteRevocation(seed, blobId, signedAtMs)`
+   * builds the canonical bytes (`REVOKE_DOMAIN_V1 || blob_id ||
+   * signed_at_ms_be`) and signs. We POST `signed_at_ms +
+   * signature` as the DELETE body; server recovers the
+   * inviter's pubkey from the stored capability bytes and
+   * verifies the signature against the same canonical layout.
+   *
+   * Replay window: the server enforces `±10 min` against its
+   * own clock. The web client uses `Date.now()` directly — a
+   * machine with a clock more than ~10 min skewed will see
+   * 400-bad-window failures, mirroring the consume path.
+   *
+   * Returns a discriminated [`RevokeInviteResult`]:
+   *   * `"revoked"` on 204
+   *   * `"not-found-or-not-owner"` on 404 (server folds "no
+   *     row" / "bad signature" / "stored bytes failed
+   *     re-decode" into one status to deny status-code
+   *     probing)
+   *
+   * Other non-2xx still throw `DiscoveryHttpError`.
+   *
+   * @param blobId      Raw 32-byte content-addressed id (the
+   *                    same value `uploadInvite` returned).
+   * @param signingSeed The owner's 32-byte Ed25519 seed —
+   *                    typically `chats.identity().ed25519Seed`.
+   */
+  async revokeInvite(
+    blobId: Uint8Array,
+    signingSeed: Uint8Array,
+  ): Promise<RevokeInviteResult> {
+    if (blobId.length !== 32) {
+      throw new DiscoveryClientArgError("blobId must be 32 bytes");
+    }
+    if (signingSeed.length !== 32) {
+      throw new DiscoveryClientArgError("signingSeed must be 32 bytes");
+    }
+
+    const wasm = await loadWasm();
+    // Bind the timestamp once so we sign the SAME value we
+    // post; reading `Date.now()` twice could in principle yield
+    // distinct values across the await boundary. The server's
+    // ±10-min window absorbs the millisecond difference, but
+    // pinning the value here is cheap and removes the doubt.
+    const signedAtMs = Date.now();
+    const signature = wasm.signInviteRevocation(
+      signingSeed,
+      blobId,
+      BigInt(signedAtMs),
+    );
+    const slug = base64UrlEncodeNoPad(blobId);
+    try {
+      await this.inviteRevoke(slug, {
+        signed_at_ms: signedAtMs,
+        signature: base64Encode(signature),
+      });
+      return { kind: "revoked" };
+    } catch (err) {
+      if (err instanceof DiscoveryHttpError && err.status === 404) {
+        return { kind: "not-found-or-not-owner" };
+      }
+      throw err;
+    }
   }
 
   /**
