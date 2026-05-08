@@ -61,6 +61,20 @@ base64 = "0.22"
 hex = "0.4"
 rand = "0.8"
 
+# Phase 1.18d1 — server-side `decode_and_verify` over the
+# uploaded `InviteCapability` so junk wire is rejected at the
+# /discovery/invite ingress and the verified `owner_account_id`
+# + `expiry_ms` can be denormalised into the row index columns.
+# The capability bytes themselves are public by design (anyone
+# holding a link sees them) so coupling the server to
+# lakko-contacts on this surface adds no privacy risk.
+lakko-contacts.workspace = true
+
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
+# Phase 1.18d1 — `invite::tests::server_side_decode_and_verify_round_trip`
+# builds an Ed25519 + X25519 pair to compose a real
+# InviteCapability and exercise the verify path. Test-only —
+# the production code stays scoped to `lakko-contacts`.
+lakko-crypto.workspace = true

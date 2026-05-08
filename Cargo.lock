@@ -2041,6 +2041,8 @@ dependencies = [
  "generic-array",
  "hex",
  "http-body-util",
+ "lakko-contacts",
+ "lakko-crypto",
  "rand 0.8.6",
  "serde",
  "serde_json",

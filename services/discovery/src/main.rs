@@ -46,10 +46,13 @@
 //! - `GET    /discovery/identity/{acct}`    — fetch public identity bundle (Phase 1.16d3a)
 //! - `POST   /discovery/keypackage`         — upsert public MLS KeyPackage (Phase 1.16e1)
 //! - `GET    /discovery/keypackage/{acct}`  — fetch public MLS KeyPackage (Phase 1.16e1)
+//! - `POST   /discovery/invite`             — upload InviteCapability blob (Phase 1.18d1)
+//! - `GET    /discovery/invite/{blob_id}`   — fetch InviteCapability blob (Phase 1.18d1)
 
 #![forbid(unsafe_code)]
 
 mod identity_bundle;
+mod invite;
 mod keypackage;
 mod oprf;
 mod pow;
@@ -169,6 +172,13 @@ pub(crate) fn build_app(state: AppState) -> Router {
         )
         .route("/discovery/keypackage", post(keypackage::upload))
         .route("/discovery/keypackage/{account_id}", get(keypackage::fetch))
+        // Phase 1.18d1 — capability-based invite-link blob storage.
+        // Owner POSTs verified InviteCapability bytes, gets a
+        // content-addressed blob_id back; joiner GETs the bytes
+        // by id. See invite.rs for the full flow + d2/d3
+        // follow-up scope.
+        .route("/discovery/invite", post(invite::upload))
+        .route("/discovery/invite/{blob_id}", get(invite::fetch))
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
