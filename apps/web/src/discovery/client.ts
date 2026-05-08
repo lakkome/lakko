@@ -37,6 +37,8 @@ import type {
   IdentityFetchResponse,
   IdentityUploadRequest,
   IdentityUploadResponse,
+  InviteConsumeRequest,
+  InviteConsumeResponse,
   InviteFetchResponse,
   InviteUploadRequest,
   InviteUploadResponse,
@@ -73,6 +75,27 @@ export interface LookupResult {
    *  registered. */
   account: Uint8Array | null;
 }
+
+/** Result of `DiscoveryClient.consumeInvite` (Phase 1.18d2a).
+ *
+ *  Discriminated so the joiner UI can branch cleanly:
+ *    * `kind: "consumed"` — server bumped `used_count` and
+ *      accepted; proceed with `sendContactRequestToBundle`.
+ *    * `kind: "exhausted"` — 410 Gone, `max_uses` ceiling hit
+ *      before this consume could land. UI shows "this invite
+ *      has been used up" + Decline-only.
+ *    * `kind: "not-found"` — 404; the blob_id was never issued
+ *      OR has expired (server folds expired into 404 to deny
+ *      status-code probing). UI surfaces "invite expired or
+ *      revoked".
+ *
+ *  Other non-2xx codes still throw `DiscoveryHttpError` —
+ *  reserve the discriminated path for the three response shapes
+ *  the joiner is supposed to act on. */
+export type ConsumeInviteResult =
+  | { readonly kind: "consumed"; readonly usedCount: number; readonly maxUses: number }
+  | { readonly kind: "exhausted" }
+  | { readonly kind: "not-found" };
 
 /** Programmer error — empty / invalid inputs caught before any
  *  network round-trip. Distinct from HTTP errors so the UI can
@@ -139,6 +162,18 @@ export class DiscoveryClient {
    *  [`uploadInvite`] wrapper drives the PoW solve. */
   async inviteUpload(req: InviteUploadRequest): Promise<InviteUploadResponse> {
     return this.post("/discovery/invite", req);
+  }
+
+  /** `POST /discovery/invite/{blob_id}/consume` — atomic
+   *  `max_uses` enforcement (Phase 1.18d2a). The high-level
+   *  [`consumeInvite`] wrapper drives the PoW solve and folds
+   *  the 200 / 404 / 410 status trifecta into a discriminated
+   *  [`ConsumeInviteResult`]. */
+  async inviteConsume(
+    blobIdSlug: string,
+    req: InviteConsumeRequest,
+  ): Promise<InviteConsumeResponse> {
+    return this.post(`/discovery/invite/${blobIdSlug}/consume`, req);
   }
 
   /**
@@ -509,6 +544,64 @@ export class DiscoveryClient {
     }
     const raw = (await response.json()) as InviteFetchResponse;
     return base64Decode(raw.capability);
+  }
+
+  /**
+   * Atomically bump the consume counter for the invite at
+   * `blobId` (Phase 1.18d2a). Returns a discriminated
+   * [`ConsumeInviteResult`] so the joiner UI can branch:
+   *
+   *   * `"consumed"` — server accepted and bumped the counter.
+   *     Caller proceeds with `sendContactRequestToBundle(...)`.
+   *   * `"exhausted"` — 410 Gone, the `max_uses` ceiling was
+   *     hit before this consume could land. Caller surfaces
+   *     "this invite has been used up" and offers Decline only.
+   *   * `"not-found"` — 404, never-issued OR expired (server
+   *     folds both into the same status). Caller surfaces
+   *     "invite expired or revoked".
+   *
+   * Other non-2xx codes still throw `DiscoveryHttpError` —
+   * the discriminated path is reserved for the three response
+   * shapes the joiner is supposed to act on without a developer
+   * involved.
+   *
+   * Drives one PoW solve over `services/discovery`'s
+   * `/pow/challenge` (rate-limit on consume; same shape as
+   * upload).
+   */
+  async consumeInvite(blobId: Uint8Array): Promise<ConsumeInviteResult> {
+    if (blobId.length !== 32) {
+      throw new DiscoveryClientArgError("blobId must be 32 bytes");
+    }
+    const slug = base64UrlEncodeNoPad(blobId);
+
+    const challenge = await this.fetchChallenge();
+    const pow = await solvePow(challenge.seed, challenge.effort_bits);
+
+    const endpoint = `/discovery/invite/${slug}/consume`;
+    const url = `${this.baseUrl}${endpoint}`;
+    let response: Response;
+    try {
+      response = await fetch(url, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ pow }),
+      });
+    } catch (err) {
+      throw new DiscoveryNetworkError(endpoint, err);
+    }
+    if (response.status === 404) return { kind: "not-found" };
+    if (response.status === 410) return { kind: "exhausted" };
+    if (!response.ok) {
+      const text = await safeReadBody(response);
+      throw new DiscoveryHttpError(response.status, endpoint, text);
+    }
+    const raw = (await response.json()) as InviteConsumeResponse;
+    return {
+      kind: "consumed",
+      usedCount: raw.used_count,
+      maxUses: raw.max_uses,
+    };
   }
 
   /**

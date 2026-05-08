@@ -165,3 +165,25 @@ export interface InviteUploadResponse {
 export interface InviteFetchResponse {
   capability: string;
 }
+
+/** Body of `POST /discovery/invite/{blob_id_b64url}/consume`
+ *  (Phase 1.18d2a). The server bumps `used_count` atomically;
+ *  the only payload the joiner needs to surface is the PoW
+ *  proof. Phase 1.18d3 will add an additional `joiner_account_id`
+ *  field for the per-joiner HmacBloom de-dup. */
+export interface InviteConsumeRequest {
+  pow: PowProofPayload;
+}
+
+/** Response body of `POST /discovery/invite/{blob_id_b64url}/consume`. */
+export interface InviteConsumeResponse {
+  /** Post-increment counter. UI surfaces "1 of 10 uses" copy
+   *  when the invite has a finite `max_uses`. */
+  used_count: number;
+  /** Echo of the row's `max_uses` — sentinel mapping is preserved
+   *  (`0` for single-use, `0xFFFFFFFF` for unlimited, any other
+   *  N for an N-use ceiling). The web client compares it to
+   *  `used_count` to decide between "consumed successfully" and
+   *  "this was the last use" copy. */
+  max_uses: number;
+}

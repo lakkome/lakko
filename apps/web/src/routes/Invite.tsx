@@ -55,6 +55,13 @@ import { paths } from "./paths";
 interface DecodedInvite {
   cap: WasmInviteCapability;
   fingerprintShort: string;
+  /** When the slug is a 32-byte content-addressed pointer
+   *  (1.18d1b), the joiner can call `/discovery/invite/{id}/consume`
+   *  before sending the ContactRequest (1.18d2a). Inline-bytes
+   *  URLs have no associated server row — back-compat
+   *  compromise documented in the ROADMAP. The Accept path
+   *  branches on this. */
+  blobId: Uint8Array | null;
 }
 
 export default function Invite(): JSX.Element {
@@ -78,6 +85,7 @@ export default function Invite(): JSX.Element {
     try {
       const parsed = parseInviteSlug(slug);
       let bytes: Uint8Array;
+      let blobId: Uint8Array | null;
       if (parsed.kind === "pointer") {
         // 1.18d1b — fetch the bytes from /discovery/invite/{blob_id}.
         // 404 surfaces as `null` — same as the inline-form
@@ -87,16 +95,20 @@ export default function Invite(): JSX.Element {
         const fetched = await discovery.fetchInvite(parsed.blobId);
         if (fetched === null) return null;
         bytes = fetched;
+        blobId = parsed.blobId;
       } else {
         // 1.18c back-compat: capability bytes inline in the
-        // URL itself, no server round-trip.
+        // URL itself, no server round-trip. No blob_id — the
+        // /consume path (1.18d2a) is skipped on Accept.
         bytes = parsed.capabilityBytes;
+        blobId = null;
       }
       const wasm = await loadWasm();
       const cap = wasm.InviteCapability.decodeAndVerify(bytes);
       return {
         cap,
         fingerprintShort: shortFingerprintFor(cap.ownerSignaturePubkey),
+        blobId,
       };
     } catch (err) {
       // eslint-disable-next-line no-console
@@ -130,6 +142,7 @@ export default function Invite(): JSX.Element {
           <ConnectPanel
             invite={decoded() as DecodedInvite}
             client={client}
+            discovery={discovery}
             onDone={() => navigate(paths.contacts)}
           />
         </Show>
@@ -187,6 +200,7 @@ function NeedsAuthPanel(props: { slug: string }): JSX.Element {
 function ConnectPanel(props: {
   invite: DecodedInvite;
   client: ContactsClient;
+  discovery: DiscoveryClient;
   onDone: () => void;
 }): JSX.Element {
   const auth = useAuth();
@@ -195,6 +209,14 @@ function ConnectPanel(props: {
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
   const [notice, setNotice] = createSignal<string | null>(null);
+  // 1.18d2a-web: when the server reports 410 Gone (or 404 on
+  // /consume — same fold-pattern as fetch), we lock the panel
+  // into a "this invite has been used up / revoked" state and
+  // disable Accept. Decline still works; the user can navigate
+  // back to /contacts.
+  const [exhausted, setExhausted] = createSignal<
+    null | "exhausted" | "not-found"
+  >(null);
 
   const nowMs = Date.now();
   const expired = !cap.isValidNow(BigInt(nowMs));
@@ -205,6 +227,44 @@ function ConnectPanel(props: {
     setNotice(null);
     setBusy(true);
     try {
+      // 1.18d2a-web: server-side max_uses enforcement runs on
+      // the **pointer** path. Inline-bytes URLs have no
+      // associated server row to bump — back-compat compromise
+      // documented in ROADMAP 1.18d2a-web. We deliberately do
+      // NOT silently fail-open on the inline path; it just
+      // bypasses the ceiling, same as a 1.18c client would.
+      if (props.invite.blobId !== null) {
+        const result = await props.discovery.consumeInvite(
+          props.invite.blobId,
+        );
+        if (result.kind === "exhausted") {
+          setExhausted("exhausted");
+          return;
+        }
+        if (result.kind === "not-found") {
+          // Server's expiry filter folds expired into 404, so a
+          // not-found here means either the inviter revoked
+          // (1.18d2b will surface this distinctly) or expiry
+          // landed between page load and consume. Either way
+          // the user-visible copy is the same: this invite is
+          // no longer valid.
+          setExhausted("not-found");
+          return;
+        }
+        // result.kind === "consumed" — fall through to send.
+        if (
+          result.maxUses !== 0xffff_ffff &&
+          result.usedCount >= effectiveMaxUses(result.maxUses)
+        ) {
+          // This was the LAST use. We still send the
+          // ContactRequest, but surface the milestone in the
+          // notice copy below.
+          setNotice(
+            `Last use claimed — sending ContactRequest to ${labelOrFingerprint}…`,
+          );
+        }
+      }
+
       const introBytes = new TextEncoder().encode(intro());
       const result = await props.client.sendContactRequestToBundle(
         auth.identitySecrets(),
@@ -250,6 +310,20 @@ function ConnectPanel(props: {
         </div>
       </Show>
 
+      <Show when={exhausted() === "exhausted"}>
+        <div class="form-error" role="alert">
+          This invite has been used up — its <code>max_uses</code> ceiling
+          was reached. Ask the inviter for a fresh link.
+        </div>
+      </Show>
+
+      <Show when={exhausted() === "not-found"}>
+        <div class="form-error" role="alert">
+          This invite is no longer valid — the inviter may have revoked it,
+          or it expired between page load and click. Ask for a fresh link.
+        </div>
+      </Show>
+
       <label style={{ display: "block", "margin-top": "1rem" }}>
         <span>Intro message (optional)</span>
         <input
@@ -258,7 +332,7 @@ function ConnectPanel(props: {
           onInput={(e) => setIntro(e.currentTarget.value)}
           placeholder="hey, this is alice"
           style={{ width: "100%", "margin-top": "0.25rem" }}
-          disabled={expired || busy()}
+          disabled={expired || busy() || exhausted() !== null}
         />
       </label>
 
@@ -269,7 +343,7 @@ function ConnectPanel(props: {
         <button
           class="primary"
           type="button"
-          disabled={expired || busy()}
+          disabled={expired || busy() || exhausted() !== null}
           onClick={() => {
             void onAccept();
           }}
@@ -282,6 +356,21 @@ function ConnectPanel(props: {
       </div>
     </section>
   );
+}
+
+/** Map the wire `max_uses` sentinels to the effective ceiling
+ *  the server enforces. Mirrors `effective_max_uses` in
+ *  `services/discovery/src/invite.rs` and the SQL CASE
+ *  expression in the consume UPDATE. Drift between this and
+ *  the server is a real-world bug worth pinning — but the
+ *  function is tiny enough that the unit-test coverage on the
+ *  server side (`effective_max_uses_maps_sentinels`) is
+ *  sufficient. Used only to decide between "consumed
+ *  successfully" and "this was the last use" UI copy. */
+function effectiveMaxUses(maxUses: number): number {
+  if (maxUses === 0) return 1; // SINGLE_USE
+  if (maxUses === 0xffff_ffff) return 0xffff_ffff; // unlimited
+  return maxUses;
 }
 
 // ---------------------------------------------------------------
