@@ -25,11 +25,8 @@
 //!
 //! ## What's NOT here (1.9b and later)
 //!
-//! - `InviteCapability` URL pointers (scenarios B/C) — encrypted
-//!   blob in `services/storage` referenced by short URL with HMAC.
 //! - QR safety numbers (scenario D) — Signal-style fingerprint
 //!   verification.
-//! - Bootstrap-referral signup (scenario C).
 //! - Group-invite envelope (scenario E).
 //! - PoW + Privacy Pass tokens carried inside the request — the
 //!   server side already exists in 1.1e; the wire-format extension
@@ -56,9 +53,11 @@
 
 pub mod envelope;
 pub mod error;
+pub mod invite;
 pub mod pseudonym;
 pub mod request;
 
 pub use error::{ContactError, Result};
+pub use invite::{InviteCapability, MAX_LABEL_LEN, NEVER_EXPIRES, SINGLE_USE};
 pub use pseudonym::{Direction, IdentityPseudonym, PerRelationship, StrangerInbox, PSEUDONYM_LEN};
 pub use request::{compose, decode_and_verify, open_envelope, ContactRequest, ACCOUNT_ID_LEN};
