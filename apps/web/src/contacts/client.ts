@@ -305,13 +305,93 @@ export class ContactsClient {
     const recipientSignaturePub = base64Decode(bundle.signature_pubkey);
     const recipientX25519Pub = base64Decode(bundle.x25519_pubkey);
 
-    // 3. Derive the recipient's mailbox pseudonym + the
-    //    sender-side per-relationship pseudonym + the wire
-    //    bytes. All three are WASM calls. The canonical
-    //    Identity (1.16e6c2) is the same instance the
-    //    ChatProvider holds — using it here keeps Ed25519 +
-    //    X25519 keys consistent across operations and avoids
-    //    the throwaway-provider trap.
+    const publish = await this.composeAndPublishContactRequest(
+      identity,
+      recipientSignaturePub,
+      recipientX25519Pub,
+      introMessage,
+    );
+
+    return {
+      recipientUsername: lookup.normalisedUsername,
+      recipientAccountId,
+      messageId: publish.messageId,
+      createdAt: publish.createdAt,
+    };
+  }
+
+  /**
+   * Send a `ContactRequest` directly against a known recipient
+   * bundle — i.e. **without** going through the discovery
+   * `lookup → identityFetch` round-trip.
+   *
+   * The invite-link flow (1.18c) is the canonical caller: the
+   * `InviteCapability` already carries `owner_account_id`,
+   * `owner_signature_pubkey`, and `owner_x25519_pubkey`, so the
+   * joiner has everything needed to seal an envelope without
+   * touching `services/discovery`. Useful both for the happy
+   * path (faster onboarding from a link) and for the censored-
+   * region path (`/discovery/*` may be blocked while the link
+   * still works because the bytes are inline).
+   *
+   * @param identity              Current session secrets — same
+   *                              gate as `sendContactRequest`.
+   * @param recipientAccountId    16-byte UUIDv7 (caller MUST
+   *                              cross-check against the
+   *                              capability's `ownerAccountId`).
+   * @param recipientSignaturePubkey 32-byte Ed25519 pubkey from
+   *                              the capability.
+   * @param recipientX25519Pubkey 32-byte X25519 pubkey from the
+   *                              capability — used to seal the
+   *                              intro envelope.
+   * @param introMessage          Optional intro bytes (UTF-8 or
+   *                              empty array).
+   *
+   * Returns the same `SendResult` shape `sendContactRequest`
+   * produces. `recipientUsername` is left empty — the joiner
+   * does not have it (no discovery round-trip happened).
+   */
+  async sendContactRequestToBundle(
+    identity: IdentitySecrets | null,
+    recipientAccountId: Uint8Array,
+    recipientSignaturePubkey: Uint8Array,
+    recipientX25519Pubkey: Uint8Array,
+    introMessage: Uint8Array,
+  ): Promise<SendResult> {
+    const publish = await this.composeAndPublishContactRequest(
+      identity,
+      recipientSignaturePubkey,
+      recipientX25519Pubkey,
+      introMessage,
+    );
+    return {
+      recipientUsername: "",
+      recipientAccountId,
+      messageId: publish.messageId,
+      createdAt: publish.createdAt,
+    };
+  }
+
+  /** Inner helper extracted from `sendContactRequest` (and reused
+   *  by `sendContactRequestToBundle`) — given a pre-resolved
+   *  recipient bundle (Ed25519 + X25519 pubkeys), compose the
+   *  envelope and publish it to the recipient's stranger-inbox.
+   *  Returns the DS receipt fields (`messageId` + `createdAt`).
+   *
+   *  Pulled out so the two public flows don't drift on subtle
+   *  details (e.g. the `from_pseudonym` derivation, the
+   *  `KIND_CONTACT_REQUEST` envelope wrap, the canonical
+   *  Identity gate from 1.16e6c2). */
+  private async composeAndPublishContactRequest(
+    identity: IdentitySecrets | null,
+    recipientSignaturePubkey: Uint8Array,
+    recipientX25519Pubkey: Uint8Array,
+    introMessage: Uint8Array,
+  ): Promise<{ messageId: number; createdAt: string }> {
+    // The canonical Identity (1.16e6c2) is the same instance the
+    // ChatProvider holds — using it here keeps Ed25519 + X25519
+    // keys consistent across operations and avoids the
+    // throwaway-provider trap.
     const wasm = await loadWasm();
     const senderIdentity = await this.resolveIdentity(identity);
     const senderSigningSeed = senderIdentity.ed25519Seed;
@@ -326,7 +406,7 @@ export class ContactsClient {
     // design. This is the routing address for cold contact
     // requests (see ADR-0005 §13.7).
     const recipientPseudonym = wasm.IdentityPseudonym.fromIdentity(
-      recipientSignaturePub,
+      recipientSignaturePubkey,
     ).asBytes();
 
     // Sender's `from_pseudonym` field. For a first cold contact
@@ -347,7 +427,7 @@ export class ContactsClient {
       wireBytes = wasm.ContactRequest.compose(
         senderSigningSeed,
         senderAccountId,
-        recipientX25519Pub,
+        recipientX25519Pubkey,
         senderPseudonym,
         validAfterMs,
         introMessage,
@@ -356,9 +436,9 @@ export class ContactsClient {
       throw ContactsError.wrap(err);
     }
 
-    // 4. Publish to the DS, wrapped with the kind discriminator
-    //    so the receiver's pollMailbox can distinguish a
-    //    ContactRequest from a Welcome (1.16e3).
+    // Publish to the DS, wrapped with the kind discriminator so
+    // the receiver's pollMailbox can distinguish a
+    // ContactRequest from a Welcome (1.16e3).
     const envelope = wrapEnvelope(KIND_CONTACT_REQUEST, wireBytes);
     let publish;
     try {
@@ -366,13 +446,7 @@ export class ContactsClient {
     } catch (err) {
       throw ContactsError.wrap(err);
     }
-
-    return {
-      recipientUsername: lookup.normalisedUsername,
-      recipientAccountId,
-      messageId: publish.id,
-      createdAt: publish.createdAt,
-    };
+    return { messageId: publish.id, createdAt: publish.createdAt };
   }
 
   /**

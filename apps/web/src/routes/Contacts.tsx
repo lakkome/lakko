@@ -30,7 +30,16 @@ import { base64Encode, base64UrlEncodeNoPad } from "../auth/account-id";
 import { ContactsClient, ContactsError } from "../contacts/client";
 import type { IncomingContactRequest, SendResult } from "../contacts/client";
 import { useChats, type ActiveGroup } from "../chat/ChatContext";
+import { loadWasm } from "../wasm";
 import { paths } from "./paths";
+import {
+  composeInviteUrl,
+  expiryPresetToMs,
+  INVITE_LABEL_MAX_LEN,
+  maxUsesPresetToValue,
+  type ExpiryPreset,
+  type MaxUsesPreset,
+} from "../contacts/invite";
 import {
   fingerprintShort,
   loadAccepted,
@@ -306,6 +315,8 @@ function ConnectedContacts(props: ConnectedContactsProps): JSX.Element {
         }}
       />
 
+      <InvitePanel />
+
       <PendingPanel
         pending={pending}
         busy={pollBusy}
@@ -394,6 +405,250 @@ function SendPanel(props: SendPanelProps): JSX.Element {
         </div>
       </form>
     </section>
+  );
+}
+
+function InvitePanel(): JSX.Element {
+  // Phase 1.18c — local-only state. Form drives
+  // `wasm.InviteCapability.compose(...)` and produces a
+  // `https://<host>/i/<slug>` URL. No server round-trip; the
+  // capability bytes are fully self-contained inside the URL
+  // until 1.18d switches to the short-pointer + blob form.
+  //
+  // We pull the canonical Identity from <ChatProvider> rather
+  // than re-deriving from `auth.identitySecrets` so the
+  // Ed25519 seed + X25519 pubkey we stamp into the capability
+  // are byte-identical to what every other contact-flow uses
+  // on this device (1.16e6c2 — identity coherence). The
+  // account_id still lives in IdentitySecrets — the canonical
+  // Identity doesn't carry it on the wasm-bindgen surface.
+  const chats = useChats();
+  const auth = useAuth();
+
+  const [label, setLabel] = createSignal("");
+  const [expiry, setExpiry] = createSignal<ExpiryPreset>("7d");
+  const [maxUses, setMaxUses] = createSignal<MaxUsesPreset>("single");
+  const [bootstrapReferral, setBootstrapReferral] = createSignal(false);
+  const [busy, setBusy] = createSignal(false);
+  const [error, setError] = createSignal<string | null>(null);
+  const [generatedUrl, setGeneratedUrl] = createSignal<string | null>(null);
+  const [copied, setCopied] = createSignal(false);
+
+  async function onGenerate(e: SubmitEvent): Promise<void> {
+    e.preventDefault();
+    setError(null);
+    setGeneratedUrl(null);
+    setCopied(false);
+    setBusy(true);
+    try {
+      const id = chats.identity();
+      if (id === null) {
+        // Same gate as the rest of the contacts surface — the
+        // outer Show keeps us from rendering when
+        // identitySecrets is null, but defensive belt
+        // and suspenders.
+        throw new Error("re-enter your password to generate invites");
+      }
+      // wasm-bindgen surface uses bigint for u64; preset
+      // helpers return that shape directly.
+      const expiryMs = expiryPresetToMs(expiry(), Date.now());
+      const maxUsesValue = maxUsesPresetToValue(maxUses());
+      const wasm = await loadWasm();
+      // Owner account_id sits in IdentitySecrets — the canonical
+      // Identity doesn't carry it on the JS surface. We read
+      // both fields lazily inside the handler so a session
+      // reset between mount and click surfaces as the same
+      // re-auth prompt the rest of the contacts surface uses.
+      const secrets = auth.identitySecrets();
+      if (secrets === null) {
+        throw new Error("re-enter your password to generate invites");
+      }
+      const bytes = wasm.InviteCapability.compose(
+        id.ed25519Seed,
+        secrets.accountId,
+        id.x25519PublicKey,
+        expiryMs,
+        maxUsesValue,
+        bootstrapReferral(),
+        label(),
+      );
+      setGeneratedUrl(composeInviteUrl(bytes));
+    } catch (err) {
+      setError(formatError(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function onCopy(): Promise<void> {
+    const url = generatedUrl();
+    if (url === null) return;
+    try {
+      await navigator.clipboard.writeText(url);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 2000);
+    } catch (err) {
+      setError(formatError(err));
+    }
+  }
+
+  function reset(): void {
+    setGeneratedUrl(null);
+    setError(null);
+    setCopied(false);
+    setLabel("");
+    setBootstrapReferral(false);
+  }
+
+  return (
+    <section style={panelStyle()}>
+      <h2 style={{ "margin-top": 0 }}>Generate invite link</h2>
+      <p style={{ color: "var(--surface-muted)", "margin-top": 0 }}>
+        Anyone holding the link can send you a ContactRequest. The
+        link carries the capability bytes inline — no server
+        round-trip on open.
+      </p>
+
+      <Show
+        when={generatedUrl() === null}
+        fallback={
+          <GeneratedUrlPanel
+            url={generatedUrl() ?? ""}
+            copied={copied}
+            onCopy={() => {
+              void onCopy();
+            }}
+            onReset={reset}
+          />
+        }
+      >
+        <form onSubmit={onGenerate}>
+          <label style={{ display: "block", "margin-bottom": "0.6rem" }}>
+            <span>Label</span>
+            <input
+              type="text"
+              value={label()}
+              onInput={(e) => setLabel(e.currentTarget.value)}
+              placeholder="alice@home"
+              maxlength={INVITE_LABEL_MAX_LEN}
+              style={{ width: "100%", "margin-top": "0.25rem" }}
+              disabled={busy()}
+            />
+            <span
+              style={{
+                color: "var(--surface-muted)",
+                "font-size": "0.8rem",
+                display: "block",
+                "margin-top": "0.2rem",
+              }}
+            >
+              Optional, ≤ {INVITE_LABEL_MAX_LEN} chars. Shown to the
+              joiner before they accept.
+            </span>
+          </label>
+
+          <label style={{ display: "block", "margin-bottom": "0.6rem" }}>
+            <span>Expiry</span>
+            <select
+              value={expiry()}
+              onChange={(e) => setExpiry(e.currentTarget.value as ExpiryPreset)}
+              style={{ width: "100%", "margin-top": "0.25rem" }}
+              disabled={busy()}
+            >
+              <option value="1d">1 day</option>
+              <option value="7d">7 days (default)</option>
+              <option value="30d">30 days</option>
+              <option value="never">Never (stalking risk — see ADR-0005)</option>
+            </select>
+          </label>
+
+          <label style={{ display: "block", "margin-bottom": "0.6rem" }}>
+            <span>Max uses</span>
+            <select
+              value={maxUses()}
+              onChange={(e) =>
+                setMaxUses(e.currentTarget.value as MaxUsesPreset)
+              }
+              style={{ width: "100%", "margin-top": "0.25rem" }}
+              disabled={busy()}
+            >
+              <option value="single">Single-use (default)</option>
+              <option value="ten">Up to 10 uses</option>
+              <option value="unlimited">Unlimited</option>
+            </select>
+            <span
+              style={{
+                color: "var(--surface-muted)",
+                "font-size": "0.8rem",
+                display: "block",
+                "margin-top": "0.2rem",
+              }}
+            >
+              UI hint in V1; server-side enforcement lands in 1.18d.
+            </span>
+          </label>
+
+          <label
+            style={{
+              display: "flex",
+              gap: "0.5rem",
+              "align-items": "center",
+              "margin-bottom": "0.6rem",
+            }}
+          >
+            <input
+              type="checkbox"
+              checked={bootstrapReferral()}
+              onChange={(e) => setBootstrapReferral(e.currentTarget.checked)}
+              disabled={busy()}
+            />
+            <span>Referral link (for someone without a Lakko account yet)</span>
+          </label>
+
+          {error() !== null && <div class="form-error">{error()}</div>}
+
+          <button class="primary" type="submit" disabled={busy()}>
+            {busy() ? "Generating…" : "Generate"}
+          </button>
+        </form>
+      </Show>
+    </section>
+  );
+}
+
+function GeneratedUrlPanel(props: {
+  url: string;
+  copied: () => boolean;
+  onCopy: () => void;
+  onReset: () => void;
+}): JSX.Element {
+  return (
+    <div>
+      <p style={{ margin: "0 0 0.5rem 0" }}>
+        <strong>Share this URL out-of-band.</strong> The capability
+        bytes are inline — anyone with the link can send you a
+        ContactRequest until it expires.
+      </p>
+      <textarea
+        readonly
+        value={props.url}
+        rows={3}
+        style={{
+          width: "100%",
+          "font-family": "monospace",
+          "font-size": "0.8rem",
+        }}
+        onClick={(e) => e.currentTarget.select()}
+      />
+      <div style={{ display: "flex", gap: "0.5rem", "margin-top": "0.5rem" }}>
+        <button class="primary" type="button" onClick={props.onCopy}>
+          {props.copied() ? "Copied" : "Copy to clipboard"}
+        </button>
+        <button type="button" onClick={props.onReset}>
+          Generate another
+        </button>
+      </div>
+    </div>
   );
 }
 

@@ -33,8 +33,9 @@ import Home from "./Home";
 import Contacts from "./Contacts";
 import Chat from "./Chat";
 import DevProbe from "./DevProbe";
+import Invite from "./Invite";
 import NotFound from "./NotFound";
-import { chatRoutePattern, paths } from "./paths";
+import { chatRoutePattern, inviteRoutePattern, paths } from "./paths";
 
 /** All app routes. Consumed by `<Router>` in `App.tsx`. */
 export const routes: RouteDefinition[] = [
@@ -63,6 +64,15 @@ export const routes: RouteDefinition[] = [
       </RequireAnonymous>
     ),
   },
+
+  // Invite-link landing — Phase 1.18c. Public route: anyone
+  // who clicks an invite URL must be able to land here, and
+  // the component itself drives the "log in / sign up" prompt
+  // when the visitor is anonymous. NOT wrapped in
+  // <RequireAnonymous> (auth users open invites too) nor
+  // <RequireSession> (anon users CAN open it; the component
+  // handles the gating).
+  { path: inviteRoutePattern, component: Invite },
 
   // Protected pages — every child renders inside <AppShell />.
   {

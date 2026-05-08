@@ -117,3 +117,26 @@ export function base64UrlEncodeNoPad(bytes: Uint8Array): string {
     .replace(/\//g, "_")
     .replace(/=+$/, "");
 }
+
+/**
+ * Reverse of [`base64UrlEncodeNoPad`]. Substitutes `-` → `+`,
+ * `_` → `/`, re-pads to a multiple of 4 with `=`, and decodes
+ * via the standard-alphabet path.
+ *
+ * Throws on invalid input — by design: callers either trust the
+ * source (a URL slug we just produced) or have already validated
+ * it. A bad slug surfaces as the runtime exception rather than
+ * as silently-truncated bytes.
+ *
+ * Phase 1.18c (invite-link landing) is the first caller; the
+ * `/chat/:id` route had its own inline copy of this logic since
+ * 1.16e5 — fold-in is a follow-up to `Chat.tsx`.
+ */
+export function base64UrlDecodeNoPad(slug: string): Uint8Array {
+  const standard = slug.replace(/-/g, "+").replace(/_/g, "/");
+  const padded = standard.padEnd(
+    standard.length + ((4 - (standard.length % 4)) % 4),
+    "=",
+  );
+  return base64Decode(padded);
+}

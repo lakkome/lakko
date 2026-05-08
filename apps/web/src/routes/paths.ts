@@ -52,6 +52,18 @@ export const paths = {
   chat(groupIdB64Url: string): string {
     return `/chat/${groupIdB64Url}`;
   },
+  /**
+   * Build an invite-link URL for a capability slug
+   * (1.18c). `slug` is the base64url-no-pad encoding of the
+   * `InviteCapability.compose(...)` wire bytes — see
+   * `contacts/invite.ts::composeInviteUrl` for the canonical
+   * builder that prepends the origin. The route handler at
+   * `/i/:slug` decodes + verifies the capability and drives
+   * the joiner-side ContactRequest send.
+   */
+  invite(slug: string): string {
+    return `/i/${slug}`;
+  },
 } as const;
 
 /**
@@ -59,3 +71,9 @@ export const paths = {
  * sync with `paths.chat(...)`. Used in the route table.
  */
 export const chatRoutePattern = "/chat/:id" as const;
+
+/**
+ * The matchable pattern for the dynamic invite-link route — must
+ * stay in sync with `paths.invite(...)`. Used in the route table.
+ */
+export const inviteRoutePattern = "/i/:slug" as const;
