@@ -39,15 +39,29 @@ regen-proto:
     cargo build -p lakko-proto
 
 # Regenerate Swift + Kotlin bindings from lakko-ffi-uniffi.
-# Requires uniffi-bindgen — install once with: cargo install uniffi-bindgen
+#
+# Phase 1.15a: drives the **crate-local** `uniffi-bindgen` bin
+# (in `crates/lakko-ffi-uniffi/src/bin/uniffi-bindgen.rs`) instead
+# of a floating `cargo install uniffi-bindgen`. The bin compiles
+# against the same workspace `Cargo.lock` as the cdylib, so the
+# bindgen and the runtime can never drift across a UniFFI minor
+# release.
+#
+# `os()` resolves to `linux` / `macos` / `windows`; we pick the
+# matching dynamic-library extension so the recipe runs on any
+# of the three host targets.
+lib_ext := if os() == "macos" { "dylib" } else if os() == "windows" { "dll" } else { "so" }
+
 regen-bindings:
     cargo build -p lakko-ffi-uniffi --release
-    uniffi-bindgen generate \
-        --library target/release/liblakko_ffi_uniffi.dylib \
+    cargo run -p lakko-ffi-uniffi --bin uniffi-bindgen --release -- \
+        generate \
+        --library target/release/liblakko_ffi_uniffi.{{lib_ext}} \
         --language swift \
         --out-dir target/bindings/swift
-    uniffi-bindgen generate \
-        --library target/release/liblakko_ffi_uniffi.dylib \
+    cargo run -p lakko-ffi-uniffi --bin uniffi-bindgen --release -- \
+        generate \
+        --library target/release/liblakko_ffi_uniffi.{{lib_ext}} \
         --language kotlin \
         --out-dir target/bindings/kotlin
 
