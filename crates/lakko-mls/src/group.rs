@@ -44,6 +44,29 @@ pub struct MemberAddition {
     pub welcome: MlsMessageOut,
 }
 
+/// One member's identity snapshot at the current epoch
+/// (Phase 1.18h). Returned by [`Group::members`].
+///
+/// `leaf_index` is the OpenMLS-side leaf position used by
+/// `remove_member` to identify which leaf to delete. Stable
+/// inside a single epoch; can renumber across a remove/add
+/// cycle, so callers MUST NOT cache it past an
+/// [`Group::process_incoming`] of a Commit.
+///
+/// `signature_public_key` is the raw 32-byte Ed25519
+/// verifying key the member's identity layer signs with —
+/// callers use it to render a fingerprint, look the member up
+/// in the contacts cache, or compare against `Identity::signature_public_key`
+/// to identify "is this me".
+#[derive(Debug, Clone)]
+pub struct MemberRecord {
+    /// OpenMLS leaf position. `u32` mirrors `LeafNodeIndex`'s
+    /// internal repr.
+    pub leaf_index: u32,
+    /// 32-byte Ed25519 verifying key.
+    pub signature_public_key: Vec<u8>,
+}
+
 /// Result of [`Group::process_incoming`].
 #[derive(Debug)]
 pub enum Incoming {
@@ -281,6 +304,31 @@ impl Group {
     #[must_use]
     pub fn member_count(&self) -> usize {
         self.inner.members().count()
+    }
+
+    /// Snapshot of every member's `(leaf_index, signature_public_key)`
+    /// at the current epoch (Phase 1.18h).
+    ///
+    /// Returns a `Vec` rather than an iterator so the wasm-bindgen
+    /// surface doesn't have to thread a streaming protocol —
+    /// member sets are bounded by the application (≤ 1k for
+    /// Phase 1 groups per the ROADMAP) and a one-shot allocation
+    /// is cheaper than the cross-FFI dance.
+    ///
+    /// Ordering follows OpenMLS's internal traversal (left-to-right
+    /// over the leaf nodes), which is stable across calls inside a
+    /// single epoch and recomputed on every `process_incoming`
+    /// commit. Callers MUST NOT cache the index for use across
+    /// epochs — a remove/add cycle can renumber leaves.
+    #[must_use]
+    pub fn members(&self) -> Vec<MemberRecord> {
+        self.inner
+            .members()
+            .map(|m| MemberRecord {
+                leaf_index: m.index.u32(),
+                signature_public_key: m.signature_key,
+            })
+            .collect()
     }
 
     /// MLS `group_id` (RFC 9420 §6.2) — the opaque identifier

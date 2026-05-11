@@ -169,6 +169,41 @@ impl AddMember {
 }
 
 // ============================================================================
+// GroupMember (record) — Phase 1.18h
+// ============================================================================
+
+/// One member's identity snapshot at the current epoch. Mirror
+/// of [`lakko_mls::MemberRecord`].
+///
+/// The JS layer reads `leafIndex` to feed into
+/// `Group.removeMember(...)` for kick UX and
+/// `signaturePublicKey` to look the member up in the contacts
+/// cache / render a fingerprint. `leafIndex` is stable inside a
+/// single epoch but can renumber across an add/remove cycle —
+/// callers MUST NOT cache it past a `processIncoming` commit.
+#[wasm_bindgen]
+pub struct GroupMember {
+    leaf_index_val: u32,
+    signature_public_key_val: Vec<u8>,
+}
+
+#[wasm_bindgen]
+impl GroupMember {
+    /// OpenMLS leaf position at the current epoch.
+    #[wasm_bindgen(getter, js_name = leafIndex)]
+    pub fn leaf_index(&self) -> u32 {
+        self.leaf_index_val
+    }
+
+    /// 32-byte Ed25519 verifying key — the member's long-term
+    /// identity signing key.
+    #[wasm_bindgen(getter, js_name = signaturePublicKey)]
+    pub fn signature_public_key(&self) -> Vec<u8> {
+        self.signature_public_key_val.clone()
+    }
+}
+
+// ============================================================================
 // ProcessedMessage (tagged result of processIncoming)
 // ============================================================================
 
@@ -423,6 +458,34 @@ impl Group {
             .lock()
             .map_err(|_| JsError::new("internal lock poisoned"))?;
         Ok(g.group_id())
+    }
+
+    /// Snapshot of every member's `(leafIndex, signaturePublicKey)`
+    /// at the current epoch (Phase 1.18h).
+    ///
+    /// JS-side shape: returns a flat array of [`GroupMember`]
+    /// instances. wasm-bindgen doesn't let us return `Vec<JsValue>`
+    /// of a custom struct directly through a getter, so this is
+    /// a regular method (`.members()` not `.members`) returning
+    /// `Vec<JsValue>` after a per-element `JsValue::from`.
+    ///
+    /// Ordering matches `lakko_mls::Group::members` — left-to-right
+    /// over the leaf tree, stable inside a single epoch.
+    #[wasm_bindgen]
+    pub fn members(&self) -> Result<Vec<JsValue>, JsError> {
+        let g = self
+            .inner
+            .lock()
+            .map_err(|_| JsError::new("internal lock poisoned"))?;
+        Ok(g.members()
+            .into_iter()
+            .map(|m| {
+                JsValue::from(GroupMember {
+                    leaf_index_val: m.leaf_index,
+                    signature_public_key_val: m.signature_public_key,
+                })
+            })
+            .collect())
     }
 }
 

@@ -22,7 +22,7 @@ pub mod identity;
 pub mod key_package;
 
 pub use error::{Error, Result};
-pub use group::{Group, Incoming, MemberAddition};
+pub use group::{Group, Incoming, MemberAddition, MemberRecord};
 pub use identity::Identity;
 
 /// Re-exported MLS leaf-node index. Surfaced so callers do not need to

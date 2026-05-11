@@ -31,7 +31,7 @@
  * surface) is also a follow-up — current composer is a plain
  * `<input>`, no edit history.
  */
-import { createSignal, For, onMount, Show, type JSX } from "solid-js";
+import { createMemo, createSignal, For, onMount, Show, type JSX } from "solid-js";
 import { A, useNavigate, useParams } from "@solidjs/router";
 import { useAuth } from "../auth/AuthContext";
 import { base64Encode, base64UrlDecodeNoPad } from "../auth/account-id";
@@ -179,6 +179,28 @@ function ChatView(props: {
   const [memberCount, setMemberCount] = createSignal(
     props.entry.group.memberCount,
   );
+  // 1.18h — members panel state. `membersVersion` is a
+  // monotonic counter bumped on every epoch advance (refresh
+  // success, addMember success, removeMember success); the
+  // `members` createMemo re-reads `group.members()` whenever
+  // it changes. Same trick as `memberCount` — Solid only
+  // tracks signal reads, not WASM-side property accesses.
+  const [membersOpen, setMembersOpen] = createSignal(false);
+  const [membersVersion, setMembersVersion] = createSignal(0);
+  const members = createMemo<readonly { leafIndex: number; sigPubkey: Uint8Array }[]>(
+    () => {
+      // Subscribe to the version signal so the memo re-runs.
+      membersVersion();
+      const arr = props.entry.group.members() as Array<{
+        leafIndex: number;
+        signaturePublicKey: Uint8Array;
+      }>;
+      return arr.map((m) => ({
+        leafIndex: m.leafIndex,
+        sigPubkey: m.signaturePublicKey,
+      }));
+    },
+  );
   let nextTempId = 1;
 
   async function refresh(): Promise<void> {
@@ -217,6 +239,9 @@ function ChatView(props: {
       // No-op when no commits came in: setSignal short-circuits
       // on equal values.
       setMemberCount(props.entry.group.memberCount);
+      // 1.18h — bump membersVersion so the members panel's
+      // createMemo re-reads the post-poll leaf set.
+      setMembersVersion(membersVersion() + 1);
     } catch (err) {
       setError(formatError(err));
     } finally {
@@ -295,6 +320,9 @@ function ChatView(props: {
       // Mirror the post-add member count into the reactive
       // signal so the header re-renders.
       setMemberCount(props.entry.group.memberCount);
+      // 1.18h — bump membersVersion so the members panel
+      // (when open) re-reads the updated leaf set.
+      setMembersVersion(membersVersion() + 1);
       setNotice(
         `@${result.recipientUsername} added (commit #${result.commitMessageId}, welcome #${result.welcomeMessageId}).`,
       );
@@ -303,6 +331,38 @@ function ChatView(props: {
       // Pull anything that arrived during the add (no-op when
       // there's nothing new but cheap, and keeps the cursor
       // moving past the suppressed commit row).
+      void refresh();
+    } catch (err) {
+      setError(formatError(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // 1.18h — Remove-member handler. Symmetric to onAddMember
+  // minus the discovery/Welcome dance: caller picks the leaf
+  // index from the members list, we drive the MLS remove,
+  // broadcast the commit, suppress the echo. The removed
+  // member's leaf is gone from `group.members()` immediately;
+  // their own client lands the commit on next poll and learns
+  // they're out.
+  async function onRemoveMember(leafIndex: number): Promise<void> {
+    if (!window.confirm(`Remove this member (leaf #${leafIndex})?`)) {
+      return;
+    }
+    setError(null);
+    setNotice(null);
+    setBusy(true);
+    try {
+      const result = await contacts.removeMemberFromGroup(
+        props.requireIdentity(),
+        props.entry.group,
+        leafIndex,
+      );
+      chat.markOwnPublishedCommit(result.commitMessageId);
+      setMemberCount(props.entry.group.memberCount);
+      setMembersVersion(membersVersion() + 1);
+      setNotice(`Member at leaf #${leafIndex} removed (commit #${result.commitMessageId}).`);
       void refresh();
     } catch (err) {
       setError(formatError(err));
@@ -348,6 +408,22 @@ function ChatView(props: {
           </div>
         </div>
         <div style={{ display: "flex", gap: "0.5rem", "flex-wrap": "wrap" }}>
+          <button
+            type="button"
+            onClick={() => {
+              setMembersOpen(!membersOpen());
+              setNotice(null);
+              setError(null);
+              // Bump version so the panel reads fresh data
+              // when it opens (covers the case where new
+              // commits arrived between the last refresh and
+              // this click).
+              setMembersVersion(membersVersion() + 1);
+            }}
+            disabled={busy()}
+          >
+            {membersOpen() ? "Hide members" : "Members"}
+          </button>
           <button
             type="button"
             onClick={() => {
@@ -412,6 +488,94 @@ function ChatView(props: {
             {busy() ? "Adding…" : "Add"}
           </button>
         </form>
+      </Show>
+
+      {/* 1.18h — members panel. Lists every leaf at the
+          current epoch with a fingerprint-short label + Remove
+          button. The own-leaf row gets a "(you)" badge instead
+          of a Remove button (can't kick yourself). */}
+      <Show when={membersOpen()}>
+        <section
+          aria-label="Members"
+          style={{
+            padding: "0.5rem 0.75rem",
+            border: "1px solid var(--surface-border)",
+            "border-radius": "var(--radius-md)",
+            background: "var(--surface-elevated)",
+          }}
+        >
+          <h2
+            style={{
+              "font-size": "0.85rem",
+              "text-transform": "uppercase",
+              "letter-spacing": "0.05em",
+              color: "var(--surface-muted)",
+              margin: "0 0 0.5rem 0",
+            }}
+          >
+            Members ({members().length})
+          </h2>
+          <ul
+            style={{
+              "list-style": "none",
+              padding: 0,
+              margin: 0,
+              display: "flex",
+              "flex-direction": "column",
+              gap: "0.25rem",
+            }}
+          >
+            <For each={members()}>
+              {(m) => {
+                const isSelf = m.leafIndex === props.entry.group.ownLeafIndex;
+                return (
+                  <li
+                    style={{
+                      display: "flex",
+                      "align-items": "center",
+                      gap: "0.5rem",
+                      padding: "0.35rem 0.5rem",
+                      "border-radius": "var(--radius-sm)",
+                      background: "var(--surface-bg)",
+                    }}
+                  >
+                    <code style={{ "font-size": "0.85rem" }}>
+                      #{m.leafIndex} · {shortFingerprint(m.sigPubkey)}
+                    </code>
+                    <span style={{ flex: 1 }} />
+                    <Show
+                      when={!isSelf}
+                      fallback={
+                        <span
+                          style={{
+                            "font-size": "0.8rem",
+                            color: "var(--surface-muted)",
+                          }}
+                        >
+                          (you)
+                        </span>
+                      }
+                    >
+                      <button
+                        type="button"
+                        onClick={() => {
+                          void onRemoveMember(m.leafIndex);
+                        }}
+                        disabled={busy()}
+                        style={{
+                          "font-size": "0.8rem",
+                          color: "var(--error)",
+                        }}
+                      >
+                        Remove
+                      </button>
+                    </Show>
+                  </li>
+                );
+              }}
+            </For>
+          </ul>
+        </section>
       </Show>
 
       {error() !== null && <div class="form-error">{error()}</div>}
@@ -586,6 +750,20 @@ function panelStyle(): JSX.CSSProperties {
     "border-radius": "var(--radius-md)",
     padding: "1rem",
   };
+}
+
+/** 12-hex-char prefix of an Ed25519 verifying key — enough to
+ *  visually tell members apart in the leaf list without crowding
+ *  the row. Mirror of `Invite.tsx`'s helper; if a third call
+ *  site appears, fold both into `contacts/local-store.ts`'s
+ *  existing `fingerprintShort` (which works in base64 — JS
+ *  string typing wants the hex variant here). */
+function shortFingerprint(pubkey: Uint8Array): string {
+  let hex = "";
+  for (let i = 0; i < pubkey.length && hex.length < 12; i++) {
+    hex += (pubkey[i] ?? 0).toString(16).padStart(2, "0");
+  }
+  return hex.slice(0, 12);
 }
 
 function formatError(err: unknown): string {

@@ -60,7 +60,7 @@ use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_test::wasm_bindgen_test;
 
 use crate::contacts::InviteCapability;
-use crate::mls::Identity;
+use crate::mls::{Group, GroupMember, Identity};
 
 // `wasm-pack test --node` selects the Node V8 runner; no
 // `wasm_bindgen_test_configure!` invocation is needed
@@ -183,4 +183,29 @@ fn invite_capability_round_trips_through_wasm() {
     assert_eq!(cap.label(), "alice@home");
     assert!(cap.is_valid_now(0));
     assert!(!cap.is_valid_now(1_700_000_000_000));
+}
+
+/// `Group.members()` (Phase 1.18h) returns a flat array of
+/// `GroupMember` instances at the current epoch. Verify
+/// the array shape — length matches `memberCount`, JsValues
+/// are non-null. The per-member field round-trip is tested
+/// from the JS layer in `apps/web` (it can dyn_into through
+/// the actual wasm-bindgen runtime); inside this test target
+/// the `JsCast` impl isn't generated for the inner struct, so
+/// we settle for the array-shape pin here.
+#[wasm_bindgen_test]
+fn group_members_returns_one_entry_for_a_fresh_group() {
+    let alice = Identity::from_seed(&[0xC0u8; 64]).expect("alice");
+    let group = Group::new(&alice).expect("group");
+
+    let members = group.members().expect("members");
+    assert_eq!(members.len(), 1, "one-of-one group has one leaf");
+    assert!(!members[0].is_null());
+    assert!(!members[0].is_undefined());
+
+    assert_eq!(
+        group.member_count().expect("member_count"),
+        1,
+        "members.len() must agree with memberCount",
+    );
 }

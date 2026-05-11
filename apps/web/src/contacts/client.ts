@@ -906,6 +906,57 @@ export class ContactsClient {
     };
   }
 
+  /**
+   * Remove a member from an MLS group by leaf index (Phase 1.18h).
+   *
+   * Symmetric to [`addMemberToGroup`] minus the Welcome step —
+   * the kicked member receives nothing direct from us; their
+   * own next `pollMessages` lands the commit they cannot decrypt
+   * (their leaf was removed) which surfaces as a generic
+   * "you're no longer in this group" signal at the application
+   * layer. The Welcome path simply doesn't exist for removes.
+   *
+   * Steps:
+   *   1. Resolve the canonical Identity.
+   *   2. `group.removeMember(identity, leafIndex)` returns the
+   *      wire-encoded commit bytes. The local group state is
+   *      already at the post-remove epoch.
+   *   3. Broadcast the commit via `ds.publishGroup` — every
+   *      remaining member processes it on their next poll and
+   *      advances locally.
+   *   4. `persistBestEffort` snapshots the new state.
+   *
+   * Caller (typically `Chat.tsx`'s "Remove" button per leaf row)
+   * must register the returned `commitMessageId` with
+   * `ChatClient.markOwnPublishedCommit` to suppress the echo —
+   * same rationale as `addMemberToGroup`.
+   */
+  async removeMemberFromGroup(
+    identity: IdentitySecrets | null,
+    group: WasmGroup,
+    leafIndex: number,
+  ): Promise<{ commitMessageId: number }> {
+    const myIdentity = await this.resolveIdentity(identity);
+
+    let commitBytes: Uint8Array;
+    try {
+      commitBytes = group.removeMember(myIdentity, leafIndex);
+    } catch (err) {
+      throw ContactsError.wrap(err);
+    }
+
+    let commitPublish;
+    try {
+      commitPublish = await this.ds.publishGroup(group.groupId, commitBytes);
+    } catch (err) {
+      throw ContactsError.wrap(err);
+    }
+
+    await this.persistBestEffort();
+
+    return { commitMessageId: commitPublish.id };
+  }
+
   /** Convenience wrapper around [`addMemberToGroup`] that
    *  resolves `@username` first. Mirror of
    *  [`startGroupWithUsername`] for the existing-group path. */

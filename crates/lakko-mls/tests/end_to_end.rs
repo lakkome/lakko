@@ -307,3 +307,43 @@ fn restore_storage_rejects_truncated_snapshot() {
     // the failed restore left the original storage intact.
     let _ = alice_group.group_id();
 }
+
+/// `Group::members` (Phase 1.18h) enumerates every leaf at the
+/// current epoch with its `(leaf_index, signature_public_key)`
+/// pair. After a one-of-one create the only member is the
+/// founder; after `add_member` (used inside the helper-test
+/// path that mirrors `ffi_three_party_lifecycle`) the new
+/// member appears at a fresh leaf with its own
+/// `signature_public_key`.
+#[test]
+fn members_enumerates_leaves_at_current_epoch() {
+    let alice = Identity::from_seed(&[0xB0u8; 64]).expect("alice");
+    let alice_pub = alice.signature_public_key().to_vec();
+    let mut alice_group = Group::create(&alice).expect("group");
+
+    // One-of-one: a single leaf, Alice's, at index 0.
+    let members = alice_group.members();
+    assert_eq!(members.len(), 1);
+    assert_eq!(members[0].leaf_index, 0);
+    assert_eq!(members[0].signature_public_key, alice_pub);
+
+    // Add Bob and merge the staged commit so the local group
+    // state advances to a 2-leaf epoch (mirrors what
+    // `add_member` + `merge_pending_commit` does inside the
+    // canonical send-side path).
+    let bob = Identity::from_seed(&[0xB1u8; 64]).expect("bob");
+    let bob_kp = bob.create_key_package().expect("bob kp");
+    let bob_kp_wire = key_package::serialize(&bob_kp).expect("serialize bob kp");
+    let _added = alice_group
+        .add_member_from_wire(&alice, &bob_kp_wire)
+        .expect("add bob");
+
+    let members = alice_group.members();
+    assert_eq!(members.len(), 2);
+    // Stable ordering: Alice stays at index 0, Bob at the next
+    // available leaf (1 in a fresh group).
+    assert_eq!(members[0].leaf_index, 0);
+    assert_eq!(members[0].signature_public_key, alice_pub);
+    assert_eq!(members[1].leaf_index, 1);
+    assert_eq!(members[1].signature_public_key, bob.signature_public_key());
+}
