@@ -248,6 +248,30 @@ export class ChatClient {
   }
 
   /**
+   * Register a DS message id as one **we** published (Phase
+   * 1.18g) — typically a commit returned by
+   * `ContactsClient.addMemberToGroup`'s broadcast step.
+   *
+   * The next `pollMessages` will see this id and drop it via
+   * the `ownPublishedIds` filter — same suppression path
+   * `sendMessage` uses for application messages. Without
+   * registration the sender's own pollMessages would hit
+   * `processIncoming` on its own outgoing commit at the
+   * already-advanced epoch, fail, log a noisy console warning,
+   * and render a phantom system row in the timeline.
+   *
+   * Crosses the client boundary because `ContactsClient` owns
+   * the addMember flow (discovery resolution + Welcome shipping)
+   * but `ChatClient` owns the ownPublishedIds registry.
+   * Plumbing the registry through ContactsClient would couple
+   * the two; a thin `markOwnPublishedCommit` accessor keeps the
+   * surfaces independent.
+   */
+  markOwnPublishedCommit(messageId: number): void {
+    this.ownPublishedIds.add(messageId);
+  }
+
+  /**
    * Pull all rows newer than `after` for the group's journal,
    * decrypt application messages, return discriminated events
    * + a fresh cursor. Persists the MLS snapshot once at the

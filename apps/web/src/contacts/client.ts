@@ -804,4 +804,156 @@ export class ContactsClient {
 
     return group;
   }
+
+  /**
+   * Add a new member to an **existing** MLS group (Phase 1.18g).
+   *
+   * Differs from [`startGroupWith`] in two crucial ways:
+   *
+   *   1. The group is already populated — the commit returned by
+   *      `Group.addMember(...)` MUST be broadcast to the DS group
+   *      journal so every existing member's next `pollMessages`
+   *      advances their local epoch. (In 1-of-1 group creation the
+   *      commit is dropped; here it's load-bearing.)
+   *   2. The Welcome still ships to the new member's
+   *      stranger-inbox, same as `startGroupWith`. The new member
+   *      lands at the post-commit epoch — they're a leaf at the
+   *      tail of the ratchet tree.
+   *
+   * Returns the DS message id of the **commit** publish — the
+   * caller (typically `Chat.tsx`'s "Add member" handler) must
+   * register this id with the `ChatClient.markOwnPublishedCommit(id)`
+   * to suppress the echo on the sender's own next poll. Without
+   * that suppression `processIncoming` raises "cannot process own
+   * outgoing commit at the same epoch" and the timeline shows a
+   * spurious warning row.
+   *
+   * The Welcome message id is also returned for UI logging
+   * (mirror of `startGroupWith`'s `welcomeMessageId`).
+   */
+  async addMemberToGroup(
+    identity: IdentitySecrets | null,
+    group: WasmGroup,
+    recipientAccountId: Uint8Array,
+    recipientSignaturePubkey: Uint8Array,
+  ): Promise<{ commitMessageId: number; welcomeMessageId: number }> {
+    // 1. Fetch the new member's KeyPackage from discovery.
+    //    Identical to `startGroupWith`'s step 1.
+    let keyPackageBytes;
+    try {
+      keyPackageBytes = await this.discovery.fetchKeyPackage(recipientAccountId);
+    } catch (err) {
+      throw ContactsError.wrap(err);
+    }
+    if (keyPackageBytes === null) {
+      throw ContactsError.noIdentityBundle(recipientAccountId);
+    }
+
+    // 2. Resolve the canonical Identity — same instance every
+    //    Group on this device uses (1.16e6c2). The `addMember`
+    //    call below mutates this Identity's provider storage:
+    //    appends the new member's leaf, increments the epoch,
+    //    queues the Welcome state for the recipient.
+    const myIdentity = await this.resolveIdentity(identity);
+
+    // 3. Drive the MLS add. Returns `{ commit, welcome }` — the
+    //    commit is the wire bytes existing members process to
+    //    advance their tree; the welcome is what the new member
+    //    decodes via `joinFromWelcome`.
+    let added;
+    try {
+      added = group.addMember(myIdentity, keyPackageBytes);
+    } catch (err) {
+      throw ContactsError.wrap(err);
+    }
+    const commitBytes = added.commit;
+    const welcomeBytes = added.welcome;
+
+    // 4. **Broadcast the commit** to the DS group journal. This
+    //    is the new step that differentiates this method from
+    //    `startGroupWith` — without it the existing members' local
+    //    state never moves past the pre-add epoch and the new
+    //    member's Welcome can't be reconciled when it arrives.
+    let commitPublish;
+    try {
+      commitPublish = await this.ds.publishGroup(group.groupId, commitBytes);
+    } catch (err) {
+      throw ContactsError.wrap(err);
+    }
+
+    // 5. Ship the Welcome to the new member's stranger inbox.
+    //    Identical to `startGroupWith`'s step 4.
+    let welcomePublish;
+    try {
+      welcomePublish = await this.sendWelcome(
+        recipientSignaturePubkey,
+        welcomeBytes,
+      );
+    } catch (err) {
+      throw ContactsError.wrap(err);
+    }
+
+    // 6. Snapshot the post-add provider state: new leaf, new
+    //    epoch keys, pruned init keys for the consumed KeyPackage.
+    //    Auto-persist follows the 1.16e6c2 best-effort policy —
+    //    a failure here doesn't unwind the network publishes
+    //    (those are already public on the DS).
+    await this.persistBestEffort();
+
+    return {
+      commitMessageId: commitPublish.id,
+      welcomeMessageId: welcomePublish.messageId,
+    };
+  }
+
+  /** Convenience wrapper around [`addMemberToGroup`] that
+   *  resolves `@username` first. Mirror of
+   *  [`startGroupWithUsername`] for the existing-group path. */
+  async addMemberToGroupByUsername(
+    identity: IdentitySecrets | null,
+    group: WasmGroup,
+    username: string,
+  ): Promise<{
+    recipientUsername: string;
+    recipientAccountId: Uint8Array;
+    commitMessageId: number;
+    welcomeMessageId: number;
+  }> {
+    if (identity === null) {
+      throw ContactsError.noIdentitySecrets();
+    }
+    let lookup;
+    try {
+      lookup = await this.discovery.lookup(username);
+    } catch (err) {
+      throw ContactsError.wrap(err);
+    }
+    if (lookup.account === null) {
+      throw ContactsError.usernameUnknown(lookup.normalisedUsername);
+    }
+
+    let bundle;
+    try {
+      bundle = await this.discovery.identityFetch(lookup.account);
+    } catch (err) {
+      throw ContactsError.wrap(err);
+    }
+    if (bundle === null) {
+      throw ContactsError.noIdentityBundle(lookup.account);
+    }
+    const recipientSignaturePubkey = base64Decode(bundle.signature_pubkey);
+
+    const out = await this.addMemberToGroup(
+      identity,
+      group,
+      lookup.account,
+      recipientSignaturePubkey,
+    );
+    return {
+      recipientUsername: lookup.normalisedUsername,
+      recipientAccountId: lookup.account,
+      commitMessageId: out.commitMessageId,
+      welcomeMessageId: out.welcomeMessageId,
+    };
+  }
 }

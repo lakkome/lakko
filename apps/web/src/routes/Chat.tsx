@@ -36,6 +36,7 @@ import { A, useNavigate, useParams } from "@solidjs/router";
 import { useAuth } from "../auth/AuthContext";
 import { base64Encode, base64UrlDecodeNoPad } from "../auth/account-id";
 import { ChatClient } from "../chat/client";
+import { ContactsClient } from "../contacts/client";
 import type { IncomingChatEvent } from "../chat/client";
 import { useChats, type ActiveGroup } from "../chat/ChatContext";
 import { paths } from "./paths";
@@ -144,12 +145,40 @@ function ChatView(props: {
       await chats.persistSnapshot(s.account.accountId);
     },
   });
+  // 1.18g — ContactsClient is the home of the addMemberToGroup
+  // flow (resolves @username via discovery + drives the MLS
+  // addMember + ships Welcome). Same canonical-Identity +
+  // persist plumbing as ChatClient — both end up calling
+  // `chats.persistSnapshot` after every mutation.
+  const contacts = new ContactsClient(undefined, undefined, {
+    identityProvider: () => chats.identity(),
+    onPersist: async () => {
+      const s = auth.state();
+      if (s.kind !== "session") return;
+      await chats.persistSnapshot(s.account.accountId);
+    },
+  });
 
   const [rows, setRows] = createSignal<TimelineRow[]>([]);
   const [cursor, setCursor] = createSignal(0);
   const [input, setInput] = createSignal("");
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
+  const [notice, setNotice] = createSignal<string | null>(null);
+  // 1.18g — Add-member panel state. Inline form expands below
+  // the chat header when toggled; collapses after a successful
+  // add or explicit Cancel.
+  const [addMemberOpen, setAddMemberOpen] = createSignal(false);
+  const [addMemberInput, setAddMemberInput] = createSignal("");
+  // `memberCount` mirrors `props.entry.group.memberCount` into
+  // a reactive signal so the header re-renders after
+  // `addMember`. Without this the WASM-side property read in
+  // JSX wouldn't re-evaluate on a render driven by a different
+  // signal — Solid's fine-grained reactivity only tracks signal
+  // accesses, not arbitrary object property reads.
+  const [memberCount, setMemberCount] = createSignal(
+    props.entry.group.memberCount,
+  );
   let nextTempId = 1;
 
   async function refresh(): Promise<void> {
@@ -181,6 +210,13 @@ function ChatView(props: {
         setRows([...rows(), ...fresh]);
       }
       setCursor(result.cursor);
+      // 1.18g — mirror the post-poll member count so the
+      // header re-renders after an incoming commit advances
+      // the local group state (someone else added / removed a
+      // member; we processed their commit in pollMessages).
+      // No-op when no commits came in: setSignal short-circuits
+      // on equal values.
+      setMemberCount(props.entry.group.memberCount);
     } catch (err) {
       setError(formatError(err));
     } finally {
@@ -230,6 +266,51 @@ function ChatView(props: {
     }
   }
 
+  // 1.18g — "Add member" submission handler. Resolves the
+  // typed @username via discovery, runs the full MLS add
+  // (fetch KeyPackage → group.addMember → publish commit to DS
+  // → ship Welcome to stranger inbox), then registers the
+  // commit's DS id with `ChatClient.markOwnPublishedCommit` so
+  // the very next pollMessages drops our own echo and doesn't
+  // hit `processIncoming` on a commit we just applied locally.
+  // Final step is a `refresh()` — pulls the (now-suppressed)
+  // commit off the wire + re-renders the header (memberCount
+  // signal updates from `group.memberCount` post-add).
+  async function onAddMember(): Promise<void> {
+    const username = addMemberInput().trim();
+    if (username.length === 0) return;
+    setError(null);
+    setNotice(null);
+    setBusy(true);
+    try {
+      const result = await contacts.addMemberToGroupByUsername(
+        props.requireIdentity(),
+        props.entry.group,
+        username,
+      );
+      // Suppress the echo so the sender's next pollMessages
+      // doesn't try to processIncoming on its own commit at
+      // an epoch we've already advanced past.
+      chat.markOwnPublishedCommit(result.commitMessageId);
+      // Mirror the post-add member count into the reactive
+      // signal so the header re-renders.
+      setMemberCount(props.entry.group.memberCount);
+      setNotice(
+        `@${result.recipientUsername} added (commit #${result.commitMessageId}, welcome #${result.welcomeMessageId}).`,
+      );
+      setAddMemberInput("");
+      setAddMemberOpen(false);
+      // Pull anything that arrived during the add (no-op when
+      // there's nothing new but cheap, and keeps the cursor
+      // moving past the suppressed commit row).
+      void refresh();
+    } catch (err) {
+      setError(formatError(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   // Pull the current backlog on mount so a fresh `/chat/:id`
   // visit shows whatever the peer has sent so far.
   onMount(() => {
@@ -261,12 +342,23 @@ function ChatView(props: {
               "margin-top": "0.25rem",
             }}
           >
-            {props.entry.group.memberCount} member
-            {props.entry.group.memberCount === 1 ? "" : "s"} · seat #
+            {memberCount()} member
+            {memberCount() === 1 ? "" : "s"} · seat #
             {props.entry.group.ownLeafIndex}
           </div>
         </div>
-        <div style={{ display: "flex", gap: "0.5rem" }}>
+        <div style={{ display: "flex", gap: "0.5rem", "flex-wrap": "wrap" }}>
+          <button
+            type="button"
+            onClick={() => {
+              setAddMemberOpen(!addMemberOpen());
+              setNotice(null);
+              setError(null);
+            }}
+            disabled={busy()}
+          >
+            {addMemberOpen() ? "Cancel add" : "Add member"}
+          </button>
           <button
             type="button"
             onClick={() => {
@@ -282,7 +374,48 @@ function ChatView(props: {
         </div>
       </header>
 
+      {/* 1.18g — inline "Add member" form. Toggled via the
+         button above. Submit drives
+         ContactsClient.addMemberToGroupByUsername, which fetches
+         the recipient's KeyPackage, runs Group.addMember,
+         broadcasts the commit to existing members via DS, and
+         ships the Welcome to the new member's stranger inbox. */}
+      <Show when={addMemberOpen()}>
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            void onAddMember();
+          }}
+          style={{
+            display: "flex",
+            gap: "0.5rem",
+            padding: "0.75rem",
+            border: "1px solid var(--surface-border)",
+            "border-radius": "var(--radius-md)",
+            background: "var(--surface-elevated)",
+          }}
+        >
+          <input
+            type="text"
+            placeholder="@username"
+            autocomplete="off"
+            value={addMemberInput()}
+            onInput={(e) => setAddMemberInput(e.currentTarget.value)}
+            style={{ flex: 1 }}
+            disabled={busy()}
+          />
+          <button
+            class="primary"
+            type="submit"
+            disabled={busy() || addMemberInput().trim().length === 0}
+          >
+            {busy() ? "Adding…" : "Add"}
+          </button>
+        </form>
+      </Show>
+
       {error() !== null && <div class="form-error">{error()}</div>}
+      {notice() !== null && <div class="form-notice">{notice()}</div>}
 
       <Show
         when={rows().length > 0}
