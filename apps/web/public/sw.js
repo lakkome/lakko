@@ -71,10 +71,18 @@ self.addEventListener("install", (event) => {
       // That's intentional: a partially-cached shell would serve
       // a broken offline experience.
       await cache.addAll(PRECACHE_MANIFEST);
-      // Promote this SW to active as soon as the install finishes.
-      // Without skipWaiting() the user has to close every Lakko tab
-      // before the new bytes take effect.
-      await self.skipWaiting();
+      // 1.18f — `skipWaiting()` is NOT called here any more. The
+      // first-install case (no controller present) progresses to
+      // `activating` on its own without a prior worker to wait
+      // out, so the very first registration still takes effect
+      // immediately. **Updates** (controller is set) now stay in
+      // `waiting` — the page detects this via `registration.waiting`
+      // and surfaces a "new version available — reload" banner.
+      // The user clicks the banner, which posts `SKIP_WAITING`
+      // (handler below) and listens for `controllerchange` before
+      // reloading. Silent auto-update was a footgun: the active
+      // page kept running JS that no longer matched the cached
+      // bytes the new SW just installed.
     })(),
   );
 });
@@ -190,10 +198,12 @@ self.addEventListener("push", (event) => {
 // ----- message (skip-waiting handshake) ------------------------
 
 self.addEventListener("message", (event) => {
-  // Reserved for a future "new version available" banner: the page
-  // sends `{ type: "SKIP_WAITING" }` when the user clicks the
-  // banner, the SW activates immediately. No-op today; the install
-  // path already calls skipWaiting() unconditionally.
+  // Live since 1.18f: the page's "new version available" banner
+  // posts this when the user clicks Reload. The SW transitions
+  // out of `waiting` into `activating` → `activated`; the page
+  // listens for `controllerchange` and reloads itself once the
+  // swap is observable. See `apps/web/src/sw/register.ts` for
+  // the page-side counterpart.
   if (event.data && event.data.type === "SKIP_WAITING") {
     void self.skipWaiting();
   }

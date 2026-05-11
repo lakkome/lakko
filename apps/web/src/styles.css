@@ -10,16 +10,26 @@
  * exist yet.
  */
 
-:root {
-  /* Neutral surface palette — light theme only for now. */
+/*
+ * Light theme tokens — applied by default and on
+ * `<html data-theme="light">`.
+ *
+ * 1.18f: dark-mode tokens added via the `[data-theme="dark"]`
+ * selector below + a `prefers-color-scheme: dark` fallback for
+ * users who haven't set an explicit override. The manual toggle
+ * in `AppShell.tsx` stashes the preference in `localStorage`
+ * (`lakko.theme = "light" | "dark"`) and writes the matching
+ * `data-theme` attribute on `<html>` — survives reloads, beats
+ * system preference.
+ */
+:root,
+:root[data-theme="light"] {
   --surface-bg: #fafafa;
   --surface-fg: #111;
   --surface-muted: #666;
   --surface-border: #e0e0e0;
   --surface-elevated: #ffffff;
 
-  /* Accent — single hue; 1.16e revisits when we have real chat
-     bubbles to colour. */
   --accent: #2b5fff;
   --accent-fg: #ffffff;
   --error: #b00020;
@@ -32,6 +42,49 @@
   font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   line-height: 1.5;
   color-scheme: light;
+}
+
+/* Dark theme tokens. Contrast targets WCAG-AA (≥4.5:1 body
+ * text against `--surface-bg`); shadows lower opacity because
+ * dark surfaces don't need elevation cues as heavily as light
+ * ones. `--accent` keeps the same hue but brightens for AA
+ * contrast against `--surface-elevated`. */
+:root[data-theme="dark"] {
+  --surface-bg: #0e1014;
+  --surface-fg: #e6e8eb;
+  --surface-muted: #9aa0a6;
+  --surface-border: #2a2f36;
+  --surface-elevated: #15181d;
+
+  --accent: #6a8cff;
+  --accent-fg: #0e1014;
+  --error: #ff6b6b;
+
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.45), 0 1px 3px rgba(0, 0, 0, 0.35);
+
+  color-scheme: dark;
+}
+
+/* System-preference fallback: when no explicit `data-theme`
+ * is set on `<html>`, follow the OS. The web client writes
+ * `data-theme` on first user toggle, so this rule only fires
+ * before any explicit preference exists. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) {
+    --surface-bg: #0e1014;
+    --surface-fg: #e6e8eb;
+    --surface-muted: #9aa0a6;
+    --surface-border: #2a2f36;
+    --surface-elevated: #15181d;
+
+    --accent: #6a8cff;
+    --accent-fg: #0e1014;
+    --error: #ff6b6b;
+
+    --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.45), 0 1px 3px rgba(0, 0, 0, 0.35);
+
+    color-scheme: dark;
+  }
 }
 
 *,
@@ -129,7 +182,12 @@ a:focus-visible {
   color: var(--accent-fg);
 }
 .app-shell nav a:hover:not(.active) {
-  background: rgba(0, 0, 0, 0.04);
+  /* color-mix gives us a hover-overlay that adapts to both
+   * themes: in light mode 92% bg + 8% fg lands at a faint
+   * grey; in dark mode the same recipe lands at a faint
+   * lighter-than-bg. Falls back to bg if the browser doesn't
+   * support color-mix (~96% of users in 2026). */
+  background: color-mix(in srgb, var(--surface-bg) 92%, var(--surface-fg));
   text-decoration: none;
 }
 .app-shell .nav-spacer {

@@ -14,6 +14,7 @@ import type { JSX } from "solid-js";
 import { A, useNavigate } from "@solidjs/router";
 import { paths } from "../routes/paths";
 import { useAuth } from "../auth/AuthContext";
+import { cycleTheme, useTheme } from "./theme";
 
 /**
  * Layout wrapper rendered around every protected route. The actual
@@ -91,6 +92,17 @@ export function AppShell(props: { children?: JSX.Element }): JSX.Element {
               style={{ "font-size": "0.85rem" }}
             >
               Forget this device
+            </button>
+            {/* 1.18f — theme toggle cycles system → dark → light
+                → system. Label echoes the *current* state so the
+                user sees what's active. */}
+            <button
+              type="button"
+              onClick={cycleTheme}
+              style={{ "font-size": "0.85rem" }}
+              title="Cycle theme (system / dark / light)"
+            >
+              Theme: {useTheme()}
             </button>
           </div>
         </div>

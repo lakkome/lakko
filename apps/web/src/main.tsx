@@ -17,6 +17,7 @@ import { render } from "solid-js/web";
 import App from "./App";
 import "./styles.css";
 import { registerServiceWorker } from "./sw/register";
+import { bootstrapTheme } from "./ui/theme";
 
 const root = document.getElementById("root");
 if (root === null) {
@@ -24,6 +25,12 @@ if (root === null) {
   // broken at the source-tree level, not at runtime — fail loud.
   throw new Error("apps/web: #root element missing from index.html");
 }
+
+// 1.18f — apply the persisted `data-theme` BEFORE the Solid
+// app renders so the very first frame doesn't flash the wrong
+// theme. Synchronous reads of localStorage + a single
+// setAttribute; ~0.5 ms typical.
+bootstrapTheme();
 
 render(() => <App />, root);
 

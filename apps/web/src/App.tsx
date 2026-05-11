@@ -32,11 +32,20 @@ import { Router } from "@solidjs/router";
 import { AuthProvider } from "./auth/AuthContext";
 import { ChatProvider } from "./chat/ChatContext";
 import { routes } from "./routes/routes";
+import { SwUpdateBanner } from "./sw/SwUpdateBanner";
 
 const App: Component = () => (
   <ChatProvider>
     <AuthProvider>
       <Router>{routes}</Router>
+      {/*
+       * 1.18f — "new version available" toast. Mounted at the
+       * top level so it overlays every route (auth shell + main
+       * app shell + invite landing). No route knows it exists;
+       * it self-subscribes to the SW_UPDATE_EVENT dispatched by
+       * `sw/register.ts`.
+       */}
+      <SwUpdateBanner />
     </AuthProvider>
   </ChatProvider>
 );
