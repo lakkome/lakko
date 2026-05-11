@@ -34,7 +34,7 @@
 import { createSignal, For, onMount, Show, type JSX } from "solid-js";
 import { A, useNavigate, useParams } from "@solidjs/router";
 import { useAuth } from "../auth/AuthContext";
-import { base64Decode, base64Encode } from "../auth/account-id";
+import { base64Encode, base64UrlDecodeNoPad } from "../auth/account-id";
 import { ChatClient } from "../chat/client";
 import type { IncomingChatEvent } from "../chat/client";
 import { useChats, type ActiveGroup } from "../chat/ChatContext";
@@ -64,19 +64,16 @@ export default function Chat(): JSX.Element {
 
   // Decode the URL slug into a groupId base64-standard (the
   // ChatProvider's registry key).
+  //
+  // 1.18e: the inline base64url-no-pad → standard-base64
+  // conversion that lived here since 1.16e5 is now the shared
+  // `base64UrlDecodeNoPad` helper (added in 1.18c next to its
+  // encode-side sibling). Folding the duplicate keeps both
+  // call sites — `/chat/:id` and `/i/:slug` — converging on
+  // one tested decoder.
   const groupIdB64 = (): string | null => {
     try {
-      // The URL alphabet is `-_` instead of `+/`. Reverse the
-      // substitution before re-encoding under the standard
-      // alphabet — that matches what `chats.get(...)` expects.
-      const urlSafe = params.id;
-      const standard = urlSafe.replace(/-/g, "+").replace(/_/g, "/");
-      // Add padding so atob accepts it.
-      const padded = standard.padEnd(
-        standard.length + ((4 - (standard.length % 4)) % 4),
-        "=",
-      );
-      const bytes = base64Decode(padded);
+      const bytes = base64UrlDecodeNoPad(params.id);
       return base64Encode(bytes);
     } catch {
       return null;

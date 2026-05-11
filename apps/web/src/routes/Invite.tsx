@@ -41,6 +41,7 @@ import { createMemo, createResource, createSignal, Show, type JSX } from "solid-
 import { A, useNavigate, useParams } from "@solidjs/router";
 import type { InviteCapability as WasmInviteCapability } from "../../wasm/lakko_ffi_wasm";
 import { useAuth } from "../auth/AuthContext";
+import { buildAuthUrlWithReturn } from "../auth/return-url";
 import { ContactsClient, ContactsError } from "../contacts/client";
 import {
   describeExpiry,
@@ -179,21 +180,27 @@ function InvalidInvitePanel(): JSX.Element {
 }
 
 function NeedsAuthPanel(props: { slug: string }): JSX.Element {
+  // 1.18e — preserve the current `/i/:slug` URL across the
+  // auth round-trip. `buildAuthUrlWithReturn` encodes the
+  // current path as a `?return=` query that Signup.tsx /
+  // Login.tsx read on success to bounce back here. Pre-1.18e
+  // the joiner had to re-paste / re-click the invite URL after
+  // signup — easy to lose when copy-pasting from email.
+  const returnTo = paths.invite(props.slug);
   return (
     <section style={panelStyle()}>
       <h1 style={{ "margin-top": 0 }}>Sign up or log in to accept</h1>
       <p>
         This invite link needs a Lakko account to claim. Create one
-        below — you'll come back to this page from your contacts list
-        once you're in.
+        below — you'll come back here automatically after sign-up.
       </p>
       <div style={{ display: "flex", gap: "0.75rem", "margin-top": "1rem" }}>
-        <A href={paths.signup}>
+        <A href={buildAuthUrlWithReturn(paths.signup, returnTo)}>
           <button class="primary" type="button">
             Sign up
           </button>
         </A>
-        <A href={paths.login}>
+        <A href={buildAuthUrlWithReturn(paths.login, returnTo)}>
           <button type="button">Log in</button>
         </A>
       </div>

@@ -14,13 +14,15 @@
  * the same device) skip the lookup round-trip.
  */
 import { createSignal, type JSX } from "solid-js";
-import { A, useNavigate } from "@solidjs/router";
+import { A, useLocation, useNavigate } from "@solidjs/router";
 import { paths } from "./paths";
 import { useAuth } from "../auth/AuthContext";
+import { readReturnUrl } from "../auth/return-url";
 
 export default function Login(): JSX.Element {
   const auth = useAuth();
   const navigate = useNavigate();
+  const location = useLocation();
 
   // Pre-fill from the device-cached username (1.16c3b). When 1.16d
   // brings cross-device discovery the form will accept arbitrary
@@ -43,7 +45,13 @@ export default function Login(): JSX.Element {
     setBusy(true);
     try {
       await auth.login(username().trim(), password());
-      navigate(paths.home, { replace: true });
+      // 1.18e — honour `?return=<path>` from the URL so an anon
+      // visitor who clicked "Log in" from the invite landing
+      // (`/i/:slug`) lands back there after auth. Validated
+      // path-only by `readReturnUrl`; falls back to `/` when
+      // the param is absent, malformed, or an open-redirect
+      // attempt.
+      navigate(readReturnUrl(location), { replace: true });
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {

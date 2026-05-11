@@ -18,9 +18,10 @@
  * on this device work.
  */
 import { createSignal, Show, type JSX } from "solid-js";
-import { A, useNavigate } from "@solidjs/router";
+import { A, useLocation, useNavigate } from "@solidjs/router";
 import { paths } from "./paths";
 import { useAuth } from "../auth/AuthContext";
+import { readReturnUrl } from "../auth/return-url";
 
 /**
  * Two-stage form: `"form"` collects username + password, `"phrase"`
@@ -32,6 +33,7 @@ type Stage = { kind: "form" } | { kind: "phrase"; phrase: string };
 export default function Signup(): JSX.Element {
   const auth = useAuth();
   const navigate = useNavigate();
+  const location = useLocation();
 
   const [stage, setStage] = createSignal<Stage>({ kind: "form" });
   const [username, setUsername] = createSignal("");
@@ -77,7 +79,12 @@ export default function Signup(): JSX.Element {
     // server-side ciphertext (the OPAQUE recovery envelope), but
     // are NOT recoverable from there without the words themselves.
     setStage({ kind: "form" });
-    navigate(paths.home, { replace: true });
+    // 1.18e — honour `?return=<path>` from the URL so an anon
+    // visitor who clicked "Sign up" from the invite landing
+    // (`/i/:slug`) lands back there after auth + acknowledge.
+    // Validated path-only by `readReturnUrl`; falls back to `/`
+    // when the param is absent / malformed / open-redirect attempt.
+    navigate(readReturnUrl(location), { replace: true });
   }
 
   return (

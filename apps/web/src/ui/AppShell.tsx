@@ -54,6 +54,13 @@ export function AppShell(props: { children?: JSX.Element }): JSX.Element {
   // matches its `href` prop. The default match is "starts with",
   // which would match `/contacts` from `/`; passing `end` switches
   // to exact match.
+  //
+  // 1.18e — DevProbe was a sidebar entry through 1.16-1.18 but
+  // it's a smoke surface, not a user-facing page (renders raw
+  // 8-byte pubkey fingerprints + KeyPackage byte counts). The
+  // route at `/dev` stays reachable by URL for the maintainer's
+  // self-debugging; the sidebar link is gone so end-users don't
+  // wander into it.
   return (
     <div class="app-shell">
       <nav aria-label="Primary">
@@ -61,7 +68,6 @@ export function AppShell(props: { children?: JSX.Element }): JSX.Element {
           Home
         </A>
         <A href={paths.contacts}>Contacts</A>
-        <A href={paths.dev}>Dev probe</A>
 
         <div class="nav-spacer" />
         <div class="nav-footer">
