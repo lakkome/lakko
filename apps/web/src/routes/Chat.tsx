@@ -37,6 +37,7 @@ import { useAuth } from "../auth/AuthContext";
 import { base64Encode, base64UrlDecodeNoPad } from "../auth/account-id";
 import { ChatClient } from "../chat/client";
 import { ContactsClient } from "../contacts/client";
+import { loadAccepted } from "../contacts/local-store";
 import type { IncomingChatEvent } from "../chat/client";
 import { useChats, type ActiveGroup } from "../chat/ChatContext";
 import { paths } from "./paths";
@@ -187,6 +188,23 @@ function ChatView(props: {
   // tracks signal reads, not WASM-side property accesses.
   const [membersOpen, setMembersOpen] = createSignal(false);
   const [membersVersion, setMembersVersion] = createSignal(0);
+  // 1.18i — accepted-contacts directory keyed by
+  // base64(signature_pubkey). Lookup at member-render time
+  // turns a hex fingerprint into a real displayName when the
+  // member is somebody we've already accepted via the
+  // ContactRequest handshake (1.16d3d). Re-read at the same
+  // cadence as `members` so a fresh accept-flow happening in a
+  // sibling tab on `/contacts` surfaces here without a hard
+  // reload. The cost is one localStorage read per
+  // membersVersion bump — sub-millisecond.
+  const acceptedByPubkey = createMemo<Map<string, string>>(() => {
+    membersVersion();
+    const map = new Map<string, string>();
+    for (const c of loadAccepted()) {
+      map.set(c.signaturePubkeyB64, c.displayName);
+    }
+    return map;
+  });
   const members = createMemo<readonly { leafIndex: number; sigPubkey: Uint8Array }[]>(
     () => {
       // Subscribe to the version signal so the memo re-runs.
@@ -528,6 +546,17 @@ function ChatView(props: {
             <For each={members()}>
               {(m) => {
                 const isSelf = m.leafIndex === props.entry.group.ownLeafIndex;
+                // 1.18i — render the accepted-contact's
+                // displayName when this leaf's pubkey is in our
+                // local cache. Falls back to a hex fingerprint
+                // (a recipient we've not formally accepted yet,
+                // or somebody else who joined a group we're in).
+                // Lookup key matches `local-store.ts`'s
+                // `signaturePubkeyB64` shape (standard base64
+                // of the 32-byte Ed25519 verifying key).
+                const displayName = acceptedByPubkey().get(
+                  base64Encode(m.sigPubkey),
+                );
                 return (
                   <li
                     style={{
@@ -540,7 +569,10 @@ function ChatView(props: {
                     }}
                   >
                     <code style={{ "font-size": "0.85rem" }}>
-                      #{m.leafIndex} · {shortFingerprint(m.sigPubkey)}
+                      #{m.leafIndex} ·{" "}
+                      {displayName !== undefined
+                        ? displayName
+                        : shortFingerprint(m.sigPubkey)}
                     </code>
                     <span style={{ flex: 1 }} />
                     <Show
