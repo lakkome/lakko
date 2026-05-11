@@ -24,11 +24,28 @@
 
 name: CI
 
+# **Quota-conservation mode (May 2026 — re-enable in June after
+# free-tier reset)**: per-push / per-PR auto-triggers are
+# disabled until the 2,000-minute Free quota resets at the
+# start of the next billing month. The `push:` / `pull_request:`
+# blocks are kept as commented stanzas below so re-enabling is a
+# single uncomment.
+#
+# Until then run validation locally before commit:
+#
+#   just lint && just fmt-check && just test
+#
+# Trigger a full CI sweep manually via:
+#
+#   Actions tab → CI → "Run workflow"
+#
+# Reverting: uncomment the `push:` / `pull_request:` blocks and
+# remove this header note. ROADMAP entry tracks the flip.
 on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
+  # push:
+  #   branches: [main]
+  # pull_request:
+  #   branches: [main]
   workflow_dispatch: {}
 
 env:
