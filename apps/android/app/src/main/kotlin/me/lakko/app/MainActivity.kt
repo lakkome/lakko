@@ -6,55 +6,59 @@ package me.lakko.app
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
-import uniffi.lakko_ffi_uniffi.Identity
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.viewmodel.compose.viewModel
+import me.lakko.app.auth.AuthRepository
+import me.lakko.app.auth.AuthState
+import me.lakko.app.ui.auth.SignupScreen
+import me.lakko.app.ui.auth.SignupViewModel
+import me.lakko.app.ui.home.HomeScreen
 
 /**
- * Single-activity Compose entry point for the 1.15c
- * "Hello core" smoke build.
+ * Single-activity Compose host.
  *
- * Mirror of `apps/web`'s 1.16a `DevProbe.tsx`:
+ * Phase 1.15d4 — drives the signup-or-home flow:
  *
- *   1. Construct `Identity("lakko-android-skeleton")` via
- *      the UniFFI-generated Kotlin bindings.
- *   2. Read `signaturePublicKey()` — 32-byte Ed25519
- *      verifying key.
- *   3. Render it as a hex string. If we see hex, the JNA
- *      cdylib bridge works on this device and every later
- *      phase of 1.15 (OPAQUE auth, contacts, chat) sits on a
- *      proven foundation.
+ *   * [AuthRepository.state] is a [kotlinx.coroutines.flow.StateFlow]
+ *     that resolves to [AuthState.Loading], [AuthState.Anon], or
+ *     [AuthState.Session] after rehydration.
+ *   * `Anon` → [SignupScreen]. (Login lands in 1.15d5; Recover in
+ *     1.15d6; until then the user's only option is to sign up.)
+ *   * `Session` → [HomeScreen] placeholder. Contacts (1.15e) and
+ *     chat (1.15f) take it over once they ship.
  *
- * The Identity instance is intentionally **leaked** — for a
- * smoke screen on a single frame the auto-cleaner that
- * `lakko_ffi_uniffi.kt` registers on construction takes care
- * of it eventually. Production paths will hold the Identity
- * inside a session manager (1.15d) and explicitly `.destroy()`
- * on logout.
+ * The repository lives at the Activity scope — built once in
+ * [onCreate], remembered for the lifetime of the process. Compose
+ * recompositions don't recreate it. A future migration to a DI
+ * container (Hilt / Koin) is plausible but premature at one
+ * repository + a couple of ViewModels.
  */
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        // `applicationContext` (not `this`) so the repository
+        // doesn't hold an Activity reference past rotation.
+        val repository = AuthRepository(applicationContext)
+
         setContent {
             MaterialTheme {
                 Surface(
                     modifier = Modifier.fillMaxSize(),
                     color = MaterialTheme.colorScheme.background,
                 ) {
-                    HelloCoreScreen()
+                    AppRoot(repository = repository)
                 }
             }
         }
@@ -62,61 +66,67 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-private fun HelloCoreScreen() {
-    // `state` carries one of:
-    //   * "Loading core…"  before the FFI call lands
-    //   * "<hex>"            on success
-    //   * "Error: <msg>"    if the Rust core throws (shouldn't
-    //                       on a fresh Identity construction,
-    //                       but surface anyway — we'd rather
-    //                       see the error than show a blank
-    //                       screen).
-    var state by remember { mutableStateOf<String>("Loading core…") }
+private fun AppRoot(repository: AuthRepository) {
+    val state by repository.state.collectAsStateWithLifecycle()
 
-    LaunchedEffect(Unit) {
-        state =
-            try {
-                // UniFFI's generated constructor invokes
-                // `Identity::new("lakko-android-skeleton")` on
-                // the Rust side, returning a Pointer-backed
-                // wrapper.
-                val identity = Identity("lakko-android-skeleton")
-                val pubkey = identity.signaturePublicKey()
-                // Render hex — short on screen because a 64-
-                // char string wraps awkwardly. Full key in
-                // 1.15d's auth surface when there's a proper
-                // identity-detail view.
-                pubkey.joinToString(separator = "") { "%02x".format(it) }
-            } catch (e: Throwable) {
-                "Error: ${e.message ?: e::class.simpleName}"
-            }
-    }
-
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(24.dp),
-        verticalArrangement = Arrangement.Center,
-    ) {
-        Text(
-            text = "Lakko",
-            style = MaterialTheme.typography.displaySmall,
-        )
-        Text(
-            text = "Identity public key",
-            style = MaterialTheme.typography.titleMedium,
-            modifier = Modifier.padding(top = 16.dp),
-        )
-        Text(
-            text = state,
-            style = MaterialTheme.typography.bodyMedium,
-            modifier = Modifier.padding(top = 8.dp),
-        )
-        Text(
-            text = "Phase 1.15c smoke — JNA + UniFFI bridge",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.padding(top = 24.dp),
+    when (val current = state) {
+        AuthState.Loading -> LoadingScreen()
+        is AuthState.Anon -> {
+            val signupVm: SignupViewModel = viewModel(
+                factory = singletonViewModelFactory { SignupViewModel(repository) },
+            )
+            // `cachedUsername` will pre-fill the Login form
+            // (1.15d5). On Signup we deliberately keep the field
+            // empty — "create a new account" implies a fresh
+            // handle.
+            SignupScreen(
+                viewModel = signupVm,
+                // The auth state flips to Session inside the
+                // repository the moment signup commits; the
+                // top-level `collectAsStateWithLifecycle` above
+                // re-renders us into [HomeScreen] automatically.
+                // The acknowledge callback intentionally does
+                // nothing here — it exists to be wired up to a
+                // future navigation animation in 1.15d7.
+                onAuthenticated = {},
+            )
+        }
+        is AuthState.Session -> HomeScreen(
+            account = current.account,
+            onForgetDevice = repository::forgetDevice,
         )
     }
+}
+
+/**
+ * Tiny inline [ViewModelProvider.Factory] that constructs a single
+ * VM via the supplied [block]. The `androidx.lifecycle:viewmodel-ktx`
+ * `viewModelFactory { initializer { ... } }` builder is the
+ * canonical idiom but lives in a separate artefact; rolling our
+ * own keeps the dep set tight for 1.15d4.
+ */
+private inline fun <reified VM : ViewModel> singletonViewModelFactory(
+    crossinline block: () -> VM,
+): ViewModelProvider.Factory = object : ViewModelProvider.Factory {
+    @Suppress("UNCHECKED_CAST")
+    override fun <T : ViewModel> create(modelClass: Class<T>): T {
+        require(modelClass.isAssignableFrom(VM::class.java)) {
+            "Unexpected ViewModel class: $modelClass"
+        }
+        return block() as T
+    }
+}
+
+/**
+ * Loading splash for the brief window between Activity start and
+ * [AuthRepository] rehydration. Practically invisible (rehydrate
+ * is synchronous), but rendered for symmetry with the web side.
+ */
+@Composable
+private fun LoadingScreen() {
+    Text(
+        text = "Lakko",
+        style = MaterialTheme.typography.displaySmall,
+        modifier = Modifier.padding(24.dp),
+    )
 }

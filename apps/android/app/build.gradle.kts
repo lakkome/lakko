@@ -113,6 +113,10 @@ dependencies {
     debugImplementation(libs.compose.ui.tooling)
     implementation(libs.compose.ui.tooling.preview)
 
+    // 1.15d4 — ViewModel + StateFlow ↔ Compose glue.
+    implementation(libs.lifecycle.viewmodel.compose)
+    implementation(libs.lifecycle.runtime.compose)
+
     // 1.15d2 — networking + JSON for the OPAQUE auth client.
     //
     // Ktor's `client-core` is the suspending HTTP surface;

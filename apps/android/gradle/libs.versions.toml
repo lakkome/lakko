@@ -28,6 +28,13 @@ android-compile-sdk = "35"
 # pin governs every `androidx.compose.*` artefact.
 compose-bom        = "2024.10.01"
 activity-compose   = "1.9.3"
+# Phase 1.15d4 — ViewModel + StateFlow integration with Compose.
+# `androidx.lifecycle:lifecycle-viewmodel-compose` brings the
+# `viewModel()` composable factory; `runtime-compose` adds the
+# `collectAsStateWithLifecycle` extension so StateFlow can drive
+# Compose recomposition with proper lifecycle awareness (no
+# emissions to a backgrounded UI).
+lifecycle          = "2.8.7"
 
 # Phase 1.15d2 — networking + JSON for the OPAQUE auth client.
 # Ktor 3.x is the modern Kotlin HTTP stack: suspending API,
@@ -62,6 +69,13 @@ compose-ui-tooling-preview = { group = "androidx.compose.ui", name = "ui-tooling
 compose-ui-tooling  = { group = "androidx.compose.ui", name = "ui-tooling" }
 compose-material3   = { group = "androidx.compose.material3", name = "material3" }
 activity-compose    = { group = "androidx.activity", name = "activity-compose", version.ref = "activity-compose" }
+
+# Phase 1.15d4 — ViewModel <-> Compose glue. `viewmodel-compose`
+# gives the `viewModel()` composable factory; `runtime-compose`
+# gives `collectAsStateWithLifecycle` so a StateFlow can drive
+# Compose recomposition with proper Lifecycle awareness.
+lifecycle-viewmodel-compose = { group = "androidx.lifecycle", name = "lifecycle-viewmodel-compose", version.ref = "lifecycle" }
+lifecycle-runtime-compose   = { group = "androidx.lifecycle", name = "lifecycle-runtime-compose",   version.ref = "lifecycle" }
 
 # Ktor — HTTP client. `core` is the public API; `okhttp` is the
 # Android-side engine; `content-negotiation` is the plug for
