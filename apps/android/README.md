@@ -13,7 +13,7 @@ on JVM with the same Rust core.
 |---|---|---|
 | 1.15a | Kotlin bindings generation pipeline (`just regen-bindings`) | ✅ |
 | 1.15b | Android NDK cross-compile + Gradle scaffold (AAR build) | ✅ |
-| 1.15c | Compose project skeleton + "Hello core" smoke screen | TODO |
+| 1.15c | Compose project skeleton + "Hello core" smoke screen | ✅ |
 | 1.15d | OPAQUE-PAKE auth (signup / login / recover) | TODO |
 | 1.15e | Contacts (search / send / accept / invite-link) | TODO |
 | 1.15f | 1×1 chat UI (timeline + composer + ack indicators) | TODO |
@@ -153,6 +153,52 @@ is identical; only the platform-specific glue differs:
 * **1.15f** — 1×1 chat: timeline (LazyColumn) + composer +
   Material3 ack indicators. MLS state persistence via Android's
   EncryptedFile under the device root key.
+
+## First-run instructions (Phase 1.15c)
+
+Pre-reqs from 1.15b: JDK 17/21, Android SDK + NDK, `cargo-ndk`,
+Rust Android targets — see the install notes in
+`docs/ROADMAP.md` 1.15b entry.
+
+Build + install on a device or emulator:
+
+```bash
+# 1. Regenerate Kotlin bindings (idempotent; needs to run once
+#    after a fresh checkout — the generated tree is gitignored).
+just regen-bindings
+
+# 2. Cross-compile the Rust cdylib for both supported ABIs and
+#    drop the .so files into lakko-core/src/main/jniLibs/.
+just build-android
+
+# 3. Open `apps/android/` in Android Studio. The first launch
+#    populates `local.properties` with the SDK path (auto). The
+#    Gradle sync resolves AGP 8.6.1, Kotlin 2.0.21, the Compose
+#    BOM 2024.10.x + JNA — single-digit-MB download on a warm
+#    Android Studio install.
+open -a "Android Studio" apps/android
+
+# 4. From Android Studio: Run → "app" → pick a device (physical
+#    via USB / wireless ADB / emulator). The Hello-core screen
+#    appears with the hex-encoded Ed25519 verifying key of a
+#    fresh `Identity("lakko-android-skeleton")` — if you see hex,
+#    the JNA cdylib bridge is alive on that device.
+```
+
+CLI equivalent (no Android Studio needed for the build, only
+for the AVD / device picker):
+
+```bash
+cd apps/android && ./gradlew :app:assembleDebug
+# → app/build/outputs/apk/debug/app-debug.apk
+adb install -r app/build/outputs/apk/debug/app-debug.apk
+adb shell am start -n me.lakko.dev/me.lakko.app.MainActivity
+```
+
+The Gradle wrapper (`gradlew`) is created on the first Android
+Studio open; if you want to skip the IDE entirely run
+`gradle wrapper --gradle-version 8.10` from `apps/android/` once
+before the `gradlew` invocation above.
 
 ## Operator notes
 

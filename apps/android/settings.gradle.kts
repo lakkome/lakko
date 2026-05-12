@@ -37,3 +37,4 @@ dependencyResolutionManagement {
 rootProject.name = "lakko-android"
 
 include(":lakko-core")
+include(":app")

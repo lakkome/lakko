@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  SPDX-License-Identifier: AGPL-3.0-or-later
+  SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+  Phase 1.15c — minimum Material3 theme. The real colour
+  tokens live in the Compose layer (`MaterialTheme` overrides
+  in MainActivity); this XML only exists because the Activity
+  needs a valid `android:theme` attribute on the manifest tag
+  before Compose takes over the render tree.
+
+  `Theme.Material3.DayNight.NoActionBar` follows the system
+  light/dark mode automatically — matches the dark-mode toggle
+  posture we built into `apps/web` (1.18f), minus the manual
+  override (Compose's `isSystemInDarkTheme()` will read the
+  same OS preference here when the auth surface lands in
+  1.15d and we add the toggle).
+-->
+<resources>
+    <style name="Theme.Lakko" parent="Theme.Material3.DayNight.NoActionBar" />
+</resources>

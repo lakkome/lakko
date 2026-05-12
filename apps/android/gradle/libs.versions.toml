@@ -20,9 +20,32 @@ android-min-sdk    = "26"              # Android 8.0+ — covers ~97% of active 
 android-target-sdk = "35"              # Android 15 — current Play Store target requirement
 android-compile-sdk = "35"
 
+# Phase 1.15c — Compose stack. Compose Compiler since Kotlin 2.0
+# moves out of AndroidX into the Kotlin plugin
+# `org.jetbrains.kotlin.plugin.compose` (pinned to the same
+# Kotlin version above — no separate compiler-version dance).
+# Runtime libraries come from the Compose BOM so one version
+# pin governs every `androidx.compose.*` artefact.
+compose-bom        = "2024.10.01"
+activity-compose   = "1.9.3"
+
 [libraries]
 jna = { group = "net.java.dev.jna", name = "jna", version.ref = "jna" }
 
+# Compose stack — versions resolved through the BOM (use
+# `composeBom` as a platform dep in the consumer module).
+compose-bom         = { group = "androidx.compose", name = "compose-bom", version.ref = "compose-bom" }
+compose-ui          = { group = "androidx.compose.ui", name = "ui" }
+compose-ui-graphics = { group = "androidx.compose.ui", name = "ui-graphics" }
+compose-ui-tooling-preview = { group = "androidx.compose.ui", name = "ui-tooling-preview" }
+compose-ui-tooling  = { group = "androidx.compose.ui", name = "ui-tooling" }
+compose-material3   = { group = "androidx.compose.material3", name = "material3" }
+activity-compose    = { group = "androidx.activity", name = "activity-compose", version.ref = "activity-compose" }
+
 [plugins]
-android-library = { id = "com.android.library", version.ref = "agp" }
-kotlin-android  = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
+android-application = { id = "com.android.application", version.ref = "agp" }
+android-library     = { id = "com.android.library", version.ref = "agp" }
+kotlin-android      = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
+# Compose Compiler is now a Kotlin plugin (Kotlin 2.0+). Versions
+# track the host Kotlin version 1-for-1.
+kotlin-compose      = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
