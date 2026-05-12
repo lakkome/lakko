@@ -26,6 +26,8 @@ import me.lakko.app.auth.AuthRepository
 import me.lakko.app.auth.AuthState
 import me.lakko.app.ui.auth.LoginScreen
 import me.lakko.app.ui.auth.LoginViewModel
+import me.lakko.app.ui.auth.RecoverScreen
+import me.lakko.app.ui.auth.RecoverViewModel
 import me.lakko.app.ui.auth.SignupScreen
 import me.lakko.app.ui.auth.SignupViewModel
 import me.lakko.app.ui.home.HomeScreen
@@ -95,56 +97,89 @@ private fun AppRoot(repository: AuthRepository) {
 }
 
 /**
- * Anon-state subgraph — picks Login or Signup. The default is
- * remembered keyed on [cachedUsername] so a `forgetDevice` (which
- * clears the cache) snaps the user from Login back to Signup
- * without manual toggling.
+ * Anon-state subgraph — picks Login, Signup, or Recover. The
+ * default destination is keyed on [cachedUsername] so a
+ * `forgetDevice` (which clears the cache) snaps the user from
+ * Login back to Signup without manual toggling.
+ *
+ * Cached username present → default `Login` (returning user).
+ * Cached absent             → default `Signup` (fresh install).
+ *
+ * All three screens carry footer links to switch between them.
+ * The Recover screen additionally renders a "no cached account"
+ * stub when [cachedUsername] is `null` — the recovery flow can't
+ * target an account that isn't on disk.
  */
 @Composable
 private fun AnonRoot(
     repository: AuthRepository,
     cachedUsername: String?,
 ) {
-    var showLogin by remember(cachedUsername) {
-        mutableStateOf(cachedUsername != null)
+    var destination by remember(cachedUsername) {
+        mutableStateOf(
+            if (cachedUsername != null) AnonDestination.Login
+            else AnonDestination.Signup,
+        )
     }
 
-    if (showLogin) {
-        // Key the ViewModel by cachedUsername so a returning user
-        // ("alice" cached, signed out, came back) gets a VM with
-        // the pre-filled username, while a freshly-forgotten
-        // device builds a VM with an empty field.
-        val loginVm: LoginViewModel = viewModel(
-            key = "login-${cachedUsername ?: ""}",
-            factory = singletonViewModelFactory {
-                LoginViewModel(repository, cachedUsername)
-            },
-        )
-        LoginScreen(
-            viewModel = loginVm,
-            onNavigateToSignup = { showLogin = false },
-            // 1.15d6 wires this to the RecoverScreen. Until then
-            // the click target is a no-op so the link doesn't
-            // disappear from the layout but doesn't navigate
-            // anywhere either.
-            onNavigateToRecover = { /* TODO(1.15d6) */ },
-        )
-    } else {
-        val signupVm: SignupViewModel = viewModel(
-            factory = singletonViewModelFactory { SignupViewModel(repository) },
-        )
-        SignupScreen(
-            viewModel = signupVm,
-            // Auth state flips to Session inside the repo on
-            // commit; the top-level `collectAsStateWithLifecycle`
-            // re-renders us into HomeScreen automatically. The
-            // acknowledge callback intentionally does nothing
-            // here — it exists for a future navigation animation
-            // in 1.15d7.
-            onAuthenticated = {},
-            onNavigateToLogin = { showLogin = true },
-        )
+    when (destination) {
+        AnonDestination.Login -> {
+            // Key the ViewModel by cachedUsername so a returning
+            // user ("alice" cached, signed out, came back) gets
+            // a VM with the pre-filled username, while a freshly-
+            // forgotten device builds a VM with an empty field.
+            val loginVm: LoginViewModel = viewModel(
+                key = "login-${cachedUsername ?: ""}",
+                factory = singletonViewModelFactory {
+                    LoginViewModel(repository, cachedUsername)
+                },
+            )
+            LoginScreen(
+                viewModel = loginVm,
+                onNavigateToSignup = { destination = AnonDestination.Signup },
+                onNavigateToRecover = { destination = AnonDestination.Recover },
+            )
+        }
+        AnonDestination.Signup -> {
+            val signupVm: SignupViewModel = viewModel(
+                factory = singletonViewModelFactory { SignupViewModel(repository) },
+            )
+            SignupScreen(
+                viewModel = signupVm,
+                // Auth state flips to Session inside the repo on
+                // commit; the top-level `collectAsStateWithLifecycle`
+                // re-renders us into HomeScreen automatically. The
+                // acknowledge callback intentionally does nothing
+                // here — it exists for a future navigation
+                // animation in 1.15d7.
+                onAuthenticated = {},
+                onNavigateToLogin = { destination = AnonDestination.Login },
+            )
+        }
+        AnonDestination.Recover -> {
+            val recoverVm: RecoverViewModel = viewModel(
+                key = "recover-${cachedUsername ?: ""}",
+                factory = singletonViewModelFactory {
+                    RecoverViewModel(repository, cachedUsername)
+                },
+            )
+            RecoverScreen(
+                viewModel = recoverVm,
+                onNavigateToLogin = { destination = AnonDestination.Login },
+                onNavigateToSignup = { destination = AnonDestination.Signup },
+            )
+        }
     }
+}
+
+/**
+ * Three Anon-state destinations. Compose Navigation lands in
+ * 1.15d7 — this enum holds the place until then.
+ */
+private enum class AnonDestination {
+    Login,
+    Signup,
+    Recover,
 }
 
 /**

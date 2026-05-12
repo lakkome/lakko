@@ -7,6 +7,7 @@ import android.content.Context
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import uniffi.lakko_ffi_uniffi.RecoveryMnemonic
 
 /**
  * Single source of truth for "is the user authenticated on this
@@ -271,6 +272,109 @@ public class AuthRepository(
                 result.exportKey.fill(0)
                 result.sessionKey.fill(0)
             }
+        }
+    }
+
+    /**
+     * Drive the full recover-from-mnemonic flow.
+     *
+     * Mirror of `apps/web/src/auth/AuthContext.tsx::recover`.
+     * Drives `lakko-svc-auth`'s `/password/reset/{start,finish}`
+     * endpoint pair via [AuthClient.recover]:
+     *
+     *   1. Validate caller-side preconditions (cached account
+     *      present, mnemonic + new password non-empty, new
+     *      password ≥ 8 chars; mnemonic checksum is validated
+     *      inside `RecoveryMnemonic.fromPhrase` and surfaces as a
+     *      generic "invalid recovery phrase" error).
+     *   2. Parse the typed phrase via [RecoveryMnemonic.fromPhrase]
+     *      to validate the BIP39 checksum and derive the 64-byte
+     *      seed. The OPAQUE recovery flow consumes the seed as
+     *      its "secret"; a wrong word or a checksum failure
+     *      surfaces here before the network call.
+     *   3. Call [AuthClient.recover] with `(accountId, seed,
+     *      newPasswordBytes)` — one PoW solve, parallel OPAQUE
+     *      recovery-login + new-password-registration round.
+     *   4. Re-derive the device root key from the **new** export
+     *      key. The previous key (if any) is no longer reachable
+     *      from the new password; the upsert overwrites the on-
+     *      disk envelope cleanly.
+     *   5. Idempotent re-save of the [SessionStore] marker
+     *      (`accountId` unchanged, `username` unchanged).
+     *   6. Flip state to [AuthState.Session].
+     *
+     * A wrong mnemonic surfaces as an [AuthHttpError] from
+     * `AuthClient.recover` — by design the failure is
+     * indistinguishable from a transport-mangled response (OPAQUE
+     * AKE refuses to agree on a session key, the server returns
+     * a generic error code). We let it bubble unchanged so the
+     * UI form can render "invalid recovery phrase" without
+     * leaking further.
+     *
+     * @throws AuthClientArgError on empty / too-short inputs or
+     *         no cached account on this device
+     * @throws me.lakko.app.auth.FfiException via [RecoveryMnemonic.fromPhrase]
+     *         when the BIP39 checksum fails
+     * @throws AuthHttpError on a non-2xx server response or a
+     *         rejected mnemonic
+     * @throws AuthNetworkError on transport failure
+     */
+    public suspend fun recover(
+        mnemonicPhrase: String,
+        newPassword: ByteArray,
+    ) {
+        if (mnemonicPhrase.isBlank()) {
+            throw AuthClientArgError("recovery phrase must be non-empty")
+        }
+        if (newPassword.isEmpty()) {
+            throw AuthClientArgError("new password must be non-empty")
+        }
+        val cached = sessionStore.load()
+            ?: throw AuthClientArgError(
+                "no account on this device — cross-device recovery " +
+                    "via the discovery service arrives in 1.15e",
+            )
+        val accountIdBytes = base64Decode(cached.accountIdB64)
+
+        // Parse the mnemonic up front. `fromPhrase` collapses
+        // unknown-word and bad-checksum into one FfiException by
+        // design (preserves BIP39's no-probing property). Burn
+        // the seed buffer at the end — it's the only thing
+        // standing between an attacker and the OPAQUE export key
+        // we'll derive next.
+        val seed = RecoveryMnemonic.fromPhrase(mnemonicPhrase).use { mnemonic ->
+            mnemonic.toSeed()
+        }
+        try {
+            authClientFactory().use { client ->
+                val result = client.recover(accountIdBytes, seed, newPassword)
+                try {
+                    val deviceRootKey =
+                        deriveDeviceRootKey(result.exportKey, cached.accountIdB64)
+                    try {
+                        deviceKeyStore.putDeviceKey(
+                            context = applicationContext,
+                            accountIdB64 = cached.accountIdB64,
+                            rootKey = deviceRootKey,
+                        )
+                    } finally {
+                        deviceRootKey.fill(0)
+                    }
+                    sessionStore.save(cached) // idempotent upsert
+                    mutableState.value = AuthState.Session(
+                        account = SessionAccount(
+                            accountIdB64 = cached.accountIdB64,
+                            username = cached.username,
+                        ),
+                    )
+                } finally {
+                    result.exportKey.fill(0)
+                }
+            }
+        } finally {
+            // BIP39 seed is the highest-value secret we touch in
+            // this flow — wipe before GC even thinks about it.
+            seed.fill(0)
         }
     }
 
