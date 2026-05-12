@@ -21,6 +21,10 @@ plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
+    // 1.15d2 — kotlinx-serialization compiler plugin. Generates
+    // the `Serializer` implementations for the `@Serializable`
+    // JSON data classes under `me.lakko.app.auth.wire`.
+    alias(libs.plugins.kotlin.serialization)
 }
 
 android {
@@ -108,4 +112,42 @@ dependencies {
     // only so they don't bloat release APKs.
     debugImplementation(libs.compose.ui.tooling)
     implementation(libs.compose.ui.tooling.preview)
+
+    // 1.15d2 — networking + JSON for the OPAQUE auth client.
+    //
+    // Ktor's `client-core` is the suspending HTTP surface;
+    // `client-okhttp` is the engine that actually opens
+    // sockets on Android (production-grade HTTP/2 + connection
+    // pooling); `client-content-negotiation` is the plug that
+    // auto-serializes / -deserializes JSON request bodies; the
+    // `serialization-kotlinx-json` artefact is the codec
+    // implementation that plug uses.
+    implementation(libs.ktor.client.core)
+    implementation(libs.ktor.client.okhttp)
+    implementation(libs.ktor.client.content.negotiation)
+    implementation(libs.ktor.serialization.kotlinx.json)
+
+    // kotlinx-coroutines on Android. Ktor pulls -core in
+    // transitively, but the -android dispatcher (`Dispatchers.Main`
+    // backed by Looper) is Android-specific and needs to be
+    // declared explicitly. Coroutines drive both Ktor's
+    // suspending HTTP and our `Dispatchers.Default` PoW solve.
+    implementation(libs.kotlinx.coroutines.core)
+    implementation(libs.kotlinx.coroutines.android)
+
+    // kotlinx-serialization runtime — required by the `@Serializable`
+    // data classes (Ktor pulls the JSON-side via
+    // `serialization-kotlinx-json`, but the core annotation
+    // package needs to be on the runtime classpath of any
+    // module that declares `@Serializable` types).
+    implementation(libs.kotlinx.serialization.json)
+
+    // 1.15d2 — JVM-side unit tests. `testDebugUnitTest` runs
+    // these on the host JDK without any emulator; perfect for
+    // the AuthClient flow tests that drive the high-level
+    // signup/login/recover against a Ktor MockEngine.
+    testImplementation(libs.junit)
+    testImplementation(libs.kotlinx.coroutines.test)
+    testImplementation(libs.ktor.client.mock)
+    testImplementation(libs.kotlinx.serialization.json)
 }

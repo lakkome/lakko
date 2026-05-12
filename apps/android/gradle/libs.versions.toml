@@ -29,6 +29,27 @@ android-compile-sdk = "35"
 compose-bom        = "2024.10.01"
 activity-compose   = "1.9.3"
 
+# Phase 1.15d2 — networking + JSON for the OPAQUE auth client.
+# Ktor 3.x is the modern Kotlin HTTP stack: suspending API,
+# OkHttp engine on Android (production-grade HTTP/2 + connection
+# pooling), pluggable engines mean tests can swap in `MockEngine`
+# with zero refactor. kotlinx-serialization is the JSON layer
+# Ktor pulls in via `content-negotiation`.
+#
+# Coroutines are required transitively but pinned explicitly so
+# the version stays under our control — Ktor 3.0.x bundles
+# kotlinx-coroutines 1.9.x; we follow.
+ktor                  = "3.0.1"
+kotlinx-serialization = "1.7.3"
+kotlinx-coroutines    = "1.9.0"
+
+# Phase 1.15d2 — unit-test stack. JUnit 4 stays the Android-idiomatic
+# choice (works under the `testDebugUnitTest` task without an
+# emulator); kotlinx-coroutines-test gives `runTest` for suspend
+# functions; ktor `client-mock` engine drives `AuthClient` against
+# fake responses without a network.
+junit              = "4.13.2"
+
 [libraries]
 jna = { group = "net.java.dev.jna", name = "jna", version.ref = "jna" }
 
@@ -42,6 +63,27 @@ compose-ui-tooling  = { group = "androidx.compose.ui", name = "ui-tooling" }
 compose-material3   = { group = "androidx.compose.material3", name = "material3" }
 activity-compose    = { group = "androidx.activity", name = "activity-compose", version.ref = "activity-compose" }
 
+# Ktor — HTTP client. `core` is the public API; `okhttp` is the
+# Android-side engine; `content-negotiation` is the plug for
+# automatic JSON ser/deser; `serialization-kotlinx-json` is the
+# actual ser/deser implementation. `client-mock` is test-only —
+# drives the high-level signup/login flows against fake responses
+# without the network.
+ktor-client-core                  = { group = "io.ktor", name = "ktor-client-core",                  version.ref = "ktor" }
+ktor-client-okhttp                = { group = "io.ktor", name = "ktor-client-okhttp",                version.ref = "ktor" }
+ktor-client-content-negotiation   = { group = "io.ktor", name = "ktor-client-content-negotiation",   version.ref = "ktor" }
+ktor-serialization-kotlinx-json   = { group = "io.ktor", name = "ktor-serialization-kotlinx-json",   version.ref = "ktor" }
+ktor-client-mock                  = { group = "io.ktor", name = "ktor-client-mock",                  version.ref = "ktor" }
+
+# kotlinx — coroutines + serialization.
+kotlinx-coroutines-core        = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-core",        version.ref = "kotlinx-coroutines" }
+kotlinx-coroutines-android     = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-android",     version.ref = "kotlinx-coroutines" }
+kotlinx-coroutines-test        = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-test",        version.ref = "kotlinx-coroutines" }
+kotlinx-serialization-json     = { group = "org.jetbrains.kotlinx", name = "kotlinx-serialization-json",     version.ref = "kotlinx-serialization" }
+
+# Test deps.
+junit              = { group = "junit", name = "junit", version.ref = "junit" }
+
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
 android-library     = { id = "com.android.library", version.ref = "agp" }
@@ -49,3 +91,7 @@ kotlin-android      = { id = "org.jetbrains.kotlin.android", version.ref = "kotl
 # Compose Compiler is now a Kotlin plugin (Kotlin 2.0+). Versions
 # track the host Kotlin version 1-for-1.
 kotlin-compose      = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
+# kotlinx-serialization compiler plugin — generates the `Serializer`
+# implementations for `@Serializable` types. Version-locked to the
+# host Kotlin (same convention as `kotlin-compose`).
+kotlin-serialization = { id = "org.jetbrains.kotlin.plugin.serialization", version.ref = "kotlin" }

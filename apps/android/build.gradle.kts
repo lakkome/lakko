@@ -19,4 +19,9 @@ plugins {
     alias(libs.plugins.android.library) apply false
     alias(libs.plugins.kotlin.android) apply false
     alias(libs.plugins.kotlin.compose) apply false
+    // kotlinx-serialization plugin — generates `Serializer`
+    // implementations for `@Serializable` types in
+    // `me.lakko.app.auth.wire` (1.15d2). `apply false` so only
+    // the module that needs it (`:app`) enables it.
+    alias(libs.plugins.kotlin.serialization) apply false
 }
