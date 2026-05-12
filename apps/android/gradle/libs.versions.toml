@@ -1,0 +1,28 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+# Gradle version catalog — single source of truth for plugin
+# and dependency versions across every Android module
+# (Phase 1.15b). Bumping a version here propagates to every
+# subproject that references it via `libs.plugins.<alias>` /
+# `libs.<group>.<artifact>`.
+#
+# Pinned versions track the Android Studio Koala+ wave (AGP 8.5+).
+# Kotlin 2.x is required for the Compose Compiler plugin to
+# move out of AndroidX and into the official Kotlin plugin
+# (lands in 1.15c when the actual Compose UI shows up).
+
+[versions]
+agp                = "8.6.1"
+kotlin             = "2.0.21"
+jna                = "5.14.0"          # UniFFI runtime — JNA-based bindings call into the cdylib
+android-min-sdk    = "26"              # Android 8.0+ — covers ~97% of active devices as of 2026
+android-target-sdk = "35"              # Android 15 — current Play Store target requirement
+android-compile-sdk = "35"
+
+[libraries]
+jna = { group = "net.java.dev.jna", name = "jna", version.ref = "jna" }
+
+[plugins]
+android-library = { id = "com.android.library", version.ref = "agp" }
+kotlin-android  = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }

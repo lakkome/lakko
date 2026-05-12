@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  SPDX-License-Identifier: AGPL-3.0-or-later
+  SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+  Phase 1.15b — minimal manifest for the `lakko-core` AAR.
+  The module declares no activities, services, broadcast
+  receivers, permissions, or features — it's a pure Kotlin
+  facade over the Rust cdylib. AGP still demands a manifest
+  to identify the module; the `package` attribute is supplied
+  via `namespace = "me.lakko.core"` in `build.gradle.kts`
+  (AGP 7.x+), so this file stays empty save for the root tag.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" />

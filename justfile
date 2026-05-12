@@ -64,6 +64,16 @@ regen-bindings:
         --library target/release/liblakko_ffi_uniffi.{{lib_ext}} \
         --language kotlin \
         --out-dir target/bindings/kotlin
+    # Phase 1.15b — fan the Kotlin tree out into the Gradle
+    # module's source set so `:lakko-core:assembleDebug` picks
+    # it up. The generator drops files under
+    # `target/bindings/kotlin/uniffi/lakko_ffi_uniffi/`; mirror
+    # that path under `apps/android/lakko-core/src/main/kotlin/`
+    # (gitignored on the Android side — regenerated on every
+    # `regen-bindings`).
+    @mkdir -p apps/android/lakko-core/src/main/kotlin
+    @rm -rf apps/android/lakko-core/src/main/kotlin/uniffi
+    @cp -R target/bindings/kotlin/uniffi apps/android/lakko-core/src/main/kotlin/uniffi
 
 # Smoke-build all fuzz targets on stable (verifies harnesses compile).
 # Real fuzzing requires nightly + cargo-fuzz; see `just fuzz <crate> <target>`.
@@ -168,6 +178,39 @@ dev-web:
 # `vite build`. Output lands in `apps/web/dist/`.
 build-web:
     cd apps/web && npm run build
+
+# Phase 1.15b — cross-compile `lakko-ffi-uniffi` (cdylib) for
+# Android NDK targets via `cargo-ndk`, drop the `.so` files into
+# `apps/android/lakko-core/src/main/jniLibs/{abi}/` where the
+# Gradle module's `assembleDebug` picks them up. JNA / UniFFI
+# load them at runtime via `System.loadLibrary("lakko_ffi_uniffi")`.
+#
+# Two targets cover the entire Apple-Silicon dev loop:
+#   * arm64-v8a       — modern phones + Apple-Silicon emulator
+#                       (qemu-system-aarch64 with KVM-like accel)
+#   * x86_64          — Intel emulator on Intel Macs
+#
+# 32-bit Android (armv7-linux-androideabi / i686-linux-android)
+# is intentionally NOT in the matrix — current Play Store
+# minimum is API 21 and the long-tail of armv7-only devices is
+# below 5% by 2026. Bring back as a separate target list if a
+# real distribution gate flags it.
+#
+# Pre-reqs:
+#   * `rustup target add aarch64-linux-android x86_64-linux-android`
+#   * `cargo install cargo-ndk`
+#   * `$ANDROID_NDK_HOME` pointing at an NDK r26+ install
+#
+# `--release` keeps optimisations on by default — debug builds
+# of OpenMLS + RustCrypto on Android are slow enough to matter.
+# Flip to `--profile dev` only for active debugging.
+build-android:
+    @test -n "${ANDROID_NDK_HOME:-}" || (echo "ERROR: ANDROID_NDK_HOME unset — see apps/android/README.md" && exit 1)
+    cargo ndk \
+        --target arm64-v8a \
+        --target x86_64 \
+        --output-dir apps/android/lakko-core/src/main/jniLibs \
+        build --release -p lakko-ffi-uniffi
 
 # Phase 1.16f3 — wasm-bindgen-test smoke suite under Node. Tests
 # in `crates/lakko-ffi-wasm/src/wasm_tests.rs` exercise WASM-shape

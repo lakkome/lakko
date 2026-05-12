@@ -12,7 +12,7 @@ on JVM with the same Rust core.
 | Sub-sprint | Scope | Status |
 |---|---|---|
 | 1.15a | Kotlin bindings generation pipeline (`just regen-bindings`) | ✅ |
-| 1.15b | Android NDK cross-compile + AAR packaging | TODO |
+| 1.15b | Android NDK cross-compile + Gradle scaffold (AAR build) | ✅ |
 | 1.15c | Compose project skeleton + "Hello core" smoke screen | TODO |
 | 1.15d | OPAQUE-PAKE auth (signup / login / recover) | TODO |
 | 1.15e | Contacts (search / send / accept / invite-link) | TODO |
