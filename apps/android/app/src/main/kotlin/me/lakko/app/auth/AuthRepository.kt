@@ -178,13 +178,124 @@ public class AuthRepository(
     }
 
     /**
+     * Drive the full OPAQUE-PAKE login flow.
+     *
+     * Mirror of `apps/web/src/auth/AuthContext.tsx::login`. Steps:
+     *   1. Resolve the typed username to an `accountId`. In 1.15d5
+     *      the only resolver is the on-device [SessionStore] cache
+     *      — if the typed username matches the cached entry, we
+     *      use the cached `accountId` and skip a round-trip; if it
+     *      doesn't, we throw `invalid credentials` (the same error
+     *      as a wrong password — indistinguishable failure preserves
+     *      OPAQUE's no-probing property). Cross-device login via
+     *      the discovery service is 1.15e's job; until then a fresh
+     *      device requires running signup first.
+     *   2. Call [AuthClient.login] with `(accountId, password)`.
+     *   3. Re-derive the device root key from the OPAQUE export
+     *      key. The derivation is deterministic for the same
+     *      password, so re-running it on every login produces the
+     *      same bytes the original signup wrote — the
+     *      [DeviceKeyStore.putDeviceKey] upsert is harmless.
+     *   4. Re-save the SessionStore marker (idempotent — same
+     *      `accountId`, same `username`).
+     *   5. Flip state to [AuthState.Session].
+     *
+     * `session_key` from the OPAQUE finish is dropped on the floor
+     * in 1.15d5. When the auth server gains token-bound sessions
+     * (post-1.18 sprint on the wider service mesh) we'll feed it
+     * into a [SessionStore]-adjacent token cache.
+     *
+     * @throws AuthClientArgError on empty username / empty password
+     * @throws AuthHttpError 401 on wrong password / unknown account
+     * @throws AuthNetworkError on transport failure
+     */
+    public suspend fun login(
+        username: String,
+        password: ByteArray,
+    ) {
+        val trimmed = username.trim()
+        if (trimmed.isEmpty()) {
+            throw AuthClientArgError("username must be non-empty")
+        }
+        if (password.isEmpty()) {
+            throw AuthClientArgError("password must be non-empty")
+        }
+        val cached = sessionStore.load()
+            ?: throw AuthHttpError(
+                status = 401,
+                endpoint = "/login/start",
+                body = "no account on this device — sign up first",
+            )
+        if (cached.username != trimmed) {
+            // Cross-device login resolves via the discovery service
+            // (1.15e); until then a mismatched username is the same
+            // failure mode as a wrong password.
+            throw AuthHttpError(
+                status = 401,
+                endpoint = "/login/start",
+                body = "invalid credentials",
+            )
+        }
+        val accountIdBytes = base64Decode(cached.accountIdB64)
+
+        authClientFactory().use { client ->
+            val result = client.login(accountIdBytes, password)
+            try {
+                // Re-derive + upsert the device key. Deterministic
+                // for the same password — the on-disk envelope is
+                // overwritten with byte-equivalent content; harmless
+                // unless the account was previously recovered via
+                // mnemonic with a new password, in which case the
+                // old envelope decrypts to the previous device key
+                // and the new envelope replaces it cleanly.
+                val deviceRootKey = deriveDeviceRootKey(result.exportKey, cached.accountIdB64)
+                try {
+                    deviceKeyStore.putDeviceKey(
+                        context = applicationContext,
+                        accountIdB64 = cached.accountIdB64,
+                        rootKey = deviceRootKey,
+                    )
+                } finally {
+                    deviceRootKey.fill(0)
+                }
+                sessionStore.save(cached)  // upsert — schema-versioned marker
+                mutableState.value = AuthState.Session(
+                    account = SessionAccount(
+                        accountIdB64 = cached.accountIdB64,
+                        username = cached.username,
+                    ),
+                )
+            } finally {
+                // Best-effort wipe of the export key + session key
+                // before they drop out of scope.
+                result.exportKey.fill(0)
+                result.sessionKey.fill(0)
+            }
+        }
+    }
+
+    /**
+     * Drop the in-memory session. Keeps [SessionStore] and the
+     * Keystore-wrapped device key intact — re-login on the same
+     * device stays cheap.
+     *
+     * Mirror of the web's `logout()`. The cached username is
+     * surfaced in [AuthState.Anon.cachedUsername] so the next
+     * Login form pre-fills it.
+     */
+    public fun logout() {
+        val cached = sessionStore.load()
+        mutableState.value = AuthState.Anon(cachedUsername = cached?.username)
+    }
+
+    /**
      * Drop the in-memory session **and** the on-device material.
      *
-     * Mirror of the web's `forgetDevice` semantics — we don't
-     * ship a lightweight "logout but keep the device key" path on
-     * Android yet because the auth surface is signup-only in
-     * 1.15d4. The lightweight `logout()` lands with login in
-     * 1.15d5.
+     * Mirror of the web's `forgetDevice` semantics. Distinct from
+     * [logout]: this wipes both the [SessionStore] record and the
+     * Keystore-wrapped device key envelope. After `forgetDevice`
+     * the only way back into the account is via the recovery
+     * passphrase (1.15d6 `/recover` flow).
      */
     public fun forgetDevice() {
         val cached = sessionStore.load()

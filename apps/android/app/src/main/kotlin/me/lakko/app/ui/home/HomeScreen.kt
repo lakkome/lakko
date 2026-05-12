@@ -5,11 +5,14 @@ package me.lakko.app.ui.home
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
+import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
@@ -32,6 +35,7 @@ import me.lakko.app.auth.SessionAccount
 @Composable
 public fun HomeScreen(
     account: SessionAccount,
+    onLogout: () -> Unit,
     onForgetDevice: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -70,11 +74,27 @@ public fun HomeScreen(
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         Spacer(Modifier.height(24.dp))
-        OutlinedButton(
-            onClick = onForgetDevice,
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
             modifier = Modifier.fillMaxWidth(),
         ) {
-            Text("Forget device")
+            // `Logout` keeps the on-device material; the user can
+            // log back in quickly with their password. `Forget
+            // device` wipes the SessionStore marker + the
+            // Keystore-wrapped device root key — the only path
+            // back is the 24-word recovery phrase (1.15d6).
+            Button(
+                onClick = onLogout,
+                modifier = Modifier.weight(1f),
+            ) {
+                Text("Log out")
+            }
+            OutlinedButton(
+                onClick = onForgetDevice,
+                modifier = Modifier.weight(1f),
+            ) {
+                Text("Forget device")
+            }
         }
     }
 }
