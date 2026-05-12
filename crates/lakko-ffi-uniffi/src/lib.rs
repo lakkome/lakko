@@ -35,6 +35,7 @@ use lakko_mls::{
 };
 
 pub mod auth;
+pub mod contacts;
 pub mod discovery;
 pub mod mnemonic;
 pub mod pow;
@@ -116,6 +117,23 @@ pub enum FfiError {
     /// failure signal.
     #[error("OPRF blinder already finalized")]
     DiscoveryAlreadyFinalized,
+
+    /// Contact-request envelope / pseudonym error.
+    ///
+    /// Same elision posture as the wasm side: the underlying
+    /// `ContactError` distinguishes wire-format / signature /
+    /// AEAD / argument categories internally; UI-side handling
+    /// would not benefit from carving that into separate
+    /// variants here.
+    #[error("contacts error: {0}")]
+    Contacts(String),
+
+    /// Crypto primitive (Ed25519 / X25519 / AEAD) error at the
+    /// FFI boundary. Surfaced when input bytes don't decode to a
+    /// valid public / private key, or an AEAD op fails — both
+    /// are typically caller-side wiring bugs.
+    #[error("crypto error: {0}")]
+    Crypto(String),
 
     /// Lock contention / poisoned mutex on the shared Group state.
     #[error("internal lock error")]

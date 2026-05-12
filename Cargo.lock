@@ -2004,6 +2004,8 @@ version = "0.0.0"
 dependencies = [
  "base64",
  "lakko-auth-client",
+ "lakko-contacts",
+ "lakko-crypto",
  "lakko-discovery-client",
  "lakko-mls",
  "lakko-mnemonic",

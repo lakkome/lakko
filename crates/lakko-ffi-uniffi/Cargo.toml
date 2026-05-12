@@ -34,6 +34,12 @@ lakko-pow.workspace = true
 # VOPRF client — username discovery. The blind/finalize dance +
 # the canonical username-normalisation helper. 1.15e1.
 lakko-discovery-client.workspace = true
+# Contact-request envelope + pseudonym lifecycle. Used by 1.15e2's
+# ContactRequest UniFFI surface. Pulls `lakko-crypto` transitively
+# for the X25519 / Ed25519 primitive types compose / open_envelope
+# need at the boundary.
+lakko-contacts.workspace = true
+lakko-crypto.workspace = true
 # Base64 framing for the PoW surface (seed/nonce/solution
 # fields → base64 strings on the JSON request body). Matches
 # the wasm surface 1:1.
