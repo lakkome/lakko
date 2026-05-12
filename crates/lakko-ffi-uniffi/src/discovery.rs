@@ -1,0 +1,216 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+//! UniFFI exposure of `lakko-discovery-client`.
+//!
+//! Mirror of `lakko-ffi-wasm/src/discovery.rs`. Two public items:
+//!
+//!   * [`normalize_username`] — a pure helper that turns whatever
+//!     the user typed (`"  @Alice  "`, `"alice\n"`) into the
+//!     canonical form (`"alice"`). Used in the Compose UI to
+//!     surface "Looking up @alice…" while a request is in flight,
+//!     and by the discovery server's own normalisation path on
+//!     the wire (the strings have to agree byte-for-byte so the
+//!     OPRF hash matches).
+//!
+//!   * [`OprfBlinder`] — the OPRF dance handle. Construct with
+//!     `OprfBlinder::blind(username)`, read `blinded_b64` for the
+//!     `/discovery/oprf` request body, then call `finalize` with
+//!     the server's `evaluated` response to obtain the 64-byte
+//!     OPRF hash (consumed by `/discovery/lookup` /
+//!     `/discovery/register` as `oprf_hash`).
+//!
+//! ## "Consume on `finalize`" model
+//!
+//! Same posture as the OPAQUE wrappers in [`super::auth`].
+//! `OprfClient::finalize` takes `self` by value — a second call
+//! is a protocol bug that produces nonsense output without an
+//! error signal. UniFFI `&self` methods cannot consume the
+//! receiver, so the blinder is held in a `Mutex<Option<…>>` and
+//! `.take()`d on the first `finalize`. A second call returns
+//! [`FfiError::DiscoveryAlreadyFinalized`] instead of corrupting
+//! math.
+
+use std::sync::Mutex;
+
+use lakko_discovery_client::{
+    normalize_username as inner_normalize, DiscoveryClientError, OprfBlinder as InnerBlinder,
+};
+
+use crate::FfiError;
+
+impl From<DiscoveryClientError> for FfiError {
+    fn from(e: DiscoveryClientError) -> Self {
+        Self::Discovery(e.to_string())
+    }
+}
+
+/// Normalise the typed username and return the canonical form.
+///
+/// Pure helper, exposed as a free function. The UI uses it for
+/// "Looking up @alice…" feedback; production discovery flows
+/// drive [`OprfBlinder::blind`] which calls this internally.
+///
+/// Trim → strip a leading `@` → trim again. The double-trim
+/// handles `"\t@alice\n"` (whitespace outside the `@`) and
+/// `"@ alice"` (a space between the `@` and the handle) — both
+/// normal copy-paste artefacts.
+#[uniffi::export]
+pub fn normalize_username(input: String) -> String {
+    inner_normalize(&input)
+}
+
+/// Client-side OPRF blinder handle — Swift / Kotlin exposure of
+/// [`lakko_discovery_client::OprfBlinder`].
+///
+/// Kotlin usage:
+///
+/// ```kotlin
+/// import uniffi.lakko_ffi_uniffi.OprfBlinder
+///
+/// val blinder = OprfBlinder.blind("alice")
+/// val request = OprfChallengeRequest(blinded = blinder.blindedB64())
+/// // POST /discovery/oprf → response.evaluated
+/// val hash = blinder.finalize(response.evaluated)  // 64-byte ByteArray
+/// // hash → oprf_hash field on /discovery/lookup
+/// ```
+#[derive(uniffi::Object)]
+pub struct OprfBlinder {
+    /// `Mutex<Option<…>>` so `finalize` (which moves the inner
+    /// blinder into `voprf::OprfClient::finalize`) can `take()`
+    /// the slot. UniFFI `Object`s are always `Arc<Self>` on the
+    /// FFI side, so interior mutability is required regardless.
+    inner: Mutex<Option<InnerBlinder>>,
+    blinded_b64: String,
+}
+
+#[uniffi::export]
+impl OprfBlinder {
+    /// Normalise `username` and produce a fresh blinded element.
+    ///
+    /// `blinded_b64()` then exposes the base64 string for the
+    /// `/discovery/oprf` request body.
+    ///
+    /// # Errors
+    ///
+    /// * [`FfiError::Discovery`] with an "empty username" message
+    ///   when the input reduces to an empty string after
+    ///   normalisation (e.g. caller passed `"@"` or `"   "`).
+    /// * [`FfiError::Discovery`] with a "voprf" message on a
+    ///   blind failure — extremely unlikely on a sane RNG;
+    ///   treat as fatal.
+    #[uniffi::constructor]
+    pub fn blind(username: String) -> Result<Self, FfiError> {
+        let (blinder, blinded_b64) = InnerBlinder::blind(&username)?;
+        Ok(Self {
+            inner: Mutex::new(Some(blinder)),
+            blinded_b64,
+        })
+    }
+
+    /// Base64-encoded blinded element. Goes into the `blinded`
+    /// field of the `/discovery/oprf` request body. Cheap to
+    /// read; the cached string is cloned per call.
+    pub fn blinded_b64(&self) -> String {
+        self.blinded_b64.clone()
+    }
+
+    /// The normalised form of the typed username. Surface in
+    /// the UI ("Looking up @alice…") so the user sees what's
+    /// actually being queried.
+    ///
+    /// Errors with [`FfiError::DiscoveryAlreadyFinalized`] if
+    /// the blinder has already been consumed by [`finalize`].
+    pub fn normalized_username(&self) -> Result<String, FfiError> {
+        let guard = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
+        guard
+            .as_ref()
+            .map(|b| b.normalised_username().to_string())
+            .ok_or(FfiError::DiscoveryAlreadyFinalized)
+    }
+
+    /// Finalise the OPRF dance with the server's evaluation.
+    ///
+    /// Returns the 64-byte OPRF hash. Single-use: a second call
+    /// on the same instance returns
+    /// [`FfiError::DiscoveryAlreadyFinalized`] rather than
+    /// producing a second hash.
+    ///
+    /// # Errors
+    ///
+    /// * [`FfiError::DiscoveryAlreadyFinalized`] — second call.
+    /// * [`FfiError::Discovery`] — base64 decode failure, or
+    ///   the bytes decode but are not a valid
+    ///   `EvaluationElement`, or the underlying `voprf`
+    ///   finalisation rejected the math (wire corruption in
+    ///   the non-verifiable mode we use).
+    pub fn finalize(&self, evaluated_b64: String) -> Result<Vec<u8>, FfiError> {
+        let mut guard = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
+        let blinder = guard.take().ok_or(FfiError::DiscoveryAlreadyFinalized)?;
+        let hash = blinder.finalize(&evaluated_b64)?;
+        Ok(hash.to_vec())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_strips_at_and_trims() {
+        assert_eq!(normalize_username("  @Alice  ".to_string()), "alice");
+        assert_eq!(normalize_username("@bob".to_string()), "bob");
+        assert_eq!(normalize_username("carol".to_string()), "carol");
+    }
+
+    #[test]
+    fn normalize_collapses_outer_whitespace() {
+        assert_eq!(normalize_username("\t@Dave\n".to_string()), "dave");
+    }
+
+    #[test]
+    fn blind_produces_non_empty_b64() {
+        let blinder = OprfBlinder::blind("alice".to_string()).expect("blind");
+        let b64 = blinder.blinded_b64();
+        assert!(!b64.is_empty());
+        // Cached — repeated reads must be stable.
+        assert_eq!(b64, blinder.blinded_b64());
+    }
+
+    #[test]
+    fn blind_rejects_empty_after_normalisation() {
+        match OprfBlinder::blind("   @   ".to_string()) {
+            Err(FfiError::Discovery(_)) => {},
+            Err(other) => panic!("expected Discovery, got {other:?}"),
+            Ok(_) => panic!("expected empty-username rejection"),
+        }
+    }
+
+    #[test]
+    fn normalized_username_surfaces_canonical_form() {
+        let blinder = OprfBlinder::blind("@Eve".to_string()).expect("blind");
+        assert_eq!(blinder.normalized_username().expect("getter"), "eve");
+    }
+
+    /// A second call to `finalize` (simulated by manually
+    /// draining the inner `Option<…>`) MUST refuse rather than
+    /// silently corrupt OPRF math. Driving a real `finalize`
+    /// against the math needs an `OprfServer`, exercised in the
+    /// underlying crate's tests.
+    #[test]
+    fn finalize_is_single_use_sentinel() {
+        let blinder = OprfBlinder::blind("alice".to_string()).expect("blind");
+        let _ = blinder.inner.lock().expect("lock").take();
+        match blinder.finalize(String::new()) {
+            Err(FfiError::DiscoveryAlreadyFinalized) => {},
+            Err(other) => panic!("expected DiscoveryAlreadyFinalized, got {other:?}"),
+            Ok(_) => panic!("expected error on second finalize"),
+        }
+        // The `normalized_username` getter also surfaces the
+        // already-finalized sentinel — verify.
+        match blinder.normalized_username() {
+            Err(FfiError::DiscoveryAlreadyFinalized) => {},
+            other => panic!("expected DiscoveryAlreadyFinalized, got {other:?}"),
+        }
+    }
+}

@@ -35,6 +35,7 @@ use lakko_mls::{
 };
 
 pub mod auth;
+pub mod discovery;
 pub mod mnemonic;
 pub mod pow;
 
@@ -99,6 +100,22 @@ pub enum FfiError {
     /// Equix proof-of-work solve error.
     #[error("pow error: {0}")]
     Pow(String),
+
+    /// Discovery / OPRF blinder error.
+    ///
+    /// Same elision posture as the wasm side: a normalised
+    /// empty-username failure, a base64-decode failure, and a
+    /// `voprf` math failure all collapse into this variant.
+    #[error("discovery error: {0}")]
+    Discovery(String),
+
+    /// An `OprfBlinder` handle was finalized twice. Single-use
+    /// is enforced because `OprfClient::finalize` consumes the
+    /// blinding state by value; a re-run would either corrupt
+    /// math or produce a nonsense output without a clear
+    /// failure signal.
+    #[error("OPRF blinder already finalized")]
+    DiscoveryAlreadyFinalized,
 
     /// Lock contention / poisoned mutex on the shared Group state.
     #[error("internal lock error")]

@@ -31,6 +31,9 @@ lakko-mnemonic.workspace = true
 # Equix proof-of-work solver — every expensive auth endpoint
 # demands a `pow` proof; exposed as a static-only class.
 lakko-pow.workspace = true
+# VOPRF client — username discovery. The blind/finalize dance +
+# the canonical username-normalisation helper. 1.15e1.
+lakko-discovery-client.workspace = true
 # Base64 framing for the PoW surface (seed/nonce/solution
 # fields → base64 strings on the JSON request body). Matches
 # the wasm surface 1:1.
