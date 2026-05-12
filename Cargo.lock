@@ -2002,7 +2002,11 @@ dependencies = [
 name = "lakko-ffi-uniffi"
 version = "0.0.0"
 dependencies = [
+ "base64",
+ "lakko-auth-client",
  "lakko-mls",
+ "lakko-mnemonic",
+ "lakko-pow",
  "thiserror 1.0.69",
  "uniffi",
 ]

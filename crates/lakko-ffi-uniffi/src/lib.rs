@@ -16,6 +16,12 @@
 //! - [`Group::export_secret`]
 //! - [`Group::epoch`] / [`Group::member_count`]
 //!
+//! Phase 1.15d1 — auth surface, mirror of `lakko-ffi-wasm`:
+//!
+//! - [`auth::OpaqueRegister`] / [`auth::OpaqueLogin`] — OPAQUE-PAKE client.
+//! - [`mnemonic::RecoveryMnemonic`] — 24-word BIP39 recovery passphrase.
+//! - [`pow::PowSolver`] / [`pow::PowProof`] — Equix proof-of-work.
+//!
 //! Public-key serialization, error types and message-routing structs are
 //! exposed as plain UniFFI records / enums.
 
@@ -27,6 +33,10 @@ use lakko_mls::group::MemberAddition;
 use lakko_mls::{
     group, key_package, Group as MlsGroup, Identity as MlsIdentity, Incoming as MlsIncoming,
 };
+
+pub mod auth;
+pub mod mnemonic;
+pub mod pow;
 
 uniffi::setup_scaffolding!();
 
@@ -64,6 +74,31 @@ pub enum FfiError {
     /// Unsupported or unexpected wire message.
     #[error("unsupported: {0}")]
     Unsupported(String),
+
+    /// OPAQUE-PAKE registration / login error.
+    ///
+    /// Same elision policy as the underlying `AuthClientError`:
+    /// "wrong password" and "unknown account" are deliberately
+    /// indistinguishable on the wire and at the FFI.
+    #[error("auth error: {0}")]
+    Auth(String),
+
+    /// An `OpaqueRegister` / `OpaqueLogin` handle was finalized
+    /// twice. Calling `finish` a second time is a wiring bug —
+    /// the underlying `opaque-ke` state machine consumes the
+    /// session by value, and a re-run would either produce a
+    /// fresh-but-unusable envelope or corrupt OPAQUE state.
+    /// Surface it loudly.
+    #[error("OPAQUE session already finalized")]
+    AuthAlreadyFinalized,
+
+    /// BIP39 mnemonic parse / generation error.
+    #[error("mnemonic error: {0}")]
+    Mnemonic(String),
+
+    /// Equix proof-of-work solve error.
+    #[error("pow error: {0}")]
+    Pow(String),
 
     /// Lock contention / poisoned mutex on the shared Group state.
     #[error("internal lock error")]

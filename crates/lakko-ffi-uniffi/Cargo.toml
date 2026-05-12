@@ -21,6 +21,20 @@ workspace = true
 [dependencies]
 thiserror.workspace = true
 lakko-mls.workspace = true
+# OPAQUE-PAKE client surface — wraps `RegistrationSession` and
+# `LoginSession` for Swift / Kotlin (mirror of the wasm-bindgen
+# surface in `lakko-ffi-wasm/src/auth.rs`). 1.15d1.
+lakko-auth-client.workspace = true
+# BIP39 24-word mnemonic — for the recovery passphrase shown
+# at signup and parsed at recover-from-words.
+lakko-mnemonic.workspace = true
+# Equix proof-of-work solver — every expensive auth endpoint
+# demands a `pow` proof; exposed as a static-only class.
+lakko-pow.workspace = true
+# Base64 framing for the PoW surface (seed/nonce/solution
+# fields → base64 strings on the JSON request body). Matches
+# the wasm surface 1:1.
+base64 = "0.22"
 
 # `build` powers the `uniffi::setup_scaffolding!()` proc-macro
 # the lib uses to register types; `cli` enables
