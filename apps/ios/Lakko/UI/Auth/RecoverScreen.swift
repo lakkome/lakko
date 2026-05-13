@@ -1,0 +1,218 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+import SwiftUI
+
+/// SwiftUI recover-from-mnemonic screen.
+///
+/// Mirror of:
+///
+///   * `apps/web/src/routes/Recover.tsx` (1.17d8)
+///   * `apps/android/.../ui/auth/RecoverScreen.kt` (1.15d6)
+///
+/// Two render paths:
+///
+///   * **No cached account** (``RecoverViewModel/cachedUsername``
+///     is `nil`) — the recovery flow can't run without an
+///     `accountId` on disk. We show a "no cached account" stub
+///     with deep links to Signup / Login instead of a form the
+///     user would fill and fail at submit. Cross-device recovery
+///     (mnemonic-only) is a 1.14e / discovery-service problem.
+///   * **Cached account present** — single-stage form: 24-word
+///     phrase + new password + confirm. On submit drives
+///     ``AuthRepository/recover(mnemonicPhrase:newPassword:)``.
+///
+/// The mnemonic textfield is a multi-line ``TextEditor`` with a
+/// monospaced font + autocorrect / autocapitalisation disabled.
+/// Autocorrect on a wordlist phrase would helpfully rewrite valid
+/// BIP39 words into adjacent dictionary entries; we have to turn
+/// it off. SwiftUI's ``TextEditor`` does not ship a placeholder
+/// API — we overlay one manually with a `ZStack` when the buffer
+/// is empty.
+public struct RecoverScreen: View {
+
+    @ObservedObject public var viewModel: RecoverViewModel
+    public var onNavigateToLogin: () -> Void
+    public var onNavigateToSignup: () -> Void
+
+    public init(
+        viewModel: RecoverViewModel,
+        onNavigateToLogin: @escaping () -> Void,
+        onNavigateToSignup: @escaping () -> Void
+    ) {
+        self.viewModel = viewModel
+        self.onNavigateToLogin = onNavigateToLogin
+        self.onNavigateToSignup = onNavigateToSignup
+    }
+
+    public var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                Text("Recover account")
+                    .font(.largeTitle)
+                    .fontWeight(.semibold)
+
+                if let cachedUsername = viewModel.cachedUsername {
+                    RecoverForm(
+                        viewModel: viewModel,
+                        cachedUsername: cachedUsername,
+                        onNavigateToLogin: onNavigateToLogin
+                    )
+                } else {
+                    NoCachedAccountPanel(
+                        onNavigateToSignup: onNavigateToSignup,
+                        onNavigateToLogin: onNavigateToLogin
+                    )
+                }
+            }
+            .padding(24)
+        }
+    }
+}
+
+// =============================================================================
+// Form
+// =============================================================================
+
+private struct RecoverForm: View {
+    @ObservedObject var viewModel: RecoverViewModel
+    let cachedUsername: String
+    let onNavigateToLogin: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text(
+                "Paste your 24-word recovery phrase and pick a new password. " +
+                "We'll prove ownership to the server and rotate the password " +
+                "envelope."
+            )
+            .font(.body)
+            .foregroundStyle(.secondary)
+
+            Text("Account on this device: @\(cachedUsername)")
+                .font(.body)
+
+            phraseEditor
+
+            SecureField("New password", text: $viewModel.password)
+                .textFieldStyle(.roundedBorder)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled(true)
+                .disabled(viewModel.busy)
+
+            SecureField("Confirm new password", text: $viewModel.confirm)
+                .textFieldStyle(.roundedBorder)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled(true)
+                .disabled(viewModel.busy)
+
+            if let error = viewModel.error {
+                Text(error)
+                    .font(.body)
+                    .foregroundStyle(.red)
+            }
+
+            Button(action: viewModel.onSubmit) {
+                HStack {
+                    if viewModel.busy {
+                        ProgressView()
+                            .controlSize(.small)
+                            .progressViewStyle(.circular)
+                            .tint(.white)
+                        Text("Verifying…")
+                    } else {
+                        Text("Recover account")
+                    }
+                }
+                .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.large)
+            .disabled(viewModel.busy)
+
+            HStack(spacing: 4) {
+                Spacer()
+                Text("Remembered your password?")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                Button(action: onNavigateToLogin) {
+                    Text("Log in")
+                        .font(.footnote)
+                }
+                Spacer()
+            }
+        }
+    }
+
+    /// Multi-line phrase editor with a manual placeholder overlay.
+    ///
+    /// SwiftUI's ``TextEditor`` does not surface a placeholder API.
+    /// The standard pattern is to overlay a faded ``Text`` aligned
+    /// to the top-leading corner that fades out the moment the
+    /// buffer becomes non-empty. The monospaced font matches the
+    /// Compose `FontFamily.Monospace` posture — visual cue that
+    /// these are wordlist tokens, not free-form prose.
+    private var phraseEditor: some View {
+        ZStack(alignment: .topLeading) {
+            if viewModel.phrase.isEmpty {
+                Text("abandon abandon abandon … art")
+                    .font(.system(.body, design: .monospaced))
+                    .foregroundStyle(.tertiary)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 8)
+                    .allowsHitTesting(false)
+            }
+            TextEditor(text: $viewModel.phrase)
+                .font(.system(.body, design: .monospaced))
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled(true)
+                .scrollContentBackground(.hidden)
+                .disabled(viewModel.busy)
+                .frame(minHeight: 120)
+        }
+        .background(Color(.secondarySystemBackground))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(Color(.separator), lineWidth: 1)
+        )
+    }
+}
+
+// =============================================================================
+// No cached account stub
+// =============================================================================
+
+private struct NoCachedAccountPanel: View {
+    let onNavigateToSignup: () -> Void
+    let onNavigateToLogin: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text(
+                "This device has no cached account, so there's no account id " +
+                "for the recovery flow to target. Cross-device recovery " +
+                "(using just the mnemonic from a fresh install) arrives in " +
+                "Phase 1.14e together with the username discovery service."
+            )
+            .font(.body)
+            .foregroundStyle(.secondary)
+
+            HStack(spacing: 12) {
+                Button(action: onNavigateToSignup) {
+                    Text("Create account")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+
+                Button(action: onNavigateToLogin) {
+                    Text("Log in")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.large)
+            }
+        }
+    }
+}
