@@ -27,7 +27,7 @@
 
 #![forbid(unsafe_code)]
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use lakko_mls::group::MemberAddition;
 use lakko_mls::{
@@ -418,6 +418,36 @@ impl Group {
     }
 }
 
+/// Load an existing MLS group from the provider's persisted
+/// storage by its `group_id`.
+///
+/// Returns `null` (on the Kotlin side; `None` on the Rust side
+/// — UniFFI maps the `Option` to the platform's null shape)
+/// when the provider has no group with that id (e.g. a
+/// freshly-bootstrapped session that hasn't yet rehydrated, or
+/// a typo in the id the caller is passing).
+///
+/// **Bootstrap-side eager rebuild** (1.15f5) calls this for
+/// every previously-known group id after
+/// [`Identity::restore_storage`] runs — the resulting `Group`
+/// handles let `pollGroup` decrypt peers' commits + application
+/// messages without first having to wait for a user-initiated
+/// send / receive on each thread.
+///
+/// Free function rather than `Group::load` constructor because
+/// UniFFI 0.28 rejects `Option<Self>` in constructor signatures —
+/// the standard workaround for "constructor that may return
+/// null", same shape as `pow_solve` (1.15d1).
+#[uniffi::export]
+pub fn load_group(identity: &Identity, group_id: Vec<u8>) -> Result<Option<Arc<Group>>, FfiError> {
+    let loaded = MlsGroup::load(&identity.inner, &group_id)?;
+    Ok(loaded.map(|inner| {
+        Arc::new(Group {
+            inner: Mutex::new(inner),
+        })
+    }))
+}
+
 // Manual std::fmt::Debug for ProcessedMessage so we can panic-format it in
 // tests without uniffi attempting to derive Debug for FFI types.
 impl core::fmt::Debug for ProcessedMessage {
@@ -616,6 +646,50 @@ mod tests {
         // surfaces as the underlying Identity error.
         let err = alice.restore_storage(vec![]).unwrap_err();
         assert!(matches!(err, FfiError::Identity(_)));
+    }
+
+    /// `load_group` round-trips a snapshot: create a group +
+    /// snapshot the Identity's provider storage + restore into
+    /// a parallel Identity + `load_group(group_id)` rebuilds a
+    /// handle that produces the same exporter as the original.
+    /// Drives 1.15f5's eager-rebuild path through the FFI
+    /// boundary.
+    #[test]
+    fn load_group_round_trips_through_snapshot() {
+        // Build Alice, create a group, snapshot her provider
+        // storage.
+        let alice = Identity::from_seed(vec![0xAAu8; 32]).unwrap();
+        let alice_group = Group::create(&alice).unwrap();
+        let group_id = alice_group.group_id().unwrap();
+        let exporter_before = alice_group
+            .export_secret(&alice, "lakko/test".into(), b"ctx".to_vec(), 32)
+            .unwrap();
+        let snapshot = alice.snapshot_storage().unwrap();
+
+        // Build a parallel Alice from the same seed; her
+        // provider has no groups until we restore.
+        let alice_clone = Identity::from_seed(vec![0xAAu8; 32]).unwrap();
+        // load_group on the un-restored clone returns None —
+        // the group doesn't exist in her provider yet.
+        let pre_restore = load_group(&alice_clone, group_id.clone()).unwrap();
+        assert!(pre_restore.is_none(), "no group before restore");
+
+        // Restore + load.
+        alice_clone.restore_storage(snapshot).unwrap();
+        let loaded = load_group(&alice_clone, group_id.clone())
+            .unwrap()
+            .expect("load_group must return Some after restore");
+
+        // The restored handle produces the same exporter the
+        // original did — the ratchet state survived the
+        // round-trip.
+        let exporter_after = loaded
+            .export_secret(&alice_clone, "lakko/test".into(), b"ctx".to_vec(), 32)
+            .unwrap();
+        assert_eq!(exporter_before, exporter_after);
+
+        // `group_id` on the loaded handle matches the original.
+        assert_eq!(loaded.group_id().unwrap(), group_id);
     }
 
     /// `Group::group_id` is stable across epochs — `1.15f2`'s

@@ -20,6 +20,7 @@ import me.lakko.app.ds.DsClient
 import uniffi.lakko_ffi_uniffi.FfiException
 import uniffi.lakko_ffi_uniffi.Group
 import uniffi.lakko_ffi_uniffi.Identity
+import uniffi.lakko_ffi_uniffi.loadGroup
 
 /**
  * In-memory + on-disk state holder for the user's MLS chats.
@@ -75,6 +76,7 @@ public class ChatRepository(
     private val dsClient: DsClient = DsClient(),
     private val discovery: DiscoveryClient = DiscoveryClient(),
     private val snapshotStore: IdentitySnapshotStore = IdentitySnapshotStore,
+    private val knownGroupsStore: KnownGroupsStore = KnownGroupsStore(applicationContext),
 ) : AutoCloseable {
 
     /**
@@ -144,24 +146,63 @@ public class ChatRepository(
         // Restore the snapshot — best-effort. The Identity is
         // valid even if the restore fails (we just lose the
         // prior MLS state, peers re-bootstrap).
-        runCatching {
+        val restored = runCatching {
             val blob = snapshotStore.getSnapshot(applicationContext, newAccountIdB64)
             if (blob != null) {
                 identity.restoreStorage(blob)
-                // `restoreStorage` mutated the OpenMLS provider
-                // storage; we still need to figure out which
-                // groups existed in the snapshot. 1.15f4 keeps
-                // the per-group `Group` rebuild lazy: peers'
-                // commits will surface via pollAllGroups and the
-                // user's send-side path will Group.create or
-                // joinFromWelcome on demand. A future sprint
-                // could iterate the provider's known group ids
-                // and rebuild handles eagerly.
+                true
+            } else {
+                false
             }
-        }
+        }.getOrDefault(false)
+
         canonicalIdentity.set(identity)
         currentAccountIdB64.set(newAccountIdB64)
+
+        // Eagerly rebuild `Group` handles for every previously-
+        // known group id (1.15f5). `restoreStorage` laid down
+        // OpenMLS provider storage; without this loop the in-
+        // memory map would still be empty + peers' commits to
+        // those groups would miss `pollGroup`'s lookup until
+        // the user re-opened each thread.
+        //
+        // Best-effort per group: a load failure on one row
+        // (e.g. epoch advanced too far, OpenMLS state file
+        // corrupted) doesn't block the others. The store
+        // entry stays — future bootstrap retries the load + a
+        // future sprint can wire a "drop stale entries"
+        // sweeper. Silent failures match 1.15f4a's posture
+        // (no logger plumbed yet; 1.15d7 wires a tracing sink).
+        if (restored) {
+            for (groupIdHex in knownGroupsStore.load(newAccountIdB64)) {
+                try {
+                    val groupId = hexToBytes(groupIdHex) ?: continue
+                    val group = loadGroup(identity, groupId) ?: continue
+                    groups[groupIdHex] = GroupRecord(group = group, groupId = groupId)
+                } catch (_: Throwable) {
+                    // best-effort
+                }
+            }
+            publishThreadList()
+        }
+
         mutableState.update { it.copy(bootstrapped = true) }
+    }
+
+    /** Decode a lowercase hex string into bytes. Returns `null`
+     *  on any malformed input (odd length, non-hex chars) so
+     *  the bootstrap loop can `continue` past a corrupted
+     *  store entry instead of throwing. */
+    private fun hexToBytes(hex: String): ByteArray? {
+        if (hex.length % 2 != 0) return null
+        val out = ByteArray(hex.length / 2)
+        for (i in out.indices) {
+            val hi = Character.digit(hex[i * 2], 16)
+            val lo = Character.digit(hex[i * 2 + 1], 16)
+            if (hi < 0 || lo < 0) return null
+            out[i] = ((hi shl 4) or lo).toByte()
+        }
+        return out
     }
 
     /**
@@ -227,6 +268,7 @@ public class ChatRepository(
             val groupId = group.groupId()
             val groupIdHex = DsClient.pseudonymHex(groupId)
             groups[groupIdHex] = GroupRecord(group = group, groupId = groupId)
+            persistKnownGroupBestEffort(groupIdHex)
             persistSnapshotBestEffort()
             publishThreadList()
             groupIdHex
@@ -257,6 +299,7 @@ public class ChatRepository(
             val groupId = group.groupId()
             val groupIdHex = DsClient.pseudonymHex(groupId)
             groups[groupIdHex] = GroupRecord(group = group, groupId = groupId)
+            persistKnownGroupBestEffort(groupIdHex)
             persistSnapshotBestEffort()
             publishThreadList()
             groupIdHex
@@ -372,6 +415,12 @@ public class ChatRepository(
                 // forgotten the device, missing snapshot
                 // delete is non-fatal.
             }
+            try {
+                knownGroupsStore.clear(accountIdB64)
+            } catch (_: Throwable) {
+                // Best-effort wipe — same posture as
+                // snapshotStore.deleteSnapshot above.
+            }
         }
     }
 
@@ -399,6 +448,20 @@ public class ChatRepository(
         // Rust-side Arc + provider storage); the next
         // bootstrap builds a fresh one.
         canonicalIdentity.getAndSet(null)?.close()
+    }
+
+    /** Add [groupIdHex] to the per-account known-groups set so
+     *  the next [bootstrap] can eagerly rebuild the handle.
+     *  Best-effort: failures swallowed; a missing entry just
+     *  forces the lazy `Group.create` / `joinFromWelcome` path
+     *  on next session, which is fine. */
+    private fun persistKnownGroupBestEffort(groupIdHex: String) {
+        val accountIdB64 = currentAccountIdB64.get() ?: return
+        try {
+            knownGroupsStore.add(accountIdB64, groupIdHex)
+        } catch (_: Throwable) {
+            // best-effort
+        }
     }
 
     /** Save the canonical Identity's MLS snapshot, swallowing
