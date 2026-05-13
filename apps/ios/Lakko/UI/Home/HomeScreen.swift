@@ -24,15 +24,18 @@ import SwiftUI
 public struct HomeScreen: View {
 
     public let account: SessionAccount
+    public var onOpenContacts: () -> Void
     public var onLogout: () -> Void
     public var onForgetDevice: () -> Void
 
     public init(
         account: SessionAccount,
+        onOpenContacts: @escaping () -> Void = {},
         onLogout: @escaping () -> Void,
         onForgetDevice: @escaping () -> Void
     ) {
         self.account = account
+        self.onOpenContacts = onOpenContacts
         self.onLogout = onLogout
         self.onForgetDevice = onForgetDevice
     }
@@ -55,10 +58,16 @@ public struct HomeScreen: View {
 
             Spacer().frame(height: 16)
 
+            Button(action: onOpenContacts) {
+                Text("Open contacts")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.large)
+
             Text(
-                "Contacts (1.14e) and 1×1 chat (1.14f) arrive in the next " +
-                "two sub-sprints. The Android + Web sides already ship " +
-                "them; the iOS port follows the same cadence."
+                "1×1 chat (1.14f) lands next. The Android + Web sides already " +
+                "ship Chats; the iOS port follows the same cadence."
             )
             .font(.footnote)
             .foregroundStyle(.secondary)

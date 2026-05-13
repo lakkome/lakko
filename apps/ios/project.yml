@@ -67,6 +67,20 @@ targets:
         # `UIRequiredDeviceCapabilities` left at default — every
         # device the deployment target accepts has the same
         # baseline (arm64, OpenGL ES 2.0).
+    # Universal Links entitlement (Phase 1.14e9). Mirror of the
+    # Android `<intent-filter autoVerify="true">` for
+    # `https://lakko.me/i/*`. The actual handler lives in
+    # `LakkoApp.body`'s `.onOpenURL { ... }` modifier; this
+    # entitlement is the on-device half of the Universal Links
+    # contract. The other half — the `apple-app-site-association`
+    # JSON at `https://lakko.me/.well-known/apple-app-site-association`
+    # — lives server-side (lakko-svc-discovery serves it; the JSON
+    # claims this bundle id under `applinks/details/appIDs`).
+    entitlements:
+      path: Lakko/Lakko.entitlements
+      properties:
+        com.apple.developer.associated-domains:
+          - applinks:lakko.me
     dependencies:
       # Local Swift Package reference. The `package: LakkoCore`
       # name matches the SPM Package.swift's `name:` field; the
