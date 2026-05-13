@@ -306,6 +306,30 @@ build-ios:
     @mkdir -p apps/ios/Sources/LakkoCore
     @cp target/bindings/swift/lakko_ffi_uniffi.swift apps/ios/Sources/LakkoCore/
 
+# Phase 1.14c — regenerate `apps/ios/Lakko.xcodeproj/` from the
+# xcodegen spec at `apps/ios/project.yml`.
+#
+# The `.xcodeproj` is gitignored as a build artefact (Xcode's
+# project format is a plist-like binary blob with per-developer
+# absolute-path drift — reviewing diffs on it is a permanent
+# papercut). `project.yml` is the reviewable source of truth;
+# this recipe regenerates the binary blob from it.
+#
+# Pre-reqs:
+#   * `brew install xcodegen` (or `mint install yonaskolb/XcodeGen`).
+#   * `just build-ios` must have run at least once so the
+#     `target/ios/LakkoCore.xcframework/` exists at the path
+#     `apps/ios/Package.swift`'s `LakkoCoreFFI.binaryTarget`
+#     resolves to — xcodegen will error otherwise on the SPM
+#     dependency resolution step.
+#
+# Pre-flight `command -v xcodegen` check fails fast with a
+# pointer to the install command if the dependency is missing.
+[macos]
+generate-ios-project:
+    @command -v xcodegen >/dev/null 2>&1 || (echo "ERROR: xcodegen not found — install via 'brew install xcodegen'" && exit 1)
+    cd apps/ios && xcodegen generate --spec project.yml
+
 # Phase 1.16f3 — wasm-bindgen-test smoke suite under Node. Tests
 # in `crates/lakko-ffi-wasm/src/wasm_tests.rs` exercise WASM-shape
 # regressions the host `cargo test` cannot reach: getrandom under

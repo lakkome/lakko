@@ -13,15 +13,16 @@ bindings. Mirror of `apps/android` (`auth → contacts → 1×1 chat
 |---|---|---|
 | 1.14a | iOS cross-compile + XCFramework build (`just build-ios`) | ✅ |
 | 1.14b | `apps/ios/Package.swift` Swift Package wrapping the XCFramework | ✅ |
-| 1.14c | SwiftUI app `apps/ios/Lakko.xcodeproj` + "Hello core" smoke screen | TODO |
+| 1.14c | SwiftUI app + `apps/ios/project.yml` xcodegen spec + "Hello core" smoke | ✅ |
 | 1.14d | OPAQUE-PAKE auth (signup / login / recover) | TODO |
 | 1.14e | Contacts (search / send / accept / invite-link) | TODO |
 | 1.14f | 1×1 chat UI (timeline + composer + ack indicators) | TODO |
 
 `1.14a` produces the `LakkoCore.xcframework`; `1.14b` wraps it
-in a Swift Package the Xcode app will consume as a local
-dependency. **No actual `apps/ios/Lakko.xcodeproj` lives here
-yet** — that's `1.14c`.
+in a Swift Package; `1.14c` lands the SwiftUI app source +
+the xcodegen spec that generates the `Lakko.xcodeproj/` on
+first build. The `.xcodeproj/` is **gitignored** as a build
+artefact — `project.yml` is the reviewable source of truth.
 
 The dependency arrow is: `lakko-ffi-uniffi` (Rust) →
 `just regen-bindings` (Swift source) + `just build-ios` (the
@@ -145,48 +146,116 @@ more recent hardware on average. `macCatalyst` pre-declared so
 the future Mac target (Phase 1.14-mac, deferred) can add UI
 without churn here.
 
-## Bootstrap path (1.14c — Xcode app + SwiftUI skeleton)
+## What 1.14c ships
 
-After 1.14b ships the Swift Package, 1.14c lands the actual
-iPhone / iPad app the user installs:
+`apps/ios/project.yml` is the xcodegen spec the
+`just generate-ios-project` recipe drives to produce
+`apps/ios/Lakko.xcodeproj/`. The generated `.xcodeproj` is
+gitignored (Xcode's project format is a plist-like binary blob
+with per-developer path drift; reviewing diffs on it is a
+permanent papercut). The YAML is the reviewable source of
+truth + regenerates the binary blob deterministically on every
+contributor's machine.
 
-1. **Open Xcode** (16.0+ — that's the version that ships the
-   Swift 5.10 toolchain `Package.swift` pins).
-2. **File → New → Project → iOS → App**.
-   * Product Name: `Lakko`
-   * Interface: `SwiftUI`
-   * Language: `Swift`
-   * Storage: `None`
-   * Bundle Identifier: `me.lakko.dev` (matches the Android
-     `applicationId` from 1.15c).
-3. **Save under `apps/ios/Lakko/`** (this creates
-   `apps/ios/Lakko.xcodeproj` + `apps/ios/Lakko/` source dir).
-4. **File → Add Packages → Add Local…** → point at the
-   `apps/ios/` directory (where `Package.swift` lives). Xcode
-   resolves the local SPM package + adds `LakkoCore` as a
-   product the app target can depend on. **Important**: SPM
-   resolves the package's `LakkoCoreFFI.binaryTarget` against
-   the path `../../target/ios/LakkoCore.xcframework`; run
-   `just build-ios` from the workspace root before Xcode's
-   first `Build` so the XCFramework exists.
-5. **Add `LakkoCore` to the app target's "Frameworks,
-   Libraries, and Embedded Content"** (under the target's
-   General tab).
-6. **Source layout** (1.14c onwards):
-   ```
-   apps/ios/Lakko/                — Xcode app target
-   ├── LakkoApp.swift             — @main App struct + smoke screen
-   ├── Auth/                      — signup / login / recover (1.14d)
-   ├── Contacts/                  — contacts surface (1.14e)
-   ├── Chat/                      — 1×1 chat surface (1.14f)
-   ├── Resources/                 — assets, Info.plist
-   └── … (Xcode-generated boilerplate)
-   ```
-7. **"Hello core" smoke** — the 1.14c first-pass body of
-   `LakkoApp.swift` constructs `Identity(name: "lakko-ios-skeleton")`,
-   reads `signaturePublicKey()`, renders the hex on screen.
-   Same surface as the Android `MainActivity.HelloCoreScreen`
-   from 1.15c.
+```
+apps/ios/
+├── Package.swift                 — SPM library wrapper (1.14b)
+├── project.yml                   — xcodegen spec  ← regenerates .xcodeproj
+├── Lakko/                        — committed SwiftUI source
+│   ├── LakkoApp.swift            — @main App struct
+│   └── HelloCoreView.swift       — Hello-core smoke screen
+├── Sources/LakkoCore/            — SPM target source (placeholder + UniFFI fan-out)
+├── .gitignore
+└── Lakko.xcodeproj/              — gitignored; produced by xcodegen
+```
+
+The `Lakko` app target declared in `project.yml`:
+
+* `type: application` / `platform: iOS` / `deploymentTarget: 17.0`
+* `dependencies: - package: LakkoCore` — local SPM dependency
+  on the `apps/ios/Package.swift` from 1.14b. xcodegen forwards
+  this to Xcode as a "local SPM dependency" (same shape Xcode's
+  `File → Add Packages → Add Local…` wizard produces; xcodegen
+  just generates it from YAML).
+* `PRODUCT_BUNDLE_IDENTIFIER: me.lakko.dev` — mirror of the
+  Android `applicationId` from 1.15c; keeps debug installs
+  separate from a future production `me.lakko` bundle.
+* `SWIFT_VERSION: "5.10"` — matches the
+  `Package.swift swift-tools-version` from 1.14b.
+* Auto-synthesized `Info.plist` from `info.properties` in the
+  spec — `CFBundleDisplayName: Lakko`, blank launch screen,
+  portrait orientation. No asset catalog in 1.14c — default
+  Xcode launcher icon is fine for the smoke build; real
+  branding lands when 1.14d's signup screen needs a place to
+  surface it.
+* Single `Lakko` scheme covers Debug build / Run / Release
+  archive.
+
+## Pre-reqs (Phase 1.14c)
+
+In addition to the 1.14a pre-reqs (macOS host + Xcode CLI
+tools + Rust iOS targets):
+
+* **xcodegen**:
+  ```bash
+  brew install xcodegen
+  # or:
+  mint install yonaskolb/XcodeGen
+  ```
+
+## First-run instructions (Phase 1.14c)
+
+```bash
+# 1. Regenerate Swift bindings + the XCFramework (1.14a).
+#    Fans `target/bindings/swift/lakko_ffi_uniffi.swift` into
+#    `apps/ios/Sources/LakkoCore/` so the SPM target picks it
+#    up; produces `target/ios/LakkoCore.xcframework`.
+just regen-bindings
+just build-ios
+
+# 2. Generate the Xcode project from the YAML spec.
+just generate-ios-project
+# → apps/ios/Lakko.xcodeproj appears.
+
+# 3. Open in Xcode + run on a simulator.
+open apps/ios/Lakko.xcodeproj
+# In Xcode: select the `Lakko` scheme + an iPhone Simulator
+# destination, then ⌘R.
+```
+
+When the simulator launches, the app shows:
+
+* `Lakko` title
+* `Identity public key` subheading
+* The 64-char hex of a freshly-derived
+  `Identity("lakko-ios-skeleton")`'s signature public key
+* `Phase 1.14c smoke — UniFFI bridge via XCFramework`
+  footer
+
+If the hex renders, the XCFramework bridge works on this
+device. Every later phase (auth in 1.14d, contacts in 1.14e,
+chat in 1.14f) sits on a proven foundation.
+
+CLI equivalent (no Xcode app needed for a build-only smoke):
+
+```bash
+cd apps/ios && xcodebuild \
+    -project Lakko.xcodeproj \
+    -scheme Lakko \
+    -destination "platform=iOS Simulator,name=iPhone 15" \
+    build
+```
+
+## Future source layout (1.14d-f)
+
+```
+apps/ios/Lakko/
+├── LakkoApp.swift                — @main App struct
+├── HelloCoreView.swift           — 1.14c smoke (removed once auth lands)
+├── Auth/                         — signup / login / recover (1.14d)
+├── Contacts/                     — contacts surface (1.14e)
+└── Chat/                         — 1×1 chat surface (1.14f)
+```
 
 ## Reproducible builds
 
