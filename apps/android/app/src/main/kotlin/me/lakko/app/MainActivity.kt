@@ -24,12 +24,16 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import me.lakko.app.auth.AuthRepository
 import me.lakko.app.auth.AuthState
+import me.lakko.app.auth.SessionAccount
+import me.lakko.app.contacts.ContactsRepository
 import me.lakko.app.ui.auth.LoginScreen
 import me.lakko.app.ui.auth.LoginViewModel
 import me.lakko.app.ui.auth.RecoverScreen
 import me.lakko.app.ui.auth.RecoverViewModel
 import me.lakko.app.ui.auth.SignupScreen
 import me.lakko.app.ui.auth.SignupViewModel
+import me.lakko.app.ui.contacts.ContactsScreen
+import me.lakko.app.ui.contacts.ContactsViewModel
 import me.lakko.app.ui.home.HomeScreen
 
 /**
@@ -61,9 +65,14 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // `applicationContext` (not `this`) so the repository
-        // doesn't hold an Activity reference past rotation.
-        val repository = AuthRepository(applicationContext)
+        // `applicationContext` (not `this`) so the repositories
+        // don't hold an Activity reference past rotation.
+        val authRepository = AuthRepository(applicationContext)
+        // Single ContactsRepository shared by every ContactsViewModel
+        // for the Activity's lifetime — the in-memory state
+        // (pending requests, sent log) survives composition
+        // recreations but drops on process death.
+        val contactsRepository = ContactsRepository(authRepository)
 
         setContent {
             MaterialTheme {
@@ -71,7 +80,10 @@ class MainActivity : ComponentActivity() {
                     modifier = Modifier.fillMaxSize(),
                     color = MaterialTheme.colorScheme.background,
                 ) {
-                    AppRoot(repository = repository)
+                    AppRoot(
+                        authRepository = authRepository,
+                        contactsRepository = contactsRepository,
+                    )
                 }
             }
         }
@@ -79,22 +91,73 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-private fun AppRoot(repository: AuthRepository) {
-    val state by repository.state.collectAsStateWithLifecycle()
+private fun AppRoot(
+    authRepository: AuthRepository,
+    contactsRepository: ContactsRepository,
+) {
+    val state by authRepository.state.collectAsStateWithLifecycle()
 
     when (val current = state) {
         AuthState.Loading -> LoadingScreen()
         is AuthState.Anon -> AnonRoot(
-            repository = repository,
+            repository = authRepository,
             cachedUsername = current.cachedUsername,
         )
-        is AuthState.Session -> HomeScreen(
+        is AuthState.Session -> SessionRoot(
+            authRepository = authRepository,
+            contactsRepository = contactsRepository,
             account = current.account,
-            onLogout = repository::logout,
-            onForgetDevice = repository::forgetDevice,
         )
     }
 }
+
+/**
+ * Session-state subgraph — local toggle between Home and
+ * Contacts destinations. Compose Navigation lands later
+ * (deferred 1.15d7 work); the local `when` + a remembered
+ * destination value is enough for the two screens 1.15e6 ships.
+ *
+ * Logging out / forgetting the device flips the top-level
+ * AuthState back to Anon and we exit this composition entirely;
+ * the local destination resets to [SessionDestination.Home]
+ * automatically next time a Session lands.
+ */
+@Composable
+private fun SessionRoot(
+    authRepository: AuthRepository,
+    contactsRepository: ContactsRepository,
+    account: SessionAccount,
+) {
+    var destination by remember { mutableStateOf(SessionDestination.Home) }
+
+    when (destination) {
+        SessionDestination.Home -> HomeScreen(
+            account = account,
+            onOpenContacts = { destination = SessionDestination.Contacts },
+            onLogout = {
+                contactsRepository.clear()
+                authRepository.logout()
+            },
+            onForgetDevice = {
+                contactsRepository.clear()
+                authRepository.forgetDevice()
+            },
+        )
+        SessionDestination.Contacts -> {
+            val contactsVm: ContactsViewModel = viewModel(
+                factory = singletonViewModelFactory {
+                    ContactsViewModel(contactsRepository)
+                },
+            )
+            ContactsScreen(
+                viewModel = contactsVm,
+                onNavigateBack = { destination = SessionDestination.Home },
+            )
+        }
+    }
+}
+
+private enum class SessionDestination { Home, Contacts }
 
 /**
  * Anon-state subgraph — picks Login, Signup, or Recover. The

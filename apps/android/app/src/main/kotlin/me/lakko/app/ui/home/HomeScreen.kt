@@ -35,6 +35,7 @@ import me.lakko.app.auth.SessionAccount
 @Composable
 public fun HomeScreen(
     account: SessionAccount,
+    onOpenContacts: () -> Unit,
     onLogout: () -> Unit,
     onForgetDevice: () -> Unit,
     modifier: Modifier = Modifier,
@@ -66,10 +67,18 @@ public fun HomeScreen(
             fontFamily = FontFamily.Monospace,
         )
         Spacer(Modifier.height(32.dp))
+        Button(
+            onClick = onOpenContacts,
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Text("Open contacts")
+        }
+        Spacer(Modifier.height(16.dp))
         Text(
-            text = "Phase 1.15d4 placeholder. Contacts (1.15e) and chat (1.15f) " +
-                "arrive in the next sub-sprints. The OPAQUE-PAKE round trip + " +
-                "Keystore-wrapped device root key are live behind this screen.",
+            text = "Contacts (1.15e) is live. 1×1 chat (1.15f) arrives in the " +
+                "next sub-sprint — Accept on a pending request currently just " +
+                "dismisses it locally; the MLS group handshake lands with the " +
+                "chat surface.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )

@@ -61,6 +61,37 @@ public class AuthRepository(
 
     public val state: StateFlow<AuthState> = mutableState.asStateFlow()
 
+    /**
+     * In-memory identity secrets — the OPAQUE export key + the
+     * raw account id bytes for the active session.
+     *
+     * Mirror of `apps/web/src/auth/AuthContext.tsx::identitySecrets`.
+     * Populated whenever the user has **just authenticated**
+     * (signup, login, recover) — those flows have the export key
+     * in scope and can stash it for the duration of the current
+     * process lifetime. **Cleared on logout / forgetDevice**.
+     *
+     * **NOT populated on a session restore from disk**: the
+     * export key is not persisted (only the device root key,
+     * which is a one-way HKDF derivation — the export key cannot
+     * be recovered from the device key bytes). A returning user
+     * whose session rehydrates from `SessionStore` lands in a
+     * state where `state` is `Session` but `identitySecrets` is
+     * `null`. Operations that need to sign on behalf of the user
+     * (contact-request send, MLS commits, …) MUST check this and
+     * surface a "please re-enter your password" prompt when it's
+     * `null`.
+     *
+     * The shape mirrors the web `IdentitySecrets` precisely so
+     * the cross-platform mental model stays uniform: same
+     * lifecycle, same null-after-rehydrate, same wipe-on-logout.
+     */
+    private val mutableIdentitySecrets: MutableStateFlow<IdentitySecrets?> =
+        MutableStateFlow(null)
+
+    public val identitySecrets: StateFlow<IdentitySecrets?> =
+        mutableIdentitySecrets.asStateFlow()
+
     init {
         // Rehydrate synchronously — both reads are tiny and SharedPreferences
         // is on-disk-but-process-cached. If we ever switch to DataStore
@@ -160,6 +191,15 @@ public class AuthRepository(
                 } finally {
                     deviceRootKey.fill(0)
                 }
+                // Stash the export key for ContactsClient / future
+                // ChatClient + the like. The bytes survive until
+                // logout / forgetDevice clears the flow; signup is
+                // a one-shot ceremony so we don't expect any
+                // surprises here.
+                mutableIdentitySecrets.value = IdentitySecrets(
+                    accountId = result.accountId,
+                    exportKey = result.exportKey.copyOf(),
+                )
                 mutableState.value = AuthState.Session(
                     account = SessionAccount(
                         accountIdB64 = accountIdB64,
@@ -171,8 +211,10 @@ public class AuthRepository(
                 )
                 SignupOutcome(recoveryPhrase = phrase)
             } finally {
-                // The OPAQUE export key drops out of scope here.
-                // Best-effort wipe before GC sees the buffer.
+                // The original OPAQUE export key buffer drops out
+                // of scope here. We already cloned it into
+                // `mutableIdentitySecrets` above; the wipe here
+                // affects the AuthClient's buffer only.
                 result.exportKey.fill(0)
             }
         }
@@ -260,6 +302,11 @@ public class AuthRepository(
                     deviceRootKey.fill(0)
                 }
                 sessionStore.save(cached)  // upsert — schema-versioned marker
+                // Stash the export key for ContactsClient.
+                mutableIdentitySecrets.value = IdentitySecrets(
+                    accountId = accountIdBytes,
+                    exportKey = result.exportKey.copyOf(),
+                )
                 mutableState.value = AuthState.Session(
                     account = SessionAccount(
                         accountIdB64 = cached.accountIdB64,
@@ -267,8 +314,9 @@ public class AuthRepository(
                     ),
                 )
             } finally {
-                // Best-effort wipe of the export key + session key
-                // before they drop out of scope.
+                // Best-effort wipe of the original buffers — the
+                // identity-secrets clone above survives in
+                // `mutableIdentitySecrets` until logout.
                 result.exportKey.fill(0)
                 result.sessionKey.fill(0)
             }
@@ -361,6 +409,14 @@ public class AuthRepository(
                         deviceRootKey.fill(0)
                     }
                     sessionStore.save(cached) // idempotent upsert
+                    // Stash the NEW export key — the recovery
+                    // flow rotates the password envelope so this
+                    // is fresh material, not a reuse of the prior
+                    // signup/login result.
+                    mutableIdentitySecrets.value = IdentitySecrets(
+                        accountId = accountIdBytes,
+                        exportKey = result.exportKey.copyOf(),
+                    )
                     mutableState.value = AuthState.Session(
                         account = SessionAccount(
                             accountIdB64 = cached.accountIdB64,
@@ -389,6 +445,11 @@ public class AuthRepository(
      */
     public fun logout() {
         val cached = sessionStore.load()
+        // Wipe the in-memory identity secrets — the user just
+        // signed out of this session. The on-disk Keystore
+        // envelope (device root key) survives; re-login on the
+        // same device repopulates `identitySecrets` cheaply.
+        clearIdentitySecrets()
         mutableState.value = AuthState.Anon(cachedUsername = cached?.username)
     }
 
@@ -412,7 +473,21 @@ public class AuthRepository(
             }
         }
         sessionStore.clear()
+        clearIdentitySecrets()
         mutableState.value = AuthState.Anon()
+    }
+
+    /** Wipe the stashed export key bytes + drop the flow value.
+     *  Called from [logout] / [forgetDevice]. The `.fill(0)` is
+     *  best-effort: the buffer may still live elsewhere in heap
+     *  if callers cloned it, but our local copy goes away
+     *  promptly. */
+    private fun clearIdentitySecrets() {
+        mutableIdentitySecrets.value?.let { secrets ->
+            secrets.exportKey.fill(0)
+            secrets.accountId.fill(0)
+        }
+        mutableIdentitySecrets.value = null
     }
 }
 
@@ -444,6 +519,48 @@ public data class SessionAccount(
     /** Human-visible handle. Local-only until 1.15e. */
     val username: String,
 )
+
+/**
+ * Identity secrets held in memory for the current session.
+ *
+ * Mirror of `apps/web/src/auth/AuthContext.tsx::IdentitySecrets`.
+ * Populated whenever the user has just authenticated (signup,
+ * login, recover) — those flows have the OPAQUE export key in
+ * scope. Empty after a session restore from disk: the export
+ * key is not persisted, so the secrets cannot be re-derived
+ * without a password.
+ *
+ * Consumers that need to sign on behalf of the user
+ * (`ContactsClient.sendContactRequest`, MLS commits) MUST check
+ * `AuthRepository.identitySecrets.value` and surface a "please
+ * re-enter your password" prompt when it's `null`.
+ *
+ * The bytes themselves are held — not a UniFFI `Identity`
+ * instance — because:
+ *   * they're small (16 + 64 = 80 bytes) and clone-friendly;
+ *   * a UniFFI handle carries lifetime baggage (the Rust-side
+ *     Arc) and an explicit `.close()` requirement;
+ *   * downstream callers reconstruct an `Identity` on demand
+ *     via `Identity.fromSeed(exportKey)` — each reconstruction
+ *     is sub-millisecond (HKDF + Ed25519 + X25519 derivation).
+ */
+public data class IdentitySecrets(
+    /** Raw 16-byte UUIDv7. */
+    val accountId: ByteArray,
+    /** OPAQUE password export key (64 bytes for `LakkoCipherSuite`).
+     *  Use as the seed for `Identity.fromSeed`. */
+    val exportKey: ByteArray,
+) {
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (other !is IdentitySecrets) return false
+        return accountId.contentEquals(other.accountId) &&
+            exportKey.contentEquals(other.exportKey)
+    }
+
+    override fun hashCode(): Int =
+        accountId.contentHashCode() * 31 + exportKey.contentHashCode()
+}
 
 /** Result handed back to the signup ViewModel so it can show
  *  the freshly-generated 24-word recovery passphrase exactly once. */
