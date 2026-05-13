@@ -9,6 +9,7 @@ import io.ktor.client.engine.HttpClientEngine
 import io.ktor.client.engine.okhttp.OkHttp
 import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.client.request.HttpRequestBuilder
+import io.ktor.client.request.delete
 import io.ktor.client.request.get
 import io.ktor.client.request.post
 import io.ktor.client.request.setBody
@@ -26,8 +27,11 @@ import me.lakko.app.auth.PowChallengeResponse
 import me.lakko.app.auth.base64Decode
 import me.lakko.app.auth.base64Encode
 import me.lakko.app.auth.base64UrlEncodeNoPad
+import me.lakko.app.auth.base64UrlDecodeNoPad
 import me.lakko.app.auth.solvePow
 import uniffi.lakko_ffi_uniffi.OprfBlinder
+import uniffi.lakko_ffi_uniffi.computeJoinerInviteTag
+import uniffi.lakko_ffi_uniffi.signInviteRevocation
 
 /**
  * Ktor-based client for `lakko-svc-discovery`.
@@ -179,6 +183,85 @@ public class DiscoveryClient(
         val slug = base64UrlEncodeNoPad(accountId)
         val endpoint = "/discovery/keypackage/$slug"
         return getNullableOn404(endpoint)
+    }
+
+    /** `POST /discovery/invite` — upload a verified
+     *  `InviteCapability` blob, get the content-addressed
+     *  `blob_id` back (Phase 1.18d1). */
+    public suspend fun inviteUpload(req: InviteUploadRequest): InviteUploadResponse =
+        doPost("/discovery/invite") {
+            contentType(ContentType.Application.Json)
+            setBody(req)
+        }
+
+    /**
+     * `GET /discovery/invite/{blob_id_b64url}`. Returns the
+     * capability wire shape on 200, `null` on 404 (server folds
+     * expired blobs into the same status), throws on any other
+     * non-2xx.
+     */
+    public suspend fun inviteFetch(blobId: ByteArray): InviteFetchResponse? {
+        if (blobId.size != BLOB_ID_LEN) {
+            throw DiscoveryClientArgError("blobId must be $BLOB_ID_LEN bytes")
+        }
+        val slug = base64UrlEncodeNoPad(blobId)
+        val endpoint = "/discovery/invite/$slug"
+        return getNullableOn404(endpoint)
+    }
+
+    /**
+     * `POST /discovery/invite/{blob_id_b64url}/consume` —
+     * atomic `max_uses` enforcement + per-joiner dedup
+     * (Phase 1.18d2a + 1.18d3b). The high-level [consumeInvite]
+     * wrapper drives the PoW solve + the local
+     * [computeJoinerInviteTag] call + folds the 200 / 404 / 410
+     * status trifecta into a discriminated [ConsumeInviteResult].
+     *
+     * Surface this low-level method when tests need to inject
+     * a synthetic body; production paths use [consumeInvite].
+     */
+    public suspend fun inviteConsume(
+        blobIdSlug: String,
+        req: InviteConsumeRequest,
+    ): InviteConsumeResponse =
+        doPost("/discovery/invite/$blobIdSlug/consume") {
+            contentType(ContentType.Application.Json)
+            setBody(req)
+        }
+
+    /**
+     * `DELETE /discovery/invite/{blob_id_b64url}` — owner-
+     * signed revocation. The body carries `signed_at_ms` + the
+     * Ed25519 signature; the server recovers the inviter's
+     * pubkey from the stored capability bytes and verifies
+     * against the canonical revocation layout.
+     *
+     * 204 on success → returns; 404 → throws
+     * [DiscoveryHttpError] which the high-level [revokeInvite]
+     * wrapper folds into a discriminated `not-found-or-not-
+     * owner` result. Other non-2xx still throw.
+     */
+    public suspend fun inviteRevoke(blobIdSlug: String, req: InviteRevokeRequest) {
+        val endpoint = "/discovery/invite/$blobIdSlug"
+        val url = "$baseUrl$endpoint"
+        val response: HttpResponse = try {
+            client.delete(url) {
+                contentType(ContentType.Application.Json)
+                setBody(req)
+            }
+        } catch (cause: Throwable) {
+            throw DiscoveryNetworkError("$endpoint (DELETE)", cause)
+        }
+        if (response.status == HttpStatusCode.NoContent) return
+        // 200 OK is also acceptable — some axum versions don't
+        // emit 204 cleanly through `setBody`. Treat any 2xx as
+        // success.
+        if (response.status.isSuccess()) return
+        throw DiscoveryHttpError(
+            status = response.status.value,
+            endpoint = "$endpoint (DELETE)",
+            body = response.safeReadBody(),
+        )
     }
 
     // -----------------------------------------------------------------
@@ -351,6 +434,209 @@ public class DiscoveryClient(
     }
 
     /**
+     * Upload a freshly-composed [InviteCapability] blob and
+     * receive the server-assigned content-addressed `blobId`
+     * (raw 32-byte SHA-256). Drives one PoW solve + `POST
+     * /discovery/invite`. Idempotent — same bytes yield the
+     * same id, server upserts.
+     *
+     * Feed `capabilityBytes` straight from
+     * [uniffi.lakko_ffi_uniffi.composeInviteCapability]. The
+     * server runs `decode_and_verify` server-side, so a junk
+     * upload surfaces as
+     * `DiscoveryHttpError(400, "/discovery/invite", …)`.
+     *
+     * Returns the 32-byte `blobId`, ready to substitute into a
+     * `https://<host>/i/<slug>` pointer URL via
+     * [base64UrlEncodeNoPad].
+     */
+    public suspend fun uploadInvite(capabilityBytes: ByteArray): ByteArray {
+        if (capabilityBytes.isEmpty()) {
+            throw DiscoveryClientArgError("capabilityBytes must be non-empty")
+        }
+        if (capabilityBytes.size > MAX_CAPABILITY_BYTES) {
+            // Mirror the server-side ceiling so a misbehaving
+            // caller fails fast without a round-trip.
+            throw DiscoveryClientArgError(
+                "capabilityBytes exceeds the $MAX_CAPABILITY_BYTES-byte ceiling " +
+                    "(got ${capabilityBytes.size} bytes)",
+            )
+        }
+
+        val challenge = powChallenge()
+        val pow = solvePow(challenge.seed, challenge.effort_bits, powDispatcher)
+
+        val resp = inviteUpload(
+            InviteUploadRequest(pow = pow, capability = base64Encode(capabilityBytes)),
+        )
+        // Server returns base64url-no-pad; decode back to raw
+        // 32 bytes via the same helper used for accountId
+        // slugs.
+        val blobId = base64UrlDecodeNoPad(resp.blob_id)
+        if (blobId.size != BLOB_ID_LEN) {
+            throw DiscoveryHttpError(
+                status = 200,
+                endpoint = "/discovery/invite",
+                body = "server returned blob_id of ${blobId.size} bytes, expected $BLOB_ID_LEN",
+            )
+        }
+        return blobId
+    }
+
+    /**
+     * Fetch a previously-uploaded `InviteCapability` by its
+     * content-addressed [blobId]. Returns `null` on 404 (server
+     * folds expired blobs into the same status), the raw
+     * capability bytes on 200 (the caller drives
+     * [uniffi.lakko_ffi_uniffi.InviteCapability.decodeAndVerify]
+     * to re-verify locally so a malicious server cannot serve
+     * substituted bytes).
+     */
+    public suspend fun fetchInvite(blobId: ByteArray): ByteArray? {
+        if (blobId.size != BLOB_ID_LEN) {
+            throw DiscoveryClientArgError("blobId must be $BLOB_ID_LEN bytes")
+        }
+        val raw = inviteFetch(blobId) ?: return null
+        return base64Decode(raw.capability)
+    }
+
+    /**
+     * Atomically bump the consume counter for the invite at
+     * [blobId] with per-joiner dedup. Returns a discriminated
+     * [ConsumeInviteResult] so the joiner UI can branch on the
+     * four observable outcomes without exception-walking the
+     * underlying [DiscoveryHttpError] hierarchy.
+     *
+     * Drives one PoW solve + one
+     * [uniffi.lakko_ffi_uniffi.computeJoinerInviteTag] call
+     * locally before posting; the joiner's `accountId` never
+     * crosses the wire in plaintext.
+     *
+     * @param capabilityBytes the same wire-format bytes the
+     *        joiner already verified locally via
+     *        `InviteCapability.decodeAndVerify` — mandatory
+     *        for the dedup-tag's per-blob salt derivation.
+     * @param joinerAccountId the joiner's 16-byte UUIDv7
+     *        account_id. Hashed locally into the tag; not sent.
+     */
+    public suspend fun consumeInvite(
+        blobId: ByteArray,
+        capabilityBytes: ByteArray,
+        joinerAccountId: ByteArray,
+    ): ConsumeInviteResult {
+        if (blobId.size != BLOB_ID_LEN) {
+            throw DiscoveryClientArgError("blobId must be $BLOB_ID_LEN bytes")
+        }
+        if (joinerAccountId.size != ACCOUNT_ID_LEN) {
+            throw DiscoveryClientArgError("joinerAccountId must be $ACCOUNT_ID_LEN bytes")
+        }
+
+        val joinerTag = computeJoinerInviteTag(capabilityBytes, joinerAccountId)
+        val slug = base64UrlEncodeNoPad(blobId)
+
+        val challenge = powChallenge()
+        val pow = solvePow(challenge.seed, challenge.effort_bits, powDispatcher)
+
+        val endpoint = "/discovery/invite/$slug/consume"
+        val url = "$baseUrl$endpoint"
+        val response: HttpResponse = try {
+            client.post(url) {
+                contentType(ContentType.Application.Json)
+                setBody(
+                    InviteConsumeRequest(
+                        pow = pow,
+                        joiner_tag = base64Encode(joinerTag),
+                    ),
+                )
+            }
+        } catch (cause: Throwable) {
+            throw DiscoveryNetworkError(endpoint, cause)
+        }
+        return when (response.status) {
+            HttpStatusCode.NotFound -> ConsumeInviteResult.NotFound
+            HttpStatusCode.Gone -> ConsumeInviteResult.Exhausted
+            else -> {
+                if (!response.status.isSuccess()) {
+                    throw DiscoveryHttpError(
+                        status = response.status.value,
+                        endpoint = endpoint,
+                        body = response.safeReadBody(),
+                    )
+                }
+                val parsed: InviteConsumeResponse = response.body()
+                if (parsed.already_consumed) {
+                    ConsumeInviteResult.AlreadyConsumed(
+                        usedCount = parsed.used_count,
+                        maxUses = parsed.max_uses,
+                    )
+                } else {
+                    ConsumeInviteResult.Consumed(
+                        usedCount = parsed.used_count,
+                        maxUses = parsed.max_uses,
+                    )
+                }
+            }
+        }
+    }
+
+    /**
+     * Owner-signed revocation of an invite blob.
+     *
+     * Driven by the same Ed25519 key that signed the
+     * capability:
+     * [uniffi.lakko_ffi_uniffi.signInviteRevocation] builds the
+     * canonical bytes + signs. We POST `signed_at_ms +
+     * signature` as the DELETE body; the server recovers the
+     * inviter's pubkey from the stored capability bytes and
+     * verifies the signature against the same canonical
+     * layout.
+     *
+     * Replay window: the server enforces ±10 min against its
+     * own clock. The client uses [System.currentTimeMillis]
+     * directly — a machine with a clock skewed more than ~10
+     * min will see 400-bad-window failures, mirroring the
+     * consume path.
+     *
+     * Returns a discriminated [RevokeInviteResult]: `Revoked`
+     * on 2xx, `NotFoundOrNotOwner` on 404 (server folds "no
+     * row" / "bad signature" / "stored bytes failed re-decode"
+     * into one status to deny status-code probing). Other
+     * non-2xx still throw [DiscoveryHttpError].
+     */
+    public suspend fun revokeInvite(
+        blobId: ByteArray,
+        signingSeed: ByteArray,
+    ): RevokeInviteResult {
+        if (blobId.size != BLOB_ID_LEN) {
+            throw DiscoveryClientArgError("blobId must be $BLOB_ID_LEN bytes")
+        }
+        if (signingSeed.size != SIGNING_SEED_LEN) {
+            throw DiscoveryClientArgError("signingSeed must be $SIGNING_SEED_LEN bytes")
+        }
+
+        // Pin signedAtMs to one value across the await
+        // boundary — reading System.currentTimeMillis twice
+        // could yield distinct millis. The server's ±10-min
+        // window absorbs the difference but pinning removes
+        // doubt.
+        val signedAtMs = System.currentTimeMillis()
+        val signature = signInviteRevocation(signingSeed, blobId, signedAtMs.toULong())
+        val slug = base64UrlEncodeNoPad(blobId)
+        return try {
+            inviteRevoke(
+                slug,
+                InviteRevokeRequest(
+                    signed_at_ms = signedAtMs,
+                    signature = base64Encode(signature),
+                ),
+            )
+            RevokeInviteResult.Revoked
+        } catch (e: DiscoveryHttpError) {
+            if (e.status == 404) RevokeInviteResult.NotFoundOrNotOwner else throw e
+        }
+    }
+
+    /**
      * Upload (or replace) the identity bundle for [accountId].
      * Drives one PoW solve + `POST /discovery/identity`.
      *
@@ -504,6 +790,19 @@ public class DiscoveryClient(
          *  Surfacing the ceiling here saves a round-trip on a
          *  misbehaving caller. */
         private const val MAX_KEYPACKAGE_BYTES: Int = 2048
+
+        /** Mirror of `services/discovery`'s
+         *  `MAX_CAPABILITY_BYTES`. The 1.18a wire format is
+         *  small (a few hundred bytes); the 2048 ceiling has
+         *  generous headroom. */
+        private const val MAX_CAPABILITY_BYTES: Int = 2048
+
+        /** SHA-256 → 32-byte content-addressed invite id. */
+        private const val BLOB_ID_LEN: Int = 32
+
+        /** Ed25519 signing seed length, mirrors
+         *  `me.lakko.app.auth` constants. */
+        private const val SIGNING_SEED_LEN: Int = 32
     }
 }
 
@@ -527,6 +826,65 @@ public data class RegisterResult(
      *  sees what handle is now bound to their account. */
     val normalisedUsername: String,
 )
+
+/**
+ * Result of [DiscoveryClient.consumeInvite]. Discriminated so
+ * the joiner UI can branch cleanly on the four observable
+ * outcomes without exception-walking the underlying
+ * [DiscoveryHttpError] hierarchy:
+ *
+ *   * [Consumed] — server accepted the consume + bumped the
+ *     counter + recorded this joiner in the dedup side table.
+ *     Caller proceeds with `sendContactRequestToBundle(...)`.
+ *   * [AlreadyConsumed] — server's `(blob_id, joiner_tag)` PK
+ *     already had a row, so the counter was NOT bumped. UI
+ *     surfaces "you've already accepted this invite" +
+ *     Decline-only; skipping the ContactRequest send avoids
+ *     landing another envelope in the inviter's stranger
+ *     inbox.
+ *   * [Exhausted] — 410 Gone, the `max_uses` ceiling was hit
+ *     by other joiners before this consume could land.
+ *   * [NotFound] — 404, never-issued OR expired (server folds
+ *     both into the same status to deny status-code probing).
+ *     UI surfaces "invite expired or revoked".
+ */
+public sealed interface ConsumeInviteResult {
+    public data class Consumed(
+        val usedCount: Int,
+        val maxUses: Long,
+    ) : ConsumeInviteResult
+
+    public data class AlreadyConsumed(
+        val usedCount: Int,
+        val maxUses: Long,
+    ) : ConsumeInviteResult
+
+    public data object Exhausted : ConsumeInviteResult
+
+    public data object NotFound : ConsumeInviteResult
+}
+
+/**
+ * Result of [DiscoveryClient.revokeInvite]. Discriminated so
+ * the owner UI can branch cleanly on the two observable
+ * outcomes:
+ *
+ *   * [Revoked] — server deleted the row (2xx).
+ *   * [NotFoundOrNotOwner] — 404. Server folds "no row" /
+ *     "signature did not verify" / "stored bytes failed
+ *     re-decode" into the same status to deny status-code
+ *     probing of the blob_id space; the UI surfaces a generic
+ *     "this invite no longer exists or you don't own it"
+ *     message.
+ *
+ * Body-shape failures (bad base64, signed_at_ms outside the
+ * replay window, …) still throw `DiscoveryHttpError(400, …)`
+ * — those indicate a buggy client, not a probing attacker.
+ */
+public sealed interface RevokeInviteResult {
+    public data object Revoked : RevokeInviteResult
+    public data object NotFoundOrNotOwner : RevokeInviteResult
+}
 
 /** Result of [DiscoveryClient.lookup]. */
 public data class LookupResult(

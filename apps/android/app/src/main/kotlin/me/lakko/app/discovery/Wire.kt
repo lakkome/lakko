@@ -151,3 +151,84 @@ data class KeyPackageUploadResponse(
 data class KeyPackageFetchResponse(
     val keypackage: String,
 )
+
+// ----------------------------------------------------------------------------
+// /discovery/invite   (services/discovery/src/invite.rs — Phase 1.18d1)
+// ----------------------------------------------------------------------------
+
+/** Body of `POST /discovery/invite`. */
+@Serializable
+data class InviteUploadRequest(
+    val pow: PowProofPayload,
+    /** Standard-alphabet base64 of the
+     *  `composeInviteCapability(...)` output. Server caps
+     *  decoded size at 2048 bytes (mirrored client-side in
+     *  [DiscoveryClient.uploadInvite] so a misbehaving caller
+     *  fails fast). */
+    val capability: String,
+)
+
+/** Response body of `POST /discovery/invite`. */
+@Serializable
+data class InviteUploadResponse(
+    /** base64url-no-pad of `SHA-256(capability_bytes)` — same
+     *  bytes ⇒ same id; a retried upload is a no-op (server-
+     *  side upsert). The client substitutes this directly into
+     *  the `https://<host>/i/<blob_id>` pointer URL. */
+    val blob_id: String,
+)
+
+/** Response body of `GET /discovery/invite/{blob_id_b64url}`.
+ *  404 surfaces as `null` in [DiscoveryClient.inviteFetch]
+ *  (server-side expiry filter folds expired-blob into the same
+ *  status). */
+@Serializable
+data class InviteFetchResponse(
+    val capability: String,
+)
+
+/** Body of `POST /discovery/invite/{blob_id_b64url}/consume`
+ *  (Phase 1.18d3b mandatory shape). */
+@Serializable
+data class InviteConsumeRequest(
+    val pow: PowProofPayload,
+    /** Standard-alphabet base64 of the 32-byte joiner-tag from
+     *  [uniffi.lakko_ffi_uniffi.computeJoinerInviteTag]. */
+    val joiner_tag: String,
+)
+
+/** Response body of `POST /discovery/invite/{blob_id_b64url}/consume`. */
+@Serializable
+data class InviteConsumeResponse(
+    /** Post-increment counter. UI surfaces "N of MAX uses" copy
+     *  when the invite has a finite `max_uses`. When
+     *  `already_consumed` is `true` the counter was NOT bumped —
+     *  the value reflects pre-call state. */
+    val used_count: Int,
+    /** Echo of the row's `max_uses`. Sentinel mapping preserved:
+     *  `0` = single-use, `0xFFFFFFFF` = unlimited, any other N
+     *  = N-use ceiling. */
+    val max_uses: Long,
+    /** `true` when the side-table PK on `(blob_id, joiner_tag)`
+     *  already had a row — i.e. this joiner has consumed the
+     *  invite before (Phase 1.18d3b). The handler returns 200
+     *  with the counter unchanged; the UI surfaces "you've
+     *  already accepted this invite" + Decline-only and skips
+     *  the ContactRequest send. */
+    val already_consumed: Boolean,
+)
+
+/** Body of `DELETE /discovery/invite/{blob_id_b64url}` (Phase
+ *  1.18d2b). The `signature` field carries proof that the
+ *  request came from the same Ed25519 key that signed the
+ *  capability. */
+@Serializable
+data class InviteRevokeRequest(
+    /** UNIX millis at which the body was signed. Must be within
+     *  `±REVOKE_REPLAY_WINDOW_MS` (10 min) of the server clock
+     *  or the request is rejected with 400. */
+    val signed_at_ms: Long,
+    /** Standard-alphabet base64 of the 64-byte Ed25519 signature
+     *  from [uniffi.lakko_ffi_uniffi.signInviteRevocation]. */
+    val signature: String,
+)

@@ -501,4 +501,236 @@ class DiscoveryClientTest {
         }
         assertTrue(err.message!!.contains("2048"))
     }
+
+    // ===================================================================
+    // /discovery/invite — 1.15e9
+    // ===================================================================
+
+    @Test
+    fun `inviteUpload sends capability + parses blob_id`() = runTest {
+        val captured = mutableListOf<CapturedRequest>()
+        client(
+            responses = listOf(HttpStatusCode.OK to """{"blob_id":"BLOB_B64URL"}"""),
+            captured = captured,
+        ).use { client ->
+            val resp = client.inviteUpload(
+                InviteUploadRequest(
+                    pow = me.lakko.app.auth.PowProofPayload("S", "N", "X"),
+                    capability = "CAP_B64",
+                ),
+            )
+            assertEquals("BLOB_B64URL", resp.blob_id)
+        }
+        val body = captured[0].body!!
+        assertEquals("CAP_B64", body["capability"]!!.jsonPrimitive.content)
+        assertTrue(captured[0].url.endsWith("/discovery/invite"))
+    }
+
+    @Test
+    fun `inviteFetch decodes 200 + folds 404 into null`() = runTest {
+        val captured = mutableListOf<CapturedRequest>()
+        client(
+            responses = listOf(
+                HttpStatusCode.OK to """{"capability":"CAP_B64"}""",
+                HttpStatusCode.NotFound to "",
+            ),
+            captured = captured,
+        ).use { client ->
+            val ok = client.inviteFetch(ByteArray(32))
+            assertNotNull(ok)
+            assertEquals("CAP_B64", ok!!.capability)
+
+            val gone = client.inviteFetch(ByteArray(32))
+            assertNull(gone)
+        }
+        // Both calls used base64url-no-pad slugs.
+        for (req in captured) {
+            assertEquals(HttpMethod.Get, req.method)
+            val slug = req.url.substringAfter("/discovery/invite/")
+            assertEquals(-1, slug.indexOf('='))
+            assertEquals(-1, slug.indexOf('+'))
+            assertEquals(-1, slug.indexOf('/'))
+        }
+    }
+
+    @Test
+    fun `inviteFetch rejects wrong-length blobId before network`() {
+        val engine = MockEngine { error("must not reach the network") }
+        assertThrows(DiscoveryClientArgError::class.java) {
+            runTest {
+                DiscoveryClient(baseUrl = "http://test.invalid", engine = engine).use { client ->
+                    client.inviteFetch(ByteArray(16))
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `inviteConsume serializes joiner_tag + posts to slug path`() = runTest {
+        val captured = mutableListOf<CapturedRequest>()
+        client(
+            responses = listOf(
+                HttpStatusCode.OK to
+                    """{"used_count":3,"max_uses":10,"already_consumed":false}""",
+            ),
+            captured = captured,
+        ).use { client ->
+            val resp = client.inviteConsume(
+                blobIdSlug = "BLOB_SLUG",
+                req = InviteConsumeRequest(
+                    pow = me.lakko.app.auth.PowProofPayload("S", "N", "X"),
+                    joiner_tag = "TAG_B64",
+                ),
+            )
+            assertEquals(3, resp.used_count)
+            assertEquals(10L, resp.max_uses)
+            assertEquals(false, resp.already_consumed)
+        }
+        val body = captured[0].body!!
+        assertEquals("TAG_B64", body["joiner_tag"]!!.jsonPrimitive.content)
+        assertTrue(captured[0].url.endsWith("/discovery/invite/BLOB_SLUG/consume"))
+    }
+
+    @Test
+    fun `inviteRevoke 204 returns + sends snake_case body`() = runTest {
+        val captured = mutableListOf<CapturedRequest>()
+        client(
+            responses = listOf(HttpStatusCode.NoContent to ""),
+            captured = captured,
+        ).use { client ->
+            client.inviteRevoke(
+                blobIdSlug = "BLOB_SLUG",
+                req = InviteRevokeRequest(
+                    signed_at_ms = 1_700_000_000_000L,
+                    signature = "SIG_B64",
+                ),
+            )
+        }
+        val req = captured[0]
+        assertEquals(HttpMethod.Delete, req.method)
+        assertTrue(req.url.endsWith("/discovery/invite/BLOB_SLUG"))
+        val body = req.body!!
+        assertEquals(1_700_000_000_000L, body["signed_at_ms"]!!.jsonPrimitive.content.toLong())
+        assertEquals("SIG_B64", body["signature"]!!.jsonPrimitive.content)
+    }
+
+    @Test
+    fun `inviteRevoke 404 throws DiscoveryHttpError`() {
+        val err = assertThrows(DiscoveryHttpError::class.java) {
+            runTest {
+                client(
+                    responses = listOf(HttpStatusCode.NotFound to ""),
+                ).use { client ->
+                    client.inviteRevoke(
+                        blobIdSlug = "SLUG",
+                        req = InviteRevokeRequest(signed_at_ms = 0L, signature = "X"),
+                    )
+                }
+            }
+        }
+        assertEquals(404, err.status)
+    }
+
+    // ===================================================================
+    // High-level invite arg-validation gates (no FFI reached)
+    // ===================================================================
+
+    @Test
+    fun `uploadInvite rejects empty bytes before network`() {
+        val engine = MockEngine { error("must not reach the network") }
+        assertThrows(DiscoveryClientArgError::class.java) {
+            runTest {
+                DiscoveryClient(baseUrl = "http://test.invalid", engine = engine).use { client ->
+                    client.uploadInvite(ByteArray(0))
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `uploadInvite rejects oversized bytes before network`() {
+        val engine = MockEngine { error("must not reach the network") }
+        val err = assertThrows(DiscoveryClientArgError::class.java) {
+            runTest {
+                DiscoveryClient(baseUrl = "http://test.invalid", engine = engine).use { client ->
+                    client.uploadInvite(ByteArray(2049))
+                }
+            }
+        }
+        assertTrue(err.message!!.contains("2048"))
+    }
+
+    @Test
+    fun `fetchInvite rejects wrong-length blobId before network`() {
+        val engine = MockEngine { error("must not reach the network") }
+        assertThrows(DiscoveryClientArgError::class.java) {
+            runTest {
+                DiscoveryClient(baseUrl = "http://test.invalid", engine = engine).use { client ->
+                    client.fetchInvite(ByteArray(16))
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `consumeInvite rejects wrong-length blobId before network`() {
+        val engine = MockEngine { error("must not reach the network") }
+        assertThrows(DiscoveryClientArgError::class.java) {
+            runTest {
+                DiscoveryClient(baseUrl = "http://test.invalid", engine = engine).use { client ->
+                    client.consumeInvite(
+                        blobId = ByteArray(16),
+                        capabilityBytes = byteArrayOf(1, 2, 3),
+                        joinerAccountId = ByteArray(16),
+                    )
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `consumeInvite rejects wrong-length joinerAccountId before network`() {
+        val engine = MockEngine { error("must not reach the network") }
+        assertThrows(DiscoveryClientArgError::class.java) {
+            runTest {
+                DiscoveryClient(baseUrl = "http://test.invalid", engine = engine).use { client ->
+                    client.consumeInvite(
+                        blobId = ByteArray(32),
+                        capabilityBytes = byteArrayOf(1),
+                        joinerAccountId = ByteArray(8),
+                    )
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `revokeInvite rejects wrong-length blobId before network`() {
+        val engine = MockEngine { error("must not reach the network") }
+        assertThrows(DiscoveryClientArgError::class.java) {
+            runTest {
+                DiscoveryClient(baseUrl = "http://test.invalid", engine = engine).use { client ->
+                    client.revokeInvite(
+                        blobId = ByteArray(16),
+                        signingSeed = ByteArray(32),
+                    )
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `revokeInvite rejects wrong-length signingSeed before network`() {
+        val engine = MockEngine { error("must not reach the network") }
+        assertThrows(DiscoveryClientArgError::class.java) {
+            runTest {
+                DiscoveryClient(baseUrl = "http://test.invalid", engine = engine).use { client ->
+                    client.revokeInvite(
+                        blobId = ByteArray(32),
+                        signingSeed = ByteArray(16),
+                    )
+                }
+            }
+        }
+    }
 }
