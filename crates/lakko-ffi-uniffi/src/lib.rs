@@ -362,6 +362,23 @@ impl Group {
         let g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
         Ok(u32::try_from(g.member_count()).unwrap_or(u32::MAX))
     }
+
+    /// Group identifier bytes (RFC 9420 `group_id`).
+    ///
+    /// Stable across the lifetime of the group and at every
+    /// epoch — `lakko-svc-ds` uses this value (hex-encoded) to
+    /// key the `/ds/group/{group_id_hex}/messages` journal that
+    /// carries application messages + commits.
+    ///
+    /// Length is cipher-suite-dependent (32 bytes for the
+    /// suites we ship; the underlying MLS layer does not promise
+    /// a fixed size, so callers should treat the byte array as
+    /// opaque and just hand it to `DsClient.publishGroup` /
+    /// `DsClient.fetchGroup`).
+    pub fn group_id(&self) -> Result<Vec<u8>, FfiError> {
+        let g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
+        Ok(g.group_id().clone())
+    }
 }
 
 // Manual std::fmt::Debug for ProcessedMessage so we can panic-format it in
@@ -475,5 +492,32 @@ mod tests {
         let bob = Identity::from_seed(vec![2u8; 32]).unwrap();
         assert_ne!(alice.signature_public_key(), bob.signature_public_key());
         assert_ne!(alice.x25519_public_key(), bob.x25519_public_key());
+    }
+
+    /// `Group::group_id` is stable across epochs — `1.15f2`'s
+    /// chat client uses the value to key the DS group journal,
+    /// so a wandering id would route messages to a dead
+    /// `/ds/group/{...}` slot mid-conversation.
+    #[test]
+    fn group_id_is_stable_across_epoch_advance() {
+        let alice = Identity::new("alice".into()).unwrap();
+        let bob = Identity::new("bob".into()).unwrap();
+
+        let alice_group = Group::create(&alice).unwrap();
+        let epoch0_id = alice_group.group_id().unwrap();
+        assert!(!epoch0_id.is_empty(), "group_id must be non-empty");
+        let epoch0_value = alice_group.epoch().unwrap();
+
+        // Add Bob — epoch advances, group_id must NOT.
+        let bob_kp = bob.create_key_package().unwrap();
+        alice_group.add_member_from_wire(&alice, bob_kp).unwrap();
+        let epoch1_id = alice_group.group_id().unwrap();
+        let epoch1_value = alice_group.epoch().unwrap();
+
+        assert_ne!(
+            epoch0_value, epoch1_value,
+            "epoch must have advanced after add_member",
+        );
+        assert_eq!(epoch0_id, epoch1_id, "group_id must not change with epoch");
     }
 }
