@@ -68,6 +68,11 @@ import me.lakko.app.contacts.SentContactRequest
 public fun ContactsScreen(
     viewModel: ContactsViewModel,
     onNavigateBack: () -> Unit,
+    /** Called when the user taps an accepted contact's "Open
+     *  chat" affordance. The parent route navigates to the 1×1
+     *  ChatScreen for the given group. `null` when 1.15f4c's
+     *  chat-bridge wiring isn't active (tests). */
+    onOpenChat: ((groupIdHex: String) -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
@@ -128,7 +133,7 @@ public fun ContactsScreen(
             )
 
             Spacer(Modifier.height(24.dp))
-            AcceptedSection(accepted = state.accepted)
+            AcceptedSection(accepted = state.accepted, onOpenChat = onOpenChat)
 
             Spacer(Modifier.height(24.dp))
             SentSection(sent = state.sent)
@@ -346,27 +351,51 @@ private fun PendingRow(
 }
 
 @Composable
-private fun AcceptedSection(accepted: List<AcceptedContact>) {
-    SectionHeader(title = "Accepted (no chat yet)", count = accepted.size)
+private fun AcceptedSection(
+    accepted: List<AcceptedContact>,
+    onOpenChat: ((groupIdHex: String) -> Unit)?,
+) {
+    SectionHeader(title = "Accepted", count = accepted.size)
     if (accepted.isEmpty()) {
         EmptyHint(text = "No accepted contacts.")
         return
     }
     Spacer(Modifier.height(8.dp))
     for (c in accepted) {
-        Text(
-            text = shortHex(c.request.fromPubkey),
-            style = MaterialTheme.typography.bodyMedium,
-            fontFamily = FontFamily.Monospace,
-            modifier = Modifier.padding(vertical = 2.dp),
-        )
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(vertical = 4.dp),
+        ) {
+            Text(
+                text = shortHex(c.request.fromPubkey),
+                style = MaterialTheme.typography.bodyMedium,
+                fontFamily = FontFamily.Monospace,
+                modifier = Modifier.weight(1f),
+            )
+            // "Open chat" affordance — shown only when the
+            // 1.15f4c bridge wired the chat handshake at
+            // Accept time. `null` for legacy v1 envelopes (no
+            // sender account-id) or for accepts that happened
+            // while ChatRepository was unbootstrapped; the row
+            // surfaces a tiny "no chat" hint instead.
+            if (c.groupIdHex != null && onOpenChat != null) {
+                val groupIdHex = c.groupIdHex
+                Button(
+                    onClick = { onOpenChat(groupIdHex) },
+                ) {
+                    Text("Open chat")
+                }
+            } else {
+                Text(
+                    text = "no chat",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
     }
-    Spacer(Modifier.height(4.dp))
-    Text(
-        text = "1×1 chat creation arrives in 1.15f.",
-        style = MaterialTheme.typography.bodySmall,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-    )
 }
 
 @Composable

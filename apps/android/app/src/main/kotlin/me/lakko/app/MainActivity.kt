@@ -12,6 +12,8 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -25,6 +27,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import me.lakko.app.auth.AuthRepository
 import me.lakko.app.auth.AuthState
 import me.lakko.app.auth.SessionAccount
+import me.lakko.app.chat.ChatRepository
 import me.lakko.app.contacts.ContactsRepository
 import me.lakko.app.ui.auth.LoginScreen
 import me.lakko.app.ui.auth.LoginViewModel
@@ -32,6 +35,9 @@ import me.lakko.app.ui.auth.RecoverScreen
 import me.lakko.app.ui.auth.RecoverViewModel
 import me.lakko.app.ui.auth.SignupScreen
 import me.lakko.app.ui.auth.SignupViewModel
+import me.lakko.app.ui.chat.ChatListScreen
+import me.lakko.app.ui.chat.ChatScreen
+import me.lakko.app.ui.chat.ChatViewModel
 import me.lakko.app.ui.contacts.ContactsScreen
 import me.lakko.app.ui.contacts.ContactsViewModel
 import me.lakko.app.ui.home.HomeScreen
@@ -39,40 +45,50 @@ import me.lakko.app.ui.home.HomeScreen
 /**
  * Single-activity Compose host.
  *
- * Phase 1.15d5 — drives the **signup-or-login-or-home** flow:
+ * Phase 1.15f4c — drives the **signup-or-login-or-home-or-
+ * contacts-or-chats-or-chat** flow:
  *
- *   * [AuthRepository.state] is a [kotlinx.coroutines.flow.StateFlow]
- *     that resolves to [AuthState.Loading], [AuthState.Anon], or
- *     [AuthState.Session] after rehydration.
- *   * `Anon` → either [LoginScreen] or [SignupScreen]. The default
- *     pick depends on whether there's a cached username on this
- *     device:
- *       - cached present → Login (the user is returning); the form
- *         pre-fills the username.
- *       - cached absent  → Signup (fresh install).
- *     Both screens carry "switch to the other one" footer links
- *     so the choice is never trapped.
- *   * `Session` → [HomeScreen] placeholder with both `logout`
- *     (keeps device material) and `forgetDevice` (wipes
- *     SessionStore + Keystore envelope) actions. Contacts (1.15e)
- *     and chat (1.15f) take this real estate over.
+ *   * `Anon` → [LoginScreen] / [SignupScreen] / [RecoverScreen].
+ *   * `Session` → [HomeScreen] / [ContactsScreen] /
+ *     [ChatListScreen] / [ChatScreen] (per groupIdHex).
  *
- * No NavController yet — Compose Navigation lands in 1.15d7. The
- * top-level `when` over [AuthState] + the local `showLogin` toggle
- * for the Anon screens is plenty for three destinations.
+ * Three repositories live at the Activity scope:
+ *   * [AuthRepository] — auth state + identity secrets.
+ *   * [ContactsRepository] — pending / sent / accepted contacts.
+ *   * [ChatRepository] — MLS groups + per-thread message timeline.
+ *
+ * Lifecycle wire-up (1.15f4c):
+ *   * On every transition into a `Session` state we observe
+ *     [AuthRepository.identitySecrets]; the first non-null
+ *     value drives [ChatRepository.bootstrap]. Subsequent
+ *     re-emissions of the same secrets are idempotent.
+ *   * Logout → `contacts.clear()` → `chat.clear()` →
+ *     `auth.logout()`. Order matters: drop ephemeral state
+ *     BEFORE flipping the auth state, so the AnonRoot doesn't
+ *     briefly observe a Session-side flow.
+ *   * Forget device → `contacts.clear()` → `chat.forgetDevice()`
+ *     → `auth.forgetDevice()` — same order, but
+ *     `chat.forgetDevice()` additionally wipes the on-disk
+ *     snapshot envelope under the current accountId before
+ *     [AuthRepository.forgetDevice] clears the
+ *     [me.lakko.app.auth.SessionStore] marker. (If we cleared
+ *     the SessionStore first, ChatRepository would lose the
+ *     accountId reference and skip the deleteSnapshot.)
  */
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // `applicationContext` (not `this`) so the repositories
-        // don't hold an Activity reference past rotation.
         val authRepository = AuthRepository(applicationContext)
-        // Single ContactsRepository shared by every ContactsViewModel
-        // for the Activity's lifetime — the in-memory state
-        // (pending requests, sent log) survives composition
-        // recreations but drops on process death.
-        val contactsRepository = ContactsRepository(authRepository)
+        // ChatRepository before ContactsRepository — the
+        // contacts side optionally bridges to chat via
+        // joinGroupFromWelcome, and the order of construction
+        // makes the dependency obvious in the call site.
+        val chatRepository = ChatRepository(applicationContext)
+        val contactsRepository = ContactsRepository(
+            authRepo = authRepository,
+            chatRepo = chatRepository,
+        )
 
         setContent {
             MaterialTheme {
@@ -83,6 +99,7 @@ class MainActivity : ComponentActivity() {
                     AppRoot(
                         authRepository = authRepository,
                         contactsRepository = contactsRepository,
+                        chatRepository = chatRepository,
                     )
                 }
             }
@@ -94,6 +111,7 @@ class MainActivity : ComponentActivity() {
 private fun AppRoot(
     authRepository: AuthRepository,
     contactsRepository: ContactsRepository,
+    chatRepository: ChatRepository,
 ) {
     val state by authRepository.state.collectAsStateWithLifecycle()
 
@@ -106,72 +124,137 @@ private fun AppRoot(
         is AuthState.Session -> SessionRoot(
             authRepository = authRepository,
             contactsRepository = contactsRepository,
+            chatRepository = chatRepository,
             account = current.account,
         )
     }
 }
 
 /**
- * Session-state subgraph — local toggle between Home and
- * Contacts destinations. Compose Navigation lands later
- * (deferred 1.15d7 work); the local `when` + a remembered
- * destination value is enough for the two screens 1.15e6 ships.
- *
- * Logging out / forgetting the device flips the top-level
- * AuthState back to Anon and we exit this composition entirely;
- * the local destination resets to [SessionDestination.Home]
- * automatically next time a Session lands.
+ * Session-state subgraph. Adds ChatRepository bootstrap +
+ * a four-way [SessionDestination] router (Home / Contacts /
+ * Chats / Chat(groupIdHex)). Compose Navigation lands later
+ * (deferred 1.15d7); the local destination state + a
+ * `String?`-shaped Chat argument is plenty for four screens.
  */
 @Composable
 private fun SessionRoot(
     authRepository: AuthRepository,
     contactsRepository: ContactsRepository,
+    chatRepository: ChatRepository,
     account: SessionAccount,
 ) {
-    var destination by remember { mutableStateOf(SessionDestination.Home) }
+    // Drive ChatRepository.bootstrap whenever a fresh
+    // identity-secrets value lands. The first non-null emission
+    // happens immediately after signup / login / recover; the
+    // bootstrap call is idempotent for the same account id, so
+    // repeated emissions (state restoration across config
+    // changes) cost nothing.
+    val identitySecrets by authRepository.identitySecrets.collectAsStateWithLifecycle()
+    LaunchedEffect(identitySecrets) {
+        val secrets = identitySecrets ?: return@LaunchedEffect
+        chatRepository.bootstrap(secrets)
+    }
 
-    when (destination) {
+    // Auto-clear chat in-memory state when we leave the
+    // Session entirely (e.g. via process death after logout).
+    // The explicit logout / forgetDevice handlers below cover
+    // the user-initiated paths; this DisposableEffect catches
+    // the natural composition exit.
+    DisposableEffect(Unit) {
+        onDispose { /* keep state — the next SessionRoot re-mount
+                       will bootstrap again from identitySecrets */ }
+    }
+
+    var destination: SessionDestination by remember {
+        mutableStateOf(SessionDestination.Home)
+    }
+
+    when (val current = destination) {
         SessionDestination.Home -> HomeScreen(
             account = account,
             onOpenContacts = { destination = SessionDestination.Contacts },
+            onOpenChats = { destination = SessionDestination.Chats },
             onLogout = {
                 contactsRepository.clear()
+                chatRepository.clear()
                 authRepository.logout()
             },
             onForgetDevice = {
                 contactsRepository.clear()
+                // Note: chat.forgetDevice() BEFORE
+                // auth.forgetDevice() — see the file-level
+                // docstring for the ordering rationale.
+                chatRepository.forgetDevice()
                 authRepository.forgetDevice()
             },
         )
+
         SessionDestination.Contacts -> {
             val contactsVm: ContactsViewModel = viewModel(
                 factory = singletonViewModelFactory {
-                    ContactsViewModel(contactsRepository)
+                    ContactsViewModel(
+                        repo = contactsRepository,
+                        chatRepo = chatRepository,
+                    )
                 },
             )
             ContactsScreen(
                 viewModel = contactsVm,
                 onNavigateBack = { destination = SessionDestination.Home },
+                onOpenChat = { groupIdHex ->
+                    destination = SessionDestination.Chat(groupIdHex)
+                },
+            )
+        }
+
+        SessionDestination.Chats -> ChatListScreen(
+            repository = chatRepository,
+            onNavigateBack = { destination = SessionDestination.Home },
+            onOpenThread = { groupIdHex ->
+                destination = SessionDestination.Chat(groupIdHex)
+            },
+        )
+
+        is SessionDestination.Chat -> {
+            val groupIdHex = current.groupIdHex
+            // Key the ChatViewModel by groupIdHex so navigating
+            // to a different thread rebuilds the VM with the
+            // right per-thread state binding.
+            val chatVm: ChatViewModel = viewModel(
+                key = "chat-$groupIdHex",
+                factory = singletonViewModelFactory {
+                    ChatViewModel(chatRepository, groupIdHex)
+                },
+            )
+            ChatScreen(
+                viewModel = chatVm,
+                // Back from a 1×1 chat goes to the chat list,
+                // not Home — standard chat-app navigation
+                // shape.
+                onNavigateBack = { destination = SessionDestination.Chats },
             )
         }
     }
 }
 
-private enum class SessionDestination { Home, Contacts }
+/**
+ * Four Session-state destinations. Compose Navigation lands in
+ * a later sprint — this sealed hierarchy holds the place. The
+ * [Chat] variant carries a `groupIdHex` argument so the
+ * ChatViewModel knows which thread to project.
+ */
+private sealed interface SessionDestination {
+    data object Home : SessionDestination
+    data object Contacts : SessionDestination
+    data object Chats : SessionDestination
+    data class Chat(val groupIdHex: String) : SessionDestination
+}
 
 /**
  * Anon-state subgraph — picks Login, Signup, or Recover. The
- * default destination is keyed on [cachedUsername] so a
- * `forgetDevice` (which clears the cache) snaps the user from
- * Login back to Signup without manual toggling.
- *
- * Cached username present → default `Login` (returning user).
- * Cached absent             → default `Signup` (fresh install).
- *
- * All three screens carry footer links to switch between them.
- * The Recover screen additionally renders a "no cached account"
- * stub when [cachedUsername] is `null` — the recovery flow can't
- * target an account that isn't on disk.
+ * default destination is keyed on [cachedUsername]. All three
+ * screens carry footer links to switch between them.
  */
 @Composable
 private fun AnonRoot(
@@ -187,10 +270,6 @@ private fun AnonRoot(
 
     when (destination) {
         AnonDestination.Login -> {
-            // Key the ViewModel by cachedUsername so a returning
-            // user ("alice" cached, signed out, came back) gets
-            // a VM with the pre-filled username, while a freshly-
-            // forgotten device builds a VM with an empty field.
             val loginVm: LoginViewModel = viewModel(
                 key = "login-${cachedUsername ?: ""}",
                 factory = singletonViewModelFactory {
@@ -209,12 +288,6 @@ private fun AnonRoot(
             )
             SignupScreen(
                 viewModel = signupVm,
-                // Auth state flips to Session inside the repo on
-                // commit; the top-level `collectAsStateWithLifecycle`
-                // re-renders us into HomeScreen automatically. The
-                // acknowledge callback intentionally does nothing
-                // here — it exists for a future navigation
-                // animation in 1.15d7.
                 onAuthenticated = {},
                 onNavigateToLogin = { destination = AnonDestination.Login },
             )
@@ -235,10 +308,6 @@ private fun AnonRoot(
     }
 }
 
-/**
- * Three Anon-state destinations. Compose Navigation lands in
- * 1.15d7 — this enum holds the place until then.
- */
 private enum class AnonDestination {
     Login,
     Signup,
@@ -247,10 +316,7 @@ private enum class AnonDestination {
 
 /**
  * Tiny inline [ViewModelProvider.Factory] that constructs a single
- * VM via the supplied [block]. The `androidx.lifecycle:viewmodel-ktx`
- * `viewModelFactory { initializer { ... } }` builder is the
- * canonical idiom but lives in a separate artefact; rolling our
- * own keeps the dep set tight for 1.15d4-5.
+ * VM via the supplied [block].
  */
 private inline fun <reified VM : ViewModel> singletonViewModelFactory(
     crossinline block: () -> VM,
@@ -265,9 +331,9 @@ private inline fun <reified VM : ViewModel> singletonViewModelFactory(
 }
 
 /**
- * Loading splash for the brief window between Activity start and
- * [AuthRepository] rehydration. Practically invisible (rehydrate
- * is synchronous), but rendered for symmetry with the web side.
+ * Loading splash for the brief window between Activity start
+ * and [AuthRepository] rehydration. Practically invisible
+ * (rehydrate is synchronous), but rendered for symmetry.
  */
 @Composable
 private fun LoadingScreen() {

@@ -10,6 +10,7 @@ import kotlinx.coroutines.flow.update
 import me.lakko.app.auth.AuthRepository
 import me.lakko.app.auth.IdentitySecrets
 import me.lakko.app.auth.base64Encode
+import me.lakko.app.chat.ChatRepository
 import uniffi.lakko_ffi_uniffi.Identity
 
 /**
@@ -44,6 +45,13 @@ import uniffi.lakko_ffi_uniffi.Identity
 public class ContactsRepository(
     private val authRepo: AuthRepository,
     private val clientFactory: () -> ContactsClient = { ContactsClient() },
+    /** Optional bridge to the chat surface. When non-null,
+     *  [refreshInbox] forwards Welcome envelopes to
+     *  [ChatRepository.joinGroupFromWelcome] so a peer's
+     *  startGroupWith lands a live 1×1 chat on this device.
+     *  Tests + the contacts-only configurations pass `null` and
+     *  Welcomes drop on the floor (the cursor still advances). */
+    private val chatRepo: ChatRepository? = null,
 ) {
     private val mutableState: MutableStateFlow<ContactsState> =
         MutableStateFlow(ContactsState())
@@ -99,11 +107,13 @@ public class ContactsRepository(
      * Welcome envelopes. Updates [ContactsState.pending] with
      * any new requests + bumps the cursor.
      *
-     * Welcome envelopes are recognised but **dropped on the
-     * floor** in 1.15e6 — turning them into a usable chat
-     * session is 1.15f's job. They'll be re-polled then; the
-     * cursor still advances here so we don't process them
-     * twice, but for now they're a no-op.
+     * Welcome envelopes — produced by a peer calling
+     * [ChatRepository.startGroupWith] against us — are
+     * forwarded to [chatRepo].joinGroupFromWelcome when a
+     * [ChatRepository] reference is wired. The resulting
+     * `groupIdHex` is left to the chat surface to surface;
+     * this repository is concerned with the contact-side
+     * lifecycle only.
      */
     public suspend fun refreshInbox() {
         val secrets = authRepo.identitySecrets.value ?: run {
@@ -122,6 +132,27 @@ public class ContactsRepository(
                 val newIncoming = result.events.filterIsInstance<
                     IncomingMailboxEvent.ContactRequest>(
                 ).map { it.request }
+                val welcomes = result.events.filterIsInstance<
+                    IncomingMailboxEvent.Welcome>(
+                )
+                // Forward Welcomes to the chat repository so the
+                // peer's startGroupWith lands a live 1×1 chat.
+                // Best-effort: a single bad Welcome doesn't
+                // block the inbox poll from advancing the
+                // cursor for the rest of the events.
+                for (welcome in welcomes) {
+                    if (chatRepo != null) {
+                        try {
+                            chatRepo.joinGroupFromWelcome(welcome.welcomeBytes)
+                        } catch (_: Throwable) {
+                            // No logger plumbed yet — same
+                            // posture as ContactsClient's
+                            // pollStrangerInbox malformed-payload
+                            // drop. 1.15d7 will wire a tracing-
+                            // equivalent sink.
+                        }
+                    }
+                }
                 mutableState.update { state ->
                     state.copy(
                         pending = state.pending + newIncoming,
@@ -141,20 +172,28 @@ public class ContactsRepository(
     /**
      * Mark an incoming ContactRequest as accepted locally.
      *
-     * In 1.15e6 this is **purely a local marker** — the
-     * accept-side group creation (fetch recipient KeyPackage →
-     * `Group::create` → `addMember` → `sendWelcome`) lives in
-     * 1.15f's `ChatClient`. Production wires the MLS handshake
-     * here; today the UI just dismisses the row from the
-     * pending list.
+     * Moves the matching pending row to [ContactsState.accepted]
+     * with an optional [groupIdHex] — set by the orchestration
+     * layer (`ContactsViewModel.onAcceptClicked` from 1.15f4c)
+     * when it has just called `ChatRepository.startGroupWith`
+     * for this peer. The UI uses the id to offer an "Open chat"
+     * affordance on the accepted row.
+     *
+     * Pure state mutation — the actual MLS group creation
+     * happens in the caller before this method is invoked, so
+     * the repository stays uncoupled from `ChatRepository` on
+     * the Accept path (`refreshInbox` keeps the dependency on
+     * the Welcome-forwarding side).
      */
-    public fun acceptContactRequest(messageId: Long) {
+    public fun acceptContactRequest(messageId: Long, groupIdHex: String? = null) {
         mutableState.update { state ->
             val (accepted, remaining) = state.pending.partition { it.messageId == messageId }
             if (accepted.isEmpty()) return@update state
             state.copy(
                 pending = remaining,
-                accepted = state.accepted + accepted.map { AcceptedContact(it) },
+                accepted = state.accepted + accepted.map {
+                    AcceptedContact(request = it, groupIdHex = groupIdHex)
+                },
             )
         }
     }
@@ -257,10 +296,20 @@ public data class ContactsState(
     val lastError: String? = null,
 )
 
-/** A request the user has accepted locally. 1.15f turns these
- *  into real MLS-backed chats. */
+/** A request the user has accepted locally.
+ *
+ *  [groupIdHex] is populated when the Accept flow has just
+ *  driven `ChatRepository.startGroupWith` for this peer
+ *  (1.15f4c bridge). When non-null, the contacts UI surfaces
+ *  an "Open chat" affordance that navigates the user to the
+ *  per-thread chat screen for the new group. `null` indicates
+ *  either a pre-1.15f4c accept that was never wired to chat,
+ *  or an Accept that ran while [ChatRepository] wasn't
+ *  bootstrapped — the UI surfaces a degraded "chat creation
+ *  failed" hint in that case. */
 public data class AcceptedContact(
     val request: IncomingContactRequest,
+    val groupIdHex: String? = null,
 )
 
 /** Outgoing contact request, surfaced on the UI as an "I asked

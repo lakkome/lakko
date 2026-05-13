@@ -10,6 +10,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import me.lakko.app.chat.ChatRepository
 import me.lakko.app.contacts.ContactsError
 import me.lakko.app.contacts.ContactsRepository
 import me.lakko.app.contacts.ContactsState
@@ -30,6 +31,15 @@ import me.lakko.app.contacts.ContactsState
  */
 public class ContactsViewModel(
     private val repo: ContactsRepository,
+    /** Optional bridge to the chat surface. When non-null,
+     *  [onAcceptClicked] drives the MLS handshake
+     *  (`ChatRepository.startGroupWith`) before flipping the
+     *  contact row from pending → accepted; the resulting
+     *  `groupIdHex` lands on the [me.lakko.app.contacts.AcceptedContact]
+     *  so the UI can surface an "Open chat" link. When `null`
+     *  (tests / future contacts-only configs), Accept stays a
+     *  pure local marker. */
+    private val chatRepo: ChatRepository? = null,
 ) : ViewModel() {
 
     private val mutableUi: MutableStateFlow<UiSlice> = MutableStateFlow(UiSlice())
@@ -132,8 +142,52 @@ public class ContactsViewModel(
         viewModelScope.launch { repo.refreshInbox() }
     }
 
+    /**
+     * Accept a pending request:
+     *
+     *   1. If a [chatRepo] is wired AND the request carries a
+     *      `fromAccountId` (the sender's UUIDv7 — present on
+     *      every v2 ContactRequest, absent on v1 legacy
+     *      envelopes), call
+     *      [ChatRepository.startGroupWith] to fetch the
+     *      sender's KeyPackage and ship them a Welcome.
+     *   2. Move the row from `pending → accepted`, stashing the
+     *      resulting `groupIdHex` (or `null` if the bridge is
+     *      unwired / the chat handshake failed).
+     *
+     * Failures during the chat handshake fall through to the
+     * "move row to accepted with `groupIdHex = null`" branch —
+     * the user still sees the Accept confirmed in their UI; the
+     * sender just won't get the Welcome (Phase-1 trade-off the
+     * UI surfaces as "chat creation failed, retry"). A future
+     * sprint can add an explicit retry affordance.
+     */
     public fun onAcceptClicked(messageId: Long) {
-        repo.acceptContactRequest(messageId)
+        val pending = repo.state.value.pending.firstOrNull { it.messageId == messageId }
+        if (pending == null) return
+
+        if (chatRepo == null || pending.fromAccountId == null) {
+            // No chat bridge wired OR v1 legacy envelope without
+            // a sender account-id — fall back to the pre-1.15f4c
+            // "purely local marker" semantics.
+            repo.acceptContactRequest(messageId)
+            return
+        }
+        viewModelScope.launch {
+            val groupIdHex = try {
+                chatRepo.startGroupWith(
+                    recipientAccountId = pending.fromAccountId,
+                    recipientSignaturePubkey = pending.fromPubkey,
+                )
+            } catch (_: Throwable) {
+                // chat handshake failed — fall back to the
+                // local-marker path. The UI surfaces the
+                // missing groupIdHex as a "chat creation
+                // failed" hint on the accepted row.
+                null
+            }
+            repo.acceptContactRequest(messageId, groupIdHex = groupIdHex)
+        }
     }
 
     public fun onDeclineClicked(messageId: Long) {

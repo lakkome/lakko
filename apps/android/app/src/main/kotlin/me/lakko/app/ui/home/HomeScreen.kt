@@ -36,6 +36,7 @@ import me.lakko.app.auth.SessionAccount
 public fun HomeScreen(
     account: SessionAccount,
     onOpenContacts: () -> Unit,
+    onOpenChats: () -> Unit,
     onLogout: () -> Unit,
     onForgetDevice: () -> Unit,
     modifier: Modifier = Modifier,
@@ -73,12 +74,18 @@ public fun HomeScreen(
         ) {
             Text("Open contacts")
         }
+        Spacer(Modifier.height(8.dp))
+        Button(
+            onClick = onOpenChats,
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Text("Open chats")
+        }
         Spacer(Modifier.height(16.dp))
         Text(
-            text = "Contacts (1.15e) is live. 1×1 chat (1.15f) arrives in the " +
-                "next sub-sprint — Accept on a pending request currently just " +
-                "dismisses it locally; the MLS group handshake lands with the " +
-                "chat surface.",
+            text = "Contacts (1.15e) and 1×1 chat (1.15f) are live. Accept on a " +
+                "pending request drives the MLS handshake — switch to the " +
+                "Chats list to find the new thread.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
