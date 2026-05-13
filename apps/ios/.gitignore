@@ -1,0 +1,42 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+# Xcode + SPM build artefacts. The workspace-root `.gitignore`
+# covers `target/` (where the XCFramework + cargo outputs land);
+# this file covers the Xcode-side build directories that land
+# under `apps/ios/` itself.
+
+# Xcode build outputs from `xcodebuild build` / `archive`.
+build/
+DerivedData/
+
+# Per-user Xcode workspace state — not portable + leaks dev
+# machine paths.
+*.xcodeproj/xcuserdata/
+*.xcworkspace/xcuserdata/
+*.swiftpm/xcode/xcuserdata/
+
+# Swift Package Manager resolved-version lockfile is committed
+# elsewhere (workspace-root Cargo.lock is the only lockfile
+# we track in-tree for Phase 1.14a/b — Package.resolved would
+# pin SPM's view of `LakkoCoreFFI` which is a local binary
+# target, so the pin is trivial and noisy).
+Package.resolved
+
+# SPM build cache.
+.build/
+.swiftpm/
+
+# Local Xcode app-target directories — added when 1.14c lands
+# a `.xcodeproj`. For now there's nothing here; the line
+# preserves the intent for future contributors.
+Lakko.xcodeproj/
+
+# UniFFI-emitted Swift source — fan'd in by `just build-ios`
+# from `target/bindings/swift/`. Treated as a build artefact
+# the same way `apps/android/lakko-core/src/main/kotlin/uniffi/`
+# is gitignored on the Android side.
+Sources/LakkoCore/lakko_ffi_uniffi.swift
+
+# macOS Finder cruft.
+.DS_Store

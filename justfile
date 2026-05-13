@@ -295,12 +295,16 @@ build-ios:
         -library target/ios/liblakko_ffi_uniffi-simulator.a \
         -headers target/ios/headers \
         -output target/ios/LakkoCore.xcframework
-    # Phase 1.14b will fan the Swift binding source into the
-    # Xcode project's source set, parallel to `regen-bindings`
-    # copying the Kotlin tree into `apps/android/lakko-core/`.
-    # Until 1.14b lands `apps/ios/`, we just leave
-    # `target/bindings/swift/lakko_ffi_uniffi.swift` in place
-    # for manual import.
+    # Phase 1.14b — fan the UniFFI-emitted Swift binding into
+    # the SPM target's source dir so `apps/ios/Package.swift`
+    # picks it up as part of the `LakkoCore` target's source
+    # set. Mirror of `regen-bindings` copying the Kotlin tree
+    # into `apps/android/lakko-core/src/main/kotlin/uniffi/`.
+    # The file is gitignored on the iOS side (build artefact;
+    # source of truth lives in the `#[uniffi::export]`
+    # annotations on `crates/lakko-ffi-uniffi/`).
+    @mkdir -p apps/ios/Sources/LakkoCore
+    @cp target/bindings/swift/lakko_ffi_uniffi.swift apps/ios/Sources/LakkoCore/
 
 # Phase 1.16f3 — wasm-bindgen-test smoke suite under Node. Tests
 # in `crates/lakko-ffi-wasm/src/wasm_tests.rs` exercise WASM-shape

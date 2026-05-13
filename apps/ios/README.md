@@ -12,15 +12,16 @@ bindings. Mirror of `apps/android` (`auth → contacts → 1×1 chat
 | Sub-sprint | Scope | Status |
 |---|---|---|
 | 1.14a | iOS cross-compile + XCFramework build (`just build-ios`) | ✅ |
-| 1.14b | Xcode project scaffold (`apps/ios/Lakko.xcodeproj`) + Swift Package consuming the XCFramework | TODO |
-| 1.14c | SwiftUI skeleton + "Hello core" smoke screen | TODO |
+| 1.14b | `apps/ios/Package.swift` Swift Package wrapping the XCFramework | ✅ |
+| 1.14c | SwiftUI app `apps/ios/Lakko.xcodeproj` + "Hello core" smoke screen | TODO |
 | 1.14d | OPAQUE-PAKE auth (signup / login / recover) | TODO |
 | 1.14e | Contacts (search / send / accept / invite-link) | TODO |
 | 1.14f | 1×1 chat UI (timeline + composer + ack indicators) | TODO |
 
-`1.14a` produces the `LakkoCore.xcframework` the Xcode project
-will consume. **No actual `apps/ios/Lakko.xcodeproj` lives here
-yet** — that's `1.14b`.
+`1.14a` produces the `LakkoCore.xcframework`; `1.14b` wraps it
+in a Swift Package the Xcode app will consume as a local
+dependency. **No actual `apps/ios/Lakko.xcodeproj` lives here
+yet** — that's `1.14c`.
 
 The dependency arrow is: `lakko-ffi-uniffi` (Rust) →
 `just regen-bindings` (Swift source) + `just build-ios` (the
@@ -93,52 +94,115 @@ rlib for in-workspace consumers.
                     x86_64-apple-ios-sim
   ```
 
-## Bootstrap path forward (1.14b — Xcode project)
+## What 1.14b ships
 
-The XCFramework alone is not enough — the SwiftUI app needs an
-Xcode project to consume it. Plan:
+`apps/ios/Package.swift` declares a Swift Package with a single
+library product (`LakkoCore`) backed by two targets:
 
-1. **`apps/ios/Lakko.xcodeproj`** under `apps/ios/`. Two
-   options for the project shape:
-   * **Plain `.xcodeproj`** — traditional, every Lakko
-     contributor needs Xcode to open + edit.
-   * **Swift Package (SPM)** at `apps/ios/Package.swift` — open
-     in VSCode or Xcode, cleaner diffs, fewer GUI ceremonies.
-     SPM-based iOS apps are a 2024+ pattern, well-supported by
-     Xcode 16+.
-   1.14b will pick whichever lands faster on a clean machine
-   without `Lakko.xcodeproj`-style binary blobs leaking through
-   `git diff`.
-2. **Drop the `LakkoCore.xcframework`** in as a framework
-   reference (binary target if SPM).
-3. **Bridging notes**: the UniFFI-emitted
-   `lakko_ffi_uniffi.swift` is the public Swift API surface;
-   the `LakkoCore.xcframework` provides the underlying C-ABI
-   symbols the Swift code calls through. The `module.modulemap`
-   in the headers directory is what Swift's `import` resolves
-   against — `lakko_ffi_uniffi.swift` already carries the right
-   import statement at the top.
-4. **Source layout** (1.14c onwards):
+```
+apps/ios/
+├── Package.swift                 — SPM manifest
+├── .gitignore                    — Xcode + SPM build artefacts
+└── Sources/
+    └── LakkoCore/
+        ├── LakkoCore.swift                 — committed umbrella placeholder
+        └── lakko_ffi_uniffi.swift          — fan'd in by `just build-ios`, gitignored
+```
+
+The package wires two targets:
+
+* **`LakkoCoreFFI`** — `.binaryTarget` pointing at
+  `../../target/ios/LakkoCore.xcframework`. Resolves from
+  `apps/ios/` to the workspace-root `target/` (same depth as
+  the Android side's `apps/android/lakko-core/` resolving to
+  `target/bindings/kotlin/`).
+* **`LakkoCore`** — regular Swift `.target` depending on the
+  binary target; its source dir is the UniFFI-emitted
+  `lakko_ffi_uniffi.swift` plus the committed
+  `LakkoCore.swift` umbrella (the latter exists so SPM has a
+  source file to find before the first `just build-ios` runs;
+  it declares no public symbols itself).
+
+The SwiftUI app from 1.14c adds this package as a local
+dependency (`File → Add Packages → Add Local…` in Xcode, point
+at `apps/ios/`) and then `import LakkoCore` to access the full
+public surface.
+
+### Platforms pinned
+
+```swift
+platforms: [
+    .iOS(.v17),
+    .macCatalyst(.v17),
+]
+```
+
+iOS 17 covers every device the App Store still accepts in
+2026 (iPhone XS+, iPad 6th-gen+). The Apple-platform tier
+raises the floor compared to Android `minSdk = 26` (Android
+8.0, ~2017) on the assumption that the iOS user base lives on
+more recent hardware on average. `macCatalyst` pre-declared so
+the future Mac target (Phase 1.14-mac, deferred) can add UI
+without churn here.
+
+## Bootstrap path (1.14c — Xcode app + SwiftUI skeleton)
+
+After 1.14b ships the Swift Package, 1.14c lands the actual
+iPhone / iPad app the user installs:
+
+1. **Open Xcode** (16.0+ — that's the version that ships the
+   Swift 5.10 toolchain `Package.swift` pins).
+2. **File → New → Project → iOS → App**.
+   * Product Name: `Lakko`
+   * Interface: `SwiftUI`
+   * Language: `Swift`
+   * Storage: `None`
+   * Bundle Identifier: `me.lakko.dev` (matches the Android
+     `applicationId` from 1.15c).
+3. **Save under `apps/ios/Lakko/`** (this creates
+   `apps/ios/Lakko.xcodeproj` + `apps/ios/Lakko/` source dir).
+4. **File → Add Packages → Add Local…** → point at the
+   `apps/ios/` directory (where `Package.swift` lives). Xcode
+   resolves the local SPM package + adds `LakkoCore` as a
+   product the app target can depend on. **Important**: SPM
+   resolves the package's `LakkoCoreFFI.binaryTarget` against
+   the path `../../target/ios/LakkoCore.xcframework`; run
+   `just build-ios` from the workspace root before Xcode's
+   first `Build` so the XCFramework exists.
+5. **Add `LakkoCore` to the app target's "Frameworks,
+   Libraries, and Embedded Content"** (under the target's
+   General tab).
+6. **Source layout** (1.14c onwards):
    ```
-   apps/ios/
-   ├── Lakko.xcodeproj/           — or Package.swift
-   ├── Sources/
-   │   ├── LakkoApp.swift         — @main App struct
-   │   ├── Auth/                  — signup / login / recover
-   │   ├── Contacts/              — contacts surface
-   │   ├── Chat/                  — 1×1 chat surface
-   │   └── Resources/             — assets, Info.plist
-   └── Tests/                     — XCTest suite
+   apps/ios/Lakko/                — Xcode app target
+   ├── LakkoApp.swift             — @main App struct + smoke screen
+   ├── Auth/                      — signup / login / recover (1.14d)
+   ├── Contacts/                  — contacts surface (1.14e)
+   ├── Chat/                      — 1×1 chat surface (1.14f)
+   ├── Resources/                 — assets, Info.plist
+   └── … (Xcode-generated boilerplate)
    ```
-5. **Reproducible builds** — pin Xcode + Swift toolchain
-   versions in CI; two clean builds must produce byte-identical
-   `.ipa` files (mirror of `apps/web`'s `web-repro` CI gate
-   from Phase 1.17b + the same posture documented for Android
-   in 1.15b).
+7. **"Hello core" smoke** — the 1.14c first-pass body of
+   `LakkoApp.swift` constructs `Identity(name: "lakko-ios-skeleton")`,
+   reads `signaturePublicKey()`, renders the hex on screen.
+   Same surface as the Android `MainActivity.HelloCoreScreen`
+   from 1.15c.
 
-`1.14b` will land a `just package-ios` recipe driving
+## Reproducible builds
+
+Pin Xcode + Swift toolchain versions in CI; two clean builds
+must produce byte-identical `.ipa` files (mirror of `apps/web`'s
+`web-repro` gate from Phase 1.17b + the same posture
+documented for Android in 1.15b). Apple's App Store re-signing
+on the production publish path breaks byte-identicality on the
+shipped `.ipa`; we ship the unsigned XCFramework + the unsigned
+app archive as the reproducible artefact + treat the
+App-Store-signed `.ipa` as a separate trust root (documented in
+the Phase 0 roadmap §11).
+
+`1.14c+` will land a `just package-ios` recipe driving
 `xcodebuild archive` + `xcodebuild -exportArchive` for the
-ad-hoc / App Store distribution flow.
+ad-hoc / TestFlight distribution flow.
 
 ## Bootstrap path (1.14c — SwiftUI skeleton)
 
