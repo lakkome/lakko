@@ -37,6 +37,8 @@ import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import delay
+import isActive
 import me.lakko.app.contacts.AcceptedContact
 import me.lakko.app.contacts.IncomingContactRequest
 import me.lakko.app.contacts.SentContactRequest
@@ -77,11 +79,28 @@ public fun ContactsScreen(
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
 
-    // Auto-refresh on first arrival. `LaunchedEffect(Unit)` runs
-    // once per composition; navigating away + back triggers
-    // another fetch.
+    // Auto-refresh on first arrival + continuous long-poll
+    // while the screen is visible. The `LaunchedEffect(Unit)`
+    // coroutine cancels automatically when the composable
+    // leaves composition (back navigation, logout, etc.).
+    //
+    // The first iteration uses the manual-refresh path
+    // (`onRefreshClicked`) so the spinner blips on / off; the
+    // subsequent loop uses `pollOnceLongPoll(waitSecs = 30)`
+    // which is silent (no spinner flicker for 30s at a time).
     LaunchedEffect(Unit) {
         viewModel.onRefreshClicked()
+        while (isActive) {
+            try {
+                viewModel.pollOnceLongPoll()
+            } catch (_: Throwable) {
+                // Back off on transport / server errors so we
+                // don't tight-loop against a 503. The
+                // composable still gets the next user-driven
+                // refresh via the header button.
+                delay(POLL_RETRY_BACKOFF_MS)
+            }
+        }
     }
 
     Column(
@@ -463,6 +482,12 @@ private fun EmptyHint(text: String) {
         )
     }
 }
+
+/** Back-off delay between failed long-poll iterations. 5s
+ *  matches the canonical chat-app retry cadence — long enough
+ *  to absorb a 503 burst, short enough that a transient blip
+ *  doesn't degrade UX noticeably. */
+private const val POLL_RETRY_BACKOFF_MS: Long = 5_000L
 
 /** Short hex preview of a 32-byte public key — first 6 + last 4
  *  hex chars, separated by an ellipsis. Useful as a row label

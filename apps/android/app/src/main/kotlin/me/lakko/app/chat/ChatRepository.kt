@@ -292,8 +292,13 @@ public class ChatRepository(
     /**
      * Pull new messages from one group's journal + apply them
      * to the in-memory timeline.
+     *
+     * @param waitSecs DS long-poll budget. `0` returns
+     *   immediately whatever's there (manual refresh); non-zero
+     *   holds the connection — 1.15e7's continuous-polling
+     *   `LaunchedEffect` passes `30`.
      */
-    public suspend fun pollGroup(groupIdHex: String) {
+    public suspend fun pollGroup(groupIdHex: String, waitSecs: Int = 0) {
         val identity = canonicalIdentity.get() ?: return
         val record = groups[groupIdHex] ?: return
 
@@ -302,7 +307,7 @@ public class ChatRepository(
                 identity = identity,
                 group = record.group,
                 after = record.cursor,
-                waitSecs = 0,
+                waitSecs = waitSecs,
             )
             record.applyPollResult(result)
             if (result.events.isNotEmpty()) {
@@ -314,19 +319,27 @@ public class ChatRepository(
 
     /** Pull new messages for every active group. Best-effort:
      *  per-group failures are logged-and-swallowed so one bad
-     *  apple doesn't block the others. */
-    public suspend fun pollAllGroups() {
+     *  apple doesn't block the others.
+     *
+     *  @param waitSecs same semantics as [pollGroup]; passed
+     *    through to each per-group call. With 30s long-poll +
+     *    sequential per-group iteration the worst-case latency
+     *    to see a new message in any group is `30 * N` seconds
+     *    where N is the group count — which is fine for the
+     *    1×1 chat surface (one group per peer), and the
+     *    refactor to parallel polling lands when group counts
+     *    actually push back. */
+    public suspend fun pollAllGroups(waitSecs: Int = 0) {
         val identity = canonicalIdentity.get() ?: return
         // Snapshot the keys outside the lock — pollGroup
         // re-acquires it per group.
         val groupIds = synchronized(groups) { groups.keys.toList() }
         for (groupIdHex in groupIds) {
             try {
-                pollGroup(groupIdHex)
+                pollGroup(groupIdHex, waitSecs = waitSecs)
             } catch (_: Throwable) {
-                // Best-effort: the UI surfaces a per-thread error
-                // when 1.15f4b wires that — for now silence is
-                // acceptable.
+                // Best-effort: 1.15d7 will wire a tracing-
+                // equivalent sink for these.
             }
         }
     }

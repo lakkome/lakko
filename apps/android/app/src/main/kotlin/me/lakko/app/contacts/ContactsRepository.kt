@@ -103,9 +103,9 @@ public class ContactsRepository(
     }
 
     /**
-     * Poll the stranger inbox once for new ContactRequest /
-     * Welcome envelopes. Updates [ContactsState.pending] with
-     * any new requests + bumps the cursor.
+     * Poll the stranger inbox for new ContactRequest / Welcome
+     * envelopes. Updates [ContactsState.pending] with any new
+     * requests + bumps the cursor.
      *
      * Welcome envelopes — produced by a peer calling
      * [ChatRepository.startGroupWith] against us — are
@@ -114,20 +114,32 @@ public class ContactsRepository(
      * `groupIdHex` is left to the chat surface to surface;
      * this repository is concerned with the contact-side
      * lifecycle only.
+     *
+     * @param waitSecs DS long-poll budget. `0` (the default)
+     *   returns immediately whatever's there — manual refresh
+     *   from a button press; the UI spinner blips on /
+     *   off. Non-zero values hold the connection up to that
+     *   many seconds; the [ContactsState.refreshing] flag is
+     *   **not** raised so the spinner doesn't flicker for the
+     *   full long-poll window. 1.15e7's continuous-polling
+     *   `LaunchedEffect` uses `waitSecs = 30`.
      */
-    public suspend fun refreshInbox() {
+    public suspend fun refreshInbox(waitSecs: Int = 0) {
         val secrets = authRepo.identitySecrets.value ?: run {
             mutableState.update { it.copy(requiresReauth = true) }
             return
         }
-        mutableState.update { it.copy(refreshing = true, lastError = null) }
+        val isManualRefresh = waitSecs == 0
+        if (isManualRefresh) {
+            mutableState.update { it.copy(refreshing = true, lastError = null) }
+        }
         try {
             useClientWith(secrets) { client, sender ->
                 val result = client.pollStrangerInbox(
                     mySignaturePubkey = sender.signaturePubkey,
                     myX25519Secret = sender.x25519Secret,
                     after = mutableState.value.cursor,
-                    waitSecs = 0,
+                    waitSecs = waitSecs,
                 )
                 val newIncoming = result.events.filterIsInstance<
                     IncomingMailboxEvent.ContactRequest>(
@@ -157,12 +169,20 @@ public class ContactsRepository(
                     state.copy(
                         pending = state.pending + newIncoming,
                         cursor = result.cursor,
+                        // Always clear the refreshing flag —
+                        // even if this was a long-poll that
+                        // didn't raise it, clearing is a no-op.
                         refreshing = false,
                         lastError = null,
                     )
                 }
             }
         } catch (e: ContactsError) {
+            // Background long-polls surface failures on the
+            // `lastError` slot too — the UI renders a small
+            // inline hint without flipping `refreshing`. The
+            // caller (a `LaunchedEffect` loop) will retry on
+            // the next iteration.
             mutableState.update {
                 it.copy(refreshing = false, lastError = e.message)
             }

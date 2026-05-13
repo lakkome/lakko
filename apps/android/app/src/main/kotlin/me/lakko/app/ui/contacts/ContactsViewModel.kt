@@ -143,6 +143,29 @@ public class ContactsViewModel(
     }
 
     /**
+     * One long-poll tick — used by the composable's
+     * `LaunchedEffect(Unit) { while (isActive) { pollOnce(...) } }`
+     * loop. Foreground-only continuous polling (1.15e7);
+     * WorkManager-driven background fetch + FCM push lands in
+     * 1.15e7b/c.
+     *
+     * Pulled out as a suspend method on the VM (rather than
+     * inlined in the composable) so the test seam — once we
+     * land an instrumented suite — can drive a single
+     * iteration without owning the loop's lifecycle.
+     */
+    public suspend fun pollOnceLongPoll(waitSecs: Int = DEFAULT_LONG_POLL_SECS) {
+        repo.refreshInbox(waitSecs = waitSecs)
+    }
+
+    public companion object {
+        /** DS long-poll budget for the foreground-poll loop.
+         *  The server clamps to its own `MAX_WAIT_SECS`; 30
+         *  matches the canonical chat-app cadence. */
+        public const val DEFAULT_LONG_POLL_SECS: Int = 30
+    }
+
+    /**
      * Accept a pending request:
      *
      *   1. If a [chatRepo] is wired AND the request carries a

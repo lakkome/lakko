@@ -36,6 +36,8 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import delay
+import isActive
 import me.lakko.app.chat.ChatMessage
 import me.lakko.app.chat.Direction
 
@@ -71,7 +73,20 @@ public fun ChatScreen(
     val listState = rememberLazyListState()
 
     LaunchedEffect(Unit) {
+        // First tick: manual-style refresh so the spinner
+        // blips briefly while the immediate fetch resolves.
         viewModel.onRefreshClicked()
+        // Subsequent ticks: continuous long-poll. Cancels when
+        // the composable leaves composition (back navigation,
+        // logout). Errors back off via [POLL_RETRY_BACKOFF_MS]
+        // so we don't tight-loop against a 503.
+        while (isActive) {
+            try {
+                viewModel.pollOnceLongPoll()
+            } catch (_: Throwable) {
+                delay(POLL_RETRY_BACKOFF_MS)
+            }
+        }
     }
     LaunchedEffect(state.messages.size) {
         // Auto-scroll to the latest row on every new message
@@ -330,6 +345,11 @@ private fun Composer(
         }
     }
 }
+
+/** Back-off delay between failed long-poll iterations. 5s
+ *  matches the canonical chat-app retry cadence — see the
+ *  parallel constant in `ContactsScreen`. */
+private const val POLL_RETRY_BACKOFF_MS: Long = 5_000L
 
 /** Short hex preview — same format as
  *  [me.lakko.app.ui.contacts.ContactsScreen]'s `shortHex`. */

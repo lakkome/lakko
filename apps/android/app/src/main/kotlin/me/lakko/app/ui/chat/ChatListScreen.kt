@@ -33,6 +33,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import delay
+import isActive
 import kotlinx.coroutines.launch
 import me.lakko.app.chat.ChatRepository
 import me.lakko.app.chat.ChatThread
@@ -72,8 +74,18 @@ public fun ChatListScreen(
     val scope = rememberCoroutineScope()
 
     LaunchedEffect(Unit) {
-        // Auto-refresh on first arrival.
+        // First tick: immediate refresh so the list is fresh
+        // when the user lands. Subsequent ticks: continuous
+        // long-poll across every active group. Cancels when
+        // the composable leaves composition.
         scope.launch { repository.pollAllGroups() }
+        while (isActive) {
+            try {
+                repository.pollAllGroups(waitSecs = LONG_POLL_SECS)
+            } catch (_: Throwable) {
+                delay(POLL_RETRY_BACKOFF_MS)
+            }
+        }
     }
 
     Column(
@@ -202,6 +214,11 @@ private fun EmptyPanel() {
         }
     }
 }
+
+/** Long-poll constants — same values as the per-thread
+ *  ChatScreen + the ContactsScreen polling loops. */
+private const val LONG_POLL_SECS: Int = 30
+private const val POLL_RETRY_BACKOFF_MS: Long = 5_000L
 
 /** Show the first six + last four hex chars of a long string —
  *  same preview format as

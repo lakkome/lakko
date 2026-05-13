@@ -118,6 +118,23 @@ public class ChatViewModel(
         }
     }
 
+    /**
+     * One long-poll tick for the per-thread continuous-polling
+     * loop the composable drives via
+     * `LaunchedEffect(Unit) { while (isActive) { pollOnce(...) } }`.
+     * Silent — does NOT flip the `refreshing` flag (the spinner
+     * would otherwise stay on for the full long-poll window).
+     */
+    public suspend fun pollOnceLongPoll(waitSecs: Int = DEFAULT_LONG_POLL_SECS) {
+        repo.pollGroup(groupIdHex, waitSecs = waitSecs)
+    }
+
+    public companion object {
+        /** DS long-poll budget — same value as
+         *  [me.lakko.app.ui.contacts.ContactsViewModel]. */
+        public const val DEFAULT_LONG_POLL_SECS: Int = 30
+    }
+
     /** VM-local composer + transient flags. Persistent timeline
      *  data lives in [ChatRepository]. */
     private data class ComposerState(
