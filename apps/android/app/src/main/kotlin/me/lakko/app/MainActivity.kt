@@ -3,6 +3,7 @@
 
 package me.lakko.app
 
+import android.content.Intent
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -29,6 +30,7 @@ import me.lakko.app.auth.AuthState
 import me.lakko.app.auth.SessionAccount
 import me.lakko.app.chat.ChatRepository
 import me.lakko.app.contacts.ContactsRepository
+import me.lakko.app.contacts.InviteIntake
 import me.lakko.app.ui.auth.LoginScreen
 import me.lakko.app.ui.auth.LoginViewModel
 import me.lakko.app.ui.auth.RecoverScreen
@@ -40,6 +42,8 @@ import me.lakko.app.ui.chat.ChatScreen
 import me.lakko.app.ui.chat.ChatViewModel
 import me.lakko.app.ui.contacts.ContactsScreen
 import me.lakko.app.ui.contacts.ContactsViewModel
+import me.lakko.app.ui.contacts.InviteLandingScreen
+import me.lakko.app.ui.contacts.InviteLandingViewModel
 import me.lakko.app.ui.home.HomeScreen
 
 /**
@@ -76,6 +80,13 @@ import me.lakko.app.ui.home.HomeScreen
  *     accountId reference and skip the deleteSnapshot.)
  */
 class MainActivity : ComponentActivity() {
+
+    /** Process-scoped intake for invite slugs from
+     *  `https://lakko.me/i/<slug>` deep links. `onCreate` +
+     *  `onNewIntent` publish to this holder; `SessionRoot`
+     *  collects it and routes to [InviteLandingScreen]. */
+    private val inviteIntake = InviteIntake()
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
@@ -90,6 +101,13 @@ class MainActivity : ComponentActivity() {
             chatRepo = chatRepository,
         )
 
+        // Read the launching Intent — a cold-start tap on
+        // `https://lakko.me/i/<slug>` carries the URL in
+        // `intent.data`. `onNewIntent` below handles the
+        // warm-start case (the app is already running and the
+        // OS routes a new deep-link to the same Activity).
+        handleInviteIntent(intent)
+
         setContent {
             MaterialTheme {
                 Surface(
@@ -100,10 +118,55 @@ class MainActivity : ComponentActivity() {
                         authRepository = authRepository,
                         contactsRepository = contactsRepository,
                         chatRepository = chatRepository,
+                        inviteIntake = inviteIntake,
                     )
                 }
             }
         }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        // Standard `singleTask` /`launchMode = singleInstance`
+        // shape: warm-start deep links route here. We DON'T
+        // call `setIntent(intent)` because the Compose tree
+        // doesn't observe `getIntent()` directly — we publish
+        // into `inviteIntake` whose StateFlow drives the
+        // re-render.
+        handleInviteIntent(intent)
+    }
+
+    /**
+     * Extract an invite slug from [intent]'s `data` URI when
+     * the URL matches `https?://lakko.me/i/<slug>`, then hand
+     * it to [InviteIntake.publish] so the Compose router can
+     * navigate to the landing screen.
+     *
+     * Defensive against:
+     *   * Non-VIEW intents (LAUNCHER taps land here too on
+     *     every restart with the same Intent stored as the
+     *     "last intent" — those don't carry a `data` URI
+     *     unless the user actually deep-linked in).
+     *   * Wrong-host URLs (the manifest filter narrows to
+     *     `lakko.me`, but if the user opens the same URL on a
+     *     self-hosted mirror that happens to match the http
+     *     filter we still want to handle it).
+     *   * Empty or whitespace slugs (the manifest's
+     *     `pathPrefix="/i/"` allows `/i/` with no slug at all
+     *     — extract to "" + skip).
+     */
+    private fun handleInviteIntent(intent: Intent) {
+        if (intent.action != Intent.ACTION_VIEW) return
+        val uri = intent.data ?: return
+        val path = uri.path ?: return
+        // Manifest filter pinned `pathPrefix="/i/"`; the slug
+        // is everything after that. `substringAfter` returns
+        // the original string when the separator is missing —
+        // guard with a startsWith check first.
+        if (!path.startsWith("/i/")) return
+        val slug = path.removePrefix("/i/").trim().removeSuffix("/")
+        if (slug.isEmpty()) return
+        inviteIntake.publish(slug)
     }
 }
 
@@ -112,6 +175,7 @@ private fun AppRoot(
     authRepository: AuthRepository,
     contactsRepository: ContactsRepository,
     chatRepository: ChatRepository,
+    inviteIntake: InviteIntake,
 ) {
     val state by authRepository.state.collectAsStateWithLifecycle()
 
@@ -125,6 +189,7 @@ private fun AppRoot(
             authRepository = authRepository,
             contactsRepository = contactsRepository,
             chatRepository = chatRepository,
+            inviteIntake = inviteIntake,
             account = current.account,
         )
     }
@@ -142,6 +207,7 @@ private fun SessionRoot(
     authRepository: AuthRepository,
     contactsRepository: ContactsRepository,
     chatRepository: ChatRepository,
+    inviteIntake: InviteIntake,
     account: SessionAccount,
 ) {
     // Drive ChatRepository.bootstrap whenever a fresh
@@ -168,6 +234,20 @@ private fun SessionRoot(
 
     var destination: SessionDestination by remember {
         mutableStateOf(SessionDestination.Home)
+    }
+
+    // Observe pending invite slugs (1.15e11). When a deep
+    // link arrives — either at cold start (MainActivity's
+    // onCreate published it before SessionRoot mounted) or
+    // during a warm session (onNewIntent published mid-
+    // session) — route to InviteLanding(slug) and consume()
+    // the slot so a subsequent slug for a different invite
+    // can land cleanly.
+    val pendingInviteSlug by inviteIntake.pendingInviteSlug.collectAsStateWithLifecycle()
+    LaunchedEffect(pendingInviteSlug) {
+        val slug = pendingInviteSlug ?: return@LaunchedEffect
+        destination = SessionDestination.InviteLanding(slug)
+        inviteIntake.consume()
     }
 
     when (val current = destination) {
@@ -235,20 +315,43 @@ private fun SessionRoot(
                 onNavigateBack = { destination = SessionDestination.Chats },
             )
         }
+
+        is SessionDestination.InviteLanding -> {
+            val inviteSlug = current.slug
+            // Key the VM by slug so re-tapping a different
+            // invite URL (already-consumed-and-published-
+            // again via onNewIntent) builds a fresh VM with
+            // the right slug binding + auto-runs the Accept
+            // flow against the new slug.
+            val inviteVm: InviteLandingViewModel = viewModel(
+                key = "invite-$inviteSlug",
+                factory = singletonViewModelFactory {
+                    InviteLandingViewModel(contactsRepository, inviteSlug)
+                },
+            )
+            InviteLandingScreen(
+                viewModel = inviteVm,
+                onDone = { destination = SessionDestination.Home },
+                onOpenChat = { groupIdHex ->
+                    destination = SessionDestination.Chat(groupIdHex)
+                },
+            )
+        }
     }
 }
 
 /**
- * Four Session-state destinations. Compose Navigation lands in
+ * Five Session-state destinations. Compose Navigation lands in
  * a later sprint — this sealed hierarchy holds the place. The
- * [Chat] variant carries a `groupIdHex` argument so the
- * ChatViewModel knows which thread to project.
+ * [Chat] + [InviteLanding] variants carry id args so their
+ * ViewModels know which thread / invite to project.
  */
 private sealed interface SessionDestination {
     data object Home : SessionDestination
     data object Contacts : SessionDestination
     data object Chats : SessionDestination
     data class Chat(val groupIdHex: String) : SessionDestination
+    data class InviteLanding(val slug: String) : SessionDestination
 }
 
 /**
