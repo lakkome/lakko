@@ -14,6 +14,7 @@ import me.lakko.app.chat.ChatRepository
 import me.lakko.app.contacts.ContactsError
 import me.lakko.app.contacts.ContactsRepository
 import me.lakko.app.contacts.ContactsState
+import me.lakko.app.contacts.GeneratedInvite
 
 /**
  * State + dispatcher for the [ContactsScreen].
@@ -82,6 +83,9 @@ public class ContactsViewModel(
             pending = repoState.pending,
             accepted = repoState.accepted,
             sent = repoState.sent,
+            outstandingInvites = repoState.outstandingInvites,
+            generatingInvite = ui.generatingInvite,
+            inviteError = ui.inviteError,
             refreshing = repoState.refreshing,
             refreshError = repoState.lastError,
             requiresReauth = repoState.requiresReauth,
@@ -140,6 +144,63 @@ public class ContactsViewModel(
 
     public fun onRefreshClicked() {
         viewModelScope.launch { repo.refreshInbox() }
+    }
+
+    /**
+     * Generate a fresh single-use 7-day invite link. Surfaces
+     * the resulting [GeneratedInvite] in
+     * [ContactsState.outstandingInvites]; failures land in
+     * [ContactsUiState.inviteError].
+     *
+     * Single-button-fire shape for 1.15e10. The custom-config
+     * dialog (user-typed label / expiry / max_uses) lands in
+     * 1.15e10b when the UX pushes back.
+     */
+    public fun onGenerateInviteClicked() {
+        val snapshot = mutableUi.value
+        if (snapshot.generatingInvite) return
+
+        mutableUi.update { it.copy(generatingInvite = true, inviteError = null) }
+        viewModelScope.launch {
+            try {
+                repo.generateInviteLink()
+                mutableUi.update {
+                    it.copy(generatingInvite = false, inviteError = null)
+                }
+            } catch (err: ContactsError) {
+                mutableUi.update {
+                    it.copy(generatingInvite = false, inviteError = userFacingError(err))
+                }
+            } catch (err: Throwable) {
+                mutableUi.update {
+                    it.copy(
+                        generatingInvite = false,
+                        inviteError = err.message ?: "Invite generation failed.",
+                    )
+                }
+            }
+        }
+    }
+
+    /**
+     * Revoke an outstanding invite by [blobId]. On success the
+     * row is dropped from [ContactsState.outstandingInvites]
+     * automatically by [ContactsRepository.revokeInviteLink].
+     */
+    public fun onRevokeInviteClicked(blobId: ByteArray) {
+        viewModelScope.launch {
+            try {
+                repo.revokeInviteLink(blobId)
+            } catch (err: ContactsError) {
+                mutableUi.update {
+                    it.copy(inviteError = userFacingError(err))
+                }
+            } catch (err: Throwable) {
+                mutableUi.update {
+                    it.copy(inviteError = err.message ?: "Revoke failed.")
+                }
+            }
+        }
     }
 
     /**
@@ -228,13 +289,16 @@ public class ContactsViewModel(
                 v.cause.message ?: "Send failed."
         }
 
-    /** VM-internal slice carrying ephemeral form + send state.
-     *  Persistent contacts data lives in the repository. */
+    /** VM-internal slice carrying ephemeral form + send +
+     *  invite-generation state. Persistent contacts data lives
+     *  in the repository. */
     private data class UiSlice(
         val usernameInput: String = "",
         val introInput: String = "",
         val sending: Boolean = false,
         val sendError: String? = null,
+        val generatingInvite: Boolean = false,
+        val inviteError: String? = null,
     )
 }
 
@@ -247,6 +311,9 @@ public data class ContactsUiState(
     val pending: List<me.lakko.app.contacts.IncomingContactRequest>,
     val accepted: List<me.lakko.app.contacts.AcceptedContact>,
     val sent: List<me.lakko.app.contacts.SentContactRequest>,
+    val outstandingInvites: List<GeneratedInvite>,
+    val generatingInvite: Boolean,
+    val inviteError: String?,
     val refreshing: Boolean,
     val refreshError: String?,
     val requiresReauth: Boolean,

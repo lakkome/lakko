@@ -36,10 +36,16 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
+import android.content.Intent
+import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import delay
-import isActive
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import me.lakko.app.contacts.AcceptedContact
+import me.lakko.app.contacts.GeneratedInvite
 import me.lakko.app.contacts.IncomingContactRequest
 import me.lakko.app.contacts.SentContactRequest
 
@@ -120,11 +126,25 @@ public fun ContactsScreen(
             return@Column
         }
 
+        val context = LocalContext.current
         Column(
             modifier = Modifier
                 .fillMaxSize()
                 .verticalScroll(rememberScrollState()),
         ) {
+            InviteSection(
+                outstandingInvites = state.outstandingInvites,
+                generating = state.generatingInvite,
+                error = state.inviteError,
+                onGenerateClicked = viewModel::onGenerateInviteClicked,
+                onCopyClicked = { invite -> copyToClipboard(context, invite.url) },
+                onShareClicked = { invite -> launchShareIntent(context, invite.url) },
+                onRevokeClicked = { invite ->
+                    viewModel.onRevokeInviteClicked(invite.blobId)
+                },
+            )
+
+            Spacer(Modifier.height(24.dp))
             SendSection(
                 usernameInput = state.usernameInput,
                 introInput = state.introInput,
@@ -225,6 +245,138 @@ private fun ReauthPanel() {
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
     }
+}
+
+// =============================================================================
+// Invite section — owner side (1.15e10)
+// =============================================================================
+
+@Composable
+private fun InviteSection(
+    outstandingInvites: List<GeneratedInvite>,
+    generating: Boolean,
+    error: String?,
+    onGenerateClicked: () -> Unit,
+    onCopyClicked: (GeneratedInvite) -> Unit,
+    onShareClicked: (GeneratedInvite) -> Unit,
+    onRevokeClicked: (GeneratedInvite) -> Unit,
+) {
+    SectionHeader(title = "Invite links", count = outstandingInvites.size)
+    Spacer(Modifier.height(4.dp))
+    Text(
+        text = "Generate a single-use 7-day link your friend can open to add " +
+            "you without typing your username.",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+    Spacer(Modifier.height(8.dp))
+
+    Button(
+        onClick = onGenerateClicked,
+        enabled = !generating,
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        if (generating) {
+            CircularProgressIndicator(
+                modifier = Modifier
+                    .height(20.dp)
+                    .width(20.dp),
+                strokeWidth = 2.dp,
+                color = MaterialTheme.colorScheme.onPrimary,
+            )
+            Spacer(Modifier.width(8.dp))
+            Text("Generating…")
+        } else {
+            Text("Generate invite link")
+        }
+    }
+
+    if (error != null) {
+        Spacer(Modifier.height(8.dp))
+        Text(
+            text = error,
+            color = MaterialTheme.colorScheme.error,
+            style = MaterialTheme.typography.bodyMedium,
+        )
+    }
+
+    if (outstandingInvites.isNotEmpty()) {
+        Spacer(Modifier.height(12.dp))
+        for (invite in outstandingInvites) {
+            InviteRow(
+                invite = invite,
+                onCopyClicked = { onCopyClicked(invite) },
+                onShareClicked = { onShareClicked(invite) },
+                onRevokeClicked = { onRevokeClicked(invite) },
+            )
+            Spacer(Modifier.height(8.dp))
+        }
+    }
+}
+
+@Composable
+private fun InviteRow(
+    invite: GeneratedInvite,
+    onCopyClicked: () -> Unit,
+    onShareClicked: () -> Unit,
+    onRevokeClicked: () -> Unit,
+) {
+    Card(
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant,
+        ),
+        shape = RoundedCornerShape(8.dp),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(modifier = Modifier.padding(12.dp)) {
+            Text(
+                text = invite.url,
+                style = MaterialTheme.typography.bodySmall,
+                fontFamily = FontFamily.Monospace,
+                maxLines = 2,
+            )
+            Spacer(Modifier.height(8.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(
+                    onClick = onCopyClicked,
+                    modifier = Modifier.weight(1f),
+                ) { Text("Copy") }
+                Button(
+                    onClick = onShareClicked,
+                    modifier = Modifier.weight(1f),
+                ) { Text("Share") }
+                OutlinedButton(
+                    onClick = onRevokeClicked,
+                    modifier = Modifier.weight(1f),
+                ) { Text("Revoke") }
+            }
+        }
+    }
+}
+
+/** Copy [text] to the system clipboard. Uses
+ *  `ClipboardManager.setPrimaryClip` — Android 13+ surfaces the
+ *  "copied to clipboard" snackbar automatically, so this
+ *  helper doesn't need a Toast fallback. */
+private fun copyToClipboard(context: Context, text: String) {
+    val clipboard =
+        context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+            ?: return
+    val clip = ClipData.newPlainText("Lakko invite link", text)
+    clipboard.setPrimaryClip(clip)
+}
+
+/** Launch the Android share sheet with [url] as the body.
+ *  The user picks the destination app (messenger, email,
+ *  SMS); we don't constrain it. */
+private fun launchShareIntent(context: Context, url: String) {
+    val send = Intent(Intent.ACTION_SEND).apply {
+        type = "text/plain"
+        putExtra(Intent.EXTRA_TEXT, url)
+    }
+    val chooser = Intent.createChooser(send, /* title = */ null)
+        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    context.startActivity(chooser)
 }
 
 // =============================================================================

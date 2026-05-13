@@ -10,8 +10,10 @@ import kotlinx.coroutines.flow.update
 import me.lakko.app.auth.AuthRepository
 import me.lakko.app.auth.IdentitySecrets
 import me.lakko.app.auth.base64Encode
+import me.lakko.app.auth.base64UrlEncodeNoPad
 import me.lakko.app.chat.ChatRepository
 import uniffi.lakko_ffi_uniffi.Identity
+import uniffi.lakko_ffi_uniffi.composeInviteCapability
 
 /**
  * In-memory state holder for the user's contacts surface.
@@ -45,6 +47,16 @@ import uniffi.lakko_ffi_uniffi.Identity
 public class ContactsRepository(
     private val authRepo: AuthRepository,
     private val clientFactory: () -> ContactsClient = { ContactsClient() },
+    /** Factory for the [me.lakko.app.discovery.DiscoveryClient] the invite-
+     *  link operations need ([generateInviteLink] /
+     *  [revokeInviteLink]). Distinct factory rather than reusing the
+     *  one inside [ContactsClient] because invite operations don't go
+     *  through `ContactsClient` — they're discovery-side operations the
+     *  Repository drives directly so the orchestration sits next to
+     *  the `outstandingInvites` state. */
+    private val discoveryClientFactory: () -> me.lakko.app.discovery.DiscoveryClient = {
+        me.lakko.app.discovery.DiscoveryClient()
+    },
     /** Optional bridge to the chat surface. When non-null,
      *  [refreshInbox] forwards Welcome envelopes to
      *  [ChatRepository.joinGroupFromWelcome] so a peer's
@@ -228,6 +240,130 @@ public class ContactsRepository(
         }
     }
 
+    /**
+     * Generate a fresh capability-based invite link.
+     *
+     * Builds the canonical [`InviteCapability`](uniffi.lakko_ffi_uniffi.InviteCapability)
+     * wire bytes from the current session's [IdentitySecrets] +
+     * uploads them to the discovery directory; receives a
+     * server-assigned 32-byte `blob_id` back. Returns the
+     * `https://lakko.me/i/<blob_id_b64url>` pointer URL the
+     * owner shares via copy-to-clipboard or the Android share
+     * sheet.
+     *
+     * 1.15e10 ships with **fixed defaults**: 7-day expiry,
+     * single-use (`max_uses = 0`), non-bootstrap-referral
+     * (this flow is for connecting existing users, not new
+     * signups). A custom-config dialog (user-typed label /
+     * expiry / max_uses) layers on as 1.15e10b when the UX
+     * pushes back.
+     *
+     * The new invite is appended to [ContactsState.outstandingInvites]
+     * so the UI can render a list of the owner's outstanding
+     * links + offer per-row Copy / Share / Revoke affordances.
+     *
+     * @throws ContactsError on identity-secrets missing, on FFI
+     *         compose failure (extremely unlikely for valid
+     *         inputs), or on discovery upload failure.
+     */
+    public suspend fun generateInviteLink(
+        label: String = "",
+        expiryMillisFromNow: Long = DEFAULT_INVITE_EXPIRY_MS,
+        maxUses: UInt = SINGLE_USE,
+        bootstrapReferral: Boolean = false,
+    ): GeneratedInvite {
+        val secrets = authRepo.identitySecrets.value
+            ?: throw ContactsError.wrap(
+                IllegalStateException(
+                    "no identity secrets — please re-enter your password",
+                ),
+            )
+        val expiryMs = (System.currentTimeMillis() + expiryMillisFromNow).toULong()
+
+        return Identity.fromSeed(secrets.exportKey).use { identity ->
+            val capabilityBytes = try {
+                composeInviteCapability(
+                    ownerSigningSeed = identity.ed25519Seed(),
+                    ownerAccountId = secrets.accountId,
+                    ownerX25519Pubkey = identity.x25519PublicKey(),
+                    expiryMs = expiryMs,
+                    maxUses = maxUses,
+                    bootstrapReferral = bootstrapReferral,
+                    label = label,
+                )
+            } catch (e: Throwable) {
+                throw ContactsError.wrap(e)
+            }
+            val blobId = try {
+                discoveryClientFactory().use { discovery ->
+                    discovery.uploadInvite(capabilityBytes)
+                }
+            } catch (e: Throwable) {
+                throw ContactsError.wrap(e)
+            }
+
+            val blobIdSlug = base64UrlEncodeNoPad(blobId)
+            val url = "$INVITE_URL_PREFIX$blobIdSlug"
+            val invite = GeneratedInvite(
+                blobId = blobId,
+                blobIdSlug = blobIdSlug,
+                url = url,
+                label = label,
+                expiryMs = expiryMs.toLong(),
+                maxUses = maxUses.toLong(),
+                createdAtMs = System.currentTimeMillis(),
+            )
+            mutableState.update { state ->
+                state.copy(outstandingInvites = state.outstandingInvites + invite)
+            }
+            invite
+        }
+    }
+
+    /**
+     * Revoke an outstanding invite link via the discovery
+     * service's owner-signed `DELETE` endpoint + drop the row
+     * from [ContactsState.outstandingInvites].
+     *
+     * Returns the underlying [me.lakko.app.discovery.RevokeInviteResult]
+     * so the UI can branch on `Revoked` vs `NotFoundOrNotOwner`.
+     * The row is dropped from local state on `Revoked` **only**;
+     * `NotFoundOrNotOwner` keeps it so the user can retry (the
+     * 404-folding-of-bad-signature path may be transient).
+     */
+    public suspend fun revokeInviteLink(
+        blobId: ByteArray,
+    ): me.lakko.app.discovery.RevokeInviteResult {
+        val secrets = authRepo.identitySecrets.value
+            ?: throw ContactsError.wrap(
+                IllegalStateException(
+                    "no identity secrets — please re-enter your password",
+                ),
+            )
+        return Identity.fromSeed(secrets.exportKey).use { identity ->
+            val signingSeed = identity.ed25519Seed()
+            try {
+                val result = discoveryClientFactory().use { discovery ->
+                    discovery.revokeInvite(blobId, signingSeed)
+                }
+                if (result is me.lakko.app.discovery.RevokeInviteResult.Revoked) {
+                    val blobIdHex = blobId.toList()
+                    mutableState.update { state ->
+                        state.copy(
+                            outstandingInvites = state.outstandingInvites
+                                .filterNot { it.blobId.toList() == blobIdHex },
+                        )
+                    }
+                }
+                result
+            } catch (e: Throwable) {
+                throw ContactsError.wrap(e)
+            } finally {
+                signingSeed.fill(0)
+            }
+        }
+    }
+
     /** Clear the in-memory state. Called from the AuthRepository
      *  when the session ends — pending requests + sent log do
      *  not persist across logouts. */
@@ -302,6 +438,15 @@ public data class ContactsState(
      *  rehydrate from, so a fresh process starts with an empty
      *  list. */
     val sent: List<SentContactRequest> = emptyList(),
+    /** Owner-side invite links we've generated this session.
+     *  Like [sent], not persisted across process death — the
+     *  authoritative state lives on the discovery server, and
+     *  rehydrating this list would require a per-account
+     *  /discovery/invite/by-owner endpoint that doesn't exist
+     *  in Phase 1 (deliberate: surfaces the "share the URL right
+     *  now" UX, not a "manage outstanding invites" admin panel).
+     *  Cleared on logout / forgetDevice. */
+    val outstandingInvites: List<GeneratedInvite> = emptyList(),
     /** Cursor for the stranger-inbox poll. `0` = catch-up
      *  fetch on first refresh. */
     val cursor: Long = 0,
@@ -315,6 +460,63 @@ public data class ContactsState(
      *  display. `null` clears on the next successful call. */
     val lastError: String? = null,
 )
+
+/** An invite link the owner has just generated this session. */
+public data class GeneratedInvite(
+    /** Raw 32-byte content-addressed id (the same value
+     *  `revokeInviteLink` takes). */
+    val blobId: ByteArray,
+    /** base64url-no-pad of [blobId] — the slug portion of [url]. */
+    val blobIdSlug: String,
+    /** `https://lakko.me/i/<slug>` — the URL the owner shares. */
+    val url: String,
+    /** Human-visible label (empty when the user didn't set one). */
+    val label: String,
+    /** UNIX millis when this invite stops being honoured. `0` is
+     *  the never-expires sentinel. */
+    val expiryMs: Long,
+    /** Server-enforced consume ceiling. `0` = single-use,
+     *  `0xFFFFFFFF` = unlimited. */
+    val maxUses: Long,
+    /** UNIX millis when the row was generated (local clock). */
+    val createdAtMs: Long,
+) {
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (other !is GeneratedInvite) return false
+        return blobId.contentEquals(other.blobId) &&
+            blobIdSlug == other.blobIdSlug &&
+            url == other.url &&
+            label == other.label &&
+            expiryMs == other.expiryMs &&
+            maxUses == other.maxUses &&
+            createdAtMs == other.createdAtMs
+    }
+
+    override fun hashCode(): Int {
+        var result = blobId.contentHashCode()
+        result = 31 * result + blobIdSlug.hashCode()
+        result = 31 * result + url.hashCode()
+        result = 31 * result + label.hashCode()
+        result = 31 * result + expiryMs.hashCode()
+        result = 31 * result + maxUses.hashCode()
+        result = 31 * result + createdAtMs.hashCode()
+        return result
+    }
+}
+
+/** Default invite expiry — 7 days from generation. Mirrors the
+ *  web side's `7 * 86_400_000` constant. */
+private const val DEFAULT_INVITE_EXPIRY_MS: Long = 7L * 24 * 60 * 60 * 1000
+
+/** Server-side sentinel for `max_uses = single-use`. */
+private val SINGLE_USE: UInt = 0u
+
+/** URL prefix Lakko shares its invite links under. Should
+ *  remain in sync with the web `composePointerInviteUrl` host
+ *  + path so a link generated on web works when consumed on
+ *  Android and vice versa. */
+private const val INVITE_URL_PREFIX: String = "https://lakko.me/i/"
 
 /** A request the user has accepted locally.
  *

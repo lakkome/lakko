@@ -36,8 +36,8 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import delay
-import isActive
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import me.lakko.app.chat.ChatMessage
 import me.lakko.app.chat.Direction
 
