@@ -384,4 +384,121 @@ class DiscoveryClientTest {
             }
         }
     }
+
+    // ===================================================================
+    // /discovery/keypackage — 1.15f1
+    // ===================================================================
+
+    @Test
+    fun `keypackageUpload sends snake_case keypackage field`() = runTest {
+        val captured = mutableListOf<CapturedRequest>()
+        client(
+            responses = listOf(HttpStatusCode.OK to """{"ok":true}"""),
+            captured = captured,
+        ).use { client ->
+            val resp = client.keypackageUpload(
+                KeyPackageUploadRequest(
+                    pow = me.lakko.app.auth.PowProofPayload("S", "N", "X"),
+                    account_id = "ACC_B64",
+                    keypackage = "KP_B64",
+                ),
+            )
+            assertTrue(resp.ok)
+        }
+        val body = captured[0].body!!
+        assertEquals("ACC_B64", body["account_id"]!!.jsonPrimitive.content)
+        assertEquals("KP_B64", body["keypackage"]!!.jsonPrimitive.content)
+    }
+
+    @Test
+    fun `keypackageFetch returns the row on 200`() = runTest {
+        val captured = mutableListOf<CapturedRequest>()
+        client(
+            responses = listOf(
+                HttpStatusCode.OK to """{"keypackage":"KP_BYTES_B64"}""",
+            ),
+            captured = captured,
+        ).use { client ->
+            val resp = client.keypackageFetch(ByteArray(16))
+            assertNotNull(resp)
+            assertEquals("KP_BYTES_B64", resp!!.keypackage)
+        }
+        assertEquals(HttpMethod.Get, captured[0].method)
+        // Path is base64url-no-pad — same shape as identityFetch.
+        val url = captured[0].url
+        assertTrue(url.contains("/discovery/keypackage/"))
+        val slug = url
+            .substringAfter("/discovery/keypackage/")
+        assertEquals(-1, slug.indexOf('='))
+        assertEquals(-1, slug.indexOf('+'))
+        assertEquals(-1, slug.indexOf('/'))
+    }
+
+    @Test
+    fun `keypackageFetch folds 404 into null`() = runTest {
+        client(
+            responses = listOf(HttpStatusCode.NotFound to ""),
+        ).use { client ->
+            val resp = client.keypackageFetch(ByteArray(16))
+            assertNull(resp)
+        }
+    }
+
+    @Test
+    fun `keypackageFetch rejects wrong-length accountId before network`() {
+        val engine = MockEngine { error("must not reach the network") }
+        assertThrows(DiscoveryClientArgError::class.java) {
+            runTest {
+                DiscoveryClient(baseUrl = "http://test.invalid", engine = engine).use { client ->
+                    client.keypackageFetch(ByteArray(8))
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `uploadKeyPackage rejects wrong-length accountId before network`() {
+        val engine = MockEngine { error("must not reach the network") }
+        assertThrows(DiscoveryClientArgError::class.java) {
+            runTest {
+                DiscoveryClient(baseUrl = "http://test.invalid", engine = engine).use { client ->
+                    client.uploadKeyPackage(
+                        accountId = ByteArray(8),
+                        keyPackageBytes = ByteArray(32),
+                    )
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `uploadKeyPackage rejects empty bytes before network`() {
+        val engine = MockEngine { error("must not reach the network") }
+        assertThrows(DiscoveryClientArgError::class.java) {
+            runTest {
+                DiscoveryClient(baseUrl = "http://test.invalid", engine = engine).use { client ->
+                    client.uploadKeyPackage(
+                        accountId = ByteArray(16),
+                        keyPackageBytes = ByteArray(0),
+                    )
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `uploadKeyPackage rejects oversized bytes before network`() {
+        val engine = MockEngine { error("must not reach the network") }
+        val err = assertThrows(DiscoveryClientArgError::class.java) {
+            runTest {
+                DiscoveryClient(baseUrl = "http://test.invalid", engine = engine).use { client ->
+                    client.uploadKeyPackage(
+                        accountId = ByteArray(16),
+                        keyPackageBytes = ByteArray(2049), // 1 over the 2048 ceiling
+                    )
+                }
+            }
+        }
+        assertTrue(err.message!!.contains("2048"))
+    }
 }

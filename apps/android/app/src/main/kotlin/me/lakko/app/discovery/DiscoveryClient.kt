@@ -150,21 +150,35 @@ public class DiscoveryClient(
         }
         val slug = base64UrlEncodeNoPad(accountId)
         val endpoint = "/discovery/identity/$slug"
-        val url = "$baseUrl$endpoint"
-        val response: HttpResponse = try {
-            client.get(url)
-        } catch (cause: Throwable) {
-            throw DiscoveryNetworkError("$endpoint (GET)", cause)
+        return getNullableOn404(endpoint)
+    }
+
+    /** `POST /discovery/keypackage` — upsert the user's MLS
+     *  KeyPackage. */
+    public suspend fun keypackageUpload(
+        req: KeyPackageUploadRequest,
+    ): KeyPackageUploadResponse =
+        doPost("/discovery/keypackage") {
+            contentType(ContentType.Application.Json)
+            setBody(req)
         }
-        if (response.status == HttpStatusCode.NotFound) return null
-        if (!response.status.isSuccess()) {
-            throw DiscoveryHttpError(
-                status = response.status.value,
-                endpoint = "$endpoint (GET)",
-                body = response.safeReadBody(),
-            )
+
+    /**
+     * `GET /discovery/keypackage/{accountId_b64url}`. Returns
+     * the KeyPackage shape on 200, `null` on 404, throws on
+     * any other non-2xx.
+     *
+     * Same base64url-no-pad path-slug shape as
+     * [identityFetch] for the same reason (axum + `/` in path
+     * segments).
+     */
+    public suspend fun keypackageFetch(accountId: ByteArray): KeyPackageFetchResponse? {
+        if (accountId.size != ACCOUNT_ID_LEN) {
+            throw DiscoveryClientArgError("accountId must be $ACCOUNT_ID_LEN bytes")
         }
-        return response.body()
+        val slug = base64UrlEncodeNoPad(accountId)
+        val endpoint = "/discovery/keypackage/$slug"
+        return getNullableOn404(endpoint)
     }
 
     // -----------------------------------------------------------------
@@ -263,6 +277,77 @@ public class DiscoveryClient(
                 )
             }
         }
+    }
+
+    /**
+     * Upload (or replace) the user's MLS KeyPackage. Drives one
+     * PoW solve + `POST /discovery/keypackage`.
+     *
+     * Unlike the identity bundle, KeyPackages are **not**
+     * deterministic — `Identity.createKeyPackage()` generates
+     * fresh randomness on every call (RFC 9420 forward-secrecy
+     * property). Calling this on every login refreshes the
+     * `init_key` on the server, so a fresh sender starting a
+     * new 1×1 group gets bytes the recipient hasn't already
+     * used.
+     *
+     * The Phase-1 directory only stores ONE KeyPackage per
+     * account at a time (consume-on-use is post-1.15 work), so
+     * a sender racing two sessions can in theory seed two
+     * groups with the same `init_key`. Documented MVP trade-off
+     * matching `apps/web`'s posture.
+     */
+    public suspend fun uploadKeyPackage(
+        accountId: ByteArray,
+        keyPackageBytes: ByteArray,
+    ) {
+        if (accountId.size != ACCOUNT_ID_LEN) {
+            throw DiscoveryClientArgError("accountId must be $ACCOUNT_ID_LEN bytes")
+        }
+        if (keyPackageBytes.isEmpty()) {
+            throw DiscoveryClientArgError("keyPackageBytes must be non-empty")
+        }
+        if (keyPackageBytes.size > MAX_KEYPACKAGE_BYTES) {
+            // Hard ceiling mirrors `MAX_KEYPACKAGE_BYTES = 2048`
+            // on the server. Surfacing here saves a round-trip
+            // on a misbehaving caller.
+            throw DiscoveryClientArgError(
+                "keyPackageBytes exceeds the $MAX_KEYPACKAGE_BYTES-byte ceiling " +
+                    "(got ${keyPackageBytes.size} bytes)",
+            )
+        }
+
+        val challenge = powChallenge()
+        val pow = solvePow(challenge.seed, challenge.effort_bits, powDispatcher)
+
+        val resp = keypackageUpload(
+            KeyPackageUploadRequest(
+                pow = pow,
+                account_id = base64Encode(accountId),
+                keypackage = base64Encode(keyPackageBytes),
+            ),
+        )
+        if (!resp.ok) {
+            throw DiscoveryHttpError(
+                status = 200,
+                endpoint = "/discovery/keypackage",
+                body = "server reported ok=false",
+            )
+        }
+    }
+
+    /**
+     * Resolve `accountId → KeyPackage bytes` (TLS-encoded MLS).
+     * Returns `null` when the recipient hasn't published one
+     * yet.
+     *
+     * Convenience wrapper around [keypackageFetch] that decodes
+     * the base64 wire field to a [ByteArray] so the caller can
+     * hand it straight to `Group.addMemberFromWire(...)`.
+     */
+    public suspend fun fetchKeyPackage(accountId: ByteArray): ByteArray? {
+        val raw = keypackageFetch(accountId) ?: return null
+        return base64Decode(raw.keypackage)
     }
 
     /**
@@ -372,6 +457,34 @@ public class DiscoveryClient(
         return response.body()
     }
 
+    /**
+     * `GET` variant of [doPostNullableOn404]. Same 404→null
+     * fold, no request body — used by the
+     * `/discovery/identity/{slug}` and `/discovery/keypackage/{slug}`
+     * fetch paths. Pulled out of the inline endpoint methods
+     * so the error / 404 handling stays uniform across both
+     * fetches.
+     */
+    private suspend inline fun <reified Res : Any> getNullableOn404(
+        endpoint: String,
+    ): Res? {
+        val url = "$baseUrl$endpoint"
+        val response: HttpResponse = try {
+            client.get(url)
+        } catch (cause: Throwable) {
+            throw DiscoveryNetworkError("$endpoint (GET)", cause)
+        }
+        if (response.status == HttpStatusCode.NotFound) return null
+        if (!response.status.isSuccess()) {
+            throw DiscoveryHttpError(
+                status = response.status.value,
+                endpoint = "$endpoint (GET)",
+                body = response.safeReadBody(),
+            )
+        }
+        return response.body()
+    }
+
     public companion object {
         /**
          * Default discovery service URL — the Android emulator
@@ -386,6 +499,11 @@ public class DiscoveryClient(
 
         /** Ed25519 + X25519 both use 32-byte public keys. */
         private const val PUBKEY_LEN: Int = 32
+
+        /** Mirror of `services/discovery`'s `MAX_KEYPACKAGE_BYTES`.
+         *  Surfacing the ceiling here saves a round-trip on a
+         *  misbehaving caller. */
+        private const val MAX_KEYPACKAGE_BYTES: Int = 2048
     }
 }
 
