@@ -212,6 +212,96 @@ build-android:
         --output-dir apps/android/lakko-core/src/main/jniLibs \
         build --release -p lakko-ffi-uniffi
 
+# Phase 1.14a — cross-compile `lakko-ffi-uniffi` (staticlib) for
+# the three iOS targets that cover both physical devices + the
+# simulator on every Mac architecture, then bundle the per-target
+# `.a` archives into a single `LakkoCore.xcframework` consumable
+# by the SwiftUI app `apps/ios/` (lands in 1.14b).
+#
+# **Targets:**
+#   * `aarch64-apple-ios`           — modern physical iPhones + iPads
+#                                     (every device since A7, 2013).
+#                                     Built standalone — Apple
+#                                     doesn't ship 32-bit iOS any
+#                                     more; armv7 / armv7s are gone.
+#   * `aarch64-apple-ios-sim`       — Apple-Silicon Mac simulator.
+#   * `x86_64-apple-ios-sim`        — Intel Mac simulator (still
+#                                     common on Intel-era 2015-2020
+#                                     hardware; cheap to keep in
+#                                     the matrix until the Intel-Mac
+#                                     install base is < 5%).
+#
+# **Pre-reqs:**
+#   * macOS host (no other OS can run `xcodebuild`).
+#   * `xcode-select --install` (Xcode Command Line Tools).
+#     The full Xcode app is not required to BUILD the XCFramework
+#     — only to ship the eventual SwiftUI app via `xcodebuild`'s
+#     archive / export flows in 1.14b/c.
+#   * `rustup target add aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios-sim`
+#
+# **Output:**
+#   `target/ios/LakkoCore.xcframework/` — the directory the Xcode
+#   project (1.14b) imports via `Add Files…` or as a Swift Package
+#   product. Gitignored under the existing `target/` rule.
+#
+# **modulemap shape:** UniFFI's swift bindgen emits both the
+# `.swift` source and the C-ABI `*FFI.h` header. The XCFramework
+# format expects a sibling `module.modulemap` to expose the C
+# symbols to Swift; we generate it inline here (5-line template
+# pinned at the head of the recipe). Doing it inline is simpler
+# than maintaining a `tools/ios/modulemap.template` for a single
+# consumer.
+#
+# **Why `staticlib` not `cdylib`:** iOS embeds frameworks
+# differently from Android — the codesign + entitlement story
+# for dynamic libraries on iOS adds friction that pays off only
+# at scale (faster app updates without re-shipping the binary).
+# For a single-app `.xcframework` consumed by one Xcode target,
+# static linking is the canonical shape + the App Store reviewer
+# friction is zero.
+[macos]
+build-ios:
+    @command -v xcodebuild >/dev/null 2>&1 || (echo "ERROR: xcodebuild not found — install Xcode Command Line Tools via 'xcode-select --install'" && exit 1)
+    cargo build --release --target aarch64-apple-ios -p lakko-ffi-uniffi
+    cargo build --release --target aarch64-apple-ios-sim -p lakko-ffi-uniffi
+    cargo build --release --target x86_64-apple-ios-sim -p lakko-ffi-uniffi
+    # Combine the two simulator slices into one fat archive
+    # — `xcodebuild -create-xcframework` accepts exactly one
+    # binary per `-library` argument, and Mac simulators come
+    # in both arm64 + x86_64 flavours.
+    mkdir -p target/ios
+    lipo -create \
+        target/aarch64-apple-ios-sim/release/liblakko_ffi_uniffi.a \
+        target/x86_64-apple-ios-sim/release/liblakko_ffi_uniffi.a \
+        -output target/ios/liblakko_ffi_uniffi-simulator.a
+    # Lay out the headers + modulemap directory the
+    # `-headers` argument expects: a single dir with the C
+    # header + the `module.modulemap` referencing it. The
+    # `LakkoCoreFFI` framework name must match what the
+    # Swift binding's `import LakkoCoreFFI` line expects (the
+    # uniffi generator emits the import for us in
+    # `lakko_ffi_uniffi.swift`).
+    mkdir -p target/ios/headers
+    @cp target/bindings/swift/lakko_ffi_uniffiFFI.h target/ios/headers/
+    @printf 'module lakko_ffi_uniffiFFI {\n    header "lakko_ffi_uniffiFFI.h"\n    export *\n}\n' \
+        > target/ios/headers/module.modulemap
+    # `xcodebuild -create-xcframework` is the canonical
+    # path — alternatives (`carton`, hand-rolled `Info.plist`)
+    # all proxy through this command eventually.
+    rm -rf target/ios/LakkoCore.xcframework
+    xcodebuild -create-xcframework \
+        -library target/aarch64-apple-ios/release/liblakko_ffi_uniffi.a \
+        -headers target/ios/headers \
+        -library target/ios/liblakko_ffi_uniffi-simulator.a \
+        -headers target/ios/headers \
+        -output target/ios/LakkoCore.xcframework
+    # Phase 1.14b will fan the Swift binding source into the
+    # Xcode project's source set, parallel to `regen-bindings`
+    # copying the Kotlin tree into `apps/android/lakko-core/`.
+    # Until 1.14b lands `apps/ios/`, we just leave
+    # `target/bindings/swift/lakko_ffi_uniffi.swift` in place
+    # for manual import.
+
 # Phase 1.16f3 — wasm-bindgen-test smoke suite under Node. Tests
 # in `crates/lakko-ffi-wasm/src/wasm_tests.rs` exercise WASM-shape
 # regressions the host `cargo test` cannot reach: getrandom under

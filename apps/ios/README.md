@@ -1,0 +1,222 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+<!-- SPDX-FileCopyrightText: 2026 Lakko Contributors -->
+
+# `apps/ios` — Lakko for iOS / iPadOS
+
+**Phase 1.14.** SwiftUI on top of `lakko-ffi-uniffi` Swift
+bindings. Mirror of `apps/android` (`auth → contacts → 1×1 chat
+→ invites`) on Apple platforms with the same Rust core.
+
+## Status
+
+| Sub-sprint | Scope | Status |
+|---|---|---|
+| 1.14a | iOS cross-compile + XCFramework build (`just build-ios`) | ✅ |
+| 1.14b | Xcode project scaffold (`apps/ios/Lakko.xcodeproj`) + Swift Package consuming the XCFramework | TODO |
+| 1.14c | SwiftUI skeleton + "Hello core" smoke screen | TODO |
+| 1.14d | OPAQUE-PAKE auth (signup / login / recover) | TODO |
+| 1.14e | Contacts (search / send / accept / invite-link) | TODO |
+| 1.14f | 1×1 chat UI (timeline + composer + ack indicators) | TODO |
+
+`1.14a` produces the `LakkoCore.xcframework` the Xcode project
+will consume. **No actual `apps/ios/Lakko.xcodeproj` lives here
+yet** — that's `1.14b`.
+
+The dependency arrow is: `lakko-ffi-uniffi` (Rust) →
+`just regen-bindings` (Swift source) + `just build-ios` (the
+three static-lib slices fused into one XCFramework) → Xcode
+project → SwiftUI app.
+
+## What 1.14a ships
+
+`just build-ios` produces, alongside the existing Kotlin output
+that `just regen-bindings` already emits:
+
+```
+target/ios/
+├── headers/
+│   ├── lakko_ffi_uniffiFFI.h    — C-ABI symbol surface
+│   └── module.modulemap          — exposes the C symbols to Swift
+├── liblakko_ffi_uniffi-simulator.a  — fat lipo of arm64 + x86_64 sim slices
+└── LakkoCore.xcframework/
+    ├── Info.plist
+    ├── ios-arm64/                — physical-device slice
+    │   ├── headers/
+    │   └── liblakko_ffi_uniffi.a
+    └── ios-arm64_x86_64-simulator/  — combined-simulator slice
+        ├── headers/
+        └── liblakko_ffi_uniffi.a
+```
+
+The `LakkoCore.xcframework/` directory is the only thing the
+Xcode project from 1.14b needs to import — Xcode handles slice
+selection automatically based on the active build destination
+(physical iPhone vs Simulator).
+
+### Three iOS targets in the matrix
+
+* **`aarch64-apple-ios`** — modern physical iPhones + iPads
+  (every device since A7, 2013). Built standalone.
+* **`aarch64-apple-ios-sim`** — Apple-Silicon Mac simulator.
+* **`x86_64-apple-ios-sim`** — Intel Mac simulator (kept until
+  the Intel-Mac install base drops below ~5% — cheap to keep).
+
+32-bit iOS (armv7 / armv7s) is intentionally NOT in the matrix
+— Apple dropped support with iOS 11 (2017); every device the
+App Store still accepts is 64-bit.
+
+### Why `staticlib`, not `cdylib`
+
+iOS embeds frameworks differently from Android. The codesign +
+entitlement story for dynamic libraries on iOS pays off only at
+app-update scale (the dynamic lib can be re-shipped without
+re-shipping the host app). For a single-app `.xcframework`
+consumed by one Xcode target, static linking is the canonical
+shape; App Store reviewer friction is zero.
+
+`crates/lakko-ffi-uniffi/Cargo.toml` already declares
+`crate-type = ["staticlib", "cdylib", "rlib"]` from 1.15b —
+cdylib for Android JNI, **staticlib for the iOS XCFramework**,
+rlib for in-workspace consumers.
+
+## Pre-reqs
+
+* **macOS host** — `xcodebuild` doesn't run on Linux/Windows.
+* **Xcode Command Line Tools**: `xcode-select --install`. The
+  full Xcode app is not required to BUILD the XCFramework —
+  only to ship the eventual SwiftUI app via the archive / export
+  flows in 1.14b/c.
+* **Rust iOS targets**:
+  ```bash
+  rustup target add aarch64-apple-ios \
+                    aarch64-apple-ios-sim \
+                    x86_64-apple-ios-sim
+  ```
+
+## Bootstrap path forward (1.14b — Xcode project)
+
+The XCFramework alone is not enough — the SwiftUI app needs an
+Xcode project to consume it. Plan:
+
+1. **`apps/ios/Lakko.xcodeproj`** under `apps/ios/`. Two
+   options for the project shape:
+   * **Plain `.xcodeproj`** — traditional, every Lakko
+     contributor needs Xcode to open + edit.
+   * **Swift Package (SPM)** at `apps/ios/Package.swift` — open
+     in VSCode or Xcode, cleaner diffs, fewer GUI ceremonies.
+     SPM-based iOS apps are a 2024+ pattern, well-supported by
+     Xcode 16+.
+   1.14b will pick whichever lands faster on a clean machine
+   without `Lakko.xcodeproj`-style binary blobs leaking through
+   `git diff`.
+2. **Drop the `LakkoCore.xcframework`** in as a framework
+   reference (binary target if SPM).
+3. **Bridging notes**: the UniFFI-emitted
+   `lakko_ffi_uniffi.swift` is the public Swift API surface;
+   the `LakkoCore.xcframework` provides the underlying C-ABI
+   symbols the Swift code calls through. The `module.modulemap`
+   in the headers directory is what Swift's `import` resolves
+   against — `lakko_ffi_uniffi.swift` already carries the right
+   import statement at the top.
+4. **Source layout** (1.14c onwards):
+   ```
+   apps/ios/
+   ├── Lakko.xcodeproj/           — or Package.swift
+   ├── Sources/
+   │   ├── LakkoApp.swift         — @main App struct
+   │   ├── Auth/                  — signup / login / recover
+   │   ├── Contacts/              — contacts surface
+   │   ├── Chat/                  — 1×1 chat surface
+   │   └── Resources/             — assets, Info.plist
+   └── Tests/                     — XCTest suite
+   ```
+5. **Reproducible builds** — pin Xcode + Swift toolchain
+   versions in CI; two clean builds must produce byte-identical
+   `.ipa` files (mirror of `apps/web`'s `web-repro` CI gate
+   from Phase 1.17b + the same posture documented for Android
+   in 1.15b).
+
+`1.14b` will land a `just package-ios` recipe driving
+`xcodebuild archive` + `xcodebuild -exportArchive` for the
+ad-hoc / App Store distribution flow.
+
+## Bootstrap path (1.14c — SwiftUI skeleton)
+
+After 1.14b ships an installable app shell, 1.14c lands:
+
+```
+apps/ios/Sources/
+├── LakkoApp.swift               — single @main entry point
+├── HelloCore.swift              — smoke surface (mirror of Android's 1.15c)
+└── … (auth / contacts / chat land in 1.14d-f)
+```
+
+The "Hello core" surface the 1.14c sprint ships will:
+1. Build an `Identity("lakko-ios-skeleton")` via the UniFFI-
+   generated Swift class.
+2. Read `signaturePublicKey()` — 32-byte Ed25519 verifying key.
+3. Render the hex on screen. Same surface as
+   `apps/web/src/routes/DevProbe.tsx` from 1.16a and the
+   Android `MainActivity.HelloCoreScreen` from 1.15c.
+
+## Bootstrap path (1.14d-f — feature parity with `apps/android`)
+
+Each feature sprint mirrors the Android sub-sprint arc 1.15d /
+1.15e / 1.15f. The Rust core is identical; only the platform-
+specific glue differs:
+
+* **1.14d** — auth: OPAQUE-PAKE wired through UniFFI (the same
+  `OpaqueRegister` / `OpaqueLogin` shape both `apps/android` and
+  `apps/web` already consume). SwiftUI signup / login / recover
+  screens; device-root key in the iOS Keychain (Secure-Enclave-
+  backed when present, hardware-AES-backed otherwise — mirrors
+  the Android Keystore posture from 1.15d3 but uses the iOS
+  primitives).
+* **1.14e** — contacts: same `OprfBlinder` + `ContactRequest`
+  + `InviteCapability` surface via UniFFI. Compose contacts /
+  invite-link UI translates near-mechanically to SwiftUI; the
+  StateFlow / `collectAsStateWithLifecycle` pattern maps to
+  Swift's `@StateObject` + `ObservableObject`.
+* **1.14f** — 1×1 chat: SwiftUI `ScrollView` / `LazyVStack`
+  timeline + composer + Material3-ish ack indicators. MLS
+  state persistence via the same `Identity.snapshotStorage` /
+  `restoreStorage` UniFFI surface 1.15f3 wired, wrapped under
+  a Keychain-resident key the way `IdentitySnapshotStore.kt`
+  wraps it under Android Keystore.
+
+## First-run instructions (Phase 1.14a)
+
+Pre-reqs above (macOS + Xcode CLI tools + Rust iOS targets).
+
+```bash
+# 1. Regenerate Swift bindings — idempotent. The .swift source
+#    + the FFI .h header land in target/bindings/swift/.
+just regen-bindings
+
+# 2. Cross-compile the staticlib for all three iOS targets +
+#    build the XCFramework. ~2 min on an M-series Mac (release
+#    profile, OpenMLS + RustCrypto all in).
+just build-ios
+
+# 3. Inspect the output.
+ls target/ios/LakkoCore.xcframework
+# → Info.plist, ios-arm64/, ios-arm64_x86_64-simulator/
+```
+
+That's all 1.14a ships. The Xcode project + SwiftUI app are
+1.14b / 1.14c.
+
+## Operator notes
+
+* The `.a` artefacts under `target/aarch64-apple-ios{-sim,}/release/`
+  + `target/ios/` are build outputs — gitignored via the
+  workspace-root `target/` rule.
+* `just build-ios` is **macOS-only** (gated via `[macos]`
+  recipe attribute in the justfile). On Linux / Windows the
+  recipe is silently skipped — same posture as
+  Android-toolchain recipes that need `cargo-ndk`.
+* `lakko-ffi-uniffi`'s public API is the **stable surface
+  contract** with iOS / Android / Tauri-desktop. Changes to it
+  require an ADR (mirror of the policy on the wasm-bindgen
+  surface for `apps/web` in 1.13a-b and the UniFFI surface for
+  `apps/android` in 1.15a).
