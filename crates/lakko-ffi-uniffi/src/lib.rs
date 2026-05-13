@@ -198,9 +198,54 @@ impl Identity {
         Ok(Self { inner })
     }
 
-    /// Public signature key bytes.
+    /// Derive a deterministic identity from a 32-byte seed.
+    ///
+    /// The OPAQUE export key (1.15d) is the canonical seed source
+    /// in production: same password ⇒ same Ed25519 + X25519
+    /// keypairs ⇒ same device identity across re-installs.
+    ///
+    /// Mirror of `apps/web`'s `Identity.fromSeed`. Caller MUST
+    /// pass exactly 32 bytes; longer / shorter input is rejected
+    /// at the underlying `MlsIdentity::from_seed` call.
+    #[uniffi::constructor]
+    pub fn from_seed(seed: Vec<u8>) -> Result<Self, FfiError> {
+        let inner = MlsIdentity::from_seed(&seed)?;
+        Ok(Self { inner })
+    }
+
+    /// Public signature key bytes (Ed25519, 32 bytes).
     pub fn signature_public_key(&self) -> Vec<u8> {
         self.inner.signature_public_key().to_vec()
+    }
+
+    /// Long-term X25519 public key bytes (32 bytes). Recipients
+    /// publish this in their identity bundle; senders use it to
+    /// seal the [`crate::contacts::ContactRequest`] intro
+    /// envelope.
+    pub fn x25519_public_key(&self) -> Vec<u8> {
+        self.inner.x25519_public_key().to_vec()
+    }
+
+    /// Long-term X25519 secret key bytes (32 bytes).
+    ///
+    /// Sensitive — the caller is expected to use it
+    /// transactionally (open one envelope, wipe) and never to
+    /// persist outside the Keystore-wrapped device-root layer
+    /// 1.15d3 set up.
+    pub fn x25519_secret_key(&self) -> Vec<u8> {
+        self.inner.x25519_secret_bytes().to_vec()
+    }
+
+    /// Ed25519 signing-seed bytes (32 bytes).
+    ///
+    /// `lakko_contacts::compose` consumes this to sign the
+    /// `ContactRequest` envelope; the wasm bridge exposes the
+    /// same accessor for the equivalent flow in `apps/web`.
+    ///
+    /// Sensitive — same lifecycle constraints as
+    /// [`x25519_secret_key`].
+    pub fn ed25519_seed(&self) -> Vec<u8> {
+        self.inner.ed25519_seed_bytes().to_vec()
     }
 
     /// Create a fresh KeyPackage in TLS wire form.
@@ -386,5 +431,49 @@ mod tests {
             .export_secret(&charlie, "lakko/test".into(), b"ctx".to_vec(), 32)
             .unwrap();
         assert_eq!(alice_export, charlie_export);
+    }
+
+    /// `Identity::from_seed` is deterministic for the same input
+    /// — the OPAQUE-export-key path 1.15d / 1.15e5 rely on for
+    /// "same password → same device identity across re-installs."
+    /// Verifies both that the constructor accepts a 32-byte seed
+    /// and that every public accessor (Ed25519 / X25519 / seed)
+    /// produces stable bytes across reconstruction.
+    #[test]
+    fn identity_from_seed_is_deterministic() {
+        let seed = [0x42u8; 32];
+        let a = Identity::from_seed(seed.to_vec()).unwrap();
+        let b = Identity::from_seed(seed.to_vec()).unwrap();
+
+        assert_eq!(a.signature_public_key(), b.signature_public_key());
+        assert_eq!(a.x25519_public_key(), b.x25519_public_key());
+        assert_eq!(a.x25519_secret_key(), b.x25519_secret_key());
+        assert_eq!(a.ed25519_seed(), b.ed25519_seed());
+
+        // Every key has the expected length.
+        assert_eq!(a.signature_public_key().len(), 32);
+        assert_eq!(a.x25519_public_key().len(), 32);
+        assert_eq!(a.x25519_secret_key().len(), 32);
+        assert_eq!(a.ed25519_seed().len(), 32);
+
+        // Note: `ed25519_seed()` returns the HKDF-derived
+        // Ed25519 sub-seed, not the input bytes. The input
+        // `seed` is hashed through HKDF with separate "info"
+        // labels for the Ed25519 and X25519 sub-keys (see
+        // `lakko_mls::Identity::from_seed` impl), so the
+        // accessor exposes the derived material, not the
+        // master. Still useful for the contact-request flow:
+        // it's the Ed25519 signing seed `lakko_contacts::compose`
+        // demands.
+    }
+
+    /// Different seeds produce different keys — sanity check that
+    /// the derivation actually depends on the input.
+    #[test]
+    fn identity_from_seed_distinct_inputs_distinct_outputs() {
+        let alice = Identity::from_seed(vec![1u8; 32]).unwrap();
+        let bob = Identity::from_seed(vec![2u8; 32]).unwrap();
+        assert_ne!(alice.signature_public_key(), bob.signature_public_key());
+        assert_ne!(alice.x25519_public_key(), bob.x25519_public_key());
     }
 }
