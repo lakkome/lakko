@@ -10,9 +10,11 @@ import kotlinx.coroutines.flow.update
 import me.lakko.app.auth.AuthRepository
 import me.lakko.app.auth.IdentitySecrets
 import me.lakko.app.auth.base64Encode
+import me.lakko.app.auth.base64UrlDecodeNoPad
 import me.lakko.app.auth.base64UrlEncodeNoPad
 import me.lakko.app.chat.ChatRepository
 import uniffi.lakko_ffi_uniffi.Identity
+import uniffi.lakko_ffi_uniffi.InviteCapability
 import uniffi.lakko_ffi_uniffi.composeInviteCapability
 
 /**
@@ -241,6 +243,176 @@ public class ContactsRepository(
     }
 
     /**
+     * Joiner-side: open + verify an invite-link slug, fetch the
+     * capability bytes from the discovery directory, consume
+     * (atomically bumps the server's used-counter + records
+     * this joiner in the dedup side table), and drive the
+     * full Accept flow — `sendContactRequestToBundle` →
+     * `ChatRepository.startGroupWith`. Surfaces every distinct
+     * step as an [AcceptInviteResult] variant so the
+     * `InviteLandingScreen` (1.15e11b) can render the right
+     * outcome copy.
+     *
+     * Steps:
+     *   1. base64url-decode the slug to recover the 32-byte
+     *      `blob_id`.
+     *   2. `DiscoveryClient.fetchInvite(blobId)` → capability
+     *      wire bytes (404 → `NotFound`).
+     *   3. `InviteCapability.decodeAndVerify(wire)` — local
+     *      Ed25519 signature check (a malicious server cannot
+     *      serve substituted bytes; the joiner re-verifies).
+     *   4. `isValidNow(now)` — expiry check. Expired → return
+     *      `Expired` without touching the consume counter.
+     *   5. `DiscoveryClient.consumeInvite(blobId, capabilityBytes,
+     *      joinerAccountId)` — atomic counter bump + dedup tag.
+     *      `Exhausted` / `AlreadyConsumed` short-circuit out
+     *      here without further side effects.
+     *   6. `ContactsClient.sendContactRequestToBundle(...)` —
+     *      ship a ContactRequest to the inviter's stranger
+     *      inbox (the bundle is already in hand from the
+     *      capability; no discovery lookup needed).
+     *   7. If a [ChatRepository] is wired,
+     *      `ChatRepository.startGroupWith(...)` — fetch the
+     *      inviter's KeyPackage + create the 1×1 MLS group +
+     *      ship the Welcome.
+     *
+     * The pending request list is **not** touched on this
+     * path — invites bypass the stranger-inbox + Accept dance
+     * by design (the cryptographic provenance is already
+     * established by the signature on the capability). The
+     * accepted-contacts list gets a fresh row with the
+     * resulting `groupIdHex` so the joiner can immediately
+     * Open Chat.
+     */
+    public suspend fun acceptInviteLink(slug: String): AcceptInviteResult {
+        val secrets = authRepo.identitySecrets.value
+            ?: return AcceptInviteResult.RequiresReauth
+        val blobId = try {
+            base64UrlDecodeNoPad(slug)
+        } catch (_: Throwable) {
+            return AcceptInviteResult.MalformedSlug
+        }
+        if (blobId.size != 32) return AcceptInviteResult.MalformedSlug
+
+        val capabilityBytes = try {
+            discoveryClientFactory().use { discovery ->
+                discovery.fetchInvite(blobId)
+            }
+        } catch (e: Throwable) {
+            return AcceptInviteResult.Failed(message = e.message ?: "fetch failed")
+        } ?: return AcceptInviteResult.NotFound
+
+        val cap = try {
+            InviteCapability.decodeAndVerify(capabilityBytes)
+        } catch (_: Throwable) {
+            // Signature / wire-format failure → treat as
+            // not-found from the user's perspective; the
+            // server might also have been compromised, but
+            // splitting hairs on that doesn't help the UI.
+            return AcceptInviteResult.NotFound
+        }
+        return cap.use { capability ->
+            val nowMs = System.currentTimeMillis().toULong()
+            if (!capability.isValidNow(nowMs)) {
+                return@use AcceptInviteResult.Expired
+            }
+
+            // Snapshot the bundle fields we need post-consume.
+            val inviterAccountId = capability.ownerAccountId()
+            val inviterSigPubkey = capability.ownerSignaturePubkey()
+            val inviterX25519Pubkey = capability.ownerX25519Pubkey()
+
+            // Consume — atomic counter bump + per-joiner dedup.
+            val consumeResult = try {
+                discoveryClientFactory().use { discovery ->
+                    discovery.consumeInvite(blobId, capabilityBytes, secrets.accountId)
+                }
+            } catch (e: Throwable) {
+                return@use AcceptInviteResult.Failed(
+                    message = e.message ?: "consume failed",
+                )
+            }
+            when (consumeResult) {
+                is me.lakko.app.discovery.ConsumeInviteResult.Exhausted ->
+                    return@use AcceptInviteResult.Exhausted
+                is me.lakko.app.discovery.ConsumeInviteResult.NotFound ->
+                    return@use AcceptInviteResult.NotFound
+                is me.lakko.app.discovery.ConsumeInviteResult.AlreadyConsumed ->
+                    return@use AcceptInviteResult.AlreadyAccepted
+                is me.lakko.app.discovery.ConsumeInviteResult.Consumed -> {
+                    // Drop the consumeResult counters — the UI
+                    // doesn't need them for the V1 flow.
+                }
+            }
+
+            // Ship a ContactRequest to the inviter's stranger
+            // inbox. The bundle is inline in the capability —
+            // no discovery round-trip needed.
+            val sendResult = try {
+                useClientWith(secrets) { client, sender ->
+                    client.sendContactRequestToBundle(
+                        senderSigningSeed = sender.signingSeed,
+                        senderAccountId = secrets.accountId,
+                        senderSignaturePubkey = sender.signaturePubkey,
+                        recipientAccountId = inviterAccountId,
+                        recipientSignaturePubkey = inviterSigPubkey,
+                        recipientX25519Pubkey = inviterX25519Pubkey,
+                        introMessage = ByteArray(0),
+                    )
+                }
+            } catch (e: Throwable) {
+                return@use AcceptInviteResult.Failed(
+                    message = e.message ?: "ContactRequest send failed",
+                )
+            }
+
+            // Drive the chat-side startGroupWith if wired.
+            val groupIdHex = if (chatRepo != null) {
+                try {
+                    chatRepo.startGroupWith(
+                        recipientAccountId = inviterAccountId,
+                        recipientSignaturePubkey = inviterSigPubkey,
+                    )
+                } catch (_: Throwable) {
+                    null
+                }
+            } else {
+                null
+            }
+
+            // Append the new contact to the accepted list so
+            // the user sees the result + can immediately Open
+            // Chat. Construct a synthetic IncomingContactRequest
+            // shell — the invite flow bypassed the stranger
+            // inbox, but the AcceptedContact UI shape expects
+            // one. The synthetic request's `messageId` is the
+            // DS receipt id from the outbound ContactRequest;
+            // `intro` is null.
+            val syntheticRequest = IncomingContactRequest(
+                messageId = sendResult.messageId,
+                fromPubkey = inviterSigPubkey,
+                fromAccountId = inviterAccountId,
+                fromPseudonym = ByteArray(32),
+                validAfterMs = nowMs,
+                intro = null,
+                createdAt = sendResult.createdAt,
+            )
+            mutableState.update { state ->
+                state.copy(
+                    accepted = state.accepted + AcceptedContact(
+                        request = syntheticRequest,
+                        groupIdHex = groupIdHex,
+                    ),
+                )
+            }
+            AcceptInviteResult.Accepted(
+                recipientAccountId = inviterAccountId,
+                groupIdHex = groupIdHex,
+            )
+        }
+    }
+
+    /**
      * Generate a fresh capability-based invite link.
      *
      * Builds the canonical [`InviteCapability`](uniffi.lakko_ffi_uniffi.InviteCapability)
@@ -460,6 +632,66 @@ public data class ContactsState(
      *  display. `null` clears on the next successful call. */
     val lastError: String? = null,
 )
+
+/**
+ * Discriminated outcome of [ContactsRepository.acceptInviteLink].
+ *
+ * Each variant maps to a distinct user-visible state on the
+ * [InviteLandingScreen] (1.15e11b):
+ *
+ *   * [Accepted] — every step succeeded; the inviter has a
+ *     fresh ContactRequest in their stranger inbox, the
+ *     MLS group is up (when `groupIdHex` is non-null —
+ *     `ChatRepository` was wired + `startGroupWith` worked).
+ *   * [AlreadyAccepted] — the server's per-joiner dedup tag
+ *     already had a row for `(blob_id, joiner_account_id)`.
+ *     The user landed on this URL before; the UI surfaces a
+ *     "you've already accepted this invite" hint + an "Open
+ *     chat" affordance pointing at the prior thread.
+ *   * [Expired] — the capability's `expiry_ms` is in the past
+ *     (local clock check); no server round-trip happened, no
+ *     state mutated.
+ *   * [Exhausted] — the server's `max_uses` ceiling was hit
+ *     by other joiners before our consume could land
+ *     (410 Gone).
+ *   * [NotFound] — server returned 404 (revoked / expired /
+ *     never-issued; the server folds these into one status to
+ *     deny status-code probing).
+ *   * [MalformedSlug] — the URL slug is not valid base64url
+ *     or doesn't decode to a 32-byte blob_id.
+ *   * [RequiresReauth] — [AuthRepository.identitySecrets] is
+ *     `null`. The UI surfaces a "please re-enter your
+ *     password" panel + a Login deep-link.
+ *   * [Failed] — any other underlying failure (transport,
+ *     OPAQUE / OPRF wire-format mismatch on the consume PoW,
+ *     MLS group creation throwing). Carries the inner error
+ *     message for diagnostics.
+ */
+public sealed interface AcceptInviteResult {
+    public data class Accepted(
+        val recipientAccountId: ByteArray,
+        /** Non-null when the chat surface was wired AND the
+         *  MLS handshake succeeded; the UI surfaces an "Open
+         *  chat" button pointing at the new thread. */
+        val groupIdHex: String?,
+    ) : AcceptInviteResult {
+        override fun equals(other: Any?): Boolean =
+            other is Accepted &&
+                recipientAccountId.contentEquals(other.recipientAccountId) &&
+                groupIdHex == other.groupIdHex
+        override fun hashCode(): Int =
+            recipientAccountId.contentHashCode() * 31 + (groupIdHex?.hashCode() ?: 0)
+    }
+
+    public data object AlreadyAccepted : AcceptInviteResult
+    public data object Expired : AcceptInviteResult
+    public data object Exhausted : AcceptInviteResult
+    public data object NotFound : AcceptInviteResult
+    public data object MalformedSlug : AcceptInviteResult
+    public data object RequiresReauth : AcceptInviteResult
+
+    public data class Failed(val message: String) : AcceptInviteResult
+}
 
 /** An invite link the owner has just generated this session. */
 public data class GeneratedInvite(

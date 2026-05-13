@@ -23,6 +23,40 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+
+            <!--
+              Phase 1.15e11a — deep-link handler for invite URLs.
+              The OS routes `https://lakko.me/i/<slug>` taps from
+              any app (Messages, email, browser) into MainActivity.
+              The Activity reads `intent.data` on launch / via
+              `onNewIntent`, extracts the slug, hands it to
+              `InviteIntake.publish(...)` so the Compose router can
+              navigate to the [InviteLandingScreen].
+
+              `autoVerify="true"` opts into Android App Links —
+              the OS fetches `https://lakko.me/.well-known/assetlinks.json`
+              to verify the app's SHA-256 cert fingerprint owns
+              the domain, then opens our app directly **without**
+              showing the disambiguation chooser. The assetlinks
+              file ships on the discovery service in a later
+              sprint; until then this filter still works but the
+              user sees the standard "open with…" picker.
+
+              The intent filter matches BOTH https + http so a
+              user in a censored region using a self-hosted
+              `lakko.me` mirror over plaintext still lands here.
+              The capability codec itself doesn't depend on TLS
+              for security — the bytes are Ed25519-signed.
+            -->
+            <intent-filter android:autoVerify="true">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="https" />
+                <data android:scheme="http" />
+                <data android:host="lakko.me" />
+                <data android:pathPrefix="/i/" />
+            </intent-filter>
         </activity>
 
     </application>
