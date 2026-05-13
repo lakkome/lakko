@@ -29,11 +29,16 @@
 //!     X25519 private key. Method (not constructor) because it
 //!     returns plaintext bytes, not another `ContactRequest`.
 
+use lakko_contacts::invite::{
+    compose as rust_invite_compose, compute_joiner_tag as rust_compute_joiner_tag,
+    decode_and_verify as rust_invite_decode, sign_revocation as rust_sign_revocation, BLOB_ID_LEN,
+};
 use lakko_contacts::{
     compose as rust_compose, decode_and_verify as rust_decode, open_envelope as rust_open,
     ContactError, ContactRequest as RustContactRequest, Direction as RustDirection,
-    IdentityPseudonym as RustIdentityPseudonym, PerRelationship as RustPerRelationship,
-    StrangerInbox as RustStrangerInbox, ACCOUNT_ID_LEN, PSEUDONYM_LEN,
+    IdentityPseudonym as RustIdentityPseudonym, InviteCapability as RustInviteCapability,
+    PerRelationship as RustPerRelationship, StrangerInbox as RustStrangerInbox, ACCOUNT_ID_LEN,
+    MAX_LABEL_LEN, PSEUDONYM_LEN,
 };
 use lakko_crypto::agreement::{PublicKey as X25519PublicKey, SecretKey as X25519SecretKey};
 use lakko_crypto::secret::SecretBytes;
@@ -347,6 +352,264 @@ impl ContactRequest {
     }
 }
 
+// ============================================================================
+// InviteCapability — ADR-0005 §13.3 / §13.4
+// ============================================================================
+
+/// Compose a signed invite capability. Returns the wire bytes.
+///
+/// Top-level free function rather than an associated function on
+/// [`InviteCapability`] for the same reason as
+/// [`compose_contact_request`]: UniFFI 0.28 rejects associated
+/// fns on `Object`-typed classes.
+///
+/// `owner_signing_seed` is the 32-byte Ed25519 seed the
+/// inviter's [`crate::Identity`] holds (see
+/// [`crate::Identity::ed25519_seed`] for the canonical source).
+/// `owner_account_id` is 16 bytes (UUIDv7).
+/// `owner_x25519_pubkey` is the inviter's long-term HPKE init
+/// key (32 bytes — [`crate::Identity::x25519_public_key`]).
+///
+/// `expiry_ms` is UNIX millis; pass `0` for the
+/// `NEVER_EXPIRES` sentinel — the UI **must** warn before
+/// honouring (stalking risk; ADR-0005 §13.3). `max_uses` is a
+/// UI hint only in the v1 wire format (server-side enforcement
+/// is the discovery service's job — 1.18d on the web side, the
+/// Kotlin invite-flow sub-sprint will pick this up). `0` means
+/// the `SINGLE_USE` sentinel. `bootstrap_referral = true` flips
+/// on the fresh-signup deep-link path (ADR-0005 §13.4).
+/// `label` is an optional human-visible UTF-8 string capped at
+/// [`MAX_LABEL_LEN`] bytes — empty string is fine.
+///
+/// # Errors
+///
+/// * [`FfiError::Contacts`] on wrong-length seed / account-id /
+///   x25519 pubkey, or on a label exceeding `MAX_LABEL_LEN`
+///   bytes.
+/// * [`FfiError::Crypto`] when `owner_x25519_pubkey` is not a
+///   valid X25519 public key (canonical encoding).
+#[uniffi::export]
+pub fn compose_invite_capability(
+    owner_signing_seed: Vec<u8>,
+    owner_account_id: Vec<u8>,
+    owner_x25519_pubkey: Vec<u8>,
+    expiry_ms: u64,
+    max_uses: u32,
+    bootstrap_referral: bool,
+    label: String,
+) -> Result<Vec<u8>, FfiError> {
+    if owner_signing_seed.len() != 32 {
+        return Err(FfiError::Contacts(
+            "ownerSigningSeed must be 32 bytes".to_string(),
+        ));
+    }
+    let mut seed = [0u8; 32];
+    seed.copy_from_slice(&owner_signing_seed);
+    let signing = SigningKey::from_seed(&seed);
+
+    if owner_account_id.len() != ACCOUNT_ID_LEN {
+        return Err(FfiError::Contacts(format!(
+            "ownerAccountId must be {ACCOUNT_ID_LEN} bytes",
+        )));
+    }
+    let mut acct = [0u8; ACCOUNT_ID_LEN];
+    acct.copy_from_slice(&owner_account_id);
+
+    if owner_x25519_pubkey.len() != PUBLIC_KEY_LEN {
+        return Err(FfiError::Contacts(format!(
+            "ownerX25519Pubkey must be {PUBLIC_KEY_LEN} bytes",
+        )));
+    }
+    let mut x_arr = [0u8; PUBLIC_KEY_LEN];
+    x_arr.copy_from_slice(&owner_x25519_pubkey);
+    let x25519_pub = X25519PublicKey::from_bytes(&x_arr)?;
+
+    if label.len() > MAX_LABEL_LEN {
+        return Err(FfiError::Contacts(format!(
+            "label is {} bytes, max is {MAX_LABEL_LEN}",
+            label.len(),
+        )));
+    }
+
+    let wire = rust_invite_compose(
+        &signing,
+        &acct,
+        &x25519_pub,
+        expiry_ms,
+        max_uses,
+        bootstrap_referral,
+        &label,
+    )?;
+    Ok(wire)
+}
+
+/// Composed and verified invite capability — capability-based
+/// contact-invite flow per ADR-0005 §13.3 / §13.4. Mirror of
+/// [`lakko_contacts::InviteCapability`].
+///
+/// Owners drive [`compose_invite_capability`] to produce signed
+/// wire bytes; the Kotlin layer base64url-encodes the bytes
+/// into a `https://<host>/i/<...>` URL and shares it OOB.
+/// Joiners drive [`InviteCapability::decode_and_verify`] on
+/// the bytes recovered from the URL slug, then read the
+/// getters to seed the first ContactRequest back to the
+/// inviter via the Kotlin-side `sendContactRequestToBundle`
+/// orchestrator (1.15e9-side work).
+///
+/// The v1 wire format is the 1.18a Rust struct verbatim — no
+/// server dependency, capability bytes live in the URL itself
+/// (server-side `/discovery/invite` storage is the discovery
+/// service's job, deferred 1.15e9-side work).
+#[derive(uniffi::Object)]
+pub struct InviteCapability {
+    inner: RustInviteCapability,
+}
+
+#[uniffi::export]
+impl InviteCapability {
+    /// Joiner-side: decode wire bytes, verify the Ed25519
+    /// signature, return the validated [`InviteCapability`].
+    ///
+    /// Does **not** check expiry — call [`is_valid_now`]
+    /// separately so the UI can render "this invite expired N
+    /// minutes ago" rather than a generic verification failure.
+    #[uniffi::constructor]
+    pub fn decode_and_verify(wire: Vec<u8>) -> Result<Self, FfiError> {
+        let inner = rust_invite_decode(&wire)?;
+        Ok(Self { inner })
+    }
+
+    /// Inviter's long-term Ed25519 verifying key (32 bytes).
+    pub fn owner_signature_pubkey(&self) -> Vec<u8> {
+        self.inner.owner_signature_pubkey.to_bytes().to_vec()
+    }
+
+    /// Inviter's `account_id` (16-byte UUIDv7).
+    pub fn owner_account_id(&self) -> Vec<u8> {
+        self.inner.owner_account_id.to_vec()
+    }
+
+    /// Inviter's long-term X25519 public key (32 bytes).
+    pub fn owner_x25519_pubkey(&self) -> Vec<u8> {
+        self.inner.owner_x25519_pubkey.to_bytes().to_vec()
+    }
+
+    /// UNIX milliseconds when the invite stops being valid.
+    /// `0` is the `NEVER_EXPIRES` sentinel — the UI must warn
+    /// before honouring (stalking risk; ADR-0005 §13.3).
+    pub fn expiry_ms(&self) -> u64 {
+        self.inner.expiry_ms
+    }
+
+    /// Max-uses hint. `0` is the `SINGLE_USE` sentinel. v1 is
+    /// a best-effort hint with no server enforcement — the
+    /// discovery service consume-counter (web 1.18d-side work,
+    /// 1.15e9 on the Kotlin side) lands the wire enforcement.
+    pub fn max_uses(&self) -> u32 {
+        self.inner.max_uses
+    }
+
+    /// `true` when this is a referral link for a fresh signup
+    /// (ADR-0005 §13.4) — the joiner's signup flow auto-sends
+    /// a ContactRequest back to the inviter on successful
+    /// account creation.
+    pub fn bootstrap_referral(&self) -> bool {
+        self.inner.bootstrap_referral
+    }
+
+    /// Optional human-visible label, UTF-8, ≤ [`MAX_LABEL_LEN`].
+    /// Empty string when the inviter didn't set one — the UI
+    /// fills in a default from the inviter's display name on
+    /// lookup.
+    pub fn label(&self) -> String {
+        self.inner.label.clone()
+    }
+
+    /// `true` iff the capability has not expired at `now_ms`.
+    /// `NEVER_EXPIRES` capabilities always return `true`.
+    pub fn is_valid_now(&self, now_ms: u64) -> bool {
+        self.inner.is_valid_now(now_ms)
+    }
+}
+
+/// Sign an invite-link revocation request.
+///
+/// The Kotlin client calls this just before posting
+/// `DELETE /discovery/invite/{blob_id}` so the body's
+/// `signature` field carries proof that the revocation came
+/// from the same Ed25519 key that signed the capability. The
+/// canonical bytes the signature covers — domain separator +
+/// `blob_id` + big-endian `signed_at_ms` — live in
+/// [`lakko_contacts::invite::revoke_canonical_bytes`]; both
+/// the server (`services/discovery`) and this helper drive
+/// sign / verify against the same layout.
+///
+/// Returns the 64-byte raw Ed25519 signature. Caller
+/// base64-encodes for the JSON body.
+///
+/// # Errors
+///
+/// * [`FfiError::Contacts`] on wrong-length signing seed
+///   (32 bytes required) or blob_id ([`BLOB_ID_LEN`] required).
+#[uniffi::export]
+pub fn sign_invite_revocation(
+    signing_seed: Vec<u8>,
+    blob_id: Vec<u8>,
+    signed_at_ms: u64,
+) -> Result<Vec<u8>, FfiError> {
+    if signing_seed.len() != 32 {
+        return Err(FfiError::Contacts(
+            "signingSeed must be 32 bytes".to_string(),
+        ));
+    }
+    let mut seed = [0u8; 32];
+    seed.copy_from_slice(&signing_seed);
+    let signing = SigningKey::from_seed(&seed);
+
+    if blob_id.len() != BLOB_ID_LEN {
+        return Err(FfiError::Contacts(format!(
+            "blobId must be {BLOB_ID_LEN} bytes",
+        )));
+    }
+    let mut blob_id_arr = [0u8; BLOB_ID_LEN];
+    blob_id_arr.copy_from_slice(&blob_id);
+
+    Ok(rust_sign_revocation(&signing, &blob_id_arr, signed_at_ms).to_vec())
+}
+
+/// Compute the per-joiner consume-dedup tag for an invite-link
+/// `(capability_bytes, joiner_account_id)` pair.
+///
+/// The Kotlin client calls this just before posting
+/// `POST /discovery/invite/{blob_id}/consume` so the server
+/// can dedup repeat consumes from the same joiner without
+/// learning the joiner's `account_id` in plaintext. Layout +
+/// privacy story: see
+/// [`lakko_contacts::invite::compute_joiner_tag`].
+///
+/// Returns the 32-byte HMAC-SHA-256 tag. Caller base64-encodes
+/// for the JSON body.
+///
+/// # Errors
+///
+/// * [`FfiError::Contacts`] if `joiner_account_id` is the
+///   wrong length — 16 bytes is the only supported shape
+///   today (UUIDv7 raw). The capability slice is unbounded by
+///   length here; the server-side ceiling enforces the actual
+///   cap.
+#[uniffi::export]
+pub fn compute_joiner_invite_tag(
+    capability_bytes: Vec<u8>,
+    joiner_account_id: Vec<u8>,
+) -> Result<Vec<u8>, FfiError> {
+    if joiner_account_id.len() != ACCOUNT_ID_LEN {
+        return Err(FfiError::Contacts(format!(
+            "joinerAccountId must be {ACCOUNT_ID_LEN} bytes",
+        )));
+    }
+    Ok(rust_compute_joiner_tag(&capability_bytes, &joiner_account_id).to_vec())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -485,6 +748,141 @@ mod tests {
         match err {
             FfiError::Contacts(msg) => assert!(msg.contains("16 bytes")),
             other => panic!("expected Contacts error, got {other:?}"),
+        }
+    }
+
+    // ===================================================================
+    // InviteCapability — ADR-0005 §13.3 / §13.4
+    // ===================================================================
+
+    /// `composeInviteCapability` → `decodeAndVerify` round-trips
+    /// every getter cleanly. Exercises the full v1 wire format
+    /// through the FFI boundary; the underlying Rust struct
+    /// already has comprehensive coverage in `lakko-contacts`'s
+    /// own tests, so we just verify the FFI-side bridging.
+    #[test]
+    fn invite_capability_round_trip() {
+        let alice_signing = SigningKey::from_seed(&[0xAAu8; 32]);
+        let alice_account_id = [0xA1u8; ACCOUNT_ID_LEN];
+        let alice_x25519 = InnerX25519SecretKey::from_bytes([0xBBu8; 32]).public_key();
+
+        // Positional args — Rust function calls don't have
+        // named-arg syntax; the parameter order matches the
+        // signature on `compose_invite_capability` above.
+        let wire = compose_invite_capability(
+            alice_signing.to_seed().to_vec(),
+            alice_account_id.to_vec(),
+            alice_x25519.to_bytes().to_vec(),
+            1_900_000_000_000, // expiry_ms
+            5,                 // max_uses
+            true,              // bootstrap_referral
+            "lunch group".to_string(),
+        )
+        .expect("compose");
+
+        let cap = InviteCapability::decode_and_verify(wire).expect("decode");
+        assert_eq!(
+            cap.owner_signature_pubkey(),
+            alice_signing.verifying_key().to_bytes().to_vec(),
+        );
+        assert_eq!(cap.owner_account_id(), alice_account_id.to_vec());
+        assert_eq!(cap.owner_x25519_pubkey(), alice_x25519.to_bytes().to_vec());
+        assert_eq!(cap.expiry_ms(), 1_900_000_000_000);
+        assert_eq!(cap.max_uses(), 5);
+        assert!(cap.bootstrap_referral());
+        assert_eq!(cap.label(), "lunch group");
+
+        // is_valid_now: well before expiry → true; way after → false.
+        assert!(cap.is_valid_now(1_700_000_000_000));
+        assert!(!cap.is_valid_now(2_000_000_000_000));
+    }
+
+    #[test]
+    fn invite_capability_rejects_oversize_label() {
+        let alice_signing = SigningKey::from_seed(&[0xAAu8; 32]);
+        let alice_x25519 = InnerX25519SecretKey::from_bytes([0xBBu8; 32]).public_key();
+        // MAX_LABEL_LEN + 1 byte — should bounce.
+        let too_long = "x".repeat(super::MAX_LABEL_LEN + 1);
+        let err = compose_invite_capability(
+            alice_signing.to_seed().to_vec(),
+            vec![0u8; ACCOUNT_ID_LEN],
+            alice_x25519.to_bytes().to_vec(),
+            0,
+            0,
+            false,
+            too_long,
+        )
+        .expect_err("expected oversize-label rejection");
+        match err {
+            FfiError::Contacts(msg) => assert!(msg.contains("max is")),
+            other => panic!("expected Contacts, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sign_invite_revocation_round_trip() {
+        let alice_signing = SigningKey::from_seed(&[0x77u8; 32]);
+        let blob_id = [0x99u8; BLOB_ID_LEN];
+        let sig = sign_invite_revocation(
+            alice_signing.to_seed().to_vec(),
+            blob_id.to_vec(),
+            1_700_000_000_000,
+        )
+        .expect("sign");
+        assert_eq!(sig.len(), 64, "Ed25519 signature must be 64 bytes");
+    }
+
+    #[test]
+    fn sign_invite_revocation_rejects_wrong_blob_id_length() {
+        let alice_signing = SigningKey::from_seed(&[0x77u8; 32]);
+        let err = sign_invite_revocation(
+            alice_signing.to_seed().to_vec(),
+            vec![0u8; 16], // wrong: BLOB_ID_LEN is 32
+            0,
+        )
+        .expect_err("expected wrong-length rejection");
+        match err {
+            FfiError::Contacts(msg) => assert!(msg.contains("bytes")),
+            other => panic!("expected Contacts, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn compute_joiner_invite_tag_round_trip() {
+        // Build a real capability + a fixed joiner account id;
+        // assert the tag is 32 bytes and is **deterministic**
+        // for the same inputs (the dedup property the server
+        // relies on).
+        let alice_signing = SigningKey::from_seed(&[0xAAu8; 32]);
+        let alice_x25519 = InnerX25519SecretKey::from_bytes([0xBBu8; 32]).public_key();
+        let wire = compose_invite_capability(
+            alice_signing.to_seed().to_vec(),
+            vec![0u8; ACCOUNT_ID_LEN],
+            alice_x25519.to_bytes().to_vec(),
+            0,
+            0,
+            false,
+            String::new(),
+        )
+        .expect("compose");
+        let joiner_account_id = vec![0xCCu8; ACCOUNT_ID_LEN];
+
+        let tag1 = compute_joiner_invite_tag(wire.clone(), joiner_account_id.clone()).expect("tag");
+        assert_eq!(tag1.len(), 32);
+        let tag2 = compute_joiner_invite_tag(wire, joiner_account_id).expect("tag");
+        assert_eq!(
+            tag1, tag2,
+            "same inputs must yield same tag (dedup property)"
+        );
+    }
+
+    #[test]
+    fn compute_joiner_invite_tag_rejects_wrong_account_id_length() {
+        let err = compute_joiner_invite_tag(vec![1u8, 2, 3], vec![0u8; 8])
+            .expect_err("expected wrong-length rejection");
+        match err {
+            FfiError::Contacts(msg) => assert!(msg.contains("16")),
+            other => panic!("expected Contacts, got {other:?}"),
         }
     }
 
