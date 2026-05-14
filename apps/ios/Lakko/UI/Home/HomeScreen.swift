@@ -25,17 +25,20 @@ public struct HomeScreen: View {
 
     public let account: SessionAccount
     public var onOpenContacts: () -> Void
+    public var onOpenChats: () -> Void
     public var onLogout: () -> Void
     public var onForgetDevice: () -> Void
 
     public init(
         account: SessionAccount,
         onOpenContacts: @escaping () -> Void = {},
+        onOpenChats: @escaping () -> Void = {},
         onLogout: @escaping () -> Void,
         onForgetDevice: @escaping () -> Void
     ) {
         self.account = account
         self.onOpenContacts = onOpenContacts
+        self.onOpenChats = onOpenChats
         self.onLogout = onLogout
         self.onForgetDevice = onForgetDevice
     }
@@ -65,9 +68,17 @@ public struct HomeScreen: View {
             .buttonStyle(.borderedProminent)
             .controlSize(.large)
 
+            Button(action: onOpenChats) {
+                Text("Open chats")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.large)
+
             Text(
-                "1×1 chat (1.14f) lands next. The Android + Web sides already " +
-                "ship Chats; the iOS port follows the same cadence."
+                "Accept a contact request from the Contacts screen and the " +
+                "1×1 MLS chat lands automatically. Tap into Chats to see " +
+                "every active thread."
             )
             .font(.footnote)
             .foregroundStyle(.secondary)

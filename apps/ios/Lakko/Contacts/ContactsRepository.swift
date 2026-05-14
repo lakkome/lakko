@@ -38,6 +38,19 @@ public final class ContactsRepository: ObservableObject {
     private let clientFactory: () -> ContactsClient
     private let discoveryClientFactory: () -> DiscoveryClient
 
+    /// Optional bridge to the chat surface. Wired in 1.14f4. When
+    /// non-nil, ``refreshInbox(waitSecs:)`` forwards Welcome
+    /// envelopes to ``ChatRepository/joinGroupFromWelcome(welcomeBytes:)``
+    /// so a peer's `startGroupWith` lands a live 1×1 chat on this
+    /// device. The ``acceptInviteLink(slug:)`` orchestrator drives
+    /// `startGroupWith` against the invite owner when wired.
+    ///
+    /// Marked `weak` to avoid a retain cycle — both repositories
+    /// live in `@StateObject` slots at the `LakkoApp` scope and
+    /// outlive any single view tree, so a `weak` reference is
+    /// safe.
+    public weak var chatRepository: ChatRepository?
+
     public init(
         authRepository: AuthRepository,
         clientFactory: @escaping () -> ContactsClient = { ContactsClient() },
@@ -132,11 +145,21 @@ public final class ContactsRepository: ObservableObject {
                 switch event {
                 case .contactRequest(let req):
                     newPending.append(req)
-                case .welcome:
-                    // 1.14e3 drops Welcomes on the floor. 1.14f
-                    // wires `ChatRepository.joinGroupFromWelcome`
-                    // here. The cursor has already advanced so
-                    // we won't re-process this row.
+                case .welcome(_, let welcomeBytes, _):
+                    // 1.14f4 wires `ChatRepository.joinGroupFromWelcome`
+                    // here. Best-effort: a single bad Welcome
+                    // doesn't block the inbox poll from advancing
+                    // the cursor for the rest of the events.
+                    // Cursor has already advanced so we won't
+                    // re-process this row on the next poll.
+                    if let chatRepository = chatRepository {
+                        do {
+                            _ = try await chatRepository
+                                .joinGroupFromWelcome(welcomeBytes: welcomeBytes)
+                        } catch {
+                            // best-effort
+                        }
+                    }
                     continue
                 }
             }
@@ -426,10 +449,26 @@ public final class ContactsRepository: ObservableObject {
             )
         }
 
-        // ChatRepository.startGroupWith lands in 1.14f. Until then
-        // `groupIdHex` is always nil — the UI surfaces "chat
-        // ready when 1.14f ships".
-        let groupIdHex: String? = nil
+        // 1.14f4 lights up the chat bridge — when wired, drive
+        // `ChatRepository.startGroupWith` against the invite
+        // owner so the joiner has a live 1×1 group on accept.
+        // Best-effort: a failure here drops back to the
+        // pre-1.14f4 "purely local marker" semantics with
+        // `groupIdHex = nil`; the UI surfaces a "chat creation
+        // failed, retry" hint.
+        let groupIdHex: String?
+        if let chatRepository = chatRepository {
+            do {
+                groupIdHex = try await chatRepository.startGroupWith(
+                    recipientAccountId: inviterAccountId,
+                    recipientSignaturePubkey: inviterSigPubkey
+                )
+            } catch {
+                groupIdHex = nil
+            }
+        } else {
+            groupIdHex = nil
+        }
 
         // Append the new contact to the accepted list so the user
         // sees the result. Construct a synthetic

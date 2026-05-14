@@ -24,10 +24,16 @@ public struct ContactsScreen: View {
 
     @ObservedObject public var viewModel: ContactsViewModel
     public var onBack: () -> Void
+    public var onOpenChat: (String) -> Void
 
-    public init(viewModel: ContactsViewModel, onBack: @escaping () -> Void) {
+    public init(
+        viewModel: ContactsViewModel,
+        onBack: @escaping () -> Void,
+        onOpenChat: @escaping (String) -> Void = { _ in }
+    ) {
         self.viewModel = viewModel
         self.onBack = onBack
+        self.onOpenChat = onOpenChat
     }
 
     public var body: some View {
@@ -181,7 +187,10 @@ public struct ContactsScreen: View {
                     viewModel.repositoryState.accepted,
                     id: \.request.messageId
                 ) { entry in
-                    AcceptedContactRow(entry: entry)
+                    AcceptedContactRow(
+                        entry: entry,
+                        onOpenChat: onOpenChat
+                    )
                 }
             }
         }
@@ -342,6 +351,7 @@ private struct PendingRequestRow: View {
 
 private struct AcceptedContactRow: View {
     let entry: AcceptedContact
+    let onOpenChat: (String) -> Void
 
     var body: some View {
         HStack {
@@ -349,7 +359,7 @@ private struct AcceptedContactRow: View {
                 Text(shortFingerprint(entry.request.fromPubkey))
                     .font(.system(.body, design: .monospaced))
                 if entry.groupIdHex == nil {
-                    Text("Open chat (coming in 1.14f)")
+                    Text("Chat creation failed — retry from Chats")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 } else {
@@ -359,6 +369,13 @@ private struct AcceptedContactRow: View {
                 }
             }
             Spacer()
+            if let groupIdHex = entry.groupIdHex {
+                Button(action: { onOpenChat(groupIdHex) }) {
+                    Text("Open")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
         }
         .padding(.vertical, 4)
     }

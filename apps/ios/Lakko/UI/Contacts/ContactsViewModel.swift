@@ -55,10 +55,22 @@ public final class ContactsViewModel: ObservableObject {
     // MARK: - Wiring
 
     private let repository: ContactsRepository
+    /// Optional bridge to the chat surface. When non-nil,
+    /// ``onAcceptClicked(messageId:)`` drives
+    /// ``ChatRepository/startGroupWith(recipientAccountId:recipientSignaturePubkey:)``
+    /// against the sender's published bundle before flipping the
+    /// contact row from pending → accepted; the resulting
+    /// `groupIdHex` lands on the resulting ``AcceptedContact`` so
+    /// the UI can surface an "Open chat" link.
+    private weak var chatRepository: ChatRepository?
     private var cancellables: Set<AnyCancellable> = []
 
-    public init(repository: ContactsRepository) {
+    public init(
+        repository: ContactsRepository,
+        chatRepository: ChatRepository? = nil
+    ) {
         self.repository = repository
+        self.chatRepository = chatRepository
         self.repositoryState = repository.state
         repository.$state
             .receive(on: RunLoop.main)
@@ -128,13 +140,54 @@ public final class ContactsViewModel: ObservableObject {
     /// `ContactsViewModel.DEFAULT_LONG_POLL_SECS` on Android.
     public static let defaultLongPollSecs: Int = 30
 
-    /// Accept a pending request. **1.14e4 ships local-state-only**
-    /// — the MLS chat-side handshake lives in 1.14f when
-    /// `ChatRepository` arrives. The Accept row gets a `nil`
-    /// `groupIdHex` until then; the UI surfaces an "Open chat
-    /// (coming in 1.14f)" hint.
+    /// Accept a pending request:
+    ///
+    ///   1. If a chat bridge is wired AND the request carries a
+    ///      `fromAccountId` (the sender's UUIDv7 — present on
+    ///      every v2 ContactRequest, absent on v1 legacy
+    ///      envelopes), call
+    ///      ``ChatRepository/startGroupWith(recipientAccountId:recipientSignaturePubkey:)``
+    ///      to fetch the sender's KeyPackage and ship them a
+    ///      Welcome.
+    ///   2. Move the row from `pending → accepted`, stashing the
+    ///      resulting `groupIdHex` (or `nil` if the bridge is
+    ///      unwired / the chat handshake failed).
+    ///
+    /// Failures during the chat handshake fall through to the
+    /// "move row to accepted with `groupIdHex = nil`" branch —
+    /// the user still sees the Accept confirmed in their UI; the
+    /// sender just won't get the Welcome (Phase-1 trade-off the
+    /// UI surfaces as "chat creation failed, retry").
     public func onAcceptClicked(messageId: Int64) {
-        repository.acceptContactRequest(messageId: messageId, groupIdHex: nil)
+        let pending = repository.state.pending.first { $0.messageId == messageId }
+        guard let pending = pending else { return }
+
+        guard let chatRepository = chatRepository,
+              let fromAccountId = pending.fromAccountId else {
+            // No chat bridge wired OR v1 legacy envelope without a
+            // sender account-id — fall back to the local-marker
+            // semantics.
+            repository.acceptContactRequest(messageId: messageId)
+            return
+        }
+        Task {
+            let groupIdHex: String?
+            do {
+                groupIdHex = try await chatRepository.startGroupWith(
+                    recipientAccountId: fromAccountId,
+                    recipientSignaturePubkey: pending.fromPubkey
+                )
+            } catch {
+                // chat handshake failed — fall back to the local-
+                // marker path with a "chat creation failed" hint
+                // on the accepted row.
+                groupIdHex = nil
+            }
+            repository.acceptContactRequest(
+                messageId: messageId,
+                groupIdHex: groupIdHex
+            )
+        }
     }
 
     public func onDeclineClicked(messageId: Int64) {

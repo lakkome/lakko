@@ -32,6 +32,11 @@ struct LakkoApp: App {
     /// the SessionRoot.
     @StateObject private var contactsRepository: ContactsRepository
 
+    /// Process-scoped ``ChatRepository`` (1.14f2). Owns the
+    /// canonical MLS Identity for the session + per-group
+    /// `Group` handles + snapshot persistence.
+    @StateObject private var chatRepository = ChatRepository()
+
     /// Process-scoped ``InviteIntake`` — populated by
     /// `.onOpenURL` when iOS hands us a Universal Link.
     @StateObject private var inviteIntake = InviteIntake()
@@ -53,6 +58,7 @@ struct LakkoApp: App {
             AppRoot()
                 .environmentObject(authRepository)
                 .environmentObject(contactsRepository)
+                .environmentObject(chatRepository)
                 .environmentObject(inviteIntake)
                 // Universal Links — iOS invokes this whenever the
                 // user taps a `https://lakko.me/i/<slug>` URL and
@@ -74,6 +80,7 @@ struct LakkoApp: App {
 struct AppRoot: View {
     @EnvironmentObject private var authRepository: AuthRepository
     @EnvironmentObject private var contactsRepository: ContactsRepository
+    @EnvironmentObject private var chatRepository: ChatRepository
     @EnvironmentObject private var inviteIntake: InviteIntake
 
     var body: some View {
@@ -100,6 +107,7 @@ struct AppRoot: View {
                 account: account,
                 authRepository: authRepository,
                 contactsRepository: contactsRepository,
+                chatRepository: chatRepository,
                 inviteIntake: inviteIntake
             )
         }
@@ -117,9 +125,11 @@ private struct SessionRoot: View {
     let account: SessionAccount
     let authRepository: AuthRepository
     let contactsRepository: ContactsRepository
+    let chatRepository: ChatRepository
     @ObservedObject var inviteIntake: InviteIntake
 
     @StateObject private var contactsVM: ContactsViewModel
+    @StateObject private var chatListVM: ChatListViewModel
 
     @State private var destination: SessionDestination = .home
 
@@ -127,61 +137,113 @@ private struct SessionRoot: View {
         account: SessionAccount,
         authRepository: AuthRepository,
         contactsRepository: ContactsRepository,
+        chatRepository: ChatRepository,
         inviteIntake: InviteIntake
     ) {
         self.account = account
         self.authRepository = authRepository
         self.contactsRepository = contactsRepository
+        self.chatRepository = chatRepository
         self.inviteIntake = inviteIntake
+        // Wire the chat bridge on the contacts repository so
+        // refreshInbox can forward Welcomes + acceptInviteLink can
+        // drive startGroupWith. The assignment is idempotent on
+        // body re-evaluations (same `chatRepository` reference
+        // each time).
+        contactsRepository.chatRepository = chatRepository
         self._contactsVM = StateObject(
-            wrappedValue: ContactsViewModel(repository: contactsRepository)
+            wrappedValue: ContactsViewModel(
+                repository: contactsRepository,
+                chatRepository: chatRepository
+            )
+        )
+        self._chatListVM = StateObject(
+            wrappedValue: ChatListViewModel(repository: chatRepository)
         )
     }
 
     var body: some View {
-        // Pending invite slug takes priority over the persistent
-        // destination toggle — when the user taps a deep link
-        // mid-session, the landing screen shows up over whatever
-        // they were doing. `pendingSlug` is parked in the
-        // ``InviteIntake`` publisher; clearing it (via
-        // ``InviteLandingViewModel/dismiss()``) returns the user to
-        // the previous `destination`.
-        if let slug = inviteIntake.pendingSlug {
-            InviteLandingScreen(
-                viewModel: InviteLandingViewModel(
-                    slug: slug,
-                    repository: contactsRepository,
-                    intake: inviteIntake
-                ),
-                onDone: {
-                    // InviteLandingViewModel.dismiss() already
-                    // called intake.clear() — the publisher flips
-                    // to nil + this view tree rebuild lands us
-                    // back on the prior destination.
+        Group {
+            // Pending invite slug takes priority over the
+            // persistent destination toggle — when the user taps
+            // a deep link mid-session, the landing screen shows up
+            // over whatever they were doing.
+            if let slug = inviteIntake.pendingSlug {
+                InviteLandingScreen(
+                    viewModel: InviteLandingViewModel(
+                        slug: slug,
+                        repository: contactsRepository,
+                        intake: inviteIntake
+                    ),
+                    onDone: {
+                        // InviteLandingViewModel.dismiss() already
+                        // called intake.clear() — the publisher
+                        // flips to nil + this view tree rebuild
+                        // lands us back on the prior destination.
+                    }
+                )
+            } else {
+                switch destination {
+                case .home:
+                    HomeScreen(
+                        account: account,
+                        onOpenContacts: { destination = .contacts },
+                        onOpenChats: { destination = .chats },
+                        onLogout: authRepository.logout,
+                        onForgetDevice: authRepository.forgetDevice
+                    )
+                case .contacts:
+                    ContactsScreen(
+                        viewModel: contactsVM,
+                        onBack: { destination = .home },
+                        onOpenChat: { groupIdHex in
+                            destination = .chat(groupIdHex: groupIdHex)
+                        }
+                    )
+                case .chats:
+                    ChatListScreen(
+                        viewModel: chatListVM,
+                        onBack: { destination = .home },
+                        onOpenChat: { groupIdHex in
+                            destination = .chat(groupIdHex: groupIdHex)
+                        }
+                    )
+                case .chat(let groupIdHex):
+                    NavigationStack {
+                        ChatScreen(
+                            viewModel: ChatViewModel(
+                                repository: chatRepository,
+                                groupIdHex: groupIdHex
+                            ),
+                            onBack: { destination = .chats }
+                        )
+                    }
                 }
-            )
-        } else {
-            switch destination {
-            case .home:
-                HomeScreen(
-                    account: account,
-                    onOpenContacts: { destination = .contacts },
-                    onLogout: authRepository.logout,
-                    onForgetDevice: authRepository.forgetDevice
-                )
-            case .contacts:
-                ContactsScreen(
-                    viewModel: contactsVM,
-                    onBack: { destination = .home }
-                )
+            }
+        }
+        // Bootstrap the ChatRepository whenever the auth
+        // repository has fresh `identitySecrets`. The publisher
+        // fires on every login/signup/recover; bootstrap is
+        // idempotent for the same account id, so re-running on a
+        // body re-evaluation is harmless. **NOT** populated on a
+        // session-restore from disk — the export key isn't
+        // persisted, so the user has to re-login for MLS-side
+        // operations to work. The chat screens render but
+        // `sendMessage` will throw with a clear error until the
+        // bootstrap lands.
+        .task(id: authRepository.identitySecrets?.accountId) {
+            if let secrets = authRepository.identitySecrets {
+                chatRepository.bootstrap(secrets: secrets)
             }
         }
     }
 }
 
-private enum SessionDestination {
+private enum SessionDestination: Equatable {
     case home
     case contacts
+    case chats
+    case chat(groupIdHex: String)
 }
 
 /// Anonymous-state router — three destinations (Signup / Login /
