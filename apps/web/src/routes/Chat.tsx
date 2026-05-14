@@ -39,11 +39,28 @@ import { ChatClient } from "../chat/client";
 import { ContactsClient } from "../contacts/client";
 import { loadAccepted } from "../contacts/local-store";
 import type { IncomingChatEvent } from "../chat/client";
+import {
+  composeEnvelope,
+  downloadAndDecryptRef,
+  encryptAndUploadFile,
+  formatAttachmentSize,
+  isInlinePreviewable,
+  saveDecryptedBytes,
+  type AttachmentRefBytes,
+  AttachmentSizeError,
+  AttachmentMissingError,
+  MAX_ATTACHMENT_BYTES,
+} from "../chat/attachments";
 import { useChats, type ActiveGroup } from "../chat/ChatContext";
 import { paths } from "./paths";
 
 /** A timeline entry — verified incoming events PLUS optimistic
- *  outbound bubbles that haven't been confirmed yet. */
+ *  outbound bubbles that haven't been confirmed yet.
+ *
+ *  Phase 1.19c2: outgoing bubbles now carry an optional
+ *  `attachments` field so the optimistic UI can show the chips
+ *  immediately after Send (the bytes are already uploaded to
+ *  storage by the time the bubble renders). */
 type TimelineRow =
   | { kind: "incoming"; event: IncomingChatEvent }
   | {
@@ -52,6 +69,7 @@ type TimelineRow =
        *  from any DS-assigned id. */
       tempId: number;
       plaintext: string;
+      attachments: AttachmentRefBytes[];
       ack: "pending" | "sent";
       /** Filled when ack flips to "sent". */
       messageId?: number;
@@ -166,6 +184,21 @@ function ChatView(props: {
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
   const [notice, setNotice] = createSignal<string | null>(null);
+  // 1.19c2 — attachments staged in the composer. The user picks
+  // file(s); each gets encrypt+upload immediately so the ref is
+  // ready by the time they hit Send. Cleared on Send, on
+  // explicit per-chip remove, and on navigation away.
+  const [pendingAttachments, setPendingAttachments] = createSignal<
+    AttachmentRefBytes[]
+  >([]);
+  const [uploading, setUploading] = createSignal(false);
+  // Cached per-blob_id plaintext blobs for inline preview +
+  // re-download. Keyed by hex(blob_id). Re-decrypt is cheap (no
+  // network round-trip after the first hit) but caching keeps
+  // a clicked image from re-fetching on every render.
+  const [decryptedCache, setDecryptedCache] = createSignal<
+    Map<string, { bytes: Uint8Array; objectUrl: string | null }>
+  >(new Map());
   // 1.18g — Add-member panel state. Inline form expands below
   // the chat header when toggled; collapses after a successful
   // add or explicit Cancel.
@@ -270,22 +303,38 @@ function ChatView(props: {
   async function onSend(e: SubmitEvent): Promise<void> {
     e.preventDefault();
     const text = input();
-    if (text.length === 0) return;
+    const attached = pendingAttachments();
+    // 1.19c2: attachment-only messages are valid (empty text +
+    // ≥1 attachment); pre-1.19 text-only messages still valid
+    // (≥1 char text + zero attachments). The only invalid
+    // input is the all-empty composer.
+    if (text.length === 0 && attached.length === 0) return;
     setError(null);
 
     // Optimistic outbound bubble.
     const tempId = nextTempId++;
     setRows([
       ...rows(),
-      { kind: "outgoing", tempId, plaintext: text, ack: "pending" },
+      {
+        kind: "outgoing",
+        tempId,
+        plaintext: text,
+        attachments: attached,
+        ack: "pending",
+      },
     ]);
     setInput("");
+    setPendingAttachments([]);
 
     try {
+      // 1.19c2: compose the JSON envelope from (text, refs).
+      // Empty refs ⇒ pure-text envelope; non-empty ⇒ multi-
+      // attachment envelope via the wasm EnvelopeBuilder.
+      const envelopeBytes = await composeEnvelope(text, attached);
       const result = await chat.sendMessage(
         props.requireIdentity(),
         props.entry.group,
-        new TextEncoder().encode(text),
+        envelopeBytes,
       );
       // Flip ack → sent + record DS id.
       setRows(
@@ -301,11 +350,123 @@ function ChatView(props: {
         ),
       );
     } catch (err) {
-      // Roll back the optimistic bubble + surface the error.
+      // Roll back the optimistic bubble + restore the
+      // attachments to the composer so the user can retry
+      // without re-picking the same files.
       setRows(
         rows().filter((r) => !(r.kind === "outgoing" && r.tempId === tempId)),
       );
+      setPendingAttachments(attached);
       setError(formatError(err));
+    }
+  }
+
+  /**
+   * Handle the composer's `<input type="file">` change event.
+   * Iterates the selected files, encrypts + uploads each
+   * sequentially (so a slow user-stream doesn't fan out N
+   * parallel storage PUTs), appends the resulting refs to the
+   * pending list. Failed uploads surface a per-file error and
+   * are not appended.
+   */
+  async function onFilesPicked(e: Event): Promise<void> {
+    const target = e.currentTarget as HTMLInputElement;
+    const files = target.files;
+    if (files === null || files.length === 0) return;
+    setError(null);
+    setUploading(true);
+    try {
+      for (const file of Array.from(files)) {
+        try {
+          const ref = await encryptAndUploadFile(file);
+          setPendingAttachments([...pendingAttachments(), ref]);
+        } catch (err) {
+          if (err instanceof AttachmentSizeError) {
+            setError(
+              `"${file.name}" is ${formatAttachmentSize(err.got)} — over the ${formatAttachmentSize(err.max)} limit.`,
+            );
+          } else {
+            setError(`upload of "${file.name}" failed: ${formatError(err)}`);
+          }
+          // Stop the loop on the first failure — a network
+          // outage isn't going to be fixed by trying the next
+          // file. The user picks again after surfacing.
+          break;
+        }
+      }
+    } finally {
+      setUploading(false);
+      // Reset the input so the same file can be re-picked
+      // (browsers suppress the change event when the value is
+      // identical).
+      target.value = "";
+    }
+  }
+
+  function removePendingAttachment(index: number): void {
+    setPendingAttachments(
+      pendingAttachments().filter((_, i) => i !== index),
+    );
+  }
+
+  /**
+   * Download + decrypt a received attachment + offer a Save
+   * dialog. Used by the attachment-chip Save button on incoming
+   * bubbles.
+   */
+  async function onDownloadAttachment(
+    ref: AttachmentRefBytes,
+  ): Promise<void> {
+    setError(null);
+    try {
+      const bytes = await downloadAndDecryptRef(ref);
+      saveDecryptedBytes(
+        bytes,
+        ref.name ?? `attachment-${blobIdHex(ref.blobId).slice(0, 8)}`,
+        ref.mime,
+      );
+    } catch (err) {
+      if (err instanceof AttachmentMissingError) {
+        setError(
+          "The attachment is no longer available on the server.",
+        );
+      } else {
+        setError(`download failed: ${formatError(err)}`);
+      }
+    }
+  }
+
+  /**
+   * Inline-preview an image attachment. Fetches once + caches
+   * the resulting object URL in `decryptedCache`; subsequent
+   * clicks on the same chip are instant.
+   */
+  async function onPreviewAttachment(
+    ref: AttachmentRefBytes,
+  ): Promise<void> {
+    const key = blobIdHex(ref.blobId);
+    const cached = decryptedCache().get(key);
+    if (cached !== undefined && cached.objectUrl !== null) {
+      window.open(cached.objectUrl, "_blank");
+      return;
+    }
+    setError(null);
+    try {
+      const bytes = await downloadAndDecryptRef(ref);
+      const blob = new Blob([bytes.slice()], {
+        type: ref.mime ?? "application/octet-stream",
+      });
+      const url = URL.createObjectURL(blob);
+      const next = new Map(decryptedCache());
+      next.set(key, { bytes, objectUrl: url });
+      setDecryptedCache(next);
+      window.open(url, "_blank");
+    } catch (err) {
+      if (err instanceof AttachmentMissingError) {
+        setError("The attachment is no longer available on the server.");
+      } else {
+        setError(`preview failed: ${formatError(err)}`);
+      }
     }
   }
 
@@ -636,8 +797,86 @@ function ChatView(props: {
             gap: "0.4rem",
           }}
         >
-          <For each={rows()}>{(row) => <TimelineBubble row={row} />}</For>
+          <For each={rows()}>
+            {(row) => (
+              <TimelineBubble
+                row={row}
+                onDownload={onDownloadAttachment}
+                onPreview={onPreviewAttachment}
+              />
+            )}
+          </For>
         </ol>
+      </Show>
+
+      {/* 1.19c2 — pending-attachments tray. Renders above the
+         text composer when ≥1 file is staged; each chip shows
+         the filename + size with a × to drop it. The chips
+         carry no preview because the local bytes have been
+         GC'd after encrypt — re-decrypt would round-trip
+         through storage, which is overkill for a composer
+         scratch row. */}
+      <Show when={pendingAttachments().length > 0 || uploading()}>
+        <div
+          style={{
+            display: "flex",
+            "flex-wrap": "wrap",
+            gap: "0.4rem",
+            padding: "0.5rem",
+            border: "1px solid var(--surface-border)",
+            "border-radius": "var(--radius-md)",
+            background: "var(--surface-elevated)",
+          }}
+        >
+          <For each={pendingAttachments()}>
+            {(ref, i) => (
+              <span
+                style={{
+                  display: "inline-flex",
+                  "align-items": "center",
+                  gap: "0.35rem",
+                  padding: "0.2rem 0.5rem",
+                  background: "var(--surface-bg)",
+                  border: "1px solid var(--surface-border)",
+                  "border-radius": "var(--radius-sm)",
+                  "font-size": "0.8rem",
+                }}
+              >
+                <span>{ref.name ?? "(unnamed)"}</span>
+                <span style={{ color: "var(--surface-muted)" }}>
+                  · {formatAttachmentSize(ref.size)}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => removePendingAttachment(i())}
+                  disabled={busy()}
+                  aria-label="Remove attachment"
+                  style={{
+                    border: "none",
+                    background: "transparent",
+                    cursor: "pointer",
+                    "font-size": "1rem",
+                    "line-height": 1,
+                    padding: 0,
+                  }}
+                >
+                  ×
+                </button>
+              </span>
+            )}
+          </For>
+          <Show when={uploading()}>
+            <span
+              style={{
+                color: "var(--surface-muted)",
+                "font-size": "0.8rem",
+                "align-self": "center",
+              }}
+            >
+              Encrypting + uploading…
+            </span>
+          </Show>
+        </div>
       </Show>
 
       <form
@@ -649,6 +888,37 @@ function ChatView(props: {
           "border-top": "1px solid var(--surface-border)",
         }}
       >
+        {/* 1.19c2 — Attach button. The hidden `<input
+            type="file" multiple>` is keyed by uploading() so
+            the same file can be re-picked after a failed
+            upload, and the label drives the click for a tidy
+            chrome-less control. */}
+        <label
+          style={{
+            display: "inline-flex",
+            "align-items": "center",
+            "justify-content": "center",
+            padding: "0 0.6rem",
+            border: "1px solid var(--surface-border)",
+            "border-radius": "var(--radius-md)",
+            background: "var(--surface-elevated)",
+            cursor: uploading() ? "wait" : "pointer",
+            opacity: uploading() ? 0.6 : 1,
+          }}
+          aria-label="Attach files"
+          title={`Attach files (up to ${formatAttachmentSize(MAX_ATTACHMENT_BYTES)} each)`}
+        >
+          📎
+          <input
+            type="file"
+            multiple
+            disabled={uploading()}
+            onChange={(e) => {
+              void onFilesPicked(e);
+            }}
+            style={{ display: "none" }}
+          />
+        </label>
         <input
           type="text"
           placeholder="Message"
@@ -660,7 +930,10 @@ function ChatView(props: {
         <button
           class="primary"
           type="submit"
-          disabled={input().length === 0}
+          disabled={
+            uploading() ||
+            (input().length === 0 && pendingAttachments().length === 0)
+          }
         >
           Send
         </button>
@@ -673,7 +946,11 @@ function ChatView(props: {
 // Subcomponents
 // ---------------------------------------------------------------
 
-function TimelineBubble(props: { row: TimelineRow }): JSX.Element {
+function TimelineBubble(props: {
+  row: TimelineRow;
+  onDownload: (ref: AttachmentRefBytes) => void | Promise<void>;
+  onPreview: (ref: AttachmentRefBytes) => void | Promise<void>;
+}): JSX.Element {
   if (props.row.kind === "incoming") {
     const ev = props.row.event;
     if (ev.kind === "system") {
@@ -701,7 +978,17 @@ function TimelineBubble(props: { row: TimelineRow }): JSX.Element {
           "max-width": "75%",
         }}
       >
-        <div style={{ "white-space": "pre-wrap" }}>{ev.plaintext}</div>
+        <Show when={ev.text.length > 0}>
+          <div style={{ "white-space": "pre-wrap" }}>{ev.text}</div>
+        </Show>
+        <Show when={ev.attachments.length > 0}>
+          <AttachmentChips
+            attachments={ev.attachments}
+            onDownload={props.onDownload}
+            onPreview={props.onPreview}
+            tone="incoming"
+          />
+        </Show>
         <div
           style={{
             color: "var(--surface-muted)",
@@ -728,7 +1015,17 @@ function TimelineBubble(props: { row: TimelineRow }): JSX.Element {
         opacity: r.ack === "pending" ? 0.7 : 1,
       }}
     >
-      <div style={{ "white-space": "pre-wrap" }}>{r.plaintext}</div>
+      <Show when={r.plaintext.length > 0}>
+        <div style={{ "white-space": "pre-wrap" }}>{r.plaintext}</div>
+      </Show>
+      <Show when={r.attachments.length > 0}>
+        <AttachmentChips
+          attachments={r.attachments}
+          onDownload={props.onDownload}
+          onPreview={props.onPreview}
+          tone="outgoing"
+        />
+      </Show>
       <div style={{ "font-size": "0.75rem", "margin-top": "0.2rem" }}>
         you ·{" "}
         {r.ack === "pending"
@@ -736,6 +1033,107 @@ function TimelineBubble(props: { row: TimelineRow }): JSX.Element {
           : `sent · #${r.messageId ?? "?"} · ${r.createdAt ?? ""}`}
       </div>
     </li>
+  );
+}
+
+/**
+ * Render the attachment-chip strip below a bubble's text body.
+ * Each chip shows `name · size` plus action buttons:
+ *
+ *   * **Open** — inline-preview when the MIME is a known image
+ *     format (`isInlinePreviewable`); fetches + decrypts the
+ *     bytes lazily, caches the object URL.
+ *   * **Save** — download + decrypt + trigger a save dialog.
+ *
+ * `tone` shifts the chip colour so they stay legible inside
+ * both the incoming-grey and outgoing-accent bubble bodies.
+ */
+function AttachmentChips(props: {
+  attachments: AttachmentRefBytes[];
+  onDownload: (ref: AttachmentRefBytes) => void | Promise<void>;
+  onPreview: (ref: AttachmentRefBytes) => void | Promise<void>;
+  tone: "incoming" | "outgoing";
+}): JSX.Element {
+  const chipBg = props.tone === "incoming" ? "var(--surface-bg)" : "rgba(255,255,255,0.15)";
+  const chipText = props.tone === "incoming" ? undefined : "inherit";
+  return (
+    <div
+      style={{
+        display: "flex",
+        "flex-wrap": "wrap",
+        gap: "0.35rem",
+        "margin-top": "0.4rem",
+      }}
+    >
+      <For each={props.attachments}>
+        {(ref) => (
+          <span
+            style={{
+              display: "inline-flex",
+              "align-items": "center",
+              gap: "0.35rem",
+              padding: "0.25rem 0.5rem",
+              background: chipBg,
+              color: chipText,
+              "border-radius": "var(--radius-sm)",
+              "font-size": "0.8rem",
+              "max-width": "100%",
+            }}
+          >
+            <span
+              style={{
+                "white-space": "nowrap",
+                overflow: "hidden",
+                "text-overflow": "ellipsis",
+                "max-width": "20ch",
+              }}
+              title={ref.name ?? "(unnamed)"}
+            >
+              {ref.name ?? "(unnamed)"}
+            </span>
+            <span style={{ opacity: 0.7 }}>
+              · {formatAttachmentSize(ref.size)}
+            </span>
+            <Show when={isInlinePreviewable(ref)}>
+              <button
+                type="button"
+                onClick={() => {
+                  void props.onPreview(ref);
+                }}
+                style={{
+                  border: "none",
+                  background: "transparent",
+                  color: "inherit",
+                  cursor: "pointer",
+                  "text-decoration": "underline",
+                  padding: 0,
+                  "font-size": "0.8rem",
+                }}
+              >
+                Open
+              </button>
+            </Show>
+            <button
+              type="button"
+              onClick={() => {
+                void props.onDownload(ref);
+              }}
+              style={{
+                border: "none",
+                background: "transparent",
+                color: "inherit",
+                cursor: "pointer",
+                "text-decoration": "underline",
+                padding: 0,
+                "font-size": "0.8rem",
+              }}
+            >
+              Save
+            </button>
+          </span>
+        )}
+      </For>
+    </div>
   );
 }
 
@@ -801,4 +1199,14 @@ function shortFingerprint(pubkey: Uint8Array): string {
 function formatError(err: unknown): string {
   if (err instanceof Error) return err.message;
   return String(err);
+}
+
+/** Lowercase hex of a small byte array, for short
+ *  filename-fallback when an attachment ref carries no name. */
+function blobIdHex(bytes: Uint8Array): string {
+  let out = "";
+  for (const b of bytes) {
+    out += b.toString(16).padStart(2, "0");
+  }
+  return out;
 }

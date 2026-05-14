@@ -71,6 +71,7 @@ import type {
   Identity as WasmIdentity,
 } from "../../wasm/lakko_ffi_wasm";
 import type { IdentitySecrets } from "../auth/AuthContext";
+import { parseEnvelope, type AttachmentRefBytes } from "./attachments";
 
 /** Result of `sendMessage`. */
 export interface SendMessageResult {
@@ -84,11 +85,28 @@ export interface SendMessageResult {
  *  `Commit` and `Proposal` rows advance group state but don't
  *  carry user-visible bytes; we surface them as
  *  `kind: "system"` so the UI can render a thin separator if
- *  it wants. */
+ *  it wants.
+ *
+ *  Phase 1.19c2: the application variant now carries
+ *  `(text, attachments)` from the 1.19a JSON envelope (parsed
+ *  via the wasm `parseEnvelope` surface from 1.19b). Legacy
+ *  pre-1.19 plain-UTF-8 bytes collapse to
+ *  `{ text: <utf-8 lossy>, attachments: [] }` via the same
+ *  envelope parser's documented fallback paths — existing
+ *  bubbles keep rendering unchanged. `plaintext` is preserved
+ *  as an alias of `text` for transitional call-site
+ *  compatibility. */
 export type IncomingChatEvent =
   | {
       kind: "application";
       messageId: number;
+      /** Plain user-visible text from the envelope (empty
+       *  string is valid — attachment-only message). */
+      text: string;
+      /** Zero or more attachment refs from the envelope. */
+      attachments: AttachmentRefBytes[];
+      /** Alias of `text` — kept for the few call sites that
+       *  still read `plaintext`. New code should read `text`. */
       plaintext: string;
       createdAt: string;
     }
@@ -322,7 +340,11 @@ export class ChatClient {
       // that we rejected). Track the mutation so the persist
       // hook still fires.
       mutated = true;
-      events.push(toEvent(message.id, message.createdAt, processed));
+      // 1.19c2: application messages run through the wasm
+      // envelope parser (which is async because it has to
+      // resolve the cached wasm module promise on first call,
+      // then synchronous thereafter). System rows skip it.
+      events.push(await toEvent(message.id, message.createdAt, processed));
     }
 
     if (mutated) {
@@ -333,21 +355,30 @@ export class ChatClient {
   }
 }
 
-function toEvent(
+async function toEvent(
   messageId: number,
   createdAt: string,
   processed: ReturnType<WasmGroup["processIncoming"]>,
-): IncomingChatEvent {
+): Promise<IncomingChatEvent> {
   // The WASM `ProcessedMessage.kind` is a PascalCase string
   // discriminator: "Application" | "Commit" | "Proposal" |
   // "ExternalJoinProposal" (see lakko-ffi-wasm/src/mls.rs).
   if (processed.kind === "Application" && processed.applicationData !== undefined) {
+    // 1.19c2: feed the application bytes through the wasm
+    // `parseEnvelope` surface. Legacy pre-1.19 plain-UTF-8
+    // bytes collapse cleanly to `{ text: <utf-8 lossy>,
+    // attachments: [] }` — bubbles from older builds still
+    // render unchanged. New 1.19 envelopes surface a
+    // populated attachments list the UI can render as chips.
+    const { text, attachments } = await parseEnvelope(processed.applicationData);
     return {
       kind: "application",
       messageId,
-      plaintext: new TextDecoder("utf-8", { fatal: false }).decode(
-        processed.applicationData,
-      ),
+      text,
+      attachments,
+      // Alias kept for transitional call-site compatibility;
+      // identical to `text`.
+      plaintext: text,
       createdAt,
     };
   }
