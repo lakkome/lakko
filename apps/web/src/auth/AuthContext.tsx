@@ -53,6 +53,11 @@ import { AuthClient } from "./client";
 import { base64Decode, base64Encode } from "./account-id";
 import { deriveDeviceRootKey } from "./device-key";
 import { deleteDeviceKey, getDeviceKey, putDeviceKey } from "./key-store";
+import {
+  deleteSessionToken,
+  getSessionToken,
+  putSessionToken,
+} from "./session-token-store";
 import { loadWasm } from "../wasm";
 import {
   DiscoveryClient,
@@ -248,7 +253,21 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
   const chats = useChats();
 
   onMount(() => {
-    void hydrateFromStorage().then(setState);
+    // Phase 1.13c: hydrate both the AuthState AND the persisted
+    // session token in one IDB round-trip — the token requires the
+    // device key to decrypt, which `hydrateFromStorage` already
+    // probes. Installing the token on the DiscoveryClient lets
+    // protected reads (e.g. invite consume) work for a returning
+    // user without forcing a password re-entry. The export key is
+    // NOT persisted, so signing-requiring flows (sendContactRequest,
+    // MLS commits) still surface the standard "please re-enter
+    // password" prompt.
+    void hydrateFromStorage().then(({ state, sessionToken }) => {
+      setState(state);
+      if (sessionToken !== null) {
+        discovery.setSessionToken(sessionToken);
+      }
+    });
   });
 
   const api: AuthApi = {
@@ -304,6 +323,23 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       // pretending signup succeeded silently.
       const deviceKey = await deriveDeviceRootKey(result.exportKey, accountIdB64);
       await putDeviceKey(accountIdB64, deviceKey);
+      // Phase 1.13c: persist the session token under the device
+      // key so a returning user can resume protected discovery
+      // reads (e.g. invite consume) without re-typing the
+      // password. Best-effort — a persistence failure does not
+      // block the rest of signup; in-memory token still works
+      // for this session.
+      try {
+        await putSessionToken(
+          accountIdB64,
+          result.sessionToken,
+          result.sessionExpiresAtMs,
+          deviceKey,
+        );
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn("session-token persist (signup) failed", err);
+      }
 
       // 1.16e6c1: build the canonical session-wide Identity
       // before uploading the KeyPackage so the freshly-minted
@@ -410,6 +446,20 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       // this device skip the lookup round-trip.
       const deviceKey = await deriveDeviceRootKey(result.exportKey, accountIdB64);
       await putDeviceKey(accountIdB64, deviceKey);
+      // Phase 1.13c: refresh the persisted session token alongside
+      // the device key. Same best-effort posture as signup —
+      // persistence failure does not block login.
+      try {
+        await putSessionToken(
+          accountIdB64,
+          result.sessionToken,
+          result.sessionExpiresAtMs,
+          deviceKey,
+        );
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn("session-token persist (login) failed", err);
+      }
       savePersisted({ v: 1, accountIdB64, username: resolvedUsername });
 
       // 1.16e6c1: build the canonical Identity for this session
@@ -497,6 +547,21 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
           cached.accountIdB64,
         );
         await putDeviceKey(cached.accountIdB64, deviceKey);
+        // Phase 1.13c: persist the new session token under the
+        // new device key — the old token (if any) was wrapped
+        // under the prior device key and now sits in IDB as
+        // undecryptable bytes; the next decrypt attempt drops it.
+        try {
+          await putSessionToken(
+            cached.accountIdB64,
+            result.sessionToken,
+            result.sessionExpiresAtMs,
+            deviceKey,
+          );
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.warn("session-token persist (recover) failed", err);
+        }
 
         // 1.16e6c1: post-recovery the user's password (and so
         // the export key) has changed, which means any
@@ -566,16 +631,29 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       }
     },
     logout() {
-      // Keep localStorage + IDB intact. Re-login on this device
-      // remains cheap, and the device key stays available for
-      // any encrypted local stores 1.16f wires up. Drop the
-      // in-memory Identity secrets — the user just signed out.
+      // Keep localStorage + IDB device key intact. Re-login on
+      // this device remains cheap, and the device key stays
+      // available for any encrypted local stores 1.16f wires up.
+      // Drop the in-memory Identity secrets — the user just
+      // signed out.
       const cached = loadPersisted();
       setIdentitySecrets(null);
       // Phase 1.5b: drop the bearer token so a subsequent
       // protected write surfaces a clean 401 instead of silently
       // using a stale token.
       discovery.setSessionToken(null);
+      // Phase 1.13c: ALSO drop the IDB-persisted token. Keeping
+      // it would defeat the user's "I just logged out" intent on
+      // the next page reload (we'd silently re-attach to a live
+      // session-token even with no in-memory state). The device
+      // key stays in IDB so the next login is still cheap; only
+      // the per-session bearer dies. Fire-and-forget — the API
+      // contract is sync and the deletion is best-effort.
+      if (cached !== null) {
+        void deleteSessionToken(cached.accountIdB64).catch(() => {
+          /* best-effort */
+        });
+      }
       chats.clear();
       setState({
         kind: "anon",
@@ -608,6 +686,15 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         } catch {
           // Ignore — same best-effort policy as above.
         }
+        // Phase 1.13c: drop the persisted session token too. The
+        // ciphertext is unreadable without the device key just
+        // wiped, but a stale row would confuse the rehydrate
+        // probe on a future signup with the same accountId.
+        try {
+          await deleteSessionToken(cached.accountIdB64);
+        } catch {
+          // best-effort
+        }
       }
       clearPersisted();
       // 1.16d3d: drop the on-device contacts cache too —
@@ -638,10 +725,24 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
  *     re-entry required, `anon` with `cachedUsername`.
  *   * Both present → resume `session` directly, no password.
  */
-async function hydrateFromStorage(): Promise<AuthState> {
+/**
+ * Probes localStorage + IDB to recover the most-complete state
+ * we can without prompting for a password:
+ *
+ *   - `(accountId, username)` cache → drives the auth state branch.
+ *   - Device key in IDB → required for any AES-GCM-wrapped material.
+ *   - Persisted session token in IDB → returned alongside the state
+ *     so the caller can install it on the DiscoveryClient. Phase
+ *     1.13c added this; pre-1.13c builds drop straight to
+ *     `sessionToken: null`.
+ */
+async function hydrateFromStorage(): Promise<{
+  state: AuthState;
+  sessionToken: string | null;
+}> {
   const cached = loadPersisted();
   if (cached === null) {
-    return { kind: "anon" };
+    return { state: { kind: "anon" }, sessionToken: null };
   }
   let key: CryptoKey | null = null;
   try {
@@ -653,11 +754,31 @@ async function hydrateFromStorage(): Promise<AuthState> {
     key = null;
   }
   if (key === null) {
-    return { kind: "anon", cachedUsername: cached.username };
+    return {
+      state: { kind: "anon", cachedUsername: cached.username },
+      sessionToken: null,
+    };
   }
+
+  // Phase 1.13c: try to recover the persisted session token. The
+  // store handles its own expiry probe (cheap unencrypted column
+  // + post-decrypt belt-and-suspenders) so we just consume the
+  // result. A decrypt failure (device key rotated, ciphertext
+  // tampered) surfaces as null — same UX as a missing row.
+  let sessionToken: string | null = null;
+  try {
+    const persisted = await getSessionToken(cached.accountIdB64, key);
+    sessionToken = persisted?.sessionToken ?? null;
+  } catch {
+    sessionToken = null;
+  }
+
   return {
-    kind: "session",
-    account: { accountId: cached.accountIdB64, username: cached.username },
+    state: {
+      kind: "session",
+      account: { accountId: cached.accountIdB64, username: cached.username },
+    },
+    sessionToken,
   };
 }
 
