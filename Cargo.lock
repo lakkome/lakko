@@ -2045,6 +2045,7 @@ name = "lakko-ffi-uniffi"
 version = "0.0.0"
 dependencies = [
  "base64",
+ "lakko-attachments",
  "lakko-auth-client",
  "lakko-contacts",
  "lakko-crypto",
@@ -2063,6 +2064,7 @@ dependencies = [
  "base64",
  "getrandom 0.2.17",
  "js-sys",
+ "lakko-attachments",
  "lakko-auth-client",
  "lakko-contacts",
  "lakko-crypto",

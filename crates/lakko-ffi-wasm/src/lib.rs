@@ -68,6 +68,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod attachments;
 pub mod auth;
 pub mod contacts;
 pub mod discovery;

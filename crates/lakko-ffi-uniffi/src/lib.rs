@@ -34,6 +34,7 @@ use lakko_mls::{
     group, key_package, Group as MlsGroup, Identity as MlsIdentity, Incoming as MlsIncoming,
 };
 
+pub mod attachments;
 pub mod auth;
 pub mod contacts;
 pub mod discovery;
@@ -134,6 +135,14 @@ pub enum FfiError {
     /// are typically caller-side wiring bugs.
     #[error("crypto error: {0}")]
     Crypto(String),
+
+    /// Attachment encryption / decryption / wire-format error
+    /// (Phase 1.19b). Same elision posture as the rest of the
+    /// `FfiError` enum: a wrong-length key, an AEAD tag mismatch,
+    /// an oversize plaintext, and a malformed base64 in the
+    /// envelope all collapse into this variant.
+    #[error("attachment error: {0}")]
+    Attachment(String),
 
     /// Lock contention / poisoned mutex on the shared Group state.
     #[error("internal lock error")]

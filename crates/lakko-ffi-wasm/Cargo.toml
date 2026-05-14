@@ -26,6 +26,8 @@ lakko-contacts.workspace = true
 lakko-sync.workspace = true
 lakko-push.workspace = true
 lakko-presence.workspace = true
+# Phase 1.19b — attachment encryption + JSON envelope wire format.
+lakko-attachments.workspace = true
 # OPAQUE-PAKE client surface — wraps `RegistrationSession` and
 # `LoginSession` into wasm-bindgen classes for `apps/web`.
 lakko-auth-client.workspace = true
