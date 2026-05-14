@@ -55,6 +55,53 @@ rand = "0.8"
 # `#[async_trait]` for the Provider abstraction.
 async-trait = "0.1"
 
+# ----------------------------------------------------------------------------
+# Phase 1.6b — real push provider stack.
+# ----------------------------------------------------------------------------
+
+# Outbound HTTP/2 to APNs / FCM / Web Push providers. Same rustls-ring
+# choice the rest of the workspace makes (matches sqlx's tls-rustls-ring).
+# `http2` is mandatory for APNs (HTTP/1.1 was retired in 2020) and a
+# nice-to-have for FCM (better connection reuse on the long-lived
+# OAuth2 + send loop).
+reqwest = { version = "0.12", default-features = false, features = [
+    "rustls-tls",
+    "http2",
+    "json",
+] }
+
+# JWT signing — ES256 for APNs provider tokens + Web Push VAPID
+# (P-256 ECDSA over SHA-256), RS256 for the FCM service-account →
+# OAuth2 token exchange (PKCS#1 RSA over SHA-256). `jsonwebtoken` 9.x
+# has both algorithms behind one API; the PEM-decoding helpers live in
+# the default features.
+jsonwebtoken = "9"
+
+# Web Push RFC 8291 payload encryption: ECDH(P-256) over the
+# subscriber's `p256dh` key → HKDF-SHA256 → AES-128-GCM with the
+# `aes128gcm` content-encoding (RFC 8188). The p256 / aes-gcm / hkdf
+# crates are already pulled transitively via OPAQUE-KE; the explicit
+# declaration here keeps the surface auditable.
+p256 = { version = "0.13", features = ["ecdh", "pem"] }
+aes-gcm = "0.10"
+hkdf = "0.12"
+rand_core = "0.6"
+
+# `chrono` for `iat` / `exp` JWT claims — already pulled by sqlx's
+# `chrono` feature; explicit dep so the JWT call sites are obvious.
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+
+# OAuth2-token caching for FCM. A small per-provider `RwLock<…>` over
+# the bearer-token state is enough; `parking_lot` over `std::sync` is
+# cheaper and the same workspace-style choice the contacts surface
+# already makes.
+parking_lot = "0.12"
+
+# `url` is already pulled transitively by `reqwest`; declare it
+# explicitly so the Web Push VAPID `aud`-claim derivation
+# (subscription endpoint origin) has a clean parser surface.
+url = "2"
+
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"

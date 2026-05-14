@@ -52,6 +52,7 @@
 mod notify;
 mod pow;
 mod provider;
+mod providers;
 mod registry;
 
 use std::collections::HashMap;
@@ -72,6 +73,12 @@ use tokio::signal;
 use tower_http::trace::TraceLayer;
 
 use crate::provider::{LogOnlyProvider, Provider, ProviderKind};
+use crate::providers::{
+    apns::{ApnsConfig, ApnsProvider},
+    fcm::{FcmConfig, FcmProvider},
+    unifiedpush::UnifiedPushProvider,
+    webpush::{WebPushConfig, WebPushProvider},
+};
 
 /// Default bind address if `LAKKO_BIND` is not set. Distinct from
 /// auth (8081), ds (8082), storage (8083), discovery (8084).
@@ -149,24 +156,82 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// Pick a provider implementation per `ProviderKind`. Phase 1.6 wires
-/// every kind to [`LogOnlyProvider`]. Phase 1.6b will read env (paths
-/// to .p8 / service-account.json / VAPID keys) and replace LogOnly
-/// entries with real impls.
+/// Pick a provider implementation per [`ProviderKind`].
+///
+/// Phase 1.6b: probes env for real provider credentials and falls
+/// back to [`LogOnlyProvider`] per-kind when they're missing. Each
+/// `*Config::from_env` call logs the reason for any fallback so
+/// operators see what's wrong without grepping for empty env vars.
+///
+/// Required env vars per kind:
+///
+/// - APNs (`ProviderKind::Apns`):
+///     - `LAKKO_APNS_KEY_PATH` — path to the .p8 file Apple issues.
+///     - `LAKKO_APNS_KEY_ID` — 10-char key id (e.g. `ABCDE12345`).
+///     - `LAKKO_APNS_TEAM_ID` — 10-char team id (e.g. `1A2B3C4D5E`).
+///     - `LAKKO_APNS_TOPIC` — bundle id (e.g. `me.lakko.dev`).
+///     - `LAKKO_APNS_ENDPOINT` — `sandbox` for TestFlight builds,
+///       anything else (or unset) = production.
+/// - FCM (`ProviderKind::Fcm`):
+///     - `LAKKO_FCM_SA_PATH` — path to the service-account JSON
+///       Google Cloud issues.
+/// - Web Push (`ProviderKind::WebPush`):
+///     - `LAKKO_WEBPUSH_VAPID_PRIVATE_KEY_PEM` — EC PEM (P-256).
+///     - `LAKKO_WEBPUSH_VAPID_PUBLIC_KEY_B64URL` — base64url-no-pad
+///       of the uncompressed P-256 point (65 bytes).
+///     - `LAKKO_WEBPUSH_VAPID_SUBJECT` — `mailto:` URI.
+/// - UnifiedPush (`ProviderKind::UnifiedPush`): none — always
+///   wired, the subscription endpoint URL itself is the capability.
 fn resolve_providers() -> HashMap<ProviderKind, Box<dyn Provider>> {
     let mut map: HashMap<ProviderKind, Box<dyn Provider>> = HashMap::new();
-    for kind in [
-        ProviderKind::Apns,
-        ProviderKind::Fcm,
-        ProviderKind::WebPush,
-        ProviderKind::UnifiedPush,
-    ] {
-        map.insert(kind, Box::new(LogOnlyProvider { kind }));
-    }
-    tracing::info!(
-        providers = ?map.keys().map(|k| k.as_str()).collect::<Vec<_>>(),
-        "Phase 1.6: every provider kind wired to LogOnlyProvider (no real keys yet)",
-    );
+
+    // APNs. Explicit `let p: Box<dyn Provider>` lets each arm
+    // return a concrete `Box<ApnsProvider>` or `Box<LogOnlyProvider>`
+    // without an `as` coercion — the let-type drives unification.
+    let apns: Box<dyn Provider> = if let Some(cfg) = ApnsConfig::from_env() {
+        tracing::info!("APNs provider configured from env");
+        Box::new(ApnsProvider::new(cfg))
+    } else {
+        tracing::warn!(
+            "APNs provider falling back to LogOnly — LAKKO_APNS_* not configured",
+        );
+        Box::new(LogOnlyProvider {
+            kind: ProviderKind::Apns,
+        })
+    };
+    map.insert(ProviderKind::Apns, apns);
+
+    let fcm: Box<dyn Provider> = if let Some(cfg) = FcmConfig::from_env() {
+        tracing::info!("FCM provider configured from env");
+        Box::new(FcmProvider::new(cfg))
+    } else {
+        tracing::warn!(
+            "FCM provider falling back to LogOnly — LAKKO_FCM_SA_PATH not configured",
+        );
+        Box::new(LogOnlyProvider {
+            kind: ProviderKind::Fcm,
+        })
+    };
+    map.insert(ProviderKind::Fcm, fcm);
+
+    let webpush: Box<dyn Provider> = if let Some(cfg) = WebPushConfig::from_env() {
+        tracing::info!("Web Push provider configured from env");
+        Box::new(WebPushProvider::new(cfg))
+    } else {
+        tracing::warn!(
+            "Web Push provider falling back to LogOnly — LAKKO_WEBPUSH_VAPID_* not configured",
+        );
+        Box::new(LogOnlyProvider {
+            kind: ProviderKind::WebPush,
+        })
+    };
+    map.insert(ProviderKind::WebPush, webpush);
+
+    // UnifiedPush — always real; no shared credentials.
+    let unifiedpush: Box<dyn Provider> = Box::new(UnifiedPushProvider::new());
+    map.insert(ProviderKind::UnifiedPush, unifiedpush);
+    tracing::info!("UnifiedPush provider configured (no shared credentials needed)");
+
     map
 }
 
