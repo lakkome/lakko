@@ -1,0 +1,48 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+[package]
+name = "lakko-attachments"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Phase 1.19a — per-attachment ChaCha20-Poly1305 encryption + the application-message JSON wire envelope that carries attachment references"
+
+[lints]
+workspace = true
+
+[dependencies]
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+# Re-use the workspace AEAD surface (ChaCha20-Poly1305 + AES-256-GCM).
+# Same primitives every higher-level encryption layer in Lakko picks
+# from — keeps the crypto audit boundary small.
+lakko-crypto.workspace = true
+
+# SHA-256 for the content-addressed blob id (= SHA-256(ciphertext)).
+# Same `sha2` major the wider workspace already pulls in transitively
+# via OPAQUE / equix; declared explicitly so the blob_id call site
+# is auditable.
+sha2 = "0.10"
+
+# Base64 for the wire envelope (every byte field crosses the JSON
+# wire base64-encoded).
+base64 = "0.22"
+
+# CSPRNG for per-attachment key + nonce generation. On wasm32 the
+# downstream `lakko-ffi-wasm` consumer enables `getrandom`'s `js`
+# feature; the host build picks `/dev/urandom` via `rand::OsRng`.
+rand = "0.8"
+
+# Zeroize-on-drop wrappers for the per-attachment key — same pattern
+# the rest of the crypto surface uses.
+zeroize = { version = "1", features = ["zeroize_derive"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.2", features = ["js"] }

@@ -1949,6 +1949,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "lakko-attachments"
+version = "0.0.0"
+dependencies = [
+ "base64",
+ "getrandom 0.2.17",
+ "lakko-crypto",
+ "rand 0.8.6",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 1.0.69",
+ "zeroize",
+]
+
+[[package]]
 name = "lakko-auth-client"
 version = "0.0.0"
 dependencies = [

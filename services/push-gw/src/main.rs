@@ -192,9 +192,7 @@ fn resolve_providers() -> HashMap<ProviderKind, Box<dyn Provider>> {
         tracing::info!("APNs provider configured from env");
         Box::new(ApnsProvider::new(cfg))
     } else {
-        tracing::warn!(
-            "APNs provider falling back to LogOnly — LAKKO_APNS_* not configured",
-        );
+        tracing::warn!("APNs provider falling back to LogOnly — LAKKO_APNS_* not configured",);
         Box::new(LogOnlyProvider {
             kind: ProviderKind::Apns,
         })
@@ -205,9 +203,7 @@ fn resolve_providers() -> HashMap<ProviderKind, Box<dyn Provider>> {
         tracing::info!("FCM provider configured from env");
         Box::new(FcmProvider::new(cfg))
     } else {
-        tracing::warn!(
-            "FCM provider falling back to LogOnly — LAKKO_FCM_SA_PATH not configured",
-        );
+        tracing::warn!("FCM provider falling back to LogOnly — LAKKO_FCM_SA_PATH not configured",);
         Box::new(LogOnlyProvider {
             kind: ProviderKind::Fcm,
         })
