@@ -52,6 +52,16 @@ export default defineConfig({
         changeOrigin: true,
         rewrite: (p) => p.replace(/^\/api\/ds/, ""),
       },
+      // 1.19c1: lakko-svc-storage defaults to 127.0.0.1:8083.
+      // PUT/GET/HEAD /blob/<sha256_hex> carries ciphertext as
+      // an octet-stream body. Production nginx forwards the
+      // same path; the client-side `StorageClient` uses a
+      // single relative base URL in both environments.
+      "/api/storage": {
+        target: "http://127.0.0.1:8083",
+        changeOrigin: true,
+        rewrite: (p) => p.replace(/^\/api\/storage/, ""),
+      },
     },
   },
 
