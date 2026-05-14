@@ -113,6 +113,7 @@ pub(crate) struct UploadResponse {
 /// `POST /discovery/invite` — upsert a verified invite capability.
 pub(crate) async fn upload(
     State(state): State<AppState>,
+    axum::Extension(authed): axum::Extension<crate::auth::AuthenticatedAccount>,
     Json(payload): Json<UploadRequest>,
 ) -> Result<Json<UploadResponse>, (StatusCode, String)> {
     crate::pow::verify_proof(&state.db, &payload.pow).await?;
@@ -153,6 +154,26 @@ pub(crate) async fn upload(
 
     let blob_id = blob_id_for(&bytes);
     let owner_account_id = cap.owner_account_id;
+
+    // Phase 1.5b anti-impersonation: the capability's embedded
+    // `owner_account_id` must match the token's. Without this
+    // check, an authenticated user could upload an invite whose
+    // owner field is someone else's account — combined with a
+    // matching signature pubkey for that account (which they'd
+    // need anyway to make the capability verify), this opens a
+    // narrow forge surface that the token check closes.
+    if owner_account_id != authed.0 {
+        tracing::warn!(
+            owner_account_id = %B64.encode(owner_account_id),
+            token_account_id = %B64.encode(authed.0),
+            "invite upload: capability owner_account_id does not match token's"
+        );
+        return Err((
+            StatusCode::FORBIDDEN,
+            "capability owner_account_id mismatch with session token".to_string(),
+        ));
+    }
+
     // SQL u64 column maps to MariaDB BIGINT UNSIGNED — sqlx
     // accepts u64 directly via the `chrono`-free numeric path.
     let expiry_ms: u64 = cap.expiry_ms;
@@ -623,6 +644,15 @@ pub(crate) struct RevokeRequest {
 pub(crate) async fn revoke(
     State(state): State<AppState>,
     Path(blob_id_b64url): Path<String>,
+    // Phase 1.5b: session token required (route_layer'd in
+    // `build_app`). The Ed25519 signature on the body proves
+    // ownership of the capability; the session token proves
+    // ownership of *some* logged-in account — together they
+    // strictly stronger than either alone. We don't actively
+    // match `authed.0` against the capability's owner_account_id
+    // here because the signature verify below already does the
+    // hard work; the token is purely a rate-limit / DoS gate.
+    axum::Extension(_authed): axum::Extension<crate::auth::AuthenticatedAccount>,
     Json(payload): Json<RevokeRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let blob_id = B64URL.decode(&blob_id_b64url).map_err(|e| {

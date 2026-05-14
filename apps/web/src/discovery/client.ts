@@ -156,7 +156,33 @@ export class DiscoveryNetworkError extends Error {
 }
 
 export class DiscoveryClient {
+  /**
+   * Phase 1.5b: bearer token threaded into the
+   * `Authorization: Bearer <token>` header on every protected
+   * `lakko-svc-discovery` write (register, identity upload,
+   * keypackage upload, invite upload, invite revoke). `null`
+   * means "anonymous" — protected endpoints will return 401,
+   * unauthenticated paths (`/pow/challenge`, `/discovery/oprf`,
+   * `/discovery/lookup`, all GETs, invite consume) still work.
+   */
+  private sessionToken: string | null = null;
+
   constructor(public readonly baseUrl: string = DEFAULT_BASE_URL) {}
+
+  /** Update the bearer token in-place. Mirror of the iOS +
+   *  Android `setSessionToken` shape. */
+  setSessionToken(token: string | null): void {
+    this.sessionToken = token;
+  }
+
+  /** Build the `Authorization` header value when a session token
+   *  is set. `null` collapses to "no header" — caller spreads
+   *  via `{ ...this.authHeaders() }`. */
+  private authHeaders(): Record<string, string> {
+    return this.sessionToken !== null
+      ? { Authorization: `Bearer ${this.sessionToken}` }
+      : {};
+  }
 
   // -----------------------------------------------------------------
   // Low-level: 1:1 HTTP endpoints
@@ -222,7 +248,10 @@ export class DiscoveryClient {
     try {
       response = await fetch(url, {
         method: "DELETE",
-        headers: { "content-type": "application/json" },
+        headers: {
+          "content-type": "application/json",
+          ...this.authHeaders(),
+        },
         body: JSON.stringify(req),
       });
     } catch (err) {
@@ -684,7 +713,10 @@ export class DiscoveryClient {
     try {
       response = await fetch(url, {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: {
+          "content-type": "application/json",
+          ...this.authHeaders(),
+        },
         body: JSON.stringify({
           pow,
           joiner_tag: base64Encode(joinerTag),
@@ -839,10 +871,15 @@ export class DiscoveryClient {
     const url = `${this.baseUrl}${endpoint}`;
     let response: Response;
     try {
+      // Phase 1.5b: every POST carries the Authorization header
+      // when a session token is set. Unauthenticated POSTs
+      // (`/pow/challenge`, `/discovery/oprf`, `/discovery/lookup`)
+      // silently ignore the header server-side.
+      const baseHeaders =
+        body === undefined ? {} : { "content-type": "application/json" };
       response = await fetch(url, {
         method: "POST",
-        headers:
-          body === undefined ? {} : { "content-type": "application/json" },
+        headers: { ...baseHeaders, ...this.authHeaders() },
         body: body === undefined ? null : JSON.stringify(body),
       });
     } catch (err) {

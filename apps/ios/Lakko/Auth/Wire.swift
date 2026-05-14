@@ -163,9 +163,25 @@ public struct SignupFinishRequest: Codable, Equatable {
 /// `POST /signup/finish` response body.
 public struct SignupFinishResponse: Codable, Equatable {
     public let ok: Bool
+    /// Phase 1.5b: HMAC-SHA256 bearer token for protected
+    /// `lakko-svc-discovery` writes. Stash in
+    /// ``AuthRepository`` then thread through every
+    /// ``DiscoveryClient`` request via the
+    /// `Authorization: Bearer <token>` header.
+    public let sessionToken: String
+    /// Token expiry as a unix-millisecond timestamp.
+    public let sessionExpiresAtMs: Int64
 
-    public init(ok: Bool) {
+    public init(ok: Bool, sessionToken: String, sessionExpiresAtMs: Int64) {
         self.ok = ok
+        self.sessionToken = sessionToken
+        self.sessionExpiresAtMs = sessionExpiresAtMs
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case ok
+        case sessionToken = "session_token"
+        case sessionExpiresAtMs = "session_expires_at_ms"
     }
 }
 
@@ -234,15 +250,28 @@ public struct LoginFinishResponse: Codable, Equatable {
     public let ok: Bool
     /// base64(account_id) — echoed back so the client can pin it.
     public let accountId: String
+    /// Phase 1.5b: bearer token for protected discovery writes.
+    public let sessionToken: String
+    /// Token expiry as a unix-millisecond timestamp.
+    public let sessionExpiresAtMs: Int64
 
-    public init(ok: Bool, accountId: String) {
+    public init(
+        ok: Bool,
+        accountId: String,
+        sessionToken: String,
+        sessionExpiresAtMs: Int64
+    ) {
         self.ok = ok
         self.accountId = accountId
+        self.sessionToken = sessionToken
+        self.sessionExpiresAtMs = sessionExpiresAtMs
     }
 
     enum CodingKeys: String, CodingKey {
         case ok
         case accountId = "account_id"
+        case sessionToken = "session_token"
+        case sessionExpiresAtMs = "session_expires_at_ms"
     }
 }
 
@@ -342,14 +371,27 @@ public struct PasswordResetFinishResponse: Codable, Equatable {
     /// base64(account_id) — echoed back, same shape as
     /// ``LoginFinishResponse``.
     public let accountId: String
+    /// Phase 1.5b: fresh bearer token for the rotated password.
+    public let sessionToken: String
+    /// Token expiry as a unix-millisecond timestamp.
+    public let sessionExpiresAtMs: Int64
 
-    public init(ok: Bool, accountId: String) {
+    public init(
+        ok: Bool,
+        accountId: String,
+        sessionToken: String,
+        sessionExpiresAtMs: Int64
+    ) {
         self.ok = ok
         self.accountId = accountId
+        self.sessionToken = sessionToken
+        self.sessionExpiresAtMs = sessionExpiresAtMs
     }
 
     enum CodingKeys: String, CodingKey {
         case ok
         case accountId = "account_id"
+        case sessionToken = "session_token"
+        case sessionExpiresAtMs = "session_expires_at_ms"
     }
 }

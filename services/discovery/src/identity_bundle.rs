@@ -98,6 +98,7 @@ pub(crate) struct UploadResponse {
 /// `ON UPDATE CURRENT_TIMESTAMP` clause.
 pub(crate) async fn upload(
     State(state): State<AppState>,
+    axum::Extension(authed): axum::Extension<crate::auth::AuthenticatedAccount>,
     Json(payload): Json<UploadRequest>,
 ) -> Result<Json<UploadResponse>, (StatusCode, String)> {
     crate::pow::verify_proof(&state.db, &payload.pow).await?;
@@ -106,6 +107,21 @@ pub(crate) async fn upload(
     let signature_pubkey =
         decode_fixed::<SIGNATURE_PUBKEY_LEN>(&payload.signature_pubkey, "signature_pubkey")?;
     let x25519_pubkey = decode_fixed::<X25519_PUBKEY_LEN>(&payload.x25519_pubkey, "x25519_pubkey")?;
+
+    // Phase 1.5b anti-impersonation: only the account_id's owner
+    // can upload its identity bundle. Same check shape as
+    // `registry::register`.
+    if account_id != authed.0 {
+        tracing::warn!(
+            body_account_id = %B64.encode(account_id),
+            token_account_id = %B64.encode(authed.0),
+            "identity_bundle upload: body account_id does not match token's"
+        );
+        return Err((
+            StatusCode::FORBIDDEN,
+            "account_id mismatch between body and session token".to_string(),
+        ));
+    }
 
     sqlx::query(
         "INSERT INTO identity_bundles \

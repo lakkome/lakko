@@ -87,7 +87,14 @@ export default function Invite(): JSX.Element {
   // Used for the pointer-form path. Created once per route
   // mount; reuses the existing fetch defaults (Vite proxy in
   // dev, same-origin nginx in prod).
+  // Phase 1.5b: the joiner-side fetchInvite / consumeInvite calls
+  // don't strictly require auth (Universal-Link joiners may not
+  // be signed up yet — fetch + consume are open by design), but
+  // we thread the token when available so logged-in joiners get
+  // the standard Authorization header on every protected path
+  // the page might trigger later.
   const discovery = new DiscoveryClient();
+  discovery.setSessionToken(auth.identitySecrets()?.sessionToken ?? null);
   const [decoded] = createResource(slugSignal, async (slug): Promise<DecodedInvite | null> => {
     try {
       const parsed = parseInviteSlug(slug);

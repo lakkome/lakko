@@ -199,7 +199,12 @@ class AuthClientTest {
     @Test
     fun `signupFinish parses ok flag`() = runTest {
         client(
-            responses = listOf(HttpStatusCode.OK to """{"ok":true}"""),
+            // Phase 1.5b: server now emits session_token +
+            // session_expires_at_ms on every */finish endpoint.
+            responses = listOf(
+                HttpStatusCode.OK to
+                    """{"ok":true,"session_token":"v1.AAAA.1.BBBB","session_expires_at_ms":2000000000000}""",
+            ),
         ).use { client ->
             val resp = client.signupFinish(
                 SignupFinishRequest(
@@ -209,6 +214,8 @@ class AuthClientTest {
                 ),
             )
             assertTrue(resp.ok)
+            assertEquals("v1.AAAA.1.BBBB", resp.session_token)
+            assertEquals(2_000_000_000_000L, resp.session_expires_at_ms)
         }
     }
 
@@ -221,7 +228,8 @@ class AuthClientTest {
         client(
             responses = listOf(
                 HttpStatusCode.OK to """{"session_id":"01HXY","response":"CRED_RESP"}""",
-                HttpStatusCode.OK to """{"ok":true,"account_id":"ACC"}""",
+                HttpStatusCode.OK to
+                    """{"ok":true,"account_id":"ACC","session_token":"v1.AAAA.1.BBBB","session_expires_at_ms":2000000000000}""",
             ),
         ).use { client ->
             val start = client.loginStart(

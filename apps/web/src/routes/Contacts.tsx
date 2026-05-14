@@ -433,7 +433,12 @@ function InvitePanel(): JSX.Element {
   // dev without the service running, or a censored region path
   // where /discovery/* is blocked but the link is still
   // shareable).
+  // Phase 1.5b: thread the bearer token through. `setSessionToken`
+  // accepts `null` so an Anon-state render (Show guard above
+  // wouldn't get us here but be defensive) just emits 401s on
+  // the protected paths.
   const discovery = new DiscoveryClient();
+  discovery.setSessionToken(auth.identitySecrets()?.sessionToken ?? null);
 
   const [label, setLabel] = createSignal("");
   const [expiry, setExpiry] = createSignal<ExpiryPreset>("7d");

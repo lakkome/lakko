@@ -199,6 +199,8 @@ public class AuthRepository(
                 mutableIdentitySecrets.value = IdentitySecrets(
                     accountId = result.accountId,
                     exportKey = result.exportKey.copyOf(),
+                    sessionToken = result.sessionToken,
+                    sessionExpiresAtMs = result.sessionExpiresAtMs,
                 )
                 mutableState.value = AuthState.Session(
                     account = SessionAccount(
@@ -302,10 +304,13 @@ public class AuthRepository(
                     deviceRootKey.fill(0)
                 }
                 sessionStore.save(cached)  // upsert — schema-versioned marker
-                // Stash the export key for ContactsClient.
+                // Stash the export key + session token for
+                // ContactsClient / DiscoveryClient.
                 mutableIdentitySecrets.value = IdentitySecrets(
                     accountId = accountIdBytes,
                     exportKey = result.exportKey.copyOf(),
+                    sessionToken = result.sessionToken,
+                    sessionExpiresAtMs = result.sessionExpiresAtMs,
                 )
                 mutableState.value = AuthState.Session(
                     account = SessionAccount(
@@ -416,6 +421,8 @@ public class AuthRepository(
                     mutableIdentitySecrets.value = IdentitySecrets(
                         accountId = accountIdBytes,
                         exportKey = result.exportKey.copyOf(),
+                        sessionToken = result.sessionToken,
+                        sessionExpiresAtMs = result.sessionExpiresAtMs,
                     )
                     mutableState.value = AuthState.Session(
                         account = SessionAccount(
@@ -550,16 +557,30 @@ public data class IdentitySecrets(
     /** OPAQUE password export key (64 bytes for `LakkoCipherSuite`).
      *  Use as the seed for `Identity.fromSeed`. */
     val exportKey: ByteArray,
+    /** Phase 1.5b: bearer token issued by the auth service on the
+     *  most recent signup/login/recover. Threaded into
+     *  `DiscoveryClient` so every protected write carries the
+     *  `Authorization: Bearer <token>` header. */
+    val sessionToken: String,
+    /** Token expiry as a unix-millisecond timestamp. */
+    val sessionExpiresAtMs: Long,
 ) {
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
         if (other !is IdentitySecrets) return false
         return accountId.contentEquals(other.accountId) &&
-            exportKey.contentEquals(other.exportKey)
+            exportKey.contentEquals(other.exportKey) &&
+            sessionToken == other.sessionToken &&
+            sessionExpiresAtMs == other.sessionExpiresAtMs
     }
 
-    override fun hashCode(): Int =
-        accountId.contentHashCode() * 31 + exportKey.contentHashCode()
+    override fun hashCode(): Int {
+        var h = accountId.contentHashCode()
+        h = 31 * h + exportKey.contentHashCode()
+        h = 31 * h + sessionToken.hashCode()
+        h = 31 * h + sessionExpiresAtMs.hashCode()
+        return h
+    }
 }
 
 /** Result handed back to the signup ViewModel so it can show

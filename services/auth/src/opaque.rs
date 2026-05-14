@@ -55,7 +55,37 @@ use opaque_ke::{
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 use sqlx::MySqlPool;
+use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
+
+/// Issue a fresh session token for `account_id`. Returns the
+/// dot-formatted token + the absolute unix-ms expiry (mirror of
+/// the wire shape every `*FinishResponse` now carries).
+///
+/// Wraps the `lakko-auth-token` crate's `TokenSecret::issue` with
+/// the server-side TTL math: `now_ms + state.session_token_ttl_ms`,
+/// clamped to the i64 range so a misconfigured TTL of years
+/// doesn't overflow the millisecond arithmetic.
+fn issue_token_for(
+    state: &crate::AppState,
+    account_id: &[u8; 16],
+) -> Result<(String, i64), (StatusCode, String)> {
+    let now_ms: i64 = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX));
+    let expires_at_ms = now_ms.saturating_add(state.session_token_ttl_ms);
+    let token = state
+        .session_token_secret
+        .issue(account_id, expires_at_ms)
+        .map_err(|e| {
+            tracing::error!(error = %e, "session-token issuance failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal token error".to_string(),
+            )
+        })?;
+    Ok((token, expires_at_ms))
+}
 
 /// Lakko OPAQUE-PAKE ciphersuite.
 ///
@@ -324,6 +354,15 @@ pub(crate) struct SignupFinishRequest {
 #[derive(Serialize)]
 pub(crate) struct SignupFinishResponse {
     pub(crate) ok: bool,
+    /// Phase 1.5b: session bearer token. Same shape as the one
+    /// `/login/finish` returns — the client treats signup +
+    /// auto-login as one ceremony and stashes the token for
+    /// follow-up writes to `services/discovery`.
+    pub(crate) session_token: String,
+    /// Token expiry as a unix-millisecond timestamp. The client
+    /// uses this to schedule a silent re-login before the token
+    /// dies.
+    pub(crate) session_expires_at_ms: i64,
 }
 
 /// `POST /signup/finish` — finalize registration.
@@ -443,7 +482,12 @@ pub(crate) async fn signup_finish(
         with_recovery,
         "signup completed",
     );
-    Ok(Json(SignupFinishResponse { ok: true }))
+    let (session_token, session_expires_at_ms) = issue_token_for(&state, &account_id)?;
+    Ok(Json(SignupFinishResponse {
+        ok: true,
+        session_token,
+        session_expires_at_ms,
+    }))
 }
 
 // ============================================================================
@@ -602,9 +646,17 @@ pub(crate) struct LoginFinishRequest {
 pub(crate) struct LoginFinishResponse {
     pub(crate) ok: bool,
     /// Base64-encoded account_id (16 raw UUIDv7 bytes) — the client pins
-    /// this for follow-up requests. A real session token (JWT or DB-backed
-    /// session) is a separate sub-sprint.
+    /// this for follow-up requests.
     pub(crate) account_id: String,
+    /// Phase 1.5b: HMAC-SHA256 bearer token. The client presents
+    /// this in the `Authorization: Bearer <token>` header on
+    /// protected `lakko-svc-discovery` writes (register, identity
+    /// upload, keypackage upload, invite upload).
+    pub(crate) session_token: String,
+    /// Token expiry as a unix-millisecond timestamp. Mirrors the
+    /// `session_token`'s internal `expires_at_ms` field; surfaced
+    /// separately so the client doesn't have to parse the token.
+    pub(crate) session_expires_at_ms: i64,
 }
 
 /// Shared `/login/start` handler parameterised by `kind`.
@@ -770,9 +822,12 @@ async fn login_finish_inner(
 
     tracing::info!(kind, account_id = %B64.encode(account_id), "login completed");
 
+    let (session_token, session_expires_at_ms) = issue_token_for(state, &account_id)?;
     Ok(Json(LoginFinishResponse {
         ok: true,
         account_id: B64.encode(account_id),
+        session_token,
+        session_expires_at_ms,
     }))
 }
 
@@ -902,6 +957,16 @@ pub(crate) struct PasswordResetFinishResponse {
     /// Base64-encoded `account_id` echo, same shape as
     /// [`LoginFinishResponse::account_id`].
     pub(crate) account_id: String,
+    /// Phase 1.5b: bearer token for the rotated password. Same
+    /// shape as [`LoginFinishResponse::session_token`]. The
+    /// recovery flow issues a fresh token because the prior
+    /// password (and any tokens issued against it) is now stale
+    /// from the user's PoV — though server-side those tokens
+    /// still verify until their TTL expires (stateless tokens
+    /// don't revoke).
+    pub(crate) session_token: String,
+    /// Token expiry as a unix-millisecond timestamp.
+    pub(crate) session_expires_at_ms: i64,
 }
 
 /// `POST /password/reset/start`.
@@ -1125,9 +1190,12 @@ pub(crate) async fn password_reset_finish(
         "password reset completed (mnemonic-driven)",
     );
 
+    let (session_token, session_expires_at_ms) = issue_token_for(&state, &account_id)?;
     Ok(Json(PasswordResetFinishResponse {
         ok: true,
         account_id: B64.encode(account_id),
+        session_token,
+        session_expires_at_ms,
     }))
 }
 

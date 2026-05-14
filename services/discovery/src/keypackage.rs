@@ -88,11 +88,28 @@ pub(crate) struct UploadResponse {
 /// `POST /discovery/keypackage` — upsert.
 pub(crate) async fn upload(
     State(state): State<AppState>,
+    axum::Extension(authed): axum::Extension<crate::auth::AuthenticatedAccount>,
     Json(payload): Json<UploadRequest>,
 ) -> Result<Json<UploadResponse>, (StatusCode, String)> {
     crate::pow::verify_proof(&state.db, &payload.pow).await?;
 
     let account_id = decode_account_id(&payload.account_id)?;
+
+    // Phase 1.5b anti-impersonation: KeyPackage uploads must be
+    // bound to the token's account. Otherwise an authenticated
+    // user could overwrite someone else's KeyPackage to fork them
+    // into a wrong-init-key 1×1 group on next contact.
+    if account_id != authed.0 {
+        tracing::warn!(
+            body_account_id = %B64.encode(account_id),
+            token_account_id = %B64.encode(authed.0),
+            "keypackage upload: body account_id does not match token's"
+        );
+        return Err((
+            StatusCode::FORBIDDEN,
+            "account_id mismatch between body and session token".to_string(),
+        ));
+    }
 
     let kp_bytes = B64.decode(&payload.keypackage).map_err(|e| {
         (

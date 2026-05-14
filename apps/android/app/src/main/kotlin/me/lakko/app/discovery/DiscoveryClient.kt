@@ -11,6 +11,7 @@ import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.client.request.HttpRequestBuilder
 import io.ktor.client.request.delete
 import io.ktor.client.request.get
+import io.ktor.client.request.header
 import io.ktor.client.request.post
 import io.ktor.client.request.setBody
 import io.ktor.client.statement.HttpResponse
@@ -94,6 +95,28 @@ public class DiscoveryClient(
         HttpClient(OkHttp) {
             install(ContentNegotiation) { json(json) }
         }
+    }
+
+    /**
+     * Phase 1.5b: bearer token threaded into the
+     * `Authorization: Bearer <token>` header on every protected
+     * `lakko-svc-discovery` write. `null` means "anonymous";
+     * unauthenticated paths (`/pow/challenge`, `/discovery/oprf`,
+     * `/discovery/lookup`, all GETs, invite consume) still work.
+     *
+     * Volatile so a `setSessionToken` from one coroutine is
+     * immediately visible to a concurrent request on another.
+     * `URLSession`-equivalent in Ktor is thread-safe; the only
+     * thing we need is field-level visibility.
+     */
+    @Volatile
+    public var sessionToken: String? = null
+        private set
+
+    /** Update the bearer token in-place. Mirror of the
+     *  iOS `DiscoveryClient.setSessionToken(_:)` shape. */
+    public fun setSessionToken(token: String?) {
+        sessionToken = token
     }
 
     override fun close() {
@@ -246,6 +269,9 @@ public class DiscoveryClient(
         val url = "$baseUrl$endpoint"
         val response: HttpResponse = try {
             client.delete(url) {
+                sessionToken?.let {
+                    header(io.ktor.http.HttpHeaders.Authorization, "Bearer $it")
+                }
                 contentType(ContentType.Application.Json)
                 setBody(req)
             }
@@ -539,8 +565,12 @@ public class DiscoveryClient(
 
         val endpoint = "/discovery/invite/$slug/consume"
         val url = "$baseUrl$endpoint"
+        val authHeader = sessionToken?.let { "Bearer $it" }
         val response: HttpResponse = try {
             client.post(url) {
+                if (authHeader != null) {
+                    header(io.ktor.http.HttpHeaders.Authorization, authHeader)
+                }
                 contentType(ContentType.Application.Json)
                 setBody(
                     InviteConsumeRequest(
@@ -700,8 +730,19 @@ public class DiscoveryClient(
         crossinline configure: HttpRequestBuilder.() -> Unit,
     ): Res {
         val url = "$baseUrl$endpoint"
+        // Phase 1.5b: capture the current bearer token outside
+        // the (potentially Dispatchers.IO-running) Ktor block so
+        // the inline lambda doesn't try to capture `this` —
+        // `@Volatile` reads are atomic but the field-access
+        // shape still confuses inlining.
+        val authHeader = sessionToken?.let { "Bearer $it" }
         val response: HttpResponse = try {
-            client.post(url) { configure() }
+            client.post(url) {
+                if (authHeader != null) {
+                    header(io.ktor.http.HttpHeaders.Authorization, authHeader)
+                }
+                configure()
+            }
         } catch (cause: Throwable) {
             throw DiscoveryNetworkError(endpoint, cause)
         }
@@ -727,8 +768,14 @@ public class DiscoveryClient(
         crossinline configure: HttpRequestBuilder.() -> Unit,
     ): Res? {
         val url = "$baseUrl$endpoint"
+        val authHeader = sessionToken?.let { "Bearer $it" }
         val response: HttpResponse = try {
-            client.post(url) { configure() }
+            client.post(url) {
+                if (authHeader != null) {
+                    header(io.ktor.http.HttpHeaders.Authorization, authHeader)
+                }
+                configure()
+            }
         } catch (cause: Throwable) {
             throw DiscoveryNetworkError(endpoint, cause)
         }
@@ -755,8 +802,13 @@ public class DiscoveryClient(
         endpoint: String,
     ): Res? {
         val url = "$baseUrl$endpoint"
+        val authHeader = sessionToken?.let { "Bearer $it" }
         val response: HttpResponse = try {
-            client.get(url)
+            client.get(url) {
+                if (authHeader != null) {
+                    header(io.ktor.http.HttpHeaders.Authorization, authHeader)
+                }
+            }
         } catch (cause: Throwable) {
             throw DiscoveryNetworkError("$endpoint (GET)", cause)
         }

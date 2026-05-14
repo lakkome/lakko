@@ -78,6 +78,13 @@ lakko-contacts.workspace = true
 # crate.
 lakko-crypto.workspace = true
 
+# Phase 1.5b — session-token verification middleware. Shares the
+# HMAC secret with `services/auth` via `LAKKO_SESSION_TOKEN_SECRET`
+# (loaded once at startup); per-request middleware extracts the
+# `Authorization: Bearer …` header and rejects non-verifying
+# tokens with a 401.
+lakko-auth-token.workspace = true
+
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"

@@ -1,0 +1,40 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+[package]
+name = "lakko-auth-token"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+description = "HMAC-SHA256 session-token issuance + verification for the lakko-svc-auth ↔ lakko-svc-discovery contract (Phase 1.5b)"
+
+[lints]
+workspace = true
+
+[dependencies]
+thiserror.workspace = true
+
+# HMAC-SHA256 over the canonical token bytes. The same `hmac` + `sha2`
+# crates the wider crypto stack already pulls transitively via OPAQUE
+# (opaque-ke → argon2 → digest); pinning the versions here keeps the
+# dep tree explicit + cargo-deny-friendly.
+hmac = "0.12"
+sha2 = "0.10"
+
+# Constant-time tag comparison — `subtle` is the canonical Rust crate
+# for the primitive. Already pulled transitively by `opaque-ke` →
+# `voprf` → `curve25519-dalek`; the explicit dep here pins the
+# 2.x major.
+subtle = "2"
+
+# Base64url-no-pad (RFC 4648 §5) encoding for the three token fields.
+# Same crate version every other Lakko crate uses for base64 work.
+base64 = "0.22"
+
+[dev-dependencies]
+# Reproducibility check uses a constant secret; no separate test-only
+# deps required.

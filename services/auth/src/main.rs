@@ -22,6 +22,13 @@
 //! - `DATABASE_URL` — sqlx-style MariaDB DSN
 //! - `RUST_LOG` — `tracing-subscriber` env-filter spec
 //! - `LAKKO_POW_EFFORT_BITS` — PoW difficulty (default 8; 0 in tests)
+//! - `LAKKO_SESSION_TOKEN_SECRET` — base64-encoded HMAC-SHA256 key
+//!   (≥ 32 bytes after decode) shared with `lakko-svc-discovery` for
+//!   Phase 1.5b session-token issuance + verification. **Required**
+//!   at startup; missing / short secrets fail-fast.
+//! - `LAKKO_SESSION_TOKEN_TTL_DAYS` — issued-token validity window
+//!   in days (default 30). Matches the rough OPAQUE export-key
+//!   lifetime documented in the plan.
 //!
 //! Endpoints:
 //!
@@ -61,9 +68,15 @@ use tokio::signal;
 use tower_http::trace::TraceLayer;
 
 use crate::opaque::LakkoCipherSuite;
+use lakko_auth_token::TokenSecret;
 
 /// Default bind address if `LAKKO_BIND` is not set.
 const DEFAULT_BIND: &str = "127.0.0.1:8081";
+
+/// Default session-token TTL — 30 days. Matches the rough OPAQUE
+/// export-key lifetime documented in the plan. Override via
+/// `LAKKO_SESSION_TOKEN_TTL_DAYS`.
+const DEFAULT_SESSION_TOKEN_TTL_DAYS: u64 = 30;
 
 /// Migrations directory (relative to crate root). `sqlx::migrate!` reads it
 /// at compile time and embeds the SQL in the binary.
@@ -80,6 +93,14 @@ pub(crate) struct AppState {
     /// generated on first run) at bootstrap. Wrapped in `Arc` to avoid
     /// cloning the inner scalar / point material on every request.
     pub(crate) opaque_setup: Arc<ServerSetup<LakkoCipherSuite>>,
+    /// Shared HMAC secret for issuing session tokens (Phase 1.5b).
+    /// Loaded once at startup from `LAKKO_SESSION_TOKEN_SECRET`; the
+    /// same value MUST be present in `lakko-svc-discovery`'s env so
+    /// the verifier middleware accepts what we issued.
+    pub(crate) session_token_secret: Arc<TokenSecret>,
+    /// Issued-token TTL in milliseconds. Convertible from
+    /// `LAKKO_SESSION_TOKEN_TTL_DAYS` × 86_400_000.
+    pub(crate) session_token_ttl_ms: i64,
 }
 
 #[tokio::main]
@@ -126,9 +147,28 @@ async fn main() -> Result<()> {
         .await
         .context("load OPAQUE ServerSetup")?;
 
+    // Phase 1.5b: session-token secret. Required env var; failing
+    // fast at startup beats issuing un-verifiable tokens silently.
+    let session_token_secret_raw = std::env::var("LAKKO_SESSION_TOKEN_SECRET")
+        .context("LAKKO_SESSION_TOKEN_SECRET env var must be set (base64-encoded HMAC-SHA256 key, ≥ 32 bytes after decode)")?;
+    let session_token_secret = TokenSecret::from_base64(&session_token_secret_raw)
+        .context("parse LAKKO_SESSION_TOKEN_SECRET as base64")?;
+
+    let session_token_ttl_days: u64 = std::env::var("LAKKO_SESSION_TOKEN_TTL_DAYS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(DEFAULT_SESSION_TOKEN_TTL_DAYS);
+    // Saturating multiply guards against an env-typo like "9999999"
+    // overflowing the i64 millisecond timestamp arithmetic later.
+    let session_token_ttl_ms: i64 = i64::try_from(session_token_ttl_days)
+        .unwrap_or(i64::MAX / 86_400_000)
+        .saturating_mul(86_400_000);
+
     let state = AppState {
         db: pool.clone(),
         opaque_setup: Arc::new(opaque_setup),
+        session_token_secret: Arc::new(session_token_secret),
+        session_token_ttl_ms,
     };
 
     // Background tasks: periodically delete expired rows from the

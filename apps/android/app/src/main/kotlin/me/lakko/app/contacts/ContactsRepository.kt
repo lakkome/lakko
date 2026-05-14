@@ -67,6 +67,21 @@ public class ContactsRepository(
      *  Welcomes drop on the floor (the cursor still advances). */
     private val chatRepo: ChatRepository? = null,
 ) {
+    /**
+     * Build a [DiscoveryClient] pre-stamped with the current
+     * session's bearer token (Phase 1.5b). Every protected
+     * discovery write (register, identity upload, keypackage
+     * upload, invite upload, invite revoke) needs the
+     * `Authorization: Bearer <token>` header; reading
+     * `authRepo.identitySecrets.value?.sessionToken` at
+     * factory-call time keeps the threading model simple.
+     */
+    private fun authenticatedDiscoveryClient(): me.lakko.app.discovery.DiscoveryClient {
+        val client = discoveryClientFactory()
+        client.setSessionToken(authRepo.identitySecrets.value?.sessionToken)
+        return client
+    }
+
     private val mutableState: MutableStateFlow<ContactsState> =
         MutableStateFlow(ContactsState())
 
@@ -295,7 +310,7 @@ public class ContactsRepository(
         if (blobId.size != 32) return AcceptInviteResult.MalformedSlug
 
         val capabilityBytes = try {
-            discoveryClientFactory().use { discovery ->
+            authenticatedDiscoveryClient().use { discovery ->
                 discovery.fetchInvite(blobId)
             }
         } catch (e: Throwable) {
@@ -324,7 +339,7 @@ public class ContactsRepository(
 
             // Consume — atomic counter bump + per-joiner dedup.
             val consumeResult = try {
-                discoveryClientFactory().use { discovery ->
+                authenticatedDiscoveryClient().use { discovery ->
                     discovery.consumeInvite(blobId, capabilityBytes, secrets.accountId)
                 }
             } catch (e: Throwable) {
@@ -467,7 +482,7 @@ public class ContactsRepository(
                 throw ContactsError.wrap(e)
             }
             val blobId = try {
-                discoveryClientFactory().use { discovery ->
+                authenticatedDiscoveryClient().use { discovery ->
                     discovery.uploadInvite(capabilityBytes)
                 }
             } catch (e: Throwable) {
@@ -515,7 +530,7 @@ public class ContactsRepository(
         return Identity.fromSeed(secrets.exportKey).use { identity ->
             val signingSeed = identity.ed25519Seed()
             try {
-                val result = discoveryClientFactory().use { discovery ->
+                val result = authenticatedDiscoveryClient().use { discovery ->
                     discovery.revokeInvite(blobId, signingSeed)
                 }
                 if (result is me.lakko.app.discovery.RevokeInviteResult.Revoked) {

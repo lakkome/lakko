@@ -80,12 +80,31 @@ pub(crate) struct RegisterResponse {
 /// `account_id` is presented.
 pub(crate) async fn register(
     State(state): State<AppState>,
+    axum::Extension(authed): axum::Extension<crate::auth::AuthenticatedAccount>,
     Json(payload): Json<RegisterRequest>,
 ) -> Result<Json<RegisterResponse>, (StatusCode, String)> {
     crate::pow::verify_proof(&state.db, &payload.pow).await?;
 
     let account_id = decode_fixed::<ACCOUNT_ID_LEN>(&payload.account_id, "account_id")?;
     let oprf_hash = decode_fixed::<OPRF_HASH_LEN>(&payload.oprf_hash, "oprf_hash")?;
+
+    // Phase 1.5b anti-impersonation: the body's account_id must
+    // match the token's. Otherwise an authenticated user could
+    // register a username under someone else's account_id (the
+    // resulting state would be useless to the attacker, but it
+    // would burn the username for the victim — first-come-first-
+    // served is the only resolution in Phase 1).
+    if account_id != authed.0 {
+        tracing::warn!(
+            body_account_id = %B64.encode(account_id),
+            token_account_id = %B64.encode(authed.0),
+            "register: body account_id does not match token's"
+        );
+        return Err((
+            StatusCode::FORBIDDEN,
+            "account_id mismatch between body and session token".to_string(),
+        ));
+    }
 
     let result = sqlx::query("INSERT INTO usernames (oprf_hash, account_id) VALUES (?, ?)")
         .bind(&oprf_hash[..])

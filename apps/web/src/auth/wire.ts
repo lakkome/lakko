@@ -78,6 +78,13 @@ export interface SignupFinishRequest {
 /** `POST /signup/finish` response body. */
 export interface SignupFinishResponse {
   ok: boolean;
+  /** Phase 1.5b: HMAC-SHA256 bearer token. Stash in the
+   *  `AuthContext` then thread through every protected
+   *  `lakko-svc-discovery` write via the `Authorization: Bearer …`
+   *  header. */
+  session_token: string;
+  /** Token expiry as a unix-millisecond timestamp. */
+  session_expires_at_ms: number;
 }
 
 // ----------------------------------------------------------------------------
@@ -113,6 +120,10 @@ export interface LoginFinishResponse {
   ok: boolean;
   /** base64(account_id) — echoed back so the client can pin it. */
   account_id: string;
+  /** Phase 1.5b: HMAC-SHA256 bearer token. */
+  session_token: string;
+  /** Token expiry as a unix-millisecond timestamp. */
+  session_expires_at_ms: number;
 }
 
 // ----------------------------------------------------------------------------
@@ -161,4 +172,8 @@ export interface PasswordResetFinishResponse {
   ok: boolean;
   /** base64(account_id) — echoed back, same shape as `LoginFinishResponse`. */
   account_id: string;
+  /** Phase 1.5b: fresh bearer token for the rotated password. */
+  session_token: string;
+  /** Token expiry as a unix-millisecond timestamp. */
+  session_expires_at_ms: number;
 }

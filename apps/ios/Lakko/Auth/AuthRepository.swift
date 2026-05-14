@@ -173,13 +173,15 @@ public final class AuthRepository: ObservableObject {
             rootKey: deviceRootKey
         )
 
-        // Stash the export key for ContactsClient / future ChatClient
-        // and friends. The bytes survive until logout / forgetDevice
-        // clears the publisher; signup is a one-shot ceremony so we
-        // don't expect any surprises here.
+        // Stash the export key + session token for ContactsClient /
+        // ChatRepository / DiscoveryClient. The bytes survive until
+        // logout / forgetDevice clears the publisher; signup is a
+        // one-shot ceremony so we don't expect any surprises here.
         identitySecrets = IdentitySecrets(
             accountId: result.accountId,
-            exportKey: result.exportKey
+            exportKey: result.exportKey,
+            sessionToken: result.sessionToken,
+            sessionExpiresAtMs: result.sessionExpiresAtMs
         )
         state = .session(
             SessionAccount(
@@ -273,7 +275,9 @@ public final class AuthRepository: ObservableObject {
 
         identitySecrets = IdentitySecrets(
             accountId: accountIdBytes,
-            exportKey: result.exportKey
+            exportKey: result.exportKey,
+            sessionToken: result.sessionToken,
+            sessionExpiresAtMs: result.sessionExpiresAtMs
         )
         state = .session(
             SessionAccount(
@@ -359,7 +363,9 @@ public final class AuthRepository: ObservableObject {
 
         identitySecrets = IdentitySecrets(
             accountId: accountIdBytes,
-            exportKey: result.exportKey
+            exportKey: result.exportKey,
+            sessionToken: result.sessionToken,
+            sessionExpiresAtMs: result.sessionExpiresAtMs
         )
         state = .session(
             SessionAccount(
@@ -458,10 +464,25 @@ public struct IdentitySecrets: Equatable {
     /// OPAQUE password export key (64 bytes for `LakkoCipherSuite`).
     /// Use as the seed for `Identity.fromSeed(seed:)`.
     public let exportKey: Data
+    /// Phase 1.5b: bearer token issued by the auth service on the
+    /// most recent signup/login/recover. Threaded into
+    /// ``DiscoveryClient/setSessionToken(_:)`` by
+    /// ``ContactsRepository`` so every protected write carries
+    /// the `Authorization: Bearer <token>` header.
+    public let sessionToken: String
+    /// Token expiry as a unix-millisecond timestamp.
+    public let sessionExpiresAtMs: Int64
 
-    public init(accountId: Data, exportKey: Data) {
+    public init(
+        accountId: Data,
+        exportKey: Data,
+        sessionToken: String,
+        sessionExpiresAtMs: Int64
+    ) {
         self.accountId = accountId
         self.exportKey = exportKey
+        self.sessionToken = sessionToken
+        self.sessionExpiresAtMs = sessionExpiresAtMs
     }
 }
 

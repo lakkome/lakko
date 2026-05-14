@@ -279,7 +279,9 @@ public final class AuthClient {
         return SignupResult(
             accountId: accountId,
             exportKey: passwordOut.exportKey(),
-            recoveryPhrase: recoveryMnemonic?.phrase()
+            recoveryPhrase: recoveryMnemonic?.phrase(),
+            sessionToken: finishResp.sessionToken,
+            sessionExpiresAtMs: finishResp.sessionExpiresAtMs
         )
     }
 
@@ -349,7 +351,9 @@ public final class AuthClient {
         return LoginResult(
             accountId: accountId,
             sessionKey: out.sessionKey(),
-            exportKey: out.exportKey()
+            exportKey: out.exportKey(),
+            sessionToken: finishResp.sessionToken,
+            sessionExpiresAtMs: finishResp.sessionExpiresAtMs
         )
     }
 
@@ -449,7 +453,9 @@ public final class AuthClient {
 
         return RecoverResult(
             accountId: accountId,
-            exportKey: passwordOut.exportKey()
+            exportKey: passwordOut.exportKey(),
+            sessionToken: finishResp.sessionToken,
+            sessionExpiresAtMs: finishResp.sessionExpiresAtMs
         )
     }
 
@@ -558,15 +564,25 @@ public struct SignupResult: Equatable {
     /// somewhere safe — losing it means losing the only way back
     /// into the account if the password is forgotten.
     public let recoveryPhrase: String?
+    /// Phase 1.5b: bearer token issued by the auth service. Carry
+    /// in the `Authorization: Bearer <token>` header on every
+    /// protected `lakko-svc-discovery` write.
+    public let sessionToken: String
+    /// Token expiry as a unix-millisecond timestamp.
+    public let sessionExpiresAtMs: Int64
 
     public init(
         accountId: Data,
         exportKey: Data,
-        recoveryPhrase: String? = nil
+        recoveryPhrase: String? = nil,
+        sessionToken: String,
+        sessionExpiresAtMs: Int64
     ) {
         self.accountId = accountId
         self.exportKey = exportKey
         self.recoveryPhrase = recoveryPhrase
+        self.sessionToken = sessionToken
+        self.sessionExpiresAtMs = sessionExpiresAtMs
     }
 }
 
@@ -579,11 +595,23 @@ public struct LoginResult: Equatable {
     /// Same export key the user got at signup time — deterministic
     /// for the same password.
     public let exportKey: Data
+    /// Phase 1.5b: bearer token issued by the auth service.
+    public let sessionToken: String
+    /// Token expiry as a unix-millisecond timestamp.
+    public let sessionExpiresAtMs: Int64
 
-    public init(accountId: Data, sessionKey: Data, exportKey: Data) {
+    public init(
+        accountId: Data,
+        sessionKey: Data,
+        exportKey: Data,
+        sessionToken: String,
+        sessionExpiresAtMs: Int64
+    ) {
         self.accountId = accountId
         self.sessionKey = sessionKey
         self.exportKey = exportKey
+        self.sessionToken = sessionToken
+        self.sessionExpiresAtMs = sessionExpiresAtMs
     }
 }
 
@@ -594,10 +622,21 @@ public struct RecoverResult: Equatable {
     /// device root key — the previous device key (if any) is no
     /// longer reachable from the new password.
     public let exportKey: Data
+    /// Phase 1.5b: fresh bearer token issued by the auth service.
+    public let sessionToken: String
+    /// Token expiry as a unix-millisecond timestamp.
+    public let sessionExpiresAtMs: Int64
 
-    public init(accountId: Data, exportKey: Data) {
+    public init(
+        accountId: Data,
+        exportKey: Data,
+        sessionToken: String,
+        sessionExpiresAtMs: Int64
+    ) {
         self.accountId = accountId
         self.exportKey = exportKey
+        self.sessionToken = sessionToken
+        self.sessionExpiresAtMs = sessionExpiresAtMs
     }
 }
 

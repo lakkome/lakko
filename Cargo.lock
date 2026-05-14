@@ -1948,6 +1948,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "lakko-auth-token"
+version = "0.0.0"
+dependencies = [
+ "base64",
+ "hmac",
+ "sha2",
+ "subtle",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "lakko-calls"
 version = "0.0.0"
 
@@ -2123,6 +2134,7 @@ dependencies = [
  "dotenvy",
  "equix",
  "http-body-util",
+ "lakko-auth-token",
  "opaque-ke",
  "rand 0.8.6",
  "serde",
@@ -2150,6 +2162,7 @@ dependencies = [
  "generic-array",
  "hex",
  "http-body-util",
+ "lakko-auth-token",
  "lakko-contacts",
  "lakko-crypto",
  "rand 0.8.6",

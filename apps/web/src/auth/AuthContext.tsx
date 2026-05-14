@@ -121,6 +121,12 @@ export interface IdentitySecrets {
   /** OPAQUE password export key (64 bytes for `LakkoCipherSuite`).
    *  Used as the seed for `Identity.fromSeed`. */
   readonly exportKey: Uint8Array;
+  /** Phase 1.5b: HMAC-SHA256 bearer token. Thread through every
+   *  protected `lakko-svc-discovery` write via the
+   *  `Authorization: Bearer <token>` header. */
+  readonly sessionToken: string;
+  /** Token expiry as a unix-millisecond timestamp. */
+  readonly sessionExpiresAtMs: number;
 }
 
 /** Public surface of the auth context. */
@@ -255,6 +261,11 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       }
       const result = await client.signup(utf8(password));
       const accountIdB64 = base64Encode(result.accountId);
+      // Phase 1.5b: install the fresh bearer token on the
+      // DiscoveryClient so the registerUsername /
+      // uploadIdentityBundle / uploadKeyPackage round-trip below
+      // sails through the auth::require_session middleware.
+      discovery.setSessionToken(result.sessionToken);
 
       // 1.16d2: claim the username server-side. We do this AFTER
       // the OPAQUE flow commits — if /discovery/register fails
@@ -333,9 +344,13 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
 
       // 1.16d3c: hand off the export key for in-memory use by
       // ContactsClient + similar. Cleared on logout.
+      // Phase 1.5b: also stash the bearer token so DiscoveryClient
+      // can thread it through every protected write.
       setIdentitySecrets({
         accountId: result.accountId,
         exportKey: result.exportKey,
+        sessionToken: result.sessionToken,
+        sessionExpiresAtMs: result.sessionExpiresAtMs,
       });
       setState({
         kind: "session",
@@ -383,6 +398,9 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
 
       const result = await client.login(accountIdBytes, utf8(password));
       const accountIdB64 = base64Encode(accountIdBytes);
+      // Phase 1.5b: install the fresh bearer token on the
+      // DiscoveryClient for any protected writes that follow.
+      discovery.setSessionToken(result.sessionToken);
 
       // OPAQUE export_key is deterministic for the same password,
       // so re-deriving the device root key here yields identical
@@ -433,9 +451,12 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       }
 
       // 1.16d3c: stash the export key for ContactsClient.
+      // Phase 1.5b: also stash the bearer token.
       setIdentitySecrets({
         accountId: accountIdBytes,
         exportKey: result.exportKey,
+        sessionToken: result.sessionToken,
+        sessionExpiresAtMs: result.sessionExpiresAtMs,
       });
       setState({
         kind: "session",
@@ -465,6 +486,9 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
           seed,
           utf8(newPassword),
         );
+        // Phase 1.5b: install the fresh bearer token on the
+        // DiscoveryClient.
+        discovery.setSessionToken(result.sessionToken);
         // Re-derive the device root key from the NEW export key.
         // The previous device key (if any) is no longer reachable
         // from the new password; the upsert in IDB drops it.
@@ -520,9 +544,12 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
 
         // 1.16d3c: stash the new export key so ContactsClient
         // works without a re-login round-trip.
+        // Phase 1.5b: also stash the bearer token.
         setIdentitySecrets({
           accountId: accountIdBytes,
           exportKey: result.exportKey,
+          sessionToken: result.sessionToken,
+          sessionExpiresAtMs: result.sessionExpiresAtMs,
         });
         setState({
           kind: "session",
@@ -545,6 +572,10 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       // in-memory Identity secrets — the user just signed out.
       const cached = loadPersisted();
       setIdentitySecrets(null);
+      // Phase 1.5b: drop the bearer token so a subsequent
+      // protected write surfaces a clean 401 instead of silently
+      // using a stale token.
+      discovery.setSessionToken(null);
       chats.clear();
       setState({
         kind: "anon",
@@ -587,6 +618,8 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       // 1.16e6c1: also free()s the canonical Identity.
       chats.clear();
       setIdentitySecrets(null);
+      // Phase 1.5b: drop the bearer token.
+      discovery.setSessionToken(null);
       setState({ kind: "anon" });
     },
   };

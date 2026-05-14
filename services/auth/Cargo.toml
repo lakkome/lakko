@@ -60,6 +60,11 @@ uuid = { version = "1", features = ["v7", "serde"] }
 equix = { version = "0.6", features = ["compiler"] }
 sha2 = "0.10"
 
+# Session-token issuance — Phase 1.5b. Stateless HMAC-SHA256 tokens
+# shared with `services/discovery`'s verifier middleware via the
+# `LAKKO_SESSION_TOKEN_SECRET` env var.
+lakko-auth-token.workspace = true
+
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"

@@ -102,6 +102,12 @@ data class SignupFinishRequest(
 @Serializable
 data class SignupFinishResponse(
     val ok: Boolean,
+    /** Phase 1.5b: HMAC-SHA256 bearer token. Carry in the
+     *  `Authorization: Bearer <token>` header on every protected
+     *  `lakko-svc-discovery` write. */
+    val session_token: String,
+    /** Token expiry as a unix-millisecond timestamp. */
+    val session_expires_at_ms: Long,
 )
 
 // ----------------------------------------------------------------------------
@@ -141,6 +147,10 @@ data class LoginFinishResponse(
     val ok: Boolean,
     /** base64(account_id) — echoed back so the client can pin it. */
     val account_id: String,
+    /** Phase 1.5b: HMAC-SHA256 bearer token. */
+    val session_token: String,
+    /** Token expiry as a unix-millisecond timestamp. */
+    val session_expires_at_ms: Long,
 )
 
 // ----------------------------------------------------------------------------
@@ -193,4 +203,8 @@ data class PasswordResetFinishResponse(
     val ok: Boolean,
     /** base64(account_id) — echoed back, same shape as `LoginFinishResponse`. */
     val account_id: String,
+    /** Phase 1.5b: fresh bearer token for the rotated password. */
+    val session_token: String,
+    /** Token expiry as a unix-millisecond timestamp. */
+    val session_expires_at_ms: Long,
 )

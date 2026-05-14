@@ -64,6 +64,12 @@ export interface SignupResult {
    *  somewhere safe — losing it means losing the only way back
    *  into the account if the password is forgotten. */
   recoveryPhrase?: string;
+  /** Phase 1.5b: HMAC-SHA256 bearer token. Thread through every
+   *  protected `lakko-svc-discovery` write via the
+   *  `Authorization: Bearer <token>` header. */
+  sessionToken: string;
+  /** Token expiry as a unix-millisecond timestamp. */
+  sessionExpiresAtMs: number;
 }
 
 /** Options for `AuthClient.signup`. */
@@ -82,6 +88,10 @@ export interface LoginResult {
   /** Same export key the user got at signup time — deterministic
    *  for the same password. */
   exportKey: Uint8Array;
+  /** Phase 1.5b: HMAC-SHA256 bearer token. */
+  sessionToken: string;
+  /** Token expiry as a unix-millisecond timestamp. */
+  sessionExpiresAtMs: number;
 }
 
 /** Result of `AuthClient.recover`. */
@@ -92,6 +102,10 @@ export interface RecoverResult {
    *  derive a fresh device root key — the previous device key
    *  (if any) is no longer reachable from the new password. */
   exportKey: Uint8Array;
+  /** Phase 1.5b: fresh bearer token for the rotated password. */
+  sessionToken: string;
+  /** Token expiry as a unix-millisecond timestamp. */
+  sessionExpiresAtMs: number;
 }
 
 /** A precondition was violated by the caller — e.g. an empty
@@ -316,6 +330,8 @@ export class AuthClient {
       accountId,
       exportKey: passwordOut.exportKey,
       ...(recovery !== null ? { recoveryPhrase: recovery.mnemonicPhrase } : {}),
+      sessionToken: finishResp.session_token,
+      sessionExpiresAtMs: finishResp.session_expires_at_ms,
     };
   }
 
@@ -372,6 +388,8 @@ export class AuthClient {
       accountId,
       sessionKey: out.sessionKey,
       exportKey: out.exportKey,
+      sessionToken: finishResp.session_token,
+      sessionExpiresAtMs: finishResp.session_expires_at_ms,
     };
   }
 
@@ -479,7 +497,12 @@ export class AuthClient {
       );
     }
 
-    return { accountId, exportKey: passwordOut.exportKey };
+    return {
+      accountId,
+      exportKey: passwordOut.exportKey,
+      sessionToken: finishResp.session_token,
+      sessionExpiresAtMs: finishResp.session_expires_at_ms,
+    };
   }
 
   // -----------------------------------------------------------------

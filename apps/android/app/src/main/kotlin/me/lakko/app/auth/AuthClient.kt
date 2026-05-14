@@ -277,6 +277,8 @@ public class AuthClient(
                         accountId = accountId,
                         exportKey = passwordOut.exportKey(),
                         recoveryPhrase = recovery?.mnemonicPhrase,
+                        sessionToken = finishResp.session_token,
+                        sessionExpiresAtMs = finishResp.session_expires_at_ms,
                     )
                 } finally {
                     passwordOut.close()
@@ -344,6 +346,8 @@ public class AuthClient(
                     accountId = accountId,
                     sessionKey = out.sessionKey(),
                     exportKey = out.exportKey(),
+                    sessionToken = finishResp.session_token,
+                    sessionExpiresAtMs = finishResp.session_expires_at_ms,
                 )
             } finally {
                 out.close()
@@ -455,6 +459,8 @@ public class AuthClient(
                         return RecoverResult(
                             accountId = accountId,
                             exportKey = passwordOut.exportKey(),
+                            sessionToken = finishResp.session_token,
+                            sessionExpiresAtMs = finishResp.session_expires_at_ms,
                         )
                     } finally {
                         passwordOut.close()
@@ -582,6 +588,13 @@ public data class SignupResult(
      *  somewhere safe — losing it means losing the only way back
      *  into the account if the password is forgotten. */
     val recoveryPhrase: String? = null,
+    /** Phase 1.5b: HMAC-SHA256 bearer token. Stash in
+     *  [AuthRepository.identitySecrets] then thread through every
+     *  protected `lakko-svc-discovery` write via the
+     *  `Authorization: Bearer <token>` header. */
+    val sessionToken: String,
+    /** Token expiry as a unix-millisecond timestamp. */
+    val sessionExpiresAtMs: Long,
 ) {
     // `data class` synthesizes `equals` / `hashCode` over reference
     // equality for arrays, which is rarely what you want. The auth
@@ -593,13 +606,17 @@ public data class SignupResult(
         if (other !is SignupResult) return false
         return accountId.contentEquals(other.accountId) &&
             exportKey.contentEquals(other.exportKey) &&
-            recoveryPhrase == other.recoveryPhrase
+            recoveryPhrase == other.recoveryPhrase &&
+            sessionToken == other.sessionToken &&
+            sessionExpiresAtMs == other.sessionExpiresAtMs
     }
 
     override fun hashCode(): Int {
         var result = accountId.contentHashCode()
         result = 31 * result + exportKey.contentHashCode()
         result = 31 * result + (recoveryPhrase?.hashCode() ?: 0)
+        result = 31 * result + sessionToken.hashCode()
+        result = 31 * result + sessionExpiresAtMs.hashCode()
         return result
     }
 }
@@ -613,19 +630,27 @@ public data class LoginResult(
     /** Same export key the user got at signup time — deterministic
      *  for the same password. */
     val exportKey: ByteArray,
+    /** Phase 1.5b: HMAC-SHA256 bearer token. */
+    val sessionToken: String,
+    /** Token expiry as a unix-millisecond timestamp. */
+    val sessionExpiresAtMs: Long,
 ) {
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
         if (other !is LoginResult) return false
         return accountId.contentEquals(other.accountId) &&
             sessionKey.contentEquals(other.sessionKey) &&
-            exportKey.contentEquals(other.exportKey)
+            exportKey.contentEquals(other.exportKey) &&
+            sessionToken == other.sessionToken &&
+            sessionExpiresAtMs == other.sessionExpiresAtMs
     }
 
     override fun hashCode(): Int {
         var result = accountId.contentHashCode()
         result = 31 * result + sessionKey.contentHashCode()
         result = 31 * result + exportKey.contentHashCode()
+        result = 31 * result + sessionToken.hashCode()
+        result = 31 * result + sessionExpiresAtMs.hashCode()
         return result
     }
 }
@@ -637,17 +662,25 @@ public data class RecoverResult(
      *  device root key — the previous device key (if any) is no
      *  longer reachable from the new password. */
     val exportKey: ByteArray,
+    /** Phase 1.5b: fresh bearer token for the rotated password. */
+    val sessionToken: String,
+    /** Token expiry as a unix-millisecond timestamp. */
+    val sessionExpiresAtMs: Long,
 ) {
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
         if (other !is RecoverResult) return false
         return accountId.contentEquals(other.accountId) &&
-            exportKey.contentEquals(other.exportKey)
+            exportKey.contentEquals(other.exportKey) &&
+            sessionToken == other.sessionToken &&
+            sessionExpiresAtMs == other.sessionExpiresAtMs
     }
 
     override fun hashCode(): Int {
         var result = accountId.contentHashCode()
         result = 31 * result + exportKey.contentHashCode()
+        result = 31 * result + sessionToken.hashCode()
+        result = 31 * result + sessionExpiresAtMs.hashCode()
         return result
     }
 }

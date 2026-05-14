@@ -56,14 +56,38 @@ public final class DiscoveryClient {
     private let encoder: JSONEncoder
     private let decoder: JSONDecoder
 
+    /// Phase 1.5b: bearer token threaded into the
+    /// `Authorization: Bearer <token>` header on every protected
+    /// `lakko-svc-discovery` write (register, identity upload,
+    /// keypackage upload, invite upload, invite revoke). `nil`
+    /// means "anonymous" — every protected endpoint will return
+    /// 401 in that mode, but unauthenticated paths (`/pow/challenge`,
+    /// `/discovery/oprf`, `/discovery/lookup`, all GETs, invite
+    /// consume) still work.
+    ///
+    /// `private(set)` so callers update via ``setSessionToken(_:)``;
+    /// reads are non-blocking from any actor (the underlying
+    /// `URLSession` is thread-safe).
+    public private(set) var sessionToken: String?
+
     public init(
         baseURL: String = DiscoveryClient.defaultBaseURL,
-        session: URLSession = .shared
+        session: URLSession = .shared,
+        sessionToken: String? = nil
     ) {
         self.baseURL = baseURL
         self.session = session
+        self.sessionToken = sessionToken
         self.encoder = JSONEncoder()
         self.decoder = JSONDecoder()
+    }
+
+    /// Update the bearer token in-place. Used by
+    /// ``ContactsRepository`` to switch tokens on a fresh
+    /// login/recover without rebuilding the entire client (the
+    /// `URLSession` connection pool is reused).
+    public func setSessionToken(_ token: String?) {
+        self.sessionToken = token
     }
 
     // MARK: - Low-level: 1:1 HTTP endpoints
@@ -503,6 +527,7 @@ public final class DiscoveryClient {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        attachAuthorizationHeader(to: &request)
         let body = InviteConsumeRequest(
             pow: pow,
             joinerTag: base64Encode(joinerTag)
@@ -616,6 +641,7 @@ public final class DiscoveryClient {
         var request = URLRequest(url: url)
         request.httpMethod = "DELETE"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        attachAuthorizationHeader(to: &request)
         let body = InviteRevokeRequest(
             signedAtMs: signedAtMs,
             signature: base64Encode(signature)
@@ -714,6 +740,7 @@ public final class DiscoveryClient {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        attachAuthorizationHeader(to: &request)
         do {
             request.httpBody = try encoder.encode(body)
         } catch {
@@ -731,7 +758,20 @@ public final class DiscoveryClient {
         let url = try buildURL(endpoint: endpoint)
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
+        attachAuthorizationHeader(to: &request)
         return try await execute(endpoint: endpoint, request: request)
+    }
+
+    /// Attach the `Authorization: Bearer <token>` header when a
+    /// session token is set. Unauthenticated POSTs (`/pow/challenge`,
+    /// `/discovery/oprf`, `/discovery/lookup`,
+    /// `invite/{}/consume`) silently ignore the header server-side
+    /// — adding it unconditionally simplifies the call sites at
+    /// the cost of a few bytes per request.
+    fileprivate func attachAuthorizationHeader(to request: inout URLRequest) {
+        if let token = sessionToken {
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
     }
 
     /// Variant of ``post(endpoint:body:)`` that folds a documented

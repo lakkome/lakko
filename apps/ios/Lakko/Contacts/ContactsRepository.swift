@@ -38,6 +38,20 @@ public final class ContactsRepository: ObservableObject {
     private let clientFactory: () -> ContactsClient
     private let discoveryClientFactory: () -> DiscoveryClient
 
+    /// Build a ``DiscoveryClient`` factory that pre-stamps every
+    /// returned client with the current session's bearer token.
+    /// Phase 1.5b: every protected discovery write (register,
+    /// identity upload, keypackage upload, invite upload, invite
+    /// revoke) needs the `Authorization: Bearer <token>` header;
+    /// the simplest threading model is to read
+    /// ``AuthRepository/identitySecrets`` at factory-call time +
+    /// install via ``DiscoveryClient/setSessionToken(_:)``.
+    private func authenticatedDiscoveryClient() -> DiscoveryClient {
+        let client = discoveryClientFactory()
+        client.setSessionToken(authRepository.identitySecrets?.sessionToken)
+        return client
+    }
+
     /// Optional bridge to the chat surface. Wired in 1.14f4. When
     /// non-nil, ``refreshInbox(waitSecs:)`` forwards Welcome
     /// envelopes to ``ChatRepository/joinGroupFromWelcome(welcomeBytes:)``
@@ -267,7 +281,7 @@ public final class ContactsRepository: ObservableObject {
             throw ContactsError.wrap(error)
         }
 
-        let discovery = discoveryClientFactory()
+        let discovery = authenticatedDiscoveryClient()
         let blobId: Data
         do {
             blobId = try await discovery.uploadInvite(
@@ -306,7 +320,7 @@ public final class ContactsRepository: ObservableObject {
             )
         }
         let identity = try Identity.fromSeed(seed: secrets.exportKey)
-        let discovery = discoveryClientFactory()
+        let discovery = authenticatedDiscoveryClient()
         let result: RevokeInviteResult
         do {
             result = try await discovery.revokeInvite(
@@ -371,7 +385,7 @@ public final class ContactsRepository: ObservableObject {
             return .malformedSlug
         }
 
-        let discovery = discoveryClientFactory()
+        let discovery = authenticatedDiscoveryClient()
         let capabilityBytes: Data?
         do {
             capabilityBytes = try await discovery.fetchInvite(blobId: blobId)
@@ -405,7 +419,7 @@ public final class ContactsRepository: ObservableObject {
         // Consume — atomic counter bump + per-joiner dedup.
         let consumeResult: ConsumeInviteResult
         do {
-            let discoveryConsume = discoveryClientFactory()
+            let discoveryConsume = authenticatedDiscoveryClient()
             consumeResult = try await discoveryConsume.consumeInvite(
                 blobId: blobId,
                 capabilityBytes: capabilityBytes,
