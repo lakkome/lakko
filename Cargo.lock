@@ -2311,6 +2311,7 @@ dependencies = [
  "futures",
  "hex",
  "http-body-util",
+ "lakko-auth-token",
  "serde",
  "serde_json",
  "sha2",

@@ -45,10 +45,21 @@
 //! - `PUT    /blob/{sha256_hex}`  — upload, body=ciphertext, idempotent
 //! - `GET    /blob/{sha256_hex}`  — download, streamed
 //! - `HEAD   /blob/{sha256_hex}`  — exists check
+//! - `PUT    /backup`             — per-account backup blob, body=lakko-backup wire bytes (Phase 2a1b, session-token auth)
+//! - `GET    /backup`             — fetch the calling account's backup blob
+//! - `DELETE /backup`             — remove the calling account's backup blob (idempotent)
+//!
+//! Authentication on `/backup` routes uses the same
+//! HMAC-SHA-256 session token `services/auth` issues. Set
+//! `LAKKO_SESSION_TOKEN_SECRET` to the same base64 value here
+//! and in `services/auth` / `services/discovery` / `services/ds`.
 
 #![forbid(unsafe_code)]
 
+mod auth;
+mod backup;
 mod blob;
+mod stream;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -58,8 +69,9 @@ use anyhow::{Context, Result};
 use axum::extract::{DefaultBodyLimit, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json};
-use axum::routing::{get, put};
+use axum::routing::{delete, get, put};
 use axum::Router;
+use lakko_auth_token::TokenSecret;
 use serde_json::json;
 use tokio::signal;
 use tower_http::trace::TraceLayer;
@@ -85,6 +97,12 @@ const MAX_BLOB_BYTES: usize = 50 * 1024 * 1024;
 #[derive(Clone)]
 pub(crate) struct AppState {
     pub(crate) blob_root: Arc<PathBuf>,
+    /// Phase 2a1b: shared HMAC secret for session-token
+    /// verification on the per-account backup routes. Same value
+    /// as `services/auth`'s `state.session_token_secret`; the
+    /// auth-token crate's `verify` runs on every protected
+    /// request via the `auth::require_session` middleware.
+    pub(crate) session_token_secret: Arc<TokenSecret>,
 }
 
 #[tokio::main]
@@ -118,8 +136,21 @@ async fn main() -> Result<()> {
         .await
         .with_context(|| format!("LAKKO_BLOB_DIR not writable: {}", blob_root.display()))?;
 
+    // Phase 2a1b: session-token verifier. Same env var name +
+    // shape as `services/auth` (the issuer) and the other
+    // verifying services. Failure here is fail-fast at startup;
+    // a misconfigured storage service would otherwise reject
+    // every `PUT /backup` with a cryptic 401.
+    let session_token_secret_raw = std::env::var("LAKKO_SESSION_TOKEN_SECRET").context(
+        "LAKKO_SESSION_TOKEN_SECRET env var must be set (base64-encoded HMAC-SHA256 key, \
+         ≥ 32 bytes after decode)",
+    )?;
+    let session_token_secret = TokenSecret::from_base64(&session_token_secret_raw)
+        .context("parse LAKKO_SESSION_TOKEN_SECRET as base64")?;
+
     let state = AppState {
         blob_root: Arc::new(blob_root.clone()),
+        session_token_secret: Arc::new(session_token_secret),
     };
 
     let app = build_app(state);
@@ -141,6 +172,30 @@ async fn main() -> Result<()> {
 /// Build the public router. Extracted so tests can drive it directly
 /// without binding a TCP listener.
 pub(crate) fn build_app(state: AppState) -> Router {
+    use axum::middleware;
+
+    // Phase 2a1b — per-account backup routes. The session-token
+    // middleware proves "the caller holds a valid token for SOME
+    // account", and the handler picks the account-id straight
+    // out of the verified `AuthenticatedAccount` extension. The
+    // URL carries no account-id field — that would let an
+    // attacker with a valid token for A scribble over B's
+    // backup. Body limit on this subtree is MAX_BACKUP_BYTES
+    // (separate from the 50 MB content-addressed blob ceiling)
+    // — backup blobs are tiny compared to attachment blobs.
+    let backup_routes = Router::new()
+        .route(
+            "/backup",
+            put(backup::put_backup)
+                .get(backup::get_backup)
+                .route_layer(DefaultBodyLimit::max(backup::MAX_BACKUP_BYTES)),
+        )
+        .route("/backup", delete(backup::delete_backup))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth::require_session,
+        ));
+
     Router::new()
         .route("/health", get(health))
         .route("/ready", get(ready))
@@ -151,8 +206,11 @@ pub(crate) fn build_app(state: AppState) -> Router {
                 .get(blob::get_blob)
                 .head(blob::head_blob),
         )
-        // Per-route body limit (axum default is 2 MB which is too small).
+        // Per-route body limit for the content-addressed
+        // attachment surface. The backup subtree is merged below
+        // with its own (much smaller) ceiling.
         .layer(DefaultBodyLimit::max(MAX_BLOB_BYTES))
+        .merge(backup_routes)
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }
@@ -228,8 +286,15 @@ mod tests {
 
     fn test_state() -> (AppState, tempfile::TempDir) {
         let tmp = tempfile::tempdir().expect("tempdir");
+        // Fixed-bytes test secret — never used for backup tests in
+        // this module (they exercise `/health`, `/ready`,
+        // `/version`); the field exists so the struct literal
+        // type-checks. Backup-route tests that need a real token
+        // verify path live next to that module.
+        let secret = TokenSecret::new(vec![0x42u8; 32]).expect("32 bytes is over MIN_SECRET_LEN");
         let state = AppState {
             blob_root: Arc::new(tmp.path().to_path_buf()),
+            session_token_secret: Arc::new(secret),
         };
         (state, tmp)
     }

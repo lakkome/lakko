@@ -278,7 +278,7 @@ pub(crate) async fn get_blob(
         .await
         .map_err(|e| internal_io("stat blob", &e))?;
 
-    let stream = tokio_util_compat::ReaderStream::new(file);
+    let stream = crate::stream::ReaderStream::new(file);
     let body = Body::from_stream(stream);
 
     let mut response = Response::new(body);
@@ -340,55 +340,8 @@ fn internal_io(ctx: &str, e: &std::io::Error) -> (StatusCode, String) {
     )
 }
 
-/// Tiny shim for `tokio_util::io::ReaderStream` so we don't pull the
-/// whole `tokio-util` crate. `tokio` does not export this on its own,
-/// so we hand-roll a minimal `Stream<Item = Result<Bytes, io::Error>>`
-/// over an `AsyncRead`. 8 KB chunks balance syscall count and memory.
-mod tokio_util_compat {
-    use std::pin::Pin;
-    use std::task::{Context, Poll};
-
-    use bytes::Bytes;
-    use futures::Stream;
-    use tokio::io::{AsyncRead, ReadBuf};
-
-    const CHUNK: usize = 8 * 1024;
-
-    pub(super) struct ReaderStream<R> {
-        reader: R,
-        buf: Vec<u8>,
-    }
-
-    impl<R: AsyncRead + Unpin> ReaderStream<R> {
-        pub(super) fn new(reader: R) -> Self {
-            Self {
-                reader,
-                buf: vec![0u8; CHUNK],
-            }
-        }
-    }
-
-    impl<R: AsyncRead + Unpin> Stream for ReaderStream<R> {
-        type Item = std::io::Result<Bytes>;
-
-        fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-            let this = self.get_mut();
-            let mut read_buf = ReadBuf::new(&mut this.buf);
-            match Pin::new(&mut this.reader).poll_read(cx, &mut read_buf) {
-                Poll::Pending => Poll::Pending,
-                Poll::Ready(Err(e)) => Poll::Ready(Some(Err(e))),
-                Poll::Ready(Ok(())) => {
-                    let filled = read_buf.filled();
-                    if filled.is_empty() {
-                        Poll::Ready(None)
-                    } else {
-                        Poll::Ready(Some(Ok(Bytes::copy_from_slice(filled))))
-                    }
-                },
-            }
-        }
-    }
-}
+// `ReaderStream` shim lives in `crate::stream` — shared with the
+// per-account backup endpoint (`crate::backup`).
 
 // ============================================================================
 // Tests
@@ -406,8 +359,11 @@ mod tests {
 
     fn test_app() -> (axum::Router, tempfile::TempDir) {
         let tmp = tempfile::tempdir().unwrap();
+        let secret = lakko_auth_token::TokenSecret::new(vec![0x42u8; 32])
+            .expect("32 bytes is over MIN_SECRET_LEN");
         let state = AppState {
             blob_root: Arc::new(tmp.path().to_path_buf()),
+            session_token_secret: Arc::new(secret),
         };
         (build_app(state), tmp)
     }

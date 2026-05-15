@@ -31,6 +31,13 @@ axum = { version = "0.8", features = ["macros", "http2"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["trace", "limit"] }
 
+# Session-token verification on the per-account backup endpoint —
+# shares the `LAKKO_SESSION_TOKEN_SECRET` with `services/auth` (the
+# issuer) and `services/discovery` / `services/ds` (the other
+# verifiers). HMAC-SHA-256 over a fixed-format token; no DB
+# round-trip per request.
+lakko-auth-token.workspace = true
+
 # .env loading — debug builds only; production uses systemd
 # `EnvironmentFile=/etc/lakko/lakko.env`.
 dotenvy = "0.15"
