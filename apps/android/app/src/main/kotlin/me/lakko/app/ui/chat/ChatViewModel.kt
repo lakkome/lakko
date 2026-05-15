@@ -12,6 +12,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import me.lakko.app.chat.AttachmentBridge
 import me.lakko.app.chat.AttachmentBridgeException
+import me.lakko.app.chat.UploadStage
 import me.lakko.app.chat.ChatMessage
 import me.lakko.app.chat.ChatRepository
 import me.lakko.app.chat.ChatThread
@@ -74,6 +75,7 @@ public class ChatViewModel(
             refreshing = composer.refreshing,
             pendingAttachments = composer.pendingAttachments,
             uploading = composer.uploading,
+            uploadStage = composer.uploadStage,
             // We always render the screen as "exists" — if the
             // repo doesn't carry this thread (no Group handle
             // built yet, post-restart pre-bootstrap), the
@@ -137,17 +139,44 @@ public class ChatViewModel(
      * upload-state flag honest.
      */
     public fun onAttachmentPicked(bytes: ByteArray, mime: String?, name: String?) {
-        composer.update { it.copy(uploading = true, sendError = null) }
+        val displayName = name?.takeUnless { it.isNullOrEmpty() } ?: "attachment"
+        composer.update {
+            it.copy(
+                uploading = true,
+                sendError = null,
+                // Polish 1.x — drive `uploadStage` immediately
+                // so the composer doesn't show a generic spinner
+                // for the brief encrypt window. The
+                // `AttachmentBridge.encryptAndUpload` callback
+                // flips this to `Uploading` once it reaches the
+                // PUT path.
+                uploadStage = UploadProgress(
+                    fileName = displayName,
+                    stage = UploadStage.Encrypting,
+                ),
+            )
+        }
         viewModelScope.launch {
             try {
                 val ref = AttachmentBridge.encryptAndUpload(
                     bytes = bytes,
                     mime = mime,
                     name = name,
+                    onStage = { stage ->
+                        composer.update {
+                            it.copy(
+                                uploadStage = UploadProgress(
+                                    fileName = displayName,
+                                    stage = stage,
+                                ),
+                            )
+                        }
+                    },
                 )
                 composer.update {
                     it.copy(
                         uploading = false,
+                        uploadStage = null,
                         pendingAttachments = it.pendingAttachments + ref,
                     )
                 }
@@ -155,6 +184,7 @@ public class ChatViewModel(
                 composer.update {
                     it.copy(
                         uploading = false,
+                        uploadStage = null,
                         sendError = err.message ?: "Attachment failed.",
                     )
                 }
@@ -162,6 +192,7 @@ public class ChatViewModel(
                 composer.update {
                     it.copy(
                         uploading = false,
+                        uploadStage = null,
                         sendError = "Attachment failed: ${err.message ?: err}",
                     )
                 }
@@ -230,8 +261,23 @@ public class ChatViewModel(
          *  encrypted + uploaded. The composer disables Send +
          *  the picker buttons until it flips back. */
         val uploading: Boolean = false,
+        /** Polish 1.x — per-pick upload-progress detail.
+         *  `null` when no upload is in flight; otherwise carries
+         *  the file name + which stage of the encrypt / upload
+         *  pipeline the in-flight pick is at. */
+        val uploadStage: UploadProgress? = null,
     )
 }
+
+/** Polish 1.x — composer-tray progress chip payload.
+ *  Mirror of the iOS `ChatViewModel.UploadStage` enum and the
+ *  web client's `uploadProgress` signal. */
+public data class UploadProgress(
+    /** Display name of the file currently being processed. */
+    val fileName: String,
+    /** Which pipeline stage the bridge is in. */
+    val stage: UploadStage,
+)
 
 /** Combined snapshot the [ChatScreen] renders. */
 public data class ChatScreenUiState(
@@ -246,6 +292,9 @@ public data class ChatScreenUiState(
     /** 1.19c4 — `true` while a picked item is being encrypted
      *  + uploaded. */
     val uploading: Boolean = false,
+    /** Polish 1.x — per-pick upload-progress detail. `null`
+     *  when no upload is in flight. */
+    val uploadStage: UploadProgress? = null,
     /** `false` when the repository has no thread for this
      *  groupIdHex — e.g. immediately after process restart
      *  before snapshot rehydration has rebuilt the per-group

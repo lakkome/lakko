@@ -353,7 +353,15 @@ public struct ChatScreen: View {
                 if viewModel.uploading {
                     HStack(spacing: 6) {
                         ProgressView().controlSize(.small)
-                        Text("Encrypting…").font(.caption2)
+                        // Polish 1.x — surface the active pick's
+                        // file name + stage instead of a generic
+                        // "Encrypting…" caption. Falls back to
+                        // the generic copy when the stage hasn't
+                        // landed yet (the brief race between
+                        // setting `uploading = true` and the
+                        // first `uploadStage` mutation).
+                        Text(uploadCaption(viewModel.uploadStage))
+                            .font(.caption2)
                             .foregroundStyle(.secondary)
                     }
                     .padding(.horizontal, 8)
@@ -370,6 +378,21 @@ public struct ChatScreen: View {
             return "photo"
         }
         return "doc"
+    }
+
+    /// Map [``ChatViewModel/UploadStage``] to the caption shown
+    /// in the composer tray's progress chip. `nil` collapses to
+    /// a generic "Encrypting…" — matches the pre-polish copy so
+    /// the brief race window doesn't show an empty caption.
+    private func uploadCaption(_ stage: ChatViewModel.UploadStage?) -> String {
+        switch stage {
+        case .none:
+            return "Encrypting…"
+        case .encrypting(let fileName):
+            return "Encrypting \(fileName)…"
+        case .uploading(let fileName):
+            return "Uploading \(fileName)…"
+        }
     }
 
     /// PhotosPicker handoff — resolve a single

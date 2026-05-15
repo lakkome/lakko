@@ -49,6 +49,24 @@ public final class ChatViewModel: ObservableObject {
     /// picker buttons until it flips back.
     @Published public private(set) var uploading: Bool = false
 
+    /// Polish 1.x — per-pick upload-progress detail. `nil` when
+    /// no upload is in flight; otherwise carries the file name
+    /// + which stage of the encrypt / upload pipeline the
+    /// in-flight pick is at, so the composer tray can render a
+    /// specific "Uploading hello.png…" caption instead of a
+    /// generic "Uploading…". The user picks one file at a time
+    /// (Apple's photo picker UX is single-image-per-pick by
+    /// default in the ChatScreen), so no file-index ornament —
+    /// the index is always 1.
+    @Published public private(set) var uploadStage: UploadStage?
+
+    /// Stage of a single pick's encrypt+upload pipeline. Mirror
+    /// of the web client's `uploadProgress.stage` discriminator.
+    public enum UploadStage: Equatable {
+        case encrypting(fileName: String)
+        case uploading(fileName: String)
+    }
+
     // MARK: - Mirror of the repository's per-thread state
 
     /// The messages list for this group's thread. Reactive — every
@@ -134,12 +152,34 @@ public final class ChatViewModel: ObservableObject {
     ) async {
         uploading = true
         sendError = nil
-        defer { uploading = false }
+        // Drive `uploadStage` immediately so the composer tray
+        // doesn't show the generic spinner for the brief encrypt
+        // window. `AttachmentBridge.encryptAndUpload` flips the
+        // stage to `.uploading` once it reaches the PUT path.
+        let displayName = (name?.isEmpty ?? true) ? "attachment" : name!
+        uploadStage = .encrypting(fileName: displayName)
+        defer {
+            uploading = false
+            uploadStage = nil
+        }
         do {
             let ref = try await AttachmentBridge.encryptAndUpload(
                 bytes: bytes,
                 mime: mime,
-                name: name
+                name: name,
+                onStage: { [weak self] stage in
+                    // Hop back to MainActor for the published
+                    // mutation — `onStage` may run on whatever
+                    // thread the URLSession completion lands on.
+                    Task { @MainActor in
+                        switch stage {
+                        case .encrypting:
+                            self?.uploadStage = .encrypting(fileName: displayName)
+                        case .uploading:
+                            self?.uploadStage = .uploading(fileName: displayName)
+                        }
+                    }
+                }
             )
             pendingAttachments.append(ref)
         } catch let err as AttachmentBridgeError {

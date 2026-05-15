@@ -192,6 +192,24 @@ function ChatView(props: {
     AttachmentRefBytes[]
   >([]);
   const [uploading, setUploading] = createSignal(false);
+  /** Per-file upload-progress snapshot — drives the
+   *  "Uploading hello.png (2/5)…" indicator in the composer
+   *  tray. `null` when no upload is in flight. The granularity
+   *  is one entry per file × two stages (encrypt → upload);
+   *  byte-level progress within a single PUT would need a
+   *  fetch-stream rewrite (`fetch` doesn't expose upload
+   *  progress; XHR does, but the trade-off in code complexity
+   *  beats the marginal UX win for sub-MAX_ATTACHMENT_BYTES
+   *  files). */
+  const [uploadProgress, setUploadProgress] = createSignal<
+    | {
+        fileIndex: number;
+        total: number;
+        fileName: string;
+        stage: "encrypting" | "uploading";
+      }
+    | null
+  >(null);
   // Cached per-blob_id plaintext blobs for inline preview +
   // re-download. Keyed by hex(blob_id). Re-decrypt is cheap (no
   // network round-trip after the first hit) but caching keeps
@@ -376,10 +394,29 @@ function ChatView(props: {
     if (files.length === 0) return;
     setError(null);
     setUploading(true);
+    const list = Array.from(files);
     try {
-      for (const file of Array.from(files)) {
+      for (let i = 0; i < list.length; i += 1) {
+        const file = list[i];
+        if (file === undefined) continue;
         try {
-          const ref = await encryptAndUploadFile(file);
+          // Polish 1.x: drive `uploadProgress` so the composer
+          // tray can render "Uploading <file> (i/n)…" with a
+          // stage indicator. The encrypt-vs-upload split lets
+          // the user see the slow phase (network) separately
+          // from the fast one (in-memory AEAD).
+          const ref = await encryptAndUploadFile(
+            file,
+            undefined,
+            (stage) => {
+              setUploadProgress({
+                fileIndex: i,
+                total: list.length,
+                fileName: file.name,
+                stage,
+              });
+            },
+          );
           setPendingAttachments([...pendingAttachments(), ref]);
         } catch (err) {
           if (err instanceof AttachmentSizeError) {
@@ -397,6 +434,7 @@ function ChatView(props: {
       }
     } finally {
       setUploading(false);
+      setUploadProgress(null);
     }
   }
 
@@ -1020,7 +1058,19 @@ function ChatView(props: {
                 "align-self": "center",
               }}
             >
-              Encrypting + uploading…
+              {(() => {
+                const p = uploadProgress();
+                if (p === null) return "Encrypting + uploading…";
+                const verb = p.stage === "encrypting"
+                  ? "Encrypting"
+                  : "Uploading";
+                // 1-based index in the user-facing copy — humans
+                // count from 1. Total = 1 collapses the "(1/1)"
+                // ornament since it's noise.
+                const tail =
+                  p.total > 1 ? ` (${p.fileIndex + 1}/${p.total})` : "";
+                return `${verb} "${p.fileName}"${tail}…`;
+              })()}
             </span>
           </Show>
         </div>

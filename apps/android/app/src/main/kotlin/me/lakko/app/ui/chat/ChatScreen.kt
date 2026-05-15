@@ -64,6 +64,7 @@ import kotlinx.coroutines.withContext
 import me.lakko.app.chat.AttachmentBridge
 import me.lakko.app.chat.ChatMessage
 import me.lakko.app.chat.Direction
+import me.lakko.app.chat.UploadStage
 import uniffi.lakko_ffi_uniffi.AttachmentRef
 
 /**
@@ -236,6 +237,7 @@ public fun ChatScreen(
             sendError = state.sendError,
             pendingAttachments = state.pendingAttachments,
             uploading = state.uploading,
+            uploadStage = state.uploadStage,
             onDraftChange = viewModel::onDraftChange,
             onSendClicked = viewModel::onSendClicked,
             onAttachClicked = {
@@ -485,6 +487,7 @@ private fun Composer(
     sendError: String?,
     pendingAttachments: List<AttachmentRef>,
     uploading: Boolean,
+    uploadStage: UploadProgress?,
     onDraftChange: (String) -> Unit,
     onSendClicked: () -> Unit,
     onAttachClicked: () -> Unit,
@@ -509,6 +512,7 @@ private fun Composer(
             PendingAttachmentsTray(
                 attachments = pendingAttachments,
                 uploading = uploading,
+                uploadStage = uploadStage,
                 onRemove = onRemoveAttachment,
             )
         }
@@ -565,6 +569,7 @@ private fun Composer(
 private fun PendingAttachmentsTray(
     attachments: List<AttachmentRef>,
     uploading: Boolean,
+    uploadStage: UploadProgress?,
     onRemove: (Int) -> Unit,
 ) {
     val scrollState = rememberScrollState()
@@ -607,7 +612,20 @@ private fun PendingAttachmentsTray(
                 )
                 Spacer(Modifier.width(6.dp))
                 Text(
-                    text = "Encrypting…",
+                    // Polish 1.x — surface the active pick's
+                    // file name + stage. Falls back to the
+                    // generic "Encrypting…" copy when the stage
+                    // hasn't landed yet (brief race window
+                    // between flipping `uploading` and the first
+                    // `uploadStage` mutation).
+                    text = uploadStage?.let { stage ->
+                        when (stage.stage) {
+                            UploadStage.Encrypting ->
+                                "Encrypting ${stage.fileName}…"
+                            UploadStage.Uploading ->
+                                "Uploading ${stage.fileName}…"
+                        }
+                    } ?: "Encrypting…",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )

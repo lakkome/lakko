@@ -134,12 +134,21 @@ export class AttachmentMissingError extends Error {
 export async function encryptAndUploadFile(
   file: File,
   storage: StorageClient = new StorageClient(),
+  /** Optional progress callback — invoked once per coarse-
+   *  grained stage (`"encrypting"` immediately after the
+   *  `file.arrayBuffer()` read returns, `"uploading"` right
+   *  before the PUT). The two stages cover the wall-clock
+   *  budget reasonably: encrypt is sub-second for sub-
+   *  MAX_ATTACHMENT_BYTES files, the PUT dominates on real
+   *  networks. */
+  onStage?: (stage: "encrypting" | "uploading") => void,
 ): Promise<AttachmentRefBytes> {
   if (file.size > MAX_ATTACHMENT_BYTES) {
     throw new AttachmentSizeError(file.size, MAX_ATTACHMENT_BYTES);
   }
 
   const wasm = await loadWasm();
+  onStage?.("encrypting");
   const plaintext = new Uint8Array(await file.arrayBuffer());
 
   // wasm encrypt — returns an EncryptedAttachment handle with
@@ -148,6 +157,7 @@ export async function encryptAndUploadFile(
   const enc = wasm.encryptAttachment(plaintext);
 
   try {
+    onStage?.("uploading");
     await storage.putBlob(enc.blobId, enc.ciphertext);
   } finally {
     // Even on PUT failure we still want to drop the wasm handle

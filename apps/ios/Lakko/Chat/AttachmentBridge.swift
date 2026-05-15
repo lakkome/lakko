@@ -75,7 +75,15 @@ public enum AttachmentBridge {
         bytes: Data,
         mime: String?,
         name: String?,
-        storage: StorageClient = StorageClient()
+        storage: StorageClient = StorageClient(),
+        /// Polish 1.x — coarse-grained stage callback the
+        /// composer surface drives off to render
+        /// "Encrypting…" → "Uploading…" captions instead of a
+        /// generic spinner. Invoked synchronously from this
+        /// function's thread context; callers that mutate
+        /// `@MainActor` state must hop back to MainActor
+        /// inside their closure.
+        onStage: (@Sendable (UploadStage) -> Void)? = nil
     ) async throws -> AttachmentRef {
         guard bytes.count <= maxAttachmentBytes else {
             throw AttachmentBridgeError.tooLarge(
@@ -83,6 +91,7 @@ public enum AttachmentBridge {
                 max: maxAttachmentBytes
             )
         }
+        onStage?(.encrypting)
         // 1) Encrypt via UniFFI — fresh CEK + nonce + SHA-256
         // blob_id all computed inside Rust.
         let enc: EncryptedAttachment
@@ -94,6 +103,7 @@ public enum AttachmentBridge {
 
         // 2) PUT the ciphertext under the content-addressed
         // blob_id.
+        onStage?(.uploading)
         do {
             try await storage.putBlob(
                 blobId: enc.blobId,
@@ -230,6 +240,18 @@ public enum AttachmentBridge {
     }
 
     private static let hexAlphabet: [Character] = Array("0123456789abcdef")
+}
+
+/// Coarse-grained pipeline stage reported through
+/// [``AttachmentBridge/encryptAndUpload(bytes:mime:name:storage:onStage:)``]'s
+/// `onStage` callback (Polish 1.x). The callback fires once per
+/// stage, before the corresponding work begins, so the UI can
+/// flip its caption to match the about-to-happen work.
+public enum UploadStage: Sendable {
+    /// About to run `encryptAttachment` over the plaintext bytes.
+    case encrypting
+    /// About to PUT the ciphertext to `services/storage`.
+    case uploading
 }
 
 // MARK: - Errors

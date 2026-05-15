@@ -88,6 +88,14 @@ public object AttachmentBridge {
         mime: String?,
         name: String?,
         storage: StorageClient = StorageClient(),
+        /** Polish 1.x — coarse-grained stage callback the
+         *  composer surface drives off to render "Encrypting…"
+         *  → "Uploading…" captions instead of a generic
+         *  spinner. Invoked synchronously from this function's
+         *  coroutine context; callers that mutate UI state from
+         *  this callback should hand off to the right
+         *  dispatcher (e.g. `Dispatchers.Main`). */
+        onStage: ((UploadStage) -> Unit)? = null,
     ): AttachmentRef {
         if (bytes.size > MAX_ATTACHMENT_BYTES) {
             throw AttachmentBridgeException.TooLarge(
@@ -96,6 +104,7 @@ public object AttachmentBridge {
             )
         }
 
+        onStage?.invoke(UploadStage.Encrypting)
         // 1) Encrypt via UniFFI — fresh CEK + nonce + SHA-256
         // blob_id all computed inside Rust.
         val enc: EncryptedAttachment = try {
@@ -106,6 +115,7 @@ public object AttachmentBridge {
 
         // 2) PUT the ciphertext under the content-addressed
         // blob_id.
+        onStage?.invoke(UploadStage.Uploading)
         try {
             storage.putBlob(blobId = enc.blobId, ciphertext = enc.ciphertext)
         } catch (e: Throwable) {
@@ -247,6 +257,21 @@ public object AttachmentBridge {
     }
 
     private const val HEX: String = "0123456789abcdef"
+}
+
+/**
+ * Coarse-grained pipeline stage reported through
+ * [AttachmentBridge.encryptAndUpload]'s `onStage` callback
+ * (Polish 1.x). Mirror of the iOS `UploadStage` enum + the web
+ * client's `progress.stage` discriminator. The callback fires
+ * once per stage, before the corresponding work begins, so the
+ * UI flips its caption to match the about-to-happen work.
+ */
+public enum class UploadStage {
+    /** About to run `encryptAttachment` over the plaintext bytes. */
+    Encrypting,
+    /** About to PUT the ciphertext to `services/storage`. */
+    Uploading,
 }
 
 // =============================================================================
