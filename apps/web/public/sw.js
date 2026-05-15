@@ -58,7 +58,13 @@ const CACHE_NAME = `lakko-app-shell-${BUILD_VERSION}`;
 // Single source of truth for "is this a backend API call". Keep
 // in lock-step with `vite.config.ts` proxy rewrites — every path
 // listed there must be matched here so we never serve stale.
-const API_PREFIXES = ["/api/auth", "/api/discovery", "/api/ds"];
+const API_PREFIXES = [
+  "/api/auth",
+  "/api/discovery",
+  "/api/ds",
+  "/api/storage",
+  "/api/push",
+];
 
 // ----- install -------------------------------------------------
 
@@ -179,20 +185,141 @@ async function networkFirstWithCacheFallback(req) {
   }
 }
 
-// ----- push (1.18 placeholder) ---------------------------------
+// ----- push (1.20b) --------------------------------------------
+
+/**
+ * Decode the wake payload that `services/push-gw` ships through
+ * Web Push (RFC 8291 aes128gcm — the browser does the AEAD on our
+ * behalf, we receive the plaintext JSON). The body shape is
+ * defined by `WakeBody` in `services/push-gw/src/providers/webpush.rs`:
+ *
+ *     { v: 1, d: <device_hex>, g: <group_hex>?, p: <pointer>? }
+ *
+ * Unknown versions / malformed JSON / missing fields collapse into
+ * a generic notification — the user still gets a wake, just without
+ * the per-message hint.
+ */
+function parseWakeBody(data) {
+  if (data === null || data === undefined) return null;
+  try {
+    const json = data.json();
+    if (json === null || typeof json !== "object") return null;
+    if (json.v !== 1) return null;
+    return {
+      deviceHex: typeof json.d === "string" ? json.d : null,
+      groupHex: typeof json.g === "string" ? json.g : null,
+      pointer: typeof json.p === "number" ? json.p : null,
+    };
+  } catch {
+    return null;
+  }
+}
 
 self.addEventListener("push", (event) => {
-  // Phase 1.16f2 stub. The 1.18 sprint will:
-  //   1. Decode the (group_pseudonym, envelope_pointer) tuple from
-  //      `event.data?.json()`.
-  //   2. Fetch the ciphertext from the DS via a same-origin GET.
-  //   3. Bridge to the WASM core (postMessage to a client, or run
-  //      the lakko-ffi-wasm bundle in the SW global once we ship a
-  //      worker-compatible build target).
-  //   4. Surface a local notification with the decrypted preview.
-  // Until then we no-op so the subscription surface stays available
-  // for early testing.
-  event.waitUntil(Promise.resolve());
+  // Decode + dispatch. The SW deliberately does NOT attempt to
+  // decrypt the MLS message itself: doing so would require the
+  // non-extractable device key (which the SW *can* access, since
+  // the IDB-stored CryptoKey is keyed by origin), the cached MLS
+  // group state, and ~megabytes of WASM glue — all running inside
+  // a ≤30-second budget the OS hands the SW before killing it.
+  //
+  // Instead we:
+  //
+  //   1. Decode the wake payload (no crypto, just JSON).
+  //   2. Render a generic notification ("New message"). The user
+  //      sees the wake; the preview body is intentionally
+  //      content-free because the SW context can't safely render
+  //      decrypted plaintext without holding the full MLS state.
+  //   3. Forward the wake hint to any open tabs via postMessage
+  //      so they can refresh the visible thread without waiting
+  //      for the next poll tick.
+  //
+  // Click-through: `notificationclick` (below) opens the right
+  // route — the SPA itself drives the actual decrypt.
+  const wake = parseWakeBody(event.data);
+  event.waitUntil(
+    (async () => {
+      // (a) Tell every open Lakko tab about the wake — they
+      //     handle the foreground refresh path natively + can
+      //     surface a real (decrypted) preview if the page is
+      //     visible.
+      try {
+        const clients = await self.clients.matchAll({
+          type: "window",
+          includeUncontrolled: false,
+        });
+        for (const c of clients) {
+          c.postMessage({ type: "LAKKO_PUSH_WAKE", wake });
+        }
+      } catch {
+        // Best effort — a closed tab is the common case.
+      }
+
+      // (b) Build a local notification. Generic body so we don't
+      //     leak any decrypted content from the SW context (which
+      //     would need to hydrate the full MLS state).
+      const title = "Lakko";
+      const body = "New message";
+      // Click-action carries the wake hint so the route layer can
+      // jump to the right chat without re-polling.
+      const data = wake !== null ? { wake } : {};
+      try {
+        await self.registration.showNotification(title, {
+          body,
+          tag: wake?.groupHex ?? "lakko-default",
+          // Replacing-tag behavior: a quick burst of messages in
+          // the same group collapses into one OS notification —
+          // matches the platform-native chat-app pattern.
+          renotify: false,
+          data,
+          icon: "/icon-192.png",
+          badge: "/icon-96.png",
+        });
+      } catch {
+        // Some browsers + private modes don't allow showing
+        // notifications from a push event under certain
+        // conditions — best-effort, don't throw past `waitUntil`.
+      }
+    })(),
+  );
+});
+
+// ----- notificationclick (1.20b) -------------------------------
+
+self.addEventListener("notificationclick", (event) => {
+  // Close the OS notification immediately so the user doesn't see
+  // it linger after the click.
+  event.notification.close();
+
+  const wake = event.notification.data?.wake;
+  // Default landing: the app shell. When we know the group, route
+  // to the per-chat page so the user lands on the unread thread.
+  // The `paths.chat(...)` slug is base64url-no-pad(groupId) — the
+  // SW doesn't have the helper, so we just open the root and let
+  // the SPA route via its own deep-link reader (set in 1.18g).
+  let url = "/";
+  if (wake?.groupHex) {
+    url = `/?wake=${encodeURIComponent(wake.groupHex)}`;
+  }
+
+  event.waitUntil(
+    (async () => {
+      // If a Lakko tab is already open, focus it (and let the SPA
+      // pull the wake out of the postMessage we already sent).
+      const clients = await self.clients.matchAll({
+        type: "window",
+        includeUncontrolled: true,
+      });
+      for (const c of clients) {
+        if (c.url.startsWith(self.location.origin)) {
+          await c.focus();
+          return;
+        }
+      }
+      // No open tab — open a fresh one.
+      await self.clients.openWindow(url);
+    })(),
+  );
 });
 
 // ----- message (skip-waiting handshake) ------------------------

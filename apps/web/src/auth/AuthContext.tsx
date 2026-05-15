@@ -67,6 +67,7 @@ import { clearAll as clearContactsStore } from "../contacts/local-store";
 import { useChats } from "../chat/ChatContext";
 import { deleteMlsSnapshot } from "../chat/mls-store";
 import { rehydrateMlsState } from "../chat/rehydrate";
+import { subscribeToPush, unsubscribeFromPush } from "../push/subscribe";
 import type { Identity as WasmIdentity } from "../../wasm/lakko_ffi_wasm";
 
 /** Account record exposed to the UI when a session is active. */
@@ -401,6 +402,14 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
           "internal: signup completed without a recovery phrase",
         );
       }
+      // 1.20b: best-effort push subscribe. The orchestrator is
+      // a no-op when the build has no VAPID public key set or the
+      // user denies the Notification permission prompt — fall
+      // back to foreground polling without throwing.
+      void subscribeToPush().catch((err) => {
+        // eslint-disable-next-line no-console
+        console.warn("push subscribe (signup) failed", err);
+      });
       return { recoveryPhrase: result.recoveryPhrase };
     },
     async login(username, password) {
@@ -511,6 +520,14 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       setState({
         kind: "session",
         account: { accountId: accountIdB64, username: resolvedUsername },
+      });
+      // 1.20b: best-effort push subscribe. Idempotent — a
+      // returning user with an already-cached PushSubscription
+      // gets a no-op browser-side, then re-registers the same
+      // token with `push-gw` (the server UPSERTs).
+      void subscribeToPush().catch((err) => {
+        // eslint-disable-next-line no-console
+        console.warn("push subscribe (login) failed", err);
       });
     },
     async recover(mnemonicPhrase, newPassword) {
@@ -623,6 +640,14 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
             username: cached.username,
           },
         });
+        // 1.20b: best-effort push subscribe after recovery —
+        // the new password changes the device key, but the
+        // device push pseudonym persists in localStorage so
+        // the server's existing token row simply gets re-keyed.
+        void subscribeToPush().catch((err) => {
+          // eslint-disable-next-line no-console
+          console.warn("push subscribe (recover) failed", err);
+        });
       } finally {
         // Best-effort wipe of the seed buffer. It's a Uint8Array
         // we own; zeroing it now means the next GC pass cannot
@@ -654,6 +679,15 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
           /* best-effort */
         });
       }
+      // 1.20b: drop the push registration too. Logout intent is
+      // "no more pushes on this device until I re-auth" — the
+      // device key + push pseudonym stay on this browser for a
+      // cheap re-login, but the server-side token row goes.
+      // Fire-and-forget; failures are non-blocking.
+      void unsubscribeFromPush().catch((err) => {
+        // eslint-disable-next-line no-console
+        console.warn("push unsubscribe (logout) failed", err);
+      });
       chats.clear();
       setState({
         kind: "anon",
@@ -701,6 +735,18 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       // "forget device" should leave nothing per-account
       // behind on this browser.
       clearContactsStore();
+      // 1.20b: full wipe of push state too — unsubscribe on the
+      // browser side, drop the push pseudonym from localStorage,
+      // tell `push-gw` to drop the token. Awaited because
+      // forgetDevice's contract is "leave NOTHING per-account
+      // behind"; a fire-and-forget here would race against the
+      // immediate state flip below.
+      try {
+        await unsubscribeFromPush();
+      } catch {
+        // best-effort — the localStorage pseudonym is dropped
+        // regardless inside `unsubscribeFromPush`.
+      }
       // 1.16e5: drop active MLS group state.
       // 1.16e6c1: also free()s the canonical Identity.
       chats.clear();
