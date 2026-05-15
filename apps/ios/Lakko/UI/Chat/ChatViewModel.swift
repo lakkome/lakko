@@ -3,6 +3,7 @@
 
 import Combine
 import Foundation
+import LakkoCore
 
 /// State + dispatcher for the per-thread ``ChatScreen``.
 ///
@@ -30,11 +31,23 @@ public final class ChatViewModel: ObservableObject {
 
     @Published public var draft: String = ""
 
+    /// Phase 1.19c3 — attachments staged in the composer. The
+    /// user picks photo / file; each call to
+    /// ``onAttachmentPicked(bytes:mime:name:)`` encrypts +
+    /// uploads to storage immediately so the ref is ready by
+    /// the time Send is tapped. Cleared on successful Send, on
+    /// per-chip remove, and on screen dismount.
+    @Published public private(set) var pendingAttachments: [AttachmentRef] = []
+
     // MARK: - Ephemeral status
 
     @Published public private(set) var sending: Bool = false
     @Published public private(set) var sendError: String?
     @Published public private(set) var refreshing: Bool = false
+    /// `true` while one or more picked items are being
+    /// encrypted + uploaded. The composer disables Send and the
+    /// picker buttons until it flips back.
+    @Published public private(set) var uploading: Bool = false
 
     // MARK: - Mirror of the repository's per-thread state
 
@@ -77,7 +90,12 @@ public final class ChatViewModel: ObservableObject {
     public func onSendClicked() {
         guard !sending else { return }
         let trimmed = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
+        let stagedAttachments = pendingAttachments
+        // 1.19c3: attachment-only messages are valid (empty
+        // text + ≥1 attachment); pre-1.19 text-only messages
+        // still valid (≥1 char text + zero attachments). The
+        // only invalid input is the all-empty composer.
+        guard !trimmed.isEmpty || !stagedAttachments.isEmpty else { return }
 
         sending = true
         sendError = nil
@@ -85,17 +103,57 @@ public final class ChatViewModel: ObservableObject {
             do {
                 try await repository.sendMessage(
                     groupIdHex: groupIdHex,
-                    plaintext: trimmed
+                    plaintext: trimmed,
+                    attachments: stagedAttachments
                 )
                 sending = false
                 sendError = nil
                 draft = ""
+                pendingAttachments = []
             } catch {
                 sending = false
+                // 1.19c3: leave `pendingAttachments` populated
+                // on send failure so the user can retry without
+                // re-picking the same files.
                 sendError = (error as? LocalizedError)?.errorDescription
                     ?? "Send failed."
             }
         }
+    }
+
+    /// Drive the encrypt + upload flow for one picked item.
+    /// Called by the screen layer after a photo / document
+    /// picker resolves to raw bytes + MIME + filename.
+    /// Sequential — one picked item at a time, called from the
+    /// screen's `Task { … }` per pick — keeps the upload-state
+    /// flag honest.
+    public func onAttachmentPicked(
+        bytes: Data,
+        mime: String?,
+        name: String?
+    ) async {
+        uploading = true
+        sendError = nil
+        defer { uploading = false }
+        do {
+            let ref = try await AttachmentBridge.encryptAndUpload(
+                bytes: bytes,
+                mime: mime,
+                name: name
+            )
+            pendingAttachments.append(ref)
+        } catch let err as AttachmentBridgeError {
+            sendError = err.errorDescription
+        } catch {
+            sendError = "Attachment failed: \(error)"
+        }
+    }
+
+    /// Drop a staged attachment from the pending tray. Index
+    /// matches the order in ``pendingAttachments``.
+    public func onRemovePendingAttachment(at index: Int) {
+        guard pendingAttachments.indices.contains(index) else { return }
+        pendingAttachments.remove(at: index)
     }
 
     public func onRefreshClicked() {

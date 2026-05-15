@@ -226,15 +226,20 @@ public final class ChatClient {
     ) -> IncomingChatEvent {
         switch processed {
         case .application(let data):
-            // UTF-8 decode with replacement on malformed bytes —
-            // the plaintext was already authenticated by the MLS
-            // Application message's MAC, so the worst case is
-            // malformed UTF-8 from a buggy peer, not a tampered
-            // payload.
-            let plaintext = String(data: data, encoding: .utf8) ?? ""
+            // 1.19c3: feed the application bytes through the
+            // UniFFI ``parseEnvelope(bytes:)`` surface. The
+            // plaintext was already authenticated by the MLS
+            // Application message's MAC, so the worst case is a
+            // malformed envelope from a buggy peer — never a
+            // tampered payload. Legacy pre-1.19 plain-UTF-8
+            // bytes collapse cleanly to
+            // `(text: <utf-8 lossy>, attachments: [])` via the
+            // parser's documented fallback paths.
+            let parsed = AttachmentBridge.parseEnvelopeBytes(data)
             return .application(
                 messageId: messageId,
-                plaintext: plaintext,
+                text: parsed.text,
+                attachments: parsed.attachments,
                 createdAt: createdAt
             )
         case .commit:
@@ -278,9 +283,22 @@ public struct SendMessageResult: Equatable {
 
 /// Discriminated chat event surfaced by
 /// ``ChatClient/pollMessages(identity:group:after:waitSecs:)``.
+///
+/// Phase 1.19c3: `.application` now carries
+/// `(text, attachments)` from the 1.19a JSON envelope (parsed
+/// via the UniFFI ``parseEnvelope(bytes:)`` surface from 1.19b).
+/// Legacy pre-1.19 plain-UTF-8 bytes collapse cleanly to
+/// `(text: <utf-8 lossy>, attachments: [])` via the parser's
+/// documented fallback paths — existing bubbles render
+/// unchanged.
 public enum IncomingChatEvent: Equatable {
     /// Application-data message (user-visible chat row).
-    case application(messageId: Int64, plaintext: String, createdAt: String)
+    case application(
+        messageId: Int64,
+        text: String,
+        attachments: [AttachmentRef],
+        createdAt: String
+    )
     /// Commit / proposal / external-join-proposal frame. MLS
     /// state advanced, no user-visible bytes.
     case system(messageId: Int64, systemKind: SystemKind, createdAt: String)

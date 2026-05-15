@@ -313,23 +313,56 @@ public final class ChatRepository: ObservableObject {
         return groupIdHex
     }
 
-    /// Encrypt `plaintext` for the current epoch of `groupIdHex`
-    /// and post the wire bytes to the DS. Appends the message to
-    /// the in-memory timeline + persists the snapshot.
-    public func sendMessage(groupIdHex: String, plaintext: String) async throws {
+    /// Compose `(plaintext, attachments)` into the canonical
+    /// 1.19a JSON envelope, encrypt for the current epoch of
+    /// `groupIdHex`, and post the wire bytes to the DS. Appends
+    /// the message to the in-memory timeline + persists the
+    /// snapshot.
+    ///
+    /// Phase 1.19c3: empty `attachments` ⇒ text-only envelope
+    /// (binary-identical to a `composeEnvelope(text: …,
+    /// attachments: [])` call, which the 1.19a parser also
+    /// accepts as a v=1 message). Empty `plaintext` is valid
+    /// when at least one attachment is present (attachment-only
+    /// message). Empty-and-empty is rejected at the call site
+    /// upstream — the view model and screen layer enforce that.
+    public func sendMessage(
+        groupIdHex: String,
+        plaintext: String,
+        attachments: [AttachmentRef] = []
+    ) async throws {
         guard let identity = canonicalIdentity else {
             throw ChatError.argument("ChatRepository not bootstrapped")
         }
         guard let record = groups[groupIdHex] else {
             throw ChatError.argument("no live Group handle for \(groupIdHex)")
         }
+        // 1.19c3: build the JSON envelope before encrypting.
+        // `composeEnvelopeBytes` routes through the UniFFI
+        // `composeEnvelope` free function — wrong-length byte
+        // fields are rejected there (defence-in-depth: the
+        // UI already validates the AttachmentRefs it builds via
+        // `AttachmentBridge.encryptAndUpload`).
+        let envelopeBytes: Data
+        do {
+            envelopeBytes = try AttachmentBridge.composeEnvelopeBytes(
+                text: plaintext,
+                attachments: attachments
+            )
+        } catch {
+            throw ChatError.wrapped(
+                "envelope compose failed",
+                underlying: error
+            )
+        }
         let result = try await chatClient.sendMessage(
             identity: identity,
             group: record.group,
-            plaintext: Data(plaintext.utf8)
+            plaintext: envelopeBytes
         )
         record.appendOutgoing(
             text: plaintext,
+            attachments: attachments,
             messageId: result.messageId,
             createdAt: result.createdAt
         )
@@ -460,21 +493,32 @@ public struct ChatThread: Equatable {
 }
 
 /// One message in a ``ChatThread``.
+///
+/// Phase 1.19c3: now carries an optional `attachments` list
+/// alongside `text`. Outgoing messages populated locally on
+/// ``ChatRepository/sendMessage(groupIdHex:plaintext:attachments:)``;
+/// incoming messages populated from the parsed envelope on
+/// ``ChatClient/pollMessages(identity:group:after:waitSecs:)``.
+/// Empty list = pre-1.19-style text-only message; identical
+/// rendering to before.
 public struct ChatMessage: Equatable, Identifiable {
     public let messageId: Int64
     public let direction: Direction
     public let text: String
+    public let attachments: [AttachmentRef]
     public let createdAt: String
 
     public init(
         messageId: Int64,
         direction: Direction,
         text: String,
+        attachments: [AttachmentRef] = [],
         createdAt: String
     ) {
         self.messageId = messageId
         self.direction = direction
         self.text = text
+        self.attachments = attachments
         self.createdAt = createdAt
     }
 
@@ -512,6 +556,7 @@ private final class GroupRecord {
 
     func appendOutgoing(
         text: String,
+        attachments: [AttachmentRef] = [],
         messageId: Int64,
         createdAt: String
     ) {
@@ -520,6 +565,7 @@ private final class GroupRecord {
                 messageId: messageId,
                 direction: .outgoing,
                 text: text,
+                attachments: attachments,
                 createdAt: createdAt
             )
         )
@@ -528,12 +574,13 @@ private final class GroupRecord {
     func applyPollResult(_ result: PollMessagesResult) {
         for event in result.events {
             switch event {
-            case .application(let messageId, let plaintext, let createdAt):
+            case .application(let messageId, let text, let attachments, let createdAt):
                 messages.append(
                     ChatMessage(
                         messageId: messageId,
                         direction: .incoming,
-                        text: plaintext,
+                        text: text,
+                        attachments: attachments,
                         createdAt: createdAt
                     )
                 )
