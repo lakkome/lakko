@@ -25,6 +25,15 @@ pub const WORD_COUNT: usize = 24;
 /// Length in bytes of the BIP39 PBKDF2 seed.
 const SEED_LEN: usize = 64;
 
+/// Length in bytes of the BIP39 raw entropy for a 24-word
+/// mnemonic. 24 words × 11 bits/word = 264 bits, minus an 8-bit
+/// checksum = 256 bits = 32 bytes. Exposed publicly because the
+/// Phase 1.21c social-recovery flow splits this exact buffer
+/// via `lakko-shamir` (the entropy is the canonical "secret to
+/// recover", not the seed — the seed is derived from the
+/// entropy via PBKDF2 with a fixed empty passphrase).
+pub const ENTROPY_LEN: usize = 32;
+
 /// Owned 24-word English mnemonic.
 ///
 /// Cheap to construct (the upstream parser does the wordlist
@@ -127,6 +136,51 @@ impl Mnemonic {
         let bytes = self.inner.to_seed_normalized("");
         SecretSeed(bytes)
     }
+
+    /// Extract the 32-byte BIP39 entropy (without the seed's
+    /// PBKDF2 derivation). Phase 1.21c uses this as the input
+    /// to the social-recovery flow's [`lakko_shamir::split`]
+    /// — 32 bytes splits + recovers far more cheaply than the
+    /// ~210-byte phrase string, and the entropy plus the BIP39
+    /// checksum lookup uniquely reconstructs the mnemonic via
+    /// [`Mnemonic::from_entropy`].
+    ///
+    /// The returned [`SecretEntropy`] zeroizes on drop, same
+    /// posture as [`SecretSeed`].
+    #[must_use]
+    pub fn to_entropy(&self) -> SecretEntropy {
+        let raw = self.inner.to_entropy();
+        debug_assert_eq!(
+            raw.len(),
+            ENTROPY_LEN,
+            "BIP39 24-word mnemonic always has 32 bytes of entropy",
+        );
+        let mut arr = [0u8; ENTROPY_LEN];
+        // `to_entropy()` returns a fresh `Vec<u8>` — copy into
+        // the array so the heap allocation goes away with `raw`
+        // (which is not zeroize-on-drop on its own).
+        arr.copy_from_slice(&raw);
+        SecretEntropy(arr)
+    }
+
+    /// Reconstruct the mnemonic from raw 32-byte entropy. The
+    /// BIP39 checksum is re-computed at this layer; the
+    /// returned [`Mnemonic`] is byte-identical to the original
+    /// that produced the entropy via [`Mnemonic::to_entropy`].
+    ///
+    /// # Errors
+    ///
+    /// * [`MnemonicError::InvalidPhrase`] — entropy is the
+    ///   wrong length for a 24-word mnemonic (must be exactly
+    ///   [`ENTROPY_LEN`] = 32 bytes).
+    pub fn from_entropy(entropy: &[u8]) -> Result<Self, MnemonicError> {
+        if entropy.len() != ENTROPY_LEN {
+            return Err(MnemonicError::InvalidPhrase);
+        }
+        let inner = InnerMnemonic::from_entropy_in(Language::English, entropy)
+            .map_err(|_| MnemonicError::InvalidPhrase)?;
+        Ok(Self { inner })
+    }
 }
 
 /// Owned 64-byte BIP39 seed that zeroizes on drop.
@@ -167,6 +221,45 @@ impl core::fmt::Debug for Mnemonic {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("Mnemonic")
             .field("words", &WORD_COUNT)
+            .finish()
+    }
+}
+
+/// Owned 32-byte BIP39 entropy buffer that zeroizes on drop.
+///
+/// `Debug` formats the length only — the bytes never enter logs.
+/// Used by the Phase 1.21c social-recovery flow as the input to
+/// `lakko_shamir::split`: the entropy is the canonical "secret
+/// to recover", and BIP39's `from_entropy` rebuilds the
+/// 24-word mnemonic byte-for-byte once 3-of-5 shares are
+/// combined.
+#[derive(Zeroize, ZeroizeOnDrop)]
+pub struct SecretEntropy(pub(crate) [u8; ENTROPY_LEN]);
+
+impl SecretEntropy {
+    /// Length in bytes (always 32).
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// Always `false` — kept for API uniformity with `len`.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        false
+    }
+}
+
+impl AsRef<[u8]> for SecretEntropy {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl core::fmt::Debug for SecretEntropy {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("SecretEntropy")
+            .field("len", &ENTROPY_LEN)
             .finish()
     }
 }
@@ -273,6 +366,72 @@ mod tests {
         let seed_a = m_a.to_seed();
         let seed_b = m_b.to_seed();
         assert_ne!(seed_a.as_ref(), seed_b.as_ref());
+    }
+
+    #[test]
+    fn to_entropy_is_32_bytes_and_deterministic() {
+        let phrase = "abandon abandon abandon abandon abandon abandon abandon abandon \
+                      abandon abandon abandon abandon abandon abandon abandon abandon \
+                      abandon abandon abandon abandon abandon abandon abandon art";
+        let m = Mnemonic::from_phrase(phrase).expect("parse");
+        let entropy_a = m.to_entropy();
+        let entropy_b = m.to_entropy();
+        assert_eq!(entropy_a.len(), ENTROPY_LEN);
+        assert_eq!(entropy_a.as_ref(), entropy_b.as_ref());
+        // The all-`abandon ... art` vector is the canonical
+        // "all-zeros entropy" mnemonic in BIP39 conformance
+        // suites — assert that here so an accidental BIP39 lib
+        // bump that changed the wordlist endianness surfaces
+        // immediately rather than silently breaking recovery.
+        assert_eq!(entropy_a.as_ref(), &[0u8; ENTROPY_LEN]);
+    }
+
+    #[test]
+    fn from_entropy_round_trips_with_to_entropy() {
+        // Splitting + reconstructing the entropy must produce
+        // the byte-identical mnemonic — that's the contract
+        // Phase 1.21c's social-recovery flow relies on.
+        let original = Mnemonic::generate();
+        let entropy = original.to_entropy();
+        let restored = Mnemonic::from_entropy(entropy.as_ref()).expect("rebuild");
+        assert_eq!(original.phrase(), restored.phrase());
+        assert_eq!(
+            original.to_seed().as_ref(),
+            restored.to_seed().as_ref(),
+            "the BIP39 PBKDF2 seed must match too — recovery checks the seed, not the phrase string",
+        );
+    }
+
+    #[test]
+    fn from_entropy_rejects_wrong_length() {
+        // 31 bytes — one short of the 24-word entropy length.
+        let short = [0u8; ENTROPY_LEN - 1];
+        let err = Mnemonic::from_entropy(&short).expect_err("must fail");
+        assert!(matches!(err, MnemonicError::InvalidPhrase));
+        // 33 bytes — one over.
+        let long = [0u8; ENTROPY_LEN + 1];
+        let err = Mnemonic::from_entropy(&long).expect_err("must fail");
+        assert!(matches!(err, MnemonicError::InvalidPhrase));
+        // Zero bytes.
+        let err = Mnemonic::from_entropy(&[]).expect_err("must fail");
+        assert!(matches!(err, MnemonicError::InvalidPhrase));
+    }
+
+    #[test]
+    fn from_entropy_accepts_any_32_byte_buffer() {
+        // Every 32-byte buffer is a valid BIP39 entropy — the
+        // 8-bit checksum is computed by the constructor, not
+        // looked up. This is the property `lakko_shamir::combine`
+        // relies on: it can return garbage when called with
+        // fewer than `threshold` shares, and `from_entropy` will
+        // happily build a mnemonic from that garbage — but the
+        // resulting seed will not OPAQUE-authenticate against
+        // the server, which surfaces as an auth error
+        // downstream. Indistinguishable from a wrong-share
+        // failure by design.
+        let entropy = [0xABu8; ENTROPY_LEN];
+        let m = Mnemonic::from_entropy(&entropy).expect("32 bytes is always valid");
+        assert_eq!(m.to_entropy().as_ref(), &entropy);
     }
 
     // BIP39 conformance to the upstream reference vectors is the

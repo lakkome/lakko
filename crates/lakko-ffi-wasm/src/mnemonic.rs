@@ -104,6 +104,34 @@ impl RecoveryMnemonic {
     pub fn to_seed(&self) -> Vec<u8> {
         self.inner.to_seed().as_ref().to_vec()
     }
+
+    /// Extract the 32-byte BIP39 entropy. Phase 1.21c social-
+    /// recovery flow splits this exact buffer via
+    /// [`crate::shamir::split`] — 32 bytes splits + recovers
+    /// far more cheaply than the ~210-byte phrase string,
+    /// and `fromEntropy` round-trips it back to the same
+    /// mnemonic for the standard recovery path.
+    #[wasm_bindgen(js_name = toEntropy)]
+    pub fn to_entropy(&self) -> Vec<u8> {
+        self.inner.to_entropy().as_ref().to_vec()
+    }
+
+    /// Reconstruct a mnemonic from raw 32-byte entropy. Inverse
+    /// of [`RecoveryMnemonic::to_entropy`]; mirror of
+    /// `lakko_mnemonic::Mnemonic::from_entropy`.
+    ///
+    /// # Errors
+    ///
+    /// `JsError` when `entropy` is not exactly 32 bytes — every
+    /// 32-byte buffer is a valid BIP39 entropy (the 8-bit
+    /// checksum is computed at the constructor, not verified),
+    /// so this is the only failure path.
+    #[wasm_bindgen(js_name = fromEntropy)]
+    pub fn from_entropy(entropy: &[u8]) -> Result<RecoveryMnemonic, JsError> {
+        let inner = lakko_mnemonic::Mnemonic::from_entropy(entropy)
+            .map_err(|e| JsError::new(&e.to_string()))?;
+        Ok(RecoveryMnemonic { inner })
+    }
 }
 
 #[cfg(test)]

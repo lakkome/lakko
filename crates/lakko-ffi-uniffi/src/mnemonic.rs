@@ -97,6 +97,33 @@ impl RecoveryMnemonic {
     pub fn to_seed(&self) -> Vec<u8> {
         self.inner.to_seed().as_ref().to_vec()
     }
+
+    /// Extract the 32-byte BIP39 entropy. Phase 1.21c social-
+    /// recovery splits this exact buffer via
+    /// [`crate::shamir::split`]; the 32-byte input recovers and
+    /// re-builds the mnemonic via [`RecoveryMnemonic::from_entropy`].
+    pub fn to_entropy(&self) -> Vec<u8> {
+        self.inner.to_entropy().as_ref().to_vec()
+    }
+}
+
+#[uniffi::export]
+impl RecoveryMnemonic {
+    /// Reconstruct a mnemonic from raw 32-byte entropy. Inverse
+    /// of [`RecoveryMnemonic::to_entropy`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FfiError::Mnemonic`] when `entropy` is not
+    /// exactly 32 bytes. Every 32-byte buffer is a valid BIP39
+    /// entropy (the 8-bit checksum is computed at the
+    /// constructor, not verified), so the wrong-length path is
+    /// the only failure mode.
+    #[uniffi::constructor]
+    pub fn from_entropy(entropy: Vec<u8>) -> Result<Self, FfiError> {
+        let inner = Mnemonic::from_entropy(&entropy)?;
+        Ok(Self { inner })
+    }
 }
 
 #[cfg(test)]
@@ -126,6 +153,24 @@ mod tests {
         let m = RecoveryMnemonic::from_phrase(phrase.to_string()).expect("parse");
         assert_eq!(m.phrase(), phrase);
         assert_eq!(m.words().len(), 24);
+    }
+
+    #[test]
+    fn to_entropy_is_32_bytes_and_round_trips_via_from_entropy() {
+        let original = RecoveryMnemonic::generate();
+        let entropy = original.to_entropy();
+        assert_eq!(entropy.len(), 32);
+        let restored = RecoveryMnemonic::from_entropy(entropy).expect("rebuild");
+        assert_eq!(original.phrase(), restored.phrase());
+    }
+
+    #[test]
+    fn from_entropy_rejects_wrong_length() {
+        match RecoveryMnemonic::from_entropy(vec![0u8; 31]) {
+            Err(FfiError::Mnemonic(_)) => {},
+            Err(other) => panic!("expected Mnemonic error, got {other:?}"),
+            Ok(_) => panic!("31 bytes must fail"),
+        }
     }
 
     #[test]

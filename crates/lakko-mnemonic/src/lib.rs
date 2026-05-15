@@ -64,5 +64,5 @@ mod mnemonic;
 mod secret;
 
 pub use error::MnemonicError;
-pub use mnemonic::{Mnemonic, SecretSeed, WORD_COUNT};
+pub use mnemonic::{Mnemonic, SecretEntropy, SecretSeed, ENTROPY_LEN, WORD_COUNT};
 pub use secret::SecretMnemonic;

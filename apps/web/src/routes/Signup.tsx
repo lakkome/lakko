@@ -17,11 +17,16 @@
  * `(accountId, username)` in `localStorage` so subsequent logins
  * on this device work.
  */
-import { createSignal, Show, type JSX } from "solid-js";
+import { createSignal, For, Show, type JSX } from "solid-js";
 import { A, useLocation, useNavigate } from "@solidjs/router";
 import { paths } from "./paths";
 import { useAuth } from "../auth/AuthContext";
 import { readReturnUrl } from "../auth/return-url";
+import {
+  DEFAULT_SHARE_COUNT,
+  DEFAULT_THRESHOLD,
+  splitMnemonic,
+} from "../recovery/shamir";
 
 /**
  * Two-stage form: `"form"` collects username + password, `"phrase"`
@@ -253,6 +258,8 @@ function RecoveryPhrasePanel(props: PhrasePanelProps): JSX.Element {
         </span>
       </label>
 
+      <SocialRecoveryPanel phrase={props.phrase} />
+
       <button
         class="primary"
         type="button"
@@ -262,5 +269,185 @@ function RecoveryPhrasePanel(props: PhrasePanelProps): JSX.Element {
         Done — take me to Lakko
       </button>
     </>
+  );
+}
+
+// ----------------------------------------------------------------------
+// Phase 1.21c — optional Shamir 3-of-5 social-recovery shares
+// ----------------------------------------------------------------------
+
+/**
+ * Optional sub-panel inside the post-signup recovery-phrase
+ * screen. Lets the user split the 24-word mnemonic into 5
+ * shares (any 3 reconstruct) for distribution to guardians.
+ *
+ * Collapsed by default — the canonical "write 24 words on
+ * paper" flow stays the prominent path. Power users who want
+ * a social fallback expand the panel, copy each share, and
+ * give one to each guardian. The user acknowledgement above
+ * (the "I have written down" checkbox) gates the Done button
+ * regardless; social shares are a complement to the
+ * paper-phrase backup, not a replacement.
+ */
+function SocialRecoveryPanel(props: { phrase: string }): JSX.Element {
+  const [open, setOpen] = createSignal(false);
+  const [busy, setBusy] = createSignal(false);
+  const [shares, setShares] = createSignal<string[]>([]);
+  const [error, setError] = createSignal<string | null>(null);
+  const [copiedIndex, setCopiedIndex] = createSignal<number | null>(null);
+
+  async function onGenerate(): Promise<void> {
+    setBusy(true);
+    setError(null);
+    try {
+      const out = await splitMnemonic(
+        props.phrase,
+        DEFAULT_THRESHOLD,
+        DEFAULT_SHARE_COUNT,
+      );
+      setShares(out);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function onCopy(idx: number, value: string): Promise<void> {
+    try {
+      await navigator.clipboard.writeText(value);
+      setCopiedIndex(idx);
+      // Reset the "copied" flag after a short delay so a
+      // subsequent copy on the same chip surfaces a fresh
+      // confirmation.
+      setTimeout(() => setCopiedIndex((cur) => (cur === idx ? null : cur)), 1500);
+    } catch {
+      setError("Clipboard write blocked — copy manually.");
+    }
+  }
+
+  return (
+    <details
+      open={open()}
+      onToggle={(e) => setOpen(e.currentTarget.open)}
+      style={{
+        "margin-bottom": "1rem",
+        padding: "0.5rem 0.75rem",
+        border: "1px solid var(--surface-border)",
+        "border-radius": "var(--radius-sm)",
+        background: "var(--surface-elevated)",
+      }}
+    >
+      <summary
+        style={{
+          cursor: "pointer",
+          "font-size": "0.9rem",
+        }}
+      >
+        Optional: split into 3-of-5 social-recovery shares
+      </summary>
+      <p
+        style={{
+          color: "var(--surface-muted)",
+          "font-size": "0.85rem",
+          margin: "0.5rem 0",
+        }}
+      >
+        Generate 5 share strings; any 3 reconstruct your
+        recovery phrase. Distribute one to each trusted
+        guardian (family, friends, a safe deposit box). No
+        single guardian alone — or any two colluding — can
+        recover your account; you can lose contact with two
+        guardians and still recover.
+      </p>
+      <Show
+        when={shares().length > 0}
+        fallback={
+          <button
+            type="button"
+            onClick={() => {
+              void onGenerate();
+            }}
+            disabled={busy()}
+            style={{ "font-size": "0.85rem" }}
+          >
+            {busy() ? "Generating…" : `Generate ${DEFAULT_SHARE_COUNT} shares`}
+          </button>
+        }
+      >
+        <ol
+          style={{
+            display: "flex",
+            "flex-direction": "column",
+            gap: "0.4rem",
+            padding: 0,
+            margin: "0 0 0.5rem 0",
+            "list-style": "none",
+          }}
+        >
+          <For each={shares()}>
+            {(share, i) => (
+              <li
+                style={{
+                  display: "flex",
+                  "align-items": "center",
+                  gap: "0.5rem",
+                  padding: "0.4rem 0.5rem",
+                  background: "var(--surface-bg)",
+                  "border-radius": "var(--radius-sm)",
+                }}
+              >
+                <strong style={{ "min-width": "1.5rem", "font-family": "ui-monospace" }}>
+                  #{i() + 1}
+                </strong>
+                <code
+                  style={{
+                    flex: 1,
+                    "font-size": "0.75rem",
+                    overflow: "hidden",
+                    "text-overflow": "ellipsis",
+                    "white-space": "nowrap",
+                  }}
+                  title={share}
+                >
+                  {share}
+                </code>
+                <button
+                  type="button"
+                  onClick={() => {
+                    void onCopy(i(), share);
+                  }}
+                  style={{
+                    "font-size": "0.75rem",
+                    padding: "0.2rem 0.5rem",
+                  }}
+                >
+                  {copiedIndex() === i() ? "Copied" : "Copy"}
+                </button>
+              </li>
+            )}
+          </For>
+        </ol>
+        <p
+          style={{
+            color: "var(--surface-muted)",
+            "font-size": "0.8rem",
+            margin: "0.25rem 0 0",
+          }}
+        >
+          Distribute one share to each of {DEFAULT_SHARE_COUNT}{" "}
+          trusted guardians. Recover via /recover → Recovery
+          shares with any {DEFAULT_THRESHOLD}.
+        </p>
+      </Show>
+      <Show when={error() !== null}>
+        <div
+          class="form-error"
+          style={{ "margin-top": "0.5rem", "font-size": "0.85rem" }}
+        >
+          {error()}
+        </div>
+      </Show>
+    </details>
   );
 }
