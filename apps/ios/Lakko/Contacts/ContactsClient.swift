@@ -192,6 +192,65 @@ public final class ContactsClient {
         return PublishedRequest(messageId: publish.id, createdAt: publish.createdAt)
     }
 
+    // MARK: - ContactAck
+
+    /// Send a `ContactAck` envelope back to the original sender's
+    /// stranger inbox (Phase 1.9b1).
+    ///
+    /// Called from the recipient's "Accept" handler after they
+    /// have decided to accept an incoming ``IncomingContactRequest``.
+    /// The ack is independent of MLS group creation — splitting
+    /// the two surfaces lets the original sender's UI flip from
+    /// "pending" to "accepted" without waiting on the joiner's
+    /// `startGroupWith` to complete.
+    ///
+    /// **Routing:** the ack body carries
+    /// `ackToPseudonym = original.fromPseudonym`. The publish
+    /// target is the sender's stranger-inbox mailbox — derived
+    /// from `original.fromPubkey` via
+    /// `IdentityPseudonym.fromIdentity`.
+    public func sendContactAck(
+        accepterSigningSeed: Data,
+        accepterAccountId: Data,
+        accepterX25519Pubkey: Data,
+        originalRequest: IncomingContactRequest
+    ) async throws -> PublishedAck {
+        let senderMailbox: Data
+        do {
+            senderMailbox = try IdentityPseudonym
+                .fromIdentity(pubkey: originalRequest.fromPubkey).asBytes()
+        } catch {
+            throw ContactsError.wrap(error)
+        }
+
+        let acceptedAtMs = UInt64(Date().timeIntervalSince1970 * 1000)
+
+        let wireBytes: Data
+        do {
+            wireBytes = try composeContactAck(
+                accepterSigningSeed: accepterSigningSeed,
+                accepterAccountId: accepterAccountId,
+                accepterX25519Pub: accepterX25519Pubkey,
+                ackToPseudonym: originalRequest.fromPseudonym,
+                acceptedAtMs: acceptedAtMs
+            )
+        } catch {
+            throw ContactsError.wrap(error)
+        }
+
+        let envelope = wrapEnvelope(kind: .contactAck, body: wireBytes)
+        let publish: PublishResult
+        do {
+            publish = try await ds.publishMailbox(
+                pseudonym: senderMailbox,
+                payload: envelope
+            )
+        } catch {
+            throw ContactsError.wrap(error)
+        }
+        return PublishedAck(messageId: publish.id, createdAt: publish.createdAt)
+    }
+
     // MARK: - Poll
 
     /// Poll the user's stranger-inbox mailbox for new
@@ -243,6 +302,26 @@ public final class ContactsClient {
                         createdAt: message.createdAt
                     )
                 )
+            case .contactAck(let body):
+                // 1.9b1: signature is verified inside the UniFFI
+                // surface; bad-signature / malformed-wire entries
+                // drop silently and the cursor still advances.
+                let parsed: ContactAck
+                do {
+                    parsed = try ContactAck.decodeAndVerify(wire: body)
+                } catch {
+                    continue
+                }
+                let ack = IncomingContactAck(
+                    messageId: message.id,
+                    accepterPubkey: parsed.accepterPubkey(),
+                    accepterAccountId: parsed.accepterAccountId(),
+                    accepterX25519Pubkey: parsed.accepterX25519Pubkey(),
+                    ackToPseudonym: parsed.ackToPseudonym(),
+                    acceptedAtMs: parsed.acceptedAtMs(),
+                    createdAt: message.createdAt
+                )
+                events.append(.contactAck(ack))
             case .contactRequest(let body):
                 let parsed: ContactRequest
                 do {
@@ -353,11 +432,74 @@ public struct IncomingContactRequest: Equatable {
     }
 }
 
+/// One verified incoming ``ContactAck`` (Phase 1.9b1).
+///
+/// The accept-reply that closes the `sendContactRequest`
+/// handshake from the original sender's perspective. The
+/// Ed25519 signature on the ack has already been verified
+/// against ``accepterPubkey``; the caller still has to match
+/// ``ackToPseudonym`` against the pending-sent table to pair
+/// it with the original request the user fired off.
+public struct IncomingContactAck: Equatable {
+    public let messageId: Int64
+    /// Accepter's Ed25519 identity public key (32 bytes). The
+    /// signature on the ack was verified against this.
+    public let accepterPubkey: Data
+    /// Accepter's `account_id` (16-byte UUIDv7).
+    public let accepterAccountId: Data
+    /// Accepter's X25519 HPKE public key (32 bytes). Stored
+    /// alongside the accepter's pubkey in the local address
+    /// book so future replies can be sealed without a fresh
+    /// discovery round-trip.
+    public let accepterX25519Pubkey: Data
+    /// The original request's `from_pseudonym` field — the
+    /// receiver matches this against their own identity
+    /// pseudonym (and the pending-sent table) to confirm the
+    /// ack is for them.
+    public let ackToPseudonym: Data
+    /// When the accepter pressed Accept (ms since epoch).
+    /// Sender-attested; not authoritative — the DS
+    /// ``createdAt`` is the trust anchor.
+    public let acceptedAtMs: UInt64
+    public let createdAt: String
+
+    public init(
+        messageId: Int64,
+        accepterPubkey: Data,
+        accepterAccountId: Data,
+        accepterX25519Pubkey: Data,
+        ackToPseudonym: Data,
+        acceptedAtMs: UInt64,
+        createdAt: String
+    ) {
+        self.messageId = messageId
+        self.accepterPubkey = accepterPubkey
+        self.accepterAccountId = accepterAccountId
+        self.accepterX25519Pubkey = accepterX25519Pubkey
+        self.ackToPseudonym = ackToPseudonym
+        self.acceptedAtMs = acceptedAtMs
+        self.createdAt = createdAt
+    }
+}
+
+/// Receipt returned by ``ContactsClient/sendContactAck(...)``.
+public struct PublishedAck: Equatable {
+    public let messageId: Int64
+    public let createdAt: String
+
+    public init(messageId: Int64, createdAt: String) {
+        self.messageId = messageId
+        self.createdAt = createdAt
+    }
+}
+
 /// Discriminated mailbox event surfaced by
 /// ``ContactsClient/pollStrangerInbox(...)``.
 public enum IncomingMailboxEvent: Equatable {
     case contactRequest(IncomingContactRequest)
     case welcome(messageId: Int64, welcomeBytes: Data, createdAt: String)
+    /// 1.9b1 — original recipient's accept-reply.
+    case contactAck(IncomingContactAck)
 }
 
 /// Result of ``ContactsClient/pollStrangerInbox(...)``.

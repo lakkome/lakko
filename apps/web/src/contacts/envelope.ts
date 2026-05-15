@@ -49,17 +49,26 @@ export const KIND_CONTACT_REQUEST = 0x01;
  *  `Group.addMember(...)` 's `welcome` field). */
 export const KIND_WELCOME = 0x02;
 
+/** Discriminator: body is a `ContactAck` wire blob (1.9b1 —
+ *  recipient's accept-reply to the original ContactRequest's
+ *  sender). */
+export const KIND_CONTACT_ACK = 0x03;
+
 /** Discriminated parse output. Unknown kinds surface so the
  *  caller can `console.warn` and skip rather than throw. */
 export type ParsedEnvelope =
   | { kind: typeof KIND_CONTACT_REQUEST; body: Uint8Array }
   | { kind: typeof KIND_WELCOME; body: Uint8Array }
+  | { kind: typeof KIND_CONTACT_ACK; body: Uint8Array }
   | { kind: "unknown"; rawKind: number; body: Uint8Array };
 
 /** Wrap inner bytes with the given kind discriminator. The
  *  returned `Uint8Array` is fresh — caller may mutate. */
 export function wrapEnvelope(
-  kind: typeof KIND_CONTACT_REQUEST | typeof KIND_WELCOME,
+  kind:
+    | typeof KIND_CONTACT_REQUEST
+    | typeof KIND_WELCOME
+    | typeof KIND_CONTACT_ACK,
   body: Uint8Array,
 ): Uint8Array {
   const out = new Uint8Array(body.length + 1);
@@ -83,6 +92,8 @@ export function parseEnvelope(bytes: Uint8Array): ParsedEnvelope {
       return { kind: KIND_CONTACT_REQUEST, body };
     case KIND_WELCOME:
       return { kind: KIND_WELCOME, body };
+    case KIND_CONTACT_ACK:
+      return { kind: KIND_CONTACT_ACK, body };
     default:
       return { kind: "unknown", rawKind: k, body };
   }

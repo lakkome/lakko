@@ -7,7 +7,7 @@ package me.lakko.app.contacts
  * One-byte kind discriminator for messages a Lakko mailbox
  * carries.
  *
- * Mirror of `apps/web/src/contacts/envelope.ts`. Two kinds today:
+ * Mirror of `apps/web/src/contacts/envelope.ts`. Three kinds today:
  *
  *   * [KIND_CONTACT_REQUEST] (`0x01`) — body is a
  *     `ContactRequest` wire blob produced by
@@ -15,6 +15,11 @@ package me.lakko.app.contacts
  *   * [KIND_WELCOME] (`0x02`) — body is an MLS Welcome wire
  *     blob produced by `Group.addMember(...)`'s `welcome` field
  *     (consumed by the chat surface in 1.15f).
+ *   * [KIND_CONTACT_ACK] (`0x03`) — body is a `ContactAck` wire
+ *     blob (1.9b1) produced by
+ *     [uniffi.lakko_ffi_uniffi.composeContactAck], the
+ *     recipient's accept-reply to the original ContactRequest's
+ *     sender.
  *
  * ## Why a 1-byte discriminator?
  *
@@ -41,10 +46,19 @@ public const val KIND_CONTACT_REQUEST: Byte = 0x01
 /** Discriminator: body is an MLS Welcome wire blob (1.15f). */
 public const val KIND_WELCOME: Byte = 0x02
 
+/** Discriminator: body is a `ContactAck` wire blob (1.9b1 —
+ *  recipient's accept-reply to the original ContactRequest's
+ *  sender). */
+public const val KIND_CONTACT_ACK: Byte = 0x03
+
 /** Wrap inner bytes with the given kind discriminator. The
  *  returned [ByteArray] is fresh — caller may mutate. */
 public fun wrapEnvelope(kind: Byte, body: ByteArray): ByteArray {
-    require(kind == KIND_CONTACT_REQUEST || kind == KIND_WELCOME) {
+    require(
+        kind == KIND_CONTACT_REQUEST ||
+            kind == KIND_WELCOME ||
+            kind == KIND_CONTACT_ACK,
+    ) {
         "unknown envelope kind: $kind"
     }
     val out = ByteArray(body.size + 1)
@@ -64,6 +78,11 @@ public sealed interface ParsedEnvelope {
     public data class Welcome(val body: ByteArray) : ParsedEnvelope {
         override fun equals(other: Any?): Boolean =
             other is Welcome && body.contentEquals(other.body)
+        override fun hashCode(): Int = body.contentHashCode()
+    }
+    public data class ContactAck(val body: ByteArray) : ParsedEnvelope {
+        override fun equals(other: Any?): Boolean =
+            other is ContactAck && body.contentEquals(other.body)
         override fun hashCode(): Int = body.contentHashCode()
     }
     /** Future / unknown kind byte. Caller logs + advances cursor. */
@@ -91,6 +110,7 @@ public fun parseEnvelope(bytes: ByteArray): ParsedEnvelope {
     return when (kind) {
         KIND_CONTACT_REQUEST -> ParsedEnvelope.ContactRequest(body)
         KIND_WELCOME -> ParsedEnvelope.Welcome(body)
+        KIND_CONTACT_ACK -> ParsedEnvelope.ContactAck(body)
         else -> ParsedEnvelope.Unknown(rawKind = kind.toInt() and 0xFF, body = body)
     }
 }

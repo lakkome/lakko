@@ -210,7 +210,7 @@ function ConnectedContacts(props: ConnectedContactsProps): JSX.Element {
           if (!seenContactRequests.has(ev.request.messageId)) {
             freshRequests.push(ev.request);
           }
-        } else {
+        } else if (ev.kind === "welcome") {
           // welcome — try to join. On success append to active
           // groups; on failure log and skip.
           try {
@@ -226,6 +226,25 @@ function ConnectedContacts(props: ConnectedContactsProps): JSX.Element {
             // eslint-disable-next-line no-console
             console.warn("joinGroupFromWelcome failed", err);
           }
+        } else {
+          // 1.9b1: contact-ack — the original recipient of our
+          // ContactRequest pressed Accept. Upsert their pubkeys
+          // into the accepted list so the local address book
+          // flips from "pending" to "accepted" and we have the
+          // accepter's X25519 pubkey handy for future seals.
+          // Cross-platform parity (Apple-Watch-style) note: the
+          // pending-sent table that pairs ack ↔ original request
+          // by `ackToPseudonym` lives on this client; Phase-1
+          // collapses that into a best-effort upsert (the
+          // signature is verified, so even a "stale" ack is a
+          // legitimate accept by the holder of `accepterPubkey`).
+          const accepterContact: AcceptedContact = {
+            signaturePubkeyB64: base64Encode(ev.ack.accepterPubkey),
+            x25519PubkeyB64: base64Encode(ev.ack.accepterX25519Pubkey),
+            displayName: `@${fingerprintShort(ev.ack.accepterPubkey)}`,
+            acceptedAtMs: Date.now(),
+          };
+          setAccepted(upsertAccepted(accepterContact));
         }
       }
       if (freshRequests.length > 0) {
@@ -257,6 +276,21 @@ function ConnectedContacts(props: ConnectedContactsProps): JSX.Element {
     };
     setAccepted(upsertAccepted(contact));
     setPending(pending().filter((r) => r.messageId !== req.messageId));
+
+    // 1.9b1: ship a ContactAck back to the original sender's
+    // mailbox so their UI can flip from "pending" to
+    // "accepted" without polling the (post-startGroupWith)
+    // Welcome arrival. Best-effort — a failure here doesn't
+    // unwind the local accept (the user already trusted the
+    // peer); we log and move on. The signed ack is independent
+    // of MLS state, so the sender can light up their address
+    // book even if our group-creation step below stalls.
+    try {
+      await props.client.sendContactAck(requireIdentity(), req);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("sendContactAck failed", err);
+    }
 
     // 1.16e3b: Accept-driven group creation. Requires v2 wire
     // format — surface a clean error for legacy senders.

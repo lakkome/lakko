@@ -51,6 +51,7 @@ import type {
   Identity as WasmIdentity,
 } from "../../wasm/lakko_ffi_wasm";
 import {
+  KIND_CONTACT_ACK,
   KIND_CONTACT_REQUEST,
   KIND_WELCOME,
   parseEnvelope,
@@ -133,13 +134,53 @@ export interface IncomingWelcome {
   createdAt: string;
 }
 
+/** A verified incoming `ContactAck` (Phase 1.9b1) — the
+ *  accept-reply that closes the `sendContactRequest` handshake
+ *  from the original sender's perspective. The Ed25519 signature
+ *  on the ack has already been verified against `accepterPubkey`;
+ *  the caller still has to match `ackToPseudonym` against the
+ *  pending-sent table to pair it with the original request the
+ *  user fired off. */
+export interface IncomingContactAck {
+  /** DS-assigned monotonic id — also serves as the cursor for
+   *  the next poll. */
+  messageId: number;
+  /** Accepter's Ed25519 identity public key (32 bytes). The
+   *  signature on the ack was verified against this. */
+  accepterPubkey: Uint8Array;
+  /** Accepter's `account_id` (16-byte UUIDv7). The original
+   *  sender needs this to fetch the accepter's KeyPackage from
+   *  discovery if they want to drive `startGroupWith` from
+   *  their side (mirror of the Accept-side group-creation
+   *  flow). */
+  accepterAccountId: Uint8Array;
+  /** Accepter's X25519 HPKE public key (32 bytes). Stored
+   *  alongside the accepter's pubkey in the local address
+   *  book so future replies can be sealed without a fresh
+   *  discovery round-trip. */
+  accepterX25519Pubkey: Uint8Array;
+  /** The original request's `from_pseudonym` field. The
+   *  receiver matches this against their own identity
+   *  pseudonym (and, in 1.9b1, against the pending-sent
+   *  table) to confirm the ack is for them. */
+  ackToPseudonym: Uint8Array;
+  /** When the accepter pressed Accept (ms since epoch). The
+   *  client may surface this as "accepted at hh:mm" — the
+   *  value is sender-attested so don't treat it as
+   *  authoritative; the DS `createdAt` is the trust anchor. */
+  acceptedAtMs: bigint;
+  /** ISO-8601 timestamp the DS recorded on receive. */
+  createdAt: string;
+}
+
 /** Discriminated event returned by `pollMailbox`. The kind tag
  *  matches the on-the-wire envelope discriminator (Phase
  *  1.16e3). Callers `switch` on it to dispatch to the right
  *  handler. */
 export type IncomingMailboxEvent =
   | { kind: "contact-request"; request: IncomingContactRequest }
-  | { kind: "welcome"; welcome: IncomingWelcome };
+  | { kind: "welcome"; welcome: IncomingWelcome }
+  | { kind: "contact-ack"; ack: IncomingContactAck };
 
 /** Result of `ContactsClient.pollMailbox`. */
 export interface PollResult {
@@ -450,6 +491,78 @@ export class ContactsClient {
   }
 
   /**
+   * Send a `ContactAck` envelope back to the original sender's
+   * stranger inbox (Phase 1.9b1).
+   *
+   * Called from the recipient's "Accept" handler **after** they
+   * have decided to accept an incoming `ContactRequest`. The ack
+   * is independent of group creation — the recipient still
+   * drives `startGroupWith(sender)` separately to spin the 1×1
+   * MLS group up. Splitting the two surfaces keeps the
+   * "I want to know you exist" signal cheap (one signed envelope,
+   * no MLS state change) and lets the original sender's UI flip
+   * from "pending" to "accepted" without waiting on the joiner
+   * to complete the more expensive Group / Welcome dance.
+   *
+   * **Routing:** the ack body carries `ackToPseudonym = original
+   * request's fromPseudonym`. The publish target is the sender's
+   * stranger-inbox mailbox — derived from `original.fromPubkey`
+   * via `IdentityPseudonym.fromIdentity` (the same public-pubkey
+   * derivation the contact-request flow uses for the recipient's
+   * mailbox).
+   *
+   * **Threat-model note:** the ack carries only public material
+   * (pubkeys + account_id + a self-attested timestamp). The
+   * Ed25519 signature proves "this came from `accepterPubkey`";
+   * the freshness of `ackToPseudonym` (matched against the
+   * sender's pending-sent table on receive) drops replays and
+   * unrelated acks from a malicious accepter spamming arbitrary
+   * pseudonyms.
+   */
+  async sendContactAck(
+    identity: IdentitySecrets | null,
+    originalRequest: IncomingContactRequest,
+  ): Promise<{ messageId: number; createdAt: string }> {
+    const wasm = await loadWasm();
+    const myIdentity = await this.resolveIdentity(identity);
+
+    const myAccountId = identity?.accountId ?? null;
+    if (myAccountId === null) {
+      throw ContactsError.noIdentitySecrets();
+    }
+
+    // Sender's mailbox = `IdentityPseudonym.fromIdentity(sender_pubkey)`.
+    // The original request's `fromPubkey` is the routing handle.
+    const senderMailbox = wasm.IdentityPseudonym.fromIdentity(
+      originalRequest.fromPubkey,
+    ).asBytes();
+
+    const acceptedAtMs = BigInt(Date.now());
+
+    let wireBytes: Uint8Array;
+    try {
+      wireBytes = wasm.ContactAck.compose(
+        myIdentity.ed25519Seed,
+        myAccountId,
+        myIdentity.x25519PublicKey,
+        originalRequest.fromPseudonym,
+        acceptedAtMs,
+      );
+    } catch (err) {
+      throw ContactsError.wrap(err);
+    }
+
+    const envelope = wrapEnvelope(KIND_CONTACT_ACK, wireBytes);
+    let publish;
+    try {
+      publish = await this.ds.publishMailbox(senderMailbox, envelope);
+    } catch (err) {
+      throw ContactsError.wrap(err);
+    }
+    return { messageId: publish.id, createdAt: publish.createdAt };
+  }
+
+  /**
    * Send a Welcome (MLS group-join blob) to the recipient via
    * their stranger-inbox mailbox. Used by `startGroupWith`
    * once the sender has called `Group.addMember(recipientKp)`
@@ -563,6 +676,32 @@ export class ContactsClient {
           welcome: {
             messageId: message.id,
             welcomeBytes: env.body,
+            createdAt: message.createdAt,
+          },
+        });
+        continue;
+      }
+      if (env.kind === KIND_CONTACT_ACK) {
+        // Phase 1.9b1: signature is verified inside the WASM
+        // surface; bad-signature / malformed-wire entries drop
+        // with a warn and the cursor still advances.
+        let ack;
+        try {
+          ack = wasm.ContactAck.decodeAndVerify(env.body);
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.warn("ContactAck verify failed", message.id, err);
+          continue;
+        }
+        events.push({
+          kind: "contact-ack",
+          ack: {
+            messageId: message.id,
+            accepterPubkey: ack.accepterPubkey,
+            accepterAccountId: ack.accepterAccountId,
+            accepterX25519Pubkey: ack.accepterX25519Pubkey,
+            ackToPseudonym: ack.ackToPseudonym,
+            acceptedAtMs: ack.acceptedAtMs,
             createdAt: message.createdAt,
           },
         });

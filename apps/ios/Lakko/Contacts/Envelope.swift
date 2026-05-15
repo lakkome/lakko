@@ -34,6 +34,11 @@ import Foundation
 public enum EnvelopeKind: UInt8 {
     case contactRequest = 0x01
     case welcome = 0x02
+    /// 1.9b1 — recipient's accept-reply to a `ContactRequest`.
+    /// Body is the wire bytes returned by
+    /// `ContactAck.compose(...)` (UniFFI free function in
+    /// `LakkoCore`).
+    case contactAck = 0x03
 }
 
 /// Wrap inner bytes with the given kind discriminator. Returns a
@@ -51,6 +56,8 @@ public func wrapEnvelope(kind: EnvelopeKind, body: Data) -> Data {
 public enum ParsedEnvelope: Equatable {
     case contactRequest(body: Data)
     case welcome(body: Data)
+    /// 1.9b1 — recipient's accept-reply.
+    case contactAck(body: Data)
     /// Future / unknown kind byte. Caller logs + advances cursor.
     /// `rawKind = -1` is used for the empty-input degenerate case.
     case unknown(rawKind: Int, body: Data)
@@ -76,6 +83,8 @@ public func parseEnvelope(_ bytes: Data) -> ParsedEnvelope {
             return .contactRequest(body: body)
         case .welcome:
             return .welcome(body: body)
+        case .contactAck:
+            return .contactAck(body: body)
         }
     }
     return .unknown(rawKind: Int(kind), body: body)

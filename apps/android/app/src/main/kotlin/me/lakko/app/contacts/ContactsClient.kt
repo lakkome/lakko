@@ -12,9 +12,11 @@ import me.lakko.app.ds.DsClient
 import me.lakko.app.ds.DsClientArgError
 import me.lakko.app.ds.DsHttpError
 import me.lakko.app.ds.DsNetworkError
+import uniffi.lakko_ffi_uniffi.ContactAck
 import uniffi.lakko_ffi_uniffi.ContactRequest
 import uniffi.lakko_ffi_uniffi.FfiException
 import uniffi.lakko_ffi_uniffi.IdentityPseudonym
+import uniffi.lakko_ffi_uniffi.composeContactAck
 import uniffi.lakko_ffi_uniffi.composeContactRequest
 
 /**
@@ -244,6 +246,62 @@ public class ContactsClient(
     }
 
     // -----------------------------------------------------------------
+    // ContactAck (1.9b1): recipient's accept-reply
+    // -----------------------------------------------------------------
+
+    /**
+     * Send a `ContactAck` envelope back to the original sender's
+     * stranger inbox (Phase 1.9b1).
+     *
+     * Called from the recipient's "Accept" handler **after** the
+     * user has decided to accept an inbound [IncomingContactRequest].
+     * The ack is independent of MLS group creation — splitting
+     * the two surfaces lets the original sender's UI flip from
+     * "pending" to "accepted" without waiting on the joiner's
+     * `startGroupWith` to complete.
+     *
+     * **Routing:** the ack body carries
+     * `ackToPseudonym = original.fromPseudonym`. The publish target
+     * is the sender's stranger-inbox mailbox — derived from
+     * `original.fromPubkey` via [IdentityPseudonym.fromIdentity].
+     */
+    public suspend fun sendContactAck(
+        accepterSigningSeed: ByteArray,
+        accepterAccountId: ByteArray,
+        accepterX25519Pubkey: ByteArray,
+        originalRequest: IncomingContactRequest,
+    ): PublishedAck {
+        val senderMailbox =
+            IdentityPseudonym.fromIdentity(originalRequest.fromPubkey).use { it.asBytes() }
+
+        val acceptedAtMs = System.currentTimeMillis().toULong()
+
+        val wireBytes = try {
+            composeContactAck(
+                accepterSigningSeed = accepterSigningSeed,
+                accepterAccountId = accepterAccountId,
+                accepterX25519Pub = accepterX25519Pubkey,
+                ackToPseudonym = originalRequest.fromPseudonym,
+                acceptedAtMs = acceptedAtMs,
+            )
+        } catch (e: FfiException) {
+            throw ContactsError.wrap(e)
+        }
+
+        val envelope = wrapEnvelope(KIND_CONTACT_ACK, wireBytes)
+        val publish = try {
+            ds.publishMailbox(senderMailbox, envelope)
+        } catch (e: DsHttpError) {
+            throw ContactsError.wrap(e)
+        } catch (e: DsNetworkError) {
+            throw ContactsError.wrap(e)
+        } catch (e: DsClientArgError) {
+            throw ContactsError.wrap(e)
+        }
+        return PublishedAck(messageId = publish.id, createdAt = publish.createdAt)
+    }
+
+    // -----------------------------------------------------------------
     // Poll: fetch stranger inbox + decode envelopes
     // -----------------------------------------------------------------
 
@@ -311,6 +369,29 @@ public class ContactsClient(
                             createdAt = message.createdAt,
                         ),
                     )
+                }
+
+                is ParsedEnvelope.ContactAck -> {
+                    // 1.9b1: signature is verified inside the UniFFI
+                    // surface; bad-signature / malformed-wire entries
+                    // drop silently and the cursor still advances.
+                    val parsed = try {
+                        ContactAck.decodeAndVerify(env.body)
+                    } catch (_: FfiException) {
+                        continue
+                    }
+                    val ack = parsed.use { a ->
+                        IncomingContactAck(
+                            messageId = message.id,
+                            accepterPubkey = a.accepterPubkey(),
+                            accepterAccountId = a.accepterAccountId(),
+                            accepterX25519Pubkey = a.accepterX25519Pubkey(),
+                            ackToPseudonym = a.ackToPseudonym(),
+                            acceptedAtMs = a.acceptedAtMs(),
+                            createdAt = message.createdAt,
+                        )
+                    }
+                    events.add(IncomingMailboxEvent.ContactAck(ack))
                 }
 
                 is ParsedEnvelope.ContactRequest -> {
@@ -456,6 +537,67 @@ public data class IncomingContactRequest(
     }
 }
 
+/** One verified incoming [ContactAck] (Phase 1.9b1).
+ *
+ *  The accept-reply that closes the [ContactsClient.sendContactRequest]
+ *  handshake from the original sender's perspective. The Ed25519
+ *  signature on the ack has already been verified against
+ *  [accepterPubkey]; the caller still has to match
+ *  [ackToPseudonym] against the pending-sent table to pair it
+ *  with the original request the user fired off. */
+public data class IncomingContactAck(
+    val messageId: Long,
+    /** Accepter's Ed25519 identity public key (32 bytes). The
+     *  signature on the ack was verified against this. */
+    val accepterPubkey: ByteArray,
+    /** Accepter's `account_id` (16-byte UUIDv7). */
+    val accepterAccountId: ByteArray,
+    /** Accepter's X25519 HPKE public key (32 bytes). Stored
+     *  alongside the accepter's pubkey in the local address
+     *  book so future replies can be sealed without a fresh
+     *  discovery round-trip. */
+    val accepterX25519Pubkey: ByteArray,
+    /** The original request's `from_pseudonym` field — the
+     *  receiver matches this against their own identity
+     *  pseudonym (and the pending-sent table) to confirm the
+     *  ack is for them. */
+    val ackToPseudonym: ByteArray,
+    /** When the accepter pressed Accept (ms since epoch).
+     *  Sender-attested; not authoritative — the DS [createdAt]
+     *  is the trust anchor. */
+    val acceptedAtMs: ULong,
+    val createdAt: String,
+) {
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (other !is IncomingContactAck) return false
+        return messageId == other.messageId &&
+            accepterPubkey.contentEquals(other.accepterPubkey) &&
+            accepterAccountId.contentEquals(other.accepterAccountId) &&
+            accepterX25519Pubkey.contentEquals(other.accepterX25519Pubkey) &&
+            ackToPseudonym.contentEquals(other.ackToPseudonym) &&
+            acceptedAtMs == other.acceptedAtMs &&
+            createdAt == other.createdAt
+    }
+
+    override fun hashCode(): Int {
+        var result = messageId.hashCode()
+        result = 31 * result + accepterPubkey.contentHashCode()
+        result = 31 * result + accepterAccountId.contentHashCode()
+        result = 31 * result + accepterX25519Pubkey.contentHashCode()
+        result = 31 * result + ackToPseudonym.contentHashCode()
+        result = 31 * result + acceptedAtMs.hashCode()
+        result = 31 * result + createdAt.hashCode()
+        return result
+    }
+}
+
+/** Receipt returned by [ContactsClient.sendContactAck]. */
+public data class PublishedAck(
+    val messageId: Long,
+    val createdAt: String,
+)
+
 /** Discriminated mailbox event surfaced by
  *  [ContactsClient.pollStrangerInbox]. */
 public sealed interface IncomingMailboxEvent {
@@ -472,6 +614,8 @@ public sealed interface IncomingMailboxEvent {
         override fun hashCode(): Int =
             messageId.hashCode() * 31 + welcomeBytes.contentHashCode() * 31 + createdAt.hashCode()
     }
+    /** 1.9b1 — original recipient's accept-reply. */
+    public data class ContactAck(val ack: IncomingContactAck) : IncomingMailboxEvent
 }
 
 /** Result of [ContactsClient.pollStrangerInbox]. */

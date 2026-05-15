@@ -286,6 +286,117 @@ impl ContactRequest {
 }
 
 // ============================================================================
+// ContactAck (1.9b1 — reply path)
+// ============================================================================
+
+/// Validated `ContactAck`. Mirror of [`lakko_contacts::ContactAck`].
+///
+/// Senders call [`ContactAck::compose`] to mint the wire bytes
+/// they publish to the sender's mailbox (the per-relationship
+/// pseudonym from the original `ContactRequest.fromPseudonym`).
+/// Recipients (= the original request's sender) call
+/// [`ContactAck::decodeAndVerify`] to validate the signature +
+/// structure, then cross-check the `accepterPubkey` against
+/// the recipient pubkey they recorded when composing the
+/// original request.
+#[wasm_bindgen]
+pub struct ContactAck {
+    inner: lakko_contacts::ContactAck,
+}
+
+#[wasm_bindgen]
+impl ContactAck {
+    /// Compose a signed `ContactAck` and return the wire bytes
+    /// ready to deliver to the original requester's mailbox.
+    /// `ackToPseudonym` is the same 32-byte pseudonym the
+    /// original `ContactRequest.fromPseudonym` carried.
+    ///
+    /// # Errors
+    ///
+    /// `JsError` on wrong-length seed / account-id / x25519-pub /
+    /// pseudonym, or on a malformed X25519 public key encoding.
+    #[wasm_bindgen]
+    pub fn compose(
+        accepter_signing_seed: &[u8],
+        accepter_account_id: &[u8],
+        accepter_x25519_pub: &[u8],
+        ack_to_pseudonym: &[u8],
+        accepted_at_ms: u64,
+    ) -> Result<Vec<u8>, JsError> {
+        if accepter_signing_seed.len() != 32 {
+            return Err(JsError::new("accepterSigningSeed must be 32 bytes"));
+        }
+        let mut seed = [0u8; 32];
+        seed.copy_from_slice(accepter_signing_seed);
+        let signing = SigningKey::from_seed(&seed);
+
+        if accepter_account_id.len() != lakko_contacts::ACCOUNT_ID_LEN {
+            return Err(JsError::new(&format!(
+                "accepterAccountId must be {} bytes",
+                lakko_contacts::ACCOUNT_ID_LEN,
+            )));
+        }
+        let mut acct = [0u8; lakko_contacts::ACCOUNT_ID_LEN];
+        acct.copy_from_slice(accepter_account_id);
+
+        if accepter_x25519_pub.len() != PUBLIC_KEY_LEN {
+            return Err(JsError::new(&format!(
+                "accepterX25519Pub must be {PUBLIC_KEY_LEN} bytes",
+            )));
+        }
+        let mut x25519_arr = [0u8; PUBLIC_KEY_LEN];
+        x25519_arr.copy_from_slice(accepter_x25519_pub);
+        let x25519_pub = X25519PublicKey::from_bytes(&x25519_arr).map_err(crypto_err)?;
+
+        let pseudonym = decode_pseudonym_bytes(ack_to_pseudonym)?;
+
+        lakko_contacts::compose_ack(&signing, &acct, &x25519_pub, pseudonym, accepted_at_ms)
+            .map_err(contact_err)
+    }
+
+    /// Recipient-side: decode the wire bytes, verify the Ed25519
+    /// signature, return the validated `ContactAck`.
+    #[wasm_bindgen(js_name = decodeAndVerify)]
+    pub fn decode_and_verify(wire: &[u8]) -> Result<ContactAck, JsError> {
+        let inner = lakko_contacts::decode_and_verify_ack(wire).map_err(contact_err)?;
+        Ok(Self { inner })
+    }
+
+    /// The 32-byte per-relationship pseudonym from the original
+    /// `ContactRequest.fromPseudonym`. Sender's poll layer matches
+    /// this against the pending-sent table to flip the local UI
+    /// state from "pending" to "accepted".
+    #[wasm_bindgen(getter, js_name = ackToPseudonym)]
+    pub fn ack_to_pseudonym(&self) -> Vec<u8> {
+        self.inner.ack_to_pseudonym.to_vec()
+    }
+
+    /// Accepter's Ed25519 identity public key (32 bytes).
+    #[wasm_bindgen(getter, js_name = accepterPubkey)]
+    pub fn accepter_pubkey(&self) -> Vec<u8> {
+        self.inner.accepter_pubkey.to_bytes().to_vec()
+    }
+
+    /// Accepter's UUIDv7 account id (16 bytes).
+    #[wasm_bindgen(getter, js_name = accepterAccountId)]
+    pub fn accepter_account_id(&self) -> Vec<u8> {
+        self.inner.accepter_account_id.to_vec()
+    }
+
+    /// Accepter's X25519 HPKE init key (32 bytes).
+    #[wasm_bindgen(getter, js_name = accepterX25519Pubkey)]
+    pub fn accepter_x25519_pubkey(&self) -> Vec<u8> {
+        self.inner.accepter_x25519_pubkey.to_bytes().to_vec()
+    }
+
+    /// UNIX milliseconds at which the ack was minted.
+    #[wasm_bindgen(getter, js_name = acceptedAtMs)]
+    pub fn accepted_at_ms(&self) -> u64 {
+        self.inner.accepted_at_ms
+    }
+}
+
+// ============================================================================
 // Invite capability (Phase 1.18b)
 // ============================================================================
 

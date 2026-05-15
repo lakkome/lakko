@@ -51,12 +51,14 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod ack;
 pub mod envelope;
 pub mod error;
 pub mod invite;
 pub mod pseudonym;
 pub mod request;
 
+pub use ack::{compose_ack, decode_and_verify_ack, ContactAck};
 pub use error::{ContactError, Result};
 pub use invite::{
     compute_joiner_tag, revoke_canonical_bytes, sign_revocation, InviteCapability, BLOB_ID_LEN,

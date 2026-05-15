@@ -610,6 +610,131 @@ pub fn compute_joiner_invite_tag(
     Ok(rust_compute_joiner_tag(&capability_bytes, &joiner_account_id).to_vec())
 }
 
+// ============================================================================
+// ContactAck (1.9b1 — reply path)
+// ============================================================================
+
+/// Compose a signed `ContactAck` and return its wire bytes.
+///
+/// The recipient of an inbound [`ContactRequest`] who has decided
+/// to accept produces this and publishes it to the sender's
+/// mailbox at `ackToPseudonym` (the same per-relationship
+/// pseudonym the sender embedded in the original request as
+/// `from_pseudonym`).
+///
+/// `accepterSigningSeed` — recipient's 32-byte Ed25519 seed
+/// (same shape every other contact-flow call uses).
+/// `accepterAccountId` — recipient's 16-byte UUIDv7.
+/// `accepterX25519Pub` — recipient's HPKE init key (32 bytes;
+/// sender already knows it from discovery, included again so the
+/// ack is a self-contained authorisation token for the future
+/// fast-path).
+/// `ackToPseudonym` — 32-byte routing handle picked off the
+/// original `ContactRequest.from_pseudonym`.
+/// `acceptedAtMs` — UNIX millisecond timestamp; sender uses it
+/// for staleness display.
+///
+/// # Errors
+///
+/// * [`FfiError::Contacts`] on wrong-length seed / account-id /
+///   x25519-pub / pseudonym.
+/// * [`FfiError::Crypto`] when `accepterX25519Pub` is not a valid
+///   X25519 public key (canonical encoding).
+#[uniffi::export]
+pub fn compose_contact_ack(
+    accepter_signing_seed: Vec<u8>,
+    accepter_account_id: Vec<u8>,
+    accepter_x25519_pub: Vec<u8>,
+    ack_to_pseudonym: Vec<u8>,
+    accepted_at_ms: u64,
+) -> Result<Vec<u8>, FfiError> {
+    if accepter_signing_seed.len() != 32 {
+        return Err(FfiError::Contacts(
+            "accepterSigningSeed must be 32 bytes".to_string(),
+        ));
+    }
+    let mut seed = [0u8; 32];
+    seed.copy_from_slice(&accepter_signing_seed);
+    let signing = SigningKey::from_seed(&seed);
+
+    if accepter_account_id.len() != ACCOUNT_ID_LEN {
+        return Err(FfiError::Contacts(format!(
+            "accepterAccountId must be {ACCOUNT_ID_LEN} bytes",
+        )));
+    }
+    let mut acct = [0u8; ACCOUNT_ID_LEN];
+    acct.copy_from_slice(&accepter_account_id);
+
+    if accepter_x25519_pub.len() != PUBLIC_KEY_LEN {
+        return Err(FfiError::Contacts(format!(
+            "accepterX25519Pub must be {PUBLIC_KEY_LEN} bytes",
+        )));
+    }
+    let x25519_pub = X25519PublicKey::from_bytes(&accepter_x25519_pub)?;
+    let pseudonym = decode_pseudonym_bytes(&ack_to_pseudonym)?;
+
+    let wire =
+        lakko_contacts::compose_ack(&signing, &acct, &x25519_pub, pseudonym, accepted_at_ms)?;
+    Ok(wire)
+}
+
+/// Validated `ContactAck`. Mirror of [`lakko_contacts::ContactAck`].
+///
+/// The sender's poll layer pulls one of these off their mailbox,
+/// matches `accepterPubkey` + `ackToPseudonym` against an open
+/// row in the pending-sent table, and flips the local UI state
+/// to "accepted". A signature-valid ack whose `accepterPubkey`
+/// doesn't match any pending request is dropped silently (spam
+/// containment — anyone with PoW can publish to the mailbox).
+#[derive(uniffi::Object)]
+pub struct ContactAck {
+    inner: lakko_contacts::ContactAck,
+}
+
+#[uniffi::export]
+impl ContactAck {
+    /// Decode wire bytes, verify the Ed25519 signature, return
+    /// the validated ack.
+    ///
+    /// # Errors
+    ///
+    /// * [`FfiError::Contacts`] — wire format malformed or Ed25519
+    ///   signature failed.
+    #[uniffi::constructor]
+    pub fn decode_and_verify(wire: Vec<u8>) -> Result<Self, FfiError> {
+        let inner = lakko_contacts::decode_and_verify_ack(&wire)?;
+        Ok(Self { inner })
+    }
+
+    /// Per-relationship pseudonym from the original request — the
+    /// caller's pending-sent table key. The sender's poll layer
+    /// looks this up to flip "pending → accepted" without revealing
+    /// the recipient identity to the server.
+    pub fn ack_to_pseudonym(&self) -> Vec<u8> {
+        self.inner.ack_to_pseudonym.to_vec()
+    }
+
+    /// Recipient's Ed25519 identity public key (32 bytes).
+    pub fn accepter_pubkey(&self) -> Vec<u8> {
+        self.inner.accepter_pubkey.to_bytes().to_vec()
+    }
+
+    /// Recipient's UUIDv7 account id (16 bytes).
+    pub fn accepter_account_id(&self) -> Vec<u8> {
+        self.inner.accepter_account_id.to_vec()
+    }
+
+    /// Recipient's X25519 HPKE init key (32 bytes).
+    pub fn accepter_x25519_pubkey(&self) -> Vec<u8> {
+        self.inner.accepter_x25519_pubkey.to_bytes().to_vec()
+    }
+
+    /// UNIX milliseconds at which the ack was minted.
+    pub fn accepted_at_ms(&self) -> u64 {
+        self.inner.accepted_at_ms
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

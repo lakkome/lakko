@@ -250,6 +250,22 @@ public class ContactsViewModel(
         val pending = repo.state.value.pending.firstOrNull { it.messageId == messageId }
         if (pending == null) return
 
+        // 1.9b1: ship a ContactAck back to the original sender's
+        // mailbox so their UI can flip from "pending" to
+        // "accepted" without waiting on the Welcome arrival.
+        // Best-effort — a network failure here doesn't unwind
+        // the local accept (the user already trusted the peer);
+        // we swallow and move on. The signed ack is independent
+        // of MLS state, so the sender can light up their address
+        // book even if the group-creation step below stalls.
+        viewModelScope.launch {
+            try {
+                repo.sendContactAck(pending)
+            } catch (_: Throwable) {
+                // best-effort
+            }
+        }
+
         if (chatRepo == null || pending.fromAccountId == null) {
             // No chat bridge wired OR v1 legacy envelope without
             // a sender account-id — fall back to the pre-1.15f4c

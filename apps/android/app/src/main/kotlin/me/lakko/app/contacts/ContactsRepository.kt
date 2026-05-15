@@ -247,6 +247,37 @@ public class ContactsRepository(
         }
     }
 
+    /**
+     * Send a `ContactAck` back to the original sender's stranger
+     * inbox so their UI flips from "pending" to "accepted"
+     * without waiting on the Welcome arrival (Phase 1.9b1).
+     *
+     * Best-effort: called from the view-model's
+     * `onAcceptClicked` after the local state mutation; a network
+     * failure here is logged at the orchestration layer and the
+     * local "accepted" state stands on its own (the user already
+     * trusted the peer).
+     */
+    public suspend fun sendContactAck(
+        request: IncomingContactRequest,
+    ): PublishedAck {
+        val secrets = authRepo.identitySecrets.value
+            ?: throw ContactsError.wrap(
+                IllegalStateException(
+                    "no identity secrets — please re-enter your password",
+                ),
+            )
+
+        return useClientWith(secrets) { client, sender ->
+            client.sendContactAck(
+                accepterSigningSeed = sender.signingSeed,
+                accepterAccountId = secrets.accountId,
+                accepterX25519Pubkey = sender.x25519Pubkey,
+                originalRequest = request,
+            )
+        }
+    }
+
     /** Drop an incoming request from the pending list without
      *  acknowledging it to the sender. Mirror of the web
      *  Decline semantics — server doesn't get told, the row
@@ -585,6 +616,7 @@ public class ContactsRepository(
                     signingSeed = identity.ed25519Seed(),
                     signaturePubkey = identity.signaturePublicKey(),
                     x25519Secret = identity.x25519SecretKey(),
+                    x25519Pubkey = identity.x25519PublicKey(),
                 )
                 try {
                     block(client, sender)
@@ -597,13 +629,18 @@ public class ContactsRepository(
     }
 
     /** Carrier for the bytes [ContactsClient] needs from the
-     *  current session's Identity. The four byte arrays live on
-     *  the heap for the duration of one repository call; the
-     *  wipe in [useClientWith]'s finally narrows the window. */
+     *  current session's Identity. The byte arrays live on the
+     *  heap for the duration of one repository call; the wipe in
+     *  [useClientWith]'s finally narrows the window. The X25519
+     *  public key (1.9b1 — carried into the ContactAck so the
+     *  original sender can seal future replies without a fresh
+     *  discovery round-trip) is public material so it is not
+     *  zeroized. */
     private data class SenderMaterial(
         val signingSeed: ByteArray,
         val signaturePubkey: ByteArray,
         val x25519Secret: ByteArray,
+        val x25519Pubkey: ByteArray,
     )
 }
 

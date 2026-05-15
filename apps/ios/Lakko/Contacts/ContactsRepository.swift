@@ -175,6 +175,21 @@ public final class ContactsRepository: ObservableObject {
                         }
                     }
                     continue
+                case .contactAck:
+                    // 1.9b1: the recipient of one of our outgoing
+                    // ContactRequests pressed Accept. The signature
+                    // is already verified inside the UniFFI layer;
+                    // the ack carries the accepter's pubkey +
+                    // X25519 pubkey + account_id. The cursor has
+                    // already advanced so we won't re-process the
+                    // same row; UI-side "flip sent → accepted"
+                    // mutation against the matching row in
+                    // `sentLog` lands as a follow-up — the network
+                    // primitive is in place and the Welcome that
+                    // typically follows an ack still drives the
+                    // canonical accepted-state insertion via the
+                    // chatRepository hand-off above.
+                    continue
                 }
             }
             state = state.with(
@@ -221,6 +236,35 @@ public final class ContactsRepository: ObservableObject {
             AcceptedContact(request: accepted, groupIdHex: groupIdHex)
         ]
         state = state.with(pending: remaining, accepted: newAccepted)
+    }
+
+    /// Send a `ContactAck` back to the original sender's stranger
+    /// inbox so their UI flips from "pending" to "accepted"
+    /// without waiting on the Welcome arrival (Phase 1.9b1).
+    ///
+    /// Best-effort: this is called from the view-model's
+    /// `onAcceptClicked` after the local state mutation; a network
+    /// failure here is logged at the orchestration layer and the
+    /// local "accepted" state stands on its own (the user already
+    /// trusted the peer).
+    public func sendContactAck(
+        request: IncomingContactRequest
+    ) async throws -> PublishedAck {
+        guard let secrets = authRepository.identitySecrets else {
+            throw ContactsError.wrap(
+                ContactsError.simple(
+                    "no identity secrets — please re-enter your password"
+                )
+            )
+        }
+        let client = clientFactory()
+        let identity = try Identity.fromSeed(seed: secrets.exportKey)
+        return try await client.sendContactAck(
+            accepterSigningSeed: identity.ed25519Seed(),
+            accepterAccountId: secrets.accountId,
+            accepterX25519Pubkey: identity.x25519PublicKey(),
+            originalRequest: request
+        )
     }
 
     /// Drop an incoming request from the pending list without
