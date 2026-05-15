@@ -68,6 +68,8 @@ import { useChats } from "../chat/ChatContext";
 import { deleteMlsSnapshot } from "../chat/mls-store";
 import { rehydrateMlsState } from "../chat/rehydrate";
 import { subscribeToPush, unsubscribeFromPush } from "../push/subscribe";
+import { bootstrapBackupFromPhraseString } from "../backup/bootstrap";
+import { deletePhrase } from "../backup/phrase-store";
 import type { Identity as WasmIdentity } from "../../wasm/lakko_ffi_wasm";
 
 /** Account record exposed to the UI when a session is active. */
@@ -402,6 +404,21 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
           "internal: signup completed without a recovery phrase",
         );
       }
+      // Phase 2a1c: post-auth backup bootstrap. Caches the
+      // phrase under the device root key + posts a baseline
+      // backup envelope to /backup. Best-effort end-to-end; the
+      // helper logs failures and never throws so a transient
+      // server hiccup does not block signup from completing.
+      void bootstrapBackupFromPhraseString(
+        {
+          accountId: result.accountId,
+          accountIdB64,
+          ed25519Seed: canonical.ed25519Seed,
+          deviceKey,
+          sessionToken: result.sessionToken,
+        },
+        result.recoveryPhrase,
+      );
       // 1.20b: best-effort push subscribe. The orchestrator is
       // a no-op when the build has no VAPID public key set or the
       // user denies the Notification permission prompt — fall
@@ -640,6 +657,21 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
             username: cached.username,
           },
         });
+        // Phase 2a1c: post-recovery backup bootstrap. Same
+        // shape as the signup-side call above — re-caches the
+        // phrase under the freshly-rotated device root key and
+        // posts a baseline backup envelope. Best-effort; logs
+        // and continues on failure.
+        void bootstrapBackupFromPhraseString(
+          {
+            accountId: accountIdBytes,
+            accountIdB64: cached.accountIdB64,
+            ed25519Seed: canonical.ed25519Seed,
+            deviceKey,
+            sessionToken: result.sessionToken,
+          },
+          mnemonicPhrase,
+        );
         // 1.20b: best-effort push subscribe after recovery —
         // the new password changes the device key, but the
         // device push pseudonym persists in localStorage so
@@ -726,6 +758,17 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         // probe on a future signup with the same accountId.
         try {
           await deleteSessionToken(cached.accountIdB64);
+        } catch {
+          // best-effort
+        }
+        // Phase 2a1c: drop the cached recovery phrase. Wrapped
+        // under the same device-root key that's now gone, so
+        // the ciphertext is already undecryptable — but a stale
+        // row would confuse a future bootstrap on the same
+        // accountId. Clean wipe matches `forgetDevice`'s
+        // "leave nothing per-account behind" contract.
+        try {
+          await deletePhrase(cached.accountIdB64);
         } catch {
           // best-effort
         }

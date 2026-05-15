@@ -28,6 +28,11 @@ lakko-push.workspace = true
 lakko-presence.workspace = true
 # Phase 1.19b — attachment encryption + JSON envelope wire format.
 lakko-attachments.workspace = true
+# Phase 2a1c — encrypted backup envelope (Argon2id KEK from the
+# recovery phrase + ChaCha20-Poly1305 AEAD) and the payload codec
+# the web client uploads to `services/storage`'s per-account
+# backup endpoint.
+lakko-backup.workspace = true
 # Phase 1.21b — Shamir's Secret Sharing (GF(256) split / combine
 # + human-typable share encode / decode) for the social-recovery
 # flow on the Web client.

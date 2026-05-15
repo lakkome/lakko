@@ -91,7 +91,28 @@ function blobIdHex(blobId: Uint8Array): string {
 }
 
 export class StorageClient {
+  /** Bearer token attached to per-account backup requests. Set
+   *  via [`setSessionToken`] post-construction. `null` is OK for
+   *  the content-addressed blob routes (they're auth-free); a
+   *  null value on a backup-route call surfaces as a 401 from
+   *  the server. */
+  private sessionToken: string | null = null;
+
   constructor(public readonly baseUrl: string = DEFAULT_BASE_URL) {}
+
+  /** Bind / rebind the bearer token used for the
+   *  `PUT/GET/DELETE /backup` routes (Phase 2a1c). Caller drives
+   *  this from the `AuthContext` session-token signal — same
+   *  pattern the discovery / ds clients use. */
+  setSessionToken(token: string | null): void {
+    this.sessionToken = token;
+  }
+
+  private authHeaders(): Record<string, string> {
+    return this.sessionToken === null
+      ? {}
+      : { authorization: `Bearer ${this.sessionToken}` };
+  }
 
   /**
    * `PUT /blob/<hex>` — upload ciphertext. Idempotent: re-PUT of
@@ -224,6 +245,105 @@ export class StorageClient {
     if (cl === null) return null;
     const parsed = Number.parseInt(cl, 10);
     return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+  }
+
+  // ---------------------------------------------------------------
+  // Per-account backup blob (Phase 2a1c)
+  // ---------------------------------------------------------------
+
+  /**
+   * `PUT /backup` — overwrite this session's backup blob. Body
+   * is the wire bytes from `lakko-backup`'s envelope `seal()`
+   * (the wasm-bindgen `sealBackup` exposes the same primitive
+   * to JS). The server identifies the owning account via the
+   * session token — there is no account_id in the URL or body,
+   * so a stolen token cannot scribble over a different account.
+   *
+   * 201 on first upload, 200 on overwrite. Both surface as a
+   * resolved `void`; the caller doesn't need to distinguish.
+   *
+   * @throws `StorageHttpError` on 4xx / 5xx,
+   *         `StorageNetworkError` on transport failure.
+   */
+  async putBackup(envelopeBytes: Uint8Array): Promise<void> {
+    const endpoint = "/backup";
+    const url = `${this.baseUrl}${endpoint}`;
+    let response: Response;
+    try {
+      response = await fetch(url, {
+        method: "PUT",
+        headers: {
+          "content-type": "application/octet-stream",
+          ...this.authHeaders(),
+        },
+        body: envelopeBytes.slice(),
+      });
+    } catch (err) {
+      throw new StorageNetworkError(`${endpoint} (PUT)`, err);
+    }
+    if (response.ok) {
+      await response.body?.cancel();
+      return;
+    }
+    const text = await safeReadBody(response);
+    throw new StorageHttpError(response.status, `${endpoint} (PUT)`, text);
+  }
+
+  /**
+   * `GET /backup` — fetch this session's backup blob, or `null`
+   * if none has ever been uploaded.
+   *
+   * @throws `StorageHttpError` on non-200 / non-404,
+   *         `StorageNetworkError` on transport failure.
+   */
+  async getBackup(): Promise<Uint8Array | null> {
+    const endpoint = "/backup";
+    const url = `${this.baseUrl}${endpoint}`;
+    let response: Response;
+    try {
+      response = await fetch(url, {
+        method: "GET",
+        headers: this.authHeaders(),
+      });
+    } catch (err) {
+      throw new StorageNetworkError(`${endpoint} (GET)`, err);
+    }
+    if (response.status === 404) return null;
+    if (!response.ok) {
+      const text = await safeReadBody(response);
+      throw new StorageHttpError(response.status, `${endpoint} (GET)`, text);
+    }
+    const buf = await response.arrayBuffer();
+    return new Uint8Array(buf);
+  }
+
+  /**
+   * `DELETE /backup` — remove this session's backup blob.
+   * Idempotent — 204 on success regardless of whether a blob
+   * existed.
+   *
+   * @throws `StorageHttpError` on 4xx / 5xx (NOT 404 — that's
+   *         folded into success by the server),
+   *         `StorageNetworkError` on transport failure.
+   */
+  async deleteBackup(): Promise<void> {
+    const endpoint = "/backup";
+    const url = `${this.baseUrl}${endpoint}`;
+    let response: Response;
+    try {
+      response = await fetch(url, {
+        method: "DELETE",
+        headers: this.authHeaders(),
+      });
+    } catch (err) {
+      throw new StorageNetworkError(`${endpoint} (DELETE)`, err);
+    }
+    if (response.ok) {
+      await response.body?.cancel();
+      return;
+    }
+    const text = await safeReadBody(response);
+    throw new StorageHttpError(response.status, `${endpoint} (DELETE)`, text);
   }
 }
 
