@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: AGPL-3.0-or-later
+  SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+  Phase 1.20c2 — entitlements for the
+  `LakkoNotificationService` extension.
+
+  The single entitlement here is the App Group shared with
+  the host app `Lakko` (declared in `apps/ios/project.yml`'s
+  main-target entitlements with the matching identifier).
+  Both targets MUST carry the App Group entry for the
+  shared-container plumbing to actually work.
+
+  In 1.20c2 the extension does NOT read any shared state —
+  the threadIdentifier mutation needs only the APNs userInfo
+  dictionary. The App Group is provisioned now so the App
+  Store / signing infrastructure is set up once; 1.20c2b
+  will wire the actual MLS state mirror through this same
+  group.
+
+  xcodegen also auto-generates an equivalent
+  .entitlements file from project.yml's `properties` block,
+  but committing the file explicitly here gives the
+  reproducible-build pipeline a stable input + lets a
+  reviewer see the entitlement contract in plain XML
+  without rendering the YAML.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>com.apple.security.application-groups</key>
+    <array>
+        <string>group.me.lakko.dev.shared</string>
+    </array>
+</dict>
+</plist>

@@ -287,11 +287,28 @@ struct ApnsErrorBody {
     reason: String,
 }
 
-/// JSON body shape. `aps.content-available = 1` is the silent-push
-/// marker that wakes the app without showing UI; the recipient's
-/// `UNNotificationServiceExtension` decodes our wake-metadata
-/// fields, fetches ciphertext from the DS, decrypts locally, and
-/// builds the actual visible notification.
+/// JSON body shape. Phase 1.20c2: shipped as an **alert push
+/// with `mutable-content: 1`** so iOS invokes the recipient's
+/// `UNNotificationServiceExtension` (`LakkoNotificationService`
+/// in `apps/ios/`) before displaying. The extension parses the
+/// wake metadata, sets `threadIdentifier` to the group hex (so
+/// iOS groups notifications per conversation on lock screen),
+/// and — in a later 1.20c2b sub-sprint — fetches the ciphertext
+/// from the DS via App-Group-shared MLS state and renders the
+/// decrypted preview body.
+///
+/// **`thread-id`** is iOS's notification-grouping key. We
+/// pre-populate it with `group_pseudonym` hex so the grouping
+/// works even when the NSE is unavailable (extension disabled
+/// in Settings, device under memory pressure, etc.) — the
+/// extension is allowed to override `threadIdentifier` after
+/// launch but the initial value is enough for the default
+/// grouping behaviour.
+///
+/// **Body copy** is the generic placeholder the NSE rewrites
+/// post-decrypt. When no NSE runs (or it times out within the
+/// 30s budget), the user sees "New message" — exactly the same
+/// fallback the foreground app code paths use.
 #[derive(Serialize)]
 struct ApsBody {
     aps: Aps,
@@ -308,15 +325,38 @@ struct ApsBody {
 
 #[derive(Serialize)]
 struct Aps {
-    #[serde(rename = "content-available")]
-    content_available: u8,
+    alert: ApsAlert,
+    /// 1.20c2: signal iOS to invoke the
+    /// `UNNotificationServiceExtension` before display.
+    #[serde(rename = "mutable-content")]
+    mutable_content: u8,
+    /// 1.20c2: notification-grouping key. iOS uses this to
+    /// stack per-conversation alerts on the lock screen even
+    /// when the NSE isn't reachable.
+    #[serde(rename = "thread-id", skip_serializing_if = "Option::is_none")]
+    thread_id: Option<String>,
+}
+
+#[derive(Serialize)]
+struct ApsAlert {
+    /// Bundle name — same string the OS shows on the lock
+    /// screen for the app. Localised display name on the
+    /// device overrides this anyway.
+    title: &'static str,
+    /// Placeholder body the NSE rewrites after decrypt.
+    body: &'static str,
 }
 
 impl ApsBody {
     fn from_payload(p: &WakePayload) -> Self {
         Self {
             aps: Aps {
-                content_available: 1,
+                alert: ApsAlert {
+                    title: "Lakko",
+                    body: "New message",
+                },
+                mutable_content: 1,
+                thread_id: p.group_pseudonym.map(hex::encode),
             },
             d: hex::encode(p.device_pseudonym),
             g: p.group_pseudonym.map(hex::encode),
@@ -346,19 +386,36 @@ mod tests {
     }
 
     #[test]
-    fn aps_body_serializes_silent_push_shape() {
+    fn aps_body_serializes_nse_alert_shape() {
         let body = ApsBody::from_payload(&WakePayload {
             device_pseudonym: [0xAB; 32],
             group_pseudonym: Some([0xCD; 32]),
             envelope_pointer: Some(42),
         });
         let json = serde_json::to_string(&body).unwrap();
-        // `content-available: 1` is the silent-push marker.
-        assert!(json.contains(r#""content-available":1"#));
-        // Per-row metadata uses short single-letter keys to keep
-        // the payload under the 4 KB silent-push ceiling.
+        // 1.20c2: alert push with `mutable-content: 1` so iOS
+        // invokes the NSE; previous silent-push shape didn't.
+        assert!(json.contains(r#""mutable-content":1"#));
+        assert!(json.contains(r#""alert":"#));
+        assert!(json.contains(r#""title":"Lakko""#));
+        assert!(json.contains(r#""body":"New message""#));
+        // Thread id is the group hex — drives iOS's lock-screen
+        // grouping when the NSE isn't reachable.
+        assert!(json.contains(r#""thread-id":"cdcdcd"#));
+        // Per-row metadata uses short single-letter keys.
         assert!(json.contains(r#""d":""#));
         assert!(json.contains(r#""g":""#));
         assert!(json.contains(r#""p":42"#));
+    }
+
+    #[test]
+    fn aps_body_omits_thread_id_when_group_absent() {
+        let body = ApsBody::from_payload(&WakePayload {
+            device_pseudonym: [0u8; 32],
+            group_pseudonym: None,
+            envelope_pointer: None,
+        });
+        let json = serde_json::to_string(&body).unwrap();
+        assert!(!json.contains("thread-id"));
     }
 }

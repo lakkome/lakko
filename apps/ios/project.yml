@@ -90,6 +90,16 @@ targets:
         # fails immediately with "no valid 'aps-environment'
         # entitlement string found".
         aps-environment: development
+        # 1.20c2 — App Group shared with
+        # `LakkoNotificationService`. Sets the ground for the
+        # 1.20c2b decrypt path (the NSE will read the main
+        # app's MLS provider state through this group's shared
+        # container). The 1.20c2 NSE itself doesn't read any
+        # shared state yet; the entitlement is provisioned
+        # now so the App Store / signing infrastructure is
+        # set up once.
+        com.apple.security.application-groups:
+          - group.me.lakko.dev.shared
     dependencies:
       # Local Swift Package reference. The `package: LakkoCore`
       # name matches the SPM Package.swift's `name:` field; the
@@ -97,6 +107,12 @@ targets:
       # exported library product (1.14b).
       - package: LakkoCore
         product: LakkoCore
+      # 1.20c2 — embed the `UNNotificationServiceExtension`
+      # bundle inside the host app at `PlugIns/`. xcodegen's
+      # `target:` dep with `embed: true` (the default for
+      # `app-extension`-type deps) produces the right "Copy
+      # Files (PlugIns)" build phase.
+      - target: LakkoNotificationService
     settings:
       base:
         # `SWIFT_VERSION = 5.10` matches the Package.swift's
@@ -109,6 +125,62 @@ targets:
         # locked in: enable-bitcode is dead, deprecated-build-
         # system is gone, ENABLE_USER_SCRIPT_SANDBOXING is on
         # by default. Nothing to override for now.
+
+  # Phase 1.20c2 — UNNotificationServiceExtension.
+  #
+  # iOS invokes this extension before displaying any APNs alert
+  # push that carries `aps.mutable-content = 1` (see
+  # `services/push-gw/src/providers/apns.rs`). The extension
+  # has ~30s + 30 MB to mutate the notification before display;
+  # 1.20c2 uses the budget to set `threadIdentifier` to the
+  # group hex so iOS groups per-conversation notifications on
+  # the lock screen. The MLS-decrypt-before-display path lands
+  # in 1.20c2b — see `NotificationService.swift` header for
+  # the deferred-scope rationale.
+  #
+  # The bundle id must be a child of the main app's
+  # (Apple requirement for extensions); we suffix with
+  # `.LakkoNotificationService`.
+  LakkoNotificationService:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: LakkoNotificationService
+    info:
+      path: LakkoNotificationService/Info.plist
+      properties:
+        CFBundleDisplayName: Lakko Notifications
+        # `NSExtension` block lives in the Info.plist itself
+        # (not synthesized from `properties` here) because the
+        # principal-class declaration uses
+        # `$(PRODUCT_MODULE_NAME).NotificationService` which
+        # the build system substitutes at compile time —
+        # xcodegen's property merge would interpolate it
+        # too early.
+    entitlements:
+      path: LakkoNotificationService/LakkoNotificationService.entitlements
+      properties:
+        # Same App Group as the main app — both targets must
+        # carry it for the shared-container plumbing to work.
+        com.apple.security.application-groups:
+          - group.me.lakko.dev.shared
+    settings:
+      base:
+        SWIFT_VERSION: "5.10"
+        # Apple requires the extension bundle id to be a strict
+        # child of the host app's.
+        PRODUCT_BUNDLE_IDENTIFIER: me.lakko.dev.LakkoNotificationService
+        # Match the deployment target floor of the host app
+        # (Phase 1.14b pinned iOS 17). Lower would prevent
+        # bundling.
+        IPHONEOS_DEPLOYMENT_TARGET: "17.0"
+        # The extension target does NOT depend on LakkoCore
+        # (or any UniFFI surface). 1.20c2 only reads the APNs
+        # `userInfo` dictionary; 1.20c2b's decrypt path will
+        # introduce a separate slim `LakkoCoreExtension`
+        # framework with just `parseEnvelope` +
+        # `Group.processIncoming` carved out for the
+        # 30 MB-memory extension process.
 
 # Local Swift Package: the LakkoCore wrapper from 1.14b.
 # Relative path resolves from `apps/ios/` to the same
