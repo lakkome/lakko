@@ -96,10 +96,13 @@ public class LakkoMessagingService : FirebaseMessagingService() {
         ensureNotificationChannel(applicationContext)
 
         // Click intent: launch MainActivity with the wake hint
-        // in the extras. The MainActivity's `Intent.data`
-        // handler doubles as the deep-link reader; a future
-        // PushIntake equivalent of InviteIntake (1.20d2) routes
-        // the user to the relevant chat.
+        // in the extras. MainActivity's `handleWakeIntent`
+        // reader publishes into the process-scoped `PushIntake`
+        // (Phase 1.20d2); the Compose router's
+        // `LaunchedEffect(pendingWake, …)` consumes the slot and
+        // routes the user to the matching chat thread (falling
+        // back to the chat list when the group is unknown
+        // locally — a stale wake).
         val clickIntent = Intent(applicationContext, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
             if (wake?.groupHex != null) {
@@ -197,8 +200,9 @@ public class LakkoMessagingService : FirebaseMessagingService() {
         public const val CHANNEL_ID: String = "lakko-messages-v1"
 
         /** Intent extras used to forward the wake hint into
-         *  MainActivity. The deep-link reader picks these up;
-         *  route layer wiring is a 1.20d2 follow-up. */
+         *  MainActivity. [PushIntake] (1.20d2) picks these up
+         *  and routes the user to the matching chat thread on
+         *  the Compose side. */
         public const val EXTRA_WAKE_GROUP: String = "me.lakko.push.wake_group"
         public const val EXTRA_WAKE_POINTER: String = "me.lakko.push.wake_pointer"
     }

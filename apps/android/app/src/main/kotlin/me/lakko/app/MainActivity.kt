@@ -31,6 +31,8 @@ import me.lakko.app.auth.SessionAccount
 import me.lakko.app.chat.ChatRepository
 import me.lakko.app.contacts.ContactsRepository
 import me.lakko.app.contacts.InviteIntake
+import me.lakko.app.push.LakkoMessagingService
+import me.lakko.app.push.PushIntake
 import me.lakko.app.ui.auth.LoginScreen
 import me.lakko.app.ui.auth.LoginViewModel
 import me.lakko.app.ui.auth.RecoverScreen
@@ -87,6 +89,15 @@ class MainActivity : ComponentActivity() {
      *  collects it and routes to [InviteLandingScreen]. */
     private val inviteIntake = InviteIntake()
 
+    /** Process-scoped intake for push-wake hints (Phase 1.20d2).
+     *  `onCreate` + `onNewIntent` read the FCM extras the
+     *  notification tap carried over from
+     *  [LakkoMessagingService.showWakeNotification] and publish
+     *  to this holder; `SessionRoot` collects it and routes to
+     *  the relevant chat thread (or falls back to the chat list
+     *  when the group is unknown locally). */
+    private val pushIntake = PushIntake()
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
@@ -103,10 +114,12 @@ class MainActivity : ComponentActivity() {
 
         // Read the launching Intent — a cold-start tap on
         // `https://lakko.me/i/<slug>` carries the URL in
-        // `intent.data`. `onNewIntent` below handles the
-        // warm-start case (the app is already running and the
-        // OS routes a new deep-link to the same Activity).
+        // `intent.data`; a cold-start tap on a Lakko push
+        // notification carries the wake extras
+        // (EXTRA_WAKE_GROUP / EXTRA_WAKE_POINTER). `onNewIntent`
+        // below handles the warm-start variants of both.
         handleInviteIntent(intent)
+        handleWakeIntent(intent)
 
         setContent {
             MaterialTheme {
@@ -119,6 +132,7 @@ class MainActivity : ComponentActivity() {
                         contactsRepository = contactsRepository,
                         chatRepository = chatRepository,
                         inviteIntake = inviteIntake,
+                        pushIntake = pushIntake,
                     )
                 }
             }
@@ -128,12 +142,13 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         // Standard `singleTask` /`launchMode = singleInstance`
-        // shape: warm-start deep links route here. We DON'T
-        // call `setIntent(intent)` because the Compose tree
-        // doesn't observe `getIntent()` directly — we publish
-        // into `inviteIntake` whose StateFlow drives the
-        // re-render.
+        // shape: warm-start deep links + push taps route here.
+        // We DON'T call `setIntent(intent)` because the Compose
+        // tree doesn't observe `getIntent()` directly — we
+        // publish into the appropriate intake whose StateFlow
+        // drives the re-render.
         handleInviteIntent(intent)
+        handleWakeIntent(intent)
     }
 
     /**
@@ -168,6 +183,40 @@ class MainActivity : ComponentActivity() {
         if (slug.isEmpty()) return
         inviteIntake.publish(slug)
     }
+
+    /**
+     * Extract a push-wake hint from [intent]'s extras when the
+     * notification tap from
+     * [LakkoMessagingService.showWakeNotification] landed here
+     * (Phase 1.20d2). Publish to [pushIntake] so the Compose
+     * router can navigate to the matching chat.
+     *
+     * Defensive against:
+     *   * Non-notification intents (LAUNCHER taps land here too
+     *     on every restart and the cold-start LaunchActivity
+     *     Intent gets re-delivered without the wake extras —
+     *     guard on the presence of [LakkoMessagingService.EXTRA_WAKE_GROUP]).
+     *   * Empty / blank group hex (treated as absent).
+     *
+     * Pointer is optional — the wake hint can carry it as a
+     * cursor advance for the next mailbox poll. Phase-1's chat
+     * surface ignores it; preserved in the [PushIntake.Wake]
+     * payload for a future "jump to message id" surface.
+     */
+    private fun handleWakeIntent(intent: Intent) {
+        val groupHex = intent.getStringExtra(LakkoMessagingService.EXTRA_WAKE_GROUP)
+            ?.trim()
+            ?.takeIf { it.isNotEmpty() }
+            ?: return
+        // `EXTRA_WAKE_POINTER` is stored as a `Long` extra by
+        // `LakkoMessagingService.showWakeNotification` — read it
+        // back as a long, but treat the default value `-1L` as
+        // "not present" so a never-set extra surfaces as `null`
+        // in the wake payload.
+        val rawPointer = intent.getLongExtra(LakkoMessagingService.EXTRA_WAKE_POINTER, -1L)
+        val pointer = if (rawPointer >= 0L) rawPointer else null
+        pushIntake.publish(PushIntake.Wake(groupHex = groupHex, pointer = pointer))
+    }
 }
 
 @Composable
@@ -176,6 +225,7 @@ private fun AppRoot(
     contactsRepository: ContactsRepository,
     chatRepository: ChatRepository,
     inviteIntake: InviteIntake,
+    pushIntake: PushIntake,
 ) {
     val state by authRepository.state.collectAsStateWithLifecycle()
 
@@ -190,6 +240,7 @@ private fun AppRoot(
             contactsRepository = contactsRepository,
             chatRepository = chatRepository,
             inviteIntake = inviteIntake,
+            pushIntake = pushIntake,
             account = current.account,
         )
     }
@@ -208,6 +259,7 @@ private fun SessionRoot(
     contactsRepository: ContactsRepository,
     chatRepository: ChatRepository,
     inviteIntake: InviteIntake,
+    pushIntake: PushIntake,
     account: SessionAccount,
 ) {
     // Drive ChatRepository.bootstrap whenever a fresh
@@ -248,6 +300,45 @@ private fun SessionRoot(
         val slug = pendingInviteSlug ?: return@LaunchedEffect
         destination = SessionDestination.InviteLanding(slug)
         inviteIntake.consume()
+    }
+
+    // Observe pending push wakes (Phase 1.20d2). A notification
+    // tap delivers a group-pseudonym hex to MainActivity, which
+    // publishes here via `pushIntake`. We route to the matching
+    // chat thread when the group is known locally; otherwise we
+    // fall back to the chat list (a stale wake — the group
+    // record was wiped after the push was minted, or this
+    // device joined the conversation under a different account).
+    //
+    // Chat-state freshness matters: we read
+    // `chatRepository.state.threads` snapshot at the moment the
+    // wake lands. A "known" group whose record was just wiped
+    // by `forgetDevice()` still races; the fallback to the chat
+    // list catches that case cleanly (the user lands on a list
+    // that no longer shows the thread, which matches the
+    // "you've left this conversation" mental model).
+    val pendingWake by pushIntake.pendingWake.collectAsStateWithLifecycle()
+    val chatState by chatRepository.state.collectAsStateWithLifecycle()
+    LaunchedEffect(pendingWake, chatState.bootstrapped) {
+        val wake = pendingWake ?: return@LaunchedEffect
+        // Wait for ChatRepository.bootstrap to finish populating
+        // the threads list before deciding whether the wake's
+        // group is locally known. The bootstrap LaunchedEffect
+        // above fires on the first identity-secrets emission;
+        // until it completes, `chatState.threads` may be empty.
+        if (!chatState.bootstrapped) return@LaunchedEffect
+        val knownThread = chatState.threads.firstOrNull {
+            it.groupIdHex.equals(wake.groupHex, ignoreCase = true)
+        }
+        destination = if (knownThread != null) {
+            SessionDestination.Chat(knownThread.groupIdHex)
+        } else {
+            // Stale wake — group is gone or never was. The chat
+            // list is the safe landing pad; the user can scan
+            // their thread inventory from there.
+            SessionDestination.Chats
+        }
+        pushIntake.consume()
     }
 
     when (val current = destination) {
