@@ -43,6 +43,9 @@ lakko-crypto.workspace = true
 # Phase 1.19b — attachment encryption + JSON envelope wire format
 # (per-message ChaCha20-Poly1305 CEK + SHA-256 content addressing).
 lakko-attachments.workspace = true
+# Phase 1.21b — Shamir's Secret Sharing for the social-recovery
+# flow (split / combine / encode / decode + GF(256) field ops).
+lakko-shamir.workspace = true
 # Base64 framing for the PoW surface (seed/nonce/solution
 # fields → base64 strings on the JSON request body). Matches
 # the wasm surface 1:1.

@@ -77,6 +77,7 @@ pub mod mnemonic;
 pub mod pow_solver;
 pub mod presence;
 pub mod push;
+pub mod shamir;
 pub mod storage;
 pub mod sync;
 

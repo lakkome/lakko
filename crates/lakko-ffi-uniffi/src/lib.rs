@@ -40,6 +40,7 @@ pub mod contacts;
 pub mod discovery;
 pub mod mnemonic;
 pub mod pow;
+pub mod shamir;
 
 uniffi::setup_scaffolding!();
 
@@ -143,6 +144,14 @@ pub enum FfiError {
     /// envelope all collapse into this variant.
     #[error("attachment error: {0}")]
     Attachment(String),
+
+    /// Shamir's-Secret-Sharing split / combine / encode / decode
+    /// error (Phase 1.21b). Same elision posture as the rest:
+    /// invalid threshold, duplicate share indices, mismatched
+    /// share lengths, oversize secret, malformed wire-form
+    /// share string — all collapse into this variant.
+    #[error("shamir error: {0}")]
+    Shamir(String),
 
     /// Lock contention / poisoned mutex on the shared Group state.
     #[error("internal lock error")]

@@ -2053,6 +2053,7 @@ dependencies = [
  "lakko-mls",
  "lakko-mnemonic",
  "lakko-pow",
+ "lakko-shamir",
  "thiserror 1.0.69",
  "uniffi",
 ]
@@ -2074,6 +2075,7 @@ dependencies = [
  "lakko-pow",
  "lakko-presence",
  "lakko-push",
+ "lakko-shamir",
  "lakko-storage",
  "lakko-sync",
  "openmls",
