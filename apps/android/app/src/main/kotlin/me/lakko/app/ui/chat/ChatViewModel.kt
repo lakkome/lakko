@@ -10,9 +10,12 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import me.lakko.app.chat.AttachmentBridge
+import me.lakko.app.chat.AttachmentBridgeException
 import me.lakko.app.chat.ChatMessage
 import me.lakko.app.chat.ChatRepository
 import me.lakko.app.chat.ChatThread
+import uniffi.lakko_ffi_uniffi.AttachmentRef
 
 /**
  * State + dispatcher for the per-thread [ChatScreen].
@@ -69,6 +72,8 @@ public class ChatViewModel(
             sending = composer.sending,
             sendError = composer.sendError,
             refreshing = composer.refreshing,
+            pendingAttachments = composer.pendingAttachments,
+            uploading = composer.uploading,
             // We always render the screen as "exists" — if the
             // repo doesn't carry this thread (no Group handle
             // built yet, post-restart pre-bootstrap), the
@@ -87,16 +92,33 @@ public class ChatViewModel(
         val snapshot = composer.value
         if (snapshot.sending) return
         val trimmed = snapshot.draft.trim()
-        if (trimmed.isEmpty()) return
+        val stagedAttachments = snapshot.pendingAttachments
+        // 1.19c4: attachment-only messages are valid (empty
+        // text + ≥1 attachment); pre-1.19 text-only messages
+        // still valid (≥1 char text + zero attachments). The
+        // only invalid input is the all-empty composer.
+        if (trimmed.isEmpty() && stagedAttachments.isEmpty()) return
 
         composer.update { it.copy(sending = true, sendError = null) }
         viewModelScope.launch {
             try {
-                repo.sendMessage(groupIdHex, trimmed)
+                repo.sendMessage(
+                    groupIdHex = groupIdHex,
+                    plaintext = trimmed,
+                    attachments = stagedAttachments,
+                )
                 composer.update {
-                    it.copy(sending = false, sendError = null, draft = "")
+                    it.copy(
+                        sending = false,
+                        sendError = null,
+                        draft = "",
+                        pendingAttachments = emptyList(),
+                    )
                 }
             } catch (err: Throwable) {
+                // 1.19c4: leave `pendingAttachments` populated
+                // on send failure so the user can retry without
+                // re-picking the same files.
                 composer.update {
                     it.copy(
                         sending = false,
@@ -104,6 +126,60 @@ public class ChatViewModel(
                     )
                 }
             }
+        }
+    }
+
+    /**
+     * Drive the encrypt + upload flow for one picked item.
+     * Called by the screen layer after the OS-level picker
+     * resolves a URI to raw bytes + MIME + display name.
+     * Sequential — one item at a time — keeps the
+     * upload-state flag honest.
+     */
+    public fun onAttachmentPicked(bytes: ByteArray, mime: String?, name: String?) {
+        composer.update { it.copy(uploading = true, sendError = null) }
+        viewModelScope.launch {
+            try {
+                val ref = AttachmentBridge.encryptAndUpload(
+                    bytes = bytes,
+                    mime = mime,
+                    name = name,
+                )
+                composer.update {
+                    it.copy(
+                        uploading = false,
+                        pendingAttachments = it.pendingAttachments + ref,
+                    )
+                }
+            } catch (err: AttachmentBridgeException) {
+                composer.update {
+                    it.copy(
+                        uploading = false,
+                        sendError = err.message ?: "Attachment failed.",
+                    )
+                }
+            } catch (err: Throwable) {
+                composer.update {
+                    it.copy(
+                        uploading = false,
+                        sendError = "Attachment failed: ${err.message ?: err}",
+                    )
+                }
+            }
+        }
+    }
+
+    /** Drop a staged attachment from the composer's pending
+     *  tray. Index matches the order in
+     *  [ChatScreenUiState.pendingAttachments]. */
+    public fun onRemovePendingAttachment(index: Int) {
+        composer.update {
+            if (index !in it.pendingAttachments.indices) it
+            else it.copy(
+                pendingAttachments = it.pendingAttachments.toMutableList().apply {
+                    removeAt(index)
+                },
+            )
         }
     }
 
@@ -142,6 +218,18 @@ public class ChatViewModel(
         val sending: Boolean = false,
         val sendError: String? = null,
         val refreshing: Boolean = false,
+        /** Phase 1.19c4 — attachments staged in the composer.
+         *  The user picks a file / photo; each call to
+         *  [ChatViewModel.onAttachmentPicked] encrypts +
+         *  uploads to storage immediately so the ref is ready
+         *  by the time Send is tapped. Cleared on successful
+         *  Send, on per-chip remove, and on screen disposal
+         *  (ViewModel.onCleared). */
+        val pendingAttachments: List<AttachmentRef> = emptyList(),
+        /** `true` while one or more picked items are being
+         *  encrypted + uploaded. The composer disables Send +
+         *  the picker buttons until it flips back. */
+        val uploading: Boolean = false,
     )
 }
 
@@ -153,6 +241,11 @@ public data class ChatScreenUiState(
     val sending: Boolean,
     val sendError: String?,
     val refreshing: Boolean,
+    /** 1.19c4 — staged attachments below the text composer. */
+    val pendingAttachments: List<AttachmentRef> = emptyList(),
+    /** 1.19c4 — `true` while a picked item is being encrypted
+     *  + uploaded. */
+    val uploading: Boolean = false,
     /** `false` when the repository has no thread for this
      *  groupIdHex — e.g. immediately after process restart
      *  before snapshot rehydration has rebuilt the per-group

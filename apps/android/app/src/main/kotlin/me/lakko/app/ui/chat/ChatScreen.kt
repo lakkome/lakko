@@ -3,6 +3,12 @@
 
 package me.lakko.app.ui.chat
 
+import android.content.Context
+import android.content.Intent
+import android.net.Uri
+import android.provider.OpenableColumns
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -17,11 +23,17 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.AssistChip
+import androidx.compose.material3.AssistChipDefaults
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
@@ -30,16 +42,29 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import me.lakko.app.chat.AttachmentBridge
 import me.lakko.app.chat.ChatMessage
 import me.lakko.app.chat.Direction
+import uniffi.lakko_ffi_uniffi.AttachmentRef
 
 /**
  * 1×1 chat screen — `LazyColumn` of messages + composer.
@@ -71,6 +96,43 @@ public fun ChatScreen(
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val listState = rememberLazyListState()
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+
+    // 1.19c4 — preview-attachment sheet state. When the user
+    // taps "Open" on an image chip we resolve the bytes off
+    // the main thread + populate this, which surfaces an
+    // AlertDialog with the decoded bitmap.
+    var previewImage by remember { mutableStateOf<ImageBitmap?>(null) }
+
+    // 1.19c4 — system-picker launchers. `ACTION_OPEN_DOCUMENT`
+    // surfaces both files and photos through the same code path
+    // (the user picks via the docs UI). Photo-specific picking
+    // could be wired through `PickVisualMedia` separately;
+    // 1.19c4 ships a single entry point for simplicity. The
+    // launcher contract is `OpenMultipleDocuments` so the user
+    // can select several files in one go — each resolves to a
+    // separate `onAttachmentPicked` call.
+    val pickFilesLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenMultipleDocuments(),
+    ) { uris: List<Uri> ->
+        for (uri in uris) {
+            // Hand off to a coroutine — the resolver work
+            // (openInputStream + ContentResolver query) needs
+            // to go off the main thread, and the encrypt +
+            // upload is async too.
+            scope.launch {
+                val payload = withContext(Dispatchers.IO) {
+                    readPickedUri(context, uri)
+                } ?: return@launch
+                viewModel.onAttachmentPicked(
+                    bytes = payload.bytes,
+                    mime = payload.mime,
+                    name = payload.name,
+                )
+            }
+        }
+    }
 
     LaunchedEffect(Unit) {
         // First tick: manual-style refresh so the spinner
@@ -135,7 +197,34 @@ public fun ChatScreen(
                     ),
                 ) {
                     items(items = state.messages, key = { it.messageId }) { msg ->
-                        MessageRow(msg)
+                        MessageRow(
+                            msg = msg,
+                            onPreview = { ref ->
+                                scope.launch {
+                                    val bytes = withContext(Dispatchers.IO) {
+                                        runCatching {
+                                            AttachmentBridge.downloadAndDecrypt(ref)
+                                        }.getOrNull()
+                                    } ?: return@launch
+                                    val bitmap = withContext(Dispatchers.Default) {
+                                        decodeImageBitmap(bytes)
+                                    }
+                                    if (bitmap != null) previewImage = bitmap
+                                }
+                            },
+                            onSave = { ref ->
+                                scope.launch {
+                                    val bytes = withContext(Dispatchers.IO) {
+                                        runCatching {
+                                            AttachmentBridge.downloadAndDecrypt(ref)
+                                        }.getOrNull()
+                                    } ?: return@launch
+                                    withContext(Dispatchers.IO) {
+                                        shareDecryptedBytes(context, ref, bytes)
+                                    }
+                                }
+                            },
+                        )
                     }
                 }
             }
@@ -145,8 +234,37 @@ public fun ChatScreen(
             draft = state.draft,
             sending = state.sending,
             sendError = state.sendError,
+            pendingAttachments = state.pendingAttachments,
+            uploading = state.uploading,
             onDraftChange = viewModel::onDraftChange,
             onSendClicked = viewModel::onSendClicked,
+            onAttachClicked = {
+                // ACTION_OPEN_DOCUMENT — pick any MIME. The
+                // contract returns `Uri` per pick. Wildcard
+                // `*/*` keeps both photos + arbitrary files in
+                // the same flow.
+                pickFilesLauncher.launch(arrayOf("*/*"))
+            },
+            onRemoveAttachment = viewModel::onRemovePendingAttachment,
+        )
+    }
+
+    // Inline image preview — surfaced as a full-screen
+    // AlertDialog with the decoded bitmap. Dismiss via tap
+    // outside or the Close button.
+    val preview = previewImage
+    if (preview != null) {
+        AlertDialog(
+            onDismissRequest = { previewImage = null },
+            confirmButton = {
+                TextButton(onClick = { previewImage = null }) { Text("Close") }
+            },
+            text = {
+                androidx.compose.foundation.Image(
+                    bitmap = preview,
+                    contentDescription = "attachment preview",
+                )
+            },
         )
     }
 }
@@ -197,7 +315,11 @@ private fun Header(
 // =============================================================================
 
 @Composable
-private fun MessageRow(msg: ChatMessage) {
+private fun MessageRow(
+    msg: ChatMessage,
+    onPreview: (AttachmentRef) -> Unit,
+    onSave: (AttachmentRef) -> Unit,
+) {
     when (msg.direction) {
         Direction.Outgoing -> Row(
             modifier = Modifier.fillMaxWidth(),
@@ -205,8 +327,11 @@ private fun MessageRow(msg: ChatMessage) {
         ) {
             Bubble(
                 text = msg.text,
+                attachments = msg.attachments,
                 background = MaterialTheme.colorScheme.primaryContainer,
                 contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                onPreview = onPreview,
+                onSave = onSave,
             )
         }
 
@@ -216,8 +341,11 @@ private fun MessageRow(msg: ChatMessage) {
         ) {
             Bubble(
                 text = msg.text,
+                attachments = msg.attachments,
                 background = MaterialTheme.colorScheme.surfaceVariant,
                 contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                onPreview = onPreview,
+                onSave = onSave,
             )
         }
 
@@ -239,8 +367,11 @@ private fun MessageRow(msg: ChatMessage) {
 @Composable
 private fun Bubble(
     text: String,
-    background: androidx.compose.ui.graphics.Color,
-    contentColor: androidx.compose.ui.graphics.Color,
+    attachments: List<AttachmentRef>,
+    background: Color,
+    contentColor: Color,
+    onPreview: (AttachmentRef) -> Unit,
+    onSave: (AttachmentRef) -> Unit,
 ) {
     Surface(
         shape = RoundedCornerShape(12.dp),
@@ -248,11 +379,68 @@ private fun Bubble(
         contentColor = contentColor,
         modifier = Modifier.widthIn(max = 280.dp),
     ) {
-        Text(
-            text = text,
-            style = MaterialTheme.typography.bodyMedium,
+        Column(
             modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-        )
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            if (text.isNotEmpty()) {
+                Text(
+                    text = text,
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+            }
+            if (attachments.isNotEmpty()) {
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    for (ref in attachments) {
+                        AttachmentChipRow(
+                            ref = ref,
+                            onPreview = { onPreview(ref) },
+                            onSave = { onSave(ref) },
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** Single attachment chip rendered inside a bubble. Hosts the
+ *  Save action on every chip and an Open action on image
+ *  MIMEs. The two callbacks are owned by [ChatScreen] so they
+ *  can drive coroutine work + the screen-level preview sheet. */
+@Composable
+private fun AttachmentChipRow(
+    ref: AttachmentRef,
+    onPreview: () -> Unit,
+    onSave: () -> Unit,
+) {
+    val preview = AttachmentBridge.isInlinePreviewable(ref)
+    Surface(
+        shape = RoundedCornerShape(8.dp),
+        color = Color.White.copy(alpha = 0.12f),
+        contentColor = MaterialTheme.colorScheme.onSurface,
+        modifier = Modifier.padding(vertical = 2.dp),
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = ref.name ?: "(unnamed)",
+                    style = MaterialTheme.typography.labelMedium,
+                    maxLines = 1,
+                )
+                Text(
+                    text = AttachmentBridge.formatSize(ref.size),
+                    style = MaterialTheme.typography.labelSmall,
+                )
+            }
+            if (preview) {
+                TextButton(onClick = onPreview) { Text("Open") }
+            }
+            TextButton(onClick = onSave) { Text("Save") }
+        }
     }
 }
 
@@ -295,8 +483,12 @@ private fun Composer(
     draft: String,
     sending: Boolean,
     sendError: String?,
+    pendingAttachments: List<AttachmentRef>,
+    uploading: Boolean,
     onDraftChange: (String) -> Unit,
     onSendClicked: () -> Unit,
+    onAttachClicked: () -> Unit,
+    onRemoveAttachment: (Int) -> Unit,
 ) {
     Column {
         HorizontalDivider()
@@ -308,12 +500,34 @@ private fun Composer(
                 modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
             )
         }
+        // 1.19c4 — pending-attachments tray. Horizontal scroll
+        // of chips above the text field; each chip shows
+        // `name · size` with a × to drop it. Plus an
+        // "Encrypting…" placeholder chip while [uploading] is
+        // true.
+        if (pendingAttachments.isNotEmpty() || uploading) {
+            PendingAttachmentsTray(
+                attachments = pendingAttachments,
+                uploading = uploading,
+                onRemove = onRemoveAttachment,
+            )
+        }
         Row(
             verticalAlignment = Alignment.Bottom,
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(12.dp),
         ) {
+            // 1.19c4 — Attach button. Drives the OS-level
+            // ACTION_OPEN_DOCUMENT picker via the launcher
+            // wired in [ChatScreen]; the contract surfaces both
+            // photos and arbitrary files behind a single tap.
+            TextButton(
+                onClick = onAttachClicked,
+                enabled = !sending && !uploading,
+            ) {
+                Text("📎")
+            }
             OutlinedTextField(
                 value = draft,
                 onValueChange = onDraftChange,
@@ -328,7 +542,8 @@ private fun Composer(
             Spacer(Modifier.width(8.dp))
             Button(
                 onClick = onSendClicked,
-                enabled = !sending && draft.isNotBlank(),
+                enabled = !sending && !uploading
+                    && (draft.isNotBlank() || pendingAttachments.isNotEmpty()),
             ) {
                 if (sending) {
                     CircularProgressIndicator(
@@ -346,6 +561,61 @@ private fun Composer(
     }
 }
 
+@Composable
+private fun PendingAttachmentsTray(
+    attachments: List<AttachmentRef>,
+    uploading: Boolean,
+    onRemove: (Int) -> Unit,
+) {
+    val scrollState = rememberScrollState()
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 6.dp)
+            .horizontalScroll(scrollState),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        attachments.forEachIndexed { index, ref ->
+            AssistChip(
+                onClick = { onRemove(index) },
+                label = {
+                    Column {
+                        Text(
+                            text = ref.name ?: "(unnamed)",
+                            style = MaterialTheme.typography.labelSmall,
+                            maxLines = 1,
+                        )
+                        Text(
+                            text = AttachmentBridge.formatSize(ref.size),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                },
+                trailingIcon = { Text("×") },
+                colors = AssistChipDefaults.assistChipColors(),
+            )
+        }
+        if (uploading) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                CircularProgressIndicator(
+                    modifier = Modifier
+                        .height(16.dp)
+                        .width(16.dp),
+                    strokeWidth = 2.dp,
+                )
+                Spacer(Modifier.width(6.dp))
+                Text(
+                    text = "Encrypting…",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+    }
+}
+
 /** Back-off delay between failed long-poll iterations. 5s
  *  matches the canonical chat-app retry cadence — see the
  *  parallel constant in `ContactsScreen`. */
@@ -356,4 +626,94 @@ private const val POLL_RETRY_BACKOFF_MS: Long = 5_000L
 private fun shortHex(hex: String): String {
     if (hex.length <= 12) return hex
     return "${hex.substring(0, 6)}…${hex.substring(hex.length - 4)}"
+}
+
+// =============================================================================
+// 1.19c4 — picker / share helpers
+// =============================================================================
+
+/** Bytes + metadata pulled from a picker URI; the screen
+ *  layer hands this to the view model. */
+private data class PickedPayload(
+    val bytes: ByteArray,
+    val mime: String?,
+    val name: String?,
+)
+
+/** Resolve a `content://` URI from `ACTION_OPEN_DOCUMENT` to
+ *  raw bytes + MIME + display name. MIME comes from
+ *  `ContentResolver.getType(uri)` (the picker contract
+ *  guarantees this matches the actual file type); display
+ *  name comes from the `OpenableColumns.DISPLAY_NAME` cursor.
+ *  Returns `null` on any IO failure — the caller drops the
+ *  pick silently. Must run off the main thread. */
+private fun readPickedUri(context: Context, uri: Uri): PickedPayload? {
+    val resolver = context.contentResolver
+    val mime = resolver.getType(uri)
+    var displayName: String? = null
+    runCatching {
+        resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
+            ?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    val idx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                    if (idx >= 0) displayName = cursor.getString(idx)
+                }
+            }
+    }
+    val bytes = runCatching {
+        resolver.openInputStream(uri)?.use { it.readBytes() }
+    }.getOrNull() ?: return null
+    return PickedPayload(
+        bytes = bytes,
+        mime = mime?.takeUnless { it.isEmpty() },
+        name = displayName?.takeUnless { it.isEmpty() },
+    )
+}
+
+/** Decode an arbitrary byte buffer to a Compose `ImageBitmap`
+ *  for the inline preview sheet. Uses Android's built-in
+ *  BitmapFactory so we don't take on Coil / Glide as a
+ *  dependency for the one preview-image use case. Returns
+ *  `null` on a non-image / corrupt blob. */
+private fun decodeImageBitmap(bytes: ByteArray): ImageBitmap? {
+    return runCatching {
+        android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+            ?.asImageBitmap()
+    }.getOrNull()
+}
+
+/** Write `bytes` to the app's cache directory under the
+ *  attachment's name (or a blob-id-derived fallback) and fire
+ *  an ACTION_SEND chooser so the user can route to Files /
+ *  Drive / etc. Best-effort: any IO / Intent failure is
+ *  swallowed because we're already on a coroutine off the UI
+ *  thread + can't surface a snackbar from this scope. */
+private fun shareDecryptedBytes(
+    context: Context,
+    ref: AttachmentRef,
+    bytes: ByteArray,
+) {
+    val baseName = ref.name
+        ?: "attachment-${AttachmentBridge.hex(ref.blobId).take(8)}"
+    runCatching {
+        val cacheDir = java.io.File(context.cacheDir, "shared-attachments").apply {
+            mkdirs()
+        }
+        val outFile = java.io.File(cacheDir, baseName).apply {
+            writeBytes(bytes)
+        }
+        val authority = "${context.packageName}.fileprovider"
+        val uri = androidx.core.content.FileProvider
+            .getUriForFile(context, authority, outFile)
+        val send = Intent(Intent.ACTION_SEND).apply {
+            putExtra(Intent.EXTRA_STREAM, uri)
+            type = ref.mime ?: "application/octet-stream"
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        context.startActivity(
+            Intent.createChooser(send, "Save attachment")
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+        )
+    }
 }

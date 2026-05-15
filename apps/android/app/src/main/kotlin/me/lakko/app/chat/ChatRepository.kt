@@ -307,11 +307,25 @@ public class ChatRepository(
     }
 
     /**
-     * Encrypt [plaintext] for the current epoch of [groupIdHex]
-     * and post the wire bytes to the DS. Appends the message to
-     * the in-memory timeline + persists the snapshot.
+     * Compose `(plaintext, attachments)` into the canonical
+     * 1.19a JSON envelope, encrypt for the current epoch of
+     * [groupIdHex], and post the wire bytes to the DS. Appends
+     * the message to the in-memory timeline + persists the
+     * snapshot.
+     *
+     * Phase 1.19c4: empty [attachments] ⇒ text-only envelope
+     * (binary-identical to a `composeEnvelope(text = …,
+     * attachments = [])` call, which the 1.19a parser also
+     * accepts as a v=1 message). Empty [plaintext] is valid
+     * when at least one attachment is present (attachment-only
+     * message). Empty-and-empty is rejected at the call site
+     * upstream — the view model and screen layer enforce that.
      */
-    public suspend fun sendMessage(groupIdHex: String, plaintext: String) {
+    public suspend fun sendMessage(
+        groupIdHex: String,
+        plaintext: String,
+        attachments: List<uniffi.lakko_ffi_uniffi.AttachmentRef> = emptyList(),
+    ) {
         val identity = canonicalIdentity.get()
             ?: throw IllegalStateException("ChatRepository not bootstrapped")
         val record = groups[groupIdHex]
@@ -321,12 +335,32 @@ public class ChatRepository(
             )
 
         groupsLock.withLock {
+            // 1.19c4: build the JSON envelope before
+            // encrypting. `composeEnvelopeBytes` routes through
+            // the UniFFI `composeEnvelope` free function;
+            // wrong-length byte fields are rejected there
+            // (defence-in-depth: the UI already validates the
+            // AttachmentRefs it builds via
+            // `AttachmentBridge.encryptAndUpload`).
+            val envelopeBytes = try {
+                AttachmentBridge.composeEnvelopeBytes(
+                    text = plaintext,
+                    attachments = attachments,
+                )
+            } catch (e: Throwable) {
+                throw ChatError("envelope compose failed", e)
+            }
             val result = chatClient.sendMessage(
                 identity = identity,
                 group = record.group,
-                plaintext = plaintext.toByteArray(Charsets.UTF_8),
+                plaintext = envelopeBytes,
             )
-            record.appendOutgoing(plaintext, result.messageId, result.createdAt)
+            record.appendOutgoing(
+                text = plaintext,
+                attachments = attachments,
+                messageId = result.messageId,
+                createdAt = result.createdAt,
+            )
             persistSnapshotBestEffort()
             publishThreadList()
         }
@@ -515,7 +549,14 @@ public data class ChatThread(
     val cursor: Long,
 )
 
-/** One message in a [ChatThread]. */
+/** One message in a [ChatThread].
+ *
+ *  Phase 1.19c4: now carries an optional [attachments] list
+ *  alongside [text]. Outgoing messages populate it on
+ *  [ChatRepository.sendMessage]; incoming messages populate it
+ *  from the parsed envelope on [ChatClient.pollMessages]. An
+ *  empty list = pre-1.19-style text-only message; identical
+ *  rendering to before. */
 public data class ChatMessage(
     /** Server-assigned DS id (or 0 for an outgoing message not
      *  yet acknowledged by the DS — `sendMessage` populates
@@ -528,6 +569,10 @@ public data class ChatMessage(
     val direction: Direction,
     /** UTF-8 plaintext (empty for system rows). */
     val text: String,
+    /** Zero or more attachments parsed from / staged for the
+     *  1.19a JSON envelope. Empty list ⇒ pre-1.19 text-only
+     *  message; UI renders it identically to before. */
+    val attachments: List<uniffi.lakko_ffi_uniffi.AttachmentRef> = emptyList(),
     /** ISO-8601 timestamp from the DS. */
     val createdAt: String,
 )
@@ -551,12 +596,18 @@ private class GroupRecord(
     var cursor: Long = 0
         private set
 
-    fun appendOutgoing(text: String, messageId: Long, createdAt: String) {
+    fun appendOutgoing(
+        text: String,
+        attachments: List<uniffi.lakko_ffi_uniffi.AttachmentRef> = emptyList(),
+        messageId: Long,
+        createdAt: String,
+    ) {
         messages.add(
             ChatMessage(
                 messageId = messageId,
                 direction = Direction.Outgoing,
                 text = text,
+                attachments = attachments,
                 createdAt = createdAt,
             ),
         )
@@ -569,7 +620,8 @@ private class GroupRecord(
                     ChatMessage(
                         messageId = event.messageId,
                         direction = Direction.Incoming,
-                        text = event.plaintext,
+                        text = event.text,
+                        attachments = event.attachments,
                         createdAt = event.createdAt,
                     ),
                 )

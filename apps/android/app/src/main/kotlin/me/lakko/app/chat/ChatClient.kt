@@ -8,6 +8,7 @@ import me.lakko.app.ds.DsClient
 import me.lakko.app.ds.DsClientArgError
 import me.lakko.app.ds.DsHttpError
 import me.lakko.app.ds.DsNetworkError
+import uniffi.lakko_ffi_uniffi.AttachmentRef
 import uniffi.lakko_ffi_uniffi.FfiException
 import uniffi.lakko_ffi_uniffi.Group
 import uniffi.lakko_ffi_uniffi.Identity
@@ -222,15 +223,27 @@ private fun toEvent(
     processed: ProcessedMessage,
 ): IncomingChatEvent =
     when (processed) {
-        is ProcessedMessage.Application -> IncomingChatEvent.Application(
-            messageId = messageId,
-            // UTF-8 decode with replacement-on-error so malformed
-            // bytes still surface as the best-effort string we
-            // can show. The plaintext was already authenticated
-            // by the MLS Application message's MAC.
-            plaintext = String(processed.data, Charsets.UTF_8),
-            createdAt = createdAt,
-        )
+        is ProcessedMessage.Application -> {
+            // 1.19c4: feed the application bytes through the
+            // UniFFI `parseEnvelope(bytes:)` surface (1.19b).
+            // The plaintext was already authenticated by the
+            // MLS Application message's MAC, so the worst case
+            // here is a malformed envelope from a buggy peer —
+            // never a tampered payload. Legacy pre-1.19
+            // plain-UTF-8 bytes collapse cleanly to
+            // `(text = <utf-8 lossy>, attachments = [])` via
+            // the parser's documented fallback paths.
+            val parsed = AttachmentBridge.parseEnvelopeBytes(processed.data)
+            IncomingChatEvent.Application(
+                messageId = messageId,
+                text = parsed.text,
+                attachments = parsed.attachments,
+                // Alias kept for the few call sites that still
+                // read `plaintext`. Identical to `text`.
+                plaintext = parsed.text,
+                createdAt = createdAt,
+            )
+        }
         is ProcessedMessage.Commit -> IncomingChatEvent.System(
             messageId = messageId,
             systemKind = SystemKind.Commit,
@@ -263,13 +276,26 @@ public data class SendMessageResult(
 
 /** Discriminated chat event surfaced by [ChatClient.pollMessages]. */
 public sealed interface IncomingChatEvent {
-    /** Application-data message (user-visible chat row). */
+    /** Application-data message (user-visible chat row).
+     *
+     *  Phase 1.19c4: now carries `(text, attachments)` from the
+     *  1.19a JSON envelope (parsed via the UniFFI
+     *  `parseEnvelope(bytes:)` surface from 1.19b). Legacy
+     *  pre-1.19 plain-UTF-8 bytes collapse cleanly to
+     *  `(text = <utf-8 lossy>, attachments = [])` via the
+     *  parser's documented fallback paths — existing bubbles
+     *  render unchanged. `plaintext` is preserved as an alias
+     *  of `text` for transitional call-site compatibility. */
     public data class Application(
         val messageId: Long,
-        /** UTF-8-decoded plaintext (with replacement on malformed
-         *  bytes — the MLS layer has already authenticated the
-         *  ciphertext, so the worst-case here is malformed UTF-8
-         *  from a buggy peer, not a tampered payload). */
+        /** Plain user-visible text from the envelope (empty
+         *  string is valid — attachment-only message). */
+        val text: String,
+        /** Zero or more attachment refs from the envelope. */
+        val attachments: List<AttachmentRef>,
+        /** Alias of [text] — kept for the few call sites that
+         *  still read `plaintext`. New code should read
+         *  [text]. */
         val plaintext: String,
         val createdAt: String,
     ) : IncomingChatEvent
