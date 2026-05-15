@@ -81,6 +81,15 @@ targets:
       properties:
         com.apple.developer.associated-domains:
           - applinks:lakko.me
+        # 1.20c — Push Notifications entitlement. `development`
+        # routes APNs requests through the sandbox endpoint
+        # (`api.sandbox.push.apple.com`); production builds
+        # need this flipped to `production` via a release-only
+        # entitlement override. Without this entry,
+        # `UIApplication.registerForRemoteNotifications()`
+        # fails immediately with "no valid 'aps-environment'
+        # entitlement string found".
+        aps-environment: development
     dependencies:
       # Local Swift Package reference. The `package: LakkoCore`
       # name matches the SPM Package.swift's `name:` field; the

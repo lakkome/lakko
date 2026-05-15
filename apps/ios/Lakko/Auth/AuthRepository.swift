@@ -197,6 +197,10 @@ public final class AuthRepository: ObservableObject {
                 "internal: signup completed without a recovery phrase"
             )
         }
+        // 1.20c — best-effort push subscribe. Same posture as the
+        // web side: errors are logged and swallowed; the user
+        // lands in a working session even without push.
+        Task { await Self.subscribePushBestEffort(context: "signup") }
         return SignupOutcome(recoveryPhrase: phrase)
     }
 
@@ -285,6 +289,8 @@ public final class AuthRepository: ObservableObject {
                 username: cached.username
             )
         )
+        // 1.20c — best-effort push subscribe.
+        Task { await Self.subscribePushBestEffort(context: "login") }
     }
 
     /// Drive the full recover-from-mnemonic flow.
@@ -373,6 +379,8 @@ public final class AuthRepository: ObservableObject {
                 username: cached.username
             )
         )
+        // 1.20c — best-effort push subscribe.
+        Task { await Self.subscribePushBestEffort(context: "recover") }
     }
 
     /// Drop the in-memory session. Keeps ``SessionStore`` and the
@@ -386,6 +394,10 @@ public final class AuthRepository: ObservableObject {
         let cached = sessionStore.load()
         identitySecrets = nil
         state = .anon(cachedUsername: cached?.username)
+        // 1.20c — fire-and-forget unsubscribe so the next page
+        // reload doesn't silently keep accepting pushes against
+        // a logged-out session.
+        Task { await PushSubscriber.shared.unsubscribe() }
     }
 
     /// Drop the in-memory session **and** the on-device material.
@@ -402,6 +414,28 @@ public final class AuthRepository: ObservableObject {
         sessionStore.clear()
         identitySecrets = nil
         state = .anon(cachedUsername: nil)
+        // 1.20c — full wipe of push state too. The contract is
+        // "leave NOTHING per-account behind on this device", so
+        // we both unregister server-side and clear the Keychain
+        // pseudonym. Best-effort fire-and-forget — the local
+        // clear inside `unsubscribe` runs regardless of the
+        // server leg outcome.
+        Task { await PushSubscriber.shared.unsubscribe() }
+    }
+
+    // MARK: - Push integration helpers
+
+    /// 1.20c — fire ``PushSubscriber/subscribe()`` on the
+    /// MainActor with errors logged and swallowed. Called from
+    /// signup / login / recover after the state flip so the
+    /// user lands in a working session even when push fails.
+    @MainActor
+    private static func subscribePushBestEffort(context: String) async {
+        do {
+            _ = try await PushSubscriber.shared.subscribe()
+        } catch {
+            NSLog("push subscribe (\(context)) failed: \(error)")
+        }
     }
 }
 

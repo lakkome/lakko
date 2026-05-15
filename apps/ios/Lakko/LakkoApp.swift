@@ -21,6 +21,15 @@ import SwiftUI
 ///   * ``AuthState/session(_:)`` — ``HomeScreen``.
 @main
 struct LakkoApp: App {
+    /// 1.20c — `UIApplicationDelegate` adaptor that catches APNs
+    /// registration callbacks the SwiftUI `App` protocol doesn't
+    /// surface and forwards them into ``PushSubscriber`` for the
+    /// actor-isolated hand-off. The adaptor is a tiny `NSObject`
+    /// that lives for the entire process lifetime; SwiftUI keeps
+    /// it alive via the property-wrapper machinery.
+    @UIApplicationDelegateAdaptor(PushAppDelegate.self)
+    private var pushDelegate
+
     /// One ``AuthRepository`` per process — `@StateObject` so SwiftUI
     /// owns the lifecycle and the same instance survives every
     /// view-tree rebuild during a session.
