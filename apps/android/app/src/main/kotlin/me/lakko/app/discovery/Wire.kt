@@ -232,3 +232,44 @@ data class InviteRevokeRequest(
      *  from [uniffi.lakko_ffi_uniffi.signInviteRevocation]. */
     val signature: String,
 )
+
+/** Body of `POST /discovery/invite/by-owner` (Phase
+ *  1.18d2b-list). The owner signs the canonical bytes
+ *  (`OWNER_LIST_DOMAIN_V1` ‖ `owner_account_id` ‖
+ *  `signed_at_ms` BE) with their identity Ed25519 key; the
+ *  server resolves the verifying key from
+ *  `identity_bundles.signature_pubkey` for the given
+ *  `account_id` and verifies. The session-token middleware on
+ *  the route is a DoS gate, not the ownership proof. */
+@Serializable
+data class InviteOwnerListRequest(
+    /** Standard-alphabet base64 of the owner's 16-byte UUIDv7
+     *  `account_id`. */
+    val owner_account_id: String,
+    /** UNIX millis at which the body was signed. Same ±10 min
+     *  replay window as the revoke endpoint. */
+    val signed_at_ms: Long,
+    /** Standard-alphabet base64 of the 64-byte Ed25519 signature
+     *  from [uniffi.lakko_ffi_uniffi.signOwnerListQuery]. */
+    val signature: String,
+)
+
+/** One entry in the `/discovery/invite/by-owner` response —
+ *  wire-shape mirror of the server's `OwnerListEntry`. */
+@Serializable
+data class InviteOwnerListEntry(
+    val blob_id_slug: String,
+    val expiry_ms: Long,
+    val max_uses: Long,
+    val used_count: Long,
+    val label: String,
+    val bootstrap_referral: Boolean,
+    val created_at: String,
+)
+
+/** Wire-level response shape from
+ *  `POST /discovery/invite/by-owner`. */
+@Serializable
+data class InviteOwnerListResponse(
+    val invites: List<InviteOwnerListEntry>,
+)

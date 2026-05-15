@@ -46,6 +46,7 @@ public struct ContactsScreen: View {
                         sendForm
                         actionsRow
                         inviteSection
+                        activeInvitesSection
                         pendingSection
                         acceptedSection
                         sentSection
@@ -258,6 +259,69 @@ public struct ContactsScreen: View {
                         invite: invite,
                         onRevoke: {
                             viewModel.onRevokeInviteClicked(blobId: invite.blobId)
+                        }
+                    )
+                }
+            }
+        }
+    }
+
+    /// Phase 1.18d2b-list — "Active invites" panel.
+    ///
+    /// Server-authoritative list of every live invite this owner
+    /// has uploaded across all devices. Refreshed on explicit
+    /// gesture; the local-session ``inviteSection`` above only
+    /// tracks links generated in the current session.
+    @ViewBuilder
+    private var activeInvitesSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Active invites")
+                    .font(.headline)
+                if viewModel.activeInvitesLoaded && !viewModel.activeInvites.isEmpty {
+                    Text("(\(viewModel.activeInvites.count))")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button(action: viewModel.onRefreshActiveInvitesClicked) {
+                    HStack {
+                        if viewModel.loadingActiveInvites {
+                            ProgressView().controlSize(.small)
+                        } else {
+                            Image(systemName: "arrow.clockwise")
+                        }
+                        Text(viewModel.loadingActiveInvites ? "Loading…" : "Refresh")
+                    }
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(viewModel.loadingActiveInvites)
+            }
+
+            if let err = viewModel.activeInvitesError {
+                Text(err)
+                    .font(.footnote)
+                    .foregroundStyle(.red)
+            }
+
+            if !viewModel.activeInvitesLoaded {
+                Text("Tap Refresh to load your live invites.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            } else if viewModel.activeInvites.isEmpty {
+                Text("No live invites — every link has been revoked or expired.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(viewModel.activeInvites, id: \.blobIdSlug) { row in
+                    ActiveInviteRow(
+                        row: row,
+                        revoking: viewModel.revokingActiveInviteSlug == row.blobIdSlug,
+                        disabled: viewModel.revokingActiveInviteSlug != nil
+                            && viewModel.revokingActiveInviteSlug != row.blobIdSlug,
+                        onRevoke: {
+                            viewModel.onRevokeActiveInviteClicked(slug: row.blobIdSlug)
                         }
                     )
                 }
@@ -489,6 +553,86 @@ private struct OutstandingInviteRow: View {
         let formatter = RelativeDateTimeFormatter()
         formatter.unitsStyle = .short
         return "expires \(formatter.localizedString(for: expiry, relativeTo: Date()))"
+    }
+}
+
+/// Phase 1.18d2b-list — one row of the server-authoritative
+/// "Active invites" list. Renders the label / expiry / usage /
+/// referral flag with a Revoke button that calls back into the
+/// view model.
+private struct ActiveInviteRow: View {
+    let row: ActiveInvite
+    let revoking: Bool
+    let disabled: Bool
+    let onRevoke: () -> Void
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(row.label.isEmpty ? "(unlabelled)" : row.label)
+                    .font(.body)
+                HStack(spacing: 6) {
+                    Text(row.blobIdSlug.prefix(16) + "…")
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                    Text("·")
+                        .foregroundStyle(.secondary)
+                    Text(expiryCopy)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text("·")
+                        .foregroundStyle(.secondary)
+                    Text(usageCopy)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                if row.bootstrapReferral {
+                    Text("referral")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            Spacer()
+            Button(action: onRevoke) {
+                if revoking {
+                    ProgressView().controlSize(.small)
+                } else {
+                    Image(systemName: "trash")
+                }
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .disabled(disabled || revoking)
+        }
+        .padding(.vertical, 4)
+    }
+
+    private var expiryCopy: String {
+        if row.expiryMs == 0 {
+            return "never expires"
+        }
+        let nowMs = UInt64(Date().timeIntervalSince1970 * 1000)
+        if row.expiryMs <= nowMs {
+            return "expired"
+        }
+        let expiry = Date(timeIntervalSince1970: TimeInterval(row.expiryMs) / 1000)
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .short
+        return "expires \(formatter.localizedString(for: expiry, relativeTo: Date()))"
+    }
+
+    private var usageCopy: String {
+        // Sentinel mapping mirrors lakko-contacts: 0 = SINGLE_USE,
+        // 0xFFFFFFFF = unlimited, any other N = N consumes
+        // allowed. Same shape as the web client's describeUsage.
+        if row.maxUses == 0 {
+            return row.usedCount >= 1 ? "used 1/1" : "0/1 used"
+        }
+        if row.maxUses == UInt32.max {
+            let uses = row.usedCount
+            return uses == 1 ? "1 use" : "\(uses) uses"
+        }
+        return "\(row.usedCount)/\(row.maxUses) used"
     }
 }
 

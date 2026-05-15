@@ -145,6 +145,19 @@ public fun ContactsScreen(
             )
 
             Spacer(Modifier.height(24.dp))
+            ActiveInvitesSection(
+                loaded = state.activeInvitesLoaded,
+                invites = state.activeInvites,
+                loading = state.loadingActiveInvites,
+                error = state.activeInvitesError,
+                revokingSlug = state.revokingActiveInviteSlug,
+                onRefreshClicked = viewModel::onRefreshActiveInvitesClicked,
+                onRevokeClicked = { slug ->
+                    viewModel.onRevokeActiveInviteClicked(slug)
+                },
+            )
+
+            Spacer(Modifier.height(24.dp))
             SendSection(
                 usernameInput = state.usernameInput,
                 introInput = state.introInput,
@@ -352,6 +365,146 @@ private fun InviteRow(
             }
         }
     }
+}
+
+/** Phase 1.18d2b-list — server-authoritative "Active invites"
+ *  section. Refreshed on explicit user gesture; the
+ *  [InviteSection] above only tracks links generated in the
+ *  current session. */
+@Composable
+private fun ActiveInvitesSection(
+    loaded: Boolean,
+    invites: List<me.lakko.app.discovery.ActiveInvite>,
+    loading: Boolean,
+    error: String?,
+    revokingSlug: String?,
+    onRefreshClicked: () -> Unit,
+    onRevokeClicked: (String) -> Unit,
+) {
+    SectionHeader(
+        title = "Active invites",
+        count = if (loaded) invites.size else 0,
+    )
+    Spacer(Modifier.height(8.dp))
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Button(
+            onClick = onRefreshClicked,
+            enabled = !loading,
+        ) {
+            if (loading) {
+                CircularProgressIndicator(
+                    modifier = Modifier
+                        .height(18.dp)
+                        .width(18.dp),
+                    strokeWidth = 2.dp,
+                )
+                Spacer(Modifier.width(8.dp))
+            }
+            Text(if (loading) "Loading…" else "Refresh")
+        }
+    }
+    if (error != null) {
+        Spacer(Modifier.height(8.dp))
+        Text(
+            text = error,
+            color = MaterialTheme.colorScheme.error,
+            style = MaterialTheme.typography.bodySmall,
+        )
+    }
+    Spacer(Modifier.height(8.dp))
+    if (!loaded) {
+        EmptyHint("Tap Refresh to load your live invites.")
+    } else if (invites.isEmpty()) {
+        EmptyHint("No live invites — every link has been revoked or expired.")
+    } else {
+        for (row in invites) {
+            ActiveInviteRow(
+                row = row,
+                revoking = revokingSlug == row.blobIdSlug,
+                disabled = revokingSlug != null && revokingSlug != row.blobIdSlug,
+                onRevoke = { onRevokeClicked(row.blobIdSlug) },
+            )
+            Spacer(Modifier.height(8.dp))
+        }
+    }
+}
+
+@Composable
+private fun ActiveInviteRow(
+    row: me.lakko.app.discovery.ActiveInvite,
+    revoking: Boolean,
+    disabled: Boolean,
+    onRevoke: () -> Unit,
+) {
+    Card(
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant,
+        ),
+        shape = RoundedCornerShape(8.dp),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(modifier = Modifier.padding(12.dp)) {
+            Text(
+                text = row.label.ifEmpty { "(unlabelled)" },
+                style = MaterialTheme.typography.bodyMedium,
+            )
+            Spacer(Modifier.height(4.dp))
+            Text(
+                text = row.blobIdSlug.take(16) + "… · " +
+                    describeExpiry(row.expiryMs) + " · " +
+                    describeUsage(row.usedCount, row.maxUses) +
+                    if (row.bootstrapReferral) " · referral" else "",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                fontFamily = FontFamily.Monospace,
+            )
+            Spacer(Modifier.height(8.dp))
+            OutlinedButton(
+                onClick = onRevoke,
+                enabled = !disabled && !revoking,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                if (revoking) {
+                    CircularProgressIndicator(
+                        modifier = Modifier
+                            .height(16.dp)
+                            .width(16.dp),
+                        strokeWidth = 2.dp,
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text("Revoking…")
+                } else {
+                    Text("Revoke")
+                }
+            }
+        }
+    }
+}
+
+/** Human-readable rendering for `expiryMs`. `0` is the
+ *  NEVER_EXPIRES sentinel; anything in the past renders as
+ *  "expired" defensively. */
+private fun describeExpiry(expiryMs: Long): String {
+    if (expiryMs == 0L) return "never expires"
+    val nowMs = System.currentTimeMillis()
+    if (expiryMs <= nowMs) return "expired"
+    val deltaMs = expiryMs - nowMs
+    val days = deltaMs / (24L * 60 * 60 * 1000)
+    if (days >= 1) return "expires in ${days}d"
+    val hours = deltaMs / (60L * 60 * 1000)
+    if (hours >= 1) return "expires in ${hours}h"
+    val minutes = (deltaMs / (60L * 1000)).coerceAtLeast(1L)
+    return "expires in ${minutes}m"
+}
+
+/** Sentinel mapping mirrors lakko-contacts: 0 = SINGLE_USE,
+ *  0xFFFFFFFF = unlimited, any other N = N consumes allowed. */
+private fun describeUsage(used: Long, max: Long): String {
+    if (max == 0L) return if (used >= 1) "used 1/1" else "0/1 used"
+    if (max == 0xFFFF_FFFFL) {
+        return if (used == 1L) "1 use" else "$used uses"
+    }
+    return "$used/$max used"
 }
 
 /** Copy [text] to the system clipboard. Uses

@@ -686,6 +686,112 @@ public final class DiscoveryClient {
         )
     }
 
+    /// Owner-signed list of every live invite this account owns
+    /// (Phase 1.18d2b-list). Distinct Ed25519 domain separator
+    /// from ``revokeInvite(blobId:signingSeed:)`` ensures a
+    /// captured revoke signature cannot be replayed against this
+    /// endpoint.
+    ///
+    /// Returns ``ListInvitesResult/list(_:)`` with the parsed
+    /// rows on 200 (empty array when the owner has no live
+    /// invites — distinct from a malformed-request failure), or
+    /// ``ListInvitesResult/notFoundOrNotOwner`` on 404 (server
+    /// folds "no identity_bundle for `accountId`" / "signature
+    /// mismatch" into one status to deny status-code probing).
+    /// Other non-2xx still throw.
+    public func listInvitesByOwner(
+        accountId: Data,
+        signingSeed: Data
+    ) async throws -> ListInvitesResult {
+        guard accountId.count == Self.accountIdLength else {
+            throw DiscoveryClientError.argument(
+                "accountId must be \(Self.accountIdLength) bytes"
+            )
+        }
+        guard signingSeed.count == Self.signingSeedLength else {
+            throw DiscoveryClientError.argument(
+                "signingSeed must be \(Self.signingSeedLength) bytes"
+            )
+        }
+
+        let signedAtMs = Int64(Date().timeIntervalSince1970 * 1000)
+        let signature = try signOwnerListQuery(
+            signingSeed: signingSeed,
+            ownerAccountId: accountId,
+            signedAtMs: UInt64(signedAtMs)
+        )
+        let endpoint = "/discovery/invite/by-owner"
+        let url = try buildURL(endpoint: endpoint)
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        attachAuthorizationHeader(to: &request)
+        let body = InviteOwnerListRequest(
+            ownerAccountId: base64Encode(accountId),
+            signedAtMs: signedAtMs,
+            signature: base64Encode(signature)
+        )
+        do {
+            request.httpBody = try encoder.encode(body)
+        } catch {
+            throw DiscoveryClientError.argument(
+                "failed to encode \(endpoint) body: \(error)"
+            )
+        }
+
+        let raw: (Data, URLResponse)
+        do {
+            raw = try await session.data(for: request)
+        } catch {
+            throw DiscoveryClientError.network(
+                endpoint: "\(endpoint) (POST)",
+                underlying: error
+            )
+        }
+        guard let httpResponse = raw.1 as? HTTPURLResponse else {
+            throw DiscoveryClientError.http(
+                status: 0,
+                endpoint: "\(endpoint) (POST)",
+                body: "non-HTTP response"
+            )
+        }
+        if httpResponse.statusCode == 404 {
+            return .notFoundOrNotOwner
+        }
+        if !(200..<300).contains(httpResponse.statusCode) {
+            let bodyText = Self.truncate(
+                String(data: raw.0, encoding: .utf8) ?? "<binary>"
+            )
+            throw DiscoveryClientError.http(
+                status: httpResponse.statusCode,
+                endpoint: "\(endpoint) (POST)",
+                body: bodyText
+            )
+        }
+        let decoded: InviteOwnerListResponse
+        do {
+            decoded = try decoder.decode(InviteOwnerListResponse.self, from: raw.0)
+        } catch {
+            throw DiscoveryClientError.http(
+                status: httpResponse.statusCode,
+                endpoint: "\(endpoint) (POST)",
+                body: "failed to decode response: \(error)"
+            )
+        }
+        let mapped = decoded.invites.map { entry in
+            ActiveInvite(
+                blobIdSlug: entry.blobIdSlug,
+                expiryMs: entry.expiryMs,
+                maxUses: entry.maxUses,
+                usedCount: entry.usedCount,
+                label: entry.label,
+                bootstrapReferral: entry.bootstrapReferral,
+                createdAt: entry.createdAt
+            )
+        }
+        return .list(mapped)
+    }
+
     /// Public-facing 404→nil GET fetch, the only difference from
     /// the private ``getNullableOn404(endpoint:)`` is callability.
     /// Pulled out so the invite-fetch implementation can reuse the
@@ -998,6 +1104,62 @@ public enum RevokeInviteResult: Equatable {
     /// 404. Server folds "no row" / "signature did not verify" /
     /// "stored bytes failed re-decode" into the same status to
     /// deny status-code probing of the blob_id space.
+    case notFoundOrNotOwner
+}
+
+/// One row in the
+/// ``DiscoveryClient/listInvitesByOwner(accountId:signingSeed:)``
+/// response — normalised TS-parity view of the wire shape
+/// (Phase 1.18d2b-list). `blobIdSlug` is the URL-safe base64
+/// the owner uses to reconstruct the share URL or feed back
+/// into ``DiscoveryClient/revokeInvite(blobId:signingSeed:)``.
+public struct ActiveInvite: Equatable {
+    /// URL-safe base64 (no padding) of the 32-byte blob_id —
+    /// same `/i/<slug>` segment that appears in the share URL.
+    public let blobIdSlug: String
+    /// UNIX millis the capability expires at. `0` means never
+    /// expires (the `NEVER_EXPIRES` sentinel).
+    public let expiryMs: UInt64
+    /// Wire-format `max_uses` sentinel: `0` = SINGLE_USE,
+    /// `0xFFFFFFFF` = unlimited, any other N = N consumes allowed.
+    public let maxUses: UInt32
+    /// Server-counted consumes.
+    public let usedCount: UInt32
+    /// Owner-supplied free-text label; empty string when not set.
+    public let label: String
+    /// `true` if the capability flags the link as a referral
+    /// signup-deep-link (Phase 1.9b4).
+    public let bootstrapReferral: Bool
+    /// RFC 3339 timestamp the server recorded on first upload.
+    public let createdAt: String
+
+    public init(
+        blobIdSlug: String,
+        expiryMs: UInt64,
+        maxUses: UInt32,
+        usedCount: UInt32,
+        label: String,
+        bootstrapReferral: Bool,
+        createdAt: String
+    ) {
+        self.blobIdSlug = blobIdSlug
+        self.expiryMs = expiryMs
+        self.maxUses = maxUses
+        self.usedCount = usedCount
+        self.label = label
+        self.bootstrapReferral = bootstrapReferral
+        self.createdAt = createdAt
+    }
+}
+
+/// Result of
+/// ``DiscoveryClient/listInvitesByOwner(accountId:signingSeed:)``.
+public enum ListInvitesResult: Equatable {
+    /// Server returned the live-invite list (possibly empty).
+    case list([ActiveInvite])
+    /// 404. Server folds "no identity_bundle for `accountId`" /
+    /// "signature mismatch" / "stored pubkey malformed" into
+    /// one status to deny status-code probing.
     case notFoundOrNotOwner
 }
 

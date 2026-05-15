@@ -609,6 +609,39 @@ public class ContactsRepository(
         }
     }
 
+    /**
+     * Owner-signed list of every live invite this account owns
+     * across all devices (Phase 1.18d2b-list). Distinct from
+     * [ContactsState.outstandingInvites] which only tracks
+     * invites generated in the current session — the server-side
+     * list is authoritative across the user's full device fleet.
+     *
+     * Throws [ContactsError] when the session has no identity
+     * secrets (caller should prompt the user to re-enter their
+     * password) or when the discovery client surfaces a transport
+     * failure.
+     */
+    public suspend fun listActiveInvites(): me.lakko.app.discovery.ListInvitesResult {
+        val secrets = authRepo.identitySecrets.value
+            ?: throw ContactsError.wrap(
+                IllegalStateException(
+                    "no identity secrets — please re-enter your password",
+                ),
+            )
+        return Identity.fromSeed(secrets.exportKey).use { identity ->
+            val signingSeed = identity.ed25519Seed()
+            try {
+                authenticatedDiscoveryClient().use { discovery ->
+                    discovery.listInvitesByOwner(secrets.accountId, signingSeed)
+                }
+            } catch (e: Throwable) {
+                throw ContactsError.wrap(e)
+            } finally {
+                signingSeed.fill(0)
+            }
+        }
+    }
+
     /** Clear the in-memory state. Called from the AuthRepository
      *  when the session ends — pending requests + sent log do
      *  not persist across logouts. */

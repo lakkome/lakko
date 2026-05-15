@@ -258,6 +258,84 @@ public final class ContactsViewModel: ObservableObject {
         lastGeneratedInvite = nil
     }
 
+    // MARK: - Active invites (Phase 1.18d2b-list)
+
+    /// Whether the "Active invites" panel has ever successfully
+    /// loaded its list in this session. Distinguishes
+    /// "user hasn't tapped Refresh yet" from "Refresh ran and
+    /// returned an empty list" — the empty-state copy differs.
+    @Published public private(set) var activeInvitesLoaded: Bool = false
+    /// Owner-side list pulled via the signed
+    /// `POST /discovery/invite/by-owner` endpoint. Refreshed on
+    /// explicit user gesture (``onRefreshActiveInvitesClicked()``);
+    /// not auto-loaded so the timing-correlation side-channel
+    /// stays under user control.
+    @Published public private(set) var activeInvites: [ActiveInvite] = []
+    @Published public private(set) var loadingActiveInvites: Bool = false
+    @Published public private(set) var activeInvitesError: String?
+    /// `blobIdSlug` of the row currently being revoked, when any.
+    /// The screen disables the Revoke button on that row + shows
+    /// a spinner.
+    @Published public private(set) var revokingActiveInviteSlug: String?
+
+    /// Refresh the owner-side active-invites list.
+    public func onRefreshActiveInvitesClicked() {
+        guard !loadingActiveInvites else { return }
+        loadingActiveInvites = true
+        activeInvitesError = nil
+        Task {
+            defer { loadingActiveInvites = false }
+            do {
+                let result = try await repository.listActiveInvites()
+                switch result {
+                case .list(let rows):
+                    activeInvites = rows
+                case .notFoundOrNotOwner:
+                    // No identity bundle for this account, or
+                    // signature mismatch — surface as a clean
+                    // empty list. The most common reason is "this
+                    // owner has never uploaded an invite", same
+                    // ergonomics as the web client.
+                    activeInvites = []
+                }
+                activeInvitesLoaded = true
+            } catch let err as ContactsError {
+                activeInvitesError = userFacing(err)
+            } catch {
+                activeInvitesError = (error as? LocalizedError)?.errorDescription
+                    ?? "Could not load invites."
+            }
+        }
+    }
+
+    /// Revoke an active invite from the loaded list. Drops the
+    /// row locally on success or on a 404 (server-side already
+    /// gone — same terminal state).
+    public func onRevokeActiveInviteClicked(slug: String) {
+        guard revokingActiveInviteSlug == nil else { return }
+        guard let row = activeInvites.first(where: { $0.blobIdSlug == slug }) else {
+            return
+        }
+        guard let blobId = base64UrlDecodeNoPad(row.blobIdSlug) else {
+            activeInvitesError = "malformed blob_id slug — cannot revoke"
+            return
+        }
+        revokingActiveInviteSlug = slug
+        activeInvitesError = nil
+        Task {
+            defer { revokingActiveInviteSlug = nil }
+            do {
+                _ = try await repository.revokeInviteLink(blobId: blobId)
+                activeInvites = activeInvites.filter { $0.blobIdSlug != slug }
+            } catch let err as ContactsError {
+                activeInvitesError = userFacing(err)
+            } catch {
+                activeInvitesError = (error as? LocalizedError)?.errorDescription
+                    ?? "Revoke failed."
+            }
+        }
+    }
+
     // MARK: - Error mapping
 
     private func userFacing(_ err: ContactsError) -> String {

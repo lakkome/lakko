@@ -86,6 +86,11 @@ public class ContactsViewModel(
             outstandingInvites = repoState.outstandingInvites,
             generatingInvite = ui.generatingInvite,
             inviteError = ui.inviteError,
+            activeInvitesLoaded = ui.activeInvitesLoaded,
+            activeInvites = ui.activeInvites,
+            loadingActiveInvites = ui.loadingActiveInvites,
+            activeInvitesError = ui.activeInvitesError,
+            revokingActiveInviteSlug = ui.revokingActiveInviteSlug,
             refreshing = repoState.refreshing,
             refreshError = repoState.lastError,
             requiresReauth = repoState.requiresReauth,
@@ -204,6 +209,97 @@ public class ContactsViewModel(
     }
 
     /**
+     * Refresh the owner-side active-invites list (Phase
+     * 1.18d2b-list). Explicit user gesture only — not
+     * auto-loaded so the timing-correlation side-channel ("server
+     * sees an owner-list query") stays under user control.
+     */
+    public fun onRefreshActiveInvitesClicked() {
+        val snapshot = mutableUi.value
+        if (snapshot.loadingActiveInvites) return
+        mutableUi.update {
+            it.copy(loadingActiveInvites = true, activeInvitesError = null)
+        }
+        viewModelScope.launch {
+            try {
+                val result = repo.listActiveInvites()
+                val rows = when (result) {
+                    is me.lakko.app.discovery.ListInvitesResult.List -> result.invites
+                    me.lakko.app.discovery.ListInvitesResult.NotFoundOrNotOwner -> emptyList()
+                }
+                mutableUi.update {
+                    it.copy(
+                        loadingActiveInvites = false,
+                        activeInvitesLoaded = true,
+                        activeInvites = rows,
+                    )
+                }
+            } catch (err: ContactsError) {
+                mutableUi.update {
+                    it.copy(
+                        loadingActiveInvites = false,
+                        activeInvitesError = userFacingError(err),
+                    )
+                }
+            } catch (err: Throwable) {
+                mutableUi.update {
+                    it.copy(
+                        loadingActiveInvites = false,
+                        activeInvitesError = err.message ?: "Could not load invites.",
+                    )
+                }
+            }
+        }
+    }
+
+    /**
+     * Revoke an active invite from the loaded list. Drops the
+     * row locally on success or on a 404 (server-side already
+     * gone — same terminal state).
+     */
+    public fun onRevokeActiveInviteClicked(slug: String) {
+        val snapshot = mutableUi.value
+        if (snapshot.revokingActiveInviteSlug != null) return
+        val row = snapshot.activeInvites.firstOrNull { it.blobIdSlug == slug } ?: return
+        val blobId = me.lakko.app.auth.base64UrlDecodeNoPad(row.blobIdSlug) ?: run {
+            mutableUi.update {
+                it.copy(activeInvitesError = "malformed blob_id slug — cannot revoke")
+            }
+            return
+        }
+        mutableUi.update {
+            it.copy(revokingActiveInviteSlug = slug, activeInvitesError = null)
+        }
+        viewModelScope.launch {
+            try {
+                repo.revokeInviteLink(blobId)
+                mutableUi.update {
+                    it.copy(
+                        revokingActiveInviteSlug = null,
+                        activeInvites = it.activeInvites.filterNot { row ->
+                            row.blobIdSlug == slug
+                        },
+                    )
+                }
+            } catch (err: ContactsError) {
+                mutableUi.update {
+                    it.copy(
+                        revokingActiveInviteSlug = null,
+                        activeInvitesError = userFacingError(err),
+                    )
+                }
+            } catch (err: Throwable) {
+                mutableUi.update {
+                    it.copy(
+                        revokingActiveInviteSlug = null,
+                        activeInvitesError = err.message ?: "Revoke failed.",
+                    )
+                }
+            }
+        }
+    }
+
+    /**
      * One long-poll tick — used by the composable's
      * `LaunchedEffect(Unit) { while (isActive) { pollOnce(...) } }`
      * loop. Foreground-only continuous polling (1.15e7);
@@ -315,6 +411,19 @@ public class ContactsViewModel(
         val sendError: String? = null,
         val generatingInvite: Boolean = false,
         val inviteError: String? = null,
+        /** Phase 1.18d2b-list — server-authoritative active-
+         *  invites slice. `activeInvitesLoaded` distinguishes
+         *  "user hasn't tapped Refresh yet" from "Refresh ran
+         *  and returned an empty list" — the empty-state copy
+         *  differs. */
+        val activeInvitesLoaded: Boolean = false,
+        val activeInvites: List<me.lakko.app.discovery.ActiveInvite> = emptyList(),
+        val loadingActiveInvites: Boolean = false,
+        val activeInvitesError: String? = null,
+        /** `blobIdSlug` of the row currently being revoked, when
+         *  any. The screen disables the Revoke button on that
+         *  row + shows a spinner. */
+        val revokingActiveInviteSlug: String? = null,
     )
 }
 
@@ -330,6 +439,12 @@ public data class ContactsUiState(
     val outstandingInvites: List<GeneratedInvite>,
     val generatingInvite: Boolean,
     val inviteError: String?,
+    /** Phase 1.18d2b-list. */
+    val activeInvitesLoaded: Boolean,
+    val activeInvites: List<me.lakko.app.discovery.ActiveInvite>,
+    val loadingActiveInvites: Boolean,
+    val activeInvitesError: String?,
+    val revokingActiveInviteSlug: String?,
     val refreshing: Boolean,
     val refreshError: String?,
     val requiresReauth: Boolean,

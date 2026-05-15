@@ -408,6 +408,36 @@ public final class ContactsRepository: ObservableObject {
         return result
     }
 
+    /// Owner-signed list of every live invite this account owns
+    /// across all devices (Phase 1.18d2b-list). Distinct from
+    /// ``ContactsState/outstandingInvites`` which only tracks
+    /// invites generated in the current session — the server-side
+    /// list is authoritative across the user's full device fleet.
+    ///
+    /// Throws ``ContactsError/wrapped`` when the session has no
+    /// identity secrets (caller should prompt the user to
+    /// re-enter their password) or when the discovery client
+    /// surfaces a transport failure.
+    public func listActiveInvites() async throws -> ListInvitesResult {
+        guard let secrets = authRepository.identitySecrets else {
+            throw ContactsError.wrap(
+                ContactsError.simple(
+                    "no identity secrets — please re-enter your password"
+                )
+            )
+        }
+        let identity = try Identity.fromSeed(seed: secrets.exportKey)
+        let discovery = authenticatedDiscoveryClient()
+        do {
+            return try await discovery.listInvitesByOwner(
+                accountId: secrets.accountId,
+                signingSeed: identity.ed25519Seed()
+            )
+        } catch {
+            throw ContactsError.wrap(error)
+        }
+    }
+
     /// Default invite expiry — 7 days. Mirrors the Android +
     /// Web sides.
     public static let defaultInviteExpiryMs: Int64 = 7 * 24 * 60 * 60 * 1000
