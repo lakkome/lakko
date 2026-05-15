@@ -364,6 +364,32 @@ ssh lakkome@lakko.me journalctl -u lakko.target --since "1 hour ago"
 ssh lakkome@lakko.me systemctl status lakko.target
 ```
 
+### Post-deploy smoke (Phase 1.22)
+
+```bash
+just smoke
+```
+
+Hits the public HTTPS surface from the dev machine and asserts every nginx route + every service `/health` + every same-origin `/api/*` proxy + every `/version` JSON is what we expect after the deploy. No ssh needed — pure outside-in. Override the bases when probing a tunnel / staging mirror:
+
+```bash
+just smoke https://staging.lakko.me https://api-staging.lakko.me
+```
+
+The script lives at `infra/scripts/staging-smoke.sh` and is the canonical "did this deploy actually land?" oracle. Run it after every `just deploy` (or after `just deploy-web` if you only touched apps/web). Exit code 0 = green; 1 = at least one route mismatched; 2 = `curl` missing locally.
+
+### What the nginx vhosts expose
+
+Two `server_name`s share one nginx config (`infra/nginx/sites-available/lakko.conf`); the web client uses both:
+
+| Vhost | Routes | Purpose |
+|---|---|---|
+| `lakko.me` | `/`, `/assets/*`, `/sw.js`, `/manifest.webmanifest` | The web SPA root + hashed assets + the service worker + the PWA manifest |
+| `lakko.me` | `/api/auth/*`, `/api/ds/*`, `/api/discovery/*`, `/api/storage/*` (1.19c1), `/api/push/*` (1.20b) | Same-origin proxy to the backend services so the web client's `connect-src 'self'` CSP stays valid |
+| `api.lakko.me` | `/auth/*`, `/ds/*`, `/storage/*`, `/discovery/*`, `/push-gw/*` | Canonical external API entry point for the iOS / Android / Tauri clients (different CSP boundary; CORS not needed because Lakko clients never cross the `lakko.me ↔ api.lakko.me` origin pair) |
+
+Every `/api/*` path on `lakko.me` must be mirrored against a real upstream — the **vite dev proxy in `apps/web/vite.config.ts` is the source of truth for what the client expects**. If you add a new dev-proxy entry, the matching production `location /api/...` block here is mandatory. The 1.22 smoke probe will catch a missing route by failing the corresponding `/api/.../health` assertion.
+
 ## Backup / restore
 
 Phase 2 sprint task. Bare minimum:

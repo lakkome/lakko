@@ -420,3 +420,19 @@ logs service:
 # Status of the whole stack.
 status:
     ssh {{vps_user}}@{{vps_host}} 'sudo systemctl status lakko.target --no-pager'
+
+# Phase 1.22 — post-deploy end-to-end smoke probe. Runs from the
+# dev machine against the public HTTPS surface; no ssh, no shell
+# on the VPS. Covers:
+#
+#   * nginx layer (/health on both vhosts)
+#   * each backend service via api.lakko.me/{auth,ds,storage,discovery,push-gw}
+#   * same-origin /api/* proxies on lakko.me
+#   * /version JSON on each service (confirms the right binary is
+#     bound to the right port — a deploy regression check)
+#
+# Override the bases with positional args when probing a staging
+# tunnel instead of the canonical lakko.me pair:
+#   just smoke https://staging.lakko.me https://api-staging.lakko.me
+smoke web="https://lakko.me" api="https://api.lakko.me":
+    ./infra/scripts/staging-smoke.sh {{web}} {{api}}
