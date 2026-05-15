@@ -219,3 +219,63 @@ export interface InviteRevokeRequest {
    *  from `wasm.signInviteRevocation(...)`. */
   signature: string;
 }
+
+/** Body of `POST /discovery/invite/by-owner` (Phase
+ *  1.18d2b-list). The owner signs the canonical bytes
+ *  (`OWNER_LIST_DOMAIN_V1` ‖ `owner_account_id` ‖
+ *  `signed_at_ms` BE) with their identity Ed25519 key; the
+ *  server resolves the verifying key from
+ *  `identity_bundles.signature_pubkey` and verifies. The
+ *  session-token middleware on the route is a DoS gate, not
+ *  the ownership proof.
+ *
+ *  `signed_at_ms` MUST be within `±REVOKE_REPLAY_WINDOW_MS`
+ *  (10 min, re-used from the revoke flow) of the server clock
+ *  or the request is rejected with 400 Bad Request. */
+export interface InviteOwnerListRequest {
+  /** Standard-alphabet base64 of the owner's 16-byte UUIDv7
+   *  `account_id` (matches `IdentitySecrets.accountId`). */
+  owner_account_id: string;
+  /** UNIX millis at which the body was signed. */
+  signed_at_ms: number;
+  /** Standard-alphabet base64 of the 64-byte Ed25519 signature
+   *  from `wasm.signOwnerListQuery(...)`. */
+  signature: string;
+}
+
+/** One entry in the `/discovery/invite/by-owner` response —
+ *  mirrors `OwnerListEntry` on the server side. The shape
+ *  matches the wire-name (snake_case) the server emits; the
+ *  TS client surfaces a normalised camelCase view to the UI
+ *  via the `ListInvitesResult` type below. */
+export interface InviteOwnerListEntry {
+  /** URL-safe base64 (no padding) of the 32-byte blob_id —
+   *  the same `/i/<slug>` segment that appears in the share
+   *  URL the owner originally minted. */
+  blob_id_slug: string;
+  /** UNIX millis the capability expires at. `0` (the
+   *  `NEVER_EXPIRES` sentinel) means it never expires. */
+  expiry_ms: number;
+  /** Wire-format `max_uses` sentinel: `0` = SINGLE_USE,
+   *  `0xFFFFFFFF` = unlimited, any other N = N consumes
+   *  allowed. */
+  max_uses: number;
+  /** Server-counted consumes so far. */
+  used_count: number;
+  /** Owner-supplied free-text label, empty string when not
+   *  set. */
+  label: string;
+  /** Mirrors `InviteCapability.bootstrap_referral` — `true`
+   *  flags the link as a signup-deep-link that auto-Accepts
+   *  on the joiner side (Phase 1.9b4). */
+  bootstrap_referral: boolean;
+  /** RFC 3339 timestamp recording when the server first
+   *  accepted the upload. */
+  created_at: string;
+}
+
+/** Wire-level response shape from
+ *  `POST /discovery/invite/by-owner`. */
+export interface InviteOwnerListResponse {
+  invites: InviteOwnerListEntry[];
+}

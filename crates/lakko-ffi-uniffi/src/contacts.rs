@@ -31,7 +31,8 @@
 
 use lakko_contacts::invite::{
     compose as rust_invite_compose, compute_joiner_tag as rust_compute_joiner_tag,
-    decode_and_verify as rust_invite_decode, sign_revocation as rust_sign_revocation, BLOB_ID_LEN,
+    decode_and_verify as rust_invite_decode, sign_owner_list as rust_sign_owner_list,
+    sign_revocation as rust_sign_revocation, BLOB_ID_LEN,
 };
 use lakko_contacts::{
     compose as rust_compose, decode_and_verify as rust_decode, open_envelope as rust_open,
@@ -601,6 +602,58 @@ pub fn sign_invite_revocation(
     Ok(rust_sign_revocation(&signing, &blob_id_arr, signed_at_ms).to_vec())
 }
 
+/// Sign an owner-list query for the
+/// `POST /discovery/invite/by-owner` endpoint (Phase
+/// 1.18d2b-list).
+///
+/// Each client calls this just before posting the list request
+/// so the body's `signature` field carries proof that the
+/// caller is the holder of the identity Ed25519 key bound to
+/// `account_id` via the KT log. The canonical bytes the
+/// signature covers — domain separator + `account_id` +
+/// big-endian `signed_at_ms` — live in
+/// [`lakko_contacts::invite::owner_list_canonical_bytes`]; both
+/// the server (`services/discovery::invite::list_by_owner`) and
+/// this helper drive sign / verify against the same layout.
+///
+/// Distinct domain separator from
+/// [`sign_invite_revocation`] ensures a captured revoke
+/// signature cannot be replayed as an owner-list authentication
+/// (and vice versa).
+///
+/// Returns the 64-byte raw Ed25519 signature. Caller
+/// base64-encodes for the JSON body.
+///
+/// # Errors
+///
+/// * [`FfiError::Contacts`] on wrong-length signing seed (32
+///   bytes required) or account_id ([`ACCOUNT_ID_LEN`] required).
+#[uniffi::export]
+pub fn sign_owner_list_query(
+    signing_seed: Vec<u8>,
+    owner_account_id: Vec<u8>,
+    signed_at_ms: u64,
+) -> Result<Vec<u8>, FfiError> {
+    if signing_seed.len() != 32 {
+        return Err(FfiError::Contacts(
+            "signingSeed must be 32 bytes".to_string(),
+        ));
+    }
+    let mut seed = [0u8; 32];
+    seed.copy_from_slice(&signing_seed);
+    let signing = SigningKey::from_seed(&seed);
+
+    if owner_account_id.len() != ACCOUNT_ID_LEN {
+        return Err(FfiError::Contacts(format!(
+            "ownerAccountId must be {ACCOUNT_ID_LEN} bytes",
+        )));
+    }
+    let mut acct_arr = [0u8; ACCOUNT_ID_LEN];
+    acct_arr.copy_from_slice(&owner_account_id);
+
+    Ok(rust_sign_owner_list(&signing, &acct_arr, signed_at_ms).to_vec())
+}
+
 /// Compute the per-joiner consume-dedup tag for an invite-link
 /// `(capability_bytes, joiner_account_id)` pair.
 ///
@@ -1042,6 +1095,34 @@ mod tests {
         .expect_err("expected wrong-length rejection");
         match err {
             FfiError::Contacts(msg) => assert!(msg.contains("bytes")),
+            other => panic!("expected Contacts, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sign_owner_list_query_round_trip() {
+        let alice_signing = SigningKey::from_seed(&[0x88u8; 32]);
+        let acct = [0xA1u8; ACCOUNT_ID_LEN];
+        let sig = sign_owner_list_query(
+            alice_signing.to_seed().to_vec(),
+            acct.to_vec(),
+            1_700_000_000_000,
+        )
+        .expect("sign");
+        assert_eq!(sig.len(), 64, "Ed25519 signature must be 64 bytes");
+    }
+
+    #[test]
+    fn sign_owner_list_query_rejects_wrong_account_id_length() {
+        let alice_signing = SigningKey::from_seed(&[0x88u8; 32]);
+        let err = sign_owner_list_query(
+            alice_signing.to_seed().to_vec(),
+            vec![0u8; 8], // wrong: ACCOUNT_ID_LEN is 16
+            0,
+        )
+        .expect_err("expected wrong-length rejection");
+        match err {
+            FfiError::Contacts(msg) => assert!(msg.contains("16 bytes")),
             other => panic!("expected Contacts, got {other:?}"),
         }
     }

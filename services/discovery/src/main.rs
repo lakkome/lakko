@@ -229,6 +229,15 @@ pub(crate) fn build_app(state: AppState) -> Router {
             "/discovery/invite/{blob_id}",
             axum::routing::delete(invite::revoke),
         )
+        // Phase 1.18d2b-list — owner-signed POST that returns
+        // every live invite for the calling account. Body
+        // carries the Ed25519 signature; the session-token
+        // middleware here is a DoS gate, same role as on
+        // `revoke` above.
+        .route(
+            "/discovery/invite/by-owner",
+            post(invite::list_by_owner),
+        )
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             auth::require_session,

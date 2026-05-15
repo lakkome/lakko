@@ -29,6 +29,7 @@ import { useAuth } from "../auth/AuthContext";
 import {
   base64Decode,
   base64Encode,
+  base64UrlDecodeNoPad,
   base64UrlEncodeNoPad,
 } from "../auth/account-id";
 import { ContactsClient, ContactsError } from "../contacts/client";
@@ -45,7 +46,7 @@ import {
   type ExpiryPreset,
   type MaxUsesPreset,
 } from "../contacts/invite";
-import { DiscoveryClient } from "../discovery/client";
+import { DiscoveryClient, type ActiveInvite } from "../discovery/client";
 import {
   fingerprintShort,
   loadAccepted,
@@ -357,6 +358,8 @@ function ConnectedContacts(props: ConnectedContactsProps): JSX.Element {
       />
 
       <InvitePanel />
+
+      <ActiveInvitesPanel />
 
       <PendingPanel
         pending={pending}
@@ -758,6 +761,225 @@ function InvitePanel(): JSX.Element {
       </Show>
     </section>
   );
+}
+
+/**
+ * Phase 1.18d2b-list — "Active invites" panel. Lists every live
+ * invite the current owner has uploaded across all their
+ * devices, with a per-row Revoke button.
+ *
+ * Sits below [`InvitePanel`] in the Contacts route. The list is
+ * **not auto-loaded** — the user clicks Refresh to pull it. The
+ * round-trip is cheap (one signed SELECT) but doing it on every
+ * page mount would be wasted work for users who never use
+ * invites; explicit gesture also keeps the timing-correlation
+ * side-channel ("Alice's discovery server sees an owner-list
+ * query") under user control rather than firing on every
+ * navigation.
+ *
+ * The Revoke flow reuses the existing
+ * [`DiscoveryClient.revokeInvite`] surface from 1.18d2b-web; the
+ * only new wire-format here is the list query itself.
+ */
+function ActiveInvitesPanel(): JSX.Element {
+  const auth = useAuth();
+  const chats = useChats();
+  // Same wiring pattern as InvitePanel — bind the session token
+  // so the protected list endpoint sees the bearer.
+  const discovery = new DiscoveryClient();
+  discovery.setSessionToken(auth.identitySecrets()?.sessionToken ?? null);
+
+  const [invites, setInvites] = createSignal<ActiveInvite[]>([]);
+  // `null` = never loaded yet; `"loaded"` = at least one
+  // successful refresh has populated `invites`. Distinguishes
+  // "user hasn't clicked Refresh yet" from "Refresh ran and
+  // returned empty list".
+  const [loadStatus, setLoadStatus] = createSignal<null | "loaded">(null);
+  const [busy, setBusy] = createSignal(false);
+  const [error, setError] = createSignal<string | null>(null);
+  const [revokeBusySlug, setRevokeBusySlug] = createSignal<string | null>(null);
+
+  async function onRefresh(): Promise<void> {
+    setError(null);
+    setBusy(true);
+    try {
+      const secrets = auth.identitySecrets();
+      const id = chats.identity();
+      if (secrets === null || id === null) {
+        throw new Error("re-enter your password to list invites");
+      }
+      const result = await discovery.listInvitesByOwner(
+        secrets.accountId,
+        id.ed25519Seed,
+      );
+      if (result.kind === "not-found-or-not-owner") {
+        // No identity bundle for this account_id, or signature
+        // mismatch. Either way, present as "no invites" — the
+        // most common path here is "owner has never uploaded an
+        // invite, so there's no row to match anyway."
+        setInvites([]);
+        setLoadStatus("loaded");
+        return;
+      }
+      setInvites(result.invites);
+      setLoadStatus("loaded");
+    } catch (err) {
+      setError(formatError(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function onRevokeRow(row: ActiveInvite): Promise<void> {
+    setError(null);
+    setRevokeBusySlug(row.blobIdSlug);
+    try {
+      const id = chats.identity();
+      if (id === null) {
+        throw new Error("re-enter your password to revoke invites");
+      }
+      const blobId = base64UrlDecodeNoPad(row.blobIdSlug);
+      const result = await discovery.revokeInvite(blobId, id.ed25519Seed);
+      // Drop the row locally regardless of `revoked` vs
+      // `not-found-or-not-owner` — both terminal states mean
+      // the row is gone server-side.
+      setInvites(invites().filter((r) => r.blobIdSlug !== row.blobIdSlug));
+      if (result.kind === "not-found-or-not-owner") {
+        setError(
+          `"${row.label || "(unlabelled)"}" was already gone server-side.`,
+        );
+      }
+    } catch (err) {
+      setError(formatError(err));
+    } finally {
+      setRevokeBusySlug(null);
+    }
+  }
+
+  return (
+    <section style={panelStyle()}>
+      <h2 style={{ "margin-top": 0 }}>
+        Active invites
+        <Show when={loadStatus() === "loaded" && invites().length > 0}>
+          <span
+            style={{
+              "margin-left": "0.5rem",
+              color: "var(--surface-muted)",
+              "font-weight": "normal",
+              "font-size": "0.9rem",
+            }}
+          >
+            ({invites().length})
+          </span>
+        </Show>
+      </h2>
+      <p style={{ color: "var(--surface-muted)", "margin-top": 0 }}>
+        Lists every live invite-link this account has issued — across
+        all your devices. Tap Refresh to pull the current state.
+      </p>
+
+      <div style={{ display: "flex", gap: "0.5rem", "margin-bottom": "0.75rem" }}>
+        <button
+          type="button"
+          disabled={busy()}
+          onClick={() => {
+            void onRefresh();
+          }}
+        >
+          {busy() ? "Loading…" : "Refresh"}
+        </button>
+      </div>
+
+      <Show when={error() !== null}>
+        <div class="form-error">{error()}</div>
+      </Show>
+
+      <Show
+        when={loadStatus() === "loaded"}
+        fallback={
+          <p style={{ color: "var(--surface-muted)" }}>
+            Click Refresh to load your live invites.
+          </p>
+        }
+      >
+        <Show
+          when={invites().length > 0}
+          fallback={
+            <p style={{ color: "var(--surface-muted)" }}>
+              No live invites — every link has been revoked or
+              expired.
+            </p>
+          }
+        >
+          <ul style={listStyle()}>
+            <For each={invites()}>
+              {(row) => (
+                <li style={rowStyle()}>
+                  <div style={{ flex: 1, "min-width": 0 }}>
+                    <strong>{row.label || "(unlabelled)"}</strong>
+                    <div
+                      style={{
+                        color: "var(--surface-muted)",
+                        "font-size": "0.85rem",
+                        "margin-top": "0.2rem",
+                      }}
+                    >
+                      <code>{row.blobIdSlug.slice(0, 16)}…</code>
+                      {" · "}
+                      {describeExpiryUnixMs(row.expiryMs)}
+                      {" · "}
+                      {describeUsage(row.usedCount, row.maxUses)}
+                      <Show when={row.bootstrapReferral}>
+                        {" · referral"}
+                      </Show>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    disabled={revokeBusySlug() !== null}
+                    onClick={() => {
+                      void onRevokeRow(row);
+                    }}
+                  >
+                    {revokeBusySlug() === row.blobIdSlug
+                      ? "Revoking…"
+                      : "Revoke"}
+                  </button>
+                </li>
+              )}
+            </For>
+          </ul>
+        </Show>
+      </Show>
+    </section>
+  );
+}
+
+/** Human-readable rendering for `expiry_ms` straight off the
+ *  wire. `0` is the `NEVER_EXPIRES` sentinel; anything in the
+ *  past is rendered as "expired" (defensive — the server's
+ *  filter shouldn't return them, but a near-instant expiry
+ *  could land in the response and lose the race). */
+function describeExpiryUnixMs(expiryMs: number): string {
+  if (expiryMs === 0) return "never expires";
+  const nowMs = Date.now();
+  if (expiryMs <= nowMs) return "expired";
+  const deltaMs = expiryMs - nowMs;
+  const days = Math.floor(deltaMs / (24 * 60 * 60 * 1000));
+  if (days >= 1) return `expires in ${days}d`;
+  const hours = Math.floor(deltaMs / (60 * 60 * 1000));
+  if (hours >= 1) return `expires in ${hours}h`;
+  const minutes = Math.max(1, Math.floor(deltaMs / (60 * 1000)));
+  return `expires in ${minutes}m`;
+}
+
+/** Human-readable rendering for the `(used_count, max_uses)`
+ *  pair using the same sentinel mapping the server enforces:
+ *  `0` ⇒ single-use, `0xFFFFFFFF` ⇒ unlimited. */
+function describeUsage(used: number, max: number): string {
+  if (max === 0) return used >= 1 ? "used 1/1" : "0/1 used";
+  if (max === 0xffff_ffff) return `${used} use${used === 1 ? "" : "s"}`;
+  return `${used}/${max} used`;
 }
 
 function GeneratedUrlPanel(props: {

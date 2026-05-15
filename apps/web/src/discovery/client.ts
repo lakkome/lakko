@@ -40,6 +40,8 @@ import type {
   InviteConsumeRequest,
   InviteConsumeResponse,
   InviteFetchResponse,
+  InviteOwnerListRequest,
+  InviteOwnerListResponse,
   InviteRevokeRequest,
   InviteUploadRequest,
   InviteUploadResponse,
@@ -124,6 +126,49 @@ export type ConsumeInviteResult =
  *  — they indicate a buggy client, not a probing attacker. */
 export type RevokeInviteResult =
   | { readonly kind: "revoked" }
+  | { readonly kind: "not-found-or-not-owner" };
+
+/** One row in the [`DiscoveryClient.listInvitesByOwner`]
+ *  response — normalised TS view of the wire shape. Field names
+ *  are camelCased compared to the snake_case wire; the
+ *  `blobIdSlug` is the URL-safe base64 the owner uses to
+ *  reconstruct the share URL or feed into
+ *  [`DiscoveryClient.revokeInvite`]. */
+export interface ActiveInvite {
+  /** URL-safe base64 (no padding) of the 32-byte blob_id —
+   *  same `/i/<slug>` segment that appears in the share URL.
+   *  Pass through `base64UrlDecodeNoPad` to recover the raw
+   *  bytes when calling `revokeInvite`. */
+  readonly blobIdSlug: string;
+  /** UNIX millis the capability expires at. `0` means never
+   *  expires (the `NEVER_EXPIRES` sentinel). */
+  readonly expiryMs: number;
+  /** Wire-format `max_uses` sentinel: `0` = SINGLE_USE,
+   *  `0xFFFFFFFF` = unlimited, any other N = N consumes
+   *  allowed. */
+  readonly maxUses: number;
+  /** Server-counted consumes. */
+  readonly usedCount: number;
+  /** Owner-supplied free-text label; empty string when not
+   *  set. */
+  readonly label: string;
+  /** `true` if the capability flags the link as a referral
+   *  signup-deep-link (Phase 1.9b4). */
+  readonly bootstrapReferral: boolean;
+  /** RFC 3339 timestamp the server recorded on first upload. */
+  readonly createdAt: string;
+}
+
+/** Result of `DiscoveryClient.listInvitesByOwner`
+ *  (Phase 1.18d2b-list). Discriminated so the owner UI can
+ *  branch on the well-known 404 — "no identity bundle for this
+ *  account_id OR the signature didn't verify" — distinctly
+ *  from a clean empty list.
+ *
+ *  Body-shape failures (bad base64, signed_at_ms outside the
+ *  replay window) still throw `DiscoveryHttpError(400, …)`. */
+export type ListInvitesResult =
+  | { readonly kind: "list"; readonly invites: ActiveInvite[] }
   | { readonly kind: "not-found-or-not-owner" };
 
 /** Programmer error — empty / invalid inputs caught before any
@@ -260,6 +305,39 @@ export class DiscoveryClient {
     if (response.status === 204) return;
     const text = await safeReadBody(response);
     throw new DiscoveryHttpError(response.status, `${endpoint} (DELETE)`, text);
+  }
+
+  /** Wire-level `POST /discovery/invite/by-owner` (Phase
+   *  1.18d2b-list). Returns the raw wire response on 200,
+   *  `null` on 404, throws `DiscoveryHttpError` on any other
+   *  non-2xx. The session-token middleware is the DoS gate;
+   *  the body signature is the actual ownership proof — see
+   *  the high-level [`listInvitesByOwner`] wrapper for the
+   *  ergonomic API. */
+  async inviteOwnerList(
+    req: InviteOwnerListRequest,
+  ): Promise<InviteOwnerListResponse | null> {
+    const endpoint = "/discovery/invite/by-owner";
+    const url = `${this.baseUrl}${endpoint}`;
+    let response: Response;
+    try {
+      response = await fetch(url, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          ...this.authHeaders(),
+        },
+        body: JSON.stringify(req),
+      });
+    } catch (err) {
+      throw new DiscoveryNetworkError(`${endpoint} (POST)`, err);
+    }
+    if (response.status === 404) return null;
+    if (!response.ok) {
+      const text = await safeReadBody(response);
+      throw new DiscoveryHttpError(response.status, `${endpoint} (POST)`, text);
+    }
+    return (await response.json()) as InviteOwnerListResponse;
   }
 
   /**
@@ -805,6 +883,83 @@ export class DiscoveryClient {
       }
       throw err;
     }
+  }
+
+  /**
+   * Owner-signed list of every live invite this account owns
+   * (Phase 1.18d2b-list).
+   *
+   * Driven by the same Ed25519 key that signed every
+   * `InviteCapability` the owner has uploaded. The canonical
+   * bytes (`OWNER_LIST_DOMAIN_V1 || owner_account_id ||
+   * signed_at_ms_be`) are signed via
+   * `wasm.signOwnerListQuery`; server resolves the verifying
+   * key from `identity_bundles.signature_pubkey` for the
+   * supplied `account_id` and verifies before returning rows.
+   *
+   * Distinct domain separator from
+   * [`signInviteRevocation`] ensures a captured revoke
+   * signature can't be replayed against this endpoint.
+   *
+   * Replay window: server enforces `±10 min` against its own
+   * clock — same constant as the revoke flow.
+   *
+   * Returns a discriminated [`ListInvitesResult`]:
+   *   * `"list"` with the parsed rows on 200 (empty array
+   *     when the owner has no live invites — distinct from a
+   *     malformed-request failure)
+   *   * `"not-found-or-not-owner"` on 404 (server folds "no
+   *     identity bundle for `account_id`" / "signature
+   *     mismatch" / "stored pubkey malformed" into one
+   *     status to deny status-code probing)
+   *
+   * Other non-2xx still throw `DiscoveryHttpError`.
+   *
+   * @param accountId    The owner's 16-byte UUIDv7 account_id
+   *                     (matches `IdentitySecrets.accountId`).
+   * @param signingSeed  The owner's 32-byte Ed25519 seed —
+   *                     typically `chats.identity().ed25519Seed`.
+   */
+  async listInvitesByOwner(
+    accountId: Uint8Array,
+    signingSeed: Uint8Array,
+  ): Promise<ListInvitesResult> {
+    if (accountId.length !== 16) {
+      throw new DiscoveryClientArgError("accountId must be 16 bytes");
+    }
+    if (signingSeed.length !== 32) {
+      throw new DiscoveryClientArgError("signingSeed must be 32 bytes");
+    }
+
+    const wasm = await loadWasm();
+    // Bind the timestamp once so the wire body's `signed_at_ms`
+    // matches the canonical bytes we just signed — same
+    // single-source pattern as `revokeInvite`.
+    const signedAtMs = Date.now();
+    const signature = wasm.signOwnerListQuery(
+      signingSeed,
+      accountId,
+      BigInt(signedAtMs),
+    );
+
+    const raw = await this.inviteOwnerList({
+      owner_account_id: base64Encode(accountId),
+      signed_at_ms: signedAtMs,
+      signature: base64Encode(signature),
+    });
+    if (raw === null) {
+      return { kind: "not-found-or-not-owner" };
+    }
+    const invites = raw.invites.map((row) => ({
+      blobIdSlug: row.blob_id_slug,
+      expiryMs: row.expiry_ms,
+      maxUses: row.max_uses,
+      usedCount: row.used_count,
+      label: row.label,
+      bootstrapReferral: row.bootstrap_referral,
+      createdAt: row.created_at,
+    }));
+    return { kind: "list", invites };
   }
 
   /**

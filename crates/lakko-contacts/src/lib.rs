@@ -62,9 +62,10 @@ pub mod safety;
 pub use ack::{compose_ack, decode_and_verify_ack, ContactAck};
 pub use error::{ContactError, Result};
 pub use invite::{
-    compute_joiner_tag, revoke_canonical_bytes, sign_revocation, InviteCapability, BLOB_ID_LEN,
-    JOINER_TAG_LEN, JOINER_TAG_SALT_DOMAIN_V1, MAX_LABEL_LEN, NEVER_EXPIRES, REVOKE_DOMAIN_V1,
-    REVOKE_REPLAY_WINDOW_MS, SINGLE_USE,
+    compute_joiner_tag, owner_list_canonical_bytes, revoke_canonical_bytes, sign_owner_list,
+    sign_revocation, InviteCapability, BLOB_ID_LEN, JOINER_TAG_LEN, JOINER_TAG_SALT_DOMAIN_V1,
+    MAX_LABEL_LEN, NEVER_EXPIRES, OWNER_LIST_DOMAIN_V1, REVOKE_DOMAIN_V1, REVOKE_REPLAY_WINDOW_MS,
+    SINGLE_USE,
 };
 pub use pseudonym::{Direction, IdentityPseudonym, PerRelationship, StrangerInbox, PSEUDONYM_LEN};
 pub use request::{compose, decode_and_verify, open_envelope, ContactRequest, ACCOUNT_ID_LEN};

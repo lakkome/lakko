@@ -7,8 +7,10 @@
 
 use lakko_contacts::invite::{
     compose as rust_invite_compose, compute_joiner_tag as rust_compute_joiner_tag,
-    decode_and_verify as rust_invite_decode, sign_revocation as rust_sign_revocation, BLOB_ID_LEN,
+    decode_and_verify as rust_invite_decode, sign_owner_list as rust_sign_owner_list,
+    sign_revocation as rust_sign_revocation, BLOB_ID_LEN,
 };
+use lakko_contacts::ACCOUNT_ID_LEN;
 use lakko_contacts::{
     compose as rust_compose, decode_and_verify as rust_decode, open_envelope as rust_open,
     ContactError, ContactRequest as RustContactRequest, Direction as RustDirection,
@@ -658,6 +660,52 @@ pub fn sign_invite_revocation(
     blob_id_arr.copy_from_slice(blob_id);
 
     Ok(rust_sign_revocation(&signing, &blob_id_arr, signed_at_ms).to_vec())
+}
+
+/// Sign an owner-list query for the
+/// `POST /discovery/invite/by-owner` endpoint (Phase
+/// 1.18d2b-list).
+///
+/// The web client calls this just before posting the list
+/// request so the body's `signature` field carries proof that
+/// the caller is the holder of the identity Ed25519 key bound
+/// to `account_id` via the KT log. Canonical bytes layout:
+/// see [`lakko_contacts::invite::owner_list_canonical_bytes`].
+///
+/// Distinct domain separator from
+/// [`signInviteRevocation`] ensures a captured revoke signature
+/// cannot be replayed as an owner-list authentication (and vice
+/// versa).
+///
+/// Returns the 64-byte raw Ed25519 signature. Caller
+/// base64-encodes for the JSON body.
+///
+/// # Errors
+///
+/// `JsError` on any input-shape failure (32-byte signing seed,
+/// 16-byte account_id required).
+#[wasm_bindgen(js_name = signOwnerListQuery)]
+pub fn sign_owner_list_query(
+    signing_seed: &[u8],
+    owner_account_id: &[u8],
+    signed_at_ms: u64,
+) -> Result<Vec<u8>, JsError> {
+    if signing_seed.len() != 32 {
+        return Err(JsError::new("signingSeed must be 32 bytes"));
+    }
+    let mut seed = [0u8; 32];
+    seed.copy_from_slice(signing_seed);
+    let signing = SigningKey::from_seed(&seed);
+
+    if owner_account_id.len() != ACCOUNT_ID_LEN {
+        return Err(JsError::new(&format!(
+            "ownerAccountId must be {ACCOUNT_ID_LEN} bytes",
+        )));
+    }
+    let mut acct_arr = [0u8; ACCOUNT_ID_LEN];
+    acct_arr.copy_from_slice(owner_account_id);
+
+    Ok(rust_sign_owner_list(&signing, &acct_arr, signed_at_ms).to_vec())
 }
 
 /// Compute the per-joiner consume-dedup tag for an invite-link

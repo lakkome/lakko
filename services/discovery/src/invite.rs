@@ -69,8 +69,10 @@ use axum::Json;
 use base64::engine::general_purpose::{STANDARD as B64, URL_SAFE_NO_PAD as B64URL};
 use base64::Engine as _;
 use lakko_contacts::invite::{
-    decode_and_verify, revoke_canonical_bytes, BLOB_ID_LEN, JOINER_TAG_LEN, REVOKE_REPLAY_WINDOW_MS,
+    decode_and_verify, owner_list_canonical_bytes, revoke_canonical_bytes, BLOB_ID_LEN,
+    JOINER_TAG_LEN, REVOKE_REPLAY_WINDOW_MS,
 };
+use lakko_contacts::ACCOUNT_ID_LEN;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -775,6 +777,301 @@ pub(crate) async fn revoke(
         "invite revoked",
     );
     Ok(StatusCode::NO_CONTENT)
+}
+
+// ============================================================================
+// POST /discovery/invite/by-owner — owner-signed list (Phase 1.18d2b-list)
+// ============================================================================
+
+#[derive(Deserialize)]
+pub(crate) struct OwnerListRequest {
+    /// Standard-alphabet base64 of the owner's 16-byte UUIDv7
+    /// `account_id`. Same shape every other discovery wire field
+    /// uses. The server verifies the bundled signature against
+    /// the `identity_bundles.signature_pubkey` row keyed by this
+    /// `account_id`; mismatch folds into a clean signature error.
+    pub(crate) owner_account_id: String,
+    /// UNIX millis at which the body was signed. Must be within
+    /// `REVOKE_REPLAY_WINDOW_MS` of the server clock (re-used —
+    /// both endpoints share the same ±10 min skew tolerance).
+    pub(crate) signed_at_ms: u64,
+    /// Standard-alphabet base64 of the 64-byte Ed25519 signature
+    /// over [`owner_list_canonical_bytes`].
+    pub(crate) signature: String,
+}
+
+/// One entry in the response list. Mirrors the row shape the
+/// `/contacts` UI's "Active invites" panel renders. Field names
+/// match the `InviteCapability` getters on each client's FFI
+/// surface so the JS / Swift / Kotlin types translate
+/// near-mechanically.
+#[derive(Serialize)]
+pub(crate) struct OwnerListEntry {
+    /// URL-safe base64 (no padding) of the 32-byte blob_id —
+    /// same slug that appears in the `https://lakko.me/i/<slug>`
+    /// share URL.
+    pub(crate) blob_id_slug: String,
+    /// UNIX millis the capability expires at. `0` = never
+    /// expires; the UI renders that as a permanent label.
+    pub(crate) expiry_ms: u64,
+    /// Wire-format `max_uses` sentinel: `0` = `SINGLE_USE`
+    /// (effective ceiling 1), `0xFFFFFFFF` = unlimited; any
+    /// other N = N consumes allowed.
+    pub(crate) max_uses: u32,
+    /// Server-counted consumes. Compared against the effective
+    /// ceiling derived from `max_uses` (see the
+    /// `effective_max_uses` mirror) when deciding whether to
+    /// gate further joiners.
+    pub(crate) used_count: u32,
+    /// Owner-supplied free-text label (empty string when not
+    /// set). Pulled out of the embedded `capability_bytes` on
+    /// each list call — not denormalised onto a column because
+    /// labels are pure UI metadata and decoding 100 capabilities
+    /// is microseconds at this scale.
+    pub(crate) label: String,
+    /// Mirrors `InviteCapability.bootstrap_referral` — `true`
+    /// flags the link as a signup-deep-link that auto-Accepts
+    /// on the joiner side (Phase 1.9b4).
+    pub(crate) bootstrap_referral: bool,
+    /// ISO-8601 timestamp recording when the server first
+    /// accepted the upload. The UI uses this for the "Created
+    /// at" column; the client clock used to compose the
+    /// capability is not authoritative here.
+    pub(crate) created_at: String,
+}
+
+#[derive(Serialize)]
+pub(crate) struct OwnerListResponse {
+    pub(crate) invites: Vec<OwnerListEntry>,
+}
+
+/// SELECT row shape from the `invites` table for the owner-list
+/// query. Aliased so the call site can use a single named type
+/// instead of a six-element tuple — both kinder to clippy
+/// (`type_complexity`) and to a future reader trying to follow
+/// the destructuring. Columns are listed in the same order as
+/// the SELECT projection so a column-list rearrangement breaks
+/// the build immediately.
+type OwnerListRow = (
+    Vec<u8>,                            // blob_id (32 bytes)
+    Vec<u8>,                            // capability_bytes
+    u64,                                // expiry_ms
+    u32,                                // max_uses
+    u32,                                // used_count
+    sqlx::types::chrono::NaiveDateTime, // created_at
+);
+
+/// `POST /discovery/invite/by-owner` — owner-signed list of all
+/// live invites this account has uploaded (Phase 1.18d2b-list).
+///
+/// Authorisation gate: the same Ed25519 identity key the owner
+/// used to sign every `InviteCapability` they own. The server
+/// resolves the owner's verifying key from
+/// `identity_bundles.signature_pubkey` (looked up by
+/// `owner_account_id`) and verifies the request signature
+/// against [`owner_list_canonical_bytes`]. Replay protection:
+/// `signed_at_ms` must be within `REVOKE_REPLAY_WINDOW_MS` of
+/// the server clock.
+///
+/// **Why a signed body + session-token middleware (belt + suspenders).**
+/// The signature is the actual ownership proof — only the
+/// holder of the identity Ed25519 key can authenticate. The
+/// session-token (route_layer'd in `build_app`, same as revoke)
+/// is a DoS gate: without it any unauthenticated bot could
+/// fan out SELECT-with-signature-verify load on the
+/// `invites` table. We don't actively match the session's
+/// `authed.0` against `owner_account_id` — the signature
+/// verification below already does the hard ownership work; the
+/// token is purely a rate-limit / DoS gate.
+///
+/// **Why the response is plaintext owner-rows (no per-row
+/// signatures).** A malicious server could omit rows from the
+/// response without the client being able to detect it. Phase
+/// 1 accepts this as a deliberate trade-off: the worst-case
+/// outcome is "the owner sees fewer invites than they actually
+/// have, which is the same UX as the client-side-tracking-only
+/// approach we explicitly rejected." A future Phase-2
+/// transparency layer (signed receipts per upload) would let
+/// the client cross-check the list against its own receipt
+/// archive; deferred.
+///
+/// Response model:
+///
+///   * **200 OK** — `application/json` carrying the `invites`
+///     array. Empty array on no live rows (a brand-new account
+///     with no invites yet — distinct from a malformed request).
+///   * **404 Not Found** — folded over "no identity bundle for
+///     `owner_account_id`" / "signature did not verify". Same
+///     attacker-probing-resistant fold as the revoke endpoint.
+///   * **400 Bad Request** — body shape failures (bad base64,
+///     wrong-sized signature, `signed_at_ms` outside the replay
+///     window). Distinct from 404 because they indicate a buggy
+///     client, not a probing attacker.
+#[allow(clippy::too_many_lines)]
+pub(crate) async fn list_by_owner(
+    State(state): State<AppState>,
+    // Session-token gate is purely DoS protection — see fn doc.
+    axum::Extension(_authed): axum::Extension<crate::auth::AuthenticatedAccount>,
+    Json(payload): Json<OwnerListRequest>,
+) -> Result<Json<OwnerListResponse>, (StatusCode, String)> {
+    // Decode `owner_account_id` first — body-shape gate before
+    // any DB work or replay-window check, mirrors the revoke
+    // path's argument-validation ordering.
+    let owner_bytes = B64.decode(&payload.owner_account_id).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("invalid owner_account_id base64: {e}"),
+        )
+    })?;
+    if owner_bytes.len() != ACCOUNT_ID_LEN {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("owner_account_id must be {ACCOUNT_ID_LEN} bytes after decode"),
+        ));
+    }
+    let mut owner_account_id = [0u8; ACCOUNT_ID_LEN];
+    owner_account_id.copy_from_slice(&owner_bytes);
+
+    // Replay window — same constant as revoke; same ±10 min
+    // symmetric skew tolerance. Reject before DB work so an
+    // attacker spamming `signed_at_ms = 0` can't make us SELECT.
+    let now_ms = current_unix_ms();
+    if !within_replay_window(payload.signed_at_ms, now_ms) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!(
+                "signed_at_ms {} outside the ±{}ms replay window (now = {})",
+                payload.signed_at_ms, REVOKE_REPLAY_WINDOW_MS, now_ms,
+            ),
+        ));
+    }
+
+    let signature_bytes = B64.decode(&payload.signature).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("invalid signature base64: {e}"),
+        )
+    })?;
+    if signature_bytes.len() != lakko_crypto::signing::SIGNATURE_LEN {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!(
+                "signature must be {} bytes",
+                lakko_crypto::signing::SIGNATURE_LEN,
+            ),
+        ));
+    }
+    let signature = lakko_crypto::signing::Signature::from_bytes(&signature_bytes)
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("malformed signature: {e}")))?;
+
+    // Look up the owner's verifying key from `identity_bundles`.
+    // `identity_bundles.account_id` is the primary key; one row
+    // per account. A missing bundle folds into the same 404 the
+    // signature-failure path returns below — keeps the endpoint
+    // indistinguishable from an unknown-account probe.
+    let row: Option<(Vec<u8>,)> =
+        sqlx::query_as("SELECT signature_pubkey FROM identity_bundles WHERE account_id = ?")
+            .bind(&owner_account_id[..])
+            .fetch_optional(&state.db)
+            .await
+            .map_err(|e| {
+                tracing::error!(error = %e, "list_by_owner identity_bundles SELECT");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal db error".to_string(),
+                )
+            })?;
+    let Some((pubkey_bytes,)) = row else {
+        return Err((StatusCode::NOT_FOUND, "owner not found".to_string()));
+    };
+    let verifying = match lakko_crypto::signing::VerifyingKey::from_bytes(&pubkey_bytes) {
+        Ok(v) => v,
+        Err(e) => {
+            // Bundle bytes don't decode as a valid Ed25519
+            // verifying key — corruption / post-upload schema
+            // drift. Fold into 404; we have no graceful recovery.
+            tracing::error!(error = %e, "list_by_owner: stored identity_bundle pubkey malformed");
+            return Err((StatusCode::NOT_FOUND, "owner not found".to_string()));
+        },
+    };
+
+    // Verify the signed query against the canonical bytes.
+    let canonical = owner_list_canonical_bytes(&owner_account_id, payload.signed_at_ms);
+    if verifying.verify(&canonical, &signature).is_err() {
+        // Fold into the same 404 the missing-bundle path returns.
+        return Err((StatusCode::NOT_FOUND, "owner not found".to_string()));
+    }
+
+    // Authorised. Pull the live rows. `expiry_ms = 0` = never
+    // expires (NEVER_EXPIRES sentinel from `lakko-contacts`);
+    // anything else gets a `> now_ms` filter so the response
+    // matches what the consume path would accept right now. The
+    // background pruner (1.18d2c) deletes expired rows out of
+    // band; the freshness check here is belt-and-suspenders for
+    // the brief window between expiry and the next pruner tick.
+    let rows: Vec<OwnerListRow> = sqlx::query_as(
+        "SELECT blob_id, capability_bytes, expiry_ms, max_uses, used_count, created_at
+         FROM invites
+         WHERE owner_account_id = ?
+           AND (expiry_ms = 0 OR expiry_ms > ?)
+         ORDER BY created_at DESC",
+    )
+    .bind(&owner_account_id[..])
+    .bind(now_ms)
+    .fetch_all(&state.db)
+    .await
+    .map_err(|e| {
+        tracing::error!(error = %e, "list_by_owner invites SELECT");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal db error".to_string(),
+        )
+    })?;
+
+    // Decode each capability_bytes to extract `label` and
+    // `bootstrap_referral` — neither is denormalised onto a
+    // column. The capabilities passed `decode_and_verify` at
+    // upload time so a re-decode here is purely "pull out the
+    // embedded fields"; a single corrupted row is skipped (with
+    // a log line) rather than failing the whole response.
+    let mut entries: Vec<OwnerListEntry> = Vec::with_capacity(rows.len());
+    for (blob_id, capability_bytes, expiry_ms, max_uses, used_count, created_at) in rows {
+        let cap = match decode_and_verify(&capability_bytes) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    blob_id = %B64URL.encode(&blob_id),
+                    "list_by_owner: stored capability did not re-verify; skipping row",
+                );
+                continue;
+            },
+        };
+        entries.push(OwnerListEntry {
+            blob_id_slug: B64URL.encode(&blob_id),
+            expiry_ms,
+            max_uses,
+            used_count,
+            label: cap.label,
+            bootstrap_referral: cap.bootstrap_referral,
+            // `NaiveDateTime` serialises as
+            // `"YYYY-MM-DDTHH:MM:SS[.fff]"` via the default
+            // `serde::Serialize` impl in `sqlx::types::chrono`.
+            // That's the same shape `fetch_mailbox` returns —
+            // clients parse it as ISO-8601-ish without TZ
+            // (server stores UTC; treating it as UTC client-side
+            // is the conventional read).
+            created_at: created_at.and_utc().to_rfc3339(),
+        });
+    }
+
+    tracing::info!(
+        owner_account_id = %B64.encode(owner_account_id),
+        count = entries.len(),
+        "invite owner-list query",
+    );
+
+    Ok(Json(OwnerListResponse { invites: entries }))
 }
 
 // ============================================================================
