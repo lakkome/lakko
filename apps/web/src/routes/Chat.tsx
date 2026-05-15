@@ -362,17 +362,18 @@ function ChatView(props: {
   }
 
   /**
-   * Handle the composer's `<input type="file">` change event.
-   * Iterates the selected files, encrypts + uploads each
-   * sequentially (so a slow user-stream doesn't fan out N
-   * parallel storage PUTs), appends the resulting refs to the
-   * pending list. Failed uploads surface a per-file error and
-   * are not appended.
+   * Encrypt + upload an iterable of files sequentially (so a
+   * slow user-stream doesn't fan out N parallel storage PUTs),
+   * appending the resulting refs to the pending list. Failed
+   * uploads surface a per-file error and stop the loop.
+   *
+   * Shared between the `<input type="file">` Change handler and
+   * the drag-drop handler — both surface a `FileList`-ish
+   * iterable; this helper is the one place we own the upload
+   * loop.
    */
-  async function onFilesPicked(e: Event): Promise<void> {
-    const target = e.currentTarget as HTMLInputElement;
-    const files = target.files;
-    if (files === null || files.length === 0) return;
+  async function processFiles(files: ArrayLike<File>): Promise<void> {
+    if (files.length === 0) return;
     setError(null);
     setUploading(true);
     try {
@@ -396,11 +397,71 @@ function ChatView(props: {
       }
     } finally {
       setUploading(false);
-      // Reset the input so the same file can be re-picked
-      // (browsers suppress the change event when the value is
-      // identical).
+    }
+  }
+
+  /**
+   * Handle the composer's `<input type="file">` change event.
+   * Delegates to [`processFiles`] then resets the input so the
+   * same file can be re-picked (browsers suppress the change
+   * event when the value is identical).
+   */
+  async function onFilesPicked(e: Event): Promise<void> {
+    const target = e.currentTarget as HTMLInputElement;
+    const files = target.files;
+    if (files === null) return;
+    try {
+      await processFiles(files);
+    } finally {
       target.value = "";
     }
+  }
+
+  // Drag-drop polish (1.x): a drop anywhere on the chat surface
+  // queues the dropped files into the pending-attachments list
+  // — same flow as clicking the 📎 button. Tracks `isDragOver`
+  // so the surface can render a "drop here" hint while a drag
+  // hovers; `dragCounter` handles the dragenter/dragleave race
+  // (children fire leave events when the drag crosses them).
+  const [isDragOver, setIsDragOver] = createSignal(false);
+  // eslint-disable-next-line solid/reactivity
+  let dragCounter = 0;
+
+  function onDragEnter(e: DragEvent): void {
+    if (!hasFilesType(e.dataTransfer)) return;
+    e.preventDefault();
+    dragCounter += 1;
+    setIsDragOver(true);
+  }
+
+  function onDragOver(e: DragEvent): void {
+    if (!hasFilesType(e.dataTransfer)) return;
+    e.preventDefault();
+    // `move` shows the cursor that matches "this drop will
+    // produce something" instead of the default "no" cursor on
+    // top of a non-droppable surface.
+    if (e.dataTransfer !== null) {
+      e.dataTransfer.dropEffect = "copy";
+    }
+  }
+
+  function onDragLeave(e: DragEvent): void {
+    if (!hasFilesType(e.dataTransfer)) return;
+    e.preventDefault();
+    dragCounter = Math.max(0, dragCounter - 1);
+    if (dragCounter === 0) {
+      setIsDragOver(false);
+    }
+  }
+
+  async function onDrop(e: DragEvent): Promise<void> {
+    if (!hasFilesType(e.dataTransfer)) return;
+    e.preventDefault();
+    dragCounter = 0;
+    setIsDragOver(false);
+    const files = e.dataTransfer?.files;
+    if (files === undefined || files.length === 0) return;
+    await processFiles(files);
   }
 
   function removePendingAttachment(index: number): void {
@@ -598,12 +659,56 @@ function ChatView(props: {
 
   return (
     <div
+      onDragEnter={onDragEnter}
+      onDragOver={onDragOver}
+      onDragLeave={onDragLeave}
+      onDrop={(e) => {
+        void onDrop(e);
+      }}
       style={{
         display: "flex",
         "flex-direction": "column",
         gap: "1rem",
+        position: "relative",
+        // Subtle outline + accent tint while a file drag hovers
+        // anywhere over the chat body. The inner content stays
+        // interactive; the overlay below the header is purely
+        // a visual cue.
+        outline: isDragOver()
+          ? "2px dashed var(--accent)"
+          : "2px dashed transparent",
+        "outline-offset": "-4px",
+        "border-radius": "var(--radius-md)",
+        transition: "outline-color 0.1s",
       }}
     >
+      <Show when={isDragOver()}>
+        <div
+          style={{
+            position: "absolute",
+            inset: "0",
+            background: "rgba(0, 122, 255, 0.08)",
+            "border-radius": "var(--radius-md)",
+            display: "flex",
+            "align-items": "center",
+            "justify-content": "center",
+            "pointer-events": "none",
+            "z-index": 10,
+          }}
+        >
+          <span
+            style={{
+              padding: "0.5rem 1rem",
+              background: "var(--surface-elevated)",
+              border: "1px solid var(--accent)",
+              "border-radius": "var(--radius-md)",
+              "font-weight": "600",
+            }}
+          >
+            Drop files to attach
+          </span>
+        </div>
+      </Show>
       <header
         style={{
           display: "flex",
@@ -1309,4 +1414,22 @@ function blobIdHex(bytes: Uint8Array): string {
     out += b.toString(16).padStart(2, "0");
   }
   return out;
+}
+
+/** `true` when the drag event carries an actual file payload
+ *  (not just selected text or a link) — the
+ *  [`DataTransfer.types`] list contains `"Files"` for OS-side
+ *  file drags from Finder / Explorer / a download manager.
+ *
+ *  Guard exists so a stray text-selection drag doesn't trigger
+ *  the drop-zone overlay; the file-only filter matches how the
+ *  attach-button path treats the user input (a `<input
+ *  type="file">` only fires for actual files). */
+function hasFilesType(dt: DataTransfer | null): boolean {
+  if (dt === null) return false;
+  // `DataTransfer.types` is a DOMStringList — `includes` is
+  // available on modern browsers; the `Array.from` fallback
+  // keeps the check working for older list-only implementations.
+  const types = Array.from(dt.types);
+  return types.includes("Files");
 }
