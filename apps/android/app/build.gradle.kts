@@ -52,6 +52,42 @@ android {
         ndk {
             abiFilters += setOf("arm64-v8a", "x86_64")
         }
+
+        // 1.20d — Firebase Messaging configuration. We deliberately
+        // do NOT apply the `com.google.gms:google-services` Gradle
+        // plugin (which would require a checked-in
+        // `google-services.json` at build time). Instead Firebase
+        // is initialised programmatically at runtime via
+        // `FirebaseOptions.Builder()` populated from these
+        // BuildConfig fields. If every field is empty the runtime
+        // init is skipped + the PushSubscriber returns null — the
+        // app keeps working without push (right posture for any
+        // contributor not actively iterating on push).
+        //
+        // Source the values from gradle properties (set via
+        // `apps/android/local.properties` or `-P` flags) so they
+        // never end up in version control. The `?:` fallbacks
+        // produce empty strings when unset.
+        buildConfigField(
+            "String",
+            "FCM_PROJECT_ID",
+            "\"${project.findProperty("lakko.fcm.projectId") as String? ?: ""}\"",
+        )
+        buildConfigField(
+            "String",
+            "FCM_APPLICATION_ID",
+            "\"${project.findProperty("lakko.fcm.applicationId") as String? ?: ""}\"",
+        )
+        buildConfigField(
+            "String",
+            "FCM_API_KEY",
+            "\"${project.findProperty("lakko.fcm.apiKey") as String? ?: ""}\"",
+        )
+        buildConfigField(
+            "String",
+            "FCM_SENDER_ID",
+            "\"${project.findProperty("lakko.fcm.senderId") as String? ?: ""}\"",
+        )
     }
 
     compileOptions {
@@ -64,11 +100,12 @@ android {
 
     buildFeatures {
         compose = true
-        // BuildConfig disabled in lakko-core; here we'd want
-        // it for VERSION_NAME but not on the smoke build —
-        // re-enable when the auth surface needs a version
-        // banner.
-        buildConfig = false
+        // 1.20d — re-enabled so the four `FCM_*` BuildConfig
+        // string fields from `defaultConfig` make it onto the
+        // runtime classpath. PushSubscriber reads them at app
+        // startup to decide whether to initialise Firebase
+        // programmatically.
+        buildConfig = true
     }
 
     buildTypes {
@@ -145,6 +182,22 @@ dependencies {
     // package needs to be on the runtime classpath of any
     // module that declares `@Serializable` types).
     implementation(libs.kotlinx.serialization.json)
+
+    // 1.20d — Firebase Messaging via the BoM. We do NOT apply
+    // the `com.google.gms:google-services` plugin (would require
+    // a checked-in `google-services.json` at build time); Firebase
+    // is initialised programmatically at runtime — see
+    // `me.lakko.app.push.PushSubscriber`.
+    implementation(platform(libs.firebase.bom))
+    implementation(libs.firebase.messaging)
+    // 1.20d — `Task<T>.await()` extension that converts the
+    // Google Play Services callback-based `Task` into a `suspend`
+    // shape. Required because `FirebaseMessaging.getInstance().token`
+    // returns `Task<String>`.
+    implementation(libs.kotlinx.coroutines.play.services)
+    // 1.20d — EncryptedSharedPreferences for the device push
+    // pseudonym (mirror of iOS Keychain posture).
+    implementation(libs.androidx.security.crypto)
 
     // 1.15d2 — JVM-side unit tests. `testDebugUnitTest` runs
     // these on the host JDK without any emulator; perfect for

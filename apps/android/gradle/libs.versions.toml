@@ -57,6 +57,33 @@ kotlinx-coroutines    = "1.9.0"
 # fake responses without a network.
 junit              = "4.13.2"
 
+# Phase 1.20d — Firebase Messaging for the FCM client integration.
+# Pinned to the 33.x BoM; bumping is a workspace concern because
+# FCM's wire protocol is backward-compatible but the SDK surface
+# (Firebase BoM coordinated set) bumps in lockstep with the GMS
+# baseline. We do NOT use the `com.google.gms:google-services`
+# Gradle plugin — that would require checking in a real
+# `google-services.json` at build time. Instead Firebase is
+# initialised programmatically via `FirebaseOptions` populated
+# from BuildConfig env vars (see `apps/android/app/build.gradle.kts`).
+firebase-bom          = "33.5.1"
+
+# Phase 1.20d — `awaitToken` glue for Firebase's `Task<T>` API.
+# `kotlinx-coroutines-play-services` ships the
+# `Task<T>.await()` extension that converts Google Play
+# Services' callback-based `Task` into a `suspend` shape.
+# Pinned to the same kotlinx-coroutines major as the rest of
+# the workspace.
+kotlinx-coroutines-play-services-version = "1.9.0"
+
+# Phase 1.20d — `EncryptedSharedPreferences` for the persisted
+# device push pseudonym. Wraps a regular SharedPreferences in
+# AES-256-GCM with a key stored in the Android Keystore. This
+# mirrors the iOS `Keychain` posture: the value is at-rest-
+# encrypted with hardware-backed keys; an attacker with raw
+# disk access cannot read it without unlocking the device.
+androidx-security-crypto = "1.1.0-alpha07"
+
 [libraries]
 jna = { group = "net.java.dev.jna", name = "jna", version.ref = "jna" }
 
@@ -97,6 +124,22 @@ kotlinx-serialization-json     = { group = "org.jetbrains.kotlinx", name = "kotl
 
 # Test deps.
 junit              = { group = "junit", name = "junit", version.ref = "junit" }
+
+# Phase 1.20d — Firebase Messaging (FCM) via the Firebase BoM.
+# The BoM coordinates every `com.google.firebase:firebase-*`
+# artefact version; consumer just declares the BoM platform +
+# `firebase-messaging` without a version (BoM resolves it).
+firebase-bom              = { group = "com.google.firebase", name = "firebase-bom",       version.ref = "firebase-bom" }
+firebase-messaging        = { group = "com.google.firebase", name = "firebase-messaging" }
+
+# Phase 1.20d — Task<T>.await() extension for Google Play
+# Services' Task-based async API (FirebaseMessaging.getToken()
+# returns Task<String>).
+kotlinx-coroutines-play-services = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-play-services", version.ref = "kotlinx-coroutines-play-services-version" }
+
+# Phase 1.20d — EncryptedSharedPreferences (AES-256-GCM-wrapped
+# SharedPreferences with the master key in the Android Keystore).
+androidx-security-crypto  = { group = "androidx.security", name = "security-crypto", version.ref = "androidx-security-crypto" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

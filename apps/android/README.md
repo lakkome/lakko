@@ -216,3 +216,32 @@ before the `gradlew` invocation above.
   with iOS / Android / Tauri-desktop. Changes to it require an ADR
   (mirror of the policy on the wasm-bindgen surface for `apps/web`
   in 1.13a-b).
+
+## Push notifications (Phase 1.20d)
+
+We do **not** apply the `com.google.gms:google-services` Gradle
+plugin — that would require checking in a real
+`google-services.json` at build time. Instead Firebase is
+initialised programmatically at runtime via
+`FirebaseOptions.Builder()` populated from four `BuildConfig`
+string fields generated from Gradle properties:
+
+```bash
+# In `apps/android/local.properties` (gitignored), or pass via
+# `-P` flags on each Gradle invocation.
+lakko.fcm.projectId=lakko-dev-12345
+lakko.fcm.applicationId=1:1234567890:android:abcdef0123456789
+lakko.fcm.apiKey=AIzaSyExampleExampleExampleExampleExample
+lakko.fcm.senderId=1234567890
+```
+
+The four values come from a Firebase project's **Project Settings
+→ General → Your apps** page (Android section). Create a Firebase
+project + register an Android app with package name `me.lakko.dev`
+to get them.
+
+When all four fields are **empty** (the default), `PushSubscriber`
+short-circuits and returns `null`. The rest of the app keeps
+working without push — the integration code is in place, the
+actual registration just doesn't run. This is the right posture
+for any contributor not actively iterating on push.

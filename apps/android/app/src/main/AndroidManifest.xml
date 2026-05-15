@@ -11,6 +11,23 @@
 -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <!--
+      Phase 1.20d — runtime permission for posting notifications.
+      Required on Android 13+ (API 33); on lower API levels the
+      OS auto-grants and the explicit `requestPermissions`
+      gesture is a no-op. The actual prompt is fired from
+      `PushSubscriber.subscribe` when the auth flow first
+      surfaces a session — we don't pop a permission prompt at
+      app launch.
+    -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!--
+      Phase 1.20d — INTERNET is implicit since API 23 (it's
+      auto-granted) but the lint expects it explicit for any
+      app using OkHttp / Ktor / Firebase.
+    -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
     <application
         android:label="@string/app_name"
         android:icon="@android:drawable/sym_def_app_icon"
@@ -58,6 +75,27 @@
                 <data android:pathPrefix="/i/" />
             </intent-filter>
         </activity>
+
+        <!--
+          Phase 1.20d — FirebaseMessagingService subclass that
+          receives FCM wake payloads. Firebase auto-discovers
+          this via the intent filter; the OS routes
+          `com.google.firebase.MESSAGING_EVENT` broadcasts to
+          this service in the background and lights up the
+          process (via the Firebase Messaging SDK's wakelock)
+          long enough for `onMessageReceived` / `onNewToken` to
+          run.
+
+          `android:exported="false"` is canonical for an FMS
+          subclass — only the FCM SDK itself ever invokes it.
+        -->
+        <service
+            android:name=".push.LakkoMessagingService"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.google.firebase.MESSAGING_EVENT" />
+            </intent-filter>
+        </service>
 
         <!--
           Phase 1.19c4 — FileProvider for the attachment "Save"

@@ -4,9 +4,15 @@
 package me.lakko.app.auth
 
 import android.content.Context
+import android.util.Log
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
+import me.lakko.app.push.PushSubscriber
 import uniffi.lakko_ffi_uniffi.RecoveryMnemonic
 
 /**
@@ -56,6 +62,15 @@ public class AuthRepository(
      *  screens only need it on submit, not on first paint. */
     private val authClientFactory: () -> AuthClient = { AuthClient() },
 ) {
+    /** 1.20d — dedicated scope for fire-and-forget push
+     *  subscribe / unsubscribe coroutines. `SupervisorJob` so
+     *  one failed leg doesn't tear down the others; bound to
+     *  `Dispatchers.IO` because both legs are network-heavy. The
+     *  scope's lifetime is the process — `AuthRepository` is a
+     *  process-singleton in `LakkoApp.kt`. */
+    private val pushScope: CoroutineScope =
+        CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
     private val mutableState: MutableStateFlow<AuthState> =
         MutableStateFlow(AuthState.Loading)
 
@@ -208,6 +223,10 @@ public class AuthRepository(
                         username = trimmed,
                     ),
                 )
+                // 1.20d — best-effort push subscribe. Errors are
+                // logged inside the subscriber + never thrown
+                // past the auth flow.
+                subscribePushBestEffort("signup")
                 val phrase = result.recoveryPhrase ?: throw IllegalStateException(
                     "internal: signup completed without a recovery phrase",
                 )
@@ -318,6 +337,8 @@ public class AuthRepository(
                         username = cached.username,
                     ),
                 )
+                // 1.20d — best-effort push subscribe.
+                subscribePushBestEffort("login")
             } finally {
                 // Best-effort wipe of the original buffers — the
                 // identity-secrets clone above survives in
@@ -430,6 +451,8 @@ public class AuthRepository(
                             username = cached.username,
                         ),
                     )
+                    // 1.20d — best-effort push subscribe.
+                    subscribePushBestEffort("recover")
                 } finally {
                     result.exportKey.fill(0)
                 }
@@ -458,6 +481,11 @@ public class AuthRepository(
         // same device repopulates `identitySecrets` cheaply.
         clearIdentitySecrets()
         mutableState.value = AuthState.Anon(cachedUsername = cached?.username)
+        // 1.20d — fire-and-forget push unsubscribe. The
+        // EncryptedSharedPreferences pseudonym + the server-
+        // side token row both go; subsequent FCM wakes for
+        // this device are no-ops until the next subscribe.
+        unsubscribePushBestEffort("logout")
     }
 
     /**
@@ -482,6 +510,40 @@ public class AuthRepository(
         sessionStore.clear()
         clearIdentitySecrets()
         mutableState.value = AuthState.Anon()
+        // 1.20d — full push wipe. Fire-and-forget — the local
+        // `DevicePushId.clear()` inside the subscriber runs
+        // regardless of the server leg outcome, honouring
+        // forgetDevice's "leave NOTHING per-account behind"
+        // contract.
+        unsubscribePushBestEffort("forgetDevice")
+    }
+
+    /** 1.20d — Fire ``PushSubscriber.subscribe`` on the
+     *  application-scoped [pushScope] (not the suspend caller's
+     *  scope, so cancellation of the auth flow doesn't strand
+     *  the subscribe in flight). Errors are logged inside the
+     *  subscriber + here, never thrown past the auth flow —
+     *  push failure must not block sign-in. */
+    private fun subscribePushBestEffort(context: String) {
+        pushScope.launch {
+            try {
+                PushSubscriber(applicationContext).subscribe()
+            } catch (cause: Throwable) {
+                Log.w("lakko-auth", "push subscribe ($context) failed", cause)
+            }
+        }
+    }
+
+    /** 1.20d — Mirror of [subscribePushBestEffort] for the
+     *  unregister path. */
+    private fun unsubscribePushBestEffort(context: String) {
+        pushScope.launch {
+            try {
+                PushSubscriber(applicationContext).unsubscribe()
+            } catch (cause: Throwable) {
+                Log.w("lakko-auth", "push unsubscribe ($context) failed", cause)
+            }
+        }
     }
 
     /** Wipe the stashed export key bytes + drop the flow value.
