@@ -460,6 +460,13 @@ export class ContactsClient {
     ).asBytes();
 
     const validAfterMs = BigInt(Date.now());
+    // 1.9b2: Privacy Pass / App-Attest / Play-Integrity token.
+    // The web client has no platform attestation API in 2026 —
+    // we ship an empty token, which lands the request in the DS
+    // ingest layer's "no attestation tier" rate-limit bucket
+    // (lowest ceiling). Production mobile builds populate this
+    // from the platform attestation API.
+    const privacyPassToken = new Uint8Array(0);
     let wireBytes: Uint8Array;
     try {
       // 1.16e3b: pass our own account_id so the receiver can
@@ -471,6 +478,7 @@ export class ContactsClient {
         recipientX25519Pubkey,
         senderPseudonym,
         validAfterMs,
+        privacyPassToken,
         introMessage,
       );
     } catch (err) {

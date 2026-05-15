@@ -165,6 +165,14 @@ public final class ContactsClient {
 
         let validAfterMs = UInt64(Date().timeIntervalSince1970 * 1000)
 
+        // 1.9b2: Privacy Pass / App-Attest attestation blob. The
+        // iOS dev path ships an empty token — wiring the real
+        // App Attest round-trip (DCAppAttestService) belongs in
+        // the 1.20+ Privacy Pass sub-sprint, gated on Apple's
+        // dev-account provisioning. The empty value lands the
+        // request in the DS ingest layer's "no attestation tier"
+        // rate-limit bucket (lowest ceiling).
+        let privacyPassToken = Data()
         let wireBytes: Data
         do {
             wireBytes = try composeContactRequest(
@@ -173,6 +181,7 @@ public final class ContactsClient {
                 recipientX25519Pub: recipientX25519Pubkey,
                 fromPseudonym: senderPseudonym,
                 validAfterMs: validAfterMs,
+                privacyPassToken: privacyPassToken,
                 introMessage: introMessage
             )
         } catch {

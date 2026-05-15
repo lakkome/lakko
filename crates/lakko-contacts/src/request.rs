@@ -24,47 +24,64 @@
 //!
 //! ## Wire format (manual codec)
 //!
-//! **v2** (current — Phase 1.16e3b):
+//! **v3** (current — Phase 1.9b2):
 //!
 //! ```text
-//! u8           schema version (= 2)
+//! u8           schema version (= 3)
 //! [32 bytes]   from_pubkey                           — Ed25519 verifying key
-//! [16 bytes]   from_account_id                       — sender's UUIDv7 (v2 only)
+//! [16 bytes]   from_account_id                       — sender's UUIDv7
 //! [32 bytes]   from_pseudonym                        — fresh per-recipient pseudonym
 //! u64be        valid_after_ms                        — UNIX millis; reject if too old
+//! u16be        privacy_pass_token length             — 0 = no token (dev / legacy)
+//! [..]         privacy_pass_token bytes              — opaque blob (RFC 9576)
 //! u32be        sealed_envelope length
 //! [..]         sealed_envelope bytes
 //! [64 bytes]   signature                             — Ed25519 over the prefix above
 //! ```
 //!
+//! **v2** (legacy — accepted on receive only — Phase 1.16e3b
+//! through 1.9b1): identical to v3 minus the
+//! `privacy_pass_token` length+bytes pair. Receivers decode v2
+//! envelopes for backwards-compat with the in-flight rolling-
+//! upgrade window; the resulting [`ContactRequest`] carries
+//! `privacy_pass_token: Vec::new()`. No `compose` path emits v2
+//! any more.
+//!
 //! **v1** (legacy — accepted on receive only): identical to v2
 //! minus the 16-byte `from_account_id` field. Receivers decode
-//! either version; the resulting [`ContactRequest`] carries
-//! `from_account_id: None` for v1 inputs.
+//! v1; the resulting [`ContactRequest`] carries
+//! `from_account_id: None` and `privacy_pass_token: Vec::new()`.
 //!
-//! The `from_account_id` extension lets the receiver drive the
-//! Accept-side of the group-creation handshake (Phase 1.16e3b):
-//! the receiver needs `account_id` to fetch the sender's
-//! KeyPackage, but a v1 ContactRequest only carries the Ed25519
-//! pubkey. Bumping to v2 closes the gap. Senders are always v2;
-//! v1 acceptance is purely a backwards-compat hatch for
-//! envelopes already in flight when a deployment upgrades.
+//! The `from_account_id` extension (v2) lets the receiver drive
+//! the Accept-side of the group-creation handshake: the receiver
+//! needs `account_id` to fetch the sender's KeyPackage, but a v1
+//! ContactRequest only carried the Ed25519 pubkey.
+//!
+//! The `privacy_pass_token` extension (v3 — Phase 1.9b2) carries
+//! a Privacy Pass / App-Attest / Play-Integrity attestation blob
+//! through the envelope so `services/ds`'s ingest layer can lift
+//! the per-stranger rate-limit ceiling for clients that prove they
+//! run on attested hardware (RFC 9576). The token is opaque to
+//! `lakko-contacts` itself — the verification keypair and batch-
+//! size choreography live in the DS sub-sprint. In dev and on
+//! web builds the token field is empty bytes; production mobile
+//! builds populate it from the platform attestation API.
 //!
 //! Signature covers everything from the schema-version byte through
 //! the sealed-envelope bytes — i.e. the entire encoding except the
-//! trailing 64-byte signature itself.
+//! trailing 64-byte signature itself. Bound to the token so a
+//! man-in-the-middle cannot strip / forge attestation.
 //!
-//! ## What's NOT in 1.9a
+//! ## What's NOT in 1.9b2
 //!
-//! The plan also calls for `pow_token` (Equix proof-of-work) and
-//! `privacy_pass_token` (App Attest / Play Integrity attestation) to
-//! be carried in the same envelope. Those are anti-spam mechanisms
-//! at the `services/ds` ingest path; gating them in the wire format
-//! itself is straightforward (extra fields with their own length
-//! prefixes), but spoke implementations belong in 1.1f and the
-//! Privacy Pass sub-sprint. The current wire format is structured so
-//! adding optional fields at the end stays backwards-compatible —
-//! a v2 schema bumps the version byte.
+//! The plan also calls for `pow_token` (Equix proof-of-work). PoW
+//! is an anti-spam mechanism at the `services/ds` ingest path;
+//! gating it in the wire format itself is straightforward
+//! (extra field with its own length prefix), but spoke
+//! implementations belong in the PoW sub-sprint. The current
+//! wire format is structured so adding optional fields at the
+//! end stays backwards-compatible — a v4 schema bumps the
+//! version byte.
 
 use lakko_crypto::agreement::{PublicKey as X25519PublicKey, SecretKey as X25519SecretKey};
 use lakko_crypto::signing::{Signature, SigningKey, VerifyingKey, PUBLIC_KEY_LEN, SIGNATURE_LEN};
@@ -73,10 +90,17 @@ use crate::envelope;
 use crate::error::{ContactError, Result};
 use crate::pseudonym::{decode_pseudonym, PSEUDONYM_LEN};
 
-/// Current `compose`d schema version.
-const SCHEMA_VERSION: u8 = 2;
+/// Current `compose`d schema version (Phase 1.9b2 — Privacy
+/// Pass token field).
+const SCHEMA_VERSION: u8 = 3;
 
-/// Legacy schema version. Receivers still decode it for
+/// Legacy schema version (Phase 1.16e3b — `from_account_id`).
+/// Receivers still decode v2 for backwards-compat with envelopes
+/// in-flight at the moment of a rolling upgrade; no caller in
+/// this codebase should produce v2 any more.
+const LEGACY_SCHEMA_VERSION_V2: u8 = 2;
+
+/// Earliest legacy schema version. Receivers still decode v1 for
 /// backwards-compat with envelopes in-flight at the moment of a
 /// rolling upgrade; no caller in this codebase should produce v1
 /// any more.
@@ -85,6 +109,14 @@ const LEGACY_SCHEMA_VERSION_V1: u8 = 1;
 /// `from_account_id` length in bytes (UUIDv7 raw, matches
 /// `services/auth.accounts.id` and the rest of the Lakko stack).
 pub const ACCOUNT_ID_LEN: usize = 16;
+
+/// Hard upper bound on the Privacy Pass token blob (1.9b2). Real
+/// RFC 9576 tokens land around 80–160 bytes; the cap is a sanity
+/// gate against pathologically large attestation payloads
+/// crashing parsers. The wire field is `u16` so any value up to
+/// 65535 would otherwise decode — we cap earlier so callers see
+/// a clean [`ContactError::InvalidEncoding`] instead.
+pub const MAX_PRIVACY_PASS_TOKEN_LEN: usize = 2048;
 
 /// AAD bound to the sealed envelope. Domain-separates this envelope
 /// from any future non-contact-request use of the same primitive.
@@ -114,6 +146,20 @@ pub struct ContactRequest {
     /// becomes valid. Recipients reject requests too far in the
     /// past (e.g. > 7 days) at the application layer.
     pub valid_after_ms: u64,
+    /// Privacy Pass (RFC 9576) attestation token (Phase 1.9b2).
+    /// Carried as an opaque blob — `lakko-contacts` does not
+    /// interpret it. The DS ingest layer at
+    /// `services/ds/src/handlers/mailbox.rs` lifts the per-
+    /// stranger rate-limit ceiling for senders that supply a
+    /// verifiable token.
+    ///
+    /// **Empty `Vec` means "no token"** — accepted on the receive
+    /// path (v1/v2 envelopes always decode here; v3 envelopes
+    /// from clients without an attestation API also land empty
+    /// in dev). Production builds populate this from App Attest
+    /// (iOS) / Play Integrity (Android) / a server-issued token
+    /// (web fallback).
+    pub privacy_pass_token: Vec<u8>,
     /// Sealed envelope, opaque to anyone but the recipient.
     pub sealed_envelope: Vec<u8>,
 }
@@ -122,24 +168,39 @@ pub struct ContactRequest {
 ///
 /// The sender supplies their Ed25519 signing key (for authentication),
 /// the recipient's X25519 public key (for sealed-envelope encryption),
-/// and an optional intro message body. `from_pseudonym` should be
+/// an optional intro message body, and an optional Privacy Pass
+/// attestation token (Phase 1.9b2). `from_pseudonym` should be
 /// freshly generated per-recipient (use
 /// [`crate::pseudonym::PerRelationship::derive`] with a one-shot
 /// seed, or just 32 random bytes — a pseudonym is just routing
 /// metadata).
 ///
+/// Pass an **empty slice** as `privacy_pass_token` to omit it
+/// (dev environments + web fallback). Production mobile builds
+/// supply the platform-attestation blob (App Attest on iOS, Play
+/// Integrity on Android).
+///
 /// # Errors
 ///
-/// Returns [`ContactError::Crypto`] on AEAD failure (essentially
-/// impossible for valid inputs).
+/// * [`ContactError::Crypto`] on AEAD failure (essentially
+///   impossible for valid inputs).
+/// * [`ContactError::InvalidEncoding`] when
+///   `privacy_pass_token.len() > MAX_PRIVACY_PASS_TOKEN_LEN`.
 pub fn compose(
     sender_signing: &SigningKey,
     sender_account_id: &[u8; ACCOUNT_ID_LEN],
     recipient_x25519_pub: &X25519PublicKey,
     from_pseudonym: [u8; PSEUDONYM_LEN],
     valid_after_ms: u64,
+    privacy_pass_token: &[u8],
     intro_message: &[u8],
 ) -> Result<Vec<u8>> {
+    if privacy_pass_token.len() > MAX_PRIVACY_PASS_TOKEN_LEN {
+        return Err(ContactError::InvalidEncoding(format!(
+            "privacy_pass_token must be <= {MAX_PRIVACY_PASS_TOKEN_LEN} bytes, got {}",
+            privacy_pass_token.len(),
+        )));
+    }
     let sealed_envelope = envelope::seal(recipient_x25519_pub, ENVELOPE_AAD, intro_message)?;
 
     let from_pubkey = sender_signing.verifying_key();
@@ -148,6 +209,7 @@ pub fn compose(
         sender_account_id,
         &from_pseudonym,
         valid_after_ms,
+        privacy_pass_token,
         &sealed_envelope,
     );
     let signature = sender_signing.sign(&wire);
@@ -171,7 +233,10 @@ pub fn decode_and_verify(wire: &[u8]) -> Result<ContactRequest> {
     let mut cur = wire;
 
     let version = take_u8(&mut cur)?;
-    if version != SCHEMA_VERSION && version != LEGACY_SCHEMA_VERSION_V1 {
+    if version != SCHEMA_VERSION
+        && version != LEGACY_SCHEMA_VERSION_V2
+        && version != LEGACY_SCHEMA_VERSION_V1
+    {
         return Err(ContactError::InvalidEncoding(format!(
             "unsupported ContactRequest schema version {version}",
         )));
@@ -179,18 +244,35 @@ pub fn decode_and_verify(wire: &[u8]) -> Result<ContactRequest> {
     let from_pubkey_bytes = take_n(&mut cur, PUBLIC_KEY_LEN)?;
     let from_pubkey = VerifyingKey::from_bytes(from_pubkey_bytes).map_err(ContactError::Crypto)?;
 
-    // v2 inserts the 16-byte sender account_id between
+    // v2+ inserts the 16-byte sender account_id between
     // `from_pubkey` and `from_pseudonym`. v1 omits it.
-    let from_account_id: Option<[u8; ACCOUNT_ID_LEN]> = if version == SCHEMA_VERSION {
+    let from_account_id: Option<[u8; ACCOUNT_ID_LEN]> = if version == LEGACY_SCHEMA_VERSION_V1 {
+        None
+    } else {
         let mut buf = [0u8; ACCOUNT_ID_LEN];
         buf.copy_from_slice(take_n(&mut cur, ACCOUNT_ID_LEN)?);
         Some(buf)
-    } else {
-        None
     };
 
     let from_pseudonym = decode_pseudonym(take_n(&mut cur, PSEUDONYM_LEN)?)?;
     let valid_after_ms = u64::from_be_bytes(take_n(&mut cur, 8)?.try_into().unwrap());
+
+    // v3 inserts a u16-length-prefixed Privacy Pass token here.
+    // v1/v2 envelopes omit the field — the resulting struct
+    // carries `privacy_pass_token: Vec::new()` to preserve the
+    // existing receive-side semantics.
+    let privacy_pass_token: Vec<u8> = if version == SCHEMA_VERSION {
+        let token_len = u16::from_be_bytes(take_n(&mut cur, 2)?.try_into().unwrap()) as usize;
+        if token_len > MAX_PRIVACY_PASS_TOKEN_LEN {
+            return Err(ContactError::InvalidEncoding(format!(
+                "privacy_pass_token over cap ({token_len} > {MAX_PRIVACY_PASS_TOKEN_LEN})",
+            )));
+        }
+        take_n(&mut cur, token_len)?.to_vec()
+    } else {
+        Vec::new()
+    };
+
     let sealed_len = u32::from_be_bytes(take_n(&mut cur, 4)?.try_into().unwrap()) as usize;
     let sealed_envelope = take_n(&mut cur, sealed_len)?.to_vec();
     let signature_bytes = take_n(&mut cur, SIGNATURE_LEN)?;
@@ -204,20 +286,39 @@ pub fn decode_and_verify(wire: &[u8]) -> Result<ContactRequest> {
     }
 
     // Re-encode the prefix exactly as the signer did and verify.
-    let signed_prefix = match from_account_id {
-        Some(ref acct) => encode_signing_prefix(
+    // The codec branch is keyed off the schema version we just
+    // peeled off the wire — a tampered version byte would have
+    // either failed parsing above or driven a mismatched
+    // signature here.
+    let signed_prefix = if version == SCHEMA_VERSION {
+        encode_signing_prefix(
             &from_pubkey,
-            acct,
+            // SAFETY: v2/v3 path implies `Some(_)`.
+            from_account_id
+                .as_ref()
+                .ok_or_else(|| ContactError::InvalidEncoding("missing account_id".into()))?,
+            &from_pseudonym,
+            valid_after_ms,
+            &privacy_pass_token,
+            &sealed_envelope,
+        )
+    } else if version == LEGACY_SCHEMA_VERSION_V2 {
+        encode_signing_prefix_v2(
+            &from_pubkey,
+            from_account_id
+                .as_ref()
+                .ok_or_else(|| ContactError::InvalidEncoding("missing account_id".into()))?,
             &from_pseudonym,
             valid_after_ms,
             &sealed_envelope,
-        ),
-        None => encode_signing_prefix_v1(
+        )
+    } else {
+        encode_signing_prefix_v1(
             &from_pubkey,
             &from_pseudonym,
             valid_after_ms,
             &sealed_envelope,
-        ),
+        )
     };
     from_pubkey
         .verify(&signed_prefix, &signature)
@@ -228,6 +329,7 @@ pub fn decode_and_verify(wire: &[u8]) -> Result<ContactRequest> {
         from_account_id,
         from_pseudonym,
         valid_after_ms,
+        privacy_pass_token,
         sealed_envelope,
     })
 }
@@ -249,9 +351,48 @@ pub fn open_envelope(req: &ContactRequest, recipient_priv: &X25519SecretKey) -> 
 // Codec helpers
 // ============================================================================
 
-/// Encode the bytes that get signed for the current (v2) wire
+/// Encode the bytes that get signed for the current (v3) wire
 /// format: everything except the trailing signature itself.
 fn encode_signing_prefix(
+    from_pubkey: &VerifyingKey,
+    from_account_id: &[u8; ACCOUNT_ID_LEN],
+    from_pseudonym: &[u8; PSEUDONYM_LEN],
+    valid_after_ms: u64,
+    privacy_pass_token: &[u8],
+    sealed_envelope: &[u8],
+) -> Vec<u8> {
+    let sealed_len = u32::try_from(sealed_envelope.len())
+        .expect("sealed envelope under u32::MAX bytes — caller invariant");
+    let token_len = u16::try_from(privacy_pass_token.len())
+        .expect("privacy_pass_token capped at MAX_PRIVACY_PASS_TOKEN_LEN (<= u16::MAX)");
+    let mut out = Vec::with_capacity(
+        1 + PUBLIC_KEY_LEN
+            + ACCOUNT_ID_LEN
+            + PSEUDONYM_LEN
+            + 8
+            + 2
+            + privacy_pass_token.len()
+            + 4
+            + sealed_envelope.len(),
+    );
+    out.push(SCHEMA_VERSION);
+    out.extend_from_slice(&from_pubkey.to_bytes());
+    out.extend_from_slice(from_account_id);
+    out.extend_from_slice(from_pseudonym);
+    out.extend_from_slice(&valid_after_ms.to_be_bytes());
+    out.extend_from_slice(&token_len.to_be_bytes());
+    out.extend_from_slice(privacy_pass_token);
+    out.extend_from_slice(&sealed_len.to_be_bytes());
+    out.extend_from_slice(sealed_envelope);
+    out
+}
+
+/// Re-encode a legacy v2 signing prefix for signature
+/// verification on receive. Mirrors the 1.16e3b encoding — used
+/// only by `decode_and_verify` when the wire byte is
+/// `LEGACY_SCHEMA_VERSION_V2`. No `compose` path produces v2 any
+/// more.
+fn encode_signing_prefix_v2(
     from_pubkey: &VerifyingKey,
     from_account_id: &[u8; ACCOUNT_ID_LEN],
     from_pseudonym: &[u8; PSEUDONYM_LEN],
@@ -263,7 +404,7 @@ fn encode_signing_prefix(
     let mut out = Vec::with_capacity(
         1 + PUBLIC_KEY_LEN + ACCOUNT_ID_LEN + PSEUDONYM_LEN + 8 + 4 + sealed_envelope.len(),
     );
-    out.push(SCHEMA_VERSION);
+    out.push(LEGACY_SCHEMA_VERSION_V2);
     out.extend_from_slice(&from_pubkey.to_bytes());
     out.extend_from_slice(from_account_id);
     out.extend_from_slice(from_pseudonym);
@@ -353,6 +494,7 @@ mod tests {
             &bob.public_key(),
             pseudonym,
             1_000_000,
+            b"",
             b"hi bob",
         )
         .unwrap();
@@ -362,6 +504,7 @@ mod tests {
         assert_eq!(req.from_account_id, Some(sender_account_id()));
         assert_eq!(req.from_pseudonym, pseudonym);
         assert_eq!(req.valid_after_ms, 1_000_000);
+        assert!(req.privacy_pass_token.is_empty());
 
         let intro = open_envelope(&req, &bob).unwrap();
         assert_eq!(intro, b"hi bob");
@@ -384,6 +527,7 @@ mod tests {
             &bob.public_key(),
             [0u8; PSEUDONYM_LEN],
             0,
+            b"",
             b"",
         )
         .unwrap();
@@ -443,6 +587,7 @@ mod tests {
             pseudonym,
             0,
             b"",
+            b"",
         )
         .unwrap();
         let req = decode_and_verify(&wire).unwrap();
@@ -461,6 +606,7 @@ mod tests {
             &bob.public_key(),
             [0u8; PSEUDONYM_LEN],
             0,
+            b"",
             b"intro",
         )
         .unwrap();
@@ -484,10 +630,11 @@ mod tests {
             &bob.public_key(),
             pseudonym,
             0,
+            b"",
             b"intro",
         )
         .unwrap();
-        // Flip a byte inside the v2 signed prefix. Offset is
+        // Flip a byte inside the v3 signed prefix. Offset is
         // schema-version + from_pubkey + from_account_id, i.e.
         // the first byte of from_pseudonym.
         wire[1 + PUBLIC_KEY_LEN + ACCOUNT_ID_LEN] ^= 0xFF;
@@ -508,6 +655,7 @@ mod tests {
             &bob.public_key(),
             pseudonym,
             0,
+            b"",
             b"secret",
         )
         .unwrap();
@@ -531,6 +679,7 @@ mod tests {
             &bob.public_key(),
             [0u8; PSEUDONYM_LEN],
             0,
+            b"",
             b"private",
         )
         .unwrap();
@@ -550,6 +699,7 @@ mod tests {
             &bob.public_key(),
             [0u8; PSEUDONYM_LEN],
             0,
+            b"",
             b"x",
         )
         .unwrap();
@@ -570,6 +720,7 @@ mod tests {
             &bob.public_key(),
             [0u8; PSEUDONYM_LEN],
             0,
+            b"",
             b"x",
         )
         .unwrap();
@@ -589,6 +740,7 @@ mod tests {
             &bob.public_key(),
             [0u8; PSEUDONYM_LEN],
             0,
+            b"",
             b"x",
         )
         .unwrap();
@@ -611,6 +763,7 @@ mod tests {
             &bob.public_key(),
             pseudonym,
             0,
+            b"",
             b"intro",
         )
         .unwrap();
@@ -620,9 +773,134 @@ mod tests {
             &bob.public_key(),
             pseudonym,
             0,
+            b"",
             b"intro",
         )
         .unwrap();
         assert_ne!(w1, w2);
+    }
+
+    // ========================================================
+    // 1.9b2 — Privacy Pass token (v3 wire format)
+    // ========================================================
+
+    /// A v3 envelope with a non-empty token round-trips, the
+    /// signature covers the token, and the parsed
+    /// `privacy_pass_token` matches what the sender supplied.
+    #[test]
+    fn v3_privacy_pass_token_roundtrip() {
+        let alice = sender();
+        let bob = recipient_x25519();
+        let token = b"\x01\x02\x03\x04 token-blob \xFF\xEE".as_slice();
+
+        let wire = compose(
+            &alice,
+            &sender_account_id(),
+            &bob.public_key(),
+            [0xAB; PSEUDONYM_LEN],
+            0,
+            token,
+            b"hello",
+        )
+        .unwrap();
+
+        let req = decode_and_verify(&wire).unwrap();
+        assert_eq!(req.privacy_pass_token.as_slice(), token);
+
+        let opened = open_envelope(&req, &bob).unwrap();
+        assert_eq!(opened, b"hello");
+    }
+
+    /// Tampering the on-wire token bytes invalidates the
+    /// signature — token integrity is bound to the signed
+    /// prefix, not stapled on as an afterthought.
+    #[test]
+    fn v3_tampered_token_breaks_signature() {
+        let alice = sender();
+        let bob = recipient_x25519();
+        let token = b"\x10\x20\x30\x40".as_slice();
+
+        let mut wire = compose(
+            &alice,
+            &sender_account_id(),
+            &bob.public_key(),
+            [0u8; PSEUDONYM_LEN],
+            0,
+            token,
+            b"",
+        )
+        .unwrap();
+
+        // Token lands at offset
+        //   1 (version) + 32 (pubkey) + 16 (acct) + 32 (pseudo)
+        //   + 8 (valid_after_ms) + 2 (token_len) = 91.
+        let token_offset = 1 + PUBLIC_KEY_LEN + ACCOUNT_ID_LEN + PSEUDONYM_LEN + 8 + 2;
+        wire[token_offset] ^= 0xFF;
+
+        let err = decode_and_verify(&wire).unwrap_err();
+        assert!(matches!(err, ContactError::BadSignature));
+    }
+
+    /// `MAX_PRIVACY_PASS_TOKEN_LEN` is enforced on `compose`. The
+    /// receive path also enforces it (via the u16 length cap
+    /// check) so a malicious sender can't smuggle pathologically
+    /// large blobs through a permissive composer.
+    #[test]
+    fn v3_token_over_cap_rejected_at_compose() {
+        let alice = sender();
+        let bob = recipient_x25519();
+        let huge = vec![0u8; MAX_PRIVACY_PASS_TOKEN_LEN + 1];
+
+        let err = compose(
+            &alice,
+            &sender_account_id(),
+            &bob.public_key(),
+            [0u8; PSEUDONYM_LEN],
+            0,
+            &huge,
+            b"",
+        )
+        .unwrap_err();
+        assert!(matches!(err, ContactError::InvalidEncoding(_)));
+    }
+
+    /// Phase 1.16e3b's v2 envelopes still decode on the v3
+    /// receiver. The `privacy_pass_token` slot lands empty —
+    /// matching the dev / web fallback path. Synthesised here
+    /// by hand-rolling the v2 signed prefix (the only place
+    /// `encode_signing_prefix_v2` is exercised outside its own
+    /// private decode branch).
+    #[test]
+    fn v2_envelopes_still_decode_with_empty_token() {
+        let alice = sender();
+        let bob = recipient_x25519();
+        let acct = [0xC3u8; ACCOUNT_ID_LEN];
+        let pseudonym = [0xD4u8; PSEUDONYM_LEN];
+        let valid_after_ms = 42_u64;
+        let intro = b"v2 envelope";
+
+        let sealed_envelope = envelope::seal(&bob.public_key(), ENVELOPE_AAD, intro).unwrap();
+        let from_pubkey = alice.verifying_key();
+        let signed_prefix = encode_signing_prefix_v2(
+            &from_pubkey,
+            &acct,
+            &pseudonym,
+            valid_after_ms,
+            &sealed_envelope,
+        );
+        let signature = alice.sign(&signed_prefix);
+        let mut wire = signed_prefix;
+        wire.extend_from_slice(&signature.to_bytes());
+
+        let req = decode_and_verify(&wire).unwrap();
+        assert_eq!(req.from_account_id, Some(acct));
+        assert_eq!(req.from_pseudonym, pseudonym);
+        assert_eq!(req.valid_after_ms, valid_after_ms);
+        assert!(
+            req.privacy_pass_token.is_empty(),
+            "v2 wire should produce an empty token on v3 decode",
+        );
+        let opened = open_envelope(&req, &bob).unwrap();
+        assert_eq!(opened, intro);
     }
 }

@@ -219,6 +219,15 @@ public class ContactsClient(
 
         val validAfterMs = System.currentTimeMillis().toULong()
 
+        // 1.9b2: Privacy Pass / Play Integrity attestation blob.
+        // The Android dev path ships an empty token — wiring the
+        // real Play Integrity round-trip belongs in the 1.20+
+        // Privacy Pass sub-sprint, gated on Google's dev-account
+        // provisioning. The empty value lands the request in the
+        // DS ingest layer's "no attestation tier" rate-limit
+        // bucket (lowest ceiling).
+        val privacyPassToken = ByteArray(0)
+
         val wireBytes = try {
             composeContactRequest(
                 senderSigningSeed = senderSigningSeed,
@@ -226,6 +235,7 @@ public class ContactsClient(
                 recipientX25519Pub = recipientX25519Pubkey,
                 fromPseudonym = senderPseudonym,
                 validAfterMs = validAfterMs,
+                privacyPassToken = privacyPassToken,
                 introMessage = introMessage,
             )
         } catch (e: FfiException) {

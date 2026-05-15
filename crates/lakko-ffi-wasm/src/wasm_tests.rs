@@ -60,7 +60,7 @@ use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_test::wasm_bindgen_test;
 
 use crate::contacts::InviteCapability;
-use crate::mls::{Group, GroupMember, Identity};
+use crate::mls::{Group, Identity};
 
 // `wasm-pack test --node` selects the Node V8 runner; no
 // `wasm_bindgen_test_configure!` invocation is needed

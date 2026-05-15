@@ -217,13 +217,23 @@ impl PerRelationship {
 /// the application layer enforces an absolute staleness ceiling
 /// on top of this on the receive side.
 ///
+/// `privacy_pass_token` is an optional Privacy Pass / App-Attest /
+/// Play-Integrity attestation blob (RFC 9576 — Phase 1.9b2). Pass
+/// an **empty array** to omit it; the DS ingest path treats
+/// missing tokens as "no attestation tier" (lowest rate-limit
+/// ceiling). Mobile production builds populate this from the
+/// platform attestation API; web + dev builds send empty. Capped
+/// at [`lakko_contacts::request::MAX_PRIVACY_PASS_TOKEN_LEN`] —
+/// over-cap returns [`FfiError::Contacts`].
+///
 /// `intro_message` is the optional plaintext payload (sealed in
 /// an HPKE-equivalent envelope to `recipient_x25519_pub`).
 ///
 /// # Errors
 ///
 /// * [`FfiError::Contacts`] on wrong-length seed / account-id /
-///   pseudonym, or any AEAD failure inside the sealed envelope.
+///   pseudonym, over-cap `privacy_pass_token`, or any AEAD
+///   failure inside the sealed envelope.
 /// * [`FfiError::Crypto`] when `recipient_x25519_pub` is not a
 ///   valid X25519 public key (canonical encoding).
 #[uniffi::export]
@@ -233,6 +243,7 @@ pub fn compose_contact_request(
     recipient_x25519_pub: Vec<u8>,
     from_pseudonym: Vec<u8>,
     valid_after_ms: u64,
+    privacy_pass_token: Vec<u8>,
     intro_message: Vec<u8>,
 ) -> Result<Vec<u8>, FfiError> {
     if sender_signing_seed.len() != 32 {
@@ -269,6 +280,7 @@ pub fn compose_contact_request(
         &recipient_pub,
         pseudonym,
         valid_after_ms,
+        &privacy_pass_token,
         &intro_message,
     )?;
     Ok(wire)
@@ -329,6 +341,18 @@ impl ContactRequest {
     /// ceiling on top of this on the receive side.
     pub fn valid_after_ms(&self) -> u64 {
         self.inner.valid_after_ms
+    }
+
+    /// Privacy Pass / App-Attest / Play-Integrity attestation
+    /// blob the sender attached (Phase 1.9b2 — RFC 9576). Empty
+    /// `Vec` means "no token" — the wire envelope either was
+    /// composed without one (web / dev path) or arrived from a
+    /// v1 / v2 legacy sender that pre-dates this field. The DS
+    /// ingest path is the authority on what the token means
+    /// (rate-limit tier lift); the local client surfaces the
+    /// raw bytes here for transparency + future verification.
+    pub fn privacy_pass_token(&self) -> Vec<u8> {
+        self.inner.privacy_pass_token.clone()
     }
 
     /// Decrypt the intro envelope using the recipient's 32-byte
@@ -819,6 +843,7 @@ mod tests {
             bob_pub.to_bytes().to_vec(),
             from_pseudonym.clone(),
             1_700_000_000_000,
+            vec![], // privacy_pass_token — empty for unit test
             intro.clone(),
         )
         .expect("compose");
@@ -832,6 +857,7 @@ mod tests {
         assert_eq!(req.from_account_id(), Some(alice_account_id.to_vec()));
         assert_eq!(req.from_pseudonym(), from_pseudonym);
         assert_eq!(req.valid_after_ms(), 1_700_000_000_000);
+        assert!(req.privacy_pass_token().is_empty());
 
         // Open the sealed envelope with Bob's private key.
         let plaintext = req
@@ -850,6 +876,7 @@ mod tests {
             vec![0u8; PUBLIC_KEY_LEN],
             vec![0u8; PSEUDONYM_LEN],
             0,
+            vec![], // privacy_pass_token
             vec![],
         )
         .expect_err("expected wrong-length rejection");
@@ -867,6 +894,7 @@ mod tests {
             vec![0u8; PUBLIC_KEY_LEN],
             vec![0u8; PSEUDONYM_LEN],
             0,
+            vec![], // privacy_pass_token
             vec![],
         )
         .expect_err("expected wrong-length rejection");
@@ -1027,6 +1055,7 @@ mod tests {
             bob_pub.to_bytes().to_vec(),
             vec![0u8; PSEUDONYM_LEN],
             0,
+            vec![], // privacy_pass_token
             b"secret".to_vec(),
         )
         .expect("compose");
@@ -1035,5 +1064,36 @@ mod tests {
             Err(FfiError::Contacts(_)) => {},
             other => panic!("expected Contacts error, got {other:?}"),
         }
+    }
+
+    // ========================================================
+    // 1.9b2 — Privacy Pass token round-trip
+    // ========================================================
+
+    /// A v3 envelope with a populated `privacyPassToken` round-
+    /// trips cleanly through the FFI boundary — the inner
+    /// `lakko-contacts` crate has the wire-format coverage; this
+    /// gates that the UniFFI getter surfaces the bytes
+    /// unchanged.
+    #[test]
+    fn contact_request_privacy_pass_token_round_trip() {
+        let alice_signing = SigningKey::from_seed(&[0xAAu8; 32]);
+        let alice_account_id = [0xA1u8; ACCOUNT_ID_LEN];
+        let bob_priv = InnerX25519SecretKey::from_bytes([0xBBu8; 32]);
+        let bob_pub = bob_priv.public_key();
+        let token = b"\x99\x88\x77 attestation \x66\x55".to_vec();
+
+        let wire = compose_contact_request(
+            alice_signing.to_seed().to_vec(),
+            alice_account_id.to_vec(),
+            bob_pub.to_bytes().to_vec(),
+            vec![0xC9u8; PSEUDONYM_LEN],
+            0,
+            token.clone(),
+            b"".to_vec(),
+        )
+        .expect("compose");
+        let req = ContactRequest::decode_and_verify(wire).expect("decode");
+        assert_eq!(req.privacy_pass_token(), token);
     }
 }

@@ -194,6 +194,7 @@ impl ContactRequest {
         recipient_x25519_pub: &[u8],
         from_pseudonym: &[u8],
         valid_after_ms: u64,
+        privacy_pass_token: &[u8],
         intro_message: &[u8],
     ) -> Result<Vec<u8>, JsError> {
         if sender_signing_seed.len() != 32 {
@@ -229,6 +230,7 @@ impl ContactRequest {
             &recipient_pub,
             pseudonym,
             valid_after_ms,
+            privacy_pass_token,
             intro_message,
         )
         .map_err(contact_err)
@@ -269,6 +271,18 @@ impl ContactRequest {
     #[wasm_bindgen(getter, js_name = validAfterMs)]
     pub fn valid_after_ms(&self) -> u64 {
         self.inner.valid_after_ms
+    }
+
+    /// Privacy Pass / App-Attest / Play-Integrity attestation
+    /// blob the sender attached (Phase 1.9b2 — RFC 9576). Empty
+    /// `Uint8Array` means "no token" — either composed without
+    /// one (web / dev path) or a legacy v1/v2 envelope that
+    /// pre-dates this field. The DS ingest path is the authority
+    /// on what the token means (rate-limit tier lift); the local
+    /// client surfaces the raw bytes here for transparency.
+    #[wasm_bindgen(getter, js_name = privacyPassToken)]
+    pub fn privacy_pass_token(&self) -> Vec<u8> {
+        self.inner.privacy_pass_token.clone()
     }
 
     /// Decrypt the intro envelope using the recipient's 32-byte
@@ -683,6 +697,7 @@ mod tests {
             &recipient_pub,
             &pseudonym,
             1_000_000,
+            b"",
             b"hi bob",
         )
         .unwrap();
@@ -691,6 +706,7 @@ mod tests {
         assert_eq!(req.from_pseudonym(), pseudonym.to_vec());
         assert_eq!(req.valid_after_ms(), 1_000_000);
         assert_eq!(req.from_account_id(), Some(sender_account_id.to_vec()));
+        assert!(req.privacy_pass_token().is_empty());
 
         let priv_bytes = recipient_x25519.to_bytes();
         let plaintext = req.open_envelope(&priv_bytes).unwrap();
