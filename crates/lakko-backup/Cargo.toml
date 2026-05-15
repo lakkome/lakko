@@ -1,0 +1,34 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+[package]
+name = "lakko-backup"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Phase 2a1 — encrypted backup envelope (Argon2id KEK from the recovery phrase + ChaCha20-Poly1305 AEAD) and the payload wire codec carried inside it"
+
+[lints]
+workspace = true
+
+[dependencies]
+thiserror.workspace = true
+
+# Argon2id KEK + AEAD primitives + zeroize-on-drop SecretBytes —
+# every crypto primitive lives in `lakko-crypto`. The backup
+# envelope is a thin assembler: KDF → AEAD → wire layout.
+lakko-crypto.workspace = true
+
+# CSPRNG for the Argon2 salt + AEAD nonce. Same `rand` major as
+# `lakko-attachments` so the workspace pulls one version.
+rand = "0.8"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# wasm32 needs the `js` feature to wire `getrandom` to
+# `crypto.getRandomValues`. Host targets pick `/dev/urandom`
+# automatically via `rand::OsRng`.
+getrandom = { version = "0.2", features = ["js"] }

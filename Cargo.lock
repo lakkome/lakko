@@ -1990,6 +1990,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "lakko-backup"
+version = "0.0.0"
+dependencies = [
+ "getrandom 0.2.17",
+ "lakko-crypto",
+ "rand 0.8.6",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "lakko-calls"
 version = "0.0.0"
 

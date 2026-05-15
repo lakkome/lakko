@@ -17,6 +17,7 @@ members = [
     "crates/lakko-push",
     "crates/lakko-transparency",
     "crates/lakko-attachments",
+    "crates/lakko-backup",
     "crates/lakko-auth-client",
     "crates/lakko-auth-token",
     "crates/lakko-pow",
@@ -84,6 +85,7 @@ lakko-presence = { path = "crates/lakko-presence", version = "0.0.0" }
 lakko-push = { path = "crates/lakko-push", version = "0.0.0" }
 lakko-transparency = { path = "crates/lakko-transparency", version = "0.0.0" }
 lakko-attachments = { path = "crates/lakko-attachments", version = "0.0.0" }
+lakko-backup = { path = "crates/lakko-backup", version = "0.0.0" }
 lakko-auth-client = { path = "crates/lakko-auth-client", version = "0.0.0" }
 lakko-auth-token = { path = "crates/lakko-auth-token", version = "0.0.0" }
 lakko-pow = { path = "crates/lakko-pow", version = "0.0.0" }

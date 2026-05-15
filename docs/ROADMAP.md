@@ -29,9 +29,11 @@ Decisions about launch / audit / branding / pricing are the maintainer's. This r
 |---|---|
 | **0** Foundations | Workspace, ADRs, CI, MLS end-to-end in tests, FFI surface, fuzz harnesses |
 | **1** 1×1 Messaging | services/auth, services/ds, services/storage, services/discovery, services/push-gw, lakko-ffi-wasm, apps/ios, apps/android, apps/web |
-| **2** Groups + Multi-device | X.509 + KT log, DeviceGroup, encrypted backup, ≤50-member groups, apps/desktop, apps/macos |
-| **3** Calls | lakko-calls (SFrame), services/sfu (self-hosted LiveKit), P2P + group calls (link and in-chat) + audio rooms, CallKit / ConnectionService, coturn |
-| **4** Channels / Broadcasts | PublisherGroup, sender-key broadcast, services/edge, medium-scale broadcasts |
+| **2a** Foundation | Encrypted backup in object storage, opt-in WebAuthn passkey, multi-device sync via DeviceGroup substrate |
+| **2b** Vanilla-MLS private scale | Private groups + private channels up to ~50k members through vanilla MLS, member-list virtualization, commit batching, KeyPackage refresh schedule, admin/moderator roles |
+| **2c** Two-tier substrate | Large private groups + large private channels (50k–1M+ subscribers) through PublisherGroup + sender-key broadcast. Trades backward secrecy on content for scale — documented, aggressive rotation |
+| **2d** Public surface | Public groups + public channels, server-mediated plain TLS (no E2EE on content that is public by definition), full-text search, server-side moderation |
+| **3** Calls | lakko-calls (SFrame), services/sfu (LiveKit fork), P2P 1×1 + group calls (link and in-chat) up to ~50 participants, CallKit / ConnectionService, coturn |
 | **5** Anti-censorship + Scale | REALITY, MASQUE, Shadowsocks-2022, transport-rendezvous, multi-region edge cascade, apps/watchos, localization |
 
 ---
@@ -65,9 +67,11 @@ Everything self-hosted on Hetzner Cloud. We start with one VPS and split things 
 |---|---|
 | 0 | — (no prod) |
 | 1 | 1× VPS with all services + MariaDB + nginx + coturn co-located |
-| 2 | scale-up VPS, or 2× VPS (backend + DB) once we hit a wall |
-| 3 | + 1× CCX-tier VPS for the SFU (LiveKit / mediasoup-rs / pion / str0m), 20 TB transfer |
-| 4 | scale up the SFU as broadcast viewer load grows |
+| 2a | + Hetzner Storage Box or extra disk volume for the backup-envelope blobs |
+| 2b | scale-up VPS, or 2× VPS (backend + DB) once we hit a wall on MariaDB rows / FoundationDB latency for the per-group MLS journal |
+| 2c | + dedicated bandwidth allowance for content-key HPKE-envelope fanout (per-subscriber delivery on every rotation). May warrant a second VPS once channels grow past ~100k subscribers each |
+| 2d | + full-text search backend (start with MariaDB FULLTEXT, swap to dedicated engine — Meilisearch or similar — when query latency dictates) |
+| 3 | + 1× CCX-tier VPS for the SFU (LiveKit fork), 20 TB transfer per month allowance |
 | 5 | multi-region edges (for 100k+ viewer broadcasts with low latency globally) |
 
 ---
@@ -304,67 +308,249 @@ The first real functional slice: three devices (iOS, Android, web) exchanging 1�
 
 ---
 
-## Phase 2 — Groups + Multi-device + Desktop
+## Phase 2 — Messaging surface to scale
 
-### Goal
+Four sub-phases, executed in sequence. 2a is foundation that everything else depends on; 2b is the cheaper messaging-scale work over vanilla MLS; 2c is the expensive two-tier crypto substrate for large private groups + channels; 2d is the orthogonal public-surface work (server-mediated, no E2EE on content).
 
-Groups up to ~50 members (vanilla MLS), multi-device sync without plaintext on the server, plus desktop (Windows / Linux) and macOS clients added. iOS / Android / Web are already shipping from Phase 1.
+The split exists so we can ship working scale at the end of 2b (private groups up to ~50k) before committing to the multi-month 2c crypto project, and so the public-surface work in 2d can land in parallel with 2c since the two share no protocol-level code.
 
 ### Pre-flight
 - Phase 1 exit criteria green
+- Recovery phrase + Shamir social-recovery surface available (Phase 1.21 already ships these — they are reused as the backup KEK derivation in 2a1)
 
-### Sprint breakdown
+---
 
-#### Crypto / protocol
-- **2.0** X.509 credentials production-grade (full validation) + KT log production (CONIKS-style append-only with signed roots)
-- **2.1** Identity rotation via KT log supersession proof + 30-day bridge for old invite links
-- **2.2** FIPS ciphersuite (P-384 + AES-256-GCM + ECDSA-P384) wired through X.509 credentials end-to-end
+### Phase 2a — Foundation
 
-#### Multi-device
-- **2.3** DeviceGroup in lakko-mls + lakko-sync — every device = a leaf in the user's personal MLS group
-- **2.4** Multi-device sync substrate — read receipts, drafts, conversation order via DeviceGroup application messages
-- **2.5** History catch-up bundle exchange — HPKE-encrypted ciphertext from the old device to the new one when adding a device
-- **2.6** Encrypted backup on Hetzner Storage Box, KEK = Argon2id from the recovery passphrase
-- **2.7** Optional Shamir 3-of-5 social recovery (if not closed in Phase 1)
+**Goal:** Encrypted backup in object storage, opt-in WebAuthn passkey, and multi-device sync via the DeviceGroup substrate. These are prerequisites for everything else in Phase 2/3 and have to land first.
 
-#### Groups
-- **2.8** Group creation with ≥3 members (vanilla MLS up to ~50)
-- **2.9** Group invite links (capability-based, ADR-0005) + approval flow for private groups
-- **2.10** Group settings: encrypted name / avatar / description
+#### Sprint breakdown
 
-#### Discovery / privacy
-- **2.11** All 6 levels of discoverability scope: Open / ContactsOfContacts / Contacts / InviteOnly / Allowlist / VerifiedNetwork
-- **2.12** Mutual-contact attestation chain for the ContactsOfContacts scope
-- **2.13** Block list (encrypted under identity, the server applies a hashed match)
+**2a1 — Encrypted backup envelope + object-storage backend**
+- **2a1a** Backup envelope wire format: Argon2id-KEK derived from the BIP39 recovery phrase, ChaCha20-Poly1305 AEAD, distinct domain separator from the existing envelopes, content covers `(identity_secrets, devicegroup_membership_snapshot, per_group_mls_snapshots, accepted_contacts_list)`. Explicitly does NOT cover message history (history flows through 2a3's DeviceGroup catch-up path)
+- **2a1b** Server-side: extend `services/storage` with a per-account backup-blob endpoint. Owner-signed for overwrite protection. Hetzner Storage Box or local disk volume backs the bytes; same content-addressed schema as the attachment store
+- **2a1c** Client (all three platforms): backup creation triggered post-signup, then on schedule (daily) when local state changes since last upload
+- **2a1d** Client: restore flow — recovery phrase → fetch blob by account_id → Argon2id-KEK + decrypt → restore identity bundle + DeviceGroup snapshot + per-group MLS snapshots
+- **2a1e** Tests: round-trip, wrong-passphrase rejection (Argon2id fail), tamper detection (AEAD tag fail), stale-blob handling (server rejects out-of-order overwrites)
 
-#### Apps (new)
-- **2.14** `apps/desktop` — Tauri 2.x + Solid.js (UI reused from apps/web), Windows / Linux native binaries
-- **2.15** `apps/macos` — separate build via SwiftUI XCFramework (shared core with iOS)
-- **2.16** Extend apps/web for the group UX (member list, group settings, etc.)
+**2a2 — Passkey opt-in (WebAuthn)**
+- **2a2a** `services/auth` WebAuthn registration endpoint: FIDO2 attestation parsing, public-key + credential-id storage in a side table keyed by `account_id`
+- **2a2b** `services/auth` WebAuthn login endpoint: challenge → assertion verify → session token issue (same shape as OPAQUE login output)
+- **2a2c** Web client passkey UI: enrol affordance post-signup, login-screen toggle between password and passkey
+- **2a2d** iOS passkey UI: `AuthenticationServices.framework` (`ASAuthorizationPlatformPublicKeyCredentialProvider`)
+- **2a2e** Android passkey UI: Jetpack `CredentialManager` (`CreatePublicKeyCredentialRequest` + `GetCredentialRequest`)
+- **2a2f** Per-account "passkey-only" opt-in flag — server-side disables OPAQUE login path when set; user has to deliberately enable, with a recovery-phrase-still-works warning UX
+- **2a2g** Recovery story: phrase remains the primary recovery path; passkey is auth convenience only
 
-#### Verification & QR
-- **2.17** QR safety numbers — Signal-style fingerprint scan, OOB-secure contact addition
-- **2.18** TOFU pinning via KT log + QR override
+**2a3 — Multi-device sync (DeviceGroup substrate)**
+- **2a3a** DeviceGroup primitive in `lakko-mls`: a per-user MLS group whose leaves are the user's own devices. Reuses the existing OpenMLS provider; key derivation is identical to a normal MLS group, just with a fixed identifier convention
+- **2a3b** Add-device flow: existing device scans a one-time QR from the new device (carrying the new device's KeyPackage), runs `addMember` on the DeviceGroup, fans the Welcome out
+- **2a3c** Remove-device flow: revoke compromised device via MLS `Remove` → ratchet → key derivation moves past the compromised leaf
+- **2a3d** History catch-up bundle: on add, the inviting device publishes an HPKE-encrypted "last N messages per accepted-contact" bundle on the new device's KeyPackage. The new device unwraps + restores local state. Hard cap on N (e.g. 1000 messages per group)
+- **2a3e** Cross-device read receipts / drafts / conversation order via DeviceGroup application messages — payload schema in `schemas/mls-app/devicegroup.proto`
+- **2a3f** Self-fanout: when device A sends a message in chat X, the sender's own DeviceGroup also receives a synced copy so devices B/C/D see the sent message. Wire format: same application-message envelope, distinct kind byte
+- **2a3g** Device-list UI on three clients: "your devices", per-device last-seen indicator, revoke button
+- **2a3h** Sync conflict resolution: HLC ordering across DeviceGroup messages; last-writer-wins for drafts; accumulator for read receipts (per-message highest read state); no overwrites for conversation-order moves (idempotent set semantics)
 
-#### Hardening
-- **2.19** `kani` model checking on the MLS state machine
-- **2.20** `cargo-mutants` mutation testing on lakko-crypto + lakko-mls
-- **2.21** Coverage ≥80% on lakko-crypto + lakko-mls
-- **2.22** End-to-end tests on iOS / Android / Web in CI (matrix)
+#### 2a exit criteria
+- Backup created automatically on schedule, restorable from recovery phrase on a fresh device
+- Passkey works as opt-in login method on all three clients; OPAQUE password path remains primary
+- User can add a second device via QR scan, see their chat history, send from either device, both stay synced within p95 < 5s under good network
 
-### Exit criteria
-- Feature-complete messaging on 5 platforms (iOS / Android / macOS / Linux / Web)
-- A 50-member group is stable in a load test (Add/Remove under load, 100+ commits per hour)
-- Multi-device sync convergent at p95 < 5s between two devices
-- ≥80% statement coverage on lakko-crypto + lakko-mls
-- WASM bundle < 2 MB gzipped
-- KT log validates inclusion proofs end-to-end
+#### 2a top risks
+- Passkey cross-ecosystem sync (iCloud Keychain vs Google Password Manager) — UX edge cases per platform, documented and tested
+- DeviceGroup commit traffic when many devices added/removed in burst — bounded by practical device counts (≤10 typical)
+- History catch-up bundle size — hard cap on N per-group avoids unbounded blobs; documented in 2a3d
 
-### Top risks
-- **KT log spec is still draft** — possible fork / patch upstream
-- **WASM bundle size** for web (target < 2 MB gzipped) — may require code splitting
-- **Cross-device sync convergence** under flaky networks
-- **OpenMLS X.509 credential maturity** — may need upstream contributions
+---
+
+### Phase 2b — Vanilla-MLS private scale
+
+**Goal:** Private groups + private channels up to ~50k members through the vanilla MLS protocol from Phase 1, plus the UI / storage / commit work needed to scale that comfortably.
+
+#### Sprint breakdown
+
+**2b1 — Member-list scale**
+- **2b1a** Storage: per-group member index + page-based fetch
+- **2b1b** UI virtualization on three clients (render visible chunk, lazy load rest)
+- **2b1c** In-group member search (client-side filter over the synced member list)
+
+**2b2 — Commit batching**
+- **2b2a** Batch multiple add/remove proposals into one MLS commit (OpenMLS supports proposal queues — wire it up)
+- **2b2b** Admin UI: bulk-add (paste N `@usernames` at once)
+- **2b2c** Server-side: rate-limit per-group commit frequency to avoid commit-spam DoS
+
+**2b3 — KeyPackage refresh management**
+- **2b3a** Per-device KeyPackage rotation on schedule (every 30 days default)
+- **2b3b** Refresh trigger when LastResort KeyPackage is about to be consumed
+- **2b3c** Server-side: pruning of stale KeyPackage rows
+
+**2b4 — Group admin / moderator roles**
+- **2b4a** Server-side role flags (hint only; client enforces via MLS commit signing rules)
+- **2b4b** Add/remove permission gates client-side based on commit author's role
+- **2b4c** Owner transfer flow + co-admin promotion / demotion
+
+**2b5 — Group profile**
+- **2b5a** Encrypted group name / description / avatar under the group exporter key
+- **2b5b** Profile change as an MLS application message + DS broadcast to all members
+- **2b5c** Three-client UI for editing + viewing
+
+**2b6 — Mute / pin / archive per-conversation**
+- **2b6a** Per-conversation state via DeviceGroup application messages (synced across the user's devices)
+- **2b6b** UI affordances on three clients
+
+**2b7 — Private channels (admin-only-write ACL)**
+- **2b7a** Permission policy: only admins produce application messages (client-side enforcement; server cannot enforce because it does not decrypt)
+- **2b7b** Subscriber join flow (invite-link or admin invite)
+- **2b7c** UI: separates channel-style UX (no compose for non-admins, broadcast feel) from group-style UX
+
+#### 2b exit criteria
+- Private group up to 1k members works on three clients without UI degradation
+- Private channel (admin-only-write) up to 1k subscribers works
+- Stress test: 10k member group's ratchet-tree commit completes < 5s on a mid-range client device; member-list scroll stays smooth
+
+#### 2b top risks
+- vanilla MLS ratchet tree update bandwidth scales O(N log N) bytes per commit when broadcasting to all N members. At N=50k that is on the order of 75 MB per commit — feasible but expensive on metered networks. Commit batching (2b2) is the main mitigation
+- OpenMLS performance ceiling on ratchet-tree operations at 50k members not yet measured — may need upstream patches
+
+---
+
+### Phase 2c — Two-tier substrate for large private groups + channels
+
+**Goal:** Large private groups + large private channels (50k–1M+ subscribers) through the PublisherGroup + sender-key broadcast architecture. This is the multi-month crypto project that the original plan (`~/.claude/plans/1-nested-wreath.md` §3) calls out as the only path to scale E2EE messaging past vanilla MLS's wall.
+
+Architectural shape per ADR-0001 + plan §3:
+- **PublisherGroup** — a vanilla MLS group of admins + moderators (≤500). This group commits and rotates a content key.
+- **Subscribers** — receive the current content key via HPKE-envelope on their published KeyPackage, then decrypt content streamed by any author using a sender-key chain derived from `(content_key, author_leaf_index, message_seq)`.
+- **Trade-off:** subscribers are not cryptographic members of an MLS group, so revoking a subscriber after a content key has been distributed is best-effort until the next rotation. The plan calls for aggressive rotation (24h or every N=10000 messages, whichever first) and publishes this property in the threat-model docs.
+
+#### Sprint breakdown
+
+**2c1 — PublisherGroup primitive**
+- **2c1a** New `lakko-channels` crate, separate from `lakko-mls` to isolate the new protocol surface from the audited vanilla MLS stack
+- **2c1b** `PublisherGroup` = vanilla MLS group of ≤500 admins / moderators. Reuses the existing OpenMLS code through `lakko-mls`'s public surface
+- **2c1c** Wire format: `ChannelDescriptor` (admin pubkey set + current `content_key_epoch` + rotation policy parameters)
+
+**2c2 — Content-key derivation + rotation**
+- **2c2a** Content key seed via `publishergroup.exporter("lakko/channel-content/v1", channel_id, 32)`
+- **2c2b** Per-author sender-key chain: `HKDF(content_key_seed, author_leaf_index || "lakko/channel-sender-key/v1")` produces a chain that the author ratchets per message
+- **2c2c** Rotation triggers: (1) subscriber membership change (add or remove), (2) scheduled (configurable, default `24h OR N=10000 messages`, whichever first)
+- **2c2d** Rotation algorithm: PublisherGroup admins post an MLS commit that bumps the channel's epoch counter → new exporter output → new content key seed → server triggers re-delivery to remaining subscribers
+
+**2c3 — Subscriber-side content-key delivery**
+- **2c3a** HPKE-envelope per subscriber: `HpkeBase.seal(subscriber_x25519_pubkey, content_key_seed_for_epoch_N)`
+- **2c3b** Server-side fanout: on each rotation, generate one envelope per subscriber and queue to their mailbox (reuses `services/ds` mailbox infrastructure from Phase 1)
+- **2c3c** Subscriber-side: receive envelope on next mailbox poll, unwrap, install content key for epoch N
+- **2c3d** Lazy receive path: subscriber that missed epoch N's delivery (offline at rotation time) requests it from the server; server has the HPKE envelope cached for a short retention window
+
+**2c4 — Sender-key chain protocol**
+- **2c4a** Per-author chain: AES-256-GCM with per-message nonce derived from `(epoch, author_leaf, message_seq)`
+- **2c4b** Forward secrecy within chain (ratchet sender-key per message)
+- **2c4c** Out-of-order message tolerance: bounded-depth skipped-message-keys storage (default 1000 skips; messages beyond that are unrecoverable on this side)
+- **2c4d** Anti-replay: monotone sequence gating per `(author_leaf, epoch)` pair
+
+**2c5 — KeyPackage churn management**
+- **2c5a** Subscribers refresh their KeyPackage every 30 days (reuses 2b3 schedule)
+- **2c5b** Server-side pruning of stale KeyPackages
+- **2c5c** Subscriber rejoin flow when their KeyPackage expires before the next epoch rotation: the next admin commit re-onboards them or drops them, depending on the missed-rotation policy (configurable per channel; default: drop after 2 missed rotations)
+
+**2c6 — Server-side fanout layer**
+- **2c6a** Extend `services/ds` (or new `services/channels`) with per-channel message fanout
+- **2c6b** Message storage: ciphertext + sender-key epoch + per-message metadata, indexed by subscriber mailbox
+- **2c6c** Subscriber poll: fetch new messages for channel + missed content-key envelope deliveries from the same endpoint
+
+**2c7 — Subscriber join / revoke flows**
+- **2c7a** Admin issues an invite-link (reuses 1.18 capability infrastructure) → subscriber publishes their KeyPackage → admin onboards via a PublisherGroup commit that records the new subscriber + triggers content-key delivery to them
+- **2c7b** Subscriber revoke: admin removes subscriber from the channel's subscriber set → triggers a content-key rotation → re-delivery to remaining subscribers
+- **2c7c** Subscriber sees "you were removed" via a DS-side signal (the absence of new content-key deliveries is the canonical signal; an explicit removal message is best-effort UX)
+
+**2c8 — Migration vanilla → two-tier**
+- **2c8a** Admin promotes group when it grows past a threshold (default 50k members; configurable per deployment)
+- **2c8b** Existing members become subscribers; existing admins stay in the new PublisherGroup
+- **2c8c** Content history: re-keyed under the new content key. Old key remains archived for anyone who already had access (they retain ability to read what they already saw); the boundary is "from now on, you have to be a subscriber under the new key to read"
+
+**2c9 — Client implementation**
+- **2c9a** Three-client integration: send / receive through sender-key chain, content-key install on epoch change, lazy receive of missed rotations
+- **2c9b** UI: indistinguishable from vanilla-MLS groups for end users (transparent scaling). The fact that the underlying protocol is different is a property of the protocol, not the UX
+
+#### 2c exit criteria
+- Private channel of 100k subscribers stable; admin posts arrive on every subscriber within 5s p95
+- Subscriber revoke takes effect on the next post after rotation completes (typically < 30s)
+- Threat-model docs publicly describe the backward-secrecy trade-off in the project README + ADR
+
+#### 2c top risks
+- **Largest technical risk in the post-Phase-1 plan.** Two-tier MLS is not provided by OpenMLS — this is custom protocol work over the MLS exporter primitive. Crypto correctness is not automatic
+- KeyPackage churn-rate management at millions of subscribers is a performance concern that needs benchmarking before declaring the architecture production-ready
+- The two-tier architecture intentionally trades backward secrecy on content for scale. This is a fundamental property documented publicly; users who need strict backward secrecy can stay on smaller vanilla-MLS groups (2b)
+
+---
+
+### Phase 2d — Public surface
+
+**Goal:** Public groups + public channels — server-mediated, plain TLS, full-text search, server-side moderation. E2EE deliberately does not apply because the content is public by definition; encrypting it would add overhead without any privacy benefit. Marketing-wise: "E2EE where it makes sense; plain TLS where the content is public anyway."
+
+This phase has no protocol-level overlap with 2c, so it can run in parallel.
+
+#### Sprint breakdown
+
+**2d1 — Data model + storage**
+- **2d1a** New tables: `public_channels`, `public_messages`, `public_subscriptions`
+- **2d1b** Plaintext message storage (server-side queryable)
+- **2d1c** Full-text index: start with MariaDB `FULLTEXT` indexes; defer the dedicated-search-engine decision (Meilisearch / typesense / equivalent) until query latency dictates
+
+**2d2 — Search endpoint**
+- **2d2a** `services/discovery` extension: `POST /discovery/channels/search` accepts query string + optional filters (language, region, category), returns channel list
+- **2d2b** Anti-spam: rate limit + PoW gate (reuses the existing PoW infrastructure from `services/discovery`)
+- **2d2c** Channel description / tag indexing for discoverability
+
+**2d3 — Public content delivery**
+- **2d3a** New `services/public` (separate from `services/storage` to keep public-content traffic isolated from per-account ciphertext): anonymous-friendly content GET endpoints
+- **2d3b** HTTP caching headers (Cloudflare-friendly when / if a CDN is later wired)
+- **2d3c** Pagination (cursor-based, monotone)
+
+**2d4 — Subscribe / unsubscribe flow**
+- **2d4a** Account-level "what I follow" list, synced via DeviceGroup application messages (reuses 2a3 substrate)
+- **2d4b** Anonymous read is possible: no account → no server-side trace of which public channels they read
+- **2d4c** Authenticated subscribe for push-notification delivery on new posts
+
+**2d5 — Server-side moderation tools**
+- **2d5a** Admin endpoints: delete message, ban user from channel
+- **2d5b** Report-message flow (subscriber flags spam → server queues for admin review)
+- **2d5c** Per-channel admin role assignment
+- **2d5d** Platform-level moderation (operator deals with ToS violations out-of-band — not auto-enforced)
+
+**2d6 — Public-vs-private flag UX**
+- **2d6a** Group / channel creation: explicit toggle with a warning that the choice is meaningful and not auto-changeable
+- **2d6b** Public → private migration: server-side flag change; existing content stays public-readable (history is what it is — cannot retroactively privatise public bytes); new posts go through the appropriate private protocol path
+- **2d6c** Private → public migration: bigger operation — content gets re-published as plaintext on the public side; admins get an explicit confirmation step
+
+**2d7 — Client UIs**
+- **2d7a** Search screen on three clients
+- **2d7b** Public channel timeline (similar to private channel UX but without crypto overhead)
+- **2d7c** Subscribe / unsubscribe affordances
+- **2d7d** Comment / reply UX (or forbidden — choose at channel creation time)
+
+#### 2d exit criteria
+- Public channel is created, found via search, readable without an account
+- Subscribers get push on new posts from admins
+- Server-side moderation works (admin deletes spam, ban prevents the banned user from subscribing or posting)
+
+#### 2d top risks
+- Search infrastructure cost — MariaDB FULLTEXT scales to mid-six-figure rows; beyond that, an external search engine is needed. Migration path documented up front
+- Server-side moderation is operationally heavy — needs a "report queue" UX and a human or partial-AI review loop. Start manual, document scaling
+
+---
+
+### Phase 2 dependencies + sequencing
+
+- **2a is blocking for 2b, 2c, 2d, 3** — every later phase needs encrypted backup (recovery story for new devices), passkey path (login UX), and DeviceGroup substrate (cross-device sync for any non-trivial UX)
+- **2b is blocking for 2c** — two-tier reuses the vanilla MLS code through `lakko-mls`; that code needs to handle the larger-N case cleanly first
+- **2d is parallel-safe with 2c** — no protocol overlap. Once 2a is done, 2c and 2d teams (or work-streams in the solo case) can run in parallel
+
+### Top Phase-2-wide risks
+- **Crypto correctness of two-tier (2c)** — biggest. Custom protocol, no upstream library coverage. Mitigation: implement carefully, write extensive tests, expose protocol docs publicly for review before wider deployment
+- **KeyPackage churn at scale** — needs benchmarking. Mitigation: spend a week on a synthetic load test before committing to the production design
+- **vanilla MLS performance at 50k members (2b)** — OpenMLS may need upstream patches. Mitigation: profile early, contribute upstream where possible
 
 ---
 
@@ -372,130 +558,89 @@ Groups up to ~50 members (vanilla MLS), multi-device sync without plaintext on t
 
 ### Goal
 
-P2P 1×1 + group audio/video calls + audio rooms. Self-hosted SFU (LiveKit upstream without a fork to start with, or mediasoup-rs / pion / str0m) on a single Hetzner VPS. Media keys from MLS exporter, SFrame for frame-level encryption.
+P2P 1×1 audio + video calls and group calls (up to ~50 participants) through a self-hosted SFU (LiveKit fork) with SFrame end-to-end media encryption. Media keys are derived from the existing MLS group exporter; the SFU only sees encrypted frames.
 
-Multi-region edge cascade and 100k+ viewer broadcasts are Phase 5 (those genuinely require geographically distributed edges).
+Audio rooms with hundreds of listeners and 100k+ viewer broadcasts are deferred — the underlying SFU + SFrame layer is reusable, but the geographically distributed edge cascade and broadcast-specific UX are a separate scope (Phase 5 in the original plan).
 
 ### Pre-flight
-- Phase 2 exit criteria green
+- Phase 2a foundation done (DeviceGroup substrate is reused for incoming-call notifications across the user's devices)
+- Phase 2b done (group calls use existing chat MLS groups; private chat scale is a prerequisite for in-chat-call UX)
 
 ### Sprint breakdown
 
-#### Backend
-- **3.0** coturn self-hosted on the same Hetzner VPS — STUN + TURN-over-TLS
-- **3.1** Signaling for call setup via `services/ds` (a special MLS application-message type inside the call group)
-- **3.2** `services/sfu` — self-hosted LiveKit (Apache 2.0 upstream) or alternative (mediasoup-rs / pion / str0m); JWT-auth integration with `services/auth`; on a separate VPS
+#### 3a — 1×1 P2P calls
 
-#### Crates
-- **3.3** `lakko-calls` skeleton — SFrame (RFC 9605) implementation, jitter buffer (NetEQ-style), codec negotiation
-- **3.4** `lakko-calls` ICE/STUN/TURN client integration (via webrtc-rs or str0m)
-- **3.5** `lakko-mls::group` exporter API extended for call media keys (`mls_exporter("lakko/call/v1", call_id, 32)`)
+**3a1** `lakko-calls` crate: WebRTC plumbing, ICE candidate exchange, SDP munging (via `webrtc-rs` or `str0m`)
+**3a2** ICE infrastructure: STUN (public bootstrapped + self-hosted backup) + TURN-over-TLS (self-hosted `coturn` on the same VPS as the SFU)
+**3a3** Signaling: `call_offer` / `call_answer` / ICE candidates as MLS application messages in the existing 1×1 group. Reuses Phase 1's DS journal — no new transport
+**3a4** Media-key derivation: `mls_exporter("lakko/call/v1", call_id, 32)` → SFrame seed
+**3a5** SFrame (RFC 9605): per-frame AEAD encryption (AES-128-GCM with hardware AES-NI / ARM Crypto), key rotation on participant Add / Remove with 1s overlap
+**3a6** Audio: Opus 32-64 kbps + DTX + FEC
+**3a7** Video: AV1-SVC (preferred) / VP9-SVC / H.264 fallback (Apple legacy)
+**3a8** Web client UI: Solid.js + native WebRTC + `getUserMedia`
+**3a9** iOS UI: CallKit + WebRTC iOS pod (`GoogleWebRTC` or Apple's `WebRTC.framework`), PushKit for wake-up, Live Activities for in-progress indicator
+**3a10** Android UI: ConnectionService + WebRTC Android pod, MediaSession for controls, ForegroundService for long-running calls
+**3a11** Call quality metrics: MOS estimation via Opus stats, packet-loss-driven adaptive bitrate
 
-#### Topologies
-- **3.6** P2P 1×1 setup: WebRTC + ICE/STUN/TURN, no SFU; media keys from the 1×1 MLS group exporter
-- **3.7** Group call via link: SFU + ad-hoc MLS group, joining via embedded one-time KeyPackage
-- **3.8** Group call inside a chat: SFU + reuse of the existing chat MLS group; exporter context = `call_id`
-- **3.9** Audio room: Speakers MLS subgroup (vanilla, ≤50 speakers) + Audience via SFU subscribe-only
-- **3.10** Encrypted media: SFrame keys from the exporter, AES-128-GCM per frame, hardware AES-NI / ARM Crypto Extensions; key rotation on Add/Remove with 1s overlap
+#### 3b — SFU deployment
 
-#### Codecs
-- **3.11** Audio: Opus 32-64 kbps + DTX + FEC
-- **3.12** Video: AV1-SVC (modern), VP9-SVC (fallback), H.264 (Apple legacy)
-- **3.13** Adaptive bitrate based on receiver BWE feedback (LiveKit / SFU-side logic)
+**3b1** LiveKit fork: strip the plaintext-media path; force E2EE-only signaling (SFU never sees decrypted frames). Insertable-streams support is already in LiveKit — verify works after fork
+**3b2** SFU deployment: separate Hetzner CCX-tier VPS (media bandwidth heavy). 20 TB monthly transfer allowance baseline
+**3b3** TURN deployment: coturn config alongside the SFU, TURN-over-TLS on port 443
+**3b4** SFU auth: token-signed admission. `services/auth` issues a short-lived JWT scoped to a specific `(call_id, participant_account_id)`; SFU validates the signature
+**3b5** Monitoring: SFU CPU + bandwidth + dropped-stream count → Prometheus exposition → simple Grafana dashboard
+**3b6** Cost analysis: per-user-minute bandwidth estimate, scale projection to inform when a second SFU VPS is needed
 
-#### Apple integration
-- **3.14** CallKit for native incoming-call UI
-- **3.15** PushKit for wake-up on incoming call
-- **3.16** Live Activities for in-progress call indicator
+#### 3c — Group calls
 
-#### Android integration
-- **3.17** ConnectionService for system-managed incoming UI
-- **3.18** MediaSession for controls
-- **3.19** ForegroundService for long-running calls
+**3c1** Call MLS-group primitive: ad-hoc subgroup spun up when the call starts (derived from the chat group's exporter for in-chat calls, or fresh for link-based calls)
+**3c2** In-chat group call: reuses the existing chat MLS group; media key from `chat_group.exporter("lakko/call/v1", call_id, 32)`
+**3c3** Link-based group call: `/call/<slug>` invite (extends the 1.18 capability infrastructure); joiner publishes a one-time KeyPackage; call MLS group spins up on first accepted joiner
+**3c4** Per-participant SFrame keys: `HKDF(call_group.exporter, leaf_index || "lakko/sframe-participant/v1")`
+**3c5** Mid-call participant Add / Remove: MLS commit on the call group → SFrame key rotation with 1s overlap (old key valid for in-flight frames; the overlap absorbs reorder)
+**3c6** UI: gallery view (grid of participants), screen-share, mute controls, participant list, raise-hand. Three-client implementation
+**3c7** Bandwidth adaptation: simulcast / SVC layers, dynamic resolution per participant view based on viewport / pin state
+**3c8** Recording — deferred. The default is no recording. If it lands later, the recording client is a regular participant with its own MLS leaf, so the recorded stream is end-to-end encrypted just like any other consumer
 
-#### Extras
-- **3.20** Screen sharing — single screen producer, pinned layout
-- **3.21** In-call chat — regular MLS application messages in the call group (existing flow)
-- **3.22** Promotion / demotion in audio rooms: Add/Remove on the Speakers MLS subgroup + key rotation
+#### 3d — Real-network testing + polish
+
+**3d1** Cross-continent latency test (Hetzner EU SFU ↔ US + Asia clients) — measure baseline numbers, document them in the SFU README
+**3d2** Packet loss tolerance (simulated via Linux `netem`) — verify Opus FEC + SVC adaptation hold up
+**3d3** A / B benchmark vs Zoom / Telegram / WhatsApp on p50 / p95 latency and audio MOS — set realistic expectations in the project README
+**3d4** Background-CPU constraints on iOS — verify the PushKit + CallKit + ForegroundService stack handles 30+ minute calls without OS kill
 
 ### Exit criteria
-- P2P 1×1 audio + video call works end-to-end on iOS + Android + Web + Desktop
-- Group call (link and in-chat) — up to 30 participants through a single self-hosted SFU
-- Audio room — up to 30 speakers + ≤500 listeners through a single SFU
-- Audio quality A/B-tested against Telegram / WhatsApp / Discord in lab; not worse than p50
+- 1×1 audio + video call works end-to-end on Web + iOS + Android
+- Group call up to 10 participants stable in a 30-minute session through the self-hosted SFU
+- Group call mid-call Add / Remove of a participant — no audible lag in the > 1s key-rotation overlap window
 - Audio p50 latency < 100 ms regional (P2P) / < 150 ms (via SFU)
-- Screen sharing works on macOS / Linux / Windows
-- E2EE is strict — no silent fallback (including media in group calls)
-- CallKit / ConnectionService integration correct (incoming UI works in background)
-- The SFU sustains 5 concurrent group calls of 10 participants each in a local load test
+- 1×1 video — call sustains 30 fps at 720p baseline; up-tier to 60 fps at 1080p when bandwidth allows
+- E2EE is strict — no silent fallback (including media in group calls). If SFrame keys cannot be established, the call does not start
 
 ### Out of scope for Phase 3
-- Channels / sender-key broadcast (Phase 4)
-- 100k+ viewer broadcasts (Phase 5 — needs multi-region cascade)
-- Recording (separate deferred question — policy clarity)
+- Audio rooms with hundreds of listeners (broadcast pattern — share lifts with the 2c two-tier substrate; defer until / unless demand)
+- 100k+ viewer broadcasts (Phase 5 — needs multi-region edge cascade)
+- Recording (deferred — separate scope decision, opt-in if it ever lands)
 
 ### Top risks
-- **iOS background CPU limits** during long calls
-- **AV1 hardware decode** on older devices (fallback to H.264)
-- **TURN abuse** — self-hosted coturn needs rate limits + auth
-- **CallKit / ConnectionService** API differences create UX inconsistency between iOS and Android
-- **SFU bandwidth ceiling** — a single CCX-tier VPS gives ~60 Mbps sustained; ~30 concurrent 4-person video calls; scale up as needed
+- **iOS background CPU limits** during long calls — Apple's enforcement can be inconsistent; needs careful PushKit + CallKit handling
+- **AV1 hardware decode** absent on older devices — H.264 fallback covers the long-tail
+- **TURN abuse** — self-hosted coturn needs rate limits + auth tokens scoped to active calls
+- **CallKit / ConnectionService UX divergence** — incoming-call presentation differs between iOS and Android; document acceptable per-platform UX
+- **SFU bandwidth ceiling** — a single CCX-tier VPS gives ~60 Mbps sustained; ~30 concurrent 4-person video calls. Scale up to a second SFU VPS when sustained utilisation crosses 70%
 
 ---
 
-## Phase 4 — Channels + Medium Broadcasts
-
-### Goal
-
-Channels (sender-key broadcast via DS) and medium-scale broadcasts (≤10k concurrent viewers via a single SFU).
-
-Audio rooms are already done in Phase 3. Multi-region edge cascade for 100k-1M viewers is Phase 5 (that really needs geographically distributed edges and multi-CDN).
-
-### Pre-flight
-- Phase 3 exit criteria green
-
-### Sprint breakdown
-
-#### Channels (sender-key broadcast)
-Vanilla MLS does not scale to 1M — we implement a **two-tier** architecture (see plan §3 / ADR-0001):
-
-- **4.0** PublisherGroup in lakko-mls — vanilla MLS, ≤500 mods/admins, content-key derivation API
-- **4.1** Sender-key envelope distribution via DS — HPKE-to-KeyPackage envelope for each new subscriber
-- **4.2** Content-key rotation — on schedule (24h / N messages) + on PublisherGroup membership change
-- **4.3** Channel subscribe / unsubscribe flow + best-effort revoke
-- **4.4** Reactions + comments on channel posts (per-post small MLS group, dynamically created)
-- **4.5** Public channel discovery (`@channel-username`) via a `services/discovery` extension
-
-#### Medium broadcasts (single-region SFU)
-- **4.6** `services/edge` — broadcast origin handler; reuses the SFU from Phase 3 for the media pipe
-- **4.7** Late-joiner flow for broadcasts — a viewer receives the current content key via an HPKE envelope
-- **4.8** Reactions from viewers (via the same sender-key broadcast back-channel)
-
-#### Public posture
-- **4.9** Document publicly: backward-secrecy property of channels (the same as Telegram / Slack / Discord; we run rotation aggressively)
-
-#### Load testing
-- **4.10** A 50k-subscriber channel is stable (rotation event + delivery)
-- **4.11** A 10k-viewer broadcast end-to-end through a single SFU
-
-### Exit criteria
-- A channel up to 50k subscribers is stable (rotation events do not topple DS)
-- A broadcast up to 10k viewers through a single SFU is stable (scale up the VPS if needed)
-- Public channels are findable by `@username`
-- Documented publicly: the backward-secrecy property of channels
-
-### Out of scope for Phase 4
-- 100k-1M viewer broadcasts (Phase 5 — needs multi-region edge cascade)
-- Channel federation (out of roadmap)
-- Recording channels / broadcasts (separate policy question, not functional)
-
-### Top risks
-- **Sender-key distribution scaling** — a large channel = many HPKE envelopes on rotation; DS bandwidth budget; mitigated by staggered rollout
-- **Revocation after content-key distribution** — best-effort until rotation; community reaction to that fact
-- **DS load** at rotation events for large channels (needs throttling)
-- **Single-SFU broadcast ceiling** — past ~10k viewers degradation kicks in, beyond that we need cascade (Phase 5)
-
----
+<!--
+Phase 4 (channels / two-tier crypto / medium broadcasts) folded into
+Phase 2c (large private groups + channels via PublisherGroup +
+sender-key) and Phase 2d (public channels). The original
+"Phase 4 = channels" framing pre-dated the split between private-
+with-scale (needs E2EE, lives in 2c) and public-by-design (no E2EE
+on content, lives in 2d). The two-tier substrate ships in 2c; the
+public broadcast surface ships in 2d. 100k+ viewer broadcasts with
+geographically distributed edge cascade remain a Phase 5 concern.
+-->
 
 ## Phase 5 — Anti-censorship + Scale
 
