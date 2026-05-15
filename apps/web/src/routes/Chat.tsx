@@ -438,8 +438,19 @@ function ChatView(props: {
 
   /**
    * Inline-preview an image attachment. Fetches once + caches
-   * the resulting object URL in `decryptedCache`; subsequent
-   * clicks on the same chip are instant.
+   * the resulting object URL in `decryptedCache`; the
+   * [`AttachmentChips`] component reads the cache reactively and
+   * renders the `<img>` inside the bubble once the URL is
+   * available. Re-click is a no-op (the cache already has the
+   * entry); the user toggles the inline preview off via the
+   * Hide button on the chip.
+   *
+   * Polish 1.x — inline image previews live in the bubble
+   * itself rather than blowing open a new tab, matching iOS /
+   * Android attachment UX and Signal / Telegram patterns. The
+   * SVG exclusion in [`isInlinePreviewable`] keeps the trust
+   * boundary tight: no `<img>` src from an unverified SVG, only
+   * raster formats decoded by the browser's image pipeline.
    */
   async function onPreviewAttachment(
     ref: AttachmentRefBytes,
@@ -447,7 +458,9 @@ function ChatView(props: {
     const key = blobIdHex(ref.blobId);
     const cached = decryptedCache().get(key);
     if (cached !== undefined && cached.objectUrl !== null) {
-      window.open(cached.objectUrl, "_blank");
+      // Already cached — the bubble already renders inline.
+      // Nothing to do; the Hide affordance on the chip clears
+      // the URL.
       return;
     }
     setError(null);
@@ -460,7 +473,8 @@ function ChatView(props: {
       const next = new Map(decryptedCache());
       next.set(key, { bytes, objectUrl: url });
       setDecryptedCache(next);
-      window.open(url, "_blank");
+      // No window.open — the JSX picks up the cached URL via
+      // the `getCachedUrl` getter passed to AttachmentChips.
     } catch (err) {
       if (err instanceof AttachmentMissingError) {
         setError("The attachment is no longer available on the server.");
@@ -468,6 +482,32 @@ function ChatView(props: {
         setError(`preview failed: ${formatError(err)}`);
       }
     }
+  }
+
+  /**
+   * Drop a cached inline preview without re-decrypting on the
+   * next Open. Revokes the object URL so the browser releases
+   * the underlying Blob; the `bytes` ref is kept in the cache
+   * for re-download but the URL is cleared so the bubble
+   * re-renders without the inline image.
+   */
+  function onHideAttachmentPreview(ref: AttachmentRefBytes): void {
+    const key = blobIdHex(ref.blobId);
+    const cached = decryptedCache().get(key);
+    if (cached === undefined || cached.objectUrl === null) return;
+    URL.revokeObjectURL(cached.objectUrl);
+    const next = new Map(decryptedCache());
+    next.set(key, { bytes: cached.bytes, objectUrl: null });
+    setDecryptedCache(next);
+  }
+
+  /** Cache accessor passed to [`AttachmentChips`] — returns the
+   *  cached object URL when the attachment has been previewed
+   *  in this session, `null` otherwise. The chip reads this on
+   *  every render so the inline image appears reactively once
+   *  the cache lands. */
+  function getCachedAttachmentUrl(ref: AttachmentRefBytes): string | null {
+    return decryptedCache().get(blobIdHex(ref.blobId))?.objectUrl ?? null;
   }
 
   // 1.18g — "Add member" submission handler. Resolves the
@@ -803,6 +843,8 @@ function ChatView(props: {
                 row={row}
                 onDownload={onDownloadAttachment}
                 onPreview={onPreviewAttachment}
+                onHidePreview={onHideAttachmentPreview}
+                getCachedUrl={getCachedAttachmentUrl}
               />
             )}
           </For>
@@ -950,6 +992,8 @@ function TimelineBubble(props: {
   row: TimelineRow;
   onDownload: (ref: AttachmentRefBytes) => void | Promise<void>;
   onPreview: (ref: AttachmentRefBytes) => void | Promise<void>;
+  onHidePreview: (ref: AttachmentRefBytes) => void;
+  getCachedUrl: (ref: AttachmentRefBytes) => string | null;
 }): JSX.Element {
   if (props.row.kind === "incoming") {
     const ev = props.row.event;
@@ -986,6 +1030,8 @@ function TimelineBubble(props: {
             attachments={ev.attachments}
             onDownload={props.onDownload}
             onPreview={props.onPreview}
+            onHidePreview={props.onHidePreview}
+            getCachedUrl={props.getCachedUrl}
             tone="incoming"
           />
         </Show>
@@ -1023,6 +1069,8 @@ function TimelineBubble(props: {
           attachments={r.attachments}
           onDownload={props.onDownload}
           onPreview={props.onPreview}
+          onHidePreview={props.onHidePreview}
+          getCachedUrl={props.getCachedUrl}
           tone="outgoing"
         />
       </Show>
@@ -1052,6 +1100,11 @@ function AttachmentChips(props: {
   attachments: AttachmentRefBytes[];
   onDownload: (ref: AttachmentRefBytes) => void | Promise<void>;
   onPreview: (ref: AttachmentRefBytes) => void | Promise<void>;
+  onHidePreview: (ref: AttachmentRefBytes) => void;
+  /** Returns the cached object URL for an attachment, or `null`
+   *  if it hasn't been decrypted in this session. The bubble
+   *  renders an inline `<img>` whenever this is non-null. */
+  getCachedUrl: (ref: AttachmentRefBytes) => string | null;
   tone: "incoming" | "outgoing";
 }): JSX.Element {
   const chipBg = props.tone === "incoming" ? "var(--surface-bg)" : "rgba(255,255,255,0.15)";
@@ -1060,78 +1113,125 @@ function AttachmentChips(props: {
     <div
       style={{
         display: "flex",
-        "flex-wrap": "wrap",
+        "flex-direction": "column",
         gap: "0.35rem",
         "margin-top": "0.4rem",
       }}
     >
       <For each={props.attachments}>
-        {(ref) => (
-          <span
-            style={{
-              display: "inline-flex",
-              "align-items": "center",
-              gap: "0.35rem",
-              padding: "0.25rem 0.5rem",
-              background: chipBg,
-              color: chipText,
-              "border-radius": "var(--radius-sm)",
-              "font-size": "0.8rem",
-              "max-width": "100%",
-            }}
-          >
-            <span
-              style={{
-                "white-space": "nowrap",
-                overflow: "hidden",
-                "text-overflow": "ellipsis",
-                "max-width": "20ch",
-              }}
-              title={ref.name ?? "(unnamed)"}
-            >
-              {ref.name ?? "(unnamed)"}
-            </span>
-            <span style={{ opacity: 0.7 }}>
-              · {formatAttachmentSize(ref.size)}
-            </span>
-            <Show when={isInlinePreviewable(ref)}>
-              <button
-                type="button"
-                onClick={() => {
-                  void props.onPreview(ref);
-                }}
+        {(ref) => {
+          const cachedUrl = (): string | null => props.getCachedUrl(ref);
+          const previewable = isInlinePreviewable(ref);
+          return (
+            <div style={{ display: "flex", "flex-direction": "column", gap: "0.25rem" }}>
+              <Show when={previewable && cachedUrl() !== null}>
+                {/* Inline image preview — renders the decrypted
+                    blob URL directly in the bubble. Polish 1.x:
+                    matches the Signal / Telegram pattern of
+                    showing the picture next to its filename,
+                    rather than blowing open a new tab. */}
+                <img
+                  src={cachedUrl() ?? ""}
+                  alt={ref.name ?? "image attachment"}
+                  style={{
+                    display: "block",
+                    "max-width": "100%",
+                    "max-height": "320px",
+                    width: "auto",
+                    height: "auto",
+                    "border-radius": "var(--radius-sm)",
+                    "object-fit": "contain",
+                  }}
+                />
+              </Show>
+              <span
                 style={{
-                  border: "none",
-                  background: "transparent",
-                  color: "inherit",
-                  cursor: "pointer",
-                  "text-decoration": "underline",
-                  padding: 0,
+                  display: "inline-flex",
+                  "align-items": "center",
+                  gap: "0.35rem",
+                  padding: "0.25rem 0.5rem",
+                  background: chipBg,
+                  color: chipText,
+                  "border-radius": "var(--radius-sm)",
                   "font-size": "0.8rem",
+                  "max-width": "100%",
                 }}
               >
-                Open
-              </button>
-            </Show>
-            <button
-              type="button"
-              onClick={() => {
-                void props.onDownload(ref);
-              }}
-              style={{
-                border: "none",
-                background: "transparent",
-                color: "inherit",
-                cursor: "pointer",
-                "text-decoration": "underline",
-                padding: 0,
-                "font-size": "0.8rem",
-              }}
-            >
-              Save
-            </button>
-          </span>
-        )}
+                <span
+                  style={{
+                    "white-space": "nowrap",
+                    overflow: "hidden",
+                    "text-overflow": "ellipsis",
+                    "max-width": "20ch",
+                  }}
+                  title={ref.name ?? "(unnamed)"}
+                >
+                  {ref.name ?? "(unnamed)"}
+                </span>
+                <span style={{ opacity: 0.7 }}>
+                  · {formatAttachmentSize(ref.size)}
+                </span>
+                <Show when={previewable}>
+                  <Show
+                    when={cachedUrl() !== null}
+                    fallback={
+                      <button
+                        type="button"
+                        onClick={() => {
+                          void props.onPreview(ref);
+                        }}
+                        style={{
+                          border: "none",
+                          background: "transparent",
+                          color: "inherit",
+                          cursor: "pointer",
+                          "text-decoration": "underline",
+                          padding: 0,
+                          "font-size": "0.8rem",
+                        }}
+                      >
+                        Open
+                      </button>
+                    }
+                  >
+                    <button
+                      type="button"
+                      onClick={() => props.onHidePreview(ref)}
+                      style={{
+                        border: "none",
+                        background: "transparent",
+                        color: "inherit",
+                        cursor: "pointer",
+                        "text-decoration": "underline",
+                        padding: 0,
+                        "font-size": "0.8rem",
+                      }}
+                    >
+                      Hide
+                    </button>
+                  </Show>
+                </Show>
+                <button
+                  type="button"
+                  onClick={() => {
+                    void props.onDownload(ref);
+                  }}
+                  style={{
+                    border: "none",
+                    background: "transparent",
+                    color: "inherit",
+                    cursor: "pointer",
+                    "text-decoration": "underline",
+                    padding: 0,
+                    "font-size": "0.8rem",
+                  }}
+                >
+                  Save
+                </button>
+              </span>
+            </div>
+          );
+        }}
       </For>
     </div>
   );
