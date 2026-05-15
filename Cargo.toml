@@ -21,6 +21,7 @@ members = [
     "crates/lakko-auth-token",
     "crates/lakko-pow",
     "crates/lakko-mnemonic",
+    "crates/lakko-shamir",
     "crates/lakko-discovery-client",
     "crates/lakko-ffi-uniffi",
     "crates/lakko-ffi-wasm",
@@ -87,6 +88,7 @@ lakko-auth-client = { path = "crates/lakko-auth-client", version = "0.0.0" }
 lakko-auth-token = { path = "crates/lakko-auth-token", version = "0.0.0" }
 lakko-pow = { path = "crates/lakko-pow", version = "0.0.0" }
 lakko-mnemonic = { path = "crates/lakko-mnemonic", version = "0.0.0" }
+lakko-shamir = { path = "crates/lakko-shamir", version = "0.0.0" }
 lakko-discovery-client = { path = "crates/lakko-discovery-client", version = "0.0.0" }
 
 [workspace.lints.rust]
