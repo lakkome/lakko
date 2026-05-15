@@ -23,6 +23,38 @@ pub fn blake3_keyed(key: &[u8; 32], input: &[u8]) -> [u8; DIGEST_LEN] {
     *blake3::keyed_hash(key, input).as_bytes()
 }
 
+/// BLAKE3 keyed XOF — extract an arbitrary number of bytes from the BLAKE3
+/// stream keyed by `key`. Used where a single fixed 32-byte digest isn't
+/// enough (e.g. the 60-byte safety-number derivation in
+/// `lakko-contacts::safety`).
+///
+/// The `derive_key` ctx is the user-facing way to bind a domain to BLAKE3's
+/// keyed mode (RFC-style "context string"); a 32-byte key from
+/// `derive_key(ctx, "")` then feeds `keyed_hash`'s XOF mode.
+#[must_use]
+pub fn blake3_keyed_xof(key: &[u8; 32], input: &[u8], out_len: usize) -> Vec<u8> {
+    let mut hasher = blake3::Hasher::new_keyed(key);
+    hasher.update(input);
+    let mut xof = hasher.finalize_xof();
+    let mut buf = vec![0u8; out_len];
+    xof.fill(&mut buf);
+    buf
+}
+
+/// `blake3::derive_key(ctx, "")` — yield a 32-byte domain-bound key
+/// suitable for [`blake3_keyed`] / [`blake3_keyed_xof`].
+///
+/// # Panics
+///
+/// Panics if `domain` is not valid UTF-8. Callers pass an `&'static str`
+/// from a `const` declaration in their own module, so this is a
+/// compile-time check in practice; the function is `#[must_use]` to
+/// surface bugs where the derived key is ignored.
+#[must_use]
+pub fn blake3_derive_key(domain: &str) -> [u8; 32] {
+    blake3::derive_key(domain, b"")
+}
+
 /// SHA-256 of the given input. Use only for protocol interop (X.509, TLS).
 /// Prefer [`blake3()`] for new internal designs.
 #[must_use]

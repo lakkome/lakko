@@ -57,6 +57,7 @@ pub mod error;
 pub mod invite;
 pub mod pseudonym;
 pub mod request;
+pub mod safety;
 
 pub use ack::{compose_ack, decode_and_verify_ack, ContactAck};
 pub use error::{ContactError, Result};
@@ -67,3 +68,7 @@ pub use invite::{
 };
 pub use pseudonym::{Direction, IdentityPseudonym, PerRelationship, StrangerInbox, PSEUDONYM_LEN};
 pub use request::{compose, decode_and_verify, open_envelope, ContactRequest, ACCOUNT_ID_LEN};
+pub use safety::{
+    safety_number, safety_number_bytes, SAFETY_NUMBER_DIGITS, SAFETY_NUMBER_DIGITS_PER_GROUP,
+    SAFETY_NUMBER_GROUPS,
+};

@@ -411,6 +411,46 @@ impl ContactAck {
 }
 
 // ============================================================================
+// Safety numbers (1.9b3 — verify-existing-contact OOB compare)
+// ============================================================================
+
+/// Compute the canonical Signal-style safety number for two
+/// Ed25519 identity public keys (Phase 1.9b3 — ADR-0005 §13.5).
+///
+/// The output is a 71-byte ASCII string: 12 groups of 5 decimal
+/// digits separated by single spaces, e.g. `"12345 67890 …"`.
+/// Both sides of a conversation compute the same string
+/// regardless of input order, so the OOB compare ("read me your
+/// number / mine reads X") works either way.
+///
+/// Each pubkey input is the raw 32-byte Ed25519 verifying key.
+/// The inputs are NOT validated as on-curve points — the
+/// function is purely a hash over the bytes; callers that need
+/// on-curve validation should do it before invoking this helper.
+///
+/// # Errors
+///
+/// `JsError` when either input is not exactly 32 bytes long.
+#[wasm_bindgen(js_name = computeSafetyNumber)]
+pub fn compute_safety_number(my_pubkey: &[u8], their_pubkey: &[u8]) -> Result<String, JsError> {
+    if my_pubkey.len() != PUBLIC_KEY_LEN {
+        return Err(JsError::new(&format!(
+            "myPubkey must be {PUBLIC_KEY_LEN} bytes",
+        )));
+    }
+    if their_pubkey.len() != PUBLIC_KEY_LEN {
+        return Err(JsError::new(&format!(
+            "theirPubkey must be {PUBLIC_KEY_LEN} bytes",
+        )));
+    }
+    let mut a = [0u8; PUBLIC_KEY_LEN];
+    a.copy_from_slice(my_pubkey);
+    let mut b = [0u8; PUBLIC_KEY_LEN];
+    b.copy_from_slice(their_pubkey);
+    Ok(lakko_contacts::safety_number_bytes(&a, &b))
+}
+
+// ============================================================================
 // Invite capability (Phase 1.18b)
 // ============================================================================
 

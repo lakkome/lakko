@@ -267,6 +267,31 @@ public final class ContactsRepository: ObservableObject {
         )
     }
 
+    /// Compute the Signal-style safety number (Phase 1.9b3 —
+    /// ADR-0005 §13.5) between the local identity and the
+    /// supplied contact pubkey. Returns the canonical 71-byte
+    /// ASCII string the user reads OOB to verify their pinned
+    /// keys agree.
+    ///
+    /// Throws ``ContactsError/wrapped`` when the session has no
+    /// identity secrets (the caller should prompt the user to
+    /// re-enter their password) or when the UniFFI surface
+    /// rejects the pubkey shape.
+    public func safetyNumber(against theirPubkey: Data) throws -> String {
+        guard let secrets = authRepository.identitySecrets else {
+            throw ContactsError.wrap(
+                ContactsError.simple(
+                    "no identity secrets — please re-enter your password"
+                )
+            )
+        }
+        let identity = try Identity.fromSeed(seed: secrets.exportKey)
+        return try computeSafetyNumber(
+            myPubkey: identity.signaturePublicKey(),
+            theirPubkey: theirPubkey
+        )
+    }
+
     /// Drop an incoming request from the pending list without
     /// acknowledging it to the sender. Mirror of the web Decline
     /// semantics — server doesn't get told, the row just disappears

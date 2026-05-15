@@ -26,7 +26,11 @@
 import { createMemo, createSignal, For, Show, type JSX } from "solid-js";
 import { A } from "@solidjs/router";
 import { useAuth } from "../auth/AuthContext";
-import { base64Encode, base64UrlEncodeNoPad } from "../auth/account-id";
+import {
+  base64Decode,
+  base64Encode,
+  base64UrlEncodeNoPad,
+} from "../auth/account-id";
 import { ContactsClient, ContactsError } from "../contacts/client";
 import type { IncomingContactRequest, SendResult } from "../contacts/client";
 import { useChats, type ActiveGroup } from "../chat/ChatContext";
@@ -51,6 +55,7 @@ import {
   upsertAccepted,
   type AcceptedContact,
 } from "../contacts/local-store";
+import { computeSafetyNumber } from "../contacts/safety";
 
 export default function Contacts(): JSX.Element {
   const auth = useAuth();
@@ -368,6 +373,10 @@ function ConnectedContacts(props: ConnectedContactsProps): JSX.Element {
 
       <AcceptedPanel
         accepted={accepted}
+        myPubkey={() => {
+          const id = chats.identity();
+          return id?.signaturePublicKey ?? null;
+        }}
         onRemove={onRemoveAccepted}
       />
     </>
@@ -1024,6 +1033,11 @@ function PendingPanel(props: PendingPanelProps): JSX.Element {
 
 interface AcceptedPanelProps {
   readonly accepted: () => AcceptedContact[];
+  /** Local user's Ed25519 verifying key (32 bytes) — required to
+   *  compute safety numbers against accepted contacts. `null`
+   *  when the chat-provider identity isn't wired yet (the
+   *  AcceptedRow falls back to "safety number unavailable"). */
+  readonly myPubkey: () => Uint8Array | null;
   readonly onRemove: (c: AcceptedContact) => void;
 }
 
@@ -1056,28 +1070,120 @@ function AcceptedPanel(props: AcceptedPanelProps): JSX.Element {
         <ul style={listStyle()}>
           <For each={props.accepted()}>
             {(c) => (
-              <li style={rowStyle()}>
-                <div style={{ flex: 1 }}>
-                  <strong>{c.displayName}</strong>
-                  <div
-                    style={{
-                      color: "var(--surface-muted)",
-                      "font-size": "0.85rem",
-                      "font-family": "ui-monospace, monospace",
-                    }}
-                  >
-                    {c.signaturePubkeyB64.slice(0, 16)}…
-                  </div>
-                </div>
-                <button type="button" onClick={() => props.onRemove(c)}>
-                  Remove
-                </button>
-              </li>
+              <AcceptedRow
+                contact={c}
+                myPubkey={props.myPubkey}
+                onRemove={() => props.onRemove(c)}
+              />
             )}
           </For>
         </ul>
       </Show>
     </section>
+  );
+}
+
+/** Single accepted-contact row with a "Show safety number"
+ *  toggle (Phase 1.9b3 — ADR-0005 §13.5). The safety number is
+ *  computed lazily on first toggle: BLAKE3 is fast but `loadWasm`
+ *  has a one-time module-instantiate cost we don't want to pay
+ *  on every row mount. */
+interface AcceptedRowProps {
+  readonly contact: AcceptedContact;
+  readonly myPubkey: () => Uint8Array | null;
+  readonly onRemove: () => void;
+}
+
+function AcceptedRow(props: AcceptedRowProps): JSX.Element {
+  const [open, setOpen] = createSignal(false);
+  const [number, setNumber] = createSignal<string | null>(null);
+  const [busy, setBusy] = createSignal(false);
+  const [err, setErr] = createSignal<string | null>(null);
+
+  async function ensureNumber(): Promise<void> {
+    if (number() !== null) return;
+    const my = props.myPubkey();
+    if (my === null) {
+      setErr("safety number unavailable — sign in again to compute");
+      return;
+    }
+    setBusy(true);
+    setErr(null);
+    try {
+      const their = base64Decode(props.contact.signaturePubkeyB64);
+      const n = await computeSafetyNumber(my, their);
+      setNumber(n);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function toggle(): Promise<void> {
+    const next = !open();
+    setOpen(next);
+    if (next) {
+      await ensureNumber();
+    }
+  }
+
+  return (
+    <li style={rowStyle()}>
+      <div style={{ flex: 1 }}>
+        <strong>{props.contact.displayName}</strong>
+        <div
+          style={{
+            color: "var(--surface-muted)",
+            "font-size": "0.85rem",
+            "font-family": "ui-monospace, monospace",
+          }}
+        >
+          {props.contact.signaturePubkeyB64.slice(0, 16)}…
+        </div>
+        <Show when={open()}>
+          <div
+            style={{
+              "margin-top": "0.5rem",
+              padding: "0.5rem 0.75rem",
+              background: "var(--surface-canvas)",
+              border: "1px solid var(--surface-border)",
+              "border-radius": "var(--radius-sm)",
+              "font-size": "0.85rem",
+            }}
+          >
+            <div style={{ color: "var(--surface-muted)", "margin-bottom": "0.25rem" }}>
+              Safety number — compare these digits with your
+              contact out-of-band (voice / video / paper). If they
+              match, your pinned identity keys agree.
+            </div>
+            <Show when={number() !== null} fallback={
+              <div style={{ color: "var(--surface-muted)" }}>
+                {busy() ? "computing…" : (err() ?? "—")}
+              </div>
+            }>
+              <code style={{ "font-size": "1rem", "line-height": "1.5" }}>
+                {number()}
+              </code>
+            </Show>
+          </div>
+        </Show>
+      </div>
+      <div style={{ display: "flex", "flex-direction": "column", gap: "0.25rem" }}>
+        <button
+          type="button"
+          onClick={() => {
+            void toggle();
+          }}
+          disabled={busy()}
+        >
+          {open() ? "Hide safety number" : "Show safety number"}
+        </button>
+        <button type="button" onClick={props.onRemove}>
+          Remove
+        </button>
+      </div>
+    </li>
   );
 }
 
