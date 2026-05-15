@@ -17,6 +17,15 @@ import SwiftUI
 /// ``AcceptInviteResult`` variants. The user dismisses the result
 /// with Done; the host calls
 /// ``InviteIntake/clear()`` to drop the parked slug.
+///
+/// **Phase 1.9b4 (ADR-0005 §13.4) note:** the iOS / Android
+/// landing screens auto-accept every invite — including
+/// `bootstrap_referral` referrals — as soon as the surface
+/// mounts. The tap on the universal link is the consent gesture;
+/// requiring a second tap on Accept would be redundant. The web
+/// client keeps an explicit Accept button for non-referral
+/// invites (lets the user attach an intro) and only auto-
+/// accepts `bootstrap_referral=true` invites for parity.
 public struct InviteLandingScreen: View {
 
     @ObservedObject public var viewModel: InviteLandingViewModel

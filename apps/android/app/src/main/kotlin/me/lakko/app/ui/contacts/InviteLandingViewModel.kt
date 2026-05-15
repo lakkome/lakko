@@ -22,6 +22,14 @@ import me.lakko.app.contacts.ContactsRepository
  * on `init` so the screen immediately shows a spinner + lands
  * on the result state on its own; no user gesture needed.
  *
+ * **Phase 1.9b4 (ADR-0005 §13.4) note:** the auto-run covers
+ * every invite, including `bootstrap_referral` referrals — the
+ * tap on the deep-link is the consent gesture; requiring a
+ * second tap on Accept would be redundant. The web client keeps
+ * an explicit Accept button for non-referral invites (lets the
+ * user attach an intro) and only auto-accepts
+ * `bootstrap_referral=true` invites for parity.
+ *
  * The discriminated [InviteLandingState] mirrors the underlying
  * [AcceptInviteResult] verbatim — same eight terminal variants
  * (Accepted / AlreadyAccepted / Expired / Exhausted / NotFound /

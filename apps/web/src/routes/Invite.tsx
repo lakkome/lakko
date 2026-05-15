@@ -27,17 +27,28 @@
  *      the capability's pre-resolved bundle (no
  *      `/discovery/lookup` round-trip needed).
  *
- * `bootstrap_referral` capabilities are flagged in the UI but
- * still go through the same Accept path in V1; the dedicated
- * "auto-send-on-signup" bootstrap flow lands with the mobile
- * apps in 1.14 / 1.15.
+ * `bootstrap_referral` capabilities are flagged in the UI and
+ * **auto-trigger Accept on mount** (Phase 1.9b4 — ADR-0005 §13.4).
+ * The click on the referral link IS the consent — the joiner
+ * does not need to press Accept again. Decline stays clickable
+ * during the 1.5s navigate-back grace window. For not-yet-
+ * signed-in joiners, the existing `?return=` round-trip through
+ * Signup / Login (1.18e) brings them back to this page, where
+ * the auto-accept then fires once their session is live.
  *
  * The page is a **public route** — registered outside the
  * `<RequireSession>` block in `routes.tsx` — because an invite
  * URL can be opened by anyone, including users who haven't
  * authenticated yet on this device.
  */
-import { createMemo, createResource, createSignal, Show, type JSX } from "solid-js";
+import {
+  createMemo,
+  createResource,
+  createSignal,
+  onMount,
+  Show,
+  type JSX,
+} from "solid-js";
 import { A, useNavigate, useParams } from "@solidjs/router";
 import type { InviteCapability as WasmInviteCapability } from "../../wasm/lakko_ffi_wasm";
 import { useAuth } from "../auth/AuthContext";
@@ -247,6 +258,30 @@ function ConnectPanel(props: {
   const nowMs = Date.now();
   const expired = !cap.isValidNow(BigInt(nowMs));
   const labelOrFingerprint = cap.label.length > 0 ? cap.label : `@${props.invite.fingerprintShort}`;
+  // 1.9b4: bootstrap-referral auto-accept. When the inviter
+  // flagged the capability as a referral signup-deep-link
+  // (ADR-0005 §13.4), the joiner does not need to press Accept
+  // manually — the click on the link IS the consent. We
+  // auto-trigger `onAccept` once the panel mounts in a usable
+  // state (not expired, not already exhausted, identity secrets
+  // present). The user can still Decline before the inner
+  // `onAccept` round-trip lands, since we surface a "Sending…"
+  // notice and the Decline button remains active. The browser-
+  // side navigation back to /contacts also gives a 1.5s grace
+  // window for second thoughts.
+  //
+  // The empty intro is intentional — a bootstrap-referral click
+  // is by construction a "we already know each other" gesture;
+  // the inviter doesn't expect an introduction.
+  onMount(() => {
+    if (!cap.bootstrapReferral) return;
+    if (expired) return;
+    if (auth.identitySecrets() === null) return;
+    // Pre-flight all the same gates `Accept` checks; let the
+    // click-driven path handle the actual server round-trip /
+    // error surfacing so we don't duplicate state-machine code.
+    void onAccept();
+  });
 
   async function onAccept(): Promise<void> {
     setError(null);
@@ -346,7 +381,10 @@ function ConnectPanel(props: {
         <dd style={defStyle()}>{describeMaxUses(cap.maxUses)}</dd>
         <Show when={cap.bootstrapReferral}>
           <dt style={termStyle()}>Type</dt>
-          <dd style={defStyle()}>Referral link (signup-deep-link flag set)</dd>
+          <dd style={defStyle()}>
+            Referral link — your ContactRequest auto-sends on
+            arrival; no intro needed.
+          </dd>
         </Show>
       </dl>
 
