@@ -36,6 +36,7 @@ use lakko_mls::{
 
 pub mod attachments;
 pub mod auth;
+pub mod backup;
 pub mod contacts;
 pub mod discovery;
 pub mod mnemonic;
@@ -152,6 +153,13 @@ pub enum FfiError {
     /// share string — all collapse into this variant.
     #[error("shamir error: {0}")]
     Shamir(String),
+
+    /// Backup envelope / payload error (Phase 2a1c). Same
+    /// elision posture as the rest: wrong recovery phrase,
+    /// tampered envelope bytes, malformed payload, wrong-length
+    /// account_id / ed25519_seed inputs — all collapse here.
+    #[error("backup error: {0}")]
+    Backup(String),
 
     /// Lock contention / poisoned mutex on the shared Group state.
     #[error("internal lock error")]

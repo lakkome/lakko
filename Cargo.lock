@@ -2057,6 +2057,7 @@ dependencies = [
  "base64",
  "lakko-attachments",
  "lakko-auth-client",
+ "lakko-backup",
  "lakko-contacts",
  "lakko-crypto",
  "lakko-discovery-client",

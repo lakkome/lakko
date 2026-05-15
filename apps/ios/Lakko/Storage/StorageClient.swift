@@ -59,6 +59,11 @@ public final class StorageClient {
 
     public let baseURL: String
     private let session: URLSession
+    /// Bearer token bound to the per-account `/backup` routes
+    /// (Phase 2a1c). `nil` is fine for the content-addressed
+    /// `/blob/...` routes — they're auth-free; a `nil` value on
+    /// a backup-route call surfaces as a 401 from the server.
+    private var sessionToken: String?
 
     public init(
         baseURL: String = StorageClient.defaultBaseURL,
@@ -66,6 +71,16 @@ public final class StorageClient {
     ) {
         self.baseURL = baseURL
         self.session = session
+        self.sessionToken = nil
+    }
+
+    /// Bind / rebind the bearer token used for the per-account
+    /// backup routes. Mirror of `apps/web`'s
+    /// `StorageClient.setSessionToken`. Caller drives this from
+    /// the same `AuthRepository.identitySecrets?.sessionToken`
+    /// signal the discovery / ds clients already consume.
+    public func setSessionToken(_ token: String?) {
+        self.sessionToken = token
     }
 
     // MARK: - PUT
@@ -238,6 +253,111 @@ public final class StorageClient {
         return cl.flatMap(Int.init)
     }
 
+    // MARK: - Per-account backup (Phase 2a1c)
+
+    /// `PUT /backup` — overwrite this session's backup blob. Body
+    /// is the wire bytes from `sealBackup` (UniFFI). The server
+    /// identifies the owning account via the bearer session token
+    /// — there is no account_id in the URL or body, so a stolen
+    /// token cannot scribble over another account.
+    public func putBackup(envelopeBytes: Data) async throws {
+        let endpoint = "/backup"
+        var request = try buildRequest(endpoint: endpoint, method: "PUT")
+        request.setValue(
+            "application/octet-stream",
+            forHTTPHeaderField: "Content-Type"
+        )
+        attachAuth(to: &request)
+
+        let raw: (Data, URLResponse)
+        do {
+            raw = try await session.upload(for: request, from: envelopeBytes)
+        } catch {
+            throw StorageClientError.network(endpoint: endpoint, underlying: error)
+        }
+        let (data, response) = raw
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw StorageClientError.http(
+                status: 0,
+                endpoint: endpoint,
+                body: "non-HTTP response"
+            )
+        }
+        if (200..<300).contains(httpResponse.statusCode) {
+            return
+        }
+        throw StorageClientError.http(
+            status: httpResponse.statusCode,
+            endpoint: endpoint,
+            body: Self.truncate(String(data: data, encoding: .utf8) ?? "<binary>")
+        )
+    }
+
+    /// `GET /backup` — fetch this session's backup blob, or `nil`
+    /// when none has been uploaded yet.
+    public func getBackup() async throws -> Data? {
+        let endpoint = "/backup"
+        var request = try buildRequest(endpoint: endpoint, method: "GET")
+        attachAuth(to: &request)
+
+        let raw: (Data, URLResponse)
+        do {
+            raw = try await session.data(for: request)
+        } catch {
+            throw StorageClientError.network(endpoint: endpoint, underlying: error)
+        }
+        let (data, response) = raw
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw StorageClientError.http(
+                status: 0,
+                endpoint: endpoint,
+                body: "non-HTTP response"
+            )
+        }
+        if httpResponse.statusCode == 404 {
+            return nil
+        }
+        guard (200..<300).contains(httpResponse.statusCode) else {
+            throw StorageClientError.http(
+                status: httpResponse.statusCode,
+                endpoint: endpoint,
+                body: Self.truncate(String(data: data, encoding: .utf8) ?? "<binary>")
+            )
+        }
+        return data
+    }
+
+    /// `DELETE /backup` — drop this session's backup blob.
+    /// Idempotent — server returns 204 regardless of prior state.
+    public func deleteBackup() async throws {
+        let endpoint = "/backup"
+        var request = try buildRequest(endpoint: endpoint, method: "DELETE")
+        attachAuth(to: &request)
+
+        let raw: (Data, URLResponse)
+        do {
+            raw = try await session.data(for: request)
+        } catch {
+            throw StorageClientError.network(endpoint: endpoint, underlying: error)
+        }
+        let (data, response) = raw
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw StorageClientError.http(
+                status: 0,
+                endpoint: endpoint,
+                body: "non-HTTP response"
+            )
+        }
+        if (200..<300).contains(httpResponse.statusCode) {
+            return
+        }
+        throw StorageClientError.http(
+            status: httpResponse.statusCode,
+            endpoint: endpoint,
+            body: Self.truncate(String(data: data, encoding: .utf8) ?? "<binary>")
+        )
+    }
+
     // MARK: - Internal HTTP
 
     private func buildRequest(
@@ -252,6 +372,12 @@ public final class StorageClient {
         var request = URLRequest(url: url)
         request.httpMethod = method
         return request
+    }
+
+    private func attachAuth(to request: inout URLRequest) {
+        if let token = sessionToken {
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
     }
 
     // MARK: - Helpers

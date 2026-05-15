@@ -43,6 +43,11 @@ lakko-crypto.workspace = true
 # Phase 1.19b — attachment encryption + JSON envelope wire format
 # (per-message ChaCha20-Poly1305 CEK + SHA-256 content addressing).
 lakko-attachments.workspace = true
+# Phase 2a1c — encrypted backup envelope (Argon2id KEK from the
+# recovery phrase + ChaCha20-Poly1305 AEAD) and the payload
+# codec. Same primitive both iOS and Android clients consume
+# through this UniFFI surface.
+lakko-backup.workspace = true
 # Phase 1.21b — Shamir's Secret Sharing for the social-recovery
 # flow (split / combine / encode / decode + GF(256) field ops).
 lakko-shamir.workspace = true

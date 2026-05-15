@@ -6,8 +6,10 @@ package me.lakko.app.storage
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.HttpClientEngine
 import io.ktor.client.engine.okhttp.OkHttp
+import io.ktor.client.request.delete
 import io.ktor.client.request.get
 import io.ktor.client.request.head
+import io.ktor.client.request.header
 import io.ktor.client.request.put
 import io.ktor.client.request.setBody
 import io.ktor.client.statement.HttpResponse
@@ -72,6 +74,18 @@ public class StorageClient(
         HttpClient(engine)
     } else {
         HttpClient(OkHttp)
+    }
+
+    /** Bearer token bound to the per-account `/backup` routes
+     *  (Phase 2a1c). `null` is OK for the content-addressed
+     *  `/blob/...` routes — they're auth-free; a `null` value on
+     *  a backup-route call surfaces as a 401 from the server. */
+    private var sessionToken: String? = null
+
+    /** Bind / rebind the bearer token used for the per-account
+     *  backup routes. Mirror of the web + iOS sides. */
+    public fun setSessionToken(token: String?) {
+        this.sessionToken = token
     }
 
     override fun close() {
@@ -211,6 +225,84 @@ public class StorageClient(
         }
         val cl = response.headers[HttpHeaders.ContentLength] ?: return null
         return cl.toLongOrNull()
+    }
+
+    // -----------------------------------------------------------------
+    // Per-account backup (Phase 2a1c)
+    // -----------------------------------------------------------------
+
+    /**
+     * `PUT /backup` — overwrite this session's backup blob. Body
+     * is the wire bytes from `sealBackup` (UniFFI). The server
+     * identifies the owning account via the session token —
+     * there is no account_id in the URL or body, so a stolen
+     * token cannot scribble over another account.
+     */
+    public suspend fun putBackup(envelopeBytes: ByteArray) {
+        val endpoint = "/backup"
+        val url = "$baseUrl$endpoint"
+        val response: HttpResponse = try {
+            client.put(url) {
+                sessionToken?.let { header(HttpHeaders.Authorization, "Bearer $it") }
+                contentType(ContentType.Application.OctetStream)
+                setBody(envelopeBytes)
+            }
+        } catch (cause: Throwable) {
+            throw StorageNetworkError("$endpoint (PUT)", cause)
+        }
+        val status = response.status.value
+        if (status in 200..299) return
+        throw StorageHttpError(
+            status = status,
+            endpoint = "$endpoint (PUT)",
+            body = response.safeReadBody(),
+        )
+    }
+
+    /** `GET /backup` — fetch this session's backup blob, or
+     *  `null` when none has been uploaded yet. */
+    public suspend fun getBackup(): ByteArray? {
+        val endpoint = "/backup"
+        val url = "$baseUrl$endpoint"
+        val response: HttpResponse = try {
+            client.get(url) {
+                sessionToken?.let { header(HttpHeaders.Authorization, "Bearer $it") }
+            }
+        } catch (cause: Throwable) {
+            throw StorageNetworkError("$endpoint (GET)", cause)
+        }
+        val status = response.status.value
+        if (status == 404) return null
+        if (status !in 200..299) {
+            throw StorageHttpError(
+                status = status,
+                endpoint = "$endpoint (GET)",
+                body = response.safeReadBody(),
+            )
+        }
+        return response.bodyAsBytes()
+    }
+
+    /** `DELETE /backup` — drop this session's backup blob.
+     *  Idempotent; the server returns 204 regardless of prior
+     *  state. */
+    public suspend fun deleteBackup() {
+        val endpoint = "/backup"
+        val url = "$baseUrl$endpoint"
+        val response: HttpResponse = try {
+            client.delete(url) {
+                sessionToken?.let { header(HttpHeaders.Authorization, "Bearer $it") }
+            }
+        } catch (cause: Throwable) {
+            throw StorageNetworkError("$endpoint (DELETE)", cause)
+        }
+        val status = response.status.value
+        if (status in 200..299) return
+        throw StorageHttpError(
+            status = status,
+            endpoint = "$endpoint (DELETE)",
+            body = response.safeReadBody(),
+        )
     }
 
     public companion object {

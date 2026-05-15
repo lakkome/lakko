@@ -197,6 +197,21 @@ public final class AuthRepository: ObservableObject {
                 "internal: signup completed without a recovery phrase"
             )
         }
+        // Phase 2a1c — post-signup backup bootstrap. Caches the
+        // phrase in the Keychain + posts a baseline /backup
+        // envelope. Best-effort end-to-end; errors are logged
+        // and swallowed so a transient transport hiccup does
+        // not block signup from completing.
+        Task {
+            await Self.bootstrapBackupBestEffort(
+                accountId: result.accountId,
+                accountIdB64: accountIdB64,
+                exportKey: result.exportKey,
+                sessionToken: result.sessionToken,
+                phrase: phrase,
+                context: "signup"
+            )
+        }
         // 1.20c — best-effort push subscribe. Same posture as the
         // web side: errors are logged and swallowed; the user
         // lands in a working session even without push.
@@ -379,6 +394,20 @@ public final class AuthRepository: ObservableObject {
                 username: cached.username
             )
         )
+        // Phase 2a1c — post-recover backup bootstrap. Same
+        // shape as the signup-side call: re-cache the phrase
+        // under the freshly-rotated device root key and post a
+        // baseline /backup envelope. Best-effort.
+        Task {
+            await Self.bootstrapBackupBestEffort(
+                accountId: accountIdBytes,
+                accountIdB64: cached.accountIdB64,
+                exportKey: result.exportKey,
+                sessionToken: result.sessionToken,
+                phrase: trimmedPhrase,
+                context: "recover"
+            )
+        }
         // 1.20c — best-effort push subscribe.
         Task { await Self.subscribePushBestEffort(context: "recover") }
     }
@@ -410,6 +439,13 @@ public final class AuthRepository: ObservableObject {
     public func forgetDevice() {
         if let cached = sessionStore.load() {
             DeviceKeyStore.deleteDeviceKey(accountIdB64: cached.accountIdB64)
+            // Phase 2a1c — drop the cached recovery phrase too.
+            // Best-effort; a Keychain failure here is logged and
+            // ignored (the row is unreadable without the device
+            // key just wiped, but the clean wipe matches
+            // `forgetDevice`'s "leave nothing per-account behind"
+            // contract).
+            try? PhraseStore().deletePhrase(accountIdB64: cached.accountIdB64)
         }
         sessionStore.clear()
         identitySecrets = nil
@@ -435,6 +471,71 @@ public final class AuthRepository: ObservableObject {
             _ = try await PushSubscriber.shared.subscribe()
         } catch {
             NSLog("push subscribe (\(context)) failed: \(error)")
+        }
+    }
+
+    // MARK: - Backup bootstrap helpers (Phase 2a1c)
+
+    /// Cache the recovery phrase under the Keychain + post a
+    /// baseline backup envelope to /backup. Called from
+    /// ``signup`` and ``recover`` right after the state flip.
+    /// Best-effort end-to-end; every step logs + continues on
+    /// failure so a transient transport hiccup does not block
+    /// the user from landing in a working session.
+    ///
+    /// `ed25519Seed` is derived from `exportKey` via the same
+    /// `Identity.fromSeed` flow `ChatRepository` already uses
+    /// — re-derive here rather than threading the seed through
+    /// the auth-repository public surface so this helper stays
+    /// self-contained.
+    private static func bootstrapBackupBestEffort(
+        accountId: Data,
+        accountIdB64: String,
+        exportKey: Data,
+        sessionToken: String,
+        phrase: String,
+        context: String
+    ) async {
+        let phraseBytes = Data(phrase.utf8)
+        let backupClient = BackupClient()
+        backupClient.setSessionToken(sessionToken)
+
+        // Cache the phrase first — even if the network leg
+        // fails, future auto-backups (post-2a3) can re-try from
+        // the cached value.
+        do {
+            try backupClient.cachePhrase(
+                accountIdB64: accountIdB64,
+                phraseBytes: phraseBytes
+            )
+        } catch {
+            NSLog("backup phrase cache (\(context)) failed: \(error)")
+            // Continue — we can still ship a one-shot baseline
+            // backup without the cache. The next signup / recover
+            // re-tries the cache write.
+        }
+
+        // Derive the ed25519 signing seed deterministically from
+        // the OPAQUE export key — same `Identity.fromSeed` path
+        // every other identity-bearing operation uses.
+        let identity: Identity
+        do {
+            identity = try Identity.fromSeed(seed: exportKey)
+        } catch {
+            NSLog("backup identity-derive (\(context)) failed: \(error)")
+            return
+        }
+        let seedBytes = identity.ed25519Seed()
+
+        do {
+            try await backupClient.uploadNow(
+                accountId: accountId,
+                ed25519Seed: seedBytes,
+                phraseBytes: phraseBytes,
+                contacts: []  // 2a3 wires the cross-device-synced contact list
+            )
+        } catch {
+            NSLog("backup baseline upload (\(context)) failed: \(error)")
         }
     }
 }

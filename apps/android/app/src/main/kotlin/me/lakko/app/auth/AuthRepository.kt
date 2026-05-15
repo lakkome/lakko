@@ -230,6 +230,18 @@ public class AuthRepository(
                 val phrase = result.recoveryPhrase ?: throw IllegalStateException(
                     "internal: signup completed without a recovery phrase",
                 )
+                // Phase 2a1c — post-signup backup bootstrap.
+                // Caches the phrase in EncryptedSharedPreferences
+                // + posts a baseline /backup envelope. Best-
+                // effort; failures log and continue.
+                bootstrapBackupBestEffort(
+                    accountId = result.accountId,
+                    accountIdB64 = accountIdB64,
+                    exportKey = result.exportKey,
+                    sessionToken = result.sessionToken,
+                    phrase = phrase,
+                    context = "signup",
+                )
                 SignupOutcome(recoveryPhrase = phrase)
             } finally {
                 // The original OPAQUE export key buffer drops out
@@ -451,6 +463,18 @@ public class AuthRepository(
                             username = cached.username,
                         ),
                     )
+                    // Phase 2a1c — post-recover backup bootstrap.
+                    // Re-caches the phrase under the freshly-
+                    // rotated device root key + posts a baseline
+                    // /backup envelope. Best-effort.
+                    bootstrapBackupBestEffort(
+                        accountId = accountIdBytes,
+                        accountIdB64 = cached.accountIdB64,
+                        exportKey = result.exportKey,
+                        sessionToken = result.sessionToken,
+                        phrase = mnemonicPhrase,
+                        context = "recover",
+                    )
                     // 1.20d — best-effort push subscribe.
                     subscribePushBestEffort("recover")
                 } finally {
@@ -506,6 +530,18 @@ public class AuthRepository(
                 // Best-effort wipe; SessionStore.clear() below is
                 // still worth running.
             }
+            // Phase 2a1c — drop the cached recovery phrase. The
+            // EncryptedSharedPreferences row is independent of
+            // the device key envelope above, so we wipe it
+            // explicitly. Best-effort.
+            try {
+                me.lakko.app.backup.PhraseStore.deletePhrase(
+                    applicationContext,
+                    cached.accountIdB64,
+                )
+            } catch (_: Throwable) {
+                // best-effort
+            }
         }
         sessionStore.clear()
         clearIdentitySecrets()
@@ -516,6 +552,59 @@ public class AuthRepository(
         // forgetDevice's "leave NOTHING per-account behind"
         // contract.
         unsubscribePushBestEffort("forgetDevice")
+    }
+
+    /**
+     * Phase 2a1c — cache the phrase + post a baseline backup
+     * envelope. Called from [signup] and [recover] right after
+     * the state flip. Best-effort end-to-end; every step logs
+     * and continues on failure so a transient transport hiccup
+     * does not block the user from landing in a working session.
+     *
+     * Synchronous in the suspend context — the caller is
+     * already on the IO dispatcher.
+     */
+    private suspend fun bootstrapBackupBestEffort(
+        accountId: ByteArray,
+        accountIdB64: String,
+        exportKey: ByteArray,
+        sessionToken: String,
+        phrase: String,
+        context: String,
+    ) {
+        val phraseBytes = phrase.toByteArray(Charsets.UTF_8)
+        val backupClient = me.lakko.app.backup.BackupClient()
+        try {
+            backupClient.setSessionToken(sessionToken)
+            try {
+                backupClient.cachePhrase(applicationContext, accountIdB64, phraseBytes)
+            } catch (cause: Throwable) {
+                Log.w("lakko-auth", "backup phrase cache ($context) failed", cause)
+                // Continue — baseline envelope upload can still
+                // proceed without the cache.
+            }
+            val seed = try {
+                me.lakko.app.backup.ed25519SeedFromExportKey(exportKey)
+            } catch (cause: Throwable) {
+                Log.w("lakko-auth", "backup seed-derive ($context) failed", cause)
+                return
+            }
+            try {
+                backupClient.uploadNow(
+                    accountId = accountId,
+                    ed25519Seed = seed,
+                    phraseBytes = phraseBytes,
+                    contacts = emptyList(),  // 2a3 wires the cross-device sync
+                )
+            } catch (cause: Throwable) {
+                Log.w("lakko-auth", "backup baseline upload ($context) failed", cause)
+            } finally {
+                seed.fill(0)
+            }
+        } finally {
+            backupClient.close()
+            phraseBytes.fill(0)
+        }
     }
 
     /** 1.20d — Fire ``PushSubscriber.subscribe`` on the
