@@ -188,6 +188,118 @@ pub(crate) async fn unregister(
 }
 
 // ============================================================================
+// /push/group/subscribe (Phase 1.20e — fan-out)
+// ============================================================================
+
+#[derive(Deserialize)]
+pub(crate) struct GroupSubscribeRequest {
+    pub(crate) pow: crate::pow::PowProof,
+    /// 32-byte device pseudonym, lowercase hex.
+    pub(crate) device_pseudonym: String,
+    /// 32-byte group pseudonym, lowercase hex. Same handle the
+    /// DS uses as its group journal key.
+    pub(crate) group_pseudonym: String,
+}
+
+#[derive(Serialize)]
+pub(crate) struct GroupSubscribeResponse {
+    pub(crate) ok: bool,
+    /// `true` if the row was inserted fresh; `false` if it was
+    /// already there (idempotent re-subscribe).
+    pub(crate) inserted: bool,
+}
+
+/// `POST /push/group/subscribe` — declare that this device wants
+/// wakes for messages published into `group_pseudonym`. Idempotent:
+/// a re-subscribe with the same `(device, group)` pair returns
+/// `inserted: false` and is a no-op.
+pub(crate) async fn group_subscribe(
+    State(state): State<AppState>,
+    Json(payload): Json<GroupSubscribeRequest>,
+) -> Result<Json<GroupSubscribeResponse>, (StatusCode, String)> {
+    crate::pow::verify_proof(&state.db, &payload.pow).await?;
+
+    let device = decode_device(&payload.device_pseudonym)?;
+    let group = decode_device(&payload.group_pseudonym)?;
+
+    // INSERT IGNORE — the composite PK `(device_id, group_id)`
+    // makes a re-subscribe a silent no-op. `rows_affected == 0`
+    // is the "already subscribed" signal we surface as
+    // `inserted: false`.
+    let result = sqlx::query(
+        "INSERT IGNORE INTO push_group_subscriptions (device_id, group_id) VALUES (?, ?)",
+    )
+    .bind(&device[..])
+    .bind(&group[..])
+    .execute(&state.db)
+    .await
+    .map_err(|e| {
+        tracing::error!(error = %e, "insert push_group_subscriptions");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal db error".to_string(),
+        )
+    })?;
+
+    let inserted = result.rows_affected() > 0;
+    tracing::debug!(
+        device_prefix = %hex::encode(&device[..4]),
+        group_prefix = %hex::encode(&group[..4]),
+        inserted,
+        "push group subscription",
+    );
+    Ok(Json(GroupSubscribeResponse { ok: true, inserted }))
+}
+
+// ============================================================================
+// /push/group/unsubscribe (Phase 1.20e)
+// ============================================================================
+
+#[derive(Deserialize)]
+pub(crate) struct GroupUnsubscribeRequest {
+    pub(crate) pow: crate::pow::PowProof,
+    pub(crate) device_pseudonym: String,
+    pub(crate) group_pseudonym: String,
+}
+
+#[derive(Serialize)]
+pub(crate) struct GroupUnsubscribeResponse {
+    pub(crate) ok: bool,
+    /// `true` if a row was deleted; `false` if there was nothing
+    /// registered — idempotent like the token unregister path.
+    pub(crate) removed: bool,
+}
+
+/// `POST /push/group/unsubscribe` — drop a `(device, group)`
+/// subscription. Idempotent.
+pub(crate) async fn group_unsubscribe(
+    State(state): State<AppState>,
+    Json(payload): Json<GroupUnsubscribeRequest>,
+) -> Result<Json<GroupUnsubscribeResponse>, (StatusCode, String)> {
+    crate::pow::verify_proof(&state.db, &payload.pow).await?;
+
+    let device = decode_device(&payload.device_pseudonym)?;
+    let group = decode_device(&payload.group_pseudonym)?;
+
+    let result =
+        sqlx::query("DELETE FROM push_group_subscriptions WHERE device_id = ? AND group_id = ?")
+            .bind(&device[..])
+            .bind(&group[..])
+            .execute(&state.db)
+            .await
+            .map_err(|e| {
+                tracing::error!(error = %e, "delete push_group_subscriptions");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal db error".to_string(),
+                )
+            })?;
+
+    let removed = result.rows_affected() > 0;
+    Ok(Json(GroupUnsubscribeResponse { ok: true, removed }))
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 

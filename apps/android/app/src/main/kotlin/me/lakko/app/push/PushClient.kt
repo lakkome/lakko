@@ -148,6 +148,117 @@ public class PushClient(
         }
     }
 
+    // -----------------------------------------------------------------
+    // Group fan-out (Phase 1.20e)
+    // -----------------------------------------------------------------
+
+    /**
+     * Subscribe this device to push wakes for `groupPseudonym`.
+     * Idempotent — re-subscribing the same `(device, group)`
+     * pair returns `false` (no insert) and is a no-op.
+     */
+    public suspend fun subscribeGroup(
+        devicePseudonym: ByteArray,
+        groupPseudonym: ByteArray,
+    ): Boolean {
+        require(devicePseudonym.size == PSEUDONYM_LEN) {
+            "devicePseudonym must be $PSEUDONYM_LEN bytes"
+        }
+        require(groupPseudonym.size == PSEUDONYM_LEN) {
+            "groupPseudonym must be $PSEUDONYM_LEN bytes"
+        }
+        val challenge = fetchChallenge()
+        val pow = solvePow(seedB64 = challenge.seed, effortBits = challenge.effortBits)
+        val req = GroupSubscribeRequest(
+            pow = pow,
+            device_pseudonym = pseudonymHex(devicePseudonym),
+            group_pseudonym = pseudonymHex(groupPseudonym),
+        )
+        val response: HttpResponse = try {
+            client.post("$baseUrl/push/group/subscribe") {
+                contentType(ContentType.Application.Json)
+                setBody(req)
+            }
+        } catch (cause: Throwable) {
+            throw PushNetworkError("/push/group/subscribe", cause)
+        }
+        if (!response.status.isSuccess()) {
+            throw PushHttpError(
+                status = response.status.value,
+                endpoint = "/push/group/subscribe",
+                body = response.safeReadBody(),
+            )
+        }
+        return response.body<GroupSubscribeResponse>().inserted
+    }
+
+    /** Drop a `(device, group)` subscription. Idempotent. */
+    public suspend fun unsubscribeGroup(
+        devicePseudonym: ByteArray,
+        groupPseudonym: ByteArray,
+    ): Boolean {
+        require(devicePseudonym.size == PSEUDONYM_LEN)
+        require(groupPseudonym.size == PSEUDONYM_LEN)
+        val challenge = fetchChallenge()
+        val pow = solvePow(seedB64 = challenge.seed, effortBits = challenge.effortBits)
+        val req = GroupUnsubscribeRequest(
+            pow = pow,
+            device_pseudonym = pseudonymHex(devicePseudonym),
+            group_pseudonym = pseudonymHex(groupPseudonym),
+        )
+        val response: HttpResponse = try {
+            client.post("$baseUrl/push/group/unsubscribe") {
+                contentType(ContentType.Application.Json)
+                setBody(req)
+            }
+        } catch (cause: Throwable) {
+            throw PushNetworkError("/push/group/unsubscribe", cause)
+        }
+        if (!response.status.isSuccess()) {
+            throw PushHttpError(
+                status = response.status.value,
+                endpoint = "/push/group/unsubscribe",
+                body = response.safeReadBody(),
+            )
+        }
+        return response.body<GroupUnsubscribeResponse>().removed
+    }
+
+    /**
+     * Fan a wake out to every device subscribed to
+     * `groupPseudonym`. Phase 1.20e: the publisher's client
+     * calls this after a successful `DsClient.publishGroup`.
+     */
+    public suspend fun notifyGroup(
+        groupPseudonym: ByteArray,
+        envelopePointer: Long? = null,
+    ): Int {
+        require(groupPseudonym.size == PSEUDONYM_LEN)
+        val challenge = fetchChallenge()
+        val pow = solvePow(seedB64 = challenge.seed, effortBits = challenge.effortBits)
+        val req = NotifyGroupRequest(
+            pow = pow,
+            group_pseudonym = pseudonymHex(groupPseudonym),
+            envelope_pointer = envelopePointer?.toULong(),
+        )
+        val response: HttpResponse = try {
+            client.post("$baseUrl/push/notify-group") {
+                contentType(ContentType.Application.Json)
+                setBody(req)
+            }
+        } catch (cause: Throwable) {
+            throw PushNetworkError("/push/notify-group", cause)
+        }
+        if (!response.status.isSuccess()) {
+            throw PushHttpError(
+                status = response.status.value,
+                endpoint = "/push/notify-group",
+                body = response.safeReadBody(),
+            )
+        }
+        return response.body<NotifyGroupResponse>().devices_woken
+    }
+
     /**
      * Drop a previously-registered token. Idempotent: returns
      * `false` if the row was already gone.
@@ -275,6 +386,50 @@ private data class UnregisterRequest(
 private data class UnregisterResponse(
     val ok: Boolean,
     val removed: Boolean,
+)
+
+// 1.20e — group fan-out wire shapes.
+
+@Serializable
+@Suppress("ConstructorParameterNaming")
+private data class GroupSubscribeRequest(
+    val pow: PowProofPayload,
+    val device_pseudonym: String,
+    val group_pseudonym: String,
+)
+
+@Serializable
+private data class GroupSubscribeResponse(
+    val ok: Boolean,
+    val inserted: Boolean,
+)
+
+@Serializable
+@Suppress("ConstructorParameterNaming")
+private data class GroupUnsubscribeRequest(
+    val pow: PowProofPayload,
+    val device_pseudonym: String,
+    val group_pseudonym: String,
+)
+
+@Serializable
+private data class GroupUnsubscribeResponse(
+    val ok: Boolean,
+    val removed: Boolean,
+)
+
+@Serializable
+@Suppress("ConstructorParameterNaming")
+private data class NotifyGroupRequest(
+    val pow: PowProofPayload,
+    val group_pseudonym: String,
+    val envelope_pointer: ULong?,
+)
+
+@Serializable
+@Suppress("ConstructorParameterNaming")
+private data class NotifyGroupResponse(
+    val devices_woken: Int,
 )
 
 private suspend fun HttpResponse.safeReadBody(): String {

@@ -98,9 +98,16 @@ interface UnregisterResponse {
 
 /** Convert a 32-byte buffer to its lowercase-hex form. */
 function devicePseudonymHex(bytes: Uint8Array): string {
+  return pseudonymHex(bytes, "devicePseudonym");
+}
+
+/** Generic 32-byte → lowercase-hex with a typed error message
+ *  carrying the named-arg the validation failed for. Used by
+ *  both the device + group pseudonym paths (1.20e). */
+function pseudonymHex(bytes: Uint8Array, name: string): string {
   if (bytes.length !== DEVICE_PSEUDONYM_LEN) {
     throw new PushClientArgError(
-      `devicePseudonym must be ${DEVICE_PSEUDONYM_LEN} bytes (got ${bytes.length})`,
+      `${name} must be ${DEVICE_PSEUDONYM_LEN} bytes (got ${bytes.length})`,
     );
   }
   let out = "";
@@ -154,6 +161,113 @@ export class PushClient {
     if (!resp.ok) {
       throw new PushHttpError(200, "/push/register", "server reported ok=false");
     }
+  }
+
+  /**
+   * Subscribe this device to wakes for `groupPseudonym`. Phase
+   * 1.20e: publishers call [`notifyGroup`] after each successful
+   * `chat.sendMessage`, and the push-gw fans out to every device
+   * with a row here.
+   *
+   * Idempotent — re-subscribing the same `(device, group)` pair
+   * returns `inserted: false` and is a no-op.
+   */
+  async subscribeGroup(
+    devicePseudonym: Uint8Array,
+    groupPseudonym: Uint8Array,
+  ): Promise<{ inserted: boolean }> {
+    const deviceHex = devicePseudonymHex(devicePseudonym);
+    const groupHex = pseudonymHex(groupPseudonym, "groupPseudonym");
+
+    const challenge = await this.fetchChallenge();
+    const pow = await solvePow(challenge.seed, challenge.effort_bits);
+
+    const resp = await this.post<
+      { pow: PowProofPayload; device_pseudonym: string; group_pseudonym: string },
+      { ok: boolean; inserted: boolean }
+    >("/push/group/subscribe", {
+      pow,
+      device_pseudonym: deviceHex,
+      group_pseudonym: groupHex,
+    });
+    if (!resp.ok) {
+      throw new PushHttpError(
+        200,
+        "/push/group/subscribe",
+        "server reported ok=false",
+      );
+    }
+    return { inserted: resp.inserted };
+  }
+
+  /** Drop a `(device, group)` subscription. Idempotent. */
+  async unsubscribeGroup(
+    devicePseudonym: Uint8Array,
+    groupPseudonym: Uint8Array,
+  ): Promise<{ removed: boolean }> {
+    const deviceHex = devicePseudonymHex(devicePseudonym);
+    const groupHex = pseudonymHex(groupPseudonym, "groupPseudonym");
+
+    const challenge = await this.fetchChallenge();
+    const pow = await solvePow(challenge.seed, challenge.effort_bits);
+
+    const resp = await this.post<
+      { pow: PowProofPayload; device_pseudonym: string; group_pseudonym: string },
+      { ok: boolean; removed: boolean }
+    >("/push/group/unsubscribe", {
+      pow,
+      device_pseudonym: deviceHex,
+      group_pseudonym: groupHex,
+    });
+    if (!resp.ok) {
+      throw new PushHttpError(
+        200,
+        "/push/group/unsubscribe",
+        "server reported ok=false",
+      );
+    }
+    return { removed: resp.removed };
+  }
+
+  /**
+   * Fan a wake out to every device subscribed to
+   * `groupPseudonym`. Phase 1.20e: the publisher's client calls
+   * this right after `chat.sendMessage` succeeds. The push-gw
+   * looks up the subscription table + dispatches per device via
+   * the same provider machinery as `/push/notify`.
+   *
+   * @param groupPseudonym 32-byte group id (same value DS uses
+   *                       as the journal key).
+   * @param envelopePointer Optional DS message id; lets the
+   *                        woken client jump to the exact row
+   *                        instead of polling.
+   */
+  async notifyGroup(
+    groupPseudonym: Uint8Array,
+    envelopePointer?: number,
+  ): Promise<{ devicesWoken: number }> {
+    const groupHex = pseudonymHex(groupPseudonym, "groupPseudonym");
+
+    const challenge = await this.fetchChallenge();
+    const pow = await solvePow(challenge.seed, challenge.effort_bits);
+
+    interface NotifyGroupReq {
+      pow: PowProofPayload;
+      group_pseudonym: string;
+      envelope_pointer?: number;
+    }
+    const req: NotifyGroupReq = {
+      pow,
+      group_pseudonym: groupHex,
+    };
+    if (envelopePointer !== undefined) {
+      req.envelope_pointer = envelopePointer;
+    }
+    const resp = await this.post<
+      NotifyGroupReq,
+      { devices_woken: number; deliveries: unknown[] }
+    >("/push/notify-group", req);
+    return { devicesWoken: resp.devices_woken };
   }
 
   /**

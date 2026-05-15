@@ -27,7 +27,15 @@ public final class RecoverViewModel: ObservableObject {
 
     // MARK: - Form fields
 
+    /// 1.21c2 — which input mode the user is filling. `phrase`
+    /// reuses the original 24-word path; `shares` parses one
+    /// Shamir share per line and combines them into the same
+    /// canonical phrase via the BIP39 `from_entropy` round-trip.
+    public enum Mode: Equatable { case phrase, shares }
+
+    @Published public var mode: Mode = .phrase
     @Published public var phrase: String = ""
+    @Published public var sharesInput: String = ""
     @Published public var password: String = ""
     @Published public var confirm: String = ""
 
@@ -77,15 +85,42 @@ public final class RecoverViewModel: ObservableObject {
             error = "Password must be at least \(Self.minPasswordLength) characters."
             return
         }
-        if phrase.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            error = "Recovery phrase must be non-empty."
-            return
+
+        // 1.21c2 — resolve the phrase based on input mode.
+        // Shares mode reconstructs the canonical phrase via
+        // `ShamirBridge.combineSharesToMnemonic`; the recovered
+        // phrase then drives the existing OPAQUE recovery flow.
+        let phraseSnapshot: String
+        switch mode {
+        case .phrase:
+            if phrase.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                error = "Recovery phrase must be non-empty."
+                return
+            }
+            phraseSnapshot = phrase
+        case .shares:
+            let lines = sharesInput
+                .split(whereSeparator: \.isNewline)
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+                .filter { !$0.isEmpty }
+            if lines.count < 2 {
+                error = "At least 2 shares required (Lakko default is 3-of-5)."
+                return
+            }
+            do {
+                phraseSnapshot = try ShamirBridge.combineSharesToMnemonic(
+                    encodedShares: lines
+                )
+            } catch {
+                self.error = (error as? LocalizedError)?.errorDescription
+                    ?? "Couldn't combine shares."
+                return
+            }
         }
 
         busy = true
         error = nil
 
-        let phraseSnapshot = phrase
         let passwordBytes = Data(password.utf8)
 
         Task {
@@ -102,6 +137,7 @@ public final class RecoverViewModel: ObservableObject {
                 busy = false
                 error = nil
                 phrase = ""
+                sharesInput = ""
                 password = ""
                 confirm = ""
             } catch let err as FfiError {

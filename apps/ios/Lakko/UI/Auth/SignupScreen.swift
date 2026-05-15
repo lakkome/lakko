@@ -202,6 +202,12 @@ private struct RecoveryPhrasePanel: View {
                 }
                 .toggleStyle(.automatic)
 
+                // 1.21c2 — optional Shamir 3-of-5 social recovery
+                // panel. Collapsed via a `DisclosureGroup` by
+                // default so the canonical "write 24 words on
+                // paper" flow stays the prominent path.
+                SocialRecoveryPanel(phrase: phrase)
+
                 Button(action: onAcknowledge) {
                     Text("Done — take me to Lakko")
                         .frame(maxWidth: .infinity)
@@ -252,5 +258,167 @@ private struct WordRow: View {
             Text(word)
                 .font(.system(.body, design: .monospaced))
         }
+    }
+}
+
+// ============================================================================
+// 1.21c2 — optional Shamir 3-of-5 social recovery panel
+// ============================================================================
+
+/// Collapsed-by-default `DisclosureGroup` that lets the user
+/// split the just-generated 24-word mnemonic into 5 shares (any
+/// 3 reconstruct) for distribution to guardians. Sits between
+/// the wordsCard + the "Done" gate; complement to the paper-
+/// phrase backup, not a replacement.
+private struct SocialRecoveryPanel: View {
+    let phrase: String
+
+    @State private var expanded: Bool = false
+    @State private var shares: [String] = []
+    @State private var busy: Bool = false
+    @State private var error: String?
+    @State private var copiedIndex: Int?
+
+    var body: some View {
+        DisclosureGroup(isExpanded: $expanded) {
+            content
+                .padding(.top, 8)
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "person.2.fill")
+                    .foregroundStyle(.secondary)
+                Text("Optional: split into 3-of-5 social-recovery shares")
+                    .font(.body)
+            }
+        }
+        .padding(12)
+        .background(Color(.secondarySystemBackground))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(
+                "Generate 5 share strings; any 3 reconstruct " +
+                "your recovery phrase. Distribute one to each " +
+                "trusted guardian (family, friends, a safe " +
+                "deposit box). No single guardian alone — or any " +
+                "two colluding — can recover your account; you " +
+                "can lose contact with two guardians and still " +
+                "recover."
+            )
+            .font(.footnote)
+            .foregroundStyle(.secondary)
+
+            if shares.isEmpty {
+                Button {
+                    onGenerate()
+                } label: {
+                    HStack {
+                        if busy {
+                            ProgressView().controlSize(.small)
+                            Text("Generating…")
+                        } else {
+                            Text("Generate 5 shares")
+                        }
+                    }
+                    .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.regular)
+                .disabled(busy)
+            } else {
+                ForEach(Array(shares.enumerated()), id: \.offset) { i, share in
+                    ShareRow(
+                        index: i + 1,
+                        share: share,
+                        copied: copiedIndex == i,
+                        onCopy: { copyShare(at: i, value: share) }
+                    )
+                }
+                Text(
+                    "Distribute one share to each of 5 trusted " +
+                    "guardians. Recover via Recover → Recovery " +
+                    "shares with any 3."
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+
+            if let error = error {
+                Text(error)
+                    .font(.footnote)
+                    .foregroundStyle(.red)
+            }
+        }
+    }
+
+    private func onGenerate() {
+        busy = true
+        error = nil
+        // Synchronous (the underlying UniFFI call is in-process
+        // arithmetic, sub-millisecond). Wrap in a `Task` anyway
+        // so the UI stays responsive on slow devices + future
+        // proofs against an async-ification of the underlying
+        // surface.
+        Task { @MainActor in
+            defer { busy = false }
+            do {
+                shares = try ShamirBridge.splitMnemonic(
+                    phrase: phrase,
+                    threshold: ShamirBridge.defaultThreshold,
+                    shares: ShamirBridge.defaultShareCount
+                )
+            } catch {
+                self.error = (error as? LocalizedError)?.errorDescription
+                    ?? "Couldn't generate shares."
+            }
+        }
+    }
+
+    private func copyShare(at index: Int, value: String) {
+        UIPasteboard.general.string = value
+        copiedIndex = index
+        // Reset the "copied" flag after a short delay so a
+        // subsequent copy on the same chip surfaces a fresh
+        // confirmation.
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            if copiedIndex == index {
+                copiedIndex = nil
+            }
+        }
+    }
+}
+
+private struct ShareRow: View {
+    let index: Int
+    let share: String
+    let copied: Bool
+    let onCopy: () -> Void
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text("#\(index)")
+                .font(.system(.footnote, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .frame(width: 32, alignment: .leading)
+            Text(share)
+                .font(.system(.caption2, design: .monospaced))
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Button(action: onCopy) {
+                Text(copied ? "Copied" : "Copy")
+                    .font(.caption)
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .background(Color(.tertiarySystemBackground))
+        .clipShape(RoundedRectangle(cornerRadius: 6))
     }
 }

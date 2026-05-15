@@ -67,7 +67,29 @@ import type {
 } from "../../wasm/lakko_ffi_wasm";
 import { base64Encode } from "../auth/account-id";
 import { getDeviceKey } from "../auth/key-store";
+import { PushClient } from "../push/client";
+import { getOrCreateDevicePushId } from "../push/device-id";
 import { saveMlsSnapshot } from "./mls-store";
+
+/**
+ * 1.20e — Subscribe this device to push wakes for the given
+ * group. Idempotent server-side via composite-PK INSERT IGNORE;
+ * safe to call on every group `add` (which includes rehydrate
+ * upserts). All failures are logged and swallowed — push is a
+ * UX nicety, foreground polling still works without it.
+ */
+async function subscribeToGroupPushBestEffort(
+  groupId: Uint8Array,
+): Promise<void> {
+  try {
+    const devicePseudonym = getOrCreateDevicePushId();
+    const client = new PushClient();
+    await client.subscribeGroup(devicePseudonym, groupId);
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.warn("push group subscribe failed", err);
+  }
+}
 
 /** One entry in the active-groups registry. */
 export interface ActiveGroup {
@@ -178,6 +200,13 @@ export function ChatProvider(props: { children: JSX.Element }): JSX.Element {
       // group should reuse the slot rather than pile up.
       const next = groups().filter((g) => g.groupIdB64 !== groupIdB64);
       setGroups([...next, entry]);
+      // 1.20e — subscribe this device to push wakes for the
+      // group. Fire-and-forget: the message can still arrive
+      // via foreground polling if push-gw is unreachable.
+      // Idempotent server-side (composite PK on
+      // `push_group_subscriptions`), so re-running on a
+      // rehydrate / dedupe upsert is a no-op.
+      void subscribeToGroupPushBestEffort(input.group.groupId);
       return entry;
     },
     remove(groupIdB64) {

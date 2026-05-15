@@ -125,6 +125,99 @@ public final class PushClient {
         }
     }
 
+    // MARK: - Group fan-out (Phase 1.20e)
+
+    /// Subscribe this device to push wakes for `groupPseudonym`.
+    /// Idempotent: a re-subscribe with the same `(device, group)`
+    /// pair returns `inserted = false`.
+    public func subscribeGroup(
+        devicePseudonym: Data,
+        groupPseudonym: Data
+    ) async throws -> Bool {
+        guard devicePseudonym.count == Self.devicePseudonymLength else {
+            throw PushClientError.argument(
+                "devicePseudonym must be \(Self.devicePseudonymLength) bytes"
+            )
+        }
+        guard groupPseudonym.count == Self.devicePseudonymLength else {
+            throw PushClientError.argument(
+                "groupPseudonym must be \(Self.devicePseudonymLength) bytes"
+            )
+        }
+        let challenge = try await fetchChallenge()
+        let pow = try await solvePow(
+            seedB64: challenge.seed,
+            effortBits: challenge.effortBits
+        )
+        let req = GroupSubscribeRequest(
+            pow: pow,
+            device_pseudonym: Self.pseudonymHex(devicePseudonym),
+            group_pseudonym: Self.pseudonymHex(groupPseudonym)
+        )
+        let resp: GroupSubscribeResponse = try await post(
+            endpoint: "/push/group/subscribe",
+            body: req
+        )
+        return resp.inserted
+    }
+
+    /// Drop a `(device, group)` subscription. Idempotent.
+    public func unsubscribeGroup(
+        devicePseudonym: Data,
+        groupPseudonym: Data
+    ) async throws -> Bool {
+        guard devicePseudonym.count == Self.devicePseudonymLength,
+              groupPseudonym.count == Self.devicePseudonymLength
+        else {
+            throw PushClientError.argument("pseudonyms must be 32 bytes")
+        }
+        let challenge = try await fetchChallenge()
+        let pow = try await solvePow(
+            seedB64: challenge.seed,
+            effortBits: challenge.effortBits
+        )
+        let req = GroupUnsubscribeRequest(
+            pow: pow,
+            device_pseudonym: Self.pseudonymHex(devicePseudonym),
+            group_pseudonym: Self.pseudonymHex(groupPseudonym)
+        )
+        let resp: GroupUnsubscribeResponse = try await post(
+            endpoint: "/push/group/unsubscribe",
+            body: req
+        )
+        return resp.removed
+    }
+
+    /// Fan a wake out to every device subscribed to
+    /// `groupPseudonym`. Phase 1.20e: the publisher's client
+    /// fires this immediately after a successful
+    /// `DsClient.publishGroup` so peers' devices wake.
+    public func notifyGroup(
+        groupPseudonym: Data,
+        envelopePointer: Int64? = nil
+    ) async throws -> Int {
+        guard groupPseudonym.count == Self.devicePseudonymLength else {
+            throw PushClientError.argument(
+                "groupPseudonym must be \(Self.devicePseudonymLength) bytes"
+            )
+        }
+        let challenge = try await fetchChallenge()
+        let pow = try await solvePow(
+            seedB64: challenge.seed,
+            effortBits: challenge.effortBits
+        )
+        let req = NotifyGroupRequest(
+            pow: pow,
+            group_pseudonym: Self.pseudonymHex(groupPseudonym),
+            envelope_pointer: envelopePointer.map(UInt64.init)
+        )
+        let resp: NotifyGroupResponse = try await post(
+            endpoint: "/push/notify-group",
+            body: req
+        )
+        return resp.devices_woken
+    }
+
     // MARK: - Unregister
 
     /// Drop a previously-registered token. Idempotent: returns
@@ -295,12 +388,45 @@ private struct UnregisterRequest: Encodable {
     let device_pseudonym: String
     let provider: PushClient.Provider
 }
-// swiftlint:enable identifier_name
 
 private struct UnregisterResponse: Decodable {
     let ok: Bool
     let removed: Bool
 }
+
+// 1.20e — group fan-out wire shapes.
+private struct GroupSubscribeRequest: Encodable {
+    let pow: PowProofPayload
+    let device_pseudonym: String
+    let group_pseudonym: String
+}
+
+private struct GroupSubscribeResponse: Decodable {
+    let ok: Bool
+    let inserted: Bool
+}
+
+private struct GroupUnsubscribeRequest: Encodable {
+    let pow: PowProofPayload
+    let device_pseudonym: String
+    let group_pseudonym: String
+}
+
+private struct GroupUnsubscribeResponse: Decodable {
+    let ok: Bool
+    let removed: Bool
+}
+
+private struct NotifyGroupRequest: Encodable {
+    let pow: PowProofPayload
+    let group_pseudonym: String
+    let envelope_pointer: UInt64?
+}
+
+private struct NotifyGroupResponse: Decodable {
+    let devices_woken: Int
+}
+// swiftlint:enable identifier_name
 
 // MARK: - Errors
 

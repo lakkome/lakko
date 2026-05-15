@@ -17,6 +17,8 @@
 //! cleanest place to garbage-collect is at the moment we see the
 //! provider reject one.
 
+use std::collections::HashSet;
+
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::Json;
@@ -158,6 +160,120 @@ pub(crate) async fn notify(
     let tokens_found = deliveries.len();
     Ok(Json(NotifyResponse {
         tokens_found,
+        deliveries,
+    }))
+}
+
+// ============================================================================
+// /push/notify-group (Phase 1.20e — fan-out)
+// ============================================================================
+
+#[derive(Deserialize)]
+pub(crate) struct NotifyGroupRequest {
+    pub(crate) pow: crate::pow::PowProof,
+    /// 32-byte group pseudonym, lowercase hex. The publisher
+    /// just wrote a message into the DS journal at this key;
+    /// we fan a wake out to every device subscribed.
+    pub(crate) group_pseudonym: String,
+    /// Optional — server-assigned cursor in `services/ds` so
+    /// the woken client can jump to the exact row.
+    #[serde(default)]
+    pub(crate) envelope_pointer: Option<u64>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct NotifyGroupResponse {
+    /// Number of `(device_id, token, provider)` rows fanned to.
+    /// `0` is a legitimate outcome — no device in the group has
+    /// push registered yet.
+    pub(crate) devices_woken: usize,
+    /// Number of provider deliveries actually attempted (some
+    /// devices may carry tokens for multiple providers).
+    pub(crate) deliveries: Vec<DeliveryOutcome>,
+}
+
+/// `POST /push/notify-group` — fan a wake out to every device
+/// subscribed to this group. Phase 1.20e: the publisher's client
+/// calls this immediately after a successful
+/// `DsClient::publishGroup` so peers' devices wake and pull the
+/// new message.
+///
+/// Privacy posture: the push-gw learns `(device_id, group_id)`
+/// via the subscription table; same metadata DS already has via
+/// the cursor-fetch pattern. Documented in
+/// `migrations/0002_push_group_subscriptions.sql`.
+pub(crate) async fn notify_group(
+    State(state): State<AppState>,
+    Json(payload): Json<NotifyGroupRequest>,
+) -> Result<Json<NotifyGroupResponse>, (StatusCode, String)> {
+    crate::pow::verify_proof(&state.db, &payload.pow).await?;
+
+    let group = decode_pseudonym_hex(&payload.group_pseudonym)?;
+
+    // Join `push_group_subscriptions` on `push_tokens` so we
+    // get every `(device, provider, token)` triple in one
+    // query. The same `(device, group)` row may match multiple
+    // tokens per device (web + mobile); each is delivered to
+    // independently.
+    let rows: Vec<(Vec<u8>, u8, Vec<u8>)> = sqlx::query_as(
+        "SELECT t.device_id, t.provider, t.token \
+         FROM push_group_subscriptions s \
+         JOIN push_tokens t ON s.device_id = t.device_id \
+         WHERE s.group_id = ?",
+    )
+    .bind(&group[..])
+    .fetch_all(&state.db)
+    .await
+    .map_err(|e| {
+        tracing::error!(error = %e, "lookup push_group_subscriptions JOIN push_tokens");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal db error".to_string(),
+        )
+    })?;
+
+    // Deduplicate by `(device_id, provider)` — the JOIN
+    // produces one row per token, and the same device can carry
+    // tokens for multiple providers; both get fanned to, which
+    // is the right behaviour. We just count `devices_woken` as
+    // distinct `device_id` values for the operator-side metric.
+    let mut woken: HashSet<Vec<u8>> = HashSet::new();
+    let mut deliveries = Vec::with_capacity(rows.len());
+
+    for (device_bytes, provider_db, token) in rows {
+        let Ok(device_arr): Result<[u8; PSEUDONYM_LEN], _> =
+            <[u8; PSEUDONYM_LEN]>::try_from(device_bytes.as_slice())
+        else {
+            tracing::warn!(
+                len = device_bytes.len(),
+                "subscriptions row has wrong-length device_id — skipping",
+            );
+            continue;
+        };
+        let Some(kind) = ProviderKind::from_db(provider_db) else {
+            tracing::warn!(provider_db, "unknown provider in DB row — skipping");
+            continue;
+        };
+        // Wake payload — same shape `/push/notify` uses. Note
+        // `device_pseudonym` is the receiver, not the
+        // publisher; the receiver's client looks at this to
+        // confirm the wake is for the right local account.
+        let wake_payload = WakePayload {
+            device_pseudonym: device_arr,
+            group_pseudonym: Some(group),
+            envelope_pointer: payload.envelope_pointer,
+        };
+
+        let outcome = dispatch_one(&state, kind, &token, &wake_payload).await;
+        if matches!(outcome.status, "token_invalid") {
+            drop_invalid_token(&state, &device_arr, provider_db).await;
+        }
+        deliveries.push(outcome);
+        woken.insert(device_arr.to_vec());
+    }
+
+    Ok(Json(NotifyGroupResponse {
+        devices_woken: woken.len(),
         deliveries,
     }))
 }

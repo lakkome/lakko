@@ -19,8 +19,12 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -91,6 +95,8 @@ public fun RecoverScreen(
                 state = state,
                 cachedUsername = cachedUsername,
                 onPhraseChange = viewModel::onPhraseChange,
+                onSharesInputChange = viewModel::onSharesInputChange,
+                onModeChange = viewModel::onModeChange,
                 onPasswordChange = viewModel::onPasswordChange,
                 onConfirmChange = viewModel::onConfirmChange,
                 onSubmit = viewModel::onSubmit,
@@ -104,20 +110,23 @@ public fun RecoverScreen(
 // Form
 // =============================================================================
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun RecoverForm(
     state: RecoverUiState,
     cachedUsername: String,
     onPhraseChange: (String) -> Unit,
+    onSharesInputChange: (String) -> Unit,
+    onModeChange: (RecoverMode) -> Unit,
     onPasswordChange: (String) -> Unit,
     onConfirmChange: (String) -> Unit,
     onSubmit: () -> Unit,
     onNavigateToLogin: () -> Unit,
 ) {
     Text(
-        text = "Paste your 24-word recovery phrase and pick a new password. " +
-            "We'll prove ownership to the server and rotate the password " +
-            "envelope.",
+        text = "Recover your account using either the 24-word phrase or 3+ " +
+            "social-recovery shares. We'll prove ownership to the server " +
+            "and rotate the password envelope.",
         style = MaterialTheme.typography.bodyMedium,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
     )
@@ -126,32 +135,86 @@ private fun RecoverForm(
         text = "Account on this device: @$cachedUsername",
         style = MaterialTheme.typography.bodyMedium,
     )
-    Spacer(Modifier.height(24.dp))
+    Spacer(Modifier.height(16.dp))
 
-    OutlinedTextField(
-        value = state.phrase,
-        onValueChange = onPhraseChange,
-        label = { Text("Recovery phrase (24 words)") },
-        placeholder = { Text("abandon abandon abandon … art") },
-        singleLine = false,
-        enabled = !state.busy,
-        keyboardOptions = KeyboardOptions(
-            // Autocorrect on a wordlist phrase would helpfully
-            // rewrite valid BIP39 words into adjacent dictionary
-            // entries — disable it. We also force lowercase since
-            // the BIP39 wordlist is exclusively lowercase.
-            capitalization = KeyboardCapitalization.None,
-            autoCorrect = false,
-            keyboardType = KeyboardType.Ascii,
-            imeAction = ImeAction.Next,
-        ),
-        textStyle = MaterialTheme.typography.bodyMedium.copy(
-            fontFamily = FontFamily.Monospace,
-        ),
-        modifier = Modifier
-            .fillMaxWidth()
-            .heightIn(min = 120.dp),
-    )
+    // 1.21c3 — mode toggle (Phrase / Shares). SegmentedButtonRow
+    // is the Material3-native pattern for a two-mode form switch.
+    SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+        SegmentedButton(
+            selected = state.mode == RecoverMode.Phrase,
+            onClick = { onModeChange(RecoverMode.Phrase) },
+            shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2),
+            enabled = !state.busy,
+        ) { Text("24-word phrase") }
+        SegmentedButton(
+            selected = state.mode == RecoverMode.Shares,
+            onClick = { onModeChange(RecoverMode.Shares) },
+            shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2),
+            enabled = !state.busy,
+        ) { Text("Recovery shares") }
+    }
+    Spacer(Modifier.height(16.dp))
+
+    if (state.mode == RecoverMode.Phrase) {
+        OutlinedTextField(
+            value = state.phrase,
+            onValueChange = onPhraseChange,
+            label = { Text("Recovery phrase (24 words)") },
+            placeholder = { Text("abandon abandon abandon … art") },
+            singleLine = false,
+            enabled = !state.busy,
+            keyboardOptions = KeyboardOptions(
+                // Autocorrect on a wordlist phrase would helpfully
+                // rewrite valid BIP39 words into adjacent dictionary
+                // entries — disable it. We also force lowercase since
+                // the BIP39 wordlist is exclusively lowercase.
+                capitalization = KeyboardCapitalization.None,
+                autoCorrect = false,
+                keyboardType = KeyboardType.Ascii,
+                imeAction = ImeAction.Next,
+            ),
+            textStyle = MaterialTheme.typography.bodyMedium.copy(
+                fontFamily = FontFamily.Monospace,
+            ),
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(min = 120.dp),
+        )
+    } else {
+        OutlinedTextField(
+            value = state.sharesInput,
+            onValueChange = onSharesInputChange,
+            label = { Text("Recovery shares (one per line)") },
+            placeholder = {
+                Text(
+                    text = "3:abcdEFGH...\n" +
+                        "1:zzzzABCD...\n" +
+                        "5:mmmm0123...",
+                )
+            },
+            singleLine = false,
+            enabled = !state.busy,
+            keyboardOptions = KeyboardOptions(
+                capitalization = KeyboardCapitalization.None,
+                autoCorrect = false,
+                keyboardType = KeyboardType.Ascii,
+                imeAction = ImeAction.Next,
+            ),
+            textStyle = MaterialTheme.typography.bodyMedium.copy(
+                fontFamily = FontFamily.Monospace,
+            ),
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(min = 140.dp),
+            supportingText = {
+                Text(
+                    "Paste at least 3 shares (Lakko default is 3-of-5). " +
+                        "Each line: <index>:<base64>.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            },
+        )
+    }
     Spacer(Modifier.height(12.dp))
 
     OutlinedTextField(

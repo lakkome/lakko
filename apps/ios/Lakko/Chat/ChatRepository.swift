@@ -157,6 +157,13 @@ public final class ChatRepository: ObservableObject {
                         continue
                     }
                     groups[groupIdHex] = GroupRecord(group: group, groupId: groupId)
+                    // 1.20e — subscribe to push wakes for each
+                    // rehydrated group. Idempotent server-side
+                    // so re-subscribing on every cold start is
+                    // free.
+                    Task { [groupId] in
+                        await Self.subscribeGroupPushBestEffort(groupId: groupId)
+                    }
                 } catch {
                     // best-effort
                     continue
@@ -280,6 +287,10 @@ public final class ChatRepository: ObservableObject {
         persistKnownGroupBestEffort(groupIdHex: groupIdHex)
         persistSnapshotBestEffort()
         state = state.with(threads: buildThreadList())
+        // 1.20e — subscribe to push wakes for this new group.
+        Task { [groupId] in
+            await Self.subscribeGroupPushBestEffort(groupId: groupId)
+        }
         return groupIdHex
     }
 
@@ -310,6 +321,12 @@ public final class ChatRepository: ObservableObject {
         persistKnownGroupBestEffort(groupIdHex: groupIdHex)
         persistSnapshotBestEffort()
         state = state.with(threads: buildThreadList())
+        // 1.20e — subscribe to push wakes for the just-joined
+        // group. Same fire-and-forget pattern as the create
+        // path above; idempotent server-side.
+        Task { [groupId] in
+            await Self.subscribeGroupPushBestEffort(groupId: groupId)
+        }
         return groupIdHex
     }
 
@@ -368,6 +385,50 @@ public final class ChatRepository: ObservableObject {
         )
         persistSnapshotBestEffort()
         state = state.with(threads: buildThreadList())
+        // 1.20e — fan a wake out to every device subscribed to
+        // this group. Fire-and-forget — the message is already
+        // on the DS and recipients pick it up on next poll
+        // even if push-gw is down. Off the user-visible send
+        // critical path so the PoW solve doesn't double send
+        // latency.
+        Task { [groupId = record.groupId, messageId = result.messageId] in
+            await Self.notifyPushGroupBestEffort(
+                groupId: groupId,
+                messageId: messageId
+            )
+        }
+    }
+
+    /// 1.20e — push-gw wake fan-out. Best-effort, off the
+    /// critical path. Errors logged via NSLog, never re-thrown.
+    private static func notifyPushGroupBestEffort(
+        groupId: Data,
+        messageId: Int64
+    ) async {
+        do {
+            _ = try await PushClient().notifyGroup(
+                groupPseudonym: groupId,
+                envelopePointer: messageId
+            )
+        } catch {
+            NSLog("push notify-group failed: \(error)")
+        }
+    }
+
+    /// 1.20e — subscribe this device to push wakes for the
+    /// given group. Fired after every successful group join /
+    /// create / rehydrate; server-side idempotent so re-runs
+    /// are cheap no-ops.
+    private static func subscribeGroupPushBestEffort(groupId: Data) async {
+        do {
+            let pseudonym = try DevicePushId.getOrCreate()
+            _ = try await PushClient().subscribeGroup(
+                devicePseudonym: pseudonym,
+                groupPseudonym: groupId
+            )
+        } catch {
+            NSLog("push group subscribe failed: \(error)")
+        }
     }
 
     /// Pull new messages from one group's journal + apply them to

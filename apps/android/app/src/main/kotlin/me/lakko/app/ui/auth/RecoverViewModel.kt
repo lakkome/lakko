@@ -14,6 +14,8 @@ import me.lakko.app.auth.AuthClientArgError
 import me.lakko.app.auth.AuthHttpError
 import me.lakko.app.auth.AuthNetworkError
 import me.lakko.app.auth.AuthRepository
+import me.lakko.app.recovery.ShamirBridge
+import me.lakko.app.recovery.ShamirBridgeException
 import uniffi.lakko_ffi_uniffi.FfiException
 
 /**
@@ -43,6 +45,16 @@ public class RecoverViewModel(
 
     public fun onPhraseChange(value: String) {
         mutableState.update { it.copy(phrase = value) }
+    }
+
+    /** 1.21c3 — Shamir-shares textarea content. */
+    public fun onSharesInputChange(value: String) {
+        mutableState.update { it.copy(sharesInput = value) }
+    }
+
+    /** 1.21c3 — toggle between Phrase and Shares input modes. */
+    public fun onModeChange(mode: RecoverMode) {
+        mutableState.update { it.copy(mode = mode) }
     }
 
     public fun onPasswordChange(value: String) {
@@ -85,18 +97,52 @@ public class RecoverViewModel(
             }
             return
         }
-        if (snapshot.phrase.isBlank()) {
-            mutableState.update {
-                it.copy(error = "Recovery phrase must be non-empty.")
+        // 1.21c3 — resolve the phrase based on input mode.
+        // Shares mode reconstructs the canonical phrase via
+        // `ShamirBridge.combineSharesToMnemonic` before falling
+        // through to the existing OPAQUE recovery flow.
+        val resolvedPhrase: String = when (snapshot.mode) {
+            RecoverMode.Phrase -> {
+                if (snapshot.phrase.isBlank()) {
+                    mutableState.update {
+                        it.copy(error = "Recovery phrase must be non-empty.")
+                    }
+                    return
+                }
+                snapshot.phrase
             }
-            return
+            RecoverMode.Shares -> {
+                val lines = snapshot.sharesInput
+                    .lines()
+                    .map { it.trim() }
+                    .filter { it.isNotEmpty() }
+                if (lines.size < 2) {
+                    mutableState.update {
+                        it.copy(
+                            error = "At least 2 shares required (Lakko default is 3-of-5).",
+                        )
+                    }
+                    return
+                }
+                try {
+                    ShamirBridge.combineSharesToMnemonic(lines)
+                } catch (e: ShamirBridgeException) {
+                    mutableState.update {
+                        it.copy(
+                            busy = false,
+                            error = e.message ?: "Couldn't combine shares.",
+                        )
+                    }
+                    return
+                }
+            }
         }
 
         mutableState.update { it.copy(busy = true, error = null) }
         viewModelScope.launch {
             val passwordBytes = snapshot.password.toByteArray(Charsets.UTF_8)
             try {
-                repo.recover(snapshot.phrase, passwordBytes)
+                repo.recover(resolvedPhrase, passwordBytes)
                 // `repo.recover` already flipped AuthState to
                 // Session. The screen will be replaced by the
                 // home destination on the next recomposition;
@@ -107,6 +153,7 @@ public class RecoverViewModel(
                         busy = false,
                         error = null,
                         phrase = "",
+                        sharesInput = "",
                         password = "",
                         confirm = "",
                     )
@@ -168,9 +215,15 @@ public class RecoverViewModel(
     }
 }
 
+/** 1.21c3 — which input mode the user is filling. */
+public enum class RecoverMode { Phrase, Shares }
+
 /** Snapshot of every field the [RecoverScreen] renders. */
 public data class RecoverUiState(
+    val mode: RecoverMode = RecoverMode.Phrase,
     val phrase: String = "",
+    /** Shamir-shares textarea content (one share per line). */
+    val sharesInput: String = "",
     val password: String = "",
     val confirm: String = "",
     val busy: Boolean = false,

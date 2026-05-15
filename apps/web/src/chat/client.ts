@@ -65,6 +65,7 @@
  * next mutation will retry the persist naturally.
  */
 import { DsClient } from "../ds/client";
+import { PushClient } from "../push/client";
 import { loadWasm } from "../wasm";
 import type {
   Group as WasmGroup,
@@ -168,6 +169,11 @@ export class ChatClient {
   constructor(
     private readonly ds: DsClient = new DsClient(),
     options: ChatClientOptions = {},
+    /** 1.20e — push-gw client for the fan-out wake. Side-channel:
+     *  sendMessage fires `notifyGroup` after the DS publish to
+     *  wake every subscribed device. Default to a fresh client
+     *  so the chat surface needs no extra wiring. */
+    private readonly pushClient: PushClient = new PushClient(),
   ) {
     this.identityProvider = options.identityProvider;
     this.onPersist = options.onPersist;
@@ -262,7 +268,37 @@ export class ChatClient {
     // storage). Snapshot it.
     await this.persistBestEffort();
 
+    // 1.20e — fan a wake out to every device subscribed to
+    // this group. Fire-and-forget — failures here would not
+    // help the sender (the message is already on the DS,
+    // recipients will see it on their next poll regardless).
+    // No await; the function returns the DS receipt
+    // immediately while the wake fans out in the background.
+    this.notifyPushGroupBestEffort(groupId, publish.id);
+
     return { messageId: publish.id, createdAt: publish.createdAt };
+  }
+
+  /**
+   * 1.20e — fire `pushClient.notifyGroup(groupId, messageId)`
+   * on the side. Best-effort: if push-gw is down, the message
+   * has still been published to DS + recipients will pick it
+   * up on their next poll. We don't gate `sendMessage` on this.
+   */
+  private notifyPushGroupBestEffort(
+    groupId: Uint8Array,
+    messageId: number,
+  ): void {
+    // The notifyGroup call drives a PoW solve, which takes
+    // 100-500 ms; running it inline in sendMessage would
+    // double the user-visible send latency. Off the critical
+    // path:
+    void this.pushClient
+      .notifyGroup(groupId, messageId)
+      .catch((err) => {
+        // eslint-disable-next-line no-console
+        console.warn("push notify-group failed", err);
+      });
   }
 
   /**

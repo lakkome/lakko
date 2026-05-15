@@ -6,12 +6,18 @@ package me.lakko.app.chat
 import android.content.Context
 import java.util.Collections
 import java.util.concurrent.atomic.AtomicReference
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import me.lakko.app.push.DevicePushId
+import me.lakko.app.push.PushClient
 import me.lakko.app.auth.IdentitySecrets
 import me.lakko.app.contacts.KIND_WELCOME
 import me.lakko.app.contacts.wrapEnvelope
@@ -86,6 +92,13 @@ public class ChatRepository(
      * lock the whole repository — the [Identity] handle is
      * thread-safe at the UniFFI level (Rust-side `Arc`).
      */
+    /** 1.20e — process-lifetime scope for fire-and-forget push
+     *  fan-out / subscribe coroutines. `SupervisorJob` so one
+     *  failed leg doesn't tear down siblings; `Dispatchers.IO`
+     *  because both legs are network-heavy. */
+    private val pushScope: CoroutineScope =
+        CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
     private val canonicalIdentity = AtomicReference<Identity?>(null)
 
     /**
@@ -179,6 +192,10 @@ public class ChatRepository(
                     val groupId = hexToBytes(groupIdHex) ?: continue
                     val group = loadGroup(identity, groupId) ?: continue
                     groups[groupIdHex] = GroupRecord(group = group, groupId = groupId)
+                    // 1.20e — subscribe to push wakes for each
+                    // rehydrated group. Idempotent server-side
+                    // (composite PK), free re-runs on cold start.
+                    pushScope.launch { subscribeGroupPushBestEffort(groupId) }
                 } catch (_: Throwable) {
                     // best-effort
                 }
@@ -271,6 +288,9 @@ public class ChatRepository(
             persistKnownGroupBestEffort(groupIdHex)
             persistSnapshotBestEffort()
             publishThreadList()
+            // 1.20e — subscribe to push wakes for the just-
+            // created group.
+            pushScope.launch { subscribeGroupPushBestEffort(groupId) }
             groupIdHex
         }
     }
@@ -302,6 +322,9 @@ public class ChatRepository(
             persistKnownGroupBestEffort(groupIdHex)
             persistSnapshotBestEffort()
             publishThreadList()
+            // 1.20e — subscribe to push wakes for the just-
+            // joined group.
+            pushScope.launch { subscribeGroupPushBestEffort(groupId) }
             groupIdHex
         }
     }
@@ -363,6 +386,60 @@ public class ChatRepository(
             )
             persistSnapshotBestEffort()
             publishThreadList()
+            // 1.20e — fan a wake out to every device subscribed
+            // to this group. Off the user-visible critical path
+            // so the PoW solve doesn't double send latency.
+            // Best-effort — recipients still get the message via
+            // foreground polling if push-gw is down.
+            pushScope.launch {
+                notifyPushGroupBestEffort(
+                    groupId = record.groupId,
+                    messageId = result.messageId,
+                )
+            }
+        }
+    }
+
+    /** 1.20e — fire `PushClient.notifyGroup` on the side scope.
+     *  Logged-and-swallowed; never re-thrown past sendMessage. */
+    private suspend fun notifyPushGroupBestEffort(
+        groupId: ByteArray,
+        messageId: Long,
+    ) {
+        try {
+            PushClient().use { client ->
+                client.notifyGroup(
+                    groupPseudonym = groupId,
+                    envelopePointer = messageId,
+                )
+            }
+        } catch (cause: Throwable) {
+            android.util.Log.w(
+                "lakko-chat",
+                "push notify-group failed",
+                cause,
+            )
+        }
+    }
+
+    /** 1.20e — subscribe this device to push wakes for the
+     *  given group. Fired after every join / create / rehydrate.
+     *  Server-side idempotent so re-runs are cheap no-ops. */
+    private suspend fun subscribeGroupPushBestEffort(groupId: ByteArray) {
+        try {
+            val pseudonym = DevicePushId.getOrCreate(applicationContext)
+            PushClient().use { client ->
+                client.subscribeGroup(
+                    devicePseudonym = pseudonym,
+                    groupPseudonym = groupId,
+                )
+            }
+        } catch (cause: Throwable) {
+            android.util.Log.w(
+                "lakko-chat",
+                "push group subscribe failed",
+                cause,
+            )
         }
     }
 

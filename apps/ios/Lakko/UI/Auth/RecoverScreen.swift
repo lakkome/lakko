@@ -92,7 +92,21 @@ private struct RecoverForm: View {
             Text("Account on this device: @\(cachedUsername)")
                 .font(.body)
 
-            phraseEditor
+            // 1.21c2 — mode toggle: phrase | shares. Picker
+            // renders as a segmented control which matches the
+            // iOS native pattern for a two-mode form switch.
+            Picker("Recovery mode", selection: $viewModel.mode) {
+                Text("24-word phrase").tag(RecoverViewModel.Mode.phrase)
+                Text("Recovery shares").tag(RecoverViewModel.Mode.shares)
+            }
+            .pickerStyle(.segmented)
+            .disabled(viewModel.busy)
+
+            if viewModel.mode == .phrase {
+                phraseEditor
+            } else {
+                sharesEditor
+            }
 
             SecureField("New password", text: $viewModel.password)
                 .textFieldStyle(.roundedBorder)
@@ -141,6 +155,51 @@ private struct RecoverForm: View {
                 }
                 Spacer()
             }
+        }
+    }
+
+    /// 1.21c2 — multi-line shares editor. Same `ZStack`-
+    /// placeholder shape as `phraseEditor`; placeholder explains
+    /// the one-share-per-line convention.
+    private var sharesEditor: some View {
+        ZStack(alignment: .topLeading) {
+            if viewModel.sharesInput.isEmpty {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("3:abcdEFGH...")
+                    Text("1:zzzzABCD...")
+                    Text("5:mmmm0123...")
+                }
+                .font(.system(.body, design: .monospaced))
+                .foregroundStyle(.tertiary)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 8)
+                .allowsHitTesting(false)
+            }
+            TextEditor(text: $viewModel.sharesInput)
+                .font(.system(.body, design: .monospaced))
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled(true)
+                .scrollContentBackground(.hidden)
+                .disabled(viewModel.busy)
+                .frame(minHeight: 140)
+        }
+        .background(Color(.secondarySystemBackground))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(Color(.separator), lineWidth: 1)
+        )
+        .overlay(alignment: .bottom) {
+            Text(
+                "Paste at least 3 shares (Lakko default is 3-of-5). " +
+                "Each line is one share of the form <index>:<base64>."
+            )
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 8)
+            .padding(.bottom, 4)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color(.secondarySystemBackground).opacity(0.0))
         }
     }
 

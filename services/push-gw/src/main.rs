@@ -242,6 +242,13 @@ pub(crate) fn build_app(state: AppState) -> Router {
         .route("/push/register", post(registry::register))
         .route("/push/unregister", post(registry::unregister))
         .route("/push/notify", post(notify::notify))
+        // 1.20e — group fan-out. Devices subscribe to groups
+        // they care about; publishers call `/push/notify-group`
+        // once per send + the gateway fans out to every
+        // subscribed device's tokens.
+        .route("/push/group/subscribe", post(registry::group_subscribe))
+        .route("/push/group/unsubscribe", post(registry::group_unsubscribe))
+        .route("/push/notify-group", post(notify::notify_group))
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
