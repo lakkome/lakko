@@ -11,17 +11,23 @@
 //!
 //! ## Flow split
 //!
-//! - **Registration** (2a2a, this sub-sprint) — the user is already
-//!   logged in (the start/finish pair is gated by the session-token
-//!   middleware). The browser / iOS / Android authenticator mints a
-//!   fresh (private-key, credential-id, public-key) tuple bound to
-//!   the lakko relying-party id; the server persists the public-key
-//!   half so a future authentication round can verify a signed
-//!   challenge.
+//! - **Registration** (2a2a) — the user is already logged in
+//!   (the start/finish pair is gated by the session-token
+//!   middleware). The browser / iOS / Android authenticator mints
+//!   a fresh (private-key, credential-id, public-key) tuple bound
+//!   to the lakko relying-party id; the server persists the
+//!   public-key half so a future authentication round can verify
+//!   a signed challenge.
 //!
-//! - **Authentication** (2a2b) — anonymous; user presents the
-//!   passkey to obtain a session token without going through the
-//!   OPAQUE password round-trip. Lands in a follow-up sub-sprint.
+//! - **Authentication** (2a2b, this sub-sprint) — anonymous; the
+//!   user presents the passkey to obtain a session token without
+//!   going through the OPAQUE password round-trip. Two sub-paths:
+//!   *allow-list* (caller supplies `account_id_b64`, server
+//!   returns a constrained challenge) and *discoverable* (caller
+//!   omits the id, the authenticator picks any of its stored
+//!   passkeys for the lakko RP id and the user handle lands on
+//!   /finish). The discoverable path powers the "Sign in with
+//!   passkey" zero-friction UX.
 //!
 //! ## Relying-party identity
 //!
@@ -73,8 +79,9 @@ use sqlx::MySqlPool;
 use url::Url;
 use uuid::Uuid;
 use webauthn_rs::prelude::{
-    CreationChallengeResponse, CredentialID, Passkey, PasskeyRegistration,
-    RegisterPublicKeyCredential, Webauthn, WebauthnBuilder,
+    CreationChallengeResponse, CredentialID, DiscoverableAuthentication, DiscoverableKey, Passkey,
+    PasskeyAuthentication, PasskeyRegistration, PublicKeyCredential, RegisterPublicKeyCredential,
+    RequestChallengeResponse, Webauthn, WebauthnBuilder,
 };
 
 use crate::AppState;
@@ -91,7 +98,8 @@ const PRUNE_INTERVAL: Duration = Duration::from_secs(60);
 /// `TINYINT UNSIGNED` in the DB.
 mod state_kind {
     pub(super) const REGISTRATION: u8 = 0;
-    // 1 = authentication, 2 = discoverable — land in 2a2b.
+    pub(super) const AUTHENTICATION: u8 = 1;
+    pub(super) const DISCOVERABLE: u8 = 2;
 }
 
 /// Bearer-authenticated endpoint that prepares a fresh passkey
@@ -293,6 +301,215 @@ pub(crate) async fn delete_credential(
 }
 
 // ----------------------------------------------------------------
+// 2a2b — Authentication (anonymous)
+// ----------------------------------------------------------------
+
+/// Anonymous endpoint that prepares a fresh passkey authentication
+/// challenge.
+///
+/// Two paths:
+///
+/// 1. **Allow-list.** Caller supplies `account_id_b64`; we load the
+///    user's stored passkeys and build an `allowCredentials`
+///    challenge so the authenticator restricts itself to that list.
+///    Used when the user has already typed their username on the
+///    Login screen (the username → account_id lookup happens in
+///    `services/discovery`, then the result is passed here).
+///
+/// 2. **Discoverable.** Caller omits `account_id_b64`. The server
+///    issues a challenge with an empty `allowCredentials`; the
+///    authenticator picks any of its stored passkeys for the lakko
+///    RP id and signs. The /finish handler identifies the user from
+///    the response's `userHandle`. This is the "Sign in with
+///    passkey" zero-friction flow.
+#[axum::debug_handler]
+pub(crate) async fn auth_start(
+    State(state): State<AppState>,
+    Json(req): Json<AuthStartReq>,
+) -> Result<Json<AuthStartRes>, ApiError> {
+    let webauthn = state.webauthn.as_ref().ok_or(ApiError::Disabled)?.clone();
+
+    if let Some(b64) = req.account_id_b64.as_deref() {
+        // Allow-list path. Resolve the account, load its passkeys.
+        let account_id = decode_account_id(b64)?;
+        let passkeys = load_passkeys_for(&state.db, &account_id).await?;
+        if passkeys.is_empty() {
+            // The user has no passkeys; surface a clean error so
+            // the UI can fall back to password.
+            return Err(ApiError::NoCredentials);
+        }
+        let (rcr, auth_state): (RequestChallengeResponse, PasskeyAuthentication) = webauthn
+            .start_passkey_authentication(&passkeys)
+            .map_err(ApiError::Webauthn)?;
+        let state_bytes = serde_json::to_vec(&auth_state).map_err(ApiError::SerdeJson)?;
+        let state_id = random_state_id();
+        persist_state(
+            &state.db,
+            &state_id,
+            Some(&account_id),
+            state_kind::AUTHENTICATION,
+            &state_bytes,
+        )
+        .await?;
+        Ok(Json(AuthStartRes {
+            state_id: hex_lower(&state_id),
+            discoverable: false,
+            options: rcr,
+        }))
+    } else {
+        // Discoverable path. No account binding yet; the user
+        // handle lands on /finish.
+        let (rcr, auth_state): (RequestChallengeResponse, DiscoverableAuthentication) = webauthn
+            .start_discoverable_authentication()
+            .map_err(ApiError::Webauthn)?;
+        let state_bytes = serde_json::to_vec(&auth_state).map_err(ApiError::SerdeJson)?;
+        let state_id = random_state_id();
+        persist_state(
+            &state.db,
+            &state_id,
+            None,
+            state_kind::DISCOVERABLE,
+            &state_bytes,
+        )
+        .await?;
+        Ok(Json(AuthStartRes {
+            state_id: hex_lower(&state_id),
+            discoverable: true,
+            options: rcr,
+        }))
+    }
+}
+
+/// Verify the authenticator's signature, identify the account,
+/// bump the credential's signature counter, mint a session token.
+///
+/// Wire-equivalent to OPAQUE's `login_finish` — returns the same
+/// `(account_id, session_token, session_expires_at_ms)` triple so
+/// downstream clients hold a single shape regardless of which auth
+/// path produced the token.
+#[axum::debug_handler]
+pub(crate) async fn auth_finish(
+    State(state): State<AppState>,
+    Json(req): Json<AuthFinishReq>,
+) -> Result<Json<AuthFinishRes>, ApiError> {
+    let webauthn = state.webauthn.as_ref().ok_or(ApiError::Disabled)?.clone();
+
+    let state_id = parse_state_id(&req.state_id)?;
+    // Try the allow-list row first, then the discoverable row. We
+    // look up by `state_id` only — the `kind` discriminator tells
+    // us which path to take. A `state_id` from one kind cannot be
+    // replayed against the other-kind /finish because we dispatch
+    // on the loaded row's kind, not on caller intent.
+    let (auth_result, account_id) = if let Some(row) =
+        load_state(&state.db, &state_id, state_kind::AUTHENTICATION).await?
+    {
+        let auth_state: PasskeyAuthentication =
+            serde_json::from_slice(&row.state_bytes).map_err(ApiError::SerdeJson)?;
+        let result = webauthn
+            .finish_passkey_authentication(&req.credential, &auth_state)
+            .map_err(ApiError::Webauthn)?;
+        let account_id = row.account_id.ok_or(ApiError::StateMissing)?;
+        (result, account_id)
+    } else if let Some(row) = load_state(&state.db, &state_id, state_kind::DISCOVERABLE).await? {
+        let auth_state: DiscoverableAuthentication =
+            serde_json::from_slice(&row.state_bytes).map_err(ApiError::SerdeJson)?;
+        // Identify the user from the authenticator's userHandle.
+        let (user_uuid, _cred_id) = webauthn
+            .identify_discoverable_authentication(&req.credential)
+            .map_err(ApiError::Webauthn)?;
+        let account_id = *user_uuid.as_bytes();
+        let passkeys = load_passkeys_for(&state.db, &account_id).await?;
+        if passkeys.is_empty() {
+            return Err(ApiError::NoCredentials);
+        }
+        let discoverable_keys: Vec<DiscoverableKey> =
+            passkeys.iter().map(DiscoverableKey::from).collect();
+        let result = webauthn
+            .finish_discoverable_authentication(&req.credential, auth_state, &discoverable_keys)
+            .map_err(ApiError::Webauthn)?;
+        (result, account_id)
+    } else {
+        return Err(ApiError::StateMissing);
+    };
+
+    // Drop the in-flight state row immediately — a state_id is
+    // single-use; clearing protects against accidental client
+    // retries replaying a verified challenge.
+    let _ = sqlx::query("DELETE FROM webauthn_states WHERE state_id = ?")
+        .bind(state_id.as_slice())
+        .execute(&state.db)
+        .await;
+
+    // Bump the credential's counter + last_used_at if anything
+    // changed. webauthn-rs's `Passkey::update_credential` flags
+    // whether the row needs persisting; we only re-serialise on
+    // change to avoid VARBINARY churn.
+    let cred_id_bytes: Vec<u8> = auth_result.cred_id().as_ref().to_vec();
+    let row: Option<(Vec<u8>, Vec<u8>)> = sqlx::query_as(
+        "SELECT passkey_bytes, account_id FROM webauthn_credentials WHERE credential_id = ?",
+    )
+    .bind(&cred_id_bytes)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(ApiError::Db)?;
+    let (passkey_bytes, row_account_id_vec) = row.ok_or(ApiError::StateMissing)?;
+    // Defense in depth: the credential's account binding must
+    // match the path we authenticated. If a previously-deleted-
+    // and-re-issued credential id collides, refuse rather than
+    // hand out a token for the wrong account.
+    if row_account_id_vec.len() != 16 || row_account_id_vec != account_id {
+        tracing::warn!("webauthn auth: credential account mismatch");
+        return Err(ApiError::StateMissing);
+    }
+    let mut passkey: Passkey =
+        serde_json::from_slice(&passkey_bytes).map_err(ApiError::SerdeJson)?;
+    let changed = passkey.update_credential(&auth_result).unwrap_or(false);
+    if changed {
+        let serialised = serde_json::to_vec(&passkey).map_err(ApiError::SerdeJson)?;
+        sqlx::query(
+            "UPDATE webauthn_credentials \
+             SET passkey_bytes = ?, last_used_at = NOW(3) \
+             WHERE credential_id = ?",
+        )
+        .bind(&serialised)
+        .bind(&cred_id_bytes)
+        .execute(&state.db)
+        .await
+        .map_err(ApiError::Db)?;
+    } else {
+        // Even with no counter advance we want last_used_at to
+        // reflect this successful auth.
+        sqlx::query(
+            "UPDATE webauthn_credentials SET last_used_at = NOW(3) WHERE credential_id = ?",
+        )
+        .bind(&cred_id_bytes)
+        .execute(&state.db)
+        .await
+        .map_err(ApiError::Db)?;
+    }
+
+    // Issue the session token. Same TTL math as OPAQUE login —
+    // see `opaque::issue_token_for`.
+    let now_ms: i64 = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX));
+    let session_expires_at_ms = now_ms.saturating_add(state.session_token_ttl_ms);
+    let session_token = state
+        .session_token_secret
+        .issue(&account_id, session_expires_at_ms)
+        .map_err(|e| {
+            tracing::error!(error = %e, "webauthn auth: session-token issuance failed");
+            ApiError::Internal
+        })?;
+
+    Ok(Json(AuthFinishRes {
+        account_id_b64: URL_SAFE_NO_PAD.encode(account_id),
+        session_token,
+        session_expires_at_ms,
+    }))
+}
+
+// ----------------------------------------------------------------
 // Setup / state plumbing
 // ----------------------------------------------------------------
 
@@ -336,6 +553,43 @@ struct CredentialRow {
     nickname: String,
     created_at_ms: Option<i64>,
     last_used_at_ms: Option<i64>,
+}
+
+/// Decode the URL-safe base64 account id the auth-start payload
+/// carries on the allow-list path. Validates length so a 401 from
+/// downstream isn't a length-mismatch surprise.
+fn decode_account_id(b64: &str) -> Result<[u8; 16], ApiError> {
+    let bytes = URL_SAFE_NO_PAD
+        .decode(b64)
+        .map_err(|_| ApiError::BadInput("account_id_b64 not URL-safe base64"))?;
+    if bytes.len() != 16 {
+        return Err(ApiError::BadInput("account_id must decode to 16 bytes"));
+    }
+    let mut out = [0u8; 16];
+    out.copy_from_slice(&bytes);
+    Ok(out)
+}
+
+/// Load every `Passkey` registered to this account. Used by both
+/// the allow-list /start handler (to populate `allowCredentials`)
+/// and the discoverable /finish handler (to look up the user's
+/// keys after `identify_discoverable_authentication`).
+async fn load_passkeys_for(
+    pool: &MySqlPool,
+    account_id: &[u8; 16],
+) -> Result<Vec<Passkey>, ApiError> {
+    let rows: Vec<Vec<u8>> =
+        sqlx::query_scalar("SELECT passkey_bytes FROM webauthn_credentials WHERE account_id = ?")
+            .bind(account_id.as_slice())
+            .fetch_all(pool)
+            .await
+            .map_err(ApiError::Db)?;
+    let mut keys: Vec<Passkey> = Vec::with_capacity(rows.len());
+    for row in rows {
+        let pk: Passkey = serde_json::from_slice(&row).map_err(ApiError::SerdeJson)?;
+        keys.push(pk);
+    }
+    Ok(keys)
 }
 
 async fn load_state(
@@ -552,6 +806,54 @@ pub(crate) struct CredentialSummary {
     pub last_used_at_ms: Option<i64>,
 }
 
+// 2a2b — authentication wire ------------------------------------
+
+#[derive(Deserialize, Default)]
+pub(crate) struct AuthStartReq {
+    /// Optional. When set, drives the allow-list flow (server
+    /// loads the user's passkeys and returns a constrained
+    /// challenge). When omitted, drives the discoverable flow —
+    /// the authenticator picks any passkey for the lakko RP id
+    /// and the user handle lands on /finish.
+    #[serde(default)]
+    pub account_id_b64: Option<String>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct AuthStartRes {
+    /// Hex-lowercase 16-byte state id. Echo back on /auth/finish.
+    pub state_id: String,
+    /// `true` when the server picked the discoverable path. The
+    /// client uses this to decide whether to render a
+    /// `mediation: "conditional"` autofill prompt on web.
+    pub discoverable: bool,
+    /// `RequestChallengeResponse` ready to feed into
+    /// `navigator.credentials.get({publicKey: ...})` on web /
+    /// `ASAuthorizationController` on iOS / Jetpack
+    /// `CredentialManager.getCredential` on Android.
+    pub options: RequestChallengeResponse,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct AuthFinishReq {
+    pub state_id: String,
+    /// `PublicKeyCredential` produced by the authenticator (the
+    /// asserted signature + clientDataJSON + authenticatorData).
+    pub credential: PublicKeyCredential,
+}
+
+#[derive(Serialize)]
+pub(crate) struct AuthFinishRes {
+    /// URL-safe base64 of the 16-byte UUIDv7 account id.
+    pub account_id_b64: String,
+    /// Bearer token. Same shape as OPAQUE login's `session_token`
+    /// (HMAC-SHA256-signed, dot-segmented, v1) — issued by the
+    /// shared `lakko-auth-token::TokenSecret::issue`.
+    pub session_token: String,
+    /// Absolute unix-ms expiry, mirrors OPAQUE login.
+    pub session_expires_at_ms: i64,
+}
+
 // ----------------------------------------------------------------
 // Error → HTTP mapping
 // ----------------------------------------------------------------
@@ -561,6 +863,16 @@ pub(crate) enum ApiError {
     Disabled,
     BadInput(&'static str),
     StateMissing,
+    /// 2a2b: caller asked to authenticate via passkey but no
+    /// credentials are registered for the resolved account.
+    /// Surfaced as 404 so the UI can fall back to password.
+    NoCredentials,
+    /// 2a2b: catch-all for unrecoverable server-side errors
+    /// (session-token issuance failures). The OPAQUE module
+    /// folds the same case into a tuple-StatusCode; we keep an
+    /// `ApiError` variant for symmetry with the rest of the
+    /// `?`-using handlers in this module.
+    Internal,
     Db(sqlx::Error),
     Webauthn(webauthn_rs::prelude::WebauthnError),
     SerdeJson(serde_json::Error),
@@ -572,6 +884,8 @@ impl IntoResponse for ApiError {
             Self::Disabled => (StatusCode::SERVICE_UNAVAILABLE, "webauthn-disabled"),
             Self::BadInput(m) => (StatusCode::BAD_REQUEST, m),
             Self::StateMissing => (StatusCode::GONE, "state-missing-or-expired"),
+            Self::NoCredentials => (StatusCode::NOT_FOUND, "no-passkeys-for-account"),
+            Self::Internal => (StatusCode::INTERNAL_SERVER_ERROR, "internal"),
             Self::Db(e) => {
                 tracing::error!(error = %e, "webauthn db error");
                 (StatusCode::INTERNAL_SERVER_ERROR, "db-error")

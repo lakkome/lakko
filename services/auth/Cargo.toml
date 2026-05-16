@@ -74,7 +74,17 @@ lakko-auth-token.workspace = true
 # `webauthn_states` table between the two-step request pair —
 # webauthn-rs's defaults assume in-memory state which doesn't
 # survive across axum requests.
-webauthn-rs = { version = "0.5", features = ["danger-allow-state-serialisation"] }
+webauthn-rs = { version = "0.5", features = [
+    # Park PasskeyRegistration / PasskeyAuthentication state in the
+    # `webauthn_states` row between /start and /finish. Required
+    # because webauthn-rs's default surface assumes in-memory state.
+    "danger-allow-state-serialisation",
+    # Enable `start_discoverable_authentication` + the
+    # `DiscoverableKey` type. This is the "Sign in with passkey"
+    # path where the authenticator picks the credential without
+    # the user typing a username — the consumer-facing flow.
+    "conditional-ui",
+] }
 url = "2"
 
 [dev-dependencies]

@@ -55,6 +55,8 @@
 //! - `POST /webauthn/register/finish`— passkey enrolment, step 2 (Phase 2a2a, bearer-auth)
 //! - `GET  /webauthn/credentials`    — list this account's passkeys (Phase 2a2a, bearer-auth)
 //! - `DELETE /webauthn/credentials/{id}` — remove a passkey (Phase 2a2a, bearer-auth)
+//! - `POST /webauthn/auth/start`     — passkey login, step 1 (Phase 2a2b, anonymous)
+//! - `POST /webauthn/auth/finish`    — passkey login, step 2 (Phase 2a2b, anonymous)
 
 #![forbid(unsafe_code)]
 
@@ -265,6 +267,11 @@ fn build_app(state: AppState) -> Router {
             "/password/reset/finish",
             post(opaque::password_reset_finish),
         )
+        // 2a2b — anonymous passkey login. No bearer-auth: these
+        // are the login endpoints, the whole point is to mint
+        // the session token.
+        .route("/webauthn/auth/start", post(webauthn::auth_start))
+        .route("/webauthn/auth/finish", post(webauthn::auth_finish))
         .merge(webauthn_routes)
         .layer(TraceLayer::new_for_http())
         .with_state(state)

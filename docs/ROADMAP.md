@@ -335,7 +335,7 @@ The split exists so we can ship working scale at the end of 2b (private groups u
 
 **2a2 — Passkey opt-in (WebAuthn)**
 - **2a2a** ✅ `services/auth` WebAuthn registration endpoints (start / finish / list / delete), bearer-auth-gated. Uses `webauthn-rs` (Passkey flow: resident-key + user-verification required). State table for in-flight challenges with a 5-minute TTL pruner. `LAKKO_WEBAUTHN_RP_{ID,NAME,ORIGIN}` env vars; unset = passkey endpoints return 503 (graceful disable). FIDO2 attestation + CBOR + COSE parsing all live inside the library
-- **2a2b** `services/auth` WebAuthn login endpoint: challenge → assertion verify → session token issue (same shape as OPAQUE login output)
+- **2a2b** ✅ `services/auth` WebAuthn login endpoints (anonymous `auth/start` + `auth/finish`). Two paths: *allow-list* (caller passes `account_id_b64`, server returns a constrained challenge) and *discoverable* (caller omits the id, authenticator picks any passkey for the lakko RP id, user handle lands on /finish via `identify_discoverable_authentication`). On success: bump the credential's signature counter + last_used_at, mint a session token with the same TTL math + wire shape as OPAQUE `login_finish`. `conditional-ui` feature on `webauthn-rs` enables the discoverable path
 - **2a2c** Web client passkey UI: enrol affordance post-signup, login-screen toggle between password and passkey
 - **2a2d** iOS passkey UI: `AuthenticationServices.framework` (`ASAuthorizationPlatformPublicKeyCredentialProvider`)
 - **2a2e** Android passkey UI: Jetpack `CredentialManager` (`CreatePublicKeyCredentialRequest` + `GetCredentialRequest`)
