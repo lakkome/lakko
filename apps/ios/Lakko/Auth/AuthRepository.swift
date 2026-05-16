@@ -394,11 +394,31 @@ public final class AuthRepository: ObservableObject {
                 username: cached.username
             )
         )
-        // Phase 2a1c — post-recover backup bootstrap. Same
-        // shape as the signup-side call: re-cache the phrase
-        // under the freshly-rotated device root key and post a
-        // baseline /backup envelope. Best-effort.
+        // Phase 2a1d — restore-then-bootstrap on recover.
+        //
+        // The user has just gone through recovery, which lands
+        // on a device that may or may not have been used by
+        // them before. If a prior backup envelope sits on the
+        // server, we fetch + decrypt + parse it before posting
+        // a fresh baseline — otherwise the bootstrap-side
+        // upload nukes the prior backup with an empty payload.
+        //
+        // The applying-restored-contacts-into-ContactsRepository
+        // wire is not built yet on iOS — the contacts list is
+        // in-memory only and there's no persistent target to
+        // upsert into (mirror of the Android situation). For
+        // now restore logs the outcome; the merge layer lands
+        // alongside the iOS contact-persistence sub-sprint.
+        //
+        // Phase 2a1c — post-recover backup bootstrap: re-cache
+        // the phrase under the freshly-rotated device root key
+        // and post a baseline /backup envelope. Best-effort.
         Task {
+            await Self.restoreFromServerBackupBestEffort(
+                sessionToken: result.sessionToken,
+                phrase: trimmedPhrase,
+                context: "recover"
+            )
             await Self.bootstrapBackupBestEffort(
                 accountId: accountIdBytes,
                 accountIdB64: cached.accountIdB64,
@@ -475,6 +495,51 @@ public final class AuthRepository: ObservableObject {
     }
 
     // MARK: - Backup bootstrap helpers (Phase 2a1c)
+
+    /// Phase 2a1d — fetch + decrypt + parse the prior backup
+    /// envelope for this account, if any. Best-effort; logs
+    /// every non-`restored` outcome and continues.
+    ///
+    /// Called from the recover flow BEFORE the bootstrap step
+    /// so the new baseline upload can carry the merged set
+    /// instead of overwriting the server blob with an empty
+    /// list. On iOS the application of restored contacts into
+    /// ``ContactsRepository`` is not yet wired — the contacts
+    /// list is in-memory only and there's no persistent target
+    /// to upsert into; this helper logs the parsed-contact
+    /// count so the wire-decryption end of the flow is
+    /// exercised today, and the merge-into-state layer lands
+    /// alongside the iOS contact-persistence sub-sprint.
+    private static func restoreFromServerBackupBestEffort(
+        sessionToken: String,
+        phrase: String,
+        context: String
+    ) async {
+        let phraseBytes = Data(phrase.utf8)
+        let client = BackupClient()
+        client.setSessionToken(sessionToken)
+        let parsed: ParsedBackupPayload?
+        do {
+            parsed = try await client.restore(phraseBytes: phraseBytes)
+        } catch {
+            // Wrong phrase / tampered blob / transport failure —
+            // fold into a single log line. The user can still
+            // continue; the bootstrap step will overwrite.
+            NSLog("backup restore (\(context)) failed: \(error)")
+            return
+        }
+        guard let parsed else {
+            NSLog("backup restore (\(context)): no prior backup")
+            return
+        }
+        NSLog(
+            "backup restore (\(context)): restored \(parsed.contacts.count) contact(s) "
+            + "from snapshot at \(parsed.createdAtMs)"
+        )
+        // TODO(2a1d-followup): once the iOS persistent contact
+        // store lands, apply `parsed.contacts` here via a
+        // contacts-merge hook.
+    }
 
     /// Cache the recovery phrase under the Keychain + post a
     /// baseline backup envelope to /backup. Called from

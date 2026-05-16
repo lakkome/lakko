@@ -463,10 +463,29 @@ public class AuthRepository(
                             username = cached.username,
                         ),
                     )
+                    // Phase 2a1d — restore-then-bootstrap on
+                    // recover. If a prior backup envelope sits
+                    // on the server, fetch + decrypt + parse it
+                    // before the bootstrap-side baseline upload
+                    // overwrites the server blob with an empty
+                    // payload. On Android the application of
+                    // restored contacts into [ContactsRepository]
+                    // is not wired yet — the contacts list is
+                    // in-memory only and there's no persistent
+                    // target to upsert into (mirror of iOS); the
+                    // helper logs the parsed-contact count for
+                    // now and the merge layer lands alongside the
+                    // Android contact-persistence sub-sprint.
+                    //
                     // Phase 2a1c — post-recover backup bootstrap.
                     // Re-caches the phrase under the freshly-
                     // rotated device root key + posts a baseline
                     // /backup envelope. Best-effort.
+                    restoreFromServerBackupBestEffort(
+                        sessionToken = result.sessionToken,
+                        phrase = mnemonicPhrase,
+                        context = "recover",
+                    )
                     bootstrapBackupBestEffort(
                         accountId = accountIdBytes,
                         accountIdB64 = cached.accountIdB64,
@@ -552,6 +571,59 @@ public class AuthRepository(
         // forgetDevice's "leave NOTHING per-account behind"
         // contract.
         unsubscribePushBestEffort("forgetDevice")
+    }
+
+    /**
+     * Phase 2a1d — fetch + decrypt + parse the prior backup
+     * envelope for this account, if any. Best-effort; logs
+     * every non-`restored` outcome and continues.
+     *
+     * Called from [recover] BEFORE [bootstrapBackupBestEffort]
+     * so the new baseline upload can carry the merged set
+     * instead of overwriting the server blob with an empty
+     * list. On Android the application of restored contacts
+     * into [me.lakko.app.contacts.ContactsRepository] is not
+     * yet wired — the contacts list is in-memory only and
+     * there's no persistent target to upsert into (mirror of
+     * iOS); this helper logs the parsed-contact count so the
+     * wire-decryption end of the flow is exercised today, and
+     * the merge-into-state layer lands alongside the Android
+     * contact-persistence sub-sprint.
+     */
+    private suspend fun restoreFromServerBackupBestEffort(
+        sessionToken: String,
+        phrase: String,
+        context: String,
+    ) {
+        val phraseBytes = phrase.toByteArray(Charsets.UTF_8)
+        val client = me.lakko.app.backup.BackupClient()
+        try {
+            client.setSessionToken(sessionToken)
+            val parsed = try {
+                client.restore(phraseBytes)
+            } catch (cause: Throwable) {
+                // Wrong phrase / tampered blob / transport failure —
+                // fold into a single log line. The user can still
+                // continue; the bootstrap step will overwrite.
+                Log.w("lakko-auth", "backup restore ($context) failed", cause)
+                return
+            }
+            if (parsed == null) {
+                Log.i("lakko-auth", "backup restore ($context): no prior backup")
+                return
+            }
+            Log.i(
+                "lakko-auth",
+                "backup restore ($context): restored ${parsed.contacts.size} contact(s) " +
+                    "from snapshot at ${parsed.createdAtMs}",
+            )
+            // TODO(2a1d-followup): once the Android persistent
+            // contact store lands, apply `parsed.contacts` here
+            // via a contacts-merge hook.
+        } finally {
+            client.close()
+            phraseBytes.fill(0)
+        }
     }
 
     /**

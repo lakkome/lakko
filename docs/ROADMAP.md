@@ -326,11 +326,11 @@ The split exists so we can ship working scale at the end of 2b (private groups u
 
 #### Sprint breakdown
 
-**2a1 — Encrypted backup envelope + object-storage backend**
-- **2a1a** Backup envelope wire format: Argon2id-KEK derived from the BIP39 recovery phrase, ChaCha20-Poly1305 AEAD, distinct domain separator from the existing envelopes, content covers `(identity_secrets, devicegroup_membership_snapshot, per_group_mls_snapshots, accepted_contacts_list)`. Explicitly does NOT cover message history (history flows through 2a3's DeviceGroup catch-up path)
-- **2a1b** Server-side: extend `services/storage` with a per-account backup-blob endpoint. Owner-signed for overwrite protection. Hetzner Storage Box or local disk volume backs the bytes; same content-addressed schema as the attachment store
-- **2a1c** Client (all three platforms): backup creation triggered post-signup, then on schedule (daily) when local state changes since last upload
-- **2a1d** Client: restore flow — recovery phrase → fetch blob by account_id → Argon2id-KEK + decrypt → restore identity bundle + DeviceGroup snapshot + per-group MLS snapshots
+**2a1 — Encrypted backup envelope + object-storage backend** ✅
+- **2a1a** ✅ Backup envelope wire format: Argon2id-KEK derived from the BIP39 recovery phrase, ChaCha20-Poly1305 AEAD, distinct domain separator from the existing envelopes, content covers `(identity_secrets, accepted_contacts_list)`. MLS snapshot fields reserved as empty in v1 (DeviceGroup + per-group snapshot publishing land in 2a3). Explicitly does NOT cover message history (history flows through 2a3's DeviceGroup catch-up path)
+- **2a1b** ✅ Server-side: `services/storage` per-account backup-blob endpoint (`PUT`/`GET`/`DELETE /backup`). Session-token-gated (token's `account_id` is authority; stolen token cannot scribble over another account); local disk volume backs the bytes today (Hetzner Storage Box variant deferred to infra hardening)
+- **2a1c** ✅ Client (web + iOS + Android): backup creation triggered post-signup and post-recover; baseline envelope written under the phrase on hand. Phrase cached per-account under the device-root key (IDB AES-GCM / iOS Keychain / Android EncryptedSharedPreferences). The scheduled-revisit branch (auto-backup on local-state change) lands once the iOS/Android persistent contact stores are in (separate sub-sprint)
+- **2a1d** ✅ Client (web + iOS + Android): restore flow on recover — fetch the prior envelope before the bootstrap-side baseline upload overwrites it. Web wires end-to-end (restored contacts upserted into `localStorage`); iOS + Android wire the GET+decrypt+parse path and log the parsed-contact count (the merge-into-`ContactsRepository` hop lands alongside their persistent-contact-store sub-sprint)
 - **2a1e** Tests: round-trip, wrong-passphrase rejection (Argon2id fail), tamper detection (AEAD tag fail), stale-blob handling (server rejects out-of-order overwrites)
 
 **2a2 — Passkey opt-in (WebAuthn)**

@@ -70,6 +70,7 @@ import { rehydrateMlsState } from "../chat/rehydrate";
 import { subscribeToPush, unsubscribeFromPush } from "../push/subscribe";
 import { bootstrapBackupFromPhraseString } from "../backup/bootstrap";
 import { deletePhrase } from "../backup/phrase-store";
+import { restoreFromServerBackupFromPhraseString } from "../backup/restore";
 import type { Identity as WasmIdentity } from "../../wasm/lakko_ffi_wasm";
 
 /** Account record exposed to the UI when a session is active. */
@@ -657,21 +658,49 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
             username: cached.username,
           },
         });
+        // Phase 2a1d: post-recovery the prior accepted-contacts
+        // list only lives inside the encrypted backup envelope
+        // the previous device uploaded. Fetch + decrypt + apply
+        // BEFORE the bootstrap re-uploads, so the new baseline
+        // carries the merged set instead of overwriting the
+        // server blob with an empty list.
+        //
         // Phase 2a1c: post-recovery backup bootstrap. Same
         // shape as the signup-side call above — re-caches the
         // phrase under the freshly-rotated device root key and
-        // posts a baseline backup envelope. Best-effort; logs
-        // and continues on failure.
-        void bootstrapBackupFromPhraseString(
-          {
-            accountId: accountIdBytes,
-            accountIdB64: cached.accountIdB64,
-            ed25519Seed: canonical.ed25519Seed,
-            deviceKey,
-            sessionToken: result.sessionToken,
-          },
-          mnemonicPhrase,
-        );
+        // posts a baseline backup envelope. Best-effort end-to-end;
+        // each step logs and continues on failure.
+        void (async () => {
+          try {
+            const restored = await restoreFromServerBackupFromPhraseString(
+              { sessionToken: result.sessionToken },
+              mnemonicPhrase,
+            );
+            if (
+              restored.kind !== "restored" &&
+              restored.kind !== "no-backup"
+            ) {
+              // eslint-disable-next-line no-console
+              console.warn(
+                "restoreFromServerBackup outcome (recover):",
+                restored.kind,
+              );
+            }
+          } catch (err) {
+            // eslint-disable-next-line no-console
+            console.warn("restoreFromServerBackup threw (recover)", err);
+          }
+          await bootstrapBackupFromPhraseString(
+            {
+              accountId: accountIdBytes,
+              accountIdB64: cached.accountIdB64,
+              ed25519Seed: canonical.ed25519Seed,
+              deviceKey,
+              sessionToken: result.sessionToken,
+            },
+            mnemonicPhrase,
+          );
+        })();
         // 1.20b: best-effort push subscribe after recovery —
         // the new password changes the device key, but the
         // device push pseudonym persists in localStorage so
