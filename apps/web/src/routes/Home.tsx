@@ -9,6 +9,7 @@ import type { JSX } from "solid-js";
 import { A } from "@solidjs/router";
 import { paths } from "./paths";
 import { useAuth } from "../auth/AuthContext";
+import PasskeysSection from "../auth/PasskeysSection";
 
 export default function Home(): JSX.Element {
   const auth = useAuth();
@@ -33,6 +34,8 @@ export default function Home(): JSX.Element {
           loaded in this browser.
         </li>
       </ul>
+      <hr style={{ margin: "1.5rem 0" }} />
+      <PasskeysSection />
     </article>
   );
 }

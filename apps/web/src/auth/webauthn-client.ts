@@ -1,0 +1,585 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+/**
+ * `WebauthnClient` — fetch-based wrapper for the
+ * `/webauthn/*` routes in `lakko-svc-auth` (Phase 2a2c).
+ *
+ * Glues the browser-side `navigator.credentials` API into the
+ * server's `webauthn-rs` JSON surface. The server hands us
+ * challenges with `base64url-no-pad` strings in every byte-array
+ * slot (`challenge`, `user.id`, `allowCredentials[].id`,
+ * `excludeCredentials[].id`); the WebAuthn JS API wants those as
+ * `BufferSource`. Conversion happens here so the call sites stay
+ * shape-symmetric with the rest of the auth surface.
+ *
+ * Surfaced operations:
+ *
+ *   * [`registerPasskey`] — start + finish a registration round
+ *     for an authenticated session. Drives
+ *     `navigator.credentials.create({ publicKey })` between the
+ *     two server calls.
+ *   * [`listCredentials`] — read the user's stored credentials.
+ *   * [`deleteCredential`] — remove a credential by id.
+ *   * [`loginWithPasskey`] — anonymous login flow. Drives
+ *     `navigator.credentials.get({ publicKey })` and returns the
+ *     same `(account_id, session_token, session_expires_at_ms)`
+ *     triple OPAQUE login does, so the AuthContext can flip the
+ *     session state with the same code path.
+ *   * [`isWebauthnAvailable`] — quick capability check the UI
+ *     uses to decide whether to render the passkey affordance.
+ *
+ * Errors fold into `WebauthnHttpError` (non-2xx response),
+ * `WebauthnUnsupportedError` (browser missing
+ * `navigator.credentials`), `WebauthnUserCancelledError`
+ * (`NotAllowedError` from the authenticator), or
+ * `WebauthnNetworkError` (fetch failure). The UI branches on
+ * these to surface the right toast.
+ */
+
+import { DEFAULT_BASE_URL } from "./client";
+
+// ---- Errors ------------------------------------------------------
+
+/** Non-2xx response from the auth service. */
+export class WebauthnHttpError extends Error {
+  override name = "WebauthnHttpError";
+  constructor(
+    public readonly status: number,
+    public readonly endpoint: string,
+    public readonly body: string,
+  ) {
+    super(`webauthn ${endpoint} → ${status}: ${body}`);
+  }
+}
+
+/** Network failure (DNS / connectivity / TLS). */
+export class WebauthnNetworkError extends Error {
+  override name = "WebauthnNetworkError";
+  constructor(
+    public readonly endpoint: string,
+    cause: unknown,
+  ) {
+    super(`webauthn ${endpoint} network error: ${String(cause)}`);
+  }
+}
+
+/** Browser lacks `navigator.credentials` or it returned an
+ *  unsupported error. UI prompts the user to upgrade / use a
+ *  different sign-in. */
+export class WebauthnUnsupportedError extends Error {
+  override name = "WebauthnUnsupportedError";
+}
+
+/** User dismissed the platform sheet, or the authenticator
+ *  refused (no matching credential, locked, etc.). The DOM
+ *  surface folds all of these into a single `NotAllowedError`;
+ *  we mirror that here. */
+export class WebauthnUserCancelledError extends Error {
+  override name = "WebauthnUserCancelledError";
+}
+
+// ---- Wire shapes (mirror server-side `webauthn.rs`) -------------
+
+export interface RegisterStartRequest {
+  /** Human-visible label that surfaces in the authenticator UI
+   *  (the user's password manager shows this when picking a
+   *  passkey). Server does NOT store it. */
+  readonly user_name: string;
+  /** Bookkeeping label that lands on the credential row server-
+   *  side ("MacBook Touch ID"). Visible in
+   *  [`listCredentials`]. */
+  readonly nickname: string;
+}
+
+export interface RegisterStartResponse {
+  readonly state_id: string;
+  readonly nickname: string;
+  /** Raw `CreationChallengeResponse` from webauthn-rs. The
+   *  `publicKey` shape inside `options.publicKey` is what
+   *  `navigator.credentials.create` accepts, but every byte
+   *  array is base64url-string. [`encodeCreationOptions`]
+   *  translates. */
+  readonly options: ServerCreationOptions;
+}
+
+/** What webauthn-rs serialises for a `CreationChallengeResponse`.
+ *  Shape mirrors the WebAuthn level-2 spec but with base64url
+ *  strings in every BufferSource slot. */
+interface ServerCreationOptions {
+  readonly publicKey: ServerPublicKeyCredentialCreationOptions;
+}
+
+interface ServerPublicKeyCredentialCreationOptions {
+  readonly rp: { readonly id: string; readonly name: string };
+  readonly user: {
+    readonly id: string; // base64url
+    readonly name: string;
+    readonly displayName: string;
+  };
+  readonly challenge: string; // base64url
+  readonly pubKeyCredParams: readonly { readonly type: string; readonly alg: number }[];
+  readonly timeout?: number;
+  readonly excludeCredentials?: readonly {
+    readonly type: string;
+    readonly id: string; // base64url
+    readonly transports?: readonly string[];
+  }[];
+  readonly authenticatorSelection?: {
+    readonly authenticatorAttachment?: "platform" | "cross-platform";
+    readonly residentKey?: "discouraged" | "preferred" | "required";
+    readonly requireResidentKey?: boolean;
+    readonly userVerification?: "discouraged" | "preferred" | "required";
+  };
+  readonly attestation?: "none" | "indirect" | "direct" | "enterprise";
+  readonly extensions?: Record<string, unknown>;
+}
+
+export interface RegisterFinishRequest {
+  readonly state_id: string;
+  readonly nickname: string;
+  readonly credential: RegisterPublicKeyCredentialJSON;
+}
+
+export interface RegisterFinishResponse {
+  readonly credential_id_b64: string;
+}
+
+/** The JSON shape webauthn-rs's `RegisterPublicKeyCredential`
+ *  expects. */
+interface RegisterPublicKeyCredentialJSON {
+  readonly id: string; // base64url
+  readonly rawId: string; // base64url
+  readonly type: "public-key";
+  readonly response: {
+    readonly clientDataJSON: string; // base64url
+    readonly attestationObject: string; // base64url
+    readonly transports?: readonly string[];
+  };
+  readonly extensions?: Record<string, unknown>;
+}
+
+export interface CredentialSummary {
+  readonly credential_id_b64: string;
+  readonly nickname: string;
+  readonly created_at_ms: number | null;
+  readonly last_used_at_ms: number | null;
+}
+
+export interface ListCredentialsResponse {
+  readonly credentials: readonly CredentialSummary[];
+}
+
+export interface AuthStartRequest {
+  /** Optional. When set, server returns an allow-list challenge
+   *  for that account. When omitted, server returns a
+   *  discoverable challenge (the authenticator picks the
+   *  passkey). */
+  readonly account_id_b64?: string;
+}
+
+export interface AuthStartResponse {
+  readonly state_id: string;
+  readonly discoverable: boolean;
+  readonly options: ServerRequestOptions;
+}
+
+interface ServerRequestOptions {
+  readonly publicKey: ServerPublicKeyCredentialRequestOptions;
+}
+
+interface ServerPublicKeyCredentialRequestOptions {
+  readonly challenge: string; // base64url
+  readonly timeout?: number;
+  readonly rpId?: string;
+  readonly allowCredentials?: readonly {
+    readonly type: string;
+    readonly id: string; // base64url
+    readonly transports?: readonly string[];
+  }[];
+  readonly userVerification?: "discouraged" | "preferred" | "required";
+  readonly extensions?: Record<string, unknown>;
+}
+
+export interface AuthFinishRequest {
+  readonly state_id: string;
+  readonly credential: AuthPublicKeyCredentialJSON;
+}
+
+export interface AuthFinishResponse {
+  readonly account_id_b64: string;
+  readonly session_token: string;
+  readonly session_expires_at_ms: number;
+}
+
+interface AuthPublicKeyCredentialJSON {
+  readonly id: string;
+  readonly rawId: string;
+  readonly type: "public-key";
+  readonly response: {
+    readonly clientDataJSON: string;
+    readonly authenticatorData: string;
+    readonly signature: string;
+    readonly userHandle: string | null;
+  };
+  readonly extensions?: Record<string, unknown>;
+}
+
+// ---- Client ------------------------------------------------------
+
+export class WebauthnClient {
+  private sessionToken: string | null = null;
+
+  constructor(public readonly baseUrl: string = DEFAULT_BASE_URL) {}
+
+  /** Bind / rebind the bearer token used on the four authenticated
+   *  routes. `null` clears. */
+  setSessionToken(token: string | null): void {
+    this.sessionToken = token;
+  }
+
+  /** Quick capability probe. Returns `true` only when the
+   *  browser exposes `navigator.credentials.create/get` AND the
+   *  WebAuthn `PublicKeyCredential` global is present. */
+  static isWebauthnAvailable(): boolean {
+    return (
+      typeof window !== "undefined" &&
+      typeof window.PublicKeyCredential === "function" &&
+      typeof navigator !== "undefined" &&
+      typeof navigator.credentials !== "undefined" &&
+      typeof navigator.credentials.create === "function" &&
+      typeof navigator.credentials.get === "function"
+    );
+  }
+
+  /**
+   * Drive the full passkey-registration flow:
+   *
+   * 1. `POST /webauthn/register/start` with `(user_name,
+   *    nickname)`. Server returns `(state_id, options)`.
+   * 2. `navigator.credentials.create({publicKey: options})`.
+   * 3. `POST /webauthn/register/finish` with the resulting
+   *    credential blob.
+   *
+   * Caller must have set the session token first via
+   * [`setSessionToken`]. Throws [`WebauthnUnsupportedError`] when
+   * the browser lacks the API, [`WebauthnUserCancelledError`]
+   * when the user dismisses the sheet, or a [`WebauthnHttpError`]
+   * / [`WebauthnNetworkError`] on a server hiccup.
+   */
+  async registerPasskey(
+    req: RegisterStartRequest,
+  ): Promise<RegisterFinishResponse> {
+    if (!WebauthnClient.isWebauthnAvailable()) {
+      throw new WebauthnUnsupportedError();
+    }
+    const start = await this.post<RegisterStartRequest, RegisterStartResponse>(
+      "/webauthn/register/start",
+      req,
+    );
+    const publicKey = decodeCreationOptions(start.options.publicKey);
+    let cred: Credential | null;
+    try {
+      cred = await navigator.credentials.create({ publicKey });
+    } catch (err) {
+      throw mapDomError(err);
+    }
+    if (cred === null) {
+      throw new WebauthnUserCancelledError();
+    }
+    const finish = await this.post<RegisterFinishRequest, RegisterFinishResponse>(
+      "/webauthn/register/finish",
+      {
+        state_id: start.state_id,
+        nickname: start.nickname,
+        credential: encodeRegisterCredential(cred as PublicKeyCredential),
+      },
+    );
+    return finish;
+  }
+
+  /** `GET /webauthn/credentials` — bearer-auth required. */
+  async listCredentials(): Promise<ListCredentialsResponse> {
+    const response = await this.fetchAuthed("/webauthn/credentials", {
+      method: "GET",
+    });
+    return parseJsonOrThrow(response, "/webauthn/credentials");
+  }
+
+  /** `DELETE /webauthn/credentials/:id` — bearer-auth required. */
+  async deleteCredential(credentialIdB64: string): Promise<void> {
+    const endpoint = `/webauthn/credentials/${encodeURIComponent(credentialIdB64)}`;
+    const response = await this.fetchAuthed(endpoint, {
+      method: "DELETE",
+    });
+    if (!response.ok) {
+      const body = await safeReadBody(response);
+      throw new WebauthnHttpError(response.status, endpoint, body);
+    }
+  }
+
+  /**
+   * Drive the full passkey-login flow:
+   *
+   * 1. `POST /webauthn/auth/start`. If `accountIdB64` is set,
+   *    server uses the allow-list path; otherwise the
+   *    discoverable path.
+   * 2. `navigator.credentials.get({publicKey: options})`.
+   * 3. `POST /webauthn/auth/finish` with the asserted
+   *    credential. Returns the `(account_id, session_token,
+   *    session_expires_at_ms)` triple.
+   *
+   * No bearer token required — this is the login flow.
+   *
+   * `mediation` defaults to `"required"` (browser shows the
+   * sheet). Set to `"conditional"` for autofill-style passkey
+   * pickers (the future "type in field, browser suggests
+   * passkey" path); we keep the API hook exposed but the
+   * Phase 2a2c UI doesn't drive conditional mediation yet.
+   */
+  async loginWithPasskey(
+    options: { accountIdB64?: string; mediation?: CredentialMediationRequirement } = {},
+  ): Promise<AuthFinishResponse> {
+    if (!WebauthnClient.isWebauthnAvailable()) {
+      throw new WebauthnUnsupportedError();
+    }
+    const start = await this.post<AuthStartRequest, AuthStartResponse>(
+      "/webauthn/auth/start",
+      options.accountIdB64 === undefined
+        ? {}
+        : { account_id_b64: options.accountIdB64 },
+    );
+    const publicKey = decodeRequestOptions(start.options.publicKey);
+    let cred: Credential | null;
+    try {
+      const getOptions: CredentialRequestOptions = { publicKey };
+      if (options.mediation !== undefined) {
+        getOptions.mediation = options.mediation;
+      }
+      cred = await navigator.credentials.get(getOptions);
+    } catch (err) {
+      throw mapDomError(err);
+    }
+    if (cred === null) {
+      throw new WebauthnUserCancelledError();
+    }
+    return this.post<AuthFinishRequest, AuthFinishResponse>(
+      "/webauthn/auth/finish",
+      {
+        state_id: start.state_id,
+        credential: encodeAuthCredential(cred as PublicKeyCredential),
+      },
+    );
+  }
+
+  // -----------------------------------------------------------------
+  // Low-level transport
+  // -----------------------------------------------------------------
+
+  private async post<Req, Res>(endpoint: string, body: Req): Promise<Res> {
+    const response = await this.fetchAuthed(endpoint, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    return parseJsonOrThrow<Res>(response, endpoint);
+  }
+
+  private async fetchAuthed(endpoint: string, init: RequestInit): Promise<Response> {
+    const url = `${this.baseUrl}${endpoint}`;
+    const headers = new Headers(init.headers);
+    if (this.sessionToken !== null) {
+      headers.set("authorization", `Bearer ${this.sessionToken}`);
+    }
+    try {
+      return await fetch(url, { ...init, headers });
+    } catch (err) {
+      throw new WebauthnNetworkError(endpoint, err);
+    }
+  }
+}
+
+async function parseJsonOrThrow<T>(response: Response, endpoint: string): Promise<T> {
+  if (!response.ok) {
+    const body = await safeReadBody(response);
+    throw new WebauthnHttpError(response.status, endpoint, body);
+  }
+  return (await response.json()) as T;
+}
+
+async function safeReadBody(response: Response): Promise<string> {
+  try {
+    const text = await response.text();
+    return text.length > 512 ? `${text.slice(0, 509)}...` : text;
+  } catch {
+    return "";
+  }
+}
+
+// ---- DOM-error mapping ------------------------------------------
+
+function mapDomError(err: unknown): Error {
+  if (err instanceof Error) {
+    if (err.name === "NotAllowedError" || err.name === "AbortError") {
+      return new WebauthnUserCancelledError();
+    }
+    if (
+      err.name === "NotSupportedError" ||
+      err.name === "InvalidStateError"
+    ) {
+      return new WebauthnUnsupportedError();
+    }
+  }
+  return err instanceof Error ? err : new Error(String(err));
+}
+
+// ---- base64url ↔ ArrayBuffer / encoders -------------------------
+
+function base64urlToBuffer(s: string): ArrayBuffer {
+  // The server emits no-pad; restore if needed.
+  const padded = s + "===".slice((s.length + 3) % 4);
+  const std = padded.replace(/-/g, "+").replace(/_/g, "/");
+  const binary = atob(std);
+  const buffer = new ArrayBuffer(binary.length);
+  const view = new Uint8Array(buffer);
+  for (let i = 0; i < binary.length; i += 1) {
+    view[i] = binary.charCodeAt(i);
+  }
+  return buffer;
+}
+
+function bufferToBase64url(buf: ArrayBuffer): string {
+  const view = new Uint8Array(buf);
+  let binary = "";
+  for (let i = 0; i < view.length; i += 1) {
+    // `noUncheckedIndexedAccess` makes `view[i]` typed as
+    // `number | undefined`. The for-bounds check guarantees
+    // a value, but TS can't see that — assert here.
+    binary += String.fromCharCode(view[i] as number);
+  }
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+function decodeCreationOptions(
+  src: ServerPublicKeyCredentialCreationOptions,
+): PublicKeyCredentialCreationOptions {
+  // `exactOptionalPropertyTypes` requires us to omit fields
+  // rather than passing `undefined`. Build the object
+  // incrementally so the DOM type's strict `?:` shape is
+  // satisfied.
+  const out: PublicKeyCredentialCreationOptions = {
+    rp: src.rp,
+    user: {
+      id: base64urlToBuffer(src.user.id),
+      name: src.user.name,
+      displayName: src.user.displayName,
+    },
+    challenge: base64urlToBuffer(src.challenge),
+    pubKeyCredParams: src.pubKeyCredParams.map((p) => ({
+      type: p.type as PublicKeyCredentialType,
+      alg: p.alg,
+    })),
+  };
+  if (src.timeout !== undefined) {
+    out.timeout = src.timeout;
+  }
+  if (src.excludeCredentials !== undefined) {
+    out.excludeCredentials = src.excludeCredentials.map((c) =>
+      buildCredentialDescriptor(c),
+    );
+  }
+  if (src.authenticatorSelection !== undefined) {
+    out.authenticatorSelection = src.authenticatorSelection;
+  }
+  if (src.attestation !== undefined) {
+    out.attestation = src.attestation;
+  }
+  if (src.extensions !== undefined) {
+    out.extensions = src.extensions as AuthenticationExtensionsClientInputs;
+  }
+  return out;
+}
+
+function decodeRequestOptions(
+  src: ServerPublicKeyCredentialRequestOptions,
+): PublicKeyCredentialRequestOptions {
+  const out: PublicKeyCredentialRequestOptions = {
+    challenge: base64urlToBuffer(src.challenge),
+  };
+  if (src.timeout !== undefined) {
+    out.timeout = src.timeout;
+  }
+  if (src.rpId !== undefined) {
+    out.rpId = src.rpId;
+  }
+  if (src.allowCredentials !== undefined) {
+    out.allowCredentials = src.allowCredentials.map((c) =>
+      buildCredentialDescriptor(c),
+    );
+  }
+  if (src.userVerification !== undefined) {
+    out.userVerification = src.userVerification;
+  }
+  if (src.extensions !== undefined) {
+    out.extensions = src.extensions as AuthenticationExtensionsClientInputs;
+  }
+  return out;
+}
+
+function buildCredentialDescriptor(c: {
+  readonly type: string;
+  readonly id: string;
+  readonly transports?: readonly string[];
+}): PublicKeyCredentialDescriptor {
+  const desc: PublicKeyCredentialDescriptor = {
+    type: c.type as PublicKeyCredentialType,
+    id: base64urlToBuffer(c.id),
+  };
+  if (c.transports !== undefined) {
+    desc.transports = c.transports as AuthenticatorTransport[];
+  }
+  return desc;
+}
+
+function encodeRegisterCredential(cred: PublicKeyCredential): RegisterPublicKeyCredentialJSON {
+  const r = cred.response as AuthenticatorAttestationResponse;
+  // `getTransports()` lands in the spec; not every authenticator
+  // returns one, so we omit the field rather than passing an empty
+  // array webauthn-rs would still validate.
+  const transports =
+    typeof r.getTransports === "function" ? r.getTransports() : undefined;
+  const responseJson: RegisterPublicKeyCredentialJSON["response"] =
+    transports !== undefined && transports.length > 0
+      ? {
+          clientDataJSON: bufferToBase64url(r.clientDataJSON),
+          attestationObject: bufferToBase64url(r.attestationObject),
+          transports,
+        }
+      : {
+          clientDataJSON: bufferToBase64url(r.clientDataJSON),
+          attestationObject: bufferToBase64url(r.attestationObject),
+        };
+  return {
+    id: cred.id,
+    rawId: bufferToBase64url(cred.rawId),
+    type: "public-key",
+    response: responseJson,
+    extensions: cred.getClientExtensionResults() as Record<string, unknown>,
+  };
+}
+
+function encodeAuthCredential(cred: PublicKeyCredential): AuthPublicKeyCredentialJSON {
+  const r = cred.response as AuthenticatorAssertionResponse;
+  return {
+    id: cred.id,
+    rawId: bufferToBase64url(cred.rawId),
+    type: "public-key",
+    response: {
+      clientDataJSON: bufferToBase64url(r.clientDataJSON),
+      authenticatorData: bufferToBase64url(r.authenticatorData),
+      signature: bufferToBase64url(r.signature),
+      userHandle: r.userHandle === null ? null : bufferToBase64url(r.userHandle),
+    },
+    extensions: cred.getClientExtensionResults() as Record<string, unknown>,
+  };
+}
