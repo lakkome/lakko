@@ -1,0 +1,149 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+syntax = "proto3";
+
+package lakko.mls_app.devicegroup.v1;
+
+// Cross-device application payloads (Phase 2a3e).
+//
+// Wire shape for the application messages that flow inside a
+// user's `DeviceGroup` (Phase 2a3a) — the per-user MLS group
+// whose leaves are the user's own devices. These payloads are
+// **NOT** sent inside a conversation group; they live solely on
+// the DeviceGroup channel and are visible only to the user's
+// other devices.
+//
+// Concrete payload shapes covered here:
+//
+//   * `ReadCursor`       — "I've read up to <message_id> in
+//                          <group_id> as of <read_at_ms>"
+//   * `DraftUpdate`      — "Here's my in-flight composer state
+//                          for <group_id>" (text + reply_to)
+//   * `ThreadFlags`      — pin / mute / archive / unread-override
+//                          per conversation
+//   * `ConversationOrder` — explicit display ordering for the
+//                          conversation list (overrides the
+//                          fallback "by latest message" order)
+//
+// Two reasons for a dedicated `devicegroup_v1.proto` instead of
+// extending `mls-app/v1.proto`:
+//
+//   1. **Scope.** The mls-app payloads land in conversation
+//      groups (visible to every contact in the group);
+//      DeviceGroup payloads land only on the user's own
+//      devices. Mixing them invites accidentally signaling
+//      `Pinned` to all contacts because the wrong oneof branch
+//      was decoded.
+//   2. **Versioning.** mls-app and DeviceGroup payload formats
+//      will evolve at different rates; a separate proto file
+//      lets each carry its own version-history without
+//      coupling.
+//
+// Generated Rust code lives in
+// `crates/lakko-proto/src/generated/mls_app_devicegroup/`.
+
+// Outer envelope every DeviceGroup application message decodes
+// as. Mirrors `ApplicationPayload` from `mls-app/v1.proto` —
+// hybrid logical clock at the top, sender leaf index, then a
+// oneof body picking the concrete payload type.
+message DeviceGroupPayload {
+    // Hybrid logical clock timestamp, monotonic across the
+    // DeviceGroup. Encodes physical time + counter for total
+    // ordering on read-cursor / draft / flag updates so the
+    // last write wins deterministically across devices.
+    uint64 hlc = 1;
+
+    // Sender device leaf index in the DeviceGroup. Stable
+    // inside an epoch; can renumber across a Remove/Add cycle,
+    // so callers MUST NOT compare across epochs.
+    uint32 sender_leaf = 2;
+
+    oneof body {
+        ReadCursor read_cursor = 10;
+        DraftUpdate draft = 11;
+        ThreadFlags flags = 12;
+        ConversationOrder order = 13;
+    }
+
+    reserved 14 to 31;
+}
+
+// "I read up to this point in this thread." Other devices use
+// the last-write-wins (by HLC) cursor to compute their own
+// per-thread unread count.
+message ReadCursor {
+    // The conversation group's MLS group_id (32 bytes today;
+    // protocol carries it as opaque variable-length so a future
+    // ciphersuite change doesn't need a schema bump).
+    bytes group_id = 1;
+
+    // The MLS application-message id (the
+    // `ApplicationPayload.hlc` from `mls-app/v1.proto`) the
+    // sender claims to have read up to.
+    bytes up_to_message_id = 2;
+
+    // Wall-clock UNIX millis when the read happened. Display
+    // only — never used for ordering (that's `DeviceGroupPayload.hlc`).
+    uint64 read_at_ms = 3;
+
+    reserved 4 to 15;
+}
+
+// In-flight composer state for a single thread. Empty `text`
+// clears the draft (the receiver wipes its local copy).
+message DraftUpdate {
+    // The conversation group_id the draft belongs to.
+    bytes group_id = 1;
+
+    // Composer text. UTF-8, may be empty.
+    string text = 2;
+
+    // When set, the draft was started as a reply to this
+    // message. Empty bytes = no reply context.
+    bytes reply_to_id = 3;
+
+    reserved 4 to 15;
+}
+
+// Per-thread UI flags. Receivers apply the last-write-wins
+// snapshot of the whole struct — partial updates do not merge.
+// Pre-existing flags not represented in the message are NOT
+// preserved; senders include every field they want to assert.
+message ThreadFlags {
+    // The conversation group_id the flags apply to.
+    bytes group_id = 1;
+
+    // Pinned threads stay at the top of the conversation list
+    // regardless of recency.
+    bool pinned = 2;
+
+    // Muted threads suppress push notifications + visual
+    // unread indicators. The server-side push subscription
+    // stays alive — clients filter post-decrypt.
+    bool muted = 3;
+
+    // Archived threads drop out of the main list but remain
+    // searchable.
+    bool archived = 4;
+
+    // Manual "unread" override — user marked the thread unread
+    // after having read it. Cleared automatically by the next
+    // `ReadCursor` for the same group.
+    bool unread_override = 5;
+
+    reserved 6 to 15;
+}
+
+// Explicit display ordering for the conversation list. When
+// present, threads listed here render in the given order at
+// the top of the list. Threads NOT mentioned fall back to the
+// default recency-of-last-message order below the explicit
+// portion. Useful for "Favourites" / starred-row UX without
+// touching `ThreadFlags.pinned`.
+message ConversationOrder {
+    // Conversation group_ids in display order, top-to-bottom.
+    repeated bytes group_ids = 1;
+
+    reserved 2 to 15;
+}

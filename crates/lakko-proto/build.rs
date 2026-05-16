@@ -16,6 +16,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "wire/v1.proto",
         "wire/device_pairing_v1.proto",
         "mls-app/v1.proto",
+        "mls-app/devicegroup_v1.proto",
         "media/v1.proto",
     ]
     .iter()

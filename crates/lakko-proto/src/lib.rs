@@ -38,6 +38,18 @@ pub mod mls_app {
     pub mod v1 {
         include!(concat!(env!("OUT_DIR"), "/lakko.mls_app.v1.rs"));
     }
+
+    /// Cross-device application payloads carried on a user's
+    /// DeviceGroup (`schemas/mls-app/devicegroup_v1.proto`) —
+    /// Phase 2a3e. Read cursors, draft updates, per-thread
+    /// flags, and explicit conversation ordering.
+    pub mod devicegroup {
+        /// Version 1 of the DeviceGroup payload schema.
+        #[allow(clippy::pedantic, missing_docs)]
+        pub mod v1 {
+            include!(concat!(env!("OUT_DIR"), "/lakko.mls_app.devicegroup.v1.rs"));
+        }
+    }
 }
 
 /// Call media metadata (`schemas/media/v1.proto`).
@@ -91,5 +103,66 @@ mod tests {
         assert_eq!(decoded.version, 1);
         assert_eq!(decoded.account_id, vec![0x42; 16]);
         assert_eq!(decoded.key_package, vec![0xfe; 768]);
+    }
+
+    /// Phase 2a3e smoke tests — DeviceGroup cross-device
+    /// payloads round-trip through prost for each oneof branch.
+    #[test]
+    fn devicegroup_read_cursor_roundtrip() {
+        use mls_app::devicegroup::v1::{
+            device_group_payload::Body, DeviceGroupPayload, ReadCursor,
+        };
+        use prost::Message as _;
+
+        let original = DeviceGroupPayload {
+            hlc: 1_700_000_000_000,
+            sender_leaf: 3,
+            body: Some(Body::ReadCursor(ReadCursor {
+                group_id: vec![0xAB; 32],
+                up_to_message_id: vec![0xCD; 8],
+                read_at_ms: 1_700_000_001_000,
+            })),
+        };
+        let mut buf = Vec::new();
+        original.encode(&mut buf).expect("encode");
+        let decoded = DeviceGroupPayload::decode(&*buf).expect("decode");
+        assert_eq!(decoded, original);
+    }
+
+    #[test]
+    fn devicegroup_draft_and_flags_and_order_roundtrip() {
+        use mls_app::devicegroup::v1::{
+            device_group_payload::Body, ConversationOrder, DeviceGroupPayload, DraftUpdate,
+            ThreadFlags,
+        };
+        use prost::Message as _;
+
+        for body in [
+            Body::Draft(DraftUpdate {
+                group_id: vec![0x01; 32],
+                text: "hello, draft 👋".into(),
+                reply_to_id: vec![0x99; 8],
+            }),
+            Body::Flags(ThreadFlags {
+                group_id: vec![0x02; 32],
+                pinned: true,
+                muted: false,
+                archived: false,
+                unread_override: true,
+            }),
+            Body::Order(ConversationOrder {
+                group_ids: vec![vec![0xAA; 32], vec![0xBB; 32], vec![0xCC; 32]],
+            }),
+        ] {
+            let original = DeviceGroupPayload {
+                hlc: 42,
+                sender_leaf: 0,
+                body: Some(body),
+            };
+            let mut buf = Vec::new();
+            original.encode(&mut buf).expect("encode");
+            let decoded = DeviceGroupPayload::decode(&*buf).expect("decode");
+            assert_eq!(decoded, original);
+        }
     }
 }
