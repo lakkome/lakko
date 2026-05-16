@@ -671,15 +671,50 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         // posts a baseline backup envelope. Best-effort end-to-end;
         // each step logs and continues on failure.
         void (async () => {
+          // Phase 2a3d4 — capture the restored MLS snapshot (if
+          // any) so the post-restore bootstrap re-uploads the
+          // same state instead of nuking the server-side
+          // snapshot with an empty one.
+          let restoredSnapshot: Uint8Array = new Uint8Array(0);
           try {
             const restored = await restoreFromServerBackupFromPhraseString(
               { sessionToken: result.sessionToken },
               mnemonicPhrase,
             );
-            if (
-              restored.kind !== "restored" &&
-              restored.kind !== "no-backup"
-            ) {
+            if (restored.kind === "restored") {
+              if (restored.wholeStorageSnapshot.length > 0) {
+                // Apply to the freshly-derived canonical Identity
+                // so the new device lands with the same MLS group
+                // state the upload-side device had. The state
+                // mutates the provider's storage in place;
+                // `chats.persistSnapshot` below picks up the
+                // updated bytes via `id.snapshotStorage()`.
+                try {
+                  canonical.restoreStorage(
+                    restored.wholeStorageSnapshot,
+                  );
+                  restoredSnapshot = restored.wholeStorageSnapshot;
+                  // Re-persist the IDB snapshot so the on-device
+                  // copy carries the restored state instead of
+                  // the just-bootstrapped empty one.
+                  try {
+                    await chats.persistSnapshot(cached.accountIdB64);
+                  } catch (err) {
+                    // eslint-disable-next-line no-console
+                    console.warn(
+                      "post-restore MLS persistSnapshot failed",
+                      err,
+                    );
+                  }
+                } catch (err) {
+                  // eslint-disable-next-line no-console
+                  console.warn(
+                    "post-restore Identity.restoreStorage threw",
+                    err,
+                  );
+                }
+              }
+            } else if (restored.kind !== "no-backup") {
               // eslint-disable-next-line no-console
               console.warn(
                 "restoreFromServerBackup outcome (recover):",
@@ -697,6 +732,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
               ed25519Seed: canonical.ed25519Seed,
               deviceKey,
               sessionToken: result.sessionToken,
+              wholeStorageSnapshot: restoredSnapshot,
             },
             mnemonicPhrase,
           );

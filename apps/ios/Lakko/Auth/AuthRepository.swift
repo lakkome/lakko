@@ -414,7 +414,11 @@ public final class AuthRepository: ObservableObject {
         // the phrase under the freshly-rotated device root key
         // and post a baseline /backup envelope. Best-effort.
         Task {
-            await Self.restoreFromServerBackupBestEffort(
+            // Phase 2a3d5 — capture the restored MLS snapshot (if
+            // any) and pass it into the post-restore bootstrap so
+            // the new baseline upload re-publishes the same
+            // server-side snapshot instead of nuking it.
+            let restoredSnapshot = await Self.restoreFromServerBackupBestEffort(
                 sessionToken: result.sessionToken,
                 phrase: trimmedPhrase,
                 context: "recover"
@@ -425,7 +429,8 @@ public final class AuthRepository: ObservableObject {
                 exportKey: result.exportKey,
                 sessionToken: result.sessionToken,
                 phrase: trimmedPhrase,
-                context: "recover"
+                context: "recover",
+                wholeStorageSnapshot: restoredSnapshot
             )
         }
         // 1.20c — best-effort push subscribe.
@@ -510,11 +515,16 @@ public final class AuthRepository: ObservableObject {
     /// count so the wire-decryption end of the flow is
     /// exercised today, and the merge-into-state layer lands
     /// alongside the iOS contact-persistence sub-sprint.
+    /// Returns the prior MLS whole-storage snapshot (if any) so
+    /// the bootstrap helper can re-upload it instead of nuking
+    /// the server-side snapshot with an empty one. Empty `Data`
+    /// when there is no prior backup or the prior backup
+    /// pre-dates 2a3d.
     private static func restoreFromServerBackupBestEffort(
         sessionToken: String,
         phrase: String,
         context: String
-    ) async {
+    ) async -> Data {
         let phraseBytes = Data(phrase.utf8)
         let client = BackupClient()
         client.setSessionToken(sessionToken)
@@ -526,19 +536,30 @@ public final class AuthRepository: ObservableObject {
             // fold into a single log line. The user can still
             // continue; the bootstrap step will overwrite.
             NSLog("backup restore (\(context)) failed: \(error)")
-            return
+            return Data()
         }
         guard let parsed else {
             NSLog("backup restore (\(context)): no prior backup")
-            return
+            return Data()
         }
         NSLog(
             "backup restore (\(context)): restored \(parsed.contacts.count) contact(s) "
-            + "from snapshot at \(parsed.createdAtMs)"
+            + "from snapshot at \(parsed.createdAtMs), "
+            + "MLS snapshot \(parsed.wholeStorageSnapshot.count) bytes"
         )
         // TODO(2a1d-followup): once the iOS persistent contact
         // store lands, apply `parsed.contacts` here via a
         // contacts-merge hook.
+        //
+        // TODO(2a3d5-followup): apply `parsed.wholeStorageSnapshot`
+        // to ChatRepository's Identity via an
+        // AppEnvironment-injected hook so the recovered device
+        // lands with the same MLS group state the upload-side
+        // device had. For now the snapshot is returned so the
+        // post-restore bootstrap re-publishes it on the next
+        // /backup PUT — that protects the server-side blob from
+        // being overwritten with an empty snapshot.
+        return parsed.wholeStorageSnapshot
     }
 
     /// Cache the recovery phrase under the Keychain + post a
@@ -559,7 +580,8 @@ public final class AuthRepository: ObservableObject {
         exportKey: Data,
         sessionToken: String,
         phrase: String,
-        context: String
+        context: String,
+        wholeStorageSnapshot: Data = Data()
     ) async {
         let phraseBytes = Data(phrase.utf8)
         let backupClient = BackupClient()
@@ -597,7 +619,8 @@ public final class AuthRepository: ObservableObject {
                 accountId: accountId,
                 ed25519Seed: seedBytes,
                 phraseBytes: phraseBytes,
-                contacts: []  // 2a3 wires the cross-device-synced contact list
+                contacts: [],  // 2a3 wires the cross-device-synced contact list
+                wholeStorageSnapshot: wholeStorageSnapshot
             )
         } catch {
             NSLog("backup baseline upload (\(context)) failed: \(error)")

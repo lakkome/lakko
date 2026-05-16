@@ -43,6 +43,12 @@ export interface BackupBootstrapInputs {
   readonly sessionToken: string;
   /** UTF-8 bytes of the canonical recovery phrase. */
   readonly phraseBytes: Uint8Array;
+  /** Phase 2a3d4: whole-storage MLS snapshot from
+   *  `Identity.snapshotStorage()`. Empty `Uint8Array` is fine
+   *  on signup baseline; recover-time path passes the snapshot
+   *  it just restored so the new baseline upload doesn't nuke
+   *  the prior server-side MLS state. */
+  readonly wholeStorageSnapshot?: Uint8Array;
 }
 
 /**
@@ -79,6 +85,7 @@ export async function bootstrapBackup(inputs: BackupBootstrapInputs): Promise<vo
       inputs.accountId,
       inputs.ed25519Seed,
       inputs.phraseBytes,
+      inputs.wholeStorageSnapshot ?? new Uint8Array(0),
     );
     if (result.kind !== "uploaded") {
       // eslint-disable-next-line no-console
@@ -93,7 +100,10 @@ export async function bootstrapBackup(inputs: BackupBootstrapInputs): Promise<vo
 /** Convenience — caller has a string phrase; wraps the UTF-8
  *  encode + `bootstrapBackup` in one call. The string variant
  *  is what both signup (returns phrase as a string) and recover
- *  (takes phrase as a string) naturally hold. */
+ *  (takes phrase as a string) naturally hold. The optional
+ *  `wholeStorageSnapshot` rides through `base` if the caller
+ *  has it on hand (recover after a successful server-snapshot
+ *  restore). */
 export async function bootstrapBackupFromPhraseString(
   base: Omit<BackupBootstrapInputs, "phraseBytes">,
   phrase: string,

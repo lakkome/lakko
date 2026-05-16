@@ -481,7 +481,12 @@ public class AuthRepository(
                     // Re-caches the phrase under the freshly-
                     // rotated device root key + posts a baseline
                     // /backup envelope. Best-effort.
-                    restoreFromServerBackupBestEffort(
+                    // Phase 2a3d6 — capture the restored MLS
+                    // snapshot (if any) and pass it into the
+                    // post-restore bootstrap so the new baseline
+                    // upload re-publishes the same server-side
+                    // snapshot instead of nuking it.
+                    val restoredSnapshot = restoreFromServerBackupBestEffort(
                         sessionToken = result.sessionToken,
                         phrase = mnemonicPhrase,
                         context = "recover",
@@ -493,6 +498,7 @@ public class AuthRepository(
                         sessionToken = result.sessionToken,
                         phrase = mnemonicPhrase,
                         context = "recover",
+                        wholeStorageSnapshot = restoredSnapshot,
                     )
                     // 1.20d — best-effort push subscribe.
                     subscribePushBestEffort("recover")
@@ -590,11 +596,18 @@ public class AuthRepository(
      * the merge-into-state layer lands alongside the Android
      * contact-persistence sub-sprint.
      */
+    /**
+     * Returns the prior MLS whole-storage snapshot (if any) so
+     * the bootstrap helper can re-publish it instead of nuking
+     * the server-side snapshot with an empty one. Empty
+     * `ByteArray` when there is no prior backup or the prior
+     * backup pre-dates 2a3d.
+     */
     private suspend fun restoreFromServerBackupBestEffort(
         sessionToken: String,
         phrase: String,
         context: String,
-    ) {
+    ): ByteArray {
         val phraseBytes = phrase.toByteArray(Charsets.UTF_8)
         val client = me.lakko.app.backup.BackupClient()
         try {
@@ -606,20 +619,30 @@ public class AuthRepository(
                 // fold into a single log line. The user can still
                 // continue; the bootstrap step will overwrite.
                 Log.w("lakko-auth", "backup restore ($context) failed", cause)
-                return
+                return ByteArray(0)
             }
             if (parsed == null) {
                 Log.i("lakko-auth", "backup restore ($context): no prior backup")
-                return
+                return ByteArray(0)
             }
             Log.i(
                 "lakko-auth",
                 "backup restore ($context): restored ${parsed.contacts.size} contact(s) " +
-                    "from snapshot at ${parsed.createdAtMs}",
+                    "from snapshot at ${parsed.createdAtMs}, " +
+                    "MLS snapshot ${parsed.wholeStorageSnapshot.size} bytes",
             )
             // TODO(2a1d-followup): once the Android persistent
             // contact store lands, apply `parsed.contacts` here
             // via a contacts-merge hook.
+            //
+            // TODO(2a3d6-followup): apply `parsed.wholeStorageSnapshot`
+            // to ChatRepository's Identity via an
+            // AppEnvironment-injected hook so the recovered
+            // device lands with the same MLS group state the
+            // upload-side device had. For now the snapshot is
+            // returned so the post-restore bootstrap re-publishes
+            // it on the next /backup PUT.
+            return parsed.wholeStorageSnapshot
         } finally {
             client.close()
             phraseBytes.fill(0)
@@ -643,6 +666,7 @@ public class AuthRepository(
         sessionToken: String,
         phrase: String,
         context: String,
+        wholeStorageSnapshot: ByteArray = ByteArray(0),
     ) {
         val phraseBytes = phrase.toByteArray(Charsets.UTF_8)
         val backupClient = me.lakko.app.backup.BackupClient()
@@ -667,6 +691,7 @@ public class AuthRepository(
                     ed25519Seed = seed,
                     phraseBytes = phraseBytes,
                     contacts = emptyList(),  // 2a3 wires the cross-device sync
+                    wholeStorageSnapshot = wholeStorageSnapshot,
                 )
             } catch (cause: Throwable) {
                 Log.w("lakko-auth", "backup baseline upload ($context) failed", cause)
