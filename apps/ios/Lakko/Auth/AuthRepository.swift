@@ -172,6 +172,20 @@ public final class AuthRepository: ObservableObject {
             accountIdB64: accountIdB64,
             rootKey: deviceRootKey
         )
+        // Phase 2a2c2 — cache the OPAQUE export key under the
+        // Keychain so a future sign-in-with-passkey on the SAME
+        // device can reconstruct the full IdentitySecrets
+        // without going through the password round-trip. Best-
+        // effort: a persistence failure here just means the
+        // user falls back to password login on this device.
+        do {
+            try ExportKeyStore.putExportKey(
+                accountIdB64: accountIdB64,
+                exportKey: result.exportKey
+            )
+        } catch {
+            NSLog("export-key persist (signup) failed: \(error)")
+        }
 
         // Stash the export key + session token for ContactsClient /
         // ChatRepository / DiscoveryClient. The bytes survive until
@@ -290,6 +304,16 @@ public final class AuthRepository: ObservableObject {
             accountIdB64: cached.accountIdB64,
             rootKey: deviceRootKey
         )
+        // Phase 2a2c2 — refresh the cached export key under the
+        // Keychain. Best-effort.
+        do {
+            try ExportKeyStore.putExportKey(
+                accountIdB64: cached.accountIdB64,
+                exportKey: result.exportKey
+            )
+        } catch {
+            NSLog("export-key persist (login) failed: \(error)")
+        }
         sessionStore.save(cached) // idempotent upsert — schema-versioned
 
         identitySecrets = IdentitySecrets(
@@ -306,6 +330,126 @@ public final class AuthRepository: ObservableObject {
         )
         // 1.20c — best-effort push subscribe.
         Task { await Self.subscribePushBestEffort(context: "login") }
+    }
+
+    /// Phase 2a2c2-ios — sign in with a WebAuthn passkey on a
+    /// device that has already been seen by this account at
+    /// least once (signup / login / recover ran here in the past
+    /// + populated the export-key cache).
+    ///
+    /// Drives the WebAuthn discoverable-authentication flow via
+    /// ``WebauthnClient`` + ``WebauthnAuthentication`` (no
+    /// password / username typed in the UI). On a successful
+    /// assertion, resolves the cached export key from the
+    /// Keychain and reconstructs the full ``IdentitySecrets``
+    /// pipeline — same shape as ``login(username:password:)``
+    /// minus the OPAQUE round-trip.
+    ///
+    /// Fresh-device UX is **unsupported** by design: without a
+    /// locally-cached export key the passkey gives us only a
+    /// session token, but no path to derive Identity / device
+    /// key / MLS bootstrap. The recovery phrase remains the only
+    /// fresh-device entry route. The Login screen gates the
+    /// "Sign in with passkey" button on the cached marker so
+    /// this error path is rare in practice.
+    public func loginWithPasskey() async throws {
+        let webauthn = WebauthnClient()
+        let assertion = try await webauthn.loginWithPasskey()
+        // Resolve the cached account marker. We only support
+        // passkey-login for the account this device most
+        // recently signed in to — multi-account on the same
+        // device isn't a supported flow yet.
+        guard let cached = sessionStore.load() else {
+            throw AuthClientError.argument(
+                "No cached account on this device. Sign in with " +
+                "password or recover with your phrase first."
+            )
+        }
+        // Compare via raw bytes: the cached `accountIdB64` rides
+        // as standard padded base64 (Foundation's
+        // `Data.base64EncodedString()`), while the server's
+        // `auth_finish` response carries URL-safe base64
+        // without padding (`URL_SAFE_NO_PAD.encode`). A string
+        // comparison would always mismatch.
+        guard
+            let cachedAccountBytes = base64Decode(cached.accountIdB64),
+            let assertionAccountBytes = base64UrlDecodeNoPad(assertion.accountIdB64)
+        else {
+            throw AuthClientError.argument(
+                "Malformed account_id in passkey assertion."
+            )
+        }
+        guard cachedAccountBytes == assertionAccountBytes else {
+            throw AuthClientError.argument(
+                "This passkey belongs to a different account than the " +
+                "one cached on this device. Sign in with password first " +
+                "to enable passkey on this device."
+            )
+        }
+
+        // Read the cached export key from the Keychain. A miss
+        // (fresh device, post-`forgetDevice`, or a key-store
+        // failure) sends the user back to password / recovery.
+        let exportKey: Data
+        do {
+            guard let cachedKey = try ExportKeyStore.getExportKey(
+                accountIdB64: cached.accountIdB64
+            ) else {
+                throw AuthClientError.argument(
+                    "No cached credentials for passkey sign-in on this " +
+                    "device. Sign in with password or recover with your " +
+                    "phrase first."
+                )
+            }
+            exportKey = cachedKey
+        } catch let storeError as ExportKeyStoreError {
+            NSLog("export-key cache read failed: \(storeError)")
+            throw AuthClientError.argument(
+                "Could not read the local credential store. Sign in " +
+                "with password or recover with your phrase first."
+            )
+        }
+
+        // From here on we have everything we need to
+        // reconstruct a real IdentitySecrets-driven session.
+        // OPAQUE export key is deterministic for the same
+        // password, so re-deriving the device root key here
+        // yields identical bytes — the upsert is a no-op but
+        // keeps the Keychain freshness clock moving.
+        let deviceRootKey = deriveDeviceRootKey(
+            exportKey: exportKey,
+            accountIdB64: cached.accountIdB64
+        )
+        try DeviceKeyStore.putDeviceKey(
+            accountIdB64: cached.accountIdB64,
+            rootKey: deviceRootKey
+        )
+        // Re-upsert the export key cache too — keeps the row's
+        // last-write timestamp moving for any future eviction
+        // policy.
+        do {
+            try ExportKeyStore.putExportKey(
+                accountIdB64: cached.accountIdB64,
+                exportKey: exportKey
+            )
+        } catch {
+            NSLog("export-key persist (passkey login) failed: \(error)")
+        }
+        sessionStore.save(cached)
+
+        identitySecrets = IdentitySecrets(
+            accountId: cachedAccountBytes,
+            exportKey: exportKey,
+            sessionToken: assertion.sessionToken,
+            sessionExpiresAtMs: assertion.sessionExpiresAtMs
+        )
+        state = .session(
+            SessionAccount(
+                accountIdB64: cached.accountIdB64,
+                username: cached.username
+            )
+        )
+        Task { await Self.subscribePushBestEffort(context: "passkey-login") }
     }
 
     /// Drive the full recover-from-mnemonic flow.
@@ -380,6 +524,18 @@ public final class AuthRepository: ObservableObject {
             accountIdB64: cached.accountIdB64,
             rootKey: deviceRootKey
         )
+        // Phase 2a2c2 — refresh the cached export key under the
+        // freshly-rotated device key. Any prior cached value was
+        // bound to the OLD password; the upsert here overwrites
+        // it cleanly. Best-effort.
+        do {
+            try ExportKeyStore.putExportKey(
+                accountIdB64: cached.accountIdB64,
+                exportKey: result.exportKey
+            )
+        } catch {
+            NSLog("export-key persist (recover) failed: \(error)")
+        }
         sessionStore.save(cached) // idempotent upsert
 
         // Phase 2a1d / 2a3d7 — restore-then-bootstrap on recover.
@@ -496,6 +652,9 @@ public final class AuthRepository: ObservableObject {
             // `forgetDevice`'s "leave nothing per-account behind"
             // contract).
             try? PhraseStore().deletePhrase(accountIdB64: cached.accountIdB64)
+            // Phase 2a2c2 — drop the cached export key too. Same
+            // clean-wipe rationale.
+            ExportKeyStore.deleteExportKey(accountIdB64: cached.accountIdB64)
         }
         sessionStore.clear()
         identitySecrets = nil

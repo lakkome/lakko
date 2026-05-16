@@ -88,6 +88,26 @@ public struct LoginScreen: View {
                 .controlSize(.large)
                 .disabled(viewModel.busy)
 
+                // Phase 2a2c2-ios — passkey shortcut. Surfaced
+                // only on a device this account has signed into
+                // before (cachedUsername set on the form).
+                // Cache-miss paths surface as inline error
+                // messages from `loginWithPasskey`.
+                if !viewModel.username.isEmpty {
+                    Button(action: viewModel.onPasskeyLogin) {
+                        Text("Sign in with passkey")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.large)
+                    .disabled(viewModel.busy)
+
+                    Text("Uses the passkey you registered earlier on this device.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .center)
+                }
+
                 HStack(spacing: 4) {
                     Spacer()
                     Text("New to Lakko?")

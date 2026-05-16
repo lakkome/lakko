@@ -115,6 +115,47 @@ public final class WebauthnClient {
         )
     }
 
+    /// Phase 2a2c2-ios — drive the full passkey-login round in
+    /// one call. Mirrors `WebauthnClient.loginWithPasskey` on
+    /// the web side and exposes the same triple
+    /// `(accountIdB64, sessionToken, sessionExpiresAtMs)` the
+    /// OPAQUE login / recover paths surface.
+    ///
+    /// Discoverable-credential flow is the default
+    /// (`account_id_b64` is omitted on /start); the
+    /// authenticator picks any passkey it has for the lakko
+    /// relying-party id. Caller MUST run on `@MainActor` so
+    /// the embedded `ASAuthorizationController` can present
+    /// the system sheet via ``currentPresentationAnchor``.
+    @MainActor
+    public func loginWithPasskey() async throws -> PasskeyLoginResult {
+        let start = try await startAuthentication(accountIdB64: nil)
+        let publicKey = start.options.publicKey
+        let challenge = try base64UrlDecode(publicKey.challenge)
+        guard let rpId = publicKey.rpId else {
+            throw WebauthnClientError.argument(
+                "server omitted rp_id in /webauthn/auth/start response"
+            )
+        }
+        let allowedCredentials: [Data] = try (publicKey.allowCredentials ?? [])
+            .map { try base64UrlDecode($0.id) }
+        let credentialJSON = try await WebauthnAssertion().run(
+            rpId: rpId,
+            challenge: challenge,
+            allowedCredentials: allowedCredentials,
+            presentationAnchor: currentPresentationAnchor()
+        )
+        let finish = try await finishAuthentication(
+            stateId: start.state_id,
+            credential: credentialJSON
+        )
+        return PasskeyLoginResult(
+            accountIdB64: finish.account_id_b64,
+            sessionToken: finish.session_token,
+            sessionExpiresAtMs: finish.session_expires_at_ms
+        )
+    }
+
     // MARK: - Credential management
 
     public func listCredentials() async throws -> ListCredentialsResponse {
@@ -416,6 +457,17 @@ public struct AuthFinishResponse: Decodable {
     public let account_id_b64: String
     public let session_token: String
     public let session_expires_at_ms: Int64
+}
+
+/// Phase 2a2c2-ios — high-level result of
+/// ``WebauthnClient/loginWithPasskey()``. Mirror of the OPAQUE
+/// login result shape, minus the export key (which on iOS lives
+/// in ``ExportKeyStore`` and is looked up by the
+/// ``AuthRepository`` caller after the assertion completes).
+public struct PasskeyLoginResult {
+    public let accountIdB64: String
+    public let sessionToken: String
+    public let sessionExpiresAtMs: Int64
 }
 
 public struct ListCredentialsResponse: Decodable {

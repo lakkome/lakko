@@ -84,6 +84,35 @@ public final class LoginViewModel: ObservableObject {
         }
     }
 
+    /// Phase 2a2c2-ios — drive a passkey-only login. Mirrors
+    /// ``onSubmit`` but skips the password path: tap →
+    /// ASAuthorizationController sheet → server /webauthn/auth
+    /// round-trip → state flip. Cache miss / cross-account
+    /// failures surface as inline form messages.
+    @MainActor
+    public func onPasskeyLogin() {
+        guard !busy else { return }
+        busy = true
+        error = nil
+        Task {
+            do {
+                try await repository.loginWithPasskey()
+                busy = false
+                error = nil
+            } catch let err as AuthClientError {
+                busy = false
+                error = userFacing(err)
+            } catch let err as WebauthnAssertion.AssertionError {
+                busy = false
+                error = err.errorDescription
+            } catch {
+                busy = false
+                self.error = (error as? LocalizedError)?.errorDescription
+                    ?? "Passkey sign-in failed."
+            }
+        }
+    }
+
     // MARK: - Error mapping
 
     /// Map server-side HTTP errors to user-facing copy. 401 stays
