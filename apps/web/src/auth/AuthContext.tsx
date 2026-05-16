@@ -58,6 +58,18 @@ import {
   getSessionToken,
   putSessionToken,
 } from "./session-token-store";
+import {
+  deleteExportKey,
+  getExportKey,
+  putExportKey,
+} from "./export-key-store";
+import {
+  WebauthnClient,
+  WebauthnHttpError,
+  WebauthnNetworkError,
+  WebauthnUnsupportedError,
+  WebauthnUserCancelledError,
+} from "./webauthn-client";
 import { loadWasm } from "../wasm";
 import {
   DiscoveryClient,
@@ -173,6 +185,23 @@ export interface AuthApi {
    *  account_id cached on this device. Throws on any failure —
    *  bad mnemonic, network, server rejection, etc. */
   recover(mnemonicPhrase: string, newPassword: string): Promise<void>;
+  /** Phase 2a2c2 — sign in with a WebAuthn passkey on the SAME
+   *  device the user previously logged in / signed up from.
+   *
+   *  Requires both halves of the chain to be present:
+   *
+   *    - a `webauthn_credentials` row server-side bound to the
+   *      account, registered earlier from this or another
+   *      device.
+   *    - a locally-cached export key wrapped under the device
+   *      root key (Phase 2a2c2's `export-key-store`),
+   *      populated by a prior signup / login / recover on this
+   *      device.
+   *
+   *  Throws when the local cache is absent — passkey is an
+   *  auth-convenience, not a fresh-device onboarding path. The
+   *  recovery phrase remains the only fresh-device entry route. */
+  loginWithPasskey(): Promise<void>;
   /** Drop the in-memory session. Does NOT erase the localStorage
    *  cache or the IDB-stored device key — re-login on the same
    *  device should be cheap, and the device key remains usable
@@ -345,6 +374,19 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         console.warn("session-token persist (signup) failed", err);
       }
 
+      // Phase 2a2c2 — cache the OPAQUE export key under the
+      // device root key so a future sign-in-with-passkey on the
+      // SAME device can reconstruct the full IdentitySecrets
+      // without going through the password round-trip.
+      // Best-effort: a persistence failure here just means the
+      // user falls back to password login on this device.
+      try {
+        await putExportKey(accountIdB64, result.exportKey, deviceKey);
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn("export-key persist (signup) failed", err);
+      }
+
       // 1.16e6c1: build the canonical session-wide Identity
       // before uploading the KeyPackage so the freshly-minted
       // init/leaf private keys land in the provider we'll
@@ -487,6 +529,14 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         // eslint-disable-next-line no-console
         console.warn("session-token persist (login) failed", err);
       }
+      // Phase 2a2c2 — refresh the cached export key. Same
+      // best-effort posture.
+      try {
+        await putExportKey(accountIdB64, result.exportKey, deviceKey);
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn("export-key persist (login) failed", err);
+      }
       savePersisted({ v: 1, accountIdB64, username: resolvedUsername });
 
       // 1.16e6c1: build the canonical Identity for this session
@@ -548,6 +598,163 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         console.warn("push subscribe (login) failed", err);
       });
     },
+    async loginWithPasskey() {
+      // Phase 2a2c2 — sign in with a WebAuthn passkey on a
+      // device that has already been seen by this account at
+      // least once (signup / login / recover ran here in the
+      // past + populated the export-key cache).
+      //
+      // The fresh-device case stays UNSUPPORTED on purpose:
+      // without a locally-cached export key the passkey gives
+      // us only a session token, but no path to derive Identity
+      // / device key / MLS bootstrap. The recovery phrase
+      // remains the only fresh-device entry route. UI should
+      // gate the affordance on cache presence.
+      const webauthn = new WebauthnClient();
+      let assertion;
+      try {
+        assertion = await webauthn.loginWithPasskey();
+      } catch (err) {
+        if (err instanceof WebauthnUserCancelledError) {
+          throw new Error("Passkey sign-in cancelled.");
+        }
+        if (err instanceof WebauthnUnsupportedError) {
+          throw new Error("This browser doesn't support passkeys.");
+        }
+        if (err instanceof WebauthnHttpError) {
+          if (err.status === 503) {
+            throw new Error("Server hasn't enabled passkey support.");
+          }
+          if (err.status === 404) {
+            throw new Error(
+              "No passkey is registered for this account. Sign in with " +
+                "password first, then add a passkey from Home.",
+            );
+          }
+          throw new Error(`Passkey sign-in failed (${err.status}).`);
+        }
+        if (err instanceof WebauthnNetworkError) {
+          throw new Error("Network error during passkey sign-in.");
+        }
+        throw err;
+      }
+
+      const accountIdB64 = assertion.account_id_b64;
+      const accountIdBytes = base64Decode(accountIdB64);
+      const cached = loadPersisted();
+      if (cached === null || cached.accountIdB64 !== accountIdB64) {
+        // The passkey resolved to an account this device has
+        // never seen — without a locally-cached export key we
+        // can't reconstruct the session. Tell the user to log
+        // in with password first; the password flow populates
+        // the cache and the next passkey tap will work.
+        throw new Error(
+          "This passkey belongs to a different account than the one " +
+            "cached on this device. Sign in with password first to " +
+            "enable passkey on this device.",
+        );
+      }
+
+      const deviceKey = await getDeviceKey(accountIdB64);
+      if (deviceKey === null) {
+        throw new Error(
+          "No device key on this device. Sign in with password or " +
+            "recover with your phrase to enable passkey sign-in.",
+        );
+      }
+
+      let exportKey: Uint8Array | null;
+      try {
+        exportKey = await getExportKey(accountIdB64, deviceKey);
+      } catch (err) {
+        // Decrypt failure — typically device key rotated since
+        // the cache was written. UX-wise indistinguishable from
+        // "cache absent"; surface the same message.
+        // eslint-disable-next-line no-console
+        console.warn("export-key cache decrypt failed", err);
+        exportKey = null;
+      }
+      if (exportKey === null) {
+        throw new Error(
+          "No cached credentials for passkey sign-in on this device. " +
+            "Sign in with password or recover with your phrase first.",
+        );
+      }
+
+      // From here on we have everything we need to reconstruct
+      // a real IdentitySecrets-driven session. Mirrors the
+      // tail of `login()` minus the OPAQUE round-trip.
+
+      // Phase 1.5b: install the fresh bearer token from the
+      // WebAuthn /finish response on the DiscoveryClient.
+      discovery.setSessionToken(assertion.session_token);
+
+      // Re-derive the device root key from the cached export
+      // key. The result must match the existing `deviceKey` we
+      // already loaded (OPAQUE export key is deterministic) —
+      // the upsert is a no-op but keeps the IDB freshness clock
+      // moving so an eviction policy (future) sees it as
+      // recently-touched.
+      const newDeviceKey = await deriveDeviceRootKey(exportKey, accountIdB64);
+      await putDeviceKey(accountIdB64, newDeviceKey);
+
+      // Persist the new session token from the passkey /finish
+      // under the device key. Best-effort.
+      try {
+        await putSessionToken(
+          accountIdB64,
+          assertion.session_token,
+          assertion.session_expires_at_ms,
+          newDeviceKey,
+        );
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn("session-token persist (passkey login) failed", err);
+      }
+
+      // Build the canonical Identity from the cached export
+      // key. Same shape as `login()`.
+      const wasm = await loadWasm();
+      const canonical = wasm.Identity.fromSeed(exportKey);
+      chats.setIdentity(canonical);
+
+      // Rehydrate MLS state from the on-device snapshot. For a
+      // passkey-login on the SAME device this is the warm path
+      // — every prior group lights back up without a peer
+      // round-trip.
+      await rehydrateMlsState(chats, accountIdB64);
+
+      // Refresh the identity bundle. Best-effort — a network
+      // blip shouldn't block the user from getting into a
+      // session they've already authenticated.
+      try {
+        await uploadIdentityBundle(discovery, accountIdBytes, canonical);
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn("identity bundle refresh (passkey login) failed", err);
+      }
+      try {
+        await chats.persistSnapshot(accountIdB64);
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn("post-passkey-login MLS snapshot failed", err);
+      }
+
+      setIdentitySecrets({
+        accountId: accountIdBytes,
+        exportKey,
+        sessionToken: assertion.session_token,
+        sessionExpiresAtMs: assertion.session_expires_at_ms,
+      });
+      setState({
+        kind: "session",
+        account: { accountId: accountIdB64, username: cached.username },
+      });
+      void subscribeToPush().catch((err) => {
+        // eslint-disable-next-line no-console
+        console.warn("push subscribe (passkey login) failed", err);
+      });
+    },
     async recover(mnemonicPhrase, newPassword) {
       const cached = loadPersisted();
       if (cached === null) {
@@ -596,6 +803,16 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         } catch (err) {
           // eslint-disable-next-line no-console
           console.warn("session-token persist (recover) failed", err);
+        }
+        // Phase 2a2c2 — refresh the cached export key under the
+        // freshly-rotated device key. Any prior cached value was
+        // wrapped under the OLD device key and is now
+        // undecryptable; the upsert here overwrites it cleanly.
+        try {
+          await putExportKey(cached.accountIdB64, result.exportKey, deviceKey);
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.warn("export-key persist (recover) failed", err);
         }
 
         // 1.16e6c1: post-recovery the user's password (and so
@@ -834,6 +1051,16 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         // "leave nothing per-account behind" contract.
         try {
           await deletePhrase(cached.accountIdB64);
+        } catch {
+          // best-effort
+        }
+        // Phase 2a2c2: drop the cached export key. Same posture
+        // as the snapshot / session-token rows above — leaving
+        // ciphertext behind is safe (the wrap key is gone) but a
+        // future signup on the same accountId would trip over
+        // the stale row.
+        try {
+          await deleteExportKey(cached.accountIdB64);
         } catch {
           // best-effort
         }

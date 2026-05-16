@@ -13,11 +13,12 @@
  * account whose username is registered. Cache hits (re-login on
  * the same device) skip the lookup round-trip.
  */
-import { createSignal, type JSX } from "solid-js";
+import { createSignal, Show, type JSX } from "solid-js";
 import { A, useLocation, useNavigate } from "@solidjs/router";
 import { paths } from "./paths";
 import { useAuth } from "../auth/AuthContext";
 import { readReturnUrl } from "../auth/return-url";
+import { WebauthnClient } from "../auth/webauthn-client";
 
 export default function Login(): JSX.Element {
   const auth = useAuth();
@@ -59,6 +60,33 @@ export default function Login(): JSX.Element {
     }
   }
 
+  async function onPasskeyLogin(): Promise<void> {
+    setError(null);
+    setBusy(true);
+    try {
+      await auth.loginWithPasskey();
+      navigate(readReturnUrl(location), { replace: true });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // 2a2c2 — show the passkey affordance only when the browser
+  // supports WebAuthn AND the user has logged in here before
+  // (the export-key cache is populated). The "logged in here
+  // before" check is a coarse heuristic — we use the cached
+  // (accountId, username) marker that the prior signup / login
+  // / recover would have written to localStorage. A real cache
+  // miss (key store cleared, ciphertext tampered) surfaces
+  // later as a clean error message from `loginWithPasskey`.
+  const passkeyAvailable = (): boolean => {
+    if (!WebauthnClient.isWebauthnAvailable()) return false;
+    const s = auth.state();
+    return s.kind === "anon" && s.cachedUsername !== undefined;
+  };
+
   return (
     <div class="auth-shell">
       <section class="auth-card">
@@ -96,6 +124,24 @@ export default function Login(): JSX.Element {
             {busy() ? "Signing in…" : "Log in"}
           </button>
         </form>
+        <Show when={passkeyAvailable()}>
+          <div style={{ margin: "0.75rem 0", "text-align": "center" }}>
+            <button
+              type="button"
+              disabled={busy()}
+              onClick={() => void onPasskeyLogin()}
+              style={{ "min-width": "60%" }}
+            >
+              Sign in with passkey
+            </button>
+            <p
+              class="form-footer"
+              style={{ "font-size": "0.85em", "margin-top": "0.25rem" }}
+            >
+              Uses the passkey you registered earlier on this device.
+            </p>
+          </div>
+        </Show>
         <p class="form-footer">
           New to Lakko? <A href={paths.signup}>Create an account</A>.
         </p>
