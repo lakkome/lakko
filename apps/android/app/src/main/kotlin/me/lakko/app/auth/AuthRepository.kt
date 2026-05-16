@@ -447,6 +447,69 @@ public class AuthRepository(
                         deviceRootKey.fill(0)
                     }
                     sessionStore.save(cached) // idempotent upsert
+                    // Phase 2a1d / 2a3d7 — restore-then-bootstrap
+                    // on recover.
+                    //
+                    // The user has just gone through recovery,
+                    // which lands on a device that may or may
+                    // not have been used by them before. If a
+                    // prior backup envelope sits on the server,
+                    // we fetch + decrypt + parse it before
+                    // posting a fresh baseline.
+                    //
+                    // **Ordering matters:** the restore +
+                    // snapshot-write to [IdentitySnapshotStore]
+                    // MUST happen BEFORE the
+                    // `mutableIdentitySecrets.value = ...` flip
+                    // below. The compose-side
+                    // `LaunchedEffect(identitySecrets)` in
+                    // `MainActivity` wakes on the flip and
+                    // immediately drives
+                    // `chatRepository.bootstrap(secrets)`, which
+                    // reads `snapshotStore.getSnapshot(...)` for
+                    // the MLS state. If we restored AFTER the
+                    // flip, that read would race against the
+                    // write and the recovered device would land
+                    // with no MLS state. Doing it before is the
+                    // only way to make the rehydrate path see
+                    // the restored snapshot on the very first
+                    // ChatRepository.bootstrap call.
+                    //
+                    // On Android the application of restored
+                    // contacts into [ContactsRepository] is not
+                    // wired yet — the contacts list is in-
+                    // memory only and there's no persistent
+                    // target to upsert into. The helper logs the
+                    // parsed-contact count for now and the merge
+                    // layer lands alongside the Android contact-
+                    // persistence sub-sprint.
+                    val restoredSnapshot = restoreFromServerBackupBestEffort(
+                        sessionToken = result.sessionToken,
+                        phrase = mnemonicPhrase,
+                        context = "recover",
+                    )
+                    if (restoredSnapshot.isNotEmpty()) {
+                        // Drop the restored MLS blob into the
+                        // local snapshot store. ChatRepository's
+                        // rehydrate path picks it up
+                        // automatically — no wiring change
+                        // needed beyond this single putSnapshot
+                        // call.
+                        try {
+                            me.lakko.app.chat.IdentitySnapshotStore.putSnapshot(
+                                applicationContext,
+                                cached.accountIdB64,
+                                restoredSnapshot,
+                            )
+                        } catch (cause: Throwable) {
+                            Log.w(
+                                "lakko-auth",
+                                "post-restore IdentitySnapshotStore.putSnapshot failed",
+                                cause,
+                            )
+                        }
+                    }
+
                     // Stash the NEW export key — the recovery
                     // flow rotates the password envelope so this
                     // is fresh material, not a reuse of the prior
@@ -463,34 +526,13 @@ public class AuthRepository(
                             username = cached.username,
                         ),
                     )
-                    // Phase 2a1d — restore-then-bootstrap on
-                    // recover. If a prior backup envelope sits
-                    // on the server, fetch + decrypt + parse it
-                    // before the bootstrap-side baseline upload
-                    // overwrites the server blob with an empty
-                    // payload. On Android the application of
-                    // restored contacts into [ContactsRepository]
-                    // is not wired yet — the contacts list is
-                    // in-memory only and there's no persistent
-                    // target to upsert into (mirror of iOS); the
-                    // helper logs the parsed-contact count for
-                    // now and the merge layer lands alongside the
-                    // Android contact-persistence sub-sprint.
-                    //
-                    // Phase 2a1c — post-recover backup bootstrap.
-                    // Re-caches the phrase under the freshly-
-                    // rotated device root key + posts a baseline
-                    // /backup envelope. Best-effort.
-                    // Phase 2a3d6 — capture the restored MLS
-                    // snapshot (if any) and pass it into the
-                    // post-restore bootstrap so the new baseline
-                    // upload re-publishes the same server-side
-                    // snapshot instead of nuking it.
-                    val restoredSnapshot = restoreFromServerBackupBestEffort(
-                        sessionToken = result.sessionToken,
-                        phrase = mnemonicPhrase,
-                        context = "recover",
-                    )
+
+                    // Phase 2a1c — post-recover backup
+                    // bootstrap: re-cache the phrase + post a
+                    // baseline /backup envelope that re-publishes
+                    // the restored snapshot (so the next
+                    // device-recover sees the same state we just
+                    // rebuilt). Best-effort.
                     bootstrapBackupBestEffort(
                         accountId = accountIdBytes,
                         accountIdB64 = cached.accountIdB64,

@@ -382,6 +382,51 @@ public final class AuthRepository: ObservableObject {
         )
         sessionStore.save(cached) // idempotent upsert
 
+        // Phase 2a1d / 2a3d7 — restore-then-bootstrap on recover.
+        //
+        // The user has just gone through recovery, which lands
+        // on a device that may or may not have been used by
+        // them before. If a prior backup envelope sits on the
+        // server, we fetch + decrypt + parse it before posting
+        // a fresh baseline — otherwise the bootstrap-side
+        // upload nukes the prior backup with an empty payload.
+        //
+        // **Ordering matters:** the restore + snapshot-write to
+        // `IdentitySnapshotStore` happen BEFORE the `state`
+        // flip below. SwiftUI's `SessionRoot.task(id:
+        // identitySecrets?.accountId)` modifier wakes on the
+        // flip and immediately drives
+        // `chatRepository.bootstrap(secrets:)`, which reads
+        // `snapshotStore.getSnapshot(...)` for the MLS state.
+        // If we restored from server AFTER the flip, that read
+        // would race against the write and the new device would
+        // land with no MLS state. Doing it before is the only
+        // way to make the rehydrate path see the restored
+        // snapshot on the very first ChatRepository.bootstrap
+        // call.
+        //
+        // The applying-restored-contacts-into-ContactsRepository
+        // wire is not built yet on iOS — the contacts list is
+        // in-memory only and there's no persistent target to
+        // upsert into (mirror of the Android situation). For
+        // now restore logs the outcome; the merge layer lands
+        // alongside the iOS contact-persistence sub-sprint.
+        let restoredSnapshot = await Self.restoreFromServerBackupBestEffort(
+            sessionToken: result.sessionToken,
+            phrase: trimmedPhrase,
+            context: "recover"
+        )
+        if !restoredSnapshot.isEmpty {
+            // Drop the restored MLS blob into the local snapshot
+            // store. `ChatRepository.bootstrap`'s rehydrate path
+            // picks it up automatically — no wiring change
+            // needed beyond this single putSnapshot call.
+            IdentitySnapshotStore().putSnapshot(
+                accountIdB64: cached.accountIdB64,
+                blob: restoredSnapshot
+            )
+        }
+
         identitySecrets = IdentitySecrets(
             accountId: accountIdBytes,
             exportKey: result.exportKey,
@@ -394,35 +439,15 @@ public final class AuthRepository: ObservableObject {
                 username: cached.username
             )
         )
-        // Phase 2a1d — restore-then-bootstrap on recover.
-        //
-        // The user has just gone through recovery, which lands
-        // on a device that may or may not have been used by
-        // them before. If a prior backup envelope sits on the
-        // server, we fetch + decrypt + parse it before posting
-        // a fresh baseline — otherwise the bootstrap-side
-        // upload nukes the prior backup with an empty payload.
-        //
-        // The applying-restored-contacts-into-ContactsRepository
-        // wire is not built yet on iOS — the contacts list is
-        // in-memory only and there's no persistent target to
-        // upsert into (mirror of the Android situation). For
-        // now restore logs the outcome; the merge layer lands
-        // alongside the iOS contact-persistence sub-sprint.
-        //
+
         // Phase 2a1c — post-recover backup bootstrap: re-cache
         // the phrase under the freshly-rotated device root key
-        // and post a baseline /backup envelope. Best-effort.
+        // and post a baseline /backup envelope that re-publishes
+        // the restored snapshot (so the next device-recover
+        // sees the same state we just rebuilt). Best-effort,
+        // fire-and-forget — the state flip above already drove
+        // the UI; bootstrap is housekeeping.
         Task {
-            // Phase 2a3d5 — capture the restored MLS snapshot (if
-            // any) and pass it into the post-restore bootstrap so
-            // the new baseline upload re-publishes the same
-            // server-side snapshot instead of nuking it.
-            let restoredSnapshot = await Self.restoreFromServerBackupBestEffort(
-                sessionToken: result.sessionToken,
-                phrase: trimmedPhrase,
-                context: "recover"
-            )
             await Self.bootstrapBackupBestEffort(
                 accountId: accountIdBytes,
                 accountIdB64: cached.accountIdB64,
@@ -550,15 +575,6 @@ public final class AuthRepository: ObservableObject {
         // TODO(2a1d-followup): once the iOS persistent contact
         // store lands, apply `parsed.contacts` here via a
         // contacts-merge hook.
-        //
-        // TODO(2a3d5-followup): apply `parsed.wholeStorageSnapshot`
-        // to ChatRepository's Identity via an
-        // AppEnvironment-injected hook so the recovered device
-        // lands with the same MLS group state the upload-side
-        // device had. For now the snapshot is returned so the
-        // post-restore bootstrap re-publishes it on the next
-        // /backup PUT — that protects the server-side blob from
-        // being overwritten with an empty snapshot.
         return parsed.wholeStorageSnapshot
     }
 
