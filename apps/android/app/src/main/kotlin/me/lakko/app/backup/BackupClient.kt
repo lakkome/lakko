@@ -61,6 +61,11 @@ public class BackupClient(
         ed25519Seed: ByteArray,
         phraseBytes: ByteArray,
         contacts: List<BackupContactRecord> = emptyList(),
+        /** Phase 2a3d3: whole-storage MLS snapshot from
+         *  `Identity.snapshotStorage()`. Empty `ByteArray` on
+         *  signup baseline; recover-time + scheduled auto-backup
+         *  paths pass the current snapshot. */
+        wholeStorageSnapshot: ByteArray = ByteArray(0),
     ) {
         val createdAtMs = System.currentTimeMillis().toULong()
         val payload = buildBackupPayload(
@@ -68,6 +73,7 @@ public class BackupClient(
             createdAtMs = createdAtMs,
             ed25519Seed = ed25519Seed,
             contacts = contacts,
+            wholeStorageSnapshot = wholeStorageSnapshot,
         )
         val envelope = sealBackup(phrase = phraseBytes, payloadBytes = payload)
         storage.putBackup(envelope)
@@ -84,6 +90,7 @@ public class BackupClient(
         accountIdB64: String,
         ed25519Seed: ByteArray,
         contacts: List<BackupContactRecord> = emptyList(),
+        wholeStorageSnapshot: ByteArray = ByteArray(0),
     ): UploadResult {
         val cached = PhraseStore.getPhrase(context, accountIdB64)
             ?: return UploadResult.CacheMiss
@@ -93,6 +100,7 @@ public class BackupClient(
                 ed25519Seed = ed25519Seed,
                 phraseBytes = cached,
                 contacts = contacts,
+                wholeStorageSnapshot = wholeStorageSnapshot,
             )
             return UploadResult.Uploaded
         } catch (cause: Throwable) {

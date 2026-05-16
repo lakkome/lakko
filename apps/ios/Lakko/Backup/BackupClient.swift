@@ -51,13 +51,18 @@ public final class BackupClient {
         accountId: Data,
         ed25519Seed: Data,
         phraseBytes: Data,
-        contacts: [BackupContactRecord]
+        contacts: [BackupContactRecord],
+        // Phase 2a3d3: whole-storage MLS snapshot from
+        // `Identity.snapshotStorage()`. Pass `Data()` on signup
+        // baseline when there is no MLS state yet.
+        wholeStorageSnapshot: Data = Data()
     ) async throws {
         let payloadBytes = try buildBackupPayload(
             accountId: accountId,
             createdAtMs: UInt64(Date().timeIntervalSince1970 * 1000),
             ed25519Seed: ed25519Seed,
-            contacts: contacts
+            contacts: contacts,
+            wholeStorageSnapshot: wholeStorageSnapshot
         )
         let envelope = try sealBackup(phrase: phraseBytes, payloadBytes: payloadBytes)
         try await storage.putBackup(envelopeBytes: envelope)
@@ -72,7 +77,8 @@ public final class BackupClient {
         accountId: Data,
         accountIdB64: String,
         ed25519Seed: Data,
-        contacts: [BackupContactRecord]
+        contacts: [BackupContactRecord],
+        wholeStorageSnapshot: Data = Data()
     ) async -> UploadResult {
         let cachedOrNil: Data?
         do {
@@ -95,7 +101,8 @@ public final class BackupClient {
                 accountId: accountId,
                 ed25519Seed: ed25519Seed,
                 phraseBytes: phraseBytes,
-                contacts: contacts
+                contacts: contacts,
+                wholeStorageSnapshot: wholeStorageSnapshot
             )
             return .uploaded
         } catch {

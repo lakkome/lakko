@@ -140,8 +140,10 @@ impl BackupContact {
 ///   constructor above. Empty array is fine — degenerate case
 ///   for a brand-new account with no accepted contacts yet.
 ///
-/// `mls_snapshots` is reserved in v1; this call emits an empty
-/// list. 2a3 wires DeviceGroup-side snapshot publishing.
+/// `mls_snapshots` (the per-group reserved slot) stays empty;
+/// `whole_storage_snapshot` (Phase 2a3d1) carries the bytes
+/// `Identity.snapshotStorage()` emits for the wholesale MLS
+/// provider state.
 ///
 /// # Errors
 ///
@@ -154,6 +156,11 @@ pub fn build_backup_payload(
     created_at_ms: u64,
     ed25519_seed: &[u8],
     contacts: Vec<BackupContact>,
+    // Phase 2a3d1 — whole-storage OpenMLS provider snapshot
+    // from `Identity.snapshotStorage()`. Pass an empty
+    // `Uint8Array` when no MLS state is published yet
+    // (signup baseline pre-DeviceGroup-bootstrap, etc.).
+    whole_storage_snapshot: &[u8],
 ) -> Result<Vec<u8>, JsError> {
     if account_id.len() != 16 {
         return Err(JsError::new("account_id must be 16 bytes"));
@@ -177,6 +184,7 @@ pub fn build_backup_payload(
         ed25519_seed: seed,
         accepted_contacts,
         mls_snapshots: Vec::new(),
+        whole_storage_snapshot: whole_storage_snapshot.to_vec(),
     };
     payload.encode().map_err(err_to_js)
 }
@@ -221,6 +229,15 @@ impl ParsedBackupPayload {
                 display_name: c.display_name.clone(),
             })
             .collect()
+    }
+
+    /// Phase 2a3d1 — whole-storage OpenMLS provider snapshot. Empty
+    /// `Uint8Array` when the backup pre-dates 2a3d or had no MLS
+    /// state published at upload time. The restore path feeds
+    /// this into `Identity.restoreStorage(...)`.
+    #[wasm_bindgen(getter, js_name = wholeStorageSnapshot)]
+    pub fn whole_storage_snapshot(&self) -> Vec<u8> {
+        self.inner.whole_storage_snapshot.clone()
     }
 }
 
@@ -286,7 +303,10 @@ mod tests {
         let account_id = vec![0xA1u8; 16];
         let seed = vec![0x42u8; 32];
         let contacts = vec![sample_contact()];
-        let wire = build_backup_payload(&account_id, 1_700_000_000_000, &seed, contacts).unwrap();
+        let snapshot = vec![0xEFu8; 8];
+        let wire =
+            build_backup_payload(&account_id, 1_700_000_000_000, &seed, contacts, &snapshot)
+                .unwrap();
         let parsed = parse_backup_payload(&wire).unwrap();
         assert_eq!(parsed.account_id(), account_id);
         assert_eq!(parsed.created_at_ms(), 1_700_000_000_000);
@@ -294,6 +314,7 @@ mod tests {
         let recovered = parsed.contacts();
         assert_eq!(recovered.len(), 1);
         assert_eq!(recovered[0].display_name(), "alice");
+        assert_eq!(parsed.whole_storage_snapshot(), snapshot);
     }
 
     #[test]
@@ -311,7 +332,7 @@ mod tests {
         let account_id = vec![0xCDu8; 16];
         let seed = vec![0x77u8; 32];
         let contacts = vec![sample_contact()];
-        let payload = build_backup_payload(&account_id, 99, &seed, contacts).unwrap();
+        let payload = build_backup_payload(&account_id, 99, &seed, contacts, &[]).unwrap();
         let envelope = seal_backup(phrase, &payload).unwrap();
         let opened = open_backup(phrase, &envelope).unwrap();
         let parsed = parse_backup_payload(&opened).unwrap();

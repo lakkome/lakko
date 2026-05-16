@@ -4,7 +4,7 @@
 //! `BackupPayload` — the structured bytes sealed inside the
 //! Phase 2a1 backup envelope.
 //!
-//! ## Wire format (v1)
+//! ## Wire format
 //!
 //! Hand-rolled length-prefixed binary codec. Same pattern
 //! `lakko-contacts` uses for its wire types — keeps the parser
@@ -12,16 +12,32 @@
 //! schema dep (prost / serde-binary) that would force every
 //! caller through a wider attack surface.
 //!
+//! Two versions are recognised on decode:
+//!
+//! ### v2 (current, Phase 2a3d1)
+//!
 //! ```text
-//! u8           payload version (= 1)
+//! u8           payload version (= 2)
 //! [16 bytes]   account_id (UUIDv7 raw)
 //! u64be        created_at_ms (the wall-clock at upload time)
 //! [32 bytes]   ed25519_seed (the identity signing seed)
 //! u32be        accepted_contacts_count
 //! [..]         accepted_contacts_count × AcceptedContactRecord
-//! u32be        mls_snapshots_count (reserved for 2a3; emit 0 for now)
+//! u32be        mls_snapshots_count (per-group; reserved, emit 0)
 //! [..]         mls_snapshots_count × { 32-byte group_id, u32be length, bytes }
+//! u32be        whole_storage_snapshot_length
+//! [..]         whole_storage_snapshot_length bytes
 //! ```
+//!
+//! ### v1 (Phase 2a1; accepted on decode for forward compat)
+//!
+//! Same as v2, minus the trailing `whole_storage_snapshot`
+//! length + bytes. Decoder folds v1 → `whole_storage_snapshot:
+//! Vec::new()` so the inner type carries one shape regardless
+//! of which version was on the wire. v1 producers are
+//! Phase 2a1 clients that pre-date the snapshot work — they
+//! still upload, the restore path on a newer client simply
+//! has nothing to feed into `Identity::restore_storage`.
 //!
 //! Each [`AcceptedContactRecord`]:
 //!
@@ -60,8 +76,13 @@
 
 use crate::error::{BackupError, Result};
 
-/// Current payload schema version.
-pub const PAYLOAD_VERSION: u8 = 1;
+/// Current payload schema version emitted on encode.
+pub const PAYLOAD_VERSION: u8 = 2;
+
+/// Phase 2a1 schema. Accepted on decode for forward
+/// compatibility; mapped to a v2-shaped `BackupPayload` with
+/// `whole_storage_snapshot: Vec::new()`.
+const PAYLOAD_VERSION_V1: u8 = 1;
 
 /// Account-id length (UUIDv7 raw, mirrors
 /// `lakko_contacts::ACCOUNT_ID_LEN`).
@@ -110,13 +131,24 @@ pub struct BackupPayload {
     pub ed25519_seed: [u8; SEED_LEN],
     /// Local "accepted contacts" address book.
     pub accepted_contacts: Vec<AcceptedContactRecord>,
-    /// Per-group OpenMLS provider snapshots. Empty in 2a1;
-    /// wired in 2a3 once DeviceGroup-side snapshot publishing
-    /// lands. Each entry is `(group_id, raw_snapshot_bytes)`;
-    /// the snapshot format is the same opaque blob
-    /// `lakko-mls` already emits from
-    /// `Group::snapshot()` / `Group::load()`.
+    /// Per-group OpenMLS provider snapshots. Reserved — kept
+    /// empty in the current encoder for when OpenMLS exposes a
+    /// per-group export surface. Each entry is
+    /// `(group_id, raw_snapshot_bytes)`.
     pub mls_snapshots: Vec<(Vec<u8>, Vec<u8>)>,
+    /// Whole-storage OpenMLS provider snapshot (Phase 2a3d1).
+    ///
+    /// Same bytes [`lakko_mls::Identity::snapshot_storage`]
+    /// emits — every group + ratchet tree + signing-key row in
+    /// one length-prefixed blob. On restore the client's new
+    /// `Identity::restore_storage(...)` replaces the freshly-
+    /// minted provider with this snapshot so a paired device
+    /// lands with the same group state the upload-side device
+    /// had at backup time.
+    ///
+    /// Empty `Vec` when no snapshot was published yet. v1-shaped
+    /// payloads decode to `Vec::new()` here.
+    pub whole_storage_snapshot: Vec<u8>,
 }
 
 impl BackupPayload {
@@ -164,6 +196,16 @@ impl BackupPayload {
             encode_snapshot(&mut out, group_id, snapshot)?;
         }
 
+        // Phase 2a3d1 — whole-storage snapshot (v2 tail).
+        let snapshot_len = u32::try_from(self.whole_storage_snapshot.len()).map_err(|_| {
+            BackupError::InvalidPayload(format!(
+                "whole_storage_snapshot length {} overflows u32",
+                self.whole_storage_snapshot.len(),
+            ))
+        })?;
+        out.extend_from_slice(&snapshot_len.to_be_bytes());
+        out.extend_from_slice(&self.whole_storage_snapshot);
+
         Ok(out)
     }
 
@@ -179,9 +221,10 @@ impl BackupPayload {
         let mut cur = wire;
 
         let version = take_u8(&mut cur)?;
-        if version != PAYLOAD_VERSION {
+        if version != PAYLOAD_VERSION && version != PAYLOAD_VERSION_V1 {
             return Err(BackupError::InvalidPayload(format!(
-                "unsupported payload version {version} (expected {PAYLOAD_VERSION})",
+                "unsupported payload version {version} \
+                 (expected {PAYLOAD_VERSION_V1} or {PAYLOAD_VERSION})",
             )));
         }
 
@@ -217,6 +260,23 @@ impl BackupPayload {
             mls_snapshots.push(decode_snapshot(&mut cur)?);
         }
 
+        // Phase 2a3d1 — v2 tails carry a whole-storage snapshot;
+        // v1 tails do not. Distinguish on the version we read at
+        // the head, NOT on remaining-bytes heuristics — a v1
+        // producer never wrote the field, while a v2 producer
+        // always writes at least the 4-byte length prefix
+        // (which may be 0 for an empty snapshot).
+        let whole_storage_snapshot = if version == PAYLOAD_VERSION {
+            let snapshot_len = u32::from_be_bytes(
+                take_n(&mut cur, 4)?
+                    .try_into()
+                    .expect("take_n(4) length pinned"),
+            ) as usize;
+            take_n(&mut cur, snapshot_len)?.to_vec()
+        } else {
+            Vec::new()
+        };
+
         if !cur.is_empty() {
             return Err(BackupError::InvalidPayload(format!(
                 "{} trailing bytes after payload tail",
@@ -230,6 +290,7 @@ impl BackupPayload {
             ed25519_seed,
             accepted_contacts,
             mls_snapshots,
+            whole_storage_snapshot,
         })
     }
 }
@@ -353,6 +414,7 @@ mod tests {
                 },
             ],
             mls_snapshots: vec![(b"group-id-bytes".to_vec(), b"opaque-snapshot".to_vec())],
+            whole_storage_snapshot: b"opaque-whole-storage-blob".to_vec(),
         }
     }
 
@@ -372,10 +434,52 @@ mod tests {
             ed25519_seed: [0; SEED_LEN],
             accepted_contacts: vec![],
             mls_snapshots: vec![],
+            whole_storage_snapshot: Vec::new(),
         };
         let wire = payload.encode().unwrap();
         let decoded = BackupPayload::decode(&wire).unwrap();
         assert_eq!(decoded, payload);
+    }
+
+    /// Phase 2a3d1 — a v1-shaped wire payload (no
+    /// `whole_storage_snapshot` tail) decodes as a v2-shaped
+    /// `BackupPayload` with an empty snapshot. Guarantees
+    /// forward compat for backups uploaded by Phase 2a1
+    /// clients.
+    #[test]
+    fn v1_payload_decodes_with_empty_snapshot() {
+        // Build the v1 bytes by hand — fixture mirrors the
+        // sample_payload() shape minus the trailing snapshot
+        // length + bytes.
+        let mut wire = Vec::new();
+        wire.push(PAYLOAD_VERSION_V1);
+        wire.extend_from_slice(&[0xA1; ACCOUNT_ID_LEN]);
+        wire.extend_from_slice(&1_700_000_000_000u64.to_be_bytes());
+        wire.extend_from_slice(&[0x42; SEED_LEN]);
+        wire.extend_from_slice(&0u32.to_be_bytes()); // contact_count = 0
+        wire.extend_from_slice(&0u32.to_be_bytes()); // snapshot_count = 0
+        // NO whole_storage_snapshot tail.
+
+        let decoded = BackupPayload::decode(&wire).expect("v1 decode");
+        assert_eq!(decoded.account_id, [0xA1; ACCOUNT_ID_LEN]);
+        assert_eq!(decoded.created_at_ms, 1_700_000_000_000);
+        assert_eq!(decoded.ed25519_seed, [0x42; SEED_LEN]);
+        assert!(decoded.accepted_contacts.is_empty());
+        assert!(decoded.mls_snapshots.is_empty());
+        assert!(
+            decoded.whole_storage_snapshot.is_empty(),
+            "v1 payload should fold to an empty snapshot field"
+        );
+    }
+
+    #[test]
+    fn empty_whole_storage_snapshot_roundtrips() {
+        let mut payload = sample_payload();
+        payload.whole_storage_snapshot = Vec::new();
+        let wire = payload.encode().unwrap();
+        let decoded = BackupPayload::decode(&wire).unwrap();
+        assert_eq!(decoded, payload);
+        assert!(decoded.whole_storage_snapshot.is_empty());
     }
 
     #[test]
@@ -413,6 +517,7 @@ mod tests {
                 display_name: "x".repeat(MAX_DISPLAY_NAME_LEN + 1),
             }],
             mls_snapshots: vec![],
+            whole_storage_snapshot: Vec::new(),
         };
         let err = payload.encode().unwrap_err();
         assert!(matches!(err, BackupError::InvalidPayload(_)));
@@ -430,6 +535,7 @@ mod tests {
                 display_name: "x".repeat(MAX_DISPLAY_NAME_LEN),
             }],
             mls_snapshots: vec![],
+            whole_storage_snapshot: Vec::new(),
         };
         let wire = payload.encode().unwrap();
         let decoded = BackupPayload::decode(&wire).unwrap();

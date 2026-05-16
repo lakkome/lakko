@@ -64,6 +64,11 @@ pub struct ParsedBackupPayload {
     pub ed25519_seed: Vec<u8>,
     /// Accepted-contacts list.
     pub accepted_contacts: Vec<BackupContactRecord>,
+    /// Whole-storage OpenMLS provider snapshot (Phase 2a3d1).
+    /// Empty `Vec` when the backup pre-dates 2a3d or no MLS
+    /// state had been published at upload time. The restore
+    /// path feeds this into `Identity.restoreStorage(...)`.
+    pub whole_storage_snapshot: Vec<u8>,
 }
 
 // ============================================================================
@@ -84,6 +89,12 @@ pub fn build_backup_payload(
     created_at_ms: u64,
     ed25519_seed: Vec<u8>,
     contacts: Vec<BackupContactRecord>,
+    // Phase 2a3d1 — whole-storage OpenMLS provider snapshot
+    // (the bytes `Identity.snapshotStorage()` emits). Pass an
+    // empty `Vec` when there's no MLS state to back up yet
+    // (signup baseline before the DeviceGroup-bootstrap path
+    // runs, etc.).
+    whole_storage_snapshot: Vec<u8>,
 ) -> Result<Vec<u8>, FfiError> {
     if account_id.len() != 16 {
         return Err(FfiError::Backup("account_id must be 16 bytes".into()));
@@ -132,6 +143,7 @@ pub fn build_backup_payload(
         ed25519_seed: seed,
         accepted_contacts,
         mls_snapshots: Vec::new(),
+        whole_storage_snapshot,
     };
     Ok(payload.encode()?)
 }
@@ -161,6 +173,7 @@ pub fn parse_backup_payload(wire: Vec<u8>) -> Result<ParsedBackupPayload, FfiErr
         created_at_ms: inner.created_at_ms,
         ed25519_seed: inner.ed25519_seed.to_vec(),
         accepted_contacts,
+        whole_storage_snapshot: inner.whole_storage_snapshot,
     })
 }
 
@@ -209,11 +222,13 @@ mod tests {
         let account_id = vec![0xA1u8; 16];
         let seed = vec![0x42u8; 32];
         let contacts = vec![sample_contact()];
+        let snapshot = vec![0xEFu8; 8];
         let wire = build_backup_payload(
             account_id.clone(),
             1_700_000_000_000,
             seed.clone(),
             contacts,
+            snapshot.clone(),
         )
         .expect("build");
         let parsed = parse_backup_payload(wire).expect("parse");
@@ -222,6 +237,7 @@ mod tests {
         assert_eq!(parsed.ed25519_seed, seed);
         assert_eq!(parsed.accepted_contacts.len(), 1);
         assert_eq!(parsed.accepted_contacts[0].display_name, "alice");
+        assert_eq!(parsed.whole_storage_snapshot, snapshot);
     }
 
     #[test]
@@ -240,7 +256,8 @@ mod tests {
         let seed = vec![0x77u8; 32];
         let contacts = vec![sample_contact()];
         let payload =
-            build_backup_payload(account_id.clone(), 99, seed.clone(), contacts).expect("build");
+            build_backup_payload(account_id.clone(), 99, seed.clone(), contacts, Vec::new())
+                .expect("build");
         let envelope = seal_backup(phrase.clone(), payload).expect("seal");
         let opened = open_backup(phrase, envelope).expect("open");
         let parsed = parse_backup_payload(opened).expect("parse");
@@ -250,7 +267,8 @@ mod tests {
 
     #[test]
     fn wrong_phrase_rejected() {
-        let payload = build_backup_payload(vec![0u8; 16], 0, vec![0u8; 32], vec![]).expect("build");
+        let payload = build_backup_payload(vec![0u8; 16], 0, vec![0u8; 32], vec![], Vec::new())
+            .expect("build");
         let envelope = seal_backup(b"right".to_vec(), payload).expect("seal");
         let err = open_backup(b"wrong".to_vec(), envelope).expect_err("wrong phrase");
         match err {
@@ -261,8 +279,8 @@ mod tests {
 
     #[test]
     fn wrong_length_account_id_rejected() {
-        let err =
-            build_backup_payload(vec![0u8; 8], 0, vec![0u8; 32], vec![]).expect_err("wrong len");
+        let err = build_backup_payload(vec![0u8; 8], 0, vec![0u8; 32], vec![], Vec::new())
+            .expect_err("wrong len");
         match err {
             FfiError::Backup(msg) => assert!(msg.contains("16 bytes")),
             other => panic!("expected Backup variant, got {other:?}"),

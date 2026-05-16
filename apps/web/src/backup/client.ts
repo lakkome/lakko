@@ -67,6 +67,14 @@ export type RestoreResult =
       readonly createdAtMs: number;
       readonly ed25519Seed: Uint8Array;
       readonly acceptedContacts: AcceptedContact[];
+      /** Phase 2a3d3: whole-storage MLS snapshot from
+       *  `Identity.snapshotStorage()`. Empty when the backup
+       *  pre-dates 2a3d or no MLS state was published yet. The
+       *  recover handler feeds this into
+       *  `Identity.restoreStorage(...)` on the freshly-derived
+       *  Identity so the new device lands with the same group
+       *  state the upload-side device had at backup time. */
+      readonly wholeStorageSnapshot: Uint8Array;
     }
   | { readonly kind: "no-backup" }
   | { readonly kind: "wrong-phrase-or-tampered" }
@@ -104,12 +112,19 @@ export class BackupClient {
     accountId: Uint8Array,
     ed25519Seed: Uint8Array,
     phraseBytes: Uint8Array,
+    /** Phase 2a3d3: whole-storage MLS snapshot from
+     *  `Identity.snapshotStorage()`. Empty / omitted is fine —
+     *  on signup baseline there is no MLS state to publish
+     *  yet. Recover-time + scheduled auto-backup paths pass
+     *  the current snapshot here. */
+    wholeStorageSnapshot: Uint8Array = new Uint8Array(0),
   ): Promise<UploadResult> {
     try {
       const envelope = await this.composeEnvelope(
         accountId,
         ed25519Seed,
         phraseBytes,
+        wholeStorageSnapshot,
       );
       await this.storage.putBackup(envelope);
       return { kind: "uploaded", bytes: envelope.length, at: new Date() };
@@ -205,6 +220,7 @@ export class BackupClient {
       createdAtMs: Number(parsed.createdAtMs),
       ed25519Seed: parsed.ed25519Seed,
       acceptedContacts,
+      wholeStorageSnapshot: parsed.wholeStorageSnapshot,
     };
   }
 
@@ -218,6 +234,7 @@ export class BackupClient {
     accountId: Uint8Array,
     ed25519Seed: Uint8Array,
     phraseBytes: Uint8Array,
+    wholeStorageSnapshot: Uint8Array,
   ): Promise<Uint8Array> {
     const wasm = await loadWasm();
 
@@ -235,6 +252,7 @@ export class BackupClient {
       BigInt(Date.now()),
       ed25519Seed,
       contacts,
+      wholeStorageSnapshot,
     );
     return wasm.sealBackup(phraseBytes, payload);
   }
