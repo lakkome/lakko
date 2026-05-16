@@ -2149,11 +2149,13 @@ name = "lakko-mls"
 version = "0.0.0"
 dependencies = [
  "lakko-crypto",
+ "lakko-proto",
  "openmls",
  "openmls_basic_credential",
  "openmls_rust_crypto",
  "openmls_traits",
  "proptest",
+ "prost",
  "thiserror 1.0.69",
  "tls_codec",
  "zeroize",

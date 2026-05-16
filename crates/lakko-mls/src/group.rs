@@ -374,6 +374,17 @@ impl Group {
             .map_err(|e| Error::Group(format!("load: {e:?}")))?;
         Ok(loaded.map(|inner| Self { inner }))
     }
+
+    /// Wrap an already-constructed [`MlsGroup`] in the Lakko
+    /// [`Group`] shape. Used by [`crate::device_group::DeviceGroup`]
+    /// (Phase 2a3a) to share the public surface without duplicating
+    /// every method. Not part of the supported public API — callers
+    /// outside the crate should go through [`Group::create`] or
+    /// [`Group::join_from_welcome`].
+    #[doc(hidden)]
+    pub(crate) fn from_mls_group(inner: MlsGroup) -> Self {
+        Self { inner }
+    }
 }
 
 /// Encode any [`MlsMessageOut`] to its TLS wire form.

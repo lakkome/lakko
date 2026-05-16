@@ -12,10 +12,15 @@ use std::path::PathBuf;
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let schemas_root: PathBuf = manifest_dir().join("../../schemas");
 
-    let proto_files: Vec<PathBuf> = ["wire/v1.proto", "mls-app/v1.proto", "media/v1.proto"]
-        .iter()
-        .map(|p| schemas_root.join(p))
-        .collect();
+    let proto_files: Vec<PathBuf> = [
+        "wire/v1.proto",
+        "wire/device_pairing_v1.proto",
+        "mls-app/v1.proto",
+        "media/v1.proto",
+    ]
+    .iter()
+    .map(|p| schemas_root.join(p))
+    .collect();
 
     // Re-run when any of our protos changes.
     println!("cargo:rerun-if-changed={}", schemas_root.display());

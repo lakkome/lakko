@@ -1,0 +1,55 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+syntax = "proto3";
+
+package lakko.wire.device_pairing.v1;
+
+// Device-pairing QR payload (Phase 2a3b1).
+//
+// Encodes everything a paired-up device's "Scan" screen needs to
+// drive `DeviceGroup::add_device_from_wire` for a fresh device's
+// KeyPackage:
+//
+//   * `account_id`  — the 16-byte UUIDv7 the existing device
+//     authenticates against. The scanner verifies it matches the
+//     local account before continuing, so a fresh device's QR
+//     scanned from the wrong account's session is rejected
+//     before any MLS commit lands.
+//   * `key_package` — TLS-encoded `KeyPackage` produced by
+//     `Identity::create_key_package` on the fresh device. The
+//     scanner deserialises + validates it as part of the
+//     `add_device_from_wire` call; OpenMLS rejects invalid
+//     signatures / ciphersuites here.
+//
+// The QR contents are **not** authenticated end-to-end on the
+// wire — anyone who can show this QR to the scanner is trusted
+// by the user's physical action (the user pointed the camera at
+// it). Cross-device safety-number confirmation is a follow-up
+// (mirror of Signal's verify-existing-contact flow); for 2a3b
+// the trust anchor is the user pressing a button on both
+// devices.
+//
+// Generated Rust code lives in
+// `crates/lakko-proto/src/generated/wire_device_pairing/`.
+message PairingQr {
+    // Logical version of the QR payload format. Bumped on
+    // breaking changes; older scanners must reject payloads
+    // with version > supported.
+    uint32 version = 1;
+
+    // The account the fresh device is asking to join. Scanner
+    // compares against its local `IdentitySecrets.accountId`
+    // before driving `DeviceGroup::add_device_from_wire`.
+    bytes account_id = 2;
+
+    // TLS-encoded `KeyPackage` for the fresh device's identity.
+    // The same bytes `Identity::create_key_package(...)`
+    // produces on the fresh side.
+    bytes key_package = 3;
+
+    // Reserved for future use — never re-purpose. Slot for the
+    // optional fingerprint-attestation extension landing in
+    // 2a3b's safety-number follow-up.
+    reserved 4 to 15;
+}

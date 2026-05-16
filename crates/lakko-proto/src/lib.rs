@@ -19,6 +19,16 @@ pub mod wire {
     pub mod v1 {
         include!(concat!(env!("OUT_DIR"), "/lakko.wire.v1.rs"));
     }
+
+    /// Device-pairing QR payload
+    /// (`schemas/wire/device_pairing_v1.proto`) — Phase 2a3b1.
+    pub mod device_pairing {
+        /// Version 1 of the device-pairing QR payload.
+        #[allow(clippy::pedantic, missing_docs)]
+        pub mod v1 {
+            include!(concat!(env!("OUT_DIR"), "/lakko.wire.device_pairing.v1.rs"));
+        }
+    }
 }
 
 /// MLS application message payloads (`schemas/mls-app/v1.proto`).
@@ -61,5 +71,25 @@ mod tests {
         assert_eq!(decoded.version, 1);
         assert_eq!(decoded.routing_pseudonym, vec![0xab; 32]);
         assert_eq!(decoded.ciphertext, vec![0xcd; 128]);
+    }
+
+    /// Smoke test for the Phase 2a3b1 device-pairing QR payload.
+    #[test]
+    fn pairing_qr_roundtrip() {
+        use prost::Message as _;
+
+        let original = wire::device_pairing::v1::PairingQr {
+            version: 1,
+            account_id: vec![0x42; 16],
+            key_package: vec![0xfe; 768],
+        };
+
+        let mut buf = Vec::new();
+        original.encode(&mut buf).expect("encode");
+
+        let decoded = wire::device_pairing::v1::PairingQr::decode(&*buf).expect("decode");
+        assert_eq!(decoded.version, 1);
+        assert_eq!(decoded.account_id, vec![0x42; 16]);
+        assert_eq!(decoded.key_package, vec![0xfe; 768]);
     }
 }

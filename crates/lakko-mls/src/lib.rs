@@ -16,11 +16,14 @@
 #![forbid(unsafe_code)]
 
 pub mod ciphersuite;
+pub mod device_group;
 pub mod error;
 pub mod group;
 pub mod identity;
 pub mod key_package;
+pub mod pairing;
 
+pub use device_group::{AccountId, DeviceGroup};
 pub use error::{Error, Result};
 pub use group::{Group, Incoming, MemberAddition, MemberRecord};
 pub use identity::Identity;

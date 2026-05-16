@@ -29,6 +29,11 @@ zeroize = "1"
 # scoped — the Identity-level X25519 is what `lakko-contacts`
 # sealed envelopes target.
 lakko-crypto.workspace = true
+# Phase 2a3b1 — device-pairing QR payload schema lives in
+# lakko-proto. The pairing module wraps encode/decode +
+# account_id binding around the generated `PairingQr` type.
+lakko-proto.workspace = true
+prost = "0.13"
 
 [dev-dependencies]
 proptest = "1"
