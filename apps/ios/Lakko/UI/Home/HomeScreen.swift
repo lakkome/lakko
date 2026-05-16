@@ -26,6 +26,7 @@ public struct HomeScreen: View {
     public let account: SessionAccount
     public var onOpenContacts: () -> Void
     public var onOpenChats: () -> Void
+    public var onOpenPasskeys: () -> Void
     public var onLogout: () -> Void
     public var onForgetDevice: () -> Void
 
@@ -33,12 +34,14 @@ public struct HomeScreen: View {
         account: SessionAccount,
         onOpenContacts: @escaping () -> Void = {},
         onOpenChats: @escaping () -> Void = {},
+        onOpenPasskeys: @escaping () -> Void = {},
         onLogout: @escaping () -> Void,
         onForgetDevice: @escaping () -> Void
     ) {
         self.account = account
         self.onOpenContacts = onOpenContacts
         self.onOpenChats = onOpenChats
+        self.onOpenPasskeys = onOpenPasskeys
         self.onLogout = onLogout
         self.onForgetDevice = onForgetDevice
     }
@@ -70,6 +73,18 @@ public struct HomeScreen: View {
 
             Button(action: onOpenChats) {
                 Text("Open chats")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.large)
+
+            // 2a2d — passkey management lives behind its own
+            // surface so the Home screen doesn't bulk out with
+            // a long credential list. Tapping pushes
+            // `PasskeysView` via the SessionRoot destination
+            // toggle.
+            Button(action: onOpenPasskeys) {
+                Text("Manage passkeys")
                     .frame(maxWidth: .infinity)
             }
             .buttonStyle(.bordered)
