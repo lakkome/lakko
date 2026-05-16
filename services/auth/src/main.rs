@@ -29,6 +29,13 @@
 //! - `LAKKO_SESSION_TOKEN_TTL_DAYS` — issued-token validity window
 //!   in days (default 30). Matches the rough OPAQUE export-key
 //!   lifetime documented in the plan.
+//! - `LAKKO_WEBAUTHN_RP_ID`     — WebAuthn relying-party identifier
+//!   (eTLD+1, e.g. `lakko.me`). Optional. Unset = passkey routes
+//!   return 503.
+//! - `LAKKO_WEBAUTHN_RP_NAME`   — human label shown by the
+//!   authenticator UI. Default: `Lakko`.
+//! - `LAKKO_WEBAUTHN_RP_ORIGIN` — full origin including scheme,
+//!   e.g. `https://lakko.me`. Required when `RP_ID` is set.
 //!
 //! Endpoints:
 //!
@@ -44,11 +51,16 @@
 //! - `POST /recovery/login/finish`   — OPAQUE login step 2, BIP39 (Phase 1.1d)
 //! - `POST /password/reset/start`    — replace password via mnemonic, step 1 (Phase 1.16c3c3a)
 //! - `POST /password/reset/finish`   — replace password via mnemonic, step 2 (Phase 1.16c3c3a)
+//! - `POST /webauthn/register/start` — passkey enrolment, step 1 (Phase 2a2a, bearer-auth)
+//! - `POST /webauthn/register/finish`— passkey enrolment, step 2 (Phase 2a2a, bearer-auth)
+//! - `GET  /webauthn/credentials`    — list this account's passkeys (Phase 2a2a, bearer-auth)
+//! - `DELETE /webauthn/credentials/{id}` — remove a passkey (Phase 2a2a, bearer-auth)
 
 #![forbid(unsafe_code)]
 
 mod opaque;
 mod pow;
+mod webauthn;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -58,7 +70,7 @@ use anyhow::{Context, Result};
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::Router;
 use opaque_ke::ServerSetup;
 use serde_json::json;
@@ -66,6 +78,7 @@ use sqlx::mysql::MySqlPoolOptions;
 use sqlx::MySqlPool;
 use tokio::signal;
 use tower_http::trace::TraceLayer;
+use webauthn_rs::Webauthn;
 
 use crate::opaque::LakkoCipherSuite;
 use lakko_auth_token::TokenSecret;
@@ -101,6 +114,11 @@ pub(crate) struct AppState {
     /// Issued-token TTL in milliseconds. Convertible from
     /// `LAKKO_SESSION_TOKEN_TTL_DAYS` × 86_400_000.
     pub(crate) session_token_ttl_ms: i64,
+    /// Phase 2a2 — WebAuthn relying-party config. `None` when the
+    /// service is started without `LAKKO_WEBAUTHN_RP_ID`; the four
+    /// `/webauthn/*` routes then return 503 instead of registering
+    /// passkeys with an undefined RP identity.
+    pub(crate) webauthn: Option<Arc<Webauthn>>,
 }
 
 #[tokio::main]
@@ -164,18 +182,31 @@ async fn main() -> Result<()> {
         .unwrap_or(i64::MAX / 86_400_000)
         .saturating_mul(86_400_000);
 
+    // Phase 2a2 — optional WebAuthn config. Unset env vars leave the
+    // four `/webauthn/*` routes returning 503; the rest of the
+    // service (OPAQUE password / recovery flows) is unaffected.
+    let webauthn_instance =
+        webauthn::load_webauthn().context("load WebAuthn relying-party config")?;
+    if webauthn_instance.is_some() {
+        tracing::info!("webauthn enabled");
+    } else {
+        tracing::info!("webauthn disabled (LAKKO_WEBAUTHN_RP_ID not set)");
+    }
+
     let state = AppState {
         db: pool.clone(),
         opaque_setup: Arc::new(opaque_setup),
         session_token_secret: Arc::new(session_token_secret),
         session_token_ttl_ms,
+        webauthn: webauthn_instance,
     };
 
     // Background tasks: periodically delete expired rows from the
-    // `opaque_login_states` and `pow_challenges` tables. Aborted when
-    // the service stops.
+    // `opaque_login_states`, `pow_challenges`, and `webauthn_states`
+    // tables. Aborted when the service stops.
     let _login_pruner = opaque::spawn_login_state_pruner(pool.clone());
     let _pow_pruner = pow::spawn_pruner(pool.clone());
+    let _webauthn_pruner = webauthn::spawn_state_pruner(pool.clone());
 
     let app = build_app(state);
 
@@ -197,6 +228,24 @@ async fn main() -> Result<()> {
 /// Build the public router. Extracted so tests can drive it directly without
 /// binding a TCP listener.
 fn build_app(state: AppState) -> Router {
+    // Phase 2a2 — the four `/webauthn/*` routes are gated by the
+    // session-token middleware so only an already-authenticated
+    // caller can register / list / delete passkeys. The /auth/*
+    // (login) routes that land in 2a2b are anonymous and live in
+    // the public router.
+    let webauthn_routes = Router::new()
+        .route("/webauthn/register/start", post(webauthn::register_start))
+        .route("/webauthn/register/finish", post(webauthn::register_finish))
+        .route("/webauthn/credentials", get(webauthn::list_credentials))
+        .route(
+            "/webauthn/credentials/{credential_id_b64}",
+            delete(webauthn::delete_credential),
+        )
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            webauthn::require_session,
+        ));
+
     Router::new()
         .route("/health", get(health))
         .route("/ready", get(ready))
@@ -216,6 +265,7 @@ fn build_app(state: AppState) -> Router {
             "/password/reset/finish",
             post(opaque::password_reset_finish),
         )
+        .merge(webauthn_routes)
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }

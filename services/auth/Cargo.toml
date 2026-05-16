@@ -65,6 +65,18 @@ sha2 = "0.10"
 # `LAKKO_SESSION_TOKEN_SECRET` env var.
 lakko-auth-token.workspace = true
 
+# WebAuthn / passkey support — Phase 2a2. `webauthn-rs` is the
+# de-facto Rust implementation: battle-tested, maintained, and
+# absorbs the long tail of CBOR-attestation + COSE-key parsing we
+# have no business writing ourselves. The `danger-allow-state-
+# serialisation` feature is required so we can park
+# `PasskeyRegistration` / `PasskeyAuthentication` in the
+# `webauthn_states` table between the two-step request pair —
+# webauthn-rs's defaults assume in-memory state which doesn't
+# survive across axum requests.
+webauthn-rs = { version = "0.5", features = ["danger-allow-state-serialisation"] }
+url = "2"
+
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
