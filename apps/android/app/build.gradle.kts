@@ -199,6 +199,14 @@ dependencies {
     // pseudonym (mirror of iOS Keychain posture).
     implementation(libs.androidx.security.crypto)
 
+    // 2a2e — Jetpack Credential Manager for WebAuthn passkey
+    // enrolment + assertion. `credentials` is the unified
+    // public API; `credentials-play-services-auth` bridges to
+    // Google Play Services on devices that ship it (everywhere
+    // outside CN/RU appstore-only builds).
+    implementation(libs.androidx.credentials)
+    implementation(libs.androidx.credentials.play.services.auth)
+
     // 1.15d2 — JVM-side unit tests. `testDebugUnitTest` runs
     // these on the host JDK without any emulator; perfect for
     // the AuthClient flow tests that drive the high-level

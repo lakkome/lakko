@@ -346,6 +346,7 @@ private fun SessionRoot(
             account = account,
             onOpenContacts = { destination = SessionDestination.Contacts },
             onOpenChats = { destination = SessionDestination.Chats },
+            onOpenPasskeys = { destination = SessionDestination.Passkeys },
             onLogout = {
                 contactsRepository.clear()
                 chatRepository.clear()
@@ -407,6 +408,18 @@ private fun SessionRoot(
             )
         }
 
+        SessionDestination.Passkeys -> {
+            val passkeysVm: me.lakko.app.webauthn.PasskeysViewModel = viewModel(
+                factory = singletonViewModelFactory {
+                    me.lakko.app.webauthn.PasskeysViewModel(repo = authRepository)
+                },
+            )
+            me.lakko.app.webauthn.PasskeysScreen(
+                viewModel = passkeysVm,
+                onBack = { destination = SessionDestination.Home },
+            )
+        }
+
         is SessionDestination.InviteLanding -> {
             val inviteSlug = current.slug
             // Key the VM by slug so re-tapping a different
@@ -443,6 +456,8 @@ private sealed interface SessionDestination {
     data object Chats : SessionDestination
     data class Chat(val groupIdHex: String) : SessionDestination
     data class InviteLanding(val slug: String) : SessionDestination
+    /** 2a2e — passkey management surface. */
+    data object Passkeys : SessionDestination
 }
 
 /**

@@ -37,6 +37,7 @@ public fun HomeScreen(
     account: SessionAccount,
     onOpenContacts: () -> Unit,
     onOpenChats: () -> Unit,
+    onOpenPasskeys: () -> Unit,
     onLogout: () -> Unit,
     onForgetDevice: () -> Unit,
     modifier: Modifier = Modifier,
@@ -80,6 +81,16 @@ public fun HomeScreen(
             modifier = Modifier.fillMaxWidth(),
         ) {
             Text("Open chats")
+        }
+        Spacer(Modifier.height(8.dp))
+        // 2a2e — passkey management lives behind its own
+        // surface. Tapping pushes `PasskeysScreen` via the
+        // SessionRoot destination toggle.
+        OutlinedButton(
+            onClick = onOpenPasskeys,
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Text("Manage passkeys")
         }
         Spacer(Modifier.height(16.dp))
         Text(
