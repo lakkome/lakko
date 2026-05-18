@@ -43,13 +43,35 @@ message PairingQr {
     // before driving `DeviceGroup::add_device_from_wire`.
     bytes account_id = 2;
 
-    // TLS-encoded `KeyPackage` for the fresh device's identity.
-    // The same bytes `Identity::create_key_package(...)`
-    // produces on the fresh side.
+    // TLS-encoded `KeyPackage` for the fresh device's
+    // DeviceIdentity (ADR-0007). The same bytes
+    // `Identity::create_key_package(...)` produces on the
+    // fresh side, built over the per-device random
+    // DeviceIdentity (not the deterministic AccountIdentity)
+    // so the resulting MLS leaf has a unique signature key
+    // per RFC 9420 §5.3.
     bytes key_package = 3;
+
+    // 32-byte random rendezvous pseudonym the fresh device
+    // chose for this pairing session. The DS mailbox at this
+    // pseudonym is the one-shot delivery channel for the
+    // Welcome message. Sequence: the fresh device generates a
+    // random pseudonym, starts polling
+    // GET /ds/mailbox/{pseudonym}/messages, encodes
+    // (account_id, key_package, pseudonym) into this QR; the
+    // scanner device decodes the QR, runs
+    // DeviceGroup::add_device_from_wire(key_package) to
+    // produce a Welcome, PUTs the Welcome at
+    // POST /ds/mailbox/{pseudonym}/messages; the fresh
+    // device's poll picks the Welcome up and runs
+    // DeviceGroup::join_from_welcome. The rendezvous pseudonym
+    // is then forgotten. 32 bytes mirrors the per-relationship
+    // pseudonym width used everywhere else (routing_pseudonym
+    // in wire/v1.proto, contact pseudonyms in lakko-contacts).
+    bytes rendezvous_pseudonym = 4;
 
     // Reserved for future use — never re-purpose. Slot for the
     // optional fingerprint-attestation extension landing in
     // 2a3b's safety-number follow-up.
-    reserved 4 to 15;
+    reserved 5 to 15;
 }

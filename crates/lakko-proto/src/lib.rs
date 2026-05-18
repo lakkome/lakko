@@ -94,6 +94,7 @@ mod tests {
             version: 1,
             account_id: vec![0x42; 16],
             key_package: vec![0xfe; 768],
+            rendezvous_pseudonym: vec![0xab; 32],
         };
 
         let mut buf = Vec::new();
@@ -103,6 +104,7 @@ mod tests {
         assert_eq!(decoded.version, 1);
         assert_eq!(decoded.account_id, vec![0x42; 16]);
         assert_eq!(decoded.key_package, vec![0xfe; 768]);
+        assert_eq!(decoded.rendezvous_pseudonym, vec![0xab; 32]);
     }
 
     /// Phase 2a3e smoke tests — DeviceGroup cross-device
