@@ -13,6 +13,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import me.lakko.app.push.PushSubscriber
+import me.lakko.app.webauthn.PasskeyLoginResult
+import me.lakko.app.webauthn.WebauthnClient
 import uniffi.lakko_ffi_uniffi.RecoveryMnemonic
 
 /**
@@ -206,6 +208,21 @@ public class AuthRepository(
                 } finally {
                     deviceRootKey.fill(0)
                 }
+                // Phase 2a2c2 — cache the OPAQUE export key under
+                // EncryptedSharedPreferences so a future sign-
+                // in-with-passkey on the SAME device can
+                // reconstruct the full IdentitySecrets without
+                // going through the password round-trip. Best-
+                // effort.
+                try {
+                    ExportKeyStore.putExportKey(
+                        applicationContext,
+                        accountIdB64,
+                        result.exportKey,
+                    )
+                } catch (cause: Throwable) {
+                    Log.w("lakko-auth", "export-key persist (signup) failed", cause)
+                }
                 // Stash the export key for ContactsClient / future
                 // ChatClient + the like. The bytes survive until
                 // logout / forgetDevice clears the flow; signup is
@@ -334,6 +351,17 @@ public class AuthRepository(
                 } finally {
                     deviceRootKey.fill(0)
                 }
+                // Phase 2a2c2 — refresh the cached export key
+                // under EncryptedSharedPreferences. Best-effort.
+                try {
+                    ExportKeyStore.putExportKey(
+                        applicationContext,
+                        cached.accountIdB64,
+                        result.exportKey,
+                    )
+                } catch (cause: Throwable) {
+                    Log.w("lakko-auth", "export-key persist (login) failed", cause)
+                }
                 sessionStore.save(cached)  // upsert — schema-versioned marker
                 // Stash the export key + session token for
                 // ContactsClient / DiscoveryClient.
@@ -446,6 +474,20 @@ public class AuthRepository(
                     } finally {
                         deviceRootKey.fill(0)
                     }
+                    // Phase 2a2c2 — refresh the cached export key
+                    // under the freshly-rotated device key. Any
+                    // prior cached value was bound to the OLD
+                    // password; the upsert here overwrites it
+                    // cleanly. Best-effort.
+                    try {
+                        ExportKeyStore.putExportKey(
+                            applicationContext,
+                            cached.accountIdB64,
+                            result.exportKey,
+                        )
+                    } catch (cause: Throwable) {
+                        Log.w("lakko-auth", "export-key persist (recover) failed", cause)
+                    }
                     sessionStore.save(cached) // idempotent upsert
                     // Phase 2a1d / 2a3d7 — restore-then-bootstrap
                     // on recover.
@@ -556,6 +598,138 @@ public class AuthRepository(
     }
 
     /**
+     * Phase 2a2c2-android — sign in with a WebAuthn passkey on
+     * a device that has already been seen by this account at
+     * least once (signup / login / recover ran here in the past
+     * + populated the export-key cache).
+     *
+     * Drives the Credential Manager discoverable-credential
+     * flow (no username / password typed in the UI). On a
+     * successful assertion, resolves the cached export key from
+     * [ExportKeyStore] and reconstructs the full
+     * [IdentitySecrets] pipeline — same shape as
+     * [login(username:password)] minus the OPAQUE round-trip.
+     *
+     * Fresh-device UX is **unsupported** by design: without a
+     * locally-cached export key the passkey gives us only a
+     * session token, but no path to derive Identity / device
+     * key / MLS bootstrap. The recovery phrase remains the only
+     * fresh-device entry route. The Login screen gates the
+     * "Sign in with passkey" button on the cached marker so
+     * this error path is rare in practice.
+     *
+     * @throws AuthClientArgError when there is no cached
+     *         account, the passkey belongs to a different
+     *         account than the cached one, or the export-key
+     *         cache is empty / malformed.
+     */
+    public suspend fun loginWithPasskey() {
+        val cached = sessionStore.load()
+            ?: throw AuthClientArgError(
+                "No cached account on this device. Sign in with " +
+                    "password or recover with your phrase first.",
+            )
+
+        val webauthnClient = WebauthnClient()
+        val assertion: PasskeyLoginResult? = try {
+            webauthnClient.loginWithPasskey(applicationContext)
+        } finally {
+            webauthnClient.close()
+        }
+        // Credential Manager returned null only on user cancel
+        // — surface as an arg error so the form layer can show
+        // a generic "cancelled" message.
+        assertion ?: throw AuthClientArgError(
+            "Cancelled. No passkey sign-in happened.",
+        )
+
+        // Compare via raw bytes — the cached `accountIdB64`
+        // rides as Foundation/JVM-standard padded base64, while
+        // the server's auth_finish response is URL-safe base64
+        // without padding (URL_SAFE_NO_PAD on the wire). A
+        // string comparison would always mismatch.
+        val cachedAccountBytes: ByteArray = try {
+            android.util.Base64.decode(
+                cached.accountIdB64,
+                android.util.Base64.NO_WRAP,
+            )
+        } catch (_: IllegalArgumentException) {
+            throw AuthClientArgError("Malformed cached account_id.")
+        }
+        val assertionAccountBytes: ByteArray = try {
+            android.util.Base64.decode(
+                assertion.accountIdB64,
+                android.util.Base64.URL_SAFE or
+                    android.util.Base64.NO_WRAP or
+                    android.util.Base64.NO_PADDING,
+            )
+        } catch (_: IllegalArgumentException) {
+            throw AuthClientArgError("Malformed account_id in passkey assertion.")
+        }
+        if (!cachedAccountBytes.contentEquals(assertionAccountBytes)) {
+            throw AuthClientArgError(
+                "This passkey belongs to a different account than the " +
+                    "one cached on this device. Sign in with password " +
+                    "first to enable passkey on this device.",
+            )
+        }
+
+        val exportKey = ExportKeyStore.getExportKey(
+            applicationContext,
+            cached.accountIdB64,
+        ) ?: throw AuthClientArgError(
+            "No cached credentials for passkey sign-in on this device. " +
+                "Sign in with password or recover with your phrase first.",
+        )
+
+        // Re-derive the device root key from the cached export
+        // key. OPAQUE export key is deterministic — the upsert
+        // here is a no-op for an unchanged password but keeps
+        // the row's last-write timestamp moving.
+        val deviceRootKey = deriveDeviceRootKey(exportKey, cached.accountIdB64)
+        try {
+            deviceKeyStore.putDeviceKey(
+                context = applicationContext,
+                accountIdB64 = cached.accountIdB64,
+                rootKey = deviceRootKey,
+            )
+        } finally {
+            deviceRootKey.fill(0)
+        }
+        // Re-upsert the cache too so any future eviction policy
+        // sees the row as recently touched.
+        try {
+            ExportKeyStore.putExportKey(
+                applicationContext,
+                cached.accountIdB64,
+                exportKey,
+            )
+        } catch (cause: Throwable) {
+            Log.w("lakko-auth", "export-key persist (passkey login) failed", cause)
+        }
+        sessionStore.save(cached)
+
+        mutableIdentitySecrets.value = IdentitySecrets(
+            accountId = cachedAccountBytes,
+            exportKey = exportKey.copyOf(),
+            sessionToken = assertion.sessionToken,
+            sessionExpiresAtMs = assertion.sessionExpiresAtMs,
+        )
+        mutableState.value = AuthState.Session(
+            account = SessionAccount(
+                accountIdB64 = cached.accountIdB64,
+                username = cached.username,
+            ),
+        )
+        // Best-effort wipe of the local export-key copy in the
+        // suspend frame. The `IdentitySecrets.exportKey` slot
+        // above carries an independent `copyOf()` for the
+        // ChatRepository / ContactsClient lifetime.
+        exportKey.fill(0)
+        subscribePushBestEffort("passkey-login")
+    }
+
+    /**
      * Drop the in-memory session. Keeps [SessionStore] and the
      * Keystore-wrapped device key intact — re-login on the same
      * device stays cheap.
@@ -603,6 +777,17 @@ public class AuthRepository(
             // explicitly. Best-effort.
             try {
                 me.lakko.app.backup.PhraseStore.deletePhrase(
+                    applicationContext,
+                    cached.accountIdB64,
+                )
+            } catch (_: Throwable) {
+                // best-effort
+            }
+            // Phase 2a2c2 — drop the cached export key too. Same
+            // clean-wipe rationale as the phrase + device-key
+            // rows above.
+            try {
+                ExportKeyStore.deleteExportKey(
                     applicationContext,
                     cached.accountIdB64,
                 )

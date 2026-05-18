@@ -164,6 +164,39 @@ public class WebauthnClient(
         return response.body()
     }
 
+    /**
+     * Phase 2a2c2-android — drive the full passkey-login round
+     * in one call. Mirrors `WebauthnClient.loginWithPasskey` on
+     * web + iOS. Discoverable-credential flow is the default
+     * (no `accountIdB64` passed up); the Credential Manager
+     * picks any passkey it has for the lakko relying-party id.
+     *
+     * Returns `null` when the user cancelled the sheet. Throws
+     * on any other failure mode ([WebauthnHttpError], etc.).
+     */
+    public suspend fun loginWithPasskey(
+        context: android.content.Context,
+        registration: WebauthnRegistration = WebauthnRegistration(),
+    ): PasskeyLoginResult? {
+        val start = startAuthentication(accountIdB64 = null)
+        val publicKey = start.options.publicKeyField()
+        return when (val outcome = registration.authenticate(context, publicKey)) {
+            is WebauthnRegistration.Outcome.Success -> {
+                val finish = finishAuthentication(
+                    stateId = start.stateId,
+                    credential = outcome.value,
+                )
+                PasskeyLoginResult(
+                    accountIdB64 = finish.accountIdB64,
+                    sessionToken = finish.sessionToken,
+                    sessionExpiresAtMs = finish.sessionExpiresAtMs,
+                )
+            }
+            WebauthnRegistration.Outcome.Cancelled -> null
+            is WebauthnRegistration.Outcome.Failed -> throw outcome.cause
+        }
+    }
+
     // -----------------------------------------------------------------
     // Credential management
     // -----------------------------------------------------------------
@@ -265,6 +298,20 @@ public data class AuthFinishResponse(
     @SerialName("account_id_b64") public val accountIdB64: String,
     @SerialName("session_token") public val sessionToken: String,
     @SerialName("session_expires_at_ms") public val sessionExpiresAtMs: Long,
+)
+
+/**
+ * Phase 2a2c2-android — high-level result of
+ * [WebauthnClient.loginWithPasskey]. Mirror of the OPAQUE
+ * login result shape, minus the export key (which on Android
+ * lives in [me.lakko.app.auth.ExportKeyStore] and is looked
+ * up by the [me.lakko.app.auth.AuthRepository] caller after
+ * the assertion completes).
+ */
+public data class PasskeyLoginResult(
+    public val accountIdB64: String,
+    public val sessionToken: String,
+    public val sessionExpiresAtMs: Long,
 )
 
 @Serializable

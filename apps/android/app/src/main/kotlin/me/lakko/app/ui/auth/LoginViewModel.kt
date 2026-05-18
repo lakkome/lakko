@@ -101,6 +101,48 @@ public class LoginViewModel(
         }
     }
 
+    /**
+     * Phase 2a2c2-android — drive a passkey-only login. Mirror
+     * of [onSubmit] minus the password path: tap → Credential
+     * Manager sheet → server /webauthn/auth round-trip → state
+     * flip. Cache miss / cross-account failures surface as
+     * inline form messages.
+     */
+    public fun onPasskeyLogin() {
+        val snapshot = mutableState.value
+        if (snapshot.busy) return
+
+        mutableState.update { it.copy(busy = true, error = null) }
+        viewModelScope.launch {
+            try {
+                repo.loginWithPasskey()
+                mutableState.update { it.copy(busy = false, error = null) }
+            } catch (err: AuthClientArgError) {
+                mutableState.update {
+                    it.copy(busy = false, error = err.message ?: "Passkey sign-in failed.")
+                }
+            } catch (err: AuthHttpError) {
+                mutableState.update {
+                    it.copy(busy = false, error = userFacingHttpError(err))
+                }
+            } catch (_: AuthNetworkError) {
+                mutableState.update {
+                    it.copy(
+                        busy = false,
+                        error = "Network error. Check your connection and try again.",
+                    )
+                }
+            } catch (err: Throwable) {
+                mutableState.update {
+                    it.copy(
+                        busy = false,
+                        error = err.message ?: "Passkey sign-in failed.",
+                    )
+                }
+            }
+        }
+    }
+
     /** Map server-side HTTP errors to user-facing copy. 401 stays
      *  generic on purpose — wrong password and unknown account
      *  are intentionally indistinguishable (OPAQUE's no-probing

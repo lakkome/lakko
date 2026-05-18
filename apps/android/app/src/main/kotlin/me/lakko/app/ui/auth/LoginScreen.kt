@@ -19,6 +19,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -125,6 +126,29 @@ public fun LoginScreen(
             } else {
                 Text("Log in")
             }
+        }
+
+        // Phase 2a2c2-android — passkey shortcut. Surfaced only
+        // on a device this account has signed into before
+        // (cached username pre-fill is the marker). Cache-miss
+        // paths surface as inline error messages from
+        // `loginWithPasskey`.
+        if (state.username.isNotEmpty()) {
+            Spacer(Modifier.height(8.dp))
+            OutlinedButton(
+                onClick = viewModel::onPasskeyLogin,
+                enabled = !state.busy,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text("Sign in with passkey")
+            }
+            Spacer(Modifier.height(4.dp))
+            Text(
+                text = "Uses the passkey you registered earlier on this device.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.fillMaxWidth(),
+            )
         }
 
         Spacer(Modifier.height(16.dp))
