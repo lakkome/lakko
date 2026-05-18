@@ -593,6 +593,71 @@ impl DeviceGroup {
             .map_err(|_| JsError::new("internal lock poisoned"))?;
         Ok(g.group_id())
     }
+
+    /// Snapshot of every device leaf currently in the
+    /// DeviceGroup (Phase 2a3c). One [`GroupMember`] per row —
+    /// the JS layer renders the list, marks the row whose
+    /// `leafIndex` matches [`Self::ownLeafIndex`] as
+    /// "(this device)", and offers a Remove affordance on every
+    /// other row.
+    ///
+    /// Same wasm-bindgen shape as the conversation
+    /// [`Group::members`] — flat `JsValue` array, ordering
+    /// matches `lakko_mls::DeviceGroup::devices` (left-to-right
+    /// over the leaf tree, stable inside a single epoch).
+    #[wasm_bindgen]
+    pub fn devices(&self) -> Result<Vec<JsValue>, JsError> {
+        let g = self
+            .inner
+            .lock()
+            .map_err(|_| JsError::new("internal lock poisoned"))?;
+        Ok(g.devices()
+            .into_iter()
+            .map(|m| {
+                JsValue::from(GroupMember {
+                    leaf_index_val: m.leaf_index,
+                    signature_public_key_val: m.signature_public_key,
+                })
+            })
+            .collect())
+    }
+
+    /// Leaf index of THIS device inside the DeviceGroup
+    /// (Phase 2a3c). UI uses this to flag the "(this device)"
+    /// row and disable its Remove button.
+    #[wasm_bindgen(js_name = ownLeafIndex)]
+    pub fn own_leaf_index(&self) -> Result<u32, JsError> {
+        let g = self
+            .inner
+            .lock()
+            .map_err(|_| JsError::new("internal lock poisoned"))?;
+        Ok(g.own_leaf_index())
+    }
+
+    /// Revoke a device leaf (Phase 2a3c). Returns the encoded
+    /// Commit bytes the caller MUST broadcast to every remaining
+    /// device via the DS group journal so they advance past the
+    /// revoked leaf and ratchet the group secrets out of the
+    /// removed device's reach.
+    ///
+    /// `leafIndex` must come from a [`Self::devices`] snapshot
+    /// at the SAME epoch; concurrent commits can renumber
+    /// leaves, in which case the caller refetches and retries.
+    /// Attempting to remove the local device's own leaf is
+    /// rejected with a wasm-side error.
+    #[wasm_bindgen(js_name = removeDeviceAt)]
+    pub fn remove_device_at(
+        &self,
+        identity: &Identity,
+        leaf_index: u32,
+    ) -> Result<Vec<u8>, JsError> {
+        let mut g = self
+            .inner
+            .lock()
+            .map_err(|_| JsError::new("internal lock poisoned"))?;
+        g.remove_device_at(&identity.inner, leaf_index)
+            .map_err(mls_err)
+    }
 }
 
 /// Compute the deterministic DeviceGroup `group_id` from an

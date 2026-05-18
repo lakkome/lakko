@@ -30,6 +30,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -48,6 +49,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import me.lakko.app.auth.AuthRepository
 import me.lakko.app.auth.AuthState
+import me.lakko.app.devices.DeviceRemoval
 import me.lakko.app.devices.PairingOrchestrator
 import me.lakko.app.devices.WelcomeCourier
 
@@ -128,17 +130,26 @@ public fun DevicesScreen(
                 Tab(
                     selected = tab == 0,
                     onClick = { tab = 0 },
-                    text = { Text("Pair this device") },
+                    text = { Text("Your devices") },
                 )
                 Tab(
                     selected = tab == 1,
                     onClick = { tab = 1 },
+                    text = { Text("Pair this device") },
+                )
+                Tab(
+                    selected = tab == 2,
+                    onClick = { tab = 2 },
                     text = { Text("Add a device") },
                 )
             }
 
             when (tab) {
-                0 -> PairTab(
+                0 -> DevicesListTab(
+                    accountIdBytes = secrets.accountId,
+                    accountIdB64 = account.accountIdB64,
+                )
+                1 -> PairTab(
                     accountIdBytes = secrets.accountId,
                     accountIdB64 = account.accountIdB64,
                 )
@@ -498,3 +509,158 @@ private fun base64UrlDecodeNoPad(text: String): ByteArray? {
         null
     }
 }
+
+// =============================================================================
+// Your devices (list + remove) tab
+// =============================================================================
+
+private sealed interface DevicesListUi {
+    data object Loading : DevicesListUi
+    data class Ready(val devices: List<DeviceRemoval.DeviceListItem>) : DevicesListUi
+    data class Error(val message: String) : DevicesListUi
+}
+
+@Composable
+private fun DevicesListTab(
+    accountIdBytes: ByteArray,
+    accountIdB64: String,
+) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var state: DevicesListUi by remember { mutableStateOf(DevicesListUi.Loading) }
+    var removingLeaf: UInt? by remember { mutableStateOf(null) }
+
+    fun refresh() {
+        state = DevicesListUi.Loading
+        try {
+            val list = DeviceRemoval.listDevices(
+                context = context,
+                accountIdBytes = accountIdBytes,
+                accountIdB64 = accountIdB64,
+            )
+            state = DevicesListUi.Ready(list.devices)
+        } catch (cause: Throwable) {
+            state = DevicesListUi.Error(cause.message ?: "Failed to load devices")
+        }
+    }
+
+    LaunchedEffect(Unit) { refresh() }
+
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Text(
+            "These are the devices currently linked to your account. " +
+                "Removing a device revokes its access via an MLS commit " +
+                "broadcast on the DeviceGroup journal — the revoked " +
+                "device can no longer decrypt any subsequent traffic.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+
+        when (val s = state) {
+            DevicesListUi.Loading -> Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                CircularProgressIndicator()
+                Text("Loading devices…")
+            }
+
+            is DevicesListUi.Ready -> {
+                s.devices.forEach { device ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                "#${device.leafIndex} ${hexPrefix(device.signaturePublicKey, 8)}",
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.Medium,
+                            )
+                            if (device.isSelf) {
+                                Text(
+                                    "this device",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        }
+                        if (device.isSelf) {
+                            Text(
+                                "—",
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        } else {
+                            OutlinedButton(
+                                onClick = {
+                                    val leaf = device.leafIndex
+                                    removingLeaf = leaf
+                                    scope.launch {
+                                        try {
+                                            DeviceRemoval.removeDeviceAt(
+                                                context = context,
+                                                accountIdBytes = accountIdBytes,
+                                                accountIdB64 = accountIdB64,
+                                                leafIndex = leaf,
+                                            )
+                                            removingLeaf = null
+                                            refresh()
+                                        } catch (cause: Throwable) {
+                                            removingLeaf = null
+                                            state = DevicesListUi.Error(
+                                                cause.message ?: "Failed to remove device",
+                                            )
+                                        }
+                                    }
+                                },
+                                enabled = removingLeaf == null,
+                            ) {
+                                Text(
+                                    if (removingLeaf == device.leafIndex) "Removing…" else "Remove",
+                                )
+                            }
+                        }
+                    }
+                }
+                OutlinedButton(
+                    onClick = { refresh() },
+                    enabled = removingLeaf == null,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text("Refresh")
+                }
+            }
+
+            is DevicesListUi.Error -> Column(
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Text(
+                    s.message,
+                    color = MaterialTheme.colorScheme.error,
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                OutlinedButton(onClick = { refresh() }) {
+                    Text("Try again")
+                }
+            }
+        }
+    }
+}
+
+private fun hexPrefix(bytes: ByteArray, n: Int): String {
+    val take = minOf(n, bytes.size)
+    val sb = StringBuilder(take * 2)
+    for (i in 0 until take) {
+        val v = bytes[i].toInt() and 0xFF
+        sb.append(HEX_CHARS[v ushr 4])
+        sb.append(HEX_CHARS[v and 0x0F])
+    }
+    return sb.toString()
+}
+
+private const val HEX_CHARS: String = "0123456789abcdef"

@@ -292,11 +292,93 @@ impl DeviceGroup {
         self.inner.remove_member(identity, leaf)
     }
 
+    /// FFI-friendly wrapper around [`Self::remove_device`].
+    ///
+    /// Takes a raw `u32` leaf index (UniFFI / wasm-bindgen
+    /// don't speak `LeafNodeIndex`) and returns the wire-format
+    /// bytes of the resulting Commit. The local view advances
+    /// atomically inside [`Self::remove_device`] (which calls
+    /// `merge_pending_commit` after building the commit), so
+    /// after this returns the caller's job is simply to
+    /// broadcast `commit_bytes` to every remaining device on
+    /// the DS group journal.
+    ///
+    /// Caller-visible safety:
+    ///
+    ///   * **Don't remove yourself.** `leaf_index ==
+    ///     own_leaf_index()` is rejected up front — every
+    ///     remaining peer would still ratchet past us, but our
+    ///     local Commit `merge_pending_commit` would fail mid-
+    ///     way (the leaf the commit's signer points at is no
+    ///     longer in the tree the merge resolves to). The user
+    ///     should use `forgetDevice` on this device instead.
+    ///   * **Leaf indices renumber on epoch boundaries.** Pass
+    ///     a `leaf_index` taken from a `devices()` snapshot in
+    ///     the SAME epoch; if a concurrent Commit landed since
+    ///     the snapshot, refetch via `devices()` and retry.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::Group`] with a "cannot remove own leaf" body
+    ///   when `leaf_index == own_leaf_index()`.
+    /// - [`Error::Group`] with a "no such device leaf" body when
+    ///   the supplied index doesn't correspond to any current
+    ///   member.
+    /// - [`Error::Group`] for OpenMLS-side failures
+    ///   (signature, storage, …).
+    /// - [`Error::Codec`] / [`Error::Message`] surfacing the
+    ///   inner wire-encode failure (practically unreachable —
+    ///   OpenMLS produced the message in the previous step).
+    pub fn remove_device_at(
+        &mut self,
+        identity: &Identity,
+        leaf_index: u32,
+    ) -> Result<Vec<u8>> {
+        let own = self.inner.own_leaf_index().u32();
+        if leaf_index == own {
+            return Err(Error::Group(
+                "DeviceGroup remove_device_at: cannot remove own leaf — use forgetDevice instead"
+                    .into(),
+            ));
+        }
+        // Bail before we hand OpenMLS a leaf it doesn't know
+        // about, so the caller gets a clean "no such device"
+        // signal instead of an opaque `remove_members` error.
+        if !self
+            .inner
+            .members()
+            .iter()
+            .any(|m| m.leaf_index == leaf_index)
+        {
+            return Err(Error::Group(format!(
+                "DeviceGroup remove_device_at: no such device leaf {leaf_index}"
+            )));
+        }
+        let commit_out = self
+            .inner
+            .remove_member(identity, LeafNodeIndex::new(leaf_index))?;
+        crate::group::encode_message(&commit_out)
+    }
+
     /// List every device leaf currently in the group. Useful
     /// for rendering a "Your devices" management screen.
     #[must_use]
     pub fn devices(&self) -> Vec<MemberRecord> {
         self.inner.members()
+    }
+
+    /// Leaf index of THIS device inside the DeviceGroup.
+    ///
+    /// UI uses this to render the "(this device)" badge next
+    /// to one row of the device list and to disable that row's
+    /// Remove button. Cheap to call — no hash, no copy.
+    ///
+    /// Stable inside an epoch; can renumber after a
+    /// remove/add cycle, so callers MUST NOT cache the value
+    /// across DeviceGroup state changes.
+    #[must_use]
+    pub fn own_leaf_index(&self) -> u32 {
+        self.inner.own_leaf_index().u32()
     }
 
     /// Encrypt a cross-device application payload (read receipt,
@@ -729,6 +811,82 @@ mod tests {
         // group where A is the founder.
         assert_eq!(parsed.sender_leaf, 0);
         assert_eq!(parsed.body, body);
+    }
+
+    #[test]
+    fn remove_device_at_rejects_own_leaf() {
+        let account = fixture_account_id();
+        let id_a = Identity::generate("device-A").unwrap();
+        let mut group_a = DeviceGroup::create_founder(&id_a, &account).unwrap();
+        let own = group_a.own_leaf_index();
+        match group_a.remove_device_at(&id_a, own) {
+            Ok(_) => panic!("remove_device_at must reject own leaf"),
+            Err(Error::Group(msg)) => {
+                assert!(msg.contains("own leaf"), "unexpected body: {msg}");
+            },
+            Err(other) => panic!("expected Group error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn remove_device_at_rejects_unknown_leaf() {
+        let account = fixture_account_id();
+        let id_a = Identity::generate("device-A").unwrap();
+        let mut group_a = DeviceGroup::create_founder(&id_a, &account).unwrap();
+        match group_a.remove_device_at(&id_a, 999_999) {
+            Ok(_) => panic!("remove_device_at must reject an unknown leaf"),
+            Err(Error::Group(msg)) => {
+                assert!(
+                    msg.contains("no such device leaf"),
+                    "unexpected body: {msg}"
+                );
+            },
+            Err(other) => panic!("expected Group error, got {other:?}"),
+        }
+    }
+
+    /// A→B pairing, then A revokes B. The returned commit bytes
+    /// decode cleanly and B's `process_incoming` advances B's
+    /// view past its own removal.
+    #[test]
+    fn remove_device_at_revokes_paired_device() {
+        let account = fixture_account_id();
+        let id_a = Identity::generate("device-A").unwrap();
+        let mut group_a = DeviceGroup::create_founder(&id_a, &account).unwrap();
+        let id_b = Identity::generate("device-B").unwrap();
+        let kp_b = id_b.create_key_package().unwrap();
+        let addition = group_a.add_device(&id_a, kp_b).unwrap();
+        let welcome_bytes = crate::group::encode_message(&addition.welcome).unwrap();
+        let mut group_b =
+            DeviceGroup::join_from_welcome(&welcome_bytes, &id_b, &account).unwrap();
+
+        // Find B's leaf index in A's view (NOT B's own_leaf_index
+        // — both views happen to agree on leaf 1 for B, but the
+        // production flow always queries A-side first).
+        let own_a = group_a.own_leaf_index();
+        let b_leaf_in_a = group_a
+            .devices()
+            .into_iter()
+            .find(|m| m.leaf_index != own_a)
+            .expect("a sees b's leaf")
+            .leaf_index;
+
+        // A removes B.
+        let commit_bytes = group_a.remove_device_at(&id_a, b_leaf_in_a).unwrap();
+
+        // A's view is already advanced (merge_pending_commit
+        // ran inside remove_device_at); only A's own leaf
+        // remains.
+        let after_a = group_a.devices();
+        assert_eq!(after_a.len(), 1);
+        assert_eq!(after_a[0].leaf_index, own_a);
+
+        // B receives the Commit and advances past its own
+        // removal. OpenMLS surfaces a "removed self" outcome
+        // as a normal Commit — the next state query reports
+        // the leaf gone.
+        let incoming = group_b.process_incoming(&id_b, &commit_bytes).unwrap();
+        assert!(matches!(incoming, Incoming::Commit));
     }
 
     #[test]

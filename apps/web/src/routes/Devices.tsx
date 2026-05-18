@@ -28,10 +28,12 @@
  */
 import {
   createSignal,
+  createEffect,
   onCleanup,
   Show,
   Switch,
   Match,
+  For,
   type JSX,
 } from "solid-js";
 import { useAuth } from "../auth/AuthContext";
@@ -41,14 +43,19 @@ import {
   runScanFlow,
   type JoinSession,
 } from "../devices/orchestrator";
+import {
+  listDevices,
+  removeDeviceAt,
+  type DeviceListItem,
+} from "../devices/remove";
 import QRCode from "qrcode";
 import jsQR from "jsqr";
 
-type Tab = "pair" | "scan";
+type Tab = "list" | "pair" | "scan";
 
 export default function Devices(): JSX.Element {
   const auth = useAuth();
-  const [tab, setTab] = createSignal<Tab>("pair");
+  const [tab, setTab] = createSignal<Tab>("list");
 
   const session = (): { accountIdB64: string; accountIdBytes: Uint8Array } | null => {
     const s = auth.state();
@@ -79,6 +86,13 @@ export default function Devices(): JSX.Element {
         <div style={{ display: "flex", gap: "0.5rem", "margin-bottom": "1rem" }}>
           <button
             type="button"
+            class={tab() === "list" ? "primary" : ""}
+            onClick={() => setTab("list")}
+          >
+            Your devices
+          </button>
+          <button
+            type="button"
             class={tab() === "pair" ? "primary" : ""}
             onClick={() => setTab("pair")}
           >
@@ -93,6 +107,12 @@ export default function Devices(): JSX.Element {
           </button>
         </div>
         <Switch>
+          <Match when={tab() === "list"}>
+            <DevicesListView
+              accountIdB64={session()!.accountIdB64}
+              accountIdBytes={session()!.accountIdBytes}
+            />
+          </Match>
           <Match when={tab() === "pair"}>
             <PairView
               accountIdB64={session()!.accountIdB64}
@@ -109,6 +129,189 @@ export default function Devices(): JSX.Element {
       </Show>
     </article>
   );
+}
+
+// ---- Your devices (list + remove) -------------------------------
+
+function DevicesListView(props: {
+  readonly accountIdB64: string;
+  readonly accountIdBytes: Uint8Array;
+}): JSX.Element {
+  type State =
+    | { kind: "loading" }
+    | { kind: "ready"; devices: readonly DeviceListItem[] }
+    | { kind: "removing"; leafIndex: number; devices: readonly DeviceListItem[] }
+    | { kind: "error"; message: string };
+  const [state, setState] = createSignal<State>({ kind: "loading" });
+
+  async function refresh(): Promise<void> {
+    setState({ kind: "loading" });
+    try {
+      const deviceKey = await getDeviceKey(props.accountIdB64);
+      if (deviceKey === null) {
+        setState({
+          kind: "error",
+          message: "No device key on this browser. Sign in again.",
+        });
+        return;
+      }
+      const list = await listDevices({
+        accountIdBytes: props.accountIdBytes,
+        accountIdB64: props.accountIdB64,
+        deviceKey,
+      });
+      setState({ kind: "ready", devices: list.devices });
+    } catch (err) {
+      setState({
+        kind: "error",
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  async function remove(leafIndex: number): Promise<void> {
+    const current = state();
+    const devices =
+      current.kind === "ready" || current.kind === "removing"
+        ? current.devices
+        : [];
+    setState({ kind: "removing", leafIndex, devices });
+    try {
+      const deviceKey = await getDeviceKey(props.accountIdB64);
+      if (deviceKey === null) {
+        setState({
+          kind: "error",
+          message: "No device key on this browser. Sign in again.",
+        });
+        return;
+      }
+      await removeDeviceAt({
+        accountIdBytes: props.accountIdBytes,
+        accountIdB64: props.accountIdB64,
+        deviceKey,
+        leafIndex,
+      });
+      // Re-fetch — the new epoch has its own leaf numbering.
+      await refresh();
+    } catch (err) {
+      setState({
+        kind: "error",
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  createEffect(() => {
+    void refresh();
+  });
+
+  return (
+    <div>
+      <p>
+        These are the devices currently linked to your account.
+        Removing a device revokes its access via an MLS commit
+        broadcast on the DeviceGroup journal — the revoked device
+        can no longer decrypt any subsequent traffic on this
+        account.
+      </p>
+      <Switch>
+        <Match when={state().kind === "loading"}>
+          <p>Loading devices…</p>
+        </Match>
+        <Match when={state().kind === "ready" || state().kind === "removing"}>
+          {(_) => {
+            const s = state();
+            const devices =
+              s.kind === "ready" || s.kind === "removing" ? s.devices : [];
+            const removingLeaf =
+              s.kind === "removing" ? s.leafIndex : null;
+            return (
+              <div>
+                <ul style={{ "list-style": "none", padding: 0, margin: 0 }}>
+                  <For each={devices}>
+                    {(device) => (
+                      <li
+                        style={{
+                          display: "flex",
+                          "align-items": "center",
+                          "justify-content": "space-between",
+                          padding: "0.5rem 0",
+                          "border-bottom":
+                            "1px solid var(--surface-muted)",
+                        }}
+                      >
+                        <div>
+                          <div style={{ "font-family": "monospace" }}>
+                            #{device.leafIndex}{" "}
+                            {hexPrefix(device.signaturePublicKey, 8)}
+                          </div>
+                          <Show when={device.isSelf}>
+                            <small style={{ color: "var(--surface-muted)" }}>
+                              this device
+                            </small>
+                          </Show>
+                        </div>
+                        <Show
+                          when={!device.isSelf}
+                          fallback={
+                            <span style={{ color: "var(--surface-muted)" }}>
+                              —
+                            </span>
+                          }
+                        >
+                          <button
+                            type="button"
+                            disabled={removingLeaf !== null}
+                            onClick={() => void remove(device.leafIndex)}
+                          >
+                            {removingLeaf === device.leafIndex
+                              ? "Removing…"
+                              : "Remove"}
+                          </button>
+                        </Show>
+                      </li>
+                    )}
+                  </For>
+                </ul>
+                <p style={{ "margin-top": "1rem" }}>
+                  <button
+                    type="button"
+                    disabled={removingLeaf !== null}
+                    onClick={() => void refresh()}
+                  >
+                    Refresh
+                  </button>
+                </p>
+              </div>
+            );
+          }}
+        </Match>
+        <Match when={state().kind === "error"}>
+          {(_) => {
+            const s = state();
+            const message = s.kind === "error" ? s.message : "Unknown error.";
+            return (
+              <div>
+                <p class="form-error">{message}</p>
+                <button type="button" onClick={() => void refresh()}>
+                  Try again
+                </button>
+              </div>
+            );
+          }}
+        </Match>
+      </Switch>
+    </div>
+  );
+}
+
+function hexPrefix(bytes: Uint8Array, n: number): string {
+  const slice = bytes.subarray(0, n);
+  let out = "";
+  for (let i = 0; i < slice.length; i += 1) {
+    out += (slice[i] as number).toString(16).padStart(2, "0");
+  }
+  return out;
 }
 
 // ---- Pair (joining device) --------------------------------------

@@ -29,14 +29,16 @@ public struct DevicesScreen: View {
     @ObservedObject public var authRepository: AuthRepository
     public var onBack: () -> Void
 
-    @State private var tab: Tab = .pair
+    @State private var tab: Tab = .list
 
     private enum Tab: String, CaseIterable, Identifiable {
+        case list
         case pair
         case scan
         var id: String { rawValue }
         var label: String {
             switch self {
+            case .list: return "Your devices"
             case .pair: return "Pair this device"
             case .scan: return "Add a device"
             }
@@ -70,6 +72,11 @@ public struct DevicesScreen: View {
                         .pickerStyle(.segmented)
 
                         switch tab {
+                        case .list:
+                            DevicesListView(
+                                accountIdBytes: session.accountIdBytes,
+                                accountIdB64: session.accountIdB64
+                            )
                         case .pair:
                             PairView(
                                 accountIdBytes: session.accountIdBytes,
@@ -331,5 +338,123 @@ private struct ScanView: View {
         let pad = (4 - (b64.count % 4)) % 4
         b64 += String(repeating: "=", count: pad)
         return Data(base64Encoded: b64)
+    }
+}
+
+// MARK: - Your devices (list + remove)
+
+private struct DevicesListView: View {
+
+    let accountIdBytes: Data
+    let accountIdB64: String
+
+    @State private var state: ListState = .loading
+    @State private var removingLeaf: UInt32?
+
+    private enum ListState: Equatable {
+        case loading
+        case ready([DeviceRemoval.DeviceListItem])
+        case error(String)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(
+                "These are the devices currently linked to your " +
+                "account. Removing a device revokes its access " +
+                "via an MLS commit broadcast on the DeviceGroup " +
+                "journal — the revoked device can no longer " +
+                "decrypt any subsequent traffic on this account."
+            )
+            .font(.footnote)
+            .foregroundStyle(.secondary)
+
+            switch state {
+            case .loading:
+                ProgressView("Loading devices…")
+            case .ready(let devices):
+                ForEach(devices) { device in
+                    HStack {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("#\(device.leafIndex) \(hexPrefix(device.signaturePublicKey, n: 8))")
+                                .font(.system(.footnote, design: .monospaced))
+                            if device.isSelf {
+                                Text("this device")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        Spacer()
+                        if device.isSelf {
+                            Text("—")
+                                .foregroundStyle(.secondary)
+                        } else {
+                            Button(role: .destructive) {
+                                Task { await remove(leafIndex: device.leafIndex) }
+                            } label: {
+                                if removingLeaf == device.leafIndex {
+                                    Text("Removing…")
+                                } else {
+                                    Text("Remove")
+                                }
+                            }
+                            .disabled(removingLeaf != nil)
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                        }
+                    }
+                    .padding(.vertical, 4)
+                    Divider()
+                }
+                Button(action: { refresh() }) {
+                    Text("Refresh").frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+                .disabled(removingLeaf != nil)
+
+            case .error(let message):
+                VStack(alignment: .leading, spacing: 8) {
+                    Label(message, systemImage: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.red)
+                        .font(.footnote)
+                    Button("Try again") { refresh() }
+                }
+            }
+        }
+        .onAppear { refresh() }
+    }
+
+    private func refresh() {
+        state = .loading
+        do {
+            let list = try DeviceRemoval.listDevices(
+                accountIdBytes: accountIdBytes,
+                accountIdB64: accountIdB64
+            )
+            state = .ready(list.devices)
+        } catch {
+            state = .error(error.localizedDescription)
+        }
+    }
+
+    @MainActor
+    private func remove(leafIndex: UInt32) async {
+        removingLeaf = leafIndex
+        defer { removingLeaf = nil }
+        do {
+            try await DeviceRemoval.removeDeviceAt(
+                accountIdBytes: accountIdBytes,
+                accountIdB64: accountIdB64,
+                leafIndex: leafIndex
+            )
+            refresh()
+        } catch {
+            state = .error(error.localizedDescription)
+        }
+    }
+
+    private func hexPrefix(_ data: Data, n: Int) -> String {
+        let take = min(n, data.count)
+        return data.prefix(take).map { String(format: "%02x", $0) }.joined()
     }
 }

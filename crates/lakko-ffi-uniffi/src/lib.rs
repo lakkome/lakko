@@ -194,6 +194,24 @@ pub struct AddMember {
     pub welcome: Vec<u8>,
 }
 
+/// FFI projection of [`lakko_mls::group::MemberRecord`]
+/// (Phase 2a3c).
+///
+/// One row of the `devices()` snapshot — a single leaf in the
+/// DeviceGroup tree. UI surfaces this as a list row in the
+/// "Your devices" management screen.
+#[derive(uniffi::Record)]
+pub struct DeviceLeaf {
+    /// OpenMLS leaf position. `u32` mirrors `LeafNodeIndex`'s
+    /// internal repr. Stable inside an epoch; can renumber on
+    /// the next add/remove cycle.
+    pub leaf_index: u32,
+    /// 32-byte Ed25519 verifying key for the device's
+    /// signature credential. UI renders a hex prefix as a
+    /// fingerprint so the user can tell devices apart.
+    pub signature_public_key: Vec<u8>,
+}
+
 /// Result of [`Group::process_incoming`].
 #[derive(uniffi::Enum)]
 pub enum ProcessedMessage {
@@ -579,6 +597,52 @@ impl DeviceGroup {
     pub fn group_id(&self) -> Result<Vec<u8>, FfiError> {
         let g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
         Ok(g.group_id())
+    }
+
+    /// Snapshot of every device leaf currently in the
+    /// DeviceGroup (Phase 2a3c). One row per device — the UI
+    /// renders the list, marks the row whose `leaf_index`
+    /// matches [`Self::own_leaf_index`] as "(this device)",
+    /// and offers a Remove affordance on every other row.
+    pub fn devices(&self) -> Result<Vec<DeviceLeaf>, FfiError> {
+        let g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
+        Ok(g.devices()
+            .into_iter()
+            .map(|m| DeviceLeaf {
+                leaf_index: m.leaf_index,
+                signature_public_key: m.signature_public_key,
+            })
+            .collect())
+    }
+
+    /// Leaf index of THIS device inside the DeviceGroup
+    /// (Phase 2a3c). See [`MlsDeviceGroup::own_leaf_index`] for
+    /// the lifecycle caveats — caller MUST NOT cache across
+    /// state changes.
+    pub fn own_leaf_index(&self) -> Result<u32, FfiError> {
+        let g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
+        Ok(g.own_leaf_index())
+    }
+
+    /// Revoke a device leaf (Phase 2a3c). Returns the encoded
+    /// Commit bytes that the caller MUST broadcast to every
+    /// remaining device via the DS group journal so they
+    /// advance past the revoked leaf and ratchet the group
+    /// secrets out of the removed device's reach.
+    ///
+    /// `leaf_index` must come from a [`Self::devices`] snapshot
+    /// at the SAME epoch; concurrent commits can renumber
+    /// leaves, in which case the caller refetches and retries.
+    /// Attempting to remove the local device's own leaf
+    /// surfaces as `FfiError::Mls("…cannot remove own leaf…")`.
+    pub fn remove_device_at(
+        &self,
+        identity: &Identity,
+        leaf_index: u32,
+    ) -> Result<Vec<u8>, FfiError> {
+        let mut g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
+        let bytes = g.remove_device_at(&identity.inner, leaf_index)?;
+        Ok(bytes)
     }
 }
 
