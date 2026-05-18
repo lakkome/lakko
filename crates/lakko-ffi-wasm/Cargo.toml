@@ -64,6 +64,11 @@ base64 = "0.22"
 lakko-storage.workspace = true
 # Re-exposed for `Hlc`, `Draft`, etc. that take `lakko_crypto::secret::SecretBytes`.
 lakko-crypto.workspace = true
+# Phase 2a3d8 — `HistoryBundle` / `SealedBundle` generated types
+# + prost runtime for the inner-bytes re-encode in
+# `sealHistoryBundle` / `openHistoryBundle`.
+lakko-proto.workspace = true
+prost = "0.13"
 
 # JS bindings.
 wasm-bindgen = "0.2"

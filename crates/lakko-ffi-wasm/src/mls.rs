@@ -658,6 +658,67 @@ impl DeviceGroup {
         g.remove_device_at(&identity.inner, leaf_index)
             .map_err(mls_err)
     }
+
+    /// Derive the per-pairing history-bundle exporter secret
+    /// (Phase 2a3d8). Returns 32 bytes — the scanner side feeds
+    /// it into [`sealHistoryBundle`], the joining side feeds it
+    /// into [`openHistoryBundle`]. Both devices reach the same
+    /// value after they advance to the post-add-device epoch.
+    #[wasm_bindgen(js_name = historyBundleSecret)]
+    pub fn history_bundle_secret(&self, identity: &Identity) -> Result<Vec<u8>, JsError> {
+        let g = self
+            .inner
+            .lock()
+            .map_err(|_| JsError::new("internal lock poisoned"))?;
+        let secret = lakko_mls::history_bundle::exporter_secret(&g, &identity.inner)
+            .map_err(mls_err)?;
+        Ok(secret.to_vec())
+    }
+}
+
+/// AEAD-seal a [`lakko_proto::mls_app::history_bundle::v1::HistoryBundle`]
+/// (Phase 2a3d8).
+///
+/// `secret` MUST be 32 bytes. `bundleBytes` is the prost-encoded
+/// `HistoryBundle` proto bytes the caller built from its local
+/// message store. Returns the wire-format `SealedBundle` proto
+/// bytes ready to PUT to the rendezvous mailbox.
+///
+/// Refuses to seal bundles whose total message count exceeds
+/// `lakko_mls::history_bundle::MAX_BUNDLE_MESSAGES` (1000).
+#[wasm_bindgen(js_name = sealHistoryBundle)]
+pub fn seal_history_bundle(secret: &[u8], bundle_bytes: &[u8]) -> Result<Vec<u8>, JsError> {
+    use prost::Message as _;
+    if secret.len() != 32 {
+        return Err(JsError::new("history-bundle secret must be 32 bytes"));
+    }
+    let mut key = [0u8; 32];
+    key.copy_from_slice(secret);
+
+    let bundle =
+        lakko_proto::mls_app::history_bundle::v1::HistoryBundle::decode(bundle_bytes)
+            .map_err(|e| JsError::new(&format!("HistoryBundle decode: {e}")))?;
+    lakko_mls::history_bundle::seal_bundle(&key, &bundle).map_err(mls_err)
+}
+
+/// Inverse of [`sealHistoryBundle`]. Returns the prost-encoded
+/// `HistoryBundle` bytes; the caller decodes via its own proto
+/// runtime (`protobuf-ts` on TS).
+#[wasm_bindgen(js_name = openHistoryBundle)]
+pub fn open_history_bundle(secret: &[u8], sealed_bytes: &[u8]) -> Result<Vec<u8>, JsError> {
+    use prost::Message as _;
+    if secret.len() != 32 {
+        return Err(JsError::new("history-bundle secret must be 32 bytes"));
+    }
+    let mut key = [0u8; 32];
+    key.copy_from_slice(secret);
+
+    let bundle = lakko_mls::history_bundle::open_bundle(&key, sealed_bytes).map_err(mls_err)?;
+    let mut out = Vec::with_capacity(bundle.encoded_len());
+    bundle
+        .encode(&mut out)
+        .map_err(|e| JsError::new(&format!("HistoryBundle re-encode: {e}")))?;
+    Ok(out)
 }
 
 /// Compute the deterministic DeviceGroup `group_id` from an

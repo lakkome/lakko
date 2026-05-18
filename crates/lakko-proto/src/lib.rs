@@ -50,6 +50,23 @@ pub mod mls_app {
             include!(concat!(env!("OUT_DIR"), "/lakko.mls_app.devicegroup.v1.rs"));
         }
     }
+
+    /// History catch-up bundle
+    /// (`schemas/mls-app/history_bundle_v1.proto`) — Phase 2a3d8.
+    /// HPKE-style sealed payload the scanner-side device hands to
+    /// the joining device at add-time so the latter can backfill
+    /// the application-level message log it would otherwise be
+    /// unable to recover from the `whole_storage_snapshot` alone.
+    pub mod history_bundle {
+        /// Version 1 of the history-bundle schema.
+        #[allow(clippy::pedantic, missing_docs)]
+        pub mod v1 {
+            include!(concat!(
+                env!("OUT_DIR"),
+                "/lakko.mls_app.history_bundle.v1.rs"
+            ));
+        }
+    }
 }
 
 /// Call media metadata (`schemas/media/v1.proto`).
@@ -129,6 +146,64 @@ mod tests {
         original.encode(&mut buf).expect("encode");
         let decoded = DeviceGroupPayload::decode(&*buf).expect("decode");
         assert_eq!(decoded, original);
+    }
+
+    /// Phase 2a3d8 smoke test — `HistoryBundle` + `SealedBundle`
+    /// round-trip through prost.
+    #[test]
+    fn history_bundle_roundtrip() {
+        use mls_app::history_bundle::v1::{
+            HistoryBundle, HistoryGroup, HistoryMessage, SealedBundle,
+        };
+        use prost::Message as _;
+
+        let inner = HistoryBundle {
+            max_hlc: 1_700_000_001_234,
+            groups: vec![
+                HistoryGroup {
+                    group_id: vec![0xAA; 32],
+                    count_capped: false,
+                    messages: vec![
+                        HistoryMessage {
+                            payload_bytes: vec![0x01, 0x02, 0x03],
+                            sender_leaf: 0,
+                            message_id: vec![0x10; 8],
+                            received_at_ms: 1_700_000_000_000,
+                        },
+                        HistoryMessage {
+                            payload_bytes: vec![0x04, 0x05, 0x06],
+                            sender_leaf: 1,
+                            message_id: vec![0x11; 8],
+                            received_at_ms: 1_700_000_001_000,
+                        },
+                    ],
+                },
+                HistoryGroup {
+                    group_id: vec![0xBB; 32],
+                    count_capped: true,
+                    messages: vec![HistoryMessage {
+                        payload_bytes: vec![0x07],
+                        sender_leaf: 2,
+                        message_id: vec![0x12; 8],
+                        received_at_ms: 1_700_000_001_234,
+                    }],
+                },
+            ],
+        };
+        let mut buf = Vec::new();
+        inner.encode(&mut buf).expect("encode bundle");
+        let decoded = HistoryBundle::decode(&*buf).expect("decode bundle");
+        assert_eq!(decoded, inner);
+
+        let sealed = SealedBundle {
+            algorithm: 1,
+            nonce: vec![0xCD; 12],
+            ciphertext: buf.clone(),
+        };
+        let mut sbuf = Vec::new();
+        sealed.encode(&mut sbuf).expect("encode sealed");
+        let sdecoded = SealedBundle::decode(&*sbuf).expect("decode sealed");
+        assert_eq!(sdecoded, sealed);
     }
 
     #[test]

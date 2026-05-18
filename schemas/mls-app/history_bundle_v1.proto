@@ -1,0 +1,134 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+syntax = "proto3";
+
+package lakko.mls_app.history_bundle.v1;
+
+// History catch-up bundle (Phase 2a3d8).
+//
+// Sealed payload the scanner-side device publishes alongside the
+// Welcome at add-device time so the joining device can backfill
+// the application-level message log it would otherwise be unable
+// to recover.
+//
+// ## Why this exists separately from `whole_storage_snapshot`
+//
+// Phase 2a3d1-d7 ships a per-account OpenMLS provider snapshot in
+// the backup envelope. That snapshot carries the **MLS ratchet
+// state** — every conversation group's tree, init-key material,
+// per-epoch chain keys at the current head. With it, the
+// recovering device can decrypt every **future** message in
+// every group.
+//
+// What that snapshot does NOT carry:
+//
+//   * Already-decrypted plaintext of past messages. MLS forward
+//     secrecy intentionally wipes chain keys after each epoch
+//     ratchet; the recovering device cannot derive the keys
+//     that would let it re-decrypt the old wire bytes.
+//   * Sender / timestamp / reaction / edit metadata that the UI
+//     needs to render the prior conversation history.
+//
+// 2a3d8 fills the gap: each newly-paired device receives a
+// best-effort dump of the last N decrypted messages per
+// accepted-contact group from the device that added it. The
+// dump is HPKE-style sealed under a per-pairing exporter secret
+// (RFC 9420 §8.5) so the server (DS-mailbox) never sees the
+// plaintext.
+//
+// ## Wire shape
+//
+// The outermost [`HistoryBundle`] is the unsealed protobuf the
+// crypto layer hands back after AEAD-open. The on-the-wire bytes
+// are the [`SealedBundle`] envelope (ciphertext + nonce + AEAD
+// algorithm marker). The two are separated so a future migration
+// to a different AEAD or to HPKE-direct can drop SealedBundle
+// without re-coining the HistoryBundle plaintext shape.
+//
+// ## Size + N cap
+//
+// The plan caps the bundle at ~1000 messages per group; clients
+// MUST refuse to encode a bundle whose total `messages` count
+// exceeds [`MAX_BUNDLE_MESSAGES`] (defined Rust-side in
+// `lakko-mls::history_bundle`) and SHOULD trim per-group lists
+// to the most recent slice before encoding.
+
+// One message in the history bundle. Carries the
+// already-decrypted MLS `ApplicationPayload` bytes plus the
+// envelope metadata clients need to project the message into
+// their local store.
+message HistoryMessage {
+    // Application-message envelope: TLS-encoded
+    // `mls_app::v1::ApplicationPayload` bytes. The receiving
+    // device decodes via the same prost-generated type
+    // `Group::process_incoming` produces and feeds straight
+    // into its local message store, so the projection logic
+    // doesn't need a parallel code path for backfilled rows.
+    bytes payload_bytes = 1;
+    // Sender's MLS leaf index at the time the message was
+    // first seen. Stable inside the epoch the message was
+    // authored in; the receiving device uses this only for
+    // attribution display, not for ratchet bookkeeping.
+    uint32 sender_leaf = 2;
+    // Per-message id assigned by the local store at the time
+    // of receipt. Stable across snapshots — the receiver
+    // dedupes incoming history rows against its own store
+    // using this value, so a bundle's twice-applied content
+    // doesn't double-render.
+    bytes message_id = 3;
+    // Wall-clock UNIX millis the sending device first saw the
+    // message. Display-only; never used for ordering (HLC in
+    // the payload bytes is the source of truth).
+    uint64 received_at_ms = 4;
+    reserved 5 to 15;
+}
+
+// All history rows for a single conversation group.
+message HistoryGroup {
+    // MLS group_id the messages belong to. The receiving
+    // device matches this against the groups it learnt about
+    // via the `whole_storage_snapshot` import; rows for
+    // unknown group_ids are dropped (defensive — the sender
+    // could have shipped rows for a group the receiver isn't
+    // a member of yet).
+    bytes group_id = 1;
+    // Messages, newest-first. Receiver inserts in reverse
+    // order so its local store ends up with oldest-first
+    // ordering matching the natural send order.
+    repeated HistoryMessage messages = 2;
+    // `true` when this list was truncated to the
+    // per-group N cap. UI surfaces a "load older" affordance.
+    bool count_capped = 3;
+    reserved 4 to 15;
+}
+
+// The full bundle, one slot per group.
+message HistoryBundle {
+    repeated HistoryGroup groups = 1;
+    // HLC value of the most recent message included in the
+    // bundle, across every group. Diagnostics + integration
+    // tests; receivers don't read it.
+    uint64 max_hlc = 2;
+    reserved 3 to 15;
+}
+
+// AEAD envelope for the bundle. `nonce` + `ciphertext` are the
+// raw output of `lakko_crypto::aead::seal`; `algorithm` pins the
+// cipher so the receiver doesn't have to guess. Fixed-position
+// fields so the wire bytes round-trip stably.
+message SealedBundle {
+    // 1 = ChaCha20-Poly1305 (RFC 8439). The 2a3d8 producer
+    // always picks ChaCha20-Poly1305; future migrations bump
+    // the value (2 = AES-256-GCM, etc.) and the receiver
+    // matches against its own known set.
+    uint32 algorithm = 1;
+    // 12-byte AEAD nonce. The exporter-secret-derived key is
+    // single-use per pairing, so any random nonce is
+    // collision-safe.
+    bytes nonce = 2;
+    // `ciphertext || tag` — exactly what `lakko_crypto::aead::seal`
+    // returns. The unsealed bytes are a `HistoryBundle` proto.
+    bytes ciphertext = 3;
+    reserved 4 to 15;
+}

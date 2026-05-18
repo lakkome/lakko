@@ -644,6 +644,77 @@ impl DeviceGroup {
         let bytes = g.remove_device_at(&identity.inner, leaf_index)?;
         Ok(bytes)
     }
+
+    /// Derive the per-pairing history-bundle exporter secret
+    /// (Phase 2a3d8). Returns 32 bytes; the scanner side feeds
+    /// it into [`seal_history_bundle`], the joining side feeds
+    /// it into [`open_history_bundle`]. Both devices reach the
+    /// same value because they end up at the same DeviceGroup
+    /// epoch after add_device_from_wire / join_from_welcome.
+    pub fn history_bundle_secret(
+        &self,
+        identity: &Identity,
+    ) -> Result<Vec<u8>, FfiError> {
+        let g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
+        let secret = lakko_mls::history_bundle::exporter_secret(&g, &identity.inner)?;
+        Ok(secret.to_vec())
+    }
+}
+
+/// AEAD-seal a [`lakko_proto::mls_app::history_bundle::v1::HistoryBundle`]
+/// (Phase 2a3d8).
+///
+/// `secret` MUST be exactly 32 bytes — typically the output of
+/// [`DeviceGroup::history_bundle_secret`]. `bundle_bytes` is
+/// the prost-encoded `HistoryBundle` proto; the caller builds
+/// it from its local message store. Returns the wire-format
+/// [`SealedBundle`] proto bytes ready to PUT to the rendezvous
+/// mailbox.
+///
+/// Refuses to seal bundles whose total message count exceeds
+/// [`lakko_mls::history_bundle::MAX_BUNDLE_MESSAGES`] (1000).
+#[uniffi::export]
+pub fn seal_history_bundle(
+    secret: Vec<u8>,
+    bundle_bytes: Vec<u8>,
+) -> Result<Vec<u8>, FfiError> {
+    use prost::Message as _;
+    if secret.len() != 32 {
+        return Err(FfiError::Codec("history-bundle secret must be 32 bytes".into()));
+    }
+    let mut key = [0u8; 32];
+    key.copy_from_slice(&secret);
+
+    let bundle =
+        lakko_proto::mls_app::history_bundle::v1::HistoryBundle::decode(bundle_bytes.as_slice())
+            .map_err(|e| FfiError::Codec(format!("HistoryBundle decode: {e}")))?;
+    let sealed = lakko_mls::history_bundle::seal_bundle(&key, &bundle)?;
+    Ok(sealed)
+}
+
+/// Inverse of [`seal_history_bundle`]. Returns the prost-encoded
+/// `HistoryBundle` bytes (the caller decodes them in its native
+/// proto runtime — TypeScript via the wasm proto, Swift via
+/// `SwiftProtobuf`, Kotlin via the generated `lakko-proto`
+/// classes).
+#[uniffi::export]
+pub fn open_history_bundle(
+    secret: Vec<u8>,
+    sealed_bytes: Vec<u8>,
+) -> Result<Vec<u8>, FfiError> {
+    use prost::Message as _;
+    if secret.len() != 32 {
+        return Err(FfiError::Codec("history-bundle secret must be 32 bytes".into()));
+    }
+    let mut key = [0u8; 32];
+    key.copy_from_slice(&secret);
+
+    let bundle = lakko_mls::history_bundle::open_bundle(&key, &sealed_bytes)?;
+    let mut out = Vec::with_capacity(bundle.encoded_len());
+    bundle
+        .encode(&mut out)
+        .map_err(|e| FfiError::Codec(format!("HistoryBundle re-encode: {e}")))?;
+    Ok(out)
 }
 
 /// Compute the deterministic DeviceGroup `group_id` from an

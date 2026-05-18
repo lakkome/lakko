@@ -51,6 +51,11 @@ lakko-backup.workspace = true
 # Phase 1.21b — Shamir's Secret Sharing for the social-recovery
 # flow (split / combine / encode / decode + GF(256) field ops).
 lakko-shamir.workspace = true
+# Phase 2a3d8 — `lakko-proto` generated `HistoryBundle` /
+# `SealedBundle` types + prost runtime for the inner-bytes
+# re-encode in `seal_history_bundle` / `open_history_bundle`.
+lakko-proto.workspace = true
+prost = "0.13"
 # Base64 framing for the PoW surface (seed/nonce/solution
 # fields → base64 strings on the JSON request body). Matches
 # the wasm surface 1:1.
