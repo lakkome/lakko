@@ -318,6 +318,238 @@ impl DeviceGroup {
     pub fn as_group_mut(&mut self) -> &mut Group {
         &mut self.inner
     }
+
+    // -----------------------------------------------------------------
+    // Phase 2a3e1 — typed cross-device application payloads
+    // -----------------------------------------------------------------
+
+    /// Compose + encrypt a cross-device payload (`DeviceGroupPayload`
+    /// from `schemas/mls-app/devicegroup_v1.proto`) and return the
+    /// wire-format bytes ready to PUT to the DS group journal.
+    ///
+    /// Caller supplies the typed [`DeviceGroupBody`] + the HLC
+    /// timestamp (callers are expected to wire a single HLC
+    /// generator at the application layer so total ordering
+    /// survives across devices). `sender_leaf` is taken from the
+    /// local view of the group, not threaded by the caller.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::Codec`] when the proto encode fails (practically
+    ///   unreachable — every field is fixed-shape).
+    /// - [`Error::Message`] / [`Error::Group`] for OpenMLS-side
+    ///   encryption or wire-encode failures.
+    pub fn create_devicegroup_message(
+        &mut self,
+        identity: &Identity,
+        body: DeviceGroupBody,
+        hlc: u64,
+    ) -> Result<Vec<u8>> {
+        use prost::Message as _;
+
+        let proto_body = body.into_proto();
+        let payload = lakko_proto::mls_app::devicegroup::v1::DeviceGroupPayload {
+            hlc,
+            sender_leaf: self.inner.own_leaf_index().u32(),
+            body: Some(proto_body),
+        };
+        let mut buf = Vec::with_capacity(payload.encoded_len());
+        payload
+            .encode(&mut buf)
+            .map_err(|e| Error::Codec(format!("DeviceGroupPayload encode: {e}")))?;
+        let mls_out = self.inner.create_application_message(identity, &buf)?;
+        crate::group::encode_message(&mls_out)
+    }
+
+    /// Decode a `DeviceGroupPayload` from the bytes
+    /// [`Group::process_incoming`] surfaced as
+    /// [`Incoming::Application`]. Static rather than method on
+    /// `&self` because the receiver-side flow goes
+    /// `process_incoming → Incoming::Application(bytes) →
+    /// parse_devicegroup_payload(&bytes)`, with no `DeviceGroup`
+    /// state to consult.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::Codec`] when the proto decode fails.
+    /// - [`Error::Unsupported`] when the payload's `body` is
+    ///   absent or a variant this build doesn't recognise (an
+    ///   older client reading a future-version payload).
+    pub fn parse_devicegroup_payload(bytes: &[u8]) -> Result<ParsedDeviceGroupPayload> {
+        use prost::Message as _;
+
+        let payload = lakko_proto::mls_app::devicegroup::v1::DeviceGroupPayload::decode(bytes)
+            .map_err(|e| Error::Codec(format!("DeviceGroupPayload decode: {e}")))?;
+        let body = payload
+            .body
+            .ok_or(Error::Unsupported("DeviceGroupPayload missing body"))?;
+        let parsed_body = DeviceGroupBody::from_proto(body);
+        Ok(ParsedDeviceGroupPayload {
+            hlc: payload.hlc,
+            sender_leaf: payload.sender_leaf,
+            body: parsed_body,
+        })
+    }
+}
+
+/// Parsed payload returned by
+/// [`DeviceGroup::parse_devicegroup_payload`]. Wraps the typed
+/// [`DeviceGroupBody`] with the envelope metadata callers
+/// frequently want (HLC for ordering, sender leaf for
+/// originator identification).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedDeviceGroupPayload {
+    /// Hybrid logical clock timestamp from the envelope.
+    pub hlc: u64,
+    /// Leaf index of the device that authored this payload.
+    /// Stable inside an epoch; can renumber across a
+    /// remove/add cycle, so callers MUST NOT compare across
+    /// epochs.
+    pub sender_leaf: u32,
+    /// Concrete payload — one of `ReadCursor` / `DraftUpdate`
+    /// / `ThreadFlags` / `ConversationOrder`.
+    pub body: DeviceGroupBody,
+}
+
+/// Typed body of a DeviceGroup application payload. Wraps the
+/// generated `DeviceGroupPayload.body` `oneof` with a Rust-side
+/// enum so call sites get exhaustive `match` checking instead
+/// of having to remember to handle a `None` proto variant.
+///
+/// Conversion methods [`DeviceGroupBody::into_proto`] and
+/// [`DeviceGroupBody::from_proto`] are the only places that
+/// touch the generated proto types — keeping the protobuf
+/// shape contained inside the conversion functions means the
+/// rest of `lakko-mls` (and downstream callers via FFI) sees
+/// a plain Rust enum.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeviceGroupBody {
+    /// "I read up to this point in this thread." Other
+    /// devices use the last-write-wins (by HLC) cursor to
+    /// compute their own per-thread unread count.
+    ReadCursor {
+        /// The conversation group's MLS group_id.
+        group_id: Vec<u8>,
+        /// The message id (mls-app HLC bytes) the sender
+        /// claims to have read up to.
+        up_to_message_id: Vec<u8>,
+        /// Wall-clock UNIX millis when the read happened.
+        /// Display only — never used for ordering.
+        read_at_ms: u64,
+    },
+    /// In-flight composer state for a single thread. Empty
+    /// `text` clears the draft (receivers wipe their local
+    /// copy).
+    Draft {
+        /// The conversation group_id the draft belongs to.
+        group_id: Vec<u8>,
+        /// Composer text. UTF-8, may be empty.
+        text: String,
+        /// When non-empty, the draft was started as a reply
+        /// to this message.
+        reply_to_id: Vec<u8>,
+    },
+    /// Per-thread UI flags (last-write-wins snapshot of the
+    /// whole struct).
+    Flags {
+        /// The conversation group_id the flags apply to.
+        group_id: Vec<u8>,
+        /// Pinned threads stay at the top of the list.
+        pinned: bool,
+        /// Muted threads suppress push notifications +
+        /// unread indicators.
+        muted: bool,
+        /// Archived threads drop out of the main list but
+        /// remain searchable.
+        archived: bool,
+        /// Manual "unread" override — user marked the thread
+        /// unread after having read it.
+        unread_override: bool,
+    },
+    /// Explicit display ordering for the conversation list.
+    /// Threads listed here render in the given order; threads
+    /// not mentioned fall back to recency-of-last-message.
+    Order {
+        /// Conversation group_ids in display order,
+        /// top-to-bottom.
+        group_ids: Vec<Vec<u8>>,
+    },
+}
+
+impl DeviceGroupBody {
+    fn into_proto(
+        self,
+    ) -> lakko_proto::mls_app::devicegroup::v1::device_group_payload::Body {
+        use lakko_proto::mls_app::devicegroup::v1::{
+            device_group_payload::Body, ConversationOrder, DraftUpdate, ReadCursor, ThreadFlags,
+        };
+        match self {
+            Self::ReadCursor {
+                group_id,
+                up_to_message_id,
+                read_at_ms,
+            } => Body::ReadCursor(ReadCursor {
+                group_id,
+                up_to_message_id,
+                read_at_ms,
+            }),
+            Self::Draft {
+                group_id,
+                text,
+                reply_to_id,
+            } => Body::Draft(DraftUpdate {
+                group_id,
+                text,
+                reply_to_id,
+            }),
+            Self::Flags {
+                group_id,
+                pinned,
+                muted,
+                archived,
+                unread_override,
+            } => Body::Flags(ThreadFlags {
+                group_id,
+                pinned,
+                muted,
+                archived,
+                unread_override,
+            }),
+            Self::Order { group_ids } => Body::Order(ConversationOrder { group_ids }),
+        }
+    }
+
+    /// Infallible — every proto `Body` variant maps onto a
+    /// concrete `Self` case. A future proto extension that adds
+    /// a variant we don't recognise would surface earlier as a
+    /// prost-decode failure, not here.
+    fn from_proto(
+        body: lakko_proto::mls_app::devicegroup::v1::device_group_payload::Body,
+    ) -> Self {
+        use lakko_proto::mls_app::devicegroup::v1::device_group_payload::Body;
+        match body {
+            Body::ReadCursor(b) => Self::ReadCursor {
+                group_id: b.group_id,
+                up_to_message_id: b.up_to_message_id,
+                read_at_ms: b.read_at_ms,
+            },
+            Body::Draft(b) => Self::Draft {
+                group_id: b.group_id,
+                text: b.text,
+                reply_to_id: b.reply_to_id,
+            },
+            Body::Flags(b) => Self::Flags {
+                group_id: b.group_id,
+                pinned: b.pinned,
+                muted: b.muted,
+                archived: b.archived,
+                unread_override: b.unread_override,
+            },
+            Body::Order(b) => Self::Order {
+                group_ids: b.group_ids,
+            },
+        }
+    }
 }
 
 #[cfg(test)]
@@ -424,6 +656,99 @@ mod tests {
                 );
             },
             Err(other) => panic!("expected Group error, got {other:?}"),
+        }
+    }
+
+    /// Phase 2a3e1 — end-to-end: device A composes a
+    /// `ReadCursor` payload, the wire bytes round-trip through
+    /// the MLS application-message path, and device B parses
+    /// the inbound payload back into the same typed body.
+    #[test]
+    fn devicegroup_application_payload_round_trips_a_to_b() {
+        let account = fixture_account_id();
+
+        // A bootstraps; B joins via Welcome.
+        let id_a = Identity::generate("device-A").unwrap();
+        let mut group_a = DeviceGroup::create_founder(&id_a, &account).unwrap();
+        let id_b = Identity::generate("device-B").unwrap();
+        let kp_b = id_b.create_key_package().unwrap();
+        let addition = group_a.add_device(&id_a, kp_b).unwrap();
+        let welcome_bytes = crate::group::encode_message(&addition.welcome).unwrap();
+        let mut group_b =
+            DeviceGroup::join_from_welcome(&welcome_bytes, &id_b, &account).unwrap();
+
+        // A sends a typed ReadCursor payload.
+        let body = DeviceGroupBody::ReadCursor {
+            group_id: vec![0xAB; 32],
+            up_to_message_id: vec![0xCD; 8],
+            read_at_ms: 1_700_000_000_001,
+        };
+        let wire = group_a
+            .create_devicegroup_message(&id_a, body.clone(), 12345)
+            .expect("compose");
+
+        // B receives + decrypts.
+        let incoming = group_b
+            .process_incoming(&id_b, &wire)
+            .expect("process_incoming");
+        let bytes = match incoming {
+            Incoming::Application(b) => b,
+            other => panic!("expected Application, got {other:?}"),
+        };
+
+        // B parses the typed payload back out.
+        let parsed = DeviceGroup::parse_devicegroup_payload(&bytes).expect("parse");
+        assert_eq!(parsed.hlc, 12345);
+        // sender_leaf is A's leaf — index 0 in this 2-leaf
+        // group where A is the founder.
+        assert_eq!(parsed.sender_leaf, 0);
+        assert_eq!(parsed.body, body);
+    }
+
+    #[test]
+    fn devicegroup_payload_each_variant_roundtrips() {
+        // Smoke-test all four variants survive the
+        // proto-encode + proto-decode trip via the typed
+        // `DeviceGroupBody` wrappers. Doesn't need a real MLS
+        // group — encode + decode round-trips the bytes
+        // directly via the same conversion methods the
+        // application-message helpers use.
+        use prost::Message as _;
+
+        let cases = vec![
+            DeviceGroupBody::ReadCursor {
+                group_id: vec![0x01; 32],
+                up_to_message_id: vec![0xAB; 8],
+                read_at_ms: 42,
+            },
+            DeviceGroupBody::Draft {
+                group_id: vec![0x02; 32],
+                text: "hello".into(),
+                reply_to_id: vec![0x99; 8],
+            },
+            DeviceGroupBody::Flags {
+                group_id: vec![0x03; 32],
+                pinned: true,
+                muted: false,
+                archived: true,
+                unread_override: false,
+            },
+            DeviceGroupBody::Order {
+                group_ids: vec![vec![0xAA; 32], vec![0xBB; 32]],
+            },
+        ];
+        for body in cases {
+            let payload = lakko_proto::mls_app::devicegroup::v1::DeviceGroupPayload {
+                hlc: 7,
+                sender_leaf: 0,
+                body: Some(body.clone().into_proto()),
+            };
+            let mut buf = Vec::new();
+            payload.encode(&mut buf).unwrap();
+            let parsed = DeviceGroup::parse_devicegroup_payload(&buf).unwrap();
+            assert_eq!(parsed.hlc, 7);
+            assert_eq!(parsed.sender_leaf, 0);
+            assert_eq!(parsed.body, body);
         }
     }
 }
