@@ -64,6 +64,14 @@ targets:
         UILaunchScreen: {}  # blank launch screen
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
+        # Phase 2a3b3-ui — camera access for the add-device QR
+        # scanner. Apple's permission dialog surfaces this
+        # string verbatim; keep the wording aligned with what
+        # the user sees in the Devices → "Add a device" screen.
+        NSCameraUsageDescription: >-
+          Lakko uses the camera to scan a QR code from a device
+          you want to link to your account. The camera is only
+          used during the add-device flow.
         # `UIRequiredDeviceCapabilities` left at default — every
         # device the deployment target accepts has the same
         # baseline (arm64, OpenGL ES 2.0).

@@ -27,6 +27,7 @@ public struct HomeScreen: View {
     public var onOpenContacts: () -> Void
     public var onOpenChats: () -> Void
     public var onOpenPasskeys: () -> Void
+    public var onOpenDevices: () -> Void
     public var onLogout: () -> Void
     public var onForgetDevice: () -> Void
 
@@ -35,6 +36,7 @@ public struct HomeScreen: View {
         onOpenContacts: @escaping () -> Void = {},
         onOpenChats: @escaping () -> Void = {},
         onOpenPasskeys: @escaping () -> Void = {},
+        onOpenDevices: @escaping () -> Void = {},
         onLogout: @escaping () -> Void,
         onForgetDevice: @escaping () -> Void
     ) {
@@ -42,6 +44,7 @@ public struct HomeScreen: View {
         self.onOpenContacts = onOpenContacts
         self.onOpenChats = onOpenChats
         self.onOpenPasskeys = onOpenPasskeys
+        self.onOpenDevices = onOpenDevices
         self.onLogout = onLogout
         self.onForgetDevice = onForgetDevice
     }
@@ -85,6 +88,16 @@ public struct HomeScreen: View {
             // toggle.
             Button(action: onOpenPasskeys) {
                 Text("Manage passkeys")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.large)
+
+            // 2a3b3-ui — DeviceGroup pairing surface. Tapping
+            // pushes `DevicesScreen` via the SessionRoot
+            // destination toggle.
+            Button(action: onOpenDevices) {
+                Text("Devices")
                     .frame(maxWidth: .infinity)
             }
             .buttonStyle(.bordered)

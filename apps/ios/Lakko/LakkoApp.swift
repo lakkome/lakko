@@ -199,6 +199,7 @@ private struct SessionRoot: View {
                         onOpenContacts: { destination = .contacts },
                         onOpenChats: { destination = .chats },
                         onOpenPasskeys: { destination = .passkeys },
+                        onOpenDevices: { destination = .devices },
                         onLogout: authRepository.logout,
                         onForgetDevice: authRepository.forgetDevice
                     )
@@ -235,6 +236,11 @@ private struct SessionRoot: View {
                         ),
                         onBack: { destination = .home }
                     )
+                case .devices:
+                    DevicesScreen(
+                        authRepository: authRepository,
+                        onBack: { destination = .home }
+                    )
                 }
             }
         }
@@ -262,6 +268,7 @@ private enum SessionDestination: Equatable {
     case chats
     case chat(groupIdHex: String)
     case passkeys
+    case devices
 }
 
 /// Anonymous-state router — three destinations (Signup / Login /
