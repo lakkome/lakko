@@ -46,6 +46,12 @@ struct LakkoApp: App {
     /// `Group` handles + snapshot persistence.
     @StateObject private var chatRepository = ChatRepository()
 
+    /// Process-scoped ``DeviceGroupSyncRepository``
+    /// (Phase 2a3e2b-iOS). Holds the per-session DeviceGroup
+    /// handle + reactive maps for cross-device drafts /
+    /// flags / read cursors / conversation order.
+    @StateObject private var deviceGroupSync = DeviceGroupSyncRepository()
+
     /// Process-scoped ``InviteIntake`` — populated by
     /// `.onOpenURL` when iOS hands us a Universal Link.
     @StateObject private var inviteIntake = InviteIntake()
@@ -68,6 +74,7 @@ struct LakkoApp: App {
                 .environmentObject(authRepository)
                 .environmentObject(contactsRepository)
                 .environmentObject(chatRepository)
+                .environmentObject(deviceGroupSync)
                 .environmentObject(inviteIntake)
                 // Universal Links — iOS invokes this whenever the
                 // user taps a `https://lakko.me/i/<slug>` URL and
@@ -90,6 +97,7 @@ struct AppRoot: View {
     @EnvironmentObject private var authRepository: AuthRepository
     @EnvironmentObject private var contactsRepository: ContactsRepository
     @EnvironmentObject private var chatRepository: ChatRepository
+    @EnvironmentObject private var deviceGroupSync: DeviceGroupSyncRepository
     @EnvironmentObject private var inviteIntake: InviteIntake
 
     var body: some View {
@@ -110,6 +118,12 @@ struct AppRoot: View {
             // ``acceptInviteLink`` flow needs `identitySecrets`.
             // We leave the slug parked; once the user signs in,
             // the session-state branch picks it up.
+            .onAppear {
+                // Defensive: returning to anon (logout /
+                // forgetDevice) tears down the cross-device sync
+                // runtime so the next login bootstraps fresh.
+                deviceGroupSync.clear()
+            }
 
         case .session(let account):
             SessionRoot(
@@ -135,6 +149,7 @@ private struct SessionRoot: View {
     let authRepository: AuthRepository
     let contactsRepository: ContactsRepository
     let chatRepository: ChatRepository
+    @EnvironmentObject var deviceGroupSync: DeviceGroupSyncRepository
     @ObservedObject var inviteIntake: InviteIntake
 
     @StateObject private var contactsVM: ContactsViewModel
@@ -257,6 +272,11 @@ private struct SessionRoot: View {
         .task(id: authRepository.identitySecrets?.accountId) {
             if let secrets = authRepository.identitySecrets {
                 chatRepository.bootstrap(secrets: secrets)
+                // Phase 2a3e2b — wire the cross-device sync
+                // runtime alongside the chat bootstrap so the
+                // poll loop starts at the same moment the chat
+                // surfaces become usable.
+                deviceGroupSync.bootstrap(secrets: secrets)
             }
         }
     }

@@ -23,6 +23,12 @@ public struct ChatScreen: View {
     @ObservedObject public var viewModel: ChatViewModel
     public var onBack: () -> Void
 
+    /// Phase 2a3e2b-iOS — cross-device sync runtime. Attached
+    /// to the VM on first appearance so the composer's `draft`
+    /// seeds from sibling-device drafts and rebroadcasts every
+    /// change (debounced).
+    @EnvironmentObject private var deviceGroupSync: DeviceGroupSyncRepository
+
     // 1.19c3 — picker state. Swift's `PhotosPicker` returns
     // `PhotosPickerItem`s asynchronously (we resolve them to
     // `Data` + MIME inside the `.onChange`); the file
@@ -50,6 +56,13 @@ public struct ChatScreen: View {
             messagesList
             Divider()
             composer
+        }
+        .onAppear {
+            // Phase 2a3e2b — wire the cross-device sync hook
+            // on first mount. Idempotent: subsequent calls
+            // overwrite the weak reference but the existing
+            // Combine subscriptions stay intact.
+            viewModel.attachSync(deviceGroupSync)
         }
         .navigationTitle(headline)
         .navigationBarTitleDisplayMode(.inline)

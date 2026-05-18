@@ -5,9 +5,12 @@ package me.lakko.app.ui.chat
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import me.lakko.app.chat.AttachmentBridge
@@ -16,6 +19,7 @@ import me.lakko.app.chat.UploadStage
 import me.lakko.app.chat.ChatMessage
 import me.lakko.app.chat.ChatRepository
 import me.lakko.app.chat.ChatThread
+import me.lakko.app.devices.sync.DeviceGroupSyncRepository
 import uniffi.lakko_ffi_uniffi.AttachmentRef
 
 /**
@@ -58,6 +62,99 @@ public class ChatViewModel(
                 derived.value = buildState(repo.state.value, composerState)
             }
         }
+    }
+
+    // -------------------------------------------------------------
+    // Phase 2a3e2b-Android — cross-device draft sync
+    // -------------------------------------------------------------
+
+    /** Attached via [attachSync] from the screen. `null` until
+     *  the screen lifecycle wires it in. */
+    private var deviceGroupSync: DeviceGroupSyncRepository? = null
+    /** Raw group_id bytes for the active thread — cached so
+     *  the broadcast / seed paths don't re-decode the hex
+     *  string on every keystroke. */
+    private var groupIdBytes: ByteArray? = null
+    /** Last draft text the broadcast path published — dedups
+     *  echoes that loop back through the poll loop. */
+    private var lastBroadcastDraft: String? = null
+    private var draftBroadcastJob: Job? = null
+    private var didSeedDraft: Boolean = false
+    private val DRAFT_DEBOUNCE_MS: Long = 500L
+
+    /**
+     * Bind to the process-scoped [DeviceGroupSyncRepository]
+     * (Phase 2a3e2b). Called from the Compose ChatScreen on
+     * `LaunchedEffect(Unit)`. Subscribes to:
+     *
+     *   * incoming `Draft` payloads keyed on this thread —
+     *     seed the composer once on first mount when local
+     *     is empty (avoids stomping mid-typing on this
+     *     device).
+     *   * local `draft` changes — debounce 500 ms then
+     *     broadcast.
+     *
+     * Idempotent: a second call replaces the prior reference
+     * but the in-flight collectors keep running.
+     */
+    public fun attachSync(sync: DeviceGroupSyncRepository) {
+        if (deviceGroupSync === sync) return
+        deviceGroupSync = sync
+        val gid = hexToBytes(groupIdHex) ?: return
+        groupIdBytes = gid
+
+        viewModelScope.launch {
+            sync.drafts.collect { drafts ->
+                if (didSeedDraft) return@collect
+                val incoming = drafts[groupIdHex] ?: return@collect
+                if (composer.value.draft.isEmpty()) {
+                    composer.update { it.copy(draft = incoming.text) }
+                }
+                didSeedDraft = true
+            }
+        }
+
+        viewModelScope.launch {
+            composer
+                .asStateFlow()
+                .distinctUntilChanged { a, b -> a.draft == b.draft }
+                .collect { snapshot ->
+                    scheduleDraftBroadcast(snapshot.draft, gid)
+                }
+        }
+    }
+
+    private fun scheduleDraftBroadcast(text: String, gid: ByteArray) {
+        if (text == lastBroadcastDraft) return
+        draftBroadcastJob?.cancel()
+        draftBroadcastJob = viewModelScope.launch {
+            delay(DRAFT_DEBOUNCE_MS)
+            lastBroadcastDraft = text
+            try {
+                deviceGroupSync?.setDraft(groupId = gid, text = text)
+            } catch (cause: Throwable) {
+                // Best-effort — the next keystroke retries.
+                android.util.Log.w(
+                    "ChatViewModel",
+                    "setDraft failed",
+                    cause,
+                )
+            }
+        }
+    }
+
+    private fun hexToBytes(hex: String): ByteArray? {
+        if (hex.length % 2 != 0) return null
+        val out = ByteArray(hex.length / 2)
+        var i = 0
+        while (i < hex.length) {
+            val hi = Character.digit(hex[i], 16)
+            val lo = Character.digit(hex[i + 1], 16)
+            if (hi < 0 || lo < 0) return null
+            out[i / 2] = ((hi shl 4) or lo).toByte()
+            i += 2
+        }
+        return out
     }
 
     private fun buildState(

@@ -31,21 +31,39 @@ import type { Component } from "solid-js";
 import { Router } from "@solidjs/router";
 import { AuthProvider } from "./auth/AuthContext";
 import { ChatProvider } from "./chat/ChatContext";
+import { DeviceGroupSyncProvider } from "./devices/sync/DeviceGroupSyncContext";
 import { routes } from "./routes/routes";
 import { SwUpdateBanner } from "./sw/SwUpdateBanner";
 
+/**
+ * Provider order rationale:
+ *
+ *   <ChatProvider> — AuthProvider's body synchronously calls
+ *     `useChats()` (chat state is cleared on logout / forgetDevice).
+ *     Has to be in scope before AuthProvider mounts.
+ *
+ *   <AuthProvider> — exposes session state. Owns the canonical
+ *     export-key-derived Identity.
+ *
+ *   <DeviceGroupSyncProvider> — Phase 2a3e2b. Reads
+ *     `useAuth().state()` to know when to bootstrap a per-session
+ *     DeviceGroup handle + poll loop. MUST be inside AuthProvider
+ *     so the auth-state subscription resolves.
+ */
 const App: Component = () => (
   <ChatProvider>
     <AuthProvider>
-      <Router>{routes}</Router>
-      {/*
-       * 1.18f — "new version available" toast. Mounted at the
-       * top level so it overlays every route (auth shell + main
-       * app shell + invite landing). No route knows it exists;
-       * it self-subscribes to the SW_UPDATE_EVENT dispatched by
-       * `sw/register.ts`.
-       */}
-      <SwUpdateBanner />
+      <DeviceGroupSyncProvider>
+        <Router>{routes}</Router>
+        {/*
+         * 1.18f — "new version available" toast. Mounted at
+         * the top level so it overlays every route (auth shell
+         * + main app shell + invite landing). No route knows
+         * it exists; it self-subscribes to the SW_UPDATE_EVENT
+         * dispatched by `sw/register.ts`.
+         */}
+        <SwUpdateBanner />
+      </DeviceGroupSyncProvider>
     </AuthProvider>
   </ChatProvider>
 );

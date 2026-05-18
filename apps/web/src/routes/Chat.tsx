@@ -31,9 +31,20 @@
  * surface) is also a follow-up — current composer is a plain
  * `<input>`, no edit history.
  */
-import { createMemo, createSignal, For, onMount, Show, type JSX } from "solid-js";
+import {
+  createEffect,
+  createMemo,
+  createSignal,
+  For,
+  onMount,
+  onCleanup,
+  Show,
+  type JSX,
+} from "solid-js";
 import { A, useNavigate, useParams } from "@solidjs/router";
 import { useAuth } from "../auth/AuthContext";
+import { useDeviceGroupSync } from "../devices/sync/DeviceGroupSyncContext";
+import { groupIdHex as hexOf } from "../devices/sync/state";
 import { base64Encode, base64UrlDecodeNoPad } from "../auth/account-id";
 import { ChatClient } from "../chat/client";
 import { ContactsClient } from "../contacts/client";
@@ -156,6 +167,18 @@ function ChatView(props: {
   // always see the current session.
   const auth = useAuth();
   const chats = useChats();
+  // Phase 2a3e2b-web — cross-device sync for per-thread state
+  // (drafts now; flags / order / read cursors follow). Used
+  // below to seed the composer from sibling-device drafts
+  // and to broadcast composer edits back out.
+  const sync = useDeviceGroupSync();
+  // Raw bytes of the conversation group_id — fed straight to
+  // the sync API and into the LWW resolver keying. `Group.groupId`
+  // is a wasm-bindgen getter (no parens), distinct from
+  // `DeviceGroup.groupId()` which is a method (the surfaces
+  // diverged in the Rust source). `createMemo` so the
+  // closure-capturing effects below see a stable reference.
+  const groupIdBytes = createMemo(() => props.entry.group.groupId);
   const chat = new ChatClient(undefined, {
     identityProvider: () => chats.identity(),
     onPersist: async () => {
@@ -184,6 +207,61 @@ function ChatView(props: {
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
   const [notice, setNotice] = createSignal<string | null>(null);
+
+  // Phase 2a3e2b-web: cross-device draft synchronisation.
+  //
+  // Seed-side effect — on first mount + every time a fresh
+  // Draft payload arrives from a sibling device, replace the
+  // composer's text with the remote one IF the local composer
+  // is currently empty. Choosing empty-only avoids stomping a
+  // user mid-typing on this device when a stale sibling-device
+  // update lands; the typing-side then broadcasts its own HLC
+  // and wins by LWW.
+  let seededDraft = false;
+  createEffect(() => {
+    const draft = sync.drafts()[hexOf(groupIdBytes())];
+    if (draft === undefined) return;
+    if (seededDraft) return;
+    if (input() !== "") {
+      // User is already typing on this device — don't stomp.
+      // Mark seeded so we don't keep re-checking, and let the
+      // local broadcast win the LWW race.
+      seededDraft = true;
+      return;
+    }
+    setInput(draft.text);
+    seededDraft = true;
+  });
+
+  // Outbound broadcast — debounced. Every keystroke fires a
+  // signal change; we batch ≤ 1 payload / DRAFT_DEBOUNCE_MS to
+  // avoid drowning the DS journal in single-character commits.
+  let draftBroadcastTimer: ReturnType<typeof setTimeout> | null = null;
+  let lastBroadcastDraft: string | null = null;
+  const DRAFT_DEBOUNCE_MS = 500;
+  createEffect(() => {
+    const text = input();
+    if (text === lastBroadcastDraft) return;
+    if (draftBroadcastTimer !== null) clearTimeout(draftBroadcastTimer);
+    draftBroadcastTimer = setTimeout(() => {
+      draftBroadcastTimer = null;
+      lastBroadcastDraft = text;
+      // Best-effort — a transient DS failure shouldn't crash
+      // the composer; the next keystroke will re-broadcast.
+      void sync
+        .setDraft(groupIdBytes(), text)
+        .catch((err: unknown) => {
+          // eslint-disable-next-line no-console
+          console.warn("setDraft failed", err);
+        });
+    }, DRAFT_DEBOUNCE_MS);
+  });
+  onCleanup(() => {
+    if (draftBroadcastTimer !== null) {
+      clearTimeout(draftBroadcastTimer);
+      draftBroadcastTimer = null;
+    }
+  });
   // 1.19c2 — attachments staged in the composer. The user picks
   // file(s); each gets encrypt+upload immediately so the ref is
   // ready by the time they hit Send. Cleared on Send, on

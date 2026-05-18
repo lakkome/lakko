@@ -112,6 +112,13 @@ class MainActivity : ComponentActivity() {
             authRepo = authRepository,
             chatRepo = chatRepository,
         )
+        // Phase 2a3e2b-Android — process-scoped cross-device
+        // sync runtime. Bootstrapped from `SessionRoot` once
+        // identitySecrets land; cleared on logout /
+        // forgetDevice from the same place ChatRepository
+        // gets cleared.
+        val deviceGroupSync = me.lakko.app.devices.sync
+            .DeviceGroupSyncRepository(applicationContext)
 
         // Read the launching Intent — a cold-start tap on
         // `https://lakko.me/i/<slug>` carries the URL in
@@ -132,6 +139,7 @@ class MainActivity : ComponentActivity() {
                         authRepository = authRepository,
                         contactsRepository = contactsRepository,
                         chatRepository = chatRepository,
+                        deviceGroupSync = deviceGroupSync,
                         inviteIntake = inviteIntake,
                         pushIntake = pushIntake,
                     )
@@ -225,10 +233,21 @@ private fun AppRoot(
     authRepository: AuthRepository,
     contactsRepository: ContactsRepository,
     chatRepository: ChatRepository,
+    deviceGroupSync: me.lakko.app.devices.sync.DeviceGroupSyncRepository,
     inviteIntake: InviteIntake,
     pushIntake: PushIntake,
 ) {
     val state by authRepository.state.collectAsStateWithLifecycle()
+
+    // Phase 2a3e2b-Android — tear down the cross-device sync
+    // runtime when we leave the session entirely (logout /
+    // forgetDevice flips us to Anon). Bootstrap fires from
+    // SessionRoot's LaunchedEffect block.
+    LaunchedEffect(state is AuthState.Session) {
+        if (state !is AuthState.Session) {
+            deviceGroupSync.clear()
+        }
+    }
 
     when (val current = state) {
         AuthState.Loading -> LoadingScreen()
@@ -240,6 +259,7 @@ private fun AppRoot(
             authRepository = authRepository,
             contactsRepository = contactsRepository,
             chatRepository = chatRepository,
+            deviceGroupSync = deviceGroupSync,
             inviteIntake = inviteIntake,
             pushIntake = pushIntake,
             account = current.account,
@@ -259,6 +279,7 @@ private fun SessionRoot(
     authRepository: AuthRepository,
     contactsRepository: ContactsRepository,
     chatRepository: ChatRepository,
+    deviceGroupSync: me.lakko.app.devices.sync.DeviceGroupSyncRepository,
     inviteIntake: InviteIntake,
     pushIntake: PushIntake,
     account: SessionAccount,
@@ -273,6 +294,11 @@ private fun SessionRoot(
     LaunchedEffect(identitySecrets) {
         val secrets = identitySecrets ?: return@LaunchedEffect
         chatRepository.bootstrap(secrets)
+        // Phase 2a3e2b — bootstrap the cross-device sync
+        // runtime alongside the chat bootstrap so the poll
+        // loop starts at the same moment chat surfaces become
+        // usable. Idempotent for the same account id.
+        deviceGroupSync.bootstrap(secrets)
     }
 
     // Auto-clear chat in-memory state when we leave the
@@ -401,6 +427,13 @@ private fun SessionRoot(
                     ChatViewModel(chatRepository, groupIdHex)
                 },
             )
+            // Phase 2a3e2b-Android — wire cross-device sync
+            // into this VM's composer on every navigation.
+            // Idempotent on the same `(vm, sync)` pair so the
+            // re-runs from Compose recomposition cost nothing.
+            LaunchedEffect(chatVm) {
+                chatVm.attachSync(deviceGroupSync)
+            }
             ChatScreen(
                 viewModel = chatVm,
                 // Back from a 1×1 chat goes to the chat list,

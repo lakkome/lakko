@@ -84,6 +84,21 @@ public final class ChatViewModel: ObservableObject {
 
     private let repository: ChatRepository
     private var cancellables: Set<AnyCancellable> = []
+    /// Phase 2a3e2b-iOS — cross-device sync. Attached via
+    /// [`attachSync`] from the screen so the existing init
+    /// signature (1.14f2) stays binary-compatible. `nil` until
+    /// the screen lifecycle wires it in.
+    private weak var deviceGroupSync: DeviceGroupSyncRepository?
+    /// Raw group_id bytes for the active thread — cached so
+    /// the broadcast / seed paths don't re-fetch on every
+    /// keystroke.
+    private var groupIdBytes: Data?
+    /// Last text the broadcast path published. Used to dedup
+    /// echoes that loop back through the poll loop.
+    private var lastBroadcastDraft: String?
+    /// Debounce timer for outgoing Draft payloads.
+    private var draftBroadcastWork: DispatchWorkItem?
+    private var didSeedDraft: Bool = false
 
     public init(repository: ChatRepository, groupIdHex: String) {
         self.repository = repository
@@ -95,6 +110,84 @@ public final class ChatViewModel: ObservableObject {
                 self?.sync(state: newState)
             }
             .store(in: &cancellables)
+    }
+
+    /// Bind to the process-scoped
+    /// ``DeviceGroupSyncRepository`` (Phase 2a3e2b). Called
+    /// from `ChatScreen.onAppear`. Subscribes to:
+    ///
+    ///   * incoming `Draft` payloads keyed on this thread —
+    ///     seed `draft` once on first mount when local is
+    ///     empty (avoids stomping mid-typing on this device).
+    ///   * local `draft` changes — debounce 500 ms then
+    ///     broadcast.
+    public func attachSync(_ sync: DeviceGroupSyncRepository) {
+        deviceGroupSync = sync
+        // Resolve groupIdBytes lazily — the ChatRepository
+        // exposes the per-thread record's groupId; we hex-
+        // decode the `groupIdHex` we already carry.
+        groupIdBytes = Self.hexToBytes(groupIdHex)
+        guard let groupIdBytes = groupIdBytes else { return }
+
+        // Observe the sync repository's drafts map. On every
+        // change, seed locally IF the local composer is
+        // empty + we haven't seeded yet.
+        let key = groupIdHex
+        sync.$drafts
+            .receive(on: RunLoop.main)
+            .sink { [weak self] drafts in
+                guard let self = self else { return }
+                guard !self.didSeedDraft else { return }
+                guard let incoming = drafts[key] else { return }
+                if self.draft.isEmpty {
+                    self.draft = incoming.text
+                }
+                self.didSeedDraft = true
+            }
+            .store(in: &cancellables)
+
+        // Observe own `draft` changes + broadcast debounced.
+        $draft
+            .receive(on: RunLoop.main)
+            .sink { [weak self] text in
+                self?.scheduleDraftBroadcast(text: text, groupIdBytes: groupIdBytes)
+            }
+            .store(in: &cancellables)
+    }
+
+    private func scheduleDraftBroadcast(text: String, groupIdBytes: Data) {
+        if text == lastBroadcastDraft { return }
+        draftBroadcastWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self = self,
+                  let sync = self.deviceGroupSync else { return }
+            self.lastBroadcastDraft = text
+            Task { @MainActor in
+                do {
+                    try await sync.setDraft(
+                        groupId: groupIdBytes,
+                        text: text
+                    )
+                } catch {
+                    NSLog("setDraft failed: %@", error.localizedDescription)
+                }
+            }
+        }
+        draftBroadcastWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: work)
+    }
+
+    private static func hexToBytes(_ hex: String) -> Data? {
+        guard hex.count % 2 == 0 else { return nil }
+        var bytes = Data(capacity: hex.count / 2)
+        var index = hex.startIndex
+        while index < hex.endIndex {
+            let next = hex.index(index, offsetBy: 2)
+            guard let b = UInt8(hex[index..<next], radix: 16) else { return nil }
+            bytes.append(b)
+            index = next
+        }
+        return bytes
     }
 
     private func sync(state: ChatRepositoryState) {
