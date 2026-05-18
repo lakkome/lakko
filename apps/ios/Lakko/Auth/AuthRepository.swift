@@ -699,6 +699,12 @@ public final class AuthRepository: ObservableObject {
             DeviceIdentityStore.deleteDeviceIdentitySeed(
                 accountIdB64: cached.accountIdB64
             )
+            // Phase 2a3b3 — drop the cached DeviceGroup MLS
+            // snapshot. Same clean-wipe rationale as the
+            // identity-seed / phrase / device-key rows above.
+            DeviceGroupSnapshotStore().deleteSnapshot(
+                accountIdB64: cached.accountIdB64
+            )
         }
         sessionStore.clear()
         identitySecrets = nil
