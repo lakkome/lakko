@@ -67,6 +67,7 @@ import {
   deleteDeviceIdentitySeed,
   ensureDeviceIdentitySeed,
 } from "./device-identity-store";
+import { deleteDeviceGroupSnapshot } from "../devices/device-group-snapshot-store";
 import {
   WebauthnClient,
   WebauthnHttpError,
@@ -1116,6 +1117,15 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         // remove-device flow runs from a sibling device.
         try {
           await deleteDeviceIdentitySeed(cached.accountIdB64);
+        } catch {
+          // best-effort
+        }
+        // Phase 2a3b2-bootstrap: drop the cached DeviceGroup
+        // MLS snapshot. Ciphertext is unreadable without the
+        // device key just wiped, but a stale row would
+        // confuse a future signup on the same accountId.
+        try {
+          await deleteDeviceGroupSnapshot(cached.accountIdB64);
         } catch {
           // best-effort
         }

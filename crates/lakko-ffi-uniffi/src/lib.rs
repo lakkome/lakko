@@ -597,6 +597,33 @@ pub fn device_group_id_for(account_id: Vec<u8>) -> Result<Vec<u8>, FfiError> {
     Ok(MlsDeviceGroup::group_id_for(&acct))
 }
 
+/// Load an existing DeviceGroup for `account_id` from
+/// `identity`'s MLS provider storage. Returns `null` (on the
+/// Kotlin side; `None` on the Rust side) when no row is
+/// present.
+///
+/// Free function rather than `DeviceGroup::load` constructor —
+/// UniFFI 0.28 rejects `Option<Self>` in constructor
+/// signatures (mirror of the `load_group` shape from the
+/// Group surface).
+#[uniffi::export]
+pub fn load_device_group(
+    identity: &Identity,
+    account_id: Vec<u8>,
+) -> Result<Option<Arc<DeviceGroup>>, FfiError> {
+    if account_id.len() != 16 {
+        return Err(FfiError::Codec("account_id must be 16 bytes".into()));
+    }
+    let mut acct = [0u8; 16];
+    acct.copy_from_slice(&account_id);
+    let loaded = MlsDeviceGroup::load(&identity.inner, &acct)?;
+    Ok(loaded.map(|inner| {
+        Arc::new(DeviceGroup {
+            inner: Mutex::new(inner),
+        })
+    }))
+}
+
 // Manual std::fmt::Debug for ProcessedMessage so we can panic-format it in
 // tests without uniffi attempting to derive Debug for FFI types.
 impl core::fmt::Debug for ProcessedMessage {

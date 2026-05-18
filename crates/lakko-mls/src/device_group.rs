@@ -175,6 +175,32 @@ impl DeviceGroup {
         })
     }
 
+    /// Load the DeviceGroup for `account_id` from `identity`'s
+    /// MLS provider storage. Returns `None` when the provider
+    /// has no row for the deterministic
+    /// [`DeviceGroup::group_id_for(account_id)`] (typical
+    /// case: a freshly-bootstrapped session that hasn't yet
+    /// rehydrated, or this device hasn't joined the
+    /// DeviceGroup yet).
+    ///
+    /// Pair with [`crate::identity::Identity::restore_storage`]
+    /// on app startup: restore the snapshot first, then call
+    /// `DeviceGroup::load` to get a live handle.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Group`] when storage carries a row
+    /// under the expected `group_id` but OpenMLS rejects it
+    /// (corrupt snapshot, ciphersuite mismatch, …).
+    pub fn load(identity: &Identity, account_id: &AccountId) -> Result<Option<Self>> {
+        let group_id = Self::group_id_for(account_id);
+        let loaded = Group::load(identity, &group_id)?;
+        Ok(loaded.map(|inner| Self {
+            inner,
+            account_id: *account_id,
+        }))
+    }
+
     /// Reconstruct a [`DeviceGroup`] handle from an underlying
     /// [`Group`] already loaded from disk. The caller asserts
     /// (via `account_id`) what the group_id should look like;

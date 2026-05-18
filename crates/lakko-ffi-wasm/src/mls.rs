@@ -610,6 +610,37 @@ pub fn device_group_id_for(account_id: &[u8]) -> Result<Vec<u8>, JsError> {
     Ok(MlsDeviceGroup::group_id_for(&acct))
 }
 
+/// Load an existing DeviceGroup for `account_id` from
+/// `identity`'s MLS provider storage. Pair with
+/// `Identity.restoreStorage` on app startup: restore the
+/// snapshot first, then call this to get the live handle.
+///
+/// Returns `undefined` when the provider has no row under the
+/// deterministic group_id — typical case: a freshly-derived
+/// Identity that hasn't joined the DeviceGroup yet.
+///
+/// Free function instead of a `DeviceGroup::load` constructor
+/// because wasm-bindgen's constructor surface doesn't tolerate
+/// `Result<Option<Self>, _>` returns cleanly — the same shape
+/// `Group::load` uses works fine as a free function.
+#[wasm_bindgen(js_name = loadDeviceGroup)]
+pub fn load_device_group(
+    identity: &Identity,
+    account_id: &[u8],
+) -> Result<Option<DeviceGroup>, JsError> {
+    if account_id.len() != 16 {
+        return Err(JsError::new("account_id must be 16 bytes"));
+    }
+    let mut acct = [0u8; 16];
+    acct.copy_from_slice(account_id);
+    match MlsDeviceGroup::load(&identity.inner, &acct).map_err(mls_err)? {
+        Some(inner) => Ok(Some(DeviceGroup {
+            inner: Mutex::new(inner),
+        })),
+        None => Ok(None),
+    }
+}
+
 // ============================================================================
 // Tests
 // ============================================================================
