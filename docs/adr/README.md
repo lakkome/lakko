@@ -21,3 +21,4 @@ See [`0000-template.md`](0000-template.md). Style — Michael Nygard, minimalist
 | [0004](0004-anti-censorship.md) | Accepted | Pluggable transports: REALITY + MASQUE + Shadowsocks-2022 |
 | [0005](0005-contact-invitations.md) | Accepted | Capability-based invites + 6 scenarios + pseudonym lifecycle |
 | [0006](0006-licensing.md) | Accepted | AGPLv3 monorepo + CLA |
+| [0007](0007-multi-device-identity.md) | Accepted | Two-tier identity (account-level deterministic + per-device random) |
