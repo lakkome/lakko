@@ -33,6 +33,7 @@ import Home from "./Home";
 import Contacts from "./Contacts";
 import Chat from "./Chat";
 import DevProbe from "./DevProbe";
+import Devices from "./Devices";
 import Invite from "./Invite";
 import NotFound from "./NotFound";
 import { chatRoutePattern, inviteRoutePattern, paths } from "./paths";
@@ -87,6 +88,7 @@ export const routes: RouteDefinition[] = [
       { path: paths.contacts, component: Contacts },
       { path: chatRoutePattern, component: Chat },
       { path: paths.dev, component: DevProbe },
+      { path: paths.devices, component: Devices },
     ],
   },
 

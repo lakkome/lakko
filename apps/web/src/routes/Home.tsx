@@ -30,6 +30,10 @@ export default function Home(): JSX.Element {
           discovery (OPRF lookup) ships in 1.16d.
         </li>
         <li>
+          <A href={paths.devices}>Devices</A> — link a second device to
+          this account via QR pairing (2a3b2).
+        </li>
+        <li>
           <A href={paths.dev}>Dev probe</A> — verify the WASM core is
           loaded in this browser.
         </li>

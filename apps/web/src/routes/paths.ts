@@ -41,6 +41,8 @@ export const paths = {
    * here in normal flows.
    */
   dev: "/dev",
+  /** Multi-device management — pair / scan / list devices (2a3b2-ui). */
+  devices: "/devices",
   /**
    * Build a chat URL for a specific MLS group. `groupIdB64Url`
    * MUST be a URL-safe-base64-no-pad encoding of the group's
