@@ -1,0 +1,235 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+/**
+ * IndexedDB-backed encrypted store for plaintext chat
+ * messages (Phase 2a3f1-web).
+ *
+ * Mirror of:
+ *
+ *   * `apps/ios/Lakko/Chat/MessageLogStore.swift`
+ *   * `apps/android/.../chat/MessageLogStore.kt`
+ *
+ * Persists the per-account `{ groupIdHex → (cursor, messages) }`
+ * map the UI currently keeps in component-local state. Before
+ * this layer the timeline vanished on every page reload —
+ * MLS state survived via the snapshot store but its forward-
+ * secret chain keys could not re-decrypt the already-consumed
+ * wire bytes.
+ *
+ * ## Schema
+ *
+ * One row per `accountIdB64`:
+ *
+ * ```text
+ *   db   "lakko-message-log"  v1
+ *   ├── store "logs"  keyPath: "accountId" (string)
+ *         row {
+ *           accountId:  <b64-uuidv7>,
+ *           ciphertext: Uint8Array   // [12-byte IV | AES-GCM ct+tag]
+ *         }
+ * ```
+ *
+ * Plaintext is the JSON-encoded [`MessageLogPayload`].
+ * Wrapped under the device root key (the non-extractable
+ * AES-256-GCM `CryptoKey` from 1.16c3c2) — same posture as
+ * the MLS snapshot blob.
+ */
+
+const DB_NAME = "lakko-message-log";
+const DB_VERSION = 1;
+const STORE = "logs";
+const IV_LEN = 12;
+
+// ----- JSON payload (mirror of iOS / Android shapes) -------------
+
+export interface PersistedAttachment {
+  /** Base64-encoded 32-byte SHA-256 blob id. */
+  readonly blobIdB64: string;
+  /** Base64-encoded 32-byte CEK. */
+  readonly keyB64: string;
+  /** Base64-encoded 12-byte AEAD nonce. */
+  readonly nonceB64: string;
+  readonly mime: string | null;
+  /** Stored as a string because JS can't round-trip `u64` >2^53
+   *  through `JSON.parse`. Always present (no `null`); empty
+   *  attachments aren't a thing. */
+  readonly sizeStr: string;
+  readonly name: string | null;
+}
+
+export interface PersistedMessage {
+  /** Stable across snapshots. Stored as a string for the same
+   *  reason as `sizeStr`. */
+  readonly messageId: string;
+  readonly direction: "outgoing" | "incoming" | "system";
+  readonly text: string;
+  readonly attachments: readonly PersistedAttachment[];
+  readonly createdAt: string;
+}
+
+export interface PersistedGroup {
+  /** DS journal cursor (stringified i64). */
+  readonly cursor: string;
+  readonly messages: readonly PersistedMessage[];
+}
+
+/** Wire shape of the encrypted blob, post-decrypt + JSON-parse. */
+export interface MessageLogPayload {
+  readonly version: number;
+  readonly groups: { readonly [groupIdHex: string]: PersistedGroup };
+}
+
+// ----- IDB plumbing ----------------------------------------------
+
+interface PersistedRow {
+  accountId: string;
+  ciphertext: Uint8Array;
+}
+
+function openDb(): Promise<IDBDatabase> {
+  return new Promise((resolve, reject) => {
+    if (typeof indexedDB === "undefined") {
+      reject(new Error("IndexedDB unavailable in this environment"));
+      return;
+    }
+    const req = indexedDB.open(DB_NAME, DB_VERSION);
+    req.onupgradeneeded = (): void => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains(STORE)) {
+        db.createObjectStore(STORE, { keyPath: "accountId" });
+      }
+    };
+    req.onsuccess = (): void => resolve(req.result);
+    req.onerror = (): void =>
+      reject(req.error ?? new Error("indexedDB.open failed"));
+  });
+}
+
+function awaitTx<T>(tx: IDBTransaction, value: T): Promise<T> {
+  return new Promise((resolve, reject) => {
+    tx.oncomplete = (): void => resolve(value);
+    tx.onabort = (): void => reject(tx.error ?? new Error("idb tx aborted"));
+    tx.onerror = (): void => reject(tx.error ?? new Error("idb tx errored"));
+  });
+}
+
+async function encryptBlob(
+  deviceKey: CryptoKey,
+  plaintext: Uint8Array,
+): Promise<Uint8Array> {
+  const iv = crypto.getRandomValues(new Uint8Array(IV_LEN));
+  const ct = new Uint8Array(
+    await crypto.subtle.encrypt(
+      { name: "AES-GCM", iv: iv.slice() },
+      deviceKey,
+      plaintext.slice(),
+    ),
+  );
+  const out = new Uint8Array(IV_LEN + ct.length);
+  out.set(iv, 0);
+  out.set(ct, IV_LEN);
+  return out;
+}
+
+async function decryptBlob(
+  deviceKey: CryptoKey,
+  blob: Uint8Array,
+): Promise<Uint8Array> {
+  if (blob.length < IV_LEN + 16) {
+    throw new Error("encrypted message log is too short to be valid");
+  }
+  const iv = blob.slice(0, IV_LEN);
+  const ct = blob.slice(IV_LEN);
+  const pt = new Uint8Array(
+    await crypto.subtle.decrypt({ name: "AES-GCM", iv }, deviceKey, ct),
+  );
+  return pt;
+}
+
+// ----- Public CRUD ----------------------------------------------
+
+/**
+ * Persist (or replace) the message log for an account.
+ *
+ * Best-effort: an IDB / WebCrypto failure surfaces as a
+ * rejected promise; callers (the chat surface) log + swallow.
+ * The in-memory state stays good and the next mutation
+ * retries the write.
+ */
+export async function saveMessageLog(
+  accountIdB64: string,
+  deviceKey: CryptoKey,
+  payload: MessageLogPayload,
+): Promise<void> {
+  const plaintext = new TextEncoder().encode(JSON.stringify(payload));
+  const ciphertext = await encryptBlob(deviceKey, plaintext);
+  const row: PersistedRow = { accountId: accountIdB64, ciphertext };
+  const db = await openDb();
+  try {
+    const tx = db.transaction(STORE, "readwrite");
+    tx.objectStore(STORE).put(row);
+    await awaitTx(tx, undefined);
+  } finally {
+    db.close();
+  }
+}
+
+/**
+ * Read + decrypt the message log for `accountIdB64`. Returns
+ * `null` when:
+ *
+ *   * no row on disk for this account,
+ *   * AES-GCM auth failure (device key rotated since the row
+ *     was written, blob tampered, …),
+ *   * JSON parse failure (corrupt blob — caller starts with
+ *     an empty timeline and re-bootstraps from the DS cursor).
+ */
+export async function loadMessageLog(
+  accountIdB64: string,
+  deviceKey: CryptoKey,
+): Promise<MessageLogPayload | null> {
+  const db = await openDb();
+  let row: PersistedRow | undefined;
+  try {
+    const tx = db.transaction(STORE, "readonly");
+    const req = tx.objectStore(STORE).get(accountIdB64);
+    row = await new Promise<PersistedRow | undefined>((resolve, reject) => {
+      req.onsuccess = (): void => resolve(req.result as PersistedRow | undefined);
+      req.onerror = (): void => reject(req.error ?? new Error("idb get failed"));
+    });
+    await awaitTx(tx, undefined);
+  } finally {
+    db.close();
+  }
+  if (row === undefined) return null;
+  let plaintext: Uint8Array;
+  try {
+    plaintext = await decryptBlob(deviceKey, row.ciphertext);
+  } catch {
+    return null;
+  }
+  try {
+    return JSON.parse(new TextDecoder().decode(plaintext)) as MessageLogPayload;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Erase the message log for `accountIdB64`. No-op when
+ * absent. Called from `forgetDevice`. The device root key
+ * itself lives in a different IDB store and gets wiped by
+ * the auth layer; this call drops only the per-account
+ * message-log row.
+ */
+export async function deleteMessageLog(accountIdB64: string): Promise<void> {
+  const db = await openDb();
+  try {
+    const tx = db.transaction(STORE, "readwrite");
+    tx.objectStore(STORE).delete(accountIdB64);
+    await awaitTx(tx, undefined);
+  } finally {
+    db.close();
+  }
+}

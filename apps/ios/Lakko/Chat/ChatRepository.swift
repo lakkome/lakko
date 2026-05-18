@@ -65,6 +65,10 @@ public final class ChatRepository: ObservableObject {
     private let discovery: DiscoveryClient
     private let snapshotStore: IdentitySnapshotStore
     private let knownGroupsStore: KnownGroupsStore
+    /// Phase 2a3f1 — persistent plaintext-message log.
+    /// Survives app launches; mutated on every append /
+    /// poll / send.
+    private let messageLogStore: MessageLogStore
 
     /// The canonical ``Identity`` for the current session. `nil`
     /// until ``bootstrap(secrets:)`` populates it.
@@ -85,13 +89,15 @@ public final class ChatRepository: ObservableObject {
         dsClient: DsClient = DsClient(),
         discovery: DiscoveryClient = DiscoveryClient(),
         snapshotStore: IdentitySnapshotStore = IdentitySnapshotStore(),
-        knownGroupsStore: KnownGroupsStore = KnownGroupsStore()
+        knownGroupsStore: KnownGroupsStore = KnownGroupsStore(),
+        messageLogStore: MessageLogStore = MessageLogStore()
     ) {
         self.chatClient = chatClient
         self.dsClient = dsClient
         self.discovery = discovery
         self.snapshotStore = snapshotStore
         self.knownGroupsStore = knownGroupsStore
+        self.messageLogStore = messageLogStore
     }
 
     // MARK: - Lifecycle
@@ -171,6 +177,19 @@ public final class ChatRepository: ObservableObject {
             }
         }
 
+        // Phase 2a3f1 — restore the plaintext message log on
+        // top of the rehydrated Group handles. The two stores
+        // are independent (MLS state ⊥ message timeline), so a
+        // corrupt / missing log doesn't block the rest of the
+        // bootstrap.
+        if let log = messageLogStore.getLog(accountIdB64: newAccountIdB64) {
+            for (groupIdHex, persisted) in log.groups {
+                guard let record = groups[groupIdHex] else { continue }
+                let messages = persisted.messages.compactMap { $0.toChatMessage() }
+                record.seed(messages: messages, cursor: persisted.cursor)
+            }
+        }
+
         state = ChatRepositoryState(
             threads: buildThreadList(),
             bootstrapped: true
@@ -195,6 +214,12 @@ public final class ChatRepository: ObservableObject {
         if let accountIdB64 = accountIdB64 {
             snapshotStore.deleteSnapshot(accountIdB64: accountIdB64)
             knownGroupsStore.clear(accountIdB64: accountIdB64)
+            // Phase 2a3f1 — drop the plaintext message log too.
+            // The Keychain wrap key is shared across accounts
+            // (per-installation, not per-account) so we leave
+            // it intact; only the per-account envelope file
+            // gets removed.
+            messageLogStore.deleteLog(accountIdB64: accountIdB64)
         }
     }
 
@@ -486,6 +511,29 @@ public final class ChatRepository: ObservableObject {
         } catch {
             // best-effort
         }
+        // Phase 2a3f1 — co-located with the MLS snapshot
+        // persist so every mutation that ratchets the group
+        // also writes the resulting plaintext-message log.
+        // Keeps the on-disk pair in sync without dispersing
+        // call sites.
+        persistMessageLogBestEffort()
+    }
+
+    /// Capture the current `(cursor, messages)` map across
+    /// every known group and write it to the encrypted message
+    /// log (Phase 2a3f1). Best-effort — Keychain / FS failures
+    /// log + swallow.
+    private func persistMessageLogBestEffort() {
+        guard let accountIdB64 = currentAccountIdB64 else { return }
+        var slots: [String: PersistedGroup] = [:]
+        for (hex, record) in groups {
+            slots[hex] = PersistedGroup(
+                cursor: record.cursor,
+                messages: record.messages.map { PersistedMessage(from: $0) }
+            )
+        }
+        let payload = MessageLogPayload(groups: slots)
+        messageLogStore.putLog(accountIdB64: accountIdB64, payload: payload)
     }
 
     private func buildThreadList() -> [ChatThread] {
@@ -613,6 +661,18 @@ private final class GroupRecord {
     init(group: Group, groupId: Data) {
         self.group = group
         self.groupId = groupId
+    }
+
+    /// Phase 2a3f1 — seed the in-memory timeline + cursor from
+    /// a persistent snapshot. Called from `ChatRepository.bootstrap`
+    /// after the live `Group` handle has been rehydrated; the
+    /// MLS state + the message log are stored separately on
+    /// disk and the order they get reattached doesn't matter.
+    /// Idempotent on the message ids — duplicate seeds replace
+    /// rather than append.
+    func seed(messages: [ChatMessage], cursor: Int64) {
+        self.messages = messages
+        self.cursor = cursor
     }
 
     func appendOutgoing(

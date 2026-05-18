@@ -45,6 +45,15 @@ import { A, useNavigate, useParams } from "@solidjs/router";
 import { useAuth } from "../auth/AuthContext";
 import { useDeviceGroupSync } from "../devices/sync/DeviceGroupSyncContext";
 import { groupIdHex as hexOf } from "../devices/sync/state";
+import {
+  loadMessageLog,
+  saveMessageLog,
+  type MessageLogPayload,
+  type PersistedAttachment,
+  type PersistedGroup,
+  type PersistedMessage,
+} from "../chat/message-log-store";
+import { getDeviceKey } from "../auth/key-store";
 import { base64Encode, base64UrlDecodeNoPad } from "../auth/account-id";
 import { ChatClient } from "../chat/client";
 import { ContactsClient } from "../contacts/client";
@@ -203,6 +212,23 @@ function ChatView(props: {
 
   const [rows, setRows] = createSignal<TimelineRow[]>([]);
   const [cursor, setCursor] = createSignal(0);
+
+  // Phase 2a3f1-web — persistent message log. The plaintext
+  // timeline survives reloads under the device root key in
+  // IDB; without it, every refresh emptied the visible
+  // history (MLS forward secrecy wipes the chain keys, so
+  // there's no way to re-derive past plaintexts from the wire
+  // bytes). The two stores (MLS snapshot ⊥ message log) ride
+  // side-by-side keyed on the same `accountIdB64`.
+  const accountIdB64ForLog = (): string | null => {
+    const s = auth.state();
+    if (s.kind !== "session") return null;
+    return s.account.accountId;
+  };
+  const groupIdHexForLog = (): string => hexOf(props.entry.group.groupId);
+  let didHydrateFromLog = false;
+  let pendingPersistTimer: ReturnType<typeof setTimeout> | null = null;
+  const PERSIST_DEBOUNCE_MS = 500;
   const [input, setInput] = createSignal("");
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
@@ -769,9 +795,115 @@ function ChatView(props: {
 
   // Pull the current backlog on mount so a fresh `/chat/:id`
   // visit shows whatever the peer has sent so far.
+  //
+  // Phase 2a3f1-web — also seed `rows` from the persistent
+  // message log BEFORE the first refresh. This way reloads
+  // show prior history immediately + the DS poll just
+  // catches up any rows that arrived while the tab was
+  // closed (the persisted `cursor` lets the next refresh
+  // start from the right slot).
   onMount(() => {
-    void refresh();
+    void (async (): Promise<void> => {
+      await hydrateFromLog();
+      await refresh();
+    })();
   });
+
+  // Debounced persist whenever the timeline mutates. We
+  // re-read `rows()` inside the effect so every transitive
+  // signal change schedules a write; the 500 ms debounce
+  // collapses bursts (poll batch, send + ack flip) into one
+  // write.
+  createEffect(() => {
+    // touch the signals
+    void rows();
+    void cursor();
+    if (!didHydrateFromLog) return;
+    if (pendingPersistTimer !== null) clearTimeout(pendingPersistTimer);
+    pendingPersistTimer = setTimeout(() => {
+      pendingPersistTimer = null;
+      void persistToLogBestEffort();
+    }, PERSIST_DEBOUNCE_MS);
+  });
+
+  onCleanup(() => {
+    if (pendingPersistTimer !== null) {
+      clearTimeout(pendingPersistTimer);
+      pendingPersistTimer = null;
+    }
+  });
+
+  async function hydrateFromLog(): Promise<void> {
+    try {
+      const accountIdB64 = accountIdB64ForLog();
+      if (accountIdB64 === null) {
+        didHydrateFromLog = true;
+        return;
+      }
+      const deviceKey = await getDeviceKey(accountIdB64);
+      if (deviceKey === null) {
+        didHydrateFromLog = true;
+        return;
+      }
+      const log = await loadMessageLog(accountIdB64, deviceKey);
+      didHydrateFromLog = true;
+      if (log === null) return;
+      const slot = log.groups[groupIdHexForLog()];
+      if (slot === undefined) return;
+      const seeded = slot.messages.map(persistedToTimelineRow);
+      // Only seed when the in-memory list is empty — a refresh
+      // running concurrently with hydration shouldn't get
+      // stomped by the disk load.
+      if (rows().length === 0) {
+        setRows(seeded);
+      }
+      const cur = Number(slot.cursor);
+      if (Number.isFinite(cur) && cur > cursor()) {
+        setCursor(cur);
+      }
+    } catch (err) {
+      // Best-effort — corrupt blob or transient IDB failure
+      // shouldn't block the chat surface. The DS poll backs
+      // up the timeline anyway.
+      // eslint-disable-next-line no-console
+      console.warn("hydrateFromLog failed", err);
+      didHydrateFromLog = true;
+    }
+  }
+
+  async function persistToLogBestEffort(): Promise<void> {
+    try {
+      const accountIdB64 = accountIdB64ForLog();
+      if (accountIdB64 === null) return;
+      const deviceKey = await getDeviceKey(accountIdB64);
+      if (deviceKey === null) return;
+      // Read current log (other groups may have rows that
+      // belong to the same account — we don't want to wipe
+      // them when writing back). Per-tab serialisation is the
+      // common case (one Chat route mounted at a time), so a
+      // read-modify-write race against another tab is rare
+      // enough to ignore for MVP.
+      const existing =
+        (await loadMessageLog(accountIdB64, deviceKey)) ??
+        ({ version: 1, groups: {} } as MessageLogPayload);
+      const next: MessageLogPayload = {
+        version: existing.version,
+        groups: {
+          ...existing.groups,
+          [groupIdHexForLog()]: {
+            cursor: String(cursor()),
+            messages: rows()
+              .map(timelineRowToPersisted)
+              .filter((m): m is PersistedMessage => m !== null),
+          } satisfies PersistedGroup,
+        },
+      };
+      await saveMessageLog(accountIdB64, deviceKey, next);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("persistToLogBestEffort failed", err);
+    }
+  }
 
   return (
     <div
@@ -1560,4 +1692,143 @@ function hasFilesType(dt: DataTransfer | null): boolean {
   // keeps the check working for older list-only implementations.
   const types = Array.from(dt.types);
   return types.includes("Files");
+}
+
+// ---------------------------------------------------------------
+// Phase 2a3f1-web — TimelineRow ↔ PersistedMessage conversion
+// ---------------------------------------------------------------
+
+/** Convert a runtime [`TimelineRow`] into the on-disk
+ *  [`PersistedMessage`] shape. Returns `null` for outgoing
+ *  rows that haven't been acked yet — those carry no
+ *  server-assigned `messageId` and would collide on reload
+ *  with whatever the DS eventually hands back. The next ack
+ *  flips the row to `kind: "outgoing"` with a populated
+ *  `messageId` and the next persist sweep includes it. */
+function timelineRowToPersisted(row: TimelineRow): PersistedMessage | null {
+  if (row.kind === "outgoing") {
+    if (
+      row.ack !== "sent" ||
+      row.messageId === undefined ||
+      row.createdAt === undefined
+    ) {
+      return null;
+    }
+    return {
+      messageId: String(row.messageId),
+      direction: "outgoing",
+      text: row.plaintext,
+      attachments: row.attachments.map(persistedFromAttachmentRef),
+      createdAt: row.createdAt,
+    };
+  }
+  // Incoming: split application vs system.
+  if (row.event.kind === "application") {
+    return {
+      messageId: String(row.event.messageId),
+      direction: "incoming",
+      text: row.event.text,
+      attachments: row.event.attachments.map(persistedFromAttachmentRef),
+      createdAt: row.event.createdAt,
+    };
+  }
+  // system
+  return {
+    messageId: String(row.event.messageId),
+    direction: "system",
+    text: `[mls ${row.event.systemKind}]`,
+    attachments: [],
+    createdAt: row.event.createdAt,
+  };
+}
+
+function persistedFromAttachmentRef(a: AttachmentRefBytes): PersistedAttachment {
+  return {
+    blobIdB64: b64UrlEncode(a.blobId),
+    keyB64: b64UrlEncode(a.key),
+    nonceB64: b64UrlEncode(a.nonce),
+    mime: a.mime ?? null,
+    sizeStr: String(a.size),
+    name: a.name ?? null,
+  };
+}
+
+/** Inverse — reconstruct a [`TimelineRow`] from the on-disk
+ *  shape. Outgoing rows come back as acked
+ *  (`ack: "sent"`, no `tempId`); the UI's `<For>` key uses
+ *  `messageId` for outgoing+sent so no key conflict with the
+ *  fresh-send tempIds.
+ *
+ *  Caveat: `system` rows survive the round trip with their
+ *  text already baked in; the systemKind discriminator isn't
+ *  recoverable but the rendered string is the same. */
+function persistedToTimelineRow(m: PersistedMessage): TimelineRow {
+  const attachments = m.attachments.map(attachmentRefFromPersisted);
+  if (m.direction === "outgoing") {
+    return {
+      kind: "outgoing",
+      tempId: -1,
+      plaintext: m.text,
+      attachments,
+      ack: "sent",
+      messageId: Number(m.messageId),
+      createdAt: m.createdAt,
+    };
+  }
+  if (m.direction === "incoming") {
+    return {
+      kind: "incoming",
+      event: {
+        kind: "application",
+        messageId: Number(m.messageId),
+        text: m.text,
+        plaintext: m.text,
+        attachments,
+        createdAt: m.createdAt,
+      },
+    };
+  }
+  // system
+  return {
+    kind: "incoming",
+    event: {
+      kind: "system",
+      messageId: Number(m.messageId),
+      systemKind: "commit",
+      createdAt: m.createdAt,
+    },
+  };
+}
+
+function attachmentRefFromPersisted(a: PersistedAttachment): AttachmentRefBytes {
+  return {
+    blobId: b64UrlDecode(a.blobIdB64),
+    key: b64UrlDecode(a.keyB64),
+    nonce: b64UrlDecode(a.nonceB64),
+    mime: a.mime ?? undefined,
+    size: Number(a.sizeStr),
+    name: a.name ?? undefined,
+  };
+}
+
+function b64UrlEncode(bytes: Uint8Array): string {
+  let binary = "";
+  for (let i = 0; i < bytes.length; i += 1) {
+    binary += String.fromCharCode(bytes[i] as number);
+  }
+  return btoa(binary)
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
+}
+
+function b64UrlDecode(s: string): Uint8Array {
+  const padded = s + "===".slice((s.length + 3) % 4);
+  const std = padded.replace(/-/g, "+").replace(/_/g, "/");
+  const binary = atob(std);
+  const out = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) {
+    out[i] = binary.charCodeAt(i);
+  }
+  return out;
 }

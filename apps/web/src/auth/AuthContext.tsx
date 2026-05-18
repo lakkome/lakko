@@ -83,6 +83,7 @@ import {
 import { clearAll as clearContactsStore } from "../contacts/local-store";
 import { useChats } from "../chat/ChatContext";
 import { deleteMlsSnapshot } from "../chat/mls-store";
+import { deleteMessageLog } from "../chat/message-log-store";
 import { rehydrateMlsState } from "../chat/rehydrate";
 import { subscribeToPush, unsubscribeFromPush } from "../push/subscribe";
 import { bootstrapBackupFromPhraseString } from "../backup/bootstrap";
@@ -1079,6 +1080,17 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
           await deleteMlsSnapshot(cached.accountIdB64);
         } catch {
           // Ignore — same best-effort policy as above.
+        }
+        // Phase 2a3f1-web — drop the plaintext message log
+        // too. Same wipe-on-forgetDevice rationale as the MLS
+        // snapshot: the encryption key (device root key) just
+        // got wiped, so the ciphertext is already unreadable;
+        // a stale IDB row would confuse a future signup on
+        // the same account_id.
+        try {
+          await deleteMessageLog(cached.accountIdB64);
+        } catch {
+          // best-effort
         }
         // Phase 1.13c: drop the persisted session token too. The
         // ciphertext is unreadable without the device key just

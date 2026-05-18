@@ -203,6 +203,21 @@ public class ChatRepository(
             publishThreadList()
         }
 
+        // Phase 2a3f1 — restore the plaintext message log on
+        // top of the rehydrated Group handles. The two stores
+        // are independent (MLS state ⊥ message timeline), so
+        // a corrupt / missing log doesn't block the rest of
+        // the bootstrap.
+        val log = MessageLogStore.getLog(applicationContext, newAccountIdB64)
+        if (log != null) {
+            for ((groupIdHex, persisted) in log.groups) {
+                val record = groups[groupIdHex] ?: continue
+                val seeded = persisted.messages.mapNotNull { it.toChatMessage() }
+                record.seed(messages = seeded, cursor = persisted.cursor)
+            }
+            publishThreadList()
+        }
+
         mutableState.update { it.copy(bootstrapped = true) }
     }
 
@@ -532,6 +547,15 @@ public class ChatRepository(
                 // Best-effort wipe — same posture as
                 // snapshotStore.deleteSnapshot above.
             }
+            // Phase 2a3f1 — drop the plaintext message log
+            // too. The Keystore wrap key is shared across
+            // accounts so we leave it intact; only the
+            // per-account envelope file gets removed.
+            try {
+                MessageLogStore.deleteLog(applicationContext, accountIdB64)
+            } catch (_: Throwable) {
+                // best-effort
+            }
         }
     }
 
@@ -589,6 +613,33 @@ public class ChatRepository(
             // equivalent logger so failures here surface to
             // diagnostics.
         }
+        // Phase 2a3f1 — co-located with the MLS snapshot
+        // persist so every mutation that ratchets the group
+        // also writes the resulting plaintext-message log.
+        persistMessageLogBestEffort()
+    }
+
+    /** Capture `(cursor, messages)` per known group + write
+     *  it to the encrypted message log (Phase 2a3f1).
+     *  Best-effort — Keystore / FS failures swallowed; the
+     *  in-memory state stays good and the next mutation
+     *  retries naturally. */
+    private fun persistMessageLogBestEffort() {
+        val accountIdB64 = currentAccountIdB64.get() ?: return
+        val slots = mutableMapOf<String, PersistedGroup>()
+        for ((hex, record) in groups) {
+            slots[hex] = PersistedGroup(
+                cursor = record.cursor,
+                messages = record.snapshot().map {
+                    PersistedMessage.Companion.from(it)
+                },
+            )
+        }
+        MessageLogStore.putLog(
+            context = applicationContext,
+            accountIdB64 = accountIdB64,
+            payload = MessageLogPayload(groups = slots),
+        )
     }
 
     /** Snapshot the per-group state into the public StateFlow.
@@ -720,6 +771,21 @@ private class GroupRecord(
         messages = messages.toList(),
         cursor = cursor,
     )
+
+    /** Read-only snapshot for the persistence layer. */
+    fun snapshot(): List<ChatMessage> = messages.toList()
+
+    /** Phase 2a3f1 — seed the in-memory timeline + cursor
+     *  from a persistent snapshot. Called from
+     *  [ChatRepository.bootstrap] after the live [Group]
+     *  handle has been rehydrated. */
+    fun seed(messages: List<ChatMessage>, cursor: Long) {
+        synchronized(this.messages) {
+            this.messages.clear()
+            this.messages.addAll(messages)
+        }
+        this.cursor = cursor
+    }
 
     private fun systemRowText(kind: SystemKind): String = when (kind) {
         SystemKind.Commit -> "[mls commit]"
