@@ -28,6 +28,24 @@
     -->
     <uses-permission android:name="android.permission.INTERNET" />
 
+    <!--
+      Phase 2a3b4 — runtime camera permission for the add-device
+      QR scanner. Compose's `DevicesScreen` requests this at the
+      moment the user taps "Open camera" (mirror of iOS
+      NSCameraUsageDescription Just-In-Time prompt). Without the
+      permission the screen surfaces a "permission needed"
+      affordance with a deep-link to Settings.
+
+      `<uses-feature>` advertises camera as optional — Lakko
+      runs fine on devices without a back-camera (the user can
+      still receive a pairing from the other side; only the
+      add-device path needs it).
+    -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-feature
+        android:name="android.hardware.camera"
+        android:required="false" />
+
     <application
         android:label="@string/app_name"
         android:icon="@android:drawable/sym_def_app_icon"

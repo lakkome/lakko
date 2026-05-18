@@ -848,6 +848,22 @@ public class AuthRepository(
             } catch (_: Throwable) {
                 // best-effort
             }
+            // Phase 2a3b4 — drop the per-account DeviceGroup
+            // snapshot envelope. Without the snapshot the local
+            // OpenMLS provider has no DeviceGroup state to
+            // restore, mirroring the iOS / web `forgetDevice`
+            // surface. The Keystore wrap key under
+            // `DeviceGroupSnapshotStore.WRAP_KEY_ALIAS` is
+            // shared across accounts so we leave it intact;
+            // only the per-account envelope file is removed.
+            try {
+                me.lakko.app.devices.DeviceGroupSnapshotStore.deleteSnapshot(
+                    applicationContext,
+                    cached.accountIdB64,
+                )
+            } catch (_: Throwable) {
+                // best-effort
+            }
         }
         sessionStore.clear()
         clearIdentitySecrets()

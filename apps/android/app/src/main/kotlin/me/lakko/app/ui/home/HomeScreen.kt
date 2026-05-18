@@ -38,6 +38,7 @@ public fun HomeScreen(
     onOpenContacts: () -> Unit,
     onOpenChats: () -> Unit,
     onOpenPasskeys: () -> Unit,
+    onOpenDevices: () -> Unit,
     onLogout: () -> Unit,
     onForgetDevice: () -> Unit,
     modifier: Modifier = Modifier,
@@ -91,6 +92,16 @@ public fun HomeScreen(
             modifier = Modifier.fillMaxWidth(),
         ) {
             Text("Manage passkeys")
+        }
+        Spacer(Modifier.height(8.dp))
+        // 2a3b4 — DeviceGroup pairing surface. Tapping pushes
+        // `DevicesScreen` via the SessionRoot destination
+        // toggle.
+        OutlinedButton(
+            onClick = onOpenDevices,
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Text("Devices")
         }
         Spacer(Modifier.height(16.dp))
         Text(

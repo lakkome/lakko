@@ -207,6 +207,19 @@ dependencies {
     implementation(libs.androidx.credentials)
     implementation(libs.androidx.credentials.play.services.auth)
 
+    // 2a3b4 — add-device QR pipeline. CameraX drives the live
+    // preview + frame analysis, ML Kit decodes QR codes inside
+    // those frames, ZXing-core encodes the pairing payload into
+    // the QR matrix the joining device renders. All three together
+    // cover the iOS CoreImage + AVCaptureMetadataOutput pair and
+    // the web `qrcode + jsqr` pair on a single AAR surface.
+    implementation(libs.androidx.camera.core)
+    implementation(libs.androidx.camera.camera2)
+    implementation(libs.androidx.camera.lifecycle)
+    implementation(libs.androidx.camera.view)
+    implementation(libs.mlkit.barcode.scanning)
+    implementation(libs.zxing.core)
+
     // 1.15d2 — JVM-side unit tests. `testDebugUnitTest` runs
     // these on the host JDK without any emulator; perfect for
     // the AuthClient flow tests that drive the high-level

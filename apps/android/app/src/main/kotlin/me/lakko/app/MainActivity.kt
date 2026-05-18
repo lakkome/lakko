@@ -46,6 +46,7 @@ import me.lakko.app.ui.contacts.ContactsScreen
 import me.lakko.app.ui.contacts.ContactsViewModel
 import me.lakko.app.ui.contacts.InviteLandingScreen
 import me.lakko.app.ui.contacts.InviteLandingViewModel
+import me.lakko.app.ui.devices.DevicesScreen
 import me.lakko.app.ui.home.HomeScreen
 
 /**
@@ -347,6 +348,7 @@ private fun SessionRoot(
             onOpenContacts = { destination = SessionDestination.Contacts },
             onOpenChats = { destination = SessionDestination.Chats },
             onOpenPasskeys = { destination = SessionDestination.Passkeys },
+            onOpenDevices = { destination = SessionDestination.Devices },
             onLogout = {
                 contactsRepository.clear()
                 chatRepository.clear()
@@ -420,6 +422,11 @@ private fun SessionRoot(
             )
         }
 
+        SessionDestination.Devices -> DevicesScreen(
+            authRepository = authRepository,
+            onBack = { destination = SessionDestination.Home },
+        )
+
         is SessionDestination.InviteLanding -> {
             val inviteSlug = current.slug
             // Key the VM by slug so re-tapping a different
@@ -458,6 +465,8 @@ private sealed interface SessionDestination {
     data class InviteLanding(val slug: String) : SessionDestination
     /** 2a2e — passkey management surface. */
     data object Passkeys : SessionDestination
+    /** 2a3b4 — DeviceGroup pairing surface. */
+    data object Devices : SessionDestination
 }
 
 /**
