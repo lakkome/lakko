@@ -232,7 +232,14 @@ private fun PairTab(
                                     is WelcomeCourier.WelcomeOutcome.Received -> {
                                         state = PairUi.Joining
                                         try {
-                                            js.accept(outcome.welcomeBytes)
+                                            // Phase 2a3d8-ui — pass the
+                                            // Welcome cursor so `accept`
+                                            // polls past it for the
+                                            // scanner-side history bundle.
+                                            js.accept(
+                                                welcomeBytes = outcome.welcomeBytes,
+                                                welcomeCursor = outcome.welcomeCursor,
+                                            )
                                             state = PairUi.Done
                                         } catch (cause: Throwable) {
                                             state = PairUi.Error(

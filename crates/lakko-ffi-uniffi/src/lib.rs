@@ -940,6 +940,156 @@ pub fn open_history_bundle(
     Ok(out)
 }
 
+// ============================================================================
+// Phase 2a3d8-ui — structured history-bundle FFI
+//
+// The byte-oriented `seal_history_bundle` / `open_history_bundle` above
+// assume the caller hands in / receives a prost-encoded `HistoryBundle`
+// proto. Three clients × three proto runtimes isn't a great trade so
+// the surface below mirrors the same operation in plain `uniffi::Record`
+// + `uniffi::Object` types. Native callers (Swift / Kotlin) never see a
+// proto byte buffer; they build / consume the Records.
+//
+// Wire format is identical to the byte path's — same prost-encoded
+// `HistoryBundle` + `SealedBundle` wrappers underneath — so the two
+// callers interop on the wire.
+// ============================================================================
+
+/// One message in a [`StructuredHistoryGroup`] (Phase 2a3d8-ui).
+///
+/// `payload_bytes` is the already-decoded MLS `ApplicationPayload`
+/// blob — the same bytes the receiver-side
+/// `Group::process_incoming` produced when the message first
+/// landed. The receiving device decodes it via its native chat
+/// envelope parser before projecting into the local message
+/// store.
+#[derive(uniffi::Record)]
+pub struct StructuredHistoryMessage {
+    /// TLS-encoded `mls_app::v1::ApplicationPayload` bytes from
+    /// the original receive path.
+    pub payload_bytes: Vec<u8>,
+    /// Sender MLS leaf index at the time of original receipt.
+    pub sender_leaf: u32,
+    /// Local store's per-message id (stable across snapshots).
+    /// Used by the receiver for dedup against its own log.
+    pub message_id: Vec<u8>,
+    /// UNIX millis when the sender first saw the message.
+    pub received_at_ms: u64,
+}
+
+/// All history rows for a single conversation group.
+#[derive(uniffi::Record)]
+pub struct StructuredHistoryGroup {
+    /// MLS group_id the messages belong to.
+    pub group_id: Vec<u8>,
+    /// Messages, newest-first. Receiver inserts in reverse so
+    /// the local store ends up with oldest-first ordering.
+    pub messages: Vec<StructuredHistoryMessage>,
+    /// `true` when the list was truncated to a per-group cap.
+    /// UI may surface a "load older" affordance later.
+    pub count_capped: bool,
+}
+
+/// Top-level result of [`open_history_bundle_structured`].
+#[derive(uniffi::Record)]
+pub struct StructuredHistoryBundle {
+    pub groups: Vec<StructuredHistoryGroup>,
+    /// HLC of the most recent message included in the bundle.
+    pub max_hlc: u64,
+}
+
+/// AEAD-seal a structured history bundle (Phase 2a3d8-ui).
+///
+/// Same wire format as [`seal_history_bundle`] — the function
+/// internally builds a `HistoryBundle` proto from the supplied
+/// Records and runs the byte path's seal logic.
+///
+/// `secret` MUST be 32 bytes (typically the output of
+/// [`DeviceGroup::history_bundle_secret`]).
+#[uniffi::export]
+pub fn seal_history_bundle_structured(
+    secret: Vec<u8>,
+    groups: Vec<StructuredHistoryGroup>,
+    max_hlc: u64,
+) -> Result<Vec<u8>, FfiError> {
+    if secret.len() != 32 {
+        return Err(FfiError::Codec("history-bundle secret must be 32 bytes".into()));
+    }
+    let mut key = [0u8; 32];
+    key.copy_from_slice(&secret);
+
+    let bundle = build_history_bundle_proto(groups, max_hlc);
+    let sealed = lakko_mls::history_bundle::seal_bundle(&key, &bundle)?;
+    Ok(sealed)
+}
+
+/// Inverse of [`seal_history_bundle_structured`]. Returns the
+/// structured projection — no proto runtime needed on the
+/// caller side.
+#[uniffi::export]
+pub fn open_history_bundle_structured(
+    secret: Vec<u8>,
+    sealed_bytes: Vec<u8>,
+) -> Result<StructuredHistoryBundle, FfiError> {
+    if secret.len() != 32 {
+        return Err(FfiError::Codec("history-bundle secret must be 32 bytes".into()));
+    }
+    let mut key = [0u8; 32];
+    key.copy_from_slice(&secret);
+
+    let bundle = lakko_mls::history_bundle::open_bundle(&key, &sealed_bytes)?;
+    Ok(StructuredHistoryBundle {
+        max_hlc: bundle.max_hlc,
+        groups: bundle
+            .groups
+            .into_iter()
+            .map(|g| StructuredHistoryGroup {
+                group_id: g.group_id,
+                count_capped: g.count_capped,
+                messages: g
+                    .messages
+                    .into_iter()
+                    .map(|m| StructuredHistoryMessage {
+                        payload_bytes: m.payload_bytes,
+                        sender_leaf: m.sender_leaf,
+                        message_id: m.message_id,
+                        received_at_ms: m.received_at_ms,
+                    })
+                    .collect(),
+            })
+            .collect(),
+    })
+}
+
+fn build_history_bundle_proto(
+    groups: Vec<StructuredHistoryGroup>,
+    max_hlc: u64,
+) -> lakko_proto::mls_app::history_bundle::v1::HistoryBundle {
+    use lakko_proto::mls_app::history_bundle::v1::{
+        HistoryBundle, HistoryGroup, HistoryMessage,
+    };
+    HistoryBundle {
+        max_hlc,
+        groups: groups
+            .into_iter()
+            .map(|g| HistoryGroup {
+                group_id: g.group_id,
+                count_capped: g.count_capped,
+                messages: g
+                    .messages
+                    .into_iter()
+                    .map(|m| HistoryMessage {
+                        payload_bytes: m.payload_bytes,
+                        sender_leaf: m.sender_leaf,
+                        message_id: m.message_id,
+                        received_at_ms: m.received_at_ms,
+                    })
+                    .collect(),
+            })
+            .collect(),
+    }
+}
+
 /// Compute the deterministic DeviceGroup `group_id` from an
 /// account_id, without building a `DeviceGroup` instance.
 /// Useful on the joining-device side when polling the DS

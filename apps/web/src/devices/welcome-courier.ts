@@ -57,7 +57,14 @@ export async function publishWelcome(
 
 /** Result of [`pollForWelcome`]. */
 export type WelcomeOutcome =
-  | { readonly kind: "received"; readonly welcome: Uint8Array }
+  | {
+      readonly kind: "received";
+      readonly welcome: Uint8Array;
+      /** DS journal id the Welcome landed on. Passed to
+       *  [`pollForHistoryBundle`] as the `welcomeCursor` so
+       *  the history poll starts at the next FIFO slot. */
+      readonly welcomeCursor: number;
+    }
   | { readonly kind: "timeout" }
   | { readonly kind: "cancelled" };
 
@@ -141,7 +148,11 @@ export async function pollForWelcome(
       // Defensive — `noUncheckedIndexedAccess` flags this
       // path; the length check above guarantees the value.
       if (first === undefined) continue;
-      return { kind: "received", welcome: first.payload };
+      return {
+        kind: "received",
+        welcome: first.payload,
+        welcomeCursor: first.id,
+      };
     }
     // Advance the cursor by the highest id we've seen so the
     // next poll doesn't re-fetch the same empty range. In
@@ -150,6 +161,96 @@ export async function pollForWelcome(
     // non-Welcome bytes into the slot (which shouldn't
     // happen — the slot is single-use by design — but the
     // cursor advance is the canonical FIFO-journal posture).
+    cursor = result.messages.reduce((acc, m) => Math.max(acc, m.id), cursor);
+  }
+}
+
+// ---------------------------------------------------------------
+// Phase 2a3d8-ui — history-bundle courier piggybacks the
+// rendezvous mailbox. After the Welcome lands on slot id=1, the
+// scanner side publishes the sealed history bundle as the next
+// FIFO row; the joining device polls past the Welcome cursor for
+// a small soft window.
+// ---------------------------------------------------------------
+
+/** Default soft timeout for the joiner-side history poll. Short
+ *  — the bundle is supposed to arrive within seconds of the
+ *  Welcome; a longer wait creates a stalled UX without any
+ *  meaningful payoff. */
+const HISTORY_POLL_TIMEOUT_MS = 10_000;
+
+/**
+ * Scanner side: PUT the sealed history bundle to the rendezvous
+ * slot AFTER the Welcome has been published. Same mailbox; the
+ * FIFO journal assigns it the next id (id=2 if Welcome was the
+ * first publish).
+ */
+export async function publishHistoryBundle(
+  rendezvousPseudonym: Uint8Array,
+  sealedBytes: Uint8Array,
+  options: { ds?: DsClient } = {},
+): Promise<void> {
+  const ds = options.ds ?? new DsClient();
+  await ds.publishMailbox(rendezvousPseudonym, sealedBytes);
+}
+
+/** Result of [`pollForHistoryBundle`]. */
+export type HistoryBundleOutcome =
+  | { readonly kind: "received"; readonly sealedBytes: Uint8Array }
+  | { readonly kind: "timeout" }
+  | { readonly kind: "cancelled" };
+
+/**
+ * Joining side: poll the rendezvous mailbox past the Welcome
+ * cursor for the sealed history bundle. Soft timeout 10 s —
+ * the scanner side either publishes within that window or never
+ * (e.g. it had no prior history; nothing to send).
+ *
+ * `welcomeCursor` is the id of the Welcome row the joining
+ * device just consumed (typically `1` for a fresh pairing).
+ * The poll starts at `after = welcomeCursor` so the next FIFO
+ * row is the bundle.
+ */
+export async function pollForHistoryBundle(
+  rendezvousPseudonym: Uint8Array,
+  welcomeCursor: number,
+  options: {
+    ds?: DsClient;
+    signal?: AbortSignal;
+    timeoutMs?: number;
+  } = {},
+): Promise<HistoryBundleOutcome> {
+  const ds = options.ds ?? new DsClient();
+  const signal = options.signal;
+  const timeoutMs = options.timeoutMs ?? HISTORY_POLL_TIMEOUT_MS;
+  const deadline = performance.now() + timeoutMs;
+  let cursor = welcomeCursor;
+
+  while (true) {
+    if (signal?.aborted) return { kind: "cancelled" };
+    const remainingMs = deadline - performance.now();
+    if (remainingMs <= 0) return { kind: "timeout" };
+    const waitSecs = Math.min(
+      PER_REQUEST_LONG_POLL_SECS,
+      Math.max(1, Math.floor(remainingMs / 1000)),
+    );
+    let result;
+    try {
+      result = await ds.fetchMailbox(rendezvousPseudonym, {
+        after: cursor,
+        limit: 1,
+        waitSecs,
+      });
+    } catch (err) {
+      if (err instanceof DsHttpError && err.status === 404) continue;
+      if (err instanceof DsNetworkError) continue;
+      throw err;
+    }
+    if (result.messages.length > 0) {
+      const first = result.messages[0];
+      if (first === undefined) continue;
+      return { kind: "received", sealedBytes: first.payload };
+    }
     cursor = result.messages.reduce((acc, m) => Math.max(acc, m.id), cursor);
   }
 }

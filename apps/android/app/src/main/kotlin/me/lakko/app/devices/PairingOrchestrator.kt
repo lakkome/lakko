@@ -80,21 +80,54 @@ public object PairingOrchestrator {
          * account_id)` value for this account — defensive
          * against a misrouted Welcome from a different user.
          */
-        public fun accept(welcomeBytes: ByteArray) {
+        public suspend fun accept(
+            welcomeBytes: ByteArray,
+            welcomeCursor: Long? = null,
+        ) {
             check(!disposed) { "JoinSession.accept called after dispose" }
             // The deterministic group_id check inside
             // DeviceGroup.joinFromWelcome rejects a misrouted
             // Welcome before any state advance.
-            group = DeviceGroup.joinFromWelcome(
+            val joined = DeviceGroup.joinFromWelcome(
                 welcome = welcomeBytes,
                 identity = identity,
                 accountId = accountIdBytes,
             )
+            group = joined
             DeviceGroupLifecycle.persistSnapshot(
                 context = context,
                 identity = identity,
                 accountIdB64 = accountIdB64,
             )
+
+            // Phase 2a3d8-ui — history catch-up bundle.
+            if (welcomeCursor != null) {
+                try {
+                    val outcome = WelcomeCourier.pollForHistoryBundle(
+                        rendezvousPseudonym = rendezvous,
+                        welcomeCursor = welcomeCursor,
+                    )
+                    if (outcome is WelcomeCourier.HistoryBundleOutcome.Received) {
+                        val secret = joined.historyBundleSecret(identity)
+                        val applied = HistoryBundleCodec.applyToMessageLog(
+                            context = context,
+                            accountIdB64 = accountIdB64,
+                            secret = secret,
+                            sealedBytes = outcome.sealedBytes,
+                        )
+                        android.util.Log.i(
+                            "PairingOrchestrator",
+                            "history catch-up: applied $applied rows",
+                        )
+                    }
+                } catch (cause: Throwable) {
+                    android.util.Log.w(
+                        "PairingOrchestrator",
+                        "history bundle apply failed",
+                        cause,
+                    )
+                }
+            }
         }
 
         /** Release the FFI handles backing this session. Safe
@@ -220,6 +253,36 @@ public object PairingOrchestrator {
             // only existing member, and the merge-pending-
             // commit already advanced its local view inside
             // addDeviceFromWire).
+
+            // Phase 2a3d8-ui — best-effort history catch-up
+            // bundle. Read the local message log, derive the
+            // post-add exporter secret, seal, publish as the
+            // *second* mailbox row. Any failure here is
+            // non-fatal — the joining device still receives
+            // the Welcome and ratchets forward.
+            try {
+                val secret = ensured.group.historyBundleSecret(
+                    identity = ensured.identity,
+                )
+                val sealed = HistoryBundleCodec.buildFromMessageLog(
+                    context = context,
+                    accountIdB64 = accountIdB64,
+                    secret = secret,
+                )
+                if (sealed != null) {
+                    WelcomeCourier.publishHistoryBundle(
+                        rendezvousPseudonym = decoded.rendezvousPseudonym,
+                        sealedBytes = sealed,
+                    )
+                }
+            } catch (cause: Throwable) {
+                android.util.Log.w(
+                    "PairingOrchestrator",
+                    "history bundle publish failed",
+                    cause,
+                )
+            }
+
             DeviceGroupLifecycle.persistSnapshot(
                 context = context,
                 identity = ensured.identity,

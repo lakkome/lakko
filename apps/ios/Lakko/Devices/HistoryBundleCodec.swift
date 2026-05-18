@@ -1,0 +1,202 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+import Foundation
+import LakkoCore
+
+/// History catch-up bundle helpers on iOS (Phase 2a3d8-ui).
+///
+/// Mirror of `apps/web/src/devices/history-bundle.ts`. Two
+/// pure functions wrap the structured UniFFI surface:
+///
+///   * [`buildFromMessageLog`] — scanner side. Reads the local
+///     persistent message log, projects rows into
+///     `StructuredHistoryGroup` / `StructuredHistoryMessage`
+///     Records, seals the bundle. Returns `nil` when there's
+///     nothing to send (no log on disk yet) so the caller
+///     skips the mailbox PUT.
+///
+///   * [`applyToMessageLog`] — joining side. Takes the sealed
+///     bytes, opens via the post-join exporter secret,
+///     projects each row back into the persistent message
+///     log. Idempotent on the `messageId` dedup.
+///
+/// `payload_bytes` are an opaque JSON projection of the
+/// runtime `PersistedMessage` shape; the receiver's
+/// `applyToMessageLog` decodes them back. A future sprint can
+/// replace the placeholder with true MLS application-payload
+/// bytes once the message log starts retaining them.
+public enum HistoryBundleCodec {
+
+    /// Hard cap on the total `HistoryMessage` count across
+    /// every group in a single bundle — must match
+    /// `lakko_mls::history_bundle::MAX_BUNDLE_MESSAGES`.
+    public static let maxBundleMessages: Int = 1000
+
+    // MARK: - Scanner side
+
+    /// Build the sealed history-bundle wire bytes from the
+    /// scanner device's local message log.
+    ///
+    /// Returns `nil` when the log doesn't exist (fresh install
+    /// — nothing to send) or decrypts to an empty groups map.
+    /// Caller handles the `nil` case by skipping the mailbox
+    /// PUT; the joining side's `pollForHistoryBundle` timeout
+    /// fires harmlessly.
+    public static func buildFromMessageLog(
+        accountIdB64: String,
+        secret: Data,
+        store: MessageLogStore = MessageLogStore()
+    ) throws -> Data? {
+        guard let log = store.getLog(accountIdB64: accountIdB64) else {
+            return nil
+        }
+        if log.groups.isEmpty { return nil }
+
+        let groupHexes = Array(log.groups.keys)
+        let perGroupCap = max(1, Self.maxBundleMessages / groupHexes.count)
+
+        var groupInputs: [StructuredHistoryGroup] = []
+        var maxHlc: UInt64 = 0
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+
+        for hex in groupHexes {
+            guard let slot = log.groups[hex] else { continue }
+            guard let groupIdBytes = Self.hexToBytes(hex) else { continue }
+            let trimmed = Array(slot.messages.suffix(perGroupCap))
+            let capped = trimmed.count < slot.messages.count
+            var messages: [StructuredHistoryMessage] = []
+            for m in trimmed {
+                let placeholder: Data
+                do {
+                    placeholder = try encoder.encode(m)
+                } catch {
+                    continue
+                }
+                let createdMs = Self.parseIsoMs(m.createdAt)
+                messages.append(
+                    StructuredHistoryMessage(
+                        payloadBytes: placeholder,
+                        senderLeaf: 0,
+                        messageId: Data(m.messageId.utf8),
+                        receivedAtMs: createdMs
+                    )
+                )
+                if let v = UInt64(m.messageId), v > maxHlc { maxHlc = v }
+            }
+            groupInputs.append(
+                StructuredHistoryGroup(
+                    groupId: groupIdBytes,
+                    messages: messages,
+                    countCapped: capped
+                )
+            )
+        }
+        if groupInputs.isEmpty { return nil }
+
+        return try sealHistoryBundleStructured(
+            secret: secret,
+            groups: groupInputs,
+            maxHlc: maxHlc
+        )
+    }
+
+    // MARK: - Joining side
+
+    /// Open the sealed bytes + project rows into the joining
+    /// device's persistent message log. Returns the number of
+    /// rows applied (across all groups). Idempotent on
+    /// `messageId` — collisions take the on-disk value.
+    public static func applyToMessageLog(
+        accountIdB64: String,
+        secret: Data,
+        sealedBytes: Data,
+        store: MessageLogStore = MessageLogStore()
+    ) throws -> Int {
+        let opened = try openHistoryBundleStructured(
+            secret: secret,
+            sealedBytes: sealedBytes
+        )
+        let existing = store.getLog(accountIdB64: accountIdB64)
+            ?? MessageLogPayload(version: 1, groups: [:])
+
+        var nextGroups = existing.groups
+        var applied = 0
+        let decoder = JSONDecoder()
+
+        for g in opened.groups {
+            let hex = Self.bytesToHex(g.groupId)
+            let slot = nextGroups[hex] ?? PersistedGroup(cursor: 0, messages: [])
+            var existingIds = Set(slot.messages.map { $0.messageId })
+            var merged = slot.messages
+            for m in g.messages {
+                guard let decoded = try? decoder.decode(
+                    PersistedMessage.self,
+                    from: m.payloadBytes
+                ) else {
+                    continue
+                }
+                if existingIds.contains(decoded.messageId) { continue }
+                merged.append(decoded)
+                existingIds.insert(decoded.messageId)
+                applied += 1
+            }
+            // Sort by parsed messageId so the timeline lands
+            // in order. Defensive on non-numeric strings.
+            merged.sort { a, b in
+                if let ai = Int64(a.messageId), let bi = Int64(b.messageId) {
+                    return ai < bi
+                }
+                return a.messageId < b.messageId
+            }
+            nextGroups[hex] = PersistedGroup(
+                cursor: slot.cursor,
+                messages: merged
+            )
+        }
+
+        store.putLog(
+            accountIdB64: accountIdB64,
+            payload: MessageLogPayload(
+                version: existing.version,
+                groups: nextGroups
+            )
+        )
+        return applied
+    }
+
+    // MARK: - Helpers
+
+    private static func parseIsoMs(_ iso: String) -> UInt64 {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let d = f.date(from: iso) {
+            return UInt64(d.timeIntervalSince1970 * 1000)
+        }
+        let f2 = ISO8601DateFormatter()
+        f2.formatOptions = [.withInternetDateTime]
+        if let d = f2.date(from: iso) {
+            return UInt64(d.timeIntervalSince1970 * 1000)
+        }
+        return 0
+    }
+
+    private static func hexToBytes(_ hex: String) -> Data? {
+        guard hex.count % 2 == 0 else { return nil }
+        var out = Data()
+        out.reserveCapacity(hex.count / 2)
+        var i = hex.startIndex
+        while i < hex.endIndex {
+            let next = hex.index(i, offsetBy: 2)
+            guard let b = UInt8(hex[i..<next], radix: 16) else { return nil }
+            out.append(b)
+            i = next
+        }
+        return out
+    }
+
+    private static func bytesToHex(_ data: Data) -> String {
+        return data.map { String(format: "%02x", $0) }.joined()
+    }
+}

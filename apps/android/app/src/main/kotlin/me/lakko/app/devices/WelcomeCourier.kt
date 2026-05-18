@@ -43,17 +43,47 @@ public object WelcomeCourier {
 
     /** Discriminated outcome of [pollForWelcome]. */
     public sealed interface WelcomeOutcome {
-        public data class Received(val welcomeBytes: ByteArray) : WelcomeOutcome {
+        /** `welcomeCursor` is the DS journal id the Welcome row
+         *  landed on; the history-bundle poll uses it as the
+         *  starting `after` cursor. */
+        public data class Received(
+            val welcomeBytes: ByteArray,
+            val welcomeCursor: Long,
+        ) : WelcomeOutcome {
             override fun equals(other: Any?): Boolean {
                 if (this === other) return true
                 if (other !is Received) return false
-                return welcomeBytes.contentEquals(other.welcomeBytes)
+                return welcomeBytes.contentEquals(other.welcomeBytes) &&
+                    welcomeCursor == other.welcomeCursor
             }
-            override fun hashCode(): Int = welcomeBytes.contentHashCode()
+            override fun hashCode(): Int {
+                var h = welcomeBytes.contentHashCode()
+                h = 31 * h + welcomeCursor.hashCode()
+                return h
+            }
         }
         public data object Timeout : WelcomeOutcome
         public data object Cancelled : WelcomeOutcome
     }
+
+    /** Discriminated outcome of [pollForHistoryBundle]. */
+    public sealed interface HistoryBundleOutcome {
+        public data class Received(val sealedBytes: ByteArray) : HistoryBundleOutcome {
+            override fun equals(other: Any?): Boolean {
+                if (this === other) return true
+                if (other !is Received) return false
+                return sealedBytes.contentEquals(other.sealedBytes)
+            }
+            override fun hashCode(): Int = sealedBytes.contentHashCode()
+        }
+        public data object Timeout : HistoryBundleOutcome
+        public data object Cancelled : HistoryBundleOutcome
+    }
+
+    /** Soft timeout for the joiner-side history poll (Phase
+     *  2a3d8-ui). Short — bundle is supposed to arrive within
+     *  seconds of the Welcome; a longer wait stalls the UX. */
+    public const val HISTORY_BUNDLE_TIMEOUT_MS: Long = 10_000L
 
     /**
      * Scanner side: PUT a Welcome to the rendezvous mailbox
@@ -137,7 +167,10 @@ public object WelcomeCourier {
             }
             val first = result.messages.firstOrNull()
             if (first != null) {
-                return@use WelcomeOutcome.Received(first.payload)
+                return@use WelcomeOutcome.Received(
+                    welcomeBytes = first.payload,
+                    welcomeCursor = first.id,
+                )
             }
             // Advance cursor by the highest id seen so the next
             // poll doesn't re-fetch the same empty range. Happy
@@ -149,5 +182,79 @@ public object WelcomeCourier {
         // inside a lambda requires an explicit terminator.
         @Suppress("UNREACHABLE_CODE")
         WelcomeOutcome.Timeout
+    }
+
+    // ----------------------------------------------------------------
+    // Phase 2a3d8-ui — history-bundle courier piggybacks the
+    // rendezvous mailbox after the Welcome.
+    // ----------------------------------------------------------------
+
+    /**
+     * Scanner side: PUT the sealed history bundle to the
+     * rendezvous slot AFTER the Welcome. FIFO journal assigns
+     * the next id (id=2 if Welcome was id=1).
+     */
+    public suspend fun publishHistoryBundle(
+        rendezvousPseudonym: ByteArray,
+        sealedBytes: ByteArray,
+        ds: DsClient = DsClient(),
+    ) {
+        ds.use { client ->
+            client.publishMailbox(
+                pseudonym = rendezvousPseudonym,
+                payload = sealedBytes,
+            )
+        }
+    }
+
+    /**
+     * Joining side: poll the rendezvous mailbox past the
+     * Welcome cursor for the sealed history bundle. Soft
+     * timeout (default 10 s) — the scanner side either
+     * publishes within that window or never (no prior history
+     * to send).
+     */
+    public suspend fun pollForHistoryBundle(
+        rendezvousPseudonym: ByteArray,
+        welcomeCursor: Long,
+        timeoutMillis: Long = HISTORY_BUNDLE_TIMEOUT_MS,
+        ds: DsClient = DsClient(),
+    ): HistoryBundleOutcome = ds.use { client ->
+        val deadline = System.nanoTime() + timeoutMillis * 1_000_000L
+        var cursor = welcomeCursor
+
+        while (true) {
+            if (!currentCoroutineContext().isActive) {
+                return@use HistoryBundleOutcome.Cancelled
+            }
+            val remainingNanos = deadline - System.nanoTime()
+            if (remainingNanos <= 0L) return@use HistoryBundleOutcome.Timeout
+
+            val remainingSecs = (remainingNanos / 1_000_000_000L).toInt().coerceAtLeast(1)
+            val waitSecs = minOf(PER_REQUEST_LONG_POLL_SECS, remainingSecs)
+
+            val result = try {
+                client.fetchMailbox(
+                    pseudonym = rendezvousPseudonym,
+                    after = cursor,
+                    limit = 1,
+                    waitSecs = waitSecs,
+                )
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (http: DsHttpError) {
+                if (http.status == 404) continue
+                throw http
+            } catch (_: DsNetworkError) {
+                continue
+            }
+            val first = result.messages.firstOrNull()
+            if (first != null) {
+                return@use HistoryBundleOutcome.Received(first.payload)
+            }
+            cursor = result.messages.fold(cursor) { acc, msg -> maxOf(acc, msg.id) }
+        }
+        @Suppress("UNREACHABLE_CODE")
+        HistoryBundleOutcome.Timeout
     }
 }

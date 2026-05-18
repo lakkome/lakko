@@ -30,10 +30,26 @@ public enum WelcomeCourier {
 
     /// Discriminated outcome of [`pollForWelcome`].
     public enum WelcomeOutcome {
+        /// `welcomeCursor` is the DS journal id the Welcome row
+        /// landed on; the history-bundle poll picks up from
+        /// `after = welcomeCursor`.
+        case received(Data, welcomeCursor: Int64)
+        case timeout
+        case cancelled
+    }
+
+    /// Discriminated outcome of
+    /// [`pollForHistoryBundle`] (Phase 2a3d8-ui).
+    public enum HistoryBundleOutcome {
         case received(Data)
         case timeout
         case cancelled
     }
+
+    /// Soft timeout for the joiner-side history poll (Phase
+    /// 2a3d8-ui). Short — bundle is supposed to arrive within
+    /// seconds of the Welcome; a longer wait stalls the UX.
+    public static let historyBundleTimeoutSeconds: TimeInterval = 10
 
     /// Scanner side: PUT a Welcome to the rendezvous mailbox
     /// slot the joining device chose.
@@ -105,12 +121,73 @@ public enum WelcomeCourier {
                 throw err
             }
             if let first = result.messages.first {
-                return .received(first.payload)
+                return .received(first.payload, welcomeCursor: first.id)
             }
             // Advance cursor by the highest id seen so the
             // next poll doesn't re-fetch the same empty
             // range. Happy path returns above; this branch
             // is defensive.
+            cursor = result.messages.reduce(cursor) { max($0, $1.id) }
+        }
+    }
+
+    /// Scanner side: PUT the sealed history bundle to the
+    /// rendezvous slot AFTER the Welcome has been published.
+    /// FIFO journal assigns it the next id (id=2 if Welcome
+    /// was the first publish).
+    public static func publishHistoryBundle(
+        rendezvousPseudonym: Data,
+        sealedBytes: Data,
+        ds: DsClient = DsClient()
+    ) async throws {
+        _ = try await ds.publishMailbox(
+            pseudonym: rendezvousPseudonym,
+            payload: sealedBytes
+        )
+    }
+
+    /// Joining side: poll the rendezvous mailbox past the
+    /// Welcome cursor for the sealed history bundle. Soft
+    /// timeout (default 10 s) — the scanner side either
+    /// publishes within that window or never (e.g. it had no
+    /// prior history; nothing to send).
+    public static func pollForHistoryBundle(
+        rendezvousPseudonym: Data,
+        welcomeCursor: Int64,
+        timeoutSeconds: TimeInterval = historyBundleTimeoutSeconds,
+        ds: DsClient = DsClient()
+    ) async throws -> HistoryBundleOutcome {
+        let deadline = Date(timeIntervalSinceNow: timeoutSeconds)
+        var cursor = welcomeCursor
+
+        while true {
+            if Task.isCancelled { return .cancelled }
+            let remaining = deadline.timeIntervalSinceNow
+            if remaining <= 0 { return .timeout }
+
+            let waitSecs = min(
+                Self.perRequestLongPollSeconds,
+                max(1, Int(remaining))
+            )
+            let result: FetchResult
+            do {
+                result = try await ds.fetchMailbox(
+                    pseudonym: rendezvousPseudonym,
+                    after: cursor,
+                    limit: 1,
+                    waitSecs: waitSecs
+                )
+            } catch DsClientError.http(let status, _, _) where status == 404 {
+                continue
+            } catch let err as DsClientError {
+                if case .network = err {
+                    continue
+                }
+                throw err
+            }
+            if let first = result.messages.first {
+                return .received(first.payload)
+            }
             cursor = result.messages.reduce(cursor) { max($0, $1.id) }
         }
     }

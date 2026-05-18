@@ -1087,6 +1087,298 @@ pub fn open_history_bundle(secret: &[u8], sealed_bytes: &[u8]) -> Result<Vec<u8>
     Ok(out)
 }
 
+// ============================================================================
+// Phase 2a3d8-ui — structured history-bundle API for the web
+//
+// wasm-bindgen rejects Rust enums-with-data + nested Vecs of Records in
+// the public surface, so the structured API splits into:
+//
+//   - `HistoryMessageInput` / `HistoryGroupInput` — wasm-bindgen
+//     classes the JS caller constructs and passes into the seal path.
+//   - `OpenedHistoryGroup` / `OpenedHistoryMessage` — flat
+//     wasm-bindgen classes the open path returns; the JS caller
+//     iterates `.groups()` etc.
+//
+// Wire format is identical to the byte path — both surfaces produce /
+// consume the same `SealedBundle` proto.
+// ============================================================================
+
+/// One message the scanner-side caller adds to a
+/// [`HistoryGroupInput`] before sealing the bundle.
+/// wasm-bindgen class — JS-side `new HistoryMessageInput(...)`.
+#[wasm_bindgen]
+#[allow(clippy::struct_field_names)]
+pub struct HistoryMessageInput {
+    payload_bytes_val: Vec<u8>,
+    sender_leaf_val: u32,
+    message_id_val: Vec<u8>,
+    received_at_ms_val: u64,
+}
+
+#[wasm_bindgen]
+impl HistoryMessageInput {
+    /// JS constructor — one call per included message.
+    #[wasm_bindgen(constructor)]
+    pub fn new(
+        payload_bytes: &[u8],
+        sender_leaf: u32,
+        message_id: &[u8],
+        received_at_ms: u64,
+    ) -> HistoryMessageInput {
+        HistoryMessageInput {
+            payload_bytes_val: payload_bytes.to_vec(),
+            sender_leaf_val: sender_leaf,
+            message_id_val: message_id.to_vec(),
+            received_at_ms_val: received_at_ms,
+        }
+    }
+}
+
+/// One group's worth of history rows for the seal path.
+/// wasm-bindgen class — JS-side `new HistoryGroupInput(...)`.
+#[wasm_bindgen]
+#[allow(clippy::struct_field_names)]
+pub struct HistoryGroupInput {
+    group_id_val: Vec<u8>,
+    messages_val: Vec<HistoryMessageInput>,
+    count_capped_val: bool,
+}
+
+#[wasm_bindgen]
+impl HistoryGroupInput {
+    /// JS constructor. `messages` is a flat `Array<HistoryMessageInput>`;
+    /// the binding consumes ownership.
+    #[wasm_bindgen(constructor)]
+    pub fn new(
+        group_id: &[u8],
+        messages: Vec<HistoryMessageInput>,
+        count_capped: bool,
+    ) -> HistoryGroupInput {
+        HistoryGroupInput {
+            group_id_val: group_id.to_vec(),
+            messages_val: messages,
+            count_capped_val: count_capped,
+        }
+    }
+}
+
+/// AEAD-seal a structured history bundle (Phase 2a3d8-ui).
+///
+/// `secret` MUST be 32 bytes (typically the output of
+/// [`DeviceGroup::historyBundleSecret`]). `groups` is an
+/// `Array<HistoryGroupInput>`.
+#[wasm_bindgen(js_name = sealHistoryBundleStructured)]
+pub fn seal_history_bundle_structured(
+    secret: &[u8],
+    groups: Vec<HistoryGroupInput>,
+    max_hlc: u64,
+) -> Result<Vec<u8>, JsError> {
+    if secret.len() != 32 {
+        return Err(JsError::new("history-bundle secret must be 32 bytes"));
+    }
+    let mut key = [0u8; 32];
+    key.copy_from_slice(secret);
+
+    let bundle = build_history_bundle_proto(groups, max_hlc);
+    lakko_mls::history_bundle::seal_bundle(&key, &bundle).map_err(mls_err)
+}
+
+fn build_history_bundle_proto(
+    groups: Vec<HistoryGroupInput>,
+    max_hlc: u64,
+) -> lakko_proto::mls_app::history_bundle::v1::HistoryBundle {
+    use lakko_proto::mls_app::history_bundle::v1::{
+        HistoryBundle, HistoryGroup, HistoryMessage,
+    };
+    HistoryBundle {
+        max_hlc,
+        groups: groups
+            .into_iter()
+            .map(|g| HistoryGroup {
+                group_id: g.group_id_val,
+                count_capped: g.count_capped_val,
+                messages: g
+                    .messages_val
+                    .into_iter()
+                    .map(|m| HistoryMessage {
+                        payload_bytes: m.payload_bytes_val,
+                        sender_leaf: m.sender_leaf_val,
+                        message_id: m.message_id_val,
+                        received_at_ms: m.received_at_ms_val,
+                    })
+                    .collect(),
+            })
+            .collect(),
+    }
+}
+
+/// One message after the open path — flat getters for the JS
+/// caller. wasm-bindgen doesn't expose tuple-style returns, so
+/// each opened message is a class instance.
+#[wasm_bindgen]
+#[allow(clippy::struct_field_names)]
+pub struct OpenedHistoryMessage {
+    payload_bytes_val: Vec<u8>,
+    sender_leaf_val: u32,
+    message_id_val: Vec<u8>,
+    received_at_ms_val: u64,
+}
+
+#[allow(missing_docs)]
+
+#[wasm_bindgen]
+impl OpenedHistoryMessage {
+    #[wasm_bindgen(getter, js_name = payloadBytes)]
+    pub fn payload_bytes(&self) -> Vec<u8> {
+        self.payload_bytes_val.clone()
+    }
+
+    #[wasm_bindgen(getter, js_name = senderLeaf)]
+    pub fn sender_leaf(&self) -> u32 {
+        self.sender_leaf_val
+    }
+
+    #[wasm_bindgen(getter, js_name = messageId)]
+    pub fn message_id(&self) -> Vec<u8> {
+        self.message_id_val.clone()
+    }
+
+    #[wasm_bindgen(getter, js_name = receivedAtMs)]
+    pub fn received_at_ms(&self) -> u64 {
+        self.received_at_ms_val
+    }
+}
+
+/// One group's worth of opened history rows for the receive
+/// path. wasm-bindgen class — JS reads `.groupId`, `.messages()`,
+/// `.countCapped`.
+#[wasm_bindgen]
+#[allow(clippy::struct_field_names)]
+pub struct OpenedHistoryGroup {
+    group_id_val: Vec<u8>,
+    messages_val: Vec<OpenedHistoryMessage>,
+    count_capped_val: bool,
+}
+
+#[wasm_bindgen]
+impl OpenedHistoryGroup {
+    /// MLS group_id this group's history rows belong to.
+    #[wasm_bindgen(getter, js_name = groupId)]
+    pub fn group_id(&self) -> Vec<u8> {
+        self.group_id_val.clone()
+    }
+
+    /// Flat array of [`OpenedHistoryMessage`] — JS iterates via
+    /// `Array.from(g.messages())`. wasm-bindgen owns the
+    /// inner allocations; the caller must not retain references
+    /// past the parent `OpenedHistoryGroup`'s lifetime.
+    #[wasm_bindgen]
+    pub fn messages(&self) -> Result<Vec<JsValue>, JsError> {
+        Ok(self
+            .messages_val
+            .iter()
+            .map(|m| {
+                JsValue::from(OpenedHistoryMessage {
+                    payload_bytes_val: m.payload_bytes_val.clone(),
+                    sender_leaf_val: m.sender_leaf_val,
+                    message_id_val: m.message_id_val.clone(),
+                    received_at_ms_val: m.received_at_ms_val,
+                })
+            })
+            .collect())
+    }
+
+    /// `true` when the per-group message list was truncated
+    /// to the producer-side cap. UI surfaces a "load older"
+    /// affordance later.
+    #[wasm_bindgen(getter, js_name = countCapped)]
+    pub fn count_capped(&self) -> bool {
+        self.count_capped_val
+    }
+}
+
+/// Top-level result of [`openHistoryBundleStructured`].
+/// wasm-bindgen class — JS reads `.groups()` and `.maxHlc`.
+#[wasm_bindgen]
+#[allow(clippy::struct_field_names)]
+pub struct OpenedHistoryBundle {
+    groups_val: Vec<OpenedHistoryGroup>,
+    max_hlc_val: u64,
+}
+
+#[wasm_bindgen]
+impl OpenedHistoryBundle {
+    /// Flat array of [`OpenedHistoryGroup`]. Same JS-iter
+    /// pattern as `OpenedHistoryGroup.messages()`.
+    #[wasm_bindgen]
+    pub fn groups(&self) -> Result<Vec<JsValue>, JsError> {
+        Ok(self
+            .groups_val
+            .iter()
+            .map(|g| {
+                JsValue::from(OpenedHistoryGroup {
+                    group_id_val: g.group_id_val.clone(),
+                    messages_val: g
+                        .messages_val
+                        .iter()
+                        .map(|m| OpenedHistoryMessage {
+                            payload_bytes_val: m.payload_bytes_val.clone(),
+                            sender_leaf_val: m.sender_leaf_val,
+                            message_id_val: m.message_id_val.clone(),
+                            received_at_ms_val: m.received_at_ms_val,
+                        })
+                        .collect(),
+                    count_capped_val: g.count_capped_val,
+                })
+            })
+            .collect())
+    }
+
+    /// HLC of the most recent message included in the bundle.
+    #[wasm_bindgen(getter, js_name = maxHlc)]
+    pub fn max_hlc(&self) -> u64 {
+        self.max_hlc_val
+    }
+}
+
+/// Inverse of [`sealHistoryBundleStructured`]. Returns a flat
+/// JS object the caller iterates through getters; no proto
+/// runtime needed.
+#[wasm_bindgen(js_name = openHistoryBundleStructured)]
+pub fn open_history_bundle_structured(
+    secret: &[u8],
+    sealed_bytes: &[u8],
+) -> Result<OpenedHistoryBundle, JsError> {
+    if secret.len() != 32 {
+        return Err(JsError::new("history-bundle secret must be 32 bytes"));
+    }
+    let mut key = [0u8; 32];
+    key.copy_from_slice(secret);
+
+    let bundle = lakko_mls::history_bundle::open_bundle(&key, sealed_bytes).map_err(mls_err)?;
+    Ok(OpenedHistoryBundle {
+        max_hlc_val: bundle.max_hlc,
+        groups_val: bundle
+            .groups
+            .into_iter()
+            .map(|g| OpenedHistoryGroup {
+                group_id_val: g.group_id,
+                count_capped_val: g.count_capped,
+                messages_val: g
+                    .messages
+                    .into_iter()
+                    .map(|m| OpenedHistoryMessage {
+                        payload_bytes_val: m.payload_bytes,
+                        sender_leaf_val: m.sender_leaf,
+                        message_id_val: m.message_id,
+                        received_at_ms_val: m.received_at_ms,
+                    })
+                    .collect(),
+            })
+            .collect(),
+    })
+}
+
 /// Compute the deterministic DeviceGroup `group_id` from an
 /// account_id, without constructing a `DeviceGroup` handle.
 /// Useful on the joining-device side when polling the DS

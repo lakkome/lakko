@@ -70,11 +70,23 @@ public enum PairingOrchestrator {
 
         /// Drive the terminal joining-side step: join the
         /// DeviceGroup, persist the resulting snapshot.
-        public func accept(welcomeBytes: Data) throws {
+        ///
+        /// Optional `welcomeCursor` (Phase 2a3d8-ui) opts in
+        /// to the history catch-up bundle path: after the
+        /// MLS join lands, the method polls the rendezvous
+        /// mailbox past the Welcome cursor for the
+        /// scanner-side bundle, opens it with the post-join
+        /// exporter secret, and applies the rows to the local
+        /// message log. Failures along that chain log + are
+        /// swallowed — the join itself still succeeds.
+        public func accept(
+            welcomeBytes: Data,
+            welcomeCursor: Int64? = nil
+        ) async throws {
             // The deterministic group_id check inside
             // DeviceGroup.joinFromWelcome rejects a misrouted
             // Welcome before any state advance.
-            _ = try DeviceGroup.joinFromWelcome(
+            let joined = try DeviceGroup.joinFromWelcome(
                 welcome: welcomeBytes,
                 identity: identity,
                 accountId: accountIdBytes
@@ -83,6 +95,29 @@ public enum PairingOrchestrator {
                 identity: identity,
                 accountIdB64: accountIdB64
             )
+
+            // Phase 2a3d8-ui — history catch-up bundle.
+            if let cursor = welcomeCursor {
+                do {
+                    let sealed = try await WelcomeCourier.pollForHistoryBundle(
+                        rendezvousPseudonym: rendezvous,
+                        welcomeCursor: cursor
+                    )
+                    if case .received(let sealedBytes) = sealed {
+                        let secret = try joined.historyBundleSecret(
+                            identity: identity
+                        )
+                        let applied = try HistoryBundleCodec.applyToMessageLog(
+                            accountIdB64: accountIdB64,
+                            secret: secret,
+                            sealedBytes: sealedBytes
+                        )
+                        NSLog("history catch-up: applied %d rows", applied)
+                    }
+                } catch {
+                    NSLog("history bundle apply failed: %@", error.localizedDescription)
+                }
+            }
         }
     }
 
@@ -167,6 +202,30 @@ public enum PairingOrchestrator {
         // existing member, and the merge-pending-commit
         // already advanced its local view inside
         // addDeviceFromWire).
+
+        // Phase 2a3d8-ui — best-effort history catch-up bundle.
+        // Read the local message log, derive the post-add
+        // exporter secret, seal the bundle, publish as the
+        // *second* mailbox row. Any failure here is non-fatal —
+        // the joining device still receives the Welcome and
+        // ratchets forward.
+        do {
+            let secret = try ensured.group.historyBundleSecret(
+                identity: ensured.identity
+            )
+            if let sealed = try HistoryBundleCodec.buildFromMessageLog(
+                accountIdB64: accountIdB64,
+                secret: secret
+            ) {
+                try await WelcomeCourier.publishHistoryBundle(
+                    rendezvousPseudonym: decoded.rendezvousPseudonym,
+                    sealedBytes: sealed
+                )
+            }
+        } catch {
+            NSLog("history bundle publish failed: %@", error.localizedDescription)
+        }
+
         DeviceGroupLifecycle.persistSnapshot(
             identity: ensured.identity,
             accountIdB64: accountIdB64

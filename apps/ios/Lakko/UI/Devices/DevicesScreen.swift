@@ -206,10 +206,13 @@ private struct PairView: View {
                     let outcome = try await s.awaitWelcome()
                     if Task.isCancelled { return }
                     switch outcome {
-                    case .received(let welcome):
+                    case .received(let welcome, let welcomeCursor):
                         state = .joining
                         do {
-                            try s.accept(welcomeBytes: welcome)
+                            try await s.accept(
+                                welcomeBytes: welcome,
+                                welcomeCursor: welcomeCursor
+                            )
                             state = .done
                         } catch {
                             state = .error(error.localizedDescription)

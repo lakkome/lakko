@@ -368,7 +368,12 @@ function PairView(props: {
           const outcome = await sess.awaitWelcome(abort.signal);
           if (outcome.kind === "received") {
             setState({ kind: "joining" });
-            await sess.accept(outcome.welcome);
+            // Phase 2a3d8-ui — pass the Welcome's DS cursor so
+            // `accept` can poll past it for the scanner-side
+            // history catch-up bundle.
+            await sess.accept(outcome.welcome, {
+              welcomeCursor: outcome.welcomeCursor,
+            });
             sess.dispose();
             setState({ kind: "done" });
           } else if (outcome.kind === "timeout") {

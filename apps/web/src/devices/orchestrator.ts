@@ -33,7 +33,17 @@ import {
   parsePairingQrPayload,
 } from "./pairing";
 import { ensureDeviceGroup, persistDeviceGroupSnapshot } from "./lifecycle";
-import { publishWelcome, pollForWelcome, type WelcomeOutcome } from "./welcome-courier";
+import {
+  publishWelcome,
+  pollForWelcome,
+  publishHistoryBundle,
+  pollForHistoryBundle,
+  type WelcomeOutcome,
+} from "./welcome-courier";
+import {
+  buildHistoryBundleFromLog,
+  applyHistoryBundleToLog,
+} from "./history-bundle";
 
 // ---- Joining side ------------------------------------------------
 
@@ -60,8 +70,20 @@ export interface JoinSession {
   awaitWelcome(signal?: AbortSignal): Promise<WelcomeOutcome>;
   /** Drive the joining-side terminal step: join the
    *  DeviceGroup, persist the resulting snapshot, free the
-   *  ephemeral identity handle. */
-  accept(welcomeBytes: Uint8Array): Promise<void>;
+   *  ephemeral identity handle.
+   *
+   *  Optional `opts.welcomeCursor` (the DS journal id of the
+   *  consumed Welcome row) opts into the Phase 2a3d8-ui
+   *  history catch-up bundle path — `accept` polls the
+   *  rendezvous mailbox past that cursor, opens the bundle
+   *  with the post-join DeviceGroup exporter secret, and
+   *  applies the rows into the local message log. Omit to
+   *  skip the catch-up step (older callers stay
+   *  backward-compatible). */
+  accept(
+    welcomeBytes: Uint8Array,
+    opts?: { readonly welcomeCursor: number },
+  ): Promise<void>;
   /** Release the ephemeral DeviceIdentity wasm handle. Safe
    *  to call multiple times; safe to call after `accept`
    *  (no-op). */
@@ -110,7 +132,7 @@ export async function prepareJoinFlow(args: {
         signal === undefined ? {} : { signal },
       );
     },
-    async accept(welcomeBytes): Promise<void> {
+    async accept(welcomeBytes, opts): Promise<void> {
       if (identity === null) {
         throw new Error("join session already disposed");
       }
@@ -130,6 +152,33 @@ export async function prepareJoinFlow(args: {
         args.accountIdB64,
         args.deviceKey,
       );
+      // Phase 2a3d8-ui — poll past the Welcome cursor for the
+      // scanner-side history bundle. Best-effort: a timeout or
+      // a malformed bundle leaves the joiner with an empty
+      // log + the normal DS-poll catch-up takes over going
+      // forward.
+      if (opts !== undefined && group !== null) {
+        try {
+          const sealed = await pollForHistoryBundle(
+            rendezvous,
+            opts.welcomeCursor,
+          );
+          if (sealed.kind === "received") {
+            const secret = group.historyBundleSecret(identity);
+            const applied = await applyHistoryBundleToLog({
+              accountIdB64: args.accountIdB64,
+              deviceKey: args.deviceKey,
+              secret,
+              sealedBytes: sealed.sealedBytes,
+            });
+            // eslint-disable-next-line no-console
+            console.info(`history catch-up: applied ${applied} rows`);
+          }
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.warn("history bundle apply failed", err);
+        }
+      }
     },
     dispose(): void {
       if (group !== null) {
@@ -209,6 +258,29 @@ export async function runScanFlow(args: {
     // commit is a no-op (the founder is the only existing
     // member, and the merge-pending-commit already advanced
     // its local view inside addDeviceFromWire).
+
+    // Phase 2a3d8-ui — best-effort history catch-up bundle.
+    // Read the local message log, derive the post-add
+    // exporter secret, seal the bundle, publish as the
+    // *second* mailbox row (Welcome was the first). A
+    // failure anywhere along the chain is non-fatal — the
+    // joining device still gets the Welcome + ratchets
+    // forward; it just lands with an empty timeline.
+    try {
+      const secret = ensured.group.historyBundleSecret(ensured.identity);
+      const sealed = await buildHistoryBundleFromLog({
+        accountIdB64: args.accountIdB64,
+        deviceKey: args.deviceKey,
+        secret,
+      });
+      if (sealed !== null) {
+        await publishHistoryBundle(decoded.rendezvousPseudonym, sealed);
+      }
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("history bundle publish failed", err);
+    }
+
     await persistDeviceGroupSnapshot(
       ensured.identity,
       args.accountIdB64,
