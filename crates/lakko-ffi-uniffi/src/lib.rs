@@ -31,7 +31,8 @@ use std::sync::{Arc, Mutex};
 
 use lakko_mls::group::MemberAddition;
 use lakko_mls::{
-    group, key_package, Group as MlsGroup, Identity as MlsIdentity, Incoming as MlsIncoming,
+    group, key_package, DeviceGroup as MlsDeviceGroup, Group as MlsGroup, Identity as MlsIdentity,
+    Incoming as MlsIncoming,
 };
 
 pub mod attachments;
@@ -473,6 +474,127 @@ pub fn load_group(identity: &Identity, group_id: Vec<u8>) -> Result<Option<Arc<G
             inner: Mutex::new(inner),
         })
     }))
+}
+
+// ============================================================================
+// DeviceGroup (Phase 2a3b1d)
+// ============================================================================
+
+/// Per-user multi-device MLS group (ADR-0007).
+///
+/// Wraps `lakko_mls::DeviceGroup` for FFI use. The leaves are
+/// the user's own devices; the deterministic `group_id` is
+/// `BLAKE3("lakko-device-group/v1" || account_id)`.
+///
+/// FFI subset of what `lakko_mls::DeviceGroup` exposes — just
+/// what 2a3b's add-device flow needs:
+///
+///   * Bootstrap a fresh device group (`create_founder`).
+///   * Join an already-running device group from a Welcome
+///     (`join_from_welcome`).
+///   * Add a new device by its KeyPackage bytes
+///     (`add_device_from_wire`) — returns the
+///     (commit, welcome) pair the caller fans out.
+///   * Read the deterministic `group_id`.
+///
+/// 2a3c will widen this with `devices()` + `remove_device(...)`
+/// once the per-platform UI lands.
+#[derive(uniffi::Object)]
+pub struct DeviceGroup {
+    inner: Mutex<MlsDeviceGroup>,
+}
+
+#[uniffi::export]
+impl DeviceGroup {
+    /// Bootstrap a fresh DeviceGroup with `identity` as the
+    /// founding (and only) leaf.
+    ///
+    /// `account_id` MUST be the raw 16-byte UUIDv7. The
+    /// resulting group's `group_id` is derived
+    /// deterministically — every device that knows the same
+    /// `account_id` agrees on the same `group_id` without
+    /// server coordination.
+    #[uniffi::constructor]
+    pub fn create_founder(identity: &Identity, account_id: Vec<u8>) -> Result<Self, FfiError> {
+        if account_id.len() != 16 {
+            return Err(FfiError::Codec("account_id must be 16 bytes".into()));
+        }
+        let mut acct = [0u8; 16];
+        acct.copy_from_slice(&account_id);
+        let inner = MlsDeviceGroup::create_founder(&identity.inner, &acct)?;
+        Ok(Self {
+            inner: Mutex::new(inner),
+        })
+    }
+
+    /// Join a DeviceGroup from a Welcome the scanner device
+    /// produced via [`DeviceGroup::add_device_from_wire`].
+    ///
+    /// Verifies that the embedded `group_id` matches
+    /// `BLAKE3("lakko-device-group/v1" || account_id)` — a
+    /// misrouted Welcome from a different user's DeviceGroup
+    /// is rejected before any state advance.
+    #[uniffi::constructor]
+    pub fn join_from_welcome(
+        welcome: Vec<u8>,
+        identity: &Identity,
+        account_id: Vec<u8>,
+    ) -> Result<Self, FfiError> {
+        if account_id.len() != 16 {
+            return Err(FfiError::Codec("account_id must be 16 bytes".into()));
+        }
+        let mut acct = [0u8; 16];
+        acct.copy_from_slice(&account_id);
+        let inner = MlsDeviceGroup::join_from_welcome(&welcome, &identity.inner, &acct)?;
+        Ok(Self {
+            inner: Mutex::new(inner),
+        })
+    }
+
+    /// Add a device by its TLS-encoded KeyPackage. Returns the
+    /// `(commit, welcome)` pair:
+    ///
+    ///   * `commit` — broadcast to every existing DeviceGroup
+    ///     member via the DS group journal.
+    ///   * `welcome` — sent to the joining device via the DS
+    ///     mailbox at the rendezvous pseudonym the pairing QR
+    ///     supplied.
+    pub fn add_device_from_wire(
+        &self,
+        identity: &Identity,
+        key_package: Vec<u8>,
+    ) -> Result<AddMember, FfiError> {
+        let mut g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
+        let MemberAddition { commit, welcome } =
+            g.add_device_from_wire(&identity.inner, &key_package)?;
+        Ok(AddMember {
+            commit: group::encode_message(&commit)?,
+            welcome: group::encode_message(&welcome)?,
+        })
+    }
+
+    /// The deterministic `group_id` this DeviceGroup is bound
+    /// to. Same value `MlsDeviceGroup::group_id_for(account_id)`
+    /// computes for the same `account_id`.
+    pub fn group_id(&self) -> Result<Vec<u8>, FfiError> {
+        let g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
+        Ok(g.group_id())
+    }
+}
+
+/// Compute the deterministic DeviceGroup `group_id` from an
+/// account_id, without building a `DeviceGroup` instance.
+/// Useful on the joining-device side when polling the DS
+/// journal for catch-up Commits before any Welcome has been
+/// processed.
+#[uniffi::export]
+pub fn device_group_id_for(account_id: Vec<u8>) -> Result<Vec<u8>, FfiError> {
+    if account_id.len() != 16 {
+        return Err(FfiError::Codec("account_id must be 16 bytes".into()));
+    }
+    let mut acct = [0u8; 16];
+    acct.copy_from_slice(&account_id);
+    Ok(MlsDeviceGroup::group_id_for(&acct))
 }
 
 // Manual std::fmt::Debug for ProcessedMessage so we can panic-format it in

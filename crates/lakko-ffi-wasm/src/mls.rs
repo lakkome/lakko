@@ -10,7 +10,8 @@ use std::sync::Mutex;
 
 use lakko_mls::group::MemberAddition;
 use lakko_mls::{
-    group, key_package, Group as MlsGroup, Identity as MlsIdentity, Incoming as MlsIncoming,
+    group, key_package, DeviceGroup as MlsDeviceGroup, Group as MlsGroup, Identity as MlsIdentity,
+    Incoming as MlsIncoming,
 };
 use wasm_bindgen::prelude::*;
 
@@ -487,6 +488,126 @@ impl Group {
             })
             .collect())
     }
+}
+
+// ============================================================================
+// DeviceGroup (Phase 2a3b1d)
+// ============================================================================
+
+/// Per-user multi-device MLS group (ADR-0007). Mirror of
+/// UniFFI's `DeviceGroup`.
+///
+/// FFI subset for 2a3b's add-device flow:
+///
+///   * `createFounder` — bootstrap on this device.
+///   * `joinFromWelcome` — join from a Welcome the scanner
+///     produced + delivered via DS mailbox.
+///   * `addDeviceFromWire` — add a fresh device by its
+///     KeyPackage; returns the (commit, welcome) pair.
+///   * `groupId` — the deterministic
+///     `BLAKE3("lakko-device-group/v1" || account_id)`.
+///
+/// 2a3c widens this with `devices` + `removeDevice` once the
+/// per-platform UI lands.
+#[wasm_bindgen]
+pub struct DeviceGroup {
+    inner: Mutex<MlsDeviceGroup>,
+}
+
+#[wasm_bindgen]
+impl DeviceGroup {
+    /// Bootstrap a fresh DeviceGroup with `identity` as the
+    /// founding leaf. `account_id` MUST be the raw 16-byte
+    /// UUIDv7.
+    #[wasm_bindgen(js_name = createFounder)]
+    pub fn create_founder(
+        identity: &Identity,
+        account_id: &[u8],
+    ) -> Result<DeviceGroup, JsError> {
+        if account_id.len() != 16 {
+            return Err(JsError::new("account_id must be 16 bytes"));
+        }
+        let mut acct = [0u8; 16];
+        acct.copy_from_slice(account_id);
+        let inner =
+            MlsDeviceGroup::create_founder(&identity.inner, &acct).map_err(mls_err)?;
+        Ok(Self {
+            inner: Mutex::new(inner),
+        })
+    }
+
+    /// Join a DeviceGroup from a Welcome the scanner device
+    /// produced via [`DeviceGroup::addDeviceFromWire`]. The
+    /// deterministic `group_id` check inside
+    /// `lakko_mls::DeviceGroup::join_from_welcome` rejects a
+    /// misrouted Welcome before any state advance.
+    #[wasm_bindgen(js_name = joinFromWelcome)]
+    pub fn join_from_welcome(
+        welcome: &[u8],
+        identity: &Identity,
+        account_id: &[u8],
+    ) -> Result<DeviceGroup, JsError> {
+        if account_id.len() != 16 {
+            return Err(JsError::new("account_id must be 16 bytes"));
+        }
+        let mut acct = [0u8; 16];
+        acct.copy_from_slice(account_id);
+        let inner =
+            MlsDeviceGroup::join_from_welcome(welcome, &identity.inner, &acct).map_err(mls_err)?;
+        Ok(Self {
+            inner: Mutex::new(inner),
+        })
+    }
+
+    /// Add a device by its TLS-encoded KeyPackage. Returns
+    /// `(commit, welcome)`: broadcast `commit` to existing
+    /// members via the DS group journal, deliver `welcome` to
+    /// the joining device via DS mailbox at the rendezvous
+    /// pseudonym.
+    #[wasm_bindgen(js_name = addDeviceFromWire)]
+    pub fn add_device_from_wire(
+        &self,
+        identity: &Identity,
+        key_package: &[u8],
+    ) -> Result<AddMember, JsError> {
+        let mut g = self
+            .inner
+            .lock()
+            .map_err(|_| JsError::new("internal lock poisoned"))?;
+        let MemberAddition { commit, welcome } = g
+            .add_device_from_wire(&identity.inner, key_package)
+            .map_err(mls_err)?;
+        Ok(AddMember {
+            commit_bytes: group::encode_message(&commit).map_err(mls_err)?,
+            welcome_bytes: group::encode_message(&welcome).map_err(mls_err)?,
+        })
+    }
+
+    /// The deterministic `group_id` this DeviceGroup is bound
+    /// to. Same value `deviceGroupIdFor(account_id)` returns.
+    #[wasm_bindgen(js_name = groupId)]
+    pub fn group_id(&self) -> Result<Vec<u8>, JsError> {
+        let g = self
+            .inner
+            .lock()
+            .map_err(|_| JsError::new("internal lock poisoned"))?;
+        Ok(g.group_id())
+    }
+}
+
+/// Compute the deterministic DeviceGroup `group_id` from an
+/// account_id, without constructing a `DeviceGroup` handle.
+/// Useful on the joining-device side when polling the DS
+/// journal for catch-up Commits before any Welcome has been
+/// processed.
+#[wasm_bindgen(js_name = deviceGroupIdFor)]
+pub fn device_group_id_for(account_id: &[u8]) -> Result<Vec<u8>, JsError> {
+    if account_id.len() != 16 {
+        return Err(JsError::new("account_id must be 16 bytes"));
+    }
+    let mut acct = [0u8; 16];
+    acct.copy_from_slice(account_id);
+    Ok(MlsDeviceGroup::group_id_for(&acct))
 }
 
 // ============================================================================
