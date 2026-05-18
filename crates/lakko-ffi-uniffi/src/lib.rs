@@ -40,6 +40,7 @@ pub mod backup;
 pub mod contacts;
 pub mod discovery;
 pub mod mnemonic;
+pub mod pairing;
 pub mod pow;
 pub mod shamir;
 

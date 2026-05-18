@@ -75,6 +75,7 @@ pub mod contacts;
 pub mod discovery;
 pub mod mls;
 pub mod mnemonic;
+pub mod pairing;
 pub mod pow_solver;
 pub mod presence;
 pub mod push;
