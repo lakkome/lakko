@@ -64,6 +64,10 @@ import {
   putExportKey,
 } from "./export-key-store";
 import {
+  deleteDeviceIdentitySeed,
+  ensureDeviceIdentitySeed,
+} from "./device-identity-store";
+import {
   WebauthnClient,
   WebauthnHttpError,
   WebauthnNetworkError,
@@ -387,6 +391,20 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         console.warn("export-key persist (signup) failed", err);
       }
 
+      // Phase 2a3b0 (ADR-0007) — ensure a random per-device
+      // DeviceIdentity seed exists on this device. Distinct
+      // from the deterministic AccountIdentity above; used as
+      // the MLS leaf in the user's DeviceGroup (2a3a) once the
+      // add-device flow lands. Best-effort — a persistence
+      // failure here doesn't block signup; the seed gets
+      // generated on the next login.
+      try {
+        await ensureDeviceIdentitySeed(accountIdB64, deviceKey);
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn("device-identity ensure (signup) failed", err);
+      }
+
       // 1.16e6c1: build the canonical session-wide Identity
       // before uploading the KeyPackage so the freshly-minted
       // init/leaf private keys land in the provider we'll
@@ -536,6 +554,16 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       } catch (err) {
         // eslint-disable-next-line no-console
         console.warn("export-key persist (login) failed", err);
+      }
+      // Phase 2a3b0 (ADR-0007) — ensure DeviceIdentity seed.
+      // Idempotent: a returning user with a seed already on
+      // file gets the cached one; first-login generates fresh
+      // bytes.
+      try {
+        await ensureDeviceIdentitySeed(accountIdB64, deviceKey);
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn("device-identity ensure (login) failed", err);
       }
       savePersisted({ v: 1, accountIdB64, username: resolvedUsername });
 
@@ -814,6 +842,23 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
           // eslint-disable-next-line no-console
           console.warn("export-key persist (recover) failed", err);
         }
+        // Phase 2a3b0 (ADR-0007) — DeviceIdentity seed is
+        // decoupled from the OPAQUE password (ADR-0007 §
+        // "Lifecycle"), so recovery does NOT rotate it. But
+        // any prior cached seed was wrapped under the OLD
+        // device key — `ensureDeviceIdentitySeed` falls
+        // through to generate-fresh on decrypt failure, which
+        // gives us a clean new local DeviceIdentity. The prior
+        // leaf in the user's DeviceGroup becomes orphaned and
+        // gets cleaned up by 2a3c's remove-device flow on the
+        // user's other devices (or by an eventual
+        // server-driven prune).
+        try {
+          await ensureDeviceIdentitySeed(cached.accountIdB64, deviceKey);
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.warn("device-identity ensure (recover) failed", err);
+        }
 
         // 1.16e6c1: post-recovery the user's password (and so
         // the export key) has changed, which means any
@@ -1061,6 +1106,16 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         // the stale row.
         try {
           await deleteExportKey(cached.accountIdB64);
+        } catch {
+          // best-effort
+        }
+        // Phase 2a3b0: drop the cached DeviceIdentity seed.
+        // The leaf in the user's DeviceGroup that this seed
+        // signed for is orphaned by this wipe — other devices
+        // will see it as unreachable until 2a3c's
+        // remove-device flow runs from a sibling device.
+        try {
+          await deleteDeviceIdentitySeed(cached.accountIdB64);
         } catch {
           // best-effort
         }

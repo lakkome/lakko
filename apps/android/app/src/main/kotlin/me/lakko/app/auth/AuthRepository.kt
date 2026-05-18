@@ -223,6 +223,20 @@ public class AuthRepository(
                 } catch (cause: Throwable) {
                     Log.w("lakko-auth", "export-key persist (signup) failed", cause)
                 }
+                // Phase 2a3b0 (ADR-0007) — ensure a random
+                // per-device DeviceIdentity seed exists on this
+                // device. Distinct from the deterministic
+                // AccountIdentity above; used as the MLS leaf
+                // in the user's DeviceGroup (2a3a) once the
+                // add-device flow lands. Best-effort.
+                try {
+                    DeviceIdentityStore.ensureDeviceIdentitySeed(
+                        applicationContext,
+                        accountIdB64,
+                    )
+                } catch (cause: Throwable) {
+                    Log.w("lakko-auth", "device-identity ensure (signup) failed", cause)
+                }
                 // Stash the export key for ContactsClient / future
                 // ChatClient + the like. The bytes survive until
                 // logout / forgetDevice clears the flow; signup is
@@ -362,6 +376,18 @@ public class AuthRepository(
                 } catch (cause: Throwable) {
                     Log.w("lakko-auth", "export-key persist (login) failed", cause)
                 }
+                // Phase 2a3b0 (ADR-0007) — ensure DeviceIdentity
+                // seed. Idempotent: a returning user with a
+                // seed already on file gets the cached one;
+                // first-login generates fresh bytes.
+                try {
+                    DeviceIdentityStore.ensureDeviceIdentitySeed(
+                        applicationContext,
+                        cached.accountIdB64,
+                    )
+                } catch (cause: Throwable) {
+                    Log.w("lakko-auth", "device-identity ensure (login) failed", cause)
+                }
                 sessionStore.save(cached)  // upsert — schema-versioned marker
                 // Stash the export key + session token for
                 // ContactsClient / DiscoveryClient.
@@ -487,6 +513,21 @@ public class AuthRepository(
                         )
                     } catch (cause: Throwable) {
                         Log.w("lakko-auth", "export-key persist (recover) failed", cause)
+                    }
+                    // Phase 2a3b0 (ADR-0007) — DeviceIdentity
+                    // seed is decoupled from the OPAQUE
+                    // password, so recovery does NOT rotate it.
+                    // `ensureDeviceIdentitySeed` returns the
+                    // existing seed when present and only
+                    // generates fresh bytes if the row is
+                    // missing.
+                    try {
+                        DeviceIdentityStore.ensureDeviceIdentitySeed(
+                            applicationContext,
+                            cached.accountIdB64,
+                        )
+                    } catch (cause: Throwable) {
+                        Log.w("lakko-auth", "device-identity ensure (recover) failed", cause)
                     }
                     sessionStore.save(cached) // idempotent upsert
                     // Phase 2a1d / 2a3d7 — restore-then-bootstrap
@@ -788,6 +829,19 @@ public class AuthRepository(
             // rows above.
             try {
                 ExportKeyStore.deleteExportKey(
+                    applicationContext,
+                    cached.accountIdB64,
+                )
+            } catch (_: Throwable) {
+                // best-effort
+            }
+            // Phase 2a3b0 — drop the cached DeviceIdentity
+            // seed. The leaf in the user's DeviceGroup that
+            // this seed signed for is orphaned; sibling
+            // devices clean it up via 2a3c's remove-device
+            // flow.
+            try {
+                DeviceIdentityStore.deleteDeviceIdentitySeed(
                     applicationContext,
                     cached.accountIdB64,
                 )

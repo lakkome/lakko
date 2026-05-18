@@ -186,6 +186,19 @@ public final class AuthRepository: ObservableObject {
         } catch {
             NSLog("export-key persist (signup) failed: \(error)")
         }
+        // Phase 2a3b0 (ADR-0007) — ensure a random per-device
+        // DeviceIdentity seed exists on this device. Distinct
+        // from the deterministic AccountIdentity (the
+        // ``exportKey`` above); used as the MLS leaf in the
+        // user's DeviceGroup (2a3a) once the add-device flow
+        // lands. Best-effort.
+        do {
+            _ = try DeviceIdentityStore.ensureDeviceIdentitySeed(
+                accountIdB64: accountIdB64
+            )
+        } catch {
+            NSLog("device-identity ensure (signup) failed: \(error)")
+        }
 
         // Stash the export key + session token for ContactsClient /
         // ChatRepository / DiscoveryClient. The bytes survive until
@@ -313,6 +326,17 @@ public final class AuthRepository: ObservableObject {
             )
         } catch {
             NSLog("export-key persist (login) failed: \(error)")
+        }
+        // Phase 2a3b0 (ADR-0007) — ensure DeviceIdentity seed.
+        // Idempotent: a returning user with a seed already on
+        // file gets the cached one; first-login generates
+        // fresh bytes.
+        do {
+            _ = try DeviceIdentityStore.ensureDeviceIdentitySeed(
+                accountIdB64: cached.accountIdB64
+            )
+        } catch {
+            NSLog("device-identity ensure (login) failed: \(error)")
         }
         sessionStore.save(cached) // idempotent upsert — schema-versioned
 
@@ -536,6 +560,18 @@ public final class AuthRepository: ObservableObject {
         } catch {
             NSLog("export-key persist (recover) failed: \(error)")
         }
+        // Phase 2a3b0 (ADR-0007) — DeviceIdentity seed is
+        // decoupled from the OPAQUE password, so recovery does
+        // NOT rotate it. `ensureDeviceIdentitySeed` returns
+        // the existing seed when present and only generates
+        // fresh bytes if the Keychain row is missing.
+        do {
+            _ = try DeviceIdentityStore.ensureDeviceIdentitySeed(
+                accountIdB64: cached.accountIdB64
+            )
+        } catch {
+            NSLog("device-identity ensure (recover) failed: \(error)")
+        }
         sessionStore.save(cached) // idempotent upsert
 
         // Phase 2a1d / 2a3d7 — restore-then-bootstrap on recover.
@@ -655,6 +691,14 @@ public final class AuthRepository: ObservableObject {
             // Phase 2a2c2 — drop the cached export key too. Same
             // clean-wipe rationale.
             ExportKeyStore.deleteExportKey(accountIdB64: cached.accountIdB64)
+            // Phase 2a3b0 — drop the cached DeviceIdentity
+            // seed. The leaf in the user's DeviceGroup that
+            // this seed signed for is orphaned; sibling
+            // devices clean it up via 2a3c's remove-device
+            // flow.
+            DeviceIdentityStore.deleteDeviceIdentitySeed(
+                accountIdB64: cached.accountIdB64
+            )
         }
         sessionStore.clear()
         identitySecrets = nil
