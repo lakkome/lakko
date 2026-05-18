@@ -82,6 +82,14 @@ public class ChatViewModel(
     private var didSeedDraft: Boolean = false
     private val DRAFT_DEBOUNCE_MS: Long = 500L
 
+    /** Phase 2a3e2c-Android — read-cursor broadcast tracker.
+     *  Highest broadcast messageId; the per-`messages` effect
+     *  schedules a fresh `ReadCursor` payload only when the
+     *  newest visible row's id exceeds this value. */
+    private var lastBroadcastReadId: Long = -1L
+    private var readCursorJob: Job? = null
+    private val READ_CURSOR_DEBOUNCE_MS: Long = 1500L
+
     /**
      * Bind to the process-scoped [DeviceGroupSyncRepository]
      * (Phase 2a3e2b). Called from the Compose ChatScreen on
@@ -121,6 +129,72 @@ public class ChatViewModel(
                 .collect { snapshot ->
                     scheduleDraftBroadcast(snapshot.draft, gid)
                 }
+        }
+
+        // Phase 2a3e2c-Android — read-cursor broadcast. Every
+        // time the repo's per-thread message list grows past
+        // the previously-broadcast value, schedule a fresh
+        // `ReadCursor` payload pointing at the newest visible
+        // message-id. Debounced 1500 ms.
+        viewModelScope.launch {
+            repo.state
+                .distinctUntilChanged { a, b ->
+                    val ar = a.threads.firstOrNull { it.groupIdHex == groupIdHex }
+                    val br = b.threads.firstOrNull { it.groupIdHex == groupIdHex }
+                    ar?.messages?.size == br?.messages?.size
+                }
+                .collect { state ->
+                    val thread = state.threads.firstOrNull {
+                        it.groupIdHex == groupIdHex
+                    } ?: return@collect
+                    scheduleReadCursorBroadcast(
+                        messages = thread.messages,
+                        groupIdBytes = gid,
+                    )
+                }
+        }
+    }
+
+    private fun scheduleReadCursorBroadcast(
+        messages: List<ChatMessage>,
+        groupIdBytes: ByteArray,
+    ) {
+        if (messages.isEmpty()) return
+        // Find the highest server-assigned messageId. Outgoing
+        // rows with messageId == 0 (pre-ack) get skipped — the
+        // ack path triggers a fresh effect.
+        var highest: Long = -1L
+        for (m in messages) {
+            if (m.messageId > highest) highest = m.messageId
+        }
+        if (highest <= lastBroadcastReadId) return
+        val target = highest
+        readCursorJob?.cancel()
+        readCursorJob = viewModelScope.launch {
+            delay(READ_CURSOR_DEBOUNCE_MS)
+            lastBroadcastReadId = target
+            // 8 big-endian bytes — wire shape stable across
+            // platforms.
+            val idBytes = ByteArray(8)
+            var v = target
+            for (i in 7 downTo 0) {
+                idBytes[i] = (v and 0xff).toByte()
+                v = v ushr 8
+            }
+            val now = System.currentTimeMillis().toULong()
+            try {
+                deviceGroupSync?.setReadCursor(
+                    groupId = groupIdBytes,
+                    upToMessageId = idBytes,
+                    readAtMs = now,
+                )
+            } catch (cause: Throwable) {
+                android.util.Log.w(
+                    "ChatViewModel",
+                    "setReadCursor failed",
+                    cause,
+                )
+            }
         }
     }
 

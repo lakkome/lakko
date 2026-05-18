@@ -21,6 +21,7 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -30,9 +31,13 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import kotlinx.coroutines.launch
+import me.lakko.app.devices.sync.DeviceGroupSyncRepository
+import me.lakko.app.devices.sync.FlagsState
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -69,9 +74,15 @@ public fun ChatListScreen(
     onNavigateBack: () -> Unit,
     onOpenThread: (groupIdHex: String) -> Unit,
     modifier: Modifier = Modifier,
+    deviceGroupSync: DeviceGroupSyncRepository? = null,
 ) {
     val state by repository.state.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
+    // Phase 2a3e2c-Android — cross-device flags. Nullable
+    // `deviceGroupSync` keeps the screen mountable in tests /
+    // older callers that haven't wired the sync runtime yet.
+    val flagsState = deviceGroupSync?.flags?.collectAsStateWithLifecycle()
+    val flagsMap: Map<String, FlagsState> = flagsState?.value ?: emptyMap()
 
     LaunchedEffect(Unit) {
         // First tick: immediate refresh so the list is fresh
@@ -102,19 +113,79 @@ public fun ChatListScreen(
         if (state.threads.isEmpty()) {
             EmptyPanel()
         } else {
+            // Phase 2a3e2c — pinned threads to the top,
+            // archived to the bottom, otherwise stable on the
+            // repository order.
+            val sorted = state.threads.sortedWith(
+                compareByDescending<ChatThread> { thread ->
+                    flagsMap[thread.groupIdHex]?.pinned == true
+                }.thenBy { thread ->
+                    flagsMap[thread.groupIdHex]?.archived == true
+                },
+            )
             LazyColumn(
                 modifier = Modifier.fillMaxSize(),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                items(items = state.threads, key = { it.groupIdHex }) { thread ->
+                items(items = sorted, key = { it.groupIdHex }) { thread ->
                     ThreadRow(
                         thread = thread,
+                        flags = flagsMap[thread.groupIdHex],
                         onClick = { onOpenThread(thread.groupIdHex) },
+                        onToggleFlag = { field ->
+                            val sync = deviceGroupSync ?: return@ThreadRow
+                            val groupId = hexToBytes(thread.groupIdHex)
+                                ?: return@ThreadRow
+                            val cur = flagsMap[thread.groupIdHex]
+                            var pinned = cur?.pinned ?: false
+                            var muted = cur?.muted ?: false
+                            var archived = cur?.archived ?: false
+                            val unreadOverride =
+                                cur?.unreadOverride ?: false
+                            when (field) {
+                                FlagField.Pin -> pinned = !pinned
+                                FlagField.Mute -> muted = !muted
+                                FlagField.Archive -> archived = !archived
+                            }
+                            scope.launch {
+                                try {
+                                    sync.setFlags(
+                                        groupId = groupId,
+                                        pinned = pinned,
+                                        muted = muted,
+                                        archived = archived,
+                                        unreadOverride = unreadOverride,
+                                    )
+                                } catch (cause: Throwable) {
+                                    android.util.Log.w(
+                                        "ChatListScreen",
+                                        "setFlags failed",
+                                        cause,
+                                    )
+                                }
+                            }
+                        },
                     )
                 }
             }
         }
     }
+}
+
+internal enum class FlagField { Pin, Mute, Archive }
+
+private fun hexToBytes(hex: String): ByteArray? {
+    if (hex.length % 2 != 0) return null
+    val out = ByteArray(hex.length / 2)
+    var i = 0
+    while (i < hex.length) {
+        val hi = Character.digit(hex[i], 16)
+        val lo = Character.digit(hex[i + 1], 16)
+        if (hi < 0 || lo < 0) return null
+        out[i / 2] = ((hi shl 4) or lo).toByte()
+        i += 2
+    }
+    return out
 }
 
 @Composable
@@ -141,9 +212,14 @@ private fun Header(
 @Composable
 private fun ThreadRow(
     thread: ChatThread,
+    flags: FlagsState?,
     onClick: () -> Unit,
+    onToggleFlag: (FlagField) -> Unit,
 ) {
     val lastMessage = thread.messages.lastOrNull()
+    val archived = flags?.archived == true
+    val pinned = flags?.pinned == true
+    val muted = flags?.muted == true
     Card(
         colors = CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.surfaceVariant,
@@ -151,14 +227,59 @@ private fun ThreadRow(
         shape = RoundedCornerShape(8.dp),
         modifier = Modifier
             .fillMaxWidth()
+            .alpha(if (archived) 0.6f else 1f)
             .clickable(onClick = onClick),
     ) {
         Column(modifier = Modifier.padding(12.dp)) {
-            Text(
-                text = "Group ${shortHex(thread.groupIdHex)}",
-                style = MaterialTheme.typography.titleSmall,
-                fontFamily = FontFamily.Monospace,
-            )
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        if (pinned) {
+                            Text("📌 ", style = MaterialTheme.typography.titleSmall)
+                        }
+                        Text(
+                            text = "Group ${shortHex(thread.groupIdHex)}",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontFamily = FontFamily.Monospace,
+                        )
+                        if (muted) {
+                            Text(
+                                " 🔇",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        if (archived) {
+                            Text(
+                                " 📦",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                }
+                IconButton(onClick = { onToggleFlag(FlagField.Pin) }) {
+                    Text(
+                        if (pinned) "📌" else "📍",
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                }
+                IconButton(onClick = { onToggleFlag(FlagField.Mute) }) {
+                    Text(
+                        if (muted) "🔇" else "🔈",
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                }
+                IconButton(onClick = { onToggleFlag(FlagField.Archive) }) {
+                    Text(
+                        if (archived) "📤" else "📦",
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                }
+            }
             Spacer(Modifier.height(4.dp))
             if (lastMessage == null) {
                 Text(

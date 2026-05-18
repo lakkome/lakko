@@ -414,6 +414,10 @@ private fun SessionRoot(
             onOpenThread = { groupIdHex ->
                 destination = SessionDestination.Chat(groupIdHex)
             },
+            // Phase 2a3e2c-Android — surfaces pin / mute /
+            // archive indicators + swipe / icon-tap toggles
+            // backed by the cross-device sync store.
+            deviceGroupSync = deviceGroupSync,
         )
 
         is SessionDestination.Chat -> {

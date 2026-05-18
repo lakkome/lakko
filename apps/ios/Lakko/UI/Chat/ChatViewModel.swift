@@ -112,6 +112,13 @@ public final class ChatViewModel: ObservableObject {
             .store(in: &cancellables)
     }
 
+    /// Phase 2a3e2c-iOS — read-cursor broadcast tracker.
+    /// Highest broadcast messageId; the per-`messages` effect
+    /// schedules a fresh `ReadCursor` payload only when the
+    /// newest visible row's id exceeds this value.
+    private var lastBroadcastReadId: Int64 = -1
+    private var readCursorWork: DispatchWorkItem?
+
     /// Bind to the process-scoped
     /// ``DeviceGroupSyncRepository`` (Phase 2a3e2b). Called
     /// from `ChatScreen.onAppear`. Subscribes to:
@@ -121,6 +128,9 @@ public final class ChatViewModel: ObservableObject {
     ///     empty (avoids stomping mid-typing on this device).
     ///   * local `draft` changes — debounce 500 ms then
     ///     broadcast.
+    ///   * local `messages` mutations — debounce 1.5 s then
+    ///     broadcast a `ReadCursor` payload pointing at the
+    ///     highest message-id (Phase 2a3e2c).
     public func attachSync(_ sync: DeviceGroupSyncRepository) {
         deviceGroupSync = sync
         // Resolve groupIdBytes lazily — the ChatRepository
@@ -153,6 +163,64 @@ public final class ChatViewModel: ObservableObject {
                 self?.scheduleDraftBroadcast(text: text, groupIdBytes: groupIdBytes)
             }
             .store(in: &cancellables)
+
+        // Phase 2a3e2c-iOS — read-cursor broadcast. Every time
+        // the timeline grows past the previously-broadcast
+        // value, mint a fresh `ReadCursor` payload pointing at
+        // the newest visible message.
+        $messages
+            .receive(on: RunLoop.main)
+            .sink { [weak self] msgs in
+                self?.scheduleReadCursorBroadcast(
+                    messages: msgs,
+                    groupIdBytes: groupIdBytes
+                )
+            }
+            .store(in: &cancellables)
+    }
+
+    private func scheduleReadCursorBroadcast(
+        messages: [ChatMessage],
+        groupIdBytes: Data
+    ) {
+        guard !messages.isEmpty else { return }
+        // Find the highest server-assigned messageId. Outgoing
+        // rows with messageId == 0 (pre-ack) get skipped — the
+        // ack path will trigger a fresh effect run.
+        var highest: Int64 = -1
+        for m in messages where m.messageId > 0 {
+            if m.messageId > highest { highest = m.messageId }
+        }
+        if highest <= lastBroadcastReadId { return }
+        let target = highest
+        readCursorWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self = self,
+                  let sync = self.deviceGroupSync else { return }
+            self.lastBroadcastReadId = target
+            // 8 big-endian bytes — wire shape stable across
+            // platforms.
+            var idBytes = Data(count: 8)
+            var v = UInt64(bitPattern: target)
+            for i in (0..<8).reversed() {
+                idBytes[i] = UInt8(v & 0xff)
+                v >>= 8
+            }
+            let now = UInt64(Date().timeIntervalSince1970 * 1000)
+            Task { @MainActor in
+                do {
+                    try await sync.setReadCursor(
+                        groupId: groupIdBytes,
+                        upToMessageId: idBytes,
+                        readAtMs: now
+                    )
+                } catch {
+                    NSLog("setReadCursor failed: %@", error.localizedDescription)
+                }
+            }
+        }
+        readCursorWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5, execute: work)
     }
 
     private func scheduleDraftBroadcast(text: String, groupIdBytes: Data) {

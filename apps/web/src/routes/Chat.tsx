@@ -809,6 +809,72 @@ function ChatView(props: {
     })();
   });
 
+  // Phase 2a3e2c-web — read cursor sync. Every time the
+  // timeline grows past the previously-broadcast value, mint
+  // a fresh `ReadCursor` payload pointing at the newest
+  // visible message. The sibling-device chat list folds the
+  // cursor into its unread-count tracker on its next mount.
+  //
+  // Debounced to 1500 ms so a noisy poll batch doesn't fan
+  // out one DeviceGroup write per row; the user's "thread
+  // open + scrolling" intent is captured at the end of the
+  // burst.
+  let lastBroadcastReadId: bigint | null = null;
+  let readCursorTimer: ReturnType<typeof setTimeout> | null = null;
+  const READ_CURSOR_DEBOUNCE_MS = 1500;
+  createEffect(() => {
+    const list = rows();
+    if (list.length === 0) return;
+    // Find the highest server-assigned messageId — outgoing
+    // rows with `ack === "pending"` carry no messageId yet so
+    // they're skipped.
+    let lastId: bigint | null = null;
+    for (const r of list) {
+      let id: number | undefined;
+      if (r.kind === "outgoing") {
+        if (r.ack === "sent" && r.messageId !== undefined) id = r.messageId;
+      } else {
+        id = r.event.messageId;
+      }
+      if (id !== undefined) {
+        const b = BigInt(id);
+        if (lastId === null || b > lastId) lastId = b;
+      }
+    }
+    if (lastId === null) return;
+    if (lastBroadcastReadId !== null && lastBroadcastReadId >= lastId) return;
+    const target = lastId;
+    if (readCursorTimer !== null) clearTimeout(readCursorTimer);
+    readCursorTimer = setTimeout(() => {
+      readCursorTimer = null;
+      lastBroadcastReadId = target;
+      const groupId = groupIdBytes();
+      // Encode the messageId as 8 big-endian bytes so the
+      // wire shape stays stable regardless of how JS strings
+      // serialise BigInt. Receivers compare the raw bytes
+      // against their own per-group highest-id.
+      const idBytes = new Uint8Array(8);
+      let v = target;
+      for (let i = 7; i >= 0; i -= 1) {
+        idBytes[i] = Number(v & 0xffn);
+        v >>= 8n;
+      }
+      void sync
+        .setReadCursor(groupId, idBytes, BigInt(Date.now()))
+        .catch((err: unknown) => {
+          // eslint-disable-next-line no-console
+          console.warn("setReadCursor failed", err);
+        });
+    }, READ_CURSOR_DEBOUNCE_MS);
+  });
+
+  onCleanup(() => {
+    if (readCursorTimer !== null) {
+      clearTimeout(readCursorTimer);
+      readCursorTimer = null;
+    }
+  });
+
   // Debounced persist whenever the timeline mutates. We
   // re-read `rows()` inside the effect so every transitive
   // signal change schedules a write; the 500 ms debounce

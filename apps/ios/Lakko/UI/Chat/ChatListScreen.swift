@@ -21,6 +21,13 @@ public struct ChatListScreen: View {
     public var onBack: () -> Void
     public var onOpenChat: (String) -> Void
 
+    /// Phase 2a3e2c-iOS — cross-device per-thread flags
+    /// (pinned / muted / archived). The Combine subscription
+    /// inside ``DeviceGroupSyncRepository`` keeps the row
+    /// indicators + the sort order live as sibling devices
+    /// publish updates.
+    @EnvironmentObject private var deviceGroupSync: DeviceGroupSyncRepository
+
     public init(
         viewModel: ChatListViewModel,
         onBack: @escaping () -> Void,
@@ -46,19 +53,123 @@ public struct ChatListScreen: View {
         }
     }
 
+    /// Threads with the active flags applied:
+    ///   * pinned → top of the list
+    ///   * archived → bottom
+    ///   * otherwise stable on the underlying repository order
+    private var sortedThreads: [ChatThread] {
+        let flagsMap = deviceGroupSync.flags
+        return viewModel.threads.sorted { lhs, rhs in
+            let lf = flagsMap[lhs.groupIdHex]
+            let rf = flagsMap[rhs.groupIdHex]
+            let lpinned = lf?.pinned == true
+            let rpinned = rf?.pinned == true
+            if lpinned != rpinned { return lpinned }
+            let larchived = lf?.archived == true
+            let rarchived = rf?.archived == true
+            if larchived != rarchived { return !larchived }
+            return false
+        }
+    }
+
     @ViewBuilder
     private var content: some View {
         if viewModel.threads.isEmpty {
             emptyState
         } else {
-            List(viewModel.threads, id: \.groupIdHex) { thread in
+            List(sortedThreads, id: \.groupIdHex) { thread in
                 Button(action: { onOpenChat(thread.groupIdHex) }) {
-                    ThreadRow(thread: thread)
+                    ThreadRow(
+                        thread: thread,
+                        flags: deviceGroupSync.flags[thread.groupIdHex]
+                    )
                 }
                 .buttonStyle(.plain)
+                .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                    swipeActions(thread: thread)
+                }
             }
             .listStyle(.plain)
         }
+    }
+
+    @ViewBuilder
+    private func swipeActions(thread: ChatThread) -> some View {
+        let cur = deviceGroupSync.flags[thread.groupIdHex]
+        let pinned = cur?.pinned == true
+        let muted = cur?.muted == true
+        let archived = cur?.archived == true
+        Button {
+            Task { await toggleFlag(thread: thread, field: .pin) }
+        } label: {
+            Label(
+                pinned ? "Unpin" : "Pin",
+                systemImage: pinned ? "pin.slash" : "pin"
+            )
+        }
+        .tint(.orange)
+        Button {
+            Task { await toggleFlag(thread: thread, field: .mute) }
+        } label: {
+            Label(
+                muted ? "Unmute" : "Mute",
+                systemImage: muted ? "bell" : "bell.slash"
+            )
+        }
+        .tint(.gray)
+        Button {
+            Task { await toggleFlag(thread: thread, field: .archive) }
+        } label: {
+            Label(
+                archived ? "Unarchive" : "Archive",
+                systemImage: archived ? "tray.and.arrow.up" : "archivebox"
+            )
+        }
+        .tint(.indigo)
+    }
+
+    private enum FlagField {
+        case pin, mute, archive
+    }
+
+    @MainActor
+    private func toggleFlag(thread: ChatThread, field: FlagField) async {
+        guard let groupId = Self.hexToBytes(thread.groupIdHex) else { return }
+        let cur = deviceGroupSync.flags[thread.groupIdHex]
+        var pinned = cur?.pinned ?? false
+        var muted = cur?.muted ?? false
+        var archived = cur?.archived ?? false
+        let unreadOverride = cur?.unreadOverride ?? false
+        switch field {
+        case .pin: pinned.toggle()
+        case .mute: muted.toggle()
+        case .archive: archived.toggle()
+        }
+        do {
+            try await deviceGroupSync.setFlags(
+                groupId: groupId,
+                pinned: pinned,
+                muted: muted,
+                archived: archived,
+                unreadOverride: unreadOverride
+            )
+        } catch {
+            NSLog("setFlags failed: %@", error.localizedDescription)
+        }
+    }
+
+    private static func hexToBytes(_ hex: String) -> Data? {
+        guard hex.count % 2 == 0 else { return nil }
+        var out = Data()
+        out.reserveCapacity(hex.count / 2)
+        var i = hex.startIndex
+        while i < hex.endIndex {
+            let next = hex.index(i, offsetBy: 2)
+            guard let b = UInt8(hex[i..<next], radix: 16) else { return nil }
+            out.append(b)
+            i = next
+        }
+        return out
     }
 
     @ViewBuilder
@@ -81,21 +192,47 @@ public struct ChatListScreen: View {
 
 private struct ThreadRow: View {
     let thread: ChatThread
+    /// Phase 2a3e2c-iOS — cross-device flags snapshot for this
+    /// thread. `nil` until a `Flags` payload lands.
+    let flags: FlagsState?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            // First 16 chars of the hex id — placeholder for the
-            // username surface that 1.14f4 lights up via
-            // ContactsRepository.accepted's stored peer pubkey.
-            Text(thread.groupIdHex.prefix(16) + "…")
-                .font(.system(.body, design: .monospaced))
-            Text(lastMessagePreview)
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
+        HStack(spacing: 8) {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 4) {
+                    if flags?.pinned == true {
+                        Image(systemName: "pin.fill")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                    }
+                    // First 16 chars of the hex id —
+                    // placeholder for the username surface
+                    // that 1.14f4 lights up via
+                    // ContactsRepository.accepted's stored
+                    // peer pubkey.
+                    Text(thread.groupIdHex.prefix(16) + "…")
+                        .font(.system(.body, design: .monospaced))
+                    if flags?.muted == true {
+                        Image(systemName: "bell.slash.fill")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    if flags?.archived == true {
+                        Image(systemName: "archivebox.fill")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                Text(lastMessagePreview)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            Spacer()
         }
         .padding(.vertical, 4)
         .contentShape(Rectangle())
+        .opacity(flags?.archived == true ? 0.6 : 1)
     }
 
     private var lastMessagePreview: String {

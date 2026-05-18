@@ -35,6 +35,8 @@ import {
 import { ContactsClient, ContactsError } from "../contacts/client";
 import type { IncomingContactRequest, SendResult } from "../contacts/client";
 import { useChats, type ActiveGroup } from "../chat/ChatContext";
+import { useDeviceGroupSync } from "../devices/sync/DeviceGroupSyncContext";
+import { groupIdHex as syncGroupIdHex } from "../devices/sync/state";
 import { loadWasm } from "../wasm";
 import { paths } from "./paths";
 import {
@@ -1073,6 +1075,53 @@ function GeneratedUrlPanel(props: {
 function ActiveGroupsPanel(props: {
   groups: () => readonly ActiveGroup[];
 }): JSX.Element {
+  // Phase 2a3e2c-web — reactive flags from the cross-device
+  // sync runtime. Reads here drive (a) the pin / mute /
+  // archive indicators next to each row, (b) the sort
+  // ordering (pinned top, archived bottom).
+  const sync = useDeviceGroupSync();
+
+  /** Pinned → top, archived → bottom, otherwise stable on
+   *  creation order. */
+  const sortedGroups = (): readonly ActiveGroup[] => {
+    const flagsMap = sync.flags();
+    const items = [...props.groups()];
+    items.sort((a, b) => {
+      const fa = flagsMap[syncGroupIdHex(a.group.groupId)];
+      const fb = flagsMap[syncGroupIdHex(b.group.groupId)];
+      const aPinned = fa?.pinned === true;
+      const bPinned = fb?.pinned === true;
+      if (aPinned !== bPinned) return aPinned ? -1 : 1;
+      const aArchived = fa?.archived === true;
+      const bArchived = fb?.archived === true;
+      if (aArchived !== bArchived) return aArchived ? 1 : -1;
+      return 0;
+    });
+    return items;
+  };
+
+  async function toggleFlag(
+    g: ActiveGroup,
+    field: "pinned" | "muted" | "archived",
+  ): Promise<void> {
+    const groupId = g.group.groupId;
+    const key = syncGroupIdHex(groupId);
+    const cur = sync.flags()[key];
+    const next = {
+      pinned: cur?.pinned ?? false,
+      muted: cur?.muted ?? false,
+      archived: cur?.archived ?? false,
+      unreadOverride: cur?.unreadOverride ?? false,
+    };
+    next[field] = !next[field];
+    try {
+      await sync.setFlags(groupId, next);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn(`setFlags(${field}) failed`, err);
+    }
+  }
+
   return (
     <section style={panelStyle()}>
       <h2 style={{ "margin-top": 0 }}>
@@ -1101,48 +1150,149 @@ function ActiveGroupsPanel(props: {
         }
       >
         <ul style={listStyle()}>
-          <For each={props.groups()}>
-            {(g) => (
-              <li
-                style={{
-                  ...rowStyle(),
-                  "align-items": "center",
-                }}
-              >
-                <div style={{ flex: 1 }}>
-                  <strong>{g.label}</strong>
-                  <div
-                    style={{
-                      color: "var(--surface-muted)",
-                      "font-size": "0.85rem",
-                    }}
-                  >
-                    {g.group.memberCount} member
-                    {g.group.memberCount === 1 ? "" : "s"} · seat #
-                    {g.group.ownLeafIndex}
-                  </div>
-                </div>
-                <A
-                  href={paths.chat(
-                    base64UrlEncodeNoPad(g.group.groupId),
-                  )}
+          <For each={sortedGroups()}>
+            {(g) => {
+              const key = syncGroupIdHex(g.group.groupId);
+              const flags = (): {
+                pinned: boolean;
+                muted: boolean;
+                archived: boolean;
+              } => {
+                const f = sync.flags()[key];
+                return {
+                  pinned: f?.pinned === true,
+                  muted: f?.muted === true,
+                  archived: f?.archived === true,
+                };
+              };
+              return (
+                <li
                   style={{
-                    padding: "0.4rem 0.8rem",
-                    background: "var(--accent)",
-                    color: "var(--accent-fg)",
-                    "border-radius": "var(--radius-sm)",
-                    "text-decoration": "none",
+                    ...rowStyle(),
+                    "align-items": "center",
+                    opacity: flags().archived ? "0.6" : "1",
                   }}
                 >
-                  Open chat
-                </A>
-              </li>
-            )}
+                  <div style={{ flex: 1 }}>
+                    <strong>
+                      <Show when={flags().pinned}>📌 </Show>
+                      {g.label}
+                      <Show when={flags().muted}>
+                        <span
+                          style={{
+                            "margin-left": "0.4rem",
+                            color: "var(--surface-muted)",
+                            "font-size": "0.85rem",
+                          }}
+                          title="Muted on this account"
+                        >
+                          🔇
+                        </span>
+                      </Show>
+                      <Show when={flags().archived}>
+                        <span
+                          style={{
+                            "margin-left": "0.4rem",
+                            color: "var(--surface-muted)",
+                            "font-size": "0.85rem",
+                          }}
+                          title="Archived on this account"
+                        >
+                          📦
+                        </span>
+                      </Show>
+                    </strong>
+                    <div
+                      style={{
+                        color: "var(--surface-muted)",
+                        "font-size": "0.85rem",
+                      }}
+                    >
+                      {g.group.memberCount} member
+                      {g.group.memberCount === 1 ? "" : "s"} · seat #
+                      {g.group.ownLeafIndex}
+                    </div>
+                  </div>
+                  <div
+                    style={{
+                      display: "flex",
+                      gap: "0.3rem",
+                      "align-items": "center",
+                    }}
+                  >
+                    <button
+                      type="button"
+                      title={flags().pinned ? "Unpin" : "Pin"}
+                      onClick={() => {
+                        void toggleFlag(g, "pinned");
+                      }}
+                      style={iconBtnStyle(flags().pinned)}
+                    >
+                      📌
+                    </button>
+                    <button
+                      type="button"
+                      title={flags().muted ? "Unmute" : "Mute"}
+                      onClick={() => {
+                        void toggleFlag(g, "muted");
+                      }}
+                      style={iconBtnStyle(flags().muted)}
+                    >
+                      🔇
+                    </button>
+                    <button
+                      type="button"
+                      title={flags().archived ? "Unarchive" : "Archive"}
+                      onClick={() => {
+                        void toggleFlag(g, "archived");
+                      }}
+                      style={iconBtnStyle(flags().archived)}
+                    >
+                      📦
+                    </button>
+                    <A
+                      href={paths.chat(
+                        base64UrlEncodeNoPad(g.group.groupId),
+                      )}
+                      style={{
+                        padding: "0.4rem 0.8rem",
+                        background: "var(--accent)",
+                        color: "var(--accent-fg)",
+                        "border-radius": "var(--radius-sm)",
+                        "text-decoration": "none",
+                      }}
+                    >
+                      Open chat
+                    </A>
+                  </div>
+                </li>
+              );
+            }}
           </For>
         </ul>
       </Show>
     </section>
   );
+}
+
+/** Round inline toggle button. `active` = filled background
+ *  for the on-state; off-state shows a muted outline. The
+ *  state across devices comes via DeviceGroupSync flags map. */
+function iconBtnStyle(active: boolean): JSX.CSSProperties {
+  return {
+    width: "1.8rem",
+    height: "1.8rem",
+    padding: "0",
+    "border-radius": "var(--radius-sm)",
+    border: active
+      ? "1px solid var(--accent)"
+      : "1px solid var(--surface-muted)",
+    background: active ? "var(--accent)" : "transparent",
+    color: active ? "var(--accent-fg)" : "var(--surface-muted)",
+    cursor: "pointer",
+    "font-size": "0.9rem",
+    "line-height": "1",
+  };
 }
 
 interface PendingPanelProps {
