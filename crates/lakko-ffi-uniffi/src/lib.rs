@@ -228,6 +228,150 @@ pub enum ProcessedMessage {
     ExternalJoinProposal,
 }
 
+/// Typed body of a DeviceGroup cross-device payload
+/// (Phase 2a3e2). Mirror of [`lakko_mls::device_group::DeviceGroupBody`]
+/// on the FFI boundary. Four variants matching the
+/// `DeviceGroupPayload.body` `oneof` in
+/// `schemas/mls-app/devicegroup_v1.proto`.
+#[derive(uniffi::Enum)]
+pub enum DeviceGroupBody {
+    /// "I read up to this point in this thread." Other devices
+    /// last-write-wins by HLC to compute their own unread count.
+    ReadCursor {
+        /// The conversation group's MLS group_id.
+        group_id: Vec<u8>,
+        /// The message id the sender claims to have read up to.
+        up_to_message_id: Vec<u8>,
+        /// Wall-clock UNIX millis when the read happened.
+        read_at_ms: u64,
+    },
+    /// In-flight composer text for a single thread. Empty `text`
+    /// clears the draft (receivers wipe their local copy).
+    Draft {
+        /// The conversation group_id the draft belongs to.
+        group_id: Vec<u8>,
+        /// Composer text. UTF-8, may be empty.
+        text: String,
+        /// Non-empty when the draft was started as a reply.
+        reply_to_id: Vec<u8>,
+    },
+    /// Per-thread UI flags (last-write-wins snapshot of the
+    /// whole struct).
+    Flags {
+        /// The conversation group_id the flags apply to.
+        group_id: Vec<u8>,
+        /// Pinned threads stay at the top of the list.
+        pinned: bool,
+        /// Muted threads suppress push notifications + unread
+        /// indicators.
+        muted: bool,
+        /// Archived threads drop out of the main list.
+        archived: bool,
+        /// Manual unread override after the thread was read.
+        unread_override: bool,
+    },
+    /// Explicit display ordering for the conversation list.
+    Order {
+        /// Conversation group_ids in display order, top-to-bottom.
+        group_ids: Vec<Vec<u8>>,
+    },
+}
+
+/// Parsed envelope returned by
+/// [`parse_devicegroup_payload`] (Phase 2a3e2). Wraps the
+/// typed [`DeviceGroupBody`] with the metadata callers need for
+/// ordering (HLC) and originator identification (sender_leaf).
+#[derive(uniffi::Record)]
+pub struct ParsedDeviceGroupPayload {
+    /// Hybrid logical clock timestamp from the envelope.
+    pub hlc: u64,
+    /// Leaf index of the device that authored this payload.
+    pub sender_leaf: u32,
+    /// Concrete payload — one of `ReadCursor` / `Draft` /
+    /// `Flags` / `Order`.
+    pub body: DeviceGroupBody,
+}
+
+impl From<DeviceGroupBody> for lakko_mls::device_group::DeviceGroupBody {
+    fn from(value: DeviceGroupBody) -> Self {
+        use lakko_mls::device_group::DeviceGroupBody as Inner;
+        match value {
+            DeviceGroupBody::ReadCursor {
+                group_id,
+                up_to_message_id,
+                read_at_ms,
+            } => Inner::ReadCursor {
+                group_id,
+                up_to_message_id,
+                read_at_ms,
+            },
+            DeviceGroupBody::Draft {
+                group_id,
+                text,
+                reply_to_id,
+            } => Inner::Draft {
+                group_id,
+                text,
+                reply_to_id,
+            },
+            DeviceGroupBody::Flags {
+                group_id,
+                pinned,
+                muted,
+                archived,
+                unread_override,
+            } => Inner::Flags {
+                group_id,
+                pinned,
+                muted,
+                archived,
+                unread_override,
+            },
+            DeviceGroupBody::Order { group_ids } => Inner::Order { group_ids },
+        }
+    }
+}
+
+impl From<lakko_mls::device_group::DeviceGroupBody> for DeviceGroupBody {
+    fn from(value: lakko_mls::device_group::DeviceGroupBody) -> Self {
+        use lakko_mls::device_group::DeviceGroupBody as Inner;
+        match value {
+            Inner::ReadCursor {
+                group_id,
+                up_to_message_id,
+                read_at_ms,
+            } => Self::ReadCursor {
+                group_id,
+                up_to_message_id,
+                read_at_ms,
+            },
+            Inner::Draft {
+                group_id,
+                text,
+                reply_to_id,
+            } => Self::Draft {
+                group_id,
+                text,
+                reply_to_id,
+            },
+            Inner::Flags {
+                group_id,
+                pinned,
+                muted,
+                archived,
+                unread_override,
+            } => Self::Flags {
+                group_id,
+                pinned,
+                muted,
+                archived,
+                unread_override,
+            },
+            Inner::Order { group_ids } => Self::Order { group_ids },
+        }
+    }
+}
+
 /// Lakko identity — owns the device's signing keypair, MLS credential and
 /// per-device storage provider.
 #[derive(uniffi::Object)]
@@ -659,6 +803,85 @@ impl DeviceGroup {
         let secret = lakko_mls::history_bundle::exporter_secret(&g, &identity.inner)?;
         Ok(secret.to_vec())
     }
+
+    /// Compose + encrypt a typed cross-device payload
+    /// (Phase 2a3e2). Wraps
+    /// [`lakko_mls::DeviceGroup::create_devicegroup_message`]
+    /// with a FFI-friendly enum. Returns the wire-format MLS
+    /// application-message bytes ready to PUT to the
+    /// DeviceGroup DS journal.
+    ///
+    /// `hlc` is the caller-supplied hybrid logical clock value
+    /// — callers wire a single per-account HLC generator at
+    /// the application layer so total ordering survives across
+    /// devices.
+    pub fn create_devicegroup_message(
+        &self,
+        identity: &Identity,
+        body: DeviceGroupBody,
+        hlc: u64,
+    ) -> Result<Vec<u8>, FfiError> {
+        let mut g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
+        let bytes = g.create_devicegroup_message(&identity.inner, body.into(), hlc)?;
+        Ok(bytes)
+    }
+
+    /// Decrypt / advance the state machine for an inbound
+    /// DeviceGroup wire message (Phase 2a3e2). Same shape as
+    /// [`Group::process_incoming`]:
+    ///
+    ///   * `ProcessedMessage::Application { data }` — the
+    ///     application-message plaintext. Pass `data` to
+    ///     [`parse_devicegroup_payload`] to get a typed
+    ///     `ParsedDeviceGroupPayload`.
+    ///   * `ProcessedMessage::Commit` — a Commit was processed and
+    ///     merged. DeviceGroup state advanced. Caller refreshes
+    ///     its `devices()` snapshot.
+    ///   * `ProcessedMessage::Proposal` /
+    ///     `::ExternalJoinProposal` — defensive; no state
+    ///     advance.
+    pub fn process_incoming(
+        &self,
+        identity: &Identity,
+        message_bytes: Vec<u8>,
+    ) -> Result<ProcessedMessage, FfiError> {
+        let mut g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
+        let incoming = g.process_incoming(&identity.inner, &message_bytes)?;
+        Ok(match incoming {
+            lakko_mls::Incoming::Application(data) => ProcessedMessage::Application { data },
+            lakko_mls::Incoming::Commit => ProcessedMessage::Commit,
+            lakko_mls::Incoming::Proposal => ProcessedMessage::Proposal,
+            lakko_mls::Incoming::ExternalJoinProposal => ProcessedMessage::ExternalJoinProposal,
+        })
+    }
+}
+
+/// Parse a DeviceGroup application-payload plaintext into the
+/// typed [`ParsedDeviceGroupPayload`] (Phase 2a3e2). Callers
+/// feed in the `data` field of
+/// [`ProcessedMessage::Application`] from
+/// [`DeviceGroup::process_incoming`].
+///
+/// Free function because the receiver-side flow is
+/// stateless — no `DeviceGroup` state to consult.
+///
+/// # Errors
+///
+/// - [`FfiError::Codec`] when the proto decode fails.
+/// - [`FfiError::Mls`] with an `Unsupported` body when the
+///   payload's `body` is absent or carries a variant this
+///   binary doesn't recognise (older client reading a
+///   future-version payload).
+#[uniffi::export]
+pub fn parse_devicegroup_payload(
+    plaintext: Vec<u8>,
+) -> Result<ParsedDeviceGroupPayload, FfiError> {
+    let parsed = lakko_mls::DeviceGroup::parse_devicegroup_payload(&plaintext)?;
+    Ok(ParsedDeviceGroupPayload {
+        hlc: parsed.hlc,
+        sender_leaf: parsed.sender_leaf,
+        body: parsed.body.into(),
+    })
 }
 
 /// AEAD-seal a [`lakko_proto::mls_app::history_bundle::v1::HistoryBundle`]

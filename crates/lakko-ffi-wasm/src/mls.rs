@@ -674,6 +674,372 @@ impl DeviceGroup {
             .map_err(mls_err)?;
         Ok(secret.to_vec())
     }
+
+    // ====================================================================
+    // 2a3e2 — typed cross-device payload composer / consumer.
+    //
+    // wasm-bindgen rejects Rust enums with associated data on the
+    // public surface, so each typed body variant gets its own
+    // composer. The parser returns a flat [`ParsedDeviceGroupPayload`]
+    // object whose getters surface a `kind` discriminator + every
+    // possible field; the JS layer reads only the fields relevant to
+    // the active kind. Mirror of the UniFFI surface (where the
+    // FFI-friendly `DeviceGroupBody` Enum sealed-shape is idiomatic).
+    // ====================================================================
+
+    /// Compose a `ReadCursor` cross-device payload + return the
+    /// encrypted wire bytes ready to PUT to the DeviceGroup DS
+    /// journal (Phase 2a3e2). `groupId` / `upToMessageId` are
+    /// raw bytes; `readAtMs` / `hlc` are unix-millis / HLC u64s.
+    #[wasm_bindgen(js_name = createDeviceGroupReadCursorMessage)]
+    pub fn create_devicegroup_read_cursor_message(
+        &self,
+        identity: &Identity,
+        group_id: &[u8],
+        up_to_message_id: &[u8],
+        read_at_ms: u64,
+        hlc: u64,
+    ) -> Result<Vec<u8>, JsError> {
+        self.create_devicegroup_body(
+            identity,
+            lakko_mls::device_group::DeviceGroupBody::ReadCursor {
+                group_id: group_id.to_vec(),
+                up_to_message_id: up_to_message_id.to_vec(),
+                read_at_ms,
+            },
+            hlc,
+        )
+    }
+
+    /// Compose a `Draft` cross-device payload. Empty `text`
+    /// clears the receiver's local draft for the same group.
+    #[wasm_bindgen(js_name = createDeviceGroupDraftMessage)]
+    pub fn create_devicegroup_draft_message(
+        &self,
+        identity: &Identity,
+        group_id: &[u8],
+        text: &str,
+        reply_to_id: &[u8],
+        hlc: u64,
+    ) -> Result<Vec<u8>, JsError> {
+        self.create_devicegroup_body(
+            identity,
+            lakko_mls::device_group::DeviceGroupBody::Draft {
+                group_id: group_id.to_vec(),
+                text: text.to_string(),
+                reply_to_id: reply_to_id.to_vec(),
+            },
+            hlc,
+        )
+    }
+
+    /// Compose a `Flags` cross-device payload (pin / mute /
+    /// archive / unread-override snapshot — last-write-wins by
+    /// HLC).
+    #[wasm_bindgen(js_name = createDeviceGroupFlagsMessage)]
+    #[allow(clippy::fn_params_excessive_bools)]
+    pub fn create_devicegroup_flags_message(
+        &self,
+        identity: &Identity,
+        group_id: &[u8],
+        pinned: bool,
+        muted: bool,
+        archived: bool,
+        unread_override: bool,
+        hlc: u64,
+    ) -> Result<Vec<u8>, JsError> {
+        self.create_devicegroup_body(
+            identity,
+            lakko_mls::device_group::DeviceGroupBody::Flags {
+                group_id: group_id.to_vec(),
+                pinned,
+                muted,
+                archived,
+                unread_override,
+            },
+            hlc,
+        )
+    }
+
+    /// Compose an `Order` cross-device payload — explicit
+    /// display ordering for the conversation list. `groupIds`
+    /// is the flat concatenation of all group_ids; the lengths
+    /// are encoded inline via the leading-length prefix
+    /// convention `len(u32 LE) || bytes`. Callers should
+    /// prefer the `Vec<Vec<u8>>` shape; wasm-bindgen flattens
+    /// it via a JS `Uint8Array[]`.
+    #[wasm_bindgen(js_name = createDeviceGroupOrderMessage)]
+    pub fn create_devicegroup_order_message(
+        &self,
+        identity: &Identity,
+        group_ids: Vec<js_sys::Uint8Array>,
+        hlc: u64,
+    ) -> Result<Vec<u8>, JsError> {
+        let owned: Vec<Vec<u8>> = group_ids.into_iter().map(|a| a.to_vec()).collect();
+        self.create_devicegroup_body(
+            identity,
+            lakko_mls::device_group::DeviceGroupBody::Order { group_ids: owned },
+            hlc,
+        )
+    }
+
+    /// Decrypt / advance the state machine for an inbound
+    /// DeviceGroup wire message (Phase 2a3e2). JS layer reads
+    /// `kind`:
+    ///
+    ///   * `"application"` — pass `data` into
+    ///     [`parseDeviceGroupPayload`] to project into a typed
+    ///     payload.
+    ///   * `"commit"` — DeviceGroup advanced. Caller refreshes
+    ///     `devices()`.
+    ///   * `"proposal"` / `"externalJoinProposal"` — defensive;
+    ///     no state advance.
+    #[wasm_bindgen(js_name = processIncoming)]
+    pub fn dg_process_incoming(
+        &self,
+        identity: &Identity,
+        message_bytes: &[u8],
+    ) -> Result<ProcessedMessage, JsError> {
+        let mut g = self
+            .inner
+            .lock()
+            .map_err(|_| JsError::new("internal lock poisoned"))?;
+        let incoming = g
+            .process_incoming(&identity.inner, message_bytes)
+            .map_err(mls_err)?;
+        Ok(match incoming {
+            lakko_mls::Incoming::Application(data) => ProcessedMessage {
+                kind: ProcessedMessageKind::Application,
+                application_data: Some(data),
+            },
+            lakko_mls::Incoming::Commit => ProcessedMessage {
+                kind: ProcessedMessageKind::Commit,
+                application_data: None,
+            },
+            lakko_mls::Incoming::Proposal => ProcessedMessage {
+                kind: ProcessedMessageKind::Proposal,
+                application_data: None,
+            },
+            lakko_mls::Incoming::ExternalJoinProposal => ProcessedMessage {
+                kind: ProcessedMessageKind::ExternalJoinProposal,
+                application_data: None,
+            },
+        })
+    }
+
+    /// Shared compose plumbing — wire-encodes via OpenMLS +
+    /// returns the bytes.
+    fn create_devicegroup_body(
+        &self,
+        identity: &Identity,
+        body: lakko_mls::device_group::DeviceGroupBody,
+        hlc: u64,
+    ) -> Result<Vec<u8>, JsError> {
+        let mut g = self
+            .inner
+            .lock()
+            .map_err(|_| JsError::new("internal lock poisoned"))?;
+        g.create_devicegroup_message(&identity.inner, body, hlc)
+            .map_err(mls_err)
+    }
+}
+
+/// Discriminator string for [`ParsedDeviceGroupPayload::kind`].
+/// JS-side `switch` matches on this to read the relevant
+/// optional fields. Pinned ASCII; any change is a breaking
+/// surface change.
+const KIND_READ_CURSOR: &str = "readCursor";
+const KIND_DRAFT: &str = "draft";
+const KIND_FLAGS: &str = "flags";
+const KIND_ORDER: &str = "order";
+
+/// JS-side projection of
+/// [`lakko_mls::device_group::ParsedDeviceGroupPayload`]
+/// (Phase 2a3e2). One flat class with a `kind` discriminator +
+/// every possible field as a typed getter — keeps the
+/// wasm-bindgen surface simple at the cost of some
+/// always-present fields on every variant.
+///
+/// Each field carries a trailing `_val` to disambiguate from
+/// the same-named wasm-bindgen getter; this is mechanically
+/// required by wasm-bindgen and outside our control.
+#[wasm_bindgen]
+#[allow(
+    clippy::similar_names,
+    clippy::struct_excessive_bools,
+    clippy::struct_field_names
+)]
+pub struct ParsedDeviceGroupPayload {
+    hlc_val: u64,
+    sender_leaf_val: u32,
+    kind_val: &'static str,
+    group_id_val: Vec<u8>,
+    up_to_message_id_val: Vec<u8>,
+    read_at_ms_val: u64,
+    text_val: String,
+    reply_to_id_val: Vec<u8>,
+    pinned_val: bool,
+    muted_val: bool,
+    archived_val: bool,
+    unread_override_val: bool,
+    order_group_ids_val: Vec<Vec<u8>>,
+}
+
+#[wasm_bindgen]
+impl ParsedDeviceGroupPayload {
+    /// HLC timestamp from the envelope.
+    #[wasm_bindgen(getter)]
+    pub fn hlc(&self) -> u64 {
+        self.hlc_val
+    }
+
+    /// Leaf index of the device that authored this payload.
+    #[wasm_bindgen(getter, js_name = senderLeaf)]
+    pub fn sender_leaf(&self) -> u32 {
+        self.sender_leaf_val
+    }
+
+    /// One of `"readCursor"` / `"draft"` / `"flags"` /
+    /// `"order"`. JS reads this to decide which other fields
+    /// are meaningful.
+    #[wasm_bindgen(getter)]
+    pub fn kind(&self) -> String {
+        self.kind_val.to_string()
+    }
+
+    /// Conversation group_id. Set for `readCursor`, `draft`,
+    /// and `flags`; empty for `order`.
+    #[wasm_bindgen(getter, js_name = groupId)]
+    pub fn group_id(&self) -> Vec<u8> {
+        self.group_id_val.clone()
+    }
+
+    /// `readCursor` only: the message-id the sender claims to
+    /// have read up to.
+    #[wasm_bindgen(getter, js_name = upToMessageId)]
+    pub fn up_to_message_id(&self) -> Vec<u8> {
+        self.up_to_message_id_val.clone()
+    }
+
+    /// `readCursor` only: wall-clock UNIX millis when the read
+    /// happened (display only).
+    #[wasm_bindgen(getter, js_name = readAtMs)]
+    pub fn read_at_ms(&self) -> u64 {
+        self.read_at_ms_val
+    }
+
+    /// `draft` only: composer text. May be empty (clear).
+    #[wasm_bindgen(getter)]
+    pub fn text(&self) -> String {
+        self.text_val.clone()
+    }
+
+    /// `draft` only: the message-id the draft is replying to,
+    /// or empty.
+    #[wasm_bindgen(getter, js_name = replyToId)]
+    pub fn reply_to_id(&self) -> Vec<u8> {
+        self.reply_to_id_val.clone()
+    }
+
+    /// `flags` only: pinned indicator.
+    #[wasm_bindgen(getter)]
+    pub fn pinned(&self) -> bool {
+        self.pinned_val
+    }
+
+    /// `flags` only: muted indicator.
+    #[wasm_bindgen(getter)]
+    pub fn muted(&self) -> bool {
+        self.muted_val
+    }
+
+    /// `flags` only: archived indicator.
+    #[wasm_bindgen(getter)]
+    pub fn archived(&self) -> bool {
+        self.archived_val
+    }
+
+    /// `flags` only: manual unread-override indicator.
+    #[wasm_bindgen(getter, js_name = unreadOverride)]
+    pub fn unread_override(&self) -> bool {
+        self.unread_override_val
+    }
+
+    /// `order` only: conversation group_ids in display order,
+    /// top-to-bottom. Empty for non-`order` kinds.
+    #[wasm_bindgen(js_name = orderGroupIds)]
+    pub fn order_group_ids(&self) -> Vec<js_sys::Uint8Array> {
+        self.order_group_ids_val
+            .iter()
+            .map(|g| js_sys::Uint8Array::from(g.as_slice()))
+            .collect()
+    }
+}
+
+/// Parse a DeviceGroup application-payload plaintext (the
+/// `data` field of `ProcessedMessage::Application`) into a
+/// typed [`ParsedDeviceGroupPayload`] (Phase 2a3e2).
+#[wasm_bindgen(js_name = parseDeviceGroupPayload)]
+pub fn parse_devicegroup_payload(plaintext: &[u8]) -> Result<ParsedDeviceGroupPayload, JsError> {
+    use lakko_mls::device_group::DeviceGroupBody as Body;
+    let parsed =
+        lakko_mls::DeviceGroup::parse_devicegroup_payload(plaintext).map_err(mls_err)?;
+    let mut out = ParsedDeviceGroupPayload {
+        hlc_val: parsed.hlc,
+        sender_leaf_val: parsed.sender_leaf,
+        kind_val: KIND_READ_CURSOR,
+        group_id_val: Vec::new(),
+        up_to_message_id_val: Vec::new(),
+        read_at_ms_val: 0,
+        text_val: String::new(),
+        reply_to_id_val: Vec::new(),
+        pinned_val: false,
+        muted_val: false,
+        archived_val: false,
+        unread_override_val: false,
+        order_group_ids_val: Vec::new(),
+    };
+    match parsed.body {
+        Body::ReadCursor {
+            group_id,
+            up_to_message_id,
+            read_at_ms,
+        } => {
+            out.kind_val = KIND_READ_CURSOR;
+            out.group_id_val = group_id;
+            out.up_to_message_id_val = up_to_message_id;
+            out.read_at_ms_val = read_at_ms;
+        },
+        Body::Draft {
+            group_id,
+            text,
+            reply_to_id,
+        } => {
+            out.kind_val = KIND_DRAFT;
+            out.group_id_val = group_id;
+            out.text_val = text;
+            out.reply_to_id_val = reply_to_id;
+        },
+        Body::Flags {
+            group_id,
+            pinned,
+            muted,
+            archived,
+            unread_override,
+        } => {
+            out.kind_val = KIND_FLAGS;
+            out.group_id_val = group_id;
+            out.pinned_val = pinned;
+            out.muted_val = muted;
+            out.archived_val = archived;
+            out.unread_override_val = unread_override;
+        },
+        Body::Order { group_ids } => {
+            out.kind_val = KIND_ORDER;
+            out.order_group_ids_val = group_ids;
+        },
+    }
+    Ok(out)
 }
 
 /// AEAD-seal a [`lakko_proto::mls_app::history_bundle::v1::HistoryBundle`]
