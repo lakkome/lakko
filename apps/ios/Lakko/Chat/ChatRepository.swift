@@ -424,6 +424,29 @@ public final class ChatRepository: ObservableObject {
         }
     }
 
+    /// Phase 3a9 — publish raw plaintext bytes as an MLS
+    /// application message. Same MLS-wrap + DS-publish path
+    /// as ``sendMessage`` but skips the chat-envelope
+    /// composer and the timeline append — call signaling
+    /// rides this channel out-of-band.
+    public func publishApplicationMessage(
+        groupIdHex: String,
+        plaintextBytes: Data
+    ) async throws {
+        guard let identity = canonicalIdentity else {
+            throw ChatError.argument("ChatRepository not bootstrapped")
+        }
+        guard let record = groups[groupIdHex] else {
+            throw ChatError.argument("no live Group handle for \(groupIdHex)")
+        }
+        _ = try await chatClient.sendMessage(
+            identity: identity,
+            group: record.group,
+            plaintext: plaintextBytes
+        )
+        persistSnapshotBestEffort()
+    }
+
     /// 1.20e — push-gw wake fan-out. Best-effort, off the
     /// critical path. Errors logged via NSLog, never re-thrown.
     private static func notifyPushGroupBestEffort(
@@ -470,12 +493,21 @@ public final class ChatRepository: ObservableObject {
             after: record.cursor,
             waitSecs: waitSecs
         )
-        record.applyPollResult(result)
+        record.applyPollResult(result) { [weak self] payload in
+            self?.callSignalingSink?(groupIdHex, payload)
+        }
         if !result.events.isEmpty {
             persistSnapshotBestEffort()
         }
         state = state.with(threads: buildThreadList())
     }
+
+    /// Phase 3a9 — closure the UI attaches to dispatch
+    /// inbound call-signaling bytes into its
+    /// ``CallSession`` state machine. `nil` when no call
+    /// surface is attached; the per-record poll just drops
+    /// the payload.
+    public var callSignalingSink: ((String, Data) -> Void)?
 
     /// Pull new messages for every active group. Per-group
     /// failures are swallowed so one bad apple doesn't block the
@@ -692,7 +724,10 @@ private final class GroupRecord {
         )
     }
 
-    func applyPollResult(_ result: PollMessagesResult) {
+    func applyPollResult(
+        _ result: PollMessagesResult,
+        callSignalingSink: ((Data) -> Void)? = nil
+    ) {
         for event in result.events {
             switch event {
             case .application(let messageId, let text, let attachments, let createdAt):
@@ -714,6 +749,11 @@ private final class GroupRecord {
                         createdAt: createdAt
                     )
                 )
+            case .callSignaling(_, let payloadBytes, _):
+                // Phase 3a9 — route into the CallSession
+                // state machine. Out-of-band — never
+                // touches the chat timeline.
+                callSignalingSink?(payloadBytes)
             }
         }
         cursor = result.cursor

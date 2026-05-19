@@ -53,6 +53,7 @@ public struct ChatScreen: View {
 
     public var body: some View {
         VStack(spacing: 0) {
+            callOverlay
             messagesList
             Divider()
             composer
@@ -81,6 +82,17 @@ public struct ChatScreen: View {
                     }
                 }
                 .disabled(viewModel.refreshing)
+            }
+            // Phase 3a9 — Call button. Hidden when a call
+            // overlay is up (the overlay carries the
+            // Accept / Decline / Hang up affordances).
+            ToolbarItem(placement: .navigationBarTrailing) {
+                Button {
+                    viewModel.startCall(audio: true, video: false)
+                } label: {
+                    Image(systemName: "phone.fill")
+                }
+                .disabled(viewModel.activeCall != nil)
             }
         }
         .task {
@@ -265,6 +277,92 @@ public struct ChatScreen: View {
                 .font(.footnote)
                 .foregroundStyle(.secondary)
             }
+        }
+    }
+
+    /// Phase 3a9 — sticky overlay rendering active call
+    /// state. Hidden when `activeCall == nil`. Surface
+    /// reproduces the web overlay shape: status caption +
+    /// Accept/Decline (ringing) or Hang up (active).
+    @ViewBuilder
+    private var callOverlay: some View {
+        if let call = viewModel.activeCall {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(callOverlayHeadline(call.state))
+                        .font(.headline)
+                        .foregroundStyle(.white)
+                    Text(
+                        "Audio · signaling-only scaffold. " +
+                        "WebRTC pod integration is the 3a9-followup."
+                    )
+                    .font(.caption2)
+                    .foregroundStyle(.white.opacity(0.85))
+                }
+                Spacer()
+                callOverlayButtons(call)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+            .background(callOverlayBackground(call.state))
+        }
+    }
+
+    private func callOverlayHeadline(_ s: CallSession.WebCallState) -> String {
+        switch s {
+        case .idle: return "📞"
+        case .outgoing: return "📞 Calling…"
+        case .ringing: return "📞 Incoming call"
+        case .connecting: return "📞 Connecting…"
+        case .connected: return "📞 In call"
+        case .ending: return "📞 Ending…"
+        case .done: return "📞 Call ended"
+        }
+    }
+
+    private func callOverlayBackground(
+        _ s: CallSession.WebCallState
+    ) -> Color {
+        switch s {
+        case .ringing: return .orange
+        case .connected: return .green
+        case .done: return .gray
+        default: return .blue
+        }
+    }
+
+    @ViewBuilder
+    private func callOverlayButtons(_ call: CallSession) -> some View {
+        switch call.state {
+        case .ringing:
+            HStack(spacing: 8) {
+                Button("Accept") {
+                    viewModel.acceptIncomingCall()
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.white)
+                .foregroundStyle(.green)
+                Button("Decline", role: .destructive) {
+                    viewModel.declineIncomingCall()
+                }
+                .buttonStyle(.bordered)
+                .tint(.white)
+            }
+        case .done:
+            Button("Dismiss") {
+                viewModel.clearFinishedCall()
+            }
+            .buttonStyle(.bordered)
+            .tint(.white)
+        case .idle:
+            EmptyView()
+        default:
+            Button("Hang up", role: .destructive) {
+                viewModel.hangUpCall()
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(.white)
+            .foregroundStyle(.red)
         }
     }
 

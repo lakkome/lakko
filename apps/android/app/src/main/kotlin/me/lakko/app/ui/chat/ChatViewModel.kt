@@ -19,8 +19,11 @@ import me.lakko.app.chat.UploadStage
 import me.lakko.app.chat.ChatMessage
 import me.lakko.app.chat.ChatRepository
 import me.lakko.app.chat.ChatThread
+import me.lakko.app.calls.CallSession
+import me.lakko.app.calls.parseCallSignalingBytes
 import me.lakko.app.devices.sync.DeviceGroupSyncRepository
 import uniffi.lakko_ffi_uniffi.AttachmentRef
+import uniffi.lakko_ffi_uniffi.FfiCallSignalingBody
 
 /**
  * State + dispatcher for the per-thread [ChatScreen].
@@ -47,6 +50,16 @@ public class ChatViewModel(
 
     public val state: StateFlow<ChatScreenUiState> = derived.asStateFlow()
 
+    // -------------------------------------------------------------
+    // Phase 3a10 — call surface
+    // -------------------------------------------------------------
+
+    private val mutableActiveCall: MutableStateFlow<CallSession?> = MutableStateFlow(null)
+
+    /** Active 1×1 call for this thread, or `null`. UI
+     *  collects this StateFlow to render the call overlay. */
+    public val activeCall: StateFlow<CallSession?> = mutableActiveCall.asStateFlow()
+
     init {
         // Manually combine two StateFlows — kotlinx-coroutines
         // has no synchronous `combine` for two StateFlows;
@@ -62,6 +75,84 @@ public class ChatViewModel(
                 derived.value = buildState(repo.state.value, composerState)
             }
         }
+        // Phase 3a10 — attach a call-signaling sink to the
+        // repository. The closure runs on whatever
+        // dispatcher the per-record poll loop uses; we hop
+        // back through the ViewModel scope to mutate
+        // StateFlow safely.
+        repo.callSignalingSink = { hex, payloadBytes ->
+            if (hex == groupIdHex) {
+                viewModelScope.launch {
+                    handleIncomingCallSignaling(payloadBytes)
+                }
+            }
+        }
+    }
+
+    /** Tap-to-call from the chat header. */
+    public fun startCall(audio: Boolean = true, video: Boolean = false) {
+        if (mutableActiveCall.value != null) return
+        val session = makeSession(CallSession.mintCallId())
+        mutableActiveCall.value = session
+        session.dial(audio = audio, video = video)
+    }
+
+    public fun acceptIncomingCall() {
+        mutableActiveCall.value?.acceptCall()
+    }
+
+    public fun declineIncomingCall() {
+        mutableActiveCall.value?.declineCall()
+    }
+
+    public fun hangUpCall() {
+        mutableActiveCall.value?.hangUp()
+    }
+
+    public fun clearFinishedCall() {
+        val cur = mutableActiveCall.value ?: return
+        if (cur.state.value == CallSession.WebCallState.Done) {
+            mutableActiveCall.value = null
+        }
+    }
+
+    private fun makeSession(callId: ByteArray): CallSession =
+        CallSession(callId = callId) { bytes ->
+            viewModelScope.launch {
+                publishCallSignaling(bytes)
+            }
+        }
+
+    private suspend fun publishCallSignaling(bytes: ByteArray) {
+        try {
+            repo.publishApplicationMessage(
+                groupIdHex = groupIdHex,
+                plaintextBytes = bytes,
+            )
+        } catch (cause: Throwable) {
+            android.util.Log.w("ChatViewModel", "publishCallSignaling failed", cause)
+        }
+    }
+
+    private fun handleIncomingCallSignaling(payloadBytes: ByteArray) {
+        val parsed: FfiCallSignalingBody = try {
+            parseCallSignalingBytes(payloadBytes)
+        } catch (cause: Throwable) {
+            android.util.Log.w("ChatViewModel", "parseCallSignaling failed", cause)
+            return
+        }
+        val bodyCallId = CallSession.callIdOf(parsed)
+        val active = mutableActiveCall.value
+        if (active == null) {
+            if (parsed is FfiCallSignalingBody.Offer) {
+                val session = makeSession(bodyCallId)
+                mutableActiveCall.value = session
+                session.applyIncomingSignaling(parsed)
+            }
+            return
+        }
+        if (!active.callId.contentEquals(bodyCallId)) return
+        active.applyIncomingSignaling(parsed)
     }
 
     // -------------------------------------------------------------

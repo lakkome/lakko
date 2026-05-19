@@ -55,6 +55,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.unit.dp
+import androidx.compose.foundation.background
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -159,13 +160,32 @@ public fun ChatScreen(
         }
     }
 
+    // Phase 3a10 — call surface.
+    val activeCall by viewModel.activeCall.collectAsStateWithLifecycle()
+    val callStateSnapshot = activeCall?.state?.collectAsStateWithLifecycle()?.value
+
     Column(modifier = modifier.fillMaxSize()) {
         Header(
             groupIdHex = state.groupIdHex,
             refreshing = state.refreshing,
+            callActive = activeCall != null,
             onNavigateBack = onNavigateBack,
             onRefresh = viewModel::onRefreshClicked,
+            onStartCall = { viewModel.startCall(audio = true, video = false) },
         )
+
+        // Phase 3a10 — sticky call overlay. Renders only
+        // when an active session exists.
+        if (activeCall != null) {
+            CallOverlay(
+                state = callStateSnapshot
+                    ?: me.lakko.app.calls.CallSession.WebCallState.Idle,
+                onAccept = { viewModel.acceptIncomingCall() },
+                onDecline = { viewModel.declineIncomingCall() },
+                onHangUp = { viewModel.hangUpCall() },
+                onDismiss = { viewModel.clearFinishedCall() },
+            )
+        }
 
         if (!state.threadKnown) {
             // The chat list opened this screen for a group that
@@ -279,8 +299,10 @@ public fun ChatScreen(
 private fun Header(
     groupIdHex: String,
     refreshing: Boolean,
+    callActive: Boolean,
     onNavigateBack: () -> Unit,
     onRefresh: () -> Unit,
+    onStartCall: () -> Unit,
 ) {
     Column {
         Row(
@@ -297,6 +319,12 @@ private fun Header(
                 fontFamily = FontFamily.Monospace,
                 modifier = Modifier.weight(1f),
             )
+            // Phase 3a10 — call button. Hidden when a call
+            // is already active (the overlay carries the
+            // Accept / Decline / Hang up affordances).
+            if (!callActive) {
+                TextButton(onClick = onStartCall) { Text("📞 Call") }
+            }
             if (refreshing) {
                 CircularProgressIndicator(
                     modifier = Modifier
@@ -310,6 +338,86 @@ private fun Header(
         }
         HorizontalDivider()
     }
+}
+
+// =============================================================================
+// Phase 3a10 — Call overlay
+// =============================================================================
+
+@Composable
+private fun CallOverlay(
+    state: me.lakko.app.calls.CallSession.WebCallState,
+    onAccept: () -> Unit,
+    onDecline: () -> Unit,
+    onHangUp: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val bg = when (state) {
+        me.lakko.app.calls.CallSession.WebCallState.Ringing ->
+            androidx.compose.ui.graphics.Color(0xFFFFA000)
+        me.lakko.app.calls.CallSession.WebCallState.Connected ->
+            androidx.compose.ui.graphics.Color(0xFF2E7D32)
+        me.lakko.app.calls.CallSession.WebCallState.Done ->
+            androidx.compose.ui.graphics.Color(0xFF616161)
+        else -> androidx.compose.ui.graphics.Color(0xFF1565C0)
+    }
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(bg)
+            .padding(horizontal = 16.dp, vertical = 10.dp),
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = when (state) {
+                    me.lakko.app.calls.CallSession.WebCallState.Idle -> "📞"
+                    me.lakko.app.calls.CallSession.WebCallState.Outgoing ->
+                        "📞 Calling…"
+                    me.lakko.app.calls.CallSession.WebCallState.Ringing ->
+                        "📞 Incoming call"
+                    me.lakko.app.calls.CallSession.WebCallState.Connecting ->
+                        "📞 Connecting…"
+                    me.lakko.app.calls.CallSession.WebCallState.Connected ->
+                        "📞 In call"
+                    me.lakko.app.calls.CallSession.WebCallState.Ending ->
+                        "📞 Ending…"
+                    me.lakko.app.calls.CallSession.WebCallState.Done ->
+                        "📞 Call ended"
+                },
+                style = MaterialTheme.typography.titleMedium,
+                color = androidx.compose.ui.graphics.Color.White,
+            )
+            Text(
+                text = "Audio · signaling-only scaffold. WebRTC pod " +
+                    "integration is the 3a10-followup.",
+                style = MaterialTheme.typography.bodySmall,
+                color = androidx.compose.ui.graphics.Color.White.copy(alpha = 0.85f),
+            )
+        }
+        when (state) {
+            me.lakko.app.calls.CallSession.WebCallState.Ringing -> {
+                TextButton(onClick = onAccept) {
+                    Text("Accept", color = androidx.compose.ui.graphics.Color.White)
+                }
+                TextButton(onClick = onDecline) {
+                    Text("Decline", color = androidx.compose.ui.graphics.Color.White)
+                }
+            }
+            me.lakko.app.calls.CallSession.WebCallState.Done -> {
+                TextButton(onClick = onDismiss) {
+                    Text("Dismiss", color = androidx.compose.ui.graphics.Color.White)
+                }
+            }
+            me.lakko.app.calls.CallSession.WebCallState.Idle -> {}
+            else -> {
+                TextButton(onClick = onHangUp) {
+                    Text("Hang up", color = androidx.compose.ui.graphics.Color.White)
+                }
+            }
+        }
+    }
+    HorizontalDivider()
 }
 
 // =============================================================================

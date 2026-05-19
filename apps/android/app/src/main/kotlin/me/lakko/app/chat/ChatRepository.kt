@@ -359,6 +359,44 @@ public class ChatRepository(
      * message). Empty-and-empty is rejected at the call site
      * upstream — the view model and screen layer enforce that.
      */
+    /**
+     * Phase 3a10 — closure the UI attaches to dispatch
+     * inbound call-signaling bytes into its
+     * [me.lakko.app.calls.CallSession] state machine. `null`
+     * when no call surface is attached; the per-record poll
+     * just drops the payload.
+     */
+    @Volatile
+    public var callSignalingSink: ((String, ByteArray) -> Unit)? = null
+
+    /**
+     * Phase 3a10 — publish raw plaintext bytes as an MLS
+     * application message. Same MLS-wrap + DS-publish path
+     * as [sendMessage] but skips the chat-envelope composer
+     * and the timeline append — call signaling rides this
+     * channel out-of-band.
+     */
+    public suspend fun publishApplicationMessage(
+        groupIdHex: String,
+        plaintextBytes: ByteArray,
+    ) {
+        val identity = canonicalIdentity.get()
+            ?: throw IllegalStateException("ChatRepository not bootstrapped")
+        val record = groups[groupIdHex]
+            ?: throw ChatError(
+                "no live Group handle for $groupIdHex",
+                IllegalStateException("unknown group"),
+            )
+        groupsLock.withLock {
+            chatClient.sendMessage(
+                identity = identity,
+                group = record.group,
+                plaintext = plaintextBytes,
+            )
+            persistSnapshotBestEffort()
+        }
+    }
+
     public suspend fun sendMessage(
         groupIdHex: String,
         plaintext: String,
@@ -478,7 +516,9 @@ public class ChatRepository(
                 after = record.cursor,
                 waitSecs = waitSecs,
             )
-            record.applyPollResult(result)
+            record.applyPollResult(result) { payload ->
+                callSignalingSink?.invoke(groupIdHex, payload)
+            }
             if (result.events.isNotEmpty()) {
                 persistSnapshotBestEffort()
             }
@@ -741,7 +781,10 @@ private class GroupRecord(
         )
     }
 
-    fun applyPollResult(result: PollMessagesResult) {
+    fun applyPollResult(
+        result: PollMessagesResult,
+        callSignalingSink: ((ByteArray) -> Unit)? = null,
+    ) {
         for (event in result.events) {
             when (event) {
                 is IncomingChatEvent.Application -> messages.add(
@@ -761,6 +804,12 @@ private class GroupRecord(
                         createdAt = event.createdAt,
                     ),
                 )
+                is IncomingChatEvent.CallSignaling -> {
+                    // Phase 3a10 — route into the
+                    // CallSession state machine. Never
+                    // touches the chat timeline.
+                    callSignalingSink?.invoke(event.payloadBytes)
+                }
             }
         }
         cursor = result.cursor

@@ -110,7 +110,113 @@ public final class ChatViewModel: ObservableObject {
                 self?.sync(state: newState)
             }
             .store(in: &cancellables)
+        // Phase 3a9 — attach a call-signaling sink to the
+        // repository. The closure runs on the main actor
+        // because the repository's poll loop already
+        // dispatches results on @MainActor.
+        repository.callSignalingSink = { [weak self] hex, payloadBytes in
+            guard hex == groupIdHex else { return }
+            Task { @MainActor in
+                self?.handleIncomingCallSignaling(payloadBytes: payloadBytes)
+            }
+        }
     }
+
+    // MARK: - Phase 3a9 — call surface helpers
+
+    /// Tap-to-call from the chat header. Mints a fresh
+    /// `call_id`, builds the outbound Offer, drives the
+    /// overlay.
+    public func startCall(audio: Bool = true, video: Bool = false) {
+        guard activeCall == nil else { return }
+        let callId = CallSession.mintCallId()
+        let session = makeSession(callId: callId)
+        activeCall = session
+        session.dial(audio: audio, video: video)
+    }
+
+    /// Accept the in-flight inbound call.
+    public func acceptIncomingCall() {
+        activeCall?.acceptCall()
+    }
+
+    /// Decline the in-flight inbound call.
+    public func declineIncomingCall() {
+        activeCall?.declineCall()
+    }
+
+    /// Hang up the active call.
+    public func hangUpCall() {
+        activeCall?.hangUp(reason: .hungUp)
+    }
+
+    /// Clear the overlay after a `done` transition. Called
+    /// from the SwiftUI overlay's dismiss action.
+    public func clearFinishedCall() {
+        if activeCall?.state == .done {
+            activeCall = nil
+        }
+    }
+
+    private func makeSession(callId: Data) -> CallSession {
+        // Capture the repository + groupIdHex for the
+        // outbound publish callback. We can't depend on
+        // ContextsRepository here (the chat client is
+        // owned by `ChatRepository`); the publish goes
+        // straight through the repository's `publishGroup`
+        // path via a thin helper.
+        return CallSession(callId: callId) { [weak self] bytes in
+            guard let self = self else { return }
+            Task { @MainActor in
+                await self.publishCallSignaling(bytes)
+            }
+        }
+    }
+
+    @MainActor
+    private func publishCallSignaling(_ bytes: Data) async {
+        do {
+            try await repository.publishApplicationMessage(
+                groupIdHex: groupIdHex,
+                plaintextBytes: bytes
+            )
+        } catch {
+            NSLog("publishCallSignaling failed: %@", error.localizedDescription)
+        }
+    }
+
+    private func handleIncomingCallSignaling(payloadBytes: Data) {
+        do {
+            let parsed = try parseCallSignaling(plaintext: payloadBytes)
+            let bodyCallId = CallSession.callId(of: parsed)
+            // Spin up an answerer session for a first-seen
+            // inbound offer; otherwise route into the active
+            // session if call_ids match.
+            if activeCall == nil {
+                if case .offer = parsed {
+                    let session = makeSession(callId: bodyCallId)
+                    activeCall = session
+                    session.applyIncomingSignaling(parsed)
+                }
+                return
+            }
+            guard let session = activeCall, session.callId == bodyCallId else {
+                // Stale signaling for a different call_id —
+                // drop silently.
+                return
+            }
+            session.applyIncomingSignaling(parsed)
+        } catch {
+            NSLog("parseCallSignaling failed: %@", error.localizedDescription)
+        }
+    }
+
+    // MARK: - Phase 3a9 — call surface
+
+    /// Active 1×1 call for this thread. `nil` when no call.
+    /// Published so the SwiftUI overlay re-renders on every
+    /// state transition.
+    @Published public private(set) var activeCall: CallSession?
 
     /// Phase 2a3e2c-iOS — read-cursor broadcast tracker.
     /// Highest broadcast messageId; the per-`messages` effect

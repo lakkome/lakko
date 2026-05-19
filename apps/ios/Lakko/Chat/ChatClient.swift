@@ -226,6 +226,20 @@ public final class ChatClient {
     ) -> IncomingChatEvent {
         switch processed {
         case .application(let data):
+            // Phase 3a8/9 — sniff for call-signaling proto
+            // bytes before running the chat-envelope parser.
+            // Cheap unambiguous discriminator: the proto's
+            // first wire tag is one of 0x52 / 0x5A / 0x62 /
+            // 0x6A (CallSignalingPayload.body oneof fields
+            // 10..13); the chat envelope starts with `{`
+            // (0x7B). No overlap.
+            if Self.looksLikeCallSignaling(data) {
+                return .callSignaling(
+                    messageId: messageId,
+                    payloadBytes: data,
+                    createdAt: createdAt
+                )
+            }
             // 1.19c3: feed the application bytes through the
             // UniFFI ``parseEnvelope(bytes:)`` surface. The
             // plaintext was already authenticated by the MLS
@@ -261,6 +275,18 @@ public final class ChatClient {
                 createdAt: createdAt
             )
         }
+    }
+
+    /// Phase 3a8/9 — cheap byte-sniff for the
+    /// `CallSignalingPayload` proto. Returns `true` when
+    /// the first byte matches one of the oneof body tags
+    /// (0x52 / 0x5A / 0x62 / 0x6A for fields 10..13). Chat
+    /// envelopes start with `{` (0x7B); the sets don't
+    /// overlap. A false positive downstream surfaces as a
+    /// proto-decode error and the caller swallows.
+    private static func looksLikeCallSignaling(_ bytes: Data) -> Bool {
+        guard let first = bytes.first else { return false }
+        return first == 0x52 || first == 0x5A || first == 0x62 || first == 0x6A
     }
 }
 
@@ -302,6 +328,11 @@ public enum IncomingChatEvent: Equatable {
     /// Commit / proposal / external-join-proposal frame. MLS
     /// state advanced, no user-visible bytes.
     case system(messageId: Int64, systemKind: SystemKind, createdAt: String)
+    /// Phase 3a8/9 — call-signaling event lifted out of an
+    /// MLS application message. The chat repository
+    /// dispatches it into the ``CallSession`` state machine
+    /// instead of the chat timeline.
+    case callSignaling(messageId: Int64, payloadBytes: Data, createdAt: String)
 }
 
 /// Kind discriminator for ``IncomingChatEvent/system(messageId:systemKind:createdAt:)``.

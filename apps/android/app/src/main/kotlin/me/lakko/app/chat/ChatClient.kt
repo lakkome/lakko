@@ -217,6 +217,17 @@ public class ChatClient(
     }
 }
 
+/** Phase 3a10 — cheap byte-sniff for the
+ *  `CallSignalingPayload` proto. Returns `true` when the
+ *  first byte matches one of the oneof body tags
+ *  (0x52/0x5A/0x62/0x6A for fields 10..13). Chat envelopes
+ *  start with `{` (0x7B); sets don't overlap. */
+private fun looksLikeCallSignaling(bytes: ByteArray): Boolean {
+    if (bytes.isEmpty()) return false
+    val first = bytes[0].toInt() and 0xFF
+    return first == 0x52 || first == 0x5A || first == 0x62 || first == 0x6A
+}
+
 private fun toEvent(
     messageId: Long,
     createdAt: String,
@@ -224,25 +235,38 @@ private fun toEvent(
 ): IncomingChatEvent =
     when (processed) {
         is ProcessedMessage.Application -> {
-            // 1.19c4: feed the application bytes through the
-            // UniFFI `parseEnvelope(bytes:)` surface (1.19b).
-            // The plaintext was already authenticated by the
-            // MLS Application message's MAC, so the worst case
-            // here is a malformed envelope from a buggy peer —
-            // never a tampered payload. Legacy pre-1.19
-            // plain-UTF-8 bytes collapse cleanly to
-            // `(text = <utf-8 lossy>, attachments = [])` via
-            // the parser's documented fallback paths.
-            val parsed = AttachmentBridge.parseEnvelopeBytes(processed.data)
-            IncomingChatEvent.Application(
-                messageId = messageId,
-                text = parsed.text,
-                attachments = parsed.attachments,
-                // Alias kept for the few call sites that still
-                // read `plaintext`. Identical to `text`.
-                plaintext = parsed.text,
-                createdAt = createdAt,
-            )
+            // Phase 3a10 — sniff for call-signaling proto
+            // bytes before running the chat-envelope
+            // parser. Cheap unambiguous discriminator:
+            // CallSignalingPayload's first proto wire tag
+            // is one of 0x52 / 0x5A / 0x62 / 0x6A
+            // (oneof fields 10..13); chat envelopes start
+            // with `{` (0x7B). No overlap.
+            if (looksLikeCallSignaling(processed.data)) {
+                IncomingChatEvent.CallSignaling(
+                    messageId = messageId,
+                    payloadBytes = processed.data,
+                    createdAt = createdAt,
+                )
+            } else {
+                // 1.19c4: feed the application bytes
+                // through the UniFFI `parseEnvelope` surface.
+                // The plaintext was already authenticated by
+                // the MLS Application message's MAC, so the
+                // worst case here is a malformed envelope
+                // from a buggy peer — never a tampered
+                // payload. Legacy pre-1.19 plain-UTF-8 bytes
+                // collapse cleanly to `(text = <utf-8 lossy>,
+                // attachments = [])`.
+                val parsed = AttachmentBridge.parseEnvelopeBytes(processed.data)
+                IncomingChatEvent.Application(
+                    messageId = messageId,
+                    text = parsed.text,
+                    attachments = parsed.attachments,
+                    plaintext = parsed.text,
+                    createdAt = createdAt,
+                )
+            }
         }
         is ProcessedMessage.Commit -> IncomingChatEvent.System(
             messageId = messageId,
@@ -307,6 +331,34 @@ public sealed interface IncomingChatEvent {
         val systemKind: SystemKind,
         val createdAt: String,
     ) : IncomingChatEvent
+
+    /** Phase 3a10 — call-signaling event lifted out of an
+     *  MLS application message. The chat repository
+     *  dispatches it into the [me.lakko.app.calls.CallSession]
+     *  state machine instead of the chat timeline. */
+    public data class CallSignaling(
+        val messageId: Long,
+        val payloadBytes: ByteArray,
+        val createdAt: String,
+    ) : IncomingChatEvent {
+        // Override equals / hashCode for the payload
+        // ByteArray — default reference equality would
+        // surprise downstream consumers.
+        override fun equals(other: Any?): Boolean {
+            if (this === other) return true
+            if (other !is CallSignaling) return false
+            return messageId == other.messageId &&
+                payloadBytes.contentEquals(other.payloadBytes) &&
+                createdAt == other.createdAt
+        }
+
+        override fun hashCode(): Int {
+            var result = messageId.hashCode()
+            result = 31 * result + payloadBytes.contentHashCode()
+            result = 31 * result + createdAt.hashCode()
+            return result
+        }
+    }
 }
 
 /** Kind discriminator for [IncomingChatEvent.System]. */
