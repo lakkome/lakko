@@ -53,7 +53,7 @@ pub mod sframe;
 pub mod signaling;
 
 pub use error::{Error, Result};
-pub use group_call::{GroupCallScope, GroupCallSession, Participant};
+pub use group_call::{GroupCallScope, GroupCallSession, Participant, SignalingOutcome};
 pub use session::{
     CallSession, CallState, Event, IceCandidate, MediaKind, Role, SdpDescription, SdpKind,
     Transition,

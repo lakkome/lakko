@@ -1444,12 +1444,19 @@ pub struct ParsedCallSignaling {
     sdp_mid_val: String,
     sdp_m_line_index_val: u32,
     end_reason_val: &'static str,
+    // Phase 3c2 — group-call variants.
+    leaf_index_val: u32,
+    initiator_leaf_val: u32,
+    joined_at_ms_val: u64,
 }
 
 const CALL_KIND_OFFER: &str = "offer";
 const CALL_KIND_ANSWER: &str = "answer";
 const CALL_KIND_ICE_CANDIDATE: &str = "iceCandidate";
 const CALL_KIND_END: &str = "end";
+const CALL_KIND_GROUP_START: &str = "groupStart";
+const CALL_KIND_GROUP_JOIN: &str = "groupJoin";
+const CALL_KIND_GROUP_LEAVE: &str = "groupLeave";
 
 #[wasm_bindgen]
 impl ParsedCallSignaling {
@@ -1509,11 +1516,33 @@ impl ParsedCallSignaling {
         self.sdp_m_line_index_val
     }
 
-    /// `end` only: one of `"hungUp"` / `"busy"` /
-    /// `"declined"` / `"timedOut"` / `"error"`.
+    /// `end` / `groupLeave` only: one of `"hungUp"` /
+    /// `"busy"` / `"declined"` / `"timedOut"` / `"error"`.
+    /// For `groupLeave` only `"hungUp"` / `"timedOut"` /
+    /// `"error"` are meaningful.
     #[wasm_bindgen(getter, js_name = endReason)]
     pub fn end_reason(&self) -> String {
         self.end_reason_val.to_string()
+    }
+
+    /// `groupStart` only: MLS leaf index of the initiator.
+    #[wasm_bindgen(getter, js_name = initiatorLeaf)]
+    pub fn initiator_leaf(&self) -> u32 {
+        self.initiator_leaf_val
+    }
+
+    /// `groupJoin` / `groupLeave` only: MLS leaf index of
+    /// the joining / leaving participant.
+    #[wasm_bindgen(getter, js_name = leafIndex)]
+    pub fn leaf_index(&self) -> u32 {
+        self.leaf_index_val
+    }
+
+    /// `groupJoin` only: wall-clock UNIX millis when the
+    /// join landed on the chat journal.
+    #[wasm_bindgen(getter, js_name = joinedAtMs)]
+    pub fn joined_at_ms(&self) -> u64 {
+        self.joined_at_ms_val
     }
 }
 
@@ -1582,6 +1611,67 @@ pub fn compose_call_end_signaling(call_id: &[u8], reason: &str) -> Result<Vec<u8
     lakko_calls::compose_signaling_payload(&body).map_err(calls_err)
 }
 
+/// Compose a `GroupCallStart` call-signaling event
+/// (Phase 3c2). Posted by the initiator to the chat MLS
+/// group; observers render a joinable-call card.
+#[wasm_bindgen(js_name = composeGroupCallStartSignaling)]
+pub fn compose_group_call_start_signaling(
+    call_id: &[u8],
+    initiator_leaf: u32,
+    created_at_ms: u64,
+    media_audio: bool,
+    media_video: bool,
+) -> Result<Vec<u8>, JsError> {
+    let id = take_call_id(call_id)?;
+    let body = lakko_calls::SignalingBody::GroupStart {
+        call_id: id,
+        initiator_leaf,
+        created_at_ms,
+        media: lakko_calls::MediaFlags {
+            audio: media_audio,
+            video: media_video,
+        },
+    };
+    lakko_calls::compose_signaling_payload(&body).map_err(calls_err)
+}
+
+/// Compose a `GroupCallJoin` event (Phase 3c2). Sent by
+/// each participant after their per-participant SFU
+/// session reaches `connected`.
+#[wasm_bindgen(js_name = composeGroupCallJoinSignaling)]
+pub fn compose_group_call_join_signaling(
+    call_id: &[u8],
+    leaf_index: u32,
+    joined_at_ms: u64,
+) -> Result<Vec<u8>, JsError> {
+    let id = take_call_id(call_id)?;
+    let body = lakko_calls::SignalingBody::GroupJoin {
+        call_id: id,
+        leaf_index,
+        joined_at_ms,
+    };
+    lakko_calls::compose_signaling_payload(&body).map_err(calls_err)
+}
+
+/// Compose a `GroupCallLeave` event (Phase 3c2). `reason`
+/// accepts the same values as `composeCallEndSignaling`;
+/// only `"hungUp"` / `"timedOut"` / `"error"` are
+/// meaningful for group-call leave.
+#[wasm_bindgen(js_name = composeGroupCallLeaveSignaling)]
+pub fn compose_group_call_leave_signaling(
+    call_id: &[u8],
+    leaf_index: u32,
+    reason: &str,
+) -> Result<Vec<u8>, JsError> {
+    let id = take_call_id(call_id)?;
+    let body = lakko_calls::SignalingBody::GroupLeave {
+        call_id: id,
+        leaf_index,
+        reason: parse_end_reason(reason),
+    };
+    lakko_calls::compose_signaling_payload(&body).map_err(calls_err)
+}
+
 /// Parse plaintext bytes (the `Application` payload from
 /// `processIncoming`) into a typed
 /// [`ParsedCallSignaling`] (Phase 3a3).
@@ -1599,6 +1689,9 @@ pub fn parse_call_signaling(plaintext: &[u8]) -> Result<ParsedCallSignaling, JsE
         sdp_mid_val: String::new(),
         sdp_m_line_index_val: 0,
         end_reason_val: "hungUp",
+        leaf_index_val: 0,
+        initiator_leaf_val: 0,
+        joined_at_ms_val: 0,
     };
     match body {
         lakko_calls::SignalingBody::Offer {
@@ -1634,6 +1727,39 @@ pub fn parse_call_signaling(plaintext: &[u8]) -> Result<ParsedCallSignaling, JsE
         lakko_calls::SignalingBody::End { call_id, reason } => {
             out.kind_val = CALL_KIND_END;
             out.call_id_val = call_id.to_vec();
+            out.end_reason_val = end_reason_str(reason);
+        },
+        lakko_calls::SignalingBody::GroupStart {
+            call_id,
+            initiator_leaf,
+            created_at_ms,
+            media,
+        } => {
+            out.kind_val = CALL_KIND_GROUP_START;
+            out.call_id_val = call_id.to_vec();
+            out.initiator_leaf_val = initiator_leaf;
+            out.created_at_ms_val = created_at_ms;
+            out.media_audio_val = media.audio;
+            out.media_video_val = media.video;
+        },
+        lakko_calls::SignalingBody::GroupJoin {
+            call_id,
+            leaf_index,
+            joined_at_ms,
+        } => {
+            out.kind_val = CALL_KIND_GROUP_JOIN;
+            out.call_id_val = call_id.to_vec();
+            out.leaf_index_val = leaf_index;
+            out.joined_at_ms_val = joined_at_ms;
+        },
+        lakko_calls::SignalingBody::GroupLeave {
+            call_id,
+            leaf_index,
+            reason,
+        } => {
+            out.kind_val = CALL_KIND_GROUP_LEAVE;
+            out.call_id_val = call_id.to_vec();
+            out.leaf_index_val = leaf_index;
             out.end_reason_val = end_reason_str(reason);
         },
     }

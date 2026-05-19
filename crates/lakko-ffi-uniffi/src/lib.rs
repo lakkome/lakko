@@ -1200,29 +1200,50 @@ impl FfiCallEndReason {
     }
 }
 
-/// Typed body of a call-signaling event (Phase 3a3).
-/// Every variant carries a 16-byte `call_id`.
+/// Typed body of a call-signaling event (Phase 3a3 +
+/// 3c2). Every variant carries a 16-byte `call_id`.
 #[derive(uniffi::Enum)]
 pub enum FfiCallSignalingBody {
-    /// SDP offer from the initiator.
+    /// SDP offer from the initiator (1×1).
     Offer {
         call_id: Vec<u8>,
         sdp: String,
         created_at_ms: u64,
         media: FfiCallMediaFlags,
     },
-    /// SDP answer from the callee.
+    /// SDP answer from the callee (1×1).
     Answer { call_id: Vec<u8>, sdp: String },
-    /// Trickled ICE candidate.
+    /// Trickled ICE candidate (1×1).
     IceCandidate {
         call_id: Vec<u8>,
         candidate: String,
         sdp_mid: String,
         sdp_m_line_index: u32,
     },
-    /// Terminal event.
+    /// Terminal event (1×1 hang-up).
     End {
         call_id: Vec<u8>,
+        reason: FfiCallEndReason,
+    },
+    /// Group-call announce (Phase 3c2). Posted by the
+    /// initiator to the chat MLS group; observers render a
+    /// joinable-call card.
+    GroupStart {
+        call_id: Vec<u8>,
+        initiator_leaf: u32,
+        created_at_ms: u64,
+        media: FfiCallMediaFlags,
+    },
+    /// Group-call participant joined the SFU (Phase 3c2).
+    GroupJoin {
+        call_id: Vec<u8>,
+        leaf_index: u32,
+        joined_at_ms: u64,
+    },
+    /// Group-call participant left the SFU (Phase 3c2).
+    GroupLeave {
+        call_id: Vec<u8>,
+        leaf_index: u32,
         reason: FfiCallEndReason,
     },
 }
@@ -1270,6 +1291,35 @@ fn body_into_inner(body: FfiCallSignalingBody) -> Result<lakko_calls::SignalingB
             call_id: take_id(call_id)?,
             reason: reason.into_inner(),
         },
+        FfiCallSignalingBody::GroupStart {
+            call_id,
+            initiator_leaf,
+            created_at_ms,
+            media,
+        } => lakko_calls::SignalingBody::GroupStart {
+            call_id: take_id(call_id)?,
+            initiator_leaf,
+            created_at_ms,
+            media: media.into_inner(),
+        },
+        FfiCallSignalingBody::GroupJoin {
+            call_id,
+            leaf_index,
+            joined_at_ms,
+        } => lakko_calls::SignalingBody::GroupJoin {
+            call_id: take_id(call_id)?,
+            leaf_index,
+            joined_at_ms,
+        },
+        FfiCallSignalingBody::GroupLeave {
+            call_id,
+            leaf_index,
+            reason,
+        } => lakko_calls::SignalingBody::GroupLeave {
+            call_id: take_id(call_id)?,
+            leaf_index,
+            reason: reason.into_inner(),
+        },
     })
 }
 
@@ -1303,6 +1353,35 @@ fn body_from_inner(body: lakko_calls::SignalingBody) -> FfiCallSignalingBody {
         },
         lakko_calls::SignalingBody::End { call_id, reason } => FfiCallSignalingBody::End {
             call_id: call_id.to_vec(),
+            reason: FfiCallEndReason::from_inner(reason),
+        },
+        lakko_calls::SignalingBody::GroupStart {
+            call_id,
+            initiator_leaf,
+            created_at_ms,
+            media,
+        } => FfiCallSignalingBody::GroupStart {
+            call_id: call_id.to_vec(),
+            initiator_leaf,
+            created_at_ms,
+            media: FfiCallMediaFlags::from_inner(media),
+        },
+        lakko_calls::SignalingBody::GroupJoin {
+            call_id,
+            leaf_index,
+            joined_at_ms,
+        } => FfiCallSignalingBody::GroupJoin {
+            call_id: call_id.to_vec(),
+            leaf_index,
+            joined_at_ms,
+        },
+        lakko_calls::SignalingBody::GroupLeave {
+            call_id,
+            leaf_index,
+            reason,
+        } => FfiCallSignalingBody::GroupLeave {
+            call_id: call_id.to_vec(),
+            leaf_index,
             reason: FfiCallEndReason::from_inner(reason),
         },
     }

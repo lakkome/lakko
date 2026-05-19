@@ -56,7 +56,7 @@ use lakko_mls::Group;
 
 use crate::error::Result;
 use crate::sframe::{CallKey, ParticipantKey};
-use crate::signaling::CallId;
+use crate::signaling::{CallId, SignalingBody};
 
 /// Which MLS group keys the call.
 ///
@@ -218,6 +218,69 @@ impl GroupCallSession {
         }
     }
 
+    /// Mark a remote leaf as joined the call. Convenience
+    /// wrapper over [`Self::set_joined`] called from the
+    /// signaling dispatcher when a [`SignalingBody::GroupJoin`]
+    /// lands on the chat DS journal.
+    pub fn apply_remote_join(&mut self, leaf_index: u32) {
+        self.set_joined(leaf_index, true);
+    }
+
+    /// Mark a remote leaf as left the call. Mirrors
+    /// [`Self::apply_remote_join`] for `GroupCallLeave`.
+    /// Keeps the row (not `forget_participant`) so the UI
+    /// can show "Alice left" without the leaf disappearing
+    /// from the roster mid-render.
+    pub fn apply_remote_leave(&mut self, leaf_index: u32) {
+        self.set_joined(leaf_index, false);
+    }
+
+    /// Fold a remote signaling body into the ledger. Returns
+    /// the [`SignalingOutcome`] the platform should react to:
+    ///
+    ///   * [`SignalingOutcome::Ignored`] — body wasn't a
+    ///     group-control variant (i.e. an `Offer` / `Answer` /
+    ///     `IceCandidate` / `End` from a 1×1 call leaked into
+    ///     the dispatcher), or the body's `call_id` didn't
+    ///     match this session.
+    ///   * [`SignalingOutcome::Announced`] — `GroupCallStart`
+    ///     accepted; the UI may render "Bob started a group
+    ///     call". The ledger doesn't auto-join the initiator
+    ///     — `GroupJoin` from the initiator's device lands
+    ///     separately.
+    ///   * [`SignalingOutcome::Joined { leaf_index }`] /
+    ///     [`SignalingOutcome::Left { leaf_index }`] — roster
+    ///     mutated; the platform consults `needs_rekey()` to
+    ///     decide whether to cycle SFrame transforms.
+    pub fn apply_remote_signaling(&mut self, body: &SignalingBody) -> SignalingOutcome {
+        if body.call_id() != &self.call_id {
+            return SignalingOutcome::Ignored;
+        }
+        match body {
+            SignalingBody::GroupStart { .. } => SignalingOutcome::Announced,
+            SignalingBody::GroupJoin { leaf_index, .. } => {
+                self.apply_remote_join(*leaf_index);
+                SignalingOutcome::Joined {
+                    leaf_index: *leaf_index,
+                }
+            },
+            SignalingBody::GroupLeave { leaf_index, .. } => {
+                self.apply_remote_leave(*leaf_index);
+                SignalingOutcome::Left {
+                    leaf_index: *leaf_index,
+                }
+            },
+            // Per-peer 1×1 bodies leaking into a group-call
+            // dispatcher — typed away so the call-site
+            // handles each surface separately. The ledger
+            // doesn't react.
+            SignalingBody::Offer { .. }
+            | SignalingBody::Answer { .. }
+            | SignalingBody::IceCandidate { .. }
+            | SignalingBody::End { .. } => SignalingOutcome::Ignored,
+        }
+    }
+
     /// Snapshot of currently-joined participants. Stable
     /// ordering by leaf index — handy for UI projections
     /// + golden tests.
@@ -298,6 +361,33 @@ impl GroupCallSession {
     pub fn call_key(&self) -> &CallKey {
         &self.call_key
     }
+}
+
+/// Result of folding a remote [`SignalingBody`] into the
+/// ledger via [`GroupCallSession::apply_remote_signaling`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SignalingOutcome {
+    /// Body wasn't applicable to this session — either a
+    /// 1×1 variant leaked into the group dispatcher, or the
+    /// `call_id` didn't match. Ledger unchanged.
+    Ignored,
+    /// Group call was announced. UI may render a "Bob
+    /// started a call" affordance; the ledger doesn't
+    /// auto-join anyone — the initiator's own
+    /// `GroupCallJoin` lands separately.
+    Announced,
+    /// Remote leaf joined the call. `leaf_index` is the
+    /// MLS leaf that flipped to `joined = true`.
+    Joined {
+        /// MLS leaf index of the joining participant.
+        leaf_index: u32,
+    },
+    /// Remote leaf left the call. `leaf_index` is the MLS
+    /// leaf that flipped to `joined = false`.
+    Left {
+        /// MLS leaf index of the leaving participant.
+        leaf_index: u32,
+    },
 }
 
 #[cfg(test)]
@@ -412,6 +502,106 @@ mod tests {
 
         assert_ne!(pre, post, "epoch advance must rotate the call-key seed");
         assert!(session.needs_rekey());
+    }
+
+    #[test]
+    fn apply_remote_signaling_routes_each_group_body() {
+        use crate::signaling::{EndReason, MediaFlags, SignalingBody};
+
+        let (id_a, _id_b, group_a) = make_pair();
+        let mut session =
+            GroupCallSession::create(GroupCallScope::InChat, fixture_call_id(), &group_a, &id_a)
+                .unwrap();
+
+        // Announce — ledger unchanged, returns Announced.
+        let outcome = session.apply_remote_signaling(&SignalingBody::GroupStart {
+            call_id: fixture_call_id(),
+            initiator_leaf: 0,
+            created_at_ms: 1,
+            media: MediaFlags::audio_only(),
+        });
+        assert_eq!(outcome, SignalingOutcome::Announced);
+        assert_eq!(session.joined_count(), 0);
+        assert!(!session.needs_rekey());
+
+        // Join — leaf 1 flips to joined, returns Joined.
+        let outcome = session.apply_remote_signaling(&SignalingBody::GroupJoin {
+            call_id: fixture_call_id(),
+            leaf_index: 1,
+            joined_at_ms: 2,
+        });
+        assert_eq!(outcome, SignalingOutcome::Joined { leaf_index: 1 });
+        assert_eq!(session.joined_count(), 1);
+        assert!(session.needs_rekey());
+        session.ack_rekey();
+
+        // Leave — leaf 1 flips back, returns Left.
+        let outcome = session.apply_remote_signaling(&SignalingBody::GroupLeave {
+            call_id: fixture_call_id(),
+            leaf_index: 1,
+            reason: EndReason::HungUp,
+        });
+        assert_eq!(outcome, SignalingOutcome::Left { leaf_index: 1 });
+        assert_eq!(session.joined_count(), 0);
+        assert!(session.needs_rekey());
+    }
+
+    #[test]
+    fn apply_remote_signaling_ignores_one_to_one_bodies() {
+        use crate::signaling::{EndReason, MediaFlags, SignalingBody};
+
+        let (id_a, _id_b, group_a) = make_pair();
+        let mut session =
+            GroupCallSession::create(GroupCallScope::InChat, fixture_call_id(), &group_a, &id_a)
+                .unwrap();
+
+        for body in [
+            SignalingBody::Offer {
+                call_id: fixture_call_id(),
+                sdp: "v=0\n".into(),
+                created_at_ms: 0,
+                media: MediaFlags::audio_only(),
+            },
+            SignalingBody::Answer {
+                call_id: fixture_call_id(),
+                sdp: "v=0\n".into(),
+            },
+            SignalingBody::IceCandidate {
+                call_id: fixture_call_id(),
+                candidate: String::new(),
+                sdp_mid: "audio".into(),
+                sdp_m_line_index: 0,
+            },
+            SignalingBody::End {
+                call_id: fixture_call_id(),
+                reason: EndReason::HungUp,
+            },
+        ] {
+            let outcome = session.apply_remote_signaling(&body);
+            assert_eq!(outcome, SignalingOutcome::Ignored, "{body:?}");
+        }
+        assert_eq!(session.joined_count(), 0);
+        assert!(!session.needs_rekey());
+    }
+
+    #[test]
+    fn apply_remote_signaling_ignores_wrong_call_id() {
+        use crate::signaling::SignalingBody;
+
+        let (id_a, _id_b, group_a) = make_pair();
+        let mut session =
+            GroupCallSession::create(GroupCallScope::InChat, fixture_call_id(), &group_a, &id_a)
+                .unwrap();
+        let mut other = fixture_call_id();
+        other[0] = 0xFF;
+        let outcome = session.apply_remote_signaling(&SignalingBody::GroupJoin {
+            call_id: other,
+            leaf_index: 1,
+            joined_at_ms: 0,
+        });
+        assert_eq!(outcome, SignalingOutcome::Ignored);
+        assert_eq!(session.joined_count(), 0);
+        assert!(!session.needs_rekey());
     }
 
     #[test]

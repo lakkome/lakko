@@ -480,6 +480,15 @@ impl CallSession {
                 })];
             },
             SignalingBody::End { reason, .. } => Event::RemoteEnded { reason: *reason },
+            // Group-control bodies (3c2) are routed to
+            // `GroupCallSession::apply_remote_signaling`, not
+            // to the 1×1 `CallSession` state machine. The
+            // dispatcher pre-splits by `body.is_group_control()`;
+            // if anything leaks through, drop silently rather
+            // than synthesising a bogus transition.
+            SignalingBody::GroupStart { .. }
+            | SignalingBody::GroupJoin { .. }
+            | SignalingBody::GroupLeave { .. } => return vec![],
         };
         self.on_event(event)
     }

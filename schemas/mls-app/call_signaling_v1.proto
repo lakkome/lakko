@@ -30,6 +30,26 @@ package lakko.mls_app.call_signaling.v1;
 // but doesn't match any live call_id and gets dropped.
 
 // Outer envelope. One per signaling event.
+//
+// ## 1×1 vs group call wire shapes
+//
+// **1×1 (Phase 3a).** Per-peer SDP / ICE rides MLS as
+// `CallOffer` / `CallAnswer` / `IceCandidate` / `CallEnd`.
+// The MLS chat group is the only signaling channel.
+//
+// **Group call (Phase 3c, SFU-based).** Per-participant
+// SDP / ICE goes participant ↔ SFU directly through the
+// LiveKit signaling channel — the SFU never sees the MLS
+// group. What rides MLS is **call-control only**:
+// `GroupCallStart` (announce the call_id to the chat),
+// `GroupCallJoin` (participant connected to SFU),
+// `GroupCallLeave` (participant disconnected). The split
+// keeps the chat group's DS journal small + keeps the
+// SFU blind to chat membership.
+//
+// `CallEnd` is reused for the group-call terminal event
+// (last participant leaves, admin force-ends) — the body
+// is the same.
 message CallSignalingPayload {
     // Concrete body. Exactly one variant is set.
     oneof body {
@@ -37,8 +57,11 @@ message CallSignalingPayload {
         CallAnswer answer = 11;
         IceCandidate candidate = 12;
         CallEnd end = 13;
+        GroupCallStart group_start = 14;
+        GroupCallJoin group_join = 15;
+        GroupCallLeave group_leave = 16;
     }
-    reserved 14 to 31;
+    reserved 17 to 31;
 }
 
 // "I am calling you" — SDP offer from the initiator.
@@ -100,4 +123,77 @@ message CallEnd {
     //   4 = ERROR — unrecoverable error mid-call
     uint32 reason = 2;
     reserved 3 to 15;
+}
+
+// "I am opening a group call in this chat" — announce.
+//
+// First event in the group-call lifecycle. Anyone in the
+// chat MLS group sees this on the DS journal and renders
+// a joinable-call card in the conversation. The initiator
+// is identified by their MLS leaf index — receivers can
+// match it against their local member roster to display a
+// name without leaking identity to the server.
+//
+// Subsequent `GroupCallJoin` events from each participant
+// (including the initiator) populate the live roster.
+message GroupCallStart {
+    // 16-byte random id minted by the initiator.
+    bytes call_id = 1;
+    // MLS leaf index of the initiator at the time of the
+    // announce. Leaf indices are stable within an epoch;
+    // a commit advancing the chat group's epoch invalidates
+    // stale indices (receivers fall back to "Unknown" until
+    // the next `GroupCallJoin` lands).
+    uint32 initiator_leaf = 2;
+    // Wall-clock UNIX millis when the announce was minted.
+    // Display only; never used for ordering.
+    uint64 created_at_ms = 3;
+    // Bitmap of media kinds the group call supports:
+    //   bit 0 = audio
+    //   bit 1 = video
+    uint32 media_flags = 4;
+    reserved 5 to 15;
+}
+
+// "I have connected to the SFU" — roster update.
+//
+// Sent by each participant after their per-participant
+// SFU session reaches `connected`. Other clients in the
+// chat update their local `GroupCallSession` roster +
+// recompute the rekey state (per `GroupCallSession::
+// set_joined`). The body intentionally does NOT carry
+// SDP / ICE — that path goes participant ↔ SFU directly
+// through the LiveKit signaling channel.
+message GroupCallJoin {
+    bytes call_id = 1;
+    // MLS leaf index of the joining participant.
+    uint32 leaf_index = 2;
+    // Wall-clock UNIX millis when the join landed.
+    // Display only.
+    uint64 joined_at_ms = 3;
+    reserved 4 to 15;
+}
+
+// "I have disconnected from the SFU" — roster update.
+//
+// Counterpart of `GroupCallJoin`. Receivers call
+// `GroupCallSession::set_joined(leaf, false)` on their
+// local ledger; the rekey state flips so the next MLS
+// commit triggers a key rotation per 3c5.
+//
+// When the LAST participant leaves, the initiator (or
+// admin) follows up with `CallEnd` to mark the call
+// terminated in the chat history.
+message GroupCallLeave {
+    bytes call_id = 1;
+    uint32 leaf_index = 2;
+    // Reason discriminator. Mirrors `CallEnd.reason` for
+    // wire-shape consistency; values:
+    //   0 = HUNG_UP — participant left voluntarily
+    //   1 = BUSY — unused for group calls; reserved
+    //   2 = DECLINED — unused; reserved
+    //   3 = TIMED_OUT — connection lost / SFU eviction
+    //   4 = ERROR — unrecoverable error on this participant
+    uint32 reason = 3;
+    reserved 4 to 15;
 }

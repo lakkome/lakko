@@ -229,7 +229,7 @@ mod tests {
     fn call_signaling_roundtrip() {
         use mls_app::call_signaling::v1::{
             call_signaling_payload::Body, CallAnswer, CallEnd, CallOffer, CallSignalingPayload,
-            IceCandidate,
+            GroupCallJoin, GroupCallLeave, GroupCallStart, IceCandidate,
         };
         use prost::Message as _;
 
@@ -253,6 +253,22 @@ mod tests {
             Body::End(CallEnd {
                 call_id: vec![0x10; 16],
                 reason: 0,
+            }),
+            Body::GroupStart(GroupCallStart {
+                call_id: vec![0x20; 16],
+                initiator_leaf: 7,
+                created_at_ms: 1_700_000_000_500,
+                media_flags: 0b11,
+            }),
+            Body::GroupJoin(GroupCallJoin {
+                call_id: vec![0x20; 16],
+                leaf_index: 12,
+                joined_at_ms: 1_700_000_001_000,
+            }),
+            Body::GroupLeave(GroupCallLeave {
+                call_id: vec![0x20; 16],
+                leaf_index: 12,
+                reason: 3,
             }),
         ] {
             let original = CallSignalingPayload { body: Some(body) };

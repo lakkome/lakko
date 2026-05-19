@@ -30,9 +30,12 @@ use crate::error::{Error, Result};
 /// 16-byte random per-call id.
 pub type CallId = [u8; 16];
 
-/// Reason discriminator carried in [`SignalingBody::End`].
-/// Pinned numeric values so the wire ↔ enum mapping is stable
-/// across schema versions.
+/// Reason discriminator carried in [`SignalingBody::End`]
+/// and [`SignalingBody::GroupLeave`]. Pinned numeric values
+/// so the wire ↔ enum mapping is stable across schema
+/// versions. For [`SignalingBody::GroupLeave`] only `HungUp`,
+/// `TimedOut`, and `Error` are meaningful — `Busy` /
+/// `Declined` are 1×1-only and reserved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EndReason {
     /// Either side tore down (regular hangup).
@@ -148,6 +151,46 @@ pub enum SignalingBody {
     },
     /// Terminal event.
     End { call_id: CallId, reason: EndReason },
+    /// Group call announce — first event in the group-call
+    /// lifecycle. Posted to the chat MLS group by the
+    /// initiator; observers render a joinable-call card.
+    /// Per-peer SDP / ICE still goes participant ↔ SFU
+    /// directly, not through MLS.
+    GroupStart {
+        /// 16-byte random id minted by the initiator.
+        call_id: CallId,
+        /// MLS leaf index of the initiator at announce time.
+        initiator_leaf: u32,
+        /// Wall-clock UNIX millis when the announce was minted.
+        created_at_ms: u64,
+        /// Audio / video support flags for the call.
+        media: MediaFlags,
+    },
+    /// Group call join — participant connected to the SFU.
+    /// Receivers fold this into their local
+    /// [`crate::GroupCallSession`] roster via
+    /// [`crate::GroupCallSession::apply_remote_join`].
+    GroupJoin {
+        call_id: CallId,
+        /// MLS leaf index of the joining participant.
+        leaf_index: u32,
+        /// Wall-clock UNIX millis when the join landed.
+        joined_at_ms: u64,
+    },
+    /// Group call leave — participant disconnected from
+    /// the SFU. Receivers fold this via
+    /// [`crate::GroupCallSession::apply_remote_leave`];
+    /// the local rekey flag flips so the next MLS commit
+    /// triggers a key rotation per 3c5.
+    GroupLeave {
+        call_id: CallId,
+        leaf_index: u32,
+        /// Reason discriminator; meaningful values for
+        /// group-call leave are `HungUp` (voluntary),
+        /// `TimedOut` (connection lost / SFU eviction),
+        /// `Error` (unrecoverable per-participant fault).
+        reason: EndReason,
+    },
 }
 
 impl SignalingBody {
@@ -158,8 +201,24 @@ impl SignalingBody {
             Self::Offer { call_id, .. }
             | Self::Answer { call_id, .. }
             | Self::IceCandidate { call_id, .. }
-            | Self::End { call_id, .. } => call_id,
+            | Self::End { call_id, .. }
+            | Self::GroupStart { call_id, .. }
+            | Self::GroupJoin { call_id, .. }
+            | Self::GroupLeave { call_id, .. } => call_id,
         }
+    }
+
+    /// `true` for `GroupStart` / `GroupJoin` / `GroupLeave` —
+    /// the call-control-only bodies that ride MLS in
+    /// SFU-based group calls. Useful for client dispatchers
+    /// that route 1×1 vs group-call events to different
+    /// state machines.
+    #[must_use]
+    pub fn is_group_control(&self) -> bool {
+        matches!(
+            self,
+            Self::GroupStart { .. } | Self::GroupJoin { .. } | Self::GroupLeave { .. }
+        )
     }
 }
 
@@ -174,7 +233,7 @@ impl SignalingBody {
 pub fn compose_signaling_payload(body: &SignalingBody) -> Result<Vec<u8>> {
     use lakko_proto::mls_app::call_signaling::v1::{
         call_signaling_payload::Body as ProtoBody, CallAnswer, CallEnd, CallOffer,
-        CallSignalingPayload, IceCandidate,
+        CallSignalingPayload, GroupCallJoin, GroupCallLeave, GroupCallStart, IceCandidate,
     };
 
     let proto_body = match body {
@@ -206,6 +265,35 @@ pub fn compose_signaling_payload(body: &SignalingBody) -> Result<Vec<u8>> {
         }),
         SignalingBody::End { call_id, reason } => ProtoBody::End(CallEnd {
             call_id: call_id.to_vec(),
+            reason: reason.into_proto(),
+        }),
+        SignalingBody::GroupStart {
+            call_id,
+            initiator_leaf,
+            created_at_ms,
+            media,
+        } => ProtoBody::GroupStart(GroupCallStart {
+            call_id: call_id.to_vec(),
+            initiator_leaf: *initiator_leaf,
+            created_at_ms: *created_at_ms,
+            media_flags: media.into_bits(),
+        }),
+        SignalingBody::GroupJoin {
+            call_id,
+            leaf_index,
+            joined_at_ms,
+        } => ProtoBody::GroupJoin(GroupCallJoin {
+            call_id: call_id.to_vec(),
+            leaf_index: *leaf_index,
+            joined_at_ms: *joined_at_ms,
+        }),
+        SignalingBody::GroupLeave {
+            call_id,
+            leaf_index,
+            reason,
+        } => ProtoBody::GroupLeave(GroupCallLeave {
+            call_id: call_id.to_vec(),
+            leaf_index: *leaf_index,
             reason: reason.into_proto(),
         }),
     };
@@ -274,6 +362,22 @@ pub fn parse_signaling_payload(bytes: &[u8]) -> Result<SignalingBody> {
         ProtoBody::End(e) => SignalingBody::End {
             call_id: take_call_id(e.call_id)?,
             reason: EndReason::from_proto(e.reason),
+        },
+        ProtoBody::GroupStart(s) => SignalingBody::GroupStart {
+            call_id: take_call_id(s.call_id)?,
+            initiator_leaf: s.initiator_leaf,
+            created_at_ms: s.created_at_ms,
+            media: MediaFlags::from_bits(s.media_flags),
+        },
+        ProtoBody::GroupJoin(j) => SignalingBody::GroupJoin {
+            call_id: take_call_id(j.call_id)?,
+            leaf_index: j.leaf_index,
+            joined_at_ms: j.joined_at_ms,
+        },
+        ProtoBody::GroupLeave(l) => SignalingBody::GroupLeave {
+            call_id: take_call_id(l.call_id)?,
+            leaf_index: l.leaf_index,
+            reason: EndReason::from_proto(l.reason),
         },
     })
 }
@@ -391,6 +495,81 @@ mod tests {
                 assert!(msg.contains("call_id length"), "unexpected body: {msg}");
             },
             other => panic!("expected Crypto length error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn group_start_round_trips() {
+        let body = SignalingBody::GroupStart {
+            call_id: fixture_call_id(),
+            initiator_leaf: 7,
+            created_at_ms: 1_700_000_000_000,
+            media: MediaFlags::audio_video(),
+        };
+        let bytes = compose_signaling_payload(&body).unwrap();
+        let parsed = parse_signaling_payload(&bytes).unwrap();
+        assert_eq!(parsed, body);
+        assert!(parsed.is_group_control());
+    }
+
+    #[test]
+    fn group_join_round_trips() {
+        let body = SignalingBody::GroupJoin {
+            call_id: fixture_call_id(),
+            leaf_index: 12,
+            joined_at_ms: 1_700_000_000_500,
+        };
+        let bytes = compose_signaling_payload(&body).unwrap();
+        let parsed = parse_signaling_payload(&bytes).unwrap();
+        assert_eq!(parsed, body);
+        assert!(parsed.is_group_control());
+    }
+
+    #[test]
+    fn group_leave_round_trips_each_reason() {
+        // Receivers fold unknown reason codes to HungUp via
+        // EndReason::from_proto — verify the meaningful set
+        // round-trips identity-cleanly and the forward-compat
+        // fold still holds on this variant.
+        for reason in [EndReason::HungUp, EndReason::TimedOut, EndReason::Error] {
+            let body = SignalingBody::GroupLeave {
+                call_id: fixture_call_id(),
+                leaf_index: 5,
+                reason,
+            };
+            let bytes = compose_signaling_payload(&body).unwrap();
+            let parsed = parse_signaling_payload(&bytes).unwrap();
+            assert_eq!(parsed, body);
+            assert!(parsed.is_group_control());
+        }
+    }
+
+    #[test]
+    fn is_group_control_false_for_one_on_one_bodies() {
+        let one_to_one = [
+            SignalingBody::Offer {
+                call_id: fixture_call_id(),
+                sdp: "v=0\n".into(),
+                created_at_ms: 0,
+                media: MediaFlags::audio_only(),
+            },
+            SignalingBody::Answer {
+                call_id: fixture_call_id(),
+                sdp: "v=0\n".into(),
+            },
+            SignalingBody::IceCandidate {
+                call_id: fixture_call_id(),
+                candidate: String::new(),
+                sdp_mid: "audio".into(),
+                sdp_m_line_index: 0,
+            },
+            SignalingBody::End {
+                call_id: fixture_call_id(),
+                reason: EndReason::HungUp,
+            },
+        ];
+        for body in one_to_one {
+            assert!(!body.is_group_control(), "{body:?}");
         }
     }
 
