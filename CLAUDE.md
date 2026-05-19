@@ -59,6 +59,7 @@ The tactical decomposition of all 6 phases with sprint breakdowns lives in [`doc
 | `discovery` | Username lookup via OPRF |
 | `push-gw` | Fan-out APNs / FCM / UnifiedPush |
 | `transport-rendezvous` | Signed bootstrap config for anti-censorship |
+| `sfu` | LiveKit fork (Go, not Rust) — SFU media routing. Scaffolded in 3b1a; see [`services/sfu/README.md`](services/sfu/README.md) + ADR-0008 |
 
 ### Other
 

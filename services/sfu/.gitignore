@@ -1,0 +1,25 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+# Go build artefacts — never committed.
+*.test
+*.out
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Local-dev secrets / configs.
+*.env
+*.local
+local-config.yaml
+
+# Build output dirs.
+bin/
+dist/
+
+# Editor / OS junk.
+.idea/
+.vscode/
+*.swp
+.DS_Store
