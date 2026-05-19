@@ -57,9 +57,12 @@
 //! - `DELETE /webauthn/credentials/{id}` — remove a passkey (Phase 2a2a, bearer-auth)
 //! - `POST /webauthn/auth/start`     — passkey login, step 1 (Phase 2a2b, anonymous)
 //! - `POST /webauthn/auth/finish`    — passkey login, step 2 (Phase 2a2b, anonymous)
+//! - `POST /call/jwt`                — issue SFU-bound JWT (Phase 3b4 forward, bearer-auth)
+//! - `GET  /.well-known/jwks.json`   — publish call-JWT public key (Phase 3b4 forward, anonymous)
 
 #![forbid(unsafe_code)]
 
+mod call_jwt;
 mod opaque;
 mod pow;
 mod webauthn;
@@ -121,6 +124,12 @@ pub(crate) struct AppState {
     /// `/webauthn/*` routes then return 503 instead of registering
     /// passkeys with an undefined RP identity.
     pub(crate) webauthn: Option<Arc<Webauthn>>,
+    /// Phase 3b4 forward — Ed25519 keypair the service uses
+    /// to sign call JWTs (consumed by `services/sfu` per
+    /// ADR-0008). Loaded (or generated on first run) at
+    /// startup via `call_jwt::load_or_init_call_signing_key`.
+    /// Public key is published at GET `/.well-known/jwks.json`.
+    pub(crate) call_jwt_signing: Arc<call_jwt::CallSigningKey>,
 }
 
 #[tokio::main]
@@ -195,12 +204,24 @@ async fn main() -> Result<()> {
         tracing::info!("webauthn disabled (LAKKO_WEBAUTHN_RP_ID not set)");
     }
 
+    // Phase 3b4 forward — load (or generate on first run)
+    // the Ed25519 call-JWT signing key. Same load_or_init
+    // pattern as OPAQUE server setup.
+    let call_jwt_signing = call_jwt::load_or_init_call_signing_key(&pool)
+        .await
+        .context("load call_jwt signing key")?;
+    tracing::info!(
+        kid = %call_jwt_signing.kid,
+        "call-JWT signing key loaded"
+    );
+
     let state = AppState {
         db: pool.clone(),
         opaque_setup: Arc::new(opaque_setup),
         session_token_secret: Arc::new(session_token_secret),
         session_token_ttl_ms,
         webauthn: webauthn_instance,
+        call_jwt_signing: Arc::new(call_jwt_signing),
     };
 
     // Background tasks: periodically delete expired rows from the
@@ -248,6 +269,18 @@ fn build_app(state: AppState) -> Router {
             webauthn::require_session,
         ));
 
+    // Phase 3b4 forward — `POST /call/jwt` mints a JWT
+    // scoped to (account_id, call_id, role). Bearer-auth
+    // required (same session-token middleware webauthn
+    // routes use). The SFU verifies the JWT against the
+    // public key it fetched from `/.well-known/jwks.json`.
+    let call_jwt_routes = Router::new()
+        .route("/call/jwt", post(call_jwt::issue_call_jwt))
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            webauthn::require_session,
+        ));
+
     Router::new()
         .route("/health", get(health))
         .route("/ready", get(ready))
@@ -272,7 +305,12 @@ fn build_app(state: AppState) -> Router {
         // the session token.
         .route("/webauthn/auth/start", post(webauthn::auth_start))
         .route("/webauthn/auth/finish", post(webauthn::auth_finish))
+        // Phase 3b4 forward — anonymous JWKS endpoint. The
+        // public key is public; the SFU fetches it at
+        // startup + refreshes every 24 h.
+        .route("/.well-known/jwks.json", get(call_jwt::jwks_handler))
         .merge(webauthn_routes)
+        .merge(call_jwt_routes)
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }

@@ -2259,6 +2259,7 @@ dependencies = [
  "equix",
  "http-body-util",
  "lakko-auth-token",
+ "lakko-crypto",
  "opaque-ke",
  "rand 0.8.6",
  "serde",
