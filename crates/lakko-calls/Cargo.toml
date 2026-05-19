@@ -14,3 +14,16 @@ description = "Audio/video calls — SFrame (RFC 9605), jitter buffer, codec neg
 
 [lints]
 workspace = true
+
+[dependencies]
+# Per-call media key seed pulled from the MLS group's exporter
+# secret. The `lakko_mls::Group::export_secret(label, ctx, n)`
+# call wraps OpenMLS's RFC 9420 §8.5 exporter; this crate
+# layers SFrame (RFC 9605) per-participant key derivation on
+# top.
+lakko-mls.workspace = true
+# AEAD primitives (ChaCha20-Poly1305 + AES-256-GCM) + HKDF for
+# the per-participant ratchet.
+lakko-crypto.workspace = true
+thiserror.workspace = true
+zeroize = "1"

@@ -23,7 +23,7 @@
  * up front rather than letting the user click into a flow that
  * will fail at the WASM boundary.
  */
-import { createMemo, createSignal, For, Show, type JSX } from "solid-js";
+import { createMemo, createSignal, For, onMount, Show, type JSX } from "solid-js";
 import { A } from "@solidjs/router";
 import { useAuth } from "../auth/AuthContext";
 import {
@@ -37,6 +37,8 @@ import type { IncomingContactRequest, SendResult } from "../contacts/client";
 import { useChats, type ActiveGroup } from "../chat/ChatContext";
 import { useDeviceGroupSync } from "../devices/sync/DeviceGroupSyncContext";
 import { groupIdHex as syncGroupIdHex } from "../devices/sync/state";
+import { loadMessageLog } from "../chat/message-log-store";
+import { getDeviceKey } from "../auth/key-store";
 import { loadWasm } from "../wasm";
 import { paths } from "./paths";
 import {
@@ -1080,6 +1082,81 @@ function ActiveGroupsPanel(props: {
   // archive indicators next to each row, (b) the sort
   // ordering (pinned top, archived bottom).
   const sync = useDeviceGroupSync();
+  const auth = useAuth();
+  // Phase 2a3e2c-followup-web — per-thread highest message-id
+  // map, sourced from the persistent message log. Unread
+  // count = highestMessageId - readCursor for the same
+  // group. We load the log once on mount and refresh
+  // whenever the auth account_id changes; live changes
+  // happen on Chat.tsx mutations which run in another tab /
+  // route, so the next visit picks them up on its own mount.
+  // Per-group sorted list of incoming/system messageIds —
+  // unread count is `idsAboveCursor.length`, so we keep the
+  // full vector instead of just the max. Web's message-log
+  // store carries the full timeline so this is cheap; the
+  // sort lets `unreadFor` early-exit at the first id ≤ cursor.
+  const [incomingIds, setIncomingIds] = createSignal<
+    { readonly [groupIdHex: string]: readonly bigint[] }
+  >({});
+  onMount(() => {
+    void (async (): Promise<void> => {
+      const s = auth.state();
+      if (s.kind !== "session") return;
+      const accountIdB64 = s.account.accountId;
+      const deviceKey = await getDeviceKey(accountIdB64);
+      if (deviceKey === null) return;
+      const log = await loadMessageLog(accountIdB64, deviceKey);
+      if (log === null) return;
+      const map: { [hex: string]: bigint[] } = {};
+      for (const [hex, slot] of Object.entries(log.groups)) {
+        const ids: bigint[] = [];
+        for (const m of slot.messages) {
+          if (m.direction === "outgoing") continue;
+          try {
+            ids.push(BigInt(m.messageId));
+          } catch {
+            // Non-numeric message id — skip.
+          }
+        }
+        if (ids.length > 0) {
+          ids.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+          map[hex] = ids;
+        }
+      }
+      setIncomingIds(map);
+    })();
+  });
+
+  function unreadFor(groupIdBytes: Uint8Array): number {
+    const hex = syncGroupIdHex(groupIdBytes);
+    const ids = incomingIds()[hex];
+    if (ids === undefined || ids.length === 0) return 0;
+    const cursor = sync.readCursors()[hex];
+    if (cursor === undefined || cursor.upToMessageId.length < 8) {
+      // No cursor yet — treat as "all read" so we don't blast
+      // the badge during cold start; the chat-screen mount
+      // broadcasts a cursor within 1.5 s.
+      return 0;
+    }
+    let cursorId: bigint = 0n;
+    const bytes = cursor.upToMessageId;
+    for (let i = 0; i < 8; i += 1) {
+      cursorId = (cursorId << 8n) | BigInt(bytes[i] as number);
+    }
+    // Count from the high end. Sorted ascending, so the
+    // first id ≤ cursor short-circuits.
+    let unread = 0;
+    for (let i = ids.length - 1; i >= 0; i -= 1) {
+      const id = ids[i] as bigint;
+      if (id > cursorId) {
+        unread += 1;
+        if (unread > 99) return 100;
+      } else {
+        break;
+      }
+    }
+    return unread;
+  }
 
   /** Pinned → top, archived → bottom, otherwise stable on
    *  creation order. */
@@ -1220,6 +1297,29 @@ function ActiveGroupsPanel(props: {
                       "align-items": "center",
                     }}
                   >
+                    <Show when={unreadFor(g.group.groupId) > 0}>
+                      <span
+                        title={`${unreadFor(g.group.groupId)} unread`}
+                        style={{
+                          "min-width": "1.5rem",
+                          "text-align": "center",
+                          padding: "0.1rem 0.4rem",
+                          "border-radius": "999px",
+                          background: flags().muted
+                            ? "var(--surface-muted)"
+                            : "var(--accent)",
+                          color: flags().muted
+                            ? "var(--surface)"
+                            : "var(--accent-fg)",
+                          "font-size": "0.75rem",
+                          "font-weight": "600",
+                        }}
+                      >
+                        {unreadFor(g.group.groupId) >= 100
+                          ? "99+"
+                          : unreadFor(g.group.groupId)}
+                      </span>
+                    </Show>
                     <button
                       type="button"
                       title={flags().pinned ? "Unpin" : "Pin"}

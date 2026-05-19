@@ -81,7 +81,11 @@ public struct ChatListScreen: View {
                 Button(action: { onOpenChat(thread.groupIdHex) }) {
                     ThreadRow(
                         thread: thread,
-                        flags: deviceGroupSync.flags[thread.groupIdHex]
+                        flags: deviceGroupSync.flags[thread.groupIdHex],
+                        unread: Self.unreadCount(
+                            thread: thread,
+                            cursor: deviceGroupSync.readCursors[thread.groupIdHex]
+                        )
                     )
                 }
                 .buttonStyle(.plain)
@@ -91,6 +95,42 @@ public struct ChatListScreen: View {
             }
             .listStyle(.plain)
         }
+    }
+
+    /// Compute unread count for a thread (Phase 2a3e2c-followup).
+    ///
+    /// Counts every incoming / system row whose `messageId` is
+    /// strictly greater than the last broadcast read cursor.
+    /// Outgoing rows never count — the sender already "read"
+    /// them by composing.
+    ///
+    /// Returns 0 when `cursor` is `nil` and the thread has no
+    /// rows at all (treats "no cursor" the same as "everything
+    /// read"; otherwise an empty cursor would flip every prior
+    /// row to unread on the first attach which spams the UI
+    /// during cold start). A future sprint can refine the
+    /// "first attach" semantics — for now the read-cursor
+    /// broadcast on chat-mount lands within 1.5 s and the
+    /// badge clears.
+    private static func unreadCount(
+        thread: ChatThread,
+        cursor: ReadCursorState?
+    ) -> Int {
+        let cursorId = cursor.map { Self.decodeBeI64($0.upToMessageId) } ?? Int64.max
+        return thread.messages.reduce(0) { acc, msg in
+            if msg.direction == .outgoing { return acc }
+            if msg.messageId > cursorId { return acc + 1 }
+            return acc
+        }
+    }
+
+    private static func decodeBeI64(_ data: Data) -> Int64 {
+        guard data.count >= 8 else { return Int64.max }
+        var v: UInt64 = 0
+        for i in 0..<8 {
+            v = (v << 8) | UInt64(data[data.startIndex + i])
+        }
+        return Int64(bitPattern: v)
     }
 
     @ViewBuilder
@@ -195,6 +235,9 @@ private struct ThreadRow: View {
     /// Phase 2a3e2c-iOS — cross-device flags snapshot for this
     /// thread. `nil` until a `Flags` payload lands.
     let flags: FlagsState?
+    /// Phase 2a3e2c-followup — unread count derived from the
+    /// per-thread read cursor + the incoming/system row IDs.
+    let unread: Int
 
     var body: some View {
         HStack(spacing: 8) {
@@ -229,6 +272,26 @@ private struct ThreadRow: View {
                     .lineLimit(1)
             }
             Spacer()
+            if unread > 0 {
+                // Pill badge. Muted threads render a hollow
+                // ring instead of the filled accent fill so a
+                // muted-but-unread row still surfaces a hint
+                // without grabbing attention.
+                Text(unread > 99 ? "99+" : "\(unread)")
+                    .font(.caption2)
+                    .fontWeight(.semibold)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(
+                        flags?.muted == true
+                            ? Color.secondary.opacity(0.2)
+                            : Color.accentColor
+                    )
+                    .foregroundStyle(
+                        flags?.muted == true ? .secondary : Color.white
+                    )
+                    .clipShape(Capsule())
+            }
         }
         .padding(.vertical, 4)
         .contentShape(Rectangle())

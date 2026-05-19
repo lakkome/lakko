@@ -1,0 +1,93 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+<!-- SPDX-FileCopyrightText: 2026 Lakko Contributors -->
+
+# Lakko — Security documentation
+
+Audit-readiness pack for the Phase 2 → 3 transition (per
+[`docs/ROADMAP.md`](../ROADMAP.md) §9 exit criteria: "External
+crypto + MLS state + auth audit before public beta").
+
+The intent of this directory is to let an external reviewer
+load the project state in one read pass without grepping the
+codebase. Each file points at the live code paths it
+summarises so the docs and the implementation stay in sync
+(reviewers verify by jumping to the cited paths).
+
+## Files in this pack
+
+- [`threat-model.md`](./threat-model.md) — assets, adversaries,
+  invariants. Single source of truth for "what must the
+  protocol resist".
+- [`crypto-overview.md`](./crypto-overview.md) — every
+  primitive in use, where it lives in the code, which RFC /
+  cipher-suite it implements.
+- [`mls-state-machine.md`](./mls-state-machine.md) — wrappers
+  around OpenMLS we ship, exporter labels we coined,
+  invariants the state machine MUST preserve.
+- [`auth-flow.md`](./auth-flow.md) — OPAQUE-PAKE registration
+  / login / recover round-trips, WebAuthn passkey opt-in,
+  device-key derivation chain, key-rotation paths.
+- [`device-keys.md`](./device-keys.md) — hardware-backed
+  device-root-key lifecycle on every platform
+  (Secure Enclave / StrongBox / non-extractable WebCrypto).
+- [`backup.md`](./backup.md) — encrypted backup envelope
+  (v2: identity_seed + contacts + whole_storage_snapshot),
+  Argon2id KEK, recovery flow, Shamir social recovery.
+- [`multi-device.md`](./multi-device.md) — ADR-0007 two-tier
+  identity + DeviceGroup pairing + remove-device + history
+  catch-up bundle + cross-device sync.
+- [`known-gaps.md`](./known-gaps.md) — items the maintainer
+  knows are not audit-ready yet; reviewers should not
+  re-discover them. Each entry has a tracking issue / ROADMAP
+  link.
+
+## Audit scope inputs
+
+The reviewer is asked to verify:
+
+1. The **MLS state machine** wrapper (`crates/lakko-mls/`) is
+   free of state-confusion / re-key bypass bugs given the
+   OpenMLS API contract. Property tests, fuzz harnesses, and
+   the `mls-state-machine.md` invariant list are the
+   in-scope reference.
+2. The **authentication round-trips** (`services/auth/`,
+   `crates/lakko-auth-client/`) implement RFC-draft OPAQUE
+   correctly + leak no PII on signup / login / recover /
+   password rotation. Particular focus on the password-
+   change path's interaction with the device key derivation
+   chain.
+3. The **wire protocol** (`schemas/*.proto`) carries no
+   plaintext PII or social-graph identifiers; every
+   server-routable id is a pseudonym (per the
+   `threat-model.md` invariants).
+4. The **device-key derivation chain** keeps plaintext
+   material off-disk on every platform — the
+   `device-keys.md` document enumerates the at-rest material
+   per layer and the key it sits behind.
+5. The **encrypted backup envelope** (`crates/lakko-backup/`)
+   is tamper-evident, downgrade-resistant, and decodes
+   identically across platforms.
+6. **Multi-device pairing** (DeviceGroup + history bundle)
+   doesn't leak the receiver's plaintext to the server or to
+   a misrouted Welcome.
+
+Audit scope **out**: censorship-resistance transports
+(REALITY / MASQUE / Shadowsocks-2022) — these land in
+Phase 5 and get their own audit then.
+
+## Reproducibility
+
+Every command an audit reviewer might want to run:
+
+```bash
+just check      # cargo check --workspace --all-targets
+just lint       # cargo clippy --workspace -- -D warnings
+just test       # cargo test --workspace
+just audit      # cargo deny check
+just fuzz-check # smoke-build every fuzz harness on stable
+just reuse      # SPDX-header lint
+```
+
+The Nix flake (`infra/nix/flake.nix`) pins the entire
+toolchain. Two independent CI runners produce byte-identical
+artefacts — see `ci/release.yml`.

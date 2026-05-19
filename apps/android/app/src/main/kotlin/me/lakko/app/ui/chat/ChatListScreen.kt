@@ -3,6 +3,7 @@
 
 package me.lakko.app.ui.chat
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -32,12 +33,14 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.launch
 import me.lakko.app.devices.sync.DeviceGroupSyncRepository
 import me.lakko.app.devices.sync.FlagsState
+import me.lakko.app.devices.sync.ReadCursorState
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -83,6 +86,11 @@ public fun ChatListScreen(
     // older callers that haven't wired the sync runtime yet.
     val flagsState = deviceGroupSync?.flags?.collectAsStateWithLifecycle()
     val flagsMap: Map<String, FlagsState> = flagsState?.value ?: emptyMap()
+    // Phase 2a3e2c-followup — per-thread read cursor map for
+    // the unread-badge counter.
+    val readCursorState = deviceGroupSync?.readCursors?.collectAsStateWithLifecycle()
+    val readCursorMap: Map<String, ReadCursorState> =
+        readCursorState?.value ?: emptyMap()
 
     LaunchedEffect(Unit) {
         // First tick: immediate refresh so the list is fresh
@@ -128,9 +136,14 @@ public fun ChatListScreen(
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 items(items = sorted, key = { it.groupIdHex }) { thread ->
+                    val unread = unreadCount(
+                        thread = thread,
+                        cursor = readCursorMap[thread.groupIdHex],
+                    )
                     ThreadRow(
                         thread = thread,
                         flags = flagsMap[thread.groupIdHex],
+                        unread = unread,
                         onClick = { onOpenThread(thread.groupIdHex) },
                         onToggleFlag = { field ->
                             val sync = deviceGroupSync ?: return@ThreadRow
@@ -174,6 +187,30 @@ public fun ChatListScreen(
 
 internal enum class FlagField { Pin, Mute, Archive }
 
+/** Compute unread count for a thread (Phase 2a3e2c-followup).
+ *  Counts every incoming / system row whose `messageId` is
+ *  strictly greater than the last broadcast read cursor.
+ *  Outgoing rows never count — the sender already "read" them
+ *  by composing. */
+internal fun unreadCount(thread: ChatThread, cursor: ReadCursorState?): Int {
+    val cursorId = cursor?.let { decodeBeI64(it.upToMessageId) } ?: Long.MAX_VALUE
+    var unread = 0
+    for (m in thread.messages) {
+        if (m.direction == Direction.Outgoing) continue
+        if (m.messageId > cursorId) unread += 1
+    }
+    return unread
+}
+
+private fun decodeBeI64(bytes: ByteArray): Long {
+    if (bytes.size < 8) return Long.MAX_VALUE
+    var v: Long = 0L
+    for (i in 0 until 8) {
+        v = (v shl 8) or (bytes[i].toLong() and 0xff)
+    }
+    return v
+}
+
 private fun hexToBytes(hex: String): ByteArray? {
     if (hex.length % 2 != 0) return null
     val out = ByteArray(hex.length / 2)
@@ -213,6 +250,7 @@ private fun Header(
 private fun ThreadRow(
     thread: ChatThread,
     flags: FlagsState?,
+    unread: Int,
     onClick: () -> Unit,
     onToggleFlag: (FlagField) -> Unit,
 ) {
@@ -259,6 +297,30 @@ private fun ThreadRow(
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                         }
+                    }
+                }
+                // Phase 2a3e2c-followup — unread badge.
+                // Muted rows render a hollow ring; everyone
+                // else gets the accent fill.
+                if (unread > 0) {
+                    val label = if (unread > 99) "99+" else unread.toString()
+                    androidx.compose.foundation.layout.Box(
+                        contentAlignment = Alignment.Center,
+                        modifier = Modifier
+                            .padding(end = 4.dp)
+                            .clip(RoundedCornerShape(percent = 50))
+                            .background(
+                                if (muted) MaterialTheme.colorScheme.surface
+                                else MaterialTheme.colorScheme.primary,
+                            )
+                            .padding(horizontal = 6.dp, vertical = 2.dp),
+                    ) {
+                        Text(
+                            text = label,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = if (muted) MaterialTheme.colorScheme.onSurfaceVariant
+                            else MaterialTheme.colorScheme.onPrimary,
+                        )
                     }
                 }
                 IconButton(onClick = { onToggleFlag(FlagField.Pin) }) {

@@ -2051,6 +2051,12 @@ dependencies = [
 [[package]]
 name = "lakko-calls"
 version = "0.0.0"
+dependencies = [
+ "lakko-crypto",
+ "lakko-mls",
+ "thiserror 1.0.69",
+ "zeroize",
+]
 
 [[package]]
 name = "lakko-contacts"
