@@ -309,13 +309,19 @@ Surfacing the public key as a JWK lets the SFU verifier
 fetch + cache it without any handshake with the auth
 service beyond a single GET on a static URL.
 
-Test:
-[`lakko_call_jwt::tests::mint_then_verify_round_trips`](../../crates/lakko-call-jwt/src/lib.rs)
-covers the sign-then-verify happy path. The persistence
-side is exercised by the auth-side smoke test
-[`call_jwt::tests::auth_side_issuance_round_trips`](../../services/auth/src/call_jwt.rs)
-which builds a `CallSigningKey` from a fixture seed and
-round-trips the claim shape the HTTP handler emits.
+Tests:
+- [`lakko_call_jwt::tests::mint_then_verify_round_trips`](../../crates/lakko-call-jwt/src/lib.rs)
+  — sign-then-verify happy path at the primitive layer.
+- [`call_jwt::tests::auth_side_issuance_round_trips`](../../services/auth/src/call_jwt.rs)
+  — server-side smoke that the claim shape the HTTP
+  handler emits round-trips cleanly through the shared
+  crate.
+- [`call_jwt::tests::issue_call_jwt_happy_path_round_trips`](../../services/auth/src/call_jwt.rs)
+  — full HTTP integration test: `POST /call/jwt` with a
+  valid session-token bearer header through the real
+  axum router (middleware → handler → JSON), then
+  `verify_jwt` on the response under the same signing
+  key.
 
 ### C-16: A JWT with the wrong `iss` or `aud` is rejected
 
@@ -416,6 +422,20 @@ The middleware itself is shared with
 `services/discovery` (Phase 1.5b) and reviewed there;
 the audit cross-link is in [`auth-flow.md`](./auth-flow.md).
 
+Tests (HTTP integration, drives the real axum router):
+- [`call_jwt::tests::issue_call_jwt_without_bearer_rejects_401`](../../services/auth/src/call_jwt.rs)
+  — request with no `Authorization` header → 401.
+- [`call_jwt::tests::issue_call_jwt_with_wrong_secret_rejects_401`](../../services/auth/src/call_jwt.rs)
+  — bearer token minted under a DIFFERENT HMAC secret →
+  401 (attacker who got the wire shape right but doesn't
+  have the secret).
+- [`call_jwt::tests::issue_call_jwt_with_malformed_call_id_rejects_400`](../../services/auth/src/call_jwt.rs)
+  — bearer passes but `call_id` is the wrong length /
+  non-hex → 400.
+- [`call_jwt::tests::issue_call_jwt_happy_path_round_trips`](../../services/auth/src/call_jwt.rs)
+  asserts the `sub` field is taken from the bearer
+  token's account_id, never from the request body.
+
 ### C-22: `verify_with_jwks` resolves the correct key by `kid` across a multi-key JWKS doc
 
 During key rotation the JWKS document carries BOTH the
@@ -430,13 +450,17 @@ SFU's logs differentiate "key rotation in progress, our
 JWKS cache is stale" from "this JWT is forged".
 
 Tests:
-[`lakko_call_jwt::tests::verify_with_jwks_resolves_by_kid`](../../crates/lakko-call-jwt/src/lib.rs)
-covers the multi-key happy path;
-[`lakko_call_jwt::tests::verify_with_jwks_rejects_unknown_kid`](../../crates/lakko-call-jwt/src/lib.rs)
-covers the no-match-on-kid rejection;
-[`lakko_call_jwt::tests::jwks_round_trips_through_json`](../../crates/lakko-call-jwt/src/lib.rs)
-covers the JWKS doc round-tripping cleanly through
-JSON.
+- [`lakko_call_jwt::tests::verify_with_jwks_resolves_by_kid`](../../crates/lakko-call-jwt/src/lib.rs)
+  — multi-key happy path.
+- [`lakko_call_jwt::tests::verify_with_jwks_rejects_unknown_kid`](../../crates/lakko-call-jwt/src/lib.rs)
+  — no-match-on-kid rejection.
+- [`lakko_call_jwt::tests::jwks_round_trips_through_json`](../../crates/lakko-call-jwt/src/lib.rs)
+  — JWKS doc round-trips cleanly through JSON.
+- [`call_jwt::tests::jwks_endpoint_full_chain`](../../services/auth/src/call_jwt.rs)
+  — HTTP integration: mint via `POST /call/jwt`, fetch
+  the JWKS via `GET /.well-known/jwks.json`, verify the
+  minted JWT against the fetched doc through
+  `verify_with_jwks`. Same path a real SFU process takes.
 
 ### C-23: `Jwk::to_verifying_key` rejects non-OKP / non-Ed25519 JWKs
 
