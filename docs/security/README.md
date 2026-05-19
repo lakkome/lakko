@@ -37,11 +37,14 @@ summarises so the docs and the implementation stay in sync
   identity + DeviceGroup pairing + remove-device + history
   catch-up bundle + cross-device sync.
 - [`calls.md`](./calls.md) — call-side cryptography (Phase
-  3a–3c). MLS exporter → CallKey → ParticipantKey chain,
-  per-participant SFrame keys, 1-second overlap window for
-  mid-call rotation, what the SFU sees vs what stays
-  client-side. Invariants C-1..C-14, each cites a property
-  test.
+  3a–3c + 3b4). Two layers: (1) media-key pipeline — MLS
+  exporter → CallKey → ParticipantKey chain, per-participant
+  SFrame keys, 1-second overlap window for mid-call rotation
+  (invariants C-1..C-14); (2) call-admission JWT — Ed25519
+  signing in `services/auth`, JWKS publication, bearer-auth
+  on `POST /call/jwt`, issuer / audience / expiry checks
+  (invariants C-15..C-21). What the SFU sees vs what stays
+  client-side. Every invariant cites a property test.
 - [`known-gaps.md`](./known-gaps.md) — items the maintainer
   knows are not audit-ready yet; reviewers should not
   re-discover them. Each entry has a tracking issue / ROADMAP
@@ -81,9 +84,15 @@ The reviewer is asked to verify:
    [`calls.md`](./calls.md) — particular focus on
    cross-party exporter agreement, per-participant key
    distinctness, and the 1-second overlap window's
-   forward-secrecy boundary on rotation. The SFU-side JWT
-   validation (3b1c) is out of scope for THIS audit pass —
-   it lands with the LiveKit fork.
+   forward-secrecy boundary on rotation.
+8. The **call-admission JWT issuance side** (`services/auth/
+   src/call_jwt.rs`) holds C-15..C-21 in [`calls.md`](./calls.md)
+   — hand-rolled JWS Compact + EdDSA over Ed25519, persistent
+   signing key, JWKS publication, bearer-auth on the mint
+   endpoint, strict issuer / audience / expiry / kid checks.
+   The SFU-side validation (3b1c) is **out of scope for THIS
+   audit pass** — it lands with the LiveKit fork. See G-19
+   in [`known-gaps.md`](./known-gaps.md).
 
 Audit scope **out**: censorship-resistance transports
 (REALITY / MASQUE / Shadowsocks-2022) — these land in

@@ -186,11 +186,23 @@ cannot cause it remotely).
 
 ### G-19: SFU-side JWT validation lands with 3b1c (LiveKit fork)
 
-The `(account_id, call_id, role, expires_at)` JWT shape is
-specified in [ADR-0008](../adr/0008-livekit-fork-strategy.md)
-but the validation surface is not yet implemented — that's
-3b1c work alongside the fork tree setup (3b1a). This audit
-covers the client-side contract only.
+**Issuance side: shipped in 3b4** —
+[`services/auth/src/call_jwt.rs`](../../services/auth/src/call_jwt.rs)
+mints Ed25519-signed JWTs with the C-15..C-21 invariants
+in [`calls.md`](./calls.md). Public key is published at
+`GET /.well-known/jwks.json`.
+
+**Validation side: still pending 3b1c (Go-side, in the
+LiveKit fork)**. The Rust-side `verify_jwt` helper in
+the same module is functional and tested but isn't on
+the load-bearing path until the SFU's Go verifier
+consumes the JWKS doc.
+
+Operational consequence: today's `POST /call/jwt`
+endpoint issues admittedly-bearer tokens but there's no
+SFU host to present them to. Clients can already cache
+the JWT — the call won't actually open until the SFU is
+deployed in 3b2.
 
 ### G-20: Call recording is out of scope (deferred per ROADMAP 3c8)
 

@@ -124,6 +124,10 @@ header for any **protected** endpoint:
 
 - `discovery` (OPRF lookups)
 - `push-gw` (per-account subscriptions)
+- `auth` itself for the WebAuthn registration / management
+  routes (`/webauthn/register/*`, `/webauthn/credentials/*`)
+- `auth` `/call/jwt` (the call-admission JWT mint endpoint —
+  see "Call-admission JWT" below)
 
 The DS service is anonymous — append-only journals keyed on
 opaque pseudonyms; no auth check on `/ds/group/.../messages`
@@ -133,6 +137,93 @@ gate write spam.
 Token shape: 32 random bytes, base64url-encoded. Validated
 against an in-memory map on the auth service; future
 sprints will harden against horizontal scaling.
+
+## Call-admission JWT (Phase 3b4)
+
+Distinct from the session token above. The session token
+is the long-lived (30-day default) handle to "this account
+is logged in here"; the call JWT is a 1-hour scoped
+credential the client hands to the SFU per call.
+
+### Mint round-trip
+
+```text
+client                                        services/auth
+  │
+  │── POST /call/jwt
+  │   Authorization: Bearer <session-token>
+  │   { call_id: "<32 hex>", role: "participant" }
+  │                                                │
+  │                          require_session       │
+  │                          middleware extracts   │
+  │                          account_id from the   │
+  │                          session token         │
+  │                                                │
+  │                          mint_jwt(...)         │
+  │                          - sub = account_id    │
+  │                          - call_id from body   │
+  │                          - role from body      │
+  │                          - iat = now           │
+  │                          - exp = iat + 3600    │
+  │                                                │
+  │◄─────────────────────────────────── 200 OK
+  │     { jwt: "<JWS Compact>",
+  │       expires_at_unix_secs: <iat + 3600> }
+  │
+  │── (later, opening a call)
+  │   GET <sfu>/admit
+  │   Authorization: Bearer <jwt>
+  │                                                │
+  │                                              SFU verifies
+  │                                              the JWT against
+  │                                              the public key
+  │                                              cached from
+  │                                              /.well-known/
+  │                                              jwks.json
+```
+
+### Crypto
+
+- **Signing alg**: EdDSA over Ed25519 (RFC 8037).
+- **Signing key**: persisted in `call_jwt_signing_key.seed`
+  (migration 0007). Single-row table; generated on first
+  boot via `INSERT IGNORE` (race-safe across concurrent
+  startups).
+- **Public key**: published at `GET /.well-known/jwks.json`
+  as an OKP/Ed25519 JWK per RFC 8037. SFU fetches at
+  startup + refreshes every 24 h per ADR-0008.
+- **`kid`**: `hex(BLAKE3(public_key_bytes)[..8])` — 16
+  hex chars; stable across restarts, bumps only on
+  rotation.
+- **Wire shape**: JWS Compact `header.payload.signature`
+  (RFC 7515 §3.1), hand-rolled — no `jsonwebtoken`
+  dep. Sign/verify ride `lakko_crypto::signing`.
+
+### Claim set
+
+```text
+iss     "lakko-auth"                  // pinned constant
+aud     "lakko-sfu"                   // pinned constant
+sub     <account_id_hex>              // 16-byte UUIDv7, lower hex
+call_id <call_id_hex>                 // 16-byte random, lower hex
+role    "participant" | "publisher" | "subscriber"
+iat     <unix seconds>
+exp     <iat + 3600>                  // 1 hour
+```
+
+`account_id` is NEVER taken from the request body — the
+middleware stamps it into request extensions from the
+session token. The body carries only `call_id` (caller's
+choice) and `role` (defaults to `participant`).
+
+The SFU is **assumed-compromised** (per
+[`threat-model.md`](./threat-model.md)). The JWT
+signature is the only proof of admission; a leaked JWT
+is bounded by the 1-hour `exp`.
+
+See [`calls.md`](./calls.md) §"Call-admission JWT
+invariants" for the full C-15..C-21 invariant list +
+cited tests.
 
 ## Password rotation invariants
 

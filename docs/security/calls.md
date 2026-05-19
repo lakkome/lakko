@@ -257,6 +257,153 @@ malformed-payload attacker from crashing the receiver.
 Test:
 [`signaling::tests::wrong_call_id_length_rejected`](../../crates/lakko-calls/src/signaling.rs).
 
+## Call-admission JWT invariants (Phase 3b4)
+
+The SFU admits a participant only after validating a JWT
+signed by `services/auth`. The Rust-side issuance shipped
+in 3b4 (forward-progress, since the SFU-side verifier in
+Go lives in 3b1c). Module:
+[`services/auth/src/call_jwt.rs`](../../services/auth/src/call_jwt.rs).
+Storage: `services/auth/migrations/0007_call_jwt_signing.sql`
+(single-row `call_jwt_signing_key` table holding the
+32-byte Ed25519 seed).
+
+Wire shape — JWS Compact:
+
+```text
+header.payload.signature
+
+  header  = base64url({"alg": "EdDSA", "typ": "JWT", "kid": <16-hex>})
+  payload = base64url({"iss": "lakko-auth",
+                       "aud": "lakko-sfu",
+                       "sub": <account_id_hex>,
+                       "call_id": <call_id_hex>,
+                       "role": "participant" | "publisher" | "subscriber",
+                       "iat": <unix-seconds>,
+                       "exp": <iat + 3600>})
+  signature = base64url(Ed25519(header || "." || payload))
+```
+
+Public key is published anonymously at
+`GET /.well-known/jwks.json` per RFC 8037 (OKP/Ed25519
+JWK). The SFU process fetches the JWKS doc at startup +
+refreshes every 24 h per ADR-0008.
+
+### C-15: Call JWTs are signed by an Ed25519 key persisted across restarts
+
+The signing seed lives in `call_jwt_signing_key.seed` (32
+bytes). `load_or_init_call_signing_key` reads the existing
+row OR inserts a freshly-generated seed on first boot via
+`INSERT IGNORE`. Concurrent first-boots race-safely converge
+on a single row (the CHECK `id = 1` constraint pins the
+table to one row).
+
+Surfacing the public key as a JWK lets the SFU verifier
+fetch + cache it without any handshake with the auth
+service beyond a single GET on a static URL.
+
+Test:
+[`call_jwt::tests::mint_then_verify_round_trips`](../../services/auth/src/call_jwt.rs)
+covers the sign-then-verify happy path; the persistence
+side is exercised by the bootstrap test fixture spinning
+a fresh `AppState`.
+
+### C-16: A JWT with the wrong `iss` or `aud` is rejected
+
+`iss = "lakko-auth"` and `aud = "lakko-sfu"` are pinned
+constants (in code: `JWT_ISSUER` / `JWT_AUDIENCE`). The
+verifier checks both after the signature. This stops a
+JWT minted for some other audience (e.g. a future
+`lakko-edge` service) from being replayed at the SFU.
+
+Tests:
+[`call_jwt::tests::wrong_issuer_rejects`](../../services/auth/src/call_jwt.rs)
++ [`call_jwt::tests::wrong_audience_rejects`](../../services/auth/src/call_jwt.rs).
+
+### C-17: A JWT past its `exp` is rejected
+
+`exp = iat + 3600` (1 hour, per ADR-0008 §"Auth token
+format"). The verifier compares `now_secs` injected by
+the caller (the SFU verifier, in production) against
+`claims.exp` and rejects on `>=`. This bounds the damage
+from a leaked JWT to a 1-hour window.
+
+The injection lets tests drive the clock without depending
+on `SystemTime::now`.
+
+Test:
+[`call_jwt::tests::expired_jwt_rejects`](../../services/auth/src/call_jwt.rs)
+— verifies both `now == exp` and `now == exp + 1` reject.
+
+### C-18: A JWT signed by a different key is rejected, even if the `kid` matches
+
+Ed25519 verification is the load-bearing check — `kid`
+exists for key discovery (the SFU picks the matching JWK
+from the JWKS doc) but is not a security boundary by
+itself. The test exercises the realistic attacker shape:
+swap the JWKS doc to advertise the attacker's public key
+under the legitimate `kid`, mint a JWT with that key. The
+verifier rejects because the **signature** doesn't match
+the **expected** public key the verifier was constructed
+with.
+
+In production this maps to: the SFU process fetches the
+JWKS doc directly from `services/auth` over TLS; an
+attacker who can swap the JWKS doc has already MITM'd the
+auth-service-to-SFU link, which is a separate failure mode
+that TLS terminates upstream of this check.
+
+Test:
+[`call_jwt::tests::wrong_signing_key_rejects`](../../services/auth/src/call_jwt.rs).
+
+### C-19: A JWT with a tampered header / payload is rejected
+
+The signature is computed over the exact bytes
+`header_b64 || "." || payload_b64`. Any single-byte
+mutation in either segment changes the signing input;
+Ed25519 verification rejects. This is the canonical JWS
+tamper-evident property.
+
+Test:
+[`call_jwt::tests::tampered_payload_rejects`](../../services/auth/src/call_jwt.rs)
+mutates the last base64url character in the payload
+segment and asserts the verifier rejects with one of
+`{Signature, Format, Encode}` — the specific error type
+depends on whether the mutated payload still decodes to
+valid JSON.
+
+### C-20: `kid` is a deterministic, stable function of the public key
+
+`kid = hex(BLAKE3(public_key_bytes)[..8])` (16 hex
+characters). Two derivations from the same seed produce
+the same `kid`; different seeds produce different `kid`s.
+This lets the JWKS-cache-refresh logic on the SFU side
+detect a key rotation by `kid` inequality rather than
+needing to compare full public-key bytes.
+
+Test:
+[`call_jwt::tests::kid_is_stable_per_keypair`](../../services/auth/src/call_jwt.rs).
+
+### C-21: `POST /call/jwt` requires a valid session token
+
+Bearer-auth via the same `webauthn::require_session`
+middleware passkey routes use. A request without
+`Authorization: Bearer <session-token>` (or with an
+expired / forged one) is rejected at the middleware
+layer with 401 — the handler never sees the call_id /
+role. This stops an unauthenticated caller from minting
+JWTs for arbitrary `account_id`s.
+
+The middleware stamps the authenticated `account_id`
+into request extensions; the handler reads from there
+rather than trusting any field in the request body.
+The request body carries only `call_id` and `role` —
+`account_id` is NEVER supplied by the caller.
+
+The middleware itself is shared with
+`services/discovery` (Phase 1.5b) and reviewed there;
+the audit cross-link is in [`auth-flow.md`](./auth-flow.md).
+
 ## Exporter labels (call-side)
 
 | Label | Length | Context | Source | Used for |
@@ -318,7 +465,8 @@ fully in effect.
 | Per-participant nonce salt | ❌ | ✅ | Same derivation chain |
 | SFrame header (sender leaf + counter + timestamp) | ✅ | ✅ | Forwarding metadata only |
 | Encrypted frame body | ✅ (opaque) | ✅ (decoded) | AEAD-sealed |
-| JWT `(account_id, call_id, role, expires_at)` | ✅ (validate) | ✅ (mint via auth) | Per ADR-0008 |
+| JWT `(account_id, call_id, role, expires_at)` | ✅ (validate via cached JWKS) | ✅ (mint via `POST /call/jwt`) | Per ADR-0008 + C-15..C-21 |
+| Ed25519 signing seed for call JWTs | ❌ | ❌ (stays on `services/auth` host) | Persisted in `call_jwt_signing_key.seed`. Public half published at `/.well-known/jwks.json` |
 | Plaintext SDP / ICE | ❌ | ✅ | 1×1 rides MLS; group rides LiveKit-signaling channel which never sees keys |
 
 ## Known soft spots — out of scope, tracked
