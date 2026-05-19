@@ -22,3 +22,4 @@ See [`0000-template.md`](0000-template.md). Style — Michael Nygard, minimalist
 | [0005](0005-contact-invitations.md) | Accepted | Capability-based invites + 6 scenarios + pseudonym lifecycle |
 | [0006](0006-licensing.md) | Accepted | AGPLv3 monorepo + CLA |
 | [0007](0007-multi-device-identity.md) | Accepted | Two-tier identity (account-level deterministic + per-device random) |
+| [0008](0008-livekit-fork-strategy.md) | Accepted | LiveKit fork — operational strategy (extends 0003) |

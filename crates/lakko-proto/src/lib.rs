@@ -228,28 +228,25 @@ mod tests {
     #[test]
     fn call_signaling_roundtrip() {
         use mls_app::call_signaling::v1::{
-            call_signaling_payload::Body, CallAnswer, CallEnd, CallOffer,
-            CallSignalingPayload, IceCandidate,
+            call_signaling_payload::Body, CallAnswer, CallEnd, CallOffer, CallSignalingPayload,
+            IceCandidate,
         };
         use prost::Message as _;
 
         for body in [
             Body::Offer(CallOffer {
                 call_id: vec![0x10; 16],
-                sdp: "v=0\no=- 1 2 IN IP4 0.0.0.0\nm=audio 9 UDP/TLS/RTP/SAVPF 111\n"
-                    .into(),
+                sdp: "v=0\no=- 1 2 IN IP4 0.0.0.0\nm=audio 9 UDP/TLS/RTP/SAVPF 111\n".into(),
                 created_at_ms: 1_700_000_000_000,
                 media_flags: 0b11,
             }),
             Body::Answer(CallAnswer {
                 call_id: vec![0x10; 16],
-                sdp: "v=0\no=- 3 4 IN IP4 0.0.0.0\nm=audio 9 UDP/TLS/RTP/SAVPF 111\n"
-                    .into(),
+                sdp: "v=0\no=- 3 4 IN IP4 0.0.0.0\nm=audio 9 UDP/TLS/RTP/SAVPF 111\n".into(),
             }),
             Body::Candidate(IceCandidate {
                 call_id: vec![0x10; 16],
-                candidate:
-                    "candidate:1 1 udp 1677729535 192.168.0.1 56789 typ srflx".into(),
+                candidate: "candidate:1 1 udp 1677729535 192.168.0.1 56789 typ srflx".into(),
                 sdp_mid: "audio".into(),
                 sdp_m_line_index: 0,
             }),

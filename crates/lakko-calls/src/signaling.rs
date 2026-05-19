@@ -147,10 +147,7 @@ pub enum SignalingBody {
         sdp_m_line_index: u32,
     },
     /// Terminal event.
-    End {
-        call_id: CallId,
-        reason: EndReason,
-    },
+    End { call_id: CallId, reason: EndReason },
 }
 
 impl SignalingBody {
@@ -320,8 +317,7 @@ mod tests {
     fn ice_candidate_round_trips() {
         let body = SignalingBody::IceCandidate {
             call_id: fixture_call_id(),
-            candidate: "candidate:1 1 udp 1677729535 192.168.0.1 56789 typ srflx"
-                .into(),
+            candidate: "candidate:1 1 udp 1677729535 192.168.0.1 56789 typ srflx".into(),
             sdp_mid: "audio".into(),
             sdp_m_line_index: 0,
         };

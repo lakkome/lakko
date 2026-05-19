@@ -329,11 +329,7 @@ impl DeviceGroup {
     /// - [`Error::Codec`] / [`Error::Message`] surfacing the
     ///   inner wire-encode failure (practically unreachable —
     ///   OpenMLS produced the message in the previous step).
-    pub fn remove_device_at(
-        &mut self,
-        identity: &Identity,
-        leaf_index: u32,
-    ) -> Result<Vec<u8>> {
+    pub fn remove_device_at(&mut self, identity: &Identity, leaf_index: u32) -> Result<Vec<u8>> {
         let own = self.inner.own_leaf_index().u32();
         if leaf_index == own {
             return Err(Error::Group(
@@ -585,9 +581,7 @@ pub enum DeviceGroupBody {
 }
 
 impl DeviceGroupBody {
-    fn into_proto(
-        self,
-    ) -> lakko_proto::mls_app::devicegroup::v1::device_group_payload::Body {
+    fn into_proto(self) -> lakko_proto::mls_app::devicegroup::v1::device_group_payload::Body {
         use lakko_proto::mls_app::devicegroup::v1::{
             device_group_payload::Body, ConversationOrder, DraftUpdate, ReadCursor, ThreadFlags,
         };
@@ -631,9 +625,7 @@ impl DeviceGroupBody {
     /// concrete `Self` case. A future proto extension that adds
     /// a variant we don't recognise would surface earlier as a
     /// prost-decode failure, not here.
-    fn from_proto(
-        body: lakko_proto::mls_app::devicegroup::v1::device_group_payload::Body,
-    ) -> Self {
+    fn from_proto(body: lakko_proto::mls_app::devicegroup::v1::device_group_payload::Body) -> Self {
         use lakko_proto::mls_app::devicegroup::v1::device_group_payload::Body;
         match body {
             Body::ReadCursor(b) => Self::ReadCursor {
@@ -782,8 +774,7 @@ mod tests {
         let kp_b = id_b.create_key_package().unwrap();
         let addition = group_a.add_device(&id_a, kp_b).unwrap();
         let welcome_bytes = crate::group::encode_message(&addition.welcome).unwrap();
-        let mut group_b =
-            DeviceGroup::join_from_welcome(&welcome_bytes, &id_b, &account).unwrap();
+        let mut group_b = DeviceGroup::join_from_welcome(&welcome_bytes, &id_b, &account).unwrap();
 
         // A sends a typed ReadCursor payload.
         let body = DeviceGroupBody::ReadCursor {
@@ -857,8 +848,7 @@ mod tests {
         let kp_b = id_b.create_key_package().unwrap();
         let addition = group_a.add_device(&id_a, kp_b).unwrap();
         let welcome_bytes = crate::group::encode_message(&addition.welcome).unwrap();
-        let mut group_b =
-            DeviceGroup::join_from_welcome(&welcome_bytes, &id_b, &account).unwrap();
+        let mut group_b = DeviceGroup::join_from_welcome(&welcome_bytes, &id_b, &account).unwrap();
 
         // Find B's leaf index in A's view (NOT B's own_leaf_index
         // — both views happen to agree on leaf 1 for B, but the

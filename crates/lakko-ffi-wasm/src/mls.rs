@@ -520,17 +520,13 @@ impl DeviceGroup {
     /// founding leaf. `account_id` MUST be the raw 16-byte
     /// UUIDv7.
     #[wasm_bindgen(js_name = createFounder)]
-    pub fn create_founder(
-        identity: &Identity,
-        account_id: &[u8],
-    ) -> Result<DeviceGroup, JsError> {
+    pub fn create_founder(identity: &Identity, account_id: &[u8]) -> Result<DeviceGroup, JsError> {
         if account_id.len() != 16 {
             return Err(JsError::new("account_id must be 16 bytes"));
         }
         let mut acct = [0u8; 16];
         acct.copy_from_slice(account_id);
-        let inner =
-            MlsDeviceGroup::create_founder(&identity.inner, &acct).map_err(mls_err)?;
+        let inner = MlsDeviceGroup::create_founder(&identity.inner, &acct).map_err(mls_err)?;
         Ok(Self {
             inner: Mutex::new(inner),
         })
@@ -670,8 +666,8 @@ impl DeviceGroup {
             .inner
             .lock()
             .map_err(|_| JsError::new("internal lock poisoned"))?;
-        let secret = lakko_mls::history_bundle::exporter_secret(&g, &identity.inner)
-            .map_err(mls_err)?;
+        let secret =
+            lakko_mls::history_bundle::exporter_secret(&g, &identity.inner).map_err(mls_err)?;
         Ok(secret.to_vec())
     }
 
@@ -982,8 +978,7 @@ impl ParsedDeviceGroupPayload {
 #[wasm_bindgen(js_name = parseDeviceGroupPayload)]
 pub fn parse_devicegroup_payload(plaintext: &[u8]) -> Result<ParsedDeviceGroupPayload, JsError> {
     use lakko_mls::device_group::DeviceGroupBody as Body;
-    let parsed =
-        lakko_mls::DeviceGroup::parse_devicegroup_payload(plaintext).map_err(mls_err)?;
+    let parsed = lakko_mls::DeviceGroup::parse_devicegroup_payload(plaintext).map_err(mls_err)?;
     let mut out = ParsedDeviceGroupPayload {
         hlc_val: parsed.hlc,
         sender_leaf_val: parsed.sender_leaf,
@@ -1061,9 +1056,8 @@ pub fn seal_history_bundle(secret: &[u8], bundle_bytes: &[u8]) -> Result<Vec<u8>
     let mut key = [0u8; 32];
     key.copy_from_slice(secret);
 
-    let bundle =
-        lakko_proto::mls_app::history_bundle::v1::HistoryBundle::decode(bundle_bytes)
-            .map_err(|e| JsError::new(&format!("HistoryBundle decode: {e}")))?;
+    let bundle = lakko_proto::mls_app::history_bundle::v1::HistoryBundle::decode(bundle_bytes)
+        .map_err(|e| JsError::new(&format!("HistoryBundle decode: {e}")))?;
     lakko_mls::history_bundle::seal_bundle(&key, &bundle).map_err(mls_err)
 }
 
@@ -1187,9 +1181,7 @@ fn build_history_bundle_proto(
     groups: Vec<HistoryGroupInput>,
     max_hlc: u64,
 ) -> lakko_proto::mls_app::history_bundle::v1::HistoryBundle {
-    use lakko_proto::mls_app::history_bundle::v1::{
-        HistoryBundle, HistoryGroup, HistoryMessage,
-    };
+    use lakko_proto::mls_app::history_bundle::v1::{HistoryBundle, HistoryGroup, HistoryMessage};
     HistoryBundle {
         max_hlc,
         groups: groups
@@ -1225,7 +1217,6 @@ pub struct OpenedHistoryMessage {
 }
 
 #[allow(missing_docs)]
-
 #[wasm_bindgen]
 impl OpenedHistoryMessage {
     #[wasm_bindgen(getter, js_name = payloadBytes)]
@@ -1551,10 +1542,7 @@ pub fn compose_call_offer_signaling(
 
 /// Compose an Answer call-signaling event.
 #[wasm_bindgen(js_name = composeCallAnswerSignaling)]
-pub fn compose_call_answer_signaling(
-    call_id: &[u8],
-    sdp: &str,
-) -> Result<Vec<u8>, JsError> {
+pub fn compose_call_answer_signaling(call_id: &[u8], sdp: &str) -> Result<Vec<u8>, JsError> {
     let id = take_call_id(call_id)?;
     let body = lakko_calls::SignalingBody::Answer {
         call_id: id,

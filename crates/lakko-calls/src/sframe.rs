@@ -41,8 +41,8 @@ use lakko_crypto::aead::{self, AeadKey, Algorithm, Nonce};
 use lakko_crypto::hash;
 use lakko_crypto::kdf;
 use lakko_crypto::secret::SecretBytes;
-use lakko_mls::Group;
 use lakko_mls::identity::Identity;
+use lakko_mls::Group;
 
 use crate::error::{Error, Result};
 

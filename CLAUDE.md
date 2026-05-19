@@ -22,6 +22,7 @@ A Telegram-class secure messenger with **E2EE by default for everything** (1×1,
 | [0005](docs/adr/0005-contact-invitations.md) | Capability-based invites + 6 scenarios + pseudonym lifecycle |
 | [0006](docs/adr/0006-licensing.md) | AGPLv3 monorepo + CLA |
 | [0007](docs/adr/0007-multi-device-identity.md) | Two-tier identity (account-level deterministic + per-device random) for multi-device |
+| [0008](docs/adr/0008-livekit-fork-strategy.md) | LiveKit fork — operational strategy (extends 0003) |
 
 The full strategic plan and trade-offs live in `~/.claude/plans/1-nested-wreath.md`.
 The tactical decomposition of all 6 phases with sprint breakdowns lives in [`docs/ROADMAP.md`](docs/ROADMAP.md).

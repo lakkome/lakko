@@ -78,13 +78,11 @@ const ALGO_CHACHA20_POLY1305: u32 = 1;
 ///
 /// Returns [`Error::Exporter`] on the (practically unreachable)
 /// case where the MLS exporter rejects the label / length.
-pub fn exporter_secret(
-    device_group: &crate::DeviceGroup,
-    identity: &Identity,
-) -> Result<[u8; 32]> {
-    let secret = device_group
-        .as_group()
-        .export_secret(identity, HISTORY_EXPORTER_LABEL, &[], 32)?;
+pub fn exporter_secret(device_group: &crate::DeviceGroup, identity: &Identity) -> Result<[u8; 32]> {
+    let secret =
+        device_group
+            .as_group()
+            .export_secret(identity, HISTORY_EXPORTER_LABEL, &[], 32)?;
     let mut out = [0u8; 32];
     out.copy_from_slice(&secret);
     Ok(out)
@@ -172,9 +170,8 @@ pub fn open_bundle(
     secret: &[u8; 32],
     sealed_bytes: &[u8],
 ) -> Result<lakko_proto::mls_app::history_bundle::v1::HistoryBundle> {
-    let sealed =
-        lakko_proto::mls_app::history_bundle::v1::SealedBundle::decode(sealed_bytes)
-            .map_err(|e| Error::Codec(format!("SealedBundle decode: {e}")))?;
+    let sealed = lakko_proto::mls_app::history_bundle::v1::SealedBundle::decode(sealed_bytes)
+        .map_err(|e| Error::Codec(format!("SealedBundle decode: {e}")))?;
     if sealed.algorithm != ALGO_CHACHA20_POLY1305 {
         return Err(Error::Unsupported(
             "history bundle algorithm not supported by this build",
@@ -209,9 +206,7 @@ pub fn open_bundle(
 mod tests {
     use super::*;
     use crate::DeviceGroup;
-    use lakko_proto::mls_app::history_bundle::v1::{
-        HistoryBundle, HistoryGroup, HistoryMessage,
-    };
+    use lakko_proto::mls_app::history_bundle::v1::{HistoryBundle, HistoryGroup, HistoryMessage};
 
     fn fixture_account_id() -> [u8; 16] {
         let mut id = [0u8; 16];
@@ -227,11 +222,20 @@ mod tests {
                 group_id: vec![0xAB; 32],
                 count_capped: false,
                 messages: (0..count_per_group)
-                    .map(|i| HistoryMessage {
-                        payload_bytes: vec![i as u8; 16],
-                        sender_leaf: 0,
-                        message_id: vec![i as u8; 8],
-                        received_at_ms: 1_700_000_000_000 + i as u64,
+                    .map(|i| {
+                        // The fixture caps `count_per_group` at the
+                        // bundle limit (1000) which fits in a u8 lane
+                        // here only because tests stay under 256;
+                        // assert defensively so a future test that
+                        // pushes higher fails loudly rather than
+                        // wrapping silently.
+                        let byte = u8::try_from(i & 0xFF).expect("masked");
+                        HistoryMessage {
+                            payload_bytes: vec![byte; 16],
+                            sender_leaf: 0,
+                            message_id: vec![byte; 8],
+                            received_at_ms: 1_700_000_000_000 + i as u64,
+                        }
                     })
                     .collect(),
             }],
@@ -263,8 +267,7 @@ mod tests {
         let kp_b = id_b.create_key_package().unwrap();
         let addition = group_a.add_device(&id_a, kp_b).unwrap();
         let welcome_bytes = crate::group::encode_message(&addition.welcome).unwrap();
-        let group_b =
-            DeviceGroup::join_from_welcome(&welcome_bytes, &id_b, &account).unwrap();
+        let group_b = DeviceGroup::join_from_welcome(&welcome_bytes, &id_b, &account).unwrap();
 
         let secret_a = exporter_secret(&group_a, &id_a).unwrap();
         let secret_b = exporter_secret(&group_b, &id_b).unwrap();
@@ -301,10 +304,7 @@ mod tests {
         let secret = [0x77u8; 32];
         let bundle = fixture_bundle(MAX_BUNDLE_MESSAGES + 1);
         match seal_bundle(&secret, &bundle) {
-            Err(Error::Codec(msg)) => assert!(
-                msg.contains("cap"),
-                "unexpected error body: {msg}"
-            ),
+            Err(Error::Codec(msg)) => assert!(msg.contains("cap"), "unexpected error body: {msg}"),
             other => panic!("expected Codec cap error, got {other:?}"),
         }
     }

@@ -795,10 +795,7 @@ impl DeviceGroup {
     /// it into [`open_history_bundle`]. Both devices reach the
     /// same value because they end up at the same DeviceGroup
     /// epoch after add_device_from_wire / join_from_welcome.
-    pub fn history_bundle_secret(
-        &self,
-        identity: &Identity,
-    ) -> Result<Vec<u8>, FfiError> {
+    pub fn history_bundle_secret(&self, identity: &Identity) -> Result<Vec<u8>, FfiError> {
         let g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
         let secret = lakko_mls::history_bundle::exporter_secret(&g, &identity.inner)?;
         Ok(secret.to_vec())
@@ -873,9 +870,7 @@ impl DeviceGroup {
 ///   binary doesn't recognise (older client reading a
 ///   future-version payload).
 #[uniffi::export]
-pub fn parse_devicegroup_payload(
-    plaintext: Vec<u8>,
-) -> Result<ParsedDeviceGroupPayload, FfiError> {
+pub fn parse_devicegroup_payload(plaintext: Vec<u8>) -> Result<ParsedDeviceGroupPayload, FfiError> {
     let parsed = lakko_mls::DeviceGroup::parse_devicegroup_payload(&plaintext)?;
     Ok(ParsedDeviceGroupPayload {
         hlc: parsed.hlc,
@@ -897,13 +892,12 @@ pub fn parse_devicegroup_payload(
 /// Refuses to seal bundles whose total message count exceeds
 /// [`lakko_mls::history_bundle::MAX_BUNDLE_MESSAGES`] (1000).
 #[uniffi::export]
-pub fn seal_history_bundle(
-    secret: Vec<u8>,
-    bundle_bytes: Vec<u8>,
-) -> Result<Vec<u8>, FfiError> {
+pub fn seal_history_bundle(secret: Vec<u8>, bundle_bytes: Vec<u8>) -> Result<Vec<u8>, FfiError> {
     use prost::Message as _;
     if secret.len() != 32 {
-        return Err(FfiError::Codec("history-bundle secret must be 32 bytes".into()));
+        return Err(FfiError::Codec(
+            "history-bundle secret must be 32 bytes".into(),
+        ));
     }
     let mut key = [0u8; 32];
     key.copy_from_slice(&secret);
@@ -921,13 +915,12 @@ pub fn seal_history_bundle(
 /// `SwiftProtobuf`, Kotlin via the generated `lakko-proto`
 /// classes).
 #[uniffi::export]
-pub fn open_history_bundle(
-    secret: Vec<u8>,
-    sealed_bytes: Vec<u8>,
-) -> Result<Vec<u8>, FfiError> {
+pub fn open_history_bundle(secret: Vec<u8>, sealed_bytes: Vec<u8>) -> Result<Vec<u8>, FfiError> {
     use prost::Message as _;
     if secret.len() != 32 {
-        return Err(FfiError::Codec("history-bundle secret must be 32 bytes".into()));
+        return Err(FfiError::Codec(
+            "history-bundle secret must be 32 bytes".into(),
+        ));
     }
     let mut key = [0u8; 32];
     key.copy_from_slice(&secret);
@@ -1013,7 +1006,9 @@ pub fn seal_history_bundle_structured(
     max_hlc: u64,
 ) -> Result<Vec<u8>, FfiError> {
     if secret.len() != 32 {
-        return Err(FfiError::Codec("history-bundle secret must be 32 bytes".into()));
+        return Err(FfiError::Codec(
+            "history-bundle secret must be 32 bytes".into(),
+        ));
     }
     let mut key = [0u8; 32];
     key.copy_from_slice(&secret);
@@ -1032,7 +1027,9 @@ pub fn open_history_bundle_structured(
     sealed_bytes: Vec<u8>,
 ) -> Result<StructuredHistoryBundle, FfiError> {
     if secret.len() != 32 {
-        return Err(FfiError::Codec("history-bundle secret must be 32 bytes".into()));
+        return Err(FfiError::Codec(
+            "history-bundle secret must be 32 bytes".into(),
+        ));
     }
     let mut key = [0u8; 32];
     key.copy_from_slice(&secret);
@@ -1065,9 +1062,7 @@ fn build_history_bundle_proto(
     groups: Vec<StructuredHistoryGroup>,
     max_hlc: u64,
 ) -> lakko_proto::mls_app::history_bundle::v1::HistoryBundle {
-    use lakko_proto::mls_app::history_bundle::v1::{
-        HistoryBundle, HistoryGroup, HistoryMessage,
-    };
+    use lakko_proto::mls_app::history_bundle::v1::{HistoryBundle, HistoryGroup, HistoryMessage};
     HistoryBundle {
         max_hlc,
         groups: groups
@@ -1377,9 +1372,7 @@ pub fn sframe_derive_participant_key(
     sender_leaf: u32,
 ) -> Result<FfiSframeParticipantKey, FfiError> {
     if call_key_seed.len() != 32 {
-        return Err(FfiError::Codec(
-            "call_key_seed must be 32 bytes".into(),
-        ));
+        return Err(FfiError::Codec("call_key_seed must be 32 bytes".into()));
     }
     let mut seed = [0u8; 32];
     seed.copy_from_slice(&call_key_seed);

@@ -458,7 +458,7 @@ mod tests {
         wire.extend_from_slice(&[0x42; SEED_LEN]);
         wire.extend_from_slice(&0u32.to_be_bytes()); // contact_count = 0
         wire.extend_from_slice(&0u32.to_be_bytes()); // snapshot_count = 0
-        // NO whole_storage_snapshot tail.
+                                                     // NO whole_storage_snapshot tail.
 
         let decoded = BackupPayload::decode(&wire).expect("v1 decode");
         assert_eq!(decoded.account_id, [0xA1; ACCOUNT_ID_LEN]);

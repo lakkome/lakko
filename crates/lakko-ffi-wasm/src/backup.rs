@@ -304,9 +304,8 @@ mod tests {
         let seed = vec![0x42u8; 32];
         let contacts = vec![sample_contact()];
         let snapshot = vec![0xEFu8; 8];
-        let wire =
-            build_backup_payload(&account_id, 1_700_000_000_000, &seed, contacts, &snapshot)
-                .unwrap();
+        let wire = build_backup_payload(&account_id, 1_700_000_000_000, &seed, contacts, &snapshot)
+            .unwrap();
         let parsed = parse_backup_payload(&wire).unwrap();
         assert_eq!(parsed.account_id(), account_id);
         assert_eq!(parsed.created_at_ms(), 1_700_000_000_000);

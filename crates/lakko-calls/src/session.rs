@@ -195,9 +195,7 @@ pub enum Event {
         reason: crate::signaling::EndReason,
     },
     /// Remote sent an `End` signaling event.
-    RemoteEnded {
-        reason: crate::signaling::EndReason,
-    },
+    RemoteEnded { reason: crate::signaling::EndReason },
     /// Platform's PeerConnection signalled ICE-connected.
     IceConnected,
     /// Platform's PeerConnection signalled ICE-failed.
@@ -222,9 +220,7 @@ pub enum Transition {
     /// Send a trickled ICE candidate.
     SendIceCandidate(IceCandidate),
     /// Send the terminal `End` event.
-    SendEnd {
-        reason: crate::signaling::EndReason,
-    },
+    SendEnd { reason: crate::signaling::EndReason },
     /// Tell the local PeerConnection to apply the remote
     /// description.
     ApplyRemoteDescription(SdpDescription),
@@ -243,9 +239,7 @@ pub enum Transition {
     /// the "active call" surface.
     NotifyConnected,
     /// Notify the UI that the call has fully ended.
-    NotifyEnded {
-        reason: crate::signaling::EndReason,
-    },
+    NotifyEnded { reason: crate::signaling::EndReason },
 }
 
 /// In-memory call session — one per active call.
@@ -426,10 +420,7 @@ impl CallSession {
                     Transition::NotifyEnded { reason: *reason },
                 ]
             },
-            (
-                CallState::Connecting | CallState::Connected,
-                Event::RemoteEnded { reason },
-            ) => {
+            (CallState::Connecting | CallState::Connected, Event::RemoteEnded { reason }) => {
                 self.state = CallState::Ended;
                 vec![Transition::NotifyEnded { reason: *reason }]
             },
@@ -552,7 +543,10 @@ mod tests {
         }
         // Remote answers → Connecting.
         let t = s.on_event(Event::RemoteAnswered(answer_sdp()));
-        assert!(matches!(t.as_slice(), [Transition::ApplyRemoteDescription(_)]));
+        assert!(matches!(
+            t.as_slice(),
+            [Transition::ApplyRemoteDescription(_)]
+        ));
         assert_eq!(s.state, CallState::Connecting);
         // ICE pair completes → Connected.
         let t = s.on_event(Event::IceConnected);
@@ -622,7 +616,12 @@ mod tests {
             reason: EndReason::HungUp,
         });
         assert_eq!(t.len(), 2);
-        assert!(matches!(t[0], Transition::SendEnd { reason: EndReason::HungUp }));
+        assert!(matches!(
+            t[0],
+            Transition::SendEnd {
+                reason: EndReason::HungUp
+            }
+        ));
         assert_eq!(s.state, CallState::Ending);
     }
 
@@ -673,7 +672,12 @@ mod tests {
         let t = s.apply_remote_signaling(&body);
         assert_eq!(t.len(), 2);
         assert!(matches!(t[0], Transition::ApplyRemoteDescription(_)));
-        assert!(matches!(t[1], Transition::ShowRinger { media: MediaKind::AudioVideo }));
+        assert!(matches!(
+            t[1],
+            Transition::ShowRinger {
+                media: MediaKind::AudioVideo
+            }
+        ));
         assert_eq!(s.state, CallState::Ringing);
     }
 
@@ -694,6 +698,9 @@ mod tests {
             sdp_m_line_index: 0,
         };
         let t = s.apply_remote_signaling(&body);
-        assert!(matches!(t.as_slice(), [Transition::ApplyRemoteIceCandidate(_)]));
+        assert!(matches!(
+            t.as_slice(),
+            [Transition::ApplyRemoteIceCandidate(_)]
+        ));
     }
 }

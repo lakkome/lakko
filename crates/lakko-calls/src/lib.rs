@@ -30,6 +30,11 @@
 //!     derivation via HKDF over the seed + sender leaf index.
 //!     Counter-based per-frame nonce composition matches
 //!     RFC 9605 §4.4.
+//!   * [`group_call`] — Phase 3c1. Multi-participant ledger
+//!     that owns the [`CallKey`] seed + tracks which leaves
+//!     are currently on the call (a subset of the MLS
+//!     group's full membership), surfaces a
+//!     `needs_rekey()` flag on every membership change.
 //!
 //! What's NOT in core: live `RTCPeerConnection` instances,
 //! `MediaStream`s, codec pipelines, ICE-pair establishment.
@@ -42,11 +47,13 @@
 #![forbid(unsafe_code)]
 
 pub mod error;
+pub mod group_call;
 pub mod session;
 pub mod sframe;
 pub mod signaling;
 
 pub use error::{Error, Result};
+pub use group_call::{GroupCallScope, GroupCallSession, Participant};
 pub use session::{
     CallSession, CallState, Event, IceCandidate, MediaKind, Role, SdpDescription, SdpKind,
     Transition,
