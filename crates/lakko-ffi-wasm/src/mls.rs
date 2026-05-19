@@ -1429,6 +1429,326 @@ pub fn load_device_group(
 // Tests
 // ============================================================================
 //
+// ============================================================================
+// Phase 3a4 — Call signaling + SFrame keying FFI for the web
+// ============================================================================
+
+/// One composed call-signaling event — flat class with a
+/// `kind` discriminator + every possible field, mirroring
+/// the `ParsedDeviceGroupPayload` shape from 2a3e2a.
+#[wasm_bindgen]
+#[allow(
+    clippy::similar_names,
+    clippy::struct_excessive_bools,
+    clippy::struct_field_names
+)]
+pub struct ParsedCallSignaling {
+    kind_val: &'static str,
+    call_id_val: Vec<u8>,
+    sdp_val: String,
+    created_at_ms_val: u64,
+    media_audio_val: bool,
+    media_video_val: bool,
+    candidate_val: String,
+    sdp_mid_val: String,
+    sdp_m_line_index_val: u32,
+    end_reason_val: &'static str,
+}
+
+const CALL_KIND_OFFER: &str = "offer";
+const CALL_KIND_ANSWER: &str = "answer";
+const CALL_KIND_ICE_CANDIDATE: &str = "iceCandidate";
+const CALL_KIND_END: &str = "end";
+
+#[wasm_bindgen]
+impl ParsedCallSignaling {
+    /// One of `"offer"` / `"answer"` / `"iceCandidate"` /
+    /// `"end"`. JS reads this to decide which other fields
+    /// are meaningful.
+    #[wasm_bindgen(getter)]
+    pub fn kind(&self) -> String {
+        self.kind_val.to_string()
+    }
+
+    /// 16-byte call_id (every kind carries one).
+    #[wasm_bindgen(getter, js_name = callId)]
+    pub fn call_id(&self) -> Vec<u8> {
+        self.call_id_val.clone()
+    }
+
+    /// `offer` / `answer` only: SDP body.
+    #[wasm_bindgen(getter)]
+    pub fn sdp(&self) -> String {
+        self.sdp_val.clone()
+    }
+
+    /// `offer` only: wall-clock UNIX millis.
+    #[wasm_bindgen(getter, js_name = createdAtMs)]
+    pub fn created_at_ms(&self) -> u64 {
+        self.created_at_ms_val
+    }
+
+    /// `offer` only: audio media flag.
+    #[wasm_bindgen(getter, js_name = mediaAudio)]
+    pub fn media_audio(&self) -> bool {
+        self.media_audio_val
+    }
+
+    /// `offer` only: video media flag.
+    #[wasm_bindgen(getter, js_name = mediaVideo)]
+    pub fn media_video(&self) -> bool {
+        self.media_video_val
+    }
+
+    /// `iceCandidate` only: ICE candidate SDP fragment.
+    #[wasm_bindgen(getter)]
+    pub fn candidate(&self) -> String {
+        self.candidate_val.clone()
+    }
+
+    /// `iceCandidate` only: SDP m-section identifier.
+    #[wasm_bindgen(getter, js_name = sdpMid)]
+    pub fn sdp_mid(&self) -> String {
+        self.sdp_mid_val.clone()
+    }
+
+    /// `iceCandidate` only: zero-based SDP m-section index.
+    #[wasm_bindgen(getter, js_name = sdpMLineIndex)]
+    pub fn sdp_m_line_index(&self) -> u32 {
+        self.sdp_m_line_index_val
+    }
+
+    /// `end` only: one of `"hungUp"` / `"busy"` /
+    /// `"declined"` / `"timedOut"` / `"error"`.
+    #[wasm_bindgen(getter, js_name = endReason)]
+    pub fn end_reason(&self) -> String {
+        self.end_reason_val.to_string()
+    }
+}
+
+/// Compose an Offer call-signaling event into plaintext
+/// bytes (Phase 3a3).
+#[wasm_bindgen(js_name = composeCallOfferSignaling)]
+pub fn compose_call_offer_signaling(
+    call_id: &[u8],
+    sdp: &str,
+    created_at_ms: u64,
+    media_audio: bool,
+    media_video: bool,
+) -> Result<Vec<u8>, JsError> {
+    let id = take_call_id(call_id)?;
+    let body = lakko_calls::SignalingBody::Offer {
+        call_id: id,
+        sdp: sdp.to_string(),
+        created_at_ms,
+        media: lakko_calls::MediaFlags {
+            audio: media_audio,
+            video: media_video,
+        },
+    };
+    lakko_calls::compose_signaling_payload(&body).map_err(calls_err)
+}
+
+/// Compose an Answer call-signaling event.
+#[wasm_bindgen(js_name = composeCallAnswerSignaling)]
+pub fn compose_call_answer_signaling(
+    call_id: &[u8],
+    sdp: &str,
+) -> Result<Vec<u8>, JsError> {
+    let id = take_call_id(call_id)?;
+    let body = lakko_calls::SignalingBody::Answer {
+        call_id: id,
+        sdp: sdp.to_string(),
+    };
+    lakko_calls::compose_signaling_payload(&body).map_err(calls_err)
+}
+
+/// Compose an IceCandidate call-signaling event.
+#[wasm_bindgen(js_name = composeCallIceCandidateSignaling)]
+pub fn compose_call_ice_candidate_signaling(
+    call_id: &[u8],
+    candidate: &str,
+    sdp_mid: &str,
+    sdp_m_line_index: u32,
+) -> Result<Vec<u8>, JsError> {
+    let id = take_call_id(call_id)?;
+    let body = lakko_calls::SignalingBody::IceCandidate {
+        call_id: id,
+        candidate: candidate.to_string(),
+        sdp_mid: sdp_mid.to_string(),
+        sdp_m_line_index,
+    };
+    lakko_calls::compose_signaling_payload(&body).map_err(calls_err)
+}
+
+/// Compose an End call-signaling event. `reason` is one of
+/// `"hungUp"` / `"busy"` / `"declined"` / `"timedOut"` /
+/// `"error"`; unknown values fold to `"hungUp"`.
+#[wasm_bindgen(js_name = composeCallEndSignaling)]
+pub fn compose_call_end_signaling(call_id: &[u8], reason: &str) -> Result<Vec<u8>, JsError> {
+    let id = take_call_id(call_id)?;
+    let body = lakko_calls::SignalingBody::End {
+        call_id: id,
+        reason: parse_end_reason(reason),
+    };
+    lakko_calls::compose_signaling_payload(&body).map_err(calls_err)
+}
+
+/// Parse plaintext bytes (the `Application` payload from
+/// `processIncoming`) into a typed
+/// [`ParsedCallSignaling`] (Phase 3a3).
+#[wasm_bindgen(js_name = parseCallSignaling)]
+pub fn parse_call_signaling(plaintext: &[u8]) -> Result<ParsedCallSignaling, JsError> {
+    let body = lakko_calls::parse_signaling_payload(plaintext).map_err(calls_err)?;
+    let mut out = ParsedCallSignaling {
+        kind_val: CALL_KIND_OFFER,
+        call_id_val: Vec::new(),
+        sdp_val: String::new(),
+        created_at_ms_val: 0,
+        media_audio_val: false,
+        media_video_val: false,
+        candidate_val: String::new(),
+        sdp_mid_val: String::new(),
+        sdp_m_line_index_val: 0,
+        end_reason_val: "hungUp",
+    };
+    match body {
+        lakko_calls::SignalingBody::Offer {
+            call_id,
+            sdp,
+            created_at_ms,
+            media,
+        } => {
+            out.kind_val = CALL_KIND_OFFER;
+            out.call_id_val = call_id.to_vec();
+            out.sdp_val = sdp;
+            out.created_at_ms_val = created_at_ms;
+            out.media_audio_val = media.audio;
+            out.media_video_val = media.video;
+        },
+        lakko_calls::SignalingBody::Answer { call_id, sdp } => {
+            out.kind_val = CALL_KIND_ANSWER;
+            out.call_id_val = call_id.to_vec();
+            out.sdp_val = sdp;
+        },
+        lakko_calls::SignalingBody::IceCandidate {
+            call_id,
+            candidate,
+            sdp_mid,
+            sdp_m_line_index,
+        } => {
+            out.kind_val = CALL_KIND_ICE_CANDIDATE;
+            out.call_id_val = call_id.to_vec();
+            out.candidate_val = candidate;
+            out.sdp_mid_val = sdp_mid;
+            out.sdp_m_line_index_val = sdp_m_line_index;
+        },
+        lakko_calls::SignalingBody::End { call_id, reason } => {
+            out.kind_val = CALL_KIND_END;
+            out.call_id_val = call_id.to_vec();
+            out.end_reason_val = end_reason_str(reason);
+        },
+    }
+    Ok(out)
+}
+
+fn take_call_id(bytes: &[u8]) -> Result<lakko_calls::CallId, JsError> {
+    if bytes.len() != 16 {
+        return Err(JsError::new(&format!(
+            "call_id length: expected 16, got {}",
+            bytes.len()
+        )));
+    }
+    let mut id = [0u8; 16];
+    id.copy_from_slice(bytes);
+    Ok(id)
+}
+
+fn parse_end_reason(s: &str) -> lakko_calls::EndReason {
+    match s {
+        "busy" => lakko_calls::EndReason::Busy,
+        "declined" => lakko_calls::EndReason::Declined,
+        "timedOut" => lakko_calls::EndReason::TimedOut,
+        "error" => lakko_calls::EndReason::Error,
+        _ => lakko_calls::EndReason::HungUp,
+    }
+}
+
+fn end_reason_str(r: lakko_calls::EndReason) -> &'static str {
+    match r {
+        lakko_calls::EndReason::HungUp => "hungUp",
+        lakko_calls::EndReason::Busy => "busy",
+        lakko_calls::EndReason::Declined => "declined",
+        lakko_calls::EndReason::TimedOut => "timedOut",
+        lakko_calls::EndReason::Error => "error",
+    }
+}
+
+fn calls_err(err: lakko_calls::Error) -> JsError {
+    JsError::new(&format!("{err}"))
+}
+
+/// Per-participant SFrame key + nonce salt (Phase 3a4).
+/// wasm-bindgen class with two getters.
+#[wasm_bindgen]
+#[allow(clippy::struct_field_names)]
+pub struct SframeParticipantKey {
+    key_bytes_val: Vec<u8>,
+    nonce_salt_val: Vec<u8>,
+}
+
+#[wasm_bindgen]
+impl SframeParticipantKey {
+    /// 32-byte AEAD key.
+    #[wasm_bindgen(getter, js_name = keyBytes)]
+    pub fn key_bytes(&self) -> Vec<u8> {
+        self.key_bytes_val.clone()
+    }
+
+    /// 12-byte nonce salt — XOR with `(counter as u32 BE in
+    /// the low 4 bytes)` to compose each per-frame nonce.
+    #[wasm_bindgen(getter, js_name = nonceSalt)]
+    pub fn nonce_salt(&self) -> Vec<u8> {
+        self.nonce_salt_val.clone()
+    }
+}
+
+/// Derive the per-call SFrame seed from a conversation MLS
+/// group's exporter (Phase 3a4).
+#[wasm_bindgen(js_name = sframeDeriveCallKey)]
+pub fn sframe_derive_call_key(
+    group: &Group,
+    identity: &Identity,
+    call_id: &[u8],
+) -> Result<Vec<u8>, JsError> {
+    let g = group
+        .inner
+        .lock()
+        .map_err(|_| JsError::new("internal lock poisoned"))?;
+    let key = lakko_calls::CallKey::derive(&g, &identity.inner, call_id).map_err(calls_err)?;
+    Ok(key.as_bytes().to_vec())
+}
+
+/// Derive a per-participant SFrame key + nonce salt
+/// (Phase 3a4).
+#[wasm_bindgen(js_name = sframeDeriveParticipantKey)]
+pub fn sframe_derive_participant_key(
+    call_key_seed: &[u8],
+    sender_leaf: u32,
+) -> Result<SframeParticipantKey, JsError> {
+    if call_key_seed.len() != 32 {
+        return Err(JsError::new("call_key_seed must be 32 bytes"));
+    }
+    let mut seed = [0u8; 32];
+    seed.copy_from_slice(call_key_seed);
+    let ck = lakko_calls::CallKey::from_seed(seed);
+    let pk = ck.participant_key(sender_leaf).map_err(calls_err)?;
+    Ok(SframeParticipantKey {
+        key_bytes_val: pk.key_bytes().to_vec(),
+        nonce_salt_val: pk.nonce_salt().to_vec(),
+    })
+}
+
 // Tests run on the host target (`cargo test`) — no `wasm-bindgen-test`
 // runner needed for what we cover here. The wire-level invariants
 // from `lakko-mls` are unchanged regardless of FFI binding; this

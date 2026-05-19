@@ -1145,6 +1145,252 @@ impl core::fmt::Debug for ProcessedMessage {
     }
 }
 
+// ============================================================================
+// Phase 3a4 — Call signaling + SFrame keying FFI
+// ============================================================================
+
+/// Audio / video request flags on a call offer (Phase 3a3).
+#[derive(uniffi::Record)]
+pub struct FfiCallMediaFlags {
+    pub audio: bool,
+    pub video: bool,
+}
+
+impl FfiCallMediaFlags {
+    fn into_inner(self) -> lakko_calls::MediaFlags {
+        lakko_calls::MediaFlags {
+            audio: self.audio,
+            video: self.video,
+        }
+    }
+
+    fn from_inner(f: lakko_calls::MediaFlags) -> Self {
+        Self {
+            audio: f.audio,
+            video: f.video,
+        }
+    }
+}
+
+/// Terminal reason carried in
+/// [`FfiCallSignalingBody::End`].
+#[derive(uniffi::Enum)]
+pub enum FfiCallEndReason {
+    HungUp,
+    Busy,
+    Declined,
+    TimedOut,
+    Error,
+}
+
+impl FfiCallEndReason {
+    fn into_inner(self) -> lakko_calls::EndReason {
+        match self {
+            Self::HungUp => lakko_calls::EndReason::HungUp,
+            Self::Busy => lakko_calls::EndReason::Busy,
+            Self::Declined => lakko_calls::EndReason::Declined,
+            Self::TimedOut => lakko_calls::EndReason::TimedOut,
+            Self::Error => lakko_calls::EndReason::Error,
+        }
+    }
+
+    fn from_inner(r: lakko_calls::EndReason) -> Self {
+        match r {
+            lakko_calls::EndReason::HungUp => Self::HungUp,
+            lakko_calls::EndReason::Busy => Self::Busy,
+            lakko_calls::EndReason::Declined => Self::Declined,
+            lakko_calls::EndReason::TimedOut => Self::TimedOut,
+            lakko_calls::EndReason::Error => Self::Error,
+        }
+    }
+}
+
+/// Typed body of a call-signaling event (Phase 3a3).
+/// Every variant carries a 16-byte `call_id`.
+#[derive(uniffi::Enum)]
+pub enum FfiCallSignalingBody {
+    /// SDP offer from the initiator.
+    Offer {
+        call_id: Vec<u8>,
+        sdp: String,
+        created_at_ms: u64,
+        media: FfiCallMediaFlags,
+    },
+    /// SDP answer from the callee.
+    Answer { call_id: Vec<u8>, sdp: String },
+    /// Trickled ICE candidate.
+    IceCandidate {
+        call_id: Vec<u8>,
+        candidate: String,
+        sdp_mid: String,
+        sdp_m_line_index: u32,
+    },
+    /// Terminal event.
+    End {
+        call_id: Vec<u8>,
+        reason: FfiCallEndReason,
+    },
+}
+
+fn body_into_inner(body: FfiCallSignalingBody) -> Result<lakko_calls::SignalingBody, FfiError> {
+    let take_id = |bytes: Vec<u8>| -> Result<lakko_calls::CallId, FfiError> {
+        if bytes.len() != 16 {
+            return Err(FfiError::Codec(format!(
+                "call_id length: expected 16, got {}",
+                bytes.len()
+            )));
+        }
+        let mut id = [0u8; 16];
+        id.copy_from_slice(&bytes);
+        Ok(id)
+    };
+    Ok(match body {
+        FfiCallSignalingBody::Offer {
+            call_id,
+            sdp,
+            created_at_ms,
+            media,
+        } => lakko_calls::SignalingBody::Offer {
+            call_id: take_id(call_id)?,
+            sdp,
+            created_at_ms,
+            media: media.into_inner(),
+        },
+        FfiCallSignalingBody::Answer { call_id, sdp } => lakko_calls::SignalingBody::Answer {
+            call_id: take_id(call_id)?,
+            sdp,
+        },
+        FfiCallSignalingBody::IceCandidate {
+            call_id,
+            candidate,
+            sdp_mid,
+            sdp_m_line_index,
+        } => lakko_calls::SignalingBody::IceCandidate {
+            call_id: take_id(call_id)?,
+            candidate,
+            sdp_mid,
+            sdp_m_line_index,
+        },
+        FfiCallSignalingBody::End { call_id, reason } => lakko_calls::SignalingBody::End {
+            call_id: take_id(call_id)?,
+            reason: reason.into_inner(),
+        },
+    })
+}
+
+fn body_from_inner(body: lakko_calls::SignalingBody) -> FfiCallSignalingBody {
+    match body {
+        lakko_calls::SignalingBody::Offer {
+            call_id,
+            sdp,
+            created_at_ms,
+            media,
+        } => FfiCallSignalingBody::Offer {
+            call_id: call_id.to_vec(),
+            sdp,
+            created_at_ms,
+            media: FfiCallMediaFlags::from_inner(media),
+        },
+        lakko_calls::SignalingBody::Answer { call_id, sdp } => FfiCallSignalingBody::Answer {
+            call_id: call_id.to_vec(),
+            sdp,
+        },
+        lakko_calls::SignalingBody::IceCandidate {
+            call_id,
+            candidate,
+            sdp_mid,
+            sdp_m_line_index,
+        } => FfiCallSignalingBody::IceCandidate {
+            call_id: call_id.to_vec(),
+            candidate,
+            sdp_mid,
+            sdp_m_line_index,
+        },
+        lakko_calls::SignalingBody::End { call_id, reason } => FfiCallSignalingBody::End {
+            call_id: call_id.to_vec(),
+            reason: FfiCallEndReason::from_inner(reason),
+        },
+    }
+}
+
+impl From<lakko_calls::Error> for FfiError {
+    fn from(err: lakko_calls::Error) -> Self {
+        match err {
+            lakko_calls::Error::Exporter(msg) => FfiError::Exporter(msg),
+            lakko_calls::Error::Crypto(msg) => FfiError::Codec(msg),
+            lakko_calls::Error::CounterExhausted => {
+                FfiError::Codec("sframe counter exhausted".into())
+            },
+        }
+    }
+}
+
+/// Compose plaintext call-signaling bytes (Phase 3a3). The
+/// caller wraps these in an MLS application message via
+/// [`Group::create_application_message`].
+#[uniffi::export]
+pub fn compose_call_signaling(body: FfiCallSignalingBody) -> Result<Vec<u8>, FfiError> {
+    let inner = body_into_inner(body)?;
+    Ok(lakko_calls::compose_signaling_payload(&inner)?)
+}
+
+/// Inverse of [`compose_call_signaling`]. Decodes the
+/// plaintext bytes that fell out of
+/// [`ProcessedMessage::Application`].
+#[uniffi::export]
+pub fn parse_call_signaling(plaintext: Vec<u8>) -> Result<FfiCallSignalingBody, FfiError> {
+    let body = lakko_calls::parse_signaling_payload(&plaintext)?;
+    Ok(body_from_inner(body))
+}
+
+/// Phase 3a4 — derive the per-call SFrame seed from a
+/// conversation MLS group's exporter (label
+/// `lakko/call/v1`). Both sides reach the same 32 bytes at
+/// the same epoch with the same `call_id`.
+#[uniffi::export]
+pub fn sframe_derive_call_key(
+    group: &Group,
+    identity: &Identity,
+    call_id: Vec<u8>,
+) -> Result<Vec<u8>, FfiError> {
+    let g = group.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
+    let key = lakko_calls::CallKey::derive(&g, &identity.inner, &call_id)?;
+    Ok(key.as_bytes().to_vec())
+}
+
+/// Per-participant SFrame key + nonce salt derived from the
+/// 32-byte call key + sender leaf index. Caller maintains
+/// the frame counter on the platform side.
+#[derive(uniffi::Record)]
+pub struct FfiSframeParticipantKey {
+    /// 32-byte AEAD key.
+    pub key_bytes: Vec<u8>,
+    /// 12-byte nonce salt.
+    pub nonce_salt: Vec<u8>,
+}
+
+/// Derive a per-participant SFrame key + nonce salt
+/// (Phase 3a4).
+#[uniffi::export]
+pub fn sframe_derive_participant_key(
+    call_key_seed: Vec<u8>,
+    sender_leaf: u32,
+) -> Result<FfiSframeParticipantKey, FfiError> {
+    if call_key_seed.len() != 32 {
+        return Err(FfiError::Codec(
+            "call_key_seed must be 32 bytes".into(),
+        ));
+    }
+    let mut seed = [0u8; 32];
+    seed.copy_from_slice(&call_key_seed);
+    let ck = lakko_calls::CallKey::from_seed(seed);
+    let pk = ck.participant_key(sender_leaf)?;
+    Ok(FfiSframeParticipantKey {
+        key_bytes: pk.key_bytes().to_vec(),
+        nonce_salt: pk.nonce_salt().to_vec(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

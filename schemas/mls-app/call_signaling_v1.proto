@@ -1,0 +1,103 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+syntax = "proto3";
+
+package lakko.mls_app.call_signaling.v1;
+
+// Call-signaling wire format (Phase 3a3).
+//
+// Ride the existing conversation MLS group as application
+// messages. Per the plan §5 and `docs/adr/0001-mls-only.md`
+// section "Звонки", in-chat calls reuse the chat group's
+// epoch — call signaling lives on the same DS journal as
+// chat messages, with no new transport.
+//
+// `CallSignalingPayload` carries one of four signaling-event
+// bodies (oneof). The outer envelope is intentionally narrow
+// — no HLC, no sender_leaf, none of the cross-device-sync
+// trappings the `devicegroup_v1` shape needs. Signaling
+// events are ordered by the DS journal cursor + the MLS
+// epoch they were sealed in; that's sufficient for the
+// "offer → answer → ice → ice → … → end" call lifecycle.
+//
+// ## Multi-call disambiguation
+//
+// Every body variant carries the same `call_id` field —
+// 16 random bytes the offer-side device mints. Receivers
+// match incoming candidates to the active call by id; a
+// stale candidate from a prior call lands in the same group
+// but doesn't match any live call_id and gets dropped.
+
+// Outer envelope. One per signaling event.
+message CallSignalingPayload {
+    // Concrete body. Exactly one variant is set.
+    oneof body {
+        CallOffer offer = 10;
+        CallAnswer answer = 11;
+        IceCandidate candidate = 12;
+        CallEnd end = 13;
+    }
+    reserved 14 to 31;
+}
+
+// "I am calling you" — SDP offer from the initiator.
+message CallOffer {
+    // 16-byte random id minted by the offer side. Receivers
+    // use this to match subsequent answer / candidate /
+    // end events.
+    bytes call_id = 1;
+    // Full SDP-offer body. Plaintext — the MLS envelope is
+    // the only privacy layer (SDP carries no PII beyond the
+    // codec list + ICE candidate parameters).
+    string sdp = 2;
+    // Wall-clock UNIX millis when the offer was minted.
+    // Display only; never used for ordering (DS cursor is
+    // the source of truth).
+    uint64 created_at_ms = 3;
+    // Bitmap of media kinds the offer requests:
+    //   bit 0 = audio
+    //   bit 1 = video
+    // Only audio + video for Phase 3; data channels land
+    // alongside the SFU integration in 3b.
+    uint32 media_flags = 4;
+    reserved 5 to 15;
+}
+
+// "I am picking up" — SDP answer from the callee.
+message CallAnswer {
+    bytes call_id = 1;
+    string sdp = 2;
+    reserved 3 to 15;
+}
+
+// Trickled ICE candidate. Sent zero or more times per side
+// after the offer / answer pair, until the ICE pair
+// finalises or the call ends.
+message IceCandidate {
+    bytes call_id = 1;
+    // ICE candidate string in SDP `a=candidate:` form, e.g.
+    // `candidate:842163049 1 udp 1677729535 192.168.0.1
+    //  56789 typ srflx raddr 0.0.0.0 rport 0 generation 0
+    //  ufrag GsfV network-id 4 network-cost 50`.
+    string candidate = 2;
+    // SDP m-section identifier (e.g. `audio`, `video`).
+    string sdp_mid = 3;
+    // SDP m-section index (zero-based).
+    uint32 sdp_m_line_index = 4;
+    reserved 5 to 15;
+}
+
+// Terminal event. Either side can send. Receipt of
+// `CallEnd` aborts any in-flight ICE renegotiation.
+message CallEnd {
+    bytes call_id = 1;
+    // Reason discriminator:
+    //   0 = HUNG_UP — initiator or callee tore down
+    //   1 = BUSY — callee was already on another call
+    //   2 = DECLINED — callee declined explicitly
+    //   3 = TIMED_OUT — no answer within the offer window
+    //   4 = ERROR — unrecoverable error mid-call
+    uint32 reason = 2;
+    reserved 3 to 15;
+}

@@ -67,6 +67,23 @@ pub mod mls_app {
             ));
         }
     }
+
+    /// Call signaling payloads
+    /// (`schemas/mls-app/call_signaling_v1.proto`) — Phase 3a3.
+    /// Offer / answer / trickled ICE candidates / end. Ride
+    /// the existing conversation MLS group as application
+    /// messages, reusing the Phase 1 DS journal — no new
+    /// transport.
+    pub mod call_signaling {
+        /// Version 1 of the call-signaling schema.
+        #[allow(clippy::pedantic, missing_docs)]
+        pub mod v1 {
+            include!(concat!(
+                env!("OUT_DIR"),
+                "/lakko.mls_app.call_signaling.v1.rs"
+            ));
+        }
+    }
 }
 
 /// Call media metadata (`schemas/media/v1.proto`).
@@ -204,6 +221,49 @@ mod tests {
         sealed.encode(&mut sbuf).expect("encode sealed");
         let sdecoded = SealedBundle::decode(&*sbuf).expect("decode sealed");
         assert_eq!(sdecoded, sealed);
+    }
+
+    /// Phase 3a3 smoke test — `CallSignalingPayload`
+    /// round-trips through prost for each oneof branch.
+    #[test]
+    fn call_signaling_roundtrip() {
+        use mls_app::call_signaling::v1::{
+            call_signaling_payload::Body, CallAnswer, CallEnd, CallOffer,
+            CallSignalingPayload, IceCandidate,
+        };
+        use prost::Message as _;
+
+        for body in [
+            Body::Offer(CallOffer {
+                call_id: vec![0x10; 16],
+                sdp: "v=0\no=- 1 2 IN IP4 0.0.0.0\nm=audio 9 UDP/TLS/RTP/SAVPF 111\n"
+                    .into(),
+                created_at_ms: 1_700_000_000_000,
+                media_flags: 0b11,
+            }),
+            Body::Answer(CallAnswer {
+                call_id: vec![0x10; 16],
+                sdp: "v=0\no=- 3 4 IN IP4 0.0.0.0\nm=audio 9 UDP/TLS/RTP/SAVPF 111\n"
+                    .into(),
+            }),
+            Body::Candidate(IceCandidate {
+                call_id: vec![0x10; 16],
+                candidate:
+                    "candidate:1 1 udp 1677729535 192.168.0.1 56789 typ srflx".into(),
+                sdp_mid: "audio".into(),
+                sdp_m_line_index: 0,
+            }),
+            Body::End(CallEnd {
+                call_id: vec![0x10; 16],
+                reason: 0,
+            }),
+        ] {
+            let original = CallSignalingPayload { body: Some(body) };
+            let mut buf = Vec::new();
+            original.encode(&mut buf).expect("encode");
+            let decoded = CallSignalingPayload::decode(&*buf).expect("decode");
+            assert_eq!(decoded, original);
+        }
     }
 
     #[test]

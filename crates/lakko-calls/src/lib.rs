@@ -12,24 +12,47 @@
 //!
 //! ## Phase 3 scaffolding scope
 //!
-//! Today's surface is **keying only** — the SFrame frame
-//! cipher + the jitter buffer + ICE plumbing land in later
-//! sub-sprints. What ships now:
+//! Today's surface covers the **state-machine + crypto + wire** layers; the
+//! live media path stays on each platform's native WebRTC stack:
 //!
-//!   * [`sframe`] — per-call media key seed from a
-//!     [`lakko_mls::Group`] exporter; per-participant key
+//!   * [`session`] — Phase 3a1. `CallSession` state machine
+//!     (`Idle → Outgoing/Ringing → Connecting → Connected →
+//!     Ending → Ended`), wire-typed `SdpDescription` +
+//!     `IceCandidate` + `MediaKind`. Platform code drives via
+//!     `on_event` and applies the returned `Transition`s.
+//!   * [`signaling`] — Phase 3a3. `SignalingBody` enum
+//!     (Offer / Answer / IceCandidate / End) + the
+//!     `CallSignalingPayload` proto codec. Bytes ride the
+//!     existing chat MLS group as application messages —
+//!     no new transport.
+//!   * [`sframe`] — Phase 3a4. Per-call media-key seed from a
+//!     `lakko_mls::Group` exporter; per-participant key
 //!     derivation via HKDF over the seed + sender leaf index.
 //!     Counter-based per-frame nonce composition matches
 //!     RFC 9605 §4.4.
 //!
-//! Frame encryption ([`sframe::ParticipantKey::seal`] /
-//! [`sframe::ParticipantKey::open`]) lands alongside the
-//! LiveKit-fork media-path integration in Phase 3.2.
+//! What's NOT in core: live `RTCPeerConnection` instances,
+//! `MediaStream`s, codec pipelines, ICE-pair establishment.
+//! Every platform owns its own native WebRTC stack
+//! (Apple `WebRTC.framework` / `org.webrtc:google-webrtc` /
+//! browser-native `RTCPeerConnection`); the core sits on top
+//! with a shared state machine + wire format + key
+//! derivation. See [`session`] for the rationale.
 
 #![forbid(unsafe_code)]
 
 pub mod error;
+pub mod session;
 pub mod sframe;
+pub mod signaling;
 
 pub use error::{Error, Result};
+pub use session::{
+    CallSession, CallState, Event, IceCandidate, MediaKind, Role, SdpDescription, SdpKind,
+    Transition,
+};
 pub use sframe::{CallKey, ParticipantKey, SFRAME_EXPORT_LABEL};
+pub use signaling::{
+    compose_signaling_payload, parse_signaling_payload, CallId, EndReason, MediaFlags,
+    SignalingBody,
+};

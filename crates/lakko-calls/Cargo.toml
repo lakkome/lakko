@@ -25,5 +25,9 @@ lakko-mls.workspace = true
 # AEAD primitives (ChaCha20-Poly1305 + AES-256-GCM) + HKDF for
 # the per-participant ratchet.
 lakko-crypto.workspace = true
+# Phase 3a3 — generated `CallSignalingPayload` proto types +
+# prost runtime for the signaling codec.
+lakko-proto.workspace = true
+prost = "0.13"
 thiserror.workspace = true
 zeroize = "1"

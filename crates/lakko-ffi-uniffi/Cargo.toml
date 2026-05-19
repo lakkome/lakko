@@ -56,6 +56,11 @@ lakko-shamir.workspace = true
 # re-encode in `seal_history_bundle` / `open_history_bundle`.
 lakko-proto.workspace = true
 prost = "0.13"
+# Phase 3a4 — call signaling typed Records + SFrame keying
+# free-function surface for Swift / Kotlin callers. Hides
+# the proto codec + AEAD plumbing behind plain UniFFI
+# Records the platform composes by hand.
+lakko-calls.workspace = true
 # Base64 framing for the PoW surface (seed/nonce/solution
 # fields → base64 strings on the JSON request body). Matches
 # the wasm surface 1:1.

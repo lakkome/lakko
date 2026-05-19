@@ -18,6 +18,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "mls-app/v1.proto",
         "mls-app/devicegroup_v1.proto",
         "mls-app/history_bundle_v1.proto",
+        "mls-app/call_signaling_v1.proto",
         "media/v1.proto",
     ]
     .iter()

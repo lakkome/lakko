@@ -2054,6 +2054,8 @@ version = "0.0.0"
 dependencies = [
  "lakko-crypto",
  "lakko-mls",
+ "lakko-proto",
+ "prost",
  "thiserror 1.0.69",
  "zeroize",
 ]
@@ -2113,6 +2115,7 @@ dependencies = [
  "lakko-attachments",
  "lakko-auth-client",
  "lakko-backup",
+ "lakko-calls",
  "lakko-contacts",
  "lakko-crypto",
  "lakko-discovery-client",
@@ -2136,6 +2139,7 @@ dependencies = [
  "lakko-attachments",
  "lakko-auth-client",
  "lakko-backup",
+ "lakko-calls",
  "lakko-contacts",
  "lakko-crypto",
  "lakko-discovery-client",
