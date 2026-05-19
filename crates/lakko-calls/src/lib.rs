@@ -48,12 +48,17 @@
 
 pub mod error;
 pub mod group_call;
+pub mod quality;
 pub mod session;
 pub mod sframe;
 pub mod signaling;
 
 pub use error::{Error, Result};
 pub use group_call::{GroupCallScope, GroupCallSession, Participant, SignalingOutcome};
+pub use quality::{
+    estimate_quality, recommend_bitrate, AudioCodec, QualityLevel, QualitySample, QualityScore,
+    OPUS_MAX_BITRATE_BPS, OPUS_MIN_BITRATE_BPS,
+};
 pub use session::{
     CallSession, CallState, Event, IceCandidate, MediaKind, Role, SdpDescription, SdpKind,
     Transition,

@@ -1639,6 +1639,121 @@ pub fn verify_call_jwt_with_jwks(
     Ok(claims_to_ffi(claims, header.kid))
 }
 
+// ============================================================================
+// Phase 3a11 — Call quality metrics FFI
+// ============================================================================
+//
+// MOS estimation + adaptive-bitrate recommendation surfaced
+// as plain Records / free functions. Platform layer
+// samples `RTCStatsReport` on its own cadence and feeds
+// the values in.
+
+/// Audio codec hint for the loss-impairment curve. Mirror
+/// of `lakko_calls::AudioCodec`.
+#[derive(uniffi::Enum)]
+pub enum FfiAudioCodec {
+    /// Opus (RFC 6716) — FEC-capable; the default for
+    /// Lakko's voice / video calls.
+    Opus,
+    /// G.711 / ISAC / AAC-LC / any non-Opus. No-FEC
+    /// baseline for the impairment math.
+    Other,
+}
+
+impl FfiAudioCodec {
+    fn into_inner(self) -> lakko_calls::AudioCodec {
+        match self {
+            Self::Opus => lakko_calls::AudioCodec::Opus,
+            Self::Other => lakko_calls::AudioCodec::Other,
+        }
+    }
+}
+
+/// Discretised quality bucket. Mirror of
+/// `lakko_calls::QualityLevel`.
+#[derive(uniffi::Enum)]
+pub enum FfiQualityLevel {
+    /// MOS ≥ 4.3 — toll-quality.
+    Excellent,
+    /// 4.0 ≤ MOS < 4.3.
+    Good,
+    /// 3.6 ≤ MOS < 4.0.
+    Fair,
+    /// 3.1 ≤ MOS < 3.6.
+    Poor,
+    /// MOS < 3.1 — near-unusable.
+    Bad,
+}
+
+impl FfiQualityLevel {
+    fn from_inner(l: lakko_calls::QualityLevel) -> Self {
+        match l {
+            lakko_calls::QualityLevel::Excellent => Self::Excellent,
+            lakko_calls::QualityLevel::Good => Self::Good,
+            lakko_calls::QualityLevel::Fair => Self::Fair,
+            lakko_calls::QualityLevel::Poor => Self::Poor,
+            lakko_calls::QualityLevel::Bad => Self::Bad,
+        }
+    }
+}
+
+/// Single network sample. Caller constructs one per
+/// `RTCStatsReport` poll.
+#[derive(uniffi::Record)]
+pub struct FfiQualitySample {
+    /// Round-trip time in milliseconds.
+    pub rtt_ms: u32,
+    /// Inter-arrival jitter in milliseconds.
+    pub jitter_ms: u32,
+    /// Packet-loss fraction in `[0.0, 100.0]`.
+    pub loss_pct: f32,
+    /// Codec hint.
+    pub codec: FfiAudioCodec,
+}
+
+/// Output of [`estimate_call_quality`]. Carries both raw
+/// `r_factor` / `mos` and the discretised bucket.
+#[derive(uniffi::Record)]
+pub struct FfiQualityScore {
+    /// E-model R-factor in `[0.0, 100.0]`.
+    pub r_factor: f32,
+    /// Mean Opinion Score in `[1.0, 4.5]`.
+    pub mos: f32,
+    /// Discretised bucket.
+    pub level: FfiQualityLevel,
+}
+
+/// Estimate call quality from a single network sample.
+#[uniffi::export]
+pub fn estimate_call_quality(sample: FfiQualitySample) -> FfiQualityScore {
+    let inner = lakko_calls::QualitySample {
+        rtt_ms: sample.rtt_ms,
+        jitter_ms: sample.jitter_ms,
+        loss_pct: sample.loss_pct,
+        codec: sample.codec.into_inner(),
+    };
+    let score = lakko_calls::estimate_quality(inner);
+    FfiQualityScore {
+        r_factor: score.r_factor,
+        mos: score.mos,
+        level: FfiQualityLevel::from_inner(score.level),
+    }
+}
+
+/// Recommend a new encoder bitrate. Returns the current
+/// bitrate unchanged when the sample falls in the "hold"
+/// band.
+#[uniffi::export]
+pub fn recommend_call_bitrate(current_bps: u32, sample: FfiQualitySample) -> u32 {
+    let inner = lakko_calls::QualitySample {
+        rtt_ms: sample.rtt_ms,
+        jitter_ms: sample.jitter_ms,
+        loss_pct: sample.loss_pct,
+        codec: sample.codec.into_inner(),
+    };
+    lakko_calls::recommend_bitrate(current_bps, inner)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

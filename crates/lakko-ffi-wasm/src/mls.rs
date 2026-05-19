@@ -2037,6 +2037,104 @@ pub fn verify_call_jwt_with_jwks(
     Ok(claims_to_parsed(claims, header.kid))
 }
 
+// ============================================================================
+// Phase 3a11 — Call quality metrics FFI (web client)
+// ============================================================================
+
+/// MOS estimation result. `level` is one of
+/// `"excellent" | "good" | "fair" | "poor" | "bad"`.
+#[wasm_bindgen]
+#[allow(clippy::struct_field_names)]
+pub struct CallQualityScore {
+    r_factor_val: f32,
+    mos_val: f32,
+    level_val: &'static str,
+}
+
+#[wasm_bindgen]
+impl CallQualityScore {
+    /// E-model R-factor in `[0.0, 100.0]`.
+    #[wasm_bindgen(getter, js_name = rFactor)]
+    pub fn r_factor(&self) -> f32 {
+        self.r_factor_val
+    }
+
+    /// Mean Opinion Score in `[1.0, 4.5]`.
+    #[wasm_bindgen(getter)]
+    pub fn mos(&self) -> f32 {
+        self.mos_val
+    }
+
+    /// One of `"excellent"` / `"good"` / `"fair"` /
+    /// `"poor"` / `"bad"`.
+    #[wasm_bindgen(getter)]
+    pub fn level(&self) -> String {
+        self.level_val.to_string()
+    }
+}
+
+fn level_str(l: lakko_calls::QualityLevel) -> &'static str {
+    match l {
+        lakko_calls::QualityLevel::Excellent => "excellent",
+        lakko_calls::QualityLevel::Good => "good",
+        lakko_calls::QualityLevel::Fair => "fair",
+        lakko_calls::QualityLevel::Poor => "poor",
+        lakko_calls::QualityLevel::Bad => "bad",
+    }
+}
+
+fn parse_codec(s: &str) -> lakko_calls::AudioCodec {
+    match s {
+        "opus" | "Opus" | "OPUS" => lakko_calls::AudioCodec::Opus,
+        _ => lakko_calls::AudioCodec::Other,
+    }
+}
+
+/// Estimate call quality from a single network sample
+/// (Phase 3a11). `codec` accepts `"opus"` (default for
+/// Lakko voice / video) or any other value (mapped to the
+/// no-FEC baseline).
+#[wasm_bindgen(js_name = estimateCallQuality)]
+pub fn estimate_call_quality(
+    rtt_ms: u32,
+    jitter_ms: u32,
+    loss_pct: f32,
+    codec: &str,
+) -> CallQualityScore {
+    let sample = lakko_calls::QualitySample {
+        rtt_ms,
+        jitter_ms,
+        loss_pct,
+        codec: parse_codec(codec),
+    };
+    let score = lakko_calls::estimate_quality(sample);
+    CallQualityScore {
+        r_factor_val: score.r_factor,
+        mos_val: score.mos,
+        level_val: level_str(score.level),
+    }
+}
+
+/// Recommend a new encoder bitrate given the current one +
+/// a fresh quality sample. Returns the current value
+/// unchanged when the sample falls in the "hold" band.
+#[wasm_bindgen(js_name = recommendCallBitrate)]
+pub fn recommend_call_bitrate(
+    current_bps: u32,
+    rtt_ms: u32,
+    jitter_ms: u32,
+    loss_pct: f32,
+    codec: &str,
+) -> u32 {
+    let sample = lakko_calls::QualitySample {
+        rtt_ms,
+        jitter_ms,
+        loss_pct,
+        codec: parse_codec(codec),
+    };
+    lakko_calls::recommend_bitrate(current_bps, sample)
+}
+
 // Tests run on the host target (`cargo test`) — no `wasm-bindgen-test`
 // runner needed for what we cover here. The wire-level invariants
 // from `lakko-mls` are unchanged regardless of FFI binding; this
