@@ -45,6 +45,7 @@ The tactical decomposition of all 6 phases with sprint breakdowns lives in [`doc
 | `lakko-presence` | Blinded per-conversation presence tokens |
 | `lakko-push` | Encrypted APNs / FCM / UnifiedPush envelopes |
 | `lakko-transparency` | CONIKS-style key transparency log (Merkle tree, signed roots, inclusion proofs) |
+| `lakko-call-jwt` | Call-admission JWT (Phase 3b4) — JWS Compact + EdDSA-Ed25519 + JWKS publication, shared between `services/auth` (mint) and FFI crates (parse / verify) |
 | `lakko-ffi-uniffi` | UniFFI surface for Swift / Kotlin bindings |
 | `lakko-ffi-wasm` | wasm-bindgen surface for Web / Tauri |
 

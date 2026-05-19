@@ -1917,6 +1917,126 @@ pub fn sframe_open_with_overlap(
     ))
 }
 
+// ============================================================================
+// Phase 3b4 — Call-admission JWT FFI surface (web client)
+// ============================================================================
+//
+// Same shape Swift / Kotlin get via UniFFI's
+// `FfiCallJwtClaims` Record; here we expose a `ParsedCallJwt`
+// class with getters because wasm-bindgen rejects enums with
+// associated data (same constraint that drove the
+// `ParsedCallSignaling` flat-class shape in 3a4 / 3c2).
+
+/// Parsed call-JWT claims — flat class with getters.
+#[wasm_bindgen]
+#[allow(clippy::struct_field_names)]
+pub struct ParsedCallJwt {
+    iss_val: String,
+    aud_val: String,
+    sub_val: String,
+    call_id_val: String,
+    role_val: &'static str,
+    iat_val: u64,
+    exp_val: u64,
+    kid_val: String,
+}
+
+fn role_str(role: lakko_call_jwt::CallRole) -> &'static str {
+    match role {
+        lakko_call_jwt::CallRole::Participant => "participant",
+        lakko_call_jwt::CallRole::Publisher => "publisher",
+        lakko_call_jwt::CallRole::Subscriber => "subscriber",
+    }
+}
+
+fn claims_to_parsed(claims: lakko_call_jwt::CallJwtClaims, kid: String) -> ParsedCallJwt {
+    ParsedCallJwt {
+        iss_val: claims.iss,
+        aud_val: claims.aud,
+        sub_val: claims.sub,
+        call_id_val: claims.call_id,
+        role_val: role_str(claims.role),
+        iat_val: claims.iat,
+        exp_val: claims.exp,
+        kid_val: kid,
+    }
+}
+
+fn jwt_err(e: lakko_call_jwt::JwtError) -> JsError {
+    JsError::new(&format!("{e}"))
+}
+
+#[wasm_bindgen]
+impl ParsedCallJwt {
+    /// `iss` claim — always `"lakko-auth"` on a well-formed JWT.
+    #[wasm_bindgen(getter)]
+    pub fn iss(&self) -> String {
+        self.iss_val.clone()
+    }
+    /// `aud` claim — always `"lakko-sfu"`.
+    #[wasm_bindgen(getter)]
+    pub fn aud(&self) -> String {
+        self.aud_val.clone()
+    }
+    /// account_id, 32-char lower-case hex.
+    #[wasm_bindgen(getter)]
+    pub fn sub(&self) -> String {
+        self.sub_val.clone()
+    }
+    /// call_id, 32-char lower-case hex.
+    #[wasm_bindgen(getter, js_name = callId)]
+    pub fn call_id(&self) -> String {
+        self.call_id_val.clone()
+    }
+    /// One of `"participant"` / `"publisher"` / `"subscriber"`.
+    #[wasm_bindgen(getter)]
+    pub fn role(&self) -> String {
+        self.role_val.to_string()
+    }
+    /// `iat` — issued-at, unix seconds.
+    #[wasm_bindgen(getter)]
+    pub fn iat(&self) -> u64 {
+        self.iat_val
+    }
+    /// `exp` — expires-at, unix seconds.
+    #[wasm_bindgen(getter)]
+    pub fn exp(&self) -> u64 {
+        self.exp_val
+    }
+    /// JWS header `kid` — 16 hex chars.
+    #[wasm_bindgen(getter)]
+    pub fn kid(&self) -> String {
+        self.kid_val.clone()
+    }
+}
+
+/// Parse a JWT into typed claims WITHOUT verifying the
+/// signature. Useful for inspecting role / expiry / kid
+/// client-side before presenting the JWT to the SFU.
+#[wasm_bindgen(js_name = parseCallJwtUnverified)]
+pub fn parse_call_jwt_unverified(jwt: &str) -> Result<ParsedCallJwt, JsError> {
+    let (header, claims) = lakko_call_jwt::parse_unverified(jwt).map_err(jwt_err)?;
+    Ok(claims_to_parsed(claims, header.kid))
+}
+
+/// Verify a JWT against a JWKS document the client fetched
+/// from `GET /.well-known/jwks.json`. Returns the typed
+/// claims on success.
+///
+/// `nowUnixSecs` is injected so the platform controls the
+/// clock source — pass `Math.floor(Date.now() / 1000)`.
+#[wasm_bindgen(js_name = verifyCallJwtWithJwks)]
+pub fn verify_call_jwt_with_jwks(
+    jwks_doc_bytes: &[u8],
+    jwt: &str,
+    now_unix_secs: u64,
+) -> Result<ParsedCallJwt, JsError> {
+    let jwks = lakko_call_jwt::parse_jwks(jwks_doc_bytes).map_err(jwt_err)?;
+    let claims = lakko_call_jwt::verify_with_jwks(&jwks, jwt, now_unix_secs).map_err(jwt_err)?;
+    let (header, _) = lakko_call_jwt::parse_unverified(jwt).map_err(jwt_err)?;
+    Ok(claims_to_parsed(claims, header.kid))
+}
+
 // Tests run on the host target (`cargo test`) — no `wasm-bindgen-test`
 // runner needed for what we cover here. The wire-level invariants
 // from `lakko-mls` are unchanged regardless of FFI binding; this

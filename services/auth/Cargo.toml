@@ -65,10 +65,11 @@ sha2 = "0.10"
 # `LAKKO_SESSION_TOKEN_SECRET` env var.
 lakko-auth-token.workspace = true
 
-# Call-JWT issuance — Phase 3b4 forward. Ed25519 signing (via
-# `lakko-crypto::signing`) + BLAKE3 fingerprints for the `kid`
-# field. The SFU (services/sfu, 3b1c) verifies these JWTs.
-lakko-crypto.workspace = true
+# Call-JWT issuance — Phase 3b4 forward. JWS Compact + EdDSA
+# Ed25519 + JWKS shapes shared with the FFI crates so client +
+# server speak the same wire format. The SFU (services/sfu,
+# 3b1c, Go) reimplements the verifier against the same spec.
+lakko-call-jwt.workspace = true
 
 # WebAuthn / passkey support — Phase 2a2. `webauthn-rs` is the
 # de-facto Rust implementation: battle-tested, maintained, and

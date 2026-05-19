@@ -2049,6 +2049,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "lakko-call-jwt"
+version = "0.0.0"
+dependencies = [
+ "base64 0.22.1",
+ "lakko-crypto",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "lakko-calls"
 version = "0.0.0"
 dependencies = [
@@ -2115,6 +2126,7 @@ dependencies = [
  "lakko-attachments",
  "lakko-auth-client",
  "lakko-backup",
+ "lakko-call-jwt",
  "lakko-calls",
  "lakko-contacts",
  "lakko-crypto",
@@ -2139,6 +2151,7 @@ dependencies = [
  "lakko-attachments",
  "lakko-auth-client",
  "lakko-backup",
+ "lakko-call-jwt",
  "lakko-calls",
  "lakko-contacts",
  "lakko-crypto",
@@ -2259,7 +2272,7 @@ dependencies = [
  "equix",
  "http-body-util",
  "lakko-auth-token",
- "lakko-crypto",
+ "lakko-call-jwt",
  "opaque-ke",
  "rand 0.8.6",
  "serde",

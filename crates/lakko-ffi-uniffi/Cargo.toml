@@ -61,6 +61,12 @@ prost = "0.13"
 # the proto codec + AEAD plumbing behind plain UniFFI
 # Records the platform composes by hand.
 lakko-calls.workspace = true
+# Phase 3b4 — call-admission JWT mint + verify shared with
+# `services/auth`. Client-side surface lets a platform parse
+# / self-verify a JWT it just received from
+# `POST /call/jwt` and inspect role / expiry before
+# presenting it to the SFU.
+lakko-call-jwt.workspace = true
 # Base64 framing for the PoW surface (seed/nonce/solution
 # fields → base64 strings on the JSON request body). Matches
 # the wasm surface 1:1.

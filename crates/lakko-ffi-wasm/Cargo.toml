@@ -72,6 +72,10 @@ prost = "0.13"
 # Phase 3a4 — call signaling typed classes + SFrame keying
 # free-function surface for the web client.
 lakko-calls.workspace = true
+# Phase 3b4 — call-admission JWT mint + verify shared with
+# `services/auth`. Same shape Swift / Kotlin clients get via
+# UniFFI.
+lakko-call-jwt.workspace = true
 
 # JS bindings.
 wasm-bindgen = "0.2"

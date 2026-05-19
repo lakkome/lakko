@@ -129,7 +129,9 @@ pub(crate) struct AppState {
     /// ADR-0008). Loaded (or generated on first run) at
     /// startup via `call_jwt::load_or_init_call_signing_key`.
     /// Public key is published at GET `/.well-known/jwks.json`.
-    pub(crate) call_jwt_signing: Arc<call_jwt::CallSigningKey>,
+    /// Crypto + wire shape lives in the shared `lakko-call-jwt`
+    /// crate so client FFI uses the same types.
+    pub(crate) call_jwt_signing: Arc<lakko_call_jwt::CallSigningKey>,
 }
 
 #[tokio::main]

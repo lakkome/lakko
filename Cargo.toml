@@ -20,6 +20,7 @@ members = [
     "crates/lakko-backup",
     "crates/lakko-auth-client",
     "crates/lakko-auth-token",
+    "crates/lakko-call-jwt",
     "crates/lakko-pow",
     "crates/lakko-mnemonic",
     "crates/lakko-shamir",
@@ -88,6 +89,7 @@ lakko-attachments = { path = "crates/lakko-attachments", version = "0.0.0" }
 lakko-backup = { path = "crates/lakko-backup", version = "0.0.0" }
 lakko-auth-client = { path = "crates/lakko-auth-client", version = "0.0.0" }
 lakko-auth-token = { path = "crates/lakko-auth-token", version = "0.0.0" }
+lakko-call-jwt = { path = "crates/lakko-call-jwt", version = "0.0.0" }
 lakko-pow = { path = "crates/lakko-pow", version = "0.0.0" }
 lakko-mnemonic = { path = "crates/lakko-mnemonic", version = "0.0.0" }
 lakko-shamir = { path = "crates/lakko-shamir", version = "0.0.0" }

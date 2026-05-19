@@ -1518,6 +1518,127 @@ pub fn sframe_open_with_overlap(
     ))
 }
 
+// ============================================================================
+// Phase 3b4 — Call-admission JWT FFI surface
+// ============================================================================
+//
+// The client side of the call-admission JWT flow lets the
+// platform (Swift / Kotlin) parse + self-verify a JWT it
+// just received from `POST /call/jwt` (caller drives the
+// HTTP; the FFI surface is plain bytes / strings ↔ typed
+// records). Crypto + wire shape lives in
+// `crates/lakko-call-jwt`.
+
+/// Mirror of `lakko_call_jwt::CallRole` — Record-friendly
+/// enum.
+#[derive(uniffi::Enum)]
+pub enum FfiCallRole {
+    /// Regular participant.
+    Participant,
+    /// Publisher-only (Phase 4 broadcasts).
+    Publisher,
+    /// Subscriber-only (Phase 4 audio-room audience).
+    Subscriber,
+}
+
+impl FfiCallRole {
+    fn from_inner(r: lakko_call_jwt::CallRole) -> Self {
+        match r {
+            lakko_call_jwt::CallRole::Participant => Self::Participant,
+            lakko_call_jwt::CallRole::Publisher => Self::Publisher,
+            lakko_call_jwt::CallRole::Subscriber => Self::Subscriber,
+        }
+    }
+}
+
+/// Parsed JWT claims — typed mirror of
+/// `lakko_call_jwt::CallJwtClaims`. Returned by
+/// [`parse_call_jwt_unverified`] + [`verify_call_jwt_with_jwks`].
+#[derive(uniffi::Record)]
+pub struct FfiCallJwtClaims {
+    /// Issuer; always `"lakko-auth"` on a well-formed JWT.
+    pub iss: String,
+    /// Audience; always `"lakko-sfu"`.
+    pub aud: String,
+    /// account_id, 32-char lower-case hex.
+    pub sub: String,
+    /// call_id, 32-char lower-case hex.
+    pub call_id: String,
+    /// Participation role.
+    pub role: FfiCallRole,
+    /// `iat` — issued-at, unix seconds.
+    pub iat: u64,
+    /// `exp` — expires-at, unix seconds.
+    pub exp: u64,
+    /// JWS header `kid` — 16 hex chars. Useful for client
+    /// dashboards / debug logs.
+    pub kid: String,
+}
+
+fn claims_to_ffi(claims: lakko_call_jwt::CallJwtClaims, kid: String) -> FfiCallJwtClaims {
+    FfiCallJwtClaims {
+        iss: claims.iss,
+        aud: claims.aud,
+        sub: claims.sub,
+        call_id: claims.call_id,
+        role: FfiCallRole::from_inner(claims.role),
+        iat: claims.iat,
+        exp: claims.exp,
+        kid,
+    }
+}
+
+impl From<lakko_call_jwt::JwtError> for FfiError {
+    fn from(err: lakko_call_jwt::JwtError) -> Self {
+        match err {
+            lakko_call_jwt::JwtError::Format(msg) => FfiError::Codec(format!("jwt format: {msg}")),
+            lakko_call_jwt::JwtError::Signature => FfiError::Codec("jwt signature".into()),
+            lakko_call_jwt::JwtError::Expired => FfiError::Codec("jwt expired".into()),
+            lakko_call_jwt::JwtError::Encode(msg) => FfiError::Codec(format!("jwt encode: {msg}")),
+        }
+    }
+}
+
+/// Parse a JWT into typed claims WITHOUT verifying the
+/// signature. Useful for inspecting role / expiry / kid
+/// client-side before presenting the JWT to the SFU.
+///
+/// **Do NOT** trust the returned claims for any
+/// authorisation decision — use [`verify_call_jwt_with_jwks`]
+/// for the verifying path.
+#[uniffi::export]
+pub fn parse_call_jwt_unverified(jwt: String) -> Result<FfiCallJwtClaims, FfiError> {
+    let (header, claims) = lakko_call_jwt::parse_unverified(&jwt)?;
+    Ok(claims_to_ffi(claims, header.kid))
+}
+
+/// Verify a JWT against a JWKS document the client fetched
+/// from `GET /.well-known/jwks.json` (typically cached
+/// for 24 h). Returns the typed claims on success.
+///
+/// `now_unix_secs` is injected by the caller so the
+/// platform controls the clock source — pass
+/// `Date.now() / 1000` on web, `Date().timeIntervalSince1970`
+/// on iOS, `System.currentTimeMillis() / 1000` on Android.
+///
+/// # Errors
+///
+/// Surfaces every shape failure (JWS format, JWKS no-match,
+/// signature, expired, JSON decode) as [`FfiError::Codec`]
+/// with a descriptive prefix.
+#[uniffi::export]
+pub fn verify_call_jwt_with_jwks(
+    jwks_doc_bytes: Vec<u8>,
+    jwt: String,
+    now_unix_secs: u64,
+) -> Result<FfiCallJwtClaims, FfiError> {
+    let jwks = lakko_call_jwt::parse_jwks(&jwks_doc_bytes)?;
+    let claims = lakko_call_jwt::verify_with_jwks(&jwks, &jwt, now_unix_secs)?;
+    // Re-derive kid from the JWT header for the FFI shape.
+    let (header, _) = lakko_call_jwt::parse_unverified(&jwt)?;
+    Ok(claims_to_ffi(claims, header.kid))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
