@@ -1463,6 +1463,61 @@ pub fn sframe_derive_participant_key(
     })
 }
 
+/// Open an SFrame frame with the Phase 3c5 overlap window.
+/// Tries `current_call_key_seed` first; on AEAD rejection
+/// falls back to `previous_call_key_seed` if present
+/// (caller passes `None` outside the 1-second overlap
+/// window). Returns the plaintext on success.
+///
+/// Mirrors [`GroupCallSession::try_open_with_overlap`]; the
+/// FFI surface is seed-flat so platform code can hold the
+/// 32-byte seeds in its own keychain-backed store rather
+/// than ferrying a Rust handle.
+#[uniffi::export]
+pub fn sframe_open_with_overlap(
+    current_call_key_seed: Vec<u8>,
+    previous_call_key_seed: Option<Vec<u8>>,
+    sender_leaf: u32,
+    aad: Vec<u8>,
+    ciphertext: Vec<u8>,
+    frame_counter: u32,
+) -> Result<Vec<u8>, FfiError> {
+    let take_seed = |bytes: Vec<u8>| -> Result<[u8; 32], FfiError> {
+        if bytes.len() != 32 {
+            return Err(FfiError::Codec(format!(
+                "call_key_seed must be 32 bytes, got {}",
+                bytes.len()
+            )));
+        }
+        let mut seed = [0u8; 32];
+        seed.copy_from_slice(&bytes);
+        Ok(seed)
+    };
+
+    let current_seed = take_seed(current_call_key_seed)?;
+    let current = lakko_calls::CallKey::from_seed(current_seed);
+    let current_key = current.participant_key(sender_leaf)?;
+    match current_key.open(&aad, &ciphertext, frame_counter) {
+        Ok(pt) => return Ok(pt),
+        Err(lakko_calls::Error::Crypto(_)) => {
+            // Fall through to the overlap-window path.
+        },
+        Err(other) => return Err(other.into()),
+    }
+
+    if let Some(prev_bytes) = previous_call_key_seed {
+        let prev_seed = take_seed(prev_bytes)?;
+        let previous = lakko_calls::CallKey::from_seed(prev_seed);
+        let prev_key = previous.participant_key(sender_leaf)?;
+        return prev_key
+            .open(&aad, &ciphertext, frame_counter)
+            .map_err(Into::into);
+    }
+    Err(FfiError::Codec(
+        "frame failed authentication under current key (no overlap window active)".into(),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

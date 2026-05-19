@@ -1863,6 +1863,60 @@ pub fn sframe_derive_participant_key(
     })
 }
 
+/// Open an SFrame frame with the Phase 3c5 overlap window.
+/// Tries `currentCallKeySeed` first; on AEAD rejection
+/// falls back to `previousCallKeySeed` if not `null`
+/// (caller passes `null` outside the 1-second overlap
+/// window). Returns the plaintext on success.
+///
+/// Seed-flat shape — platform code holds the 32-byte seeds
+/// in its own non-extractable WebCrypto store and ferries
+/// them in per-call.
+#[wasm_bindgen(js_name = sframeOpenWithOverlap)]
+pub fn sframe_open_with_overlap(
+    current_call_key_seed: &[u8],
+    previous_call_key_seed: Option<Vec<u8>>,
+    sender_leaf: u32,
+    aad: &[u8],
+    ciphertext: &[u8],
+    frame_counter: u32,
+) -> Result<Vec<u8>, JsError> {
+    let take_seed = |bytes: &[u8]| -> Result<[u8; 32], JsError> {
+        if bytes.len() != 32 {
+            return Err(JsError::new(&format!(
+                "call_key_seed must be 32 bytes, got {}",
+                bytes.len()
+            )));
+        }
+        let mut seed = [0u8; 32];
+        seed.copy_from_slice(bytes);
+        Ok(seed)
+    };
+
+    let current_seed = take_seed(current_call_key_seed)?;
+    let current = lakko_calls::CallKey::from_seed(current_seed);
+    let current_key = current.participant_key(sender_leaf).map_err(calls_err)?;
+    match current_key.open(aad, ciphertext, frame_counter) {
+        Ok(pt) => return Ok(pt),
+        Err(lakko_calls::Error::Crypto(_)) => {
+            // Fall through to the overlap-window path.
+        },
+        Err(other) => return Err(calls_err(other)),
+    }
+
+    if let Some(prev_bytes) = previous_call_key_seed {
+        let prev_seed = take_seed(&prev_bytes)?;
+        let previous = lakko_calls::CallKey::from_seed(prev_seed);
+        let prev_key = previous.participant_key(sender_leaf).map_err(calls_err)?;
+        return prev_key
+            .open(aad, ciphertext, frame_counter)
+            .map_err(calls_err);
+    }
+    Err(JsError::new(
+        "frame failed authentication under current key (no overlap window active)",
+    ))
+}
+
 // Tests run on the host target (`cargo test`) — no `wasm-bindgen-test`
 // runner needed for what we cover here. The wire-level invariants
 // from `lakko-mls` are unchanged regardless of FFI binding; this

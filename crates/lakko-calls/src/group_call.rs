@@ -38,16 +38,26 @@
 //! the ledger consumes already-known `(leaf_index, joined?)`
 //! events the caller produces.
 //!
-//! ## Rotation policy
+//! ## Rotation policy (Phase 3c5)
 //!
 //! Per ADR-0001 + 0008, every participant Add / Remove on
 //! the MLS group rotates the epoch; the next
 //! [`GroupCallSession::refresh_call_key`] re-derives the
-//! seed against the new epoch. The 1-second overlap window
-//! (the old key remains accepted briefly so in-flight
-//! frames decode) is a per-platform PeerConnection
-//! concern — the ledger surfaces `needs_rekey()` after a
-//! member change and the platform schedules the swap.
+//! seed against the new epoch. The previous seed is kept
+//! in [`GroupCallSession::previous_call_key`] for the
+//! **1-second overlap window** — receive-side
+//! [`GroupCallSession::try_open_with_overlap`] first tries
+//! the current seed's per-participant key, then falls back
+//! to the previous seed's key if the new one rejects. This
+//! absorbs in-flight frames sealed under the OLD key that
+//! land after the rotation (RTT, jitter, reorder).
+//!
+//! The crate does **not** depend on wall-clock — the
+//! platform calls [`GroupCallSession::drop_previous_call_key`]
+//! when its own overlap timer fires (≈ 1 s in production
+//! per the plan §5). After that, frames under the old key
+//! cease to decode and the seed-boundary forward secrecy
+//! is fully in effect.
 
 use std::collections::BTreeMap;
 
@@ -121,6 +131,14 @@ pub struct GroupCallSession {
     /// 32-byte call-key seed. Re-derived from the MLS
     /// exporter at every epoch change.
     call_key: CallKey,
+    /// Previous-epoch seed retained for the 1-second
+    /// overlap window (Phase 3c5). [`Self::refresh_call_key`]
+    /// moves the current seed here; the receive path falls
+    /// back to it for frames sealed under the OLD key that
+    /// land after rotation. The caller invokes
+    /// [`Self::drop_previous_call_key`] when its overlap
+    /// timer fires.
+    previous_call_key: Option<CallKey>,
     /// Participant ledger. `BTreeMap` over `HashMap` so
     /// the iter order is stable for snapshot helpers + so
     /// integration tests can pattern-match the layout.
@@ -156,27 +174,42 @@ impl GroupCallSession {
             call_id,
             own_leaf_index,
             call_key,
+            previous_call_key: None,
             participants: BTreeMap::new(),
             needs_rekey: false,
         })
     }
 
-    /// Re-derive the call-key seed from the MLS group.
-    /// Caller invokes this after every Add / Remove commit
-    /// on the keying group has been processed locally; the
-    /// `needs_rekey` flag flips so the platform schedules
-    /// the SFrame transform swap.
+    /// Re-derive the call-key seed from the MLS group +
+    /// stash the prior seed into
+    /// [`Self::previous_call_key`] for the 1-second overlap
+    /// window (Phase 3c5). Caller invokes this after every
+    /// Add / Remove commit on the keying group has been
+    /// processed locally; the `needs_rekey` flag flips so
+    /// the platform schedules the SFrame transform swap.
     ///
-    /// Idempotent — calling twice at the same epoch
-    /// produces the same seed. The platform's overlap
-    /// window logic is on top.
+    /// **Not idempotent across epoch boundaries.** Calling
+    /// at the same epoch produces the same seed, and the
+    /// previous-key slot ends up populated with that
+    /// identical seed (harmless — frames sealed under it
+    /// decode under either slot). Calling across N epochs
+    /// in rapid succession only retains the **most recent
+    /// previous** epoch's seed; older overlap windows fall
+    /// off. The 1-second overlap budget assumes ≤ 1 commit
+    /// per second per call, which matches the SFU's commit
+    /// debouncing.
     ///
     /// # Errors
     ///
     /// Surfaces the same `Error::Exporter` shapes as
     /// [`Self::create`].
     pub fn refresh_call_key(&mut self, group: &Group, identity: &Identity) -> Result<()> {
-        self.call_key = CallKey::derive(group, identity, &self.call_id)?;
+        let next = CallKey::derive(group, identity, &self.call_id)?;
+        // Stash the prior seed for the overlap window. We
+        // overwrite any earlier stash — see the doc-comment
+        // contract above.
+        let prior = std::mem::replace(&mut self.call_key, next);
+        self.previous_call_key = Some(prior);
         self.own_leaf_index = group.own_leaf_index().u32();
         self.needs_rekey = true;
         Ok(())
@@ -360,6 +393,89 @@ impl GroupCallSession {
     #[must_use]
     pub fn call_key(&self) -> &CallKey {
         &self.call_key
+    }
+
+    /// Borrow the previous-epoch seed retained for the
+    /// overlap window, if one is currently held. Returns
+    /// `None` outside an overlap window (initial state +
+    /// after [`Self::drop_previous_call_key`]).
+    ///
+    /// Diagnostic / test surface — production callers
+    /// should funnel through [`Self::try_open_with_overlap`]
+    /// rather than re-deriving from this directly.
+    #[must_use]
+    pub fn previous_call_key(&self) -> Option<&CallKey> {
+        self.previous_call_key.as_ref()
+    }
+
+    /// Open a received SFrame with the 1-second overlap
+    /// behaviour: try the current seed's per-participant
+    /// key for `sender_leaf` first; on AEAD failure (the
+    /// frame was sealed under the OLD seed but landed late),
+    /// fall back to the previous seed's key. Returns the
+    /// plaintext on either path.
+    ///
+    /// Outside an overlap window — i.e. when no rotation
+    /// has happened yet, or after the platform invoked
+    /// [`Self::drop_previous_call_key`] — this collapses to
+    /// "current key only" and the second path is skipped.
+    ///
+    /// `frame_counter` is the explicit counter the SFrame
+    /// header carries (RFC 9605 §4.4); the producer's
+    /// monotonic seal-side counter survives the rotation
+    /// because the receiver doesn't need to know which
+    /// epoch produced a frame — just whether the AEAD
+    /// authenticates.
+    ///
+    /// # Errors
+    ///
+    /// - [`crate::Error::Crypto`] when the frame fails to
+    ///   authenticate under **both** the current and (if
+    ///   present) previous keys. This is the same shape
+    ///   [`ParticipantKey::open`] returns — the overlap is
+    ///   transparent to the error type.
+    /// - [`crate::Error::Crypto`] when the participant_key
+    ///   derivation fails (practically unreachable with
+    ///   valid leaf indices).
+    pub fn try_open_with_overlap(
+        &self,
+        sender_leaf: u32,
+        aad: &[u8],
+        ciphertext: &[u8],
+        frame_counter: u32,
+    ) -> Result<Vec<u8>> {
+        // Path 1 — current seed.
+        let current = self.call_key.participant_key(sender_leaf)?;
+        match current.open(aad, ciphertext, frame_counter) {
+            Ok(pt) => return Ok(pt),
+            Err(crate::Error::Crypto(_)) => {
+                // Fall through to the overlap-window path.
+            },
+            Err(other) => return Err(other),
+        }
+
+        // Path 2 — previous seed, if any. Outside an overlap
+        // window this collapses to a propagated AEAD
+        // rejection from path 1.
+        if let Some(prev) = self.previous_call_key.as_ref() {
+            let prev_key = prev.participant_key(sender_leaf)?;
+            return prev_key.open(aad, ciphertext, frame_counter);
+        }
+        Err(crate::Error::Crypto(
+            "frame failed authentication under current key (no overlap window active)".into(),
+        ))
+    }
+
+    /// Drop the previous-epoch seed. Caller invokes this
+    /// when its 1-second overlap timer fires; after the
+    /// call, frames sealed under the OLD seed cease to
+    /// decode and seed-boundary forward secrecy is fully
+    /// in effect.
+    ///
+    /// Idempotent — calling without a stashed previous
+    /// seed is a no-op.
+    pub fn drop_previous_call_key(&mut self) {
+        self.previous_call_key = None;
     }
 }
 
@@ -843,6 +959,233 @@ mod tests {
                 assert_eq!(opened.as_slice(), pt.as_bytes());
             }
         }
+    }
+
+    // =====================================================
+    // Phase 3c5 — Mid-call Add/Remove + 1s overlap window.
+    // The crate stays wall-clock-free; the caller (platform
+    // SFrame-transform layer) invokes drop_previous_call_key
+    // after its own 1s timer fires.
+    // =====================================================
+
+    /// During the overlap window (after `refresh_call_key`
+    /// but before `drop_previous_call_key`), a frame sealed
+    /// under the OLD seed still decodes via
+    /// `try_open_with_overlap`. A fresh frame sealed under
+    /// the NEW seed also decodes. Once `drop_previous_call_key`
+    /// fires, the OLD-seed frame ceases to decode but the
+    /// NEW-seed one still does.
+    #[test]
+    fn overlap_window_accepts_stale_frame_until_dropped() {
+        let id_a = MlsIdentity::generate("device-A").unwrap();
+        let id_b = MlsIdentity::generate("device-B").unwrap();
+        let id_c = MlsIdentity::generate("device-C").unwrap();
+        let call_id = fixture_call_id();
+
+        // Epoch 0 — A creates, B joins.
+        let mut group_a = lakko_mls::Group::create(&id_a).unwrap();
+        let kp_b = id_b.create_key_package().unwrap();
+        let add_b = group_a.add_member(&id_a, kp_b).unwrap();
+        let welcome_b = lakko_mls::group::encode_message(&add_b.welcome).unwrap();
+        let mut group_b = lakko_mls::Group::join_from_welcome(&welcome_b, &id_b).unwrap();
+
+        let mut session_a =
+            GroupCallSession::create(GroupCallScope::InChat, call_id, &group_a, &id_a).unwrap();
+        let mut session_b =
+            GroupCallSession::create(GroupCallScope::InChat, call_id, &group_b, &id_b).unwrap();
+
+        // Pre-rotation frame from A → B (sealed under epoch-0 key).
+        let mut send_a_pre = session_a.own_participant_key().unwrap();
+        let stale_aad = b"sframe-header-pre";
+        let stale_plain = b"in-flight frame";
+        let (stale_counter, stale_cipher) = send_a_pre.seal(stale_aad, stale_plain).unwrap();
+
+        // Epoch advance — A adds C, B applies the commit.
+        let kp_c = id_c.create_key_package().unwrap();
+        let add_c = group_a.add_member(&id_a, kp_c).unwrap();
+        let commit = lakko_mls::group::encode_message(&add_c.commit).unwrap();
+        let processed = group_b.process_incoming(&id_b, &commit).unwrap();
+        assert!(matches!(processed, lakko_mls::Incoming::Commit));
+        session_a.refresh_call_key(&group_a, &id_a).unwrap();
+        session_b.refresh_call_key(&group_b, &id_b).unwrap();
+        assert!(session_b.previous_call_key().is_some(), "overlap stashed");
+
+        // Overlap path on the B side: stale frame still
+        // decodes via the previous-key fallback.
+        let opened = session_b
+            .try_open_with_overlap(0, stale_aad, &stale_cipher, stale_counter)
+            .unwrap();
+        assert_eq!(opened.as_slice(), stale_plain.as_ref());
+
+        // Fresh frame under the NEW seed also decodes via
+        // the current-key path.
+        let mut send_a_post = session_a.own_participant_key().unwrap();
+        let fresh_aad = b"sframe-header-post";
+        let fresh_plain = b"post-rotation frame";
+        let (fresh_counter, fresh_cipher) = send_a_post.seal(fresh_aad, fresh_plain).unwrap();
+        let opened = session_b
+            .try_open_with_overlap(0, fresh_aad, &fresh_cipher, fresh_counter)
+            .unwrap();
+        assert_eq!(opened.as_slice(), fresh_plain.as_ref());
+
+        // Platform's overlap timer fires.
+        session_b.drop_previous_call_key();
+        assert!(session_b.previous_call_key().is_none());
+
+        // Stale frame now rejects — seed-boundary forward
+        // secrecy fully in effect.
+        match session_b.try_open_with_overlap(0, stale_aad, &stale_cipher, stale_counter) {
+            Ok(_) => panic!("stale frame must not decode after overlap drop"),
+            Err(crate::Error::Crypto(_)) => {},
+            Err(other) => panic!("expected Crypto error, got {other:?}"),
+        }
+
+        // Fresh frame still decodes — current path
+        // unaffected. We re-seal under a fresh counter (the
+        // prior seal mutated the sender's counter).
+        let (fresh_counter2, fresh_cipher2) = send_a_post.seal(fresh_aad, fresh_plain).unwrap();
+        let opened = session_b
+            .try_open_with_overlap(0, fresh_aad, &fresh_cipher2, fresh_counter2)
+            .unwrap();
+        assert_eq!(opened.as_slice(), fresh_plain.as_ref());
+    }
+
+    /// Receiver outside an overlap window (no rotation has
+    /// happened yet) — `try_open_with_overlap` collapses to
+    /// the current-key-only path. Fresh frames decode;
+    /// random-bit garbage rejects.
+    #[test]
+    fn no_overlap_window_collapses_to_current_only() {
+        let (id_a, id_b, group_a, group_b) = make_pair_joined();
+        let call_id = fixture_call_id();
+        let session_a =
+            GroupCallSession::create(GroupCallScope::InChat, call_id, &group_a, &id_a).unwrap();
+        let session_b =
+            GroupCallSession::create(GroupCallScope::InChat, call_id, &group_b, &id_b).unwrap();
+        assert!(
+            session_b.previous_call_key().is_none(),
+            "no overlap initially"
+        );
+
+        let mut send_a = session_a.own_participant_key().unwrap();
+        let aad = b"sframe-header";
+        let plain = b"frame";
+        let (counter, cipher) = send_a.seal(aad, plain).unwrap();
+        let opened = session_b
+            .try_open_with_overlap(0, aad, &cipher, counter)
+            .unwrap();
+        assert_eq!(opened.as_slice(), plain.as_ref());
+
+        // Tamper one byte → rejects, and the error message
+        // explicitly says no overlap window is active (to
+        // help platform-side debugging differentiate "we
+        // missed a rotation" from "the wire is corrupted").
+        let mut bad_cipher = cipher.clone();
+        bad_cipher[0] ^= 0xFF;
+        match session_b.try_open_with_overlap(0, aad, &bad_cipher, counter) {
+            Ok(_) => panic!("tampered frame must not decode"),
+            Err(crate::Error::Crypto(msg)) => {
+                assert!(
+                    msg.contains("no overlap window"),
+                    "expected no-overlap-window hint, got: {msg}"
+                );
+            },
+            Err(other) => panic!("expected Crypto error, got {other:?}"),
+        }
+    }
+
+    /// Two rotations in rapid succession — only the
+    /// most-recent previous seed is retained per the
+    /// doc-comment contract. A frame sealed under
+    /// epoch 0 decodes during the epoch-1 overlap. After
+    /// rotating to epoch 2, frames sealed under epoch 1
+    /// decode during the epoch-2 overlap, but epoch-0
+    /// frames no longer decode (their seed got displaced).
+    #[test]
+    fn chained_rotations_retain_only_most_recent_previous() {
+        let id_a = MlsIdentity::generate("device-A").unwrap();
+        let id_b = MlsIdentity::generate("device-B").unwrap();
+        let id_c = MlsIdentity::generate("device-C").unwrap();
+        let id_d = MlsIdentity::generate("device-D").unwrap();
+        let call_id = fixture_call_id();
+
+        // Epoch 0: A creates, B joins.
+        let mut group_a = lakko_mls::Group::create(&id_a).unwrap();
+        let kp_b = id_b.create_key_package().unwrap();
+        let add_b = group_a.add_member(&id_a, kp_b).unwrap();
+        let welcome_b = lakko_mls::group::encode_message(&add_b.welcome).unwrap();
+        let mut group_b = lakko_mls::Group::join_from_welcome(&welcome_b, &id_b).unwrap();
+
+        let mut session_a =
+            GroupCallSession::create(GroupCallScope::InChat, call_id, &group_a, &id_a).unwrap();
+        let mut session_b =
+            GroupCallSession::create(GroupCallScope::InChat, call_id, &group_b, &id_b).unwrap();
+
+        // Frame F0 sealed under epoch-0 key.
+        let mut send_a_e0 = session_a.own_participant_key().unwrap();
+        let aad_e0 = b"epoch-0";
+        let plain_e0 = b"frame from epoch 0";
+        let (counter_e0, cipher_e0) = send_a_e0.seal(aad_e0, plain_e0).unwrap();
+
+        // Epoch advance to 1 — A adds C; B applies.
+        let kp_c = id_c.create_key_package().unwrap();
+        let add_c = group_a.add_member(&id_a, kp_c).unwrap();
+        let commit_c = lakko_mls::group::encode_message(&add_c.commit).unwrap();
+        group_b.process_incoming(&id_b, &commit_c).unwrap();
+        session_a.refresh_call_key(&group_a, &id_a).unwrap();
+        session_b.refresh_call_key(&group_b, &id_b).unwrap();
+
+        // F0 still decodes (epoch-1 overlap covers epoch-0).
+        let opened = session_b
+            .try_open_with_overlap(0, aad_e0, &cipher_e0, counter_e0)
+            .unwrap();
+        assert_eq!(opened.as_slice(), plain_e0.as_ref());
+
+        // Frame F1 sealed under epoch-1 key.
+        let mut send_a_e1 = session_a.own_participant_key().unwrap();
+        let aad_e1 = b"epoch-1";
+        let plain_e1 = b"frame from epoch 1";
+        let (counter_e1, cipher_e1) = send_a_e1.seal(aad_e1, plain_e1).unwrap();
+
+        // Epoch advance to 2 — A adds D; B applies. The
+        // epoch-1 seed displaces the epoch-0 seed in the
+        // previous_call_key slot.
+        let kp_d = id_d.create_key_package().unwrap();
+        let add_d = group_a.add_member(&id_a, kp_d).unwrap();
+        let commit_d = lakko_mls::group::encode_message(&add_d.commit).unwrap();
+        group_b.process_incoming(&id_b, &commit_d).unwrap();
+        session_a.refresh_call_key(&group_a, &id_a).unwrap();
+        session_b.refresh_call_key(&group_b, &id_b).unwrap();
+
+        // F1 still decodes (epoch-2 overlap covers epoch-1).
+        let opened = session_b
+            .try_open_with_overlap(0, aad_e1, &cipher_e1, counter_e1)
+            .unwrap();
+        assert_eq!(opened.as_slice(), plain_e1.as_ref());
+
+        // F0 no longer decodes — its seed got pushed out of
+        // the single overlap slot. Per the doc-comment
+        // contract, only the most-recent previous epoch is
+        // retained.
+        match session_b.try_open_with_overlap(0, aad_e0, &cipher_e0, counter_e0) {
+            Ok(_) => panic!("epoch-0 frame must not decode in epoch-2 overlap"),
+            Err(crate::Error::Crypto(_)) => {},
+            Err(other) => panic!("expected Crypto error, got {other:?}"),
+        }
+    }
+
+    /// `drop_previous_call_key` is idempotent — calling
+    /// without an active overlap is a no-op, not a panic.
+    #[test]
+    fn drop_previous_call_key_is_idempotent() {
+        let (id_a, _id_b, group_a) = make_pair();
+        let mut session =
+            GroupCallSession::create(GroupCallScope::InChat, fixture_call_id(), &group_a, &id_a)
+                .unwrap();
+        assert!(session.previous_call_key().is_none());
+        session.drop_previous_call_key();
+        session.drop_previous_call_key();
+        assert!(session.previous_call_key().is_none());
     }
 
     /// AAD-binding check on the cross-party path: A seals
