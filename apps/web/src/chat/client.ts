@@ -119,6 +119,23 @@ export type IncomingChatEvent =
        *  `ProcessedMessageKind` strings on the Rust side. */
       systemKind: "commit" | "proposal" | "external-join-proposal";
       createdAt: string;
+    }
+  | {
+      /** Phase 3a8 — call-signaling event lifted from an
+       *  MLS application message. Driven into the
+       *  CallSession state machine by the chat-route
+       *  dispatcher. */
+      kind: "callSignaling";
+      messageId: number;
+      /** Plaintext application-payload bytes — caller
+       *  feeds them to `parseCallSignaling` (wasm) inside
+       *  the call surface. We don't ship the parsed
+       *  result on the event itself because the wasm
+       *  module isn't loaded eagerly on every poll
+       *  iteration; the call surface loads it lazily on
+       *  its own mount. */
+      payloadBytes: Uint8Array;
+      createdAt: string;
     };
 
 /** Result of `pollMessages`. */
@@ -400,13 +417,30 @@ async function toEvent(
   // discriminator: "Application" | "Commit" | "Proposal" |
   // "ExternalJoinProposal" (see lakko-ffi-wasm/src/mls.rs).
   if (processed.kind === "Application" && processed.applicationData !== undefined) {
+    const bytes = processed.applicationData;
+    // Phase 3a8 — sniff for call-signaling bytes before
+    // running the chat-envelope parser. Call signaling is a
+    // prost-encoded `CallSignalingPayload` proto; chat
+    // envelopes are JSON (the first byte is `{` / 0x7B). The
+    // discriminator is cheap + unambiguous because the
+    // proto's first wire tag is field 10 (offer) ... field
+    // 13 (end) — first byte ∈ {0x52, 0x5A, 0x62, 0x6A},
+    // none of which is 0x7B.
+    if (looksLikeCallSignaling(bytes)) {
+      return {
+        kind: "callSignaling",
+        messageId,
+        payloadBytes: bytes,
+        createdAt,
+      };
+    }
     // 1.19c2: feed the application bytes through the wasm
     // `parseEnvelope` surface. Legacy pre-1.19 plain-UTF-8
     // bytes collapse cleanly to `{ text: <utf-8 lossy>,
     // attachments: [] }` — bubbles from older builds still
     // render unchanged. New 1.19 envelopes surface a
     // populated attachments list the UI can render as chips.
-    const { text, attachments } = await parseEnvelope(processed.applicationData);
+    const { text, attachments } = await parseEnvelope(bytes);
     return {
       kind: "application",
       messageId,
@@ -425,4 +459,32 @@ async function toEvent(
         ? "proposal"
         : "external-join-proposal";
   return { kind: "system", messageId, systemKind: sk, createdAt };
+}
+
+/**
+ * Cheap discriminator: are these bytes a call-signaling
+ * proto? Returns `true` when the first byte matches one of
+ * the `CallSignalingPayload.body` oneof field tags
+ * (0x52 / 0x5A / 0x62 / 0x6A) AND the bytes are NOT JSON
+ * (which would start with `{` / 0x7B). Cheap enough to run
+ * on every `Application` row in the poll batch.
+ *
+ * Wire layout for the first byte of an embedded
+ * `CallSignalingPayload`:
+ *
+ *   field 10 (offer)        → tag = (10 << 3) | 2 = 0x52
+ *   field 11 (answer)       → tag = (11 << 3) | 2 = 0x5A
+ *   field 12 (candidate)    → tag = (12 << 3) | 2 = 0x62
+ *   field 13 (end)          → tag = (13 << 3) | 2 = 0x6A
+ *
+ * Chat envelopes are JSON and start with `{` (0x7B). The
+ * sets don't overlap. A false positive on a non-JSON,
+ * non-signaling future-envelope shape is still harmless —
+ * the caller's downstream `parseCallSignaling` rejects with
+ * a proto-decode error and the caller swallows.
+ */
+function looksLikeCallSignaling(bytes: Uint8Array): boolean {
+  if (bytes.length === 0) return false;
+  const first = bytes[0] as number;
+  return first === 0x52 || first === 0x5a || first === 0x62 || first === 0x6a;
 }

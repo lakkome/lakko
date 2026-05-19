@@ -46,6 +46,14 @@ import { useAuth } from "../auth/AuthContext";
 import { useDeviceGroupSync } from "../devices/sync/DeviceGroupSyncContext";
 import { groupIdHex as hexOf } from "../devices/sync/state";
 import {
+  CallSession,
+  mintCallId,
+  type WebCallState,
+  type WebCallEndReason,
+} from "../calls/call-session";
+import { DsClient } from "../ds/client";
+import { loadWasm as loadWasmForCalls } from "../wasm";
+import {
   loadMessageLog,
   saveMessageLog,
   type MessageLogPayload,
@@ -233,6 +241,146 @@ function ChatView(props: {
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
   const [notice, setNotice] = createSignal<string | null>(null);
+
+  // Phase 3a8 — 1×1 call surface. Only one CallSession can
+  // ride a given chat thread at a time; the field tracks
+  // the active session (if any) + its observable state.
+  // Audio is bound to a hidden `<audio>` element via the
+  // ref below; the call overlay shows the duration / hang
+  // up button.
+  const [callState, setCallState] = createSignal<WebCallState>("idle");
+  const [callEndReason, setCallEndReason] = createSignal<WebCallEndReason | null>(null);
+  let activeCall: CallSession | null = null;
+  const [remoteAudioStream, setRemoteAudioStream] = createSignal<MediaStream | null>(
+    null,
+  );
+  const [audioRef, setAudioRef] = createSignal<HTMLAudioElement | null>(null);
+  createEffect(() => {
+    const el = audioRef();
+    const stream = remoteAudioStream();
+    if (el !== null && stream !== null) {
+      el.srcObject = stream;
+      void el.play().catch(() => {
+        // Autoplay might be blocked until user gesture —
+        // the Accept button click on the receiver counts.
+      });
+    }
+  });
+
+  /** Build outbound-signaling callback that PUTs raw
+   *  bytes onto the chat group's DS journal as an MLS
+   *  application message. */
+  function publishSignalingFor(group: ActiveGroup): (bytes: Uint8Array) => void {
+    return (bytes: Uint8Array): void => {
+      void (async (): Promise<void> => {
+        try {
+          const id = chats.identity();
+          if (id === null) {
+            // eslint-disable-next-line no-console
+            console.warn(
+              "call signaling publish skipped: no canonical Identity in session",
+            );
+            return;
+          }
+          const out = group.group.createApplicationMessage(id, bytes);
+          const ds = new DsClient();
+          await ds.publishGroup(group.group.groupId, out);
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.warn("call signaling publish failed", err);
+        }
+      })();
+    };
+  }
+
+  function buildCallSession(callId: Uint8Array): CallSession {
+    return new CallSession(callId, {
+      onRemoteStream: (s) => setRemoteAudioStream(s),
+      onOutboundSignaling: publishSignalingFor(props.entry),
+      onStateChange: (s, reason) => {
+        setCallState(s);
+        if (reason !== undefined) setCallEndReason(reason);
+        if (s === "done") {
+          activeCall = null;
+          setRemoteAudioStream(null);
+        }
+      },
+    });
+  }
+
+  async function onCallClicked(): Promise<void> {
+    if (activeCall !== null) return;
+    const session = buildCallSession(mintCallId());
+    activeCall = session;
+    try {
+      await session.dial({ audio: true, video: false });
+    } catch (err) {
+      setError(
+        `Could not start call: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      activeCall = null;
+    }
+  }
+
+  async function onHangUp(): Promise<void> {
+    if (activeCall === null) return;
+    await activeCall.hangUp("hungUp");
+  }
+
+  async function onAcceptCall(): Promise<void> {
+    if (activeCall === null) return;
+    await activeCall.accept();
+  }
+
+  async function onDeclineCall(): Promise<void> {
+    if (activeCall === null) return;
+    await activeCall.decline();
+  }
+
+  // Route every inbound callSignaling row to the active
+  // session (or spin a fresh answerer session up for a
+  // first-seen offer).
+  createEffect(() => {
+    const list = rows();
+    for (const row of list) {
+      if (row.kind !== "incoming") continue;
+      const ev = row.event;
+      if (ev.kind !== "callSignaling") continue;
+      const bytes = ev.payloadBytes;
+      void (async (): Promise<void> => {
+        try {
+          const wasm = await loadWasmForCalls();
+          const parsed = wasm.parseCallSignaling(bytes);
+          if (activeCall === null) {
+            // Fresh inbound offer — spin up an answerer
+            // session bound to the offer's call_id.
+            if (parsed.kind !== "offer") return;
+            const session = buildCallSession(parsed.callId);
+            activeCall = session;
+          }
+          // Ignore stale signaling targeting a different
+          // call_id.
+          if (
+            activeCall.callId.length === parsed.callId.length &&
+            !uint8ArrayEquals(activeCall.callId, parsed.callId)
+          ) {
+            return;
+          }
+          await activeCall.applyIncomingSignaling(parsed);
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.warn("inbound call signaling failed", err);
+        }
+      })();
+    }
+  });
+
+  onCleanup(() => {
+    if (activeCall !== null) {
+      activeCall.dispose();
+      activeCall = null;
+    }
+  });
 
   // Phase 2a3e2b-web: cross-device draft synchronisation.
   //
@@ -1082,11 +1230,151 @@ function ChatView(props: {
           >
             {busy() ? "Refreshing…" : "Refresh"}
           </button>
+          {/* Phase 3a8 — call button. Visible whenever no
+              call is active in this thread. */}
+          <Show when={callState() === "idle" || callState() === "done"}>
+            <button
+              type="button"
+              onClick={() => {
+                void onCallClicked();
+              }}
+              disabled={busy()}
+            >
+              📞 Call
+            </button>
+          </Show>
           <button type="button" onClick={props.onLeave}>
             Back to Contacts
           </button>
         </div>
       </header>
+
+      {/* Phase 3a8 — call overlay. Renders on top of the
+          timeline whenever a call is in flight. */}
+      <Show
+        when={
+          callState() !== "idle" &&
+          callState() !== "done"
+        }
+      >
+        <div
+          style={{
+            position: "sticky",
+            top: "0",
+            "z-index": 10,
+            margin: "0.5rem 0",
+            padding: "0.75rem 1rem",
+            background: "var(--accent)",
+            color: "var(--accent-fg)",
+            "border-radius": "var(--radius-md)",
+            display: "flex",
+            "align-items": "center",
+            "justify-content": "space-between",
+            gap: "0.75rem",
+            "box-shadow": "0 2px 8px rgba(0, 0, 0, 0.15)",
+          }}
+        >
+          <div>
+            <strong>
+              {(() => {
+                switch (callState()) {
+                  case "outgoing":
+                    return "📞 Calling…";
+                  case "ringing":
+                    return "📞 Incoming call";
+                  case "connecting":
+                    return "📞 Connecting…";
+                  case "connected":
+                    return "📞 In call";
+                  case "ending":
+                    return "📞 Ending…";
+                  default:
+                    return "📞";
+                }
+              })()}
+            </strong>
+            <div style={{ "font-size": "0.85rem", "margin-top": "0.2rem" }}>
+              Audio · P2P (DTLS-SRTP). SFU + SFrame land in Phase 3b.
+            </div>
+          </div>
+          <div style={{ display: "flex", gap: "0.4rem" }}>
+            <Show when={callState() === "ringing"}>
+              <button
+                type="button"
+                onClick={() => {
+                  void onAcceptCall();
+                }}
+                style={{
+                  background: "var(--surface)",
+                  color: "var(--surface-fg)",
+                  border: "none",
+                  padding: "0.5rem 0.9rem",
+                  "border-radius": "var(--radius-sm)",
+                  "font-weight": "600",
+                  cursor: "pointer",
+                }}
+              >
+                Accept
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  void onDeclineCall();
+                }}
+                style={{
+                  background: "transparent",
+                  color: "var(--accent-fg)",
+                  border: "1px solid var(--accent-fg)",
+                  padding: "0.5rem 0.9rem",
+                  "border-radius": "var(--radius-sm)",
+                  cursor: "pointer",
+                }}
+              >
+                Decline
+              </button>
+            </Show>
+            <Show when={callState() !== "ringing"}>
+              <button
+                type="button"
+                onClick={() => {
+                  void onHangUp();
+                }}
+                style={{
+                  background: "transparent",
+                  color: "var(--accent-fg)",
+                  border: "1px solid var(--accent-fg)",
+                  padding: "0.5rem 0.9rem",
+                  "border-radius": "var(--radius-sm)",
+                  cursor: "pointer",
+                }}
+              >
+                Hang up
+              </button>
+            </Show>
+          </div>
+          {/* Hidden audio sink for the remote stream. */}
+          <audio
+            ref={(el) => setAudioRef(el)}
+            autoplay
+            style={{ display: "none" }}
+          />
+        </div>
+      </Show>
+
+      <Show when={callState() === "done" && callEndReason() !== null}>
+        <div
+          style={{
+            margin: "0.5rem 0",
+            padding: "0.5rem 0.75rem",
+            background: "var(--surface-elevated)",
+            "border-radius": "var(--radius-sm)",
+            "font-size": "0.85rem",
+            color: "var(--surface-muted)",
+          }}
+        >
+          Last call ended ({callEndReason()}).
+        </div>
+      </Show>
 
       {/* 1.18g — inline "Add member" form. Toggled via the
          button above. Submit drives
@@ -1442,6 +1730,13 @@ function TimelineBubble(props: {
         </li>
       );
     }
+    if (ev.kind === "callSignaling") {
+      // Phase 3a8 — call signaling rides the same MLS group
+      // as chat messages, but it isn't part of the visible
+      // timeline. The CallContext upstream already routed
+      // it into the state machine; nothing renders here.
+      return null;
+    }
     return (
       <li
         style={{
@@ -1772,6 +2067,12 @@ function hasFilesType(dt: DataTransfer | null): boolean {
  *  flips the row to `kind: "outgoing"` with a populated
  *  `messageId` and the next persist sweep includes it. */
 function timelineRowToPersisted(row: TimelineRow): PersistedMessage | null {
+  // Phase 3a8 — call signaling events never persist into
+  // the chat log; they're an out-of-band side channel that
+  // the CallContext consumes.
+  if (row.kind === "incoming" && row.event.kind === "callSignaling") {
+    return null;
+  }
   if (row.kind === "outgoing") {
     if (
       row.ack !== "sent" ||
@@ -1797,6 +2098,10 @@ function timelineRowToPersisted(row: TimelineRow): PersistedMessage | null {
       attachments: row.event.attachments.map(persistedFromAttachmentRef),
       createdAt: row.event.createdAt,
     };
+  }
+  if (row.event.kind === "callSignaling") {
+    // Already filtered out at the top of this function.
+    return null;
   }
   // system
   return {
@@ -1886,6 +2191,14 @@ function b64UrlEncode(bytes: Uint8Array): string {
     .replace(/\+/g, "-")
     .replace(/\//g, "_")
     .replace(/=+$/, "");
+}
+
+function uint8ArrayEquals(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i += 1) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
 }
 
 function b64UrlDecode(s: string): Uint8Array {
