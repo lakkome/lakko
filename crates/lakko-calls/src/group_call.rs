@@ -405,6 +405,22 @@ mod tests {
         (id_a, id_b, group_a)
     }
 
+    /// Same shape as [`make_pair`] but also returns B's
+    /// independently-derived `Group` handle (built from the
+    /// Welcome). The cross-party seal/open tests need both
+    /// sides' Groups so the exporter is exercised twice on
+    /// independent state — the way it'll be in production.
+    fn make_pair_joined() -> (Identity, Identity, Group, Group) {
+        let id_a = MlsIdentity::generate("device-A").unwrap();
+        let id_b = MlsIdentity::generate("device-B").unwrap();
+        let kp_b = id_b.create_key_package().unwrap();
+        let mut group_a = lakko_mls::Group::create(&id_a).unwrap();
+        let addition = group_a.add_member(&id_a, kp_b).unwrap();
+        let welcome_bytes = lakko_mls::group::encode_message(&addition.welcome).unwrap();
+        let group_b = lakko_mls::Group::join_from_welcome(&welcome_bytes, &id_b).unwrap();
+        (id_a, id_b, group_a, group_b)
+    }
+
     fn fixture_call_id() -> CallId {
         let mut id = [0u8; 16];
         id[0] = 0x10;
@@ -617,5 +633,241 @@ mod tests {
         let joined = session.joined_participants();
         let indices: Vec<u32> = joined.iter().map(|p| p.leaf_index).collect();
         assert_eq!(indices, vec![3, 5, 7]);
+    }
+
+    // =====================================================
+    // Phase 3c4 — cross-party SFrame seal/open via two
+    // independent GroupCallSession instances. Exercises the
+    // real MLS exporter agreement across an A↔B pair (and an
+    // A↔B↔C trio) rather than the shortcut used in
+    // `sframe::tests::participant_key_round_trips`.
+    // =====================================================
+
+    /// A seals with its own_participant_key; B derives A's
+    /// remote_participant_key from B's independent MLS Group
+    /// view and opens. This is the real production shape —
+    /// no shared seed, no shortcut — proving the MLS
+    /// exporter agrees byte-for-byte across the wire.
+    #[test]
+    fn cross_party_seal_open_round_trips() {
+        let (id_a, id_b, group_a, group_b) = make_pair_joined();
+        let call_id = fixture_call_id();
+
+        let session_a =
+            GroupCallSession::create(GroupCallScope::InChat, call_id, &group_a, &id_a).unwrap();
+        let session_b =
+            GroupCallSession::create(GroupCallScope::InChat, call_id, &group_b, &id_b).unwrap();
+
+        // Both sides agree on the call_key seed.
+        assert_eq!(
+            session_a.call_key().as_bytes(),
+            session_b.call_key().as_bytes()
+        );
+        // And on the local-leaf indices each thinks they own.
+        assert_eq!(session_a.own_leaf_index, 0);
+        assert_eq!(session_b.own_leaf_index, 1);
+
+        // A → B: A seals with its own key (sender_leaf = 0);
+        // B re-derives A's key from B's side via
+        // remote_participant_key(0) and opens.
+        let mut send_a = session_a.own_participant_key().unwrap();
+        let recv_a_on_b = session_b.remote_participant_key(0).unwrap();
+        let aad = b"sframe-header-A";
+        let pt = b"hello from A";
+        let (ctr, ct) = send_a.seal(aad, pt).unwrap();
+        let opened = recv_a_on_b.open(aad, &ct, ctr).unwrap();
+        assert_eq!(opened.as_slice(), pt.as_ref());
+
+        // B → A: symmetric path. Confirms the per-leaf
+        // derivation is not biased toward leaf 0.
+        let mut send_b = session_b.own_participant_key().unwrap();
+        let recv_b_on_a = session_a.remote_participant_key(1).unwrap();
+        let aad = b"sframe-header-B";
+        let pt = b"hello from B";
+        let (ctr, ct) = send_b.seal(aad, pt).unwrap();
+        let opened = recv_b_on_a.open(aad, &ct, ctr).unwrap();
+        assert_eq!(opened.as_slice(), pt.as_ref());
+    }
+
+    /// After an MLS commit that advances the chat group's
+    /// epoch (here: A adds a third member C), both A and B
+    /// `refresh_call_key`. The post-epoch call_key seed
+    /// differs from the pre-epoch one. Cross-party seal/open
+    /// still works between A↔B under the new seed; frames
+    /// sealed under the OLD key cannot be opened with the
+    /// NEW key — the rotation gives forward secrecy of the
+    /// seed boundary, even before the 1s SFrame overlap
+    /// window applies.
+    #[test]
+    fn cross_party_round_trip_survives_epoch_advance() {
+        let id_a = MlsIdentity::generate("device-A").unwrap();
+        let id_b = MlsIdentity::generate("device-B").unwrap();
+        let id_c = MlsIdentity::generate("device-C").unwrap();
+        let call_id = fixture_call_id();
+
+        // Epoch 0 — A creates, B joins.
+        let mut group_a = lakko_mls::Group::create(&id_a).unwrap();
+        let kp_b = id_b.create_key_package().unwrap();
+        let addition_b = group_a.add_member(&id_a, kp_b).unwrap();
+        let welcome_b = lakko_mls::group::encode_message(&addition_b.welcome).unwrap();
+        let mut group_b = lakko_mls::Group::join_from_welcome(&welcome_b, &id_b).unwrap();
+
+        let mut session_a =
+            GroupCallSession::create(GroupCallScope::InChat, call_id, &group_a, &id_a).unwrap();
+        let mut session_b =
+            GroupCallSession::create(GroupCallScope::InChat, call_id, &group_b, &id_b).unwrap();
+        let seed_pre = *session_a.call_key().as_bytes();
+        assert_eq!(seed_pre, *session_b.call_key().as_bytes());
+
+        // Snapshot a stale ciphertext under the OLD key, AAD,
+        // and counter. We'll try to open it after rotation
+        // and expect AEAD authentication failure.
+        let mut send_a_pre = session_a.own_participant_key().unwrap();
+        let stale_aad = b"sframe-header-pre";
+        let stale_plain = b"stale frame";
+        let (stale_counter, stale_cipher) = send_a_pre.seal(stale_aad, stale_plain).unwrap();
+
+        // Epoch advance — A adds C; B applies the commit.
+        let kp_c = id_c.create_key_package().unwrap();
+        let addition_c = group_a.add_member(&id_a, kp_c).unwrap();
+        let commit_bytes = lakko_mls::group::encode_message(&addition_c.commit).unwrap();
+        let processed = group_b.process_incoming(&id_b, &commit_bytes).unwrap();
+        assert!(matches!(processed, lakko_mls::Incoming::Commit));
+
+        session_a.refresh_call_key(&group_a, &id_a).unwrap();
+        session_b.refresh_call_key(&group_b, &id_b).unwrap();
+        let seed_post = *session_a.call_key().as_bytes();
+        assert_ne!(seed_pre, seed_post, "epoch advance must rotate seed");
+        assert_eq!(seed_post, *session_b.call_key().as_bytes());
+        assert!(session_a.needs_rekey());
+        assert!(session_b.needs_rekey());
+        session_a.ack_rekey();
+        session_b.ack_rekey();
+
+        // Cross-party seal/open under the NEW seed: works.
+        let mut send_a_post = session_a.own_participant_key().unwrap();
+        let recv_a_on_b = session_b.remote_participant_key(0).unwrap();
+        let fresh_aad = b"sframe-header-post";
+        let fresh_plain = b"fresh frame";
+        let (fresh_counter, fresh_cipher) = send_a_post.seal(fresh_aad, fresh_plain).unwrap();
+        let opened = recv_a_on_b
+            .open(fresh_aad, &fresh_cipher, fresh_counter)
+            .unwrap();
+        assert_eq!(opened.as_slice(), fresh_plain.as_ref());
+
+        // Stale ciphertext under the OLD key cannot be opened
+        // by the NEW key — AEAD authentication rejects.
+        // This is the "seed boundary forward secrecy" the
+        // re-key buys before the 1s overlap window even
+        // applies (the overlap holds the old key briefly on
+        // the wire; here we're past that).
+        let recv_a_stale = session_b.remote_participant_key(0).unwrap();
+        match recv_a_stale.open(stale_aad, &stale_cipher, stale_counter) {
+            Ok(_) => panic!("stale frame must not decode under new key"),
+            Err(crate::Error::Crypto(_)) => {},
+            Err(other) => panic!("expected Crypto error, got {other:?}"),
+        }
+    }
+
+    /// Three-party seal/open: every participant can seal
+    /// under its own_participant_key and every other
+    /// participant can open via the sender's
+    /// remote_participant_key. Exercises the
+    /// "everyone derives everyone else's key" invariant the
+    /// SFU forwarding path depends on.
+    #[test]
+    fn three_party_full_mesh_seal_open() {
+        let id_a = MlsIdentity::generate("device-A").unwrap();
+        let id_b = MlsIdentity::generate("device-B").unwrap();
+        let id_c = MlsIdentity::generate("device-C").unwrap();
+        let call_id = fixture_call_id();
+
+        // Build the 3-party group: A creates, A adds B
+        // (commit-1), A adds C (commit-2). B and C catch up
+        // by applying the relevant commits / welcome.
+        let mut group_a = lakko_mls::Group::create(&id_a).unwrap();
+        let kp_b = id_b.create_key_package().unwrap();
+        let add_b = group_a.add_member(&id_a, kp_b).unwrap();
+        let welcome_b = lakko_mls::group::encode_message(&add_b.welcome).unwrap();
+        let mut group_b = lakko_mls::Group::join_from_welcome(&welcome_b, &id_b).unwrap();
+
+        let kp_c = id_c.create_key_package().unwrap();
+        let add_c = group_a.add_member(&id_a, kp_c).unwrap();
+        let welcome_c = lakko_mls::group::encode_message(&add_c.welcome).unwrap();
+        let group_c = lakko_mls::Group::join_from_welcome(&welcome_c, &id_c).unwrap();
+        // B applies the commit that added C so B's epoch
+        // catches up to A's and C's.
+        let commit_c_bytes = lakko_mls::group::encode_message(&add_c.commit).unwrap();
+        let processed = group_b.process_incoming(&id_b, &commit_c_bytes).unwrap();
+        assert!(matches!(processed, lakko_mls::Incoming::Commit));
+
+        let session_a =
+            GroupCallSession::create(GroupCallScope::InChat, call_id, &group_a, &id_a).unwrap();
+        let session_b =
+            GroupCallSession::create(GroupCallScope::InChat, call_id, &group_b, &id_b).unwrap();
+        let session_c =
+            GroupCallSession::create(GroupCallScope::InChat, call_id, &group_c, &id_c).unwrap();
+
+        // Everyone agrees on the seed.
+        let seed = *session_a.call_key().as_bytes();
+        assert_eq!(seed, *session_b.call_key().as_bytes());
+        assert_eq!(seed, *session_c.call_key().as_bytes());
+        assert_eq!(session_a.own_leaf_index, 0);
+        assert_eq!(session_b.own_leaf_index, 1);
+        assert_eq!(session_c.own_leaf_index, 2);
+
+        // Full mesh: each of A / B / C seals one frame; the
+        // other two open it via the sender's leaf index.
+        let senders: [(u32, &GroupCallSession); 3] =
+            [(0, &session_a), (1, &session_b), (2, &session_c)];
+        let receivers: [&GroupCallSession; 3] = [&session_a, &session_b, &session_c];
+
+        for (sender_leaf, sender_session) in senders {
+            let mut send_key = sender_session.own_participant_key().unwrap();
+            let aad = format!("sframe/leaf={sender_leaf}");
+            let pt = format!("frame-from-{sender_leaf}");
+            let (ctr, ct) = send_key.seal(aad.as_bytes(), pt.as_bytes()).unwrap();
+
+            for (idx, receiver) in receivers.iter().enumerate() {
+                if u32::try_from(idx).unwrap() == sender_leaf {
+                    // Skip the sender itself; the SFU loops
+                    // a participant's own frames back, but
+                    // SFrame open under one's own key is a
+                    // separate property (counter would clash
+                    // — receiver state holds the latest
+                    // observed counter per sender).
+                    continue;
+                }
+                let recv_key = receiver.remote_participant_key(sender_leaf).unwrap();
+                let opened = recv_key.open(aad.as_bytes(), &ct, ctr).unwrap();
+                assert_eq!(opened.as_slice(), pt.as_bytes());
+            }
+        }
+    }
+
+    /// AAD-binding check on the cross-party path: A seals
+    /// with `aad_a`; B tries to open with `aad_b`. The
+    /// AEAD construction must reject. This is the
+    /// participant-key-level twin of the SFrame
+    /// header-integrity property (the SFrame header itself
+    /// is the AAD in production).
+    #[test]
+    fn cross_party_wrong_aad_rejects() {
+        let (id_a, id_b, group_a, group_b) = make_pair_joined();
+        let call_id = fixture_call_id();
+
+        let session_a =
+            GroupCallSession::create(GroupCallScope::InChat, call_id, &group_a, &id_a).unwrap();
+        let session_b =
+            GroupCallSession::create(GroupCallScope::InChat, call_id, &group_b, &id_b).unwrap();
+
+        let mut send_a = session_a.own_participant_key().unwrap();
+        let recv_a_on_b = session_b.remote_participant_key(0).unwrap();
+        let (ctr, ct) = send_a.seal(b"aad-A", b"frame").unwrap();
+        match recv_a_on_b.open(b"aad-B", &ct, ctr) {
+            Ok(_) => panic!("wrong AAD must fail authentication"),
+            Err(crate::Error::Crypto(_)) => {},
+            Err(other) => panic!("expected Crypto error, got {other:?}"),
+        }
     }
 }
