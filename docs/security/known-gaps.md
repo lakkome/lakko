@@ -154,6 +154,52 @@ session is implausible but not impossible — Phase 2c can
 mix the OPAQUE message hash into the WebAuthn assertion
 challenge.
 
+## Calls
+
+### G-17: Frame-counter exhaustion path is documented but not test-exercised
+
+`ParticipantKey::seal` honours the RFC 9605 §4.4 32-bit
+counter bound and surfaces `Error::CounterExhausted` when
+exhausted; the caller is expected to trigger a fresh MLS
+commit to re-key. A dedicated test that drives the counter
+to 2^32 is infeasible in CI (≈ 4 billion seal ops). The
+property is reviewed by inspection;
+`crates/lakko-calls/src/sframe.rs::MAX_FRAME_COUNTER` is
+the canonical bound.
+
+### G-18: Overlap-window 1-second timer lives in platform code, not in the Rust core
+
+`GroupCallSession::drop_previous_call_key` is invoked by
+the platform's own timer (iOS `Task.sleep` / Android
+coroutine delay / web `setTimeout`). The Rust core stays
+wall-clock-free per design (testability, no time-source
+dependency). Each platform's timer correctness is reviewed
+alongside the WebRTC pod integration in 3a9 / 3a10
+followups; a "platform forgot to drop" would extend the
+overlap window indefinitely and weaken seed-boundary
+forward secrecy until the next rotation.
+
+Mitigation: the platform's overlap timer is the same
+trivial-to-audit `setTimeout(drop, 1000)` shape on every
+client; failure mode is local-to-that-client (an attacker
+cannot cause it remotely).
+
+### G-19: SFU-side JWT validation lands with 3b1c (LiveKit fork)
+
+The `(account_id, call_id, role, expires_at)` JWT shape is
+specified in [ADR-0008](../adr/0008-livekit-fork-strategy.md)
+but the validation surface is not yet implemented — that's
+3b1c work alongside the fork tree setup (3b1a). This audit
+covers the client-side contract only.
+
+### G-20: Call recording is out of scope (deferred per ROADMAP 3c8)
+
+If recording ever lands, the design is "recording client
+joins as a regular participant with its own MLS leaf" — no
+break to call-side invariants C-1..C-10 in
+[`calls.md`](./calls.md). The recorded stream is
+end-to-end encrypted just like any other consumer's view.
+
 ## Out-of-protocol
 
 ### G-14: Hostile-OS / hostile-browser threats

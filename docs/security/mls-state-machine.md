@@ -110,7 +110,7 @@ free of collisions. Current set:
 | Label | Length (bytes) | Source | Used for |
 |---|---|---|---|
 | `lakko/history-bundle/v1` | 32 | `lakko_mls::history_bundle::exporter_secret` | Per-pairing AEAD key for the history catch-up bundle (Phase 2a3d8) |
-| `lakko/call/v1` | 32 | Reserved for Phase 3 (SFrame) | Per-call media-key seed; per-participant keys derived via HKDF from leaf index |
+| `lakko/call/v1` | 32 | `lakko_calls::sframe::CallKey::derive` (Phase 3a4) | Per-call SFrame seed; per-participant keys derived via HKDF over `(seed, sender_leaf_be)` with info `lakko/sframe/v1/key` and nonce salt under `lakko/sframe/v1/nonce`. See [`calls.md`](./calls.md). |
 
 A new label requires an ADR amendment + a test +
 re-running this audit pack.
