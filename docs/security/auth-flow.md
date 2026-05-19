@@ -222,7 +222,7 @@ signature is the only proof of admission; a leaked JWT
 is bounded by the 1-hour `exp`.
 
 See [`calls.md`](./calls.md) §"Call-admission JWT
-invariants" for the full C-15..C-21 invariant list +
+invariants" for the full C-15..C-23 invariant list +
 cited tests.
 
 ## Password rotation invariants

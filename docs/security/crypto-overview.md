@@ -35,7 +35,7 @@ reviewer can jump straight to the call site.
 | VOPRF (discovery) | RFC 9497 mode-VOPRF | [`crates/lakko-discovery-client/`](../../crates/lakko-discovery-client/) | Username lookup with server-blinded queries |
 | Equix PoW | Equix algorithm (Tor's onion-service PoW lineage) | [`crates/lakko-pow/`](../../crates/lakko-pow/) | Anti-spam on auth endpoints + on contact-request envelopes |
 | WebAuthn / passkey | FIDO2 + `webauthn-rs` 0.5 | [`services/auth/`](../../services/auth/) + per-client integration | Passkey opt-in (Phase 2a2) |
-| Call-admission JWT | JWS Compact (RFC 7515) + EdDSA (RFC 8037), Ed25519 signing key + JWK publication (RFC 8037 OKP form) | [`services/auth/src/call_jwt.rs`](../../services/auth/src/call_jwt.rs) | Per-call admission token the SFU validates; 1-hour `exp`, public key published at `/.well-known/jwks.json`. Hand-rolled JWS — no `jsonwebtoken` dep. See [`calls.md`](./calls.md) C-15..C-21 (Phase 3b4) |
+| Call-admission JWT | JWS Compact (RFC 7515) + EdDSA (RFC 8037), Ed25519 signing key + JWK publication (RFC 8037 OKP form) | [`crates/lakko-call-jwt/`](../../crates/lakko-call-jwt/src/lib.rs) (mint + verify + JWKS) + [`services/auth/src/call_jwt.rs`](../../services/auth/src/call_jwt.rs) (handlers + key persistence) | Per-call admission token the SFU validates; 1-hour `exp`, public key published at `/.well-known/jwks.json`. Hand-rolled JWS — no `jsonwebtoken` dep. See [`calls.md`](./calls.md) C-15..C-23 (Phase 3b4) |
 
 ## Cipher suite pins (MLS)
 

@@ -43,7 +43,8 @@ summarises so the docs and the implementation stay in sync
   (invariants C-1..C-14); (2) call-admission JWT — Ed25519
   signing in `services/auth`, JWKS publication, bearer-auth
   on `POST /call/jwt`, issuer / audience / expiry checks
-  (invariants C-15..C-21). What the SFU sees vs what stays
+  (invariants C-15..C-23 — includes JWKS multi-key resolution +
+  JWK algorithm-confusion defence). What the SFU sees vs what stays
   client-side. Every invariant cites a property test.
 - [`known-gaps.md`](./known-gaps.md) — items the maintainer
   knows are not audit-ready yet; reviewers should not
@@ -85,11 +86,15 @@ The reviewer is asked to verify:
    cross-party exporter agreement, per-participant key
    distinctness, and the 1-second overlap window's
    forward-secrecy boundary on rotation.
-8. The **call-admission JWT issuance side** (`services/auth/
-   src/call_jwt.rs`) holds C-15..C-21 in [`calls.md`](./calls.md)
-   — hand-rolled JWS Compact + EdDSA over Ed25519, persistent
-   signing key, JWKS publication, bearer-auth on the mint
-   endpoint, strict issuer / audience / expiry / kid checks.
+8. The **call-admission JWT pipeline** — crypto + wire shape
+   in [`crates/lakko-call-jwt/`](../../crates/lakko-call-jwt/src/lib.rs),
+   server-side handlers in [`services/auth/src/call_jwt.rs`](../../services/auth/src/call_jwt.rs),
+   client-side parse / self-verify via the FFI crates — holds
+   C-15..C-23 in [`calls.md`](./calls.md). Hand-rolled JWS
+   Compact + EdDSA over Ed25519, persistent signing key, JWKS
+   publication, bearer-auth on the mint endpoint, strict
+   issuer / audience / expiry / kid checks, multi-key JWKS
+   resolution + JWK algorithm-confusion defence.
    The SFU-side validation (3b1c) is **out of scope for THIS
    audit pass** — it lands with the LiveKit fork. See G-19
    in [`known-gaps.md`](./known-gaps.md).

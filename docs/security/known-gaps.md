@@ -186,16 +186,21 @@ cannot cause it remotely).
 
 ### G-19: SFU-side JWT validation lands with 3b1c (LiveKit fork)
 
-**Issuance side: shipped in 3b4** —
-[`services/auth/src/call_jwt.rs`](../../services/auth/src/call_jwt.rs)
-mints Ed25519-signed JWTs with the C-15..C-21 invariants
+**Issuance side: shipped in 3b4** — crypto in
+[`crates/lakko-call-jwt/`](../../crates/lakko-call-jwt/src/lib.rs),
+handlers + key persistence in
+[`services/auth/src/call_jwt.rs`](../../services/auth/src/call_jwt.rs).
+Mints Ed25519-signed JWTs with the C-15..C-23 invariants
 in [`calls.md`](./calls.md). Public key is published at
-`GET /.well-known/jwks.json`.
+`GET /.well-known/jwks.json`. Client-side parse + verify
+is exposed through the FFI crates so a Lakko client can
+self-verify a JWT before presenting it.
 
 **Validation side: still pending 3b1c (Go-side, in the
-LiveKit fork)**. The Rust-side `verify_jwt` helper in
-the same module is functional and tested but isn't on
-the load-bearing path until the SFU's Go verifier
+LiveKit fork)**. The Rust-side `lakko_call_jwt::verify_with_jwks`
+is functional and tested + serves as the reference
+implementation the Go verifier interops against, but
+isn't on the load-bearing SFU path until the LiveKit fork
 consumes the JWKS doc.
 
 Operational consequence: today's `POST /call/jwt`

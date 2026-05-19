@@ -260,11 +260,18 @@ Test:
 ## Call-admission JWT invariants (Phase 3b4)
 
 The SFU admits a participant only after validating a JWT
-signed by `services/auth`. The Rust-side issuance shipped
-in 3b4 (forward-progress, since the SFU-side verifier in
-Go lives in 3b1c). Module:
-[`services/auth/src/call_jwt.rs`](../../services/auth/src/call_jwt.rs).
-Storage: `services/auth/migrations/0007_call_jwt_signing.sql`
+signed by `services/auth`. The Rust-side issuance + the
+client-side verifier shipped in 3b4 (forward-progress,
+since the SFU-side verifier in Go lives in 3b1c).
+
+Crypto + wire shape lives in the shared crate
+[`crates/lakko-call-jwt/`](../../crates/lakko-call-jwt/src/lib.rs)
+so issuance side (auth service), client side (FFI), and
+the Go-side SFU verifier (3b1c, reimplemented against the
+same spec) all speak one shape and can't drift. The auth
+service-side HTTP handlers + keypair persistence live in
+[`services/auth/src/call_jwt.rs`](../../services/auth/src/call_jwt.rs);
+storage in `services/auth/migrations/0007_call_jwt_signing.sql`
 (single-row `call_jwt_signing_key` table holding the
 32-byte Ed25519 seed).
 
@@ -303,10 +310,12 @@ fetch + cache it without any handshake with the auth
 service beyond a single GET on a static URL.
 
 Test:
-[`call_jwt::tests::mint_then_verify_round_trips`](../../services/auth/src/call_jwt.rs)
-covers the sign-then-verify happy path; the persistence
-side is exercised by the bootstrap test fixture spinning
-a fresh `AppState`.
+[`lakko_call_jwt::tests::mint_then_verify_round_trips`](../../crates/lakko-call-jwt/src/lib.rs)
+covers the sign-then-verify happy path. The persistence
+side is exercised by the auth-side smoke test
+[`call_jwt::tests::auth_side_issuance_round_trips`](../../services/auth/src/call_jwt.rs)
+which builds a `CallSigningKey` from a fixture seed and
+round-trips the claim shape the HTTP handler emits.
 
 ### C-16: A JWT with the wrong `iss` or `aud` is rejected
 
@@ -317,8 +326,8 @@ JWT minted for some other audience (e.g. a future
 `lakko-edge` service) from being replayed at the SFU.
 
 Tests:
-[`call_jwt::tests::wrong_issuer_rejects`](../../services/auth/src/call_jwt.rs)
-+ [`call_jwt::tests::wrong_audience_rejects`](../../services/auth/src/call_jwt.rs).
+[`lakko_call_jwt::tests::wrong_issuer_rejects`](../../crates/lakko-call-jwt/src/lib.rs)
++ [`lakko_call_jwt::tests::wrong_audience_rejects`](../../crates/lakko-call-jwt/src/lib.rs).
 
 ### C-17: A JWT past its `exp` is rejected
 
@@ -332,8 +341,8 @@ The injection lets tests drive the clock without depending
 on `SystemTime::now`.
 
 Test:
-[`call_jwt::tests::expired_jwt_rejects`](../../services/auth/src/call_jwt.rs)
-— verifies both `now == exp` and `now == exp + 1` reject.
+[`lakko_call_jwt::tests::expired_jwt_rejects`](../../crates/lakko-call-jwt/src/lib.rs)
+— verifies `now == exp + TTL` rejects.
 
 ### C-18: A JWT signed by a different key is rejected, even if the `kid` matches
 
@@ -354,7 +363,7 @@ auth-service-to-SFU link, which is a separate failure mode
 that TLS terminates upstream of this check.
 
 Test:
-[`call_jwt::tests::wrong_signing_key_rejects`](../../services/auth/src/call_jwt.rs).
+[`lakko_call_jwt::tests::wrong_signing_key_rejects`](../../crates/lakko-call-jwt/src/lib.rs).
 
 ### C-19: A JWT with a tampered header / payload is rejected
 
@@ -365,7 +374,7 @@ Ed25519 verification rejects. This is the canonical JWS
 tamper-evident property.
 
 Test:
-[`call_jwt::tests::tampered_payload_rejects`](../../services/auth/src/call_jwt.rs)
+[`lakko_call_jwt::tests::tampered_payload_rejects`](../../crates/lakko-call-jwt/src/lib.rs)
 mutates the last base64url character in the payload
 segment and asserts the verifier rejects with one of
 `{Signature, Format, Encode}` — the specific error type
@@ -381,8 +390,11 @@ This lets the JWKS-cache-refresh logic on the SFU side
 detect a key rotation by `kid` inequality rather than
 needing to compare full public-key bytes.
 
-Test:
-[`call_jwt::tests::kid_is_stable_per_keypair`](../../services/auth/src/call_jwt.rs).
+Tests:
+[`lakko_call_jwt::tests::kid_is_stable_per_keypair`](../../crates/lakko-call-jwt/src/lib.rs)
+covers stability + distinctness;
+[`lakko_call_jwt::tests::wrong_kid_rejects`](../../crates/lakko-call-jwt/src/lib.rs)
+covers the verifier's `kid` discrimination.
 
 ### C-21: `POST /call/jwt` requires a valid session token
 
@@ -403,6 +415,41 @@ The request body carries only `call_id` and `role` —
 The middleware itself is shared with
 `services/discovery` (Phase 1.5b) and reviewed there;
 the audit cross-link is in [`auth-flow.md`](./auth-flow.md).
+
+### C-22: `verify_with_jwks` resolves the correct key by `kid` across a multi-key JWKS doc
+
+During key rotation the JWKS document carries BOTH the
+old + new keys for the overlap window (so JWTs minted
+under either key still validate). The verifier picks the
+JWK whose `kid` matches the JWT header; a JWT signed by
+the old key opens against the old JWK, a JWT signed by
+the new key opens against the new JWK, simultaneously.
+A JWT whose `kid` matches no JWK in the doc rejects
+with a clear `Format("no JWK matches header.kid")` so the
+SFU's logs differentiate "key rotation in progress, our
+JWKS cache is stale" from "this JWT is forged".
+
+Tests:
+[`lakko_call_jwt::tests::verify_with_jwks_resolves_by_kid`](../../crates/lakko-call-jwt/src/lib.rs)
+covers the multi-key happy path;
+[`lakko_call_jwt::tests::verify_with_jwks_rejects_unknown_kid`](../../crates/lakko-call-jwt/src/lib.rs)
+covers the no-match-on-kid rejection;
+[`lakko_call_jwt::tests::jwks_round_trips_through_json`](../../crates/lakko-call-jwt/src/lib.rs)
+covers the JWKS doc round-tripping cleanly through
+JSON.
+
+### C-23: `Jwk::to_verifying_key` rejects non-OKP / non-Ed25519 JWKs
+
+The JWK parser checks `kty == "OKP"`, `crv == "Ed25519"`,
+`alg == "EdDSA"` before decoding the `x` field. A JWKS doc
+that an attacker — or a confused upstream — populated with
+an RSA / EC P-256 / EC P-384 key under our `kid` would
+get rejected at parse time, before reaching the signature
+verify step. Defence-in-depth against algorithm-confusion
+attacks (RFC 8037 §6 attack class).
+
+Test:
+[`lakko_call_jwt::tests::jwk_to_verifying_key_rejects_wrong_kty`](../../crates/lakko-call-jwt/src/lib.rs).
 
 ## Exporter labels (call-side)
 
@@ -465,7 +512,7 @@ fully in effect.
 | Per-participant nonce salt | ❌ | ✅ | Same derivation chain |
 | SFrame header (sender leaf + counter + timestamp) | ✅ | ✅ | Forwarding metadata only |
 | Encrypted frame body | ✅ (opaque) | ✅ (decoded) | AEAD-sealed |
-| JWT `(account_id, call_id, role, expires_at)` | ✅ (validate via cached JWKS) | ✅ (mint via `POST /call/jwt`) | Per ADR-0008 + C-15..C-21 |
+| JWT `(account_id, call_id, role, expires_at)` | ✅ (validate via cached JWKS) | ✅ (mint via `POST /call/jwt`) | Per ADR-0008 + C-15..C-23 |
 | Ed25519 signing seed for call JWTs | ❌ | ❌ (stays on `services/auth` host) | Persisted in `call_jwt_signing_key.seed`. Public half published at `/.well-known/jwks.json` |
 | Plaintext SDP / ICE | ❌ | ✅ | 1×1 rides MLS; group rides LiveKit-signaling channel which never sees keys |
 
