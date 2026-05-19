@@ -31,7 +31,11 @@ import Foundation
 public final class CallJwtClient: @unchecked Sendable {
     public static let defaultBaseURL = "http://127.0.0.1:8081"
 
+    /// Default JWKS cache TTL per ADR-0008 — 24 h.
+    public static let defaultJwksTtl: TimeInterval = 24 * 60 * 60
+
     public let baseURL: String
+    public let jwksTtl: TimeInterval
 
     /// `URLSession` is injectable so tests can use an ephemeral
     /// session with a stub `URLProtocol`.
@@ -40,15 +44,18 @@ public final class CallJwtClient: @unchecked Sendable {
     private let encoder: JSONEncoder
     private let decoder: JSONDecoder
 
-    private let tokenLock = NSLock()
+    private let stateLock = NSLock()
     private var sessionToken: String?
+    private var jwksCache: JwksCacheEntry?
 
     public init(
         baseURL: String = CallJwtClient.defaultBaseURL,
-        session: URLSession = .shared
+        session: URLSession = .shared,
+        jwksTtl: TimeInterval = CallJwtClient.defaultJwksTtl
     ) {
         self.baseURL = baseURL
         self.session = session
+        self.jwksTtl = max(jwksTtl, 0)
         let encoder = JSONEncoder()
         encoder.outputFormatting = []
         self.encoder = encoder
@@ -57,15 +64,39 @@ public final class CallJwtClient: @unchecked Sendable {
 
     /// Rebind the bearer token. `nil` clears (sign-out).
     public func setSessionToken(_ token: String?) {
-        tokenLock.lock()
-        defer { tokenLock.unlock() }
+        stateLock.lock()
+        defer { stateLock.unlock() }
         sessionToken = token
     }
 
+    /// Drop the cached JWKS doc. Call after a verify failure
+    /// that suggests a key rotation has happened (the
+    /// convenience ``verifyJwt(jwt:nowUnixSecs:)`` does this
+    /// for you).
+    public func clearJwksCache() {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        jwksCache = nil
+    }
+
     private func currentSessionToken() -> String? {
-        tokenLock.lock()
-        defer { tokenLock.unlock() }
+        stateLock.lock()
+        defer { stateLock.unlock() }
         return sessionToken
+    }
+
+    private func cachedJwksIfFresh() -> Data? {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        guard let entry = jwksCache else { return nil }
+        let age = Date().timeIntervalSince(entry.fetchedAt)
+        return age < jwksTtl ? entry.bytes : nil
+    }
+
+    private func storeJwks(_ bytes: Data) {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        jwksCache = JwksCacheEntry(bytes: bytes, fetchedAt: Date())
     }
 
     // MARK: - Mint
@@ -121,17 +152,28 @@ public final class CallJwtClient: @unchecked Sendable {
     /// `GET /.well-known/jwks.json` — fetches the auth service's
     /// published JWK Set. The returned `Data` is the raw JSON
     /// document; pass it into ``verifyAgainstJwks(jwt:jwksDocBytes:nowUnixSecs:)``
-    /// or cache it.
+    /// or hold it.
     ///
-    /// Anonymous endpoint — no bearer required. Caller is
-    /// responsible for caching (24 h recommended per ADR-0008).
-    public func fetchJwks() async throws -> Data {
+    /// Anonymous endpoint — no bearer required.
+    ///
+    /// **Caches in-memory for ``jwksTtl`` seconds** (default
+    /// 24 h per ADR-0008). Pass `forceRefresh = true` to
+    /// bypass the cache; on a `kid` mismatch during verify
+    /// the convenience ``verifyJwt(jwt:nowUnixSecs:)`` does
+    /// this for you. Direct invalidation via
+    /// ``clearJwksCache()``.
+    public func fetchJwks(forceRefresh: Bool = false) async throws -> Data {
+        if !forceRefresh, let cached = cachedJwksIfFresh() {
+            return cached
+        }
         let endpoint = "/.well-known/jwks.json"
         let url = try buildURL(endpoint: endpoint)
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
         request.setValue("application/json", forHTTPHeaderField: "Accept")
-        return try await executeRaw(endpoint: endpoint, request: request)
+        let bytes = try await executeRaw(endpoint: endpoint, request: request)
+        storeJwks(bytes)
+        return bytes
     }
 
     // MARK: - Parse / Verify
@@ -174,6 +216,28 @@ public final class CallJwtClient: @unchecked Sendable {
         return ParsedCallJwt(ffi: claims)
     }
 
+    /// Convenience: fetch JWKS (cache-aware) + verify in one
+    /// call. On a `no JWK matches header.kid` failure — the
+    /// canonical key-rotation signal — invalidates the
+    /// cache, refetches once, retries the verify. Any second
+    /// failure surfaces verbatim.
+    public func verifyJwt(
+        jwt: String,
+        nowUnixSecs: UInt64? = nil
+    ) async throws -> ParsedCallJwt {
+        let cached = try await fetchJwks()
+        do {
+            return try verifyAgainstJwks(jwt: jwt, jwksDocBytes: cached, nowUnixSecs: nowUnixSecs)
+        } catch let firstErr {
+            guard CallJwtClient.isKidMismatch(firstErr) else {
+                throw firstErr
+            }
+            clearJwksCache()
+            let fresh = try await fetchJwks(forceRefresh: true)
+            return try verifyAgainstJwks(jwt: jwt, jwksDocBytes: fresh, nowUnixSecs: nowUnixSecs)
+        }
+    }
+
     // MARK: - Helpers
 
     /// Mint a 16-byte random `callId` and render it as 32
@@ -183,6 +247,19 @@ public final class CallJwtClient: @unchecked Sendable {
         let status = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
         precondition(status == errSecSuccess, "SecRandomCopyBytes failed: \(status)")
         return bytes.map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// Discriminate the `no JWK matches header.kid` shape
+    /// from unrelated verify failures. UniFFI surfaces the
+    /// Rust `JwtError::Format(...)` message via the `verify`
+    /// case's underlying error; we string-match on the
+    /// substring `lakko-call-jwt` emits.
+    private static func isKidMismatch(_ err: Error) -> Bool {
+        if case let CallJwtClientError.verify(_, underlying) = err {
+            let message = String(describing: underlying)
+            return message.contains("no JWK matches header.kid") || message.contains("kid")
+        }
+        return false
     }
 
     private static let callIdPattern: NSRegularExpression = {
@@ -333,6 +410,13 @@ public enum CallJwtClientError: Error, CustomStringConvertible {
 }
 
 // MARK: - Wire shape (private)
+
+/// JWKS in-memory cache entry. Lifetime is the
+/// `CallJwtClient` instance.
+private struct JwksCacheEntry {
+    let bytes: Data
+    let fetchedAt: Date
+}
 
 /// `POST /call/jwt` request shape — snake_case keys match
 /// the server. Kept private; callers use ``CallJwtClient/mint(callId:role:)``.

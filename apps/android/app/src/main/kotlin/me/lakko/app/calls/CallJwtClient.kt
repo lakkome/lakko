@@ -61,6 +61,11 @@ public class CallJwtClient(
     /** Ktor engine. Production: `OkHttp` (default below). Tests:
      *  `MockEngine` for deterministic responses without a network. */
     engine: HttpClientEngine? = null,
+    /** Time-to-live for the in-memory JWKS cache, in
+     *  milliseconds. Defaults to 24 h per ADR-0008. Passing
+     *  `0` disables caching — every call fetches fresh.
+     *  Negative values are clamped to 0. */
+    public val jwksTtlMs: Long = DEFAULT_JWKS_TTL_MS,
 ) : AutoCloseable {
 
     /**
@@ -85,9 +90,35 @@ public class CallJwtClient(
     @Volatile
     private var sessionToken: String? = null
 
+    /** JWKS cache — guarded by the same `@Volatile` lock to
+     *  keep the read-then-write window short. Reads return
+     *  the cached value if `Date.now()` is within
+     *  [jwksTtlMs] of [JwksCacheEntry.fetchedAtMs]. */
+    @Volatile
+    private var jwksCache: JwksCacheEntry? = null
+
     /** Rebind the bearer token. `null` clears (sign-out). */
     public fun setSessionToken(token: String?) {
         sessionToken = token
+    }
+
+    /** Drop the cached JWKS doc. Call after a verify
+     *  failure that suggests a key rotation has happened —
+     *  the convenience [verifyJwt] does this for you on
+     *  `no JWK matches header.kid` errors. */
+    public fun clearJwksCache() {
+        jwksCache = null
+    }
+
+    private fun cachedJwksIfFresh(): ByteArray? {
+        val entry = jwksCache ?: return null
+        val ttl = maxOf(jwksTtlMs, 0L)
+        val ageMs = System.currentTimeMillis() - entry.fetchedAtMs
+        return if (ageMs < ttl) entry.bytes else null
+    }
+
+    private fun storeJwks(bytes: ByteArray) {
+        jwksCache = JwksCacheEntry(bytes, System.currentTimeMillis())
     }
 
     override fun close() {
@@ -151,10 +182,19 @@ public class CallJwtClient(
     /**
      * `GET /.well-known/jwks.json` — fetches the auth service's
      * published JWK Set. The returned `ByteArray` is the raw
-     * JSON document; pass it into [verifyAgainstJwks] or cache
+     * JSON document; pass it into [verifyAgainstJwks] or hold
      * it. Anonymous endpoint — no bearer required.
+     *
+     * **Caches in-memory for [jwksTtlMs] milliseconds**
+     * (default 24 h per ADR-0008). Pass `forceRefresh = true`
+     * to bypass the cache; on a `kid` mismatch during verify
+     * the convenience [verifyJwt] does this for you. Direct
+     * invalidation via [clearJwksCache].
      */
-    public suspend fun fetchJwks(): ByteArray {
+    public suspend fun fetchJwks(forceRefresh: Boolean = false): ByteArray {
+        if (!forceRefresh) {
+            cachedJwksIfFresh()?.let { return it }
+        }
         val endpoint = "/.well-known/jwks.json"
         val response: HttpResponse = try {
             client.get("$baseUrl$endpoint") {
@@ -166,7 +206,9 @@ public class CallJwtClient(
         if (!response.status.isSuccess()) {
             throw CallJwtHttpError(response.status.value, endpoint, response.safeReadBody())
         }
-        return response.readBytes()
+        val bytes = response.readBytes()
+        storeJwks(bytes)
+        return bytes
     }
 
     // -----------------------------------------------------------------
@@ -212,12 +254,44 @@ public class CallJwtClient(
         return ParsedCallJwt.from(claims)
     }
 
+    /**
+     * Convenience: fetch JWKS (cache-aware) + verify in one
+     * call. On a `no JWK matches header.kid` failure — the
+     * canonical key-rotation signal — invalidates the
+     * cache, refetches once, retries the verify. Any second
+     * failure surfaces verbatim.
+     */
+    public suspend fun verifyJwt(
+        jwt: String,
+        nowUnixSecs: ULong? = null,
+    ): ParsedCallJwt {
+        val cached = fetchJwks()
+        try {
+            return verifyAgainstJwks(jwt = jwt, jwksDocBytes = cached, nowUnixSecs = nowUnixSecs)
+        } catch (firstErr: CallJwtVerifyError) {
+            if (!isKidMismatch(firstErr)) {
+                throw firstErr
+            }
+            clearJwksCache()
+            val fresh = fetchJwks(forceRefresh = true)
+            return verifyAgainstJwks(jwt = jwt, jwksDocBytes = fresh, nowUnixSecs = nowUnixSecs)
+        }
+    }
+
+    private fun isKidMismatch(err: CallJwtVerifyError): Boolean {
+        val message = err.cause?.message ?: err.message ?: return false
+        return message.contains("no JWK matches header.kid") || message.contains("kid")
+    }
+
     public companion object {
         /**
          * `10.0.2.2` is the canonical Android-emulator alias for
          * the host workstation. Matches the AuthClient default.
          */
         public const val DEFAULT_BASE_URL: String = "http://10.0.2.2:8081"
+
+        /** Default JWKS cache TTL — 24 h per ADR-0008. */
+        public const val DEFAULT_JWKS_TTL_MS: Long = 24L * 60L * 60L * 1000L
 
         private val CALL_ID_PATTERN: Regex = Regex("^[0-9a-f]{32}$")
         private val secureRandom: SecureRandom = SecureRandom()
@@ -319,6 +393,13 @@ public class CallJwtVerifyError(
 // -----------------------------------------------------------------
 // Wire shape (private)
 // -----------------------------------------------------------------
+
+/** JWKS in-memory cache entry. Lifetime is the
+ *  [CallJwtClient] instance. */
+private data class JwksCacheEntry(
+    val bytes: ByteArray,
+    val fetchedAtMs: Long,
+)
 
 /** `POST /call/jwt` request shape — snake_case keys match the
  *  server. Kept internal; callers use [CallJwtClient.mint]. */

@@ -133,6 +133,15 @@ export const DEFAULT_BASE_URL = "/api/auth";
  *  through fetch. */
 const CALL_ID_PATTERN = /^[0-9a-f]{32}$/;
 
+/** Default JWKS cache TTL per ADR-0008. 24 hours matches
+ *  the recommended SFU refresh cadence. */
+export const DEFAULT_JWKS_TTL_MS = 24 * 60 * 60 * 1000;
+
+interface JwksCacheEntry {
+  readonly bytes: Uint8Array;
+  readonly fetchedAtMs: number;
+}
+
 // ---- Client --------------------------------------------------------
 
 /**
@@ -149,15 +158,29 @@ const CALL_ID_PATTERN = /^[0-9a-f]{32}$/;
  */
 export class CallJwtClient {
   private sessionToken: string | null = null;
+  private jwksCache: JwksCacheEntry | null = null;
 
   constructor(
     private readonly wasm: Wasm,
     public readonly baseUrl: string = DEFAULT_BASE_URL,
+    /** Time-to-live for the in-memory JWKS cache. Defaults
+     *  to 24 h (ADR-0008). Passing `0` disables caching —
+     *  every call fetches fresh. Negative values are
+     *  treated as 0. */
+    public readonly jwksTtlMs: number = DEFAULT_JWKS_TTL_MS,
   ) {}
 
   /** Rebind the bearer token. `null` clears (sign-out). */
   setSessionToken(token: string | null): void {
     this.sessionToken = token;
+  }
+
+  /** Drop the cached JWKS doc. Call after a `verifyJwt`
+   *  failure that suggests a key rotation has happened
+   *  (the convenience `verifyJwt` does this for you on
+   *  `no JWK matches header.kid` errors). */
+  clearJwksCache(): void {
+    this.jwksCache = null;
   }
 
   /**
@@ -217,13 +240,23 @@ export class CallJwtClient {
    * `GET /.well-known/jwks.json` — fetches the auth
    * service's published JWK Set. The returned bytes are
    * the raw JSON document; pass them straight into
-   * `verifyAgainstJwks(jwt, jwksBytes)` or cache them.
+   * `verifyAgainstJwks(jwt, jwksBytes)` or hold them.
    *
-   * Anonymous endpoint — no bearer token required. The
-   * caller is responsible for caching (24 h is the
-   * recommended TTL per ADR-0008 §"Auth token format").
+   * Anonymous endpoint — no bearer token required.
+   *
+   * **Caches in-memory for `jwksTtlMs` ms (default 24 h
+   * per ADR-0008).** Pass `forceRefresh = true` to bypass
+   * the cache; on a `kid` mismatch during verify the
+   * convenience `verifyJwt` does this for you. Direct
+   * cache invalidation also via `clearJwksCache()`.
    */
-  async fetchJwks(): Promise<Uint8Array> {
+  async fetchJwks(forceRefresh: boolean = false): Promise<Uint8Array> {
+    if (!forceRefresh && this.jwksCache !== null) {
+      const ageMs = Date.now() - this.jwksCache.fetchedAtMs;
+      if (ageMs < this.jwksTtlMs) {
+        return this.jwksCache.bytes;
+      }
+    }
     const endpoint = "/.well-known/jwks.json";
     let response: Response;
     try {
@@ -239,7 +272,9 @@ export class CallJwtClient {
       throw new CallJwtHttpError(response.status, endpoint, body);
     }
     const buf = await response.arrayBuffer();
-    return new Uint8Array(buf);
+    const bytes = new Uint8Array(buf);
+    this.jwksCache = { bytes, fetchedAtMs: Date.now() };
+    return bytes;
   }
 
   /**
@@ -293,6 +328,45 @@ export class CallJwtClient {
       throw new CallJwtVerifyError("verifyCallJwtWithJwks", err);
     }
   }
+
+  /**
+   * Convenience: fetch JWKS (cache-aware) + verify in one
+   * call. On a `no JWK matches header.kid` failure (the
+   * canonical key-rotation signal), invalidates the
+   * cache, refetches once, retries the verify. Any second
+   * failure surfaces verbatim.
+   *
+   * Use this when the caller has a JWT and just wants the
+   * validated claims back; the cache + rotation handling
+   * are invisible.
+   */
+  async verifyJwt(
+    jwt: string,
+    nowUnixSecs: number = Math.floor(Date.now() / 1000),
+  ): Promise<ParsedCallJwt> {
+    const cached = await this.fetchJwks();
+    try {
+      return this.verifyAgainstJwks(jwt, cached, nowUnixSecs);
+    } catch (firstErr) {
+      if (!isKidMismatch(firstErr)) {
+        throw firstErr;
+      }
+      // Rotation case — force a fresh JWKS pull, retry once.
+      this.clearJwksCache();
+      const fresh = await this.fetchJwks(true);
+      return this.verifyAgainstJwks(jwt, fresh, nowUnixSecs);
+    }
+  }
+}
+
+/** Discriminate the `no JWK matches header.kid` shape from
+ *  unrelated verify failures. The wasm-bindgen surface
+ *  wraps the Rust error message verbatim into a JsError;
+ *  we string-match on the same substring `lakko-call-jwt`
+ *  emits. */
+function isKidMismatch(err: unknown): boolean {
+  const msg = String((err as { message?: string })?.message ?? err);
+  return msg.includes("no JWK matches header.kid") || msg.includes("kid");
 }
 
 // ---- Helpers -------------------------------------------------------
