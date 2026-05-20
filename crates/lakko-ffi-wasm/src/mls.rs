@@ -2135,6 +2135,96 @@ pub fn recommend_call_bitrate(
     lakko_calls::recommend_bitrate(current_bps, sample)
 }
 
+/// Default ring-buffer size for [`CallQualitySampler`].
+#[wasm_bindgen(js_name = defaultQualitySampleWindow)]
+#[must_use]
+pub fn default_quality_sample_window() -> u32 {
+    u32::try_from(lakko_calls::DEFAULT_SAMPLE_WINDOW).unwrap_or(5)
+}
+
+/// Maximum ring-buffer size accepted by
+/// [`CallQualitySampler::new`].
+#[wasm_bindgen(js_name = maxQualitySampleWindow)]
+#[must_use]
+pub fn max_quality_sample_window() -> u32 {
+    u32::try_from(lakko_calls::MAX_SAMPLE_WINDOW).unwrap_or(60)
+}
+
+/// Stateful rolling-window smoothed quality sampler
+/// (Phase 3a11). One instance per active call.
+///
+/// `record` pushes a fresh sample and returns the
+/// smoothed [`CallQualityScore`]; `latest` returns the
+/// current smoothed score without pushing; `clear` resets
+/// the window (on call end / SFU handoff).
+#[wasm_bindgen]
+pub struct CallQualitySampler {
+    inner: lakko_calls::QualitySampler,
+}
+
+#[wasm_bindgen]
+impl CallQualitySampler {
+    /// Construct a sampler with a custom window size.
+    /// Sizes outside `[1, MAX_SAMPLE_WINDOW]` are clamped.
+    #[wasm_bindgen(constructor)]
+    #[must_use]
+    pub fn new(window_size: u32) -> Self {
+        let bounded = usize::try_from(window_size).unwrap_or(lakko_calls::DEFAULT_SAMPLE_WINDOW);
+        Self {
+            inner: lakko_calls::QualitySampler::new(bounded),
+        }
+    }
+
+    /// Effective window size after clamping.
+    #[wasm_bindgen(getter, js_name = windowSize)]
+    pub fn window_size(&self) -> u32 {
+        u32::try_from(self.inner.window_size()).unwrap_or(u32::MAX)
+    }
+
+    /// Number of samples currently buffered.
+    #[wasm_bindgen(getter)]
+    pub fn count(&self) -> u32 {
+        u32::try_from(self.inner.count()).unwrap_or(u32::MAX)
+    }
+
+    /// Drop every buffered sample.
+    pub fn clear(&mut self) {
+        self.inner.clear();
+    }
+
+    /// Push a sample and return the smoothed score.
+    pub fn record(
+        &mut self,
+        rtt_ms: u32,
+        jitter_ms: u32,
+        loss_pct: f32,
+        codec: &str,
+    ) -> CallQualityScore {
+        let sample = lakko_calls::QualitySample {
+            rtt_ms,
+            jitter_ms,
+            loss_pct,
+            codec: parse_codec(codec),
+        };
+        let score = self.inner.record(sample);
+        CallQualityScore {
+            r_factor_val: score.r_factor,
+            mos_val: score.mos,
+            level_val: level_str(score.level),
+        }
+    }
+
+    /// Latest smoothed score without pushing a new sample.
+    /// Returns `null` when the sampler is empty.
+    pub fn latest(&self) -> Option<CallQualityScore> {
+        self.inner.latest().map(|score| CallQualityScore {
+            r_factor_val: score.r_factor,
+            mos_val: score.mos,
+            level_val: level_str(score.level),
+        })
+    }
+}
+
 // Tests run on the host target (`cargo test`) — no `wasm-bindgen-test`
 // runner needed for what we cover here. The wire-level invariants
 // from `lakko-mls` are unchanged regardless of FFI binding; this

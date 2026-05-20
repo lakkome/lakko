@@ -59,10 +59,11 @@
 //! - loss < 1 % AND MOS > 4.0 → increment by 10 % (capped at codec ceiling)
 //! - otherwise → hold
 //!
-//! Hysteresis is one sample. A production stack typically
-//! adds a 3-of-5 majority vote across samples; the platform
-//! layer can wrap this primitive with whatever smoothing
-//! suits its sample cadence.
+//! Hysteresis is one sample. For multi-sample smoothing
+//! the [`QualitySampler`] helper holds an N-wide ring
+//! buffer and emits a majority-vote level + median
+//! R-factor + median MOS on every push. Platform layers
+//! don't have to roll their own smoothing.
 
 use core::cmp::Ordering;
 
@@ -272,6 +273,191 @@ pub fn recommend_bitrate(current_bps: u32, sample: QualitySample) -> u32 {
     }
 
     clamped
+}
+
+// =============================================================================
+// Multi-sample smoothing
+// =============================================================================
+
+/// Default ring-buffer size for [`QualitySampler`]. Five
+/// samples ≈ 5 seconds at the canonical 1 Hz stats poll
+/// cadence — enough to smooth a single packet-loss burst
+/// without painting a stale picture once conditions
+/// change.
+pub const DEFAULT_SAMPLE_WINDOW: usize = 5;
+
+/// Maximum permitted window size. Bounds the
+/// `QualitySampler` memory footprint + the median sort.
+/// 60 samples ≈ 1 minute at 1 Hz, which is more smoothing
+/// than any plausible UX surface needs.
+pub const MAX_SAMPLE_WINDOW: usize = 60;
+
+/// Rolling-window smoothed quality estimator. Platform
+/// layer pushes one [`QualitySample`] per `RTCStatsReport`
+/// poll; the sampler keeps the N most-recent samples in a
+/// fixed-size ring buffer and reports a **smoothed
+/// [`QualityScore`]** on every push:
+///
+///   * `level` — **majority vote** across the window.
+///     Ties broken by picking the higher (better) bucket.
+///   * `r_factor` / `mos` — **median** across the window.
+///     Median is more robust than mean against a single
+///     bad sample (e.g. a transient packet-loss burst).
+///
+/// Bounded memory: `O(window_size)`, capped at
+/// [`MAX_SAMPLE_WINDOW`].
+///
+/// Wall-clock-free — the sampler doesn't track sample age.
+/// Caller is responsible for clearing it on call end /
+/// network handoff via [`Self::clear`].
+pub struct QualitySampler {
+    window_size: usize,
+    /// Ring buffer of the most-recent samples + their
+    /// per-sample [`QualityScore`]s. We retain the raw
+    /// sample so a future caller can re-evaluate (e.g. on
+    /// codec change) without re-feeding history.
+    buffer: Vec<(QualitySample, QualityScore)>,
+}
+
+impl QualitySampler {
+    /// Build a sampler with a custom window size. Sizes
+    /// `< 1` are bumped to 1; sizes above
+    /// [`MAX_SAMPLE_WINDOW`] are clamped to it.
+    #[must_use]
+    pub fn new(window_size: usize) -> Self {
+        let bounded = window_size.clamp(1, MAX_SAMPLE_WINDOW);
+        Self {
+            window_size: bounded,
+            buffer: Vec::with_capacity(bounded),
+        }
+    }
+
+    /// Window size after clamping. Honest accessor — never
+    /// returns 0 or anything above [`MAX_SAMPLE_WINDOW`].
+    #[must_use]
+    pub fn window_size(&self) -> usize {
+        self.window_size
+    }
+
+    /// Number of samples currently buffered.
+    #[must_use]
+    pub fn count(&self) -> usize {
+        self.buffer.len()
+    }
+
+    /// Drop every buffered sample. Use on call end / SFU
+    /// handoff to start a fresh smoothing pass.
+    pub fn clear(&mut self) {
+        self.buffer.clear();
+    }
+
+    /// Push a sample and return the smoothed
+    /// [`QualityScore`]. The sampler internally evaluates
+    /// the sample via [`estimate_quality`]; callers don't
+    /// need to do it themselves.
+    pub fn record(&mut self, sample: QualitySample) -> QualityScore {
+        let score = estimate_quality(sample);
+        if self.buffer.len() == self.window_size {
+            // Oldest sample falls out. Vec::remove is O(N)
+            // but N ≤ MAX_SAMPLE_WINDOW (60) so it's
+            // bounded + fine for this cadence.
+            self.buffer.remove(0);
+        }
+        self.buffer.push((sample, score));
+        self.smoothed()
+    }
+
+    /// Latest smoothed score without pushing a new sample.
+    /// Returns `None` when the sampler is empty.
+    #[must_use]
+    pub fn latest(&self) -> Option<QualityScore> {
+        if self.buffer.is_empty() {
+            None
+        } else {
+            Some(self.smoothed())
+        }
+    }
+
+    /// Compute the smoothed score from the current buffer.
+    /// Median for `r_factor` / `mos`, majority vote for
+    /// `level` (ties → higher bucket).
+    fn smoothed(&self) -> QualityScore {
+        debug_assert!(!self.buffer.is_empty(), "smoothed() called on empty buffer");
+
+        let r_factor = median_f32(self.buffer.iter().map(|(_, s)| s.r_factor));
+        let mos = median_f32(self.buffer.iter().map(|(_, s)| s.mos));
+        let level = majority_level(self.buffer.iter().map(|(_, s)| s.level));
+        QualityScore {
+            r_factor,
+            mos,
+            level,
+        }
+    }
+}
+
+impl Default for QualitySampler {
+    fn default() -> Self {
+        Self::new(DEFAULT_SAMPLE_WINDOW)
+    }
+}
+
+/// Median of a small float iterator. Buffer is at most
+/// [`MAX_SAMPLE_WINDOW`] so the `O(N log N)` sort is cheap.
+/// NaN inputs are not expected (every R-factor / MOS goes
+/// through `clamp`) but we sort by `partial_cmp` and fall
+/// back to `Less` to stay panic-free.
+fn median_f32(values: impl Iterator<Item = f32>) -> f32 {
+    let mut sorted: Vec<f32> = values.collect();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Less));
+    let mid = sorted.len() / 2;
+    if sorted.len() % 2 == 1 {
+        sorted[mid]
+    } else {
+        // Even-sized window: average the two middle
+        // samples. Median in the strict statistical sense.
+        (sorted[mid - 1] + sorted[mid]) / 2.0
+    }
+}
+
+/// Majority-vote bucket over an iterator of [`QualityLevel`]s.
+/// Ties broken by picking the higher (better) bucket — a
+/// pessimistic UX would alarm on every flicker.
+fn majority_level(levels: impl Iterator<Item = QualityLevel>) -> QualityLevel {
+    let mut counts = [0_usize; 5];
+    for level in levels {
+        counts[level_to_index(level)] += 1;
+    }
+    // Scan from best (Excellent = idx 0) so a tie picks
+    // the higher bucket.
+    let mut best_idx = 0_usize;
+    let mut best_count = 0_usize;
+    for (idx, &count) in counts.iter().enumerate() {
+        if count > best_count {
+            best_count = count;
+            best_idx = idx;
+        }
+    }
+    index_to_level(best_idx)
+}
+
+fn level_to_index(level: QualityLevel) -> usize {
+    match level {
+        QualityLevel::Excellent => 0,
+        QualityLevel::Good => 1,
+        QualityLevel::Fair => 2,
+        QualityLevel::Poor => 3,
+        QualityLevel::Bad => 4,
+    }
+}
+
+fn index_to_level(idx: usize) -> QualityLevel {
+    match idx {
+        0 => QualityLevel::Excellent,
+        1 => QualityLevel::Good,
+        2 => QualityLevel::Fair,
+        3 => QualityLevel::Poor,
+        _ => QualityLevel::Bad,
+    }
 }
 
 // =============================================================================
@@ -562,6 +748,158 @@ mod tests {
         // Starting at the ceiling; increment clamps.
         let new_bps = recommend_bitrate(OPUS_MAX_BITRATE_BPS, s);
         assert_eq!(new_bps, OPUS_MAX_BITRATE_BPS);
+    }
+
+    // -- QualitySampler ----------------------------------------------------
+
+    fn opus_sample(rtt_ms: u32, loss_pct: f32) -> QualitySample {
+        QualitySample {
+            rtt_ms,
+            jitter_ms: 5,
+            loss_pct,
+            codec: AudioCodec::Opus,
+        }
+    }
+
+    #[test]
+    fn sampler_empty_has_no_latest() {
+        let sampler = QualitySampler::new(5);
+        assert!(sampler.latest().is_none());
+        assert_eq!(sampler.count(), 0);
+        assert_eq!(sampler.window_size(), 5);
+    }
+
+    #[test]
+    fn sampler_default_uses_window_5() {
+        let sampler = QualitySampler::default();
+        assert_eq!(sampler.window_size(), DEFAULT_SAMPLE_WINDOW);
+        assert_eq!(sampler.window_size(), 5);
+    }
+
+    #[test]
+    fn sampler_clamps_window_size_to_bounds() {
+        // Below 1 → 1. Above MAX → MAX. Anything between
+        // → unchanged.
+        assert_eq!(QualitySampler::new(0).window_size(), 1);
+        assert_eq!(
+            QualitySampler::new(MAX_SAMPLE_WINDOW * 10).window_size(),
+            MAX_SAMPLE_WINDOW
+        );
+        assert_eq!(QualitySampler::new(7).window_size(), 7);
+    }
+
+    #[test]
+    fn sampler_single_sample_passes_through() {
+        let mut sampler = QualitySampler::new(5);
+        let s = opus_sample(50, 0.0);
+        let smoothed = sampler.record(s);
+        let raw = estimate_quality(s);
+        assert!((smoothed.mos - raw.mos).abs() < 1e-4);
+        assert!((smoothed.r_factor - raw.r_factor).abs() < 1e-4);
+        assert_eq!(smoothed.level, raw.level);
+    }
+
+    #[test]
+    fn sampler_majority_vote_picks_dominant_level() {
+        let mut sampler = QualitySampler::new(5);
+        // 3 Excellent + 2 Bad → Excellent wins majority.
+        sampler.record(opus_sample(50, 0.0)); // Excellent
+        sampler.record(opus_sample(50, 0.0));
+        sampler.record(opus_sample(50, 0.0));
+        sampler.record(opus_sample(50, 50.0)); // Bad
+        let final_score = sampler.record(opus_sample(50, 50.0));
+        assert_eq!(final_score.level, QualityLevel::Excellent);
+    }
+
+    #[test]
+    fn sampler_tie_prefers_higher_bucket() {
+        let mut sampler = QualitySampler::new(2);
+        // 1 Excellent + 1 Bad → tie → Excellent wins
+        // (anti-flicker preference for the better bucket).
+        sampler.record(opus_sample(50, 0.0)); // Excellent
+        let final_score = sampler.record(opus_sample(50, 50.0));
+        assert_eq!(final_score.level, QualityLevel::Excellent);
+    }
+
+    #[test]
+    fn sampler_median_resists_single_spike() {
+        // 4 Excellent + 1 Bad. The median MOS should be
+        // near-Excellent, NOT dragged down by the spike.
+        let mut sampler = QualitySampler::new(5);
+        for _ in 0..4 {
+            sampler.record(opus_sample(50, 0.0));
+        }
+        let smoothed = sampler.record(opus_sample(50, 50.0));
+        // With 5 samples sorted, median = middle = 3rd
+        // sample which is Excellent.
+        let ideal_mos = estimate_quality(opus_sample(50, 0.0)).mos;
+        assert!(
+            (smoothed.mos - ideal_mos).abs() < 1e-3,
+            "median MOS {} drifted from Excellent {ideal_mos}",
+            smoothed.mos
+        );
+    }
+
+    #[test]
+    fn sampler_ring_rotation_drops_oldest() {
+        let mut sampler = QualitySampler::new(3);
+        // Fill with Excellent.
+        sampler.record(opus_sample(50, 0.0));
+        sampler.record(opus_sample(50, 0.0));
+        sampler.record(opus_sample(50, 0.0));
+        assert_eq!(sampler.count(), 3);
+        let excellent_mos = sampler.latest().unwrap().mos;
+
+        // Push 3 Bad samples — older Excellent ones must
+        // rotate out completely.
+        for _ in 0..3 {
+            sampler.record(opus_sample(50, 50.0));
+        }
+        assert_eq!(sampler.count(), 3);
+        let bad_mos = sampler.latest().unwrap().mos;
+        assert!(bad_mos < excellent_mos);
+        assert_eq!(sampler.latest().unwrap().level, QualityLevel::Bad);
+    }
+
+    #[test]
+    fn sampler_clear_wipes_state() {
+        let mut sampler = QualitySampler::new(5);
+        sampler.record(opus_sample(50, 0.0));
+        sampler.record(opus_sample(50, 0.0));
+        assert_eq!(sampler.count(), 2);
+        sampler.clear();
+        assert_eq!(sampler.count(), 0);
+        assert!(sampler.latest().is_none());
+    }
+
+    #[test]
+    fn sampler_window_one_disables_smoothing() {
+        let mut sampler = QualitySampler::new(1);
+        let s_good = opus_sample(50, 0.0);
+        let s_bad = opus_sample(50, 50.0);
+
+        let score_good = sampler.record(s_good);
+        assert_eq!(score_good.level, QualityLevel::Excellent);
+
+        // Window of 1 → the bad sample immediately
+        // replaces the good one with no smoothing buffer.
+        let score_bad = sampler.record(s_bad);
+        assert_eq!(score_bad.level, QualityLevel::Bad);
+    }
+
+    #[test]
+    fn sampler_majority_vote_uses_the_window_not_full_history() {
+        // Window of 3 — push 2 Excellent, 1 Bad, 2 more
+        // Excellent. After all 5 pushes the window holds
+        // [Bad, Excellent, Excellent] → majority Excellent.
+        let mut sampler = QualitySampler::new(3);
+        sampler.record(opus_sample(50, 0.0));
+        sampler.record(opus_sample(50, 0.0));
+        sampler.record(opus_sample(50, 50.0));
+        sampler.record(opus_sample(50, 0.0));
+        let score = sampler.record(opus_sample(50, 0.0));
+        assert_eq!(score.level, QualityLevel::Excellent);
+        assert_eq!(sampler.count(), 3);
     }
 
     #[test]

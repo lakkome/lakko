@@ -1754,6 +1754,91 @@ pub fn recommend_call_bitrate(current_bps: u32, sample: FfiQualitySample) -> u32
     lakko_calls::recommend_bitrate(current_bps, inner)
 }
 
+/// Default ring-buffer size for [`FfiCallQualitySampler`].
+#[uniffi::export]
+pub fn ffi_default_quality_sample_window() -> u32 {
+    u32::try_from(lakko_calls::DEFAULT_SAMPLE_WINDOW).unwrap_or(5)
+}
+
+/// Maximum ring-buffer size accepted by
+/// [`FfiCallQualitySampler::new`].
+#[uniffi::export]
+pub fn ffi_max_quality_sample_window() -> u32 {
+    u32::try_from(lakko_calls::MAX_SAMPLE_WINDOW).unwrap_or(60)
+}
+
+/// Stateful rolling-window smoothed quality sampler
+/// (Phase 3a11). Mirror of `lakko_calls::QualitySampler` —
+/// one per active call session on the platform side.
+///
+/// `record` pushes a fresh sample and returns the
+/// smoothed [`FfiQualityScore`]; `latest` returns the
+/// current smoothed score without pushing; `clear` resets
+/// the window (on call end / SFU handoff).
+#[derive(uniffi::Object)]
+pub struct FfiCallQualitySampler {
+    inner: std::sync::Mutex<lakko_calls::QualitySampler>,
+}
+
+#[uniffi::export]
+impl FfiCallQualitySampler {
+    /// Construct a sampler with a custom window size.
+    /// Sizes outside `[1, MAX_SAMPLE_WINDOW]` are clamped.
+    #[uniffi::constructor]
+    pub fn new(window_size: u32) -> Self {
+        let bounded = usize::try_from(window_size).unwrap_or(lakko_calls::DEFAULT_SAMPLE_WINDOW);
+        Self {
+            inner: std::sync::Mutex::new(lakko_calls::QualitySampler::new(bounded)),
+        }
+    }
+
+    /// Effective window size after clamping.
+    pub fn window_size(&self) -> u32 {
+        let guard = self.inner.lock().expect("FfiCallQualitySampler poisoned");
+        u32::try_from(guard.window_size()).unwrap_or(u32::MAX)
+    }
+
+    /// Number of samples currently buffered.
+    pub fn count(&self) -> u32 {
+        let guard = self.inner.lock().expect("FfiCallQualitySampler poisoned");
+        u32::try_from(guard.count()).unwrap_or(u32::MAX)
+    }
+
+    /// Drop every buffered sample.
+    pub fn clear(&self) {
+        let mut guard = self.inner.lock().expect("FfiCallQualitySampler poisoned");
+        guard.clear();
+    }
+
+    /// Push a sample and return the smoothed score.
+    pub fn record(&self, sample: FfiQualitySample) -> FfiQualityScore {
+        let inner_sample = lakko_calls::QualitySample {
+            rtt_ms: sample.rtt_ms,
+            jitter_ms: sample.jitter_ms,
+            loss_pct: sample.loss_pct,
+            codec: sample.codec.into_inner(),
+        };
+        let mut guard = self.inner.lock().expect("FfiCallQualitySampler poisoned");
+        let score = guard.record(inner_sample);
+        FfiQualityScore {
+            r_factor: score.r_factor,
+            mos: score.mos,
+            level: FfiQualityLevel::from_inner(score.level),
+        }
+    }
+
+    /// Latest smoothed score without pushing a new sample.
+    /// Returns `None` when the sampler is empty.
+    pub fn latest(&self) -> Option<FfiQualityScore> {
+        let guard = self.inner.lock().expect("FfiCallQualitySampler poisoned");
+        guard.latest().map(|score| FfiQualityScore {
+            r_factor: score.r_factor,
+            mos: score.mos,
+            level: FfiQualityLevel::from_inner(score.level),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

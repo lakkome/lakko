@@ -56,8 +56,9 @@ pub mod signaling;
 pub use error::{Error, Result};
 pub use group_call::{GroupCallScope, GroupCallSession, Participant, SignalingOutcome};
 pub use quality::{
-    estimate_quality, recommend_bitrate, AudioCodec, QualityLevel, QualitySample, QualityScore,
-    OPUS_MAX_BITRATE_BPS, OPUS_MIN_BITRATE_BPS,
+    estimate_quality, recommend_bitrate, AudioCodec, QualityLevel, QualitySample, QualitySampler,
+    QualityScore, DEFAULT_SAMPLE_WINDOW, MAX_SAMPLE_WINDOW, OPUS_MAX_BITRATE_BPS,
+    OPUS_MIN_BITRATE_BPS,
 };
 pub use session::{
     CallSession, CallState, Event, IceCandidate, MediaKind, Role, SdpDescription, SdpKind,
