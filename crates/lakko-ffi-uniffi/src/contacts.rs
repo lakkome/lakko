@@ -988,7 +988,7 @@ pub fn compose_call_invite_capability(
 /// Mirror of [`lakko_contacts::CallInviteCapability`].
 #[derive(uniffi::Object)]
 pub struct CallInviteCapability {
-    inner: RustCallInviteCapability,
+    pub(crate) inner: RustCallInviteCapability,
 }
 
 #[uniffi::export]

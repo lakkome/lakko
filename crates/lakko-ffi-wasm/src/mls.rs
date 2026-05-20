@@ -2225,6 +2225,95 @@ impl CallQualitySampler {
     }
 }
 
+// ============================================================================
+// Phase 3c3-joiner — link-based call invite acceptance FFI (web)
+// ============================================================================
+
+/// Result of [`acceptCallInvite`]. Carries the fresh MLS
+/// group, the Welcome bytes for the owner, the call_id,
+/// and the call-key seed. The group is exposed as a
+/// `Group` so the platform can continue MLS ops via the
+/// existing wasm-bindgen surface; the seed is flat so it
+/// feeds straight into `sframeDeriveParticipantKey`.
+#[wasm_bindgen]
+pub struct AcceptedCallInvite {
+    group_field: Group,
+    welcome_for_owner_val: Vec<u8>,
+    call_id_val: Vec<u8>,
+    own_leaf_index_val: u32,
+    call_key_seed_val: Vec<u8>,
+}
+
+#[wasm_bindgen]
+impl AcceptedCallInvite {
+    /// Take ownership of the freshly-created MLS group
+    /// (joiner is founder at leaf 0). Wasm-bindgen one-
+    /// shot move — calling this twice panics; the
+    /// platform must capture the result on first call.
+    pub fn group(&mut self) -> Group {
+        let placeholder = Group {
+            inner: std::sync::Mutex::new(
+                MlsGroup::create(
+                    &lakko_mls::Identity::generate("placeholder").expect("placeholder identity"),
+                )
+                .expect("placeholder group"),
+            ),
+        };
+        std::mem::replace(&mut self.group_field, placeholder)
+    }
+
+    /// MLS wire-format Welcome bytes for the owner to
+    /// run `Group.joinFromWelcome` against. Platform
+    /// delivers these out-of-band.
+    #[wasm_bindgen(getter, js_name = welcomeForOwner)]
+    pub fn welcome_for_owner(&self) -> Vec<u8> {
+        self.welcome_for_owner_val.clone()
+    }
+
+    /// 16-byte `call_id` from the capability.
+    #[wasm_bindgen(getter, js_name = callId)]
+    pub fn call_id(&self) -> Vec<u8> {
+        self.call_id_val.clone()
+    }
+
+    /// Joiner's leaf index — always 0 for the founder.
+    #[wasm_bindgen(getter, js_name = ownLeafIndex)]
+    pub fn own_leaf_index(&self) -> u32 {
+        self.own_leaf_index_val
+    }
+
+    /// 32-byte `CallKey` seed. Feed into
+    /// `sframeDeriveParticipantKey` to get the per-leaf
+    /// SFrame key.
+    #[wasm_bindgen(getter, js_name = callKeySeed)]
+    pub fn call_key_seed(&self) -> Vec<u8> {
+        self.call_key_seed_val.clone()
+    }
+}
+
+/// Accept a verified call-invite capability (Phase 3c3).
+/// `capability` must already be `decodeAndVerify`'d.
+#[wasm_bindgen(js_name = acceptCallInvite)]
+pub fn accept_call_invite(
+    capability: &crate::contacts::CallInviteCapability,
+    joiner_identity: &Identity,
+) -> Result<AcceptedCallInvite, JsError> {
+    let accepted = lakko_calls::accept_call_invite(&capability.inner, &joiner_identity.inner)
+        .map_err(|e| JsError::new(&format!("{e}")))?;
+    let call_key_seed = accepted.session.call_key().as_bytes().to_vec();
+    let call_id = accepted.session.call_id.to_vec();
+    let own_leaf_index = accepted.session.own_leaf_index;
+    Ok(AcceptedCallInvite {
+        group_field: Group {
+            inner: Mutex::new(accepted.group),
+        },
+        welcome_for_owner_val: accepted.welcome_for_owner,
+        call_id_val: call_id,
+        own_leaf_index_val: own_leaf_index,
+        call_key_seed_val: call_key_seed,
+    })
+}
+
 // Tests run on the host target (`cargo test`) — no `wasm-bindgen-test`
 // runner needed for what we cover here. The wire-level invariants
 // from `lakko-mls` are unchanged regardless of FFI binding; this

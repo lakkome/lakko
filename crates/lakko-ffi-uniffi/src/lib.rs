@@ -1839,6 +1839,114 @@ impl FfiCallQualitySampler {
     }
 }
 
+// ============================================================================
+// Phase 3c3-joiner — link-based call invite acceptance FFI
+// ============================================================================
+//
+// Wraps `lakko_calls::accept_call_invite` for Swift /
+// Kotlin. The Rust shape returns an owned MLS group + a
+// GroupCallSession + Welcome bytes; the FFI shape returns a
+// uniffi::Object wrapping the MLS group + flat fields for
+// the rest. The call-key seed is surfaced flat so the
+// platform can feed it into the existing
+// `sframe_derive_participant_key` FFI fn without holding a
+// GroupCallSession handle.
+
+/// Result of [`accept_call_invite`]. The owned `Group`
+/// handle is the freshly-created MLS group with the
+/// joiner as founder and the owner already added; the
+/// platform uses it for subsequent MLS ops via the
+/// existing `Group` methods. `welcome_for_owner` is the
+/// MLS wire bytes the joiner must deliver to the owner
+/// over their existing transport (the stranger-inbox
+/// routed by `capability.owner_account_id`, typically).
+#[derive(uniffi::Object)]
+pub struct AcceptedCallInvite {
+    /// Fresh MLS group (joiner at leaf 0, owner at leaf 1).
+    group: Arc<Group>,
+    /// MLS wire-format Welcome bytes for the owner to
+    /// run `Group::join_from_welcome` against.
+    welcome_for_owner: Vec<u8>,
+    /// 16-byte `call_id` extracted from the capability.
+    call_id: Vec<u8>,
+    /// Joiner's leaf index in the new MLS group — always
+    /// 0 for a single-joiner accept per the 3c3-joiner
+    /// V1 contract, but exposed for forward-compat.
+    own_leaf_index: u32,
+    /// 32-byte `CallKey` seed derived via the MLS
+    /// exporter against `call_id`. Feed this into the
+    /// existing `sframe_derive_participant_key`
+    /// free function to get the per-leaf SFrame key.
+    call_key_seed: Vec<u8>,
+}
+
+#[uniffi::export]
+impl AcceptedCallInvite {
+    /// Freshly-created MLS group (joiner is founder at
+    /// leaf 0). Platform uses this for subsequent MLS
+    /// ops + the existing `sframe_derive_call_key` /
+    /// `sframe_derive_participant_key` free fns.
+    pub fn group(&self) -> Arc<Group> {
+        self.group.clone()
+    }
+
+    /// MLS wire-format Welcome bytes for the owner.
+    /// Platform must deliver these out-of-band.
+    pub fn welcome_for_owner(&self) -> Vec<u8> {
+        self.welcome_for_owner.clone()
+    }
+
+    /// 16-byte `call_id` from the capability.
+    pub fn call_id(&self) -> Vec<u8> {
+        self.call_id.clone()
+    }
+
+    /// Joiner's leaf index (0 for the founder).
+    pub fn own_leaf_index(&self) -> u32 {
+        self.own_leaf_index
+    }
+
+    /// 32-byte `CallKey` seed.
+    pub fn call_key_seed(&self) -> Vec<u8> {
+        self.call_key_seed.clone()
+    }
+}
+
+/// Accept a verified call-invite capability. Mirrors
+/// [`lakko_calls::accept_call_invite`].
+///
+/// `capability` must already be `decode_and_verify`'d
+/// (use the [`contacts::CallInviteCapability`] constructor).
+/// The returned object holds a fresh MLS group + the
+/// Welcome bytes the joiner ships to the owner.
+///
+/// # Errors
+///
+/// - [`FfiError::Codec`] when the embedded KP is
+///   malformed.
+/// - [`FfiError::Exporter`] when the call-key derivation
+///   fails (practically unreachable).
+#[uniffi::export]
+pub fn accept_call_invite(
+    capability: &contacts::CallInviteCapability,
+    joiner_identity: &Identity,
+) -> Result<Arc<AcceptedCallInvite>, FfiError> {
+    let accepted = lakko_calls::accept_call_invite(&capability.inner, &joiner_identity.inner)?;
+    let call_key_seed = accepted.session.call_key().as_bytes().to_vec();
+    let call_id = accepted.session.call_id.to_vec();
+    let own_leaf_index = accepted.session.own_leaf_index;
+    let group = Group {
+        inner: Mutex::new(accepted.group),
+    };
+    Ok(Arc::new(AcceptedCallInvite {
+        group: Arc::new(group),
+        welcome_for_owner: accepted.welcome_for_owner,
+        call_id,
+        own_leaf_index,
+        call_key_seed,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -825,7 +825,7 @@ pub fn compose_call_invite_capability(
 /// 3c3). Mirror of [`lakko_contacts::CallInviteCapability`].
 #[wasm_bindgen]
 pub struct CallInviteCapability {
-    inner: RustCallInviteCapability,
+    pub(crate) inner: RustCallInviteCapability,
 }
 
 #[wasm_bindgen]
