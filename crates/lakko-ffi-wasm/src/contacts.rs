@@ -5,6 +5,11 @@
 //! [`ContactRequest`] envelope that drives ADR-0005 scenario A
 //! ("I know `@username`, add them"). Phase 1.9a only.
 
+use lakko_contacts::call_invite::{
+    compose as rust_call_invite_compose, decode_and_verify as rust_call_invite_decode,
+    CallInviteCapability as RustCallInviteCapability, CallInviteMedia as RustCallInviteMedia,
+    CALL_ID_LEN, MAX_KEY_PACKAGE_LEN,
+};
 use lakko_contacts::invite::{
     compose as rust_invite_compose, compute_joiner_tag as rust_compute_joiner_tag,
     decode_and_verify as rust_invite_decode, sign_owner_list as rust_sign_owner_list,
@@ -739,6 +744,160 @@ pub fn compute_joiner_invite_tag(
         )));
     }
     Ok(rust_compute_joiner_tag(capability_bytes, joiner_account_id).to_vec())
+}
+
+// ============================================================================
+// CallInviteCapability — ROADMAP 3c3
+// ============================================================================
+
+/// Compose + sign a call-invite capability (Phase 3c3).
+/// Returns the wire bytes the platform base64url-encodes
+/// into a `https://<host>/c/<...>` link.
+///
+/// Same shape as `composeInviteCapability` but for a
+/// link-based group-call invite. The owner embeds a
+/// one-time `KeyPackage` minted via `Identity.createKeyPackage`;
+/// the joiner uses it to bootstrap a fresh MLS group for
+/// the call.
+#[wasm_bindgen(js_name = composeCallInviteCapability)]
+#[allow(clippy::too_many_arguments)]
+pub fn compose_call_invite_capability(
+    owner_signing_seed: &[u8],
+    owner_account_id: &[u8],
+    call_id: &[u8],
+    expiry_ms: u64,
+    max_uses: u32,
+    media_audio: bool,
+    media_video: bool,
+    one_time_key_package: &[u8],
+    label: &str,
+) -> Result<Vec<u8>, JsError> {
+    if owner_signing_seed.len() != 32 {
+        return Err(JsError::new("ownerSigningSeed must be 32 bytes"));
+    }
+    let mut seed = [0u8; 32];
+    seed.copy_from_slice(owner_signing_seed);
+    let signing = SigningKey::from_seed(&seed);
+
+    if owner_account_id.len() != ACCOUNT_ID_LEN {
+        return Err(JsError::new(&format!(
+            "ownerAccountId must be {ACCOUNT_ID_LEN} bytes"
+        )));
+    }
+    let mut acct = [0u8; ACCOUNT_ID_LEN];
+    acct.copy_from_slice(owner_account_id);
+
+    if call_id.len() != CALL_ID_LEN {
+        return Err(JsError::new(&format!("callId must be {CALL_ID_LEN} bytes")));
+    }
+    let mut cid = [0u8; CALL_ID_LEN];
+    cid.copy_from_slice(call_id);
+
+    if one_time_key_package.is_empty() {
+        return Err(JsError::new("oneTimeKeyPackage must be non-empty"));
+    }
+    if one_time_key_package.len() > MAX_KEY_PACKAGE_LEN {
+        return Err(JsError::new(&format!(
+            "oneTimeKeyPackage is {} bytes, max is {MAX_KEY_PACKAGE_LEN}",
+            one_time_key_package.len()
+        )));
+    }
+
+    let media = RustCallInviteMedia {
+        audio: media_audio,
+        video: media_video,
+    };
+    let wire = rust_call_invite_compose(
+        &signing,
+        &acct,
+        &cid,
+        expiry_ms,
+        max_uses,
+        media,
+        one_time_key_package,
+        label,
+    )
+    .map_err(|e| JsError::new(&format!("{e}")))?;
+    Ok(wire)
+}
+
+/// Composed and verified call-invite capability (Phase
+/// 3c3). Mirror of [`lakko_contacts::CallInviteCapability`].
+#[wasm_bindgen]
+pub struct CallInviteCapability {
+    inner: RustCallInviteCapability,
+}
+
+#[wasm_bindgen]
+impl CallInviteCapability {
+    /// Joiner-side: decode wire bytes, verify the Ed25519
+    /// signature, return the validated capability.
+    #[wasm_bindgen(js_name = decodeAndVerify)]
+    pub fn decode_and_verify(wire: &[u8]) -> Result<CallInviteCapability, JsError> {
+        let inner = rust_call_invite_decode(wire).map_err(|e| JsError::new(&format!("{e}")))?;
+        Ok(Self { inner })
+    }
+
+    /// Inviter's long-term Ed25519 verifying key (32 bytes).
+    #[wasm_bindgen(getter, js_name = ownerSignaturePubkey)]
+    pub fn owner_signature_pubkey(&self) -> Vec<u8> {
+        self.inner.owner_signature_pubkey.to_bytes().to_vec()
+    }
+
+    /// Inviter's `account_id` (16-byte UUIDv7).
+    #[wasm_bindgen(getter, js_name = ownerAccountId)]
+    pub fn owner_account_id(&self) -> Vec<u8> {
+        self.inner.owner_account_id.to_vec()
+    }
+
+    /// 16-byte random call id minted by the inviter.
+    #[wasm_bindgen(getter, js_name = callId)]
+    pub fn call_id(&self) -> Vec<u8> {
+        self.inner.call_id.to_vec()
+    }
+
+    /// UNIX milliseconds when the invite stops being valid.
+    /// `0` is the never-expires sentinel.
+    #[wasm_bindgen(getter, js_name = expiryMs)]
+    pub fn expiry_ms(&self) -> u64 {
+        self.inner.expiry_ms
+    }
+
+    /// Max-uses hint. `0` is the single-use sentinel.
+    #[wasm_bindgen(getter, js_name = maxUses)]
+    pub fn max_uses(&self) -> u32 {
+        self.inner.max_uses
+    }
+
+    /// `true` when the call supports audio.
+    #[wasm_bindgen(getter, js_name = mediaAudio)]
+    pub fn media_audio(&self) -> bool {
+        self.inner.media.audio
+    }
+
+    /// `true` when the call supports video.
+    #[wasm_bindgen(getter, js_name = mediaVideo)]
+    pub fn media_video(&self) -> bool {
+        self.inner.media.video
+    }
+
+    /// Owner's one-time `KeyPackage` wire bytes.
+    #[wasm_bindgen(getter, js_name = oneTimeKeyPackage)]
+    pub fn one_time_key_package(&self) -> Vec<u8> {
+        self.inner.one_time_key_package.clone()
+    }
+
+    /// Optional human-visible label.
+    #[wasm_bindgen(getter)]
+    pub fn label(&self) -> String {
+        self.inner.label.clone()
+    }
+
+    /// `true` iff the capability has not expired at `nowMs`.
+    #[wasm_bindgen(js_name = isValidNow)]
+    pub fn is_valid_now(&self, now_ms: u64) -> bool {
+        self.inner.is_valid_now(now_ms)
+    }
 }
 
 // Tests cover only happy paths — error paths invoke `JsError::new`,

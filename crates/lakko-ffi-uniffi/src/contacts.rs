@@ -29,6 +29,11 @@
 //!     X25519 private key. Method (not constructor) because it
 //!     returns plaintext bytes, not another `ContactRequest`.
 
+use lakko_contacts::call_invite::{
+    compose as rust_call_invite_compose, decode_and_verify as rust_call_invite_decode,
+    CallInviteCapability as RustCallInviteCapability, CallInviteMedia as RustCallInviteMedia,
+    CALL_ID_LEN, MAX_KEY_PACKAGE_LEN,
+};
 use lakko_contacts::invite::{
     compose as rust_invite_compose, compute_joiner_tag as rust_compute_joiner_tag,
     decode_and_verify as rust_invite_decode, sign_owner_list as rust_sign_owner_list,
@@ -856,6 +861,197 @@ pub fn compute_safety_number(
     let mut b = [0u8; PUBLIC_KEY_LEN];
     b.copy_from_slice(&their_pubkey);
     Ok(lakko_contacts::safety_number_bytes(&a, &b))
+}
+
+// ============================================================================
+// CallInviteCapability — ROADMAP 3c3
+// ============================================================================
+//
+// Sibling of `InviteCapability` for link-based group-call
+// invites. The owner mints a one-time `KeyPackage` via
+// `Identity::create_key_package` (already in this crate's
+// FFI surface), embeds the resulting wire bytes here, signs
+// the whole thing with their Ed25519 seed, ships out the
+// resulting `wire` bytes as a `https://<host>/c/<base64url>`
+// link. Joiner decodes + verifies + boots a fresh MLS group
+// using the embedded KP.
+
+/// Media flags mirror of `lakko_contacts::CallInviteMedia`.
+/// Wire bitmap: `bit 0 = audio`, `bit 1 = video`.
+#[derive(uniffi::Record)]
+pub struct FfiCallInviteMedia {
+    /// `true` when the call supports audio.
+    pub audio: bool,
+    /// `true` when the call supports video.
+    pub video: bool,
+}
+
+impl FfiCallInviteMedia {
+    fn into_inner(self) -> RustCallInviteMedia {
+        RustCallInviteMedia {
+            audio: self.audio,
+            video: self.video,
+        }
+    }
+
+    fn from_inner(inner: RustCallInviteMedia) -> Self {
+        Self {
+            audio: inner.audio,
+            video: inner.video,
+        }
+    }
+}
+
+/// Compose + sign a call-invite capability (Phase 3c3).
+/// Returns the wire bytes the platform base64url-encodes
+/// into a `https://<host>/c/<...>` link.
+///
+/// `owner_signing_seed` is the 32-byte Ed25519 seed (same
+/// source as `compose_invite_capability`).
+/// `owner_account_id` is the 16-byte UUIDv7.
+/// `call_id` is 16 random bytes the platform mints with
+/// `crypto.getRandomValues` / `SecRandomCopyBytes` /
+/// `SecureRandom.nextBytes`. Every joiner sees the same
+/// `call_id` so the call ledger
+/// (`lakko_calls::GroupCallSession`) shares membership
+/// across all joiners.
+/// `one_time_key_package` is the opaque wire bytes minted
+/// via `Identity::create_key_package`.
+///
+/// # Errors
+///
+/// * [`FfiError::Contacts`] on wrong-length seed /
+///   account-id / call-id, empty or oversized KP,
+///   oversized label.
+#[uniffi::export]
+pub fn compose_call_invite_capability(
+    owner_signing_seed: Vec<u8>,
+    owner_account_id: Vec<u8>,
+    call_id: Vec<u8>,
+    expiry_ms: u64,
+    max_uses: u32,
+    media: FfiCallInviteMedia,
+    one_time_key_package: Vec<u8>,
+    label: String,
+) -> Result<Vec<u8>, FfiError> {
+    if owner_signing_seed.len() != 32 {
+        return Err(FfiError::Contacts(
+            "ownerSigningSeed must be 32 bytes".to_string(),
+        ));
+    }
+    let mut seed = [0u8; 32];
+    seed.copy_from_slice(&owner_signing_seed);
+    let signing = SigningKey::from_seed(&seed);
+
+    if owner_account_id.len() != ACCOUNT_ID_LEN {
+        return Err(FfiError::Contacts(format!(
+            "ownerAccountId must be {ACCOUNT_ID_LEN} bytes",
+        )));
+    }
+    let mut acct = [0u8; ACCOUNT_ID_LEN];
+    acct.copy_from_slice(&owner_account_id);
+
+    if call_id.len() != CALL_ID_LEN {
+        return Err(FfiError::Contacts(format!(
+            "callId must be {CALL_ID_LEN} bytes",
+        )));
+    }
+    let mut cid = [0u8; CALL_ID_LEN];
+    cid.copy_from_slice(&call_id);
+
+    if one_time_key_package.is_empty() {
+        return Err(FfiError::Contacts(
+            "oneTimeKeyPackage must be non-empty".into(),
+        ));
+    }
+    if one_time_key_package.len() > MAX_KEY_PACKAGE_LEN {
+        return Err(FfiError::Contacts(format!(
+            "oneTimeKeyPackage is {} bytes, max is {MAX_KEY_PACKAGE_LEN}",
+            one_time_key_package.len(),
+        )));
+    }
+
+    let wire = rust_call_invite_compose(
+        &signing,
+        &acct,
+        &cid,
+        expiry_ms,
+        max_uses,
+        media.into_inner(),
+        &one_time_key_package,
+        &label,
+    )?;
+    Ok(wire)
+}
+
+/// Composed and verified call-invite capability (Phase 3c3).
+/// Mirror of [`lakko_contacts::CallInviteCapability`].
+#[derive(uniffi::Object)]
+pub struct CallInviteCapability {
+    inner: RustCallInviteCapability,
+}
+
+#[uniffi::export]
+impl CallInviteCapability {
+    /// Joiner-side: decode wire bytes, verify the Ed25519
+    /// signature, return the validated capability. Does
+    /// **not** check expiry — call [`Self::is_valid_now`]
+    /// separately.
+    #[uniffi::constructor]
+    pub fn decode_and_verify(wire: Vec<u8>) -> Result<Self, FfiError> {
+        let inner = rust_call_invite_decode(&wire)?;
+        Ok(Self { inner })
+    }
+
+    /// Inviter's long-term Ed25519 verifying key (32 bytes).
+    pub fn owner_signature_pubkey(&self) -> Vec<u8> {
+        self.inner.owner_signature_pubkey.to_bytes().to_vec()
+    }
+
+    /// Inviter's `account_id` (16-byte UUIDv7).
+    pub fn owner_account_id(&self) -> Vec<u8> {
+        self.inner.owner_account_id.to_vec()
+    }
+
+    /// 16-byte random call id minted by the inviter. Every
+    /// joiner sees the same value.
+    pub fn call_id(&self) -> Vec<u8> {
+        self.inner.call_id.to_vec()
+    }
+
+    /// UNIX milliseconds when the invite stops being valid.
+    /// `0` is the never-expires sentinel.
+    pub fn expiry_ms(&self) -> u64 {
+        self.inner.expiry_ms
+    }
+
+    /// Max-uses hint. `0` is the single-use sentinel.
+    pub fn max_uses(&self) -> u32 {
+        self.inner.max_uses
+    }
+
+    /// Audio / video flags.
+    pub fn media(&self) -> FfiCallInviteMedia {
+        FfiCallInviteMedia::from_inner(self.inner.media)
+    }
+
+    /// Owner's one-time `KeyPackage` wire bytes — joiner
+    /// hands these to `Group::join_from_welcome` /
+    /// equivalent to bootstrap the call MLS group.
+    pub fn one_time_key_package(&self) -> Vec<u8> {
+        self.inner.one_time_key_package.clone()
+    }
+
+    /// Optional human-visible label. Empty string when the
+    /// inviter didn't set one.
+    pub fn label(&self) -> String {
+        self.inner.label.clone()
+    }
+
+    /// `true` iff the capability has not expired at `now_ms`.
+    pub fn is_valid_now(&self, now_ms: u64) -> bool {
+        self.inner.is_valid_now(now_ms)
+    }
 }
 
 #[cfg(test)]

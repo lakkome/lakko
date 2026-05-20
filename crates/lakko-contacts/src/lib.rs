@@ -52,6 +52,7 @@
 #![warn(missing_docs)]
 
 pub mod ack;
+pub mod call_invite;
 pub mod envelope;
 pub mod error;
 pub mod invite;
@@ -60,6 +61,11 @@ pub mod request;
 pub mod safety;
 
 pub use ack::{compose_ack, decode_and_verify_ack, ContactAck};
+pub use call_invite::{
+    compose as compose_call_invite, decode_and_verify as decode_and_verify_call_invite,
+    CallInviteCapability, CallInviteMedia, CALL_ID_LEN, CALL_NEVER_EXPIRES, CALL_SINGLE_USE,
+    MAX_KEY_PACKAGE_LEN,
+};
 pub use error::{ContactError, Result};
 pub use invite::{
     compute_joiner_tag, owner_list_canonical_bytes, revoke_canonical_bytes, sign_owner_list,
