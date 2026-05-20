@@ -48,6 +48,7 @@
 
 pub mod error;
 pub mod group_call;
+pub mod link_invite;
 pub mod quality;
 pub mod session;
 pub mod sframe;
@@ -55,6 +56,7 @@ pub mod signaling;
 
 pub use error::{Error, Result};
 pub use group_call::{GroupCallScope, GroupCallSession, Participant, SignalingOutcome};
+pub use link_invite::{accept_call_invite, AcceptedCallInvite};
 pub use quality::{
     estimate_quality, recommend_bitrate, AudioCodec, QualityLevel, QualitySample, QualitySampler,
     QualityScore, DEFAULT_SAMPLE_WINDOW, MAX_SAMPLE_WINDOW, OPUS_MAX_BITRATE_BPS,

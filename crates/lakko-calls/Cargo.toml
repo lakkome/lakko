@@ -29,5 +29,10 @@ lakko-crypto.workspace = true
 # prost runtime for the signaling codec.
 lakko-proto.workspace = true
 prost = "0.13"
+# Phase 3c3-joiner — `CallInviteCapability` codec for
+# link-based group-call invites. The orchestration in
+# `accept_call_invite` turns the embedded KP into a live
+# MLS group + `GroupCallSession`.
+lakko-contacts.workspace = true
 thiserror.workspace = true
 zeroize = "1"
