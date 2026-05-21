@@ -226,6 +226,8 @@ curl -i http://127.0.0.1:8081/version  # → 200, JSON
 - **When in doubt about security-critical code** — stop, ask, do not guess
 - **Subagents** (Explore, Plan) — for broad research, not for trivial edits
 - **Do not commit without a signature** — `commit.gpgsign = true` is required on this repo
+- **Russian-chat commit-message rule** — when the interactive chat is in Russian and the turn produced changes in code or documentation (anything `git status` would show as modified / added / deleted), the assistant MUST end its reply with a ready-to-paste English commit message in a fenced block. Skip the block only when there are no file changes.
+- **No AI signature lines in commit messages.** Never append `Co-Authored-By: Claude …`, `Generated with Claude …`, or any similar attribution footer to commit messages or PR descriptions. The maintainer authors the commit.
 
 ## Technical invariants
 
