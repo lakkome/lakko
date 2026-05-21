@@ -703,3 +703,293 @@ fn blob_id_for(capability_bytes: &[u8]) -> [u8; BLOB_ID_LEN] {
 const _: () = {
     let _ = ACCOUNT_ID_LEN; // imported for cross-module symmetry
 };
+
+// ============================================================================
+// Tests
+// ============================================================================
+//
+// Mirror of `invite::tests` — pure-helper coverage + migration-
+// shape drift sentinels. The async handlers (`upload` / `fetch` /
+// `consume` / `revoke`) need a live MariaDB and are exercised by
+// the integration suite the maintainer drives against a docker-
+// composed `discovery` instance; here we pin the helpers + the
+// host-side / SQL-side constant alignment.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -------------------------------------------------------------------------
+    // blob_id_for — SHA-256 of the capability bytes, surface
+    // contract: deterministic 32 bytes, distinct inputs ⇒
+    // distinct outputs.
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn blob_id_is_sha256_of_capability_bytes() {
+        let bytes = b"a-test-call-capability-stand-in";
+        let id = blob_id_for(bytes);
+        assert_eq!(id.len(), BLOB_ID_LEN);
+
+        // Independent SHA-256 with the same input must match.
+        let mut h = Sha256::new();
+        h.update(bytes);
+        let expected: [u8; BLOB_ID_LEN] = h.finalize().into();
+        assert_eq!(id, expected);
+    }
+
+    #[test]
+    fn same_bytes_yield_same_blob_id() {
+        let bytes = vec![0xAAu8; 200];
+        assert_eq!(blob_id_for(&bytes), blob_id_for(&bytes));
+    }
+
+    #[test]
+    fn different_bytes_yield_different_blob_id() {
+        // SHA-256 collision space is 2^256 — practically zero
+        // chance of an accidental tie on single-byte differences.
+        let a = [0xAAu8; 200];
+        let mut b = a;
+        b[0] = 0xBB;
+        assert_ne!(blob_id_for(&a), blob_id_for(&b));
+    }
+
+    /// The `blob_id_for` output must NOT collide with the
+    /// contact-invite ledger's `blob_id_for` over the same
+    /// bytes — both compute SHA-256, so they collide by design,
+    /// but the cross-table FK CASCADE on `call_invite_consumers`
+    /// only fires when `call_invites.blob_id` is deleted. We
+    /// pin the layout contract: the call-invite `blob_id_for`
+    /// is byte-for-byte SHA-256 of the capability bytes (no
+    /// domain separator), so a future change to a domain-
+    /// separated layout would surface here. The dedup tables
+    /// are partitioned by table, not by id-namespace.
+    #[test]
+    fn blob_id_layout_is_plain_sha256_no_domain_separator() {
+        let bytes = b"call-invite-canary";
+        let id = blob_id_for(bytes);
+        let mut h = Sha256::new();
+        h.update(bytes);
+        let expected: [u8; BLOB_ID_LEN] = h.finalize().into();
+        assert_eq!(id, expected, "blob_id_for must be plain SHA-256");
+    }
+
+    // -------------------------------------------------------------------------
+    // Constants vs. migration shape — drift sentinels.
+    // -------------------------------------------------------------------------
+
+    /// The `MAX_CAPABILITY_BYTES` constant pins the
+    /// `VARBINARY(...)` width declared in
+    /// `0007_call_invites.sql`. Drift surfaces as a test
+    /// failure rather than a silent "everything past N bytes
+    /// 500s in production".
+    #[test]
+    fn max_capability_bytes_matches_column_width() {
+        let migration = include_str!("../migrations/0007_call_invites.sql");
+        assert!(
+            migration.contains(&format!("VARBINARY({MAX_CAPABILITY_BYTES})")),
+            "MAX_CAPABILITY_BYTES ({MAX_CAPABILITY_BYTES}) must match the \
+             VARBINARY width declared in 0007_call_invites.sql",
+        );
+    }
+
+    #[test]
+    fn blob_id_len_matches_column_width() {
+        let migration = include_str!("../migrations/0007_call_invites.sql");
+        // Whitespace-tolerant — same hand-alignment as
+        // `call_invites_migration_indexes`.
+        let normalised = migration.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            normalised.contains(&format!("blob_id BINARY({BLOB_ID_LEN})")),
+            "BLOB_ID_LEN ({BLOB_ID_LEN}) must match the BINARY width \
+             declared in 0007_call_invites.sql",
+        );
+    }
+
+    /// The consume handler's atomic UPDATE binds
+    /// `MAX_USES_UNLIMITED` directly into the SQL CASE
+    /// expression. A future constant rename / value bump would
+    /// silently change the unlimited-budget semantics — pin
+    /// the value here so the regression surfaces in the test
+    /// suite first.
+    #[test]
+    fn max_uses_unlimited_matches_u32_max() {
+        assert_eq!(MAX_USES_UNLIMITED, u32::MAX);
+    }
+
+    /// 0008 migration shape pin — the consume handler relies
+    /// on the side table existing with PK `(blob_id,
+    /// joiner_tag)` + FK CASCADE on `call_invites.blob_id`. A
+    /// future migration that loosens either constraint would
+    /// silently break dedup or leak orphan rows; surface here.
+    #[test]
+    fn call_invite_consumers_migration_shape() {
+        let migration = include_str!("../migrations/0008_call_invite_consumers.sql");
+        let normalised = migration.split_whitespace().collect::<Vec<_>>().join(" ");
+        // Side-table exists.
+        assert!(
+            migration.contains("CREATE TABLE IF NOT EXISTS call_invite_consumers"),
+            "0008 migration must create `call_invite_consumers`",
+        );
+        // Tag column matches `JOINER_TAG_LEN` (the helper
+        // shared with the contact-invite ecosystem — see
+        // `lakko_contacts::invite::JOINER_TAG_LEN`).
+        assert!(
+            normalised.contains(&format!("joiner_tag BINARY({JOINER_TAG_LEN})")),
+            "0008 migration must declare joiner_tag as BINARY({JOINER_TAG_LEN})",
+        );
+        // PK is the dedup key the consume handler reads.
+        assert!(
+            migration.contains("PRIMARY KEY (blob_id, joiner_tag)"),
+            "0008 migration must PK on (blob_id, joiner_tag)",
+        );
+        // FK CASCADE is what gives us free cleanup on revoke.
+        assert!(
+            migration.contains(
+                "FOREIGN KEY (blob_id) REFERENCES call_invites(blob_id) ON DELETE CASCADE",
+            ),
+            "0008 migration must FK CASCADE on call_invites.blob_id",
+        );
+    }
+
+    /// 0007 migration shape pin — denormalised index columns +
+    /// the per-call query indexes the call-invite UX relies on
+    /// (owner-list, expiry pruner, call-id lookup). A future
+    /// migration that drops one of these would silently turn
+    /// hot queries into table scans.
+    #[test]
+    fn call_invites_migration_indexes() {
+        let migration = include_str!("../migrations/0007_call_invites.sql");
+        assert!(
+            migration.contains("CREATE TABLE IF NOT EXISTS call_invites"),
+            "0007 migration must create `call_invites`",
+        );
+        // Whitespace-tolerant — the migration is hand-aligned
+        // for readability (varies between 1–11 spaces between
+        // column name + type), so normalise the column-decl
+        // segment by collapsing runs of spaces before
+        // searching.
+        let normalised = migration.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            normalised.contains(&format!("call_id BINARY({CALL_ID_LEN})")),
+            "0007 migration must declare call_id as BINARY({CALL_ID_LEN})",
+        );
+        // The host-side bind layout requires `expiry_ms`,
+        // `max_uses`, `owner_account_id`, `call_id` all
+        // denormalised — surface here if a future migration
+        // drops one of them.
+        assert!(
+            migration.contains("expiry_ms"),
+            "0007 migration must declare expiry_ms column",
+        );
+        assert!(
+            migration.contains("max_uses"),
+            "0007 migration must declare max_uses column",
+        );
+        assert!(
+            migration.contains("owner_account_id"),
+            "0007 migration must declare owner_account_id column",
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // within_replay_window — server-side helper (the client
+    // doesn't filter timestamps locally). Symmetric inclusive
+    // window of ±CALL_REVOKE_REPLAY_WINDOW_MS.
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn within_replay_window_is_symmetric() {
+        let now = 1_700_000_000_000u64;
+        // Inside: ±5 minutes.
+        assert!(within_replay_window(now - 5 * 60 * 1000, now));
+        assert!(within_replay_window(now + 5 * 60 * 1000, now));
+        // Boundary: exactly ±10 minutes — accepted (inclusive
+        // ≤ on both sides; pinned here so a future tightening
+        // to strict-less-than surfaces as a test failure
+        // before it shows up as silent revoke / consume
+        // rejections on the boundary).
+        assert!(within_replay_window(
+            now - CALL_REVOKE_REPLAY_WINDOW_MS,
+            now
+        ));
+        assert!(within_replay_window(
+            now + CALL_REVOKE_REPLAY_WINDOW_MS,
+            now
+        ));
+        // Outside: > 10 minutes.
+        assert!(!within_replay_window(
+            now - CALL_REVOKE_REPLAY_WINDOW_MS - 1,
+            now,
+        ));
+        assert!(!within_replay_window(
+            now + CALL_REVOKE_REPLAY_WINDOW_MS + 1,
+            now,
+        ));
+    }
+
+    /// Saturating arithmetic boundary check — when `now_ms` is
+    /// very small (e.g. test fixtures using `now = 100`), the
+    /// `lo = now - window` subtraction must NOT wrap around to
+    /// near-u64::MAX. Pin the saturating semantics.
+    #[test]
+    fn within_replay_window_saturates_on_small_now() {
+        // `now = 100ms` is well below the 10-minute window;
+        // `lo` would underflow to near-u64::MAX without
+        // saturating_sub. The signed_at_ms = 0 case must
+        // still be accepted (it's within the boundary on the
+        // upper side: 0 <= 100 + window).
+        let now = 100u64;
+        assert!(within_replay_window(0, now));
+        assert!(within_replay_window(50, now));
+    }
+
+    // -------------------------------------------------------------------------
+    // Server-side decode_and_verify round-trip — the upload
+    // handler's signature gate. A future change to
+    // `lakko-contacts::call_invite` that loosens signature
+    // checking surfaces in this test suite, not just on the
+    // client side.
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn server_side_decode_and_verify_round_trip() {
+        use lakko_contacts::call_invite::{compose, CallInviteMedia};
+        use lakko_crypto::signing::SigningKey;
+
+        let signing = SigningKey::from_seed(&[7u8; 32]);
+        let owner_account_id = [0xA1u8; 16];
+        let call_id = [0x10u8; CALL_ID_LEN];
+
+        // The `one_time_key_package` field is opaque to the
+        // call-invite codec — `decode_and_verify` bounds-checks
+        // the length but does NOT parse the MLS KP structure
+        // (that's `lakko-mls`'s job at accept time). A
+        // synthetic non-empty byte string is enough to drive
+        // the signature gate this test pins.
+        let kp_bytes = vec![0xCDu8; 256];
+
+        let bytes = compose(
+            &signing,
+            &owner_account_id,
+            &call_id,
+            0, // CALL_NEVER_EXPIRES
+            0, // CALL_SINGLE_USE
+            CallInviteMedia::audio_video(),
+            &kp_bytes,
+            "team standup",
+        )
+        .unwrap();
+
+        let cap = decode_and_verify(&bytes).expect("verified");
+        assert_eq!(cap.owner_account_id, owner_account_id);
+        assert_eq!(cap.call_id, call_id);
+        assert_eq!(cap.label, "team standup");
+
+        // Tamper the trailing signature byte — must reject.
+        let mut tampered = bytes.clone();
+        let n = tampered.len();
+        tampered[n - 1] ^= 0x01;
+        assert!(decode_and_verify(&tampered).is_err());
+    }
+}
