@@ -64,10 +64,14 @@
 //! - `GET    /discovery/invite/{blob_id}`   — fetch InviteCapability blob (Phase 1.18d1)
 //! - `POST   /discovery/invite/{blob_id}/consume` — atomic max_uses bump (Phase 1.18d2a)
 //! - `DELETE /discovery/invite/{blob_id}`           — owner-signed revocation (Phase 1.18d2b)
+//! - `POST   /discovery/call-invite`             — upload CallInviteCapability blob (Phase 3c3-server)
+//! - `GET    /discovery/call-invite/{blob_id}`   — fetch CallInviteCapability blob (Phase 3c3-server)
+//! - `POST   /discovery/call-invite/{blob_id}/consume` — atomic max_uses bump (Phase 3c3-server)
 
 #![forbid(unsafe_code)]
 
 pub(crate) mod auth;
+mod call_invite;
 mod identity_bundle;
 mod invite;
 mod keypackage;
@@ -219,6 +223,11 @@ pub(crate) fn build_app(state: AppState) -> Router {
         .route("/discovery/identity", post(identity_bundle::upload))
         .route("/discovery/keypackage", post(keypackage::upload))
         .route("/discovery/invite", post(invite::upload))
+        // Phase 3c3-server — call-invite blob upload. Session-
+        // token-gated like the contact-invite upload above; the
+        // handler additionally enforces capability-owner /
+        // token-account match (anti-impersonation).
+        .route("/discovery/call-invite", post(call_invite::upload))
         // `DELETE /discovery/invite/{blob_id}` is owner-signed via
         // its body, but we ALSO require a session token: the
         // signature proves "owner of the capability", the token
@@ -264,6 +273,18 @@ pub(crate) fn build_app(state: AppState) -> Router {
         .route(
             "/discovery/invite/{blob_id}/consume",
             post(invite::consume),
+        )
+        // Phase 3c3-server — call-invite fetch + consume.
+        // Anonymous mirror of the contact-invite open routes
+        // above; joiner needs to access the capability before
+        // they have an account-bound session.
+        .route(
+            "/discovery/call-invite/{blob_id}",
+            get(call_invite::fetch),
+        )
+        .route(
+            "/discovery/call-invite/{blob_id}/consume",
+            post(call_invite::consume),
         );
 
     open.merge(protected)

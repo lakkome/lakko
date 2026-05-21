@@ -251,28 +251,48 @@ derive the same `CallKey` seed (same `call_id` exporter
 context) but the two groups wouldn't share an epoch, so
 the call wouldn't connect.
 
-Multi-joiner support requires a server-side rendezvous —
-`services/discovery /call-invite/{blob_id}` endpoint that
-holds the capability blob + lets the founding joiner
-publish subsequent joiners' KPs back to the owner for
-add-member commits. Tracked as the 3c3-server +
-3c3-multi-use follow-up sprints.
+**Server-side blob storage shipped in 3c3-server** —
+`services/discovery /call-invite` + `/call-invite/{blob_id}`
++ `/call-invite/{blob_id}/consume` endpoints (mirror of
+the contact-invite ones from 1.18d). Capability bytes
+now live server-side keyed by SHA-256(bytes); the URL
+becomes `https://lakko.me/c/<blob_id>` instead of
+inline-encoded.
+
+**Multi-joiner orchestration still pending** —
+publishing subsequent joiners' KPs back to the owner for
+add-member commits requires a separate "join-pending"
+side table + a notification path from the discovery
+service to the auth-flow on the owner side. Tracked as
+the 3c3-multi-use follow-up sprint.
 
 Operational impact: V1 link calls work for the 1:1
-"share a link, person clicks, both join the call" UX.
-Multi-party link calls fall back to in-chat group calls
-(`GroupCallScope::InChat`) for the time being.
+"share a link, person clicks, both join the call" UX
+with the now-shipped server-side blob storage acting as
+the durable indirection (URL no longer carries the
+capability bytes). Multi-party link calls still fall
+back to in-chat group calls (`GroupCallScope::InChat`).
 
-### G-22: Link-based invite `max_uses` is a wire hint, not enforced
+### G-22: Per-joiner dedup for call invites lands with multi-use orchestration
 
-`CallInviteCapability.max_uses` is preserved in the v1
-codec for forward-compatibility but no server-side
-counter consumes it. Mirror of the contact-invite
-situation pre-1.18d. A capability with `max_uses = 1`
-can be re-used N times by N different joiners (each
-founds their own separate MLS group — see G-21). The
-server-side enforcement lands with the 3c3-server
-endpoint + a bloom-over-consumers map.
+**Atomic `max_uses` enforcement shipped in 3c3-server**
+via `services/discovery/src/call_invite.rs::consume` —
+the handler bumps `used_count` only when the row has
+remaining budget (same CASE-expression sentinel mapping
+the contact-invite consume handler uses: `0 → 1`,
+`u32::MAX → unlimited`, otherwise N). Exhausted budgets
+surface as `410 Gone`; expired rows fold into `404 Not
+Found` to deny status-code probing.
+
+**Per-joiner dedup still pending** — V1 doesn't have a
+`call_invite_consumers` side table mirroring
+`invite_consumers` (PK on `(blob_id, joiner_tag)`,
+HMAC-blinded). Repeat consumes from the same account
+count against the budget like distinct joiners do.
+Acceptable for V1 because the call-invite lifecycle is
+much shorter than a contact invite (~minutes vs ~days);
+the dedup lands with 3c3-multi-use alongside the
+KP-republish orchestration.
 
 ## Out-of-protocol
 
