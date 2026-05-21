@@ -595,6 +595,54 @@ valid; the MLS validate step catches it).
 asserts the "first accepted joiner founds the group"
 contract: joiner at leaf 0, owner at leaf 1 post-Welcome.
 
+### C-28: Owner fingerprint enables OOB anti-phishing verification
+
+The capability exposes `owner_fingerprint()` — a
+71-character ASCII Signal-style safety number derived
+from the owner's long-term Ed25519 pubkey (same format
+joiner UIs already use for contact verification). The
+joiner-side UI shows this **before** the Accept button
+becomes active; the human compares the digits against
+what the owner shared out-of-band (a Signal chat, a
+business card, a phone call). Mismatch → the link is from
+someone other than who the human expected, typically a
+link-substitution attack where an attacker swapped a real
+`/c/<slug>` URL for one pointing at their own account.
+
+Properties:
+
+- **Deterministic per pubkey** — same owner always
+  produces the same fingerprint regardless of `call_id`,
+  expiry, media flags, or label. So the human only learns
+  one fingerprint per contact, not per invite.
+- **Format match** — 12 groups of 5 digits separated by
+  spaces, identical to
+  [`crate::safety::safety_number`](../../crates/lakko-contacts/src/safety.rs)'s
+  contract. UI surfaces don't need a second renderer.
+- **Pure function of the embedded pubkey** — no
+  external lookup, no network round-trip. Joiner can
+  display the fingerprint before consuming the
+  capability's KP.
+
+The protection holds only when the human actually
+compares the digits. Skipping the check is a UX
+regression but not a cryptographic break — the SFU still
+rejects the call if the joiner's MLS group epoch doesn't
+match the owner's. The fingerprint is a **defence-in-depth
+UX layer**, not a load-bearing crypto invariant.
+
+Tests:
+- [`lakko_contacts::call_invite::tests::owner_fingerprint_is_deterministic_per_pubkey`](../../crates/lakko-contacts/src/call_invite.rs)
+  — same owner, different capability fields → same
+  fingerprint.
+- [`…::different_owners_have_different_fingerprints`](../../crates/lakko-contacts/src/call_invite.rs)
+  — distinct pubkeys → distinct fingerprints (overwhelmingly
+  likely; BLAKE3 collision-resistance is the formal
+  argument).
+- [`…::owner_fingerprint_matches_safety_number_format`](../../crates/lakko-contacts/src/call_invite.rs)
+  — 71 chars, 12 × 5-digit groups, space separator,
+  ASCII digits only.
+
 ## Exporter labels (call-side)
 
 | Label | Length | Context | Source | Used for |

@@ -1052,6 +1052,15 @@ impl CallInviteCapability {
     pub fn is_valid_now(&self, now_ms: u64) -> bool {
         self.inner.is_valid_now(now_ms)
     }
+
+    /// Signal-style safety number derived from the owner's
+    /// long-term Ed25519 identity key. Joiner UI shows this
+    /// before letting the human Accept so they can cross-
+    /// check the digits against what the owner shared OOB.
+    /// Defends against link-substitution attacks.
+    pub fn owner_fingerprint(&self) -> String {
+        self.inner.owner_fingerprint()
+    }
 }
 
 #[cfg(test)]

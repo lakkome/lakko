@@ -222,6 +222,33 @@ impl CallInviteCapability {
     pub fn is_valid_now(&self, now_ms: u64) -> bool {
         self.expiry_ms == NEVER_EXPIRES || now_ms < self.expiry_ms
     }
+
+    /// Signal-style safety number derived from the owner's
+    /// long-term Ed25519 identity key. 71-byte ASCII string
+    /// (12 groups of 5 digits, single space between
+    /// groups) — same format as
+    /// [`crate::safety::safety_number`].
+    ///
+    /// **Purpose: anti-phishing.** Joiner UI shows this
+    /// before letting the human click Accept. The human
+    /// compares the displayed digits against what the
+    /// owner shared out-of-band (in a Signal chat, on a
+    /// business card, over the phone). If they don't
+    /// match, the link is from someone else — typically a
+    /// substitution attack where an attacker swapped a
+    /// real `/c/<slug>` URL for one pointing at their own
+    /// account.
+    ///
+    /// Order-independent on the inputs (the function reuses
+    /// the two-party `safety_number(a, b)` with both args
+    /// equal to the owner pubkey; deterministic from any
+    /// 32-byte key). This is the same Signal-protocol
+    /// fingerprint format already used for contact
+    /// verification, so the human only learns one shape.
+    #[must_use]
+    pub fn owner_fingerprint(&self) -> String {
+        crate::safety::safety_number(&self.owner_signature_pubkey, &self.owner_signature_pubkey)
+    }
 }
 
 /// Compose + sign a call-invite capability. The
@@ -723,6 +750,104 @@ mod tests {
                 assert!(msg.contains("signature"), "got: {msg}");
             },
             other => panic!("expected signature-invalid, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn owner_fingerprint_is_deterministic_per_pubkey() {
+        // Same pubkey → same fingerprint, regardless of
+        // the capability's other fields.
+        let cap_wire_a = compose(
+            &fixture_signing(),
+            &fixture_account_id(),
+            &fixture_call_id(),
+            1_000,
+            5,
+            CallInviteMedia::audio_video(),
+            &fixture_kp(),
+            "Alice",
+        )
+        .unwrap();
+        let mut another_call_id = fixture_call_id();
+        another_call_id[0] = 0xFF;
+        let cap_wire_b = compose(
+            &fixture_signing(),
+            &fixture_account_id(),
+            &another_call_id,
+            999_999,
+            0,
+            CallInviteMedia::audio_only(),
+            &fixture_kp(),
+            "Different label",
+        )
+        .unwrap();
+        let cap_a = decode_and_verify(&cap_wire_a).unwrap();
+        let cap_b = decode_and_verify(&cap_wire_b).unwrap();
+        assert_eq!(
+            cap_a.owner_fingerprint(),
+            cap_b.owner_fingerprint(),
+            "fingerprint must depend ONLY on the owner pubkey"
+        );
+    }
+
+    #[test]
+    fn different_owners_have_different_fingerprints() {
+        let signing_a = SigningKey::from_seed(&[0xAA; 32]);
+        let signing_b = SigningKey::from_seed(&[0xBB; 32]);
+        let cap_a = decode_and_verify(
+            &compose(
+                &signing_a,
+                &fixture_account_id(),
+                &fixture_call_id(),
+                0,
+                0,
+                CallInviteMedia::audio_only(),
+                &fixture_kp(),
+                "",
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let cap_b = decode_and_verify(
+            &compose(
+                &signing_b,
+                &fixture_account_id(),
+                &fixture_call_id(),
+                0,
+                0,
+                CallInviteMedia::audio_only(),
+                &fixture_kp(),
+                "",
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_ne!(cap_a.owner_fingerprint(), cap_b.owner_fingerprint());
+    }
+
+    #[test]
+    fn owner_fingerprint_matches_safety_number_format() {
+        let cap = decode_and_verify(
+            &compose(
+                &fixture_signing(),
+                &fixture_account_id(),
+                &fixture_call_id(),
+                0,
+                0,
+                CallInviteMedia::audio_only(),
+                &fixture_kp(),
+                "",
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let fingerprint = cap.owner_fingerprint();
+        // 12 groups × 5 digits + 11 spaces = 71 chars.
+        assert_eq!(fingerprint.len(), 71);
+        // Each chunk must be ASCII digits.
+        for chunk in fingerprint.split(' ') {
+            assert_eq!(chunk.len(), 5);
+            assert!(chunk.bytes().all(|b| b.is_ascii_digit()));
         }
     }
 

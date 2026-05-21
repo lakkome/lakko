@@ -48,7 +48,8 @@ summarises so the docs and the implementation stay in sync
   capability — Ed25519-signed `https://lakko.me/c/<slug>`
   with embedded one-time KeyPackage; joiner-side
   orchestration bootstraps a fresh MLS group + matching
-  CallKey (invariants C-24..C-27). What the SFU sees vs
+  CallKey; owner-fingerprint anti-phishing surface
+  (invariants C-24..C-28). What the SFU sees vs
   what stays client-side. Every invariant cites a property
   test.
 - [`known-gaps.md`](./known-gaps.md) — items the maintainer
