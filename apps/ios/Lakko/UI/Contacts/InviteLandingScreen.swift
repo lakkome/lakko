@@ -86,7 +86,45 @@ public struct InviteLandingScreen: View {
                 Text(copy(for: result))
                     .font(.body)
                     .foregroundStyle(.secondary)
+                fingerprintBlock(for: result)
             }
+        }
+    }
+
+    /// Surface the inviter's Signal-style safety number on
+    /// the `.accepted` result. iOS auto-accepts every invite
+    /// (ADR-0005 §13.4), so this is a **post-facto OOB
+    /// verification** affordance — defence-in-depth against
+    /// link-substitution attacks. The user can compare the
+    /// digits against what the inviter shared through a
+    /// trusted channel and remove the contact if mismatched.
+    /// Mirror of the web `Invite.tsx` safety-number row,
+    /// adapted to the iOS auto-accept flow.
+    @ViewBuilder
+    private func fingerprintBlock(for result: AcceptInviteResult) -> some View {
+        if case .accepted(_, let fingerprint, _) = result {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Safety number")
+                    .font(.subheadline)
+                    .fontWeight(.semibold)
+                Text(fingerprint)
+                    .font(.system(.callout, design: .monospaced))
+                    .textSelection(.enabled)
+                    .lineLimit(nil)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text(
+                    "Verify out-of-band that this matches what the " +
+                    "inviter shared (Signal, in person, phone). A " +
+                    "mismatch means the link was substituted by " +
+                    "someone else — remove the contact and ask for " +
+                    "a fresh link."
+                )
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+            }
+            .padding(12)
+            .background(Color.secondary.opacity(0.08))
+            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         }
     }
 

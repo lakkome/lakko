@@ -90,6 +90,7 @@ public class InviteLandingViewModel(
         when (result) {
             is AcceptInviteResult.Accepted -> InviteLandingState.Accepted(
                 recipientAccountId = result.recipientAccountId,
+                inviterFingerprint = result.inviterFingerprint,
                 groupIdHex = result.groupIdHex,
             )
             AcceptInviteResult.AlreadyAccepted -> InviteLandingState.AlreadyAccepted
@@ -108,6 +109,12 @@ public sealed interface InviteLandingState {
 
     public data class Accepted(
         val recipientAccountId: ByteArray,
+        /** 71-char Signal-style safety number derived from
+         *  the inviter's Ed25519 pubkey. UI shows it on the
+         *  success panel for post-facto OOB verification —
+         *  defence-in-depth against link-substitution
+         *  attacks (ROADMAP 3c3 / calls.md C-28). */
+        val inviterFingerprint: String,
         /** Non-null when the MLS handshake succeeded; the UI
          *  surfaces an `Open chat` affordance pointing at the
          *  new thread. */
@@ -116,9 +123,14 @@ public sealed interface InviteLandingState {
         override fun equals(other: Any?): Boolean =
             other is Accepted &&
                 recipientAccountId.contentEquals(other.recipientAccountId) &&
+                inviterFingerprint == other.inviterFingerprint &&
                 groupIdHex == other.groupIdHex
-        override fun hashCode(): Int =
-            recipientAccountId.contentHashCode() * 31 + (groupIdHex?.hashCode() ?: 0)
+        override fun hashCode(): Int {
+            var h = recipientAccountId.contentHashCode()
+            h = h * 31 + inviterFingerprint.hashCode()
+            h = h * 31 + (groupIdHex?.hashCode() ?: 0)
+            return h
+        }
     }
 
     public data object AlreadyAccepted : InviteLandingState

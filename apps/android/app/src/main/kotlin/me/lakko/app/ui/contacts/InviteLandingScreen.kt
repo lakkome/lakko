@@ -12,10 +12,12 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -168,6 +170,41 @@ private fun AcceptedPanel(
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
+    }
+    Spacer(Modifier.height(16.dp))
+    // Defence-in-depth anti-phishing surface — render the
+    // Signal-style safety number derived from the inviter's
+    // Ed25519 pubkey so the user can verify out-of-band that
+    // the link wasn't substituted (ROADMAP 3c3 / calls.md
+    // C-28). Mirror of the iOS + web equivalents.
+    Surface(
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        shape = RoundedCornerShape(10.dp),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(
+            modifier = Modifier.padding(12.dp),
+        ) {
+            Text(
+                text = "Safety number",
+                style = MaterialTheme.typography.titleSmall,
+            )
+            Spacer(Modifier.height(4.dp))
+            Text(
+                text = state.inviterFingerprint,
+                style = MaterialTheme.typography.bodyMedium,
+                fontFamily = FontFamily.Monospace,
+            )
+            Spacer(Modifier.height(6.dp))
+            Text(
+                text = "Verify out-of-band that this matches what the inviter " +
+                    "shared (Signal, in person, phone). A mismatch means the " +
+                    "link was substituted — remove the contact and ask for a " +
+                    "fresh link.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
     }
     Spacer(Modifier.height(24.dp))
     Row(

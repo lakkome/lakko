@@ -480,6 +480,7 @@ public class ContactsRepository(
             }
             AcceptInviteResult.Accepted(
                 recipientAccountId = inviterAccountId,
+                inviterFingerprint = capability.ownerFingerprint(),
                 groupIdHex = groupIdHex,
             )
         }
@@ -782,6 +783,13 @@ public data class ContactsState(
 public sealed interface AcceptInviteResult {
     public data class Accepted(
         val recipientAccountId: ByteArray,
+        /** 71-char Signal-style safety number derived from
+         *  the inviter's Ed25519 pubkey. UI surfaces this on
+         *  the success screen so the user can verify out-of-
+         *  band whom they just connected to — defence-in-
+         *  depth against link-substitution attacks
+         *  (ROADMAP 3c3 / calls.md C-28). */
+        val inviterFingerprint: String,
         /** Non-null when the chat surface was wired AND the
          *  MLS handshake succeeded; the UI surfaces an "Open
          *  chat" button pointing at the new thread. */
@@ -790,9 +798,14 @@ public sealed interface AcceptInviteResult {
         override fun equals(other: Any?): Boolean =
             other is Accepted &&
                 recipientAccountId.contentEquals(other.recipientAccountId) &&
+                inviterFingerprint == other.inviterFingerprint &&
                 groupIdHex == other.groupIdHex
-        override fun hashCode(): Int =
-            recipientAccountId.contentHashCode() * 31 + (groupIdHex?.hashCode() ?: 0)
+        override fun hashCode(): Int {
+            var h = recipientAccountId.contentHashCode()
+            h = h * 31 + inviterFingerprint.hashCode()
+            h = h * 31 + (groupIdHex?.hashCode() ?: 0)
+            return h
+        }
     }
 
     public data object AlreadyAccepted : AcceptInviteResult

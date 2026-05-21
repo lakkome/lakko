@@ -604,6 +604,7 @@ public final class ContactsRepository: ObservableObject {
         )
         return .accepted(
             recipientAccountId: inviterAccountId,
+            inviterFingerprint: capability.ownerFingerprint(),
             groupIdHex: groupIdHex
         )
     }
@@ -629,7 +630,17 @@ public final class ContactsRepository: ObservableObject {
 ///     `nil`.
 ///   * ``failed(message:)`` — any other underlying failure.
 public enum AcceptInviteResult: Equatable {
-    case accepted(recipientAccountId: Data, groupIdHex: String?)
+    /// Accept succeeded. `inviterFingerprint` is the 71-char
+    /// Signal-style safety number derived from the inviter's
+    /// Ed25519 pubkey — UI surfaces it after Accept so the
+    /// user can verify out-of-band whom they just connected
+    /// to (defence-in-depth against link-substitution
+    /// attacks; ROADMAP 3c3 / calls.md C-28).
+    case accepted(
+        recipientAccountId: Data,
+        inviterFingerprint: String,
+        groupIdHex: String?
+    )
     case alreadyAccepted
     case expired
     case exhausted
