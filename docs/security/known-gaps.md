@@ -184,13 +184,27 @@ trivial-to-audit `setTimeout(drop, 1000)` shape on every
 client; failure mode is local-to-that-client (an attacker
 cannot cause it remotely).
 
-**Web side: helper shipped** —
-[`apps/web/src/calls/overlap-timer.ts`](../../apps/web/src/calls/overlap-timer.ts)
-provides an `OverlapTimer` class wrapping `setTimeout`
-with single-shot semantics, idempotent `cancel()`, and
-input-clamped TTL bounds (`[50 ms, 10 s]`). Wiring it
-into a live call flow lands with the SFU integration in
-3b. iOS / Android helpers follow in parallel sprints.
+**All three platforms: helpers shipped.**
+
+- Web — [`apps/web/src/calls/overlap-timer.ts`](../../apps/web/src/calls/overlap-timer.ts):
+  `OverlapTimer` class wrapping `setTimeout`.
+- iOS — [`apps/ios/Lakko/Calls/OverlapTimer.swift`](../../apps/ios/Lakko/Calls/OverlapTimer.swift):
+  Final class with `Task.sleep` schedule, NSLock-guarded
+  state, `@Sendable` callback.
+- Android — [`apps/android/app/src/main/kotlin/me/lakko/app/calls/OverlapTimer.kt`](../../apps/android/app/src/main/kotlin/me/lakko/app/calls/OverlapTimer.kt):
+  `kotlinx.coroutines.delay` schedule, `Mutex`-guarded
+  state, scope-bound lifetime.
+
+All three share the same API surface (`arm(callback)`,
+`cancel()`, `state`/`isArmed`, three-state machine
+`disarmed`/`armed`/`fired`), the same single-shot
+"newer arm replaces prior" semantics, and the same
+TTL bounds (`[50 ms, 10 s]`, default 1 s per ADR-0008).
+Wiring them into a live call flow lands with the SFU
+integration in 3b. **G-18 is now a wiring gap, not a
+"helper missing" gap** — the schedule machinery is in
+place; only the call-into-the-helper at the right moment
+is left.
 
 ### G-19: SFU-side JWT validation lands with 3b1c (LiveKit fork)
 
