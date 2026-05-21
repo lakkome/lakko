@@ -31,22 +31,28 @@
 //! call-invite tags for the same joiner don't collide even
 //! though the function is shared.
 //!
-//! ## Why no owner-revoke endpoint yet
+//! ## Owner-signed revocation (3c3-revoke)
 //!
-//! The contact-invite ecosystem includes `DELETE /discovery/invite/
-//! {blob_id}` (1.18d2b) for owner-signed revocation. For call
-//! invites the same primitive applies but the wire shape +
-//! `revoke_canonical_bytes` analogue would need to live in
-//! `lakko_contacts::call_invite` first. V1 ships without it; the
-//! ephemeral nature of call invites (typically short expiry)
-//! makes the gap less acute than for contact invites.
+//! `DELETE /discovery/call-invite/{blob_id}` runs the same
+//! authorisation gate as the contact-invite revoke: the
+//! body carries `signed_at_ms` + Ed25519 signature over
+//! `call_revoke_canonical_bytes(blob_id, signed_at_ms)`,
+//! and the server verifies against the embedded
+//! `owner_signature_pubkey` recovered from the stored
+//! capability. Cross-kind isolation is guaranteed by the
+//! domain separator
+//! ([`CALL_INVITE_REVOKE_DOMAIN_V1`](lakko_contacts::call_invite::CALL_INVITE_REVOKE_DOMAIN_V1)):
+//! a captured contact-invite revoke signature cannot be
+//! replayed against a call-invite blob (or vice versa).
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::Json;
 use base64::engine::general_purpose::{STANDARD as B64, URL_SAFE_NO_PAD as B64URL};
 use base64::Engine as _;
-use lakko_contacts::call_invite::{decode_and_verify, CALL_ID_LEN};
+use lakko_contacts::call_invite::{
+    call_revoke_canonical_bytes, decode_and_verify, CALL_ID_LEN, CALL_REVOKE_REPLAY_WINDOW_MS,
+};
 use lakko_contacts::invite::{BLOB_ID_LEN, JOINER_TAG_LEN};
 use lakko_contacts::ACCOUNT_ID_LEN;
 use serde::{Deserialize, Serialize};
@@ -511,8 +517,170 @@ pub(crate) async fn consume(
 }
 
 // ============================================================================
+// DELETE /discovery/call-invite/{blob_id} — owner-signed revocation
+// ============================================================================
+
+#[derive(Deserialize)]
+pub(crate) struct RevokeRequest {
+    /// UNIX millis at which the body was signed. Must be
+    /// within `CALL_REVOKE_REPLAY_WINDOW_MS` of the server
+    /// clock.
+    pub(crate) signed_at_ms: u64,
+    /// Standard-alphabet base64 of the 64-byte Ed25519
+    /// signature over
+    /// `lakko_contacts::call_invite::call_revoke_canonical_bytes`.
+    pub(crate) signature: String,
+}
+
+/// `DELETE /discovery/call-invite/{blob_id}` — owner-signed
+/// delete. Mirror of `invite::revoke` for the call-invite
+/// ecosystem. Same response model:
+///
+///   * **204 No Content** — row deleted (idempotent on success).
+///   * **404 Not Found** — folded over "no row" /
+///     "signature did not verify" / "owner pubkey could not
+///     be recovered". Denies attacker status-code probing.
+///   * **400 Bad Request** — body shape failures (bad
+///     base64, wrong-sized signature, `signed_at_ms`
+///     outside the replay window).
+///
+/// Cross-kind isolation: the canonical bytes use
+/// `CALL_INVITE_REVOKE_DOMAIN_V1` instead of the contact-
+/// invite domain, so a captured contact-invite revoke
+/// signature cannot be replayed here.
+#[allow(clippy::too_many_lines)] // single-shot lifecycle —
+                                 // splitting the body shape checks into helpers would scatter
+                                 // the error-mapping across functions; matches `invite::revoke`
+                                 // posture which uses the same shape.
+pub(crate) async fn revoke(
+    State(state): State<AppState>,
+    Path(blob_id_b64url): Path<String>,
+    // Session-token-gated via route_layer in `main.rs`.
+    // Ed25519 signature on the body proves ownership of the
+    // capability; the session token proves "logged-in
+    // Lakko user" — together strictly stronger than either
+    // alone.
+    axum::Extension(_authed): axum::Extension<crate::auth::AuthenticatedAccount>,
+    Json(payload): Json<RevokeRequest>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let blob_id = B64URL.decode(&blob_id_b64url).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("invalid blob_id base64url: {e}"),
+        )
+    })?;
+    if blob_id.len() != BLOB_ID_LEN {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("blob_id must be {BLOB_ID_LEN} bytes after decode"),
+        ));
+    }
+
+    // Replay window check before any DB work — cheap DoS
+    // gate.
+    let now_ms = current_unix_ms();
+    if !within_replay_window(payload.signed_at_ms, now_ms) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!(
+                "signed_at_ms {} outside the ±{}ms replay window (now = {})",
+                payload.signed_at_ms, CALL_REVOKE_REPLAY_WINDOW_MS, now_ms,
+            ),
+        ));
+    }
+
+    let signature_bytes = B64.decode(&payload.signature).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("invalid signature base64: {e}"),
+        )
+    })?;
+    if signature_bytes.len() != lakko_crypto::signing::SIGNATURE_LEN {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!(
+                "signature must be {} bytes",
+                lakko_crypto::signing::SIGNATURE_LEN,
+            ),
+        ));
+    }
+    let signature = lakko_crypto::signing::Signature::from_bytes(&signature_bytes)
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("malformed signature: {e}")))?;
+
+    // Recover the owner's verifying key from the stored
+    // capability. "No row" folds into 404 (see doc comment).
+    let row: Option<(Vec<u8>,)> =
+        sqlx::query_as("SELECT capability_bytes FROM call_invites WHERE blob_id = ?")
+            .bind(&blob_id[..])
+            .fetch_optional(&state.db)
+            .await
+            .map_err(|e| {
+                tracing::error!(error = %e, "revoke call_invites SELECT");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal db error".to_string(),
+                )
+            })?;
+    let Some((capability_bytes,)) = row else {
+        return Err((StatusCode::NOT_FOUND, "call-invite not found".to_string()));
+    };
+
+    let cap = match decode_and_verify(&capability_bytes) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!(
+                error = %e,
+                blob_id = %blob_id_b64url,
+                "revoke: stored call-invite did not re-verify",
+            );
+            return Err((StatusCode::NOT_FOUND, "call-invite not found".to_string()));
+        },
+    };
+
+    let mut blob_id_arr = [0_u8; BLOB_ID_LEN];
+    blob_id_arr.copy_from_slice(&blob_id);
+    let canonical = call_revoke_canonical_bytes(&blob_id_arr, payload.signed_at_ms);
+    if cap
+        .owner_signature_pubkey
+        .verify(&canonical, &signature)
+        .is_err()
+    {
+        // Signature mismatch — fold into 404.
+        return Err((StatusCode::NOT_FOUND, "call-invite not found".to_string()));
+    }
+
+    // Authorised. Delete the row — the FK CASCADE on
+    // `call_invite_consumers` reaps the dedup side-table
+    // rows for free.
+    sqlx::query("DELETE FROM call_invites WHERE blob_id = ?")
+        .bind(&blob_id[..])
+        .execute(&state.db)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "revoke call_invites DELETE");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal db error".to_string(),
+            )
+        })?;
+
+    tracing::info!(
+        blob_id = %blob_id_b64url,
+        signed_at_ms = payload.signed_at_ms,
+        "call-invite revoked",
+    );
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ============================================================================
 // Helpers
 // ============================================================================
+
+fn within_replay_window(signed_at_ms: u64, now_ms: u64) -> bool {
+    let lo = now_ms.saturating_sub(CALL_REVOKE_REPLAY_WINDOW_MS);
+    let hi = now_ms.saturating_add(CALL_REVOKE_REPLAY_WINDOW_MS);
+    signed_at_ms >= lo && signed_at_ms <= hi
+}
 
 fn current_unix_ms() -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};

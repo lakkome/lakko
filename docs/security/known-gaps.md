@@ -259,6 +259,13 @@ now live server-side keyed by SHA-256(bytes); the URL
 becomes `https://lakko.me/c/<blob_id>` instead of
 inline-encoded.
 
+**Owner-signed revocation shipped in 3c3-revoke** —
+`DELETE /discovery/call-invite/{blob_id}` mirrors
+`invite::revoke`. Cross-kind isolation via
+`CALL_INVITE_REVOKE_DOMAIN_V1` (distinct from the
+contact-invite revoke domain) prevents signature replay
+across the two ecosystems.
+
 **Multi-joiner orchestration still pending** —
 publishing subsequent joiners' KPs back to the owner for
 add-member commits requires a separate "join-pending"

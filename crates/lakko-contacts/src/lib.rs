@@ -62,9 +62,10 @@ pub mod safety;
 
 pub use ack::{compose_ack, decode_and_verify_ack, ContactAck};
 pub use call_invite::{
-    compose as compose_call_invite, decode_and_verify as decode_and_verify_call_invite,
-    CallInviteCapability, CallInviteMedia, CALL_ID_LEN, CALL_NEVER_EXPIRES, CALL_SINGLE_USE,
-    MAX_KEY_PACKAGE_LEN,
+    call_revoke_canonical_bytes, call_sign_revocation, compose as compose_call_invite,
+    decode_and_verify as decode_and_verify_call_invite, CallInviteCapability, CallInviteMedia,
+    CALL_ID_LEN, CALL_INVITE_REVOKE_DOMAIN_V1, CALL_NEVER_EXPIRES, CALL_REVOKE_REPLAY_WINDOW_MS,
+    CALL_SINGLE_USE, MAX_KEY_PACKAGE_LEN,
 };
 pub use error::{ContactError, Result};
 pub use invite::{

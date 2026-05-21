@@ -67,6 +67,7 @@
 //! - `POST   /discovery/call-invite`             — upload CallInviteCapability blob (Phase 3c3-server)
 //! - `GET    /discovery/call-invite/{blob_id}`   — fetch CallInviteCapability blob (Phase 3c3-server)
 //! - `POST   /discovery/call-invite/{blob_id}/consume` — atomic max_uses bump (Phase 3c3-server)
+//! - `DELETE /discovery/call-invite/{blob_id}`         — owner-signed revocation (Phase 3c3-revoke)
 
 #![forbid(unsafe_code)]
 
@@ -228,6 +229,16 @@ pub(crate) fn build_app(state: AppState) -> Router {
         // handler additionally enforces capability-owner /
         // token-account match (anti-impersonation).
         .route("/discovery/call-invite", post(call_invite::upload))
+        // Phase 3c3-revoke — owner-signed call-invite delete.
+        // Body carries Ed25519 signature over the canonical
+        // bytes per `lakko_contacts::call_invite::
+        // call_revoke_canonical_bytes`. Session-token-gated
+        // for DoS rate-limiting; the signature is the actual
+        // authorisation gate.
+        .route(
+            "/discovery/call-invite/{blob_id}",
+            axum::routing::delete(call_invite::revoke),
+        )
         // `DELETE /discovery/invite/{blob_id}` is owner-signed via
         // its body, but we ALSO require a session token: the
         // signature proves "owner of the capability", the token

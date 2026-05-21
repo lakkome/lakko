@@ -583,6 +583,21 @@ specifically across the link-based bootstrap path —
 proves the invite-codec → MLS-group → exporter chain
 preserves the cross-party invariant.
 
+**Owner-signed revocation (3c3-revoke).** The capability
+owner can call `DELETE /discovery/call-invite/{blob_id}`
+with a body carrying `signed_at_ms` + Ed25519 signature
+over `call_revoke_canonical_bytes(blob_id, signed_at_ms)`.
+Server verifies against the embedded
+`owner_signature_pubkey` recovered from the stored
+capability; on success the row is deleted and the FK
+CASCADE on `call_invite_consumers` reaps the dedup
+side-table rows for free. Cross-kind isolation:
+`CALL_INVITE_REVOKE_DOMAIN_V1` is distinct from
+`REVOKE_DOMAIN_V1` so a contact-invite revoke signature
+can't replay against a call-invite of the same `blob_id`.
+[`lakko_contacts::call_invite::tests::call_revoke_signature_does_not_validate_under_contact_invite_domain`](../../crates/lakko-contacts/src/call_invite.rs)
+pins the invariant.
+
 Tests:
 [`lakko_calls::link_invite::tests::accept_invite_round_trips_via_welcome`](../../crates/lakko-calls/src/link_invite.rs)
 asserts byte-identical seeds + a successful seal/open

@@ -88,8 +88,79 @@ use lakko_crypto::signing::{
 };
 
 use crate::error::{ContactError, Result};
-use crate::invite::{MAX_LABEL_LEN, NEVER_EXPIRES};
+use crate::invite::{BLOB_ID_LEN, MAX_LABEL_LEN, NEVER_EXPIRES};
 use crate::request::ACCOUNT_ID_LEN;
+
+// ============================================================================
+// Owner-side revocation — protocol-shared helpers (3c3-revoke)
+// ============================================================================
+
+/// Domain-separator prefix for the canonical bytes the inviter
+/// signs to prove a call-invite revocation request. Distinct
+/// from [`crate::invite::REVOKE_DOMAIN_V1`] (`lakko-invite-
+/// revoke/v1\0`) so a captured contact-invite revoke signature
+/// cannot be replayed against a call-invite of the same
+/// `blob_id` (or vice versa). Trailing NUL keeps the prefix's
+/// byte length distinct from any incidental ASCII suffix.
+///
+/// The version is part of the domain so a future revocation
+/// scheme (e.g. delegated revoke after KT-log rotation) gets a
+/// fresh prefix without breaking existing signatures.
+pub const CALL_INVITE_REVOKE_DOMAIN_V1: &[u8] = b"lakko-call-invite-revoke/v1\x00";
+
+/// Build the canonical bytes the inviter signs to prove a
+/// call-invite revocation request. Mirror of
+/// [`crate::invite::revoke_canonical_bytes`] but with the
+/// call-invite-specific domain prefix so the two revocation
+/// surfaces stay cross-kind-isolated.
+///
+/// Layout:
+///
+/// ```text
+/// CALL_INVITE_REVOKE_DOMAIN_V1 (28 bytes) ‖ blob_id (32 bytes) ‖ signed_at_ms (8 bytes BE)
+/// ```
+///
+/// Pure deterministic helper. Both the discovery service
+/// (verify path) and the platform clients (sign path) drive
+/// against the bytes this function returns; consolidating the
+/// layout here is what keeps the two sides in sync.
+///
+/// Replay protection is provided by `signed_at_ms` —
+/// [`CALL_REVOKE_REPLAY_WINDOW_MS`] (10 minutes, shared with
+/// the contact-invite revocation) bounds how stale a
+/// signature can be before the server rejects it.
+#[must_use]
+pub fn call_revoke_canonical_bytes(blob_id: &[u8; BLOB_ID_LEN], signed_at_ms: u64) -> Vec<u8> {
+    let mut out = Vec::with_capacity(CALL_INVITE_REVOKE_DOMAIN_V1.len() + BLOB_ID_LEN + 8);
+    out.extend_from_slice(CALL_INVITE_REVOKE_DOMAIN_V1);
+    out.extend_from_slice(blob_id);
+    out.extend_from_slice(&signed_at_ms.to_be_bytes());
+    out
+}
+
+/// Sign a call-invite revocation. Mirror of
+/// [`crate::invite::sign_revocation`] using the call-invite
+/// revoke domain. Caller supplies the same Ed25519 signing
+/// key that signed the original [`CallInviteCapability`] —
+/// the server-side verify path checks the signature against
+/// the embedded `owner_signature_pubkey` it stored when the
+/// blob was uploaded.
+#[must_use]
+pub fn call_sign_revocation(
+    signing: &SigningKey,
+    blob_id: &[u8; BLOB_ID_LEN],
+    signed_at_ms: u64,
+) -> [u8; SIGNATURE_LEN] {
+    let canonical = call_revoke_canonical_bytes(blob_id, signed_at_ms);
+    signing.sign(&canonical).to_bytes()
+}
+
+/// Re-export the replay window so call-invite callers
+/// don't have to reach into `crate::invite` for it. Same
+/// 10-minute symmetric window applies to both revocation
+/// surfaces — different domain separators, same freshness
+/// ceiling.
+pub use crate::invite::REVOKE_REPLAY_WINDOW_MS as CALL_REVOKE_REPLAY_WINDOW_MS;
 
 /// Current schema version on the wire.
 const SCHEMA_VERSION: u8 = 1;
@@ -876,6 +947,86 @@ mod tests {
         let decoded = CallInviteMedia::from_byte(0b1111_1111);
         assert!(decoded.audio);
         assert!(decoded.video);
+    }
+
+    #[test]
+    fn call_revoke_canonical_bytes_layout_is_stable() {
+        let blob_id = [0xAB_u8; BLOB_ID_LEN];
+        let bytes = call_revoke_canonical_bytes(&blob_id, 0x0102_0304_0506_0708);
+        // Domain (28) + blob_id (32) + signed_at_ms (8) = 68 bytes.
+        assert_eq!(
+            bytes.len(),
+            CALL_INVITE_REVOKE_DOMAIN_V1.len() + BLOB_ID_LEN + 8
+        );
+        assert_eq!(
+            &bytes[..CALL_INVITE_REVOKE_DOMAIN_V1.len()],
+            CALL_INVITE_REVOKE_DOMAIN_V1
+        );
+        assert_eq!(
+            &bytes[CALL_INVITE_REVOKE_DOMAIN_V1.len()
+                ..CALL_INVITE_REVOKE_DOMAIN_V1.len() + BLOB_ID_LEN],
+            &blob_id[..]
+        );
+        // Last 8 bytes are big-endian signed_at_ms.
+        let tail = &bytes[bytes.len() - 8..];
+        assert_eq!(tail, &0x0102_0304_0506_0708_u64.to_be_bytes()[..]);
+    }
+
+    #[test]
+    fn call_sign_revocation_is_deterministic_and_verifiable() {
+        let signing = SigningKey::from_seed(&[0xAB; 32]);
+        let blob_id = [0xCD_u8; BLOB_ID_LEN];
+        let sig_a = call_sign_revocation(&signing, &blob_id, 1_700_000_000_000);
+        let sig_b = call_sign_revocation(&signing, &blob_id, 1_700_000_000_000);
+        assert_eq!(sig_a, sig_b);
+
+        // Verify against the same canonical bytes.
+        let canonical = call_revoke_canonical_bytes(&blob_id, 1_700_000_000_000);
+        let signature = lakko_crypto::signing::Signature::from_bytes(&sig_a).unwrap();
+        signing
+            .verifying_key()
+            .verify(&canonical, &signature)
+            .expect("call-revoke signature must verify under owner's pubkey");
+    }
+
+    #[test]
+    fn call_revoke_signature_does_not_validate_under_contact_invite_domain() {
+        // The cross-kind isolation invariant: a call-invite
+        // revoke signature must NOT verify when an attacker
+        // tries to replay it through the contact-invite
+        // `revoke_canonical_bytes` path. Different domain
+        // prefixes (`lakko-call-invite-revoke/v1\0` vs
+        // `lakko-invite-revoke/v1\0`) → different signed bytes
+        // → signature check fails.
+        let signing = SigningKey::from_seed(&[0xAB; 32]);
+        let blob_id = [0xCD_u8; BLOB_ID_LEN];
+        let signed_at_ms = 1_700_000_000_000_u64;
+
+        let call_sig = call_sign_revocation(&signing, &blob_id, signed_at_ms);
+        let signature = lakko_crypto::signing::Signature::from_bytes(&call_sig).unwrap();
+
+        // Try to verify the call-invite signature against the
+        // CONTACT-invite revoke domain. Must fail.
+        let contact_canonical = crate::invite::revoke_canonical_bytes(&blob_id, signed_at_ms);
+        assert!(
+            signing
+                .verifying_key()
+                .verify(&contact_canonical, &signature)
+                .is_err(),
+            "call-invite revoke signature MUST NOT verify under contact-invite domain"
+        );
+    }
+
+    #[test]
+    fn call_revoke_signature_changes_with_signed_at_ms() {
+        let signing = SigningKey::from_seed(&[0xAB; 32]);
+        let blob_id = [0xCD_u8; BLOB_ID_LEN];
+        let sig_a = call_sign_revocation(&signing, &blob_id, 1_700_000_000_000);
+        let sig_b = call_sign_revocation(&signing, &blob_id, 1_700_000_001_000);
+        assert_ne!(
+            sig_a, sig_b,
+            "different timestamps must produce different signatures"
+        );
     }
 
     #[test]
