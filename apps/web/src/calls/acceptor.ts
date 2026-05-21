@@ -1,0 +1,275 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+/**
+ * Joiner-side acceptor orchestration for link-based call
+ * invites (Phase 3c3-acceptor-helper).
+ *
+ * The symmetric sibling of `composer.ts` — collapses the
+ * seven-step joiner pipeline into a single discriminated
+ * result so the `/c/<slug>` landing page can render the
+ * right outcome copy without re-implementing the dispatch:
+ *
+ *   1. `parseCallInviteSlug(slug)` → pointer | inline | error
+ *   2. (pointer branch) `DiscoveryClient.fetchCallInvite(blobId)`
+ *      → bytes | null (404 → `notFound`)
+ *   3. `CallInviteCapability.decodeAndVerify(bytes)` — local
+ *      Ed25519 signature check (catches a malicious server
+ *      serving substituted bytes)
+ *   4. `capability.isValidNow(nowMs)` — expiry filter
+ *   5. (pointer branch) `DiscoveryClient.consumeCallInvite(
+ *      blobId, capabilityBytes, joinerAccountId)` — atomic
+ *      counter bump + per-joiner dedup tag
+ *   6. `acceptCallInvite(capability, joinerIdentity)` —
+ *      bootstrap a fresh MLS group with joiner as founder +
+ *      owner added via the embedded KeyPackage
+ *   7. Return `welcomeForOwner` bytes for the platform to
+ *      ferry back to the owner (via stranger-inbox routed
+ *      by `capability.ownerAccountId` or a future DS
+ *      mailbox)
+ *
+ * The acceptor does NOT deliver the Welcome — that's the
+ * platform's transport-layer job, deferred to the
+ * 3c3-multi-use sprint. The UI gets the bytes back in the
+ * `accepted` result so it can choose how to surface the
+ * "share this with the owner" step.
+ */
+
+import { loadWasm } from "../wasm";
+import { DiscoveryClient, DiscoveryHttpError } from "../discovery/client";
+import { parseCallInviteSlug } from "./invite";
+
+// Re-exported by `loadWasm()` — the wasm module surfaces
+// `CallInviteCapability` + `acceptCallInvite` + (joiner-side)
+// `Identity`. The types below are the runtime shape returned
+// from those wasm entry points.
+
+/** Subset of the wasm `Identity` surface the acceptor needs.
+ *  Mirror of the equivalent type in `composer.ts`. */
+export interface JoinerIdentityHandle {
+  /** Required to drive `wasm.acceptCallInvite(capability,
+   *  identity)`. The acceptor passes the handle through
+   *  unchanged. */
+  readonly _identity_marker?: never;
+}
+
+/** Options bag the landing page hands to
+ *  [`acceptCallInviteFromSlug`]. */
+export interface AcceptCallInviteOptions {
+  /** The `<slug>` segment from a `/c/<slug>` URL — base64url-
+   *  no-pad of either a 32-byte `blob_id` (pointer form) or
+   *  ≥ 400 bytes of inline capability (censored-region
+   *  fallback). */
+  readonly slug: string;
+  /** Joiner's 16-byte UUIDv7 account_id — folded into the
+   *  per-joiner dedup tag locally before posting to consume.
+   *  Never crosses the wire in plaintext. */
+  readonly joinerAccountId: Uint8Array;
+  /** Joiner's MLS identity handle — drives the
+   *  `acceptCallInvite(capability, identity)` step that
+   *  bootstraps the fresh call MLS group with joiner as
+   *  founder + owner added via the embedded KP. */
+  readonly joinerIdentity: unknown;
+  /** Discovery client bound to the joiner's session token
+   *  (or anonymous — only consume + fetch need session, and
+   *  consume is anonymous-friendly via PoW). */
+  readonly discoveryClient: DiscoveryClient;
+  /** UNIX millis the acceptor uses for the
+   *  `capability.isValidNow(...)` check. Defaults to
+   *  `Date.now()`; tests inject a fixed clock. */
+  readonly nowMs?: number;
+}
+
+/** Discriminated result. Every variant carries a non-failure
+ *  payload OR a stable error tag — the landing page branches
+ *  exhaustively without throwing exceptions. */
+export type AcceptCallInviteResult =
+  | {
+      readonly kind: "accepted";
+      /** Wire-format bytes the joiner just consumed. UI can
+       *  re-render details (label, expiry) from these. */
+      readonly capabilityBytes: Uint8Array;
+      /** Owner's 16-byte UUIDv7 `account_id` — the Welcome
+       *  ferry target. */
+      readonly ownerAccountId: Uint8Array;
+      /** 16-byte `call_id` embedded in the capability. UI
+       *  hands this to the call-admission JWT mint that
+       *  routes the joiner into the SFU. */
+      readonly callId: Uint8Array;
+      /** 71-char Signal-style safety number derived from
+       *  the owner's Ed25519 pubkey. The landing page
+       *  surfaces it under an "Is this really Alice?" prompt
+       *  so the joiner verifies out-of-band (defence-in-
+       *  depth against link-substitution attacks; calls.md
+       *  C-28). */
+      readonly ownerFingerprint: string;
+      /** Wire-format MLS Welcome bytes the joiner must
+       *  deliver to the owner. The platform's transport
+       *  layer (stranger-inbox / future DS mailbox / QR
+       *  paste) ferries this; the acceptor returns it
+       *  without touching the network. */
+      readonly welcomeForOwner: Uint8Array;
+      /** The `AcceptedCallInvite` wasm object — the joiner's
+       *  fresh MLS group + the live `GroupCallSession`. UI
+       *  passes it to the in-call layer. */
+      readonly accepted: unknown;
+    }
+  | {
+      readonly kind: "alreadyJoined";
+      /** The `(blob_id, joiner_tag)` PK on the server side
+       *  already had a row — counter NOT bumped. */
+      readonly capabilityBytes: Uint8Array;
+    }
+  | { readonly kind: "expired" }
+  | { readonly kind: "exhausted" }
+  | { readonly kind: "notFound" }
+  | { readonly kind: "malformedSlug"; readonly reason: string }
+  | { readonly kind: "signatureFailure"; readonly reason: string }
+  | { readonly kind: "failed"; readonly message: string };
+
+/**
+ * End-to-end "join call link" pipeline. The seven-step shape
+ * documented at the top of the file maps onto a tight switch
+ * over [`AcceptCallInviteResult`] variants — every observable
+ * outcome is a non-thrown value the UI dispatches on.
+ *
+ * The only thrown exception path is a `DiscoveryNetworkError`
+ * (no network / TLS failure / etc.) — the acceptor folds
+ * `DiscoveryHttpError` into discriminated variants but lets
+ * lower-level transport failures bubble up so the UI can
+ * surface "you're offline" copy.
+ *
+ * Inline-capability slugs (censored-region fallback) skip
+ * the `fetch` + `consume` steps entirely — `consume` on an
+ * inline capability has no server-side row to bump. The
+ * acceptor surfaces this asymmetry as `accepted` with
+ * `capabilityBytes` populated; the `welcomeForOwner` still
+ * needs ferrying via whatever transport the user has.
+ */
+export async function acceptCallInviteFromSlug(
+  opts: AcceptCallInviteOptions,
+): Promise<AcceptCallInviteResult> {
+  // ---- 1. Parse the slug -----------------------------------
+  let parsed: ReturnType<typeof parseCallInviteSlug>;
+  try {
+    parsed = parseCallInviteSlug(opts.slug);
+  } catch (err) {
+    return {
+      kind: "malformedSlug",
+      reason: err instanceof Error ? err.message : String(err),
+    };
+  }
+
+  // ---- 2. Pointer branch: fetch bytes from server ----------
+  let capabilityBytes: Uint8Array;
+  let blobId: Uint8Array | null = null;
+  if (parsed.kind === "pointer") {
+    blobId = parsed.blobId;
+    try {
+      const fetched = await opts.discoveryClient.fetchCallInvite(blobId);
+      if (fetched === null) {
+        return { kind: "notFound" };
+      }
+      capabilityBytes = fetched;
+    } catch (err) {
+      if (err instanceof DiscoveryHttpError && err.status === 404) {
+        return { kind: "notFound" };
+      }
+      throw err; // bubble up network / non-404 HTTP errors
+    }
+  } else {
+    capabilityBytes = parsed.capabilityBytes;
+  }
+
+  // ---- 3. decodeAndVerify --- catches malicious-server
+  //          substitution + signature tamper ----------------
+  const wasm = await loadWasm();
+  let capability: {
+    readonly callId: Uint8Array;
+    readonly ownerAccountId: Uint8Array;
+    readonly expiryMs: bigint;
+    readonly ownerFingerprint: string;
+    isValidNow(nowMs: bigint): boolean;
+  };
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    capability = (wasm as any).CallInviteCapability.decodeAndVerify(
+      capabilityBytes,
+    );
+  } catch (err) {
+    return {
+      kind: "signatureFailure",
+      reason: err instanceof Error ? err.message : String(err),
+    };
+  }
+
+  // ---- 4. Expiry check ------------------------------------
+  const nowMs = opts.nowMs ?? Date.now();
+  if (!capability.isValidNow(BigInt(nowMs))) {
+    return { kind: "expired" };
+  }
+
+  // ---- 5. Pointer branch: consume (counter bump + dedup) --
+  if (parsed.kind === "pointer" && blobId !== null) {
+    let consumeResult: Awaited<
+      ReturnType<DiscoveryClient["consumeCallInvite"]>
+    >;
+    try {
+      consumeResult = await opts.discoveryClient.consumeCallInvite(
+        blobId,
+        capabilityBytes,
+        opts.joinerAccountId,
+      );
+    } catch (err) {
+      return {
+        kind: "failed",
+        message: err instanceof Error ? err.message : String(err),
+      };
+    }
+    if (consumeResult.kind === "not-found") {
+      return { kind: "notFound" };
+    }
+    if (consumeResult.kind === "exhausted") {
+      return { kind: "exhausted" };
+    }
+    if (consumeResult.kind === "already-consumed") {
+      // The joiner has already accepted this exact invite
+      // before. Server doesn't bump the counter; UI typically
+      // surfaces "you're already in this call" + opens the
+      // existing call group rather than re-bootstrapping.
+      return { kind: "alreadyJoined", capabilityBytes };
+    }
+    // `consumed` — fall through to the accept step.
+  }
+
+  // ---- 6. acceptCallInvite via wasm — bootstrap the MLS
+  //          call group + return the Welcome ----------------
+  let accepted: {
+    readonly welcomeForOwner: Uint8Array;
+  };
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    accepted = (wasm as any).acceptCallInvite(
+      capability,
+      opts.joinerIdentity,
+    );
+  } catch (err) {
+    return {
+      kind: "failed",
+      message: err instanceof Error
+        ? `accept_call_invite: ${err.message}`
+        : `accept_call_invite: ${String(err)}`,
+    };
+  }
+
+  // ---- 7. Done -------------------------------------------
+  return {
+    kind: "accepted",
+    capabilityBytes,
+    ownerAccountId: capability.ownerAccountId,
+    callId: capability.callId,
+    ownerFingerprint: capability.ownerFingerprint,
+    welcomeForOwner: accepted.welcomeForOwner,
+    accepted,
+  };
+}
