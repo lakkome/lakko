@@ -475,6 +475,126 @@ attacks (RFC 8037 §6 attack class).
 Test:
 [`lakko_call_jwt::tests::jwk_to_verifying_key_rejects_wrong_kty`](../../crates/lakko-call-jwt/src/lib.rs).
 
+## Link-based call-invite invariants (Phase 3c3)
+
+A second capability class lives alongside the contact-invite
+capability from ADR-0005: the **call-invite capability**
+that lets an owner mint a `https://lakko.me/c/<slug>` link
+which a single joiner can use to bootstrap a fresh MLS
+group call. The wire codec lives in
+[`crates/lakko-contacts/src/call_invite.rs`](../../crates/lakko-contacts/src/call_invite.rs);
+the joiner-side MLS orchestration in
+[`crates/lakko-calls/src/link_invite.rs`](../../crates/lakko-calls/src/link_invite.rs).
+
+The capability embeds a **one-time `KeyPackage`** the owner
+generated specifically for this invite, alongside a
+16-byte `call_id`, `expiry_ms`, media flags, and a label.
+The wire bytes are Ed25519-signed over the owner's
+long-term identity key.
+
+Wire flow:
+
+```text
+   owner Alice                          joiner Bob
+      │                                    │
+      │ — mints KP + call_id               │
+      │ — composes CallInviteCapability    │
+      │ — publishes https://…/c/<b64>      │
+      │ ─────────────── link OOB ────────► │
+      │                                    │ — decode_and_verify
+      │                                    │ — accept_call_invite
+      │                                    │      (new MLS group with
+      │                                    │       Bob founder, Alice
+      │                                    │       added via embedded KP;
+      │                                    │       GroupCallSession with
+      │                                    │       scope = LinkBased)
+      │ ◄── Welcome ──────────────────────│
+      │                                    │
+      │ — join_from_welcome                │
+      │ — GroupCallSession::create         │
+      │     with same call_id              │
+      │                                    │
+      │ both sides derive matching         │
+      │ CallKey seed (C-1 holds)           │
+```
+
+### C-24: A `CallInviteCapability` with a tampered payload is rejected
+
+The wire format is `schema_version || owner_pubkey ||
+owner_account_id || call_id || expiry_ms || max_uses ||
+media_flags || key_package_len || key_package_bytes ||
+label_len || label || Ed25519_signature`. The signature
+covers everything before the trailing 64 bytes. Flipping a
+single byte in any field — including deep inside the
+embedded `KeyPackage` — breaks the signature, and the
+decoder refuses with `InvalidEncoding("call-invite
+signature invalid")`.
+
+Test:
+[`lakko_contacts::call_invite::tests::tampered_payload_rejected`](../../crates/lakko-contacts/src/call_invite.rs)
+flips a byte inside the KP region; AEAD-equivalent
+authentication rejects.
+
+### C-25: Splicing a different owner pubkey into a signed capability is rejected
+
+An attacker takes Alice's signed capability, swaps Bob's
+Ed25519 pubkey into the `owner_signature_pubkey` field,
+ships the result. The signature was computed against
+Alice's pubkey + the rest of the payload; verifying against
+Bob's pubkey rejects. The capability's identity is bound
+to the signature, not just the embedded pubkey field.
+
+Test:
+[`lakko_contacts::call_invite::tests::cross_signing_key_rejected`](../../crates/lakko-contacts/src/call_invite.rs).
+
+### C-26: Schema-version + bounds enforced at parse time
+
+The first byte must equal `1`; future schema bumps land as
+`2`, etc. The KP length is bounded to
+[`MAX_KEY_PACKAGE_LEN = 4 KiB`](../../crates/lakko-contacts/src/call_invite.rs)
+and the label to `MAX_LABEL_LEN = 64`. Empty KP is
+rejected at compose AND decode. Oversize KP / label
+rejected at compose; oversize-on-the-wire rejected at
+decode (defence-in-depth against an attacker who skipped
+the compose step). This bounds parser memory + caps URL
+length.
+
+Tests:
+[`lakko_contacts::call_invite::tests::unsupported_schema_version_rejected`](../../crates/lakko-contacts/src/call_invite.rs),
+[`…::empty_key_package_rejected_at_compose`](../../crates/lakko-contacts/src/call_invite.rs),
+[`…::oversize_key_package_rejected_at_compose`](../../crates/lakko-contacts/src/call_invite.rs),
+[`…::oversize_label_rejected_at_compose`](../../crates/lakko-contacts/src/call_invite.rs),
+[`…::truncated_wire_rejected`](../../crates/lakko-contacts/src/call_invite.rs).
+
+### C-27: Cross-party `CallKey` seeds agree across the bootstrap path
+
+The joiner-side `accept_call_invite` builds a fresh MLS
+group with the joiner as founder + the owner already
+added via the embedded KP, then derives a
+`GroupCallSession` keyed by `capability.call_id`. The
+owner runs `Group::join_from_welcome` on the Welcome
+bytes the joiner ships back + builds her own
+`GroupCallSession` against the same `call_id`. Both sides
+land at the same MLS epoch with the same exporter, so the
+32-byte `CallKey` seed is byte-identical.
+
+This is C-1 (cross-party seed agreement) re-asserted
+specifically across the link-based bootstrap path —
+proves the invite-codec → MLS-group → exporter chain
+preserves the cross-party invariant.
+
+Tests:
+[`lakko_calls::link_invite::tests::accept_invite_round_trips_via_welcome`](../../crates/lakko-calls/src/link_invite.rs)
+asserts byte-identical seeds + a successful seal/open
+between Bob and Alice.
+[`…::accept_invite_with_corrupted_kp_rejects`](../../crates/lakko-calls/src/link_invite.rs)
+shows the MLS layer rejects when the embedded KP is
+internally tampered (the capability signature stays
+valid; the MLS validate step catches it).
+[`…::joiner_is_founder_at_leaf_0`](../../crates/lakko-calls/src/link_invite.rs)
+asserts the "first accepted joiner founds the group"
+contract: joiner at leaf 0, owner at leaf 1 post-Welcome.
+
 ## Exporter labels (call-side)
 
 | Label | Length | Context | Source | Used for |

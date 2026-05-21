@@ -37,15 +37,20 @@ summarises so the docs and the implementation stay in sync
   identity + DeviceGroup pairing + remove-device + history
   catch-up bundle + cross-device sync.
 - [`calls.md`](./calls.md) — call-side cryptography (Phase
-  3a–3c + 3b4). Two layers: (1) media-key pipeline — MLS
+  3a–3c + 3b4). Three layers: (1) media-key pipeline — MLS
   exporter → CallKey → ParticipantKey chain, per-participant
   SFrame keys, 1-second overlap window for mid-call rotation
   (invariants C-1..C-14); (2) call-admission JWT — Ed25519
   signing in `services/auth`, JWKS publication, bearer-auth
   on `POST /call/jwt`, issuer / audience / expiry checks
   (invariants C-15..C-23 — includes JWKS multi-key resolution +
-  JWK algorithm-confusion defence). What the SFU sees vs what stays
-  client-side. Every invariant cites a property test.
+  JWK algorithm-confusion defence); (3) link-based call-invite
+  capability — Ed25519-signed `https://lakko.me/c/<slug>`
+  with embedded one-time KeyPackage; joiner-side
+  orchestration bootstraps a fresh MLS group + matching
+  CallKey (invariants C-24..C-27). What the SFU sees vs
+  what stays client-side. Every invariant cites a property
+  test.
 - [`known-gaps.md`](./known-gaps.md) — items the maintainer
   knows are not audit-ready yet; reviewers should not
   re-discover them. Each entry has a tracking issue / ROADMAP
@@ -98,6 +103,19 @@ The reviewer is asked to verify:
    The SFU-side validation (3b1c) is **out of scope for THIS
    audit pass** — it lands with the LiveKit fork. See G-19
    in [`known-gaps.md`](./known-gaps.md).
+9. The **link-based call-invite pipeline** — wire codec in
+   [`crates/lakko-contacts/src/call_invite.rs`](../../crates/lakko-contacts/src/call_invite.rs),
+   joiner-side MLS orchestration in
+   [`crates/lakko-calls/src/link_invite.rs`](../../crates/lakko-calls/src/link_invite.rs) —
+   holds C-24..C-27 in [`calls.md`](./calls.md). Ed25519
+   signature over the canonical bytes, embedded one-time
+   KeyPackage with bounded size, schema-version + length
+   gates, owner-pubkey-splicing attack rejected, and the
+   joiner-bootstrap path preserves the cross-party CallKey
+   seed agreement (C-1 re-asserted across the link flow).
+   V1 is **single-joiner**; multi-joiner support deferred
+   to 3c3-server (see G-21 / G-22 in
+   [`known-gaps.md`](./known-gaps.md)).
 
 Audit scope **out**: censorship-resistance transports
 (REALITY / MASQUE / Shadowsocks-2022) — these land in

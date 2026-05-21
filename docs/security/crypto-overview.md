@@ -36,6 +36,7 @@ reviewer can jump straight to the call site.
 | Equix PoW | Equix algorithm (Tor's onion-service PoW lineage) | [`crates/lakko-pow/`](../../crates/lakko-pow/) | Anti-spam on auth endpoints + on contact-request envelopes |
 | WebAuthn / passkey | FIDO2 + `webauthn-rs` 0.5 | [`services/auth/`](../../services/auth/) + per-client integration | Passkey opt-in (Phase 2a2) |
 | Call-admission JWT | JWS Compact (RFC 7515) + EdDSA (RFC 8037), Ed25519 signing key + JWK publication (RFC 8037 OKP form) | [`crates/lakko-call-jwt/`](../../crates/lakko-call-jwt/src/lib.rs) (mint + verify + JWKS) + [`services/auth/src/call_jwt.rs`](../../services/auth/src/call_jwt.rs) (handlers + key persistence) | Per-call admission token the SFU validates; 1-hour `exp`, public key published at `/.well-known/jwks.json`. Hand-rolled JWS — no `jsonwebtoken` dep. See [`calls.md`](./calls.md) C-15..C-23 (Phase 3b4) |
+| Link-based call-invite capability | Manual v1 codec: schema byte + Ed25519 pubkey + UUIDv7 + call_id + expiry + max_uses + media flags + embedded MLS KeyPackage + label + Ed25519 signature over the prefix | [`crates/lakko-contacts/src/call_invite.rs`](../../crates/lakko-contacts/src/call_invite.rs) (wire codec) + [`crates/lakko-calls/src/link_invite.rs`](../../crates/lakko-calls/src/link_invite.rs) (joiner-side MLS orchestration) | `/c/<base64url>` link the joiner consumes to bootstrap a fresh MLS group with the owner pre-added. Sibling of the contact-invite capability from ADR-0005. See [`calls.md`](./calls.md) C-24..C-27 (Phase 3c3) |
 
 ## Cipher suite pins (MLS)
 

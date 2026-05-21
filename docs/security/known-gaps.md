@@ -217,6 +217,41 @@ break to call-side invariants C-1..C-10 in
 [`calls.md`](./calls.md). The recorded stream is
 end-to-end encrypted just like any other consumer's view.
 
+### G-21: Link-based call invites are single-joiner in V1
+
+`CallInviteCapability` embeds one one-time `KeyPackage`
+(see C-26 in [`calls.md`](./calls.md)). The first joiner
+to call `accept_call_invite` founds the call MLS group
+with the owner already added; a second joiner using the
+same capability would call `Group::create` on their own
+side and end up in a **separate** MLS group — both would
+derive the same `CallKey` seed (same `call_id` exporter
+context) but the two groups wouldn't share an epoch, so
+the call wouldn't connect.
+
+Multi-joiner support requires a server-side rendezvous —
+`services/discovery /call-invite/{blob_id}` endpoint that
+holds the capability blob + lets the founding joiner
+publish subsequent joiners' KPs back to the owner for
+add-member commits. Tracked as the 3c3-server +
+3c3-multi-use follow-up sprints.
+
+Operational impact: V1 link calls work for the 1:1
+"share a link, person clicks, both join the call" UX.
+Multi-party link calls fall back to in-chat group calls
+(`GroupCallScope::InChat`) for the time being.
+
+### G-22: Link-based invite `max_uses` is a wire hint, not enforced
+
+`CallInviteCapability.max_uses` is preserved in the v1
+codec for forward-compatibility but no server-side
+counter consumes it. Mirror of the contact-invite
+situation pre-1.18d. A capability with `max_uses = 1`
+can be re-used N times by N different joiners (each
+founds their own separate MLS group — see G-21). The
+server-side enforcement lands with the 3c3-server
+endpoint + a bloom-over-consumers map.
+
 ## Out-of-protocol
 
 ### G-14: Hostile-OS / hostile-browser threats
