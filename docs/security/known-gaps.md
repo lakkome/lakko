@@ -284,15 +284,34 @@ the contact-invite consume handler uses: `0 → 1`,
 surface as `410 Gone`; expired rows fold into `404 Not
 Found` to deny status-code probing.
 
-**Per-joiner dedup still pending** — V1 doesn't have a
-`call_invite_consumers` side table mirroring
+**Per-joiner dedup shipped in 3c3-multi-use** —
+[`0008_call_invite_consumers.sql`](../../services/discovery/migrations/0008_call_invite_consumers.sql)
+adds the `call_invite_consumers` side table mirroring
 `invite_consumers` (PK on `(blob_id, joiner_tag)`,
-HMAC-blinded). Repeat consumes from the same account
-count against the budget like distinct joiners do.
-Acceptable for V1 because the call-invite lifecycle is
-much shorter than a contact invite (~minutes vs ~days);
-the dedup lands with 3c3-multi-use alongside the
-KP-republish orchestration.
+`FOREIGN KEY ... CASCADE` on `call_invites.blob_id`).
+The consume handler runs `INSERT IGNORE` into the table
+inside the same transaction as the counter bump; a
+repeat from the same joiner conflicts on the PK,
+surfaces as `already_consumed = true` in the response,
+and does NOT bump the counter.
+
+Joiner-tag computation reuses the existing
+[`lakko_contacts::invite::compute_joiner_tag`](../../crates/lakko-contacts/src/invite.rs)
+function (HMAC-SHA-256 over a per-blob salt). The salt
+is `SHA-256(JOINER_TAG_SALT_DOMAIN_V1 || capability_bytes)`,
+so contact-invite and call-invite tags for the same
+joiner don't collide even though the helper is shared —
+[`lakko_contacts::call_invite::tests::joiner_tag_works_on_call_invite_bytes`](../../crates/lakko-contacts/src/call_invite.rs)
+asserts this cross-kind salt isolation.
+
+**KP-republish orchestration for multi-joiner calls
+still pending** — even with dedup landed, the call-MLS-
+group bootstrap currently has the first joiner as
+founder + the owner added via the embedded KP. For a
+second joiner to land in the same group, the founder
+needs to forward their KP to the owner (or vice-versa).
+That's a separate signaling-path sprint; the dedup
+half is independent of it and shipped here.
 
 ## Out-of-protocol
 

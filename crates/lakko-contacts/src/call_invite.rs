@@ -877,4 +877,57 @@ mod tests {
         assert!(decoded.audio);
         assert!(decoded.video);
     }
+
+    #[test]
+    fn joiner_tag_works_on_call_invite_bytes() {
+        // 3c3-multi-use server-side dedup reuses the
+        // contact-invite `compute_joiner_tag` function:
+        // it's generic over `capability_bytes` because
+        // the salt is `SHA-256(domain || capability_bytes)`
+        // — wholly different wire shapes produce wholly
+        // different salts, so tags don't collide across
+        // invite kinds even though one HMAC helper covers
+        // both ecosystems.
+        let cap_a = compose(
+            &fixture_signing(),
+            &fixture_account_id(),
+            &fixture_call_id(),
+            0,
+            0,
+            CallInviteMedia::audio_only(),
+            &fixture_kp(),
+            "",
+        )
+        .unwrap();
+        let mut other_call_id = fixture_call_id();
+        other_call_id[0] = 0x99;
+        let cap_b = compose(
+            &fixture_signing(),
+            &fixture_account_id(),
+            &other_call_id,
+            0,
+            0,
+            CallInviteMedia::audio_only(),
+            &fixture_kp(),
+            "",
+        )
+        .unwrap();
+        let acct_a = [0xA1_u8; 16];
+        let acct_b = [0xB2_u8; 16];
+
+        let tag_cap_a_acct_a = crate::invite::compute_joiner_tag(&cap_a, &acct_a);
+        let tag_cap_a_acct_a_repeat = crate::invite::compute_joiner_tag(&cap_a, &acct_a);
+        let tag_cap_a_acct_other = crate::invite::compute_joiner_tag(&cap_a, &acct_b);
+        let tag_cap_other_acct_a = crate::invite::compute_joiner_tag(&cap_b, &acct_a);
+
+        // Determinism.
+        assert_eq!(tag_cap_a_acct_a, tag_cap_a_acct_a_repeat);
+        assert_eq!(tag_cap_a_acct_a.len(), crate::invite::JOINER_TAG_LEN);
+        // Different account → different tag.
+        assert_ne!(tag_cap_a_acct_a, tag_cap_a_acct_other);
+        // Different capability (different call_id) → different
+        // tag for the same joiner. Per-blob salt isolation
+        // across distinct call invites.
+        assert_ne!(tag_cap_a_acct_a, tag_cap_other_acct_a);
+    }
 }

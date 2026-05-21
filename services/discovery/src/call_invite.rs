@@ -16,15 +16,20 @@
 //! verification details. Mirroring the structure but keeping the
 //! file separate keeps each module's call graph linear + auditable.
 //!
-//! ## V1 scope
+//! ## Scope
 //!
 //! Three handlers — `upload`, `fetch`, `consume`. The atomic
 //! `consume` enforces `max_uses` via the same CASE-expression
-//! ceiling pattern `invite::consume` uses, minus the
-//! `joiner_tag`-based dedup side table. Per-joiner dedup for call
-//! invites is the 3c3-server-followup sprint; V1 still gives the
-//! basic anti-spam ceiling so a single capability can't be
-//! consumed past its budget.
+//! ceiling pattern `invite::consume` uses, PLUS per-joiner
+//! dedup via the `call_invite_consumers` side table (3c3-
+//! multi-use, mirror of `invite_consumers`). The dedup
+//! `INSERT IGNORE` and the counter UPDATE live in a single
+//! transaction so a stale dedup row never outlives a failed
+//! bump. Joiner-tag computation reuses
+//! `lakko_contacts::invite::compute_joiner_tag` — the salt
+//! depends on `capability_bytes`, so contact-invite and
+//! call-invite tags for the same joiner don't collide even
+//! though the function is shared.
 //!
 //! ## Why no owner-revoke endpoint yet
 //!
@@ -42,7 +47,7 @@ use axum::Json;
 use base64::engine::general_purpose::{STANDARD as B64, URL_SAFE_NO_PAD as B64URL};
 use base64::Engine as _;
 use lakko_contacts::call_invite::{decode_and_verify, CALL_ID_LEN};
-use lakko_contacts::invite::BLOB_ID_LEN;
+use lakko_contacts::invite::{BLOB_ID_LEN, JOINER_TAG_LEN};
 use lakko_contacts::ACCOUNT_ID_LEN;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -254,15 +259,26 @@ pub(crate) async fn fetch(
 #[derive(Deserialize)]
 pub(crate) struct ConsumeRequest {
     pub(crate) pow: crate::pow::PowProof,
+    /// Standard-alphabet base64 of the 32-byte joiner_tag.
+    /// Joiner computes via `lakko_contacts::invite::compute_joiner_tag(
+    /// capability_bytes, joiner_account_id)` (the same helper
+    /// the contact-invite ecosystem uses — salt is per-blob so
+    /// tags don't collide across invite kinds).
+    pub(crate) joiner_tag: String,
 }
 
 #[derive(Serialize)]
 pub(crate) struct ConsumeResponse {
-    /// Post-increment `used_count`.
+    /// Post-increment `used_count` — OR the existing value
+    /// when `already_consumed` is `true` (no bump on repeat).
     pub(crate) used_count: u32,
-    /// Echo of the row's `max_uses` so the client can render
-    /// "N of M uses" UI copy.
+    /// Echo of the row's `max_uses`.
     pub(crate) max_uses: u32,
+    /// `true` when the `(blob_id, joiner_tag)` PK on
+    /// `call_invite_consumers` already had a row. The UI
+    /// surfaces "you've already accepted this invite" copy
+    /// and skips the MLS bootstrap.
+    pub(crate) already_consumed: bool,
 }
 
 /// `POST /discovery/call-invite/{blob_id}/consume` — register
@@ -283,12 +299,17 @@ pub(crate) struct ConsumeResponse {
 ///   * **404 Not Found** — no row OR expired.
 ///   * **410 Gone** — budget exhausted.
 ///
-/// V1 does NOT include per-joiner dedup (joiner-tag side
-/// table). That's a 3c3-server-followup sprint — see G-21 in
-/// `docs/security/known-gaps.md`. Multi-joiner repeats from
-/// the same account count against the budget like distinct
-/// joiners do; this is acceptable for V1 because the call-
-/// invite lifecycle is much shorter than a contact invite.
+/// Per-joiner dedup landed in 3c3-multi-use via the
+/// `call_invite_consumers` side table (PK on `(blob_id,
+/// joiner_tag)`, FK CASCADE on `call_invites.blob_id`). The
+/// consume handler runs an `INSERT IGNORE` against the table
+/// inside the same transaction as the counter bump; a repeat
+/// from the same joiner returns 200 with `already_consumed =
+/// true` and does NOT bump the counter. Joiner-tag
+/// construction is server-blind (`lakko_contacts::invite::
+/// compute_joiner_tag` — HMAC over a per-blob salt); the
+/// server stores opaque 32-byte tags only.
+#[allow(clippy::too_many_lines)] // single-transaction lifecycle
 pub(crate) async fn consume(
     State(state): State<AppState>,
     Path(blob_id_b64url): Path<String>,
@@ -309,12 +330,95 @@ pub(crate) async fn consume(
         ));
     }
 
+    let joiner_tag = B64.decode(&payload.joiner_tag).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("invalid joiner_tag base64: {e}"),
+        )
+    })?;
+    if joiner_tag.len() != JOINER_TAG_LEN {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("joiner_tag must be {JOINER_TAG_LEN} bytes after decode"),
+        ));
+    }
+
     let now_ms = current_unix_ms();
 
-    // Atomic conditional UPDATE — the CASE expression maps the
-    // wire-format sentinels to SQL-comparable ceilings. Same
-    // shape as `invite::consume`.
-    let result = sqlx::query(
+    // Single transaction — dedup-insert + counter bump must
+    // live or die together. Same shape as `invite::consume`.
+    let mut tx = state.db.begin().await.map_err(|e| {
+        tracing::error!(error = %e, "consume call_invites BEGIN");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal db error".to_string(),
+        )
+    })?;
+
+    // Step 1 — dedup insert. INSERT IGNORE lets us
+    // discriminate "first time" from "already consumed" by
+    // `rows_affected`. The FK to `call_invites.blob_id`
+    // catches "no such blob" — if the parent row doesn't
+    // exist, this insert fails with a foreign-key violation
+    // which we map to 404.
+    let insert_result =
+        sqlx::query("INSERT IGNORE INTO call_invite_consumers (blob_id, joiner_tag) VALUES (?, ?)")
+            .bind(&blob_id[..])
+            .bind(&joiner_tag[..])
+            .execute(&mut *tx)
+            .await;
+
+    let insert_rows = match insert_result {
+        Ok(r) => r.rows_affected(),
+        Err(e) => {
+            let _ = tx.rollback().await;
+            let msg = format!("{e}");
+            if msg.contains("foreign key constraint") {
+                return Err((StatusCode::NOT_FOUND, "call-invite not found".to_string()));
+            }
+            tracing::error!(error = %e, "consume call_invite_consumers INSERT");
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal db error".to_string(),
+            ));
+        },
+    };
+
+    if insert_rows == 0 {
+        // Already consumed by this joiner. Read back the
+        // current counter + ceiling so the UI can render
+        // consistent copy.
+        let row: Option<(u32, u32)> =
+            sqlx::query_as("SELECT used_count, max_uses FROM call_invites WHERE blob_id = ?")
+                .bind(&blob_id[..])
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(|e| {
+                    tracing::error!(error = %e, "consume call_invites already-consumed readback");
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "internal db error".to_string(),
+                    )
+                })?;
+        tx.commit().await.map_err(|e| {
+            tracing::error!(error = %e, "consume call_invites already-consumed COMMIT");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal db error".to_string(),
+            )
+        })?;
+        let (used_count, max_uses) =
+            row.ok_or((StatusCode::NOT_FOUND, "call-invite not found".to_string()))?;
+        return Ok(Json(ConsumeResponse {
+            used_count,
+            max_uses,
+            already_consumed: true,
+        }));
+    }
+
+    // Step 2 — atomic conditional UPDATE on the parent row.
+    // Same CASE-expression sentinel mapping as before.
+    let update_result = sqlx::query(
         "UPDATE call_invites \
          SET used_count = used_count + 1 \
          WHERE blob_id = ? \
@@ -329,7 +433,7 @@ pub(crate) async fn consume(
     .bind(now_ms)
     .bind(MAX_USES_UNLIMITED)
     .bind(MAX_USES_UNLIMITED)
-    .execute(&state.db)
+    .execute(&mut *tx)
     .await
     .map_err(|e| {
         tracing::error!(error = %e, "consume call_invites UPDATE");
@@ -339,9 +443,18 @@ pub(crate) async fn consume(
         )
     })?;
 
-    if result.rows_affected() == 0 {
-        // Either the row doesn't exist, it's expired, OR
-        // the budget is exhausted. Disambiguate by SELECTing.
+    if update_result.rows_affected() == 0 {
+        // Counter didn't bump → either expired or
+        // exhausted. Roll back so the dedup-insert from
+        // step 1 is undone (this joiner can re-attempt
+        // later — though `max_uses` is static at compose
+        // time, so realistically this only matters if the
+        // invite was concurrently consumed past the
+        // ceiling by other joiners during step 2's window).
+        let _ = tx.rollback().await;
+
+        // Disambiguate "expired" vs "exhausted" via a
+        // SELECT outside the rolled-back transaction.
         let row: Option<(u64, u32, u32)> = sqlx::query_as(
             "SELECT expiry_ms, max_uses, used_count FROM call_invites WHERE blob_id = ?",
         )
@@ -356,27 +469,23 @@ pub(crate) async fn consume(
             )
         })?;
         let Some((expiry_ms, _max_uses, _used_count)) = row else {
-            // No row at all.
             return Err((StatusCode::NOT_FOUND, "call-invite not found".to_string()));
         };
         if expiry_ms != 0 && now_ms >= expiry_ms {
-            // Expired — fold into 404 same as `fetch`.
             return Err((StatusCode::NOT_FOUND, "call-invite not found".to_string()));
         }
-        // Row exists, not expired → budget exhausted.
         return Err((
             StatusCode::GONE,
             "call-invite max_uses exhausted".to_string(),
         ));
     }
 
-    // Re-SELECT to surface the post-bump counter + the static
-    // ceiling. This is a second query but it's the same row
-    // that just got UPDATEd, so it's a single buffer-pool hit.
+    // Re-SELECT inside the transaction so the readback
+    // reflects the bumped counter.
     let (used_count, max_uses): (u32, u32) =
         sqlx::query_as("SELECT used_count, max_uses FROM call_invites WHERE blob_id = ?")
             .bind(&blob_id[..])
-            .fetch_one(&state.db)
+            .fetch_one(&mut *tx)
             .await
             .map_err(|e| {
                 tracing::error!(error = %e, "consume call_invites readback");
@@ -386,9 +495,18 @@ pub(crate) async fn consume(
                 )
             })?;
 
+    tx.commit().await.map_err(|e| {
+        tracing::error!(error = %e, "consume call_invites COMMIT");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal db error".to_string(),
+        )
+    })?;
+
     Ok(Json(ConsumeResponse {
         used_count,
         max_uses,
+        already_consumed: false,
     }))
 }
 
