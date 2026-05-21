@@ -228,6 +228,7 @@ curl -i http://127.0.0.1:8081/version  # → 200, JSON
 - **Do not commit without a signature** — `commit.gpgsign = true` is required on this repo
 - **Russian-chat commit-message rule** — when the interactive chat is in Russian and the turn produced changes in code or documentation (anything `git status` would show as modified / added / deleted), the assistant MUST end its reply with a ready-to-paste English commit message in a fenced block. Skip the block only when there are no file changes.
 - **No AI signature lines in commit messages.** Never append `Co-Authored-By: Claude …`, `Generated with Claude …`, or any similar attribution footer to commit messages or PR descriptions. The maintainer authors the commit.
+- **No emoji / icons in commit messages or logs.** Commit messages, PR descriptions, and every log line emitted via the `tracing` crate from **any** client app (web / iOS / iPadOS / macOS / watchOS / Android / desktop) **and** every backend service (`services/*`) MUST be plain text — no emoji, no Unicode pictographs, no decorative icons. ASCII-only structured prefixes (`[auth]`, `OK`, `WARN`, `ERR`) are fine; emoji like `✅` / `❌` / `🔒` / `🚀` are not. Applies to user-visible release notes the maintainer drafts from these as well.
 
 ## Technical invariants
 
