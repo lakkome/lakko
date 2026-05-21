@@ -30,9 +30,9 @@
 //!     returns plaintext bytes, not another `ContactRequest`.
 
 use lakko_contacts::call_invite::{
-    compose as rust_call_invite_compose, decode_and_verify as rust_call_invite_decode,
-    CallInviteCapability as RustCallInviteCapability, CallInviteMedia as RustCallInviteMedia,
-    CALL_ID_LEN, MAX_KEY_PACKAGE_LEN,
+    call_sign_revocation as rust_call_sign_revocation, compose as rust_call_invite_compose,
+    decode_and_verify as rust_call_invite_decode, CallInviteCapability as RustCallInviteCapability,
+    CallInviteMedia as RustCallInviteMedia, CALL_ID_LEN, MAX_KEY_PACKAGE_LEN,
 };
 use lakko_contacts::invite::{
     compose as rust_invite_compose, compute_joiner_tag as rust_compute_joiner_tag,
@@ -615,6 +615,56 @@ pub fn sign_invite_revocation(
     blob_id_arr.copy_from_slice(&blob_id);
 
     Ok(rust_sign_revocation(&signing, &blob_id_arr, signed_at_ms).to_vec())
+}
+
+/// Sign a **call-invite** link revocation request (Phase 3c3-revoke).
+///
+/// Sibling of [`sign_invite_revocation`] for the
+/// [`CallInviteCapability`] ecosystem. The iOS / Android client
+/// calls this just before posting
+/// `DELETE /discovery/call-invite/{blob_id}` so the body's
+/// `signature` field carries proof that the revocation came
+/// from the same Ed25519 key that signed the capability.
+///
+/// The canonical bytes the signature covers — domain separator
+/// `lakko-call-invite-revoke/v1\0` + `blob_id` + big-endian
+/// `signed_at_ms` — live in
+/// [`lakko_contacts::call_invite::call_revoke_canonical_bytes`].
+/// The distinct domain separator (vs. contact-invite revocation)
+/// ensures a captured contact-invite revoke signature cannot be
+/// replayed as a call-invite revoke (and vice versa).
+///
+/// Returns the 64-byte raw Ed25519 signature. Caller
+/// base64-encodes for the JSON body.
+///
+/// # Errors
+///
+/// * [`FfiError::Contacts`] on wrong-length signing seed
+///   (32 bytes required) or blob_id ([`BLOB_ID_LEN`] required).
+#[uniffi::export]
+pub fn sign_call_invite_revocation(
+    signing_seed: Vec<u8>,
+    blob_id: Vec<u8>,
+    signed_at_ms: u64,
+) -> Result<Vec<u8>, FfiError> {
+    if signing_seed.len() != 32 {
+        return Err(FfiError::Contacts(
+            "signingSeed must be 32 bytes".to_string(),
+        ));
+    }
+    let mut seed = [0u8; 32];
+    seed.copy_from_slice(&signing_seed);
+    let signing = SigningKey::from_seed(&seed);
+
+    if blob_id.len() != BLOB_ID_LEN {
+        return Err(FfiError::Contacts(format!(
+            "blobId must be {BLOB_ID_LEN} bytes",
+        )));
+    }
+    let mut blob_id_arr = [0u8; BLOB_ID_LEN];
+    blob_id_arr.copy_from_slice(&blob_id);
+
+    Ok(rust_call_sign_revocation(&signing, &blob_id_arr, signed_at_ms).to_vec())
 }
 
 /// Sign an owner-list query for the
@@ -1303,6 +1353,71 @@ mod tests {
     fn sign_invite_revocation_rejects_wrong_blob_id_length() {
         let alice_signing = SigningKey::from_seed(&[0x77u8; 32]);
         let err = sign_invite_revocation(
+            alice_signing.to_seed().to_vec(),
+            vec![0u8; 16], // wrong: BLOB_ID_LEN is 32
+            0,
+        )
+        .expect_err("expected wrong-length rejection");
+        match err {
+            FfiError::Contacts(msg) => assert!(msg.contains("bytes")),
+            other => panic!("expected Contacts, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sign_call_invite_revocation_round_trip() {
+        use lakko_contacts::call_invite::call_revoke_canonical_bytes;
+        use lakko_crypto::signing::Signature;
+
+        let alice_signing = SigningKey::from_seed(&[0xC7u8; 32]);
+        let blob_id = [0xD9u8; BLOB_ID_LEN];
+        let signed_at_ms = 1_700_000_000_000u64;
+
+        let sig = sign_call_invite_revocation(
+            alice_signing.to_seed().to_vec(),
+            blob_id.to_vec(),
+            signed_at_ms,
+        )
+        .expect("sign");
+        assert_eq!(sig.len(), 64, "Ed25519 signature must be 64 bytes");
+
+        // Round-trip via the same canonical bytes the server uses
+        // to authorise `DELETE /discovery/call-invite/{blob_id}`.
+        let pubkey = alice_signing.verifying_key();
+        let canonical = call_revoke_canonical_bytes(&blob_id, signed_at_ms);
+        let signature = Signature::from_bytes(&sig).unwrap();
+        assert!(pubkey.verify(&canonical, &signature).is_ok());
+    }
+
+    #[test]
+    fn sign_call_invite_revocation_isolated_from_contact_invite() {
+        // Cross-kind isolation: signature minted via
+        // `sign_call_invite_revocation` MUST NOT verify under
+        // the contact-invite revoke canonical bytes (different
+        // domain separator).
+        use lakko_contacts::invite::revoke_canonical_bytes as contact_revoke_canonical_bytes;
+        use lakko_crypto::signing::Signature;
+
+        let alice_signing = SigningKey::from_seed(&[0xE3u8; 32]);
+        let blob_id = [0xF1u8; BLOB_ID_LEN];
+        let signed_at_ms = 1_700_000_000_000u64;
+
+        let sig = sign_call_invite_revocation(
+            alice_signing.to_seed().to_vec(),
+            blob_id.to_vec(),
+            signed_at_ms,
+        )
+        .expect("sign");
+        let pubkey = alice_signing.verifying_key();
+        let wrong_canonical = contact_revoke_canonical_bytes(&blob_id, signed_at_ms);
+        let signature = Signature::from_bytes(&sig).unwrap();
+        assert!(pubkey.verify(&wrong_canonical, &signature).is_err());
+    }
+
+    #[test]
+    fn sign_call_invite_revocation_rejects_wrong_blob_id_length() {
+        let alice_signing = SigningKey::from_seed(&[0x55u8; 32]);
+        let err = sign_call_invite_revocation(
             alice_signing.to_seed().to_vec(),
             vec![0u8; 16], // wrong: BLOB_ID_LEN is 32
             0,

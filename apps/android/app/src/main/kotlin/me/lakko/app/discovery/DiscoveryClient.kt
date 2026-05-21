@@ -32,6 +32,7 @@ import me.lakko.app.auth.base64UrlDecodeNoPad
 import me.lakko.app.auth.solvePow
 import uniffi.lakko_ffi_uniffi.OprfBlinder
 import uniffi.lakko_ffi_uniffi.computeJoinerInviteTag
+import uniffi.lakko_ffi_uniffi.signCallInviteRevocation
 import uniffi.lakko_ffi_uniffi.signInviteRevocation
 import uniffi.lakko_ffi_uniffi.signOwnerListQuery
 
@@ -283,6 +284,41 @@ public class DiscoveryClient(
         // 200 OK is also acceptable — some axum versions don't
         // emit 204 cleanly through `setBody`. Treat any 2xx as
         // success.
+        if (response.status.isSuccess()) return
+        throw DiscoveryHttpError(
+            status = response.status.value,
+            endpoint = "$endpoint (DELETE)",
+            body = response.safeReadBody(),
+        )
+    }
+
+    /** Wire-level `DELETE /discovery/call-invite/{blob_id}` —
+     *  owner-signed revocation of a [CallInviteCapability] blob
+     *  (Phase 3c3-revoke). Sibling of [inviteRevoke]; the wire
+     *  body shape is identical ([InviteRevokeRequest]) but the
+     *  signature is minted under a distinct domain separator
+     *  (`lakko-call-invite-revoke/v1`) so a captured contact-
+     *  invite revoke cannot be replayed here (and vice versa).
+     *
+     *  204 on success → returns; 404 → throws
+     *  [DiscoveryHttpError] which the high-level
+     *  [revokeCallInvite] wrapper folds into a discriminated
+     *  `not-found-or-not-owner` result. */
+    public suspend fun callInviteRevoke(blobIdSlug: String, req: InviteRevokeRequest) {
+        val endpoint = "/discovery/call-invite/$blobIdSlug"
+        val url = "$baseUrl$endpoint"
+        val response: HttpResponse = try {
+            client.delete(url) {
+                sessionToken?.let {
+                    header(io.ktor.http.HttpHeaders.Authorization, "Bearer $it")
+                }
+                contentType(ContentType.Application.Json)
+                setBody(req)
+            }
+        } catch (cause: Throwable) {
+            throw DiscoveryNetworkError("$endpoint (DELETE)", cause)
+        }
+        if (response.status == HttpStatusCode.NoContent) return
         if (response.status.isSuccess()) return
         throw DiscoveryHttpError(
             status = response.status.value,
@@ -686,6 +722,54 @@ public class DiscoveryClient(
         val slug = base64UrlEncodeNoPad(blobId)
         return try {
             inviteRevoke(
+                slug,
+                InviteRevokeRequest(
+                    signed_at_ms = signedAtMs,
+                    signature = base64Encode(signature),
+                ),
+            )
+            RevokeInviteResult.Revoked
+        } catch (e: DiscoveryHttpError) {
+            if (e.status == 404) RevokeInviteResult.NotFoundOrNotOwner else throw e
+        }
+    }
+
+    /**
+     * Owner-signed revocation of a [CallInviteCapability] blob
+     * (Phase 3c3-revoke).
+     *
+     * Sibling of [revokeInvite] for the call-invite ecosystem.
+     * Driven by the same Ed25519 key that signed the capability:
+     * [uniffi.lakko_ffi_uniffi.signCallInviteRevocation] builds
+     * the canonical bytes
+     * (`CALL_INVITE_REVOKE_DOMAIN_V1 || blob_id ||
+     * signed_at_ms_be`) under a distinct domain separator so a
+     * captured contact-invite revoke cannot be replayed here
+     * (and vice versa). The wire body shape is the shared
+     * [InviteRevokeRequest] — only the URL path differs.
+     *
+     * Returns a discriminated [RevokeInviteResult]: `Revoked`
+     * on 2xx, `NotFoundOrNotOwner` on 404 (server folds "no
+     * row" / "bad signature" / "stored bytes failed re-decode"
+     * into one status). Other non-2xx still throw
+     * [DiscoveryHttpError].
+     */
+    public suspend fun revokeCallInvite(
+        blobId: ByteArray,
+        signingSeed: ByteArray,
+    ): RevokeInviteResult {
+        if (blobId.size != BLOB_ID_LEN) {
+            throw DiscoveryClientArgError("blobId must be $BLOB_ID_LEN bytes")
+        }
+        if (signingSeed.size != SIGNING_SEED_LEN) {
+            throw DiscoveryClientArgError("signingSeed must be $SIGNING_SEED_LEN bytes")
+        }
+
+        val signedAtMs = System.currentTimeMillis()
+        val signature = signCallInviteRevocation(signingSeed, blobId, signedAtMs.toULong())
+        val slug = base64UrlEncodeNoPad(blobId)
+        return try {
+            callInviteRevoke(
                 slug,
                 InviteRevokeRequest(
                     signed_at_ms = signedAtMs,

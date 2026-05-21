@@ -307,6 +307,36 @@ export class DiscoveryClient {
     throw new DiscoveryHttpError(response.status, `${endpoint} (DELETE)`, text);
   }
 
+  /** `DELETE /discovery/call-invite/{blob_id}` — owner-signed
+   *  revocation of a [`CallInviteCapability`] blob (Phase
+   *  3c3-revoke). Sibling of [`inviteRevoke`]; the wire shape
+   *  is identical ([`InviteRevokeRequest`]) but the signature
+   *  is minted under the distinct `lakko-call-invite-revoke/v1`
+   *  domain separator so a captured contact-invite revoke can't
+   *  be replayed here (and vice versa).
+   *
+   *  High-level wrapper: [`revokeCallInvite`]. */
+  async callInviteRevoke(blobIdSlug: string, req: InviteRevokeRequest): Promise<void> {
+    const endpoint = `/discovery/call-invite/${blobIdSlug}`;
+    const url = `${this.baseUrl}${endpoint}`;
+    let response: Response;
+    try {
+      response = await fetch(url, {
+        method: "DELETE",
+        headers: {
+          "content-type": "application/json",
+          ...this.authHeaders(),
+        },
+        body: JSON.stringify(req),
+      });
+    } catch (err) {
+      throw new DiscoveryNetworkError(`${endpoint} (DELETE)`, err);
+    }
+    if (response.status === 204) return;
+    const text = await safeReadBody(response);
+    throw new DiscoveryHttpError(response.status, `${endpoint} (DELETE)`, text);
+  }
+
   /** Wire-level `POST /discovery/invite/by-owner` (Phase
    *  1.18d2b-list). Returns the raw wire response on 200,
    *  `null` on 404, throws `DiscoveryHttpError` on any other
@@ -873,6 +903,66 @@ export class DiscoveryClient {
     const slug = base64UrlEncodeNoPad(blobId);
     try {
       await this.inviteRevoke(slug, {
+        signed_at_ms: signedAtMs,
+        signature: base64Encode(signature),
+      });
+      return { kind: "revoked" };
+    } catch (err) {
+      if (err instanceof DiscoveryHttpError && err.status === 404) {
+        return { kind: "not-found-or-not-owner" };
+      }
+      throw err;
+    }
+  }
+
+  /**
+   * Owner-signed revocation of a [`CallInviteCapability`] blob
+   * (Phase 3c3-revoke).
+   *
+   * Sibling of [`revokeInvite`] for the call-invite ecosystem.
+   * Driven by the same Ed25519 key that signed the capability:
+   * `wasm.signCallInviteRevocation(seed, blobId, signedAtMs)`
+   * builds the canonical bytes
+   * (`CALL_INVITE_REVOKE_DOMAIN_V1 || blob_id ||
+   * signed_at_ms_be`) and signs. The distinct domain separator
+   * (vs. contact-invite revoke) ensures a captured signature
+   * for one kind cannot revoke a blob of the other kind.
+   *
+   * Replay window: server enforces `±10 min`
+   * (`CALL_REVOKE_REPLAY_WINDOW_MS`) against its own clock.
+   *
+   * Returns a discriminated [`RevokeInviteResult`]:
+   *   * `"revoked"` on 204
+   *   * `"not-found-or-not-owner"` on 404 (server folds "no
+   *     row" / "bad signature" / "stored bytes failed
+   *     re-decode" into one status)
+   *
+   * @param blobId      Raw 32-byte content-addressed id (the
+   *                    same value `uploadCallInvite` returned).
+   * @param signingSeed The owner's 32-byte Ed25519 seed —
+   *                    typically `chats.identity().ed25519Seed`.
+   */
+  async revokeCallInvite(
+    blobId: Uint8Array,
+    signingSeed: Uint8Array,
+  ): Promise<RevokeInviteResult> {
+    if (blobId.length !== 32) {
+      throw new DiscoveryClientArgError("blobId must be 32 bytes");
+    }
+    if (signingSeed.length !== 32) {
+      throw new DiscoveryClientArgError("signingSeed must be 32 bytes");
+    }
+
+    const wasm = await loadWasm();
+    const signedAtMs = Date.now();
+    const signature = wasm.signCallInviteRevocation(
+      signingSeed,
+      blobId,
+      BigInt(signedAtMs),
+    );
+    const slug = base64UrlEncodeNoPad(blobId);
+    try {
+      await this.callInviteRevoke(slug, {
         signed_at_ms: signedAtMs,
         signature: base64Encode(signature),
       });
