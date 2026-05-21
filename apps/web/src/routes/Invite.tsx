@@ -375,6 +375,33 @@ function ConnectPanel(props: {
         <dd style={defStyle()}>
           <code>{props.invite.fingerprintShort}</code>
         </dd>
+        <dt style={termStyle()}>Safety number</dt>
+        <dd style={defStyle()}>
+          <code
+            style={{
+              "font-size": "0.9rem",
+              "letter-spacing": "0.02em",
+              "word-spacing": "0.3em",
+              "user-select": "all",
+            }}
+          >
+            {cap.ownerFingerprint}
+          </code>
+          <p
+            style={{
+              "margin-top": "0.4rem",
+              "margin-bottom": 0,
+              "font-size": "0.85rem",
+              opacity: 0.75,
+            }}
+          >
+            <strong>Verify out-of-band before accepting.</strong> Ask
+            the inviter for their safety number through a channel you
+            already trust (Signal, in person, phone). A mismatch
+            means this link is from someone else — typically a
+            substitution attack where an attacker swapped the URL.
+          </p>
+        </dd>
         <dt style={termStyle()}>Expiry</dt>
         <dd style={defStyle()}>{describeExpiry(cap.expiryMs, nowMs)}</dd>
         <dt style={termStyle()}>Uses allowed</dt>
