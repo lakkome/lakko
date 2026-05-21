@@ -184,6 +184,14 @@ trivial-to-audit `setTimeout(drop, 1000)` shape on every
 client; failure mode is local-to-that-client (an attacker
 cannot cause it remotely).
 
+**Web side: helper shipped** —
+[`apps/web/src/calls/overlap-timer.ts`](../../apps/web/src/calls/overlap-timer.ts)
+provides an `OverlapTimer` class wrapping `setTimeout`
+with single-shot semantics, idempotent `cancel()`, and
+input-clamped TTL bounds (`[50 ms, 10 s]`). Wiring it
+into a live call flow lands with the SFU integration in
+3b. iOS / Android helpers follow in parallel sprints.
+
 ### G-19: SFU-side JWT validation lands with 3b1c (LiveKit fork)
 
 **Issuance side: shipped in 3b4** — crypto in
