@@ -623,6 +623,18 @@ impl InviteCapability {
     pub fn is_valid_now(&self, now_ms: u64) -> bool {
         self.inner.is_valid_now(now_ms)
     }
+
+    /// Signal-style safety number derived from the owner's
+    /// Ed25519 identity key. Joiner UI shows it before
+    /// Accept so the human cross-checks the digits against
+    /// what the owner shared OOB. Defends against link-
+    /// substitution attacks; identical format + value to
+    /// `CallInviteCapability.ownerFingerprint` for the
+    /// same owner.
+    #[wasm_bindgen(getter, js_name = ownerFingerprint)]
+    pub fn owner_fingerprint(&self) -> String {
+        self.inner.owner_fingerprint()
+    }
 }
 
 /// Sign an invite-link revocation request (Phase 1.18d2b-web).

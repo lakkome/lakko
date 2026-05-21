@@ -408,6 +408,35 @@ impl InviteCapability {
     pub fn is_valid_now(&self, now_ms: u64) -> bool {
         self.expiry_ms == NEVER_EXPIRES || now_ms < self.expiry_ms
     }
+
+    /// Signal-style safety number derived from the owner's
+    /// long-term Ed25519 identity key. 71-byte ASCII string
+    /// (12 groups of 5 digits, single space between
+    /// groups) — same format as
+    /// [`crate::safety::safety_number`] and the parallel
+    /// [`crate::call_invite::CallInviteCapability::owner_fingerprint`].
+    ///
+    /// **Purpose: anti-phishing.** Joiner UI shows this
+    /// before letting the human click "Accept" / "Add as
+    /// contact". The human compares the displayed digits
+    /// against what the owner shared out-of-band (in a
+    /// Signal chat, on a business card, over the phone).
+    /// If they don't match, the link is from someone else
+    /// — typically a substitution attack where an attacker
+    /// swapped a real `/i/<slug>` URL for one pointing at
+    /// their own account.
+    ///
+    /// Deterministic per-pubkey (independent of
+    /// `expiry_ms` / `max_uses` / `label` /
+    /// `bootstrap_referral`) so a contact only needs to
+    /// learn one fingerprint per identity, not per
+    /// invite. Format match guarantees the joiner UI
+    /// renders the same shape it already uses for the
+    /// existing contact-verification flow.
+    #[must_use]
+    pub fn owner_fingerprint(&self) -> String {
+        crate::safety::safety_number(&self.owner_signature_pubkey, &self.owner_signature_pubkey)
+    }
 }
 
 /// Compose an invite capability and produce its signed wire-format
@@ -791,6 +820,99 @@ mod tests {
         let (signing, account_id, x25519_pub) = fixture();
         let wire = compose(&signing, &account_id, &x25519_pub, 0, 0, false, "").unwrap();
         assert_eq!(wire[0], SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn owner_fingerprint_is_deterministic_per_pubkey() {
+        // Same owner, different capability fields →
+        // same fingerprint. The contact only needs to
+        // learn one fingerprint per identity.
+        let (signing, account_id, x25519_pub) = fixture();
+        let wire_a = compose(&signing, &account_id, &x25519_pub, 1_000, 5, true, "Alice").unwrap();
+        let wire_b = compose(
+            &signing,
+            &account_id,
+            &x25519_pub,
+            999_999,
+            0,
+            false,
+            "Different label",
+        )
+        .unwrap();
+        let cap_a = decode_and_verify(&wire_a).unwrap();
+        let cap_b = decode_and_verify(&wire_b).unwrap();
+        assert_eq!(
+            cap_a.owner_fingerprint(),
+            cap_b.owner_fingerprint(),
+            "fingerprint must depend ONLY on the owner pubkey"
+        );
+    }
+
+    #[test]
+    fn owner_fingerprint_distinct_per_pubkey() {
+        let (_, account_id, x25519_pub) = fixture();
+        let signing_a = SigningKey::from_seed(&[0xAAu8; 32]);
+        let signing_b = SigningKey::from_seed(&[0xBBu8; 32]);
+        let cap_a = decode_and_verify(
+            &compose(&signing_a, &account_id, &x25519_pub, 0, 0, false, "").unwrap(),
+        )
+        .unwrap();
+        let cap_b = decode_and_verify(
+            &compose(&signing_b, &account_id, &x25519_pub, 0, 0, false, "").unwrap(),
+        )
+        .unwrap();
+        assert_ne!(cap_a.owner_fingerprint(), cap_b.owner_fingerprint());
+    }
+
+    #[test]
+    fn owner_fingerprint_matches_safety_number_format() {
+        let (signing, account_id, x25519_pub) = fixture();
+        let cap = decode_and_verify(
+            &compose(&signing, &account_id, &x25519_pub, 0, 0, false, "").unwrap(),
+        )
+        .unwrap();
+        let fingerprint = cap.owner_fingerprint();
+        // 12 groups × 5 digits + 11 spaces = 71 chars.
+        assert_eq!(fingerprint.len(), 71);
+        for chunk in fingerprint.split(' ') {
+            assert_eq!(chunk.len(), 5);
+            assert!(chunk.bytes().all(|b| b.is_ascii_digit()));
+        }
+    }
+
+    #[test]
+    fn owner_fingerprint_matches_across_invite_kinds() {
+        // The contact-invite fingerprint and the call-
+        // invite fingerprint MUST be identical for the
+        // same owner — both reuse `safety_number(pk, pk)`,
+        // so the human only learns ONE shape across both
+        // invite ecosystems.
+        let (signing, account_id, x25519_pub) = fixture();
+
+        let contact_cap = decode_and_verify(
+            &compose(&signing, &account_id, &x25519_pub, 0, 0, false, "").unwrap(),
+        )
+        .unwrap();
+
+        // Build a call-invite for the SAME owner.
+        let call_wire = crate::call_invite::compose(
+            &signing,
+            &account_id,
+            &[0xAB; crate::call_invite::CALL_ID_LEN],
+            0,
+            0,
+            crate::call_invite::CallInviteMedia::audio_only(),
+            &[0x42; 256],
+            "",
+        )
+        .unwrap();
+        let call_cap = crate::call_invite::decode_and_verify(&call_wire).unwrap();
+
+        assert_eq!(
+            contact_cap.owner_fingerprint(),
+            call_cap.owner_fingerprint(),
+            "contact-invite and call-invite fingerprints MUST match for the same owner"
+        );
     }
 
     #[test]

@@ -643,6 +643,22 @@ Tests:
   — 71 chars, 12 × 5-digit groups, space separator,
   ASCII digits only.
 
+The same `owner_fingerprint()` method exists on the
+**contact-invite** capability
+[`lakko_contacts::InviteCapability`](../../crates/lakko-contacts/src/invite.rs).
+It defends the `/i/<slug>` contact-link substitution
+attack with identical UX: joiner UI shows the digits
+before "Add contact". Critically, both invite kinds
+produce **byte-identical fingerprints** for the same
+owner pubkey (both reuse `safety::safety_number(pk, pk)`),
+so a human only needs to learn **one** fingerprint per
+contact across both invite ecosystems —
+[`lakko_contacts::invite::tests::owner_fingerprint_matches_across_invite_kinds`](../../crates/lakko-contacts/src/invite.rs)
+asserts this cross-invite-kind compatibility explicitly,
+plus the three parallel deterministic / distinct / format
+tests in
+[`lakko_contacts::invite::tests::owner_fingerprint_*`](../../crates/lakko-contacts/src/invite.rs).
+
 ## Exporter labels (call-side)
 
 | Label | Length | Context | Source | Used for |
