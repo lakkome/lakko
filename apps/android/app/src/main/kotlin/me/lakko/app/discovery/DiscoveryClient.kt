@@ -254,6 +254,50 @@ public class DiscoveryClient(
             setBody(req)
         }
 
+    /** `POST /discovery/call-invite` — upload a verified
+     *  `CallInviteCapability` blob, get the content-addressed
+     *  `blob_id` back (Phase 3c3-server). Sibling of
+     *  [inviteUpload]; wire shape is shared. The high-level
+     *  [uploadCallInvite] wrapper drives the PoW solve. */
+    public suspend fun callInviteUpload(req: InviteUploadRequest): InviteUploadResponse =
+        doPost("/discovery/call-invite") {
+            contentType(ContentType.Application.Json)
+            setBody(req)
+        }
+
+    /**
+     * `GET /discovery/call-invite/{blob_id_b64url}`. Returns
+     * the capability wire shape on 200, `null` on 404 (server
+     * folds expired blobs into the same status), throws on
+     * any other non-2xx.
+     */
+    public suspend fun callInviteFetch(blobId: ByteArray): InviteFetchResponse? {
+        if (blobId.size != BLOB_ID_LEN) {
+            throw DiscoveryClientArgError("blobId must be $BLOB_ID_LEN bytes")
+        }
+        val slug = base64UrlEncodeNoPad(blobId)
+        val endpoint = "/discovery/call-invite/$slug"
+        return getNullableOn404(endpoint)
+    }
+
+    /**
+     * `POST /discovery/call-invite/{blob_id_b64url}/consume` —
+     * atomic `max_uses` enforcement + per-joiner dedup against
+     * the call-invite ledger (Phase 3c3-multi-use). The high-
+     * level [consumeCallInvite] wrapper drives the PoW solve +
+     * the local `computeJoinerInviteTag` call + folds the 200 /
+     * 404 / 410 status trifecta into a discriminated
+     * [ConsumeInviteResult].
+     */
+    public suspend fun callInviteConsume(
+        blobIdSlug: String,
+        req: InviteConsumeRequest,
+    ): InviteConsumeResponse =
+        doPost("/discovery/call-invite/$blobIdSlug/consume") {
+            contentType(ContentType.Application.Json)
+            setBody(req)
+        }
+
     /**
      * `DELETE /discovery/invite/{blob_id_b64url}` — owner-
      * signed revocation. The body carries `signed_at_ms` + the
@@ -735,6 +779,141 @@ public class DiscoveryClient(
     }
 
     /**
+     * Upload a freshly-composed `CallInviteCapability` blob and
+     * receive the server-assigned content-addressed `blobId`
+     * (raw 32-byte SHA-256). Drives one PoW solve + `POST
+     * /discovery/call-invite`. Idempotent.
+     *
+     * Sibling of [uploadInvite]; the client-side ceiling is
+     * [MAX_CALL_CAPABILITY_BYTES] (8 KiB, 4× contact-invite)
+     * because the call-invite capability embeds a one-time
+     * MLS KeyPackage.
+     *
+     * Returns the 32-byte `blobId`, ready to substitute into a
+     * `https://<host>/c/<slug>` pointer URL via
+     * [base64UrlEncodeNoPad].
+     */
+    public suspend fun uploadCallInvite(capabilityBytes: ByteArray): ByteArray {
+        if (capabilityBytes.isEmpty()) {
+            throw DiscoveryClientArgError("capabilityBytes must be non-empty")
+        }
+        if (capabilityBytes.size > MAX_CALL_CAPABILITY_BYTES) {
+            throw DiscoveryClientArgError(
+                "capabilityBytes exceeds the $MAX_CALL_CAPABILITY_BYTES-byte ceiling " +
+                    "(got ${capabilityBytes.size} bytes)",
+            )
+        }
+
+        val challenge = powChallenge()
+        val pow = solvePow(challenge.seed, challenge.effort_bits, powDispatcher)
+
+        val resp = callInviteUpload(
+            InviteUploadRequest(pow = pow, capability = base64Encode(capabilityBytes)),
+        )
+        val blobId = base64UrlDecodeNoPad(resp.blob_id)
+        if (blobId.size != BLOB_ID_LEN) {
+            throw DiscoveryHttpError(
+                status = 200,
+                endpoint = "/discovery/call-invite",
+                body = "server returned blob_id of ${blobId.size} bytes, expected $BLOB_ID_LEN",
+            )
+        }
+        return blobId
+    }
+
+    /**
+     * Fetch a previously-uploaded `CallInviteCapability` by its
+     * content-addressed [blobId]. Returns `null` on 404 (server
+     * folds expired blobs into the same status), raw capability
+     * bytes on 200 (the caller drives
+     * [uniffi.lakko_ffi_uniffi.CallInviteCapability.decodeAndVerify]
+     * to re-verify locally so a malicious server cannot serve
+     * substituted bytes).
+     */
+    public suspend fun fetchCallInvite(blobId: ByteArray): ByteArray? {
+        if (blobId.size != BLOB_ID_LEN) {
+            throw DiscoveryClientArgError("blobId must be $BLOB_ID_LEN bytes")
+        }
+        val raw = callInviteFetch(blobId) ?: return null
+        return base64Decode(raw.capability)
+    }
+
+    /**
+     * Atomically bump the consume counter for the call-invite
+     * at [blobId] with per-joiner dedup. Returns a discriminated
+     * [ConsumeInviteResult] so the joiner UI can branch on the
+     * four observable outcomes.
+     *
+     * Reuses the same `computeJoinerInviteTag(...)` helper as
+     * the contact-invite flow — salt is per-blob, so
+     * contact-invite and call-invite tags for the same joiner
+     * don't collide on the server.
+     */
+    public suspend fun consumeCallInvite(
+        blobId: ByteArray,
+        capabilityBytes: ByteArray,
+        joinerAccountId: ByteArray,
+    ): ConsumeInviteResult {
+        if (blobId.size != BLOB_ID_LEN) {
+            throw DiscoveryClientArgError("blobId must be $BLOB_ID_LEN bytes")
+        }
+        if (joinerAccountId.size != ACCOUNT_ID_LEN) {
+            throw DiscoveryClientArgError("joinerAccountId must be $ACCOUNT_ID_LEN bytes")
+        }
+
+        val joinerTag = computeJoinerInviteTag(capabilityBytes, joinerAccountId)
+        val slug = base64UrlEncodeNoPad(blobId)
+
+        val challenge = powChallenge()
+        val pow = solvePow(challenge.seed, challenge.effort_bits, powDispatcher)
+
+        val endpoint = "/discovery/call-invite/$slug/consume"
+        val url = "$baseUrl$endpoint"
+        val authHeader = sessionToken?.let { "Bearer $it" }
+        val response: HttpResponse = try {
+            client.post(url) {
+                if (authHeader != null) {
+                    header(io.ktor.http.HttpHeaders.Authorization, authHeader)
+                }
+                contentType(ContentType.Application.Json)
+                setBody(
+                    InviteConsumeRequest(
+                        pow = pow,
+                        joiner_tag = base64Encode(joinerTag),
+                    ),
+                )
+            }
+        } catch (cause: Throwable) {
+            throw DiscoveryNetworkError(endpoint, cause)
+        }
+        return when (response.status) {
+            HttpStatusCode.NotFound -> ConsumeInviteResult.NotFound
+            HttpStatusCode.Gone -> ConsumeInviteResult.Exhausted
+            else -> {
+                if (!response.status.isSuccess()) {
+                    throw DiscoveryHttpError(
+                        status = response.status.value,
+                        endpoint = endpoint,
+                        body = response.safeReadBody(),
+                    )
+                }
+                val parsed: InviteConsumeResponse = response.body()
+                if (parsed.already_consumed) {
+                    ConsumeInviteResult.AlreadyConsumed(
+                        usedCount = parsed.used_count,
+                        maxUses = parsed.max_uses,
+                    )
+                } else {
+                    ConsumeInviteResult.Consumed(
+                        usedCount = parsed.used_count,
+                        maxUses = parsed.max_uses,
+                    )
+                }
+            }
+        }
+    }
+
+    /**
      * Owner-signed revocation of a [CallInviteCapability] blob
      * (Phase 3c3-revoke).
      *
@@ -1021,6 +1200,14 @@ public class DiscoveryClient(
          *  small (a few hundred bytes); the 2048 ceiling has
          *  generous headroom. */
         private const val MAX_CAPABILITY_BYTES: Int = 2048
+
+        /** Mirror of `services/discovery`'s
+         *  `MAX_CALL_CAPABILITY_BYTES`. The call-invite
+         *  ledger uses an 8 KiB ceiling (vs. contact-invite's
+         *  2 KiB) because `CallInviteCapability` embeds a
+         *  one-time MLS KeyPackage (~4 KiB upper bound per
+         *  `MAX_KEY_PACKAGE_LEN`). */
+        private const val MAX_CALL_CAPABILITY_BYTES: Int = 8192
 
         /** SHA-256 → 32-byte content-addressed invite id. */
         private const val BLOB_ID_LEN: Int = 32

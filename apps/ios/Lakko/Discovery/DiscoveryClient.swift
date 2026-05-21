@@ -686,6 +686,222 @@ public final class DiscoveryClient {
         )
     }
 
+    /// `POST /discovery/call-invite` — upload a verified
+    /// `CallInviteCapability` blob (Phase 3c3-server). Sibling
+    /// of ``inviteUpload(_:)`` — wire shape
+    /// ``InviteUploadRequest`` is shared; only the URL path
+    /// differs. The high-level
+    /// ``uploadCallInvite(capabilityBytes:)`` wrapper drives
+    /// the PoW solve.
+    public func callInviteUpload(
+        _ request: InviteUploadRequest
+    ) async throws -> InviteUploadResponse {
+        try await post(endpoint: "/discovery/call-invite", body: request)
+    }
+
+    /// `GET /discovery/call-invite/{blob_id_b64url}`. Returns
+    /// the capability wire shape on 200, `nil` on 404 (server
+    /// folds expired blobs into the same status), throws on any
+    /// other non-2xx.
+    public func callInviteFetch(blobId: Data) async throws -> InviteFetchResponse? {
+        guard blobId.count == Self.blobIdLength else {
+            throw DiscoveryClientError.argument(
+                "blobId must be \(Self.blobIdLength) bytes"
+            )
+        }
+        let slug = base64UrlEncodeNoPad(blobId)
+        return try await getNullableOn404Public(
+            endpoint: "/discovery/call-invite/\(slug)"
+        )
+    }
+
+    /// `POST /discovery/call-invite/{blob_id_b64url}/consume`.
+    /// The high-level ``consumeCallInvite(blobId:capabilityBytes:joinerAccountId:)``
+    /// wrapper drives the PoW solve + the local
+    /// `computeJoinerInviteTag` call + folds the 200 / 404 /
+    /// 410 trifecta into a discriminated ``ConsumeInviteResult``.
+    public func callInviteConsume(
+        blobIdSlug: String,
+        request: InviteConsumeRequest
+    ) async throws -> InviteConsumeResponse {
+        try await post(
+            endpoint: "/discovery/call-invite/\(blobIdSlug)/consume",
+            body: request
+        )
+    }
+
+    /// Upload a freshly-composed `CallInviteCapability` blob and
+    /// receive the server-assigned content-addressed `blobId`
+    /// (raw 32-byte SHA-256). Drives one PoW solve + `POST
+    /// /discovery/call-invite`. Idempotent — same bytes yield
+    /// the same id, server upserts.
+    ///
+    /// Sibling of ``uploadInvite(capabilityBytes:)``; the
+    /// client-side ceiling is `maxCallCapabilityBytes` (8 KiB,
+    /// 4× contact-invite) because the call-invite capability
+    /// embeds a one-time MLS KeyPackage.
+    public func uploadCallInvite(capabilityBytes: Data) async throws -> Data {
+        guard !capabilityBytes.isEmpty else {
+            throw DiscoveryClientError.argument(
+                "capabilityBytes must be non-empty"
+            )
+        }
+        guard capabilityBytes.count <= Self.maxCallCapabilityBytes else {
+            throw DiscoveryClientError.argument(
+                "capabilityBytes exceeds the \(Self.maxCallCapabilityBytes)-byte ceiling " +
+                "(got \(capabilityBytes.count) bytes)"
+            )
+        }
+
+        let challenge = try await powChallenge()
+        let pow = try await solvePow(
+            seedB64: challenge.seed,
+            effortBits: challenge.effortBits
+        )
+
+        let resp = try await callInviteUpload(
+            InviteUploadRequest(
+                pow: pow,
+                capability: base64Encode(capabilityBytes)
+            )
+        )
+        guard let blobId = base64UrlDecodeNoPad(resp.blobId),
+              blobId.count == Self.blobIdLength else {
+            throw DiscoveryClientError.http(
+                status: 200,
+                endpoint: "/discovery/call-invite",
+                body: "server returned malformed blob_id"
+            )
+        }
+        return blobId
+    }
+
+    /// Fetch a previously-uploaded `CallInviteCapability` by
+    /// its content-addressed `blobId`. Returns `nil` on 404,
+    /// raw capability bytes on 200 (the caller drives
+    /// `CallInviteCapability.decodeAndVerify` to re-verify
+    /// locally so a malicious server cannot serve substituted
+    /// bytes).
+    public func fetchCallInvite(blobId: Data) async throws -> Data? {
+        guard let raw = try await callInviteFetch(blobId: blobId) else {
+            return nil
+        }
+        return base64Decode(raw.capability)
+    }
+
+    /// Atomically bump the consume counter for the call-invite
+    /// at `blobId` with per-joiner dedup. Returns a
+    /// discriminated ``ConsumeInviteResult`` so the joiner UI
+    /// can branch on the four observable outcomes.
+    ///
+    /// Reuses the same `computeJoinerInviteTag(...)` helper as
+    /// the contact-invite flow — salt is per-blob, so
+    /// contact-invite and call-invite tags for the same joiner
+    /// don't collide on the server.
+    public func consumeCallInvite(
+        blobId: Data,
+        capabilityBytes: Data,
+        joinerAccountId: Data
+    ) async throws -> ConsumeInviteResult {
+        guard blobId.count == Self.blobIdLength else {
+            throw DiscoveryClientError.argument(
+                "blobId must be \(Self.blobIdLength) bytes"
+            )
+        }
+        guard joinerAccountId.count == Self.accountIdLength else {
+            throw DiscoveryClientError.argument(
+                "joinerAccountId must be \(Self.accountIdLength) bytes"
+            )
+        }
+
+        let joinerTag = try computeJoinerInviteTag(
+            capabilityBytes: capabilityBytes,
+            joinerAccountId: joinerAccountId
+        )
+        let slug = base64UrlEncodeNoPad(blobId)
+
+        let challenge = try await powChallenge()
+        let pow = try await solvePow(
+            seedB64: challenge.seed,
+            effortBits: challenge.effortBits
+        )
+
+        let endpoint = "/discovery/call-invite/\(slug)/consume"
+        let url = try buildURL(endpoint: endpoint)
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        attachAuthorizationHeader(to: &request)
+        let body = InviteConsumeRequest(
+            pow: pow,
+            joinerTag: base64Encode(joinerTag)
+        )
+        do {
+            request.httpBody = try encoder.encode(body)
+        } catch {
+            throw DiscoveryClientError.argument(
+                "failed to encode \(endpoint) body: \(error)"
+            )
+        }
+
+        let raw: (Data, URLResponse)
+        do {
+            raw = try await session.data(for: request)
+        } catch {
+            throw DiscoveryClientError.network(
+                endpoint: endpoint,
+                underlying: error
+            )
+        }
+        guard let httpResponse = raw.1 as? HTTPURLResponse else {
+            throw DiscoveryClientError.http(
+                status: 0,
+                endpoint: endpoint,
+                body: "non-HTTP response"
+            )
+        }
+        switch httpResponse.statusCode {
+        case 404:
+            return .notFound
+        case 410:
+            return .exhausted
+        case 200..<300:
+            let parsed: InviteConsumeResponse
+            do {
+                parsed = try decoder.decode(
+                    InviteConsumeResponse.self,
+                    from: raw.0
+                )
+            } catch {
+                throw DiscoveryClientError.http(
+                    status: httpResponse.statusCode,
+                    endpoint: endpoint,
+                    body: "decode failed: \(error)"
+                )
+            }
+            if parsed.alreadyConsumed {
+                return .alreadyConsumed(
+                    usedCount: parsed.usedCount,
+                    maxUses: parsed.maxUses
+                )
+            } else {
+                return .consumed(
+                    usedCount: parsed.usedCount,
+                    maxUses: parsed.maxUses
+                )
+            }
+        default:
+            let bodyText = Self.truncate(
+                String(data: raw.0, encoding: .utf8) ?? "<binary>"
+            )
+            throw DiscoveryClientError.http(
+                status: httpResponse.statusCode,
+                endpoint: endpoint,
+                body: bodyText
+            )
+        }
+    }
+
     /// Owner-signed revocation of a `CallInviteCapability` blob
     /// (Phase 3c3-revoke).
     ///
@@ -1132,6 +1348,13 @@ public final class DiscoveryClient {
 
     /// Mirror of `services/discovery`'s `MAX_CAPABILITY_BYTES`.
     fileprivate static let maxCapabilityBytes: Int = 2048
+
+    /// Mirror of `services/discovery`'s `MAX_CALL_CAPABILITY_BYTES`
+    /// — the call-invite ledger uses an 8192-byte ceiling
+    /// (vs. contact-invite's 2048) because `CallInviteCapability`
+    /// embeds a one-time MLS KeyPackage (~4 KiB upper bound per
+    /// `MAX_KEY_PACKAGE_LEN`).
+    fileprivate static let maxCallCapabilityBytes: Int = 8192
 
     /// SHA-256 → 32-byte content-addressed invite id.
     fileprivate static let blobIdLength: Int = 32

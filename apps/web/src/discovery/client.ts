@@ -276,6 +276,32 @@ export class DiscoveryClient {
     return this.post(`/discovery/invite/${blobIdSlug}/consume`, req);
   }
 
+  /** `POST /discovery/call-invite` — upload a verified
+   *  `CallInviteCapability` blob, get the content-addressed
+   *  `blob_id` back (Phase 3c3-server). Sibling of
+   *  [`inviteUpload`]; wire shape (`InviteUploadRequest`) is
+   *  shared with the contact-invite endpoint — only the URL
+   *  path differs. The high-level [`uploadCallInvite`] wrapper
+   *  drives the PoW solve. */
+  async callInviteUpload(
+    req: InviteUploadRequest,
+  ): Promise<InviteUploadResponse> {
+    return this.post("/discovery/call-invite", req);
+  }
+
+  /** `POST /discovery/call-invite/{blob_id}/consume` — atomic
+   *  `max_uses` enforcement against the call-invite ledger
+   *  (Phase 3c3-multi-use). The high-level
+   *  [`consumeCallInvite`] wrapper drives the PoW solve + the
+   *  per-joiner tag computation and folds 200 / 404 / 410 into
+   *  a discriminated [`ConsumeInviteResult`]. */
+  async callInviteConsume(
+    blobIdSlug: string,
+    req: InviteConsumeRequest,
+  ): Promise<InviteConsumeResponse> {
+    return this.post(`/discovery/call-invite/${blobIdSlug}/consume`, req);
+  }
+
   /** `DELETE /discovery/invite/{blob_id}` — owner-signed
    *  revocation (Phase 1.18d2b). The high-level
    *  [`revokeInvite`] wrapper signs the canonical bytes via
@@ -816,6 +842,193 @@ export class DiscoveryClient {
     const pow = await solvePow(challenge.seed, challenge.effort_bits);
 
     const endpoint = `/discovery/invite/${slug}/consume`;
+    const url = `${this.baseUrl}${endpoint}`;
+    let response: Response;
+    try {
+      response = await fetch(url, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          ...this.authHeaders(),
+        },
+        body: JSON.stringify({
+          pow,
+          joiner_tag: base64Encode(joinerTag),
+        } satisfies InviteConsumeRequest),
+      });
+    } catch (err) {
+      throw new DiscoveryNetworkError(endpoint, err);
+    }
+    if (response.status === 404) return { kind: "not-found" };
+    if (response.status === 410) return { kind: "exhausted" };
+    if (!response.ok) {
+      const text = await safeReadBody(response);
+      throw new DiscoveryHttpError(response.status, endpoint, text);
+    }
+    const raw = (await response.json()) as InviteConsumeResponse;
+    return {
+      kind: raw.already_consumed ? "already-consumed" : "consumed",
+      usedCount: raw.used_count,
+      maxUses: raw.max_uses,
+    };
+  }
+
+  /**
+   * Upload a verified [`CallInviteCapability`] blob and get its
+   * content-addressed `blob_id` back (Phase 3c3-client).
+   *
+   * Sibling of [`uploadInvite`] for the call-invite ecosystem.
+   * Drives one PoW solve + `POST /discovery/call-invite`.
+   * Idempotent — same bytes yield the same id, server upserts.
+   *
+   * Caller responsibility: feed `capabilityBytes` straight from
+   * `wasm.composeCallInviteCapability(...)`. The server runs
+   * `decode_and_verify` server-side, so a junk upload surfaces
+   * as `DiscoveryHttpError(400, "/discovery/call-invite", …)`.
+   *
+   * The 8192-byte client-side ceiling matches the server's
+   * `MAX_CAPABILITY_BYTES` for the call-invite ledger (2× the
+   * 4 KiB `MAX_KEY_PACKAGE_LEN` headroom; contact-invite uses
+   * the tighter 2048-byte limit because it has no embedded KP).
+   *
+   * @param capabilityBytes  The 3a wire-format `CallInviteCapability`
+   *                         bytes (composed via the wasm FFI).
+   * @returns The 32-byte `blob_id`, ready to substitute into a
+   *          `/c/<slug>` pointer URL via the call-invite link
+   *          composer.
+   *
+   * @throws `DiscoveryClientArgError` on local input validation,
+   *         `DiscoveryHttpError` on server rejection,
+   *         `DiscoveryNetworkError` on transport failure.
+   */
+  async uploadCallInvite(capabilityBytes: Uint8Array): Promise<Uint8Array> {
+    if (capabilityBytes.length === 0) {
+      throw new DiscoveryClientArgError(
+        "capabilityBytes must be non-empty",
+      );
+    }
+    const MAX = 8192;
+    if (capabilityBytes.length > MAX) {
+      throw new DiscoveryClientArgError(
+        `capabilityBytes exceeds the ${MAX}-byte ceiling ` +
+          `(got ${capabilityBytes.length} bytes)`,
+      );
+    }
+
+    const challenge = await this.fetchChallenge();
+    const pow = await solvePow(challenge.seed, challenge.effort_bits);
+
+    const resp = await this.callInviteUpload({
+      pow,
+      capability: base64Encode(capabilityBytes),
+    });
+
+    const blobId = base64UrlDecodeNoPad(resp.blob_id);
+    if (blobId.length !== 32) {
+      throw new DiscoveryHttpError(
+        200,
+        "/discovery/call-invite",
+        `server returned blob_id of ${blobId.length} bytes, expected 32`,
+      );
+    }
+    return blobId;
+  }
+
+  /**
+   * Fetch a previously-uploaded `CallInviteCapability` by its
+   * content-addressed `blob_id` (Phase 3c3-client).
+   *
+   * Sibling of [`fetchInvite`]. Returns `null` on 404 (server
+   * folds expired blobs into the same status to deny attacker
+   * status-code probing). Returns the raw capability bytes on
+   * 200; the caller drives
+   * `wasm.decodeAndVerifyCallInviteCapability(...)` locally —
+   * the server already verified at upload time, but we re-verify
+   * so a malicious server cannot serve substituted bytes (+
+   * the joiner can cross-check `SHA-256(bytes) === blobId`).
+   */
+  async fetchCallInvite(blobId: Uint8Array): Promise<Uint8Array | null> {
+    if (blobId.length !== 32) {
+      throw new DiscoveryClientArgError("blobId must be 32 bytes");
+    }
+    const slug = base64UrlEncodeNoPad(blobId);
+    const url = `${this.baseUrl}/discovery/call-invite/${slug}`;
+    let response: Response;
+    try {
+      response = await fetch(url, { method: "GET" });
+    } catch (err) {
+      throw new DiscoveryNetworkError("/discovery/call-invite (GET)", err);
+    }
+    if (response.status === 404) return null;
+    if (!response.ok) {
+      const text = await safeReadBody(response);
+      throw new DiscoveryHttpError(
+        response.status,
+        "/discovery/call-invite (GET)",
+        text,
+      );
+    }
+    const raw = (await response.json()) as InviteFetchResponse;
+    return base64Decode(raw.capability);
+  }
+
+  /**
+   * Atomically bump the consume counter for the call-invite at
+   * `blobId` with per-joiner dedup (Phase 3c3-client).
+   *
+   * Sibling of [`consumeInvite`]. The discriminated result
+   * shape is identical:
+   *   * `"consumed"` — server accepted, counter bumped,
+   *     `(blob_id, joiner_tag)` recorded in the side table.
+   *     Caller proceeds with the joiner-side MLS Welcome
+   *     fetch + group bootstrap (see
+   *     `lakko_calls::link_invite::accept_call_invite`).
+   *   * `"already-consumed"` — `(blob_id, joiner_tag)` already
+   *     existed; counter NOT bumped. UI surfaces "you've
+   *     already joined this call" + opens the existing call
+   *     group rather than re-bootstrapping.
+   *   * `"exhausted"` — 410, `max_uses` ceiling already hit by
+   *     other joiners.
+   *   * `"not-found"` — 404, never-issued OR expired.
+   *
+   * Reuses the **same** `wasm.computeJoinerInviteTag(...)`
+   * helper as the contact-invite flow — salt is per-blob, so
+   * contact-invite and call-invite tags for the same joiner
+   * don't collide on the server side (proven by
+   * `joiner_tag_works_on_call_invite_bytes` in
+   * `lakko_contacts::invite`).
+   *
+   * @param blobId            32-byte content-addressed call-invite id.
+   * @param capabilityBytes   The same wire-format bytes the
+   *                          server holds — mandatory for the
+   *                          per-blob salt of `computeJoinerInviteTag`.
+   * @param joinerAccountId   The joiner's 16-byte UUIDv7
+   *                          account_id. Never crosses the wire
+   *                          in plaintext.
+   */
+  async consumeCallInvite(
+    blobId: Uint8Array,
+    capabilityBytes: Uint8Array,
+    joinerAccountId: Uint8Array,
+  ): Promise<ConsumeInviteResult> {
+    if (blobId.length !== 32) {
+      throw new DiscoveryClientArgError("blobId must be 32 bytes");
+    }
+    if (joinerAccountId.length !== 16) {
+      throw new DiscoveryClientArgError("joinerAccountId must be 16 bytes");
+    }
+
+    const wasm = await loadWasm();
+    const joinerTag = wasm.computeJoinerInviteTag(
+      capabilityBytes,
+      joinerAccountId,
+    );
+
+    const slug = base64UrlEncodeNoPad(blobId);
+    const challenge = await this.fetchChallenge();
+    const pow = await solvePow(challenge.seed, challenge.effort_bits);
+
+    const endpoint = `/discovery/call-invite/${slug}/consume`;
     const url = `${this.baseUrl}${endpoint}`;
     let response: Response;
     try {
