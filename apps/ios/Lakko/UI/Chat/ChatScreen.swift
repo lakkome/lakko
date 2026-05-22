@@ -514,8 +514,14 @@ public struct ChatScreen: View {
     private func resolvePhoto(
         _ item: PhotosPickerItem
     ) async -> AttachmentPayload? {
-        guard let data = try? await item.loadTransferable(type: Data.self),
-              let bytes = data
+        // `loadTransferable(type: Data.self)` returns
+        // `Data?` directly in recent SDKs (was double-
+        // Optional in an earlier signature where one level
+        // came from `try?`). The single guard-let unwraps
+        // both the throw-or-nil result of `try?` and the
+        // optional-payload Data in one step.
+        guard let bytes = try? await item.loadTransferable(type: Data.self),
+              !bytes.isEmpty
         else { return nil }
         // PhotosPickerItem doesn't expose a filename, and the
         // MIME comes from `supportedContentTypes` only on a

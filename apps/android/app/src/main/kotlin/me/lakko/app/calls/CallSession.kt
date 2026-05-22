@@ -65,6 +65,9 @@ public class CallSession(
             is FfiCallSignalingBody.Answer -> body.callId
             is FfiCallSignalingBody.IceCandidate -> body.callId
             is FfiCallSignalingBody.End -> body.callId
+            is FfiCallSignalingBody.GroupStart -> body.callId
+            is FfiCallSignalingBody.GroupJoin -> body.callId
+            is FfiCallSignalingBody.GroupLeave -> body.callId
         }
     }
 
@@ -158,6 +161,17 @@ public class CallSession(
             is FfiCallSignalingBody.End -> {
                 if (mutableState.value == WebCallState.Done) return
                 endRemote(toReason(body.reason))
+            }
+            is FfiCallSignalingBody.GroupStart,
+            is FfiCallSignalingBody.GroupJoin,
+            is FfiCallSignalingBody.GroupLeave -> {
+                // Group-call signaling (Phase 3c2) is
+                // handled by the in-chat joinable-call card
+                // dispatcher, not by the 1×1 [CallSession].
+                // The chat-route owner filters these away
+                // from the 1×1 sink before they reach this
+                // method; the exhaustive-when contract just
+                // requires we name them.
             }
         }
     }

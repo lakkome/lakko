@@ -924,12 +924,12 @@ public class AuthRepository(
             }
             Log.i(
                 "lakko-auth",
-                "backup restore ($context): restored ${parsed.contacts.size} contact(s) " +
+                "backup restore ($context): restored ${parsed.acceptedContacts.size} contact(s) " +
                     "from snapshot at ${parsed.createdAtMs}, " +
                     "MLS snapshot ${parsed.wholeStorageSnapshot.size} bytes",
             )
             // TODO(2a1d-followup): once the Android persistent
-            // contact store lands, apply `parsed.contacts` here
+            // contact store lands, apply `parsed.acceptedContacts` here
             // via a contacts-merge hook.
             //
             // TODO(2a3d6-followup): apply `parsed.wholeStorageSnapshot`

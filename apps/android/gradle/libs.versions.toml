@@ -120,6 +120,14 @@ compose-ui-graphics = { group = "androidx.compose.ui", name = "ui-graphics" }
 compose-ui-tooling-preview = { group = "androidx.compose.ui", name = "ui-tooling-preview" }
 compose-ui-tooling  = { group = "androidx.compose.ui", name = "ui-tooling" }
 compose-material3   = { group = "androidx.compose.material3", name = "material3" }
+# Google Material XML library — provides the
+# `Theme.Material3.DayNight.NoActionBar` style the AndroidManifest
+# inherits via `res/values/themes.xml`. Distinct from
+# `compose.material3` above (which is the Compose UI toolkit);
+# both are needed because the Activity-level theme is XML even
+# when the body is Compose. Pinned to the latest stable as of
+# 2026 — bump in lock-step with the AGP catalog.
+material-android    = { group = "com.google.android.material", name = "material", version = "1.12.0" }
 activity-compose    = { group = "androidx.activity", name = "activity-compose", version.ref = "activity-compose" }
 
 # Phase 1.15d4 — ViewModel <-> Compose glue. `viewmodel-compose`

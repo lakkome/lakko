@@ -143,6 +143,11 @@ dependencies {
     implementation(libs.compose.ui)
     implementation(libs.compose.ui.graphics)
     implementation(libs.compose.material3)
+    // Google Material XML library — for the
+    // `Theme.Material3.DayNight.NoActionBar` style the
+    // Activity's manifest theme inherits. Separate from
+    // `compose.material3` which is the Compose UI toolkit.
+    implementation(libs.material.android)
     implementation(libs.activity.compose)
 
     // Compose tooling (Layout Inspector previews etc.) — debug

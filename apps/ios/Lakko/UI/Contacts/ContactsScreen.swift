@@ -54,8 +54,13 @@ public struct ContactsScreen: View {
                 }
                 .padding(24)
             }
-            .sheet(item: invitePresentationBinding) { invite in
-                GeneratedInviteSheet(invite: invite) {
+            .sheet(item: invitePresentationBinding) { wrapper in
+                // `wrapper` is the `IdentifiableInvite` we
+                // adapted around `GeneratedInvite` so SwiftUI's
+                // `.sheet(item:)` modifier can identity-track
+                // it. The sheet body itself takes the unwrapped
+                // `GeneratedInvite`.
+                GeneratedInviteSheet(invite: wrapper.invite) {
                     viewModel.dismissGeneratedInvite()
                 }
             }
