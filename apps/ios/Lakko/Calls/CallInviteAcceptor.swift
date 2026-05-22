@@ -45,7 +45,14 @@ public enum CallInviteAcceptor {
             ownerAccountId: Data,
             callId: Data,
             ownerFingerprint: String,
-            welcomeForOwner: Data
+            welcomeForOwner: Data,
+            /// 32-byte SFrame call-key seed derived via the
+            /// MLS exporter (`mls_exporter("lakko/call/v1",
+            /// call_id, 32)`). UI hands it to
+            /// `sframeDeriveParticipantKey` to seal the
+            /// joiner's first frame before the owner has
+            /// even joined.
+            callKeySeed: Data
         )
         /// `(blob_id, joiner_tag)` PK already had a row —
         /// counter NOT bumped. UI surfaces "you're already
@@ -192,7 +199,8 @@ public enum CallInviteAcceptor {
             ownerAccountId: capability.ownerAccountId(),
             callId: capability.callId(),
             ownerFingerprint: capability.ownerFingerprint(),
-            welcomeForOwner: accepted.welcomeForOwner()
+            welcomeForOwner: accepted.welcomeForOwner(),
+            callKeySeed: accepted.callKeySeed()
         )
     }
 }

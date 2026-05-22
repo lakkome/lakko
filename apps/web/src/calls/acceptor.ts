@@ -109,6 +109,14 @@ export type AcceptCallInviteResult =
        *  paste) ferries this; the acceptor returns it
        *  without touching the network. */
       readonly welcomeForOwner: Uint8Array;
+      /** 32-byte SFrame call-key seed derived via the MLS
+       *  exporter (`mls_exporter("lakko/call/v1", call_id,
+       *  32)`). UI hands it to `sframeDeriveParticipantKey`
+       *  to seal the joiner's first frame BEFORE the owner
+       *  has even joined — the seed is fixed for the call's
+       *  initial epoch, so the joiner can pre-encrypt
+       *  outbound media. */
+      readonly callKeySeed: Uint8Array;
       /** The `AcceptedCallInvite` wasm object — the joiner's
        *  fresh MLS group + the live `GroupCallSession`. UI
        *  passes it to the in-call layer. */
@@ -246,6 +254,7 @@ export async function acceptCallInviteFromSlug(
   //          call group + return the Welcome ----------------
   let accepted: {
     readonly welcomeForOwner: Uint8Array;
+    readonly callKeySeed: Uint8Array;
   };
   try {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -270,6 +279,7 @@ export async function acceptCallInviteFromSlug(
     callId: capability.callId,
     ownerFingerprint: capability.ownerFingerprint,
     welcomeForOwner: accepted.welcomeForOwner,
+    callKeySeed: accepted.callKeySeed,
     accepted,
   };
 }

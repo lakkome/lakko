@@ -54,6 +54,13 @@ public class CallInviteAcceptor(
             val callId: ByteArray,
             val ownerFingerprint: String,
             val welcomeForOwner: ByteArray,
+            /** 32-byte SFrame call-key seed derived via the
+             *  MLS exporter (`mls_exporter("lakko/call/v1",
+             *  call_id, 32)`). UI hands it to
+             *  [uniffi.lakko_ffi_uniffi.sframeDeriveParticipantKey]
+             *  to seal the joiner's first frame before the
+             *  owner has even joined. */
+            val callKeySeed: ByteArray,
         ) : Result() {
             override fun equals(other: Any?): Boolean {
                 if (this === other) return true
@@ -62,7 +69,8 @@ public class CallInviteAcceptor(
                     ownerAccountId.contentEquals(other.ownerAccountId) &&
                     callId.contentEquals(other.callId) &&
                     ownerFingerprint == other.ownerFingerprint &&
-                    welcomeForOwner.contentEquals(other.welcomeForOwner)
+                    welcomeForOwner.contentEquals(other.welcomeForOwner) &&
+                    callKeySeed.contentEquals(other.callKeySeed)
             }
 
             override fun hashCode(): Int {
@@ -71,6 +79,7 @@ public class CallInviteAcceptor(
                 result = 31 * result + callId.contentHashCode()
                 result = 31 * result + ownerFingerprint.hashCode()
                 result = 31 * result + welcomeForOwner.contentHashCode()
+                result = 31 * result + callKeySeed.contentHashCode()
                 return result
             }
         }
@@ -209,6 +218,7 @@ public class CallInviteAcceptor(
             callId = capability.callId(),
             ownerFingerprint = capability.ownerFingerprint(),
             welcomeForOwner = accepted.welcomeForOwner(),
+            callKeySeed = accepted.callKeySeed(),
         )
     }
 }
