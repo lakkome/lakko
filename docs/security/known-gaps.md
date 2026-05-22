@@ -506,6 +506,53 @@ plumbing only.
 MLS suites pin classical curves today. PQ migration
 follows the WG.
 
+### G-26: RFC 9605 §4.3 wire frame header serializer not implemented
+
+[`lakko_calls::sframe`](../../crates/lakko-calls/src/sframe.rs)
+ships the keying half of RFC 9605 — `CallKey` derivation
+via MLS exporter, per-leaf `ParticipantKey` via HKDF,
+nonce composition per §4.4, AEAD seal/open round-trip
+(see **C-37** in [`calls.md`](./calls.md) for the full
+invariant set). What is **not** implemented is the
+wire-level frame header serialization specified in RFC
+9605 §4.3 — the compact bit-packed `Config|KID|CTR`
+layout that lets two independent SFrame implementations
+interoperate byte-for-byte over the wire.
+
+**Why this isn't a security gap today.** The current
+production path runs SFrame inside a closed system:
+every participant uses the same `lakko-calls` Rust
+binary, every seal/open exchange threads
+`(frame_counter, ciphertext)` as a Rust tuple through
+WebRTC insertable streams. The counter is the only
+piece of header information the receiver needs, and it
+crosses the boundary as a typed `u32` rather than a
+serialized byte. The keying math (which is what
+determines whether the AEAD opens) is fully RFC 9605
+§4.4 conformant; the wire layout is what differs.
+
+**When the gap matters.** The moment we want to:
+- Interop with a non-Lakko SFrame implementation (e.g. a
+  browser-side WebRTC stack that supports SFrame natively
+  per the Insertable Streams + SFrame W3C draft).
+- Forward SFrame frames through the LiveKit SFU's
+  selective forwarding path **without decoding** the
+  outer tuple in our Rust binary — the Go fork would
+  need to parse the wire header to route by KID.
+
+The first interop sprint with the LiveKit Go fork is when
+this lands. The serializer is mechanical (bit-packing +
+variable-length counter encoding); the test plan is a
+fixture suite against RFC 9605 §A test vectors if any
+land, or against a known-good reference implementation
+otherwise.
+
+**Operational status**: explicit deferred work, scoped
+to the LiveKit fork integration sprint (3b1c). All
+production call paths through Phase 3c3 use the typed-
+tuple form and are unaffected. Recorded here so an
+auditor doesn't re-discover the absence as a finding.
+
 ## Dependency advisories
 
 The `cargo audit` baseline (RustSec advisory DB) surfaces

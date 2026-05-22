@@ -1301,6 +1301,104 @@ change with workspace-wide test coverage backing it.
 
 lakko-calls test count: 77 → 78.
 
+### C-37: SFrame keying math + AEAD pipeline pinned
+
+Phase 3a5's SFrame primitive
+([`lakko_calls::sframe`](../../crates/lakko-calls/src/sframe.rs))
+implements **the keying half of RFC 9605** — the layers
+between the MLS exporter and the per-frame AEAD operation
+— end-to-end. The wire-level frame header serialization
+(RFC 9605 §4.3 compact `Config|KID|CTR` layout) is
+explicitly out of scope for the current implementation
+and tracked as G-26.
+
+**Pinned invariants** the test suite asserts:
+
+1. **CallKey derivation via MLS exporter.** Both
+   participants on the same call epoch agree on the same
+   32-byte seed:
+
+   ```
+   CallKey.seed = mls_exporter("lakko/call/v1", call_id, 32)
+   ```
+
+   The label is a frozen ASCII string
+   (`SFRAME_EXPORT_LABEL`); any change is a breaking
+   protocol bump for every existing call surface. Test:
+   `call_key_derives_32_bytes`.
+
+2. **ParticipantKey derivation via HKDF.** A receiver
+   re-derives a sender's ParticipantKey from the shared
+   CallKey + the sender's MLS leaf index:
+
+   ```
+   participant_key  = HKDF-SHA-256(call_key_seed, info = "lakko/sframe/v1/key"   || sender_leaf_be, len = 32)
+   nonce_salt       = HKDF-SHA-256(call_key_seed, info = "lakko/sframe/v1/nonce" || sender_leaf_be, len = 12)
+   ```
+
+   The two `info` strings carry the SFrame role of the
+   bytes so an attacker who confuses contexts (key-as-
+   nonce, nonce-as-key) hits a distinct HKDF context.
+   Test: `participant_keys_differ_across_leaves`.
+
+3. **Nonce composition per RFC 9605 §4.4.** The 12-byte
+   AEAD nonce is built as `salt XOR (frame_counter as u32
+   BE in the low 4 bytes)` — the leading 8 bytes are
+   per-participant entropy from the salt, the trailing 4
+   bytes XOR in the counter. Same construction every
+   compliant SFrame implementation uses; deterministic
+   across implementations. Inline test:
+   `participant_key_round_trips` exercises seal→open
+   across an A↔B pair re-deriving from the same seed.
+
+4. **AEAD ciphersuite ChaCha20-Poly1305** (RFC 9605
+   §4.5.3 — cipher suite identifier 3 in the RFC's IANA
+   registry). The current implementation is keyed only on
+   this suite; FIPS-track AES-256-GCM (cipher suite 4)
+   would land as a separate `Algorithm` enum variant
+   without changing the surrounding keying math.
+
+5. **Counter exhaustion is a typed error, not a silent
+   nonce reuse.** The per-participant counter is `u32`,
+   pinned to `MAX_FRAME_COUNTER = u32::MAX`. Sealing the
+   2³² nd frame returns `Error::CounterExhausted`; the
+   caller is expected to trigger a fresh MLS commit
+   (which advances the group epoch → fresh CallKey via
+   the exporter → fresh ParticipantKey → counter resets
+   to 0). At 30 fps video this is ~1.7 years per
+   participant per epoch; in practice every membership
+   change resets it long before the ceiling is reached.
+   Test: a property test exercising the bump → exhaust
+   path lands with the wire-header sprint (currently the
+   error path is reached by reading the counter directly,
+   not by burning 2³² seals in a unit test).
+
+6. **AAD authentication holds.** The seal/open AEAD path
+   binds an arbitrary AAD byte string into the tag; a
+   receiver that opens with a different AAD MUST surface
+   a `Crypto` error rather than a wrong plaintext. Test:
+   `wrong_aad_rejects_open`. Mismatched counter (which
+   composes into a different nonce) also rejects: test
+   `wrong_counter_rejects_open`.
+
+7. **Diagnostic fingerprint via BLAKE3.** The
+   `call_key_fingerprint(&CallKey) -> [u8; 32]` helper
+   produces a deterministic non-secret identifier of the
+   call key for "matching SAS" UI affordances. Same hash
+   on both peers when they hold the same seed. Test:
+   `fingerprint_is_stable`.
+
+The full pipeline (MLS exporter → CallKey → ParticipantKey
+→ AEAD) is exercised end-to-end inside the link-call
+integration tests
+(`link_call_full_e2e_via_welcome_envelope`,
+`link_call_multi_party_e2e_via_kp_forward_envelope`,
+`link_call_owner_handover_after_committer_leaves`) which
+all assert byte-identical CallKey seed agreement after
+each MLS state transition — the keying math contract
+holds across single-joiner, multi-party, and committer-
+leave-handover scenarios.
+
 ## Exporter labels (call-side)
 
 | Label | Length | Context | Source | Used for |
