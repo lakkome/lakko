@@ -46,7 +46,9 @@
 
 #![forbid(unsafe_code)]
 
+pub mod bandwidth;
 pub mod codec_audio;
+pub mod codec_video;
 pub mod error;
 pub mod group_call;
 pub mod link_invite;
@@ -55,7 +57,9 @@ pub mod session;
 pub mod sframe;
 pub mod signaling;
 
+pub use bandwidth::{BandwidthController, LayerSwitch, SimulcastLayer, CONFIRMATION_STREAK};
 pub use codec_audio::{OpusConfig, OpusProfile, OPUS_MAX_BITRATE_KBPS, OPUS_MIN_BITRATE_KBPS};
+pub use codec_video::{VideoCapability, VideoCodec};
 pub use error::{Error, Result};
 pub use group_call::{GroupCallScope, GroupCallSession, Participant, SignalingOutcome};
 pub use link_invite::{accept_call_invite, AcceptedCallInvite};
