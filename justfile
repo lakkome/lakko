@@ -129,11 +129,21 @@ build:
 #
 # Each target prints the size before + after so you see what was reclaimed.
 
-# Nuke EVERYTHING under target/ (the heavy hammer — equivalent to `cargo clean`).
-# Run when target/ has grown out of control and you want a clean slate.
+# Nuke EVERYTHING under target/ (the heavy hammer).
+#
+# Tries `cargo clean` first (which walks the tree path-by-path and is
+# friendlier to a running IDE — only deletes directories cargo itself
+# owns). When that fails with "Directory not empty" — typically because
+# RustRover / rust-analyzer holds inodes in target/debug/incremental —
+# falls back to `rm -rf` on the whole tree, which is one atomic kernel
+# unlink; open file handles in the IDE become orphaned (kernel keeps the
+# pages until the IDE closes them) but the directory entry is gone.
 clean-target:
     @echo "Before: $(du -sh target 2>/dev/null | cut -f1 || echo 'no target/')"
-    cargo clean
+    @cargo clean 2>/dev/null || { \
+        echo "cargo clean blocked (likely RustRover holds inodes) — falling back to rm -rf target/"; \
+        rm -rf target; \
+    }
     @echo "After: $(du -sh target 2>/dev/null | cut -f1 || echo 'no target/')"
 
 # Clean only the wasm32 target tree — the second-largest cache after
