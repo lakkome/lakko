@@ -34,6 +34,10 @@ use lakko_contacts::call_invite::{
     decode_and_verify as rust_call_invite_decode, CallInviteCapability as RustCallInviteCapability,
     CallInviteMedia as RustCallInviteMedia, CALL_ID_LEN, MAX_KEY_PACKAGE_LEN,
 };
+use lakko_contacts::call_welcome::{
+    try_unwrap_call_welcome as rust_try_unwrap_call_welcome,
+    wrap_call_welcome as rust_wrap_call_welcome, CallWelcomeError, CALL_WELCOME_MIN_PAYLOAD_LEN,
+};
 use lakko_contacts::invite::{
     compose as rust_invite_compose, compute_joiner_tag as rust_compute_joiner_tag,
     decode_and_verify as rust_invite_decode, sign_owner_list as rust_sign_owner_list,
@@ -1123,6 +1127,72 @@ impl CallInviteCapability {
     }
 }
 
+// ===========================================================================
+// Call-Welcome envelope — Phase 3c3-welcome-ferry
+// ===========================================================================
+
+/// Wrap MLS Welcome bytes in the call-welcome envelope's
+/// domain separator (Phase 3c3-welcome-ferry). The joiner
+/// hands the output to `contact_request_compose` as the
+/// `intro_message` argument; the existing HPKE-seal +
+/// stranger-inbox transport carries the wrapped bytes to the
+/// owner.
+///
+/// See [`lakko_contacts::call_welcome`] for the threat-model
+/// rationale (reuse the contact-invite envelope's
+/// confidentiality + authenticity + anti-abuse contracts).
+///
+/// # Errors
+///
+/// Infallible — returns `Ok` unconditionally; the `Result`
+/// shape matches the rest of the FFI surface so callers don't
+/// have to special-case the call-welcome path.
+#[uniffi::export]
+#[must_use]
+pub fn wrap_call_welcome(welcome_bytes: Vec<u8>) -> Vec<u8> {
+    rust_wrap_call_welcome(&welcome_bytes)
+}
+
+/// Try to unwrap a call-welcome envelope from a HPKE-
+/// decrypted plaintext (Phase 3c3-welcome-ferry).
+///
+/// Returns:
+///   * `Ok(Some(welcome_bytes))` — `plaintext` started with
+///     the call-welcome domain separator AND the trailing
+///     payload is at least `CALL_WELCOME_MIN_PAYLOAD_LEN`
+///     bytes. Caller drives
+///     `Group::join_from_welcome(payload)`.
+///   * `Ok(None)` — `plaintext` is a plain intro message;
+///     caller renders it as a free-text ContactRequest.
+///
+/// # Errors
+///
+/// * [`FfiError::Contacts`] ONLY when the domain separator
+///   matched but the payload is truncated (a malformed /
+///   hostile envelope). Owner-side polling logs + drops.
+#[uniffi::export]
+pub fn try_unwrap_call_welcome(plaintext: Vec<u8>) -> Result<Option<Vec<u8>>, FfiError> {
+    match rust_try_unwrap_call_welcome(&plaintext) {
+        Ok(Some(payload)) => Ok(Some(payload.to_vec())),
+        Ok(None) => Ok(None),
+        Err(CallWelcomeError::TruncatedPayload { min, got }) => Err(FfiError::Contacts(format!(
+            "call-welcome payload is {got} bytes, minimum is {min}",
+        ))),
+    }
+}
+
+/// Floor constant the platform code keeps for its own
+/// pre-FFI sanity check (`welcome.size >=
+/// callWelcomeMinPayloadLen()` before calling
+/// `wrapCallWelcome`).
+#[uniffi::export]
+#[must_use]
+pub fn call_welcome_min_payload_len() -> u32 {
+    // Wire-stable u32 for FFI portability; the underlying
+    // constant fits comfortably (32).
+    u32::try_from(CALL_WELCOME_MIN_PAYLOAD_LEN).unwrap_or(u32::MAX)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1552,5 +1622,44 @@ mod tests {
         .expect("compose");
         let req = ContactRequest::decode_and_verify(wire).expect("decode");
         assert_eq!(req.privacy_pass_token(), token);
+    }
+
+    // -------------------------------------------------------------------
+    // Call-Welcome envelope (3c3-welcome-ferry)
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn call_welcome_wrap_then_unwrap_round_trips() {
+        let welcome = vec![0xCDu8; 256];
+        let wrapped = wrap_call_welcome(welcome.clone());
+        let unwrapped = try_unwrap_call_welcome(wrapped)
+            .expect("unwrap should not error")
+            .expect("Some(welcome) expected");
+        assert_eq!(unwrapped, welcome);
+    }
+
+    #[test]
+    fn call_welcome_unwrap_returns_none_for_intro_message() {
+        let intro = b"hi bob it's alice".to_vec();
+        let result = try_unwrap_call_welcome(intro).expect("unwrap should not error");
+        assert!(result.is_none(), "intro message must surface as None");
+    }
+
+    #[test]
+    fn call_welcome_unwrap_rejects_truncated_payload() {
+        // Prefix matches but trailing bytes < 32-byte floor.
+        let mut wrapped = Vec::new();
+        wrapped.extend_from_slice(b"lakko/call-welcome/v1\x00");
+        wrapped.extend_from_slice(&[0u8; 8]); // 8 < 32
+        match try_unwrap_call_welcome(wrapped) {
+            Err(FfiError::Contacts(msg)) => assert!(msg.contains('8') && msg.contains("32")),
+            Err(other) => panic!("expected Contacts error, got {other:?}"),
+            Ok(_) => panic!("truncated payload must surface as Err"),
+        }
+    }
+
+    #[test]
+    fn call_welcome_min_payload_len_matches_rust_constant() {
+        assert_eq!(call_welcome_min_payload_len() as usize, 32);
     }
 }

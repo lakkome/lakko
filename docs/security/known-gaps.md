@@ -307,27 +307,71 @@ pinned by the C-31 invariant. The acceptor's
 seals the joiner's first SFrame frame before the owner has
 joined — no second FFI round-trip needed.
 
-**Welcome-ferry orchestration still pending** —
-publishing the joiner's MLS Welcome back to the owner (so
-the owner can `Group::join_from_welcome` and enter the
-call group) needs a transport channel. The acceptor
-returns `welcomeForOwner` bytes; the platform is currently
-expected to ferry them out-of-band (stranger-inbox routed
-by `capability.owner_account_id` is the planned path; QR
-paste is the lab fallback). The DS-mailbox extension that
-makes this fully in-band lands in the 3c3-welcome-ferry
-follow-up sprint. Subsequent joiners' KPs (for true
-multi-party link calls, > 2 participants) also need this
-channel — same gap.
+**Welcome-ferry wire path shipped in
+3c3-welcome-ferry** — the joiner-side `acceptCallInvite`
+flow's `welcomeForOwner` bytes now reuse the existing
+`ContactRequest` envelope transport (HPKE-sealed to the
+owner's identity key, routed via the
+`StrangerInbox::derive(owner_account_id)` pseudonym).
+Joiner-side: wraps the Welcome bytes with the 22-byte
+domain separator
+`CALL_WELCOME_ENVELOPE_DOMAIN_V1 = b"lakko/call-welcome/v1\x00"`
+via [`lakko_contacts::call_welcome::wrap_call_welcome`](../../crates/lakko-contacts/src/call_welcome.rs)
+before HPKE-sealing through the standard
+`ContactRequest.compose(...)` path. Owner-side: polling
+loop calls
+[`try_unwrap_call_welcome(plaintext)`](../../crates/lakko-contacts/src/call_welcome.rs)
+on every decrypted envelope and dispatches on a
+three-way discriminator — `Some(welcome)` → drive
+`Group::join_from_welcome(welcome)` and enter the call
+group; `None` → render as a plain intro message
+(ADR-0005 scenario A); `Err(TruncatedPayload)` → log +
+drop a malformed envelope. The separator is asserted
+distinct from all sibling domain prefixes (contact-invite
+revoke, call-invite revoke, joiner-tag salt) by the
+`separator_distinct_from_contact_invite_domains` test.
+The reuse means **zero new server surface** — the
+existing PoW + Privacy Pass anti-abuse gate on
+`ContactRequest` ingress carries over for free, and the
+server still sees only `(pseudonym → opaque ciphertext)`.
+FFI exposure shipped on both wasm-bindgen
+(`wrapCallWelcome` / `tryUnwrapCallWelcome` /
+`callWelcomeMinPayloadLen`) and UniFFI surfaces. See
+**C-32** in [`calls.md`](./calls.md) for the full
+invariant set + 9 property tests in
+`lakko_contacts::call_welcome::tests`.
 
-Operational impact: V1 link calls work for the 1:1
-"share a link, person clicks, both join the call" UX once
-the platform wires `welcomeForOwner` ferrying — the
-client-side helpers, URL plumbing, and discriminated
-result variants are all in place. Multi-party link calls
-(3+ participants) still fall back to in-chat group calls
-(`GroupCallScope::InChat`) until the Welcome-ferry +
-KP-republish channels land.
+**Platform-side wiring still pending** — the wrap /
+unwrap helpers are in place but the platform polling
+loops on web / iOS / Android still need to (a) call
+`tryUnwrapCallWelcome` on every decrypted
+`ContactRequest` they pull from the stranger inbox, (b)
+dispatch a Welcome to `Group::join_from_welcome` instead
+of the intro-message renderer, (c) transition the call
+UI from "waiting for owner" to "in-call" once the
+Welcome lands. This is straightforward glue work
+deferred to the platform-UI sprint; the cryptographic
+contract it depends on is fixed.
+
+**Subsequent-joiner KP forwarding (multi-party, 3+
+participants) still pending** — the same envelope
+transport works recipe-wise (wrap the joiner's KP under
+a sibling domain separator like
+`lakko/call-keypackage/v1`, ferry via the same
+ContactRequest path), but a separate sprint owns the new
+domain constant + the helper trio + the owner-side
+add-member commit. Tracked as the 3c3-multi-use
+follow-up.
+
+Operational impact: V1 1:1 link calls now have a
+**complete wire path** — owner composes link → joiner
+clicks → acceptor returns Welcome → joiner wraps + sends
+ContactRequest → owner polls + unwraps + joins. Only
+platform-UI glue remains. Multi-party (3+) link calls
+still fall back to in-chat group calls
+(`GroupCallScope::InChat`) until the
+`lakko/call-keypackage/v1` envelope and the owner-side
+add-member fanout land.
 
 ### G-22: Per-joiner dedup for call invites lands with multi-use orchestration
 

@@ -10,6 +10,10 @@ use lakko_contacts::call_invite::{
     decode_and_verify as rust_call_invite_decode, CallInviteCapability as RustCallInviteCapability,
     CallInviteMedia as RustCallInviteMedia, CALL_ID_LEN, MAX_KEY_PACKAGE_LEN,
 };
+use lakko_contacts::call_welcome::{
+    try_unwrap_call_welcome as rust_try_unwrap_call_welcome,
+    wrap_call_welcome as rust_wrap_call_welcome, CallWelcomeError, CALL_WELCOME_MIN_PAYLOAD_LEN,
+};
 use lakko_contacts::invite::{
     compose as rust_invite_compose, compute_joiner_tag as rust_compute_joiner_tag,
     decode_and_verify as rust_invite_decode, sign_owner_list as rust_sign_owner_list,
@@ -966,6 +970,65 @@ impl CallInviteCapability {
     pub fn owner_fingerprint(&self) -> String {
         self.inner.owner_fingerprint()
     }
+}
+
+// ============================================================================
+// Call-Welcome envelope — Phase 3c3-welcome-ferry
+// ============================================================================
+
+/// Wrap MLS Welcome bytes in the call-welcome envelope's
+/// domain separator (Phase 3c3-welcome-ferry). The joiner
+/// hands the output to `ContactRequest.compose` as the intro-
+/// message argument; the existing HPKE-seal + stranger-inbox
+/// transport carries the wrapped bytes to the owner.
+///
+/// See [`lakko_contacts::call_welcome`] for the threat-model
+/// rationale (reuse the contact-invite envelope's
+/// confidentiality + authenticity + anti-abuse contracts
+/// rather than spin up a fresh `/discovery/call-welcome`
+/// endpoint).
+#[wasm_bindgen(js_name = wrapCallWelcome)]
+#[must_use]
+pub fn wrap_call_welcome(welcome_bytes: &[u8]) -> Vec<u8> {
+    rust_wrap_call_welcome(welcome_bytes)
+}
+
+/// Try to unwrap a call-welcome envelope from a HPKE-decrypted
+/// plaintext (Phase 3c3-welcome-ferry).
+///
+/// Returns:
+///   * `Uint8Array` with the MLS Welcome bytes — `plaintext`
+///     started with the call-welcome domain separator AND
+///     the trailing payload is at least
+///     `CALL_WELCOME_MIN_PAYLOAD_LEN` bytes long. Caller
+///     drives `Group::join_from_welcome(payload)`.
+///   * `null` — `plaintext` is a plain intro message; caller
+///     renders it as a free-text ContactRequest.
+///
+/// # Errors
+///
+/// `JsError` ONLY when the domain separator matched but the
+/// payload is truncated (a malformed / hostile envelope; log
+/// + drop on the caller side).
+#[wasm_bindgen(js_name = tryUnwrapCallWelcome)]
+pub fn try_unwrap_call_welcome(plaintext: &[u8]) -> Result<Option<Vec<u8>>, JsError> {
+    match rust_try_unwrap_call_welcome(plaintext) {
+        Ok(Some(payload)) => Ok(Some(payload.to_vec())),
+        Ok(None) => Ok(None),
+        Err(CallWelcomeError::TruncatedPayload { min, got }) => Err(JsError::new(&format!(
+            "call-welcome payload is {got} bytes, minimum is {min}",
+        ))),
+    }
+}
+
+/// Re-export the floor constant so platform code can keep its
+/// own size sanity-check (`welcome.length >=
+/// CALL_WELCOME_MIN_PAYLOAD_LEN` before calling
+/// `wrapCallWelcome`).
+#[wasm_bindgen(js_name = callWelcomeMinPayloadLen)]
+#[must_use]
+pub fn call_welcome_min_payload_len() -> usize {
+    CALL_WELCOME_MIN_PAYLOAD_LEN
 }
 
 // Tests cover only happy paths — error paths invoke `JsError::new`,

@@ -872,6 +872,106 @@ coverage of the joiner-side MLS bootstrap lives in
 [`lakko_calls::link_invite::tests::accept_invite_round_trips_via_welcome`](../../crates/lakko-calls/src/link_invite.rs)
 and the three sibling integration tests.
 
+### C-32: Call-Welcome envelope reuses ContactRequest transport with domain separation
+
+The joiner-side `acceptCallInvite` MLS bootstrap returns a
+`welcomeForOwner` byte string the owner needs to drive
+`Group::join_from_welcome` and enter the call group.
+Phase 3c3-welcome-ferry ferries these bytes over the
+**existing** stranger-inbox `ContactRequest` envelope path
+rather than standing up a dedicated
+`/discovery/call-welcome` endpoint. The reuse is
+load-bearing on three already-pinned contracts:
+
+- **Confidentiality** — the outer `ContactRequest`
+  envelope is HPKE-sealed to
+  `capability.owner_x25519_pubkey` (the same key bound to
+  the owner's identity in the KT log). The server sees
+  only `(stranger_inbox_pseudonym → opaque ciphertext)`.
+  This is the existing contract pinned by C-12 / I-3 /
+  the [`crate::envelope`](../../crates/lakko-contacts/src/envelope.rs)
+  sealed-box tests.
+- **Authenticity** — the envelope's Ed25519 signature is
+  over the joiner's identity key, so the owner can pin
+  exactly which joiner sent the Welcome. Existing
+  `ContactRequest` invariant.
+- **Anti-abuse** — PoW + Privacy Pass on every
+  `ContactRequest` ingress already rate-limits cold
+  senders. The Welcome-ferry inherits the same DoS gate
+  without code duplication.
+
+The piece **this invariant** adds is a 22-byte ASCII
+domain separator
+[`CALL_WELCOME_ENVELOPE_DOMAIN_V1 = b"lakko/call-welcome/v1\x00"`](../../crates/lakko-contacts/src/call_welcome.rs)
+that the joiner prepends to its `welcome_for_owner` bytes
+**inside** the HPKE-sealed plaintext (so the server never
+sees it). The owner-side polling loop discriminates on a
+clean byte-prefix test:
+
+```text
+plaintext_payload = CALL_WELCOME_ENVELOPE_DOMAIN_V1 || welcome_bytes
+                  └────── 22 bytes, ASCII ──────┘
+                  "lakko/call-welcome/v1\x00"
+```
+
+Contract:
+
+- **`wrap_call_welcome(welcome_bytes) -> Vec<u8>`** is
+  infallible byte-for-byte concatenation — surface here if
+  a future refactor accidentally re-encodes / pads /
+  truncates the welcome (the `wrap_preserves_arbitrary_welcome_bytes_verbatim`
+  test exercises 2 KiB of cyclic bytes round-tripping).
+- **`try_unwrap_call_welcome(plaintext) -> Option<&[u8]>`**
+  is a three-way discriminator:
+  - `Ok(Some(payload))` — prefix matched AND payload ≥
+    32 bytes (the `CALL_WELCOME_MIN_PAYLOAD_LEN` floor,
+    well below the practical OpenMLS Welcome size of
+    ~200 bytes — anything smaller is hostile / buggy).
+    Caller drives `Group::join_from_welcome(payload)`.
+  - `Ok(None)` — prefix did not match. Caller renders
+    the plaintext as a plain intro message (ADR-0005
+    scenario A — "add me as a contact"). The trailing
+    `\x00` byte in the prefix ensures a UTF-8 intro
+    message can never start with the separator.
+  - `Err(CallWelcomeError::TruncatedPayload { min, got })`
+    — prefix matched but payload < 32 bytes. Caller logs
+    + drops the envelope.
+
+**Cross-kind isolation** is asserted by the
+`separator_distinct_from_contact_invite_domains` test —
+the 22-byte `lakko/call-welcome/v1\x00` separator MUST NOT
+collide with `lakko-invite-revoke/v1\x00`,
+`lakko-call-invite-revoke/v1\x00`, or
+`JOINER_TAG_SALT_DOMAIN_V1`. The naming pattern (`lakko/`
+prefix for in-envelope domains vs. `lakko-` for canonical-
+bytes signing domains) is a deliberate stylistic cue but
+the test is what actually pins distinctness.
+
+Tests (9 cases in
+[`lakko_contacts::call_welcome::tests`](../../crates/lakko-contacts/src/call_welcome.rs)):
+`wrap_then_unwrap_round_trips`,
+`unwrap_returns_none_for_intro_message_plaintext`,
+`unwrap_returns_none_for_partial_prefix_match`,
+`unwrap_rejects_truncated_payload`,
+`unwrap_accepts_exactly_min_payload_len`,
+`empty_plaintext_returns_none_not_error`,
+`domain_separator_is_22_bytes_and_ends_with_null`,
+`separator_distinct_from_contact_invite_domains`,
+`wrap_preserves_arbitrary_welcome_bytes_verbatim`. lakko-
+contacts test count: 98 → 107.
+
+FFI exposure: wasm-bindgen `wrapCallWelcome(welcomeBytes)`
++ `tryUnwrapCallWelcome(plaintext)` +
+`callWelcomeMinPayloadLen()`; UniFFI
+`wrap_call_welcome(welcome_bytes)` /
+`try_unwrap_call_welcome(plaintext)` /
+`call_welcome_min_payload_len()`. lakko-ffi-uniffi test
+count: 67 → 71 (4 new cases — round-trip, intro-message
+fallthrough, truncated-payload rejection, floor-constant
+pin). Negative paths on the wasm side stay UniFFI-only
+because `JsError::new` panics on the native target the
+`cargo test` harness runs on.
+
 ## Exporter labels (call-side)
 
 | Label | Length | Context | Source | Used for |

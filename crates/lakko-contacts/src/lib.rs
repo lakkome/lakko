@@ -53,6 +53,7 @@
 
 pub mod ack;
 pub mod call_invite;
+pub mod call_welcome;
 pub mod envelope;
 pub mod error;
 pub mod invite;
@@ -66,6 +67,10 @@ pub use call_invite::{
     decode_and_verify as decode_and_verify_call_invite, CallInviteCapability, CallInviteMedia,
     CALL_ID_LEN, CALL_INVITE_REVOKE_DOMAIN_V1, CALL_NEVER_EXPIRES, CALL_REVOKE_REPLAY_WINDOW_MS,
     CALL_SINGLE_USE, MAX_KEY_PACKAGE_LEN,
+};
+pub use call_welcome::{
+    try_unwrap_call_welcome, wrap_call_welcome, CallWelcomeError, CALL_WELCOME_ENVELOPE_DOMAIN_V1,
+    CALL_WELCOME_MIN_PAYLOAD_LEN,
 };
 pub use error::{ContactError, Result};
 pub use invite::{
