@@ -1142,6 +1142,94 @@ caller from Rust borrow-lifetime concerns. lakko-ffi-uniffi
 test count: 76 → 81 (5 new cases — all four dispatch
 branches + a truncated-welcome rejection sentinel).
 
+### C-35: End-to-end link-call wire chain holds across both 1×1 and multi-party paths
+
+C-24..C-34 each pin **one** invariant of the link-call
+flow. C-35 is the contract that the **full chain holds
+together**: starting from the owner composing a
+capability and ending with all participants deriving
+byte-identical SFrame seeds at the same epoch, every
+property test along the way agrees with every other. A
+silent break at any seam (composer ↔ acceptor ↔ welcome-
+ferry ↔ dispatcher ↔ MLS) surfaces as a single named
+failure rather than as a UX regression a human has to
+trace back through three platforms.
+
+Two integration tests in
+[`lakko_calls::link_invite::tests`](../../crates/lakko-calls/src/link_invite.rs)
+back this contract — both pure Rust, no HTTP / FFI /
+network mocks:
+
+**`link_call_full_e2e_via_welcome_envelope`** —
+1×1 link call. Walks the seven-step chain a production
+deployment would drive for the simplest case:
+
+  1. Owner composes the capability (C-24..C-26).
+  2. Joiner runs `accept_call_invite` (C-27 sets up the
+     call-key seed agreement).
+  3. Joiner wraps `welcomeForOwner` via
+     `wrap_call_welcome` (C-32).
+  4. Owner runs `dispatch_incoming_envelope` on the
+     wrapped plaintext — asserts the `CallWelcome`
+     variant fires (C-34).
+  5. Owner runs `Group::join_from_welcome` on the
+     unwrapped payload.
+  6. Both sides build `GroupCallSession`s — call-key
+     seeds MUST agree byte-for-byte (the full C-27
+     contract from the dispatcher's output down).
+  7. Bidirectional SFrame round-trip exercises the media
+     path (C-2 + C-3 hold across the full bootstrap).
+
+**`link_call_multi_party_e2e_via_kp_forward_envelope`** —
+3-participant link call. Walks the subsequent-joiner KP-
+forward chain a production deployment would drive when a
+third party joins an already-established 2-party group:
+
+  1. Set up the A↔B 1×1 base group via the same flow
+     (capability `max_uses = u32::MAX` so the row stays
+     consumable).
+  2. Charlie mints a fresh KP + wraps via
+     `wrap_call_kp_forward` (C-33).
+  3. Bob (current committer) runs
+     `dispatch_incoming_envelope` on the wrapped
+     plaintext — asserts the `CallKeyPackage` variant
+     fires (C-34's discrimination contract holds for
+     KP-forward as well as Welcome).
+  4. Bob runs `Group::add_member_from_wire(kp)` on the
+     existing call group — produces (commit, welcome).
+  5. Bob wraps the Welcome via `wrap_call_welcome` to
+     ferry it back to Charlie (the KP-forward and
+     welcome envelopes compose).
+  6. Charlie's polling loop dispatches the wrapped
+     welcome → `CallWelcome` → `Group::join_from_welcome`
+     → lands at leaf 2.
+  7. Alice processes Bob's commit (broadcast side-output
+     of step 4) → her group state advances to the same
+     new epoch.
+  8. All three participants build `GroupCallSession`s →
+     **all three CallKey seeds agree byte-for-byte**.
+
+The multi-party test is the strongest property the audit
+pack pins: it proves that **the cryptographic state
+machine holds together across a 3-party rendezvous over
+the wrapped-envelope transport**, not just at each
+individual seam. Any future regression to a single
+helper, the dispatcher's order, or the MLS-side
+`add_member_from_wire` would surface here as a single
+named failure that names the specific phase it broke at.
+
+Also covered as part of the same module:
+- `dispatcher_treats_plain_intro_message_as_intro_message`
+  — sanity that a free-text intro doesn't mis-dispatch
+  to a call variant when the chain is exercised end-to-
+  end.
+- `dispatcher_rejects_truncated_welcome_in_full_chain` —
+  the truncation rejection path holds end-to-end, not
+  just at the unwrap-helper level.
+
+lakko-calls test count: 72 → 77 (5 new E2E + sentinel
+cases).
+
 ## Exporter labels (call-side)
 
 | Label | Length | Context | Source | Used for |

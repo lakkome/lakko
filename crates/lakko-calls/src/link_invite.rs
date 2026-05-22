@@ -373,4 +373,341 @@ mod tests {
         let alice_group = Group::join_from_welcome(&accepted.welcome_for_owner, &alice).unwrap();
         assert_eq!(alice_group.own_leaf_index().u32(), 1);
     }
+
+    // ====================================================================
+    // E2E coverage — full link-call wire chain
+    // (Phase 3c3-link-call-e2e-test)
+    // ====================================================================
+
+    /// 1×1 link-call E2E. Walks the **full** wire chain a
+    /// production deployment would drive — composer →
+    /// acceptor → welcome-ferry wrap → incoming-envelope
+    /// dispatcher → MLS join. Any future refactor that
+    /// breaks the chain at any point surfaces here as a
+    /// single named failure rather than as a silent UX
+    /// regression in the platform polling loops.
+    ///
+    /// Steps mapped to the audit-pack invariants they
+    /// exercise (full chain per docs/security/calls.md):
+    ///
+    ///   1. Owner composes a `CallInviteCapability` —
+    ///      C-24..C-26.
+    ///   2. Joiner runs `accept_call_invite` — C-27 (call-
+    ///      key seed agreement) is set up here.
+    ///   3. Joiner wraps `welcomeForOwner` via
+    ///      `wrap_call_welcome` — C-32.
+    ///   4. Owner side: `dispatch_incoming_envelope` runs on
+    ///      the wrapped plaintext — C-34. Asserts the
+    ///      `CallWelcome` variant is returned (NOT
+    ///      `IntroMessage`, NOT `CallKeyPackage`).
+    ///   5. Owner runs `Group::join_from_welcome` on the
+    ///      unwrapped payload.
+    ///   6. Both sides build `GroupCallSession`s against
+    ///      the same `call_id` — call-key seeds MUST agree
+    ///      byte-for-byte (C-27).
+    ///   7. Joiner and owner exchange a sealed SFrame frame
+    ///      in both directions — full media-path round-trip.
+    #[test]
+    fn link_call_full_e2e_via_welcome_envelope() {
+        use lakko_contacts::incoming_envelope::{dispatch_incoming_envelope, IncomingEnvelope};
+        use lakko_contacts::wrap_call_welcome;
+
+        let alice = MlsIdentity::generate("alice").unwrap();
+        let bob = MlsIdentity::generate("bob").unwrap();
+
+        // (1) Owner composes the capability.
+        let alice_kp = alice.create_key_package().unwrap();
+        let alice_kp_bytes = lakko_mls::key_package::serialize(&alice_kp).unwrap();
+        let cap_wire = compose(
+            &signing_for(&alice),
+            &fixture_account_id(),
+            &fixture_call_id(),
+            0, // never expires
+            0, // single use
+            CallInviteMedia::audio_video(),
+            &alice_kp_bytes,
+            "Alice's standup",
+        )
+        .unwrap();
+        let capability = lakko_contacts::call_invite::decode_and_verify(&cap_wire).unwrap();
+
+        // (2) Joiner runs accept_call_invite.
+        let accepted = accept_call_invite(&capability, &bob).unwrap();
+
+        // (3) Joiner wraps the Welcome bytes inside the
+        //     call-welcome envelope domain separator.
+        let wrapped_welcome = wrap_call_welcome(&accepted.welcome_for_owner);
+
+        // (4) Owner's polling loop runs the dispatcher on
+        //     the wrapped plaintext (in production this
+        //     plaintext came out of `open_envelope` on a
+        //     stranger-inbox ContactRequest; here we feed
+        //     the wrapped bytes directly since this test
+        //     scopes the contract to the envelope codec,
+        //     not the outer HPKE seal).
+        let dispatched =
+            dispatch_incoming_envelope(&wrapped_welcome).expect("dispatch should succeed");
+        let welcome_payload = match dispatched {
+            IncomingEnvelope::CallWelcome(p) => p,
+            other => panic!(
+                "expected CallWelcome variant, got {:?}",
+                core::mem::discriminant(&other),
+            ),
+        };
+        // Round-trip sanity: the dispatched bytes equal the
+        // original Welcome.
+        assert_eq!(welcome_payload, accepted.welcome_for_owner.as_slice());
+
+        // (5) Owner runs Group::join_from_welcome.
+        let alice_group = Group::join_from_welcome(welcome_payload, &alice).unwrap();
+
+        // (6) Both sides build sessions; call-key seeds
+        //     must agree.
+        let alice_session = GroupCallSession::create(
+            GroupCallScope::LinkBased,
+            fixture_call_id(),
+            &alice_group,
+            &alice,
+        )
+        .unwrap();
+        assert_eq!(
+            accepted.session.call_key().as_bytes(),
+            alice_session.call_key().as_bytes(),
+            "call_key seeds must agree across the full envelope chain (C-27 + C-32 + C-34)",
+        );
+
+        // (7) Bidirectional SFrame round-trip.
+        let aad = b"sframe-header";
+        let mut bob_send = accepted.session.own_participant_key().unwrap();
+        let alice_recv_bob = alice_session
+            .remote_participant_key(accepted.session.own_leaf_index)
+            .unwrap();
+        let bob_to_alice = b"hello from Bob through the full wire chain";
+        let (ctr, ct) = bob_send.seal(aad, bob_to_alice).unwrap();
+        let opened = alice_recv_bob.open(aad, &ct, ctr).unwrap();
+        assert_eq!(opened.as_slice(), bob_to_alice.as_ref());
+
+        let mut alice_send = alice_session.own_participant_key().unwrap();
+        let bob_recv_alice = accepted
+            .session
+            .remote_participant_key(alice_session.own_leaf_index)
+            .unwrap();
+        let alice_to_bob = b"hello from Alice over the same call key";
+        let (alice_counter, alice_cipher) = alice_send.seal(aad, alice_to_bob).unwrap();
+        let opened_for_bob = bob_recv_alice
+            .open(aad, &alice_cipher, alice_counter)
+            .unwrap();
+        assert_eq!(opened_for_bob.as_slice(), alice_to_bob.as_ref());
+    }
+
+    /// Negative sanity. Feeding a plain free-text plaintext
+    /// (i.e. someone sending a normal ContactRequest, not a
+    /// Welcome) MUST surface as `IntroMessage` from the
+    /// dispatcher, not as a CallWelcome / CallKeyPackage
+    /// false-positive. Catches a future regression where a
+    /// drift in the domain-separator constants accidentally
+    /// makes the prefix match a UTF-8 intro message.
+    #[test]
+    fn dispatcher_treats_plain_intro_message_as_intro_message() {
+        use lakko_contacts::incoming_envelope::{dispatch_incoming_envelope, IncomingEnvelope};
+
+        let intro: &[u8] = b"hi alice, it's bob - let's chat";
+        let result = dispatch_incoming_envelope(intro).expect("dispatch should not error");
+        assert_eq!(result, IncomingEnvelope::IntroMessage(intro));
+    }
+
+    /// E2E negative — the dispatcher MUST refuse a wrapped
+    /// envelope when the trailing welcome payload is below
+    /// the welcome-floor (32 bytes). Pins the truncation-
+    /// rejection path of the chain: a malformed envelope
+    /// surfaces as `Err`, NOT as a silent intro-message
+    /// fallthrough that would later confuse the UI.
+    #[test]
+    fn dispatcher_rejects_truncated_welcome_in_full_chain() {
+        use lakko_contacts::call_welcome::CALL_WELCOME_ENVELOPE_DOMAIN_V1;
+        use lakko_contacts::incoming_envelope::dispatch_incoming_envelope;
+        use lakko_contacts::CallWelcomeError;
+
+        let mut wrapped = Vec::new();
+        wrapped.extend_from_slice(CALL_WELCOME_ENVELOPE_DOMAIN_V1);
+        wrapped.extend_from_slice(&[0u8; 8]); // 8 < 32
+        let err = dispatch_incoming_envelope(&wrapped).unwrap_err();
+        assert_eq!(
+            err,
+            CallWelcomeError::TruncatedPayload { min: 32, got: 8 },
+            "truncated welcome must surface as Err, not as a silent intro-message fallthrough",
+        );
+    }
+
+    /// Multi-party E2E (3 participants). Walks the full
+    /// **subsequent-joiner** wire chain a production
+    /// deployment would drive for a 3rd participant joining
+    /// an already-established 2-party link call:
+    ///
+    ///   1. Alice (owner) composes capability + Bob (first
+    ///      joiner) accepts — sets up A↔B group.
+    ///   2. Alice joins via Welcome — now Bob (leaf 0) +
+    ///      Alice (leaf 1) are in the same MLS group.
+    ///   3. Charlie (subsequent joiner) mints a fresh KP +
+    ///      wraps via `wrap_call_kp_forward`.
+    ///   4. Bob (committer) runs `dispatch_incoming_envelope`
+    ///      on the wrapped plaintext — MUST route to
+    ///      `CallKeyPackage` variant (NOT `CallWelcome`,
+    ///      NOT `IntroMessage`).
+    ///   5. Bob runs `Group::add_member_from_wire(kp)` on
+    ///      the existing call group → produces (commit,
+    ///      welcome).
+    ///   6. Bob wraps the resulting Welcome via
+    ///      `wrap_call_welcome` to ferry it back to
+    ///      Charlie.
+    ///   7. Charlie unwraps via `dispatch_incoming_envelope`
+    ///      → `CallWelcome` variant → runs
+    ///      `Group::join_from_welcome` → lands at leaf 2.
+    ///   8. Alice processes the commit Bob produced (step 5
+    ///      side-output) → her group state advances to the
+    ///      same new epoch.
+    ///   9. All three (A, B, C) derive byte-identical
+    ///      CallKey seeds against the same `call_id` —
+    ///      C-27 holds across the multi-party path.
+    #[test]
+    #[allow(clippy::too_many_lines)] // E2E walkthrough by design — splitting would obscure the chain
+    fn link_call_multi_party_e2e_via_kp_forward_envelope() {
+        use lakko_contacts::incoming_envelope::{dispatch_incoming_envelope, IncomingEnvelope};
+        use lakko_contacts::{wrap_call_kp_forward, wrap_call_welcome};
+        use lakko_mls::group::encode_message;
+        use lakko_mls::Group;
+
+        // ---- Phase 1: A↔B link-call bootstrap (reuse the
+        //                1×1 E2E flow). ---------------------
+        let alice = MlsIdentity::generate("alice").unwrap();
+        let bob = MlsIdentity::generate("bob").unwrap();
+        let charlie = MlsIdentity::generate("charlie").unwrap();
+
+        let alice_kp = alice.create_key_package().unwrap();
+        let alice_kp_bytes = lakko_mls::key_package::serialize(&alice_kp).unwrap();
+        let cap_wire = compose(
+            &signing_for(&alice),
+            &fixture_account_id(),
+            &fixture_call_id(),
+            0, // never expires
+            // Important: NOT single-use — the capability needs to
+            // accept multiple joiners. `u32::MAX` is the unlimited
+            // sentinel.
+            u32::MAX,
+            CallInviteMedia::audio_video(),
+            &alice_kp_bytes,
+            "Alice's standup",
+        )
+        .unwrap();
+        let capability = lakko_contacts::call_invite::decode_and_verify(&cap_wire).unwrap();
+
+        let bob_accepted = accept_call_invite(&capability, &bob).unwrap();
+        let mut alice_group =
+            Group::join_from_welcome(&bob_accepted.welcome_for_owner, &alice).unwrap();
+        let mut bob_group = bob_accepted.group;
+
+        // Sanity check the 2-party state before Charlie
+        // joins.
+        assert_eq!(bob_group.epoch(), alice_group.epoch());
+        let pre_epoch = bob_group.epoch();
+
+        // ---- Phase 2: Charlie's KP-forward send. ---------
+        let charlie_kp = charlie.create_key_package().unwrap();
+        let charlie_kp_bytes = lakko_mls::key_package::serialize(&charlie_kp).unwrap();
+        let wrapped_kp = wrap_call_kp_forward(&charlie_kp_bytes);
+
+        // ---- Phase 3: Bob (committer) routes the wrapped
+        //                KP through the dispatcher. -------
+        let dispatched = dispatch_incoming_envelope(&wrapped_kp).expect("dispatch should succeed");
+        let charlie_kp_payload = match dispatched {
+            IncomingEnvelope::CallKeyPackage(p) => p,
+            other => panic!(
+                "expected CallKeyPackage variant, got {:?}",
+                core::mem::discriminant(&other),
+            ),
+        };
+
+        // ---- Phase 4: Bob adds Charlie + advances the
+        //                group. -------------------------
+        let addition = bob_group
+            .add_member_from_wire(&bob, charlie_kp_payload)
+            .expect("add Charlie via wrapped KP");
+
+        // Bob's local view has advanced; pre_epoch + 1.
+        assert_eq!(bob_group.epoch(), pre_epoch + 1);
+
+        // ---- Phase 5: Bob ferries the Welcome back to
+        //                Charlie via wrap_call_welcome. ---
+        let welcome_bytes = encode_message(&addition.welcome).unwrap();
+        let wrapped_welcome_for_charlie = wrap_call_welcome(&welcome_bytes);
+
+        // Charlie's polling loop routes the wrapped welcome.
+        let dispatched_for_charlie = dispatch_incoming_envelope(&wrapped_welcome_for_charlie)
+            .expect("dispatch should succeed");
+        let welcome_payload = match dispatched_for_charlie {
+            IncomingEnvelope::CallWelcome(p) => p,
+            other => panic!(
+                "expected CallWelcome variant for Charlie's join, got {:?}",
+                core::mem::discriminant(&other),
+            ),
+        };
+        let charlie_group = Group::join_from_welcome(welcome_payload, &charlie).unwrap();
+
+        // ---- Phase 6: Alice processes Bob's commit and
+        //                advances her group state. ------
+        let commit_bytes = encode_message(&addition.commit).unwrap();
+        let _ = alice_group
+            .process_incoming(&alice, &commit_bytes)
+            .expect("Alice processes Bob's commit");
+
+        // ---- Phase 7: All three at the same new epoch. -
+        assert_eq!(
+            bob_group.epoch(),
+            alice_group.epoch(),
+            "Alice's view must advance after processing Bob's commit",
+        );
+        assert_eq!(
+            alice_group.epoch(),
+            charlie_group.epoch(),
+            "Charlie's view (post-join) must match Alice + Bob's new epoch",
+        );
+
+        // ---- Phase 8: All three derive byte-identical
+        //                CallKey seeds. -----------------
+        let bob_session_after_add = GroupCallSession::create(
+            GroupCallScope::LinkBased,
+            fixture_call_id(),
+            &bob_group,
+            &bob,
+        )
+        .unwrap();
+        let alice_session_after_commit = GroupCallSession::create(
+            GroupCallScope::LinkBased,
+            fixture_call_id(),
+            &alice_group,
+            &alice,
+        )
+        .unwrap();
+        let charlie_session = GroupCallSession::create(
+            GroupCallScope::LinkBased,
+            fixture_call_id(),
+            &charlie_group,
+            &charlie,
+        )
+        .unwrap();
+
+        // The strongest property: all three sessions agree
+        // on the same SFrame seed for the same call_id at
+        // the same epoch (multi-party C-27 + C-33 + C-34).
+        assert_eq!(
+            bob_session_after_add.call_key().as_bytes(),
+            alice_session_after_commit.call_key().as_bytes(),
+            "Bob + Alice CallKey seeds must agree after the add commit",
+        );
+        assert_eq!(
+            alice_session_after_commit.call_key().as_bytes(),
+            charlie_session.call_key().as_bytes(),
+            "Charlie's CallKey seed must agree with Alice + Bob's post-add",
+        );
+    }
 }
