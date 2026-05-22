@@ -80,6 +80,7 @@ regen-bindings:
 fuzz-check:
     cargo check --manifest-path crates/lakko-mls/fuzz/Cargo.toml
     cargo check --manifest-path crates/lakko-proto/fuzz/Cargo.toml
+    cargo check --manifest-path crates/lakko-contacts/fuzz/Cargo.toml
 
 # Build `lakko-ffi-wasm` for `wasm32-unknown-unknown`. CI runs this
 # too; keep it locally for fast feedback when changing the
@@ -104,6 +105,8 @@ fuzz-list:
     @ls crates/lakko-mls/fuzz/fuzz_targets/ | sed 's/\.rs$//' | sed 's/^/  /'
     @echo "lakko-proto:"
     @ls crates/lakko-proto/fuzz/fuzz_targets/ | sed 's/\.rs$//' | sed 's/^/  /'
+    @echo "lakko-contacts:"
+    @ls crates/lakko-contacts/fuzz/fuzz_targets/ | sed 's/\.rs$//' | sed 's/^/  /'
 
 # Everything CI does — run locally before pushing.
 ci: fmt-check lint test audit reuse fuzz-check

@@ -121,7 +121,7 @@ just ci                        # everything CI does, locally
 
 ## Fuzz harnesses
 
-`crates/lakko-mls/fuzz/` and `crates/lakko-proto/fuzz/` are separate crates outside the main workspace (they need nightly + libfuzzer-sys). Targets live in `fuzz/fuzz_targets/*.rs`.
+`crates/lakko-mls/fuzz/`, `crates/lakko-proto/fuzz/`, and `crates/lakko-contacts/fuzz/` are separate crates outside the main workspace (they need nightly + libfuzzer-sys). Targets live in `fuzz/fuzz_targets/*.rs`.
 
 Current targets:
 - **`lakko-mls/mls_message`** — `MlsMessageIn` wire-format parser (TLS codec)
@@ -129,6 +129,11 @@ Current targets:
 - **`lakko-proto/wire_envelope`** — `wire::v1::Envelope` prost decoder
 - **`lakko-proto/mls_app_payload`** — `mls_app::v1::ApplicationPayload` prost decoder
 - **`lakko-proto/media_call_key`** — `media::v1::CallKeyEpoch` + `CodecCapability` decoders
+- **`lakko-contacts/contact_request_decode_and_verify`** — outermost stranger-inbox parser (signature + HPKE-sealed envelope)
+- **`lakko-contacts/call_invite_capability_decode_and_verify`** — discovery-side capability parser
+- **`lakko-contacts/call_welcome_unwrap`** — owner-side welcome-envelope domain-separator parser
+- **`lakko-contacts/call_kp_forward_unwrap`** — owner-side KP-forward envelope parser (subsequent joiners)
+- **`lakko-contacts/incoming_envelope_dispatch`** — composite owner-side polling-loop dispatcher
 
 The `fuzz_api` module in `lakko-mls` (marked `#[doc(hidden)]`) is the only public entry point for harnesses; it is not part of the supported public API.
 
