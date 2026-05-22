@@ -23,3 +23,5 @@ See [`0000-template.md`](0000-template.md). Style — Michael Nygard, minimalist
 | [0006](0006-licensing.md) | Accepted | AGPLv3 monorepo + CLA |
 | [0007](0007-multi-device-identity.md) | Accepted | Two-tier identity (account-level deterministic + per-device random) |
 | [0008](0008-livekit-fork-strategy.md) | Accepted | LiveKit fork — operational strategy (extends 0003) |
+| [0009](0009-link-based-call-invitations.md) | Accepted | Link-based call invitations protocol (extends 0005) |
+| [0010](0010-channels-two-tier-broadcast.md) | Accepted | Channels — two-tier PublisherGroup + sender-key broadcast (Phase 4 design) |
