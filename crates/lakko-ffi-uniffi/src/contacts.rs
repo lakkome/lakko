@@ -42,6 +42,9 @@ use lakko_contacts::call_welcome::{
     try_unwrap_call_welcome as rust_try_unwrap_call_welcome,
     wrap_call_welcome as rust_wrap_call_welcome, CallWelcomeError, CALL_WELCOME_MIN_PAYLOAD_LEN,
 };
+use lakko_contacts::incoming_envelope::{
+    dispatch_incoming_envelope as rust_dispatch_incoming_envelope, IncomingEnvelope,
+};
 use lakko_contacts::invite::{
     compose as rust_invite_compose, compute_joiner_tag as rust_compute_joiner_tag,
     decode_and_verify as rust_invite_decode, sign_owner_list as rust_sign_owner_list,
@@ -1266,6 +1269,70 @@ pub fn call_keypackage_min_payload_len() -> u32 {
     u32::try_from(CALL_KP_FORWARD_MIN_PAYLOAD_LEN).unwrap_or(u32::MAX)
 }
 
+// ===========================================================================
+// Incoming-envelope dispatcher — Phase 3c3-incoming-dispatcher
+// ===========================================================================
+
+/// Kind tag for a dispatched incoming envelope. Mirror of
+/// the variant set on
+/// [`lakko_contacts::incoming_envelope::IncomingEnvelope`],
+/// scoped to an FFI-portable enum (no borrow lifetime).
+#[derive(uniffi::Enum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FfiIncomingEnvelopeKind {
+    /// First-joiner Welcome bytes for a link-based call.
+    CallWelcome,
+    /// Subsequent-joiner KeyPackage for a multi-party call.
+    CallKeyPackage,
+    /// Plain free-text intro message (ADR-0005 scenario A).
+    IntroMessage,
+}
+
+/// FFI-portable result of [`dispatch_incoming_envelope`].
+/// The `payload` slice is materialised into an owned
+/// `Vec<u8>` at the FFI boundary so the platform side
+/// doesn't have to think about Rust borrow lifetimes.
+#[derive(uniffi::Record, Debug, Clone, PartialEq, Eq)]
+pub struct FfiIncomingEnvelope {
+    /// Which dispatch branch fired.
+    pub kind: FfiIncomingEnvelopeKind,
+    /// The dispatched payload — for `CallWelcome` and
+    /// `CallKeyPackage` this is the bytes **after** the
+    /// 22- / 25-byte domain separator; for `IntroMessage`
+    /// it is the original plaintext verbatim.
+    pub payload: Vec<u8>,
+}
+
+/// Single-call dispatcher for HPKE-decrypted
+/// `ContactRequest` plaintexts. Runs the two call-side
+/// unwrap helpers in dispatch order
+/// (welcome → KP-forward → intro-message fallthrough) and
+/// returns the typed variant.
+///
+/// See [`lakko_contacts::incoming_envelope`] for the full
+/// dispatch contract.
+///
+/// # Errors
+///
+/// * [`FfiError::Contacts`] when a domain separator matched
+///   but the payload is shorter than the kind's minimum
+///   floor (32 bytes for Welcome, 256 bytes for KP-forward).
+#[uniffi::export]
+pub fn dispatch_incoming_envelope(plaintext: Vec<u8>) -> Result<FfiIncomingEnvelope, FfiError> {
+    let parsed = rust_dispatch_incoming_envelope(&plaintext).map_err(|err| match err {
+        CallWelcomeError::TruncatedPayload { min, got } => FfiError::Contacts(format!(
+            "incoming envelope payload is {got} bytes, minimum is {min}",
+        )),
+    })?;
+    let (kind, payload) = match parsed {
+        IncomingEnvelope::CallWelcome(p) => (FfiIncomingEnvelopeKind::CallWelcome, p.to_vec()),
+        IncomingEnvelope::CallKeyPackage(p) => {
+            (FfiIncomingEnvelopeKind::CallKeyPackage, p.to_vec())
+        },
+        IncomingEnvelope::IntroMessage(p) => (FfiIncomingEnvelopeKind::IntroMessage, p.to_vec()),
+    };
+    Ok(FfiIncomingEnvelope { kind, payload })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1789,5 +1856,56 @@ mod tests {
     #[test]
     fn call_kp_forward_min_payload_len_matches_rust_constant() {
         assert_eq!(call_keypackage_min_payload_len() as usize, 256);
+    }
+
+    // -------------------------------------------------------------------
+    // Incoming-envelope dispatcher (3c3-incoming-dispatcher)
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn dispatch_routes_call_welcome_envelope() {
+        let welcome = vec![0xABu8; 256];
+        let wrapped = wrap_call_welcome(welcome.clone());
+        let result = dispatch_incoming_envelope(wrapped).expect("dispatch should succeed");
+        assert_eq!(result.kind, FfiIncomingEnvelopeKind::CallWelcome);
+        assert_eq!(result.payload, welcome);
+    }
+
+    #[test]
+    fn dispatch_routes_call_kp_forward_envelope() {
+        let kp = vec![0xCDu8; 512];
+        let wrapped = wrap_call_keypackage(kp.clone());
+        let result = dispatch_incoming_envelope(wrapped).expect("dispatch should succeed");
+        assert_eq!(result.kind, FfiIncomingEnvelopeKind::CallKeyPackage);
+        assert_eq!(result.payload, kp);
+    }
+
+    #[test]
+    fn dispatch_falls_through_to_intro_message() {
+        let intro = b"hello alice".to_vec();
+        let result = dispatch_incoming_envelope(intro.clone()).expect("dispatch should succeed");
+        assert_eq!(result.kind, FfiIncomingEnvelopeKind::IntroMessage);
+        assert_eq!(result.payload, intro);
+    }
+
+    #[test]
+    fn dispatch_treats_empty_plaintext_as_intro_message() {
+        let result = dispatch_incoming_envelope(Vec::new()).expect("dispatch should succeed");
+        assert_eq!(result.kind, FfiIncomingEnvelopeKind::IntroMessage);
+        assert!(result.payload.is_empty());
+    }
+
+    #[test]
+    fn dispatch_surfaces_truncated_welcome_as_error() {
+        let mut wrapped = Vec::new();
+        wrapped.extend_from_slice(b"lakko/call-welcome/v1\x00");
+        wrapped.extend_from_slice(&[0u8; 4]);
+        match dispatch_incoming_envelope(wrapped) {
+            Err(FfiError::Contacts(msg)) => {
+                assert!(msg.contains('4') && msg.contains("32"));
+            },
+            Err(other) => panic!("expected Contacts error, got {other:?}"),
+            Ok(_) => panic!("truncated welcome must surface as Err"),
+        }
     }
 }

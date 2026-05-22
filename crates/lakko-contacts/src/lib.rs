@@ -57,6 +57,7 @@ pub mod call_kp_forward;
 pub mod call_welcome;
 pub mod envelope;
 pub mod error;
+pub mod incoming_envelope;
 pub mod invite;
 pub mod pseudonym;
 pub mod request;
@@ -78,6 +79,7 @@ pub use call_welcome::{
     CALL_WELCOME_MIN_PAYLOAD_LEN,
 };
 pub use error::{ContactError, Result};
+pub use incoming_envelope::{dispatch_incoming_envelope, IncomingEnvelope};
 pub use invite::{
     compute_joiner_tag, owner_list_canonical_bytes, revoke_canonical_bytes, sign_owner_list,
     sign_revocation, InviteCapability, BLOB_ID_LEN, JOINER_TAG_LEN, JOINER_TAG_SALT_DOMAIN_V1,

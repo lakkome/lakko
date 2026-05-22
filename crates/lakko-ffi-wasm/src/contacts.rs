@@ -18,6 +18,9 @@ use lakko_contacts::call_welcome::{
     try_unwrap_call_welcome as rust_try_unwrap_call_welcome,
     wrap_call_welcome as rust_wrap_call_welcome, CallWelcomeError, CALL_WELCOME_MIN_PAYLOAD_LEN,
 };
+use lakko_contacts::incoming_envelope::{
+    dispatch_incoming_envelope as rust_dispatch_incoming_envelope, IncomingEnvelope,
+};
 use lakko_contacts::invite::{
     compose as rust_invite_compose, compute_joiner_tag as rust_compute_joiner_tag,
     decode_and_verify as rust_invite_decode, sign_owner_list as rust_sign_owner_list,
@@ -1099,6 +1102,92 @@ pub fn try_unwrap_call_keypackage(plaintext: &[u8]) -> Result<Option<Vec<u8>>, J
 #[must_use]
 pub fn call_keypackage_min_payload_len() -> usize {
     CALL_KP_FORWARD_MIN_PAYLOAD_LEN
+}
+
+// ============================================================================
+// Incoming-envelope dispatcher — Phase 3c3-incoming-dispatcher
+// ============================================================================
+
+/// Kind tag for [`WasmIncomingEnvelope`]. Mirror of the
+/// underlying Rust enum variants. Pinned numeric values
+/// (`0` / `1` / `2`) match the dispatch order documented in
+/// [`lakko_contacts::incoming_envelope`].
+#[wasm_bindgen(js_name = IncomingEnvelopeKind)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum WasmIncomingEnvelopeKind {
+    /// First-joiner Welcome bytes for a link-based call.
+    CallWelcome = 0,
+    /// Subsequent-joiner KeyPackage for a multi-party call.
+    CallKeyPackage = 1,
+    /// Plain free-text intro message (ADR-0005 scenario A).
+    IntroMessage = 2,
+}
+
+/// FFI-portable result of [`dispatchIncomingEnvelope`]. The
+/// payload bytes are materialised into an owned `Vec<u8>` at
+/// the FFI boundary so the JavaScript caller doesn't have to
+/// think about Rust borrow lifetimes.
+#[wasm_bindgen(js_name = IncomingEnvelope)]
+pub struct WasmIncomingEnvelope {
+    kind: WasmIncomingEnvelopeKind,
+    payload: Vec<u8>,
+}
+
+#[wasm_bindgen(js_class = IncomingEnvelope)]
+impl WasmIncomingEnvelope {
+    /// Which dispatch branch fired.
+    #[wasm_bindgen(getter)]
+    pub fn kind(&self) -> WasmIncomingEnvelopeKind {
+        self.kind
+    }
+
+    /// The dispatched payload — for `CallWelcome` and
+    /// `CallKeyPackage` this is the bytes **after** the
+    /// 22- / 25-byte domain separator; for `IntroMessage`
+    /// it is the original plaintext verbatim.
+    #[wasm_bindgen(getter)]
+    pub fn payload(&self) -> Vec<u8> {
+        self.payload.clone()
+    }
+}
+
+/// Single-call dispatcher for HPKE-decrypted
+/// `ContactRequest` plaintexts (Phase 3c3-incoming-
+/// dispatcher). Runs the two call-side unwrap helpers in
+/// dispatch order
+/// (welcome → KP-forward → intro-message fallthrough) and
+/// returns the typed variant.
+///
+/// See [`lakko_contacts::incoming_envelope`] for the full
+/// dispatch contract.
+///
+/// # Errors
+///
+/// `JsError` when a domain separator matched but the
+/// payload is shorter than the kind's minimum floor (32
+/// bytes for Welcome, 256 bytes for KP-forward).
+#[wasm_bindgen(js_name = dispatchIncomingEnvelope)]
+pub fn dispatch_incoming_envelope(plaintext: &[u8]) -> Result<WasmIncomingEnvelope, JsError> {
+    let parsed = rust_dispatch_incoming_envelope(plaintext).map_err(|err| {
+        let lakko_contacts::call_welcome::CallWelcomeError::TruncatedPayload { min, got } = err;
+        JsError::new(&format!(
+            "incoming envelope payload is {got} bytes, minimum is {min}",
+        ))
+    })?;
+    Ok(match parsed {
+        IncomingEnvelope::CallWelcome(p) => WasmIncomingEnvelope {
+            kind: WasmIncomingEnvelopeKind::CallWelcome,
+            payload: p.to_vec(),
+        },
+        IncomingEnvelope::CallKeyPackage(p) => WasmIncomingEnvelope {
+            kind: WasmIncomingEnvelopeKind::CallKeyPackage,
+            payload: p.to_vec(),
+        },
+        IncomingEnvelope::IntroMessage(p) => WasmIncomingEnvelope {
+            kind: WasmIncomingEnvelopeKind::IntroMessage,
+            payload: p.to_vec(),
+        },
+    })
 }
 
 // Tests cover only happy paths — error paths invoke `JsError::new`,

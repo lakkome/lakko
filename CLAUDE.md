@@ -69,7 +69,7 @@ The tactical decomposition of all 6 phases with sprint breakdowns lives in [`doc
 - `infra/` — single-VPS Hetzner deployment via systemd + system-nginx + system-MariaDB; see `infra/README.md` (migration from lakko_me and daily ops)
 - `docs/adr/` — Architecture Decision Records
 - `docs/ROADMAP.md` — tactical decomposition of every phase
-- `docs/security/` — audit-readiness pack: threat model, crypto overview, MLS state machine invariants (I-1..I-8), call-side cryptography (C-1..C-33 — media-key pipeline + call-admission JWT + link-based invite + owner fingerprint + server-handler drift sentinels + URL discrimination + composer/acceptor pipelines + Welcome-ferry envelope + KP-forward envelope for multi-party), known gaps (G-1..G-22). Entry: [`docs/security/README.md`](docs/security/README.md)
+- `docs/security/` — audit-readiness pack: threat model, crypto overview, MLS state machine invariants (I-1..I-8), call-side cryptography (C-1..C-34 — media-key pipeline + call-admission JWT + link-based invite + owner fingerprint + server-handler drift sentinels + URL discrimination + composer/acceptor pipelines + Welcome-ferry envelope + KP-forward envelope + incoming-envelope dispatcher), known gaps (G-1..G-22). Entry: [`docs/security/README.md`](docs/security/README.md)
 - `tools/` — codegen, fuzz harnesses, benchmarks
 - `ci/` — GitHub Actions + self-hosted SLSA L3 builders
 

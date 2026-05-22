@@ -1065,6 +1065,83 @@ count: 71 → 76 (5 new cases — round-trip, intro-message
 fallthrough, cross-dispatch guard from welcome envelope,
 truncated-payload rejection, floor-constant pin).
 
+### C-34: Owner-side incoming-envelope dispatcher pins dispatch order
+
+The owner's stranger-inbox polling loop receives one HPKE-
+decrypted plaintext at a time and has to route each to the
+right handler: `Group::join_from_welcome` for first-joiner
+Welcomes (C-32), `Group::add_member_from_wire` for
+subsequent-joiner KeyPackages (C-33), or the ordinary intro-
+message renderer (ADR-0005 scenario A). Doing this dispatch
+manually across web / iOS / Android opens three separate
+opportunities for a drift bug to misroute a payload —
+e.g. running the KP-forward unwrap first and then falling
+through to the welcome unwrap (which would still produce
+the right answer for today's envelope set but could not
+absorb a future third kind without re-aligning all three
+platforms in lock-step).
+
+Phase 3c3-incoming-dispatcher pins the dispatch order in
+**one** place — the
+[`dispatch_incoming_envelope`](../../crates/lakko-contacts/src/incoming_envelope.rs)
+free function. The contract:
+
+1. `try_unwrap_call_welcome` (the C-32 first-joiner branch)
+2. `try_unwrap_call_kp_forward` (the C-33 subsequent-joiner
+   branch)
+3. **Intro-message fallthrough** — surfaces the original
+   plaintext verbatim (including the degenerate
+   empty-bytes case, which is a valid empty intro message).
+
+Returns a discriminated `IncomingEnvelope<'a>` enum with
+zero-copy borrow semantics — the dispatcher itself never
+allocates; the caller decides whether to clone bytes when
+forwarding them to `Group::join_from_welcome` or
+`Group::add_member_from_wire`.
+
+**Load-bearing properties** the test suite pins:
+
+- Each call-side envelope routes to its specific variant
+  (`dispatches_call_welcome_envelope`,
+  `dispatches_call_kp_forward_envelope`).
+- A plain intro message — even when empty — falls through
+  to the `IntroMessage` variant, NOT to a truncated-call
+  error (`dispatches_intro_message_for_plain_text`,
+  `dispatches_intro_message_for_empty_plaintext`).
+- A truncated call envelope (domain separator matched,
+  payload below the kind's floor) surfaces as
+  `Err(CallWelcomeError::TruncatedPayload)` — caller logs
+  + drops the envelope rather than mistaking it for an
+  intro message (`truncated_welcome_envelope_surfaces_as_error`,
+  `truncated_kp_forward_envelope_surfaces_as_error`).
+- The dispatcher is **zero-copy** on both the call-welcome
+  branch and the intro-message branch — `slice.as_ptr()`
+  equality between the returned slice and the appropriate
+  offset of the input is asserted by
+  `dispatch_is_zero_copy_on_intro_path` and
+  `dispatch_is_zero_copy_on_call_welcome_path` (and stays
+  unsafe-free under the crate-wide
+  `#![forbid(unsafe_code)]`).
+
+Tests (9 cases in
+[`lakko_contacts::incoming_envelope::tests`](../../crates/lakko-contacts/src/incoming_envelope.rs)).
+lakko-contacts test count: 117 → 126.
+
+FFI exposure: wasm-bindgen
+`dispatchIncomingEnvelope(plaintext) -> IncomingEnvelope`
+(class with `kind: IncomingEnvelopeKind` getter +
+`payload: Uint8Array` getter; `IncomingEnvelopeKind`
+exported as a numeric enum with stable values `0`
+(`CallWelcome`), `1` (`CallKeyPackage`), `2`
+(`IntroMessage`) matching the dispatch order); UniFFI
+`dispatch_incoming_envelope(plaintext) ->
+FfiIncomingEnvelope` (record with `kind:
+FfiIncomingEnvelopeKind` + `payload: Vec<u8>`). The
+owned-bytes shape at the FFI boundary frees the platform
+caller from Rust borrow-lifetime concerns. lakko-ffi-uniffi
+test count: 76 → 81 (5 new cases — all four dispatch
+branches + a truncated-welcome rejection sentinel).
+
 ## Exporter labels (call-side)
 
 | Label | Length | Context | Source | Used for |
