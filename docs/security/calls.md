@@ -1230,6 +1230,77 @@ Also covered as part of the same module:
 lakko-calls test count: 72 → 77 (5 new E2E + sentinel
 cases).
 
+### C-36: Owner-handover preserves call-key chain across mid-call committer leave
+
+The multi-party E2E in C-35 covers the happy path where
+the first joiner (Bob) remains the committer for the
+call's lifetime. C-36 pins what happens when **the
+committer leaves mid-call**: the capability's
+`owner_account_id` designates the owner as the
+**primary committer-of-record**, so when Bob
+disconnects, Alice (the owner) takes over by emitting
+the Remove commit for Bob's stale leaf and is then the
+member that subsequent joiners' KP-forwards route to.
+
+The contract:
+
+  1. Owner is **always a member** of the call group by
+     construction — added via her embedded KP when the
+     first joiner accepted (C-26 + C-27 set up).
+  2. If the current committer disconnects, the **owner
+     drives the Remove commit** to evict the stale
+     leaf (OpenMLS does not permit self-removal via
+     `remove_members`, and a disconnected client can't
+     drive `leave_group_via_self_remove` anyway —
+     someone else must commit the leave).
+  3. After the Remove commit, subsequent KP-forward
+     envelopes (C-33) flow to the **owner** as the new
+     committer; she runs `add_member_from_wire` +
+     ferries the resulting Welcome (C-32) back to the
+     new joiner.
+  4. Across the leave + add commits the MLS exporter
+     produces a **fresh CallKey seed each epoch** — the
+     pre-leave seed is no longer derivable post-handover
+     (forward secrecy across the leave + add commits).
+
+The integration test
+[`link_call_owner_handover_after_committer_leaves`](../../crates/lakko-calls/src/link_invite.rs)
+exercises the full sequence:
+
+  - Set up A↔B↔C via the multi-party flow (C-35 baseline).
+  - Alice removes Bob's leaf (owner-driven kick — Bob
+    has disconnected); Charlie's view advances.
+  - Dave arrives with a KP-forward envelope; the
+    dispatcher (C-34) routes it to Alice.
+  - Alice runs `add_member_from_wire(dave_kp)` +
+    broadcasts the commit to Charlie; Alice ferries the
+    Welcome to Dave.
+  - Assertions: epoch advances past the leave; A, C, D
+    all at the same post-handover epoch; all three
+    derive byte-identical CallKey seeds; the pre-leave
+    seed Bob held differs from the post-handover seed
+    (forward secrecy assertion).
+
+The test surfaced a load-bearing **MLS bug** in
+`lakko-mls::Group::join_from_welcome`: it was using
+`MlsGroupJoinConfig::default()` which sets
+`use_ratchet_tree_extension = false`. Members who joined
+via Welcome had a group state without the ratchet tree
+extension flag, so when one of them later acted as the
+committer (the exact owner-handover scenario), their
+freshly-emitted Welcome did not carry the embedded
+ratchet tree → the new joiner's
+`join_from_welcome` failed with `MissingRatchetTree`.
+The fix flips the join-config flag on, matching the
+`MlsGroupCreateConfig` setting the founder uses; the
+two now stay in lock-step so a chain of welcome-then-
+add-then-welcome propagation survives any number of
+hops. This is documented inline in
+`lakko-mls::Group::join_from_welcome` and is a one-line
+change with workspace-wide test coverage backing it.
+
+lakko-calls test count: 77 → 78.
+
 ## Exporter labels (call-side)
 
 | Label | Length | Context | Source | Used for |

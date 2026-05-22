@@ -113,6 +113,15 @@ impl Group {
     /// `welcome_bytes` is the TLS-encoded Welcome (extracted by the sender
     /// from the [`MemberAddition`] returned by [`Group::add_member`]).
     ///
+    /// The join config sets `use_ratchet_tree_extension(true)` so the joined
+    /// group's own future Welcomes (when this member later acts as the
+    /// committer adding someone else) also carry the embedded ratchet tree.
+    /// Without this flag the joined group inherits the OpenMLS default
+    /// (false), which means a chain of welcome-then-add propagation
+    /// fails with `MissingRatchetTree` at the second-hop join — load-bearing
+    /// for the link-call owner-handover path where the founder leaves and
+    /// the owner (who joined via welcome) becomes the new committer.
+    ///
     /// # Errors
     ///
     /// Returns [`Error::Codec`] for malformed wire data, [`Error::Unsupported`]
@@ -124,7 +133,9 @@ impl Group {
             return Err(Error::Unsupported("expected Welcome message"));
         };
 
-        let cfg = MlsGroupJoinConfig::default();
+        let cfg = MlsGroupJoinConfig::builder()
+            .use_ratchet_tree_extension(true)
+            .build();
         let staged = StagedWelcome::new_from_welcome(&identity.provider, &cfg, welcome, None)
             .map_err(|e| Error::Group(format!("staged welcome: {e:?}")))?;
         let inner = staged

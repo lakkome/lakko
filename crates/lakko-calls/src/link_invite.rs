@@ -710,4 +710,264 @@ mod tests {
             "Charlie's CallKey seed must agree with Alice + Bob's post-add",
         );
     }
+
+    /// Owner-handover E2E. After the multi-party rendezvous
+    /// of `link_call_multi_party_e2e_via_kp_forward_envelope`,
+    /// **Bob (the first joiner / current committer) leaves
+    /// the call**. The capability's `owner_account_id`
+    /// designates Alice; she picks up the committer role for
+    /// the next joiner. A fourth party Dave joins via KP-
+    /// forward and Alice (not Bob) adds him. Final state: A,
+    /// C, D in one MLS group at the post-handover epoch; Bob
+    /// gone; all three derive byte-identical CallKey seeds.
+    ///
+    /// Closes the "what happens when committer leaves" gap
+    /// the multi-party flow left open (mentioned in
+    /// `docs/security/known-gaps.md::G-21`).
+    ///
+    /// **Designated-committer rule** (this test pins the
+    /// policy): the capability's `owner_account_id` is the
+    /// **primary committer** for the call group across its
+    /// lifetime. The owner is a member by construction
+    /// (added via her embedded KeyPackage when the first
+    /// joiner accepted), so a future committer-rotation does
+    /// not require a separate election protocol — the policy
+    /// is "owner if present, otherwise the lowest active
+    /// leaf index". The test exercises the owner-present
+    /// branch; the leaf-index fallback is documented for
+    /// the no-owner-anymore edge case the V1 wire does not
+    /// reach (owner can't leave: she's the capability
+    /// holder).
+    #[test]
+    #[allow(clippy::too_many_lines)] // E2E walkthrough by design
+    fn link_call_owner_handover_after_committer_leaves() {
+        use lakko_contacts::incoming_envelope::{dispatch_incoming_envelope, IncomingEnvelope};
+        use lakko_contacts::{wrap_call_kp_forward, wrap_call_welcome};
+        use lakko_mls::group::encode_message;
+        use lakko_mls::Group;
+
+        // ---- Phase 1: Reuse the multi-party setup (A↔B↔C). -
+        let alice = MlsIdentity::generate("alice").unwrap();
+        let bob = MlsIdentity::generate("bob").unwrap();
+        let charlie = MlsIdentity::generate("charlie").unwrap();
+        let dave = MlsIdentity::generate("dave").unwrap();
+
+        let alice_kp = alice.create_key_package().unwrap();
+        let alice_kp_bytes = lakko_mls::key_package::serialize(&alice_kp).unwrap();
+        let cap_wire = compose(
+            &signing_for(&alice),
+            &fixture_account_id(),
+            &fixture_call_id(),
+            0,
+            u32::MAX, // unlimited
+            CallInviteMedia::audio_video(),
+            &alice_kp_bytes,
+            "Alice's all-hands",
+        )
+        .unwrap();
+        let capability = lakko_contacts::call_invite::decode_and_verify(&cap_wire).unwrap();
+
+        let bob_accepted = accept_call_invite(&capability, &bob).unwrap();
+        let mut alice_group =
+            Group::join_from_welcome(&bob_accepted.welcome_for_owner, &alice).unwrap();
+        let mut bob_group = bob_accepted.group;
+
+        // Charlie joins via KP-forward through Bob.
+        let charlie_kp = charlie.create_key_package().unwrap();
+        let charlie_kp_bytes = lakko_mls::key_package::serialize(&charlie_kp).unwrap();
+        let wrapped_charlie_kp = wrap_call_kp_forward(&charlie_kp_bytes);
+        let dispatched = dispatch_incoming_envelope(&wrapped_charlie_kp).unwrap();
+        let charlie_kp_payload = match dispatched {
+            IncomingEnvelope::CallKeyPackage(p) => p,
+            other => panic!(
+                "expected CallKeyPackage, got {:?}",
+                core::mem::discriminant(&other)
+            ),
+        };
+        let bob_addition = bob_group
+            .add_member_from_wire(&bob, charlie_kp_payload)
+            .unwrap();
+        let bob_commit_bytes = encode_message(&bob_addition.commit).unwrap();
+        let charlie_welcome_bytes = encode_message(&bob_addition.welcome).unwrap();
+        let wrapped_welcome_for_charlie = wrap_call_welcome(&charlie_welcome_bytes);
+        let dispatched_for_charlie =
+            dispatch_incoming_envelope(&wrapped_welcome_for_charlie).unwrap();
+        let charlie_welcome_payload = match dispatched_for_charlie {
+            IncomingEnvelope::CallWelcome(p) => p,
+            other => panic!(
+                "expected CallWelcome, got {:?}",
+                core::mem::discriminant(&other)
+            ),
+        };
+        let mut charlie_group =
+            Group::join_from_welcome(charlie_welcome_payload, &charlie).unwrap();
+        alice_group
+            .process_incoming(&alice, &bob_commit_bytes)
+            .unwrap();
+
+        // Snapshot the 3-party state.
+        let epoch_before_handover = alice_group.epoch();
+        assert_eq!(bob_group.epoch(), epoch_before_handover);
+        assert_eq!(charlie_group.epoch(), epoch_before_handover);
+
+        // ---- Phase 2: Bob disconnects (e.g. closes the
+        //                app); Alice (owner) drives the
+        //                removal commit as the designated
+        //                handover policy. OpenMLS 0.8.x
+        //                does not allow self-removal via
+        //                `remove_members` (RFC 9420 +
+        //                `CreateCommitError::CannotRemoveSelf`);
+        //                self-removal would need
+        //                `leave_group_via_self_remove`, but
+        //                a disconnected client can't drive
+        //                that anyway — someone else has to
+        //                commit. The capability's
+        //                `owner_account_id` designates
+        //                Alice as the owner-committer, so
+        //                she's the natural one to land the
+        //                kick. ---------------------------
+        let bob_leaf_in_alice_view = bob_group.own_leaf_index();
+        let alice_remove_bob = alice_group
+            .remove_member(&alice, bob_leaf_in_alice_view)
+            .expect("Alice as owner removes Bob's stale leaf");
+        let alice_remove_bytes = encode_message(&alice_remove_bob).unwrap();
+
+        // Charlie processes Alice's remove commit.
+        charlie_group
+            .process_incoming(&charlie, &alice_remove_bytes)
+            .unwrap();
+
+        let epoch_after_leave = alice_group.epoch();
+        assert!(
+            epoch_after_leave > epoch_before_handover,
+            "remove commit must advance the epoch",
+        );
+        assert_eq!(
+            charlie_group.epoch(),
+            epoch_after_leave,
+            "Charlie's view must match Alice's post-remove",
+        );
+
+        // ---- Phase 3: Dave joins. The capability's
+        //                owner_account_id designates Alice
+        //                as the committer; she handles the
+        //                KP-forward, not Bob (who is gone). -
+        let dave_kp = dave.create_key_package().unwrap();
+        let dave_kp_bytes = lakko_mls::key_package::serialize(&dave_kp).unwrap();
+        let wrapped_dave_kp = wrap_call_kp_forward(&dave_kp_bytes);
+
+        // Alice's polling loop sees the KP-forward (in
+        // production this comes via her stranger-inbox
+        // ContactRequest envelope path; here we feed the
+        // unwrapped plaintext directly to scope this test
+        // to the handover policy, not the HPKE seal).
+        let dispatched_for_alice = dispatch_incoming_envelope(&wrapped_dave_kp).unwrap();
+        let dave_kp_payload = match dispatched_for_alice {
+            IncomingEnvelope::CallKeyPackage(p) => p,
+            other => panic!(
+                "expected CallKeyPackage for Dave's join, got {:?}",
+                core::mem::discriminant(&other),
+            ),
+        };
+
+        // Alice — NOT Bob — runs add_member_from_wire. This
+        // is the load-bearing property the handover test
+        // pins: the committer role transferred to the
+        // owner without an explicit handshake.
+        let alice_addition = alice_group
+            .add_member_from_wire(&alice, dave_kp_payload)
+            .expect("Alice as new committer adds Dave");
+        let alice_commit_bytes = encode_message(&alice_addition.commit).unwrap();
+        let dave_welcome_bytes = encode_message(&alice_addition.welcome).unwrap();
+
+        // Dave joins via the welcome Alice ferried back.
+        let wrapped_welcome_for_dave = wrap_call_welcome(&dave_welcome_bytes);
+        let dispatched_for_dave = dispatch_incoming_envelope(&wrapped_welcome_for_dave).unwrap();
+        let dave_welcome_payload = match dispatched_for_dave {
+            IncomingEnvelope::CallWelcome(p) => p,
+            other => panic!(
+                "expected CallWelcome for Dave, got {:?}",
+                core::mem::discriminant(&other),
+            ),
+        };
+        let dave_group = Group::join_from_welcome(dave_welcome_payload, &dave).unwrap();
+
+        // Charlie processes Alice's commit (broadcast side-
+        // output) so his group view advances.
+        charlie_group
+            .process_incoming(&charlie, &alice_commit_bytes)
+            .unwrap();
+
+        // ---- Phase 4: All three live members (A, C, D) at
+        //                the same post-handover epoch. ----
+        let epoch_after_handover = alice_group.epoch();
+        assert!(
+            epoch_after_handover > epoch_after_leave,
+            "Alice's add-Dave commit must advance the epoch past Bob's leave",
+        );
+        assert_eq!(
+            charlie_group.epoch(),
+            epoch_after_handover,
+            "Charlie must advance after Alice's commit",
+        );
+        assert_eq!(
+            dave_group.epoch(),
+            epoch_after_handover,
+            "Dave's view (post-join) must match Alice + Charlie",
+        );
+
+        // ---- Phase 5: All three derive byte-identical
+        //                CallKey seeds. The handover
+        //                preserved the call_id binding even
+        //                though the committer changed. ---
+        let alice_session = GroupCallSession::create(
+            GroupCallScope::LinkBased,
+            fixture_call_id(),
+            &alice_group,
+            &alice,
+        )
+        .unwrap();
+        let charlie_session = GroupCallSession::create(
+            GroupCallScope::LinkBased,
+            fixture_call_id(),
+            &charlie_group,
+            &charlie,
+        )
+        .unwrap();
+        let dave_session = GroupCallSession::create(
+            GroupCallScope::LinkBased,
+            fixture_call_id(),
+            &dave_group,
+            &dave,
+        )
+        .unwrap();
+
+        assert_eq!(
+            alice_session.call_key().as_bytes(),
+            charlie_session.call_key().as_bytes(),
+            "Alice + Charlie CallKey seeds must agree post-handover",
+        );
+        assert_eq!(
+            charlie_session.call_key().as_bytes(),
+            dave_session.call_key().as_bytes(),
+            "Dave's CallKey seed must agree with Alice + Charlie post-handover",
+        );
+
+        // Bob's old seed from before he left MUST NOT match
+        // the new post-handover seed (forward secrecy across
+        // the leave + add commits — every epoch advances the
+        // exporter output).
+        let bob_session_pre_leave = GroupCallSession::create(
+            GroupCallScope::LinkBased,
+            fixture_call_id(),
+            &bob_group,
+            &bob,
+        )
+        .unwrap();
+        assert_ne!(
+            bob_session_pre_leave.call_key().as_bytes(),
+            alice_session.call_key().as_bytes(),
+            "Bob's pre-leave seed must differ from the post-handover seed (forward secrecy)",
+        );
+    }
 }
