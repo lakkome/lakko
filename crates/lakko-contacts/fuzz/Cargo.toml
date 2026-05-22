@@ -52,3 +52,17 @@ path = "fuzz_targets/call_invite_capability_decode_and_verify.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "invite_capability_decode_and_verify"
+path = "fuzz_targets/invite_capability_decode_and_verify.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "contact_ack_decode_and_verify"
+path = "fuzz_targets/contact_ack_decode_and_verify.rs"
+test = false
+doc = false
+bench = false

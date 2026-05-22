@@ -130,7 +130,9 @@ Current targets:
 - **`lakko-proto/mls_app_payload`** — `mls_app::v1::ApplicationPayload` prost decoder
 - **`lakko-proto/media_call_key`** — `media::v1::CallKeyEpoch` + `CodecCapability` decoders
 - **`lakko-contacts/contact_request_decode_and_verify`** — outermost stranger-inbox parser (signature + HPKE-sealed envelope)
-- **`lakko-contacts/call_invite_capability_decode_and_verify`** — discovery-side capability parser
+- **`lakko-contacts/contact_ack_decode_and_verify`** — ContactAck parser (Bob → Alice reply after accept)
+- **`lakko-contacts/invite_capability_decode_and_verify`** — contact-invite (Phase 1.18) capability parser
+- **`lakko-contacts/call_invite_capability_decode_and_verify`** — call-invite (Phase 3c3) capability parser
 - **`lakko-contacts/call_welcome_unwrap`** — owner-side welcome-envelope domain-separator parser
 - **`lakko-contacts/call_kp_forward_unwrap`** — owner-side KP-forward envelope parser (subsequent joiners)
 - **`lakko-contacts/incoming_envelope_dispatch`** — composite owner-side polling-loop dispatcher
