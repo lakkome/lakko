@@ -380,19 +380,50 @@ deferred to the platform-UI sprint; the cryptographic
 contract is now fully fixed for both halves of the
 multi-party handshake.
 
-Operational impact: V1 1:1 link calls have a **complete
-wire path** — owner composes link → joiner clicks →
-acceptor returns Welcome → joiner wraps + sends
-ContactRequest → owner polls + unwraps + joins. Only
-platform-UI glue remains. Multi-party (3+) link calls
-ALSO now have a **complete wire path** in both
-directions (joiner→committer KP-forward via C-33,
-committer→joiner Welcome via C-32). What remains for
-multi-party V1 is the platform-side wiring of the
-committer's polling loop dispatcher + the
-`Group::add_member_from_wire` call after unwrap, plus
-the eventual owner-handover protocol for when the
-first joiner leaves the call.
+**Owner-handover protocol shipped in 3c3-handover** —
+the committer-leaves scenario now has a pinned policy:
+the capability's `owner_account_id` designates the
+**owner as the primary committer-of-record**. When the
+first joiner disconnects, the owner drives the Remove
+commit for the stale leaf (OpenMLS does not permit
+self-removal via `remove_members`, and a disconnected
+client can't drive `leave_group_via_self_remove`
+anyway). Subsequent KP-forwards then route to the owner
+as the new committer. Across the leave + add commits
+the MLS exporter produces a fresh CallKey seed each
+epoch (forward secrecy assertion). The integration test
+[`link_call_owner_handover_after_committer_leaves`](../../crates/lakko-calls/src/link_invite.rs)
+exercises the full 4-phase sequence (A↔B↔C baseline →
+Alice removes Bob → Dave joins via Alice → all three
+at same post-handover epoch + byte-identical CallKey
+seeds + pre-leave seed differs from post-handover
+seed). See **C-36** in [`calls.md`](./calls.md) for the
+full invariant set.
+
+The owner-handover test surfaced + fixed a load-bearing
+MLS bug: `Group::join_from_welcome` was using
+`MlsGroupJoinConfig::default()` which set
+`use_ratchet_tree_extension = false` on joined groups,
+so a member who joined via Welcome and later committed
+add (the exact owner-handover scenario) produced a
+Welcome that didn't carry the ratchet tree → the new
+joiner failed with `MissingRatchetTree`. The one-line
+fix in `lakko-mls::Group::join_from_welcome` flips the
+flag on, matching the founder's `MlsGroupCreateConfig`,
+so a chain of welcome-then-add-then-welcome propagation
+now survives any number of hops.
+
+Operational impact: V1 1:1 AND multi-party (3+) link
+calls have a **complete protocol-level wire path** in
+all directions including the committer-leaves
+handover. The full cryptographic state machine is
+backed by named integration tests (C-35 happy path,
+C-36 handover path). What remains for V1 is purely
+platform-UI glue: composer view, `/c/<slug>` landing
+page, polling-loop integration with
+`dispatch_incoming_envelope`. The cryptographic
+contracts the UI work depends on are all fixed and
+fuzz-covered.
 
 ### G-22: Per-joiner dedup for call invites lands with multi-use orchestration
 
@@ -426,13 +457,32 @@ joiner don't collide even though the helper is shared —
 asserts this cross-kind salt isolation.
 
 **KP-republish orchestration for multi-joiner calls
-still pending** — even with dedup landed, the call-MLS-
-group bootstrap currently has the first joiner as
-founder + the owner added via the embedded KP. For a
-second joiner to land in the same group, the founder
-needs to forward their KP to the owner (or vice-versa).
-That's a separate signaling-path sprint; the dedup
-half is independent of it and shipped here.
+shipped in 3c3-kp-forward + 3c3-incoming-dispatcher** —
+the second-and-subsequent-joiner path now has a fully
+specified wire chain: joiner wraps a fresh KeyPackage
+via `wrap_call_kp_forward`, ferries it through the
+shared ContactRequest envelope transport to the current
+committer; the committer's polling loop runs
+`dispatch_incoming_envelope` which discriminates among
+welcome / KP-forward / intro-message kinds; on a KP-
+forward hit the committer runs
+`Group::add_member_from_wire(kp)` + commits + wraps the
+resulting Welcome via `wrap_call_welcome` and ferries
+it back to the new joiner. The owner-handover sprint
+(C-36) extended this with the policy for "what happens
+when the original committer leaves" — the owner
+designated in the capability becomes the new
+committer-of-record. The full multi-party + handover
+flow is backed by two named integration tests:
+`link_call_multi_party_e2e_via_kp_forward_envelope`
+(3-party rendezvous) and
+`link_call_owner_handover_after_committer_leaves`
+(committer-leaves + owner takeover). The dedup table
+(this G-22's primary scope) composes with the KP-
+forward chain cleanly: an already-consumed
+`(blob_id, joiner_tag)` short-circuits to the
+"already joined" UI branch without re-bootstrapping
+the MLS group.
 
 ## Out-of-protocol
 
