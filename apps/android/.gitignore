@@ -6,6 +6,11 @@
 build/
 **/build/
 
+# Kotlin compiler daemon session locks + per-build state. The
+# directory is regenerated on every `gradle` invocation and
+# carries machine-local pids / paths — never useful in git.
+.kotlin/
+
 # Local SDK / IDE config — picks up the dev's machine-specific
 # Android SDK path; never committed.
 local.properties
