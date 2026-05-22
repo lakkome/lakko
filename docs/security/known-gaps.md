@@ -266,19 +266,68 @@ inline-encoded.
 contact-invite revoke domain) prevents signature replay
 across the two ecosystems.
 
-**Multi-joiner orchestration still pending** —
-publishing subsequent joiners' KPs back to the owner for
-add-member commits requires a separate "join-pending"
-side table + a notification path from the discovery
-service to the auth-flow on the owner side. Tracked as
-the 3c3-multi-use follow-up sprint.
+**Client-side helper trio shipped in 3c3-client** —
+`uploadCallInvite(capabilityBytes)`,
+`fetchCallInvite(blobId)`,
+`consumeCallInvite(blobId, capabilityBytes,
+joinerAccountId)`, and `revokeCallInvite(blobId,
+signingSeed)` on all three clients
+(`apps/web/src/discovery/client.ts`,
+`apps/ios/Lakko/Discovery/DiscoveryClient.swift`,
+`apps/android/.../discovery/DiscoveryClient.kt`). Wire
+shapes reuse the contact-invite envelopes — the server
+emits byte-identical JSON for both ledgers, only the URL
+path + revoke signature domain separator differ.
+
+**URL plumbing shipped in 3c3-url-helpers** — the
+`<origin>/c/<slug>` URL form + parser on three platforms.
+The byte-count discrimination contract is C-30 in
+[`calls.md`](./calls.md): exactly 32 bytes ⇒ pointer
+(SHA-256 `blob_id`); ≥ 400 bytes ⇒ inline (censored-region
+fallback that skips the server round-trip); anything else
+is rejected as `slugWrongLength`. 25 JUnit cases on Android
+pin the discrimination + the constants-vs-web-side drift
+sentinels (`CALL_INVITE_URL_PREFIX == "/c/"`,
+`CALL_INVITE_BLOB_ID_LEN == 32`,
+`CALL_INVITE_INLINE_MIN_LEN == 400`).
+
+**Composer + acceptor orchestration shipped in
+3c3-{composer,acceptor}-helper** — one-call `composeAndUpload(...)`
+(5 steps: mint `call_id` → mint one-time KP →
+`composeCallInviteCapability` via FFI → `uploadCallInvite`
+via HTTP → build URL) and `acceptFromSlug(...)` (7 steps
+collapsed into an 8-variant discriminated `Result`) on web
+/ iOS / Android. The acceptor's defence-in-depth
+re-verify (`decodeAndVerify` runs locally AFTER the server
+already verified at upload time, so a malicious server
+cannot substitute bytes) and `404 → notFound` folding
+(denies status-code probing of the `blob_id` space) are
+pinned by the C-31 invariant. The acceptor's
+`Result.accepted` exposes the 32-byte `callKeySeed` so UI
+seals the joiner's first SFrame frame before the owner has
+joined — no second FFI round-trip needed.
+
+**Welcome-ferry orchestration still pending** —
+publishing the joiner's MLS Welcome back to the owner (so
+the owner can `Group::join_from_welcome` and enter the
+call group) needs a transport channel. The acceptor
+returns `welcomeForOwner` bytes; the platform is currently
+expected to ferry them out-of-band (stranger-inbox routed
+by `capability.owner_account_id` is the planned path; QR
+paste is the lab fallback). The DS-mailbox extension that
+makes this fully in-band lands in the 3c3-welcome-ferry
+follow-up sprint. Subsequent joiners' KPs (for true
+multi-party link calls, > 2 participants) also need this
+channel — same gap.
 
 Operational impact: V1 link calls work for the 1:1
-"share a link, person clicks, both join the call" UX
-with the now-shipped server-side blob storage acting as
-the durable indirection (URL no longer carries the
-capability bytes). Multi-party link calls still fall
-back to in-chat group calls (`GroupCallScope::InChat`).
+"share a link, person clicks, both join the call" UX once
+the platform wires `welcomeForOwner` ferrying — the
+client-side helpers, URL plumbing, and discriminated
+result variants are all in place. Multi-party link calls
+(3+ participants) still fall back to in-chat group calls
+(`GroupCallScope::InChat`) until the Welcome-ferry +
+KP-republish channels land.
 
 ### G-22: Per-joiner dedup for call invites lands with multi-use orchestration
 

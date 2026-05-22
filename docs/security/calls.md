@@ -674,6 +674,204 @@ plus the three parallel deterministic / distinct / format
 tests in
 [`lakko_contacts::invite::tests::owner_fingerprint_*`](../../crates/lakko-contacts/src/invite.rs).
 
+### C-29: Server-side call-invite ledger handler invariants
+
+The server-side handler module
+[`services/discovery/src/call_invite.rs`](../../services/discovery/src/call_invite.rs)
+exposes four endpoints — `POST /discovery/call-invite`
+(upload), `GET /discovery/call-invite/{blob_id}` (fetch),
+`POST /discovery/call-invite/{blob_id}/consume`, `DELETE
+/discovery/call-invite/{blob_id}` (revoke). Five
+constants-vs-migration drift sentinels and the helper-side
+pure-function contracts are pinned by the
+3c3-server-tests module:
+
+- **`blob_id_for(capability_bytes)`** is plain SHA-256
+  (no domain separator) — deterministic, length-32,
+  collision-resistant under SHA-256's security argument.
+  The cross-table FK CASCADE on
+  `call_invite_consumers.blob_id` reaps dedup rows when the
+  parent row is deleted; the lack of a domain separator on
+  the id is allowed because the dedup tables are
+  partitioned by table, not by id-namespace.
+- **`MAX_CAPABILITY_BYTES = 8192`** matches the
+  `VARBINARY(8192)` width in
+  [`0007_call_invites.sql`](../../services/discovery/migrations/0007_call_invites.sql).
+  The 3c3 wire format tops out around 4308 bytes with a
+  4 KiB embedded KP; the ~2× headroom covers future
+  schema extensions (e.g. a `transparency_proof`
+  parallel to the ADR-0005 plan).
+- **`MAX_USES_UNLIMITED = u32::MAX`** is the
+  unlimited-budget sentinel the SQL CASE expression in
+  `consume` binds directly into the atomic UPDATE.
+  Constant drift would silently change unlimited-budget
+  semantics.
+- **`within_replay_window`** is symmetric across
+  `±CALL_REVOKE_REPLAY_WINDOW_MS = 10 min` with inclusive
+  boundaries, and `saturating_sub` semantics on small
+  `now_ms` so an early-boot revoke signed against an
+  almost-zero clock still folds into the lower bound.
+- **`decode_and_verify` server-side round-trip** — the
+  upload handler's signature gate is exercised end-to-end
+  through `lakko_contacts::call_invite::compose` → handler-
+  level `decode_and_verify` → trailing-byte tamper
+  rejection. A future change to `lakko-contacts` that
+  loosens signature checking would surface here, not just
+  on the client side.
+
+Tests: 10 cases in
+[`services::discovery::call_invite::tests`](../../services/discovery/src/call_invite.rs)
+— `blob_id_is_sha256_of_capability_bytes`,
+`same_bytes_yield_same_blob_id`,
+`different_bytes_yield_different_blob_id`,
+`blob_id_layout_is_plain_sha256_no_domain_separator`,
+`max_capability_bytes_matches_column_width`,
+`blob_id_len_matches_column_width`,
+`call_invites_migration_indexes`,
+`call_invite_consumers_migration_shape`,
+`max_uses_unlimited_matches_u32_max`,
+`within_replay_window_is_symmetric`,
+`within_replay_window_saturates_on_small_now`,
+`server_side_decode_and_verify_round_trip`.
+lakko-svc-discovery test count: 28 → 38.
+
+### C-30: `/c/<slug>` URL plumbing — discrimination contract
+
+The owner-shared URL has the shape
+`<origin>/c/<base64url>`. The joiner-side dispatcher
+discriminates pointer (server-backed) vs. inline (censored-
+region fallback) by **decoded byte count**:
+
+- exactly 32 bytes ⇒ pointer (SHA-256 `blob_id`); joiner
+  fetches the capability via
+  `DiscoveryClient.fetchCallInvite(blobId)` →
+  `decodeAndVerify` → `consumeCallInvite`.
+- ≥ 400 bytes ⇒ inline; joiner runs
+  `decodeAndVerify` directly on the URL bytes, no server
+  round-trip. The 400-byte floor is below the 3c3 wire-
+  format minimum with a 256-byte KP (~500 bytes) but above
+  the 32-byte pointer ceiling; the gap is wide enough that
+  no legal 3c3 wire-format payload can be mistaken for a
+  pointer.
+- anything else (e.g. 100 bytes) is **invalid input** —
+  the parser rejects with a typed `slugWrongLength` error
+  the UI surfaces as "this link is corrupted".
+
+The `/c/` path prefix contrasts with contact-invite's
+`/i/` so the platform-level deep-link dispatcher (web
+router / iOS universal-link / Android intent filter)
+branches on the path segment without parsing the slug.
+
+Tests (parity across web typecheck-gate + Android JUnit;
+iOS XCTest infra not yet wired): 25 JUnit cases in
+[`apps/android/.../calls/CallInviteUrlTest.kt`](../../apps/android/app/src/test/kotlin/me/lakko/app/calls/CallInviteUrlTest.kt)
+cover pointer-URL round-trip, inline-URL round-trip,
+`parseCallInviteSlug` discrimination (pointer / inline /
+dead-zone / malformed base64), form-side enum wire-value
+sentinels, human-visible renderer sentinel branches, and
+the constants-vs-web-side drift sentinels
+(`CALL_INVITE_URL_PREFIX == "/c/"`,
+`CALL_INVITE_BLOB_ID_LEN == 32`,
+`CALL_INVITE_LABEL_MAX_LEN == 64`,
+`CALL_INVITE_INLINE_MIN_LEN == 400`).
+
+### C-31: Composer + acceptor pipelines — single-call surface contract
+
+Phase 3c3-{composer,acceptor}-helper exposes a
+single-call API on each client for the two ends of the
+link-based call-invite flow. The pipelines collapse 5–7
+discrete steps each into one async call so the UI can
+branch on the discriminated result without re-implementing
+the dispatch — and so a future security regression in any
+step surfaces in a tight, named property test rather than
+as a silent UX issue.
+
+**Composer (owner side, 5 steps)**:
+
+1. Mint a fresh 16-byte random `call_id` via the
+   platform CSPRNG (`crypto.getRandomValues` on web,
+   `SecRandomCopyBytes` on iOS, `SecureRandom` on Android).
+2. Mint a one-time MLS `KeyPackage` via
+   `identity.createKeyPackage()`. The capability embeds it;
+   the joiner consumes it to bootstrap a fresh call MLS
+   group.
+3. `composeCallInviteCapability(...)` via FFI — produces
+   wire bytes Ed25519-signed under the owner's identity
+   key.
+4. `DiscoveryClient.uploadCallInvite(capabilityBytes)` —
+   the server verifies the signature server-side
+   (defence-in-depth against a buggy client) and content-
+   addresses by SHA-256.
+5. Build the `<origin>/c/<slug>` URL via
+   `composePointerCallInviteUrl(blobId)`.
+
+Output (identical across the three platforms):
+`{ blobId, url, callId, capabilityBytes }`. Each field is
+independent — UI typically surfaces `url` in the share
+sheet, persists `blobId` for the future revoke flow, and
+keeps `callId` around so a subsequent call-admission JWT
+mint (C-15..C-23) binds to the same id.
+
+**Acceptor (joiner side, 7 steps + 8 result variants)**:
+
+1. `parseCallInviteSlug(slug)` discriminates pointer vs.
+   inline per C-30.
+2. (pointer branch) `DiscoveryClient.fetchCallInvite(blobId)`
+   — bytes or 404.
+3. `CallInviteCapability.decodeAndVerify(bytes)` — local
+   Ed25519 signature check. This re-runs the same verify
+   the upload handler already executed; defence-in-depth
+   against a malicious server serving substituted bytes.
+4. `capability.isValidNow(nowMs)` — expiry filter.
+5. (pointer branch)
+   `DiscoveryClient.consumeCallInvite(blobId,
+   capabilityBytes, joinerAccountId)` — atomic counter
+   bump + per-joiner dedup via the `joiner_tag`.
+6. `acceptCallInvite(capability, joinerIdentity)` — MLS
+   bootstrap (joiner founds group + owner added via the
+   embedded KP).
+7. Return the eight-variant `Result` to the UI.
+
+Behavioural invariants the acceptor pins (parity on three
+platforms):
+
+- **Local re-verify defence**: `decodeAndVerify` runs
+  AFTER the server already verified at upload time. A
+  malicious server cannot serve substituted bytes — the
+  joiner-side verify catches the tamper before `consume`
+  / `accept`. Surfaces as `signatureFailure` variant.
+- **404 folding**: a `DiscoveryHttpError(404)` from
+  `fetchCallInvite` collapses into the `notFound` variant
+  — the joiner cannot distinguish "never-issued" from
+  "revoked" from "expired". This is by design and denies
+  status-code probing of the `blob_id` space.
+- **`alreadyJoined` short-circuit**: when the server's
+  per-joiner dedup table already has a `(blob_id,
+  joiner_tag)` row (joiner clicked the link twice), the
+  acceptor returns `alreadyJoined` without re-bootstrapping
+  the MLS group — the UI opens the existing call group
+  instead of minting a fresh one (which would create a
+  duplicate Welcome the owner couldn't sensibly resolve).
+- **Inline-fallback skips fetch + consume**: an inline
+  slug has no server-side row to bump; the acceptor
+  surfaces this asymmetry as `accepted` with
+  `capabilityBytes` populated but `welcomeForOwner` still
+  requiring out-of-band ferrying.
+- **`callKeySeed` exposed in the result**: 32-byte SFrame
+  seed surfaced directly so the UI can seal the joiner's
+  first frame via `sframeDeriveParticipantKey(seed, leaf)`
+  before the owner has joined — no second FFI round-trip
+  needed.
+
+Tests: typecheck gates (web `npx tsc --noEmit`, Android
+`./gradlew :app:compileDebugKotlin` in CI, iOS `xcodebuild`
+in CI) cover the structural correctness; the discriminated
+`Result` variants are pinned by their pattern-match
+exhaustiveness in the platform code. End-to-end Rust-side
+coverage of the joiner-side MLS bootstrap lives in
+[`lakko_calls::link_invite::tests::accept_invite_round_trips_via_welcome`](../../crates/lakko-calls/src/link_invite.rs)
+and the three sibling integration tests.
+
 ## Exporter labels (call-side)
 
 | Label | Length | Context | Source | Used for |
