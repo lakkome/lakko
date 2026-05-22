@@ -188,7 +188,7 @@ impl core::fmt::Display for CallWelcomeError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::TruncatedPayload { min, got } => {
-                write!(f, "call-welcome payload is {got} bytes, minimum is {min}",)
+                write!(f, "call-welcome payload is {got} bytes, minimum is {min}")
             },
         }
     }

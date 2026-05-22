@@ -972,6 +972,99 @@ pin). Negative paths on the wasm side stay UniFFI-only
 because `JsError::new` panics on the native target the
 `cargo test` harness runs on.
 
+### C-33: Call KeyPackage-forward envelope for subsequent joiners
+
+Multi-party (3+ participant) link calls need a way for
+**subsequent** joiners (the 3rd, 4th, … participants in a
+group call) to enter an already-established call MLS
+group. The first joiner founds the group + adds the owner
+via the embedded KP (see C-26); subsequent joiners cannot
+repeat that flow without creating disjoint MLS groups that
+share a `CallKey` seed but not an epoch — splitting the
+call.
+
+The correct flow flips the topology: the subsequent joiner
+ferries its own fresh `KeyPackage` to the call group's
+current committer (the first joiner — owner handover lands
+later), who runs an MLS `Add` proposal + commit and
+ferries a Welcome back via C-32. This invariant pins the
+**joiner→committer** half of that handshake; the
+**committer→joiner** half reuses C-32 unchanged.
+
+The KP-forward envelope is a sibling of the call-welcome
+envelope from C-32 — same outer transport
+(`ContactRequest` HPKE-sealed to the committer's identity
+key + routed via the committer's stranger inbox), same
+three pinned contracts (confidentiality, authenticity,
+anti-abuse), only the inner domain separator differs:
+
+```text
+plaintext_payload = CALL_KP_FORWARD_ENVELOPE_DOMAIN_V1 || kp_bytes
+                   └────── 25 bytes, ASCII ──────┘
+                   "lakko/call-keypackage/v1\x00"
+```
+
+Constants + helpers in
+[`lakko_contacts::call_kp_forward`](../../crates/lakko-contacts/src/call_kp_forward.rs):
+
+- **`CALL_KP_FORWARD_ENVELOPE_DOMAIN_V1`** — 25 bytes,
+  trailing `\x00` makes the prefix
+  UTF-8-text-prefix-impossible. Length is intentionally
+  distinct from the 22-byte
+  `CALL_WELCOME_ENVELOPE_DOMAIN_V1` as a defence-in-depth
+  cue, though the actual dispatch is a byte-prefix match.
+- **`CALL_KP_FORWARD_MIN_PAYLOAD_LEN = 256`** — floor for
+  the truncation check. OpenMLS KPs are 400–1024 bytes
+  depending on credential + signature size; 256 is well
+  below the practical minimum, so a truncated payload
+  surfaces as a typed error rather than a confused
+  `Some(too_short_kp)` that the MLS layer would later
+  reject opaquely.
+- **`wrap_call_kp_forward(kp_bytes)`** — infallible
+  byte-for-byte prefix + payload concatenation.
+- **`try_unwrap_call_kp_forward(plaintext)`** — three-way
+  discriminator with the same shape as
+  `try_unwrap_call_welcome` (reuses
+  [`CallWelcomeError`](../../crates/lakko-contacts/src/call_welcome.rs)
+  to keep the FFI surface compact — both envelopes have a
+  single failure mode).
+
+**No-cross-dispatch guarantee** (the strongest invariant
+this module pins): a wrapped call-welcome envelope MUST
+surface as `None` (NOT `Some(welcome_bytes_misparsed_as_kp)`)
+when fed to `try_unwrap_call_kp_forward`, and vice versa.
+The
+[`welcome_and_kp_forward_round_trips_do_not_cross_dispatch`](../../crates/lakko-contacts/src/call_kp_forward.rs)
+test asserts this in both directions. The owner-side
+polling loop's dispatch order (welcome first, KP-forward
+second, intro-message fallthrough last) is therefore
+unambiguous — no payload can match two branches at once.
+
+Tests (10 cases in
+[`lakko_contacts::call_kp_forward::tests`](../../crates/lakko-contacts/src/call_kp_forward.rs)):
+`wrap_then_unwrap_round_trips`,
+`unwrap_returns_none_for_intro_message_plaintext`,
+`unwrap_returns_none_for_call_welcome_envelope`,
+`unwrap_rejects_truncated_payload`,
+`unwrap_accepts_exactly_min_payload_len`,
+`empty_plaintext_returns_none_not_error`,
+`domain_separator_is_25_bytes_and_ends_with_null`,
+`separator_distinct_from_sibling_domains`,
+`wrap_preserves_arbitrary_kp_bytes_verbatim`,
+`welcome_and_kp_forward_round_trips_do_not_cross_dispatch`.
+lakko-contacts test count: 107 → 117.
+
+FFI exposure: wasm-bindgen
+`wrapCallKeyPackage(kpBytes)` /
+`tryUnwrapCallKeyPackage(plaintext)` /
+`callKeyPackageMinPayloadLen()`; UniFFI
+`wrap_call_keypackage(kp_bytes)` /
+`try_unwrap_call_keypackage(plaintext)` /
+`call_keypackage_min_payload_len()`. lakko-ffi-uniffi test
+count: 71 → 76 (5 new cases — round-trip, intro-message
+fallthrough, cross-dispatch guard from welcome envelope,
+truncated-payload rejection, floor-constant pin).
+
 ## Exporter labels (call-side)
 
 | Label | Length | Context | Source | Used for |

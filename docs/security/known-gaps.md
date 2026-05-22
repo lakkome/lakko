@@ -353,25 +353,46 @@ Welcome lands. This is straightforward glue work
 deferred to the platform-UI sprint; the cryptographic
 contract it depends on is fixed.
 
-**Subsequent-joiner KP forwarding (multi-party, 3+
-participants) still pending** — the same envelope
-transport works recipe-wise (wrap the joiner's KP under
-a sibling domain separator like
-`lakko/call-keypackage/v1`, ferry via the same
-ContactRequest path), but a separate sprint owns the new
-domain constant + the helper trio + the owner-side
-add-member commit. Tracked as the 3c3-multi-use
-follow-up.
+**Subsequent-joiner KP-forward wire path shipped in
+3c3-kp-forward** — sibling envelope of call-welcome,
+under a distinct domain separator
+`CALL_KP_FORWARD_ENVELOPE_DOMAIN_V1 = b"lakko/call-keypackage/v1\x00"`.
+Subsequent joiners wrap their fresh `KeyPackage` via
+[`wrap_call_kp_forward`](../../crates/lakko-contacts/src/call_kp_forward.rs)
+and ferry it through the same `ContactRequest` envelope
+transport to the call group's current committer. The
+committer's polling loop dispatches in order:
+`try_unwrap_call_welcome` → `try_unwrap_call_kp_forward` →
+intro-message fallthrough. The no-cross-dispatch property
+([`welcome_and_kp_forward_round_trips_do_not_cross_dispatch`](../../crates/lakko-contacts/src/call_kp_forward.rs))
+guarantees no payload can match two branches at once. See
+**C-33** in [`calls.md`](./calls.md) for the full
+invariant set + 10 + 5 tests.
 
-Operational impact: V1 1:1 link calls now have a
-**complete wire path** — owner composes link → joiner
-clicks → acceptor returns Welcome → joiner wraps + sends
+**Owner-side add-member orchestration still pending** —
+the committer reads the unwrapped KP and runs MLS
+`Group::add_member_from_wire(kp_bytes)` + commits, then
+ferries the resulting Welcome back to the subsequent
+joiner via [`wrap_call_welcome`](../../crates/lakko-contacts/src/call_welcome.rs)
+(same C-32 envelope). The MLS operations + the platform-
+side polling-loop wiring is straightforward glue
+deferred to the platform-UI sprint; the cryptographic
+contract is now fully fixed for both halves of the
+multi-party handshake.
+
+Operational impact: V1 1:1 link calls have a **complete
+wire path** — owner composes link → joiner clicks →
+acceptor returns Welcome → joiner wraps + sends
 ContactRequest → owner polls + unwraps + joins. Only
 platform-UI glue remains. Multi-party (3+) link calls
-still fall back to in-chat group calls
-(`GroupCallScope::InChat`) until the
-`lakko/call-keypackage/v1` envelope and the owner-side
-add-member fanout land.
+ALSO now have a **complete wire path** in both
+directions (joiner→committer KP-forward via C-33,
+committer→joiner Welcome via C-32). What remains for
+multi-party V1 is the platform-side wiring of the
+committer's polling loop dispatcher + the
+`Group::add_member_from_wire` call after unwrap, plus
+the eventual owner-handover protocol for when the
+first joiner leaves the call.
 
 ### G-22: Per-joiner dedup for call invites lands with multi-use orchestration
 

@@ -34,6 +34,10 @@ use lakko_contacts::call_invite::{
     decode_and_verify as rust_call_invite_decode, CallInviteCapability as RustCallInviteCapability,
     CallInviteMedia as RustCallInviteMedia, CALL_ID_LEN, MAX_KEY_PACKAGE_LEN,
 };
+use lakko_contacts::call_kp_forward::{
+    try_unwrap_call_kp_forward as rust_try_unwrap_call_kp_forward,
+    wrap_call_kp_forward as rust_wrap_call_kp_forward, CALL_KP_FORWARD_MIN_PAYLOAD_LEN,
+};
 use lakko_contacts::call_welcome::{
     try_unwrap_call_welcome as rust_try_unwrap_call_welcome,
     wrap_call_welcome as rust_wrap_call_welcome, CallWelcomeError, CALL_WELCOME_MIN_PAYLOAD_LEN,
@@ -1193,6 +1197,75 @@ pub fn call_welcome_min_payload_len() -> u32 {
     u32::try_from(CALL_WELCOME_MIN_PAYLOAD_LEN).unwrap_or(u32::MAX)
 }
 
+// ===========================================================================
+// Call-KP-Forward envelope — Phase 3c3-kp-forward
+// (subsequent-joiner KeyPackage transport for multi-party calls)
+// ===========================================================================
+
+/// Wrap a fresh MLS KeyPackage in the call-KP-forward
+/// envelope's domain separator (Phase 3c3-kp-forward).
+///
+/// Sibling of [`wrap_call_welcome`] for the subsequent-
+/// joiner (3rd, 4th, … participant) branch of multi-party
+/// link calls. The joiner hands the output to
+/// `contact_request_compose` as the `intro_message`
+/// argument; the existing HPKE-seal + stranger-inbox
+/// transport carries the wrapped KP to the call group's
+/// current committer.
+///
+/// See [`lakko_contacts::call_kp_forward`] for the threat-
+/// model rationale.
+///
+/// # Errors
+///
+/// Infallible — returns `Ok` unconditionally for shape
+/// symmetry with [`try_unwrap_call_kp_forward`].
+#[uniffi::export]
+#[must_use]
+pub fn wrap_call_keypackage(kp_bytes: Vec<u8>) -> Vec<u8> {
+    rust_wrap_call_kp_forward(&kp_bytes)
+}
+
+/// Try to unwrap a call-KP-forward envelope from a HPKE-
+/// decrypted plaintext (Phase 3c3-kp-forward).
+///
+/// Returns:
+///   * `Ok(Some(kp_bytes))` — `plaintext` started with the
+///     call-KP-forward domain separator AND the trailing
+///     payload is at least `CALL_KP_FORWARD_MIN_PAYLOAD_LEN`
+///     bytes. Caller drives `Group::add_member_from_wire(payload)`
+///     against the call group and ferries the resulting
+///     Welcome back via [`wrap_call_welcome`].
+///   * `Ok(None)` — `plaintext` is not a KP-forward
+///     envelope; caller falls through to
+///     [`try_unwrap_call_welcome`] and then to the intro-
+///     message rendering path.
+///
+/// # Errors
+///
+/// * [`FfiError::Contacts`] ONLY when the domain separator
+///   matched but the payload is truncated.
+#[uniffi::export]
+pub fn try_unwrap_call_keypackage(plaintext: Vec<u8>) -> Result<Option<Vec<u8>>, FfiError> {
+    match rust_try_unwrap_call_kp_forward(&plaintext) {
+        Ok(Some(payload)) => Ok(Some(payload.to_vec())),
+        Ok(None) => Ok(None),
+        Err(CallWelcomeError::TruncatedPayload { min, got }) => Err(FfiError::Contacts(format!(
+            "call-KP-forward payload is {got} bytes, minimum is {min}",
+        ))),
+    }
+}
+
+/// Floor constant the platform code keeps for its own
+/// pre-FFI sanity check (`kp.size >=
+/// callKeyPackageMinPayloadLen()` before calling
+/// `wrapCallKeyPackage`).
+#[uniffi::export]
+#[must_use]
+pub fn call_keypackage_min_payload_len() -> u32 {
+    u32::try_from(CALL_KP_FORWARD_MIN_PAYLOAD_LEN).unwrap_or(u32::MAX)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1661,5 +1734,60 @@ mod tests {
     #[test]
     fn call_welcome_min_payload_len_matches_rust_constant() {
         assert_eq!(call_welcome_min_payload_len() as usize, 32);
+    }
+
+    // -------------------------------------------------------------------
+    // Call-KP-Forward envelope (3c3-kp-forward)
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn call_kp_forward_wrap_then_unwrap_round_trips() {
+        let kp = vec![0xCDu8; 512];
+        let wrapped = wrap_call_keypackage(kp.clone());
+        let unwrapped = try_unwrap_call_keypackage(wrapped)
+            .expect("unwrap should not error")
+            .expect("Some(kp) expected");
+        assert_eq!(unwrapped, kp);
+    }
+
+    #[test]
+    fn call_kp_forward_unwrap_returns_none_for_intro_message() {
+        let intro = b"hi alice it is bob".to_vec();
+        let result = try_unwrap_call_keypackage(intro).expect("unwrap should not error");
+        assert!(result.is_none(), "intro message must surface as None");
+    }
+
+    #[test]
+    fn call_kp_forward_unwrap_returns_none_for_welcome_envelope() {
+        // Cross-dispatch guard: a call-welcome envelope MUST
+        // NOT decode as a KP-forward when fed to the wrong
+        // unwrap helper.
+        let welcome = vec![0xABu8; 256];
+        let wrapped_welcome = wrap_call_welcome(welcome);
+        let result = try_unwrap_call_keypackage(wrapped_welcome).expect("unwrap should not error");
+        assert!(
+            result.is_none(),
+            "call-welcome must NOT cross-dispatch as KP-forward",
+        );
+    }
+
+    #[test]
+    fn call_kp_forward_unwrap_rejects_truncated_payload() {
+        // Prefix matches but trailing bytes < 256-byte floor.
+        let mut wrapped = Vec::new();
+        wrapped.extend_from_slice(b"lakko/call-keypackage/v1\x00");
+        wrapped.extend_from_slice(&[0u8; 100]); // 100 < 256
+        match try_unwrap_call_keypackage(wrapped) {
+            Err(FfiError::Contacts(msg)) => {
+                assert!(msg.contains("100") && msg.contains("256"));
+            },
+            Err(other) => panic!("expected Contacts error, got {other:?}"),
+            Ok(_) => panic!("truncated payload must surface as Err"),
+        }
+    }
+
+    #[test]
+    fn call_kp_forward_min_payload_len_matches_rust_constant() {
+        assert_eq!(call_keypackage_min_payload_len() as usize, 256);
     }
 }

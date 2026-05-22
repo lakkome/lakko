@@ -10,6 +10,10 @@ use lakko_contacts::call_invite::{
     decode_and_verify as rust_call_invite_decode, CallInviteCapability as RustCallInviteCapability,
     CallInviteMedia as RustCallInviteMedia, CALL_ID_LEN, MAX_KEY_PACKAGE_LEN,
 };
+use lakko_contacts::call_kp_forward::{
+    try_unwrap_call_kp_forward as rust_try_unwrap_call_kp_forward,
+    wrap_call_kp_forward as rust_wrap_call_kp_forward, CALL_KP_FORWARD_MIN_PAYLOAD_LEN,
+};
 use lakko_contacts::call_welcome::{
     try_unwrap_call_welcome as rust_try_unwrap_call_welcome,
     wrap_call_welcome as rust_wrap_call_welcome, CallWelcomeError, CALL_WELCOME_MIN_PAYLOAD_LEN,
@@ -1029,6 +1033,72 @@ pub fn try_unwrap_call_welcome(plaintext: &[u8]) -> Result<Option<Vec<u8>>, JsEr
 #[must_use]
 pub fn call_welcome_min_payload_len() -> usize {
     CALL_WELCOME_MIN_PAYLOAD_LEN
+}
+
+// ============================================================================
+// Call-KP-Forward envelope — Phase 3c3-kp-forward
+// (subsequent-joiner KeyPackage transport for multi-party calls)
+// ============================================================================
+
+/// Wrap a fresh MLS KeyPackage in the call-KP-forward
+/// envelope's domain separator (Phase 3c3-kp-forward).
+///
+/// The subsequent joiner (3rd, 4th, … participant in a
+/// multi-party link call) hands the output to
+/// `ContactRequest.compose` as the intro-message argument;
+/// the existing HPKE-seal + stranger-inbox transport carries
+/// the wrapped KP to the call group's current committer, who
+/// runs an MLS Add proposal + commit and ferries a Welcome
+/// back via `wrapCallWelcome`.
+///
+/// See [`lakko_contacts::call_kp_forward`] for the
+/// threat-model rationale (reuse the contact-invite envelope
+/// confidentiality + authenticity + anti-abuse contracts;
+/// sibling of `wrapCallWelcome`).
+#[wasm_bindgen(js_name = wrapCallKeyPackage)]
+#[must_use]
+pub fn wrap_call_keypackage(kp_bytes: &[u8]) -> Vec<u8> {
+    rust_wrap_call_kp_forward(kp_bytes)
+}
+
+/// Try to unwrap a call-KP-forward envelope from a HPKE-
+/// decrypted plaintext (Phase 3c3-kp-forward).
+///
+/// Returns:
+///   * `Uint8Array` — `plaintext` started with the
+///     call-KP-forward domain separator AND the trailing
+///     payload is at least `CALL_KP_FORWARD_MIN_PAYLOAD_LEN`
+///     bytes long. Caller drives `Group::add_member_from_wire(payload)`
+///     against the call group and ferries the resulting
+///     Welcome back via `wrapCallWelcome`.
+///   * `null` — `plaintext` is not a KP-forward envelope;
+///     caller falls through to `tryUnwrapCallWelcome` and
+///     then to the intro-message rendering path.
+///
+/// # Errors
+///
+/// `JsError` ONLY when the domain separator matched but the
+/// payload is truncated (a malformed / hostile envelope;
+/// log + drop on the caller side).
+#[wasm_bindgen(js_name = tryUnwrapCallKeyPackage)]
+pub fn try_unwrap_call_keypackage(plaintext: &[u8]) -> Result<Option<Vec<u8>>, JsError> {
+    match rust_try_unwrap_call_kp_forward(plaintext) {
+        Ok(Some(payload)) => Ok(Some(payload.to_vec())),
+        Ok(None) => Ok(None),
+        Err(CallWelcomeError::TruncatedPayload { min, got }) => Err(JsError::new(&format!(
+            "call-KP-forward payload is {got} bytes, minimum is {min}",
+        ))),
+    }
+}
+
+/// Re-export the floor constant so platform code can keep
+/// its own size sanity-check (`kp.length >=
+/// CALL_KP_FORWARD_MIN_PAYLOAD_LEN` before calling
+/// `wrapCallKeyPackage`).
+#[wasm_bindgen(js_name = callKeyPackageMinPayloadLen)]
+#[must_use]
+pub fn call_keypackage_min_payload_len() -> usize {
+    CALL_KP_FORWARD_MIN_PAYLOAD_LEN
 }
 
 // Tests cover only happy paths — error paths invoke `JsError::new`,
