@@ -455,3 +455,150 @@ plumbing only.
 
 MLS suites pin classical curves today. PQ migration
 follows the WG.
+
+## Dependency advisories
+
+The `cargo audit` baseline (RustSec advisory DB) surfaces
+two open vulnerabilities + three unmaintained-crate
+warnings in the workspace's transitive dependency tree.
+None are in code we control; remediation depends on
+upstream releases. Each entry below lists severity,
+reachability analysis, and the upstream tracker the fix
+is gated on.
+
+### G-23: `libcrux-chacha20poly1305 0.0.7` — RUSTSEC-2026-0124 (HIGH 8.2)
+
+> Potential Panic on Overlong Ciphertext Buffer.
+> Upgrade to >= 0.0.8.
+
+Transitive dependency chain:
+`libcrux-chacha20poly1305 0.0.7 → libcrux-aead 0.0.7 →
+hpke-rs-libcrux 0.6.1 → hpke-rs 0.6.1 →
+openmls_rust_crypto 0.5.1 → lakko-mls`.
+
+**Why we can't just bump it.** The fix in 0.0.8 ships with
+breaking internal dependency changes (`rand ^0.10` from
+`^0.9`, `libcrux-traits =0.0.7` from `=0.0.6`); a
+`[patch.crates-io]` override that pins
+`libcrux-chacha20poly1305 = 0.0.8` breaks the
+`libcrux-aead 0.0.7` we still depend on. The cleanest fix
+is upstream `hpke-rs-libcrux` cutting a release that
+bumps to `libcrux-aead 0.0.8` — tracked by
+[cryspen/hpke-rs](https://github.com/cryspen/hpke-rs)
+issues.
+
+**Reachability.** The vulnerable code path is HPKE
+seal/open inside OpenMLS. Every byte that reaches
+`libcrux-chacha20poly1305::decrypt` first passes through
+OpenMLS's `MlsMessageIn` parser (length-bounded by the
+TLS-codec spec — `lakko-mls-fuzz/mls_message` fuzz target
+exercises this surface) and the HPKE-RS wrapper's own
+length checks. We have not been able to construct an
+input that reaches the panic via the OpenMLS public API.
+The risk in practice is bounded to a per-request DoS on
+the calling service (services run with `RUST_BACKTRACE=1`
++ tokio's panic-catching at the request boundary, so a
+panic in one handler does NOT down the whole process).
+
+**Mitigation pending upstream**: client-side
+ContactRequest envelope inputs are gated by a
+session-token rate limit + PoW + Privacy Pass before
+they reach the OpenMLS parser. An attacker would need
+to burn one PoW solve per crash attempt and tie a
+session token — high enough cost that this isn't a
+realistic DoS path even if reachable.
+
+**Status**: accepted risk pending upstream
+`hpke-rs-libcrux` release. Re-audit every sprint and
+upgrade as soon as a compatible version lands.
+
+### G-24: `rsa 0.9.10` — RUSTSEC-2023-0071 (MEDIUM 5.9) — Marvin Attack
+
+> Potential key recovery through timing sidechannels.
+> No fixed upgrade is available.
+
+Transitive dependency: `rsa 0.9.10 → sqlx-mysql 0.8.6 →
+sqlx → all `services/*`.
+
+**Why this is structural, not negligence.** The `rsa`
+crate is the only pure-Rust RSA implementation that
+compiles on every target sqlx supports; the Marvin-attack
+mitigation requires constant-time arithmetic that the
+crate maintainers explicitly call out as "we will not
+land this in the current codebase." The upstream
+position is "use a different RSA library if you need
+side-channel resistance" — `sqlx-mysql` would have to
+swap implementations, which it has not.
+
+**Reachability.** `rsa` is reached **only** via MySQL
+native-auth handshake when the server's
+`mysql_native_password` authentication method requires
+RSA-OAEP padding to encrypt the client password (server-
+side `caching_sha2_password` cache miss path). Lakko
+configures MariaDB with `caching_sha2_password` ONLY,
+and the warm-cache hit path uses SHA-2 without RSA. The
+RSA path is reached only on first-time connect from a
+client whose password hasn't been cached server-side.
+**The application never sees user passwords directly**:
+authentication runs OPAQUE-PAKE (`services/auth`), which
+the database connection layer is downstream of — the
+MySQL connection password is the **service's** own DB
+password (configured in `/etc/lakko/lakko.env`), not a
+user's. A successful timing attack on this RSA exchange
+would leak the service's MySQL connection password to an
+attacker who already has network access to MySQL itself
+— at which point the attacker has direct DB access and
+the RSA leak is the wrong attack to spend a Marvin
+side-channel on.
+
+**Mitigation**: production MariaDB binds only to the
+internal loopback / VPC interface; only the Lakko
+services reach it. An attacker who can mount a timing
+side-channel on this internal hop has already broken
+the perimeter.
+
+**Status**: accepted risk pending upstream `sqlx-mysql`
+swapping to a constant-time RSA crate (no tracker —
+upstream position is "no fix coming"). Re-audit if MySQL
+auth surface changes.
+
+### G-25: Three unmaintained-crate warnings
+
+The same `cargo audit` baseline flags three
+unmaintained-crate advisories. None are vulnerabilities
+— maintainers have wound down support, but the code
+itself works. All are transitive dependencies pinned by
+the upstream tooling we depend on; remediation requires
+upstream replacing them.
+
+- **`bincode 1.3.3`** (RUSTSEC-2025-0141) — under
+  `uniffi_macros 0.28.3 → uniffi 0.28.3`. Used at build
+  time to serialise UDL → macro outputs. Runtime impact:
+  none. Tracker: `mozilla/uniffi-rs` planning a 0.29
+  release that switches to `bincode 2.x`.
+
+- **`instant 0.1.13`** (RUSTSEC-2024-0384) — under
+  `parking_lot_core 0.8.6 → parking_lot 0.11.2 →
+  fluvio-wasm-timer 0.2.5 → openmls 0.8.1`. WASM-only
+  timer abstraction. Runtime impact: low — only the
+  WASM target compiles this. Tracker: openmls 0.9
+  drops fluvio-wasm-timer for `web-time`.
+
+- **`paste 1.0.15`** (RUSTSEC-2024-0436) — under
+  `uniffi_core 0.28.3 → uniffi 0.28.3`. Compile-time
+  macro helper. Runtime impact: none. Tracker: the
+  `dtolnay/paste` archival happened mid-uniffi-0.28
+  cycle; uniffi 0.29 is planning to drop the dep.
+
+**Status**: accepted upstream debt. CI is configured to
+warn (not fail) on unmaintained-crate advisories so
+they remain visible without blocking releases.
+
+**Cumulative posture**: zero vulnerabilities in Lakko-
+authored code; two open advisories in transitive deps,
+both with reachability analysis above; three
+unmaintained-crate warnings pending upstream
+remediation. The `cargo audit` baseline is captured
+here as of `2026-05-21` and is re-run on every CI
+build; new findings either get a G-entry of their own
+or are remediated as the upstream chain catches up.
