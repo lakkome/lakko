@@ -1225,7 +1225,7 @@ pub fn call_welcome_min_payload_len() -> u32 {
 /// symmetry with [`try_unwrap_call_kp_forward`].
 #[uniffi::export]
 #[must_use]
-pub fn wrap_call_keypackage(kp_bytes: Vec<u8>) -> Vec<u8> {
+pub fn wrap_call_key_package(kp_bytes: Vec<u8>) -> Vec<u8> {
     rust_wrap_call_kp_forward(&kp_bytes)
 }
 
@@ -1249,7 +1249,7 @@ pub fn wrap_call_keypackage(kp_bytes: Vec<u8>) -> Vec<u8> {
 /// * [`FfiError::Contacts`] ONLY when the domain separator
 ///   matched but the payload is truncated.
 #[uniffi::export]
-pub fn try_unwrap_call_keypackage(plaintext: Vec<u8>) -> Result<Option<Vec<u8>>, FfiError> {
+pub fn try_unwrap_call_key_package(plaintext: Vec<u8>) -> Result<Option<Vec<u8>>, FfiError> {
     match rust_try_unwrap_call_kp_forward(&plaintext) {
         Ok(Some(payload)) => Ok(Some(payload.to_vec())),
         Ok(None) => Ok(None),
@@ -1265,7 +1265,7 @@ pub fn try_unwrap_call_keypackage(plaintext: Vec<u8>) -> Result<Option<Vec<u8>>,
 /// `wrapCallKeyPackage`).
 #[uniffi::export]
 #[must_use]
-pub fn call_keypackage_min_payload_len() -> u32 {
+pub fn call_key_package_min_payload_len() -> u32 {
     u32::try_from(CALL_KP_FORWARD_MIN_PAYLOAD_LEN).unwrap_or(u32::MAX)
 }
 
@@ -1810,8 +1810,8 @@ mod tests {
     #[test]
     fn call_kp_forward_wrap_then_unwrap_round_trips() {
         let kp = vec![0xCDu8; 512];
-        let wrapped = wrap_call_keypackage(kp.clone());
-        let unwrapped = try_unwrap_call_keypackage(wrapped)
+        let wrapped = wrap_call_key_package(kp.clone());
+        let unwrapped = try_unwrap_call_key_package(wrapped)
             .expect("unwrap should not error")
             .expect("Some(kp) expected");
         assert_eq!(unwrapped, kp);
@@ -1820,7 +1820,7 @@ mod tests {
     #[test]
     fn call_kp_forward_unwrap_returns_none_for_intro_message() {
         let intro = b"hi alice it is bob".to_vec();
-        let result = try_unwrap_call_keypackage(intro).expect("unwrap should not error");
+        let result = try_unwrap_call_key_package(intro).expect("unwrap should not error");
         assert!(result.is_none(), "intro message must surface as None");
     }
 
@@ -1831,7 +1831,7 @@ mod tests {
         // unwrap helper.
         let welcome = vec![0xABu8; 256];
         let wrapped_welcome = wrap_call_welcome(welcome);
-        let result = try_unwrap_call_keypackage(wrapped_welcome).expect("unwrap should not error");
+        let result = try_unwrap_call_key_package(wrapped_welcome).expect("unwrap should not error");
         assert!(
             result.is_none(),
             "call-welcome must NOT cross-dispatch as KP-forward",
@@ -1844,7 +1844,7 @@ mod tests {
         let mut wrapped = Vec::new();
         wrapped.extend_from_slice(b"lakko/call-keypackage/v1\x00");
         wrapped.extend_from_slice(&[0u8; 100]); // 100 < 256
-        match try_unwrap_call_keypackage(wrapped) {
+        match try_unwrap_call_key_package(wrapped) {
             Err(FfiError::Contacts(msg)) => {
                 assert!(msg.contains("100") && msg.contains("256"));
             },
@@ -1855,7 +1855,7 @@ mod tests {
 
     #[test]
     fn call_kp_forward_min_payload_len_matches_rust_constant() {
-        assert_eq!(call_keypackage_min_payload_len() as usize, 256);
+        assert_eq!(call_key_package_min_payload_len() as usize, 256);
     }
 
     // -------------------------------------------------------------------
@@ -1874,7 +1874,7 @@ mod tests {
     #[test]
     fn dispatch_routes_call_kp_forward_envelope() {
         let kp = vec![0xCDu8; 512];
-        let wrapped = wrap_call_keypackage(kp.clone());
+        let wrapped = wrap_call_key_package(kp.clone());
         let result = dispatch_incoming_envelope(wrapped).expect("dispatch should succeed");
         assert_eq!(result.kind, FfiIncomingEnvelopeKind::CallKeyPackage);
         assert_eq!(result.payload, kp);
