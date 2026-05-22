@@ -320,8 +320,8 @@ public final class ContactsRepository: ObservableObject {
     /// back.
     public func generateInviteLink(
         label: String = "",
-        expiryMillisFromNow: Int64 = Self.defaultInviteExpiryMs,
-        maxUses: UInt32 = Self.singleUse,
+        expiryMillisFromNow: Int64 = ContactsRepository.defaultInviteExpiryMs,
+        maxUses: UInt32 = ContactsRepository.singleUse,
         bootstrapReferral: Bool = false
     ) async throws -> GeneratedInvite {
         guard let secrets = authRepository.identitySecrets else {

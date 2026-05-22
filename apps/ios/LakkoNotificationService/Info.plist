@@ -1,32 +1,24 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!--
-  SPDX-License-Identifier: AGPL-3.0-or-later
-  SPDX-FileCopyrightText: 2026 Lakko Contributors
-
-  Phase 1.20c2 — `UNNotificationServiceExtension` Info.plist.
-
-  Declares the extension's principal class so iOS can
-  instantiate it when a `mutable-content: 1` APNs alert
-  arrives. The `NSExtensionPointIdentifier` value is the
-  documented constant for the notification-service extension
-  point; the principal class is the bundle-qualified Swift
-  class name.
-
-  xcodegen reads this file via the `info.path` directive in
-  `apps/ios/project.yml`'s `LakkoNotificationService` target;
-  the auto-generated build-time merge fills in
-  `CFBundleIdentifier`, `CFBundleVersion`, etc. against
-  values that match the main app.
--->
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>NSExtension</key>
-    <dict>
-        <key>NSExtensionPointIdentifier</key>
-        <string>com.apple.usernotifications.service</string>
-        <key>NSExtensionPrincipalClass</key>
-        <string>$(PRODUCT_MODULE_NAME).NotificationService</string>
-    </dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>$(DEVELOPMENT_LANGUAGE)</string>
+	<key>CFBundleDisplayName</key>
+	<string>Lakko Notifications</string>
+	<key>CFBundleExecutable</key>
+	<string>$(EXECUTABLE_NAME)</string>
+	<key>CFBundleIdentifier</key>
+	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>$(PRODUCT_NAME)</string>
+	<key>CFBundlePackageType</key>
+	<string>XPC!</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1.0</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
 </dict>
 </plist>

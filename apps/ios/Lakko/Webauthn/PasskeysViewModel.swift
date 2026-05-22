@@ -41,12 +41,20 @@ public final class PasskeysViewModel: ObservableObject {
 
     public init(
         authRepository: AuthRepository,
-        client: WebauthnClient = WebauthnClient(),
-        registration: WebauthnRegistration = WebauthnRegistration()
+        client: WebauthnClient? = nil,
+        registration: WebauthnRegistration? = nil
     ) {
+        // Default values constructed inside the @MainActor-
+        // isolated body rather than in default-argument
+        // position. Swift 6 strict concurrency rejects
+        // `init() = WebauthnRegistration()` as a default arg
+        // because the @MainActor-isolated `init` of
+        // WebauthnRegistration cannot be evaluated in the
+        // nonisolated context the default-argument expression
+        // compiles into.
         self.authRepository = authRepository
-        self.client = client
-        self.registration = registration
+        self.client = client ?? WebauthnClient()
+        self.registration = registration ?? WebauthnRegistration()
         rebindSession()
     }
 

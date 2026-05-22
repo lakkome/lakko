@@ -22,7 +22,11 @@
 // target's source set once `just build-ios` lays it down.
 
 import Foundation
-import LakkoCoreFFI
 
-// Intentionally empty. The UniFFI-generated source carries
-// every public symbol; this file is the SPM-required hook.
+// Intentionally empty. The UniFFI-generated source
+// (`lakko_ffi_uniffi.swift`, fan'd in by `just build-ios`)
+// carries every public symbol and does its own
+// `import lakko_ffi_uniffiFFI` against the C module name
+// the XCFramework modulemap declares. This file just
+// satisfies SPM's "target dir must have at least one
+// committed source" requirement.

@@ -150,6 +150,15 @@ public final class CallSession: ObservableObject {
             // Phase 3a9 scaffolding: candidates are no-ops
             // until the WebRTC pod lands.
             break
+        case .groupStart, .groupJoin, .groupLeave:
+            // Group-call signaling (Phase 3c2) is handled by
+            // the in-chat joinable-call card dispatcher, not
+            // by the 1×1 `CallSession`. Ignore here — the
+            // chat-route owner filters these away from the
+            // 1×1 sink before they reach this method, but
+            // the exhaustive-switch contract requires us to
+            // name the cases.
+            break
         case .end(let cid, let reason):
             guard cid == callId, state != .done else { return }
             endRemote(reason: Self.endReason(from: reason))
@@ -249,6 +258,10 @@ extension CallSession {
              .answer(let cid, _),
              .iceCandidate(let cid, _, _, _),
              .end(let cid, _):
+            return cid
+        case .groupStart(let cid, _, _, _),
+             .groupJoin(let cid, _, _),
+             .groupLeave(let cid, _, _):
             return cid
         }
     }

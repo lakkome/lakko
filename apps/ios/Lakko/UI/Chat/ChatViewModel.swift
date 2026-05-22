@@ -479,7 +479,7 @@ public final class ChatViewModel: ObservableObject {
     /// `.task { … }` modifier in a `while !Task.isCancelled` loop.
     /// Silent (does NOT flip `refreshing`) so the spinner doesn't
     /// stay on for the full 30s long-poll window.
-    public func pollOnceLongPoll(waitSecs: Int = Self.defaultLongPollSecs) async {
+    public func pollOnceLongPoll(waitSecs: Int = ChatViewModel.defaultLongPollSecs) async {
         do {
             try await repository.pollGroup(
                 groupIdHex: groupIdHex,

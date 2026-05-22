@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 import Foundation
+import LakkoCore
 
 /// Joiner-side acceptor orchestration for link-based call
 /// invites (Phase 3c3-acceptor-helper).

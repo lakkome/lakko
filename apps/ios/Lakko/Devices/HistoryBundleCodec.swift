@@ -75,15 +75,23 @@ public enum HistoryBundleCodec {
                     continue
                 }
                 let createdMs = Self.parseIsoMs(m.createdAt)
+                // `messageId` is the HLC-derived Int64 the chat
+                // pipeline assigns; serialise it big-endian for
+                // the structured-history wire so the joining
+                // device sees the same numeric value back.
+                var idBE = m.messageId.bigEndian
+                let idBytes = withUnsafeBytes(of: &idBE) { Data($0) }
                 messages.append(
                     StructuredHistoryMessage(
                         payloadBytes: placeholder,
                         senderLeaf: 0,
-                        messageId: Data(m.messageId.utf8),
+                        messageId: idBytes,
                         receivedAtMs: createdMs
                     )
                 )
-                if let v = UInt64(m.messageId), v > maxHlc { maxHlc = v }
+                if m.messageId > 0, UInt64(m.messageId) > maxHlc {
+                    maxHlc = UInt64(m.messageId)
+                }
             }
             groupInputs.append(
                 StructuredHistoryGroup(
@@ -142,14 +150,9 @@ public enum HistoryBundleCodec {
                 existingIds.insert(decoded.messageId)
                 applied += 1
             }
-            // Sort by parsed messageId so the timeline lands
-            // in order. Defensive on non-numeric strings.
-            merged.sort { a, b in
-                if let ai = Int64(a.messageId), let bi = Int64(b.messageId) {
-                    return ai < bi
-                }
-                return a.messageId < b.messageId
-            }
+            // Sort by HLC-derived messageId so the timeline
+            // lands in order.
+            merged.sort { a, b in a.messageId < b.messageId }
             nextGroups[hex] = PersistedGroup(
                 cursor: slot.cursor,
                 messages: merged

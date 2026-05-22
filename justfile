@@ -341,15 +341,18 @@ build-ios:
     @command -v xcodebuild >/dev/null 2>&1 || (echo "ERROR: xcodebuild not found — install Xcode Command Line Tools via 'xcode-select --install'" && exit 1)
     cargo build --release --target aarch64-apple-ios -p lakko-ffi-uniffi
     cargo build --release --target aarch64-apple-ios-sim -p lakko-ffi-uniffi
-    cargo build --release --target x86_64-apple-ios-sim -p lakko-ffi-uniffi
+    cargo build --release --target x86_64-apple-ios -p lakko-ffi-uniffi
     # Combine the two simulator slices into one fat archive
     # — `xcodebuild -create-xcframework` accepts exactly one
     # binary per `-library` argument, and Mac simulators come
-    # in both arm64 + x86_64 flavours.
+    # in both arm64 + x86_64 flavours. (Note: the rustup
+    # triple for the Intel simulator is `x86_64-apple-ios`,
+    # NOT `x86_64-apple-ios-sim` — the `-sim` suffix only
+    # exists for the aarch64 variant.)
     mkdir -p target/ios
     lipo -create \
         target/aarch64-apple-ios-sim/release/liblakko_ffi_uniffi.a \
-        target/x86_64-apple-ios-sim/release/liblakko_ffi_uniffi.a \
+        target/x86_64-apple-ios/release/liblakko_ffi_uniffi.a \
         -output target/ios/liblakko_ffi_uniffi-simulator.a
     # Lay out the headers + modulemap directory the
     # `-headers` argument expects: a single dir with the C

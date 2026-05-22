@@ -132,7 +132,7 @@ public final class ContactsViewModel: ObservableObject {
     /// the server clamps to its own `MAX_WAIT_SECS`. 30 matches
     /// the canonical chat-app cadence + the Android side's
     /// `DEFAULT_LONG_POLL_SECS`.
-    public func pollOnceLongPoll(waitSecs: Int = Self.defaultLongPollSecs) async {
+    public func pollOnceLongPoll(waitSecs: Int = ContactsViewModel.defaultLongPollSecs) async {
         await repository.refreshInbox(waitSecs: waitSecs)
     }
 

@@ -106,13 +106,13 @@ public final class PushClient {
             seedB64: challenge.seed,
             effortBits: challenge.effortBits
         )
-        let req = RegisterRequest(
+        let req = PushRegisterRequest(
             pow: pow,
             device_pseudonym: Self.pseudonymHex(devicePseudonym),
             provider: provider,
             token: tokenBytes.base64EncodedString()
         )
-        let resp: RegisterResponse = try await post(
+        let resp: PushRegisterResponse = try await post(
             endpoint: "/push/register",
             body: req
         )
@@ -372,14 +372,14 @@ private struct PowChallenge: Decodable {
 // Snake-case stored properties so the default `JSONEncoder`
 // serialises the field names exactly as the server expects
 // (no `convertToSnakeCase` round-trip ambiguity).
-private struct RegisterRequest: Encodable {
+private struct PushRegisterRequest: Encodable {
     let pow: PowProofPayload
     let device_pseudonym: String
     let provider: PushClient.Provider
     let token: String
 }
 
-private struct RegisterResponse: Decodable {
+private struct PushRegisterResponse: Decodable {
     let ok: Bool
 }
 

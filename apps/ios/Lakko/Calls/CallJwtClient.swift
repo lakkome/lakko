@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 import Foundation
+import LakkoCore
 
 /// Client-side HTTP transport for the Phase 3b4 call-admission JWT
 /// pipeline — iOS mirror of the web `CallJwtClient` (apps/web/src/calls/

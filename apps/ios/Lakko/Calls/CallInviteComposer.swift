@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 import Foundation
+import LakkoCore
 
 /// Owner-side composer orchestration for link-based call
 /// invites (Phase 3c3-composer-helper).

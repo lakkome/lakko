@@ -1,7 +1,7 @@
+// swift-tools-version: 5.10
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-// swift-tools-version: 5.10
 
 // `apps/ios/Package.swift` — Swift Package wrapping the
 // `LakkoCore.xcframework` (Phase 1.14a) into a normal SPM
@@ -70,8 +70,17 @@ let package = Package(
         // directory; same depth as `apps/android/lakko-core/`
         // resolving to `target/bindings/kotlin/` on the
         // Android side.
+        // SPM target name must match the **C module name**
+        // declared in the XCFramework's `module.modulemap`
+        // (`lakko_ffi_uniffiFFI`) — the Swift compiler ties
+        // the binary-target name to the import lookup. The
+        // UniFFI-generated bindings (`lakko_ffi_uniffi.swift`)
+        // hard-code `import lakko_ffi_uniffiFFI`; aligning the
+        // SPM name removes the indirection that otherwise
+        // requires either an aliased modulemap inside the
+        // XCFramework or a hand-written shim re-import.
         .binaryTarget(
-            name: "LakkoCoreFFI",
+            name: "lakko_ffi_uniffiFFI",
             path: "../../target/ios/LakkoCore.xcframework"
         ),
         // The Swift wrapper. Source lives under
@@ -84,7 +93,7 @@ let package = Package(
         // `apps/android/lakko-core/src/main/kotlin/uniffi/`.
         .target(
             name: "LakkoCore",
-            dependencies: ["LakkoCoreFFI"]
+            dependencies: ["lakko_ffi_uniffiFFI"]
         ),
     ]
 )

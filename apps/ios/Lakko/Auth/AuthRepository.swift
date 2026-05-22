@@ -777,12 +777,12 @@ public final class AuthRepository: ObservableObject {
             return Data()
         }
         NSLog(
-            "backup restore (\(context)): restored \(parsed.contacts.count) contact(s) "
+            "backup restore (\(context)): restored \(parsed.acceptedContacts.count) contact(s) "
             + "from snapshot at \(parsed.createdAtMs), "
             + "MLS snapshot \(parsed.wholeStorageSnapshot.count) bytes"
         )
         // TODO(2a1d-followup): once the iOS persistent contact
-        // store lands, apply `parsed.contacts` here via a
+        // store lands, apply `parsed.acceptedContacts` here via a
         // contacts-merge hook.
         return parsed.wholeStorageSnapshot
     }
