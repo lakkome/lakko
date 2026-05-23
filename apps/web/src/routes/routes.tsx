@@ -31,12 +31,18 @@ import Recover from "./Recover";
 import Signup from "./Signup";
 import Home from "./Home";
 import Contacts from "./Contacts";
+import Call from "./Call";
 import Chat from "./Chat";
 import DevProbe from "./DevProbe";
 import Devices from "./Devices";
 import Invite from "./Invite";
 import NotFound from "./NotFound";
-import { chatRoutePattern, inviteRoutePattern, paths } from "./paths";
+import {
+  callRoutePattern,
+  chatRoutePattern,
+  inviteRoutePattern,
+  paths,
+} from "./paths";
 
 /** All app routes. Consumed by `<Router>` in `App.tsx`. */
 export const routes: RouteDefinition[] = [
@@ -87,6 +93,7 @@ export const routes: RouteDefinition[] = [
       { path: paths.home, component: Home },
       { path: paths.contacts, component: Contacts },
       { path: chatRoutePattern, component: Chat },
+      { path: callRoutePattern, component: Call },
       { path: paths.dev, component: DevProbe },
       { path: paths.devices, component: Devices },
     ],

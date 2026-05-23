@@ -66,6 +66,19 @@ export const paths = {
   invite(slug: string): string {
     return `/i/${slug}`;
   },
+  /**
+   * In-call screen for an active call (Phase 3c6-web).
+   * `id` is a call-scoped identifier — typically the
+   * `base64UrlEncodeNoPad`-encoded 16-byte `call_id` from the
+   * MLS exporter context. The route component reads `useParams`
+   * and looks the call up in the in-memory call registry; if
+   * the call is gone (e.g. the page was opened directly via
+   * URL), the screen redirects back to `paths.home` after
+   * showing the "Call ended" overlay.
+   */
+  call(callIdB64Url: string): string {
+    return `/call/${callIdB64Url}`;
+  },
 } as const;
 
 /**
@@ -79,3 +92,10 @@ export const chatRoutePattern = "/chat/:id" as const;
  * stay in sync with `paths.invite(...)`. Used in the route table.
  */
 export const inviteRoutePattern = "/i/:slug" as const;
+
+/**
+ * The matchable pattern for the dynamic call route — must
+ * stay in sync with `paths.call(...)`. Used in the route
+ * table.
+ */
+export const callRoutePattern = "/call/:id" as const;
