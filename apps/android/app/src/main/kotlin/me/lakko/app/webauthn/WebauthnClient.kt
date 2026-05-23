@@ -26,8 +26,11 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
 
 /**
- * Ktor-based client for `lakko-svc-auth`'s `/webauthn/*`
- * endpoints (Phase 2a2e).
+ * Ktor-based client for `lakko-svc-auth`'s `/webauthn/`
+ * endpoint family (Phase 2a2e). Path-glob `*` dropped from
+ * the prose so the KDoc block doesn't terminate prematurely
+ * — Kotlin lexer reads `*` + `/` inside a `/** ... */` doc
+ * comment as the closing token.
  *
  * Mirror of:
  *
@@ -80,8 +83,10 @@ public class WebauthnClient(
     }
 
     /** Bearer token bound to the four authenticated routes
-     *  (`/register/*`, `/credentials`, `/credentials/:id`). The
-     *  anonymous `/auth/*` routes ignore it. */
+     *  (`/register/`-prefixed, `/credentials`, `/credentials/:id`).
+     *  The anonymous `/auth/`-prefixed routes ignore it.
+     *  Path-glob `*` dropped here too — same KDoc-block lexer
+     *  gotcha as the file header. */
     private var sessionToken: String? = null
 
     public fun setSessionToken(token: String?) {

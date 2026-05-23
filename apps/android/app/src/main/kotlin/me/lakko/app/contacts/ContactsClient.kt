@@ -150,8 +150,11 @@ public class ContactsClient(
      * joiner has everything needed to seal an envelope without
      * touching `services/discovery`. Useful both for the happy
      * path (faster onboarding from a link) and for the
-     * censored-region path (`/discovery/*` may be blocked while
-     * the link still works because the bytes are inline).
+     * censored-region path (the `/discovery/` route family may
+     * be blocked while the link still works because the bytes
+     * are inline). The literal `&#42;/` in the path glob was
+     * deliberately dropped — it closes the surrounding KDoc
+     * block prematurely if written inline.
      *
      * Returns the same [SendResult] shape [sendContactRequest]
      * produces. `recipientUsername` is left empty — the joiner

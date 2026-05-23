@@ -87,7 +87,17 @@ public class PushSubscriber(
         }
 
         val token = try {
-            FirebaseMessaging.getInstance(firebaseApp).token.await()
+            // `FirebaseMessaging.getInstance(firebaseApp)` was
+            // made package-private in Firebase BoM 33+; the
+            // public path is the no-arg overload, which resolves
+            // to the default app — which is the only one Lakko
+            // ever initialises. `firebaseApp` above is what
+            // guarantees the default app is ready; we don't
+            // need to pass it through here.
+            // `firebaseApp` is referenced above as the init
+            // gate; the messaging instance picks up the default
+            // app implicitly.
+            FirebaseMessaging.getInstance().token.await()
         } catch (cause: Throwable) {
             Log.w(TAG, "FCM token fetch failed", cause)
             return null

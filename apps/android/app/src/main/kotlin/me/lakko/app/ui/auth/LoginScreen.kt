@@ -97,10 +97,15 @@ public fun LoginScreen(
             modifier = Modifier.fillMaxWidth(),
         )
 
-        if (state.error != null) {
+        // `state.error` reads from a delegated property
+        // (`state` is `by collectAsStateWithLifecycle`), so the
+        // smart-cast from `!= null` doesn't carry into the body.
+        // Capture into a local first.
+        val errorText = state.error
+        if (errorText != null) {
             Spacer(Modifier.height(12.dp))
             Text(
-                text = state.error,
+                text = errorText,
                 color = MaterialTheme.colorScheme.error,
                 style = MaterialTheme.typography.bodyMedium,
             )

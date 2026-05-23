@@ -91,16 +91,25 @@ public object HistoryBundleCodec {
                     continue
                 }
                 val createdMs = parseIsoMs(m.createdAt)
+                // `messageId` is the HLC-derived Long the chat
+                // pipeline assigns; encode it big-endian for the
+                // structured-history wire so the joining device
+                // sees the same numeric value back.
+                val idBytes = java.nio.ByteBuffer.allocate(8)
+                    .order(java.nio.ByteOrder.BIG_ENDIAN)
+                    .putLong(m.messageId)
+                    .array()
                 messages.add(
                     StructuredHistoryMessage(
                         payloadBytes = placeholder,
                         senderLeaf = 0u,
-                        messageId = m.messageId.toByteArray(Charsets.UTF_8),
+                        messageId = idBytes,
                         receivedAtMs = createdMs,
                     ),
                 )
-                val v = m.messageId.toULongOrNull()
-                if (v != null && v > maxHlc) maxHlc = v
+                if (m.messageId > 0 && m.messageId.toULong() > maxHlc) {
+                    maxHlc = m.messageId.toULong()
+                }
             }
             groupInputs.add(
                 StructuredHistoryGroup(
@@ -161,17 +170,15 @@ public object HistoryBundleCodec {
                 existingIds.add(decoded.messageId)
                 applied += 1
             }
-            // Sort by parsed numeric messageId so the timeline
-            // lands in order; fall back to lexicographic on
-            // non-numeric strings.
+            // Sort by HLC-derived numeric messageId so the
+            // timeline lands in order.
             merged.sortWith(
                 Comparator { a, b ->
-                    val ai = a.messageId.toLongOrNull()
-                    val bi = b.messageId.toLongOrNull()
-                    if (ai != null && bi != null) {
-                        ai.compareTo(bi)
-                    } else {
-                        a.messageId.compareTo(b.messageId)
+                    a.messageId.compareTo(b.messageId).also { _ ->
+                        // Body intentionally trivial — kept as a
+                        // Comparator { } block for symmetry with
+                        // the sibling iOS implementation that
+                        // exposes the same shape.
                     }
                 },
             )
