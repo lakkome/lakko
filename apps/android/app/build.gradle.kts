@@ -143,6 +143,11 @@ dependencies {
     implementation(libs.compose.ui)
     implementation(libs.compose.ui.graphics)
     implementation(libs.compose.material3)
+    // Extended Compose icon set — base material3 ships only a
+    // tiny glyph table; the in-call UI (3c6-android) needs Mic /
+    // Videocam / CallEnd / ScreenShare / PanTool / PushPin /
+    // FlipCameraAndroid / Group icons.
+    implementation(libs.compose.material.icons.extended)
     // Google Material XML library — for the
     // `Theme.Material3.DayNight.NoActionBar` style the
     // Activity's manifest theme inherits. Separate from
