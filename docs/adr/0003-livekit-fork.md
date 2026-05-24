@@ -5,9 +5,21 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 # ADR-0003: LiveKit fork as the SFU; SFrame for media
 
-- **Status:** Accepted
+- **Status:** **Superseded** by [ADR-0011](./0011-rust-sfu.md) (2026-05-24)
 - **Date:** 2026-04-28
 - **Context:** Phase 0 (decision pinned in advance, implementation lands in Phase 3)
+
+> **Note (2026-05-24):** the **SFU choice** in this ADR is
+> superseded — Lakko builds a minimal Rust SFU on
+> `webrtc-rs` / `str0m` instead of forking LiveKit. See
+> [ADR-0011](./0011-rust-sfu.md) for the rationale.
+>
+> The **SFrame + MLS-exporter + topology + codec + quality-
+> budget** decisions in this ADR **remain in force** —
+> they were never LiveKit-specific. Read the rest of this
+> document as the still-binding decision for everything
+> *except* "fork of LiveKit (Go)" which is now "Rust SFU
+> built in-tree".
 
 ## Context
 

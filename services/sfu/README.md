@@ -1,144 +1,135 @@
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
 <!-- SPDX-FileCopyrightText: 2026 Lakko Contributors -->
 
-# `services/sfu` — Lakko's LiveKit fork
+# `services/sfu` — Lakko's Selective Forwarding Unit
 
-Selective fork of [`livekit/livekit`](https://github.com/livekit/livekit)
-(SFU media-routing server) + [`livekit/protocol`](https://github.com/livekit/protocol)
-(Go protobuf + Go server types), specialised for Lakko's
-threat model + auth flow.
+A minimal Rust SFU for Lakko's group calls, channels, and
+audio rooms. Speaks Lakko's signaling wire format directly;
+forwards SFrame-encrypted RTP between peers; never inspects
+media payload.
 
-The strategy is captured in [ADR-0008](../../docs/adr/0008-livekit-fork-strategy.md);
-the call-side cryptography invariants this fork must preserve
-live in [`docs/security/calls.md`](../../docs/security/calls.md).
+The strategic rationale lives in
+[ADR-0011](../../docs/adr/0011-rust-sfu.md) — "Rust SFU on
+`webrtc-rs` / `str0m`, supersedes the LiveKit fork".
+[ADR-0003](../../docs/adr/0003-livekit-fork.md) and
+[ADR-0008](../../docs/adr/0008-livekit-fork-strategy.md)
+described an earlier LiveKit-fork plan that **no longer
+applies** — both are marked Superseded.
 
-This README is the operational entry point. Read [ADR-0008](../../docs/adr/0008-livekit-fork-strategy.md)
-first for the "why"; then [`PLAYBOOK.md`](./PLAYBOOK.md) for
-the "how".
+This README is the entry point for the crate. Read
+ADR-0011 first for the "why"; then
+[`PLAYBOOK.md`](./PLAYBOOK.md) for build / run / test
+commands.
 
 ## Status
 
-**3b1a — Fork tree set up.** The directory is scaffolded
-but the upstream Go code is NOT yet vendored in. The maintainer
-will perform the initial vendor pull as a separate operational
-step (see [`PLAYBOOK.md`](./PLAYBOOK.md) §1) — that's a single
-large commit landing ~150k lines of Go in `upstream/`. The
-scaffolding here is everything you need to know AROUND that
-commit: where the pin lives, how to apply patches, how to
-rebase.
-
-Subsequent sprints land the actual modifications:
+**Scaffolding only.** No Rust code is checked in yet.
+The next sprint pulls the trigger — see
+[`docs/ROADMAP-PHASE3-CLOSEOUT.md`](../../docs/ROADMAP-PHASE3-CLOSEOUT.md)
+group **B**:
 
 | Sprint | Deliverable |
 |---|---|
-| 3b1a | ✅ This scaffolding |
-| 3b1b | Strip LiveKit `participant_key` flow + plaintext-media path |
-| 3b1c | Wire Lakko JWT validation against `services/auth`'s public key |
-| 3b1d | Replace LiveKit room-create RPC with our Lakko-fronted RPC |
-| 3b2  | Deploy on dedicated Hetzner CCX VPS |
-| 3b3  | TURN-over-TLS on port 443 via coturn alongside |
-| 3b4  | `services/auth/call_jwt` endpoint |
-| 3b5  | Prometheus / Grafana monitoring |
-| 3b6  | Cost analysis + scale projection |
+| **S-3-B-spike** | `webrtc-rs` vs `str0m` echo-test bake-off; decision recorded as an amendment to ADR-0011 |
+| **S-3-B-skeleton** | `Cargo.toml` + `src/main.rs`; axum WS signaling endpoint; per-peer registry; echo-test green |
+| **S-3-B-routing** | Multi-peer RTP track fanout (A publish → B + C receive) |
+| **S-3-B-simulcast** | Simulcast layer extraction (RID / dependency descriptor) + per-receiver layer selection |
+| **S-3-B-jwt** | `lakko-call-jwt` admission check — verifies tokens minted by `services/auth` against the JWKS endpoint |
+| **S-3-B-twcc** | TWCC aggregation + per-receiver bandwidth estimation; feeds layer switching |
+| **S-3-B-metrics** | Prometheus exporter via `metrics` crate; every metric referenced by `infra/prometheus/rules/calls.yml` is exposed |
+| **S-3-B-prod** | Config (env-vars per project convention), graceful shutdown, `/health`, `/ready`, structured `tracing` logs |
+| **S-3-B-tests** | Integration tests — mock peers, multi-peer fanout, SFrame ciphertext byte-exact passthrough |
 
-## Layout
+## Shape (target)
 
 ```text
 services/sfu/
 ├── README.md              ← this file
-├── UPSTREAM.md            ← pin metadata: upstream commit, date, drift notes
-├── PLAYBOOK.md            ← operational commands (vendor / patch / rebase)
-├── upstream/              ← VENDORED LiveKit code. NOT YET POPULATED.
-│   ├── livekit/           ← github.com/livekit/livekit @ pinned commit
-│   └── protocol/          ← github.com/livekit/protocol @ pinned commit
-├── lakko-patches/         ← git format-patch files applied on top of upstream
-│   ├── README.md          ← how to add / order / re-roll patches
-│   └── *.patch            ← one patch per logical change (3b1b, 3b1c, ...)
-└── lakko-additions/       ← Lakko-only Go code that augments (not modifies)
-                              upstream. Lives outside `upstream/` so the
-                              vendor refresh leaves it untouched.
-    └── README.md
+├── UPSTREAM.md            ← pinned WebRTC stack version + change log
+├── PLAYBOOK.md            ← build / run / test / deploy commands
+├── Cargo.toml             ← crate manifest (lakko-svc-sfu)
+└── src/
+    ├── main.rs            ← binary entry; tokio runtime; signal handling
+    ├── signaling.rs       ← axum WS endpoint; Lakko wire format
+    ├── peer.rs            ← per-peer state (PC, tracks, role)
+    ├── room.rs            ← room registry; lifecycle
+    ├── fanout.rs          ← incoming track → outgoing-track fanout logic
+    ├── simulcast.rs       ← RID / dependency-descriptor parsing; layer pick
+    ├── twcc.rs            ← bandwidth estimation aggregator
+    ├── jwt.rs             ← lakko-call-jwt verifier wiring
+    ├── metrics.rs         ← Prometheus exporter
+    └── config.rs          ← env-driven config
 ```
 
-**Important**: never edit files under `upstream/` directly.
-Every change is either:
+This is the **end-state** layout — the skeleton sprint
+lands `main.rs` + `signaling.rs` + `peer.rs`; the rest
+arrive one sprint at a time.
 
-1. A patch in `lakko-patches/` (preferred — survives upstream
-   rebase by re-applying).
-2. A new file in `lakko-additions/` (preferred for code
-   that doesn't need to live next to upstream Go).
+## Crate boundaries
 
-Direct edits to `upstream/` get clobbered on the next
-quarterly rebase. The `LAKKO:` marker grep that CI runs
-treats any file under `upstream/` with no `LAKKO:` comment
-as a hard error — forces every modification to be a patch.
+The SFU links directly to Lakko workspace crates — same
+as any other service:
 
-## Why this shape
+| Dep | Why |
+|---|---|
+| `lakko-call-jwt` | Verify the join JWT minted by `services/auth` |
+| `lakko-proto` | Signaling wire types (`schemas/sfu/v1.proto`) |
+| `tracing` + `tracing-subscriber` | Structured logging |
+| `metrics` + `metrics-exporter-prometheus` | Prometheus surface |
+| `axum` + `tokio` + `tokio-tungstenite` | HTTP / WS host |
+| `webrtc` (`webrtc-rs`) **or** `str0m` | WebRTC stack — decision in S-3-B-spike |
+| `thiserror` | Error types |
 
-[ADR-0008](../../docs/adr/0008-livekit-fork-strategy.md) §"Upstream-tracking policy"
-captures the full reasoning. Summary:
+No Go. No vendored upstream tree. No patch directory.
 
-- **A pin commit** (`UPSTREAM.md`) makes the upstream
-  position auditable.
-- **Patch files** (`lakko-patches/`) survive the quarterly
-  upstream rebase — applying them re-creates our fork from
-  upstream + patches.
-- **Separate additions** (`lakko-additions/`) lets Lakko-only
-  code escape the vendor-refresh blast radius.
-- **No silent vendoring** — every diff has a `LAKKO:` marker
-  + a patch file describing the change.
+## What the SFU does NOT do
 
-The Signal-Server fork practitioners ([signalapp/Signal-Server](https://github.com/signalapp/Signal-Server))
-use the same pattern; it scales for the quarterly
-maintenance cadence we expect.
+These are **architecturally absent**, not "feature gated":
 
-## Quick reference
+- **No recording.** No code path writes media to disk,
+  queues it for an egress process, or hooks a recorder
+  side-channel.
+- **No RTMP / WHIP ingest.** Broadcasts join via the same
+  WebRTC flow as any other participant.
+- **No agents framework / webhooks / room dashboards.**
+- **No Lakko-specific client SDK.** Clients drive their
+  native `RTCPeerConnection` (`WebRTC.framework` on Apple,
+  `webrtc-sdk:android` on Android, browser built-in on
+  web) and speak the Lakko signaling protocol directly.
+- **No plaintext-media fallback.** A peer that fails to
+  enable the SFrame transform is refused.
 
-```bash
-# Read the pin
-cat services/sfu/UPSTREAM.md
+See [ADR-0011](../../docs/adr/0011-rust-sfu.md) §"What the
+SFU does NOT do" for the full statement and the
+key-disclosure-law context.
 
-# Apply Lakko's patches on top of vendored upstream
-(cd services/sfu && for p in lakko-patches/*.patch; do
-   git apply --directory=upstream/livekit "$p"
-done)
-
-# Refresh upstream (quarterly)
-# See PLAYBOOK.md §3 for the full sequence.
-```
-
-The full rebase / patch / vendor playbook lives in
-[`PLAYBOOK.md`](./PLAYBOOK.md).
-
-## What's NOT here
-
-Per ADR-0008 §"What we fork", these are deliberately absent:
-
-- `livekit-client` (browser SDK) — clients use native
-  `RTCPeerConnection` directly. The LiveKit signaling
-  protocol is small enough to speak from our own code.
-- `livekit-server-sdk-go` (server SDK) — we issue our own
-  JWTs from `services/auth`; the SFU validates the signature
-  with the auth service's published public key.
-- `egress` / `ingress` — no transcoding, no recording (per
-  ROADMAP 3c8). If recording ever lands, it's a regular
-  participant joining the call, not an egress hook.
-- `livekit-cli` / helm charts / k8s manifests — single-VPS
-  systemd deployment (per `infra/README.md`).
-
-## Threat-model note
+## Threat model
 
 The SFU is **assumed-compromised** per
 [`docs/security/threat-model.md`](../../docs/security/threat-model.md).
-The deletions in 3b1b (the `participant_key` flow) reduce
-the SFU's surface to:
+Its surface is intentionally narrow:
 
-- Validate the JWT signature.
-- Forward encrypted SFrame frames.
+- Verify the `lakko-call-jwt` signature against the
+  `auth.lakko.me` JWKS.
+- Forward SFrame-encrypted RTP between peers.
 - Emit Prometheus metrics (counts + bandwidth, never
-  plaintext).
+  plaintext, never participant identifiers — the JWT
+  carries an opaque `call_id` and a per-call participant
+  pseudonym).
 
-It cannot see media keys, plaintext SDP / ICE bodies, or
-chat-group membership. See [`docs/security/calls.md`](../../docs/security/calls.md)
+It **cannot** see media keys, plaintext SDP / ICE bodies,
+chat-group membership, or participant identity. See
+[`docs/security/calls.md`](../../docs/security/calls.md)
 §"What the SFU sees vs what the client owns" for the
-full table.
+exhaustive table.
+
+## Cross-links
+
+- [ADR-0011](../../docs/adr/0011-rust-sfu.md) — strategy
+- [ADR-0003](../../docs/adr/0003-livekit-fork.md) — superseded; SFrame + MLS-exporter parts still in force
+- [ADR-0008](../../docs/adr/0008-livekit-fork-strategy.md) — superseded; auth-JWT shape survives in `crates/lakko-call-jwt`
+- [`docs/security/calls.md`](../../docs/security/calls.md) — call-side crypto invariants
+- [`docs/ROADMAP-PHASE3-CLOSEOUT.md`](../../docs/ROADMAP-PHASE3-CLOSEOUT.md) — sprint sequencing
+- [`infra/README-calls.md`](../../infra/README-calls.md) — deployment topology
+- [`crates/lakko-call-jwt`](../../crates/lakko-call-jwt) — JWT crate the SFU links
+- [`crates/lakko-calls`](../../crates/lakko-calls) — client-side SFrame keying that produces the bytes the SFU forwards opaquely

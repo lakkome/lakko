@@ -17,17 +17,19 @@ A Telegram-class secure messenger with **E2EE by default for everything** (1×1,
 |---|---|
 | [0001](docs/adr/0001-mls-only.md) | MLS (RFC 9420) for everything — 1×1, groups, channels, call media keys |
 | [0002](docs/adr/0002-rust-core.md) | Shared Rust core + native UI on every platform |
-| [0003](docs/adr/0003-livekit-fork.md) | LiveKit fork as the SFU; SFrame (RFC 9605) for media |
+| [0003](docs/adr/0003-livekit-fork.md) | LiveKit fork as the SFU; SFrame (RFC 9605) for media — **superseded by 0011** (SFU choice); SFrame + MLS-exporter parts still in force |
 | [0004](docs/adr/0004-anti-censorship.md) | REALITY + MASQUE + Shadowsocks-2022 + WebTransport |
 | [0005](docs/adr/0005-contact-invitations.md) | Capability-based invites + 6 scenarios + pseudonym lifecycle |
 | [0006](docs/adr/0006-licensing.md) | AGPLv3 monorepo + CLA |
 | [0007](docs/adr/0007-multi-device-identity.md) | Two-tier identity (account-level deterministic + per-device random) for multi-device |
-| [0008](docs/adr/0008-livekit-fork-strategy.md) | LiveKit fork — operational strategy (extends 0003) |
+| [0008](docs/adr/0008-livekit-fork-strategy.md) | LiveKit fork — operational strategy — **superseded by 0011**; `CallJwtClaims` shape survives in `crates/lakko-call-jwt` |
 | [0009](docs/adr/0009-link-based-call-invitations.md) | Link-based call invitations protocol (ADR-0005 scenario E expansion + welcome-ferry + multi-party KP-forward) |
 | [0010](docs/adr/0010-channels-two-tier-broadcast.md) | Channels — two-tier PublisherGroup + sender-key broadcast for >50k subscribers (Phase 4 design) |
+| [0011](docs/adr/0011-rust-sfu.md) | Rust SFU on `webrtc-rs` / `str0m` — supersedes 0003 (SFU choice) + 0008. Stack winner decided in S-3-B-spike |
 
 The full strategic plan and trade-offs live in `~/.claude/plans/1-nested-wreath.md`.
 The tactical decomposition of all 6 phases with sprint breakdowns lives in [`docs/ROADMAP.md`](docs/ROADMAP.md).
+The Phase 3 closeout punch list — gap inventory + sprint waves with exit criteria — lives in [`docs/ROADMAP-PHASE3-CLOSEOUT.md`](docs/ROADMAP-PHASE3-CLOSEOUT.md).
 
 ## Module map
 
@@ -63,7 +65,7 @@ The tactical decomposition of all 6 phases with sprint breakdowns lives in [`doc
 | `discovery` | Username lookup via OPRF |
 | `push-gw` | Fan-out APNs / FCM / UnifiedPush |
 | `transport-rendezvous` | Signed bootstrap config for anti-censorship |
-| `sfu` | LiveKit fork (Go, not Rust) — SFU media routing. Scaffolded in 3b1a; see [`services/sfu/README.md`](services/sfu/README.md) + ADR-0008 |
+| `sfu` | Minimal Rust SFU on `webrtc-rs` / `str0m` (stack picked in `S-3-B-spike`). Scaffolded; implementation lands per `docs/ROADMAP-PHASE3-CLOSEOUT.md` group **B**. See [`services/sfu/README.md`](services/sfu/README.md) + [ADR-0011](docs/adr/0011-rust-sfu.md) |
 
 ### Other
 

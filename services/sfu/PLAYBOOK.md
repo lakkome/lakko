@@ -3,213 +3,217 @@
 
 # `services/sfu` — operational playbook
 
-Exact commands for each operation on the LiveKit fork.
-The high-level strategy is in [ADR-0008](../../docs/adr/0008-livekit-fork-strategy.md);
-this file is the recipe book.
+Exact commands for build, run, test, deploy. Strategy is
+in [ADR-0011](../../docs/adr/0011-rust-sfu.md); pinned
+dependencies in [`UPSTREAM.md`](./UPSTREAM.md); this file
+is the recipe book.
 
 All commands assume `pwd = repo root`.
 
-## 1. Initial vendor pull (one-time)
+## Current status
 
-Run once when 3b1a's vendor step happens. After this commit
-lands, the table in [`UPSTREAM.md`](./UPSTREAM.md) is filled
-in and the rest of this playbook becomes operative.
+**Crate not yet bootstrapped.** Sprint
+[`S-3-B-spike`](../../docs/ROADMAP-PHASE3-CLOSEOUT.md)
+runs the `webrtc-rs` / `str0m` bake-off; sprint
+`S-3-B-skeleton` lands `Cargo.toml` + `src/main.rs` and
+turns the rest of this playbook operative. Until then,
+every section below is **the contract for what the
+skeleton sprint must produce**.
 
-```bash
-# Pick the upstream pin
-LIVEKIT_TAG="v1.7.4"          # update as needed at vendor time
-PROTOCOL_TAG="$(curl -s https://raw.githubusercontent.com/livekit/livekit/${LIVEKIT_TAG}/go.mod \
-  | awk '/livekit\/protocol/ {print $2}')"
+## 1. Build
 
-# Create the vendor dirs
-mkdir -p services/sfu/upstream
-
-# Clone shallowly at the pinned tag — keeps the repo small.
-git clone --depth 1 --branch "${LIVEKIT_TAG}" \
-  https://github.com/livekit/livekit.git services/sfu/upstream/livekit
-git clone --depth 1 --branch "${PROTOCOL_TAG}" \
-  https://github.com/livekit/protocol.git services/sfu/upstream/protocol
-
-# Detach: drop the upstream .git directories so the vendor
-# becomes plain tracked files. The pin lives in UPSTREAM.md,
-# NOT in nested .git histories.
-rm -rf services/sfu/upstream/livekit/.git
-rm -rf services/sfu/upstream/protocol/.git
-
-# Fill in UPSTREAM.md with the resolved SHAs:
-LIVEKIT_SHA="$(git ls-remote https://github.com/livekit/livekit.git \
-  refs/tags/${LIVEKIT_TAG} | cut -f1)"
-PROTOCOL_SHA="$(git ls-remote https://github.com/livekit/protocol.git \
-  refs/tags/${PROTOCOL_TAG} | cut -f1)"
-echo "Pinned at livekit ${LIVEKIT_TAG} (${LIVEKIT_SHA})"
-echo "Pinned at protocol ${PROTOCOL_TAG} (${PROTOCOL_SHA})"
-# Manually edit services/sfu/UPSTREAM.md to record these.
-
-# Single dedicated commit — DO NOT bundle other changes:
-git add services/sfu/upstream services/sfu/UPSTREAM.md
-git commit -m "chore(sfu): initial upstream vendor at livekit ${LIVEKIT_TAG}"
-```
-
-## 2. Adding a patch (3b1b / 3b1c / 3b1d work)
+After `S-3-B-skeleton`:
 
 ```bash
-# Start from a clean upstream snapshot — apply existing
-# patches first so any new patch lands on top of the
-# already-modified tree.
-just sfu-apply-patches  # see justfile section below
+# Workspace build picks up services/sfu automatically once
+# it's added to Cargo.toml [workspace] members.
+cargo build -p lakko-svc-sfu
 
-# Make your changes inside services/sfu/upstream/.
-# Add `// LAKKO: <reason>` comments wherever you modify
-# upstream code (CI greps for these).
-
-# Generate the patch with a sequenced filename + descriptive name.
-NEXT=$(printf "%03d" $(($(ls services/sfu/lakko-patches/*.patch 2>/dev/null | wc -l) + 1)))
-git -C services/sfu/upstream/livekit diff > /tmp/lakko.patch
-mv /tmp/lakko.patch services/sfu/lakko-patches/${NEXT}-<short-description>.patch
-
-# Revert the changes in upstream/ (patches are the source
-# of truth; upstream/ stays at the pinned-clean state).
-git checkout services/sfu/upstream/livekit
-
-# Commit the patch file only.
-git add services/sfu/lakko-patches/${NEXT}-<short-description>.patch
-git commit -m "fix(sfu): <patch description> [3bXY]"
+# Release build for deployment.
+cargo build -p lakko-svc-sfu --release
 ```
 
-## 3. Quarterly upstream rebase
+Reproducible-build invariant: the binary's SHA256 is byte-
+identical across the two CI runners. The Nix flake pins
+the toolchain; `Cargo.lock` pins every transitive.
+
+## 2. Run locally
+
+Pre-requisite: `auth.lakko.me` is reachable (or a local
+`services/auth` is running and exposing JWKS at
+`/.well-known/jwks.json`).
 
 ```bash
-# 3a. Stash anything in upstream/ (there shouldn't be
-#     anything — patches live in lakko-patches/).
-git status services/sfu/upstream
+# .env entries the SFU consumes — see services/sfu/src/config.rs
+# (lands in S-3-B-prod) for the canonical list.
+export LAKKO_SFU_BIND=127.0.0.1:7880
+export LAKKO_SFU_JWKS_URL=http://127.0.0.1:8081/.well-known/jwks.json
+export LAKKO_SFU_JWKS_REFRESH_SEC=300
+export LAKKO_SFU_METRICS_BIND=127.0.0.1:6789
+export LAKKO_SFU_ICE_TURN_URL=turn:turn.lakko.me:443?transport=tcp
+export RUST_LOG=info,lakko_svc_sfu=debug
 
-# 3b. Pull the new upstream pin.
-NEW_LIVEKIT_TAG="v1.X.Y"  # latest stable
-rm -rf services/sfu/upstream/livekit
-git clone --depth 1 --branch "${NEW_LIVEKIT_TAG}" \
-  https://github.com/livekit/livekit.git services/sfu/upstream/livekit
-rm -rf services/sfu/upstream/livekit/.git
-
-# 3c. Try to re-apply every patch in order.
-PATCH_DIR=services/sfu/lakko-patches
-for p in $(ls ${PATCH_DIR}/*.patch | sort); do
-  echo "applying ${p}"
-  if ! git apply --directory=services/sfu/upstream/livekit "${p}"; then
-    echo "FAILED: ${p}"
-    echo "Resolve manually:"
-    echo "  1. cd services/sfu/upstream/livekit"
-    echo "  2. apply ${p} with --3way or by hand"
-    echo "  3. regenerate ${p} via:"
-    echo "     git -C services/sfu/upstream/livekit diff > ${p}"
-    echo "  4. revert services/sfu/upstream/livekit"
-    echo "  5. re-run this script"
-    exit 1
-  fi
-done
-
-# 3d. Verify build cleanliness from upstream's own test
-#     suite. We don't ship LiveKit's tests — but they need
-#     to pass on the rebased tree to confirm no regression
-#     introduced by our patches.
-(cd services/sfu/upstream/livekit && go test ./... -short)
-
-# 3e. Revert upstream/ back to the patch-free state so
-#     git only records the new vendor + the UPSTREAM.md
-#     bump.
-git checkout services/sfu/upstream
-
-# 3f. Edit UPSTREAM.md — bump the pin + append a rebase-log
-#     entry.
-
-# 3g. Commit.
-git add services/sfu/upstream services/sfu/UPSTREAM.md
-git commit -m "chore(sfu): quarterly rebase to livekit ${NEW_LIVEKIT_TAG}"
+cargo run -p lakko-svc-sfu --bin lakko-svc-sfu
 ```
 
-## 4. Adding a Lakko-only Go file (lakko-additions/)
-
-For code that doesn't belong inline in upstream — auth-JWT
-verifier middleware, Lakko-specific integration tests,
-Prometheus metric labels, etc.
+Verify:
 
 ```bash
-# Just write the file under services/sfu/lakko-additions/.
-# No patch needed — these files survive the rebase
-# untouched.
-mkdir -p services/sfu/lakko-additions/auth
-$EDITOR services/sfu/lakko-additions/auth/jwt_verifier.go
-
-git add services/sfu/lakko-additions/auth/jwt_verifier.go
-git commit -m "feat(sfu): add Lakko JWT verifier [3b1c]"
+curl -i http://127.0.0.1:7880/health   # → 200 ok
+curl -i http://127.0.0.1:7880/ready    # → 200 ready (after JWKS pull)
+curl -i http://127.0.0.1:6789/metrics  # → Prometheus exposition
 ```
 
-The build system (Go modules + a `services/sfu/lakko-additions/go.mod`
-once we have ≥ 1 Go file) treats these as a separate
-module that depends on `./upstream/livekit/...`. That
-boundary keeps the patch surface and the addition surface
-clean from each other.
-
-## 5. `justfile` recipes
-
-The root `justfile` exposes the common operations. The
-recipes themselves are added in 3b1b once we have actual
-patches to test against:
-
-```text
-just sfu-apply-patches   # apply every lakko-patches/*.patch
-                         # to upstream/livekit/. Used in dev
-                         # before building.
-just sfu-rebuild-patches # regenerate every patch from the
-                         # current upstream/livekit state.
-                         # Used when a manual edit needs
-                         # capturing.
-just sfu-rebase          # quarterly rebase (§3 above).
-just sfu-verify-clean    # assert upstream/ matches the pin
-                         # + every patch applies cleanly.
-                         # CI gate.
-```
-
-These are stubs until 3b1b lands the first patch.
-
-## 6. CI gates
-
-The CI side enforces:
-
-1. Every commit that touches `services/sfu/upstream/` must
-   also touch `services/sfu/UPSTREAM.md` (the pin must
-   move). Exception: the initial vendor commit (§1) — a
-   `.gitattributes`-level marker exempts the first commit
-   that creates the directory.
-2. `just sfu-verify-clean` passes — every patch applies on
-   top of the pinned upstream cleanly.
-3. Every file under `services/sfu/upstream/` whose Lakko
-   diff exists carries a `LAKKO:` marker comment.
-4. The `cargo deny` / `reuse lint` / `clippy` gates from
-   the root `justfile` are Rust-side only and do not run
-   against the SFU. Go-side linting (`go vet`, `golangci-lint`)
-   is added in 3b1b once there's Go code to lint.
-
-## 7. Troubleshooting
-
-### "I edited a file under `upstream/` directly and now I'm confused"
+## 3. Test
 
 ```bash
-# Save your change as a patch, then revert.
-git -C services/sfu/upstream/livekit diff > /tmp/save.patch
-git checkout services/sfu/upstream/livekit
+# Unit + integration tests inside the crate.
+cargo test -p lakko-svc-sfu
 
-# Manually move /tmp/save.patch into services/sfu/lakko-patches/
-# with a sequenced filename + descriptive suffix per §2.
+# Full workspace test (catches cross-crate breakages).
+just test
+
+# Lint gates (cargo clippy --workspace -- -D warnings).
+just lint
+
+# Cargo audit / cargo deny across the workspace.
+just audit
+
+# Integration tests with mock peers — these live under
+# services/sfu/tests/, drive two webrtc-rs / str0m peers
+# through the real signaling endpoint, and assert SFrame
+# ciphertext byte-exact passthrough.
+cargo test -p lakko-svc-sfu --test integration
 ```
 
-### "The rebase script failed mid-way"
+CI gates that block merges:
 
-The patches are independent — apply them one by one, fix
-the failing one by hand (use `git apply --3way` for a
-3-way merge), regenerate that patch, then resume.
+1. `cargo test --workspace` green.
+2. `cargo clippy --workspace --all-targets -- -D warnings`
+   clean.
+3. `cargo deny check` clean.
+4. `cargo audit` baselined against the documented
+   exceptions in
+   [`docs/security/known-gaps.md`](../../docs/security/known-gaps.md).
+5. Reproducible-build check: two GitHub Actions runners
+   produce a byte-identical `target/release/lakko-svc-sfu`.
 
-### "I want to run the SFU locally"
+## 4. Deploy
 
-That's a 3b1b+ task — once the patches land, build with
-`go build ./...` from `services/sfu/upstream/livekit/cmd/server`.
-Until then there's no operational SFU binary to run.
+Per
+[`infra/README-calls.md`](../../infra/README-calls.md) —
+Hetzner CCX22 dedicated VPS, systemd unit
+[`lakko-sfu.service`](../../infra/systemd/lakko-sfu.service),
+nginx vhost
+[`sfu.conf`](../../infra/nginx/sites-available/sfu.conf),
+deploy script
+[`deploy-sfu.sh`](../../infra/scripts/deploy-sfu.sh).
+
+```bash
+# 1. Build the release binary on a CI runner (or laptop
+#    with the pinned Rust toolchain).
+cargo build -p lakko-svc-sfu --release
+
+# 2. Ship to the SFU VPS.
+scp target/release/lakko-svc-sfu \
+    root@sfu.lakko.me:/usr/local/bin/lakko-sfu
+
+# 3. Restart.
+ssh root@sfu.lakko.me 'systemctl restart lakko-sfu'
+
+# 4. Tail logs.
+ssh root@sfu.lakko.me 'journalctl -u lakko-sfu -f'
+```
+
+The first-time bootstrap (systemd unit install, nginx
+vhost, TLS cert, ufw) is the
+[`infra/scripts/deploy-sfu.sh`](../../infra/scripts/deploy-sfu.sh)
+one-shot — see
+[`infra/README-calls.md`](../../infra/README-calls.md)
+§"First-time deploy" for the sequence.
+
+## 5. Bumping the WebRTC stack
+
+See [`UPSTREAM.md`](./UPSTREAM.md) §"Bumping the pin".
+Short version:
+
+```bash
+# Update the exact version in services/sfu/Cargo.toml.
+$EDITOR services/sfu/Cargo.toml
+cargo update -p webrtc        # or -p str0m
+just audit
+just lint
+just test
+# Append changelog entry to UPSTREAM.md.
+git add services/sfu/Cargo.toml Cargo.lock services/sfu/UPSTREAM.md
+git commit -m "chore(sfu): bump webrtc-rs to 0.X.Y"
+```
+
+Major bumps (1.x → 2.x) ride their own PR with the diff
+explained in the commit message.
+
+## 6. Troubleshooting
+
+### "Health check fails right after deploy"
+
+Most likely the SFU can't reach the auth JWKS endpoint.
+
+```bash
+ssh root@sfu.lakko.me 'curl -sv https://auth.lakko.me/.well-known/jwks.json | head'
+ssh root@sfu.lakko.me 'journalctl -u lakko-sfu -n 50 | grep jwks'
+```
+
+Fix: confirm `LAKKO_SFU_JWKS_URL` in
+`/etc/lakko/lakko.env` points to a reachable, valid JWKS
+endpoint. The `ready` probe stays red until the first
+successful pull.
+
+### "Peers connect but no media flows"
+
+Almost always an ICE problem — coturn unreachable, or the
+SFU's advertised ICE candidates resolve to the wrong
+interface.
+
+```bash
+# Verify coturn from outside the VPS.
+openssl s_client -connect turn.lakko.me:443 -servername turn.lakko.me < /dev/null
+
+# Tail SFU logs at debug level — webrtc-rs / str0m emit
+# ICE candidate lines we propagate via tracing.
+ssh root@sfu.lakko.me 'RUST_LOG=lakko_svc_sfu=debug,webrtc=debug systemctl restart lakko-sfu'
+ssh root@sfu.lakko.me 'journalctl -u lakko-sfu -f | grep -i ice'
+```
+
+### "Metrics endpoint missing alarms-referenced metric"
+
+Cross-reference
+[`infra/prometheus/rules/calls.yml`](../../infra/prometheus/rules/calls.yml).
+Every PromQL `expr:` in there names a metric the SFU
+**must** expose. The `S-3-B-metrics` sprint enumerates
+them — if a rule lights up with `NoData`, that's a bug in
+the metrics module, not in the alert.
+
+### "Memory grows during a long call"
+
+Check whether `RTCPeerConnection` instances drop cleanly
+when peers leave. The `S-3-B-routing` sprint adds an
+integration test that opens + closes 100 peers in a loop
+and asserts steady-state RSS — that test must stay green.
+
+```bash
+ssh root@sfu.lakko.me '
+  while sleep 30; do
+    ps -o rss,vsz,pid,cmd -p "$(systemctl show -p MainPID lakko-sfu | cut -d= -f2)"
+  done
+'
+```
+
+## 7. What used to be here
+
+This file previously described a `vendor + patches +
+quarterly rebase` workflow for a LiveKit Go fork. That
+strategy is **superseded** by
+[ADR-0011](../../docs/adr/0011-rust-sfu.md). The Git
+history retains the old playbook (commit
+`a9fb877` and prior); current operations follow the
+sections above.

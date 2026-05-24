@@ -3,10 +3,34 @@
 
 # ADR-0008: LiveKit fork — operational strategy
 
-- **Status:** Accepted
+- **Status:** **Superseded** by [ADR-0011](./0011-rust-sfu.md) (2026-05-24)
 - **Date:** 2026-05-19
 - **Context:** Phase 3b implementation kick-off
-- **Supersedes:** none (extends ADR-0003 with operational detail)
+- **Supersedes:** none (extended ADR-0003 with operational detail)
+
+> **Note (2026-05-24):** this ADR is **entirely superseded**.
+> Lakko no longer forks LiveKit; the SFU is a minimal Rust
+> crate built on `webrtc-rs` / `str0m`. Quarterly-rebase,
+> patch-files, `LAKKO:` markers — none of that mechanism
+> applies anymore. The whole "upstream tracking" framework
+> goes away because there is no upstream to track.
+>
+> Two specific decisions from this ADR **survive** in
+> [ADR-0011](./0011-rust-sfu.md):
+>
+> 1. **Auth token format** (§"Auth token format") — the
+>    `CallJwtClaims` shape moved into `crates/lakko-call-jwt`
+>    and is verified the same way against the Rust SFU.
+> 2. **Single-VPS Hetzner deployment topology**
+>    (§"Deployment") — still applies, see
+>    [`infra/README-calls.md`](../../infra/README-calls.md).
+>
+> Everything else in this document — fork layout, patch
+> sequencing (3b1b / 3b1c / 3b1d), `lakko-patches/`,
+> `lakko-additions/`, rebase mechanics — is no longer in
+> effect. Read the rest of this document as historical
+> context for why we chose Rust SFU in
+> [ADR-0011](./0011-rust-sfu.md).
 
 ## Context
 
