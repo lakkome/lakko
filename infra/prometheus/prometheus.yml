@@ -1,0 +1,118 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+# Prometheus scrape config for the Lakko call-side fleet
+# (Phase 3b5).
+#
+# Sits on the monitoring VPS (CX22 is plenty — Prometheus is
+# light, Grafana is the heavier neighbour). Scrapes:
+#   - LiveKit SFU's /metrics (mTLS to sfu.lakko.me)
+#   - coturn's prometheus exporter (mTLS to turn.lakko.me)
+#   - node_exporter on every VPS in the fleet for system
+#     metrics (CPU, RAM, disk, network bytes).
+#
+# Retention: 30 days local (sized for one CX22 with the
+# default 4 GB tsdb cap). Long-term storage is out of scope
+# for V1; if you need 1y+ retention, ship to a remote-write
+# endpoint (Mimir / Thanos).
+
+global:
+  scrape_interval:     15s
+  evaluation_interval: 30s
+  external_labels:
+    cluster: lakko-prod
+
+# Alertmanager — runs on the same VPS, default port. Alerts
+# fire into Slack / email via webhook (see
+# /etc/alertmanager/alertmanager.yml).
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ['127.0.0.1:9093']
+
+# Alert rules — keep separate so a syntax error in one
+# rules file doesn't block the rest of the scrape loop.
+rule_files:
+  - /etc/prometheus/rules/calls.yml
+  - /etc/prometheus/rules/node.yml
+
+scrape_configs:
+  # ----------------------------------------------------------
+  # LiveKit SFU — the primary signal we care about. Per-call
+  # bandwidth, packet loss, room count, dropped streams.
+  # ----------------------------------------------------------
+  - job_name: lakko_sfu
+    metrics_path: /metrics
+    scheme: https
+    scrape_interval: 15s
+    scrape_timeout: 10s
+    tls_config:
+      # Server cert validation against Let's Encrypt's roots
+      # (default Ubuntu bundle).
+      ca_file: /etc/ssl/certs/ca-certificates.crt
+      # mTLS — the SFU's nginx vhost requires a client cert
+      # signed by the Lakko private CA. The monitoring VPS
+      # holds the cert + key; nothing else does.
+      cert_file: /etc/prometheus/mtls/monitoring.crt
+      key_file:  /etc/prometheus/mtls/monitoring.key
+      server_name: sfu.lakko.me
+    static_configs:
+      - targets: ['sfu.lakko.me']
+        labels:
+          service: sfu
+          environment: production
+
+  # ----------------------------------------------------------
+  # coturn — TURN relay. Counts sessions, bytes relayed,
+  # allocation failures, TLS handshake errors.
+  # ----------------------------------------------------------
+  - job_name: lakko_coturn
+    metrics_path: /metrics
+    scheme: https
+    scrape_interval: 30s
+    scrape_timeout: 10s
+    tls_config:
+      ca_file: /etc/ssl/certs/ca-certificates.crt
+      cert_file: /etc/prometheus/mtls/monitoring.crt
+      key_file:  /etc/prometheus/mtls/monitoring.key
+      server_name: turn.lakko.me
+    static_configs:
+      - targets: ['turn.lakko.me']
+        labels:
+          service: coturn
+          environment: production
+
+  # ----------------------------------------------------------
+  # node_exporter — system metrics on every VPS we run.
+  # Add a target per VPS as the fleet grows.
+  # ----------------------------------------------------------
+  - job_name: node
+    scrape_interval: 30s
+    static_configs:
+      - targets:
+          - 'sfu.lakko.me:9100'
+          - 'turn.lakko.me:9100'
+          - 'auth.lakko.me:9100'      # services/auth
+          - 'ds.lakko.me:9100'         # services/ds
+          - 'discovery.lakko.me:9100'  # services/discovery
+        labels:
+          environment: production
+    # node_exporter binds public-only on these VPSes via the
+    # mTLS-protected nginx vhost (one shared cert across the
+    # fleet). The localhost-bound exporter forwards to a
+    # localhost-bound nginx that requires the client cert.
+    scheme: https
+    tls_config:
+      ca_file: /etc/ssl/certs/ca-certificates.crt
+      cert_file: /etc/prometheus/mtls/monitoring.crt
+      key_file:  /etc/prometheus/mtls/monitoring.key
+
+  # ----------------------------------------------------------
+  # Prometheus itself — for the meta-dashboard. Useful to
+  # detect when the scraper itself is wedged.
+  # ----------------------------------------------------------
+  - job_name: prometheus
+    static_configs:
+      - targets: ['127.0.0.1:9090']
+        labels:
+          environment: monitoring

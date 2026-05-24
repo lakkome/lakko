@@ -1,0 +1,84 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+# LiveKit SFU systemd unit (Phase 3b2).
+#
+# The actual `livekit-server` binary comes from our LiveKit fork
+# (see services/sfu/ + ADR-0008). Build it with `go build` on a
+# CI runner, scp the binary to /usr/local/bin/lakko-sfu, install
+# this unit, restart.
+#
+# Co-located with nothing — the SFU lives on its own Hetzner
+# CCX22 (4 vCPU, 16 GB, 20 TB transfer/mo). At V1 user-load this
+# handles ~50 concurrent group calls × 5 participants each
+# without straining; 3b6's cost analysis is what drives the
+# scale-out decision to a second VPS.
+#
+# Operate:
+#   - journalctl -u lakko-sfu -f
+#   - systemctl reload lakko-sfu    (rebuild RPC routes from
+#                                    livekit.yaml without
+#                                    dropping live calls)
+
+[Unit]
+Description=Lakko LiveKit SFU fork (media routing + SFrame passthrough)
+Documentation=https://github.com/lakkome/lakko services/sfu/README.md
+PartOf=lakko.target
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=lakkome
+Group=lakkome
+
+# livekit.yaml carries:
+#  - listen addresses (Lakko binds 7880 for the LiveKit signal
+#    WebSocket, 7881 for the TCP fallback, 5349 + 50000-60000
+#    for media RTP).
+#  - JWKS URL pointing at https://auth.lakko.me/.well-known/jwks.json
+#    so the SFU verifies call-admission tokens against the same
+#    Ed25519 public key services/auth publishes (Phase 3b4).
+#  - room TTL, max participants per room, codec preferences.
+EnvironmentFile=/etc/lakko/lakko.env
+Environment=LIVEKIT_CONFIG=/etc/lakko/livekit.yaml
+
+ExecStart=/usr/local/bin/lakko-sfu --config $LIVEKIT_CONFIG
+ExecReload=/bin/kill -HUP $MAINPID
+
+Restart=on-failure
+RestartSec=5s
+
+# CAP_NET_BIND_SERVICE — for the 443 fallback WebSocket the
+# upstream LiveKit signal port (7880) doesn't need privileged
+# binding, but the nginx vhost (infra/nginx/sites-available/sfu.conf)
+# proxies 443 → 7880 to keep TLS off the SFU.
+
+# --- Security hardening ---------------------------------------
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+# LiveKit writes Prometheus metrics + recording state under
+# /var/lib/lakko-sfu (when 3c8 recording lands — currently
+# unused but the path is reserved).
+ReadWritePaths=/var/lib/lakko-sfu /var/log/lakko-sfu
+ReadOnlyPaths=/etc/lakko
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+[Install]
+WantedBy=lakko.target

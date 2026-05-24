@@ -1,0 +1,28 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+[package]
+name = "lakko-channels"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Two-tier channel broadcast (Phase 4a — publisher path). PublisherGroup exporter seed + per-message AEAD + Ed25519 signature on every post. See ADR-0010."
+
+[lints]
+workspace = true
+
+[dependencies]
+thiserror.workspace = true
+tracing.workspace = true
+
+# Crypto primitives (HKDF, ChaCha20-Poly1305, Ed25519) + MLS exporter
+# bridge. We never link OpenMLS directly from this crate; the publisher
+# passes us the exporter output it derived from its PublisherGroup.
+lakko-crypto.workspace = true
+
+[dev-dependencies]
+hex = "0.4"

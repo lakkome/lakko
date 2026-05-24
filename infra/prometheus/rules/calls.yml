@@ -1,0 +1,126 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+# Prometheus alert rules for the Lakko call-side fleet
+# (Phase 3b5).
+#
+# Each rule has a `severity` label so Alertmanager can route
+# critical → on-call pager, warning → Slack-only.
+# Annotations carry the human-readable summary + a link to
+# the relevant Grafana panel.
+
+groups:
+  - name: lakko_sfu
+    interval: 30s
+    rules:
+      # ----------------------------------------------------------
+      # Liveness — the SFU is up + responding to scrapes.
+      # ----------------------------------------------------------
+      - alert: LakkoSfuDown
+        expr: up{job="lakko_sfu"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          service: sfu
+        annotations:
+          summary: "LiveKit SFU is unreachable"
+          description: |
+            Prometheus has been unable to scrape the SFU's
+            /metrics endpoint for 2 minutes. Either the
+            service is down, the nginx vhost is misrouted,
+            or the mTLS client cert was rotated without
+            updating Prometheus.
+
+            Check: `systemctl status lakko-sfu` on the
+            SFU VPS, and `journalctl -u lakko-sfu -n 200`.
+
+      # ----------------------------------------------------------
+      # CPU saturation — sustained > 85 % for 5 min is the
+      # early warning before quality starts dropping.
+      # ----------------------------------------------------------
+      - alert: LakkoSfuCpuHigh
+        expr: |
+          100 * (1 - avg by(instance)(rate(node_cpu_seconds_total{mode="idle",instance="sfu.lakko.me:9100"}[5m])))
+            > 85
+        for: 5m
+        labels:
+          severity: warning
+          service: sfu
+        annotations:
+          summary: "SFU CPU > 85 % for 5 minutes"
+          description: |
+            The SFU host is CPU-bound. Concurrent room count
+            may have outgrown the CX22 capacity — time to
+            check 3b6 cost analysis and provision a second
+            SFU VPS.
+
+      # ----------------------------------------------------------
+      # Bandwidth budget — 20 TB/mo Hetzner allowance.
+      # Alarm at 80 % so there's headroom to react before the
+      # surcharge tier kicks in.
+      # ----------------------------------------------------------
+      - alert: LakkoSfuBandwidthBudget80pct
+        expr: |
+          sum(increase(node_network_transmit_bytes_total{instance="sfu.lakko.me:9100"}[30d]))
+            > 16 * 1024 * 1024 * 1024 * 1024
+        for: 1h
+        labels:
+          severity: warning
+          service: sfu
+        annotations:
+          summary: "SFU egress > 16 TB this billing period"
+          description: |
+            Hetzner's monthly transfer allowance is 20 TB.
+            We're past 80 % with time left in the cycle —
+            adjust simulcast layer caps or scale out to a
+            second VPS.
+
+      # ----------------------------------------------------------
+      # Packet loss — LiveKit emits per-room aggregates. > 5 %
+      # sustained means real users are seeing artefacts.
+      # ----------------------------------------------------------
+      - alert: LakkoSfuPacketLossHigh
+        expr: |
+          avg by(room)(livekit_packet_loss_ratio{job="lakko_sfu"}) > 0.05
+        for: 3m
+        labels:
+          severity: warning
+          service: sfu
+        annotations:
+          summary: "Packet loss > 5 % in room {{ $labels.room }}"
+          description: |
+            One or more participants in {{ $labels.room }}
+            are seeing > 5 % packet loss for 3 minutes.
+            Likely network-side; the BandwidthController
+            (#39) should already be dropping their layer
+            to Low automatically.
+
+  - name: lakko_coturn
+    interval: 30s
+    rules:
+      - alert: LakkoCoturnDown
+        expr: up{job="lakko_coturn"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          service: coturn
+        annotations:
+          summary: "coturn TURN relay is unreachable"
+          description: |
+            ~15-25 % of calls fall back to TURN; with coturn
+            down those calls will fail to connect entirely.
+            Check `systemctl status coturn` on turn.lakko.me.
+
+      - alert: LakkoCoturnTlsCertExpiringSoon
+        expr: |
+          (node_ssl_cert_not_after{instance="turn.lakko.me:9100"} - time()) / 86400 < 14
+        for: 1h
+        labels:
+          severity: warning
+          service: coturn
+        annotations:
+          summary: "TURN TLS cert expires in < 14 days"
+          description: |
+            Let's Encrypt's auto-renew should have fired by
+            now. Check `certbot renew --dry-run` on
+            turn.lakko.me.

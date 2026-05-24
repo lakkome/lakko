@@ -36,3 +36,7 @@ infra/etc-lakko/lakko.env
 # Shared Run Configurations: kept local, not committed.
 # The default env-vars template lives in .env.example + CLAUDE.md "Local dev".
 .run/
+
+# macOS Finder metadata — never useful in git.
+.DS_Store
+**/.DS_Store
