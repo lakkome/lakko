@@ -2073,6 +2073,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "lakko-channels"
+version = "0.0.0"
+dependencies = [
+ "hex",
+ "lakko-crypto",
+ "thiserror 1.0.69",
+ "tracing",
+]
+
+[[package]]
 name = "lakko-contacts"
 version = "0.0.0"
 dependencies = [

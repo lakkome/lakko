@@ -43,6 +43,7 @@ The tactical decomposition of all 6 phases with sprint breakdowns lives in [`doc
 | `lakko-storage` | SQLCipher abstraction, blob store, WAL |
 | `lakko-sync` | Multi-device sync, hybrid logical clock, edit CRDT |
 | `lakko-calls` | SFrame, jitter buffer, codec negotiation, ICE/TURN |
+| `lakko-channels` | Two-tier broadcast (Phase 4a — publisher path). PublisherGroup exporter seed + per-message AEAD + Ed25519 signature on every post. See [ADR-0010](docs/adr/0010-channels-two-tier-broadcast.md) |
 | `lakko-contacts` | Username discovery (OPRF), invite capabilities, pseudonym lifecycle |
 | `lakko-presence` | Blinded per-conversation presence tokens |
 | `lakko-push` | Encrypted APNs / FCM / UnifiedPush envelopes |

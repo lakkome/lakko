@@ -12,6 +12,7 @@ members = [
     "crates/lakko-storage",
     "crates/lakko-sync",
     "crates/lakko-calls",
+    "crates/lakko-channels",
     "crates/lakko-contacts",
     "crates/lakko-presence",
     "crates/lakko-push",
@@ -81,6 +82,7 @@ lakko-transport = { path = "crates/lakko-transport", version = "0.0.0" }
 lakko-storage = { path = "crates/lakko-storage", version = "0.0.0" }
 lakko-sync = { path = "crates/lakko-sync", version = "0.0.0" }
 lakko-calls = { path = "crates/lakko-calls", version = "0.0.0" }
+lakko-channels = { path = "crates/lakko-channels", version = "0.0.0" }
 lakko-contacts = { path = "crates/lakko-contacts", version = "0.0.0" }
 lakko-presence = { path = "crates/lakko-presence", version = "0.0.0" }
 lakko-push = { path = "crates/lakko-push", version = "0.0.0" }
