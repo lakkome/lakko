@@ -72,6 +72,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
+import androidx.compose.ui.platform.LocalContext
+import me.lakko.app.calls.CallSoundController
 import me.lakko.app.calls.CallUiState
 
 /**
@@ -125,10 +127,60 @@ public fun CallScreen(
     onExit: () -> Unit,
     state: CallUiState = remember { CallUiState() },
 ) {
+    // One sound controller per CallScreen lifetime; released
+    // in the same DisposableEffect that resets the UI state so
+    // the SoundPool + cached MediaPlayer handles do not leak
+    // their AudioTrack resources when the user navigates away.
+    val context = LocalContext.current
+    val sounds = remember(context) { CallSoundController(context) }
     DisposableEffect(Unit) {
-        onDispose { state.reset() }
+        onDispose {
+            sounds.release()
+            state.reset()
+        }
     }
+
     val phase by state.phase.collectAsState()
+    val participants by state.participants.collectAsState()
+
+    // Phase → sound mapping. Mirrors the same trigger map on
+    // web (`Call.tsx`) and iOS (`CallScreen.swift`) so the
+    // audible UX is identical across platforms.
+    LaunchedEffect(phase) {
+        when (phase) {
+            is CallUiState.CallPhase.Prejoin -> sounds.stopAll()
+            is CallUiState.CallPhase.Connecting ->
+                sounds.startLoop(CallSoundController.SoundName.RINGBACK_OUTGOING)
+            is CallUiState.CallPhase.Connected -> {
+                sounds.stopLoop(CallSoundController.SoundName.RINGBACK_OUTGOING)
+                sounds.playOnce(CallSoundController.SoundName.JOIN)
+            }
+            is CallUiState.CallPhase.Reconnecting ->
+                sounds.stopLoop(CallSoundController.SoundName.RINGBACK_OUTGOING)
+            is CallUiState.CallPhase.Ended -> {
+                sounds.stopAll()
+                sounds.playOnce(CallSoundController.SoundName.LEAVE)
+            }
+        }
+    }
+
+    // Peer arrival / departure cues — fire one-shots on remote-
+    // participant count deltas while connected. Local
+    // participant is excluded because they are not a "peer"
+    // from the user's perspective.
+    val remoteCount = participants.count { !it.isLocal }
+    var lastRemoteCount by remember { mutableStateOf(0) }
+    LaunchedEffect(remoteCount, phase) {
+        if (phase is CallUiState.CallPhase.Connected && lastRemoteCount > 0) {
+            if (remoteCount > lastRemoteCount) {
+                sounds.playOnce(CallSoundController.SoundName.JOIN)
+            } else if (remoteCount < lastRemoteCount) {
+                sounds.playOnce(CallSoundController.SoundName.LEAVE)
+            }
+        }
+        lastRemoteCount = remoteCount
+    }
+
     when (phase) {
         is CallUiState.CallPhase.Prejoin -> PrejoinScreen(state)
         else -> InCallView(state = state, onExit = onExit)

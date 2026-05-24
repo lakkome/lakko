@@ -699,6 +699,16 @@ private struct CallEndedOverlay: View {
 
 public struct CallScreen: View {
     @StateObject private var state = CallUiState()
+    /// One sound controller per CallScreen lifetime; deallocated
+    /// with the view (which deactivates the underlying
+    /// AVAudioPlayer instances via its `deinit`).
+    @StateObject private var sounds = CallSoundsObservable()
+    /// Last observed remote-participant count, used to fire
+    /// `join` / `leave` cues on count deltas while the call is
+    /// `connected`. Tracked in the view rather than the state
+    /// object because it is sound-controller bookkeeping, not
+    /// model-of-the-call state.
+    @State private var lastRemoteCount: Int = 0
     let onExit: () -> Void
 
     public init(onExit: @escaping () -> Void) {
@@ -725,7 +735,44 @@ public struct CallScreen: View {
                 callView
             }
         }
-        .onDisappear { state.reset() }
+        // Phase → sound mapping. Mirrors the same trigger map
+        // on web (`Call.tsx`) and Android (`CallScreen.kt`) so
+        // the audible UX is identical across platforms. iOS-17
+        // two-parameter `onChange` form (the single-parameter
+        // form is deprecated in iOS 17).
+        .onChange(of: state.phase) { _, newPhase in
+            switch newPhase {
+            case .prejoin:
+                sounds.controller.stopAll()
+            case .connecting:
+                sounds.controller.startLoop(.ringbackOutgoing)
+            case .connected:
+                sounds.controller.stopLoop(.ringbackOutgoing)
+                sounds.controller.playOnce(.join)
+            case .reconnecting:
+                sounds.controller.stopLoop(.ringbackOutgoing)
+            case .ended:
+                sounds.controller.stopAll()
+                sounds.controller.playOnce(.leave)
+            }
+        }
+        // Peer arrival / departure cues. The diff against
+        // `lastRemoteCount` fires the right one-shot when
+        // someone joins or leaves an active call.
+        .onChange(of: state.participants.filter { !$0.isLocal }.count) { _, newCount in
+            if case .connected = state.phase, lastRemoteCount > 0 {
+                if newCount > lastRemoteCount {
+                    sounds.controller.playOnce(.join)
+                } else if newCount < lastRemoteCount {
+                    sounds.controller.playOnce(.leave)
+                }
+            }
+            lastRemoteCount = newCount
+        }
+        .onDisappear {
+            sounds.controller.stopAll()
+            state.reset()
+        }
     }
 
     private var callView: some View {

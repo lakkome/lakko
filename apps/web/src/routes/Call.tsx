@@ -58,6 +58,7 @@ import {
   type Participant,
   type QualityTier,
 } from "../state/call-state";
+import { CallSoundController } from "../calls/CallSoundController";
 import { paths } from "./paths";
 
 // ============================================================================
@@ -1109,6 +1110,11 @@ function seedMockParticipants(): void {
 const Call: Component = () => {
   const navigate = useNavigate();
 
+  // Sound cues — one controller per Call mount; disposed on
+  // unmount so cached <audio> elements + their decoders are
+  // released cleanly.
+  const sounds = new CallSoundController();
+
   onMount(() => {
     callActions.reset();
     // Note: `reset()` leaves us in `prejoin` phase. The mock
@@ -1117,7 +1123,61 @@ const Call: Component = () => {
     // `seedMockParticipants` inside the onJoin callback below).
   });
   onCleanup(() => {
+    sounds.dispose();
     callActions.reset();
+  });
+
+  // Phase → sound mapping. Mirrors the same trigger map on
+  // iOS / Android so the user-facing audio is identical
+  // across platforms.
+  //   prejoin     → silence
+  //   connecting  → ringback-outgoing loop ("we are calling")
+  //   connected   → stop ringback, play join one-shot
+  //   reconnecting→ stop everything (visual banner conveys it)
+  //   ended       → stop everything, play leave one-shot
+  createEffect(() => {
+    const kind = callState.phase().kind;
+    switch (kind) {
+      case "prejoin":
+        sounds.stopAll();
+        break;
+      case "connecting":
+        sounds.startLoop("ringback-outgoing");
+        break;
+      case "connected":
+        sounds.stopLoop("ringback-outgoing");
+        sounds.playOnce("join");
+        break;
+      case "reconnecting":
+        sounds.stopLoop("ringback-outgoing");
+        break;
+      case "ended":
+        sounds.stopAll();
+        sounds.playOnce("leave");
+        break;
+    }
+  });
+
+  // Peer-arrival / peer-departure cues. Track the remote
+  // participant count; on each delta fire the right one-shot.
+  // Local participant is excluded because they aren't a
+  // "peer" from the user's perspective.
+  let lastRemoteCount = 0;
+  createEffect(() => {
+    const remoteCount = callState
+      .participants()
+      .filter((p) => !p.isLocal).length;
+    // Skip the initial seed transition — it's the same audible
+    // event as the `connected → join` cue above and would
+    // double up.
+    if (callState.phase().kind === "connected" && lastRemoteCount > 0) {
+      if (remoteCount > lastRemoteCount) {
+        sounds.playOnce("join");
+      } else if (remoteCount < lastRemoteCount) {
+        sounds.playOnce("leave");
+      }
+    }
+    lastRemoteCount = remoteCount;
   });
 
   // Compute whether we're alone in the call (no remote yet).
