@@ -1,0 +1,76 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+[package]
+name = "lakko-svc-sfu"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Selective Forwarding Unit for Lakko's group calls. WS signaling endpoint + per-peer registry; SFrame ciphertext passes through opaque. See ADR-0011."
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "lakko-svc-sfu"
+path = "src/main.rs"
+
+[dependencies]
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+# HTTP / WebSocket host. Same axum version pin as
+# services/auth + services/ds so the workspace resolves to one
+# axum, one tower-http.
+axum = { version = "0.8", features = ["macros", "http2", "ws"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["trace", "request-id", "timeout"] }
+
+# Futures combinators used by the WS frame loop.
+futures = "0.3"
+
+# .env loading — debug builds only; production reads the systemd
+# EnvironmentFile=/etc/lakko/lakko.env shipped by
+# infra/systemd/lakko-sfu.service.
+dotenvy = "0.15"
+
+# Prometheus metrics. The `metrics` crate is the facade; the
+# Prometheus exporter renders the recorder's snapshot at the
+# `/metrics` endpoint that infra/prometheus/prometheus.yml
+# scrapes via mTLS.
+metrics = "0.24"
+metrics-exporter-prometheus = { version = "0.16", default-features = false }
+
+# Call-admission JWT — minted by services/auth, verified here.
+# This is the SAME crate auth links, so the wire format cannot
+# drift between minter and verifier. See ADR-0011.
+lakko-call-jwt.workspace = true
+
+# JWKS HTTPS fetch — pulled at boot + on a refresh interval
+# from auth.lakko.me. `rustls-tls` keeps the openssl dep out
+# of the build (we already standardised on rustls workspace-
+# wide for FIPS-friendliness + reproducible Linux builds).
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+# Pinned for build-info embedded in /version.
+[build-dependencies]
+# Nothing for now; the version comes straight from
+# `env!("CARGO_PKG_VERSION")` at compile time.
+
+[dev-dependencies]
+# Integration tests will drive the WS endpoint with a real
+# websocket client. tokio-tungstenite mirrors what the clients
+# use on the wire.
+tokio-tungstenite = "0.24"
+# JWT-tampering tests use base64url to splice a bogus
+# signature segment.
+base64 = "0.22"
