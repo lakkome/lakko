@@ -58,22 +58,28 @@ const PEER_OUTBOUND_CAPACITY: usize = 256;
 
 /// Shared application state handed to every axum route.
 #[derive(Clone)]
-pub(crate) struct AppState {
+pub struct AppState {
+    /// JWKS cache the WS upgrade handler reads to verify
+    /// the call-admission JWT.
     pub jwks: JwksCache,
+    /// Live peer registry — every admitted WS connection
+    /// inserts a [`Peer`] record here for the lifetime of
+    /// the socket.
     pub peers: PeerRegistry,
 }
 
 impl AppState {
     /// Build a fresh state container.
     #[must_use]
-    pub(crate) fn new(jwks: JwksCache, peers: PeerRegistry) -> Arc<Self> {
+    pub fn new(jwks: JwksCache, peers: PeerRegistry) -> Arc<Self> {
         Arc::new(Self { jwks, peers })
     }
 }
 
 /// Token query string — `?token=<jwt>`.
 #[derive(Debug, Deserialize)]
-pub(crate) struct ConnectQuery {
+pub struct ConnectQuery {
+    /// Call-admission JWT minted by `services/auth`.
     pub token: String,
 }
 
@@ -86,7 +92,7 @@ fn pseudonymise(account_id: &str) -> String {
 }
 
 /// Axum handler — verify token + upgrade to WebSocket.
-pub(crate) async fn ws_handler(
+pub async fn ws_handler(
     ws: WebSocketUpgrade,
     Query(query): Query<ConnectQuery>,
     State(state): State<Arc<AppState>>,

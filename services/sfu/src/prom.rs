@@ -30,33 +30,33 @@ use tracing::info;
 /// All names follow the `lakko_sfu_*` namespace so a
 /// federation scrape can dedupe with other Lakko services
 /// without prefix-clash.
-pub(crate) mod names {
+pub mod names {
     /// Total number of peers currently registered.
-    pub(crate) const PEERS_ACTIVE: &str = "lakko_sfu_peers_active";
+    pub const PEERS_ACTIVE: &str = "lakko_sfu_peers_active";
     /// Cumulative count of accepted WS upgrades.
-    pub(crate) const PEERS_ADMITTED_TOTAL: &str = "lakko_sfu_peers_admitted_total";
+    pub const PEERS_ADMITTED_TOTAL: &str = "lakko_sfu_peers_admitted_total";
     /// Cumulative count of rejected WS upgrades — JWT
     /// verify failed, kid unknown, expired, etc.
-    pub(crate) const PEERS_REJECTED_TOTAL: &str = "lakko_sfu_peers_rejected_total";
+    pub const PEERS_REJECTED_TOTAL: &str = "lakko_sfu_peers_rejected_total";
     /// Cumulative count of distinct calls observed since
     /// boot.
-    pub(crate) const CALLS_TOTAL: &str = "lakko_sfu_calls_total";
+    pub const CALLS_TOTAL: &str = "lakko_sfu_calls_total";
     /// Cumulative count of signaling frames received from
     /// peers. Labelled `kind` once we have a typed signaling
     /// protocol; for now a single bucket.
-    pub(crate) const SIGNALING_FRAMES_TOTAL: &str = "lakko_sfu_signaling_frames_total";
+    pub const SIGNALING_FRAMES_TOTAL: &str = "lakko_sfu_signaling_frames_total";
     /// JWKS cache age, seconds since the last successful
     /// refresh. The `LakkoSfuJwksStale` alert (future) will
     /// fire when this exceeds the configured refresh cadence
     /// by a wide margin.
-    pub(crate) const JWKS_CACHE_AGE_SECS: &str = "lakko_sfu_jwks_cache_age_seconds";
+    pub const JWKS_CACHE_AGE_SECS: &str = "lakko_sfu_jwks_cache_age_seconds";
 }
 
 /// Failures while installing the recorder. The exporter
 /// install is `std::sync::Once`-y — only the first call
 /// succeeds, which is exactly what we want in production.
 #[derive(Debug, Error)]
-pub(crate) enum MetricsError {
+pub enum MetricsError {
     /// The Prometheus recorder failed to install — usually
     /// because someone else already installed one.
     #[error("metrics recorder install failed: {0}")]
@@ -67,7 +67,7 @@ pub(crate) enum MetricsError {
 /// the text-format exposition the `/metrics` HTTP handler
 /// returns.
 #[derive(Clone)]
-pub(crate) struct MetricsExporter {
+pub struct MetricsExporter {
     handle: PrometheusHandle,
 }
 
@@ -83,7 +83,7 @@ impl MetricsExporter {
     /// reuse the global state across iterations — those
     /// tests opt out by using `install_test_recorder` or
     /// run inside their own process).
-    pub(crate) fn install() -> Result<Self, MetricsError> {
+    pub fn install() -> Result<Self, MetricsError> {
         let handle = PrometheusBuilder::new()
             .install_recorder()
             .map_err(|e| MetricsError::Install(e.to_string()))?;
@@ -130,7 +130,7 @@ impl MetricsExporter {
     }
 
     /// Render the Prometheus text-format exposition.
-    pub(crate) fn render(&self) -> String {
+    pub fn render(&self) -> String {
         self.handle.render()
     }
 }
@@ -138,7 +138,7 @@ impl MetricsExporter {
 /// Run a tiny axum HTTP server that serves `GET /metrics`.
 /// Exposed on a dedicated socket so nginx can mTLS-gate the
 /// metrics endpoint without touching the signaling path.
-pub(crate) async fn serve(exporter: MetricsExporter, bind: SocketAddr) -> anyhow::Result<()> {
+pub async fn serve(exporter: MetricsExporter, bind: SocketAddr) -> anyhow::Result<()> {
     use axum::{routing::get, Router};
 
     let router = Router::new().route(

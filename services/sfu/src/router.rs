@@ -39,7 +39,7 @@ use crate::protocol::{ClientFrame, ErrorCode, PeerSnapshot, RelayTarget, ServerF
 
 /// Failure modes of a single relay attempt.
 #[derive(Debug, Error)]
-pub(crate) enum RouterError {
+pub enum RouterError {
     /// Destination peer id was not in the same call (or has
     /// disconnected since the sender last saw the roster).
     #[error("unknown peer")]
@@ -55,7 +55,10 @@ pub(crate) enum RouterError {
 /// Map [`RouterError`] back to the wire [`ErrorCode`] the
 /// SFU emits to the original sender.
 impl RouterError {
-    pub(crate) fn to_wire_code(&self) -> ErrorCode {
+    /// Translate the router-internal error code into the
+    /// wire-level [`ErrorCode`] that the SFU emits to the
+    /// peer that triggered the failed dispatch.
+    pub fn to_wire_code(&self) -> ErrorCode {
         match self {
             Self::UnknownPeer => ErrorCode::UnknownPeer,
             Self::Backpressure => ErrorCode::BackpressureDrop,
@@ -73,7 +76,7 @@ fn pseudonymise(account_id: &str) -> String {
 
 /// Router. Stateless aside from the [`PeerRegistry`] it
 /// borrows; constructed per-request, not per-call.
-pub(crate) struct Router<'a> {
+pub struct Router<'a> {
     registry: &'a PeerRegistry,
 }
 
@@ -81,14 +84,14 @@ impl<'a> Router<'a> {
     /// Borrow the registry for the duration of one routing
     /// decision.
     #[must_use]
-    pub(crate) fn new(registry: &'a PeerRegistry) -> Self {
+    pub fn new(registry: &'a PeerRegistry) -> Self {
         Self { registry }
     }
 
     /// Build the welcome frame the SFU sends a peer right
     /// after admission. Reads the current call roster
     /// (excluding the just-admitted peer).
-    pub(crate) async fn welcome_for(&self, peer: &Peer, server_ts: u64) -> ServerFrame {
+    pub async fn welcome_for(&self, peer: &Peer, server_ts: u64) -> ServerFrame {
         let roster = self
             .registry
             .peers_in_call(&peer.call_id)
@@ -112,7 +115,7 @@ impl<'a> Router<'a> {
     /// same call. Backpressure on individual recipients is
     /// logged and counted but never propagated — one slow
     /// peer must not stall the rest of the fanout.
-    pub(crate) async fn announce_join(&self, peer: &Peer) {
+    pub async fn announce_join(&self, peer: &Peer) {
         let frame = ServerFrame::PeerJoined {
             peer_id: peer.id.to_string(),
             account_pseudonym: pseudonymise(&peer.account_id),
@@ -123,7 +126,7 @@ impl<'a> Router<'a> {
 
     /// Broadcast a `peer-left` to every remaining peer in
     /// the same call.
-    pub(crate) async fn announce_leave(&self, peer: &Peer) {
+    pub async fn announce_leave(&self, peer: &Peer) {
         let frame = ServerFrame::PeerLeft {
             peer_id: peer.id.to_string(),
         };
@@ -146,7 +149,7 @@ impl<'a> Router<'a> {
     ///   absent.
     /// - `Err(RouterError::Backpressure)` — the destination
     ///   queue was full.
-    pub(crate) async fn handle_client_frame(
+    pub async fn handle_client_frame(
         &self,
         sender: &Peer,
         frame: ClientFrame,

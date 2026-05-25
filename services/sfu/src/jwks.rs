@@ -29,7 +29,7 @@ use crate::config::Config;
 
 /// JWKS-related failure modes the public API exposes.
 #[derive(Debug, Error)]
-pub(crate) enum JwksError {
+pub enum JwksError {
     /// The HTTP fetch could not be issued or returned a
     /// non-success status.
     #[error("jwks fetch failed: {0}")]
@@ -65,7 +65,7 @@ impl From<JwtError> for JwksError {
 /// cheap snapshot reads, plus a refreshed-at timestamp for
 /// future staleness alerts.
 #[derive(Clone)]
-pub(crate) struct JwksCache {
+pub struct JwksCache {
     inner: Arc<RwLock<Snapshot>>,
 }
 
@@ -75,10 +75,26 @@ struct Snapshot {
 }
 
 impl JwksCache {
+    /// Construct directly from an already-loaded `Jwks`.
+    /// Production code never calls this — it goes through
+    /// [`Self::fetch_initial`] which hits the HTTPS endpoint.
+    /// Integration tests use this constructor so they can
+    /// pre-load a JWKS minted from a known test key.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn from_jwks_for_test(jwks: Jwks) -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(Snapshot {
+                keys: jwks,
+                refreshed_at: SystemTime::now(),
+            })),
+        }
+    }
+
     /// Pull the JWKS once and store it. Returns `Err` on
     /// the very first failure — the caller (main.rs) panics,
     /// which is exactly what we want at boot.
-    pub(crate) async fn fetch_initial(cfg: &Config) -> Result<Self, JwksError> {
+    pub async fn fetch_initial(cfg: &Config) -> Result<Self, JwksError> {
         let keys = fetch_jwks(&cfg.jwks_url).await?;
         info!(url = %cfg.jwks_url, key_count = keys.keys.len(), "jwks initial fetch ok");
         Ok(Self {
@@ -92,7 +108,7 @@ impl JwksCache {
     /// Background-refresh task. Periodic; failures are
     /// logged and otherwise swallowed so a transient auth
     /// outage does not knock down the SFU.
-    pub(crate) fn spawn_refresher(self, cfg: Config) -> tokio::task::JoinHandle<()> {
+    pub fn spawn_refresher(self, cfg: Config) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             let mut ticker = tokio::time::interval(cfg.jwks_refresh);
             // First tick fires immediately — skip; we
@@ -117,7 +133,7 @@ impl JwksCache {
     /// Verify a JWT against the currently-cached key set.
     /// Looks up the matching JWK by `kid`, then delegates to
     /// `lakko_call_jwt::verify_jwt`.
-    pub(crate) async fn verify(&self, jwt: &str) -> Result<CallJwtClaims, JwksError> {
+    pub async fn verify(&self, jwt: &str) -> Result<CallJwtClaims, JwksError> {
         // Parse the header without verifying so we can pick
         // the right key.
         let (header, _claims) = lakko_call_jwt::parse_unverified(jwt)?;
@@ -141,12 +157,12 @@ impl JwksCache {
 
     /// Read-only snapshot of when the cache was last
     /// refreshed. Useful for the `/ready` probe.
-    pub(crate) async fn refreshed_at(&self) -> SystemTime {
+    pub async fn refreshed_at(&self) -> SystemTime {
         self.inner.read().await.refreshed_at
     }
 
     /// How long since the last successful refresh.
-    pub(crate) async fn age(&self) -> Duration {
+    pub async fn age(&self) -> Duration {
         let t = self.refreshed_at().await;
         SystemTime::now()
             .duration_since(t)

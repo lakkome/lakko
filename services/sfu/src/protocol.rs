@@ -54,12 +54,12 @@ use serde::{Deserialize, Serialize};
 /// large payloads on the wire. SDP offers in production
 /// peak around 8 KiB; we leave 64× headroom for unusual
 /// codec configurations.
-pub(crate) const MAX_INBOUND_FRAME_BYTES: usize = 512 * 1024;
+pub const MAX_INBOUND_FRAME_BYTES: usize = 512 * 1024;
 
 /// Server-to-client frame.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
-pub(crate) enum ServerFrame {
+pub enum ServerFrame {
     /// First frame after the WS upgrade. Confirms admission
     /// and seeds the client's view of the call.
     Welcome {
@@ -124,7 +124,7 @@ pub(crate) enum ServerFrame {
 /// Client-to-server frame.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
-pub(crate) enum ClientFrame {
+pub enum ClientFrame {
     /// Send an opaque payload. `to` selects the destination
     /// peer (or broadcast to the whole call).
     SignalRelay {
@@ -146,7 +146,7 @@ pub(crate) enum ClientFrame {
 /// Destination selector for [`ClientFrame::SignalRelay`].
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
-pub(crate) enum RelayTarget {
+pub enum RelayTarget {
     /// Single recipient — most ICE / SDP exchanges fall in
     /// this bucket.
     Peer {
@@ -161,7 +161,7 @@ pub(crate) enum RelayTarget {
 
 /// Snapshot of a peer in the welcome roster.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub(crate) struct PeerSnapshot {
+pub struct PeerSnapshot {
     /// Server-assigned peer id.
     pub peer_id: String,
     /// First 8 hex chars of the account id. The SFU never
@@ -172,7 +172,7 @@ pub(crate) struct PeerSnapshot {
 /// Machine-readable error codes the SFU may emit.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
-pub(crate) enum ErrorCode {
+pub enum ErrorCode {
     /// Inbound JSON failed to parse against `ClientFrame`.
     BadFrame,
     /// Frame exceeded `MAX_INBOUND_FRAME_BYTES`.

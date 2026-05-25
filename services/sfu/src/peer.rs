@@ -43,7 +43,7 @@ use crate::protocol::ServerFrame;
 /// distinct [`PeerId`]s so they appear as separate participants
 /// in the call.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub(crate) struct PeerId(String);
+pub struct PeerId(String);
 
 impl PeerId {
     /// Generate a fresh peer id. The id is a monotone
@@ -52,7 +52,7 @@ impl PeerId {
     /// never sees a collision in practice and dependency-
     /// free (no `rand` needed for the SFU yet).
     #[must_use]
-    pub(crate) fn fresh() -> Self {
+    pub fn fresh() -> Self {
         use std::sync::atomic::{AtomicU64, Ordering};
         use std::time::{SystemTime, UNIX_EPOCH};
         static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -73,7 +73,7 @@ impl PeerId {
     /// deterministic ids.
     #[cfg(test)]
     #[must_use]
-    pub(crate) fn from_str_for_test(s: &str) -> Self {
+    pub fn from_str_for_test(s: &str) -> Self {
         Self(s.to_owned())
     }
 
@@ -81,7 +81,7 @@ impl PeerId {
     /// router when matching a wire-supplied destination
     /// peer id back against the registry.
     #[must_use]
-    pub(crate) fn from_string(s: String) -> Self {
+    pub fn from_string(s: String) -> Self {
         Self(s)
     }
 
@@ -89,7 +89,7 @@ impl PeerId {
     /// sprint when keying RTP fanout state by peer.
     #[must_use]
     #[allow(dead_code)]
-    pub(crate) fn as_str(&self) -> &str {
+    pub fn as_str(&self) -> &str {
         &self.0
     }
 }
@@ -104,7 +104,7 @@ impl std::fmt::Display for PeerId {
 /// by-sprint — `S-3-B-routing-media` adds RTP track sets,
 /// `S-3-B-twcc` adds bandwidth counters, etc.
 #[derive(Debug, Clone)]
-pub(crate) struct Peer {
+pub struct Peer {
     /// Server-assigned id.
     pub id: PeerId,
     /// Call id this peer is part of, as carried by the
@@ -124,14 +124,14 @@ pub(crate) struct Peer {
 /// Shared registry handle. Clone freely; the inner state is
 /// behind an `Arc<RwLock<…>>`.
 #[derive(Clone, Default)]
-pub(crate) struct PeerRegistry {
+pub struct PeerRegistry {
     inner: Arc<RwLock<HashMap<PeerId, Peer>>>,
 }
 
 impl PeerRegistry {
     /// Create an empty registry.
     #[must_use]
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self::default()
     }
 
@@ -139,7 +139,7 @@ impl PeerRegistry {
     /// id is already present (only possible in pathological
     /// PRNG collisions; we surface it so callers can
     /// regenerate the id).
-    pub(crate) async fn register(&self, peer: Peer) -> bool {
+    pub async fn register(&self, peer: Peer) -> bool {
         let mut guard = self.inner.write().await;
         if guard.contains_key(&peer.id) {
             return false;
@@ -150,7 +150,7 @@ impl PeerRegistry {
 
     /// Remove a peer by id. Returns the dropped record so the
     /// caller can fire a metrics counter.
-    pub(crate) async fn unregister(&self, id: &PeerId) -> Option<Peer> {
+    pub async fn unregister(&self, id: &PeerId) -> Option<Peer> {
         let mut guard = self.inner.write().await;
         guard.remove(id)
     }
@@ -159,7 +159,7 @@ impl PeerRegistry {
     /// the metrics layer once the routing sprint wires per-
     /// gauge updates.
     #[allow(dead_code)]
-    pub(crate) async fn count(&self) -> usize {
+    pub async fn count(&self) -> usize {
         self.inner.read().await.len()
     }
 
@@ -168,7 +168,7 @@ impl PeerRegistry {
     /// Used by the routing sprint to broadcast a new track
     /// to every other peer in the call.
     #[allow(dead_code)]
-    pub(crate) async fn peers_in_call(&self, call_id: &str) -> Vec<Peer> {
+    pub async fn peers_in_call(&self, call_id: &str) -> Vec<Peer> {
         let guard = self.inner.read().await;
         guard
             .values()

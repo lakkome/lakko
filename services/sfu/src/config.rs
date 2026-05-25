@@ -37,7 +37,7 @@ const DEFAULT_PEER_MSG_RATE_PER_SEC: u32 = 100;
 
 /// Failure modes for loading the runtime config.
 #[derive(Debug, Error)]
-pub(crate) enum ConfigError {
+pub enum ConfigError {
     /// Required env var was unset or empty.
     #[error("missing required env var: {0}")]
     Missing(&'static str),
@@ -54,7 +54,7 @@ pub(crate) enum ConfigError {
 
 /// Fully-resolved runtime config.
 #[derive(Debug, Clone)]
-pub(crate) struct Config {
+pub struct Config {
     /// Where the WebSocket signaling endpoint listens.
     pub signaling_bind: SocketAddr,
     /// Where the Prometheus `/metrics` endpoint listens. We
@@ -89,7 +89,7 @@ impl Config {
     /// # Errors
     ///
     /// Returns [`ConfigError`] on missing or unparseable values.
-    pub(crate) fn from_env() -> Result<Self, ConfigError> {
+    pub fn from_env() -> Result<Self, ConfigError> {
         let signaling_bind = parse_socket("LAKKO_SFU_BIND", DEFAULT_BIND)?;
         let metrics_bind = parse_socket("LAKKO_SFU_METRICS_BIND", DEFAULT_METRICS_BIND)?;
 
