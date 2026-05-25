@@ -34,6 +34,8 @@ mod config;
 mod jwks;
 mod peer;
 mod prom;
+mod protocol;
+mod router;
 mod signaling;
 
 use std::time::Duration;

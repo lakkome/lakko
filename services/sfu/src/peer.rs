@@ -32,7 +32,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use tokio::sync::RwLock;
+use tokio::sync::{mpsc, RwLock};
+
+use crate::protocol::ServerFrame;
 
 /// Opaque per-connection identifier, generated server-side.
 ///
@@ -75,6 +77,14 @@ impl PeerId {
         Self(s.to_owned())
     }
 
+    /// Construct from an arbitrary string — used by the
+    /// router when matching a wire-supplied destination
+    /// peer id back against the registry.
+    #[must_use]
+    pub(crate) fn from_string(s: String) -> Self {
+        Self(s)
+    }
+
     /// Borrow the raw string form. Used by the routing
     /// sprint when keying RTP fanout state by peer.
     #[must_use]
@@ -90,9 +100,9 @@ impl std::fmt::Display for PeerId {
     }
 }
 
-/// Per-peer state held by the registry. Minimal for the
-/// skeleton — extended with track sets, layer state, and
-/// TWCC counters in the subsequent sprints.
+/// Per-peer state held by the registry. Extended sprint-
+/// by-sprint — `S-3-B-routing-media` adds RTP track sets,
+/// `S-3-B-twcc` adds bandwidth counters, etc.
 #[derive(Debug, Clone)]
 pub(crate) struct Peer {
     /// Server-assigned id.
@@ -103,6 +113,12 @@ pub(crate) struct Peer {
     /// Account id from the JWT `sub`. Stored for log
     /// pseudonymisation; never crosses into media frames.
     pub account_id: String,
+    /// Outbound mpsc — frames the router pushes for the
+    /// signaling task to write to the wire. `None` only in
+    /// tests that bypass the registry. Holds a *clone* of
+    /// the channel sender; the signaling task owns the
+    /// receiver.
+    pub outbound: Option<mpsc::Sender<ServerFrame>>,
 }
 
 /// Shared registry handle. Clone freely; the inner state is
@@ -173,6 +189,7 @@ mod tests {
             id: PeerId::from_str_for_test("p1"),
             call_id: "call-a".into(),
             account_id: "acct-a".into(),
+            outbound: None,
         };
         assert!(reg.register(p.clone()).await);
         assert_eq!(reg.count().await, 1);
@@ -188,6 +205,7 @@ mod tests {
             id: PeerId::from_str_for_test("dup"),
             call_id: "c".into(),
             account_id: "a".into(),
+            outbound: None,
         };
         assert!(reg.register(p.clone()).await);
         assert!(!reg.register(p).await);
@@ -200,16 +218,19 @@ mod tests {
             id: PeerId::from_str_for_test("p1"),
             call_id: "call-a".into(),
             account_id: "a1".into(),
+            outbound: None,
         };
         let p2 = Peer {
             id: PeerId::from_str_for_test("p2"),
             call_id: "call-a".into(),
             account_id: "a2".into(),
+            outbound: None,
         };
         let p3 = Peer {
             id: PeerId::from_str_for_test("p3"),
             call_id: "call-b".into(),
             account_id: "a3".into(),
+            outbound: None,
         };
         reg.register(p1).await;
         reg.register(p2).await;

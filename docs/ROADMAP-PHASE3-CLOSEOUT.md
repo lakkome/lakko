@@ -218,7 +218,8 @@ Per [ADR-0011](./adr/0011-rust-sfu.md). Lives in
 |---|---|---|
 | **S-3-B-spike** | Echo-test bake-off `webrtc-rs` vs `str0m`; throughput / RTT / memory per peer; deal-breaker API gaps. Decision recorded as an amendment to ADR-0011 §"Spike outcome" | 0.5 sprint |
 | **S-3-B-skeleton** | `services/sfu/` Rust crate. axum WS signaling endpoint. Peer registry (`PeerId → PeerConnection`). Echo test (one peer publishes, sees itself receiving) | 1 sprint |
-| **S-3-B-routing** | RTP track fanout — incoming track → outgoing tracks on every other peer. No simulcast yet. Test: 3 peers, A → B + C forwarding | 1 sprint |
+| **S-3-B-routing-signaling** | Lakko-native typed wire protocol (`peer-joined` / `peer-left` / `signal-relay`) + per-peer mpsc broadcast fanout. Unblocks P2P 1×1 calls — clients exchange SDP / ICE through the SFU as an ICE trampoline without real RTP routing | 0.5 sprint |
+| **S-3-B-routing-media** | Physical `str0m` integration: per-peer `Rtc` instance, ICE / DTLS handshake driven from signaling, RTP track fanout publisher → subscribers, SFrame ciphertext opaque passthrough. **Requires a working WebRTC pod on at least one client** (iOS or Android) to drive integration tests | 0.5–1 sprint |
 | **S-3-B-simulcast** | Simulcast layer extraction (RID + dependency descriptor). Per-receiver layer selection (low / mid / high) based on downlink bitrate | 1 sprint |
 | **S-3-B-jwt** | `lakko-call-jwt` verification — **same crate** that `services/auth` mints from, direct `workspace.dependencies` link. Test: HS256 → reject, expired → reject, wrong audience → reject | 0.25 sprint |
 | **S-3-B-twcc** | TWCC aggregation. Per-receiver bandwidth estimation. Layer-switching feedback (when to step down / up) | 1 sprint |
