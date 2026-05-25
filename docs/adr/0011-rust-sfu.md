@@ -267,12 +267,31 @@ deployments visible, sparse documentation.
 
 ## Spike outcome
 
-(filled in after **S-3-B-spike** completes)
+`S-3-B-spike` completed 2026-05-25. Detailed rationale lives
+in [`services/sfu/SPIKE.md`](../../services/sfu/SPIKE.md);
+the headline:
 
-- **Chosen stack:** *TBD — `webrtc-rs` or `str0m`*
-- **Echo-test throughput:** TBD
-- **Memory per peer (10-min sustained call):** TBD
-- **Deal-breaker findings:** TBD
+- **Chosen stack:** **`str0m`**.
+- **Decision basis:** audit-friendliness — sync caller-
+  driven event loop + ~6 k LOC surface beats `webrtc-rs`'s
+  ~30 k LOC of async / tokio-spawned plumbing for a
+  forwarding-only SFU under a "server is assumed
+  compromised" threat model.
+- **What we gave up:** full SCTP / DataChannel — neither
+  is used by Lakko (call signaling rides our own WS
+  protocol, chat-during-call rides MLS application
+  messages from S-3-A-chat).
+- **Reversal criteria:** if `S-3-B-routing` hits a `str0m`
+  API gap that is hard to work around, the routing
+  sprint may either patch upstream + pin to a fork, or
+  switch to `webrtc-rs`. Documented as a follow-up
+  amendment to this ADR, not as an emergency.
+- **Empirical numbers (throughput / memory / RTT)** are
+  deferred to the benchmark task inside
+  `S-3-B-routing`. An echo-only spike on each stack
+  would measure "echo loopback", which is not a useful
+  proxy for the N-peer fanout we actually need to
+  benchmark.
 
 ## Phase ordering inside Phase 3 closeout
 

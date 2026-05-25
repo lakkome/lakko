@@ -13,22 +13,25 @@ shadow.
 
 ## Current state
 
-**STATUS: STACK CHOICE PENDING — `S-3-B-spike` decides.**
-
-The spike sprint builds an echo-test on each candidate
-stack, measures throughput, RTT overhead, memory per
-peer, and any deal-breaker API gap. The winner is recorded
-below + as an amendment to
-[ADR-0011](../../docs/adr/0011-rust-sfu.md)
+**Stack decided: `str0m`.** Rationale lives in
+[`SPIKE.md`](./SPIKE.md); the headline + reversal criteria
+are appended to [ADR-0011](../../docs/adr/0011-rust-sfu.md)
 §"Spike outcome".
+
+The first concrete version pin lands in
+**`S-3-B-routing`** — that is the sprint that imports
+`str0m` into `services/sfu/Cargo.toml` and starts using
+it. The skeleton sprint (`S-3-B-skeleton`) deliberately
+does **not** pull the dependency, so the workspace stays
+fast to build until media routing is the work-in-progress.
 
 | Field | Value |
 |---|---|
-| WebRTC stack | *TBD — `webrtc-rs` or `str0m`* |
-| Version pin | *TBD* (set as exact version in `Cargo.toml`, not a range) |
-| Pin date (UTC) | *TBD* |
-| Pinned by | *TBD* |
-| Lakko sprint | `S-3-B-spike` (decision) → `S-3-B-skeleton` (first pin) |
+| WebRTC stack | **`str0m`** |
+| Version pin | *pending* (set as exact version in `Cargo.toml` at `S-3-B-routing` kickoff, not a range) |
+| Pin date (UTC) | *pending* |
+| Pinned by | *pending* |
+| Lakko sprint | `S-3-B-spike` decided; `S-3-B-routing` pins |
 
 ## Why we pin exactly
 
@@ -53,28 +56,34 @@ Indirect dependencies follow the workspace-wide policy —
 locked by `Cargo.lock`, reviewed at PR time, tracked by
 `cargo audit` and `cargo deny`.
 
-## Candidate stacks (for the spike)
+## Decision history
 
-### `webrtc-rs` ([github.com/webrtc-rs/webrtc](https://github.com/webrtc-rs/webrtc))
+### `str0m` ([github.com/algesten/str0m](https://github.com/algesten/str0m)) — chosen
+
+- Pure Rust, **sync** (caller drives event loop).
+- Narrower surface (~6 k LOC) — focused on the SFU
+  forwarding use case.
+- Strong audit story: no hidden tasks, no implicit
+  scheduling — the auditor reads one event loop, not
+  N tokio-spawned futures.
+- Production users: Eyevinn streaming, sentry.io,
+  Embark internals.
+- `#![forbid(unsafe_code)]`-friendly.
+
+### `webrtc-rs` ([github.com/webrtc-rs/webrtc](https://github.com/webrtc-rs/webrtc)) — rejected
 
 - Async / tokio-based.
 - Broader feature coverage (DataChannel, SCTP, multiple
-  codecs).
-- Production users: Cloudflare Calls, others.
+  codecs). Lakko uses none of the extras — chat-during-
+  call rides MLS (S-3-A-chat); signaling rides our own
+  WS protocol.
+- Production users: Cloudflare Calls, parts of Discord.
 - API mirror of `pion/webrtc` (the stack LiveKit uses) —
-  patterns transfer.
+  patterns transfer. **But** ~30 k LOC audit surface and
+  hidden tokio tasks inflate the audit budget.
 
-### `str0m` ([github.com/algesten/str0m](https://github.com/algesten/str0m))
-
-- Pure Rust, **sync** (caller drives event loop).
-- Narrower surface — focused on the SFU forwarding use
-  case.
-- Strong audit story: no hidden tasks, no implicit
-  scheduling.
-- Production users: Eyevinn streaming, others.
-
-The spike answers: which one ships our use case with
-less custom code and lower memory footprint per peer?
+Full comparison + reversal criteria: see
+[`SPIKE.md`](./SPIKE.md).
 
 ## Changelog
 
