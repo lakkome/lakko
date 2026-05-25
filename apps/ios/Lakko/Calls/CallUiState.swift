@@ -90,6 +90,65 @@ public final class CallUiState: ObservableObject {
         )
     }
 
+    /// A capture / playback device the OS exposes (S-3-A-settings).
+    /// Same shape as the web `CallDevice` and Android counterpart.
+    public struct CallDevice: Equatable, Identifiable {
+        public enum Kind: String, Equatable {
+            case audioInput
+            case videoInput
+            case audioOutput
+        }
+        public let id: String
+        public let label: String
+        public let kind: Kind
+
+        public init(id: String, label: String, kind: Kind) {
+            self.id = id
+            self.label = label
+            self.kind = kind
+        }
+    }
+
+    /// In-call audio / video settings (S-3-A-settings).
+    /// Holds the device picks + processing toggles; the WebRTC
+    /// pod sprint reads from here when configuring the local
+    /// `RTCAudioSession` + capture chain.
+    public struct CallSettings: Equatable {
+        public var selectedAudioInput: String?
+        public var selectedVideoInput: String?
+        public var selectedAudioOutput: String?
+        public var availableDevices: [CallDevice]
+        public var noiseSuppression: Bool
+        public var echoCancellation: Bool
+        public var autoGain: Bool
+        public var mirrorLocal: Bool
+        public var lowDataMode: Bool
+
+        public init(
+            selectedAudioInput: String? = nil,
+            selectedVideoInput: String? = nil,
+            selectedAudioOutput: String? = nil,
+            availableDevices: [CallDevice] = [],
+            noiseSuppression: Bool = true,
+            echoCancellation: Bool = true,
+            autoGain: Bool = true,
+            mirrorLocal: Bool = true,
+            lowDataMode: Bool = false
+        ) {
+            self.selectedAudioInput = selectedAudioInput
+            self.selectedVideoInput = selectedVideoInput
+            self.selectedAudioOutput = selectedAudioOutput
+            self.availableDevices = availableDevices
+            self.noiseSuppression = noiseSuppression
+            self.echoCancellation = echoCancellation
+            self.autoGain = autoGain
+            self.mirrorLocal = mirrorLocal
+            self.lowDataMode = lowDataMode
+        }
+
+        public static let `default` = CallSettings()
+    }
+
     // MARK: - Published state
 
     @Published public private(set) var phase: CallPhase = .prejoin
@@ -101,6 +160,12 @@ public final class CallUiState: ObservableObject {
     @Published public private(set) var connectionDetail: ConnectionDetail = .unknown
     @Published public private(set) var qualityPopoverOpen: Bool = false
     @Published public private(set) var hasMultipleCameras: Bool = false
+    /// Gear-menu open / closed (S-3-A-settings).
+    @Published public private(set) var settingsOpen: Bool = false
+    /// In-call audio / video settings + enumerated devices
+    /// (S-3-A-settings). Mock-populated until the WebRTC pod
+    /// sprint wires real device enumeration.
+    @Published public private(set) var settings: CallSettings = .default
 
     // MARK: - Derived state
 
@@ -258,6 +323,58 @@ public final class CallUiState: ObservableObject {
         self.hasMultipleCameras = many
     }
 
+    // MARK: - Settings (S-3-A-settings)
+
+    /// Open / close the gear menu.
+    public func setSettingsOpen(_ open: Bool) {
+        self.settingsOpen = open
+    }
+
+    /// Replace the enumerated devices snapshot. Called by the
+    /// WebRTC pod after `AVCaptureDevice.DiscoverySession`
+    /// (cameras) and `AVAudioSession.availableInputs` (mics)
+    /// have produced their lists.
+    public func setAvailableDevices(_ devices: [CallDevice]) {
+        self.settings.availableDevices = devices
+    }
+
+    /// Pick a microphone (`nil` → OS default).
+    public func setSelectedAudioInput(_ id: String?) {
+        self.settings.selectedAudioInput = id
+    }
+
+    /// Pick a camera (`nil` → OS default).
+    public func setSelectedVideoInput(_ id: String?) {
+        self.settings.selectedVideoInput = id
+    }
+
+    /// Pick a speaker / headset (`nil` → OS default). On iOS
+    /// this is a hint — `AVAudioSession` overrides for BT and
+    /// wired connections.
+    public func setSelectedAudioOutput(_ id: String?) {
+        self.settings.selectedAudioOutput = id
+    }
+
+    public func setNoiseSuppression(_ on: Bool) {
+        self.settings.noiseSuppression = on
+    }
+
+    public func setEchoCancellation(_ on: Bool) {
+        self.settings.echoCancellation = on
+    }
+
+    public func setAutoGain(_ on: Bool) {
+        self.settings.autoGain = on
+    }
+
+    public func setMirrorLocal(_ on: Bool) {
+        self.settings.mirrorLocal = on
+    }
+
+    public func setLowDataMode(_ on: Bool) {
+        self.settings.lowDataMode = on
+    }
+
     public func endCall() {
         self.phase = .ended(endedAt: Date())
     }
@@ -270,6 +387,11 @@ public final class CallUiState: ObservableObject {
         self.e2ee = .inactive
         self.connectionDetail = .unknown
         self.qualityPopoverOpen = false
+        self.settingsOpen = false
+        // Preferences (toggles + selected ids) survive a
+        // reset — only the enumerated-devices snapshot is
+        // cleared.
+        self.settings.availableDevices = []
     }
 
     /// Seed mock state — same shape as the web `seedMockParticipants`.

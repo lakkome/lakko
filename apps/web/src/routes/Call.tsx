@@ -46,6 +46,7 @@ import {
   onMount,
   Show,
   type Component,
+  type JSX,
 } from "solid-js";
 import { useNavigate } from "@solidjs/router";
 
@@ -55,6 +56,7 @@ import {
   callState,
   galleryParticipants,
   qualityColour,
+  type CallDevice,
   type Participant,
   type QualityTier,
 } from "../state/call-state";
@@ -830,6 +832,12 @@ const ControlsBar: Component = () => {
         }
       />
       <CircleButton
+        label="Settings"
+        glyph="⚙️"
+        active={callState.settingsOpen()}
+        onClick={(): void => callActions.setSettingsOpen(!callState.settingsOpen())}
+      />
+      <CircleButton
         label="End call"
         glyph="📞"
         active={false}
@@ -839,6 +847,225 @@ const ControlsBar: Component = () => {
     </div>
   );
 };
+
+// ============================================================================
+// SettingsPanel — gear-menu overlay (S-3-A-settings)
+// ============================================================================
+//
+// Centred modal on desktop / right side panel on tablet /
+// bottom-sheet on mobile via a `@media` shorthand on the
+// outer container. Holds three device pickers + five
+// processing toggles. Mock-populated device list for now —
+// the WebRTC pod sprint replaces the mock provider with a
+// real `navigator.mediaDevices.enumerateDevices()` pull.
+
+const SettingsPanel: Component = () => (
+  <Show when={callState.settingsOpen()}>
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label="Call settings"
+      style={{
+        position: "fixed",
+        inset: "0",
+        "background-color": "rgba(0,0,0,0.55)",
+        "z-index": "10",
+        display: "flex",
+        "align-items": "center",
+        "justify-content": "center",
+        padding: "16px",
+      }}
+      onClick={(e): void => {
+        // Click-out to dismiss — only when the backdrop itself
+        // is the target, not the inner card.
+        if (e.target === e.currentTarget) {
+          callActions.setSettingsOpen(false);
+        }
+      }}
+    >
+      <div
+        style={{
+          width: "min(440px, 100%)",
+          "max-height": "min(720px, 90vh)",
+          "overflow-y": "auto",
+          "background-color": COLOURS.surface,
+          color: COLOURS.textPrimary,
+          "border-radius": "12px",
+          padding: "20px 22px",
+          display: "flex",
+          "flex-direction": "column",
+          gap: "18px",
+        }}
+      >
+        <div
+          style={{
+            display: "flex",
+            "justify-content": "space-between",
+            "align-items": "center",
+          }}
+        >
+          <h2 style={{ margin: "0", "font-size": "18px", "font-weight": "600" }}>
+            Settings
+          </h2>
+          <button
+            type="button"
+            aria-label="Close settings"
+            onClick={(): void => callActions.setSettingsOpen(false)}
+            style={{
+              background: "none",
+              border: "none",
+              color: COLOURS.textSecondary,
+              "font-size": "22px",
+              cursor: "pointer",
+              padding: "4px 8px",
+            }}
+          >
+            ×
+          </button>
+        </div>
+
+        <DevicePicker
+          label="Microphone"
+          kind="audioinput"
+          selectedId={callState.settings().selectedAudioInput}
+          onPick={(id): void => callActions.setSelectedAudioInput(id)}
+        />
+        <DevicePicker
+          label="Camera"
+          kind="videoinput"
+          selectedId={callState.settings().selectedVideoInput}
+          onPick={(id): void => callActions.setSelectedVideoInput(id)}
+        />
+        <DevicePicker
+          label="Speaker"
+          kind="audiooutput"
+          selectedId={callState.settings().selectedAudioOutput}
+          onPick={(id): void => callActions.setSelectedAudioOutput(id)}
+        />
+
+        <hr
+          style={{
+            border: "none",
+            "border-top": `1px solid ${COLOURS.border}`,
+            margin: "4px 0",
+          }}
+        />
+
+        <SettingsToggle
+          label="Noise suppression"
+          checked={callState.settings().noiseSuppression}
+          onChange={(v): void => callActions.setNoiseSuppression(v)}
+        />
+        <SettingsToggle
+          label="Echo cancellation"
+          checked={callState.settings().echoCancellation}
+          onChange={(v): void => callActions.setEchoCancellation(v)}
+        />
+        <SettingsToggle
+          label="Automatic gain control"
+          checked={callState.settings().autoGain}
+          onChange={(v): void => callActions.setAutoGain(v)}
+        />
+        <SettingsToggle
+          label="Mirror local preview"
+          checked={callState.settings().mirrorLocal}
+          onChange={(v): void => callActions.setMirrorLocal(v)}
+        />
+        <SettingsToggle
+          label="Low-data mode"
+          description="Caps video at 360p — useful on metered mobile connections."
+          checked={callState.settings().lowDataMode}
+          onChange={(v): void => callActions.setLowDataMode(v)}
+        />
+      </div>
+    </div>
+  </Show>
+);
+
+const DevicePicker: Component<{
+  label: string;
+  kind: CallDevice["kind"];
+  selectedId: string | null;
+  onPick: (id: string | null) => void;
+}> = (props) => {
+  const available = (): CallDevice[] =>
+    callState.settings().availableDevices.filter((d) => d.kind === props.kind);
+  return (
+    <label
+      style={{
+        display: "flex",
+        "flex-direction": "column",
+        gap: "6px",
+        "font-size": "13px",
+        color: COLOURS.textSecondary,
+      }}
+    >
+      <span style={{ "font-weight": "500", color: COLOURS.textPrimary }}>
+        {props.label}
+      </span>
+      <select
+        value={props.selectedId ?? ""}
+        onChange={(e): void => {
+          const value = e.currentTarget.value;
+          props.onPick(value === "" ? null : value);
+        }}
+        style={{
+          padding: "8px 10px",
+          "background-color": COLOURS.background,
+          color: COLOURS.textPrimary,
+          border: `1px solid ${COLOURS.border}`,
+          "border-radius": "8px",
+          "font-size": "14px",
+        }}
+      >
+        <option value="">System default</option>
+        <For each={available()}>
+          {(d): JSX.Element => (
+            <option value={d.id}>{d.label || `(${d.kind})`}</option>
+          )}
+        </For>
+      </select>
+      <Show when={available().length === 0}>
+        <span style={{ "font-size": "12px", color: COLOURS.textSecondary }}>
+          No devices reported yet. They appear here once you grant
+          microphone / camera permission.
+        </span>
+      </Show>
+    </label>
+  );
+};
+
+const SettingsToggle: Component<{
+  label: string;
+  description?: string;
+  checked: boolean;
+  onChange: (value: boolean) => void;
+}> = (props) => (
+  <label
+    style={{
+      display: "flex",
+      "align-items": "flex-start",
+      gap: "10px",
+      cursor: "pointer",
+      "font-size": "14px",
+    }}
+  >
+    <input
+      type="checkbox"
+      checked={props.checked}
+      onChange={(e): void => props.onChange(e.currentTarget.checked)}
+      style={{ "margin-top": "3px" }}
+    />
+    <span style={{ display: "flex", "flex-direction": "column", gap: "2px" }}>
+      <span style={{ color: COLOURS.textPrimary }}>{props.label}</span>
+      <Show when={props.description !== undefined}>
+        <span style={{ "font-size": "12px", color: COLOURS.textSecondary }}>
+          {props.description}
+        </span>
+      </Show>
+    </span>
+  </label>
+);
 
 // ============================================================================
 // ParticipantList drawer
@@ -1309,6 +1536,7 @@ const Call: Component = () => {
 
         <ControlsBar />
         <ParticipantList />
+        <SettingsPanel />
 
         <Show when={callState.phase().kind === "ended"}>
           <CallEndedOverlay onDismiss={(): void => navigate(paths.home)} />

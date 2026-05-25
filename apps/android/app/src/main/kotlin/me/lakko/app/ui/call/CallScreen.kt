@@ -34,10 +34,16 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Divider
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CallEnd
 import androidx.compose.material.icons.filled.Close
@@ -50,7 +56,9 @@ import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.filled.ScreenShare
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.filled.VideocamOff
+import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.FlipCameraAndroid
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -520,6 +528,211 @@ private fun InCallView(state: CallUiState, onExit: () -> Unit) {
                 }
             }
         }
+
+        // Gear-menu bottom sheet (S-3-A-settings).
+        SettingsSheet(state)
+    }
+}
+
+// ============================================================
+// SettingsSheet (S-3-A-settings)
+// ============================================================
+//
+// Material3 ModalBottomSheet that appears when the user taps
+// the gear button in the controls bar. Mirrors the same control
+// surface as the web `SettingsPanel` and iOS `SettingsSheet`.
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun SettingsSheet(state: CallUiState) {
+    val open by state.settingsOpen.collectAsState()
+    if (!open) return
+
+    val settings by state.settings.collectAsState()
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+
+    ModalBottomSheet(
+        onDismissRequest = { state.setSettingsOpen(false) },
+        sheetState = sheetState,
+        containerColor = CallTheme.surface,
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 20.dp, vertical = 8.dp)
+                .padding(bottom = 24.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp),
+        ) {
+            Text(
+                "Settings",
+                color = CallTheme.textPrimary,
+                fontSize = 18.sp,
+                fontWeight = FontWeight.SemiBold,
+            )
+
+            DeviceSectionLabel("Devices")
+            DevicePickerRow(
+                label = "Microphone",
+                devices = settings.availableDevices.filter {
+                    it.kind == CallUiState.CallDevice.Kind.AudioInput
+                },
+                selectedId = settings.selectedAudioInput,
+                onPick = { state.setSelectedAudioInput(it) },
+            )
+            DevicePickerRow(
+                label = "Camera",
+                devices = settings.availableDevices.filter {
+                    it.kind == CallUiState.CallDevice.Kind.VideoInput
+                },
+                selectedId = settings.selectedVideoInput,
+                onPick = { state.setSelectedVideoInput(it) },
+            )
+            DevicePickerRow(
+                label = "Speaker",
+                devices = settings.availableDevices.filter {
+                    it.kind == CallUiState.CallDevice.Kind.AudioOutput
+                },
+                selectedId = settings.selectedAudioOutput,
+                onPick = { state.setSelectedAudioOutput(it) },
+            )
+
+            Divider(color = CallTheme.border, modifier = Modifier.padding(vertical = 4.dp))
+
+            DeviceSectionLabel("Audio processing")
+            SettingsToggleRow(
+                label = "Noise suppression",
+                checked = settings.noiseSuppression,
+                onChange = { state.setNoiseSuppression(it) },
+            )
+            SettingsToggleRow(
+                label = "Echo cancellation",
+                checked = settings.echoCancellation,
+                onChange = { state.setEchoCancellation(it) },
+            )
+            SettingsToggleRow(
+                label = "Automatic gain control",
+                checked = settings.autoGain,
+                onChange = { state.setAutoGain(it) },
+            )
+
+            DeviceSectionLabel("Video")
+            SettingsToggleRow(
+                label = "Mirror local preview",
+                checked = settings.mirrorLocal,
+                onChange = { state.setMirrorLocal(it) },
+            )
+
+            DeviceSectionLabel("Network")
+            SettingsToggleRow(
+                label = "Low-data mode",
+                description = "Caps video at 360p — useful on metered mobile connections.",
+                checked = settings.lowDataMode,
+                onChange = { state.setLowDataMode(it) },
+            )
+        }
+    }
+}
+
+@Composable
+private fun DeviceSectionLabel(text: String) {
+    Text(
+        text,
+        color = CallTheme.textSecondary,
+        fontSize = 12.sp,
+        fontWeight = FontWeight.SemiBold,
+        modifier = Modifier.padding(top = 8.dp),
+    )
+}
+
+@Composable
+private fun DevicePickerRow(
+    label: String,
+    devices: List<CallUiState.CallDevice>,
+    selectedId: String?,
+    onPick: (String?) -> Unit,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    val selectedLabel = devices.firstOrNull { it.id == selectedId }?.label
+        ?: "System default"
+
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text(label, color = CallTheme.textPrimary, fontSize = 13.sp)
+        Box {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(CallTheme.background, RoundedCornerShape(8.dp))
+                    .border(1.dp, CallTheme.border, RoundedCornerShape(8.dp))
+                    .clickable { expanded = true }
+                    .padding(horizontal = 10.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    selectedLabel,
+                    color = CallTheme.textPrimary,
+                    fontSize = 14.sp,
+                    modifier = Modifier.weight(1f),
+                )
+                Icon(
+                    Icons.Filled.ArrowDropDown,
+                    contentDescription = null,
+                    tint = CallTheme.textSecondary,
+                )
+            }
+            DropdownMenu(
+                expanded = expanded,
+                onDismissRequest = { expanded = false },
+            ) {
+                DropdownMenuItem(
+                    text = { Text("System default") },
+                    onClick = {
+                        onPick(null)
+                        expanded = false
+                    },
+                )
+                for (d in devices) {
+                    DropdownMenuItem(
+                        text = { Text(d.label.ifEmpty { d.kind.name }) },
+                        onClick = {
+                            onPick(d.id)
+                            expanded = false
+                        },
+                    )
+                }
+            }
+        }
+        if (devices.isEmpty()) {
+            Text(
+                "No devices reported yet. They appear here once you grant " +
+                    "microphone or camera permission.",
+                color = CallTheme.textSecondary,
+                fontSize = 11.sp,
+            )
+        }
+    }
+}
+
+@Composable
+private fun SettingsToggleRow(
+    label: String,
+    description: String? = null,
+    checked: Boolean,
+    onChange: (Boolean) -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable { onChange(!checked) }
+            .padding(vertical = 2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(label, color = CallTheme.textPrimary, fontSize = 14.sp)
+            if (description != null) {
+                Text(description, color = CallTheme.textSecondary, fontSize = 11.sp)
+            }
+        }
+        Switch(checked = checked, onCheckedChange = onChange)
     }
 }
 
@@ -793,6 +1006,7 @@ private fun ControlsBar(state: CallUiState) {
     val hasMultipleCams by state.hasMultipleCameras.collectAsState()
     val local = participants.firstOrNull { it.isLocal }
     val drawerOpen by state.participantListOpen.collectAsState()
+    val settingsOpen by state.settingsOpen.collectAsState()
 
     Row(
         modifier = Modifier
@@ -840,6 +1054,12 @@ private fun ControlsBar(state: CallUiState) {
             active = local?.screenSharing == true,
             description = if (local?.screenSharing == true) "Stop sharing screen" else "Share screen",
             onClick = { state.setScreenSharing(local?.screenSharing != true) },
+        )
+        CircleButton(
+            icon = Icons.Filled.Settings,
+            active = settingsOpen,
+            description = "Settings",
+            onClick = { state.setSettingsOpen(!settingsOpen) },
         )
         CircleButton(
             icon = Icons.Filled.CallEnd,

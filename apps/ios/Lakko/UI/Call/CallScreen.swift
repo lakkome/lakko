@@ -412,6 +412,12 @@ private struct ControlsBar: View {
                 onTap: { state.setScreenSharing(!(local?.screenSharing ?? false)) }
             )
             CircleButton(
+                label: "Settings",
+                systemImage: "gearshape.fill",
+                active: state.settingsOpen,
+                onTap: { state.setSettingsOpen(!state.settingsOpen) }
+            )
+            CircleButton(
                 label: "End call",
                 systemImage: "phone.down.fill",
                 active: false,
@@ -860,5 +866,134 @@ public struct CallScreen: View {
             }
         }
         .animation(.easeInOut(duration: 0.2), value: state.participantListOpen)
+        // Gear-menu sheet (S-3-A-settings). `.sheet` gives us
+        // the native iOS bottom-detent presentation; iPad gets
+        // the centred form-sheet style automatically.
+        .sheet(
+            isPresented: Binding(
+                get: { state.settingsOpen },
+                set: { state.setSettingsOpen($0) }
+            )
+        ) {
+            SettingsSheet(state: state)
+        }
+    }
+}
+
+// MARK: - SettingsSheet (S-3-A-settings)
+
+/// In-call settings sheet — device pickers + processing
+/// toggles. Mirrors the same control surface as the web
+/// `SettingsPanel` and the Android `SettingsSheet`.
+private struct SettingsSheet: View {
+    @ObservedObject var state: CallUiState
+
+    private var audioInputs: [CallUiState.CallDevice] {
+        state.settings.availableDevices.filter { $0.kind == .audioInput }
+    }
+    private var videoInputs: [CallUiState.CallDevice] {
+        state.settings.availableDevices.filter { $0.kind == .videoInput }
+    }
+    private var audioOutputs: [CallUiState.CallDevice] {
+        state.settings.availableDevices.filter { $0.kind == .audioOutput }
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section(header: Text("Devices")) {
+                    devicePicker(
+                        title: "Microphone",
+                        devices: audioInputs,
+                        selection: Binding(
+                            get: { state.settings.selectedAudioInput },
+                            set: { state.setSelectedAudioInput($0) }
+                        )
+                    )
+                    devicePicker(
+                        title: "Camera",
+                        devices: videoInputs,
+                        selection: Binding(
+                            get: { state.settings.selectedVideoInput },
+                            set: { state.setSelectedVideoInput($0) }
+                        )
+                    )
+                    devicePicker(
+                        title: "Speaker",
+                        devices: audioOutputs,
+                        selection: Binding(
+                            get: { state.settings.selectedAudioOutput },
+                            set: { state.setSelectedAudioOutput($0) }
+                        )
+                    )
+                }
+                Section(header: Text("Audio processing")) {
+                    Toggle(
+                        "Noise suppression",
+                        isOn: Binding(
+                            get: { state.settings.noiseSuppression },
+                            set: { state.setNoiseSuppression($0) }
+                        )
+                    )
+                    Toggle(
+                        "Echo cancellation",
+                        isOn: Binding(
+                            get: { state.settings.echoCancellation },
+                            set: { state.setEchoCancellation($0) }
+                        )
+                    )
+                    Toggle(
+                        "Automatic gain control",
+                        isOn: Binding(
+                            get: { state.settings.autoGain },
+                            set: { state.setAutoGain($0) }
+                        )
+                    )
+                }
+                Section(header: Text("Video")) {
+                    Toggle(
+                        "Mirror local preview",
+                        isOn: Binding(
+                            get: { state.settings.mirrorLocal },
+                            set: { state.setMirrorLocal($0) }
+                        )
+                    )
+                }
+                Section(
+                    header: Text("Network"),
+                    footer: Text("Caps video at 360p — useful on metered mobile connections.")
+                ) {
+                    Toggle(
+                        "Low-data mode",
+                        isOn: Binding(
+                            get: { state.settings.lowDataMode },
+                            set: { state.setLowDataMode($0) }
+                        )
+                    )
+                }
+            }
+            .navigationTitle("Settings")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { state.setSettingsOpen(false) }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func devicePicker(
+        title: String,
+        devices: [CallUiState.CallDevice],
+        selection: Binding<String?>
+    ) -> some View {
+        Picker(title, selection: selection) {
+            Text("System default").tag(String?.none)
+            ForEach(devices) { device in
+                Text(device.label.isEmpty ? device.kind.rawValue : device.label)
+                    .tag(String?.some(device.id))
+            }
+        }
     }
 }

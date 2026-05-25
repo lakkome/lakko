@@ -85,6 +85,36 @@ public class CallUiState(
         }
     }
 
+    /** A capture / playback device the OS exposes
+     *  (S-3-A-settings). Same shape as the web `CallDevice`
+     *  and iOS counterpart. */
+    public data class CallDevice(
+        val id: String,
+        val label: String,
+        val kind: Kind,
+    ) {
+        public enum class Kind { AudioInput, VideoInput, AudioOutput }
+    }
+
+    /** In-call audio / video settings (S-3-A-settings).
+     *  Drives the gear-menu device pickers + the processing
+     *  toggles applied to the local capture chain. */
+    public data class CallSettings(
+        val selectedAudioInput: String? = null,
+        val selectedVideoInput: String? = null,
+        val selectedAudioOutput: String? = null,
+        val availableDevices: List<CallDevice> = emptyList(),
+        val noiseSuppression: Boolean = true,
+        val echoCancellation: Boolean = true,
+        val autoGain: Boolean = true,
+        val mirrorLocal: Boolean = true,
+        val lowDataMode: Boolean = false,
+    ) {
+        public companion object {
+            public val Default: CallSettings = CallSettings()
+        }
+    }
+
     // ----------------------------------------------------------
     // State flows
     // ----------------------------------------------------------
@@ -113,6 +143,14 @@ public class CallUiState(
 
     private val _hasMultipleCameras = MutableStateFlow(false)
     public val hasMultipleCameras: StateFlow<Boolean> = _hasMultipleCameras.asStateFlow()
+
+    /** Gear-menu open / closed (S-3-A-settings). */
+    private val _settingsOpen = MutableStateFlow(false)
+    public val settingsOpen: StateFlow<Boolean> = _settingsOpen.asStateFlow()
+
+    /** Settings + enumerated devices (S-3-A-settings). */
+    private val _settings = MutableStateFlow(CallSettings.Default)
+    public val settings: StateFlow<CallSettings> = _settings.asStateFlow()
 
     // ----------------------------------------------------------
     // Derived helpers (UI calls these inline; Compose recomposes
@@ -224,6 +262,55 @@ public class CallUiState(
         _hasMultipleCameras.value = many
     }
 
+    // ----------------------------------------------------------
+    // Settings actions (S-3-A-settings)
+    // ----------------------------------------------------------
+
+    /** Open / close the gear menu. */
+    public fun setSettingsOpen(open: Boolean) {
+        _settingsOpen.value = open
+    }
+
+    /** Replace the enumerated devices snapshot. Called by the
+     *  WebRTC pod after `AudioManager.getDevices()` +
+     *  `CameraManager.cameraIdList` have produced their
+     *  results. */
+    public fun setAvailableDevices(devices: List<CallDevice>) {
+        _settings.value = _settings.value.copy(availableDevices = devices)
+    }
+
+    public fun setSelectedAudioInput(id: String?) {
+        _settings.value = _settings.value.copy(selectedAudioInput = id)
+    }
+
+    public fun setSelectedVideoInput(id: String?) {
+        _settings.value = _settings.value.copy(selectedVideoInput = id)
+    }
+
+    public fun setSelectedAudioOutput(id: String?) {
+        _settings.value = _settings.value.copy(selectedAudioOutput = id)
+    }
+
+    public fun setNoiseSuppression(on: Boolean) {
+        _settings.value = _settings.value.copy(noiseSuppression = on)
+    }
+
+    public fun setEchoCancellation(on: Boolean) {
+        _settings.value = _settings.value.copy(echoCancellation = on)
+    }
+
+    public fun setAutoGain(on: Boolean) {
+        _settings.value = _settings.value.copy(autoGain = on)
+    }
+
+    public fun setMirrorLocal(on: Boolean) {
+        _settings.value = _settings.value.copy(mirrorLocal = on)
+    }
+
+    public fun setLowDataMode(on: Boolean) {
+        _settings.value = _settings.value.copy(lowDataMode = on)
+    }
+
     public fun endCall() {
         _phase.value = CallPhase.Ended(endedAtMs = System.currentTimeMillis())
     }
@@ -236,6 +323,10 @@ public class CallUiState(
         _e2ee.value = E2eeState.Inactive
         _connectionDetail.value = ConnectionDetail.Unknown
         _qualityPopoverOpen.value = false
+        _settingsOpen.value = false
+        // Preferences (toggles + selected ids) survive a reset
+        // — only the enumerated-devices snapshot is cleared.
+        _settings.value = _settings.value.copy(availableDevices = emptyList())
     }
 
     /** Mock seed — same shape as the web `seedMockParticipants` /

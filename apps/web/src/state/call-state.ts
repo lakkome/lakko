@@ -125,6 +125,85 @@ export interface ConnectionDetail {
   readonly connectionType: "direct" | "relay" | "unknown";
 }
 
+/** A capture / playback device the OS exposes to the call.
+ *  Mirrors the relevant subset of MediaDeviceInfo (web),
+ *  AVCaptureDevice / AVAudioSessionPortDescription (iOS), and
+ *  AudioDeviceInfo / CameraManager device entries (Android).
+ *  Same shape on all three platforms so the picker UI can be
+ *  expressed once per platform without per-OS branching. */
+export interface CallDevice {
+  /** Stable platform-specific id. Opaque to the UI. */
+  readonly id: string;
+  /** Human-readable label ("MacBook Pro Microphone",
+   *  "Back camera", "AirPods Pro"). May be empty when the OS
+   *  has not granted device-label permission yet (web's
+   *  enumerateDevices returns blanks before getUserMedia
+   *  succeeds). */
+  readonly label: string;
+  /** Device class — audio capture / video capture / audio
+   *  playback. */
+  readonly kind: "audioinput" | "videoinput" | "audiooutput";
+}
+
+/** In-call audio / video settings (S-3-A-settings).
+ *
+ *  Drives:
+ *  - the gear-menu device pickers (one per `kind`), and
+ *  - the processing toggles applied to the local capture chain
+ *    (noise suppression, echo cancellation, auto-gain) — which
+ *    in WebRTC land are constraint flags on getUserMedia.
+ *
+ *  In Phase 3 the toggles affect state only — the real WebRTC
+ *  pod (`S-3-A-iOS-pod` / `S-3-A-Android-pod`) wires them into
+ *  the live PeerConnection. Storing them here keeps the UX
+ *  parity work decoupled from the pod work.
+ *
+ *  `selected*` fields are `null` until the user picks a device
+ *  explicitly; the OS-default device is used in the meantime. */
+export interface CallSettings {
+  /** Currently selected microphone (`null` → OS default). */
+  readonly selectedAudioInput: string | null;
+  /** Currently selected camera (`null` → OS default). */
+  readonly selectedVideoInput: string | null;
+  /** Currently selected speaker / headset (`null` → OS
+   *  default). On iOS this is a routing hint rather than a
+   *  hard pick — AVAudioSession overrides for BT / wired. */
+  readonly selectedAudioOutput: string | null;
+  /** Enumerated devices the OS exposes. Mock-populated in
+   *  Phase 3; real enumeration arrives with the WebRTC pod
+   *  sprints once the permission flow is wired. */
+  readonly availableDevices: readonly CallDevice[];
+  /** Noise-suppression filter — `getUserMedia({ audio: {
+   *  noiseSuppression: true } })` on web; equivalent
+   *  AVAudioSession / AudioManager mode on the natives. */
+  readonly noiseSuppression: boolean;
+  /** Acoustic echo cancellation. */
+  readonly echoCancellation: boolean;
+  /** Automatic gain control. */
+  readonly autoGain: boolean;
+  /** Mirror the local preview tile horizontally — natural for
+   *  front-facing cameras, distracting for back cameras. */
+  readonly mirrorLocal: boolean;
+  /** Low-data mode — clamps simulcast to the bottom layer
+   *  (≈ 360p / 150 kbps) regardless of measured bandwidth.
+   *  Useful on metered mobile connections. */
+  readonly lowDataMode: boolean;
+}
+
+/** Default `CallSettings` — every toggle on, no explicit
+ *  device picks. */
+const DEFAULT_SETTINGS: CallSettings = {
+  selectedAudioInput: null,
+  selectedVideoInput: null,
+  selectedAudioOutput: null,
+  availableDevices: [],
+  noiseSuppression: true,
+  echoCancellation: true,
+  autoGain: true,
+  mirrorLocal: true,
+  lowDataMode: false,
+};
+
 /** Top-level UI state. Internal — components read via the
  *  accessors below. */
 interface CallStateInternal {
@@ -148,6 +227,10 @@ interface CallStateInternal {
    *  multiple cameras — drives the "switch camera" button's
    *  visibility. */
   readonly hasMultipleCameras: Accessor<boolean>;
+  /** Settings modal open / closed. */
+  readonly settingsOpen: Accessor<boolean>;
+  /** In-call audio / video settings + selected devices. */
+  readonly settings: Accessor<CallSettings>;
 }
 
 // ============================================================================
@@ -170,6 +253,8 @@ const [connectionDetail, setConnectionDetail] = createSignal<ConnectionDetail>({
 });
 const [qualityPopoverOpen, setQualityPopoverOpen] = createSignal(false);
 const [hasMultipleCameras, setHasMultipleCameras] = createSignal(false);
+const [settingsOpen, setSettingsOpen] = createSignal(false);
+const [settings, setSettings] = createSignal<CallSettings>(DEFAULT_SETTINGS);
 
 /** Helpers — replace one participant by id without mutating the
  *  underlying array (Solid's createSignal compares by identity
@@ -206,6 +291,8 @@ export const callState: CallStateInternal = {
   connectionDetail,
   qualityPopoverOpen,
   hasMultipleCameras,
+  settingsOpen,
+  settings,
 };
 
 /** Derived: the participant whose tile should be in the big
@@ -324,6 +411,11 @@ export const callActions = {
       connectionType: "unknown",
     });
     setQualityPopoverOpen(false);
+    setSettingsOpen(false);
+    // Devices list cleared — preferences (toggles + selected
+    // device ids) survive a reset so the user does not have to
+    // re-enable NS/AEC every time they enter a call screen.
+    setSettings((s) => ({ ...s, availableDevices: [] }));
   },
   /** Transition from prejoin → connecting. Called when the user
    *  clicks Join on the prejoin screen. The WebRTC pod takes
@@ -351,5 +443,49 @@ export const callActions = {
    *  the visibility of the mobile front/back switch button. */
   setHasMultipleCameras(many: boolean): void {
     setHasMultipleCameras(many);
+  },
+  /** Open / close the in-call settings modal. */
+  setSettingsOpen(open: boolean): void {
+    setSettingsOpen(open);
+  },
+  /** Replace the enumerated-devices snapshot. Called by the
+   *  WebRTC pod once it has run `navigator.mediaDevices.
+   *  enumerateDevices()` (with permission granted so labels
+   *  are populated). Idempotent — if the list is unchanged
+   *  by id, no signal change is published. */
+  setAvailableDevices(devices: readonly CallDevice[]): void {
+    setSettings((s) => ({ ...s, availableDevices: devices }));
+  },
+  /** Pick a microphone. `null` = revert to OS default. */
+  setSelectedAudioInput(id: string | null): void {
+    setSettings((s) => ({ ...s, selectedAudioInput: id }));
+  },
+  /** Pick a camera. `null` = revert to OS default. */
+  setSelectedVideoInput(id: string | null): void {
+    setSettings((s) => ({ ...s, selectedVideoInput: id }));
+  },
+  /** Pick a speaker / headset. `null` = revert to OS default. */
+  setSelectedAudioOutput(id: string | null): void {
+    setSettings((s) => ({ ...s, selectedAudioOutput: id }));
+  },
+  /** Toggle the noise-suppression filter. */
+  setNoiseSuppression(on: boolean): void {
+    setSettings((s) => ({ ...s, noiseSuppression: on }));
+  },
+  /** Toggle acoustic echo cancellation. */
+  setEchoCancellation(on: boolean): void {
+    setSettings((s) => ({ ...s, echoCancellation: on }));
+  },
+  /** Toggle automatic gain control. */
+  setAutoGain(on: boolean): void {
+    setSettings((s) => ({ ...s, autoGain: on }));
+  },
+  /** Toggle local-preview horizontal mirroring. */
+  setMirrorLocal(on: boolean): void {
+    setSettings((s) => ({ ...s, mirrorLocal: on }));
+  },
+  /** Toggle low-data mode (clamps simulcast to bottom layer). */
+  setLowDataMode(on: boolean): void {
+    setSettings((s) => ({ ...s, lowDataMode: on }));
   },
 };
