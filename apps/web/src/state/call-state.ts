@@ -190,6 +190,34 @@ export interface CallSettings {
   readonly lowDataMode: boolean;
 }
 
+/** A single chat message inside the call. Two kinds:
+ *
+ *  - `"text"` — a user-authored message (the canonical case).
+ *    Carries an MLS application-message round-trip ID
+ *    `id` and the sender's participant id + display name.
+ *  - `"system"` — auto-generated event ("Alice joined",
+ *    "Bob raised hand", "Screen share started"). Rendered as
+ *    a grey, centred line. `senderId` is `null` for system
+ *    events.
+ *
+ *  Persistence: text messages are MLS application messages
+ *  in the call's existing MLS group, so they survive the
+ *  call ending (the group itself persists). System events
+ *  are NOT persisted — they are derived from observed state
+ *  transitions and would be regenerated on every replay. */
+export interface ChatMessage {
+  readonly id: string;
+  readonly kind: "text" | "system";
+  /** Author participant id, or `null` for system events. */
+  readonly senderId: string | null;
+  /** Display name resolved at send time (so a later rename
+   *  does not retroactively rewrite the chat). */
+  readonly senderName: string;
+  readonly text: string;
+  /** Unix milliseconds. */
+  readonly ts: number;
+}
+
 /** Default `CallSettings` — every toggle on, no explicit
  *  device picks. */
 const DEFAULT_SETTINGS: CallSettings = {
@@ -231,6 +259,18 @@ interface CallStateInternal {
   readonly settingsOpen: Accessor<boolean>;
   /** In-call audio / video settings + selected devices. */
   readonly settings: Accessor<CallSettings>;
+  /** Chat panel open / closed. */
+  readonly chatOpen: Accessor<boolean>;
+  /** Chat-message log — oldest first. */
+  readonly chatMessages: Accessor<readonly ChatMessage[]>;
+  /** Live in-progress text-box content (held in state so it
+   *  survives panel close / reopen during a call). */
+  readonly composeText: Accessor<string>;
+  /** Number of unread text messages since the user last
+   *  opened the chat panel. System events do not count
+   *  towards unread — they are background context, not a
+   *  reason to draw the user's attention. */
+  readonly chatUnreadCount: Accessor<number>;
 }
 
 // ============================================================================
@@ -255,6 +295,21 @@ const [qualityPopoverOpen, setQualityPopoverOpen] = createSignal(false);
 const [hasMultipleCameras, setHasMultipleCameras] = createSignal(false);
 const [settingsOpen, setSettingsOpen] = createSignal(false);
 const [settings, setSettings] = createSignal<CallSettings>(DEFAULT_SETTINGS);
+const [chatOpen, setChatOpen] = createSignal(false);
+const [chatMessages, setChatMessages] = createSignal<readonly ChatMessage[]>([]);
+const [composeText, setComposeText] = createSignal("");
+const [chatUnreadCount, setChatUnreadCount] = createSignal(0);
+
+/** Monotone counter for client-side chat-message ids when
+ *  the message has not yet been ack'd by the MLS application-
+ *  message round-trip. Each id is namespaced with the call
+ *  start timestamp so a fresh call cannot collide with the
+ *  previous one's mock ids. */
+let chatIdCounter = 0;
+function nextChatId(): string {
+  chatIdCounter += 1;
+  return `local-${Date.now()}-${chatIdCounter}`;
+}
 
 /** Helpers — replace one participant by id without mutating the
  *  underlying array (Solid's createSignal compares by identity
@@ -293,6 +348,10 @@ export const callState: CallStateInternal = {
   hasMultipleCameras,
   settingsOpen,
   settings,
+  chatOpen,
+  chatMessages,
+  composeText,
+  chatUnreadCount,
 };
 
 /** Derived: the participant whose tile should be in the big
@@ -416,6 +475,14 @@ export const callActions = {
     // device ids) survive a reset so the user does not have to
     // re-enable NS/AEC every time they enter a call screen.
     setSettings((s) => ({ ...s, availableDevices: [] }));
+    // Chat is a per-call surface — wipe on reset. The
+    // production MLS-backed transport persists text messages
+    // in the group history independently; what we clear here
+    // is the in-memory view + the unread counter.
+    setChatOpen(false);
+    setChatMessages([]);
+    setComposeText("");
+    setChatUnreadCount(0);
   },
   /** Transition from prejoin → connecting. Called when the user
    *  clicks Join on the prejoin screen. The WebRTC pod takes
@@ -487,5 +554,74 @@ export const callActions = {
   /** Toggle low-data mode (clamps simulcast to bottom layer). */
   setLowDataMode(on: boolean): void {
     setSettings((s) => ({ ...s, lowDataMode: on }));
+  },
+  /** Open / close the chat panel. Opening clears the unread
+   *  badge — the user has seen the new messages. */
+  setChatOpen(open: boolean): void {
+    setChatOpen(open);
+    if (open) setChatUnreadCount(0);
+  },
+  /** Update the in-progress text-box content. Held in state
+   *  so the panel can close + reopen without losing what the
+   *  user typed. */
+  setComposeText(text: string): void {
+    setComposeText(text);
+  },
+  /** Send a chat message from the local participant. Returns
+   *  the constructed `ChatMessage` so the WebRTC pod can hand
+   *  it to MLS application-message encryption.
+   *
+   *  Local-echo: the message appears in `chatMessages`
+   *  immediately. The MLS round-trip is fire-and-forget — if
+   *  the network drops, the WebRTC pod is responsible for
+   *  re-queueing. UI does not currently surface delivery
+   *  state per message (`ChatMessage` has room to add a
+   *  `status` field if that becomes important). */
+  sendChatMessage(text: string): ChatMessage | null {
+    const trimmed = text.trim();
+    if (trimmed.length === 0) return null;
+    const local = localParticipant();
+    const senderId = local?.id ?? "local";
+    const senderName = local?.displayName ?? "You";
+    const msg: ChatMessage = {
+      id: nextChatId(),
+      kind: "text",
+      senderId,
+      senderName,
+      text: trimmed,
+      ts: Date.now(),
+    };
+    setChatMessages((prev) => [...prev, msg]);
+    setComposeText("");
+    return msg;
+  },
+  /** Receive a chat message from a remote participant
+   *  (decrypted MLS application message). If the chat panel
+   *  is closed, the unread badge increments. */
+  receiveChatMessage(msg: ChatMessage): void {
+    setChatMessages((prev) => [...prev, msg]);
+    if (!chatOpen() && msg.kind === "text") {
+      setChatUnreadCount((n) => n + 1);
+    }
+  },
+  /** Append a system event (peer joined, hand raised, screen
+   *  share started). Does NOT bump the unread counter — these
+   *  are background context. */
+  addSystemEvent(text: string): void {
+    const msg: ChatMessage = {
+      id: nextChatId(),
+      kind: "system",
+      senderId: null,
+      senderName: "",
+      text,
+      ts: Date.now(),
+    };
+    setChatMessages((prev) => [...prev, msg]);
+  },
+  /** Manually clear the unread badge. The chat-open action
+   *  already does this; this is the explicit knob for cases
+   *  like "mark all read without opening". */
+  clearChatUnread(): void {
+    setChatUnreadCount(0);
   },
 };

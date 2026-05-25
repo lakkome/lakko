@@ -17,6 +17,8 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -30,9 +32,12 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.Button
 import androidx.compose.material3.Divider
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -41,6 +46,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
@@ -57,6 +63,7 @@ import androidx.compose.material.icons.filled.ScreenShare
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.filled.VideocamOff
 import androidx.compose.material.icons.filled.ArrowDropDown
+import androidx.compose.material.icons.filled.Chat
 import androidx.compose.material.icons.filled.FlipCameraAndroid
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.runtime.Composable
@@ -74,7 +81,10 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -172,21 +182,34 @@ public fun CallScreen(
         }
     }
 
-    // Peer arrival / departure cues — fire one-shots on remote-
-    // participant count deltas while connected. Local
-    // participant is excluded because they are not a "peer"
-    // from the user's perspective.
-    val remoteCount = participants.count { !it.isLocal }
-    var lastRemoteCount by remember { mutableStateOf(0) }
-    LaunchedEffect(remoteCount, phase) {
-        if (phase is CallUiState.CallPhase.Connected && lastRemoteCount > 0) {
-            if (remoteCount > lastRemoteCount) {
-                sounds.playOnce(CallSoundController.SoundName.JOIN)
-            } else if (remoteCount < lastRemoteCount) {
-                sounds.playOnce(CallSoundController.SoundName.LEAVE)
+    // Peer arrival / departure cues + chat system events.
+    // id-based diff so "Alice left, Bob joined" in the same
+    // StateFlow tick fires both events. Local participant is
+    // excluded — they're not a "peer" from the user's POV.
+    val remoteIds = participants.filter { !it.isLocal }.map { it.id }
+    var lastRemoteIds by remember { mutableStateOf<List<String>>(emptyList()) }
+    LaunchedEffect(remoteIds, phase) {
+        if (phase is CallUiState.CallPhase.Connected && lastRemoteIds.isNotEmpty()) {
+            val remoteParts = participants.filter { !it.isLocal }
+            for (p in remoteParts) {
+                if (p.id !in lastRemoteIds) {
+                    sounds.playOnce(CallSoundController.SoundName.JOIN)
+                    state.addSystemEvent("${p.displayName} joined the call")
+                }
+            }
+            val currentIds = remoteIds.toSet()
+            for (prevId in lastRemoteIds) {
+                if (prevId !in currentIds) {
+                    sounds.playOnce(CallSoundController.SoundName.LEAVE)
+                    state.addSystemEvent("A participant left the call")
+                    // Display name has been dropped from state
+                    // by the time we observe the deletion;
+                    // future refinement preserves it. Out of
+                    // scope for S-3-A-chat.
+                }
             }
         }
-        lastRemoteCount = remoteCount
+        lastRemoteIds = remoteIds
     }
 
     when (phase) {
@@ -531,6 +554,8 @@ private fun InCallView(state: CallUiState, onExit: () -> Unit) {
 
         // Gear-menu bottom sheet (S-3-A-settings).
         SettingsSheet(state)
+        // Chat bottom sheet (S-3-A-chat).
+        ChatSheet(state)
     }
 }
 
@@ -734,6 +759,194 @@ private fun SettingsToggleRow(
         }
         Switch(checked = checked, onCheckedChange = onChange)
     }
+}
+
+// ============================================================
+// ChatToggleButton + ChatSheet (S-3-A-chat)
+// ============================================================
+
+/** CircleButton with an overlaid unread-count badge. The
+ *  badge surfaces only when there is something unread AND the
+ *  panel is closed. */
+@Composable
+private fun ChatToggleButton(state: CallUiState) {
+    val chatOpen by state.chatOpen.collectAsState()
+    val unread by state.chatUnreadCount.collectAsState()
+
+    Box {
+        CircleButton(
+            icon = Icons.Filled.Chat,
+            active = chatOpen,
+            description = when {
+                chatOpen -> "Close chat"
+                unread > 0 -> "Chat ($unread unread)"
+                else -> "Chat"
+            },
+            onClick = { state.setChatOpen(!chatOpen) },
+        )
+        if (unread > 0 && !chatOpen) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .offset(x = 2.dp, y = (-2).dp)
+                    .background(CallTheme.endCallRed, CircleShape)
+                    .padding(horizontal = 5.dp, vertical = 1.dp)
+                    .widthIn(min = 18.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    if (unread > 99) "99+" else unread.toString(),
+                    color = Color.White,
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Bold,
+                )
+            }
+        }
+    }
+}
+
+/** Bottom-sheet chat panel. Text-only; system events
+ *  ("Alice joined") rendered as grey italic centred lines.
+ *  Mock transport — messages live in CallUiState only until
+ *  the WebRTC pod wires real MLS application-message
+ *  round-trips. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ChatSheet(state: CallUiState) {
+    val open by state.chatOpen.collectAsState()
+    if (!open) return
+
+    val messages by state.chatMessages.collectAsState()
+    val compose by state.composeText.collectAsState()
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val listState = rememberLazyListState()
+
+    // Auto-scroll to bottom on new message.
+    LaunchedEffect(messages.size) {
+        if (messages.isNotEmpty()) {
+            listState.animateScrollToItem(messages.size - 1)
+        }
+    }
+
+    ModalBottomSheet(
+        onDismissRequest = { state.setChatOpen(false) },
+        sheetState = sheetState,
+        containerColor = CallTheme.surface,
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(min = 360.dp)
+                .padding(horizontal = 16.dp)
+                .padding(bottom = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text(
+                "Chat",
+                color = CallTheme.textPrimary,
+                fontSize = 18.sp,
+                fontWeight = FontWeight.SemiBold,
+            )
+
+            if (messages.isEmpty()) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        "No messages yet. Anything you send is end-to-end encrypted " +
+                            "inside this call's MLS group — the server cannot read it.",
+                        color = CallTheme.textSecondary,
+                        fontSize = 13.sp,
+                        textAlign = TextAlign.Center,
+                    )
+                }
+            } else {
+                LazyColumn(
+                    state = listState,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    items(messages, key = { it.id }) { msg ->
+                        ChatMessageRow(msg)
+                    }
+                }
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                OutlinedTextField(
+                    value = compose,
+                    onValueChange = { state.setComposeText(it) },
+                    modifier = Modifier.weight(1f),
+                    placeholder = { Text("Send a message") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+                    keyboardActions = KeyboardActions(
+                        onSend = { state.sendChatMessage(compose) }
+                    ),
+                )
+                Button(
+                    onClick = { state.sendChatMessage(compose) },
+                    enabled = compose.trim().isNotEmpty(),
+                ) {
+                    Text("Send")
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ChatMessageRow(msg: CallUiState.ChatMessage) {
+    if (msg.kind == CallUiState.ChatMessage.Kind.System) {
+        Text(
+            msg.text,
+            color = CallTheme.textSecondary,
+            fontSize = 12.sp,
+            fontStyle = FontStyle.Italic,
+            textAlign = TextAlign.Center,
+            modifier = Modifier.fillMaxWidth(),
+        )
+    } else {
+        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Row(
+                verticalAlignment = Alignment.Bottom,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Text(
+                    msg.senderName,
+                    color = CallTheme.accentBlue,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Text(
+                    formatChatTimestamp(msg.tsMs),
+                    color = CallTheme.textSecondary,
+                    fontSize = 12.sp,
+                )
+            }
+            Text(
+                msg.text,
+                color = CallTheme.textPrimary,
+                fontSize = 14.sp,
+            )
+        }
+    }
+}
+
+private fun formatChatTimestamp(epochMs: Long): String {
+    val cal = java.util.Calendar.getInstance().apply { timeInMillis = epochMs }
+    val hh = cal.get(java.util.Calendar.HOUR_OF_DAY).toString().padStart(2, '0')
+    val mm = cal.get(java.util.Calendar.MINUTE).toString().padStart(2, '0')
+    return "$hh:$mm"
 }
 
 // ============================================================
@@ -1055,6 +1268,7 @@ private fun ControlsBar(state: CallUiState) {
             description = if (local?.screenSharing == true) "Stop sharing screen" else "Share screen",
             onClick = { state.setScreenSharing(local?.screenSharing != true) },
         )
+        ChatToggleButton(state)
         CircleButton(
             icon = Icons.Filled.Settings,
             active = settingsOpen,

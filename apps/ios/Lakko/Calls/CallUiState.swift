@@ -149,6 +149,40 @@ public final class CallUiState: ObservableObject {
         public static let `default` = CallSettings()
     }
 
+    /// A single chat message inside the call (S-3-A-chat).
+    /// Same shape as the web `ChatMessage` and Android
+    /// counterpart.
+    public struct ChatMessage: Equatable, Identifiable {
+        public enum Kind: String, Equatable {
+            case text
+            case system
+        }
+        public let id: String
+        public let kind: Kind
+        /// Author participant id; `nil` for system events.
+        public let senderId: String?
+        public let senderName: String
+        public let text: String
+        /// Wall-clock timestamp.
+        public let ts: Date
+
+        public init(
+            id: String,
+            kind: Kind,
+            senderId: String?,
+            senderName: String,
+            text: String,
+            ts: Date
+        ) {
+            self.id = id
+            self.kind = kind
+            self.senderId = senderId
+            self.senderName = senderName
+            self.text = text
+            self.ts = ts
+        }
+    }
+
     // MARK: - Published state
 
     @Published public private(set) var phase: CallPhase = .prejoin
@@ -166,6 +200,27 @@ public final class CallUiState: ObservableObject {
     /// (S-3-A-settings). Mock-populated until the WebRTC pod
     /// sprint wires real device enumeration.
     @Published public private(set) var settings: CallSettings = .default
+
+    /// Chat panel open / closed (S-3-A-chat).
+    @Published public private(set) var chatOpen: Bool = false
+    /// Chat-message log — oldest first.
+    @Published public private(set) var chatMessages: [ChatMessage] = []
+    /// In-progress compose-box text (held in state so it
+    /// survives panel close / reopen during a call).
+    @Published public private(set) var composeText: String = ""
+    /// Unread-message count since the user last opened the
+    /// chat panel. System events do not count towards unread
+    /// — they are background context.
+    @Published public private(set) var chatUnreadCount: Int = 0
+
+    /// Monotone counter for client-side chat-message ids;
+    /// the WebRTC pod replaces this with MLS application-
+    /// message round-trip ids once 3a-pod-followup lands.
+    private var chatIdCounter: Int = 0
+    private func nextChatId() -> String {
+        chatIdCounter += 1
+        return "local-\(Int(Date().timeIntervalSince1970))-\(chatIdCounter)"
+    }
 
     // MARK: - Derived state
 
@@ -375,6 +430,74 @@ public final class CallUiState: ObservableObject {
         self.settings.lowDataMode = on
     }
 
+    // MARK: - Chat (S-3-A-chat)
+
+    /// Open / close the chat panel. Opening clears the unread
+    /// badge.
+    public func setChatOpen(_ open: Bool) {
+        self.chatOpen = open
+        if open { self.chatUnreadCount = 0 }
+    }
+
+    /// Update the in-progress compose-box content.
+    public func setComposeText(_ text: String) {
+        self.composeText = text
+    }
+
+    /// Send a chat message from the local participant.
+    /// Returns the constructed message so the WebRTC pod can
+    /// hand it to MLS application-message encryption. Local-
+    /// echo: the message appears in `chatMessages`
+    /// immediately. Returns `nil` for whitespace-only input.
+    @discardableResult
+    public func sendChatMessage(_ text: String) -> ChatMessage? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        let local = participants.first(where: { $0.isLocal })
+        let senderId = local?.id ?? "local"
+        let senderName = local?.displayName ?? "You"
+        let msg = ChatMessage(
+            id: nextChatId(),
+            kind: .text,
+            senderId: senderId,
+            senderName: senderName,
+            text: trimmed,
+            ts: Date()
+        )
+        self.chatMessages.append(msg)
+        self.composeText = ""
+        return msg
+    }
+
+    /// Receive a chat message from a remote participant
+    /// (decrypted MLS application message). If the chat panel
+    /// is closed, the unread badge increments.
+    public func receiveChatMessage(_ msg: ChatMessage) {
+        self.chatMessages.append(msg)
+        if !chatOpen, msg.kind == .text {
+            self.chatUnreadCount += 1
+        }
+    }
+
+    /// Append a system event ("Alice joined the call"). Does
+    /// NOT bump the unread counter — system events are
+    /// background context.
+    public func addSystemEvent(_ text: String) {
+        let msg = ChatMessage(
+            id: nextChatId(),
+            kind: .system,
+            senderId: nil,
+            senderName: "",
+            text: text,
+            ts: Date()
+        )
+        self.chatMessages.append(msg)
+    }
+
+    public func clearChatUnread() {
+        self.chatUnreadCount = 0
+    }
+
     public func endCall() {
         self.phase = .ended(endedAt: Date())
     }
@@ -392,6 +515,11 @@ public final class CallUiState: ObservableObject {
         // reset — only the enumerated-devices snapshot is
         // cleared.
         self.settings.availableDevices = []
+        // Chat is per-call — wipe.
+        self.chatOpen = false
+        self.chatMessages = []
+        self.composeText = ""
+        self.chatUnreadCount = 0
     }
 
     /// Seed mock state — same shape as the web `seedMockParticipants`.

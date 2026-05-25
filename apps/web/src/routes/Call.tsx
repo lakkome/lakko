@@ -57,6 +57,7 @@ import {
   galleryParticipants,
   qualityColour,
   type CallDevice,
+  type ChatMessage,
   type Participant,
   type QualityTier,
 } from "../state/call-state";
@@ -831,6 +832,7 @@ const ControlsBar: Component = () => {
           callActions.setScreenSharing(local()?.screenSharing !== true)
         }
       />
+      <ChatToggleButton />
       <CircleButton
         label="Settings"
         glyph="⚙️"
@@ -847,6 +849,51 @@ const ControlsBar: Component = () => {
     </div>
   );
 };
+
+/** Chat toggle — CircleButton variant with an unread-count
+ *  badge in the top-right corner. The badge surfaces only
+ *  when there is something to draw the user's attention to
+ *  AND the panel itself is closed. */
+const ChatToggleButton: Component = () => (
+  <div style={{ position: "relative" }}>
+    <CircleButton
+      label={
+        callState.chatOpen()
+          ? "Close chat"
+          : callState.chatUnreadCount() > 0
+            ? `Chat (${callState.chatUnreadCount()} unread)`
+            : "Chat"
+      }
+      glyph="💬"
+      active={callState.chatOpen()}
+      onClick={(): void => callActions.setChatOpen(!callState.chatOpen())}
+    />
+    <Show when={callState.chatUnreadCount() > 0 && !callState.chatOpen()}>
+      <span
+        aria-hidden="true"
+        style={{
+          position: "absolute",
+          top: "-2px",
+          right: "-2px",
+          "background-color": COLOURS.endCallRed,
+          color: "#fff",
+          "border-radius": "10px",
+          "min-width": "18px",
+          height: "18px",
+          padding: "0 5px",
+          "font-size": "11px",
+          "font-weight": "700",
+          display: "inline-flex",
+          "align-items": "center",
+          "justify-content": "center",
+          "pointer-events": "none",
+        }}
+      >
+        {callState.chatUnreadCount() > 99 ? "99+" : callState.chatUnreadCount()}
+      </span>
+    </Show>
+  </div>
+);
 
 // ============================================================================
 // SettingsPanel — gear-menu overlay (S-3-A-settings)
@@ -1252,6 +1299,248 @@ const CallEndedOverlay: Component<{ onDismiss: () => void }> = (props) => {
 };
 
 // ============================================================================
+// ChatPanel — in-call chat (S-3-A-chat)
+// ============================================================================
+//
+// Right-rail panel on desktop (320 px), full-height. Transport
+// is text-only; emoji, attachments, and reactions are scoped
+// out of this sprint. System events (peer joined / left) are
+// rendered inline as grey centered lines.
+
+const ChatPanel: Component = () => {
+  let scrollRef: HTMLDivElement | undefined;
+  let inputRef: HTMLInputElement | undefined;
+
+  // Auto-scroll to the bottom whenever the message list grows.
+  createEffect((): void => {
+    // Re-read so the effect is reactive to message changes.
+    void callState.chatMessages().length;
+    queueMicrotask((): void => {
+      if (scrollRef !== undefined) {
+        scrollRef.scrollTop = scrollRef.scrollHeight;
+      }
+    });
+  });
+
+  // Auto-focus the compose box when the panel opens.
+  createEffect((): void => {
+    if (callState.chatOpen() && inputRef !== undefined) {
+      // Delay one tick — the input is being mounted in the
+      // same microtask.
+      queueMicrotask((): void => inputRef?.focus());
+    }
+  });
+
+  const submit = (): void => {
+    callActions.sendChatMessage(callState.composeText());
+  };
+
+  return (
+    <Show when={callState.chatOpen()}>
+      <aside
+        aria-label="Call chat"
+        style={{
+          position: "absolute",
+          right: "0",
+          top: "0",
+          bottom: "0",
+          width: "320px",
+          "background-color": COLOURS.surface,
+          "border-left": `1px solid ${COLOURS.border}`,
+          display: "flex",
+          "flex-direction": "column",
+          "z-index": "10",
+        }}
+      >
+        <header
+          style={{
+            display: "flex",
+            "align-items": "center",
+            "justify-content": "space-between",
+            padding: "14px 16px",
+            "border-bottom": `1px solid ${COLOURS.border}`,
+          }}
+        >
+          <span
+            style={{
+              "font-weight": "600",
+              "font-size": "15px",
+              color: COLOURS.textPrimary,
+            }}
+          >
+            Chat
+          </span>
+          <button
+            type="button"
+            aria-label="Close chat"
+            onClick={(): void => callActions.setChatOpen(false)}
+            style={{
+              background: "none",
+              border: "none",
+              color: COLOURS.textSecondary,
+              "font-size": "20px",
+              cursor: "pointer",
+              padding: "2px 6px",
+            }}
+          >
+            ×
+          </button>
+        </header>
+
+        <div
+          ref={scrollRef}
+          style={{
+            flex: "1",
+            "overflow-y": "auto",
+            padding: "12px 14px",
+            display: "flex",
+            "flex-direction": "column",
+            gap: "10px",
+          }}
+        >
+          <Show
+            when={callState.chatMessages().length > 0}
+            fallback={
+              <div
+                style={{
+                  color: COLOURS.textSecondary,
+                  "font-size": "13px",
+                  "text-align": "center",
+                  "padding-top": "32px",
+                  "line-height": "1.5",
+                }}
+              >
+                No messages yet. Anything you send is end-to-end encrypted
+                inside this call's MLS group — the server cannot read it.
+              </div>
+            }
+          >
+            <For each={callState.chatMessages()}>
+              {(msg): JSX.Element => <ChatMessageRow msg={msg} />}
+            </For>
+          </Show>
+        </div>
+
+        <form
+          style={{
+            display: "flex",
+            gap: "8px",
+            padding: "10px 12px",
+            "border-top": `1px solid ${COLOURS.border}`,
+          }}
+          onSubmit={(e): void => {
+            e.preventDefault();
+            submit();
+          }}
+        >
+          <input
+            ref={inputRef}
+            type="text"
+            placeholder="Send a message"
+            aria-label="Compose chat message"
+            value={callState.composeText()}
+            onInput={(e): void =>
+              callActions.setComposeText(e.currentTarget.value)
+            }
+            style={{
+              flex: "1",
+              padding: "8px 10px",
+              "background-color": COLOURS.background,
+              color: COLOURS.textPrimary,
+              border: `1px solid ${COLOURS.border}`,
+              "border-radius": "8px",
+              "font-size": "14px",
+            }}
+          />
+          <button
+            type="submit"
+            disabled={callState.composeText().trim().length === 0}
+            aria-label="Send chat message"
+            style={{
+              padding: "8px 14px",
+              "background-color": COLOURS.accentBlue,
+              color: "#fff",
+              border: "none",
+              "border-radius": "8px",
+              cursor:
+                callState.composeText().trim().length === 0
+                  ? "not-allowed"
+                  : "pointer",
+              opacity:
+                callState.composeText().trim().length === 0 ? "0.5" : "1",
+              "font-size": "14px",
+              "font-weight": "600",
+            }}
+          >
+            Send
+          </button>
+        </form>
+      </aside>
+    </Show>
+  );
+};
+
+const ChatMessageRow: Component<{ msg: ChatMessage }> = (props) => {
+  const isSystem = (): boolean => props.msg.kind === "system";
+  const time = (): string => {
+    const d = new Date(props.msg.ts);
+    const hh = `${d.getHours()}`.padStart(2, "0");
+    const mm = `${d.getMinutes()}`.padStart(2, "0");
+    return `${hh}:${mm}`;
+  };
+  return (
+    <Show
+      when={!isSystem()}
+      fallback={
+        <div
+          style={{
+            color: COLOURS.textSecondary,
+            "font-size": "12px",
+            "text-align": "center",
+            "font-style": "italic",
+          }}
+        >
+          {props.msg.text}
+        </div>
+      }
+    >
+      <div
+        style={{
+          display: "flex",
+          "flex-direction": "column",
+          gap: "2px",
+        }}
+      >
+        <div
+          style={{
+            display: "flex",
+            gap: "8px",
+            "align-items": "baseline",
+            "font-size": "12px",
+            color: COLOURS.textSecondary,
+          }}
+        >
+          <span style={{ color: COLOURS.accentBlue, "font-weight": "600" }}>
+            {props.msg.senderName}
+          </span>
+          <span>{time()}</span>
+        </div>
+        <div
+          style={{
+            color: COLOURS.textPrimary,
+            "font-size": "14px",
+            "line-height": "1.4",
+            "word-break": "break-word",
+          }}
+        >
+          {props.msg.text}
+        </div>
+      </div>
+    </Show>
+  );
+};
+
+// ============================================================================
 // Mock data — seeds the screen with placeholder participants until
 // the WebRTC pod (3a-pod-followup) wires real ones in.
 // ============================================================================
@@ -1385,26 +1674,40 @@ const Call: Component = () => {
     }
   });
 
-  // Peer-arrival / peer-departure cues. Track the remote
-  // participant count; on each delta fire the right one-shot.
-  // Local participant is excluded because they aren't a
-  // "peer" from the user's perspective.
-  let lastRemoteCount = 0;
+  // Peer-arrival / peer-departure cues + chat system events.
+  // Track the remote participant count + the id set; on each
+  // delta fire the right audio cue AND post a system event
+  // into the chat ("Alice joined", "Bob left"). Local
+  // participant is excluded because they aren't a "peer"
+  // from the user's perspective.
+  let lastRemoteIds: ReadonlyArray<string> = [];
   createEffect(() => {
-    const remoteCount = callState
-      .participants()
-      .filter((p) => !p.isLocal).length;
-    // Skip the initial seed transition — it's the same audible
-    // event as the `connected → join` cue above and would
-    // double up.
-    if (callState.phase().kind === "connected" && lastRemoteCount > 0) {
-      if (remoteCount > lastRemoteCount) {
-        sounds.playOnce("join");
-      } else if (remoteCount < lastRemoteCount) {
-        sounds.playOnce("leave");
+    const remote = callState.participants().filter((p) => !p.isLocal);
+    const remoteIds = remote.map((p) => p.id);
+
+    if (callState.phase().kind === "connected" && lastRemoteIds.length > 0) {
+      // Joiners — present now but not in the previous snapshot.
+      for (const p of remote) {
+        if (!lastRemoteIds.includes(p.id)) {
+          sounds.playOnce("join");
+          callActions.addSystemEvent(`${p.displayName} joined the call`);
+        }
+      }
+      // Leavers — in the previous snapshot but not now.
+      const remoteById = new Map(remote.map((p) => [p.id, p]));
+      const prevSnapshot = lastRemoteIds;
+      for (const prevId of prevSnapshot) {
+        if (!remoteById.has(prevId)) {
+          sounds.playOnce("leave");
+          callActions.addSystemEvent(`A participant left the call`);
+          // Display name has already been dropped from state by
+          // the time we observe the deletion; the WebRTC pod
+          // will preserve the last-known name in a future
+          // refinement (out of scope for S-3-A-chat).
+        }
       }
     }
-    lastRemoteCount = remoteCount;
+    lastRemoteIds = remoteIds;
   });
 
   // Compute whether we're alone in the call (no remote yet).
@@ -1536,6 +1839,7 @@ const Call: Component = () => {
 
         <ControlsBar />
         <ParticipantList />
+        <ChatPanel />
         <SettingsPanel />
 
         <Show when={callState.phase().kind === "ended"}>

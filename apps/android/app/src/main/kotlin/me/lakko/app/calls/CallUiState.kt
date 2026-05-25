@@ -115,6 +115,21 @@ public class CallUiState(
         }
     }
 
+    /** A single chat message inside the call (S-3-A-chat).
+     *  Same shape as the web `ChatMessage` and iOS counterpart. */
+    public data class ChatMessage(
+        val id: String,
+        val kind: Kind,
+        /** Author participant id; `null` for system events. */
+        val senderId: String?,
+        val senderName: String,
+        val text: String,
+        /** Unix milliseconds. */
+        val tsMs: Long,
+    ) {
+        public enum class Kind { Text, System }
+    }
+
     // ----------------------------------------------------------
     // State flows
     // ----------------------------------------------------------
@@ -151,6 +166,30 @@ public class CallUiState(
     /** Settings + enumerated devices (S-3-A-settings). */
     private val _settings = MutableStateFlow(CallSettings.Default)
     public val settings: StateFlow<CallSettings> = _settings.asStateFlow()
+
+    /** Chat panel open / closed (S-3-A-chat). */
+    private val _chatOpen = MutableStateFlow(false)
+    public val chatOpen: StateFlow<Boolean> = _chatOpen.asStateFlow()
+
+    /** Chat-message log — oldest first. */
+    private val _chatMessages = MutableStateFlow<List<ChatMessage>>(emptyList())
+    public val chatMessages: StateFlow<List<ChatMessage>> = _chatMessages.asStateFlow()
+
+    /** In-progress compose-box content. */
+    private val _composeText = MutableStateFlow("")
+    public val composeText: StateFlow<String> = _composeText.asStateFlow()
+
+    /** Unread-message count since the user last opened the
+     *  chat panel. System events do not count towards unread. */
+    private val _chatUnreadCount = MutableStateFlow(0)
+    public val chatUnreadCount: StateFlow<Int> = _chatUnreadCount.asStateFlow()
+
+    /** Monotone counter for client-side chat-message ids. */
+    private var chatIdCounter: Long = 0
+    private fun nextChatId(): String {
+        chatIdCounter += 1
+        return "local-${System.currentTimeMillis() / 1000}-$chatIdCounter"
+    }
 
     // ----------------------------------------------------------
     // Derived helpers (UI calls these inline; Compose recomposes
@@ -311,6 +350,74 @@ public class CallUiState(
         _settings.value = _settings.value.copy(lowDataMode = on)
     }
 
+    // ----------------------------------------------------------
+    // Chat actions (S-3-A-chat)
+    // ----------------------------------------------------------
+
+    /** Open / close the chat panel. Opening clears the unread
+     *  badge. */
+    public fun setChatOpen(open: Boolean) {
+        _chatOpen.value = open
+        if (open) _chatUnreadCount.value = 0
+    }
+
+    /** Update the in-progress compose-box content. */
+    public fun setComposeText(text: String) {
+        _composeText.value = text
+    }
+
+    /** Send a chat message from the local participant. Returns
+     *  the constructed message so the WebRTC pod can hand it
+     *  to MLS application-message encryption. Returns `null`
+     *  for whitespace-only input. */
+    public fun sendChatMessage(text: String): ChatMessage? {
+        val trimmed = text.trim()
+        if (trimmed.isEmpty()) return null
+        val local = _participants.value.firstOrNull { it.isLocal }
+        val senderId = local?.id ?: "local"
+        val senderName = local?.displayName ?: "You"
+        val msg = ChatMessage(
+            id = nextChatId(),
+            kind = ChatMessage.Kind.Text,
+            senderId = senderId,
+            senderName = senderName,
+            text = trimmed,
+            tsMs = System.currentTimeMillis(),
+        )
+        _chatMessages.value = _chatMessages.value + msg
+        _composeText.value = ""
+        return msg
+    }
+
+    /** Receive a chat message from a remote participant
+     *  (decrypted MLS application message). If the chat panel
+     *  is closed, the unread badge increments. */
+    public fun receiveChatMessage(msg: ChatMessage) {
+        _chatMessages.value = _chatMessages.value + msg
+        if (!_chatOpen.value && msg.kind == ChatMessage.Kind.Text) {
+            _chatUnreadCount.value = _chatUnreadCount.value + 1
+        }
+    }
+
+    /** Append a system event ("Alice joined the call"). Does
+     *  NOT bump the unread counter — system events are
+     *  background context. */
+    public fun addSystemEvent(text: String) {
+        val msg = ChatMessage(
+            id = nextChatId(),
+            kind = ChatMessage.Kind.System,
+            senderId = null,
+            senderName = "",
+            text = text,
+            tsMs = System.currentTimeMillis(),
+        )
+        _chatMessages.value = _chatMessages.value + msg
+    }
+
+    public fun clearChatUnread() {
+        _chatUnreadCount.value = 0
+    }
+
     public fun endCall() {
         _phase.value = CallPhase.Ended(endedAtMs = System.currentTimeMillis())
     }
@@ -327,6 +434,11 @@ public class CallUiState(
         // Preferences (toggles + selected ids) survive a reset
         // — only the enumerated-devices snapshot is cleared.
         _settings.value = _settings.value.copy(availableDevices = emptyList())
+        // Chat is per-call — wipe.
+        _chatOpen.value = false
+        _chatMessages.value = emptyList()
+        _composeText.value = ""
+        _chatUnreadCount.value = 0
     }
 
     /** Mock seed — same shape as the web `seedMockParticipants` /

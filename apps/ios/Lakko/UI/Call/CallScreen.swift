@@ -363,6 +363,38 @@ private struct CircleButton: View {
     }
 }
 
+/// Chat-toggle button — CircleButton with an overlaid unread
+/// badge in the top-right corner. The badge surfaces only when
+/// there is something unread AND the panel is closed.
+private struct ChatToggleButton: View {
+    @ObservedObject var state: CallUiState
+
+    var body: some View {
+        ZStack(alignment: .topTrailing) {
+            CircleButton(
+                label: state.chatOpen
+                    ? "Close chat"
+                    : (state.chatUnreadCount > 0
+                        ? "Chat (\(state.chatUnreadCount) unread)"
+                        : "Chat"),
+                systemImage: "bubble.left.and.bubble.right.fill",
+                active: state.chatOpen,
+                onTap: { state.setChatOpen(!state.chatOpen) }
+            )
+            if state.chatUnreadCount > 0 && !state.chatOpen {
+                Text(state.chatUnreadCount > 99 ? "99+" : "\(state.chatUnreadCount)")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 5)
+                    .frame(minWidth: 18, minHeight: 18)
+                    .background(Capsule().fill(CallTheme.endCallRed))
+                    .offset(x: 2, y: -2)
+                    .allowsHitTesting(false)
+            }
+        }
+    }
+}
+
 private struct ControlsBar: View {
     @ObservedObject var state: CallUiState
 
@@ -411,6 +443,7 @@ private struct ControlsBar: View {
                 active: local?.screenSharing == true,
                 onTap: { state.setScreenSharing(!(local?.screenSharing ?? false)) }
             )
+            ChatToggleButton(state: state)
             CircleButton(
                 label: "Settings",
                 systemImage: "gearshape.fill",
@@ -709,12 +742,12 @@ public struct CallScreen: View {
     /// with the view (which deactivates the underlying
     /// AVAudioPlayer instances via its `deinit`).
     @StateObject private var sounds = CallSoundsObservable()
-    /// Last observed remote-participant count, used to fire
-    /// `join` / `leave` cues on count deltas while the call is
-    /// `connected`. Tracked in the view rather than the state
-    /// object because it is sound-controller bookkeeping, not
-    /// model-of-the-call state.
-    @State private var lastRemoteCount: Int = 0
+    /// Last observed remote-participant ids, used to fire
+    /// `join` / `leave` cues + chat system events on deltas
+    /// while the call is `connected`. Tracked in the view
+    /// rather than the state object because it is bookkeeping
+    /// for side effects, not model-of-the-call state.
+    @State private var lastRemoteIds: [String] = []
     let onExit: () -> Void
 
     public init(onExit: @escaping () -> Void) {
@@ -762,18 +795,29 @@ public struct CallScreen: View {
                 sounds.controller.playOnce(.leave)
             }
         }
-        // Peer arrival / departure cues. The diff against
-        // `lastRemoteCount` fires the right one-shot when
-        // someone joins or leaves an active call.
-        .onChange(of: state.participants.filter { !$0.isLocal }.count) { _, newCount in
-            if case .connected = state.phase, lastRemoteCount > 0 {
-                if newCount > lastRemoteCount {
+        // Peer arrival / departure cues + chat system events.
+        // The id-based diff catches "Alice left, Bob joined"
+        // in the same StateFlow tick (which a pure count would
+        // miss).
+        .onChange(of: state.participants.map(\.id)) { _, _ in
+            let remote = state.participants.filter { !$0.isLocal }
+            let remoteIds = remote.map(\.id)
+            if case .connected = state.phase, !lastRemoteIds.isEmpty {
+                for p in remote where !lastRemoteIds.contains(p.id) {
                     sounds.controller.playOnce(.join)
-                } else if newCount < lastRemoteCount {
+                    state.addSystemEvent("\(p.displayName) joined the call")
+                }
+                let currentIds = Set(remoteIds)
+                for prevId in lastRemoteIds where !currentIds.contains(prevId) {
                     sounds.controller.playOnce(.leave)
+                    state.addSystemEvent("A participant left the call")
+                    // Display name has been dropped from state
+                    // by the time we observe the deletion — the
+                    // WebRTC pod sprint will preserve the last-
+                    // known name (out of scope for S-3-A-chat).
                 }
             }
-            lastRemoteCount = newCount
+            lastRemoteIds = remoteIds
         }
         .onDisappear {
             sounds.controller.stopAll()
@@ -876,6 +920,17 @@ public struct CallScreen: View {
             )
         ) {
             SettingsSheet(state: state)
+        }
+        // Chat sheet (S-3-A-chat). Same `.sheet` mechanism;
+        // the gear and chat are mutually exclusive on iOS by
+        // construction (presenting one dismisses the other).
+        .sheet(
+            isPresented: Binding(
+                get: { state.chatOpen },
+                set: { state.setChatOpen($0) }
+            )
+        ) {
+            ChatSheet(state: state)
         }
     }
 }
@@ -993,6 +1048,144 @@ private struct SettingsSheet: View {
             ForEach(devices) { device in
                 Text(device.label.isEmpty ? device.kind.rawValue : device.label)
                     .tag(String?.some(device.id))
+            }
+        }
+    }
+}
+
+// MARK: - ChatSheet (S-3-A-chat)
+
+/// In-call chat sheet. Text-only; system events ("Alice
+/// joined") rendered inline as grey italic centred lines.
+/// Mock transport — messages live in CallUiState only until
+/// the WebRTC pod wires real MLS application-message
+/// round-trips.
+private struct ChatSheet: View {
+    @ObservedObject var state: CallUiState
+    @FocusState private var composerFocused: Bool
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 0) {
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: 10) {
+                            if state.chatMessages.isEmpty {
+                                Text(
+                                    "No messages yet. Anything you send is end-to-end "
+                                    + "encrypted inside this call's MLS group — the "
+                                    + "server cannot read it."
+                                )
+                                .font(.system(size: 13))
+                                .foregroundColor(CallTheme.textSecondary)
+                                .multilineTextAlignment(.center)
+                                .frame(maxWidth: .infinity)
+                                .padding(.top, 40)
+                                .padding(.horizontal, 16)
+                            } else {
+                                ForEach(state.chatMessages) { msg in
+                                    ChatMessageRow(msg: msg).id(msg.id)
+                                }
+                            }
+                        }
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 12)
+                    }
+                    .onChange(of: state.chatMessages.count) { _, _ in
+                        // Auto-scroll to the newest message.
+                        if let last = state.chatMessages.last {
+                            withAnimation(.easeOut(duration: 0.15)) {
+                                proxy.scrollTo(last.id, anchor: .bottom)
+                            }
+                        }
+                    }
+                }
+
+                Divider().background(CallTheme.border)
+
+                HStack(spacing: 8) {
+                    TextField(
+                        "Send a message",
+                        text: Binding(
+                            get: { state.composeText },
+                            set: { state.setComposeText($0) }
+                        )
+                    )
+                    .focused($composerFocused)
+                    .textFieldStyle(.roundedBorder)
+                    .submitLabel(.send)
+                    .onSubmit(send)
+
+                    Button(action: send) {
+                        Text("Send")
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 8)
+                            .background(
+                                RoundedRectangle(cornerRadius: 8)
+                                    .fill(canSend ? CallTheme.accentBlue : CallTheme.surface)
+                            )
+                    }
+                    .disabled(!canSend)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
+            }
+            .background(CallTheme.background)
+            .navigationTitle("Chat")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { state.setChatOpen(false) }
+                }
+            }
+            .onAppear { composerFocused = true }
+        }
+    }
+
+    private var canSend: Bool {
+        !state.composeText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private func send() {
+        state.sendChatMessage(state.composeText)
+    }
+}
+
+private struct ChatMessageRow: View {
+    let msg: CallUiState.ChatMessage
+
+    private static let timeFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "HH:mm"
+        return f
+    }()
+
+    var body: some View {
+        if msg.kind == .system {
+            HStack {
+                Spacer()
+                Text(msg.text)
+                    .font(.system(size: 12).italic())
+                    .foregroundColor(CallTheme.textSecondary)
+                    .multilineTextAlignment(.center)
+                Spacer()
+            }
+        } else {
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 8) {
+                    Text(msg.senderName)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(CallTheme.accentBlue)
+                    Text(Self.timeFormatter.string(from: msg.ts))
+                        .font(.system(size: 12))
+                        .foregroundColor(CallTheme.textSecondary)
+                }
+                Text(msg.text)
+                    .font(.system(size: 14))
+                    .foregroundColor(CallTheme.textPrimary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
     }
