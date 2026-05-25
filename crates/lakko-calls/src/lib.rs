@@ -51,6 +51,7 @@ pub mod codec_audio;
 pub mod codec_video;
 pub mod error;
 pub mod group_call;
+pub mod header;
 pub mod link_invite;
 pub mod quality;
 pub mod session;
@@ -72,6 +73,7 @@ pub use session::{
     CallSession, CallState, Event, IceCandidate, MediaKind, Role, SdpDescription, SdpKind,
     Transition,
 };
+pub use header::{HeaderError, SframeHeader, MAX_HEADER_LEN};
 pub use sframe::{CallKey, ParticipantKey, SFRAME_EXPORT_LABEL};
 pub use signaling::{
     compose_signaling_payload, parse_signaling_payload, CallId, EndReason, MediaFlags,

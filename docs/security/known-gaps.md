@@ -506,18 +506,44 @@ plumbing only.
 MLS suites pin classical curves today. PQ migration
 follows the WG.
 
-### G-26: RFC 9605 §4.3 wire frame header serializer not implemented
+### G-26: RFC 9605 §4.3 wire frame header — serializer **landed**, end-to-end interop pending
 
-[`lakko_calls::sframe`](../../crates/lakko-calls/src/sframe.rs)
-ships the keying half of RFC 9605 — `CallKey` derivation
-via MLS exporter, per-leaf `ParticipantKey` via HKDF,
-nonce composition per §4.4, AEAD seal/open round-trip
-(see **C-37** in [`calls.md`](./calls.md) for the full
-invariant set). What is **not** implemented is the
-wire-level frame header serialization specified in RFC
-9605 §4.3 — the compact bit-packed `Config|KID|CTR`
-layout that lets two independent SFrame implementations
-interoperate byte-for-byte over the wire.
+**Status (2026-05-25):** partially closed. The serializer
++ deserializer now lives in
+[`crates/lakko-calls/src/header.rs`](../../crates/lakko-calls/src/header.rs)
+as `SframeHeader::encode` / `SframeHeader::decode`, with
+12 unit tests covering the round trip + pinned wire
+layouts + reserved-bit refusal + truncation handling +
+bit-packing first-byte invariants for every LEN /
+KID / KLEN value in `0..=7`. The implementation is RFC
+9605 §4.3 conformant by construction — every assertion
+that lands in production maps to a clause of the spec.
+
+**What is still open.** Two pieces remain:
+
+1. **Integration into the `seal` / `open` pipeline.**
+   [`lakko_calls::sframe`](../../crates/lakko-calls/src/sframe.rs)
+   still exposes the typed
+   `(frame_counter, ciphertext)` tuple instead of
+   prepending `SframeHeader::encode` to the AEAD output.
+   The integration is mechanical and lands with
+   `S-3-B-routing-media` (see
+   `docs/ROADMAP-PHASE3-CLOSEOUT.md`) — the SFU needs to
+   read the KID byte to route by participant without
+   decoding the ciphertext, so the wire form becomes the
+   natural call surface at that sprint.
+2. **External interop verification.** The current tests
+   are self-consistency: encode → decode → equal +
+   layout-pinned constants drawn straight from the spec.
+   They do NOT prove that an mlspp or browser-native
+   SFrame stack reads our bytes the same way. That gap
+   becomes answerable in `S-3-A-acceptance` when at
+   least one external SFrame stack is in the loop
+   (Chrome's `RTCRtpScriptTransform` with SFrame, or
+   mlspp's reference). The plan is to add an interop
+   corpus file at `crates/lakko-calls/tests/sframe_
+   interop.json` populated from the external stack and
+   asserted against `SframeHeader::decode`.
 
 **Why this isn't a security gap today.** The current
 production path runs SFrame inside a closed system:
@@ -529,29 +555,23 @@ piece of header information the receiver needs, and it
 crosses the boundary as a typed `u32` rather than a
 serialized byte. The keying math (which is what
 determines whether the AEAD opens) is fully RFC 9605
-§4.4 conformant; the wire layout is what differs.
+§4.4 conformant; the wire layout has now caught up with
+a parallel serializer module.
 
-**When the gap matters.** The moment we want to:
-- Interop with a non-Lakko SFrame implementation (e.g. a
-  browser-side WebRTC stack that supports SFrame natively
-  per the Insertable Streams + SFrame W3C draft).
-- Forward SFrame frames through the LiveKit SFU's
-  selective forwarding path **without decoding** the
-  outer tuple in our Rust binary — the Go fork would
-  need to parse the wire header to route by KID.
+**When the remaining gap matters.** The moment we want to:
+- Interop with a non-Lakko SFrame implementation (e.g.
+  a browser-side WebRTC stack that supports SFrame
+  natively per the Insertable Streams + SFrame W3C
+  draft).
+- Forward SFrame frames through the SFU's selective
+  forwarding path **without decoding** the outer tuple
+  in our Rust binary — the SFU (now Rust, per
+  ADR-0011) parses the wire header to route by KID.
 
-The first interop sprint with the LiveKit Go fork is when
-this lands. The serializer is mechanical (bit-packing +
-variable-length counter encoding); the test plan is a
-fixture suite against RFC 9605 §A test vectors if any
-land, or against a known-good reference implementation
-otherwise.
-
-**Operational status**: explicit deferred work, scoped
-to the LiveKit fork integration sprint (3b1c). All
-production call paths through Phase 3c3 use the typed-
-tuple form and are unaffected. Recorded here so an
-auditor doesn't re-discover the absence as a finding.
+`S-3-B-routing-media` and `S-3-A-acceptance` are the
+sprints that close the remaining two pieces. Recorded
+here so an auditor sees the residual scope, not the
+absence of any progress.
 
 ## Dependency advisories
 
