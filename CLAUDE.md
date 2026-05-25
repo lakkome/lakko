@@ -65,7 +65,7 @@ The Phase 3 closeout punch list — gap inventory + sprint waves with exit crite
 | `discovery` | Username lookup via OPRF |
 | `push-gw` | Fan-out APNs / FCM / UnifiedPush |
 | `transport-rendezvous` | Signed bootstrap config for anti-censorship |
-| `sfu` | Minimal Rust SFU on `webrtc-rs` / `str0m` (stack picked in `S-3-B-spike`). Scaffolded; implementation lands per `docs/ROADMAP-PHASE3-CLOSEOUT.md` group **B**. See [`services/sfu/README.md`](services/sfu/README.md) + [ADR-0011](docs/adr/0011-rust-sfu.md) |
+| `sfu` | Minimal Rust SFU on `str0m` (stack chosen in `S-3-B-spike`). **Signaling half shipped** — Lakko-native typed wire protocol (welcome / peer-joined / peer-left / signal-relay / ping/pong / error), `lakko-call-jwt` admission, per-peer mpsc fanout, cross-call isolation, 32 unit + 9 integration tests. **Media half pending** (`S-3-B-routing-media`) — gated on a working WebRTC pod on at least one client. See [`services/sfu/README.md`](services/sfu/README.md) + [ADR-0011](docs/adr/0011-rust-sfu.md) + [`docs/security/calls.md`](docs/security/calls.md) C-39 |
 
 ### Other
 
@@ -74,7 +74,7 @@ The Phase 3 closeout punch list — gap inventory + sprint waves with exit crite
 - `infra/` — single-VPS Hetzner deployment via systemd + system-nginx + system-MariaDB; see `infra/README.md` (migration from lakko_me and daily ops)
 - `docs/adr/` — Architecture Decision Records
 - `docs/ROADMAP.md` — tactical decomposition of every phase
-- `docs/security/` — audit-readiness pack: threat model, crypto overview, MLS state machine invariants (I-1..I-8), call-side cryptography (C-1..C-37 — media-key pipeline + call-admission JWT + link-based invite + owner fingerprint + server-handler drift sentinels + URL discrimination + composer/acceptor pipelines + Welcome-ferry envelope + KP-forward envelope + incoming-envelope dispatcher + 1×1 and multi-party E2E chain + owner-handover protocol + SFrame keying math), known gaps (G-1..G-26 — including the cargo-audit baseline for transitive deps + RFC 9605 wire-header interop gap). Entry: [`docs/security/README.md`](docs/security/README.md)
+- `docs/security/` — audit-readiness pack: threat model, crypto overview, MLS state machine invariants (I-1..I-8), call-side cryptography (C-1..C-39 — media-key pipeline + call-admission JWT + link-based invite + owner fingerprint + server-handler drift sentinels + URL discrimination + composer/acceptor pipelines + Welcome-ferry envelope + KP-forward envelope + incoming-envelope dispatcher + 1×1 and multi-party E2E chain + owner-handover protocol + SFrame keying math + RFC 9605 wire-header round-trip + SFU signaling-layer zero-payload-inspection / cross-call isolation / backpressure semantics), known gaps (G-1..G-26 — including the cargo-audit baseline for transitive deps + RFC 9605 wire-header interop gap **now partially closed**). Entry: [`docs/security/README.md`](docs/security/README.md)
 - `tools/` — codegen, fuzz harnesses, benchmarks
 - `ci/` — GitHub Actions + self-hosted SLSA L3 builders
 

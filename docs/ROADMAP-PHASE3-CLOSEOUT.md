@@ -27,39 +27,41 @@ LiveKit fork).
   terminal without physical hardware? `✅` = yes; `⚠` =
   partial (code in chat, validation needs hardware /
   upstream / external party); `❌` = no.
+- "Status" — `done` = fully closed; `partial` = some
+  sub-sprints landed, see notes; `open` = not yet started.
 
 ## Summary table
 
-| # | Gap | Group | Blocks | Chat? | Estimate |
-|---|---|---|---|---|---|
-| **G3-1** | WebRTC pod iOS — `WebRTC.framework` + peer connection | Phase 3 closeout | 1×1 + group calls | ✅ + acceptance | 2 sprints |
-| **G3-2** | WebRTC pod Android — `webrtc-sdk:android` + peer connection | Phase 3 closeout | 1×1 + group calls | ✅ + acceptance | 2 sprints |
-| **G3-3** | Rust SFU on `webrtc-rs` / `str0m` (replaces LiveKit fork — see [ADR-0011](./adr/0011-rust-sfu.md)) | Phase 3 closeout | **group** calls only (1×1 needs no SFU) | ✅ | 7.5 sprints |
-| **G3-4** | End-to-end CI gate (iOS / Android ↔ Dockerised SFU) | Phase 3 closeout | acceptance Phase 3 | ✅ | 1 sprint |
-| **G3-5** | Settings modal — audio / video / output device + toggles | UI Phase 3 | UX completeness | ✅ | 1 sprint (3 platforms parallel) |
-| **G3-6** | In-call chat panel — MLS application messages in call group | UI Phase 3 | UX completeness | ✅ | 1 sprint |
-| **G3-7** | Sound cues — resources + player on 3 platforms | UI Phase 3 | UX completeness | ✅ | 0.5 sprint |
-| **G3-8** | Acceptance on hardware (mic, camera, BT, CallKit / ConnectionService) | Phase 3 closeout | official Phase 3 close | ❌ maintainer + devices | 1 sprint |
-| **G3-9** | Cost analysis (3b6) — real measurements after a month in production | Phase 3 closeout | scale-out trigger calibration | ❌ needs deploy | out of scope of chat |
-| **G4-1** | `services/channels` backend (Rust) | Phase 4a | publishing over the wire | ✅ | 1 sprint |
-| **G4-2** | Client integration of channels on 3 platforms | Phase 4a | UX channel publishing | ✅ | 2 sprints |
-| **G4-3** | Subscriber path — HPKE seed envelope + subscribe handshake | Phase 4b | real subscribers | ✅ | 2 sprints |
-| **G4-4** | Rotation + fanout service | Phase 4c | scale-out 100k+ | ✅ | 2 sprints |
-| **G4-5** | Channel discovery (`@channelname` via OPRF) | Phase 4b | UX "find a channel" | ✅ | 1 sprint |
-| **G5-1** | REALITY pluggable transport | Phase 5 | RU / CN / IR block bypass | ✅ + lab | 3 sprints |
-| **G5-2** | MASQUE / CONNECT-UDP | Phase 5 | QUIC under H3 | ✅ + lab | 2 sprints |
-| **G5-3** | Shadowsocks-2022 | Phase 5 | alternative obfs | ✅ | 1 sprint |
-| **G5-4** | WebTransport (web client) | Phase 5 | web client in censored regions | ✅ | 1 sprint |
-| **G5-5** | Transport rendezvous (signed bootstrap config) | Phase 5 | PT endpoint discovery | ✅ | 1 sprint |
-| **G5-6** | ECH (Encrypted Client Hello) | Phase 5 | SNI privacy | ✅ | 1 sprint |
-| **G5-7** | Censorship lab (GFW / TSPU / IR emulation) | Phase 5 | CI gate for PT survival | ✅ | 2 sprints |
-| **GA-0** | [ADR-0011](./adr/0011-rust-sfu.md) — supersedes ADR-0003 / ADR-0008 | Audit / Design | rationale for G3-3 rewrite | ✅ | landed (this commit) |
-| **GA-1** | G-23 libcrux — waits for openmls upgrade | Audit | upstream CVE | ⚠ depends on upstream | tracker |
-| **GA-2** | G-26 RFC 9605 wire-header interop | Audit | interop with mlspp | ✅ | 1 sprint |
-| **GA-3** | External crypto audit (Phase 2 exit gate per plan) | Audit | public-beta launch | ❌ external auditor | out of scope of chat |
-| **GA-4** | Reproducible builds verification — 2 runners byte-identical | Process | SLSA L3 | ✅ | 1 sprint |
-| **GA-5** | TUF auto-update infrastructure | Process | secure updates | ✅ | 2 sprints |
-| **GA-6** | Bug bounty programme | Process | ongoing post-launch | ❌ org work | out of scope of chat |
+| # | Gap | Group | Blocks | Chat? | Estimate | Status |
+|---|---|---|---|---|---|---|
+| **G3-1** | WebRTC pod iOS — `WebRTC.framework` + peer connection | Phase 3 closeout | 1×1 + group calls | ✅ + acceptance | 2 sprints | open |
+| **G3-2** | WebRTC pod Android — `webrtc-sdk:android` + peer connection | Phase 3 closeout | 1×1 + group calls | ✅ + acceptance | 2 sprints | open |
+| **G3-3** | Rust SFU on `str0m` (replaces LiveKit fork — see [ADR-0011](./adr/0011-rust-sfu.md)) | Phase 3 closeout | **group** calls only (1×1 needs no SFU) | ✅ | 7.5 sprints | **partial** — skeleton + spike + routing-signaling + tests done; routing-media gated on G3-1 or G3-2 |
+| **G3-4** | End-to-end CI gate (iOS / Android ↔ Dockerised SFU) | Phase 3 closeout | acceptance Phase 3 | ✅ | 1 sprint | open |
+| **G3-5** | Settings modal — audio / video / output device + toggles | UI Phase 3 | UX completeness | ✅ | 1 sprint (3 platforms parallel) | **done** |
+| **G3-6** | In-call chat panel — MLS application messages in call group | UI Phase 3 | UX completeness | ✅ | 1 sprint | **done** |
+| **G3-7** | Sound cues — resources + player on 3 platforms | UI Phase 3 | UX completeness | ✅ | 0.5 sprint | **done** |
+| **G3-8** | Acceptance on hardware (mic, camera, BT, CallKit / ConnectionService) | Phase 3 closeout | official Phase 3 close | ❌ maintainer + devices | 1 sprint | open |
+| **G3-9** | Cost analysis (3b6) — real measurements after a month in production | Phase 3 closeout | scale-out trigger calibration | ❌ needs deploy | out of scope of chat | open |
+| **G4-1** | `services/channels` backend (Rust) | Phase 4a | publishing over the wire | ✅ | 1 sprint | open |
+| **G4-2** | Client integration of channels on 3 platforms | Phase 4a | UX channel publishing | ✅ | 2 sprints | open |
+| **G4-3** | Subscriber path — HPKE seed envelope + subscribe handshake | Phase 4b | real subscribers | ✅ | 2 sprints | open |
+| **G4-4** | Rotation + fanout service | Phase 4c | scale-out 100k+ | ✅ | 2 sprints | open |
+| **G4-5** | Channel discovery (`@channelname` via OPRF) | Phase 4b | UX "find a channel" | ✅ | 1 sprint | open |
+| **G5-1** | REALITY pluggable transport | Phase 5 | RU / CN / IR block bypass | ✅ + lab | 3 sprints | open |
+| **G5-2** | MASQUE / CONNECT-UDP | Phase 5 | QUIC under H3 | ✅ + lab | 2 sprints | open |
+| **G5-3** | Shadowsocks-2022 | Phase 5 | alternative obfs | ✅ | 1 sprint | open |
+| **G5-4** | WebTransport (web client) | Phase 5 | web client in censored regions | ✅ | 1 sprint | open |
+| **G5-5** | Transport rendezvous (signed bootstrap config) | Phase 5 | PT endpoint discovery | ✅ | 1 sprint | open |
+| **G5-6** | ECH (Encrypted Client Hello) | Phase 5 | SNI privacy | ✅ | 1 sprint | open |
+| **G5-7** | Censorship lab (GFW / TSPU / IR emulation) | Phase 5 | CI gate for PT survival | ✅ | 2 sprints | open |
+| **GA-0** | [ADR-0011](./adr/0011-rust-sfu.md) — supersedes ADR-0003 / ADR-0008 | Audit / Design | rationale for G3-3 rewrite | ✅ | landed | **done** |
+| **GA-1** | G-23 libcrux — waits for openmls upgrade | Audit | upstream CVE | ⚠ depends on upstream | tracker | open (upstream-blocked) |
+| **GA-2** | G-26 RFC 9605 wire-header interop | Audit | interop with mlspp | ✅ | 1 sprint | **partial** — serializer + 12 unit tests done; seal/open integration + external-stack interop pending G3-1/G3-2 |
+| **GA-3** | External crypto audit (Phase 2 exit gate per plan) | Audit | public-beta launch | ❌ external auditor | out of scope of chat | open |
+| **GA-4** | Reproducible builds verification — 2 runners byte-identical | Process | SLSA L3 | ✅ | 1 sprint | open |
+| **GA-5** | TUF auto-update infrastructure | Process | secure updates | ✅ | 2 sprints | open |
+| **GA-6** | Bug bounty programme | Process | ongoing post-launch | ❌ org work | out of scope of chat | open |
 
 ## Group A — Phase 3 closeout sprints
 

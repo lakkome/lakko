@@ -1399,6 +1399,193 @@ each MLS state transition — the keying math contract
 holds across single-joiner, multi-party, and committer-
 leave-handover scenarios.
 
+### C-38: RFC 9605 §4.3 wire-header round-trip pinned
+
+The companion of C-37. SFrame's keying math (C-37) lives in
+[`lakko_calls::sframe`]; the wire-header layout — the
+compact `R|LEN|X|KID|CTR` packing that an RFC 9605
+implementation prepends to each AEAD ciphertext — lives in
+[`lakko_calls::header`](../../crates/lakko-calls/src/header.rs).
+This is the byte-level surface a non-Lakko SFrame stack
+(browser-native, mlspp) needs to interoperate; the audit
+gap **G-26** is now partially closed (serializer + 12
+tests; the keying-pipeline integration + external-stack
+verification stay deferred — see
+[`known-gaps.md`](./known-gaps.md) G-26).
+
+**Pinned invariants** the test suite asserts:
+
+1. **First-byte bit packing follows RFC 9605 §4.3
+   verbatim** (network bit order, MSB first):
+
+   ```
+   Bit:   7 6 5 4 3 2 1 0
+   Field: R L L L X K K K
+   ```
+
+   - **R** = 0 always. The decoder refuses any frame with
+     R=1 — that bit is reserved for a forward-incompatible
+     schema bump; treating it as a hard error makes the
+     bump fail loud instead of silently dropping the
+     decoder into undefined territory.
+   - **LLL** = counter length minus 1 (encoded widths
+     1..=8 bytes).
+   - **X** = extended-KID flag (0 → KID inline in low 3
+     bits; 1 → KID length minus 1 in low 3 bits, KID
+     bytes follow).
+   - **KKK** = KID (when X=0) or KID-length (when X=1).
+
+   Test: `first_byte_bit_packing_pinned` walks every LEN
+   ∈ 0..=7, inline KID ∈ 0..=7, and extended-KID KLEN ∈
+   0..=7 and asserts the packed byte equals the
+   spec-derived constant.
+
+2. **Round-trip stability across the full numeric range.**
+   `SframeHeader { kid, ctr }.encode().pipe(decode)` is
+   the identity for every `(kid, ctr) ∈ [0, u64::MAX]²`
+   the tests exercise — basic-inline, extended-KID,
+   extended-CTR, both extended, and the maximum
+   `(u64::MAX, u64::MAX)` boundary. Tests:
+   `round_trip_zero_zero`, `round_trip_basic_kid_basic_ctr`,
+   `round_trip_basic_kid_extended_ctr`,
+   `round_trip_extended_kid`.
+
+3. **Concrete wire layouts pinned as constants.** Six
+   spec-derived byte sequences are pinned literally in
+   `pinned_wire_layouts` so a refactor that shifts a
+   bit-boundary lights up loudly:
+
+   - `(kid=0, ctr=0)` → `[0x00, 0x00]`
+   - `(kid=5, ctr=0x42)` → `[0x05, 0x42]`
+   - `(kid=0, ctr=0x0100)` → `[0x10, 0x01, 0x00]`
+   - `(kid=8, ctr=0)` → `[0x08, 0x08, 0x00]`
+   - `(kid=0x0100, ctr=0)` → `[0x09, 0x01, 0x00, 0x00]`
+   - `(kid=u64::MAX, ctr=u64::MAX)` → 17 bytes with
+     first-byte `0x7F` and 16 trailing `0xFF`s.
+
+4. **Truncation handling.** Three rejection paths are
+   typed: `HeaderError::Truncated { needed, had }` carries
+   the byte budget the decoder expected vs. observed.
+   Tests: `decode_rejects_empty_buffer`,
+   `decode_rejects_truncated_ctr`,
+   `decode_rejects_truncated_extended_kid`.
+
+5. **`MAX_HEADER_LEN = 17`** is a public constant — every
+   call site that pre-allocates a scratch buffer for an
+   SFrame frame uses this rather than re-deriving it.
+   Sanity test inside `encoded_length_predictable`
+   confirms the bound holds for the worst-case
+   `(u64::MAX, u64::MAX)` input.
+
+The wire-header module is **standalone** for now —
+[`crate::sframe::ParticipantKey::seal`] still returns the
+typed `(u32 counter, Vec<u8> ciphertext)` tuple instead of
+prepending `SframeHeader::encode()` to its output. The
+integration step lands in `S-3-B-routing-media` (when the
+SFU needs to read KID bytes off the wire to route by
+participant without decrypting). At that point the
+`SframeHeader { kid, ctr }` becomes the natural arg/return
+shape of `seal` / `open`, and the typed-tuple form
+becomes deprecated.
+
+### C-39: SFU signaling layer enforces zero-payload-inspection + cross-call isolation
+
+[`services/sfu`](../../services/sfu) — the Rust SFU
+crate per [ADR-0011](../adr/0011-rust-sfu.md) — has now
+shipped its **signaling half** (S-3-B-routing-signaling
++ S-3-B-tests in
+[`docs/ROADMAP-PHASE3-CLOSEOUT.md`](../ROADMAP-PHASE3-CLOSEOUT.md)
+Group B). The media half (str0m-backed RTP fanout) is
+gated on the WebRTC pod sprint and stays open as
+`S-3-B-routing-media`. This invariant set pins what the
+signaling layer already guarantees, independently of
+whether real RTP is being forwarded.
+
+**Pinned invariants** the test suite (32 unit + 9
+integration) asserts:
+
+1. **Admission requires a verified `lakko-call-jwt`.**
+   The WS-upgrade handler verifies the inbound token
+   against the JWKS cache pulled from
+   `auth.lakko.me/.well-known/jwks.json`. Failures —
+   bad signature, unknown kid, expired token — return
+   HTTP 401 and increment `lakko_sfu_peers_rejected_total`
+   **before** the WS upgrade completes. Tests:
+   `ws_admission_with_bad_jwt_is_rejected`,
+   `verify_rejects_expired`, `verify_rejects_unknown_kid`,
+   `verify_rejects_tampered_signature`.
+
+2. **The SFU never inspects the `signal-relay` payload.**
+   The `payload_b64` field of `ClientFrame::SignalRelay`
+   is forwarded byte-identical from sender to recipient(s).
+   No JSON decode, no SDP parse, no SFrame header peek.
+   This is the wire-level expression of the "SFU is
+   assumed compromised" threat-model line in
+   [`threat-model.md`](./threat-model.md) — the audit-pack
+   property that lets clients exchange MLS Welcome
+   ferries, SFrame key envelopes, and any future
+   Lakko-side blob without the SFU operator gaining a
+   meaningful surface. Test:
+   `signal_relay_unicast_only_reaches_target` asserts
+   `payload_b64 == "AAAA"` survives the round-trip
+   byte-exact.
+
+3. **Cross-call isolation is structural, not policy.**
+   Peer A in call-X cannot receive `peer-joined` /
+   `peer-left` / `signal-relay` frames originating in
+   call-Y. The router's broadcast filter is keyed on the
+   `call_id` field of the inbound JWT — a peer that
+   attempts to send to a peer in a different call gets
+   `ErrorCode::UnknownPeer` back; the SFU does not
+   "helpfully" cross-route by account id even when the
+   same account is in both calls. Test:
+   `cross_call_isolation`.
+
+4. **Account ids are pseudonymised in every outbound
+   frame and every log line.** The `account_pseudonym`
+   field on `ServerFrame::PeerJoined` is the first 8 hex
+   characters of the JWT `sub`. The full account id never
+   crosses the SFU's outbound surface; tracing log lines
+   from `services/sfu/src/signaling.rs` use the same
+   8-char truncation. Test: `pseudonymise_truncates`
+   (unit) + assertions inside
+   `two_peers_in_same_call_see_each_other` (integration).
+
+5. **Broadcast respects sender exclusion.** A `signal-
+   relay` with `to = RelayTarget::Call` reaches every
+   peer in the call **except the sender**. Symmetric for
+   `peer-joined` / `peer-left` — the joining / leaving
+   peer never receives their own announcement. Test:
+   `signal_relay_broadcast_skips_sender` (integration) +
+   `join_broadcast_reaches_existing_peers_only` (unit).
+
+6. **Backpressure is local, never global.** A single
+   slow recipient's bounded mpsc filling does NOT stall
+   broadcast fanout to the other peers — the router
+   logs the drop, increments the relevant metric, and
+   continues with the remaining recipients. Test inside
+   `router::tests::cross_call_isolation` exercises the
+   per-recipient delivery loop; the bounded mpsc
+   capacity is asserted at compile time
+   (`PEER_OUTBOUND_CAPACITY ∈ [64, 1024]`).
+
+7. **Peer departure is observed by the rest of the
+   call.** A WS-disconnect (clean Close frame or
+   transport error) triggers a `ServerFrame::PeerLeft`
+   broadcast to every remaining peer in the same call
+   before the SFU drops the peer's registry entry.
+   Test: `disconnect_propagates_peer_left` (integration).
+
+The signaling layer is now a properly verified contract.
+The SFU's media-layer responsibilities — RTP track
+forwarding, simulcast layer selection per receiver,
+TWCC aggregation — arrive in S-3-B-routing-media (gated
+on a WebRTC pod existing on at least one client
+platform). When that lands, an additional invariant
+block (C-40+) covers the "RTP frames pass through
+opaque; the SFU never reads the SFrame ciphertext"
+property.
+
 ## Exporter labels (call-side)
 
 | Label | Length | Context | Source | Used for |
