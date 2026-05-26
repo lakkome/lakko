@@ -127,7 +127,7 @@ just ci                        # everything CI does, locally
 
 ## Fuzz harnesses
 
-`crates/lakko-mls/fuzz/`, `crates/lakko-proto/fuzz/`, and `crates/lakko-contacts/fuzz/` are separate crates outside the main workspace (they need nightly + libfuzzer-sys). Targets live in `fuzz/fuzz_targets/*.rs`.
+`crates/lakko-mls/fuzz/`, `crates/lakko-proto/fuzz/`, `crates/lakko-contacts/fuzz/`, and `crates/lakko-channels/fuzz/` are separate crates outside the main workspace (they need nightly + libfuzzer-sys). Targets live in `fuzz/fuzz_targets/*.rs`.
 
 Current targets:
 - **`lakko-mls/mls_message`** — `MlsMessageIn` wire-format parser (TLS codec)
@@ -142,6 +142,10 @@ Current targets:
 - **`lakko-contacts/call_welcome_unwrap`** — owner-side welcome-envelope domain-separator parser
 - **`lakko-contacts/call_kp_forward_unwrap`** — owner-side KP-forward envelope parser (subsequent joiners)
 - **`lakko-contacts/incoming_envelope_dispatch`** — composite owner-side polling-loop dispatcher
+- **`lakko-channels/post_decode`** — wire-format parser for `ChannelPost` (Phase 4a)
+- **`lakko-channels/post_verify_and_decrypt`** — full receiver pipeline (decode → Ed25519 verify → AEAD open)
+- **`lakko-channels/subscribe_open_seed`** — subscriber-side HPKE seed-envelope opener (Phase 4b)
+- **`lakko-channels/epoch_id_from_be_bytes`** — 4-byte big-endian epoch-id parser
 
 The `fuzz_api` module in `lakko-mls` (marked `#[doc(hidden)]`) is the only public entry point for harnesses; it is not part of the supported public API.
 

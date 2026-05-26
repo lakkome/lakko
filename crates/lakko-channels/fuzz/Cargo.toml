@@ -1,0 +1,49 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+[package]
+name = "lakko-channels-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+# Opt out of the parent workspace — cargo-fuzz crates require
+# nightly + libfuzzer-sys, which we do not want as a workspace-
+# wide dep.
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+lakko-channels = { path = ".." }
+lakko-crypto = { path = "../../lakko-crypto" }
+
+[[bin]]
+name = "post_decode"
+path = "fuzz_targets/post_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "post_verify_and_decrypt"
+path = "fuzz_targets/post_verify_and_decrypt.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "subscribe_open_seed"
+path = "fuzz_targets/subscribe_open_seed.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "epoch_id_from_be_bytes"
+path = "fuzz_targets/epoch_id_from_be_bytes.rs"
+test = false
+doc = false
+bench = false
