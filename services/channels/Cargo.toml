@@ -1,0 +1,61 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+[package]
+name = "lakko-svc-channels"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Channel-broadcast backend for Phase 4a (publisher path). Stores opaque ChannelPost bytes and fans them out by cursor; the server never decrypts. See ADR-0010."
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "lakko-svc-channels"
+path = "src/main.rs"
+
+[dependencies]
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+# Same axum / tower / tower-http versions as the other
+# Lakko services so the workspace resolves to one set.
+axum = { version = "0.8", features = ["macros", "http2"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["trace", "request-id", "timeout", "limit"] }
+
+# .env loading — debug builds only; production reads
+# systemd EnvironmentFile=/etc/lakko/lakko.env.
+dotenvy = "0.15"
+
+# Hex-decode for channel_id in the URL — channel ids are
+# 16-byte pseudonyms rendered as 32 hex chars per ADR-0010.
+hex = "0.4"
+
+# Base64url for the wire form of post payloads in the
+# fetch response. The server never decodes the inner
+# bytes; the base64 layer is purely transport-level JSON
+# safety so the opaque ChannelPost bytes can ride a
+# JSON body without binary-encoding escapes.
+base64 = "0.22"
+
+# We do NOT pull lakko-channels here: the server treats
+# every ChannelPost as opaque bytes (ADR-0010 §"What the
+# SFU does NOT do" extends to this service — no payload
+# inspection). Clients verify signatures + decrypt; the
+# server only stores and forwards. Keeping the workspace
+# crate out of the dep graph keeps the proof of opacity
+# obvious to an auditor.
+
+[dev-dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }

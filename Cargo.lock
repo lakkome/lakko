@@ -2305,6 +2305,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "lakko-svc-channels"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "base64 0.22.1",
+ "dotenvy",
+ "hex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tower",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "lakko-svc-discovery"
 version = "0.0.0"
 dependencies = [

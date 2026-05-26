@@ -29,6 +29,7 @@ members = [
     "crates/lakko-ffi-uniffi",
     "crates/lakko-ffi-wasm",
     "services/auth",
+    "services/channels",
     "services/ds",
     "services/storage",
     "services/edge",
