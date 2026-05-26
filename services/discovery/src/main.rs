@@ -79,6 +79,7 @@ mod invite;
 mod keypackage;
 mod oprf;
 mod pow;
+mod rate_limit;
 mod registry;
 
 use std::net::SocketAddr;
@@ -122,6 +123,11 @@ pub(crate) struct AppState {
     /// the auth-token crate's `verify` consumes this on every
     /// protected request via the `auth::require_session` middleware.
     pub(crate) session_token_secret: Arc<TokenSecret>,
+    /// G-discovery-ratelimit: per-IP token-bucket
+    /// limiter for the anonymous OPRF + lookup
+    /// endpoints. Defense in depth on top of the
+    /// existing PoW gate.
+    pub(crate) rate_limiter: Arc<rate_limit::RateLimiter>,
 }
 
 #[tokio::main]
@@ -170,10 +176,29 @@ async fn main() -> Result<()> {
     let session_token_secret = TokenSecret::from_base64(&session_token_secret_raw)
         .context("parse LAKKO_SESSION_TOKEN_SECRET as base64")?;
 
+    // G-discovery-ratelimit: per-IP token bucket on the
+    // anonymous OPRF / lookup endpoints. Defaults match
+    // `rate_limit::DEFAULT_*`; overridable via env.
+    let rate_per_min: f64 = parse_env_f64(
+        "LAKKO_DISCOVERY_RATE_LIMIT_PER_MINUTE",
+        rate_limit::DEFAULT_RATE_PER_MINUTE,
+    );
+    let rate_burst: f64 = parse_env_f64(
+        "LAKKO_DISCOVERY_RATE_LIMIT_BURST",
+        rate_limit::DEFAULT_BURST,
+    );
+    let rate_limiter = Arc::new(rate_limit::RateLimiter::new(rate_per_min, rate_burst));
+    tracing::info!(
+        rate_per_min,
+        rate_burst,
+        "discovery rate limiter armed",
+    );
+
     let state = AppState {
         db: pool.clone(),
         oprf: Arc::new(oprf_server),
         session_token_secret: Arc::new(session_token_secret),
+        rate_limiter: Arc::clone(&rate_limiter),
     };
 
     let _pow_pruner = pow::spawn_pruner(pool.clone());
@@ -184,6 +209,9 @@ async fn main() -> Result<()> {
     // the stalking-risk warning, the storage layer doesn't
     // second-guess.
     let _invite_pruner = invite::spawn_pruner(pool.clone());
+    // G-discovery-ratelimit: drop idle per-IP buckets so
+    // the limiter's memory ceiling stays bounded.
+    let _rate_pruner = rate_limit::spawn_pruner((*rate_limiter).clone());
 
     let app = build_app(state);
 
@@ -192,7 +220,13 @@ async fn main() -> Result<()> {
         .with_context(|| format!("bind {bind}"))?;
     tracing::info!(addr = %bind, "discovery service listening");
 
-    axum::serve(listener, app)
+    axum::serve(
+        listener,
+        // ConnectInfo so the rate-limit middleware can
+        // read the source IP when X-Forwarded-For is
+        // absent (dev / direct binding).
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
         .with_graceful_shutdown(shutdown_signal())
         .await
         .context("axum serve")?;
@@ -264,14 +298,41 @@ pub(crate) fn build_app(state: AppState) -> Router {
             auth::require_session,
         ));
 
-    // Open routes — no auth required.
+    // G-discovery-ratelimit — per-IP token bucket on the
+    // three enumeration-vector endpoints. PoW remains the
+    // primary work proof; rate limiting is defense in
+    // depth that caps per-IP server CPU regardless of
+    // how many PoW tokens an attacker mints.
+    let rate_limited = Router::new()
+        .route("/discovery/oprf", post(oprf::evaluate))
+        .route("/discovery/lookup", post(registry::lookup))
+        .route(
+            "/discovery/channel/lookup",
+            post(channel_names::lookup),
+        )
+        .route_layer(axum::middleware::from_fn_with_state(
+            Arc::clone(&state.rate_limiter),
+            rate_limit::middleware,
+        ));
+
+    // Open routes — no auth required, no rate limit.
+    // Endpoints excluded from the limiter above:
+    //   * /health, /ready, /version — no compute.
+    //   * /pow/challenge — itself the primary anti-spam
+    //     layer; rate-limiting it would interfere with
+    //     legitimate retries on poor networks.
+    //   * /discovery/identity/{id} + keypackage/{id} —
+    //     by-id reads, no enumeration vector (the id is
+    //     a 32-byte pseudonym).
+    //   * /discovery/invite, /discovery/call-invite —
+    //     by-blob-id reads, same shape.
+    //   * /discovery/channel/register — write that's
+    //     UNIQUE-key-gated server-side.
     let open = Router::new()
         .route("/health", get(health))
         .route("/ready", get(ready))
         .route("/version", get(version))
         .route("/pow/challenge", post(pow::issue_challenge))
-        .route("/discovery/oprf", post(oprf::evaluate))
-        .route("/discovery/lookup", post(registry::lookup))
         .route(
             "/discovery/identity/{account_id}",
             get(identity_bundle::fetch),
@@ -298,26 +359,42 @@ pub(crate) fn build_app(state: AppState) -> Router {
             "/discovery/call-invite/{blob_id}/consume",
             post(call_invite::consume),
         )
-        // G4-5 — channel @name discovery via OPRF. Both
-        // endpoints sit on the open path: lookup is read-
-        // only PoW-gated like `/discovery/lookup` above,
-        // and register has no account_id claim so the
-        // session-token role would be a pure DoS gate
-        // that the PoW already covers. Anti-squatting is
-        // first-come-first-served via UNIQUE(oprf_hash).
+        // G4-5 — channel @name discovery via OPRF.
+        // Register stays on the open path (no
+        // enumeration vector — UNIQUE(oprf_hash) gates
+        // anti-squatting). Lookup moved to `rate_limited`
+        // above.
         .route(
             "/discovery/channel/register",
             post(channel_names::register),
-        )
-        .route(
-            "/discovery/channel/lookup",
-            post(channel_names::lookup),
         );
 
-    open.merge(protected)
+    open.merge(rate_limited)
+        .merge(protected)
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
+}
+
+/// Parse a float env var, falling back to `default`
+/// on absent/invalid values (logs a warning so the
+/// operator notices a typo).
+fn parse_env_f64(name: &'static str, default: f64) -> f64 {
+    match std::env::var(name) {
+        Ok(raw) if !raw.is_empty() => match raw.parse::<f64>() {
+            Ok(v) if v > 0.0 => v,
+            _ => {
+                tracing::warn!(
+                    env = name,
+                    value = %raw,
+                    default,
+                    "could not parse env var as positive f64 — falling back to default",
+                );
+                default
+            },
+        },
+        _ => default,
+    }
 }
 
 async fn health() -> impl IntoResponse {
