@@ -153,6 +153,101 @@ public class ChannelsClient(
     }
 
     // -----------------------------------------------------------------
+    // Subscribers (G4-3c)
+    // -----------------------------------------------------------------
+
+    @Serializable
+    private data class SubscribeReq(val subscriber_pubkey_hex: String)
+
+    @Serializable
+    private data class SubscribeResp(val subscriber_id: String)
+
+    @Serializable
+    private data class SubscribersResp(val subscribers: List<String>)
+
+    @Serializable
+    private data class EnvelopeResp(val envelope_b64: String)
+
+    /** `POST /v1/channels/:id/subscribers` — register a
+     *  subscriber's X25519 public key. */
+    public suspend fun subscribe(
+        channelIdHex: String,
+        subscriberPubkeyHex: String,
+    ): String {
+        val response: HttpResponse = client.post(
+            "$baseUrl/v1/channels/$channelIdHex/subscribers"
+        ) {
+            contentType(ContentType.Application.Json)
+            setBody(SubscribeReq(subscriberPubkeyHex))
+        }
+        if (!response.status.isSuccess()) {
+            throw decodeError(response, "subscribe")
+        }
+        return response.body<SubscribeResp>().subscriber_id
+    }
+
+    /** `GET /v1/channels/:id/subscribers` — list registered
+     *  subscriber pubkey-hex strings. Used by the publisher
+     *  to fan out HPKE-sealed seed envelopes. */
+    public suspend fun listSubscribers(channelIdHex: String): List<String> {
+        val response: HttpResponse = client.get(
+            "$baseUrl/v1/channels/$channelIdHex/subscribers"
+        )
+        if (!response.status.isSuccess()) {
+            throw decodeError(response, "list subscribers")
+        }
+        return response.body<SubscribersResp>().subscribers
+    }
+
+    /** `GET /v1/channels/:id/subscribers/:pk/envelope` —
+     *  fetch the latest seed envelope. Returns `null` when
+     *  registered but no envelope yet (server returns 404
+     *  `envelope-not-ready` which we map to null so the
+     *  caller can branch cleanly). */
+    public suspend fun fetchEnvelope(
+        channelIdHex: String,
+        subscriberPubkeyHex: String,
+    ): String? {
+        val response: HttpResponse = client.get(
+            "$baseUrl/v1/channels/$channelIdHex/subscribers/$subscriberPubkeyHex/envelope"
+        )
+        if (!response.status.isSuccess()) {
+            val err = decodeError(response, "fetch envelope")
+            if (err.code == "envelope-not-ready") {
+                return null
+            }
+            throw err
+        }
+        return response.body<EnvelopeResp>().envelope_b64
+    }
+
+    /** `POST /v1/channels/:id/subscribers/:pk/envelope` —
+     *  publisher delivers a per-subscriber HPKE-sealed seed
+     *  envelope. The server takes raw `Bytes` — same opacity
+     *  contract as the publish endpoint.
+     *
+     *  Throws `ChannelsApiException`:
+     *  - `unknown-subscriber` (404) — pubkey not registered
+     *  - `bad-envelope-len`   (400) — wrong wire length
+     *  - `bad-channel-id`     (400) — wrong channel-id shape
+     *  - `bad-subscriber-id`  (400) — wrong pubkey-hex shape */
+    public suspend fun deliverEnvelope(
+        channelIdHex: String,
+        subscriberPubkeyHex: String,
+        envelope: ByteArray,
+    ) {
+        val response: HttpResponse = client.post(
+            "$baseUrl/v1/channels/$channelIdHex/subscribers/$subscriberPubkeyHex/envelope"
+        ) {
+            contentType(ContentType.Application.OctetStream)
+            setBody(envelope)
+        }
+        if (!response.status.isSuccess()) {
+            throw decodeError(response, "deliver envelope")
+        }
+    }
+
+    // -----------------------------------------------------------------
     // Error envelope decoder
     // -----------------------------------------------------------------
 

@@ -5,10 +5,14 @@ package me.lakko.app.channels
 
 import java.security.SecureRandom
 import uniffi.lakko_ffi_uniffi.ChannelSigningKey
+import uniffi.lakko_ffi_uniffi.ChannelSubscriberKeypair
 import uniffi.lakko_ffi_uniffi.FfiException
+import uniffi.lakko_ffi_uniffi.channelSeedEnvelopeLen as uniffiChannelSeedEnvelopeLen
 import uniffi.lakko_ffi_uniffi.composeChannelPost as uniffiComposeChannelPost
 import uniffi.lakko_ffi_uniffi.decodeChannelPost as uniffiDecodeChannelPost
 import uniffi.lakko_ffi_uniffi.newChannelSeedForTest as uniffiNewChannelSeedForTest
+import uniffi.lakko_ffi_uniffi.openSubscriberSeedEnvelope as uniffiOpenSubscriberSeedEnvelope
+import uniffi.lakko_ffi_uniffi.sealSubscriberSeedEnvelope as uniffiSealSubscriberSeedEnvelope
 import uniffi.lakko_ffi_uniffi.verifyAndDecryptChannelPost as uniffiVerifyAndDecryptChannelPost
 
 /**
@@ -39,6 +43,42 @@ public data class ChannelPublisherKeys(
     override fun hashCode(): Int {
         var result = seed.contentHashCode()
         result = 31 * result + signingKeySeed.contentHashCode()
+        return result
+    }
+}
+
+/**
+ * Subscriber-side X25519 keypair (Phase 4b G4-3c). Mirror
+ * of the web `ChannelSubscriberKeys` and the iOS
+ * `ChannelSubscriberKeys` value type.
+ *
+ * The public half registers on
+ * `POST /v1/channels/:id/subscribers`; the secret half
+ * stays on the device + unwraps the per-subscriber HPKE
+ * seed envelopes the publisher fans out on every
+ * rotation.
+ *
+ * Persisted in `ChannelsUiState` via Android
+ * `SharedPreferences` until the encrypted-at-rest
+ * device-group-keyed store ships — same migration path
+ * `ChannelPublisherKeys.signingKeySeed` will follow.
+ */
+public data class ChannelSubscriberKeys(
+    /** 32-byte X25519 secret. */
+    public val secret: ByteArray,
+    /** 32-byte X25519 public. */
+    public val publicKey: ByteArray,
+) {
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (other !is ChannelSubscriberKeys) return false
+        return secret.contentEquals(other.secret) &&
+            publicKey.contentEquals(other.publicKey)
+    }
+
+    override fun hashCode(): Int {
+        var result = secret.contentHashCode()
+        result = 31 * result + publicKey.contentHashCode()
         return result
     }
 }
@@ -138,6 +178,95 @@ public object ChannelsComposer {
             post.close()
         }
     }
+
+    // -----------------------------------------------------------------
+    // Subscriber-side (G4-3c)
+    // -----------------------------------------------------------------
+
+    /** Fresh subscriber X25519 keypair, backed by
+     *  `getrandom` on the Rust side. */
+    public fun freshSubscriberKeys(): ChannelSubscriberKeys {
+        val kp = ChannelSubscriberKeypair.generate()
+        try {
+            return ChannelSubscriberKeys(
+                secret = kp.secret(),
+                publicKey = kp.`public`(),
+            )
+        } finally {
+            kp.close()
+        }
+    }
+
+    /** Publisher-side: seal a 32-byte content-key seed
+     *  against a subscriber's X25519 public key. Returns
+     *  the 80-byte wire bytes ready for
+     *  `ChannelsClient.deliverEnvelope`. */
+    public fun sealSubscriberSeedEnvelope(
+        subscriberPub: ByteArray,
+        channelIdHex: String,
+        epochId: UInt,
+        seed: ByteArray,
+    ): ByteArray {
+        val channelId = channelIdFromHex(channelIdHex)
+        try {
+            return uniffiSealSubscriberSeedEnvelope(
+                subscriberPub = subscriberPub,
+                channelId = channelId,
+                epochId = epochId,
+                seed = seed,
+            )
+        } catch (e: FfiException.Channels) {
+            throw ChannelsComposerException.Ffi(e.message ?: "seal_seed failed")
+        }
+    }
+
+    /** Subscriber-side: open a seed envelope with the
+     *  local keypair. Returns the recovered 32-byte
+     *  content-key seed — hand it to ``verifyAndDecrypt``
+     *  to decode posts on the channel for this epoch. */
+    public fun openSubscriberSeedEnvelope(
+        keys: ChannelSubscriberKeys,
+        channelIdHex: String,
+        epochId: UInt,
+        wire: ByteArray,
+    ): ByteArray {
+        val channelId = channelIdFromHex(channelIdHex)
+        val kp = try {
+            ChannelSubscriberKeypair.fromSecret(keys.secret)
+        } catch (e: FfiException.Channels) {
+            throw ChannelsComposerException.Ffi(
+                e.message ?: "subscriber-keypair construct failed"
+            )
+        }
+        try {
+            return uniffiOpenSubscriberSeedEnvelope(
+                keypair = kp,
+                channelId = channelId,
+                epochId = epochId,
+                wire = wire,
+            )
+        } catch (e: FfiException.Channels) {
+            throw ChannelsComposerException.Ffi(e.message ?: "open_seed failed")
+        } finally {
+            kp.close()
+        }
+    }
+
+    /** Wire byte length of a seed envelope —
+     *  `eph_pub(32) + sealed_seed(32) + tag(16) = 80`.
+     *  Exposed for UI sanity checks. */
+    public fun seedEnvelopeLen(): UInt = uniffiChannelSeedEnvelopeLen()
+
+    /** Decode a base64url-no-pad string to bytes. Returns
+     *  `null` on parse failure. Exposed so the
+     *  subscriber-side polling loop can hand the envelope
+     *  bytes to ``openSubscriberSeedEnvelope`` without
+     *  reaching into composer privates. */
+    public fun base64UrlDecodeOrNull(s: String): ByteArray? = base64UrlDecode(s)
+
+    // -----------------------------------------------------------------
+    // Helpers
+    // -----------------------------------------------------------------
 
     /** 32 hex chars → 16 bytes. */
     public fun channelIdFromHex(hex: String): ByteArray {

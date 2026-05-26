@@ -5,12 +5,14 @@ package me.lakko.app.ui.channels
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
@@ -31,9 +33,11 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -51,6 +55,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import me.lakko.app.channels.ChannelHandle
 import me.lakko.app.channels.ChannelsApiException
@@ -89,6 +95,7 @@ private sealed class Route {
     object List : Route()
     object New : Route()
     data class Detail(val channelId: String) : Route()
+    data class Subscribe(val channelId: String) : Route()
 }
 
 @Composable
@@ -110,6 +117,13 @@ public fun ChannelsRootScreen(
             onCreated = { id -> route = Route.Detail(id) },
         )
         is Route.Detail -> ChannelDetailScreen(
+            channelId = r.channelId,
+            state = state,
+            client = client,
+            onBack = { route = Route.List },
+            onSubscribe = { route = Route.Subscribe(r.channelId) },
+        )
+        is Route.Subscribe -> ChannelSubscribeScreen(
             channelId = r.channelId,
             state = state,
             client = client,
@@ -340,6 +354,7 @@ private fun ChannelDetailScreen(
     state: ChannelsUiState,
     client: ChannelsClient,
     onBack: () -> Unit,
+    onSubscribe: () -> Unit,
 ) {
     val channels by state.channels.collectAsState()
     val postsByChannel by state.postsByChannel.collectAsState()
@@ -475,8 +490,13 @@ private fun ChannelDetailScreen(
                         }
                     },
                 )
+                SubscribersPanel(
+                    channelId = channelId,
+                    state = state,
+                    client = client,
+                )
             } else {
-                SubscriberPlaceholderSection()
+                SubscriberPlaceholderSection(onOpenSubscribe = onSubscribe)
             }
 
             Text(
@@ -539,17 +559,29 @@ private fun ComposerSection(
 }
 
 @Composable
-private fun SubscriberPlaceholderSection() {
+private fun SubscriberPlaceholderSection(onOpenSubscribe: () -> Unit) {
     Card(
         colors = CardDefaults.cardColors(containerColor = Theme.surface),
         shape = RoundedCornerShape(8.dp),
     ) {
-        Text(
-            "No local publisher keys for this channel. Subscriber-side view + HPKE seed-envelope reception arrive in a follow-up sub-sprint.",
-            color = Theme.textSecondary,
-            fontSize = 13.sp,
-            modifier = Modifier.padding(12.dp),
-        )
+        Column(Modifier.padding(12.dp)) {
+            Text(
+                "No local publisher keys for this channel — you cannot publish to it from this device.",
+                color = Theme.textSecondary,
+                fontSize = 13.sp,
+            )
+            Spacer(Modifier.height(8.dp))
+            TextButton(
+                onClick = onOpenSubscribe,
+                contentPadding = PaddingValues(0.dp),
+            ) {
+                Text(
+                    "Read as a subscriber →",
+                    color = Theme.accent,
+                    fontSize = 13.sp,
+                )
+            }
+        }
     }
 }
 
@@ -606,4 +638,459 @@ private fun isoTimestamp(ms: Long): String {
     val fmt = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.US)
     fmt.timeZone = TimeZone.getTimeZone("UTC")
     return fmt.format(Date(ms))
+}
+
+// ============================================================================
+// SubscribersPanel — publisher-side fan-out widget
+// (embedded inside ChannelDetailScreen when the user holds
+//  publisher keys for this channel)
+// ============================================================================
+
+@Composable
+private fun SubscribersPanel(
+    channelId: String,
+    state: ChannelsUiState,
+    client: ChannelsClient,
+) {
+    val keysByChannel by state.keysByChannel.collectAsState()
+    val epochByChannel by state.epochByChannel.collectAsState()
+    val keys = keysByChannel[channelId]
+    val epoch = epochByChannel[channelId] ?: 0u
+
+    var subscribers by remember { mutableStateOf<List<String>?>(null) }
+    var busyPk by remember { mutableStateOf<String?>(null) }
+    var error by remember { mutableStateOf<String?>(null) }
+    val statusByPk = remember { mutableStateMapOf<String, String>() }
+    val scope = rememberCoroutineScope()
+
+    suspend fun refresh() {
+        try {
+            subscribers = client.listSubscribers(channelId)
+        } catch (e: ChannelsApiException) {
+            error = "List failed: ${e.code} — ${e.detail}"
+        } catch (e: Throwable) {
+            error = "List failed: ${e.message}"
+        }
+    }
+
+    LaunchedEffect(channelId) { refresh() }
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = Theme.surface),
+        shape = RoundedCornerShape(8.dp),
+    ) {
+        Column(Modifier.padding(12.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    "Subscribers",
+                    color = Theme.textPrimary,
+                    fontWeight = FontWeight.SemiBold,
+                    fontSize = 15.sp,
+                )
+                Spacer(Modifier.width(6.dp))
+                Text(
+                    "(${subscribers?.size?.toString() ?: "…"})",
+                    color = Theme.textSecondary,
+                    fontSize = 14.sp,
+                )
+                Spacer(Modifier.fillMaxWidth().weight(1f))
+                TextButton(
+                    onClick = { scope.launch { refresh() } },
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                ) {
+                    Text(
+                        "Refresh",
+                        color = Theme.textSecondary,
+                        fontSize = 12.sp,
+                    )
+                }
+            }
+            error?.let { msg ->
+                Spacer(Modifier.height(6.dp))
+                Card(colors = CardDefaults.cardColors(containerColor = Theme.destructive)) {
+                    Text(
+                        msg,
+                        color = Color.White,
+                        fontSize = 12.sp,
+                        modifier = Modifier.padding(8.dp),
+                    )
+                }
+            }
+            val subs = subscribers
+            when {
+                subs == null -> {
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        "Loading subscribers…",
+                        color = Theme.textSecondary,
+                        fontSize = 12.sp,
+                    )
+                }
+                subs.isEmpty() -> {
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        "No subscribers yet. Anyone with the channel id can open the subscribe screen and register their X25519 public key.",
+                        color = Theme.textSecondary,
+                        fontSize = 12.sp,
+                    )
+                }
+                else -> {
+                    Spacer(Modifier.height(6.dp))
+                    for (pk in subs) {
+                        SubscriberRow(
+                            pubkeyHex = pk,
+                            busy = busyPk == pk,
+                            status = statusByPk[pk],
+                            onDeliver = {
+                                if (busyPk != null || keys == null) return@SubscriberRow
+                                busyPk = pk
+                                error = null
+                                scope.launch {
+                                    try {
+                                        val parsed = hexToBytesOrNull(pk)
+                                        if (parsed == null) {
+                                            error = "Bad subscriber pubkey hex."
+                                            return@launch
+                                        }
+                                        val wire =
+                                            ChannelsComposer.sealSubscriberSeedEnvelope(
+                                                subscriberPub = parsed,
+                                                channelIdHex = channelId,
+                                                epochId = epoch,
+                                                seed = keys.seed,
+                                            )
+                                        client.deliverEnvelope(channelId, pk, wire)
+                                        statusByPk[pk] = "delivered"
+                                    } catch (e: ChannelsApiException) {
+                                        error = "Deliver failed: ${e.code} — ${e.detail}"
+                                        statusByPk[pk] = "failed"
+                                    } catch (e: ChannelsComposerException) {
+                                        error = "Seal failed: ${e.message}"
+                                        statusByPk[pk] = "failed"
+                                    } catch (e: Throwable) {
+                                        error = "Error: ${e.message}"
+                                        statusByPk[pk] = "failed"
+                                    } finally {
+                                        busyPk = null
+                                    }
+                                }
+                            },
+                        )
+                        Spacer(Modifier.height(6.dp))
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SubscriberRow(
+    pubkeyHex: String,
+    busy: Boolean,
+    status: String?,
+    onDeliver: () -> Unit,
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = Theme.background),
+        shape = RoundedCornerShape(6.dp),
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 8.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                pubkeyHex,
+                color = Theme.textSecondary,
+                fontFamily = FontFamily.Monospace,
+                fontSize = 11.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
+            Spacer(Modifier.width(6.dp))
+            status?.let { s ->
+                Text(
+                    s,
+                    color = if (s == "delivered") Theme.accent else Theme.destructive,
+                    fontSize = 11.sp,
+                )
+                Spacer(Modifier.width(6.dp))
+            }
+            Button(
+                onClick = onDeliver,
+                enabled = !busy,
+                colors = ButtonDefaults.buttonColors(containerColor = Theme.accent),
+                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+            ) {
+                Text(
+                    if (busy) "Sealing…" else "Deliver",
+                    color = Color.White,
+                    fontSize = 11.sp,
+                )
+            }
+        }
+    }
+}
+
+// ============================================================================
+// ChannelSubscribeScreen — subscriber-side route
+//   Generates (or restores) an X25519 keypair, registers
+//   on the channel, polls every 3 s for a seed envelope,
+//   opens it, then renders decoded posts using the
+//   recovered seed.
+// ============================================================================
+
+private enum class SubscribeBootstrap {
+    Idle, Registering, Polling, Active, ErrorState,
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ChannelSubscribeScreen(
+    channelId: String,
+    state: ChannelsUiState,
+    client: ChannelsClient,
+    onBack: () -> Unit,
+) {
+    val subscriberKeysByChannel by state.subscriberKeysByChannel.collectAsState()
+    // subscribedSeedByChannel collected to trigger
+    // recomposition on seed installation; the helpers below
+    // read the latest value off `state` directly to keep the
+    // read-modify-write under the StateFlow update barrier.
+    state.subscribedSeedByChannel.collectAsState()
+    val postsByChannel by state.postsByChannel.collectAsState()
+
+    val keys = subscriberKeysByChannel[channelId]
+    val posts = postsByChannel[channelId] ?: emptyList()
+
+    var bootstrap by remember { mutableStateOf(SubscribeBootstrap.Idle) }
+    var bootstrapError by remember { mutableStateOf<String?>(null) }
+    val decodedByCursor = remember { mutableStateMapOf<ULong, String?>() }
+    val scope = rememberCoroutineScope()
+    var pollJob by remember { mutableStateOf<Job?>(null) }
+
+    suspend fun openAndCacheSeed(envelopeB64: String) {
+        val kp = state.subscriberKeysByChannel.value[channelId]
+            ?: throw ChannelsComposerException.Ffi("missing subscriber keypair")
+        val wire = ChannelsComposer.base64UrlDecodeOrNull(envelopeB64)
+            ?: throw ChannelsComposerException.BadBase64(envelopeB64)
+        val epoch = client.fetchEpoch(channelId)
+        val recovered = ChannelsComposer.openSubscriberSeedEnvelope(
+            keys = kp,
+            channelIdHex = channelId,
+            epochId = epoch,
+            wire = wire,
+        )
+        state.setSubscribedSeed(channelId, recovered)
+        state.setEpoch(channelId, epoch)
+    }
+
+    suspend fun loadAndDecodePosts() {
+        val s = state.subscribedSeedByChannel.value[channelId] ?: return
+        try {
+            val page = client.fetchPosts(channelId, 0u)
+            state.setPosts(channelId, page.posts)
+            decodedByCursor.clear()
+            for (p in page.posts) {
+                try {
+                    val pt = ChannelsComposer.verifyAndDecrypt(
+                        seed = s,
+                        channelIdHex = channelId,
+                        postWireB64Url = p.payloadB64,
+                    )
+                    decodedByCursor[p.cursor] = pt.toString(Charsets.UTF_8)
+                } catch (_: Throwable) {
+                    decodedByCursor[p.cursor] = null
+                }
+            }
+        } catch (_: Throwable) {
+            // Status section already shows the bootstrap
+            // state; swallow transient post-list errors.
+        }
+    }
+
+    // Bootstrap on first composition.
+    LaunchedEffect(channelId) {
+        bootstrap = SubscribeBootstrap.Registering
+        bootstrapError = null
+        try {
+            val kp = state.subscriberKeysByChannel.value[channelId]
+                ?: ChannelsComposer.freshSubscriberKeys().also {
+                    state.setSubscriberKeys(channelId, it)
+                }
+            val pubHex = ChannelsComposer.bytesToHex(kp.publicKey)
+            client.subscribe(channelId, pubHex)
+
+            if (state.subscribedSeedByChannel.value[channelId] != null) {
+                bootstrap = SubscribeBootstrap.Active
+                loadAndDecodePosts()
+                return@LaunchedEffect
+            }
+
+            bootstrap = SubscribeBootstrap.Polling
+            // First-attempt fetch — publisher may have
+            // already fanned out before this screen opened.
+            val firstTry = client.fetchEnvelope(channelId, pubHex)
+            if (firstTry != null) {
+                openAndCacheSeed(firstTry)
+                bootstrap = SubscribeBootstrap.Active
+                loadAndDecodePosts()
+                return@LaunchedEffect
+            }
+
+            // 3-second poll loop on the envelope endpoint.
+            pollJob = scope.launch {
+                while (true) {
+                    delay(3_000L)
+                    try {
+                        val env = client.fetchEnvelope(channelId, pubHex)
+                        if (env != null) {
+                            openAndCacheSeed(env)
+                            bootstrap = SubscribeBootstrap.Active
+                            loadAndDecodePosts()
+                            break
+                        }
+                    } catch (_: Throwable) {
+                        // Transient — keep polling.
+                    }
+                }
+            }
+        } catch (e: ChannelsApiException) {
+            bootstrapError = "${e.code} — ${e.detail}"
+            bootstrap = SubscribeBootstrap.ErrorState
+        } catch (e: Throwable) {
+            bootstrapError = e.message ?: "unknown error"
+            bootstrap = SubscribeBootstrap.ErrorState
+        }
+    }
+
+    DisposableEffect(channelId) {
+        onDispose { pollJob?.cancel() }
+    }
+
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text("Subscribe", color = Theme.textPrimary) },
+                navigationIcon = {
+                    IconButton(onClick = onBack) {
+                        Icon(Icons.Default.ArrowBack, "Back", tint = Theme.textPrimary)
+                    }
+                },
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = Theme.background,
+                ),
+            )
+        },
+        containerColor = Theme.background,
+    ) { inner ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(inner)
+                .padding(horizontal = 16.dp)
+                .verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(14.dp),
+        ) {
+            Text(
+                channelId,
+                color = Theme.textSecondary,
+                fontFamily = FontFamily.Monospace,
+                fontSize = 12.sp,
+            )
+
+            keys?.let { kp ->
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = Theme.surface),
+                    shape = RoundedCornerShape(8.dp),
+                ) {
+                    Column(Modifier.padding(12.dp)) {
+                        Text(
+                            "Your subscriber public key (registered on this channel):",
+                            color = Theme.textSecondary,
+                            fontSize = 12.sp,
+                        )
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            ChannelsComposer.bytesToHex(kp.publicKey),
+                            color = Theme.textPrimary,
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 11.sp,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                }
+            }
+
+            val (statusText, statusColor) = when (bootstrap) {
+                SubscribeBootstrap.Idle, SubscribeBootstrap.Registering ->
+                    "Registering your key on the channel…" to Theme.textSecondary
+                SubscribeBootstrap.Polling ->
+                    "Registered. Waiting for the publisher to fan out a seed envelope… (auto-refreshes every 3 s)" to Theme.textSecondary
+                SubscribeBootstrap.Active ->
+                    "Seed envelope opened. You can read posts on this channel." to Theme.accent
+                SubscribeBootstrap.ErrorState ->
+                    (bootstrapError ?: "Unknown error.") to Theme.destructive
+            }
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = Theme.surface),
+                shape = RoundedCornerShape(8.dp),
+            ) {
+                Text(
+                    statusText,
+                    color = statusColor,
+                    fontSize = 13.sp,
+                    modifier = Modifier.padding(12.dp),
+                )
+            }
+
+            Text(
+                "Posts",
+                color = Theme.textPrimary,
+                fontWeight = FontWeight.SemiBold,
+                fontSize = 16.sp,
+            )
+            when {
+                bootstrap == SubscribeBootstrap.Active && posts.isNotEmpty() -> {
+                    for (post in posts) {
+                        PostRow(post, decoded = decodedByCursor[post.cursor])
+                    }
+                }
+                bootstrap == SubscribeBootstrap.Active -> Text(
+                    "No posts yet on this channel.",
+                    color = Theme.textSecondary,
+                )
+                bootstrap == SubscribeBootstrap.Polling -> Text(
+                    "Waiting for the publisher to deliver your seed.",
+                    color = Theme.textSecondary,
+                )
+                else -> Text(
+                    "Bootstrapping the subscribe flow…",
+                    color = Theme.textSecondary,
+                )
+            }
+            Spacer(Modifier.height(16.dp))
+        }
+    }
+}
+
+private fun hexToBytesOrNull(hex: String): ByteArray? {
+    if (hex.length % 2 != 0) return null
+    val out = ByteArray(hex.length / 2)
+    for (i in out.indices) {
+        val byte = hex.substring(i * 2, i * 2 + 2).toIntOrNull(16) ?: return null
+        out[i] = byte.toByte()
+    }
+    return out
 }
