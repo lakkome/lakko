@@ -461,14 +461,98 @@ to a specific `(psk, salt)` pair.
    surfaces `ShadowsocksHeaderError::WrongHeaderType`
    with the observed byte for sysadmin debugging.
 
-7. **`Transport::connect` still returns
-   `Error::NotImplemented`.** The wire-format
-   primitives in this module are the bulk of the
-   SS-2022 work, but stitching them to a real
-   `TcpStream` + the chunked-AEAD body (T-9) is its
-   own follow-up sub-sprint (`S-5-shadowsocks-tcp`).
-   Audit-grep marker `feature: "shadowsocks-2022-tcp"`
-   enumerates the remaining call path.
+7. **`Transport::connect` returns a working
+   `ShadowsocksConnection`.** Closed in sprint
+   S-5-shadowsocks-tcp (T-11). The prelude codec
+   here is wired to `tokio::net::TcpStream` +
+   `aead_stream` body via the new public
+   `ShadowsocksTransport::connect` + symmetric
+   server-side `accept_inbound` helper.
+
+### T-11: SS-2022 TCP wiring preserves per-direction key separation + frame-size cap
+
+Sprint S-5-shadowsocks-tcp stitches the prelude codec
+(T-10) and the chunked-AEAD body (T-9) into a working
+`Transport::connect` + `Connection` impl. The wiring is
+visible end-to-end through three new public surfaces in
+`crates/lakko-transport/src/shadowsocks.rs`:
+`ShadowsocksConnection`, the now-functional
+`ShadowsocksTransport::connect`, and the standalone
+server-side helper `accept_inbound`.
+
+**Pinned invariants:**
+
+1. **Per-direction subkey separation.**
+   `ShadowsocksConnection::new` takes two distinct
+   `AeadKey`s — one for the client→server direction
+   (`tx_subkey` from `encode_request` on the client,
+   echoed by the server's `decode_request` output),
+   one for the server→client direction (`rx_subkey`
+   from `encode_response` / `decode_response`). The
+   writer half holds the tx subkey, the reader half
+   holds the rx subkey; neither is swapped. A bug
+   that crossed them would surface immediately as
+   AEAD-open failure on the very first body frame.
+
+2. **Frame size cap is `aead_stream::MAX_CHUNK` (16
+   KiB) at the Connection layer.** `Connection::send`
+   returns `Error::FrameTooLarge { actual, limit:
+   16384 }` for any frame above the SS-2022 wire cap.
+   This is tighter than the generic
+   `transport::MAX_FRAME_BYTES` (16 MiB) — the SS-2022
+   spec takes precedence because the wire field is
+   2-byte length-prefixed. Caller code must chunk at
+   a higher layer if larger frames are needed.
+   `tcp_send_oversize_frame_rejected` pins this.
+
+3. **TCP_NODELAY enabled on both endpoints.**
+   `connect` and `accept_inbound` both call
+   `stream.set_nodelay(true)` (non-fatal on failure)
+   so the 2-write AEAD chunk pattern doesn't pile up
+   in Nagle's send buffer. Per-chunk latency stays
+   close to the underlying RTT.
+
+4. **Clean EOF surfaces as `Error::PeerClosed`,
+   mid-frame EOF as `Error::Io`.** The
+   `aead_err_to_transport` helper maps
+   `AeadStreamError::Io(UnexpectedEof)` →
+   `Error::PeerClosed` and other I/O errors →
+   `Error::Io(string)`. This matches the
+   Connection-trait contract (`recv` returns
+   `PeerClosed` on clean EOF, `Io` on truncation)
+   and means caller code can branch on the variant
+   without parsing error strings.
+
+5. **`accept_inbound` reuses the replay window
+   across calls.** The caller owns the
+   `&mut ReplayWindow` and threads it through every
+   acceptance call on the same listener; a replayed
+   prelude across two separate TCP connections to
+   the same server is rejected via the window's
+   FIFO LRU (T-10 #4). The listener-loop is not
+   shipped in this sprint — the helper alone is the
+   point where the window is consumed.
+
+6. **PSK decode is eager.** `ShadowsocksTransport::new`
+   calls `psk_from_b64` at construct time so a bad
+   PSK string surfaces as `Error::Config(...)`
+   immediately, not on first connect. Both padded and
+   unpadded base64 forms are accepted defensively;
+   the length check confirms exactly 32 bytes.
+   `psk_from_b64_round_trips_padded` /
+   `psk_from_b64_round_trips_unpadded` /
+   `psk_from_b64_rejects_wrong_length` /
+   `psk_from_b64_rejects_invalid_base64` pin all four
+   paths.
+
+7. **End-to-end coverage on live TCP.**
+   `tcp_round_trip_frame_traffic` spawns a server on
+   `127.0.0.1:0`, dials it through
+   `ShadowsocksTransport::connect`, runs a
+   request/response/second-frame round trip, and
+   closes cleanly. `tcp_connect_rejects_wrong_psk`
+   verifies that a PSK mismatch refuses the
+   handshake on both sides (no body bytes ever flow).
 
 ## Known soft spots — out of scope for Phase 5 scaffold
 

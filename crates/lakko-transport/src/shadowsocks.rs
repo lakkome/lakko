@@ -39,9 +39,10 @@
 //! - Full [`Transport`] / [`Connection`] impl over TCP.
 //!   `connect()` still returns `Error::NotImplemented` —
 //!   the wire-format primitives here are the bulk of the
-//!   SS-2022 work, but stitching them to a `TcpStream` +
-//!   [`crate::aead_stream`] body is its own sub-sprint
-//!   (`S-5-shadowsocks-tcp`).
+//!   SS-2022 work; with sprint S-5-shadowsocks-tcp the
+//!   prelude is stitched to a real `TcpStream` + the
+//!   chunked-AEAD body (T-9) and `Transport::connect`
+//!   returns a working `ShadowsocksConnection`.
 //! - Variable header parsing — Lakko uses SS-2022 as a
 //!   raw obfs layer, not as a SOCKS5 proxy, so the
 //!   variable header is opaque bytes that the caller
@@ -49,16 +50,27 @@
 //!   can layer SOCKS5 destination encoding on top.
 
 use std::collections::VecDeque;
+use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
+use base64::engine::general_purpose::STANDARD as B64_STANDARD;
+use base64::Engine as _;
+use bytes::Bytes;
 use lakko_crypto::aead::{self, AeadKey, Algorithm, Nonce, KEY_LEN, NONCE_LEN, TAG_LEN};
 use lakko_crypto::hash::blake3_derive_key_from_material;
 use lakko_crypto::random;
 use lakko_crypto::secret::SecretBytes;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
+use tokio::net::TcpStream;
+use tracing::debug;
 
+use crate::aead_stream::{
+    AeadStreamError, AeadStreamReader, AeadStreamWriter, MAX_CHUNK as AEAD_MAX_CHUNK,
+};
 use crate::endpoint::Endpoint;
 use crate::error::{Error, Result};
 use crate::transport::{Connection, Transport};
@@ -648,32 +660,453 @@ pub fn now_unix() -> u64 {
 }
 
 // =========================================================
-// Scaffold Transport — TCP wiring lives in S-5-shadowsocks-tcp
+// PSK parsing
 // =========================================================
 
-/// Scaffold transport — fails at `connect` until the
-/// `S-5-shadowsocks-tcp` sub-sprint wires the header
-/// primitives above to a real TCP `Connection`.
+/// Parse the base64-encoded 32-byte SS-2022 master PSK.
+///
+/// SS-2022 spec mandates standard base64 (with padding).
+/// We accept both padded and unpadded forms for caller
+/// convenience — every public bootstrap generator we've
+/// seen uses one or the other, never both, so the
+/// `STANDARD_NO_PAD` fallback is defensive.
+///
+/// # Errors
+///
+/// [`Error::Config`] if the input is not valid base64 or
+/// the decoded length is not exactly 32 bytes.
+pub fn psk_from_b64(s: &str) -> Result<[u8; KEY_LEN]> {
+    let decoded = B64_STANDARD
+        .decode(s.trim())
+        .or_else(|_| {
+            base64::engine::general_purpose::STANDARD_NO_PAD.decode(s.trim())
+        })
+        .map_err(|e| {
+            Error::Config(format!("SS-2022 PSK base64 decode failed: {e}"))
+        })?;
+    if decoded.len() != KEY_LEN {
+        return Err(Error::Config(format!(
+            "SS-2022 PSK must decode to exactly {KEY_LEN} bytes (got {})",
+            decoded.len()
+        )));
+    }
+    let mut out = [0u8; KEY_LEN];
+    out.copy_from_slice(&decoded);
+    Ok(out)
+}
+
+// =========================================================
+// Connection — bidirectional AEAD-2022 stream over TCP
+// =========================================================
+
+/// SS-2022 connection — wraps a TCP socket in the two-
+/// direction chunked AEAD body. After the handshake
+/// completes, each `send` is one AEAD chunk on the
+/// client→server subkey, each `recv` is one AEAD chunk
+/// on the server→client subkey.
+///
+/// Frame size cap is [`aead_stream::MAX_CHUNK`] (16 KiB)
+/// because each frame becomes one AEAD chunk on the wire.
+/// Callers needing larger frames must chunk at a higher
+/// layer. This is a tighter cap than the generic
+/// `transport::MAX_FRAME_BYTES` (16 MiB); the SS-2022 wire
+/// invariant takes precedence.
+pub struct ShadowsocksConnection {
+    /// Wrapped in a Mutex because the async-trait `send`
+    /// / `recv` signature is `&mut self` but `close()`
+    /// needs to coordinate writer shutdown after a recv
+    /// loop has borrowed the reader. The lock is
+    /// uncontended in normal use — one task per direction.
+    tx: Mutex<Option<AeadStreamWriter<OwnedWriteHalf>>>,
+    rx: Mutex<Option<AeadStreamReader<OwnedReadHalf>>>,
+}
+
+impl ShadowsocksConnection {
+    /// Construct from already-handshaked halves. The
+    /// `tx_subkey` is the client-direction subkey, the
+    /// `rx_subkey` is the server-direction subkey.
+    #[must_use]
+    pub fn new(
+        write_half: OwnedWriteHalf,
+        read_half: OwnedReadHalf,
+        tx_subkey: AeadKey,
+        rx_subkey: AeadKey,
+    ) -> Self {
+        Self {
+            tx: Mutex::new(Some(AeadStreamWriter::new(write_half, tx_subkey))),
+            rx: Mutex::new(Some(AeadStreamReader::new(read_half, rx_subkey))),
+        }
+    }
+}
+
+#[async_trait]
+impl Connection for ShadowsocksConnection {
+    async fn send(&mut self, frame: Bytes) -> Result<()> {
+        if frame.len() > AEAD_MAX_CHUNK {
+            return Err(Error::FrameTooLarge {
+                actual: frame.len(),
+                limit: AEAD_MAX_CHUNK,
+            });
+        }
+        // Take the writer out of the Mutex for the await
+        // — Tokio's Mutex would be cleaner here but we
+        // already use std::sync::Mutex for non-async
+        // close coordination. The take/put pattern is
+        // safe because no other task holds a reference
+        // (the trait owns `&mut self`).
+        let mut writer = self
+            .tx
+            .lock()
+            .map_err(|_| Error::Io("tx lock poisoned".into()))?
+            .take()
+            .ok_or(Error::LocalClosed)?;
+        let result = async {
+            writer.write_chunk(&frame).await?;
+            writer.flush().await?;
+            Ok::<_, AeadStreamError>(())
+        }
+        .await;
+        // Put the writer back on success; drop it on error.
+        match result {
+            Ok(()) => {
+                self.tx
+                    .lock()
+                    .map_err(|_| Error::Io("tx lock poisoned".into()))?
+                    .replace(writer);
+                Ok(())
+            },
+            Err(e) => Err(aead_err_to_transport(e)),
+        }
+    }
+
+    async fn recv(&mut self) -> Result<Bytes> {
+        let mut reader = self
+            .rx
+            .lock()
+            .map_err(|_| Error::Io("rx lock poisoned".into()))?
+            .take()
+            .ok_or(Error::PeerClosed)?;
+        let result = reader.read_chunk().await;
+        match result {
+            Ok(Some(plaintext)) => {
+                self.rx
+                    .lock()
+                    .map_err(|_| Error::Io("rx lock poisoned".into()))?
+                    .replace(reader);
+                Ok(Bytes::from(plaintext))
+            },
+            Ok(None) => Err(Error::PeerClosed),
+            Err(e) => Err(aead_err_to_transport(e)),
+        }
+    }
+
+    async fn close(&mut self) -> Result<()> {
+        // Idempotent: take + drop both halves. If the
+        // writer is still present, send a shutdown so
+        // the peer sees a clean EOF at frame boundary.
+        let writer_opt = self
+            .tx
+            .lock()
+            .map_err(|_| Error::Io("tx lock poisoned".into()))?
+            .take();
+        if let Some(mut writer) = writer_opt {
+            let _ = writer.shutdown().await;
+        }
+        let _ = self
+            .rx
+            .lock()
+            .map_err(|_| Error::Io("rx lock poisoned".into()))?
+            .take();
+        Ok(())
+    }
+}
+
+fn aead_err_to_transport(e: AeadStreamError) -> Error {
+    match e {
+        AeadStreamError::Io(io_err) => {
+            // EOF mid-frame on read surfaces as
+            // PeerClosed at the transport layer.
+            if io_err.kind() == std::io::ErrorKind::UnexpectedEof {
+                Error::PeerClosed
+            } else {
+                Error::Io(io_err.to_string())
+            }
+        },
+        AeadStreamError::AeadOpen | AeadStreamError::AeadSeal => {
+            Error::Io(format!("AEAD-2022 wire error: {e}"))
+        },
+        AeadStreamError::ChunkTooLarge(actual, limit) => {
+            Error::FrameTooLarge { actual, limit }
+        },
+        AeadStreamError::DecodedLengthTooLarge(actual) => Error::FrameTooLarge {
+            actual,
+            limit: AEAD_MAX_CHUNK,
+        },
+        AeadStreamError::NonceWrap => {
+            Error::Io("AEAD-2022 nonce counter wrapped".into())
+        },
+    }
+}
+
+// =========================================================
+// Transport — client-side connect
+// =========================================================
+
+/// SS-2022 client transport. `connect(endpoint)` opens a
+/// TCP socket, runs the SS-2022 handshake (encode + send
+/// request prelude, read + decode server response prelude),
+/// and returns a `ShadowsocksConnection` ready for chunked
+/// AEAD body traffic.
 pub struct ShadowsocksTransport {
-    #[allow(dead_code)]
     cfg: ShadowsocksConfig,
+    psk: [u8; KEY_LEN],
 }
 
 impl ShadowsocksTransport {
-    /// Build from a parsed config.
+    /// Build from a parsed [`ShadowsocksConfig`]. The
+    /// `psk_b64` field is decoded eagerly so a bad PSK
+    /// surfaces at construct time, not on first connect.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Config`] if `cfg.psk_b64` is not 32 bytes
+    /// of valid base64.
+    pub fn new(cfg: ShadowsocksConfig) -> Result<Self> {
+        let psk = psk_from_b64(&cfg.psk_b64)?;
+        Ok(Self { cfg, psk })
+    }
+
+    /// Borrow the underlying config — useful for tests
+    /// and observability.
     #[must_use]
-    pub fn new(cfg: ShadowsocksConfig) -> Self {
-        Self { cfg }
+    pub fn config(&self) -> &ShadowsocksConfig {
+        &self.cfg
     }
 }
 
 #[async_trait]
 impl Transport for ShadowsocksTransport {
-    async fn connect(&self, _endpoint: &Endpoint) -> Result<Box<dyn Connection>> {
-        Err(Error::NotImplemented {
-            feature: "shadowsocks-2022-tcp",
-            sprint: "S-5-shadowsocks-tcp",
-        })
+    async fn connect(&self, endpoint: &Endpoint) -> Result<Box<dyn Connection>> {
+        // Resolve + TCP-connect.
+        let stream = match endpoint {
+            Endpoint::Direct(addr) => TcpStream::connect(addr)
+                .await
+                .map_err(|e| Error::Setup(format!("TCP connect: {e}")))?,
+            Endpoint::Hostname { host, port } => {
+                TcpStream::connect((host.as_str(), *port))
+                    .await
+                    .map_err(|e| Error::Setup(format!("TCP connect: {e}")))?
+            },
+        };
+        // Disable Nagle: SS-2022 is message-oriented and
+        // 2-write coalescing already happens inside
+        // `AeadStreamWriter::write_chunk`.
+        if let Err(e) = stream.set_nodelay(true) {
+            debug!(error = %e, "SS-2022 set_nodelay failed (non-fatal)");
+        }
+        let (mut read_half, mut write_half) = stream.into_split();
+
+        // Build + send the request prelude.
+        let header = RequestHeader {
+            timestamp: now_unix(),
+            variable: Vec::new(),
+        };
+        let (wire_prelude, request_salt, tx_subkey) =
+            encode_request(&self.psk, &header).map_err(header_err_to_transport)?;
+        write_half
+            .write_all(&wire_prelude)
+            .await
+            .map_err(|e| Error::Io(format!("SS-2022 prelude write: {e}")))?;
+        write_half
+            .flush()
+            .await
+            .map_err(|e| Error::Io(format!("SS-2022 prelude flush: {e}")))?;
+
+        // Read the server's response prelude.
+        let rx_subkey =
+            read_and_decode_response_prelude(&self.psk, &request_salt, &mut read_half)
+                .await?;
+
+        Ok(Box::new(ShadowsocksConnection::new(
+            write_half, read_half, tx_subkey, rx_subkey,
+        )))
+    }
+}
+
+/// Read a server-direction prelude from the borrowed
+/// read half and decode it. Uses `AsyncReadExt::read_exact`
+/// directly against `OwnedReadHalf` (which is AsyncRead +
+/// Unpin) so no adapter is needed.
+async fn read_and_decode_response_prelude(
+    psk: &[u8; KEY_LEN],
+    expected_request_salt: &[u8; SS_SALT_LEN],
+    reader: &mut OwnedReadHalf,
+) -> Result<AeadKey> {
+    // Read salt + sealed fixed header.
+    let mut head = vec![0u8; SS_SALT_LEN + SS_FIXED_HEADER_SEALED_LEN];
+    reader
+        .read_exact(&mut head)
+        .await
+        .map_err(|e| Error::Io(format!("SS-2022 response prelude head read: {e}")))?;
+    // Peek the variable-header length by decoding the
+    // fixed header in isolation.
+    let mut salt = [0u8; SS_SALT_LEN];
+    salt.copy_from_slice(&head[..SS_SALT_LEN]);
+    let subkey = derive_session_subkey(psk, &salt);
+    let sealed_fixed = &head[SS_SALT_LEN..];
+    let fixed_nonce = nonce_from_counter(0);
+    let fixed_pt = aead::open(ALG, &subkey, &fixed_nonce, &[], sealed_fixed)
+        .map_err(|_| {
+            Error::Setup("SS-2022 response prelude AEAD open failed".into())
+        })?;
+    if fixed_pt.len() != SS_FIXED_HEADER_LEN {
+        return Err(Error::Setup(
+            "SS-2022 response prelude length mismatch".into(),
+        ));
+    }
+    if fixed_pt[0] != SS_HEADER_TYPE_SERVER {
+        return Err(Error::Setup(format!(
+            "SS-2022 response prelude wrong header type: {}",
+            fixed_pt[0]
+        )));
+    }
+    let var_len =
+        u16::from_be_bytes(fixed_pt[9..11].try_into().unwrap()) as usize;
+    // Read the sealed variable header.
+    let mut sealed_var = vec![0u8; var_len + TAG_LEN];
+    reader
+        .read_exact(&mut sealed_var)
+        .await
+        .map_err(|e| Error::Io(format!("SS-2022 response variable read: {e}")))?;
+    // Combine + decode through the canonical helper.
+    let mut full_wire =
+        Vec::with_capacity(SS_SALT_LEN + SS_FIXED_HEADER_SEALED_LEN + sealed_var.len());
+    full_wire.extend_from_slice(&head);
+    full_wire.extend_from_slice(&sealed_var);
+    let (_header, sub) =
+        decode_response(psk, &full_wire, now_unix(), expected_request_salt)
+            .map_err(header_err_to_transport)?;
+    Ok(sub)
+}
+
+// =========================================================
+// Server-side helper — accept_inbound
+// =========================================================
+
+/// Server-side handshake helper. Given an accepted
+/// `TcpStream`, the master PSK, and a (caller-owned)
+/// replay window, reads + decodes the client's request
+/// prelude, builds + sends the matching server response
+/// prelude, and returns a [`ShadowsocksConnection`]
+/// ready for body traffic.
+///
+/// A full `Listener` impl that loops on
+/// `TcpListener::accept` and spawns one task per
+/// connection is straight-line composition over this
+/// helper; we ship the helper alone because the listener
+/// side benefits from caller-supplied graceful-shutdown
+/// wiring that's out of scope for the header sprint.
+///
+/// # Errors
+///
+/// Inherits the same variant envelope as `connect` —
+/// [`Error::Io`] on TCP I/O failure, [`Error::Setup`] on
+/// AEAD / header validation, [`Error::Config`] never
+/// (PSK is supplied as raw bytes).
+pub async fn accept_inbound(
+    stream: TcpStream,
+    psk: &[u8; KEY_LEN],
+    window: &mut ReplayWindow,
+) -> Result<Box<dyn Connection>> {
+    if let Err(e) = stream.set_nodelay(true) {
+        debug!(error = %e, "SS-2022 accept set_nodelay failed (non-fatal)");
+    }
+    let (mut read_half, mut write_half) = stream.into_split();
+
+    // Read salt + sealed fixed header.
+    let mut head = vec![0u8; SS_SALT_LEN + SS_FIXED_HEADER_SEALED_LEN];
+    read_half
+        .read_exact(&mut head)
+        .await
+        .map_err(|e| Error::Io(format!("SS-2022 inbound prelude head: {e}")))?;
+    // Peek var_len.
+    let mut salt = [0u8; SS_SALT_LEN];
+    salt.copy_from_slice(&head[..SS_SALT_LEN]);
+    let subkey_peek = derive_session_subkey(psk, &salt);
+    let fixed_nonce = nonce_from_counter(0);
+    let fixed_pt =
+        aead::open(ALG, &subkey_peek, &fixed_nonce, &[], &head[SS_SALT_LEN..])
+            .map_err(|_| Error::Setup("SS-2022 inbound AEAD open failed".into()))?;
+    if fixed_pt.len() != SS_FIXED_HEADER_LEN {
+        return Err(Error::Setup("SS-2022 inbound length mismatch".into()));
+    }
+    let var_len =
+        u16::from_be_bytes(fixed_pt[9..11].try_into().unwrap()) as usize;
+    let mut sealed_var = vec![0u8; var_len + TAG_LEN];
+    read_half
+        .read_exact(&mut sealed_var)
+        .await
+        .map_err(|e| Error::Io(format!("SS-2022 inbound variable header: {e}")))?;
+    let mut full_wire =
+        Vec::with_capacity(SS_SALT_LEN + SS_FIXED_HEADER_SEALED_LEN + sealed_var.len());
+    full_wire.extend_from_slice(&head);
+    full_wire.extend_from_slice(&sealed_var);
+    let (req, request_salt, tx_subkey_dec) =
+        decode_request(psk, &full_wire, now_unix(), window)
+            .map_err(header_err_to_transport)?;
+    debug!(ts = req.timestamp, "SS-2022 inbound prelude accepted");
+
+    // Build + send the server response prelude.
+    let response_header = ResponseHeader {
+        timestamp: now_unix(),
+        request_salt,
+        variable: Vec::new(),
+    };
+    let (resp_wire, _resp_salt, rx_subkey_send) =
+        encode_response(psk, &response_header).map_err(header_err_to_transport)?;
+    write_half
+        .write_all(&resp_wire)
+        .await
+        .map_err(|e| Error::Io(format!("SS-2022 inbound response write: {e}")))?;
+    write_half
+        .flush()
+        .await
+        .map_err(|e| Error::Io(format!("SS-2022 inbound response flush: {e}")))?;
+
+    // From the server's perspective:
+    //   tx (server → client) uses the response-side
+    //     subkey (we just sent the response prelude with
+    //     it; body chunks continue under the same).
+    //   rx (client → server) uses the request-side
+    //     subkey (we just decoded the request prelude
+    //     with it; body chunks continue under the same).
+    Ok(Box::new(ShadowsocksConnection::new(
+        write_half,
+        read_half,
+        rx_subkey_send,
+        tx_subkey_dec,
+    )))
+}
+
+// =========================================================
+// Error mapping helpers
+// =========================================================
+
+fn header_err_to_transport(e: ShadowsocksHeaderError) -> Error {
+    match e {
+        ShadowsocksHeaderError::AeadOpen
+        | ShadowsocksHeaderError::AeadSeal
+        | ShadowsocksHeaderError::WrongHeaderType { .. }
+        | ShadowsocksHeaderError::TimestampSkew { .. }
+        | ShadowsocksHeaderError::ReplayedSalt
+        | ShadowsocksHeaderError::WrongResponseSalt
+        | ShadowsocksHeaderError::TruncatedWire => {
+            Error::Setup(format!("SS-2022 handshake: {e}"))
+        },
+        ShadowsocksHeaderError::VarHeaderTooLarge(n) => Error::FrameTooLarge {
+            actual: n,
+            limit: SS_MAX_VAR_HEADER_LEN,
+        },
     }
 }
 
@@ -905,5 +1338,163 @@ mod tests {
         let n = now_unix();
         assert!(n > 1_600_000_000);
         assert!(n < 7_000_000_000);
+    }
+
+    // -----------------------------------------------------
+    // psk_from_b64 (S-5-shadowsocks-tcp)
+    // -----------------------------------------------------
+
+    #[test]
+    fn psk_from_b64_round_trips_padded() {
+        let raw = [0xABu8; KEY_LEN];
+        let encoded = B64_STANDARD.encode(raw);
+        let parsed = psk_from_b64(&encoded).unwrap();
+        assert_eq!(parsed, raw);
+    }
+
+    #[test]
+    fn psk_from_b64_round_trips_unpadded() {
+        let raw = [0xCDu8; KEY_LEN];
+        let encoded = base64::engine::general_purpose::STANDARD_NO_PAD.encode(raw);
+        let parsed = psk_from_b64(&encoded).unwrap();
+        assert_eq!(parsed, raw);
+    }
+
+    #[test]
+    fn psk_from_b64_rejects_wrong_length() {
+        // 16 bytes encoded → 24 chars (with padding).
+        let short = B64_STANDARD.encode([0u8; 16]);
+        let err = psk_from_b64(&short).unwrap_err();
+        assert!(matches!(err, Error::Config(_)));
+    }
+
+    #[test]
+    fn psk_from_b64_rejects_invalid_base64() {
+        let err = psk_from_b64("!!! not base64 at all !!!").unwrap_err();
+        assert!(matches!(err, Error::Config(_)));
+    }
+
+    // -----------------------------------------------------
+    // TCP round-trip (S-5-shadowsocks-tcp)
+    // -----------------------------------------------------
+
+    use tokio::net::TcpListener;
+
+    /// End-to-end test: client connect → server accept →
+    /// bidirectional frame round trip through real TCP +
+    /// SS-2022 handshake + chunked-AEAD body.
+    #[tokio::test]
+    async fn tcp_round_trip_frame_traffic() {
+        let psk = [0x55u8; KEY_LEN];
+        let psk_b64 = B64_STANDARD.encode(psk);
+        let cfg = ShadowsocksConfig {
+            remote: "127.0.0.1:0".into(),
+            method: "2022-blake3-chacha20-poly1305".into(),
+            psk_b64,
+        };
+        let transport = ShadowsocksTransport::new(cfg).unwrap();
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let bound_addr = listener.local_addr().unwrap();
+
+        // Spawn the server side first so the client's
+        // connect can land.
+        let psk_server = psk;
+        let server = tokio::spawn(async move {
+            let (sock, _peer) = listener.accept().await.unwrap();
+            let mut window = ReplayWindow::new();
+            let mut conn = accept_inbound(sock, &psk_server, &mut window).await.unwrap();
+            // Echo: receive one frame, send one frame.
+            let received = conn.recv().await.unwrap();
+            conn.send(Bytes::from(format!(
+                "echo: {}",
+                String::from_utf8_lossy(&received)
+            )))
+            .await
+            .unwrap();
+            // Receive a second frame to prove counters
+            // ratchet correctly on both sides.
+            let second = conn.recv().await.unwrap();
+            assert_eq!(&second[..], b"second");
+            conn.close().await.unwrap();
+        });
+
+        let mut conn = transport
+            .connect(&Endpoint::Direct(bound_addr))
+            .await
+            .unwrap();
+        conn.send(Bytes::from_static(b"hello SS-2022")).await.unwrap();
+        let resp = conn.recv().await.unwrap();
+        assert_eq!(&resp[..], b"echo: hello SS-2022");
+        conn.send(Bytes::from_static(b"second")).await.unwrap();
+        conn.close().await.unwrap();
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn tcp_connect_rejects_wrong_psk() {
+        let psk_server = [0x10u8; KEY_LEN];
+        let psk_client = [0x20u8; KEY_LEN];
+        let cfg = ShadowsocksConfig {
+            remote: "127.0.0.1:0".into(),
+            method: "2022-blake3-chacha20-poly1305".into(),
+            psk_b64: B64_STANDARD.encode(psk_client),
+        };
+        let transport = ShadowsocksTransport::new(cfg).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let bound = listener.local_addr().unwrap();
+
+        let server = tokio::spawn(async move {
+            let (sock, _) = listener.accept().await.unwrap();
+            let mut window = ReplayWindow::new();
+            let result = accept_inbound(sock, &psk_server, &mut window).await;
+            assert!(result.is_err());
+        });
+
+        // Client side may either error during handshake
+        // (server hangs up the peer after rejecting) or
+        // successfully send the prelude but find the
+        // connection closed before the response prelude.
+        // Either way, this connect attempt must NOT
+        // succeed.
+        let result = transport.connect(&Endpoint::Direct(bound)).await;
+        assert!(result.is_err());
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn tcp_send_oversize_frame_rejected() {
+        let psk = [0x77u8; KEY_LEN];
+        let cfg = ShadowsocksConfig {
+            remote: "127.0.0.1:0".into(),
+            method: "2022-blake3-chacha20-poly1305".into(),
+            psk_b64: B64_STANDARD.encode(psk),
+        };
+        let transport = ShadowsocksTransport::new(cfg).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let bound = listener.local_addr().unwrap();
+
+        let psk_server = psk;
+        let server = tokio::spawn(async move {
+            let (sock, _) = listener.accept().await.unwrap();
+            let mut window = ReplayWindow::new();
+            // Server accepts but never reads the body —
+            // client's oversize-send fails locally before
+            // any byte hits the wire.
+            let _ = accept_inbound(sock, &psk_server, &mut window).await.unwrap();
+            // Hold the connection long enough for the
+            // client's send to land.
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        });
+
+        let mut conn = transport
+            .connect(&Endpoint::Direct(bound))
+            .await
+            .unwrap();
+        let oversized = vec![0u8; AEAD_MAX_CHUNK + 1];
+        let err = conn.send(Bytes::from(oversized)).await.unwrap_err();
+        assert!(matches!(err, Error::FrameTooLarge { .. }));
+        let _ = conn.close().await;
+        let _ = server.await;
     }
 }

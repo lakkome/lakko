@@ -62,5 +62,11 @@ sha2 = "0.10"
 # bytes for SPKI pin computation.
 x509-parser = "0.16"
 
+# S-5-shadowsocks-tcp: decode SS-2022 master PSK from
+# base64 standard-form. The spec mandates base64 with
+# padding; we surface a clean parse error if the encoded
+# length doesn't decode to exactly 32 bytes.
+base64 = "0.22"
+
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }

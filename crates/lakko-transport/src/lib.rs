@@ -71,6 +71,10 @@ pub use rendezvous::{
     BootstrapConfig, RendezvousError, RendezvousResult, TransportSpec,
     ISSUED_AT_CLOCK_SKEW_SECS, SCHEMA_VERSION,
 };
-pub use shadowsocks::{ShadowsocksConfig, ShadowsocksTransport};
+pub use shadowsocks::{
+    accept_inbound as shadowsocks_accept_inbound, psk_from_b64 as shadowsocks_psk_from_b64,
+    ReplayWindow as ShadowsocksReplayWindow, ShadowsocksConfig, ShadowsocksConnection,
+    ShadowsocksHeaderError, ShadowsocksTransport,
+};
 pub use transport::{Connection, Listener, Transport, MAX_FRAME_BYTES};
 pub use webtransport_pt::{WebTransportConfig, WebTransportPt};

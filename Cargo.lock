@@ -2501,6 +2501,7 @@ name = "lakko-transport"
 version = "0.0.0"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
  "bytes",
  "futures",
  "lakko-crypto",
