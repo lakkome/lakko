@@ -1753,6 +1753,73 @@ and the previous envelopes survive.
    the client side matches the server's view from the
    first byte of a channel's life.
 
+### C-43: FFI subscriber-side surface preserves the in-Rust opacity contract
+
+The Phase 4b subscriber path is reachable from Swift /
+Kotlin / TypeScript through
+`crates/lakko-ffi-uniffi/src/channels.rs` and
+`crates/lakko-ffi-wasm/src/channels.rs` (sprint G4-3c).
+Five symbols cross the boundary:
+
+| FFI surface | Maps to |
+|---|---|
+| `ChannelSubscriberKeypair.generate()` / `.fromSecret(bytes)` | `lakko_crypto::agreement::SecretKey::{generate, from_bytes}` |
+| `ChannelSubscriberKeypair.secret()` / `.public()` | `SecretKey::to_bytes` + `SecretKey::public_key().to_bytes()` |
+| `sealSubscriberSeedEnvelope(subPub, channelId, epoch, seed)` | `lakko_channels::subscribe::seal_seed` |
+| `openSubscriberSeedEnvelope(kp, channelId, epoch, wire)` | `lakko_channels::subscribe::open_seed` |
+| `channelSeedEnvelopeLen()` | `lakko_channels::SEED_ENVELOPE_LEN = 80` |
+
+**Pinned invariants:**
+
+1. **`ChannelSubscriberKeypair` is deliberately not
+   `Debug`.** Same rule as `ChannelSigningKey` (C-37
+   support invariant): a Debug impl would render the
+   32-byte X25519 secret into panic backtraces. UniFFI
+   tests use a hand-rolled `match` over the Result
+   variants instead of `unwrap_err()` — see
+   `crates/lakko-ffi-uniffi/src/channels.rs::tests::
+   subscriber_keypair_from_short_secret_errors`.
+
+2. **The seed crosses the FFI boundary only through
+   `copy_to_bytes_for_export`.** A new public method on
+   `ContentKeySeed` (`crates/lakko-channels/src/seed.rs`)
+   is the **single** path that turns the in-Rust
+   `SecretBytes<32>` handle into an owned `[u8; 32]` the
+   FFI layer can hand back. Grep for `for_export` to
+   audit every in-Rust use site — there is exactly one:
+   the two FFI shims. The `_for_export` suffix mirrors
+   `from_bytes_for_test`'s "non-default-handle" naming
+   convention.
+
+3. **Envelope length advertised matches the on-wire
+   length.** `channelSeedEnvelopeLen()` always returns
+   `80` (32-byte ephemeral pub + 32-byte sealed seed +
+   16-byte AEAD tag). Both FFI shim tests
+   (`seed_envelope_seal_open_round_trip{,_wasm_host}`)
+   assert `wire.len() == channelSeedEnvelopeLen()` on
+   every seal — a mismatch in the underlying constant
+   would fail compilation through the
+   `crates/lakko-channels::SEED_ENVELOPE_LEN` re-export.
+
+4. **End-to-end seal → open → decrypt is covered on
+   both FFI surfaces.** Tests
+   `full_subscriber_e2e_publisher_to_subscriber` (UniFFI
+   host) and `full_subscriber_e2e_wasm_host` (wasm host)
+   drive the whole Phase-4b receive pipeline:
+   `compose → seal seed → open envelope → decode →
+   verifyAndDecrypt`. A regression in any of the five
+   FFI entry points or the underlying
+   `seal_seed` / `open_seed` crypto fails one of these
+   two tests before binding regeneration.
+
+5. **Wrong-recipient / wrong-epoch rejected at the FFI
+   boundary, same error variant as in Rust.**
+   `seed_envelope_wrong_recipient_fails` and
+   `seed_envelope_wrong_epoch_fails` confirm that the
+   underlying `ChannelError::AeadOpen` surfaces as
+   `FfiError::Channels(_)` on Swift / Kotlin — callers
+   branch on the variant, never on the message string.
+
 ## Exporter labels (call-side)
 
 | Label | Length | Context | Source | Used for |

@@ -38,12 +38,28 @@
 //! ## Scope
 //!
 //! The composer + opener side of ADR-0010 Tier 2 (per-
-//! message AEAD keyed off the content-key seed,
-//! Ed25519 signature on every post). The
-//! `seal_seed` / `open_seed` HPKE subscriber path is
-//! left for a follow-up commit (the web UI needs a
-//! per-subscriber X25519 keypair surface before that
-//! call site has anything to drive).
+//! message AEAD keyed off the content-key seed, Ed25519
+//! signature on every post) **and** the subscriber-side
+//! HPKE seed-envelope path (G4-3c):
+//!
+//! ```ts
+//! import {
+//!   ChannelSubscriberKeypair,
+//!   sealSubscriberSeedEnvelope,
+//!   openSubscriberSeedEnvelope,
+//!   channelSeedEnvelopeLen,
+//! } from "@lakko/wasm";
+//!
+//! const kp        = ChannelSubscriberKeypair.generate();
+//! const envelope  = sealSubscriberSeedEnvelope(
+//!   kp.public(), channelIdBytes, /* epoch */ 1, seed,
+//! );
+//! // ...transport over POST /v1/channels/:id/subscribers/:pk/envelope
+//! const seed = openSubscriberSeedEnvelope(
+//!   kp, channelIdBytes, 1, envelope,
+//! );
+//! // hand the recovered seed to verifyAndDecryptChannelPost
+//! ```
 //!
 //! ## What `newChannelSeedForTest` is for
 //!
@@ -61,9 +77,10 @@
 use wasm_bindgen::prelude::*;
 
 use lakko_channels::{
-    compose_post, decode_post, post::ChannelPost as RustChannelPost, verify_and_decrypt,
-    ContentKeySeed, EpochId, CHANNEL_ID_LEN,
+    compose_post, decode_post, open_seed, post::ChannelPost as RustChannelPost, seal_seed,
+    verify_and_decrypt, ContentKeySeed, EpochId, CHANNEL_ID_LEN, SEED_ENVELOPE_LEN,
 };
+use lakko_crypto::agreement::{PublicKey as X25519PublicKey, SecretKey as X25519SecretKey};
 use lakko_crypto::signing::SigningKey;
 
 const SIGNING_KEY_SEED_LEN: usize = 32;
@@ -283,6 +300,123 @@ pub fn new_channel_seed_for_test() -> Vec<u8> {
     out.to_vec()
 }
 
+// =========================================================
+// Subscriber-side surface (G4-3c) — HPKE seed envelope
+// =========================================================
+
+const X25519_KEY_LEN: usize = 32;
+
+/// X25519 keypair the subscriber holds locally. JS treats
+/// this as an opaque handle; the secret never leaves the
+/// boundary unless the caller explicitly invokes
+/// `secret()` to persist it in their secure-store
+/// equivalent (IndexedDB-encrypted on the web).
+#[wasm_bindgen(js_name = "ChannelSubscriberKeypair")]
+pub struct WasmChannelSubscriberKeypair {
+    inner: X25519SecretKey,
+}
+
+#[wasm_bindgen(js_class = "ChannelSubscriberKeypair")]
+impl WasmChannelSubscriberKeypair {
+    /// Fresh random keypair. Backed by
+    /// `crypto.getRandomValues` via the `getrandom + js`
+    /// feature.
+    #[wasm_bindgen(js_name = "generate")]
+    #[must_use]
+    pub fn generate_js() -> WasmChannelSubscriberKeypair {
+        WasmChannelSubscriberKeypair {
+            inner: X25519SecretKey::generate(),
+        }
+    }
+
+    /// Reconstruct from a 32-byte secret seed.
+    #[wasm_bindgen(constructor)]
+    pub fn new(secret: &[u8]) -> Result<WasmChannelSubscriberKeypair, JsError> {
+        let arr: [u8; X25519_KEY_LEN] = secret
+            .try_into()
+            .map_err(|_| JsError::new("subscriber secret must be exactly 32 bytes"))?;
+        Ok(WasmChannelSubscriberKeypair {
+            inner: X25519SecretKey::from_bytes(arr),
+        })
+    }
+
+    /// Export the 32-byte secret for persistence. Caller-
+    /// side responsibility to keep it encrypted.
+    #[wasm_bindgen(js_name = "secret")]
+    #[must_use]
+    pub fn secret(&self) -> Vec<u8> {
+        self.inner.to_bytes().to_vec()
+    }
+
+    /// 32-byte X25519 public key — the value the
+    /// subscriber registers on the channel.
+    #[wasm_bindgen(js_name = "public")]
+    #[must_use]
+    pub fn public(&self) -> Vec<u8> {
+        self.inner.public_key().to_bytes().to_vec()
+    }
+}
+
+/// Seal a 32-byte content-key seed against a subscriber's
+/// X25519 public key. Returns the wire bytes ready to
+/// `POST /v1/channels/:id/subscribers/:pk/envelope`.
+///
+/// Always returns exactly [`channel_seed_envelope_len`]
+/// bytes (`eph_pub(32) || sealed_seed(32) || tag(16) = 80`).
+///
+/// Throws on wrong-length args / non-X25519 public /
+/// AEAD seal failure.
+#[wasm_bindgen(js_name = "sealSubscriberSeedEnvelope")]
+pub fn seal_subscriber_seed_envelope(
+    subscriber_pub: &[u8],
+    channel_id: &[u8],
+    epoch_id: u32,
+    seed: &[u8],
+) -> Result<Vec<u8>, JsError> {
+    let channel = channel_id_from_slice(channel_id)?;
+    let pub_arr: [u8; X25519_KEY_LEN] = subscriber_pub
+        .try_into()
+        .map_err(|_| JsError::new("subscriber public must be exactly 32 bytes"))?;
+    let pubkey = X25519PublicKey::from_bytes(&pub_arr)
+        .map_err(|_| JsError::new("subscriber public did not parse as X25519"))?;
+    let seed_arr: [u8; CONTENT_KEY_SEED_LEN] = seed
+        .try_into()
+        .map_err(|_| JsError::new("content-key seed must be exactly 32 bytes"))?;
+    let seed_handle = ContentKeySeed::from_bytes_for_test(seed_arr);
+    seal_seed(&pubkey, &channel, EpochId::new(epoch_id), &seed_handle)
+        .map_err(|e| JsError::new(&format!("seal_seed: {e}")))
+}
+
+/// Open a seed envelope with the subscriber's keypair.
+/// Returns the recovered 32-byte content-key seed — hand
+/// it to `verifyAndDecryptChannelPost` to decode posts on
+/// this channel for this epoch.
+///
+/// Throws on wire-shape / AEAD-open / wrong-recipient /
+/// wrong-`(channel_id, epoch_id)` binding failures.
+#[wasm_bindgen(js_name = "openSubscriberSeedEnvelope")]
+pub fn open_subscriber_seed_envelope(
+    keypair: &WasmChannelSubscriberKeypair,
+    channel_id: &[u8],
+    epoch_id: u32,
+    wire: &[u8],
+) -> Result<Vec<u8>, JsError> {
+    let channel = channel_id_from_slice(channel_id)?;
+    let seed = open_seed(&keypair.inner, &channel, EpochId::new(epoch_id), wire)
+        .map_err(|e| JsError::new(&format!("open_seed: {e}")))?;
+    Ok(seed.copy_to_bytes_for_export().to_vec())
+}
+
+/// Total wire length of a seed envelope —
+/// `eph_pub(32) + sealed_seed(32) + tag(16) = 80`. Exposed
+/// so JS can pre-size buffers / sanity-check incoming
+/// envelope blobs.
+#[wasm_bindgen(js_name = "channelSeedEnvelopeLen")]
+#[must_use]
+pub fn channel_seed_envelope_len() -> u32 {
+    u32::try_from(SEED_ENVELOPE_LEN).unwrap_or(u32::MAX)
+}
+
 // ---------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------
@@ -342,4 +476,61 @@ mod tests {
     // `lakko-channels`'s own unit tests; this surface only
     // re-checks the positive path that the JS side cares
     // about.
+
+    // -----------------------------------------------------
+    // Subscriber-side (G4-3c) tests
+    // -----------------------------------------------------
+
+    #[test]
+    fn subscriber_keypair_secret_round_trip_wasm_host() {
+        let a = WasmChannelSubscriberKeypair::generate_js();
+        let secret = a.secret();
+        let b = WasmChannelSubscriberKeypair::new(&secret).unwrap();
+        assert_eq!(a.public(), b.public());
+    }
+
+    #[test]
+    fn subscriber_public_is_32_bytes_wasm_host() {
+        let kp = WasmChannelSubscriberKeypair::generate_js();
+        assert_eq!(kp.public().len(), X25519_KEY_LEN);
+    }
+
+    #[test]
+    fn seed_envelope_seal_open_round_trip_wasm_host() {
+        let kp = WasmChannelSubscriberKeypair::generate_js();
+        let seed = new_channel_seed_for_test();
+        let channel_id = [0x99u8; CHANNEL_ID_LEN];
+
+        let env = seal_subscriber_seed_envelope(&kp.public(), &channel_id, 5, &seed).unwrap();
+        assert_eq!(
+            u32::try_from(env.len()).unwrap(),
+            channel_seed_envelope_len()
+        );
+
+        let recovered = open_subscriber_seed_envelope(&kp, &channel_id, 5, &env).unwrap();
+        assert_eq!(recovered, seed);
+    }
+
+    #[test]
+    fn full_subscriber_e2e_wasm_host() {
+        // End-to-end (publisher → seal → subscriber → open
+        // → verifyAndDecrypt) on the wasm host side.
+        let signer = WasmChannelSigningKey::generate_js();
+        let seed = new_channel_seed_for_test();
+        let channel_id = [0xCDu8; CHANNEL_ID_LEN];
+
+        let wire =
+            compose_channel_post(&seed, &channel_id, 2, &signer, 0, b"phase-4b wasm e2e").unwrap();
+
+        let subscriber = WasmChannelSubscriberKeypair::generate_js();
+        let envelope =
+            seal_subscriber_seed_envelope(&subscriber.public(), &channel_id, 2, &seed).unwrap();
+        let recovered_seed =
+            open_subscriber_seed_envelope(&subscriber, &channel_id, 2, &envelope).unwrap();
+
+        let post = decode_channel_post(&wire).unwrap();
+        let plaintext =
+            verify_and_decrypt_channel_post(&recovered_seed, &channel_id, &post).unwrap();
+        assert_eq!(plaintext, b"phase-4b wasm e2e");
+    }
 }

@@ -83,6 +83,25 @@ impl ContentKeySeed {
     pub(crate) fn as_inner_bytes(&self) -> &[u8; CONTENT_KEY_SEED_LEN] {
         self.0.as_bytes()
     }
+
+    /// Copy the seed bytes out for export across an FFI
+    /// boundary (UniFFI / wasm-bindgen) where the caller-
+    /// side platform takes over secret-store responsibility
+    /// (Keychain / Keystore / IndexedDB-encrypted).
+    ///
+    /// **Production use is allowed** — unlike
+    /// [`Self::from_bytes_for_test`], this is the
+    /// subscriber-side path: after [`crate::open_seed`]
+    /// returns a [`ContentKeySeed`], the FFI caller needs
+    /// the raw bytes to feed back into
+    /// [`crate::verify_and_decrypt`] via the wire-typed FFI
+    /// surface. The audit-grep marker is `for_export`; any
+    /// in-Rust call site that uses this method must justify
+    /// why it cannot keep the handle.
+    #[must_use]
+    pub fn copy_to_bytes_for_export(&self) -> [u8; CONTENT_KEY_SEED_LEN] {
+        *self.0.as_bytes()
+    }
 }
 
 #[cfg(test)]

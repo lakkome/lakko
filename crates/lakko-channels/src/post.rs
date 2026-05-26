@@ -49,9 +49,7 @@
 use lakko_crypto::aead::{self, Algorithm, KEY_LEN, NONCE_LEN};
 use lakko_crypto::kdf::hkdf_sha256;
 use lakko_crypto::secret::SecretBytes;
-use lakko_crypto::signing::{
-    Signature, SigningKey, VerifyingKey, PUBLIC_KEY_LEN, SIGNATURE_LEN,
-};
+use lakko_crypto::signing::{Signature, SigningKey, VerifyingKey, PUBLIC_KEY_LEN, SIGNATURE_LEN};
 
 use crate::epoch::{EpochId, EPOCH_ID_LEN};
 use crate::error::{ChannelError, Result};
@@ -169,13 +167,8 @@ pub fn compose_post(
     }
     let sender_pubkey = signing_key.verifying_key().to_bytes();
 
-    let (key, nonce) = derive_key_and_nonce(
-        seed,
-        channel_id,
-        epoch_id,
-        &sender_pubkey,
-        message_counter,
-    )?;
+    let (key, nonce) =
+        derive_key_and_nonce(seed, channel_id, epoch_id, &sender_pubkey, message_counter)?;
     let aad = aead_aad(channel_id, epoch_id, &sender_pubkey, message_counter);
     let ciphertext = aead::seal(Algorithm::ChaCha20Poly1305, &key, &nonce, &aad, plaintext)
         .map_err(|_| ChannelError::AeadSeal)?;
@@ -230,8 +223,7 @@ pub fn decode_post(bytes: &[u8]) -> Result<ChannelPost> {
     let message_counter = u64::from_be_bytes(counter_bytes);
     cursor += COUNTER_LEN;
 
-    let ct_len_bytes: [u8; CIPHERTEXT_LEN_PREFIX] = bytes
-        [cursor..cursor + CIPHERTEXT_LEN_PREFIX]
+    let ct_len_bytes: [u8; CIPHERTEXT_LEN_PREFIX] = bytes[cursor..cursor + CIPHERTEXT_LEN_PREFIX]
         .try_into()
         .map_err(|_| ChannelError::Wire("ciphertext length prefix"))?;
     let ct_len = u32::from_be_bytes(ct_len_bytes) as usize;
@@ -335,8 +327,7 @@ fn aead_aad(
     sender_pubkey: &[u8; PUBLIC_KEY_LEN],
     message_counter: u64,
 ) -> Vec<u8> {
-    let mut aad =
-        Vec::with_capacity(CHANNEL_ID_LEN + EPOCH_ID_LEN + PUBLIC_KEY_LEN + COUNTER_LEN);
+    let mut aad = Vec::with_capacity(CHANNEL_ID_LEN + EPOCH_ID_LEN + PUBLIC_KEY_LEN + COUNTER_LEN);
     aad.extend_from_slice(channel_id);
     aad.extend_from_slice(&epoch_id.to_be_bytes());
     aad.extend_from_slice(sender_pubkey);
@@ -379,8 +370,7 @@ fn derive_key_and_nonce(
 ) -> Result<(SecretBytes<KEY_LEN>, [u8; NONCE_LEN])> {
     // HKDF salt for the key binds (channel, epoch, sender) — see
     // ADR-0010 § "message_key" derivation.
-    let mut key_salt =
-        Vec::with_capacity(CHANNEL_ID_LEN + EPOCH_ID_LEN + PUBLIC_KEY_LEN);
+    let mut key_salt = Vec::with_capacity(CHANNEL_ID_LEN + EPOCH_ID_LEN + PUBLIC_KEY_LEN);
     key_salt.extend_from_slice(channel_id);
     key_salt.extend_from_slice(&epoch_id.to_be_bytes());
     key_salt.extend_from_slice(sender_pubkey);
@@ -390,9 +380,8 @@ fn derive_key_and_nonce(
     // HKDF salt for the nonce additionally binds the message
     // counter so two posts from the same sender in the same epoch
     // never collide on their nonce.
-    let mut nonce_salt = Vec::with_capacity(
-        CHANNEL_ID_LEN + EPOCH_ID_LEN + PUBLIC_KEY_LEN + COUNTER_LEN,
-    );
+    let mut nonce_salt =
+        Vec::with_capacity(CHANNEL_ID_LEN + EPOCH_ID_LEN + PUBLIC_KEY_LEN + COUNTER_LEN);
     nonce_salt.extend_from_slice(channel_id);
     nonce_salt.extend_from_slice(&epoch_id.to_be_bytes());
     nonce_salt.extend_from_slice(sender_pubkey);
@@ -439,8 +428,7 @@ mod tests {
         let signing = SigningKey::generate();
         let seed = fixture_seed();
         let other_seed = ContentKeySeed::from_bytes_for_test([0xAA; CONTENT_KEY_SEED_LEN_LOCAL]);
-        let post =
-            compose_post(&seed, &CHANNEL, EpochId::new(1), 0, &signing, b"hi").unwrap();
+        let post = compose_post(&seed, &CHANNEL, EpochId::new(1), 0, &signing, b"hi").unwrap();
         let err = verify_and_decrypt(&other_seed, &CHANNEL, &post).unwrap_err();
         assert!(matches!(err, ChannelError::AeadOpen));
     }
@@ -450,8 +438,7 @@ mod tests {
         let signing = SigningKey::generate();
         let seed = fixture_seed();
         let other_channel = *b"OTHER_CHANNELID_";
-        let post =
-            compose_post(&seed, &CHANNEL, EpochId::new(1), 0, &signing, b"hi").unwrap();
+        let post = compose_post(&seed, &CHANNEL, EpochId::new(1), 0, &signing, b"hi").unwrap();
         let err = verify_and_decrypt(&seed, &other_channel, &post).unwrap_err();
         // The Ed25519 signature input covers channel_id, so a
         // verifier replaying the post under the wrong channel
@@ -465,8 +452,7 @@ mod tests {
     fn tampered_ciphertext_fails_signature() {
         let signing = SigningKey::generate();
         let seed = fixture_seed();
-        let mut post =
-            compose_post(&seed, &CHANNEL, EpochId::new(1), 0, &signing, b"hi").unwrap();
+        let mut post = compose_post(&seed, &CHANNEL, EpochId::new(1), 0, &signing, b"hi").unwrap();
         // Flip a bit in the ciphertext. The signature payload
         // covers the ciphertext, so the Ed25519 verify catches
         // this before AEAD even runs.
@@ -479,8 +465,7 @@ mod tests {
     fn tampered_signature_fails_signature() {
         let signing = SigningKey::generate();
         let seed = fixture_seed();
-        let mut post =
-            compose_post(&seed, &CHANNEL, EpochId::new(1), 0, &signing, b"hi").unwrap();
+        let mut post = compose_post(&seed, &CHANNEL, EpochId::new(1), 0, &signing, b"hi").unwrap();
         post.signature[0] ^= 0x01;
         let err = verify_and_decrypt(&seed, &CHANNEL, &post).unwrap_err();
         assert!(matches!(err, ChannelError::BadSignature));
@@ -491,8 +476,7 @@ mod tests {
         let signing = SigningKey::generate();
         let seed = fixture_seed();
         let post =
-            compose_post(&seed, &CHANNEL, EpochId::new(99), 7, &signing, b"wire-rt")
-                .unwrap();
+            compose_post(&seed, &CHANNEL, EpochId::new(99), 7, &signing, b"wire-rt").unwrap();
         let bytes = post.to_bytes();
         let parsed = decode_post(&bytes).unwrap();
         assert_eq!(parsed, post);
@@ -510,8 +494,7 @@ mod tests {
     fn decode_rejects_trailing_garbage() {
         let signing = SigningKey::generate();
         let seed = fixture_seed();
-        let post =
-            compose_post(&seed, &CHANNEL, EpochId::new(1), 0, &signing, b"x").unwrap();
+        let post = compose_post(&seed, &CHANNEL, EpochId::new(1), 0, &signing, b"x").unwrap();
         let mut bytes = post.to_bytes();
         bytes.push(0xFF);
         let err = decode_post(&bytes).unwrap_err();
@@ -569,10 +552,8 @@ mod tests {
         // ciphertexts differ even when plaintexts are identical.
         let signing = SigningKey::generate();
         let seed = fixture_seed();
-        let post_0 =
-            compose_post(&seed, &CHANNEL, EpochId::new(1), 0, &signing, b"same").unwrap();
-        let post_1 =
-            compose_post(&seed, &CHANNEL, EpochId::new(1), 1, &signing, b"same").unwrap();
+        let post_0 = compose_post(&seed, &CHANNEL, EpochId::new(1), 0, &signing, b"same").unwrap();
+        let post_1 = compose_post(&seed, &CHANNEL, EpochId::new(1), 1, &signing, b"same").unwrap();
         assert_ne!(post_0.ciphertext, post_1.ciphertext);
     }
 
@@ -580,10 +561,8 @@ mod tests {
     fn epoch_advance_changes_keys() {
         let signing = SigningKey::generate();
         let seed = fixture_seed();
-        let e1 =
-            compose_post(&seed, &CHANNEL, EpochId::new(1), 0, &signing, b"same").unwrap();
-        let e2 =
-            compose_post(&seed, &CHANNEL, EpochId::new(2), 0, &signing, b"same").unwrap();
+        let e1 = compose_post(&seed, &CHANNEL, EpochId::new(1), 0, &signing, b"same").unwrap();
+        let e2 = compose_post(&seed, &CHANNEL, EpochId::new(2), 0, &signing, b"same").unwrap();
         assert_ne!(e1.ciphertext, e2.ciphertext);
         // And cross-epoch decryption fails: the e1 ciphertext
         // does not open with the key the e2 HKDF salt produces.
@@ -608,8 +587,7 @@ mod tests {
         let signing = SigningKey::generate();
         let seed = fixture_seed();
         let big = vec![0u8; MAX_PLAINTEXT_LEN + 1];
-        let err = compose_post(&seed, &CHANNEL, EpochId::new(1), 0, &signing, &big)
-            .unwrap_err();
+        let err = compose_post(&seed, &CHANNEL, EpochId::new(1), 0, &signing, &big).unwrap_err();
         assert!(matches!(err, ChannelError::PlaintextTooLong { .. }));
     }
 
@@ -617,8 +595,7 @@ mod tests {
     fn invalid_sender_pubkey_rejected() {
         let signing = SigningKey::generate();
         let seed = fixture_seed();
-        let mut post =
-            compose_post(&seed, &CHANNEL, EpochId::new(1), 0, &signing, b"hi").unwrap();
+        let mut post = compose_post(&seed, &CHANNEL, EpochId::new(1), 0, &signing, b"hi").unwrap();
         // Swap in 32 bytes that did not produce the signature.
         // Two valid rejection paths cover this: either dalek
         // refuses to parse the bytes as a verifying key

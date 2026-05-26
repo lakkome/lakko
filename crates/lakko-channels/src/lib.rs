@@ -25,15 +25,28 @@
 //!   advances on every PublisherGroup commit and on scheduled
 //!   rotations.
 //!
+//! ## What's also here (4b)
+//!
+//! - [`subscribe`] — HPKE-equivalent seed envelope:
+//!   [`seal_seed`] / [`open_seed`] + [`SEED_ENVELOPE_LEN`].
+//!   Wire shape: `eph_pub(32) || sealed_seed(32) || tag(16) = 80`.
+//!   AAD binds `channel_id || epoch_id` so a misrouted envelope
+//!   to the wrong channel or wrong epoch fails the AEAD
+//!   authenticator. Exposed across UniFFI / wasm-bindgen as
+//!   `ChannelSubscriberKeypair` + `sealSubscriberSeedEnvelope` +
+//!   `openSubscriberSeedEnvelope` (sprint G4-3c).
+//!
 //! ## What's NOT here yet
 //!
-//! - **Subscriber path (4b).** No HPKE-sealed seed envelopes, no
-//!   subscribe handshake. The publisher in 4a sends posts to its
-//!   own mailbox for verification only.
-//! - **Rotation distribution (4c).** No fanout service, no
-//!   re-subscribe handshake, no batch envelope generator.
+//! - **Rotation distribution wire (4c).** The fanout
+//!   service + batch envelope generator are over in
+//!   `services/channels` (already shipped — see
+//!   `POST /v1/channels/:id/rotate` and `docs/security/calls.md`
+//!   C-42). The client-side rotation loop that walks the
+//!   subscriber registry and seals N envelopes is a follow-up
+//!   wave.
 //! - **`@channel` discovery.** Lives in `services/discovery` (OPRF
-//!   lookup) and arrives with 4b.
+//!   lookup) — already shipped via G4-5.
 //!
 //! ## Threat-model notes (cross-link to ADR-0010)
 //!
