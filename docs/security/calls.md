@@ -1820,6 +1820,77 @@ Five symbols cross the boundary:
    `FfiError::Channels(_)` on Swift / Kotlin — callers
    branch on the variant, never on the message string.
 
+### C-44: Production channel seed comes from the MLS exporter; the demo path is grep-clean
+
+Sprint G4-mls-seed splits the FFI seed-source surface
+into two explicitly-named functions so an auditor can
+trivially separate production from demo paths:
+
+| FFI surface | Source | Audit class |
+|---|---|---|
+| `channelSeedFromMlsExporterOutput(bytes)` | Caller-supplied 32 bytes from `Group.exportSecret(identity, channelExporterLabel(), channel_id, 32)` | **Production** |
+| `newChannelSeedForTest()` | `getrandom(32)` | **Demo / single-publisher** |
+
+**Pinned invariants:**
+
+1. **Label is the wire contract.**
+   `channelExporterLabel()` returns the ASCII string
+   `"lakko/channel/v1"` (matches
+   `lakko_channels::EXPORTER_LABEL_V1` byte-for-byte).
+   A change to this label silently breaks every
+   previously-derived seed — pin tests on both the
+   UniFFI side
+   (`channel_exporter_label_pinned`) and the wasm side
+   (`channel_exporter_label_pinned_wasm_host`) assert
+   the literal so any future schema bump that needs to
+   re-key surfaces as `_v2` with the `_v1` label frozen
+   for back-compat.
+
+2. **Demo path is grep-clean.** Every non-MLS seed
+   source on the FFI boundary carries `for_test` in its
+   name. The only such entry today is
+   `newChannelSeedForTest()`; an auditor running
+   `rg "newChannelSeedForTest\|for_test" apps/` gets a
+   complete list of demo call sites. Production code
+   uses `channelSeedFromMlsExporterOutput` and is
+   grep-greppable as such.
+
+3. **End-to-end coverage on both FFI surfaces.**
+   `mls_exporter_output_full_compose_round_trip`
+   (UniFFI host) and
+   `mls_exporter_output_full_compose_round_trip_wasm_host`
+   (wasm host) drive the full pipeline: pretend the MLS
+   exporter yielded 32 bytes → push through the
+   production helper → use the result as the seed for
+   `composeChannelPost` → `verifyAndDecryptChannelPost`
+   round-trips the plaintext. A regression in either the
+   helper or the underlying `ContentKeySeed::
+   from_exporter_output` fails one of these two tests
+   before binding regeneration.
+
+4. **Length validation only — no domain separator at
+   the FFI helper.** The helper is a `ContentKeySeed::
+   from_exporter_output` wrapper that validates 32
+   bytes and returns them. The actual domain separation
+   lives in the MLS exporter (`label = "lakko/channel/v1"`,
+   `context = channel_id`) and the in-crate constant
+   `lakko_channels::seed::EXPORTER_LABEL_V1`. Two MLS
+   groups invoking `exportSecret` with the same label
+   and the same channel_id produce different output
+   because the MLS exporter ratchet is keyed off each
+   group's epoch secret; the seed at the channels layer
+   is therefore the right cryptographic unit of
+   isolation.
+
+5. **`copy_to_bytes_for_export` is the single egress
+   path.** The helper returns the seed as raw bytes for
+   the FFI caller (Keychain / Keystore / IndexedDB-
+   encrypted storage on the platform side). The audit
+   grep marker `for_export` continues to enumerate every
+   in-Rust use site that crosses the secret-bytes
+   boundary — two today: this helper and the subscriber-
+   side `openSubscriberSeedEnvelope`. Listed in C-43 #2.
+
 ## Exporter labels (call-side)
 
 | Label | Length | Context | Source | Used for |

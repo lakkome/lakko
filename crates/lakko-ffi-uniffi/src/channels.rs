@@ -82,7 +82,8 @@ use std::sync::Mutex;
 
 use lakko_channels::{
     compose_post, decode_post, open_seed, post::ChannelPost as InnerPost, seal_seed,
-    verify_and_decrypt, ContentKeySeed, EpochId, CHANNEL_ID_LEN, SEED_ENVELOPE_LEN,
+    verify_and_decrypt, ContentKeySeed, EpochId, CHANNEL_ID_LEN, EXPORTER_LABEL_V1,
+    SEED_ENVELOPE_LEN,
 };
 use lakko_crypto::agreement::{PublicKey as X25519PublicKey, SecretKey as X25519SecretKey};
 use lakko_crypto::signing::SigningKey;
@@ -343,6 +344,65 @@ pub fn new_channel_seed_for_test() -> Vec<u8> {
     out.to_vec()
 }
 
+// ---------------------------------------------------------
+// MLS-derived seed (G4-mls-seed) — production path
+// ---------------------------------------------------------
+
+/// Wrap raw bytes from `lakko_mls::Group::export_secret`
+/// into the canonical channel content-key seed format.
+///
+/// **Production path.** The caller is expected to:
+///
+/// 1. Hold an MLS PublisherGroup (created via the UniFFI
+///    `Group` surface).
+/// 2. Invoke `group.exportSecret(identity, label,
+///    channelId, 32)` with `label =
+///    channelExporterLabel()` (`"lakko/channel/v1"`) and
+///    `channelId` as the 16-byte channel pseudonym.
+/// 3. Pass the resulting 32 bytes through this function —
+///    we validate the length and return them as the
+///    `seed` argument every other channels surface
+///    (`composeChannelPost`, `verifyAndDecryptChannelPost`,
+///    `sealSubscriberSeedEnvelope`) expects.
+///
+/// The pass-through is intentional: keeping the wrapper
+/// at the FFI boundary instead of letting the JS / Swift
+/// / Kotlin sides call `composeChannelPost` directly with
+/// the MLS bytes makes the production path **grep-clean**
+/// (`channelSeedFromMlsExporterOutput` is the audit
+/// marker), and lets a future schema bump add a domain
+/// separator without breaking call sites.
+///
+/// # Errors
+///
+/// [`FfiError::Channels`] if `bytes.len() != 32`.
+#[uniffi::export]
+pub fn channel_seed_from_mls_exporter_output(
+    bytes: Vec<u8>,
+) -> Result<Vec<u8>, FfiError> {
+    // Round-trip through ContentKeySeed::from_exporter_output
+    // to surface a uniform error variant + reuse the
+    // length validation that the in-Rust call sites use.
+    let seed = ContentKeySeed::from_exporter_output(&bytes)?;
+    Ok(seed.copy_to_bytes_for_export().to_vec())
+}
+
+/// Canonical MLS exporter label for channel content-key
+/// seeds — `"lakko/channel/v1"`. Pinned ASCII, never
+/// translated, never re-encoded.
+///
+/// Use as the `label` argument to
+/// `lakko_mls::Group::export_secret` when deriving a
+/// channel seed. The `_v1` suffix is part of the wire
+/// contract; a future schema bump that changes the
+/// derivation surfaces as `_v2` with the old label
+/// frozen for backwards-compat.
+#[uniffi::export]
+#[must_use]
+pub fn channel_exporter_label() -> String {
+    EXPORTER_LABEL_V1.into()
+}
+
 // =========================================================
 // Subscriber-side surface (G4-3c) — HPKE seed envelope
 // =========================================================
@@ -599,6 +659,62 @@ mod tests {
         // (probabilistic — collision is 2^−256 likely).
         let other = new_channel_seed_for_test();
         assert_ne!(seed, other);
+    }
+
+    // -----------------------------------------------------
+    // MLS-derived seed (G4-mls-seed) tests
+    // -----------------------------------------------------
+
+    #[test]
+    fn channel_exporter_label_pinned() {
+        // Wire-contract pin — if the label string ever
+        // changes, every previously-published channel's
+        // seed derivation no longer matches and the
+        // subscriber path silently fails. The audit
+        // marker for any change here is the `_v1`
+        // suffix.
+        assert_eq!(channel_exporter_label(), "lakko/channel/v1");
+    }
+
+    #[test]
+    fn mls_exporter_output_round_trip_when_32_bytes() {
+        let raw = vec![0x5Au8; CONTENT_KEY_SEED_LEN];
+        let seed = channel_seed_from_mls_exporter_output(raw.clone()).unwrap();
+        assert_eq!(seed, raw);
+    }
+
+    #[test]
+    fn mls_exporter_output_rejects_wrong_length() {
+        for len in [0usize, 1, 16, 31, 33, 64] {
+            let err =
+                channel_seed_from_mls_exporter_output(vec![0u8; len]).unwrap_err();
+            assert!(matches!(err, FfiError::Channels(_)));
+        }
+    }
+
+    #[test]
+    fn mls_exporter_output_full_compose_round_trip() {
+        // End-to-end: pretend an MLS exporter yielded
+        // these 32 bytes; feed them through the
+        // production FFI helper; use the result as the
+        // seed for compose / verify_and_decrypt.
+        let mls_bytes = vec![0xC3u8; CONTENT_KEY_SEED_LEN];
+        let seed = channel_seed_from_mls_exporter_output(mls_bytes).unwrap();
+        let signer = ChannelSigningKey::generate();
+        let channel_id = vec![0x42u8; CHANNEL_ID_LEN];
+
+        let wire = compose_channel_post(
+            seed.clone(),
+            channel_id.clone(),
+            1,
+            signer.clone(),
+            0,
+            b"mls-derived seed end-to-end".to_vec(),
+        )
+        .unwrap();
+        let post = decode_channel_post(wire).unwrap();
+        let pt = verify_and_decrypt_channel_post(seed, channel_id, post).unwrap();
+        assert_eq!(pt, b"mls-derived seed end-to-end");
     }
 
     // -----------------------------------------------------

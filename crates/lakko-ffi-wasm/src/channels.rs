@@ -78,7 +78,8 @@ use wasm_bindgen::prelude::*;
 
 use lakko_channels::{
     compose_post, decode_post, open_seed, post::ChannelPost as RustChannelPost, seal_seed,
-    verify_and_decrypt, ContentKeySeed, EpochId, CHANNEL_ID_LEN, SEED_ENVELOPE_LEN,
+    verify_and_decrypt, ContentKeySeed, EpochId, CHANNEL_ID_LEN, EXPORTER_LABEL_V1,
+    SEED_ENVELOPE_LEN,
 };
 use lakko_crypto::agreement::{PublicKey as X25519PublicKey, SecretKey as X25519SecretKey};
 use lakko_crypto::signing::SigningKey;
@@ -300,6 +301,46 @@ pub fn new_channel_seed_for_test() -> Vec<u8> {
     out.to_vec()
 }
 
+// ---------------------------------------------------------
+// MLS-derived seed (G4-mls-seed) — production path
+// ---------------------------------------------------------
+
+/// Wrap raw bytes from `Group.exportSecret` into the
+/// canonical channel content-key seed format.
+///
+/// **Production path.** The caller is expected to hold a
+/// PublisherGroup (created via the wasm `Group` surface),
+/// invoke `group.exportSecret(identity,
+/// channelExporterLabel(), channelIdBytes, 32)`, and feed
+/// the resulting 32 bytes through this function. The
+/// pass-through gives the production seed a grep-clean
+/// audit marker (`channelSeedFromMlsExporterOutput`) and
+/// lets a future schema bump add a domain separator
+/// without breaking call sites.
+///
+/// Throws on `bytes.length !== 32`.
+#[wasm_bindgen(js_name = "channelSeedFromMlsExporterOutput")]
+pub fn channel_seed_from_mls_exporter_output(
+    bytes: &[u8],
+) -> Result<Vec<u8>, JsError> {
+    let seed = ContentKeySeed::from_exporter_output(bytes)
+        .map_err(|e| JsError::new(&format!("from_exporter_output: {e}")))?;
+    Ok(seed.copy_to_bytes_for_export().to_vec())
+}
+
+/// Canonical MLS exporter label for channel content-key
+/// seeds — `"lakko/channel/v1"`. Pinned ASCII, never
+/// translated, never re-encoded.
+///
+/// Use as the `label` argument to `Group.exportSecret`
+/// when deriving a channel seed. The `_v1` suffix is
+/// part of the wire contract.
+#[wasm_bindgen(js_name = "channelExporterLabel")]
+#[must_use]
+pub fn channel_exporter_label() -> String {
+    EXPORTER_LABEL_V1.into()
+}
+
 // =========================================================
 // Subscriber-side surface (G4-3c) — HPKE seed envelope
 // =========================================================
@@ -476,6 +517,39 @@ mod tests {
     // `lakko-channels`'s own unit tests; this surface only
     // re-checks the positive path that the JS side cares
     // about.
+
+    // -----------------------------------------------------
+    // MLS-derived seed (G4-mls-seed) tests
+    // -----------------------------------------------------
+
+    #[test]
+    fn channel_exporter_label_pinned_wasm_host() {
+        // Wire-contract pin — see the UniFFI side for the
+        // full rationale. Any change here breaks every
+        // previously-derived channel seed.
+        assert_eq!(channel_exporter_label(), "lakko/channel/v1");
+    }
+
+    #[test]
+    fn mls_exporter_output_full_compose_round_trip_wasm_host() {
+        let mls_bytes = vec![0x3Cu8; CONTENT_KEY_SEED_LEN];
+        let seed =
+            channel_seed_from_mls_exporter_output(&mls_bytes).unwrap();
+        let signer = WasmChannelSigningKey::generate_js();
+        let channel_id = [0x91u8; CHANNEL_ID_LEN];
+        let wire = compose_channel_post(
+            &seed,
+            &channel_id,
+            1,
+            &signer,
+            0,
+            b"mls-derived seed wasm e2e",
+        )
+        .unwrap();
+        let post = decode_channel_post(&wire).unwrap();
+        let pt = verify_and_decrypt_channel_post(&seed, &channel_id, &post).unwrap();
+        assert_eq!(pt, b"mls-derived seed wasm e2e");
+    }
 
     // -----------------------------------------------------
     // Subscriber-side (G4-3c) tests
