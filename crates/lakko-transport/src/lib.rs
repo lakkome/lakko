@@ -39,12 +39,25 @@ pub mod endpoint;
 pub mod error;
 pub mod http;
 pub mod in_memory;
+pub mod masque;
 pub mod pinning;
+pub mod pluggable;
 pub mod quic;
+pub mod reality;
+pub mod shadowsocks;
 pub mod transport;
+pub mod webtransport_pt;
 
 pub use endpoint::Endpoint;
 pub use error::{Error, Result};
 pub use http::{HttpError, HttpResult, HttpTransport, HttpTransportConfig};
+pub use masque::{MasqueConfig, MasqueTransport};
 pub use pinning::{PinError, PinnedVerifier, SpkiHash, SpkiPinSet};
+pub use pluggable::{
+    race_select, HappyEyeballs, PluggableCandidate, PluggableError, PluggableKind,
+    PluggableResult, PluggableTransport,
+};
+pub use reality::{RealityConfig, RealityTransport};
+pub use shadowsocks::{ShadowsocksConfig, ShadowsocksTransport};
 pub use transport::{Connection, Listener, Transport, MAX_FRAME_BYTES};
+pub use webtransport_pt::{WebTransportConfig, WebTransportPt};

@@ -43,6 +43,20 @@ pub enum Error {
     /// Generic configuration error (invalid endpoint, bad address, etc.).
     #[error("invalid configuration: {0}")]
     Config(String),
+
+    /// A scaffold-only transport variant (REALITY / Shadowsocks-2022 /
+    /// MASQUE / WebTransport) was reached before its implementation
+    /// sprint landed. Carries the sprint identifier so the operator
+    /// log line points to the open ROADMAP item.
+    #[error("transport {feature} is scaffold-only — implementation lands in {sprint}")]
+    NotImplemented {
+        /// Short identifier of the missing feature (the
+        /// `PluggableKind::as_str()` of the corresponding
+        /// kind).
+        feature: &'static str,
+        /// Sprint label in `docs/ROADMAP-PHASE3-CLOSEOUT.md`.
+        sprint: &'static str,
+    },
 }
 
 /// Convenience alias.
