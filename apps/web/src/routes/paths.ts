@@ -79,6 +79,23 @@ export const paths = {
   call(callIdB64Url: string): string {
     return `/call/${callIdB64Url}`;
   },
+  /**
+   * Channel list — Phase 4 G4-2. Shows the user's
+   * registered channels with a + entry point that goes to
+   * `paths.channelNew()`.
+   */
+  channels: "/channels",
+  /** New-channel form — Phase 4 G4-2. */
+  channelNew: "/channels/new",
+  /**
+   * Channel view — Phase 4 G4-2. `channelIdHex` is the
+   * 32-char lowercase hex form of the 16-byte channel
+   * pseudonym (ADR-0010 §"Wire surfaces"); the
+   * `services/channels` REST routes accept the same form.
+   */
+  channel(channelIdHex: string): string {
+    return `/channels/${channelIdHex}`;
+  },
 } as const;
 
 /**
@@ -99,3 +116,9 @@ export const inviteRoutePattern = "/i/:slug" as const;
  * table.
  */
 export const callRoutePattern = "/call/:id" as const;
+
+/**
+ * The matchable pattern for the dynamic channel view route
+ * — must stay in sync with `paths.channel(...)`.
+ */
+export const channelRoutePattern = "/channels/:id" as const;

@@ -32,6 +32,7 @@ import Signup from "./Signup";
 import Home from "./Home";
 import Contacts from "./Contacts";
 import Call from "./Call";
+import { ChannelsList, ChannelView, NewChannel } from "./Channels";
 import Chat from "./Chat";
 import DevProbe from "./DevProbe";
 import Devices from "./Devices";
@@ -39,6 +40,7 @@ import Invite from "./Invite";
 import NotFound from "./NotFound";
 import {
   callRoutePattern,
+  channelRoutePattern,
   chatRoutePattern,
   inviteRoutePattern,
   paths,
@@ -94,6 +96,9 @@ export const routes: RouteDefinition[] = [
       { path: paths.contacts, component: Contacts },
       { path: chatRoutePattern, component: Chat },
       { path: callRoutePattern, component: Call },
+      { path: paths.channels, component: ChannelsList },
+      { path: paths.channelNew, component: NewChannel },
+      { path: channelRoutePattern, component: ChannelView },
       { path: paths.dev, component: DevProbe },
       { path: paths.devices, component: Devices },
     ],
