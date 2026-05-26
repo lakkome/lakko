@@ -43,6 +43,13 @@ import {
   publishPost,
   type ChannelPostView,
 } from "../channels/api";
+import {
+  composePost,
+  freshPublisherKeys,
+  utf8Decode,
+  utf8Encode,
+  verifyAndDecryptPost,
+} from "../channels/composer";
 import { channelsActions, channelsState } from "../state/channels-state";
 import { paths } from "./paths";
 
@@ -199,12 +206,19 @@ const NewChannel: Component = () => {
     const id = freshChannelIdHex();
     try {
       await createChannel(id);
+      // Mint local publisher keys — single-publisher demo
+      // affordance until the PublisherGroup MLS exporter
+      // wiring lands. Stored in-memory only; a future
+      // sub-sprint persists them to the device-group-
+      // keyed sqlite cache.
+      const keys = await freshPublisherKeys();
       channelsActions.addChannel({
         id,
         localName: name().trim(),
         localDescription: description().trim(),
         addedAtMs: Date.now(),
       });
+      channelsActions.setKeys(id, keys);
       navigate(paths.channel(id));
     } catch (err) {
       if (apiError.is(err)) {
@@ -343,6 +357,7 @@ const ChannelView: Component = () => {
   const navigate = useNavigate();
   const [publishBusy, setPublishBusy] = createSignal(false);
   const [publishError, setPublishError] = createSignal<string | null>(null);
+  const [composeText, setComposeText] = createSignal("");
 
   // Resource that fetches the post list + epoch when the
   // route first opens. Both come from the same server,
@@ -381,31 +396,83 @@ const ChannelView: Component = () => {
     };
   };
 
-  async function onPublishStub(): Promise<void> {
+  async function onPublish(): Promise<void> {
     if (publishBusy()) return;
+    const text = composeText().trim();
+    if (text.length === 0) {
+      setPublishError("Type something before publishing.");
+      return;
+    }
+    const keys = channelsState.keysByChannel().get(params.id);
+    if (keys === undefined) {
+      setPublishError(
+        "This channel has no local publisher keys — you cannot publish to it from this device.",
+      );
+      return;
+    }
     setPublishBusy(true);
     setPublishError(null);
-    // Stub body — until the WASM ChannelPost composer
-    // ships, the publish form sends a random 64-byte
-    // payload. The server stores it opaque; the post
-    // appears in the list as base64. Real
-    // sign+encrypt+serialise rides on a follow-up
-    // sub-sprint.
-    const stub = new Uint8Array(64);
-    crypto.getRandomValues(stub);
     try {
-      await publishPost(params.id, stub);
+      const epoch = channelsState.epochByChannel().get(params.id) ?? 0;
+      const counter = channelsActions.nextCounter(params.id);
+      const wire = await composePost(
+        keys,
+        params.id,
+        epoch,
+        counter,
+        utf8Encode(text),
+      );
+      await publishPost(params.id, wire);
+      setComposeText("");
       await refetch();
     } catch (err) {
       if (apiError.is(err)) {
         setPublishError(`Server rejected: ${err.code} — ${err.detail}`);
       } else {
-        setPublishError(`Network error: ${String(err)}`);
+        setPublishError(`Compose / network error: ${String(err)}`);
       }
     } finally {
       setPublishBusy(false);
     }
   }
+
+  /** Decoded plaintext per-post, keyed by cursor. `null`
+   *  means the decode failed (wrong seed, wrong channel,
+   *  tampered ciphertext) — UI surfaces "[unreadable]". */
+  const [decodedByCursor, setDecodedByCursor] = createSignal<
+    ReadonlyMap<number, string | null>
+  >(new Map());
+
+  // Decode every post in the latest fetch into plaintext
+  // text. Runs whenever the post list or the channel
+  // changes. We only have the seed for channels we
+  // publish to ourselves — for someone else's channel
+  // the subscriber path supplies the seed via HPKE
+  // envelope, but that wiring is a follow-up sub-sprint.
+  createEffect(() => {
+    const d = data();
+    const keys = channelsState.keysByChannel().get(params.id);
+    if (d === undefined || keys === undefined) {
+      setDecodedByCursor(new Map());
+      return;
+    }
+    void Promise.all(
+      d.posts.map(async (p) => {
+        try {
+          const plaintext = await verifyAndDecryptPost(
+            keys.seed,
+            params.id,
+            p.payloadB64,
+          );
+          return [p.cursor, utf8Decode(plaintext)] as const;
+        } catch {
+          return [p.cursor, null] as const;
+        }
+      }),
+    ).then((entries) => {
+      setDecodedByCursor(new Map(entries));
+    });
+  });
 
   return (
     <div
@@ -469,41 +536,95 @@ const ChannelView: Component = () => {
         </strong>
       </div>
 
-      <div style={{ "margin-bottom": "20px" }}>
-        <button
-          type="button"
-          onClick={(): void => {
-            void onPublishStub();
+      <Show
+        when={channelsState.keysByChannel().get(params.id) !== undefined}
+        fallback={
+          <div
+            style={{
+              "margin-bottom": "20px",
+              padding: "12px",
+              "background-color": COLOURS.surface,
+              color: COLOURS.textSecondary,
+              "border-radius": "8px",
+              "font-size": "13px",
+              "line-height": "1.6",
+            }}
+          >
+            No local publisher keys for this channel. Subscriber-side
+            view + HPKE seed-envelope reception arrive in a follow-up
+            sub-sprint.
+          </div>
+        }
+      >
+        <form
+          onSubmit={(e): void => {
+            e.preventDefault();
+            void onPublish();
           }}
-          disabled={publishBusy()}
-          style={{
-            "background-color": COLOURS.accentBlue,
-            color: "#fff",
-            border: "none",
-            "border-radius": "8px",
-            padding: "9px 16px",
-            "font-size": "14px",
-            "font-weight": "500",
-            cursor: publishBusy() ? "wait" : "pointer",
-          }}
+          style={{ "margin-bottom": "20px" }}
         >
-          {publishBusy() ? "Publishing…" : "Publish (stub: random 64 bytes)"}
-        </button>
-        <Show when={publishError() !== null}>
+          <textarea
+            rows={3}
+            placeholder="Write a post…"
+            value={composeText()}
+            onInput={(e): void => {
+              setComposeText(e.currentTarget.value);
+            }}
+            disabled={publishBusy()}
+            style={{
+              width: "100%",
+              padding: "10px 12px",
+              "background-color": COLOURS.surface,
+              color: COLOURS.textPrimary,
+              border: `1px solid ${COLOURS.border}`,
+              "border-radius": "8px",
+              "font-size": "14px",
+              "font-family": "inherit",
+              resize: "vertical",
+              "box-sizing": "border-box",
+            }}
+          />
           <div
             style={{
               "margin-top": "10px",
-              padding: "10px 12px",
-              "background-color": COLOURS.destructive,
-              color: "#fff",
-              "border-radius": "8px",
-              "font-size": "13px",
+              display: "flex",
+              "justify-content": "flex-end",
             }}
           >
-            {publishError()}
+            <button
+              type="submit"
+              disabled={publishBusy() || composeText().trim().length === 0}
+              style={{
+                "background-color": COLOURS.accentBlue,
+                color: "#fff",
+                border: "none",
+                "border-radius": "8px",
+                padding: "9px 16px",
+                "font-size": "14px",
+                "font-weight": "500",
+                cursor: publishBusy() ? "wait" : "pointer",
+                opacity: composeText().trim().length === 0 ? "0.6" : "1",
+              }}
+            >
+              {publishBusy() ? "Publishing…" : "Publish"}
+            </button>
           </div>
-        </Show>
-      </div>
+          <Show when={publishError() !== null}>
+            <div
+              style={{
+                "margin-top": "10px",
+                padding: "10px 12px",
+                "background-color": COLOURS.destructive,
+                color: "#fff",
+                "border-radius": "8px",
+                "font-size": "13px",
+              }}
+            >
+              {publishError()}
+            </div>
+          </Show>
+        </form>
+      </Show>
 
       <h2 style={{ margin: "0 0 12px 0", "font-size": "16px" }}>Posts</h2>
       <Show
@@ -542,17 +663,51 @@ const ChannelView: Component = () => {
                   <span>cursor {p.cursor}</span>
                   <span>{new Date(p.serverTsMs).toISOString()}</span>
                 </div>
-                <div
-                  style={{
-                    "font-family": "monospace",
-                    "font-size": "12px",
-                    "word-break": "break-all",
-                    color: COLOURS.textPrimary,
-                  }}
+                <Show
+                  when={decodedByCursor().has(p.cursor)}
+                  fallback={
+                    <div
+                      style={{
+                        "font-size": "13px",
+                        color: COLOURS.textSecondary,
+                        "font-style": "italic",
+                      }}
+                    >
+                      Decoding…
+                    </div>
+                  }
                 >
-                  {p.payloadB64.slice(0, 80)}
-                  {p.payloadB64.length > 80 ? "…" : ""}
-                </div>
+                  {(() => {
+                    const decoded = decodedByCursor().get(p.cursor) ?? null;
+                    if (decoded === null) {
+                      return (
+                        <div
+                          style={{
+                            "font-size": "13px",
+                            color: COLOURS.textSecondary,
+                            "font-style": "italic",
+                          }}
+                        >
+                          [unreadable — wrong seed, tampered ciphertext, or
+                          posted by another publisher with a different
+                          signing key]
+                        </div>
+                      );
+                    }
+                    return (
+                      <div
+                        style={{
+                          "font-size": "14px",
+                          color: COLOURS.textPrimary,
+                          "white-space": "pre-wrap",
+                          "word-break": "break-word",
+                        }}
+                      >
+                        {decoded}
+                      </div>
+                    );
+                  })()}
+                </Show>
               </li>
             )}
           </For>

@@ -16,6 +16,7 @@
 
 import { createSignal, type Accessor } from "solid-js";
 
+import type { ChannelPublisherKeys } from "../channels/composer";
 import type { ChannelHandle, ChannelPostView } from "../channels/api";
 
 interface ChannelsStateInternal {
@@ -31,6 +32,17 @@ interface ChannelsStateInternal {
   /** Per-channel cached server epoch. `undefined` when
    *  not yet fetched. */
   readonly epochByChannel: Accessor<ReadonlyMap<string, number>>;
+  /** Per-channel publisher keys — local-only, never sent
+   *  to the server. Holds the content-key seed + Ed25519
+   *  signing-key seed the WASM composer needs. Present
+   *  only on channels where the local user is a
+   *  publisher. */
+  readonly keysByChannel: Accessor<ReadonlyMap<string, ChannelPublisherKeys>>;
+  /** Per-channel monotone publish counter. Bumped on
+   *  every successful publish so the next post carries
+   *  `message_counter = previous + 1`. Reset on epoch
+   *  rotation. */
+  readonly counterByChannel: Accessor<ReadonlyMap<string, bigint>>;
 }
 
 const [channels, setChannels] = createSignal<ReadonlyArray<ChannelHandle>>([]);
@@ -40,11 +52,19 @@ const [postsByChannel, setPostsByChannel] = createSignal<
 const [epochByChannel, setEpochByChannel] = createSignal<
   ReadonlyMap<string, number>
 >(new Map());
+const [keysByChannel, setKeysByChannel] = createSignal<
+  ReadonlyMap<string, ChannelPublisherKeys>
+>(new Map());
+const [counterByChannel, setCounterByChannel] = createSignal<
+  ReadonlyMap<string, bigint>
+>(new Map());
 
 export const channelsState: ChannelsStateInternal = {
   channels,
   postsByChannel,
   epochByChannel,
+  keysByChannel,
+  counterByChannel,
 };
 
 export const channelsActions = {
@@ -69,6 +89,16 @@ export const channelsActions = {
       return next;
     });
     setEpochByChannel((map) => {
+      const next = new Map(map);
+      next.delete(channelId);
+      return next;
+    });
+    setKeysByChannel((map) => {
+      const next = new Map(map);
+      next.delete(channelId);
+      return next;
+    });
+    setCounterByChannel((map) => {
       const next = new Map(map);
       next.delete(channelId);
       return next;
@@ -100,10 +130,48 @@ export const channelsActions = {
       return next;
     });
   },
+  /** Install fresh publisher keys for a channel. Resets
+   *  the publish counter to 0 — every (epoch, sender)
+   *  pair starts a new counter sequence per
+   *  `lakko_channels::post` invariants. */
+  setKeys(channelId: string, keys: ChannelPublisherKeys): void {
+    setKeysByChannel((map) => {
+      const next = new Map(map);
+      next.set(channelId, keys);
+      return next;
+    });
+    setCounterByChannel((map) => {
+      const next = new Map(map);
+      next.set(channelId, 0n);
+      return next;
+    });
+  },
+  /** Atomically bump the publish counter for a channel
+   *  and return the value the publisher should use for
+   *  the NEXT post. Caller-side composition pattern:
+   *
+   *  ```ts
+   *  const counter = channelsActions.nextCounter(id);
+   *  const wire = await composePost(keys, id, epoch, counter, plaintext);
+   *  await publishPost(id, wire);
+   *  ```
+   */
+  nextCounter(channelId: string): bigint {
+    let value = 0n;
+    setCounterByChannel((map) => {
+      const next = new Map(map);
+      value = next.get(channelId) ?? 0n;
+      next.set(channelId, value + 1n);
+      return next;
+    });
+    return value;
+  },
   /** Wipe everything — used on logout. */
   reset(): void {
     setChannels([]);
     setPostsByChannel(new Map());
     setEpochByChannel(new Map());
+    setKeysByChannel(new Map());
+    setCounterByChannel(new Map());
   },
 };
