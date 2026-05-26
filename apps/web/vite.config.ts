@@ -72,6 +72,16 @@ export default defineConfig({
         changeOrigin: true,
         rewrite: (p) => p.replace(/^\/api\/push/, ""),
       },
+      // Phase 4: lakko-svc-channels defaults to 127.0.0.1:8086.
+      // Carries opaque ChannelPost bytes (POST /v1/.../posts),
+      // HPKE seed envelopes (80 bytes per subscriber), and
+      // the subscribe handshake. Production nginx routes the
+      // same `/api/channels/*` path to the upstream.
+      "/api/channels": {
+        target: "http://127.0.0.1:8086",
+        changeOrigin: true,
+        rewrite: (p) => p.replace(/^\/api\/channels/, ""),
+      },
     },
   },
 

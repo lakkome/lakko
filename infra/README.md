@@ -17,7 +17,8 @@ infra/
 │   ├── lakko-svc-ds.service            # MLS Delivery Service
 │   ├── lakko-svc-storage.service       # ciphertext blob proxy
 │   ├── lakko-svc-discovery.service     # username OPRF lookup
-│   └── lakko-svc-push-gw.service       # APNs / FCM / VAPID
+│   ├── lakko-svc-push-gw.service       # APNs / FCM / VAPID
+│   └── lakko-svc-channels.service      # Phase 4 broadcast backend
 ├── nginx/
 │   └── sites-available/
 │       ├── lakko.conf                  # reverse proxy for system-nginx
@@ -43,6 +44,7 @@ infra/
 | storage | 127.0.0.1:8083 | `journalctl -u lakko-svc-storage` |
 | discovery | 127.0.0.1:8084 | `journalctl -u lakko-svc-discovery` |
 | push-gw | 127.0.0.1:8085 | `journalctl -u lakko-svc-push-gw` |
+| channels | 127.0.0.1:8086 | `journalctl -u lakko-svc-channels` |
 
 system-nginx listens on 80/443 → reverse proxies to 127.0.0.1:808X. Services are not exposed externally.
 
@@ -141,6 +143,8 @@ sudo mariadb <<'SQL'
         CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
     CREATE DATABASE IF NOT EXISTS lakko_push_gw
         CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+    CREATE DATABASE IF NOT EXISTS lakko_channels
+        CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 SQL
 
 # Create the service user — password is NOT in git.
@@ -151,6 +155,7 @@ sudo mariadb -e "
     GRANT ALL PRIVILEGES ON lakko_ds.*        TO 'lakko'@'localhost';
     GRANT ALL PRIVILEGES ON lakko_discovery.* TO 'lakko'@'localhost';
     GRANT ALL PRIVILEGES ON lakko_push_gw.*   TO 'lakko'@'localhost';
+    GRANT ALL PRIVILEGES ON lakko_channels.*  TO 'lakko'@'localhost';
     FLUSH PRIVILEGES;
 "
 echo "DB password: $LAKKO_DB_PASS"  # save it — needed in step 7
@@ -170,6 +175,7 @@ sudo nano /etc/lakko/lakko.env
 #   LAKKO_DS_DATABASE_URL=mysql://lakko:$LAKKO_DB_PASS@127.0.0.1:3306/lakko_ds
 #   LAKKO_DISCOVERY_DATABASE_URL=mysql://lakko:$LAKKO_DB_PASS@127.0.0.1:3306/lakko_discovery
 #   LAKKO_PUSH_GW_DATABASE_URL=mysql://lakko:$LAKKO_DB_PASS@127.0.0.1:3306/lakko_push_gw
+#   LAKKO_CHANNELS_DATABASE_URL=mysql://lakko:$LAKKO_DB_PASS@127.0.0.1:3306/lakko_channels
 
 sudo chown root:lakkome /etc/lakko/lakko.env
 sudo chmod 640 /etc/lakko/lakko.env

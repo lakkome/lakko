@@ -21,7 +21,8 @@ Wants=lakko-svc-auth.service \
       lakko-svc-ds.service \
       lakko-svc-storage.service \
       lakko-svc-discovery.service \
-      lakko-svc-push-gw.service
+      lakko-svc-push-gw.service \
+      lakko-svc-channels.service
 After=network-online.target
 
 [Install]

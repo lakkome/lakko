@@ -29,11 +29,13 @@
 
 /** Default base URL — `LAKKO_CHANNELS_URL` env var
  *  resolved at build time (Vite `import.meta.env`), falls
- *  back to a same-origin path so the dev server proxy
- *  can forward `/channels/*` upstream. */
+ *  back to the same `/api/<svc>` shape every other web
+ *  service uses (matches the lakko.me nginx vhost route
+ *  `location /api/channels/`). Mobile clients targeting
+ *  `api.lakko.me/channels/` set the env var explicitly. */
 const DEFAULT_BASE: string =
   (import.meta as { env?: Record<string, string | undefined> }).env
-    ?.LAKKO_CHANNELS_URL ?? "/channels";
+    ?.LAKKO_CHANNELS_URL ?? "/api/channels";
 
 /** A registered channel as the web UI sees it. The
  *  `services/channels` MVP only carries the channel id;

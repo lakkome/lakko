@@ -1,0 +1,54 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+[Unit]
+Description=Lakko channels service (Phase 4 broadcast publisher / subscriber backend)
+Documentation=https://github.com/lakkome/lakko
+PartOf=lakko.target
+After=network-online.target mariadb.service
+Wants=network-online.target
+Requires=mariadb.service
+
+[Service]
+Type=simple
+User=lakkome
+Group=lakkome
+
+EnvironmentFile=/etc/lakko/lakko.env
+Environment=RUST_LOG=info
+Environment=LAKKO_CHANNELS_BIND=127.0.0.1:8086
+# `LAKKO_CHANNELS_DATABASE_URL` is read from /etc/lakko/lakko.env above.
+# Each service has its own DB — sqlx migration tracking does not collide.
+#
+# Migrations are embedded into the binary at compile time via
+# `sqlx::migrate!("./migrations")` in src/main.rs, so the runtime does
+# not need a filesystem migrations directory; the binary alone is
+# sufficient.
+
+ExecStart=/usr/local/bin/lakko-svc-channels
+Restart=on-failure
+RestartSec=5s
+
+# --- Security hardening ----------------------------------------------------
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+[Install]
+WantedBy=lakko.target

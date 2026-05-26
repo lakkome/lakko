@@ -244,6 +244,13 @@ dev-discovery:
 dev-push-gw:
     cargo run -p lakko-svc-push-gw
 
+# Run the channels service locally. Reads
+# `LAKKO_CHANNELS_DATABASE_URL` from `.env`; if unset the service
+# falls back to the in-memory store (state is lost on restart —
+# fine for dev / tests, not for the VPS).
+dev-channels:
+    cargo run -p lakko-svc-channels
+
 # Run the web client (apps/web) dev server. Drives `wasm-pack` in
 # `--dev` mode against `crates/lakko-ffi-wasm` first, then starts
 # Vite on http://127.0.0.1:5173.
