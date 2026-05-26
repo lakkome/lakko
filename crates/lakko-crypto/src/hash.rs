@@ -55,6 +55,26 @@ pub fn blake3_derive_key(domain: &str) -> [u8; 32] {
     blake3::derive_key(domain, b"")
 }
 
+/// `blake3::derive_key(ctx, key_material)` — derive a
+/// 32-byte domain-bound key from arbitrary input keying
+/// material.
+///
+/// Used by Shadowsocks-2022 (G5-3) to derive per-session
+/// subkeys from `psk || salt` under a static context
+/// string. The context is the domain separator; two call
+/// sites with different `ctx` values produce independent
+/// keys even when they share the same `key_material`.
+///
+/// # Panics
+///
+/// Panics if `ctx` is not valid UTF-8 (same compile-time
+/// check as [`blake3_derive_key`] — callers pass an
+/// `&'static str` from a `const`).
+#[must_use]
+pub fn blake3_derive_key_from_material(ctx: &str, key_material: &[u8]) -> [u8; 32] {
+    blake3::derive_key(ctx, key_material)
+}
+
 /// SHA-256 of the given input. Use only for protocol interop (X.509, TLS).
 /// Prefer [`blake3()`] for new internal designs.
 #[must_use]
@@ -170,5 +190,40 @@ mod tests {
             let b = sha256(&input);
             proptest::prop_assert_eq!(a, b);
         }
+    }
+
+    // -----------------------------------------------------
+    // blake3_derive_key_from_material (G5-3 SS-2022 helper)
+    // -----------------------------------------------------
+
+    #[test]
+    fn derive_key_from_material_is_deterministic() {
+        let a = blake3_derive_key_from_material("ctx", b"ikm");
+        let b = blake3_derive_key_from_material("ctx", b"ikm");
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn derive_key_from_material_context_separates() {
+        let a = blake3_derive_key_from_material("ctx-a", b"ikm");
+        let b = blake3_derive_key_from_material("ctx-b", b"ikm");
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn derive_key_from_material_ikm_separates() {
+        let a = blake3_derive_key_from_material("ctx", b"ikm-a");
+        let b = blake3_derive_key_from_material("ctx", b"ikm-b");
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn derive_key_from_material_empty_ikm_matches_legacy_helper() {
+        // The new helper with empty IKM must produce the
+        // same bytes as the legacy `blake3_derive_key` so
+        // existing call sites can migrate without re-keying.
+        let legacy = blake3_derive_key("lakko/some/domain");
+        let new = blake3_derive_key_from_material("lakko/some/domain", b"");
+        assert_eq!(legacy, new);
     }
 }

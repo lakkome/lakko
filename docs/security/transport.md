@@ -386,6 +386,90 @@ contract, different outer headers.
    layer if a future revision needs domain
    separation between the two PT impls.
 
+### T-10: Shadowsocks-2022 outer header layer pins BLAKE3 context + timestamp window + replay window
+
+Sprint G5-3-header lands the SS-2022 prelude codec in
+`crates/lakko-transport/src/shadowsocks.rs`. The
+prelude is what sits in front of the chunked-AEAD body
+(T-9) on every SS-2022 TCP stream — salt + sealed
+fixed header + sealed variable header — and the
+per-direction subkey derivation that ties body chunks
+to a specific `(psk, salt)` pair.
+
+**Pinned invariants:**
+
+1. **BLAKE3 `derive_key` context is the wire contract.**
+   `SS_SUBKEY_CONTEXT = "shadowsocks 2022 session subkey"`
+   matches the SS-2022 spec byte-for-byte. Two pin tests
+   assert the literal: `pinned_constants` here and
+   `derive_session_subkey_is_deterministic` exercises the
+   path. Any change to the context string breaks wire
+   compatibility with every previously-shipped client
+   and every interop partner.
+
+2. **Subkey input is `psk || salt`, in that order.**
+   `derive_session_subkey` concatenates the 32-byte PSK
+   with the 32-byte per-session salt and feeds the
+   resulting 64 bytes as `key_material` to BLAKE3
+   `derive_key`. Order matters — flipping it produces
+   a different subkey and breaks every interop. The
+   `derive_session_subkey_psk_separates` /
+   `derive_session_subkey_salt_separates` tests
+   confirm independent input-keying.
+
+3. **Timestamp drift cap is `±SS_TIMESTAMP_TOLERANCE_SECS = 30`
+   seconds.** `check_timestamp_window` rejects a
+   request whose declared timestamp drifts from
+   `now_unix` by more than 30 seconds — pinned
+   verbatim from the SS-2022 spec. Tests pin both
+   directions (`decode_request_rejects_timestamp_skew_past`
+   for past, `decode_request_accepts_timestamp_within_tolerance`
+   for in-window).
+
+4. **Replay window is salt-keyed, not timestamp-keyed.**
+   `ReplayWindow` tracks the last
+   `SS_REPLAY_WINDOW_CAPACITY = 4096` distinct salts
+   in a FIFO queue. A second `decode_request` call
+   with the same wire bytes is rejected as
+   `ShadowsocksHeaderError::ReplayedSalt` even if the
+   timestamp is still within tolerance. The window's
+   FIFO eviction at capacity means a 60-second drift
+   tolerance × 4096 entries gives ~136 unique
+   requests/second of replay-window coverage —
+   comfortably above any expected per-server traffic.
+
+5. **Response binds the originating request-salt.**
+   `encode_response` prepends the 32-byte
+   `request_salt` to the variable-header payload; the
+   response-side `decode_response` rejects any wire
+   where the echoed salt does not match
+   `expected_request_salt` (verified by
+   `decode_response_rejects_wrong_request_salt`). A
+   replayed response from a different session cannot
+   be spliced into the wrong request without forging
+   the salt — and the salt is sealed inside the
+   response's own AEAD so the binding survives an
+   active-attacker rewrite.
+
+6. **Header type byte is part of the AEAD-protected
+   plaintext.** The 1-byte direction tag (`0 = client`,
+   `1 = server`) lives inside the sealed fixed header,
+   not in the clear-text salt prefix. A flipped type
+   byte fails the AEAD authenticator before the
+   decoder ever inspects it; the explicit type-check
+   after `aead::open` is a defence-in-depth layer that
+   surfaces `ShadowsocksHeaderError::WrongHeaderType`
+   with the observed byte for sysadmin debugging.
+
+7. **`Transport::connect` still returns
+   `Error::NotImplemented`.** The wire-format
+   primitives in this module are the bulk of the
+   SS-2022 work, but stitching them to a real
+   `TcpStream` + the chunked-AEAD body (T-9) is its
+   own follow-up sub-sprint (`S-5-shadowsocks-tcp`).
+   Audit-grep marker `feature: "shadowsocks-2022-tcp"`
+   enumerates the remaining call path.
+
 ## Known soft spots — out of scope for Phase 5 scaffold
 
 ### Real `Transport` implementations for REALITY / MASQUE / SS-2022 / WebTransport
