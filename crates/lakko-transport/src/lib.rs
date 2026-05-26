@@ -35,6 +35,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod doh_fetch;
 pub mod endpoint;
 pub mod error;
 pub mod http;
@@ -49,6 +50,7 @@ pub mod shadowsocks;
 pub mod transport;
 pub mod webtransport_pt;
 
+pub use doh_fetch::{DohError, DohFetcher, DOH_ENDPOINTS, PER_LEG_TIMEOUT};
 pub use endpoint::Endpoint;
 pub use error::{Error, Result};
 pub use http::{HttpError, HttpResult, HttpTransport, HttpTransportConfig};

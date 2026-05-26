@@ -52,7 +52,7 @@ LiveKit fork).
 | **G5-2** | MASQUE / CONNECT-UDP | Phase 5 | QUIC under H3 | ✅ + lab | 2 sprints | open |
 | **G5-3** | Shadowsocks-2022 | Phase 5 | alternative obfs | ✅ | 1 sprint | open |
 | **G5-4** | WebTransport (web client) | Phase 5 | web client in censored regions | ✅ | 1 sprint | open |
-| **G5-5** | Transport rendezvous (signed bootstrap config) | Phase 5 | PT endpoint discovery | ✅ | 1 sprint | **done** — `BootstrapConfig` + Ed25519 sign / verify / expiry / clock-skew + JSON wire format in `crates/lakko-transport/src/rendezvous.rs`; DoH-resolved fetch helper rides a follow-up |
+| **G5-5** | Transport rendezvous (signed bootstrap config) | Phase 5 | PT endpoint discovery | ✅ | 2 sprints | **done** — `BootstrapConfig` + Ed25519 sign / verify / expiry / clock-skew + JSON wire format in `crates/lakko-transport/src/rendezvous.rs`. Client-side `DohFetcher` (G5-5-doh) resolves bootstrap domains over four hardcoded JSON-DoH endpoints (Cloudflare / Google / Quad9 / AdGuard), then IP-pinned HTTPS GET + the existing 4-stage verify. Pinned in audit-pack invariant T-8 |
 | **G5-6** | ECH (Encrypted Client Hello) | Phase 5 | SNI privacy | ✅ | 1 sprint | open |
 | **G5-7** | Censorship lab (GFW / TSPU / IR emulation) | Phase 5 | CI gate for PT survival | ✅ | 2 sprints | open |
 | **GA-0** | [ADR-0011](./adr/0011-rust-sfu.md) — supersedes ADR-0003 / ADR-0008 | Audit / Design | rationale for G3-3 rewrite | ✅ | landed | **done** |

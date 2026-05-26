@@ -44,6 +44,13 @@ rcgen = { version = "0.13", default-features = false, features = ["pem", "ring"]
 # instead of going through the system CA bundle.
 reqwest = { version = "0.12", default-features = false, features = [
     "rustls-tls-manual-roots",
+    # G5-5-doh: webpki-roots adds the embedded Mozilla CA
+    # bundle so the DoH fetcher can talk to public DNS
+    # resolvers (Cloudflare / Google / Quad9 / AdGuard)
+    # via the standard CA chain. Lakko's own API still
+    # uses `rustls-tls-manual-roots` + SPKI pinning via
+    # `pinning.rs`; the two trust roots are independent.
+    "rustls-tls-webpki-roots",
     "json",
     "stream",
     "http2",

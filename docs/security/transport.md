@@ -239,6 +239,70 @@ module — so the test for it is the absence of any
 network-resolved trust anchor MUST update this
 section.
 
+### T-8: DoH fetcher preserves the rendezvous trust chain end-to-end
+
+Sprint G5-5-doh adds the client-side bootstrap fetcher
+in `crates/lakko-transport/src/doh_fetch.rs`. The
+module rides four hardcoded JSON-DoH endpoints
+(Cloudflare / Google / Quad9 / AdGuard) — a happy-
+eyeballs first-success-wins resolve over the
+`DOH_ENDPOINTS` constant — then a separately-pinned
+HTTPS GET against the resolved IP for the signed
+config blob.
+
+**Pinned invariants:**
+
+1. **The signature is the cryptographic backstop, not
+   the CA chain.** A censor controlling the recursive
+   DNS path can spoof `bootstrap.lakko.me` to point at
+   their own host; the payload signature check at the
+   bootstrap-fetch stage catches that — they cannot
+   forge an Ed25519 signature without the publisher
+   key (T-7's binary-pinned trust anchor). A censor
+   controlling a public CA could mount a valid TLS
+   interception against the DoH endpoint itself; the
+   signature check at the bootstrap-fetch stage
+   remains the cryptographic backstop. The DoH legs
+   use the embedded Mozilla CA bundle
+   (`rustls-tls-webpki-roots`); Lakko's own API trust
+   (auth / ds / storage / channels) continues to use
+   SPKI pinning via [`PinnedVerifier`] — the two
+   CA-trust roots are intentionally independent.
+
+2. **HTTPS leg pins the resolved IP into reqwest's
+   resolver via `Client::builder().resolve(...)`.**
+   Once a DoH endpoint resolves the domain, the
+   HTTPS GET targets the resolved IP directly (Host
+   header + SNI still carry the original domain
+   string so the TLS cert validates). A censor that
+   contests a recursive DNS lookup *after* the DoH
+   step cannot redirect the HTTPS fetch.
+
+3. **`DohFetcher::fetch_bootstrap` always runs the
+   4-stage rendezvous verify (T-4).** No partial-
+   acceptance path exists — the function returns
+   `DohError::Rendezvous` if any of schema-version /
+   expiry / issued-at clock-skew / Ed25519 stages
+   fail. There is no fallback to an unsigned
+   transport list.
+
+4. **Per-leg timeout is bounded at `PER_LEG_TIMEOUT`
+   (10s).** With 4 endpoints the cold-start budget
+   tops out at 40s (DoH) + 10s (HTTPS) = 50s worst
+   case. Pinned in `per_leg_timeout_is_sane`.
+
+5. **DoH endpoints are HTTPS-only.** Pin test
+   `doh_endpoints_pinned_and_https` rejects any
+   endpoint entry that doesn't start with `https://`,
+   blocking a future PR that accidentally adds a
+   plaintext DoH-over-HTTP endpoint.
+
+6. **Reproducible-build pin.** The `DOH_ENDPOINTS`
+   constant is part of the compiled artefact — same
+   bytes across reproducible-build runners. A change
+   to the list shows up in the build hash and is
+   visible to the audit-grep marker `DOH_ENDPOINTS`.
+
 ## Known soft spots — out of scope for Phase 5 scaffold
 
 ### Real `Transport` implementations for REALITY / MASQUE / SS-2022 / WebTransport
