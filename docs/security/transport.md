@@ -303,6 +303,89 @@ config blob.
    to the list shows up in the build hash and is
    visible to the audit-grep marker `DOH_ENDPOINTS`.
 
+### T-9: Chunked AEAD stream primitive pins ChaCha20-Poly1305 + monotonic nonce
+
+Sprint G5-aead-stream lands the
+`crates/lakko-transport/src/aead_stream.rs` primitive
+— a chunked ChaCha20-Poly1305 reader/writer pair that
+both upcoming PT implementations (G5-1 REALITY, G5-3
+Shadowsocks-2022) build on. Same crypto, same framing
+contract, different outer headers.
+
+**Pinned invariants:**
+
+1. **Ciphersuite is ChaCha20-Poly1305 only.** The
+   module-scope constant
+   `aead_stream::ALG = Algorithm::ChaCha20Poly1305` is
+   pinned by `pinned_constants`. SS-2022 and REALITY
+   both default to ChaCha20-Poly1305; AES-256-GCM
+   stays a separate variant on `lakko_crypto::aead`
+   for the rare FIPS-friendly call site. A change to
+   this constant requires bumping a wire-version
+   identifier in every PT impl that depends on it.
+
+2. **Two sealed frames per chunk — length first, then
+   payload.** The length-prefix is sealed under its
+   own nonce so the receiver can authenticate the
+   next-frame-size **before** reserving a buffer for
+   it. Reading the length unencrypted would let an
+   active attacker swap in a 64 KB length to force an
+   oversized allocation; sealing it ties the length
+   to the per-stream key + nonce counter, and the
+   AEAD authenticator rejects on read if it was
+   tampered.
+
+3. **Nonce model: 12-byte big-endian counter, low 8
+   bytes carry the u64, high 4 bytes zero.**
+   `nonce_counter_layout_pinned` asserts the exact
+   layout. Matches the SS-2022 wire format. The
+   writer's counter is independent from the reader's,
+   so a duplex stream uses two
+   `AeadStreamWriter` / `AeadStreamReader` pairs with
+   different keys when direction separation matters
+   (it does for SS-2022).
+
+4. **Counter advances per seal, never reused.** Every
+   `write_chunk` / `read_chunk` call bumps the
+   counter twice (one seal for the length, one for
+   the payload). `checked_add(1)` returns
+   `AeadStreamError::NonceWrap` at the
+   2^64-chunk-on-the-same-key ceiling — astronomical
+   in practice but the error variant exists so a
+   counter-wrap path cannot be silently misused.
+
+5. **`MAX_CHUNK = 16 KiB` plaintext per chunk.**
+   Same pin SS-2022 + REALITY use; matches TLS 1.3
+   record size for cache-friendly buffer reuse.
+   `write_chunk` returns
+   `AeadStreamError::ChunkTooLarge` on any larger
+   plaintext, never silently splits — splitting is
+   the caller's job. Readers reject any sealed length
+   that decodes above `MAX_CHUNK` (`DecodedLengthTooLarge`),
+   stopping a malformed stream from forcing a
+   megabyte allocation.
+
+6. **Clean-EOF semantics: `Ok(None)` only at frame
+   boundary.** A read that finds the underlying
+   stream EOF *between* frames returns `Ok(None)`. A
+   read that hits EOF *mid-frame* (sealed length
+   landed but sealed payload truncated) returns
+   `Err(AeadStreamError::Io(_))` — never `Ok(None)`.
+   Garbage bytes that masquerade as a sealed length
+   surface as `Err(AeadStreamError::AeadOpen)`.
+   Tests pin all three: `read_chunk_clean_eof_returns_none`,
+   `read_chunk_truncated_payload_is_io_error`,
+   `read_chunk_garbage_bytes_rejected_not_none`.
+
+7. **No domain separator in the AEAD AAD.** AAD is
+   empty for both length and payload seals — the
+   nonce counter itself is the only binding. SS-2022
+   and REALITY both add their own outer framing
+   (timestamped headers, salt, etc.) above this
+   primitive; the AAD field is reserved for that
+   layer if a future revision needs domain
+   separation between the two PT impls.
+
 ## Known soft spots — out of scope for Phase 5 scaffold
 
 ### Real `Transport` implementations for REALITY / MASQUE / SS-2022 / WebTransport

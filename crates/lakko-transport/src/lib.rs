@@ -35,6 +35,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod aead_stream;
 pub mod doh_fetch;
 pub mod endpoint;
 pub mod error;
@@ -50,6 +51,11 @@ pub mod shadowsocks;
 pub mod transport;
 pub mod webtransport_pt;
 
+pub use aead_stream::{
+    AeadStreamError, AeadStreamReader, AeadStreamWriter, ALG as AEAD_STREAM_ALG,
+    KEY_LEN_PUB as AEAD_STREAM_KEY_LEN, LENGTH_PREFIX_LEN, MAX_CHUNK as AEAD_STREAM_MAX_CHUNK,
+    NONCE_LEN_PUB as AEAD_STREAM_NONCE_LEN, TAG_LEN_PUB as AEAD_STREAM_TAG_LEN,
+};
 pub use doh_fetch::{DohError, DohFetcher, DOH_ENDPOINTS, PER_LEG_TIMEOUT};
 pub use endpoint::Endpoint;
 pub use error::{Error, Result};
