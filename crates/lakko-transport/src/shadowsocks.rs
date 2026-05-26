@@ -1089,6 +1089,101 @@ pub async fn accept_inbound(
 }
 
 // =========================================================
+// Listener — accept loop wrapping accept_inbound
+// =========================================================
+
+use crate::transport::Listener as TransportListener;
+
+/// SS-2022 server listener. Wraps a [`tokio::net::TcpListener`]
+/// together with a per-listener [`ReplayWindow`] and the
+/// master PSK. Calling [`Listener::accept`] in a loop
+/// drives the server-side handshake for each inbound TCP
+/// connection.
+///
+/// Cheap to construct via [`Self::bind`]; the listener
+/// owns its replay window, so a single listener
+/// rejects salt-replay across its own connections but
+/// two distinct listeners on different ports have
+/// independent windows. That matches the threat model:
+/// a replay against listener A cannot be repeated
+/// against listener B because the response prelude
+/// binds the request salt to the specific session.
+pub struct ShadowsocksListener {
+    tcp: tokio::net::TcpListener,
+    psk: [u8; KEY_LEN],
+    window: ReplayWindow,
+    local_addr: std::net::SocketAddr,
+}
+
+impl ShadowsocksListener {
+    /// Bind a TCP listener and prepare it for SS-2022
+    /// accepts. The `psk` is the 32-byte master PSK
+    /// (already decoded from base64 — call
+    /// [`psk_from_b64`] if the caller has the b64
+    /// form from a `ShadowsocksConfig`).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Setup`] on TCP bind failure.
+    pub async fn bind(
+        addr: std::net::SocketAddr,
+        psk: [u8; KEY_LEN],
+    ) -> Result<Self> {
+        let tcp = tokio::net::TcpListener::bind(addr)
+            .await
+            .map_err(|e| Error::Setup(format!("SS-2022 listener bind: {e}")))?;
+        let local_addr = tcp
+            .local_addr()
+            .map_err(|e| Error::Setup(format!("SS-2022 listener local_addr: {e}")))?;
+        Ok(Self {
+            tcp,
+            psk,
+            window: ReplayWindow::new(),
+            local_addr,
+        })
+    }
+
+    /// Build from an already-bound `TcpListener` and a
+    /// caller-supplied replay window. Useful for tests
+    /// that pin a known window state or for advanced
+    /// callers that want to share a window across
+    /// listeners (uncommon — the default
+    /// [`Self::bind`] gives each listener its own).
+    pub fn from_parts(
+        tcp: tokio::net::TcpListener,
+        psk: [u8; KEY_LEN],
+        window: ReplayWindow,
+    ) -> Result<Self> {
+        let local_addr = tcp
+            .local_addr()
+            .map_err(|e| Error::Setup(format!("SS-2022 listener local_addr: {e}")))?;
+        Ok(Self {
+            tcp,
+            psk,
+            window,
+            local_addr,
+        })
+    }
+}
+
+#[async_trait]
+impl TransportListener for ShadowsocksListener {
+    async fn accept(&mut self) -> Result<Box<dyn Connection>> {
+        let (stream, peer) = self
+            .tcp
+            .accept()
+            .await
+            .map_err(|e| Error::Io(format!("SS-2022 listener accept: {e}")))?;
+        debug!(%peer, "SS-2022 inbound TCP accepted");
+        accept_inbound(stream, &self.psk, &mut self.window).await
+    }
+
+    fn local_endpoint(&self) -> Endpoint {
+        Endpoint::Direct(self.local_addr)
+    }
+}
+
+// =========================================================
 // Error mapping helpers
 // =========================================================
 
@@ -1459,6 +1554,99 @@ mod tests {
         // succeed.
         let result = transport.connect(&Endpoint::Direct(bound)).await;
         assert!(result.is_err());
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn listener_accept_pairs_with_transport_connect() {
+        // Symmetric pair via the high-level Listener
+        // API: ShadowsocksListener::bind on one side,
+        // ShadowsocksTransport::connect on the other,
+        // round-trip a frame both ways.
+        let psk = [0x99u8; KEY_LEN];
+        let mut listener = ShadowsocksListener::bind("127.0.0.1:0".parse().unwrap(), psk)
+            .await
+            .unwrap();
+        let bound = match listener.local_endpoint() {
+            Endpoint::Direct(addr) => addr,
+            Endpoint::Hostname { .. } => panic!("bind expected to yield Direct endpoint"),
+        };
+
+        let psk_b64 = B64_STANDARD.encode(psk);
+        let cfg = ShadowsocksConfig {
+            remote: bound.to_string(),
+            method: "2022-blake3-chacha20-poly1305".into(),
+            psk_b64,
+        };
+        let transport = ShadowsocksTransport::new(cfg).unwrap();
+
+        // Spawn the server-side accept loop for exactly
+        // one connection, then echo the body.
+        let server = tokio::spawn(async move {
+            let mut conn = listener.accept().await.unwrap();
+            let received = conn.recv().await.unwrap();
+            conn.send(Bytes::from(format!(
+                "listener: {}",
+                String::from_utf8_lossy(&received)
+            )))
+            .await
+            .unwrap();
+            conn.close().await.unwrap();
+        });
+
+        let mut conn = transport
+            .connect(&Endpoint::Direct(bound))
+            .await
+            .unwrap();
+        conn.send(Bytes::from_static(b"via listener API")).await.unwrap();
+        let echo = conn.recv().await.unwrap();
+        assert_eq!(&echo[..], b"listener: via listener API");
+        conn.close().await.unwrap();
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn listener_accepts_two_distinct_clients_in_sequence() {
+        // The replay window lives on the listener and
+        // must NOT block legitimate second-client
+        // handshakes — each fresh client picks a fresh
+        // salt, so the window only fires on actual
+        // replays. Verifies the window does not
+        // accidentally reject distinct sessions.
+        let psk = [0x77u8; KEY_LEN];
+        let mut listener =
+            ShadowsocksListener::bind("127.0.0.1:0".parse().unwrap(), psk)
+                .await
+                .unwrap();
+        let bound = match listener.local_endpoint() {
+            Endpoint::Direct(addr) => addr,
+            Endpoint::Hostname { .. } => unreachable!(),
+        };
+        let psk_b64 = B64_STANDARD.encode(psk);
+        let cfg = ShadowsocksConfig {
+            remote: bound.to_string(),
+            method: "2022-blake3-chacha20-poly1305".into(),
+            psk_b64,
+        };
+        let transport = ShadowsocksTransport::new(cfg).unwrap();
+
+        let server = tokio::spawn(async move {
+            for expected in [&b"client-a"[..], &b"client-b"[..]] {
+                let mut conn = listener.accept().await.unwrap();
+                let got = conn.recv().await.unwrap();
+                assert_eq!(&got[..], expected);
+                conn.close().await.unwrap();
+            }
+        });
+
+        for label in [&b"client-a"[..], &b"client-b"[..]] {
+            let mut conn = transport
+                .connect(&Endpoint::Direct(bound))
+                .await
+                .unwrap();
+            conn.send(Bytes::copy_from_slice(label)).await.unwrap();
+            conn.close().await.unwrap();
+        }
         server.await.unwrap();
     }
 

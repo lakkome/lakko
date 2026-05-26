@@ -74,7 +74,7 @@ pub use rendezvous::{
 pub use shadowsocks::{
     accept_inbound as shadowsocks_accept_inbound, psk_from_b64 as shadowsocks_psk_from_b64,
     ReplayWindow as ShadowsocksReplayWindow, ShadowsocksConfig, ShadowsocksConnection,
-    ShadowsocksHeaderError, ShadowsocksTransport,
+    ShadowsocksHeaderError, ShadowsocksListener, ShadowsocksTransport,
 };
 pub use transport::{Connection, Listener, Transport, MAX_FRAME_BYTES};
 pub use webtransport_pt::{WebTransportConfig, WebTransportPt};
