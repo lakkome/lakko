@@ -71,6 +71,7 @@
 pub mod attachments;
 pub mod auth;
 pub mod backup;
+pub mod channels;
 pub mod contacts;
 pub mod discovery;
 pub mod mls;

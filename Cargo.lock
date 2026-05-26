@@ -2167,6 +2167,7 @@ dependencies = [
  "lakko-backup",
  "lakko-call-jwt",
  "lakko-calls",
+ "lakko-channels",
  "lakko-contacts",
  "lakko-crypto",
  "lakko-discovery-client",

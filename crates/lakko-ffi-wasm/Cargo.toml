@@ -23,6 +23,10 @@ workspace = true
 [dependencies]
 lakko-mls.workspace = true
 lakko-contacts.workspace = true
+# Phase 4 G4-2-crypto — channel post composer + decoder.
+# The web client uses this to produce signed encrypted
+# ChannelPosts instead of raw bytes in the publish form.
+lakko-channels.workspace = true
 lakko-sync.workspace = true
 lakko-push.workspace = true
 lakko-presence.workspace = true
