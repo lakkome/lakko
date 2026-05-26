@@ -96,6 +96,16 @@ export const paths = {
   channel(channelIdHex: string): string {
     return `/channels/${channelIdHex}`;
   },
+  /**
+   * Subscribe-to-channel view — Phase 4 G4-2 (subscriber
+   * side). Generates a local X25519 keypair on first
+   * visit, registers it via
+   * `POST /v1/channels/:id/subscribers`, polls for a
+   * seed envelope, opens it, and renders decoded posts.
+   */
+  channelSubscribe(channelIdHex: string): string {
+    return `/channels/${channelIdHex}/subscribe`;
+  },
 } as const;
 
 /**
@@ -122,3 +132,11 @@ export const callRoutePattern = "/call/:id" as const;
  * — must stay in sync with `paths.channel(...)`.
  */
 export const channelRoutePattern = "/channels/:id" as const;
+
+/**
+ * The matchable pattern for the dynamic subscribe-to-
+ * channel route — must stay in sync with
+ * `paths.channelSubscribe(...)`.
+ */
+export const channelSubscribeRoutePattern =
+  "/channels/:id/subscribe" as const;

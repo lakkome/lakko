@@ -16,7 +16,11 @@
 
 import { createSignal, type Accessor } from "solid-js";
 
-import type { ChannelPublisherKeys } from "../channels/composer";
+import {
+  bytesToHex,
+  type ChannelPublisherKeys,
+  type ChannelSubscriberKeys,
+} from "../channels/composer";
 import type { ChannelHandle, ChannelPostView } from "../channels/api";
 
 interface ChannelsStateInternal {
@@ -43,6 +47,21 @@ interface ChannelsStateInternal {
    *  `message_counter = previous + 1`. Reset on epoch
    *  rotation. */
   readonly counterByChannel: Accessor<ReadonlyMap<string, bigint>>;
+  /** Per-channel subscriber-side X25519 keypair the
+   *  device generated for joining a channel as a
+   *  reader (Phase 4b G4-3c). Persisted in localStorage
+   *  under the `lakko.channels.subscriber-keys.v1` key so
+   *  a page reload does not lose the secret half (and
+   *  with it, access to undecoded posts on the channel). */
+  readonly subscriberKeysByChannel: Accessor<
+    ReadonlyMap<string, ChannelSubscriberKeys>
+  >;
+  /** Per-channel recovered content-key seed, once the
+   *  subscriber has unwrapped a seed envelope delivered
+   *  by the publisher. `undefined` before the envelope
+   *  arrives — the UI shows a "waiting for seed
+   *  delivery" state until then. */
+  readonly subscribedSeedByChannel: Accessor<ReadonlyMap<string, Uint8Array>>;
 }
 
 const [channels, setChannels] = createSignal<ReadonlyArray<ChannelHandle>>([]);
@@ -58,6 +77,12 @@ const [keysByChannel, setKeysByChannel] = createSignal<
 const [counterByChannel, setCounterByChannel] = createSignal<
   ReadonlyMap<string, bigint>
 >(new Map());
+const [subscriberKeysByChannel, setSubscriberKeysByChannel] = createSignal<
+  ReadonlyMap<string, ChannelSubscriberKeys>
+>(loadSubscriberKeysFromStorage());
+const [subscribedSeedByChannel, setSubscribedSeedByChannel] = createSignal<
+  ReadonlyMap<string, Uint8Array>
+>(new Map());
 
 export const channelsState: ChannelsStateInternal = {
   channels,
@@ -65,6 +90,8 @@ export const channelsState: ChannelsStateInternal = {
   epochByChannel,
   keysByChannel,
   counterByChannel,
+  subscriberKeysByChannel,
+  subscribedSeedByChannel,
 };
 
 export const channelsActions = {
@@ -166,12 +193,135 @@ export const channelsActions = {
     });
     return value;
   },
-  /** Wipe everything — used on logout. */
+  /** Install / replace the subscriber-side X25519 keypair
+   *  the device generated when joining `channelId` as a
+   *  reader. Also persists to localStorage so a reload
+   *  does not strand the user without the secret needed
+   *  to open future envelopes. */
+  setSubscriberKeys(channelId: string, keys: ChannelSubscriberKeys): void {
+    setSubscriberKeysByChannel((map) => {
+      const next = new Map(map);
+      next.set(channelId, keys);
+      persistSubscriberKeys(next);
+      return next;
+    });
+  },
+  /** Forget the subscriber-side keypair for `channelId` —
+   *  used on un-follow. Clears the recovered seed too,
+   *  since it was only useful while the device had the
+   *  matching secret half. */
+  clearSubscriberKeys(channelId: string): void {
+    setSubscriberKeysByChannel((map) => {
+      const next = new Map(map);
+      next.delete(channelId);
+      persistSubscriberKeys(next);
+      return next;
+    });
+    setSubscribedSeedByChannel((map) => {
+      const next = new Map(map);
+      next.delete(channelId);
+      return next;
+    });
+  },
+  /** Cache the recovered content-key seed after the
+   *  subscriber successfully opened a seed envelope. The
+   *  seed is in-memory only — never persisted, never
+   *  sent off-device. */
+  setSubscribedSeed(channelId: string, seed: Uint8Array): void {
+    setSubscribedSeedByChannel((map) => {
+      const next = new Map(map);
+      next.set(channelId, seed);
+      return next;
+    });
+  },
+  /** Wipe everything — used on logout. Drops subscriber
+   *  keypairs from localStorage as well. */
   reset(): void {
     setChannels([]);
     setPostsByChannel(new Map());
     setEpochByChannel(new Map());
     setKeysByChannel(new Map());
     setCounterByChannel(new Map());
+    setSubscriberKeysByChannel(new Map());
+    setSubscribedSeedByChannel(new Map());
+    persistSubscriberKeys(new Map());
   },
 };
+
+// ---------------------------------------------------------
+// localStorage persistence (subscriber keypairs only)
+// ---------------------------------------------------------
+//
+// Publisher keys live in `keysByChannel` and are NOT
+// persisted to localStorage yet — they will move into the
+// encrypted-at-rest device-group-keyed sqlite cache in a
+// follow-up storage sprint. Subscriber keys are persisted
+// in the meantime because losing the secret half between
+// reloads means losing access to every future post on the
+// channel; the device-group cache rule still applies and
+// the production rewrite will migrate this localStorage
+// key into the same store.
+
+const STORAGE_KEY = "lakko.channels.subscriber-keys.v1";
+
+interface PersistedSubscriberKey {
+  readonly channelId: string;
+  /** Hex-encoded 32-byte X25519 secret. */
+  readonly secretHex: string;
+  /** Hex-encoded 32-byte X25519 public. */
+  readonly publicHex: string;
+}
+
+function loadSubscriberKeysFromStorage(): ReadonlyMap<
+  string,
+  ChannelSubscriberKeys
+> {
+  if (typeof localStorage === "undefined") {
+    return new Map();
+  }
+  const raw = localStorage.getItem(STORAGE_KEY);
+  if (raw === null) {
+    return new Map();
+  }
+  try {
+    const arr = JSON.parse(raw) as ReadonlyArray<PersistedSubscriberKey>;
+    const out = new Map<string, ChannelSubscriberKeys>();
+    for (const entry of arr) {
+      out.set(entry.channelId, {
+        secret: hexToBytes(entry.secretHex),
+        public: hexToBytes(entry.publicHex),
+      });
+    }
+    return out;
+  } catch {
+    // Corrupt JSON — drop the store rather than crashing
+    // the app. The user can re-subscribe; the worst case is
+    // they get stale envelopes from earlier rotations that
+    // they can no longer open.
+    return new Map();
+  }
+}
+
+function persistSubscriberKeys(
+  map: ReadonlyMap<string, ChannelSubscriberKeys>,
+): void {
+  if (typeof localStorage === "undefined") {
+    return;
+  }
+  const arr: ReadonlyArray<PersistedSubscriberKey> = Array.from(
+    map.entries(),
+  ).map(([channelId, k]) => ({
+    channelId,
+    secretHex: bytesToHex(k.secret),
+    publicHex: bytesToHex(k.public),
+  }));
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(arr));
+}
+
+function hexToBytes(hex: string): Uint8Array {
+  const out = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < out.length; i += 1) {
+    out[i] = Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+  }
+  return out;
+}

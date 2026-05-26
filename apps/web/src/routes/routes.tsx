@@ -32,7 +32,12 @@ import Signup from "./Signup";
 import Home from "./Home";
 import Contacts from "./Contacts";
 import Call from "./Call";
-import { ChannelsList, ChannelView, NewChannel } from "./Channels";
+import {
+  ChannelsList,
+  ChannelSubscribe,
+  ChannelView,
+  NewChannel,
+} from "./Channels";
 import Chat from "./Chat";
 import DevProbe from "./DevProbe";
 import Devices from "./Devices";
@@ -41,6 +46,7 @@ import NotFound from "./NotFound";
 import {
   callRoutePattern,
   channelRoutePattern,
+  channelSubscribeRoutePattern,
   chatRoutePattern,
   inviteRoutePattern,
   paths,
@@ -98,6 +104,10 @@ export const routes: RouteDefinition[] = [
       { path: callRoutePattern, component: Call },
       { path: paths.channels, component: ChannelsList },
       { path: paths.channelNew, component: NewChannel },
+      // Subscribe route MUST be matched BEFORE the
+      // generic `/channels/:id` pattern so `:id` does not
+      // swallow the trailing `/subscribe` segment.
+      { path: channelSubscribeRoutePattern, component: ChannelSubscribe },
       { path: channelRoutePattern, component: ChannelView },
       { path: paths.dev, component: DevProbe },
       { path: paths.devices, component: Devices },

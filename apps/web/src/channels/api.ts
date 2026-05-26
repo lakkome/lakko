@@ -274,3 +274,46 @@ export async function fetchEnvelope(
     throw err;
   }
 }
+
+/** Deliver an HPKE-sealed seed envelope to a registered
+ *  subscriber. Called by the publisher side of the UI for
+ *  each subscriber after a fan-out (initial join or
+ *  scheduled rotation). The server takes the 80 raw bytes
+ *  as the request body — same opacity contract the publish
+ *  endpoint uses.
+ *
+ *  Throws `ChannelApiError`:
+ *  - `unknown-subscriber` (404) — pubkey is not registered
+ *  - `bad-envelope-len`   (400) — wrong wire length
+ *  - `bad-channel-id`     (400) — wrong channel-id shape
+ *  - `bad-subscriber-id`  (400) — wrong pubkey-hex shape */
+export async function deliverEnvelope(
+  channelIdHex: string,
+  subscriberPubkeyHex: string,
+  envelope: Uint8Array,
+  base: string = DEFAULT_BASE,
+): Promise<void> {
+  const url = `${base}/v1/channels/${channelIdHex}/subscribers/${subscriberPubkeyHex}/envelope`;
+  // Octet-stream body so the server reads raw `Bytes` —
+  // matches `services/channels::api::deliver_envelope`. Same
+  // buffer-slice pattern as `publishPost` to narrow
+  // `ArrayBufferLike` (which permits `SharedArrayBuffer`)
+  // down to the plain `ArrayBuffer` the Blob constructor
+  // expects.
+  const resp = await fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/octet-stream" },
+    body: new Blob(
+      [
+        envelope.buffer.slice(
+          envelope.byteOffset,
+          envelope.byteOffset + envelope.byteLength,
+        ) as ArrayBuffer,
+      ],
+      { type: "application/octet-stream" },
+    ),
+  });
+  if (!resp.ok) {
+    throw await parseError(resp);
+  }
+}

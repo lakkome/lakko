@@ -59,6 +59,20 @@ export function base64UrlToBytes(b64: string): Uint8Array {
   return out;
 }
 
+/** Encode bytes to base64url (no padding). Mirror of the
+ *  Rust-side `base64::URL_SAFE_NO_PAD` encoder used in
+ *  `services/channels`'s envelope-delivery handler. */
+export function bytesToBase64Url(bytes: Uint8Array): string {
+  let binary = "";
+  for (const b of bytes) {
+    binary += String.fromCharCode(b);
+  }
+  return btoa(binary)
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
+}
+
 /**
  * Fresh `(seed, signingKeySeed)` tuple — the local
  * publisher state the web UI needs to produce posts
@@ -149,6 +163,110 @@ export async function verifyAndDecryptPost(
     post.free();
   }
 }
+
+// ---------------------------------------------------------
+// Subscriber-side surface (G4-3c-web)
+// ---------------------------------------------------------
+
+/**
+ * Subscriber-side X25519 keypair. The public half is what
+ * gets registered on `POST /v1/channels/:id/subscribers`;
+ * the secret half stays on the device + unwraps the per-
+ * subscriber HPKE seed envelopes the publisher fans out
+ * on every rotation.
+ *
+ * Both halves are 32 bytes — the storage layer
+ * (channels-state.ts) persists them in localStorage as
+ * base64url for now; a follow-up sprint moves the secret
+ * into IndexedDB encrypted under the device-group key.
+ */
+export interface ChannelSubscriberKeys {
+  /** 32-byte X25519 secret. */
+  readonly secret: Uint8Array;
+  /** 32-byte X25519 public. */
+  readonly public: Uint8Array;
+}
+
+/** Build a fresh X25519 keypair for joining a channel as
+ *  a subscriber. Backed by `crypto.getRandomValues` via
+ *  the `getrandom + js` feature on the wasm side. */
+export async function freshSubscriberKeys(): Promise<ChannelSubscriberKeys> {
+  const wasm = await loadWasm();
+  const kp = wasm.ChannelSubscriberKeypair.generate();
+  try {
+    return {
+      secret: kp.secret(),
+      public: kp.public(),
+    };
+  } finally {
+    kp.free();
+  }
+}
+
+/**
+ * Seal a 32-byte content-key seed against a subscriber's
+ * X25519 public key. Returns the 80-byte wire bytes ready
+ * to base64url-encode and `POST
+ * /v1/channels/:id/subscribers/:pk/envelope`.
+ *
+ * Used by the publisher side of the UI when delivering
+ * a fresh seed to each registered subscriber on rotation
+ * or initial fan-out.
+ */
+export async function sealSubscriberSeedEnvelope(
+  subscriberPub: Uint8Array,
+  channelIdHex: string,
+  epochId: number,
+  seed: Uint8Array,
+): Promise<Uint8Array> {
+  const wasm = await loadWasm();
+  const channelId = channelIdFromHex(channelIdHex);
+  return wasm.sealSubscriberSeedEnvelope(
+    subscriberPub,
+    channelId,
+    epochId,
+    seed,
+  );
+}
+
+/**
+ * Open a seed envelope with the subscriber's keypair.
+ * Returns the recovered 32-byte content-key seed — hand
+ * it to `verifyAndDecryptPost` to decode posts on this
+ * channel for this epoch.
+ *
+ * The keypair is rebuilt fresh from `secret` on every
+ * call so the public surface does not hold a live WASM
+ * handle across await boundaries (same pattern as
+ * `composePost` above).
+ */
+export async function openSubscriberSeedEnvelope(
+  secret: Uint8Array,
+  channelIdHex: string,
+  epochId: number,
+  wire: Uint8Array,
+): Promise<Uint8Array> {
+  const wasm = await loadWasm();
+  const channelId = channelIdFromHex(channelIdHex);
+  const kp = new wasm.ChannelSubscriberKeypair(secret);
+  try {
+    return wasm.openSubscriberSeedEnvelope(kp, channelId, epochId, wire);
+  } finally {
+    kp.free();
+  }
+}
+
+/** Wire byte length of a seed envelope —
+ *  `eph_pub(32) + sealed_seed(32) + tag(16) = 80`. Exposed
+ *  for UI sanity checks. */
+export async function seedEnvelopeLen(): Promise<number> {
+  const wasm = await loadWasm();
+  return wasm.channelSeedEnvelopeLen();
+}
+
+// ---------------------------------------------------------
+// UTF-8 helpers
+// ---------------------------------------------------------
 
 /** UTF-8 encode a string for the publish form. */
 export function utf8Encode(s: string): Uint8Array {

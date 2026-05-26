@@ -29,6 +29,7 @@ import {
   createResource,
   createSignal,
   For,
+  onCleanup,
   Show,
   type Component,
   type JSX,
@@ -38,14 +39,23 @@ import { useNavigate, useParams } from "@solidjs/router";
 import {
   apiError,
   createChannel,
+  deliverEnvelope,
+  fetchEnvelope,
   fetchEpoch,
   fetchPosts,
+  listSubscribers,
   publishPost,
+  subscribe,
   type ChannelPostView,
 } from "../channels/api";
 import {
+  base64UrlToBytes,
+  bytesToHex,
   composePost,
   freshPublisherKeys,
+  freshSubscriberKeys,
+  openSubscriberSeedEnvelope,
+  sealSubscriberSeedEnvelope,
   utf8Decode,
   utf8Encode,
   verifyAndDecryptPost,
@@ -550,9 +560,16 @@ const ChannelView: Component = () => {
               "line-height": "1.6",
             }}
           >
-            No local publisher keys for this channel. Subscriber-side
-            view + HPKE seed-envelope reception arrive in a follow-up
-            sub-sprint.
+            No local publisher keys for this channel — you cannot
+            publish to it from this device. To read posts as a
+            subscriber instead,{" "}
+            <a
+              href={paths.channelSubscribe(params.id)}
+              style={{ color: COLOURS.accentBlue }}
+            >
+              open the subscribe page
+            </a>
+            .
           </div>
         }
       >
@@ -624,6 +641,8 @@ const ChannelView: Component = () => {
             </div>
           </Show>
         </form>
+
+        <SubscribersPanel channelIdHex={params.id} />
       </Show>
 
       <h2 style={{ margin: "0 0 12px 0", "font-size": "16px" }}>Posts</h2>
@@ -718,7 +737,575 @@ const ChannelView: Component = () => {
 };
 
 // ============================================================================
+// SubscribersPanel — publisher-side fan-out widget
+// (lives inside ChannelView when the user holds publisher keys)
+// ============================================================================
+
+const SubscribersPanel: Component<{ readonly channelIdHex: string }> = (
+  props,
+) => {
+  const [subs, setSubs] = createSignal<ReadonlyArray<string> | null>(null);
+  const [busyPk, setBusyPk] = createSignal<string | null>(null);
+  const [error, setError] = createSignal<string | null>(null);
+  const [statusByPk, setStatusByPk] = createSignal<
+    ReadonlyMap<string, "delivered" | "failed">
+  >(new Map());
+
+  async function refresh(): Promise<void> {
+    try {
+      const list = await listSubscribers(props.channelIdHex);
+      setSubs(list.subscribers);
+    } catch (err) {
+      setError(`List failed: ${String(err)}`);
+    }
+  }
+
+  // First-load fetch.
+  void refresh();
+
+  async function deliverTo(pubkeyHex: string): Promise<void> {
+    if (busyPk() !== null) return;
+    const keys = channelsState.keysByChannel().get(props.channelIdHex);
+    if (keys === undefined) {
+      setError("No publisher keys on this device.");
+      return;
+    }
+    setBusyPk(pubkeyHex);
+    setError(null);
+    try {
+      const subPubBytes = new Uint8Array(pubkeyHex.length / 2);
+      for (let i = 0; i < subPubBytes.length; i += 1) {
+        subPubBytes[i] = Number.parseInt(pubkeyHex.slice(i * 2, i * 2 + 2), 16);
+      }
+      const epoch = channelsState.epochByChannel().get(props.channelIdHex) ?? 0;
+      const wire = await sealSubscriberSeedEnvelope(
+        subPubBytes,
+        props.channelIdHex,
+        epoch,
+        keys.seed,
+      );
+      await deliverEnvelope(props.channelIdHex, pubkeyHex, wire);
+      setStatusByPk((m) => new Map(m).set(pubkeyHex, "delivered"));
+    } catch (err) {
+      if (apiError.is(err)) {
+        setError(`Deliver failed: ${err.code} — ${err.detail}`);
+      } else {
+        setError(`Deliver failed: ${String(err)}`);
+      }
+      setStatusByPk((m) => new Map(m).set(pubkeyHex, "failed"));
+    } finally {
+      setBusyPk(null);
+    }
+  }
+
+  return (
+    <div
+      style={{
+        "margin-bottom": "20px",
+        padding: "12px",
+        "background-color": COLOURS.surface,
+        "border-radius": "8px",
+      }}
+    >
+      <div
+        style={{
+          display: "flex",
+          "justify-content": "space-between",
+          "align-items": "center",
+          "margin-bottom": "8px",
+        }}
+      >
+        <h2 style={{ margin: "0", "font-size": "15px" }}>
+          Subscribers{" "}
+          <span style={{ color: COLOURS.textSecondary, "font-weight": "400" }}>
+            ({subs()?.length ?? "…"})
+          </span>
+        </h2>
+        <button
+          type="button"
+          onClick={(): void => {
+            void refresh();
+          }}
+          style={{
+            background: "transparent",
+            color: COLOURS.textSecondary,
+            border: `1px solid ${COLOURS.border}`,
+            "border-radius": "6px",
+            padding: "4px 10px",
+            "font-size": "12px",
+            cursor: "pointer",
+          }}
+        >
+          Refresh
+        </button>
+      </div>
+      <Show when={error() !== null}>
+        <div
+          style={{
+            padding: "8px 10px",
+            "background-color": COLOURS.destructive,
+            color: "#fff",
+            "border-radius": "6px",
+            "font-size": "12px",
+            "margin-bottom": "8px",
+          }}
+        >
+          {error()}
+        </div>
+      </Show>
+      <Show
+        when={subs() !== null && subs()!.length > 0}
+        fallback={
+          <div
+            style={{
+              color: COLOURS.textSecondary,
+              "font-size": "12px",
+              "line-height": "1.6",
+            }}
+          >
+            <Show
+              when={subs() === null}
+              fallback="No subscribers yet. Anyone with the channel id can open the subscribe page and register their X25519 public key."
+            >
+              Loading subscribers…
+            </Show>
+          </div>
+        }
+      >
+        <ul style={{ "list-style": "none", padding: "0", margin: "0" }}>
+          <For each={subs()!}>
+            {(pk): JSX.Element => {
+              const status = (): "delivered" | "failed" | undefined =>
+                statusByPk().get(pk);
+              return (
+                <li
+                  style={{
+                    display: "flex",
+                    "align-items": "center",
+                    "justify-content": "space-between",
+                    padding: "8px 10px",
+                    "background-color": COLOURS.background,
+                    "border-radius": "6px",
+                    "margin-bottom": "6px",
+                    "font-family": "monospace",
+                    "font-size": "11px",
+                    gap: "10px",
+                  }}
+                >
+                  <span
+                    style={{
+                      color: COLOURS.textSecondary,
+                      "word-break": "break-all",
+                      flex: "1",
+                    }}
+                  >
+                    {pk}
+                  </span>
+                  <Show when={status() === "delivered"}>
+                    <span
+                      style={{
+                        color: COLOURS.accentBlue,
+                        "font-family": "inherit",
+                        "font-size": "11px",
+                      }}
+                    >
+                      delivered
+                    </span>
+                  </Show>
+                  <Show when={status() === "failed"}>
+                    <span
+                      style={{
+                        color: COLOURS.destructive,
+                        "font-family": "inherit",
+                        "font-size": "11px",
+                      }}
+                    >
+                      failed
+                    </span>
+                  </Show>
+                  <button
+                    type="button"
+                    onClick={(): void => {
+                      void deliverTo(pk);
+                    }}
+                    disabled={busyPk() === pk}
+                    style={{
+                      "background-color": COLOURS.accentBlue,
+                      color: "#fff",
+                      border: "none",
+                      "border-radius": "6px",
+                      padding: "4px 10px",
+                      "font-size": "11px",
+                      "font-family": "inherit",
+                      cursor: busyPk() === pk ? "wait" : "pointer",
+                    }}
+                  >
+                    {busyPk() === pk ? "Sealing…" : "Deliver seed"}
+                  </button>
+                </li>
+              );
+            }}
+          </For>
+        </ul>
+      </Show>
+    </div>
+  );
+};
+
+// ============================================================================
+// ChannelSubscribe — `/channels/:id/subscribe`
+//   Subscriber-side view: generate (or restore) an X25519
+//   keypair, register it on the channel, poll for a seed
+//   envelope, open it, then render decoded posts using the
+//   recovered seed.
+// ============================================================================
+
+const ChannelSubscribe: Component = () => {
+  const params = useParams<{ id: string }>();
+  const navigate = useNavigate();
+  const [bootstrap, setBootstrap] = createSignal<
+    "idle" | "registering" | "polling" | "active" | "error"
+  >("idle");
+  const [bootstrapError, setBootstrapError] = createSignal<string | null>(null);
+  const [posts, setPosts] = createSignal<ReadonlyArray<ChannelPostView>>([]);
+  const [decodedByCursor, setDecodedByCursor] = createSignal<
+    ReadonlyMap<number, string | null>
+  >(new Map());
+
+  // Persisted keypair lookup. If none exists on first
+  // mount, we generate one and store it.
+  async function ensureKeypair(): Promise<{
+    readonly secret: Uint8Array;
+    readonly public: Uint8Array;
+  }> {
+    const existing = channelsState.subscriberKeysByChannel().get(params.id);
+    if (existing !== undefined) {
+      return existing;
+    }
+    const fresh = await freshSubscriberKeys();
+    channelsActions.setSubscriberKeys(params.id, fresh);
+    return fresh;
+  }
+
+  /** Drive the registration + poll-for-envelope dance.
+   *  Idempotent — the server treats a re-register of the
+   *  same pubkey as a no-op, and a re-poll just finds
+   *  whatever envelope is current. */
+  async function bootstrap_(): Promise<void> {
+    setBootstrap("registering");
+    setBootstrapError(null);
+    try {
+      const kp = await ensureKeypair();
+      const pubHex = bytesToHex(kp.public);
+      await subscribe(params.id, pubHex);
+
+      // If we already have a recovered seed cached in
+      // memory, skip the poll and go straight to active.
+      if (channelsState.subscribedSeedByChannel().get(params.id) !== undefined) {
+        setBootstrap("active");
+        return;
+      }
+
+      setBootstrap("polling");
+      // First-attempt fetch in case the publisher has
+      // already fanned out.
+      const b64 = await fetchEnvelope(params.id, pubHex);
+      if (b64 !== null) {
+        await openAndCacheSeed(b64);
+        setBootstrap("active");
+      }
+      // Otherwise the polling effect below will pick it up.
+    } catch (err) {
+      if (apiError.is(err)) {
+        setBootstrapError(`${err.code} — ${err.detail}`);
+      } else {
+        setBootstrapError(String(err));
+      }
+      setBootstrap("error");
+    }
+  }
+
+  async function openAndCacheSeed(envelopeB64: string): Promise<void> {
+    const kp = channelsState.subscriberKeysByChannel().get(params.id);
+    if (kp === undefined) {
+      throw new Error("missing subscriber keypair");
+    }
+    const wire = base64UrlToBytes(envelopeB64);
+    const epochView = await fetchEpoch(params.id);
+    const seed = await openSubscriberSeedEnvelope(
+      kp.secret,
+      params.id,
+      epochView.epoch,
+      wire,
+    );
+    channelsActions.setSubscribedSeed(params.id, seed);
+    channelsActions.setEpoch(params.id, epochView.epoch);
+  }
+
+  // First-load: drive the bootstrap.
+  void bootstrap_();
+
+  // Polling loop — runs while `bootstrap === "polling"`.
+  // 3-second cadence; cancels itself once the envelope
+  // arrives. A future sprint adds server-push (long-poll
+  // or SSE) so this becomes event-driven.
+  createEffect(() => {
+    if (bootstrap() !== "polling") return;
+    const kp = channelsState.subscriberKeysByChannel().get(params.id);
+    if (kp === undefined) return;
+    const pubHex = bytesToHex(kp.public);
+    const handle = setInterval(() => {
+      void (async (): Promise<void> => {
+        try {
+          const b64 = await fetchEnvelope(params.id, pubHex);
+          if (b64 !== null) {
+            clearInterval(handle);
+            await openAndCacheSeed(b64);
+            setBootstrap("active");
+          }
+        } catch (err) {
+          // Transient network errors: keep polling. A real
+          // permanent failure (404 unknown-channel etc.) is
+          // surfaced by the registration step.
+          // eslint-disable-next-line no-console
+          console.warn("envelope poll error", err);
+        }
+      })();
+    }, 3000);
+    onCleanup(() => {
+      clearInterval(handle);
+    });
+  });
+
+  // Posts loader — runs once the seed is cached. Same
+  // shape as ChannelView's load + decode pipeline, but
+  // keyed off the recovered subscriber seed.
+  createEffect(() => {
+    if (bootstrap() !== "active") return;
+    const seed = channelsState.subscribedSeedByChannel().get(params.id);
+    if (seed === undefined) return;
+    void (async (): Promise<void> => {
+      try {
+        const page = await fetchPosts(params.id, 0);
+        setPosts(page.posts);
+        const entries = await Promise.all(
+          page.posts.map(async (p) => {
+            try {
+              const plaintext = await verifyAndDecryptPost(
+                seed,
+                params.id,
+                p.payloadB64,
+              );
+              return [p.cursor, utf8Decode(plaintext)] as const;
+            } catch {
+              return [p.cursor, null] as const;
+            }
+          }),
+        );
+        setDecodedByCursor(new Map(entries));
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.error("subscribe post-load error", err);
+      }
+    })();
+  });
+
+  const myKeypair = (): { readonly public: Uint8Array } | undefined =>
+    channelsState.subscriberKeysByChannel().get(params.id);
+
+  return (
+    <div
+      style={{
+        padding: "20px",
+        "max-width": "720px",
+        margin: "0 auto",
+        color: COLOURS.textPrimary,
+        "min-height": "100vh",
+        "background-color": COLOURS.background,
+      }}
+    >
+      <button
+        type="button"
+        onClick={(): void => navigate(paths.channels)}
+        style={{
+          background: "transparent",
+          color: COLOURS.textSecondary,
+          border: "none",
+          padding: "0 0 12px 0",
+          cursor: "pointer",
+          "font-size": "13px",
+        }}
+      >
+        ← All channels
+      </button>
+      <h1 style={{ margin: "0 0 4px 0", "font-size": "22px" }}>Subscribe</h1>
+      <div
+        style={{
+          "font-size": "12px",
+          color: COLOURS.textSecondary,
+          "font-family": "monospace",
+          "margin-bottom": "16px",
+        }}
+      >
+        {params.id}
+      </div>
+
+      <div
+        style={{
+          padding: "12px",
+          "background-color": COLOURS.surface,
+          "border-radius": "8px",
+          "margin-bottom": "16px",
+          "font-size": "13px",
+          "line-height": "1.6",
+          color: COLOURS.textSecondary,
+        }}
+      >
+        <Show when={myKeypair() !== undefined}>
+          <div style={{ "margin-bottom": "6px" }}>
+            Your subscriber public key (registered on this channel):
+          </div>
+          <div
+            style={{
+              "font-family": "monospace",
+              "font-size": "11px",
+              color: COLOURS.textPrimary,
+              "word-break": "break-all",
+            }}
+          >
+            {bytesToHex(myKeypair()!.public)}
+          </div>
+        </Show>
+      </div>
+
+      <div
+        style={{
+          padding: "12px",
+          "background-color": COLOURS.surface,
+          "border-radius": "8px",
+          "margin-bottom": "20px",
+          "font-size": "13px",
+          "line-height": "1.6",
+        }}
+      >
+        <Show when={bootstrap() === "idle" || bootstrap() === "registering"}>
+          <span style={{ color: COLOURS.textSecondary }}>
+            Registering your key on the channel…
+          </span>
+        </Show>
+        <Show when={bootstrap() === "polling"}>
+          <span style={{ color: COLOURS.textSecondary }}>
+            Registered. Waiting for the publisher to fan out a seed envelope…
+            (auto-refreshes every 3 s)
+          </span>
+        </Show>
+        <Show when={bootstrap() === "active"}>
+          <span style={{ color: COLOURS.accentBlue }}>
+            Seed envelope opened. You can read posts on this channel.
+          </span>
+        </Show>
+        <Show when={bootstrap() === "error"}>
+          <span style={{ color: COLOURS.destructive }}>
+            {bootstrapError() ?? "Unknown error."}
+          </span>
+        </Show>
+      </div>
+
+      <h2 style={{ margin: "0 0 12px 0", "font-size": "16px" }}>Posts</h2>
+      <Show
+        when={bootstrap() === "active" && posts().length > 0}
+        fallback={
+          <p style={{ color: COLOURS.textSecondary, "line-height": "1.6" }}>
+            <Show
+              when={bootstrap() === "active"}
+              fallback={
+                bootstrap() === "polling"
+                  ? "Waiting for the publisher to deliver your seed."
+                  : "Bootstrapping the subscribe flow…"
+              }
+            >
+              No posts yet on this channel.
+            </Show>
+          </p>
+        }
+      >
+        <ul style={{ "list-style": "none", padding: "0", margin: "0" }}>
+          <For each={posts()}>
+            {(p): JSX.Element => (
+              <li
+                style={{
+                  padding: "12px",
+                  "background-color": COLOURS.surface,
+                  "border-radius": "8px",
+                  "margin-bottom": "8px",
+                }}
+              >
+                <div
+                  style={{
+                    display: "flex",
+                    "justify-content": "space-between",
+                    "font-size": "12px",
+                    color: COLOURS.textSecondary,
+                    "margin-bottom": "6px",
+                  }}
+                >
+                  <span>cursor {p.cursor}</span>
+                  <span>{new Date(p.serverTsMs).toISOString()}</span>
+                </div>
+                <Show
+                  when={decodedByCursor().has(p.cursor)}
+                  fallback={
+                    <div
+                      style={{
+                        "font-size": "13px",
+                        color: COLOURS.textSecondary,
+                        "font-style": "italic",
+                      }}
+                    >
+                      Decoding…
+                    </div>
+                  }
+                >
+                  {(() => {
+                    const decoded = decodedByCursor().get(p.cursor) ?? null;
+                    if (decoded === null) {
+                      return (
+                        <div
+                          style={{
+                            "font-size": "13px",
+                            color: COLOURS.textSecondary,
+                            "font-style": "italic",
+                          }}
+                        >
+                          [unreadable — wrong seed or tampered ciphertext]
+                        </div>
+                      );
+                    }
+                    return (
+                      <div
+                        style={{
+                          "font-size": "14px",
+                          color: COLOURS.textPrimary,
+                          "white-space": "pre-wrap",
+                          "word-break": "break-word",
+                        }}
+                      >
+                        {decoded}
+                      </div>
+                    );
+                  })()}
+                </Show>
+              </li>
+            )}
+          </For>
+        </ul>
+      </Show>
+    </div>
+  );
+};
+
+// ============================================================================
 // Module exports
 // ============================================================================
 
-export { ChannelsList, NewChannel, ChannelView };
+export { ChannelsList, NewChannel, ChannelView, ChannelSubscribe };
