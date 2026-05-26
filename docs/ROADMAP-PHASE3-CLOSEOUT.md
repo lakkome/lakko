@@ -43,10 +43,10 @@ LiveKit fork).
 | **G3-7** | Sound cues — resources + player on 3 platforms | UI Phase 3 | UX completeness | ✅ | 0.5 sprint | **done** |
 | **G3-8** | Acceptance on hardware (mic, camera, BT, CallKit / ConnectionService) | Phase 3 closeout | official Phase 3 close | ❌ maintainer + devices | 1 sprint | open |
 | **G3-9** | Cost analysis (3b6) — real measurements after a month in production | Phase 3 closeout | scale-out trigger calibration | ❌ needs deploy | out of scope of chat | open |
-| **G4-1** | `services/channels` backend (Rust) | Phase 4a | publishing over the wire | ✅ | 1 sprint | open |
+| **G4-1** | `services/channels` backend (Rust) | Phase 4a | publishing over the wire | ✅ | 1 sprint | **done** — in-memory MVP; SQL persistence sub-sprint G4-1-sql remains open |
 | **G4-2** | Client integration of channels on 3 platforms | Phase 4a | UX channel publishing | ✅ | 2 sprints | open |
-| **G4-3** | Subscriber path — HPKE seed envelope + subscribe handshake | Phase 4b | real subscribers | ✅ | 2 sprints | open |
-| **G4-4** | Rotation + fanout service | Phase 4c | scale-out 100k+ | ✅ | 2 sprints | open |
+| **G4-3** | Subscriber path — HPKE seed envelope + subscribe handshake | Phase 4b | real subscribers | ✅ | 2 sprints | **done** — crypto in `lakko-channels::subscribe` (G4-3a) + backend endpoints (G4-3b) |
+| **G4-4** | Rotation + fanout service | Phase 4c | scale-out 100k+ | ✅ | 2 sprints | **done** — atomic batch fanout + epoch tracking; per-receiver background fanout worker is a follow-up sub-sprint |
 | **G4-5** | Channel discovery (`@channelname` via OPRF) | Phase 4b | UX "find a channel" | ✅ | 1 sprint | open |
 | **G5-1** | REALITY pluggable transport | Phase 5 | RU / CN / IR block bypass | ✅ + lab | 3 sprints | open |
 | **G5-2** | MASQUE / CONNECT-UDP | Phase 5 | QUIC under H3 | ✅ + lab | 2 sprints | open |

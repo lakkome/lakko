@@ -1586,6 +1586,173 @@ block (C-40+) covers the "RTP frames pass through
 opaque; the SFU never reads the SFrame ciphertext"
 property.
 
+## Channel-broadcast invariants (Phase 4)
+
+These invariants pin the contract between
+[`crates/lakko-channels`](../../crates/lakko-channels) (the
+client-side broadcast crypto per ADR-0010) and
+[`services/channels`](../../services/channels) (the
+backend that stores opaque ciphertext + relays it between
+publisher and subscribers). The C-numbering continues
+from the call-side invariants above; the modules are
+distinct (channels are a broadcast surface, not a call
+surface), but the audit-pack convention is one source of
+truth per crypto subsystem.
+
+### C-40: services/channels publisher path treats every byte as opaque
+
+The publisher endpoints —
+`POST /v1/channels` (registration),
+`POST /v1/channels/:channel_id/posts` (publish),
+`GET  /v1/channels/:channel_id/posts?after=&limit=`
+(cursor-paginated fetch) — **never** decode the
+[`ChannelPost`](../../crates/lakko-channels/src/post.rs)
+they carry. No signature verify, no AEAD open, no
+ciphertext-shape inspection.
+
+**Pinned invariants** the test suite asserts:
+
+1. **The `lakko-channels` Rust crate is NOT in the
+   production dep graph.** `services/channels/Cargo.toml`
+   pulls `lakko-channels.workspace = true` **only as a
+   `dev-dependency`** — used by the integration test for
+   one compile-time cross-check on
+   `SEED_ENVELOPE_LEN`, never linked into the release
+   binary. The audit-pack property "the server cannot
+   parse a ChannelPost even if it tried" is therefore
+   structural, not policy-bound.
+
+2. **Wire-level byte-identical passthrough.** Integration
+   test `payload_round_trips_byte_identical` publishes
+   all 256 distinct byte values (0x00..0xFF), fetches via
+   the cursor endpoint, base64-decodes the returned
+   `payload_b64`, and asserts a bit-exact equality. Any
+   future refactor that inserts a transformation (
+   compression, normalisation, "helpful" re-encoding)
+   trips this test loudly.
+
+3. **Per-post body cap is length-only, not
+   content-based.** `LAKKO_CHANNELS_MAX_POST_BYTES`
+   (default 17 MiB — leaves ~1 MiB SFrame/AEAD overhead
+   over the `lakko-channels` 16 MiB plaintext ceiling)
+   is enforced at the gate before any storage write. A
+   post body that exceeds the cap is rejected as
+   `post-too-large` without the server ever touching
+   the bytes.
+
+4. **Cursor-only fetch — no body indexing, no
+   content-based search.** `?after=<cursor>` is the only
+   query knob; the server has no notion of "search
+   posts by content" because content is opaque to it.
+   Subscribers do their own client-side indexing after
+   decryption.
+
+### C-41: services/channels subscribe handshake opacity holds
+
+The subscribe endpoints —
+`POST /v1/channels/:id/subscribers` (register pubkey),
+`GET  /v1/channels/:id/subscribers` (list for publisher
+fan-out),
+`POST /v1/channels/:id/subscribers/:pubkey/envelope`
+(publisher delivers a per-subscriber HPKE-sealed seed
+envelope),
+`GET  /v1/channels/:id/subscribers/:pubkey/envelope`
+(subscriber pulls latest) — match the same opacity
+contract as the publisher path. The server never
+performs a Diffie-Hellman operation against a registered
+`subscriber_pubkey`; it only matches identities in the
+registry.
+
+**Pinned invariants:**
+
+1. **Envelope length is structurally pinned.**
+   `services/channels/src/api.rs::EXPECTED_ENVELOPE_LEN
+   == lakko_channels::SEED_ENVELOPE_LEN` is asserted
+   compile-time inside `tests/integration_api.rs`. A
+   bump in either crate without the matching bump in
+   the other fails the build.
+
+2. **Wrong-length envelope rejected at the gate.**
+   `deliver_envelope_with_wrong_length_is_400` —
+   a 79-byte body against the 80-byte target returns
+   400 `bad-envelope-len` without touching the
+   envelope store.
+
+3. **Per-subscriber wire round-trip is byte-identical.**
+   `subscribe_then_list_then_deliver_then_fetch`
+   delivers bytes 0x00..0x4F, decodes the
+   base64-wrapped fetch response, and asserts bit-exact
+   equality. Same wire-level opacity proof as C-40 but
+   for the subscriber path.
+
+4. **Unsubscribed pubkey cannot receive an envelope.**
+   `deliver_to_unsubscribed_pubkey_is_404` —
+   `POST .../subscribers/<unregistered>/envelope`
+   returns 404 `unknown-subscriber` without storing the
+   envelope. Stops a misbehaving publisher from
+   silently spraying envelopes against arbitrary
+   pubkeys.
+
+5. **`SubscriberId` is the subscriber's X25519 public
+   key, used only as an identifier — never as ECDH
+   input on the server side.** The server's storage
+   surface (`storage.rs`) is the only place
+   `SubscriberId` flows through; no path constructs
+   a `lakko_crypto::agreement::PublicKey` from it. The
+   `subscriber_pubkey` ends up at the publisher's
+   client where `lakko_channels::subscribe::seal_seed`
+   does the actual sealing.
+
+### C-42: rotation is atomic — either every envelope lands or none does
+
+`POST /v1/channels/:id/rotate` bumps the channel's
+`current_epoch` **and** replaces the per-subscriber
+envelope for every entry in the batch under a single
+write lock. The implementation pre-validates every
+entry's length + registration before committing any
+mutation; on any failure, the epoch counter stays put
+and the previous envelopes survive.
+
+**Pinned invariants:**
+
+1. **Two-pass commit.** `storage.rs::rotate`'s first
+   loop validates every batch entry's envelope length;
+   the second loop walks the registered-subscriber set
+   under the write lock. Mutation runs only after
+   both passes complete. Source-level enforcement,
+   not just test-checked.
+
+2. **No torn rotations.**
+   `rotate_aborts_on_wrong_envelope_length` —
+   a one-element batch with a 79-byte envelope (off by
+   one) returns 400 `bad-envelope-len`; the epoch
+   counter remains 0 and the previous envelope is
+   unchanged. Same property covered by
+   `rotate_rejects_unsubscribed_recipient` — one
+   unsubscribed pubkey in the batch aborts the whole
+   commit.
+
+3. **Empty batch still advances the epoch.**
+   `rotate_empty_batch_still_bumps_epoch` — a scheduled
+   tick on a quiet channel must still increment the
+   counter so a future subscriber that comes online
+   sees "stale state, refresh me" via
+   `GET /v1/channels/:id/epoch`. ADR-0010 §"Epoch
+   boundaries" lists this as the expected behaviour.
+
+4. **`current_epoch` is monotone + saturating.** The
+   counter is a `u32` with
+   `saturating_add(1)` on bump — at 1 rotation/second
+   (a pathological worst case) the counter takes ~136
+   years to wrap, well past the cryptographic lifetime
+   of any reasonable identity key.
+
+5. **Genesis epoch is 0.** `genesis_epoch_is_zero`
+   pins the starting value so the
+   `lakko_channels::EpochId::GENESIS = 0` constant on
+   the client side matches the server's view from the
+   first byte of a channel's life.
+
 ## Exporter labels (call-side)
 
 | Label | Length | Context | Source | Used for |

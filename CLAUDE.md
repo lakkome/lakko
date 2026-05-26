@@ -61,6 +61,7 @@ The Phase 3 closeout punch list — gap inventory + sprint waves with exit crite
 | `auth` | OPAQUE-PAKE + WebAuthn passkey, no PII stored |
 | `ds` | MLS Delivery Service (FIFO journal per group) |
 | `storage` | Ciphertext blob proxy in front of SeaweedFS |
+| `channels` | Phase 4 channel-broadcast backend (in-memory MVP). Publisher / subscriber / rotation paths complete. Server stays opaque — never decrypts `ChannelPost` bytes or HPKE seed envelopes; `lakko-channels` crate is `dev-dep` only. See [`docs/security/calls.md`](docs/security/calls.md) C-40..C-42 |
 | `edge` | Broadcast cascade + audio room signaling |
 | `discovery` | Username lookup via OPRF |
 | `push-gw` | Fan-out APNs / FCM / UnifiedPush |
@@ -74,7 +75,7 @@ The Phase 3 closeout punch list — gap inventory + sprint waves with exit crite
 - `infra/` — single-VPS Hetzner deployment via systemd + system-nginx + system-MariaDB; see `infra/README.md` (migration from lakko_me and daily ops)
 - `docs/adr/` — Architecture Decision Records
 - `docs/ROADMAP.md` — tactical decomposition of every phase
-- `docs/security/` — audit-readiness pack: threat model, crypto overview, MLS state machine invariants (I-1..I-8), call-side cryptography (C-1..C-39 — media-key pipeline + call-admission JWT + link-based invite + owner fingerprint + server-handler drift sentinels + URL discrimination + composer/acceptor pipelines + Welcome-ferry envelope + KP-forward envelope + incoming-envelope dispatcher + 1×1 and multi-party E2E chain + owner-handover protocol + SFrame keying math + RFC 9605 wire-header round-trip + SFU signaling-layer zero-payload-inspection / cross-call isolation / backpressure semantics), known gaps (G-1..G-26 — including the cargo-audit baseline for transitive deps + RFC 9605 wire-header interop gap **now partially closed**). Entry: [`docs/security/README.md`](docs/security/README.md)
+- `docs/security/` — audit-readiness pack: threat model, crypto overview, MLS state machine invariants (I-1..I-8), call-side cryptography (C-1..C-42 — media-key pipeline + call-admission JWT + link-based invite + owner fingerprint + server-handler drift sentinels + URL discrimination + composer/acceptor pipelines + Welcome-ferry envelope + KP-forward envelope + incoming-envelope dispatcher + 1×1 and multi-party E2E chain + owner-handover protocol + SFrame keying math + RFC 9605 wire-header round-trip + SFU signaling-layer zero-payload-inspection / cross-call isolation / backpressure semantics + channels-backend publisher-path / subscriber-handshake opacity + atomic rotation), known gaps (G-1..G-26 — including the cargo-audit baseline for transitive deps + RFC 9605 wire-header interop gap **now partially closed**). Entry: [`docs/security/README.md`](docs/security/README.md)
 - `tools/` — codegen, fuzz harnesses, benchmarks
 - `ci/` — GitHub Actions + self-hosted SLSA L3 builders
 
