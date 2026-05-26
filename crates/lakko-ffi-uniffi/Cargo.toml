@@ -48,6 +48,10 @@ lakko-attachments.workspace = true
 # codec. Same primitive both iOS and Android clients consume
 # through this UniFFI surface.
 lakko-backup.workspace = true
+# Phase 4 G4-2-crypto — channel post composer + decoder for
+# iOS / Android channel UIs. Same surface the wasm crate
+# exposes to web.
+lakko-channels.workspace = true
 # Phase 1.21b — Shamir's Secret Sharing for the social-recovery
 # flow (split / combine / encode / decode + GF(256) field ops).
 lakko-shamir.workspace = true

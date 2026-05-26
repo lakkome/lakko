@@ -38,6 +38,7 @@ use lakko_mls::{
 pub mod attachments;
 pub mod auth;
 pub mod backup;
+pub mod channels;
 pub mod contacts;
 pub mod discovery;
 pub mod mnemonic;
@@ -162,6 +163,14 @@ pub enum FfiError {
     /// account_id / ed25519_seed inputs — all collapse here.
     #[error("backup error: {0}")]
     Backup(String),
+
+    /// Channel post / subscribe envelope error (Phase 4 G4-2-
+    /// crypto). Same elision posture: wrong-length seed,
+    /// channel-id mismatch, tampered ChannelPost ciphertext,
+    /// Ed25519 verify failure on a post signature — all
+    /// collapse here.
+    #[error("channels error: {0}")]
+    Channels(String),
 
     /// Lock contention / poisoned mutex on the shared Group state.
     #[error("internal lock error")]
