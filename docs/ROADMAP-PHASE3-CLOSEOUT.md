@@ -47,7 +47,7 @@ LiveKit fork).
 | **G4-2** | Client integration of channels on 3 platforms | Phase 4a | UX channel publishing | ✅ | 2 sprints | open |
 | **G4-3** | Subscriber path — HPKE seed envelope + subscribe handshake | Phase 4b | real subscribers | ✅ | 2 sprints | **done** — crypto in `lakko-channels::subscribe` (G4-3a) + backend endpoints (G4-3b) |
 | **G4-4** | Rotation + fanout service | Phase 4c | scale-out 100k+ | ✅ | 2 sprints | **done** — atomic batch fanout + epoch tracking; per-receiver background fanout worker is a follow-up sub-sprint |
-| **G4-5** | Channel discovery (`@channelname` via OPRF) | Phase 4b | UX "find a channel" | ✅ | 1 sprint | open |
+| **G4-5** | Channel discovery (`@channelname` via OPRF) | Phase 4b | UX "find a channel" | ✅ | 1 sprint | **done** — new `channel_names` table + `/discovery/channel/{register,lookup}` endpoints reuse the existing VOPRF Ristretto255-SHA512 infrastructure |
 | **G5-1** | REALITY pluggable transport | Phase 5 | RU / CN / IR block bypass | ✅ + lab | 3 sprints | open |
 | **G5-2** | MASQUE / CONNECT-UDP | Phase 5 | QUIC under H3 | ✅ + lab | 2 sprints | open |
 | **G5-3** | Shadowsocks-2022 | Phase 5 | alternative obfs | ✅ | 1 sprint | open |

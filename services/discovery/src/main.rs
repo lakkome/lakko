@@ -73,6 +73,7 @@
 
 pub(crate) mod auth;
 mod call_invite;
+mod channel_names;
 mod identity_bundle;
 mod invite;
 mod keypackage;
@@ -296,6 +297,21 @@ pub(crate) fn build_app(state: AppState) -> Router {
         .route(
             "/discovery/call-invite/{blob_id}/consume",
             post(call_invite::consume),
+        )
+        // G4-5 — channel @name discovery via OPRF. Both
+        // endpoints sit on the open path: lookup is read-
+        // only PoW-gated like `/discovery/lookup` above,
+        // and register has no account_id claim so the
+        // session-token role would be a pure DoS gate
+        // that the PoW already covers. Anti-squatting is
+        // first-come-first-served via UNIQUE(oprf_hash).
+        .route(
+            "/discovery/channel/register",
+            post(channel_names::register),
+        )
+        .route(
+            "/discovery/channel/lookup",
+            post(channel_names::lookup),
         );
 
     open.merge(protected)
