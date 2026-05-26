@@ -59,7 +59,7 @@ LiveKit fork).
 | **GA-1** | G-23 libcrux — waits for openmls upgrade | Audit | upstream CVE | ⚠ depends on upstream | tracker | open (upstream-blocked) |
 | **GA-2** | G-26 RFC 9605 wire-header interop | Audit | interop with mlspp | ✅ | 1 sprint | **partial** — serializer + 12 unit tests done; seal/open integration + external-stack interop pending G3-1/G3-2 |
 | **GA-3** | External crypto audit (Phase 2 exit gate per plan) | Audit | public-beta launch | ❌ external auditor | out of scope of chat | open |
-| **GA-4** | Reproducible builds verification — 2 runners byte-identical | Process | SLSA L3 | ✅ | 1 sprint | open |
+| **GA-4** | Reproducible builds verification — 2 runners byte-identical | Process | SLSA L3 | ✅ | 1 sprint | **partial** — `.github/workflows/repro.yml` ships same-runner double-build + cross-runner matrix verifier (both advisory `continue-on-error: true`); flip-to-gating waits on stable byte-identicality across the workspace |
 | **GA-5** | TUF auto-update infrastructure | Process | secure updates | ✅ | 2 sprints | open |
 | **GA-6** | Bug bounty programme | Process | ongoing post-launch | ❌ org work | out of scope of chat | open |
 

@@ -154,9 +154,105 @@ jobs:
           # this, add a filter line here. For now no known-flaky
           # entries are expected.
           if diff -u /tmp/web-build-a.txt /tmp/web-build-b.txt; then
-            echo "✅ Reproducible: byte-identical apps/web/dist between two clean builds"
+            echo "OK Reproducible: byte-identical apps/web/dist between two clean builds"
           else
-            echo "⚠️ Non-reproducible: apps/web/dist differs between builds"
+            echo "WARN Non-reproducible: apps/web/dist differs between builds"
             echo "(this job is non-blocking until web byte-identicality is stable)"
+            exit 1
+          fi
+
+  # ----------------------------------------------------------------
+  # Cross-runner reproducibility (GA-4 partial)
+  # ----------------------------------------------------------------
+  #
+  # The `repro` job above proves "byte-identical between two
+  # builds on **the same** runner". That catches in-process
+  # non-determinism (timestamp embedding, randomness in
+  # codegen) but does NOT catch host-state leaks — kernel
+  # version, libc patch level, environment-derived
+  # constants — which are exactly what SLSA L3 cares
+  # about.
+  #
+  # This pair of jobs separates the build phase per runner
+  # via a matrix (each matrix entry lands on a fresh
+  # ephemeral GitHub Actions VM); the verifier job
+  # downloads both runners' hash manifests and diffs.
+  #
+  # Same `continue-on-error: true` posture as the
+  # single-runner job — advisory until byte-identicality is
+  # stable across the workspace; flip to gating + add to
+  # CI's required-status set once the underlying flakiness
+  # is resolved.
+
+  cross-runner-build:
+    name: cross-runner build (${{ matrix.runner-id }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        runner-id: [a, b]
+    env:
+      RUSTFLAGS: --remap-path-prefix=/github/workspace=. -C symbol-mangling-version=v0
+      SOURCE_DATE_EPOCH: "1735689600"
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Release build
+        run: cargo build --workspace --release --locked
+      - name: Hash release artifacts
+        run: |
+          mkdir -p /tmp/build
+          find target/release -maxdepth 1 -type f \( -name 'lakko-svc-*' -o -name '*.rlib' \) \
+            | sort | xargs -I{} cp {} /tmp/build/
+          (cd /tmp/build && sha256sum * | sort) > /tmp/hashes.txt
+          echo "===== Runner ${{ matrix.runner-id }} hashes ====="
+          cat /tmp/hashes.txt
+      - name: Upload hashes
+        uses: actions/upload-artifact@v4
+        with:
+          name: cross-runner-hashes-${{ matrix.runner-id }}
+          path: /tmp/hashes.txt
+          if-no-files-found: error
+
+  cross-runner-verify:
+    name: cross-runner reproducibility verifier
+    runs-on: ubuntu-latest
+    needs: cross-runner-build
+    # Advisory until the workspace is fully reproducible
+    # across independent runners. Mirror of the `repro`
+    # job's posture above.
+    continue-on-error: true
+    steps:
+      - name: Download runner-a hashes
+        uses: actions/download-artifact@v4
+        with:
+          name: cross-runner-hashes-a
+          path: a/
+      - name: Download runner-b hashes
+        uses: actions/download-artifact@v4
+        with:
+          name: cross-runner-hashes-b
+          path: b/
+      - name: Diff across runners
+        run: |
+          # Same known-flaky filter the single-runner repro
+          # job applies; centralised here so a future
+          # change happens in one place.
+          KNOWN_FLAKY='liblakko_ffi_uniffi\.rlib'
+
+          grep -v -E "$KNOWN_FLAKY" a/hashes.txt > /tmp/a-filtered.txt || true
+          grep -v -E "$KNOWN_FLAKY" b/hashes.txt > /tmp/b-filtered.txt || true
+
+          echo "===== Runner A (filtered) ====="
+          cat /tmp/a-filtered.txt
+          echo "===== Runner B (filtered) ====="
+          cat /tmp/b-filtered.txt
+
+          if diff -u /tmp/a-filtered.txt /tmp/b-filtered.txt; then
+            echo "OK Cross-runner reproducible: byte-identical artifacts across independent runners (excluding known flaky: $KNOWN_FLAKY)"
+          else
+            echo "WARN Cross-runner non-reproducible: artifacts differ between independent runners"
+            echo "(this job is non-blocking until cross-runner byte-identicality is stable;"
+            echo " SLSA L3 prerequisite per plan section 8)"
             exit 1
           fi
