@@ -44,6 +44,7 @@ pub mod pinning;
 pub mod pluggable;
 pub mod quic;
 pub mod reality;
+pub mod rendezvous;
 pub mod shadowsocks;
 pub mod transport;
 pub mod webtransport_pt;
@@ -58,6 +59,10 @@ pub use pluggable::{
     PluggableResult, PluggableTransport,
 };
 pub use reality::{RealityConfig, RealityTransport};
+pub use rendezvous::{
+    BootstrapConfig, RendezvousError, RendezvousResult, TransportSpec,
+    ISSUED_AT_CLOCK_SKEW_SECS, SCHEMA_VERSION,
+};
 pub use shadowsocks::{ShadowsocksConfig, ShadowsocksTransport};
 pub use transport::{Connection, Listener, Transport, MAX_FRAME_BYTES};
 pub use webtransport_pt::{WebTransportConfig, WebTransportPt};

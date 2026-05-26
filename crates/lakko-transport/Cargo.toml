@@ -26,6 +26,12 @@ serde_json.workspace = true
 async-trait = "0.1"
 bytes = "1"
 
+# Phase 5 G5-5 — Ed25519 verify for the signed
+# rendezvous bootstrap config. Reusing the workspace
+# crypto crate keeps the audit surface aligned with
+# every other Lakko crate that handles Ed25519.
+lakko-crypto.workspace = true
+
 # QUIC — used by the message-oriented mesh transport (Phase 0.3).
 quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
 rustls = { version = "0.23", default-features = false, features = ["std", "ring"] }
