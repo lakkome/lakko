@@ -67,6 +67,7 @@ pub mod epoch;
 pub mod error;
 pub mod post;
 pub mod seed;
+pub mod subscribe;
 
 pub use epoch::{EpochId, EPOCH_ID_LEN};
 pub use error::{ChannelError, Result};
@@ -75,6 +76,7 @@ pub use post::{
     POST_SIG_DOMAIN_V1,
 };
 pub use seed::{ContentKeySeed, CONTENT_KEY_SEED_LEN, EXPORTER_LABEL_V1};
+pub use subscribe::{open_seed, seal_seed, EPH_PUB_LEN, SEED_ENVELOPE_LEN, TAG_LEN};
 
 /// Channel identifier length — 16 bytes (the pseudonym chosen at
 /// channel creation, per ADR-0010 § "Server can correlate" mitigation).
