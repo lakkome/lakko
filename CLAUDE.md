@@ -41,7 +41,7 @@ The Phase 3 closeout punch list — gap inventory + sprint waves with exit crite
 | `lakko-crypto` | HPKE, HKDF, AEAD, Argon2id, OPRF, BLAKE3 |
 | `lakko-mls` | OpenMLS wrapper, group state, exporters for calls |
 | `lakko-proto` | Generated types from `schemas/`, shared with the server |
-| `lakko-transport` | quinn (QUIC) + tungstenite (WS) + pluggable obfs trait |
+| `lakko-transport` | quinn (QUIC) + tungstenite (WS) + pluggable obfs trait + signed bootstrap rendezvous (Phase 5 scaffold + G5-5 done). REALITY / MASQUE / Shadowsocks-2022 / WebTransport modules are scaffold (`Error::NotImplemented`); real impls land per G5-1..G5-4. See [`docs/security/transport.md`](docs/security/transport.md) T-1..T-7 |
 | `lakko-storage` | SQLCipher abstraction, blob store, WAL |
 | `lakko-sync` | Multi-device sync, hybrid logical clock, edit CRDT |
 | `lakko-calls` | SFrame, jitter buffer, codec negotiation, ICE/TURN |
@@ -75,7 +75,7 @@ The Phase 3 closeout punch list — gap inventory + sprint waves with exit crite
 - `infra/` — single-VPS Hetzner deployment via systemd + system-nginx + system-MariaDB; see `infra/README.md` (migration from lakko_me and daily ops)
 - `docs/adr/` — Architecture Decision Records
 - `docs/ROADMAP.md` — tactical decomposition of every phase
-- `docs/security/` — audit-readiness pack: threat model, crypto overview, MLS state machine invariants (I-1..I-8), call-side cryptography (C-1..C-42 — media-key pipeline + call-admission JWT + link-based invite + owner fingerprint + server-handler drift sentinels + URL discrimination + composer/acceptor pipelines + Welcome-ferry envelope + KP-forward envelope + incoming-envelope dispatcher + 1×1 and multi-party E2E chain + owner-handover protocol + SFrame keying math + RFC 9605 wire-header round-trip + SFU signaling-layer zero-payload-inspection / cross-call isolation / backpressure semantics + channels-backend publisher-path / subscriber-handshake opacity + atomic rotation), known gaps (G-1..G-26 — including the cargo-audit baseline for transitive deps + RFC 9605 wire-header interop gap **now partially closed**). Entry: [`docs/security/README.md`](docs/security/README.md)
+- `docs/security/` — audit-readiness pack: threat model, crypto overview, MLS state machine invariants (I-1..I-8), call-side cryptography (C-1..C-42 — media-key pipeline + call-admission JWT + link-based invite + owner fingerprint + server-handler drift sentinels + URL discrimination + composer/acceptor pipelines + Welcome-ferry envelope + KP-forward envelope + incoming-envelope dispatcher + 1×1 and multi-party E2E chain + owner-handover protocol + SFrame keying math + RFC 9605 wire-header round-trip + SFU signaling-layer zero-payload-inspection / cross-call isolation / backpressure semantics + channels-backend publisher-path / subscriber-handshake opacity + atomic rotation), transport layer (T-1..T-7 — pluggable wire identifiers + scaffold loud-fail + selector race + 4-stage rendezvous verify + canonical signing bytes + kebab-case kind tag + binary-pinned trust anchor), known gaps (G-1..G-26 — including the cargo-audit baseline for transitive deps + RFC 9605 wire-header interop gap **now partially closed**). Entry: [`docs/security/README.md`](docs/security/README.md)
 - `tools/` — codegen, fuzz harnesses, benchmarks
 - `ci/` — GitHub Actions + self-hosted SLSA L3 builders
 

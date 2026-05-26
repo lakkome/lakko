@@ -52,6 +52,13 @@ summarises so the docs and the implementation stay in sync
   (invariants C-24..C-28). What the SFU sees vs
   what stays client-side. Every invariant cites a property
   test.
+- [`transport.md`](./transport.md) — anti-censorship +
+  rendezvous transport surface (Phase 5). Pluggable-kind
+  wire identifiers (T-1), scaffold-transport loud-fail
+  (T-2), happy-eyeballs selector race semantics (T-3),
+  4-stage `BootstrapConfig::verify` gate (T-4), canonical
+  signing bytes (T-5), kebab-case `TransportSpec` kind
+  pinning (T-6), binary-pinned trust anchor (T-7).
 - [`known-gaps.md`](./known-gaps.md) — items the maintainer
   knows are not audit-ready yet; reviewers should not
   re-discover them. Each entry has a tracking issue / ROADMAP
