@@ -646,6 +646,13 @@ private fun isoTimestamp(ms: Long): String {
 //  publisher keys for this channel)
 // ============================================================================
 
+/** Auto-fanout poll cadence — every 5 s the publisher
+ *  panel re-fetches the subscriber list, diffs against
+ *  the already-delivered set, and auto-seals an envelope
+ *  for each new pubkey. Same cadence the subscribe-screen
+ *  poll uses on the receive side. */
+private const val SUBSCRIBERS_POLL_INTERVAL_MS: Long = 5_000L
+
 @Composable
 private fun SubscribersPanel(
     channelId: String,
@@ -660,6 +667,9 @@ private fun SubscribersPanel(
     var subscribers by remember { mutableStateOf<List<String>?>(null) }
     var busyPk by remember { mutableStateOf<String?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
+    // statusByPk values: "delivered" (manual), "auto"
+    // (polling loop), "failed". UI badges differentiate
+    // delivered vs. auto-delivered visually.
     val statusByPk = remember { mutableStateMapOf<String, String>() }
     val scope = rememberCoroutineScope()
 
@@ -673,7 +683,71 @@ private fun SubscribersPanel(
         }
     }
 
+    suspend fun deliverTo(pubkeyHex: String, trigger: String) {
+        // Manual delivery is one-at-a-time; the auto
+        // path ignores busyPk so a slow manual click does
+        // not stall progress on other subscribers.
+        if (trigger == "manual" && busyPk != null) return
+        if (keys == null) {
+            if (trigger == "manual") {
+                error = "No publisher keys on this device."
+            }
+            return
+        }
+        if (trigger == "manual") {
+            busyPk = pubkeyHex
+            error = null
+        }
+        try {
+            val parsed = hexToBytesOrNull(pubkeyHex)
+            if (parsed == null) {
+                if (trigger == "manual") error = "Bad subscriber pubkey hex."
+                statusByPk[pubkeyHex] = "failed"
+                return
+            }
+            val wire = ChannelsComposer.sealSubscriberSeedEnvelope(
+                subscriberPub = parsed,
+                channelIdHex = channelId,
+                epochId = epoch,
+                seed = keys.seed,
+            )
+            client.deliverEnvelope(channelId, pubkeyHex, wire)
+            statusByPk[pubkeyHex] = if (trigger == "auto") "auto" else "delivered"
+        } catch (e: ChannelsApiException) {
+            if (trigger == "manual") error = "Deliver failed: ${e.code} — ${e.detail}"
+            statusByPk[pubkeyHex] = "failed"
+        } catch (e: ChannelsComposerException) {
+            if (trigger == "manual") error = "Seal failed: ${e.message}"
+            statusByPk[pubkeyHex] = "failed"
+        } catch (e: Throwable) {
+            if (trigger == "manual") error = "Error: ${e.message}"
+            statusByPk[pubkeyHex] = "failed"
+        } finally {
+            if (trigger == "manual") busyPk = null
+        }
+    }
+
     LaunchedEffect(channelId) { refresh() }
+
+    // Auto-fanout polling loop. Cancelled when the
+    // composable leaves the composition. Sequences the
+    // per-subscriber seals — the UniFFI ChannelSigningKey
+    // and ChannelSubscriberKeypair calls hit the Rust
+    // runtime serially anyway, and serial avoids a burst
+    // of N parallel seals on a fresh subscriber storm.
+    LaunchedEffect(channelId) {
+        while (true) {
+            delay(SUBSCRIBERS_POLL_INTERVAL_MS)
+            refresh()
+            val list = subscribers ?: continue
+            for (pk in list) {
+                val st = statusByPk[pk]
+                if (st == null || st == "failed") {
+                    deliverTo(pk, "auto")
+                }
+            }
+        }
+    }
 
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -746,38 +820,7 @@ private fun SubscribersPanel(
                             busy = busyPk == pk,
                             status = statusByPk[pk],
                             onDeliver = {
-                                if (busyPk != null || keys == null) return@SubscriberRow
-                                busyPk = pk
-                                error = null
-                                scope.launch {
-                                    try {
-                                        val parsed = hexToBytesOrNull(pk)
-                                        if (parsed == null) {
-                                            error = "Bad subscriber pubkey hex."
-                                            return@launch
-                                        }
-                                        val wire =
-                                            ChannelsComposer.sealSubscriberSeedEnvelope(
-                                                subscriberPub = parsed,
-                                                channelIdHex = channelId,
-                                                epochId = epoch,
-                                                seed = keys.seed,
-                                            )
-                                        client.deliverEnvelope(channelId, pk, wire)
-                                        statusByPk[pk] = "delivered"
-                                    } catch (e: ChannelsApiException) {
-                                        error = "Deliver failed: ${e.code} — ${e.detail}"
-                                        statusByPk[pk] = "failed"
-                                    } catch (e: ChannelsComposerException) {
-                                        error = "Seal failed: ${e.message}"
-                                        statusByPk[pk] = "failed"
-                                    } catch (e: Throwable) {
-                                        error = "Error: ${e.message}"
-                                        statusByPk[pk] = "failed"
-                                    } finally {
-                                        busyPk = null
-                                    }
-                                }
+                                scope.launch { deliverTo(pk, "manual") }
                             },
                         )
                         Spacer(Modifier.height(6.dp))
@@ -817,9 +860,15 @@ private fun SubscriberRow(
             )
             Spacer(Modifier.width(6.dp))
             status?.let { s ->
+                val (label, color) = when (s) {
+                    "delivered" -> "delivered" to Theme.accent
+                    "auto"      -> "auto-delivered" to Theme.accent
+                    "failed"    -> "failed" to Theme.destructive
+                    else        -> s to Theme.textSecondary
+                }
                 Text(
-                    s,
-                    color = if (s == "delivered") Theme.accent else Theme.destructive,
+                    label,
+                    color = color,
                     fontSize = 11.sp,
                 )
                 Spacer(Modifier.width(6.dp))

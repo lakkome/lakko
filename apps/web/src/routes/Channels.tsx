@@ -741,14 +741,26 @@ const ChannelView: Component = () => {
 // (lives inside ChannelView when the user holds publisher keys)
 // ============================================================================
 
+/** Auto-fanout poll cadence — every 5 s the publisher
+ *  panel re-fetches the subscriber list, diffs against
+ *  the already-delivered set, and auto-seals an envelope
+ *  for each new pubkey. 5 s is the same trade-off the
+ *  subscribe-screen poll uses on the other side. */
+const SUBSCRIBERS_POLL_INTERVAL_MS = 5_000;
+
 const SubscribersPanel: Component<{ readonly channelIdHex: string }> = (
   props,
 ) => {
   const [subs, setSubs] = createSignal<ReadonlyArray<string> | null>(null);
   const [busyPk, setBusyPk] = createSignal<string | null>(null);
   const [error, setError] = createSignal<string | null>(null);
+  /** Per-subscriber delivery status. `"auto"` means the
+   *  polling loop sealed + delivered without a manual
+   *  button click; `"delivered"` means the publisher
+   *  clicked Deliver seed; `"failed"` covers both
+   *  manual and auto-trigger failures. */
   const [statusByPk, setStatusByPk] = createSignal<
-    ReadonlyMap<string, "delivered" | "failed">
+    ReadonlyMap<string, "delivered" | "auto" | "failed">
   >(new Map());
 
   async function refresh(): Promise<void> {
@@ -763,15 +775,26 @@ const SubscribersPanel: Component<{ readonly channelIdHex: string }> = (
   // First-load fetch.
   void refresh();
 
-  async function deliverTo(pubkeyHex: string): Promise<void> {
-    if (busyPk() !== null) return;
+  async function deliverTo(
+    pubkeyHex: string,
+    trigger: "manual" | "auto" = "manual",
+  ): Promise<void> {
+    // Manual delivery is one-at-a-time (single busy
+    // spinner across the panel). The auto path ignores
+    // busyPk so a slow manual click on one subscriber
+    // does not stall the polling loop's progress on
+    // others — auto-triggered deliveries are tracked
+    // only through statusByPk.
+    if (trigger === "manual" && busyPk() !== null) return;
     const keys = channelsState.keysByChannel().get(props.channelIdHex);
     if (keys === undefined) {
       setError("No publisher keys on this device.");
       return;
     }
-    setBusyPk(pubkeyHex);
-    setError(null);
+    if (trigger === "manual") {
+      setBusyPk(pubkeyHex);
+      setError(null);
+    }
     try {
       const subPubBytes = new Uint8Array(pubkeyHex.length / 2);
       for (let i = 0; i < subPubBytes.length; i += 1) {
@@ -785,18 +808,57 @@ const SubscribersPanel: Component<{ readonly channelIdHex: string }> = (
         keys.seed,
       );
       await deliverEnvelope(props.channelIdHex, pubkeyHex, wire);
-      setStatusByPk((m) => new Map(m).set(pubkeyHex, "delivered"));
+      setStatusByPk((m) =>
+        new Map(m).set(pubkeyHex, trigger === "auto" ? "auto" : "delivered"),
+      );
     } catch (err) {
-      if (apiError.is(err)) {
-        setError(`Deliver failed: ${err.code} — ${err.detail}`);
-      } else {
-        setError(`Deliver failed: ${String(err)}`);
+      if (trigger === "manual") {
+        if (apiError.is(err)) {
+          setError(`Deliver failed: ${err.code} — ${err.detail}`);
+        } else {
+          setError(`Deliver failed: ${String(err)}`);
+        }
       }
       setStatusByPk((m) => new Map(m).set(pubkeyHex, "failed"));
     } finally {
-      setBusyPk(null);
+      if (trigger === "manual") {
+        setBusyPk(null);
+      }
     }
   }
+
+  // Auto-fanout polling loop. Every SUBSCRIBERS_POLL_INTERVAL_MS:
+  //   1. refresh the list
+  //   2. for every pubkey we have not yet successfully
+  //      delivered to (status is absent or "failed"),
+  //      auto-seal + deliver.
+  // Cancelled on component cleanup via onCleanup, same
+  // pattern as the subscribe-screen poll. The opacity
+  // contract is unchanged — every envelope still computed
+  // client-side under the publisher's content-key seed.
+  createEffect(() => {
+    const handle = setInterval(() => {
+      void (async (): Promise<void> => {
+        await refresh();
+        const list = subs();
+        if (list === null) return;
+        const status = statusByPk();
+        // Sequence the auto-deliveries so we don't open
+        // N parallel sealSubscriberSeedEnvelope WASM
+        // calls on a fresh subscriber storm — the WASM
+        // module is single-threaded.
+        for (const pk of list) {
+          const st = status.get(pk);
+          if (st === undefined || st === "failed") {
+            await deliverTo(pk, "auto");
+          }
+        }
+      })();
+    }, SUBSCRIBERS_POLL_INTERVAL_MS);
+    onCleanup(() => {
+      clearInterval(handle);
+    });
+  });
 
   return (
     <div
@@ -875,7 +937,7 @@ const SubscribersPanel: Component<{ readonly channelIdHex: string }> = (
         <ul style={{ "list-style": "none", padding: "0", margin: "0" }}>
           <For each={subs()!}>
             {(pk): JSX.Element => {
-              const status = (): "delivered" | "failed" | undefined =>
+              const status = (): "delivered" | "auto" | "failed" | undefined =>
                 statusByPk().get(pk);
               return (
                 <li
@@ -910,6 +972,18 @@ const SubscribersPanel: Component<{ readonly channelIdHex: string }> = (
                       }}
                     >
                       delivered
+                    </span>
+                  </Show>
+                  <Show when={status() === "auto"}>
+                    <span
+                      style={{
+                        color: COLOURS.accentBlue,
+                        "font-family": "inherit",
+                        "font-size": "11px",
+                      }}
+                      title="Auto-delivered by the 5 s polling loop"
+                    >
+                      auto-delivered
                     </span>
                   </Show>
                   <Show when={status() === "failed"}>

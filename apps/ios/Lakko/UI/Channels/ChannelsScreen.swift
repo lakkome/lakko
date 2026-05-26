@@ -488,6 +488,13 @@ struct ChannelDetailScreen: View {
 //  publisher keys for this channel)
 // ============================================================================
 
+/// Auto-fanout poll cadence — every 5 s the publisher
+/// panel re-fetches the subscriber list, diffs against
+/// the already-delivered set, and auto-seals an envelope
+/// for each new pubkey. Same cadence the subscribe-screen
+/// poll uses on the receive side.
+private let subscribersPollIntervalNs: UInt64 = 5_000_000_000
+
 struct SubscribersPanelView: View {
     let channelId: String
     @ObservedObject var state: ChannelsUiState
@@ -496,8 +503,9 @@ struct SubscribersPanelView: View {
     @State private var subscribers: [String]?
     @State private var busyPk: String?
     @State private var error: String?
-    private enum Status { case delivered, failed }
+    private enum Status { case delivered, auto, failed }
     @State private var statusByPk: [String: Status] = [:]
+    @State private var pollTask: Task<Void, Never>?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -548,7 +556,11 @@ struct SubscribersPanelView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Theme.surface)
         .clipShape(RoundedRectangle(cornerRadius: 8))
-        .task { await refresh() }
+        .task {
+            await refresh()
+            startAutoFanoutLoop()
+        }
+        .onDisappear { pollTask?.cancel() }
     }
 
     private func subscriberRow(_ pk: String) -> some View {
@@ -560,9 +572,16 @@ struct SubscribersPanelView: View {
                 .truncationMode(.middle)
 
             if let st = statusByPk[pk] {
-                Text(st == .delivered ? "delivered" : "failed")
+                let (label, color): (String, Color) = {
+                    switch st {
+                    case .delivered: return ("delivered", Theme.accent)
+                    case .auto:      return ("auto-delivered", Theme.accent)
+                    case .failed:    return ("failed", Theme.destructive)
+                    }
+                }()
+                Text(label)
                     .font(.caption2)
-                    .foregroundStyle(st == .delivered ? Theme.accent : Theme.destructive)
+                    .foregroundStyle(color)
             }
 
             Spacer(minLength: 4)
@@ -596,18 +615,31 @@ struct SubscribersPanelView: View {
         }
     }
 
-    private func deliverTo(_ pubkeyHex: String) async {
-        if busyPk != nil { return }
+    private enum DeliverTrigger { case manual, auto }
+
+    private func deliverTo(
+        _ pubkeyHex: String,
+        trigger: DeliverTrigger = .manual
+    ) async {
+        // Manual delivery is one-at-a-time (single busy
+        // spinner across the panel). The auto path
+        // ignores `busyPk` so a slow manual click on one
+        // subscriber does not stall the polling loop's
+        // progress on others.
+        if trigger == .manual && busyPk != nil { return }
         guard let keys = state.keysByChannel[channelId] else {
             error = "No publisher keys on this device."
             return
         }
-        busyPk = pubkeyHex
-        error = nil
-        defer { busyPk = nil }
+        if trigger == .manual {
+            busyPk = pubkeyHex
+            error = nil
+        }
+        defer { if trigger == .manual { busyPk = nil } }
         do {
             guard let subPub = Data(channelHex: pubkeyHex) else {
-                error = "Bad subscriber pubkey hex."
+                if trigger == .manual { error = "Bad subscriber pubkey hex." }
+                statusByPk[pubkeyHex] = .failed
                 return
             }
             let epoch = state.epochByChannel[channelId] ?? 0
@@ -622,16 +654,50 @@ struct SubscribersPanelView: View {
                 subscriberPubkeyHex: pubkeyHex,
                 envelope: wire
             )
-            statusByPk[pubkeyHex] = .delivered
+            statusByPk[pubkeyHex] = trigger == .auto ? .auto : .delivered
         } catch let err as ChannelsApiError {
-            error = "Deliver failed: \(err.code) — \(err.detail)"
+            if trigger == .manual {
+                error = "Deliver failed: \(err.code) — \(err.detail)"
+            }
             statusByPk[pubkeyHex] = .failed
         } catch let err as ChannelsComposerError {
-            error = "Seal failed: \(err)"
+            if trigger == .manual { error = "Seal failed: \(err)" }
             statusByPk[pubkeyHex] = .failed
         } catch {
-            self.error = "Error: \(error.localizedDescription)"
+            if trigger == .manual {
+                self.error = "Error: \(error.localizedDescription)"
+            }
             statusByPk[pubkeyHex] = .failed
+        }
+    }
+
+    /// Start the auto-fanout polling loop. Every
+    /// `subscribersPollIntervalNs`: refresh the list,
+    /// then auto-deliver to any pubkey we have not
+    /// successfully delivered to yet. Cancellable via
+    /// `pollTask?.cancel()` in `.onDisappear`.
+    private func startAutoFanoutLoop() {
+        pollTask?.cancel()
+        pollTask = Task {
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: subscribersPollIntervalNs)
+                if Task.isCancelled { return }
+                await refresh()
+                guard let list = subscribers else { continue }
+                // Sequence the auto-deliveries — UniFFI
+                // ChannelSigningKey / ChannelSubscriberKeypair
+                // calls each hit the Rust runtime
+                // serially anyway, and serial avoids a
+                // burst of N parallel seals on a fresh
+                // subscriber storm.
+                for pk in list {
+                    if Task.isCancelled { return }
+                    let st = statusByPk[pk]
+                    if st == nil || st == .failed {
+                        await deliverTo(pk, trigger: .auto)
+                    }
+                }
+            }
         }
     }
 }
