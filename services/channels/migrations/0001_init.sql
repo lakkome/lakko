@@ -28,10 +28,21 @@
 --                             replaced on rotation, matching the
 --                             ADR-0010 N=1 retention model.
 --
--- Retention: posts + envelopes are kept forever for now — Phase 4
--- explicitly punts retention to a follow-up sprint when channels
--- start carrying real traffic and a pruning policy can be
--- calibrated against actual usage.
+-- Retention:
+--   * `channel_posts` is pruned by the background loop in
+--     `src/main.rs::run_prune_loop` — defaults to 30 days,
+--     overridable via `LAKKO_CHANNELS_RETENTION_SECS`.
+--     `next_cursor` is NOT rolled back on prune so a
+--     paginating subscriber's resume point stays monotone.
+--   * `channel_envelopes` is latest-wins (UPSERT on
+--     rotation); no TTL — an envelope is replaced when a
+--     new one for the same (channel, subscriber) lands,
+--     and dropped when the subscriber un-follows
+--     (FK ON DELETE CASCADE).
+--   * `channel_subscribers` has no TTL — un-follow is
+--     explicit. Stale-subscriber GC is a follow-up
+--     sprint once we have signal about the distribution
+--     of actual subscriber lifetimes.
 
 -- ============================================================
 -- channels

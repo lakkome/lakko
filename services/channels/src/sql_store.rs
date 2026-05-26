@@ -200,6 +200,31 @@ impl ChannelStore for SqlChannelStore {
             .unwrap_or(0)
     }
 
+    async fn prune_posts_older_than(
+        &self,
+        cutoff_ms: u64,
+    ) -> Result<u64, StorageError> {
+        // Single bulk DELETE — the per-channel indexes
+        // (`PRIMARY KEY (channel_id, cursor)` +
+        // `INDEX idx_channel_cursor`) keep this fast
+        // even against a multi-million-row table because
+        // the cutoff column is monotone-ish per channel
+        // (server timestamps grow with cursors). A
+        // future optimization would partition by month;
+        // out of scope for the MVP retention sprint.
+        //
+        // `channels.next_cursor` is deliberately NOT
+        // rolled back — cursors stay monotone across
+        // pruning so a paginating subscriber's resume
+        // point keeps pointing at the right survivor.
+        let result = sqlx::query("DELETE FROM channel_posts WHERE server_ts_ms < ?")
+            .bind(cutoff_ms)
+            .execute(&self.pool)
+            .await
+            .map_err(db_err)?;
+        Ok(result.rows_affected())
+    }
+
     async fn subscribe(
         &self,
         channel: ChannelId,

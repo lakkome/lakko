@@ -238,6 +238,25 @@ pub trait ChannelStore: Send + Sync {
     /// Total number of posts stored across every channel.
     async fn total_posts(&self) -> usize;
 
+    /// Delete every post across every channel whose
+    /// `server_ts_ms` is strictly less than
+    /// `cutoff_ms`. Returns the number of rows that were
+    /// removed. Idempotent and safe to run concurrently
+    /// with `put` / `fetch` (the in-memory impl holds the
+    /// write lock for the duration of the prune; the
+    /// SQL impl emits a single bulk DELETE).
+    ///
+    /// Cursor counters on `channels.next_cursor` are
+    /// **not** rolled back — cursors stay monotone across
+    /// pruning so a paginating subscriber's
+    /// `WHERE cursor > ?` resume point continues to
+    /// point at the same post if it survived, and at the
+    /// next-survivor otherwise.
+    async fn prune_posts_older_than(
+        &self,
+        cutoff_ms: u64,
+    ) -> Result<u64, StorageError>;
+
     /// Register a subscriber against the channel.
     async fn subscribe(
         &self,
@@ -440,6 +459,20 @@ impl ChannelStore for InMemoryChannelStore {
             .values()
             .map(Vec::len)
             .sum()
+    }
+
+    async fn prune_posts_older_than(
+        &self,
+        cutoff_ms: u64,
+    ) -> Result<u64, StorageError> {
+        let mut guard = self.inner.write().await;
+        let mut removed: u64 = 0;
+        for posts in guard.posts.values_mut() {
+            let before = posts.len();
+            posts.retain(|p| p.server_ts_ms >= cutoff_ms);
+            removed = removed.saturating_add((before - posts.len()) as u64);
+        }
+        Ok(removed)
     }
 
     /// Register a subscriber's X25519 public key for the
@@ -1019,5 +1052,96 @@ mod tests {
         s.create(c).await.unwrap();
         let new_epoch = s.rotate(c, vec![], 80).await.unwrap();
         assert_eq!(new_epoch, 1);
+    }
+
+    // -----------------------------------------------------
+    // prune_posts_older_than (G4-1-retention)
+    // -----------------------------------------------------
+
+    #[tokio::test]
+    async fn prune_removes_old_posts_keeps_fresh() {
+        let s = InMemoryChannelStore::new();
+        let c = cid(0xA1);
+        s.create(c).await.unwrap();
+        // Five posts at timestamps 100, 200, 300, 400, 500.
+        for i in 1..=5 {
+            s.put(c, vec![u8::try_from(i).unwrap()], 1024, i * 100).await.unwrap();
+        }
+        // Cutoff at 350 — drops the three oldest (100,
+        // 200, 300).
+        let removed = s.prune_posts_older_than(350).await.unwrap();
+        assert_eq!(removed, 3);
+        // Two survivors remain (400, 500). Cursors are
+        // preserved on the survivors — fetch starting at
+        // 0 returns them in cursor order.
+        let survivors = s.fetch(c, 0, 100).await.unwrap();
+        assert_eq!(survivors.len(), 2);
+        assert_eq!(survivors[0].server_ts_ms, 400);
+        assert_eq!(survivors[1].server_ts_ms, 500);
+    }
+
+    #[tokio::test]
+    async fn prune_with_future_cutoff_drops_everything() {
+        let s = InMemoryChannelStore::new();
+        let c = cid(0xA2);
+        s.create(c).await.unwrap();
+        for i in 1..=3 {
+            s.put(c, vec![u8::try_from(i).unwrap()], 1024, i * 100).await.unwrap();
+        }
+        let removed = s.prune_posts_older_than(u64::MAX).await.unwrap();
+        assert_eq!(removed, 3);
+        assert_eq!(s.fetch(c, 0, 100).await.unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn prune_with_zero_cutoff_drops_nothing() {
+        let s = InMemoryChannelStore::new();
+        let c = cid(0xA3);
+        s.create(c).await.unwrap();
+        s.put(c, vec![1], 1024, 100).await.unwrap();
+        s.put(c, vec![2], 1024, 200).await.unwrap();
+        let removed = s.prune_posts_older_than(0).await.unwrap();
+        assert_eq!(removed, 0);
+        assert_eq!(s.fetch(c, 0, 100).await.unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn prune_preserves_cursor_monotonicity() {
+        // A subscriber paginating with WHERE cursor > ?
+        // must not see cursors reused after a prune. We
+        // verify by checking that put-after-prune assigns
+        // a strictly-greater cursor than the highest
+        // pre-prune cursor (i.e. `next_cursor` was not
+        // rolled back).
+        let s = InMemoryChannelStore::new();
+        let c = cid(0xA4);
+        s.create(c).await.unwrap();
+        let a = s.put(c, vec![1], 1024, 100).await.unwrap();
+        let b = s.put(c, vec![2], 1024, 200).await.unwrap();
+        assert_eq!(a.cursor, 1);
+        assert_eq!(b.cursor, 2);
+        s.prune_posts_older_than(u64::MAX).await.unwrap();
+        let c3 = s.put(c, vec![3], 1024, 300).await.unwrap();
+        // Cursor 3 — not 1 — proves next_cursor survived.
+        assert_eq!(c3.cursor, 3);
+    }
+
+    #[tokio::test]
+    async fn prune_runs_across_multiple_channels() {
+        let s = InMemoryChannelStore::new();
+        let c1 = cid(0xB1);
+        let c2 = cid(0xB2);
+        s.create(c1).await.unwrap();
+        s.create(c2).await.unwrap();
+        s.put(c1, vec![1], 1024, 100).await.unwrap();
+        s.put(c1, vec![2], 1024, 500).await.unwrap();
+        s.put(c2, vec![3], 1024, 200).await.unwrap();
+        s.put(c2, vec![4], 1024, 600).await.unwrap();
+        // Cutoff 300 — drops the 100 and 200 timestamps,
+        // one from each channel.
+        let removed = s.prune_posts_older_than(300).await.unwrap();
+        assert_eq!(removed, 2);
+        assert_eq!(s.fetch(c1, 0, 100).await.unwrap().len(), 1);
+        assert_eq!(s.fetch(c2, 0, 100).await.unwrap().len(), 1);
     }
 }

@@ -61,7 +61,7 @@ The Phase 3 closeout punch list — gap inventory + sprint waves with exit crite
 | `auth` | OPAQUE-PAKE + WebAuthn passkey, no PII stored |
 | `ds` | MLS Delivery Service (FIFO journal per group) |
 | `storage` | Ciphertext blob proxy in front of SeaweedFS |
-| `channels` | Phase 4 channel-broadcast backend. Publisher / subscriber / rotation paths complete. `ChannelStore` trait with two impls: `InMemoryChannelStore` (test default, dev fallback) + `SqlChannelStore` (MariaDB, production; migrations under `services/channels/migrations/0001_init.sql`). Toggled at boot via `LAKKO_CHANNELS_DATABASE_URL`. Server stays opaque — never decrypts `ChannelPost` bytes or HPKE seed envelopes; `lakko-channels` crate is `dev-dep` only. See [`docs/security/calls.md`](docs/security/calls.md) C-40..C-42 |
+| `channels` | Phase 4 channel-broadcast backend. Publisher / subscriber / rotation paths complete. `ChannelStore` trait with two impls: `InMemoryChannelStore` (test default, dev fallback) + `SqlChannelStore` (MariaDB, production; migrations under `services/channels/migrations/0001_init.sql`). Toggled at boot via `LAKKO_CHANNELS_DATABASE_URL`. Background prune loop (default 30-day TTL, hourly cadence, configurable via `LAKKO_CHANNELS_RETENTION_SECS` + `LAKKO_CHANNELS_PRUNE_INTERVAL_SECS`). Server stays opaque — never decrypts `ChannelPost` bytes or HPKE seed envelopes; `lakko-channels` crate is `dev-dep` only. See [`docs/security/calls.md`](docs/security/calls.md) C-40..C-42 |
 | `edge` | Broadcast cascade + audio room signaling |
 | `discovery` | Username lookup via OPRF |
 | `push-gw` | Fan-out APNs / FCM / UnifiedPush |

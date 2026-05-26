@@ -27,6 +27,17 @@ const DEFAULT_MAX_POST_BYTES: usize = 17 * 1024 * 1024;
 const DEFAULT_FETCH_LIMIT: usize = 50;
 /// Hard cap on the fetch endpoint's `limit` query param.
 const DEFAULT_FETCH_LIMIT_MAX: usize = 500;
+/// Default post retention — 30 days, matching the DS
+/// service's mailbox retention. Posts older than this
+/// are pruned by the background loop. Subscribers
+/// offline longer than the retention lose access to
+/// pre-retention posts but can still fetch anything
+/// since their last cursor.
+const DEFAULT_RETENTION_SECS: u64 = 30 * 24 * 3600;
+/// Default cadence for the background prune loop — once
+/// an hour. Hot path is a single bulk DELETE on the SQL
+/// impl; a tighter cadence buys nothing.
+const DEFAULT_PRUNE_INTERVAL_SECS: u64 = 3600;
 
 /// Failure modes when loading the runtime config.
 #[derive(Debug, Error)]
@@ -66,6 +77,18 @@ pub struct Config {
     /// `DATABASE_URL` so a single-service `cargo run`
     /// dev workflow does not need both vars.
     pub database_url: Option<String>,
+    /// Post retention in seconds. Posts whose
+    /// `server_ts_ms` is older than
+    /// `now_ms - retention_secs * 1000` are pruned by
+    /// the background loop. `0` disables retention
+    /// entirely (the loop still runs but issues a no-op
+    /// log line).
+    pub retention_secs: u64,
+    /// Cadence of the background prune loop in
+    /// seconds. `0` disables the loop — useful for
+    /// integration tests that want to drive prune
+    /// manually.
+    pub prune_interval_secs: u64,
 }
 
 impl Config {
@@ -95,14 +118,33 @@ impl Config {
             .ok()
             .or_else(|| env::var("DATABASE_URL").ok())
             .filter(|s| !s.is_empty());
+        let retention_secs =
+            parse_u64("LAKKO_CHANNELS_RETENTION_SECS", DEFAULT_RETENTION_SECS)?;
+        let prune_interval_secs = parse_u64(
+            "LAKKO_CHANNELS_PRUNE_INTERVAL_SECS",
+            DEFAULT_PRUNE_INTERVAL_SECS,
+        )?;
         Ok(Self {
             bind,
             max_post_bytes,
             fetch_limit_default,
             fetch_limit_max,
             database_url,
+            retention_secs,
+            prune_interval_secs,
         })
     }
+}
+
+fn parse_u64(name: &'static str, fallback: u64) -> Result<u64, ConfigError> {
+    let raw = match env::var(name) {
+        Ok(v) if !v.is_empty() => v,
+        _ => return Ok(fallback),
+    };
+    raw.parse::<u64>().map_err(|_| ConfigError::Invalid {
+        name,
+        detail: format!("expected unsigned integer, got {raw:?}"),
+    })
 }
 
 fn parse_socket(name: &'static str, fallback: &str) -> Result<SocketAddr, ConfigError> {
