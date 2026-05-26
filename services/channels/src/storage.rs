@@ -27,6 +27,59 @@ use std::sync::Arc;
 
 use tokio::sync::RwLock;
 
+/// 32-byte subscriber X25519 public key, used as the
+/// subscriber's identifier on the wire. Stored as 64-char
+/// lowercase hex in URLs; this type is the parsed binary
+/// form. The server NEVER does Diffie-Hellman against this
+/// key — it only matches identities in the registry. The
+/// publisher derives the per-subscriber HPKE envelope
+/// using this same pubkey (see
+/// [`lakko_channels::subscribe::seal_seed`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct SubscriberId([u8; 32]);
+
+impl SubscriberId {
+    /// Build from a 32-byte slice.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError::BadSubscriberId`] when the
+    /// input is not 32 bytes.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, StorageError> {
+        if bytes.len() != 32 {
+            return Err(StorageError::BadSubscriberId);
+        }
+        let mut out = [0u8; 32];
+        out.copy_from_slice(bytes);
+        Ok(Self(out))
+    }
+
+    /// Build from a 64-char lowercase hex string.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError::BadSubscriberId`] when the
+    /// input is not 64 hex chars.
+    pub fn from_hex(hex_str: &str) -> Result<Self, StorageError> {
+        let bytes = hex::decode(hex_str).map_err(|_| StorageError::BadSubscriberId)?;
+        Self::from_bytes(&bytes)
+    }
+
+    /// Render as 64-char lowercase hex.
+    #[must_use]
+    pub fn to_hex(self) -> String {
+        hex::encode(self.0)
+    }
+
+    /// Borrow the underlying bytes — the subscriber's
+    /// X25519 public key, ready for
+    /// `lakko_channels::subscribe::seal_seed`.
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
 /// 16-byte channel pseudonym. Stored as 32-char lowercase
 /// hex in the URL; this type is the parsed binary form.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -97,11 +150,17 @@ pub enum StorageError {
     /// Channel id was not 16 bytes / 32 hex chars.
     #[error("channel id must be 16 bytes (32 hex chars)")]
     BadChannelId,
+    /// Subscriber id was not 32 bytes / 64 hex chars.
+    #[error("subscriber id must be 32 bytes (64 hex chars)")]
+    BadSubscriberId,
     /// Channel does not exist in the registry. Clients must
     /// call `POST /v1/channels` to register it before
     /// posting.
     #[error("channel not found")]
     UnknownChannel,
+    /// Subscriber is not registered for this channel.
+    #[error("subscriber not found in this channel")]
+    UnknownSubscriber,
     /// Post body exceeded the configured per-post cap.
     #[error("post body exceeds {max} bytes (got {got})")]
     PostTooLarge {
@@ -115,6 +174,18 @@ pub enum StorageError {
     /// storage gate as an early sanity check.
     #[error("post body is empty")]
     EmptyPost,
+    /// HPKE seed envelope did not match the expected size
+    /// `lakko_channels::subscribe::SEED_ENVELOPE_LEN`.
+    /// The server validates the byte length only — it
+    /// never inspects the envelope content.
+    #[error("seed envelope must be exactly {expected} bytes (got {got})")]
+    BadEnvelopeLen {
+        /// Required length (pinned to
+        /// `lakko_channels::subscribe::SEED_ENVELOPE_LEN`).
+        expected: usize,
+        /// Length the caller actually delivered.
+        got: usize,
+    },
 }
 
 /// In-memory state container. Cheap to clone — the inner
@@ -131,6 +202,21 @@ struct Inner {
     /// Next cursor to hand out per channel (1-based; 0 is
     /// reserved as "before any post" in the fetch query).
     next_cursor: HashMap<ChannelId, u64>,
+    /// Channel id → set of registered subscribers.
+    /// `HashMap` rather than `HashSet` lets us iterate in
+    /// insertion-stable order on the publisher's fan-out
+    /// path; the value is the registration timestamp
+    /// (unix-ms) to surface a "subscribed at" field if
+    /// the future-self wants it.
+    subscribers: HashMap<ChannelId, HashMap<SubscriberId, u64>>,
+    /// (Channel, Subscriber) → latest HPKE-sealed seed
+    /// envelope the publisher delivered. Latest-wins;
+    /// the previous envelope is replaced on every
+    /// publish, matching ADR-0010's "the most recent N
+    /// seed envelopes per subscriber" retention model
+    /// (N=1 in this MVP — multi-epoch retention is a
+    /// follow-up).
+    envelopes: HashMap<(ChannelId, SubscriberId), Vec<u8>>,
 }
 
 impl ChannelStore {
@@ -230,6 +316,156 @@ impl ChannelStore {
             .posts
             .values()
             .map(Vec::len)
+            .sum()
+    }
+
+    /// Register a subscriber's X25519 public key for the
+    /// channel. Idempotent — repeated calls with the same
+    /// pubkey just update the registration timestamp.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError::UnknownChannel`] when the
+    /// channel was never registered via [`Self::create`].
+    pub async fn subscribe(
+        &self,
+        channel: ChannelId,
+        subscriber: SubscriberId,
+        server_ts_ms: u64,
+    ) -> Result<(), StorageError> {
+        let mut guard = self.inner.write().await;
+        if !guard.posts.contains_key(&channel) {
+            return Err(StorageError::UnknownChannel);
+        }
+        guard
+            .subscribers
+            .entry(channel)
+            .or_default()
+            .insert(subscriber, server_ts_ms);
+        Ok(())
+    }
+
+    /// `true` if the subscriber is registered against the
+    /// channel.
+    pub async fn is_subscribed(
+        &self,
+        channel: ChannelId,
+        subscriber: SubscriberId,
+    ) -> bool {
+        self.inner
+            .read()
+            .await
+            .subscribers
+            .get(&channel)
+            .is_some_and(|set| set.contains_key(&subscriber))
+    }
+
+    /// List every subscriber currently registered against
+    /// the channel. Used by the publisher to fan out
+    /// per-subscriber HPKE seed envelopes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError::UnknownChannel`] when the
+    /// channel is unknown.
+    pub async fn list_subscribers(
+        &self,
+        channel: ChannelId,
+    ) -> Result<Vec<SubscriberId>, StorageError> {
+        let guard = self.inner.read().await;
+        if !guard.posts.contains_key(&channel) {
+            return Err(StorageError::UnknownChannel);
+        }
+        Ok(guard
+            .subscribers
+            .get(&channel)
+            .map(|set| set.keys().copied().collect())
+            .unwrap_or_default())
+    }
+
+    /// Store the publisher-supplied HPKE seed envelope for
+    /// a specific (channel, subscriber). The server never
+    /// inspects `envelope` — it stores opaque bytes and
+    /// hands them back unchanged on the matching GET.
+    ///
+    /// # Errors
+    ///
+    /// - [`StorageError::UnknownChannel`] — channel was
+    ///   never registered.
+    /// - [`StorageError::UnknownSubscriber`] — subscriber
+    ///   has not registered against this channel.
+    /// - [`StorageError::BadEnvelopeLen`] — the byte
+    ///   length does not match `expected`. Callers pass
+    ///   `lakko_channels::subscribe::SEED_ENVELOPE_LEN`
+    ///   here.
+    pub async fn deliver_envelope(
+        &self,
+        channel: ChannelId,
+        subscriber: SubscriberId,
+        envelope: Vec<u8>,
+        expected_len: usize,
+    ) -> Result<(), StorageError> {
+        if envelope.len() != expected_len {
+            return Err(StorageError::BadEnvelopeLen {
+                expected: expected_len,
+                got: envelope.len(),
+            });
+        }
+        let mut guard = self.inner.write().await;
+        if !guard.posts.contains_key(&channel) {
+            return Err(StorageError::UnknownChannel);
+        }
+        let registered = guard
+            .subscribers
+            .get(&channel)
+            .is_some_and(|set| set.contains_key(&subscriber));
+        if !registered {
+            return Err(StorageError::UnknownSubscriber);
+        }
+        guard.envelopes.insert((channel, subscriber), envelope);
+        Ok(())
+    }
+
+    /// Fetch the most-recent HPKE seed envelope for the
+    /// (channel, subscriber) pair. Returns `Ok(None)` if
+    /// the subscriber is registered but no envelope has
+    /// been delivered yet (e.g. the subscriber registered
+    /// faster than the publisher's fan-out completed).
+    ///
+    /// # Errors
+    ///
+    /// - [`StorageError::UnknownChannel`] — channel is
+    ///   unknown.
+    /// - [`StorageError::UnknownSubscriber`] — subscriber
+    ///   has not registered against this channel.
+    pub async fn fetch_envelope(
+        &self,
+        channel: ChannelId,
+        subscriber: SubscriberId,
+    ) -> Result<Option<Vec<u8>>, StorageError> {
+        let guard = self.inner.read().await;
+        if !guard.posts.contains_key(&channel) {
+            return Err(StorageError::UnknownChannel);
+        }
+        let registered = guard
+            .subscribers
+            .get(&channel)
+            .is_some_and(|set| set.contains_key(&subscriber));
+        if !registered {
+            return Err(StorageError::UnknownSubscriber);
+        }
+        Ok(guard.envelopes.get(&(channel, subscriber)).cloned())
+    }
+
+    /// Total number of subscribers across every channel
+    /// — surfaced for the `/metrics` endpoint future-self.
+    pub async fn total_subscribers(&self) -> usize {
+        self.inner
+            .read()
+            .await
+            .subscribers
+            .values()
+            .map(HashMap::len)
             .sum()
     }
 }
@@ -341,5 +577,130 @@ mod tests {
     #[test]
     fn channel_id_rejects_non_hex() {
         assert!(ChannelId::from_hex(&"z".repeat(32)).is_err());
+    }
+
+    fn sid(b: u8) -> SubscriberId {
+        SubscriberId([b; 32])
+    }
+
+    #[tokio::test]
+    async fn subscribe_round_trip() {
+        let s = ChannelStore::new();
+        let c = cid(0x10);
+        let sub = sid(0x20);
+        s.create(c).await;
+        s.subscribe(c, sub, 1_700_000_000).await.unwrap();
+        assert!(s.is_subscribed(c, sub).await);
+        let list = s.list_subscribers(c).await.unwrap();
+        assert_eq!(list, vec![sub]);
+        assert_eq!(s.total_subscribers().await, 1);
+    }
+
+    #[tokio::test]
+    async fn subscribe_rejects_unknown_channel() {
+        let s = ChannelStore::new();
+        let err = s.subscribe(cid(0x10), sid(0x20), 0).await.unwrap_err();
+        assert!(matches!(err, StorageError::UnknownChannel));
+    }
+
+    #[tokio::test]
+    async fn subscribe_is_idempotent() {
+        let s = ChannelStore::new();
+        let c = cid(0x30);
+        let sub = sid(0x40);
+        s.create(c).await;
+        s.subscribe(c, sub, 1).await.unwrap();
+        s.subscribe(c, sub, 2).await.unwrap();
+        let list = s.list_subscribers(c).await.unwrap();
+        assert_eq!(list.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn deliver_envelope_round_trip() {
+        let s = ChannelStore::new();
+        let c = cid(0x50);
+        let sub = sid(0x60);
+        s.create(c).await;
+        s.subscribe(c, sub, 0).await.unwrap();
+        let envelope = vec![0xAAu8; 80]; // SEED_ENVELOPE_LEN
+        s.deliver_envelope(c, sub, envelope.clone(), 80)
+            .await
+            .unwrap();
+        let fetched = s.fetch_envelope(c, sub).await.unwrap().unwrap();
+        assert_eq!(fetched, envelope);
+    }
+
+    #[tokio::test]
+    async fn deliver_envelope_rejects_wrong_length() {
+        let s = ChannelStore::new();
+        let c = cid(0x70);
+        let sub = sid(0x80);
+        s.create(c).await;
+        s.subscribe(c, sub, 0).await.unwrap();
+        let err = s
+            .deliver_envelope(c, sub, vec![0u8; 79], 80)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            StorageError::BadEnvelopeLen {
+                expected: 80,
+                got: 79
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn deliver_envelope_rejects_unknown_subscriber() {
+        let s = ChannelStore::new();
+        let c = cid(0x90);
+        s.create(c).await;
+        let err = s
+            .deliver_envelope(c, sid(0xA0), vec![0u8; 80], 80)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StorageError::UnknownSubscriber));
+    }
+
+    #[tokio::test]
+    async fn fetch_envelope_returns_none_before_delivery() {
+        let s = ChannelStore::new();
+        let c = cid(0xB0);
+        let sub = sid(0xC0);
+        s.create(c).await;
+        s.subscribe(c, sub, 0).await.unwrap();
+        assert!(s.fetch_envelope(c, sub).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn envelope_latest_wins() {
+        let s = ChannelStore::new();
+        let c = cid(0xD0);
+        let sub = sid(0xE0);
+        s.create(c).await;
+        s.subscribe(c, sub, 0).await.unwrap();
+        s.deliver_envelope(c, sub, vec![0x11; 80], 80)
+            .await
+            .unwrap();
+        s.deliver_envelope(c, sub, vec![0x22; 80], 80)
+            .await
+            .unwrap();
+        let fetched = s.fetch_envelope(c, sub).await.unwrap().unwrap();
+        assert_eq!(fetched, vec![0x22; 80]);
+    }
+
+    #[test]
+    fn subscriber_id_hex_round_trip() {
+        let sub = sid(0xAB);
+        let hex = sub.to_hex();
+        assert_eq!(hex.len(), 64);
+        assert_eq!(SubscriberId::from_hex(&hex).unwrap(), sub);
+    }
+
+    #[test]
+    fn subscriber_id_rejects_wrong_length() {
+        assert!(SubscriberId::from_hex("abc").is_err());
+        assert!(SubscriberId::from_bytes(&[0u8; 31]).is_err());
+        assert!(SubscriberId::from_bytes(&[0u8; 33]).is_err());
     }
 }

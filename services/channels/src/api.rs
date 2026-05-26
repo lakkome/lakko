@@ -33,7 +33,15 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use crate::config::Config;
-use crate::storage::{ChannelId, ChannelStore, StorageError, StoredPost};
+use crate::storage::{ChannelId, ChannelStore, StorageError, StoredPost, SubscriberId};
+
+/// Seed-envelope wire length pinned to
+/// `lakko_channels::subscribe::SEED_ENVELOPE_LEN`. We don't
+/// pull that crate in here (the opacity invariant — see
+/// Cargo.toml comment) so the constant is mirrored as a
+/// `const _: () = assert!(...)` test in the integration
+/// suite where both crates are visible.
+pub const EXPECTED_ENVELOPE_LEN: usize = 80;
 
 /// Shared application state — config + storage handle.
 #[derive(Clone)]
@@ -117,6 +125,37 @@ pub struct FetchResponse {
     /// thread the next request without scanning the
     /// payload.
     pub next_after: u64,
+}
+
+/// Body for `POST /v1/channels/:id/subscribers`.
+#[derive(Deserialize)]
+pub struct SubscribeRequest {
+    /// 64-char lowercase hex of the subscriber's X25519
+    /// identity public key.
+    pub subscriber_pubkey_hex: String,
+}
+
+/// Response for `POST /v1/channels/:id/subscribers`.
+#[derive(Serialize)]
+pub struct SubscribeResponse {
+    /// Echoed subscriber pubkey hex.
+    pub subscriber_id: String,
+}
+
+/// Response for `GET /v1/channels/:id/subscribers`.
+#[derive(Serialize)]
+pub struct ListSubscribersResponse {
+    /// Subscriber pubkey hex strings, unordered.
+    pub subscribers: Vec<String>,
+}
+
+/// Response for `GET /v1/channels/:id/subscribers/:pubkey/envelope`.
+#[derive(Serialize)]
+pub struct EnvelopeView {
+    /// Opaque HPKE-sealed seed envelope, base64url
+    /// (no padding). Exactly `EXPECTED_ENVELOPE_LEN`
+    /// bytes pre-encode.
+    pub envelope_b64: String,
 }
 
 /// Wire-level error response.
@@ -216,6 +255,11 @@ async fn publish_post(
             Json(err("bad-channel-id", "channel_id must be 32 hex chars")),
         )
             .into_response(),
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(err("internal", "unexpected error")),
+        )
+            .into_response(),
     }
 }
 
@@ -263,6 +307,216 @@ async fn fetch_posts(
     }
 }
 
+/// `POST /v1/channels/:channel_id/subscribers` — register.
+async fn subscribe(
+    State(state): State<Arc<AppState>>,
+    Path(channel_id): Path<String>,
+    Json(req): Json<SubscribeRequest>,
+) -> Response {
+    let Ok(channel) = ChannelId::from_hex(&channel_id) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(err("bad-channel-id", "channel_id must be 32 hex chars")),
+        )
+            .into_response();
+    };
+    let Ok(sub) = SubscriberId::from_hex(&req.subscriber_pubkey_hex) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(err(
+                "bad-subscriber-id",
+                "subscriber_pubkey_hex must be 64 hex chars",
+            )),
+        )
+            .into_response();
+    };
+    let now = unix_ms();
+    match state.store.subscribe(channel, sub, now).await {
+        Ok(()) => (
+            StatusCode::CREATED,
+            Json(SubscribeResponse {
+                subscriber_id: sub.to_hex(),
+            }),
+        )
+            .into_response(),
+        Err(StorageError::UnknownChannel) => (
+            StatusCode::NOT_FOUND,
+            Json(err(
+                "unknown-channel",
+                "register the channel via POST /v1/channels first",
+            )),
+        )
+            .into_response(),
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(err("internal", "unexpected error")),
+        )
+            .into_response(),
+    }
+}
+
+/// `GET /v1/channels/:channel_id/subscribers` — list.
+async fn list_subscribers(
+    State(state): State<Arc<AppState>>,
+    Path(channel_id): Path<String>,
+) -> Response {
+    let Ok(channel) = ChannelId::from_hex(&channel_id) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(err("bad-channel-id", "channel_id must be 32 hex chars")),
+        )
+            .into_response();
+    };
+    match state.store.list_subscribers(channel).await {
+        Ok(list) => (
+            StatusCode::OK,
+            Json(ListSubscribersResponse {
+                subscribers: list.into_iter().map(SubscriberId::to_hex).collect(),
+            }),
+        )
+            .into_response(),
+        Err(StorageError::UnknownChannel) => (
+            StatusCode::NOT_FOUND,
+            Json(err("unknown-channel", "no such channel")),
+        )
+            .into_response(),
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(err("internal", "unexpected error")),
+        )
+            .into_response(),
+    }
+}
+
+/// `POST /v1/channels/:channel_id/subscribers/:pubkey_hex/envelope` — publisher delivers.
+async fn deliver_envelope(
+    State(state): State<Arc<AppState>>,
+    Path((channel_id, pubkey_hex)): Path<(String, String)>,
+    body: Bytes,
+) -> Response {
+    let Ok(channel) = ChannelId::from_hex(&channel_id) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(err("bad-channel-id", "channel_id must be 32 hex chars")),
+        )
+            .into_response();
+    };
+    let Ok(sub) = SubscriberId::from_hex(&pubkey_hex) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(err(
+                "bad-subscriber-id",
+                "subscriber pubkey must be 64 hex chars",
+            )),
+        )
+            .into_response();
+    };
+    match state
+        .store
+        .deliver_envelope(channel, sub, body.to_vec(), EXPECTED_ENVELOPE_LEN)
+        .await
+    {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(StorageError::UnknownChannel) => (
+            StatusCode::NOT_FOUND,
+            Json(err("unknown-channel", "no such channel")),
+        )
+            .into_response(),
+        Err(StorageError::UnknownSubscriber) => (
+            StatusCode::NOT_FOUND,
+            Json(err(
+                "unknown-subscriber",
+                "subscriber has not registered against this channel",
+            )),
+        )
+            .into_response(),
+        Err(StorageError::BadEnvelopeLen { expected, got }) => (
+            StatusCode::BAD_REQUEST,
+            Json(err(
+                "bad-envelope-len",
+                format!("envelope must be {expected} bytes (got {got})"),
+            )),
+        )
+            .into_response(),
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(err("internal", "unexpected error")),
+        )
+            .into_response(),
+    }
+}
+
+/// `GET /v1/channels/:channel_id/subscribers/:pubkey_hex/envelope` — subscriber pulls.
+async fn fetch_envelope(
+    State(state): State<Arc<AppState>>,
+    Path((channel_id, pubkey_hex)): Path<(String, String)>,
+) -> Response {
+    let Ok(channel) = ChannelId::from_hex(&channel_id) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(err("bad-channel-id", "channel_id must be 32 hex chars")),
+        )
+            .into_response();
+    };
+    let Ok(sub) = SubscriberId::from_hex(&pubkey_hex) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(err(
+                "bad-subscriber-id",
+                "subscriber pubkey must be 64 hex chars",
+            )),
+        )
+            .into_response();
+    };
+    match state.store.fetch_envelope(channel, sub).await {
+        Ok(Some(env)) => {
+            use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+            use base64::Engine as _;
+            (
+                StatusCode::OK,
+                Json(EnvelopeView {
+                    envelope_b64: URL_SAFE_NO_PAD.encode(&env),
+                }),
+            )
+                .into_response()
+        },
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(err(
+                "envelope-not-ready",
+                "no envelope delivered to this subscriber yet",
+            )),
+        )
+            .into_response(),
+        Err(StorageError::UnknownChannel) => (
+            StatusCode::NOT_FOUND,
+            Json(err("unknown-channel", "no such channel")),
+        )
+            .into_response(),
+        Err(StorageError::UnknownSubscriber) => (
+            StatusCode::NOT_FOUND,
+            Json(err(
+                "unknown-subscriber",
+                "subscriber has not registered against this channel",
+            )),
+        )
+            .into_response(),
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(err("internal", "unexpected error")),
+        )
+            .into_response(),
+    }
+}
+
+fn unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|d| u64::try_from(d.as_millis()).ok())
+        .unwrap_or(0)
+}
+
 /// Assemble the axum router. Used by both the production
 /// binary and integration tests.
 pub fn router(state: Arc<AppState>) -> Router {
@@ -271,6 +525,14 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route(
             "/v1/channels/{channel_id}/posts",
             post(publish_post).get(fetch_posts),
+        )
+        .route(
+            "/v1/channels/{channel_id}/subscribers",
+            post(subscribe).get(list_subscribers),
+        )
+        .route(
+            "/v1/channels/{channel_id}/subscribers/{pubkey_hex}/envelope",
+            post(deliver_envelope).get(fetch_envelope),
         )
         .route("/health", get(health))
         .route("/version", get(version))

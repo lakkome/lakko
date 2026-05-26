@@ -2313,6 +2313,7 @@ dependencies = [
  "base64 0.22.1",
  "dotenvy",
  "hex",
+ "lakko-channels",
  "reqwest",
  "serde",
  "serde_json",

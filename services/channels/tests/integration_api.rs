@@ -9,6 +9,8 @@
 
 use std::net::SocketAddr;
 
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine as _;
 use lakko_svc_channels::{router, AppState, ChannelStore, Config};
 use serde_json::json;
 use tokio::net::TcpListener;
@@ -186,10 +188,178 @@ async fn fetch_respects_limit() {
     assert_eq!(body["posts"].as_array().unwrap().len(), 3);
 }
 
+const SUB_HEX: &str =
+    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+#[tokio::test]
+async fn subscribe_to_unknown_channel_is_404() {
+    let addr = spawn().await;
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("http://{addr}/v1/channels/{CHANNEL_HEX}/subscribers"))
+        .json(&json!({ "subscriber_pubkey_hex": SUB_HEX }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["code"].as_str().unwrap(), "unknown-channel");
+}
+
+#[tokio::test]
+async fn subscribe_then_list_then_deliver_then_fetch() {
+    let addr = spawn().await;
+    let client = reqwest::Client::new();
+    // Create.
+    client
+        .post(format!("http://{addr}/v1/channels"))
+        .json(&json!({ "channel_id": CHANNEL_HEX }))
+        .send()
+        .await
+        .unwrap();
+    // Subscribe.
+    let resp = client
+        .post(format!("http://{addr}/v1/channels/{CHANNEL_HEX}/subscribers"))
+        .json(&json!({ "subscriber_pubkey_hex": SUB_HEX }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["subscriber_id"].as_str().unwrap(), SUB_HEX);
+    // List.
+    let resp = client
+        .get(format!("http://{addr}/v1/channels/{CHANNEL_HEX}/subscribers"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let subs = body["subscribers"].as_array().unwrap();
+    assert_eq!(subs.len(), 1);
+    assert_eq!(subs[0].as_str().unwrap(), SUB_HEX);
+    // Fetch before delivery → 404 envelope-not-ready.
+    let resp = client
+        .get(format!(
+            "http://{addr}/v1/channels/{CHANNEL_HEX}/subscribers/{SUB_HEX}/envelope"
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["code"].as_str().unwrap(), "envelope-not-ready");
+    // Deliver an envelope (80 bytes — SEED_ENVELOPE_LEN).
+    let envelope: Vec<u8> = (0..80u8).collect();
+    let resp = client
+        .post(format!(
+            "http://{addr}/v1/channels/{CHANNEL_HEX}/subscribers/{SUB_HEX}/envelope"
+        ))
+        .body(envelope.clone())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 204);
+    // Fetch — must return the envelope base64-encoded.
+    let resp = client
+        .get(format!(
+            "http://{addr}/v1/channels/{CHANNEL_HEX}/subscribers/{SUB_HEX}/envelope"
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let b64 = body["envelope_b64"].as_str().unwrap();
+    let decoded = URL_SAFE_NO_PAD.decode(b64).unwrap();
+    assert_eq!(decoded, envelope, "envelope must round-trip byte-identical");
+}
+
+#[tokio::test]
+async fn deliver_envelope_with_wrong_length_is_400() {
+    let addr = spawn().await;
+    let client = reqwest::Client::new();
+    client
+        .post(format!("http://{addr}/v1/channels"))
+        .json(&json!({ "channel_id": CHANNEL_HEX }))
+        .send()
+        .await
+        .unwrap();
+    client
+        .post(format!("http://{addr}/v1/channels/{CHANNEL_HEX}/subscribers"))
+        .json(&json!({ "subscriber_pubkey_hex": SUB_HEX }))
+        .send()
+        .await
+        .unwrap();
+    let resp = client
+        .post(format!(
+            "http://{addr}/v1/channels/{CHANNEL_HEX}/subscribers/{SUB_HEX}/envelope"
+        ))
+        .body(vec![0u8; 79]) // off by one
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["code"].as_str().unwrap(), "bad-envelope-len");
+}
+
+#[tokio::test]
+async fn deliver_to_unsubscribed_pubkey_is_404() {
+    let addr = spawn().await;
+    let client = reqwest::Client::new();
+    client
+        .post(format!("http://{addr}/v1/channels"))
+        .json(&json!({ "channel_id": CHANNEL_HEX }))
+        .send()
+        .await
+        .unwrap();
+    // No subscribe; jump straight to deliver.
+    let resp = client
+        .post(format!(
+            "http://{addr}/v1/channels/{CHANNEL_HEX}/subscribers/{SUB_HEX}/envelope"
+        ))
+        .body(vec![0u8; 80])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["code"].as_str().unwrap(), "unknown-subscriber");
+}
+
+#[tokio::test]
+async fn bad_subscriber_id_is_400() {
+    let addr = spawn().await;
+    let client = reqwest::Client::new();
+    client
+        .post(format!("http://{addr}/v1/channels"))
+        .json(&json!({ "channel_id": CHANNEL_HEX }))
+        .send()
+        .await
+        .unwrap();
+    let resp = client
+        .post(format!("http://{addr}/v1/channels/{CHANNEL_HEX}/subscribers"))
+        .json(&json!({ "subscriber_pubkey_hex": "shortie" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["code"].as_str().unwrap(), "bad-subscriber-id");
+}
+
+/// SubscribeRequest's expected envelope length must match
+/// `lakko_channels::subscribe::SEED_ENVELOPE_LEN`. Compile-
+/// time assertion so a future bump in either crate is
+/// caught by the build.
+const _ASSERT_ENVELOPE_LEN: () = assert!(
+    lakko_svc_channels::api::EXPECTED_ENVELOPE_LEN
+        == lakko_channels::SEED_ENVELOPE_LEN
+);
+
 #[tokio::test]
 async fn payload_round_trips_byte_identical() {
-    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-    use base64::Engine as _;
     let addr = spawn().await;
     let client = reqwest::Client::new();
     client
