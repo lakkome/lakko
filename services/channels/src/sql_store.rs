@@ -270,6 +270,52 @@ impl ChannelStore for SqlChannelStore {
         .is_some()
     }
 
+    async fn touch_subscriber_activity(
+        &self,
+        channel: ChannelId,
+        subscriber: SubscriberId,
+        now_ms: u64,
+    ) -> Result<(), StorageError> {
+        // Single UPDATE — `last_active_at` is a
+        // TIMESTAMP(3) column so we feed it the
+        // millisecond value via FROM_UNIXTIME. Affecting
+        // zero rows when the subscriber is not
+        // registered is intentional (no-op semantics).
+        sqlx::query(
+            "UPDATE channel_subscribers \
+             SET last_active_at = FROM_UNIXTIME(? / 1000.0) \
+             WHERE channel_id = ? AND subscriber_id = ?",
+        )
+        .bind(now_ms)
+        .bind(channel.as_bytes().as_slice())
+        .bind(subscriber.as_bytes().as_slice())
+        .execute(&self.pool)
+        .await
+        .map_err(db_err)?;
+        Ok(())
+    }
+
+    async fn prune_subscribers_older_than(
+        &self,
+        cutoff_ms: u64,
+    ) -> Result<u64, StorageError> {
+        // Single bulk DELETE. FK ON DELETE CASCADE on
+        // `channel_envelopes` cleans up the matching
+        // envelope rows automatically — no second query
+        // needed. The (last_active_at) index ferries
+        // this query past a full table scan even when
+        // the surviving subscriber set is the majority.
+        let result = sqlx::query(
+            "DELETE FROM channel_subscribers \
+             WHERE last_active_at < FROM_UNIXTIME(? / 1000.0)",
+        )
+        .bind(cutoff_ms)
+        .execute(&self.pool)
+        .await
+        .map_err(db_err)?;
+        Ok(result.rows_affected())
+    }
+
     async fn list_subscribers(
         &self,
         channel: ChannelId,

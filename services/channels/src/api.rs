@@ -498,6 +498,8 @@ async fn fetch_envelope(
     State(state): State<Arc<AppState>>,
     Path((channel_id, pubkey_hex)): Path<(String, String)>,
 ) -> Response {
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use base64::Engine as _;
     let Ok(channel) = ChannelId::from_hex(&channel_id) else {
         return (
             StatusCode::BAD_REQUEST,
@@ -517,8 +519,22 @@ async fn fetch_envelope(
     };
     match state.store.fetch_envelope(channel, sub).await {
         Ok(Some(env)) => {
-            use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-            use base64::Engine as _;
+            // Bump `last_active_at` so the
+            // stale-subscriber pruner does not GC this
+            // subscriber on its next tick. The
+            // subscriber's own poll loop (default 3 s on
+            // the client side) is the activity signal —
+            // no separate heartbeat protocol. Errors are
+            // silently swallowed: a failed touch only
+            // delays the inevitable GC, never breaks the
+            // GET response the caller is waiting on.
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+            let _ = state
+                .store
+                .touch_subscriber_activity(channel, sub, now_ms)
+                .await;
             (
                 StatusCode::OK,
                 Json(EnvelopeView {
@@ -527,14 +543,26 @@ async fn fetch_envelope(
             )
                 .into_response()
         },
-        Ok(None) => (
-            StatusCode::NOT_FOUND,
-            Json(err(
-                "envelope-not-ready",
-                "no envelope delivered to this subscriber yet",
-            )),
-        )
-            .into_response(),
+        Ok(None) => {
+            // Subscriber is registered but no envelope
+            // yet — still counts as activity (they're
+            // polling), so bump last_active_at.
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+            let _ = state
+                .store
+                .touch_subscriber_activity(channel, sub, now_ms)
+                .await;
+            (
+                StatusCode::NOT_FOUND,
+                Json(err(
+                    "envelope-not-ready",
+                    "no envelope delivered to this subscriber yet",
+                )),
+            )
+                .into_response()
+        },
         Err(StorageError::UnknownChannel) => (
             StatusCode::NOT_FOUND,
             Json(err("unknown-channel", "no such channel")),

@@ -34,6 +34,14 @@ const DEFAULT_FETCH_LIMIT_MAX: usize = 500;
 /// pre-retention posts but can still fetch anything
 /// since their last cursor.
 const DEFAULT_RETENTION_SECS: u64 = 30 * 24 * 3600;
+/// Default subscriber retention — 90 days. A subscriber
+/// whose client has not polled the envelope endpoint in
+/// this long is assumed gone for good; the pruner GCs
+/// them so the publisher's rotation fan-out does not
+/// scale with the number of historical-ever subscribers.
+/// `0` disables the stale-subscriber pruner entirely
+/// (loop still runs as no-op).
+const DEFAULT_SUBSCRIBER_RETENTION_SECS: u64 = 90 * 24 * 3600;
 /// Default cadence for the background prune loop — once
 /// an hour. Hot path is a single bulk DELETE on the SQL
 /// impl; a tighter cadence buys nothing.
@@ -84,6 +92,13 @@ pub struct Config {
     /// entirely (the loop still runs but issues a no-op
     /// log line).
     pub retention_secs: u64,
+    /// Subscriber retention in seconds. Subscribers
+    /// whose `last_active_at` is older than
+    /// `now_ms - subscriber_retention_secs * 1000` are
+    /// dropped by the background loop (FK cascade
+    /// cleans up their envelope). `0` disables the
+    /// stale-subscriber prune step.
+    pub subscriber_retention_secs: u64,
     /// Cadence of the background prune loop in
     /// seconds. `0` disables the loop — useful for
     /// integration tests that want to drive prune
@@ -120,6 +135,10 @@ impl Config {
             .filter(|s| !s.is_empty());
         let retention_secs =
             parse_u64("LAKKO_CHANNELS_RETENTION_SECS", DEFAULT_RETENTION_SECS)?;
+        let subscriber_retention_secs = parse_u64(
+            "LAKKO_CHANNELS_SUBSCRIBER_RETENTION_SECS",
+            DEFAULT_SUBSCRIBER_RETENTION_SECS,
+        )?;
         let prune_interval_secs = parse_u64(
             "LAKKO_CHANNELS_PRUNE_INTERVAL_SECS",
             DEFAULT_PRUNE_INTERVAL_SECS,
@@ -131,6 +150,7 @@ impl Config {
             fetch_limit_max,
             database_url,
             retention_secs,
+            subscriber_retention_secs,
             prune_interval_secs,
         })
     }

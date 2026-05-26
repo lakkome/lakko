@@ -24,6 +24,7 @@ fn test_config() -> Config {
         fetch_limit_max: 500,
         database_url: None,
         retention_secs: 0,
+        subscriber_retention_secs: 0,
         // Integration tests drive prune manually; the
         // periodic loop is disabled (0 = no background
         // task spawned).

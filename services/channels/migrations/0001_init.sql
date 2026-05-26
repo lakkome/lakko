@@ -39,10 +39,14 @@
 --     new one for the same (channel, subscriber) lands,
 --     and dropped when the subscriber un-follows
 --     (FK ON DELETE CASCADE).
---   * `channel_subscribers` has no TTL — un-follow is
---     explicit. Stale-subscriber GC is a follow-up
---     sprint once we have signal about the distribution
---     of actual subscriber lifetimes.
+--   * `channel_subscribers` carries a `last_active_at`
+--     column (added in migration 0002) bumped on every
+--     successful envelope GET; the background loop GCs
+--     subscribers whose last_active is older than
+--     `LAKKO_CHANNELS_SUBSCRIBER_RETENTION_SECS`
+--     (default 90 days). FK `channel_envelopes` →
+--     `channel_subscribers` ON DELETE CASCADE drops the
+--     matching envelope automatically.
 
 -- ============================================================
 -- channels

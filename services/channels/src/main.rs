@@ -59,13 +59,21 @@ async fn main() -> anyhow::Result<()> {
     // tokio drops the task on runtime drop.
     let prune_interval = cfg.prune_interval_secs;
     let retention_secs = cfg.retention_secs;
+    let subscriber_retention_secs = cfg.subscriber_retention_secs;
     if prune_interval > 0 {
         let prune_store = Arc::clone(&store);
         tokio::spawn(async move {
-            run_prune_loop(prune_store, retention_secs, prune_interval).await;
+            run_prune_loop(
+                prune_store,
+                retention_secs,
+                subscriber_retention_secs,
+                prune_interval,
+            )
+            .await;
         });
         info!(
             retention_secs,
+            subscriber_retention_secs,
             prune_interval_secs = prune_interval,
             "prune: background loop spawned",
         );
@@ -111,24 +119,23 @@ fn dotenv_in_debug() {
 }
 
 /// Background prune loop — sleeps for `interval_secs`,
-/// then issues a single `prune_posts_older_than` against
-/// the store. Runs until the tokio runtime is dropped.
+/// then issues both retention prunes (posts + stale
+/// subscribers) against the store. Runs until the tokio
+/// runtime is dropped.
 ///
-/// `retention_secs == 0` short-circuits the prune call
-/// (the loop still sleeps and logs, so operators can flip
-/// retention on/off live without restarting the service).
+/// Either `*_retention_secs == 0` short-circuits its
+/// own prune call (the loop still sleeps and logs, so
+/// operators can flip either retention on/off live
+/// without restarting the service).
 async fn run_prune_loop(
     store: Arc<dyn ChannelStore + Send + Sync>,
-    retention_secs: u64,
+    posts_retention_secs: u64,
+    subscriber_retention_secs: u64,
     interval_secs: u64,
 ) {
     let interval = Duration::from_secs(interval_secs);
     loop {
         tokio::time::sleep(interval).await;
-        if retention_secs == 0 {
-            info!("prune: retention disabled — loop tick, no work");
-            continue;
-        }
         let now_ms = match SystemTime::now().duration_since(UNIX_EPOCH) {
             Ok(d) => {
                 u64::try_from(d.as_millis()).unwrap_or(u64::MAX)
@@ -138,17 +145,46 @@ async fn run_prune_loop(
                 continue;
             },
         };
-        let retention_ms = retention_secs.saturating_mul(1000);
-        let cutoff_ms = now_ms.saturating_sub(retention_ms);
-        match store.prune_posts_older_than(cutoff_ms).await {
-            Ok(removed) => {
-                if removed > 0 {
-                    info!(removed, retention_secs, "prune: tick complete");
-                }
-            },
-            Err(e) => {
-                warn!(error = %e, "prune: tick failed");
-            },
+
+        // Posts retention — bulk DELETE per the cutoff.
+        if posts_retention_secs == 0 {
+            info!("prune: posts retention disabled — no work");
+        } else {
+            let cutoff_ms =
+                now_ms.saturating_sub(posts_retention_secs.saturating_mul(1000));
+            match store.prune_posts_older_than(cutoff_ms).await {
+                Ok(removed) => {
+                    if removed > 0 {
+                        info!(
+                            removed,
+                            posts_retention_secs,
+                            "prune: posts tick complete"
+                        );
+                    }
+                },
+                Err(e) => warn!(error = %e, "prune: posts tick failed"),
+            }
+        }
+
+        // Stale-subscriber retention — bulk DELETE +
+        // envelope FK cascade.
+        if subscriber_retention_secs == 0 {
+            info!("prune: subscriber retention disabled — no work");
+        } else {
+            let cutoff_ms =
+                now_ms.saturating_sub(subscriber_retention_secs.saturating_mul(1000));
+            match store.prune_subscribers_older_than(cutoff_ms).await {
+                Ok(removed) => {
+                    if removed > 0 {
+                        info!(
+                            removed,
+                            subscriber_retention_secs,
+                            "prune: subscribers tick complete"
+                        );
+                    }
+                },
+                Err(e) => warn!(error = %e, "prune: subscribers tick failed"),
+            }
         }
     }
 }

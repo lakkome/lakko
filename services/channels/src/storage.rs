@@ -273,6 +273,39 @@ pub trait ChannelStore: Send + Sync {
         subscriber: SubscriberId,
     ) -> bool;
 
+    /// Mark the subscriber as active right now — bump
+    /// `last_active_at` so the stale-subscriber pruner
+    /// does not GC them on its next tick. Called by the
+    /// API layer on every successful envelope GET so the
+    /// subscriber's own poll loop is the activity
+    /// signal; no separate heartbeat protocol.
+    ///
+    /// Idempotent: no-op if the subscriber is not
+    /// registered (returns `Ok(())` — touch is a hint,
+    /// not a contract).
+    async fn touch_subscriber_activity(
+        &self,
+        channel: ChannelId,
+        subscriber: SubscriberId,
+        now_ms: u64,
+    ) -> Result<(), StorageError>;
+
+    /// Delete every subscriber across every channel
+    /// whose `last_active_at` is strictly less than
+    /// `cutoff_ms`. Returns the number of subscriber
+    /// rows removed (envelopes are cascaded out by the
+    /// FK on the SQL side; the in-memory impl drops
+    /// the matching envelope entries explicitly).
+    ///
+    /// Idempotent and safe to run concurrently with
+    /// `subscribe` / `deliver_envelope` / `rotate`
+    /// (each impl holds the appropriate lock for the
+    /// duration of the prune).
+    async fn prune_subscribers_older_than(
+        &self,
+        cutoff_ms: u64,
+    ) -> Result<u64, StorageError>;
+
     /// List every subscriber registered on the channel.
     async fn list_subscribers(
         &self,
@@ -334,11 +367,14 @@ struct Inner {
     /// reserved as "before any post" in the fetch query).
     next_cursor: HashMap<ChannelId, u64>,
     /// Channel id → set of registered subscribers.
-    /// `HashMap` rather than `HashSet` lets us iterate in
-    /// insertion-stable order on the publisher's fan-out
-    /// path; the value is the registration timestamp
-    /// (unix-ms) to surface a "subscribed at" field if
-    /// the future-self wants it.
+    /// `HashMap` rather than `HashSet` lets us iterate
+    /// in insertion-stable order on the publisher's
+    /// fan-out path; the value is the **last-active-at**
+    /// timestamp (unix-ms) used by the stale-subscriber
+    /// pruner. Bumped on every successful envelope GET
+    /// via [`InMemoryChannelStore::touch_subscriber_activity`]
+    /// and re-bumped to the registration time on each
+    /// idempotent re-subscribe.
     subscribers: HashMap<ChannelId, HashMap<SubscriberId, u64>>,
     /// (Channel, Subscriber) → latest HPKE-sealed seed
     /// envelope the publisher delivered. Latest-wins;
@@ -514,6 +550,56 @@ impl ChannelStore for InMemoryChannelStore {
             .subscribers
             .get(&channel)
             .is_some_and(|set| set.contains_key(&subscriber))
+    }
+
+    async fn touch_subscriber_activity(
+        &self,
+        channel: ChannelId,
+        subscriber: SubscriberId,
+        now_ms: u64,
+    ) -> Result<(), StorageError> {
+        let mut guard = self.inner.write().await;
+        if let Some(set) = guard.subscribers.get_mut(&channel) {
+            if let Some(ts) = set.get_mut(&subscriber) {
+                *ts = now_ms;
+            }
+        }
+        // Non-registered subscriber: silent no-op. Touch
+        // is a hint, not a contract — the API layer
+        // already gates registration through `subscribe`.
+        Ok(())
+    }
+
+    async fn prune_subscribers_older_than(
+        &self,
+        cutoff_ms: u64,
+    ) -> Result<u64, StorageError> {
+        let mut guard = self.inner.write().await;
+        let mut removed: u64 = 0;
+        // First pass: collect the (channel, subscriber)
+        // pairs that fail the cutoff. We cannot mutate
+        // `subscribers` and read it for envelope cleanup
+        // in the same loop body.
+        let mut to_drop: Vec<(ChannelId, SubscriberId)> = Vec::new();
+        for (channel, set) in &guard.subscribers {
+            for (sub, last_active_ms) in set {
+                if *last_active_ms < cutoff_ms {
+                    to_drop.push((*channel, *sub));
+                }
+            }
+        }
+        // Second pass: drop the subscriber + the
+        // matching envelope. The SQL impl gets this for
+        // free via FK ON DELETE CASCADE.
+        for (channel, sub) in to_drop {
+            if let Some(set) = guard.subscribers.get_mut(&channel) {
+                if set.remove(&sub).is_some() {
+                    removed = removed.saturating_add(1);
+                }
+            }
+            guard.envelopes.remove(&(channel, sub));
+        }
+        Ok(removed)
     }
 
     /// List every subscriber currently registered against
@@ -1143,5 +1229,118 @@ mod tests {
         assert_eq!(removed, 2);
         assert_eq!(s.fetch(c1, 0, 100).await.unwrap().len(), 1);
         assert_eq!(s.fetch(c2, 0, 100).await.unwrap().len(), 1);
+    }
+
+    // -----------------------------------------------------
+    // touch_subscriber_activity + prune_subscribers_older_than
+    // (G4-1-subretention)
+    // -----------------------------------------------------
+
+    #[tokio::test]
+    async fn touch_bumps_last_active_at() {
+        let s = InMemoryChannelStore::new();
+        let c = cid(0xC1);
+        let sub = sid(0xC2);
+        s.create(c).await.unwrap();
+        s.subscribe(c, sub, 100).await.unwrap();
+        // Touch with a later timestamp.
+        s.touch_subscriber_activity(c, sub, 500).await.unwrap();
+        // Prune at cutoff 200 — original 100 would have
+        // been dropped, but the touch bumped to 500.
+        let removed = s.prune_subscribers_older_than(200).await.unwrap();
+        assert_eq!(removed, 0);
+        assert!(s.is_subscribed(c, sub).await);
+    }
+
+    #[tokio::test]
+    async fn touch_on_unregistered_is_noop() {
+        // Touch on a (channel, subscriber) pair that
+        // never registered is silently ignored.
+        let s = InMemoryChannelStore::new();
+        let c = cid(0xC3);
+        s.create(c).await.unwrap();
+        // No subscribe — touch should not error.
+        s.touch_subscriber_activity(c, sid(0xC4), 1_000)
+            .await
+            .unwrap();
+        assert!(!s.is_subscribed(c, sid(0xC4)).await);
+    }
+
+    #[tokio::test]
+    async fn prune_subscribers_removes_stale_keeps_active() {
+        let s = InMemoryChannelStore::new();
+        let c = cid(0xD1);
+        let stale = sid(0xD2);
+        let active = sid(0xD3);
+        s.create(c).await.unwrap();
+        // Stale subscriber: registered at 100, never
+        // touched.
+        s.subscribe(c, stale, 100).await.unwrap();
+        // Active subscriber: registered at 200, touched
+        // at 800.
+        s.subscribe(c, active, 200).await.unwrap();
+        s.touch_subscriber_activity(c, active, 800).await.unwrap();
+        // Cutoff 500 — drops `stale` (last_active=100),
+        // keeps `active` (last_active=800).
+        let removed = s.prune_subscribers_older_than(500).await.unwrap();
+        assert_eq!(removed, 1);
+        assert!(!s.is_subscribed(c, stale).await);
+        assert!(s.is_subscribed(c, active).await);
+    }
+
+    #[tokio::test]
+    async fn prune_subscribers_cascades_envelope() {
+        // The SQL impl gets envelope-cascade for free via
+        // FK ON DELETE CASCADE; the in-memory impl drops
+        // the matching envelope entries explicitly.
+        // Either way, fetch_envelope after a prune
+        // returns UnknownSubscriber.
+        let s = InMemoryChannelStore::new();
+        let c = cid(0xE1);
+        let sub = sid(0xE2);
+        s.create(c).await.unwrap();
+        s.subscribe(c, sub, 100).await.unwrap();
+        s.deliver_envelope(c, sub, vec![0xAB; 80], 80)
+            .await
+            .unwrap();
+        // Pre-prune: envelope is fetchable.
+        assert!(s.fetch_envelope(c, sub).await.unwrap().is_some());
+        // Cutoff 500 drops the subscriber + envelope.
+        let removed = s.prune_subscribers_older_than(500).await.unwrap();
+        assert_eq!(removed, 1);
+        // Post-prune: subscriber is unknown, envelope is gone.
+        let err = s.fetch_envelope(c, sub).await.unwrap_err();
+        assert!(matches!(err, StorageError::UnknownSubscriber));
+    }
+
+    #[tokio::test]
+    async fn prune_subscribers_zero_cutoff_drops_nothing() {
+        let s = InMemoryChannelStore::new();
+        let c = cid(0xE3);
+        s.create(c).await.unwrap();
+        s.subscribe(c, sid(0xE4), 100).await.unwrap();
+        s.subscribe(c, sid(0xE5), 200).await.unwrap();
+        let removed = s.prune_subscribers_older_than(0).await.unwrap();
+        assert_eq!(removed, 0);
+        assert_eq!(s.list_subscribers(c).await.unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn prune_subscribers_across_multiple_channels() {
+        let s = InMemoryChannelStore::new();
+        let c1 = cid(0xF1);
+        let c2 = cid(0xF2);
+        s.create(c1).await.unwrap();
+        s.create(c2).await.unwrap();
+        s.subscribe(c1, sid(0xF3), 100).await.unwrap();
+        s.subscribe(c1, sid(0xF4), 700).await.unwrap();
+        s.subscribe(c2, sid(0xF5), 200).await.unwrap();
+        s.subscribe(c2, sid(0xF6), 800).await.unwrap();
+        // Cutoff 500 — drops the 100 and 200 entries
+        // (one from each channel); keeps the 700 + 800.
+        let removed = s.prune_subscribers_older_than(500).await.unwrap();
+        assert_eq!(removed, 2);
+        assert_eq!(s.list_subscribers(c1).await.unwrap().len(), 1);
+        assert_eq!(s.list_subscribers(c2).await.unwrap().len(), 1);
     }
 }
