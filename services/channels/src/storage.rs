@@ -217,6 +217,13 @@ struct Inner {
     /// (N=1 in this MVP — multi-epoch retention is a
     /// follow-up).
     envelopes: HashMap<(ChannelId, SubscriberId), Vec<u8>>,
+    /// Channel id → current epoch id. Server-side bookkeeping
+    /// only; the authoritative epoch lives in each
+    /// `ChannelPost`'s header on the client. Surfaced via
+    /// `GET /v1/channels/:id/epoch` so a subscriber that
+    /// comes back online after weeks can ask "did I miss a
+    /// rotation?" before deciding to refresh its envelope.
+    current_epoch: HashMap<ChannelId, u32>,
 }
 
 impl ChannelStore {
@@ -232,6 +239,9 @@ impl ChannelStore {
         let mut guard = self.inner.write().await;
         guard.posts.entry(channel).or_default();
         guard.next_cursor.entry(channel).or_insert(1);
+        // Genesis epoch is 0 — the first rotation bumps it
+        // to 1, matching `lakko_channels::EpochId::GENESIS`.
+        guard.current_epoch.entry(channel).or_insert(0);
     }
 
     /// `true` if the channel is registered.
@@ -468,6 +478,89 @@ impl ChannelStore {
             .map(HashMap::len)
             .sum()
     }
+
+    /// Read the channel's current epoch id. Returns
+    /// `Ok(0)` for a freshly-created channel (genesis).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError::UnknownChannel`] when the
+    /// channel was never registered.
+    pub async fn current_epoch(
+        &self,
+        channel: ChannelId,
+    ) -> Result<u32, StorageError> {
+        let guard = self.inner.read().await;
+        if !guard.posts.contains_key(&channel) {
+            return Err(StorageError::UnknownChannel);
+        }
+        Ok(*guard.current_epoch.get(&channel).unwrap_or(&0))
+    }
+
+    /// Atomic rotation: bump the current epoch by one **and**
+    /// replace the per-subscriber envelopes for every entry
+    /// in `batch`. Either every step lands or none — the
+    /// entire operation runs under a single write lock so a
+    /// concurrent reader cannot observe a torn rotation.
+    ///
+    /// `expected_envelope_len` is checked per entry; one
+    /// wrong-sized envelope aborts the whole batch (epoch is
+    /// NOT bumped). This matches the "rotation is atomic"
+    /// property a subscriber-side catch-up flow assumes —
+    /// if `current_epoch` advanced, every registered
+    /// subscriber's envelope is the freshly-rotated one.
+    ///
+    /// Returns the new epoch id on success.
+    ///
+    /// # Errors
+    ///
+    /// - [`StorageError::UnknownChannel`] — channel unknown.
+    /// - [`StorageError::UnknownSubscriber`] — a subscriber
+    ///   in the batch is not registered against this
+    ///   channel.
+    /// - [`StorageError::BadEnvelopeLen`] — any entry's
+    ///   envelope does not match `expected_envelope_len`.
+    pub async fn rotate(
+        &self,
+        channel: ChannelId,
+        batch: Vec<(SubscriberId, Vec<u8>)>,
+        expected_envelope_len: usize,
+    ) -> Result<u32, StorageError> {
+        // First pass: validate without mutating. We want
+        // either-all-or-none semantics.
+        for (_sub, env) in &batch {
+            if env.len() != expected_envelope_len {
+                return Err(StorageError::BadEnvelopeLen {
+                    expected: expected_envelope_len,
+                    got: env.len(),
+                });
+            }
+        }
+        let mut guard = self.inner.write().await;
+        if !guard.posts.contains_key(&channel) {
+            return Err(StorageError::UnknownChannel);
+        }
+        // Cross-check every subscriber id against the
+        // registry before any mutation lands.
+        let subs = guard.subscribers.get(&channel).cloned().unwrap_or_default();
+        for (sub, _env) in &batch {
+            if !subs.contains_key(sub) {
+                return Err(StorageError::UnknownSubscriber);
+            }
+        }
+        // Validations passed — commit.
+        for (sub, env) in batch {
+            guard.envelopes.insert((channel, sub), env);
+        }
+        let next = guard
+            .current_epoch
+            .get(&channel)
+            .copied()
+            .unwrap_or(0)
+            .saturating_add(1);
+        guard.current_epoch.insert(channel, next);
+        Ok(next)
+    }
 }
 
 #[cfg(test)]
@@ -702,5 +795,116 @@ mod tests {
         assert!(SubscriberId::from_hex("abc").is_err());
         assert!(SubscriberId::from_bytes(&[0u8; 31]).is_err());
         assert!(SubscriberId::from_bytes(&[0u8; 33]).is_err());
+    }
+
+    #[tokio::test]
+    async fn genesis_epoch_is_zero() {
+        let s = ChannelStore::new();
+        let c = cid(0xF0);
+        s.create(c).await;
+        assert_eq!(s.current_epoch(c).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn current_epoch_rejects_unknown_channel() {
+        let s = ChannelStore::new();
+        let err = s.current_epoch(cid(0xF1)).await.unwrap_err();
+        assert!(matches!(err, StorageError::UnknownChannel));
+    }
+
+    #[tokio::test]
+    async fn rotate_bumps_epoch_and_replaces_envelopes() {
+        let s = ChannelStore::new();
+        let c = cid(0x01);
+        let a = sid(0x02);
+        let b = sid(0x03);
+        s.create(c).await;
+        s.subscribe(c, a, 0).await.unwrap();
+        s.subscribe(c, b, 0).await.unwrap();
+        // Pre-rotation: deliver an "epoch 0" envelope for
+        // each (so we can prove they get replaced).
+        s.deliver_envelope(c, a, vec![0x00; 80], 80)
+            .await
+            .unwrap();
+        s.deliver_envelope(c, b, vec![0x00; 80], 80)
+            .await
+            .unwrap();
+        // Rotate.
+        let new_epoch = s
+            .rotate(
+                c,
+                vec![(a, vec![0xAA; 80]), (b, vec![0xBB; 80])],
+                80,
+            )
+            .await
+            .unwrap();
+        assert_eq!(new_epoch, 1);
+        assert_eq!(s.current_epoch(c).await.unwrap(), 1);
+        assert_eq!(
+            s.fetch_envelope(c, a).await.unwrap().unwrap(),
+            vec![0xAA; 80]
+        );
+        assert_eq!(
+            s.fetch_envelope(c, b).await.unwrap().unwrap(),
+            vec![0xBB; 80]
+        );
+    }
+
+    #[tokio::test]
+    async fn rotate_is_atomic_on_wrong_length() {
+        let s = ChannelStore::new();
+        let c = cid(0x04);
+        let a = sid(0x05);
+        s.create(c).await;
+        s.subscribe(c, a, 0).await.unwrap();
+        s.deliver_envelope(c, a, vec![0x00; 80], 80)
+            .await
+            .unwrap();
+        // Second batch entry is wrong length — entire
+        // rotation must abort without touching the
+        // envelope or bumping the epoch.
+        let err = s
+            .rotate(c, vec![(a, vec![0u8; 79])], 80)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            StorageError::BadEnvelopeLen {
+                expected: 80,
+                got: 79
+            }
+        ));
+        assert_eq!(s.current_epoch(c).await.unwrap(), 0);
+        assert_eq!(
+            s.fetch_envelope(c, a).await.unwrap().unwrap(),
+            vec![0x00; 80]
+        );
+    }
+
+    #[tokio::test]
+    async fn rotate_rejects_unsubscribed_pubkey() {
+        let s = ChannelStore::new();
+        let c = cid(0x06);
+        s.create(c).await;
+        // No subscribe; try to rotate to an unknown peer.
+        let err = s
+            .rotate(c, vec![(sid(0x07), vec![0u8; 80])], 80)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StorageError::UnknownSubscriber));
+        assert_eq!(s.current_epoch(c).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn rotate_empty_batch_still_bumps_epoch() {
+        // A scheduled rotation on a channel with zero
+        // subscribers should still increment the epoch —
+        // future-self may subscribe and check the epoch
+        // to decide whether to ask for a fresh envelope.
+        let s = ChannelStore::new();
+        let c = cid(0x08);
+        s.create(c).await;
+        let new_epoch = s.rotate(c, vec![], 80).await.unwrap();
+        assert_eq!(new_epoch, 1);
     }
 }

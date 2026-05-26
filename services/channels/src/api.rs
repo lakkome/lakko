@@ -30,6 +30,8 @@ use axum::{
     routing::{get, post},
     Router,
 };
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 
 use crate::config::Config;
@@ -156,6 +158,38 @@ pub struct EnvelopeView {
     /// (no padding). Exactly `EXPECTED_ENVELOPE_LEN`
     /// bytes pre-encode.
     pub envelope_b64: String,
+}
+
+/// One entry in a rotation batch.
+#[derive(Deserialize)]
+pub struct RotateBatchEntry {
+    /// 64-char lowercase hex of the subscriber's X25519
+    /// public key. Must already be registered against the
+    /// channel.
+    pub subscriber_id: String,
+    /// HPKE-sealed seed envelope for this subscriber,
+    /// base64url-encoded. Decodes to exactly
+    /// `EXPECTED_ENVELOPE_LEN` opaque bytes.
+    pub envelope_b64: String,
+}
+
+/// Body for `POST /v1/channels/:id/rotate`.
+#[derive(Deserialize)]
+pub struct RotateRequest {
+    /// One entry per subscriber the publisher wants to
+    /// reach. Server validates every entry's length /
+    /// registration before committing — either the whole
+    /// batch lands or none does.
+    pub envelopes: Vec<RotateBatchEntry>,
+}
+
+/// Response for `POST /v1/channels/:id/rotate` +
+/// `GET /v1/channels/:id/epoch`.
+#[derive(Serialize)]
+pub struct EpochView {
+    /// Current epoch id after the operation. Genesis is 0;
+    /// first rotation bumps to 1.
+    pub epoch: u32,
 }
 
 /// Wire-level error response.
@@ -509,6 +543,111 @@ async fn fetch_envelope(
     }
 }
 
+/// `GET /v1/channels/:channel_id/epoch` — current epoch id.
+async fn fetch_epoch(
+    State(state): State<Arc<AppState>>,
+    Path(channel_id): Path<String>,
+) -> Response {
+    let Ok(channel) = ChannelId::from_hex(&channel_id) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(err("bad-channel-id", "channel_id must be 32 hex chars")),
+        )
+            .into_response();
+    };
+    match state.store.current_epoch(channel).await {
+        Ok(epoch) => (StatusCode::OK, Json(EpochView { epoch })).into_response(),
+        Err(StorageError::UnknownChannel) => (
+            StatusCode::NOT_FOUND,
+            Json(err("unknown-channel", "no such channel")),
+        )
+            .into_response(),
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(err("internal", "unexpected error")),
+        )
+            .into_response(),
+    }
+}
+
+/// `POST /v1/channels/:channel_id/rotate` — atomic batch
+/// envelope delivery + epoch bump.
+async fn rotate_channel(
+    State(state): State<Arc<AppState>>,
+    Path(channel_id): Path<String>,
+    Json(req): Json<RotateRequest>,
+) -> Response {
+    let Ok(channel) = ChannelId::from_hex(&channel_id) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(err("bad-channel-id", "channel_id must be 32 hex chars")),
+        )
+            .into_response();
+    };
+
+    // Validate + decode every entry BEFORE asking the
+    // store to commit — keeps the "either-all-or-none"
+    // property even on malformed input.
+    let mut batch: Vec<(SubscriberId, Vec<u8>)> = Vec::with_capacity(req.envelopes.len());
+    for entry in req.envelopes {
+        let Ok(sub) = SubscriberId::from_hex(&entry.subscriber_id) else {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(err(
+                    "bad-subscriber-id",
+                    format!("subscriber_id {:?} is not 64 hex chars", entry.subscriber_id),
+                )),
+            )
+                .into_response();
+        };
+        let Ok(env_bytes) = URL_SAFE_NO_PAD.decode(&entry.envelope_b64) else {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(err(
+                    "bad-envelope-b64",
+                    "envelope_b64 must be valid base64url (no padding)",
+                )),
+            )
+                .into_response();
+        };
+        batch.push((sub, env_bytes));
+    }
+
+    match state
+        .store
+        .rotate(channel, batch, EXPECTED_ENVELOPE_LEN)
+        .await
+    {
+        Ok(epoch) => (StatusCode::OK, Json(EpochView { epoch })).into_response(),
+        Err(StorageError::UnknownChannel) => (
+            StatusCode::NOT_FOUND,
+            Json(err("unknown-channel", "no such channel")),
+        )
+            .into_response(),
+        Err(StorageError::UnknownSubscriber) => (
+            StatusCode::CONFLICT,
+            Json(err(
+                "unknown-subscriber",
+                "one or more entries reference a subscriber that is not registered against this channel",
+            )),
+        )
+            .into_response(),
+        Err(StorageError::BadEnvelopeLen { expected, got }) => (
+            StatusCode::BAD_REQUEST,
+            Json(err(
+                "bad-envelope-len",
+                format!("each envelope must decode to exactly {expected} bytes (got {got})"),
+            )),
+        )
+            .into_response(),
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(err("internal", "unexpected error")),
+        )
+            .into_response(),
+    }
+}
+
 fn unix_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -534,6 +673,8 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/v1/channels/{channel_id}/subscribers/{pubkey_hex}/envelope",
             post(deliver_envelope).get(fetch_envelope),
         )
+        .route("/v1/channels/{channel_id}/rotate", post(rotate_channel))
+        .route("/v1/channels/{channel_id}/epoch", get(fetch_epoch))
         .route("/health", get(health))
         .route("/version", get(version))
         .with_state(state)

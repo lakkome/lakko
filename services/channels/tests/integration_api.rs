@@ -358,6 +358,203 @@ const _ASSERT_ENVELOPE_LEN: () = assert!(
         == lakko_channels::SEED_ENVELOPE_LEN
 );
 
+const SUB_HEX_B: &str =
+    "abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd";
+
+async fn create_channel_with_two_subs(client: &reqwest::Client, addr: SocketAddr) {
+    client
+        .post(format!("http://{addr}/v1/channels"))
+        .json(&json!({ "channel_id": CHANNEL_HEX }))
+        .send()
+        .await
+        .unwrap();
+    for sub in [SUB_HEX, SUB_HEX_B] {
+        client
+            .post(format!("http://{addr}/v1/channels/{CHANNEL_HEX}/subscribers"))
+            .json(&json!({ "subscriber_pubkey_hex": sub }))
+            .send()
+            .await
+            .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn genesis_epoch_is_zero() {
+    let addr = spawn().await;
+    let client = reqwest::Client::new();
+    client
+        .post(format!("http://{addr}/v1/channels"))
+        .json(&json!({ "channel_id": CHANNEL_HEX }))
+        .send()
+        .await
+        .unwrap();
+    let resp = client
+        .get(format!("http://{addr}/v1/channels/{CHANNEL_HEX}/epoch"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["epoch"].as_u64().unwrap(), 0);
+}
+
+#[tokio::test]
+async fn epoch_for_unknown_channel_is_404() {
+    let addr = spawn().await;
+    let resp = reqwest::get(format!("http://{addr}/v1/channels/{CHANNEL_HEX}/epoch"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
+}
+
+#[tokio::test]
+async fn rotate_bumps_epoch_and_delivers_envelopes() {
+    let addr = spawn().await;
+    let client = reqwest::Client::new();
+    create_channel_with_two_subs(&client, addr).await;
+    let bytes_for_alice: Vec<u8> = (0..80u8).collect();
+    let bytes_for_bob: Vec<u8> = (10..90u8).collect();
+    let alice_envelope_b64 = URL_SAFE_NO_PAD.encode(&bytes_for_alice);
+    let bob_envelope_b64 = URL_SAFE_NO_PAD.encode(&bytes_for_bob);
+    let resp = client
+        .post(format!("http://{addr}/v1/channels/{CHANNEL_HEX}/rotate"))
+        .json(&json!({
+            "envelopes": [
+                { "subscriber_id": SUB_HEX,   "envelope_b64": alice_envelope_b64 },
+                { "subscriber_id": SUB_HEX_B, "envelope_b64": bob_envelope_b64 },
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["epoch"].as_u64().unwrap(), 1);
+
+    // Cross-check via GET /epoch.
+    let resp = client
+        .get(format!("http://{addr}/v1/channels/{CHANNEL_HEX}/epoch"))
+        .send()
+        .await
+        .unwrap();
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["epoch"].as_u64().unwrap(), 1);
+
+    // Each subscriber receives its own envelope.
+    for (sub, expected) in [(SUB_HEX, &bytes_for_alice), (SUB_HEX_B, &bytes_for_bob)] {
+        let resp = client
+            .get(format!(
+                "http://{addr}/v1/channels/{CHANNEL_HEX}/subscribers/{sub}/envelope"
+            ))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        let decoded = URL_SAFE_NO_PAD
+            .decode(body["envelope_b64"].as_str().unwrap())
+            .unwrap();
+        assert_eq!(&decoded, expected);
+    }
+}
+
+#[tokio::test]
+async fn rotate_aborts_on_wrong_envelope_length() {
+    let addr = spawn().await;
+    let client = reqwest::Client::new();
+    create_channel_with_two_subs(&client, addr).await;
+    let short_env = URL_SAFE_NO_PAD.encode(vec![0u8; 79]);
+    let resp = client
+        .post(format!("http://{addr}/v1/channels/{CHANNEL_HEX}/rotate"))
+        .json(&json!({
+            "envelopes": [
+                { "subscriber_id": SUB_HEX, "envelope_b64": short_env },
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["code"].as_str().unwrap(), "bad-envelope-len");
+
+    // Epoch must NOT have advanced (atomic abort).
+    let resp = client
+        .get(format!("http://{addr}/v1/channels/{CHANNEL_HEX}/epoch"))
+        .send()
+        .await
+        .unwrap();
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["epoch"].as_u64().unwrap(), 0);
+}
+
+#[tokio::test]
+async fn rotate_rejects_unsubscribed_recipient() {
+    let addr = spawn().await;
+    let client = reqwest::Client::new();
+    client
+        .post(format!("http://{addr}/v1/channels"))
+        .json(&json!({ "channel_id": CHANNEL_HEX }))
+        .send()
+        .await
+        .unwrap();
+    // No subscribe at all.
+    let env_b64 = URL_SAFE_NO_PAD.encode(vec![0u8; 80]);
+    let resp = client
+        .post(format!("http://{addr}/v1/channels/{CHANNEL_HEX}/rotate"))
+        .json(&json!({
+            "envelopes": [
+                { "subscriber_id": SUB_HEX, "envelope_b64": env_b64 },
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 409);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["code"].as_str().unwrap(), "unknown-subscriber");
+}
+
+#[tokio::test]
+async fn rotate_empty_batch_still_bumps_epoch() {
+    let addr = spawn().await;
+    let client = reqwest::Client::new();
+    client
+        .post(format!("http://{addr}/v1/channels"))
+        .json(&json!({ "channel_id": CHANNEL_HEX }))
+        .send()
+        .await
+        .unwrap();
+    let resp = client
+        .post(format!("http://{addr}/v1/channels/{CHANNEL_HEX}/rotate"))
+        .json(&json!({ "envelopes": [] }))
+        .send()
+        .await
+        .unwrap();
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["epoch"].as_u64().unwrap(), 1);
+}
+
+#[tokio::test]
+async fn rotate_rejects_bad_envelope_b64() {
+    let addr = spawn().await;
+    let client = reqwest::Client::new();
+    create_channel_with_two_subs(&client, addr).await;
+    let resp = client
+        .post(format!("http://{addr}/v1/channels/{CHANNEL_HEX}/rotate"))
+        .json(&json!({
+            "envelopes": [
+                { "subscriber_id": SUB_HEX, "envelope_b64": "!!!not-base64!!!" },
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["code"].as_str().unwrap(), "bad-envelope-b64");
+}
+
 #[tokio::test]
 async fn payload_round_trips_byte_identical() {
     let addr = spawn().await;
