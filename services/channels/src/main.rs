@@ -9,11 +9,21 @@
 
 #![forbid(unsafe_code)]
 
+use std::sync::Arc;
+
+use sqlx::mysql::MySqlPoolOptions;
 use tokio::net::TcpListener;
 use tracing::{info, warn};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
-use lakko_svc_channels::{router, AppState, ChannelStore, Config, VERSION};
+use lakko_svc_channels::{
+    router, AppState, ChannelStore, Config, InMemoryChannelStore, SqlChannelStore, VERSION,
+};
+
+/// Migrations directory (relative to crate root). `sqlx::migrate!`
+/// reads it at compile time, so a missing file fails the build
+/// instead of erroring at boot.
+const MIGRATIONS: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -23,7 +33,22 @@ async fn main() -> anyhow::Result<()> {
     let cfg = Config::from_env()?;
     info!(bind = %cfg.bind, "lakko-svc-channels starting (v{})", VERSION);
 
-    let store = ChannelStore::new();
+    let store: Arc<dyn ChannelStore + Send + Sync> =
+        if let Some(url) = &cfg.database_url {
+            info!("storage: MariaDB (LAKKO_CHANNELS_DATABASE_URL set) — running migrations");
+            let pool = MySqlPoolOptions::new()
+                .max_connections(16)
+                .connect(url)
+                .await?;
+            MIGRATIONS.run(&pool).await?;
+            Arc::new(SqlChannelStore::new(pool))
+        } else {
+            warn!(
+                "storage: in-memory (no LAKKO_CHANNELS_DATABASE_URL) — \
+                 state is lost on restart, set the env var for production"
+            );
+            Arc::new(InMemoryChannelStore::new())
+        };
     let state = AppState::new(cfg.clone(), store);
     let app = router(state);
 

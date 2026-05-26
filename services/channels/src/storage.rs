@@ -1,15 +1,19 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! In-memory storage for channels + posts.
+//! Storage backends for channels + posts + subscribers +
+//! envelopes.
 //!
-//! Phase 4a backend deliberately starts in-memory: a
-//! `HashMap<ChannelId, Vec<StoredPost>>` behind a
-//! [`tokio::sync::RwLock`]. MariaDB persistence lands as a
-//! separate sub-sprint once the wire-API surface is
-//! confirmed against real client traffic — premature
-//! schema design before client behaviour is observed has
-//! cost the project once already.
+//! Two implementations of the [`ChannelStore`] trait:
+//!
+//! 1. [`InMemoryChannelStore`] — `HashMap` behind a
+//!    [`tokio::sync::RwLock`]. Used by every integration
+//!    test (no MariaDB dependency in the test suite) and
+//!    as the runtime default when
+//!    `LAKKO_CHANNELS_DATABASE_URL` is unset.
+//! 2. [`SqlChannelStore`] in [`crate::sql_store`] —
+//!    MariaDB-backed, used in production. Same trait, same
+//!    method signatures, same opacity contract.
 //!
 //! ## Opacity contract
 //!
@@ -17,14 +21,17 @@
 //! It never decodes the ChannelPost wire layout, never
 //! verifies the Ed25519 signature, never derives the
 //! AEAD key. Subscribers do all of those steps client-
-//! side after fetching. This module's API surface
-//! reinforces the contract — there's no method called
-//! `decode_post`, `verify_signature`, or
-//! `decrypt_payload` here, only `put` and `fetch`.
+//! side after fetching. The trait's API surface reinforces
+//! the contract — there's no method called `decode_post`,
+//! `verify_signature`, or `decrypt_payload` here, only
+//! `put` and `fetch`. Same contract holds for the SQL
+//! impl: every `payload` / `envelope` column is opaque
+//! bytes on the way in and on the way out.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use tokio::sync::RwLock;
 
 /// 32-byte subscriber X25519 public key, used as the
@@ -186,12 +193,117 @@ pub enum StorageError {
         /// Length the caller actually delivered.
         got: usize,
     },
+    /// Database-level failure — connection lost, query
+    /// timeout, constraint violation, anything sqlx
+    /// surfaces. The string carries the underlying
+    /// `sqlx::Error`'s `Display` so logs point at the
+    /// real cause; the API layer maps this to 500.
+    #[error("database error: {0}")]
+    Database(String),
+}
+
+/// Storage backend used by the channels service. Object-
+/// safe (via `#[async_trait]`) so `AppState` can hold an
+/// `Arc<dyn ChannelStore + Send + Sync>` and dispatch
+/// dynamically between the in-memory and SQL impls.
+///
+/// All 13 methods are async — even on the in-memory path
+/// the lock is async so a slow `await` elsewhere in the
+/// request handler does not block a tokio worker.
+#[async_trait]
+pub trait ChannelStore: Send + Sync {
+    /// Register a fresh channel. Idempotent.
+    async fn create(&self, channel: ChannelId) -> Result<(), StorageError>;
+
+    /// `true` if the channel is registered.
+    async fn exists(&self, channel: ChannelId) -> bool;
+
+    /// Append a post. Returns the freshly-stored record.
+    async fn put(
+        &self,
+        channel: ChannelId,
+        payload: Vec<u8>,
+        max_bytes: usize,
+        server_ts_ms: u64,
+    ) -> Result<StoredPost, StorageError>;
+
+    /// Fetch posts strictly after `after`, up to `limit`.
+    async fn fetch(
+        &self,
+        channel: ChannelId,
+        after: u64,
+        limit: usize,
+    ) -> Result<Vec<StoredPost>, StorageError>;
+
+    /// Total number of posts stored across every channel.
+    async fn total_posts(&self) -> usize;
+
+    /// Register a subscriber against the channel.
+    async fn subscribe(
+        &self,
+        channel: ChannelId,
+        subscriber: SubscriberId,
+        server_ts_ms: u64,
+    ) -> Result<(), StorageError>;
+
+    /// `true` if the subscriber is registered on the
+    /// channel.
+    async fn is_subscribed(
+        &self,
+        channel: ChannelId,
+        subscriber: SubscriberId,
+    ) -> bool;
+
+    /// List every subscriber registered on the channel.
+    async fn list_subscribers(
+        &self,
+        channel: ChannelId,
+    ) -> Result<Vec<SubscriberId>, StorageError>;
+
+    /// Store the publisher-supplied HPKE seed envelope for
+    /// `(channel, subscriber)`. Envelope is opaque.
+    async fn deliver_envelope(
+        &self,
+        channel: ChannelId,
+        subscriber: SubscriberId,
+        envelope: Vec<u8>,
+        expected_len: usize,
+    ) -> Result<(), StorageError>;
+
+    /// Fetch the latest HPKE seed envelope for
+    /// `(channel, subscriber)`. Returns `Ok(None)` when
+    /// the subscriber is registered but no envelope has
+    /// been delivered yet.
+    async fn fetch_envelope(
+        &self,
+        channel: ChannelId,
+        subscriber: SubscriberId,
+    ) -> Result<Option<Vec<u8>>, StorageError>;
+
+    /// Total number of subscribers across every channel.
+    async fn total_subscribers(&self) -> usize;
+
+    /// Read the channel's current epoch id.
+    async fn current_epoch(
+        &self,
+        channel: ChannelId,
+    ) -> Result<u32, StorageError>;
+
+    /// Atomic rotation: bump the current epoch + replace
+    /// the per-subscriber envelopes for every entry in the
+    /// batch. Either every step lands or none.
+    async fn rotate(
+        &self,
+        channel: ChannelId,
+        batch: Vec<(SubscriberId, Vec<u8>)>,
+        expected_envelope_len: usize,
+    ) -> Result<u32, StorageError>;
 }
 
 /// In-memory state container. Cheap to clone — the inner
 /// state is behind an `Arc<RwLock<…>>`.
 #[derive(Clone, Default)]
-pub struct ChannelStore {
+pub struct InMemoryChannelStore {
     inner: Arc<RwLock<Inner>>,
 }
 
@@ -226,26 +338,27 @@ struct Inner {
     current_epoch: HashMap<ChannelId, u32>,
 }
 
-impl ChannelStore {
+impl InMemoryChannelStore {
     /// Construct an empty store.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
+}
 
-    /// Register a fresh channel. Idempotent — a second call
-    /// with the same id is a no-op.
-    pub async fn create(&self, channel: ChannelId) {
+#[async_trait]
+impl ChannelStore for InMemoryChannelStore {
+    async fn create(&self, channel: ChannelId) -> Result<(), StorageError> {
         let mut guard = self.inner.write().await;
         guard.posts.entry(channel).or_default();
         guard.next_cursor.entry(channel).or_insert(1);
         // Genesis epoch is 0 — the first rotation bumps it
         // to 1, matching `lakko_channels::EpochId::GENESIS`.
         guard.current_epoch.entry(channel).or_insert(0);
+        Ok(())
     }
 
-    /// `true` if the channel is registered.
-    pub async fn exists(&self, channel: ChannelId) -> bool {
+    async fn exists(&self, channel: ChannelId) -> bool {
         self.inner.read().await.posts.contains_key(&channel)
     }
 
@@ -259,7 +372,7 @@ impl ChannelStore {
     /// - [`StorageError::EmptyPost`] — zero-byte payload.
     /// - [`StorageError::PostTooLarge`] — payload exceeds
     ///   `max_bytes`.
-    pub async fn put(
+    async fn put(
         &self,
         channel: ChannelId,
         payload: Vec<u8>,
@@ -299,7 +412,7 @@ impl ChannelStore {
     /// Fetch posts strictly after `after` cursor, up to
     /// `limit` entries. Returns empty when the channel has
     /// nothing newer or is unknown.
-    pub async fn fetch(
+    async fn fetch(
         &self,
         channel: ChannelId,
         after: u64,
@@ -319,7 +432,7 @@ impl ChannelStore {
 
     /// Total number of posts stored across every channel
     /// — surfaced for the `/metrics` endpoint future-self.
-    pub async fn total_posts(&self) -> usize {
+    async fn total_posts(&self) -> usize {
         self.inner
             .read()
             .await
@@ -337,7 +450,7 @@ impl ChannelStore {
     ///
     /// Returns [`StorageError::UnknownChannel`] when the
     /// channel was never registered via [`Self::create`].
-    pub async fn subscribe(
+    async fn subscribe(
         &self,
         channel: ChannelId,
         subscriber: SubscriberId,
@@ -357,7 +470,7 @@ impl ChannelStore {
 
     /// `true` if the subscriber is registered against the
     /// channel.
-    pub async fn is_subscribed(
+    async fn is_subscribed(
         &self,
         channel: ChannelId,
         subscriber: SubscriberId,
@@ -378,7 +491,7 @@ impl ChannelStore {
     ///
     /// Returns [`StorageError::UnknownChannel`] when the
     /// channel is unknown.
-    pub async fn list_subscribers(
+    async fn list_subscribers(
         &self,
         channel: ChannelId,
     ) -> Result<Vec<SubscriberId>, StorageError> {
@@ -408,7 +521,7 @@ impl ChannelStore {
     ///   length does not match `expected`. Callers pass
     ///   `lakko_channels::subscribe::SEED_ENVELOPE_LEN`
     ///   here.
-    pub async fn deliver_envelope(
+    async fn deliver_envelope(
         &self,
         channel: ChannelId,
         subscriber: SubscriberId,
@@ -448,7 +561,7 @@ impl ChannelStore {
     ///   unknown.
     /// - [`StorageError::UnknownSubscriber`] — subscriber
     ///   has not registered against this channel.
-    pub async fn fetch_envelope(
+    async fn fetch_envelope(
         &self,
         channel: ChannelId,
         subscriber: SubscriberId,
@@ -469,7 +582,7 @@ impl ChannelStore {
 
     /// Total number of subscribers across every channel
     /// — surfaced for the `/metrics` endpoint future-self.
-    pub async fn total_subscribers(&self) -> usize {
+    async fn total_subscribers(&self) -> usize {
         self.inner
             .read()
             .await
@@ -486,7 +599,7 @@ impl ChannelStore {
     ///
     /// Returns [`StorageError::UnknownChannel`] when the
     /// channel was never registered.
-    pub async fn current_epoch(
+    async fn current_epoch(
         &self,
         channel: ChannelId,
     ) -> Result<u32, StorageError> {
@@ -520,7 +633,7 @@ impl ChannelStore {
     ///   channel.
     /// - [`StorageError::BadEnvelopeLen`] — any entry's
     ///   envelope does not match `expected_envelope_len`.
-    pub async fn rotate(
+    async fn rotate(
         &self,
         channel: ChannelId,
         batch: Vec<(SubscriberId, Vec<u8>)>,
@@ -573,18 +686,18 @@ mod tests {
 
     #[tokio::test]
     async fn create_is_idempotent() {
-        let s = ChannelStore::new();
+        let s = InMemoryChannelStore::new();
         let c = cid(0xAA);
-        s.create(c).await;
-        s.create(c).await;
+        s.create(c).await.unwrap();
+        s.create(c).await.unwrap();
         assert!(s.exists(c).await);
     }
 
     #[tokio::test]
     async fn put_assigns_monotone_cursors() {
-        let s = ChannelStore::new();
+        let s = InMemoryChannelStore::new();
         let c = cid(0xBB);
-        s.create(c).await;
+        s.create(c).await.unwrap();
         let a = s.put(c, vec![1, 2, 3], 1024, 1000).await.unwrap();
         let b = s.put(c, vec![4, 5], 1024, 2000).await.unwrap();
         assert_eq!(a.cursor, 1);
@@ -594,25 +707,25 @@ mod tests {
 
     #[tokio::test]
     async fn put_rejects_unknown_channel() {
-        let s = ChannelStore::new();
+        let s = InMemoryChannelStore::new();
         let err = s.put(cid(0xCC), vec![1], 1024, 0).await.unwrap_err();
         assert!(matches!(err, StorageError::UnknownChannel));
     }
 
     #[tokio::test]
     async fn put_rejects_empty_payload() {
-        let s = ChannelStore::new();
+        let s = InMemoryChannelStore::new();
         let c = cid(0xDD);
-        s.create(c).await;
+        s.create(c).await.unwrap();
         let err = s.put(c, vec![], 1024, 0).await.unwrap_err();
         assert!(matches!(err, StorageError::EmptyPost));
     }
 
     #[tokio::test]
     async fn put_rejects_oversize_payload() {
-        let s = ChannelStore::new();
+        let s = InMemoryChannelStore::new();
         let c = cid(0xEE);
-        s.create(c).await;
+        s.create(c).await.unwrap();
         let err = s
             .put(c, vec![0u8; 100], 50, 0)
             .await
@@ -625,9 +738,9 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_filters_by_cursor() {
-        let s = ChannelStore::new();
+        let s = InMemoryChannelStore::new();
         let c = cid(0xFF);
-        s.create(c).await;
+        s.create(c).await.unwrap();
         for i in 0..5 {
             s.put(c, vec![i], 1024, u64::from(i)).await.unwrap();
         }
@@ -640,9 +753,9 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_respects_limit() {
-        let s = ChannelStore::new();
+        let s = InMemoryChannelStore::new();
         let c = cid(0x11);
-        s.create(c).await;
+        s.create(c).await.unwrap();
         for i in 0..10 {
             s.put(c, vec![i], 1024, 0).await.unwrap();
         }
@@ -678,10 +791,10 @@ mod tests {
 
     #[tokio::test]
     async fn subscribe_round_trip() {
-        let s = ChannelStore::new();
+        let s = InMemoryChannelStore::new();
         let c = cid(0x10);
         let sub = sid(0x20);
-        s.create(c).await;
+        s.create(c).await.unwrap();
         s.subscribe(c, sub, 1_700_000_000).await.unwrap();
         assert!(s.is_subscribed(c, sub).await);
         let list = s.list_subscribers(c).await.unwrap();
@@ -691,17 +804,17 @@ mod tests {
 
     #[tokio::test]
     async fn subscribe_rejects_unknown_channel() {
-        let s = ChannelStore::new();
+        let s = InMemoryChannelStore::new();
         let err = s.subscribe(cid(0x10), sid(0x20), 0).await.unwrap_err();
         assert!(matches!(err, StorageError::UnknownChannel));
     }
 
     #[tokio::test]
     async fn subscribe_is_idempotent() {
-        let s = ChannelStore::new();
+        let s = InMemoryChannelStore::new();
         let c = cid(0x30);
         let sub = sid(0x40);
-        s.create(c).await;
+        s.create(c).await.unwrap();
         s.subscribe(c, sub, 1).await.unwrap();
         s.subscribe(c, sub, 2).await.unwrap();
         let list = s.list_subscribers(c).await.unwrap();
@@ -710,10 +823,10 @@ mod tests {
 
     #[tokio::test]
     async fn deliver_envelope_round_trip() {
-        let s = ChannelStore::new();
+        let s = InMemoryChannelStore::new();
         let c = cid(0x50);
         let sub = sid(0x60);
-        s.create(c).await;
+        s.create(c).await.unwrap();
         s.subscribe(c, sub, 0).await.unwrap();
         let envelope = vec![0xAAu8; 80]; // SEED_ENVELOPE_LEN
         s.deliver_envelope(c, sub, envelope.clone(), 80)
@@ -725,10 +838,10 @@ mod tests {
 
     #[tokio::test]
     async fn deliver_envelope_rejects_wrong_length() {
-        let s = ChannelStore::new();
+        let s = InMemoryChannelStore::new();
         let c = cid(0x70);
         let sub = sid(0x80);
-        s.create(c).await;
+        s.create(c).await.unwrap();
         s.subscribe(c, sub, 0).await.unwrap();
         let err = s
             .deliver_envelope(c, sub, vec![0u8; 79], 80)
@@ -745,9 +858,9 @@ mod tests {
 
     #[tokio::test]
     async fn deliver_envelope_rejects_unknown_subscriber() {
-        let s = ChannelStore::new();
+        let s = InMemoryChannelStore::new();
         let c = cid(0x90);
-        s.create(c).await;
+        s.create(c).await.unwrap();
         let err = s
             .deliver_envelope(c, sid(0xA0), vec![0u8; 80], 80)
             .await
@@ -757,20 +870,20 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_envelope_returns_none_before_delivery() {
-        let s = ChannelStore::new();
+        let s = InMemoryChannelStore::new();
         let c = cid(0xB0);
         let sub = sid(0xC0);
-        s.create(c).await;
+        s.create(c).await.unwrap();
         s.subscribe(c, sub, 0).await.unwrap();
         assert!(s.fetch_envelope(c, sub).await.unwrap().is_none());
     }
 
     #[tokio::test]
     async fn envelope_latest_wins() {
-        let s = ChannelStore::new();
+        let s = InMemoryChannelStore::new();
         let c = cid(0xD0);
         let sub = sid(0xE0);
-        s.create(c).await;
+        s.create(c).await.unwrap();
         s.subscribe(c, sub, 0).await.unwrap();
         s.deliver_envelope(c, sub, vec![0x11; 80], 80)
             .await
@@ -799,26 +912,26 @@ mod tests {
 
     #[tokio::test]
     async fn genesis_epoch_is_zero() {
-        let s = ChannelStore::new();
+        let s = InMemoryChannelStore::new();
         let c = cid(0xF0);
-        s.create(c).await;
+        s.create(c).await.unwrap();
         assert_eq!(s.current_epoch(c).await.unwrap(), 0);
     }
 
     #[tokio::test]
     async fn current_epoch_rejects_unknown_channel() {
-        let s = ChannelStore::new();
+        let s = InMemoryChannelStore::new();
         let err = s.current_epoch(cid(0xF1)).await.unwrap_err();
         assert!(matches!(err, StorageError::UnknownChannel));
     }
 
     #[tokio::test]
     async fn rotate_bumps_epoch_and_replaces_envelopes() {
-        let s = ChannelStore::new();
+        let s = InMemoryChannelStore::new();
         let c = cid(0x01);
         let a = sid(0x02);
         let b = sid(0x03);
-        s.create(c).await;
+        s.create(c).await.unwrap();
         s.subscribe(c, a, 0).await.unwrap();
         s.subscribe(c, b, 0).await.unwrap();
         // Pre-rotation: deliver an "epoch 0" envelope for
@@ -852,10 +965,10 @@ mod tests {
 
     #[tokio::test]
     async fn rotate_is_atomic_on_wrong_length() {
-        let s = ChannelStore::new();
+        let s = InMemoryChannelStore::new();
         let c = cid(0x04);
         let a = sid(0x05);
-        s.create(c).await;
+        s.create(c).await.unwrap();
         s.subscribe(c, a, 0).await.unwrap();
         s.deliver_envelope(c, a, vec![0x00; 80], 80)
             .await
@@ -883,9 +996,9 @@ mod tests {
 
     #[tokio::test]
     async fn rotate_rejects_unsubscribed_pubkey() {
-        let s = ChannelStore::new();
+        let s = InMemoryChannelStore::new();
         let c = cid(0x06);
-        s.create(c).await;
+        s.create(c).await.unwrap();
         // No subscribe; try to rotate to an unknown peer.
         let err = s
             .rotate(c, vec![(sid(0x07), vec![0u8; 80])], 80)
@@ -901,9 +1014,9 @@ mod tests {
         // subscribers should still increment the epoch —
         // future-self may subscribe and check the epoch
         // to decide whether to ask for a fresh envelope.
-        let s = ChannelStore::new();
+        let s = InMemoryChannelStore::new();
         let c = cid(0x08);
-        s.create(c).await;
+        s.create(c).await.unwrap();
         let new_epoch = s.rotate(c, vec![], 80).await.unwrap();
         assert_eq!(new_epoch, 1);
     }

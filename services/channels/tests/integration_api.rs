@@ -11,8 +11,9 @@ use std::net::SocketAddr;
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
-use lakko_svc_channels::{router, AppState, ChannelStore, Config};
+use lakko_svc_channels::{router, AppState, Config, InMemoryChannelStore};
 use serde_json::json;
+use std::sync::Arc;
 use tokio::net::TcpListener;
 
 fn test_config() -> Config {
@@ -21,12 +22,13 @@ fn test_config() -> Config {
         max_post_bytes: 64 * 1024,
         fetch_limit_default: 50,
         fetch_limit_max: 500,
+        database_url: None,
     }
 }
 
 async fn spawn() -> SocketAddr {
     let cfg = test_config();
-    let store = ChannelStore::new();
+    let store = Arc::new(InMemoryChannelStore::new());
     let state = AppState::new(cfg, store);
     let app = router(state);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

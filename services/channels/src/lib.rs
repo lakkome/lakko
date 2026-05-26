@@ -15,11 +15,15 @@
 
 pub mod api;
 pub mod config;
+pub mod sql_store;
 pub mod storage;
 
 pub use api::{router, AppState};
 pub use config::{Config, ConfigError};
-pub use storage::{ChannelId, ChannelStore, StorageError, StoredPost};
+pub use sql_store::SqlChannelStore;
+pub use storage::{
+    ChannelId, ChannelStore, InMemoryChannelStore, StorageError, StoredPost, SubscriberId,
+};
 
 /// Service version pulled from the crate manifest at
 /// compile time.

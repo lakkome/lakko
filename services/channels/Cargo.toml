@@ -49,6 +49,25 @@ hex = "0.4"
 # JSON body without binary-encoding escapes.
 base64 = "0.22"
 
+# SQL persistence (G4-1-sql). Same workspace pin every
+# other lakko service uses; production binds to MariaDB
+# via LAKKO_CHANNELS_DATABASE_URL while tests fall back
+# to the in-memory store.
+sqlx = { version = "0.8", default-features = false, features = [
+    "runtime-tokio",
+    "tls-rustls-ring",
+    "mysql",
+    "migrate",
+    "macros",
+] }
+
+# Object-safe async trait dispatch for the `ChannelStore`
+# trait. Stable Rust can do dyn-async today via the
+# experimental dyn-compat path, but every other lakko
+# service that needs an async trait (push-gw, transport)
+# uses the `async-trait` crate, so we stay consistent.
+async-trait = "0.1"
+
 # We do NOT pull lakko-channels here: the server treats
 # every ChannelPost as opaque bytes (ADR-0010 §"What the
 # SFU does NOT do" extends to this service — no payload

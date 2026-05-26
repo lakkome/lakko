@@ -50,15 +50,22 @@ pub const EXPECTED_ENVELOPE_LEN: usize = 80;
 pub struct AppState {
     /// Runtime config (read-only after boot).
     pub cfg: Config,
-    /// In-memory channel store. Multi-thread-safe; shares
-    /// one `Arc<RwLock<…>>` across handlers.
-    pub store: ChannelStore,
+    /// Channel store — `Arc<dyn ChannelStore + …>` so the
+    /// same handler code dispatches dynamically between
+    /// the in-memory and the SQL-backed impls (G4-1-sql).
+    pub store: Arc<dyn ChannelStore + Send + Sync>,
 }
 
 impl AppState {
-    /// Build a fresh state container behind an `Arc`.
+    /// Build a fresh state container behind an `Arc`. Takes
+    /// a boxed trait object so the caller picks the impl
+    /// (production wires a `SqlChannelStore`; tests wire
+    /// an `InMemoryChannelStore`).
     #[must_use]
-    pub fn new(cfg: Config, store: ChannelStore) -> Arc<Self> {
+    pub fn new(
+        cfg: Config,
+        store: Arc<dyn ChannelStore + Send + Sync>,
+    ) -> Arc<Self> {
         Arc::new(Self { cfg, store })
     }
 }
@@ -225,7 +232,13 @@ async fn create_channel(
         )
             .into_response();
     };
-    state.store.create(channel).await;
+    if let Err(e) = state.store.create(channel).await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(err("storage", e.to_string())),
+        )
+            .into_response();
+    }
     (
         StatusCode::CREATED,
         Json(CreateChannelResponse {

@@ -59,6 +59,13 @@ pub struct Config {
     pub fetch_limit_default: usize,
     /// Maximum value the client may pass to `?limit=`.
     pub fetch_limit_max: usize,
+    /// MariaDB connection URL — when set, the service
+    /// uses `SqlChannelStore`; when unset, falls back to
+    /// the in-memory store (dev / test). Reads first
+    /// `LAKKO_CHANNELS_DATABASE_URL`, then the generic
+    /// `DATABASE_URL` so a single-service `cargo run`
+    /// dev workflow does not need both vars.
+    pub database_url: Option<String>,
 }
 
 impl Config {
@@ -84,11 +91,16 @@ impl Config {
                 ),
             });
         }
+        let database_url = env::var("LAKKO_CHANNELS_DATABASE_URL")
+            .ok()
+            .or_else(|| env::var("DATABASE_URL").ok())
+            .filter(|s| !s.is_empty());
         Ok(Self {
             bind,
             max_post_bytes,
             fetch_limit_default,
             fetch_limit_max,
+            database_url,
         })
     }
 }
