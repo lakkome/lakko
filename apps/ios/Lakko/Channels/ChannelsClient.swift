@@ -114,6 +114,105 @@ public final class ChannelsClient {
         return resp.epoch
     }
 
+    // MARK: - Subscribers (G4-3c)
+
+    /// `POST /v1/channels/:id/subscribers` — register a
+    /// subscriber's X25519 public key.
+    @discardableResult
+    public func subscribe(
+        channelIdHex: String,
+        subscriberPubkeyHex: String
+    ) async throws -> String {
+        struct Req: Encodable { let subscriber_pubkey_hex: String }
+        struct Resp: Decodable { let subscriber_id: String }
+        let resp: Resp = try await postJson(
+            endpoint: "/v1/channels/\(channelIdHex)/subscribers",
+            body: Req(subscriber_pubkey_hex: subscriberPubkeyHex)
+        )
+        return resp.subscriber_id
+    }
+
+    /// `GET /v1/channels/:id/subscribers` — list registered
+    /// subscriber pubkey-hex strings. Used by the publisher
+    /// to fan out HPKE-sealed seed envelopes.
+    public func listSubscribers(
+        channelIdHex: String
+    ) async throws -> [String] {
+        struct Resp: Decodable { let subscribers: [String] }
+        let resp: Resp = try await getJson(
+            endpoint: "/v1/channels/\(channelIdHex)/subscribers"
+        )
+        return resp.subscribers
+    }
+
+    /// `GET /v1/channels/:id/subscribers/:pk/envelope` —
+    /// fetch the latest seed envelope delivered to this
+    /// subscriber. Returns `nil` when registered but no
+    /// envelope yet (server returns 404
+    /// `envelope-not-ready` which we map to nil so the
+    /// caller can branch cleanly).
+    public func fetchEnvelope(
+        channelIdHex: String,
+        subscriberPubkeyHex: String
+    ) async throws -> String? {
+        struct Resp: Decodable { let envelope_b64: String }
+        do {
+            let resp: Resp = try await getJson(
+                endpoint: "/v1/channels/\(channelIdHex)/subscribers/\(subscriberPubkeyHex)/envelope"
+            )
+            return resp.envelope_b64
+        } catch let err as ChannelsApiError where err.code == "envelope-not-ready" {
+            return nil
+        }
+    }
+
+    /// `POST /v1/channels/:id/subscribers/:pk/envelope` —
+    /// publisher delivers a per-subscriber HPKE-sealed seed
+    /// envelope. The server takes raw `Bytes` — same opacity
+    /// contract as the publish endpoint.
+    ///
+    /// Throws `ChannelsApiError`:
+    /// - `unknown-subscriber` (404) — pubkey not registered
+    /// - `bad-envelope-len`   (400) — wrong wire length
+    /// - `bad-channel-id`     (400) — wrong channel-id shape
+    /// - `bad-subscriber-id`  (400) — wrong pubkey-hex shape
+    public func deliverEnvelope(
+        channelIdHex: String,
+        subscriberPubkeyHex: String,
+        envelope: Data
+    ) async throws {
+        let url = try buildURL(
+            endpoint: "/v1/channels/\(channelIdHex)/subscribers/\(subscriberPubkeyHex)/envelope"
+        )
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
+        request.httpBody = envelope
+        let (data, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse else {
+            throw ChannelsApiError(
+                status: -1,
+                code: "no-http-response",
+                detail: "non-HTTP response"
+            )
+        }
+        if !(200..<300).contains(http.statusCode) {
+            struct ErrEnvelope: Decodable { let code: String; let detail: String }
+            if let body = try? decoder.decode(ErrEnvelope.self, from: data) {
+                throw ChannelsApiError(
+                    status: http.statusCode,
+                    code: body.code,
+                    detail: body.detail
+                )
+            }
+            throw ChannelsApiError(
+                status: http.statusCode,
+                code: "unknown",
+                detail: HTTPURLResponse.localizedString(forStatusCode: http.statusCode)
+            )
+        }
+    }
+
     // MARK: - Internals
 
     private func postJson<Body: Encodable, R: Decodable>(

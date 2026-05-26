@@ -36,7 +36,35 @@ public final class ChannelsUiState: ObservableObject {
     /// invariants.
     @Published public private(set) var counterByChannel: [String: UInt64] = [:]
 
-    public init() {}
+    /// Per-channel subscriber-side X25519 keypair (Phase 4b
+    /// G4-3c). Persisted in `UserDefaults` under
+    /// ``Self.subscriberKeysStorageKey`` so a relaunch does
+    /// not strand the user without the secret needed to
+    /// open future seed envelopes. A follow-up sprint moves
+    /// the secret half into the device Keychain.
+    @Published public private(set)
+    var subscriberKeysByChannel: [String: ChannelSubscriberKeys] = [:]
+
+    /// Per-channel recovered content-key seed (Phase 4b
+    /// G4-3c). In-memory only — never persisted, never
+    /// sent off-device. UI shows a "waiting for seed
+    /// delivery" state until a value lands here.
+    @Published public private(set)
+    var subscribedSeedByChannel: [String: Data] = [:]
+
+    /// `UserDefaults` key used by subscriber-keypair
+    /// persistence. The value is a JSON-encoded
+    /// `[PersistedSubscriberKey]`; see
+    /// ``persistSubscriberKeys()`` for the shape.
+    public static let subscriberKeysStorageKey =
+        "lakko.channels.subscriber-keys.v1"
+
+    public init() {
+        // Restore persisted subscriber keypairs so a fresh
+        // launch can poll for envelopes without the user
+        // re-subscribing manually.
+        self.subscriberKeysByChannel = Self.loadSubscriberKeys()
+    }
 
     // MARK: - Mutations
 
@@ -95,12 +123,107 @@ public final class ChannelsUiState: ObservableObject {
         return current
     }
 
+    /// Install / replace the subscriber-side X25519
+    /// keypair the device generated when joining
+    /// `channelId` as a reader. Persists to
+    /// `UserDefaults` synchronously.
+    public func setSubscriberKeys(
+        channelId: String,
+        keys: ChannelSubscriberKeys
+    ) {
+        subscriberKeysByChannel[channelId] = keys
+        persistSubscriberKeys()
+    }
+
+    /// Forget the subscriber-side keypair for
+    /// `channelId` — used on un-follow. Clears the cached
+    /// recovered seed too.
+    public func clearSubscriberKeys(_ channelId: String) {
+        subscriberKeysByChannel[channelId] = nil
+        subscribedSeedByChannel[channelId] = nil
+        persistSubscriberKeys()
+    }
+
+    /// Cache the recovered content-key seed after the
+    /// subscriber successfully opened a seed envelope.
+    public func setSubscribedSeed(channelId: String, seed: Data) {
+        subscribedSeedByChannel[channelId] = seed
+    }
+
     public func reset() {
         channels = []
         postsByChannel = [:]
         epochByChannel = [:]
         keysByChannel = [:]
         counterByChannel = [:]
+        subscriberKeysByChannel = [:]
+        subscribedSeedByChannel = [:]
+        persistSubscriberKeys()
+    }
+
+    // MARK: - Subscriber-keypair persistence
+
+    /// One row in the persisted `UserDefaults` blob.
+    private struct PersistedSubscriberKey: Codable {
+        let channelId: String
+        /// Hex-encoded 32-byte X25519 secret.
+        let secretHex: String
+        /// Hex-encoded 32-byte X25519 public.
+        let publicHex: String
+    }
+
+    private func persistSubscriberKeys() {
+        let rows: [PersistedSubscriberKey] =
+            subscriberKeysByChannel.map { (channelId, k) in
+                PersistedSubscriberKey(
+                    channelId: channelId,
+                    secretHex: ChannelsComposer.bytesToHex(k.secret),
+                    publicHex: ChannelsComposer.bytesToHex(k.publicKey)
+                )
+            }
+        guard let data = try? JSONEncoder().encode(rows) else { return }
+        UserDefaults.standard.set(data, forKey: Self.subscriberKeysStorageKey)
+    }
+
+    private static func loadSubscriberKeys() -> [String: ChannelSubscriberKeys] {
+        guard
+            let data = UserDefaults.standard.data(
+                forKey: subscriberKeysStorageKey
+            ),
+            let rows = try? JSONDecoder().decode(
+                [PersistedSubscriberKey].self,
+                from: data
+            )
+        else {
+            return [:]
+        }
+        var out: [String: ChannelSubscriberKeys] = [:]
+        for row in rows {
+            guard let secret = Data(hexString: row.secretHex),
+                  let pub = Data(hexString: row.publicHex)
+            else { continue }
+            out[row.channelId] = ChannelSubscriberKeys(
+                secret: secret,
+                publicKey: pub
+            )
+        }
+        return out
+    }
+}
+
+private extension Data {
+    init?(hexString: String) {
+        let chars = Array(hexString)
+        guard chars.count % 2 == 0 else { return nil }
+        var out = Data(capacity: chars.count / 2)
+        var i = 0
+        while i < chars.count {
+            guard let byte = UInt8(String(chars[i...(i + 1)]), radix: 16)
+            else { return nil }
+            out.append(byte)
+            i += 2
+        }
+        self = out
     }
 }
 

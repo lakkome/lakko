@@ -239,6 +239,11 @@ struct ChannelDetailScreen: View {
                     metaSection
                     if state.keysByChannel[channelId] != nil {
                         composerSection
+                        SubscribersPanelView(
+                            channelId: channelId,
+                            state: state,
+                            client: client
+                        )
                     } else {
                         subscriberPlaceholderSection
                     }
@@ -314,14 +319,28 @@ struct ChannelDetailScreen: View {
     }
 
     private var subscriberPlaceholderSection: some View {
-        Text(
-            "No local publisher keys for this channel. Subscriber-side view + HPKE seed-envelope reception arrive in a follow-up sub-sprint."
-        )
-        .font(.footnote)
+        VStack(alignment: .leading, spacing: 12) {
+            Text(
+                "No local publisher keys for this channel — you cannot publish to it from this device."
+            )
+            .font(.footnote)
+            .foregroundStyle(Theme.textSecondary)
+
+            NavigationLink {
+                ChannelSubscribeScreen(
+                    channelId: channelId,
+                    state: state,
+                    client: client
+                )
+            } label: {
+                Text("Read as a subscriber →")
+                    .font(.footnote)
+                    .foregroundStyle(Theme.accent)
+            }
+        }
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Theme.surface)
-        .foregroundStyle(Theme.textSecondary)
         .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 
@@ -460,5 +479,478 @@ struct ChannelDetailScreen: View {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime]
         return formatter.string(from: date)
+    }
+}
+
+// ============================================================================
+// SubscribersPanelView — publisher-side fan-out widget
+// (embedded inside ChannelDetailScreen when the user holds
+//  publisher keys for this channel)
+// ============================================================================
+
+struct SubscribersPanelView: View {
+    let channelId: String
+    @ObservedObject var state: ChannelsUiState
+    let client: ChannelsClient
+
+    @State private var subscribers: [String]?
+    @State private var busyPk: String?
+    @State private var error: String?
+    private enum Status { case delivered, failed }
+    @State private var statusByPk: [String: Status] = [:]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("Subscribers")
+                    .font(.subheadline.bold())
+                    .foregroundStyle(Theme.textPrimary)
+                Text("(\(subscribers?.count.description ?? "…"))")
+                    .font(.subheadline)
+                    .foregroundStyle(Theme.textSecondary)
+                Spacer()
+                Button("Refresh") {
+                    Task { await refresh() }
+                }
+                .font(.caption)
+                .foregroundStyle(Theme.textSecondary)
+            }
+
+            if let error {
+                Text(error)
+                    .font(.caption)
+                    .padding(8)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Theme.destructive)
+                    .foregroundStyle(.white)
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+            }
+
+            if let subs = subscribers {
+                if subs.isEmpty {
+                    Text(
+                        "No subscribers yet. Anyone with the channel id can open the subscribe screen and register their X25519 public key."
+                    )
+                    .font(.caption)
+                    .foregroundStyle(Theme.textSecondary)
+                } else {
+                    ForEach(subs, id: \.self) { pk in
+                        subscriberRow(pk)
+                    }
+                }
+            } else {
+                Text("Loading subscribers…")
+                    .font(.caption)
+                    .foregroundStyle(Theme.textSecondary)
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Theme.surface)
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .task { await refresh() }
+    }
+
+    private func subscriberRow(_ pk: String) -> some View {
+        HStack(alignment: .center, spacing: 10) {
+            Text(pk)
+                .font(.caption2.monospaced())
+                .foregroundStyle(Theme.textSecondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+
+            if let st = statusByPk[pk] {
+                Text(st == .delivered ? "delivered" : "failed")
+                    .font(.caption2)
+                    .foregroundStyle(st == .delivered ? Theme.accent : Theme.destructive)
+            }
+
+            Spacer(minLength: 4)
+
+            Button {
+                Task { await deliverTo(pk) }
+            } label: {
+                Text(busyPk == pk ? "Sealing…" : "Deliver seed")
+                    .font(.caption2)
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(Theme.accent)
+            .controlSize(.mini)
+            .disabled(busyPk == pk)
+        }
+        .padding(8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Theme.background)
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+    }
+
+    private func refresh() async {
+        do {
+            subscribers = try await client.listSubscribers(
+                channelIdHex: channelId
+            )
+        } catch let err as ChannelsApiError {
+            error = "List failed: \(err.code) — \(err.detail)"
+        } catch {
+            self.error = "List failed: \(error.localizedDescription)"
+        }
+    }
+
+    private func deliverTo(_ pubkeyHex: String) async {
+        if busyPk != nil { return }
+        guard let keys = state.keysByChannel[channelId] else {
+            error = "No publisher keys on this device."
+            return
+        }
+        busyPk = pubkeyHex
+        error = nil
+        defer { busyPk = nil }
+        do {
+            guard let subPub = Data(channelHex: pubkeyHex) else {
+                error = "Bad subscriber pubkey hex."
+                return
+            }
+            let epoch = state.epochByChannel[channelId] ?? 0
+            let wire = try ChannelsComposer.sealSubscriberSeedEnvelope(
+                subscriberPub: subPub,
+                channelIdHex: channelId,
+                epochId: epoch,
+                seed: keys.seed
+            )
+            try await client.deliverEnvelope(
+                channelIdHex: channelId,
+                subscriberPubkeyHex: pubkeyHex,
+                envelope: wire
+            )
+            statusByPk[pubkeyHex] = .delivered
+        } catch let err as ChannelsApiError {
+            error = "Deliver failed: \(err.code) — \(err.detail)"
+            statusByPk[pubkeyHex] = .failed
+        } catch let err as ChannelsComposerError {
+            error = "Seal failed: \(err)"
+            statusByPk[pubkeyHex] = .failed
+        } catch {
+            self.error = "Error: \(error.localizedDescription)"
+            statusByPk[pubkeyHex] = .failed
+        }
+    }
+}
+
+// ============================================================================
+// ChannelSubscribeScreen — subscriber-side route
+//   Generates (or restores) an X25519 keypair on first
+//   visit, registers it on the channel, polls for a seed
+//   envelope, opens it, then renders decoded posts using
+//   the recovered seed.
+// ============================================================================
+
+struct ChannelSubscribeScreen: View {
+    let channelId: String
+    @ObservedObject var state: ChannelsUiState
+    let client: ChannelsClient
+
+    private enum Bootstrap {
+        case idle, registering, polling, active, errorState
+    }
+    @State private var bootstrap: Bootstrap = .idle
+    @State private var bootstrapError: String?
+    @State private var posts: [PostView] = []
+    @State private var decodedByCursor: [UInt64: String?] = [:]
+    @State private var pollTask: Task<Void, Never>?
+
+    var body: some View {
+        ZStack {
+            Theme.background.ignoresSafeArea()
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    metaSection
+                    keypairSection
+                    statusSection
+                    postsSection
+                }
+                .padding()
+            }
+        }
+        .navigationTitle("Subscribe")
+        .navigationBarTitleDisplayMode(.inline)
+        .task { await runBootstrap() }
+        .onDisappear { pollTask?.cancel() }
+    }
+
+    private var metaSection: some View {
+        Text(channelId)
+            .font(.caption.monospaced())
+            .foregroundStyle(Theme.textSecondary)
+    }
+
+    private var keypairSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if let kp = state.subscriberKeysByChannel[channelId] {
+                Text("Your subscriber public key (registered on this channel):")
+                    .font(.caption)
+                    .foregroundStyle(Theme.textSecondary)
+                Text(ChannelsComposer.bytesToHex(kp.publicKey))
+                    .font(.caption2.monospaced())
+                    .foregroundStyle(Theme.textPrimary)
+                    .textSelection(.enabled)
+                    .lineLimit(2)
+                    .truncationMode(.middle)
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Theme.surface)
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+
+    @ViewBuilder
+    private var statusSection: some View {
+        let (text, color): (String, Color) = {
+            switch bootstrap {
+            case .idle, .registering:
+                return ("Registering your key on the channel…", Theme.textSecondary)
+            case .polling:
+                return (
+                    "Registered. Waiting for the publisher to fan out a seed envelope… (auto-refreshes every 3 s)",
+                    Theme.textSecondary
+                )
+            case .active:
+                return ("Seed envelope opened. You can read posts on this channel.", Theme.accent)
+            case .errorState:
+                return (bootstrapError ?? "Unknown error.", Theme.destructive)
+            }
+        }()
+        Text(text)
+            .font(.footnote)
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Theme.surface)
+            .foregroundStyle(color)
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+
+    private var postsSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Posts")
+                .font(.headline)
+                .foregroundStyle(Theme.textPrimary)
+
+            if bootstrap == .active && !posts.isEmpty {
+                ForEach(posts, id: \.cursor) { p in
+                    postRow(p)
+                }
+            } else {
+                Text(
+                    bootstrap == .active
+                        ? "No posts yet on this channel."
+                        : (bootstrap == .polling
+                            ? "Waiting for the publisher to deliver your seed."
+                            : "Bootstrapping the subscribe flow…")
+                )
+                .foregroundStyle(Theme.textSecondary)
+            }
+        }
+    }
+
+    private func postRow(_ post: PostView) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text("cursor \(post.cursor)")
+                Spacer()
+                Text(isoTimestamp(ms: post.serverTsMs))
+            }
+            .font(.caption.monospaced())
+            .foregroundStyle(Theme.textSecondary)
+
+            if let entry = decodedByCursor[post.cursor] {
+                if let text = entry {
+                    Text(text)
+                        .foregroundStyle(Theme.textPrimary)
+                } else {
+                    Text("[unreadable — wrong seed or tampered ciphertext]")
+                        .font(.footnote)
+                        .italic()
+                        .foregroundStyle(Theme.textSecondary)
+                }
+            } else {
+                Text("Decoding…")
+                    .font(.footnote)
+                    .italic()
+                    .foregroundStyle(Theme.textSecondary)
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Theme.surface)
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+
+    // MARK: - Actions
+
+    private func ensureKeypair() -> ChannelSubscriberKeys {
+        if let existing = state.subscriberKeysByChannel[channelId] {
+            return existing
+        }
+        let fresh = ChannelsComposer.freshSubscriberKeys()
+        state.setSubscriberKeys(channelId: channelId, keys: fresh)
+        return fresh
+    }
+
+    private func runBootstrap() async {
+        bootstrap = .registering
+        bootstrapError = nil
+        let kp = ensureKeypair()
+        let pubHex = ChannelsComposer.bytesToHex(kp.publicKey)
+        do {
+            _ = try await client.subscribe(
+                channelIdHex: channelId,
+                subscriberPubkeyHex: pubHex
+            )
+
+            // If a seed is already cached in memory, jump
+            // straight to active.
+            if state.subscribedSeedByChannel[channelId] != nil {
+                bootstrap = .active
+                await loadAndDecodePosts()
+                return
+            }
+
+            bootstrap = .polling
+            // First-attempt fetch in case the publisher
+            // has already fanned out.
+            if let b64 = try await client.fetchEnvelope(
+                channelIdHex: channelId,
+                subscriberPubkeyHex: pubHex
+            ) {
+                try await openAndCacheSeed(envelopeB64: b64)
+                bootstrap = .active
+                await loadAndDecodePosts()
+                return
+            }
+            startPollingTask(pubHex: pubHex)
+        } catch let err as ChannelsApiError {
+            bootstrapError = "\(err.code) — \(err.detail)"
+            bootstrap = .errorState
+        } catch {
+            bootstrapError = error.localizedDescription
+            bootstrap = .errorState
+        }
+    }
+
+    private func startPollingTask(pubHex: String) {
+        pollTask?.cancel()
+        pollTask = Task { [client] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 3_000_000_000)
+                if Task.isCancelled { return }
+                do {
+                    if let b64 = try await client.fetchEnvelope(
+                        channelIdHex: channelId,
+                        subscriberPubkeyHex: pubHex
+                    ) {
+                        try await openAndCacheSeed(envelopeB64: b64)
+                        bootstrap = .active
+                        await loadAndDecodePosts()
+                        return
+                    }
+                } catch {
+                    // Transient — keep polling. A permanent
+                    // failure (unknown-channel etc.) would
+                    // have come from the initial register.
+                }
+            }
+        }
+    }
+
+    private func openAndCacheSeed(envelopeB64: String) async throws {
+        guard let kp = state.subscriberKeysByChannel[channelId] else {
+            throw ChannelsComposerError.ffi("missing subscriber keypair")
+        }
+        guard let wire = Data(base64URLNoPadSubscriber: envelopeB64) else {
+            throw ChannelsComposerError.badBase64(envelopeB64)
+        }
+        let epoch = try await client.fetchEpoch(channelIdHex: channelId)
+        let seed = try ChannelsComposer.openSubscriberSeedEnvelope(
+            keys: kp,
+            channelIdHex: channelId,
+            epochId: epoch,
+            wire: wire
+        )
+        state.setSubscribedSeed(channelId: channelId, seed: seed)
+        state.setEpoch(channelId: channelId, epoch: epoch)
+    }
+
+    private func loadAndDecodePosts() async {
+        guard let seed = state.subscribedSeedByChannel[channelId] else {
+            return
+        }
+        do {
+            let page = try await client.fetchPosts(
+                channelIdHex: channelId,
+                after: 0
+            )
+            posts = page.posts
+            var next: [UInt64: String?] = [:]
+            for post in page.posts {
+                do {
+                    let plain = try ChannelsComposer.verifyAndDecrypt(
+                        seed: seed,
+                        channelIdHex: channelId,
+                        postWireB64Url: post.payloadB64
+                    )
+                    next[post.cursor] = String(data: plain, encoding: .utf8)
+                } catch {
+                    next[post.cursor] = nil as String?
+                }
+            }
+            decodedByCursor = next
+        } catch {
+            // Swallow — the status section already shows
+            // the bootstrap state; the posts section will
+            // simply show "no posts yet" until the next
+            // refresh succeeds.
+        }
+    }
+
+    private func isoTimestamp(ms: UInt64) -> String {
+        let date = Date(timeIntervalSince1970: TimeInterval(ms) / 1000.0)
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter.string(from: date)
+    }
+}
+
+// MARK: - hex / base64url helpers shared by the iOS UI
+
+private extension Data {
+    /// Decode 64 lowercase hex chars (subscriber pubkey
+    /// wire form) into 32 bytes. Returns `nil` on any
+    /// failure.
+    init?(channelHex hex: String) {
+        let chars = Array(hex)
+        guard chars.count % 2 == 0 else { return nil }
+        var out = Data(capacity: chars.count / 2)
+        var i = 0
+        while i < chars.count {
+            guard let byte = UInt8(String(chars[i...(i + 1)]), radix: 16)
+            else { return nil }
+            out.append(byte)
+            i += 2
+        }
+        self = out
+    }
+
+    /// Decode a base64url-no-pad string into `Data`.
+    /// Local copy of `ChannelsComposer`'s private helper,
+    /// re-implemented here so the subscribe screen does
+    /// not have to reach into composer internals.
+    init?(base64URLNoPadSubscriber s: String) {
+        var std = s
+            .replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/")
+        let pad = (4 - (std.count % 4)) % 4
+        std.append(String(repeating: "=", count: pad))
+        guard let data = Data(base64Encoded: std) else { return nil }
+        self = data
     }
 }

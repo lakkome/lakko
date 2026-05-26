@@ -40,6 +40,29 @@ public struct ChannelPublisherKeys: Equatable, Sendable {
     public let signingKeySeed: Data
 }
 
+/// Subscriber-side X25519 keypair (Phase 4b G4-3c).
+/// The public half registers on
+/// `POST /v1/channels/:id/subscribers`; the secret half
+/// stays on the device + unwraps the per-subscriber HPKE
+/// seed envelopes the publisher fans out on every
+/// rotation.
+///
+/// Both halves are 32 bytes. Persisted in `UserDefaults`
+/// by `ChannelsUiState` for now — a follow-up sprint moves
+/// the secret into the device Keychain (same migration
+/// path the publisher's `signingKeySeed` will take).
+public struct ChannelSubscriberKeys: Equatable, Sendable {
+    /// 32-byte X25519 secret.
+    public let secret: Data
+    /// 32-byte X25519 public.
+    public let publicKey: Data
+
+    public init(secret: Data, publicKey: Data) {
+        self.secret = secret
+        self.publicKey = publicKey
+    }
+}
+
 /// Errors the composer surfaces. Wraps both the UniFFI
 /// `FfiError.Channels` variant + Swift-side framing
 /// failures (hex decode, UTF-8 surprise) into one type
@@ -123,6 +146,81 @@ public enum ChannelsComposer {
         } catch let FfiError.Channels(msg) {
             throw ChannelsComposerError.ffi(msg)
         }
+    }
+
+    // MARK: - Subscriber-side (G4-3c)
+
+    /// Fresh subscriber X25519 keypair, backed by
+    /// `getrandom` (Security framework on iOS).
+    public static func freshSubscriberKeys() -> ChannelSubscriberKeys {
+        let kp = ChannelSubscriberKeypair.generate()
+        return ChannelSubscriberKeys(
+            secret: kp.secret(),
+            // `public` is a Swift reserved word — the
+            // UniFFI-generated method name is
+            // backtick-escaped, so the call site must
+            // backtick-escape too.
+            publicKey: kp.`public`()
+        )
+    }
+
+    /// Publisher-side: seal the channel's 32-byte content-
+    /// key seed against a subscriber's X25519 public key.
+    /// Returns the 80-byte wire bytes ready for
+    /// `ChannelsClient.deliverEnvelope`.
+    public static func sealSubscriberSeedEnvelope(
+        subscriberPub: Data,
+        channelIdHex: String,
+        epochId: UInt32,
+        seed: Data
+    ) throws -> Data {
+        let channelId = try channelIdFromHex(channelIdHex)
+        do {
+            return try LakkoCore.sealSubscriberSeedEnvelope(
+                subscriberPub: subscriberPub,
+                channelId: channelId,
+                epochId: epochId,
+                seed: seed
+            )
+        } catch let FfiError.Channels(msg) {
+            throw ChannelsComposerError.ffi(msg)
+        }
+    }
+
+    /// Subscriber-side: open a seed envelope with the
+    /// local keypair. Returns the recovered 32-byte
+    /// content-key seed — hand it to ``verifyAndDecrypt``
+    /// to decode posts on the channel for this epoch.
+    public static func openSubscriberSeedEnvelope(
+        keys: ChannelSubscriberKeys,
+        channelIdHex: String,
+        epochId: UInt32,
+        wire: Data
+    ) throws -> Data {
+        let channelId = try channelIdFromHex(channelIdHex)
+        let kp: ChannelSubscriberKeypair
+        do {
+            kp = try ChannelSubscriberKeypair.fromSecret(secret: keys.secret)
+        } catch let FfiError.Channels(msg) {
+            throw ChannelsComposerError.ffi(msg)
+        }
+        do {
+            return try LakkoCore.openSubscriberSeedEnvelope(
+                keypair: kp,
+                channelId: channelId,
+                epochId: epochId,
+                wire: wire
+            )
+        } catch let FfiError.Channels(msg) {
+            throw ChannelsComposerError.ffi(msg)
+        }
+    }
+
+    /// Wire length of a seed envelope —
+    /// `eph_pub(32) + sealed_seed(32) + tag(16) = 80`.
+    /// Exposed for UI sanity checks.
+    public static var seedEnvelopeLen: UInt32 {
+        LakkoCore.channelSeedEnvelopeLen()
     }
 
     // MARK: - Helpers
