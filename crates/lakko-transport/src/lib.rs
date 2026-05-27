@@ -68,13 +68,13 @@ pub use http::{HttpError, HttpResult, HttpTransport, HttpTransportConfig};
 pub use masque::{MasqueConfig, MasqueTransport};
 pub use pinning::{PinError, PinnedVerifier, SpkiHash, SpkiPinSet};
 pub use pluggable::{
-    race_select, HappyEyeballs, PluggableCandidate, PluggableError, PluggableKind,
-    PluggableResult, PluggableTransport,
+    race_select, HappyEyeballs, PluggableCandidate, PluggableError, PluggableKind, PluggableResult,
+    PluggableTransport,
 };
 pub use reality::{RealityConfig, RealityTransport};
 pub use rendezvous::{
-    BootstrapConfig, RendezvousError, RendezvousResult, TransportSpec,
-    ISSUED_AT_CLOCK_SKEW_SECS, SCHEMA_VERSION,
+    BootstrapConfig, RendezvousError, RendezvousResult, TransportSpec, ISSUED_AT_CLOCK_SKEW_SECS,
+    SCHEMA_VERSION,
 };
 pub use shadowsocks::{
     accept_inbound as shadowsocks_accept_inbound, psk_from_b64 as shadowsocks_psk_from_b64,

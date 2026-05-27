@@ -210,7 +210,7 @@ mod tests {
         match target_artifact_url("https://updates.lakko.me", "") {
             Err(TufError::BadTargetName { reason }) => {
                 assert!(reason.contains("empty"));
-            }
+            },
             other => panic!("expected BadTargetName, got {other:?}"),
         }
     }
@@ -226,7 +226,7 @@ mod tests {
             "foo..bar",
         ] {
             match target_artifact_url("https://updates.lakko.me", name) {
-                Err(TufError::BadTargetName { .. }) => {}
+                Err(TufError::BadTargetName { .. }) => {},
                 other => panic!("expected BadTargetName for {name:?}, got {other:?}"),
             }
         }
@@ -241,7 +241,7 @@ mod tests {
                         reason.contains("separator"),
                         "wrong reason for {name:?}: {reason}"
                     );
-                }
+                },
                 other => panic!("expected BadTargetName for {name:?}, got {other:?}"),
             }
         }
@@ -252,7 +252,7 @@ mod tests {
         match target_artifact_url("https://updates.lakko.me", "foo\0bar") {
             Err(TufError::BadTargetName { reason }) => {
                 assert!(reason.contains("NUL"));
-            }
+            },
             other => panic!("expected BadTargetName, got {other:?}"),
         }
     }

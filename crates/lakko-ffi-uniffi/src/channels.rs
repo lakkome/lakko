@@ -377,9 +377,7 @@ pub fn new_channel_seed_for_test() -> Vec<u8> {
 ///
 /// [`FfiError::Channels`] if `bytes.len() != 32`.
 #[uniffi::export]
-pub fn channel_seed_from_mls_exporter_output(
-    bytes: Vec<u8>,
-) -> Result<Vec<u8>, FfiError> {
+pub fn channel_seed_from_mls_exporter_output(bytes: Vec<u8>) -> Result<Vec<u8>, FfiError> {
     // Round-trip through ContentKeySeed::from_exporter_output
     // to surface a uniform error variant + reuse the
     // length validation that the in-Rust call sites use.
@@ -686,8 +684,7 @@ mod tests {
     #[test]
     fn mls_exporter_output_rejects_wrong_length() {
         for len in [0usize, 1, 16, 31, 33, 64] {
-            let err =
-                channel_seed_from_mls_exporter_output(vec![0u8; len]).unwrap_err();
+            let err = channel_seed_from_mls_exporter_output(vec![0u8; len]).unwrap_err();
             assert!(matches!(err, FfiError::Channels(_)));
         }
     }

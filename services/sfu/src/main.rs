@@ -70,9 +70,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let signaling_listener = TcpListener::bind(cfg.signaling_bind).await?;
-    let signaling = tokio::spawn(async move {
-        axum::serve(signaling_listener, router).await
-    });
+    let signaling = tokio::spawn(async move { axum::serve(signaling_listener, router).await });
 
     // Metrics exporter — separate socket so nginx can mTLS-
     // gate it independently of the signaling path.
@@ -139,15 +137,14 @@ async fn shutdown_signal() {
 
     #[cfg(unix)]
     let terminate = async {
-        let mut term = match tokio::signal::unix::signal(
-            tokio::signal::unix::SignalKind::terminate(),
-        ) {
-            Ok(s) => s,
-            Err(e) => {
-                warn!(error = %e, "shutdown: SIGTERM handler init failed");
-                return;
-            },
-        };
+        let mut term =
+            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+                Ok(s) => s,
+                Err(e) => {
+                    warn!(error = %e, "shutdown: SIGTERM handler init failed");
+                    return;
+                },
+            };
         let _ = term.recv().await;
     };
 

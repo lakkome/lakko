@@ -34,22 +34,21 @@ async fn main() -> anyhow::Result<()> {
     let cfg = Config::from_env()?;
     info!(bind = %cfg.bind, "lakko-svc-channels starting (v{})", VERSION);
 
-    let store: Arc<dyn ChannelStore + Send + Sync> =
-        if let Some(url) = &cfg.database_url {
-            info!("storage: MariaDB (LAKKO_CHANNELS_DATABASE_URL set) — running migrations");
-            let pool = MySqlPoolOptions::new()
-                .max_connections(16)
-                .connect(url)
-                .await?;
-            MIGRATIONS.run(&pool).await?;
-            Arc::new(SqlChannelStore::new(pool))
-        } else {
-            warn!(
-                "storage: in-memory (no LAKKO_CHANNELS_DATABASE_URL) — \
+    let store: Arc<dyn ChannelStore + Send + Sync> = if let Some(url) = &cfg.database_url {
+        info!("storage: MariaDB (LAKKO_CHANNELS_DATABASE_URL set) — running migrations");
+        let pool = MySqlPoolOptions::new()
+            .max_connections(16)
+            .connect(url)
+            .await?;
+        MIGRATIONS.run(&pool).await?;
+        Arc::new(SqlChannelStore::new(pool))
+    } else {
+        warn!(
+            "storage: in-memory (no LAKKO_CHANNELS_DATABASE_URL) — \
                  state is lost on restart, set the env var for production"
-            );
-            Arc::new(InMemoryChannelStore::new())
-        };
+        );
+        Arc::new(InMemoryChannelStore::new())
+    };
     // Spawn the background prune loop before handing
     // `store` into AppState — both halves share the same
     // `Arc<dyn ChannelStore + Send + Sync>` clone. The
@@ -78,9 +77,7 @@ async fn main() -> anyhow::Result<()> {
             "prune: background loop spawned",
         );
     } else {
-        info!(
-            "prune: background loop disabled (LAKKO_CHANNELS_PRUNE_INTERVAL_SECS=0)"
-        );
+        info!("prune: background loop disabled (LAKKO_CHANNELS_PRUNE_INTERVAL_SECS=0)");
     }
 
     let state = AppState::new(cfg.clone(), store);
@@ -137,9 +134,7 @@ async fn run_prune_loop(
     loop {
         tokio::time::sleep(interval).await;
         let now_ms = match SystemTime::now().duration_since(UNIX_EPOCH) {
-            Ok(d) => {
-                u64::try_from(d.as_millis()).unwrap_or(u64::MAX)
-            },
+            Ok(d) => u64::try_from(d.as_millis()).unwrap_or(u64::MAX),
             Err(e) => {
                 warn!(error = %e, "prune: clock before UNIX epoch — skipping tick");
                 continue;
@@ -150,16 +145,11 @@ async fn run_prune_loop(
         if posts_retention_secs == 0 {
             info!("prune: posts retention disabled — no work");
         } else {
-            let cutoff_ms =
-                now_ms.saturating_sub(posts_retention_secs.saturating_mul(1000));
+            let cutoff_ms = now_ms.saturating_sub(posts_retention_secs.saturating_mul(1000));
             match store.prune_posts_older_than(cutoff_ms).await {
                 Ok(removed) => {
                     if removed > 0 {
-                        info!(
-                            removed,
-                            posts_retention_secs,
-                            "prune: posts tick complete"
-                        );
+                        info!(removed, posts_retention_secs, "prune: posts tick complete");
                     }
                 },
                 Err(e) => warn!(error = %e, "prune: posts tick failed"),
@@ -171,15 +161,13 @@ async fn run_prune_loop(
         if subscriber_retention_secs == 0 {
             info!("prune: subscriber retention disabled — no work");
         } else {
-            let cutoff_ms =
-                now_ms.saturating_sub(subscriber_retention_secs.saturating_mul(1000));
+            let cutoff_ms = now_ms.saturating_sub(subscriber_retention_secs.saturating_mul(1000));
             match store.prune_subscribers_older_than(cutoff_ms).await {
                 Ok(removed) => {
                     if removed > 0 {
                         info!(
                             removed,
-                            subscriber_retention_secs,
-                            "prune: subscribers tick complete"
+                            subscriber_retention_secs, "prune: subscribers tick complete"
                         );
                     }
                 },
@@ -198,15 +186,14 @@ async fn shutdown_signal() {
 
     #[cfg(unix)]
     let terminate = async {
-        let mut term = match tokio::signal::unix::signal(
-            tokio::signal::unix::SignalKind::terminate(),
-        ) {
-            Ok(s) => s,
-            Err(e) => {
-                warn!(error = %e, "shutdown: SIGTERM handler init failed");
-                return;
-            },
-        };
+        let mut term =
+            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+                Ok(s) => s,
+                Err(e) => {
+                    warn!(error = %e, "shutdown: SIGTERM handler init failed");
+                    return;
+                },
+            };
         let _ = term.recv().await;
     };
 

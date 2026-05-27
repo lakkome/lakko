@@ -227,7 +227,9 @@ async fn two_peers_in_same_call_see_each_other() {
         .expect("alice connects");
     let alice_welcome = recv_frame(&mut alice).await;
     let alice_peer_id = match alice_welcome {
-        ServerFrame::Welcome { peer_id, roster, .. } => {
+        ServerFrame::Welcome {
+            peer_id, roster, ..
+        } => {
             assert!(roster.is_empty());
             peer_id
         },
@@ -247,7 +249,9 @@ async fn two_peers_in_same_call_see_each_other() {
         .expect("bob connects");
     let bob_welcome = recv_frame(&mut bob).await;
     let bob_peer_id = match bob_welcome {
-        ServerFrame::Welcome { peer_id, roster, .. } => {
+        ServerFrame::Welcome {
+            peer_id, roster, ..
+        } => {
             assert_eq!(roster.len(), 1);
             assert_eq!(roster[0].peer_id, alice_peer_id);
             peer_id
@@ -365,8 +369,7 @@ async fn signal_relay_broadcast_skips_sender() {
     }
 
     // Alice (the sender) must not receive her own broadcast.
-    let race =
-        tokio::time::timeout(std::time::Duration::from_millis(150), alice.next()).await;
+    let race = tokio::time::timeout(std::time::Duration::from_millis(150), alice.next()).await;
     assert!(race.is_err(), "alice must not see her own broadcast");
 }
 
@@ -407,7 +410,12 @@ async fn disconnect_propagates_peer_left() {
 async fn ping_round_trip() {
     let key = test_key(0x08);
     let addr = spawn_server(key.jwks.clone()).await;
-    let jwt = mint(&key, "p1", "5555555555555555ffffffffffffffff", CallRole::Publisher);
+    let jwt = mint(
+        &key,
+        "p1",
+        "5555555555555555ffffffffffffffff",
+        CallRole::Publisher,
+    );
 
     let (mut ws, _) = tokio_tungstenite::connect_async(ws_url(&addr, &jwt))
         .await
@@ -451,10 +459,6 @@ async fn cross_call_isolation() {
     let _ = recv_frame(&mut eve).await; // welcome
 
     // Alice should NOT see eve-joined (different call).
-    let race = tokio::time::timeout(
-        std::time::Duration::from_millis(150),
-        alice.next(),
-    )
-    .await;
+    let race = tokio::time::timeout(std::time::Duration::from_millis(150), alice.next()).await;
     assert!(race.is_err(), "cross-call peer-joined leaked");
 }

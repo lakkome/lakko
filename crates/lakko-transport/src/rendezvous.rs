@@ -180,8 +180,7 @@ impl BootstrapConfig {
             transports: self.transports.clone(),
             signature_hex: String::new(),
         };
-        serde_json::to_vec(&zeroed)
-            .map_err(|e| RendezvousError::CanonicalJsonFailed(e.to_string()))
+        serde_json::to_vec(&zeroed).map_err(|e| RendezvousError::CanonicalJsonFailed(e.to_string()))
     }
 
     /// Verify signature + schema + clock window against
@@ -192,11 +191,7 @@ impl BootstrapConfig {
     /// # Errors
     ///
     /// See [`RendezvousError`].
-    pub fn verify(
-        &self,
-        trust_anchor: &VerifyingKey,
-        now: SystemTime,
-    ) -> RendezvousResult<()> {
+    pub fn verify(&self, trust_anchor: &VerifyingKey, now: SystemTime) -> RendezvousResult<()> {
         if self.version != SCHEMA_VERSION {
             return Err(RendezvousError::VersionMismatch {
                 expected: SCHEMA_VERSION,
@@ -219,15 +214,15 @@ impl BootstrapConfig {
             });
         }
 
-        let sig_bytes = hex::decode(&self.signature_hex).map_err(|()| {
+        let sig_bytes =
+            hex::decode(&self.signature_hex).map_err(|()| RendezvousError::BadSignatureFormat {
+                got: self.signature_hex.len(),
+            })?;
+        let sig = Ed25519Signature::from_bytes(&sig_bytes).map_err(|_| {
             RendezvousError::BadSignatureFormat {
                 got: self.signature_hex.len(),
             }
         })?;
-        let sig = Ed25519Signature::from_bytes(&sig_bytes)
-            .map_err(|_| RendezvousError::BadSignatureFormat {
-                got: self.signature_hex.len(),
-            })?;
         let canonical = self.canonical_bytes()?;
         trust_anchor
             .verify(&canonical, &sig)
@@ -253,10 +248,7 @@ impl BootstrapConfig {
     /// signing happens server-side; the helper is
     /// available here so the canonical-bytes contract
     /// stays in one place.
-    pub fn sign(
-        &mut self,
-        signer: &lakko_crypto::signing::SigningKey,
-    ) -> RendezvousResult<()> {
+    pub fn sign(&mut self, signer: &lakko_crypto::signing::SigningKey) -> RendezvousResult<()> {
         self.signature_hex = String::new();
         let canonical = self.canonical_bytes()?;
         let sig = signer.sign(&canonical);
@@ -434,7 +426,9 @@ mod tests {
         // And the parsed copy still verifies — proves the
         // wire encode + decode preserves the canonical
         // signing input.
-        parsed.verify(&signer.verifying_key(), SystemTime::now()).unwrap();
+        parsed
+            .verify(&signer.verifying_key(), SystemTime::now())
+            .unwrap();
     }
 
     #[test]
@@ -462,13 +456,11 @@ mod tests {
         // Wire-format guard — kind strings are part of the
         // protocol surface, a bump breaks every config
         // already pinned by deployed clients.
-        let json = serde_json::to_string(&TransportSpec::Shadowsocks2022(
-            ShadowsocksConfig {
-                remote: "1.2.3.4:8388".into(),
-                method: "2022-blake3-chacha20-poly1305".into(),
-                psk_b64: "AAAA".into(),
-            },
-        ))
+        let json = serde_json::to_string(&TransportSpec::Shadowsocks2022(ShadowsocksConfig {
+            remote: "1.2.3.4:8388".into(),
+            method: "2022-blake3-chacha20-poly1305".into(),
+            psk_b64: "AAAA".into(),
+        }))
         .unwrap();
         assert!(json.contains("\"kind\":\"shadowsocks-2022\""));
     }
@@ -480,20 +472,22 @@ mod tests {
         let now = now_secs();
         let mut cfg = fixture_config(now, now + 3600);
         // Mix four kinds.
-        cfg.transports.push(TransportSpec::Shadowsocks2022(ShadowsocksConfig {
-            remote: "5.6.7.8:8388".into(),
-            method: "2022-blake3-aes-256-gcm".into(),
-            psk_b64: "BBBB".into(),
-        }));
+        cfg.transports
+            .push(TransportSpec::Shadowsocks2022(ShadowsocksConfig {
+                remote: "5.6.7.8:8388".into(),
+                method: "2022-blake3-aes-256-gcm".into(),
+                psk_b64: "BBBB".into(),
+            }));
         cfg.transports.push(TransportSpec::Masque(MasqueConfig {
             proxy_url: "https://proxy.invalid/h3".into(),
             inner_target: "rendez.lakko.me:443".into(),
             bearer: Some("token".into()),
         }));
-        cfg.transports.push(TransportSpec::WebTransport(WebTransportConfig {
-            url: "https://rdz.lakko.me/wt".into(),
-            spki_pins_b64: vec!["pin-a".into(), "pin-b".into()],
-        }));
+        cfg.transports
+            .push(TransportSpec::WebTransport(WebTransportConfig {
+                url: "https://rdz.lakko.me/wt".into(),
+                spki_pins_b64: vec!["pin-a".into(), "pin-b".into()],
+            }));
         cfg.sign(&signer).unwrap();
         let json = serde_json::to_string(&cfg).unwrap();
         let parsed: BootstrapConfig = serde_json::from_str(&json).unwrap();

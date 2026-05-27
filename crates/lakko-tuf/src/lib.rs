@@ -328,8 +328,8 @@ impl PublicKey {
     /// Parse back to a [`VerifyingKey`]. Returns
     /// [`TufError::BadHex`] on bad hex or wrong length.
     pub fn to_verifying_key(&self) -> Result<VerifyingKey> {
-        let bytes = hex::decode(&self.keyval.public)
-            .map_err(|e| TufError::BadHex(e.to_string()))?;
+        let bytes =
+            hex::decode(&self.keyval.public).map_err(|e| TufError::BadHex(e.to_string()))?;
         if bytes.len() != 32 {
             return Err(TufError::BadHex(format!(
                 "ed25519 key must be 32 bytes, got {}",
@@ -427,8 +427,7 @@ impl<T: for<'de> Deserialize<'de>> Signed<T> {
     where
         T: Serialize,
     {
-        serde_json::to_vec(self)
-            .map_err(|e| TufError::CanonicalEncode(format!("JSON encode: {e}")))
+        serde_json::to_vec(self).map_err(|e| TufError::CanonicalEncode(format!("JSON encode: {e}")))
     }
 }
 
@@ -596,10 +595,8 @@ fn verify_signatures<T: Serialize>(
     keys: &BTreeMap<KeyId, PublicKey>,
 ) -> Result<()> {
     let canonical = canonical_json(&signed.signed)?;
-    let authorised: std::collections::BTreeSet<&KeyId> =
-        role_spec.keyids.iter().collect();
-    let mut seen: std::collections::BTreeSet<KeyId> =
-        std::collections::BTreeSet::default();
+    let authorised: std::collections::BTreeSet<&KeyId> = role_spec.keyids.iter().collect();
+    let mut seen: std::collections::BTreeSet<KeyId> = std::collections::BTreeSet::default();
     let mut valid: u32 = 0;
     for sig in &signed.signatures {
         if !authorised.contains(&sig.keyid) {
@@ -622,10 +619,8 @@ fn verify_signatures<T: Serialize>(
             });
         };
         let vk = pubkey.to_verifying_key()?;
-        let sig_bytes = hex::decode(&sig.sig)
-            .map_err(|e| TufError::BadHex(e.to_string()))?;
-        let Ok(signature) = lakko_crypto::signing::Signature::from_bytes(&sig_bytes)
-        else {
+        let sig_bytes = hex::decode(&sig.sig).map_err(|e| TufError::BadHex(e.to_string()))?;
+        let Ok(signature) = lakko_crypto::signing::Signature::from_bytes(&sig_bytes) else {
             // malformed signature byte length → skip
             continue;
         };
@@ -645,11 +640,7 @@ fn verify_signatures<T: Serialize>(
 
 /// Check a role-body's `expires` against `now`. Returns
 /// [`TufError::Expired`] if `now > expires`.
-fn check_expiry(
-    role: &'static str,
-    expires: DateTime<Utc>,
-    now: DateTime<Utc>,
-) -> Result<()> {
+fn check_expiry(role: &'static str, expires: DateTime<Utc>, now: DateTime<Utc>) -> Result<()> {
     if now > expires {
         return Err(TufError::Expired { role, expires });
     }
@@ -792,12 +783,10 @@ pub fn verify_chain(
 }
 
 fn role_spec<'a>(root: &'a Root, role: &'static str) -> Result<&'a RoleSpec> {
-    root.roles
-        .get(role)
-        .ok_or(TufError::UnauthorizedKey {
-            role,
-            key_id: "(no role spec in root)".into(),
-        })
+    root.roles.get(role).ok_or(TufError::UnauthorizedKey {
+        role,
+        key_id: "(no role spec in root)".into(),
+    })
 }
 
 /// Walk a chain of root metadata versions, verifying
@@ -877,14 +866,13 @@ pub fn verify_root_chain<'a>(
     if pinned_keys.is_empty() {
         return Err(TufError::UntrustedFirstRoot);
     }
-    verify_signatures("root", first, &pinned_spec, &pinned_keys)
-        .map_err(|e| match e {
-            // Re-label threshold-not-met against the
-            // pinned-trust-anchor check so the operator
-            // log line points at the right cause.
-            TufError::ThresholdNotMet { .. } => TufError::UntrustedFirstRoot,
-            other => other,
-        })?;
+    verify_signatures("root", first, &pinned_spec, &pinned_keys).map_err(|e| match e {
+        // Re-label threshold-not-met against the
+        // pinned-trust-anchor check so the operator
+        // log line points at the right cause.
+        TufError::ThresholdNotMet { .. } => TufError::UntrustedFirstRoot,
+        other => other,
+    })?;
 
     // Step 2: walk forward, each pair (prev, curr).
     for pair in roots.windows(2) {
@@ -1029,7 +1017,12 @@ mod tests {
     fn build_chain(
         signer: &SigningKey,
         now: DateTime<Utc>,
-    ) -> (Signed<Root>, Signed<Timestamp>, Signed<Snapshot>, Signed<Targets>) {
+    ) -> (
+        Signed<Root>,
+        Signed<Timestamp>,
+        Signed<Snapshot>,
+        Signed<Targets>,
+    ) {
         let vk = signer.verifying_key();
         let key_id = KeyId::from_verifying_key(&vk);
         let pubkey = PublicKey::ed25519(&vk);
@@ -1137,8 +1130,7 @@ mod tests {
         let signer = SigningKey::from_seed(&[0x42; 32]);
         let now = Utc::now();
         let (root, timestamp, snapshot, targets) = build_chain(&signer, now);
-        let targets_map =
-            verify_chain(&root, &timestamp, &snapshot, &targets, now, None).unwrap();
+        let targets_map = verify_chain(&root, &timestamp, &snapshot, &targets, now, None).unwrap();
         assert_eq!(targets_map.len(), 1);
         let entry = targets_map.get("lakko-svc-channels").unwrap();
         assert_eq!(entry.length, 12_345_678);
@@ -1158,9 +1150,14 @@ mod tests {
             .unwrap()
             .hashes
             .insert("sha256".into(), "00".repeat(32));
-        let err = verify_chain(&root, &timestamp, &snapshot, &targets, now, None)
-            .unwrap_err();
-        assert!(matches!(err, TufError::ThresholdNotMet { role: "targets", .. }));
+        let err = verify_chain(&root, &timestamp, &snapshot, &targets, now, None).unwrap_err();
+        assert!(matches!(
+            err,
+            TufError::ThresholdNotMet {
+                role: "targets",
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -1179,9 +1176,14 @@ mod tests {
             keyid: attacker_id,
             sig: hex::encode(attacker_sig.to_bytes()),
         }];
-        let err = verify_chain(&root, &timestamp, &snapshot, &targets, now, None)
-            .unwrap_err();
-        assert!(matches!(err, TufError::ThresholdNotMet { role: "targets", .. }));
+        let err = verify_chain(&root, &timestamp, &snapshot, &targets, now, None).unwrap_err();
+        assert!(matches!(
+            err,
+            TufError::ThresholdNotMet {
+                role: "targets",
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -1196,9 +1198,14 @@ mod tests {
         // not the signature check.
         let key_id = KeyId::from_verifying_key(&signer.verifying_key());
         timestamp = sign(timestamp.signed, &signer, &key_id);
-        let err = verify_chain(&root, &timestamp, &snapshot, &targets, now, None)
-            .unwrap_err();
-        assert!(matches!(err, TufError::Expired { role: "timestamp", .. }));
+        let err = verify_chain(&root, &timestamp, &snapshot, &targets, now, None).unwrap_err();
+        assert!(matches!(
+            err,
+            TufError::Expired {
+                role: "timestamp",
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -1212,8 +1219,7 @@ mod tests {
         snapshot.signed.version = 2;
         let key_id = KeyId::from_verifying_key(&signer.verifying_key());
         let resigned = sign(snapshot.signed, &signer, &key_id);
-        let err = verify_chain(&root, &timestamp, &resigned, &targets, now, None)
-            .unwrap_err();
+        let err = verify_chain(&root, &timestamp, &resigned, &targets, now, None).unwrap_err();
         assert!(matches!(err, TufError::SnapshotVersionMismatch { .. }));
     }
 
@@ -1225,8 +1231,7 @@ mod tests {
         targets.signed.version = 2;
         let key_id = KeyId::from_verifying_key(&signer.verifying_key());
         let resigned = sign(targets.signed, &signer, &key_id);
-        let err = verify_chain(&root, &timestamp, &snapshot, &resigned, now, None)
-            .unwrap_err();
+        let err = verify_chain(&root, &timestamp, &snapshot, &resigned, now, None).unwrap_err();
         assert!(matches!(err, TufError::TargetsVersionMismatch { .. }));
     }
 
@@ -1242,8 +1247,7 @@ mod tests {
             snapshot: 1,
         };
         let err =
-            verify_chain(&root, &timestamp, &snapshot, &targets, now, Some(&last))
-                .unwrap_err();
+            verify_chain(&root, &timestamp, &snapshot, &targets, now, Some(&last)).unwrap_err();
         assert!(matches!(
             err,
             TufError::VersionRollback {
@@ -1276,10 +1280,14 @@ mod tests {
         root.signed.roles.remove("targets");
         let key_id = KeyId::from_verifying_key(&signer.verifying_key());
         let resigned = sign(root.signed, &signer, &key_id);
-        let err =
-            verify_chain(&resigned, &timestamp, &snapshot, &targets, now, None)
-                .unwrap_err();
-        assert!(matches!(err, TufError::UnauthorizedKey { role: "targets", .. }));
+        let err = verify_chain(&resigned, &timestamp, &snapshot, &targets, now, None).unwrap_err();
+        assert!(matches!(
+            err,
+            TufError::UnauthorizedKey {
+                role: "targets",
+                ..
+            }
+        ));
     }
 
     // -----------------------------------------------------
@@ -1392,10 +1400,7 @@ mod tests {
         let pinned = vec![KeyId::from_verifying_key(&signer.verifying_key())];
         let chain = [v1, v3];
         let err = verify_root_chain(&chain, &pinned, now).unwrap_err();
-        assert!(matches!(
-            err,
-            TufError::RootVersionGap { from: 1, to: 3 }
-        ));
+        assert!(matches!(err, TufError::RootVersionGap { from: 1, to: 3 }));
     }
 
     #[test]
@@ -1476,15 +1481,13 @@ mod tests {
         // v2 root (which authorises both signers); use
         // the new signer to prove the trust transition
         // actually granted it authority.
-        let (_root_unused, timestamp, snapshot, targets) =
-            build_chain(&signer_new, now);
+        let (_root_unused, timestamp, snapshot, targets) = build_chain(&signer_new, now);
         // Replace the canned root from build_chain with
         // the multi-version v2 — verify_chain accepts it
         // because v2's `targets` role authorises both
         // signer_old and signer_new.
         let targets_map =
-            verify_chain(final_root, &timestamp, &snapshot, &targets, now, None)
-                .unwrap();
+            verify_chain(final_root, &timestamp, &snapshot, &targets, now, None).unwrap();
         assert_eq!(targets_map.len(), 1);
     }
 
@@ -1522,7 +1525,7 @@ mod tests {
             Err(TufError::TargetLengthMismatch { expected, got }) => {
                 assert_eq!(expected, meta.length);
                 assert_eq!(got, bytes.len() as u64);
-            }
+            },
             other => panic!("expected TargetLengthMismatch, got {other:?}"),
         }
     }
@@ -1542,7 +1545,7 @@ mod tests {
         match verify_target_bytes(&meta, bytes) {
             Err(TufError::TargetHashMismatch { algo, .. }) => {
                 assert_eq!(algo, "sha256");
-            }
+            },
             other => panic!("expected TargetHashMismatch, got {other:?}"),
         }
     }
@@ -1566,7 +1569,7 @@ mod tests {
                 // key; both unknown algos are surfaced.
                 assert!(available.contains(&"sha512".to_string()));
                 assert!(available.contains(&"blake2b256".to_string()));
-            }
+            },
             other => panic!("expected NoKnownTargetHashAlgo, got {other:?}"),
         }
     }
@@ -1586,8 +1589,7 @@ mod tests {
             hashes,
         };
 
-        verify_target_bytes(&meta, bytes)
-            .expect("unknown algo alongside sha256 still verifies");
+        verify_target_bytes(&meta, bytes).expect("unknown algo alongside sha256 still verifies");
     }
 
     #[test]
@@ -1604,7 +1606,7 @@ mod tests {
         match verify_target_bytes(&meta, bytes) {
             Err(TufError::NoKnownTargetHashAlgo { available }) => {
                 assert!(available.is_empty());
-            }
+            },
             other => panic!("expected NoKnownTargetHashAlgo, got {other:?}"),
         }
     }

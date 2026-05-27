@@ -62,10 +62,7 @@ impl AppState {
     /// (production wires a `SqlChannelStore`; tests wire
     /// an `InMemoryChannelStore`).
     #[must_use]
-    pub fn new(
-        cfg: Config,
-        store: Arc<dyn ChannelStore + Send + Sync>,
-    ) -> Arc<Self> {
+    pub fn new(cfg: Config, store: Arc<dyn ChannelStore + Send + Sync>) -> Arc<Self> {
         Arc::new(Self { cfg, store })
     }
 }
@@ -271,11 +268,7 @@ async fn publish_post(
         .put(channel, body.to_vec(), state.cfg.max_post_bytes, now)
         .await
     {
-        Ok(stored) => (
-            StatusCode::CREATED,
-            Json(PostView::from_stored(stored)),
-        )
-            .into_response(),
+        Ok(stored) => (StatusCode::CREATED, Json(PostView::from_stored(stored))).into_response(),
         Err(StorageError::UnknownChannel) => (
             StatusCode::NOT_FOUND,
             Json(err(
@@ -636,7 +629,10 @@ async fn rotate_channel(
                 StatusCode::BAD_REQUEST,
                 Json(err(
                     "bad-subscriber-id",
-                    format!("subscriber_id {:?} is not 64 hex chars", entry.subscriber_id),
+                    format!(
+                        "subscriber_id {:?} is not 64 hex chars",
+                        entry.subscriber_id
+                    ),
                 )),
             )
                 .into_response();

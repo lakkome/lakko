@@ -31,9 +31,7 @@ use async_trait::async_trait;
 use sqlx::MySqlPool;
 use sqlx::Row;
 
-use crate::storage::{
-    ChannelId, ChannelStore, StorageError, StoredPost, SubscriberId,
-};
+use crate::storage::{ChannelId, ChannelStore, StorageError, StoredPost, SubscriberId};
 
 /// MariaDB-backed `ChannelStore`. Construct with a pool
 /// that has been migrated via `sqlx::migrate!` from the
@@ -81,15 +79,13 @@ impl ChannelStore for SqlChannelStore {
     }
 
     async fn exists(&self, channel: ChannelId) -> bool {
-        sqlx::query_scalar::<_, i64>(
-            "SELECT 1 FROM channels WHERE id = ? LIMIT 1",
-        )
-        .bind(channel.as_bytes().as_slice())
-        .fetch_optional(&self.pool)
-        .await
-        .ok()
-        .flatten()
-        .is_some()
+        sqlx::query_scalar::<_, i64>("SELECT 1 FROM channels WHERE id = ? LIMIT 1")
+            .bind(channel.as_bytes().as_slice())
+            .fetch_optional(&self.pool)
+            .await
+            .ok()
+            .flatten()
+            .is_some()
     }
 
     async fn put(
@@ -117,23 +113,20 @@ impl ChannelStore for SqlChannelStore {
         // ... RETURNING-equivalent (MariaDB lacks RETURNING
         // on UPDATE; emulate with SELECT FOR UPDATE then
         // UPDATE).
-        let existing: Option<(u64,)> = sqlx::query_as(
-            "SELECT next_cursor FROM channels WHERE id = ? FOR UPDATE",
-        )
-        .bind(channel.as_bytes().as_slice())
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(db_err)?;
+        let existing: Option<(u64,)> =
+            sqlx::query_as("SELECT next_cursor FROM channels WHERE id = ? FOR UPDATE")
+                .bind(channel.as_bytes().as_slice())
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(db_err)?;
         let Some((cursor,)) = existing else {
             return Err(StorageError::UnknownChannel);
         };
-        sqlx::query(
-            "UPDATE channels SET next_cursor = next_cursor + 1 WHERE id = ?",
-        )
-        .bind(channel.as_bytes().as_slice())
-        .execute(&mut *tx)
-        .await
-        .map_err(db_err)?;
+        sqlx::query("UPDATE channels SET next_cursor = next_cursor + 1 WHERE id = ?")
+            .bind(channel.as_bytes().as_slice())
+            .execute(&mut *tx)
+            .await
+            .map_err(db_err)?;
         sqlx::query(
             "INSERT INTO channel_posts \
                  (channel_id, cursor, server_ts_ms, payload) \
@@ -200,10 +193,7 @@ impl ChannelStore for SqlChannelStore {
             .unwrap_or(0)
     }
 
-    async fn prune_posts_older_than(
-        &self,
-        cutoff_ms: u64,
-    ) -> Result<u64, StorageError> {
+    async fn prune_posts_older_than(&self, cutoff_ms: u64) -> Result<u64, StorageError> {
         // Single bulk DELETE — the per-channel indexes
         // (`PRIMARY KEY (channel_id, cursor)` +
         // `INDEX idx_channel_cursor`) keep this fast
@@ -251,11 +241,7 @@ impl ChannelStore for SqlChannelStore {
         Ok(())
     }
 
-    async fn is_subscribed(
-        &self,
-        channel: ChannelId,
-        subscriber: SubscriberId,
-    ) -> bool {
+    async fn is_subscribed(&self, channel: ChannelId, subscriber: SubscriberId) -> bool {
         sqlx::query_scalar::<_, i64>(
             "SELECT 1 FROM channel_subscribers \
              WHERE channel_id = ? AND subscriber_id = ? \
@@ -295,10 +281,7 @@ impl ChannelStore for SqlChannelStore {
         Ok(())
     }
 
-    async fn prune_subscribers_older_than(
-        &self,
-        cutoff_ms: u64,
-    ) -> Result<u64, StorageError> {
+    async fn prune_subscribers_older_than(&self, cutoff_ms: u64) -> Result<u64, StorageError> {
         // Single bulk DELETE. FK ON DELETE CASCADE on
         // `channel_envelopes` cleans up the matching
         // envelope rows automatically — no second query
@@ -401,27 +384,20 @@ impl ChannelStore for SqlChannelStore {
     }
 
     async fn total_subscribers(&self) -> usize {
-        sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM channel_subscribers",
-        )
-        .fetch_one(&self.pool)
-        .await
-        .ok()
-        .and_then(|n| usize::try_from(n).ok())
-        .unwrap_or(0)
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM channel_subscribers")
+            .fetch_one(&self.pool)
+            .await
+            .ok()
+            .and_then(|n| usize::try_from(n).ok())
+            .unwrap_or(0)
     }
 
-    async fn current_epoch(
-        &self,
-        channel: ChannelId,
-    ) -> Result<u32, StorageError> {
-        let row: Option<(u32,)> = sqlx::query_as(
-            "SELECT current_epoch FROM channels WHERE id = ?",
-        )
-        .bind(channel.as_bytes().as_slice())
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(db_err)?;
+    async fn current_epoch(&self, channel: ChannelId) -> Result<u32, StorageError> {
+        let row: Option<(u32,)> = sqlx::query_as("SELECT current_epoch FROM channels WHERE id = ?")
+            .bind(channel.as_bytes().as_slice())
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(db_err)?;
         let Some((e,)) = row else {
             return Err(StorageError::UnknownChannel);
         };
@@ -497,14 +473,12 @@ impl ChannelStore for SqlChannelStore {
             .map_err(db_err)?;
         }
         let new_epoch = current.saturating_add(1);
-        sqlx::query(
-            "UPDATE channels SET current_epoch = ? WHERE id = ?",
-        )
-        .bind(new_epoch)
-        .bind(channel.as_bytes().as_slice())
-        .execute(&mut *tx)
-        .await
-        .map_err(db_err)?;
+        sqlx::query("UPDATE channels SET current_epoch = ? WHERE id = ?")
+            .bind(new_epoch)
+            .bind(channel.as_bytes().as_slice())
+            .execute(&mut *tx)
+            .await
+            .map_err(db_err)?;
         tx.commit().await.map_err(db_err)?;
         Ok(new_epoch)
     }

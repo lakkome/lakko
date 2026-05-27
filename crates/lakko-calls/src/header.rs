@@ -276,12 +276,19 @@ mod tests {
 
         // (kid=5, ctr=0x42): first 0x05 (LEN=0, X=0, KID=5),
         // CTR = 0x42.
-        assert_eq!(SframeHeader { kid: 5, ctr: 0x42 }.encode(), vec![0x05, 0x42]);
+        assert_eq!(
+            SframeHeader { kid: 5, ctr: 0x42 }.encode(),
+            vec![0x05, 0x42]
+        );
 
         // (kid=0, ctr=0x0100): LEN=1 (ctr fits in 2 bytes),
         // X=0, KID=0 → first 0x10, CTR = 0x01 0x00.
         assert_eq!(
-            SframeHeader { kid: 0, ctr: 0x0100 }.encode(),
+            SframeHeader {
+                kid: 0,
+                ctr: 0x0100
+            }
+            .encode(),
             vec![0x10, 0x01, 0x00]
         );
 
@@ -295,14 +302,21 @@ mod tests {
         // (kid=0x0100, ctr=0): X=1, KLEN=1 (2 bytes of KID),
         // first 0x09, KID = 0x01 0x00, CTR = 0x00.
         assert_eq!(
-            SframeHeader { kid: 0x0100, ctr: 0 }.encode(),
+            SframeHeader {
+                kid: 0x0100,
+                ctr: 0
+            }
+            .encode(),
             vec![0x09, 0x01, 0x00, 0x00]
         );
 
         // (kid=u64::MAX, ctr=u64::MAX): X=1, KLEN=7 (8
         // bytes), LEN=7 (8 bytes). First byte:
         // LEN=7 (0x70) | X=1 (0x08) | KLEN=7 (0x07) = 0x7F.
-        let header = SframeHeader { kid: u64::MAX, ctr: u64::MAX };
+        let header = SframeHeader {
+            kid: u64::MAX,
+            ctr: u64::MAX,
+        };
         let bytes = header.encode();
         assert_eq!(bytes[0], 0x7F);
         assert_eq!(bytes.len(), 1 + 8 + 8);

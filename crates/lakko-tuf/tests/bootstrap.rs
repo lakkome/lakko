@@ -20,9 +20,8 @@
 use chrono::{Duration, Utc};
 use lakko_crypto::signing::SigningKey;
 use lakko_tuf::{
-    canonical_json_for_test, verify_chain, KeyId, KeyVal, MetaPin, PublicKey, RoleSpec,
-    Root, RoleMap, Signature, Signed, Snapshot, TargetMeta, Targets, Timestamp,
-    TufError,
+    canonical_json_for_test, verify_chain, KeyId, KeyVal, MetaPin, PublicKey, RoleMap, RoleSpec,
+    Root, Signature, Signed, Snapshot, TargetMeta, Targets, Timestamp, TufError,
 };
 use std::collections::BTreeMap;
 
@@ -46,8 +45,7 @@ fn bootstrap_from_raw_json_round_trip() {
 
     // Each blob round-trips through from_json.
     let parsed_root: Signed<Root> = Signed::from_json(&root_json).unwrap();
-    let parsed_timestamp: Signed<Timestamp> =
-        Signed::from_json(&timestamp_json).unwrap();
+    let parsed_timestamp: Signed<Timestamp> = Signed::from_json(&timestamp_json).unwrap();
     let parsed_snapshot: Signed<Snapshot> = Signed::from_json(&snapshot_json).unwrap();
     let parsed_targets: Signed<Targets> = Signed::from_json(&targets_json).unwrap();
 
@@ -63,7 +61,9 @@ fn bootstrap_from_raw_json_round_trip() {
     .unwrap();
 
     assert_eq!(target_map.len(), 1);
-    let entry = target_map.get("lakko-svc-channels").expect("target present");
+    let entry = target_map
+        .get("lakko-svc-channels")
+        .expect("target present");
     assert_eq!(entry.length, 17_825_792);
     assert_eq!(
         entry.hashes.get("sha256").expect("sha256 hash"),
@@ -211,11 +211,7 @@ fn build_chain(
     )
 }
 
-fn sign<T: serde::Serialize>(
-    body: T,
-    signer: &SigningKey,
-    key_id: &KeyId,
-) -> Signed<T> {
+fn sign<T: serde::Serialize>(body: T, signer: &SigningKey, key_id: &KeyId) -> Signed<T> {
     let canonical = canonical_json_for_test(&body).unwrap();
     let sig = signer.sign(&canonical);
     Signed {

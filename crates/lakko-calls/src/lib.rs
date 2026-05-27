@@ -63,6 +63,7 @@ pub use codec_audio::{OpusConfig, OpusProfile, OPUS_MAX_BITRATE_KBPS, OPUS_MIN_B
 pub use codec_video::{VideoCapability, VideoCodec};
 pub use error::{Error, Result};
 pub use group_call::{GroupCallScope, GroupCallSession, Participant, SignalingOutcome};
+pub use header::{HeaderError, SframeHeader, MAX_HEADER_LEN};
 pub use link_invite::{accept_call_invite, AcceptedCallInvite};
 pub use quality::{
     estimate_quality, recommend_bitrate, AudioCodec, QualityLevel, QualitySample, QualitySampler,
@@ -73,7 +74,6 @@ pub use session::{
     CallSession, CallState, Event, IceCandidate, MediaKind, Role, SdpDescription, SdpKind,
     Transition,
 };
-pub use header::{HeaderError, SframeHeader, MAX_HEADER_LEN};
 pub use sframe::{CallKey, ParticipantKey, SFRAME_EXPORT_LABEL};
 pub use signaling::{
     compose_signaling_payload, parse_signaling_payload, CallId, EndReason, MediaFlags,

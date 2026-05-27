@@ -388,7 +388,8 @@ fn build_aad(
     nonce: &[u8; NONCE_LEN],
     header: &ChainHeader,
 ) -> Vec<u8> {
-    let mut out = Vec::with_capacity(ENVELOPE_DOMAIN_V2.len() + 1 + SALT_LEN + NONCE_LEN + CHAIN_HEADER_LEN);
+    let mut out =
+        Vec::with_capacity(ENVELOPE_DOMAIN_V2.len() + 1 + SALT_LEN + NONCE_LEN + CHAIN_HEADER_LEN);
     out.extend_from_slice(ENVELOPE_DOMAIN_V2);
     out.push(version);
     out.extend_from_slice(salt);
@@ -487,7 +488,7 @@ mod tests {
         match verify_chain(&skipped) {
             Err(BackupError::InvalidEncoding(msg)) => {
                 assert!(msg.contains("non-sequential"), "wrong message: {msg}");
-            }
+            },
             other => panic!("expected non-sequential rejection, got {other:?}"),
         }
     }
@@ -502,19 +503,12 @@ mod tests {
             version: 2,
             prev_hash: [0xFF; 32], // not the real BLAKE3 of envelopes[0]
         };
-        let bad_v2 = seal_v2(
-            PHRASE,
-            &salt(),
-            &nonce(0x02),
-            &bad_header,
-            &payload(0x02),
-        )
-        .unwrap();
+        let bad_v2 = seal_v2(PHRASE, &salt(), &nonce(0x02), &bad_header, &payload(0x02)).unwrap();
         let chain: Vec<&[u8]> = vec![&envelopes[0], &bad_v2];
         match verify_chain(&chain) {
             Err(BackupError::InvalidEncoding(msg)) => {
                 assert!(msg.contains("broken chain link"), "wrong message: {msg}");
-            }
+            },
             other => panic!("expected broken-link rejection, got {other:?}"),
         }
     }
@@ -546,7 +540,7 @@ mod tests {
         match open_v2(PHRASE, &wire) {
             Err(BackupError::InvalidEncoding(msg)) => {
                 assert!(msg.contains("schema version"), "wrong message: {msg}");
-            }
+            },
             other => panic!("expected schema-version rejection, got {other:?}"),
         }
     }
@@ -566,7 +560,7 @@ mod tests {
         let header_off = 1 + SALT_LEN + NONCE_LEN;
         wire[header_off] ^= 0xFF;
         match open_v2(PHRASE, &wire) {
-            Err(BackupError::DecryptFailed) => {}
+            Err(BackupError::DecryptFailed) => {},
             other => panic!("expected DecryptFailed, got {other:?}"),
         }
     }
@@ -577,7 +571,7 @@ mod tests {
         let wire = seal_v2(PHRASE, &salt(), &nonce(0x44), &header, &payload(4)).unwrap();
         let short = &wire[..wire.len() - 1];
         match open_v2(PHRASE, short) {
-            Err(BackupError::InvalidEncoding(_)) => {}
+            Err(BackupError::InvalidEncoding(_)) => {},
             other => panic!("expected InvalidEncoding on truncated wire, got {other:?}"),
         }
     }
@@ -590,7 +584,7 @@ mod tests {
         match open_v2(PHRASE, &wire) {
             Err(BackupError::InvalidEncoding(msg)) => {
                 assert!(msg.contains("trailing"), "wrong message: {msg}");
-            }
+            },
             other => panic!("expected trailing-bytes rejection, got {other:?}"),
         }
     }

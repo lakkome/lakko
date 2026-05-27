@@ -99,14 +99,15 @@ impl Config {
             return Err(ConfigError::Missing("LAKKO_SFU_JWKS_URL"));
         }
 
-        let jwks_refresh =
-            parse_secs("LAKKO_SFU_JWKS_REFRESH_SECS", DEFAULT_JWKS_REFRESH_SECS)?;
+        let jwks_refresh = parse_secs("LAKKO_SFU_JWKS_REFRESH_SECS", DEFAULT_JWKS_REFRESH_SECS)?;
         let handshake_timeout = parse_secs(
             "LAKKO_SFU_HANDSHAKE_TIMEOUT_SECS",
             DEFAULT_HANDSHAKE_TIMEOUT_SECS,
         )?;
-        let peer_msg_rate_per_sec =
-            parse_u32("LAKKO_SFU_PEER_MSG_RATE_PER_SEC", DEFAULT_PEER_MSG_RATE_PER_SEC)?;
+        let peer_msg_rate_per_sec = parse_u32(
+            "LAKKO_SFU_PEER_MSG_RATE_PER_SEC",
+            DEFAULT_PEER_MSG_RATE_PER_SEC,
+        )?;
 
         Ok(Self {
             signaling_bind,
@@ -121,11 +122,10 @@ impl Config {
 
 fn parse_socket(name: &'static str, fallback: &str) -> Result<SocketAddr, ConfigError> {
     let raw = env::var(name).unwrap_or_else(|_| fallback.to_owned());
-    raw.parse::<SocketAddr>()
-        .map_err(|e| ConfigError::Invalid {
-            name,
-            detail: e.to_string(),
-        })
+    raw.parse::<SocketAddr>().map_err(|e| ConfigError::Invalid {
+        name,
+        detail: e.to_string(),
+    })
 }
 
 fn parse_secs(name: &'static str, fallback: u64) -> Result<Duration, ConfigError> {
@@ -168,7 +168,9 @@ mod tests {
     /// `pairs`, run the closure, restore. Holds the
     /// `ENV_LOCK` for the duration.
     fn with_env<F: FnOnce() -> R, R>(pairs: &[(&str, &str)], f: F) -> R {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         for key in [
             "LAKKO_SFU_JWKS_URL",
             "LAKKO_SFU_BIND",
@@ -200,7 +202,10 @@ mod tests {
     #[test]
     fn minimal_valid_config() {
         with_env(
-            &[("LAKKO_SFU_JWKS_URL", "https://auth.lakko.me/.well-known/jwks.json")],
+            &[(
+                "LAKKO_SFU_JWKS_URL",
+                "https://auth.lakko.me/.well-known/jwks.json",
+            )],
             || {
                 let cfg = Config::from_env().expect("valid minimal env");
                 assert_eq!(cfg.jwks_url, "https://auth.lakko.me/.well-known/jwks.json");
@@ -220,7 +225,13 @@ mod tests {
             ],
             || {
                 let err = Config::from_env().unwrap_err();
-                assert!(matches!(err, ConfigError::Invalid { name: "LAKKO_SFU_BIND", .. }));
+                assert!(matches!(
+                    err,
+                    ConfigError::Invalid {
+                        name: "LAKKO_SFU_BIND",
+                        ..
+                    }
+                ));
             },
         );
     }

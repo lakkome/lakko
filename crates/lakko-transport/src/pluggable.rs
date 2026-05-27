@@ -245,8 +245,7 @@ pub async fn race_select(
     if candidates.is_empty() {
         return Err(PluggableError::EmptyCandidates);
     }
-    let deadline_ms =
-        u64::try_from(deadline.as_millis()).unwrap_or(u64::MAX);
+    let deadline_ms = u64::try_from(deadline.as_millis()).unwrap_or(u64::MAX);
 
     // **Sequential** race — scaffold version. Each candidate
     // gets its own `tokio::time::timeout` slice of the
@@ -295,10 +294,7 @@ mod tests {
         // strings. A rename is a breaking protocol change.
         assert_eq!(PluggableKind::Quic.as_str(), "quic");
         assert_eq!(PluggableKind::Reality.as_str(), "reality");
-        assert_eq!(
-            PluggableKind::Shadowsocks2022.as_str(),
-            "shadowsocks-2022"
-        );
+        assert_eq!(PluggableKind::Shadowsocks2022.as_str(), "shadowsocks-2022");
         assert_eq!(PluggableKind::WebTransport.as_str(), "webtransport");
         assert_eq!(PluggableKind::Masque.as_str(), "masque");
     }

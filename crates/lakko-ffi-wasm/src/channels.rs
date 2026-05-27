@@ -320,9 +320,7 @@ pub fn new_channel_seed_for_test() -> Vec<u8> {
 ///
 /// Throws on `bytes.length !== 32`.
 #[wasm_bindgen(js_name = "channelSeedFromMlsExporterOutput")]
-pub fn channel_seed_from_mls_exporter_output(
-    bytes: &[u8],
-) -> Result<Vec<u8>, JsError> {
+pub fn channel_seed_from_mls_exporter_output(bytes: &[u8]) -> Result<Vec<u8>, JsError> {
     let seed = ContentKeySeed::from_exporter_output(bytes)
         .map_err(|e| JsError::new(&format!("from_exporter_output: {e}")))?;
     Ok(seed.copy_to_bytes_for_export().to_vec())
@@ -533,8 +531,7 @@ mod tests {
     #[test]
     fn mls_exporter_output_full_compose_round_trip_wasm_host() {
         let mls_bytes = vec![0x3Cu8; CONTENT_KEY_SEED_LEN];
-        let seed =
-            channel_seed_from_mls_exporter_output(&mls_bytes).unwrap();
+        let seed = channel_seed_from_mls_exporter_output(&mls_bytes).unwrap();
         let signer = WasmChannelSigningKey::generate_js();
         let channel_id = [0x91u8; CHANNEL_ID_LEN];
         let wire = compose_channel_post(

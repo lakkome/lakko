@@ -180,10 +180,7 @@ async fn fetch_jwks(url: &str) -> Result<Jwks, JwksError> {
         .await
         .map_err(|e| JwksError::Fetch(e.to_string()))?;
     if !resp.status().is_success() {
-        return Err(JwksError::Fetch(format!(
-            "HTTP {}",
-            resp.status().as_u16()
-        )));
+        return Err(JwksError::Fetch(format!("HTTP {}", resp.status().as_u16())));
     }
     let body: Jwks = resp
         .json()
@@ -197,8 +194,8 @@ mod tests {
     use super::*;
     use base64::Engine as _;
     use lakko_call_jwt::{
-        kid_for, mint_jwt, CallJwtClaims, CallRole, CallSigningKey, Jwk, JWT_AUDIENCE,
-        JWT_ISSUER, JWT_TTL_SECS,
+        kid_for, mint_jwt, CallJwtClaims, CallRole, CallSigningKey, Jwk, JWT_AUDIENCE, JWT_ISSUER,
+        JWT_TTL_SECS,
     };
 
     /// Construct a JwksCache directly without an HTTP fetch
@@ -225,8 +222,16 @@ mod tests {
             sub: "deadbeefdeadbeefdeadbeefdeadbeef".into(),
             call_id: "0123456789abcdef0123456789abcdef".into(),
             role: CallRole::Publisher,
-            iat: if expired { now - JWT_TTL_SECS - 60 } else { now },
-            exp: if expired { now - 60 } else { now + JWT_TTL_SECS },
+            iat: if expired {
+                now - JWT_TTL_SECS - 60
+            } else {
+                now
+            },
+            exp: if expired {
+                now - 60
+            } else {
+                now + JWT_TTL_SECS
+            },
         };
         let jwt = mint_jwt(&key, &claims).unwrap();
         let jwk = Jwk::from_signing_key(&key);

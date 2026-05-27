@@ -179,23 +179,16 @@ impl<W: AsyncWrite + Unpin> AeadStreamWriter<W> {
     /// - [`AeadStreamError::Io`] on TCP write failure.
     /// - [`AeadStreamError::NonceWrap`] on the
     ///   astronomically-unlikely counter wraparound.
-    pub async fn write_chunk(
-        &mut self,
-        plaintext: &[u8],
-    ) -> Result<(), AeadStreamError> {
+    pub async fn write_chunk(&mut self, plaintext: &[u8]) -> Result<(), AeadStreamError> {
         if plaintext.len() > MAX_CHUNK {
-            return Err(AeadStreamError::ChunkTooLarge(
-                plaintext.len(),
-                MAX_CHUNK,
-            ));
+            return Err(AeadStreamError::ChunkTooLarge(plaintext.len(), MAX_CHUNK));
         }
         // First seal: the 2-byte length prefix. AAD is
         // empty — the nonce counter itself is the only
         // binding between length and payload.
-        let length_bytes =
-            u16::try_from(plaintext.len()).map_err(|_| {
-                AeadStreamError::ChunkTooLarge(plaintext.len(), MAX_CHUNK)
-            })?.to_be_bytes();
+        let length_bytes = u16::try_from(plaintext.len())
+            .map_err(|_| AeadStreamError::ChunkTooLarge(plaintext.len(), MAX_CHUNK))?
+            .to_be_bytes();
         let length_nonce = nonce_from_counter(self.nonce_counter);
         let sealed_length = aead::seal(ALG, &self.key, &length_nonce, &[], &length_bytes)
             .map_err(|_| AeadStreamError::AeadSeal)?;

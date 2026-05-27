@@ -519,7 +519,7 @@ mod tests {
             Err(EchError::TruncatedWire { needed, have }) => {
                 assert_eq!(needed, 2);
                 assert_eq!(have, 1);
-            }
+            },
             other => panic!("expected TruncatedWire, got {other:?}"),
         }
     }
@@ -536,7 +536,7 @@ mod tests {
         let new_outer = u16::try_from(wire.len() - 2).unwrap();
         wire[0..2].copy_from_slice(&new_outer.to_be_bytes());
         match parse_ech_config_list(&wire) {
-            Err(EchError::TruncatedWire { .. }) => {}
+            Err(EchError::TruncatedWire { .. }) => {},
             other => panic!("expected TruncatedWire on inner body, got {other:?}"),
         }
     }
@@ -553,7 +553,7 @@ mod tests {
             Err(EchError::UnsupportedVersion { got, expected }) => {
                 assert_eq!(got, 0xfeff);
                 assert_eq!(expected, ECH_VERSION_DRAFT_13);
-            }
+            },
             other => panic!("expected UnsupportedVersion, got {other:?}"),
         }
     }
@@ -572,7 +572,7 @@ mod tests {
             Err(EchError::OuterTooLarge { len, cap }) => {
                 assert_eq!(len, MAX_ECH_CONFIG_LIST_LEN + 1);
                 assert_eq!(cap, MAX_ECH_CONFIG_LIST_LEN);
-            }
+            },
             other => panic!("expected OuterTooLarge, got {other:?}"),
         }
     }
@@ -582,7 +582,7 @@ mod tests {
         let mut wire = build_one_config_list();
         wire.push(0x00); // one junk byte past the outer length
         match parse_ech_config_list(&wire) {
-            Err(EchError::TrailingBytes) => {}
+            Err(EchError::TrailingBytes) => {},
             other => panic!("expected TrailingBytes, got {other:?}"),
         }
     }
@@ -614,7 +614,7 @@ mod tests {
         wire.extend_from_slice(&config);
 
         match parse_ech_config_list(&wire) {
-            Err(EchError::EmptyCipherSuites) => {}
+            Err(EchError::EmptyCipherSuites) => {},
             other => panic!("expected EmptyCipherSuites, got {other:?}"),
         }
     }
@@ -675,7 +675,7 @@ mod tests {
         wire.extend_from_slice(&config);
 
         match parse_ech_config_list(&wire) {
-            Err(EchError::ZeroMaxNameLength) => {}
+            Err(EchError::ZeroMaxNameLength) => {},
             other => panic!("expected ZeroMaxNameLength, got {other:?}"),
         }
     }
@@ -705,7 +705,7 @@ mod tests {
         wire.extend_from_slice(&config);
 
         match parse_ech_config_list(&wire) {
-            Err(EchError::BadPublicNameUtf8) => {}
+            Err(EchError::BadPublicNameUtf8) => {},
             other => panic!("expected BadPublicNameUtf8, got {other:?}"),
         }
     }

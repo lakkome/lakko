@@ -184,12 +184,7 @@ impl<'a> Router<'a> {
     /// Send `frame` to every peer in `call_id`, excluding
     /// `except` (typically the originator). Per-recipient
     /// backpressure is logged + counted, never propagated.
-    async fn broadcast_to_call(
-        &self,
-        call_id: &str,
-        except: Option<&PeerId>,
-        frame: ServerFrame,
-    ) {
+    async fn broadcast_to_call(&self, call_id: &str, except: Option<&PeerId>, frame: ServerFrame) {
         let recipients = self.registry.peers_in_call(call_id).await;
         let mut delivered = 0usize;
         let mut dropped = 0usize;
@@ -230,12 +225,8 @@ fn deliver(peer: &Peer, frame: ServerFrame) -> Result<(), RouterError> {
         None => Err(RouterError::UnknownPeer),
         Some(tx) => match tx.try_send(frame) {
             Ok(()) => Ok(()),
-            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                Err(RouterError::Backpressure)
-            },
-            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                Err(RouterError::UnknownPeer)
-            },
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => Err(RouterError::Backpressure),
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => Err(RouterError::UnknownPeer),
         },
     }
 }
@@ -248,11 +239,7 @@ mod tests {
     /// Construct a fully-registered peer with an outbound
     /// channel hooked up. Returns both the peer record (for
     /// the registry) and the receiver end (for assertions).
-    fn make_peer(
-        id: &str,
-        call_id: &str,
-        account_id: &str,
-    ) -> (Peer, mpsc::Receiver<ServerFrame>) {
+    fn make_peer(id: &str, call_id: &str, account_id: &str) -> (Peer, mpsc::Receiver<ServerFrame>) {
         let (tx, rx) = mpsc::channel::<ServerFrame>(16);
         let peer = Peer {
             id: PeerId::from_str_for_test(id),
@@ -389,8 +376,14 @@ mod tests {
             .await
             .unwrap();
         // Bob + Carol receive; Alice (sender) does not.
-        assert!(matches!(bob_rx.try_recv().unwrap(), ServerFrame::SignalRelay { .. }));
-        assert!(matches!(carol_rx.try_recv().unwrap(), ServerFrame::SignalRelay { .. }));
+        assert!(matches!(
+            bob_rx.try_recv().unwrap(),
+            ServerFrame::SignalRelay { .. }
+        ));
+        assert!(matches!(
+            carol_rx.try_recv().unwrap(),
+            ServerFrame::SignalRelay { .. }
+        ));
         assert!(alice_rx.try_recv().is_err());
     }
 
@@ -447,7 +440,10 @@ mod tests {
         router.announce_join(&bob).await;
         // Alice (same call) sees the join; Eve (other call)
         // must not.
-        assert!(matches!(alice_rx.try_recv().unwrap(), ServerFrame::PeerJoined { .. }));
+        assert!(matches!(
+            alice_rx.try_recv().unwrap(),
+            ServerFrame::PeerJoined { .. }
+        ));
         assert!(eve_rx.try_recv().is_err());
         // Sanity — bob still does not see his own join.
         assert!(bob_rx.try_recv().is_err());

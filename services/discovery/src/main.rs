@@ -188,11 +188,7 @@ async fn main() -> Result<()> {
         rate_limit::DEFAULT_BURST,
     );
     let rate_limiter = Arc::new(rate_limit::RateLimiter::new(rate_per_min, rate_burst));
-    tracing::info!(
-        rate_per_min,
-        rate_burst,
-        "discovery rate limiter armed",
-    );
+    tracing::info!(rate_per_min, rate_burst, "discovery rate limiter armed",);
 
     let state = AppState {
         db: pool.clone(),
@@ -227,9 +223,9 @@ async fn main() -> Result<()> {
         // absent (dev / direct binding).
         app.into_make_service_with_connect_info::<SocketAddr>(),
     )
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-        .context("axum serve")?;
+    .with_graceful_shutdown(shutdown_signal())
+    .await
+    .context("axum serve")?;
 
     pool.close().await;
     tracing::info!("discovery service stopped cleanly");
@@ -306,10 +302,7 @@ pub(crate) fn build_app(state: AppState) -> Router {
     let rate_limited = Router::new()
         .route("/discovery/oprf", post(oprf::evaluate))
         .route("/discovery/lookup", post(registry::lookup))
-        .route(
-            "/discovery/channel/lookup",
-            post(channel_names::lookup),
-        )
+        .route("/discovery/channel/lookup", post(channel_names::lookup))
         .route_layer(axum::middleware::from_fn_with_state(
             Arc::clone(&state.rate_limiter),
             rate_limit::middleware,

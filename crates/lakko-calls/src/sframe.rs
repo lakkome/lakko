@@ -463,7 +463,9 @@ mod tests {
         let mut sender = key.participant_key(0).unwrap();
         let receiver = key.participant_key(0).unwrap();
         sender.set_counter_for_test(u32::MAX - 1);
-        let (ctr, ct) = sender.seal(b"aad-edge", b"last-frame").expect("seal at MAX-1");
+        let (ctr, ct) = sender
+            .seal(b"aad-edge", b"last-frame")
+            .expect("seal at MAX-1");
         assert_eq!(ctr, u32::MAX);
         let opened = receiver
             .open(b"aad-edge", &ct, ctr)

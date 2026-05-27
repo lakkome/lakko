@@ -325,10 +325,7 @@ impl Default for ReplayWindow {
 /// [`crate::aead_stream::AeadStreamWriter::new`] /
 /// [`crate::aead_stream::AeadStreamReader::new`].
 #[must_use]
-pub fn derive_session_subkey(
-    psk: &[u8; KEY_LEN],
-    salt: &[u8; SS_SALT_LEN],
-) -> AeadKey {
+pub fn derive_session_subkey(psk: &[u8; KEY_LEN], salt: &[u8; SS_SALT_LEN]) -> AeadKey {
     let mut ikm = [0u8; KEY_LEN + SS_SALT_LEN];
     ikm[..KEY_LEN].copy_from_slice(psk);
     ikm[KEY_LEN..].copy_from_slice(salt);
@@ -359,10 +356,7 @@ pub fn derive_session_subkey(
 pub fn encode_request(
     psk: &[u8; KEY_LEN],
     header: &RequestHeader,
-) -> std::result::Result<
-    (Vec<u8>, [u8; SS_SALT_LEN], AeadKey),
-    ShadowsocksHeaderError,
-> {
+) -> std::result::Result<(Vec<u8>, [u8; SS_SALT_LEN], AeadKey), ShadowsocksHeaderError> {
     if header.variable.len() > SS_MAX_VAR_HEADER_LEN {
         return Err(ShadowsocksHeaderError::VarHeaderTooLarge(
             header.variable.len(),
@@ -377,9 +371,8 @@ pub fn encode_request(
     let mut fixed_pt = [0u8; SS_FIXED_HEADER_LEN];
     fixed_pt[0] = SS_HEADER_TYPE_CLIENT;
     fixed_pt[1..9].copy_from_slice(&header.timestamp.to_be_bytes());
-    let var_len_u16 = u16::try_from(header.variable.len()).map_err(|_| {
-        ShadowsocksHeaderError::VarHeaderTooLarge(header.variable.len())
-    })?;
+    let var_len_u16 = u16::try_from(header.variable.len())
+        .map_err(|_| ShadowsocksHeaderError::VarHeaderTooLarge(header.variable.len()))?;
     fixed_pt[9..11].copy_from_slice(&var_len_u16.to_be_bytes());
 
     let fixed_nonce = nonce_from_counter(0);
@@ -389,8 +382,7 @@ pub fn encode_request(
     let sealed_var = aead::seal(ALG, &subkey, &var_nonce, &[], &header.variable)
         .map_err(|_| ShadowsocksHeaderError::AeadSeal)?;
 
-    let mut out =
-        Vec::with_capacity(SS_SALT_LEN + sealed_fixed.len() + sealed_var.len());
+    let mut out = Vec::with_capacity(SS_SALT_LEN + sealed_fixed.len() + sealed_var.len());
     out.extend_from_slice(&salt);
     out.extend_from_slice(&sealed_fixed);
     out.extend_from_slice(&sealed_var);
@@ -433,10 +425,7 @@ pub fn decode_request(
     wire: &[u8],
     now_unix: u64,
     window: &mut ReplayWindow,
-) -> std::result::Result<
-    (RequestHeader, [u8; SS_SALT_LEN], AeadKey),
-    ShadowsocksHeaderError,
-> {
+) -> std::result::Result<(RequestHeader, [u8; SS_SALT_LEN], AeadKey), ShadowsocksHeaderError> {
     if wire.len() < SS_SALT_LEN + SS_FIXED_HEADER_SEALED_LEN {
         return Err(ShadowsocksHeaderError::TruncatedWire);
     }
@@ -460,8 +449,7 @@ pub fn decode_request(
         });
     }
     let timestamp = u64::from_be_bytes(fixed_pt[1..9].try_into().unwrap());
-    let var_len =
-        u16::from_be_bytes(fixed_pt[9..11].try_into().unwrap()) as usize;
+    let var_len = u16::from_be_bytes(fixed_pt[9..11].try_into().unwrap()) as usize;
 
     // Timestamp drift check.
     check_timestamp_window(timestamp, now_unix)?;
@@ -510,10 +498,7 @@ pub fn decode_request(
 pub fn encode_response(
     psk: &[u8; KEY_LEN],
     header: &ResponseHeader,
-) -> std::result::Result<
-    (Vec<u8>, [u8; SS_SALT_LEN], AeadKey),
-    ShadowsocksHeaderError,
-> {
+) -> std::result::Result<(Vec<u8>, [u8; SS_SALT_LEN], AeadKey), ShadowsocksHeaderError> {
     // The variable section is `request_salt || header.variable`.
     let var_len = SS_SALT_LEN + header.variable.len();
     if var_len > SS_MAX_VAR_HEADER_LEN {
@@ -526,8 +511,8 @@ pub fn encode_response(
     let mut fixed_pt = [0u8; SS_FIXED_HEADER_LEN];
     fixed_pt[0] = SS_HEADER_TYPE_SERVER;
     fixed_pt[1..9].copy_from_slice(&header.timestamp.to_be_bytes());
-    let var_len_u16 = u16::try_from(var_len)
-        .map_err(|_| ShadowsocksHeaderError::VarHeaderTooLarge(var_len))?;
+    let var_len_u16 =
+        u16::try_from(var_len).map_err(|_| ShadowsocksHeaderError::VarHeaderTooLarge(var_len))?;
     fixed_pt[9..11].copy_from_slice(&var_len_u16.to_be_bytes());
 
     let fixed_nonce = nonce_from_counter(0);
@@ -542,8 +527,7 @@ pub fn encode_response(
     let sealed_var = aead::seal(ALG, &subkey, &var_nonce, &[], &var_pt)
         .map_err(|_| ShadowsocksHeaderError::AeadSeal)?;
 
-    let mut out =
-        Vec::with_capacity(SS_SALT_LEN + sealed_fixed.len() + sealed_var.len());
+    let mut out = Vec::with_capacity(SS_SALT_LEN + sealed_fixed.len() + sealed_var.len());
     out.extend_from_slice(&salt);
     out.extend_from_slice(&sealed_fixed);
     out.extend_from_slice(&sealed_var);
@@ -592,8 +576,7 @@ pub fn decode_response(
         });
     }
     let timestamp = u64::from_be_bytes(fixed_pt[1..9].try_into().unwrap());
-    let var_len =
-        u16::from_be_bytes(fixed_pt[9..11].try_into().unwrap()) as usize;
+    let var_len = u16::from_be_bytes(fixed_pt[9..11].try_into().unwrap()) as usize;
     check_timestamp_window(timestamp, now_unix)?;
 
     let sealed_var_end = sealed_fixed_end + var_len + TAG_LEN;
@@ -633,10 +616,7 @@ fn nonce_from_counter(counter: u64) -> Nonce {
     n
 }
 
-fn check_timestamp_window(
-    ts: u64,
-    now: u64,
-) -> std::result::Result<(), ShadowsocksHeaderError> {
+fn check_timestamp_window(ts: u64, now: u64) -> std::result::Result<(), ShadowsocksHeaderError> {
     let drift = ts.abs_diff(now);
     if drift > SS_TIMESTAMP_TOLERANCE_SECS {
         return Err(ShadowsocksHeaderError::TimestampSkew {
@@ -678,12 +658,8 @@ pub fn now_unix() -> u64 {
 pub fn psk_from_b64(s: &str) -> Result<[u8; KEY_LEN]> {
     let decoded = B64_STANDARD
         .decode(s.trim())
-        .or_else(|_| {
-            base64::engine::general_purpose::STANDARD_NO_PAD.decode(s.trim())
-        })
-        .map_err(|e| {
-            Error::Config(format!("SS-2022 PSK base64 decode failed: {e}"))
-        })?;
+        .or_else(|_| base64::engine::general_purpose::STANDARD_NO_PAD.decode(s.trim()))
+        .map_err(|e| Error::Config(format!("SS-2022 PSK base64 decode failed: {e}")))?;
     if decoded.len() != KEY_LEN {
         return Err(Error::Config(format!(
             "SS-2022 PSK must decode to exactly {KEY_LEN} bytes (got {})",
@@ -835,16 +811,12 @@ fn aead_err_to_transport(e: AeadStreamError) -> Error {
         AeadStreamError::AeadOpen | AeadStreamError::AeadSeal => {
             Error::Io(format!("AEAD-2022 wire error: {e}"))
         },
-        AeadStreamError::ChunkTooLarge(actual, limit) => {
-            Error::FrameTooLarge { actual, limit }
-        },
+        AeadStreamError::ChunkTooLarge(actual, limit) => Error::FrameTooLarge { actual, limit },
         AeadStreamError::DecodedLengthTooLarge(actual) => Error::FrameTooLarge {
             actual,
             limit: AEAD_MAX_CHUNK,
         },
-        AeadStreamError::NonceWrap => {
-            Error::Io("AEAD-2022 nonce counter wrapped".into())
-        },
+        AeadStreamError::NonceWrap => Error::Io("AEAD-2022 nonce counter wrapped".into()),
     }
 }
 
@@ -888,16 +860,15 @@ impl ShadowsocksTransport {
 impl Transport for ShadowsocksTransport {
     async fn connect(&self, endpoint: &Endpoint) -> Result<Box<dyn Connection>> {
         // Resolve + TCP-connect.
-        let stream = match endpoint {
-            Endpoint::Direct(addr) => TcpStream::connect(addr)
-                .await
-                .map_err(|e| Error::Setup(format!("TCP connect: {e}")))?,
-            Endpoint::Hostname { host, port } => {
-                TcpStream::connect((host.as_str(), *port))
+        let stream =
+            match endpoint {
+                Endpoint::Direct(addr) => TcpStream::connect(addr)
                     .await
-                    .map_err(|e| Error::Setup(format!("TCP connect: {e}")))?
-            },
-        };
+                    .map_err(|e| Error::Setup(format!("TCP connect: {e}")))?,
+                Endpoint::Hostname { host, port } => TcpStream::connect((host.as_str(), *port))
+                    .await
+                    .map_err(|e| Error::Setup(format!("TCP connect: {e}")))?,
+            };
         // Disable Nagle: SS-2022 is message-oriented and
         // 2-write coalescing already happens inside
         // `AeadStreamWriter::write_chunk`.
@@ -924,8 +895,7 @@ impl Transport for ShadowsocksTransport {
 
         // Read the server's response prelude.
         let rx_subkey =
-            read_and_decode_response_prelude(&self.psk, &request_salt, &mut read_half)
-                .await?;
+            read_and_decode_response_prelude(&self.psk, &request_salt, &mut read_half).await?;
 
         Ok(Box::new(ShadowsocksConnection::new(
             write_half, read_half, tx_subkey, rx_subkey,
@@ -956,9 +926,7 @@ async fn read_and_decode_response_prelude(
     let sealed_fixed = &head[SS_SALT_LEN..];
     let fixed_nonce = nonce_from_counter(0);
     let fixed_pt = aead::open(ALG, &subkey, &fixed_nonce, &[], sealed_fixed)
-        .map_err(|_| {
-            Error::Setup("SS-2022 response prelude AEAD open failed".into())
-        })?;
+        .map_err(|_| Error::Setup("SS-2022 response prelude AEAD open failed".into()))?;
     if fixed_pt.len() != SS_FIXED_HEADER_LEN {
         return Err(Error::Setup(
             "SS-2022 response prelude length mismatch".into(),
@@ -970,8 +938,7 @@ async fn read_and_decode_response_prelude(
             fixed_pt[0]
         )));
     }
-    let var_len =
-        u16::from_be_bytes(fixed_pt[9..11].try_into().unwrap()) as usize;
+    let var_len = u16::from_be_bytes(fixed_pt[9..11].try_into().unwrap()) as usize;
     // Read the sealed variable header.
     let mut sealed_var = vec![0u8; var_len + TAG_LEN];
     reader
@@ -983,9 +950,8 @@ async fn read_and_decode_response_prelude(
         Vec::with_capacity(SS_SALT_LEN + SS_FIXED_HEADER_SEALED_LEN + sealed_var.len());
     full_wire.extend_from_slice(&head);
     full_wire.extend_from_slice(&sealed_var);
-    let (_header, sub) =
-        decode_response(psk, &full_wire, now_unix(), expected_request_salt)
-            .map_err(header_err_to_transport)?;
+    let (_header, sub) = decode_response(psk, &full_wire, now_unix(), expected_request_salt)
+        .map_err(header_err_to_transport)?;
     Ok(sub)
 }
 
@@ -1034,14 +1000,12 @@ pub async fn accept_inbound(
     salt.copy_from_slice(&head[..SS_SALT_LEN]);
     let subkey_peek = derive_session_subkey(psk, &salt);
     let fixed_nonce = nonce_from_counter(0);
-    let fixed_pt =
-        aead::open(ALG, &subkey_peek, &fixed_nonce, &[], &head[SS_SALT_LEN..])
-            .map_err(|_| Error::Setup("SS-2022 inbound AEAD open failed".into()))?;
+    let fixed_pt = aead::open(ALG, &subkey_peek, &fixed_nonce, &[], &head[SS_SALT_LEN..])
+        .map_err(|_| Error::Setup("SS-2022 inbound AEAD open failed".into()))?;
     if fixed_pt.len() != SS_FIXED_HEADER_LEN {
         return Err(Error::Setup("SS-2022 inbound length mismatch".into()));
     }
-    let var_len =
-        u16::from_be_bytes(fixed_pt[9..11].try_into().unwrap()) as usize;
+    let var_len = u16::from_be_bytes(fixed_pt[9..11].try_into().unwrap()) as usize;
     let mut sealed_var = vec![0u8; var_len + TAG_LEN];
     read_half
         .read_exact(&mut sealed_var)
@@ -1052,8 +1016,7 @@ pub async fn accept_inbound(
     full_wire.extend_from_slice(&head);
     full_wire.extend_from_slice(&sealed_var);
     let (req, request_salt, tx_subkey_dec) =
-        decode_request(psk, &full_wire, now_unix(), window)
-            .map_err(header_err_to_transport)?;
+        decode_request(psk, &full_wire, now_unix(), window).map_err(header_err_to_transport)?;
     debug!(ts = req.timestamp, "SS-2022 inbound prelude accepted");
 
     // Build + send the server response prelude.
@@ -1125,10 +1088,7 @@ impl ShadowsocksListener {
     /// # Errors
     ///
     /// [`Error::Setup`] on TCP bind failure.
-    pub async fn bind(
-        addr: std::net::SocketAddr,
-        psk: [u8; KEY_LEN],
-    ) -> Result<Self> {
+    pub async fn bind(addr: std::net::SocketAddr, psk: [u8; KEY_LEN]) -> Result<Self> {
         let tcp = tokio::net::TcpListener::bind(addr)
             .await
             .map_err(|e| Error::Setup(format!("SS-2022 listener bind: {e}")))?;
@@ -1195,9 +1155,7 @@ fn header_err_to_transport(e: ShadowsocksHeaderError) -> Error {
         | ShadowsocksHeaderError::TimestampSkew { .. }
         | ShadowsocksHeaderError::ReplayedSalt
         | ShadowsocksHeaderError::WrongResponseSalt
-        | ShadowsocksHeaderError::TruncatedWire => {
-            Error::Setup(format!("SS-2022 handshake: {e}"))
-        },
+        | ShadowsocksHeaderError::TruncatedWire => Error::Setup(format!("SS-2022 handshake: {e}")),
         ShadowsocksHeaderError::VarHeaderTooLarge(n) => Error::FrameTooLarge {
             actual: n,
             limit: SS_MAX_VAR_HEADER_LEN,
@@ -1306,8 +1264,7 @@ mod tests {
         };
         let (wire, _salt, _subkey) = encode_request(&psk, &header).unwrap();
         let mut window = ReplayWindow::new();
-        let (decoded, _, _) =
-            decode_request(&psk, &wire, 1_700_000_000, &mut window).unwrap();
+        let (decoded, _, _) = decode_request(&psk, &wire, 1_700_000_000, &mut window).unwrap();
         assert_eq!(decoded, header);
     }
 
@@ -1321,8 +1278,7 @@ mod tests {
             variable: b"hello from server".to_vec(),
         };
         let (wire, _resp_salt, _subkey) = encode_response(&psk, &header).unwrap();
-        let (decoded, _subkey2) =
-            decode_response(&psk, &wire, 1_700_000_005, &req_salt).unwrap();
+        let (decoded, _subkey2) = decode_response(&psk, &wire, 1_700_000_005, &req_salt).unwrap();
         assert_eq!(decoded, header);
     }
 
@@ -1336,8 +1292,7 @@ mod tests {
         };
         let (wire, _, _) = encode_request(&psk, &header).unwrap();
         let mut window = ReplayWindow::new();
-        let err =
-            decode_request(&other, &wire, 1_700_000_000, &mut window).unwrap_err();
+        let err = decode_request(&other, &wire, 1_700_000_000, &mut window).unwrap_err();
         assert!(matches!(err, ShadowsocksHeaderError::AeadOpen));
     }
 
@@ -1389,8 +1344,7 @@ mod tests {
         decode_request(&psk, &wire, 1_700_000_000, &mut window).unwrap();
         // Second admission of the same wire — same salt —
         // is rejected as a replay.
-        let err =
-            decode_request(&psk, &wire, 1_700_000_000, &mut window).unwrap_err();
+        let err = decode_request(&psk, &wire, 1_700_000_000, &mut window).unwrap_err();
         assert!(matches!(err, ShadowsocksHeaderError::ReplayedSalt));
     }
 
@@ -1399,8 +1353,7 @@ mod tests {
         let mut window = ReplayWindow::new();
         // 32 (salt) + 27 (sealed fixed header) = 59 bytes
         // minimum; 40 bytes is below that.
-        let err = decode_request(&fresh_psk(0x01), &[0u8; 40], 0, &mut window)
-            .unwrap_err();
+        let err = decode_request(&fresh_psk(0x01), &[0u8; 40], 0, &mut window).unwrap_err();
         assert!(matches!(err, ShadowsocksHeaderError::TruncatedWire));
     }
 
@@ -1415,13 +1368,7 @@ mod tests {
         let (wire, _, _) = encode_response(&psk, &header).unwrap();
         // Attacker tries to splice this response into a
         // session whose request-salt was 0x22.
-        let err = decode_response(
-            &psk,
-            &wire,
-            1_700_000_000,
-            &[0x22u8; SS_SALT_LEN],
-        )
-        .unwrap_err();
+        let err = decode_response(&psk, &wire, 1_700_000_000, &[0x22u8; SS_SALT_LEN]).unwrap_err();
         assert!(matches!(err, ShadowsocksHeaderError::WrongResponseSalt));
     }
 
@@ -1498,7 +1445,9 @@ mod tests {
         let server = tokio::spawn(async move {
             let (sock, _peer) = listener.accept().await.unwrap();
             let mut window = ReplayWindow::new();
-            let mut conn = accept_inbound(sock, &psk_server, &mut window).await.unwrap();
+            let mut conn = accept_inbound(sock, &psk_server, &mut window)
+                .await
+                .unwrap();
             // Echo: receive one frame, send one frame.
             let received = conn.recv().await.unwrap();
             conn.send(Bytes::from(format!(
@@ -1518,7 +1467,9 @@ mod tests {
             .connect(&Endpoint::Direct(bound_addr))
             .await
             .unwrap();
-        conn.send(Bytes::from_static(b"hello SS-2022")).await.unwrap();
+        conn.send(Bytes::from_static(b"hello SS-2022"))
+            .await
+            .unwrap();
         let resp = conn.recv().await.unwrap();
         assert_eq!(&resp[..], b"echo: hello SS-2022");
         conn.send(Bytes::from_static(b"second")).await.unwrap();
@@ -1594,11 +1545,10 @@ mod tests {
             conn.close().await.unwrap();
         });
 
-        let mut conn = transport
-            .connect(&Endpoint::Direct(bound))
+        let mut conn = transport.connect(&Endpoint::Direct(bound)).await.unwrap();
+        conn.send(Bytes::from_static(b"via listener API"))
             .await
             .unwrap();
-        conn.send(Bytes::from_static(b"via listener API")).await.unwrap();
         let echo = conn.recv().await.unwrap();
         assert_eq!(&echo[..], b"listener: via listener API");
         conn.close().await.unwrap();
@@ -1614,10 +1564,9 @@ mod tests {
         // replays. Verifies the window does not
         // accidentally reject distinct sessions.
         let psk = [0x77u8; KEY_LEN];
-        let mut listener =
-            ShadowsocksListener::bind("127.0.0.1:0".parse().unwrap(), psk)
-                .await
-                .unwrap();
+        let mut listener = ShadowsocksListener::bind("127.0.0.1:0".parse().unwrap(), psk)
+            .await
+            .unwrap();
         let bound = match listener.local_endpoint() {
             Endpoint::Direct(addr) => addr,
             Endpoint::Hostname { .. } => unreachable!(),
@@ -1640,10 +1589,7 @@ mod tests {
         });
 
         for label in [&b"client-a"[..], &b"client-b"[..]] {
-            let mut conn = transport
-                .connect(&Endpoint::Direct(bound))
-                .await
-                .unwrap();
+            let mut conn = transport.connect(&Endpoint::Direct(bound)).await.unwrap();
             conn.send(Bytes::copy_from_slice(label)).await.unwrap();
             conn.close().await.unwrap();
         }
@@ -1669,16 +1615,15 @@ mod tests {
             // Server accepts but never reads the body —
             // client's oversize-send fails locally before
             // any byte hits the wire.
-            let _ = accept_inbound(sock, &psk_server, &mut window).await.unwrap();
+            let _ = accept_inbound(sock, &psk_server, &mut window)
+                .await
+                .unwrap();
             // Hold the connection long enough for the
             // client's send to land.
             tokio::time::sleep(Duration::from_millis(50)).await;
         });
 
-        let mut conn = transport
-            .connect(&Endpoint::Direct(bound))
-            .await
-            .unwrap();
+        let mut conn = transport.connect(&Endpoint::Direct(bound)).await.unwrap();
         let oversized = vec![0u8; AEAD_MAX_CHUNK + 1];
         let err = conn.send(Bytes::from(oversized)).await.unwrap_err();
         assert!(matches!(err, Error::FrameTooLarge { .. }));

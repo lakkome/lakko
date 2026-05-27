@@ -213,11 +213,7 @@ impl DohFetcher {
     /// JSON-DoH (RFC 8484 §6) query against a single
     /// endpoint. Returns the first A record from the
     /// answer section, or an error if none.
-    async fn resolve_via_endpoint(
-        &self,
-        endpoint: &str,
-        domain: &str,
-    ) -> Result<IpAddr, DohError> {
+    async fn resolve_via_endpoint(&self, endpoint: &str, domain: &str) -> Result<IpAddr, DohError> {
         let url = format!("{endpoint}?name={domain}&type=A");
         let resp = self
             .http
@@ -286,7 +282,8 @@ impl DohFetcher {
         trust_anchor: &VerifyingKey,
     ) -> Result<BootstrapConfig, DohError> {
         let ip = self.resolve(domain).await?;
-        self.fetch_bootstrap_at(ip, domain, path, trust_anchor).await
+        self.fetch_bootstrap_at(ip, domain, path, trust_anchor)
+            .await
     }
 
     /// Variant of [`Self::fetch_bootstrap`] that takes an
@@ -372,7 +369,8 @@ impl DohFetcher {
         max_bytes: usize,
     ) -> Result<Vec<u8>, DohError> {
         let ip = self.resolve(domain).await?;
-        self.fetch_pinned_bytes_at(ip, domain, path, max_bytes).await
+        self.fetch_pinned_bytes_at(ip, domain, path, max_bytes)
+            .await
     }
 
     /// Variant of [`Self::fetch_pinned_bytes`] that takes

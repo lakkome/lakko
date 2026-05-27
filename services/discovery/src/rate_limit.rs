@@ -1,11 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-#![allow(
-    unreachable_pub,
-    dead_code,
-    clippy::float_cmp,
-)]
+#![allow(unreachable_pub, dead_code, clippy::float_cmp)]
 
 //! Per-IP token-bucket rate limiter for discovery's
 //! anonymous endpoints — OPRF evaluation, username
@@ -123,7 +119,6 @@ impl TokenBucket {
             false
         }
     }
-
 }
 
 /// Shared rate limiter — one instance per service.
@@ -297,10 +292,7 @@ pub async fn middleware(
         // Returning 429 (rather than 400) keeps the
         // stable error envelope clients already branch
         // on, and short-circuits before any OPRF compute.
-        return rate_limited_response(
-            "rate-limited",
-            "unable to identify source",
-        );
+        return rate_limited_response("rate-limited", "unable to identify source");
     };
     if limiter.try_consume(ip) {
         next.run(req).await
@@ -352,10 +344,7 @@ mod tests {
             );
         }
         // 11th immediate request → rejected.
-        assert!(
-            !rl.try_consume_at(src, now),
-            "burst+1 must be rejected"
-        );
+        assert!(!rl.try_consume_at(src, now), "burst+1 must be rejected");
     }
 
     #[test]

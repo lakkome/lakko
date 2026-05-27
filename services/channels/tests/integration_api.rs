@@ -87,7 +87,9 @@ async fn create_channel_then_publish_then_fetch() {
 
     // 3. Fetch from cursor 0.
     let resp = client
-        .get(format!("http://{addr}/v1/channels/{CHANNEL_HEX}/posts?after=0"))
+        .get(format!(
+            "http://{addr}/v1/channels/{CHANNEL_HEX}/posts?after=0"
+        ))
         .send()
         .await
         .unwrap();
@@ -99,7 +101,9 @@ async fn create_channel_then_publish_then_fetch() {
 
     // 4. Fetch from cursor 1 — returns only the second post.
     let resp = client
-        .get(format!("http://{addr}/v1/channels/{CHANNEL_HEX}/posts?after=1"))
+        .get(format!(
+            "http://{addr}/v1/channels/{CHANNEL_HEX}/posts?after=1"
+        ))
         .send()
         .await
         .unwrap();
@@ -196,15 +200,16 @@ async fn fetch_respects_limit() {
     assert_eq!(body["posts"].as_array().unwrap().len(), 3);
 }
 
-const SUB_HEX: &str =
-    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+const SUB_HEX: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
 #[tokio::test]
 async fn subscribe_to_unknown_channel_is_404() {
     let addr = spawn().await;
     let client = reqwest::Client::new();
     let resp = client
-        .post(format!("http://{addr}/v1/channels/{CHANNEL_HEX}/subscribers"))
+        .post(format!(
+            "http://{addr}/v1/channels/{CHANNEL_HEX}/subscribers"
+        ))
         .json(&json!({ "subscriber_pubkey_hex": SUB_HEX }))
         .send()
         .await
@@ -227,7 +232,9 @@ async fn subscribe_then_list_then_deliver_then_fetch() {
         .unwrap();
     // Subscribe.
     let resp = client
-        .post(format!("http://{addr}/v1/channels/{CHANNEL_HEX}/subscribers"))
+        .post(format!(
+            "http://{addr}/v1/channels/{CHANNEL_HEX}/subscribers"
+        ))
         .json(&json!({ "subscriber_pubkey_hex": SUB_HEX }))
         .send()
         .await
@@ -237,7 +244,9 @@ async fn subscribe_then_list_then_deliver_then_fetch() {
     assert_eq!(body["subscriber_id"].as_str().unwrap(), SUB_HEX);
     // List.
     let resp = client
-        .get(format!("http://{addr}/v1/channels/{CHANNEL_HEX}/subscribers"))
+        .get(format!(
+            "http://{addr}/v1/channels/{CHANNEL_HEX}/subscribers"
+        ))
         .send()
         .await
         .unwrap();
@@ -294,7 +303,9 @@ async fn deliver_envelope_with_wrong_length_is_400() {
         .await
         .unwrap();
     client
-        .post(format!("http://{addr}/v1/channels/{CHANNEL_HEX}/subscribers"))
+        .post(format!(
+            "http://{addr}/v1/channels/{CHANNEL_HEX}/subscribers"
+        ))
         .json(&json!({ "subscriber_pubkey_hex": SUB_HEX }))
         .send()
         .await
@@ -347,7 +358,9 @@ async fn bad_subscriber_id_is_400() {
         .await
         .unwrap();
     let resp = client
-        .post(format!("http://{addr}/v1/channels/{CHANNEL_HEX}/subscribers"))
+        .post(format!(
+            "http://{addr}/v1/channels/{CHANNEL_HEX}/subscribers"
+        ))
         .json(&json!({ "subscriber_pubkey_hex": "shortie" }))
         .send()
         .await
@@ -361,13 +374,10 @@ async fn bad_subscriber_id_is_400() {
 /// `lakko_channels::subscribe::SEED_ENVELOPE_LEN`. Compile-
 /// time assertion so a future bump in either crate is
 /// caught by the build.
-const _ASSERT_ENVELOPE_LEN: () = assert!(
-    lakko_svc_channels::api::EXPECTED_ENVELOPE_LEN
-        == lakko_channels::SEED_ENVELOPE_LEN
-);
+const _ASSERT_ENVELOPE_LEN: () =
+    assert!(lakko_svc_channels::api::EXPECTED_ENVELOPE_LEN == lakko_channels::SEED_ENVELOPE_LEN);
 
-const SUB_HEX_B: &str =
-    "abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd";
+const SUB_HEX_B: &str = "abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd";
 
 async fn create_channel_with_two_subs(client: &reqwest::Client, addr: SocketAddr) {
     client
@@ -378,7 +388,9 @@ async fn create_channel_with_two_subs(client: &reqwest::Client, addr: SocketAddr
         .unwrap();
     for sub in [SUB_HEX, SUB_HEX_B] {
         client
-            .post(format!("http://{addr}/v1/channels/{CHANNEL_HEX}/subscribers"))
+            .post(format!(
+                "http://{addr}/v1/channels/{CHANNEL_HEX}/subscribers"
+            ))
             .json(&json!({ "subscriber_pubkey_hex": sub }))
             .send()
             .await
@@ -590,5 +602,8 @@ async fn payload_round_trips_byte_identical() {
     let body: serde_json::Value = resp.json().await.unwrap();
     let b64 = body["posts"][0]["payload_b64"].as_str().unwrap();
     let decoded = URL_SAFE_NO_PAD.decode(b64).unwrap();
-    assert_eq!(decoded, payload, "server must forward payload byte-identical");
+    assert_eq!(
+        decoded, payload,
+        "server must forward payload byte-identical"
+    );
 }

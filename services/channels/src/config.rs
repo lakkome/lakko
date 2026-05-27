@@ -115,8 +115,7 @@ impl Config {
     /// values.
     pub fn from_env() -> Result<Self, ConfigError> {
         let bind = parse_socket("LAKKO_CHANNELS_BIND", DEFAULT_BIND)?;
-        let max_post_bytes =
-            parse_usize("LAKKO_CHANNELS_MAX_POST_BYTES", DEFAULT_MAX_POST_BYTES)?;
+        let max_post_bytes = parse_usize("LAKKO_CHANNELS_MAX_POST_BYTES", DEFAULT_MAX_POST_BYTES)?;
         let fetch_limit_default =
             parse_usize("LAKKO_CHANNELS_FETCH_LIMIT_DEFAULT", DEFAULT_FETCH_LIMIT)?;
         let fetch_limit_max =
@@ -124,17 +123,14 @@ impl Config {
         if fetch_limit_default > fetch_limit_max {
             return Err(ConfigError::Invalid {
                 name: "LAKKO_CHANNELS_FETCH_LIMIT_DEFAULT",
-                detail: format!(
-                    "default ({fetch_limit_default}) exceeds max ({fetch_limit_max})"
-                ),
+                detail: format!("default ({fetch_limit_default}) exceeds max ({fetch_limit_max})"),
             });
         }
         let database_url = env::var("LAKKO_CHANNELS_DATABASE_URL")
             .ok()
             .or_else(|| env::var("DATABASE_URL").ok())
             .filter(|s| !s.is_empty());
-        let retention_secs =
-            parse_u64("LAKKO_CHANNELS_RETENTION_SECS", DEFAULT_RETENTION_SECS)?;
+        let retention_secs = parse_u64("LAKKO_CHANNELS_RETENTION_SECS", DEFAULT_RETENTION_SECS)?;
         let subscriber_retention_secs = parse_u64(
             "LAKKO_CHANNELS_SUBSCRIBER_RETENTION_SECS",
             DEFAULT_SUBSCRIBER_RETENTION_SECS,
@@ -169,11 +165,10 @@ fn parse_u64(name: &'static str, fallback: u64) -> Result<u64, ConfigError> {
 
 fn parse_socket(name: &'static str, fallback: &str) -> Result<SocketAddr, ConfigError> {
     let raw = env::var(name).unwrap_or_else(|_| fallback.to_owned());
-    raw.parse::<SocketAddr>()
-        .map_err(|e| ConfigError::Invalid {
-            name,
-            detail: e.to_string(),
-        })
+    raw.parse::<SocketAddr>().map_err(|e| ConfigError::Invalid {
+        name,
+        detail: e.to_string(),
+    })
 }
 
 fn parse_usize(name: &'static str, fallback: usize) -> Result<usize, ConfigError> {
@@ -195,7 +190,9 @@ mod tests {
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn with_env<F: FnOnce() -> R, R>(pairs: &[(&str, &str)], f: F) -> R {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         for key in [
             "LAKKO_CHANNELS_BIND",
             "LAKKO_CHANNELS_MAX_POST_BYTES",

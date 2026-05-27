@@ -214,7 +214,9 @@ mod tests {
     #[test]
     fn signal_relay_serialises_to_kebab_case() {
         let frame = ClientFrame::SignalRelay {
-            to: RelayTarget::Peer { peer_id: "p1".into() },
+            to: RelayTarget::Peer {
+                peer_id: "p1".into(),
+            },
             payload_b64: "AAAA".into(),
         };
         let json = serde_json::to_string(&frame).unwrap();

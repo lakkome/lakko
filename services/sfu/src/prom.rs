@@ -110,10 +110,7 @@ impl MetricsExporter {
             names::SIGNALING_FRAMES_TOTAL,
             "Cumulative count of signaling frames received from peers"
         );
-        metrics::describe_gauge!(
-            names::PEERS_ACTIVE,
-            "Number of peers currently registered"
-        );
+        metrics::describe_gauge!(names::PEERS_ACTIVE, "Number of peers currently registered");
         metrics::describe_gauge!(
             names::JWKS_CACHE_AGE_SECS,
             "JWKS cache age in seconds since last successful refresh"

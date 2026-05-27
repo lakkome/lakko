@@ -252,10 +252,7 @@ pub trait ChannelStore: Send + Sync {
     /// `WHERE cursor > ?` resume point continues to
     /// point at the same post if it survived, and at the
     /// next-survivor otherwise.
-    async fn prune_posts_older_than(
-        &self,
-        cutoff_ms: u64,
-    ) -> Result<u64, StorageError>;
+    async fn prune_posts_older_than(&self, cutoff_ms: u64) -> Result<u64, StorageError>;
 
     /// Register a subscriber against the channel.
     async fn subscribe(
@@ -267,11 +264,7 @@ pub trait ChannelStore: Send + Sync {
 
     /// `true` if the subscriber is registered on the
     /// channel.
-    async fn is_subscribed(
-        &self,
-        channel: ChannelId,
-        subscriber: SubscriberId,
-    ) -> bool;
+    async fn is_subscribed(&self, channel: ChannelId, subscriber: SubscriberId) -> bool;
 
     /// Mark the subscriber as active right now — bump
     /// `last_active_at` so the stale-subscriber pruner
@@ -301,16 +294,11 @@ pub trait ChannelStore: Send + Sync {
     /// `subscribe` / `deliver_envelope` / `rotate`
     /// (each impl holds the appropriate lock for the
     /// duration of the prune).
-    async fn prune_subscribers_older_than(
-        &self,
-        cutoff_ms: u64,
-    ) -> Result<u64, StorageError>;
+    async fn prune_subscribers_older_than(&self, cutoff_ms: u64) -> Result<u64, StorageError>;
 
     /// List every subscriber registered on the channel.
-    async fn list_subscribers(
-        &self,
-        channel: ChannelId,
-    ) -> Result<Vec<SubscriberId>, StorageError>;
+    async fn list_subscribers(&self, channel: ChannelId)
+        -> Result<Vec<SubscriberId>, StorageError>;
 
     /// Store the publisher-supplied HPKE seed envelope for
     /// `(channel, subscriber)`. Envelope is opaque.
@@ -336,10 +324,7 @@ pub trait ChannelStore: Send + Sync {
     async fn total_subscribers(&self) -> usize;
 
     /// Read the channel's current epoch id.
-    async fn current_epoch(
-        &self,
-        channel: ChannelId,
-    ) -> Result<u32, StorageError>;
+    async fn current_epoch(&self, channel: ChannelId) -> Result<u32, StorageError>;
 
     /// Atomic rotation: bump the current epoch + replace
     /// the per-subscriber envelopes for every entry in the
@@ -448,9 +433,7 @@ impl ChannelStore for InMemoryChannelStore {
             return Err(StorageError::UnknownChannel);
         }
         let cursor = *guard.next_cursor.get(&channel).unwrap_or(&1);
-        guard
-            .next_cursor
-            .insert(channel, cursor.saturating_add(1));
+        guard.next_cursor.insert(channel, cursor.saturating_add(1));
         let stored = StoredPost {
             cursor,
             server_ts_ms,
@@ -488,19 +471,10 @@ impl ChannelStore for InMemoryChannelStore {
     /// Total number of posts stored across every channel
     /// — surfaced for the `/metrics` endpoint future-self.
     async fn total_posts(&self) -> usize {
-        self.inner
-            .read()
-            .await
-            .posts
-            .values()
-            .map(Vec::len)
-            .sum()
+        self.inner.read().await.posts.values().map(Vec::len).sum()
     }
 
-    async fn prune_posts_older_than(
-        &self,
-        cutoff_ms: u64,
-    ) -> Result<u64, StorageError> {
+    async fn prune_posts_older_than(&self, cutoff_ms: u64) -> Result<u64, StorageError> {
         let mut guard = self.inner.write().await;
         let mut removed: u64 = 0;
         for posts in guard.posts.values_mut() {
@@ -539,11 +513,7 @@ impl ChannelStore for InMemoryChannelStore {
 
     /// `true` if the subscriber is registered against the
     /// channel.
-    async fn is_subscribed(
-        &self,
-        channel: ChannelId,
-        subscriber: SubscriberId,
-    ) -> bool {
+    async fn is_subscribed(&self, channel: ChannelId, subscriber: SubscriberId) -> bool {
         self.inner
             .read()
             .await
@@ -570,10 +540,7 @@ impl ChannelStore for InMemoryChannelStore {
         Ok(())
     }
 
-    async fn prune_subscribers_older_than(
-        &self,
-        cutoff_ms: u64,
-    ) -> Result<u64, StorageError> {
+    async fn prune_subscribers_older_than(&self, cutoff_ms: u64) -> Result<u64, StorageError> {
         let mut guard = self.inner.write().await;
         let mut removed: u64 = 0;
         // First pass: collect the (channel, subscriber)
@@ -718,10 +685,7 @@ impl ChannelStore for InMemoryChannelStore {
     ///
     /// Returns [`StorageError::UnknownChannel`] when the
     /// channel was never registered.
-    async fn current_epoch(
-        &self,
-        channel: ChannelId,
-    ) -> Result<u32, StorageError> {
+    async fn current_epoch(&self, channel: ChannelId) -> Result<u32, StorageError> {
         let guard = self.inner.read().await;
         if !guard.posts.contains_key(&channel) {
             return Err(StorageError::UnknownChannel);
@@ -845,10 +809,7 @@ mod tests {
         let s = InMemoryChannelStore::new();
         let c = cid(0xEE);
         s.create(c).await.unwrap();
-        let err = s
-            .put(c, vec![0u8; 100], 50, 0)
-            .await
-            .unwrap_err();
+        let err = s.put(c, vec![0u8; 100], 50, 0).await.unwrap_err();
         assert!(matches!(
             err,
             StorageError::PostTooLarge { max: 50, got: 100 }
@@ -1055,19 +1016,11 @@ mod tests {
         s.subscribe(c, b, 0).await.unwrap();
         // Pre-rotation: deliver an "epoch 0" envelope for
         // each (so we can prove they get replaced).
-        s.deliver_envelope(c, a, vec![0x00; 80], 80)
-            .await
-            .unwrap();
-        s.deliver_envelope(c, b, vec![0x00; 80], 80)
-            .await
-            .unwrap();
+        s.deliver_envelope(c, a, vec![0x00; 80], 80).await.unwrap();
+        s.deliver_envelope(c, b, vec![0x00; 80], 80).await.unwrap();
         // Rotate.
         let new_epoch = s
-            .rotate(
-                c,
-                vec![(a, vec![0xAA; 80]), (b, vec![0xBB; 80])],
-                80,
-            )
+            .rotate(c, vec![(a, vec![0xAA; 80]), (b, vec![0xBB; 80])], 80)
             .await
             .unwrap();
         assert_eq!(new_epoch, 1);
@@ -1089,16 +1042,11 @@ mod tests {
         let a = sid(0x05);
         s.create(c).await.unwrap();
         s.subscribe(c, a, 0).await.unwrap();
-        s.deliver_envelope(c, a, vec![0x00; 80], 80)
-            .await
-            .unwrap();
+        s.deliver_envelope(c, a, vec![0x00; 80], 80).await.unwrap();
         // Second batch entry is wrong length — entire
         // rotation must abort without touching the
         // envelope or bumping the epoch.
-        let err = s
-            .rotate(c, vec![(a, vec![0u8; 79])], 80)
-            .await
-            .unwrap_err();
+        let err = s.rotate(c, vec![(a, vec![0u8; 79])], 80).await.unwrap_err();
         assert!(matches!(
             err,
             StorageError::BadEnvelopeLen {
@@ -1151,7 +1099,9 @@ mod tests {
         s.create(c).await.unwrap();
         // Five posts at timestamps 100, 200, 300, 400, 500.
         for i in 1..=5 {
-            s.put(c, vec![u8::try_from(i).unwrap()], 1024, i * 100).await.unwrap();
+            s.put(c, vec![u8::try_from(i).unwrap()], 1024, i * 100)
+                .await
+                .unwrap();
         }
         // Cutoff at 350 — drops the three oldest (100,
         // 200, 300).
@@ -1172,7 +1122,9 @@ mod tests {
         let c = cid(0xA2);
         s.create(c).await.unwrap();
         for i in 1..=3 {
-            s.put(c, vec![u8::try_from(i).unwrap()], 1024, i * 100).await.unwrap();
+            s.put(c, vec![u8::try_from(i).unwrap()], 1024, i * 100)
+                .await
+                .unwrap();
         }
         let removed = s.prune_posts_older_than(u64::MAX).await.unwrap();
         assert_eq!(removed, 3);
