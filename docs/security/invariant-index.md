@@ -232,10 +232,15 @@ the audit-grep failure mode this page exists to prevent.
 
 If `wc -l docs/security/{calls,transport,mls-state-machine}.md`
 goes up significantly without this index changing, an
-invariant landed without being indexed. CI does not yet
-gate on this; a follow-up sprint adds a tiny
-`tools/audit-index-check` that diffs the source-file
-`### {class}-{n}:` headers against this index.
+invariant landed without being indexed. **CI gates on
+this** via [`tools/audit-index-check`](../../tools/audit-index-check)
+— a bash script that diffs the `### {class}-{n}:` headers
+in the three source files against the per-class tables on
+this page. Both directions are checked: a new invariant
+in the source must have a matching index row, and a stale
+index row whose source-file header is gone is also a fail.
+Wired into `just ci` as the final docs gate. Run locally
+via `just audit-index-check`.
 
 ## Cross-links
 

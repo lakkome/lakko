@@ -116,8 +116,15 @@ fuzz-list:
     @echo "lakko-channels:"
     @ls crates/lakko-channels/fuzz/fuzz_targets/ | sed 's/\.rs$//' | sed 's/^/  /'
 
+# Audit-pack drift gate — every numbered invariant in
+# docs/security/{calls,transport,mls-state-machine}.md
+# must have a matching row in invariant-index.md, and
+# vice versa.
+audit-index-check:
+    ./tools/audit-index-check
+
 # Everything CI does — run locally before pushing.
-ci: fmt-check lint test audit reuse fuzz-check
+ci: fmt-check lint test audit reuse fuzz-check audit-index-check
 
 # Build for all release targets (host platform only here; cross-builds via Nix).
 build:

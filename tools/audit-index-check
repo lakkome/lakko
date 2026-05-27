@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+# audit-index-check — drift gate between source-file headers
+# and docs/security/invariant-index.md.
+#
+# The audit pack pins three numbered invariant classes:
+#
+#   I-N  -> docs/security/mls-state-machine.md  (### I-N:)
+#   C-N  -> docs/security/calls.md              (### C-N:)
+#   T-N  -> docs/security/transport.md          (### T-N:)
+#
+# docs/security/invariant-index.md aggregates them into one
+# reviewer-friendly cheat sheet. The "how to add a new
+# invariant" procedure on that page requires the maintainer
+# to add a row to the index whenever a new invariant lands;
+# this script gates that procedure. Run via `just ci`.
+#
+# Failure mode the script catches: an invariant landed in
+# its source file but the index never got the row, OR an
+# index row whose source-file header does not exist (stale
+# entry). The index page itself says the audit-grep
+# failure mode is exactly the kind of drift this script
+# catches.
+#
+# Portable across macOS bash 3.2 (no `declare -A`) and
+# Linux bash 4+.
+
+set -eu
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+INDEX="$ROOT/docs/security/invariant-index.md"
+
+source_for_class() {
+    case "$1" in
+        I) echo "$ROOT/docs/security/mls-state-machine.md" ;;
+        C) echo "$ROOT/docs/security/calls.md" ;;
+        T) echo "$ROOT/docs/security/transport.md" ;;
+        *) echo "audit-index-check: unknown class $1" >&2; exit 2 ;;
+    esac
+}
+
+fail=0
+
+for class in I C T; do
+    src=$(source_for_class "$class")
+
+    # IDs that the source file claims via `### CLASS-N: ...`
+    # headers.
+    src_ids=$(grep -oE "^### ${class}-[0-9]+:" "$src" \
+        | sed -E "s/^### (${class}-[0-9]+):.*/\1/" \
+        | sort -u)
+
+    # IDs that the index claims via leading-pipe table
+    # cells: `| CLASS-N |` or `| CLASS-N  |`.
+    idx_ids=$(grep -oE "\| ${class}-[0-9]+ *\|" "$INDEX" \
+        | sed -E "s/\| (${class}-[0-9]+) *\|/\1/" \
+        | sort -u)
+
+    missing_in_index=$(comm -23 <(printf '%s\n' "$src_ids") <(printf '%s\n' "$idx_ids"))
+    if [ -n "$missing_in_index" ]; then
+        echo "drift: ${class}-class invariants present in source but missing from invariant-index.md:"
+        echo "$missing_in_index" | sed 's/^/    /'
+        fail=1
+    fi
+
+    stale_in_index=$(comm -13 <(printf '%s\n' "$src_ids") <(printf '%s\n' "$idx_ids"))
+    if [ -n "$stale_in_index" ]; then
+        echo "drift: ${class}-class index rows whose source-file header does not exist:"
+        echo "$stale_in_index" | sed 's/^/    /'
+        fail=1
+    fi
+done
+
+if [ "$fail" -eq 0 ]; then
+    i_n=$(grep -c "^### I-" "$(source_for_class I)")
+    c_n=$(grep -c "^### C-" "$(source_for_class C)")
+    t_n=$(grep -c "^### T-" "$(source_for_class T)")
+    echo "audit-index-check: clean (${i_n} I + ${c_n} C + ${t_n} T invariants pinned in both source and index)"
+fi
+
+exit "$fail"
