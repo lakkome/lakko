@@ -61,6 +61,7 @@
 
 pub mod authenticator;
 pub mod config;
+pub mod handshake;
 mod transport;
 
 pub use authenticator::{
@@ -70,5 +71,8 @@ pub use authenticator::{
 pub use config::{
     RealityConfig, RealityConfigError, RealityServerPubkey, RealityShortId, REALITY_PUBKEY_LEN,
     SHORT_ID_LEN,
+};
+pub use handshake::{
+    extract_server_hello_random, patch_client_hello_session_id, TlsWireError, RANDOM_LEN,
 };
 pub use transport::RealityTransport;

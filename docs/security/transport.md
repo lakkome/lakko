@@ -707,14 +707,46 @@ follow-up sprint aligns the exact label / field
 layout to enable interop. Until then, Lakko REALITY
 clients only handshake with Lakko REALITY servers.
 
-**Not covered yet.** TLS handshake injection (writing
-the authenticator into ClientHello.session_id and
-validating the server's response in
-ServerHello.Random) is the next sub-sprint
-(S-5-reality-handshake). rustls 0.23's public API
-does not expose a session_id override hook, so the
-wire-up either takes a `rustls-hooks` fork dependency
-or writes the ClientHello on top of a raw TCP socket.
+**TLS wire-format parsers (G5-1-wire) shipped.**
+[`crates/lakko-transport/src/reality/handshake.rs`](../../crates/lakko-transport/src/reality/handshake.rs)
+provides the two pure-function byte-slice helpers a
+TLS-bytes interceptor needs:
+
+- [`patch_client_hello_session_id`] mutates a TLS record
+  containing one ClientHello in place — locates the
+  `legacy_session_id` field per RFC 8446 §4.1.2 + RFC 8446
+  §5.1 record framing and overwrites the 32-byte slot with
+  REALITY authenticator bytes. Strict validation: refuses
+  non-handshake records, refuses non-ClientHello message
+  types, refuses session_id length other than 32 (REALITY's
+  fixed-width contract), refuses record-length-vs-buffer
+  mismatches, refuses truncated input.
+- [`extract_server_hello_random`] returns the 32-byte
+  `Random` from a TLS record containing one ServerHello
+  per RFC 8446 §4.1.3. REALITY-aware servers write their
+  auth-response into that field. Same family of refusals
+  as the ClientHello patcher.
+
+13 unit tests in `handshake.rs` cover: round-trip patch +
+extract, "preserves everything else" on the ClientHello
+patch (cipher_suites / compression / extensions
+untouched), reject non-handshake content type, reject
+wrong handshake message type, reject short session_id
+length, reject truncated buffer, reject record-length
+mismatch, plus a `compute → patch → reverse-parse`
+integration round-trip that pins the
+authenticator-to-wire contract between
+[`authenticator::compute`] and the patcher.
+
+**Still not covered yet.** The byte-intercept harness
+itself: TCP + tokio-rustls + raw `ClientConnection::write_tls`
+/ `read_tls` byte interception loop that calls the
+helpers between rustls and the socket. rustls 0.23's
+high-level API does not expose those byte streams
+directly; the driver sub-sprint either (a) uses the
+low-level `rustls::ClientConnection` directly with a
+custom async I/O harness, or (b) takes a `rustls-hooks`
+fork dep. Tracked as `S-5-reality-driver`.
 
 ### T-14: WebTransport client uses cert-hash pinning + u32-BE length-prefixed framing with MAX_FRAME_BYTES enforcement
 
