@@ -39,9 +39,14 @@
 //!   DoH bootstrap, etc.).
 //! - **Delegated targets.** The TUF spec lets the targets
 //!   role delegate sub-paths to other keys (`delegations`
-//!   field). Scaffold path: not implemented; a future
-//!   sprint adds it when the release engineering need
-//!   actually shows up.
+//!   field). The scaffold does not follow delegations
+//!   yet — and to defend against an attacker who
+//!   compromised the targets signing key, [`verify_chain`]
+//!   actively refuses to install any `Targets` whose
+//!   `delegations` field is present (the field round-trips
+//!   as opaque [`serde_json::Value`] so we can observe
+//!   presence without trusting the contents). Removed
+//!   once the delegation walk lands.
 //! - **Key rotation across root versions.** Closed by
 //!   [`verify_root_chain`] — the caller holds an
 //!   ordered slice of root metadata files (one per
@@ -217,6 +222,16 @@ pub enum TufError {
         /// triage.
         available: Vec<String>,
     },
+    /// The signed `Targets` metadata carries a
+    /// `delegations` block. The scaffold does not follow
+    /// delegations yet — refusing to install is the
+    /// audit-safe stance, since an attacker who compromised
+    /// the top-level targets signing key could otherwise
+    /// indirect through a weaker delegated key whose
+    /// authority the scaffold can neither verify nor
+    /// revoke. Removed once delegation walk lands.
+    #[error("targets role carries a `delegations` block — not yet supported")]
+    DelegationsNotSupported,
 }
 
 /// Convenience alias.
@@ -446,6 +461,22 @@ pub struct Targets {
     /// Map from target path (`"lakko-svc-channels"`) to
     /// target metadata.
     pub targets: BTreeMap<String, TargetMeta>,
+    /// Per TUF spec §5.5, the targets role may carry a
+    /// `delegations` block authorising sub-paths to other
+    /// signing keys. `lakko-tuf` does NOT yet follow
+    /// delegations — `verify_chain` refuses to install any
+    /// `Targets` whose `delegations` field is set, the
+    /// audit-safe stance until the delegation walk is
+    /// implemented.
+    ///
+    /// The field is decoded as opaque [`serde_json::Value`]:
+    /// the verifier never trusts its contents, only its
+    /// presence. Once delegation support lands, this field
+    /// becomes a strongly-typed struct and the rejection
+    /// in `verify_chain` is replaced with the recursive
+    /// walk.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delegations: Option<serde_json::Value>,
 }
 
 /// Timestamp metadata — short-lived proof of freshness
@@ -717,6 +748,17 @@ pub fn verify_chain(
     check_expiry("targets", targets.signed.expires, now)?;
     let targets_spec = role_spec(&root.signed, "targets")?;
     verify_signatures("targets", targets, targets_spec, &root.signed.keys)?;
+
+    // 7. Refuse `delegations`. The scaffold can verify the
+    //    top-level targets map but cannot yet walk a
+    //    delegation tree — an attacker who compromised the
+    //    targets signing key could otherwise indirect
+    //    through a weaker delegated key whose authority we
+    //    can neither verify nor revoke. Refusing is the
+    //    audit-safe stance until the walk lands.
+    if targets.signed.delegations.is_some() {
+        return Err(TufError::DelegationsNotSupported);
+    }
 
     Ok(targets.signed.targets.clone())
 }
@@ -1007,6 +1049,7 @@ mod tests {
             version: 1,
             expires,
             targets: targets_targets,
+            delegations: None,
         };
         let mut snapshot_meta = BTreeMap::new();
         snapshot_meta.insert(
@@ -1536,5 +1579,60 @@ mod tests {
             }
             other => panic!("expected NoKnownTargetHashAlgo, got {other:?}"),
         }
+    }
+
+    // ---------------------------------------------------
+    // delegations defense-in-depth tests
+    // ---------------------------------------------------
+
+    #[test]
+    fn verify_chain_rejects_targets_with_delegations() {
+        let signer = SigningKey::from_seed(&[0x99; 32]);
+        let now = Utc::now();
+        let (root, timestamp, snapshot, targets) = build_chain(&signer, now);
+
+        // Re-sign the targets body with the delegations
+        // field populated. Any non-null JSON value triggers
+        // the rejection — the scaffold does not inspect the
+        // contents, just refuses on presence.
+        let mut delegated_body = targets.signed.clone();
+        delegated_body.delegations = Some(serde_json::json!({
+            "keys": {},
+            "roles": [],
+        }));
+        let key_id = KeyId::from_verifying_key(&signer.verifying_key());
+        let delegated = sign(delegated_body, &signer, &key_id);
+
+        let err = verify_chain(&root, &timestamp, &snapshot, &delegated, now, None)
+            .expect_err("delegations must be rejected");
+        assert!(
+            matches!(err, TufError::DelegationsNotSupported),
+            "expected DelegationsNotSupported, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn signed_targets_round_trips_without_delegations() {
+        // Default-built targets metadata has `delegations:
+        // None`, which serialises as the field being absent
+        // entirely (skip_serializing_if). A round-trip
+        // through canonical JSON + back must preserve the
+        // None — otherwise the rejection path above could
+        // be tripped by a benign serde quirk.
+        let signer = SigningKey::from_seed(&[0xAA; 32]);
+        let now = Utc::now();
+        let (_root, _timestamp, _snapshot, targets) = build_chain(&signer, now);
+
+        let json = serde_json::to_vec(&targets).unwrap();
+        // Field must NOT appear in the on-wire form when it
+        // is None.
+        let json_str = std::str::from_utf8(&json).unwrap();
+        assert!(
+            !json_str.contains("delegations"),
+            "delegations key leaked into wire form: {json_str}"
+        );
+
+        let parsed: Signed<Targets> = serde_json::from_slice(&json).unwrap();
+        assert!(parsed.signed.delegations.is_none());
     }
 }

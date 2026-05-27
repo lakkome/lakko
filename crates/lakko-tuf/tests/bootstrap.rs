@@ -168,6 +168,7 @@ fn build_chain(
         version: 1,
         expires,
         targets: targets_targets,
+        delegations: None,
     };
 
     let mut snapshot_meta = BTreeMap::new();
