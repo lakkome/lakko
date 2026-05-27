@@ -180,6 +180,43 @@ pub enum TufError {
     /// id set.
     #[error("first root in chain not signed by pinned trust anchor")]
     UntrustedFirstRoot,
+    /// Fetched target bytes do not match the length the
+    /// signed `TargetMeta` commits to. Surfaced by
+    /// [`verify_target_bytes`].
+    #[error("target length mismatch: expected {expected}, got {got}")]
+    TargetLengthMismatch {
+        /// Length recorded in the signed targets metadata.
+        expected: u64,
+        /// Length of the bytes the caller actually fetched.
+        got: u64,
+    },
+    /// Fetched target bytes have the right length but the
+    /// digest under a known hash algorithm does not match
+    /// the value the signed `TargetMeta` commits to.
+    #[error("target {algo} hash mismatch: expected {expected}, got {got}")]
+    TargetHashMismatch {
+        /// Hash algorithm whose digest failed
+        /// (`"sha256"`).
+        algo: String,
+        /// Hex-encoded digest from the signed metadata.
+        expected: String,
+        /// Hex-encoded digest the caller actually computed.
+        got: String,
+    },
+    /// The signed `TargetMeta.hashes` map contained only
+    /// hash algorithms this build of the verifier does not
+    /// know how to compute. Refusing to install is the
+    /// audit-safe behaviour — an attacker could otherwise
+    /// publish a target with only an exotic algorithm
+    /// nobody verifies. Forward-compat path: add the
+    /// algorithm to the verifier, ship a new client.
+    #[error("no known target hash algorithm in metadata: had {available:?}")]
+    NoKnownTargetHashAlgo {
+        /// Algorithm names found in the metadata; the
+        /// caller can surface this to the user / log for
+        /// triage.
+        available: Vec<String>,
+    },
 }
 
 /// Convenience alias.
@@ -824,6 +861,89 @@ pub struct KnownVersions {
 }
 
 // =========================================================
+// Target-bytes verification
+// =========================================================
+
+/// Verify fetched target bytes against the signed
+/// [`TargetMeta`] returned by [`verify_chain`].
+///
+/// This is the final gate in the TUF auto-update flow:
+/// after the metadata chain has been verified, the caller
+/// fetches the actual binary artefact (over its preferred
+/// transport — HTTPS, sidechannel, USB key) and runs this
+/// helper to confirm the bytes match what the signed
+/// `targets` metadata commits to.
+///
+/// Both the length and the SHA-256 digest must match.
+/// Unknown hash algorithms in `meta.hashes` are skipped
+/// (forward-compat); at least one known algorithm must
+/// have been checked, otherwise [`TufError::NoKnownTargetHashAlgo`]
+/// is returned — the audit-safe stance, since otherwise an
+/// attacker could publish a target whose only hash is
+/// under an exotic algorithm this build does not verify.
+///
+/// # Algorithms
+///
+/// The scaffold understands `"sha256"` only. SHA-512 /
+/// BLAKE2b / BLAKE3 can be added when release-engineering
+/// actually publishes them; the function shape stays the
+/// same.
+///
+/// # Errors
+///
+/// - [`TufError::TargetLengthMismatch`] — `bytes.len()`
+///   does not match `meta.length`.
+/// - [`TufError::TargetHashMismatch`] — a known hash
+///   algorithm in `meta.hashes` does not agree with the
+///   actual digest of `bytes`.
+/// - [`TufError::NoKnownTargetHashAlgo`] — `meta.hashes`
+///   contained only algorithms this build does not know
+///   how to compute (including the empty-map case).
+pub fn verify_target_bytes(meta: &TargetMeta, bytes: &[u8]) -> Result<()> {
+    // Length first — cheap to compute and rules out the
+    // entire input before we touch the SHA-256 path. We
+    // compare `u64`-to-`u64` to avoid platform-dependent
+    // `usize` rounding on 32-bit targets.
+    let got_len = bytes.len() as u64;
+    if got_len != meta.length {
+        return Err(TufError::TargetLengthMismatch {
+            expected: meta.length,
+            got: got_len,
+        });
+    }
+
+    let mut algo_checked = false;
+    let mut available: Vec<String> = Vec::with_capacity(meta.hashes.len());
+    for (algo, expected_hex) in &meta.hashes {
+        available.push(algo.clone());
+        // Unknown algorithms are skipped — forward-compat.
+        // A publisher may ship sha256 alongside a future-
+        // proof sha512 entry; older clients verify the
+        // sha256 and ignore the rest. The audit-safe stance
+        // is enforced by the `algo_checked` guard below:
+        // if NO known algorithm got verified, refuse.
+        if algo.as_str() == "sha256" {
+            let digest = lakko_crypto::hash::sha256(bytes);
+            let got_hex = hex::encode(digest);
+            if got_hex != *expected_hex {
+                return Err(TufError::TargetHashMismatch {
+                    algo: algo.clone(),
+                    expected: expected_hex.clone(),
+                    got: got_hex,
+                });
+            }
+            algo_checked = true;
+        }
+    }
+
+    if !algo_checked {
+        return Err(TufError::NoKnownTargetHashAlgo { available });
+    }
+
+    Ok(())
+}
+
+// =========================================================
 // Tests
 // =========================================================
 
@@ -1295,5 +1415,126 @@ mod tests {
             verify_chain(final_root, &timestamp, &snapshot, &targets, now, None)
                 .unwrap();
         assert_eq!(targets_map.len(), 1);
+    }
+
+    // ---------------------------------------------------
+    // verify_target_bytes tests
+    // ---------------------------------------------------
+
+    /// Build a `TargetMeta` whose `length` + `sha256`
+    /// agree with the supplied bytes. Used as the happy
+    /// fixture across the verify_target_bytes tests.
+    fn target_meta_for(bytes: &[u8]) -> TargetMeta {
+        let digest = lakko_crypto::hash::sha256(bytes);
+        let mut hashes = BTreeMap::new();
+        hashes.insert("sha256".into(), hex::encode(digest));
+        TargetMeta {
+            length: bytes.len() as u64,
+            hashes,
+        }
+    }
+
+    #[test]
+    fn verify_target_bytes_happy_path() {
+        let bytes = b"hello, lakko TUF target bytes";
+        let meta = target_meta_for(bytes);
+        verify_target_bytes(&meta, bytes).expect("happy path verifies");
+    }
+
+    #[test]
+    fn verify_target_bytes_wrong_length_rejected() {
+        let bytes = b"hello, lakko TUF target bytes";
+        let mut meta = target_meta_for(bytes);
+        meta.length += 1; // claim one byte more than we have
+
+        match verify_target_bytes(&meta, bytes) {
+            Err(TufError::TargetLengthMismatch { expected, got }) => {
+                assert_eq!(expected, meta.length);
+                assert_eq!(got, bytes.len() as u64);
+            }
+            other => panic!("expected TargetLengthMismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn verify_target_bytes_wrong_digest_rejected() {
+        let bytes = b"hello, lakko TUF target bytes";
+        let mut meta = target_meta_for(bytes);
+        // Flip one hex char in the expected digest — still
+        // valid hex of the right length, but no longer the
+        // correct digest.
+        let entry = meta.hashes.get_mut("sha256").unwrap();
+        let mut chars: Vec<char> = entry.chars().collect();
+        chars[0] = if chars[0] == 'f' { '0' } else { 'f' };
+        *entry = chars.into_iter().collect();
+
+        match verify_target_bytes(&meta, bytes) {
+            Err(TufError::TargetHashMismatch { algo, .. }) => {
+                assert_eq!(algo, "sha256");
+            }
+            other => panic!("expected TargetHashMismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn verify_target_bytes_no_known_algo_rejected() {
+        let bytes = b"hello, lakko TUF target bytes";
+        // Length matches, but the only hash is under a
+        // future algorithm this build does not understand.
+        let mut hashes = BTreeMap::new();
+        hashes.insert("sha512".into(), "00".repeat(64));
+        hashes.insert("blake2b256".into(), "00".repeat(32));
+        let meta = TargetMeta {
+            length: bytes.len() as u64,
+            hashes,
+        };
+
+        match verify_target_bytes(&meta, bytes) {
+            Err(TufError::NoKnownTargetHashAlgo { available }) => {
+                // BTreeMap iteration order is sorted by
+                // key; both unknown algos are surfaced.
+                assert!(available.contains(&"sha512".to_string()));
+                assert!(available.contains(&"blake2b256".to_string()));
+            }
+            other => panic!("expected NoKnownTargetHashAlgo, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn verify_target_bytes_unknown_algo_alongside_sha256_accepted() {
+        let bytes = b"hello, lakko TUF target bytes";
+        let digest = lakko_crypto::hash::sha256(bytes);
+        let mut hashes = BTreeMap::new();
+        // A real sha256 plus a forward-compat algorithm we
+        // don't know how to compute. Verifier MUST accept
+        // — the sha256 is enough, the unknown is skipped.
+        hashes.insert("sha256".into(), hex::encode(digest));
+        hashes.insert("sha512".into(), "ff".repeat(64));
+        let meta = TargetMeta {
+            length: bytes.len() as u64,
+            hashes,
+        };
+
+        verify_target_bytes(&meta, bytes)
+            .expect("unknown algo alongside sha256 still verifies");
+    }
+
+    #[test]
+    fn verify_target_bytes_empty_hashes_rejected() {
+        // Edge case: a `TargetMeta` whose `hashes` map is
+        // empty. Length-only verification is unsafe, so we
+        // must reject the same way as the unknown-algo
+        // case.
+        let bytes = b"hello, lakko TUF target bytes";
+        let meta = TargetMeta {
+            length: bytes.len() as u64,
+            hashes: BTreeMap::new(),
+        };
+        match verify_target_bytes(&meta, bytes) {
+            Err(TufError::NoKnownTargetHashAlgo { available }) => {
+                assert!(available.is_empty());
+            }
+            other => panic!("expected NoKnownTargetHashAlgo, got {other:?}"),
+        }
     }
 }
