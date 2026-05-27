@@ -116,7 +116,8 @@ just reuse                     # reuse lint
 just regen-proto               # regenerate types from schemas/
 just regen-bindings            # Swift + Kotlin bindings from lakko-ffi-uniffi
 just fuzz-check                # smoke-build all fuzz targets on stable
-just fuzz <crate> <target>     # run a specific target on nightly + cargo-fuzz
+just fuzz <fuzz_dir> <target>  # run a specific target on nightly + cargo-fuzz
+just fuzz-quick                # run EVERY target for 60s each (local mirror of nightly CI workflow)
 just fuzz-list                 # list all available fuzz targets
 just deploy                    # build + install + systemctl restart on the VPS (ssh lakkome@lakko.me)
 just restart                   # systemctl restart lakko.target

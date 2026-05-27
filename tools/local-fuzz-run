@@ -1,0 +1,104 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+# local-fuzz-run — what `fuzz-quick` does in CI, but on the
+# maintainer's box.
+#
+# `just fuzz-check` only smoke-builds the harnesses; the
+# `fuzz-quick` workflow runs each target for 60 s on nightly
+# cron. Between those two extremes there's a "I just touched
+# a parser, did I break anything?" gap — this script fills it.
+#
+# Usage:
+#   tools/local-fuzz-run                  # all 9 crates, 60s/target
+#   tools/local-fuzz-run lakko-tuf        # only the lakko-tuf crate
+#   tools/local-fuzz-run lakko-tuf 300    # lakko-tuf, 5 min/target
+#   tools/local-fuzz-run "" 30            # all crates, 30s/target
+#
+# Prerequisites (one-time):
+#   rustup toolchain install nightly
+#   cargo install cargo-fuzz
+#
+# Crash artifacts land in the per-crate fuzz/artifacts/$target/
+# directory (gitignored). Re-running the target on the saved
+# corpus reproduces the crash for a debugger session:
+#   cargo +nightly fuzz run --fuzz-dir crates/X/fuzz $target \
+#       crates/X/fuzz/artifacts/$target/crash-<hash>
+
+set -eu
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$ROOT"
+
+FILTER="${1:-}"
+DURATION="${2:-60}"
+
+manifests=(
+    "lakko-mls:crates/lakko-mls/fuzz/Cargo.toml"
+    "lakko-proto:crates/lakko-proto/fuzz/Cargo.toml"
+    "lakko-contacts:crates/lakko-contacts/fuzz/Cargo.toml"
+    "lakko-channels:crates/lakko-channels/fuzz/Cargo.toml"
+    "lakko-transport:crates/lakko-transport/fuzz/Cargo.toml"
+    "lakko-tuf:crates/lakko-tuf/fuzz/Cargo.toml"
+    "lakko-call-jwt:crates/lakko-call-jwt/fuzz/Cargo.toml"
+    "lakko-backup:crates/lakko-backup/fuzz/Cargo.toml"
+    "lakko-svc-sfu:services/sfu/fuzz/Cargo.toml"
+)
+
+# Sanity — nightly toolchain + cargo-fuzz present?
+if ! rustup toolchain list 2>/dev/null | grep -q '^nightly'; then
+    echo "error: nightly toolchain missing — run 'rustup toolchain install nightly'" >&2
+    exit 2
+fi
+if ! cargo +nightly fuzz --version >/dev/null 2>&1; then
+    echo "error: cargo-fuzz missing — run 'cargo install cargo-fuzz --locked'" >&2
+    exit 2
+fi
+
+total_targets=0
+failed_targets=()
+
+for entry in "${manifests[@]}"; do
+    crate="${entry%%:*}"
+    manifest="${entry##*:}"
+
+    if [ -n "$FILTER" ] && [ "$FILTER" != "$crate" ]; then
+        continue
+    fi
+
+    fuzz_dir="$(dirname "$manifest")"
+    targets_dir="$fuzz_dir/fuzz_targets"
+    if [ ! -d "$targets_dir" ]; then
+        echo "warn: $crate has no fuzz_targets dir at $targets_dir" >&2
+        continue
+    fi
+
+    echo "==> $crate (manifest=$manifest, budget=${DURATION}s/target)"
+    for target_file in "$targets_dir"/*.rs; do
+        target="$(basename "$target_file" .rs)"
+        total_targets=$((total_targets + 1))
+        echo "--- target: $crate / $target"
+        if cargo +nightly fuzz run \
+                --fuzz-dir "$fuzz_dir" \
+                "$target" \
+                -- -max_total_time="$DURATION"; then
+            :
+        else
+            echo "FAIL: $crate / $target"
+            failed_targets+=("$crate/$target")
+        fi
+    done
+done
+
+echo
+if [ "${#failed_targets[@]}" -eq 0 ]; then
+    echo "local-fuzz-run: clean ($total_targets targets, ${DURATION}s budget each)"
+    exit 0
+fi
+
+echo "local-fuzz-run: ${#failed_targets[@]}/$total_targets target(s) crashed:"
+printf '    %s\n' "${failed_targets[@]}"
+echo
+echo "crash inputs live under <crate>/fuzz/artifacts/<target>/ — re-run them under a debugger."
+exit 1

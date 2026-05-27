@@ -100,12 +100,21 @@ wasm-build:
 #   rustup toolchain install nightly
 #   cargo install cargo-fuzz
 # Examples:
-#   just fuzz lakko-mls mls_message
-#   just fuzz lakko-proto wire_envelope
-fuzz crate target:
-    cd crates/{{crate}}/fuzz && cargo +nightly fuzz run {{target}} -- -max_total_time=300
+#   just fuzz crates/lakko-mls/fuzz mls_message
+#   just fuzz services/sfu/fuzz       client_frame_decode
+fuzz fuzz_dir target:
+    cargo +nightly fuzz run --fuzz-dir {{fuzz_dir}} {{target}} -- -max_total_time=300
 
-# List all available fuzz targets.
+# Run every fuzz target for a bounded budget — what the
+# nightly `fuzz-quick` workflow does in CI, but locally.
+# Use this before pushing a parser-touching change.
+# Optional filter: `just fuzz-quick lakko-tuf` runs only
+# the lakko-tuf crate; `just fuzz-quick "" 30` runs every
+# target for 30 s each.
+fuzz-quick crate='' duration='60':
+    ./tools/local-fuzz-run "{{crate}}" "{{duration}}"
+
+# List all available fuzz targets across the 9 fuzz crates.
 fuzz-list:
     @echo "lakko-mls:"
     @ls crates/lakko-mls/fuzz/fuzz_targets/ | sed 's/\.rs$//' | sed 's/^/  /'
@@ -115,6 +124,16 @@ fuzz-list:
     @ls crates/lakko-contacts/fuzz/fuzz_targets/ | sed 's/\.rs$//' | sed 's/^/  /'
     @echo "lakko-channels:"
     @ls crates/lakko-channels/fuzz/fuzz_targets/ | sed 's/\.rs$//' | sed 's/^/  /'
+    @echo "lakko-transport:"
+    @ls crates/lakko-transport/fuzz/fuzz_targets/ | sed 's/\.rs$//' | sed 's/^/  /'
+    @echo "lakko-tuf:"
+    @ls crates/lakko-tuf/fuzz/fuzz_targets/ | sed 's/\.rs$//' | sed 's/^/  /'
+    @echo "lakko-call-jwt:"
+    @ls crates/lakko-call-jwt/fuzz/fuzz_targets/ | sed 's/\.rs$//' | sed 's/^/  /'
+    @echo "lakko-backup:"
+    @ls crates/lakko-backup/fuzz/fuzz_targets/ | sed 's/\.rs$//' | sed 's/^/  /'
+    @echo "lakko-svc-sfu:"
+    @ls services/sfu/fuzz/fuzz_targets/ | sed 's/\.rs$//' | sed 's/^/  /'
 
 # Audit-pack drift gate — every numbered invariant in
 # docs/security/{calls,transport,mls-state-machine}.md
