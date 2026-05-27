@@ -716,6 +716,75 @@ does not expose a session_id override hook, so the
 wire-up either takes a `rustls-hooks` fork dependency
 or writes the ClientHello on top of a raw TCP socket.
 
+### T-14: WebTransport client uses cert-hash pinning + u32-BE length-prefixed framing with MAX_FRAME_BYTES enforcement
+
+**Property.**
+[`WebTransportPt`](../../crates/lakko-transport/src/webtransport_pt.rs)
+is the real-implementation `Transport` impl over the
+[`web-transport-quinn`](https://crates.io/crates/web-transport-quinn)
+crate (built on top of the same quinn 0.11 + rustls 0.23
+QUIC stack the rest of `lakko-transport` already
+depends on; crypto-provider-agnostic so the whole crate
+stays on `ring`).
+
+Two trust modes, both validated at construction time
+(`WebTransportPt::new` returns `Error::Config` upfront —
+no connect-time surprises):
+
+- **Cert-hash pinning** (recommended for production):
+  the signed bootstrap config carries SHA-256 hashes of
+  the server's full DER certificate, base64-encoded
+  without padding. Matches the W3C
+  `serverCertificateHashes` mode the browser WebTransport
+  API uses; the bootstrap-rendezvous signed channel is
+  the out-of-band trust root the W3C spec assumes.
+- **System-roots fallback**: empty `cert_hashes_b64` →
+  the platform CA chain. Convenience for dev against a
+  CA-signed origin; production SHOULD pin.
+
+Note: this is **cert-hash** pinning (SHA-256 of full DER
+cert), not **SPKI** pinning (SHA-256 of the
+SubjectPublicKeyInfo) — different from the SPKI pinning
+[`PinnedVerifier`](../../crates/lakko-transport/src/pinning.rs)
+uses for HTTPS REST clients. The W3C WebTransport spec
+defines this specific mode; the rendezvous-trust
+audit-grep marker is `cert_hashes_b64`.
+
+Framing: every `Connection::send` writes a u32-BE
+length prefix followed by the payload; every
+`Connection::recv` reads the same 4-byte prefix +
+`MAX_FRAME_BYTES`-bounded payload. Frames larger than
+[`MAX_FRAME_BYTES`](../../crates/lakko-transport/src/transport.rs)
+(16 MiB) are refused with `Error::FrameTooLarge` —
+both the send-time guard (against local-side bug) and
+the recv-time guard (against attacker-supplied
+length prefix). Each `Connection` rides one
+bidirectional WebTransport stream within one session;
+multiplexing across multiple Lakko channels is the next
+layer's job.
+
+**Tests.** 8 unit tests in
+[`crates/lakko-transport/src/webtransport_pt.rs`](../../crates/lakko-transport/src/webtransport_pt.rs)
+covering: happy parse, reject non-https URL, reject
+unparseable URL, reject base64 garbage in cert hash,
+reject wrong-length cert hash, accept empty hash list
+(system-roots mode), `WebTransportPt::new` rejects bad
+config eagerly, and a serde round-trip of the wire
+config.
+
+**Not covered yet.** Live network integration test
+against an in-test wtransport server with an
+rcgen-generated self-signed cert and a known-hash
+pinning round-trip — deferred to a follow-up sprint
+because the wtransport server-side TLS configuration
+takes an `rcgen` cert via several layers of conversion
+(rustls-pki-types `PrivateKeyDer` → `CertificateDer` →
+quinn `ServerConfig`) that needs its own wiring
+beyond the scope of this implementation sprint.
+The unit tests above pin the config / framing surface;
+the actual session round-trip rides on `web-transport-quinn`'s
+own test suite + production deployments.
+
 ## Known soft spots — out of scope for Phase 5 scaffold
 
 ### Real `Transport` implementations for REALITY / MASQUE / SS-2022 / WebTransport

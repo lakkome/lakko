@@ -78,5 +78,14 @@ hex = "0.4"
 # already pulls.
 subtle = "2"
 
+# G5-4: WebTransport over HTTP/3. The `web-transport-quinn`
+# crate is the actively-maintained successor to the
+# deprecated `webtransport-quinn` and rides directly on
+# quinn 0.11 — version-aligned with the rest of this crate's
+# QUIC stack and crypto-provider-agnostic (works with rustls
+# `ring` like the rest of lakko-transport, unlike `wtransport`
+# 0.6 which hard-codes `aws_lc_rs`).
+web-transport-quinn = "0.11"
+
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }

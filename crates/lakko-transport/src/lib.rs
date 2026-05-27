@@ -89,4 +89,7 @@ pub use shadowsocks::{
     ShadowsocksHeaderError, ShadowsocksListener, ShadowsocksTransport,
 };
 pub use transport::{Connection, Listener, Transport, MAX_FRAME_BYTES};
-pub use webtransport_pt::{WebTransportConfig, WebTransportPt};
+pub use webtransport_pt::{
+    ParsedConfig as WebTransportParsedConfig, WebTransportConfig, WebTransportConfigError,
+    WebTransportPt,
+};

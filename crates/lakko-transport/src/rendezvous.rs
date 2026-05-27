@@ -486,7 +486,11 @@ mod tests {
         cfg.transports
             .push(TransportSpec::WebTransport(WebTransportConfig {
                 url: "https://rdz.lakko.me/wt".into(),
-                spki_pins_b64: vec!["pin-a".into(), "pin-b".into()],
+                // G5-4 renamed `spki_pins_b64` → `cert_hashes_b64`
+                // (W3C WebTransport spec uses cert-hash pinning,
+                // not SPKI pinning). Test value is opaque — only
+                // the JSON-round-trip shape is asserted here.
+                cert_hashes_b64: vec!["pin-a".into(), "pin-b".into()],
             }));
         cfg.sign(&signer).unwrap();
         let json = serde_json::to_string(&cfg).unwrap();
