@@ -2521,6 +2521,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "lakko-tuf"
+version = "0.0.0"
+dependencies = [
+ "chrono",
+ "hex",
+ "lakko-crypto",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

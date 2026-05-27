@@ -51,6 +51,7 @@ The Phase 3 closeout punch list — gap inventory + sprint waves with exit crite
 | `lakko-push` | Encrypted APNs / FCM / UnifiedPush envelopes |
 | `lakko-transparency` | CONIKS-style key transparency log (Merkle tree, signed roots, inclusion proofs) |
 | `lakko-call-jwt` | Call-admission JWT (Phase 3b4) — JWS Compact + EdDSA-Ed25519 + JWKS publication, shared between `services/auth` (mint) and FFI crates (parse / verify) |
+| `lakko-tuf` | TUF v1.1 client-side metadata verifier (GA-5 scaffold). Root / Snapshot / Targets / Timestamp Ed25519-signed envelopes, chain-of-trust walk via `verify_chain`, version-rollback detection, expiry check, threshold-of-keys per role. Network fetch + key rotation + delegated targets are out-of-scope follow-ups |
 | `lakko-ffi-uniffi` | UniFFI surface for Swift / Kotlin bindings |
 | `lakko-ffi-wasm` | wasm-bindgen surface for Web / Tauri |
 
