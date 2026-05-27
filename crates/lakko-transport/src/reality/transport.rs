@@ -57,11 +57,11 @@ impl RealityTransport {
         cfg.parse().map_err(|e| Error::NotImplemented {
             feature: "reality (bad config)",
             sprint: match e {
-                crate::reality::config::RealityConfigError::BadPubkeyBase64 => {
-                    "S-5-reality (server_pubkey_b64 invalid)"
+                crate::reality::config::RealityConfigError::BadTagSecretBase64 => {
+                    "S-5-reality (tag_secret_b64 invalid)"
                 },
-                crate::reality::config::RealityConfigError::PubkeyLength { .. } => {
-                    "S-5-reality (server_pubkey wrong length)"
+                crate::reality::config::RealityConfigError::TagSecretLength { .. } => {
+                    "S-5-reality (tag_secret wrong length)"
                 },
                 crate::reality::config::RealityConfigError::BadShortIdHex => {
                     "S-5-reality (short_id_hex invalid)"
@@ -110,7 +110,7 @@ mod tests {
     fn happy_config() -> RealityConfig {
         RealityConfig {
             sni: "www.microsoft.com".into(),
-            server_pubkey_b64: B64.encode([0xCA; 32]),
+            tag_secret_b64: B64.encode([0xCA; 32]),
             short_id_hex: hex::encode([0xAB; 8]),
             allowed_inner_servers: vec!["lakko.me".into()],
             remote: "203.0.113.7:443".into(),
@@ -125,14 +125,14 @@ mod tests {
     }
 
     #[test]
-    fn new_rejects_bad_pubkey() {
+    fn new_rejects_bad_tag_secret() {
         let mut cfg = happy_config();
-        cfg.server_pubkey_b64 = "!!!".into();
+        cfg.tag_secret_b64 = "!!!".into();
         let err = RealityTransport::new(cfg).expect_err("bad config must reject");
         match err {
             Error::NotImplemented { feature, sprint } => {
                 assert_eq!(feature, "reality (bad config)");
-                assert!(sprint.contains("server_pubkey_b64 invalid"));
+                assert!(sprint.contains("tag_secret_b64 invalid"));
             },
             other => panic!("expected NotImplemented (bad config), got {other:?}"),
         }

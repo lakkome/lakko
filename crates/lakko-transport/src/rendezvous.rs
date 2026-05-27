@@ -306,7 +306,9 @@ mod tests {
             expires_at: expires,
             transports: vec![TransportSpec::Reality(RealityConfig {
                 sni: "example.invalid".into(),
-                server_pubkey_b64: "AAAA".into(),
+                // G5-1-v2: renamed `server_pubkey_b64` → `tag_secret_b64`
+                // (Path C — pre-shared-key model, no ECDH).
+                tag_secret_b64: "AAAA".into(),
                 short_id_hex: "00".into(),
                 allowed_inner_servers: vec!["inner.lakko.me".into()],
                 remote: "1.2.3.4:443".into(),

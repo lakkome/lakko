@@ -77,11 +77,12 @@ pub use pluggable::{
     PluggableTransport,
 };
 pub use reality::{
-    compute_authenticator as compute_reality_authenticator,
-    verify_authenticator as verify_reality_authenticator, RealityAuthError, RealityAuthenticator,
-    RealityConfig, RealityConfigError, RealityServerPubkey, RealityShortId, RealityTimestamp,
-    RealityTransport, AUTHENTICATOR_LEN as REALITY_AUTHENTICATOR_LEN,
-    HKDF_LABEL as REALITY_HKDF_LABEL, REALITY_PUBKEY_LEN, SHORT_ID_LEN as REALITY_SHORT_ID_LEN,
+    compute_authenticator as compute_reality_authenticator, compute_server_response,
+    verify_authenticator as verify_reality_authenticator, verify_server_response, RealityAuthError,
+    RealityAuthenticator, RealityConfig, RealityConfigError, RealityShortId, RealityTagSecret,
+    RealityTimestamp, RealityTransport, AUTHENTICATOR_LEN as REALITY_AUTHENTICATOR_LEN,
+    HKDF_LABEL as REALITY_HKDF_LABEL, SERVER_RESPONSE_LEN as REALITY_SERVER_RESPONSE_LEN,
+    SHORT_ID_LEN as REALITY_SHORT_ID_LEN, TAG_SECRET_LEN as REALITY_TAG_SECRET_LEN,
     TIMESTAMP_LEN as REALITY_TIMESTAMP_LEN,
 };
 pub use rendezvous::{

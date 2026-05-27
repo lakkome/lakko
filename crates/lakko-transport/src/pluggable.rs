@@ -321,7 +321,7 @@ mod tests {
         use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
         RealityTransport::new(RealityConfig {
             sni: "example.invalid".into(),
-            server_pubkey_b64: B64.encode([0u8; 32]),
+            tag_secret_b64: B64.encode([0u8; 32]),
             short_id_hex: hex::encode([0u8; 8]),
             allowed_inner_servers: vec![],
             remote: "example.invalid:443".into(),

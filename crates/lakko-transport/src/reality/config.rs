@@ -1,45 +1,49 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! Strongly-typed REALITY configuration. The bootstrap
-//! rendezvous config carries this serialised; the JSON
-//! field names match upstream xtls/REALITY for trivial
-//! interop with existing tooling.
+//! Strongly-typed REALITY v2 configuration (Path C).
 //!
-//! Parsing is fail-loud — a malformed short_id or pubkey
-//! never silently becomes a no-op. The [`RealityConfig::parse`]
-//! one-shot constructor lifts the wire form into the typed
-//! form in a single step and is the recommended entry point.
+//! v2 replaces the v1 ECDH-based config (`server_pubkey_b64`)
+//! with a pre-shared-key model (`tag_secret_b64`). See the
+//! authenticator module docstring for the rationale.
+//!
+//! Parsing is fail-loud — a malformed short_id or tag
+//! secret never silently becomes a no-op.
+//! [`RealityConfig::parse`] is the one-shot constructor.
 
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-/// Length of an X25519 public key in bytes — pinned by
-/// curve. Re-declared here so a caller does not have to
-/// reach into `lakko_crypto::agreement::PUBLIC_KEY_LEN`.
-pub const REALITY_PUBKEY_LEN: usize = 32;
+/// Length of a REALITY tag secret in bytes. Picked to
+/// match HMAC-SHA-256 key size + HKDF-SHA-256 IKM
+/// preferred length.
+pub const TAG_SECRET_LEN: usize = 32;
 
-/// Length of a REALITY short ID. Upstream xtls/REALITY
-/// allows variable-length short_id up to 8 bytes; Lakko
-/// pins exactly 8 bytes so the authenticator layout is
-/// fixed-width and trivially audited. Publishers pad
-/// shorter values with zeros, but the audit-grep marker
-/// is the exact constant.
+/// Length of a REALITY short ID. Lakko pins exactly 8
+/// bytes so the authenticator layout is fixed-width and
+/// trivially audited. Publishers pad shorter values with
+/// zeros.
 pub const SHORT_ID_LEN: usize = 8;
 
-/// REALITY server's static X25519 public key. The
-/// publisher publishes this through the signed bootstrap
-/// rendezvous (T-7 trust anchor) — under the threat model
-/// it is publisher-controlled, never attacker-controlled.
+/// Pre-shared tag secret. The publisher derives one per
+/// `(client, short_id)` pair (typically via
+/// `HKDF(master_key, "lakko/reality/tag", short_id)`) and
+/// distributes it to the client through the signed
+/// bootstrap rendezvous channel (T-7 trust anchor).
+///
+/// Server side: the publisher's REALITY server holds the
+/// same master_key, recomputes the tag_secret on demand
+/// from the short_id observed in the inbound
+/// ClientHello.session_id, and feeds it to
+/// [`crate::reality::authenticator::verify`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct RealityServerPubkey(pub [u8; REALITY_PUBKEY_LEN]);
+pub struct RealityTagSecret(pub [u8; TAG_SECRET_LEN]);
 
-/// REALITY short identifier — a publisher-assigned
-/// per-client tag baked into the bootstrap config. Lets
-/// the server quickly look up which keying material this
-/// client is allowed to authenticate against.
+/// REALITY short identifier — publisher-assigned per-client
+/// tag baked into the bootstrap config. Lets the server
+/// quickly look up which `tag_secret` to verify against.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RealityShortId(pub [u8; SHORT_ID_LEN]);
 
@@ -48,13 +52,12 @@ pub struct RealityShortId(pub [u8; SHORT_ID_LEN]);
 /// telemetry-friendly but never an attack surface.
 #[derive(Debug, Error)]
 pub enum RealityConfigError {
-    /// `server_pubkey_b64` was not valid base64.
-    #[error("server pubkey base64 decode failed")]
-    BadPubkeyBase64,
-    /// `server_pubkey_b64` decoded to a non-32-byte
-    /// value.
-    #[error("server pubkey is {got} bytes, expected {REALITY_PUBKEY_LEN}")]
-    PubkeyLength {
+    /// `tag_secret_b64` was not valid base64.
+    #[error("tag_secret base64 decode failed")]
+    BadTagSecretBase64,
+    /// `tag_secret_b64` decoded to a non-32-byte value.
+    #[error("tag_secret is {got} bytes, expected {TAG_SECRET_LEN}")]
+    TagSecretLength {
         /// Number of bytes the decoded value carried.
         got: usize,
     },
@@ -81,23 +84,25 @@ pub enum RealityConfigError {
 /// Convenience alias for `Result<T, RealityConfigError>`.
 pub type RealityConfigResult<T> = core::result::Result<T, RealityConfigError>;
 
-/// Bootstrap-config descriptor for a REALITY endpoint. JSON
-/// shape pinned because the rendezvous bootstrap config the
-/// client downloads carries this serialised; a renaming
-/// breaks every previously-pinned config.
+/// Bootstrap-config descriptor for a REALITY endpoint.
+/// JSON shape pinned because the rendezvous bootstrap
+/// config the client downloads carries this serialised; a
+/// rename breaks every previously-pinned config.
 ///
-/// Field names mirror upstream xtls/REALITY for trivial
-/// interop with existing tooling. Use
-/// [`RealityConfig::parse`] to lift this into typed form.
+/// Field shape differs from upstream xtls/REALITY — Lakko
+/// REALITY v2 (Path C) is wire-NOT-compatible with
+/// upstream because of the ECDH-removal redesign. See the
+/// authenticator module docstring.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RealityConfig {
     /// Hostname presented in the outer TLS ClientHello —
     /// typically a high-traffic site (e.g. `microsoft.com`)
     /// the censor will not block by SNI alone.
     pub sni: String,
-    /// Server-side static X25519 public key, base64
-    /// (`STANDARD` padded). 32 bytes after decode.
-    pub server_pubkey_b64: String,
+    /// Pre-shared tag secret, base64 (`STANDARD` padded).
+    /// 32 bytes after decode. Replaces the v1
+    /// `server_pubkey_b64`.
+    pub tag_secret_b64: String,
     /// Short id (8 bytes), hex-encoded.
     pub short_id_hex: String,
     /// Server names the inner TLS may legitimately serve.
@@ -110,7 +115,7 @@ pub struct RealityConfig {
 
 impl RealityConfig {
     /// Lift the wire-form config into typed
-    /// `(RealityServerPubkey, RealityShortId)`. Validates
+    /// `(RealityTagSecret, RealityShortId)`. Validates
     /// every length / format constraint upfront so a bad
     /// bootstrap config cannot silently flow into the
     /// handshake layer.
@@ -118,7 +123,7 @@ impl RealityConfig {
     /// # Errors
     ///
     /// See [`RealityConfigError`].
-    pub fn parse(&self) -> RealityConfigResult<(RealityServerPubkey, RealityShortId)> {
+    pub fn parse(&self) -> RealityConfigResult<(RealityTagSecret, RealityShortId)> {
         if self.sni.is_empty() {
             return Err(RealityConfigError::EmptySni);
         }
@@ -126,16 +131,16 @@ impl RealityConfig {
             return Err(RealityConfigError::EmptyRemote);
         }
 
-        let pk_bytes = B64
-            .decode(self.server_pubkey_b64.as_bytes())
-            .map_err(|_| RealityConfigError::BadPubkeyBase64)?;
-        if pk_bytes.len() != REALITY_PUBKEY_LEN {
-            return Err(RealityConfigError::PubkeyLength {
-                got: pk_bytes.len(),
+        let secret_bytes = B64
+            .decode(self.tag_secret_b64.as_bytes())
+            .map_err(|_| RealityConfigError::BadTagSecretBase64)?;
+        if secret_bytes.len() != TAG_SECRET_LEN {
+            return Err(RealityConfigError::TagSecretLength {
+                got: secret_bytes.len(),
             });
         }
-        let mut pk = [0u8; REALITY_PUBKEY_LEN];
-        pk.copy_from_slice(&pk_bytes);
+        let mut ts = [0u8; TAG_SECRET_LEN];
+        ts.copy_from_slice(&secret_bytes);
 
         let sid_bytes =
             hex::decode(&self.short_id_hex).map_err(|_| RealityConfigError::BadShortIdHex)?;
@@ -147,7 +152,7 @@ impl RealityConfig {
         let mut sid = [0u8; SHORT_ID_LEN];
         sid.copy_from_slice(&sid_bytes);
 
-        Ok((RealityServerPubkey(pk), RealityShortId(sid)))
+        Ok((RealityTagSecret(ts), RealityShortId(sid)))
     }
 }
 
@@ -158,7 +163,7 @@ mod tests {
     fn happy_config() -> RealityConfig {
         RealityConfig {
             sni: "www.microsoft.com".into(),
-            server_pubkey_b64: B64.encode([0xCA; REALITY_PUBKEY_LEN]),
+            tag_secret_b64: B64.encode([0xCA; TAG_SECRET_LEN]),
             short_id_hex: hex::encode([0xAB; SHORT_ID_LEN]),
             allowed_inner_servers: vec!["lakko.me".into()],
             remote: "203.0.113.7:443".into(),
@@ -168,29 +173,28 @@ mod tests {
     #[test]
     fn parse_happy_path() {
         let cfg = happy_config();
-        let (pk, sid) = cfg.parse().expect("happy parse");
-        assert_eq!(pk.0, [0xCA; REALITY_PUBKEY_LEN]);
+        let (ts, sid) = cfg.parse().expect("happy parse");
+        assert_eq!(ts.0, [0xCA; TAG_SECRET_LEN]);
         assert_eq!(sid.0, [0xAB; SHORT_ID_LEN]);
     }
 
     #[test]
-    fn parse_rejects_bad_pubkey_base64() {
+    fn parse_rejects_bad_tag_secret_base64() {
         let mut cfg = happy_config();
-        cfg.server_pubkey_b64 = "!!!not-base64!!!".into();
+        cfg.tag_secret_b64 = "!!!not-base64!!!".into();
         assert!(matches!(
             cfg.parse(),
-            Err(RealityConfigError::BadPubkeyBase64)
+            Err(RealityConfigError::BadTagSecretBase64)
         ));
     }
 
     #[test]
-    fn parse_rejects_wrong_pubkey_length() {
+    fn parse_rejects_wrong_tag_secret_length() {
         let mut cfg = happy_config();
-        // Encode only 16 bytes — decodes fine but length-checks.
-        cfg.server_pubkey_b64 = B64.encode([0xCA; 16]);
+        cfg.tag_secret_b64 = B64.encode([0xCA; 16]);
         match cfg.parse() {
-            Err(RealityConfigError::PubkeyLength { got }) => assert_eq!(got, 16),
-            other => panic!("expected PubkeyLength, got {other:?}"),
+            Err(RealityConfigError::TagSecretLength { got }) => assert_eq!(got, 16),
+            other => panic!("expected TagSecretLength, got {other:?}"),
         }
     }
 
@@ -207,7 +211,7 @@ mod tests {
     #[test]
     fn parse_rejects_wrong_short_id_length() {
         let mut cfg = happy_config();
-        cfg.short_id_hex = hex::encode([0xAB; 4]); // 4 bytes, want 8
+        cfg.short_id_hex = hex::encode([0xAB; 4]);
         match cfg.parse() {
             Err(RealityConfigError::ShortIdLength { got }) => assert_eq!(got, 4),
             other => panic!("expected ShortIdLength, got {other:?}"),

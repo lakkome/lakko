@@ -513,21 +513,18 @@ mod tests {
     #[test]
     fn round_trip_through_compute_then_extract() {
         // Sanity: an integration shape — compute REALITY
-        // authenticator bytes, patch them into a
-        // ClientHello, parse them back out. This pins the
-        // wire-layout contract between authenticator.rs
-        // and this module.
+        // authenticator bytes (v2 pre-shared-key), patch
+        // them into a ClientHello, parse them back out.
+        // This pins the wire-layout contract between
+        // authenticator.rs and this module.
         use crate::reality::authenticator::{compute, RealityTimestamp};
-        use crate::reality::config::{RealityServerPubkey, RealityShortId};
-        use lakko_crypto::agreement::SecretKey;
+        use crate::reality::config::{RealityShortId, RealityTagSecret};
 
-        let server_secret = SecretKey::from_bytes([0x11; 32]);
-        let server_pub = RealityServerPubkey(server_secret.public_key().to_bytes());
-        let client_secret = SecretKey::from_bytes([0x22; 32]);
+        let tag_secret = RealityTagSecret([0x42; 32]);
         let short_id = RealityShortId([0xAB; 8]);
         let ts = RealityTimestamp(1_700_000_000);
 
-        let auth = compute(&server_pub, &short_id, &client_secret, ts);
+        let auth = compute(&tag_secret, &short_id, ts);
 
         let mut wire = build_client_hello([0xAA; AUTHENTICATOR_LEN]);
         patch_client_hello_session_id(&mut wire, &auth.0).unwrap();

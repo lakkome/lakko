@@ -635,16 +635,26 @@ test endpoint (Cloudflare publishes one). The parser
 stands alone so the invariant can be pinned
 independently of network-side wiring.
 
-### T-13: REALITY authenticator is ECDH-keyed HMAC over (short_id || timestamp), tag verified before any downstream byte is trusted
+### T-13: REALITY v2 authenticator is HMAC-over-(short_id || timestamp) keyed by a publisher-distributed pre-shared `tag_secret`; tag verified before any downstream byte is trusted; mutual-auth via ServerHello.Random
 
-**Property.** The REALITY authenticator that rides in
-the TLS 1.3 ClientHello.session_id slot is built from:
+**Path C redesign.** v1 (ECDH-keyed) was structurally
+blocked on rustls 0.23 not exposing a TLS 1.3
+key_share ephemeral hook — see `S-5-reality-driver`
+remediation analysis below. v2 (Path C) drops ECDH and
+authenticates via a publisher-distributed pre-shared
+`tag_secret` per `(client, short_id)` pair. Wire-NOT-
+compatible with upstream xtls/REALITY; Lakko-only
+ecosystem.
 
-- X25519 ECDH between the client's TLS-1.3-key_share
-  ephemeral secret and the publisher-distributed
-  REALITY server static public key;
-- HKDF-SHA-256 over the ECDH shared secret with the
-  pinned label `"lakko/reality/v1"`;
+**Property.** The REALITY v2 authenticator that rides
+in the TLS 1.3 ClientHello.session_id slot is built
+from:
+
+- A 32-byte `tag_secret` the publisher distributes to
+  each client via the signed bootstrap rendezvous
+  (T-7 trust anchor);
+- HKDF-SHA-256 expansion of `tag_secret` under the
+  pinned label `"lakko/reality/v2"` → HMAC key;
 - HMAC-SHA-256(key, short_id || ts_be8) truncated to
   16 bytes.
 
@@ -656,11 +666,30 @@ Wire layout:
 ```
 
 `short_id` is plaintext so the receiver can look up
-its keying material in O(1) before doing any HMAC
-work; `ts_be8` is a u64 big-endian unix-seconds
+the matching `tag_secret` in O(1) before doing any
+HMAC work; `ts_be8` is a u64 big-endian unix-seconds
 timestamp; the 16-byte tag is the cryptographic
 backstop. Constant-time comparison via the `subtle`
 crate gates the verifier path.
+
+**Mutual auth via ServerHello.Random.** A REALITY-aware
+server proves it knows the same `tag_secret` by writing
+`HMAC(mac_key, "v2-server-response" || short_id ||
+ts_be8)[..32]` into the TLS 1.3 ServerHello.Random
+slot. The client extracts via
+[`extract_server_hello_random`](../../crates/lakko-transport/src/reality/handshake.rs)
+and verifies via
+[`verify_server_response`](../../crates/lakko-transport/src/reality/authenticator.rs).
+An active prober (or any non-REALITY-aware server)
+emits a normal random `ServerHello.Random`, fails the
+HMAC check, surfaces `RealityAuthError::BadServerResponse`
+— the client refuses the connection before any
+application-data byte flows.
+
+Domain separation via the `"v2-server-response"` prefix
+guarantees that a reflected client tag CANNOT verify in
+the server-response position; pinned by the
+`server_response_distinguishes_client_response` test.
 
 **Why this matters.** An attacker on the wire sees a
 TLS 1.3 ClientHello with the cover-site SNI, a
@@ -670,42 +699,71 @@ authenticator binds the handshake to a specific
 publisher key + a recent timestamp; a captured
 session_id cannot be replayed outside the
 `tolerance_secs` window the receiver pins (default
-suggested 30 s).
+suggested 30 s, can be tightened to 5–10 s with
+server-side replay-window detection).
 
-**Tests.** 10 unit tests in
+**Forward-secrecy trade-off (v2 vs v1).** v1 used a
+fresh ECDH per handshake → REALITY authenticator
+itself had perfect forward secrecy (compromising a
+captured tag did not help forge future tags). v2 uses
+a long-lived per-client `tag_secret` → if an attacker
+exfiltrates a client's tag_secret from the device,
+they can forge that client's authenticators until the
+publisher rotates the secret through a fresh signed
+bootstrap config. Mitigation: rotate `tag_secret`
+through bootstrap config with monthly-or-shorter TTL.
+
+The COVER TLS 1.3 handshake (the outer encrypted
+session between client and REALITY server) still has
+fresh per-handshake forward secrecy from rustls's own
+ephemeral X25519 — independent of REALITY auth. A
+censor that captures the wire bytes cannot decrypt the
+cover traffic later even if the tag_secret leaks. The
+forward-secrecy loss in v2 is strictly limited to "can
+the leaked tag_secret forge fresh AUTHENTICATORS".
+
+**Tests.** 13 unit tests in
 [`crates/lakko-transport/src/reality/authenticator.rs`](../../crates/lakko-transport/src/reality/authenticator.rs)
 covering: compute + verify round-trip; wrong short_id
 in allow-set is `ShortIdNotAllowed`; timestamp outside
 tolerance is `TimestampSkew`; timestamp inside window
-verifies; tampered tag is `TagMismatch`; wrong server
-secret (attacker without the publisher's static
-private key) is `TagMismatch`; wrong client ephemeral
-pubkey is `TagMismatch`; authenticator is exactly 32
-bytes; short_id is extractable directly from the
-authenticator (the receiver's O(1) lookup path is
-preserved); two distinct ephemerals yield distinct
-tags even with identical short_id + timestamp (a
-passive observer cannot replay-detect by tag
-equality).
+verifies; tampered tag is `TagMismatch`; wrong
+`tag_secret` is `TagMismatch`; authenticator is
+exactly 32 bytes; short_id is extractable directly
+from the authenticator (the receiver's O(1) lookup
+path is preserved); two distinct timestamps yield
+distinct tags even with identical short_id;
+server-response round-trip; server-response rejects
+wrong `tag_secret`; server-response rejects wrong
+short_id; server-response rejects wrong timestamp;
+server-response refuses a reflected client tag
+(domain separation via `"v2-server-response"` prefix).
 
 Plus 7 unit tests on
 [`crates/lakko-transport/src/reality/config.rs`](../../crates/lakko-transport/src/reality/config.rs)
-covering happy parse + every rejection path (bad
-pubkey base64, wrong pubkey length, bad short_id hex,
-wrong short_id length, empty SNI, empty remote).
+covering happy parse + every rejection path
+(`tag_secret_b64` base64, wrong tag_secret length,
+bad short_id hex, wrong short_id length, empty SNI,
+empty remote, serde round-trip).
 
 Plus 5 unit tests on
 [`crates/lakko-transport/src/reality/transport.rs`](../../crates/lakko-transport/src/reality/transport.rs)
-covering the constructor's config-validation gate and
-the `Transport::connect` `NotImplemented` shape.
+covering the constructor's config-validation gate.
 
-**Wire-compatibility caveat.** Lakko's REALITY pins
-its own canonical bytes via the `"lakko/reality/v1"`
-HKDF label and is therefore NOT byte-for-byte
-compatible with upstream xtls/REALITY today. A
-follow-up sprint aligns the exact label / field
-layout to enable interop. Until then, Lakko REALITY
-clients only handshake with Lakko REALITY servers.
+Plus 13 unit tests on
+[`crates/lakko-transport/src/reality/handshake.rs`](../../crates/lakko-transport/src/reality/handshake.rs)
+covering the TLS 1.3 ClientHello / ServerHello
+wire-format parsers (G5-1-wire).
+
+**Wire-compatibility caveat.** Lakko's REALITY v2 pins
+its own canonical bytes via the `"lakko/reality/v2"`
+HKDF label, uses a pre-shared-key model instead of
+ECDH, and is therefore NOT byte-for-byte compatible
+with upstream xtls/REALITY at all. Lakko REALITY
+clients only handshake with Lakko REALITY servers. The
+audit-pack stance: Lakko REALITY is a Lakko-specific
+protocol that shares xtls/REALITY's "TLS-cover with
+hidden auth in session_id" *idea* but not its bytes.
 
 **TLS wire-format parsers (G5-1-wire) shipped.**
 [`crates/lakko-transport/src/reality/handshake.rs`](../../crates/lakko-transport/src/reality/handshake.rs)
@@ -738,15 +796,32 @@ integration round-trip that pins the
 authenticator-to-wire contract between
 [`authenticator::compute`] and the patcher.
 
-**Still not covered yet.** The byte-intercept harness
-itself: TCP + tokio-rustls + raw `ClientConnection::write_tls`
-/ `read_tls` byte interception loop that calls the
-helpers between rustls and the socket. rustls 0.23's
-high-level API does not expose those byte streams
-directly; the driver sub-sprint either (a) uses the
-low-level `rustls::ClientConnection` directly with a
-custom async I/O harness, or (b) takes a `rustls-hooks`
-fork dep. Tracked as `S-5-reality-driver`.
+**Still not covered yet (S-5-reality-driver-v2).** The
+byte-intercept harness: TCP + tokio + raw
+`ClientConnection::write_tls` / `read_tls` byte
+interception loop that calls
+`patch_client_hello_session_id` on the first outgoing
+record + `extract_server_hello_random` +
+`verify_server_response` on the first incoming
+record + then continues normal app-data through
+rustls. v2 (pre-shared-key) **unblocks this work** —
+no longer waiting on a rustls ephemeral hook, can be
+written with stock rustls 0.23.
+
+Remaining pieces of `S-5-reality-driver-v2`:
+- `reality/cert.rs` — custom `ServerCertVerifier` that
+  accepts any cert (cover-site PKI is irrelevant under
+  REALITY threat model; the cryptographic auth lives
+  in our session_id + ServerHello.Random round-trip)
+- `reality/driver.rs` — async function that owns a
+  tokio TCP socket + a `rustls::ClientConnection`,
+  drives the handshake byte-by-byte, splices in our
+  patch / extract calls at the right boundaries
+- `reality/stream.rs` — post-handshake `Connection`
+  impl that wraps the rustls state machine + socket
+  for app-data exchange
+- `RealityTransport::connect` actually wires it all
+  together and returns `Ok(Box<dyn Connection>)`
 
 ### T-14: WebTransport client uses cert-hash pinning + u32-BE length-prefixed framing with MAX_FRAME_BYTES enforcement
 

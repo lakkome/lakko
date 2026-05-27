@@ -17,7 +17,7 @@
 //!
 //! ## What this module ships now (G5-1 foundation)
 //!
-//! - [`RealityServerPubkey`] / [`RealityShortId`] /
+//! - [`RealityTagSecret`] / [`RealityShortId`] /
 //!   [`RealityConfig`] — strongly-typed config bound to
 //!   the bootstrap-rendezvous wire shape.
 //! - [`authenticator::compute`] /
@@ -65,12 +65,13 @@ pub mod handshake;
 mod transport;
 
 pub use authenticator::{
-    compute as compute_authenticator, verify as verify_authenticator, RealityAuthError,
-    RealityAuthenticator, RealityTimestamp, AUTHENTICATOR_LEN, HKDF_LABEL, TIMESTAMP_LEN,
+    compute as compute_authenticator, compute_server_response, verify as verify_authenticator,
+    verify_server_response, RealityAuthError, RealityAuthenticator, RealityTimestamp,
+    AUTHENTICATOR_LEN, HKDF_LABEL, SERVER_RESPONSE_LEN, SERVER_RESPONSE_TAG, TIMESTAMP_LEN,
 };
 pub use config::{
-    RealityConfig, RealityConfigError, RealityServerPubkey, RealityShortId, REALITY_PUBKEY_LEN,
-    SHORT_ID_LEN,
+    RealityConfig, RealityConfigError, RealityShortId, RealityTagSecret, SHORT_ID_LEN,
+    TAG_SECRET_LEN,
 };
 pub use handshake::{
     extract_server_hello_random, patch_client_hello_session_id, TlsWireError, RANDOM_LEN,
