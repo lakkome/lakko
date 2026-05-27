@@ -750,6 +750,18 @@ authored code; two open advisories in transitive deps,
 both with reachability analysis above; three
 unmaintained-crate warnings pending upstream
 remediation. The `cargo audit` baseline is captured
-here as of `2026-05-21` and is re-run on every CI
-build; new findings either get a G-entry of their own
-or are remediated as the upstream chain catches up.
+here as of `2026-05-27` (re-run delta vs `2026-05-21`:
+**zero change** — same 2 vulnerabilities, same 3
+unmaintained warnings, no new findings, no advisories
+resolved upstream) and is re-run on every CI build;
+new findings either get a G-entry of their own or are
+remediated as the upstream chain catches up.
+
+`cargo deny check` is the second tier of the supply-
+chain gate (licence allowlist, advisory deduplication,
+unmaintained-crate policy on top of `cargo audit`). The
+binary is not currently installed on this dev host; the
+`just audit` recipe invokes it during CI runs. A follow-
+up sprint stands up `cargo deny` locally on the
+maintainer's box so the audit pack can mirror its CI
+output here.

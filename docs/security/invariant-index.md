@@ -204,7 +204,7 @@ should not re-discover them.
 | ID   | Title |
 |---|---|
 | G-23 | `libcrux-chacha20poly1305 0.0.7` — RUSTSEC-2026-0124 (HIGH 8.2) — upstream-blocked |
-| G-24 | `rsa 0.9.10` — RUSTSEC-2023-0071 (MEDIUM 5.9) — Marvin Attack — TLS-stack transitive |
+| G-24 | `rsa 0.9.10` — RUSTSEC-2023-0071 (MEDIUM 5.9) — Marvin Attack — `sqlx-mysql` MariaDB-auth transitive (NOT TLS-stack — see known-gaps.md G-24 for reachability analysis) |
 | G-25 | Three unmaintained-crate warnings |
 
 ## How to add a new invariant
