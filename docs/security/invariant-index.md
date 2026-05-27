@@ -14,9 +14,9 @@ section that describes it.
 |---|---|---|---|
 | **I-** | 8   | I-1..I-8   | [`mls-state-machine.md`](./mls-state-machine.md) |
 | **C-** | 44  | C-1..C-44  | [`calls.md`](./calls.md) |
-| **T-** | 11  | T-1..T-11  | [`transport.md`](./transport.md) |
+| **T-** | 12  | T-1..T-12  | [`transport.md`](./transport.md) |
 | **G-** | 26  | G-1..G-26  | [`known-gaps.md`](./known-gaps.md) — open / deferred |
-| Total invariants  | 63  | (I + C + T) | live properties |
+| Total invariants  | 64  | (I + C + T) | live properties |
 | Total open gaps   | 26  | (G)         | tracked + scoped |
 
 ## MLS state machine invariants (I-1..I-8)
@@ -133,6 +133,7 @@ Source: [`transport.md`](./transport.md). Anti-censorship
 | T-9  | Chunked AEAD stream primitive pins ChaCha20-Poly1305 + monotonic nonce |
 | T-10 | Shadowsocks-2022 outer header layer pins BLAKE3 context + timestamp window + replay window |
 | T-11 | SS-2022 TCP wiring preserves per-direction key separation + frame-size cap |
+| T-12 | ECH config list parser is version-pinned (0xfe0d) + length-bounded (16 KiB outer / 16 inner configs / 4 KiB per config) |
 
 ## Known gaps (G-1..G-26)
 

@@ -37,6 +37,7 @@
 
 pub mod aead_stream;
 pub mod doh_fetch;
+pub mod ech;
 pub mod endpoint;
 pub mod error;
 pub mod http;
@@ -57,6 +58,10 @@ pub use aead_stream::{
     NONCE_LEN_PUB as AEAD_STREAM_NONCE_LEN, TAG_LEN_PUB as AEAD_STREAM_TAG_LEN,
 };
 pub use doh_fetch::{DohError, DohFetcher, DOH_ENDPOINTS, PER_LEG_TIMEOUT};
+pub use ech::{
+    parse_ech_config_list, EchConfig, EchConfigList, EchError, HpkeSymmetricCipherSuite,
+    ECH_VERSION_DRAFT_13, MAX_ECH_CONFIG_LIST_LEN, MAX_INNER_CONFIGS, MAX_INNER_CONFIG_LEN,
+};
 pub use endpoint::Endpoint;
 pub use error::{Error, Result};
 pub use http::{HttpError, HttpResult, HttpTransport, HttpTransportConfig};

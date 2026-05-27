@@ -554,6 +554,67 @@ server-side helper `accept_inbound`.
    verifies that a PSK mismatch refuses the
    handshake on both sides (no body bytes ever flow).
 
+### T-12: ECH config list parser is version-pinned + length-bounded
+
+**Property.** [`parse_ech_config_list`](../../crates/lakko-transport/src/ech.rs)
+strictly enforces the draft-ietf-tls-esni-18 §4
+wire format. Strictly:
+
+- Only the pinned version code `0xfe0d` (draft-13) is
+  accepted. Any other version code surfaces as
+  `EchError::UnsupportedVersion` rather than being
+  silently skipped — the audit-safe stance until a
+  forward-compat path is wired.
+- Outer `ECHConfigList` length is capped at
+  `MAX_ECH_CONFIG_LIST_LEN = 16 KiB`.
+- Inner config count is capped at
+  `MAX_INNER_CONFIGS = 16`.
+- Each inner `ECHConfig` body is capped at
+  `MAX_INNER_CONFIG_LEN = 4 KiB`.
+- `cipher_suites` must be non-empty + a multiple of 4
+  bytes (KDF id + AEAD id pair).
+- `public_name` is 1..=255 bytes + valid UTF-8.
+- `maximum_name_length` is non-zero.
+- `public_key` is non-zero length.
+- Trailing bytes past the declared outer length are
+  refused (`EchError::TrailingBytes`) — TLS extensions
+  are length-prefixed for a reason; trailing junk
+  means something went wrong upstream.
+
+**Why this matters.** The DNS HTTPS resource record
+(RR type 65) carries the `ech=...` parameter as opaque
+bytes the client MUST parse before it can configure
+rustls. Any attacker that can spoof / poison the DNS
+answer (or any cache between the recursive resolver
+and the client) can deliver arbitrary bytes through
+this parser. The parser is the gate that separates
+attacker-controlled bytes from rustls — a panic /
+overflow / stack abuse here is a vulnerability on the
+anti-censorship bootstrap path.
+
+The parser is fully sync, no allocation exceeds a hard
+cap from arbitrary attacker input, and the
+[`HpkeSymmetricCipherSuite`](../../crates/lakko-transport/src/ech.rs)
++ [`EchConfig`](../../crates/lakko-transport/src/ech.rs)
+types are opaque to rustls (just the keying material it
+needs to build the inner ClientHello).
+
+**Tests.** 12 unit tests in
+[`crates/lakko-transport/src/ech.rs`](../../crates/lakko-transport/src/ech.rs)
+covering happy path (one config + two configs),
+empty list, truncated outer length, truncated inner
+body, unsupported version, outer too large, trailing
+bytes, empty cipher suites, bad cipher-suites length
+(non-multiple-of-4), zero `maximum_name_length`,
+invalid UTF-8 in `public_name`.
+
+**Not covered yet.** Integration with
+`rustls::client::ClientConfig::with_ech_config_list` is
+a follow-up sprint gated on a working ECH-supporting
+test endpoint (Cloudflare publishes one). The parser
+stands alone so the invariant can be pinned
+independently of network-side wiring.
+
 ## Known soft spots — out of scope for Phase 5 scaffold
 
 ### Real `Transport` implementations for REALITY / MASQUE / SS-2022 / WebTransport
@@ -585,10 +646,15 @@ the refactor.
 
 ### ECH (Encrypted Client Hello)
 
-Tracked as G5-6. Rides on rustls 0.23+ ECH support
-once it stabilises. Until then the outer SNI on the
-TLS-based transports (REALITY, WebTransport,
-HttpTransport) is observable to the path.
+Parser-side closed by T-12 (see invariants section).
+Remaining work for full ECH coverage: wire the parsed
+[`EchConfigList`](../../crates/lakko-transport/src/ech.rs)
+into `rustls::client::ClientConfig::with_ech_config_list`
+on the HTTPS-based transports (REALITY, WebTransport,
+HttpTransport) once a working ECH-supporting test
+endpoint is stood up. Until then the outer SNI on those
+transports remains observable to the path even though
+the parser is ready.
 
 ### Censorship lab tests
 
