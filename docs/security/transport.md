@@ -303,6 +303,26 @@ config blob.
    to the list shows up in the build hash and is
    visible to the audit-grep marker `DOH_ENDPOINTS`.
 
+7. **Generic IP-pinned fetch reuses the same trust
+   path.** `DohFetcher::fetch_pinned_bytes(domain,
+   path, max_bytes)` and the pre-resolved
+   `fetch_pinned_bytes_at` variant route through
+   exactly the same DoH-resolve + IP-pin HTTPS + `https_only(true)`
+   pipeline as `fetch_bootstrap`. Downstream callers
+   that need to pull other signed artefacts over the
+   same trust shape — TUF metadata
+   ([`lakko_tuf::urls`](../../crates/lakko-tuf/src/urls.rs)
+   composes the URLs;
+   [`lakko_tuf::Signed::from_json`](../../crates/lakko-tuf/src/lib.rs)
+   parses the body), KeyPackage bundles, signed
+   identity blobs — reuse this helper rather than
+   re-implementing IP pinning. The size cap
+   (`max_bytes`) defends against an attacker-served
+   unbounded payload that would otherwise let a
+   single GET exhaust memory; the streaming-body
+   loop bails out with `DohError::BodyTooLarge` on
+   the first chunk that crosses the cap.
+
 ### T-9: Chunked AEAD stream primitive pins ChaCha20-Poly1305 + monotonic nonce
 
 Sprint G5-aead-stream lands the

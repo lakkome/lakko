@@ -36,7 +36,23 @@
 //!   they live; this crate only verifies what it's handed.
 //!   That keeps the audit surface small and lets the
 //!   transport layer enforce its own policy (TLS pinning,
-//!   DoH bootstrap, etc.).
+//!   DoH bootstrap, etc.). The canonical wire-up is
+//!   `lakko_transport::DohFetcher::fetch_pinned_bytes` —
+//!   DoH-resolve the publisher domain, IP-pinned HTTPS GET
+//!   against the resolved IP, return the raw body bytes
+//!   the [`Signed::from_json`] family consumes. The
+//!   orchestration shape:
+//!
+//!   ```text
+//!   urls::root_url(base, n)        -> bytes -> Signed::<Root>     |
+//!   urls::timestamp_url(base)      -> bytes -> Signed::<Timestamp>|
+//!   urls::snapshot_url(base)       -> bytes -> Signed::<Snapshot> | -> verify_chain -> TargetMap
+//!   urls::targets_url(base)        -> bytes -> Signed::<Targets>  |
+//!
+//!   for (name, meta) in target_map:
+//!       urls::target_artifact_url(base, name) -> bytes
+//!       verify_target_bytes(meta, &bytes)?
+//!   ```
 //! - **Delegated targets.** The TUF spec lets the targets
 //!   role delegate sub-paths to other keys (`delegations`
 //!   field). The scaffold does not follow delegations

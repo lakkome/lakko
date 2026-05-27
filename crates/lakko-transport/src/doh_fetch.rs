@@ -65,6 +65,7 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::{Duration, SystemTime};
 
+use futures::StreamExt as _;
 use lakko_crypto::signing::VerifyingKey;
 use reqwest::Client;
 use serde::Deserialize;
@@ -126,6 +127,18 @@ pub enum DohError {
     /// HTTP status was non-2xx.
     #[error("bootstrap fetch returned HTTP {0}")]
     BootstrapHttp(u16),
+    /// Response body exceeded the caller-supplied size
+    /// cap. Surfaced by [`DohFetcher::fetch_pinned_bytes`]
+    /// / [`DohFetcher::fetch_pinned_bytes_at`] when an
+    /// attacker-controlled origin serves a larger payload
+    /// than the caller is willing to buffer in memory.
+    #[error("response body exceeded cap: {got} bytes > cap {cap}")]
+    BodyTooLarge {
+        /// Number of bytes read before the cap was hit.
+        got: usize,
+        /// Cap the caller asked us to enforce.
+        cap: usize,
+    },
 }
 
 /// Fetcher with two reqwest clients underneath — one for
@@ -314,6 +327,102 @@ impl DohFetcher {
             .map_err(|e| DohError::Json(e.to_string()))?;
         cfg.verify(trust_anchor, SystemTime::now())?;
         Ok(cfg)
+    }
+
+    /// Generic IP-pinned HTTPS GET — DoH-resolve `domain`,
+    /// HTTPS GET `https://{domain}{path}` against the
+    /// resolved IP, return the body bytes up to `max_bytes`.
+    /// Refuses payloads larger than the cap (the call
+    /// surfaces [`DohError::BodyTooLarge`] rather than
+    /// silently truncating).
+    ///
+    /// Designed for downstream callers that need to pull
+    /// signed artefacts over the same IP-pin + DoH pipeline
+    /// the bootstrap rendezvous uses — TUF metadata
+    /// (`{base}/timestamp.json` / `{base}/{n}.root.json` /
+    /// etc.), KeyPackage bundles, signed identity blobs.
+    /// The crate stays unaware of those payload shapes; the
+    /// caller decodes the bytes (e.g.
+    /// `lakko_tuf::Signed::<T>::from_json`) and runs the
+    /// signature / chain checks.
+    ///
+    /// # Threat model
+    ///
+    /// Same shape as [`Self::fetch_bootstrap`]: a censor
+    /// controlling DNS cannot interpose because the
+    /// resolved IP is pinned into reqwest's resolver, and
+    /// the signature check happens on the bytes downstream
+    /// (TUF: each role envelope signed by Ed25519 under the
+    /// binary-pinned trust anchor).
+    ///
+    /// # Errors
+    ///
+    /// - [`DohError::AllDohFailed`] / [`DohError::NoAddressInResponse`]
+    ///   — every DoH endpoint failed to resolve `domain`.
+    /// - [`DohError::BootstrapHttp`] — HTTPS GET returned
+    ///   non-2xx (variant name is historical; covers
+    ///   every IP-pinned GET in this module).
+    /// - [`DohError::BodyTooLarge`] — origin served a
+    ///   payload larger than `max_bytes`.
+    /// - [`DohError::Http`] — TCP / TLS-layer failure.
+    pub async fn fetch_pinned_bytes(
+        &self,
+        domain: &str,
+        path: &str,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, DohError> {
+        let ip = self.resolve(domain).await?;
+        self.fetch_pinned_bytes_at(ip, domain, path, max_bytes).await
+    }
+
+    /// Variant of [`Self::fetch_pinned_bytes`] that takes
+    /// an already-resolved IP. Useful for tests pinning a
+    /// known mock-server address and for callers that
+    /// already cached a previous DoH resolution.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::fetch_pinned_bytes`], minus the
+    /// DoH-leg failures.
+    pub async fn fetch_pinned_bytes_at(
+        &self,
+        ip: IpAddr,
+        domain: &str,
+        path: &str,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, DohError> {
+        let url = format!("https://{domain}{path}");
+        let resolved = SocketAddr::new(ip, 443);
+        let pinned_client = Client::builder()
+            .timeout(PER_LEG_TIMEOUT)
+            .https_only(true)
+            .use_rustls_tls()
+            .resolve(domain, resolved)
+            .build()?;
+        let resp = pinned_client.get(&url).send().await?;
+        if !resp.status().is_success() {
+            return Err(DohError::BootstrapHttp(resp.status().as_u16()));
+        }
+
+        // Stream the body chunk-by-chunk so we can bail
+        // out the moment we cross max_bytes — `bytes()`
+        // would buffer the entire response before we get
+        // a chance to inspect length. Content-Length is
+        // attacker-controllable so we also check the
+        // running total on every chunk.
+        let mut buf: Vec<u8> = Vec::new();
+        let mut stream = resp.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk?;
+            if buf.len().saturating_add(chunk.len()) > max_bytes {
+                return Err(DohError::BodyTooLarge {
+                    got: buf.len() + chunk.len(),
+                    cap: max_bytes,
+                });
+            }
+            buf.extend_from_slice(&chunk);
+        }
+        Ok(buf)
     }
 }
 
