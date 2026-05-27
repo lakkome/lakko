@@ -62,6 +62,7 @@
 pub mod authenticator;
 pub(crate) mod cert;
 pub mod config;
+pub mod driver;
 pub mod handshake;
 mod transport;
 
@@ -73,6 +74,10 @@ pub use authenticator::{
 pub use config::{
     RealityConfig, RealityConfigError, RealityShortId, RealityTagSecret, SHORT_ID_LEN,
     TAG_SECRET_LEN,
+};
+pub use driver::{
+    build_reality_client_config, drive_handshake, RealityDriverError, RealityDriverResult,
+    MAX_HANDSHAKE_BUFFER_BYTES,
 };
 pub use handshake::{
     extract_server_hello_random, patch_client_hello_session_id, TlsWireError, RANDOM_LEN,
