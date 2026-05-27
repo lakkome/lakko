@@ -74,6 +74,45 @@ successful PUT. A future sprint adds versioning / history
 if rolling back to a prior backup turns out to be a real
 need.
 
+### Tamper-evident chain (v2 envelopes — G-11 partial close)
+
+[`crates/lakko-backup/src/chain.rs`](../../crates/lakko-backup/src/chain.rs)
+adds an opt-in **v2 envelope shape** that carries a
+plaintext `(version: u64, prev_hash: [u8; 32])` chain
+header bound into the AEAD AAD. Each fresh seal:
+
+1. Bumps `version` by 1.
+2. Sets `prev_hash = BLAKE3(previous_envelope_wire)`,
+   or the genesis sentinel `[0u8; 32]` for the very
+   first envelope.
+
+`verify_chain(envelopes: &[&[u8]])` walks an ordered
+sequence and rejects any non-sequential version OR
+broken `prev_hash` link. The header is plaintext on
+wire so the verifier never needs the recovery phrase —
+the version is a public count anyway, `prev_hash` is a
+public commitment. The header is AAD-bound so a server
+trying to edit either field hits a clean AEAD-open
+failure on the next `open_v2`.
+
+**What this defends against.** A client that persisted
+`(last_known_version, last_known_envelope_hash)` in its
+device-key-encrypted local storage catches any
+server-side rollback (server returns v(N-5) instead of
+v(N)) on the next restore: the returned version is too
+low OR the chain audit fails against the local anchor.
+
+**What this does NOT defend against.** A fresh install
+restoring from scratch with only the recovery phrase
+has no way to tell whether the returned envelope is the
+latest — both phrase-derived KEKs verify cleanly, the
+chain header binds only to the *previous* envelope, not
+to a global "is this the head" commitment. Closing the
+fresh-install case requires a separate out-of-band
+signed timestamp (e.g., a KT-log entry). Tracked in
+[`known-gaps.md`](./known-gaps.md) G-11 as "still open
+for the fresh-install case".
+
 ### Recover
 
 ```text

@@ -127,13 +127,28 @@ in practice the baseline write fires within seconds.
 A future sprint can fold the baseline write into the
 recover round-trip so the window collapses.
 
-### G-11: No tamper-evident chain across backup versions
+### G-11: No tamper-evident chain across backup versions — **partial: client-with-state case CLOSED**
 
-The server's "PUT replaces" semantics is the only
-versioning. A maintainer-coerced server could roll the
-envelope back to a prior known-good one. Phase 1.21 (or
-later) can add a per-account monotonic sequence number +
-client-side reject of older versions.
+**Closed for the client-with-state case** by
+[`crates/lakko-backup/src/chain.rs`](../../crates/lakko-backup/src/chain.rs):
+v2 envelopes carry a plaintext `(version, prev_hash)`
+chain header bound into the AEAD AAD; `verify_chain`
+walks an ordered sequence and rejects any non-sequential
+version OR broken `prev_hash` link. A client that
+persisted `(last_known_version, last_known_envelope_hash)`
+in its device-key-encrypted local storage catches any
+server-side rollback on the next restore.
+
+**Still open: fresh-install rollback.** A user who lost
+all local state and is restoring from scratch with only
+the recovery phrase has no way to tell whether the
+server returned the latest envelope or an older one —
+both verify cleanly against the same Argon2id-derived
+KEK, and the chain header binds only to the *previous*
+envelope, not to a global "is this the head". Closing
+this requires a separate out-of-band commitment (e.g.,
+a KT-log entry "latest backup envelope hash for account
+X is h, signed at time t").
 
 ## Auth
 

@@ -60,10 +60,15 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod chain;
 pub mod envelope;
 pub mod error;
 pub mod payload;
 
+pub use chain::{
+    envelope_hash, header_of, open_v2, seal_v2, verify_chain, ChainHeader, ENVELOPE_DOMAIN_V2,
+    GENESIS_PREV_HASH, SCHEMA_VERSION_V2,
+};
 pub use envelope::{open, seal, ENVELOPE_DOMAIN_V1, SALT_LEN, SCHEMA_VERSION};
 pub use error::{BackupError, Result};
 pub use payload::{AcceptedContactRecord, BackupPayload, PAYLOAD_VERSION};

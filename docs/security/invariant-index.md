@@ -170,7 +170,7 @@ should not re-discover them.
 | ID   | Title |
 |---|---|
 | G-10 | Backup envelope rotation on password change happens on the next baseline write, not the recover round-trip itself |
-| G-11 | No tamper-evident chain across backup versions |
+| G-11 | No tamper-evident chain across backup versions — **client-with-state case CLOSED** by `lakko-backup::chain` v2 envelope; fresh-install case still open (needs KT-log anchor) |
 
 ### Auth
 
