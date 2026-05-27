@@ -60,6 +60,7 @@
 //!   `docs/security/transport.md`.
 
 pub mod authenticator;
+pub(crate) mod cert;
 pub mod config;
 pub mod handshake;
 mod transport;
