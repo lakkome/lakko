@@ -42,12 +42,15 @@
 //!   field). Scaffold path: not implemented; a future
 //!   sprint adds it when the release engineering need
 //!   actually shows up.
-//! - **Key rotation atomic swap.** TUF lets root.json
-//!   rotate the signing-key set across versions; the
-//!   client verifies the new root against the previous
-//!   root's keys. This scaffold trusts a static
-//!   binary-pinned root key set; a follow-up sprint
-//!   wires the version-chain walk.
+//! - **Key rotation across root versions.** Closed by
+//!   [`verify_root_chain`] — the caller holds an
+//!   ordered slice of root metadata files (one per
+//!   version they've stepped through since first install)
+//!   and `verify_root_chain` walks them, verifying each
+//!   new root against the *previous* root's `root`
+//!   role. The first root in the chain is anchored
+//!   against the binary-pinned key id set baked into
+//!   the build artefact.
 //! - **Consistent snapshots / mirror selection / hashed
 //!   bins.** All deferred to a future sprint.
 //!
@@ -159,6 +162,24 @@ pub enum TufError {
         /// Expected type for this role.
         expected: &'static str,
     },
+    /// Root chain (`verify_root_chain`) was given an
+    /// empty `roots` slice.
+    #[error("root chain is empty")]
+    EmptyRootChain,
+    /// Two consecutive roots in the chain skipped a
+    /// version (TUF requires sequential v_n → v_n+1).
+    #[error("root chain skipped versions: {from} → {to}")]
+    RootVersionGap {
+        /// Version of the earlier root.
+        from: u64,
+        /// Version of the next root in the slice.
+        to: u64,
+    },
+    /// First root in the chain does not match the
+    /// caller-supplied binary-pinned trust anchor key
+    /// id set.
+    #[error("first root in chain not signed by pinned trust anchor")]
+    UntrustedFirstRoot,
 }
 
 /// Convenience alias.
@@ -609,6 +630,124 @@ fn role_spec<'a>(root: &'a Root, role: &'static str) -> Result<&'a RoleSpec> {
         })
 }
 
+/// Walk a chain of root metadata versions, verifying
+/// each against the previous root's `root` role. Returns
+/// the **final** root in the chain — the trust anchor
+/// the caller should hand to [`verify_chain`].
+///
+/// ## Walk
+///
+/// 1. The first root must be signed by ≥ threshold of
+///    keys whose ids are in `pinned_trust_anchor`. This
+///    is the binary-pinned trust anchor baked into the
+///    reproducible-build artefact — the only way a
+///    fully fresh install bootstraps trust.
+/// 2. Each subsequent root `r_n+1` must:
+///    - Have `version = r_n.version + 1` (TUF §5.3.4
+///      requires sequential root versions; gaps would
+///      let an attacker omit a revocation).
+///    - Be signed by ≥ threshold of `r_n.roles["root"]`
+///      keys. This is the core TUF security property —
+///      a compromised current root key cannot be
+///      rotated out without the *previous* signers'
+///      consent.
+///    - Not be expired against `now`.
+///
+/// `pinned_trust_anchor` is a list of [`KeyId`]s that
+/// the very first root must be signed by ≥ first-root's
+/// threshold of. In practice it's a single-element list
+/// pointing at the root key the binary was compiled
+/// against; multi-key threshold is supported for
+/// org-policy needs.
+///
+/// # Errors
+///
+/// - [`TufError::EmptyRootChain`] if `roots` is empty.
+/// - [`TufError::UntrustedFirstRoot`] if the first
+///   root's signers don't match the pinned trust
+///   anchor.
+/// - [`TufError::RootVersionGap`] if two consecutive
+///   roots skip a version.
+/// - [`TufError::VersionRollback`] if a root carries a
+///   `version` lower than its predecessor.
+/// - [`TufError::ThresholdNotMet`] / [`TufError::Expired`]
+///   propagating from per-root verification.
+pub fn verify_root_chain<'a>(
+    roots: &'a [Signed<Root>],
+    pinned_trust_anchor: &[KeyId],
+    now: DateTime<Utc>,
+) -> Result<&'a Signed<Root>> {
+    let Some(first) = roots.first() else {
+        return Err(TufError::EmptyRootChain);
+    };
+
+    // Step 1: first root must be signed by ≥ first
+    // root's own threshold of keys whose ids are in
+    // `pinned_trust_anchor`. We synthesise a pinned
+    // role spec from the first root's `root` role
+    // threshold + the pinned KeyId list.
+    check_type(&first.signed.type_, "root")?;
+    check_expiry("root", first.signed.expires, now)?;
+    let first_root_spec = role_spec(&first.signed, "root")?;
+    let pinned_spec = RoleSpec {
+        keyids: pinned_trust_anchor.to_vec(),
+        threshold: first_root_spec.threshold,
+    };
+    // Verify with a key map limited to the pinned set —
+    // even if the first root *also* declares other keys
+    // for `root` role (e.g. legacy), only the pinned
+    // ones can satisfy the threshold here. Building a
+    // restricted key map below.
+    let mut pinned_keys = BTreeMap::new();
+    for kid in pinned_trust_anchor {
+        if let Some(k) = first.signed.keys.get(kid) {
+            pinned_keys.insert(kid.clone(), k.clone());
+        }
+    }
+    if pinned_keys.is_empty() {
+        return Err(TufError::UntrustedFirstRoot);
+    }
+    verify_signatures("root", first, &pinned_spec, &pinned_keys)
+        .map_err(|e| match e {
+            // Re-label threshold-not-met against the
+            // pinned-trust-anchor check so the operator
+            // log line points at the right cause.
+            TufError::ThresholdNotMet { .. } => TufError::UntrustedFirstRoot,
+            other => other,
+        })?;
+
+    // Step 2: walk forward, each pair (prev, curr).
+    for pair in roots.windows(2) {
+        let prev = &pair[0];
+        let curr = &pair[1];
+        check_type(&curr.signed.type_, "root")?;
+        check_expiry("root", curr.signed.expires, now)?;
+        if curr.signed.version <= prev.signed.version {
+            return Err(TufError::VersionRollback {
+                role: "root",
+                got: curr.signed.version,
+                last: prev.signed.version,
+            });
+        }
+        if curr.signed.version != prev.signed.version + 1 {
+            return Err(TufError::RootVersionGap {
+                from: prev.signed.version,
+                to: curr.signed.version,
+            });
+        }
+        // Verify curr against prev's `root` role + key
+        // registry. This is the rotation-safety
+        // property: a new root needs the *old* root's
+        // signers' consent to be accepted.
+        let prev_root_spec = role_spec(&prev.signed, "root")?;
+        verify_signatures("root", curr, prev_root_spec, &prev.signed.keys)?;
+    }
+
+    // Final root is what the caller hands to
+    // verify_chain.
+    Ok(roots.last().expect("non-empty by check above"))
+}
+
 /// Caller-tracked last-accepted versions of the two
 /// short-lived roles (timestamp + snapshot). Used to
 /// detect rollback attempts.
@@ -887,5 +1026,211 @@ mod tests {
             verify_chain(&resigned, &timestamp, &snapshot, &targets, now, None)
                 .unwrap_err();
         assert!(matches!(err, TufError::UnauthorizedKey { role: "targets", .. }));
+    }
+
+    // -----------------------------------------------------
+    // verify_root_chain (GA-5-rotation)
+    // -----------------------------------------------------
+
+    /// Build a single root metadata at the given
+    /// version, signers, and threshold. Used by the
+    /// rotation tests to construct hand-crafted chain
+    /// segments.
+    fn build_root_at(
+        signers: &[&SigningKey],
+        threshold: u32,
+        version: u64,
+        now: DateTime<Utc>,
+    ) -> Signed<Root> {
+        let mut keys = BTreeMap::new();
+        let mut keyids = Vec::new();
+        for signer in signers {
+            let vk = signer.verifying_key();
+            let kid = KeyId::from_verifying_key(&vk);
+            keys.insert(kid.clone(), PublicKey::ed25519(&vk));
+            keyids.push(kid);
+        }
+        let mut roles = BTreeMap::new();
+        for role in ["root", "snapshot", "targets", "timestamp"] {
+            roles.insert(
+                role.into(),
+                RoleSpec {
+                    keyids: keyids.clone(),
+                    threshold,
+                },
+            );
+        }
+        let body = Root {
+            type_: "root".into(),
+            spec_version: "1.0".into(),
+            version,
+            expires: now + Duration::days(30),
+            keys,
+            roles,
+        };
+        // Multi-signer sign — every signer attaches one
+        // signature.
+        let canonical = canonical_json(&body).unwrap();
+        let signatures = signers
+            .iter()
+            .map(|s| {
+                let kid = KeyId::from_verifying_key(&s.verifying_key());
+                Signature {
+                    keyid: kid,
+                    sig: hex::encode(s.sign(&canonical).to_bytes()),
+                }
+            })
+            .collect();
+        Signed {
+            signed: body,
+            signatures,
+        }
+    }
+
+    #[test]
+    fn root_chain_single_element_returns_first() {
+        let signer = SigningKey::from_seed(&[0x42; 32]);
+        let now = Utc::now();
+        let root_v1 = build_root_at(&[&signer], 1, 1, now);
+        let pinned = vec![KeyId::from_verifying_key(&signer.verifying_key())];
+        let chain = [root_v1];
+        let final_root = verify_root_chain(&chain, &pinned, now).unwrap();
+        assert_eq!(final_root.signed.version, 1);
+    }
+
+    #[test]
+    fn root_chain_empty_slice_rejected() {
+        let err = verify_root_chain(&[], &[], Utc::now()).unwrap_err();
+        assert!(matches!(err, TufError::EmptyRootChain));
+    }
+
+    #[test]
+    fn root_chain_walks_three_versions() {
+        let signer_old = SigningKey::from_seed(&[0xAA; 32]);
+        let signer_new = SigningKey::from_seed(&[0xBB; 32]);
+        let now = Utc::now();
+        // v1: signed by old key only.
+        let v1 = build_root_at(&[&signer_old], 1, 1, now);
+        // v2: signed by BOTH old + new — transition root.
+        // The new key gains authority once v2 is
+        // accepted; the old key signs it so v2 is
+        // accepted by anyone holding v1's key set.
+        let v2 = build_root_at(&[&signer_old, &signer_new], 1, 2, now);
+        // v3: signed by new key only — old key fully
+        // retired.
+        let v3 = build_root_at(&[&signer_new], 1, 3, now);
+        let pinned = vec![KeyId::from_verifying_key(&signer_old.verifying_key())];
+        let chain = [v1, v2, v3];
+        let final_root = verify_root_chain(&chain, &pinned, now).unwrap();
+        assert_eq!(final_root.signed.version, 3);
+    }
+
+    #[test]
+    fn root_chain_rejects_missing_intermediate() {
+        let signer = SigningKey::from_seed(&[0x42; 32]);
+        let now = Utc::now();
+        let v1 = build_root_at(&[&signer], 1, 1, now);
+        // Jump straight from v1 to v3 — missing the v2
+        // intermediate. Even though v3 is signed by
+        // the same key, the version gap is a fatal
+        // protocol violation.
+        let v3 = build_root_at(&[&signer], 1, 3, now);
+        let pinned = vec![KeyId::from_verifying_key(&signer.verifying_key())];
+        let chain = [v1, v3];
+        let err = verify_root_chain(&chain, &pinned, now).unwrap_err();
+        assert!(matches!(
+            err,
+            TufError::RootVersionGap { from: 1, to: 3 }
+        ));
+    }
+
+    #[test]
+    fn root_chain_rejects_unrelated_new_root() {
+        // v2 signed by a key the v1 root never
+        // authorised — attacker tries to inject their
+        // own root mid-chain. v2 fails to verify against
+        // v1's `root` role.
+        let signer_old = SigningKey::from_seed(&[0x42; 32]);
+        let attacker = SigningKey::from_seed(&[0xFE; 32]);
+        let now = Utc::now();
+        let v1 = build_root_at(&[&signer_old], 1, 1, now);
+        let v2 = build_root_at(&[&attacker], 1, 2, now);
+        let pinned = vec![KeyId::from_verifying_key(&signer_old.verifying_key())];
+        let chain = [v1, v2];
+        let err = verify_root_chain(&chain, &pinned, now).unwrap_err();
+        assert!(matches!(
+            err,
+            TufError::ThresholdNotMet { role: "root", .. }
+        ));
+    }
+
+    #[test]
+    fn root_chain_rejects_untrusted_first_root() {
+        // First root in the chain is NOT signed by any
+        // pinned trust anchor — fresh-install bootstrap
+        // refuses it.
+        let attacker = SigningKey::from_seed(&[0xFE; 32]);
+        let trusted = SigningKey::from_seed(&[0x42; 32]);
+        let now = Utc::now();
+        let v1 = build_root_at(&[&attacker], 1, 1, now);
+        // Pinned anchor is the *trusted* key, not the
+        // attacker.
+        let pinned = vec![KeyId::from_verifying_key(&trusted.verifying_key())];
+        let chain = [v1];
+        let err = verify_root_chain(&chain, &pinned, now).unwrap_err();
+        assert!(matches!(err, TufError::UntrustedFirstRoot));
+    }
+
+    #[test]
+    fn root_chain_rejects_version_rollback() {
+        // v1 followed by v0 — version went down.
+        let signer = SigningKey::from_seed(&[0x42; 32]);
+        let now = Utc::now();
+        let v1 = build_root_at(&[&signer], 1, 1, now);
+        let v0 = build_root_at(&[&signer], 1, 0, now);
+        let pinned = vec![KeyId::from_verifying_key(&signer.verifying_key())];
+        let chain = [v1, v0];
+        let err = verify_root_chain(&chain, &pinned, now).unwrap_err();
+        assert!(matches!(
+            err,
+            TufError::VersionRollback {
+                role: "root",
+                got: 0,
+                last: 1
+            }
+        ));
+    }
+
+    #[test]
+    fn root_chain_final_root_drives_verify_chain() {
+        // The whole point of the rotation walk: the
+        // final root in a valid chain becomes the trust
+        // anchor that `verify_chain` consumes. Build a
+        // 2-version chain and prove the rest of the
+        // metadata verifies under the final root.
+        let signer_old = SigningKey::from_seed(&[0x10; 32]);
+        let signer_new = SigningKey::from_seed(&[0x20; 32]);
+        let now = Utc::now();
+        let v1 = build_root_at(&[&signer_old], 1, 1, now);
+        let v2 = build_root_at(&[&signer_old, &signer_new], 1, 2, now);
+        let pinned = vec![KeyId::from_verifying_key(&signer_old.verifying_key())];
+        let chain = [v1, v2];
+        let final_root = verify_root_chain(&chain, &pinned, now).unwrap();
+        // Sanity — final root is v2.
+        assert_eq!(final_root.signed.version, 2);
+        // Build the rest of the chain signed under the
+        // v2 root (which authorises both signers); use
+        // the new signer to prove the trust transition
+        // actually granted it authority.
+        let (_root_unused, timestamp, snapshot, targets) =
+            build_chain(&signer_new, now);
+        // Replace the canned root from build_chain with
+        // the multi-version v2 — verify_chain accepts it
+        // because v2's `targets` role authorises both
+        // signer_old and signer_new.
+        let targets_map =
+            verify_chain(final_root, &timestamp, &snapshot, &targets, now, None)
+                .unwrap();
+        assert_eq!(targets_map.len(), 1);
     }
 }
