@@ -1,0 +1,57 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+[package]
+name = "lakko-tuf-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+# Opt out of the parent workspace. cargo-fuzz needs its own
+# Cargo.lock and we do not want this crate to inherit the
+# workspace's `[lints]` table (libfuzzer-sys emits the kind
+# of pattern the workspace clippy config forbids).
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+lakko-tuf = { path = ".." }
+
+# Four targets, one per TUF role envelope. Each one shoves a
+# raw byte slice through `Signed::<T>::from_json` — the
+# outermost parser the verifier sees when the caller hands
+# over bytes it just pulled off the mirror. Any panic /
+# stack-overflow / integer-overflow here is a vulnerability:
+# the signature check has not run yet, so the input is
+# fully attacker-controlled.
+
+[[bin]]
+name = "signed_root_from_json"
+path = "fuzz_targets/signed_root_from_json.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "signed_snapshot_from_json"
+path = "fuzz_targets/signed_snapshot_from_json.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "signed_targets_from_json"
+path = "fuzz_targets/signed_targets_from_json.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "signed_timestamp_from_json"
+path = "fuzz_targets/signed_timestamp_from_json.rs"
+test = false
+doc = false
+bench = false

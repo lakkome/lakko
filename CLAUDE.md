@@ -128,7 +128,7 @@ just ci                        # everything CI does, locally
 
 ## Fuzz harnesses
 
-`crates/lakko-mls/fuzz/`, `crates/lakko-proto/fuzz/`, `crates/lakko-contacts/fuzz/`, and `crates/lakko-channels/fuzz/` are separate crates outside the main workspace (they need nightly + libfuzzer-sys). Targets live in `fuzz/fuzz_targets/*.rs`.
+`crates/lakko-mls/fuzz/`, `crates/lakko-proto/fuzz/`, `crates/lakko-contacts/fuzz/`, `crates/lakko-channels/fuzz/`, and `crates/lakko-tuf/fuzz/` are separate crates outside the main workspace (they need nightly + libfuzzer-sys). Targets live in `fuzz/fuzz_targets/*.rs`.
 
 Current targets:
 - **`lakko-mls/mls_message`** — `MlsMessageIn` wire-format parser (TLS codec)
@@ -147,6 +147,10 @@ Current targets:
 - **`lakko-channels/post_verify_and_decrypt`** — full receiver pipeline (decode → Ed25519 verify → AEAD open)
 - **`lakko-channels/subscribe_open_seed`** — subscriber-side HPKE seed-envelope opener (Phase 4b)
 - **`lakko-channels/epoch_id_from_be_bytes`** — 4-byte big-endian epoch-id parser
+- **`lakko-tuf/signed_root_from_json`** — outermost TUF metadata parser for the `Root` role envelope (GA-5)
+- **`lakko-tuf/signed_snapshot_from_json`** — outermost TUF metadata parser for the `Snapshot` role envelope
+- **`lakko-tuf/signed_targets_from_json`** — outermost TUF metadata parser for the `Targets` role envelope (widest deserialiser surface; carries the targets `BTreeMap`)
+- **`lakko-tuf/signed_timestamp_from_json`** — outermost TUF metadata parser for the `Timestamp` role envelope
 
 The `fuzz_api` module in `lakko-mls` (marked `#[doc(hidden)]`) is the only public entry point for harnesses; it is not part of the supported public API.
 
