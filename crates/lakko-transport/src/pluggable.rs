@@ -312,12 +312,14 @@ mod tests {
     }
 
     fn dummy_reality() -> RealityTransport {
-        // Valid-shape config (32-byte X25519 pubkey, 8-byte
-        // short_id) so RealityTransport::new accepts it — the
-        // transport's connect() still returns NotImplemented
-        // (the foundation sprint shipped the authenticator
-        // primitive + config validation; the TLS handshake
-        // injection is the next sub-sprint).
+        // Valid-shape config (32-byte tag_secret, 8-byte
+        // short_id) so `RealityTransport::new` accepts it.
+        // Since S-5-reality-driver-v2 step 4/4, REALITY's
+        // `connect` actually opens a TCP socket and drives
+        // the handshake; pointing at `example.invalid:443`
+        // makes the connect leg fail at DNS resolution and
+        // surface `Error::Io`, which is enough to exercise
+        // the happy-eyeballs `AllFailed` path.
         use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
         RealityTransport::new(RealityConfig {
             sni: "example.invalid".into(),
@@ -330,10 +332,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn scaffold_transport_surfaces_not_implemented() {
-        // Two scaffold candidates — both should report
-        // NotImplemented; the selector wraps them as
-        // AllFailed because no candidate completed.
+    async fn all_candidates_failing_surfaces_all_failed() {
+        // Two REALITY candidates pointed at an unresolvable
+        // host — the connect leg fails at DNS, the selector
+        // wraps both results as `AllFailed`. This test used
+        // to assert each `inner` was `NotImplemented` (back
+        // when REALITY was scaffold-only); after S-5-reality-
+        // driver-v2 it asserts the variant-agnostic shape:
+        // attempted count + per-candidate kinds.
         let policy = HappyEyeballs::new(vec![
             PluggableCandidate::new(PluggableKind::Reality, dummy_reality()),
             PluggableCandidate::new(PluggableKind::Reality, dummy_reality()),
@@ -349,9 +355,8 @@ mod tests {
             }) => {
                 assert_eq!(attempted, 2);
                 assert_eq!(per_candidate.len(), 2);
-                for (kind, inner) in &per_candidate {
+                for (kind, _inner) in &per_candidate {
                     assert_eq!(*kind, PluggableKind::Reality);
-                    assert!(matches!(inner, crate::error::Error::NotImplemented { .. }));
                 }
             },
             Err(other) => panic!("expected AllFailed, got {other:?}"),

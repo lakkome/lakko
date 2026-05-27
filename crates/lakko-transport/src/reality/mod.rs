@@ -64,6 +64,7 @@ pub(crate) mod cert;
 pub mod config;
 pub mod driver;
 pub mod handshake;
+pub mod stream;
 mod transport;
 
 pub use authenticator::{
@@ -82,4 +83,5 @@ pub use driver::{
 pub use handshake::{
     extract_server_hello_random, patch_client_hello_session_id, TlsWireError, RANDOM_LEN,
 };
+pub use stream::RealityConnection;
 pub use transport::RealityTransport;

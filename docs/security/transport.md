@@ -796,32 +796,72 @@ integration round-trip that pins the
 authenticator-to-wire contract between
 [`authenticator::compute`] and the patcher.
 
-**Still not covered yet (S-5-reality-driver-v2).** The
-byte-intercept harness: TCP + tokio + raw
+**S-5-reality-driver-v2 — four-piece byte-intercept
+harness shipped.** TCP + tokio + raw
 `ClientConnection::write_tls` / `read_tls` byte
 interception loop that calls
 `patch_client_hello_session_id` on the first outgoing
 record + `extract_server_hello_random` +
-`verify_server_response` on the first incoming
-record + then continues normal app-data through
-rustls. v2 (pre-shared-key) **unblocks this work** —
-no longer waiting on a rustls ephemeral hook, can be
-written with stock rustls 0.23.
+`verify_server_response` on the first incoming record
++ then continues normal app-data through rustls. v2
+(pre-shared-key) unblocked this work by eliminating
+the dependence on a rustls ephemeral hook; the entire
+stack is built on stock rustls 0.23.
 
-Remaining pieces of `S-5-reality-driver-v2`:
-- `reality/cert.rs` — custom `ServerCertVerifier` that
-  accepts any cert (cover-site PKI is irrelevant under
-  REALITY threat model; the cryptographic auth lives
-  in our session_id + ServerHello.Random round-trip)
-- `reality/driver.rs` — async function that owns a
-  tokio TCP socket + a `rustls::ClientConnection`,
-  drives the handshake byte-by-byte, splices in our
-  patch / extract calls at the right boundaries
-- `reality/stream.rs` — post-handshake `Connection`
-  impl that wraps the rustls state machine + socket
-  for app-data exchange
-- `RealityTransport::connect` actually wires it all
-  together and returns `Ok(Box<dyn Connection>)`
+Shipped pieces:
+
+- [`reality/cert.rs`](../../crates/lakko-transport/src/reality/cert.rs)
+  `pub(crate) struct AcceptAnyCertVerifier` — custom
+  `ServerCertVerifier` that returns
+  `ServerCertVerified::assertion()` for every leaf cert
+  (cover-site PKI is irrelevant under REALITY threat
+  model; the cryptographic auth lives in our session_id
+  + ServerHello.Random round-trip). `verify_tls12_signature`
+  refuses loudly with `rustls::Error::General` — REALITY
+  pins TLS 1.3 per RFC 8446 §1.3 and any TLS 1.2 downgrade
+  is treated as malicious. Audit-grep marker is the
+  struct name `AcceptAnyCertVerifier`.
+- [`reality/driver.rs`](../../crates/lakko-transport/src/reality/driver.rs)
+  `build_reality_client_config` returns a `rustls::ClientConfig`
+  wired with the any-cert verifier. `drive_handshake`
+  is an async function that owns mutable references
+  to a tokio socket + `rustls::ClientConnection` and
+  loops `wants_write` / `write_tls` (patching the first
+  outgoing batch's ClientHello.session_id) and
+  `wants_read` / socket.read / extract+verify
+  ServerHello.Random / `read_tls` / `process_new_packets`
+  until `is_handshaking` returns false. Typed
+  `RealityDriverError` with 10 variants — each maps to a
+  specific failure surface (ConfigBuild / InvalidSni /
+  ClientConnectionInit / SocketIo / PeerClosed / Rustls /
+  PatchClientHello / ExtractServerHello / ServerAuth /
+  HandshakeBufferOverflow). `MAX_HANDSHAKE_BUFFER_BYTES`
+  (64 KiB) caps pre-extraction buffering to defend
+  against slow-loris drip-feed peers.
+- [`reality/stream.rs`](../../crates/lakko-transport/src/reality/stream.rs)
+  `RealityConnection<S>` — post-handshake `Connection`
+  trait impl that wraps the rustls state machine +
+  socket for app-data exchange. Wire layout of app
+  data inside the TLS tunnel: u32-BE length prefix +
+  payload (`MAX_FRAME_BYTES` cap = 16 MiB, enforced on
+  both `send` and `recv`). Idempotent `close` drives
+  `send_close_notify` then `socket.shutdown`; subsequent
+  send / recv return `Error::LocalClosed`.
+- [`reality::transport::RealityTransport::connect`](../../crates/lakko-transport/src/reality/transport.rs)
+  pipeline: parse typed `(tag_secret, short_id)` →
+  `TcpStream::connect` → `build_reality_client_config`
+  → `ServerName::try_from(cfg.sni)` →
+  `ClientConnection::new` → `drive_handshake` →
+  `RealityConnection::new`. Refuses to open the
+  connection on partial handshake (CLAUDE.md security
+  invariant #4 — no silent downgrade).
+
+The client side is production-ready against a
+REALITY-aware server that knows the matching
+`tag_secret` for our `short_id`. The server-side
+counterpart lives in a separate sprint
+(`S-5-reality-server`); until that lands, lab
+validation requires a Lakko-flavoured REALITY server.
 
 ### T-14: WebTransport client uses cert-hash pinning + u32-BE length-prefixed framing with MAX_FRAME_BYTES enforcement
 

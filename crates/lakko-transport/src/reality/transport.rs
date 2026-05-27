@@ -4,32 +4,46 @@
 //! `RealityTransport` — `Transport` trait impl for the
 //! REALITY pluggable transport.
 //!
-//! Currently still returns
-//! [`Error::NotImplemented`] on `connect`. The
-//! cryptographic primitive (`reality::authenticator`)
-//! and the typed config (`reality::config`) are both
-//! shipped and tested; the missing piece is the TLS
-//! handshake injection layer that:
+//! ## What `connect` does
 //!
-//! 1. Builds a TLS 1.3 ClientHello aimed at the
+//! 1. Resolves [`Endpoint`] to a TCP target and opens a
+//!    [`tokio::net::TcpStream`] to it.
+//! 2. Builds a rustls TLS-1.3 client config wired with
+//!    [`crate::reality::cert::AcceptAnyCertVerifier`]
+//!    (REALITY's authentication is the HMAC chain on the
+//!    session_id, **not** the PKI chain — see ADR-0004
+//!    and the safety contract on that struct).
+//! 3. Builds a [`rustls::ClientConnection`] aimed at the
 //!    cover-site SNI from [`RealityConfig::sni`].
-//! 2. Overrides the 32-byte session_id slot with the
-//!    output of [`crate::reality::authenticator::compute`].
-//! 3. Verifies the server's response in ServerHello.Random
-//!    (REALITY signals "I am the real REALITY backend, not
-//!    the cover site") before any application data flows.
+//! 4. Runs [`crate::reality::driver::drive_handshake`]
+//!    which (a) patches the outgoing
+//!    ClientHello.session_id with the REALITY v2
+//!    authenticator and (b) verifies the inbound
+//!    ServerHello.Random under the shared tag_secret.
+//! 5. On success, hands the post-handshake socket + rustls
+//!    state to [`crate::reality::stream::RealityConnection`]
+//!    which implements the [`Connection`] trait via
+//!    length-prefixed frames inside the TLS tunnel.
 //!
-//! rustls 0.23's public API does not expose a session_id
-//! override hook today. The wire-up sprint either (a)
-//! takes a dependency on a `rustls-hooks` fork OR (b)
-//! writes the ClientHello payload by hand on top of a
-//! raw TCP socket. Tracked in G5-1 closeout notes.
+//! Any failure on the path returns a typed
+//! [`Error`] — the connection is **never** opened on a
+//! partial handshake (no silent downgrade to plain TLS or
+//! plaintext, per CLAUDE.md security invariant #4).
+
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
+use rustls::pki_types::ServerName;
+use rustls::ClientConnection;
+use tokio::net::TcpStream;
 
 use crate::endpoint::Endpoint;
 use crate::error::{Error, Result};
-use crate::reality::config::RealityConfig;
+use crate::reality::authenticator::RealityTimestamp;
+use crate::reality::config::{RealityConfig, RealityConfigError};
+use crate::reality::driver::{build_reality_client_config, drive_handshake, RealityDriverError};
+use crate::reality::stream::RealityConnection;
 use crate::transport::{Connection, Transport};
 
 /// REALITY transport — typed wrapper around a parsed
@@ -47,32 +61,25 @@ impl RealityTransport {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::NotImplemented`] only when the
-    /// underlying [`RealityConfig::parse`] fails. Other
-    /// failure modes (network / TLS) surface from
-    /// [`Self::connect`].
+    /// Returns [`Error::NotImplemented`] when the
+    /// underlying [`RealityConfig::parse`] fails. The
+    /// `NotImplemented` shape (rather than `Config`) is
+    /// preserved for backwards-compat with the bootstrap
+    /// loader, which already branches on it.
     pub fn new(cfg: RealityConfig) -> Result<Self> {
         // Validate the config eagerly so any wire-shape
         // surprise surfaces here, not at connect time.
         cfg.parse().map_err(|e| Error::NotImplemented {
             feature: "reality (bad config)",
             sprint: match e {
-                crate::reality::config::RealityConfigError::BadTagSecretBase64 => {
-                    "S-5-reality (tag_secret_b64 invalid)"
-                },
-                crate::reality::config::RealityConfigError::TagSecretLength { .. } => {
+                RealityConfigError::BadTagSecretBase64 => "S-5-reality (tag_secret_b64 invalid)",
+                RealityConfigError::TagSecretLength { .. } => {
                     "S-5-reality (tag_secret wrong length)"
                 },
-                crate::reality::config::RealityConfigError::BadShortIdHex => {
-                    "S-5-reality (short_id_hex invalid)"
-                },
-                crate::reality::config::RealityConfigError::ShortIdLength { .. } => {
-                    "S-5-reality (short_id wrong length)"
-                },
-                crate::reality::config::RealityConfigError::EmptySni => "S-5-reality (sni empty)",
-                crate::reality::config::RealityConfigError::EmptyRemote => {
-                    "S-5-reality (remote empty)"
-                },
+                RealityConfigError::BadShortIdHex => "S-5-reality (short_id_hex invalid)",
+                RealityConfigError::ShortIdLength { .. } => "S-5-reality (short_id wrong length)",
+                RealityConfigError::EmptySni => "S-5-reality (sni empty)",
+                RealityConfigError::EmptyRemote => "S-5-reality (remote empty)",
             },
         })?;
         Ok(Self { cfg })
@@ -87,18 +94,87 @@ impl RealityTransport {
     }
 }
 
+/// Resolve an [`Endpoint`] to a `tokio::net::TcpStream`.
+///
+/// `Direct` → connect by SocketAddr; `Hostname` → let
+/// tokio resolve via system getaddrinfo. The bootstrap-
+/// rendezvous DoH path resolves the cover host upstream
+/// and hands us a `Direct` endpoint; the `Hostname` branch
+/// is a fallback for tests / local dev.
+async fn open_tcp(endpoint: &Endpoint) -> Result<TcpStream> {
+    match endpoint {
+        Endpoint::Direct(addr) => TcpStream::connect(addr)
+            .await
+            .map_err(|e| Error::Io(format!("tcp connect {addr}: {e}"))),
+        Endpoint::Hostname { host, port } => TcpStream::connect((host.as_str(), *port))
+            .await
+            .map_err(|e| Error::Io(format!("tcp connect {host}:{port}: {e}"))),
+    }
+}
+
+/// Map driver-side error variants to transport-layer
+/// errors. Keeps the public error surface coarse — no
+/// timing-side-channel leak through error discriminants.
+fn map_driver_error(e: RealityDriverError) -> Error {
+    match e {
+        RealityDriverError::ConfigBuild(msg)
+        | RealityDriverError::InvalidSni(msg)
+        | RealityDriverError::ClientConnectionInit(msg)
+        | RealityDriverError::Rustls(msg) => Error::Tls(msg),
+        RealityDriverError::SocketIo(msg) => Error::Io(msg),
+        RealityDriverError::PeerClosed => Error::PeerClosed,
+        RealityDriverError::PatchClientHello(e) => Error::Tls(format!("patch client hello: {e}")),
+        RealityDriverError::ExtractServerHello(e) => {
+            Error::Tls(format!("extract server hello: {e}"))
+        },
+        RealityDriverError::ServerAuth(e) => Error::Tls(format!("reality server auth: {e}")),
+        RealityDriverError::HandshakeBufferOverflow { cap } => {
+            Error::Io(format!("handshake buffer exceeded {cap} bytes"))
+        },
+    }
+}
+
 #[async_trait]
 impl Transport for RealityTransport {
-    async fn connect(&self, _endpoint: &Endpoint) -> Result<Box<dyn Connection>> {
-        // Foundation sprint (G5-1-foundation): the
-        // authenticator primitive + config types are
-        // shipped + tested. The TLS-handshake injection
-        // is the next sub-sprint — see module-level docs
-        // for the rustls-hook gap.
-        Err(Error::NotImplemented {
-            feature: "reality TLS handshake injection",
-            sprint: "S-5-reality-handshake (rustls ClientHello hook)",
-        })
+    async fn connect(&self, endpoint: &Endpoint) -> Result<Box<dyn Connection>> {
+        // 1. Re-parse the config to get typed
+        //    (tag_secret, short_id). `new()` already
+        //    validated the wire shape, so this is cheap
+        //    + must not fail in practice.
+        let (tag_secret, short_id) = self
+            .cfg
+            .parse()
+            .map_err(|e| Error::Config(format!("reality config: {e}")))?;
+
+        // 2. TCP connect to the resolved endpoint.
+        let mut socket = open_tcp(endpoint).await?;
+
+        // 3. Build rustls client config + ClientConnection
+        //    pointed at the cover SNI.
+        let client_cfg = build_reality_client_config().map_err(map_driver_error)?;
+        let server_name = ServerName::try_from(self.cfg.sni.clone())
+            .map_err(|e| Error::Tls(format!("invalid reality SNI {:?}: {e}", self.cfg.sni)))?;
+        let mut conn = ClientConnection::new(Arc::new(client_cfg), server_name)
+            .map_err(|e| Error::Tls(format!("rustls ClientConnection::new: {e}")))?;
+
+        // 4. Current wall-clock as the authenticator's
+        //    timestamp slot. Server clock skew is bounded
+        //    on the verifier side; we just publish ours.
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|e| Error::Config(format!("system clock before UNIX_EPOCH: {e}")))?
+            .as_secs();
+        let timestamp = RealityTimestamp(now);
+
+        // 5. Drive the handshake to completion. On Ok the
+        //    socket carries TLS-encrypted bytes and `conn`
+        //    is in transport-mode.
+        drive_handshake(&mut socket, &mut conn, &tag_secret, &short_id, timestamp)
+            .await
+            .map_err(map_driver_error)?;
+
+        // 6. Wrap into the Connection-trait implementer.
+        Ok(Box::new(RealityConnection::new(socket, conn)))
     }
 }
 
@@ -151,21 +227,81 @@ mod tests {
         }
     }
 
+    /// Connect against an unreachable endpoint surfaces a
+    /// typed I/O error — proves the connect path is now
+    /// wired beyond the old `NotImplemented` stub.
+    ///
+    /// We use `127.0.0.1:1` (privileged port, almost
+    /// certainly no listener) so the test is deterministic
+    /// and stays inside the loopback interface — no
+    /// outbound traffic, no DNS, no firewall surprises.
     #[tokio::test]
-    async fn connect_returns_not_implemented() {
+    async fn connect_surfaces_io_error_on_unreachable_endpoint() {
         let t = RealityTransport::new(happy_config()).unwrap();
-        let endpoint = crate::endpoint::Endpoint::hostname("203.0.113.7", 443);
+        let endpoint = Endpoint::direct("127.0.0.1:1".parse().unwrap());
         let err = t
             .connect(&endpoint)
             .await
             .err()
-            .expect("connect must return NotImplemented");
+            .expect("connect to :1 must fail");
         match err {
-            Error::NotImplemented { feature, sprint } => {
-                assert!(feature.contains("TLS handshake injection"));
-                assert!(sprint.contains("rustls ClientHello hook"));
+            Error::Io(msg) => {
+                assert!(
+                    msg.contains("tcp connect"),
+                    "expected tcp-connect prefix, got {msg:?}"
+                );
             },
-            other => panic!("expected NotImplemented, got {other:?}"),
+            other => panic!("expected Error::Io, got {other:?}"),
+        }
+    }
+
+    /// Sanity that the SNI string is fed into rustls.
+    /// `ServerName::try_from` rejects something that
+    /// isn't a syntactically-valid DNS name or IP. We
+    /// build the transport with `cfg.sni = "not a host"`,
+    /// connect to a deliberately-reachable loopback port,
+    /// and expect the TLS branch to fire BEFORE the
+    /// handshake-overrun branch.
+    ///
+    /// The TCP connect runs first in our pipeline, so a
+    /// loopback target that *accepts* but does nothing
+    /// would let the TLS error fire next. To avoid pulling
+    /// in a fake server, we instead bind a one-shot
+    /// listener that immediately accepts + drops, giving
+    /// the connect leg an Ok and forcing the bad SNI to
+    /// fail at the `ServerName::try_from` step.
+    #[tokio::test]
+    async fn connect_rejects_bad_sni_after_tcp_connect() {
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let bound = listener.local_addr().unwrap();
+        // accept+drop so our connect leg succeeds
+        let _accept_task = tokio::spawn(async move {
+            let _ = listener.accept().await;
+        });
+
+        let mut cfg = happy_config();
+        cfg.sni = "definitely not a hostname!".into();
+        // Skip the eager validator (it doesn't check SNI
+        // syntax beyond non-empty) by constructing the
+        // transport directly with the new() path — the
+        // `EmptySni` rejection above proves the eager
+        // check fires when SNI is empty, but a non-empty
+        // garbage SNI passes new() and only fails inside
+        // rustls's ServerName::try_from.
+        let t = RealityTransport::new(cfg).expect("non-empty garbage SNI passes new()");
+        let endpoint = Endpoint::direct(bound);
+
+        let err = t.connect(&endpoint).await.err().expect("must fail");
+        match err {
+            Error::Tls(msg) => {
+                assert!(
+                    msg.contains("invalid reality SNI"),
+                    "expected SNI-rejection message, got {msg:?}"
+                );
+            },
+            other => panic!("expected Error::Tls (bad SNI), got {other:?}"),
         }
     }
 }
