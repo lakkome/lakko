@@ -1,0 +1,53 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+[package]
+name = "lakko-transport-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+# Opt out of the parent workspace.
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+lakko-transport = { path = ".." }
+# Rendezvous target needs `VerifyingKey` (fixed trust
+# anchor); pull a thin slice via the existing crypto crate
+# rather than duplicate ed25519-dalek deps.
+lakko-crypto = { path = "../../lakko-crypto" }
+# Rendezvous target also needs `serde_json::from_slice` —
+# the parse step before `BootstrapConfig::verify`.
+serde_json = "1"
+
+# Each target shoves an attacker-controlled byte slice
+# through one of the transport-layer wire parsers — the
+# parsers run BEFORE signature / AEAD checks succeed, so
+# any panic / overflow / stack abuse on arbitrary input is
+# a vulnerability on the rendezvous + obfs paths the client
+# uses to bootstrap inside censored networks.
+
+[[bin]]
+name = "shadowsocks_decode_request"
+path = "fuzz_targets/shadowsocks_decode_request.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "shadowsocks_decode_response"
+path = "fuzz_targets/shadowsocks_decode_response.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "rendezvous_decode_and_verify"
+path = "fuzz_targets/rendezvous_decode_and_verify.rs"
+test = false
+doc = false
+bench = false

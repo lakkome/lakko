@@ -128,7 +128,7 @@ just ci                        # everything CI does, locally
 
 ## Fuzz harnesses
 
-`crates/lakko-mls/fuzz/`, `crates/lakko-proto/fuzz/`, `crates/lakko-contacts/fuzz/`, `crates/lakko-channels/fuzz/`, and `crates/lakko-tuf/fuzz/` are separate crates outside the main workspace (they need nightly + libfuzzer-sys). Targets live in `fuzz/fuzz_targets/*.rs`.
+`crates/lakko-mls/fuzz/`, `crates/lakko-proto/fuzz/`, `crates/lakko-contacts/fuzz/`, `crates/lakko-channels/fuzz/`, `crates/lakko-transport/fuzz/`, and `crates/lakko-tuf/fuzz/` are separate crates outside the main workspace (they need nightly + libfuzzer-sys). Targets live in `fuzz/fuzz_targets/*.rs`.
 
 Current targets:
 - **`lakko-mls/mls_message`** — `MlsMessageIn` wire-format parser (TLS codec)
@@ -147,6 +147,9 @@ Current targets:
 - **`lakko-channels/post_verify_and_decrypt`** — full receiver pipeline (decode → Ed25519 verify → AEAD open)
 - **`lakko-channels/subscribe_open_seed`** — subscriber-side HPKE seed-envelope opener (Phase 4b)
 - **`lakko-channels/epoch_id_from_be_bytes`** — 4-byte big-endian epoch-id parser
+- **`lakko-transport/shadowsocks_decode_request`** — SS-2022 client-to-server outer-header parser (Phase 5, T-10 surface; fixed-zero PSK + fresh ReplayWindow)
+- **`lakko-transport/shadowsocks_decode_response`** — SS-2022 server-to-client outer-header parser (fixed-zero PSK + fixed expected request-salt; exercises the `WrongResponseSalt` branch)
+- **`lakko-transport/rendezvous_decode_and_verify`** — full attacker-controlled rendezvous pipeline: `serde_json::from_slice::<BootstrapConfig>` → on Ok, `BootstrapConfig::verify` with fixed trust anchor + fixed `now` (T-4 / T-5 / T-7 / T-8 surfaces)
 - **`lakko-tuf/signed_root_from_json`** — outermost TUF metadata parser for the `Root` role envelope (GA-5)
 - **`lakko-tuf/signed_snapshot_from_json`** — outermost TUF metadata parser for the `Snapshot` role envelope
 - **`lakko-tuf/signed_targets_from_json`** — outermost TUF metadata parser for the `Targets` role envelope (widest deserialiser surface; carries the targets `BTreeMap`)
