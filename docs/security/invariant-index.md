@@ -14,9 +14,9 @@ section that describes it.
 |---|---|---|---|
 | **I-** | 8   | I-1..I-8   | [`mls-state-machine.md`](./mls-state-machine.md) |
 | **C-** | 44  | C-1..C-44  | [`calls.md`](./calls.md) |
-| **T-** | 12  | T-1..T-12  | [`transport.md`](./transport.md) |
+| **T-** | 13  | T-1..T-13  | [`transport.md`](./transport.md) |
 | **G-** | 26  | G-1..G-26  | [`known-gaps.md`](./known-gaps.md) — open / deferred |
-| Total invariants  | 64  | (I + C + T) | live properties |
+| Total invariants  | 65  | (I + C + T) | live properties |
 | Total open gaps   | 26  | (G)         | tracked + scoped |
 
 ## MLS state machine invariants (I-1..I-8)
@@ -134,6 +134,7 @@ Source: [`transport.md`](./transport.md). Anti-censorship
 | T-10 | Shadowsocks-2022 outer header layer pins BLAKE3 context + timestamp window + replay window |
 | T-11 | SS-2022 TCP wiring preserves per-direction key separation + frame-size cap |
 | T-12 | ECH config list parser is version-pinned (0xfe0d) + length-bounded (16 KiB outer / 16 inner configs / 4 KiB per config) |
+| T-13 | REALITY authenticator is X25519 ECDH + HKDF-SHA-256 (label `lakko/reality/v1`) + HMAC-SHA-256 over (short_id || timestamp); tag verified constant-time before any downstream byte is trusted |
 
 ## Known gaps (G-1..G-26)
 

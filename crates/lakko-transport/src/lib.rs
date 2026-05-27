@@ -71,7 +71,14 @@ pub use pluggable::{
     race_select, HappyEyeballs, PluggableCandidate, PluggableError, PluggableKind, PluggableResult,
     PluggableTransport,
 };
-pub use reality::{RealityConfig, RealityTransport};
+pub use reality::{
+    compute_authenticator as compute_reality_authenticator,
+    verify_authenticator as verify_reality_authenticator, RealityAuthError, RealityAuthenticator,
+    RealityConfig, RealityConfigError, RealityServerPubkey, RealityShortId, RealityTimestamp,
+    RealityTransport, AUTHENTICATOR_LEN as REALITY_AUTHENTICATOR_LEN,
+    HKDF_LABEL as REALITY_HKDF_LABEL, REALITY_PUBKEY_LEN, SHORT_ID_LEN as REALITY_SHORT_ID_LEN,
+    TIMESTAMP_LEN as REALITY_TIMESTAMP_LEN,
+};
 pub use rendezvous::{
     BootstrapConfig, RendezvousError, RendezvousResult, TransportSpec, ISSUED_AT_CLOCK_SKEW_SECS,
     SCHEMA_VERSION,

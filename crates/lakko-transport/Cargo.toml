@@ -67,6 +67,16 @@ x509-parser = "0.16"
 # padding; we surface a clean parse error if the encoded
 # length doesn't decode to exactly 32 bytes.
 base64 = "0.22"
+# G5-1-foundation: decode REALITY short_id from hex in the
+# bootstrap rendezvous config. Same hex crate the workspace
+# already pulls via lakko-tuf — registry resolver aligns
+# versions.
+hex = "0.4"
+# G5-1-foundation: constant-time HMAC-tag comparison on the
+# REALITY verifier path so a timing attacker cannot narrow
+# which tag bytes mismatched. Same crate lakko-crypto
+# already pulls.
+subtle = "2"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }

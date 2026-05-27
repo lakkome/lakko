@@ -635,6 +635,87 @@ test endpoint (Cloudflare publishes one). The parser
 stands alone so the invariant can be pinned
 independently of network-side wiring.
 
+### T-13: REALITY authenticator is ECDH-keyed HMAC over (short_id || timestamp), tag verified before any downstream byte is trusted
+
+**Property.** The REALITY authenticator that rides in
+the TLS 1.3 ClientHello.session_id slot is built from:
+
+- X25519 ECDH between the client's TLS-1.3-key_share
+  ephemeral secret and the publisher-distributed
+  REALITY server static public key;
+- HKDF-SHA-256 over the ECDH shared secret with the
+  pinned label `"lakko/reality/v1"`;
+- HMAC-SHA-256(key, short_id || ts_be8) truncated to
+  16 bytes.
+
+Wire layout:
+
+```
+0           8           16                          32
+|  short_id  |  ts_be8    |       hmac_tag[..16]      |
+```
+
+`short_id` is plaintext so the receiver can look up
+its keying material in O(1) before doing any HMAC
+work; `ts_be8` is a u64 big-endian unix-seconds
+timestamp; the 16-byte tag is the cryptographic
+backstop. Constant-time comparison via the `subtle`
+crate gates the verifier path.
+
+**Why this matters.** An attacker on the wire sees a
+TLS 1.3 ClientHello with the cover-site SNI, a
+standard-shaped key_share, and a session_id that is
+opaque random bytes to a non-REALITY peer. The
+authenticator binds the handshake to a specific
+publisher key + a recent timestamp; a captured
+session_id cannot be replayed outside the
+`tolerance_secs` window the receiver pins (default
+suggested 30 s).
+
+**Tests.** 10 unit tests in
+[`crates/lakko-transport/src/reality/authenticator.rs`](../../crates/lakko-transport/src/reality/authenticator.rs)
+covering: compute + verify round-trip; wrong short_id
+in allow-set is `ShortIdNotAllowed`; timestamp outside
+tolerance is `TimestampSkew`; timestamp inside window
+verifies; tampered tag is `TagMismatch`; wrong server
+secret (attacker without the publisher's static
+private key) is `TagMismatch`; wrong client ephemeral
+pubkey is `TagMismatch`; authenticator is exactly 32
+bytes; short_id is extractable directly from the
+authenticator (the receiver's O(1) lookup path is
+preserved); two distinct ephemerals yield distinct
+tags even with identical short_id + timestamp (a
+passive observer cannot replay-detect by tag
+equality).
+
+Plus 7 unit tests on
+[`crates/lakko-transport/src/reality/config.rs`](../../crates/lakko-transport/src/reality/config.rs)
+covering happy parse + every rejection path (bad
+pubkey base64, wrong pubkey length, bad short_id hex,
+wrong short_id length, empty SNI, empty remote).
+
+Plus 5 unit tests on
+[`crates/lakko-transport/src/reality/transport.rs`](../../crates/lakko-transport/src/reality/transport.rs)
+covering the constructor's config-validation gate and
+the `Transport::connect` `NotImplemented` shape.
+
+**Wire-compatibility caveat.** Lakko's REALITY pins
+its own canonical bytes via the `"lakko/reality/v1"`
+HKDF label and is therefore NOT byte-for-byte
+compatible with upstream xtls/REALITY today. A
+follow-up sprint aligns the exact label / field
+layout to enable interop. Until then, Lakko REALITY
+clients only handshake with Lakko REALITY servers.
+
+**Not covered yet.** TLS handshake injection (writing
+the authenticator into ClientHello.session_id and
+validating the server's response in
+ServerHello.Random) is the next sub-sprint
+(S-5-reality-handshake). rustls 0.23's public API
+does not expose a session_id override hook, so the
+wire-up either takes a `rustls-hooks` fork dependency
+or writes the ClientHello on top of a raw TCP socket.
+
 ## Known soft spots — out of scope for Phase 5 scaffold
 
 ### Real `Transport` implementations for REALITY / MASQUE / SS-2022 / WebTransport

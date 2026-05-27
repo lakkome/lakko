@@ -312,13 +312,21 @@ mod tests {
     }
 
     fn dummy_reality() -> RealityTransport {
+        // Valid-shape config (32-byte X25519 pubkey, 8-byte
+        // short_id) so RealityTransport::new accepts it — the
+        // transport's connect() still returns NotImplemented
+        // (the foundation sprint shipped the authenticator
+        // primitive + config validation; the TLS handshake
+        // injection is the next sub-sprint).
+        use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
         RealityTransport::new(RealityConfig {
             sni: "example.invalid".into(),
-            server_pubkey_b64: "AAAA".into(),
-            short_id_hex: "00".into(),
+            server_pubkey_b64: B64.encode([0u8; 32]),
+            short_id_hex: hex::encode([0u8; 8]),
             allowed_inner_servers: vec![],
             remote: "example.invalid:443".into(),
         })
+        .expect("dummy_reality builds a valid-shape config")
     }
 
     #[tokio::test]
