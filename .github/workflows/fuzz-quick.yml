@@ -1,0 +1,134 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+# Quick-fuzz CI — actually RUN the 30 fuzz targets that
+# `just fuzz-check` only smoke-builds. Each target gets a
+# bounded budget (60 s by default) which is enough to find
+# the kind of immediate-input panic / overflow regression
+# that a parser refactor accidentally introduces; deeper
+# coverage rides on the OSS-Fuzz integration tracked
+# separately.
+#
+# Triggers:
+#   - schedule: nightly 03:00 UTC.
+#   - workflow_dispatch: on-demand from the Actions tab,
+#     with a custom per-target duration.
+#
+# Permission posture: read-only — no PR comments, no
+# pushes, no cache write across forks. Crash artifacts
+# upload to the workflow run page.
+
+name: fuzz-quick
+
+on:
+  schedule:
+    # nightly 03:00 UTC — well outside the European maintainer's
+    # working hours so a real-time crash signal hits inbox before
+    # the next day starts.
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+    inputs:
+      duration_secs:
+        description: 'Per-target fuzz duration (seconds).'
+        required: false
+        default: '60'
+
+# Avoid piling up overlapping nightly runs — if yesterday's
+# run is still going, skip today's. Crash signal is the same
+# either way.
+concurrency:
+  group: fuzz-quick
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    name: ${{ matrix.crate }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      # Don't bail on first failure — every crate's signal is
+      # independent, and a crash in one parser shouldn't hide
+      # a separate crash in another.
+      fail-fast: false
+      matrix:
+        include:
+          - crate: lakko-mls
+            manifest: crates/lakko-mls/fuzz/Cargo.toml
+          - crate: lakko-proto
+            manifest: crates/lakko-proto/fuzz/Cargo.toml
+          - crate: lakko-contacts
+            manifest: crates/lakko-contacts/fuzz/Cargo.toml
+          - crate: lakko-channels
+            manifest: crates/lakko-channels/fuzz/Cargo.toml
+          - crate: lakko-transport
+            manifest: crates/lakko-transport/fuzz/Cargo.toml
+          - crate: lakko-tuf
+            manifest: crates/lakko-tuf/fuzz/Cargo.toml
+          - crate: lakko-call-jwt
+            manifest: crates/lakko-call-jwt/fuzz/Cargo.toml
+          - crate: lakko-backup
+            manifest: crates/lakko-backup/fuzz/Cargo.toml
+          - crate: lakko-svc-sfu
+            manifest: services/sfu/fuzz/Cargo.toml
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install nightly Rust + cargo-fuzz
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Cache cargo registry + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: fuzz-${{ matrix.crate }}-${{ hashFiles(matrix.manifest) }}
+          restore-keys: |
+            fuzz-${{ matrix.crate }}-
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked --version '^0.13' || true
+
+      - name: Run fuzz targets
+        env:
+          DURATION_SECS: ${{ inputs.duration_secs || '60' }}
+        run: |
+          set -eu
+          manifest="${{ matrix.manifest }}"
+          fuzz_dir="$(dirname "$manifest")"
+          targets_dir="$fuzz_dir/fuzz_targets"
+          echo "== Fuzz crate: ${{ matrix.crate }} (manifest=$manifest, budget=${DURATION_SECS}s/target) =="
+          fail=0
+          for target_file in "$targets_dir"/*.rs; do
+            target="$(basename "$target_file" .rs)"
+            echo "--- target: $target ---"
+            # cargo-fuzz drops crash inputs into
+            # $fuzz_dir/artifacts/$target/. The exit code is
+            # non-zero on crash; we capture per-target failure
+            # so every target still gets a chance to run.
+            if ! cargo +nightly fuzz run \
+                --fuzz-dir "$fuzz_dir" \
+                "$target" \
+                -- -max_total_time="$DURATION_SECS"; then
+              echo "FAIL: $target produced a crash"
+              fail=1
+            fi
+          done
+          exit "$fail"
+
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crashes-${{ matrix.crate }}
+          path: |
+            ${{ matrix.manifest }}/../artifacts/
+            ${{ matrix.manifest }}/../corpus/
+          if-no-files-found: ignore
+          retention-days: 14

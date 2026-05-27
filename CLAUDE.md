@@ -166,6 +166,8 @@ The `fuzz_api` module in `lakko-mls` (marked `#[doc(hidden)]`) is the only publi
 
 Fuzzing corpora are not committed (`fuzz/corpus/`, `fuzz/artifacts/` are gitignored); they are spun up locally.
 
+The `.github/workflows/fuzz-quick.yml` workflow actually RUNS every fuzz target for a bounded budget (60s default, configurable via `workflow_dispatch`) on nightly cron (03:00 UTC) — `just fuzz-check` only smoke-builds. Matrix runs one job per fuzz crate (9 jobs, ~30 targets total); crashes upload to the workflow run page as 14-day-retention artifacts. Concurrency limited to 1 so overlapping nightly runs don't pile up.
+
 ## Local dev
 
 ### First time
