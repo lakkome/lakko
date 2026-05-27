@@ -1,0 +1,32 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+[package]
+name = "lakko-svc-sfu-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+# Opt out of the parent workspace.
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+lakko-svc-sfu = { path = ".." }
+serde_json = "1"
+
+# The SFU's signaling parser sits on the WS receive path
+# inside an admitted (post-JWT) call. An admitted attacker
+# can ship arbitrary text frames; a panic / overflow in
+# the parser crashes the per-call task and would amplify
+# into a reconnect storm. C-39 invariant body.
+
+[[bin]]
+name = "client_frame_decode"
+path = "fuzz_targets/client_frame_decode.rs"
+test = false
+doc = false
+bench = false
