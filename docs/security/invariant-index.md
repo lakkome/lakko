@@ -14,9 +14,9 @@ section that describes it.
 |---|---|---|---|
 | **I-** | 8   | I-1..I-8   | [`mls-state-machine.md`](./mls-state-machine.md) |
 | **C-** | 44  | C-1..C-44  | [`calls.md`](./calls.md) |
-| **T-** | 14  | T-1..T-14  | [`transport.md`](./transport.md) |
+| **T-** | 15  | T-1..T-15  | [`transport.md`](./transport.md) |
 | **G-** | 26  | G-1..G-26  | [`known-gaps.md`](./known-gaps.md) — open / deferred |
-| Total invariants  | 66  | (I + C + T) | live properties |
+| Total invariants  | 67  | (I + C + T) | live properties |
 | Total open gaps   | 26  | (G)         | tracked + scoped |
 
 ## MLS state machine invariants (I-1..I-8)
@@ -136,6 +136,7 @@ Source: [`transport.md`](./transport.md). Anti-censorship
 | T-12 | ECH config list parser is version-pinned (0xfe0d) + length-bounded (16 KiB outer / 16 inner configs / 4 KiB per config) |
 | T-13 | REALITY authenticator is X25519 ECDH + HKDF-SHA-256 (label `lakko/reality/v1`) + HMAC-SHA-256 over (short_id || timestamp); tag verified constant-time before any downstream byte is trusted |
 | T-14 | WebTransport client uses cert-hash pinning (SHA-256 of full DER cert, W3C `serverCertificateHashes` mode) + u32-BE length-prefixed framing with MAX_FRAME_BYTES enforcement |
+| T-15 | MASQUE config + CONNECT-UDP request (RFC 9298 §3) + HTTP Datagram payload codec (RFC 9297 §3) are spec-aligned and length-bounded; CONNECT-UDP Context ID 0 pinned, others refused |
 
 ## Known gaps (G-1..G-26)
 

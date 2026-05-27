@@ -785,6 +785,95 @@ The unit tests above pin the config / framing surface;
 the actual session round-trip rides on `web-transport-quinn`'s
 own test suite + production deployments.
 
+### T-15: MASQUE config + CONNECT-UDP request + HTTP Datagram payload codec are spec-aligned and length-bounded
+
+**Property.** The MASQUE foundation in
+[`crates/lakko-transport/src/masque/`](../../crates/lakko-transport/src/masque/)
+ships three independently-tested primitives the future
+h3+quinn handshake sprint will wire together:
+
+- **Config** ([`config.rs`](../../crates/lakko-transport/src/masque/config.rs)):
+  `MasqueConfig::parse` lifts the wire-form config into
+  typed `(MasqueProxyUrl, MasqueInnerTarget, Option<MasqueBearer>)`.
+  Eager validation: proxy URL must be `https://` (refused
+  otherwise — CONNECT-UDP rides on HTTP/3 over QUIC over
+  TLS); proxy URL must have a host component;
+  `inner_target` must be `host:port` (supports bracketed
+  IPv6 literal `[::1]:port`); bearer if set must be
+  non-empty.
+- **Request** ([`request.rs`](../../crates/lakko-transport/src/masque/request.rs)):
+  [`build_connect_udp_request`] emits a
+  `ConnectUdpRequest` carrying the HTTP/3 pseudo-headers
+  per [RFC 9298 §3](https://www.rfc-editor.org/rfc/rfc9298.html#section-3):
+  `:method = CONNECT`, `:protocol = connect-udp`,
+  `:scheme = https`,
+  `:authority = <proxy host[:port]>`,
+  `:path = /.well-known/masque/udp/{target_host}/{target_port}/`
+  (host percent-encoded per RFC 3986 §2.3), plus
+  `capsule-protocol: ?1` ([RFC 9297 §3.4](https://www.rfc-editor.org/rfc/rfc9297.html#section-3.4))
+  and optional `authorization: Bearer <token>`.
+- **Datagram codec** ([`datagram.rs`](../../crates/lakko-transport/src/masque/datagram.rs)):
+  [`encode_udp_payload`] / [`decode_udp_payload`] handle
+  the HTTP Datagram wire layout per
+  [RFC 9297 §3](https://www.rfc-editor.org/rfc/rfc9297.html#section-3)
+  + [RFC 9298 §3](https://www.rfc-editor.org/rfc/rfc9298.html#section-3):
+  QUIC varint Context ID (RFC 9000 §16) followed by the
+  inner UDP payload. CONNECT-UDP pins
+  [`CONNECT_UDP_CONTEXT_ID`] = 0; the decoder refuses any
+  other context id loudly (`DatagramError::UnsupportedContextId`)
+  rather than silently treat the rest as UDP — future
+  extensions (e.g. ICMP forwarding) get their own audit
+  invariant.
+
+**Length bounds.** Encoded datagram payload is capped at
+[`MAX_DATAGRAM_PAYLOAD`] = 65 KiB (matches UDP MTU
+ceiling + leading varint). Both `encode_udp_payload`
+(against local bugs) and `decode_udp_payload` (against
+attacker-supplied giant datagrams) enforce this cap.
+
+**Why this matters.** A censor watching a Lakko client
+inside RU / CN / IR sees a `CONNECT` request to a public
+HTTPS host — looks like any other HTTP proxy use. The
+inner UDP target (Lakko's own services) never appears
+on the outer wire. The HTTP Datagram codec is the
+attacker-controllable parser between the proxy and the
+client; a panic / overflow here on a malicious datagram
+would crash the client's connect path.
+
+**Tests.** 28 unit tests across the three modules:
+
+- 10 config tests: happy parse, allow no bearer, reject
+  non-https proxy, reject bad URL, reject missing-port
+  inner target, reject bad-port inner target, reject
+  empty bearer, accept bracketed IPv6, accept custom
+  proxy port, serde round-trip.
+- 6 request-builder tests: happy path, no-bearer → no
+  authorization header, custom proxy port lands in
+  `:authority`, IPv6 inner target percent-encoded
+  in `:path`, DNS host passes through unchanged,
+  percent-encoder only escapes RFC-3986-reserved bytes.
+- 7 datagram-codec tests: encode/decode round trip,
+  encode rejects oversize, decode rejects empty wire,
+  decode rejects truncated varint, decode rejects
+  unsupported context id, decode rejects oversize wire,
+  varint encoding classes (all four length classes),
+  varint round-trip across classes.
+- 4 transport-ctor tests: accept valid config, reject
+  non-https proxy, reject bad inner target, connect
+  returns `NotImplemented` with the right sprint marker.
+
+**Not covered yet** (= `S-5-masque-handshake`). The h3 +
+quinn integration that actually opens an HTTP/3
+connection to the proxy, sends the `ConnectUdpRequest`
+via the `h3` crate's extended-CONNECT path, waits for the
+`2xx` response, and then multiplexes outbound UDP
+payloads through
+`quinn::Connection::send_datagram` + the codec above.
+`h3-datagram` is at 0.0.2 on crates.io (very early); the
+handshake sprint either pins to it or implements the
+QUIC DATAGRAM frame handling directly on top of
+`quinn`'s `send_datagram` / `read_datagram` API.
+
 ## Known soft spots — out of scope for Phase 5 scaffold
 
 ### Real `Transport` implementations for REALITY / MASQUE / SS-2022 / WebTransport
