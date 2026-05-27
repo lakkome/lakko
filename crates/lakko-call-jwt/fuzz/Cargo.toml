@@ -1,0 +1,52 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+[package]
+name = "lakko-call-jwt-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+# Opt out of the parent workspace.
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+lakko-call-jwt = { path = ".." }
+# verify_with_jwks fuzz target needs a fixed JWKS — derive
+# it deterministically from an all-zero seed via the
+# existing crypto crate's SigningKey.
+lakko-crypto = { path = "../../lakko-crypto" }
+
+# JWS Compact + JWKS parsers — both feed attacker-
+# controllable strings (clients parse JWTs served by the
+# auth service, and a compromised JWKS publish endpoint
+# can serve arbitrary JSON). Any panic / overflow /
+# stack abuse on arbitrary input is a vulnerability — JWS
+# parsers are a notorious vulnerability surface (algorithm
+# confusion, base64 length tricks, JSON injection on
+# unknown fields).
+
+[[bin]]
+name = "jwt_parse_unverified"
+path = "fuzz_targets/jwt_parse_unverified.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "jwt_verify_with_jwks"
+path = "fuzz_targets/jwt_verify_with_jwks.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "jwks_parse"
+path = "fuzz_targets/jwks_parse.rs"
+test = false
+doc = false
+bench = false

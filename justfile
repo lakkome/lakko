@@ -84,6 +84,7 @@ fuzz-check:
     cargo check --manifest-path crates/lakko-channels/fuzz/Cargo.toml
     cargo check --manifest-path crates/lakko-transport/fuzz/Cargo.toml
     cargo check --manifest-path crates/lakko-tuf/fuzz/Cargo.toml
+    cargo check --manifest-path crates/lakko-call-jwt/fuzz/Cargo.toml
 
 # Build `lakko-ffi-wasm` for `wasm32-unknown-unknown`. CI runs this
 # too; keep it locally for fast feedback when changing the

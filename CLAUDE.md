@@ -128,7 +128,7 @@ just ci                        # everything CI does, locally
 
 ## Fuzz harnesses
 
-`crates/lakko-mls/fuzz/`, `crates/lakko-proto/fuzz/`, `crates/lakko-contacts/fuzz/`, `crates/lakko-channels/fuzz/`, `crates/lakko-transport/fuzz/`, and `crates/lakko-tuf/fuzz/` are separate crates outside the main workspace (they need nightly + libfuzzer-sys). Targets live in `fuzz/fuzz_targets/*.rs`.
+`crates/lakko-mls/fuzz/`, `crates/lakko-proto/fuzz/`, `crates/lakko-contacts/fuzz/`, `crates/lakko-channels/fuzz/`, `crates/lakko-transport/fuzz/`, `crates/lakko-tuf/fuzz/`, and `crates/lakko-call-jwt/fuzz/` are separate crates outside the main workspace (they need nightly + libfuzzer-sys). Targets live in `fuzz/fuzz_targets/*.rs`.
 
 Current targets:
 - **`lakko-mls/mls_message`** — `MlsMessageIn` wire-format parser (TLS codec)
@@ -154,6 +154,9 @@ Current targets:
 - **`lakko-tuf/signed_snapshot_from_json`** — outermost TUF metadata parser for the `Snapshot` role envelope
 - **`lakko-tuf/signed_targets_from_json`** — outermost TUF metadata parser for the `Targets` role envelope (widest deserialiser surface; carries the targets `BTreeMap`)
 - **`lakko-tuf/signed_timestamp_from_json`** — outermost TUF metadata parser for the `Timestamp` role envelope
+- **`lakko-call-jwt/jwt_parse_unverified`** — JWS Compact parser (3 dot-segments → base64url-decode → JSON-decode header + claims). UTF-8 gate at the harness edge keeps coverage focused on the base64 / JSON parser branches
+- **`lakko-call-jwt/jwt_verify_with_jwks`** — full JWS pipeline: signature path + kid lookup + algorithm-confusion check + base64 of signature + `Signature::from_bytes` length check + `exp` clock comparison. Fixed all-zero-seed single-key JWKS + fixed `now_secs` so the harness is reproducible and the fuzzer can learn the deterministic `kid`
+- **`lakko-call-jwt/jwks_parse`** — `parse_jwks(doc_bytes)` JSON decoder; the auth service publishes the JWKS at `/.well-known/jwks.json` and a compromised publish endpoint can serve arbitrary bytes
 
 The `fuzz_api` module in `lakko-mls` (marked `#[doc(hidden)]`) is the only public entry point for harnesses; it is not part of the supported public API.
 
