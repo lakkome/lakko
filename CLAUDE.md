@@ -128,7 +128,7 @@ just ci                        # everything CI does, locally
 
 ## Fuzz harnesses
 
-`crates/lakko-mls/fuzz/`, `crates/lakko-proto/fuzz/`, `crates/lakko-contacts/fuzz/`, `crates/lakko-channels/fuzz/`, `crates/lakko-transport/fuzz/`, `crates/lakko-tuf/fuzz/`, and `crates/lakko-call-jwt/fuzz/` are separate crates outside the main workspace (they need nightly + libfuzzer-sys). Targets live in `fuzz/fuzz_targets/*.rs`.
+`crates/lakko-mls/fuzz/`, `crates/lakko-proto/fuzz/`, `crates/lakko-contacts/fuzz/`, `crates/lakko-channels/fuzz/`, `crates/lakko-transport/fuzz/`, `crates/lakko-tuf/fuzz/`, `crates/lakko-call-jwt/fuzz/`, and `crates/lakko-backup/fuzz/` are separate crates outside the main workspace (they need nightly + libfuzzer-sys). Targets live in `fuzz/fuzz_targets/*.rs`.
 
 Current targets:
 - **`lakko-mls/mls_message`** — `MlsMessageIn` wire-format parser (TLS codec)
@@ -150,6 +150,9 @@ Current targets:
 - **`lakko-transport/shadowsocks_decode_request`** — SS-2022 client-to-server outer-header parser (Phase 5, T-10 surface; fixed-zero PSK + fresh ReplayWindow)
 - **`lakko-transport/shadowsocks_decode_response`** — SS-2022 server-to-client outer-header parser (fixed-zero PSK + fixed expected request-salt; exercises the `WrongResponseSalt` branch)
 - **`lakko-transport/rendezvous_decode_and_verify`** — full attacker-controlled rendezvous pipeline: `serde_json::from_slice::<BootstrapConfig>` → on Ok, `BootstrapConfig::verify` with fixed trust anchor + fixed `now` (T-4 / T-5 / T-7 / T-8 surfaces)
+- **`lakko-transport/ech_decode`** — ECH config list parser (T-12 surface; DNS HTTPS RR bytes are attacker-controlled if the DNS path is poisoned)
+- **`lakko-backup/envelope_v2_header_of`** — v2 backup envelope plaintext chain-header parse (G-11 surface; cheapest attacker-touchable path, no recovery phrase needed)
+- **`lakko-backup/envelope_v2_open`** — full v2 AEAD-open path under a fixed phrase (covers schema-version gate + salt/nonce slicing + chain-header decode + ct_len arithmetic + Argon2id KEK + AEAD-open)
 - **`lakko-tuf/signed_root_from_json`** — outermost TUF metadata parser for the `Root` role envelope (GA-5)
 - **`lakko-tuf/signed_snapshot_from_json`** — outermost TUF metadata parser for the `Snapshot` role envelope
 - **`lakko-tuf/signed_targets_from_json`** — outermost TUF metadata parser for the `Targets` role envelope (widest deserialiser surface; carries the targets `BTreeMap`)

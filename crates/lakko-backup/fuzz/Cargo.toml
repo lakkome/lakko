@@ -1,0 +1,40 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+[package]
+name = "lakko-backup-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+# Opt out of the parent workspace.
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+lakko-backup = { path = ".." }
+
+# The v2 envelope parser surface — both header_of (cheap
+# plaintext header parse, no phrase needed) and open_v2
+# (full AEAD-open path under a fixed phrase) accept
+# attacker-controlled bytes from the storage backend. A
+# panic / overflow / stack abuse here is a vulnerability
+# on the backup-restore path the user invokes when they
+# fail-over to a new device.
+
+[[bin]]
+name = "envelope_v2_header_of"
+path = "fuzz_targets/envelope_v2_header_of.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "envelope_v2_open"
+path = "fuzz_targets/envelope_v2_open.rs"
+test = false
+doc = false
+bench = false

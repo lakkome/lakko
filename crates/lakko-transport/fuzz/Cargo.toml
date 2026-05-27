@@ -51,3 +51,10 @@ path = "fuzz_targets/rendezvous_decode_and_verify.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "ech_decode"
+path = "fuzz_targets/ech_decode.rs"
+test = false
+doc = false
+bench = false
