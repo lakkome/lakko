@@ -259,6 +259,18 @@ impl ParticipantKey {
             .map_err(|e| Error::Crypto(format!("aead open: {e:?}")))
     }
 
+    /// Test-only — force the internal counter to a given
+    /// value so the exhaustion-edge tests can land on
+    /// `u32::MAX - 1` without running 4 billion seals.
+    /// Compiled out of the release crate via `cfg(test)` so
+    /// no production caller can reset the counter (which
+    /// would re-use a nonce under the same key — a critical
+    /// AEAD violation).
+    #[cfg(test)]
+    fn set_counter_for_test(&mut self, c: u32) {
+        self.counter = c;
+    }
+
     /// RFC 9605 §4.4 nonce composition. `nonce = salt XOR
     /// (frame_counter as u32 BE in the low 4 bytes)`. The
     /// high 8 bytes of the salt stay; the low 4 bytes XOR in
@@ -399,5 +411,83 @@ mod tests {
         let k1 = CallKey::from_seed([0x42; CALL_KEY_LEN]);
         let k2 = CallKey::from_seed([0x42; CALL_KEY_LEN]);
         assert_eq!(call_key_fingerprint(&k1), call_key_fingerprint(&k2));
+    }
+
+    // -----------------------------------------------------
+    // G-17 — frame-counter exhaustion edge.
+    //
+    // Per RFC 9605 §4.4 the SFrame counter is 32-bit. After
+    // u32::MAX successful seals the producer MUST refuse to
+    // emit another frame (a 33rd-bit overflow would re-use
+    // the AEAD nonce and break confidentiality). The
+    // production rotation path is an MLS commit — fresh
+    // epoch → fresh CallKey → fresh ParticipantKey → counter
+    // resets to 0. These tests use the test-only counter
+    // accessor to land near the edge in O(1) rather than
+    // grinding 4 billion seals.
+    // -----------------------------------------------------
+
+    #[test]
+    fn counter_exhaustion_returns_typed_error() {
+        let key = CallKey::from_seed([0xCC; CALL_KEY_LEN]);
+        let mut p = key.participant_key(0).unwrap();
+        // Land at u32::MAX - 2 — two seals must still
+        // succeed (counter increments to MAX - 1 then MAX),
+        // the third must refuse.
+        p.set_counter_for_test(u32::MAX - 2);
+        let (c1, _) = p.seal(b"aad", b"frame-A").expect("seal at MAX-2");
+        let (c2, _) = p.seal(b"aad", b"frame-B").expect("seal at MAX-1");
+        assert_eq!(c1, u32::MAX - 1);
+        assert_eq!(c2, u32::MAX);
+        // Counter is now at u32::MAX. Third attempt MUST
+        // refuse with the typed variant — no panic, no
+        // silent wrap, no nonce reuse.
+        match p.seal(b"aad", b"frame-C") {
+            Err(Error::CounterExhausted) => {},
+            Ok((ctr, _)) => panic!("must refuse 33rd-bit roll, got counter={ctr}"),
+            Err(other) => panic!("expected CounterExhausted, got {other:?}"),
+        }
+        // Counter accessor reflects the saturated state so
+        // a UI / metrics surface can see the exhaustion.
+        assert_eq!(p.counter(), u32::MAX);
+    }
+
+    #[test]
+    fn counter_max_frame_still_opens_on_receiver() {
+        // The last legal seal lands at frame_counter =
+        // u32::MAX. A receiver re-deriving the same
+        // ParticipantKey at the same epoch MUST authenticate
+        // it — no off-by-one at the nonce-composition
+        // boundary.
+        let key = CallKey::from_seed([0xCD; CALL_KEY_LEN]);
+        let mut sender = key.participant_key(0).unwrap();
+        let receiver = key.participant_key(0).unwrap();
+        sender.set_counter_for_test(u32::MAX - 1);
+        let (ctr, ct) = sender.seal(b"aad-edge", b"last-frame").expect("seal at MAX-1");
+        assert_eq!(ctr, u32::MAX);
+        let opened = receiver
+            .open(b"aad-edge", &ct, ctr)
+            .expect("open at MAX must authenticate");
+        assert_eq!(opened.as_slice(), b"last-frame");
+    }
+
+    #[test]
+    fn counter_exhaustion_is_idempotent() {
+        // After the first CounterExhausted, the producer
+        // must keep refusing on every subsequent call —
+        // never silently wrap around to 0 (which would
+        // re-use the salt-XOR-0 nonce already consumed by
+        // the very first seal in this key's lifetime).
+        let key = CallKey::from_seed([0xCE; CALL_KEY_LEN]);
+        let mut p = key.participant_key(0).unwrap();
+        p.set_counter_for_test(u32::MAX);
+        for attempt in 0..16 {
+            match p.seal(b"aad", b"junk") {
+                Err(Error::CounterExhausted) => {},
+                Ok(_) => panic!("attempt {attempt} unexpectedly succeeded"),
+                Err(other) => panic!("attempt {attempt}: expected CounterExhausted, got {other:?}"),
+            }
+            assert_eq!(p.counter(), u32::MAX, "counter must not wrap");
+        }
     }
 }

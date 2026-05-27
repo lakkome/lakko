@@ -171,16 +171,35 @@ challenge.
 
 ## Calls
 
-### G-17: Frame-counter exhaustion path is documented but not test-exercised
+### G-17: Frame-counter exhaustion path is test-exercised — **CLOSED**
 
 `ParticipantKey::seal` honours the RFC 9605 §4.4 32-bit
 counter bound and surfaces `Error::CounterExhausted` when
 exhausted; the caller is expected to trigger a fresh MLS
-commit to re-key. A dedicated test that drives the counter
-to 2^32 is infeasible in CI (≈ 4 billion seal ops). The
-property is reviewed by inspection;
-`crates/lakko-calls/src/sframe.rs::MAX_FRAME_COUNTER` is
-the canonical bound.
+commit to re-key. A dedicated test that grinds 4 billion
+seal ops is infeasible in CI; instead the test trio in
+`crates/lakko-calls/src/sframe.rs` uses a `#[cfg(test)]`-
+only `set_counter_for_test` accessor to land on the edge
+in O(1):
+
+- `counter_exhaustion_returns_typed_error` — counter at
+  `u32::MAX - 2`: two seals succeed landing on
+  `frame_counter = u32::MAX - 1` then `u32::MAX`; the
+  third refuses with `Error::CounterExhausted` (no panic,
+  no silent 33-bit wrap, no nonce re-use).
+- `counter_max_frame_still_opens_on_receiver` — the last
+  legal `frame_counter = u32::MAX` authenticates correctly
+  on a receiver re-deriving the same `ParticipantKey`
+  (no off-by-one in nonce composition at the boundary).
+- `counter_exhaustion_is_idempotent` — 16 successive seal
+  attempts past exhaustion all return the typed error and
+  the counter stays at `u32::MAX` (never wraps to 0,
+  which would re-use the very first nonce in this key's
+  lifetime).
+
+The test-only accessor is compiled out of the release
+crate via `cfg(test)` so no production caller can reset
+the counter and re-use an AEAD nonce.
 
 ### G-18: Overlap-window 1-second timer lives in platform code, not in the Rust core
 

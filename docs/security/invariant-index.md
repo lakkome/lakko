@@ -191,7 +191,7 @@ should not re-discover them.
 
 | ID   | Title |
 |---|---|
-| G-17 | Frame-counter exhaustion path is documented but not test-exercised |
+| G-17 | Frame-counter exhaustion path is test-exercised — **CLOSED** by 3-test trio in `crates/lakko-calls/src/sframe.rs` |
 | G-18 | Overlap-window 1-second timer lives in platform code, not in the Rust core |
 | G-19 | SFU-side JWT validation lands with 3b1c (LiveKit fork) — **superseded by ADR-0011 (str0m SFU); C-39 covers the new path** |
 | G-20 | Call recording is out of scope (deferred per ROADMAP 3c8) |
