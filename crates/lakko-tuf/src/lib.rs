@@ -283,6 +283,13 @@ pub struct RoleSpec {
     pub threshold: u32,
 }
 
+/// Convenience alias for the `Root.roles` map shape
+/// (`role_name` → role spec). Used so integration tests
+/// and production callers can name the type without
+/// pulling in `BTreeMap` + `String` + `RoleSpec`
+/// individually.
+pub type RoleMap = std::collections::BTreeMap<String, RoleSpec>;
+
 // =========================================================
 // Signed envelope
 // =========================================================
@@ -298,6 +305,51 @@ pub struct Signed<T> {
     /// One signature per authorised signer (each entry's
     /// `keyid` must be present in the role's `keyids`).
     pub signatures: Vec<Signature>,
+}
+
+impl<T: for<'de> Deserialize<'de>> Signed<T> {
+    /// Parse a `Signed<T>` envelope from raw JSON bytes.
+    /// The caller is expected to have pulled the four
+    /// TUF metadata files (root / snapshot / targets /
+    /// timestamp) over whatever transport they prefer
+    /// (HTTPS to the release mirror, or a sidechannel
+    /// for the very-first-install root) and to feed the
+    /// raw bytes through here.
+    ///
+    /// **Important**: this is **the only entry point**
+    /// that lets the caller construct a `Signed<T>` from
+    /// untrusted bytes — any subsequent `verify_chain`
+    /// / `verify_root_chain` calls work on the parsed
+    /// struct *after* this function has run. The
+    /// signature byte sequence is re-derived from the
+    /// `signed` sub-tree at verification time (not at
+    /// parse time), so a JSON encoder that produces
+    /// equivalent-but-not-byte-identical output (e.g.
+    /// reordered keys outside of `BTreeMap` fields)
+    /// still verifies correctly because the verifier
+    /// re-serialises the parsed struct through the
+    /// canonical encoder.
+    ///
+    /// # Errors
+    ///
+    /// [`TufError::CanonicalEncode`] on any JSON
+    /// deserialisation failure — the inner error
+    /// message points at the offending field.
+    pub fn from_json(json: &[u8]) -> Result<Self> {
+        serde_json::from_slice(json)
+            .map_err(|e| TufError::CanonicalEncode(format!("JSON parse: {e}")))
+    }
+
+    /// Encode the envelope back to JSON. Useful for
+    /// tests + audit-grep matching against the canonical
+    /// bytes the signature commits to.
+    pub fn to_json(&self) -> Result<Vec<u8>>
+    where
+        T: Serialize,
+    {
+        serde_json::to_vec(self)
+            .map_err(|e| TufError::CanonicalEncode(format!("JSON encode: {e}")))
+    }
 }
 
 // =========================================================
@@ -422,6 +474,17 @@ pub type TargetMap = BTreeMap<String, TargetMeta>;
 /// reference impl.
 fn canonical_json<T: Serialize>(body: &T) -> Result<Vec<u8>> {
     serde_json::to_vec(body).map_err(|e| TufError::CanonicalEncode(e.to_string()))
+}
+
+/// Test-only re-export of [`canonical_json`] so the
+/// integration test fixture in `tests/bootstrap.rs` can
+/// build a `Signed<T>` envelope with the exact signing
+/// bytes the in-crate verifier consumes. The `_for_test`
+/// suffix keeps this audit-grep clean — production
+/// callers never reach for it; they only consume parsed
+/// envelopes through `Signed::from_json`.
+pub fn canonical_json_for_test<T: Serialize>(body: &T) -> Result<Vec<u8>> {
+    canonical_json(body)
 }
 
 // =========================================================

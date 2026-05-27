@@ -22,3 +22,9 @@ thiserror.workspace = true
 chrono = { version = "0.4", default-features = false, features = ["serde", "alloc", "clock"] }
 hex = "0.4"
 lakko-crypto.workspace = true
+
+[dev-dependencies]
+# Integration tests in tests/ share hex with the main
+# crate's signing fixture; the dependency is hoisted to
+# dev-only so external consumers don't pull it twice.
+hex = "0.4"
