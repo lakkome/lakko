@@ -122,22 +122,92 @@ The reviewer is asked to verify:
 9. The **link-based call-invite pipeline** — wire codec in
    [`crates/lakko-contacts/src/call_invite.rs`](../../crates/lakko-contacts/src/call_invite.rs),
    joiner-side MLS orchestration in
-   [`crates/lakko-calls/src/link_invite.rs`](../../crates/lakko-calls/src/link_invite.rs) —
-   holds C-24..C-27 in [`calls.md`](./calls.md). Ed25519
+   [`crates/lakko-calls/src/link_invite.rs`](../../crates/lakko-calls/src/link_invite.rs),
+   owner-side dispatcher in
+   [`crates/lakko-contacts/src/incoming_envelope.rs`](../../crates/lakko-contacts/src/incoming_envelope.rs) —
+   holds C-24..C-36 in [`calls.md`](./calls.md). Ed25519
    signature over the canonical bytes, embedded one-time
    KeyPackage with bounded size, schema-version + length
-   gates, owner-pubkey-splicing attack rejected, and the
-   joiner-bootstrap path preserves the cross-party CallKey
-   seed agreement (C-1 re-asserted across the link flow).
-   V1 is **single-joiner**; multi-joiner support deferred
-   to 3c3-server (see G-21 / G-22 in
-   [`known-gaps.md`](./known-gaps.md)).
+   gates, owner-pubkey-splicing attack rejected. Both the
+   single-joiner and multi-party paths are in scope (G-21
+   and G-22 **closed** by C-33 KP-forward + C-35 multi-
+   party E2E; the single-joiner V1 caveat in older audit-
+   pack revisions is obsolete).
 
-Audit scope **out**: censorship-resistance transports
-(REALITY / MASQUE / Shadowsocks-2022) — these land in
-Phase 5 and get their own audit then. SFU-side surfaces
-(LiveKit fork, JWT validation, RPC) audit alongside the
-3b1 fork tree.
+10. The **SFU signaling layer** — typed wire protocol in
+    [`services/sfu/src/protocol.rs`](../../services/sfu/src/protocol.rs),
+    per-peer fanout in
+    [`services/sfu/src/signaling.rs`](../../services/sfu/src/signaling.rs) —
+    holds C-39 in [`calls.md`](./calls.md). Server does
+    not decode payload bytes (opacity invariant), cross-call
+    isolation enforced via per-call peer registry, JWT
+    admission gate at the WS upgrade. The fuzz harness at
+    `services/sfu/fuzz/client_frame_decode` backs the
+    "parser does not panic on attacker-controlled bytes"
+    sub-property. The original LiveKit-fork SFU plan is
+    **superseded** by ADR-0011; the Rust `str0m` SFU
+    signaling half is shipped, the routing-media half is
+    gated on G3-1/G3-2 (WebRTC client pod work).
+
+11. The **channels broadcast backend + crypto** (Phase 4) —
+    publisher-side seal in
+    [`crates/lakko-channels/src/post.rs`](../../crates/lakko-channels/src/post.rs),
+    subscriber-side HPKE seed envelope in
+    [`crates/lakko-channels/src/subscribe.rs`](../../crates/lakko-channels/src/subscribe.rs),
+    backend ciphertext-only storage at
+    [`services/channels/src/`](../../services/channels/src/) —
+    holds C-40..C-44 in [`calls.md`](./calls.md). Server
+    handles `ChannelPost` bytes as opaque (`lakko-channels`
+    crate is `dev-dep` only), atomic rotation under a SQL
+    transaction, MLS-derived publisher seed via the
+    `lakko/channel/v1` exporter label.
+
+12. The **TUF v1.1 auto-update verifier** —
+    [`crates/lakko-tuf/`](../../crates/lakko-tuf/). The
+    crate is feature-complete: chain-of-trust walk
+    (`verify_chain`), root rotation (`verify_root_chain`)
+    anchored at a binary-pinned trust anchor, target-bytes
+    verifier (`verify_target_bytes`), defense-in-depth
+    rejection of any `Targets.delegations` block, URL
+    convention module with path-traversal defence, 36 unit
+    + 5 integration tests, 4 fuzz targets covering the
+    JSON role envelope parsers. Network fetch glue lives
+    in [`lakko-transport::DohFetcher::fetch_pinned_bytes`](../../crates/lakko-transport/src/doh_fetch.rs)
+    (T-8 §7 sub-property).
+
+13. The **anti-censorship transport surface** — pluggable
+    transport trait, signed bootstrap rendezvous, DoH
+    fetcher with IP pinning, chunked ChaCha20-Poly1305
+    stream primitive, Shadowsocks-2022 outer header + TCP
+    wiring + listener API, ECH config list parser. Holds
+    T-1..T-12 in [`transport.md`](./transport.md). All
+    parser surfaces have fuzz targets at
+    [`crates/lakko-transport/fuzz/`](../../crates/lakko-transport/fuzz/).
+    REALITY / MASQUE / WebTransport remain `scaffold`
+    (`NotImplemented`), guarded by T-2 "scaffold transports
+    surface NotImplemented loudly" — they get their own
+    audit pass when the real implementations land.
+
+14. The **encrypted backup tamper-evident chain** — v2
+    envelope at
+    [`crates/lakko-backup/src/envelope.rs`](../../crates/lakko-backup/src/envelope.rs)
+    with chained `prev_hash` so a client holding any
+    previous version detects server-side rollback.
+    `header_of` / `open_v2` fuzz targets in
+    [`crates/lakko-backup/fuzz/`](../../crates/lakko-backup/fuzz/).
+    Closes G-11 for the client-with-state case; the
+    cross-version Merkle log for stateless clients
+    remains a known gap.
+
+Audit scope **out**: REALITY / MASQUE / WebTransport
+client-side real implementations (still scaffolds, tracked
+as G5-1 / G5-2 / G5-4). SFU media half (`str0m` routing,
+RTP fanout, simulcast) — gated on G3-1 / G3-2 client pods.
+Censorship lab DPI emulation (G5-7) — needs deploy infra.
+Reproducible-build cross-runner byte-identicality (GA-4) —
+advisory in CI, flip-to-gating waits on stable artefact.
+External crypto audit itself (GA-3), bug bounty programme
+(GA-6) — out-of-chat process work.
 
 ## Reproducibility
 
