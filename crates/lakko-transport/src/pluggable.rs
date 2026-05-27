@@ -327,6 +327,7 @@ mod tests {
             short_id_hex: hex::encode([0u8; 8]),
             allowed_inner_servers: vec![],
             remote: "example.invalid:443".into(),
+            require_server_response: true,
         })
         .expect("dummy_reality builds a valid-shape config")
     }

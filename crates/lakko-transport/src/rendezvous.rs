@@ -312,6 +312,7 @@ mod tests {
                 short_id_hex: "00".into(),
                 allowed_inner_servers: vec!["inner.lakko.me".into()],
                 remote: "1.2.3.4:443".into(),
+                require_server_response: true,
             })],
             signature_hex: String::new(),
         }

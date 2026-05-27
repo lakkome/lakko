@@ -196,12 +196,13 @@ pub async fn drive_handshake<S>(
     tag_secret: &RealityTagSecret,
     short_id: &RealityShortId,
     timestamp: RealityTimestamp,
+    require_server_response: bool,
 ) -> RealityDriverResult<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     let authenticator = compute(tag_secret, short_id, timestamp);
-    let mut state = HandshakeState::new();
+    let mut state = HandshakeState::new(require_server_response);
 
     while conn.is_handshaking() {
         // Outgoing side — drain rustls's pending writes,
@@ -275,8 +276,15 @@ struct HandshakeState {
     /// been patched with our authenticator.
     patched_client_hello: bool,
     /// `true` once the inbound ServerHello.Random has
-    /// been extracted and verified.
+    /// been extracted and verified (or skipped, if
+    /// `require_server_response = false`).
     verified_server_hello: bool,
+    /// Whether the inbound ServerHello.Random must verify
+    /// against our authenticator (mutual-auth posture). If
+    /// `false`, the driver skips the verification step and
+    /// trusts the server purely on the cover-TLS handshake
+    /// completing. See [`RealityConfig::require_server_response`].
+    require_server_response: bool,
     /// Buffer of inbound bytes that have arrived but not
     /// yet been fed to rustls. We hold onto them until we
     /// have at least one complete first record (for
@@ -285,10 +293,11 @@ struct HandshakeState {
 }
 
 impl HandshakeState {
-    fn new() -> Self {
+    fn new(require_server_response: bool) -> Self {
         Self {
             patched_client_hello: false,
             verified_server_hello: false,
+            require_server_response,
             inbound_buf: Vec::with_capacity(8 * 1024),
         }
     }
@@ -325,13 +334,21 @@ impl HandshakeState {
         if self.inbound_buf.len() < total_len {
             return Ok(());
         }
-        // We now have at least one full record. Peel
-        // off + extract + verify.
+        // We now have at least one full record. Peel off
+        // + (optionally) extract + verify. With
+        // `require_server_response = false` we just confirm
+        // the first record IS a syntactically-shaped
+        // ServerHello (via the extractor's wire-format
+        // checks) and skip the HMAC step — the server side
+        // currently cannot sign the random without an RNG
+        // override hook (S-5-reality-server-mutual-auth).
         let first_record = &self.inbound_buf[..total_len];
         let server_random = extract_server_hello_random(first_record)
             .map_err(RealityDriverError::ExtractServerHello)?;
-        verify_server_response(tag_secret, &short_id, client_timestamp, &server_random)
-            .map_err(RealityDriverError::ServerAuth)?;
+        if self.require_server_response {
+            verify_server_response(tag_secret, &short_id, client_timestamp, &server_random)
+                .map_err(RealityDriverError::ServerAuth)?;
+        }
         self.verified_server_hello = true;
         Ok(())
     }
@@ -386,7 +403,7 @@ mod tests {
 
     #[test]
     fn state_waits_for_record_header() {
-        let mut state = HandshakeState::new();
+        let mut state = HandshakeState::new(true);
         let (ts, sid, t) = fixtures();
         // Empty buffer — try should be a no-op success.
         state
@@ -404,7 +421,7 @@ mod tests {
 
     #[test]
     fn state_waits_for_complete_record() {
-        let mut state = HandshakeState::new();
+        let mut state = HandshakeState::new(true);
         let (ts, sid, t) = fixtures();
         // Full header but truncated body.
         state.inbound_buf.extend_from_slice(&[
@@ -420,7 +437,7 @@ mod tests {
 
     #[test]
     fn state_verifies_on_complete_correct_record() {
-        let mut state = HandshakeState::new();
+        let mut state = HandshakeState::new(true);
         let (tag_secret, short_id, ts) = fixtures();
         // Compute the EXPECTED server response under our
         // tag_secret. Use it as the ServerHello.Random.
@@ -437,7 +454,7 @@ mod tests {
 
     #[test]
     fn state_rejects_wrong_random() {
-        let mut state = HandshakeState::new();
+        let mut state = HandshakeState::new(true);
         let (tag_secret, short_id, ts) = fixtures();
         // ServerHello with random Random — simulates a
         // non-REALITY-aware peer (active probe forwarded
@@ -453,7 +470,7 @@ mod tests {
 
     #[test]
     fn state_rejects_buffer_overflow() {
-        let mut state = HandshakeState::new();
+        let mut state = HandshakeState::new(true);
         let (tag_secret, short_id, ts) = fixtures();
         // Pump a giant buffer of header-shaped bytes
         // that never yield a complete record (declared

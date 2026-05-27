@@ -856,12 +856,64 @@ Shipped pieces:
   connection on partial handshake (CLAUDE.md security
   invariant #4 — no silent downgrade).
 
-The client side is production-ready against a
-REALITY-aware server that knows the matching
-`tag_secret` for our `short_id`. The server-side
-counterpart lives in a separate sprint
-(`S-5-reality-server`); until that lands, lab
-validation requires a Lakko-flavoured REALITY server.
+**Server side (S-5-reality-server) shipped.** Mirror
+modules:
+[`reality/handshake.rs`](../../crates/lakko-transport/src/reality/handshake.rs)
+adds `extract_client_hello_session_id` +
+`patch_server_hello_random` (zero-allocation byte
+parsers matching the client-side helpers);
+[`reality/server_driver.rs`](../../crates/lakko-transport/src/reality/server_driver.rs)
+ships `build_reality_server_config` +
+`make_self_signed_cert(cover_sni)` (rcgen 0.13
+self-signed cert for the cover-SNI) +
+`drive_server_handshake` — async byte-intercept loop
+that extracts the inbound ClientHello.session_id,
+verifies it against a publisher-distributed allow-list
+of `(short_id, tag_secret)` pairs, and surfaces a
+typed `AcceptedClient { short_id, client_timestamp }`
+on success. Post-handshake
+[`reality/server_stream.rs::RealityServerConnection<S>`](../../crates/lakko-transport/src/reality/server_stream.rs)
+mirrors `RealityConnection` for the server half.
+[`reality/listener.rs::RealityListener::accept`](../../crates/lakko-transport/src/reality/listener.rs)
+is the inherent accept-loop API over
+`tokio::net::TcpListener`.
+
+**Known gap — `S-5-reality-rng-hook`.** The REALITY
+spec's authenticator (in ClientHello.session_id) AND
+mutual-auth response (in ServerHello.Random) both
+ride in TLS 1.3 fields that participate in the
+transcript hash (RFC 8446 §4.4.1). Patching those
+bytes AFTER rustls has computed its transcript
+desyncs key derivation between the two ends, surfacing
+as `Tls("cannot decrypt peer's message")` on the
+first application record. The fix is plumbing a
+custom `SecureRandom` into the rustls `CryptoProvider`
+so the REALITY-shaped bytes go INTO rustls (and thus
+into its transcript) before being written to the
+wire. The hook unlocks both the client-side full
+handshake AND server-side mutual-auth (patching the
+`ServerHello.Random` with `compute_server_response`).
+Until the hook lands:
+
+- the client driver supports an opt-out flag
+  [`RealityConfig::require_server_response`](../../crates/lakko-transport/src/reality/config.rs)
+  (default `true`, so opt-out is explicit);
+- REALITY in Lakko is therefore **one-way
+  authenticated** (the client proves it knows
+  `tag_secret`; the server does not have a way to
+  prove it back yet);
+- the negative E2E integration test
+  ([`crates/lakko-transport/tests/reality_e2e.rs::refuses_active_prober`](../../crates/lakko-transport/tests/reality_e2e.rs))
+  is green — proves the listener does NOT silently
+  admit peers whose session_id doesn't HMAC-verify;
+- the positive E2E round-trip
+  (`reality_v2_loopback_roundtrip`) is `#[ignore]`'d
+  on the gap label.
+
+The full Lakko REALITY protocol becomes operational
+end-to-end once `S-5-reality-rng-hook` lands. Tracked
+as a known gap in
+[`docs/security/known-gaps.md`](known-gaps.md).
 
 ### T-14: WebTransport client uses cert-hash pinning + u32-BE length-prefixed framing with MAX_FRAME_BYTES enforcement
 

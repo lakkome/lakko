@@ -168,10 +168,21 @@ impl Transport for RealityTransport {
 
         // 5. Drive the handshake to completion. On Ok the
         //    socket carries TLS-encrypted bytes and `conn`
-        //    is in transport-mode.
-        drive_handshake(&mut socket, &mut conn, &tag_secret, &short_id, timestamp)
-            .await
-            .map_err(map_driver_error)?;
+        //    is in transport-mode. Mutual-auth (verifying
+        //    the server's HMAC in ServerHello.Random) is
+        //    gated on `cfg.require_server_response` — see
+        //    `RealityConfig` doc + server_driver module
+        //    doc for the trade-off.
+        drive_handshake(
+            &mut socket,
+            &mut conn,
+            &tag_secret,
+            &short_id,
+            timestamp,
+            self.cfg.require_server_response,
+        )
+        .await
+        .map_err(map_driver_error)?;
 
         // 6. Wrap into the Connection-trait implementer.
         Ok(Box::new(RealityConnection::new(socket, conn)))
@@ -190,6 +201,7 @@ mod tests {
             short_id_hex: hex::encode([0xAB; 8]),
             allowed_inner_servers: vec!["lakko.me".into()],
             remote: "203.0.113.7:443".into(),
+            require_server_response: true,
         }
     }
 

@@ -64,6 +64,9 @@ pub(crate) mod cert;
 pub mod config;
 pub mod driver;
 pub mod handshake;
+pub mod listener;
+pub mod server_driver;
+pub mod server_stream;
 pub mod stream;
 mod transport;
 
@@ -81,7 +84,15 @@ pub use driver::{
     MAX_HANDSHAKE_BUFFER_BYTES,
 };
 pub use handshake::{
-    extract_server_hello_random, patch_client_hello_session_id, TlsWireError, RANDOM_LEN,
+    extract_client_hello_session_id, extract_server_hello_random, patch_client_hello_session_id,
+    patch_server_hello_random, TlsWireError, RANDOM_LEN,
 };
+pub use listener::RealityListener;
+pub use server_driver::{
+    build_reality_server_config, drive_server_handshake, make_self_signed_cert, AcceptedClient,
+    RealityServerDriverError, RealityServerDriverResult,
+    MAX_HANDSHAKE_BUFFER_BYTES as REALITY_SERVER_MAX_HANDSHAKE_BUFFER_BYTES,
+};
+pub use server_stream::RealityServerConnection;
 pub use stream::RealityConnection;
 pub use transport::RealityTransport;

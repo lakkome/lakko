@@ -111,6 +111,33 @@ pub struct RealityConfig {
     pub allowed_inner_servers: Vec<String>,
     /// Network endpoint (host:port) of the REALITY server.
     pub remote: String,
+    /// Whether the client must verify the REALITY v2
+    /// `server_response` HMAC carried in the
+    /// `ServerHello.Random` slot (mutual-auth posture).
+    ///
+    /// **Default: `true`** (security-first). The serde
+    /// attribute defaults the field to true for legacy
+    /// bootstrap configs that were minted before the field
+    /// existed.
+    ///
+    /// **When to set false**: only against a REALITY server
+    /// that has not yet implemented the
+    /// `S-5-reality-server-mutual-auth` sub-sprint (which
+    /// requires plumbing a custom `SecureRandom` into the
+    /// rustls `CryptoProvider` — see
+    /// [`crate::reality::server_driver`] doc). With
+    /// `require_server_response = false`, the client trusts
+    /// the server purely because the cover-SNI TLS
+    /// handshake completed; an in-line cover-site proxy is
+    /// indistinguishable from a real REALITY server. The
+    /// E2E client/server loopback test sets this to false
+    /// while the server side cannot yet sign the random.
+    #[serde(default = "default_require_server_response")]
+    pub require_server_response: bool,
+}
+
+const fn default_require_server_response() -> bool {
+    true
 }
 
 impl RealityConfig {
@@ -167,6 +194,7 @@ mod tests {
             short_id_hex: hex::encode([0xAB; SHORT_ID_LEN]),
             allowed_inner_servers: vec!["lakko.me".into()],
             remote: "203.0.113.7:443".into(),
+            require_server_response: true,
         }
     }
 

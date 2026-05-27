@@ -240,6 +240,89 @@ pub fn extract_server_hello_random(buf: &[u8]) -> TlsWireResult<[u8; RANDOM_LEN]
     Ok(out)
 }
 
+/// Extract the 32-byte `legacy_session_id` field from a TLS
+/// 1.3 ClientHello record. REALITY's server side reads its
+/// authenticator (short_id || timestamp || hmac_tag[..16])
+/// out of this slot to decide whether to accept the peer
+/// as a REALITY client or fall through to the cover-site
+/// proxy path.
+///
+/// The caller hands a buffer that contains exactly one
+/// complete TLS record carrying one ClientHello message.
+/// On success returns a copy of the 32-byte session_id.
+///
+/// REALITY pins the session_id length to 32 — the function
+/// refuses a ClientHello whose declared session_id length
+/// is anything else. A 0-length or shorter session_id from
+/// a real (non-REALITY) browser is therefore reported as
+/// `UnexpectedSessionIdLen`, which the server uses as the
+/// "this is not a REALITY peer" signal.
+///
+/// # Errors
+///
+/// See [`TlsWireError`].
+pub fn extract_client_hello_session_id(buf: &[u8]) -> TlsWireResult<[u8; AUTHENTICATOR_LEN]> {
+    parse_handshake_header(buf, HANDSHAKE_TYPE_CLIENT_HELLO)?;
+
+    // Bounds: we need at least the length byte +
+    // AUTHENTICATOR_LEN bytes after it.
+    let needed = CLIENT_HELLO_SESSION_ID_LEN_OFFSET + 1 + AUTHENTICATOR_LEN;
+    if buf.len() < needed {
+        return Err(TlsWireError::Truncated {
+            needed,
+            have: buf.len(),
+        });
+    }
+
+    let session_id_len = buf[CLIENT_HELLO_SESSION_ID_LEN_OFFSET];
+    if session_id_len as usize != AUTHENTICATOR_LEN {
+        return Err(TlsWireError::UnexpectedSessionIdLen {
+            got: session_id_len,
+        });
+    }
+
+    let src_start = CLIENT_HELLO_SESSION_ID_LEN_OFFSET + 1;
+    let src_end = src_start + AUTHENTICATOR_LEN;
+    let mut out = [0u8; AUTHENTICATOR_LEN];
+    out.copy_from_slice(&buf[src_start..src_end]);
+    Ok(out)
+}
+
+/// Overwrite the 32-byte `Random` field of a TLS 1.3
+/// ServerHello record with the REALITY v2 server-response
+/// bytes.
+///
+/// The caller hands a buffer that contains exactly one
+/// complete TLS record carrying one ServerHello message.
+/// On success the buffer is mutated in place; the rest of
+/// the record (cipher_suite, extensions, ...) is untouched.
+///
+/// This is the server-side mirror of
+/// [`extract_server_hello_random`]: the server computes
+/// `compute_server_response(tag_secret, short_id, ts)` and
+/// patches the result into the outgoing ServerHello so the
+/// REALITY-aware client can verify mutual-auth via
+/// `verify_server_response` before any application data
+/// flows.
+///
+/// # Errors
+///
+/// See [`TlsWireError`].
+pub fn patch_server_hello_random(buf: &mut [u8], random: &[u8; RANDOM_LEN]) -> TlsWireResult<()> {
+    parse_handshake_header(buf, HANDSHAKE_TYPE_SERVER_HELLO)?;
+
+    let end = SERVER_HELLO_RANDOM_OFFSET + RANDOM_LEN;
+    if buf.len() < end {
+        return Err(TlsWireError::Truncated {
+            needed: end,
+            have: buf.len(),
+        });
+    }
+
+    buf[SERVER_HELLO_RANDOM_OFFSET..end].copy_from_slice(random);
+    Ok(())
+}
+
 /// Shared prefix check — verifies the TLS record header
 /// plus the handshake header look like the expected
 /// message type. Returns `Ok(())` if everything up through
@@ -532,5 +615,196 @@ mod tests {
         let dst_start = CLIENT_HELLO_SESSION_ID_LEN_OFFSET + 1;
         let dst_end = dst_start + AUTHENTICATOR_LEN;
         assert_eq!(&wire[dst_start..dst_end], &auth.0);
+    }
+
+    // -------- extract_client_hello_session_id --------
+
+    #[test]
+    fn extract_session_id_round_trip() {
+        let mut original = [0u8; AUTHENTICATOR_LEN];
+        for (i, b) in original.iter_mut().enumerate() {
+            *b = u8::try_from(i).unwrap();
+        }
+        let wire = build_client_hello(original);
+        let extracted = extract_client_hello_session_id(&wire).expect("extract");
+        assert_eq!(extracted, original);
+    }
+
+    #[test]
+    fn extract_session_id_rejects_non_handshake_record() {
+        let mut wire = build_client_hello([0xAA; AUTHENTICATOR_LEN]);
+        wire[0] = 23; // application_data
+        match extract_client_hello_session_id(&wire) {
+            Err(TlsWireError::NotHandshake { got }) => assert_eq!(got, 23),
+            other => panic!("expected NotHandshake, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn extract_session_id_rejects_wrong_handshake_type() {
+        let mut wire = build_client_hello([0xAA; AUTHENTICATOR_LEN]);
+        wire[TLS_RECORD_HEADER_LEN] = HANDSHAKE_TYPE_SERVER_HELLO;
+        match extract_client_hello_session_id(&wire) {
+            Err(TlsWireError::WrongHandshakeType { got, expected }) => {
+                assert_eq!(got, HANDSHAKE_TYPE_SERVER_HELLO);
+                assert_eq!(expected, HANDSHAKE_TYPE_CLIENT_HELLO);
+            },
+            other => panic!("expected WrongHandshakeType, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn extract_session_id_rejects_short_session_id_length() {
+        // A genuine non-REALITY browser ClientHello with
+        // session_id_len = 0 or 16 should be reported via
+        // UnexpectedSessionIdLen — the server uses this
+        // discriminator to fall through to the cover-site
+        // proxy path.
+        let mut wire = build_client_hello([0xAA; AUTHENTICATOR_LEN]);
+        wire[CLIENT_HELLO_SESSION_ID_LEN_OFFSET] = 16;
+        match extract_client_hello_session_id(&wire) {
+            Err(TlsWireError::UnexpectedSessionIdLen { got }) => assert_eq!(got, 16),
+            other => panic!("expected UnexpectedSessionIdLen, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn extract_session_id_rejects_truncated_buffer() {
+        let wire = build_client_hello([0xAA; AUTHENTICATOR_LEN]);
+        let truncated = &wire[..30];
+        match extract_client_hello_session_id(truncated) {
+            Err(TlsWireError::Truncated { .. } | TlsWireError::RecordLengthMismatch { .. }) => {},
+            other => panic!("expected truncation rejection, got {other:?}"),
+        }
+    }
+
+    // -------- patch_server_hello_random --------
+
+    #[test]
+    fn patch_random_round_trip() {
+        let replacement = {
+            let mut r = [0u8; RANDOM_LEN];
+            for (i, b) in r.iter_mut().enumerate() {
+                *b = u8::try_from(i ^ 0x5A).unwrap();
+            }
+            r
+        };
+        let mut wire = build_server_hello([0u8; RANDOM_LEN]);
+        patch_server_hello_random(&mut wire, &replacement).expect("patch");
+
+        let end = SERVER_HELLO_RANDOM_OFFSET + RANDOM_LEN;
+        assert_eq!(&wire[SERVER_HELLO_RANDOM_OFFSET..end], &replacement);
+    }
+
+    #[test]
+    fn patch_random_preserves_everything_else() {
+        // Same posture as patch_preserves_everything_else
+        // for the ClientHello — everything outside the
+        // Random window must be bit-identical after the
+        // patch.
+        let mut wire = build_server_hello([0u8; RANDOM_LEN]);
+        let before = wire.clone();
+        patch_server_hello_random(&mut wire, &[0x42; RANDOM_LEN]).unwrap();
+        // Bytes up through the start of Random.
+        assert_eq!(
+            &wire[..SERVER_HELLO_RANDOM_OFFSET],
+            &before[..SERVER_HELLO_RANDOM_OFFSET]
+        );
+        // Bytes after the Random slot.
+        let after_start = SERVER_HELLO_RANDOM_OFFSET + RANDOM_LEN;
+        assert_eq!(&wire[after_start..], &before[after_start..]);
+    }
+
+    #[test]
+    fn patch_random_rejects_non_handshake_record() {
+        let mut wire = build_server_hello([0u8; RANDOM_LEN]);
+        wire[0] = 20; // change_cipher_spec
+        match patch_server_hello_random(&mut wire, &[0u8; RANDOM_LEN]) {
+            Err(TlsWireError::NotHandshake { got }) => assert_eq!(got, 20),
+            other => panic!("expected NotHandshake, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn patch_random_rejects_wrong_handshake_type() {
+        let mut wire = build_server_hello([0u8; RANDOM_LEN]);
+        wire[TLS_RECORD_HEADER_LEN] = HANDSHAKE_TYPE_CLIENT_HELLO;
+        match patch_server_hello_random(&mut wire, &[0u8; RANDOM_LEN]) {
+            Err(TlsWireError::WrongHandshakeType { got, expected }) => {
+                assert_eq!(got, HANDSHAKE_TYPE_CLIENT_HELLO);
+                assert_eq!(expected, HANDSHAKE_TYPE_SERVER_HELLO);
+            },
+            other => panic!("expected WrongHandshakeType, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn patch_random_rejects_truncated_buffer() {
+        let wire = build_server_hello([0u8; RANDOM_LEN]);
+        let mut truncated = wire[..20].to_vec();
+        match patch_server_hello_random(&mut truncated, &[0u8; RANDOM_LEN]) {
+            Err(TlsWireError::Truncated { .. } | TlsWireError::RecordLengthMismatch { .. }) => {},
+            other => panic!("expected truncation rejection, got {other:?}"),
+        }
+    }
+
+    /// Full server-side wire-format integration round-trip:
+    /// `compute_server_response` → `patch_server_hello_random`
+    /// → `extract_server_hello_random` → `verify_server_response`.
+    /// Pins the server-side wire contract end-to-end.
+    #[test]
+    fn server_side_round_trip_through_compute_patch_extract_verify() {
+        use crate::reality::authenticator::{
+            compute_server_response, verify_server_response, RealityTimestamp,
+        };
+        use crate::reality::config::{RealityShortId, RealityTagSecret};
+
+        let tag_secret = RealityTagSecret([0x42; 32]);
+        let short_id = RealityShortId([0xAB; 8]);
+        let ts = RealityTimestamp(1_700_000_000);
+
+        let server_response = compute_server_response(&tag_secret, &short_id, ts);
+
+        let mut wire = build_server_hello([0u8; RANDOM_LEN]);
+        patch_server_hello_random(&mut wire, &server_response).unwrap();
+
+        let extracted = extract_server_hello_random(&wire).unwrap();
+        verify_server_response(&tag_secret, &short_id, ts, &extracted)
+            .expect("server-response round-trip must verify");
+    }
+
+    /// Symmetric round-trip for the client-side authenticator
+    /// path on the server: extract a REALITY authenticator
+    /// from a ClientHello and verify it against the allowed
+    /// (short_id, tag_secret) pair list.
+    #[test]
+    fn server_side_extract_then_verify_authenticator() {
+        use crate::reality::authenticator::{
+            compute, verify, RealityAuthenticator, RealityTimestamp,
+        };
+        use crate::reality::config::{RealityShortId, RealityTagSecret};
+
+        let tag_secret = RealityTagSecret([0x99; 32]);
+        let short_id = RealityShortId([0x77; 8]);
+        let ts = RealityTimestamp(1_700_000_000);
+
+        let auth = compute(&tag_secret, &short_id, ts);
+
+        let mut wire = build_client_hello([0u8; AUTHENTICATOR_LEN]);
+        patch_client_hello_session_id(&mut wire, &auth.0).unwrap();
+
+        let extracted = extract_client_hello_session_id(&wire).unwrap();
+        // Wrap back into the typed authenticator + run the
+        // server-side verifier with a single-entry allow-set.
+        let allowed = [(short_id, tag_secret)];
+        verify(
+            &allowed,
+            &RealityAuthenticator(extracted),
+            ts,
+            // generous skew tolerance for the deterministic
+            // test clock
+            300,
+        )
+        .expect("server-side authenticator verify must succeed");
     }
 }
