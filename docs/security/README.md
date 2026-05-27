@@ -63,6 +63,14 @@ summarises so the docs and the implementation stay in sync
   knows are not audit-ready yet; reviewers should not
   re-discover them. Each entry has a tracking issue / ROADMAP
   link.
+- [`invariant-index.md`](./invariant-index.md) — consolidated
+  cross-reference for every numbered invariant (I-1..I-8,
+  C-1..C-44, T-1..T-11) and every tracked gap (G-1..G-26).
+  Reviewer cheat-sheet: open this page, find the invariant
+  ID, jump to the file + section that describes it. Also
+  documents the "how to add a new invariant" maintenance
+  procedure that keeps the index from drifting against the
+  source files.
 
 ## Audit scope inputs
 
