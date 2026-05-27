@@ -71,6 +71,8 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod urls;
+
 use std::collections::BTreeMap;
 
 use chrono::{DateTime, Utc};
@@ -232,6 +234,16 @@ pub enum TufError {
     /// revoke. Removed once delegation walk lands.
     #[error("targets role carries a `delegations` block — not yet supported")]
     DelegationsNotSupported,
+    /// A target name (key from `Targets.targets` map) is
+    /// not safe to plug into a URL. Surfaced by
+    /// [`urls::target_artifact_url`].
+    #[error("bad target name: {reason}")]
+    BadTargetName {
+        /// Static description of the rejected condition
+        /// (empty, NUL byte, path separator, contains
+        /// `..`).
+        reason: &'static str,
+    },
 }
 
 /// Convenience alias.
