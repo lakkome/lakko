@@ -64,11 +64,13 @@
 //!   exceeds a hard cap from arbitrary attacker input.
 
 pub mod adapter;
+pub mod wireup;
 
 pub use adapter::{
     LakkoHpkeSuiteAesGcm128, LakkoHpkeSuiteAesGcm256, LakkoHpkeSuiteChaCha20Poly1305,
     ALL_SUPPORTED_SUITES,
 };
+pub use wireup::{build_ech_mode_from_bytes, EchWireUpError};
 
 use thiserror::Error;
 

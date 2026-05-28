@@ -79,6 +79,14 @@ pub enum HttpError {
     /// pin set passed in).
     #[error("tls configuration error: {0}")]
     TlsConfig(#[source] PinError),
+
+    /// ECH config-list bytes supplied via
+    /// [`HttpTransportConfig::ech_config_list`] could not be turned
+    /// into a usable [`rustls::client::EchMode`]. Failure at
+    /// construction time — wire layer never starts. Refuses
+    /// silently downgrading to non-ECH per security invariant #4.
+    #[error("ECH configuration error: {0}")]
+    EchConfig(#[source] crate::ech::EchWireUpError),
 }
 
 impl From<PinError> for HttpError {
@@ -111,6 +119,24 @@ pub struct HttpTransportConfig {
     pub connect_timeout: Duration,
     /// Response size cap. Defaults to 64 MiB.
     pub max_response_bytes: usize,
+    /// Raw ECH config-list bytes (the DNS HTTPS `ech` parameter
+    /// payload). `None` (default) means no ECH — the standard
+    /// SPKI-pinned TLS path. `Some(bytes)` arms ECH on every
+    /// outgoing TLS handshake: the outer ClientHello carries
+    /// `cloudflare-ech.com` (or whichever public-name the published
+    /// config advertises) and the real SNI rides inside an
+    /// HPKE-sealed inner ClientHello.
+    ///
+    /// On construction the bytes are validated twice (our parser
+    /// in `crate::ech` + rustls's own parser inside
+    /// `EchConfig::new`); if either rejects, `with_config` returns
+    /// [`HttpError::EchConfig`] and refuses to build the
+    /// transport. There is no silent downgrade to non-ECH per the
+    /// "no fallback to non-E2EE" invariant family.
+    ///
+    /// Default: `None`. Populate via a signed bootstrap config or
+    /// a fresh DoH lookup.
+    pub ech_config_list: Option<Vec<u8>>,
 }
 
 impl Default for HttpTransportConfig {
@@ -119,6 +145,7 @@ impl Default for HttpTransportConfig {
             read_timeout: DEFAULT_READ_TIMEOUT,
             connect_timeout: DEFAULT_CONNECT_TIMEOUT,
             max_response_bytes: DEFAULT_MAX_RESPONSE_BYTES,
+            ech_config_list: None,
         }
     }
 }
@@ -152,10 +179,41 @@ impl HttpTransport {
         // takes over via `dangerous().set_certificate_verifier`.
         let _ = rustls::crypto::ring::default_provider().install_default();
         let verifier = PinnedVerifier::new(pins)?;
-        let tls = rustls::ClientConfig::builder()
-            .dangerous()
-            .with_custom_certificate_verifier(verifier.into_arc())
-            .with_no_client_auth();
+
+        // ECH branch — switch from `ClientConfig::builder()` (which
+        // returns `WantsVerifier` directly with default versions) to
+        // `builder_with_provider()` (which returns `WantsVersions`),
+        // so we can hop through `with_ech`. `with_ech` returns
+        // `WantsVerifier` just like `with_safe_default_protocol_versions`,
+        // so the rest of the chain is identical.
+        let provider = std::sync::Arc::new(rustls::crypto::ring::default_provider());
+        let tls = if let Some(ech_bytes) = config.ech_config_list.as_deref() {
+            let mode =
+                crate::ech::build_ech_mode_from_bytes(ech_bytes).map_err(HttpError::EchConfig)?;
+            rustls::ClientConfig::builder_with_provider(provider)
+                .with_ech(mode)
+                .map_err(|e| {
+                    // rustls rejected the EchMode itself (e.g. unsupported
+                    // version after `EchConfig::new` already accepted it —
+                    // shouldn't fire today, but the surface is fallible).
+                    HttpError::EchConfig(crate::ech::EchWireUpError::RustlsRefused(e.to_string()))
+                })?
+                .dangerous()
+                .with_custom_certificate_verifier(verifier.into_arc())
+                .with_no_client_auth()
+        } else {
+            rustls::ClientConfig::builder_with_provider(provider)
+                .with_safe_default_protocol_versions()
+                .map_err(|e| {
+                    // Defensive — `default_provider` and default versions
+                    // are known compatible. A failure here means a broken
+                    // build, not a runtime condition.
+                    HttpError::EchConfig(crate::ech::EchWireUpError::RustlsRefused(e.to_string()))
+                })?
+                .dangerous()
+                .with_custom_certificate_verifier(verifier.into_arc())
+                .with_no_client_auth()
+        };
 
         let client = Client::builder()
             .use_preconfigured_tls(tls)

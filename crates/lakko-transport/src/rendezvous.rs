@@ -494,6 +494,7 @@ mod tests {
                 // not SPKI pinning). Test value is opaque — only
                 // the JSON-round-trip shape is asserted here.
                 cert_hashes_b64: vec!["pin-a".into(), "pin-b".into()],
+                ech_config_list_b64: None,
             }));
         cfg.sign(&signer).unwrap();
         let json = serde_json::to_string(&cfg).unwrap();

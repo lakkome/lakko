@@ -86,6 +86,24 @@ pub struct WebTransportConfig {
     /// empty, the client falls back to system CA roots —
     /// production deployments SHOULD populate this.
     pub cert_hashes_b64: Vec<String>,
+    /// Optional ECH config-list bytes, base64 (`STANDARD_NO_PAD`).
+    /// When `Some`, the WebTransport handshake will arm ECH:
+    /// the outer ClientHello SNI carries the cover-site name
+    /// from the published config, and the inner ClientHello
+    /// rides inside an HPKE-sealed envelope. When `None`
+    /// (the default), the transport behaves as before —
+    /// either system-roots or cert-hash-pinned trust.
+    ///
+    /// The bytes are validated twice at construction
+    /// (`parse()`): our defense-in-depth parser
+    /// ([`crate::ech::parse_ech_config_list`]) first, then
+    /// rustls's own parser inside
+    /// `rustls::client::EchConfig::new`. If either rejects,
+    /// `parse()` returns `BadEchConfigList`. There is no
+    /// silent downgrade to non-ECH per security invariant
+    /// #4.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ech_config_list_b64: Option<String>,
 }
 
 /// Failure modes the WebTransport transport surfaces at
@@ -121,6 +139,23 @@ pub enum WebTransportConfigError {
     /// Client construction failed inside `web-transport-quinn`.
     #[error("client build failed: {0}")]
     ClientBuild(String),
+    /// `ech_config_list_b64` did not base64-decode.
+    #[error("ech_config_list_b64 base64 decode failed")]
+    BadEchConfigListBase64,
+    /// `ech_config_list_b64` decoded but failed the
+    /// defense-in-depth parser or rustls's own parser.
+    #[error("ech_config_list_b64 rejected: {0}")]
+    BadEchConfigList(#[source] crate::ech::EchWireUpError),
+    /// ECH is enabled but `cert_hashes_b64` is empty.
+    /// Under ECH the outer cert is the cover-site's; we
+    /// require an explicit pin set on that cert rather
+    /// than silently falling back to system CA roots —
+    /// otherwise a compromised CA fronting the cover SNI
+    /// could MITM the entire transport. Production
+    /// deployments arming ECH must also publish the
+    /// cover-site's expected cert hash.
+    #[error("ech_config_list_b64 requires non-empty cert_hashes_b64")]
+    EchRequiresCertHashes,
 }
 
 impl WebTransportConfig {
@@ -157,7 +192,41 @@ impl WebTransportConfig {
             hashes.push(arr);
         }
 
-        Ok(ParsedConfig { url, hashes })
+        // ECH config — eager parse so we know at construction
+        // whether the bootstrap config is usable. We hold the
+        // raw bytes (not the assembled `EchMode`, because
+        // `EchMode` is not `Clone` and we need the option to
+        // build one per connect).
+        let ech_bytes = self
+            .ech_config_list_b64
+            .as_deref()
+            .map(|s| {
+                let bytes = B64
+                    .decode(s.as_bytes())
+                    .map_err(|_| WebTransportConfigError::BadEchConfigListBase64)?;
+                // Defense-in-depth — `build_ech_mode_from_bytes`
+                // would catch the same conditions at connect
+                // time, but doing it here surfaces a bad
+                // publisher config at boot rather than on first
+                // dial.
+                crate::ech::build_ech_mode_from_bytes(&bytes)
+                    .map_err(WebTransportConfigError::BadEchConfigList)?;
+                Ok::<_, WebTransportConfigError>(bytes)
+            })
+            .transpose()?;
+
+        // Under ECH we require explicit cover-site cert pins
+        // — see `EchRequiresCertHashes` doc for the threat
+        // model.
+        if ech_bytes.is_some() && hashes.is_empty() {
+            return Err(WebTransportConfigError::EchRequiresCertHashes);
+        }
+
+        Ok(ParsedConfig {
+            url,
+            hashes,
+            ech_bytes,
+        })
     }
 }
 
@@ -169,6 +238,11 @@ pub struct ParsedConfig {
     pub url: Url,
     /// 32-byte SHA-256 cert-hash pins.
     pub hashes: Vec<[u8; CERT_HASH_LEN]>,
+    /// Raw ECH config-list bytes if ECH was configured;
+    /// already validated by [`crate::ech::build_ech_mode_from_bytes`]
+    /// during `parse`. Held as bytes (not as `EchMode`)
+    /// because rustls's `EchMode` is not `Clone`.
+    pub ech_bytes: Option<Vec<u8>>,
 }
 
 /// WebTransport `Transport` impl.
@@ -225,7 +299,23 @@ impl Transport for WebTransportPt {
 }
 
 async fn open_session(parsed: &ParsedConfig) -> Result<Session> {
-    let client = if parsed.hashes.is_empty() {
+    let client = if let Some(ech_bytes) = parsed.ech_bytes.as_deref() {
+        // ECH-armed path — `web-transport-quinn::ClientBuilder`
+        // does not expose `with_ech`, so we bypass it and
+        // assemble the rustls/quinn stack manually. The
+        // semantics we preserve from ClientBuilder:
+        //
+        // - TLS 1.3-only (ECH itself forces this; we'd pin
+        //   it anyway for a W3C-conforming WebTransport client);
+        // - the W3C `serverCertificateHashes` verifier (we
+        //   replicate `ServerFingerprints` as `CertHashVerifier`
+        //   below — `ServerFingerprints` is private to
+        //   web-transport-quinn);
+        // - the WebTransport ALPN identifier;
+        // - the same `[::]:0` UDP-bind quinn::Endpoint
+        //   ClientBuilder uses internally.
+        build_ech_armed_client(parsed, ech_bytes)?
+    } else if parsed.hashes.is_empty() {
         // System-roots fallback — production deployments
         // SHOULD pin via `cert_hashes_b64`; this branch is
         // a convenience for development against a
@@ -246,6 +336,134 @@ async fn open_session(parsed: &ParsedConfig) -> Result<Session> {
         .connect(parsed.url.clone())
         .await
         .map_err(|e| Error::Io(format!("connect: {e}")))
+}
+
+/// Build a `web_transport_quinn::Client` whose underlying
+/// rustls::ClientConfig has ECH armed via the Lakko HPKE
+/// adapter. Optionally also pins the server certificate
+/// hash, mirroring the W3C `serverCertificateHashes` mode
+/// the non-ECH branch uses.
+///
+/// This function exists because `web-transport-quinn 0.11`
+/// does not surface ECH; we go through `Client::new(...)`
+/// with a hand-built `quinn::ClientConfig`.
+fn build_ech_armed_client(
+    parsed: &ParsedConfig,
+    ech_bytes: &[u8],
+) -> Result<web_transport_quinn::Client> {
+    use quinn::crypto::rustls::QuicClientConfig;
+
+    // `parse` already refused the empty-hashes branch when
+    // ECH was armed; the invariant is enforced upstream.
+    debug_assert!(!parsed.hashes.is_empty());
+
+    let mode = crate::ech::build_ech_mode_from_bytes(ech_bytes)
+        .map_err(|e| Error::Config(format!("webtransport ECH: {e}")))?;
+
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let verifier = Arc::new(CertHashVerifier::new(
+        provider.clone(),
+        parsed.hashes.clone(),
+    ));
+
+    let mut crypto = rustls::ClientConfig::builder_with_provider(provider)
+        .with_ech(mode)
+        .map_err(|e| Error::Config(format!("rustls with_ech: {e}")))?
+        .dangerous()
+        .with_custom_certificate_verifier(verifier)
+        .with_no_client_auth();
+    crypto.alpn_protocols = vec![web_transport_quinn::ALPN.as_bytes().to_vec()];
+
+    let quic = QuicClientConfig::try_from(crypto)
+        .map_err(|e| Error::Config(format!("QuicClientConfig::try_from: {e}")))?;
+    let quinn_cfg = quinn::ClientConfig::new(Arc::new(quic));
+
+    let bind_addr = "[::]:0"
+        .parse::<std::net::SocketAddr>()
+        .expect("hardcoded bind addr is valid");
+    let endpoint = quinn::Endpoint::client(bind_addr)
+        .map_err(|e| Error::Io(format!("quinn::Endpoint::client: {e}")))?;
+    Ok(web_transport_quinn::Client::new(endpoint, quinn_cfg))
+}
+
+/// `ServerCertVerifier` that accepts the leaf cert iff its
+/// SHA-256 hash matches one of the published pins.
+/// Replicates the W3C `serverCertificateHashes` semantics
+/// that `web-transport-quinn`'s private `ServerFingerprints`
+/// implements — we cannot re-use that type because it is
+/// not `pub`. Lives here so the ECH-armed code path has a
+/// drop-in cert verifier without pulling another dep.
+#[derive(Debug)]
+struct CertHashVerifier {
+    provider: Arc<rustls::crypto::CryptoProvider>,
+    fingerprints: Vec<[u8; CERT_HASH_LEN]>,
+}
+
+impl CertHashVerifier {
+    fn new(
+        provider: Arc<rustls::crypto::CryptoProvider>,
+        fingerprints: Vec<[u8; CERT_HASH_LEN]>,
+    ) -> Self {
+        Self {
+            provider,
+            fingerprints,
+        }
+    }
+}
+
+impl rustls::client::danger::ServerCertVerifier for CertHashVerifier {
+    fn verify_server_cert(
+        &self,
+        end_entity: &rustls::pki_types::CertificateDer<'_>,
+        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
+        _server_name: &rustls::pki_types::ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: rustls::pki_types::UnixTime,
+    ) -> std::result::Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        use sha2::{Digest, Sha256};
+        let hash = Sha256::digest(end_entity.as_ref());
+        if self.fingerprints.iter().any(|fp| fp[..] == hash[..]) {
+            Ok(rustls::client::danger::ServerCertVerified::assertion())
+        } else {
+            Err(rustls::Error::InvalidCertificate(
+                rustls::CertificateError::UnknownIssuer,
+            ))
+        }
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &self.provider.signature_verification_algorithms,
+        )
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &self.provider.signature_verification_algorithms,
+        )
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        self.provider
+            .signature_verification_algorithms
+            .supported_schemes()
+    }
 }
 
 /// `Connection` impl over a single WebTransport
@@ -354,6 +572,7 @@ mod tests {
         WebTransportConfig {
             url: "https://lakko.me/wt".into(),
             cert_hashes_b64: vec![B64.encode([0u8; 32])],
+            ech_config_list_b64: None,
         }
     }
 
