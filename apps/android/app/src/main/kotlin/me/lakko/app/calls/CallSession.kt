@@ -3,10 +3,17 @@
 
 package me.lakko.app.calls
 
+import android.content.Context
 import java.security.SecureRandom
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
+import org.webrtc.PeerConnection
 import uniffi.lakko_ffi_uniffi.FfiCallEndReason
 import uniffi.lakko_ffi_uniffi.FfiCallMediaFlags
 import uniffi.lakko_ffi_uniffi.FfiCallSignalingBody
@@ -14,24 +21,48 @@ import uniffi.lakko_ffi_uniffi.composeCallSignaling
 import uniffi.lakko_ffi_uniffi.parseCallSignaling
 
 /**
- * 1×1 P2P call session on Android (Phase 3a10
- * scaffolding).
+ * 1×1 P2P call session on Android.
  *
  * Mirror of:
  *   * `apps/ios/Lakko/Calls/CallSession.swift`
  *   * `apps/web/src/calls/call-session.ts`
  *
- * ## Phase 3a10 scope
+ * ## G3-2 status
  *
- * Signaling-only today — the real `org.webrtc:google-webrtc`
- * pod integration lands in 3a10-followup. The UI surface
- * (call button + state overlay in
- * `apps/android/.../ui/chat/ChatScreen.kt`) is fully wired
- * against this class; once the WebRTC stack integrates,
- * only `dial` / `acceptCall` need to grow the live
- * media-stream branches.
+ * Real WebRTC integration: [dial] / [acceptCall] now build
+ * real SDP via [WebRtcPeerConnection], local ICE candidates
+ * are emitted through the `IceCandidate` signaling body, and
+ * the underlying PeerConnection's connection-state
+ * transitions drive [WebCallState]. Audio-only on first pass
+ * — video plumbing extension point lives at
+ * [WebRtcPeerConnection.addLocalVideoTrack], wired by a
+ * follow-up (`G3-2-video`) once the Compose preview surface
+ * is in place.
+ *
+ * ## SFrame deferred
+ *
+ * Today's transport rides plain SRTP (per-hop encryption
+ * only). The end-to-end SFrame layer keyed off the call's
+ * MLS exporter arrives in a follow-up sub-sprint
+ * (`G3-2-sframe`); the Android call surface is **not yet
+ * E2EE-complete** despite the wire saying so. This caveat
+ * is repeated verbatim in `docs/security/calls.md` so the
+ * audit pack doesn't double-count.
+ *
+ * ## Threading
+ *
+ * Public methods are not annotated `@MainThread` but the
+ * intended caller is the Compose UI thread. State flows
+ * are read-only `StateFlow`s; mutations are funneled
+ * through the constructor-supplied `onOutboundSignaling`
+ * callback so the caller controls when bytes leave the
+ * session. libwebrtc observer callbacks fire on internal
+ * worker threads — the wrapper bounces them back into a
+ * session-owned [CoroutineScope] running on `Dispatchers.Main`
+ * before mutating any [StateFlow].
  */
 public class CallSession(
+    private val applicationContext: Context,
     public val callId: ByteArray,
     private val onOutboundSignaling: (ByteArray) -> Unit,
 ) {
@@ -49,6 +80,30 @@ public class CallSession(
     public val endReason: StateFlow<WebCallEndReason?> = mutableEndReason.asStateFlow()
 
     private var isOfferer: Boolean = false
+
+    /**
+     * Stored remote SDP offer between `Ringing` →
+     * `Connecting`. [acceptCall] reads it to build the
+     * answer.
+     */
+    private var pendingRemoteOfferSdp: String? = null
+
+    /**
+     * The WebRTC pod. Lazily constructed inside [dial] /
+     * [acceptCall] so an `Idle` session pays nothing.
+     */
+    private var rtc: WebRtcPeerConnection? = null
+
+    /**
+     * Session-owned scope. Every coroutine launched from
+     * delegate callbacks (which fire on libwebrtc's worker
+     * threads) hops into [Dispatchers.Main] via this scope
+     * so [StateFlow] mutations stay on the main thread.
+     * [endLocal] / [endRemote] cancel it before nulling the
+     * PeerConnection.
+     */
+    private val scope: CoroutineScope =
+        CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
     public companion object {
         /** Generate a fresh 16-byte call_id. */
@@ -76,29 +131,44 @@ public class CallSession(
     // ----------------------------------------------------------------
 
     /**
-     * Outbound side: dial. In 3a10 scaffolding this
-     * immediately emits the Offer with a placeholder SDP
-     * the receiver-side WebRTC stack accepts but produces
-     * no audio. Followup replaces with real
-     * `PeerConnection.createOffer`.
+     * Outbound side: dial. Spins up [WebRtcPeerConnection],
+     * attaches a local audio track, generates a real SDP
+     * offer and ships it via the existing signaling pipe.
      */
     public fun dial(audio: Boolean = true, video: Boolean = false) {
         if (mutableState.value != WebCallState.Idle) return
         isOfferer = true
         mutableState.value = WebCallState.Outgoing
-        try {
-            val bytes = composeCallSignaling(
-                FfiCallSignalingBody.Offer(
-                    callId = callId,
-                    sdp = placeholderOfferSdp(),
-                    createdAtMs = System.currentTimeMillis().toULong(),
-                    media = FfiCallMediaFlags(audio = audio, video = video),
-                ),
-            )
-            onOutboundSignaling(bytes)
-        } catch (cause: Throwable) {
-            android.util.Log.w("CallSession", "dial compose failed", cause)
+
+        val rtc = WebRtcPeerConnection(applicationContext)
+        if (!rtc.isReady) {
+            android.util.Log.w("CallSession", "dial: PeerConnection allocation failed")
             endLocal(WebCallEndReason.Error)
+            return
+        }
+        installDelegate(rtc)
+        rtc.addLocalAudioTrack(enabled = audio)
+        // Video track extension point: when the Compose
+        // preview surface lands (G3-2-video), pass the
+        // capture-session source here. Today audio-only.
+        this.rtc = rtc
+
+        scope.launch {
+            try {
+                val offerSdp = rtc.createOffer(audio = audio, video = video)
+                val bytes = composeCallSignaling(
+                    FfiCallSignalingBody.Offer(
+                        callId = callId,
+                        sdp = offerSdp,
+                        createdAtMs = System.currentTimeMillis().toULong(),
+                        media = FfiCallMediaFlags(audio = audio, video = video),
+                    ),
+                )
+                onOutboundSignaling(bytes)
+            } catch (cause: Throwable) {
+                android.util.Log.w("CallSession", "dial offer-build failed", cause)
+                endLocal(WebCallEndReason.Error)
+            }
         }
     }
 
@@ -107,24 +177,47 @@ public class CallSession(
         endLocal(reason)
     }
 
-    /** Inbound side: accept the ringing call. */
+    /** Inbound side: accept the ringing call. Builds the SDP
+     *  answer against the stored remote offer + ships it. */
     public fun acceptCall() {
         if (mutableState.value != WebCallState.Ringing || isOfferer) return
-        try {
-            val bytes = composeCallSignaling(
-                FfiCallSignalingBody.Answer(
-                    callId = callId,
-                    sdp = placeholderAnswerSdp(),
-                ),
-            )
-            onOutboundSignaling(bytes)
-            mutableState.value = WebCallState.Connecting
-            // Phase 3a10 scaffolding — synthesise
-            // Connected. Real ICE pair lands in followup.
-            mutableState.value = WebCallState.Connected
-        } catch (cause: Throwable) {
-            android.util.Log.w("CallSession", "accept compose failed", cause)
+        val offerSdp = pendingRemoteOfferSdp
+        if (offerSdp == null) {
+            android.util.Log.w("CallSession", "acceptCall: pendingRemoteOfferSdp missing — race?")
             endLocal(WebCallEndReason.Error)
+            return
+        }
+
+        val rtc = WebRtcPeerConnection(applicationContext)
+        if (!rtc.isReady) {
+            android.util.Log.w("CallSession", "acceptCall: PeerConnection allocation failed")
+            endLocal(WebCallEndReason.Error)
+            return
+        }
+        installDelegate(rtc)
+        // Mic on by default for the answerer; future UI may
+        // expose "accept muted".
+        rtc.addLocalAudioTrack(enabled = true)
+        this.rtc = rtc
+
+        mutableState.value = WebCallState.Connecting
+
+        scope.launch {
+            try {
+                val answerSdp = rtc.createAnswer(remoteOfferSdp = offerSdp)
+                val bytes = composeCallSignaling(
+                    FfiCallSignalingBody.Answer(
+                        callId = callId,
+                        sdp = answerSdp,
+                    ),
+                )
+                onOutboundSignaling(bytes)
+                // Don't synthesise Connected here — wait for
+                // the real PeerConnection state transition.
+            } catch (cause: Throwable) {
+                android.util.Log.w("CallSession", "accept compose failed", cause)
+                endLocal(WebCallEndReason.Error)
+            }
         }
     }
 
@@ -138,25 +231,40 @@ public class CallSession(
     // ----------------------------------------------------------------
 
     /** Route a parsed signaling payload into the state
-     *  machine. Caller has already verified call_id
-     *  matches this session. */
+     *  machine. Caller has already verified call_id matches
+     *  this session. */
     public fun applyIncomingSignaling(body: FfiCallSignalingBody) {
         when (body) {
             is FfiCallSignalingBody.Offer -> {
                 if (mutableState.value != WebCallState.Idle) return
                 isOfferer = false
+                pendingRemoteOfferSdp = body.sdp
                 mutableState.value = WebCallState.Ringing
             }
             is FfiCallSignalingBody.Answer -> {
                 if (mutableState.value != WebCallState.Outgoing) return
                 mutableState.value = WebCallState.Connecting
-                // Phase 3a10 scaffolding — synthesise
-                // Connected.
-                mutableState.value = WebCallState.Connected
+                val rtc = this.rtc ?: return
+                scope.launch {
+                    try {
+                        rtc.applyRemoteAnswer(body.sdp)
+                    } catch (cause: Throwable) {
+                        android.util.Log.w("CallSession", "applyRemoteAnswer failed", cause)
+                        endLocal(WebCallEndReason.Error)
+                    }
+                }
             }
             is FfiCallSignalingBody.IceCandidate -> {
-                // Phase 3a10 scaffolding — no-op until pod
-                // lands.
+                val rtc = this.rtc ?: return
+                // sdpMLineIndex on the wire is UInt32; libwebrtc
+                // takes Int. The valid range for an SDP m-line
+                // index is 0..255 in practice, so the cast is
+                // loss-free.
+                rtc.addRemoteCandidate(
+                    sdpMid = body.sdpMid,
+                    sdpMLineIndex = body.sdpMLineIndex.toInt(),
+                    candidateSdp = body.candidate,
+                )
             }
             is FfiCallSignalingBody.End -> {
                 if (mutableState.value == WebCallState.Done) return
@@ -165,8 +273,8 @@ public class CallSession(
             is FfiCallSignalingBody.GroupStart,
             is FfiCallSignalingBody.GroupJoin,
             is FfiCallSignalingBody.GroupLeave -> {
-                // Group-call signaling (Phase 3c2) is
-                // handled by the in-chat joinable-call card
+                // Group-call signaling (Phase 3c2) is handled
+                // by the in-chat joinable-call card
                 // dispatcher, not by the 1×1 [CallSession].
                 // The chat-route owner filters these away
                 // from the 1×1 sink before they reach this
@@ -177,8 +285,85 @@ public class CallSession(
     }
 
     // ----------------------------------------------------------------
-    // Internal
+    // Internal — WebRTC delegate plumbing
     // ----------------------------------------------------------------
+
+    /** Wire the wrapper's typed callbacks back into the
+     *  session. libwebrtc fires them on internal worker
+     *  threads; we hop into [scope] (main dispatcher) before
+     *  touching [StateFlow]. */
+    private fun installDelegate(rtc: WebRtcPeerConnection) {
+        rtc.installDelegate(
+            WebRtcPeerConnection.Delegate(
+                onLocalCandidate = { sdpMid, sdpMLineIndex, candidateSdp ->
+                    // Hop to main dispatcher before composing
+                    // — UniFFI is thread-safe but the resulting
+                    // bytes must be handed to the caller's
+                    // signaling sink on the main thread to
+                    // preserve ordering w.r.t. UI state.
+                    scope.launch {
+                        shipLocalCandidate(sdpMid, sdpMLineIndex, candidateSdp)
+                    }
+                },
+                onConnectionState = { newState ->
+                    scope.launch { handleConnectionState(newState) }
+                },
+            )
+        )
+    }
+
+    private fun shipLocalCandidate(
+        sdpMid: String,
+        sdpMLineIndex: Int,
+        candidateSdp: String,
+    ) {
+        try {
+            val bytes = composeCallSignaling(
+                FfiCallSignalingBody.IceCandidate(
+                    callId = callId,
+                    candidate = candidateSdp,
+                    sdpMid = sdpMid,
+                    sdpMLineIndex = sdpMLineIndex.toUInt(),
+                ),
+            )
+            onOutboundSignaling(bytes)
+        } catch (cause: Throwable) {
+            android.util.Log.w("CallSession", "shipLocalCandidate failed", cause)
+        }
+    }
+
+    /** Map PeerConnection.PeerConnectionState transitions
+     *  to the public [WebCallState]. */
+    private fun handleConnectionState(newState: PeerConnection.PeerConnectionState) {
+        when (newState) {
+            PeerConnection.PeerConnectionState.CONNECTED -> {
+                if (mutableState.value == WebCallState.Connecting ||
+                    mutableState.value == WebCallState.Outgoing
+                ) {
+                    mutableState.value = WebCallState.Connected
+                }
+            }
+            PeerConnection.PeerConnectionState.FAILED -> {
+                endLocal(WebCallEndReason.Error)
+            }
+            PeerConnection.PeerConnectionState.DISCONNECTED -> {
+                // libwebrtc sometimes flaps disconnected →
+                // connected on a transient network glitch
+                // (e.g. wifi → LTE handover). Don't tear
+                // down — let the wrapper recover. The
+                // upper-layer watchdog handles permanent
+                // stalls via [WebCallEndReason.TimedOut].
+            }
+            PeerConnection.PeerConnectionState.CLOSED -> {
+                if (mutableState.value != WebCallState.Done) {
+                    endRemote(WebCallEndReason.HungUp)
+                }
+            }
+            PeerConnection.PeerConnectionState.NEW,
+            PeerConnection.PeerConnectionState.CONNECTING,
+            -> Unit
+        }
+    }
 
     private fun endLocal(reason: WebCallEndReason) {
         if (mutableState.value == WebCallState.Done) return
@@ -195,36 +380,22 @@ public class CallSession(
         } catch (cause: Throwable) {
             android.util.Log.w("CallSession", "endLocal compose failed", cause)
         }
+        rtc?.close()
+        rtc = null
+        pendingRemoteOfferSdp = null
+        scope.cancel()
         mutableState.value = WebCallState.Done
     }
 
     private fun endRemote(reason: WebCallEndReason) {
         if (mutableState.value == WebCallState.Done) return
         mutableEndReason.value = reason
+        rtc?.close()
+        rtc = null
+        pendingRemoteOfferSdp = null
+        scope.cancel()
         mutableState.value = WebCallState.Done
     }
-
-    private fun placeholderOfferSdp(): String = listOf(
-        "v=0",
-        "o=- 1 1 IN IP4 0.0.0.0",
-        "s=lakko-3a10-scaffold",
-        "t=0 0",
-        "m=audio 9 UDP/TLS/RTP/SAVPF 111",
-        "a=rtpmap:111 opus/48000/2",
-        "a=mid:audio",
-        "",
-    ).joinToString("\n")
-
-    private fun placeholderAnswerSdp(): String = listOf(
-        "v=0",
-        "o=- 2 2 IN IP4 0.0.0.0",
-        "s=lakko-3a10-scaffold",
-        "t=0 0",
-        "m=audio 9 UDP/TLS/RTP/SAVPF 111",
-        "a=rtpmap:111 opus/48000/2",
-        "a=mid:audio",
-        "",
-    ).joinToString("\n")
 
     private fun toReason(r: FfiCallEndReason): WebCallEndReason = when (r) {
         FfiCallEndReason.HUNG_UP -> WebCallEndReason.HungUp
@@ -243,7 +414,7 @@ public class CallSession(
     }
 }
 
-/** Phase 3a10 — convenience wrapper. Caller passes raw
- *  bytes; returns the typed body. */
+/** Convenience wrapper. Caller passes raw bytes; returns
+ *  the typed body. */
 public fun parseCallSignalingBytes(bytes: ByteArray): FfiCallSignalingBody =
     parseCallSignaling(bytes)

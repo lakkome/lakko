@@ -46,6 +46,29 @@
         android:name="android.hardware.camera"
         android:required="false" />
 
+    <!--
+      G3-2 — WebRTC pod runtime permissions for the in-call
+      audio capture path. `RECORD_AUDIO` is the runtime
+      permission the OS gates `AudioRecord` (and therefore
+      `org.webrtc.AudioSource`) on; `MODIFY_AUDIO_SETTINGS`
+      is required by `AudioManager.setMode(MODE_IN_COMMUNICATION)`
+      which WebRTC uses to switch the audio routing into
+      voice-call mode (echo-cancellation, AGC, NS all flip
+      to the in-call profile). Both are install-time on
+      pre-23 / runtime on 23+; CallScreen requests them
+      just-in-time on the user's first dial / accept.
+
+      `<uses-feature>` for the microphone is `false` —
+      Lakko runs fine on devices without a mic (text-only
+      messaging). Only a user trying to start a call hits
+      the permission prompt.
+    -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <uses-feature
+        android:name="android.hardware.microphone"
+        android:required="false" />
+
     <application
         android:label="@string/app_name"
         android:icon="@android:drawable/sym_def_app_icon"

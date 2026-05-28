@@ -130,7 +130,7 @@ public object ChannelsComposer {
     ): ByteArray {
         val channelId = channelIdFromHex(channelIdHex)
         val signer = try {
-            ChannelSigningKey(keys.signingKeySeed)
+            ChannelSigningKey.fromSeed(keys.signingKeySeed)
         } catch (e: FfiException.Channels) {
             throw ChannelsComposerException.Ffi(e.message ?: "signing-key construct failed")
         }
@@ -146,6 +146,10 @@ public object ChannelsComposer {
         } catch (e: FfiException.Channels) {
             throw ChannelsComposerException.Ffi(e.message ?: "compose failed")
         } finally {
+            // ChannelSigningKey implements AutoCloseable;
+            // close() forwards to destroy() which releases
+            // the underlying Rust object. The try/finally
+            // shape here predates the `use {}` idiom.
             signer.close()
         }
     }

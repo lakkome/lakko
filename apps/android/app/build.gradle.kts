@@ -230,6 +230,18 @@ dependencies {
     implementation(libs.mlkit.barcode.scanning)
     implementation(libs.zxing.core)
 
+    // G3-2 — WebRTC pod. The artifact ships the Java/Kotlin
+    // surface under the `org.webrtc` package the upstream
+    // libwebrtc has used since 2018; only the Maven
+    // coordinate changed from the abandoned
+    // `org.webrtc:google-webrtc` to the community-maintained
+    // `io.github.webrtc-sdk:android`. Consumer code under
+    // `me.lakko.app.calls.WebRtcPeerConnection` imports
+    // `org.webrtc.PeerConnection`, `org.webrtc.SessionDescription`,
+    // and friends — unchanged from the abandoned artifact's
+    // surface.
+    implementation(libs.webrtc.sdk.android)
+
     // 1.15d2 — JVM-side unit tests. `testDebugUnitTest` runs
     // these on the host JDK without any emulator; perfect for
     // the AuthClient flow tests that drive the high-level

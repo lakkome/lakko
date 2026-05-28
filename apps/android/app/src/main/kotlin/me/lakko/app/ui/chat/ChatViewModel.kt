@@ -117,7 +117,10 @@ public class ChatViewModel(
     }
 
     private fun makeSession(callId: ByteArray): CallSession =
-        CallSession(callId = callId) { bytes ->
+        CallSession(
+            applicationContext = repo.context,
+            callId = callId,
+        ) { bytes ->
             viewModelScope.launch {
                 publishCallSignaling(bytes)
             }

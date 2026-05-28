@@ -86,6 +86,17 @@ public class ChatRepository(
 ) : AutoCloseable {
 
     /**
+     * G3-2 — expose the application context so downstream
+     * `CallSession` instances can hand it to
+     * `WebRtcPeerConnection` (libwebrtc's
+     * `PeerConnectionFactory.initialize` requires an
+     * Android Context for native-library loading + audio
+     * device manager). Read-only — the constructor still
+     * owns the lifecycle.
+     */
+    public val context: Context get() = applicationContext
+
+    /**
      * The canonical [Identity] for the current session. `null`
      * until [bootstrap] populates it. Holding the reference in
      * an [AtomicReference] means snapshot writes don't need to

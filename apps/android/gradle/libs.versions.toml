@@ -109,6 +109,15 @@ androidx-camera        = "1.3.4"
 mlkit-barcode-scanning = "17.3.0"
 zxing-core             = "3.5.3"
 
+# G3-2 — Android WebRTC pod. `io.github.webrtc-sdk:android` is
+# the community-maintained Maven mirror of Google's `libwebrtc`
+# (Google stopped publishing `org.webrtc:google-webrtc` in
+# 2021). The version pin uses Google's internal versioning
+# scheme: `<M-line>.<build>.<patch>`. Bumping the M-line is a
+# deliberate decision — the C++ API breaks across milestones
+# and the Java/Kotlin wrappers follow.
+webrtc-sdk-android     = "125.6422.07"
+
 [libraries]
 jna = { group = "net.java.dev.jna", name = "jna", version.ref = "jna" }
 
@@ -198,6 +207,17 @@ androidx-camera-lifecycle = { group = "androidx.camera", name = "camera-lifecycl
 androidx-camera-view      = { group = "androidx.camera", name = "camera-view",      version.ref = "androidx-camera" }
 mlkit-barcode-scanning    = { group = "com.google.mlkit", name = "barcode-scanning", version.ref = "mlkit-barcode-scanning" }
 zxing-core                = { group = "com.google.zxing", name = "core",            version.ref = "zxing-core" }
+
+# G3-2 — WebRTC pod artifact. The community webrtc-sdk org
+# publishes the same `org.webrtc.PeerConnection` /
+# `RTCPeerConnectionFactory` Java surface under a fresh
+# Maven coordinate. The Kotlin wrapper
+# (`apps/android/app/src/main/kotlin/me/lakko/app/calls/WebRtcPeerConnection.kt`)
+# imports from the `org.webrtc` package — that is the Java
+# package name the artifact ships, unchanged from the
+# Google-published one we used to depend on. Only the Maven
+# coordinate changed.
+webrtc-sdk-android        = { group = "io.github.webrtc-sdk", name = "android", version.ref = "webrtc-sdk-android" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
