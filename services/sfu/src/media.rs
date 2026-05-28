@@ -334,6 +334,227 @@ impl MediaRouter {
     pub fn is_empty(&self) -> bool {
         self.peers.is_empty()
     }
+
+    /// Mutable borrow of the peer with the given id, if
+    /// present. Returns `None` if no peer matches.
+    pub fn peer_mut(&mut self, id: &MediaPeerId) -> Option<&mut MediaPeer> {
+        self.peers.iter_mut().find(|p| p.id() == id)
+    }
+
+    /// Get the peer with the given id, or insert a fresh
+    /// one (constructed at `now`) if it does not exist.
+    /// Returns a mutable borrow of the (possibly new)
+    /// peer.
+    ///
+    /// Used by the media task to lazily promote a
+    /// signaling-admitted peer into the media layer on
+    /// the first SDP-offer frame from that peer — there
+    /// is no separate `MediaCommand::AddPeer` op because
+    /// the offer itself signals that the peer wants
+    /// media.
+    pub fn peer_or_insert(&mut self, id: MediaPeerId, now: Instant) -> &mut MediaPeer {
+        // Avoid the borrow-checker NLL gotcha by indexing
+        // after a non-borrowed lookup.
+        let existing_idx = self.peers.iter().position(|p| p.id() == &id);
+        if let Some(idx) = existing_idx {
+            &mut self.peers[idx]
+        } else {
+            self.peers.push(MediaPeer::new(id, now));
+            self.peers
+                .last_mut()
+                .expect("just-pushed peer is always present")
+        }
+    }
+}
+
+// ============================================================
+// Async/sync boundary — MediaCommand + spawn_media_task
+// ============================================================
+
+/// Commands the async signaling layer sends to the
+/// sync-style media event loop.
+///
+/// Each variant carries a `oneshot::Sender` that the
+/// task uses to send the result back. Dropping the
+/// receiver before the task replies is harmless — the
+/// task's `send` becomes a no-op and the originating
+/// future just gets a `RecvError`, which the router maps
+/// to a typed [`MediaCommandError::TaskGone`].
+pub enum MediaCommand {
+    /// Hand a client's SDP offer to the corresponding
+    /// `MediaPeer` (created lazily if not yet present),
+    /// reply with either the answer SDP string or a
+    /// typed error.
+    AcceptOffer {
+        /// Originating peer id.
+        peer_id: MediaPeerId,
+        /// Client-supplied SDP offer text.
+        offer_sdp: String,
+        /// One-shot reply channel.
+        reply: tokio::sync::oneshot::Sender<MediaResult<String>>,
+    },
+    /// Hand a trickle ICE candidate to the corresponding
+    /// `MediaPeer`. No payload reply; the task either
+    /// signals success or surfaces a typed error.
+    AddRemoteCandidate {
+        /// Originating peer id.
+        peer_id: MediaPeerId,
+        /// SDP-form candidate string.
+        candidate_sdp: String,
+        /// One-shot reply channel.
+        reply: tokio::sync::oneshot::Sender<MediaResult<()>>,
+    },
+}
+
+/// Bounded capacity for the media-command channel. A
+/// stuck media task would surface as send-side
+/// `try_send` errors at the router rather than
+/// unbounded memory growth.
+const MEDIA_COMMAND_CAPACITY: usize = 1024;
+
+/// Handle the signaling layer uses to talk to the media
+/// task. Cheap to clone — the underlying channel is
+/// `Arc`-backed inside `tokio::sync::mpsc`.
+#[derive(Clone)]
+pub struct MediaTaskHandle {
+    tx: tokio::sync::mpsc::Sender<MediaCommand>,
+}
+
+impl std::fmt::Debug for MediaTaskHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MediaTaskHandle")
+            .field("capacity", &MEDIA_COMMAND_CAPACITY)
+            .finish()
+    }
+}
+
+/// Failure modes the router surfaces when talking to
+/// the media task. Each variant maps to a wire-level
+/// `ErrorCode`.
+#[derive(Debug, Error)]
+pub enum MediaCommandError {
+    /// The media task is gone (either the task panicked
+    /// or the handle's recipient was dropped). The
+    /// service should be restarted; recoverable
+    /// per-request handling is not possible because the
+    /// underlying str0m state machine cannot resume
+    /// from outside the task.
+    #[error("media task is no longer running")]
+    TaskGone,
+    /// The media-command channel is full — the task is
+    /// behind the signaling rate. The router drops the
+    /// inbound frame rather than block the WS reader.
+    #[error("media task command queue full")]
+    Backpressure,
+    /// The media task processed the command but returned
+    /// a typed media-layer error (e.g. `BadSdp`). The
+    /// wrapped error is the one the [`MediaPeer`] method
+    /// surfaced.
+    #[error("media operation failed: {0}")]
+    Media(#[source] MediaError),
+}
+
+impl MediaTaskHandle {
+    /// Send an [`AcceptOffer`](MediaCommand::AcceptOffer)
+    /// command and await the answer.
+    ///
+    /// # Errors
+    ///
+    /// See [`MediaCommandError`]. Notably:
+    /// - [`MediaCommandError::Backpressure`] when the
+    ///   command channel is full (1024 entries).
+    /// - [`MediaCommandError::TaskGone`] when the task
+    ///   is no longer running.
+    /// - [`MediaCommandError::Media`] wrapping the
+    ///   per-peer media-layer error.
+    pub async fn accept_offer(
+        &self,
+        peer_id: MediaPeerId,
+        offer_sdp: String,
+    ) -> std::result::Result<String, MediaCommandError> {
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        self.tx
+            .try_send(MediaCommand::AcceptOffer {
+                peer_id,
+                offer_sdp,
+                reply: reply_tx,
+            })
+            .map_err(|e| match e {
+                tokio::sync::mpsc::error::TrySendError::Full(_) => MediaCommandError::Backpressure,
+                tokio::sync::mpsc::error::TrySendError::Closed(_) => MediaCommandError::TaskGone,
+            })?;
+        let result = reply_rx.await.map_err(|_| MediaCommandError::TaskGone)?;
+        result.map_err(MediaCommandError::Media)
+    }
+
+    /// Send an [`AddRemoteCandidate`](MediaCommand::AddRemoteCandidate)
+    /// command.
+    ///
+    /// # Errors
+    ///
+    /// Symmetric to [`Self::accept_offer`] — same
+    /// variants for transport / task / media errors.
+    pub async fn add_remote_candidate(
+        &self,
+        peer_id: MediaPeerId,
+        candidate_sdp: String,
+    ) -> std::result::Result<(), MediaCommandError> {
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        self.tx
+            .try_send(MediaCommand::AddRemoteCandidate {
+                peer_id,
+                candidate_sdp,
+                reply: reply_tx,
+            })
+            .map_err(|e| match e {
+                tokio::sync::mpsc::error::TrySendError::Full(_) => MediaCommandError::Backpressure,
+                tokio::sync::mpsc::error::TrySendError::Closed(_) => MediaCommandError::TaskGone,
+            })?;
+        let result = reply_rx.await.map_err(|_| MediaCommandError::TaskGone)?;
+        result.map_err(MediaCommandError::Media)
+    }
+}
+
+/// Spawn the media event-loop task. Returns the handle
+/// signaling code uses to send commands.
+///
+/// The task is a single tokio future that owns the
+/// [`MediaRouter`] and processes [`MediaCommand`]s one
+/// at a time. Step 3 ships only the command channel; the
+/// UDP socket + receive loop + `MediaData` fanout slot
+/// into the same `select!` body in step 4.
+#[must_use]
+pub fn spawn_media_task() -> MediaTaskHandle {
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<MediaCommand>(MEDIA_COMMAND_CAPACITY);
+    tokio::spawn(async move {
+        let mut router = MediaRouter::new();
+        while let Some(cmd) = rx.recv().await {
+            match cmd {
+                MediaCommand::AcceptOffer {
+                    peer_id,
+                    offer_sdp,
+                    reply,
+                } => {
+                    let peer = router.peer_or_insert(peer_id, Instant::now());
+                    let res = peer.accept_offer(&offer_sdp);
+                    // If the receiver dropped, the
+                    // originating future has bailed —
+                    // ignore the send failure.
+                    let _ = reply.send(res);
+                },
+                MediaCommand::AddRemoteCandidate {
+                    peer_id,
+                    candidate_sdp,
+                    reply,
+                } => {
+                    let peer = router.peer_or_insert(peer_id, Instant::now());
+                    let res = peer.add_remote_candidate(&candidate_sdp);
+                    let _ = reply.send(res);
+                },
+            }
+        }
+    });
+    MediaTaskHandle { tx }
 }
 
 #[cfg(test)]
@@ -452,6 +673,53 @@ mod tests {
         match err {
             MediaError::BadSdp(_) => {},
             other => panic!("expected BadSdp, got {other:?}"),
+        }
+    }
+
+    /// `peer_or_insert` returns the same peer instance on
+    /// a second lookup with the same id — no duplicate
+    /// rows in the router.
+    #[test]
+    fn peer_or_insert_is_idempotent_on_repeated_id() {
+        let mut r = MediaRouter::new();
+        let id = pid("alice");
+        r.peer_or_insert(id.clone(), Instant::now());
+        r.peer_or_insert(id.clone(), Instant::now());
+        assert_eq!(r.len(), 1, "second insert must reuse the existing peer");
+    }
+
+    /// `spawn_media_task` → `accept_offer` round-trip on
+    /// a malformed offer surfaces as
+    /// `MediaCommandError::Media(MediaError::BadSdp)`
+    /// through the channel. Exercises mpsc send-path,
+    /// oneshot reply path, lazy `peer_or_insert` on
+    /// first command, and typed-error propagation
+    /// across the async/sync boundary.
+    #[tokio::test]
+    async fn task_accept_offer_surfaces_bad_sdp_through_channel() {
+        let handle = spawn_media_task();
+        let err = handle
+            .accept_offer(pid("alice"), "garbage".into())
+            .await
+            .expect_err("malformed SDP must surface as BadSdp through the task");
+        match err {
+            MediaCommandError::Media(MediaError::BadSdp(_)) => {},
+            other => panic!("expected Media(BadSdp), got {other:?}"),
+        }
+    }
+
+    /// `add_remote_candidate` over the channel surfaces
+    /// `BadIceCandidate` symmetrically.
+    #[tokio::test]
+    async fn task_add_remote_candidate_surfaces_bad_candidate_through_channel() {
+        let handle = spawn_media_task();
+        let err = handle
+            .add_remote_candidate(pid("alice"), "not a candidate".into())
+            .await
+            .expect_err("garbage candidate must surface as BadIceCandidate through the task");
+        match err {
+            MediaCommandError::Media(MediaError::BadIceCandidate(_)) => {},
+            other => panic!("expected Media(BadIceCandidate), got {other:?}"),
         }
     }
 }

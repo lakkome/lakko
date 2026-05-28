@@ -51,16 +51,44 @@ pub enum RouterError {
     #[error("recipient queue full")]
     Backpressure,
 
-    /// Media wiring is not yet in place. The wire frames
-    /// `ClientFrame::SdpOffer` / `ClientFrame::IceCandidate`
-    /// arrived at the router but the router-to-MediaPeer
-    /// integration that consumes them lands in
-    /// `S-3-B-routing-media` step 3 (alongside the UDP
-    /// socket loop). Until then a client that starts the
-    /// SDP exchange sees a typed error rather than
-    /// silently dropped frames.
-    #[error("media routing not yet wired (S-3-B-routing-media step 3)")]
+    /// Media wiring is not present on this `Router`
+    /// instance — the caller did not attach a
+    /// [`crate::media::MediaTaskHandle`] via
+    /// [`Router::with_media`]. Surfaced when a client
+    /// sends `SdpOffer` / `IceCandidate` to an SFU
+    /// process that started up without a media task
+    /// (defensive default; production main always wires
+    /// it). Existing signaling tests that construct
+    /// `Router::new` without media also hit this path.
+    #[error("media routing not wired on this Router instance")]
     MediaNotWired,
+
+    /// `MediaPeer::accept_offer` or
+    /// `add_remote_candidate` failed inside the media
+    /// task. The wrapped error keeps the
+    /// `MediaError` variant intact so the wire-level
+    /// code mapping can distinguish `BadSdp` from
+    /// `BadIceCandidate`.
+    #[error("media operation failed: {0}")]
+    Media(#[source] crate::media::MediaError),
+
+    /// The media task is no longer reachable — either
+    /// it panicked or the SFU is mid-shutdown. We treat
+    /// this as a transient backend failure; the WS
+    /// connection should be closed to force the client
+    /// to re-handshake against a fresh SFU instance.
+    #[error("media task is no longer running")]
+    MediaTaskGone,
+}
+
+impl From<crate::media::MediaCommandError> for RouterError {
+    fn from(err: crate::media::MediaCommandError) -> Self {
+        match err {
+            crate::media::MediaCommandError::TaskGone => Self::MediaTaskGone,
+            crate::media::MediaCommandError::Backpressure => Self::Backpressure,
+            crate::media::MediaCommandError::Media(inner) => Self::Media(inner),
+        }
+    }
 }
 
 /// Map [`RouterError`] back to the wire [`ErrorCode`] the
@@ -73,12 +101,19 @@ impl RouterError {
         match self {
             Self::UnknownPeer => ErrorCode::UnknownPeer,
             Self::Backpressure => ErrorCode::BackpressureDrop,
-            // Both SDP-offer and ICE-candidate frames hit
-            // the same router stub today; we surface them
-            // as `BadSdp` so existing clients see the
-            // existing audit-pack error code rather than
-            // a brand-new variant they don't recognise.
-            Self::MediaNotWired => ErrorCode::BadSdp,
+            // No media task at all — surface as `BadSdp`
+            // for now, since the client has nothing
+            // useful to do with a more granular
+            // diagnostic. A future audit-pack ErrorCode
+            // (e.g. `MediaUnavailable`) may carve this
+            // out.
+            Self::MediaNotWired | Self::MediaTaskGone => ErrorCode::BadSdp,
+            Self::Media(inner) => match inner {
+                crate::media::MediaError::BadSdp(_) | crate::media::MediaError::Str0m(_) => {
+                    ErrorCode::BadSdp
+                },
+                crate::media::MediaError::BadIceCandidate(_) => ErrorCode::BadIceCandidate,
+            },
         }
     }
 }
@@ -95,14 +130,32 @@ fn pseudonymise(account_id: &str) -> String {
 /// borrows; constructed per-request, not per-call.
 pub struct Router<'a> {
     registry: &'a PeerRegistry,
+    media: Option<&'a crate::media::MediaTaskHandle>,
 }
 
 impl<'a> Router<'a> {
     /// Borrow the registry for the duration of one routing
-    /// decision.
+    /// decision. The router runs without media wiring —
+    /// SDP / ICE frames surface as
+    /// [`RouterError::MediaNotWired`]. Use
+    /// [`Self::with_media`] to attach a
+    /// [`crate::media::MediaTaskHandle`].
     #[must_use]
     pub fn new(registry: &'a PeerRegistry) -> Self {
-        Self { registry }
+        Self {
+            registry,
+            media: None,
+        }
+    }
+
+    /// Attach a [`crate::media::MediaTaskHandle`] so
+    /// `SdpOffer` / `IceCandidate` frames are dispatched
+    /// to the media event loop instead of being refused
+    /// with `MediaNotWired`.
+    #[must_use]
+    pub fn with_media(mut self, media: &'a crate::media::MediaTaskHandle) -> Self {
+        self.media = Some(media);
+        self
     }
 
     /// Build the welcome frame the SFU sends a peer right
@@ -195,19 +248,28 @@ impl<'a> Router<'a> {
                     },
                 }
             },
-            // S-3-B-routing-media step 2 defines the wire
-            // shape for these frames; the router-side
-            // wiring (hand offer / candidate through to
-            // the corresponding `crate::media::MediaPeer`
-            // + ship the answer back as
-            // `ServerFrame::SdpAnswer`) lands in step 3
-            // alongside the UDP socket loop. Until then we
-            // surface a typed `NotImplemented` error to
-            // the client rather than silently dropping —
-            // a misbehaving client that starts sending
-            // SDP before the SFU is wired must see why.
-            ClientFrame::SdpOffer { sdp: _ } | ClientFrame::IceCandidate { candidate_sdp: _ } => {
-                Err(RouterError::MediaNotWired)
+            ClientFrame::SdpOffer { sdp } => {
+                let Some(media) = self.media else {
+                    return Err(RouterError::MediaNotWired);
+                };
+                let answer = media
+                    .accept_offer(sender.id.clone(), sdp)
+                    .await
+                    .map_err(RouterError::from)?;
+                Ok(Some(ServerFrame::SdpAnswer { sdp: answer }))
+            },
+            ClientFrame::IceCandidate { candidate_sdp } => {
+                let Some(media) = self.media else {
+                    return Err(RouterError::MediaNotWired);
+                };
+                media
+                    .add_remote_candidate(sender.id.clone(), candidate_sdp)
+                    .await
+                    .map_err(RouterError::from)?;
+                // Trickle ICE has no synchronous reply
+                // shape on the wire — the SFU stays
+                // silent on success.
+                Ok(None)
             },
         }
     }
@@ -233,15 +295,17 @@ impl<'a> Router<'a> {
                     // Peer dropped between the registry read
                     // and the send — race, not a bug.
                 },
-                Err(RouterError::MediaNotWired) => {
-                    // Cannot reach this arm — `deliver`
+                Err(
+                    RouterError::MediaNotWired | RouterError::Media(_) | RouterError::MediaTaskGone,
+                ) => {
+                    // Cannot reach these arms — `deliver`
                     // only ever returns UnknownPeer /
-                    // Backpressure / Ok, never
-                    // MediaNotWired. Exhaustive match
-                    // here so future-additions to
+                    // Backpressure / Ok, never any of the
+                    // media variants. Exhaustive match
+                    // here so future additions to
                     // RouterError force re-thinking the
                     // broadcast loop's recovery.
-                    debug_assert!(false, "broadcast saw MediaNotWired unreachable arm");
+                    debug_assert!(false, "broadcast saw media-error unreachable arm");
                 },
             }
         }
