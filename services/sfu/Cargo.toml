@@ -61,6 +61,19 @@ lakko-call-jwt.workspace = true
 # wide for FIPS-friendliness + reproducible Linux builds).
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
+# S-3-B-routing-media — str0m is the WebRTC stack chosen
+# in S-3-B-spike (see SPIKE.md + ADR-0011). Exact pin per
+# UPSTREAM.md — we treat str0m as a code-readable
+# dependency (not a black box) and refuse semver-implied
+# transitive surface changes between deploys.
+#
+# `rust-crypto` feature picks the pure-Rust crypto provider
+# (ring-family under the hood, same posture as the rest of
+# Lakko). Default features disabled so we don't pull
+# `apple-crypto` / `aws-lc-rs` / `openssl` / `wincrypto` by
+# accident.
+str0m = { version = "=0.19.0", default-features = false, features = ["rust-crypto"] }
+
 # Pinned for build-info embedded in /version.
 [build-dependencies]
 # Nothing for now; the version comes straight from

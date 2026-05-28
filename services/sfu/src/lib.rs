@@ -22,6 +22,7 @@
 
 pub mod config;
 pub mod jwks;
+pub mod media;
 pub mod peer;
 pub mod prom;
 pub mod protocol;

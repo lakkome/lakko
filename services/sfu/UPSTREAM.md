@@ -28,10 +28,11 @@ fast to build until media routing is the work-in-progress.
 | Field | Value |
 |---|---|
 | WebRTC stack | **`str0m`** |
-| Version pin | *pending* (set as exact version in `Cargo.toml` at `S-3-B-routing` kickoff, not a range) |
-| Pin date (UTC) | *pending* |
-| Pinned by | *pending* |
-| Lakko sprint | `S-3-B-spike` decided; `S-3-B-routing` pins |
+| Version pin | **`=0.19.0`** (exact, no range) — recorded in `services/sfu/Cargo.toml` |
+| Features | `default-features = false, features = ["rust-crypto"]` — pure-Rust crypto provider, no `openssl` / `aws-lc-rs` / `apple-crypto` / `wincrypto` pulled |
+| Pin date (UTC) | 2026-05-28 |
+| Pinned by | `S-3-B-routing-media` step 1 |
+| Lakko sprint | `S-3-B-spike` decided; `S-3-B-routing-media` step 1 pinned the version + shipped `services/sfu/src/media.rs` foundation; steps 2–5 add SDP signaling wiring, UDP socket loop, RTP fanout, and integration tests |
 
 ## Why we pin exactly
 
