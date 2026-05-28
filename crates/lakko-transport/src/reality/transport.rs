@@ -168,13 +168,9 @@ impl Transport for RealityTransport {
         //    lands in legacy_session_id INSIDE rustls's
         //    transcript hash. No .await between arm and
         //    new() — this call is fully synchronous.
-        let mut conn = build_reality_client_connection(
-            server_name,
-            &tag_secret,
-            &short_id,
-            timestamp,
-        )
-        .map_err(map_driver_error)?;
+        let mut conn =
+            build_reality_client_connection(server_name, &tag_secret, &short_id, timestamp)
+                .map_err(map_driver_error)?;
 
         // 6. Drive the handshake to completion. On Ok the
         //    socket carries TLS-encrypted bytes and `conn`

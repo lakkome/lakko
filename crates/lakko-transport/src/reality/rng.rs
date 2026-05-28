@@ -138,7 +138,10 @@ mod tests {
         RealityRng::arm(payload);
         let mut buf = [0u8; 32];
         REALITY_RNG.fill(&mut buf).expect("fill succeeds");
-        assert_eq!(buf, payload, "first 32-byte fill must return the armed payload");
+        assert_eq!(
+            buf, payload,
+            "first 32-byte fill must return the armed payload"
+        );
     }
 
     #[test]
@@ -161,7 +164,9 @@ mod tests {
         clear_inject();
         let mut buf = [0u8; 32];
         // Must not panic — delegates to ring.
-        REALITY_RNG.fill(&mut buf).expect("fill succeeds without inject");
+        REALITY_RNG
+            .fill(&mut buf)
+            .expect("fill succeeds without inject");
     }
 
     #[test]
@@ -176,7 +181,9 @@ mod tests {
 
         // Slot must still be armed.
         let mut buf32 = [0u8; 32];
-        REALITY_RNG.fill(&mut buf32).expect("32-byte fill after 2-byte");
+        REALITY_RNG
+            .fill(&mut buf32)
+            .expect("32-byte fill after 2-byte");
         assert_eq!(buf32, payload, "inject must survive a 2-byte fill");
     }
 
@@ -190,7 +197,9 @@ mod tests {
         REALITY_RNG.fill(&mut buf16).expect("16-byte fill");
 
         let mut buf32 = [0u8; 32];
-        REALITY_RNG.fill(&mut buf32).expect("32-byte fill after 16-byte");
+        REALITY_RNG
+            .fill(&mut buf32)
+            .expect("32-byte fill after 16-byte");
         assert_eq!(buf32, payload, "inject must survive a 16-byte fill");
     }
 

@@ -63,6 +63,13 @@
 //!   [`MAX_INNER_CONFIGS`] inner configs); no allocation
 //!   exceeds a hard cap from arbitrary attacker input.
 
+pub mod adapter;
+
+pub use adapter::{
+    LakkoHpkeSuiteAesGcm128, LakkoHpkeSuiteAesGcm256, LakkoHpkeSuiteChaCha20Poly1305,
+    ALL_SUPPORTED_SUITES,
+};
+
 use thiserror::Error;
 
 /// ECH version code published by IANA for

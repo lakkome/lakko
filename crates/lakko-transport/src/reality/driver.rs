@@ -84,9 +84,7 @@ use crate::reality::authenticator::{
 };
 use crate::reality::cert::AcceptAnyCertVerifier;
 use crate::reality::config::{RealityShortId, RealityTagSecret};
-use crate::reality::handshake::{
-    extract_server_hello_random, TlsWireError, TLS_RECORD_HEADER_LEN,
-};
+use crate::reality::handshake::{extract_server_hello_random, TlsWireError, TLS_RECORD_HEADER_LEN};
 use crate::reality::rng;
 
 /// Failure modes the REALITY handshake driver surfaces.

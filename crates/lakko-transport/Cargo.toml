@@ -106,12 +106,13 @@ hpke = { version = "0.13", default-features = false, features = [
     "std",
     "x25519",
 ] }
-# G5-6-wireup: `rand` 0.9 is the RngCore version `hpke`
-# 0.13 takes. The workspace already pulls 0.9 transitively
-# via quinn-proto + openmls_rust_crypto; we declare it
+# G5-6-wireup: `rand_core` 0.9 is the version `hpke` 0.13
+# takes. The workspace already pulls 0.9 transitively via
+# quinn-proto + openmls_rust_crypto; we declare it
 # directly here so the adapter can construct `OsRng` and
-# feed it to hpke's setup_sealer.
-rand_core = "0.9"
+# feed it to hpke's setup_sealer. `os_rng` is feature-gated
+# in 0.9 (split out for no-std users); we need it.
+rand_core = { version = "0.9", features = ["os_rng"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }
