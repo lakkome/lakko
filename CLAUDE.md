@@ -73,7 +73,7 @@ The Phase 3 closeout punch list — gap inventory + sprint waves with exit crite
 ### Other
 
 - `schemas/` — protobuf schemas; **single source of truth** for the wire format
-- `apps/` — clients (iOS / iPadOS / macOS / watchOS / Android / desktop / web), arrive in Phase 1
+- `apps/` — clients (iOS / iPadOS / macOS / watchOS / Android / desktop / web), arrive in Phase 1. iOS WebRTC pod (G3-1) shipped: `apps/ios/Lakko/Calls/WebRTCPeerConnection.swift` wraps `RTCPeerConnectionFactory` + `RTCPeerConnection` from `stasel/WebRTC` SPM (`from: 125.0.0`); `CallSession.swift` drives real SDP offer/answer + ICE through it. Audio-only on first pass; video preview, TURN bootstrap, and SFrame keying are deferred follow-ups (G3-1-video / G3-1-turn / G3-1-sframe) — see [`docs/ROADMAP-PHASE3-CLOSEOUT.md`](docs/ROADMAP-PHASE3-CLOSEOUT.md) G3-1 row
 - `infra/` — single-VPS Hetzner deployment via systemd + system-nginx + system-MariaDB; see `infra/README.md` (migration from lakko_me and daily ops)
 - `docs/adr/` — Architecture Decision Records
 - `docs/ROADMAP.md` — tactical decomposition of every phase

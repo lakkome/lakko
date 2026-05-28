@@ -101,7 +101,7 @@ public enum ChannelsComposer {
         let channelId = try channelIdFromHex(channelIdHex)
         let signer: ChannelSigningKey
         do {
-            signer = try ChannelSigningKey(seed: keys.signingKeySeed)
+            signer = try ChannelSigningKey.fromSeed(seed: keys.signingKeySeed)
         } catch let FfiError.Channels(msg) {
             throw ChannelsComposerError.ffi(msg)
         }

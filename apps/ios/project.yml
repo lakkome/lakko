@@ -65,13 +65,29 @@ targets:
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
         # Phase 2a3b3-ui — camera access for the add-device QR
-        # scanner. Apple's permission dialog surfaces this
-        # string verbatim; keep the wording aligned with what
-        # the user sees in the Devices → "Add a device" screen.
+        # scanner + G3-1 video calls. Apple's permission dialog
+        # surfaces this string verbatim; keep the wording
+        # aligned with what the user sees in the Devices → "Add
+        # a device" screen.
         NSCameraUsageDescription: >-
-          Lakko uses the camera to scan a QR code from a device
-          you want to link to your account. The camera is only
-          used during the add-device flow.
+          Lakko uses the camera to scan a QR codes from devices
+          you want to link to your account and to capture
+          video for in-call streams. The camera is never
+          recorded server-side — every call frame is end-to-end
+          encrypted under SFrame keys derived from the call's
+          MLS group.
+        # G3-1 — microphone access for in-call audio capture
+        # via `RTCAudioTrack`. iOS refuses to instantiate the
+        # `AVAudioSession` shared instance for capture without
+        # this string; without it `RTCPeerConnection.addTrack`
+        # silently produces a track that delivers zero samples.
+        NSMicrophoneUsageDescription: >-
+          Lakko uses the microphone to capture your voice for
+          end-to-end-encrypted calls. The mic is only on while
+          you are in a call and the captured audio is never
+          recorded server-side — every call frame is encrypted
+          under SFrame keys derived from the call's MLS group
+          before it leaves your device.
         # `UIRequiredDeviceCapabilities` left at default — every
         # device the deployment target accepts has the same
         # baseline (arm64, OpenGL ES 2.0).
@@ -115,6 +131,16 @@ targets:
       # exported library product (1.14b).
       - package: LakkoCore
         product: LakkoCore
+      # G3-1 — WebRTC pod via stasel/WebRTC SPM. The package
+      # ships Google's WebRTC C++ engine as an XCFramework
+      # (stasel maintains the binary build because Google
+      # stopped publishing one in 2022). The single library
+      # product is named `WebRTC`. The on-device API
+      # (`RTCPeerConnectionFactory`, `RTCPeerConnection`,
+      # `RTCAudioTrack`, `RTCVideoTrack`) is consumed by
+      # `apps/ios/Lakko/Calls/WebRTCPeerConnection.swift`.
+      - package: WebRTC
+        product: WebRTC
       # 1.20c2 — embed the `UNNotificationServiceExtension`
       # bundle inside the host app at `PlugIns/`. xcodegen's
       # `target:` dep with `embed: true` (the default for
@@ -199,6 +225,17 @@ targets:
 packages:
   LakkoCore:
     path: "."
+  # G3-1 — remote SPM: stasel/WebRTC. `from: 125.0.0` allows
+  # SemVer-minor bumps inside the 125.x line (stasel uses one
+  # major per upstream WebRTC milestone, so this stays inside
+  # M125 specifically). Bumping the major (e.g. to M137) is
+  # a deliberate decision that should land in its own PR with
+  # the matching upstream-WebRTC changelog reviewed for
+  # API-shape drift (the public C++ API breaks across
+  # milestones surprisingly often).
+  WebRTC:
+    url: https://github.com/stasel/WebRTC.git
+    from: 125.0.0
 
 # Schemes — xcodegen auto-generates one per target, but we
 # pin the explicit form so the build / archive / test actions

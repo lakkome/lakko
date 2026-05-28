@@ -60,8 +60,13 @@ import os
 public final class CallSoundsObservable: ObservableObject {
     public let controller: CallSoundController
 
-    public init(controller: CallSoundController = .init()) {
-        self.controller = controller
+    /// `controller` defaults to `nil` because Swift evaluates
+    /// default expressions outside the surrounding actor
+    /// context — passing `CallSoundController()` directly
+    /// would call a `@MainActor` initializer from a
+    /// nonisolated default-expression context.
+    public init(controller: CallSoundController? = nil) {
+        self.controller = controller ?? CallSoundController()
     }
 }
 

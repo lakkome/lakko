@@ -257,11 +257,11 @@ public final class ChannelsClient {
         }
         if !(200..<300).contains(http.statusCode) {
             // Server promises {code, detail} on every 4xx/5xx.
-            struct ErrEnvelope: Decodable {
-                let code: String
-                let detail: String
-            }
-            if let body = try? decoder.decode(ErrEnvelope.self, from: data) {
+            // The decoded shape lives on the type
+            // (`ChannelsErrEnvelope` below the class) rather
+            // than nested here — Swift refuses to nest a
+            // type inside a generic function.
+            if let body = try? decoder.decode(ChannelsErrEnvelope.self, from: data) {
                 throw ChannelsApiError(
                     status: http.statusCode,
                     code: body.code,
@@ -314,4 +314,14 @@ public struct ChannelsApiError: Error, Equatable, Sendable {
     public let status: Int
     public let code: String
     public let detail: String
+}
+
+/// Internal decode target for the `{code, detail}` JSON the
+/// channels service ships on every 4xx/5xx. Lives at file
+/// scope rather than nested inside the generic `execute`
+/// method — Swift disallows nesting types inside generic
+/// functions, and pulling it here is the canonical fix.
+fileprivate struct ChannelsErrEnvelope: Decodable {
+    let code: String
+    let detail: String
 }

@@ -4,29 +4,37 @@
 import Combine
 import Foundation
 import LakkoCore
+import WebRTC
 
-/// 1×1 P2P call session on iOS (Phase 3a9 scaffolding).
+/// 1×1 P2P call session on iOS.
 ///
 /// Mirror of `apps/web/src/calls/call-session.ts` translated
 /// into a `@MainActor` `ObservableObject`. Tracks the call
 /// state machine + composes outbound signaling via the
 /// UniFFI `composeCall*Signaling` free functions.
 ///
-/// ## Phase 3a9 scope
+/// ## G3-1 status
 ///
-/// The session ships **signaling-only** today — the real
-/// `RTCPeerConnection` integration via the `WebRTC.framework`
-/// pod / SwiftPM artefact lands in 3a9-followup. The UI
-/// surface (Call button + state overlay) is fully wired
-/// against this class today; once the WebRTC stack
-/// integrates, only [`dial`] / [`acceptCall`] need to grow
-/// the live media-stream branches (build SDP via
-/// `RTCPeerConnection`, push tracks).
+/// Real WebRTC integration: `dial()` / `acceptCall()` now
+/// build real SDP via [`WebRTCPeerConnection`], local ICE
+/// candidates are emitted through the `iceCandidate`
+/// signaling body, and the underlying RTCPeerConnection's
+/// connection-state transitions drive `WebCallState`.
+/// Audio-only on the first pass — the video plumbing
+/// extension point (`WebRTCPeerConnection.addLocalVideoTrack`)
+/// lands in a follow-up (`G3-1-video`) once the SwiftUI
+/// preview surface is wired.
 ///
-/// Two-device E2E demo today: an iOS device + a web client
-/// see the signaling transit (`outgoing` → `connecting` →
-/// `connected` state ticks); media doesn't flow yet on the
-/// iOS side until the WebRTC pod lands.
+/// ## SFrame deferred
+///
+/// Today's transport rides plain SRTP (per-hop encryption
+/// only). The end-to-end SFrame layer keyed off the call's
+/// MLS exporter arrives in a follow-up sub-sprint
+/// (`G3-1-sframe`); the iOS call surface is **not yet
+/// E2EE-complete** despite the wire saying so. This caveat
+/// is repeated verbatim in
+/// `docs/security/calls.md` so the audit pack doesn't
+/// double-count.
 @MainActor
 public final class CallSession: ObservableObject {
 
@@ -49,6 +57,18 @@ public final class CallSession: ObservableObject {
     private let onOutboundSignaling: (Data) -> Void
     private var isOfferer = false
 
+    /// Stored remote SDP offer between `.ringing` → `.connecting`.
+    /// `acceptCall` reads it to build the answer.
+    private var pendingRemoteOfferSdp: String?
+
+    /// The WebRTC pod. Lazily constructed inside `dial` /
+    /// `acceptCall` so an `idle` session pays nothing.
+    private var rtc: WebRTCPeerConnection?
+
+    /// Cached audio toggle for `dial`-side construction.
+    private var dialAudio: Bool = true
+    private var dialVideo: Bool = false
+
     public init(callId: Data, onOutboundSignaling: @escaping (Data) -> Void) {
         self.callId = callId
         self.onOutboundSignaling = onOutboundSignaling
@@ -66,27 +86,54 @@ public final class CallSession: ObservableObject {
 
     // MARK: - Outbound
 
-    /// Outbound side: dial the contact. In 3a9 scaffolding
-    /// this immediately emits the Offer with a placeholder
-    /// SDP body the web side accepts but produces no audio.
-    /// The follow-up sprint replaces the placeholder with
-    /// real `RTCPeerConnection.offer`.
+    /// Outbound side: dial the contact. Spins up
+    /// `WebRTCPeerConnection`, attaches a local audio track,
+    /// generates a real SDP offer and ships it via the
+    /// existing signaling pipe.
     public func dial(audio: Bool, video: Bool) {
         guard state == .idle else { return }
         isOfferer = true
+        dialAudio = audio
+        dialVideo = video
         state = .outgoing
+
+        let rtc = WebRTCPeerConnection()
+        guard rtc.isReady else {
+            NSLog("CallSession.dial: RTCPeerConnection allocation failed")
+            endLocal(reason: .error)
+            return
+        }
+        installDelegate(on: rtc)
+        rtc.addLocalAudioTrack(enabled: audio)
+        // Video track extension point: when the SwiftUI
+        // preview surface lands (G3-1-video), pass the
+        // capture-session source here. Today audio-only.
+        // if video { rtc.addLocalVideoTrack(<source>) }
+        self.rtc = rtc
+
+        Task { [weak self] in
+            await self?.composeAndShipOffer(rtc: rtc, audio: audio, video: video)
+        }
+    }
+
+    private func composeAndShipOffer(
+        rtc: WebRTCPeerConnection,
+        audio: Bool,
+        video: Bool
+    ) async {
         do {
+            let offerSdp = try await rtc.createOffer(audio: audio, video: video)
             let bytes = try composeCallSignaling(
                 body: .offer(
                     callId: callId,
-                    sdp: Self.placeholderOfferSdp(),
+                    sdp: offerSdp,
                     createdAtMs: UInt64(Date().timeIntervalSince1970 * 1000),
                     media: FfiCallMediaFlags(audio: audio, video: video)
                 )
             )
             onOutboundSignaling(bytes)
         } catch {
-            NSLog("dial composeCallSignaling failed: %@", error.localizedDescription)
+            NSLog("dial offer-build failed: %@", String(describing: error))
             endLocal(reason: .error)
         }
     }
@@ -97,27 +144,53 @@ public final class CallSession: ObservableObject {
         endLocal(reason: reason)
     }
 
-    /// Inbound side: accept a ringing call. Emits the Answer
-    /// signaling event.
+    /// Inbound side: accept a ringing call. Builds the SDP
+    /// answer against the stored remote offer + ships it.
     public func acceptCall() {
         guard state == .ringing, !isOfferer else { return }
+        guard let offerSdp = pendingRemoteOfferSdp else {
+            NSLog("acceptCall: pendingRemoteOfferSdp missing — race?")
+            endLocal(reason: .error)
+            return
+        }
+
+        let rtc = WebRTCPeerConnection()
+        guard rtc.isReady else {
+            NSLog("acceptCall: RTCPeerConnection allocation failed")
+            endLocal(reason: .error)
+            return
+        }
+        installDelegate(on: rtc)
+        // Mic on by default for the answerer; if the call
+        // UI later supports "accept muted" we will pass the
+        // user pick through this method.
+        rtc.addLocalAudioTrack(enabled: true)
+        self.rtc = rtc
+
+        state = .connecting
+        Task { [weak self] in
+            await self?.composeAndShipAnswer(rtc: rtc, offerSdp: offerSdp)
+        }
+    }
+
+    private func composeAndShipAnswer(
+        rtc: WebRTCPeerConnection,
+        offerSdp: String
+    ) async {
         do {
+            let answerSdp = try await rtc.createAnswer(remoteOfferSdp: offerSdp)
             let bytes = try composeCallSignaling(
                 body: .answer(
                     callId: callId,
-                    sdp: Self.placeholderAnswerSdp()
+                    sdp: answerSdp
                 )
             )
             onOutboundSignaling(bytes)
-            state = .connecting
-            // Phase 3a9 scaffolding: no real ICE pair, so we
-            // synthesise the `connected` transition
-            // immediately after the answer leaves. The
-            // follow-up replaces this with the
-            // `oniceconnectionstatechange` hook.
-            state = .connected
+            // Don't synthesise `.connected` here — wait for
+            // the RTCPeerConnection's real connectionState
+            // transition. The delegate hook below drives it.
         } catch {
-            NSLog("acceptCall composeCallSignaling failed: %@", error.localizedDescription)
+            NSLog("acceptCall answer-build failed: %@", String(describing: error))
             endLocal(reason: .error)
         }
     }
@@ -135,21 +208,42 @@ public final class CallSession: ObservableObject {
     /// session's `call_id`.
     public func applyIncomingSignaling(_ body: FfiCallSignalingBody) {
         switch body {
-        case .offer(let cid, _, _, _):
+        case .offer(let cid, let sdp, _, _):
             guard cid == callId, state == .idle else { return }
             isOfferer = false
+            pendingRemoteOfferSdp = sdp
             state = .ringing
-        case .answer(let cid, _):
+        case .answer(let cid, let sdp):
             guard cid == callId, state == .outgoing else { return }
             state = .connecting
-            // Phase 3a9 scaffolding: synthesise the
-            // `connected` transition. Real ICE pair lands in
-            // the follow-up.
-            state = .connected
-        case .iceCandidate:
-            // Phase 3a9 scaffolding: candidates are no-ops
-            // until the WebRTC pod lands.
-            break
+            // Apply the remote answer asynchronously; the
+            // real `.connected` transition fires from the
+            // RTCPeerConnection state delegate.
+            guard let rtc = rtc else { return }
+            Task { [weak self] in
+                do {
+                    try await rtc.applyRemoteAnswer(sdp)
+                } catch {
+                    NSLog(
+                        "applyRemoteAnswer failed: %@",
+                        String(describing: error)
+                    )
+                    self?.endLocal(reason: .error)
+                }
+            }
+        case .iceCandidate(let cid, let candidate, let sdpMid, let sdpMLineIndex):
+            guard cid == callId else { return }
+            guard let rtc = rtc else { return }
+            // sdpMLineIndex on the wire is UInt32; WebRTC's
+            // RTCIceCandidate takes Int32. The valid range
+            // for an SDP m-line index is 0..255 in practice,
+            // so the cast is loss-free.
+            let mLineIndex = Int32(bitPattern: sdpMLineIndex)
+            Task { await rtc.addRemoteCandidate(
+                sdpMid: sdpMid,
+                sdpMLineIndex: mLineIndex,
+                candidate: candidate
+            ) }
         case .groupStart, .groupJoin, .groupLeave:
             // Group-call signaling (Phase 3c2) is handled by
             // the in-chat joinable-call card dispatcher, not
@@ -182,46 +276,100 @@ public final class CallSession: ObservableObject {
         } catch {
             NSLog("endLocal composeCallSignaling failed: %@", error.localizedDescription)
         }
+        rtc?.close()
+        rtc = nil
+        pendingRemoteOfferSdp = nil
         state = .done
     }
 
     private func endRemote(reason: WebCallEndReason) {
         guard state != .done else { return }
         endReason = reason
+        rtc?.close()
+        rtc = nil
+        pendingRemoteOfferSdp = nil
         state = .done
     }
 
-    // MARK: - SDP placeholders (3a9 scaffolding)
+    // MARK: - WebRTC delegate plumbing
 
-    private static func placeholderOfferSdp() -> String {
-        // Minimal SDP-offer envelope. Phase 3a9 scaffolding
-        // — the web client + future iOS WebRTC pod ignore
-        // bodies they don't understand, but the wire still
-        // carries something parseable so the receive path
-        // doesn't crash on an empty string.
-        return [
-            "v=0",
-            "o=- 1 1 IN IP4 0.0.0.0",
-            "s=lakko-3a9-scaffold",
-            "t=0 0",
-            "m=audio 9 UDP/TLS/RTP/SAVPF 111",
-            "a=rtpmap:111 opus/48000/2",
-            "a=mid:audio",
-            ""
-        ].joined(separator: "\n")
+    /// Wire the wrapper's typed callbacks back into the
+    /// session. `self` is captured weakly to defend against
+    /// the wrapper outliving the session in error-path
+    /// teardown.
+    private func installDelegate(on rtc: WebRTCPeerConnection) {
+        rtc.installDelegate(.init(
+            onLocalCandidate: { [weak self] sdpMid, mLineIndex, sdp in
+                self?.shipLocalCandidate(
+                    sdpMid: sdpMid,
+                    sdpMLineIndex: mLineIndex,
+                    candidate: sdp
+                )
+            },
+            onConnectionState: { [weak self] newState in
+                self?.handleConnectionState(newState)
+            }
+        ))
     }
 
-    private static func placeholderAnswerSdp() -> String {
-        return [
-            "v=0",
-            "o=- 2 2 IN IP4 0.0.0.0",
-            "s=lakko-3a9-scaffold",
-            "t=0 0",
-            "m=audio 9 UDP/TLS/RTP/SAVPF 111",
-            "a=rtpmap:111 opus/48000/2",
-            "a=mid:audio",
-            ""
-        ].joined(separator: "\n")
+    private func shipLocalCandidate(
+        sdpMid: String,
+        sdpMLineIndex: Int32,
+        candidate: String
+    ) {
+        // WebRTC `Int32` → wire `UInt32`. Symmetric to the
+        // applyIncomingSignaling cast above.
+        let wireIndex = UInt32(bitPattern: sdpMLineIndex)
+        do {
+            let bytes = try composeCallSignaling(
+                body: .iceCandidate(
+                    callId: callId,
+                    candidate: candidate,
+                    sdpMid: sdpMid,
+                    sdpMLineIndex: wireIndex
+                )
+            )
+            onOutboundSignaling(bytes)
+        } catch {
+            NSLog(
+                "shipLocalCandidate composeCallSignaling failed: %@",
+                error.localizedDescription
+            )
+        }
+    }
+
+    /// Map RTCPeerConnectionState transitions to the public
+    /// WebCallState. Only `.connected`, `.disconnected`,
+    /// `.failed`, `.closed` are actionable — `.new` /
+    /// `.connecting` are transient.
+    private func handleConnectionState(_ newState: RTCPeerConnectionState) {
+        switch newState {
+        case .connected:
+            // First `.connected` after connecting → move to
+            // the public connected state. Reconnects after a
+            // brief `.disconnected` interlude also pass
+            // through here.
+            if state == .connecting || state == .outgoing {
+                state = .connected
+            }
+        case .failed:
+            endLocal(reason: .error)
+        case .disconnected:
+            // WebRTC sometimes flaps disconnected → connected
+            // on a transient network glitch (e.g. wifi → LTE
+            // handover). Don't tear down the session — let
+            // the wrapper recover. If it sticks for too long
+            // the upper-layer watchdog will fire `.timedOut`.
+            break
+        case .closed:
+            if state != .done {
+                endRemote(reason: .hungUp)
+            }
+        case .new, .connecting:
+            break
+        @unknown default:
+            break
+        }
     }
 
     private static func endReason(from ffi: FfiCallEndReason) -> WebCallEndReason {
