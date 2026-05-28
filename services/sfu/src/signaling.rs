@@ -44,6 +44,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use crate::jwks::{JwksCache, JwksError};
+use crate::media::MediaTaskHandle;
 use crate::peer::{Peer, PeerId, PeerRegistry};
 use crate::prom::names;
 use crate::protocol::{ClientFrame, ErrorCode, ServerFrame, MAX_INBOUND_FRAME_BYTES};
@@ -66,13 +67,41 @@ pub struct AppState {
     /// inserts a [`Peer`] record here for the lifetime of
     /// the socket.
     pub peers: PeerRegistry,
+    /// Optional handle to the media-routing task. `None`
+    /// (when `LAKKO_SFU_MEDIA_BIND` is unset) runs the SFU
+    /// as a signaling-only relay; `ClientFrame::SdpOffer`
+    /// / `IceCandidate` frames surface as
+    /// `RouterError::MediaNotWired`.
+    pub media: Option<MediaTaskHandle>,
 }
 
 impl AppState {
-    /// Build a fresh state container.
+    /// Build a fresh state container without the media
+    /// half. Used by integration tests and the signaling-
+    /// only deployment mode.
     #[must_use]
     pub fn new(jwks: JwksCache, peers: PeerRegistry) -> Arc<Self> {
-        Arc::new(Self { jwks, peers })
+        Arc::new(Self {
+            jwks,
+            peers,
+            media: None,
+        })
+    }
+
+    /// Build a fresh state container with the media half
+    /// wired. The handle is what `spawn_media_task`
+    /// returned in `main.rs`.
+    #[must_use]
+    pub fn new_with_media(
+        jwks: JwksCache,
+        peers: PeerRegistry,
+        media: MediaTaskHandle,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            jwks,
+            peers,
+            media: Some(media),
+        })
     }
 }
 
@@ -162,7 +191,17 @@ async fn handle_socket(
     // roster (excluding itself) ahead of any join broadcast
     // that might reach them indirectly via cross-call
     // peer-list races.
-    let router = Router::new(&state.peers);
+    let router = {
+        let r = Router::new(&state.peers);
+        // Attach the media task only when configured —
+        // when `state.media` is `None` SDP / ICE frames
+        // surface as `RouterError::MediaNotWired` (the
+        // signaling-only mode).
+        match state.media.as_ref() {
+            Some(m) => r.with_media(m),
+            None => r,
+        }
+    };
     let server_ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .ok()

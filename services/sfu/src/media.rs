@@ -99,10 +99,12 @@
 //! Each step keeps the audit-pack invariant
 //! ("payload-opaque router") intact.
 
-use std::time::Instant;
+use std::net::SocketAddr;
+use std::time::{Duration, Instant};
 
 use str0m::change::{SdpAnswer, SdpOffer};
-use str0m::{Candidate, Output, Rtc};
+use str0m::net::{Protocol, Receive, Transmit};
+use str0m::{Candidate, Input, Output, Rtc};
 use thiserror::Error;
 
 use crate::peer::PeerId;
@@ -235,6 +237,47 @@ impl MediaPeer {
         Ok(answer.to_sdp_string())
     }
 
+    /// Register a host candidate that points at the
+    /// SFU's bound UDP socket. The candidate is baked
+    /// into the SDP answer the next call to
+    /// [`Self::accept_offer`] produces.
+    ///
+    /// # Errors
+    ///
+    /// [`MediaError::Str0m`] on a `str0m::Candidate::host`
+    /// failure (typically: address is not a valid
+    /// host-candidate address).
+    pub fn add_local_host_candidate(&mut self, addr: SocketAddr) -> MediaResult<()> {
+        let candidate = Candidate::host(addr, Protocol::Udp)
+            .map_err(|e| MediaError::Str0m(format!("host candidate: {e}")))?;
+        self.rtc.add_local_candidate(candidate);
+        Ok(())
+    }
+
+    /// `true` if the underlying `str0m::Rtc` would
+    /// accept this UDP packet — exposed so the event
+    /// loop can demux inbound datagrams.
+    #[must_use]
+    pub fn accepts(&self, input: &Input<'_>) -> bool {
+        self.rtc.accepts(input)
+    }
+
+    /// Feed an `Input` into the str0m state machine.
+    /// Mirrors `Rtc::handle_input` with typed-error
+    /// mapping.
+    ///
+    /// # Errors
+    ///
+    /// [`MediaError::Str0m`] when `str0m::Rtc::handle_input`
+    /// returns an error. Continue-on-error is up to the
+    /// caller — typically the event loop logs and drops
+    /// the peer.
+    pub fn handle_input(&mut self, input: Input<'_>) -> MediaResult<()> {
+        self.rtc
+            .handle_input(input)
+            .map_err(|e| MediaError::Str0m(e.to_string()))
+    }
+
     /// Hand a trickle-ICE candidate (the value of the
     /// SDP `a=candidate:…` attribute) to the underlying
     /// `str0m::Rtc`.
@@ -339,6 +382,14 @@ impl MediaRouter {
     /// present. Returns `None` if no peer matches.
     pub fn peer_mut(&mut self, id: &MediaPeerId) -> Option<&mut MediaPeer> {
         self.peers.iter_mut().find(|p| p.id() == id)
+    }
+
+    /// Retain only peers for which `keep` returns `true`.
+    /// Used by the event loop to drop peers whose
+    /// `Rtc::is_alive` flipped to `false` (DTLS/ICE
+    /// failure). O(n) in the number of peers.
+    pub fn retain_peers<F: FnMut(&MediaPeer) -> bool>(&mut self, keep: F) {
+        self.peers.retain(keep);
     }
 
     /// Get the peer with the given id, or insert a fresh
@@ -515,47 +566,251 @@ impl MediaTaskHandle {
     }
 }
 
-/// Spawn the media event-loop task. Returns the handle
-/// signaling code uses to send commands.
+/// Spawn the media event-loop task. Binds a
+/// `tokio::net::UdpSocket` at `bind_addr` (typically
+/// the value of `LAKKO_SFU_MEDIA_BIND`), captures its
+/// local address, and returns the handle the signaling
+/// layer uses to push commands.
 ///
-/// The task is a single tokio future that owns the
-/// [`MediaRouter`] and processes [`MediaCommand`]s one
-/// at a time. Step 3 ships only the command channel; the
-/// UDP socket + receive loop + `MediaData` fanout slot
-/// into the same `select!` body in step 4.
+/// The task is a single tokio future driven by a
+/// `select!` over three sources:
+///
+/// 1. Inbound UDP packets on the bound socket.
+/// 2. [`MediaCommand`]s from the signaling layer.
+/// 3. The earliest pending `str0m::Output::Timeout` of
+///    any admitted [`MediaPeer`].
+///
+/// After every input, the task drains
+/// `str0m::Rtc::poll_output` on every peer and writes
+/// any `Output::Transmit` packets back to the socket.
+/// Dead peers (those whose `Rtc::is_alive` flipped to
+/// `false` after DTLS/ICE failure) are pruned at the
+/// end of each tick.
+///
+/// `Event::MediaData` events are produced today but
+/// not yet forwarded between peers — that fanout lands
+/// in step 5 of S-3-B-routing-media.
+///
+/// # Errors
+///
+/// [`MediaError::Str0m`] on UDP-bind failure (wrong
+/// permission, port already in use, etc.).
+pub async fn spawn_media_task(bind_addr: SocketAddr) -> MediaResult<MediaTaskHandle> {
+    let socket = tokio::net::UdpSocket::bind(bind_addr)
+        .await
+        .map_err(|e| MediaError::Str0m(format!("UDP bind {bind_addr}: {e}")))?;
+    let local_addr = socket
+        .local_addr()
+        .map_err(|e| MediaError::Str0m(format!("UDP local_addr: {e}")))?;
+
+    let (tx, rx) = tokio::sync::mpsc::channel::<MediaCommand>(MEDIA_COMMAND_CAPACITY);
+    tokio::spawn(run_media_loop(socket, local_addr, rx));
+    Ok(MediaTaskHandle { tx })
+}
+
+/// Spawn a media task **without** binding the UDP
+/// socket. The task processes commands but never reads
+/// or writes packets — useful for unit tests that
+/// exercise the SDP signaling path without standing up
+/// real ICE / DTLS.
+///
+/// Production paths always go through
+/// [`spawn_media_task`].
 #[must_use]
-pub fn spawn_media_task() -> MediaTaskHandle {
+pub fn spawn_media_task_no_socket() -> MediaTaskHandle {
     let (tx, mut rx) = tokio::sync::mpsc::channel::<MediaCommand>(MEDIA_COMMAND_CAPACITY);
     tokio::spawn(async move {
         let mut router = MediaRouter::new();
         while let Some(cmd) = rx.recv().await {
-            match cmd {
-                MediaCommand::AcceptOffer {
-                    peer_id,
-                    offer_sdp,
-                    reply,
-                } => {
-                    let peer = router.peer_or_insert(peer_id, Instant::now());
-                    let res = peer.accept_offer(&offer_sdp);
-                    // If the receiver dropped, the
-                    // originating future has bailed —
-                    // ignore the send failure.
-                    let _ = reply.send(res);
-                },
-                MediaCommand::AddRemoteCandidate {
-                    peer_id,
-                    candidate_sdp,
-                    reply,
-                } => {
-                    let peer = router.peer_or_insert(peer_id, Instant::now());
-                    let res = peer.add_remote_candidate(&candidate_sdp);
-                    let _ = reply.send(res);
-                },
-            }
+            handle_command(&mut router, cmd, None);
         }
     });
     MediaTaskHandle { tx }
 }
+
+/// Process one command against `router`. If
+/// `local_addr` is `Some`, the per-peer host candidate
+/// is registered before [`MediaPeer::accept_offer`] so
+/// the answer's `a=candidate:` line points at the SFU's
+/// bound socket.
+fn handle_command(router: &mut MediaRouter, cmd: MediaCommand, local_addr: Option<SocketAddr>) {
+    match cmd {
+        MediaCommand::AcceptOffer {
+            peer_id,
+            offer_sdp,
+            reply,
+        } => {
+            let peer = router.peer_or_insert(peer_id, Instant::now());
+            // Best-effort: if the host candidate fails
+            // we still try to accept the offer; the
+            // resulting answer just won't carry our
+            // address, which is observable to the
+            // client as a failed connectivity check.
+            if let Some(addr) = local_addr {
+                let _ = peer.add_local_host_candidate(addr);
+            }
+            let res = peer.accept_offer(&offer_sdp);
+            // If the receiver dropped, the originating
+            // future has bailed — ignore the send
+            // failure.
+            let _ = reply.send(res);
+        },
+        MediaCommand::AddRemoteCandidate {
+            peer_id,
+            candidate_sdp,
+            reply,
+        } => {
+            let peer = router.peer_or_insert(peer_id, Instant::now());
+            let res = peer.add_remote_candidate(&candidate_sdp);
+            let _ = reply.send(res);
+        },
+    }
+}
+
+/// The main event loop. Lives in its own function so it
+/// can be unit-tested in isolation (future sub-sprint:
+/// a synthetic-client integration test in step 5).
+async fn run_media_loop(
+    socket: tokio::net::UdpSocket,
+    local_addr: SocketAddr,
+    mut rx: tokio::sync::mpsc::Receiver<MediaCommand>,
+) {
+    let mut router = MediaRouter::new();
+    let mut buf = vec![0u8; UDP_RECV_BUF];
+
+    loop {
+        // Compute the earliest pending peer timeout —
+        // bounds the select's sleep so we drive the
+        // str0m state machines forward even when no
+        // network or command activity is happening.
+        let now = Instant::now();
+        let deadline = drain_outputs(&mut router, &socket, now).await;
+        let sleep_for = deadline
+            .saturating_duration_since(now)
+            .min(MAX_TICK_INTERVAL);
+
+        tokio::select! {
+            biased; // prioritise commands so a fast signaling layer is not starved by busy traffic
+            cmd = rx.recv() => {
+                match cmd {
+                    Some(cmd) => handle_command(&mut router, cmd, Some(local_addr)),
+                    None => return, // all senders dropped — task is done
+                }
+            }
+            recv = socket.recv_from(&mut buf) => {
+                if let Ok((n, source)) = recv {
+                    let Ok(contents) = (buf[..n]).try_into() else {
+                        continue;
+                    };
+                    let input = Input::Receive(
+                        Instant::now(),
+                        Receive {
+                            proto: Protocol::Udp,
+                            source,
+                            destination: local_addr,
+                            contents,
+                        },
+                    );
+                    if let Some(peer) = router
+                        .peers_mut()
+                        .iter_mut()
+                        .find(|p| p.accepts(&input))
+                    {
+                        // Errors here typically mean an
+                        // ICE / DTLS bug in str0m or a
+                        // spoofed packet that survived
+                        // the accepts() check. Log and
+                        // press on — `is_alive` cleanup
+                        // at the loop tail catches a
+                        // wedged peer.
+                        if let Err(e) = peer.handle_input(input) {
+                            tracing::warn!(error = %e, "media: handle_input failed");
+                        }
+                    }
+                }
+            }
+            () = tokio::time::sleep(sleep_for) => {
+                // The timeout branch is intentionally
+                // empty — the next loop iteration's
+                // `drain_outputs` call will tick the
+                // peers and recompute the deadline.
+            }
+        }
+
+        // Prune peers whose Rtc died (DTLS failure,
+        // ICE timeout, etc.). The Vec retain compacts
+        // in-place — O(n) on the worst case.
+        router.retain_peers(MediaPeer::is_alive);
+    }
+}
+
+/// Drain `poll_output` on every peer; write any
+/// `Output::Transmit` packets back to `socket`; collect
+/// the earliest `Output::Timeout(t)` so the caller can
+/// `sleep_until` it. Returns `now + MAX_TICK_INTERVAL`
+/// if no peer produced a timeout (a defensive ceiling
+/// against a peer that never declares a deadline).
+async fn drain_outputs(
+    router: &mut MediaRouter,
+    socket: &tokio::net::UdpSocket,
+    now: Instant,
+) -> Instant {
+    let mut earliest = now + MAX_TICK_INTERVAL;
+    for peer in router.peers_mut() {
+        loop {
+            match peer.poll_output() {
+                Ok(Output::Transmit(t)) => {
+                    write_transmit(socket, &t).await;
+                },
+                Ok(Output::Timeout(at)) => {
+                    if at < earliest {
+                        earliest = at;
+                    }
+                    break;
+                },
+                Ok(Output::Event(_)) => {
+                    // Step 5 handles MediaData fanout
+                    // and ICE-state events; for now we
+                    // discard.
+                },
+                Err(e) => {
+                    tracing::warn!(error = %e, "media: poll_output failed; dropping peer");
+                    // The peer's `is_alive` will likely
+                    // flip false at the next tick; we
+                    // rely on the loop-tail retain to
+                    // clean up rather than break here.
+                    break;
+                },
+            }
+        }
+    }
+    earliest
+}
+
+/// Send one `str0m::net::Transmit` out the bound
+/// socket. Errors are logged but not surfaced — UDP is
+/// already best-effort, and an EAGAIN here typically
+/// resolves on the next tick.
+async fn write_transmit(socket: &tokio::net::UdpSocket, t: &Transmit) {
+    if let Err(e) = socket.send_to(&t.contents, t.destination).await {
+        tracing::warn!(
+            error = %e,
+            destination = %t.destination,
+            "media: UDP send failed"
+        );
+    }
+}
+
+/// UDP receive buffer — sized to the largest IPv4
+/// fragment-free datagram (~1500 minus IP/UDP headers
+/// + safety margin), matching str0m's example.
+const UDP_RECV_BUF: usize = 2000;
+
+/// Ceiling on how long the event loop sleeps between
+/// ticks even when no peer has declared a deadline.
+/// 100 ms matches str0m's chat-example heartbeat and is
+/// far below the ICE keepalive interval.
+const MAX_TICK_INTERVAL: Duration = Duration::from_millis(100);
 
 #[cfg(test)]
 mod tests {
@@ -697,7 +952,7 @@ mod tests {
     /// across the async/sync boundary.
     #[tokio::test]
     async fn task_accept_offer_surfaces_bad_sdp_through_channel() {
-        let handle = spawn_media_task();
+        let handle = spawn_media_task_no_socket();
         let err = handle
             .accept_offer(pid("alice"), "garbage".into())
             .await
@@ -712,7 +967,7 @@ mod tests {
     /// `BadIceCandidate` symmetrically.
     #[tokio::test]
     async fn task_add_remote_candidate_surfaces_bad_candidate_through_channel() {
-        let handle = spawn_media_task();
+        let handle = spawn_media_task_no_socket();
         let err = handle
             .add_remote_candidate(pid("alice"), "not a candidate".into())
             .await
@@ -721,5 +976,57 @@ mod tests {
             MediaCommandError::Media(MediaError::BadIceCandidate(_)) => {},
             other => panic!("expected Media(BadIceCandidate), got {other:?}"),
         }
+    }
+
+    /// `add_local_host_candidate` accepts a loopback
+    /// IPv4 address — the smoke test for the event-loop
+    /// host-candidate registration path.
+    #[test]
+    fn add_local_host_candidate_accepts_loopback() {
+        let mut p = MediaPeer::new(pid("alice"), Instant::now());
+        let addr: SocketAddr = "127.0.0.1:9999".parse().unwrap();
+        p.add_local_host_candidate(addr)
+            .expect("host candidate accepted");
+    }
+
+    /// `accepts` returns `true` for an `Input::Timeout`
+    /// — the str0m contract is that timeouts are
+    /// universally consumed. Validates the basic
+    /// event-loop demux gate.
+    #[test]
+    fn accepts_timeout_input_unconditionally() {
+        let p = MediaPeer::new(pid("alice"), Instant::now());
+        let input = Input::Timeout(Instant::now());
+        assert!(p.accepts(&input), "Rtc must accept Timeout inputs");
+    }
+
+    /// `spawn_media_task(addr)` succeeds on a free
+    /// loopback port and returns a usable handle. End-
+    /// to-end smoke that exercises:
+    /// - real UDP bind on tokio's runtime,
+    /// - local_addr capture,
+    /// - command channel reachable,
+    /// - event-loop spawned without panic.
+    ///
+    /// Loopback port 0 lets the OS pick a free port to
+    /// dodge flakiness when the test runs in parallel.
+    #[tokio::test]
+    async fn spawn_media_task_binds_loopback() {
+        let bind: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let handle = spawn_media_task(bind)
+            .await
+            .expect("UDP bind on loopback:0 succeeds");
+        // The task is alive; reuse the handle for a
+        // round-trip command that fails at the SDP
+        // parser to confirm the bound task is wired the
+        // same way as the no-socket variant.
+        let err = handle
+            .accept_offer(pid("alice"), "garbage".into())
+            .await
+            .expect_err("malformed SDP must surface as BadSdp");
+        assert!(matches!(
+            err,
+            MediaCommandError::Media(MediaError::BadSdp(_))
+        ));
     }
 }

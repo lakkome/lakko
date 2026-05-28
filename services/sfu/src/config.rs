@@ -79,6 +79,17 @@ pub struct Config {
     /// is wired into the WS frame loop.
     #[allow(dead_code)]
     pub peer_msg_rate_per_sec: u32,
+    /// Address the media-routing task binds its UDP
+    /// socket to. `None` (env var unset or empty) turns
+    /// the media half off — the SFU runs as a signaling-
+    /// only relay, and `ClientFrame::SdpOffer` /
+    /// `IceCandidate` frames surface as
+    /// `RouterError::MediaNotWired`. Set this in
+    /// production via `LAKKO_SFU_MEDIA_BIND`
+    /// (e.g. `0.0.0.0:0` to let the OS pick a port, or
+    /// a fixed `0.0.0.0:43210` if the firewall pins
+    /// it).
+    pub media_bind: Option<SocketAddr>,
 }
 
 impl Config {
@@ -108,6 +119,7 @@ impl Config {
             "LAKKO_SFU_PEER_MSG_RATE_PER_SEC",
             DEFAULT_PEER_MSG_RATE_PER_SEC,
         )?;
+        let media_bind = parse_optional_socket("LAKKO_SFU_MEDIA_BIND")?;
 
         Ok(Self {
             signaling_bind,
@@ -116,6 +128,7 @@ impl Config {
             jwks_refresh,
             handshake_timeout,
             peer_msg_rate_per_sec,
+            media_bind,
         })
     }
 }
@@ -126,6 +139,25 @@ fn parse_socket(name: &'static str, fallback: &str) -> Result<SocketAddr, Config
         name,
         detail: e.to_string(),
     })
+}
+
+/// Parse an optional `SocketAddr` from `name`. Returns
+/// `Ok(None)` when the env var is unset or empty (the
+/// signaling-only mode signal). Returns
+/// [`ConfigError::Invalid`] when the value is present but
+/// malformed — silent fallback to `None` on a typo would
+/// mask a production misconfiguration.
+fn parse_optional_socket(name: &'static str) -> Result<Option<SocketAddr>, ConfigError> {
+    let raw = match env::var(name) {
+        Ok(v) if !v.is_empty() => v,
+        _ => return Ok(None),
+    };
+    raw.parse::<SocketAddr>()
+        .map(Some)
+        .map_err(|e| ConfigError::Invalid {
+            name,
+            detail: e.to_string(),
+        })
 }
 
 fn parse_secs(name: &'static str, fallback: u64) -> Result<Duration, ConfigError> {
@@ -178,6 +210,7 @@ mod tests {
             "LAKKO_SFU_JWKS_REFRESH_SECS",
             "LAKKO_SFU_HANDSHAKE_TIMEOUT_SECS",
             "LAKKO_SFU_PEER_MSG_RATE_PER_SEC",
+            "LAKKO_SFU_MEDIA_BIND",
         ] {
             env::remove_var(key);
         }
@@ -229,6 +262,80 @@ mod tests {
                     err,
                     ConfigError::Invalid {
                         name: "LAKKO_SFU_BIND",
+                        ..
+                    }
+                ));
+            },
+        );
+    }
+
+    /// `LAKKO_SFU_MEDIA_BIND` unset → `media_bind == None`
+    /// (signaling-only mode, the default). Verified against
+    /// the minimal-valid setup so a future regression that
+    /// flips the default to "always bind" is caught here.
+    #[test]
+    fn media_bind_default_is_none() {
+        with_env(&[("LAKKO_SFU_JWKS_URL", "https://a/x")], || {
+            let cfg = Config::from_env().expect("valid minimal env");
+            assert!(cfg.media_bind.is_none(), "media off when env unset");
+        });
+    }
+
+    /// `LAKKO_SFU_MEDIA_BIND=""` (empty string) is treated
+    /// identically to "unset" — the systemd
+    /// `EnvironmentFile=` syntax tends to surface an
+    /// uncommented-but-empty value, and we want production
+    /// to behave the same as a clean unset.
+    #[test]
+    fn media_bind_empty_is_none() {
+        with_env(
+            &[
+                ("LAKKO_SFU_JWKS_URL", "https://a/x"),
+                ("LAKKO_SFU_MEDIA_BIND", ""),
+            ],
+            || {
+                let cfg = Config::from_env().expect("valid minimal env");
+                assert!(cfg.media_bind.is_none(), "empty env value == unset");
+            },
+        );
+    }
+
+    /// A valid `host:port` parses through to a `Some(addr)`
+    /// — the production happy path.
+    #[test]
+    fn media_bind_valid_socket_addr() {
+        with_env(
+            &[
+                ("LAKKO_SFU_JWKS_URL", "https://a/x"),
+                ("LAKKO_SFU_MEDIA_BIND", "0.0.0.0:43210"),
+            ],
+            || {
+                let cfg = Config::from_env().expect("valid env with media");
+                assert_eq!(
+                    cfg.media_bind.map(|s| s.to_string()),
+                    Some("0.0.0.0:43210".to_owned())
+                );
+            },
+        );
+    }
+
+    /// A malformed `LAKKO_SFU_MEDIA_BIND` MUST fail loud —
+    /// silently degrading to `None` would mask a production
+    /// typo as a non-WebRTC SFU and surface as confused
+    /// client-side ICE failures.
+    #[test]
+    fn media_bind_invalid_socket_rejected() {
+        with_env(
+            &[
+                ("LAKKO_SFU_JWKS_URL", "https://a/x"),
+                ("LAKKO_SFU_MEDIA_BIND", "not-a-socket"),
+            ],
+            || {
+                let err = Config::from_env().unwrap_err();
+                assert!(matches!(
+                    err,
+                    ConfigError::Invalid {
+                        name: "LAKKO_SFU_MEDIA_BIND",
                         ..
                     }
                 ));

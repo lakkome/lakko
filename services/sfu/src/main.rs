@@ -18,9 +18,10 @@ use tracing::{info, warn};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 use lakko_svc_sfu::{
-    build_app,
+    build_app, build_app_with_media,
     config::Config,
     jwks::JwksCache,
+    media,
     prom::{self, MetricsExporter},
     VERSION,
 };
@@ -35,6 +36,7 @@ async fn main() -> anyhow::Result<()> {
         signaling_bind = %cfg.signaling_bind,
         metrics_bind = %cfg.metrics_bind,
         jwks_url = %cfg.jwks_url,
+        media_bind = ?cfg.media_bind,
         "lakko-svc-sfu starting (v{})",
         VERSION
     );
@@ -48,11 +50,29 @@ async fn main() -> anyhow::Result<()> {
     let jwks = JwksCache::fetch_initial(&cfg).await?;
     let _refresher_handle = jwks.clone().spawn_refresher(cfg.clone());
 
+    // Spawn the media-routing task when configured. When
+    // `LAKKO_SFU_MEDIA_BIND` is unset, run as a signaling-
+    // only relay — admitted peers can exchange welcome /
+    // signal-relay frames but SDP / ICE frames surface as
+    // `RouterError::MediaNotWired`.
+    let media_handle = if let Some(bind) = cfg.media_bind {
+        let handle = media::spawn_media_task(bind).await?;
+        info!(media_bind = %bind, "media: UDP socket bound; routing task spawned");
+        Some(handle)
+    } else {
+        info!("media: LAKKO_SFU_MEDIA_BIND unset; running signaling-only");
+        None
+    };
+
     // Build the signaling-side router. The peer registry
     // lives inside it; we keep the handle around in case a
     // future admin endpoint needs to inspect it (currently
     // unused, hence the `_`).
-    let (router, _peers) = build_app(cfg.clone(), jwks.clone());
+    let (router, _peers) = if let Some(m) = media_handle.clone() {
+        build_app_with_media(cfg.clone(), jwks.clone(), m)
+    } else {
+        build_app(cfg.clone(), jwks.clone())
+    };
 
     // Background task: keep `lakko_sfu_jwks_cache_age_seconds`
     // gauge fresh so a stale auth service surfaces in

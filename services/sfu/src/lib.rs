@@ -37,6 +37,7 @@ use tracing::warn;
 
 use crate::config::Config;
 use crate::jwks::JwksCache;
+use crate::media::MediaTaskHandle;
 use crate::peer::PeerRegistry;
 use crate::signaling::AppState;
 
@@ -98,10 +99,28 @@ pub async fn ready(cfg: Config, jwks: JwksCache) -> impl IntoResponse {
 
 /// Convenience — build everything needed for a fresh SFU
 /// instance: registry, app state, router. Returns the
-/// router ready to be passed to `axum::serve`.
+/// router ready to be passed to `axum::serve`. Runs the
+/// SFU in signaling-only mode; SDP / ICE frames surface
+/// as `RouterError::MediaNotWired` until the caller
+/// switches to [`build_app_with_media`].
 pub fn build_app(cfg: Config, jwks: JwksCache) -> (Router, PeerRegistry) {
     let peers = PeerRegistry::new();
     let state = AppState::new(jwks.clone(), peers.clone());
+    let router = build_router(state, cfg, jwks);
+    (router, peers)
+}
+
+/// Same as [`build_app`] but with a [`MediaTaskHandle`]
+/// already wired into [`AppState`]. Production path —
+/// called from `main.rs` when `LAKKO_SFU_MEDIA_BIND` is
+/// set.
+pub fn build_app_with_media(
+    cfg: Config,
+    jwks: JwksCache,
+    media: MediaTaskHandle,
+) -> (Router, PeerRegistry) {
+    let peers = PeerRegistry::new();
+    let state = AppState::new_with_media(jwks.clone(), peers.clone(), media);
     let router = build_router(state, cfg, jwks);
     (router, peers)
 }

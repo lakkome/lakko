@@ -63,6 +63,9 @@ fn test_config() -> Config {
         jwks_refresh: std::time::Duration::from_secs(300),
         handshake_timeout: std::time::Duration::from_secs(10),
         peer_msg_rate_per_sec: 100,
+        // Signaling-only — the integration tests exercise
+        // the WS fanout, not the media half.
+        media_bind: None,
     }
 }
 
