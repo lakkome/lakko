@@ -119,6 +119,23 @@ pub enum ServerFrame {
         /// match against its outstanding pings.
         nonce: u64,
     },
+
+    /// SDP answer the SFU produced in response to the
+    /// client's [`ClientFrame::SdpOffer`]. Carries the
+    /// SFU's local ICE candidates inline (`a=candidate:`
+    /// lines) — str0m bakes them into the answer rather
+    /// than emitting them as separate events.
+    ///
+    /// S-3-B-routing-media step 2: the wire frame is
+    /// shipped; the router wiring that hands offers
+    /// through to [`crate::media::MediaPeer::accept_offer`]
+    /// lands in step 3 alongside the UDP socket loop.
+    SdpAnswer {
+        /// SDP answer string. Plain text, no JSON
+        /// wrapping — str0m's
+        /// `SdpAnswer::to_sdp_string` output verbatim.
+        sdp: String,
+    },
 }
 
 /// Client-to-server frame.
@@ -140,6 +157,49 @@ pub enum ClientFrame {
     Ping {
         /// Caller-chosen nonce.
         nonce: u64,
+    },
+
+    /// Client → SFU: SDP offer that the SFU consumes via
+    /// its own `str0m::Rtc::sdp_api()`. The SFU replies
+    /// with [`ServerFrame::SdpAnswer`] on success or
+    /// [`ServerFrame::Error`] with
+    /// [`ErrorCode::BadSdp`] on a parse / state failure.
+    ///
+    /// Unlike [`Self::SignalRelay`] this is NOT an opaque
+    /// peer-to-peer payload — the SFU MUST parse the SDP
+    /// to drive its own media state machine. The audit
+    /// invariant from `docs/security/calls.md` still
+    /// holds: the SFU only inspects transport-layer SDP
+    /// (codecs, ICE creds, DTLS fingerprint) — the inner
+    /// RTP payload it later forwards is SFrame ciphertext
+    /// and stays opaque.
+    SdpOffer {
+        /// SDP offer string. Plain text, no JSON
+        /// wrapping — same shape `RTCPeerConnection.localDescription.sdp`
+        /// returns on the browser side.
+        sdp: String,
+    },
+
+    /// Client → SFU: a trickle-ICE candidate the client
+    /// gathered after sending its initial
+    /// [`Self::SdpOffer`]. The SFU hands it to its
+    /// `str0m::Rtc::add_remote_candidate` so the next
+    /// connectivity check can include it. Failure to
+    /// parse the candidate surfaces as
+    /// [`ServerFrame::Error`] with
+    /// [`ErrorCode::BadIceCandidate`].
+    ///
+    /// `candidate_sdp` is the SDP `a=candidate:…`
+    /// attribute *value* (everything after `candidate:`),
+    /// matching what `RTCIceCandidate.candidate` returns
+    /// on the browser side. `str0m::Candidate::from_sdp_string`
+    /// is the parser the SFU uses.
+    IceCandidate {
+        /// SDP candidate string — for example
+        /// `candidate:842163049 1 udp 1677729535 192.0.2.1
+        /// 60769 typ srflx raddr 0.0.0.0 rport 0
+        /// generation 0`.
+        candidate_sdp: String,
     },
 }
 
@@ -188,6 +248,14 @@ pub enum ErrorCode {
     /// Per-peer signaling rate exceeded
     /// `LAKKO_SFU_PEER_MSG_RATE_PER_SEC`.
     RateLimited,
+    /// `ClientFrame::SdpOffer.sdp` failed to parse via
+    /// `str0m::SdpOffer::from_sdp_string` or the SFU's
+    /// state machine refused the offer (see the `detail`
+    /// field for the str0m diagnostic).
+    BadSdp,
+    /// `ClientFrame::IceCandidate.candidate_sdp` failed
+    /// to parse via `str0m::Candidate::from_sdp_string`.
+    BadIceCandidate,
 }
 
 #[cfg(test)]
@@ -253,6 +321,74 @@ mod tests {
         };
         let json = serde_json::to_string(&frame).unwrap();
         assert!(json.contains("\"code\":\"frame-too-large\""));
+    }
+
+    #[test]
+    fn sdp_offer_round_trip_kebab() {
+        let frame = ClientFrame::SdpOffer {
+            sdp: "v=0\r\no=- 0 0 IN IP4 127.0.0.1\r\n".into(),
+        };
+        let json = serde_json::to_string(&frame).unwrap();
+        assert!(
+            json.contains("\"kind\":\"sdp-offer\""),
+            "expected kebab kind=sdp-offer, got {json}"
+        );
+        let back: ClientFrame = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, frame);
+    }
+
+    #[test]
+    fn sdp_answer_round_trip_kebab() {
+        let frame = ServerFrame::SdpAnswer {
+            sdp: "v=0\r\no=- 0 0 IN IP4 127.0.0.1\r\n".into(),
+        };
+        let json = serde_json::to_string(&frame).unwrap();
+        assert!(
+            json.contains("\"kind\":\"sdp-answer\""),
+            "expected kebab kind=sdp-answer, got {json}"
+        );
+        let back: ServerFrame = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, frame);
+    }
+
+    #[test]
+    fn ice_candidate_round_trip_kebab() {
+        let frame = ClientFrame::IceCandidate {
+            candidate_sdp: "candidate:1 1 udp 1677729535 192.0.2.1 60769 typ srflx".into(),
+        };
+        let json = serde_json::to_string(&frame).unwrap();
+        assert!(
+            json.contains("\"kind\":\"ice-candidate\""),
+            "expected kebab kind=ice-candidate, got {json}"
+        );
+        let back: ClientFrame = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, frame);
+    }
+
+    #[test]
+    fn bad_sdp_error_code_kebab() {
+        let frame = ServerFrame::Error {
+            code: ErrorCode::BadSdp,
+            detail: "str0m: missing m= line".into(),
+        };
+        let json = serde_json::to_string(&frame).unwrap();
+        assert!(
+            json.contains("\"code\":\"bad-sdp\""),
+            "expected kebab code=bad-sdp, got {json}"
+        );
+    }
+
+    #[test]
+    fn bad_ice_candidate_error_code_kebab() {
+        let frame = ServerFrame::Error {
+            code: ErrorCode::BadIceCandidate,
+            detail: "candidate:… parse failed".into(),
+        };
+        let json = serde_json::to_string(&frame).unwrap();
+        assert!(
+            json.contains("\"code\":\"bad-ice-candidate\""),
+            "expected kebab code=bad-ice-candidate, got {json}"
+        );
     }
 
     #[test]

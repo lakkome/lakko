@@ -34,9 +34,9 @@
 //! destination — the SFU forwards bytes without
 //! decryption.
 //!
-//! ## What this step ships
+//! ## What has shipped so far
 //!
-//! Step 1 (this file) is the foundation:
+//! Step 1 — Foundation:
 //!
 //! - `str0m` dep pinned at `=0.19.0` with
 //!   `default-features = false, features = ["rust-crypto"]`
@@ -56,17 +56,40 @@
 //!   is the property that made it the chosen stack
 //!   (see [`SPIKE.md`](../SPIKE.md)).
 //!
-//! ## What does NOT land in step 1
+//! Step 2 — SDP/ICE wire frames + MediaPeer signaling
+//! API:
 //!
-//! Steps 2-5 of S-3-B-routing-media:
+//! - New wire frames in [`crate::protocol`]:
+//!   `ClientFrame::SdpOffer` + `ClientFrame::IceCandidate`
+//!   (client → SFU), `ServerFrame::SdpAnswer` (SFU →
+//!   client). New `ErrorCode::BadSdp` /
+//!   `ErrorCode::BadIceCandidate` round-trip via kebab.
+//! - [`MediaPeer::accept_offer`] wraps
+//!   `str0m::Rtc::sdp_api().accept_offer(..)` with
+//!   typed [`MediaError::BadSdp`] /
+//!   [`MediaError::Str0m`] error mapping; returns the
+//!   answer SDP string ready to ship as
+//!   `ServerFrame::SdpAnswer`.
+//! - [`MediaPeer::add_remote_candidate`] wraps
+//!   `str0m::Candidate::from_sdp_string` +
+//!   `str0m::Rtc::add_remote_candidate` with typed
+//!   [`MediaError::BadIceCandidate`].
+//! - Router stub: when `ClientFrame::SdpOffer` /
+//!   `IceCandidate` arrives, [`crate::router::Router`]
+//!   surfaces a typed
+//!   [`crate::router::RouterError::MediaNotWired`] (maps
+//!   to `ErrorCode::BadSdp` on the wire). The
+//!   router-to-MediaPeer integration lands in step 3
+//!   alongside the UDP socket loop.
 //!
-//! - Step 2 — wire SDP-offer / SDP-answer /
-//!   ICE-candidate frames through
-//!   [`crate::protocol::ClientFrame::SignalRelay`]
-//!   onto each peer's `str0m::Rtc::sdp_api`.
+//! ## What does NOT land yet
+//!
+//! Steps 3-5 of S-3-B-routing-media:
+//!
 //! - Step 3 — open the SFU's UDP socket + spawn the
-//!   tokio task that polls the registry and writes to
-//!   the socket.
+//!   tokio task that polls the registry, writes to the
+//!   socket, and dispatches `ClientFrame::SdpOffer` /
+//!   `IceCandidate` into the right `MediaPeer`.
 //! - Step 4 — translate `str0m::Event::MediaData`
 //!   into outgoing writes on every other peer's `Rtc`
 //!   (RTP fanout).
@@ -78,7 +101,8 @@
 
 use std::time::Instant;
 
-use str0m::{Output, Rtc};
+use str0m::change::{SdpAnswer, SdpOffer};
+use str0m::{Candidate, Output, Rtc};
 use thiserror::Error;
 
 use crate::peer::PeerId;
@@ -103,6 +127,16 @@ pub enum MediaError {
     /// happen to pin.
     #[error("str0m error: {0}")]
     Str0m(String),
+    /// SDP-offer string failed to parse via
+    /// `str0m::SdpOffer::from_sdp_string`. Maps to the
+    /// wire-level [`crate::protocol::ErrorCode::BadSdp`].
+    #[error("SDP parse failed: {0}")]
+    BadSdp(String),
+    /// ICE-candidate string failed to parse via
+    /// `str0m::Candidate::from_sdp_string`. Maps to the
+    /// wire-level [`crate::protocol::ErrorCode::BadIceCandidate`].
+    #[error("ICE candidate parse failed: {0}")]
+    BadIceCandidate(String),
 }
 
 /// Result alias.
@@ -168,6 +202,59 @@ impl MediaPeer {
     #[must_use]
     pub fn is_alive(&self) -> bool {
         self.rtc.is_alive()
+    }
+
+    /// Consume a client's SDP offer and produce the
+    /// SFU-side SDP answer.
+    ///
+    /// `offer_sdp` is the plain-text offer the client
+    /// sent over the signaling channel (carried as
+    /// [`crate::protocol::ClientFrame::SdpOffer`]). On
+    /// success the returned `String` is the answer the
+    /// SFU should ship back via
+    /// [`crate::protocol::ServerFrame::SdpAnswer`]; the
+    /// SFU's local ICE candidates are baked in inline as
+    /// `a=candidate:` lines (str0m does not emit them as
+    /// separate events).
+    ///
+    /// # Errors
+    ///
+    /// - [`MediaError::BadSdp`] when the offer string
+    ///   fails `str0m::SdpOffer::from_sdp_string`.
+    /// - [`MediaError::Str0m`] when str0m's
+    ///   `SdpApi::accept_offer` refuses the offer (e.g.
+    ///   inconsistent bundle, codec mismatch).
+    pub fn accept_offer(&mut self, offer_sdp: &str) -> MediaResult<String> {
+        let offer =
+            SdpOffer::from_sdp_string(offer_sdp).map_err(|e| MediaError::BadSdp(e.to_string()))?;
+        let answer: SdpAnswer = self
+            .rtc
+            .sdp_api()
+            .accept_offer(offer)
+            .map_err(|e| MediaError::Str0m(e.to_string()))?;
+        Ok(answer.to_sdp_string())
+    }
+
+    /// Hand a trickle-ICE candidate (the value of the
+    /// SDP `a=candidate:…` attribute) to the underlying
+    /// `str0m::Rtc`.
+    ///
+    /// `candidate_sdp` is the form
+    /// `RTCIceCandidate.candidate` returns on the
+    /// browser side — i.e. the full `candidate:…` line
+    /// minus the leading `a=`. `str0m::Candidate::from_sdp_string`
+    /// parses both with and without the `candidate:`
+    /// prefix.
+    ///
+    /// # Errors
+    ///
+    /// [`MediaError::BadIceCandidate`] when the string
+    /// fails `Candidate::from_sdp_string`.
+    pub fn add_remote_candidate(&mut self, candidate_sdp: &str) -> MediaResult<()> {
+        let candidate = Candidate::from_sdp_string(candidate_sdp)
+            .map_err(|e| MediaError::BadIceCandidate(e.to_string()))?;
+        self.rtc.add_remote_candidate(candidate);
+        Ok(())
     }
 }
 
@@ -319,5 +406,52 @@ mod tests {
         let observed: Vec<_> = r.peers().iter().map(|p| p.id().clone()).collect();
         let expected: Vec<_> = names.iter().map(|n| pid(n)).collect();
         assert_eq!(observed, expected);
+    }
+
+    /// Malformed offer string must fail at the str0m
+    /// parser boundary with the typed
+    /// [`MediaError::BadSdp`] — not panic, not surface
+    /// as `MediaError::Str0m`. The audit-pack contract
+    /// for variant-based error matching at the WebSocket
+    /// layer (`router.rs` will key its
+    /// `ErrorCode::BadSdp` reply off this).
+    #[test]
+    fn accept_offer_rejects_garbage_sdp() {
+        let mut p = MediaPeer::new(pid("alice"), Instant::now());
+        let err = p
+            .accept_offer("v=0\r\n... obviously not a valid SDP ...")
+            .expect_err("malformed SDP must be rejected");
+        match err {
+            MediaError::BadSdp(_) => {},
+            other => panic!("expected BadSdp, got {other:?}"),
+        }
+    }
+
+    /// Malformed ICE-candidate string must fail with
+    /// [`MediaError::BadIceCandidate`] — symmetric
+    /// contract to `accept_offer`.
+    #[test]
+    fn add_remote_candidate_rejects_garbage() {
+        let mut p = MediaPeer::new(pid("alice"), Instant::now());
+        let err = p
+            .add_remote_candidate("not a candidate")
+            .expect_err("garbage candidate must be rejected");
+        match err {
+            MediaError::BadIceCandidate(_) => {},
+            other => panic!("expected BadIceCandidate, got {other:?}"),
+        }
+    }
+
+    /// Empty offer string must also surface as
+    /// `BadSdp` (defence against degenerate input from a
+    /// buggy or hostile client).
+    #[test]
+    fn accept_offer_rejects_empty_string() {
+        let mut p = MediaPeer::new(pid("alice"), Instant::now());
+        let err = p.accept_offer("").expect_err("empty SDP must be rejected");
+        match err {
+            MediaError::BadSdp(_) => {},
+            other => panic!("expected BadSdp, got {other:?}"),
+        }
     }
 }

@@ -50,6 +50,17 @@ pub enum RouterError {
     /// to retry, drop, or close the slow recipient.
     #[error("recipient queue full")]
     Backpressure,
+
+    /// Media wiring is not yet in place. The wire frames
+    /// `ClientFrame::SdpOffer` / `ClientFrame::IceCandidate`
+    /// arrived at the router but the router-to-MediaPeer
+    /// integration that consumes them lands in
+    /// `S-3-B-routing-media` step 3 (alongside the UDP
+    /// socket loop). Until then a client that starts the
+    /// SDP exchange sees a typed error rather than
+    /// silently dropped frames.
+    #[error("media routing not yet wired (S-3-B-routing-media step 3)")]
+    MediaNotWired,
 }
 
 /// Map [`RouterError`] back to the wire [`ErrorCode`] the
@@ -62,6 +73,12 @@ impl RouterError {
         match self {
             Self::UnknownPeer => ErrorCode::UnknownPeer,
             Self::Backpressure => ErrorCode::BackpressureDrop,
+            // Both SDP-offer and ICE-candidate frames hit
+            // the same router stub today; we surface them
+            // as `BadSdp` so existing clients see the
+            // existing audit-pack error code rather than
+            // a brand-new variant they don't recognise.
+            Self::MediaNotWired => ErrorCode::BadSdp,
         }
     }
 }
@@ -178,6 +195,20 @@ impl<'a> Router<'a> {
                     },
                 }
             },
+            // S-3-B-routing-media step 2 defines the wire
+            // shape for these frames; the router-side
+            // wiring (hand offer / candidate through to
+            // the corresponding `crate::media::MediaPeer`
+            // + ship the answer back as
+            // `ServerFrame::SdpAnswer`) lands in step 3
+            // alongside the UDP socket loop. Until then we
+            // surface a typed `NotImplemented` error to
+            // the client rather than silently dropping —
+            // a misbehaving client that starts sending
+            // SDP before the SFU is wired must see why.
+            ClientFrame::SdpOffer { sdp: _ } | ClientFrame::IceCandidate { candidate_sdp: _ } => {
+                Err(RouterError::MediaNotWired)
+            },
         }
     }
 
@@ -201,6 +232,16 @@ impl<'a> Router<'a> {
                 Err(RouterError::UnknownPeer) => {
                     // Peer dropped between the registry read
                     // and the send — race, not a bug.
+                },
+                Err(RouterError::MediaNotWired) => {
+                    // Cannot reach this arm — `deliver`
+                    // only ever returns UnknownPeer /
+                    // Backpressure / Ok, never
+                    // MediaNotWired. Exhaustive match
+                    // here so future-additions to
+                    // RouterError force re-thinking the
+                    // broadcast loop's recovery.
+                    debug_assert!(false, "broadcast saw MediaNotWired unreachable arm");
                 },
             }
         }
