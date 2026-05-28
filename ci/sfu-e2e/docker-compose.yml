@@ -1,0 +1,93 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+# G3-4 — end-to-end CI gate for lakko-svc-sfu.
+#
+# Brings up two services on a private bridge network:
+#
+# - `test-jwks` — nginx serving the fixture JWKS at
+#   `http://test-jwks:8080/.well-known/jwks.json`. The
+#   SFU container resolves that name via the docker
+#   network DNS.
+# - `sfu` — the lakko-svc-sfu container built from
+#   `services/sfu/Dockerfile`. Configured via env to
+#   fetch its JWKS from the test-jwks sidecar.
+#
+# The test harness (`services/sfu/tests/e2e_dockerized.rs`)
+# runs on the host and connects to the published port
+# 7880 on `localhost`.
+
+# Use the modern compose syntax — no top-level `version:`
+# (deprecated as of compose v2.x).
+
+services:
+  test-jwks:
+    image: nginx:1.27-alpine
+    container_name: lakko-sfu-e2e-jwks
+    restart: "no"
+    volumes:
+      # Mount the static JWKS the SFU will fetch + the
+      # nginx config that serves it. Both read-only —
+      # this container only ever reads.
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./test-jwks/jwks.json:/srv/jwks.json:ro
+    healthcheck:
+      # `wget` ships in nginx:alpine. Polls the JWKS
+      # endpoint until it responds with 200; the SFU's
+      # `depends_on` block below waits on this gate.
+      test:
+        - CMD-SHELL
+        - "wget --quiet --spider http://localhost:8080/.well-known/jwks.json || exit 1"
+      interval: 1s
+      timeout: 2s
+      retries: 10
+      start_period: 2s
+
+  sfu:
+    # The Dockerfile lives at the workspace root in
+    # `services/sfu/Dockerfile`; the build context must
+    # be the workspace root so the COPY step can see
+    # every workspace crate.
+    build:
+      context: ../..
+      dockerfile: services/sfu/Dockerfile
+    container_name: lakko-sfu-e2e-sfu
+    restart: "no"
+    depends_on:
+      test-jwks:
+        condition: service_healthy
+    environment:
+      # The SFU resolves `test-jwks` via the compose
+      # network's DNS. Plain HTTP because we are not
+      # TLS-terminating inside the stack.
+      LAKKO_SFU_JWKS_URL: "http://test-jwks:8080/.well-known/jwks.json"
+      # Refresh fast so a stale-key regression surfaces
+      # within one test cycle.
+      LAKKO_SFU_JWKS_REFRESH_SECS: "5"
+      # Default bind targets from the Dockerfile already
+      # listen on 0.0.0.0; we make them explicit here for
+      # readability + so `infra/`-style compose overrides
+      # have a stable surface to patch.
+      LAKKO_SFU_BIND: "0.0.0.0:7880"
+      LAKKO_SFU_METRICS_BIND: "0.0.0.0:9641"
+      # Media routing is intentionally OFF for the E2E
+      # gate. Step 1 closes the signaling-layer contract;
+      # the media-layer half (RTP fanout under real
+      # ICE/DTLS) lands as a separate sub-sprint with its
+      # own UDP-port plumbing on top of compose.
+      LAKKO_SFU_MEDIA_BIND: ""
+      RUST_LOG: "info,lakko_svc_sfu=debug,lakko_call_jwt=info"
+    ports:
+      # Expose only the signaling port; the metrics
+      # exporter stays internal so the test harness
+      # cannot accidentally treat it as the WS upgrade
+      # target.
+      - "127.0.0.1:7880:7880"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - "wget --quiet --spider http://localhost:9641 || exit 0"
+      interval: 1s
+      timeout: 2s
+      retries: 15
+      start_period: 3s

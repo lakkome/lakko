@@ -1,0 +1,48 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+# Keep the SFU Docker build context small + reproducible.
+# Without this rule the `COPY . .` step inside
+# `services/sfu/Dockerfile` slurps the entire workspace
+# every layer rebuild, dragging in `target/`, IDE state,
+# and platform build artefacts (`apps/ios/build/`,
+# `apps/android/build/`).
+
+# Build artefacts
+target/
+**/target/
+**/build/
+**/.build/
+**/DerivedData/
+
+# Node / web
+node_modules/
+apps/web/dist/
+apps/web/.vite/
+
+# Editor / OS
+.vscode/
+.idea/
+.run/
+*.swp
+.DS_Store
+
+# Git
+.git/
+.gitignore
+
+# CI + meta
+.github/
+**/*.lock-old
+
+# Platform binaries
+**/*.xcframework/
+**/*.framework/
+**/*.a
+**/*.so
+**/*.dylib
+
+# Per-developer
+**/local.properties
+**/.env
+**/.env.*

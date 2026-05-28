@@ -1,0 +1,141 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+# G3-4 — end-to-end CI gate for lakko-svc-sfu.
+#
+# Brings up the dockerised SFU + test-jwks compose stack
+# from `ci/sfu-e2e/`, runs the `#[ignore]`-gated integration
+# tests under `services/sfu/tests/e2e_dockerized.rs`, and
+# tears everything down. Catches regressions the
+# in-process `integration_signaling.rs` tests cannot:
+# Dockerfile drift, env-var plumbing, JWKS-fetcher network
+# behaviour.
+#
+# Trigger:
+#   - manual via `workflow_dispatch`
+#   - opt-in via the `sfu-e2e` label on a pull request
+#     (lets reviewers force the gate on PRs that touch the
+#     SFU or its surface)
+#   - nightly cron so a slow regression surfaces in <24h
+#     even when no PR touches the SFU
+#
+# We do NOT run on every push: the build burns ~3 min of
+# runner time on a cold cache and ~30 s warm, which adds
+# up across the workspace's full CI matrix.
+
+name: sfu-e2e
+
+on:
+  workflow_dispatch: {}
+  pull_request:
+    types: [labeled, synchronize, reopened]
+  schedule:
+    # 03:30 UTC. Offset from the fuzz-quick cron at 03:00
+    # so the two workflows don't pile up on the same
+    # runner pool slot.
+    - cron: "30 3 * * *"
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  CARGO_INCREMENTAL: 0
+
+# Cancel an in-flight run when a new commit lands on the
+# same PR — keeps quota usage sane.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  sfu-e2e:
+    # Only run on PR triggers when the `sfu-e2e` label is
+    # explicitly set. Manual + cron always run.
+    if: >
+      github.event_name == 'workflow_dispatch'
+      || github.event_name == 'schedule'
+      || (github.event_name == 'pull_request'
+          && contains(github.event.pull_request.labels.*.name, 'sfu-e2e'))
+
+    name: dockerised SFU + WS handshake
+    runs-on: ubuntu-latest
+    # Bound the budget — a healthy run finishes in ~3 min
+    # on a cold cache. Anything past 10 min indicates a
+    # wedged container we want to abort + investigate.
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # Reuse the workspace cache so the cargo-side build
+      # of the test binary stays fast across runs.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Distinct key from the main `ci.yml` cache so a
+          # bad cache entry from one workflow does not
+          # poison the other.
+          shared-key: "sfu-e2e"
+
+      # Pre-build the test binary on the host so the
+      # compose `up` time and the test-binary build don't
+      # serialise — the binary build is the larger cost.
+      - name: cargo test --no-run
+        run: |
+          cargo test \
+            --package lakko-svc-sfu \
+            --test e2e_dockerized \
+            --no-run
+
+      # Bring up the stack. `--wait` blocks until every
+      # service with a healthcheck reaches `healthy`, so
+      # we never race the test against a still-booting
+      # SFU.
+      - name: docker compose up
+        run: |
+          docker compose -f ci/sfu-e2e/docker-compose.yml up \
+            --build \
+            --detach \
+            --wait \
+            --wait-timeout 180
+
+      - name: docker ps + healthchecks
+        run: |
+          docker compose -f ci/sfu-e2e/docker-compose.yml ps
+
+      # Run the ignored tests. `--include-ignored` is the
+      # documented opt-in for the `#[ignore]` attribute
+      # the test file carries.
+      - name: cargo test --include-ignored
+        run: |
+          cargo test \
+            --package lakko-svc-sfu \
+            --test e2e_dockerized \
+            -- \
+            --include-ignored \
+            --nocapture
+
+      # Capture container logs on failure — the run page
+      # gets one artefact per container so a reviewer can
+      # diff what happened against what the test expected.
+      - name: docker compose logs (on failure)
+        if: failure()
+        run: |
+          mkdir -p artifacts
+          docker compose -f ci/sfu-e2e/docker-compose.yml logs --no-color sfu       > artifacts/sfu.log       || true
+          docker compose -f ci/sfu-e2e/docker-compose.yml logs --no-color test-jwks > artifacts/test-jwks.log || true
+
+      - name: upload logs artefact (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sfu-e2e-logs
+          path: artifacts/
+          retention-days: 14
+
+      # Always tear down so a wedged stack doesn't haunt
+      # the runner if the workflow is re-run.
+      - name: docker compose down
+        if: always()
+        run: |
+          docker compose -f ci/sfu-e2e/docker-compose.yml down --volumes
