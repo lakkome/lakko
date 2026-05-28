@@ -15,7 +15,12 @@
  * ready.
  */
 
-import { loadWasm } from "../wasm";
+import { loadWasm, type Wasm } from "../wasm";
+
+/** wasm-bindgen-generated Identity handle. Re-exported
+ *  here as a type-only alias so caller signatures stay
+ *  readable without a deep import path. */
+export type WasmIdentity = Wasm["Identity"]["prototype"];
 
 /** 16-byte channel id parsed from a 32-char hex string. */
 export function channelIdFromHex(hex: string): Uint8Array {
@@ -74,20 +79,22 @@ export function bytesToBase64Url(bytes: Uint8Array): string {
 }
 
 /**
- * Fresh `(seed, signingKeySeed)` tuple — the local
- * publisher state the web UI needs to produce posts
- * before the MLS-per-channel keying lands. Stored
- * in-memory only in this sub-sprint; G4-2-storage
- * persists it to the device-group-keyed sqlite cache.
+ * Local publisher state the web UI needs to produce
+ * posts on a channel. The `seed` is derived from an
+ * MLS PublisherGroup exporter (ADR-0010 Tier 1) keyed
+ * by the publisher's identity and the channel id —
+ * the same byte-identical seed any device of the same
+ * publisher would derive on the same channel.
  */
 export interface ChannelPublisherKeys {
   /** 32-byte content-key seed.
    *
-   *  **Demo only.** Production seeds come out of the
-   *  PublisherGroup's MLS exporter (ADR-0010 Tier 1) —
-   *  the `seedHex` you see in `channels-state` is a
-   *  single-publisher local-only seed until the MLS-per-
-   *  channel sprint lands. */
+   *  Derived from an MLS PublisherGroup via
+   *  `Group.exportSecret(identity, channelExporterLabel(),
+   *  channelId, 32)` and then folded through
+   *  `channelSeedFromMlsExporterOutput`. Two devices of
+   *  the same publisher on the same channel produce the
+   *  byte-identical seed. */
   readonly seed: Uint8Array;
   /** 32-byte Ed25519 signing-key seed used to derive the
    *  `ChannelSigningKey` for every post. Persisted as a
@@ -96,10 +103,48 @@ export interface ChannelPublisherKeys {
   readonly signingKeySeed: Uint8Array;
 }
 
-/** Build a fresh `(seed, signingKeySeed)` pair. */
-export async function freshPublisherKeys(): Promise<ChannelPublisherKeys> {
+/**
+ * Build a fresh `(seed, signingKeySeed)` pair for a new
+ * channel. `identity` is the publisher's MLS identity
+ * (typically built from the OPAQUE export key via
+ * `wasm.Identity.fromSeed`); `channelIdHex` is the
+ * 16-byte channel id as a 32-char hex string.
+ *
+ * The PublisherGroup is created and dropped within this
+ * call — the seed is the only thing extracted. A future
+ * sub-sprint (G4-2-mls-persistence) will keep the group
+ * alive across composer calls so it can be advanced /
+ * rotated; until then every call to this helper for the
+ * same channel produces a different seed (the group has
+ * a random group_id internally), so the caller MUST
+ * persist the returned `seed` and reuse it across posts
+ * on the same channel/epoch. The web UI does this
+ * through `channels-state.setKeys`, called immediately
+ * after `freshPublisherKeys` resolves.
+ */
+export async function freshPublisherKeys(
+  identity: WasmIdentity,
+  channelIdHex: string,
+): Promise<ChannelPublisherKeys> {
   const wasm = await loadWasm();
-  const seed = wasm.newChannelSeedForTest();
+  const channelId = channelIdFromHex(channelIdHex);
+
+  // MLS PublisherGroup → exporter → channel seed. The
+  // group lives only for the duration of this call.
+  const group = new wasm.Group(identity);
+  let exporterOutput: Uint8Array;
+  try {
+    exporterOutput = group.exportSecret(
+      identity,
+      wasm.channelExporterLabel(),
+      channelId,
+      32,
+    );
+  } finally {
+    group.free();
+  }
+  const seed = wasm.channelSeedFromMlsExporterOutput(exporterOutput);
+
   const signer = wasm.ChannelSigningKey.generate();
   const signingKeySeed = signer.toSeed();
   signer.free();

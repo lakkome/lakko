@@ -60,7 +60,9 @@ import {
   utf8Encode,
   verifyAndDecryptPost,
 } from "../channels/composer";
+import { useAuth } from "../auth/AuthContext";
 import { channelsActions, channelsState } from "../state/channels-state";
+import { loadWasm } from "../wasm";
 import { paths } from "./paths";
 
 // ============================================================================
@@ -187,6 +189,7 @@ const ChannelsList: Component = () => {
 
 const NewChannel: Component = () => {
   const navigate = useNavigate();
+  const auth = useAuth();
   const [name, setName] = createSignal("");
   const [description, setDescription] = createSignal("");
   const [busy, setBusy] = createSignal(false);
@@ -211,17 +214,34 @@ const NewChannel: Component = () => {
       setError("Name cannot be empty.");
       return;
     }
+    const secrets = auth.identitySecrets();
+    if (secrets === null) {
+      setError(
+        "Identity not in memory — refresh the page and sign in again to create a channel.",
+      );
+      return;
+    }
     setBusy(true);
     setError(null);
     const id = freshChannelIdHex();
     try {
       await createChannel(id);
-      // Mint local publisher keys — single-publisher demo
-      // affordance until the PublisherGroup MLS exporter
-      // wiring lands. Stored in-memory only; a future
-      // sub-sprint persists them to the device-group-
-      // keyed sqlite cache.
-      const keys = await freshPublisherKeys();
+      // Mint local publisher keys — the content-key seed
+      // comes from an MLS PublisherGroup exporter
+      // (ADR-0010 Tier 1), the signing-key seed is a
+      // fresh Ed25519 keypair seed. Identity is rebuilt
+      // here from the OPAQUE export key on every call;
+      // a future sub-sprint (G4-2-mls-persistence) keeps
+      // the PublisherGroup alive across composer calls
+      // so it can be rotated rather than rebuilt fresh.
+      const wasm = await loadWasm();
+      const identity = wasm.Identity.fromSeed(secrets.exportKey);
+      let keys;
+      try {
+        keys = await freshPublisherKeys(identity, id);
+      } finally {
+        identity.free();
+      }
       channelsActions.addChannel({
         id,
         localName: name().trim(),

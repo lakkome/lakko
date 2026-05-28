@@ -15,9 +15,9 @@ section that describes it.
 | **I-** | 8   | I-1..I-8   | [`mls-state-machine.md`](./mls-state-machine.md) |
 | **C-** | 44  | C-1..C-44  | [`calls.md`](./calls.md) |
 | **T-** | 15  | T-1..T-15  | [`transport.md`](./transport.md) |
-| **G-** | 26  | G-1..G-26  | [`known-gaps.md`](./known-gaps.md) — open / deferred |
+| **G-** | 27  | G-1..G-27  | [`known-gaps.md`](./known-gaps.md) — open / deferred |
 | Total invariants  | 67  | (I + C + T) | live properties |
-| Total open gaps   | 26  | (G)         | tracked + scoped |
+| Total open gaps   | 27  | (G)         | tracked + scoped |
 
 ## MLS state machine invariants (I-1..I-8)
 
@@ -201,6 +201,7 @@ should not re-discover them.
 | G-21 | Link-based call invites are single-joiner in V1 — **CLOSED** by C-33/C-35 KP-forward + multi-party tests |
 | G-22 | Per-joiner dedup for call invites lands with multi-use orchestration — **CLOSED** by C-33/C-35 |
 | G-26 | RFC 9605 §4.3 wire frame header — serializer **landed** (C-38); end-to-end interop pending |
+| G-27 | Channel PublisherGroup — **web wired** (G4-2-mls-publisher); iOS / Android still using `newChannelSeedForTest`; persistence + rotation deferred to G4-2-mls-persistence |
 
 ### Dependency advisories
 

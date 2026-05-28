@@ -770,3 +770,76 @@ binary is not currently installed on this dev host; the
 up sprint stands up `cargo deny` locally on the
 maintainer's box so the audit pack can mirror its CI
 output here.
+
+### G-27: Channel PublisherGroup — **web wired** (G4-2-mls-publisher); iOS / Android still using `newChannelSeedForTest`; persistence + rotation deferred
+
+[`apps/web/src/channels/composer.ts::freshPublisherKeys`](../../apps/web/src/channels/composer.ts)
+now derives the channel content-key seed from a real
+MLS PublisherGroup exporter: `Group.create(identity)`
+→ `exportSecret(identity, channelExporterLabel(),
+channelIdBytes, 32)` →
+`channelSeedFromMlsExporterOutput`. The identity is
+rebuilt from the OPAQUE export key
+(`wasm.Identity.fromSeed(secrets.exportKey)`) inside
+the `NewChannel` route handler in
+[`apps/web/src/routes/Channels.tsx`](../../apps/web/src/routes/Channels.tsx).
+The wasm-pack bindings have been regenerated so
+`channelExporterLabel` + `channelSeedFromMlsExporterOutput`
+are exposed in the TypeScript `.d.ts`. TS typecheck +
+`npm run build` are green.
+
+**Still open — iOS + Android wiring.** The same
+`Group::create` + `Group::export_secret` +
+`channelSeedFromMlsExporterOutput` triplet is already
+on the UniFFI surface
+([`crates/lakko-ffi-uniffi/src/lib.rs::Group`](../../crates/lakko-ffi-uniffi/src/lib.rs)),
+but the per-platform composers
+([`apps/ios/Lakko/Channels/ChannelsComposer.swift`](../../apps/ios/Lakko/Channels/ChannelsComposer.swift)
+and
+[`apps/android/app/src/main/kotlin/me/lakko/app/channels/ChannelsComposer.kt`](../../apps/android/app/src/main/kotlin/me/lakko/app/channels/ChannelsComposer.kt))
+are still calling `newChannelSeedForTest()`.
+Mechanical port — same FFI shape, different identity
+plumbing per platform — tracked separately so we can
+verify each on hardware (`xcodebuild` / Gradle) as
+part of the platform's own integration sprint.
+
+**Still open — PublisherGroup persistence + rotation.**
+The current web flow builds a fresh `Group::create`
+on every channel-create call and drops it immediately
+after extracting the seed; ADR-0010's "Tier 1"
+PublisherGroup vision keeps the group alive across
+composer calls so it can be advanced (`commit`)
+and rotated (`exportSecret(newEpochCtx)` per
+membership change or schedule). A follow-up sprint
+(working name **G4-2-mls-persistence**) will:
+
+- persist the group via `Group::load(identity, group_id)`
+  on subsequent composer calls (group state is held
+  in the identity provider's storage);
+- introduce a `(channelId → groupId)` mapping in
+  `channels-state` so the same group is reused on
+  every post;
+- wire rotation triggers per ADR-0010 (membership
+  change → mandatory commit; schedule → 24 h /
+  N-message rotation).
+
+Until then, every call to `freshPublisherKeys(identity,
+channelId)` yields a fresh group internally with a
+fresh `group_id` — meaning the caller MUST persist
+the returned `seed` and reuse it across all posts on
+the same channel/epoch (which is what the web UI
+does, via `channelsActions.setKeys` immediately
+after `freshPublisherKeys` resolves).
+
+The cryptographic property is preserved: the seed is
+genuinely derived from the MLS exporter under the
+publisher's identity, not from `OsRng`. What is
+missing is the multi-device byte-identicality
+property (per ADR-0010 Tier 1, two devices of the
+same publisher on the same channel SHOULD produce
+the byte-identical seed via shared identity +
+identical `Group::create`/exporter inputs;
+`Group::create` uses the identity's MLS provider
+which currently treats `group_id` as random, so
+that property only holds after group-id persistence
++ replication via DeviceGroup are wired).
