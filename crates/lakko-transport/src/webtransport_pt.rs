@@ -658,4 +658,96 @@ mod tests {
         let back: WebTransportConfig = serde_json::from_str(&json).expect("deserialise");
         assert_eq!(cfg, back);
     }
+
+    // ============================================================
+    // ECH wire-up (G5-6-wireup step 4)
+    // ============================================================
+
+    /// Build a minimal valid ECHConfigList carrying one
+    /// X25519-HKDF-SHA256 + ChaCha20-Poly1305 inner config
+    /// — one of the three suites this adapter exposes.
+    /// Mirrors `super::parse_ech_config_list` happy-path
+    /// fixture, kept local so the test file does not reach
+    /// into the parser's private test helpers.
+    fn build_one_config_list_bytes() -> Vec<u8> {
+        let mut body = Vec::new();
+        body.push(7u8); // config_id
+        body.extend_from_slice(&0x0020u16.to_be_bytes()); // KEM = X25519-HKDF-SHA256
+        body.extend_from_slice(&32u16.to_be_bytes()); // public_key length
+        body.extend_from_slice(&[1u8; 32]); // public_key bytes
+        body.extend_from_slice(&4u16.to_be_bytes()); // cipher_suites length
+        body.extend_from_slice(&[0x00, 0x01, 0x00, 0x03]); // HKDF-SHA256 + ChaCha20-Poly1305
+        body.push(64u8); // maximum_name_length
+        let public_name = b"cloudflare-ech.com";
+        body.push(u8::try_from(public_name.len()).expect("name fits u8"));
+        body.extend_from_slice(public_name);
+        body.extend_from_slice(&0u16.to_be_bytes()); // extensions length = 0
+
+        let mut config = Vec::new();
+        config.extend_from_slice(&0xfe0du16.to_be_bytes()); // ECH version draft-13
+        config.extend_from_slice(&u16::try_from(body.len()).expect("fits u16").to_be_bytes());
+        config.extend_from_slice(&body);
+
+        let mut wire = Vec::new();
+        wire.extend_from_slice(&u16::try_from(config.len()).expect("fits u16").to_be_bytes());
+        wire.extend_from_slice(&config);
+        wire
+    }
+
+    #[test]
+    fn parse_accepts_valid_ech_when_cert_hashes_set() {
+        let mut cfg = happy_config();
+        cfg.ech_config_list_b64 = Some(B64.encode(build_one_config_list_bytes()));
+        // happy_config already populates one cert hash, so
+        // the `EchRequiresCertHashes` invariant is met.
+        let parsed = cfg.parse().expect("valid ECH + cert pin should parse");
+        assert!(parsed.ech_bytes.is_some(), "ech_bytes propagated to parsed");
+    }
+
+    #[test]
+    fn parse_rejects_ech_without_cert_hashes() {
+        // Same valid ECH bytes, but no cert pins — that
+        // combination is refused at parse time per the
+        // `EchRequiresCertHashes` security invariant
+        // (cover-site cert under ECH must be pinned).
+        let mut cfg = happy_config();
+        cfg.cert_hashes_b64 = vec![];
+        cfg.ech_config_list_b64 = Some(B64.encode(build_one_config_list_bytes()));
+        match cfg.parse() {
+            Err(WebTransportConfigError::EchRequiresCertHashes) => (),
+            other => panic!("expected EchRequiresCertHashes, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_rejects_malformed_ech_bytes() {
+        let mut cfg = happy_config();
+        // Outer length says 4 bytes but the inner payload
+        // is junk — rustls's parser refuses after our
+        // outer-envelope check passes.
+        cfg.ech_config_list_b64 = Some(B64.encode([0x00, 0x04, 0xff, 0xff, 0x00, 0x00]));
+        match cfg.parse() {
+            Err(WebTransportConfigError::BadEchConfigList(_)) => (),
+            other => panic!("expected BadEchConfigList, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_rejects_bad_ech_base64() {
+        let mut cfg = happy_config();
+        cfg.ech_config_list_b64 = Some("!!! not base64 !!!".into());
+        match cfg.parse() {
+            Err(WebTransportConfigError::BadEchConfigListBase64) => (),
+            other => panic!("expected BadEchConfigListBase64, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn config_with_ech_round_trips_through_serde() {
+        let mut cfg = happy_config();
+        cfg.ech_config_list_b64 = Some(B64.encode(build_one_config_list_bytes()));
+        let json = serde_json::to_string(&cfg).expect("serialise");
+        let back: WebTransportConfig = serde_json::from_str(&json).expect("deserialise");
+        assert_eq!(cfg, back);
+    }
 }

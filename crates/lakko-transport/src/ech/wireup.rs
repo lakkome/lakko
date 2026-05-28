@@ -89,6 +89,72 @@ pub fn build_ech_mode_from_bytes(bytes: &[u8]) -> Result<EchMode, EchWireUpError
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ech::ECH_VERSION_DRAFT_13;
+
+    /// Build a valid one-config `ECHConfigList` on the wire,
+    /// pinning X25519 + HKDF-SHA256 + ChaCha20-Poly1305 (one
+    /// of the three suites our adapter exposes). Real ECH
+    /// publishers MAY embed an actual X25519 public key
+    /// here; we use a 32-byte placeholder since rustls
+    /// validates structure + cipher-suite match, not the
+    /// point itself, at this layer.
+    ///
+    /// Duplicated from `super::tests::build_one_config_list`
+    /// because that helper is private to the parser tests.
+    fn build_one_config_list() -> Vec<u8> {
+        let config_id: u8 = 7;
+        let kem_id: u16 = 0x0020; // X25519-HKDF-SHA256
+                                  // 32-byte X25519 pubkey shape — rustls only checks
+                                  // length + suite compatibility, not point validity,
+                                  // when assembling `EchConfig`. A real publisher's
+                                  // bytes would be a Curve25519 point.
+        let public_key = vec![1u8; 32];
+        let cipher_suites: Vec<u8> = vec![
+            0x00, 0x01, // kdf: HKDF-SHA256
+            0x00, 0x03, // aead: ChaCha20-Poly1305
+        ];
+        let max_name_len: u8 = 64;
+        let public_name = b"cloudflare-ech.com";
+
+        let mut body = Vec::new();
+        body.push(config_id);
+        body.extend_from_slice(&kem_id.to_be_bytes());
+        body.extend_from_slice(
+            &u16::try_from(public_key.len())
+                .expect("len fits u16")
+                .to_be_bytes(),
+        );
+        body.extend_from_slice(&public_key);
+        body.extend_from_slice(
+            &u16::try_from(cipher_suites.len())
+                .expect("len fits u16")
+                .to_be_bytes(),
+        );
+        body.extend_from_slice(&cipher_suites);
+        body.push(max_name_len);
+        body.push(u8::try_from(public_name.len()).expect("len fits u8"));
+        body.extend_from_slice(public_name);
+        // No extensions.
+        body.extend_from_slice(&0u16.to_be_bytes());
+
+        let mut config = Vec::new();
+        config.extend_from_slice(&ECH_VERSION_DRAFT_13.to_be_bytes());
+        config.extend_from_slice(
+            &u16::try_from(body.len())
+                .expect("len fits u16")
+                .to_be_bytes(),
+        );
+        config.extend_from_slice(&body);
+
+        let mut wire = Vec::new();
+        wire.extend_from_slice(
+            &u16::try_from(config.len())
+                .expect("len fits u16")
+                .to_be_bytes(),
+        );
+        wire.extend_from_slice(&config);
+        wire
+    }
 
     /// Empty payload — our parser refuses first (truncated
     /// wire header before any inner config). Confirms the
@@ -120,5 +186,72 @@ mod tests {
         let payload = vec![0x00, 0x04, 0xff, 0xff, 0x00, 0x00];
         let err = build_ech_mode_from_bytes(&payload).expect_err("must refuse junk");
         let _ = err; // either parser or rustls is acceptable.
+    }
+
+    /// Positive integration — a wire-valid one-config list
+    /// with an X25519-HKDF-SHA256 + ChaCha20-Poly1305 inner
+    /// suite (one of the three suites Lakko advertises)
+    /// must assemble into `EchMode::Enable(..)`. Confirms
+    /// the parser → adapter suite-selection chain wires up
+    /// end-to-end without an actual TLS handshake.
+    #[test]
+    fn valid_one_config_assembles_to_enable_mode() {
+        let wire = build_one_config_list();
+        let mode = build_ech_mode_from_bytes(&wire).expect("valid config assembles");
+        // `EchMode::Enable(_)` is the expected variant —
+        // `Grease(_)` would mean rustls fell back to a
+        // synthetic placeholder, which our caller does NOT
+        // want (silent downgrade).
+        assert!(
+            matches!(mode, rustls::client::EchMode::Enable(_)),
+            "expected EchMode::Enable, got {mode:?}"
+        );
+    }
+
+    /// A config-list that only advertises a KEM we do NOT
+    /// support (DH-KEM-P-256, IANA 0x0010) must be refused
+    /// by rustls's matcher — our `ALL_SUPPORTED_SUITES`
+    /// only covers X25519. Confirms there is no silent
+    /// downgrade onto an unintended suite.
+    #[test]
+    fn unsupported_kem_refused_by_rustls() {
+        // Same shape as `build_one_config_list` but with
+        // `kem_id = 0x0010` (DH-KEM-P-256-HKDF-SHA256),
+        // which the adapter does not enable.
+        let config_id: u8 = 7;
+        let kem_id: u16 = 0x0010;
+        // P-256 pubkey shape — 65-byte uncompressed point.
+        let public_key = vec![4u8; 65];
+        let cipher_suites: Vec<u8> = vec![0x00, 0x01, 0x00, 0x01]; // HKDF-SHA256 + AES-128-GCM
+        let public_name = b"unused.example";
+
+        let mut body = Vec::new();
+        body.push(config_id);
+        body.extend_from_slice(&kem_id.to_be_bytes());
+        body.extend_from_slice(&65u16.to_be_bytes());
+        body.extend_from_slice(&public_key);
+        body.extend_from_slice(&4u16.to_be_bytes());
+        body.extend_from_slice(&cipher_suites);
+        body.push(64u8);
+        body.push(u8::try_from(public_name.len()).unwrap());
+        body.extend_from_slice(public_name);
+        body.extend_from_slice(&0u16.to_be_bytes());
+
+        let mut config = Vec::new();
+        config.extend_from_slice(&ECH_VERSION_DRAFT_13.to_be_bytes());
+        config.extend_from_slice(&u16::try_from(body.len()).unwrap().to_be_bytes());
+        config.extend_from_slice(&body);
+
+        let mut wire = Vec::new();
+        wire.extend_from_slice(&u16::try_from(config.len()).unwrap().to_be_bytes());
+        wire.extend_from_slice(&config);
+
+        let err = build_ech_mode_from_bytes(&wire).expect_err("unsupported KEM must be refused");
+        match err {
+            EchWireUpError::RustlsRefused(_) => (),
+            EchWireUpError::ParserRefused(p) => {
+                panic!("expected rustls refusal, got parser refusal: {p:?}")
+            },
+        }
     }
 }

@@ -58,3 +58,10 @@ path = "fuzz_targets/ech_decode.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "ech_wireup_build_mode"
+path = "fuzz_targets/ech_wireup_build_mode.rs"
+test = false
+doc = false
+bench = false

@@ -405,6 +405,46 @@ mod tests {
         assert_eq!(resolved.as_str(), "https://api.lakko.me/storage/blob/abc");
     }
 
+    #[test]
+    fn malformed_ech_bytes_refused_at_construction() {
+        install_crypto_provider();
+        let url = Url::parse("https://example.invalid/").unwrap();
+        let pins = SpkiPinSet::from_hashes([[0u8; 32]]);
+        let cfg = HttpTransportConfig {
+            // Two bytes — not even a valid outer length
+            // prefix. Our parser refuses immediately, the
+            // builder surfaces it via `HttpError::EchConfig`.
+            ech_config_list: Some(vec![0xff, 0xff]),
+            ..HttpTransportConfig::default()
+        };
+        let err =
+            HttpTransport::with_config(url, pins, cfg).expect_err("must reject malformed ECH");
+        assert!(
+            matches!(err, HttpError::EchConfig(_)),
+            "expected EchConfig error, got {err:?}",
+        );
+    }
+
+    #[test]
+    fn empty_ech_bytes_refused_at_construction() {
+        install_crypto_provider();
+        let url = Url::parse("https://example.invalid/").unwrap();
+        let pins = SpkiPinSet::from_hashes([[0u8; 32]]);
+        let cfg = HttpTransportConfig {
+            // Empty payload — the parser's truncated-wire
+            // check refuses before rustls ever sees the
+            // bytes.
+            ech_config_list: Some(Vec::new()),
+            ..HttpTransportConfig::default()
+        };
+        let err =
+            HttpTransport::with_config(url, pins, cfg).expect_err("empty ECH must be refused");
+        assert!(
+            matches!(err, HttpError::EchConfig(_)),
+            "expected EchConfig error, got {err:?}",
+        );
+    }
+
     #[tokio::test]
     async fn pin_mismatch_against_real_server_yields_network_error() {
         // Smoke test the wiring end-to-end against a public HTTPS host.

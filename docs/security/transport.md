@@ -574,9 +574,9 @@ server-side helper `accept_inbound`.
    verifies that a PSK mismatch refuses the
    handshake on both sides (no body bytes ever flow).
 
-### T-12: ECH config list parser is version-pinned + length-bounded
+### T-12: ECH config list parser is version-pinned + length-bounded; wire-up via RustCrypto/hpke adapter on rustls 0.23
 
-**Property.** [`parse_ech_config_list`](../../crates/lakko-transport/src/ech.rs)
+**Property.** [`parse_ech_config_list`](../../crates/lakko-transport/src/ech/mod.rs)
 strictly enforces the draft-ietf-tls-esni-18 §4
 wire format. Strictly:
 
@@ -614,26 +614,106 @@ anti-censorship bootstrap path.
 
 The parser is fully sync, no allocation exceeds a hard
 cap from arbitrary attacker input, and the
-[`HpkeSymmetricCipherSuite`](../../crates/lakko-transport/src/ech.rs)
-+ [`EchConfig`](../../crates/lakko-transport/src/ech.rs)
+[`HpkeSymmetricCipherSuite`](../../crates/lakko-transport/src/ech/mod.rs)
++ [`EchConfig`](../../crates/lakko-transport/src/ech/mod.rs)
 types are opaque to rustls (just the keying material it
 needs to build the inner ClientHello).
 
-**Tests.** 12 unit tests in
-[`crates/lakko-transport/src/ech.rs`](../../crates/lakko-transport/src/ech.rs)
-covering happy path (one config + two configs),
-empty list, truncated outer length, truncated inner
-body, unsupported version, outer too large, trailing
-bytes, empty cipher suites, bad cipher-suites length
-(non-multiple-of-4), zero `maximum_name_length`,
-invalid UTF-8 in `public_name`.
+**Wire-up (G5-6-wireup, [ADR-0012](../adr/0012-ech-hpke-adapter.md)).**
+rustls 0.23 ships HPKE only under `aws_lc_rs`, and
+`lakko-transport` is pinned to the `ring` crypto
+provider. The wire-up sprint adds:
 
-**Not covered yet.** Integration with
-`rustls::client::ClientConfig::with_ech_config_list` is
-a follow-up sprint gated on a working ECH-supporting
-test endpoint (Cloudflare publishes one). The parser
-stands alone so the invariant can be pinned
-independently of network-side wiring.
+1. [`crates/lakko-transport/src/ech/adapter.rs`](../../crates/lakko-transport/src/ech/adapter.rs)
+   — `LakkoHpkeSuiteAesGcm128` / `AesGcm256` /
+   `ChaCha20Poly1305` implementing
+   `rustls::crypto::hpke::Hpke` on top of RustCrypto
+   `hpke 0.13`. Exposed as
+   `ALL_SUPPORTED_SUITES: &[&'static dyn Hpke]` for
+   `rustls::client::EchConfig::new`.
+2. [`crates/lakko-transport/src/ech/wireup.rs`](../../crates/lakko-transport/src/ech/wireup.rs)
+   — `build_ech_mode_from_bytes` runs a two-stage
+   validation pipeline (our T-12 parser first as
+   defense-in-depth, then rustls's own
+   `EchConfig::new`) before returning a usable
+   `EchMode::Enable(..)`.
+3. **HTTP transport** —
+   `HttpTransportConfig::ech_config_list:
+   Option<Vec<u8>>`. When `Some`, `with_config`
+   switches from `ClientConfig::builder()` to
+   `builder_with_provider(...).with_ech(mode)?`. The
+   existing `PinnedVerifier` still drives cert
+   validation.
+4. **WebTransport** —
+   `WebTransportConfig::ech_config_list_b64:
+   Option<String>`. When set, `open_session` bypasses
+   `web-transport-quinn::ClientBuilder` (which does
+   not expose `with_ech`) and assembles
+   `rustls::ClientConfig` + `quinn::ClientConfig`
+   manually. Ships a Lakko-side `CertHashVerifier`
+   replicating the W3C `serverCertificateHashes`
+   semantics. **Refuses ECH without cert pins**
+   (`EchRequiresCertHashes`): under ECH the outer cert
+   is the cover-site's, so silently falling back to
+   system CA roots would let a compromised CA fronting
+   the cover SNI MITM the transport.
+
+REALITY is **not wired** for ECH — REALITY and ECH are
+mutually exclusive (both want to own the
+`legacy_session_id` / SNI slot of the outer
+ClientHello; REALITY embeds an HMAC authenticator
+there, ECH replaces SNI entirely with an HPKE-sealed
+inner ClientHello). REALITY already provides
+SNI-hiding; the caller picks one transport, not both.
+
+**No silent downgrade.** Every error path on the wire-up
+(`EchWireUpError::ParserRefused`,
+`EchWireUpError::RustlsRefused`,
+`HttpError::EchConfig`,
+`WebTransportConfigError::BadEchConfigList`,
+`WebTransportConfigError::EchRequiresCertHashes`,
+`WebTransportConfigError::BadEchConfigListBase64`)
+refuses to build the transport rather than falling
+back to non-ECH. Security invariant #4.
+
+**Internal-API caveat.** rustls 0.23 surfaces the
+IANA-aligned `HpkeKem` / `HpkeKdf` / `HpkeAead` /
+`HpkeSymmetricCipherSuite` enums only via
+`#[doc(hidden)] pub mod internal`. That path is the
+documented consumer surface for external
+crypto-provider adapters, but explicitly excluded from
+rustls's stable interface. A rustls major-version bump
+may require re-pointing the `use rustls::internal::...`
+imports in `adapter.rs`. The rebreak path is
+well-localised (one `use` block).
+
+**Tests.** 12 parser unit tests in
+[`crates/lakko-transport/src/ech/mod.rs`](../../crates/lakko-transport/src/ech/mod.rs)
++ 9 adapter unit tests
+([`adapter.rs::tests`](../../crates/lakko-transport/src/ech/adapter.rs):
+round-trip per suite, stateful round-trip per suite,
+wrong-AAD-fails-open, IANA suite-ID drift, preference
+order) + 4 wire-up integration tests
+([`wireup.rs::tests`](../../crates/lakko-transport/src/ech/wireup.rs))
++ 2 HTTP integration tests
+([`http.rs::tests`](../../crates/lakko-transport/src/http.rs):
+malformed / empty ECH refused at construction) + 5
+WebTransport integration tests
+([`webtransport_pt.rs::tests`](../../crates/lakko-transport/src/webtransport_pt.rs):
+valid ECH + pins accepted, ECH without pins refused,
+malformed ECH refused, bad base64 refused, serde
+round-trip).
+
+**Fuzz.** Two harnesses in
+[`crates/lakko-transport/fuzz/fuzz_targets/`](../../crates/lakko-transport/fuzz/fuzz_targets/):
+`ech_decode` (parser in isolation, T-12 §1) and
+`ech_wireup_build_mode` (full parse → rustls assembly
+chain, T-12 §2).
+
+**Not covered yet.** Live integration test against a
+real ECH-publishing endpoint (Cloudflare) is gated on
+the censorship-lab sprint (G5-7); current coverage is
+unit + integration + fuzz on synthetic vectors.
 
 ### T-13: REALITY v2 authenticator is HMAC-over-(short_id || timestamp) keyed by a publisher-distributed pre-shared `tag_secret`; tag verified before any downstream byte is trusted; mutual-auth via ServerHello.Random
 
