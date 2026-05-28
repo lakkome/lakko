@@ -1579,12 +1579,43 @@ integration) asserts:
 The signaling layer is now a properly verified contract.
 The SFU's media-layer responsibilities — RTP track
 forwarding, simulcast layer selection per receiver,
-TWCC aggregation — arrive in S-3-B-routing-media (gated
-on a WebRTC pod existing on at least one client
-platform). When that lands, an additional invariant
-block (C-40+) covers the "RTP frames pass through
-opaque; the SFU never reads the SFrame ciphertext"
-property.
+TWCC aggregation — arrive in S-3-B-routing-media. The
+**structural fanout** has landed (steps 1–5: media task,
+UDP bind, `MediaData` capture + cross-peer forwarding
+helper); the **deferred follow-up** is the
+TracksIn/TracksOut mapping that drives SDP renegotiation
+when a peer joins (so destination peers actually have a
+writer for the source `mid`) plus the synthetic str0m-
+client integration test under real ICE.
+
+**SFrame-passthrough property the existing fanout
+preserves.** `services/sfu/src/media.rs::fanout_media_data`
+walks every non-origin peer and calls
+`MediaPeer::forward_media_data(&data)`, which is a thin
+wrapper over `Rtc::writer(mid).match_params(params).write(
+pt, network_time, time, data.data.clone())`. The
+`data.data` byte buffer is the inner SFrame-encrypted
+payload, forwarded **verbatim** into the destination
+peer's str0m state — no inspection, no parsing, no
+SFrame-header peek. str0m subsequently SRTP-encrypts the
+buffer for the per-peer transport hop, but the inner
+SFrame ciphertext stays opaque from origin client to
+destination client. The variant-typed `MediaForward`
+outcome (`Sent` / `NoWriter` / `NoCodecMatch` /
+`WriteFailed`) keeps observability counters
+disambiguated — a future metrics layer will count each
+skip reason separately so the audit-time question "is
+the SFU dropping all my media or refusing it for a
+codec reason?" is answerable without reading bytes.
+Unit-tested in `media::tests::{forward_to_peer_without_writer_returns_no_writer,
+fanout_with_single_peer_is_noop, fanout_skips_origin_peer,
+fanout_empty_pending_is_noop}`.
+
+When the deferred TracksIn/TracksOut sub-sprint lands,
+the synthetic-client integration test that drives two
+str0m peers through full DTLS+ICE against the SFU and
+asserts a payload sent by A surfaces verbatim at B will
+close the audit loop on this property.
 
 ## Channel-broadcast invariants (Phase 4)
 

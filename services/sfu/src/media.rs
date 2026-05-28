@@ -103,8 +103,9 @@ use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use str0m::change::{SdpAnswer, SdpOffer};
+use str0m::media::MediaData;
 use str0m::net::{Protocol, Receive, Transmit};
-use str0m::{Candidate, Input, Output, Rtc};
+use str0m::{Candidate, Event, Input, Output, Rtc};
 use thiserror::Error;
 
 use crate::peer::PeerId;
@@ -143,6 +144,28 @@ pub enum MediaError {
 
 /// Result alias.
 pub type MediaResult<T> = std::result::Result<T, MediaError>;
+
+/// Outcome of a single [`MediaPeer::forward_media_data`]
+/// call. Distinct skip reasons live on distinct variants
+/// so a future metrics layer can count `NoWriter` /
+/// `NoCodecMatch` separately — the former is the
+/// expected state during early track negotiation and
+/// must not look like a codec mismatch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MediaForward {
+    /// The frame was forwarded into the destination
+    /// peer's outbound stream; str0m will SRTP-encrypt
+    /// it on the next `poll_output` tick.
+    Sent,
+    /// Destination peer has no writer for the source
+    /// `mid` — typically pre-renegotiation.
+    NoWriter,
+    /// Destination peer has no codec PT matching the
+    /// source `PayloadParams`.
+    NoCodecMatch,
+    /// str0m's `Writer::write` returned an error.
+    WriteFailed(String),
+}
 
 /// One media-routing peer.
 ///
@@ -298,6 +321,50 @@ impl MediaPeer {
             .map_err(|e| MediaError::BadIceCandidate(e.to_string()))?;
         self.rtc.add_remote_candidate(candidate);
         Ok(())
+    }
+
+    /// Best-effort forward of a [`MediaData`] frame
+    /// captured from a *different* peer's `poll_output`.
+    /// Returns the [`MediaForward`] outcome so the caller
+    /// can keep observability counters per skip reason.
+    ///
+    /// The SFrame contract holds: `data.data` is the
+    /// inner SFrame-encrypted payload bytes; we forward
+    /// them verbatim into the destination peer's
+    /// outbound stream without inspecting them. str0m
+    /// re-encrypts at the SRTP layer for the per-hop
+    /// destination — the inner SFrame ciphertext stays
+    /// opaque from origin to destination (see audit-pack
+    /// C-39).
+    ///
+    /// Skip conditions (each surfaces as a distinct
+    /// [`MediaForward`] variant so a future metrics layer
+    /// can count them without colliding):
+    ///
+    /// - `NoWriter`: destination has no `Writer` for
+    ///   `data.mid` — typically means the SDP renegotiation
+    ///   that adds an outgoing track for this stream
+    ///   hasn't happened yet. The full track-mapping work
+    ///   (`TracksIn` / `TracksOut` per chat.rs) lands in a
+    ///   follow-up sub-sprint; today we forward only when
+    ///   the destination happens to already have a writer
+    ///   for the same mid.
+    /// - `NoCodecMatch`: destination's negotiated codec
+    ///   set doesn't include the incoming PT.
+    /// - `WriteFailed`: str0m refused the write (rare —
+    ///   typically a state-machine inconsistency or an
+    ///   unknown PT slipped past `match_params`).
+    pub fn forward_media_data(&mut self, data: &MediaData) -> MediaForward {
+        let Some(writer) = self.rtc.writer(data.mid) else {
+            return MediaForward::NoWriter;
+        };
+        let Some(pt) = writer.match_params(data.params) else {
+            return MediaForward::NoCodecMatch;
+        };
+        if let Err(e) = writer.write(pt, data.network_time, data.time, data.data.clone()) {
+            return MediaForward::WriteFailed(e.to_string());
+        }
+        MediaForward::Sent
     }
 }
 
@@ -683,9 +750,17 @@ async fn run_media_loop(
         // bounds the select's sleep so we drive the
         // str0m state machines forward even when no
         // network or command activity is happening.
+        // Capture-then-fanout: drain_outputs collects
+        // `Event::MediaData` events with their origin
+        // peer ids; fanout_media_data forwards them into
+        // every other peer's writer so the next drain
+        // tick converts them to `Output::Transmit` UDP
+        // sends.
         let now = Instant::now();
-        let deadline = drain_outputs(&mut router, &socket, now).await;
-        let sleep_for = deadline
+        let summary = drain_outputs(&mut router, &socket, now).await;
+        fanout_media_data(&mut router, &summary.pending);
+        let sleep_for = summary
+            .earliest_deadline
             .saturating_duration_since(now)
             .min(MAX_TICK_INTERVAL);
 
@@ -744,34 +819,72 @@ async fn run_media_loop(
     }
 }
 
+/// One [`MediaData`] event captured during a drain pass,
+/// tagged with the originating peer id so the fanout
+/// step can skip the source when forwarding.
+pub(crate) struct PendingFanout {
+    /// Peer that emitted the [`MediaData`] event.
+    pub(crate) origin: MediaPeerId,
+    /// The frame to be forwarded.
+    pub(crate) data: MediaData,
+}
+
+/// Result of one tick's [`drain_outputs`] pass.
+pub(crate) struct DrainSummary {
+    /// Earliest pending `Output::Timeout` across all peers.
+    pub(crate) earliest_deadline: Instant,
+    /// [`MediaData`] frames captured during the drain,
+    /// waiting to be forwarded to non-origin peers.
+    pub(crate) pending: Vec<PendingFanout>,
+}
+
 /// Drain `poll_output` on every peer; write any
 /// `Output::Transmit` packets back to `socket`; collect
 /// the earliest `Output::Timeout(t)` so the caller can
-/// `sleep_until` it. Returns `now + MAX_TICK_INTERVAL`
-/// if no peer produced a timeout (a defensive ceiling
-/// against a peer that never declares a deadline).
+/// `sleep_until` it; capture `Event::MediaData` frames
+/// into a pending-fanout queue. Returns a
+/// [`DrainSummary`].
+///
+/// The caller is responsible for invoking
+/// [`fanout_media_data`] on `summary.pending` after this
+/// returns — keeping capture and dispatch separate lets
+/// each peer's `poll_output` loop hold an exclusive
+/// borrow on a single peer without dropping it mid-walk
+/// to write to other peers.
 async fn drain_outputs(
     router: &mut MediaRouter,
     socket: &tokio::net::UdpSocket,
     now: Instant,
-) -> Instant {
-    let mut earliest = now + MAX_TICK_INTERVAL;
+) -> DrainSummary {
+    let mut earliest_deadline = now + MAX_TICK_INTERVAL;
+    let mut pending: Vec<PendingFanout> = Vec::new();
     for peer in router.peers_mut() {
+        let origin = peer.id().clone();
         loop {
             match peer.poll_output() {
                 Ok(Output::Transmit(t)) => {
                     write_transmit(socket, &t).await;
                 },
                 Ok(Output::Timeout(at)) => {
-                    if at < earliest {
-                        earliest = at;
+                    if at < earliest_deadline {
+                        earliest_deadline = at;
                     }
                     break;
                 },
-                Ok(Output::Event(_)) => {
-                    // Step 5 handles MediaData fanout
-                    // and ICE-state events; for now we
-                    // discard.
+                Ok(Output::Event(event)) => {
+                    // Capture MediaData for fanout;
+                    // ignore other events (ICE state,
+                    // keyframe requests, stats) — they
+                    // are not actionable for the
+                    // SFrame-passthrough router yet. The
+                    // per-event surface lands as a
+                    // follow-up sub-sprint.
+                    if let Event::MediaData(data) = event {
+                        pending.push(PendingFanout {
+                            origin: origin.clone(),
+                            data,
+                        });
+                    }
                 },
                 Err(e) => {
                     tracing::warn!(error = %e, "media: poll_output failed; dropping peer");
@@ -784,7 +897,60 @@ async fn drain_outputs(
             }
         }
     }
-    earliest
+    DrainSummary {
+        earliest_deadline,
+        pending,
+    }
+}
+
+/// Walk `pending` and forward each frame to every peer
+/// in `router` that is NOT the origin. The write
+/// enqueues bytes into the destination peer's str0m
+/// state; the next `drain_outputs` tick will turn those
+/// into `Output::Transmit` events that hit the wire.
+///
+/// Best-effort: forwarding skips peers without a
+/// matching writer or codec PT — see [`MediaForward`]
+/// for the per-variant skip semantics and the deferred
+/// TracksIn/TracksOut mapping note.
+pub(crate) fn fanout_media_data(router: &mut MediaRouter, pending: &[PendingFanout]) {
+    if pending.is_empty() || router.len() < 2 {
+        return;
+    }
+    for event in pending {
+        // Walk the peer list manually so we can borrow
+        // each non-origin peer mutably one at a time.
+        let n = router.len();
+        for idx in 0..n {
+            // Borrow check: re-borrow per-iteration so we
+            // can compare ids before touching the writer.
+            let target_is_origin = router
+                .peers()
+                .get(idx)
+                .is_some_and(|p| p.id() == &event.origin);
+            if target_is_origin {
+                continue;
+            }
+            let Some(peer) = router.peers_mut().get_mut(idx) else {
+                continue;
+            };
+            match peer.forward_media_data(&event.data) {
+                MediaForward::Sent | MediaForward::NoWriter | MediaForward::NoCodecMatch => {
+                    // First two are the expected steady-
+                    // state outcomes; we don't log them
+                    // per-packet. NoCodecMatch is rare
+                    // and not actionable per-packet.
+                },
+                MediaForward::WriteFailed(detail) => {
+                    tracing::warn!(
+                        target_peer = %peer.id(),
+                        error = %detail,
+                        "media: forward write failed"
+                    );
+                },
+            }
+        }
+    }
 }
 
 /// Send one `str0m::net::Transmit` out the bound
@@ -1028,5 +1194,128 @@ mod tests {
             err,
             MediaCommandError::Media(MediaError::BadSdp(_))
         ));
+    }
+
+    /// `forward_media_data` on a freshly-constructed
+    /// `MediaPeer` returns [`MediaForward::NoWriter`] —
+    /// the destination peer has no negotiated outgoing
+    /// media-line yet, so the SFU has no writer to push
+    /// into. This is the expected steady-state outcome
+    /// during the brief pre-renegotiation window after a
+    /// new peer joins and before its outbound track is
+    /// added.
+    ///
+    /// The test guarantees the variant is `NoWriter` and
+    /// NOT `NoCodecMatch` — a future codec-mismatch path
+    /// must surface separately so observability counters
+    /// stay disambiguated.
+    #[test]
+    fn forward_to_peer_without_writer_returns_no_writer() {
+        let mut p = MediaPeer::new(pid("alice"), Instant::now());
+        let synthetic = synthetic_media_data();
+        let outcome = p.forward_media_data(&synthetic);
+        assert_eq!(
+            outcome,
+            MediaForward::NoWriter,
+            "fresh Rtc has no writer for arbitrary mid"
+        );
+    }
+
+    /// `fanout_media_data` is a no-op when the router
+    /// has a single peer — there is no non-origin peer
+    /// to forward to, so the call must return without
+    /// touching state.
+    #[test]
+    fn fanout_with_single_peer_is_noop() {
+        let mut r = MediaRouter::new();
+        r.add_peer(MediaPeer::new(pid("alice"), Instant::now()));
+        let pending = vec![PendingFanout {
+            origin: pid("alice"),
+            data: synthetic_media_data(),
+        }];
+        // Smoke — must return without panic and leave
+        // the router untouched.
+        fanout_media_data(&mut r, &pending);
+        assert_eq!(r.len(), 1);
+    }
+
+    /// `fanout_media_data` skips the origin peer when
+    /// forwarding — the origin must not receive its own
+    /// echo. Because none of the destination peers have
+    /// a writer for the synthetic mid, the call is a
+    /// no-op on each, but the iteration must NOT panic
+    /// on borrow-check (the origin-skip path is what we
+    /// are exercising).
+    #[test]
+    fn fanout_skips_origin_peer() {
+        let mut r = MediaRouter::new();
+        r.add_peer(MediaPeer::new(pid("alice"), Instant::now()));
+        r.add_peer(MediaPeer::new(pid("bob"), Instant::now()));
+        r.add_peer(MediaPeer::new(pid("charlie"), Instant::now()));
+        let pending = vec![PendingFanout {
+            origin: pid("bob"),
+            data: synthetic_media_data(),
+        }];
+        fanout_media_data(&mut r, &pending);
+        // All three peers still present, none died.
+        assert_eq!(r.len(), 3);
+        for peer in r.peers() {
+            assert!(peer.is_alive());
+        }
+    }
+
+    /// Empty `pending` slice is a no-op even with many
+    /// peers — defensive against silent walking of the
+    /// peer list.
+    #[test]
+    fn fanout_empty_pending_is_noop() {
+        let mut r = MediaRouter::new();
+        for n in &["a", "b", "c"] {
+            r.add_peer(MediaPeer::new(pid(n), Instant::now()));
+        }
+        fanout_media_data(&mut r, &[]);
+        assert_eq!(r.len(), 3);
+    }
+
+    /// Synthetic `MediaData` for tests — uses a
+    /// fabricated mid + PT that will never match a
+    /// freshly-constructed `Rtc`'s codec config, so
+    /// `forward_media_data` always returns `NoWriter`
+    /// here. The struct fields exercised by the fanout
+    /// path (mid, params, network_time, time, data) all
+    /// take values that pass str0m's API but never
+    /// match a real session.
+    fn synthetic_media_data() -> MediaData {
+        use str0m::format::{Codec, CodecExtra, CodecSpec, FormatParams, PayloadParams};
+        use str0m::media::{Frequency, MediaTime, Mid, Pt};
+        use str0m::rtp::{ExtensionValues, SeqNo};
+        let mid = Mid::new();
+        let pt: Pt = 96.into();
+        let params = PayloadParams::new(
+            pt,
+            None,
+            CodecSpec {
+                codec: Codec::Opus,
+                channels: Some(2),
+                clock_rate: Frequency::FORTY_EIGHT_KHZ,
+                format: FormatParams::default(),
+            },
+        );
+        let seq: SeqNo = 0_u64.into();
+        MediaData {
+            mid,
+            pt,
+            rid: None,
+            params,
+            time: MediaTime::new(0, Frequency::FORTY_EIGHT_KHZ),
+            network_time: Instant::now(),
+            seq_range: seq..=seq,
+            contiguous: true,
+            data: vec![0; 16],
+            ext_vals: ExtensionValues::default(),
+            codec_extra: CodecExtra::None,
+            last_sender_info: None,
+            audio_start_of_talk_spurt: false,
+        }
     }
 }
