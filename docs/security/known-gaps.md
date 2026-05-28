@@ -750,11 +750,16 @@ authored code; two open advisories in transitive deps,
 both with reachability analysis above; three
 unmaintained-crate warnings pending upstream
 remediation. The `cargo audit` baseline is captured
-here as of `2026-05-27` (re-run delta vs `2026-05-21`:
+here as of `2026-05-28` (re-run delta vs `2026-05-27`:
 **zero change** — same 2 vulnerabilities, same 3
 unmaintained warnings, no new findings, no advisories
-resolved upstream) and is re-run on every CI build;
-new findings either get a G-entry of their own or are
+resolved upstream. Post-G5-6-wireup confirmation: the
+`hpke 0.13` + `rand_core 0.9` deps added by ADR-0012
+brought in their pure-Rust RustCrypto dependencies
+[`x25519-dalek`, `aes-gcm`, `chacha20poly1305`,
+`hkdf`, `hmac`, `sha2`] without introducing any new
+advisory) and is re-run on every CI build; new
+findings either get a G-entry of their own or are
 remediated as the upstream chain catches up.
 
 `cargo deny check` is the second tier of the supply-

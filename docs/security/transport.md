@@ -1054,27 +1054,40 @@ bidirectional WebTransport stream within one session;
 multiplexing across multiple Lakko channels is the next
 layer's job.
 
-**Tests.** 8 unit tests in
+**Tests.** 13 unit tests in
 [`crates/lakko-transport/src/webtransport_pt.rs`](../../crates/lakko-transport/src/webtransport_pt.rs)
 covering: happy parse, reject non-https URL, reject
 unparseable URL, reject base64 garbage in cert hash,
 reject wrong-length cert hash, accept empty hash list
 (system-roots mode), `WebTransportPt::new` rejects bad
-config eagerly, and a serde round-trip of the wire
-config.
+config eagerly, serde round-trip of the wire config,
+plus 5 ECH-armed integration tests (G5-6-wireup, see
+T-12 §3): valid ECH + cert pins accepted, ECH without
+cert pins refused (`EchRequiresCertHashes`), malformed
+ECH bytes refused, bad ECH base64 refused, ECH-armed
+config round-trips through serde.
 
-**Not covered yet.** Live network integration test
-against an in-test wtransport server with an
-rcgen-generated self-signed cert and a known-hash
-pinning round-trip — deferred to a follow-up sprint
-because the wtransport server-side TLS configuration
-takes an `rcgen` cert via several layers of conversion
-(rustls-pki-types `PrivateKeyDer` → `CertificateDer` →
-quinn `ServerConfig`) that needs its own wiring
-beyond the scope of this implementation sprint.
-The unit tests above pin the config / framing surface;
-the actual session round-trip rides on `web-transport-quinn`'s
-own test suite + production deployments.
+**E2E integration test (G5-4-server-test).**
+[`crates/lakko-transport/tests/webtransport_e2e.rs::webtransport_loopback_roundtrip`](../../crates/lakko-transport/tests/webtransport_e2e.rs)
+spins a real `web_transport_quinn::Server` on
+`127.0.0.1:0` with an rcgen-generated self-signed cert
+chain (`make_self_signed_cert` lifts `rcgen::generate_simple_self_signed`
+into `Vec<CertificateDer<'static>>` + `PrivateKeyDer::Pkcs8`).
+The `WebTransportPt` client points at the bound port
+with the cert's SHA-256 hash pinned in
+`cert_hashes_b64`, opens the WebTransport session,
+sends a u32-BE length-prefixed frame, and reads the
+echoed reply. Validates the full
+`WebTransportPt::connect` → `Connection::send` →
+`Connection::recv` pipeline end-to-end on
+W3C-`serverCertificateHashes`-pinned trust. The URL
+uses `127.0.0.1` (not `localhost`) so the IPv4 server
+bind matches the client's destination — `localhost`
+resolves to `::1` first on macOS while
+`quinn::Endpoint::client` binds to `[::]:0`
+dual-stack, and the server would never receive the
+packets. Cert-hash pinning bypasses SAN matching, so
+the IP-literal SNI is fine here.
 
 ### T-15: MASQUE config + CONNECT-UDP request + HTTP Datagram payload codec are spec-aligned and length-bounded
 

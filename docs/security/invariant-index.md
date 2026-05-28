@@ -133,7 +133,7 @@ Source: [`transport.md`](./transport.md). Anti-censorship
 | T-9  | Chunked AEAD stream primitive pins ChaCha20-Poly1305 + monotonic nonce |
 | T-10 | Shadowsocks-2022 outer header layer pins BLAKE3 context + timestamp window + replay window |
 | T-11 | SS-2022 TCP wiring preserves per-direction key separation + frame-size cap |
-| T-12 | ECH config list parser is version-pinned (0xfe0d) + length-bounded (16 KiB outer / 16 inner configs / 4 KiB per config) |
+| T-12 | ECH config list parser is version-pinned (0xfe0d) + length-bounded (16 KiB outer / 16 inner configs / 4 KiB per config); wire-up via RustCrypto/hpke adapter on rustls 0.23 (HTTP + WebTransport landed, REALITY architecturally not applicable) |
 | T-13 | REALITY authenticator is X25519 ECDH + HKDF-SHA-256 (label `lakko/reality/v1`) + HMAC-SHA-256 over (short_id || timestamp); tag verified constant-time before any downstream byte is trusted |
 | T-14 | WebTransport client uses cert-hash pinning (SHA-256 of full DER cert, W3C `serverCertificateHashes` mode) + u32-BE length-prefixed framing with MAX_FRAME_BYTES enforcement |
 | T-15 | MASQUE config + CONNECT-UDP request (RFC 9298 §3) + HTTP Datagram payload codec (RFC 9297 §3) are spec-aligned and length-bounded; CONNECT-UDP Context ID 0 pinned, others refused |
