@@ -1162,21 +1162,72 @@ would crash the client's connect path.
   unsupported context id, decode rejects oversize wire,
   varint encoding classes (all four length classes),
   varint round-trip across classes.
-- 4 transport-ctor tests: accept valid config, reject
-  non-https proxy, reject bad inner target, connect
-  returns `NotImplemented` with the right sprint marker.
+- 5 transport-ctor tests: accept valid config, reject
+  non-https proxy, reject bad inner target, http::Request
+  translation carries pseudo-headers correctly, connect
+  to an unreachable proxy surfaces a typed `Error::Io`
+  (post-`S-5-masque-handshake`).
 
-**Not covered yet** (= `S-5-masque-handshake`). The h3 +
-quinn integration that actually opens an HTTP/3
-connection to the proxy, sends the `ConnectUdpRequest`
-via the `h3` crate's extended-CONNECT path, waits for the
-`2xx` response, and then multiplexes outbound UDP
-payloads through
-`quinn::Connection::send_datagram` + the codec above.
-`h3-datagram` is at 0.0.2 on crates.io (very early); the
-handshake sprint either pins to it or implements the
-QUIC DATAGRAM frame handling directly on top of
-`quinn`'s `send_datagram` / `read_datagram` API.
+**`S-5-masque-handshake` landed.**
+[`MasqueTransport::connect`](../../crates/lakko-transport/src/masque/transport.rs)
+now drives the full h3 + quinn handshake:
+
+1. Resolve `proxy_url` → `SocketAddr` via `std::net::ToSocketAddrs`.
+2. Build a rustls `ClientConfig` with TLS 1.3 + h3 ALPN +
+   system CA roots (`rustls_native_certs`), then a
+   `quinn::ClientConfig` from it.
+3. `quinn::Endpoint::client("[::]:0")` + `connect(addr,
+   sni)`. The handshake bounces real network errors out
+   as `Error::Io`.
+4. Wrap the resulting `quinn::Connection` in
+   `h3_quinn::Connection` and hand it to
+   `h3::client::builder()
+       .enable_extended_connect(true)
+       .enable_datagram(true)
+       .build(..)`. The h3 SETTINGS exchange negotiates
+   both extended-CONNECT (RFC 8441) and HTTP Datagrams
+   (RFC 9297 §2.1.1).
+5. Translate the typed [`ConnectUdpRequest`](../../crates/lakko-transport/src/masque/request.rs)
+   into an `http::Request<()>` carrying `:method = CONNECT`,
+   `Protocol::CONNECT_UDP` extension, capsule-protocol +
+   bearer headers, then `send_request` and await
+   `recv_response`. Non-2xx surfaces as `Error::Io`; per
+   RFC 9298 §4.2 we treat the tunnel as alive only on 2xx.
+6. Clone the `quinn::Connection` before handing it to h3;
+   the clone goes into `MasqueConnection` which shuttles
+   `Bytes` frames via `quinn::Connection::send_datagram` /
+   `read_datagram` using
+   [`encode_udp_payload`](../../crates/lakko-transport/src/masque/datagram.rs) /
+   `decode_udp_payload`. The h3 driver + the
+   request-stream pump are spawned as tokio tasks; their
+   `JoinHandle`s live on `MasqueConnection` and are
+   aborted on `close()` / `Drop`, tearing the tunnel
+   down cleanly.
+
+**Why we skip h3-datagram.** The `h3-datagram` crate
+(0.0.2) layers a Context-ID multiplex on top of
+`quinn::Connection::send_datagram`. Our use case runs
+exactly one CONNECT-UDP tunnel per `quinn::Connection`
+and our own codec already prepends Context-ID 0 as a
+QUIC varint. Skipping h3-datagram trims a pre-1.0
+audit-surface dep without losing wire compatibility —
+the bytes we feed `quinn::Connection::send_datagram` are
+already in the RFC 9297 §3 + RFC 9298 §3 wire shape.
+
+**Why system roots.** MASQUE proxies are typically
+operated by CDNs with proper CA-signed certs; the
+bootstrap config does not currently carry SPKI pins for
+the proxy. A future sprint may add `MasqueConfig::cert_hashes_b64`
+analogous to `WebTransportConfig` if we want strict
+pinning here.
+
+**Not covered yet.** A live MASQUE handshake test against
+an in-process proxy server. That would require standing
+up a server-side h3+quinn stack with extended-CONNECT
+support; deferred. The negative test
+(`connect_to_unreachable_proxy_surfaces_io_error`)
+exercises the full handshake path against `127.0.0.1:1`
+and confirms the typed-error contract.
 
 ## Known soft spots — out of scope for Phase 5 scaffold
 

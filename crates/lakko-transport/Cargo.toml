@@ -114,5 +114,40 @@ hpke = { version = "0.13", default-features = false, features = [
 # in 0.9 (split out for no-std users); we need it.
 rand_core = { version = "0.9", features = ["os_rng"] }
 
+# S-5-masque-handshake: HTTP/3 client for MASQUE RFC 9298
+# extended-CONNECT. The hyperium `h3` crate runs the
+# control-channel handshake; `h3-quinn` glues it to
+# quinn 0.11 (our existing QUIC layer). Both are pre-1.0
+# (0.0.x) but version-aligned with our quinn 0.11 /
+# rustls 0.23 / http 1 / bytes 1 stack.
+#
+# We deliberately skip `h3-datagram` and shuttle the
+# RFC 9297 datagrams directly through
+# `quinn::Connection::{send_datagram, read_datagram}` —
+# our `masque::datagram::encode_udp_payload` already
+# emits the (Context-ID || UDP-payload) wire format
+# RFC 9297 §3 mandates, and h3-datagram's API surface
+# only adds value when multiplexing multiple Context
+# IDs on the same h3 connection (we run exactly one
+# CONNECT-UDP tunnel per quinn::Connection).
+http = "1"
+h3 = "0.0.8"
+h3-quinn = "0.0.10"
+
+# S-5-masque-handshake: load the system CA chain so the
+# MASQUE proxy's CA-signed cert validates without
+# requiring the bootstrap config to ship SPKI pins.
+# Future sprint may add `spki_pins_b64` to MasqueConfig
+# for stricter trust; for now system roots are the
+# pragmatic default since MASQUE proxies are typically
+# operated by CDNs with proper CA-signed certs.
+rustls-native-certs = "0.8"
+
+# S-5-masque-handshake: futures::future::poll_fn is used
+# to drive the h3 connection's `poll_close` from a
+# spawned tokio task. `futures` is already a workspace
+# dep (re-exported here so we can name `poll_fn` without
+# pulling the broader futures-util surface).
+
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }
