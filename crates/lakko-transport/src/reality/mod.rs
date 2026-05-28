@@ -65,6 +65,7 @@ pub mod config;
 pub mod driver;
 pub mod handshake;
 pub mod listener;
+pub(crate) mod rng;
 pub mod server_driver;
 pub mod server_stream;
 pub mod stream;
@@ -80,8 +81,8 @@ pub use config::{
     TAG_SECRET_LEN,
 };
 pub use driver::{
-    build_reality_client_config, drive_handshake, RealityDriverError, RealityDriverResult,
-    MAX_HANDSHAKE_BUFFER_BYTES,
+    build_reality_client_config, build_reality_client_connection, drive_handshake,
+    RealityDriverError, RealityDriverResult, MAX_HANDSHAKE_BUFFER_BYTES,
 };
 pub use handshake::{
     extract_client_hello_session_id, extract_server_hello_random, patch_client_hello_session_id,

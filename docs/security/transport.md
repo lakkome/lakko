@@ -878,42 +878,54 @@ mirrors `RealityConnection` for the server half.
 is the inherent accept-loop API over
 `tokio::net::TcpListener`.
 
-**Known gap — `S-5-reality-rng-hook`.** The REALITY
-spec's authenticator (in ClientHello.session_id) AND
-mutual-auth response (in ServerHello.Random) both
-ride in TLS 1.3 fields that participate in the
-transcript hash (RFC 8446 §4.4.1). Patching those
-bytes AFTER rustls has computed its transcript
-desyncs key derivation between the two ends, surfacing
-as `Tls("cannot decrypt peer's message")` on the
-first application record. The fix is plumbing a
-custom `SecureRandom` into the rustls `CryptoProvider`
-so the REALITY-shaped bytes go INTO rustls (and thus
-into its transcript) before being written to the
-wire. The hook unlocks both the client-side full
-handshake AND server-side mutual-auth (patching the
-`ServerHello.Random` with `compute_server_response`).
-Until the hook lands:
+**`S-5-reality-rng-hook` landed — both E2E integration
+tests are green.** The REALITY authenticator
+(ClientHello.`legacy_session_id`) and the server's
+mutual-auth response (`ServerHello.Random`) both
+participate in the TLS 1.3 transcript hash (RFC 8446
+§4.4.1). The rng-hook sprint resolved this by wiring
+a custom
+[`RealityRng`](../../crates/lakko-transport/src/reality/rng.rs)
+as the `secure_random` field of the per-connection
+`CryptoProvider`:
 
-- the client driver supports an opt-out flag
-  [`RealityConfig::require_server_response`](../../crates/lakko-transport/src/reality/config.rs)
-  (default `true`, so opt-out is explicit);
-- REALITY in Lakko is therefore **one-way
-  authenticated** (the client proves it knows
-  `tag_secret`; the server does not have a way to
-  prove it back yet);
-- the negative E2E integration test
-  ([`crates/lakko-transport/tests/reality_e2e.rs::refuses_active_prober`](../../crates/lakko-transport/tests/reality_e2e.rs))
-  is green — proves the listener does NOT silently
-  admit peers whose session_id doesn't HMAC-verify;
-- the positive E2E round-trip
-  (`reality_v2_loopback_roundtrip`) is `#[ignore]`'d
-  on the gap label.
+- **Client side** — `build_reality_client_connection`
+  arms the per-thread `RealityRng` inject slot with
+  the REALITY authenticator bytes immediately before
+  `ClientConnection::new`; the first 32-byte
+  `fill(32)` call during `SessionId::random` consumes
+  those bytes. rustls's transcript therefore sees the
+  REALITY authenticator from the start, so key
+  derivation converges on both ends.
+- **Server side** — `drive_server_handshake` arms the
+  same slot with `compute_server_response` bytes
+  immediately before `process_new_packets` processes
+  the inbound `ClientHello`; the first 32-byte fill
+  during `ServerHello` generation receives the HMAC
+  response, and the client verifies it in
+  `drive_handshake`.
+- **TLS 1.3 ClientFinished drain** — `drive_handshake`
+  adds a post-loop write drain (after the
+  `while conn.is_handshaking()` exit) because rustls
+  transitions `is_handshaking()` to `false` and queues
+  the `ClientFinished` in the write buffer in the same
+  `process_new_packets` call. Without the drain the
+  server blocks waiting for `ClientFinished` that never
+  arrives.
+- **TCP coalescing defence** — `read_until` in both
+  `RealityConnection` and `RealityServerConnection`
+  calls `pump_decrypt` before the blocking
+  `socket.read()` loop so that application data
+  decrypted during the handshake phase (bundled with
+  `ClientFinished` via TCP coalescing on loopback) is
+  visible immediately without an additional round-trip.
 
-The full Lakko REALITY protocol becomes operational
-end-to-end once `S-5-reality-rng-hook` lands. Tracked
-as a known gap in
-[`docs/security/known-gaps.md`](known-gaps.md).
+Both E2E integration tests in
+[`crates/lakko-transport/tests/reality_e2e.rs`](../../crates/lakko-transport/tests/reality_e2e.rs)
+are green: `reality_v2_listener_refuses_active_prober`
+(negative — active-prober rejection) and
+`reality_v2_loopback_roundtrip` (positive — full
+client/server handshake + application-data echo).
 
 ### T-14: WebTransport client uses cert-hash pinning + u32-BE length-prefixed framing with MAX_FRAME_BYTES enforcement
 

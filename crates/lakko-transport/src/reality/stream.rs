@@ -127,6 +127,16 @@ where
     /// decrypt until the buffer is big enough or peer
     /// closes.
     async fn read_until(&mut self, needed: usize) -> Result<()> {
+        // Drain any plaintext that rustls has already
+        // decrypted but not yet pumped into rx_plaintext.
+        // This can happen when the handshake driver
+        // (drive_handshake) fed records that contained
+        // application data alongside the ServerFinished —
+        // e.g. when the server bundles NewSessionTicket
+        // and application-data in the same TCP burst.
+        // Without this, read_until would block on
+        // socket.read() even though the data is ready.
+        self.pump_decrypt()?;
         while self.rx_plaintext.len() < needed {
             let mut chunk = [0u8; SOCKET_READ_CHUNK];
             let n = self

@@ -15,35 +15,26 @@
 //!    against the publisher-distributed allow-list of
 //!    `(short_id, tag_secret)` pairs. The buffer is NOT
 //!    mutated; rustls sees the raw bytes after the splice.
-//!    `legacy_session_id` does NOT participate in the TLS
-//!    1.3 transcript hash (RFC 8446 §4.1.2) so the
-//!    splice-then-feed pattern preserves rustls's key
-//!    derivation.
-//! 2. **Mutual-auth via ServerHello.Random — DEFERRED.**
-//!    The REALITY v2 spec writes a `server_response` HMAC
-//!    into the 32-byte ServerHello.Random slot so the
-//!    client can prove the server knows the same
-//!    `tag_secret`. Implementing this on the server side
-//!    requires plumbing a custom `SecureRandom` into the
-//!    rustls `CryptoProvider` so the bytes that go on the
-//!    wire are the same bytes that go into the transcript
-//!    hash — a simple in-place patch of the outgoing
-//!    record after rustls has already computed its
-//!    transcript would desync key derivation and break
-//!    decryption on the client. The custom-RNG path is
-//!    tracked as `S-5-reality-server-mutual-auth`; until
-//!    it lands, REALITY in Lakko is **one-way
-//!    authenticated** (the client proves it knows the
-//!    `tag_secret`; the server does not). The client
-//!    can opt out of mutual-auth via
-//!    [`crate::reality::RealityConfig::require_server_response`].
+//!
+//! 2. **Mutual-auth via ServerHello.Random** — after the
+//!    ClientHello is verified, the driver arms
+//!    [`crate::reality::rng::RealityRng`] with
+//!    `compute_server_response(tag_secret, short_id, ts)` bytes
+//!    immediately before `process_new_packets` processes the
+//!    inbound ClientHello. That processing generates the
+//!    `ServerHello` and calls the first 32-byte
+//!    `SecureRandom::fill` for `ServerHello.Random` — which
+//!    receives our server-response HMAC bytes via the RNG
+//!    hook. The client verifies this in
+//!    [`crate::reality::driver::drive_handshake`] when
+//!    `require_server_response = true`.
 //!
 //! On any verification failure the driver returns a typed
 //! [`RealityServerDriverError`]; the caller drops the
 //! connection without writing further bytes — there is no
-//! "fall through to a real cover-site proxy" path in this
-//! sprint. That live-cover-proxy posture is a publisher-
-//! operator concern and lives outside the driver.
+//! "fall through to a real cover-site proxy" path. That
+//! live-cover-proxy posture is a publisher-operator concern
+//! and lives outside the driver.
 //!
 //! On success the driver returns the verified `short_id`
 //! and the client's `RealityTimestamp` so the caller can
@@ -58,13 +49,15 @@ use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
 
 use crate::reality::authenticator::{
-    verify, RealityAuthError, RealityAuthenticator, RealityTimestamp, AUTHENTICATOR_LEN,
+    compute_server_response, verify, RealityAuthError, RealityAuthenticator, RealityTimestamp,
+    AUTHENTICATOR_LEN,
 };
 use crate::reality::cert::AcceptAnyCertVerifier;
 use crate::reality::config::{RealityShortId, RealityTagSecret};
 use crate::reality::handshake::{
     extract_client_hello_session_id, TlsWireError, TLS_RECORD_HEADER_LEN,
 };
+use crate::reality::rng;
 
 /// Errors the server-side driver can surface. Variants
 /// branch on cause; never inspect the message string.
@@ -146,7 +139,14 @@ pub fn build_reality_server_config(
     cert_chain: Vec<CertificateDer<'static>>,
     key: PrivateKeyDer<'static>,
 ) -> RealityServerDriverResult<rustls::ServerConfig> {
-    let provider = rustls::crypto::ring::default_provider();
+    // Substitute REALITY_RNG for ring's default SecureRandom so
+    // the first 32-byte fill during ServerHello generation (inside
+    // process_new_packets) receives the server-response HMAC bytes
+    // armed by drive_server_handshake.
+    let provider = rustls::crypto::CryptoProvider {
+        secure_random: &rng::REALITY_RNG,
+        ..rustls::crypto::ring::default_provider()
+    };
     // Keep AcceptAnyCertVerifier referenced so the
     // pub(crate)-scoped struct stays connected to the
     // server-build path the audit-grep marker expects.
@@ -255,25 +255,38 @@ where
             let consumed = usize::try_from(cur.position()).expect("Cursor position fits usize");
             state.inbound_buf.drain(..consumed);
 
+            // Arm the server-side RNG inject slot once,
+            // immediately before process_new_packets. That
+            // call generates the ServerHello and invokes
+            // the first 32-byte SecureRandom::fill —
+            // which receives the server-response HMAC bytes.
+            // There is no .await between the arm and the
+            // process_new_packets call, so the thread-local
+            // slot cannot be consumed by another future.
+            if !state.server_rng_armed {
+                let short_id = state
+                    .matched_short_id
+                    .expect("verified_client_hello implies short_id set");
+                let client_ts = state
+                    .client_timestamp
+                    .expect("verified_client_hello implies client_timestamp set");
+                let tag_secret = allowed_pairs
+                    .iter()
+                    .find(|(s, _)| *s == short_id)
+                    .map(|(_, ts)| ts)
+                    .expect("verified short_id must be in allowed_pairs");
+                let server_response = compute_server_response(tag_secret, &short_id, client_ts);
+                rng::RealityRng::arm(server_response);
+                state.server_rng_armed = true;
+            }
+
             conn.process_new_packets()
                 .map_err(|e| RealityServerDriverError::Rustls(e.to_string()))?;
         }
 
         // Outbound side — drain rustls's pending writes.
-        //
-        // NOTE: The REALITY v2 spec writes a server-response
-        // HMAC into ServerHello.Random for mutual auth. We
-        // do NOT patch that here: ServerHello.Random
-        // participates in the TLS 1.3 transcript hash, so
-        // mutating the byte slice after rustls has already
-        // folded its own random into the transcript would
-        // desync key derivation and surface as "cannot
-        // decrypt peer's message" on the client. Doing it
-        // right requires plugging a custom `SecureRandom`
-        // into the rustls `CryptoProvider` — tracked as
-        // `S-5-reality-server-mutual-auth`. Until that
-        // lands, REALITY in Lakko is one-way authenticated
-        // (client proves it knows tag_secret).
+        // ServerHello.Random is populated with the server-response
+        // HMAC via the RNG hook above.
         if conn.wants_write() {
             let mut write_buf = Vec::with_capacity(4096);
             while conn.wants_write() {
@@ -308,6 +321,10 @@ struct ServerHandshakeState {
     /// been extracted, verified, and the matching
     /// `(short_id, _)` pair recorded.
     verified_client_hello: bool,
+    /// `true` once the server-side RNG inject slot has
+    /// been armed with the server-response HMAC. Guards
+    /// against redundant arm calls across loop iterations.
+    server_rng_armed: bool,
     /// Buffer of inbound bytes that have arrived but not
     /// yet been fed to rustls.
     inbound_buf: Vec<u8>,
@@ -323,6 +340,7 @@ impl ServerHandshakeState {
     fn new() -> Self {
         Self {
             verified_client_hello: false,
+            server_rng_armed: false,
             inbound_buf: Vec::with_capacity(8 * 1024),
             matched_short_id: None,
             client_timestamp: None,
@@ -369,11 +387,11 @@ impl ServerHandshakeState {
         let (short_id, client_ts) = verify(allowed_pairs, &authenticator, now, tolerance_secs)
             .map_err(RealityServerDriverError::ClientAuth)?;
 
-        // Note: mutual-auth (writing the server-response
-        // HMAC into ServerHello.Random) is deferred to
-        // S-5-reality-server-mutual-auth — see module doc.
-        // We therefore do not look up tag_secret here; the
-        // verifier already used it via `allowed_pairs`.
+        // The server-response HMAC for ServerHello.Random is
+        // computed in drive_server_handshake after this
+        // returns, using allowed_pairs to look up tag_secret
+        // by matched_short_id. We record the short_id and
+        // timestamp here so the caller can do that lookup.
         self.matched_short_id = Some(short_id);
         self.client_timestamp = Some(client_ts);
         self.verified_client_hello = true;

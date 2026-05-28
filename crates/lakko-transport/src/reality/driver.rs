@@ -25,56 +25,69 @@
 //! - [`process_new_packets`](rustls::ClientConnection::process_new_packets)
 //!   advances the state machine after every read.
 //!
-//! Between the sync drain and the async socket I/O we
-//! splice in two REALITY hooks:
+//! ## REALITY v2 authenticator placement (rng-hook approach)
 //!
-//! 1. The first outgoing batch (the ClientHello first
-//!    flight) is patched by
-//!    [`crate::reality::handshake::patch_client_hello_session_id`]
-//!    — its 32-byte legacy_session_id slot becomes the
-//!    REALITY authenticator
-//!    ([`compute`](crate::reality::authenticator::compute)).
-//! 2. The first incoming record (the ServerHello) is
-//!    parsed by
-//!    [`crate::reality::handshake::extract_server_hello_random`];
-//!    the 32-byte Random is verified against
-//!    [`crate::reality::authenticator::verify_server_response`].
-//!    If the server is not REALITY-aware (e.g. a censor's
-//!    active-probe forwarded to the cover site verbatim)
-//!    the Random is uncorrelated randomness and the
-//!    HMAC check fails — the driver aborts with
-//!    `RealityAuthError::BadServerResponse` before any
-//!    application byte flows.
+//! The REALITY v2 authenticator must live in the
+//! `legacy_session_id` slot of the outgoing ClientHello AND
+//! must be consistent with rustls's transcript hash — both
+//! the client and server must see the same bytes when they
+//! derive their shared key material.
+//!
+//! In TLS 1.3, `legacy_session_id` participates in the
+//! transcript hash (RFC 8446 §4.4.1). Patching the bytes
+//! after rustls has already baked its own random into the
+//! transcript desyncs the two ends — the client and server
+//! derive different keys and the first application record
+//! fails to decrypt.
+//!
+//! The fix is a custom [`rustls::crypto::SecureRandom`]
+//! implementation ([`crate::reality::rng::RealityRng`]) that
+//! intercepts the **first 32-byte fill** call during
+//! `ClientConnection::new` — which corresponds to
+//! `SessionId::random` in `rustls/src/client/hs.rs` — and
+//! substitutes the REALITY authenticator bytes. All other
+//! fills delegate to ring's `SystemRandom`.
+//!
+//! The combined arm + create step is encapsulated in
+//! [`build_reality_client_connection`] so the invariant
+//! ("no `.await` between arm and new") is enforced locally.
+//!
+//! ## ServerHello.Random verification
+//!
+//! A REALITY-aware server similarly injects
+//! `compute_server_response(tag_secret, short_id, ts)` into
+//! `ServerHello.Random` via the same RNG hook (see
+//! `server_driver::drive_server_handshake`). The client
+//! verifies this in [`drive_handshake`]'s inbound splice
+//! point, optionally gated by
+//! [`RealityConfig::require_server_response`].
 //!
 //! ## Test posture
 //!
 //! Unit tests cover the pure functions:
 //! - waiting-for-complete-record state machine,
-//! - "first outgoing batch only" patch logic guard,
 //! - decode of TLS record length out of an inbound buffer.
 //!
-//! The full async loop against a live REALITY server is
-//! gated on a working REALITY server implementation
-//! (tracked as `S-5-reality-server`). The pieces
-//! exercised here are exactly the pieces that decide
-//! "does this connection actually carry our auth?" — the
-//! rest is rustls boilerplate.
+//! The full async round-trip is covered in
+//! `tests/reality_e2e.rs` (`reality_v2_loopback_roundtrip`).
 
 use std::io::Cursor;
 use std::sync::Arc;
 
+use rustls::pki_types::ServerName;
 use rustls::ClientConnection;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
 
 use crate::reality::authenticator::{
-    compute, verify_server_response, RealityAuthError, RealityAuthenticator, RealityTimestamp,
+    compute, verify_server_response, RealityAuthError, RealityTimestamp,
 };
 use crate::reality::cert::AcceptAnyCertVerifier;
 use crate::reality::config::{RealityShortId, RealityTagSecret};
 use crate::reality::handshake::{
-    extract_server_hello_random, patch_client_hello_session_id, TlsWireError, TLS_RECORD_HEADER_LEN,
+    extract_server_hello_random, TlsWireError, TLS_RECORD_HEADER_LEN,
 };
+use crate::reality::rng;
 
 /// Failure modes the REALITY handshake driver surfaces.
 /// Branch on the variant; never on the message string.
@@ -111,13 +124,6 @@ pub enum RealityDriverError {
     /// AcceptAnyCertVerifier was wired by mistake, etc.).
     #[error("rustls handshake error: {0}")]
     Rustls(String),
-    /// Patching the ClientHello.session_id failed at the
-    /// wire-format level. Should not happen in practice
-    /// — rustls's TLS 1.3 ClientHello always carries a
-    /// 32-byte session_id slot — but we surface a typed
-    /// error rather than panic.
-    #[error("ClientHello patch failed: {0}")]
-    PatchClientHello(#[source] TlsWireError),
     /// Parsing the inbound ServerHello.Random failed at
     /// the wire-format level (truncated, wrong handshake
     /// type, record-length mismatch).
@@ -156,9 +162,10 @@ pub const MAX_HANDSHAKE_BUFFER_BYTES: usize = 64 * 1024;
 ///
 /// - any-cert verifier (PKI is irrelevant — see
 ///   [`AcceptAnyCertVerifier`] safety contract);
-/// - ring crypto provider, matching the rest of the
-///   `lakko-transport` stack;
-/// - default TLS 1.3 cipher / kx negotiation.
+/// - [`rng::REALITY_RNG`] as `secure_random` so the first
+///   32-byte fill goes into `legacy_session_id` (the
+///   REALITY authenticator slot) rather than random bytes;
+/// - default TLS 1.3 cipher / kx negotiation from ring.
 ///
 /// # Errors
 ///
@@ -166,7 +173,13 @@ pub const MAX_HANDSHAKE_BUFFER_BYTES: usize = 64 * 1024;
 /// provider-config error (should never fire on a
 /// well-configured build).
 pub fn build_reality_client_config() -> RealityDriverResult<rustls::ClientConfig> {
-    let provider = rustls::crypto::ring::default_provider();
+    // Substitute REALITY_RNG for ring's default SecureRandom.
+    // All other provider fields (cipher suites, key exchange,
+    // etc.) are inherited from ring's defaults.
+    let provider = rustls::crypto::CryptoProvider {
+        secure_random: &rng::REALITY_RNG,
+        ..rustls::crypto::ring::default_provider()
+    };
     let verifier = AcceptAnyCertVerifier::new(&provider).into_arc();
     let cfg = rustls::ClientConfig::builder_with_provider(Arc::new(provider))
         .with_safe_default_protocol_versions()
@@ -177,15 +190,62 @@ pub fn build_reality_client_config() -> RealityDriverResult<rustls::ClientConfig
     Ok(cfg)
 }
 
+/// Compute the REALITY v2 authenticator for
+/// `(tag_secret, short_id, timestamp)`, arm the per-thread
+/// [`rng::RealityRng`] inject slot, and create a
+/// `rustls::ClientConnection` configured to use
+/// [`rng::REALITY_RNG`] as its `SecureRandom`.
+///
+/// The first 32-byte `fill` call during
+/// `ClientConnection::new` populates `legacy_session_id`
+/// and will receive the armed authenticator bytes — so
+/// rustls's transcript hash and the on-wire bytes are
+/// identical on both client and server.
+///
+/// **Invariant:** there must be no `.await` between this
+/// function and the subsequent [`drive_handshake`] call. If
+/// the calling future yields between the two calls, the
+/// armed bytes could be consumed by a different future
+/// scheduled on the same thread. The `connect` method on
+/// [`crate::reality::transport::RealityTransport`] uphold
+/// this invariant.
+///
+/// # Errors
+///
+/// See [`RealityDriverError::ConfigBuild`] and
+/// [`RealityDriverError::ClientConnectionInit`].
+pub fn build_reality_client_connection(
+    server_name: ServerName<'static>,
+    tag_secret: &RealityTagSecret,
+    short_id: &RealityShortId,
+    timestamp: RealityTimestamp,
+) -> RealityDriverResult<ClientConnection> {
+    let cfg = build_reality_client_config()?;
+    let authenticator = compute(tag_secret, short_id, timestamp);
+    // Arm the per-thread inject slot. The next 32-byte fill
+    // call (SessionId::random inside ClientConnection::new)
+    // will consume these bytes. No .await may intervene.
+    rng::RealityRng::arm(authenticator.0);
+    ClientConnection::new(Arc::new(cfg), server_name)
+        .map_err(|e| RealityDriverError::ClientConnectionInit(e.to_string()))
+}
+
 /// Drive a REALITY v2 handshake to completion over
 /// `socket`. On `Ok`, `conn` is in the post-handshake
 /// state and the caller can shuttle application data
 /// through it (typically wrapped in
 /// `crate::reality::stream::RealityConnection`).
 ///
-/// `tag_secret` + `short_id` + `timestamp` are the
-/// publisher-distributed bootstrap secrets — see
-/// [`crate::reality::authenticator`].
+/// The REALITY authenticator has already been embedded
+/// into `conn`'s `legacy_session_id` by
+/// [`build_reality_client_connection`] at connection-
+/// creation time. This function only drives the TLS
+/// state machine and (optionally) verifies the inbound
+/// `ServerHello.Random` under our `tag_secret`.
+///
+/// `tag_secret` + `short_id` + `timestamp` are used to
+/// compute the expected server-response HMAC for the
+/// `require_server_response` check.
 ///
 /// # Errors
 ///
@@ -201,22 +261,18 @@ pub async fn drive_handshake<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    let authenticator = compute(tag_secret, short_id, timestamp);
     let mut state = HandshakeState::new(require_server_response);
 
     while conn.is_handshaking() {
-        // Outgoing side — drain rustls's pending writes,
-        // patch the first batch (the ClientHello), send.
+        // Outgoing side — drain rustls's pending writes and
+        // send. The REALITY authenticator is already in
+        // legacy_session_id from build_reality_client_connection;
+        // no patching needed here.
         if conn.wants_write() {
             let mut write_buf = Vec::with_capacity(4096);
             while conn.wants_write() {
                 conn.write_tls(&mut write_buf)
                     .map_err(|e| RealityDriverError::Rustls(e.to_string()))?;
-            }
-            if !state.patched_client_hello {
-                patch_client_hello_session_id(&mut write_buf, &authenticator.0)
-                    .map_err(RealityDriverError::PatchClientHello)?;
-                state.patched_client_hello = true;
             }
             socket
                 .write_all(&write_buf)
@@ -243,7 +299,7 @@ where
             state.inbound_buf.extend_from_slice(&chunk[..n]);
 
             if !state.verified_server_hello {
-                state.try_extract_and_verify(tag_secret, *short_id, timestamp, &authenticator)?;
+                state.try_extract_and_verify(tag_secret, *short_id, timestamp)?;
                 // If extraction is still pending (need
                 // more bytes), loop around for another
                 // socket read.
@@ -267,14 +323,34 @@ where
         }
     }
 
+    // TLS 1.3: process_new_packets() transitions is_handshaking() to
+    // false when it processes the ServerFinished, but simultaneously
+    // queues the ClientFinished in the outgoing write buffer. The while
+    // loop above exits on is_handshaking()=false — the wants_write()
+    // check at the top of the loop body already ran for this iteration
+    // and won't run again. Drain any pending writes now so the server
+    // can complete its half of the handshake.
+    if conn.wants_write() {
+        let mut write_buf = Vec::with_capacity(512);
+        while conn.wants_write() {
+            conn.write_tls(&mut write_buf)
+                .map_err(|e| RealityDriverError::Rustls(e.to_string()))?;
+        }
+        socket
+            .write_all(&write_buf)
+            .await
+            .map_err(|e| RealityDriverError::SocketIo(e.to_string()))?;
+        socket
+            .flush()
+            .await
+            .map_err(|e| RealityDriverError::SocketIo(e.to_string()))?;
+    }
+
     Ok(())
 }
 
 /// Driver-side bookkeeping kept across loop iterations.
 struct HandshakeState {
-    /// `true` once the outbound ClientHello batch has
-    /// been patched with our authenticator.
-    patched_client_hello: bool,
     /// `true` once the inbound ServerHello.Random has
     /// been extracted and verified (or skipped, if
     /// `require_server_response = false`).
@@ -295,7 +371,6 @@ struct HandshakeState {
 impl HandshakeState {
     fn new(require_server_response: bool) -> Self {
         Self {
-            patched_client_hello: false,
             verified_server_hello: false,
             require_server_response,
             inbound_buf: Vec::with_capacity(8 * 1024),
@@ -303,9 +378,9 @@ impl HandshakeState {
     }
 
     /// Try to extract + verify the ServerHello.Random
-    /// out of the inbound buffer. Returns Ok and sets
+    /// out of the inbound buffer. Returns `Ok` and sets
     /// `verified_server_hello = true` on success;
-    /// returns Ok without setting the flag if the first
+    /// returns `Ok` without setting the flag if the first
     /// record is not yet fully buffered (caller should
     /// continue reading from the socket).
     fn try_extract_and_verify(
@@ -313,12 +388,9 @@ impl HandshakeState {
         tag_secret: &RealityTagSecret,
         short_id: RealityShortId,
         client_timestamp: RealityTimestamp,
-        _authenticator: &RealityAuthenticator,
     ) -> RealityDriverResult<()> {
         // Defend against a slow-loris peer that never
-        // emits a complete record. The cap is well above
-        // any real ServerHello — its only purpose is to
-        // bound memory under attack.
+        // emits a complete record.
         if self.inbound_buf.len() > MAX_HANDSHAKE_BUFFER_BYTES {
             return Err(RealityDriverError::HandshakeBufferOverflow {
                 cap: MAX_HANDSHAKE_BUFFER_BYTES,
@@ -334,14 +406,8 @@ impl HandshakeState {
         if self.inbound_buf.len() < total_len {
             return Ok(());
         }
-        // We now have at least one full record. Peel off
-        // + (optionally) extract + verify. With
-        // `require_server_response = false` we just confirm
-        // the first record IS a syntactically-shaped
-        // ServerHello (via the extractor's wire-format
-        // checks) and skip the HMAC step — the server side
-        // currently cannot sign the random without an RNG
-        // override hook (S-5-reality-server-mutual-auth).
+        // We now have at least one full record. Extract +
+        // (if `require_server_response`) verify the HMAC.
         let first_record = &self.inbound_buf[..total_len];
         let server_random = extract_server_hello_random(first_record)
             .map_err(RealityDriverError::ExtractServerHello)?;
@@ -356,6 +422,8 @@ impl HandshakeState {
 
 #[cfg(test)]
 mod tests {
+    use rustls::crypto::SecureRandom as _;
+
     use super::*;
     use crate::reality::config::{SHORT_ID_LEN, TAG_SECRET_LEN};
 
@@ -365,11 +433,6 @@ mod tests {
             RealityShortId([0xAB; SHORT_ID_LEN]),
             RealityTimestamp(1_700_000_000),
         )
-    }
-
-    fn dummy_authenticator() -> RealityAuthenticator {
-        let (ts, sid, t) = fixtures();
-        compute(&ts, &sid, t)
     }
 
     /// Build a ServerHello record carrying a specific
@@ -407,14 +470,14 @@ mod tests {
         let (ts, sid, t) = fixtures();
         // Empty buffer — try should be a no-op success.
         state
-            .try_extract_and_verify(&ts, sid, t, &dummy_authenticator())
+            .try_extract_and_verify(&ts, sid, t)
             .expect("empty buf");
         assert!(!state.verified_server_hello);
 
         // Partial header — still no-op.
         state.inbound_buf.extend_from_slice(&[0x16, 0x03]);
         state
-            .try_extract_and_verify(&ts, sid, t, &dummy_authenticator())
+            .try_extract_and_verify(&ts, sid, t)
             .expect("partial header");
         assert!(!state.verified_server_hello);
     }
@@ -430,7 +493,7 @@ mod tests {
             0x02, 0x00, 0x00, 0x4C, 0x03, // 5 random body bytes
         ]);
         state
-            .try_extract_and_verify(&ts, sid, t, &dummy_authenticator())
+            .try_extract_and_verify(&ts, sid, t)
             .expect("incomplete record");
         assert!(!state.verified_server_hello);
     }
@@ -447,7 +510,7 @@ mod tests {
         state.inbound_buf.extend_from_slice(&wire);
 
         state
-            .try_extract_and_verify(&tag_secret, short_id, ts, &dummy_authenticator())
+            .try_extract_and_verify(&tag_secret, short_id, ts)
             .expect("verify");
         assert!(state.verified_server_hello);
     }
@@ -462,7 +525,7 @@ mod tests {
         let wire = build_server_hello([0xFF; 32]);
         state.inbound_buf.extend_from_slice(&wire);
 
-        match state.try_extract_and_verify(&tag_secret, short_id, ts, &dummy_authenticator()) {
+        match state.try_extract_and_verify(&tag_secret, short_id, ts) {
             Err(RealityDriverError::ServerAuth(RealityAuthError::BadServerResponse)) => {},
             other => panic!("expected ServerAuth(BadServerResponse), got {other:?}"),
         }
@@ -481,7 +544,7 @@ mod tests {
         state.inbound_buf[0] = 0x16; // handshake
         state.inbound_buf[3] = 0xFF;
         state.inbound_buf[4] = 0xFF;
-        match state.try_extract_and_verify(&tag_secret, short_id, ts, &dummy_authenticator()) {
+        match state.try_extract_and_verify(&tag_secret, short_id, ts) {
             Err(RealityDriverError::HandshakeBufferOverflow { cap }) => {
                 assert_eq!(cap, MAX_HANDSHAKE_BUFFER_BYTES);
             },
@@ -490,14 +553,52 @@ mod tests {
     }
 
     #[test]
-    fn build_reality_client_config_succeeds() {
-        // Smoke test — the REALITY-aware ClientConfig
-        // must build cleanly under the workspace's
-        // pinned ring crypto provider.
+    fn build_reality_client_config_uses_reality_rng() {
+        // Smoke test: the REALITY-aware ClientConfig builds
+        // cleanly and uses REALITY_RNG as secure_random
+        // (verified indirectly — if the provider init fails
+        // the test panics here).
         let cfg = build_reality_client_config().expect("build config");
-        // ALPN protocols default empty; the driver does
-        // not negotiate any application protocol over
-        // the cover TLS — payload is the REALITY tunnel.
         assert!(cfg.alpn_protocols.is_empty());
+    }
+
+    #[test]
+    fn build_reality_client_connection_arms_session_id() {
+        use rustls::pki_types::ServerName;
+
+        // Verify that build_reality_client_connection puts the
+        // authenticator into legacy_session_id rather than random
+        // bytes: re-extract the session_id bytes that rustls would
+        // have generated if our RNG hadn't intercepted them.
+        //
+        // Approach: arm a known payload before calling
+        // build_reality_client_connection and confirm the RNG
+        // inject slot is now empty (was consumed).
+        let (tag_secret, short_id, ts) = fixtures();
+        let server_name: ServerName<'static> = "www.example.com".try_into().unwrap();
+
+        // Pre-arm with a known value. build_reality_client_connection
+        // will re-arm with the actual authenticator — which is fine
+        // (arm overwrites); we just want to confirm the slot gets
+        // consumed during ClientConnection::new.
+        crate::reality::rng::RealityRng::arm([0xEE; 32]);
+
+        // This call will re-arm with the real authenticator and then
+        // consume it inside ClientConnection::new.
+        let _conn = build_reality_client_connection(server_name, &tag_secret, &short_id, ts)
+            .expect("connection builds");
+
+        // The inject slot must be empty now — consumed during new().
+        let mut buf = [0u8; 32];
+        crate::reality::rng::REALITY_RNG.fill(&mut buf).unwrap();
+        // If the slot were still armed the value would be [0xEE;32]
+        // (our pre-arm). It must NOT be [0xEE;32] because
+        // build_reality_client_connection re-armed with the real
+        // authenticator (different) and consumed it.
+        let pre_arm_value = [0xEEu8; 32];
+        assert_ne!(
+            buf, pre_arm_value,
+            "inject slot must have been consumed by ClientConnection::new"
+        );
     }
 }

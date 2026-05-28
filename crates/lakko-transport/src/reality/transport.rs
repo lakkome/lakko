@@ -8,41 +8,41 @@
 //!
 //! 1. Resolves [`Endpoint`] to a TCP target and opens a
 //!    [`tokio::net::TcpStream`] to it.
-//! 2. Builds a rustls TLS-1.3 client config wired with
-//!    [`crate::reality::cert::AcceptAnyCertVerifier`]
-//!    (REALITY's authentication is the HMAC chain on the
-//!    session_id, **not** the PKI chain — see ADR-0004
-//!    and the safety contract on that struct).
-//! 3. Builds a [`rustls::ClientConnection`] aimed at the
-//!    cover-site SNI from [`RealityConfig::sni`].
-//! 4. Runs [`crate::reality::driver::drive_handshake`]
-//!    which (a) patches the outgoing
-//!    ClientHello.session_id with the REALITY v2
-//!    authenticator and (b) verifies the inbound
-//!    ServerHello.Random under the shared tag_secret.
+//! 2. Gets the current wall-clock timestamp (needed for the
+//!    REALITY v2 authenticator embedded in the `ClientHello`).
+//! 3. Calls [`crate::reality::driver::build_reality_client_connection`]
+//!    which (a) computes the authenticator, (b) arms the
+//!    per-thread [`crate::reality::rng::RealityRng`] inject slot,
+//!    and (c) creates a `rustls::ClientConnection` so the
+//!    authenticator lands in `legacy_session_id` INSIDE
+//!    rustls's transcript hash — not patched after the fact.
+//! 4. Runs [`crate::reality::driver::drive_handshake`] which
+//!    drives the TLS state machine and optionally verifies the
+//!    inbound `ServerHello.Random` (the server's mutual-auth
+//!    proof) under the shared `tag_secret`.
 //! 5. On success, hands the post-handshake socket + rustls
 //!    state to [`crate::reality::stream::RealityConnection`]
 //!    which implements the [`Connection`] trait via
 //!    length-prefixed frames inside the TLS tunnel.
 //!
-//! Any failure on the path returns a typed
-//! [`Error`] — the connection is **never** opened on a
-//! partial handshake (no silent downgrade to plain TLS or
-//! plaintext, per CLAUDE.md security invariant #4).
+//! Any failure on the path returns a typed [`Error`] — the
+//! connection is **never** opened on a partial handshake (no
+//! silent downgrade to plain TLS or plaintext, per CLAUDE.md
+//! security invariant #4).
 
-use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use rustls::pki_types::ServerName;
-use rustls::ClientConnection;
 use tokio::net::TcpStream;
 
 use crate::endpoint::Endpoint;
 use crate::error::{Error, Result};
 use crate::reality::authenticator::RealityTimestamp;
 use crate::reality::config::{RealityConfig, RealityConfigError};
-use crate::reality::driver::{build_reality_client_config, drive_handshake, RealityDriverError};
+use crate::reality::driver::{
+    build_reality_client_connection, drive_handshake, RealityDriverError,
+};
 use crate::reality::stream::RealityConnection;
 use crate::transport::{Connection, Transport};
 
@@ -123,7 +123,6 @@ fn map_driver_error(e: RealityDriverError) -> Error {
         | RealityDriverError::Rustls(msg) => Error::Tls(msg),
         RealityDriverError::SocketIo(msg) => Error::Io(msg),
         RealityDriverError::PeerClosed => Error::PeerClosed,
-        RealityDriverError::PatchClientHello(e) => Error::Tls(format!("patch client hello: {e}")),
         RealityDriverError::ExtractServerHello(e) => {
             Error::Tls(format!("extract server hello: {e}"))
         },
@@ -149,30 +148,39 @@ impl Transport for RealityTransport {
         // 2. TCP connect to the resolved endpoint.
         let mut socket = open_tcp(endpoint).await?;
 
-        // 3. Build rustls client config + ClientConnection
-        //    pointed at the cover SNI.
-        let client_cfg = build_reality_client_config().map_err(map_driver_error)?;
+        // 3. Resolve the cover SNI to a rustls ServerName.
         let server_name = ServerName::try_from(self.cfg.sni.clone())
             .map_err(|e| Error::Tls(format!("invalid reality SNI {:?}: {e}", self.cfg.sni)))?;
-        let mut conn = ClientConnection::new(Arc::new(client_cfg), server_name)
-            .map_err(|e| Error::Tls(format!("rustls ClientConnection::new: {e}")))?;
 
-        // 4. Current wall-clock as the authenticator's
-        //    timestamp slot. Server clock skew is bounded
-        //    on the verifier side; we just publish ours.
+        // 4. Current wall-clock for the authenticator's
+        //    timestamp slot. Must be captured BEFORE
+        //    build_reality_client_connection so both the
+        //    authenticator baked into session_id AND the
+        //    server-response verification use the same ts.
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|e| Error::Config(format!("system clock before UNIX_EPOCH: {e}")))?
             .as_secs();
         let timestamp = RealityTimestamp(now);
 
-        // 5. Drive the handshake to completion. On Ok the
+        // 5. Arm the per-thread RNG inject slot + create
+        //    the rustls ClientConnection. The authenticator
+        //    lands in legacy_session_id INSIDE rustls's
+        //    transcript hash. No .await between arm and
+        //    new() — this call is fully synchronous.
+        let mut conn = build_reality_client_connection(
+            server_name,
+            &tag_secret,
+            &short_id,
+            timestamp,
+        )
+        .map_err(map_driver_error)?;
+
+        // 6. Drive the handshake to completion. On Ok the
         //    socket carries TLS-encrypted bytes and `conn`
         //    is in transport-mode. Mutual-auth (verifying
         //    the server's HMAC in ServerHello.Random) is
-        //    gated on `cfg.require_server_response` — see
-        //    `RealityConfig` doc + server_driver module
-        //    doc for the trade-off.
+        //    gated on `cfg.require_server_response`.
         drive_handshake(
             &mut socket,
             &mut conn,
@@ -184,7 +192,7 @@ impl Transport for RealityTransport {
         .await
         .map_err(map_driver_error)?;
 
-        // 6. Wrap into the Connection-trait implementer.
+        // 7. Wrap into the Connection-trait implementer.
         Ok(Box::new(RealityConnection::new(socket, conn)))
     }
 }

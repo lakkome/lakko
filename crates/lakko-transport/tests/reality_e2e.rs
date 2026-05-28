@@ -29,26 +29,20 @@ fn install_crypto_provider() {
     });
 }
 
-/// **DEFERRED — known gap.** The positive REALITY E2E
-/// round-trip is gated on `S-5-reality-rng-hook`: in TLS
-/// 1.3 the `legacy_session_id` field participates in the
-/// transcript-hash (RFC 8446 §4.4.1), so the current
-/// "rustls writes its bytes, we patch on the way to the
-/// socket" approach desyncs key derivation between the
-/// two ends — `Tls("cannot decrypt peer's message")` on
-/// the first decrypted record. The fix is to plumb a
-/// custom `SecureRandom` into the rustls `CryptoProvider`
-/// so the REALITY authenticator goes into rustls *before*
-/// the transcript-hash is computed. The same RNG hook
-/// also unlocks the server-side mutual-auth patch of
-/// `ServerHello.Random`.
+/// Full REALITY v2 loopback round-trip: a real
+/// `RealityListener` + `RealityTransport` client on the
+/// same loopback TCP port complete the handshake end-to-end
+/// (mutual authentication included) and exchange a
+/// post-handshake application frame.
 ///
-/// Until that lands, this test is `#[ignore]`d. The
-/// negative test below (`refuses_active_prober`) still
-/// runs and proves the listener does NOT silently admit
-/// peers whose session_id doesn't HMAC-verify.
+/// S-5-reality-rng-hook landed: the REALITY authenticator
+/// is placed into `legacy_session_id` via the rustls
+/// `SecureRandom` hook so rustls's transcript hash and the
+/// on-wire bytes are consistent on both sides.
+/// `ServerHello.Random` carries the server-response HMAC
+/// via the same mechanism; `require_server_response: true`
+/// exercises the mutual-auth path.
 #[tokio::test]
-#[ignore = "S-5-reality-rng-hook — needs custom CryptoProvider RNG for transcript-hash"]
 async fn reality_v2_loopback_roundtrip() {
     install_crypto_provider();
 
@@ -107,13 +101,10 @@ async fn reality_v2_loopback_roundtrip() {
         short_id_hex: hex::encode(short_id_bytes),
         allowed_inner_servers: vec![],
         remote: format!("{bound_addr}"),
-        // The server-side mutual-auth path (writing the
-        // REALITY v2 server-response HMAC into
-        // ServerHello.Random) is deferred to
-        // S-5-reality-server-mutual-auth — see
-        // server_driver module doc. While that gap is
-        // open the client opts out of mutual-auth.
-        require_server_response: false,
+        // S-5-reality-rng-hook landed: server now injects
+        // compute_server_response bytes into ServerHello.Random
+        // via the RNG hook. Verify mutual-auth here.
+        require_server_response: true,
     };
     let client_transport =
         RealityTransport::new(client_cfg).expect("client transport builds from config");

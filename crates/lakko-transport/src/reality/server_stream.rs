@@ -92,6 +92,19 @@ where
     /// Read until at least `needed` bytes of plaintext are
     /// buffered.
     async fn read_until(&mut self, needed: usize) -> Result<()> {
+        // Drain any plaintext that rustls has already
+        // decrypted but not yet pumped into rx_plaintext.
+        // This can happen when drive_server_handshake fed
+        // records that contained application data bundled
+        // with the ClientFinished (TCP coalescing on
+        // loopback) — process_new_packets() during the
+        // handshake already decrypted those bytes into
+        // rustls's internal reader, but rx_plaintext is
+        // empty at the time RealityServerConnection is
+        // constructed. Without this early pump, read_until
+        // would block on socket.read() even though the
+        // data is ready.
+        self.pump_decrypt()?;
         while self.rx_plaintext.len() < needed {
             let mut chunk = [0u8; SOCKET_READ_CHUNK];
             let n = self
