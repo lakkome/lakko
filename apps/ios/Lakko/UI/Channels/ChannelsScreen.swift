@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 import Foundation
+import LakkoCore
 import SwiftUI
 
 /// Channels UI for the iOS client — Phase 4 G4-2 iOS
@@ -45,14 +46,32 @@ private enum Theme {
 public struct ChannelsRootScreen: View {
     @StateObject private var state = ChannelsUiState()
     private let client: ChannelsClient
+    /// 32-byte OPAQUE export key for the current session.
+    /// `NewChannelScreen.create` rebuilds a transient
+    /// `Identity` from it (`Identity.fromSeed(seed: exportKey)`)
+    /// to drive the MLS PublisherGroup that produces the
+    /// channel content-key seed (G-27).
+    ///
+    /// The host (`LakkoApp` / a future Channels tab) supplies
+    /// this from `AuthRepository`'s in-memory `IdentitySecrets`
+    /// — same shape `ChatRepository.bootstrap` already uses.
+    private let exportKey: Data
 
-    public init(client: ChannelsClient = ChannelsClient()) {
+    public init(
+        client: ChannelsClient = ChannelsClient(),
+        exportKey: Data
+    ) {
         self.client = client
+        self.exportKey = exportKey
     }
 
     public var body: some View {
         NavigationStack {
-            ChannelsListScreen(state: state, client: client)
+            ChannelsListScreen(
+                state: state,
+                client: client,
+                exportKey: exportKey
+            )
         }
         .preferredColorScheme(.dark)
     }
@@ -65,6 +84,10 @@ public struct ChannelsRootScreen: View {
 struct ChannelsListScreen: View {
     @ObservedObject var state: ChannelsUiState
     let client: ChannelsClient
+    /// Forwarded down to [`NewChannelScreen`] so the
+    /// create-action can build the MLS PublisherGroup
+    /// identity. See [`ChannelsRootScreen.exportKey`].
+    let exportKey: Data
 
     var body: some View {
         ZStack {
@@ -79,7 +102,11 @@ struct ChannelsListScreen: View {
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 NavigationLink {
-                    NewChannelScreen(state: state, client: client)
+                    NewChannelScreen(
+                        state: state,
+                        client: client,
+                        exportKey: exportKey
+                    )
                 } label: {
                     Image(systemName: "plus")
                         .foregroundStyle(Theme.accent)
@@ -147,6 +174,10 @@ struct ChannelsListScreen: View {
 struct NewChannelScreen: View {
     @ObservedObject var state: ChannelsUiState
     let client: ChannelsClient
+    /// OPAQUE export key from the active session. Used to
+    /// build a transient `Identity` inside [`create`] —
+    /// the MLS PublisherGroup founding member.
+    let exportKey: Data
     @Environment(\.dismiss) private var dismiss
 
     @State private var name: String = ""
@@ -199,7 +230,22 @@ struct NewChannelScreen: View {
         let id = ChannelsComposer.freshChannelIdHex()
         do {
             _ = try await client.createChannel(channelIdHex: id)
-            let keys = ChannelsComposer.freshPublisherKeys()
+            // G-27: build a transient `Identity` from the
+            // OPAQUE export key, hand it to the composer
+            // so the channel content-key seed comes from a
+            // real MLS PublisherGroup exporter (instead of
+            // `newChannelSeedForTest`). The identity is
+            // throwaway — `freshPublisherKeys` builds a
+            // throwaway `Group` from it for the duration
+            // of the call.
+            // `Identity` releases its handle via ARC at
+            // scope-exit — UniFFI's Swift surface has no
+            // explicit `close()`.
+            let identity = try Identity.fromSeed(seed: exportKey)
+            let keys = try ChannelsComposer.freshPublisherKeys(
+                identity: identity,
+                channelIdHex: id
+            )
             state.addChannel(.init(
                 id: id,
                 localName: name.trimmingCharacters(in: .whitespaces),
@@ -210,6 +256,8 @@ struct NewChannelScreen: View {
             dismiss()
         } catch let err as ChannelsApiError {
             errorMessage = "Server rejected: \(err.code) — \(err.detail)"
+        } catch let err as ChannelsComposerError {
+            errorMessage = "Composer: \(err)"
         } catch {
             errorMessage = "Network error: \(error.localizedDescription)"
         }

@@ -75,13 +75,76 @@ public enum ChannelsComposerError: Error, Equatable {
 
 public enum ChannelsComposer {
 
-    /// Fresh `(seed, signingKeySeed)` pair backed by the
-    /// underlying `getrandom` source (iOS Security
-    /// framework CSPRNG via `SecRandomCopyBytes`).
-    public static func freshPublisherKeys() -> ChannelPublisherKeys {
-        let seed = LakkoCore.newChannelSeedForTest()
+    /// Build the publisher's `(seed, signingKeySeed)` pair
+    /// for `channelIdHex`, deriving the content-key seed
+    /// from a fresh MLS **PublisherGroup** exporter
+    /// (G-27 / ADR-0010 Tier-1).
+    ///
+    /// Mirror of
+    /// `apps/web/src/channels/composer.ts::freshPublisherKeys`.
+    /// The flow is:
+    ///
+    /// 1. Build a transient `Group` with `identity` as the
+    ///    founding member (`Group.create(identity:)`).
+    /// 2. Call `group.exportSecret(identity:, label:
+    ///    channelExporterLabel(), context: channel_id,
+    ///    length: 32)` — produces 32 bytes domain-separated
+    ///    by `"lakko/channel/v1"` + the 16-byte channel id.
+    /// 3. Hand the bytes to
+    ///    `channelSeedFromMlsExporterOutput` so the seed
+    ///    crosses the FFI boundary through the audit-pack
+    ///    surface (C-44) rather than a raw `Data` cast.
+    ///
+    /// The group is throwaway — it lives only for the
+    /// duration of this call, exactly like the web shim.
+    /// PublisherGroup persistence + rotation across
+    /// composer calls lands in a follow-up sub-sprint
+    /// (working name `G4-2-mls-persistence`) per the
+    /// note in [`docs/security/known-gaps.md`](../../../../docs/security/known-gaps.md)
+    /// G-27.
+    ///
+    /// `signingKeySeed` stays randomly minted by the
+    /// underlying iOS Security CSPRNG —
+    /// [ADR-0010](../../../../docs/adr/0010-channels-two-tier-broadcast.md)
+    /// treats the signing key as a long-lived per-channel
+    /// publisher identity, not as something derived from
+    /// the call-time exporter. It belongs in the Keychain
+    /// alongside the device root key once the migration
+    /// sub-sprint lands.
+    public static func freshPublisherKeys(
+        identity: Identity,
+        channelIdHex: String
+    ) throws -> ChannelPublisherKeys {
+        let channelId = try channelIdFromHex(channelIdHex)
+
+        let exporterOutput: Data
+        do {
+            // `Group` releases its Rust handle in its
+            // `deinit` (UniFFI's Swift surface does not
+            // expose an explicit `close()`); the binding
+            // is `Disposable`-via-ARC. Limiting the
+            // variable's scope to this `do` block is the
+            // idiomatic equivalent of the web's
+            // `try { ... } finally { group.free(); }`.
+            let group = try Group.create(identity: identity)
+            exporterOutput = try group.exportSecret(
+                identity: identity,
+                label: LakkoCore.channelExporterLabel(),
+                context: channelId,
+                length: 32
+            )
+        } catch let FfiError.Channels(msg) {
+            throw ChannelsComposerError.ffi(msg)
+        }
+
+        let seed: Data
+        do {
+            seed = try LakkoCore.channelSeedFromMlsExporterOutput(bytes: exporterOutput)
+        } catch let FfiError.Channels(msg) {
+            throw ChannelsComposerError.ffi(msg)
+        }
+
         let signer = ChannelSigningKey.generate()
-        defer { /* Arc handle drops naturally */ }
         return ChannelPublisherKeys(
             seed: seed,
             signingKeySeed: signer.toSeed()

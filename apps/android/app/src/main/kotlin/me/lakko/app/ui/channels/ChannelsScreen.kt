@@ -100,6 +100,19 @@ private sealed class Route {
 
 @Composable
 public fun ChannelsRootScreen(
+    /**
+     * 32-byte OPAQUE export key for the active session.
+     * [NewChannelScreen] rebuilds a transient `Identity`
+     * from it (`Identity.fromSeed(exportKey)`) to drive
+     * the MLS PublisherGroup that produces the channel
+     * content-key seed (G-27).
+     *
+     * The host (`MainActivity` / a future Channels tab)
+     * supplies this from `AuthRepository`'s in-memory
+     * `IdentitySecrets` — same shape `ChatRepository`
+     * already uses.
+     */
+    exportKey: ByteArray,
     state: ChannelsUiState = remember { ChannelsUiState() },
     client: ChannelsClient = remember { ChannelsClient() },
 ) {
@@ -113,6 +126,7 @@ public fun ChannelsRootScreen(
         Route.New -> NewChannelScreen(
             state = state,
             client = client,
+            exportKey = exportKey,
             onClose = { route = Route.List },
             onCreated = { id -> route = Route.Detail(id) },
         )
@@ -240,11 +254,14 @@ private fun ChannelRow(channel: ChannelHandle, onClick: () -> Unit) {
 // NewChannelScreen
 // ============================================================================
 
+/** G-27: needs `exportKey` so [NewChannelScreen.create]
+ *  can rebuild the PublisherGroup founding-member identity. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun NewChannelScreen(
     state: ChannelsUiState,
     client: ChannelsClient,
+    exportKey: ByteArray,
     onClose: () -> Unit,
     onCreated: (String) -> Unit,
 ) {
@@ -313,7 +330,23 @@ private fun NewChannelScreen(
                     scope.launch {
                         try {
                             client.createChannel(id)
-                            val keys = ChannelsComposer.freshPublisherKeys()
+                            // G-27: build a transient
+                            // `Identity` from the OPAQUE
+                            // export key, hand it to the
+                            // composer so the channel
+                            // content-key seed comes from
+                            // a real MLS PublisherGroup
+                            // exporter (instead of
+                            // `newChannelSeedForTest`).
+                            val identity = uniffi.lakko_ffi_uniffi.Identity.fromSeed(exportKey)
+                            val keys = try {
+                                ChannelsComposer.freshPublisherKeys(
+                                    identity = identity,
+                                    channelIdHex = id,
+                                )
+                            } finally {
+                                identity.close()
+                            }
                             state.addChannel(
                                 ChannelHandle(
                                     id = id,
@@ -326,6 +359,8 @@ private fun NewChannelScreen(
                             onCreated(id)
                         } catch (e: ChannelsApiException) {
                             error = "Server rejected: ${e.code} — ${e.detail}"
+                        } catch (e: ChannelsComposerException) {
+                            error = "Composer: ${e.message}"
                         } catch (e: Throwable) {
                             error = "Network error: ${e.message}"
                         } finally {

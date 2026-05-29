@@ -7,10 +7,13 @@ import java.security.SecureRandom
 import uniffi.lakko_ffi_uniffi.ChannelSigningKey
 import uniffi.lakko_ffi_uniffi.ChannelSubscriberKeypair
 import uniffi.lakko_ffi_uniffi.FfiException
+import uniffi.lakko_ffi_uniffi.Group
+import uniffi.lakko_ffi_uniffi.Identity
+import uniffi.lakko_ffi_uniffi.channelExporterLabel as uniffiChannelExporterLabel
 import uniffi.lakko_ffi_uniffi.channelSeedEnvelopeLen as uniffiChannelSeedEnvelopeLen
+import uniffi.lakko_ffi_uniffi.channelSeedFromMlsExporterOutput as uniffiChannelSeedFromMlsExporterOutput
 import uniffi.lakko_ffi_uniffi.composeChannelPost as uniffiComposeChannelPost
 import uniffi.lakko_ffi_uniffi.decodeChannelPost as uniffiDecodeChannelPost
-import uniffi.lakko_ffi_uniffi.newChannelSeedForTest as uniffiNewChannelSeedForTest
 import uniffi.lakko_ffi_uniffi.openSubscriberSeedEnvelope as uniffiOpenSubscriberSeedEnvelope
 import uniffi.lakko_ffi_uniffi.sealSubscriberSeedEnvelope as uniffiSealSubscriberSeedEnvelope
 import uniffi.lakko_ffi_uniffi.verifyAndDecryptChannelPost as uniffiVerifyAndDecryptChannelPost
@@ -102,11 +105,74 @@ public object ChannelsComposer {
 
     private val rng = SecureRandom()
 
-    /** Fresh (seed, signingKeySeed) pair backed by
-     *  `getrandom` on the Rust side (Android NDK uses
-     *  /dev/urandom). */
-    public fun freshPublisherKeys(): ChannelPublisherKeys {
-        val seed = uniffiNewChannelSeedForTest()
+    /**
+     * Build the publisher's `(seed, signingKeySeed)` pair
+     * for `channelIdHex`, deriving the content-key seed
+     * from a fresh MLS **PublisherGroup** exporter (G-27 /
+     * ADR-0010 Tier-1).
+     *
+     * Mirror of
+     * `apps/web/src/channels/composer.ts::freshPublisherKeys`
+     * and `apps/ios/Lakko/Channels/ChannelsComposer.swift`.
+     * The flow is:
+     *
+     * 1. Build a transient `Group` with `identity` as the
+     *    founding member.
+     * 2. Call `group.exportSecret(identity, label =
+     *    channelExporterLabel(), context = channel_id,
+     *    length = 32u)` — produces 32 bytes domain-separated
+     *    by `"lakko/channel/v1"` + the 16-byte channel id.
+     * 3. Hand the bytes to
+     *    `channelSeedFromMlsExporterOutput` so the seed
+     *    crosses the FFI boundary through the audit-pack
+     *    surface (C-44).
+     *
+     * The group is throwaway — it lives only for the
+     * duration of this call, exactly like the web shim.
+     * PublisherGroup persistence + rotation across
+     * composer calls lands in a follow-up sub-sprint
+     * (working name `G4-2-mls-persistence`).
+     *
+     * `signingKeySeed` stays randomly minted by the
+     * underlying Android NDK CSPRNG — ADR-0010 treats the
+     * signing key as a long-lived per-channel publisher
+     * identity, not as something derived from the
+     * call-time exporter. It belongs in
+     * `androidx.security.crypto` once the migration
+     * sub-sprint lands.
+     */
+    public fun freshPublisherKeys(
+        identity: Identity,
+        channelIdHex: String,
+    ): ChannelPublisherKeys {
+        val channelId = channelIdFromHex(channelIdHex)
+
+        val exporterOutput: ByteArray = try {
+            val group = Group.create(identity)
+            try {
+                group.exportSecret(
+                    identity = identity,
+                    label = uniffiChannelExporterLabel(),
+                    context = channelId,
+                    length = 32u,
+                )
+            } finally {
+                // `Group` is UniFFI-Disposable +
+                // AutoCloseable — explicit close() drops
+                // the Rust object now rather than waiting
+                // on JVM GC.
+                group.close()
+            }
+        } catch (e: FfiException.Channels) {
+            throw ChannelsComposerException.Ffi(e.message ?: "PublisherGroup exporter failed")
+        }
+
+        val seed: ByteArray = try {
+            uniffiChannelSeedFromMlsExporterOutput(exporterOutput)
+        } catch (e: FfiException.Channels) {
+            throw ChannelsComposerException.Ffi(e.message ?: "channelSeedFromMlsExporterOutput failed")
+        }
+
         val signer = ChannelSigningKey.generate()
         try {
             return ChannelPublisherKeys(

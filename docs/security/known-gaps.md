@@ -771,7 +771,7 @@ up sprint stands up `cargo deny` locally on the
 maintainer's box so the audit pack can mirror its CI
 output here.
 
-### G-27: Channel PublisherGroup — **web wired** (G4-2-mls-publisher); iOS / Android still using `newChannelSeedForTest`; persistence + rotation deferred
+### G-27: Channel PublisherGroup — **all three platforms wired** (G4-2-mls-publisher + G-27 iOS / Android slice); persistence + rotation still deferred
 
 [`apps/web/src/channels/composer.ts::freshPublisherKeys`](../../apps/web/src/channels/composer.ts)
 now derives the channel content-key seed from a real
@@ -788,20 +788,46 @@ The wasm-pack bindings have been regenerated so
 are exposed in the TypeScript `.d.ts`. TS typecheck +
 `npm run build` are green.
 
-**Still open — iOS + Android wiring.** The same
-`Group::create` + `Group::export_secret` +
-`channelSeedFromMlsExporterOutput` triplet is already
-on the UniFFI surface
-([`crates/lakko-ffi-uniffi/src/lib.rs::Group`](../../crates/lakko-ffi-uniffi/src/lib.rs)),
-but the per-platform composers
-([`apps/ios/Lakko/Channels/ChannelsComposer.swift`](../../apps/ios/Lakko/Channels/ChannelsComposer.swift)
-and
-[`apps/android/app/src/main/kotlin/me/lakko/app/channels/ChannelsComposer.kt`](../../apps/android/app/src/main/kotlin/me/lakko/app/channels/ChannelsComposer.kt))
-are still calling `newChannelSeedForTest()`.
-Mechanical port — same FFI shape, different identity
-plumbing per platform — tracked separately so we can
-verify each on hardware (`xcodebuild` / Gradle) as
-part of the platform's own integration sprint.
+**Closed — iOS + Android wired.** Both per-platform
+composers now drive the same `Group::create` +
+`Group::export_secret` +
+`channelSeedFromMlsExporterOutput` triplet the web
+composer uses:
+
+- [`apps/ios/Lakko/Channels/ChannelsComposer.swift::freshPublisherKeys`](../../apps/ios/Lakko/Channels/ChannelsComposer.swift)
+  now takes `(identity: Identity, channelIdHex:
+  String)`, builds a transient `Group` via
+  `Group.create(identity:)`, calls
+  `group.exportSecret(identity:, label:
+  channelExporterLabel(), context: channelId,
+  length: 32)`, and crosses the FFI boundary via
+  `LakkoCore.channelSeedFromMlsExporterOutput`. The
+  caller plumbs `secrets.exportKey` from the
+  `AuthRepository` session through
+  `ChannelsRootScreen(exportKey:)` →
+  `ChannelsListScreen` → `NewChannelScreen` → its
+  `create()` action which constructs the throwaway
+  `Identity.fromSeed(seed: exportKey)` for the
+  duration of the call.
+- [`apps/android/app/src/main/kotlin/me/lakko/app/channels/ChannelsComposer.kt::freshPublisherKeys`](../../apps/android/app/src/main/kotlin/me/lakko/app/channels/ChannelsComposer.kt)
+  ships the same shape with the same lifecycle
+  semantics — `Group` and `Identity` are both
+  `AutoCloseable` via UniFFI's Disposable
+  conformance, so the call sites use `try { ...
+  } finally { group.close(); identity.close() }`
+  to drop the Rust handles eagerly rather than
+  waiting on the JVM GC. The Compose call site at
+  `apps/android/.../ui/channels/ChannelsScreen.kt::ChannelsRootScreen(exportKey: ByteArray, ...)`
+  threads the export key through the same shape
+  as iOS.
+
+`xcodebuild -sdk iphonesimulator -configuration Debug build`
+and `./gradlew :app:assembleDebug` both green after
+the wire-up. The audit-pack invariant C-44 ("the
+channel seed crosses the FFI boundary via
+`channelSeedFromMlsExporterOutput`, never via a raw
+`Data` cast") now holds on every client platform
+that ships a publisher composer.
 
 **Still open — PublisherGroup persistence + rotation.**
 The current web flow builds a fresh `Group::create`
