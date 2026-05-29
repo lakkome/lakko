@@ -44,6 +44,7 @@ pub mod discovery;
 pub mod mnemonic;
 pub mod pairing;
 pub mod pow;
+pub mod sframe;
 pub mod shamir;
 
 uniffi::setup_scaffolding!();
@@ -171,6 +172,15 @@ pub enum FfiError {
     /// collapse here.
     #[error("channels error: {0}")]
     Channels(String),
+
+    /// Call-side cryptography error (G3-sframe). Covers:
+    /// wrong-length CallKey seed, SFrame counter
+    /// exhaustion, AEAD seal / open failure on
+    /// ParticipantKey. Same elision posture as the
+    /// other variants — the message is for logs, the
+    /// variant for the wire.
+    #[error("call crypto error: {0}")]
+    Call(String),
 
     /// Lock contention / poisoned mutex on the shared Group state.
     #[error("internal lock error")]
