@@ -136,6 +136,41 @@ pub enum ServerFrame {
         /// `SdpAnswer::to_sdp_string` output verbatim.
         sdp: String,
     },
+
+    /// SDP offer the **SFU** sends to a peer when an
+    /// upstream `MediaAdded` event from another peer
+    /// in the same call needs a renegotiation cycle to
+    /// open a downstream track (S-3-B-tracks step 2).
+    ///
+    /// The wire flow that produces this frame:
+    ///
+    /// 1. Peer A sends `ClientFrame::SdpOffer` to add a
+    ///    new media line.
+    /// 2. SFU replies `ServerFrame::SdpAnswer` (existing
+    ///    path).
+    /// 3. SFU's media task sees `Event::MediaAdded` on
+    ///    A's `Rtc`, registers the `TrackIn`, propagates
+    ///    a `TrackOutEntry::ToOpen` to every other peer
+    ///    in the same call.
+    /// 4. For each peer with a `ToOpen` entry, the SFU
+    ///    calls `Rtc::sdp_api().add_media(...)`, calls
+    ///    `apply()` to produce an SDP offer +
+    ///    `SdpPendingOffer`, ships the offer here.
+    ///
+    /// The peer's `RTCPeerConnection` accepts the
+    /// offer, generates an answer, ships it back as
+    /// `ClientFrame::SdpAnswer`. The SFU calls
+    /// `Rtc::sdp_api().accept_answer(pending, answer)`
+    /// and promotes the `TrackOutEntry` to
+    /// `Open(local_mid)` — fanout starts delivering
+    /// upstream `MediaData` frames through.
+    SdpOffer {
+        /// SDP offer the SFU produced via
+        /// `Rtc::sdp_api()` + `apply()`. Same shape as
+        /// `ClientFrame::SdpOffer.sdp` from the
+        /// inverse flow.
+        sdp: String,
+    },
 }
 
 /// Client-to-server frame.
@@ -200,6 +235,30 @@ pub enum ClientFrame {
         /// 60769 typ srflx raddr 0.0.0.0 rport 0
         /// generation 0`.
         candidate_sdp: String,
+    },
+
+    /// Client → SFU: SDP answer that responds to a
+    /// **SFU-initiated** offer (the inverse of the
+    /// usual flow). The SFU sent
+    /// [`ServerFrame::SdpOffer`] to open a downstream
+    /// track for media coming from another peer; the
+    /// client's `RTCPeerConnection.createAnswer` runs
+    /// against that offer and the resulting SDP rides
+    /// back on this frame.
+    ///
+    /// The SFU hands the answer to
+    /// `Rtc::sdp_api().accept_answer(pending, answer)`
+    /// and promotes the matching `TrackOutEntry` from
+    /// `Negotiating(local_mid)` to
+    /// `Open(local_mid)` — fanout starts delivering
+    /// upstream RTP through.
+    SdpAnswer {
+        /// SDP answer string. Same shape as
+        /// `RTCPeerConnection.localDescription.sdp`
+        /// returns on the browser side after a
+        /// `setRemoteDescription(offer)` +
+        /// `createAnswer()`.
+        sdp: String,
     },
 }
 

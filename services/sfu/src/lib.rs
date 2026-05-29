@@ -124,3 +124,28 @@ pub fn build_app_with_media(
     let router = build_router(state, cfg, jwks);
     (router, peers)
 }
+
+/// Same as [`build_app`] but with a caller-supplied
+/// [`PeerRegistry`]. The media task needs to share the
+/// registry with the signaling layer so SFU-initiated
+/// [`crate::protocol::ServerFrame::SdpOffer`] frames can
+/// reach the right peer's outbound mpsc; `main.rs`
+/// constructs the registry once and threads it through
+/// both halves.
+pub fn build_app_without_media(cfg: Config, jwks: JwksCache, peers: PeerRegistry) -> Router {
+    let state = AppState::new(jwks.clone(), peers);
+    build_router(state, cfg, jwks)
+}
+
+/// Same as [`build_app_with_media`] but with a caller-
+/// supplied [`PeerRegistry`] — the production path that
+/// shares the registry with `media::spawn_media_task`.
+pub fn build_app_with_media_and_peers(
+    cfg: Config,
+    jwks: JwksCache,
+    media: MediaTaskHandle,
+    peers: PeerRegistry,
+) -> Router {
+    let state = AppState::new_with_media(jwks.clone(), peers, media);
+    build_router(state, cfg, jwks)
+}

@@ -271,6 +271,27 @@ impl<'a> Router<'a> {
                 // silent on success.
                 Ok(None)
             },
+            ClientFrame::SdpAnswer { sdp } => {
+                // S-3-B-tracks step 2: peer is responding
+                // to an SFU-initiated [`ServerFrame::SdpOffer`].
+                // Hand it to the media task which calls
+                // `Rtc::sdp_api().accept_answer(pending, answer)`
+                // and promotes the matching
+                // `TrackOutEntry` from `Negotiating(mid)`
+                // to `Open(mid)`.
+                let Some(media) = self.media else {
+                    return Err(RouterError::MediaNotWired);
+                };
+                media
+                    .accept_renegotiation_answer(sender.id.clone(), sdp)
+                    .await
+                    .map_err(RouterError::from)?;
+                // No synchronous reply — fanout starts
+                // delivering as soon as the next
+                // `drain_outputs` tick converts the
+                // newly-Open writer into UDP transmits.
+                Ok(None)
+            },
         }
     }
 

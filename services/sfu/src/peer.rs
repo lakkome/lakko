@@ -176,6 +176,19 @@ impl PeerRegistry {
             .cloned()
             .collect()
     }
+
+    /// Look up a single peer by id. Cloned out under the
+    /// read lock so the caller can read `outbound` without
+    /// holding the lock across an `await`.
+    ///
+    /// S-3-B-tracks step 2 — the media task uses this to
+    /// look up the outbound mpsc of a peer it needs to
+    /// ship a `ServerFrame::SdpOffer` to after a
+    /// successful `MediaPeer::negotiate_if_needed`.
+    pub async fn peer(&self, id: &PeerId) -> Option<Peer> {
+        let guard = self.inner.read().await;
+        guard.get(id).cloned()
+    }
 }
 
 #[cfg(test)]

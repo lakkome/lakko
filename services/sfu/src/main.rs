@@ -18,10 +18,11 @@ use tracing::{info, warn};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 use lakko_svc_sfu::{
-    build_app, build_app_with_media,
+    build_app_with_media_and_peers, build_app_without_media,
     config::Config,
     jwks::JwksCache,
     media,
+    peer::PeerRegistry,
     prom::{self, MetricsExporter},
     VERSION,
 };
@@ -50,13 +51,21 @@ async fn main() -> anyhow::Result<()> {
     let jwks = JwksCache::fetch_initial(&cfg).await?;
     let _refresher_handle = jwks.clone().spawn_refresher(cfg.clone());
 
+    // PeerRegistry is shared between the signaling side
+    // and the media task — the media task needs it to
+    // dispatch SFU-initiated `ServerFrame::SdpOffer`
+    // frames back to a peer's outbound channel after a
+    // successful `MediaPeer::negotiate_if_needed`
+    // (S-3-B-tracks step 2).
+    let peers = PeerRegistry::new();
+
     // Spawn the media-routing task when configured. When
     // `LAKKO_SFU_MEDIA_BIND` is unset, run as a signaling-
     // only relay — admitted peers can exchange welcome /
     // signal-relay frames but SDP / ICE frames surface as
     // `RouterError::MediaNotWired`.
     let media_handle = if let Some(bind) = cfg.media_bind {
-        let handle = media::spawn_media_task(bind).await?;
+        let handle = media::spawn_media_task(bind, peers.clone()).await?;
         info!(media_bind = %bind, "media: UDP socket bound; routing task spawned");
         Some(handle)
     } else {
@@ -65,13 +74,13 @@ async fn main() -> anyhow::Result<()> {
     };
 
     // Build the signaling-side router. The peer registry
-    // lives inside it; we keep the handle around in case a
-    // future admin endpoint needs to inspect it (currently
-    // unused, hence the `_`).
-    let (router, _peers) = if let Some(m) = media_handle.clone() {
-        build_app_with_media(cfg.clone(), jwks.clone(), m)
+    // is shared with the media task — pass it into the
+    // builder rather than letting the builder mint a new
+    // one.
+    let router = if let Some(m) = media_handle.clone() {
+        build_app_with_media_and_peers(cfg.clone(), jwks.clone(), m, peers.clone())
     } else {
-        build_app(cfg.clone(), jwks.clone())
+        build_app_without_media(cfg.clone(), jwks.clone(), peers.clone())
     };
 
     // Background task: keep `lakko_sfu_jwks_cache_age_seconds`

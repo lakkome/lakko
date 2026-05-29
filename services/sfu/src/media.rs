@@ -102,13 +102,14 @@
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
-use str0m::change::{SdpAnswer, SdpOffer};
-use str0m::media::{MediaData, MediaKind, Mid};
+use str0m::change::{SdpAnswer, SdpOffer, SdpPendingOffer};
+use str0m::media::{Direction, MediaData, MediaKind, Mid};
 use str0m::net::{Protocol, Receive, Transmit};
 use str0m::{Candidate, Event, Input, Output, Rtc};
 use thiserror::Error;
 
-use crate::peer::PeerId;
+use crate::peer::{PeerId, PeerRegistry};
+use crate::protocol::ServerFrame;
 
 /// Stable identifier for a media peer. One-to-one with
 /// [`crate::peer::PeerId`] — the signaling-layer
@@ -268,6 +269,22 @@ pub struct MediaPeer {
     /// to resolve `(source_peer, source_mid)` to a
     /// local writer mid.
     tracks_out: Vec<TrackOutEntry>,
+    /// In-flight SFU-initiated renegotiation. `Some`
+    /// after [`MediaPeer::negotiate_if_needed`]
+    /// produced an SDP offer that has been shipped to
+    /// the peer but not yet answered. The next
+    /// `ClientFrame::SdpAnswer` routes here via
+    /// [`MediaPeer::accept_renegotiation_answer`],
+    /// which hands the stored `SdpPendingOffer` +
+    /// the inbound `SdpAnswer` to
+    /// `Rtc::sdp_api().accept_answer(..)`.
+    ///
+    /// Only one renegotiation is in flight at a time —
+    /// `negotiate_if_needed` short-circuits if
+    /// `pending_offer.is_some()`. Adding a second
+    /// concurrent change without applying the first
+    /// would tangle str0m's internal SDP state.
+    pending_offer: Option<SdpPendingOffer>,
 }
 
 impl MediaPeer {
@@ -287,6 +304,7 @@ impl MediaPeer {
             rtc: Rtc::new(now),
             tracks_in: Vec::new(),
             tracks_out: Vec::new(),
+            pending_offer: None,
         }
     }
 
@@ -352,6 +370,134 @@ impl MediaPeer {
             state: TrackOutState::ToOpen,
         });
         true
+    }
+
+    /// `true` if the peer has an in-flight SFU-
+    /// initiated renegotiation cycle. Used by the
+    /// event loop to skip the
+    /// [`negotiate_if_needed`](Self::negotiate_if_needed)
+    /// call when it would be a no-op.
+    #[must_use]
+    pub fn has_pending_renegotiation(&self) -> bool {
+        self.pending_offer.is_some()
+    }
+
+    /// Produce an SDP offer that promotes every
+    /// `TrackOutState::ToOpen` entry to
+    /// `TrackOutState::Negotiating(local_mid)`. Returns
+    /// the SDP string the caller ships back to the peer
+    /// as `ServerFrame::SdpOffer`.
+    ///
+    /// Returns `Ok(None)` when:
+    ///
+    /// - there are no `ToOpen` entries (nothing to
+    ///   negotiate), or
+    /// - a previous renegotiation is still in flight
+    ///   (`pending_offer.is_some()`). The next call
+    ///   after [`accept_renegotiation_answer`](Self::accept_renegotiation_answer)
+    ///   picks up any `ToOpen` entries that landed
+    ///   during the in-flight window.
+    ///
+    /// # Errors
+    ///
+    /// [`MediaError::Str0m`] if `Rtc::sdp_api()` /
+    /// `apply()` surfaces an error.
+    pub fn negotiate_if_needed(&mut self) -> MediaResult<Option<String>> {
+        if self.pending_offer.is_some() {
+            return Ok(None);
+        }
+        // Snapshot the indices of ToOpen entries — we
+        // mutate `state` after the change-apply step
+        // and a simultaneous iter+mut on the Vec would
+        // fight the borrow checker.
+        let to_open: Vec<usize> = self
+            .tracks_out
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| matches!(t.state, TrackOutState::ToOpen))
+            .map(|(i, _)| i)
+            .collect();
+        if to_open.is_empty() {
+            return Ok(None);
+        }
+
+        let mut change = self.rtc.sdp_api();
+        // Allocate one outgoing media line per ToOpen
+        // entry. `Direction::SendOnly` — the SFU's job
+        // is to forward RTP **to** this peer, not to
+        // receive any back through these lines.
+        //
+        // The `stream_id` argument is the MSID stream
+        // grouping; chat.rs uses the originating peer
+        // id so the receiver can group all tracks from
+        // one publisher into the same JS-side
+        // `MediaStream`. We mirror that.
+        let allocated: Vec<(usize, Mid)> = to_open
+            .iter()
+            .map(|&idx| {
+                let entry = &self.tracks_out[idx];
+                let mid = change.add_media(
+                    entry.kind,
+                    Direction::SendOnly,
+                    Some(entry.source_peer.to_string()),
+                    None,
+                    None,
+                );
+                (idx, mid)
+            })
+            .collect();
+
+        let Some((offer, pending)) = change.apply() else {
+            // `apply` returns `None` when there are no
+            // pending changes — should not happen given
+            // we just queued `to_open.len()` add_media
+            // calls, but defend against str0m API drift.
+            return Ok(None);
+        };
+
+        for (idx, mid) in allocated {
+            self.tracks_out[idx].state = TrackOutState::Negotiating(mid);
+        }
+        self.pending_offer = Some(pending);
+        Ok(Some(offer.to_sdp_string()))
+    }
+
+    /// Apply a peer's `ClientFrame::SdpAnswer` to the
+    /// in-flight renegotiation. Promotes every
+    /// `TrackOutState::Negotiating(mid)` entry to
+    /// `TrackOutState::Open(mid)` — fanout starts
+    /// delivering through them on the next tick.
+    ///
+    /// # Errors
+    ///
+    /// - [`MediaError::Str0m`] when there is no
+    ///   pending offer (the peer answered without us
+    ///   asking) or `Rtc::sdp_api().accept_answer(..)`
+    ///   refuses.
+    /// - [`MediaError::BadSdp`] when `sdp` fails
+    ///   `SdpAnswer::from_sdp_string`.
+    pub fn accept_renegotiation_answer(&mut self, sdp: &str) -> MediaResult<()> {
+        let Some(pending) = self.pending_offer.take() else {
+            return Err(MediaError::Str0m(
+                "received SdpAnswer with no pending offer".to_owned(),
+            ));
+        };
+        let answer =
+            SdpAnswer::from_sdp_string(sdp).map_err(|e| MediaError::BadSdp(e.to_string()))?;
+        self.rtc
+            .sdp_api()
+            .accept_answer(pending, answer)
+            .map_err(|e| MediaError::Str0m(e.to_string()))?;
+        // Promote every Negotiating(..) entry. Multiple
+        // tracks may have been added in the same
+        // change-set; all of them flip on the same
+        // answer.
+        for entry in &mut self.tracks_out {
+            if let TrackOutState::Negotiating(mid) = entry.state {
+                entry.state = TrackOutState::Open(mid);
+            }
+        }
+        Ok(())
     }
 
     /// Stable id for this peer.
@@ -722,6 +868,21 @@ pub enum MediaCommand {
         /// One-shot reply channel.
         reply: tokio::sync::oneshot::Sender<MediaResult<()>>,
     },
+    /// Apply a peer's `ClientFrame::SdpAnswer` to the
+    /// in-flight SFU-initiated renegotiation
+    /// (S-3-B-tracks step 2). Promotes the matching
+    /// `TrackOutEntry` from
+    /// `TrackOutState::Negotiating(mid)` to
+    /// `TrackOutState::Open(mid)`.
+    AcceptRenegotiationAnswer {
+        /// Originating peer id.
+        peer_id: MediaPeerId,
+        /// SDP answer the peer's RTCPeerConnection
+        /// produced via `createAnswer`.
+        answer_sdp: String,
+        /// One-shot reply channel.
+        reply: tokio::sync::oneshot::Sender<MediaResult<()>>,
+    },
 }
 
 /// Bounded capacity for the media-command channel. A
@@ -831,6 +992,34 @@ impl MediaTaskHandle {
         let result = reply_rx.await.map_err(|_| MediaCommandError::TaskGone)?;
         result.map_err(MediaCommandError::Media)
     }
+
+    /// Send an
+    /// [`AcceptRenegotiationAnswer`](MediaCommand::AcceptRenegotiationAnswer)
+    /// command. Called by the router when it routes a
+    /// `ClientFrame::SdpAnswer` back to the media task.
+    ///
+    /// # Errors
+    ///
+    /// Symmetric to [`Self::accept_offer`].
+    pub async fn accept_renegotiation_answer(
+        &self,
+        peer_id: MediaPeerId,
+        answer_sdp: String,
+    ) -> std::result::Result<(), MediaCommandError> {
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        self.tx
+            .try_send(MediaCommand::AcceptRenegotiationAnswer {
+                peer_id,
+                answer_sdp,
+                reply: reply_tx,
+            })
+            .map_err(|e| match e {
+                tokio::sync::mpsc::error::TrySendError::Full(_) => MediaCommandError::Backpressure,
+                tokio::sync::mpsc::error::TrySendError::Closed(_) => MediaCommandError::TaskGone,
+            })?;
+        let result = reply_rx.await.map_err(|_| MediaCommandError::TaskGone)?;
+        result.map_err(MediaCommandError::Media)
+    }
 }
 
 /// Spawn the media event-loop task. Binds a
@@ -854,15 +1043,26 @@ impl MediaTaskHandle {
 /// `false` after DTLS/ICE failure) are pruned at the
 /// end of each tick.
 ///
-/// `Event::MediaData` events are produced today but
-/// not yet forwarded between peers — that fanout lands
-/// in step 5 of S-3-B-routing-media.
+/// `Event::MediaData` events are forwarded between
+/// peers via `fanout_media_data` (S-3-B-routing-media
+/// step 5). `Event::MediaAdded` events get registered
+/// as `TrackIn` + propagated to every other peer as
+/// `TrackOutEntry::ToOpen` (S-3-B-tracks step 1).
+///
+/// `peers` is the same [`PeerRegistry`] the signaling
+/// layer owns. The media task uses it to push SFU-
+/// initiated `ServerFrame::SdpOffer` frames back to
+/// the right peer's outbound channel after a
+/// successful [`MediaPeer::negotiate_if_needed`] call.
 ///
 /// # Errors
 ///
 /// [`MediaError::Str0m`] on UDP-bind failure (wrong
 /// permission, port already in use, etc.).
-pub async fn spawn_media_task(bind_addr: SocketAddr) -> MediaResult<MediaTaskHandle> {
+pub async fn spawn_media_task(
+    bind_addr: SocketAddr,
+    peers: PeerRegistry,
+) -> MediaResult<MediaTaskHandle> {
     let socket = tokio::net::UdpSocket::bind(bind_addr)
         .await
         .map_err(|e| MediaError::Str0m(format!("UDP bind {bind_addr}: {e}")))?;
@@ -871,7 +1071,7 @@ pub async fn spawn_media_task(bind_addr: SocketAddr) -> MediaResult<MediaTaskHan
         .map_err(|e| MediaError::Str0m(format!("UDP local_addr: {e}")))?;
 
     let (tx, rx) = tokio::sync::mpsc::channel::<MediaCommand>(MEDIA_COMMAND_CAPACITY);
-    tokio::spawn(run_media_loop(socket, local_addr, rx));
+    tokio::spawn(run_media_loop(socket, local_addr, rx, peers));
     Ok(MediaTaskHandle { tx })
 }
 
@@ -879,7 +1079,8 @@ pub async fn spawn_media_task(bind_addr: SocketAddr) -> MediaResult<MediaTaskHan
 /// socket. The task processes commands but never reads
 /// or writes packets — useful for unit tests that
 /// exercise the SDP signaling path without standing up
-/// real ICE / DTLS.
+/// real ICE / DTLS. The test variant does not drive
+/// renegotiations (no PeerRegistry is plumbed).
 ///
 /// Production paths always go through
 /// [`spawn_media_task`].
@@ -931,6 +1132,23 @@ fn handle_command(router: &mut MediaRouter, cmd: MediaCommand, local_addr: Optio
             let res = peer.add_remote_candidate(&candidate_sdp);
             let _ = reply.send(res);
         },
+        MediaCommand::AcceptRenegotiationAnswer {
+            peer_id,
+            answer_sdp,
+            reply,
+        } => {
+            // A peer answering a renegotiation MUST
+            // already have a media slot (the inbound
+            // SdpOffer cycle created it). If not, the
+            // peer is replying to a phantom offer.
+            let res = match router.peer_mut(&peer_id) {
+                Some(peer) => peer.accept_renegotiation_answer(&answer_sdp),
+                None => Err(MediaError::Str0m(format!(
+                    "SdpAnswer from unknown media peer {peer_id}"
+                ))),
+            };
+            let _ = reply.send(res);
+        },
     }
 }
 
@@ -941,6 +1159,7 @@ async fn run_media_loop(
     socket: tokio::net::UdpSocket,
     local_addr: SocketAddr,
     mut rx: tokio::sync::mpsc::Receiver<MediaCommand>,
+    peers: PeerRegistry,
 ) {
     let mut router = MediaRouter::new();
     let mut buf = vec![0u8; UDP_RECV_BUF];
@@ -961,12 +1180,14 @@ async fn run_media_loop(
         // Propagate any new upstream tracks to every
         // other peer's `tracks_out` BEFORE fanout —
         // fanout depends on the `tracks_out` map to
-        // resolve destination mids. (Today entries land
-        // in `ToOpen` state and fanout still returns
-        // `NoWriter` for them; S-3-B-tracks step 2
-        // promotes them to `Open(mid)` via SDP
-        // renegotiation.)
+        // resolve destination mids.
         propagate_new_tracks_in(&mut router, &summary.new_tracks);
+        // S-3-B-tracks step 2: for every peer that
+        // gained a fresh `ToOpen` entry, kick off the
+        // SDP renegotiation. The produced offer rides
+        // back to the peer's WS via the same
+        // PeerRegistry the signaling layer owns.
+        drive_renegotiations(&mut router, &peers).await;
         fanout_media_data(&mut router, &summary.pending);
         let sleep_for = summary
             .earliest_deadline
@@ -1232,6 +1453,89 @@ pub(crate) fn propagate_new_tracks_in(router: &mut MediaRouter, new_tracks: &[Pe
     }
 }
 
+/// Walk every peer; if any have `tracks_out` entries
+/// in `ToOpen`, call [`MediaPeer::negotiate_if_needed`]
+/// and ship the resulting SDP offer to that peer's
+/// outbound channel as a [`ServerFrame::SdpOffer`].
+///
+/// The peer's `RTCPeerConnection` answers with
+/// `ClientFrame::SdpAnswer`, which the router routes
+/// through [`MediaCommand::AcceptRenegotiationAnswer`]
+/// back to [`MediaPeer::accept_renegotiation_answer`].
+///
+/// Peers that have an in-flight cycle
+/// (`has_pending_renegotiation == true`) are skipped —
+/// the next `drive_renegotiations` tick will pick them
+/// up once their answer arrives.
+async fn drive_renegotiations(router: &mut MediaRouter, peers: &PeerRegistry) {
+    // Collect (peer_id, sdp) pairs while holding only
+    // the borrow on `router`. The async dispatch loop
+    // below runs after the borrow ends so we can
+    // freely await on the PeerRegistry lock.
+    let pending: Vec<(MediaPeerId, String)> = router
+        .peers_mut()
+        .iter_mut()
+        .filter_map(|peer| {
+            if peer.has_pending_renegotiation() {
+                return None;
+            }
+            match peer.negotiate_if_needed() {
+                Ok(Some(sdp)) => Some((peer.id().clone(), sdp)),
+                Ok(None) => None,
+                Err(e) => {
+                    tracing::warn!(
+                        peer = %peer.id(),
+                        error = %e,
+                        "media: negotiate_if_needed failed"
+                    );
+                    None
+                },
+            }
+        })
+        .collect();
+
+    for (peer_id, sdp) in pending {
+        let Some(peer) = peers.peer(&peer_id).await else {
+            tracing::warn!(
+                peer = %peer_id,
+                "media: cannot dispatch SdpOffer — peer not in registry"
+            );
+            continue;
+        };
+        let Some(tx) = peer.outbound.as_ref() else {
+            tracing::warn!(
+                peer = %peer_id,
+                "media: cannot dispatch SdpOffer — peer has no outbound channel"
+            );
+            continue;
+        };
+        match tx.try_send(ServerFrame::SdpOffer { sdp }) {
+            Ok(()) => {
+                tracing::debug!(
+                    peer = %peer_id,
+                    "media: dispatched SFU-initiated SdpOffer"
+                );
+            },
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                // The peer's writer half is wedged —
+                // the connection is likely about to
+                // close. Log + move on; the next tick
+                // retries.
+                tracing::warn!(
+                    peer = %peer_id,
+                    "media: outbound channel full; renegotiation SdpOffer dropped"
+                );
+            },
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                tracing::debug!(
+                    peer = %peer_id,
+                    "media: outbound channel closed (peer disconnected mid-renegotiation)"
+                );
+            },
+        }
+    }
+}
+
 /// Send one `str0m::net::Transmit` out the bound
 /// socket. Errors are logged but not surfaced — UDP is
 /// already best-effort, and an EAGAIN here typically
@@ -1458,7 +1762,8 @@ mod tests {
     #[tokio::test]
     async fn spawn_media_task_binds_loopback() {
         let bind: SocketAddr = "127.0.0.1:0".parse().unwrap();
-        let handle = spawn_media_task(bind)
+        let peers = crate::peer::PeerRegistry::new();
+        let handle = spawn_media_task(bind, peers)
             .await
             .expect("UDP bind on loopback:0 succeeds");
         // The task is alive; reuse the handle for a
@@ -1761,5 +2066,88 @@ mod tests {
             p.forward_media_data(&source, &synthetic),
             MediaForward::NoWriter,
         );
+    }
+
+    // ============================================================
+    // S-3-B-tracks step 2 — renegotiation surface
+    // ============================================================
+
+    /// `negotiate_if_needed` returns `Ok(None)` when
+    /// the peer has no `tracks_out` entries at all —
+    /// the post-drain renegotiation pass must not
+    /// produce a phantom offer.
+    #[test]
+    fn negotiate_if_needed_returns_none_when_no_tracks_out() {
+        let mut p = MediaPeer::new(pid("alice"), Instant::now());
+        let result = p.negotiate_if_needed().expect("no Rtc error");
+        assert!(result.is_none(), "no tracks_out → no offer");
+        assert!(!p.has_pending_renegotiation());
+    }
+
+    /// `negotiate_if_needed` with one ToOpen entry
+    /// produces an SDP offer, promotes the entry to
+    /// Negotiating(mid), and sets the pending flag.
+    #[test]
+    fn negotiate_if_needed_promotes_to_negotiating_and_sets_pending() {
+        let mut p = MediaPeer::new(pid("alice"), Instant::now());
+        let mid = Mid::new();
+        p.observe_remote_track_in(
+            pid("bob"),
+            TrackIn {
+                mid,
+                kind: MediaKind::Audio,
+            },
+        );
+
+        let sdp = p
+            .negotiate_if_needed()
+            .expect("Rtc::sdp_api succeeds")
+            .expect("at least one ToOpen entry → Some(sdp)");
+        // The produced string is real SDP — must be
+        // non-empty and start with the v=0 line that
+        // every SDP body begins with.
+        assert!(
+            sdp.starts_with("v="),
+            "produced SDP starts with v=, got {sdp:.80?}"
+        );
+        assert!(p.has_pending_renegotiation());
+        assert!(
+            matches!(p.tracks_out()[0].state, TrackOutState::Negotiating(_)),
+            "ToOpen → Negotiating(_)"
+        );
+    }
+
+    /// A second `negotiate_if_needed` call with a
+    /// pending offer in flight short-circuits to
+    /// `Ok(None)` — preventing concurrent str0m
+    /// changes from tangling the SDP state.
+    #[test]
+    fn negotiate_if_needed_skips_when_pending() {
+        let mut p = MediaPeer::new(pid("alice"), Instant::now());
+        p.observe_remote_track_in(
+            pid("bob"),
+            TrackIn {
+                mid: Mid::new(),
+                kind: MediaKind::Audio,
+            },
+        );
+        let _ = p.negotiate_if_needed().unwrap().unwrap();
+        // Second call without applying an answer.
+        let result = p.negotiate_if_needed().expect("no Rtc error");
+        assert!(result.is_none(), "pending offer → no second offer");
+    }
+
+    /// `accept_renegotiation_answer` with no pending
+    /// offer must surface a typed error rather than
+    /// silently no-op (the peer is replying to a
+    /// phantom offer — almost certainly a protocol
+    /// violation worth surfacing).
+    #[test]
+    fn accept_renegotiation_answer_errors_without_pending() {
+        let mut p = MediaPeer::new(pid("alice"), Instant::now());
+        let err = p
+            .accept_renegotiation_answer("v=0\r\n")
+            .expect_err("no pending offer → error");
+        assert!(matches!(err, MediaError::Str0m(_)));
     }
 }
