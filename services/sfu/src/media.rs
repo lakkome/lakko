@@ -103,7 +103,7 @@ use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use str0m::change::{SdpAnswer, SdpOffer};
-use str0m::media::MediaData;
+use str0m::media::{MediaData, MediaKind, Mid};
 use str0m::net::{Protocol, Receive, Transmit};
 use str0m::{Candidate, Event, Input, Output, Rtc};
 use thiserror::Error;
@@ -167,6 +167,83 @@ pub enum MediaForward {
     WriteFailed(String),
 }
 
+/// One incoming track on a [`MediaPeer`]. Produced from
+/// `Event::MediaAdded` — str0m fires it after a
+/// successful SDP offer-answer negotiates a new media
+/// line.
+///
+/// The router uses `(peer_id, mid)` to identify the
+/// upstream side of a forwarded RTP flow. Subscribed
+/// peers carry a matching [`TrackOutEntry`] pointing
+/// back through the same key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TrackIn {
+    /// The `mid` str0m assigned to this incoming media
+    /// line on the originating peer's `Rtc`.
+    pub mid: Mid,
+    /// Audio vs. video — needed when the router opens
+    /// the matching outgoing track on every other peer.
+    pub kind: MediaKind,
+}
+
+/// Lifecycle phase of a downstream peer's track that
+/// mirrors an upstream [`TrackIn`].
+///
+/// Mirror of `TrackOutState` from str0m's `chat.rs`
+/// example. Three states matter:
+///
+/// - `ToOpen` — the SFU has registered the upstream
+///   TrackIn but has not yet initiated SDP
+///   renegotiation with this downstream peer. The
+///   media task picks this state up on its next
+///   `negotiate_if_needed` pass.
+/// - `Negotiating(local_mid)` — renegotiation is in
+///   flight; the SFU has emitted a `ServerFrame::SdpOffer`
+///   and is waiting on `ClientFrame::SdpAnswer`. The
+///   `local_mid` is the destination-side mid the SDP
+///   change allocated.
+/// - `Open(local_mid)` — the SDP answer landed; the
+///   destination peer now has a real writer for
+///   `local_mid` and [`fanout_media_data`] can shovel
+///   frames through.
+///
+/// The two `ToStop` / `NegotiatingStop` states mirror
+/// chat.rs's cleanup path but are deferred — the
+/// current SFU drops the entire `MediaPeer` on
+/// disconnect, so per-track stop renegotiation is not
+/// needed today.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrackOutState {
+    /// Track registered; SDP renegotiation not started.
+    ToOpen,
+    /// SDP renegotiation in flight; the destination-side
+    /// mid the change allocated is carried so we can
+    /// match the answer to this entry.
+    Negotiating(Mid),
+    /// SDP answer applied; writer for `local_mid` is
+    /// live and [`MediaPeer::forward_media_data`] can
+    /// use it as the destination.
+    Open(Mid),
+}
+
+/// One outgoing track on a downstream peer that mirrors
+/// an upstream [`TrackIn`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrackOutEntry {
+    /// Upstream peer that owns the source TrackIn.
+    pub source_peer: MediaPeerId,
+    /// Upstream side's mid (the source's `data.mid` on
+    /// every `Event::MediaData` we forward through this
+    /// entry).
+    pub source_mid: Mid,
+    /// Audio / video — pinned at registration so we do
+    /// not need to chase the upstream peer at fanout
+    /// time.
+    pub kind: MediaKind,
+    /// Lifecycle phase. See [`TrackOutState`].
+    pub state: TrackOutState,
+}
+
 /// One media-routing peer.
 ///
 /// Wraps a single `str0m::Rtc` instance plus the
@@ -177,6 +254,20 @@ pub enum MediaForward {
 pub struct MediaPeer {
     id: MediaPeerId,
     rtc: Rtc,
+    /// Incoming tracks this peer announced via
+    /// `Event::MediaAdded`. Populated in
+    /// [`drain_outputs`]; consumed by
+    /// [`MediaRouter::propagate_new_tracks_in`] when
+    /// the router opens matching `TrackOutEntry`s on
+    /// every other peer.
+    tracks_in: Vec<TrackIn>,
+    /// Outgoing tracks the SFU has opened (or is
+    /// opening) on this peer so RTP from other peers'
+    /// `tracks_in` can be forwarded here. Walked by
+    /// [`MediaPeer::forward_media_data`] when it needs
+    /// to resolve `(source_peer, source_mid)` to a
+    /// local writer mid.
+    tracks_out: Vec<TrackOutEntry>,
 }
 
 impl MediaPeer {
@@ -194,7 +285,73 @@ impl MediaPeer {
         Self {
             id,
             rtc: Rtc::new(now),
+            tracks_in: Vec::new(),
+            tracks_out: Vec::new(),
         }
+    }
+
+    /// Immutable view of the upstream tracks this peer has
+    /// announced via `Event::MediaAdded`. Read-only — the
+    /// drain pass owns mutation.
+    #[must_use]
+    pub fn tracks_in(&self) -> &[TrackIn] {
+        &self.tracks_in
+    }
+
+    /// Immutable view of the downstream tracks the SFU
+    /// has opened (or is opening) on this peer so the
+    /// fanout can shovel upstream RTP through. Read-only
+    /// for the same reason.
+    #[must_use]
+    pub fn tracks_out(&self) -> &[TrackOutEntry] {
+        &self.tracks_out
+    }
+
+    /// Record an upstream track this peer just announced
+    /// via `Event::MediaAdded`. Returns the [`TrackIn`] so
+    /// the caller (the router) can propagate matching
+    /// `TrackOutEntry::ToOpen` rows to every other peer.
+    ///
+    /// Idempotent — repeated calls with the same `mid`
+    /// return the existing entry rather than appending a
+    /// duplicate. str0m occasionally fires `MediaAdded`
+    /// twice during an SDP renegotiation that re-uses an
+    /// existing m-line; this guard keeps the router's
+    /// view consistent without leaning on str0m's
+    /// internal de-dup.
+    pub fn register_local_track_in(&mut self, mid: Mid, kind: MediaKind) -> TrackIn {
+        if let Some(existing) = self.tracks_in.iter().find(|t| t.mid == mid).copied() {
+            return existing;
+        }
+        let track = TrackIn { mid, kind };
+        self.tracks_in.push(track);
+        track
+    }
+
+    /// Record an upstream track from a *different* peer
+    /// that this peer needs to receive. Adds a fresh
+    /// [`TrackOutEntry`] in [`TrackOutState::ToOpen`]
+    /// state; the SDP-renegotiation pass picks it up.
+    ///
+    /// Idempotent on `(source_peer, source_mid)` so the
+    /// router's broadcast-to-everyone-else pass cannot
+    /// accumulate duplicates if a `MediaAdded` event
+    /// fires twice.
+    pub fn observe_remote_track_in(&mut self, source_peer: MediaPeerId, source: TrackIn) -> bool {
+        let already = self
+            .tracks_out
+            .iter()
+            .any(|t| t.source_peer == source_peer && t.source_mid == source.mid);
+        if already {
+            return false;
+        }
+        self.tracks_out.push(TrackOutEntry {
+            source_peer,
+            source_mid: source.mid,
+            kind: source.kind,
+            state: TrackOutState::ToOpen,
+        });
+        true
     }
 
     /// Stable id for this peer.
@@ -337,25 +494,64 @@ impl MediaPeer {
     /// opaque from origin to destination (see audit-pack
     /// C-39).
     ///
+    /// ## Mid resolution
+    ///
+    /// `data.mid` is the **source** peer's mid. The
+    /// destination peer (this one) has its own mid for
+    /// the corresponding outgoing track which the SDP
+    /// renegotiation allocated. The mapping lives in
+    /// [`tracks_out`](Self::tracks_out): walk for an
+    /// entry whose `(source_peer, source_mid)` matches
+    /// `(source_peer, data.mid)` and is in
+    /// `TrackOutState::Open(local_mid)` — that's the mid
+    /// we hand `Rtc::writer`.
+    ///
+    /// Until the renegotiation pass has flipped the
+    /// entry to `Open`, the function returns
+    /// `NoWriter` — the upstream RTP is dropped on the
+    /// floor at this peer because there is no
+    /// downstream surface to forward it through. The
+    /// caller's metrics layer treats this as a
+    /// transient pre-negotiation drop, not a fatal
+    /// error.
+    ///
     /// Skip conditions (each surfaces as a distinct
     /// [`MediaForward`] variant so a future metrics layer
     /// can count them without colliding):
     ///
-    /// - `NoWriter`: destination has no `Writer` for
-    ///   `data.mid` — typically means the SDP renegotiation
-    ///   that adds an outgoing track for this stream
-    ///   hasn't happened yet. The full track-mapping work
-    ///   (`TracksIn` / `TracksOut` per chat.rs) lands in a
-    ///   follow-up sub-sprint; today we forward only when
-    ///   the destination happens to already have a writer
-    ///   for the same mid.
+    /// - `NoWriter`: no `tracks_out` entry in
+    ///   `Open(local_mid)` state for the source pair, or
+    ///   str0m no longer has a writer for that
+    ///   `local_mid` (rare — typically a race against
+    ///   peer teardown).
     /// - `NoCodecMatch`: destination's negotiated codec
     ///   set doesn't include the incoming PT.
     /// - `WriteFailed`: str0m refused the write (rare —
     ///   typically a state-machine inconsistency or an
     ///   unknown PT slipped past `match_params`).
-    pub fn forward_media_data(&mut self, data: &MediaData) -> MediaForward {
-        let Some(writer) = self.rtc.writer(data.mid) else {
+    pub fn forward_media_data(
+        &mut self,
+        source_peer: &MediaPeerId,
+        data: &MediaData,
+    ) -> MediaForward {
+        // Resolve the destination mid via the
+        // `tracks_out` map. We only forward through an
+        // entry that has reached the `Open(..)` state —
+        // `ToOpen` / `Negotiating` mean the SDP
+        // renegotiation is in flight and the destination
+        // writer is not yet live.
+        let local_mid = self.tracks_out.iter().find_map(|entry| {
+            if entry.source_peer == *source_peer && entry.source_mid == data.mid {
+                if let TrackOutState::Open(local) = entry.state {
+                    return Some(local);
+                }
+            }
+            None
+        });
+        let Some(local_mid) = local_mid else {
+            return MediaForward::NoWriter;
+        };
+        let Some(writer) = self.rtc.writer(local_mid) else {
             return MediaForward::NoWriter;
         };
         let Some(pt) = writer.match_params(data.params) else {
@@ -370,12 +566,16 @@ impl MediaPeer {
 
 impl std::fmt::Debug for MediaPeer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // `str0m::Rtc` does not implement Debug, so we
-        // print just the id + liveness.
+        // `str0m::Rtc` does not implement Debug — print
+        // the id + liveness + track-bookkeeping counts.
+        // `finish_non_exhaustive` because the underlying
+        // `rtc` field is intentionally elided.
         f.debug_struct("MediaPeer")
             .field("id", &self.id)
             .field("alive", &self.rtc.is_alive())
-            .finish()
+            .field("tracks_in_len", &self.tracks_in.len())
+            .field("tracks_out_len", &self.tracks_out.len())
+            .finish_non_exhaustive()
     }
 }
 
@@ -758,6 +958,15 @@ async fn run_media_loop(
         // sends.
         let now = Instant::now();
         let summary = drain_outputs(&mut router, &socket, now).await;
+        // Propagate any new upstream tracks to every
+        // other peer's `tracks_out` BEFORE fanout —
+        // fanout depends on the `tracks_out` map to
+        // resolve destination mids. (Today entries land
+        // in `ToOpen` state and fanout still returns
+        // `NoWriter` for them; S-3-B-tracks step 2
+        // promotes them to `Open(mid)` via SDP
+        // renegotiation.)
+        propagate_new_tracks_in(&mut router, &summary.new_tracks);
         fanout_media_data(&mut router, &summary.pending);
         let sleep_for = summary
             .earliest_deadline
@@ -829,6 +1038,17 @@ pub(crate) struct PendingFanout {
     pub(crate) data: MediaData,
 }
 
+/// One `Event::MediaAdded` captured during a drain pass.
+/// The router post-pass propagates each new track to
+/// every other peer's `tracks_out` as
+/// [`TrackOutState::ToOpen`].
+pub(crate) struct PendingTrackIn {
+    /// Peer that announced the new media line.
+    pub(crate) origin: MediaPeerId,
+    /// The track itself (mid + kind).
+    pub(crate) track: TrackIn,
+}
+
 /// Result of one tick's [`drain_outputs`] pass.
 pub(crate) struct DrainSummary {
     /// Earliest pending `Output::Timeout` across all peers.
@@ -836,6 +1056,10 @@ pub(crate) struct DrainSummary {
     /// [`MediaData`] frames captured during the drain,
     /// waiting to be forwarded to non-origin peers.
     pub(crate) pending: Vec<PendingFanout>,
+    /// New `MediaAdded` events captured during the drain.
+    /// The router propagates them to every other peer's
+    /// `tracks_out` before the next fanout pass.
+    pub(crate) new_tracks: Vec<PendingTrackIn>,
 }
 
 /// Drain `poll_output` on every peer; write any
@@ -858,6 +1082,7 @@ async fn drain_outputs(
 ) -> DrainSummary {
     let mut earliest_deadline = now + MAX_TICK_INTERVAL;
     let mut pending: Vec<PendingFanout> = Vec::new();
+    let mut new_tracks: Vec<PendingTrackIn> = Vec::new();
     for peer in router.peers_mut() {
         let origin = peer.id().clone();
         loop {
@@ -871,20 +1096,35 @@ async fn drain_outputs(
                     }
                     break;
                 },
-                Ok(Output::Event(event)) => {
-                    // Capture MediaData for fanout;
-                    // ignore other events (ICE state,
-                    // keyframe requests, stats) — they
-                    // are not actionable for the
-                    // SFrame-passthrough router yet. The
-                    // per-event surface lands as a
-                    // follow-up sub-sprint.
-                    if let Event::MediaData(data) = event {
+                Ok(Output::Event(event)) => match event {
+                    Event::MediaData(data) => {
                         pending.push(PendingFanout {
                             origin: origin.clone(),
                             data,
                         });
-                    }
+                    },
+                    Event::MediaAdded(added) => {
+                        // Register the track on the
+                        // origin side; the router
+                        // post-pass propagates it to
+                        // every other peer's
+                        // `tracks_out` as `ToOpen`.
+                        // `register_local_track_in`
+                        // is idempotent on `mid`.
+                        let track = peer.register_local_track_in(added.mid, added.kind);
+                        new_tracks.push(PendingTrackIn {
+                            origin: origin.clone(),
+                            track,
+                        });
+                    },
+                    // Other events (ICE state,
+                    // keyframe requests, stats,
+                    // MediaChanged, ChannelOpen, ...)
+                    // are not actionable for the
+                    // SFrame-passthrough router yet.
+                    // The per-event surface lands as
+                    // follow-up sub-sprints.
+                    _ => {},
                 },
                 Err(e) => {
                     tracing::warn!(error = %e, "media: poll_output failed; dropping peer");
@@ -900,6 +1140,7 @@ async fn drain_outputs(
     DrainSummary {
         earliest_deadline,
         pending,
+        new_tracks,
     }
 }
 
@@ -934,7 +1175,7 @@ pub(crate) fn fanout_media_data(router: &mut MediaRouter, pending: &[PendingFano
             let Some(peer) = router.peers_mut().get_mut(idx) else {
                 continue;
             };
-            match peer.forward_media_data(&event.data) {
+            match peer.forward_media_data(&event.origin, &event.data) {
                 MediaForward::Sent | MediaForward::NoWriter | MediaForward::NoCodecMatch => {
                     // First two are the expected steady-
                     // state outcomes; we don't log them
@@ -948,6 +1189,44 @@ pub(crate) fn fanout_media_data(router: &mut MediaRouter, pending: &[PendingFano
                         "media: forward write failed"
                     );
                 },
+            }
+        }
+    }
+}
+
+/// Walk `new_tracks` and push a matching
+/// [`TrackOutEntry::ToOpen`] onto every non-origin
+/// peer. The next renegotiation pass (S-3-B-tracks step
+/// 2) picks the entry up, calls
+/// `Rtc::sdp_api().add_media(...).apply()` and ships
+/// the resulting SDP offer back to the destination peer
+/// over the signaling wire.
+pub(crate) fn propagate_new_tracks_in(router: &mut MediaRouter, new_tracks: &[PendingTrackIn]) {
+    if new_tracks.is_empty() || router.len() < 2 {
+        return;
+    }
+    for event in new_tracks {
+        let n = router.len();
+        for idx in 0..n {
+            let target_is_origin = router
+                .peers()
+                .get(idx)
+                .is_some_and(|p| p.id() == &event.origin);
+            if target_is_origin {
+                continue;
+            }
+            let Some(peer) = router.peers_mut().get_mut(idx) else {
+                continue;
+            };
+            let inserted = peer.observe_remote_track_in(event.origin.clone(), event.track);
+            if inserted {
+                tracing::debug!(
+                    origin = %event.origin,
+                    target = %peer.id(),
+                    mid = ?event.track.mid,
+                    kind = ?event.track.kind,
+                    "media: registered remote TrackIn on downstream peer"
+                );
             }
         }
     }
@@ -1213,11 +1492,18 @@ mod tests {
     fn forward_to_peer_without_writer_returns_no_writer() {
         let mut p = MediaPeer::new(pid("alice"), Instant::now());
         let synthetic = synthetic_media_data();
-        let outcome = p.forward_media_data(&synthetic);
+        // A fresh peer has no `tracks_out` entry for the
+        // synthetic source, so `forward_media_data`
+        // short-circuits to `NoWriter` before even
+        // touching `Rtc::writer`. The source id is
+        // arbitrary — the test guarantees the variant
+        // mapping, not any particular topology.
+        let source = pid("bob");
+        let outcome = p.forward_media_data(&source, &synthetic);
         assert_eq!(
             outcome,
             MediaForward::NoWriter,
-            "fresh Rtc has no writer for arbitrary mid"
+            "no tracks_out entry → NoWriter"
         );
     }
 
@@ -1317,5 +1603,163 @@ mod tests {
             last_sender_info: None,
             audio_start_of_talk_spurt: false,
         }
+    }
+
+    // ============================================================
+    // S-3-B-tracks step 1 — TrackIn / TrackOut bookkeeping
+    // ============================================================
+
+    /// `register_local_track_in` appends a fresh
+    /// [`TrackIn`] and returns it.
+    #[test]
+    fn register_local_track_in_appends() {
+        let mut p = MediaPeer::new(pid("alice"), Instant::now());
+        let mid = Mid::new();
+        let track = p.register_local_track_in(mid, MediaKind::Audio);
+        assert_eq!(track.mid, mid);
+        assert_eq!(track.kind, MediaKind::Audio);
+        assert_eq!(p.tracks_in().len(), 1);
+    }
+
+    /// Two calls with the same `mid` must return the
+    /// same [`TrackIn`] without duplicating the entry —
+    /// `MediaAdded` occasionally fires twice when an
+    /// existing m-line is re-negotiated.
+    #[test]
+    fn register_local_track_in_is_idempotent_on_mid() {
+        let mut p = MediaPeer::new(pid("alice"), Instant::now());
+        let mid = Mid::new();
+        let first = p.register_local_track_in(mid, MediaKind::Audio);
+        let second = p.register_local_track_in(mid, MediaKind::Audio);
+        assert_eq!(first, second);
+        assert_eq!(p.tracks_in().len(), 1, "no duplicate entry");
+    }
+
+    /// `observe_remote_track_in` appends a fresh
+    /// [`TrackOutEntry`] in [`TrackOutState::ToOpen`].
+    #[test]
+    fn observe_remote_track_in_appends_to_open() {
+        let mut p = MediaPeer::new(pid("alice"), Instant::now());
+        let mid = Mid::new();
+        let source = TrackIn {
+            mid,
+            kind: MediaKind::Audio,
+        };
+        let inserted = p.observe_remote_track_in(pid("bob"), source);
+        assert!(inserted);
+        assert_eq!(p.tracks_out().len(), 1);
+        let entry = &p.tracks_out()[0];
+        assert_eq!(entry.source_peer, pid("bob"));
+        assert_eq!(entry.source_mid, mid);
+        assert_eq!(entry.kind, MediaKind::Audio);
+        assert_eq!(entry.state, TrackOutState::ToOpen);
+    }
+
+    /// Repeated `observe_remote_track_in` calls on the
+    /// same `(source_peer, source_mid)` are de-duped.
+    /// The router's broadcast-to-everyone-else pass
+    /// cannot accumulate phantom entries.
+    #[test]
+    fn observe_remote_track_in_is_idempotent_on_source_pair() {
+        let mut p = MediaPeer::new(pid("alice"), Instant::now());
+        let mid = Mid::new();
+        let source = TrackIn {
+            mid,
+            kind: MediaKind::Audio,
+        };
+        assert!(p.observe_remote_track_in(pid("bob"), source));
+        assert!(!p.observe_remote_track_in(pid("bob"), source));
+        assert_eq!(p.tracks_out().len(), 1);
+    }
+
+    /// `propagate_new_tracks_in` opens a downstream
+    /// entry on every non-origin peer, skips the origin
+    /// itself, and is idempotent on a repeated call.
+    #[test]
+    fn propagate_new_tracks_in_skips_origin_and_is_idempotent() {
+        let mut r = MediaRouter::new();
+        r.add_peer(MediaPeer::new(pid("alice"), Instant::now()));
+        r.add_peer(MediaPeer::new(pid("bob"), Instant::now()));
+        r.add_peer(MediaPeer::new(pid("charlie"), Instant::now()));
+        let mid = Mid::new();
+        let pending = vec![PendingTrackIn {
+            origin: pid("alice"),
+            track: TrackIn {
+                mid,
+                kind: MediaKind::Video,
+            },
+        }];
+
+        propagate_new_tracks_in(&mut r, &pending);
+
+        // Alice (origin) has no tracks_out for her own
+        // upstream track.
+        let alice = r.peers().iter().find(|p| p.id() == &pid("alice")).unwrap();
+        assert_eq!(alice.tracks_out().len(), 0);
+
+        // Bob + charlie each have one entry pointing
+        // back at alice's mid.
+        for name in ["bob", "charlie"] {
+            let peer = r.peers().iter().find(|p| p.id() == &pid(name)).unwrap();
+            assert_eq!(peer.tracks_out().len(), 1, "{name}");
+            assert_eq!(peer.tracks_out()[0].source_peer, pid("alice"));
+            assert_eq!(peer.tracks_out()[0].source_mid, mid);
+            assert_eq!(peer.tracks_out()[0].kind, MediaKind::Video);
+            assert_eq!(peer.tracks_out()[0].state, TrackOutState::ToOpen);
+        }
+
+        // Second call must not duplicate.
+        propagate_new_tracks_in(&mut r, &pending);
+        for name in ["bob", "charlie"] {
+            let peer = r.peers().iter().find(|p| p.id() == &pid(name)).unwrap();
+            assert_eq!(peer.tracks_out().len(), 1, "{name} stays at 1");
+        }
+    }
+
+    /// Empty `new_tracks` is a no-op; single-peer
+    /// router is a no-op even with a non-empty list.
+    #[test]
+    fn propagate_new_tracks_in_edge_cases() {
+        let mut r = MediaRouter::new();
+        r.add_peer(MediaPeer::new(pid("alice"), Instant::now()));
+        propagate_new_tracks_in(&mut r, &[]);
+        let pending = vec![PendingTrackIn {
+            origin: pid("alice"),
+            track: TrackIn {
+                mid: Mid::new(),
+                kind: MediaKind::Audio,
+            },
+        }];
+        // Single peer → no non-origin destinations.
+        propagate_new_tracks_in(&mut r, &pending);
+        assert_eq!(r.peers()[0].tracks_out().len(), 0);
+    }
+
+    /// Forwarding refuses to deliver through a
+    /// `TrackOutEntry` that is still in
+    /// `TrackOutState::ToOpen` — the renegotiation has
+    /// not yet promoted it to `Open(local_mid)`. This
+    /// pins the step-1 / step-2 boundary: step 1 wires
+    /// the bookkeeping; step 2 is what makes fanout
+    /// effective.
+    #[test]
+    fn forward_returns_no_writer_when_tracks_out_is_to_open() {
+        let mut p = MediaPeer::new(pid("alice"), Instant::now());
+        let synthetic = synthetic_media_data();
+        let source = pid("bob");
+        // Even with a matching `tracks_out` entry in
+        // ToOpen state, fanout must surface NoWriter
+        // (state machine isn't ready yet).
+        p.observe_remote_track_in(
+            source.clone(),
+            TrackIn {
+                mid: synthetic.mid,
+                kind: MediaKind::Audio,
+            },
+        );
+        assert_eq!(
+            p.forward_media_data(&source, &synthetic),
+            MediaForward::NoWriter,
+        );
     }
 }
