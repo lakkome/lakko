@@ -1,0 +1,115 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+# G5-7 — censorship lab CI gate.
+#
+# Brings up `ci/censorship-lab/docker-compose.yml`,
+# runs the `#[ignore]`-gated tests under
+# `crates/lakko-transport/tests/*_e2e.rs` against the
+# live observer, tears down.
+#
+# Trigger surface mirrors `sfu-e2e.yml`:
+#
+#   - manual via `workflow_dispatch`,
+#   - opt-in via the `censorship-lab` PR label,
+#   - nightly cron so a slow regression surfaces in
+#     <24 h even when no PR touches transport code.
+
+name: censorship-lab
+
+on:
+  workflow_dispatch: {}
+  pull_request:
+    types: [labeled, synchronize, reopened]
+  schedule:
+    # 04:00 UTC — offset from the existing fuzz-quick
+    # (03:00) and sfu-e2e (03:30) cron windows.
+    - cron: "0 4 * * *"
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  CARGO_INCREMENTAL: 0
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  observer:
+    if: >
+      github.event_name == 'workflow_dispatch'
+      || github.event_name == 'schedule'
+      || (github.event_name == 'pull_request'
+          && contains(github.event.pull_request.labels.*.name, 'censorship-lab'))
+
+    name: SNI observer + tokio-rustls handshake
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Separate from `ci.yml` / `sfu-e2e.yml` so a
+          # poisoned entry from one workflow does not
+          # break the others.
+          shared-key: "censorship-lab"
+
+      - name: cargo test --no-run
+        run: |
+          cargo test \
+            --package lakko-transport \
+            --test sni_observer_e2e \
+            --no-run
+
+      - name: prepare host log dir
+        run: |
+          mkdir -p ci/censorship-lab/logs
+          touch ci/censorship-lab/logs/observed.jsonl
+
+      - name: docker compose up
+        run: |
+          docker compose \
+            -f ci/censorship-lab/docker-compose.yml \
+            up --build --detach --wait --wait-timeout 180
+
+      - name: docker compose ps
+        run: |
+          docker compose -f ci/censorship-lab/docker-compose.yml ps
+
+      - name: cargo test --include-ignored
+        run: |
+          cargo test \
+            --package lakko-transport \
+            --test sni_observer_e2e \
+            -- --include-ignored --nocapture
+
+      # Save the observer's log + container logs on
+      # failure so a reviewer can diff what the lab
+      # observed vs what the test expected.
+      - name: collect artefacts (on failure)
+        if: failure()
+        run: |
+          mkdir -p artifacts
+          cp -v ci/censorship-lab/logs/observed.jsonl artifacts/ || true
+          docker compose -f ci/censorship-lab/docker-compose.yml logs --no-color sni-observer \
+            > artifacts/sni-observer.log || true
+
+      - name: upload artefacts (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: censorship-lab-logs
+          path: artifacts/
+          retention-days: 14
+
+      - name: docker compose down
+        if: always()
+        run: |
+          docker compose \
+            -f ci/censorship-lab/docker-compose.yml \
+            down --volumes

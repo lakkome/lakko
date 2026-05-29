@@ -1,0 +1,50 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+# G5-7 — censorship-lab compose stack.
+#
+# Brings up the SNI observer on `127.0.0.1:8443` and
+# mounts its log file into the host at
+# `./logs/observed.jsonl` so the integration test
+# (`crates/lakko-transport/tests/sni_observer_e2e.rs`)
+# can tail it without exec-ing into the container.
+#
+# Subsequent G5-7 sub-sprints (TSPU active probing,
+# GFW packet-drop, IR throttle — see `README.md`)
+# layer additional observer / filter sidecars onto the
+# same compose so the matrix grows by appending
+# services rather than forking the stack.
+
+services:
+  sni-observer:
+    build:
+      context: ./sni-observer
+      dockerfile: Dockerfile
+    container_name: lakko-censorship-sni-observer
+    restart: "no"
+    environment:
+      LAKKO_SNI_BIND: "0.0.0.0:8443"
+      LAKKO_SNI_LOG: "/var/log/sni-observer/observed.jsonl"
+      RUST_LOG: "info,sni_observer=debug"
+    ports:
+      # Pinned to 127.0.0.1 so a stray Internet host
+      # never sees an open observer on the runner.
+      - "127.0.0.1:8443:8443"
+    volumes:
+      # Host bind-mount. The compose `up` step in CI
+      # creates `./logs/` first so the volume points at
+      # a real (empty) file the container's non-root
+      # user can write to.
+      - ./logs:/var/log/sni-observer
+    healthcheck:
+      # `nc -z` against the observer's own bind. The
+      # Dockerfile installs `netcat-openbsd` precisely
+      # so this check is available without needing
+      # bash / /dev/tcp shenanigans.
+      test:
+        - CMD-SHELL
+        - "nc -z 127.0.0.1 8443"
+      interval: 1s
+      timeout: 2s
+      retries: 15
+      start_period: 2s

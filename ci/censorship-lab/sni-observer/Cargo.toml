@@ -1,0 +1,34 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+# `sni-observer` — passive TLS-SNI observer used by the
+# G5-7 censorship lab. NOT a workspace member (lives
+# under `ci/`, gitignored from `cargo metadata` via the
+# workspace exclude rule) so the production binaries
+# don't take a dep on a CI fixture and so a CI-only bump
+# of `tokio` here doesn't ripple through `services/sfu`.
+
+[package]
+name        = "sni-observer"
+version     = "0.0.0"
+edition     = "2021"
+publish     = false
+description = "Censorship-lab fixture — reads a TLS ClientHello off TCP, extracts SNI, logs (epoch_ms, sni) to a file."
+
+# Explicit empty `[workspace]` keeps cargo from rolling
+# this crate into the parent workspace at
+# `/Users/.../lakko/Cargo.toml`. The CI fixture has a
+# different MSRV story (we deliberately do not pin
+# `rust-toolchain.toml` here so a contributor on a
+# slightly older Rust still gets a working observer).
+[workspace]
+
+[[bin]]
+name = "sni-observer"
+path = "src/main.rs"
+
+[dependencies]
+tokio   = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync", "fs"] }
+anyhow  = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
