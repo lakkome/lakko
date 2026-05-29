@@ -65,8 +65,8 @@ async fn main() -> anyhow::Result<()> {
     // signal-relay frames but SDP / ICE frames surface as
     // `RouterError::MediaNotWired`.
     let media_handle = if let Some(bind) = cfg.media_bind {
-        let handle = media::spawn_media_task(bind, peers.clone()).await?;
-        info!(media_bind = %bind, "media: UDP socket bound; routing task spawned");
+        let (handle, local_addr) = media::spawn_media_task(bind, peers.clone()).await?;
+        info!(media_bind = %bind, media_local_addr = %local_addr, "media: UDP socket bound; routing task spawned");
         Some(handle)
     } else {
         info!("media: LAKKO_SFU_MEDIA_BIND unset; running signaling-only");

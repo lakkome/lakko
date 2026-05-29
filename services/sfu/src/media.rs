@@ -1062,7 +1062,7 @@ impl MediaTaskHandle {
 pub async fn spawn_media_task(
     bind_addr: SocketAddr,
     peers: PeerRegistry,
-) -> MediaResult<MediaTaskHandle> {
+) -> MediaResult<(MediaTaskHandle, SocketAddr)> {
     let socket = tokio::net::UdpSocket::bind(bind_addr)
         .await
         .map_err(|e| MediaError::Str0m(format!("UDP bind {bind_addr}: {e}")))?;
@@ -1072,7 +1072,7 @@ pub async fn spawn_media_task(
 
     let (tx, rx) = tokio::sync::mpsc::channel::<MediaCommand>(MEDIA_COMMAND_CAPACITY);
     tokio::spawn(run_media_loop(socket, local_addr, rx, peers));
-    Ok(MediaTaskHandle { tx })
+    Ok((MediaTaskHandle { tx }, local_addr))
 }
 
 /// Spawn a media task **without** binding the UDP
@@ -1763,9 +1763,11 @@ mod tests {
     async fn spawn_media_task_binds_loopback() {
         let bind: SocketAddr = "127.0.0.1:0".parse().unwrap();
         let peers = crate::peer::PeerRegistry::new();
-        let handle = spawn_media_task(bind, peers)
+        let (handle, local_addr) = spawn_media_task(bind, peers)
             .await
             .expect("UDP bind on loopback:0 succeeds");
+        assert!(local_addr.ip().is_loopback());
+        assert_ne!(local_addr.port(), 0, "OS-picked port must be non-zero");
         // The task is alive; reuse the handle for a
         // round-trip command that fails at the SDP
         // parser to confirm the bound task is wired the
