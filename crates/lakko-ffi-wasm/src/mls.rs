@@ -10,8 +10,9 @@ use std::sync::Mutex;
 
 use lakko_mls::group::MemberAddition;
 use lakko_mls::{
-    group, key_package, DeviceGroup as MlsDeviceGroup, Group as MlsGroup, Identity as MlsIdentity,
-    Incoming as MlsIncoming,
+    group, key_package, ChannelId as MlsChannelId, DeviceGroup as MlsDeviceGroup,
+    Group as MlsGroup, Identity as MlsIdentity, Incoming as MlsIncoming,
+    PublisherGroup as MlsPublisherGroup,
 };
 use wasm_bindgen::prelude::*;
 
@@ -487,6 +488,100 @@ impl Group {
                 })
             })
             .collect())
+    }
+}
+
+// ============================================================================
+// PublisherGroup (G4-2-mls-persistence step 2 — wasm-bindgen mirror of the
+// UniFFI surface. Same load-or-create dance for the Phase 4 channels Tier-1
+// MLS group; web composers go through this instead of the throwaway-group
+// path the prior implementation used.)
+// ============================================================================
+
+/// Persistent MLS-group wrapper for one Lakko channel's
+/// publisher tier (ADR-0010 Tier 1). Mirror of the
+/// UniFFI `PublisherGroup` (`crates/lakko-ffi-uniffi`).
+#[wasm_bindgen]
+pub struct PublisherGroup {
+    inner: Mutex<MlsPublisherGroup>,
+}
+
+#[wasm_bindgen]
+impl PublisherGroup {
+    /// Mint a fresh PublisherGroup for `channel_id`. Persists
+    /// the MLS state via the OpenMLS provider; subsequent
+    /// [`PublisherGroup.load`] calls return the same group.
+    ///
+    /// `channel_id` MUST be exactly 16 bytes (
+    /// [`lakko_mls::CHANNEL_ID_LEN`]).
+    #[wasm_bindgen(constructor)]
+    pub fn new(identity: &Identity, channel_id: &[u8]) -> Result<PublisherGroup, JsError> {
+        let cid = MlsChannelId::try_from_slice(channel_id).map_err(mls_err)?;
+        let inner = MlsPublisherGroup::create(&identity.inner, &cid).map_err(mls_err)?;
+        Ok(Self {
+            inner: Mutex::new(inner),
+        })
+    }
+
+    /// Load the persisted PublisherGroup for `channel_id`.
+    /// Returns `undefined` (`Option<...> -> None`) when no
+    /// group has been minted yet — pair with
+    /// [`PublisherGroup.openOrCreate`] for the load-or-create
+    /// path every composer wants.
+    #[wasm_bindgen(js_name = load)]
+    pub fn load(identity: &Identity, channel_id: &[u8]) -> Result<Option<PublisherGroup>, JsError> {
+        let cid = MlsChannelId::try_from_slice(channel_id).map_err(mls_err)?;
+        match MlsPublisherGroup::load(&identity.inner, &cid).map_err(mls_err)? {
+            Some(inner) => Ok(Some(Self {
+                inner: Mutex::new(inner),
+            })),
+            None => Ok(None),
+        }
+    }
+
+    /// Load-or-create convenience. Returns the persisted
+    /// PublisherGroup for `(identity, channel_id)` if one
+    /// exists; otherwise mints a fresh one and persists it
+    /// as a side effect. Idempotent across consecutive
+    /// calls — the load-bearing invariant that lets
+    /// subscribers' previously-received seed envelopes keep
+    /// decrypting across publisher restarts.
+    #[wasm_bindgen(js_name = openOrCreate)]
+    pub fn open_or_create(
+        identity: &Identity,
+        channel_id: &[u8],
+    ) -> Result<PublisherGroup, JsError> {
+        if let Some(existing) = Self::load(identity, channel_id)? {
+            return Ok(existing);
+        }
+        Self::new(identity, channel_id)
+    }
+
+    /// 32-byte channel content-key seed from the MLS
+    /// exporter at the current group epoch. Stable across
+    /// process restarts once the group has been persisted —
+    /// hand directly to the channels composer's
+    /// `ChannelPublisherKeys.seed` field.
+    #[wasm_bindgen(js_name = channelSeed)]
+    pub fn channel_seed(&self, identity: &Identity) -> Result<Vec<u8>, JsError> {
+        let g = self
+            .inner
+            .lock()
+            .map_err(|_| JsError::new("internal lock poisoned"))?;
+        let seed = g.channel_seed(&identity.inner).map_err(mls_err)?;
+        Ok(seed.to_vec())
+    }
+
+    /// Channel id this group was minted for. Returned as raw
+    /// bytes (16 elements) so the JS side can compare with
+    /// whatever shape the channel-discovery layer hands it.
+    #[wasm_bindgen(js_name = channelId)]
+    pub fn channel_id(&self) -> Result<Vec<u8>, JsError> {
+        let g = self
+            .inner
+            .lock()
+            .map_err(|_| JsError::new("internal lock poisoned"))?;
+        Ok(g.channel_id().as_bytes().to_vec())
     }
 }
 
@@ -2506,4 +2601,59 @@ mod tests {
         assert_eq!(r.commit(), vec![0xAA; 4]); // call twice → still same
         assert_eq!(r.welcome(), vec![0xBB; 4]);
     }
+
+    // ============================================================================
+    // PublisherGroup wasm surface (G4-2-mls-persistence step 2)
+    // ============================================================================
+
+    fn channel_id_filled(byte: u8) -> Vec<u8> {
+        vec![byte; lakko_mls::CHANNEL_ID_LEN]
+    }
+
+    #[test]
+    fn wasm_publisher_group_create_then_seed_is_stable() {
+        let alice = Identity::new("alice-pub").unwrap();
+        let cid = channel_id_filled(0xAA);
+
+        let pg = PublisherGroup::new(&alice, &cid).unwrap();
+        let s1 = pg.channel_seed(&alice).unwrap();
+        let s2 = pg.channel_seed(&alice).unwrap();
+        assert_eq!(s1, s2);
+        assert_eq!(s1.len(), 32);
+        assert_eq!(pg.channel_id().unwrap(), cid);
+    }
+
+    #[test]
+    fn wasm_publisher_group_open_or_create_is_idempotent() {
+        // Same load-bearing test as the UniFFI mirror —
+        // proves the throwaway-group bug stays fixed under
+        // the web composer's call shape.
+        let alice = Identity::new("alice-persist").unwrap();
+        let cid = channel_id_filled(0xBB);
+
+        let first = PublisherGroup::open_or_create(&alice, &cid).unwrap();
+        let s1 = first.channel_seed(&alice).unwrap();
+
+        let second = PublisherGroup::open_or_create(&alice, &cid).unwrap();
+        let s2 = second.channel_seed(&alice).unwrap();
+
+        assert_eq!(s1, s2);
+    }
+
+    #[test]
+    fn wasm_publisher_group_load_returns_none_before_create() {
+        let alice = Identity::new("alice-empty").unwrap();
+        let cid = channel_id_filled(0xCC);
+        let loaded = PublisherGroup::load(&alice, &cid).unwrap();
+        assert!(loaded.is_none());
+    }
+
+    // `wasm_publisher_group_rejects_short_channel_id` lives in
+    // the UniFFI mirror (`crates/lakko-ffi-uniffi`) only. The
+    // wasm-bindgen `JsError` constructor panics under cargo
+    // test (off-wasm target), so error-path tests that
+    // produce a `JsError` cannot execute here. The Rust-side
+    // channel-id length check it would exercise is the same
+    // `MlsChannelId::try_from_slice` predicate the UniFFI
+    // tests already pin.
 }

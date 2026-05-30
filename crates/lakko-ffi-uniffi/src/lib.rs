@@ -31,8 +31,9 @@ use std::sync::{Arc, Mutex};
 
 use lakko_mls::group::MemberAddition;
 use lakko_mls::{
-    group, key_package, DeviceGroup as MlsDeviceGroup, Group as MlsGroup, Identity as MlsIdentity,
-    Incoming as MlsIncoming,
+    group, key_package, ChannelId as MlsChannelId, DeviceGroup as MlsDeviceGroup,
+    Group as MlsGroup, Identity as MlsIdentity, Incoming as MlsIncoming,
+    PublisherGroup as MlsPublisherGroup,
 };
 
 pub mod attachments;
@@ -655,6 +656,115 @@ pub fn load_group(identity: &Identity, group_id: Vec<u8>) -> Result<Option<Arc<G
             inner: Mutex::new(inner),
         })
     }))
+}
+
+// ============================================================================
+// PublisherGroup (G4-2-mls-persistence step 2 — FFI surface for the persistent
+// Tier-1 MLS group that owns the channel content-key rotation authority. See
+// `crates/lakko-mls/src/publisher_group.rs` for the Rust core; the wrapper here
+// only mediates the `Mutex<>` + UniFFI handle conventions the iOS / Android
+// composers consume.)
+// ============================================================================
+
+/// Persistent MLS-group wrapper for one Lakko channel's
+/// publisher tier (ADR-0010 Tier 1).
+///
+/// Mirror of [`Group`] but with the channel-id keyed
+/// persistence + the `channel_seed` exporter shortcut baked
+/// in. The iOS / Android channels composer should construct
+/// via [`PublisherGroup::open_or_create`] on every publish —
+/// the load-or-create dance ensures the MLS state from a
+/// prior session is reused (so the exporter output is stable
+/// across app restarts).
+#[derive(uniffi::Object)]
+pub struct PublisherGroup {
+    inner: Mutex<MlsPublisherGroup>,
+}
+
+#[uniffi::export]
+impl PublisherGroup {
+    /// Load the persisted PublisherGroup for `channel_id`.
+    /// Returns `null` if no group exists yet for this channel
+    /// under the caller's identity — pair with
+    /// [`PublisherGroup::create`] or use the
+    /// [`publisher_group_open_or_create`] free function for
+    /// the load-or-create shortcut.
+    ///
+    /// Free-function shape (not a constructor) because UniFFI
+    /// 0.28 rejects `Option<Self>` in `#[uniffi::constructor]`
+    /// signatures — same workaround as [`load_group`].
+    #[uniffi::constructor]
+    pub fn create(identity: &Identity, channel_id: Vec<u8>) -> Result<Self, FfiError> {
+        let cid = MlsChannelId::try_from_slice(&channel_id)?;
+        let inner = MlsPublisherGroup::create(&identity.inner, &cid)?;
+        Ok(Self {
+            inner: Mutex::new(inner),
+        })
+    }
+
+    /// 32-byte channel content-key seed derived from the MLS
+    /// exporter at the **current** group epoch. Stable across
+    /// process restarts once the group has been persisted —
+    /// that is the load-bearing invariant
+    /// G4-2-mls-persistence closes.
+    ///
+    /// Wire shape matches the existing
+    /// `channel_seed_from_mls_exporter_output` byte-pipe:
+    /// 32 bytes the channels composer hands to
+    /// `compose_channel_post` as the per-channel content seed.
+    pub fn channel_seed(&self, identity: &Identity) -> Result<Vec<u8>, FfiError> {
+        let g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
+        let seed = g.channel_seed(&identity.inner)?;
+        Ok(seed.to_vec())
+    }
+
+    /// Channel id this group was minted for.
+    pub fn channel_id(&self) -> Result<Vec<u8>, FfiError> {
+        let g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
+        Ok(g.channel_id().as_bytes().to_vec())
+    }
+}
+
+/// Load the persisted PublisherGroup for `channel_id` if any.
+/// Returns `null` when no group has been minted yet for this
+/// (identity, channel_id) pair under `identity`'s provider
+/// storage.
+///
+/// Free function rather than a constructor because UniFFI
+/// 0.28 rejects `Option<Self>` in constructor returns — same
+/// shape rationale as the existing [`load_group`].
+#[uniffi::export]
+pub fn publisher_group_load(
+    identity: &Identity,
+    channel_id: Vec<u8>,
+) -> Result<Option<Arc<PublisherGroup>>, FfiError> {
+    let cid = MlsChannelId::try_from_slice(&channel_id)?;
+    let loaded = MlsPublisherGroup::load(&identity.inner, &cid)?;
+    Ok(loaded.map(|inner| {
+        Arc::new(PublisherGroup {
+            inner: Mutex::new(inner),
+        })
+    }))
+}
+
+/// Load-or-create convenience — the path every composer
+/// should take. Tries [`publisher_group_load`] first; on
+/// `null`, mints a fresh group via
+/// [`PublisherGroup::create`]. Idempotent: once a group has
+/// been minted for `(identity, channel_id)`, every
+/// subsequent call returns the same persisted state and
+/// therefore the same exporter output for the current
+/// epoch.
+#[uniffi::export]
+pub fn publisher_group_open_or_create(
+    identity: &Identity,
+    channel_id: Vec<u8>,
+) -> Result<Arc<PublisherGroup>, FfiError> {
+    if let Some(existing) = publisher_group_load(identity, channel_id.clone())? {
+        return Ok(existing);
+    }
+    let created = PublisherGroup::create(identity, channel_id)?;
+    Ok(Arc::new(created))
 }
 
 // ============================================================================
@@ -2222,5 +2332,106 @@ mod tests {
             "epoch must have advanced after add_member",
         );
         assert_eq!(epoch0_id, epoch1_id, "group_id must not change with epoch");
+    }
+
+    // ============================================================================
+    // PublisherGroup FFI surface (G4-2-mls-persistence step 2)
+    // ============================================================================
+
+    /// Channel id helper — 16 bytes, deterministic per test
+    /// case so a re-run sees the same persistence-key shape
+    /// without depending on any RNG.
+    fn channel_id_filled(byte: u8) -> Vec<u8> {
+        vec![byte; lakko_mls::CHANNEL_ID_LEN]
+    }
+
+    #[test]
+    fn publisher_group_create_then_channel_seed_is_stable() {
+        let alice = Identity::new("alice-publisher".into()).unwrap();
+        let cid = channel_id_filled(0xAA);
+
+        let pg = PublisherGroup::create(&alice, cid.clone()).unwrap();
+        let seed_1 = pg.channel_seed(&alice).unwrap();
+        let seed_2 = pg.channel_seed(&alice).unwrap();
+        // Same group, same epoch -> same seed.
+        assert_eq!(seed_1, seed_2);
+        assert_eq!(seed_1.len(), 32);
+        // Channel id round-trips.
+        assert_eq!(pg.channel_id().unwrap(), cid);
+    }
+
+    #[test]
+    fn publisher_group_open_or_create_is_idempotent_across_handles() {
+        // The load-bearing FFI test: two consecutive
+        // `open_or_create` calls under the SAME identity for
+        // the SAME channel id must resolve to the SAME
+        // persisted group — i.e. they must produce byte-
+        // identical channel seeds. If they don't, we're back
+        // to the throwaway-group bug G4-2-mls-persistence
+        // closes.
+        let alice = Identity::new("alice-persist".into()).unwrap();
+        let cid = channel_id_filled(0xBB);
+
+        let first = publisher_group_open_or_create(&alice, cid.clone()).unwrap();
+        let seed_first = first.channel_seed(&alice).unwrap();
+
+        let second = publisher_group_open_or_create(&alice, cid.clone()).unwrap();
+        let seed_second = second.channel_seed(&alice).unwrap();
+
+        assert_eq!(seed_first, seed_second);
+    }
+
+    #[test]
+    fn publisher_group_load_returns_null_before_create() {
+        let alice = Identity::new("alice-empty".into()).unwrap();
+        let cid = channel_id_filled(0xCC);
+
+        let loaded = publisher_group_load(&alice, cid).unwrap();
+        assert!(loaded.is_none(), "no group should be persisted yet");
+    }
+
+    #[test]
+    fn publisher_group_load_returns_group_after_create() {
+        let alice = Identity::new("alice-loadback".into()).unwrap();
+        let cid = channel_id_filled(0xDD);
+
+        let _created = PublisherGroup::create(&alice, cid.clone()).unwrap();
+        let loaded = publisher_group_load(&alice, cid.clone()).unwrap();
+        assert!(loaded.is_some(), "load must find the freshly-created group");
+        assert_eq!(loaded.unwrap().channel_id().unwrap(), cid);
+    }
+
+    #[test]
+    fn publisher_group_rejects_wrong_length_channel_id() {
+        let alice = Identity::new("alice-badid".into()).unwrap();
+        // 8 bytes — half a channel id. Must refuse rather
+        // than silently zero-pad (would let two channels
+        // collide under the deterministic group id).
+        let bad = vec![0u8; 8];
+        let create_res = PublisherGroup::create(&alice, bad.clone());
+        assert!(create_res.is_err(), "create must refuse short channel id");
+        let create_err = create_res.err().unwrap();
+        assert!(matches!(
+            create_err,
+            FfiError::Codec(_) | FfiError::Group(_)
+        ));
+
+        let load_res = publisher_group_load(&alice, bad);
+        assert!(load_res.is_err(), "load must refuse short channel id");
+        let load_err = load_res.err().unwrap();
+        assert!(matches!(load_err, FfiError::Codec(_) | FfiError::Group(_)));
+    }
+
+    #[test]
+    fn publisher_group_distinct_channels_distinct_seeds() {
+        let alice = Identity::new("alice-multichannel".into()).unwrap();
+        let cid_a = channel_id_filled(0x11);
+        let cid_b = channel_id_filled(0x22);
+
+        let pg_a = publisher_group_open_or_create(&alice, cid_a).unwrap();
+        let pg_b = publisher_group_open_or_create(&alice, cid_b).unwrap();
+        let seed_a = pg_a.channel_seed(&alice).unwrap();
+        let seed_b = pg_b.channel_seed(&alice).unwrap();
+        assert_ne!(seed_a, seed_b);
     }
 }
