@@ -69,9 +69,33 @@ public final class CallSession: ObservableObject {
     private var dialAudio: Bool = true
     private var dialVideo: Bool = false
 
+    /// G3-sframe-native N-6 — per-call MLS exporter seed +
+    /// local participant leaf index. Both must be set before
+    /// `dial` / `acceptCall` so the SFrame attach can fire
+    /// against every fresh RTCRtpSender immediately after the
+    /// track is added. A nil seed at attach time aborts the
+    /// call (security invariant #4: no fallback to non-E2EE).
+    private var callKeySeed: Data?
+    private var localLeaf: UInt32?
+
     public init(callId: Data, onOutboundSignaling: @escaping (Data) -> Void) {
         self.callId = callId
         self.onOutboundSignaling = onOutboundSignaling
+    }
+
+    /// Inject the per-call SFrame keying material. Caller MUST
+    /// run this AFTER the welcome-ferry / KP-forward dispatcher
+    /// has resolved (for joiners) or AFTER `Group.create`
+    /// on the 1×1-from-chat path (for the call originator),
+    /// and BEFORE `dial` / `acceptCall`.
+    ///
+    /// `seed` is exactly 32 bytes
+    /// (`Group.export_secret("lakko/call/v1", call_id, 32)`).
+    /// `localLeaf` is this device's leaf index in the call's
+    /// MLS group.
+    public func setCallKey(seed: Data, localLeaf: UInt32) {
+        self.callKeySeed = seed
+        self.localLeaf = localLeaf
     }
 
     /// Generate a fresh 16-byte call_id.
@@ -109,11 +133,42 @@ public final class CallSession: ObservableObject {
         // preview surface lands (G3-1-video), pass the
         // capture-session source here. Today audio-only.
         // if video { rtc.addLocalVideoTrack(<source>) }
+
+        // G3-sframe-native N-6 — arm SFrame on every freshly-
+        // added sender. Must happen AFTER addLocalAudioTrack
+        // (it captures the RtpSender we need to attach to) and
+        // BEFORE composeAndShipOffer (the SDP-build path can
+        // run on a codec thread the moment the sender exists,
+        // so we want the encryptor already in place to avoid
+        // a window where libwebrtc would tee bytes unencrypted).
+        if !attachSFrame(on: rtc) {
+            NSLog("dial: SFrame attach failed — refusing per security invariant #4")
+            endLocal(reason: .error)
+            return
+        }
         self.rtc = rtc
 
         Task { [weak self] in
             await self?.composeAndShipOffer(rtc: rtc, audio: audio, video: video)
         }
+    }
+
+    /// Resolve the seed + leaf and invoke
+    /// `armSFrameEncryptors`. Returns `false` when:
+    ///   - `setCallKey` was never called (caller forgot — bug)
+    ///   - `SFrameAvailability.isCallingAvailable` is false
+    ///   - any sender failed to attach
+    /// All three cases collapse to a refused call.
+    private func attachSFrame(on rtc: WebRTCPeerConnection) -> Bool {
+        guard let seed = callKeySeed, let leaf = localLeaf else {
+            NSLog("attachSFrame: setCallKey was never called — security invariant #4")
+            return false
+        }
+        guard SFrameAvailability.shared.isCallingAvailable else {
+            NSLog("attachSFrame: SFrameAvailability reports calling unavailable")
+            return false
+        }
+        return rtc.armSFrameEncryptors(seed: seed, localLeaf: leaf)
     }
 
     private func composeAndShipOffer(
@@ -165,6 +220,13 @@ public final class CallSession: ObservableObject {
         // UI later supports "accept muted" we will pass the
         // user pick through this method.
         rtc.addLocalAudioTrack(enabled: true)
+
+        // G3-sframe-native N-6 — same attach point as dial().
+        if !attachSFrame(on: rtc) {
+            NSLog("acceptCall: SFrame attach failed — refusing per security invariant #4")
+            endLocal(reason: .error)
+            return
+        }
         self.rtc = rtc
 
         state = .connecting

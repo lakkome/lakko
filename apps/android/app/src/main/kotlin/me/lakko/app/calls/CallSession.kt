@@ -95,6 +95,31 @@ public class CallSession(
     private var rtc: WebRtcPeerConnection? = null
 
     /**
+     * G3-sframe-native N-6 — per-call MLS exporter seed and
+     * local participant leaf index. Both must be set BEFORE
+     * [dial] / [acceptCall]; missing seed at attach time
+     * aborts the call (security invariant #4).
+     */
+    private var callKeySeed: ByteArray? = null
+    private var localLeaf: Int? = null
+
+    /**
+     * Inject the per-call SFrame keying material. Caller MUST
+     * run this AFTER the welcome-ferry / KP-forward dispatcher
+     * has resolved (for joiners) or AFTER `Group.create` on
+     * the 1×1-from-chat path (for the originator), and BEFORE
+     * [dial] / [acceptCall].
+     *
+     * `seed` is exactly 32 bytes (`Group.export_secret
+     * ("lakko/call/v1", call_id, 32)`); `localLeaf` is this
+     * device's leaf index in the call's MLS group.
+     */
+    public fun setCallKey(seed: ByteArray, localLeaf: Int) {
+        this.callKeySeed = seed
+        this.localLeaf = localLeaf
+    }
+
+    /**
      * Session-owned scope. Every coroutine launched from
      * delegate callbacks (which fire on libwebrtc's worker
      * threads) hops into [Dispatchers.Main] via this scope
@@ -151,6 +176,20 @@ public class CallSession(
         // Video track extension point: when the Compose
         // preview surface lands (G3-2-video), pass the
         // capture-session source here. Today audio-only.
+
+        // G3-sframe-native N-6 — arm SFrame on every freshly-
+        // added sender. Mirror of iOS CallSession.dial — same
+        // sequencing (after addLocalAudioTrack, before SDP
+        // build) so the encryptor is in place before libwebrtc
+        // can begin pulling encoder bytes.
+        if (!attachSFrame(rtc)) {
+            android.util.Log.w(
+                "CallSession",
+                "dial: SFrame attach failed — refusing per security invariant #4",
+            )
+            endLocal(WebCallEndReason.Error)
+            return
+        }
         this.rtc = rtc
 
         scope.launch {
@@ -198,6 +237,16 @@ public class CallSession(
         // Mic on by default for the answerer; future UI may
         // expose "accept muted".
         rtc.addLocalAudioTrack(enabled = true)
+
+        // G3-sframe-native N-6 — same attach point as dial.
+        if (!attachSFrame(rtc)) {
+            android.util.Log.w(
+                "CallSession",
+                "acceptCall: SFrame attach failed — refusing per security invariant #4",
+            )
+            endLocal(WebCallEndReason.Error)
+            return
+        }
         this.rtc = rtc
 
         mutableState.value = WebCallState.Connecting
@@ -287,6 +336,34 @@ public class CallSession(
     // ----------------------------------------------------------------
     // Internal — WebRTC delegate plumbing
     // ----------------------------------------------------------------
+
+    /** G3-sframe-native N-6 — arm SFrame encryptors on every
+     *  sender of [rtc] using the seed + leaf injected via
+     *  [setCallKey]. Returns false on any of:
+     *    - [setCallKey] was never called
+     *    - `SFrameAvailability.isCallingAvailable` is false
+     *    - any sender failed to attach
+     *  All three collapse to a refused call (security
+     *  invariant #4). */
+    private fun attachSFrame(rtc: WebRtcPeerConnection): Boolean {
+        val seed = callKeySeed
+        val leaf = localLeaf
+        if (seed == null || leaf == null) {
+            android.util.Log.w(
+                "CallSession",
+                "attachSFrame: setCallKey was never called — security invariant #4",
+            )
+            return false
+        }
+        if (!me.lakko.sframe.SFrameAvailability.isCallingAvailable) {
+            android.util.Log.w(
+                "CallSession",
+                "attachSFrame: SFrameAvailability reports calling unavailable",
+            )
+            return false
+        }
+        return rtc.armSFrameEncryptors(seed, leaf)
+    }
 
     /** Wire the wrapper's typed callbacks back into the
      *  session. libwebrtc fires them on internal worker
