@@ -122,6 +122,31 @@ public class WebRtcPeerConnection(
     /** Local video track. Lazily added by [addLocalVideoTrack]. */
     private var localVideoTrack: VideoTrack? = null
 
+    /** G3-sframe-native N-5 — the `RtpSender` returned by
+     *  `peer.addTrack(audioTrack, ...)`. Captured so SFrame
+     *  attachment via [armSFrameEncryptors] can call
+     *  `sender.setFrameEncryptor(LakkoFrameEncryptor)` once
+     *  the per-call MLS exporter seed is known. */
+    internal var localAudioSender: org.webrtc.RtpSender? = null
+
+    /** Same shape as [localAudioSender], populated once
+     *  [addLocalVideoTrack] is no longer a stub. */
+    internal var localVideoSender: org.webrtc.RtpSender? = null
+
+    /** G3-sframe-native N-5 — Kotlin-side strong references to
+     *  the SFrame encryptors attached to local senders. We hold
+     *  these so the underlying native pointer stays alive even
+     *  after libwebrtc's Java glue temporarily drops its own
+     *  reference during sender renegotiation; [armSFrameEncryptors]
+     *  releases the prior entries before re-attaching. */
+    private val attachedEncryptors:
+        MutableList<me.lakko.sframe.LakkoFrameEncryptor> = mutableListOf()
+
+    /** Same shape as [attachedEncryptors] for the decryptor
+     *  side. */
+    private val attachedDecryptors:
+        MutableList<me.lakko.sframe.LakkoFrameDecryptor> = mutableListOf()
+
     /**
      * Bridge libwebrtc's `PeerConnection.Observer` into the
      * typed [Delegate] surface. Declared before `init` so
@@ -195,6 +220,21 @@ public class WebRtcPeerConnection(
      *  callbacks. */
     public fun close() {
         try {
+            // G3-sframe-native N-5 — release SFrame native
+            // pointers BEFORE the senders/receivers / peer
+            // are disposed. Otherwise libwebrtc's Java glue
+            // releases its scoped_refptr<FrameEncryptorInterface>
+            // last, the C++ refcount drops to 0, `delete this`
+            // fires, and we're left holding a dangling pointer
+            // inside `attachedEncryptors`. Releasing here means
+            // our wrapper's Release() runs while libwebrtc still
+            // holds its own retain — count goes 2 -> 1, then
+            // peer.dispose drops to 0 + frees cleanly.
+            attachedEncryptors.forEach { it.release() }
+            attachedEncryptors.clear()
+            attachedDecryptors.forEach { it.release() }
+            attachedDecryptors.clear()
+
             localAudioTrack?.dispose()
             localAudioSource?.dispose()
             localVideoTrack?.dispose()
@@ -207,6 +247,8 @@ public class WebRtcPeerConnection(
         localAudioTrack = null
         localAudioSource = null
         localVideoTrack = null
+        localAudioSender = null
+        localVideoSender = null
     }
 
     // ----------------------------------------------------------------
@@ -225,9 +267,14 @@ public class WebRtcPeerConnection(
         val source = factory.createAudioSource(constraints)
         val track = factory.createAudioTrack(AUDIO_TRACK_ID, source)
         track.setEnabled(enabled)
-        peer.addTrack(track, listOf(LOCAL_STREAM_ID))
+        // `addTrack` returns the RtpSender — we need that for
+        // SFrame attachment. The wrapper above already hands the
+        // track to libwebrtc; the sender is the right hook for
+        // `setFrameEncryptor`.
+        val sender = peer.addTrack(track, listOf(LOCAL_STREAM_ID))
         this.localAudioSource = source
         this.localAudioTrack = track
+        this.localAudioSender = sender
     }
 
     /** Toggle the mic. Mute → unmute flips at the encoder
@@ -251,8 +298,65 @@ public class WebRtcPeerConnection(
         val factory = sharedFactory ?: return
         val peer = peer ?: return
         val track = factory.createVideoTrack(VIDEO_TRACK_ID, source)
-        peer.addTrack(track, listOf(LOCAL_STREAM_ID))
+        val sender = peer.addTrack(track, listOf(LOCAL_STREAM_ID))
         this.localVideoTrack = track
+        this.localVideoSender = sender
+    }
+
+    // ----------------------------------------------------------------
+    // SFrame (G3-sframe-native N-5)
+    // ----------------------------------------------------------------
+
+    /**
+     * Arm SFrame on every outgoing RtpSender on this peer.
+     * Called by `CallSession` once the per-call MLS exporter
+     * seed is known (`Group.export_secret("lakko/call/v1",
+     * call_id, 32)`).
+     *
+     * Returns `true` only when every present sender attached
+     * successfully. A `false` return is the signal to abort the
+     * call — security invariant #4 forbids letting one track
+     * flow encrypted while another doesn't.
+     */
+    public fun armSFrameEncryptors(seed: ByteArray, localLeaf: Int): Boolean {
+        if (!me.lakko.sframe.SFrameAvailability.isCallingAvailable) {
+            return false
+        }
+        // Release any prior encryptors first (re-arming on
+        // mid-call rotation goes through here).
+        attachedEncryptors.forEach { it.release() }
+        attachedEncryptors.clear()
+
+        var allOk = true
+        for (sender in listOf(localAudioSender, localVideoSender)) {
+            sender ?: continue
+            val enc = me.lakko.sframe.LakkoFrameEncryptor.create(seed, localLeaf)
+            if (enc == null) {
+                allOk = false
+                continue
+            }
+            sender.setFrameEncryptor(enc)
+            attachedEncryptors += enc
+        }
+        return allOk
+    }
+
+    /**
+     * Arm SFrame on a freshly-arrived remote `RtpReceiver`.
+     * Called by the `onAddTrack` / `onTrack` delegate path when
+     * libwebrtc hands us a new incoming track.
+     */
+    public fun armSFrameDecryptor(
+        receiver: org.webrtc.RtpReceiver,
+        seed: ByteArray,
+    ): Boolean {
+        if (!me.lakko.sframe.SFrameAvailability.isCallingAvailable) {
+            return false
+        }
+        val dec = me.lakko.sframe.LakkoFrameDecryptor.create(seed) ?: return false
+        receiver.setFrameDecryptor(dec)
+        attachedDecryptors += dec
+        return true
     }
 
     // ----------------------------------------------------------------

@@ -102,6 +102,21 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
+        // G3-sframe-native N-5 — runtime probe for the public
+        // org.webrtc.RtpSender.setFrameEncryptor /
+        // RtpReceiver.setFrameDecryptor methods libwebrtc M125
+        // exposes on Android. We deliberately call this BEFORE
+        // any other side effect because the probe's NO result
+        // becomes a process-wide gate: every call entry point
+        // gates on `SFrameAvailability.isCallingAvailable` and
+        // aborts if false. There is no silent fallback to
+        // non-E2EE media — security invariant #4 forbids it.
+        //
+        // The probe is cheap (a handful of Class.forName +
+        // getMethod calls) and the result is cached for the
+        // process lifetime.
+        me.lakko.sframe.SFrameAvailability.bootProbe()
+
         val authRepository = AuthRepository(applicationContext)
         // ChatRepository before ContactsRepository — the
         // contacts side optionally bridges to chat via

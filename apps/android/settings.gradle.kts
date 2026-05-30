@@ -37,4 +37,9 @@ dependencyResolutionManagement {
 rootProject.name = "lakko-android"
 
 include(":lakko-core")
+// G3-sframe-native N-5 — SFrame native shim AAR. Sibling of
+// :lakko-core; the app target depends on both. See
+// `apps/android/lakko-sframe/build.gradle.kts` for the
+// motivation behind two AARs instead of one bigger module.
+include(":lakko-sframe")
 include(":app")

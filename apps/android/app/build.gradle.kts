@@ -136,6 +136,12 @@ dependencies {
     // The local AAR — Rust cdylib + UniFFI Kotlin bindings.
     implementation(project(":lakko-core"))
 
+    // G3-sframe-native N-5 — local AAR with the SFrame JNI
+    // bridge. Bundles libsframe_jni.so (one per shipped ABI)
+    // plus the LakkoFrameEncryptor / Decryptor Kotlin classes
+    // that org.webrtc.RtpSender.setFrameEncryptor accepts.
+    implementation(project(":lakko-sframe"))
+
     // Compose stack via BOM — one version pin covers every
     // androidx.compose.* artefact.
     val composeBom = platform(libs.compose.bom)

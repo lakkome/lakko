@@ -330,6 +330,53 @@ build-android:
         --output-dir apps/android/lakko-core/src/main/jniLibs \
         build --release -p lakko-ffi-uniffi
 
+# G3-sframe-native N-5 — cross-compile lakko-sframe-native for
+# the Android NDK ABIs the lakko-sframe AAR ships, then build
+# the JNI bridge .so by compiling apps/shared/sframe-bridge +
+# apps/android/lakko-sframe/src/main/cpp against the cross-
+# compiled Rust archive and the M125 vendored libwebrtc
+# headers.
+#
+# Output layout:
+#   apps/android/lakko-sframe/src/main/jniLibs/arm64-v8a/libsframe_jni.so
+#   apps/android/lakko-sframe/src/main/jniLibs/x86_64/libsframe_jni.so
+#
+# Each .so statically links the cargo-built lakko_sframe_native
+# archive for that ABI, plus the C++ N-3 bridge sources, into
+# one self-contained shared object the AAR ships.
+#
+# Pre-reqs (same as build-android):
+#   * $ANDROID_NDK_HOME pointing at NDK r26+
+#   * cargo-ndk (`cargo install cargo-ndk`)
+#   * rustup targets aarch64-linux-android + x86_64-linux-android
+cross-build-sframe-native-android:
+    @test -n "${ANDROID_NDK_HOME:-}" || (echo "ERROR: ANDROID_NDK_HOME unset — see apps/android/README.md" && exit 1)
+    @rustup target list --installed | grep -q "aarch64-linux-android" || rustup target add aarch64-linux-android
+    @rustup target list --installed | grep -q "x86_64-linux-android" || rustup target add x86_64-linux-android
+    # 1. Cross-compile the lakko-sframe-native staticlib for
+    #    both ABIs via cargo-ndk. The output goes under
+    #    target/{aarch64-linux-android,x86_64-linux-android}/
+    #    release/liblakko_sframe_native.a (cargo-ndk just sets
+    #    CC + AR + linker env vars for the NDK toolchain and
+    #    delegates to plain cargo).
+    cargo ndk \
+        --target arm64-v8a \
+        --target x86_64 \
+        build --release -p lakko-sframe-native
+    # 2. Build the JNI bridge .so for each ABI by hand. AGP's
+    #    `externalNativeBuild { cmake }` path would also work
+    #    but has a brittle ordering with cargo-ndk's output;
+    #    plain $(NDK_TOOLCHAIN)/bin/clang++ is simpler + the
+    #    surface is small (two .cc files, one .a archive).
+    tools/build-sframe-jni.sh
+
+# G3-sframe-native N-5 — full Android build of both jniLibs
+# layers (lakko-ffi-uniffi via build-android + the SFrame
+# bridge via cross-build-sframe-native-android). Run this
+# before any Gradle build of the app that depends on
+# :lakko-sframe.
+build-android-all: build-android cross-build-sframe-native-android
+
 # Phase 1.14a — cross-compile `lakko-ffi-uniffi` (staticlib) for
 # the three iOS targets that cover both physical devices + the
 # simulator on every Mac architecture, then bundle the per-target

@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+<!-- SPDX-FileCopyrightText: 2026 Lakko Contributors -->
+<!--
+    G3-sframe-native N-5 — manifest for the lakko-sframe AAR.
+    Empty save for the package namespace; no activities,
+    permissions, or content providers ride with this library.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" />
