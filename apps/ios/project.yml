@@ -50,6 +50,19 @@ targets:
     platform: iOS
     sources:
       - path: Lakko
+      # G3-sframe-native N-4 — pull the C++ bridge sub-sprint
+      # source into the iOS target as a sibling compile unit.
+      # Only the production .cc / .h ship; test_bridge.cc +
+      # test_checks_stub.cc are excluded — the iOS WebRTC
+      # framework supplies the real FatalLog at link time, and
+      # the standalone test main() would collide with iOS app
+      # main.
+      - path: ../shared/sframe-bridge/sframe-bridge.cc
+        type: file
+        buildPhase: sources
+      - path: ../shared/sframe-bridge/sframe-bridge.h
+        type: file
+        buildPhase: headers
     # Asset catalog: omitted for the smoke build (1.14c). The
     # default Xcode-emitted launcher icon shows for `me.lakko.dev`
     # debug installs. The real branding lands when 1.14d's
@@ -155,6 +168,62 @@ targets:
         SWIFT_VERSION: "5.10"
         # `me.lakko.dev` — same as the Android applicationId.
         PRODUCT_BUNDLE_IDENTIFIER: me.lakko.dev
+        # G3-sframe-native N-4 — bridging header so the Obj-C++
+        # SFrameAttach shim (apps/ios/Lakko/Calls/SFrameAttach.mm)
+        # is importable from Swift call code without a separate
+        # Obj-C-only static library. The header itself lives at
+        # apps/ios/Lakko/Lakko-Bridging-Header.h and currently
+        # imports only Calls/SFrameAttach.h.
+        SWIFT_OBJC_BRIDGING_HEADER: Lakko/Lakko-Bridging-Header.h
+        # G3-sframe-native N-4 — the SFrame bridge depends on the
+        # `apps/shared/sframe-bridge/sframe-bridge.{h,cc}` C++17
+        # source plus the cbindgen-generated header from
+        # `crates/lakko-sframe-native`. The Xcode build copies
+        # sframe-bridge.cc into the target's compile sources via
+        # an additional source path below; we also need to widen
+        # the header-search path for "sframe-bridge.h" + the
+        # cbindgen-emitted "lakko_sframe_native.h".
+        #
+        # The C++17 standard is required by the bridge's
+        # `std::lock_guard` + `[[nodiscard]]` usage.
+        CLANG_CXX_LANGUAGE_STANDARD: c++17
+        CLANG_CXX_LIBRARY: libc++
+        # Header search paths. Three entries:
+        #   - the bridge's own dir (sframe-bridge.h)
+        #   - the cbindgen output dir (lakko_sframe_native.h)
+        #   - the M125 vendored webrtc headers (only needed by
+        #     sframe-bridge.cc, which subclasses webrtc::Frame*)
+        HEADER_SEARCH_PATHS:
+          - $(SRCROOT)/../shared/sframe-bridge
+          # G3-sframe-native N-4 — stable mirror path written by
+          # crates/lakko-sframe-native/build.rs alongside the
+          # canonical OUT_DIR copy. Xcode does NOT glob HEADER_
+          # SEARCH_PATHS, so the hash-suffixed `target/release/
+          # build/lakko-sframe-native-*/out` cannot be referenced
+          # directly. The mirror at `target/lakko-include/` is
+          # populated by every `cargo build -p lakko-sframe-
+          # native` invocation.
+          - $(SRCROOT)/../../target/lakko-include
+          - $(SRCROOT)/../shared/webrtc-cpp-headers/M125/include
+        # Link the cross-compiled `liblakko_sframe_native.a`
+        # archives. Layout under `target/ios-link/`:
+        #
+        #   iphoneos/           — aarch64-apple-ios (device only)
+        #   iphonesimulator/    — fat archive: aarch64-apple-ios-
+        #                         sim + x86_64-apple-ios (lipo'd)
+        #
+        # Xcode substitutes `$(PLATFORM_NAME)` to one of those
+        # directory names at link time. The archives are populated
+        # by `just ios-cross-build` (justfile recipe that runs
+        # `cargo build -p lakko-sframe-native --release --target
+        # <slice>` three times + `lipo -create` for the simulator
+        # pair). N-4-build is the follow-up sub-sprint that wires
+        # this into an Xcode "Run Script" build phase so a fresh
+        # `xcodebuild` invocation auto-builds the archives.
+        LIBRARY_SEARCH_PATHS:
+          - $(SRCROOT)/../../target/ios-link/$(PLATFORM_NAME)
+        OTHER_LDFLAGS:
+          - -llakko_sframe_native
         # Modern build-settings (Xcode 15+) defaults we want
         # locked in: enable-bitcode is dead, deprecated-build-
         # system is gone, ENABLE_USER_SCRIPT_SANDBOXING is on

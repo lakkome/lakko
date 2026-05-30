@@ -377,6 +377,38 @@ build-android:
 # For a single-app `.xcframework` consumed by one Xcode target,
 # static linking is the canonical shape + the App Store reviewer
 # friction is zero.
+# G3-sframe-native N-4 — cross-compile the lakko-sframe-native
+# Rust staticlib for every iOS slice the Xcode build needs to
+# link, then lay the archives out under target/ios-link/ keyed
+# by Xcode's $(PLATFORM_NAME) substitution. Run this before
+# `just build-ios` whenever the lakko-sframe-native crate (or
+# any of its transitive Rust deps) changes.
+#
+# Three slices:
+#   - aarch64-apple-ios       — physical device builds
+#   - aarch64-apple-ios-sim   — Apple Silicon Mac simulators
+#   - x86_64-apple-ios        — Intel Mac simulators
+#
+# The two simulator slices are `lipo`-fused into one fat
+# archive (libfoo.a in iphonesimulator/) — Xcode's linker picks
+# the matching arch out of the fat archive automatically.
+cross-build-sframe-native-ios:
+    @command -v lipo >/dev/null 2>&1 || (echo "ERROR: lipo not found — install Xcode Command Line Tools via 'xcode-select --install'" && exit 1)
+    @rustup target list --installed | grep -q "aarch64-apple-ios" || rustup target add aarch64-apple-ios
+    @rustup target list --installed | grep -q "aarch64-apple-ios-sim" || rustup target add aarch64-apple-ios-sim
+    @rustup target list --installed | grep -q "x86_64-apple-ios" || rustup target add x86_64-apple-ios
+    cargo build -p lakko-sframe-native --release --target aarch64-apple-ios
+    cargo build -p lakko-sframe-native --release --target aarch64-apple-ios-sim
+    cargo build -p lakko-sframe-native --release --target x86_64-apple-ios
+    mkdir -p target/ios-link/iphoneos target/ios-link/iphonesimulator
+    cp target/aarch64-apple-ios/release/liblakko_sframe_native.a \
+       target/ios-link/iphoneos/liblakko_sframe_native.a
+    lipo -create \
+        target/aarch64-apple-ios-sim/release/liblakko_sframe_native.a \
+        target/x86_64-apple-ios/release/liblakko_sframe_native.a \
+        -output target/ios-link/iphonesimulator/liblakko_sframe_native.a
+    @echo "OK: target/ios-link/{iphoneos,iphonesimulator}/liblakko_sframe_native.a"
+
 [macos]
 build-ios:
     @command -v xcodebuild >/dev/null 2>&1 || (echo "ERROR: xcodebuild not found — install Xcode Command Line Tools via 'xcode-select --install'" && exit 1)

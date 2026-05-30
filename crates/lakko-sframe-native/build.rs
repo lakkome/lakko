@@ -34,6 +34,41 @@ fn main() {
     {
         Ok(bindings) => {
             bindings.write_to_file(&header_path);
+            // G3-sframe-native N-4 — also emit to a stable, glob-
+            // free path so downstream build systems (Xcode, Gradle
+            // NDK) can `-I` it without expanding `lakko-sframe-
+            // native-*/out`. `CARGO_TARGET_DIR` defaults to
+            // `<workspace>/target`; the stable path is
+            // `<workspace>/target/lakko-include/`. We resolve it
+            // off `CARGO_MANIFEST_DIR` because cargo's
+            // `CARGO_TARGET_DIR` is only set when the user
+            // overrides it via env.
+            let stable_target = PathBuf::from(&crate_dir)
+                .parent()
+                .and_then(|p| p.parent())
+                .map(|workspace| workspace.join("target").join("lakko-include"));
+            if let Some(dir) = stable_target {
+                if let Err(e) = std::fs::create_dir_all(&dir) {
+                    println!(
+                        "cargo:warning=lakko-sframe-native: could not create {}: {e}",
+                        dir.display()
+                    );
+                } else {
+                    let stable_path = dir.join("lakko_sframe_native.h");
+                    if let Err(e) = std::fs::copy(&header_path, &stable_path) {
+                        println!(
+                            "cargo:warning=lakko-sframe-native: could not copy header to \
+                             {}: {e}",
+                            stable_path.display()
+                        );
+                    } else {
+                        println!(
+                            "cargo:warning=lakko-sframe-native: mirrored {}",
+                            stable_path.display()
+                        );
+                    }
+                }
+            }
             println!("cargo:rerun-if-changed=src/lib.rs");
             println!("cargo:rerun-if-changed=cbindgen.toml");
             println!(

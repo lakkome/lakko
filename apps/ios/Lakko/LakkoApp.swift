@@ -57,6 +57,25 @@ struct LakkoApp: App {
     @StateObject private var inviteIntake = InviteIntake()
 
     init() {
+        // G3-sframe-native N-4 — runtime probe for the non-public
+        // `setFrameEncryptor:` / `setFrameDecryptor:` selectors
+        // libwebrtc M125's RTCRtpSender / RTCRtpReceiver carry.
+        //
+        // We deliberately call this BEFORE any other side effect
+        // because the probe's NO result becomes a process-wide
+        // gate: `SFrameAvailability.shared.isCallingAvailable`
+        // returns false, the call UI surfaces a disabled banner,
+        // and `CallSession.start` aborts before opening any
+        // RTCPeerConnection. There is no silent fallback to
+        // non-E2EE media — security invariant #4 forbids it.
+        //
+        // The probe is cheap (one `class_respondsToSelector` per
+        // class) and the result is cached for the process
+        // lifetime; running it here means the very first call-UI
+        // surface render already has the correct availability
+        // state.
+        SFrameAvailability.shared.runBootProbe()
+
         // `@StateObject` cannot reference another `@StateObject` in
         // its default initializer, so we hand-roll the wiring
         // inside `init`: build the AuthRepository first, then feed

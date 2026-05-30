@@ -123,6 +123,20 @@ public final class WebRTCPeerConnection: NSObject {
     /// pay the AVCapture cost.
     private var localVideoTrack: RTCVideoTrack?
 
+    /// `RTCRtpSender` returned by `peer.add(audioTrack, ...)`.
+    /// G3-sframe-native N-4 attaches the `LakkoFrameEncryptor` to
+    /// this sender via `LakkoSFrameAttach.attachEncryptorToSender
+    /// (_:seed:localLeaf:)` once the call's MLS exporter seed is
+    /// known (which happens after the welcome / KP-forward
+    /// envelope dispatcher resolves on the link-based-invite
+    /// path, or immediately after `Group.create` on the
+    /// 1×1-from-chat path).
+    internal var localAudioSender: RTCRtpSender?
+
+    /// Same shape as `localAudioSender`, populated by
+    /// `addLocalVideoTrack(_:)` once it's no longer a stub.
+    internal var localVideoSender: RTCRtpSender?
+
     // MARK: - Lifecycle
 
     /// Construct a peer connection.
@@ -232,8 +246,15 @@ public final class WebRTCPeerConnection: NSObject {
             trackId: "lakko-audio0"
         )
         track.isEnabled = enabled
-        peer.add(track, streamIds: ["lakko-local-stream"])
+        // `peer.add(track, streamIds:)` returns an `RTCRtpSender?`
+        // — the surface we need for SFrame attachment. If it's
+        // nil the framework refused the track for an unrelated
+        // reason (audio session conflict, etc.); we still record
+        // the local track so mute toggles work, but SFrame stays
+        // unattached on a degenerate peer.
+        let sender = peer.add(track, streamIds: ["lakko-local-stream"])
         self.localAudioTrack = track
+        self.localAudioSender = sender
     }
 
     /// Toggle the local audio track's `isEnabled` flag.
@@ -261,8 +282,61 @@ public final class WebRTCPeerConnection: NSObject {
             with: source,
             trackId: "lakko-video0"
         )
-        peer.add(track, streamIds: ["lakko-local-stream"])
+        let sender = peer.add(track, streamIds: ["lakko-local-stream"])
         self.localVideoTrack = track
+        self.localVideoSender = sender
+    }
+
+    // MARK: - SFrame (G3-sframe-native N-4)
+
+    /// Arm SFrame for every outgoing RTCRtpSender on this peer.
+    /// Called by `CallSession` once the per-call MLS exporter
+    /// seed is known.
+    ///
+    /// `seed` is exactly 32 bytes (the
+    /// `Group::export_secret("lakko/call/v1", call_id, 32)`
+    /// output). `localLeaf` is this device's leaf index in the
+    /// call's MLS group.
+    ///
+    /// Returns `true` only when every present sender attached
+    /// successfully. A `false` return is the signal to abort the
+    /// call — security invariant #4 forbids letting one track
+    /// flow encrypted while another doesn't.
+    public func armSFrameEncryptors(seed: Data, localLeaf: UInt32) -> Bool {
+        guard SFrameAvailability.shared.isCallingAvailable else {
+            return false
+        }
+        var allOk = true
+        for sender in [localAudioSender, localVideoSender] {
+            guard let sender = sender else { continue }
+            let status = LakkoSFrameAttach.attachEncryptor(
+                toSender: sender,
+                seed: seed,
+                localLeaf: localLeaf
+            )
+            if status != .OK {
+                allOk = false
+            }
+        }
+        return allOk
+    }
+
+    /// Arm SFrame for a freshly-arrived remote `RTCRtpReceiver`.
+    /// Called by the `peerConnection(_:didStartReceivingOn:)` /
+    /// `peerConnection(_:didAdd:streams:)` delegate paths when
+    /// the framework hands us a new incoming track.
+    public func armSFrameDecryptor(
+        for receiver: RTCRtpReceiver,
+        seed: Data
+    ) -> Bool {
+        guard SFrameAvailability.shared.isCallingAvailable else {
+            return false
+        }
+        let status = LakkoSFrameAttach.attachDecryptor(
+            toReceiver: receiver,
+            seed: seed
+        )
+        return status == .OK
     }
 
     // MARK: - SDP exchange
