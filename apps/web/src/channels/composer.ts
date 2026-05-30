@@ -110,17 +110,20 @@ export interface ChannelPublisherKeys {
  * `wasm.Identity.fromSeed`); `channelIdHex` is the
  * 16-byte channel id as a 32-char hex string.
  *
- * The PublisherGroup is created and dropped within this
- * call — the seed is the only thing extracted. A future
- * sub-sprint (G4-2-mls-persistence) will keep the group
- * alive across composer calls so it can be advanced /
- * rotated; until then every call to this helper for the
- * same channel produces a different seed (the group has
- * a random group_id internally), so the caller MUST
- * persist the returned `seed` and reuse it across posts
- * on the same channel/epoch. The web UI does this
- * through `channels-state.setKeys`, called immediately
- * after `freshPublisherKeys` resolves.
+ * G4-2-mls-persistence step 3 — the PublisherGroup is now
+ * **persisted** in the OpenMLS provider keyed by
+ * `channelIdHex` (deterministic group id derived from the
+ * 16-byte channel id). The first publish on this browser
+ * profile mints + persists; every subsequent publish
+ * reuses the same MLS state, so the exporter output is
+ * stable across page reloads. Subscribers who received a
+ * sealed seed envelope in a prior epoch continue to
+ * decrypt new posts.
+ *
+ * The previous throwaway-group implementation lived here
+ * until step 3 (flagged in the G-27 closeout). See
+ * `crates/lakko-mls/src/publisher_group.rs` for the
+ * Rust-core invariant + the load-or-create dance.
  */
 export async function freshPublisherKeys(
   identity: WasmIdentity,
@@ -129,21 +132,18 @@ export async function freshPublisherKeys(
   const wasm = await loadWasm();
   const channelId = channelIdFromHex(channelIdHex);
 
-  // MLS PublisherGroup → exporter → channel seed. The
-  // group lives only for the duration of this call.
-  const group = new wasm.Group(identity);
-  let exporterOutput: Uint8Array;
+  // Persistent PublisherGroup → MLS exporter → channel
+  // seed. The wasm-bindgen surface delegates to the
+  // load-or-create dance in `crates/lakko-mls`; the seed
+  // is stable across page reloads for the same identity +
+  // channel id.
+  const publisher = wasm.PublisherGroup.openOrCreate(identity, channelId);
+  let seed: Uint8Array;
   try {
-    exporterOutput = group.exportSecret(
-      identity,
-      wasm.channelExporterLabel(),
-      channelId,
-      32,
-    );
+    seed = publisher.channelSeed(identity);
   } finally {
-    group.free();
+    publisher.free();
   }
-  const seed = wasm.channelSeedFromMlsExporterOutput(exporterOutput);
 
   const signer = wasm.ChannelSigningKey.generate();
   const signingKeySeed = signer.toSeed();

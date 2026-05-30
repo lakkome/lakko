@@ -117,32 +117,41 @@ public enum ChannelsComposer {
     ) throws -> ChannelPublisherKeys {
         let channelId = try channelIdFromHex(channelIdHex)
 
-        let exporterOutput: Data
+        // G4-2-mls-persistence step 3 — load-or-create the
+        // PublisherGroup keyed by `channelId`. The first
+        // publish on this device mints + persists; every
+        // subsequent publish reuses the same MLS state, so
+        // the exporter output is stable across process
+        // restarts. Subscribers who received a sealed seed
+        // envelope in a prior epoch continue to decrypt new
+        // posts.
+        //
+        // Replaces the throwaway-group path that lived here
+        // before (and was explicitly flagged as a follow-up
+        // in the G-27 closeout). See
+        // `crates/lakko-mls/src/publisher_group.rs` for the
+        // Rust-core invariant.
+        let seedBytes: Data
         do {
-            // `Group` releases its Rust handle in its
-            // `deinit` (UniFFI's Swift surface does not
-            // expose an explicit `close()`); the binding
-            // is `Disposable`-via-ARC. Limiting the
-            // variable's scope to this `do` block is the
-            // idiomatic equivalent of the web's
-            // `try { ... } finally { group.free(); }`.
-            let group = try Group.create(identity: identity)
-            exporterOutput = try group.exportSecret(
+            let group = try LakkoCore.publisherGroupOpenOrCreate(
                 identity: identity,
-                label: LakkoCore.channelExporterLabel(),
-                context: channelId,
-                length: 32
+                channelId: channelId
             )
+            seedBytes = try group.channelSeed(identity: identity)
+        } catch let FfiError.Group(msg) {
+            throw ChannelsComposerError.ffi(msg)
         } catch let FfiError.Channels(msg) {
             throw ChannelsComposerError.ffi(msg)
-        }
-
-        let seed: Data
-        do {
-            seed = try LakkoCore.channelSeedFromMlsExporterOutput(bytes: exporterOutput)
-        } catch let FfiError.Channels(msg) {
+        } catch let FfiError.Codec(msg) {
             throw ChannelsComposerError.ffi(msg)
         }
+        // The PublisherGroup surface returns the 32-byte
+        // channel seed directly — no separate
+        // `channelSeedFromMlsExporterOutput` hop needed (the
+        // wrapper bakes in the exporter label + length +
+        // context per
+        // `lakko_mls::publisher_group::CHANNEL_EXPORTER_LABEL`).
+        let seed = seedBytes
 
         let signer = ChannelSigningKey.generate()
         return ChannelPublisherKeys(

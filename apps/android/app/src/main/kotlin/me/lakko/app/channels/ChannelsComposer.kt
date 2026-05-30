@@ -9,6 +9,7 @@ import uniffi.lakko_ffi_uniffi.ChannelSubscriberKeypair
 import uniffi.lakko_ffi_uniffi.FfiException
 import uniffi.lakko_ffi_uniffi.Group
 import uniffi.lakko_ffi_uniffi.Identity
+import uniffi.lakko_ffi_uniffi.publisherGroupOpenOrCreate as uniffiPublisherGroupOpenOrCreate
 import uniffi.lakko_ffi_uniffi.channelExporterLabel as uniffiChannelExporterLabel
 import uniffi.lakko_ffi_uniffi.channelSeedEnvelopeLen as uniffiChannelSeedEnvelopeLen
 import uniffi.lakko_ffi_uniffi.channelSeedFromMlsExporterOutput as uniffiChannelSeedFromMlsExporterOutput
@@ -147,30 +148,32 @@ public object ChannelsComposer {
     ): ChannelPublisherKeys {
         val channelId = channelIdFromHex(channelIdHex)
 
-        val exporterOutput: ByteArray = try {
-            val group = Group.create(identity)
+        // G4-2-mls-persistence step 3 — load-or-create the
+        // PublisherGroup keyed by `channelId`. The first
+        // publish mints + persists; every subsequent publish
+        // reuses the same MLS state so the exporter output is
+        // stable across process restarts. Subscribers who
+        // received a sealed seed envelope in a prior epoch
+        // continue to decrypt new posts.
+        //
+        // Replaces the throwaway-group path that lived here
+        // before (flagged as the follow-up in the G-27
+        // closeout). See
+        // `crates/lakko-mls/src/publisher_group.rs` for the
+        // Rust-core invariant.
+        val seed: ByteArray = try {
+            val publisher = uniffiPublisherGroupOpenOrCreate(identity, channelId)
             try {
-                group.exportSecret(
-                    identity = identity,
-                    label = uniffiChannelExporterLabel(),
-                    context = channelId,
-                    length = 32u,
-                )
+                publisher.channelSeed(identity)
             } finally {
-                // `Group` is UniFFI-Disposable +
-                // AutoCloseable — explicit close() drops
-                // the Rust object now rather than waiting
-                // on JVM GC.
-                group.close()
+                publisher.close()
             }
+        } catch (e: FfiException.Group) {
+            throw ChannelsComposerException.Ffi(e.message ?: "PublisherGroup open_or_create failed")
         } catch (e: FfiException.Channels) {
             throw ChannelsComposerException.Ffi(e.message ?: "PublisherGroup exporter failed")
-        }
-
-        val seed: ByteArray = try {
-            uniffiChannelSeedFromMlsExporterOutput(exporterOutput)
-        } catch (e: FfiException.Channels) {
-            throw ChannelsComposerException.Ffi(e.message ?: "channelSeedFromMlsExporterOutput failed")
+        } catch (e: FfiException.Codec) {
+            throw ChannelsComposerException.Ffi(e.message ?: "PublisherGroup channel_id codec failed")
         }
 
         val signer = ChannelSigningKey.generate()
