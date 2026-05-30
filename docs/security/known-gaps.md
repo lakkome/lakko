@@ -869,22 +869,95 @@ identical `Group::create`/exporter inputs;
 which currently treats `group_id` as random, so
 that property only holds after group-id persistence
 
-### G-28: SFrame on-device wiring blocked by mobile WebRTC SDK shape — FFI algorithm shipped, frame-encryptor surface not exposed by upstream Java/Swift APIs
+### G-28: SFrame on-device wiring — CLOSED (May 2026) via the G3-sframe-native arc (N-1..N-6)
 
-**Status (May 2026)**: The Rust SFrame algorithm
-(`lakko_calls::sframe::{CallKey, ParticipantKey, seal,
-open}` + RFC 9605 §4 wire-header encoder /decoder) is
-fully FFI-exposed (G3-sframe step 1, both UniFFI and
-wasm-bindgen). 11 unit tests pin the full
-publisher-side / receiver-side / wrong-counter /
-distinct-leaf / wire round-trip semantics. The
-**algorithm is callable from Swift, Kotlin, and
-TypeScript** today.
+**Status (May 2026)**: **CLOSED.** Six sub-sprints (N-1
+through N-6) shipped the full native-shim stack on both
+mobile platforms. The Rust SFrame algorithm is now
+plumbed end-to-end through libwebrtc's
+`FrameEncryptorInterface` / `FrameDecryptorInterface`
+on iOS and Android, with security invariant #4 ("no
+fallback to non-E2EE") enforced at five layers
+(documented under C-45..C-50 in
+[`docs/security/calls.md`](./calls.md)).
 
-What is NOT yet wired is **per-frame interception of
-libwebrtc's encrypt / decrypt path on iOS and
-Android**. The investigation surfaced a structural
-ceiling on the artifacts we currently depend on:
+What landed:
+
+- **N-1** `crates/lakko-sframe-native/` — flat C ABI
+  around `lakko_calls::sframe` (11 `extern "C"`
+  functions + 7 unit tests + cbindgen header emitted
+  to a stable mirror at `target/lakko-include/`).
+- **N-2** `apps/shared/webrtc-cpp-headers/M125/` — 13
+  sha256-pinned libwebrtc M125 (branch-heads/6422)
+  C++ headers + 2 Lakko-authored abseil shims +
+  `fetch.sh` verify-mode + `probe.cc` compile-only
+  validation harness.
+- **N-3** `apps/shared/sframe-bridge/` — C++ subclass
+  `LakkoFrameEncryptor` / `LakkoFrameDecryptor` of
+  `webrtc::FrameEncryptorInterface` /
+  `FrameDecryptorInterface` (the upstream M125
+  shape). 4-test standalone round-trip suite proving
+  AAD-binding, multi-sender cache, bad-seed rejection.
+- **N-4** `apps/ios/Lakko/Calls/SFrameAttach.{h,mm}`
+  + `Lakko-Bridging-Header.h` — Obj-C++ shim with
+  boot-time `class_respondsToSelector` probe for
+  `setFrameEncryptor:` / `setFrameDecryptor:`. Refuses
+  to start the call when the probe goes negative.
+  Swift-side `SFrameAvailability.shared` fail-closed
+  gate. `cross-build-sframe-native-ios` justfile
+  recipe lipo-fuses simulator slices.
+- **N-5** `apps/android/lakko-sframe/` — Gradle AAR
+  with Kotlin `LakkoFrameEncryptor` / `Decryptor`
+  implementing `org.webrtc.FrameEncryptor` /
+  `FrameDecryptor`. JNI bridge `libsframe_jni.so`
+  built via `tools/build-sframe-jni.sh` against the
+  cross-compiled Rust staticlib for each NDK ABI.
+  Kotlin `SFrameAvailability` boot probe through
+  `Class.forName + getMethod` against
+  `org.webrtc.RtpSender.setFrameEncryptor`.
+- **N-6** Production CallSession integration on both
+  platforms — `setCallKey(seed, localLeaf)` injected
+  after welcome-ferry / KP-forward dispatcher
+  resolves; `attachSFrame` called between
+  `addLocalAudioTrack` and SDP build so the
+  encryptor is armed before libwebrtc's codec
+  thread pulls bytes. Extended Rust E2E test
+  `crates/lakko-sframe-native/tests/sfu_opacity_e2e.rs`
+  (6 tests, all green) proving SFU opacity,
+  AAD-tampering detection, wrong-key isolation,
+  multi-party fan-in, cross-call isolation, counter
+  monotonicity.
+
+Validation chain (all green):
+
+- `cargo test --workspace --all-targets` — 224+ tests
+  pass including the new sfu_opacity_e2e suite.
+- `xcodebuild -destination 'generic/platform=iOS
+  Simulator' build` → BUILD SUCCEEDED. The full Swift
+  / Obj-C++ / C++ / Rust path compiles and links
+  cleanly with the lipo'd `liblakko_sframe_native.a`.
+- `./gradlew :app:assembleDebug` → BUILD SUCCESSFUL.
+  The full Kotlin / JNI / C++ / Rust path likewise.
+
+**Deferred follow-ups (out of G-28 scope, tracked
+separately)**:
+
+- **N-4-validate** — runtime-on-simulator + on-device
+  dual-test (two iOS simulators in CI running a
+  synthetic call, verifying SFrame frames decrypt and
+  tampered AAD causes kFailedToDecrypt).
+- **N-5-validate** — Android-emulator equivalent.
+
+Build artefacts are already produced; what is
+deferred is the CI harness that exercises them under
+real ICE.
+
+---
+
+**Historical context (preserved for audit trail)**:
+
+The original G-28 investigation surfaced a structural
+ceiling on both upstream WebRTC SDKs Lakko depends on:
 
 - **Android `io.github.webrtc-sdk:android` 125.6422.07**
   exposes `org.webrtc.FrameEncryptor` and

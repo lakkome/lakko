@@ -13,10 +13,10 @@ section that describes it.
 | Class | Count | Range | Source file |
 |---|---|---|---|
 | **I-** | 8   | I-1..I-8   | [`mls-state-machine.md`](./mls-state-machine.md) |
-| **C-** | 44  | C-1..C-44  | [`calls.md`](./calls.md) |
+| **C-** | 50  | C-1..C-50  | [`calls.md`](./calls.md) |
 | **T-** | 15  | T-1..T-15  | [`transport.md`](./transport.md) |
-| **G-** | 27  | G-1..G-27  | [`known-gaps.md`](./known-gaps.md) — open / deferred |
-| Total invariants  | 67  | (I + C + T) | live properties |
+| **G-** | 27  | G-1..G-27 (G-28 closed via the G3-sframe-native arc N-1..N-6) | [`known-gaps.md`](./known-gaps.md) — open / deferred |
+| Total invariants  | 73  | (I + C + T) | live properties |
 | Total open gaps   | 27  | (G)         | tracked + scoped |
 
 ## MLS state machine invariants (I-1..I-8)
@@ -37,7 +37,7 @@ in `crates/lakko-mls/`.
 | I-7 | Opening a `SealedBundle` with an unknown `algorithm` discriminator is rejected before AEAD-open is attempted | Forward-compat ratchet |
 | I-8 | `create_devicegroup_message` round-trips through `parse_devicegroup_payload` losslessly for every typed body variant | Wire-format byte-stability |
 
-## Call-side invariants (C-1..C-44)
+## Call-side invariants (C-1..C-50)
 
 Source: [`calls.md`](./calls.md). Five sub-sections —
 media-key pipeline (C-1..C-14), call-admission JWT
@@ -114,6 +114,17 @@ media-key pipeline (C-1..C-14), call-admission JWT
 | C-42 | Rotation is atomic — either every envelope lands or none does |
 | C-43 | FFI subscriber-side surface preserves the in-Rust opacity contract |
 | C-44 | Production channel seed comes from the MLS exporter; the demo path is grep-clean |
+
+### C-45..C-50 — SFrame native-shim stack (G3-sframe-native arc, closes G-28)
+
+| ID   | Title |
+|---|---|
+| C-45 | lakko-sframe-native C ABI is the only path into the AEAD seal from non-Rust callers |
+| C-46 | Bad seed length is refused at every layer, no silent downgrade |
+| C-47 | Boot-time selector probe enforces invariant #4 (no fallback to non-E2EE) |
+| C-48 | SFrame attach happens between addLocalAudioTrack and SDP build |
+| C-49 | Per-sender ParticipantKey cache is bounded by leaf count + thread-safe under multi-sender fan-in |
+| C-50 | Refcount machinery balances every AddRef with exactly one Release, no leak no double-free |
 
 ## Transport-layer invariants (T-1..T-11)
 

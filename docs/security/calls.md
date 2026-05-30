@@ -1922,6 +1922,223 @@ trivially separate production from demo paths:
    boundary — two today: this helper and the subscriber-
    side `openSubscriberSeedEnvelope`. Listed in C-43 #2.
 
+## SFrame native-shim invariants (G3-sframe-native — closes G-28)
+
+The native-shim stack lands the per-frame AEAD seal /
+open on iOS + Android by subclassing libwebrtc's M125
+`webrtc::FrameEncryptorInterface` / `FrameDecryptorInterface`
+and trampolining through a flat C ABI into
+`lakko_calls::sframe`. Six sub-sprints (N-1..N-6)
+shipped six invariants:
+
+### C-45: lakko-sframe-native C ABI is the only path into the AEAD seal from non-Rust callers
+
+`crates/lakko-sframe-native` (N-1) is the bottom of
+the stack — every iOS Obj-C++ and Android JNI call
+into the SFrame seal / open path goes through this
+crate's 11 `extern "C"` functions. No alternative
+back-channel exists:
+
+1. The iOS Obj-C++ shim
+   (`apps/ios/Lakko/Calls/SFrameAttach.mm`) imports
+   only the cbindgen-generated
+   `lakko_sframe_native.h` header (via the stable
+   mirror at `target/lakko-include/`); it never
+   reaches into `lakko-calls` directly.
+2. The Android JNI shim
+   (`apps/android/lakko-sframe/src/main/cpp/sframe_jni.cc`)
+   does the same — its sole Rust-side dependency is
+   the cross-compiled
+   `liblakko_sframe_native.a` archive linked into
+   `libsframe_jni.so`.
+3. The C++ N-3 bridge layer
+   (`apps/shared/sframe-bridge/sframe-bridge.cc`)
+   is the only consumer of the C ABI from C++;
+   neither iOS nor Android side bypasses it.
+
+This ABI surface is what audit tooling greps for; a
+hypothetical alternative seal path in the iOS /
+Android binaries would be visible as a missing
+symbol against this header.
+
+### C-46: Bad seed length is refused at every layer, no silent downgrade
+
+The 32-byte requirement on the MLS exporter output
+(`Group::export_secret("lakko/call/v1", call_id, 32)`)
+is enforced symmetrically at five layers, each of
+which refuses to proceed (returns null /
+`BadSeedLength` / `false`) on a shorter or longer
+input:
+
+1. **Rust core**: `lakko_calls::sframe::CallKey::from_seed`
+   takes `[u8; 32]`, so length is a compile-time
+   constraint at the type system level.
+2. **C ABI**: `lakko_sframe_call_key_new(seed_ptr,
+   seed_len, ...)` checks `seed_len == CALL_KEY_LEN`
+   before constructing.
+3. **C++ bridge**: `LakkoFrameEncryptor::Create` /
+   `LakkoFrameDecryptor::Create` return `nullptr`
+   when the C ABI returned non-OK.
+4. **iOS Obj-C++**:
+   `+[LakkoSFrameAttach attachEncryptorToSender:
+   seed:localLeaf:]` returns
+   `LakkoSFrameAttachStatusBadSeedLength` on
+   `seed.length != 32`, before the C++ side is
+   even called.
+5. **Android Kotlin**:
+   `LakkoFrameEncryptor.create(seed, localLeaf)`
+   returns `null` on `seed.size != 32`.
+
+The path of least resistance through any layer
+under bad input is a refused call, never a silently-
+unencrypted media stream.
+
+### C-47: Boot-time selector probe enforces invariant #4 (no fallback to non-E2EE)
+
+Both platform shims run a one-shot capability probe
+before the first call surface renders:
+
+- **iOS** (`SFrameAttach.mm`): atomic
+  `class_respondsToSelector` against
+  `RTCRtpSender` / `RTCRtpReceiver` for the non-
+  public selectors `setFrameEncryptor:` /
+  `setFrameDecryptor:`. Cached tri-state result
+  (`0 = unknown`, `1 = yes`, `2 = no`) in
+  `g_probe_result`.
+- **Android** (`SFrameAvailability.kt`):
+  `Class.forName + getMethod` against
+  `org.webrtc.RtpSender.setFrameEncryptor` /
+  `RtpReceiver.setFrameDecryptor`. Cached
+  `AtomicReference<Boolean?>`.
+
+Both probes are **fail-closed**: a not-yet-run or
+negative result returns `false` from
+`isCallingAvailable`. The Swift `SFrameAvailability.shared`
++ Kotlin `SFrameAvailability` singletons run the
+probe at the very top of `LakkoApp.init` (iOS) /
+`MainActivity.onCreate` (Android) so the first
+call-UI render already sees the correct value.
+
+`CallSession.attachSFrame` re-checks
+`isCallingAvailable` immediately before each call
+start and aborts via `endLocal(reason: .error)` on
+`false`. A milestone bump in either upstream WebRTC
+SDK that renames or removes the selectors / methods
+makes the probe go negative; the call UI surfaces
+"calling unavailable on this build" rather than
+silently shipping unencrypted media.
+
+### C-48: SFrame attach happens between addLocalAudioTrack and SDP build
+
+The `armSFrameEncryptors(seed, localLeaf)` call
+runs inside the call-start path AFTER
+`peer.addLocalAudioTrack(...)` captures the freshly-
+created `RtpSender` and BEFORE `composeAndShipOffer`
+/ `composeAndShipAnswer` builds the SDP. This is a
+hard ordering invariant:
+
+- BEFORE add-track: there is no sender to attach to;
+  `armSFrameEncryptors` silently no-ops because the
+  internal `localAudioSender` / `localVideoSender`
+  are nil.
+- AFTER SDP-build: libwebrtc's codec thread can begin
+  pulling encoder bytes the moment the sender exists
+  + the SDP exchange has handed it a peer. An
+  attach that races against the first codec poll
+  would tee plaintext to libwebrtc's encoder before
+  the encryptor is installed — a window of
+  unencrypted egress that audit invariant #4
+  forbids.
+
+`CallSession.dial` and `CallSession.acceptCall` on
+both platforms call `attachSFrame` exactly between
+those two points, and refuse-to-start (`endLocal`)
+on `false` return.
+
+### C-49: Per-sender ParticipantKey cache is bounded by leaf count + thread-safe under multi-sender fan-in
+
+`LakkoFrameDecryptor` (N-3) holds an
+`unordered_map<uint32_t, lakko_sframe_participant_key_t*>`
+keyed by the `sender_leaf` extracted from each
+SFrame wire header. First frame from a new leaf
+triggers one HKDF derivation via
+`lakko_sframe_participant_key_new`; subsequent
+frames hit the cache. The map is guarded by
+`std::mutex cache_mutex_`:
+
+- **Lookup-or-derive** races safely: two threads
+  arriving on the same fresh `sender_leaf`
+  concurrently both derive a `ParticipantKey`; the
+  loser of the `emplace` race frees its copy via
+  `lakko_sframe_participant_key_free` and returns
+  the winner's pointer. Derive happens **outside**
+  the mutex so N parallel first-frame arrivals
+  don't serialise on a contended lock.
+- **Destructor drain**: the map is drained in
+  `~LakkoFrameDecryptor()` without holding the
+  mutex (no other thread can observe an object in
+  its destructor under refcount discipline; the
+  refcount drop is the synchronisation edge).
+- **Cardinality**: bounded by the number of
+  distinct leaves the receiver sees. In an MLS-
+  group call this is `O(participants)`, well below
+  any DoS threshold (MLS group caps are at
+  ≤ 50 000 in vanilla mode; broadcast scenarios
+  use the two-tier channel path which doesn't go
+  through this code).
+
+Test 4 in `sfu_opacity_e2e.rs`
+(`multi_party_fanin_through_per_sender_cache`)
+proves the cardinality bound: three encryptors
+(leaves 10/20/30) feed one decryptor; after round 1
+the cache holds exactly 3 entries; round 2 adds
+none.
+
+### C-50: Refcount machinery balances every AddRef with exactly one Release, no leak no double-free
+
+The C++ N-3 bridge implements `rtc::RefCountInterface`
+manually (no upstream
+`rtc::FinalRefCountedObject<T>` — that header is
+not in the vendored M125 set, see C-45). Discipline:
+
+- **Construct**: `Create()` returns a raw pointer
+  with `refcount_ = 0`. First `AddRef()` bumps to 1.
+- **Platform shim**: iOS Obj-C++
+  `LakkoSFrameEncryptorWrapper` holds the raw
+  pointer behind an `objc_setAssociatedObject`
+  strong retain; its `dealloc` fires
+  `_cppEncryptor->Release()`. Android Kotlin
+  `LakkoFrameEncryptor` holds a `nativePtr: Long`
+  field; its `release()` (idempotent) calls
+  `nativeRelease` which fires `Release()`.
+- **libwebrtc takes ownership**:
+  `[sender setFrameEncryptor:enc]` (iOS) or
+  `sender.setFrameEncryptor(LakkoFrameEncryptor)`
+  (Android) hands the pointer to libwebrtc, which
+  internally wraps it in
+  `rtc::scoped_refptr<webrtc::FrameEncryptorInterface>`.
+  That wrap-up does its own `AddRef()` — refcount
+  goes to 2 (ours + libwebrtc's).
+- **Detach**: `setFrameEncryptor:nil` (or
+  `setFrameEncryptor(null)`) on the platform side
+  drops libwebrtc's `scoped_refptr` — refcount goes
+  back to 1. Our wrapper's `dealloc` /
+  `release()` then drops to 0 and runs
+  `delete this`.
+
+`CallSession.close` / `WebRtcPeerConnection.close`
+on both platforms releases attached encryptors /
+decryptors BEFORE peer-disposal so libwebrtc's
+internal Release runs while our wrapper is still
+holding its retain — no use-after-free window.
+
+Memory-ordering: `AddRef` uses
+`std::memory_order_relaxed`; `Release` uses
+`std::memory_order_acq_rel` so the happens-before
+edge from any prior `AddRef` synchronises with the
+final `delete`. Same posture as upstream
+`rtc::RefCountedNonVirtual`.
+
 ## Exporter labels (call-side)
 
 | Label | Length | Context | Source | Used for |

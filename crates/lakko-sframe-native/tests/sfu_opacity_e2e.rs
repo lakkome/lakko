@@ -69,11 +69,7 @@ fn deterministic_seed(byte: u8) -> [u8; CALL_KEY_LEN] {
 /// Encrypt a frame the way the N-3 LakkoFrameEncryptor::Encrypt
 /// path does: seal + wrap_frame. Returns the wire bytes the SFU
 /// would forward.
-fn encrypt_frame(
-    pk: &mut ParticipantKey,
-    aad: &[u8],
-    plaintext: &[u8],
-) -> Vec<u8> {
+fn encrypt_frame(pk: &mut ParticipantKey, aad: &[u8], plaintext: &[u8]) -> Vec<u8> {
     let (counter, ciphertext) = pk.seal(aad, plaintext).expect("seal");
     let header = SframeHeader {
         kid: u64::from(pk.sender_leaf()),
@@ -132,8 +128,8 @@ fn sfu_opacity_forward_without_inspection() {
     // mirrors services/sfu's fanout_media_data behaviour.
     let sfu_forwarded = wire.clone();
 
-    let recovered = decrypt_frame(&bob_key, &mut bob_cache, aad, &sfu_forwarded)
-        .expect("bob decrypt");
+    let recovered =
+        decrypt_frame(&bob_key, &mut bob_cache, aad, &sfu_forwarded).expect("bob decrypt");
     assert_eq!(recovered, plaintext);
 }
 
