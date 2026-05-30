@@ -18,13 +18,11 @@
 name: censorship-lab
 
 on:
+  # Quota-conservation mode (May 2026). Auto-triggers
+  # disabled. Re-enable the `pull_request` + `schedule`
+  # arms below when a paid CI tier or self-hosted
+  # runner lands.
   workflow_dispatch: {}
-  pull_request:
-    types: [labeled, synchronize, reopened]
-  schedule:
-    # 04:00 UTC — offset from the existing fuzz-quick
-    # (03:00) and sfu-e2e (03:30) cron windows.
-    - cron: "0 4 * * *"
 
 env:
   CARGO_TERM_COLOR: always
@@ -37,11 +35,11 @@ concurrency:
 
 jobs:
   observer:
-    if: >
-      github.event_name == 'workflow_dispatch'
-      || github.event_name == 'schedule'
-      || (github.event_name == 'pull_request'
-          && contains(github.event.pull_request.labels.*.name, 'censorship-lab'))
+    # workflow_dispatch is the only trigger today (quota-
+    # conservation mode); the PR-label + cron arms above
+    # are commented out, so the `if:` gate is a no-op now
+    # but stays in place for the day they come back.
+    if: github.event_name == 'workflow_dispatch'
 
     name: SNI observer + tokio-rustls handshake
     runs-on: ubuntu-latest

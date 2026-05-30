@@ -216,6 +216,83 @@ pub struct SealedFrame {
     pub ciphertext: Vec<u8>,
 }
 
+// ============================================================
+// SFrame wire-format helpers (RFC 9605 §4)
+// ============================================================
+
+/// Encode an SFrame wire frame: `header(kid=sender_leaf,
+/// ctr=counter) || ciphertext`. The platform transformer
+/// returns these bytes to libwebrtc as the encrypted
+/// frame payload.
+///
+/// Mirrors `lakko_calls::SframeHeader::encode()` + a
+/// trailing append of the ciphertext. The choice to live
+/// behind the FFI rather than at the platform layer keeps
+/// the RFC 9605 wire encoder in one place — both iOS and
+/// Android cannot drift.
+#[uniffi::export]
+#[must_use]
+pub fn wrap_sframe_frame(sender_leaf: u32, counter: u32, ciphertext: Vec<u8>) -> Vec<u8> {
+    let header = lakko_calls::SframeHeader {
+        kid: u64::from(sender_leaf),
+        ctr: u64::from(counter),
+    };
+    let mut out = header.encode();
+    out.extend_from_slice(&ciphertext);
+    out
+}
+
+/// Parse an SFrame wire frame back into
+/// `(sender_leaf, counter, ciphertext)`.
+///
+/// # Errors
+///
+/// - [`FfiError::Call`] when the header parse fails
+///   (truncated, reserved bit set).
+/// - [`FfiError::Call`] when the parsed `kid` does not
+///   fit in `u32`. Lakko's call-keying layer pins
+///   `sender_leaf` to `u32` (see
+///   `crates/lakko-calls/src/header.rs` doc comment); a
+///   wire frame with a 5-byte+ kid is either malformed or
+///   from a future schema bump that this binary does not
+///   know how to dispatch.
+/// - [`FfiError::Call`] when the parsed `ctr` does not
+///   fit in `u32`. Same reasoning — `ParticipantKey`
+///   exhausts its counter at `u32::MAX` and triggers a
+///   fresh MLS commit; a wire counter that exceeds
+///   `u32` is out-of-protocol.
+#[uniffi::export]
+pub fn unwrap_sframe_frame(wire: Vec<u8>) -> Result<UnwrappedFrame, FfiError> {
+    let (header, consumed) = lakko_calls::SframeHeader::decode(&wire)
+        .map_err(|e| FfiError::Call(format!("sframe header decode: {e:?}")))?;
+    let sender_leaf = u32::try_from(header.kid)
+        .map_err(|_| FfiError::Call("sframe kid does not fit in u32".into()))?;
+    let counter = u32::try_from(header.ctr)
+        .map_err(|_| FfiError::Call("sframe ctr does not fit in u32".into()))?;
+    let ciphertext = wire[consumed..].to_vec();
+    Ok(UnwrappedFrame {
+        sender_leaf,
+        counter,
+        ciphertext,
+    })
+}
+
+/// Output of [`unwrap_sframe_frame`]. Carries everything
+/// the receiver needs to look up the right
+/// [`ParticipantKey`] and call its `open`.
+#[derive(uniffi::Record, Clone, Debug)]
+pub struct UnwrappedFrame {
+    /// `kid` from the SFrame header; the
+    /// `ParticipantKey`'s sender-leaf index.
+    pub sender_leaf: u32,
+    /// `ctr` from the SFrame header; the AEAD counter
+    /// the sender used.
+    pub counter: u32,
+    /// Bytes that follow the header — the ciphertext
+    /// (including the trailing AEAD tag).
+    pub ciphertext: Vec<u8>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -330,5 +407,71 @@ mod tests {
             .open(vec![], sealed.ciphertext, sealed.counter)
             .unwrap();
         assert_eq!(opened, b"hi from alice");
+    }
+
+    // ============================================================
+    // wire wrap/unwrap tests
+    // ============================================================
+
+    /// `wrap_sframe_frame` + `unwrap_sframe_frame` round-
+    /// trip preserves `(sender_leaf, counter, ciphertext)`.
+    #[test]
+    fn wire_round_trip_preserves_fields() {
+        let ct = b"cipher-bytes-here".to_vec();
+        let wire = wrap_sframe_frame(7, 42, ct.clone());
+        let unwrapped = unwrap_sframe_frame(wire).expect("round-trip parses");
+        assert_eq!(unwrapped.sender_leaf, 7);
+        assert_eq!(unwrapped.counter, 42);
+        assert_eq!(unwrapped.ciphertext, ct);
+    }
+
+    /// Full send-side / receive-side path: alice seals
+    /// + wraps; bob unwraps + opens. This is the shape
+    /// the platform transformers (RTCFrameTransformer on
+    /// iOS, FrameEncryptor + FrameDecryptor on Android)
+    /// stage when they implement
+    /// `transform(encryptedFrame)` and
+    /// `transform(decryptedFrame)` respectively.
+    #[test]
+    fn send_then_receive_full_pipeline() {
+        let ck = CallKey::from_seed(fixture_seed()).unwrap();
+        let alice_send = ck.participant_key(0).unwrap();
+        let aad = b"call-id".to_vec();
+        let plaintext = b"voice frame".to_vec();
+        let sealed = alice_send.seal(aad.clone(), plaintext.clone()).unwrap();
+        let wire = wrap_sframe_frame(0, sealed.counter, sealed.ciphertext);
+
+        // Receiver side. Bob's transformer parses the
+        // wire, looks up Alice's participant key by
+        // sender_leaf, opens.
+        let unwrapped = unwrap_sframe_frame(wire).unwrap();
+        assert_eq!(unwrapped.sender_leaf, 0);
+        let alice_recv = ck.participant_key(unwrapped.sender_leaf).unwrap();
+        let opened = alice_recv
+            .open(aad, unwrapped.ciphertext, unwrapped.counter)
+            .unwrap();
+        assert_eq!(opened, plaintext);
+    }
+
+    /// `unwrap_sframe_frame` refuses an empty input
+    /// (header decoder bails on the first byte).
+    #[test]
+    fn unwrap_refuses_empty_wire() {
+        match unwrap_sframe_frame(vec![]) {
+            Err(FfiError::Call(msg)) => assert!(msg.contains("decode")),
+            other => panic!("expected decode error, got {other:?}"),
+        }
+    }
+
+    /// `unwrap_sframe_frame` refuses a reserved-bit-set
+    /// first byte — that's the forward-compatibility
+    /// schema marker the encoder will never emit.
+    #[test]
+    fn unwrap_refuses_reserved_bit_set() {
+        // First byte 0b1000_0000 → R=1, reserved-set.
+        match unwrap_sframe_frame(vec![0x80, 0x00, 0x00]) {
+            Err(FfiError::Call(msg)) => assert!(msg.contains("decode")),
+            other => panic!("expected decode error, got {other:?}"),
+        }
     }
 }

@@ -868,4 +868,117 @@ identical `Group::create`/exporter inputs;
 `Group::create` uses the identity's MLS provider
 which currently treats `group_id` as random, so
 that property only holds after group-id persistence
+
+### G-28: SFrame on-device wiring blocked by mobile WebRTC SDK shape — FFI algorithm shipped, frame-encryptor surface not exposed by upstream Java/Swift APIs
+
+**Status (May 2026)**: The Rust SFrame algorithm
+(`lakko_calls::sframe::{CallKey, ParticipantKey, seal,
+open}` + RFC 9605 §4 wire-header encoder /decoder) is
+fully FFI-exposed (G3-sframe step 1, both UniFFI and
+wasm-bindgen). 11 unit tests pin the full
+publisher-side / receiver-side / wrong-counter /
+distinct-leaf / wire round-trip semantics. The
+**algorithm is callable from Swift, Kotlin, and
+TypeScript** today.
+
+What is NOT yet wired is **per-frame interception of
+libwebrtc's encrypt / decrypt path on iOS and
+Android**. The investigation surfaced a structural
+ceiling on the artifacts we currently depend on:
+
+- **Android `io.github.webrtc-sdk:android` 125.6422.07**
+  exposes `org.webrtc.FrameEncryptor` and
+  `org.webrtc.FrameDecryptor` only as Java interfaces
+  with a single abstract method `long
+  getNativeFrameEncryptor()` / `long
+  getNativeFrameDecryptor()`. The actual `encrypt` /
+  `decrypt` calls happen entirely inside the C++
+  `webrtc::FrameEncryptorInterface` /
+  `FrameDecryptorInterface` instance whose pointer
+  that `long` returns. A pure-Kotlin override of an
+  `encrypt(mediaType, ssrc, additionalData, frame)`
+  method **does not exist on this SDK** — that shape
+  matches the older `google-webrtc` artifact Lakko
+  abandoned per G3-2 / ADR-0011's note that Google
+  stopped publishing that artifact in 2021.
+- **iOS stasel/WebRTC 125.0.0** — **G3-1-sframe-spike
+  closed (May 2026)**: walked the
+  `WebRTC.xcframework/ios-arm64/WebRTC.framework/Headers/`
+  directory (92 public headers across iOS arm64, iOS
+  simulator x86_64+arm64, macOS, mac-catalyst — every
+  slice identical in this respect). The only public
+  mention of `FrameEncryptor` / `FrameDecryptor` is the
+  docstring on `RTCCryptoOptions.sframeRequireFrameEncryption`
+  — a require-flag, **not** an attach-API. Neither
+  `RTCRtpSender.h` nor `RTCRtpReceiver.h` exposes
+  `frameEncryptor` / `frameDecryptor` /
+  `frameTransformer` properties. The C++
+  `webrtc::FrameEncryptorInterface` exists in upstream
+  libwebrtc but stasel's Obj-C wrappers don't bridge
+  it out. Same shape as Android.
+
+**Path forward (Android, possibly iOS)**: a Rust crate
+`lakko-sframe-jni` that compiles via `cxx-rs` to one
+`.so` per ABI (arm64-v8a, x86_64). The `.so` exposes
+a C++ subclass of `webrtc::FrameEncryptorInterface`
+whose `Encrypt` / `Decrypt` thunks call back into
+LakkoCore's `ParticipantKey` via the existing UniFFI
+surface (a `long` pointer round-trips through the
+Java `getNativeFrameEncryptor()` contract without
+ever crossing back to the JVM mid-frame). This is
+the canonical Insertable-Streams shape upstream
+expects; it is also how Signal, Jitsi, and Matrix
+do it. Estimated at ~2 sprints (cxx-rs setup +
+libwebrtc header dep + Android NDK toolchain pin +
+separate Gradle module for `.so` packaging).
+Tracked as `G3-2-sframe-jni`.
+
+**iOS path forward (post-spike)**: matching native-
+shim shape under task **G3-1-sframe-native**. An
+Objective-C++ (`.mm`) class subclasses
+`webrtc::FrameEncryptorInterface` + `FrameDecryptorInterface`
+from upstream libwebrtc's C++ headers (bundled
+ourselves since stasel only ships Obj-C headers +
+the linked binary; libwebrtc's BSD license permits
+header redistribution). The shim is installed onto
+`RTCRtpSender` / `RTCRtpReceiver` via the
+non-public selector `setFrameEncryptor:` that the
+upstream Obj-C wrapper carries but does not declare
+in its public headers (the selector is hit by name
+through `objc_msgSend` — same technique Signal-iOS
+and Jitsi-Meet iOS use for the identical gap).
+Inside `Encrypt` / `Decrypt` the shim calls into
+LakkoCore's `ParticipantKey` via the existing
+UniFFI surface. Estimated ~2 sprints in parallel
+with G3-2-sframe-jni; the Rust side may share a
+single crate (`lakko-sframe-native`) exposing a C
+ABI both platforms wrap.
+
+The native shim approach has a security caveat: the
+non-public `setFrameEncryptor:` selector is not part
+of stasel/WebRTC's stable API. An upstream rename or
+removal would silently no-op the installation —
+behaviour the audit pack must catch. Mitigation: a
+boot-time `class_respondsToSelector` probe that
+panics loud if the selector is missing, surfaced as
+a "SFrame attach refused" log + the call MUST refuse
+to start (no fallback to plain SRTP under any
+circumstance, per security invariant #4 "no fallback
+to non-E2EE").
+
+**Security posture during the gap**: documented in
+[`docs/security/calls.md`](./calls.md) under the
+G3-1 / G3-2 partial-completion rows in
+[`docs/ROADMAP-PHASE3-CLOSEOUT.md`](../ROADMAP-PHASE3-CLOSEOUT.md):
+the iOS + Android call paths today ride **plain
+SRTP** (per-hop encryption only). They are NOT
+E2EE-complete. The wire still announces SFrame
+support so the SFU still forwards opaque payload,
+but the absence of an actual SFrame transformer at
+the codec boundary means the SFU could in principle
+decode the SRTP and see plaintext Opus/AV1. ROADMAP
+explicitly states this. The fix is the JNI shim
+above + the iOS spike + (subsequently) MLS-exporter
+seed delivery from each platform's CallSession into
+the freshly-created `ParticipantKey`.
 + replication via DeviceGroup are wired).

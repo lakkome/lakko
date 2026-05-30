@@ -182,3 +182,72 @@ impl WasmSealedFrame {
         self.ciphertext.clone()
     }
 }
+
+// ============================================================
+// SFrame wire-format helpers (RFC 9605 §4)
+// ============================================================
+
+/// Encode an SFrame wire frame: `header(kid=sender_leaf,
+/// ctr=counter) || ciphertext`. Mirror of the UniFFI
+/// helper at `crates/lakko-ffi-uniffi/src/sframe.rs`.
+#[wasm_bindgen(js_name = "wrapSframeFrame")]
+#[must_use]
+pub fn wrap_sframe_frame_js(sender_leaf: u32, counter: u32, ciphertext: &[u8]) -> Vec<u8> {
+    let header = lakko_calls::SframeHeader {
+        kid: u64::from(sender_leaf),
+        ctr: u64::from(counter),
+    };
+    let mut out = header.encode();
+    out.extend_from_slice(ciphertext);
+    out
+}
+
+/// Parse an SFrame wire frame.
+///
+/// # Errors
+///
+/// `JsError` on header decode failure or oversize
+/// `kid` / `ctr` (must fit in u32).
+#[wasm_bindgen(js_name = "unwrapSframeFrame")]
+pub fn unwrap_sframe_frame_js(wire: &[u8]) -> Result<WasmUnwrappedFrame, JsError> {
+    let (header, consumed) = lakko_calls::SframeHeader::decode(wire)
+        .map_err(|e| JsError::new(&format!("call crypto error: sframe header decode: {e:?}")))?;
+    let sender_leaf = u32::try_from(header.kid)
+        .map_err(|_| JsError::new("call crypto error: sframe kid does not fit in u32"))?;
+    let counter = u32::try_from(header.ctr)
+        .map_err(|_| JsError::new("call crypto error: sframe ctr does not fit in u32"))?;
+    Ok(WasmUnwrappedFrame {
+        sender_leaf,
+        counter,
+        ciphertext: wire[consumed..].to_vec(),
+    })
+}
+
+/// JS-side mirror of `UnwrappedFrame`.
+#[wasm_bindgen(js_name = "UnwrappedFrame")]
+pub struct WasmUnwrappedFrame {
+    sender_leaf: u32,
+    counter: u32,
+    ciphertext: Vec<u8>,
+}
+
+#[wasm_bindgen(js_class = "UnwrappedFrame")]
+impl WasmUnwrappedFrame {
+    #[wasm_bindgen(getter, js_name = "senderLeaf")]
+    #[must_use]
+    pub fn sender_leaf(&self) -> u32 {
+        self.sender_leaf
+    }
+
+    #[wasm_bindgen(getter, js_name = "counter")]
+    #[must_use]
+    pub fn counter(&self) -> u32 {
+        self.counter
+    }
+
+    #[wasm_bindgen(getter, js_name = "ciphertext")]
+    #[must_use]
+    pub fn ciphertext(&self) -> Vec<u8> {
+        self.ciphertext.clone()
+    }
+}

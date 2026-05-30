@@ -26,14 +26,14 @@
 name: sfu-e2e
 
 on:
+  # Quota-conservation mode (May 2026). Auto-triggers
+  # disabled — the dockerised SFU build burns ~3 min
+  # warm / ~5 min cold and the Free-tier quota cannot
+  # afford a nightly run plus per-PR runs. Re-enable
+  # the `pull_request` block (with the `sfu-e2e`
+  # label gate) + `schedule` cron when a paid tier
+  # or self-hosted runner lands.
   workflow_dispatch: {}
-  pull_request:
-    types: [labeled, synchronize, reopened]
-  schedule:
-    # 03:30 UTC. Offset from the fuzz-quick cron at 03:00
-    # so the two workflows don't pile up on the same
-    # runner pool slot.
-    - cron: "30 3 * * *"
 
 env:
   CARGO_TERM_COLOR: always
@@ -48,13 +48,11 @@ concurrency:
 
 jobs:
   sfu-e2e:
-    # Only run on PR triggers when the `sfu-e2e` label is
-    # explicitly set. Manual + cron always run.
-    if: >
-      github.event_name == 'workflow_dispatch'
-      || github.event_name == 'schedule'
-      || (github.event_name == 'pull_request'
-          && contains(github.event.pull_request.labels.*.name, 'sfu-e2e'))
+    # workflow_dispatch is the only trigger today (quota-
+    # conservation mode); the PR-label + cron arms above
+    # are commented out, so the `if:` gate is a no-op now
+    # but stays in place for the day they come back.
+    if: github.event_name == 'workflow_dispatch'
 
     name: dockerised SFU + WS handshake
     runs-on: ubuntu-latest

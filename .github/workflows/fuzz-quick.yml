@@ -21,11 +21,14 @@
 name: fuzz-quick
 
 on:
-  schedule:
-    # nightly 03:00 UTC — well outside the European maintainer's
-    # working hours so a real-time crash signal hits inbox before
-    # the next day starts.
-    - cron: '0 3 * * *'
+  # Quota-conservation mode (May 2026). Auto-triggers
+  # (schedule / push / PR-label) are disabled — the
+  # Free-tier 2,000-minute budget gets eaten by the
+  # fuzz matrix in under a week of nightly cron. Run
+  # manually from the Actions tab when investigating
+  # a real lead; flip the `schedule` block back on when
+  # the workspace moves to a paid tier or a self-hosted
+  # runner.
   workflow_dispatch:
     inputs:
       duration_secs:
