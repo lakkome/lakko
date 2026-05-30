@@ -27,13 +27,26 @@ no_includes = false
 sys_includes = ["stddef.h", "stdint.h"]
 
 [export]
-prefix = "lakko_sframe_"
+# No top-level `prefix` — every exported Rust symbol already
+# carries the `lakko_sframe_` prefix in source (functions via
+# `#[no_mangle] extern "C" fn lakko_sframe_*`, opaque types
+# via the explicit `[export.rename]` table below). Adding a
+# cbindgen-level prefix on top would emit `lakko_sframe_lakko_
+# sframe_call_key_t` etc. — see the bumpy double-prefix that
+# the N-3 sub-sprint had to scrape off the first generated
+# header.
 
 [export.rename]
 "CallKey" = "lakko_sframe_call_key_t"
 "ParticipantKey" = "lakko_sframe_participant_key_t"
+"LakkoSframeStatus" = "lakko_sframe_status_t"
 
 [enum]
+# `rename_variants = "ScreamingSnakeCase"` plus `prefix_with_name`
+# emits `LAKKO_SFRAME_STATUS_T_OK` rather than the bumpier
+# `LAKKO_SFRAME_LAKKO_SFRAME_STATUS_OK`. The export.rename above
+# normalises the type name; this prefix-with-name then derives
+# the variant names off it.
 rename_variants = "ScreamingSnakeCase"
 prefix_with_name = true
 
