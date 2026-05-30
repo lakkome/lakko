@@ -120,6 +120,18 @@ public class CallSession(
     }
 
     /**
+     * G3-2-turn — TURN-credential client. Injected by the
+     * call-UI layer via [setTurnClient]; nullable so dev
+     * builds without a deployed coturn cluster still work
+     * (fail-soft STUN-only path).
+     */
+    private var turnClient: TurnCredentialClient? = null
+
+    public fun setTurnClient(client: TurnCredentialClient?) {
+        this.turnClient = client
+    }
+
+    /**
      * Session-owned scope. Every coroutine launched from
      * delegate callbacks (which fire on libwebrtc's worker
      * threads) hops into [Dispatchers.Main] via this scope
@@ -165,34 +177,30 @@ public class CallSession(
         isOfferer = true
         mutableState.value = WebCallState.Outgoing
 
-        val rtc = WebRtcPeerConnection(applicationContext)
-        if (!rtc.isReady) {
-            android.util.Log.w("CallSession", "dial: PeerConnection allocation failed")
-            endLocal(WebCallEndReason.Error)
-            return
-        }
-        installDelegate(rtc)
-        rtc.addLocalAudioTrack(enabled = audio)
-        // Video track extension point: when the Compose
-        // preview surface lands (G3-2-video), pass the
-        // capture-session source here. Today audio-only.
-
-        // G3-sframe-native N-6 — arm SFrame on every freshly-
-        // added sender. Mirror of iOS CallSession.dial — same
-        // sequencing (after addLocalAudioTrack, before SDP
-        // build) so the encryptor is in place before libwebrtc
-        // can begin pulling encoder bytes.
-        if (!attachSFrame(rtc)) {
-            android.util.Log.w(
-                "CallSession",
-                "dial: SFrame attach failed — refusing per security invariant #4",
-            )
-            endLocal(WebCallEndReason.Error)
-            return
-        }
-        this.rtc = rtc
-
+        // G3-2-turn — fetch the TURN credential first so the
+        // RTCPeerConnection sees the relay candidate in its
+        // initial configuration (same rationale as iOS).
         scope.launch {
+            val iceServers = resolveIceServers()
+            val rtc = WebRtcPeerConnection(applicationContext, iceServers = iceServers)
+            if (!rtc.isReady) {
+                android.util.Log.w("CallSession", "dial: PeerConnection allocation failed")
+                endLocal(WebCallEndReason.Error)
+                return@launch
+            }
+            installDelegate(rtc)
+            rtc.addLocalAudioTrack(enabled = audio)
+
+            if (!attachSFrame(rtc)) {
+                android.util.Log.w(
+                    "CallSession",
+                    "dial: SFrame attach failed — refusing per security invariant #4",
+                )
+                endLocal(WebCallEndReason.Error)
+                return@launch
+            }
+            this@CallSession.rtc = rtc
+
             try {
                 val offerSdp = rtc.createOffer(audio = audio, video = video)
                 val bytes = composeCallSignaling(
@@ -211,6 +219,21 @@ public class CallSession(
         }
     }
 
+    /**
+     * G3-2-turn — build the ICE-server list for this call:
+     * `defaultIceServers()` (STUN-only baseline) plus
+     * optionally one TURN row freshly minted via
+     * [TurnCredentialClient.fetchOrNull]. Fails soft to
+     * STUN-only when [turnClient] is unset or the fetch
+     * returns null.
+     */
+    private suspend fun resolveIceServers(): List<PeerConnection.IceServer> {
+        val base = WebRtcPeerConnection.defaultIceServers().toMutableList()
+        val row = turnClient?.fetchOrNull()
+        if (row != null) base.add(row)
+        return base
+    }
+
     /** Outbound or active call teardown. */
     public fun hangUp(reason: WebCallEndReason = WebCallEndReason.HungUp) {
         endLocal(reason)
@@ -227,31 +250,29 @@ public class CallSession(
             return
         }
 
-        val rtc = WebRtcPeerConnection(applicationContext)
-        if (!rtc.isReady) {
-            android.util.Log.w("CallSession", "acceptCall: PeerConnection allocation failed")
-            endLocal(WebCallEndReason.Error)
-            return
-        }
-        installDelegate(rtc)
-        // Mic on by default for the answerer; future UI may
-        // expose "accept muted".
-        rtc.addLocalAudioTrack(enabled = true)
-
-        // G3-sframe-native N-6 — same attach point as dial.
-        if (!attachSFrame(rtc)) {
-            android.util.Log.w(
-                "CallSession",
-                "acceptCall: SFrame attach failed — refusing per security invariant #4",
-            )
-            endLocal(WebCallEndReason.Error)
-            return
-        }
-        this.rtc = rtc
-
-        mutableState.value = WebCallState.Connecting
-
         scope.launch {
+            val iceServers = resolveIceServers()
+            val rtc = WebRtcPeerConnection(applicationContext, iceServers = iceServers)
+            if (!rtc.isReady) {
+                android.util.Log.w("CallSession", "acceptCall: PeerConnection allocation failed")
+                endLocal(WebCallEndReason.Error)
+                return@launch
+            }
+            installDelegate(rtc)
+            rtc.addLocalAudioTrack(enabled = true)
+
+            if (!attachSFrame(rtc)) {
+                android.util.Log.w(
+                    "CallSession",
+                    "acceptCall: SFrame attach failed — refusing per security invariant #4",
+                )
+                endLocal(WebCallEndReason.Error)
+                return@launch
+            }
+            this@CallSession.rtc = rtc
+
+            mutableState.value = WebCallState.Connecting
+
             try {
                 val answerSdp = rtc.createAnswer(remoteOfferSdp = offerSdp)
                 val bytes = composeCallSignaling(

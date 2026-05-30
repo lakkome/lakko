@@ -65,6 +65,7 @@
 mod call_jwt;
 mod opaque;
 mod pow;
+mod turn;
 mod webauthn;
 
 use std::net::SocketAddr;
@@ -132,6 +133,12 @@ pub(crate) struct AppState {
     /// Crypto + wire shape lives in the shared `lakko-call-jwt`
     /// crate so client FFI uses the same types.
     pub(crate) call_jwt_signing: Arc<lakko_call_jwt::CallSigningKey>,
+    /// G3-{1,2}-turn step 1 — short-lived TURN-credential
+    /// minter. `None` when `LAKKO_TURN_URIS` /
+    /// `LAKKO_TURN_SHARED_SECRET` are unset; the
+    /// `POST /call/turn-credential` route returns 503 in
+    /// that case and clients fall back to STUN-only ICE.
+    pub(crate) turn: Option<Arc<turn::TurnConfig>>,
 }
 
 #[tokio::main]
@@ -217,6 +224,16 @@ async fn main() -> Result<()> {
         "call-JWT signing key loaded"
     );
 
+    // G3-{1,2}-turn step 1 — TURN-credential config. Loud-
+    // fail on malformed env vars (typo in base64 / scheme);
+    // soft-disable when both env vars are simply unset.
+    let turn_config = turn::TurnConfig::from_env().context("load TURN config")?;
+    if turn_config.is_some() {
+        tracing::info!("turn-credential endpoint enabled");
+    } else {
+        tracing::info!("turn-credential endpoint disabled (LAKKO_TURN_URIS / LAKKO_TURN_SHARED_SECRET not set)");
+    }
+
     let state = AppState {
         db: pool.clone(),
         opaque_setup: Arc::new(opaque_setup),
@@ -224,6 +241,7 @@ async fn main() -> Result<()> {
         session_token_ttl_ms,
         webauthn: webauthn_instance,
         call_jwt_signing: Arc::new(call_jwt_signing),
+        turn: turn_config.map(Arc::new),
     };
 
     // Background tasks: periodically delete expired rows from the
@@ -283,6 +301,20 @@ fn build_app(state: AppState) -> Router {
             webauthn::require_session,
         ));
 
+    // G3-{1,2}-turn step 1 — `POST /call/turn-credential`
+    // mints a short-lived TURN credential per the coturn
+    // `static-auth-secret` REST API. Same bearer-auth
+    // middleware as `/call/jwt`. Caller invokes once at
+    // call-start; the TURN credential's expiry (default 10
+    // minutes) comfortably outlasts ICE gathering on every
+    // tested mobile network.
+    let turn_routes = Router::new()
+        .route("/call/turn-credential", post(turn::issue_turn_credential))
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            webauthn::require_session,
+        ));
+
     Router::new()
         .route("/health", get(health))
         .route("/ready", get(ready))
@@ -313,6 +345,7 @@ fn build_app(state: AppState) -> Router {
         .route("/.well-known/jwks.json", get(call_jwt::jwks_handler))
         .merge(webauthn_routes)
         .merge(call_jwt_routes)
+        .merge(turn_routes)
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }

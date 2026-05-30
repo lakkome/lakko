@@ -13,10 +13,10 @@ section that describes it.
 | Class | Count | Range | Source file |
 |---|---|---|---|
 | **I-** | 8   | I-1..I-8   | [`mls-state-machine.md`](./mls-state-machine.md) |
-| **C-** | 50  | C-1..C-50  | [`calls.md`](./calls.md) |
+| **C-** | 51  | C-1..C-51  | [`calls.md`](./calls.md) |
 | **T-** | 15  | T-1..T-15  | [`transport.md`](./transport.md) |
 | **G-** | 27  | G-1..G-27 (G-28 closed via the G3-sframe-native arc N-1..N-6) | [`known-gaps.md`](./known-gaps.md) — open / deferred |
-| Total invariants  | 73  | (I + C + T) | live properties |
+| Total invariants  | 74  | (I + C + T) | live properties |
 | Total open gaps   | 27  | (G)         | tracked + scoped |
 
 ## MLS state machine invariants (I-1..I-8)
@@ -37,7 +37,7 @@ in `crates/lakko-mls/`.
 | I-7 | Opening a `SealedBundle` with an unknown `algorithm` discriminator is rejected before AEAD-open is attempted | Forward-compat ratchet |
 | I-8 | `create_devicegroup_message` round-trips through `parse_devicegroup_payload` losslessly for every typed body variant | Wire-format byte-stability |
 
-## Call-side invariants (C-1..C-50)
+## Call-side invariants (C-1..C-51)
 
 Source: [`calls.md`](./calls.md). Five sub-sections —
 media-key pipeline (C-1..C-14), call-admission JWT
@@ -125,6 +125,12 @@ media-key pipeline (C-1..C-14), call-admission JWT
 | C-48 | SFrame attach happens between addLocalAudioTrack and SDP build |
 | C-49 | Per-sender ParticipantKey cache is bounded by leaf count + thread-safe under multi-sender fan-in |
 | C-50 | Refcount machinery balances every AddRef with exactly one Release, no leak no double-free |
+
+### C-51 — TURN credential issuance (G3-{1,2}-turn)
+
+| ID   | Title |
+|---|---|
+| C-51 | TURN credential follows the coturn `static-auth-secret` REST scheme; bound to a per-call expiry |
 
 ## Transport-layer invariants (T-1..T-11)
 

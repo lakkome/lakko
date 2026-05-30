@@ -283,6 +283,7 @@ mod tests {
             session_token_ttl_ms: 86_400_000,
             webauthn: None,
             call_jwt_signing: signing,
+            turn: None,
         }
     }
 

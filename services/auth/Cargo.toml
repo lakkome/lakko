@@ -93,6 +93,18 @@ webauthn-rs = { version = "0.5", features = [
 ] }
 url = "2"
 
+# G3-{1,2}-turn — HMAC-SHA1 for the coturn `static-auth-secret`
+# credential scheme (TURN REST API: username=`<expiry>:<account>`,
+# password=base64(HMAC-SHA1(secret, username))). SHA-1 is fine
+# here — the keyed-MAC use case is unaffected by the SHA-1
+# collision attacks (those land on plaintext digests, not on
+# HMAC). The coturn server itself only accepts this exact
+# scheme. `hmac` + `sha1` are already in the dep tree via
+# transitive pulls (jsonwebtoken, ring, etc.) so we list them
+# directly to keep the import path obvious.
+hmac = "0.12"
+sha1 = "0.10"
+
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"

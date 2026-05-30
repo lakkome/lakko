@@ -2139,6 +2139,62 @@ edge from any prior `AddRef` synchronises with the
 final `delete`. Same posture as upstream
 `rtc::RefCountedNonVirtual`.
 
+## TURN-credential invariants (G3-{1,2}-turn)
+
+### C-51: TURN credential follows the coturn `static-auth-secret` REST scheme; bound to a per-call expiry
+
+`POST /call/turn-credential` (services/auth) mints a
+short-lived credential the WebRTC `RTCIceServer.urls`
+authenticates against, using the convention
+draft-uberti-rtcweb-turn-rest-00 (also known as the
+"TURN REST API") pins:
+
+```
+username = `<unix_expiry_secs>:<account_id_hex>`
+password = base64(HMAC-SHA1(static_auth_secret, username))
+```
+
+Where `static_auth_secret` is loaded once from
+`LAKKO_TURN_SHARED_SECRET` at auth-service startup and
+MUST match the same value coturn's config file pins
+under `static-auth-secret`. Rotation = service restart;
+no in-process key migration path.
+
+The credential expires at the embedded `unix_expiry_secs`
+— coturn refuses any STUN allocation past that timestamp
+even if the password recomputes correctly. Default
+expiry is `now + 600` (`TURN_CRED_TTL_SECS`) — long
+enough to comfortably outlast ICE gathering on every
+tested mobile network (≤ 30 s p99), short enough that a
+leaked credential is useless for any post-call attack.
+
+Fail-soft posture (audit-relevant): when the auth
+service has `LAKKO_TURN_URIS` / `LAKKO_TURN_SHARED_SECRET`
+unset the endpoint returns 503 with body
+`{"error":"turn_not_configured"}`, and both platform
+clients (`apps/ios/Lakko/Calls/TurnCredentialClient.swift`
++ `apps/android/.../calls/TurnCredentialClient.kt`)
+swallow that into an empty TURN-server list. The call
+still attempts to dial; only symmetric-NAT peers will
+fail to connect. This is a deliberate trade-off — the
+alternative is refusing every call when the auth
+service hiccups, which is much worse UX than a
+degraded-NAT-traversal call.
+
+Why HMAC-SHA1 (not SHA-256): the coturn protocol pins
+it, and we cannot override. The HMAC use case is
+unaffected by the SHA-1 collision-attack family
+(SHAttered, etc., target plaintext-digest construction,
+not keyed-MAC). NIST SP 800-131A continues to allow
+HMAC-SHA1 in authentication roles for the same
+reason.
+
+Tested in `services/auth/src/turn.rs` (5 unit tests:
+shape-matches-coturn-rest-api, distinct-accounts-distinct-
+passwords, same-account-different-time-distinct-password,
+saturating-expiry-does-not-overflow,
+from-env-rejects-short-secret).
+
 ## Exporter labels (call-side)
 
 | Label | Length | Context | Source | Used for |

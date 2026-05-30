@@ -78,6 +78,21 @@ public final class CallSession: ObservableObject {
     private var callKeySeed: Data?
     private var localLeaf: UInt32?
 
+    /// G3-1-turn — TURN-credential client. Injected by the
+    /// call-UI layer via [`setTurnClient`] so tests can swap
+    /// a stub. When `nil` (or when its `fetchOrNil()`
+    /// returns `nil`) the call proceeds with STUN-only ICE —
+    /// fail-soft path per `TurnCredentialClient` docs.
+    private var turnClient: TurnCredentialClient?
+
+    /// Bind the TURN client used for ICE-server resolution at
+    /// `dial` / `acceptCall` time. Idempotent; passing `nil`
+    /// disables TURN fetching for subsequent calls (STUN-only
+    /// fallback).
+    public func setTurnClient(_ client: TurnCredentialClient?) {
+        self.turnClient = client
+    }
+
     public init(callId: Data, onOutboundSignaling: @escaping (Data) -> Void) {
         self.callId = callId
         self.onOutboundSignaling = onOutboundSignaling
@@ -121,7 +136,25 @@ public final class CallSession: ObservableObject {
         dialVideo = video
         state = .outgoing
 
-        let rtc = WebRTCPeerConnection()
+        // G3-1-turn — fetch TURN credential before constructing
+        // the RTCPeerConnection so its initial RTCConfiguration
+        // already lists the relay candidate. Doing it after
+        // construction would require an `setConfiguration:` call
+        // mid-flight, which the stasel/WebRTC pod accepts but
+        // some libwebrtc forks have known footguns around (the
+        // ICE agent may have already started gathering, in which
+        // case the new TURN server is ignored).
+        Task { [weak self] in
+            guard let self = self else { return }
+            let iceServers = await self.resolveIceServers()
+            await MainActor.run {
+                self.completeDial(iceServers: iceServers, audio: audio, video: video)
+            }
+        }
+    }
+
+    private func completeDial(iceServers: [RTCIceServer], audio: Bool, video: Bool) {
+        let rtc = WebRTCPeerConnection(iceServers: iceServers)
         guard rtc.isReady else {
             NSLog("CallSession.dial: RTCPeerConnection allocation failed")
             endLocal(reason: .error)
@@ -151,6 +184,22 @@ public final class CallSession: ObservableObject {
         Task { [weak self] in
             await self?.composeAndShipOffer(rtc: rtc, audio: audio, video: video)
         }
+    }
+
+    /// G3-1-turn — build the ICE-server list for this call:
+    /// `defaultIceServers()` (STUN-only) plus optionally one
+    /// TURN row freshly minted via the auth service. Fails
+    /// soft to STUN-only when `turnClient` is unset or
+    /// `fetchOrNil()` returns nil — the call still attempts
+    /// to connect (the SFU is reachable; only symmetric-NAT
+    /// peers will fail), and the failure surfaces as a normal
+    /// ICE-disconnected state rather than a refused call.
+    private func resolveIceServers() async -> [RTCIceServer] {
+        var servers = WebRTCPeerConnection.defaultIceServers()
+        if let turn = turnClient, let row = await turn.fetchOrNil() {
+            servers.append(row)
+        }
+        return servers
     }
 
     /// Resolve the seed + leaf and invoke
@@ -209,7 +258,18 @@ public final class CallSession: ObservableObject {
             return
         }
 
-        let rtc = WebRTCPeerConnection()
+        // G3-1-turn — same async TURN-fetch shape as `dial()`.
+        Task { [weak self] in
+            guard let self = self else { return }
+            let iceServers = await self.resolveIceServers()
+            await MainActor.run {
+                self.completeAccept(iceServers: iceServers, offerSdp: offerSdp)
+            }
+        }
+    }
+
+    private func completeAccept(iceServers: [RTCIceServer], offerSdp: String) {
+        let rtc = WebRTCPeerConnection(iceServers: iceServers)
         guard rtc.isReady else {
             NSLog("acceptCall: RTCPeerConnection allocation failed")
             endLocal(reason: .error)
