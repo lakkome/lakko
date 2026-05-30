@@ -829,33 +829,65 @@ channel seed crosses the FFI boundary via
 `Data` cast") now holds on every client platform
 that ships a publisher composer.
 
-**Still open — PublisherGroup persistence + rotation.**
-The current web flow builds a fresh `Group::create`
-on every channel-create call and drops it immediately
-after extracting the seed; ADR-0010's "Tier 1"
-PublisherGroup vision keeps the group alive across
-composer calls so it can be advanced (`commit`)
-and rotated (`exportSecret(newEpochCtx)` per
-membership change or schedule). A follow-up sprint
-(working name **G4-2-mls-persistence**) will:
+**G4-2-mls-persistence — CLOSED (May 2026).**
 
-- persist the group via `Group::load(identity, group_id)`
-  on subsequent composer calls (group state is held
-  in the identity provider's storage);
-- introduce a `(channelId → groupId)` mapping in
-  `channels-state` so the same group is reused on
-  every post;
-- wire rotation triggers per ADR-0010 (membership
-  change → mandatory commit; schedule → 24 h /
-  N-message rotation).
+The persistence + rotation gap closed across six
+sub-sprints:
 
-Until then, every call to `freshPublisherKeys(identity,
-channelId)` yields a fresh group internally with a
-fresh `group_id` — meaning the caller MUST persist
-the returned `seed` and reuse it across all posts on
-the same channel/epoch (which is what the web UI
-does, via `channelsActions.setKeys` immediately
-after `freshPublisherKeys` resolves).
+- **Step 1 (Rust core)** —
+  `crates/lakko-mls/src/publisher_group.rs` ships
+  `PublisherGroup` keyed by `channel_id`, with
+  `load` / `create` / `open_or_create` routed
+  through OpenMLS's `MlsGroup::new_with_group_id`
+  and `MlsGroup::load`. Deterministic group id
+  derivation: `prefix("lakko/publisher-group/v1/") ||
+  channel_id`. 8 unit tests pin the load-or-create
+  idempotence invariant.
+- **Step 2 (FFI)** — UniFFI + wasm-bindgen
+  `PublisherGroup` wrappers in `lakko-ffi-uniffi` +
+  `lakko-ffi-wasm`. `publisher_group_load` /
+  `publisher_group_open_or_create` free functions
+  (Option<Self> work-around for UniFFI 0.28). 7
+  UniFFI + 4 wasm host-side tests.
+- **Step 3 (composer refactor)** — iOS + Android +
+  web composers all swapped throwaway `Group.create`
+  for `PublisherGroup.openOrCreate`. xcodebuild +
+  `:app:assembleDebug` + `npm run build` all green.
+- **Step 4 (rotation)** —
+  `PublisherGroup.rotate(identity)` advances the
+  MLS group epoch via `MlsGroup::self_update` +
+  `merge_pending_commit`. Returns the wire-encoded
+  commit for fanout to co-publishers. Both the
+  Rust-core and the FFI surfaces are covered by
+  `rotate_advances_epoch_and_changes_seed` /
+  `rotated_seed_persists_across_reload` /
+  `publisher_group_rotate_changes_seed`.
+- **Step 5 (audit pack)** — see C-52 in
+  `docs/security/calls.md` for the persistence +
+  rotation invariants.
+- **Step 6 (cross-publisher membership)** —
+  `rotate_emits_commit_bytes_processable_by_co_publisher`
+  proves: Alice mints PublisherGroup, adds Bob via
+  Add proposal, Bob joins from welcome, Alice
+  rotates, Bob processes the commit, both ends at
+  the same epoch with the same exporter output.
+  ADR-0010 §"PublisherGroup" cross-publisher
+  seed-sync invariant satisfied.
+
+Remaining deferred follow-ups (out of G4-2 scope):
+
+- Scheduled rotation timer (24 h / N posts).
+  Triggered by a publisher-side cron in the
+  client UI; calls `PublisherGroup.rotate` + the
+  subscriber-batch reseal path. The Rust primitive
+  is shipped; the UI-side timer is a small
+  per-platform addition.
+- Batched subscriber-side fanout after rotation —
+  walking the subscriber registry, sealing N new
+  envelopes under the new epoch, posting them.
+  Server-side `POST /v1/channels/:id/rotate` route
+  is already shipped (C-42); the client-side loop
+  that drives it is the remaining piece.
 
 The cryptographic property is preserved: the seed is
 genuinely derived from the MLS exporter under the

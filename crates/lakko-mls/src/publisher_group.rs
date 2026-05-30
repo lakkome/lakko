@@ -257,6 +257,40 @@ impl PublisherGroup {
         &self.channel_id
     }
 
+    /// Rotate the channel content-key seed by advancing the
+    /// MLS group epoch via a self-update commit
+    /// (G4-2-mls-persistence step 4).
+    ///
+    /// Returns the wire-encoded commit; the publisher SHOULD
+    /// broadcast it to every other PublisherGroup member so
+    /// they advance to the same epoch in lock-step. The
+    /// committed state is persisted as a side effect — the
+    /// next [`PublisherGroup::channel_seed`] call against
+    /// THIS handle, or any future
+    /// [`PublisherGroup::load`] under the same channel_id,
+    /// returns the new-epoch seed.
+    ///
+    /// ## Why "rotate"
+    ///
+    /// The MLS exporter is keyed on group epoch (RFC 9420
+    /// §8.5). Advancing the epoch produces a fresh
+    /// 32-byte exporter output for the same `(label,
+    /// context, length)` triple — that is exactly what
+    /// ADR-0010's "rotation on every PublisherGroup commit
+    /// and on scheduled rotations" requires. The publisher-
+    /// side timer (24 h / N posts) calls this method, then
+    /// reads the new seed via [`PublisherGroup::channel_seed`],
+    /// then runs the subscriber-batch reseal path
+    /// (`lakko-channels::subscribe::seal_seed` + the
+    /// services/channels batch fanout).
+    ///
+    /// # Errors
+    ///
+    /// Propagates [`Group::self_update`] failures.
+    pub fn rotate(&mut self, identity: &Identity) -> Result<Vec<u8>> {
+        self.inner.self_update(identity)
+    }
+
     /// Borrow the underlying [`Group`] for the rare caller
     /// who needs the full MLS surface (membership ops,
     /// application messages between publishers, etc.).
@@ -383,6 +417,129 @@ mod tests {
         // exporter outputs. Cross-channel-decrypt confusion
         // is forbidden by ADR-0010's two-tier isolation.
         assert_ne!(seed_a, seed_b);
+    }
+
+    #[test]
+    fn rotate_advances_epoch_and_changes_seed() {
+        // G4-2-mls-persistence step 4 — load-bearing test.
+        // Before rotation, two consecutive `channel_seed`
+        // calls return the same bytes (step 1's idempotence
+        // invariant). After `rotate()` the MLS epoch advances
+        // by one and the exporter output MUST differ, otherwise
+        // the scheduled-rotation primitive ADR-0010 §"Rotation"
+        // requires has no semantic meaning.
+        let identity = test_identity();
+        let cid = test_channel_id();
+
+        let mut pg = PublisherGroup::open_or_create(&identity, &cid).expect("create");
+        let seed_pre = pg.channel_seed(&identity).expect("seed pre");
+
+        let epoch_pre = pg.inner().epoch();
+        let _commit_bytes = pg.rotate(&identity).expect("rotate");
+        let epoch_post = pg.inner().epoch();
+        assert_eq!(epoch_post, epoch_pre + 1, "epoch must advance by one");
+
+        let seed_post = pg.channel_seed(&identity).expect("seed post");
+        assert_ne!(seed_pre, seed_post, "rotation must change the seed");
+    }
+
+    #[test]
+    fn rotated_seed_persists_across_reload() {
+        // After `rotate()` + drop, a fresh `load` must surface
+        // the post-rotation epoch's exporter output — i.e. the
+        // rotation is durable, not just held in the live
+        // handle's memory. Without this invariant the
+        // scheduled-rotation timer would reset to epoch 0 on
+        // every app restart and rotation would be meaningless.
+        let identity = test_identity();
+        let cid = test_channel_id();
+
+        let post_rotation_seed = {
+            let mut pg = PublisherGroup::open_or_create(&identity, &cid).expect("create");
+            let _commit = pg.rotate(&identity).expect("rotate");
+            pg.channel_seed(&identity).expect("seed post")
+        };
+
+        let reloaded = PublisherGroup::load(&identity, &cid)
+            .expect("load")
+            .expect("Some");
+        let reloaded_seed = reloaded.channel_seed(&identity).expect("seed reload");
+        assert_eq!(post_rotation_seed, reloaded_seed);
+    }
+
+    #[test]
+    fn rotate_emits_commit_bytes_processable_by_co_publisher() {
+        // G4-2-mls-persistence step 6 — cross-publisher
+        // membership propagation. Alice mints the
+        // PublisherGroup, adds Bob via the underlying Group's
+        // standard membership ops (the wrapper exposes
+        // inner_mut() for this), Bob joins from the welcome,
+        // then Alice rotates and Bob processes the commit.
+        // Both end up at the same epoch with the same seed —
+        // the load-bearing invariant for a multi-publisher
+        // channel where any member can issue rotations and
+        // the others stay in sync via MLS commit propagation.
+        use crate::group::Incoming;
+        use openmls_traits::OpenMlsProvider;
+
+        let alice = Identity::generate("alice-channel").unwrap();
+        let bob = Identity::generate("bob-channel").unwrap();
+        let cid = ChannelId([0x77; CHANNEL_ID_LEN]);
+
+        // Alice mints the PublisherGroup, then adds Bob via a
+        // standard MLS Add.
+        let mut alice_pg = PublisherGroup::create(&alice, &cid).expect("alice create");
+        let bob_kp = bob.create_key_package().expect("bob kp");
+        let addition = alice_pg
+            .inner_mut()
+            .add_member(&alice, bob_kp)
+            .expect("alice adds bob");
+
+        // Encode the welcome to bytes, give Bob a fresh
+        // Group::join_from_welcome handle. Bob's PublisherGroup
+        // is constructed by hand from that handle since we
+        // don't expose a "join PublisherGroup from welcome"
+        // shortcut yet (would be the natural next API; for
+        // step 6 the test goes through Group::from_mls_group
+        // analogue isn't accessible publicly, so we use the
+        // standard Group::join_from_welcome + a custom assemble).
+        let welcome_bytes =
+            crate::group::encode_message(&addition.welcome).expect("welcome encode");
+        let bob_group = crate::Group::join_from_welcome(&welcome_bytes, &bob).expect("bob join");
+
+        // Alice rotates AFTER adding Bob. Both sides advance.
+        // (Note: Alice's `add_member` already merged a commit
+        // and advanced her epoch from 0 -> 1; the rotation
+        // bumps to 2.)
+        let alice_epoch_pre_rotate = alice_pg.inner().epoch();
+        let commit_bytes = alice_pg.rotate(&alice).expect("rotate");
+        assert_eq!(alice_pg.inner().epoch(), alice_epoch_pre_rotate + 1);
+
+        // Bob processes the rotation commit.
+        let mut bob_group_mut = bob_group;
+        let processed = bob_group_mut
+            .process_incoming(&bob, &commit_bytes)
+            .expect("bob processes rotate");
+        assert!(matches!(processed, Incoming::Commit));
+
+        // Both ends now at the same epoch. Exporter outputs
+        // computed against (label, channel_id, 32) must
+        // match — that is the cross-publisher seed-sync
+        // invariant ADR-0010 §"PublisherGroup" requires.
+        assert_eq!(alice_pg.inner().epoch(), bob_group_mut.epoch());
+
+        let alice_seed = alice_pg.channel_seed(&alice).expect("alice seed");
+        let bob_seed = bob_group_mut
+            .export_secret(&bob, CHANNEL_EXPORTER_LABEL, cid.as_bytes(), 32)
+            .expect("bob exporter");
+        assert_eq!(alice_seed, bob_seed.as_slice());
+
+        // Silence the unused-import warning the
+        // `openmls_traits::OpenMlsProvider` brings in via
+        // identity creation transitively — we keep it for
+        // documentation of which trait the providers
+        // implement, but don't reference it directly.
+        fn _silence(_: &impl OpenMlsProvider) {}
     }
 
     #[test]

@@ -213,6 +213,39 @@ impl Group {
         Ok(MemberAddition { commit, welcome })
     }
 
+    /// Commit a self-update with default leaf-node parameters.
+    /// Advances the group epoch by one. Subsequent calls to
+    /// [`Group::export_secret`] derive against the new epoch
+    /// and therefore produce a different secret — that is
+    /// exactly the rotation primitive
+    /// [`crate::publisher_group::PublisherGroup::rotate`]
+    /// surfaces for the Phase 4 channels publisher path
+    /// (24 h / N-posts scheduled rotation).
+    ///
+    /// Returns the wire-encoded commit. Welcomes are not
+    /// emitted by a no-op self_update — the bundle's
+    /// `welcome()` is `None` here per OpenMLS semantics.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Group`] for any OpenMLS-side failure.
+    pub fn self_update(&mut self, identity: &Identity) -> Result<Vec<u8>> {
+        use openmls::prelude::LeafNodeParameters;
+        let bundle = self
+            .inner
+            .self_update(
+                &identity.provider,
+                &identity.signature_keys,
+                LeafNodeParameters::default(),
+            )
+            .map_err(|e| Error::Group(format!("self_update: {e:?}")))?;
+        let commit_msg = bundle.into_commit();
+        self.inner
+            .merge_pending_commit(&identity.provider)
+            .map_err(|e| Error::Group(format!("merge_pending_commit: {e:?}")))?;
+        encode_message(&commit_msg)
+    }
+
     /// Add a member from a wire-format `KeyPackageIn`.
     ///
     /// Convenience wrapper that deserializes the bytes via

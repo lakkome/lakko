@@ -723,6 +723,24 @@ impl PublisherGroup {
         let g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
         Ok(g.channel_id().as_bytes().to_vec())
     }
+
+    /// G4-2-mls-persistence step 4 — rotate the channel
+    /// content-key seed by advancing the MLS group epoch
+    /// via a self-update commit. Returns the wire-encoded
+    /// commit bytes; the caller broadcasts them to every
+    /// other PublisherGroup member so they advance to the
+    /// same epoch in lock-step.
+    ///
+    /// After `rotate` returns, the next [`channel_seed`]
+    /// call against this handle (or any future
+    /// [`publisher_group_load`]) yields the **new-epoch**
+    /// seed. Pair with `seal_subscriber_seed_envelope` +
+    /// the services/channels batch fanout to reseal the
+    /// seed to every subscriber under the new epoch id.
+    pub fn rotate(&self, identity: &Identity) -> Result<Vec<u8>, FfiError> {
+        let mut g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
+        Ok(g.rotate(&identity.inner)?)
+    }
 }
 
 /// Load the persisted PublisherGroup for `channel_id` if any.
@@ -2420,6 +2438,27 @@ mod tests {
         assert!(load_res.is_err(), "load must refuse short channel id");
         let load_err = load_res.err().unwrap();
         assert!(matches!(load_err, FfiError::Codec(_) | FfiError::Group(_)));
+    }
+
+    #[test]
+    fn publisher_group_rotate_changes_seed() {
+        // G4-2-mls-persistence step 4 (FFI) — the load-bearing
+        // test: rotating the PublisherGroup MUST produce a
+        // distinct exporter output (different epoch under the
+        // hood). Mirror of the lakko-mls test of the same
+        // shape, but exercised through the UniFFI surface so
+        // the iOS / Android composer paths are covered too.
+        let alice = Identity::new("alice-rotate".into()).unwrap();
+        let cid = channel_id_filled(0xEE);
+
+        let pg = publisher_group_open_or_create(&alice, cid).unwrap();
+        let seed_pre = pg.channel_seed(&alice).unwrap();
+
+        let _commit = pg.rotate(&alice).unwrap();
+        let seed_post = pg.channel_seed(&alice).unwrap();
+
+        assert_ne!(seed_pre, seed_post);
+        assert_eq!(seed_post.len(), 32);
     }
 
     #[test]

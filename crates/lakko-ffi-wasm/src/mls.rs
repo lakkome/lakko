@@ -583,6 +583,27 @@ impl PublisherGroup {
             .map_err(|_| JsError::new("internal lock poisoned"))?;
         Ok(g.channel_id().as_bytes().to_vec())
     }
+
+    /// G4-2-mls-persistence step 4 — rotate the channel
+    /// content-key seed via an MLS self-update commit.
+    /// Mirror of the UniFFI `PublisherGroup.rotate`. Returns
+    /// the wire-encoded commit bytes; the caller broadcasts
+    /// them to every other PublisherGroup member so they
+    /// advance to the same epoch in lock-step.
+    ///
+    /// After `rotate` resolves, the next `channelSeed` call
+    /// returns the **new-epoch** seed. The web composer
+    /// pairs this with `sealSubscriberSeedEnvelope` + the
+    /// services/channels batch fanout to reseal the seed to
+    /// every subscriber under the new epoch id.
+    #[wasm_bindgen(js_name = rotate)]
+    pub fn rotate(&self, identity: &Identity) -> Result<Vec<u8>, JsError> {
+        let mut g = self
+            .inner
+            .lock()
+            .map_err(|_| JsError::new("internal lock poisoned"))?;
+        g.rotate(&identity.inner).map_err(mls_err)
+    }
 }
 
 // ============================================================================
@@ -2646,6 +2667,23 @@ mod tests {
         let cid = channel_id_filled(0xCC);
         let loaded = PublisherGroup::load(&alice, &cid).unwrap();
         assert!(loaded.is_none());
+    }
+
+    #[test]
+    fn wasm_publisher_group_rotate_changes_seed() {
+        // G4-2-mls-persistence step 4 (wasm). Mirror of the
+        // UniFFI rotate test.
+        let alice = Identity::new("alice-rotate").unwrap();
+        let cid = channel_id_filled(0xEE);
+
+        let pg = PublisherGroup::open_or_create(&alice, &cid).unwrap();
+        let seed_pre = pg.channel_seed(&alice).unwrap();
+
+        let _commit = pg.rotate(&alice).unwrap();
+        let seed_post = pg.channel_seed(&alice).unwrap();
+
+        assert_ne!(seed_pre, seed_post);
+        assert_eq!(seed_post.len(), 32);
     }
 
     // `wasm_publisher_group_rejects_short_channel_id` lives in

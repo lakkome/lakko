@@ -2139,6 +2139,86 @@ edge from any prior `AddRef` synchronises with the
 final `delete`. Same posture as upstream
 `rtc::RefCountedNonVirtual`.
 
+## PublisherGroup persistence + rotation (G4-2-mls-persistence)
+
+### C-52: PublisherGroup MLS state is persisted by deterministic channel-id, exporter output stable across reloads, rotation advances the epoch
+
+`crates/lakko-mls/src/publisher_group.rs` ships
+`PublisherGroup` — a thin wrapper around the standard
+[`Group`] with two invariants channels publishers rely on:
+
+1. **Persistence keyed by channel id**. The MLS group
+   id is deterministically derived from the 16-byte
+   `channel_id`:
+
+   ```
+   group_id = b"lakko/publisher-group/v1/" || channel_id   // 25 + 16 = 41 bytes
+   ```
+
+   The domain-separation prefix prevents byte-shape
+   confusion with any other channel-id-derived value
+   (the exporter label, the subscriber-envelope AAD).
+   `PublisherGroup::open_or_create(identity, channel_id)`
+   resolves to the same persisted group across process
+   restarts — `MlsGroup::load(provider.storage(),
+   group_id)` reads the OpenMLS snapshot from
+   SQLCipher. Subsequent calls return the same handle's
+   exporter output for the current epoch, so subscribers
+   who received a sealed seed envelope under a prior
+   epoch continue to decrypt new posts.
+
+   Pre-G4-2-mls-persistence, every composer call built a
+   throwaway `Group::create` with a random group_id —
+   the exporter output reset on every app restart,
+   subscribers' sealed seed envelopes silently stopped
+   matching, and the channel broke at the first reopen.
+
+2. **Rotation advances the MLS epoch, exporter output
+   changes**. `PublisherGroup::rotate(identity)` issues
+   an MLS self-update commit (`MlsGroup::self_update` +
+   `merge_pending_commit`), advancing the group epoch by
+   one. The exporter at the new epoch returns a
+   different 32-byte output for the same `(label,
+   context, length)` triple — that is the rotation
+   primitive ADR-0010 §"Rotation" requires
+   (scheduled-rotation timer 24 h / N posts, plus
+   on-demand for compromise response).
+
+   The rotation is **durable** — `rotated_seed_persists
+   _across_reload` proves that after `rotate` + drop, a
+   fresh `PublisherGroup::load` surfaces the post-
+   rotation seed (not epoch 0).
+
+   `rotate` returns the wire-encoded commit bytes so the
+   publisher can broadcast them to every other
+   PublisherGroup member. `rotate_emits_commit_bytes_
+   processable_by_co_publisher` proves the cross-
+   publisher seed-sync invariant: Alice mints
+   PublisherGroup, adds Bob via Add proposal, Bob joins
+   from welcome, Alice rotates, Bob processes the
+   commit, both ends at the same epoch with the same
+   exporter output.
+
+3. **FFI surface preserves the invariant across iOS /
+   Android / web**. UniFFI `PublisherGroup` +
+   `publisher_group_open_or_create` +
+   `publisher_group_load` (Swift / Kotlin) and
+   wasm-bindgen `PublisherGroup.openOrCreate` /
+   `.load` / `.rotate` (TypeScript) wrap the same Rust
+   handle behind a `Mutex<>`. Composer-side tests on
+   all three platforms exercise the idempotence
+   invariant: two consecutive `open_or_create` calls
+   for the same identity + channel id return byte-
+   identical seeds.
+
+Tested in 11 Rust-core tests
+(`crates/lakko-mls/src/publisher_group.rs` —
+including `open_or_create_is_idempotent`,
+`rotate_advances_epoch_and_changes_seed`,
+`rotated_seed_persists_across_reload`,
+`rotate_emits_commit_bytes_processable_by_co_publisher`)
++ 7 UniFFI + 4 wasm host-side tests.
+
 ## TURN-credential invariants (G3-{1,2}-turn)
 
 ### C-51: TURN credential follows the coturn `static-auth-secret` REST scheme; bound to a per-call expiry
