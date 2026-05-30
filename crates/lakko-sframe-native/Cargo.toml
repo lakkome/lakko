@@ -1,0 +1,50 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+# `lakko-sframe-native` (G3-sframe-native N-1) — flat C ABI
+# around `lakko_calls::sframe`. Compiles to both a
+# `staticlib` (iOS link target — the Obj-C++ shim N-4
+# links `liblakko_sframe_native.a` into the host app's
+# WebRTC.framework consumer) and a `cdylib` (Android link
+# target — the JNI shim N-5 loads
+# `liblakko_sframe_native.so` via `System.loadLibrary`).
+#
+# The crate is **not** a UniFFI / wasm-bindgen surface;
+# those live in `crates/lakko-ffi-uniffi/src/sframe.rs`
+# and `crates/lakko-ffi-wasm/src/sframe.rs` respectively
+# (G3-sframe step 1 surfaces). This crate is the
+# narrower hand-rolled `extern "C"` layer the C++
+# `webrtc::FrameEncryptorInterface` subclass (N-3) calls
+# into without going through UniFFI's JNI / Swift code
+# generators — the codec thread cannot afford the round
+# trip through the higher-level FFIs.
+
+[package]
+name        = "lakko-sframe-native"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish     = false
+description = "Flat C ABI around lakko_calls::sframe for the per-platform native frame-transformer shims (iOS Obj-C++, Android JNI)."
+
+[lib]
+# `staticlib` produces `liblakko_sframe_native.a` —
+# linked into the iOS Obj-C++ shim, no runtime symbol
+# resolution.
+# `cdylib` produces `liblakko_sframe_native.so` /
+# `.dylib` — loaded via JNI on Android (which expects
+# a dynamically-loaded shared library) and used by the
+# integration tests via `dlsym`.
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[lints]
+workspace = true
+
+[dependencies]
+lakko-calls.workspace = true
+
+[build-dependencies]
+cbindgen = "0.28"
