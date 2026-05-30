@@ -242,6 +242,280 @@ void test_bad_seed_length() {
   std::printf("ok\n");
 }
 
+// Tampering inside the ciphertext body — flip a single bit in the
+// middle of the wire frame. AEAD tag verification must catch it.
+// Mirrors test_aad_binding but on the ciphertext slot rather than
+// the AAD slot, so both sides of the AEAD's authenticated set are
+// exercised.
+void test_ciphertext_tamper() {
+  std::printf("test_ciphertext_tamper ... ");
+
+  constexpr uint32_t kAliceLeaf = 11;
+  auto* enc =
+      lakko::sframe::LakkoFrameEncryptor::Create(kTestSeed.data(),
+                                                 kTestSeed.size(),
+                                                 kAliceLeaf);
+  auto* dec =
+      lakko::sframe::LakkoFrameDecryptor::Create(kTestSeed.data(),
+                                                 kTestSeed.size());
+  enc->AddRef();
+  dec->AddRef();
+
+  // Plaintext deliberately > 16B so the body slot has bytes that
+  // are not the AEAD tag (tag is the last 16B). We flip a byte
+  // somewhere in the middle to exercise the body authentication
+  // path rather than only the tag.
+  const std::vector<uint8_t> plaintext = {
+      'l', 'a', 'k', 'k', 'o', '-', 's', 'f', 'r', 'a', 'm', 'e',
+      '-', 'b', 'r', 'i', 'd', 'g', 'e', '-', 't', 'a', 'm', 'p',
+      'e', 'r', '-', 't', 'e', 's', 't', '!',
+  };
+  const std::vector<uint8_t> aad = {0x55, 0xAA};
+
+  std::vector<uint8_t> ciphertext(enc->GetMaxCiphertextByteSize(
+      cricket::MEDIA_TYPE_AUDIO, plaintext.size()));
+  std::size_t ct_written = 0;
+  int rc = enc->Encrypt(cricket::MEDIA_TYPE_AUDIO,
+                        /*ssrc=*/0xCAFE,
+                        rtc::MakeArrayView(aad.data(), aad.size()),
+                        rtc::MakeArrayView(plaintext.data(), plaintext.size()),
+                        rtc::MakeArrayView(ciphertext.data(), ciphertext.size()),
+                        &ct_written);
+  assert(rc == 0);
+  // AEAD tag is the trailing 16 bytes (ChaCha20-Poly1305 / AES-GCM).
+  constexpr std::size_t kAeadTagBytes = 16;
+  assert(ct_written > kAeadTagBytes && "ct must be larger than AEAD tag");
+
+  // Pick a byte halfway between the wire-header end and the tag
+  // start — there must be plaintext bytes there because the
+  // plaintext is 32 bytes and the AEAD-tag is the trailing 16. The
+  // SFrame wire header is at most 17 bytes (see
+  // kMaxSframeHeaderBytes in sframe-bridge.cc); the midpoint of
+  // (header_max, ct_written - tag) is a safe body byte.
+  const std::size_t mid = (17 + (ct_written - kAeadTagBytes)) / 2;
+  ciphertext[mid] ^= 0x40;  // single-bit flip is enough for AEAD
+
+  std::vector<uint8_t> recovered(dec->GetMaxPlaintextByteSize(
+      cricket::MEDIA_TYPE_AUDIO, ct_written));
+  auto result = dec->Decrypt(
+      cricket::MEDIA_TYPE_AUDIO,
+      std::vector<uint32_t>{},
+      rtc::MakeArrayView(aad.data(), aad.size()),
+      rtc::MakeArrayView(ciphertext.data(), ct_written),
+      rtc::MakeArrayView(recovered.data(), recovered.size()));
+  assert(result.status ==
+             webrtc::FrameDecryptorInterface::Status::kFailedToDecrypt &&
+         "Ciphertext-body tamper unexpectedly returned kOk");
+
+  enc->Release();
+  dec->Release();
+  std::printf("ok\n");
+}
+
+// Encrypt N frames with the same encryptor — verify every one
+// encrypts successfully + every one decrypts on the receiver side
+// regardless of arrival order. SFrame counters live in the wire
+// header; the decryptor parses each frame's own counter and does
+// NOT require monotonic-order arrival across the wire.
+void test_counter_monotonicity_and_out_of_order() {
+  std::printf("test_counter_monotonicity_and_out_of_order ... ");
+
+  constexpr uint32_t kAliceLeaf = 21;
+  constexpr std::size_t kFrameCount = 1000;
+
+  auto* enc =
+      lakko::sframe::LakkoFrameEncryptor::Create(kTestSeed.data(),
+                                                 kTestSeed.size(),
+                                                 kAliceLeaf);
+  auto* dec =
+      lakko::sframe::LakkoFrameDecryptor::Create(kTestSeed.data(),
+                                                 kTestSeed.size());
+  enc->AddRef();
+  dec->AddRef();
+
+  // Each frame's plaintext encodes its own sequence number so we
+  // can verify out-of-order delivery still recovers the correct
+  // plaintext.
+  struct WireFrame {
+    std::vector<uint8_t> ct;
+    std::size_t expected_plaintext_seq;
+  };
+  std::vector<WireFrame> wire;
+  wire.reserve(kFrameCount);
+
+  const std::vector<uint8_t> aad = {0x01, 0x02, 0x03, 0x04};
+
+  for (std::size_t i = 0; i < kFrameCount; ++i) {
+    // 8-byte plaintext = big-endian i. Independent of any wire
+    // counter the encryptor adds.
+    std::array<uint8_t, 8> pt{};
+    for (int b = 0; b < 8; ++b) {
+      pt[7 - b] = static_cast<uint8_t>((i >> (b * 8)) & 0xFFu);
+    }
+
+    std::vector<uint8_t> ct(enc->GetMaxCiphertextByteSize(
+        cricket::MEDIA_TYPE_VIDEO, pt.size()));
+    std::size_t ct_written = 0;
+    int rc = enc->Encrypt(cricket::MEDIA_TYPE_VIDEO, /*ssrc=*/0,
+                          rtc::MakeArrayView(aad.data(), aad.size()),
+                          rtc::MakeArrayView(pt.data(), pt.size()),
+                          rtc::MakeArrayView(ct.data(), ct.size()),
+                          &ct_written);
+    assert(rc == 0 && "Encrypt failed mid-stream");
+    ct.resize(ct_written);
+    wire.push_back(WireFrame{std::move(ct), i});
+  }
+
+  // Fixed-seed deterministic shuffle (Math.random is forbidden in
+  // CC scripts and we want reproducible CI). Pairwise rotate
+  // mod-prime walk — covers every index uniformly within one pass.
+  for (std::size_t i = 0; i < wire.size(); ++i) {
+    const std::size_t j = (i * 7919u + 31u) % wire.size();
+    std::swap(wire[i], wire[j]);
+  }
+
+  // Decrypt in shuffled order.
+  for (const auto& w : wire) {
+    std::vector<uint8_t> recovered(dec->GetMaxPlaintextByteSize(
+        cricket::MEDIA_TYPE_VIDEO, w.ct.size()));
+    auto result = dec->Decrypt(
+        cricket::MEDIA_TYPE_VIDEO, std::vector<uint32_t>{},
+        rtc::MakeArrayView(aad.data(), aad.size()),
+        rtc::MakeArrayView(w.ct.data(), w.ct.size()),
+        rtc::MakeArrayView(recovered.data(), recovered.size()));
+    assert(result.status == webrtc::FrameDecryptorInterface::Status::kOk &&
+           "Decrypt failed for an out-of-order frame");
+    assert(result.bytes_written == 8);
+
+    std::size_t recovered_seq = 0;
+    for (int b = 0; b < 8; ++b) {
+      recovered_seq = (recovered_seq << 8) | recovered[b];
+    }
+    assert(recovered_seq == w.expected_plaintext_seq &&
+           "Out-of-order decrypt returned wrong plaintext");
+  }
+
+  enc->Release();
+  dec->Release();
+  std::printf("ok\n");
+}
+
+// Two distinct CallKey instances seeded with different bytes —
+// frames encrypted under seed_A must not decrypt under seed_B.
+// Mirrors the per-call key isolation invariant exporter labels
+// guarantee at the MLS layer.
+void test_per_call_key_isolation() {
+  std::printf("test_per_call_key_isolation ... ");
+
+  constexpr uint32_t kAliceLeaf = 31;
+
+  std::array<uint8_t, kSeedLen> seed_b = kTestSeed;
+  seed_b[0] ^= 0xFFu;  // diverge in the first byte → distinct CallKey
+
+  auto* enc_a =
+      lakko::sframe::LakkoFrameEncryptor::Create(kTestSeed.data(),
+                                                 kTestSeed.size(),
+                                                 kAliceLeaf);
+  auto* dec_b =
+      lakko::sframe::LakkoFrameDecryptor::Create(seed_b.data(),
+                                                 seed_b.size());
+  enc_a->AddRef();
+  dec_b->AddRef();
+
+  const std::vector<uint8_t> plaintext = {'i', 's', 'o', 'l', 'a', 't', 'e'};
+  const std::vector<uint8_t> aad = {0x99};
+
+  std::vector<uint8_t> ciphertext(enc_a->GetMaxCiphertextByteSize(
+      cricket::MEDIA_TYPE_AUDIO, plaintext.size()));
+  std::size_t ct_written = 0;
+  int rc = enc_a->Encrypt(cricket::MEDIA_TYPE_AUDIO, /*ssrc=*/0,
+                          rtc::MakeArrayView(aad.data(), aad.size()),
+                          rtc::MakeArrayView(plaintext.data(), plaintext.size()),
+                          rtc::MakeArrayView(ciphertext.data(), ciphertext.size()),
+                          &ct_written);
+  assert(rc == 0);
+
+  std::vector<uint8_t> recovered(dec_b->GetMaxPlaintextByteSize(
+      cricket::MEDIA_TYPE_AUDIO, ct_written));
+  auto result = dec_b->Decrypt(
+      cricket::MEDIA_TYPE_AUDIO,
+      std::vector<uint32_t>{},
+      rtc::MakeArrayView(aad.data(), aad.size()),
+      rtc::MakeArrayView(ciphertext.data(), ct_written),
+      rtc::MakeArrayView(recovered.data(), recovered.size()));
+  assert(result.status ==
+             webrtc::FrameDecryptorInterface::Status::kFailedToDecrypt &&
+         "Decryptor with a different per-call seed unexpectedly returned kOk");
+
+  enc_a->Release();
+  dec_b->Release();
+  std::printf("ok\n");
+}
+
+// 1 byte and 64 KiB payloads round-trip — covers both extremes of
+// realistic media frames (audio Opus packets are ~80B; an
+// intra-coded 1080p H.264 keyframe is in the ~40 KiB range). Empty
+// payloads (0 bytes) are NOT a libwebrtc shape — RTP frames are
+// always at least 1 byte — so we don't bother with that edge.
+void test_payload_size_extremes() {
+  std::printf("test_payload_size_extremes ... ");
+
+  constexpr uint32_t kAliceLeaf = 41;
+  auto* enc =
+      lakko::sframe::LakkoFrameEncryptor::Create(kTestSeed.data(),
+                                                 kTestSeed.size(),
+                                                 kAliceLeaf);
+  auto* dec =
+      lakko::sframe::LakkoFrameDecryptor::Create(kTestSeed.data(),
+                                                 kTestSeed.size());
+  enc->AddRef();
+  dec->AddRef();
+
+  const std::vector<uint8_t> aad = {0x77, 0x77, 0x77};
+
+  // Sizes tested: 1 byte (smallest realistic frame), 80 (Opus
+  // packet), 1500 (Ethernet MTU equivalent), 65536 (one 64 KiB
+  // video keyframe slice).
+  const std::vector<std::size_t> sizes = {1, 80, 1500, 65536};
+
+  for (std::size_t sz : sizes) {
+    std::vector<uint8_t> pt(sz);
+    for (std::size_t i = 0; i < sz; ++i) {
+      // Deterministic but non-trivial pattern so any byte-level
+      // corruption is visible if the round-trip ever silently
+      // truncates.
+      pt[i] = static_cast<uint8_t>(((i * 131u) ^ 0xA5u) & 0xFFu);
+    }
+
+    std::vector<uint8_t> ct(enc->GetMaxCiphertextByteSize(
+        cricket::MEDIA_TYPE_VIDEO, pt.size()));
+    std::size_t ct_written = 0;
+    int rc = enc->Encrypt(cricket::MEDIA_TYPE_VIDEO, /*ssrc=*/0,
+                          rtc::MakeArrayView(aad.data(), aad.size()),
+                          rtc::MakeArrayView(pt.data(), pt.size()),
+                          rtc::MakeArrayView(ct.data(), ct.size()),
+                          &ct_written);
+    assert(rc == 0 && "Encrypt failed for a payload-extremes size");
+
+    std::vector<uint8_t> recovered(dec->GetMaxPlaintextByteSize(
+        cricket::MEDIA_TYPE_VIDEO, ct_written));
+    auto result = dec->Decrypt(
+        cricket::MEDIA_TYPE_VIDEO, std::vector<uint32_t>{},
+        rtc::MakeArrayView(aad.data(), aad.size()),
+        rtc::MakeArrayView(ct.data(), ct_written),
+        rtc::MakeArrayView(recovered.data(), recovered.size()));
+    assert(result.status == webrtc::FrameDecryptorInterface::Status::kOk &&
+           "Decrypt failed for a payload-extremes size");
+    assert(result.bytes_written == sz);
+    assert(std::memcmp(recovered.data(), pt.data(), sz) == 0 &&
+           "Round-tripped plaintext differs at a payload-extremes size");
+  }
+
+  enc->Release();
+  dec->Release();
+  std::printf("ok\n");
+}
+
 }  // namespace
 
 int main() {
@@ -249,6 +523,10 @@ int main() {
   test_aad_binding();
   test_multi_sender_into_one_receiver();
   test_bad_seed_length();
+  test_ciphertext_tamper();
+  test_counter_monotonicity_and_out_of_order();
+  test_per_call_key_isolation();
+  test_payload_size_extremes();
   std::printf("all sframe-bridge tests passed\n");
   return 0;
 }

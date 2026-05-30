@@ -142,6 +142,19 @@ fuzz-list:
 audit-index-check:
     ./tools/audit-index-check
 
+# Host-side validation of the SFrame native shim — runs the
+# `apps/shared/sframe-bridge/build.sh` round-trip suite on the
+# dev box. Builds the lakko-sframe-native staticlib + compiles
+# the N-3 bridge + test harness, then exercises eight assertions:
+# single-sender round-trip, AAD-binding, multi-sender cache,
+# bad-seed rejection, ciphertext-body tamper, counter monotonicity
+# with out-of-order delivery, per-call-key isolation, payload-
+# size extremes (1 B / 80 B / 1500 B / 64 KiB). Closes the host-
+# side half of the N-{4,5}-validate sub-sprint; the full dual-
+# simulator / dual-emulator E2E lives in G3-4-mobile.
+test-sframe-bridge:
+    apps/shared/sframe-bridge/build.sh
+
 # Everything CI does — run locally before pushing.
 ci: fmt-check lint test audit reuse fuzz-check audit-index-check
 

@@ -1,0 +1,125 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+# Host-side CI gate for the SFrame native shim
+# (G3-sframe-native N-{4,5}-validate close-out).
+#
+# What this gates: the C++ bridge from N-3
+# (`apps/shared/sframe-bridge/`) and the Rust crate it links
+# (`crates/lakko-sframe-native`) together produce a correct
+# round-trip + reject every documented tampering mode. Eight
+# host-side assertions live in
+# `apps/shared/sframe-bridge/test_bridge.cc`:
+#
+#   1. Single-sender round-trip (audio).
+#   2. AAD-binding (correct AAD → kOk; tampered AAD → kFailedToDecrypt).
+#   3. Multi-sender into one receiver (per-sender_leaf
+#      ParticipantKey cache works under three concurrent senders).
+#   4. Bad seed length rejected on both encryptor + decryptor.
+#   5. Ciphertext-body tamper rejected (AEAD body authentication).
+#   6. Counter monotonicity + out-of-order delivery (1000 frames,
+#      shuffled then decrypted, all recover correctly).
+#   7. Per-call key isolation (two distinct CallKey seeds cannot
+#      cross-decrypt).
+#   8. Payload-size extremes (1 B / 80 B / 1500 B / 64 KiB).
+#
+# What this does NOT cover (lives in G3-4-mobile):
+#   - Live RTP between two iOS simulators or two Android
+#     emulators inside CI. The Obj-C++ shim (N-4
+#     `SFrameAttach.{h,mm}`) and the JNI shim (N-5
+#     `apps/android/lakko-sframe/src/main/cpp/sframe_jni.cc`)
+#     trampoline straight into this bridge — their plumbing is
+#     compile-gated by `xcodebuild build` + `./gradlew
+#     assembleDebug`. End-to-end ICE/DTLS + RTP forwarding
+#     against the dockerised SFU is the remit of G3-4-mobile,
+#     which needs simulator / emulator runners we do not yet
+#     have budget for.
+#
+# Trigger:
+#   - manual via `workflow_dispatch`
+#
+# Quota-conservation mode (May 2026): no schedule, no PR-label,
+# no push trigger. The build is ~1 min warm and a release-mode
+# cargo build of `lakko-sframe-native` is ~25 s cold; tractable
+# to run on demand. Re-enable a `schedule:` cron + PR-label
+# trigger when a paid tier or self-hosted runner lands.
+
+name: sframe-bridge
+
+on:
+  workflow_dispatch: {}
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  CARGO_INCREMENTAL: 0
+
+# Cancel any earlier in-flight run on the same ref so manual
+# re-triggers do not stack.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  sframe-bridge:
+    if: github.event_name == 'workflow_dispatch'
+
+    name: SFrame host-bridge round-trip (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    # The bridge build is ~1 min warm. 10 min upper-bounds any
+    # pathological cold-cache + apt-install combination on the
+    # Linux side.
+    timeout-minutes: 10
+
+    strategy:
+      # We want to see both Linux and macOS failures even if one
+      # side breaks — the bridge code is identical, but the host
+      # toolchain (gcc vs Apple clang) plus the platform-specific
+      # link extras (`-lpthread -ldl -lm` on Linux, nothing on
+      # macOS) diverge.
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # The bridge build invokes cargo for the staticlib, then
+      # plain c++. Cache the cargo target dir so the warm path
+      # stays under a minute.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Distinct key per OS so the macOS staticlib (which
+          # links against a different libSystem ABI) does not
+          # share storage with the Linux build.
+          shared-key: "sframe-bridge-${{ matrix.os }}"
+
+      # `just` is the documented entry point; pre-install it so
+      # the workflow exercises the same path a maintainer would
+      # locally with `just test-sframe-bridge`.
+      - name: install just
+        run: |
+          if [[ "${{ runner.os }}" == "Linux" ]]; then
+            curl --proto '=https' --tlsv1.2 -sSf https://just.systems/install.sh | bash -s -- --to /usr/local/bin
+          else
+            brew install just
+          fi
+
+      - name: just test-sframe-bridge
+        run: just test-sframe-bridge
+
+      # On failure, surface the freshly built test binary +
+      # build log so a reviewer can diff what an assertion
+      # printed against what the source expected.
+      - name: upload bridge artefacts (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sframe-bridge-${{ matrix.os }}
+          path: |
+            apps/shared/sframe-bridge/build/
+          retention-days: 14

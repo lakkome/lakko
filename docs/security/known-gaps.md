@@ -974,15 +974,38 @@ Validation chain (all green):
 **Deferred follow-ups (out of G-28 scope, tracked
 separately)**:
 
-- **N-4-validate** — runtime-on-simulator + on-device
-  dual-test (two iOS simulators in CI running a
-  synthetic call, verifying SFrame frames decrypt and
-  tampered AAD causes kFailedToDecrypt).
-- **N-5-validate** — Android-emulator equivalent.
+- **N-{4,5}-validate** — host-side close-out DONE
+  (May 2026). `apps/shared/sframe-bridge/test_bridge.cc`
+  ships eight standalone C++17 assertions exercising
+  every documented tampering mode of the SFrame
+  native shim before either platform binding loads:
+  single-sender round-trip, AAD-tamper, multi-sender
+  per-leaf cache, bad-seed rejection, ciphertext-body
+  tamper, counter monotonicity with out-of-order
+  delivery, per-call key isolation (two distinct
+  CallKey seeds cannot cross-decrypt), payload-size
+  extremes (1B/80B/1500B/64KiB). Runner: `just
+  test-sframe-bridge` locally and
+  `.github/workflows/sframe-bridge.yml`
+  (`workflow_dispatch` only, matrix `ubuntu-latest`
+  + `macos-latest`) in CI. Pinned as audit-pack
+  invariant **C-53** in
+  [`docs/security/calls.md`](./calls.md).
+- **N-{4,5}-validate-live** — dual-simulator /
+  dual-emulator live-RTP gate (two iOS simulators
+  + two Android emulators in CI running synthetic
+  calls against the dockerised SFU from
+  `ci/sfu-e2e/`, asserting tampered AAD →
+  `kFailedToDecrypt` end-to-end). Lives in
+  **G3-4-mobile** — the simulator / emulator matrix
+  half of the parent **G3-4** sprint. Needs
+  `macos-14` + KVM-enabled Linux runners we do not
+  yet have budget for.
 
-Build artefacts are already produced; what is
-deferred is the CI harness that exercises them under
-real ICE.
+Build artefacts are already produced; the host-side
+gate covers every code path below the platform shim,
+and the dual-instance live-RTP gate is the only
+remaining piece (waiting on CI-runner allocation).
 
 ---
 

@@ -2275,6 +2275,90 @@ passwords, same-account-different-time-distinct-password,
 saturating-expiry-does-not-overflow,
 from-env-rejects-short-secret).
 
+## SFrame native-shim host-side validation (N-{4,5}-validate)
+
+### C-53: Host-side bridge round-trip exercises every documented tampering mode of the SFrame native shim before either platform binding is loaded
+
+The iOS Obj-C++ shim (`apps/ios/Lakko/Calls/SFrameAttach.{h,mm}`)
+and the Android JNI shim
+(`apps/android/lakko-sframe/src/main/cpp/sframe_jni.cc`) are
+~99% wire-trampoline code — they cast pointers, marshal byte
+slices, and hand control off. Every cryptographic decision
+the call surface makes lives one layer down, in:
+
+  * `crates/lakko-sframe-native` (N-1) — flat C ABI over
+    `lakko_calls::sframe::{CallKey, ParticipantKey}`.
+  * `apps/shared/sframe-bridge/sframe-bridge.{h,cc}` (N-3) —
+    the C++ subclass of `webrtc::FrameEncryptorInterface` +
+    `webrtc::FrameDecryptorInterface` that the platform shims
+    actually pass to libwebrtc's `setFrameEncryptor:` /
+    `RtpSender.setFrameEncryptor(...)`.
+
+`apps/shared/sframe-bridge/test_bridge.cc` builds and runs as
+a standalone C++17 binary (no libwebrtc runtime, no gtest)
+against the same bridge code the platform shims attach. Eight
+assertions, all green on every push that touches the bridge
+or the Rust crate it links:
+
+  1. **Single-sender round-trip** — encrypt + decrypt produces
+     byte-identical plaintext.
+  2. **AAD binding** — tampered `additional_data` returns
+     `kFailedToDecrypt` (NOT `kOk`, NOT `kRecoverable`).
+  3. **Multi-sender into one receiver** — three concurrent
+     senders into one decryptor each get their own
+     `ParticipantKey` cache entry, every round-trip succeeds.
+  4. **Bad seed length** — both `LakkoFrameEncryptor::Create`
+     and `LakkoFrameDecryptor::Create` return `nullptr` for
+     seeds shorter than 32 bytes (fail-closed; the platform
+     shim must refuse to install a `nullptr` encryptor per
+     security invariant #4 — no fallback to non-E2EE).
+  5. **Ciphertext-body tamper** — flipping a single bit in the
+     AEAD-protected body (between the SFrame wire header and
+     the trailing 16-byte tag) returns `kFailedToDecrypt`. Together
+     with #2 this exercises both halves of the AEAD's
+     authenticated set.
+  6. **Counter monotonicity + out-of-order delivery** — 1000
+     frames sealed in order, decrypted in a deterministic
+     shuffle, every plaintext recovered correctly. SFrame
+     counters live in the wire header, not in receiver state;
+     no monotonic-order assumption.
+  7. **Per-call key isolation** — two `CallKey` instances
+     seeded with different bytes cannot cross-decrypt. Mirrors
+     the per-call domain-separation MLS exporter labels
+     guarantee at the layer above.
+  8. **Payload-size extremes** — 1 B / 80 B / 1500 B / 64 KiB
+     all round-trip; rules out a silent-truncation regression
+     in `GetMaxCiphertextByteSize` or
+     `GetMaxPlaintextByteSize`.
+
+The runner is `just test-sframe-bridge` locally and
+`.github/workflows/sframe-bridge.yml` in CI
+(`workflow_dispatch`-only, matrix on `ubuntu-latest` +
+`macos-latest`). Quota-conservation mode means no nightly
+cron yet; flip to `schedule:` when a paid tier lands.
+
+**Scope boundary.** This invariant does NOT cover live RTP
+between two iOS simulators or two Android emulators inside CI
+— that end-to-end gate is the remit of **G3-4-mobile**, the
+Phase 3 closeout sprint that wires `xcodebuild test -sdk
+iphonesimulator` and Gradle `connectedAndroidTest` against
+the dockerised SFU compose stack from `ci/sfu-e2e/`. The Obj-C++
+shim's selector trampoline (`objc_msgSend` →
+`setFrameEncryptor:`) and the JNI shim's
+`Java_me_lakko_sframe_LakkoFrameEncryptor_nativeCreate`
+plumbing are compile-gated by `xcodebuild build` + `./gradlew
+assembleDebug` today; the runtime install path is exercised
+by the `SFrameAvailability.bootProbe` reflection check on
+both platforms before any call entry point renders (security
+invariant #4: refuse-to-start if `RtpSender.setFrameEncryptor`
+disappears from a libwebrtc bump).
+
+Tested in `apps/shared/sframe-bridge/test_bridge.cc` (eight
+host-side assertions, listed above) + boot probe at
+`apps/ios/Lakko/Calls/SFrameAvailability.swift` +
+`apps/android/lakko-sframe/src/main/kotlin/me/lakko/sframe/
+SFrameAvailability.kt` (run at app start; fail-closed).
+
 ## Exporter labels (call-side)
 
 | Label | Length | Context | Source | Used for |
