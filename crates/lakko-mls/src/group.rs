@@ -108,6 +108,48 @@ impl Group {
         Ok(Self { inner })
     }
 
+    /// Create a new MLS group with a **caller-supplied** group id.
+    ///
+    /// Lakko's default `Group::create` lets OpenMLS pick a random
+    /// 32-byte group id at creation time. That is the right shape
+    /// for 1×1 chats / multi-party calls / DeviceGroup where the
+    /// group is uniquely identified by a server-side opaque
+    /// pseudonym.
+    ///
+    /// For **PublisherGroup** (G4-2-mls-persistence, ADR-0010
+    /// Tier-1) the publisher needs to round-trip the same group
+    /// state across process restarts keyed by `channel_id` — so
+    /// the group id MUST be deterministic from the channel id.
+    /// This variant supplies the same `MlsGroup` config as
+    /// [`Group::create`] but routes through OpenMLS's
+    /// `new_with_group_id` constructor instead of the
+    /// random-id `new`.
+    ///
+    /// # Errors
+    ///
+    /// Same shape as [`Group::create`]: [`Error::Group`] on any
+    /// OpenMLS-side failure.
+    pub fn create_with_id(identity: &Identity, group_id: &[u8]) -> Result<Self> {
+        use openmls::group::GroupId;
+
+        let cfg = MlsGroupCreateConfig::builder()
+            .ciphersuite(identity.ciphersuite())
+            .use_ratchet_tree_extension(true)
+            .build();
+
+        let id = GroupId::from_slice(group_id);
+        let inner = MlsGroup::new_with_group_id(
+            &identity.provider,
+            &identity.signature_keys,
+            &cfg,
+            id,
+            identity.credential.clone(),
+        )
+        .map_err(|e| Error::Group(format!("create_with_id: {e:?}")))?;
+
+        Ok(Self { inner })
+    }
+
     /// Join an existing group from a Welcome message.
     ///
     /// `welcome_bytes` is the TLS-encoded Welcome (extracted by the sender

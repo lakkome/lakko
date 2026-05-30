@@ -23,11 +23,13 @@ pub mod history_bundle;
 pub mod identity;
 pub mod key_package;
 pub mod pairing;
+pub mod publisher_group;
 
 pub use device_group::{AccountId, DeviceGroup};
 pub use error::{Error, Result};
 pub use group::{Group, Incoming, MemberAddition, MemberRecord};
 pub use identity::Identity;
+pub use publisher_group::{ChannelId, PublisherGroup, CHANNEL_EXPORTER_LABEL, CHANNEL_ID_LEN};
 
 /// Re-exported MLS leaf-node index. Surfaced so callers do not need to
 /// depend on `openmls` directly.
