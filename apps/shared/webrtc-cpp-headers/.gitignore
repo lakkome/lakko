@@ -1,0 +1,14 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+# Vendored headers under MNNN/include/ are populated by
+# `fetch.sh` from the pinned upstream URL with sha256
+# verification against the committed `SHA256SUMS`. The
+# `.h` files themselves are NOT committed — this keeps a
+# contributor from silently editing a vendored header
+# and breaking the upstream-truth invariant. The single
+# source of truth at PR-review time is `SHA256SUMS` +
+# `fetch.sh`. See README.md "Why `include/` is gitignored".
+
+*/include/*.h
+*/include/**/*.h
