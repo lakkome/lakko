@@ -126,6 +126,11 @@ just restart                   # systemctl restart lakko.target
 just restart-svc <svc>         # systemctl restart lakko-svc-<svc>
 just logs <svc>                # journalctl -u lakko-svc-<svc> -f
 just status                    # systemctl status lakko.target
+just deploy-coturn             # bootstrap / refresh coturn VPS (idempotent; LAKKO_TURN_HOST, default turn.lakko.me)
+just reload-coturn             # SIGUSR2 reload (TLS cert + config refresh, no relay session drop)
+just restart-coturn            # full restart (drops live sessions; use only for listening-port changes)
+just logs-coturn               # journalctl -u coturn -f on the coturn VPS
+just turn-smoke [host]         # local smoke probe (DNS / STUN / TURN-over-TLS / mTLS gate)
 just ci                        # everything CI does, locally
 ```
 

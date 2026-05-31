@@ -42,7 +42,7 @@ modes.
 
 | Sprint | Status | Files |
 |---|---|---|
-| **3a2** ICE infrastructure | Configs ready | [`coturn/turnserver.conf`](coturn/turnserver.conf), [`systemd/lakko-coturn.service`](systemd/lakko-coturn.service), [`scripts/deploy-coturn.sh`](scripts/deploy-coturn.sh) |
+| **3a2** ICE infrastructure | Configs + deploy + nginx mTLS + renew hook + smoke ready (G3-turn-deploy May 2026) | [`coturn/turnserver.conf`](coturn/turnserver.conf), [`systemd/lakko-coturn.service`](systemd/lakko-coturn.service), [`scripts/deploy-coturn.sh`](scripts/deploy-coturn.sh), [`nginx/sites-available/turn.conf`](nginx/sites-available/turn.conf), [`letsencrypt/lakko-coturn-renew-hook.sh`](letsencrypt/lakko-coturn-renew-hook.sh), [`scripts/turn-smoke.sh`](scripts/turn-smoke.sh) |
 | **3b2** SFU deployment | Configs ready | [`systemd/lakko-sfu.service`](systemd/lakko-sfu.service), [`nginx/sites-available/sfu.conf`](nginx/sites-available/sfu.conf), [`scripts/deploy-sfu.sh`](scripts/deploy-sfu.sh) |
 | **3b3** TURN-over-TLS | Bundled with 3a2 | Same files — coturn handles both `:3478` STUN/TURN and `:443` TURN-over-TLS in one binary |
 | **3b5** Monitoring | Configs ready | [`prometheus/prometheus.yml`](prometheus/prometheus.yml), [`prometheus/rules/calls.yml`](prometheus/rules/calls.yml) |
@@ -79,9 +79,14 @@ scp /tmp/lakko-sfu root@sfu.lakko.me:/usr/local/bin/lakko-sfu
 ssh root@sfu.lakko.me 'install -m 640 -g lakkome /dev/stdin /etc/lakko/livekit.yaml' < livekit.yaml
 
 # 4. Run the bootstrap on each VPS. Each script is idempotent.
-ssh root@turn.lakko.me 'bash -s' < infra/scripts/deploy-coturn.sh
+#    The `just deploy-coturn` recipe wraps step (a) — same
+#    posture as `just deploy` for the main fleet.
+just deploy-coturn   # equivalent to:
+                     #   rsync infra/ → root@turn.lakko.me + run deploy-coturn.sh
 # Note the TURN_SHARED_SECRET it prints — paste it into
 # /etc/lakko/lakko.env on the auth VPS too.
+# Day-to-day: `just restart-coturn`, `just reload-coturn`,
+# `just logs-coturn`, `just turn-smoke` (local smoke probe).
 
 ssh root@sfu.lakko.me 'bash -s' < infra/scripts/deploy-sfu.sh
 

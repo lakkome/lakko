@@ -77,7 +77,12 @@ scrape_configs:
       key_file:  /etc/prometheus/mtls/monitoring.key
       server_name: turn.lakko.me
     static_configs:
-      - targets: ['turn.lakko.me']
+      # `turn.lakko.me:9642` — coturn owns :443 (TURN-over-TLS)
+      # so the mTLS-fronted Prometheus scrape lives on the
+      # adjacent port 9642 (see
+      # `infra/nginx/sites-available/turn.conf`). Bare hostname
+      # would default to :443 and clash with the TURN listener.
+      - targets: ['turn.lakko.me:9642']
         labels:
           service: coturn
           environment: production

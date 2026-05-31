@@ -576,6 +576,13 @@ bundle-report-only:
 vps_user := env_var_or_default("LAKKO_VPS_USER", "lakkome")
 vps_host := env_var_or_default("LAKKO_VPS_HOST", "lakko.me")
 
+# G3-turn-deploy — separate VPS for coturn. Defaults match the
+# `turn.lakko.me` DNS name pinned in `infra/coturn/turnserver.conf`
+# + `infra/prometheus/prometheus.yml`. Override via env vars if
+# the operator's fleet layout differs.
+turn_user := env_var_or_default("LAKKO_TURN_USER", "root")
+turn_host := env_var_or_default("LAKKO_TURN_HOST", "turn.lakko.me")
+
 # Deploy: ssh into the VPS and run infra/scripts/deploy.sh.
 # That script does `git pull` + `cargo build --release` + install into
 # /usr/local/bin + `systemctl restart lakko.target`.
@@ -633,6 +640,58 @@ logs service:
 # Status of the whole stack.
 status:
     ssh {{vps_user}}@{{vps_host}} 'sudo systemctl status lakko.target --no-pager'
+
+# G3-turn-deploy — bootstrap or refresh the coturn VPS.
+# Idempotent — safe to re-run after editing turnserver.conf or
+# the systemd override; the script reloads coturn at the end.
+#
+# Prereqs:
+#   1. DNS A + AAAA records for turn.lakko.me → VPS IP.
+#   2. Root SSH access to the VPS (`LAKKO_TURN_USER=root` by
+#      default — Hetzner Ubuntu images ship root-only).
+#   3. The maintainer's monitoring CA cert (`monitoring-ca.crt`)
+#      pre-staged at `/etc/lakko/mtls/` on the VPS (see
+#      `infra/README-calls.md` "First-time deploy" step 5).
+#
+# First-run also generates a fresh TURN_SHARED_SECRET — the
+# script prints it; paste the same value into
+# /etc/lakko/lakko.env on the auth VPS as
+# LAKKO_TURN_SHARED_SECRET=... so services/auth can mint
+# matching credentials.
+deploy-coturn:
+    @echo "[deploy-coturn] rsyncing repo to {{turn_host}} (root may prompt for sudo)"
+    rsync -a --delete --exclude='target/' --exclude='.git/' \
+        ./infra/ {{turn_user}}@{{turn_host}}:/root/lakko-infra/
+    ssh {{turn_user}}@{{turn_host}} 'bash /root/lakko-infra/scripts/deploy-coturn.sh'
+
+# Restart coturn (drops in-flight relay sessions — operators
+# prefer `reload-coturn` below in 99 % of cases). Use this only
+# when a config change requires a full re-init (e.g. swapping
+# the listening IPs).
+restart-coturn:
+    ssh {{turn_user}}@{{turn_host}} 'sudo systemctl restart coturn'
+
+# Reload coturn — SIGUSR2-equivalent. Re-reads turnserver.conf
+# + the TLS cert files WITHOUT dropping live relay sessions.
+# This is what the Let's Encrypt deploy-hook
+# (`infra/letsencrypt/lakko-coturn-renew-hook.sh`) does on every
+# renewal, and what the operator should use after editing
+# `turnserver.conf` for everything except listening-port changes.
+reload-coturn:
+    ssh {{turn_user}}@{{turn_host}} 'sudo systemctl reload coturn'
+
+# Tail coturn logs. Same posture as `just logs <service>` for the
+# main fleet — `journalctl -u coturn -f` because the systemd
+# override unit logs through the journal (no separate file).
+logs-coturn:
+    ssh {{turn_user}}@{{turn_host}} 'journalctl -u coturn -f'
+
+# Local smoke probe — runs from the dev machine against the
+# public TURN endpoint. Does NOT require ssh; verifies the
+# TURN-over-TLS handshake + reachability of the metrics port.
+# Optional first arg overrides the host (default turn_host).
+turn-smoke host=turn_host:
+    bash infra/scripts/turn-smoke.sh {{host}}
 
 # Phase 1.22 — post-deploy end-to-end smoke probe. Runs from the
 # dev machine against the public HTTPS surface; no ssh, no shell
