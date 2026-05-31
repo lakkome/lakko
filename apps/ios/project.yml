@@ -285,6 +285,32 @@ targets:
         # `Group.processIncoming` carved out for the
         # 30 MB-memory extension process.
 
+  # G3-4-mobile — iOS XCTest target hosted by the Lakko app.
+  # Wired into the existing `Lakko` scheme below so
+  # `xcodebuild test -scheme Lakko -only-testing:LakkoTests`
+  # exercises the bundle on a booted simulator. Reads
+  # `LAKKO_SFU_E2E_URL` from the test process environment so
+  # the CI workflow `.github/workflows/g3-4-mobile.yml` can
+  # point the simulator at the dockerised SFU on the host.
+  LakkoTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: LakkoTests
+    settings:
+      base:
+        SWIFT_VERSION: "5.10"
+        IPHONEOS_DEPLOYMENT_TARGET: "17.0"
+        PRODUCT_BUNDLE_IDENTIFIER: me.lakko.dev.LakkoTests
+        GENERATE_INFOPLIST_FILE: YES
+        # Host-app bundle loader so the test binary can resolve
+        # symbols against the running Lakko.app on the
+        # simulator (standard app-hosted XCTest pattern).
+        BUNDLE_LOADER: "$(TEST_HOST)"
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/Lakko.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Lakko"
+    dependencies:
+      - target: Lakko
+
 # Local Swift Package: the LakkoCore wrapper from 1.14b.
 # Relative path resolves from `apps/ios/` to the same
 # directory. xcodegen forwards this to Xcode as a "local SPM
@@ -308,13 +334,19 @@ packages:
 
 # Schemes — xcodegen auto-generates one per target, but we
 # pin the explicit form so the build / archive / test actions
-# are reproducible. Single scheme `Lakko` covers Debug + Release.
+# are reproducible. Single scheme `Lakko` covers Debug +
+# Release + the LakkoTests bundle (G3-4-mobile).
 schemes:
   Lakko:
     build:
       targets:
         Lakko: all
+        LakkoTests: [test]
     run:
       config: Debug
+    test:
+      config: Debug
+      targets:
+        - LakkoTests
     archive:
       config: Release

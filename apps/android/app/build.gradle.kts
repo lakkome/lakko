@@ -88,6 +88,15 @@ android {
             "FCM_SENDER_ID",
             "\"${project.findProperty("lakko.fcm.senderId") as String? ?: ""}\"",
         )
+
+        // G3-4-mobile — wire androidx.test runner for the
+        // `app/src/androidTest/` instrumented test source set.
+        // `./gradlew :app:connectedDebugAndroidTest` boots a
+        // device / emulator + installs `app-debug-androidTest.apk`
+        // + invokes AndroidJUnitRunner against the @Test methods
+        // there. Without this line the test APK packages but
+        // never starts.
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
     compileOptions {
@@ -256,4 +265,14 @@ dependencies {
     testImplementation(libs.kotlinx.coroutines.test)
     testImplementation(libs.ktor.client.mock)
     testImplementation(libs.kotlinx.serialization.json)
+
+    // G3-4-mobile — instrumented test stack under
+    // `app/src/androidTest/`. The first-pass SfuHealth
+    // instrumented test only needs JUnit4 + the
+    // AndroidJUnitRunner; Espresso (view-matching) and
+    // mockito-android come later, when call UI grows
+    // assertions worth pinning against a live emulator.
+    androidTestImplementation(libs.androidx.test.runner)
+    androidTestImplementation(libs.androidx.test.ext.junit)
+    androidTestImplementation(libs.junit)
 }

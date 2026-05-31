@@ -57,6 +57,15 @@ kotlinx-coroutines    = "1.9.0"
 # fake responses without a network.
 junit              = "4.13.2"
 
+# Phase G3-4-mobile — androidx.test stack for instrumented
+# tests (`app/src/androidTest/`). Runner + JUnit4 shim around
+# the AndroidJUnitRunner. We deliberately skip Espresso —
+# the first-pass SFU health check does not touch the UI, so
+# pulling the view-matching surface in would just add cold-
+# start cost.
+androidx-test-runner   = "1.6.2"
+androidx-test-ext-junit = "1.2.1"
+
 # Phase 1.20d — Firebase Messaging for the FCM client integration.
 # Pinned to the 33.x BoM; bumping is a workspace concern because
 # FCM's wire protocol is backward-compatible but the SDK surface
@@ -171,6 +180,12 @@ kotlinx-serialization-json     = { group = "org.jetbrains.kotlinx", name = "kotl
 
 # Test deps.
 junit              = { group = "junit", name = "junit", version.ref = "junit" }
+# G3-4-mobile — `androidTest/` instrumented test stack.
+# `androidx-test-runner` provides AndroidJUnitRunner;
+# `androidx-test-ext-junit` lets the test class use the
+# standard JUnit4 `@Test` annotation under the runner.
+androidx-test-runner    = { group = "androidx.test",     name = "runner", version.ref = "androidx-test-runner" }
+androidx-test-ext-junit = { group = "androidx.test.ext", name = "junit",  version.ref = "androidx-test-ext-junit" }
 
 # Phase 1.20d — Firebase Messaging (FCM) via the Firebase BoM.
 # The BoM coordinates every `com.google.firebase:firebase-*`

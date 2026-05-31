@@ -1,0 +1,238 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+# G3-4-mobile — iOS / Android mobile half of the dockerised
+# SFU end-to-end gate (Variant A: manual-trigger only).
+#
+# Brings up the same compose stack as `sfu-e2e.yml`
+# (`ci/sfu-e2e/docker-compose.yml`), then exercises:
+#   - **iOS** — `xcodebuild test -scheme Lakko
+#     -only-testing:LakkoTests` on a booted iPhone 15
+#     simulator. The XCTest target reads
+#     `LAKKO_SFU_E2E_URL` from its process environment and
+#     hits `/health` over the simulator → host loopback.
+#   - **Android** — `./gradlew :app:connectedDebugAndroidTest`
+#     on a Pixel-class API-34 emulator brought up by
+#     `reactivecircus/android-emulator-runner`. The
+#     instrumented test reads the same URL from the
+#     `instrumentation-arguments` channel and hits `/health`
+#     over the Android-emulator → host loopback `10.0.2.2`.
+#
+# Why a single `macos-14` runner for both halves:
+#   - iOS Simulator requires macOS (Apple constraint).
+#   - Android Emulator on macOS uses HVF (Hypervisor.framework)
+#     for hardware acceleration. KVM-on-Linux is not available
+#     on GitHub-hosted runners — actions/runner-images#183
+#     has been open since 2019.
+#   - Running both on the same host means one compose-bring-
+#     up amortises across both test runs.
+#
+# Trigger:
+#   - manual via `workflow_dispatch` only.
+#
+# Quota-conservation mode (May 2026): no schedule, no
+# PR-label, no push. A full run burns ~25-35 minutes of
+# `macos-14` runtime which counts as 250-350 Linux minutes
+# against the Free-tier 2,000-minute budget. Re-enable a
+# `schedule:` cron + PR-label trigger when a paid tier or a
+# self-hosted Mac mini lands.
+#
+# What this workflow does NOT cover (deferred follow-ups):
+#   - Dual-simulator / dual-emulator live RTP between two
+#     synthetic peers (the actual end-to-end SFrame round-
+#     trip over real ICE / DTLS). That gate lands in
+#     `G3-4-mobile-call` once the WebSocket + JWT clients
+#     have a Swift / Kotlin surface inside the apps that
+#     tests can drive without re-implementing the wire
+#     protocol per-platform.
+
+name: g3-4-mobile
+
+on:
+  workflow_dispatch: {}
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  g3-4-mobile:
+    if: github.event_name == 'workflow_dispatch'
+
+    name: iOS + Android against dockerised SFU
+    runs-on: macos-14
+    # A green run completes in 25-30 minutes on a cold cache
+    # (Rust SFU build ~5 min, Xcode test ~3 min, Android
+    # emulator boot + test ~10-15 min). 60 min upper-bounds
+    # the pathological cold-cache case + any one-off
+    # Homebrew install drift.
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v5
+
+      # --- Toolchains ------------------------------------------
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      # Android SDK manager — the emulator-runner step below
+      # uses the SDK we provision here. `level=34` matches the
+      # `libs.versions.toml :: android.target.sdk` pin.
+      - name: setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "g3-4-mobile"
+
+      # Cache Gradle so the second invocation in the same
+      # session reuses the dependency graph.
+      - uses: gradle/actions/setup-gradle@v4
+
+      # Docker.app on `macos-14` runners is bundled but not
+      # started by default. We use colima (lightweight alt) so
+      # the workflow is independent of whether the runner
+      # ships Docker Desktop.
+      - name: setup colima
+        run: |
+          brew install colima docker docker-compose
+          colima start --cpu 4 --memory 8 --disk 30
+
+      # --- SFU compose stack -----------------------------------
+      - name: docker compose up
+        run: |
+          docker compose -f ci/sfu-e2e/docker-compose.yml up \
+            --build \
+            --detach \
+            --wait \
+            --wait-timeout 240
+
+      - name: docker compose ps
+        run: docker compose -f ci/sfu-e2e/docker-compose.yml ps
+
+      # The published port from the compose mapping
+      # (`127.0.0.1:7880:7880` under `services.sfu.ports`).
+      # Both the iOS simulator and the Android emulator
+      # reach the host's `7880` through their respective
+      # loopback bridges (simulator: `127.0.0.1` directly,
+      # emulator: `10.0.2.2`).
+      - name: verify SFU is reachable from host
+        run: |
+          curl -fsS http://127.0.0.1:7880/health
+
+      # --- iOS half --------------------------------------------
+      - name: install xcodegen
+        run: brew install xcodegen
+
+      - name: xcodegen generate
+        working-directory: apps/ios
+        run: xcodegen generate
+
+      - name: boot iPhone simulator
+        run: |
+          # `xcrun simctl` ships in every macos-14 image's
+          # Xcode. Pick the first iPhone 15-class device the
+          # runner image supplies — the Lakko project's
+          # iOS-17 deployment target floor accepts any of them.
+          udid=$(xcrun simctl list devices available -j | \
+                 python3 -c '
+          import json, sys
+          data = json.load(sys.stdin)
+          for runtime, devices in data["devices"].items():
+              for d in devices:
+                  if d.get("isAvailable") and "iPhone 15" in d["name"]:
+                      print(d["udid"])
+                      sys.exit(0)
+          sys.exit(1)
+          ')
+          echo "Booting simulator $udid"
+          xcrun simctl boot "$udid" || true
+          xcrun simctl bootstatus "$udid" -b
+
+      - name: xcodebuild test -only-testing:LakkoTests
+        working-directory: apps/ios
+        env:
+          # The simulator inherits its parent's env; XCTest
+          # process forwards env vars the test reads via
+          # `ProcessInfo.processInfo.environment`.
+          LAKKO_SFU_E2E_URL: http://127.0.0.1:7880
+        run: |
+          xcodebuild test \
+            -scheme Lakko \
+            -destination 'platform=iOS Simulator,name=iPhone 15' \
+            -only-testing:LakkoTests \
+            LAKKO_SFU_E2E_URL=http://127.0.0.1:7880
+
+      # --- Android half ----------------------------------------
+      # `reactivecircus/android-emulator-runner` knows how to
+      # provision an Android emulator on a macos-14 runner via
+      # HVF — under the hood it accepts the emulator image,
+      # boots it, waits for `boot_completed`, runs the
+      # provided script, and tears down. Single-action, one
+      # cold-boot of ~3-5 minutes.
+      - name: instrumented test via Android emulator
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          target: google_apis
+          arch: x86_64
+          profile: pixel_6
+          # Skip GPU acceleration in headless CI — slower but
+          # avoids fighting the runner's display layer.
+          emulator-options: -no-snapshot -no-window -gpu swiftshader_indirect
+          # `connectedDebugAndroidTest` invokes the
+          # `AndroidJUnitRunner` against the installed
+          # `app-debug-androidTest.apk`. We pass the SFU URL
+          # via the runner's documented argument channel.
+          script: |
+            ./gradlew :app:connectedDebugAndroidTest \
+              -Pandroid.testInstrumentationRunnerArguments.LAKKO_SFU_E2E_URL=http://10.0.2.2:7880
+          working-directory: apps/android
+
+      # --- Teardown + failure capture --------------------------
+      - name: docker compose logs (on failure)
+        if: failure()
+        run: |
+          mkdir -p artifacts
+          docker compose -f ci/sfu-e2e/docker-compose.yml logs --no-color sfu       > artifacts/sfu.log       || true
+          docker compose -f ci/sfu-e2e/docker-compose.yml logs --no-color test-jwks > artifacts/test-jwks.log || true
+
+      - name: upload Android test reports (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: g3-4-mobile-android-reports
+          path: |
+            apps/android/app/build/reports/androidTests/
+            apps/android/app/build/outputs/androidTest-results/
+          retention-days: 14
+
+      - name: upload iOS test reports (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: g3-4-mobile-ios-reports
+          path: |
+            ~/Library/Developer/Xcode/DerivedData/Lakko-*/Logs/Test/
+          retention-days: 14
+
+      - name: upload compose logs (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: g3-4-mobile-compose-logs
+          path: artifacts/
+          retention-days: 14
+
+      - name: docker compose down
+        if: always()
+        run: |
+          docker compose -f ci/sfu-e2e/docker-compose.yml down --volumes

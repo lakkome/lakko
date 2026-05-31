@@ -35,9 +35,15 @@ services:
       # `wget` ships in nginx:alpine. Polls the JWKS
       # endpoint until it responds with 200; the SFU's
       # `depends_on` block below waits on this gate.
+      # Pin to 127.0.0.1: busybox wget prefers ipv6 when
+      # `localhost` is given, and nginx.conf here only
+      # listens on the ipv4 socket (the
+      # `10-listen-on-ipv6-by-default.sh` entrypoint script
+      # patches `conf.d/default.conf` which we DO NOT
+      # use — we replace `nginx.conf` wholesale).
       test:
         - CMD-SHELL
-        - "wget --quiet --spider http://localhost:8080/.well-known/jwks.json || exit 1"
+        - "wget --quiet --spider http://127.0.0.1:8080/.well-known/jwks.json || exit 1"
       interval: 1s
       timeout: 2s
       retries: 10

@@ -20,5 +20,22 @@
 	<string>1.0</string>
 	<key>CFBundleVersion</key>
 	<string>1</string>
+	<key>NSExtension</key>
+	<dict>
+		<!--
+		Notification Service Extension principal-class declaration.
+		`$(PRODUCT_MODULE_NAME).NotificationService` resolves at
+		build time to `LakkoNotificationService.NotificationService`
+		(the Swift class in `NotificationService.swift`). Without
+		this block `simctl install` rejects the embedded .appex
+		with "extensionDictionary must be set in placeholder
+		attributes", blocking `xcodebuild test` even though
+		`xcodebuild build` succeeds.
+		-->
+		<key>NSExtensionPointIdentifier</key>
+		<string>com.apple.usernotifications.service</string>
+		<key>NSExtensionPrincipalClass</key>
+		<string>$(PRODUCT_MODULE_NAME).NotificationService</string>
+	</dict>
 </dict>
 </plist>
