@@ -193,3 +193,128 @@ async fn observer_records_clienthello_sni() {
         body.lines().rev().take(5).collect::<Vec<_>>().join("\n"),
     );
 }
+
+/// G5-7-fingerprint — verify the observer records JA3 +
+/// JA4 fingerprints alongside the SNI. The matching log
+/// line MUST carry non-null `ja3`, `ja3_string`, and `ja4`
+/// fields, and each MUST match the canonical shape (JA3
+/// = 32 lowercase hex chars; JA4 = `<prefix>_<hash_a>_<hash_b>`
+/// with two 12-char hex hashes).
+#[tokio::test]
+#[ignore = "requires ci/censorship-lab docker compose stack — see ci/censorship-lab/README.md"]
+async fn observer_records_ja3_and_ja4_fingerprints() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
+    let config = ClientConfig::builder()
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(AcceptAnyCert))
+        .with_no_client_auth();
+    let connector = TlsConnector::from(Arc::new(config));
+
+    // A distinct SNI so this test's log line cannot be
+    // confused with the SNI-only test's line in a shared
+    // observed.jsonl tail.
+    let sni_under_test = "lakko-fingerprint-test.example";
+    let server_name =
+        ServerName::try_from(sni_under_test.to_owned()).expect("test SNI is a valid DNS name");
+
+    let stream = TcpStream::connect(observer_addr())
+        .await
+        .expect("TCP connect to observer must succeed — is the compose stack up?");
+
+    let _ = tokio::time::timeout(
+        Duration::from_secs(3),
+        connector.connect(server_name, stream),
+    )
+    .await;
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let log_path = observer_log_path();
+    let mut file = tokio::fs::File::open(&log_path)
+        .await
+        .unwrap_or_else(|e| panic!("open observer log {}: {e}", log_path.display()));
+    let mut body = String::new();
+    file.read_to_string(&mut body).await.expect("read log");
+
+    let line = body
+        .lines()
+        .rev()
+        .find(|line| line.contains(&format!(r#""observed_sni":"{sni_under_test}""#)))
+        .unwrap_or_else(|| {
+            panic!(
+                "observer log must contain a fingerprint line for {sni_under_test:?}.\n\
+                 Tail of {}:\n{}",
+                log_path.display(),
+                body.lines().rev().take(5).collect::<Vec<_>>().join("\n"),
+            )
+        });
+
+    // JA3 — 32 lowercase hex chars between the literal
+    // `"ja3":"` and the next `"`.
+    let ja3 = extract_string_field(line, "ja3")
+        .unwrap_or_else(|| panic!("line missing `ja3` field: {line}"));
+    assert!(
+        ja3 != "null"
+            && ja3.len() == 32
+            && ja3
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+        "ja3 must be 32 lowercase hex chars, got: {ja3:?}",
+    );
+
+    // JA3 raw string — non-empty, contains commas.
+    let ja3_string = extract_string_field(line, "ja3_string")
+        .unwrap_or_else(|| panic!("line missing `ja3_string` field: {line}"));
+    assert!(
+        ja3_string != "null" && ja3_string.matches(',').count() == 4,
+        "ja3_string must carry 4 commas (5 fields), got: {ja3_string:?}",
+    );
+
+    // JA4 — `<prefix>_<hash_a>_<hash_b>`, each hash 12 hex chars.
+    let ja4 = extract_string_field(line, "ja4")
+        .unwrap_or_else(|| panic!("line missing `ja4` field: {line}"));
+    let parts: Vec<&str> = ja4.split('_').collect();
+    assert_eq!(
+        parts.len(),
+        3,
+        "JA4 must have 3 underscore-separated parts: {ja4:?}"
+    );
+    assert!(
+        parts[0].starts_with('t'),
+        "JA4 prefix must begin with `t` (TCP): {ja4:?}"
+    );
+    assert_eq!(parts[1].len(), 12, "JA4 hash_a must be 12 chars: {ja4:?}");
+    assert_eq!(parts[2].len(), 12, "JA4 hash_b must be 12 chars: {ja4:?}");
+    assert!(
+        parts[1].chars().all(|c| c.is_ascii_hexdigit()),
+        "JA4 hash_a must be hex: {ja4:?}",
+    );
+    assert!(
+        parts[2].chars().all(|c| c.is_ascii_hexdigit()),
+        "JA4 hash_b must be hex: {ja4:?}",
+    );
+}
+
+/// Minimal JSON-field extractor — finds `"name":"value"`
+/// in a flat single-line JSON object. Returns the value
+/// without the surrounding quotes, or `None` if the field
+/// is missing or appears as `"name":null`. Avoids a full
+/// `serde_json` dep just for the test harness — the
+/// observer output is strictly known-shape one-line
+/// JSON.
+fn extract_string_field<'a>(line: &'a str, field: &str) -> Option<&'a str> {
+    let needle = format!("\"{field}\":");
+    let start = line.find(&needle)? + needle.len();
+    let rest = &line[start..];
+    if rest.starts_with("null") {
+        // Strictly speaking returning `Some("null")` would
+        // let the caller treat that as the JSON null
+        // sentinel; the assertions above use `!= "null"`
+        // for that case, so we keep the shape consistent.
+        return Some("null");
+    }
+    let after_quote = rest.strip_prefix('"')?;
+    let end = after_quote.find('"')?;
+    Some(&after_quote[..end])
+}

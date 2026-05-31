@@ -20,9 +20,17 @@ runs the matrix on `workflow_dispatch` + a
 
 - `sni-observer/` — a small Rust binary that listens
   for TLS on `127.0.0.1:8443`, parses the inbound
-  ClientHello, extracts the `server_name` extension,
-  appends one JSON line per observation to
-  `./logs/observed.jsonl`, drops the connection. This
+  ClientHello, extracts the `server_name` extension
+  **plus JA3 (Salesforce 2017) and JA4 (FoxIO 2023
+  compact form)** passive fingerprints, appends one JSON
+  line per observation to `./logs/observed.jsonl`, drops
+  the connection. JA3 = MD5 over `version,ciphers,
+  extensions,groups,ec_point_formats` decimal CSV;
+  GREASE values (RFC 8701) are filtered. JA4 =
+  `t<ver><sni><nc><ne><alpn>_<hash_a>_<hash_b>` where
+  the two hashes are SHA-256-truncated-to-12-hex over
+  sorted unique ciphers and sorted extensions+sigalgs
+  respectively. This
   is the unencrypted picture an on-path passive
   adversary sees on the very first packet of a TLS
   flow.
