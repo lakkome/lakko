@@ -567,6 +567,39 @@ public class WebRtcPeerConnection(
         }
 
         /**
+         * Construct a fresh `VideoSource` bound to the
+         * process-wide `PeerConnectionFactory` (G3-2-video).
+         * `CameraVideoCapture` (the companion class in this
+         * folder) drives frames into the returned source via
+         * libwebrtc's `CapturerObserver` plumbing.
+         *
+         * Returns `null` only if the factory has not been
+         * initialised yet — in practice the caller will have
+         * already constructed a `WebRtcPeerConnection`, which
+         * primes the factory.
+         */
+        public fun newVideoSource(context: Context): VideoSource? {
+            ensureFactoryInitialised(context)
+            return sharedFactory?.createVideoSource(false)
+        }
+
+        /**
+         * Hand the call UI the same EGL context the encoder /
+         * decoder factories were built against. The Compose
+         * preview surface (`LocalVideoPreviewView`) initialises
+         * its `SurfaceViewRenderer` with this exact context so
+         * the renderer's GL pipeline shares textures with the
+         * codec path — same EGL share-group means zero texture
+         * copies between capturer / encoder / preview.
+         *
+         * Returns `null` if the factory has not been initialised
+         * yet; caller should construct a `WebRtcPeerConnection`
+         * first (which primes the factory).
+         */
+        public fun sharedEglContext(): EglBase.Context? =
+            sharedEglBase?.eglBaseContext
+
+        /**
          * STUN + (placeholder) TURN config. Production wires
          * these via the rendezvous bootstrap config; for now
          * a single Google STUN server is enough to exercise

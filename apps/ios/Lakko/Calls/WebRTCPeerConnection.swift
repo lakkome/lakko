@@ -265,17 +265,31 @@ public final class WebRTCPeerConnection: NSObject {
         localAudioTrack?.isEnabled = on
     }
 
+    /// Factory entry point for a fresh `RTCVideoSource`
+    /// bound to this process's shared `RTCPeerConnectionFactory`.
+    /// `LocalCameraCapture` (G3-1-video) drives frames into the
+    /// returned source via the standard
+    /// `RTCVideoCapturerDelegate` shape libwebrtc exposes.
+    /// Keep this static so the source's lifetime is independent
+    /// of any one `WebRTCPeerConnection` instance — the camera
+    /// can outlive a single call session (e.g. preview during
+    /// ringing).
+    public static func newVideoSource() -> RTCVideoSource {
+        sharedFactory.videoSource()
+    }
+
     /// Video plumbing extension point. `addLocalVideoTrack`
-    /// wires a `RTCVideoTrack` backed by an
-    /// `AVCaptureSession` the caller supplies — pinning the
-    /// capture lifecycle to the UI's video preview is the
-    /// caller's job (the SwiftUI overlay owns the preview
-    /// layer).
+    /// wires a `RTCVideoTrack` backed by the supplied
+    /// `RTCVideoSource` into the peer connection, tagging the
+    /// outgoing sender so `SFrame` attach + the SDP build
+    /// pipeline can find it. The caller (`LocalCameraCapture`)
+    /// owns the capturer + drives frames into the source; this
+    /// class only owns the track + sender pair.
     ///
-    /// First pass: this method is a stub that records the
-    /// intent. The actual `RTCCameraVideoCapturer` wire-up
-    /// lands in `G3-1-video` once the call UI grows the
-    /// preview surface. Audio calls work today without it.
+    /// MUST be called BEFORE the first SDP offer is built so
+    /// the resulting offer advertises a video m-line. Adding a
+    /// track post-offer triggers libwebrtc's renegotiation
+    /// path, which the call surface does not drive today.
     public func addLocalVideoTrack(_ source: RTCVideoSource) {
         guard let peer = peer else { return }
         let track = Self.sharedFactory.videoTrack(
