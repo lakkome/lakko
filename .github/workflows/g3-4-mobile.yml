@@ -37,14 +37,31 @@
 # `schedule:` cron + PR-label trigger when a paid tier or a
 # self-hosted Mac mini lands.
 #
-# What this workflow does NOT cover (deferred follow-ups):
+# What this workflow covers as of G3-4-mobile-call iter1
+# (May 2026):
+#   - Health probe: simulator + emulator both reach the
+#     SFU's `/health` over loopback (first-wave G3-4-mobile).
+#   - **Signaling round-trip**: simulator + emulator both
+#     mint a JWT (via `cargo run --example mint_test_jwt`
+#     pre-step) and open a real WebSocket to
+#     `/v1/connect?token=<jwt>` with the `lakko-sfu-v1`
+#     subprotocol, asserting the first server frame is a
+#     typed `Welcome` echoing the JWT's `call_id`. Tests
+#     the full JWT verify path the SFU runs against the
+#     fixture JWKS.
+#
+# Deferred follow-up `G3-4-mobile-call-iter2`:
 #   - Dual-simulator / dual-emulator live RTP between two
 #     synthetic peers (the actual end-to-end SFrame round-
-#     trip over real ICE / DTLS). That gate lands in
-#     `G3-4-mobile-call` once the WebSocket + JWT clients
-#     have a Swift / Kotlin surface inside the apps that
-#     tests can drive without re-implementing the wire
-#     protocol per-platform.
+#     trip over real ICE / DTLS). Requires real
+#     `RTCPeerConnection` integration on both halves +
+#     synthesised audio source + frame-counter assertions.
+#     Sketch: two `XCTestExpectation`s in one process /
+#     two coroutines in one instrumented test, each driving
+#     `WebRTCPeerConnection` / `WebRtcPeerConnection`
+#     through the SDP exchange, sending and receiving
+#     opus-encoded audio for ~2 s, asserting peer-B sees
+#     ≥ K frames within T seconds. ~600 LOC per platform.
 
 name: g3-4-mobile
 
@@ -128,6 +145,27 @@ jobs:
         run: |
           curl -fsS http://127.0.0.1:7880/health
 
+      # --- G3-4-mobile-call iter1: mint JWT ---------------------
+      # The `mint_test_jwt` example signs with the fixture
+      # seed `[0x42; 32]` the dockerised SFU's JWKS file
+      # pins (`ci/sfu-e2e/test-jwks/jwks.json`). The token's
+      # `call_id` matches what the iOS + Android signaling
+      # tests assert against in the Welcome frame.
+      - name: mint SFU test JWT
+        id: mint_jwt
+        run: |
+          jwt=$(cargo run --quiet --release -p lakko-call-jwt \
+            --example mint_test_jwt -- \
+            --call-id deadbeef0000000000000000000000aa \
+            --account cafef00d0000000000000000000000bb \
+            --role participant \
+            --ttl-secs 600)
+          # Stash on the step output AND in GITHUB_ENV so both
+          # the iOS step (env mapping) and the Android step
+          # (instrumentation argument) can read it.
+          echo "jwt=$jwt" >> "$GITHUB_OUTPUT"
+          echo "LAKKO_SFU_E2E_JWT=$jwt" >> "$GITHUB_ENV"
+
       # --- iOS half --------------------------------------------
       - name: install xcodegen
         run: brew install xcodegen
@@ -160,16 +198,27 @@ jobs:
       - name: xcodebuild test -only-testing:LakkoTests
         working-directory: apps/ios
         env:
-          # The simulator inherits its parent's env; XCTest
-          # process forwards env vars the test reads via
-          # `ProcessInfo.processInfo.environment`.
+          # xcodebuild reads env vars from the parent process
+          # but the simulator-hosted XCTest target does NOT
+          # see them — see `apps/ios/project.yml` scheme
+          # block `environmentVariables` which threads the
+          # build-setting values through to the test runner
+          # via `$(...)` interpolation.
           LAKKO_SFU_E2E_URL: http://127.0.0.1:7880
+          LAKKO_SFU_E2E_JWT: ${{ steps.mint_jwt.outputs.jwt }}
         run: |
+          # Pass URL + JWT as build-setting overrides on the
+          # xcodebuild command line. The scheme's
+          # `environmentVariables` block evaluates
+          # `$(LAKKO_SFU_E2E_URL)` / `$(LAKKO_SFU_E2E_JWT)`
+          # against these and injects the result into the
+          # test process environment.
           xcodebuild test \
             -scheme Lakko \
             -destination 'platform=iOS Simulator,name=iPhone 15' \
             -only-testing:LakkoTests \
-            LAKKO_SFU_E2E_URL=http://127.0.0.1:7880
+            LAKKO_SFU_E2E_URL="${LAKKO_SFU_E2E_URL}" \
+            LAKKO_SFU_E2E_JWT="${LAKKO_SFU_E2E_JWT}"
 
       # --- Android half ----------------------------------------
       # `reactivecircus/android-emulator-runner` knows how to
@@ -194,7 +243,8 @@ jobs:
           # via the runner's documented argument channel.
           script: |
             ./gradlew :app:connectedDebugAndroidTest \
-              -Pandroid.testInstrumentationRunnerArguments.LAKKO_SFU_E2E_URL=http://10.0.2.2:7880
+              -Pandroid.testInstrumentationRunnerArguments.LAKKO_SFU_E2E_URL=http://10.0.2.2:7880 \
+              -Pandroid.testInstrumentationRunnerArguments.LAKKO_SFU_E2E_JWT="${{ steps.mint_jwt.outputs.jwt }}"
           working-directory: apps/android
 
       # --- Teardown + failure capture --------------------------

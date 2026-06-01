@@ -253,13 +253,22 @@ targets:
       path: LakkoNotificationService/Info.plist
       properties:
         CFBundleDisplayName: Lakko Notifications
-        # `NSExtension` block lives in the Info.plist itself
-        # (not synthesized from `properties` here) because the
-        # principal-class declaration uses
-        # `$(PRODUCT_MODULE_NAME).NotificationService` which
-        # the build system substitutes at compile time —
-        # xcodegen's property merge would interpolate it
-        # too early.
+        # `NSExtension` block now lives in `properties` so
+        # xcodegen owns the entire Info.plist (previous
+        # comment about manual editing was stale — Xcode
+        # 26 simulator install refuses an app-extension
+        # bundle whose Info.plist lacks `NSExtension`
+        # outright, surfacing as
+        # `extensionDictionary must be set` in IXPlaceholder).
+        # `$(PRODUCT_MODULE_NAME)` in the principal-class
+        # value IS the syntax the build system substitutes
+        # at compile time; xcodegen writes the literal
+        # `$(...)` string into the plist and the linker
+        # resolves it later, exactly as a hand-rolled
+        # Xcode project would.
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.usernotifications.service
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).NotificationService
     entitlements:
       path: LakkoNotificationService/LakkoNotificationService.entitlements
       properties:
@@ -348,5 +357,23 @@ schemes:
       config: Debug
       targets:
         - LakkoTests
+      # G3-4-mobile-call iter1 — pull `LAKKO_SFU_E2E_URL`
+      # + `LAKKO_SFU_E2E_JWT` from the xcodebuild build-
+      # setting environment into the test process via
+      # `$(VAR)` interpolation. The workflow passes the
+      # actual values on the xcodebuild command line as
+      # `xcodebuild test ... LAKKO_SFU_E2E_JWT=<jwt>`;
+      # the scheme then expands those into the test
+      # runner's process environment. Without this
+      # plumbing, `ProcessInfo.environment` in the
+      # XCTest target cannot see what the parent shell
+      # had.
+      environmentVariables:
+        - variable: LAKKO_SFU_E2E_URL
+          value: "$(LAKKO_SFU_E2E_URL)"
+          isEnabled: true
+        - variable: LAKKO_SFU_E2E_JWT
+          value: "$(LAKKO_SFU_E2E_JWT)"
+          isEnabled: true
     archive:
       config: Release

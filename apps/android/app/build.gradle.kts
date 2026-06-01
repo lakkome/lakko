@@ -275,4 +275,15 @@ dependencies {
     androidTestImplementation(libs.androidx.test.runner)
     androidTestImplementation(libs.androidx.test.ext.junit)
     androidTestImplementation(libs.junit)
+    // G3-4-mobile-call iter1 — the SfuSignalingInstrumentedTest
+    // opens a real WebSocket to the dockerised SFU. Ktor's
+    // OkHttp engine is already a production dep
+    // (`libs.ktor.client.okhttp` above); pulling it into the
+    // instrumented-test classpath gives us the same
+    // `HttpClient { install(WebSockets) }` shape callers use
+    // in production without dragging in a second WS stack.
+    androidTestImplementation(libs.ktor.client.okhttp)
+    androidTestImplementation(libs.ktor.client.websockets)
+    androidTestImplementation(libs.kotlinx.coroutines.test)
+    androidTestImplementation(libs.kotlinx.serialization.json)
 }
