@@ -318,3 +318,158 @@ fn extract_string_field<'a>(line: &'a str, field: &str) -> Option<&'a str> {
     let end = after_quote.find('"')?;
     Some(&after_quote[..end])
 }
+
+// ===========================================================
+// G5-7-transport-matrix iter1 — Shadowsocks-2022 leaks-nothing
+// ===========================================================
+//
+// The first transport-matrix data point: drive
+// `ShadowsocksTransport::connect` at the SNI observer and
+// assert the observer logs the connection as **non-TLS**.
+//
+// What the observer should see:
+//   - First inbound bytes are a SS-2022 outer header:
+//     16-byte salt (or 32 for chacha20-poly1305) +
+//     sealed prelude. Random bytes; the first byte is
+//     almost never `0x16` (TLS handshake record type),
+//     and even if it were, the next bytes do not form
+//     a valid TLS record header.
+//   - `parse_client_hello` walks the wire format, fails
+//     at the first sanity check, returns `None`.
+//   - JSONL line: `observed_sni: null`, `ja3: null`,
+//     `ja4: null`. `first_bytes_hex` carries the random
+//     prefix.
+//
+// Why this matters for the security claim:
+//   Shadowsocks-2022 is Lakko's "no metadata" transport
+//   for environments where REALITY's cover-TLS heuristic
+//   is itself a fingerprint. Any future change that
+//   accidentally surfaces a parseable TLS ClientHello
+//   (e.g. an obfs layer wrapping outbound bytes in a TLS
+//   record) would defeat the design. The observer
+//   doubles as the regression detector.
+//
+// Companion claims this gate validates:
+//   T-10 (SS-2022 outer header layer) — bytes are
+//   indistinguishable from random.
+//   T-11 (SS-2022 TCP wiring) — does not accidentally
+//   emit pre-header TLS-looking bytes.
+
+use base64::engine::general_purpose::STANDARD as B64_STANDARD;
+use base64::Engine as _;
+use lakko_transport::{Endpoint, ShadowsocksConfig, ShadowsocksTransport, Transport};
+
+/// Drive a SS-2022 client at the observer; assert the
+/// observer's log line records `observed_sni: null`
+/// AND the connection was logged at all (i.e. the
+/// observer parsed the inbound bytes through to the
+/// JSON-emit step, not silently dropped).
+#[tokio::test]
+#[ignore = "requires ci/censorship-lab docker compose stack — see ci/censorship-lab/README.md"]
+async fn observer_records_shadowsocks_as_non_tls() {
+    // PSK is arbitrary — the observer has no server
+    // partner, the connection will fail mid-handshake.
+    // What matters: SS-2022 emits its outer-header bytes
+    // before failing, and those bytes hit the observer.
+    let psk_b64 = B64_STANDARD.encode([0x99u8; 32]);
+    let cfg = ShadowsocksConfig {
+        remote: observer_addr(),
+        method: "2022-blake3-chacha20-poly1305".into(),
+        psk_b64,
+    };
+    let transport =
+        ShadowsocksTransport::new(cfg).expect("ShadowsocksConfig must build a valid transport");
+
+    // Connect must fail — the observer has no SS server
+    // brain and drops the TCP after reading the prelude.
+    // What we care about is that the prelude was emitted
+    // and logged.
+    let endpoint = Endpoint::Hostname {
+        host: "127.0.0.1".into(),
+        port: observer_addr()
+            .rsplit(':')
+            .next()
+            .and_then(|p| p.parse::<u16>().ok())
+            .expect("observer_addr should carry an explicit port"),
+    };
+    let connect_result =
+        tokio::time::timeout(Duration::from_secs(3), transport.connect(&endpoint)).await;
+    // We don't assert on the connect result — it may
+    // surface as Err(timeout) (observer drops without
+    // reply) or Err(transport-level error) depending on
+    // how far SS-2022 got into its read-prelude state
+    // machine. Both are fine; the observation already
+    // happened before any of those terminal states.
+    let _ = connect_result;
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let log_path = observer_log_path();
+    let mut file = tokio::fs::File::open(&log_path)
+        .await
+        .unwrap_or_else(|e| panic!("open observer log {}: {e}", log_path.display()));
+    let mut body = String::new();
+    file.read_to_string(&mut body).await.expect("read log");
+
+    // The most recent line should be ours. SS-2022 does
+    // not embed a SNI we could grep for, so we identify
+    // our line by the timestamp ordering: tail of file =
+    // most recent. We then assert the shape.
+    let last = body
+        .lines()
+        .rev()
+        .next()
+        .unwrap_or_else(|| panic!("observer log is empty: {}", log_path.display()));
+
+    // `observed_sni: null` is what an unparseable / non-
+    // TLS prelude looks like in the JSONL. The extractor
+    // returns "null" (the literal four-char sentinel) for
+    // a `null` JSON value.
+    let observed = extract_string_field(last, "observed_sni")
+        .unwrap_or_else(|| panic!("line missing observed_sni: {last}"));
+    assert_eq!(
+        observed, "null",
+        "shadowsocks outer header must NOT parse as a TLS ClientHello — observed_sni should be null.\n\
+         line: {last}",
+    );
+
+    // JA3 + JA4 must also be null — these are derived
+    // from the same parser, so any leak would surface here
+    // too.
+    let ja3 =
+        extract_string_field(last, "ja3").unwrap_or_else(|| panic!("line missing ja3: {last}"));
+    assert_eq!(
+        ja3, "null",
+        "shadowsocks bytes must not yield a JA3 fingerprint. line: {last}",
+    );
+    let ja4 =
+        extract_string_field(last, "ja4").unwrap_or_else(|| panic!("line missing ja4: {last}"));
+    assert_eq!(
+        ja4, "null",
+        "shadowsocks bytes must not yield a JA4 fingerprint. line: {last}",
+    );
+
+    // first_bytes_hex must be present + non-empty (the
+    // observer read SOMETHING from the connection).
+    let first = extract_string_field(last, "first_bytes_hex")
+        .unwrap_or_else(|| panic!("line missing first_bytes_hex: {last}"));
+    assert_ne!(
+        first, "null",
+        "observer must have read at least one byte from shadowsocks. line: {last}",
+    );
+    assert!(
+        !first.is_empty(),
+        "first_bytes_hex must record the observed prelude. line: {last}",
+    );
+    // The first hex pair MUST NOT be the TLS handshake
+    // record type `16` — that would mean SS-2022's outer
+    // header started with what looks like a TLS record,
+    // which would defeat the no-TLS posture even if the
+    // rest fails to parse. This is the precise
+    // regression guard.
+    assert!(
+        !first.starts_with("16"),
+        "shadowsocks outer header must NOT begin with 0x16 (TLS handshake type). \
+         first_bytes_hex: {first}",
+    );
+}
