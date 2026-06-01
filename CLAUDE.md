@@ -286,6 +286,7 @@ curl -i http://127.0.0.1:8081/version  # → 200, JSON
   When a fact CAN be verified cheaply (read a file, run a command, look at git history), the assistant MUST verify before stating it. Fabricating facts that could have been checked is the same violation as making them up out of nowhere.
 
   Recommendations and prioritisation calls are allowed without quantification — `"my hunch is iter2a first because it does not touch ICE/DTLS"` is honest. `"iter2a delivers $1500 of value"` is not.
+- **No LOC counts in chat.** The maintainer does not care how many lines of code the AI generates. Do NOT report "~600-800 LOC" / "~200 LOC per platform" / "small sprint ~50 LOC" as a way to signal sprint size or complexity. This was a habit the assistant used to project rigour; it just clutters the chat with a metric that does not measure anything the maintainer is evaluating. If sprint sizing must be discussed, talk about it in terms of risk surface, number of integration points, blast radius of a regression, debug cost of flaky failures — anything but a line count. Counting actual diff lines AFTER a commit is fine when the maintainer explicitly asks ("how big was that?"); volunteering it as a size proxy in a recommendation is not.
 
 ## Technical invariants
 
