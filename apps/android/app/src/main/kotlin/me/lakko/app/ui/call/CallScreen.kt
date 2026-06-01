@@ -93,6 +93,9 @@ import kotlinx.coroutines.delay
 import androidx.compose.ui.platform.LocalContext
 import me.lakko.app.calls.CallSoundController
 import me.lakko.app.calls.CallUiState
+import me.lakko.app.calls.LocalVideoPreviewView
+import me.lakko.app.calls.WebRtcPeerConnection
+import org.webrtc.RendererCommon
 
 /**
  * In-call UI (Phase 3c6-android).
@@ -227,6 +230,12 @@ private fun PrejoinScreen(state: CallUiState) {
     var displayName by remember { mutableStateOf("") }
     var camOn by remember { mutableStateOf(true) }
     var micOn by remember { mutableStateOf(true) }
+    // G3-2-video-ui-screen — observe the live local track for
+    // the rare case where the host has armed the camera before
+    // the user hits Join (e.g. the accept-with-video flow runs
+    // through the prejoin screen).
+    val localVideoTrack by state.localVideoTrack.collectAsState()
+    val settings by state.settings.collectAsState()
 
     Column(
         modifier = Modifier
@@ -257,26 +266,38 @@ private fun PrejoinScreen(state: CallUiState) {
                 .border(1.dp, CallTheme.border, RoundedCornerShape(12.dp)),
         ) {
             if (camOn) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .background(
-                            Brush.linearGradient(
-                                colors = listOf(
-                                    Color(0xFF1F2937),
-                                    Color(0xFF111827),
-                                    Color(0xFF0B0F19),
-                                ),
-                            ),
-                            RoundedCornerShape(12.dp),
-                        ),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Text(
-                        "(camera preview)",
-                        color = CallTheme.textSecondary,
-                        fontSize = 13.sp,
+                val eglContext = remember { WebRtcPeerConnection.sharedEglContext() }
+                val track = localVideoTrack
+                if (track != null && eglContext != null) {
+                    LocalVideoPreviewView(
+                        track = track,
+                        eglContext = eglContext,
+                        modifier = Modifier.fillMaxSize(),
+                        mirrored = settings.mirrorLocal,
+                        scalingType = RendererCommon.ScalingType.SCALE_ASPECT_FILL,
                     )
+                } else {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(
+                                Brush.linearGradient(
+                                    colors = listOf(
+                                        Color(0xFF1F2937),
+                                        Color(0xFF111827),
+                                        Color(0xFF0B0F19),
+                                    ),
+                                ),
+                                RoundedCornerShape(12.dp),
+                            ),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text(
+                            "(camera preview)",
+                            color = CallTheme.textSecondary,
+                            fontSize = 13.sp,
+                        )
+                    }
                 }
             } else {
                 Box(
@@ -1066,6 +1087,13 @@ private fun ParticipantTile(
 ) {
     val pinnedId by state.pinnedId.collectAsState()
     val isPinned = pinnedId == participant.id
+    // G3-2-video-ui-screen — observe the live local track so a
+    // post-construction camera-arm flips this tile from
+    // placeholder to live preview without an outer recomposition
+    // dance. Remote tracks land in a separate sub-sprint (the
+    // SFU's TracksIn/Out ssrc-to-leaf mapping is the blocker).
+    val localVideoTrack by state.localVideoTrack.collectAsState()
+    val settings by state.settings.collectAsState()
 
     Box(
         modifier = Modifier
@@ -1083,26 +1111,45 @@ private fun ParticipantTile(
     ) {
         // Video surface.
         if (participant.camOn) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(
-                        Brush.linearGradient(
-                            colors = listOf(
-                                Color(0xFF1F2937),
-                                Color(0xFF111827),
-                                Color(0xFF0B0F19),
-                            ),
-                        ),
-                        RoundedCornerShape(12.dp),
-                    ),
-                contentAlignment = Alignment.Center,
-            ) {
-                Text(
-                    "(video)",
-                    color = CallTheme.textSecondary.copy(alpha = 0.6f),
-                    fontSize = 12.sp,
+            // Live local-track render path (G3-2-video-ui-screen).
+            // The EGL context is the same share-group the codec /
+            // capturer use — sharedEglContext() is non-null once
+            // any WebRtcPeerConnection has primed the factory,
+            // which is true by the time a local track is
+            // attached. Defensive fallback to the placeholder if
+            // it is unexpectedly null.
+            val eglContext = remember { WebRtcPeerConnection.sharedEglContext() }
+            val track = localVideoTrack
+            if (participant.isLocal && track != null && eglContext != null) {
+                LocalVideoPreviewView(
+                    track = track,
+                    eglContext = eglContext,
+                    modifier = Modifier.fillMaxSize(),
+                    mirrored = settings.mirrorLocal,
+                    scalingType = RendererCommon.ScalingType.SCALE_ASPECT_FILL,
                 )
+            } else {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(
+                            Brush.linearGradient(
+                                colors = listOf(
+                                    Color(0xFF1F2937),
+                                    Color(0xFF111827),
+                                    Color(0xFF0B0F19),
+                                ),
+                            ),
+                            RoundedCornerShape(12.dp),
+                        ),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        "(video)",
+                        color = CallTheme.textSecondary.copy(alpha = 0.6f),
+                        fontSize = 12.sp,
+                    )
+                }
             }
         } else {
             Box(

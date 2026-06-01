@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 import SwiftUI
+import WebRTC
 
 /// In-call UI (Phase 3c6-ios).
 ///
@@ -278,22 +279,40 @@ private struct ParticipantTile: View {
     @ViewBuilder
     private var videoSurface: some View {
         if participant.camOn {
-            // Gradient placeholder for the camera feed — real
-            // <RTCVideoView> lands with 3a-pod-followup.
-            LinearGradient(
-                gradient: Gradient(colors: [
-                    Color(red: 0.12, green: 0.16, blue: 0.22),
-                    Color(red: 0.07, green: 0.09, blue: 0.16),
-                    Color(red: 0.04, green: 0.06, blue: 0.10),
-                ]),
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
-            .overlay(
-                Text("(video)")
-                    .font(.caption)
-                    .foregroundColor(CallTheme.textSecondary.opacity(0.6))
-            )
+            // G3-1-video-ui-screen — when the state has a live
+            // local track (bound via `CallUiState.bind(to:)`),
+            // render it for the **local** participant. Remote
+            // tracks are still on the placeholder path until
+            // the WebRTC pod's RTP-receiver wiring publishes
+            // per-participant tracks; the wiring shape is the
+            // same — extend `CallUiState` with a
+            // `[participantId: RTCVideoTrack]` map and look up
+            // here. Remote-track integration is its own
+            // follow-up sprint, gated by the SFU's
+            // `TracksIn` / `TracksOut` ssrc-to-leaf mapping
+            // landing in production.
+            if participant.isLocal, let track = state.localVideoTrack {
+                LocalVideoPreviewView(
+                    track: track,
+                    mirrored: state.settings.mirrorLocal,
+                    contentMode: .scaleAspectFill
+                )
+            } else {
+                LinearGradient(
+                    gradient: Gradient(colors: [
+                        Color(red: 0.12, green: 0.16, blue: 0.22),
+                        Color(red: 0.07, green: 0.09, blue: 0.16),
+                        Color(red: 0.04, green: 0.06, blue: 0.10),
+                    ]),
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+                .overlay(
+                    Text("(video)")
+                        .font(.caption)
+                        .foregroundColor(CallTheme.textSecondary.opacity(0.6))
+                )
+            }
         } else {
             ZStack {
                 Color(red: 0.15, green: 0.15, blue: 0.17)
@@ -559,20 +578,39 @@ private struct PrejoinView: View {
                 // Video preview box with overlays.
                 ZStack {
                     if camOn {
-                        LinearGradient(
-                            gradient: Gradient(colors: [
-                                Color(red: 0.12, green: 0.16, blue: 0.22),
-                                Color(red: 0.07, green: 0.09, blue: 0.16),
-                                Color(red: 0.04, green: 0.06, blue: 0.10),
-                            ]),
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        )
-                        .overlay(
-                            Text("(camera preview)")
-                                .font(.subheadline)
-                                .foregroundColor(CallTheme.textSecondary)
-                        )
+                        // G3-1-video-ui-screen — same posture as
+                        // the in-call self-tile: when the host
+                        // has already armed the camera via
+                        // `CallSession.startLocalCameraCapture`
+                        // (rare on the prejoin path — production
+                        // typically waits until the user taps
+                        // "Join" — but the testbed + the
+                        // accept-with-video flow both arm it
+                        // here), render the live preview.
+                        // Otherwise fall through to the
+                        // legacy gradient placeholder.
+                        if let track = state.localVideoTrack {
+                            LocalVideoPreviewView(
+                                track: track,
+                                mirrored: state.settings.mirrorLocal,
+                                contentMode: .scaleAspectFill
+                            )
+                        } else {
+                            LinearGradient(
+                                gradient: Gradient(colors: [
+                                    Color(red: 0.12, green: 0.16, blue: 0.22),
+                                    Color(red: 0.07, green: 0.09, blue: 0.16),
+                                    Color(red: 0.04, green: 0.06, blue: 0.10),
+                                ]),
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                            .overlay(
+                                Text("(camera preview)")
+                                    .font(.subheadline)
+                                    .foregroundColor(CallTheme.textSecondary)
+                            )
+                        }
                     } else {
                         ZStack {
                             CallTheme.surface

@@ -5,12 +5,15 @@ package me.lakko.app.calls
 
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
+import org.webrtc.VideoTrack
 
 /**
  * In-call UI state (Phase 3c6-android).
@@ -183,6 +186,24 @@ public class CallUiState(
      *  chat panel. System events do not count towards unread. */
     private val _chatUnreadCount = MutableStateFlow(0)
     public val chatUnreadCount: StateFlow<Int> = _chatUnreadCount.asStateFlow()
+
+    /** G3-2-video-ui-screen — live local-camera track from the
+     *  underlying [CallSession] (when one is attached via
+     *  [bindTo]). `null` while audio-only, while the prejoin
+     *  flow is still up, or while the camera-pipeline init is
+     *  in-flight. Compose consumers (the self-tile in the
+     *  participant grid, the prejoin preview) render
+     *  `LocalVideoPreviewView(track:)` when this is non-null
+     *  **and** the local participant's `camOn == true`.
+     *  Untouched by [seedMockState] — the mock-driven design
+     *  path keeps the legacy "(video)" placeholder. */
+    private val _localVideoTrack = MutableStateFlow<VideoTrack?>(null)
+    public val localVideoTrack: StateFlow<VideoTrack?> = _localVideoTrack.asStateFlow()
+
+    /** Job for an active [bindTo] subscription. Cancelled on
+     *  [reset] / re-bind to a different session so the previous
+     *  flow doesn't keep pushing onto the StateFlow. */
+    private var bindJob: Job? = null
 
     /** Monotone counter for client-side chat-message ids. */
     private var chatIdCounter: Long = 0
@@ -418,6 +439,38 @@ public class CallUiState(
         _chatUnreadCount.value = 0
     }
 
+    // ----------------------------------------------------------
+    // Live video track (G3-2-video-ui-screen)
+    // ----------------------------------------------------------
+
+    /** Push a fresh local video track into the state. Callers
+     *  are typically the [bindTo] coroutine collector; an
+     *  explicit setter is exposed so testbeds + previews can
+     *  drive the UI without standing up a real [CallSession]. */
+    public fun setLocalVideoTrack(track: VideoTrack?) {
+        _localVideoTrack.value = track
+    }
+
+    /**
+     * Attach a live [CallSession] so the UI mirrors its
+     * `localVideoTrack` StateFlow. Currently bridges only the
+     * local video track; the audio / participant / e2ee /
+     * connection-detail fields stay on the mock path until the
+     * full-session-integration sub-sprint lands (the screen
+     * today reads from [seedMockState]).
+     *
+     * Cancels any previous bind subscription so re-attaching
+     * to a different session is safe.
+     */
+    public fun bindTo(session: CallSession) {
+        bindJob?.cancel()
+        bindJob = scope.launch {
+            session.localVideoTrack.collect { track ->
+                _localVideoTrack.value = track
+            }
+        }
+    }
+
     public fun endCall() {
         _phase.value = CallPhase.Ended(endedAtMs = System.currentTimeMillis())
     }
@@ -439,6 +492,12 @@ public class CallUiState(
         _chatMessages.value = emptyList()
         _composeText.value = ""
         _chatUnreadCount.value = 0
+        // Live media — drop the local track + cancel any
+        // bound CallSession subscription so the next call
+        // re-binds against a fresh session.
+        bindJob?.cancel()
+        bindJob = null
+        _localVideoTrack.value = null
     }
 
     /** Mock seed — same shape as the web `seedMockParticipants` /

@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
+import Combine
 import Foundation
 import SwiftUI
+import WebRTC
 
 /// In-call UI state (Phase 3c6-ios).
 ///
@@ -212,6 +214,18 @@ public final class CallUiState: ObservableObject {
     /// chat panel. System events do not count towards unread
     /// — they are background context.
     @Published public private(set) var chatUnreadCount: Int = 0
+
+    /// G3-1-video-ui-screen — live local-camera track from the
+    /// underlying `CallSession` (when one is attached via
+    /// `bind(to:)`). `nil` while audio-only, while the prejoin
+    /// flow is still up, or while the camera-pipeline init is
+    /// in-flight. SwiftUI consumers (the self-tile in
+    /// `ParticipantTile`, the prejoin preview in `PrejoinView`)
+    /// render `LocalVideoPreviewView(track:)` when this is
+    /// non-nil **and** the local participant's `camOn == true`.
+    /// Untouched by `seedMockState()` — the mock-driven design
+    /// path keeps the legacy "(video)" placeholder.
+    @Published public private(set) var localVideoTrack: RTCVideoTrack?
 
     /// Monotone counter for client-side chat-message ids;
     /// the WebRTC pod replaces this with MLS application-
@@ -498,6 +512,16 @@ public final class CallUiState: ObservableObject {
         self.chatUnreadCount = 0
     }
 
+    // MARK: - Live video track (G3-1-video-ui-screen)
+
+    /// Push a fresh local video track into the state. Callers
+    /// are typically the `bind(to:)` Combine subscription; an
+    /// explicit setter is exposed so testbeds + previews can
+    /// drive the UI without standing up a real `CallSession`.
+    public func setLocalVideoTrack(_ track: RTCVideoTrack?) {
+        self.localVideoTrack = track
+    }
+
     public func endCall() {
         self.phase = .ended(endedAt: Date())
     }
@@ -520,6 +544,9 @@ public final class CallUiState: ObservableObject {
         self.chatMessages = []
         self.composeText = ""
         self.chatUnreadCount = 0
+        // Live media — drop the local track so the next call
+        // re-binds against a fresh CallSession.
+        self.localVideoTrack = nil
     }
 
     /// Seed mock state — same shape as the web `seedMockParticipants`.
@@ -565,5 +592,39 @@ public final class CallUiState: ObservableObject {
         participants = participants.map { p in
             p.id == id ? patch(p) : p
         }
+    }
+}
+
+// MARK: - CallSession bridge (G3-1-video-ui-screen)
+
+extension CallUiState {
+
+    /// Attach a live `CallSession` so the UI mirrors its
+    /// `@Published` outputs. Currently bridges the local video
+    /// track; the audio / participant / e2ee / connection-
+    /// detail fields stay on the mock path until the
+    /// full-session-integration sub-sprint lands (the screen
+    /// today reads from `seedMockState()`).
+    ///
+    /// The returned `AnyCancellable` owns the Combine
+    /// subscription — store it in the SwiftUI host (typically
+    /// a `@State` on the screen that constructs the session)
+    /// and drop it when the call ends. Dropping the
+    /// cancellable does NOT clear the existing track from
+    /// state — call `reset()` for that, or wait for the
+    /// session itself to publish `nil` on teardown
+    /// (`CallSession.teardownMediaPipeline()` does this).
+    ///
+    /// Safe to call from any actor — the Combine subscription
+    /// receives on the main queue and re-enters the
+    /// `@MainActor`-isolated setter.
+    public func bind(to session: CallSession) -> AnyCancellable {
+        return session.$localVideoTrack
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] track in
+                MainActor.assumeIsolated {
+                    self?.setLocalVideoTrack(track)
+                }
+            }
     }
 }
