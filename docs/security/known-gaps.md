@@ -876,18 +876,34 @@ sub-sprints:
 
 Remaining deferred follow-ups (out of G4-2 scope):
 
-- Scheduled rotation timer (24 h / N posts).
-  Triggered by a publisher-side cron in the
-  client UI; calls `PublisherGroup.rotate` + the
-  subscriber-batch reseal path. The Rust primitive
-  is shipped; the UI-side timer is a small
-  per-platform addition.
-- Batched subscriber-side fanout after rotation —
-  walking the subscriber registry, sealing N new
-  envelopes under the new epoch, posting them.
-  Server-side `POST /v1/channels/:id/rotate` route
-  is already shipped (C-42); the client-side loop
-  that drives it is the remaining piece.
+- **G4-2-rotation-timer wave 1 DONE** (May 2026) —
+  scheduled rotation policy + web orchestration.
+  `crates/lakko-channels/src/rotation_policy.rs` ships
+  `RotationPolicy` (24 h or 1 000 posts, both
+  thresholds independently disable-able) + `RotationState`
+  + pure `should_rotate(now_ms, state)` decision.
+  Saturating arithmetic on the time delta tolerates
+  host-clock jumps backward. 13 unit tests + UniFFI +
+  wasm-bindgen FFI surface + audit-pack invariant
+  **C-54** in [`calls.md`](./calls.md).
+  `apps/web/src/channels/rotation-cron.ts` ships
+  `runRotationOnce` (single-pass: policy check → MLS
+  `PublisherGroup.rotate` → fetch subscribers → seal new
+  envelopes per subscriber → atomic batch `POST
+  /v1/channels/:id/rotate`) + `startRotationCron`
+  (periodic poller, default 5-minute heartbeat). Empty
+  batches are allowed (still bump the epoch — covers
+  the "no subscribers yet" case). Server-side `POST
+  /v1/channels/:id/rotate` is C-42 (atomic
+  rotation); client now drives it via the new
+  `rotateChannel` helper at
+  `apps/web/src/channels/api.ts`.
+- **Deferred sub-sprint G4-2-rotation-timer-{ios,android}** —
+  Swift + Kotlin orchestration ports. Same Rust core
+  policy via UniFFI; same shape of fetch + seal + post
+  batch. ~150 LOC per platform; the Rust core already
+  shipped means there is no cryptographic decision left
+  to make on the platform side — pure plumbing.
 
 The cryptographic property is preserved: the seed is
 genuinely derived from the MLS exporter under the

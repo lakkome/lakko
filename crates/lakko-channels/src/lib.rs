@@ -79,6 +79,7 @@
 pub mod epoch;
 pub mod error;
 pub mod post;
+pub mod rotation_policy;
 pub mod seed;
 pub mod subscribe;
 
@@ -88,6 +89,7 @@ pub use post::{
     compose_post, decode_post, verify_and_decrypt, ChannelPost, MAX_PLAINTEXT_LEN,
     POST_SIG_DOMAIN_V1,
 };
+pub use rotation_policy::{RotationPolicy, RotationState, DEFAULT_INTERVAL_MS, DEFAULT_MAX_POSTS};
 pub use seed::{ContentKeySeed, CONTENT_KEY_SEED_LEN, EXPORTER_LABEL_V1};
 pub use subscribe::{open_seed, seal_seed, EPH_PUB_LEN, SEED_ENVELOPE_LEN, TAG_LEN};
 

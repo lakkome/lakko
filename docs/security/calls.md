@@ -2359,6 +2359,71 @@ host-side assertions, listed above) + boot probe at
 `apps/android/lakko-sframe/src/main/kotlin/me/lakko/sframe/
 SFrameAvailability.kt` (run at app start; fail-closed).
 
+## Channel rotation policy (G4-2-rotation-timer)
+
+### C-54: Scheduled rotation cadence is governed by a pure policy, identical across all three platforms, with clock-skew-tolerant arithmetic
+
+ADR-0010 §"PublisherGroup" pins the rotation cadence as
+"every 24 h or N posts, whichever lands first." The
+**policy** that decides _when_ to rotate lives in one
+place — `crates/lakko-channels/src/rotation_policy.rs` —
+and is exposed verbatim to all three platforms via UniFFI
++ wasm-bindgen.
+
+Three sub-invariants:
+
+1. **Either trigger fires independently.**
+   `RotationPolicy::should_rotate(now_ms, state)` returns
+   `true` iff either:
+   - `interval_ms > 0 && now_ms.saturating_sub(state.last_rotation_ms) >= interval_ms`, or
+   - `max_posts > 0 && state.posts_since_rotation >= max_posts`.
+
+   Setting either threshold to `0` disables the
+   corresponding trigger; setting both to `0` disables
+   scheduled rotation entirely (membership-change-driven
+   rotations still happen on every MLS commit).
+
+2. **Saturating arithmetic on the time delta keeps a host
+   clock jump backward from forcing a spurious rotation.**
+   A NTP correction, manual timezone change on Android,
+   suspend / resume on iOS, or fork-bombed `setTimeout`
+   on web can all surface as `now_ms < state.last_rotation_ms`.
+   `saturating_sub` clamps the delta to `0` for those
+   cases, so the time trigger stays silent until the
+   clock catches up — no rotation storm.
+
+3. **The orchestration layer is platform-specific but
+   the decision is single-sourced.** The web side ships
+   `apps/web/src/channels/rotation-cron.ts` with
+   `runRotationOnce` (single-pass: policy check → MLS
+   rotate → fetch subscribers → seal per subscriber →
+   atomic batch `POST /v1/channels/:id/rotate`) and
+   `startRotationCron` (periodic poller, default
+   5-minute heartbeat). iOS / Android orchestration
+   ports are explicitly deferred — same Rust core
+   policy via UniFFI; same shape of fetch + seal + post
+   batch. Subscriber fanout is bound to the
+   **post-rotation server epoch** via
+   `sealSubscriberSeedEnvelope(pub, channel_id,
+   new_server_epoch, new_seed)` so envelopes the
+   subscribers fetch on `GET /v1/channels/:id/subscribers/:pk/envelope`
+   land at the right epoch slot.
+
+Tested in 13 Rust-core unit tests
+(`crates/lakko-channels/src/rotation_policy.rs`) covering:
+genesis state, exact-boundary time trigger, exact-count
+count trigger, either-alone-sufficient, clock-skew
+tolerance (no spurious rotation on backward jump),
+zero-interval disables time trigger, zero-max-posts
+disables count trigger, both-zero disables scheduled
+rotation entirely, `after_post` saturates at `u32::MAX`,
+`after_rotation` resets the post counter, genesis state is
+zeroed, custom-cadence policy round-trip. FFI mirrors at
+`crates/lakko-ffi-uniffi/src/lib.rs` (Swift / Kotlin) +
+`crates/lakko-ffi-wasm/src/channels.rs` (TypeScript).
+Web orchestration `tsc --noEmit` clean at
+`apps/web/src/channels/rotation-cron.ts`.
+
 ## Exporter labels (call-side)
 
 | Label | Length | Context | Source | Used for |

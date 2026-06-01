@@ -13,10 +13,10 @@ section that describes it.
 | Class | Count | Range | Source file |
 |---|---|---|---|
 | **I-** | 8   | I-1..I-8   | [`mls-state-machine.md`](./mls-state-machine.md) |
-| **C-** | 53  | C-1..C-53  | [`calls.md`](./calls.md) |
+| **C-** | 54  | C-1..C-54  | [`calls.md`](./calls.md) |
 | **T-** | 15  | T-1..T-15  | [`transport.md`](./transport.md) |
 | **G-** | 27  | G-1..G-27 (G-28 closed via the G3-sframe-native arc N-1..N-6) | [`known-gaps.md`](./known-gaps.md) — open / deferred |
-| Total invariants  | 76  | (I + C + T) | live properties |
+| Total invariants  | 77  | (I + C + T) | live properties |
 | Total open gaps   | 27  | (G)         | tracked + scoped |
 
 ## MLS state machine invariants (I-1..I-8)
@@ -37,7 +37,7 @@ in `crates/lakko-mls/`.
 | I-7 | Opening a `SealedBundle` with an unknown `algorithm` discriminator is rejected before AEAD-open is attempted | Forward-compat ratchet |
 | I-8 | `create_devicegroup_message` round-trips through `parse_devicegroup_payload` losslessly for every typed body variant | Wire-format byte-stability |
 
-## Call-side invariants (C-1..C-53)
+## Call-side invariants (C-1..C-54)
 
 Source: [`calls.md`](./calls.md). Five sub-sections —
 media-key pipeline (C-1..C-14), call-admission JWT
@@ -143,6 +143,12 @@ media-key pipeline (C-1..C-14), call-admission JWT
 | ID   | Title |
 |---|---|
 | C-53 | Host-side bridge round-trip exercises every documented tampering mode of the SFrame native shim before either platform binding is loaded |
+
+### C-54 — Channel rotation policy (G4-2-rotation-timer)
+
+| ID   | Title |
+|---|---|
+| C-54 | Scheduled rotation cadence is governed by a pure policy, identical across all three platforms, with clock-skew-tolerant arithmetic |
 
 ## Transport-layer invariants (T-1..T-11)
 

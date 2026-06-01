@@ -467,6 +467,204 @@ fn channel_id_from_slice(slice: &[u8]) -> Result<[u8; CHANNEL_ID_LEN], JsError> 
 }
 
 // ---------------------------------------------------------
+// Rotation policy (G4-2-rotation-timer)
+// ---------------------------------------------------------
+//
+// wasm-bindgen mirror of `lakko_channels::rotation_policy`.
+// Pure logic; the TypeScript caller drives a periodic
+// `setInterval` (or any other clock source) that asks
+// `channelShouldRotate(policy, state, Date.now())` and acts
+// on the boolean.
+//
+// We keep the policy + state as **plain JS objects** rather
+// than wasm-bindgen handle classes — they are 8-12 bytes
+// total and copying them across the FFI is cheaper than
+// the handle's vtable indirection.
+
+/// JavaScript-side rotation policy. Mirrored from the Rust
+/// `lakko_channels::RotationPolicy` (also exposed via
+/// UniFFI as `ChannelRotationPolicy`).
+#[wasm_bindgen]
+extern "C" {
+    /// TypeScript declares this shape:
+    /// `{ intervalMs: bigint; maxPosts: number }`.
+    #[wasm_bindgen(typescript_type = "ChannelRotationPolicy")]
+    pub type ChannelRotationPolicy;
+    /// TypeScript declares this shape:
+    /// `{ lastRotationMs: bigint; postsSinceRotation: number }`.
+    #[wasm_bindgen(typescript_type = "ChannelRotationState")]
+    pub type ChannelRotationState;
+}
+
+#[wasm_bindgen(typescript_custom_section)]
+const ROTATION_POLICY_TS: &'static str = r#"
+/**
+ * Rotation policy — when the publisher should rotate the
+ * channel content key. Either trigger fires independently.
+ * Mirrors `lakko_channels::rotation_policy::RotationPolicy`.
+ */
+export interface ChannelRotationPolicy {
+  /** Max ms between rotations. 0 disables the time trigger. */
+  intervalMs: bigint;
+  /** Max posts between rotations. 0 disables the count trigger. */
+  maxPosts: number;
+}
+
+/**
+ * Caller-persisted snapshot of when the channel was last
+ * rotated + how many posts since. Pair with
+ * `channelShouldRotate(...)`.
+ */
+export interface ChannelRotationState {
+  /** Unix ms when the last rotation completed. 0 = never. */
+  lastRotationMs: bigint;
+  /** Count of posts published since the last rotation. */
+  postsSinceRotation: number;
+}
+"#;
+
+/// Build the recommended default policy — 24 h or 1 000
+/// posts, whichever lands first. Pinned in ADR-0010
+/// §"PublisherGroup".
+#[wasm_bindgen(js_name = channelRotationPolicyDefault)]
+pub fn channel_rotation_policy_default_js() -> Result<ChannelRotationPolicy, JsError> {
+    let obj = js_sys::Object::new();
+    js_sys::Reflect::set(
+        &obj,
+        &"intervalMs".into(),
+        &js_sys::BigInt::from(lakko_channels::DEFAULT_INTERVAL_MS).into(),
+    )
+    .map_err(|e| JsError::new(&format!("set intervalMs: {e:?}")))?;
+    js_sys::Reflect::set(
+        &obj,
+        &"maxPosts".into(),
+        &JsValue::from_f64(f64::from(lakko_channels::DEFAULT_MAX_POSTS)),
+    )
+    .map_err(|e| JsError::new(&format!("set maxPosts: {e:?}")))?;
+    Ok(obj.unchecked_into())
+}
+
+/// Genesis rotation state (`{ lastRotationMs: 0n,
+/// postsSinceRotation: 0 }`).
+#[wasm_bindgen(js_name = channelRotationStateNew)]
+pub fn channel_rotation_state_new_js() -> Result<ChannelRotationState, JsError> {
+    rotation_state_to_js(lakko_channels::RotationState::new())
+}
+
+/// Stamp a fresh rotation state right after a successful
+/// fanout. Caller passes `Date.now()` (or any monotonic-
+/// adjacent ms timestamp).
+#[wasm_bindgen(js_name = channelRotationStateAfterRotation)]
+pub fn channel_rotation_state_after_rotation_js(
+    now_ms: u64,
+) -> Result<ChannelRotationState, JsError> {
+    rotation_state_to_js(lakko_channels::RotationState::after_rotation(now_ms))
+}
+
+/// Bump the post counter (saturating at `u32::MAX`).
+#[wasm_bindgen(js_name = channelRotationStateAfterPost)]
+pub fn channel_rotation_state_after_post_js(
+    state: &ChannelRotationState,
+) -> Result<ChannelRotationState, JsError> {
+    let s = rotation_state_from_js(state)?;
+    rotation_state_to_js(s.after_post())
+}
+
+/// Pure decision: should the publisher rotate now?
+///
+/// `now_ms` — caller-supplied epoch milliseconds (typically
+/// `Date.now()`).
+#[wasm_bindgen(js_name = channelShouldRotate)]
+pub fn channel_should_rotate_js(
+    policy: &ChannelRotationPolicy,
+    state: &ChannelRotationState,
+    now_ms: u64,
+) -> Result<bool, JsError> {
+    let p = rotation_policy_from_js(policy)?;
+    let s = rotation_state_from_js(state)?;
+    Ok(p.should_rotate(now_ms, s))
+}
+
+fn rotation_policy_from_js(
+    policy: &ChannelRotationPolicy,
+) -> Result<lakko_channels::RotationPolicy, JsError> {
+    let val: JsValue = policy.into();
+    let interval_ms = js_sys::Reflect::get(&val, &"intervalMs".into())
+        .map_err(|e| JsError::new(&format!("read intervalMs: {e:?}")))?;
+    let interval_ms: u64 = if interval_ms.is_bigint() {
+        let bi: js_sys::BigInt = interval_ms.unchecked_into();
+        u64::try_from(bi).map_err(|e| JsError::new(&format!("intervalMs to u64: {e:?}")))?
+    } else if let Some(n) = interval_ms.as_f64() {
+        if n < 0.0 || !n.is_finite() {
+            return Err(JsError::new(
+                "intervalMs must be a non-negative finite number or bigint",
+            ));
+        }
+        n as u64
+    } else {
+        return Err(JsError::new("intervalMs must be bigint or number"));
+    };
+    let max_posts = js_sys::Reflect::get(&val, &"maxPosts".into())
+        .map_err(|e| JsError::new(&format!("read maxPosts: {e:?}")))?
+        .as_f64()
+        .ok_or_else(|| JsError::new("maxPosts must be a number"))?;
+    if !max_posts.is_finite() || max_posts < 0.0 || max_posts > f64::from(u32::MAX) {
+        return Err(JsError::new("maxPosts out of u32 range"));
+    }
+    Ok(lakko_channels::RotationPolicy::new(
+        interval_ms,
+        max_posts as u32,
+    ))
+}
+
+fn rotation_state_from_js(
+    state: &ChannelRotationState,
+) -> Result<lakko_channels::RotationState, JsError> {
+    let val: JsValue = state.into();
+    let last = js_sys::Reflect::get(&val, &"lastRotationMs".into())
+        .map_err(|e| JsError::new(&format!("read lastRotationMs: {e:?}")))?;
+    let last: u64 = if last.is_bigint() {
+        let bi: js_sys::BigInt = last.unchecked_into();
+        u64::try_from(bi).map_err(|e| JsError::new(&format!("lastRotationMs to u64: {e:?}")))?
+    } else if let Some(n) = last.as_f64() {
+        if n < 0.0 || !n.is_finite() {
+            return Err(JsError::new("lastRotationMs must be non-negative finite"));
+        }
+        n as u64
+    } else {
+        return Err(JsError::new("lastRotationMs must be bigint or number"));
+    };
+    let posts = js_sys::Reflect::get(&val, &"postsSinceRotation".into())
+        .map_err(|e| JsError::new(&format!("read postsSinceRotation: {e:?}")))?
+        .as_f64()
+        .ok_or_else(|| JsError::new("postsSinceRotation must be a number"))?;
+    if !posts.is_finite() || posts < 0.0 || posts > f64::from(u32::MAX) {
+        return Err(JsError::new("postsSinceRotation out of u32 range"));
+    }
+    Ok(lakko_channels::RotationState {
+        last_rotation_ms: last,
+        posts_since_rotation: posts as u32,
+    })
+}
+
+fn rotation_state_to_js(s: lakko_channels::RotationState) -> Result<ChannelRotationState, JsError> {
+    let obj = js_sys::Object::new();
+    js_sys::Reflect::set(
+        &obj,
+        &"lastRotationMs".into(),
+        &js_sys::BigInt::from(s.last_rotation_ms).into(),
+    )
+    .map_err(|e| JsError::new(&format!("set lastRotationMs: {e:?}")))?;
+    js_sys::Reflect::set(
+        &obj,
+        &"postsSinceRotation".into(),
+        &JsValue::from_f64(f64::from(s.posts_since_rotation)),
+    )
+    .map_err(|e| JsError::new(&format!("set postsSinceRotation: {e:?}")))?;
+    Ok(obj.unchecked_into())
+}
+
+// ---------------------------------------------------------
 // Tests (host-side; the wasm-target tests live elsewhere)
 // ---------------------------------------------------------
 

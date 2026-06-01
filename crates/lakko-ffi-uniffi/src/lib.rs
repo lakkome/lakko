@@ -786,6 +786,104 @@ pub fn publisher_group_open_or_create(
 }
 
 // ============================================================================
+// Channel rotation policy (G4-2-rotation-timer)
+// ============================================================================
+//
+// Mirrors `lakko_channels::rotation_policy`. Pure logic — no
+// I/O, no clock side-effects. The Swift / Kotlin call site
+// passes `now_ms` from `Date().timeIntervalSince1970 * 1000`
+// / `System.currentTimeMillis()` so the host's monotonic-
+// adjacent clock drives the decision.
+
+/// FFI mirror of [`lakko_channels::rotation_policy::RotationPolicy`].
+#[derive(uniffi::Record, Clone, Copy)]
+pub struct ChannelRotationPolicy {
+    /// Maximum milliseconds between rotations. `0` disables
+    /// the time trigger.
+    pub interval_ms: u64,
+    /// Maximum posts between rotations. `0` disables the
+    /// count trigger.
+    pub max_posts: u32,
+}
+
+impl From<ChannelRotationPolicy> for lakko_channels::RotationPolicy {
+    fn from(p: ChannelRotationPolicy) -> Self {
+        Self::new(p.interval_ms, p.max_posts)
+    }
+}
+
+/// FFI mirror of [`lakko_channels::rotation_policy::RotationState`].
+/// Caller-persisted snapshot of when the channel was last
+/// rotated + how many posts since.
+#[derive(uniffi::Record, Clone, Copy)]
+pub struct ChannelRotationState {
+    /// Unix milliseconds when the last rotation completed.
+    /// `0` means "never rotated yet".
+    pub last_rotation_ms: u64,
+    /// Count of posts published since the last rotation.
+    pub posts_since_rotation: u32,
+}
+
+impl From<ChannelRotationState> for lakko_channels::RotationState {
+    fn from(s: ChannelRotationState) -> Self {
+        Self {
+            last_rotation_ms: s.last_rotation_ms,
+            posts_since_rotation: s.posts_since_rotation,
+        }
+    }
+}
+
+impl From<lakko_channels::RotationState> for ChannelRotationState {
+    fn from(s: lakko_channels::RotationState) -> Self {
+        Self {
+            last_rotation_ms: s.last_rotation_ms,
+            posts_since_rotation: s.posts_since_rotation,
+        }
+    }
+}
+
+/// Default rotation policy — 24 h or 1 000 posts, whichever
+/// lands first. Pinned in ADR-0010 §"PublisherGroup".
+#[uniffi::export]
+pub fn channel_rotation_policy_default() -> ChannelRotationPolicy {
+    let p = lakko_channels::RotationPolicy::DEFAULT;
+    ChannelRotationPolicy {
+        interval_ms: p.interval_ms,
+        max_posts: p.max_posts,
+    }
+}
+
+/// Decide whether the publisher should rotate now. Pure
+/// function — see crate docs. Saturating arithmetic on the
+/// time delta keeps a host clock jump backward from
+/// surfacing as a spurious rotation.
+#[uniffi::export]
+pub fn channel_should_rotate(
+    policy: ChannelRotationPolicy,
+    state: ChannelRotationState,
+    now_ms: u64,
+) -> bool {
+    let p: lakko_channels::RotationPolicy = policy.into();
+    let s: lakko_channels::RotationState = state.into();
+    p.should_rotate(now_ms, s)
+}
+
+/// Stamp a fresh rotation state right after a successful
+/// fanout — server returned 2xx and the new epoch landed.
+#[uniffi::export]
+pub fn channel_rotation_state_after_rotation(now_ms: u64) -> ChannelRotationState {
+    lakko_channels::RotationState::after_rotation(now_ms).into()
+}
+
+/// Bump the post counter (saturating at `u32::MAX`). Called
+/// after every successfully-published `ChannelPost`.
+#[uniffi::export]
+pub fn channel_rotation_state_after_post(state: ChannelRotationState) -> ChannelRotationState {
+    let s: lakko_channels::RotationState = state.into();
+    s.after_post().into()
+}
+
+// ============================================================================
 // DeviceGroup (Phase 2a3b1d)
 // ============================================================================
 

@@ -319,3 +319,47 @@ export async function deliverEnvelope(
     throw await parseError(resp);
   }
 }
+
+/** G4-2-rotation-timer — one entry in the rotation batch the
+ *  publisher posts to `POST /v1/channels/:id/rotate`. */
+export interface RotateBatchEntry {
+  /** Hex-encoded subscriber public key. */
+  readonly subscriber_pubkey_hex: string;
+  /** Base64-encoded `EXPECTED_ENVELOPE_LEN`-byte sealed
+   *  HPKE envelope carrying the new content seed under the
+   *  subscriber's HPKE public key. */
+  readonly envelope_b64: string;
+}
+
+/** Atomic rotation fanout. The publisher walks
+ *  `listSubscribers(...)`, reseals the new MLS-exporter
+ *  seed once per subscriber via the wasm `sealSeed`
+ *  surface, then posts the batch here. The server validates
+ *  every entry's length + registration before committing —
+ *  either the whole batch lands or none does (per the
+ *  atomic-rotation invariant in G4-4). On success the
+ *  response carries the new epoch id, which the caller
+ *  records as part of the rotation state.
+ *
+ *  Throws `ChannelApiError`:
+ *  - `unknown-subscriber` (404) — one of the pubkeys is
+ *    not registered (batch aborted; no envelopes landed)
+ *  - `bad-envelope-len`   (400) — wrong wire length
+ *  - `bad-channel-id`     (400) — wrong channel-id shape
+ *  - `bad-subscriber-id`  (400) — wrong pubkey-hex shape */
+export async function rotateChannel(
+  channelIdHex: string,
+  envelopes: ReadonlyArray<RotateBatchEntry>,
+  base: string = DEFAULT_BASE,
+): Promise<ChannelEpoch> {
+  const url = `${base}/v1/channels/${channelIdHex}/rotate`;
+  const resp = await fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ envelopes }),
+  });
+  if (!resp.ok) {
+    throw await parseError(resp);
+  }
+  return (await resp.json()) as ChannelEpoch;
+}
