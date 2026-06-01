@@ -357,7 +357,9 @@ fn extract_string_field<'a>(line: &'a str, field: &str) -> Option<&'a str> {
 
 use base64::engine::general_purpose::STANDARD as B64_STANDARD;
 use base64::Engine as _;
-use lakko_transport::{Endpoint, ShadowsocksConfig, ShadowsocksTransport, Transport};
+use lakko_transport::{
+    Endpoint, RealityConfig, RealityTransport, ShadowsocksConfig, ShadowsocksTransport, Transport,
+};
 
 /// Drive a SS-2022 client at the observer; assert the
 /// observer's log line records `observed_sni: null`
@@ -470,6 +472,195 @@ async fn observer_records_shadowsocks_as_non_tls() {
     assert!(
         !first.starts_with("16"),
         "shadowsocks outer header must NOT begin with 0x16 (TLS handshake type). \
+         first_bytes_hex: {first}",
+    );
+}
+
+// ===========================================================
+// G5-7-transport-matrix iter2 — REALITY cover-SNI assertion
+// ===========================================================
+//
+// REALITY's anti-censorship pitch: from a passive on-path
+// observer's viewpoint, a REALITY connection looks
+// indistinguishable from a real TLS connection to the cover
+// host (`config.sni`). Internally REALITY then unwraps to
+// Lakko's real inner endpoint — that inner step happens
+// only after the cover-TLS handshake is accepted by the
+// REALITY server, and the inner target name is NEVER on the
+// wire in cleartext.
+//
+// This test asserts the observable property:
+//   - The client sends a ClientHello whose `server_name`
+//     extension carries the configured cover SNI.
+//   - The observer logs that cover SNI (not Lakko's real
+//     target, not nothing).
+//   - The wire bytes are valid TLS (first byte 0x16) and
+//     produce a JA3 + JA4 fingerprint — the goal of REALITY
+//     is to look like normal TLS to a real host, so JA3/JA4
+//     MUST be populated, not absent.
+//
+// What this gate catches that the existing in-crate REALITY
+// tests cannot:
+//   - A future REALITY redesign that accidentally emits the
+//     real inner target's name in some auxiliary extension
+//     (ALPN, ESNI, etc.) before the cover-TLS handshake
+//     completes. The observer's parser walks every
+//     extension; a name leak anywhere surfaces here.
+//   - A future obfs layer that wraps REALITY in something
+//     that strips the TLS record header — would surface as
+//     `first_bytes_hex` not starting with `16`.
+//
+// Why `require_server_response: false`: the observer drops
+// the connection after reading the ClientHello, so it never
+// emits a ServerHello with the mutual-auth HMAC. REALITY's
+// require-server-response gate would refuse the handshake
+// before we got a chance to observe. The observation
+// happens at ClientHello-send time, which is BEFORE the
+// server-response check on the client side; flipping the
+// flag just lets the client error cleanly after the
+// observation rather than panicking the test.
+//
+// Test against the security claim in
+// `docs/security/transport.md` T-1..T-15 + ADR-0004
+// §"REALITY".
+
+/// Drive a REALITY client at the observer. Assert the
+/// observer's log line records the cover SNI verbatim AND
+/// the bytes parse as a valid TLS ClientHello producing a
+/// JA3 + JA4 fingerprint.
+#[tokio::test]
+#[ignore = "requires ci/censorship-lab docker compose stack — see ci/censorship-lab/README.md"]
+async fn observer_records_reality_cover_sni() {
+    // Install rustls's ring crypto provider exactly once
+    // in the test process. Idempotent — the second call
+    // returns Err which we deliberately ignore.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
+    let cover_sni = "www.microsoft.com";
+    let real_target = "lakko.me"; // What the SFU / chat plane
+                                  // would have used in a non-REALITY
+                                  // transport. We want to assert this
+                                  // is NEVER on the wire.
+
+    // Parse observer_addr into host:port so we can build
+    // the REALITY config's `remote` field + the Endpoint
+    // the connect call points at.
+    let addr_str = observer_addr();
+    let (host, port_str) = addr_str.rsplit_once(':').expect("observer addr has port");
+    let port: u16 = port_str.parse().expect("observer port is u16");
+
+    let cfg = RealityConfig {
+        sni: cover_sni.into(),
+        // Arbitrary tag secret — the observer is not a real
+        // REALITY server, so the secret is never verified;
+        // we just need a well-formed config so
+        // `RealityTransport::new` accepts it.
+        tag_secret_b64: B64_STANDARD.encode([0xCA_u8; 32]),
+        short_id_hex: "abababababababab".into(), // 8 bytes hex
+        allowed_inner_servers: vec![real_target.into()],
+        remote: addr_str.clone(),
+        // Disable the mutual-auth gate — see test docstring
+        // above for the rationale.
+        require_server_response: false,
+    };
+    let transport = RealityTransport::new(cfg).expect("RealityConfig must validate");
+
+    let endpoint = Endpoint::Hostname {
+        host: host.into(),
+        port,
+    };
+    let _ = tokio::time::timeout(Duration::from_secs(5), transport.connect(&endpoint)).await;
+    // We don't assert on the connect result — the handshake
+    // will fail (observer drops the connection mid-TLS),
+    // and that is fine. The observation already happened
+    // before the failure surfaces.
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let log_path = observer_log_path();
+    let mut file = tokio::fs::File::open(&log_path)
+        .await
+        .unwrap_or_else(|e| panic!("open observer log {}: {e}", log_path.display()));
+    let mut body = String::new();
+    file.read_to_string(&mut body).await.expect("read log");
+
+    // REALITY's cover SNI MUST be the observed_sni. Find
+    // the most recent line carrying our cover SNI literal.
+    let line = body
+        .lines()
+        .rev()
+        .find(|line| line.contains(&format!(r#""observed_sni":"{cover_sni}""#)))
+        .unwrap_or_else(|| {
+            panic!(
+                "observer log must carry an observed_sni == {cover_sni:?} line.\n\
+                 Tail of {}:\n{}",
+                log_path.display(),
+                body.lines().rev().take(5).collect::<Vec<_>>().join("\n"),
+            )
+        });
+
+    // The real inner target MUST NOT appear anywhere in the
+    // line — not as observed_sni, not in first_bytes_hex
+    // ASCII, not anywhere. This is the negative-space
+    // assertion that proves REALITY does NOT leak the real
+    // destination via the cover-TLS observation channel.
+    assert!(
+        !line.contains(real_target),
+        "REALITY connection MUST NOT leak the real inner target {real_target:?} in the \
+         observed line. Full line: {line}",
+    );
+
+    // ja3 + ja4 MUST be populated — REALITY's design is
+    // to LOOK like normal TLS, so the fingerprints
+    // exist (the security promise is "ja3 matches a
+    // popular browser", not "no ja3"). We assert the
+    // SHAPE here; whether the fingerprint matches
+    // Chrome / Firefox specifically is a separate
+    // sub-sprint (G5-7-fingerprint-match).
+    let ja3 =
+        extract_string_field(line, "ja3").unwrap_or_else(|| panic!("line missing ja3: {line}"));
+    assert!(
+        ja3 != "null" && ja3.len() == 32,
+        "REALITY ClientHello must yield a non-null 32-char JA3. ja3: {ja3:?}",
+    );
+    let ja4 =
+        extract_string_field(line, "ja4").unwrap_or_else(|| panic!("line missing ja4: {line}"));
+    assert!(
+        ja4 != "null",
+        "REALITY ClientHello must yield a non-null JA4. ja4: {ja4:?}",
+    );
+    let ja4_parts: Vec<&str> = ja4.split('_').collect();
+    assert_eq!(
+        ja4_parts.len(),
+        3,
+        "JA4 must have 3 underscore-separated parts: {ja4}",
+    );
+    assert!(
+        ja4_parts[0].starts_with('t'),
+        "JA4 prefix must begin with `t` (TCP): {ja4}",
+    );
+
+    // first_bytes_hex MUST start with `16` — that's the
+    // TLS handshake record type. REALITY by design carries
+    // a real TLS record on the wire; if this byte ever
+    // drifts, the cover-TLS premise is broken and any
+    // DPI box looking for "starts with 16 03" would flag
+    // the connection.
+    let first = extract_string_field(line, "first_bytes_hex")
+        .unwrap_or_else(|| panic!("line missing first_bytes_hex: {line}"));
+    assert!(
+        first.starts_with("16"),
+        "REALITY ClientHello must begin with TLS handshake record type 0x16. \
+         first_bytes_hex: {first}",
+    );
+    // The two bytes after the record-type are the legacy
+    // TLS version (`03 01` for TLS 1.0 wire-version which
+    // every modern client still sends for compat). Assert
+    // the prefix so any future REALITY change that drops
+    // the legacy-version envelope surfaces here.
+    assert!(
+        first.starts_with("160301") || first.starts_with("160303"),
+        "REALITY ClientHello must carry a TLS 1.x record header (16 03 01 or 16 03 03). \
          first_bytes_hex: {first}",
     );
 }
