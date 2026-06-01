@@ -271,6 +271,21 @@ curl -i http://127.0.0.1:8081/version  # → 200, JSON
 - **Russian-chat commit-message rule** — when the interactive chat is in Russian and the turn produced changes in code or documentation (anything `git status` would show as modified / added / deleted), the assistant MUST end its reply with a ready-to-paste English commit message in a fenced block. Skip the block only when there are no file changes.
 - **No AI signature lines in commit messages.** Never append `Co-Authored-By: Claude …`, `Generated with Claude …`, or any similar attribution footer to commit messages or PR descriptions. The maintainer authors the commit.
 - **No emoji / icons in commit messages or logs.** Commit messages, PR descriptions, and every log line emitted via the `tracing` crate from **any** client app (web / iOS / iPadOS / macOS / watchOS / Android / desktop) **and** every backend service (`services/*`) MUST be plain text — no emoji, no Unicode pictographs, no decorative icons. ASCII-only structured prefixes (`[auth]`, `OK`, `WARN`, `ERR`) are fine; emoji like `✅` / `❌` / `🔒` / `🚀` are not. Applies to user-visible release notes the maintainer drafts from these as well.
+- **NEVER fabricate numbers, metrics, estimates, or facts.** Hard rule. Forbidden examples that the assistant has previously violated and MUST NOT repeat:
+  - Cost / value / ROI dollar figures invented for rhetorical effect (`"$1500 of value for $400 of work"` with no underlying model).
+  - Performance numbers, latency / throughput / memory budgets pulled out of thin air to back a recommendation.
+  - Bug counts, defect rates, percentage-of-users-affected, MTTR estimates without a data source.
+  - LOC counts, time-to-ship estimates, sprint sizing presented as confident when they are guesses.
+  - Citation-shaped references (`per RFC 1234 §5`, `per ADR-0099`) that are not actually verified by reading the source.
+  - Commit-message claims about what the commit does — every line must match what `git diff` actually shows.
+  - Test-result summaries when tests were not actually run (`"all green"` when nothing was executed).
+  - Claims that something is `done` / `green` / `passes` when it has not been observed firsthand in this session.
+
+  When the assistant does not have a real basis for a number or fact, the correct shapes are: `"I do not know"`, `"my rough guess is N — not verified"`, `"the order of magnitude is X based on Y, the precise value would need a measurement"`, or simply omitting the unsupported claim and proceeding without it.
+
+  When a fact CAN be verified cheaply (read a file, run a command, look at git history), the assistant MUST verify before stating it. Fabricating facts that could have been checked is the same violation as making them up out of nowhere.
+
+  Recommendations and prioritisation calls are allowed without quantification — `"my hunch is iter2a first because it does not touch ICE/DTLS"` is honest. `"iter2a delivers $1500 of value"` is not.
 
 ## Technical invariants
 
