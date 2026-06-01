@@ -3,6 +3,24 @@
 
 import Foundation
 
+/// G4-2-rotation-timer-ios — one entry in the rotation
+/// batch the publisher posts to
+/// `POST /v1/channels/:id/rotate`. Snake-case field names
+/// match the server-side `RotateBatchEntry` wire shape so
+/// the default JSONEncoder produces the right body bytes.
+public struct RotateBatchEntry: Encodable {
+    /// Hex-encoded subscriber public key.
+    public let subscriber_pubkey_hex: String
+    /// Base64-encoded sealed HPKE envelope carrying the
+    /// new content seed.
+    public let envelope_b64: String
+
+    public init(subscriberPubkeyHex: String, envelopeB64: String) {
+        self.subscriber_pubkey_hex = subscriberPubkeyHex
+        self.envelope_b64 = envelopeB64
+    }
+}
+
 /// URLSession-based client for `lakko-svc-channels`
 /// (Phase 4 G4-2 iOS).
 ///
@@ -211,6 +229,37 @@ public final class ChannelsClient {
                 detail: HTTPURLResponse.localizedString(forStatusCode: http.statusCode)
             )
         }
+    }
+
+    /// G4-2-rotation-timer-ios — atomic batch rotation
+    /// fanout. The publisher walks `listSubscribers(...)`,
+    /// reseals the new MLS-exporter seed once per
+    /// subscriber via the wasm-equivalent UniFFI
+    /// `sealSubscriberSeedEnvelope`, then posts the batch
+    /// here. The server commits or rejects the whole batch
+    /// atomically (G4-4 / C-42); on success the response
+    /// carries the new epoch id, which the caller records
+    /// as part of the rotation state.
+    ///
+    /// Throws `ChannelsApiError`:
+    /// - `unknown-subscriber` (404) — one of the pubkeys is
+    ///   not registered (batch aborted; no envelopes
+    ///   landed)
+    /// - `bad-envelope-len`   (400) — wrong wire length
+    /// - `bad-channel-id`     (400) — wrong channel-id shape
+    /// - `bad-subscriber-id`  (400) — wrong pubkey-hex shape
+    public func rotateChannel(
+        channelIdHex: String,
+        envelopes: [RotateBatchEntry]
+    ) async throws -> UInt32 {
+        struct Body: Encodable { let envelopes: [RotateBatchEntry] }
+        struct EpochView: Decodable { let epoch: UInt32 }
+        let body = Body(envelopes: envelopes)
+        let view: EpochView = try await postJson(
+            endpoint: "/v1/channels/\(channelIdHex)/rotate",
+            body: body
+        )
+        return view.epoch
     }
 
     // MARK: - Internals

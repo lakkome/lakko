@@ -898,12 +898,40 @@ Remaining deferred follow-ups (out of G4-2 scope):
   rotation); client now drives it via the new
   `rotateChannel` helper at
   `apps/web/src/channels/api.ts`.
-- **Deferred sub-sprint G4-2-rotation-timer-{ios,android}** —
-  Swift + Kotlin orchestration ports. Same Rust core
-  policy via UniFFI; same shape of fetch + seal + post
-  batch. ~150 LOC per platform; the Rust core already
-  shipped means there is no cryptographic decision left
-  to make on the platform side — pure plumbing.
+- **G4-2-rotation-timer-ios DONE** (May 2026) —
+  `apps/ios/Lakko/Channels/RotationCron.swift` ships
+  the Swift orchestrator as an `actor` with `runOnce(policy,
+  state, nowMs?)` + `start(policy, pollInterval,
+  loadState, onError)` returning a `Task` whose
+  `cancel()` stops the loop. Same shape as the web side:
+  policy check via UniFFI `channelShouldRotate` →
+  `PublisherGroup.rotate` → fetch subscribers → seal new
+  envelopes per subscriber → atomic batch via
+  `ChannelsClient.rotateChannel(...)`. New
+  `RotateBatchEntry` wire type lives in
+  `ChannelsClient.swift` next to the existing batch
+  shapes. `xcodebuild -scheme Lakko -destination
+  'platform=iOS Simulator,name=iPhone 17'` →
+  BUILD SUCCEEDED.
+- **G4-2-rotation-timer-android DONE** (May 2026) —
+  `apps/android/app/src/main/kotlin/me/lakko/app/channels/RotationCron.kt`
+  ships the Kotlin orchestrator with the same shape
+  (`runOnce` suspend fun + `start(scope, policy,
+  loadState, pollInterval, onError)` returning a `Job`).
+  `RotateBatchEntry` @Serializable wire type +
+  `ChannelsClient.rotateChannel` Ktor POST. Uses the
+  UniFFI bindings (`channelShouldRotate`,
+  `channelRotationStateAfterRotation`,
+  `sealSubscriberSeedEnvelope`) verbatim — no Kotlin-side
+  re-implementation of the policy. `./gradlew
+  :app:assembleDebug` → BUILD SUCCESSFUL.
+
+The G4-2-rotation-timer arc is now complete across all
+three platforms (web + iOS + Android). All decisions
+about _when_ to rotate flow through one Rust file
+(`crates/lakko-channels/src/rotation_policy.rs`); each
+platform's orchestrator is ~200 LOC of pure plumbing
+above the same FFI surface.
 
 The cryptographic property is preserved: the seed is
 genuinely derived from the MLS exporter under the

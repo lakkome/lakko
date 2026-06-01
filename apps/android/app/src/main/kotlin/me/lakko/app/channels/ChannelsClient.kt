@@ -247,6 +247,46 @@ public class ChannelsClient(
         }
     }
 
+    /** G4-2-rotation-timer-android — atomic batch rotation
+     *  fanout. The publisher walks `listSubscribers(...)`,
+     *  reseals the new MLS-exporter seed once per
+     *  subscriber via `sealSubscriberSeedEnvelope`, then
+     *  posts the batch here. The server commits or rejects
+     *  the whole batch atomically (G4-4 / C-42); on
+     *  success the response carries the new epoch id,
+     *  which the caller records as part of the rotation
+     *  state.
+     *
+     *  Throws `ChannelsApiException`:
+     *  - `unknown-subscriber` (404) — one of the pubkeys
+     *    is not registered (batch aborted; no envelopes
+     *    landed)
+     *  - `bad-envelope-len`   (400) — wrong wire length
+     *  - `bad-channel-id`     (400) — wrong channel-id shape
+     *  - `bad-subscriber-id`  (400) — wrong pubkey-hex shape */
+    public suspend fun rotateChannel(
+        channelIdHex: String,
+        envelopes: List<RotateBatchEntry>,
+    ): UInt {
+        val response: HttpResponse = client.post(
+            "$baseUrl/v1/channels/$channelIdHex/rotate"
+        ) {
+            contentType(ContentType.Application.Json)
+            setBody(RotateRequest(envelopes))
+        }
+        if (!response.status.isSuccess()) {
+            throw decodeError(response, "rotate channel")
+        }
+        val view = response.body<EpochView>()
+        return view.epoch
+    }
+
+    @Serializable
+    private data class RotateRequest(val envelopes: List<RotateBatchEntry>)
+
+    @Serializable
+    private data class EpochView(val epoch: UInt)
+
     // -----------------------------------------------------------------
     // Error envelope decoder
     // -----------------------------------------------------------------
