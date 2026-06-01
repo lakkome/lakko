@@ -95,6 +95,26 @@ public class CallSession(
     private var rtc: WebRtcPeerConnection? = null
 
     /**
+     * G3-2-video-ui — local camera capture lifecycle. Held
+     * for the duration of a video-enabled call so the
+     * `CameraVideoCapturer` + `VideoSource` pair survives a
+     * Compose recompose. Released in [endLocal] / [endRemote].
+     */
+    private var localCameraCapture: CameraVideoCapture? = null
+
+    /**
+     * G3-2-video-ui — observable for the Compose preview
+     * overlay. Compose layer collects this via `collectAsState`
+     * and renders `LocalVideoPreviewView(track = ..., eglContext = ...)`
+     * when non-null. Set in [startLocalCameraCapture];
+     * cleared in [teardownMediaPipeline].
+     */
+    private val mutableLocalVideoTrack: MutableStateFlow<org.webrtc.VideoTrack?> =
+        MutableStateFlow(null)
+    public val localVideoTrack: StateFlow<org.webrtc.VideoTrack?> =
+        mutableLocalVideoTrack.asStateFlow()
+
+    /**
      * G3-sframe-native N-6 — per-call MLS exporter seed and
      * local participant leaf index. Both must be set BEFORE
      * [dial] / [acceptCall]; missing seed at attach time
@@ -191,6 +211,16 @@ public class CallSession(
             installDelegate(rtc)
             rtc.addLocalAudioTrack(enabled = audio)
 
+            // G3-2-video-ui — local video track + camera
+            // capture. MUST land BEFORE createOffer: the SDP
+            // build emits the m=video line based on what
+            // PeerConnection already has attached; adding the
+            // track later would force a renegotiation we do
+            // not drive.
+            if (video) {
+                startLocalCameraCapture(rtc)
+            }
+
             if (!attachSFrame(rtc)) {
                 android.util.Log.w(
                     "CallSession",
@@ -240,8 +270,14 @@ public class CallSession(
     }
 
     /** Inbound side: accept the ringing call. Builds the SDP
-     *  answer against the stored remote offer + ships it. */
-    public fun acceptCall() {
+     *  answer against the stored remote offer + ships it.
+     *
+     *  `withVideo` mirrors the offerer's `dial(video=)`: the
+     *  answerer can choose to publish video or stay audio-only
+     *  while accepting a video call. Defaults to `false` —
+     *  the UI's "accept with camera" toggle threads its value
+     *  through to here. */
+    public fun acceptCall(withVideo: Boolean = false) {
         if (mutableState.value != WebCallState.Ringing || isOfferer) return
         val offerSdp = pendingRemoteOfferSdp
         if (offerSdp == null) {
@@ -260,6 +296,13 @@ public class CallSession(
             }
             installDelegate(rtc)
             rtc.addLocalAudioTrack(enabled = true)
+
+            // G3-2-video-ui — symmetric video wire-up on
+            // accept path. Same pre-SDP-build ordering as
+            // dial().
+            if (withVideo) {
+                startLocalCameraCapture(rtc)
+            }
 
             if (!attachSFrame(rtc)) {
                 android.util.Log.w(
@@ -478,8 +521,7 @@ public class CallSession(
         } catch (cause: Throwable) {
             android.util.Log.w("CallSession", "endLocal compose failed", cause)
         }
-        rtc?.close()
-        rtc = null
+        teardownMediaPipeline()
         pendingRemoteOfferSdp = null
         scope.cancel()
         mutableState.value = WebCallState.Done
@@ -488,11 +530,77 @@ public class CallSession(
     private fun endRemote(reason: WebCallEndReason) {
         if (mutableState.value == WebCallState.Done) return
         mutableEndReason.value = reason
-        rtc?.close()
-        rtc = null
+        teardownMediaPipeline()
         pendingRemoteOfferSdp = null
         scope.cancel()
         mutableState.value = WebCallState.Done
+    }
+
+    /**
+     * G3-2-video-ui — common teardown for the WebRTC pod
+     * + camera capture. Both [endLocal] and [endRemote]
+     * go through here so a hung-up call and a remote-end
+     * call release the camera + clear the Compose preview
+     * overlay identically.
+     */
+    private fun teardownMediaPipeline() {
+        rtc?.close()
+        rtc = null
+        localCameraCapture?.let { capture ->
+            // stopCapture is synchronous + thread-blocking
+            // for ~50 ms while libwebrtc's camera thread
+            // joins. Doing it inline here keeps the order
+            // predictable: by the time `Done` is observed
+            // by the UI, the camera is fully released.
+            capture.stop()
+            capture.dispose()
+        }
+        localCameraCapture = null
+        mutableLocalVideoTrack.value = null
+    }
+
+    /**
+     * G3-2-video-ui — common helper for the dial + accept
+     * paths. Constructs the camera capture pipeline, attaches
+     * the resulting track to the peer connection, starts the
+     * capturer. Soft-fail on no-camera / start-failure so
+     * the call still proceeds audio-only.
+     */
+    private fun startLocalCameraCapture(rtc: WebRtcPeerConnection) {
+        if (!CameraVideoCapture.hasUsableCamera(applicationContext)) {
+            android.util.Log.i("CallSession", "no camera available; staying audio-only")
+            return
+        }
+        val source = WebRtcPeerConnection.newVideoSource(applicationContext)
+        val eglContext = WebRtcPeerConnection.sharedEglContext()
+        if (source == null || eglContext == null) {
+            android.util.Log.w(
+                "CallSession",
+                "newVideoSource / sharedEglContext returned null — staying audio-only",
+            )
+            return
+        }
+        val capture = CameraVideoCapture.create(applicationContext, source, eglContext)
+        if (capture == null) {
+            android.util.Log.w("CallSession", "CameraVideoCapture.create returned null")
+            return
+        }
+        rtc.addLocalVideoTrack(source)
+        this.localCameraCapture = capture
+        mutableLocalVideoTrack.value = rtc.currentLocalVideoTrack()
+        try {
+            capture.start()
+        } catch (cause: CameraVideoCapture.CaptureError) {
+            android.util.Log.w("CallSession", "camera start failed", cause)
+            // On start failure, drop the capture handle +
+            // clear the track ref so the Compose overlay
+            // hides. The (now silent) video sender keeps
+            // the SDP m=video line, which is fine — the
+            // receiver sees a black frame.
+            capture.dispose()
+            this.localCameraCapture = null
+            mutableLocalVideoTrack.value = null
+        }
     }
 
     private fun toReason(r: FfiCallEndReason): WebCallEndReason = when (r) {

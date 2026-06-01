@@ -303,6 +303,15 @@ public class WebRtcPeerConnection(
         this.localVideoSender = sender
     }
 
+    /**
+     * G3-2-video-ui — expose the currently-attached local
+     * video track so the Compose call screen can hand it
+     * to [LocalVideoPreviewView]. Returns `null` if
+     * [addLocalVideoTrack] has not run yet (audio-only
+     * call, or pre-`startLocalCameraCapture`).
+     */
+    public fun currentLocalVideoTrack(): VideoTrack? = localVideoTrack
+
     // ----------------------------------------------------------------
     // SFrame (G3-sframe-native N-5)
     // ----------------------------------------------------------------

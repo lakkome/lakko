@@ -69,6 +69,21 @@ public final class CallSession: ObservableObject {
     private var dialAudio: Bool = true
     private var dialVideo: Bool = false
 
+    /// G3-1-video-ui — local-camera capture lifecycle. Held
+    /// for the duration of a video-enabled call so the
+    /// AVCaptureSession + RTCVideoSource pair survives a
+    /// SwiftUI view recompose. Nil when the call is audio-
+    /// only or before `completeDial` / `completeAccept` has
+    /// fired.
+    private var localCameraCapture: LocalCameraCapture?
+
+    /// G3-1-video-ui — observable for the SwiftUI preview
+    /// overlay. The CallScreenView reads this via @ObservedObject
+    /// + `if let track = session.localVideoTrack { LocalVideoPreviewView(track: track) }`.
+    /// Set inside `completeDial` / `completeAccept` after
+    /// `addLocalVideoTrack`; cleared in `endLocal`.
+    @Published public private(set) var localVideoTrack: RTCVideoTrack?
+
     /// G3-sframe-native N-6 — per-call MLS exporter seed +
     /// local participant leaf index. Both must be set before
     /// `dial` / `acceptCall` so the SFrame attach can fire
@@ -162,10 +177,16 @@ public final class CallSession: ObservableObject {
         }
         installDelegate(on: rtc)
         rtc.addLocalAudioTrack(enabled: audio)
-        // Video track extension point: when the SwiftUI
-        // preview surface lands (G3-1-video), pass the
-        // capture-session source here. Today audio-only.
-        // if video { rtc.addLocalVideoTrack(<source>) }
+
+        // G3-1-video-ui — local video track + camera capture.
+        // MUST land BEFORE `composeAndShipOffer` because the
+        // SDP build pipeline counts senders and emits the
+        // m=video line based on what `RTCPeerConnection`
+        // already has attached. Adding the track later would
+        // force a renegotiation we do not drive today.
+        if video {
+            startLocalCameraCapture(on: rtc)
+        }
 
         // G3-sframe-native N-6 — arm SFrame on every freshly-
         // added sender. Must happen AFTER addLocalAudioTrack
@@ -183,6 +204,60 @@ public final class CallSession: ObservableObject {
 
         Task { [weak self] in
             await self?.composeAndShipOffer(rtc: rtc, audio: audio, video: video)
+        }
+    }
+
+    /// G3-1-video-ui — common helper for the dial + accept
+    /// paths. Constructs the camera capture pipeline, attaches
+    /// the resulting track to the peer connection, and starts
+    /// the capturer asynchronously. Soft-fail if no camera is
+    /// present (e.g. simulator without a host camera, Mac
+    /// Catalyst without webcam) — the call still proceeds as
+    /// audio-only rather than aborting.
+    ///
+    /// The capturer is held on `self.localCameraCapture` so
+    /// it survives the synchronous return of this method and
+    /// gets torn down in `endLocal`.
+    private func startLocalCameraCapture(on rtc: WebRTCPeerConnection) {
+        guard LocalCameraCapture.hasUsableCamera() else {
+            NSLog("CallSession: no camera available; staying audio-only")
+            return
+        }
+        let source = WebRTCPeerConnection.newVideoSource()
+        guard let capture = LocalCameraCapture(source: source) else {
+            NSLog("CallSession: LocalCameraCapture init returned nil")
+            return
+        }
+        rtc.addLocalVideoTrack(source)
+        self.localCameraCapture = capture
+        // The track lives on the peer connection; expose it
+        // to SwiftUI via the published `localVideoTrack` so
+        // the call screen can render the preview overlay.
+        self.localVideoTrack = rtc.currentLocalVideoTrack()
+        // Start capture off the main actor — `startCapture`
+        // can take a few hundred ms while `AVCaptureSession`
+        // negotiates with the camera service.
+        Task { [weak self] in
+            do {
+                try await capture.start()
+            } catch {
+                NSLog(
+                    "CallSession: camera start failed: %@",
+                    String(describing: error)
+                )
+                await MainActor.run {
+                    // On a camera-start failure, drop the
+                    // capture handle + clear the track ref
+                    // so the UI hides the preview overlay.
+                    // The call proceeds audio-only — the
+                    // already-added (but now silent) video
+                    // sender keeps the SDP m=video line
+                    // intact, which is fine for the receiver
+                    // (they will see a black frame).
+                    self?.localCameraCapture = nil
+                    self?.localVideoTrack = nil
+                }
+            }
         }
     }
 
@@ -250,7 +325,15 @@ public final class CallSession: ObservableObject {
 
     /// Inbound side: accept a ringing call. Builds the SDP
     /// answer against the stored remote offer + ships it.
-    public func acceptCall() {
+    ///
+    /// `withVideo` mirrors the offerer's `dial(video:)` —
+    /// the call surface decides per-call whether the
+    /// answerer publishes video. Defaults to `false`: an
+    /// answerer can accept a video call audio-only, the
+    /// SDP answer simply omits the video m-line's
+    /// `recvonly` direction. See `G3-1-video-ui` docs in
+    /// ROADMAP for the deferred "video toggle" sub-sprint.
+    public func acceptCall(withVideo: Bool = false) {
         guard state == .ringing, !isOfferer else { return }
         guard let offerSdp = pendingRemoteOfferSdp else {
             NSLog("acceptCall: pendingRemoteOfferSdp missing — race?")
@@ -263,12 +346,20 @@ public final class CallSession: ObservableObject {
             guard let self = self else { return }
             let iceServers = await self.resolveIceServers()
             await MainActor.run {
-                self.completeAccept(iceServers: iceServers, offerSdp: offerSdp)
+                self.completeAccept(
+                    iceServers: iceServers,
+                    offerSdp: offerSdp,
+                    withVideo: withVideo
+                )
             }
         }
     }
 
-    private func completeAccept(iceServers: [RTCIceServer], offerSdp: String) {
+    private func completeAccept(
+        iceServers: [RTCIceServer],
+        offerSdp: String,
+        withVideo: Bool
+    ) {
         let rtc = WebRTCPeerConnection(iceServers: iceServers)
         guard rtc.isReady else {
             NSLog("acceptCall: RTCPeerConnection allocation failed")
@@ -280,6 +371,13 @@ public final class CallSession: ObservableObject {
         // UI later supports "accept muted" we will pass the
         // user pick through this method.
         rtc.addLocalAudioTrack(enabled: true)
+
+        // G3-1-video-ui — symmetric video wire-up on the
+        // accept path. Same pre-SDP-build ordering rationale
+        // as `completeDial`.
+        if withVideo {
+            startLocalCameraCapture(on: rtc)
+        }
 
         // G3-sframe-native N-6 — same attach point as dial().
         if !attachSFrame(on: rtc) {
@@ -398,8 +496,7 @@ public final class CallSession: ObservableObject {
         } catch {
             NSLog("endLocal composeCallSignaling failed: %@", error.localizedDescription)
         }
-        rtc?.close()
-        rtc = nil
+        teardownMediaPipeline()
         pendingRemoteOfferSdp = nil
         state = .done
     }
@@ -407,10 +504,28 @@ public final class CallSession: ObservableObject {
     private func endRemote(reason: WebCallEndReason) {
         guard state != .done else { return }
         endReason = reason
-        rtc?.close()
-        rtc = nil
+        teardownMediaPipeline()
         pendingRemoteOfferSdp = nil
         state = .done
+    }
+
+    /// G3-1-video-ui — common teardown for the WebRTC pod
+    /// + camera capture. Called from both `endLocal` and
+    /// `endRemote` so a hung-up or remote-end-of-call
+    /// path releases the camera + clears the SwiftUI
+    /// preview overlay identically.
+    private func teardownMediaPipeline() {
+        rtc?.close()
+        rtc = nil
+        if let capture = self.localCameraCapture {
+            // Fire-and-forget — `LocalCameraCapture.deinit`
+            // is a safety-net stop, so even if this Task is
+            // cancelled before completion the AVCaptureSession
+            // gets released.
+            Task { await capture.stop() }
+            self.localCameraCapture = nil
+        }
+        self.localVideoTrack = nil
     }
 
     // MARK: - WebRTC delegate plumbing

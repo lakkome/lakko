@@ -301,6 +301,15 @@ public final class WebRTCPeerConnection: NSObject {
         self.localVideoSender = sender
     }
 
+    /// G3-1-video-ui — expose the currently-attached local
+    /// video track so the SwiftUI call screen can hand it
+    /// to `LocalVideoPreviewView`. Returns `nil` if
+    /// `addLocalVideoTrack` has not run yet (audio-only
+    /// call, or pre-`completeDial`).
+    public func currentLocalVideoTrack() -> RTCVideoTrack? {
+        localVideoTrack
+    }
+
     // MARK: - SFrame (G3-sframe-native N-4)
 
     /// Arm SFrame for every outgoing RTCRtpSender on this peer.
