@@ -19,18 +19,28 @@ runs the matrix on `workflow_dispatch` + a
 ## What landed in this wave
 
 - `sni-observer/` — a small Rust binary that listens
-  for TLS on `127.0.0.1:8443`, parses the inbound
+  for TLS on `127.0.0.1:8443` (TCP) **AND for QUIC v1
+  Initial packets on the same port over UDP** (G5-7-
+  transport-matrix-iter3, May 2026), parses the inbound
   ClientHello, extracts the `server_name` extension
   **plus JA3 (Salesforce 2017) and JA4 (FoxIO 2023
   compact form)** passive fingerprints, appends one JSON
-  line per observation to `./logs/observed.jsonl`, drops
-  the connection. JA3 = MD5 over `version,ciphers,
+  line per observation to `./logs/observed.jsonl` with a
+  `transport: "tcp"|"udp"` discriminator, drops the
+  connection. JA3 = MD5 over `version,ciphers,
   extensions,groups,ec_point_formats` decimal CSV;
   GREASE values (RFC 8701) are filtered. JA4 =
   `t<ver><sni><nc><ne><alpn>_<hash_a>_<hash_b>` where
   the two hashes are SHA-256-truncated-to-12-hex over
   sorted unique ciphers and sorted extensions+sigalgs
-  respectively. This
+  respectively. QUIC Initial packets are decrypted per
+  RFC 9001 §5.2 (well-known initial salt + HKDF-Expand-
+  Label deriving `quic key` / `quic iv` / `quic hp` from
+  the client-side DCID, then AES-ECB-128 header-
+  protection removal + AES-128-GCM AEAD); the embedded
+  CRYPTO frame's TLS handshake bytes feed the same
+  ClientHello parser the TCP path uses. RFC 9001 §A.2
+  test vectors gate the crypto math. This
   is the unencrypted picture an on-path passive
   adversary sees on the very first packet of a TLS
   flow.

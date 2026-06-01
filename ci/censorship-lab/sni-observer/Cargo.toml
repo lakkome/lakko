@@ -41,3 +41,23 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # — RustCrypto stays inside that posture.
 md-5 = "0.10"
 sha2 = "0.10"
+
+# G5-7-transport-matrix-iter3 — QUIC Initial packet decryption
+# per RFC 9001 §5.2. The observer's UDP path decrypts the
+# first inbound datagram to extract the TLS ClientHello
+# wrapped in a CRYPTO frame.
+#   aes      — AES-128-ECB for the header-protection mask.
+#   aes-gcm  — AES-128-GCM for the AEAD-protected packet
+#              payload.
+#   hkdf     — HKDF-Extract + HKDF-Expand-Label for the
+#              initial-keys derivation. RustCrypto, no
+#              unsafe.
+aes = "0.8"
+aes-gcm = "0.10"
+hkdf = "0.12"
+
+[dev-dependencies]
+# `hex` is only used by the RFC 9001 §A.2 test-vector
+# assertions in `quic_initial.rs`; the production code path
+# does not need it.
+hex = "0.4"

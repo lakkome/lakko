@@ -30,6 +30,12 @@ services:
       # Pinned to 127.0.0.1 so a stray Internet host
       # never sees an open observer on the runner.
       - "127.0.0.1:8443:8443"
+      # G5-7-transport-matrix-iter3 — UDP/8443 for QUIC
+      # Initial observations (MASQUE / WebTransport).
+      # The observer binds the same port on both
+      # transports; consumers disambiguate via the
+      # `transport: "tcp"|"udp"` JSONL field.
+      - "127.0.0.1:8443:8443/udp"
     volumes:
       # Host bind-mount. The compose `up` step in CI
       # creates `./logs/` first so the volume points at

@@ -358,7 +358,8 @@ fn extract_string_field<'a>(line: &'a str, field: &str) -> Option<&'a str> {
 use base64::engine::general_purpose::STANDARD as B64_STANDARD;
 use base64::Engine as _;
 use lakko_transport::{
-    Endpoint, RealityConfig, RealityTransport, ShadowsocksConfig, ShadowsocksTransport, Transport,
+    Endpoint, MasqueConfig, MasqueTransport, RealityConfig, RealityTransport, ShadowsocksConfig,
+    ShadowsocksTransport, Transport, WebTransportConfig, WebTransportPt,
 };
 
 /// Drive a SS-2022 client at the observer; assert the
@@ -663,4 +664,205 @@ async fn observer_records_reality_cover_sni() {
         "REALITY ClientHello must carry a TLS 1.x record header (16 03 01 or 16 03 03). \
          first_bytes_hex: {first}",
     );
+}
+
+// ===========================================================
+// G5-7-transport-matrix-iter3 — MASQUE + WebTransport via the
+// UDP/QUIC half of the observer
+// ===========================================================
+//
+// The observer's TCP listener catches Shadowsocks + REALITY +
+// HTTP; MASQUE and WebTransport ride over QUIC v1, so their
+// first packets land on the UDP listener that decodes
+// RFC 9001 §5.2 Initial packets to extract the TLS
+// ClientHello carried in a CRYPTO frame.
+//
+// What these two tests guard:
+//   - The QUIC Initial we send carries the proxy / WT
+//     server hostname as the SNI, NOT any "inner" target
+//     (MASQUE inner_target / WebTransport URL path).
+//   - The observer's `transport: "udp"` field is non-null
+//     on a successful decrypt — proving the QUIC Initial
+//     was parseable, not silently malformed.
+//   - The negative-space invariant: the inner target name
+//     must NEVER appear anywhere on the observed line.
+
+/// MASQUE — proxy URL host is the SNI in the QUIC Initial;
+/// the configured `inner_target` is wrapped in the
+/// CONNECT-UDP request payload, which would only be sent
+/// AFTER the QUIC + h3 handshake completes (the observer
+/// drops well before that).
+#[tokio::test]
+#[ignore = "requires ci/censorship-lab docker compose stack — see ci/censorship-lab/README.md"]
+async fn observer_records_masque_outer_proxy_sni() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
+    // 127.0.0.1 directly — `localhost` resolves to BOTH
+    // ::1 and 127.0.0.1, and `to_socket_addrs().next()`
+    // picks one platform-dependently; the observer's UDP
+    // listener publishes on IPv4 only via Docker's port
+    // mapping, so an IPv6-first pick would land in a
+    // black hole. Using `127.0.0.1` ALSO means rustls
+    // correctly OMITS the SNI extension (RFC 6066 §3
+    // forbids IP literals in SNI) — which is fine: this
+    // test asserts on the negative-space invariant
+    // (inner target never on the wire) + the structural
+    // shape (Initial successfully decrypted → JA3
+    // populated), not on the SNI value itself.
+    let inner_target_name = "lakko-masque-inner-target.example";
+
+    let cfg = MasqueConfig {
+        proxy_url: "https://127.0.0.1:8443/".to_owned(),
+        inner_target: format!("{inner_target_name}:443"),
+        bearer: None,
+    };
+    let transport = MasqueTransport::new(cfg).expect("MasqueConfig must validate");
+
+    // The connect will time out / error — observer is not
+    // a real h3 server, so the QUIC handshake never
+    // completes. We just need the Initial bytes on the
+    // wire, which happens IMMEDIATELY after connect()
+    // calls quinn's `endpoint.connect(...)`.
+    let _ = tokio::time::timeout(
+        Duration::from_secs(8),
+        transport.connect(&Endpoint::Hostname {
+            host: "127.0.0.1".into(),
+            port: 8443,
+        }),
+    )
+    .await;
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let log_path = observer_log_path();
+    let body = read_log(&log_path).await;
+
+    // Walk lines tail-first, find the first udp line where
+    // the QUIC Initial was successfully decrypted (JA3
+    // present). A null-ja3 udp line means the observer saw
+    // the datagram but failed to decrypt as QUIC v1 — we
+    // need a positive decrypt to assert the negative-space
+    // claim against the cleartext frames.
+    let line = body
+        .lines()
+        .rev()
+        .find(|line| line.contains(r#""transport":"udp""#) && !line.contains(r#""ja3":null"#))
+        .unwrap_or_else(|| {
+            panic!(
+                "observer log must carry a udp line with non-null ja3 (successful QUIC Initial \
+                 decrypt).\nTail of {}:\n{}",
+                log_path.display(),
+                body.lines().rev().take(8).collect::<Vec<_>>().join("\n"),
+            )
+        });
+
+    // The inner target name MUST NOT appear anywhere on
+    // the observed line. MASQUE wraps it inside a
+    // CONNECT-UDP request payload that the proxy unseals
+    // AFTER the QUIC + h3 handshake completes — the inner
+    // never rides in cleartext on the QUIC Initial.
+    assert!(
+        !line.contains(inner_target_name),
+        "MASQUE connection MUST NOT leak the inner target {inner_target_name:?} in the udp \
+         observed line. Full line: {line}",
+    );
+
+    // Shape: ja3 + ja4 populated (it IS valid TLS-over-QUIC
+    // — the same browser-class fingerprint quinn emits for
+    // any HTTPS site over h3).
+    let ja3 =
+        extract_string_field(line, "ja3").unwrap_or_else(|| panic!("line missing ja3: {line}"));
+    assert!(
+        ja3 != "null" && ja3.len() == 32,
+        "MASQUE QUIC Initial must yield a non-null 32-char JA3. ja3: {ja3:?}",
+    );
+    let ja4 =
+        extract_string_field(line, "ja4").unwrap_or_else(|| panic!("line missing ja4: {line}"));
+    let ja4_parts: Vec<&str> = ja4.split('_').collect();
+    assert_eq!(
+        ja4_parts.len(),
+        3,
+        "JA4 must have 3 underscore-separated parts: {ja4}",
+    );
+    // Note: ja4 prefix starts with `t` for TCP — but the
+    // observer's parser doesn't currently distinguish QUIC
+    // from TCP at the JA4 prefix level (would need
+    // protocol-aware fingerprinting per FoxIO JA4Q spec).
+    // We assert only the structural shape here; classifying
+    // as `q13d...` vs `t13d...` is a deferred fidelity
+    // improvement.
+}
+
+/// WebTransport — same posture as MASQUE: the URL host is
+/// the SNI, the URL path is sent only after handshake. No
+/// path / inner-target leaks here either.
+#[tokio::test]
+#[ignore = "requires ci/censorship-lab docker compose stack — see ci/censorship-lab/README.md"]
+async fn observer_records_webtransport_outer_sni() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
+    // 127.0.0.1 directly — same IPv4-only-Docker-publish
+    // rationale as the MASQUE test above.
+    let inner_path_name = "lakko-wt-inner-path-marker";
+
+    let cfg = WebTransportConfig {
+        url: format!("https://127.0.0.1:8443/{inner_path_name}"),
+        cert_hashes_b64: vec![],
+        ech_config_list_b64: None,
+    };
+    let transport = WebTransportPt::new(cfg).expect("WebTransportConfig must validate");
+
+    let _ = tokio::time::timeout(
+        Duration::from_secs(8),
+        transport.connect(&Endpoint::Hostname {
+            host: "127.0.0.1".into(),
+            port: 8443,
+        }),
+    )
+    .await;
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let log_path = observer_log_path();
+    let body = read_log(&log_path).await;
+
+    let line = body
+        .lines()
+        .rev()
+        .find(|line| line.contains(r#""transport":"udp""#) && !line.contains(r#""ja3":null"#))
+        .unwrap_or_else(|| {
+            panic!(
+                "observer log must carry a udp line with non-null ja3 (successful QUIC Initial \
+                 decrypt).\nTail of {}:\n{}",
+                log_path.display(),
+                body.lines().rev().take(8).collect::<Vec<_>>().join("\n"),
+            )
+        });
+
+    // URL path MUST NOT be on the wire in cleartext.
+    assert!(
+        !line.contains(inner_path_name),
+        "WebTransport connection MUST NOT leak the URL path marker {inner_path_name:?} in \
+         the udp observed line. Full line: {line}",
+    );
+
+    let ja3 =
+        extract_string_field(line, "ja3").unwrap_or_else(|| panic!("line missing ja3: {line}"));
+    assert!(
+        ja3 != "null" && ja3.len() == 32,
+        "WebTransport QUIC Initial must yield a non-null 32-char JA3. ja3: {ja3:?}",
+    );
+}
+
+/// Helper — read the whole observer log file. Used by the
+/// MASQUE + WebTransport tests above; the older tests have
+/// their own inline `tokio::fs::File::open` + `read_to_string`
+/// pair, retained for readability.
+async fn read_log(path: &std::path::Path) -> String {
+    let mut file = tokio::fs::File::open(path)
+        .await
+        .unwrap_or_else(|e| panic!("open observer log {}: {e}", path.display()));
+    let mut body = String::new();
+    file.read_to_string(&mut body).await.expect("read log");
+    body
 }

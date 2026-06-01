@@ -57,6 +57,8 @@
 
 #![forbid(unsafe_code)]
 
+mod quic_initial;
+
 use std::fmt::Write as _;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -118,6 +120,29 @@ async fn main() -> Result<()> {
         .await
         .with_context(|| format!("bind {bind}"))?;
 
+    // G5-7-transport-matrix-iter3 — UDP listener on the
+    // same port for QUIC Initial observations. Independent
+    // of the TCP path; a single concurrent loop is enough
+    // (Initial packets are not high-rate in the CI lab).
+    // Bind defaults to the same port as TCP so an operator
+    // who only thinks in "the observer port" gets both
+    // halves without further config.
+    let udp_bind: SocketAddr = std::env::var("LAKKO_SNI_UDP_BIND")
+        .unwrap_or_else(|_| bind.to_string())
+        .parse()
+        .context("LAKKO_SNI_UDP_BIND must be a valid SocketAddr")?;
+    let udp_socket = tokio::net::UdpSocket::bind(udp_bind)
+        .await
+        .with_context(|| format!("udp bind {udp_bind}"))?;
+    info!(%udp_bind, "sni-observer udp listener up");
+
+    let udp_log = log.clone();
+    tokio::spawn(async move {
+        if let Err(e) = run_udp_loop(udp_socket, udp_log).await {
+            warn!(error = %e, "udp loop exited");
+        }
+    });
+
     loop {
         match listener.accept().await {
             Ok((stream, peer)) => {
@@ -132,6 +157,83 @@ async fn main() -> Result<()> {
                 warn!(error = %e, "accept failed");
             },
         }
+    }
+}
+
+/// Single-task UDP loop. For each inbound datagram, attempt
+/// to decrypt as a QUIC v1 Initial packet, then feed the
+/// embedded handshake bytes to the same `parse_client_hello
+/// _from_handshake` the TCP path uses. Emits one JSONL line
+/// per datagram regardless of decrypt success — on failure
+/// `observed_sni` is `null` and `first_bytes_hex` carries
+/// the leading bytes for diagnostics.
+async fn run_udp_loop(
+    socket: tokio::net::UdpSocket,
+    log: Arc<Mutex<tokio::fs::File>>,
+) -> Result<()> {
+    // UDP datagrams in QUIC v1 are capped at the path MTU
+    // (~1500 typical, ~9000 jumbo). 64 KiB is the wire
+    // ceiling and keeps the buffer one allocation.
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        let (n, peer) = match socket.recv_from(&mut buf).await {
+            Ok(pair) => pair,
+            Err(e) => {
+                warn!(error = %e, "udp recv_from failed");
+                continue;
+            },
+        };
+        let datagram = &buf[..n];
+
+        let observed = quic_initial::decrypt_initial(datagram)
+            .ok()
+            .and_then(|d| parse_client_hello_from_handshake(&d.handshake_bytes));
+        let ts_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+
+        let line = match &observed {
+            Some(ch) => format!(
+                "{{\"ts_ms\":{},\"transport\":\"udp\",\"observed_sni\":{},\"ja3\":\"{}\",\"ja3_string\":\"{}\",\"ja4\":\"{}\",\"peer\":\"{}\",\"first_bytes_hex\":\"{}\"}}\n",
+                ts_ms,
+                match &ch.sni {
+                    Some(name) => format!("\"{}\"", escape_json(name)),
+                    None => "null".to_owned(),
+                },
+                ch.ja3,
+                escape_json(&ch.ja3_string),
+                ch.ja4,
+                peer,
+                hex_head(datagram, 16),
+            ),
+            None => format!(
+                // QUIC Initial decryption failed (or the
+                // datagram is not QUIC v1 at all). Log the
+                // negative observation; first_bytes_hex
+                // disambiguates "non-QUIC noise" from "QUIC
+                // we failed to decrypt".
+                "{{\"ts_ms\":{},\"transport\":\"udp\",\"observed_sni\":null,\"ja3\":null,\"ja3_string\":null,\"ja4\":null,\"peer\":\"{}\",\"first_bytes_hex\":\"{}\"}}\n",
+                ts_ms,
+                peer,
+                hex_head(datagram, 16),
+            ),
+        };
+
+        {
+            let mut log = log.lock().await;
+            log.write_all(line.as_bytes()).await?;
+            log.flush().await?;
+        }
+
+        info!(
+            %peer,
+            transport = "udp",
+            observed_sni = ?observed.as_ref().and_then(|c| c.sni.clone()),
+            ja3 = ?observed.as_ref().map(|c| &c.ja3),
+            ja4 = ?observed.as_ref().map(|c| &c.ja4),
+            "observed",
+        );
     }
 }
 
@@ -163,7 +265,7 @@ async fn handle_one(
 
     let line = match &observed {
         Some(ch) => format!(
-            "{{\"ts_ms\":{},\"observed_sni\":{},\"ja3\":\"{}\",\"ja3_string\":\"{}\",\"ja4\":\"{}\",\"peer\":\"{}\",\"first_bytes_hex\":\"{}\"}}\n",
+            "{{\"ts_ms\":{},\"transport\":\"tcp\",\"observed_sni\":{},\"ja3\":\"{}\",\"ja3_string\":\"{}\",\"ja4\":\"{}\",\"peer\":\"{}\",\"first_bytes_hex\":\"{}\"}}\n",
             ts_ms,
             match &ch.sni {
                 Some(name) => format!("\"{}\"", escape_json(name)),
@@ -180,7 +282,7 @@ async fn handle_one(
             // observation so the test harness can
             // distinguish "non-TLS" from "TLS we failed to
             // parse". `first_bytes_hex` is the disambiguator.
-            "{{\"ts_ms\":{},\"observed_sni\":null,\"ja3\":null,\"ja3_string\":null,\"ja4\":null,\"peer\":\"{}\",\"first_bytes_hex\":\"{}\"}}\n",
+            "{{\"ts_ms\":{},\"transport\":\"tcp\",\"observed_sni\":null,\"ja3\":null,\"ja3_string\":null,\"ja4\":null,\"peer\":\"{}\",\"first_bytes_hex\":\"{}\"}}\n",
             ts_ms,
             peer,
             hex_head(&buf, 16),
@@ -264,6 +366,25 @@ pub fn parse_client_hello(buf: &[u8]) -> Option<ClientHelloFingerprint> {
     }
     let _legacy_record_version = p.u16()?;
     let _record_len = p.u16()?;
+
+    // Handshake header + ClientHello body — delegate to the
+    // record-less variant so QUIC Initial's CRYPTO frame
+    // payload (which carries the handshake message WITHOUT
+    // the TLS record wrapper) can share the same parser.
+    parse_client_hello_from_handshake(&buf[5..])
+}
+
+/// Parse a ClientHello from a buffer that begins with the
+/// **handshake message header** (NOT the TLS record header).
+/// QUIC Initial packets carry the ClientHello inside a
+/// CRYPTO frame whose payload is `handshake_type (u8) +
+/// length (u24) + body`; the outer TLS record layer is
+/// absent because QUIC's own packet protection replaces it.
+///
+/// This is the inner half of [`parse_client_hello`]; the
+/// outer half strips the record header and calls into here.
+pub fn parse_client_hello_from_handshake(buf: &[u8]) -> Option<ClientHelloFingerprint> {
+    let mut p = Parser::new(buf);
 
     // Handshake header
     let msg_type = p.u8()?;
