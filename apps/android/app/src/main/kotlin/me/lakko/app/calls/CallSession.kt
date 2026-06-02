@@ -9,6 +9,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -152,6 +154,23 @@ public class CallSession(
      *  (needs a canonical cross-platform hash of the seed). */
     private val mutableE2eeActive: MutableStateFlow<Boolean> = MutableStateFlow(false)
     public val e2eeActive: StateFlow<Boolean> = mutableE2eeActive.asStateFlow()
+
+    /** G3-2-conn-quality — live connection stats polled from the
+     *  pod's `RTCStatsReport` every couple of seconds while
+     *  connected. `rttMs` null until ICE settles; `connectionRelayed`
+     *  true when the active pair goes through a TURN relay.
+     *  `CallUiState.driveFrom` maps these onto the header
+     *  quality-dot + RTT/connection-type popover. Down/up bitrate
+     *  needs a two-sample byte delta — deferred iter2. */
+    private val mutableRttMs: MutableStateFlow<Int?> = MutableStateFlow(null)
+    public val rttMs: StateFlow<Int?> = mutableRttMs.asStateFlow()
+    private val mutableConnectionRelayed: MutableStateFlow<Boolean> = MutableStateFlow(false)
+    public val connectionRelayed: StateFlow<Boolean> = mutableConnectionRelayed.asStateFlow()
+
+    /** Background poll loop driving [rttMs] / [connectionRelayed].
+     *  Started on the first Connected transition; cancelled in
+     *  [teardownMediaPipeline]. */
+    private var statsJob: kotlinx.coroutines.Job? = null
 
     /**
      * G3-sframe-native N-6 — per-call MLS exporter seed and
@@ -550,6 +569,9 @@ public class CallSession(
                 ) {
                     mutableState.value = WebCallState.Connected
                 }
+                // G3-2-conn-quality — begin polling connection
+                // stats once the transport is up. Idempotent.
+                startStatsPollingIfNeeded()
             }
             PeerConnection.PeerConnectionState.FAILED -> {
                 endLocal(WebCallEndReason.Error)
@@ -611,6 +633,10 @@ public class CallSession(
      * overlay identically.
      */
     private fun teardownMediaPipeline() {
+        // G3-2-conn-quality — stop the stats poll loop before
+        // dropping the peer connection.
+        statsJob?.cancel()
+        statsJob = null
         rtc?.close()
         rtc = null
         localCameraCapture?.let { capture ->
@@ -628,6 +654,29 @@ public class CallSession(
         // gallery tile reverts to the avatar placeholder on
         // both end paths.
         mutableRemoteVideoTrack.value = null
+        // G3-2-conn-quality — clear stale stats.
+        mutableRttMs.value = null
+        mutableConnectionRelayed.value = false
+    }
+
+    /** G3-2-conn-quality — start the connection-stats poll loop
+     *  once, on the first Connected transition. Samples the pod's
+     *  `RTCStatsReport` every 2 s and republishes [rttMs] /
+     *  [connectionRelayed]. Ends when [statsJob] is cancelled
+     *  (teardown) or the peer goes away. */
+    private fun startStatsPollingIfNeeded() {
+        if (statsJob != null) return
+        statsJob = scope.launch {
+            while (isActive) {
+                val pod = rtc ?: return@launch
+                val snap = pod.sampleConnectionStats()
+                if (snap != null) {
+                    mutableRttMs.value = snap.rttMs
+                    mutableConnectionRelayed.value = snap.relayed
+                }
+                delay(2_000)
+            }
+        }
     }
 
     /**

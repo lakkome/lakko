@@ -542,6 +542,8 @@ public class CallUiState(
             launch { session.micEnabled.collect { rebuildFromSession(session) } }
             launch { session.cameraEnabled.collect { rebuildFromSession(session) } }
             launch { session.e2eeActive.collect { rebuildFromSession(session) } }
+            launch { session.rttMs.collect { rebuildFromSession(session) } }
+            launch { session.connectionRelayed.collect { rebuildFromSession(session) } }
         }
     }
 
@@ -551,6 +553,8 @@ public class CallUiState(
         _phase.value = mapSessionPhase(session.state.value)
         val connected = session.state.value == CallSession.WebCallState.Connected
         val remoteTrack = session.remoteVideoTrack.value
+        // G3-2-conn-quality — local quality dot bucketed from RTT.
+        val tier = qualityTierForRtt(session.rttMs.value)
         val roster = mutableListOf(
             Participant(
                 id = "local",
@@ -559,7 +563,7 @@ public class CallUiState(
                 micOn = session.micEnabled.value,
                 camOn = session.cameraEnabled.value,
                 handRaised = false,
-                quality = QualityTier.Good,
+                quality = tier,
                 speaking = false,
                 screenSharing = false,
             ),
@@ -586,7 +590,38 @@ public class CallUiState(
         // No comparable fingerprint yet (canonical cross-platform
         // hash is a deferred follow-up), so shortFingerprint=null.
         _e2ee.value = E2eeState(active = session.e2eeActive.value, shortFingerprint = null)
+        // G3-2-conn-quality — header detail from getStats sampling.
+        // down/up bitrate deferred to iter2; only RTT + path type here.
+        val rtt = session.rttMs.value
+        _connectionDetail.value = ConnectionDetail(
+            rttMs = rtt,
+            downBps = null,
+            upBps = null,
+            connectionType = when {
+                session.connectionRelayed.value -> ConnectionDetail.ConnectionType.Relay
+                rtt != null -> ConnectionDetail.ConnectionType.Direct
+                else -> ConnectionDetail.ConnectionType.Unknown
+            },
+        )
     }
+
+    /**
+     * RTT-to-[QualityTier] bucketing for the per-participant quality dot.
+     *
+     * These thresholds are UX display bands, NOT measured network SLOs:
+     * a null sample (no nominated candidate-pair yet) reads as [QualityTier.Good]
+     * so a freshly-connected call does not flash a red dot before the first
+     * stats poll lands.
+     */
+    private fun qualityTierForRtt(rttMs: Int?): QualityTier =
+        when {
+            rttMs == null -> QualityTier.Good
+            rttMs < 100 -> QualityTier.Excellent
+            rttMs < 200 -> QualityTier.Good
+            rttMs < 350 -> QualityTier.Fair
+            rttMs < 600 -> QualityTier.Poor
+            else -> QualityTier.Bad
+        }
 
     private fun mapSessionPhase(s: CallSession.WebCallState): CallPhase =
         when (s) {

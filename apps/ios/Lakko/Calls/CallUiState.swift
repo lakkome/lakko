@@ -698,11 +698,14 @@ extension CallUiState {
             self.setPhase(Self.mapSessionPhase(session.state))
             let connected = session.state == .connected
             let remoteTrack = session.remoteVideoTrack
+            // G3-1-conn-quality — local participant's quality dot
+            // is the path quality bucketed from the live RTT.
+            let tier = Self.qualityTier(forRttMs: session.rttMs)
             var roster: [Participant] = [
                 Participant(
                     id: "local", displayName: "You", isLocal: true,
                     micOn: session.micEnabled, camOn: session.cameraEnabled,
-                    handRaised: false, quality: .good, speaking: false,
+                    handRaised: false, quality: tier, speaking: false,
                     screenSharing: false
                 ),
             ]
@@ -724,6 +727,17 @@ extension CallUiState {
             // cross-platform hash is a deferred follow-up), so
             // `shortFingerprint` stays nil.
             self.setE2ee(E2eeState(active: session.e2eeActive, shortFingerprint: nil))
+            // G3-1-conn-quality — RTT + connection type from the
+            // live getStats sample. Down/up bitrate stay nil
+            // (iter2 — needs a two-sample byte delta).
+            self.setConnectionDetail(ConnectionDetail(
+                rttMs: session.rttMs,
+                downBps: nil,
+                upBps: nil,
+                connectionType: session.connectionRelayed
+                    ? .relay
+                    : (session.rttMs != nil ? .direct : .unknown)
+            ))
         }
         let onMain: (@escaping () -> Void) -> Void = { work in
             MainActor.assumeIsolated { work() }
@@ -746,10 +760,33 @@ extension CallUiState {
         let e2ee = session.$e2eeActive
             .receive(on: DispatchQueue.main)
             .sink { _ in onMain(rebuild) }
+        let rtt = session.$rttMs
+            .receive(on: DispatchQueue.main)
+            .sink { _ in onMain(rebuild) }
+        let relay = session.$connectionRelayed
+            .receive(on: DispatchQueue.main)
+            .sink { _ in onMain(rebuild) }
         // Seed once synchronously so the first frame is correct
         // before any publisher fires.
         rebuild()
-        return [state, localTrack, remoteTrack, mic, camera, e2ee]
+        return [state, localTrack, remoteTrack, mic, camera, e2ee, rtt, relay]
+    }
+
+    /// G3-1-conn-quality — bucket a measured round-trip time
+    /// into the three-colour quality glyph. These are **UX
+    /// display thresholds** (not measured SLOs): green for a
+    /// snappy path, yellow as it degrades, red when calls start
+    /// to feel laggy. `nil` RTT (pre-measurement) shows the
+    /// neutral `good` rather than alarming the user.
+    private static func qualityTier(forRttMs rtt: Int?) -> QualityTier {
+        guard let rtt else { return .good }
+        switch rtt {
+        case ..<100: return .excellent
+        case ..<200: return .good
+        case ..<350: return .fair
+        case ..<600: return .poor
+        default: return .bad
+        }
     }
 
     /// Map the `CallSession` lifecycle onto the UI phase. The

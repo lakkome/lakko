@@ -289,6 +289,47 @@ public final class WebRTCPeerConnection: NSObject {
         localVideoTrack?.isEnabled = on
     }
 
+    /// G3-1-conn-quality — one-shot connection-stats sample
+    /// read out of WebRTC's `RTCStatisticsReport`. Surfaces
+    /// the active (nominated, succeeded) ICE candidate-pair's
+    /// round-trip time + whether the path is relayed (TURN).
+    /// `rttMs` is `nil` until WebRTC has a usable RTT estimate;
+    /// `hasActivePair` is `false` before ICE settles. Bytes /
+    /// bitrate are intentionally not sampled here — that needs
+    /// a two-sample delta (deferred to iter2).
+    public struct ConnectionStatsSnapshot: Sendable {
+        public let rttMs: Int?
+        public let relayed: Bool
+        public let hasActivePair: Bool
+    }
+
+    public func sampleConnectionStats() async -> ConnectionStatsSnapshot? {
+        guard let peer = peer else { return nil }
+        let report: RTCStatisticsReport = await withCheckedContinuation { cont in
+            peer.statistics { cont.resume(returning: $0) }
+        }
+        let stats = report.statistics
+        // Prefer the nominated succeeded pair; fall back to any
+        // succeeded pair (some stacks don't flag `nominated`).
+        let pairs = stats.values.filter { $0.type == "candidate-pair" }
+        let active = pairs.first(where: {
+            ($0.values["state"] as? String) == "succeeded"
+                && (($0.values["nominated"] as? NSNumber)?.boolValue ?? false)
+        }) ?? pairs.first(where: { ($0.values["state"] as? String) == "succeeded" })
+        guard let pair = active else {
+            return ConnectionStatsSnapshot(rttMs: nil, relayed: false, hasActivePair: false)
+        }
+        let rttSec = (pair.values["currentRoundTripTime"] as? NSNumber)?.doubleValue
+        let rttMs = rttSec.map { Int(($0 * 1000).rounded()) }
+        let candType: (String?) -> String? = { id in
+            guard let id = id, let s = stats[id] else { return nil }
+            return s.values["candidateType"] as? String
+        }
+        let relayed = candType(pair.values["localCandidateId"] as? String) == "relay"
+            || candType(pair.values["remoteCandidateId"] as? String) == "relay"
+        return ConnectionStatsSnapshot(rttMs: rttMs, relayed: relayed, hasActivePair: true)
+    }
+
     /// Factory entry point for a fresh `RTCVideoSource`
     /// bound to this process's shared `RTCPeerConnectionFactory`.
     /// `LocalCameraCapture` (G3-1-video) drives frames into the

@@ -116,6 +116,23 @@ public final class CallSession: ObservableObject {
     /// hash of the seed so both parties + web agree).
     @Published public private(set) var e2eeActive: Bool = false
 
+    /// G3-1-conn-quality — live connection stats, polled from
+    /// the pod's `RTCStatisticsReport` every couple of seconds
+    /// while the call is connected. `rttMs` is `nil` until ICE
+    /// settles + WebRTC has an RTT estimate; `connectionRelayed`
+    /// is `true` when the active candidate-pair goes through a
+    /// TURN relay. `CallUiState.driveFrom` maps these onto the
+    /// header quality-dot + the RTT/connection-type popover.
+    /// Down/up bitrate (the popover's `↓`/`↑` lines) needs a
+    /// two-sample byte delta and is a deferred iter2.
+    @Published public private(set) var rttMs: Int?
+    @Published public private(set) var connectionRelayed: Bool = false
+
+    /// Background poll loop driving [`rttMs`] / [`connectionRelayed`].
+    /// Started on the first `.connected` transition, cancelled in
+    /// `teardownMediaPipeline`.
+    private var statsTask: Task<Void, Never>?
+
     /// G3-sframe-native N-6 — per-call MLS exporter seed +
     /// local participant leaf index. Both must be set before
     /// `dial` / `acceptCall` so the SFrame attach can fire
@@ -575,6 +592,10 @@ public final class CallSession: ObservableObject {
     /// path releases the camera + clears the SwiftUI
     /// preview overlay identically.
     private func teardownMediaPipeline() {
+        // G3-1-conn-quality — stop the stats poll loop before
+        // dropping the peer connection.
+        statsTask?.cancel()
+        statsTask = nil
         rtc?.close()
         rtc = nil
         if let capture = self.localCameraCapture {
@@ -590,6 +611,32 @@ public final class CallSession: ObservableObject {
         // gallery tile reverts to the avatar placeholder on
         // both end paths.
         self.remoteVideoTrack = nil
+        // G3-1-conn-quality — clear the stale stats so a fresh
+        // call doesn't briefly show the previous RTT.
+        self.rttMs = nil
+        self.connectionRelayed = false
+    }
+
+    /// G3-1-conn-quality — start the connection-stats poll loop
+    /// once, on the first `.connected` transition. Samples the
+    /// pod's `RTCStatisticsReport` every 2 s and republishes
+    /// `rttMs` / `connectionRelayed` on the main actor. The loop
+    /// ends when the task is cancelled (`teardownMediaPipeline`)
+    /// or the `Rtc` goes away.
+    private func startStatsPollingIfNeeded() {
+        guard statsTask == nil else { return }
+        statsTask = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let self, let rtc = self.rtc else { return }
+                if let snap = await rtc.sampleConnectionStats() {
+                    await MainActor.run {
+                        self.rttMs = snap.rttMs
+                        self.connectionRelayed = snap.relayed
+                    }
+                }
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+            }
+        }
     }
 
     // MARK: - WebRTC delegate plumbing
@@ -660,6 +707,10 @@ public final class CallSession: ObservableObject {
             if state == .connecting || state == .outgoing {
                 state = .connected
             }
+            // G3-1-conn-quality — begin polling connection stats
+            // once the transport is up. Idempotent: a flap back
+            // through `.connected` won't spawn a second loop.
+            startStatsPollingIfNeeded()
         case .failed:
             endLocal(reason: .error)
         case .disconnected:

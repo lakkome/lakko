@@ -320,6 +320,44 @@ public class WebRtcPeerConnection(
         localVideoTrack?.setEnabled(on)
     }
 
+    /** G3-2-conn-quality — one-shot connection-stats sample read
+     *  out of WebRTC's `RTCStatsReport`. Surfaces the active
+     *  (nominated, succeeded) ICE candidate-pair's round-trip
+     *  time + whether the path is relayed (TURN). `rttMs` is
+     *  null until WebRTC has an estimate; `hasActivePair` is
+     *  false before ICE settles. Bytes / bitrate are not sampled
+     *  here — that needs a two-sample delta (deferred to iter2). */
+    public class ConnectionStatsSnapshot(
+        public val rttMs: Int?,
+        public val relayed: Boolean,
+        public val hasActivePair: Boolean,
+    )
+
+    public suspend fun sampleConnectionStats(): ConnectionStatsSnapshot? {
+        val p = peer ?: return null
+        val report = suspendCancellableCoroutine<org.webrtc.RTCStatsReport?> { cont ->
+            try {
+                p.getStats { r -> if (cont.isActive) cont.resume(r) }
+            } catch (cause: Throwable) {
+                if (cont.isActive) cont.resume(null)
+            }
+        } ?: return null
+        val stats = report.statsMap
+        val pairs = stats.values.filter { it.type == "candidate-pair" }
+        val active = pairs.firstOrNull {
+            (it.members["state"] as? String) == "succeeded" &&
+                (it.members["nominated"] as? Boolean == true)
+        } ?: pairs.firstOrNull { (it.members["state"] as? String) == "succeeded" }
+            ?: return ConnectionStatsSnapshot(rttMs = null, relayed = false, hasActivePair = false)
+        val rttSec = (active.members["currentRoundTripTime"] as? Number)?.toDouble()
+        val rttMs = rttSec?.let { Math.round(it * 1000.0).toInt() }
+        fun candType(id: String?): String? =
+            id?.let { stats[it]?.members?.get("candidateType") as? String }
+        val relayed = candType(active.members["localCandidateId"] as? String) == "relay" ||
+            candType(active.members["remoteCandidateId"] as? String) == "relay"
+        return ConnectionStatsSnapshot(rttMs = rttMs, relayed = relayed, hasActivePair = true)
+    }
+
     /**
      * Video plumbing extension point. `addLocalVideoTrack`
      * wires a `VideoTrack` backed by a `VideoSource` the
