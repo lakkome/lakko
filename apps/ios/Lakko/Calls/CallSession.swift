@@ -84,6 +84,18 @@ public final class CallSession: ObservableObject {
     /// `addLocalVideoTrack`; cleared in `endLocal`.
     @Published public private(set) var localVideoTrack: RTCVideoTrack?
 
+    /// G3-1-remote-video — the remote participant's incoming
+    /// video track, surfaced from `WebRTCPeerConnection`'s
+    /// `onRemoteVideoTrack` delegate callback. `nil` until the
+    /// remote adds a camera track (or after it is removed /
+    /// the call ends). On the 1×1 direct-PeerConnection path
+    /// there is exactly one remote, so this single handle is
+    /// unambiguous; the N-way SFU path (per-participant
+    /// MSID→leaf mapping) is a deferred follow-up that will
+    /// replace this with a `[participantId: RTCVideoTrack]`
+    /// map keyed on the stream id the SFU stamps.
+    @Published public private(set) var remoteVideoTrack: RTCVideoTrack?
+
     /// G3-sframe-native N-6 — per-call MLS exporter seed +
     /// local participant leaf index. Both must be set before
     /// `dial` / `acceptCall` so the SFrame attach can fire
@@ -526,6 +538,10 @@ public final class CallSession: ObservableObject {
             self.localCameraCapture = nil
         }
         self.localVideoTrack = nil
+        // G3-1-remote-video — drop the remote handle so the
+        // gallery tile reverts to the avatar placeholder on
+        // both end paths.
+        self.remoteVideoTrack = nil
     }
 
     // MARK: - WebRTC delegate plumbing
@@ -545,6 +561,13 @@ public final class CallSession: ObservableObject {
             },
             onConnectionState: { [weak self] newState in
                 self?.handleConnectionState(newState)
+            },
+            onRemoteVideoTrack: { [weak self] track, _ in
+                // 1×1: a single remote video track. The
+                // stream id is ignored here; the N-way SFU
+                // path will key on it to map the track to a
+                // specific participant leaf.
+                self?.remoteVideoTrack = track
             }
         ))
     }

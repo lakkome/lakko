@@ -200,6 +200,18 @@ public class CallUiState(
     private val _localVideoTrack = MutableStateFlow<VideoTrack?>(null)
     public val localVideoTrack: StateFlow<VideoTrack?> = _localVideoTrack.asStateFlow()
 
+    /** G3-2-remote-video — the remote participant's live video
+     *  track (when one is attached via [bindTo]). `null` for
+     *  audio-only, before the remote adds a camera, or after
+     *  teardown. The 1×1 direct-PeerConnection path has exactly
+     *  one remote track; `CallScreen` renders it on the **sole
+     *  remote participant's** tile (see [soleRemoteParticipantId]).
+     *  Untouched by [seedMockState] so the mock design path keeps
+     *  the legacy placeholder; the N-way SFU path will replace
+     *  this with a per-participant track map. */
+    private val _remoteVideoTrack = MutableStateFlow<VideoTrack?>(null)
+    public val remoteVideoTrack: StateFlow<VideoTrack?> = _remoteVideoTrack.asStateFlow()
+
     /** Job for an active [bindTo] subscription. Cancelled on
      *  [reset] / re-bind to a different session so the previous
      *  flow doesn't keep pushing onto the StateFlow. */
@@ -451,13 +463,33 @@ public class CallUiState(
         _localVideoTrack.value = track
     }
 
+    /** G3-2-remote-video — push the remote participant's video
+     *  track. Same [bindTo]-driven / testbed-explicit dual use
+     *  as [setLocalVideoTrack]. */
+    public fun setRemoteVideoTrack(track: VideoTrack?) {
+        _remoteVideoTrack.value = track
+    }
+
+    /** The id of the only remote participant, when exactly one
+     *  exists (the 1×1 case); `null` when alone or in an N-way
+     *  call. `CallScreen` gates remote-video rendering on
+     *  `participant.id == soleRemoteParticipantId` so the single
+     *  [remoteVideoTrack] handle is never painted onto the wrong
+     *  tile in a group call (per-participant track mapping is the
+     *  deferred N-way follow-up). */
+    public val soleRemoteParticipantId: String?
+        get() {
+            val remotes = _participants.value.filter { !it.isLocal }
+            return if (remotes.size == 1) remotes.first().id else null
+        }
+
     /**
-     * Attach a live [CallSession] so the UI mirrors its
-     * `localVideoTrack` StateFlow. Currently bridges only the
-     * local video track; the audio / participant / e2ee /
-     * connection-detail fields stay on the mock path until the
-     * full-session-integration sub-sprint lands (the screen
-     * today reads from [seedMockState]).
+     * Attach a live [CallSession] so the UI mirrors its video
+     * StateFlows. Bridges the local **and** remote video tracks
+     * (G3-2-video-ui-screen + G3-2-remote-video); the audio /
+     * participant / e2ee / connection-detail fields stay on the
+     * mock path until the full-session-integration sub-sprint
+     * lands (the screen today reads from [seedMockState]).
      *
      * Cancels any previous bind subscription so re-attaching
      * to a different session is safe.
@@ -465,8 +497,15 @@ public class CallUiState(
     public fun bindTo(session: CallSession) {
         bindJob?.cancel()
         bindJob = scope.launch {
-            session.localVideoTrack.collect { track ->
-                _localVideoTrack.value = track
+            launch {
+                session.localVideoTrack.collect { track ->
+                    _localVideoTrack.value = track
+                }
+            }
+            launch {
+                session.remoteVideoTrack.collect { track ->
+                    _remoteVideoTrack.value = track
+                }
             }
         }
     }
@@ -498,6 +537,7 @@ public class CallUiState(
         bindJob?.cancel()
         bindJob = null
         _localVideoTrack.value = null
+        _remoteVideoTrack.value = null
     }
 
     /** Mock seed — same shape as the web `seedMockParticipants` /

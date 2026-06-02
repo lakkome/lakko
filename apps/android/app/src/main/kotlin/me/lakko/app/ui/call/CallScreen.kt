@@ -1090,10 +1090,15 @@ private fun ParticipantTile(
     // G3-2-video-ui-screen — observe the live local track so a
     // post-construction camera-arm flips this tile from
     // placeholder to live preview without an outer recomposition
-    // dance. Remote tracks land in a separate sub-sprint (the
-    // SFU's TracksIn/Out ssrc-to-leaf mapping is the blocker).
+    // dance. G3-2-remote-video — also observe the remote track,
+    // rendered for the sole remote participant (1×1). N-way
+    // per-participant mapping is the deferred follow-up (gated on
+    // the SFU's MSID→leaf stream-id mapping the client consumes).
     val localVideoTrack by state.localVideoTrack.collectAsState()
+    val remoteVideoTrack by state.remoteVideoTrack.collectAsState()
+    val participants by state.participants.collectAsState()
     val settings by state.settings.collectAsState()
+    val soleRemoteId = remember(participants) { state.soleRemoteParticipantId }
 
     Box(
         modifier = Modifier
@@ -1119,13 +1124,23 @@ private fun ParticipantTile(
             // attached. Defensive fallback to the placeholder if
             // it is unexpectedly null.
             val eglContext = remember { WebRtcPeerConnection.sharedEglContext() }
-            val track = localVideoTrack
-            if (participant.isLocal && track != null && eglContext != null) {
+            // Pick the track for this tile: the local track for the
+            // local participant, the remote track for the sole
+            // remote participant (1×1). Remote video is never
+            // mirrored — the viewer wants the other party's true
+            // orientation.
+            val isSoleRemote = !participant.isLocal && participant.id == soleRemoteId
+            val track = when {
+                participant.isLocal -> localVideoTrack
+                isSoleRemote -> remoteVideoTrack
+                else -> null
+            }
+            if (track != null && eglContext != null) {
                 LocalVideoPreviewView(
                     track = track,
                     eglContext = eglContext,
                     modifier = Modifier.fillMaxSize(),
-                    mirrored = settings.mirrorLocal,
+                    mirrored = participant.isLocal && settings.mirrorLocal,
                     scalingType = RendererCommon.ScalingType.SCALE_ASPECT_FILL,
                 )
             } else {

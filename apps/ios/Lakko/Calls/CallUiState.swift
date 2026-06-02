@@ -227,6 +227,17 @@ public final class CallUiState: ObservableObject {
     /// path keeps the legacy "(video)" placeholder.
     @Published public private(set) var localVideoTrack: RTCVideoTrack?
 
+    /// G3-1-remote-video — the remote participant's live video
+    /// track (when one is attached via `bind(to:)`). `nil` for
+    /// audio-only, before the remote adds a camera, or after
+    /// teardown. The 1×1 direct-PeerConnection path has exactly
+    /// one remote track; `CallScreen` renders it on the **sole
+    /// remote participant's** tile (see `soleRemoteParticipantId`).
+    /// Untouched by `seedMockState()` so the mock design path
+    /// keeps the legacy placeholder; the N-way SFU path will
+    /// replace this with a per-participant track map.
+    @Published public private(set) var remoteVideoTrack: RTCVideoTrack?
+
     /// Monotone counter for client-side chat-message ids;
     /// the WebRTC pod replaces this with MLS application-
     /// message round-trip ids once 3a-pod-followup lands.
@@ -522,6 +533,25 @@ public final class CallUiState: ObservableObject {
         self.localVideoTrack = track
     }
 
+    /// G3-1-remote-video — push the remote participant's video
+    /// track. Same `bind(to:)`-driven / testbed-explicit dual
+    /// use as [`setLocalVideoTrack`].
+    public func setRemoteVideoTrack(_ track: RTCVideoTrack?) {
+        self.remoteVideoTrack = track
+    }
+
+    /// The id of the only remote participant, when exactly one
+    /// exists (the 1×1 case). `nil` when alone or in an N-way
+    /// call. `CallScreen` gates remote-video rendering on
+    /// `participant.id == soleRemoteParticipantId` so the
+    /// single `remoteVideoTrack` handle is never painted onto
+    /// the wrong tile in a group call (where per-participant
+    /// track mapping is the deferred follow-up).
+    public var soleRemoteParticipantId: String? {
+        let remotes = participants.filter { !$0.isLocal }
+        return remotes.count == 1 ? remotes.first?.id : nil
+    }
+
     public func endCall() {
         self.phase = .ended(endedAt: Date())
     }
@@ -544,9 +574,10 @@ public final class CallUiState: ObservableObject {
         self.chatMessages = []
         self.composeText = ""
         self.chatUnreadCount = 0
-        // Live media — drop the local track so the next call
+        // Live media — drop both tracks so the next call
         // re-binds against a fresh CallSession.
         self.localVideoTrack = nil
+        self.remoteVideoTrack = nil
     }
 
     /// Seed mock state — same shape as the web `seedMockParticipants`.
@@ -600,31 +631,40 @@ public final class CallUiState: ObservableObject {
 extension CallUiState {
 
     /// Attach a live `CallSession` so the UI mirrors its
-    /// `@Published` outputs. Currently bridges the local video
-    /// track; the audio / participant / e2ee / connection-
-    /// detail fields stay on the mock path until the
+    /// `@Published` outputs. Bridges the local **and** remote
+    /// video tracks (G3-1-video-ui-screen + G3-1-remote-video);
+    /// the audio / participant / e2ee / connection-detail
+    /// fields stay on the mock path until the
     /// full-session-integration sub-sprint lands (the screen
     /// today reads from `seedMockState()`).
     ///
-    /// The returned `AnyCancellable` owns the Combine
-    /// subscription — store it in the SwiftUI host (typically
+    /// The returned array of `AnyCancellable` owns the Combine
+    /// subscriptions — store it in the SwiftUI host (typically
     /// a `@State` on the screen that constructs the session)
     /// and drop it when the call ends. Dropping the
-    /// cancellable does NOT clear the existing track from
+    /// cancellables does NOT clear the existing tracks from
     /// state — call `reset()` for that, or wait for the
     /// session itself to publish `nil` on teardown
     /// (`CallSession.teardownMediaPipeline()` does this).
     ///
-    /// Safe to call from any actor — the Combine subscription
-    /// receives on the main queue and re-enters the
-    /// `@MainActor`-isolated setter.
-    public func bind(to session: CallSession) -> AnyCancellable {
-        return session.$localVideoTrack
+    /// Safe to call from any actor — the Combine subscriptions
+    /// receive on the main queue and re-enter the
+    /// `@MainActor`-isolated setters.
+    public func bind(to session: CallSession) -> [AnyCancellable] {
+        let local = session.$localVideoTrack
             .receive(on: DispatchQueue.main)
             .sink { [weak self] track in
                 MainActor.assumeIsolated {
                     self?.setLocalVideoTrack(track)
                 }
             }
+        let remote = session.$remoteVideoTrack
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] track in
+                MainActor.assumeIsolated {
+                    self?.setRemoteVideoTrack(track)
+                }
+            }
+        return [local, remote]
     }
 }

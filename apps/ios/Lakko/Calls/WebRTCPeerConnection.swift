@@ -73,12 +73,26 @@ public final class WebRTCPeerConnection: NSObject {
         /// `WebCallState.connected`, `.disconnected` /
         /// `.failed` / `.closed` to call teardown.
         public let onConnectionState: (RTCPeerConnectionState) -> Void
+        /// G3-1-remote-video — emitted when a remote
+        /// `RTCVideoTrack` is added (`Optional.some`) or
+        /// removed (`nil`). `streamId` is the MSID of the
+        /// owning media stream — on a call routed through the
+        /// Lakko SFU this equals the originating peer id
+        /// (`negotiate_if_needed` sets the MSID stream group
+        /// to the source peer id), which a future N-way
+        /// sprint will use to map the track to a specific
+        /// participant. For the 1×1 direct-PeerConnection
+        /// path there is exactly one remote track and the
+        /// caller renders it for the sole remote participant.
+        public let onRemoteVideoTrack: (RTCVideoTrack?, _ streamId: String?) -> Void
         public init(
             onLocalCandidate: @escaping (String, Int32, String) -> Void,
-            onConnectionState: @escaping (RTCPeerConnectionState) -> Void
+            onConnectionState: @escaping (RTCPeerConnectionState) -> Void,
+            onRemoteVideoTrack: @escaping (RTCVideoTrack?, String?) -> Void = { _, _ in }
         ) {
             self.onLocalCandidate = onLocalCandidate
             self.onConnectionState = onConnectionState
+            self.onRemoteVideoTrack = onRemoteVideoTrack
         }
     }
 
@@ -594,6 +608,49 @@ extension WebRTCPeerConnection: RTCPeerConnectionDelegate {
         _ peerConnection: RTCPeerConnection,
         didOpen dataChannel: RTCDataChannel
     ) {}
+
+    /// G3-1-remote-video — Unified-Plan track-added callback.
+    /// Fires when the remote adds (or the SFU renegotiates in)
+    /// a media line we receive on. We surface only video
+    /// tracks to the UI here; the incoming audio track is
+    /// played out by the SDK's audio device automatically and
+    /// needs no UI handle. SFrame on the receive path is armed
+    /// separately via `armSFrameDecryptor(for:seed:)` from the
+    /// call's exporter-seed dispatch.
+    public nonisolated func peerConnection(
+        _ peerConnection: RTCPeerConnection,
+        didAdd rtpReceiver: RTCRtpReceiver,
+        streams mediaStreams: [RTCMediaStream]
+    ) {
+        guard let videoTrack = rtpReceiver.track as? RTCVideoTrack else {
+            return
+        }
+        // The MSID stream group id — on an SFU-routed call this
+        // is the originating peer id (see Delegate doc).
+        let streamId = mediaStreams.first?.streamId
+        Task { @MainActor [weak self] in
+            self?.delegate?.onRemoteVideoTrack(videoTrack, streamId)
+        }
+    }
+
+    /// G3-1-remote-video — Unified-Plan track-removed callback.
+    /// Clears the remote video handle so the UI drops back to
+    /// the avatar placeholder. We cannot cheaply tell from the
+    /// receiver alone whether the removed track was the video
+    /// one, so we signal `nil` unconditionally; the 1×1 path
+    /// has a single remote video track, and a future N-way
+    /// sprint that tracks per-stream handles will refine this.
+    public nonisolated func peerConnection(
+        _ peerConnection: RTCPeerConnection,
+        didRemove rtpReceiver: RTCRtpReceiver
+    ) {
+        guard rtpReceiver.track is RTCVideoTrack else {
+            return
+        }
+        Task { @MainActor [weak self] in
+            self?.delegate?.onRemoteVideoTrack(nil, nil)
+        }
+    }
 
     public nonisolated func peerConnection(
         _ peerConnection: RTCPeerConnection,

@@ -104,6 +104,22 @@ public class WebRtcPeerConnection(
          * `FAILED` / `CLOSED` to call teardown.
          */
         public val onConnectionState: (PeerConnection.PeerConnectionState) -> Unit,
+        /**
+         * G3-2-remote-video — emitted when a remote
+         * `VideoTrack` is added (non-null) via libwebrtc's
+         * Unified-Plan `onAddTrack`. `streamId` is the MSID
+         * of the owning media stream — on a call routed
+         * through the Lakko SFU this equals the originating
+         * peer id (`negotiate_if_needed` sets the MSID stream
+         * group to the source peer id), which a future N-way
+         * sprint will use to map the track to a specific
+         * participant leaf. On the 1×1 direct-PeerConnection
+         * path there is exactly one remote track and the
+         * caller renders it for the sole remote participant.
+         * Defaulted to a no-op so existing test constructions
+         * stay source-compatible.
+         */
+        public val onRemoteVideoTrack: (track: VideoTrack?, streamId: String?) -> Unit = { _, _ -> },
     )
 
     private var delegate: Delegate? = null
@@ -173,7 +189,19 @@ public class WebRtcPeerConnection(
         override fun onRemoveStream(stream: MediaStream?) {}
         override fun onDataChannel(channel: DataChannel?) {}
         override fun onRenegotiationNeeded() {}
-        override fun onAddTrack(receiver: RtpReceiver?, streams: Array<out MediaStream>?) {}
+        override fun onAddTrack(receiver: RtpReceiver?, streams: Array<out MediaStream>?) {
+            // G3-2-remote-video — surface only video tracks to
+            // the UI. The incoming audio track is played out by
+            // libwebrtc's audio device automatically and needs
+            // no UI handle. SFrame on the receive path is armed
+            // separately via [armSFrameDecryptors] from the
+            // call's exporter-seed dispatch.
+            val track = receiver?.track() as? VideoTrack ?: return
+            // MSID stream group id — on an SFU-routed call this
+            // is the originating peer id (see Delegate doc).
+            val streamId = streams?.firstOrNull()?.id
+            delegate?.onRemoteVideoTrack(track, streamId)
+        }
         override fun onConnectionChange(state: PeerConnection.PeerConnectionState?) {
             val s = state ?: return
             delegate?.onConnectionState(s)

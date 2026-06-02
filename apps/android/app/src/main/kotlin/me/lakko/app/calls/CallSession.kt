@@ -115,6 +115,23 @@ public class CallSession(
         mutableLocalVideoTrack.asStateFlow()
 
     /**
+     * G3-2-remote-video — the remote participant's incoming
+     * video track, surfaced from `WebRtcPeerConnection`'s
+     * `onRemoteVideoTrack` delegate callback. `null` until
+     * the remote adds a camera track (or after the call
+     * ends). On the 1×1 direct-PeerConnection path there is
+     * exactly one remote, so this single handle is
+     * unambiguous; the N-way SFU path (per-participant
+     * MSID→leaf mapping) is a deferred follow-up that will
+     * replace this with a `Map<participantId, VideoTrack>`
+     * keyed on the stream id the SFU stamps.
+     */
+    private val mutableRemoteVideoTrack: MutableStateFlow<org.webrtc.VideoTrack?> =
+        MutableStateFlow(null)
+    public val remoteVideoTrack: StateFlow<org.webrtc.VideoTrack?> =
+        mutableRemoteVideoTrack.asStateFlow()
+
+    /**
      * G3-sframe-native N-6 — per-call MLS exporter seed and
      * local participant leaf index. Both must be set BEFORE
      * [dial] / [acceptCall]; missing seed at attach time
@@ -449,6 +466,14 @@ public class CallSession(
                 onConnectionState = { newState ->
                     scope.launch { handleConnectionState(newState) }
                 },
+                onRemoteVideoTrack = { track, _ ->
+                    // 1×1: a single remote video track. The
+                    // stream id is ignored here; the N-way SFU
+                    // path will key on it to map the track to a
+                    // specific participant leaf. Hop to the main
+                    // dispatcher before touching the StateFlow.
+                    scope.launch { mutableRemoteVideoTrack.value = track }
+                },
             )
         )
     }
@@ -557,6 +582,10 @@ public class CallSession(
         }
         localCameraCapture = null
         mutableLocalVideoTrack.value = null
+        // G3-2-remote-video — drop the remote handle so the
+        // gallery tile reverts to the avatar placeholder on
+        // both end paths.
+        mutableRemoteVideoTrack.value = null
     }
 
     /**
