@@ -50,16 +50,14 @@ LakkoFrameEncryptor* LakkoFrameEncryptor::Create(const uint8_t* seed,
     return nullptr;
   }
 
-  return new LakkoFrameEncryptor(call_key, participant_key, local_leaf);
+  return new LakkoFrameEncryptor(call_key, participant_key);
 }
 
 LakkoFrameEncryptor::LakkoFrameEncryptor(
     lakko_sframe_call_key_t* call_key,
-    lakko_sframe_participant_key_t* participant_key,
-    uint32_t local_leaf)
+    lakko_sframe_participant_key_t* participant_key)
     : call_key_(call_key),
-      participant_key_(participant_key),
-      local_leaf_(local_leaf) {}
+      participant_key_(participant_key) {}
 
 LakkoFrameEncryptor::~LakkoFrameEncryptor() {
   // Free in reverse order of construction. The free routines
@@ -72,7 +70,7 @@ LakkoFrameEncryptor::~LakkoFrameEncryptor() {
 
 int LakkoFrameEncryptor::Encrypt(cricket::MediaType /*media_type*/,
                                  uint32_t /*ssrc*/,
-                                 rtc::ArrayView<const uint8_t> additional_data,
+                                 rtc::ArrayView<const uint8_t> /*additional_data*/,
                                  rtc::ArrayView<const uint8_t> frame,
                                  rtc::ArrayView<uint8_t> encrypted_frame,
                                  std::size_t* bytes_written) {
@@ -81,36 +79,26 @@ int LakkoFrameEncryptor::Encrypt(cricket::MediaType /*media_type*/,
   }
   *bytes_written = 0;
 
-  // 1. Seal the plaintext frame under the next per-participant
-  //    counter, with the RTP additional_data bound into the AAD.
-  uint32_t counter = 0;
-  uint8_t* ct_ptr = nullptr;
-  std::size_t ct_len = 0;
-  lakko_sframe_status_t seal_status = lakko_sframe_seal(
-      participant_key_,
-      additional_data.data(), additional_data.size(),
-      frame.data(), frame.size(),
-      &counter,
-      &ct_ptr, &ct_len);
-  if (seal_status != LAKKO_SFRAME_STATUS_T_OK) {
-    return -1;
-  }
-
-  // 2. Pack the SFrame wire header (kid=local_leaf, ctr=counter)
-  //    followed by the ciphertext. Two allocs per frame is
-  //    suboptimal; an inlined header+ct emit is a follow-up.
+  // Seal the plaintext into a complete SFrame wire frame
+  // (header || ciphertext) in one call, with the SFrame header
+  // (KID = local_leaf, CTR) bound as the AEAD AAD — per ADR-0013.
+  //
+  // The host RTP `additional_data` is intentionally NOT bound: that
+  // byte string is not reconstructible on the web
+  // `RTCRtpScriptTransform` side, so binding it would break
+  // web <-> native interop. The header authenticates the frame's
+  // routing (KID + CTR); media confidentiality + integrity come
+  // from the AEAD itself. `lakko_sframe_seal_framed` replaces the
+  // old `seal` + `wrap_frame` pair (and drops the second alloc).
   uint8_t* wire_ptr = nullptr;
   std::size_t wire_len = 0;
-  lakko_sframe_status_t wrap_status = lakko_sframe_wrap_frame(
-      local_leaf_, counter, ct_ptr, ct_len, &wire_ptr, &wire_len);
-  // We're done with the bare ciphertext regardless of whether
-  // wrapping succeeded.
-  lakko_sframe_buffer_free(ct_ptr, ct_len);
-  if (wrap_status != LAKKO_SFRAME_STATUS_T_OK) {
+  lakko_sframe_status_t status = lakko_sframe_seal_framed(
+      participant_key_, frame.data(), frame.size(), &wire_ptr, &wire_len);
+  if (status != LAKKO_SFRAME_STATUS_T_OK) {
     return -1;
   }
 
-  // 3. Copy into libwebrtc's output buffer.
+  // Copy into libwebrtc's output buffer.
   if (wire_len > encrypted_frame.size()) {
     // GetMaxCiphertextByteSize undercounted — bug in this file.
     lakko_sframe_buffer_free(wire_ptr, wire_len);
@@ -215,11 +203,13 @@ lakko_sframe_participant_key_t* LakkoFrameDecryptor::lookup_or_derive(
 webrtc::FrameDecryptorInterface::Result LakkoFrameDecryptor::Decrypt(
     cricket::MediaType /*media_type*/,
     const std::vector<uint32_t>& /*csrcs*/,
-    rtc::ArrayView<const uint8_t> additional_data,
+    rtc::ArrayView<const uint8_t> /*additional_data*/,
     rtc::ArrayView<const uint8_t> encrypted_frame,
     rtc::ArrayView<uint8_t> frame) {
-  // 1. Unwrap the SFrame wire header to extract sender_leaf +
-  //    counter + bare ciphertext.
+  // 1. Peek the SFrame header to resolve sender_leaf (KID) for key
+  //    selection. The bare ciphertext `unwrap_frame` also returns is
+  //    unused here — `open_framed` re-parses the full wire and binds
+  //    the on-wire header as the AEAD AAD (ADR-0013) — so we free it.
   uint32_t sender_leaf = 0;
   uint32_t counter = 0;
   uint8_t* ct_ptr = nullptr;
@@ -230,24 +220,26 @@ webrtc::FrameDecryptorInterface::Result LakkoFrameDecryptor::Decrypt(
   if (unwrap_status != LAKKO_SFRAME_STATUS_T_OK) {
     return Result(Status::kFailedToDecrypt, 0);
   }
+  lakko_sframe_buffer_free(ct_ptr, ct_len);
+  (void)counter;  // CTR is read again inside open_framed from the wire.
 
   // 2. Resolve the per-sender ParticipantKey (derive lazily).
   lakko_sframe_participant_key_t* participant_key =
       lookup_or_derive(sender_leaf);
   if (participant_key == nullptr) {
-    lakko_sframe_buffer_free(ct_ptr, ct_len);
     return Result(Status::kFailedToDecrypt, 0);
   }
 
-  // 3. Open the AEAD payload.
+  // 3. Open the full wire frame — the on-wire SFrame header is the
+  //    AEAD AAD (ADR-0013). The host `additional_data` is
+  //    intentionally NOT used (mirrors Encrypt; required for
+  //    web <-> native interop).
   uint8_t* pt_ptr = nullptr;
   std::size_t pt_len = 0;
-  lakko_sframe_status_t open_status = lakko_sframe_open(
+  lakko_sframe_status_t open_status = lakko_sframe_open_framed(
       participant_key,
-      additional_data.data(), additional_data.size(),
-      ct_ptr, ct_len, counter,
+      encrypted_frame.data(), encrypted_frame.size(),
       &pt_ptr, &pt_len);
-  lakko_sframe_buffer_free(ct_ptr, ct_len);
   if (open_status != LAKKO_SFRAME_STATUS_T_OK) {
     return Result(Status::kFailedToDecrypt, 0);
   }

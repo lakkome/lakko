@@ -97,8 +97,19 @@ void test_round_trip_single_sender() {
   std::printf("ok\n");
 }
 
-void test_aad_binding() {
-  std::printf("test_aad_binding ... ");
+// ADR-0013: the AEAD AAD is the SFrame wire header (KID + CTR), NOT
+// the host RTP `additional_data`. This test proves both halves of
+// that contract:
+//   (a) host `additional_data` is IGNORED — encrypt and decrypt with
+//       deliberately mismatched additional_data still round-trips.
+//       This is the property that lets a web RTCRtpScriptTransform
+//       frame decrypt verbatim on iOS/Android (and vice versa): the
+//       host RTP metadata is not reconstructible across platforms,
+//       so it cannot be part of the authenticated set.
+//   (b) the SFrame header IS bound — flipping a header byte makes the
+//       AEAD open fail (kFailedToDecrypt).
+void test_additional_data_ignored_header_is_aad() {
+  std::printf("test_additional_data_ignored_header_is_aad ... ");
 
   constexpr uint32_t kAliceLeaf = 7;
   auto* enc =
@@ -112,32 +123,57 @@ void test_aad_binding() {
   dec->AddRef();
 
   const std::vector<uint8_t> plaintext = {1, 2, 3, 4, 5};
-  const std::vector<uint8_t> aad_correct = {0x11, 0x22};
-  const std::vector<uint8_t> aad_tampered = {0x11, 0x23};
+  const std::vector<uint8_t> aad_enc = {0x11, 0x22};
+  const std::vector<uint8_t> aad_dec_mismatch = {0x99, 0x88, 0x77};
 
   std::vector<uint8_t> ciphertext(enc->GetMaxCiphertextByteSize(
       cricket::MEDIA_TYPE_VIDEO, plaintext.size()));
   std::size_t ct_written = 0;
   int rc = enc->Encrypt(cricket::MEDIA_TYPE_VIDEO,
                         /*ssrc=*/0x1234,
-                        rtc::MakeArrayView(aad_correct.data(), aad_correct.size()),
+                        rtc::MakeArrayView(aad_enc.data(), aad_enc.size()),
                         rtc::MakeArrayView(plaintext.data(), plaintext.size()),
                         rtc::MakeArrayView(ciphertext.data(), ciphertext.size()),
                         &ct_written);
   assert(rc == 0);
 
-  // Decrypt with the tampered AAD — must fail.
+  // (a) Decrypt with a DIFFERENT host additional_data — must SUCCEED,
+  //     because host additional_data is not part of the AAD.
   std::vector<uint8_t> recovered(dec->GetMaxPlaintextByteSize(
       cricket::MEDIA_TYPE_VIDEO, ct_written));
   auto result = dec->Decrypt(
       cricket::MEDIA_TYPE_VIDEO,
       std::vector<uint32_t>{},
-      rtc::MakeArrayView(aad_tampered.data(), aad_tampered.size()),
+      rtc::MakeArrayView(aad_dec_mismatch.data(), aad_dec_mismatch.size()),
       rtc::MakeArrayView(ciphertext.data(), ct_written),
       rtc::MakeArrayView(recovered.data(), recovered.size()));
-  assert(result.status ==
+  assert(result.status == webrtc::FrameDecryptorInterface::Status::kOk &&
+         "mismatched host additional_data must NOT fail decryption "
+         "(ADR-0013: header-as-AAD, not host AAD)");
+  assert(result.bytes_written == plaintext.size());
+  assert(std::memcmp(recovered.data(), plaintext.data(),
+                     plaintext.size()) == 0);
+
+  // (b) Flip the first header byte (the SFrame config octet — part of
+  //     the bound AAD) and decrypt — must fail. Either the header
+  //     decode rejects it or the AEAD tag check does; both surface as
+  //     kFailedToDecrypt.
+  std::vector<uint8_t> tampered_wire(ciphertext.begin(),
+                                     ciphertext.begin() +
+                                         static_cast<std::ptrdiff_t>(ct_written));
+  tampered_wire[0] ^= 0x01;
+  std::vector<uint8_t> recovered2(dec->GetMaxPlaintextByteSize(
+      cricket::MEDIA_TYPE_VIDEO, tampered_wire.size()));
+  auto result2 = dec->Decrypt(
+      cricket::MEDIA_TYPE_VIDEO,
+      std::vector<uint32_t>{},
+      rtc::MakeArrayView(aad_enc.data(), aad_enc.size()),
+      rtc::MakeArrayView(tampered_wire.data(), tampered_wire.size()),
+      rtc::MakeArrayView(recovered2.data(), recovered2.size()));
+  assert(result2.status ==
              webrtc::FrameDecryptorInterface::Status::kFailedToDecrypt &&
-         "AAD-tampered Decrypt unexpectedly returned kOk");
+         "header-tampered Decrypt unexpectedly returned kOk "
+         "(ADR-0013: header IS the bound AAD)");
 
   enc->Release();
   dec->Release();
@@ -520,7 +556,7 @@ void test_payload_size_extremes() {
 
 int main() {
   test_round_trip_single_sender();
-  test_aad_binding();
+  test_additional_data_ignored_header_is_aad();
   test_multi_sender_into_one_receiver();
   test_bad_seed_length();
   test_ciphertext_tamper();

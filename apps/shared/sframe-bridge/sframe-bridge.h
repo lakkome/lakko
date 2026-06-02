@@ -119,13 +119,14 @@ class LakkoFrameEncryptor : public webrtc::FrameEncryptorInterface {
 
  private:
   LakkoFrameEncryptor(lakko_sframe_call_key_t* call_key,
-                      lakko_sframe_participant_key_t* participant_key,
-                      uint32_t local_leaf);
+                      lakko_sframe_participant_key_t* participant_key);
 
   // Owned. Freed in the destructor via the matching `_free` symbol.
+  // The local leaf index is not stored separately — it is baked into
+  // `participant_key_` at derivation, and `seal_framed` re-emits it
+  // into the SFrame header (KID) internally (ADR-0013).
   lakko_sframe_call_key_t* call_key_;
   lakko_sframe_participant_key_t* participant_key_;
-  uint32_t local_leaf_;
 
   mutable std::atomic<int> refcount_{0};
 };
