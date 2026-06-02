@@ -1576,17 +1576,13 @@ integration) asserts:
    before the SFU drops the peer's registry entry.
    Test: `disconnect_propagates_peer_left` (integration).
 
-The signaling layer is now a properly verified contract.
+The signaling layer is a properly verified contract.
 The SFU's media-layer responsibilities — RTP track
-forwarding, simulcast layer selection per receiver,
-TWCC aggregation — arrive in S-3-B-routing-media. The
-**structural fanout** has landed (steps 1–5: media task,
-UDP bind, `MediaData` capture + cross-peer forwarding
-helper); the **deferred follow-up** is the
-TracksIn/TracksOut mapping that drives SDP renegotiation
-when a peer joins (so destination peers actually have a
-writer for the source `mid`) plus the synthetic str0m-
-client integration test under real ICE.
+forwarding and the `TracksIn`/`TracksOut` mapping that
+drives SDP renegotiation when a peer joins — have now
+**also** landed (S-3-B-routing-media steps 1–5 +
+S-3-B-tracks steps 1–3b). Simulcast layer selection per
+receiver and TWCC aggregation remain deferred follow-ups.
 
 **SFrame-passthrough property the existing fanout
 preserves.** `services/sfu/src/media.rs::fanout_media_data`
@@ -1611,11 +1607,25 @@ Unit-tested in `media::tests::{forward_to_peer_without_writer_returns_no_writer,
 fanout_with_single_peer_is_noop, fanout_skips_origin_peer,
 fanout_empty_pending_is_noop}`.
 
-When the deferred TracksIn/TracksOut sub-sprint lands,
-the synthetic-client integration test that drives two
-str0m peers through full DTLS+ICE against the SFU and
-asserts a payload sent by A surfaces verbatim at B will
-close the audit loop on this property.
+**The audit loop on this property is now closed on the
+integration-test side.**
+`services/sfu/tests/synthetic_client_e2e.rs::two_clients_cross_fanout_forwards_media_verbatim`
+(S-3-B-tracks step 3b) drives two real `str0m::Rtc` peers
+through full DTLS + ICE against the production
+`spawn_media_task`: a publisher A and a subscriber B both
+reach `Event::Connected`; the SFU-initiated renegotiation
+(`drive_renegotiations` → `ServerFrame::SdpOffer`) opens
+B's downstream track; A then writes a distinctive 80-byte
+payload via `Rtc::writer(mid).write(...)`, and the test
+asserts the **exact same bytes** surface as an
+`Event::MediaData` at B. A pass proves the SFU received
+A's RTP, resolved B's downstream mid via the `tracks_out`
+map, and forwarded the opaque payload verbatim — without
+inspecting, parsing, or peeking the SFrame header. The
+remaining deferred work (3-plus-peer fanout fairness,
+simulcast-layer selection) extends this harness by adding
+peers / tracks; it does not change the verbatim-forwarding
+property this test pins.
 
 ## Channel-broadcast invariants (Phase 4)
 
