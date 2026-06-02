@@ -2604,6 +2604,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "lakko-sfu-proto"
+version = "0.0.0"
+dependencies = [
+ "base64 0.22.1",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "lakko-shamir"
 version = "0.0.0"
 dependencies = [
@@ -2785,6 +2795,7 @@ dependencies = [
  "dotenvy",
  "futures",
  "lakko-call-jwt",
+ "lakko-sfu-proto",
  "metrics",
  "metrics-exporter-prometheus",
  "reqwest",

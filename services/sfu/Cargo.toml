@@ -55,6 +55,11 @@ metrics-exporter-prometheus = { version = "0.16", default-features = false }
 # drift between minter and verifier. See ADR-0011.
 lakko-call-jwt.workspace = true
 
+# SFU signaling wire frames — the SAME crate the client FFI links
+# (lakko-ffi-uniffi / lakko-ffi-wasm), so the wire format cannot
+# drift between server and clients. `crate::protocol` re-exports it.
+lakko-sfu-proto.workspace = true
+
 # JWKS HTTPS fetch — pulled at boot + on a refresh interval
 # from auth.lakko.me. `rustls-tls` keeps the openssl dep out
 # of the build (we already standardised on rustls workspace-
