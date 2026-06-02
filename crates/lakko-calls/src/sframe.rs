@@ -45,6 +45,7 @@ use lakko_mls::identity::Identity;
 use lakko_mls::Group;
 
 use crate::error::{Error, Result};
+use crate::header::SframeHeader;
 
 /// MLS exporter label for SFrame call keying. Pinned ASCII;
 /// any change is a breaking protocol change to every
@@ -257,6 +258,92 @@ impl ParticipantKey {
         let key = AeadKey::new(*self.key.as_bytes());
         aead::open(Algorithm::ChaCha20Poly1305, &key, &nonce, aad, ciphertext)
             .map_err(|e| Error::Crypto(format!("aead open: {e:?}")))
+    }
+
+    /// Seal `plaintext` into a complete RFC 9605 wire frame:
+    /// `SframeHeader(kid, ctr) || ciphertext`, with the
+    /// **encoded header bytes bound as the AEAD AAD**.
+    ///
+    /// This is the cross-platform contract from
+    /// [ADR-0013](../../../docs/adr/0013-sframe-cross-platform-aad.md):
+    /// the AAD is the SFrame header (KID = sender leaf, CTR =
+    /// this frame's counter) and nothing else — no host RTP
+    /// `additional_data`. Because the header is computed from
+    /// `(kid, ctr)` alone, a web (`RTCRtpScriptTransform`) and a
+    /// native (`FrameEncryptorInterface`) client feed identical
+    /// AAD into the same AEAD and interop byte-for-byte.
+    ///
+    /// The counter the header carries is the same one [`Self::seal`]
+    /// is about to consume, so the AAD and the on-wire header match
+    /// exactly. [`Self::open_framed`] is the inverse.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::CounterExhausted`] when the 32-bit counter would
+    ///   roll over (checked before any state mutation, so the key
+    ///   is left usable for a re-keyed retry).
+    /// - [`Error::Crypto`] on AEAD failure (practically unreachable).
+    pub fn seal_framed(&mut self, plaintext: &[u8]) -> Result<Vec<u8>> {
+        // Peek the counter `seal` will use (it pre-increments) so
+        // the header we bind as AAD matches the one we ship. Guard
+        // exhaustion here too, so we never build a header for a
+        // counter `seal` will then refuse.
+        if self.counter == MAX_FRAME_COUNTER {
+            return Err(Error::CounterExhausted);
+        }
+        let next_ctr = self.counter + 1;
+        let mut wire = SframeHeader {
+            kid: u64::from(self.sender_leaf),
+            ctr: u64::from(next_ctr),
+        }
+        .encode();
+        let (frame_counter, ciphertext) = self.seal(&wire, plaintext)?;
+        debug_assert_eq!(
+            frame_counter, next_ctr,
+            "seal consumed a different counter than the header bound"
+        );
+        wire.extend_from_slice(&ciphertext);
+        Ok(wire)
+    }
+
+    /// Open a complete RFC 9605 wire frame produced by
+    /// [`Self::seal_framed`] (or any conformant peer on the
+    /// [ADR-0013](../../../docs/adr/0013-sframe-cross-platform-aad.md)
+    /// contract): parse the header, bind the **exact on-wire header
+    /// bytes** as the AEAD AAD, and AEAD-open the trailing
+    /// ciphertext.
+    ///
+    /// The AAD is the literal header slice from the wire, NOT a
+    /// re-encode of the parsed `(kid, ctr)` — [`SframeHeader::decode`]
+    /// accepts non-minimal encodings, so re-encoding could differ
+    /// from what the sender authenticated.
+    ///
+    /// This key must be the one derived for the frame's sender leaf
+    /// (the caller selects it by the header's KID before calling);
+    /// a KID that doesn't match this key's `sender_leaf` is rejected
+    /// up front.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::Crypto`] on a malformed header, a KID that doesn't
+    ///   match this key's leaf, a counter that exceeds the 32-bit
+    ///   keying range, or an AEAD authentication failure (wrong key /
+    ///   wrong AAD / tampered header or ciphertext / wrong counter).
+    pub fn open_framed(&self, wire: &[u8]) -> Result<Vec<u8>> {
+        let (header, consumed) = SframeHeader::decode(wire)
+            .map_err(|e| Error::Crypto(format!("sframe header decode: {e}")))?;
+        if header.kid != u64::from(self.sender_leaf) {
+            return Err(Error::Crypto(format!(
+                "sframe header kid {} does not match participant leaf {}",
+                header.kid, self.sender_leaf
+            )));
+        }
+        let frame_counter = u32::try_from(header.ctr)
+            .map_err(|_| Error::Crypto("sframe counter exceeds 32-bit keying range".into()))?;
+        // AAD = the literal header bytes the sender authenticated.
+        let aad = &wire[..consumed];
+        let ciphertext = &wire[consumed..];
+        self.open(aad, ciphertext, frame_counter)
     }
 
     /// Test-only — force the internal counter to a given
@@ -491,5 +578,112 @@ mod tests {
             }
             assert_eq!(p.counter(), u32::MAX, "counter must not wrap");
         }
+    }
+
+    // -- ADR-0013: seal_framed / open_framed (header-as-AAD) -------------
+
+    #[test]
+    fn seal_framed_round_trips_through_open_framed() {
+        let key = CallKey::from_seed([0x13; CALL_KEY_LEN]);
+        let mut sender = key.participant_key(5).unwrap();
+        // Receiver re-derives the SENDER's key by the same leaf —
+        // exactly the cross-participant open path.
+        let receiver = key.participant_key(5).unwrap();
+        let pt = b"e2ee media frame";
+        let wire = sender.seal_framed(pt).expect("seal_framed");
+        let opened = receiver.open_framed(&wire).expect("open_framed");
+        assert_eq!(opened.as_slice(), pt);
+    }
+
+    #[test]
+    fn seal_framed_wire_starts_with_the_canonical_header() {
+        let key = CallKey::from_seed([0x13; CALL_KEY_LEN]);
+        let mut sender = key.participant_key(5).unwrap();
+        let wire = sender.seal_framed(b"x").expect("seal_framed");
+        // First frame → counter 1; header decodes to (kid=5, ctr=1)
+        // and is the minimal canonical encoding.
+        let (header, consumed) = SframeHeader::decode(&wire).expect("decode");
+        assert_eq!(header.kid, 5);
+        assert_eq!(header.ctr, 1);
+        assert_eq!(
+            &wire[..consumed],
+            SframeHeader { kid: 5, ctr: 1 }.encode().as_slice()
+        );
+    }
+
+    #[test]
+    fn seal_framed_counters_advance_monotonically() {
+        let key = CallKey::from_seed([0x13; CALL_KEY_LEN]);
+        let mut sender = key.participant_key(0).unwrap();
+        let receiver = key.participant_key(0).unwrap();
+        for expected_ctr in 1..=4u64 {
+            let wire = sender.seal_framed(b"frame").expect("seal_framed");
+            let (header, _) = SframeHeader::decode(&wire).expect("decode");
+            assert_eq!(header.ctr, expected_ctr);
+            // A fresh receiver opens any frame by its header counter.
+            assert_eq!(receiver.open_framed(&wire).expect("open").as_slice(), b"frame");
+        }
+    }
+
+    #[test]
+    fn open_framed_rejects_wrong_leaf_key() {
+        let key = CallKey::from_seed([0x13; CALL_KEY_LEN]);
+        let mut sender = key.participant_key(5).unwrap();
+        let wire = sender.seal_framed(b"frame").expect("seal_framed");
+        // A key derived for a DIFFERENT leaf must refuse — the kid
+        // guard fires before any AEAD work.
+        let wrong = key.participant_key(6).unwrap();
+        match wrong.open_framed(&wire) {
+            Err(Error::Crypto(msg)) => assert!(msg.contains("kid"), "got {msg}"),
+            other => panic!("expected kid-mismatch Crypto error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn open_framed_rejects_tampered_header() {
+        let key = CallKey::from_seed([0x13; CALL_KEY_LEN]);
+        let mut sender = key.participant_key(0).unwrap();
+        let receiver = key.participant_key(0).unwrap();
+        let mut wire = sender.seal_framed(b"frame").expect("seal_framed");
+        // Flip the counter byte in the header (kid=0,ctr=1 → header
+        // is [0x00, 0x01]; bump ctr to 2). The AEAD AAD no longer
+        // matches what was sealed AND the nonce changes → open fails.
+        wire[1] = wire[1].wrapping_add(1);
+        assert!(receiver.open_framed(&wire).is_err());
+    }
+
+    #[test]
+    fn open_framed_rejects_tampered_ciphertext() {
+        let key = CallKey::from_seed([0x13; CALL_KEY_LEN]);
+        let mut sender = key.participant_key(0).unwrap();
+        let receiver = key.participant_key(0).unwrap();
+        let mut wire = sender.seal_framed(b"frame").expect("seal_framed");
+        // Flip the last ciphertext byte (inside the AEAD tag region).
+        let last = wire.len() - 1;
+        wire[last] ^= 0x01;
+        assert!(receiver.open_framed(&wire).is_err());
+    }
+
+    #[test]
+    fn open_framed_rejects_truncated_wire() {
+        let key = CallKey::from_seed([0x13; CALL_KEY_LEN]);
+        let receiver = key.participant_key(0).unwrap();
+        // Header declares LEN=3 (4 counter bytes) with none present.
+        match receiver.open_framed(&[0x30]) {
+            Err(Error::Crypto(msg)) => assert!(msg.contains("header decode"), "got {msg}"),
+            other => panic!("expected header-decode Crypto error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn seal_framed_honours_counter_exhaustion() {
+        let key = CallKey::from_seed([0x13; CALL_KEY_LEN]);
+        let mut p = key.participant_key(0).unwrap();
+        p.set_counter_for_test(u32::MAX);
+        match p.seal_framed(b"junk") {
+            Err(Error::CounterExhausted) => {},
+            other => panic!("expected CounterExhausted, got {other:?}"),
+        }
+        assert_eq!(p.counter(), u32::MAX, "counter must not advance on exhaustion");
     }
 }
