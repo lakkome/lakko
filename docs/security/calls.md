@@ -68,6 +68,26 @@ asserts byte equality of `session_a.call_key()` and
 `session_b.call_key()` after both sides build independent
 `GroupCallSession`s from their own `Group` handles.
 
+**Client wiring (G3-{1,2}-call-key, Jun 2026).** The mobile
+clients now derive this seed in the chat-call path. iOS
+`ChatRepository.deriveCallKey(groupIdHex:callId:)` and the
+Android `ChatRepository.deriveCallKey` both call
+`Group.export_secret(identity, "lakko/call/v1", callId, 32)`
++ `Group.own_leaf_index()` on the live MLS group handle the
+repository owns, and `ChatViewModel` arms
+`CallSession.setCallKey(seed, localLeaf)` **before** the
+session dials or accepts (covering the outgoing + incoming
+paths). A failed derivation (not bootstrapped / group
+missing / epoch skew) leaves the seed unset, so
+`attachSFrame` refuses the call per security invariant #4 —
+the fail-closed path. Before this wiring `setCallKey` was
+never called from the app, so every chat-initiated call
+refused; the keying plumbing was the missing link, not a
+violation. The live two-device seed-match is asserted by
+construction (both derive from the same exporter label +
+context + epoch); an on-device cross-platform call test is
+a deferred follow-up.
+
 ### C-2: Cross-party seal/open works end-to-end through the MLS exporter
 
 Stricter than C-1: not only do the seeds agree, but the

@@ -165,12 +165,30 @@ public final class ChatViewModel: ObservableObject {
         // owned by `ChatRepository`); the publish goes
         // straight through the repository's `publishGroup`
         // path via a thin helper.
-        return CallSession(callId: callId) { [weak self] bytes in
+        let session = CallSession(callId: callId) { [weak self] bytes in
             guard let self = self else { return }
             Task { @MainActor in
                 await self.publishCallSignaling(bytes)
             }
         }
+        // G3-1-call-key — derive the per-call SFrame seed from
+        // the chat group's MLS exporter and arm the session
+        // BEFORE it dials / accepts. Both directions go through
+        // `makeSession`, so this single call covers the outgoing
+        // (`startCall`) and the incoming (`handleIncomingCallSignaling`)
+        // paths. Without the seed, `attachSFrame` refuses the
+        // call per security invariant #4 (no non-E2EE fallback);
+        // a failed derivation leaves the seed unset, which is the
+        // correct fail-closed outcome (the call simply refuses).
+        if let key = repository.deriveCallKey(groupIdHex: groupIdHex, callId: callId) {
+            session.setCallKey(seed: key.seed, localLeaf: key.localLeaf)
+        } else {
+            NSLog(
+                "makeSession: call-key derivation failed — " +
+                "call will refuse per security invariant #4"
+            )
+        }
+        return session
     }
 
     @MainActor

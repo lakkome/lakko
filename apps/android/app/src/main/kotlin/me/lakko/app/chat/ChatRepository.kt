@@ -387,6 +387,60 @@ public class ChatRepository(
      * and the timeline append — call signaling rides this
      * channel out-of-band.
      */
+    /** G3-2-call-key — material for arming a call's SFrame
+     *  encryptor: the per-call seed + this member's leaf index. */
+    public class CallKeyMaterial(
+        public val seed: ByteArray,
+        public val localLeaf: Int,
+    )
+
+    /**
+     * G3-2-call-key — derive the per-call SFrame seed + local
+     * leaf index for a call inside [groupIdHex].
+     *
+     * The seed is the MLS exporter output
+     * `export_secret(label = "lakko/call/v1", context = callId,
+     * length = 32)` per audit-pack invariant C-1 — a
+     * deterministic function of the group's current epoch
+     * secret, so both the offerer and the answerer (same group,
+     * same `callId`, same epoch) derive **identical** seed bytes;
+     * the per-sender SFrame key then forks on each member's leaf
+     * index. Returns `null` (the call must refuse per security
+     * invariant #4 — never fall back to non-E2EE) when the
+     * repository is not bootstrapped, the group handle is
+     * missing, or the exporter call fails (e.g. epoch skew).
+     */
+    public suspend fun deriveCallKey(
+        groupIdHex: String,
+        callId: ByteArray,
+    ): CallKeyMaterial? {
+        val identity = canonicalIdentity.get() ?: run {
+            android.util.Log.w("ChatRepository", "deriveCallKey: not bootstrapped")
+            return null
+        }
+        return groupsLock.withLock {
+            val record = groups[groupIdHex]
+            if (record == null) {
+                android.util.Log.w("ChatRepository", "deriveCallKey: no group $groupIdHex")
+                null
+            } else {
+                try {
+                    val seed = record.group.exportSecret(
+                        identity,
+                        "lakko/call/v1",
+                        callId,
+                        32u,
+                    )
+                    val leaf = record.group.ownLeafIndex().toInt()
+                    CallKeyMaterial(seed, leaf)
+                } catch (cause: Throwable) {
+                    android.util.Log.w("ChatRepository", "deriveCallKey: exporter failed", cause)
+                    null
+                }
+            }
+        }
+    }
+
     public suspend fun publishApplicationMessage(
         groupIdHex: String,
         plaintextBytes: ByteArray,

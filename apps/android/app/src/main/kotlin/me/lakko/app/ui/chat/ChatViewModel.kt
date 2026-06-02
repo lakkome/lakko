@@ -92,9 +92,35 @@ public class ChatViewModel(
     /** Tap-to-call from the chat header. */
     public fun startCall(audio: Boolean = true, video: Boolean = false) {
         if (mutableActiveCall.value != null) return
-        val session = makeSession(CallSession.mintCallId())
+        val callId = CallSession.mintCallId()
+        val session = makeSession(callId)
         mutableActiveCall.value = session
-        session.dial(audio = audio, video = video)
+        // G3-2-call-key — arm the SFrame seed from the MLS
+        // exporter BEFORE dialing (dial arms SFrame in
+        // completeDial; without the key it refuses per
+        // invariant #4). The session sits Idle — and the call
+        // screen stays unpresented — for the brief derivation.
+        viewModelScope.launch {
+            armCallKey(session, callId)
+            session.dial(audio = audio, video = video)
+        }
+    }
+
+    /** G3-2-call-key — derive + set the per-call SFrame seed
+     *  from the chat group's MLS exporter. Shared by the
+     *  outgoing + incoming paths. A failed derivation leaves
+     *  the seed unset, which is the correct fail-closed outcome
+     *  (the call refuses per security invariant #4). */
+    private suspend fun armCallKey(session: CallSession, callId: ByteArray) {
+        val key = repo.deriveCallKey(groupIdHex = groupIdHex, callId = callId)
+        if (key != null) {
+            session.setCallKey(key.seed, key.localLeaf)
+        } else {
+            android.util.Log.w(
+                "ChatViewModel",
+                "call-key derivation failed — call will refuse per invariant #4",
+            )
+        }
     }
 
     public fun acceptIncomingCall() {
@@ -137,7 +163,7 @@ public class ChatViewModel(
         }
     }
 
-    private fun handleIncomingCallSignaling(payloadBytes: ByteArray) {
+    private suspend fun handleIncomingCallSignaling(payloadBytes: ByteArray) {
         val parsed: FfiCallSignalingBody = try {
             parseCallSignalingBytes(payloadBytes)
         } catch (cause: Throwable) {
@@ -150,6 +176,10 @@ public class ChatViewModel(
             if (parsed is FfiCallSignalingBody.Offer) {
                 val session = makeSession(bodyCallId)
                 mutableActiveCall.value = session
+                // G3-2-call-key — arm the SFrame seed now, while
+                // the call is ringing, so it is ready before the
+                // user taps Accept (acceptCall arms SFrame).
+                armCallKey(session, bodyCallId)
                 session.applyIncomingSignaling(parsed)
             }
             return

@@ -368,6 +368,50 @@ public final class ChatRepository: ObservableObject {
     /// when at least one attachment is present (attachment-only
     /// message). Empty-and-empty is rejected at the call site
     /// upstream — the view model and screen layer enforce that.
+    /// G3-1-call-key — derive the per-call SFrame seed + the
+    /// local leaf index for a call inside `groupIdHex`.
+    ///
+    /// The seed is the MLS exporter output
+    /// `export_secret(label = "lakko/call/v1", context = call_id,
+    /// length = 32)` per audit-pack invariant C-1 — a
+    /// deterministic function of the group's current epoch
+    /// secret, so both the offerer and the answerer (same group,
+    /// same `callId`, same epoch) derive **identical** seed
+    /// bytes; the per-sender SFrame key then forks on each
+    /// member's leaf index. Returns `nil` (call must refuse per
+    /// security invariant #4 — never fall back to non-E2EE) when
+    /// the repository is not bootstrapped, the group handle is
+    /// missing, or the exporter call fails (e.g. epoch skew).
+    ///
+    /// The derivation lives here, in the layer that owns the
+    /// MLS `Group` + `Identity`, rather than in the view model.
+    public func deriveCallKey(
+        groupIdHex: String,
+        callId: Data
+    ) -> (seed: Data, localLeaf: UInt32)? {
+        guard let identity = canonicalIdentity else {
+            NSLog("deriveCallKey: ChatRepository not bootstrapped")
+            return nil
+        }
+        guard let record = groups[groupIdHex] else {
+            NSLog("deriveCallKey: no group handle for %@", groupIdHex)
+            return nil
+        }
+        do {
+            let seed = try record.group.exportSecret(
+                identity: identity,
+                label: "lakko/call/v1",
+                context: callId,
+                length: 32
+            )
+            let leaf = try record.group.ownLeafIndex()
+            return (seed, leaf)
+        } catch {
+            NSLog("deriveCallKey: exporter failed: %@", String(describing: error))
+            return nil
+        }
+    }
+
     public func sendMessage(
         groupIdHex: String,
         plaintext: String,
