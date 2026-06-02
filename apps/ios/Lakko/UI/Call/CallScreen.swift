@@ -431,6 +431,12 @@ private struct ControlsBar: View {
     /// `session.hangUp()` when a real session drives the
     /// screen; falls back to `state.endCall()` (mock path).
     let onEndCall: () -> Void
+    /// G3-1-call-controls — mic / camera toggles. Route to the
+    /// real `CallSession` (driving `RTCAudio/VideoTrack.isEnabled`)
+    /// when a session drives the screen; mock-state fallback
+    /// otherwise. The argument is the *desired* enabled state.
+    let onSetMic: (Bool) -> Void
+    let onSetCamera: (Bool) -> Void
 
     private var local: CallUiState.Participant? {
         state.participants.first(where: { $0.isLocal })
@@ -442,13 +448,13 @@ private struct ControlsBar: View {
                 label: local?.micOn == true ? "Mute microphone" : "Unmute microphone",
                 systemImage: local?.micOn == true ? "mic.fill" : "mic.slash.fill",
                 active: local?.micOn == false,
-                onTap: { state.setMic(!(local?.micOn ?? true)) }
+                onTap: { onSetMic(!(local?.micOn ?? true)) }
             )
             CircleButton(
                 label: local?.camOn == true ? "Stop camera" : "Start camera",
                 systemImage: local?.camOn == true ? "video.fill" : "video.slash.fill",
                 active: local?.camOn == false,
-                onTap: { state.setCamera(!(local?.camOn ?? true)) }
+                onTap: { onSetCamera(!(local?.camOn ?? true)) }
             )
             if state.hasMultipleCameras && local?.camOn == true {
                 CircleButton(
@@ -965,13 +971,30 @@ public struct CallScreen: View {
                     }
                 }
 
-                ControlsBar(state: state, onEndCall: {
-                    if let session {
-                        session.hangUp()
-                    } else {
-                        state.endCall()
+                ControlsBar(
+                    state: state,
+                    onEndCall: {
+                        if let session {
+                            session.hangUp()
+                        } else {
+                            state.endCall()
+                        }
+                    },
+                    onSetMic: { on in
+                        if let session {
+                            session.setMicrophoneEnabled(on)
+                        } else {
+                            state.setMic(on)
+                        }
+                    },
+                    onSetCamera: { on in
+                        if let session {
+                            session.setCameraEnabled(on)
+                        } else {
+                            state.setCamera(on)
+                        }
                     }
-                })
+                )
             }
 
             // Centre overlay when alone.

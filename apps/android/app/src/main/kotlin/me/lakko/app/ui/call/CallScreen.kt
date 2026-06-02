@@ -237,10 +237,13 @@ public fun CallScreen(
         else -> InCallView(
             state = state,
             onExit = onExit,
-            // G3-2-session-bind — end-call routes to the real
-            // session when one drives the screen; mock fallback
+            // G3-2-session-bind / G3-2-call-controls — route the
+            // end-call + mic/camera toggles to the real session
+            // when one drives the screen; mock-state fallback
             // otherwise.
             onEndCall = { if (session != null) session.hangUp() else state.endCall() },
+            onSetMic = { on -> if (session != null) session.setMicrophoneEnabled(on) else state.setMic(on) },
+            onSetCamera = { on -> if (session != null) session.setCameraEnabled(on) else state.setCamera(on) },
         )
     }
 }
@@ -455,6 +458,8 @@ private fun InCallView(
     state: CallUiState,
     onExit: () -> Unit,
     onEndCall: () -> Unit = { state.endCall() },
+    onSetMic: (Boolean) -> Unit = { state.setMic(it) },
+    onSetCamera: (Boolean) -> Unit = { state.setCamera(it) },
 ) {
     val participants by state.participants.collectAsState()
     val phase by state.phase.collectAsState()
@@ -557,7 +562,12 @@ private fun InCallView(
                 }
             }
 
-            ControlsBar(state, onEndCall = onEndCall)
+            ControlsBar(
+                state,
+                onEndCall = onEndCall,
+                onSetMic = onSetMic,
+                onSetCamera = onSetCamera,
+            )
         }
 
         // Top-centre phase banner.
@@ -1304,7 +1314,12 @@ private fun ParticipantTile(
 }
 
 @Composable
-private fun ControlsBar(state: CallUiState, onEndCall: () -> Unit = { state.endCall() }) {
+private fun ControlsBar(
+    state: CallUiState,
+    onEndCall: () -> Unit = { state.endCall() },
+    onSetMic: (Boolean) -> Unit = { state.setMic(it) },
+    onSetCamera: (Boolean) -> Unit = { state.setCamera(it) },
+) {
     val participants by state.participants.collectAsState()
     val hasMultipleCams by state.hasMultipleCameras.collectAsState()
     val local = participants.firstOrNull { it.isLocal }
@@ -1324,13 +1339,13 @@ private fun ControlsBar(state: CallUiState, onEndCall: () -> Unit = { state.endC
             icon = if (local?.micOn == true) Icons.Filled.Mic else Icons.Filled.MicOff,
             active = local?.micOn == false,
             description = if (local?.micOn == true) "Mute microphone" else "Unmute microphone",
-            onClick = { state.setMic(local?.micOn != true) },
+            onClick = { onSetMic(local?.micOn != true) },
         )
         CircleButton(
             icon = if (local?.camOn == true) Icons.Filled.Videocam else Icons.Filled.VideocamOff,
             active = local?.camOn == false,
             description = if (local?.camOn == true) "Stop camera" else "Start camera",
-            onClick = { state.setCamera(local?.camOn != true) },
+            onClick = { onSetCamera(local?.camOn != true) },
         )
         if (hasMultipleCams && local?.camOn == true) {
             CircleButton(

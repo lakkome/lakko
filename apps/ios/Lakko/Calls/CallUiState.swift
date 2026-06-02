@@ -701,7 +701,7 @@ extension CallUiState {
             var roster: [Participant] = [
                 Participant(
                     id: "local", displayName: "You", isLocal: true,
-                    micOn: true, camOn: session.localVideoTrack != nil,
+                    micOn: session.micEnabled, camOn: session.cameraEnabled,
                     handRaised: false, quality: .good, speaking: false,
                     screenSharing: false
                 ),
@@ -732,10 +732,16 @@ extension CallUiState {
         let remoteTrack = session.$remoteVideoTrack
             .receive(on: DispatchQueue.main)
             .sink { _ in onMain(rebuild) }
+        let mic = session.$micEnabled
+            .receive(on: DispatchQueue.main)
+            .sink { _ in onMain(rebuild) }
+        let camera = session.$cameraEnabled
+            .receive(on: DispatchQueue.main)
+            .sink { _ in onMain(rebuild) }
         // Seed once synchronously so the first frame is correct
         // before any publisher fires.
         rebuild()
-        return [state, localTrack, remoteTrack]
+        return [state, localTrack, remoteTrack, mic, camera]
     }
 
     /// Map the `CallSession` lifecycle onto the UI phase. The

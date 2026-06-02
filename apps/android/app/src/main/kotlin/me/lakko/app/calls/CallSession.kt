@@ -132,6 +132,19 @@ public class CallSession(
         mutableRemoteVideoTrack.asStateFlow()
 
     /**
+     * G3-2-call-controls — observable local mic / camera enabled
+     * state, so the in-call control buttons reflect (and drive)
+     * the real WebRTC track enabled flags. `micEnabled` starts
+     * true; `cameraEnabled` starts false and flips true when the
+     * camera pipeline arms on a video call. `CallUiState.driveFrom`
+     * maps these onto the local participant's `micOn` / `camOn`.
+     */
+    private val mutableMicEnabled: MutableStateFlow<Boolean> = MutableStateFlow(true)
+    public val micEnabled: StateFlow<Boolean> = mutableMicEnabled.asStateFlow()
+    private val mutableCameraEnabled: MutableStateFlow<Boolean> = MutableStateFlow(false)
+    public val cameraEnabled: StateFlow<Boolean> = mutableCameraEnabled.asStateFlow()
+
+    /**
      * G3-sframe-native N-6 — per-call MLS exporter seed and
      * local participant leaf index. Both must be set BEFORE
      * [dial] / [acceptCall]; missing seed at attach time
@@ -279,6 +292,22 @@ public class CallSession(
         val row = turnClient?.fetchOrNull()
         if (row != null) base.add(row)
         return base
+    }
+
+    /** G3-2-call-controls — mute / unmute the local mic. Drives
+     *  the real `AudioTrack.setEnabled` via the pod and publishes
+     *  the new state so the in-call control reflects it. */
+    public fun setMicrophoneEnabled(on: Boolean) {
+        rtc?.setMicrophoneEnabled(on)
+        mutableMicEnabled.value = on
+    }
+
+    /** G3-2-call-controls — start / stop the local camera track
+     *  (`VideoTrack.setEnabled` via the pod; no SDP
+     *  renegotiation) and publish the new state. */
+    public fun setCameraEnabled(on: Boolean) {
+        rtc?.setCameraEnabled(on)
+        mutableCameraEnabled.value = on
     }
 
     /** Outbound or active call teardown. */
@@ -617,6 +646,9 @@ public class CallSession(
         rtc.addLocalVideoTrack(source)
         this.localCameraCapture = capture
         mutableLocalVideoTrack.value = rtc.currentLocalVideoTrack()
+        // G3-2-call-controls — camera is now live; the in-call
+        // camera toggle reflects + drives this from here.
+        mutableCameraEnabled.value = true
         try {
             capture.start()
         } catch (cause: CameraVideoCapture.CaptureError) {
@@ -629,6 +661,7 @@ public class CallSession(
             capture.dispose()
             this.localCameraCapture = null
             mutableLocalVideoTrack.value = null
+            mutableCameraEnabled.value = false
         }
     }
 

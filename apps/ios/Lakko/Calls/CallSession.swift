@@ -96,6 +96,17 @@ public final class CallSession: ObservableObject {
     /// map keyed on the stream id the SFU stamps.
     @Published public private(set) var remoteVideoTrack: RTCVideoTrack?
 
+    /// G3-1-call-controls — observable local mic / camera
+    /// enabled state, so the in-call control buttons reflect
+    /// (and drive) the real WebRTC track `isEnabled` flags
+    /// rather than a mock toggle. `micEnabled` defaults true
+    /// (calls start unmuted); `cameraEnabled` defaults false
+    /// and flips true when the camera pipeline arms on a
+    /// video call. `CallUiState.driveFrom` maps these onto the
+    /// local participant's `micOn` / `camOn`.
+    @Published public private(set) var micEnabled: Bool = true
+    @Published public private(set) var cameraEnabled: Bool = false
+
     /// G3-sframe-native N-6 — per-call MLS exporter seed +
     /// local participant leaf index. Both must be set before
     /// `dial` / `acceptCall` so the SFrame attach can fire
@@ -246,6 +257,9 @@ public final class CallSession: ObservableObject {
         // to SwiftUI via the published `localVideoTrack` so
         // the call screen can render the preview overlay.
         self.localVideoTrack = rtc.currentLocalVideoTrack()
+        // G3-1-call-controls — camera is now live; the in-call
+        // camera toggle reflects + drives this from here.
+        self.cameraEnabled = true
         // Start capture off the main actor — `startCapture`
         // can take a few hundred ms while `AVCaptureSession`
         // negotiates with the camera service.
@@ -327,6 +341,24 @@ public final class CallSession: ObservableObject {
             NSLog("dial offer-build failed: %@", String(describing: error))
             endLocal(reason: .error)
         }
+    }
+
+    /// G3-1-call-controls — mute / unmute the local mic. Drives
+    /// the real `RTCAudioTrack.isEnabled` via the pod and
+    /// publishes the new state so the in-call control reflects
+    /// it. No-op-safe before the pod exists (the published flag
+    /// still updates so the prejoin/connecting UI is correct).
+    public func setMicrophoneEnabled(_ on: Bool) {
+        rtc?.setMicrophoneEnabled(on)
+        micEnabled = on
+    }
+
+    /// G3-1-call-controls — start / stop the local camera track.
+    /// Toggles `RTCVideoTrack.isEnabled` via the pod (no SDP
+    /// renegotiation) and publishes the new state.
+    public func setCameraEnabled(_ on: Bool) {
+        rtc?.setCameraEnabled(on)
+        cameraEnabled = on
     }
 
     /// Outbound side: tear down a call we initiated or

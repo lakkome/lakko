@@ -279,6 +279,16 @@ public final class WebRTCPeerConnection: NSObject {
         localAudioTrack?.isEnabled = on
     }
 
+    /// Toggle the local video track's `isEnabled` flag —
+    /// the in-call "stop / start camera" control. Disabling
+    /// halts frame delivery to the encoder (the remote sees
+    /// the last frame freeze then a black frame); no SDP
+    /// renegotiation, the m-line stays. No-op on an audio-only
+    /// call (no local video track present).
+    public func setCameraEnabled(_ on: Bool) {
+        localVideoTrack?.isEnabled = on
+    }
+
     /// Factory entry point for a fresh `RTCVideoSource`
     /// bound to this process's shared `RTCPeerConnectionFactory`.
     /// `LocalCameraCapture` (G3-1-video) drives frames into the

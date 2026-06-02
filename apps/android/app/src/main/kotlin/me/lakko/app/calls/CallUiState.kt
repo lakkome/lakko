@@ -539,6 +539,8 @@ public class CallUiState(
             launch { session.state.collect { rebuildFromSession(session) } }
             launch { session.localVideoTrack.collect { rebuildFromSession(session) } }
             launch { session.remoteVideoTrack.collect { rebuildFromSession(session) } }
+            launch { session.micEnabled.collect { rebuildFromSession(session) } }
+            launch { session.cameraEnabled.collect { rebuildFromSession(session) } }
         }
     }
 
@@ -553,8 +555,8 @@ public class CallUiState(
                 id = "local",
                 displayName = "You",
                 isLocal = true,
-                micOn = true,
-                camOn = session.localVideoTrack.value != null,
+                micOn = session.micEnabled.value,
+                camOn = session.cameraEnabled.value,
                 handRaised = false,
                 quality = QualityTier.Good,
                 speaking = false,

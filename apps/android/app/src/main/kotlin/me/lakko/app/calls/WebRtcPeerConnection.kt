@@ -312,6 +312,14 @@ public class WebRtcPeerConnection(
         localAudioTrack?.setEnabled(on)
     }
 
+    /** G3-2-call-controls — toggle the local video track's
+     *  enabled flag (the in-call "stop / start camera"
+     *  control). Disabling halts frame delivery to the encoder;
+     *  no SDP renegotiation. No-op on an audio-only call. */
+    public fun setCameraEnabled(on: Boolean) {
+        localVideoTrack?.setEnabled(on)
+    }
+
     /**
      * Video plumbing extension point. `addLocalVideoTrack`
      * wires a `VideoTrack` backed by a `VideoSource` the
