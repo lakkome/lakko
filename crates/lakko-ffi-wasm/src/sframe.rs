@@ -153,6 +153,48 @@ impl WasmParticipantKey {
             .open(aad, ciphertext, counter)
             .map_err(|e| JsError::new(&format!("call crypto error: sframe open: {e:?}")))
     }
+
+    /// Seal `plaintext` into a complete RFC 9605 wire frame —
+    /// `SframeHeader(kid, ctr) || ciphertext` — with the SFrame
+    /// header bound as the AEAD AAD, per ADR-0013. This is the
+    /// path the web `RTCRtpScriptTransform` worker uses on the
+    /// outgoing side; the resulting bytes decrypt byte-for-byte on
+    /// iOS/Android (and vice versa) because the AAD is the
+    /// platform-independent header, not any host RTP metadata.
+    ///
+    /// # Errors
+    ///
+    /// `JsError` containing `"counter exhausted"` when the 32-bit
+    /// counter rolls over (re-key required), else an AEAD error.
+    #[wasm_bindgen(js_name = "sealFramed")]
+    pub fn seal_framed(&self, plaintext: &[u8]) -> Result<Vec<u8>, JsError> {
+        self.inner
+            .lock()
+            .expect("sframe lock")
+            .seal_framed(plaintext)
+            .map_err(|e| JsError::new(&format!("call crypto error: sframe seal_framed: {e:?}")))
+    }
+
+    /// Open a complete RFC 9605 wire frame produced by
+    /// [`Self::seal_framed`] (or any ADR-0013-conformant peer):
+    /// parse the header, bind the on-wire header bytes as AAD,
+    /// AEAD-open. This key must be derived for the frame's sender
+    /// leaf (the worker selects it by the header's KID). The
+    /// incoming-side path for the web worker.
+    ///
+    /// # Errors
+    ///
+    /// `JsError` on a malformed header, a KID that doesn't match
+    /// this key's leaf, a counter out of range, or AEAD auth
+    /// failure.
+    #[wasm_bindgen(js_name = "openFramed")]
+    pub fn open_framed(&self, wire: &[u8]) -> Result<Vec<u8>, JsError> {
+        self.inner
+            .lock()
+            .expect("sframe lock")
+            .open_framed(wire)
+            .map_err(|e| JsError::new(&format!("call crypto error: sframe open_framed: {e:?}")))
+    }
 }
 
 /// Output of [`WasmParticipantKey::seal`] — paired

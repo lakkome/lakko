@@ -201,6 +201,47 @@ impl ParticipantKey {
             .open(&aad, &ciphertext, counter)
             .map_err(|e| FfiError::Call(format!("sframe open: {e:?}")))
     }
+
+    /// Seal `plaintext` into a complete RFC 9605 wire frame —
+    /// `SframeHeader(kid, ctr) || ciphertext` — with the header
+    /// bound as the AEAD AAD, per ADR-0013. The cross-platform
+    /// path: the bytes decrypt byte-for-byte on web (via the wasm
+    /// `sealFramed`) and the SFU never sees plaintext. The native
+    /// frame-encryptor shim uses the parallel `lakko_sframe_seal_framed`
+    /// C ABI; this UniFFI method is the in-process Swift / Kotlin
+    /// equivalent.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::Call`] on counter exhaustion (re-key required)
+    /// or AEAD failure.
+    #[uniffi::method]
+    pub fn seal_framed(&self, plaintext: Vec<u8>) -> Result<Vec<u8>, FfiError> {
+        self.inner
+            .lock()
+            .expect("sframe lock")
+            .seal_framed(&plaintext)
+            .map_err(|e| FfiError::Call(format!("sframe seal_framed: {e:?}")))
+    }
+
+    /// Open a complete RFC 9605 wire frame produced by
+    /// [`Self::seal_framed`] (or any ADR-0013-conformant peer):
+    /// parse the header, bind the on-wire header bytes as AAD,
+    /// AEAD-open. This key must be derived for the frame's sender
+    /// leaf (the caller selects it by the header's KID).
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::Call`] on a malformed header, a KID/leaf
+    /// mismatch, a counter out of range, or AEAD auth failure.
+    #[uniffi::method]
+    pub fn open_framed(&self, wire: Vec<u8>) -> Result<Vec<u8>, FfiError> {
+        self.inner
+            .lock()
+            .expect("sframe lock")
+            .open_framed(&wire)
+            .map_err(|e| FfiError::Call(format!("sframe open_framed: {e:?}")))
+    }
 }
 
 /// Output of [`ParticipantKey::seal`] — paired counter +
