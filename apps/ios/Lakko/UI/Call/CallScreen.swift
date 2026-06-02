@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
+import Combine
 import SwiftUI
 import WebRTC
 
@@ -426,6 +427,10 @@ private struct ChatToggleButton: View {
 
 private struct ControlsBar: View {
     @ObservedObject var state: CallUiState
+    /// G3-1-session-bind — end-call action. Routes to
+    /// `session.hangUp()` when a real session drives the
+    /// screen; falls back to `state.endCall()` (mock path).
+    let onEndCall: () -> Void
 
     private var local: CallUiState.Participant? {
         state.participants.first(where: { $0.isLocal })
@@ -484,7 +489,7 @@ private struct ControlsBar: View {
                 systemImage: "phone.down.fill",
                 active: false,
                 destructive: true,
-                onTap: { state.endCall() }
+                onTap: onEndCall
             )
         }
         .padding(.horizontal, 16)
@@ -796,9 +801,20 @@ public struct CallScreen: View {
     /// rather than the state object because it is bookkeeping
     /// for side effects, not model-of-the-call state.
     @State private var lastRemoteIds: [String] = []
+    /// G3-1-session-bind — the live call session driving this
+    /// screen. When `nil` (SwiftUI previews / design work) the
+    /// screen runs on `seedMockState()` exactly as before. When
+    /// injected, `onAppear` wires `state.driveFrom(session:)` so
+    /// phase + roster + video reflect the real call, and the
+    /// end-call button routes to `session.hangUp()`.
+    private let session: CallSession?
+    /// Combine subscriptions from `driveFrom(session:)`, held
+    /// for the screen's lifetime.
+    @State private var sessionBindings: [AnyCancellable] = []
     let onExit: () -> Void
 
-    public init(onExit: @escaping () -> Void) {
+    public init(session: CallSession? = nil, onExit: @escaping () -> Void) {
+        self.session = session
         self.onExit = onExit
     }
 
@@ -807,6 +823,20 @@ public struct CallScreen: View {
             switch state.phase {
             case .prejoin:
                 PrejoinView(state: state) { displayName, micOn, camOn in
+                    // G3-1-session-bind — when a real session
+                    // drives the screen, the call is already
+                    // active (the presenter dialed / accepted
+                    // before pushing this screen) and phase is
+                    // driven by `driveFrom`, so the mock seed is
+                    // skipped. The prejoin Join → `dial` /
+                    // `acceptCall` wiring (which would let the
+                    // user pick mic/cam *before* dialing) is a
+                    // deferred follow-up; for now an injected
+                    // session means we never sit in `.prejoin`.
+                    guard session == nil else {
+                        _ = (displayName, micOn, camOn)
+                        return
+                    }
                     state.seedMockState()
                     // Apply prejoin toggles to local participant.
                     state.setMic(micOn)
@@ -867,8 +897,17 @@ public struct CallScreen: View {
             }
             lastRemoteIds = remoteIds
         }
+        .onAppear {
+            // G3-1-session-bind — drive the UI from the real
+            // session when one is injected; otherwise the
+            // prejoin → seedMockState() path runs as before.
+            if let session, sessionBindings.isEmpty {
+                sessionBindings = state.driveFrom(session: session)
+            }
+        }
         .onDisappear {
             sounds.controller.stopAll()
+            sessionBindings.removeAll()
             state.reset()
         }
     }
@@ -926,7 +965,13 @@ public struct CallScreen: View {
                     }
                 }
 
-                ControlsBar(state: state)
+                ControlsBar(state: state, onEndCall: {
+                    if let session {
+                        session.hangUp()
+                    } else {
+                        state.endCall()
+                    }
+                })
             }
 
             // Centre overlay when alone.

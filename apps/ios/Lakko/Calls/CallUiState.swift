@@ -667,4 +667,87 @@ extension CallUiState {
             }
         return [local, remote]
     }
+
+    /// G3-1-session-bind — drive the **full** mock-free UI from
+    /// a live 1×1 `CallSession`. Maps `session.state` →
+    /// [`CallPhase`], synthesises the 2-person roster (local
+    /// always; the single remote appears once the call is
+    /// `connected` or a remote track has arrived), and bridges
+    /// both video tracks — every relevant publisher triggers a
+    /// full rebuild from the session's current truth, so there
+    /// are no partial-update races.
+    ///
+    /// Scope (1×1 direct-PeerConnection): the roster is exactly
+    /// two participants; `camOn` is driven by track presence so
+    /// a tile flips from avatar to live video the moment a track
+    /// lands. **Not** mapped here (each needs a dedicated
+    /// `CallSession` signal, deferred): the e2ee fingerprint
+    /// pill, connection-quality detail, and the mic / hand /
+    /// screen-share controls writing *back* into the session.
+    /// The prejoin Join → `dial` / `acceptCall` action and the
+    /// navigation that presents this screen with a session are
+    /// separate follow-ups — `CallScreen` calls this from
+    /// `onAppear` when a session is injected and falls back to
+    /// `seedMockState()` otherwise.
+    ///
+    /// Returns the owning `[AnyCancellable]`; store it on the
+    /// SwiftUI host for the call's lifetime.
+    public func driveFrom(session: CallSession) -> [AnyCancellable] {
+        let rebuild: () -> Void = { [weak self, weak session] in
+            guard let self, let session else { return }
+            self.setPhase(Self.mapSessionPhase(session.state))
+            let connected = session.state == .connected
+            let remoteTrack = session.remoteVideoTrack
+            var roster: [Participant] = [
+                Participant(
+                    id: "local", displayName: "You", isLocal: true,
+                    micOn: true, camOn: session.localVideoTrack != nil,
+                    handRaised: false, quality: .good, speaking: false,
+                    screenSharing: false
+                ),
+            ]
+            if connected || remoteTrack != nil {
+                roster.append(
+                    Participant(
+                        id: "remote", displayName: "", isLocal: false,
+                        micOn: true, camOn: remoteTrack != nil,
+                        handRaised: false, quality: .good, speaking: false,
+                        screenSharing: false
+                    )
+                )
+            }
+            self.setParticipants(roster)
+            self.setLocalVideoTrack(session.localVideoTrack)
+            self.setRemoteVideoTrack(remoteTrack)
+        }
+        let onMain: (@escaping () -> Void) -> Void = { work in
+            MainActor.assumeIsolated { work() }
+        }
+        let state = session.$state
+            .receive(on: DispatchQueue.main)
+            .sink { _ in onMain(rebuild) }
+        let localTrack = session.$localVideoTrack
+            .receive(on: DispatchQueue.main)
+            .sink { _ in onMain(rebuild) }
+        let remoteTrack = session.$remoteVideoTrack
+            .receive(on: DispatchQueue.main)
+            .sink { _ in onMain(rebuild) }
+        // Seed once synchronously so the first frame is correct
+        // before any publisher fires.
+        rebuild()
+        return [state, localTrack, remoteTrack]
+    }
+
+    /// Map the `CallSession` lifecycle onto the UI phase. The
+    /// pre-connect states collapse to `.connecting` (the UI has
+    /// no separate "ringing"); `ending` holds at `.connected`
+    /// until the terminal `done` flips to `.ended`.
+    private static func mapSessionPhase(_ s: CallSession.WebCallState) -> CallPhase {
+        switch s {
+        case .idle: return .prejoin
+        case .outgoing, .ringing, .connecting: return .connecting
+        case .connected, .ending: return .connected
+        case .done: return .ended(endedAt: Date())
+        }
+    }
 }

@@ -91,6 +91,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
 import androidx.compose.ui.platform.LocalContext
+import me.lakko.app.calls.CallSession
 import me.lakko.app.calls.CallSoundController
 import me.lakko.app.calls.CallUiState
 import me.lakko.app.calls.LocalVideoPreviewView
@@ -147,6 +148,13 @@ private fun CallUiState.QualityTier.colour(): Color = when (this) {
 public fun CallScreen(
     onExit: () -> Unit,
     state: CallUiState = remember { CallUiState() },
+    // G3-2-session-bind — the live call session driving this
+    // screen. When `null` (Compose previews / design work) the
+    // screen runs on `seedMockState()` exactly as before. When
+    // injected, `driveFrom` wires phase + roster + video to the
+    // real call and the end-call button routes to
+    // `session.hangUp()`.
+    session: CallSession? = null,
 ) {
     // One sound controller per CallScreen lifetime; released
     // in the same DisposableEffect that resets the UI state so
@@ -158,6 +166,15 @@ public fun CallScreen(
         onDispose {
             sounds.release()
             state.reset()
+        }
+    }
+
+    // G3-2-session-bind — drive the UI from the real session
+    // when one is injected; otherwise the prejoin →
+    // seedMockState() path runs as before.
+    LaunchedEffect(session) {
+        if (session != null) {
+            state.driveFrom(session)
         }
     }
 
@@ -217,7 +234,14 @@ public fun CallScreen(
 
     when (phase) {
         is CallUiState.CallPhase.Prejoin -> PrejoinScreen(state)
-        else -> InCallView(state = state, onExit = onExit)
+        else -> InCallView(
+            state = state,
+            onExit = onExit,
+            // G3-2-session-bind — end-call routes to the real
+            // session when one drives the screen; mock fallback
+            // otherwise.
+            onEndCall = { if (session != null) session.hangUp() else state.endCall() },
+        )
     }
 }
 
@@ -427,7 +451,11 @@ private fun PreviewToggleButton(
 // ============================================================
 
 @Composable
-private fun InCallView(state: CallUiState, onExit: () -> Unit) {
+private fun InCallView(
+    state: CallUiState,
+    onExit: () -> Unit,
+    onEndCall: () -> Unit = { state.endCall() },
+) {
     val participants by state.participants.collectAsState()
     val phase by state.phase.collectAsState()
     val drawerOpen by state.participantListOpen.collectAsState()
@@ -529,7 +557,7 @@ private fun InCallView(state: CallUiState, onExit: () -> Unit) {
                 }
             }
 
-            ControlsBar(state)
+            ControlsBar(state, onEndCall = onEndCall)
         }
 
         // Top-centre phase banner.
@@ -1276,7 +1304,7 @@ private fun ParticipantTile(
 }
 
 @Composable
-private fun ControlsBar(state: CallUiState) {
+private fun ControlsBar(state: CallUiState, onEndCall: () -> Unit = { state.endCall() }) {
     val participants by state.participants.collectAsState()
     val hasMultipleCams by state.hasMultipleCameras.collectAsState()
     val local = participants.firstOrNull { it.isLocal }
@@ -1342,7 +1370,7 @@ private fun ControlsBar(state: CallUiState) {
             active = false,
             destructive = true,
             description = "End call",
-            onClick = { state.endCall() },
+            onClick = onEndCall,
         )
     }
 }

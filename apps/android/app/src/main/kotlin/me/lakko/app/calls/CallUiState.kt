@@ -510,6 +510,91 @@ public class CallUiState(
         }
     }
 
+    /**
+     * G3-2-session-bind — drive the **full** mock-free UI from a
+     * live 1×1 [CallSession]. Maps `session.state` → [CallPhase],
+     * synthesises the 2-person roster (local always; the single
+     * remote appears once the call is `Connected` or a remote
+     * track has arrived), and bridges both video tracks. Every
+     * relevant flow emission triggers a full rebuild from the
+     * session's current truth, so there are no partial-update
+     * races. Supersedes [bindTo] (reuses the same [bindJob] so a
+     * later [reset] cancels it).
+     *
+     * Scope (1×1): roster is exactly two; `camOn` is driven by
+     * track presence. **Not** mapped here (each needs a dedicated
+     * [CallSession] signal, deferred): the e2ee fingerprint pill,
+     * connection-quality detail, and the mic / hand / share
+     * controls writing back into the session. The prejoin Join →
+     * `dial` / `acceptCall` action and the navigation that
+     * presents this screen with a session are separate
+     * follow-ups — `CallScreen` calls this when a session is
+     * injected and falls back to [seedMockState] otherwise.
+     */
+    public fun driveFrom(session: CallSession) {
+        bindJob?.cancel()
+        bindJob = scope.launch {
+            // Collect all three sources; recompute the whole UI
+            // snapshot on every emission from any of them.
+            launch { session.state.collect { rebuildFromSession(session) } }
+            launch { session.localVideoTrack.collect { rebuildFromSession(session) } }
+            launch { session.remoteVideoTrack.collect { rebuildFromSession(session) } }
+        }
+    }
+
+    /** Recompute phase + roster + video from the session's
+     *  current state. Called from each [driveFrom] collector. */
+    private fun rebuildFromSession(session: CallSession) {
+        _phase.value = mapSessionPhase(session.state.value)
+        val connected = session.state.value == CallSession.WebCallState.Connected
+        val remoteTrack = session.remoteVideoTrack.value
+        val roster = mutableListOf(
+            Participant(
+                id = "local",
+                displayName = "You",
+                isLocal = true,
+                micOn = true,
+                camOn = session.localVideoTrack.value != null,
+                handRaised = false,
+                quality = QualityTier.Good,
+                speaking = false,
+                screenSharing = false,
+            ),
+        )
+        if (connected || remoteTrack != null) {
+            roster.add(
+                Participant(
+                    id = "remote",
+                    displayName = "",
+                    isLocal = false,
+                    micOn = true,
+                    camOn = remoteTrack != null,
+                    handRaised = false,
+                    quality = QualityTier.Good,
+                    speaking = false,
+                    screenSharing = false,
+                ),
+            )
+        }
+        _participants.value = roster
+        _localVideoTrack.value = session.localVideoTrack.value
+        _remoteVideoTrack.value = remoteTrack
+    }
+
+    private fun mapSessionPhase(s: CallSession.WebCallState): CallPhase =
+        when (s) {
+            CallSession.WebCallState.Idle -> CallPhase.Prejoin
+            CallSession.WebCallState.Outgoing,
+            CallSession.WebCallState.Ringing,
+            CallSession.WebCallState.Connecting,
+            -> CallPhase.Connecting
+            CallSession.WebCallState.Connected,
+            CallSession.WebCallState.Ending,
+            -> CallPhase.Connected
+            CallSession.WebCallState.Done ->
+                CallPhase.Ended(endedAtMs = System.currentTimeMillis())
+        }
+
     public fun endCall() {
         _phase.value = CallPhase.Ended(endedAtMs = System.currentTimeMillis())
     }
