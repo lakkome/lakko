@@ -541,6 +541,7 @@ public class CallUiState(
             launch { session.remoteVideoTrack.collect { rebuildFromSession(session) } }
             launch { session.micEnabled.collect { rebuildFromSession(session) } }
             launch { session.cameraEnabled.collect { rebuildFromSession(session) } }
+            launch { session.e2eeActive.collect { rebuildFromSession(session) } }
         }
     }
 
@@ -581,6 +582,10 @@ public class CallUiState(
         _participants.value = roster
         _localVideoTrack.value = session.localVideoTrack.value
         _remoteVideoTrack.value = remoteTrack
+        // G3-2-e2ee-active — pill reflects real SFrame keying.
+        // No comparable fingerprint yet (canonical cross-platform
+        // hash is a deferred follow-up), so shortFingerprint=null.
+        _e2ee.value = E2eeState(active = session.e2eeActive.value, shortFingerprint = null)
     }
 
     private fun mapSessionPhase(s: CallSession.WebCallState): CallPhase =

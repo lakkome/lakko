@@ -719,6 +719,11 @@ extension CallUiState {
             self.setParticipants(roster)
             self.setLocalVideoTrack(session.localVideoTrack)
             self.setRemoteVideoTrack(remoteTrack)
+            // G3-1-e2ee-active — the pill reflects real SFrame
+            // keying. No comparable fingerprint yet (canonical
+            // cross-platform hash is a deferred follow-up), so
+            // `shortFingerprint` stays nil.
+            self.setE2ee(E2eeState(active: session.e2eeActive, shortFingerprint: nil))
         }
         let onMain: (@escaping () -> Void) -> Void = { work in
             MainActor.assumeIsolated { work() }
@@ -738,10 +743,13 @@ extension CallUiState {
         let camera = session.$cameraEnabled
             .receive(on: DispatchQueue.main)
             .sink { _ in onMain(rebuild) }
+        let e2ee = session.$e2eeActive
+            .receive(on: DispatchQueue.main)
+            .sink { _ in onMain(rebuild) }
         // Seed once synchronously so the first frame is correct
         // before any publisher fires.
         rebuild()
-        return [state, localTrack, remoteTrack, mic, camera]
+        return [state, localTrack, remoteTrack, mic, camera, e2ee]
     }
 
     /// Map the `CallSession` lifecycle onto the UI phase. The

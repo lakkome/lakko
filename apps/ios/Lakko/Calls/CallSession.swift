@@ -107,6 +107,15 @@ public final class CallSession: ObservableObject {
     @Published public private(set) var micEnabled: Bool = true
     @Published public private(set) var cameraEnabled: Bool = false
 
+    /// G3-1-e2ee-active — `true` once `setCallKey` has armed the
+    /// SFrame seed (the call's media is end-to-end encrypted).
+    /// `CallUiState.driveFrom` maps this onto the E2EE pill so
+    /// it shows the green lock only when keying is real, not
+    /// optimistically. The short comparable fingerprint is a
+    /// deferred follow-up (needs a canonical cross-platform
+    /// hash of the seed so both parties + web agree).
+    @Published public private(set) var e2eeActive: Bool = false
+
     /// G3-sframe-native N-6 — per-call MLS exporter seed +
     /// local participant leaf index. Both must be set before
     /// `dial` / `acceptCall` so the SFrame attach can fire
@@ -149,6 +158,13 @@ public final class CallSession: ObservableObject {
     public func setCallKey(seed: Data, localLeaf: UInt32) {
         self.callKeySeed = seed
         self.localLeaf = localLeaf
+        // G3-1-e2ee-active — the SFrame seed is now present, so
+        // the call's E2EE keying is armed. The UI's E2EE pill
+        // mirrors this (green-lock vs negotiating). A
+        // comparable short fingerprint (a canonical
+        // cross-platform hash of the seed) is a deferred
+        // follow-up.
+        self.e2eeActive = true
     }
 
     /// Generate a fresh 16-byte call_id.

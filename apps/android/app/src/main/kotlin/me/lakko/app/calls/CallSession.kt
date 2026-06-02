@@ -144,6 +144,15 @@ public class CallSession(
     private val mutableCameraEnabled: MutableStateFlow<Boolean> = MutableStateFlow(false)
     public val cameraEnabled: StateFlow<Boolean> = mutableCameraEnabled.asStateFlow()
 
+    /** G3-2-e2ee-active — `true` once [setCallKey] has armed the
+     *  SFrame seed (the call's media is end-to-end encrypted).
+     *  `CallUiState.driveFrom` maps this onto the E2EE pill so
+     *  it shows the green lock only when keying is real. The
+     *  short comparable fingerprint is a deferred follow-up
+     *  (needs a canonical cross-platform hash of the seed). */
+    private val mutableE2eeActive: MutableStateFlow<Boolean> = MutableStateFlow(false)
+    public val e2eeActive: StateFlow<Boolean> = mutableE2eeActive.asStateFlow()
+
     /**
      * G3-sframe-native N-6 — per-call MLS exporter seed and
      * local participant leaf index. Both must be set BEFORE
@@ -167,6 +176,10 @@ public class CallSession(
     public fun setCallKey(seed: ByteArray, localLeaf: Int) {
         this.callKeySeed = seed
         this.localLeaf = localLeaf
+        // G3-2-e2ee-active — SFrame seed present → E2EE keying
+        // armed; the UI pill mirrors this. Comparable short
+        // fingerprint is a deferred follow-up.
+        mutableE2eeActive.value = true
     }
 
     /**
