@@ -81,6 +81,7 @@ pub mod pow_solver;
 pub mod presence;
 pub mod push;
 pub mod sframe;
+pub mod sfu_signaling;
 pub mod shamir;
 pub mod storage;
 pub mod sync;

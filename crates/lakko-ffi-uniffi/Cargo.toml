@@ -65,6 +65,10 @@ prost = "0.13"
 # the proto codec + AEAD plumbing behind plain UniFFI
 # Records the platform composes by hand.
 lakko-calls.workspace = true
+# SFU multi-party (subsprint 1c) — shared SFU signaling wire
+# frames; this surface lets clients parse ServerFrame + compose
+# ClientFrame from the same definition the SFU uses.
+lakko-sfu-proto.workspace = true
 # Phase 3b4 — call-admission JWT mint + verify shared with
 # `services/auth`. Client-side surface lets a platform parse
 # / self-verify a JWT it just received from

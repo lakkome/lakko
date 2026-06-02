@@ -76,6 +76,10 @@ prost = "0.13"
 # Phase 3a4 — call signaling typed classes + SFrame keying
 # free-function surface for the web client.
 lakko-calls.workspace = true
+# SFU multi-party (subsprint 1c) — shared SFU signaling wire
+# frames for the web client (parse ServerFrame, compose
+# ClientFrame, payload base64url helpers).
+lakko-sfu-proto.workspace = true
 # Phase 3b4 — call-admission JWT mint + verify shared with
 # `services/auth`. Same shape Swift / Kotlin clients get via
 # UniFFI.

@@ -46,6 +46,7 @@ pub mod mnemonic;
 pub mod pairing;
 pub mod pow;
 pub mod sframe;
+pub mod sfu_signaling;
 pub mod shamir;
 
 uniffi::setup_scaffolding!();
@@ -182,6 +183,14 @@ pub enum FfiError {
     /// variant for the wire.
     #[error("call crypto error: {0}")]
     Call(String),
+
+    /// SFU signaling wire-frame error (SFU multi-party subsprint
+    /// 1c). Covers: a malformed / unknown-kind / oversize server
+    /// frame off the WebSocket, and a base64url decode failure on
+    /// a relay payload. Same elision posture as the rest — the
+    /// message is for logs, the variant for the wire.
+    #[error("sfu signaling error: {0}")]
+    Sfu(String),
 
     /// Lock contention / poisoned mutex on the shared Group state.
     #[error("internal lock error")]
