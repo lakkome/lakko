@@ -438,6 +438,124 @@ pub unsafe extern "C" fn lakko_sframe_open(
 }
 
 // ---------------------------------------------------------------------
+// Framed seal / open — ADR-0013 header-as-AAD wire frames
+// ---------------------------------------------------------------------
+
+/// Seal `plaintext` into a complete RFC 9605 wire frame —
+/// `header(kid = sender_leaf, ctr) || ciphertext` — with the SFrame
+/// header bound as the AEAD AAD, per
+/// [ADR-0013](../../../docs/adr/0013-sframe-cross-platform-aad.md).
+/// This is the cross-platform path: a web `RTCRtpScriptTransform`
+/// worker sealing under the same contract produces frames this binary
+/// opens, and vice versa — no host-specific `additional_data` enters
+/// the AEAD. Wraps [`core::ParticipantKey::seal_framed`] so the
+/// header-as-AAD logic lives in exactly one place.
+///
+/// Writes the wire frame into a freshly-allocated buffer the caller
+/// MUST free via [`lakko_sframe_buffer_free`].
+///
+/// # Safety
+///
+/// - `participant_key` must be a live pointer from
+///   [`lakko_sframe_participant_key_new`].
+/// - `plaintext_ptr` may be null only when `plaintext_len == 0`;
+///   otherwise `plaintext_len` valid bytes must be readable.
+/// - `out_wire_ptr` / `out_wire_len` must be writable.
+#[no_mangle]
+pub unsafe extern "C" fn lakko_sframe_seal_framed(
+    participant_key: *mut ParticipantKey,
+    plaintext_ptr: *const u8,
+    plaintext_len: usize,
+    out_wire_ptr: *mut *mut u8,
+    out_wire_len: *mut usize,
+) -> LakkoSframeStatus {
+    if participant_key.is_null() || out_wire_ptr.is_null() || out_wire_len.is_null() {
+        return LakkoSframeStatus::NullPointer;
+    }
+    if plaintext_ptr.is_null() && plaintext_len != 0 {
+        return LakkoSframeStatus::NullPointer;
+    }
+    // SAFETY: pointer + length guarded above.
+    let plaintext = if plaintext_len == 0 {
+        &[]
+    } else {
+        unsafe { std::slice::from_raw_parts(plaintext_ptr, plaintext_len) }
+    };
+    // SAFETY: caller upheld the live-pointer contract.
+    let pk = unsafe { &mut *participant_key };
+    let wire = match pk.inner.seal_framed(plaintext) {
+        Ok(w) => w,
+        Err(CallsError::CounterExhausted) => return LakkoSframeStatus::CounterExhausted,
+        Err(_) => return LakkoSframeStatus::AeadFailed,
+    };
+    let (ptr, len) = vec_into_raw(wire);
+    // SAFETY: out-pointers non-null per the guard above.
+    unsafe {
+        *out_wire_ptr = ptr;
+        *out_wire_len = len;
+    }
+    LakkoSframeStatus::Ok
+}
+
+/// Open a complete RFC 9605 wire frame produced by
+/// [`lakko_sframe_seal_framed`] (or any ADR-0013-conformant peer,
+/// including the web worker): parse the header, bind the exact
+/// on-wire header bytes as the AEAD AAD, and AEAD-open the trailing
+/// ciphertext. Wraps [`core::ParticipantKey::open_framed`].
+///
+/// `participant_key` must be the key derived for the frame's sender
+/// leaf (the platform shim selects it by the header's KID before
+/// calling). Every failure mode — malformed header, KID that doesn't
+/// match this key's leaf, counter beyond the 32-bit range, AEAD
+/// authentication failure — collapses to
+/// [`LakkoSframeStatus::AeadFailed`]; the shim drops the frame
+/// (`kFailedToDecrypt`) on any of them, so the granularity is not
+/// load-bearing here.
+///
+/// Writes the recovered plaintext into a freshly-allocated buffer the
+/// caller MUST free via [`lakko_sframe_buffer_free`].
+///
+/// # Safety
+///
+/// - `participant_key` must be a live pointer from
+///   [`lakko_sframe_participant_key_new`].
+/// - `wire_ptr` may be null only when `wire_len == 0`.
+/// - `out_plaintext_ptr` / `out_plaintext_len` must be writable.
+#[no_mangle]
+pub unsafe extern "C" fn lakko_sframe_open_framed(
+    participant_key: *const ParticipantKey,
+    wire_ptr: *const u8,
+    wire_len: usize,
+    out_plaintext_ptr: *mut *mut u8,
+    out_plaintext_len: *mut usize,
+) -> LakkoSframeStatus {
+    if participant_key.is_null() || out_plaintext_ptr.is_null() || out_plaintext_len.is_null() {
+        return LakkoSframeStatus::NullPointer;
+    }
+    if wire_ptr.is_null() && wire_len != 0 {
+        return LakkoSframeStatus::NullPointer;
+    }
+    // SAFETY: pointer + length guarded above.
+    let wire = if wire_len == 0 {
+        &[]
+    } else {
+        unsafe { std::slice::from_raw_parts(wire_ptr, wire_len) }
+    };
+    // SAFETY: caller upheld the live-pointer contract.
+    let pk = unsafe { &*participant_key };
+    let Ok(plaintext) = pk.inner.open_framed(wire) else {
+        return LakkoSframeStatus::AeadFailed;
+    };
+    let (ptr, len) = vec_into_raw(plaintext);
+    // SAFETY: out-pointers non-null per the guard above.
+    unsafe {
+        *out_plaintext_ptr = ptr;
+        *out_plaintext_len = len;
+    }
+    LakkoSframeStatus::Ok
+}
+
+// ---------------------------------------------------------------------
 // Wire frame wrap / unwrap (RFC 9605 §4)
 // ---------------------------------------------------------------------
 
@@ -697,6 +815,86 @@ mod tests {
             lakko_sframe_buffer_free(ct_ptr, ct_len);
             lakko_sframe_buffer_free(pt_ptr, pt_len);
             lakko_sframe_participant_key_free(pk_ptr);
+            lakko_sframe_call_key_free(ck_ptr);
+        }
+    }
+
+    /// ADR-0013 header-as-AAD framed seal / open round-trip through
+    /// the C ABI: a sender's `seal_framed` wire frame opens on a
+    /// receiver key re-derived for the same leaf, with no external
+    /// AAD passed anywhere.
+    #[test]
+    fn seal_framed_open_framed_round_trip() {
+        let seed = fixture_seed();
+        let plaintext = b"framed e2ee media".to_vec();
+
+        let mut ck_ptr: *mut CallKey = std::ptr::null_mut();
+        assert_eq!(
+            unsafe { lakko_sframe_call_key_new(seed.as_ptr(), seed.len(), &mut ck_ptr) },
+            LakkoSframeStatus::Ok
+        );
+        // Sender + receiver keys, both derived for leaf 7.
+        let mut sender_ptr: *mut ParticipantKey = std::ptr::null_mut();
+        let mut receiver_ptr: *mut ParticipantKey = std::ptr::null_mut();
+        unsafe {
+            lakko_sframe_participant_key_new(ck_ptr, 7, &mut sender_ptr);
+            lakko_sframe_participant_key_new(ck_ptr, 7, &mut receiver_ptr);
+        }
+
+        // seal_framed → header || ciphertext (no AAD argument).
+        let mut wire_ptr: *mut u8 = std::ptr::null_mut();
+        let mut wire_len: usize = 0;
+        assert_eq!(
+            unsafe {
+                lakko_sframe_seal_framed(
+                    sender_ptr,
+                    plaintext.as_ptr(),
+                    plaintext.len(),
+                    &mut wire_ptr,
+                    &mut wire_len,
+                )
+            },
+            LakkoSframeStatus::Ok
+        );
+        assert!(!wire_ptr.is_null());
+        // header (>=2 bytes) + ciphertext (plaintext + AEAD tag).
+        assert!(wire_len > plaintext.len() + 1);
+
+        // open_framed on the receiver recovers the plaintext.
+        let mut pt_ptr: *mut u8 = std::ptr::null_mut();
+        let mut pt_len: usize = 0;
+        assert_eq!(
+            unsafe {
+                lakko_sframe_open_framed(receiver_ptr, wire_ptr, wire_len, &mut pt_ptr, &mut pt_len)
+            },
+            LakkoSframeStatus::Ok
+        );
+        let recovered = unsafe { std::slice::from_raw_parts(pt_ptr, pt_len) };
+        assert_eq!(recovered, plaintext.as_slice());
+
+        // A tampered header byte fails to open (AAD + nonce both shift).
+        let mut tampered = unsafe { std::slice::from_raw_parts(wire_ptr, wire_len) }.to_vec();
+        tampered[1] = tampered[1].wrapping_add(1);
+        let mut bad_ptr: *mut u8 = std::ptr::null_mut();
+        let mut bad_len: usize = 0;
+        assert_eq!(
+            unsafe {
+                lakko_sframe_open_framed(
+                    receiver_ptr,
+                    tampered.as_ptr(),
+                    tampered.len(),
+                    &mut bad_ptr,
+                    &mut bad_len,
+                )
+            },
+            LakkoSframeStatus::AeadFailed
+        );
+
+        unsafe {
+            lakko_sframe_buffer_free(wire_ptr, wire_len);
+            lakko_sframe_buffer_free(pt_ptr, pt_len);
+            lakko_sframe_participant_key_free(sender_ptr);
+            lakko_sframe_participant_key_free(receiver_ptr);
             lakko_sframe_call_key_free(ck_ptr);
         }
     }
