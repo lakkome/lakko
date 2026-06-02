@@ -728,12 +728,12 @@ extension CallUiState {
             // `shortFingerprint` stays nil.
             self.setE2ee(E2eeState(active: session.e2eeActive, shortFingerprint: nil))
             // G3-1-conn-quality — RTT + connection type from the
-            // live getStats sample. Down/up bitrate stay nil
-            // (iter2 — needs a two-sample byte delta).
+            // live getStats sample; iter2 adds the down/up bitrate
+            // derived from the candidate-pair byte delta.
             self.setConnectionDetail(ConnectionDetail(
                 rttMs: session.rttMs,
-                downBps: nil,
-                upBps: nil,
+                downBps: session.downBps,
+                upBps: session.upBps,
                 connectionType: session.connectionRelayed
                     ? .relay
                     : (session.rttMs != nil ? .direct : .unknown)
@@ -766,10 +766,16 @@ extension CallUiState {
         let relay = session.$connectionRelayed
             .receive(on: DispatchQueue.main)
             .sink { _ in onMain(rebuild) }
+        let down = session.$downBps
+            .receive(on: DispatchQueue.main)
+            .sink { _ in onMain(rebuild) }
+        let up = session.$upBps
+            .receive(on: DispatchQueue.main)
+            .sink { _ in onMain(rebuild) }
         // Seed once synchronously so the first frame is correct
         // before any publisher fires.
         rebuild()
-        return [state, localTrack, remoteTrack, mic, camera, e2ee, rtt, relay]
+        return [state, localTrack, remoteTrack, mic, camera, e2ee, rtt, relay, down, up]
     }
 
     /// G3-1-conn-quality — bucket a measured round-trip time

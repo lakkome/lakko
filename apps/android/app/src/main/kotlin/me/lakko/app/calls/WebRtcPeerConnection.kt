@@ -325,12 +325,19 @@ public class WebRtcPeerConnection(
      *  (nominated, succeeded) ICE candidate-pair's round-trip
      *  time + whether the path is relayed (TURN). `rttMs` is
      *  null until WebRTC has an estimate; `hasActivePair` is
-     *  false before ICE settles. Bytes / bitrate are not sampled
-     *  here — that needs a two-sample delta (deferred to iter2). */
+     *  false before ICE settles.
+     *
+     *  G3-2-conn-quality iter2 — `bytesReceived` / `bytesSent` are
+     *  the candidate-pair's cumulative wire-byte counters (RTP +
+     *  RTCP + STUN on the selected path). A single sample carries
+     *  no rate; the caller diffs two samples against its own wall
+     *  clock to derive a bitrate. */
     public class ConnectionStatsSnapshot(
         public val rttMs: Int?,
         public val relayed: Boolean,
         public val hasActivePair: Boolean,
+        public val bytesReceived: Long,
+        public val bytesSent: Long,
     )
 
     public suspend fun sampleConnectionStats(): ConnectionStatsSnapshot? {
@@ -348,14 +355,22 @@ public class WebRtcPeerConnection(
             (it.members["state"] as? String) == "succeeded" &&
                 (it.members["nominated"] as? Boolean == true)
         } ?: pairs.firstOrNull { (it.members["state"] as? String) == "succeeded" }
-            ?: return ConnectionStatsSnapshot(rttMs = null, relayed = false, hasActivePair = false)
+            ?: return ConnectionStatsSnapshot(
+                rttMs = null, relayed = false, hasActivePair = false,
+                bytesReceived = 0L, bytesSent = 0L,
+            )
         val rttSec = (active.members["currentRoundTripTime"] as? Number)?.toDouble()
         val rttMs = rttSec?.let { Math.round(it * 1000.0).toInt() }
         fun candType(id: String?): String? =
             id?.let { stats[it]?.members?.get("candidateType") as? String }
         val relayed = candType(active.members["localCandidateId"] as? String) == "relay" ||
             candType(active.members["remoteCandidateId"] as? String) == "relay"
-        return ConnectionStatsSnapshot(rttMs = rttMs, relayed = relayed, hasActivePair = true)
+        val bytesReceived = (active.members["bytesReceived"] as? Number)?.toLong() ?: 0L
+        val bytesSent = (active.members["bytesSent"] as? Number)?.toLong() ?: 0L
+        return ConnectionStatsSnapshot(
+            rttMs = rttMs, relayed = relayed, hasActivePair = true,
+            bytesReceived = bytesReceived, bytesSent = bytesSent,
+        )
     }
 
     /**

@@ -294,13 +294,19 @@ public final class WebRTCPeerConnection: NSObject {
     /// the active (nominated, succeeded) ICE candidate-pair's
     /// round-trip time + whether the path is relayed (TURN).
     /// `rttMs` is `nil` until WebRTC has a usable RTT estimate;
-    /// `hasActivePair` is `false` before ICE settles. Bytes /
-    /// bitrate are intentionally not sampled here — that needs
-    /// a two-sample delta (deferred to iter2).
+    /// `hasActivePair` is `false` before ICE settles.
+    ///
+    /// G3-1-conn-quality iter2 — `bytesReceived` / `bytesSent`
+    /// are the candidate-pair's cumulative wire-byte counters
+    /// (RTP + RTCP + STUN on the selected path). A single
+    /// sample carries no rate; the caller diffs two samples
+    /// against its own wall clock to derive a bitrate.
     public struct ConnectionStatsSnapshot: Sendable {
         public let rttMs: Int?
         public let relayed: Bool
         public let hasActivePair: Bool
+        public let bytesReceived: Int64
+        public let bytesSent: Int64
     }
 
     public func sampleConnectionStats() async -> ConnectionStatsSnapshot? {
@@ -317,7 +323,10 @@ public final class WebRTCPeerConnection: NSObject {
                 && (($0.values["nominated"] as? NSNumber)?.boolValue ?? false)
         }) ?? pairs.first(where: { ($0.values["state"] as? String) == "succeeded" })
         guard let pair = active else {
-            return ConnectionStatsSnapshot(rttMs: nil, relayed: false, hasActivePair: false)
+            return ConnectionStatsSnapshot(
+                rttMs: nil, relayed: false, hasActivePair: false,
+                bytesReceived: 0, bytesSent: 0
+            )
         }
         let rttSec = (pair.values["currentRoundTripTime"] as? NSNumber)?.doubleValue
         let rttMs = rttSec.map { Int(($0 * 1000).rounded()) }
@@ -327,7 +336,12 @@ public final class WebRTCPeerConnection: NSObject {
         }
         let relayed = candType(pair.values["localCandidateId"] as? String) == "relay"
             || candType(pair.values["remoteCandidateId"] as? String) == "relay"
-        return ConnectionStatsSnapshot(rttMs: rttMs, relayed: relayed, hasActivePair: true)
+        let bytesReceived = (pair.values["bytesReceived"] as? NSNumber)?.int64Value ?? 0
+        let bytesSent = (pair.values["bytesSent"] as? NSNumber)?.int64Value ?? 0
+        return ConnectionStatsSnapshot(
+            rttMs: rttMs, relayed: relayed, hasActivePair: true,
+            bytesReceived: bytesReceived, bytesSent: bytesSent
+        )
     }
 
     /// Factory entry point for a fresh `RTCVideoSource`

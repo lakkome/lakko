@@ -123,14 +123,25 @@ public final class CallSession: ObservableObject {
     /// is `true` when the active candidate-pair goes through a
     /// TURN relay. `CallUiState.driveFrom` maps these onto the
     /// header quality-dot + the RTT/connection-type popover.
-    /// Down/up bitrate (the popover's `↓`/`↑` lines) needs a
-    /// two-sample byte delta and is a deferred iter2.
     @Published public private(set) var rttMs: Int?
     @Published public private(set) var connectionRelayed: Bool = false
 
-    /// Background poll loop driving [`rttMs`] / [`connectionRelayed`].
-    /// Started on the first `.connected` transition, cancelled in
-    /// `teardownMediaPipeline`.
+    /// G3-1-conn-quality iter2 — receive / send bitrate in **bits
+    /// per second** (the popover's `↓`/`↑` lines), derived from the
+    /// candidate-pair's cumulative byte counters diffed across two
+    /// poll samples against the wall clock. `nil` until a second
+    /// sample lands (a single sample carries no rate).
+    @Published public private(set) var downBps: Int?
+    @Published public private(set) var upBps: Int?
+
+    /// Previous (bytesReceived, bytesSent, monotonic timestamp in
+    /// seconds) used to derive [`downBps`] / [`upBps`]. Reset in
+    /// `teardownMediaPipeline` so a fresh call starts clean.
+    private var prevStatsBytes: (received: Int64, sent: Int64, atSec: Double)?
+
+    /// Background poll loop driving [`rttMs`] / [`connectionRelayed`]
+    /// / [`downBps`] / [`upBps`]. Started on the first `.connected`
+    /// transition, cancelled in `teardownMediaPipeline`.
     private var statsTask: Task<Void, Never>?
 
     /// G3-sframe-native N-6 — per-call MLS exporter seed +
@@ -612,9 +623,12 @@ public final class CallSession: ObservableObject {
         // both end paths.
         self.remoteVideoTrack = nil
         // G3-1-conn-quality — clear the stale stats so a fresh
-        // call doesn't briefly show the previous RTT.
+        // call doesn't briefly show the previous RTT / bitrate.
         self.rttMs = nil
         self.connectionRelayed = false
+        self.downBps = nil
+        self.upBps = nil
+        self.prevStatsBytes = nil
     }
 
     /// G3-1-conn-quality — start the connection-stats poll loop
@@ -629,9 +643,30 @@ public final class CallSession: ObservableObject {
             while !Task.isCancelled {
                 guard let self, let rtc = self.rtc else { return }
                 if let snap = await rtc.sampleConnectionStats() {
+                    // iter2 — derive bitrate from the byte delta against
+                    // a monotonic clock (robust to poll-loop jitter; the
+                    // 2 s sleep is only a nominal cadence).
+                    let nowSec = ProcessInfo.processInfo.systemUptime
+                    let prev = self.prevStatsBytes
+                    var down: Int?
+                    var up: Int?
+                    if snap.hasActivePair, let p = prev {
+                        let dt = nowSec - p.atSec
+                        if dt > 0.1 {
+                            let dRx = max(0, snap.bytesReceived - p.received)
+                            let dTx = max(0, snap.bytesSent - p.sent)
+                            down = Int((Double(dRx) * 8.0 / dt).rounded())
+                            up = Int((Double(dTx) * 8.0 / dt).rounded())
+                        }
+                    }
+                    self.prevStatsBytes = snap.hasActivePair
+                        ? (received: snap.bytesReceived, sent: snap.bytesSent, atSec: nowSec)
+                        : nil
                     await MainActor.run {
                         self.rttMs = snap.rttMs
                         self.connectionRelayed = snap.relayed
+                        self.downBps = down
+                        self.upBps = up
                     }
                 }
                 try? await Task.sleep(nanoseconds: 2_000_000_000)

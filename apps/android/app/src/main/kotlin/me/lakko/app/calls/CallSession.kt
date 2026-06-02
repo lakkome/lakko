@@ -160,16 +160,30 @@ public class CallSession(
      *  connected. `rttMs` null until ICE settles; `connectionRelayed`
      *  true when the active pair goes through a TURN relay.
      *  `CallUiState.driveFrom` maps these onto the header
-     *  quality-dot + RTT/connection-type popover. Down/up bitrate
-     *  needs a two-sample byte delta — deferred iter2. */
+     *  quality-dot + RTT/connection-type popover. */
     private val mutableRttMs: MutableStateFlow<Int?> = MutableStateFlow(null)
     public val rttMs: StateFlow<Int?> = mutableRttMs.asStateFlow()
     private val mutableConnectionRelayed: MutableStateFlow<Boolean> = MutableStateFlow(false)
     public val connectionRelayed: StateFlow<Boolean> = mutableConnectionRelayed.asStateFlow()
 
-    /** Background poll loop driving [rttMs] / [connectionRelayed].
-     *  Started on the first Connected transition; cancelled in
-     *  [teardownMediaPipeline]. */
+    /** G3-2-conn-quality iter2 — receive / send bitrate in **bits
+     *  per second** (the popover's down/up lines), derived from the
+     *  candidate-pair's cumulative byte counters diffed across two
+     *  poll samples against the wall clock. null until a second
+     *  sample lands (a single sample carries no rate). */
+    private val mutableDownBps: MutableStateFlow<Int?> = MutableStateFlow(null)
+    public val downBps: StateFlow<Int?> = mutableDownBps.asStateFlow()
+    private val mutableUpBps: MutableStateFlow<Int?> = MutableStateFlow(null)
+    public val upBps: StateFlow<Int?> = mutableUpBps.asStateFlow()
+
+    /** Previous (bytesReceived, bytesSent, monotonic nanos) used to
+     *  derive [downBps] / [upBps]. Reset in [teardownMediaPipeline]
+     *  so a fresh call starts clean. */
+    private var prevStatsBytes: Triple<Long, Long, Long>? = null
+
+    /** Background poll loop driving [rttMs] / [connectionRelayed] /
+     *  [downBps] / [upBps]. Started on the first Connected
+     *  transition; cancelled in [teardownMediaPipeline]. */
     private var statsJob: kotlinx.coroutines.Job? = null
 
     /**
@@ -654,9 +668,12 @@ public class CallSession(
         // gallery tile reverts to the avatar placeholder on
         // both end paths.
         mutableRemoteVideoTrack.value = null
-        // G3-2-conn-quality — clear stale stats.
+        // G3-2-conn-quality — clear stale stats (RTT + bitrate).
         mutableRttMs.value = null
         mutableConnectionRelayed.value = false
+        mutableDownBps.value = null
+        mutableUpBps.value = null
+        prevStatsBytes = null
     }
 
     /** G3-2-conn-quality — start the connection-stats poll loop
@@ -673,6 +690,25 @@ public class CallSession(
                 if (snap != null) {
                     mutableRttMs.value = snap.rttMs
                     mutableConnectionRelayed.value = snap.relayed
+                    // iter2 — derive bitrate from the byte delta against
+                    // a monotonic clock (robust to poll-loop jitter; the
+                    // 2 s delay is only a nominal cadence).
+                    val nowNanos = System.nanoTime()
+                    val prev = prevStatsBytes
+                    if (snap.hasActivePair && prev != null) {
+                        val dtSec = (nowNanos - prev.third) / 1_000_000_000.0
+                        if (dtSec > 0.1) {
+                            val dRx = (snap.bytesReceived - prev.first).coerceAtLeast(0L)
+                            val dTx = (snap.bytesSent - prev.second).coerceAtLeast(0L)
+                            mutableDownBps.value = Math.round(dRx * 8.0 / dtSec).toInt()
+                            mutableUpBps.value = Math.round(dTx * 8.0 / dtSec).toInt()
+                        }
+                    }
+                    prevStatsBytes = if (snap.hasActivePair) {
+                        Triple(snap.bytesReceived, snap.bytesSent, nowNanos)
+                    } else {
+                        null
+                    }
                 }
                 delay(2_000)
             }

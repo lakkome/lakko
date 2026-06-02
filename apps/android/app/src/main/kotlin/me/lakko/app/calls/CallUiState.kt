@@ -544,6 +544,8 @@ public class CallUiState(
             launch { session.e2eeActive.collect { rebuildFromSession(session) } }
             launch { session.rttMs.collect { rebuildFromSession(session) } }
             launch { session.connectionRelayed.collect { rebuildFromSession(session) } }
+            launch { session.downBps.collect { rebuildFromSession(session) } }
+            launch { session.upBps.collect { rebuildFromSession(session) } }
         }
     }
 
@@ -591,12 +593,13 @@ public class CallUiState(
         // hash is a deferred follow-up), so shortFingerprint=null.
         _e2ee.value = E2eeState(active = session.e2eeActive.value, shortFingerprint = null)
         // G3-2-conn-quality — header detail from getStats sampling.
-        // down/up bitrate deferred to iter2; only RTT + path type here.
+        // iter2 adds the down/up bitrate from the candidate-pair byte
+        // delta; RTT + path type from iter1.
         val rtt = session.rttMs.value
         _connectionDetail.value = ConnectionDetail(
             rttMs = rtt,
-            downBps = null,
-            upBps = null,
+            downBps = session.downBps.value,
+            upBps = session.upBps.value,
             connectionType = when {
                 session.connectionRelayed.value -> ConnectionDetail.ConnectionType.Relay
                 rtt != null -> ConnectionDetail.ConnectionType.Direct
