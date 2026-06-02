@@ -101,7 +101,11 @@ export const routes: RouteDefinition[] = [
       { path: paths.home, component: Home },
       { path: paths.contacts, component: Contacts },
       { path: chatRoutePattern, component: Chat },
-      { path: callRoutePattern, component: Call },
+      // Standalone design route — render Call with no props (its
+      // embedded/onExit props are only used when Chat.tsx presents
+      // it over a live call). Wrapping decouples Call's prop type
+      // from the router's RouteSectionProps signature.
+      { path: callRoutePattern, component: () => <Call /> },
       { path: paths.channels, component: ChannelsList },
       { path: paths.channelNew, component: NewChannel },
       // Subscribe route MUST be matched BEFORE the

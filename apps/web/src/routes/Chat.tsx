@@ -52,7 +52,14 @@ import {
   type WebCallEndReason,
   type WebConnectionStats,
 } from "../calls/call-session";
-import { qualityColour, type QualityTier } from "../state/call-state";
+import {
+  callActions,
+  callState as callUi,
+  qualityColour,
+  type Participant,
+  type QualityTier,
+} from "../state/call-state";
+import Call from "./Call";
 import { DsClient } from "../ds/client";
 import { loadWasm as loadWasmForCalls } from "../wasm";
 import {
@@ -314,6 +321,100 @@ function ChatView(props: {
     }
   });
 
+  // -----------------------------------------------------------------
+  // G3-3-web-session-bind — drive the full Call.tsx in-call UI (the
+  // shared `callActions` store) from the live `CallSession`. The web
+  // analog of iOS/Android driveFrom + call-present: the rich UI is
+  // presented as a full-screen overlay over the chat for live call
+  // states, while `ringing` keeps the lightweight inline banner
+  // (Accept / Decline).
+  // -----------------------------------------------------------------
+
+  /** True while the full in-call overlay should cover the chat.
+   *  `ringing` is excluded — an incoming call shows the inline
+   *  banner until accepted. */
+  const callOverlayVisible = (): boolean => {
+    const s = callState();
+    return (
+      s === "outgoing" ||
+      s === "connecting" ||
+      s === "connected" ||
+      s === "ending"
+    );
+  };
+
+  /** Synthesised local participant. Web 1×1 is audio-only, so
+   *  `camOn` is false; mic is always on (the web `CallSession`
+   *  has no mic-toggle yet — a deferred follow-up). Quality dot
+   *  tracks the live RTT sample. */
+  const localParticipant = (): Participant => ({
+    id: "local",
+    displayName: "You",
+    isLocal: true,
+    micOn: true,
+    camOn: false,
+    handRaised: false,
+    quality: qualityTierForRtt(callConnStats()?.rttMs ?? null),
+    speaking: false,
+    screenSharing: false,
+  });
+
+  /** Synthesised sole remote participant for the 1×1 call. The
+   *  web P2P path carries no roster, so the peer is a single
+   *  placeholder ("Peer") — a real display name folds in when
+   *  the SFU multi-party roster lands. */
+  const remoteParticipant = (): Participant => ({
+    id: "peer",
+    displayName: "Peer",
+    isLocal: false,
+    micOn: true,
+    camOn: false,
+    handRaised: false,
+    quality: "good",
+    speaking: false,
+    screenSharing: false,
+  });
+
+  /** Map the session's `WebCallState` onto the shared call-UI
+   *  store (phase + 1×1 roster). Called from `onStateChange`. */
+  const syncCallUiFromState = (s: WebCallState): void => {
+    switch (s) {
+      case "outgoing":
+      case "connecting":
+        callActions.setPhase({ kind: "connecting" });
+        callActions.setParticipants([localParticipant()]);
+        // 1×1 web media is P2P DTLS-SRTP, not SFrame — keep the
+        // E2EE indicator inactive (and the text pill is hidden in
+        // the embedded view regardless).
+        callActions.setE2ee({ active: false, shortFingerprint: null });
+        break;
+      case "connected":
+        callActions.setPhase({ kind: "connected" });
+        callActions.setParticipants([localParticipant(), remoteParticipant()]);
+        break;
+      case "ending":
+        // Transient — hold the connected visuals until `done`.
+        break;
+      case "idle":
+      case "ringing":
+      case "done":
+        // `ringing` uses the inline banner (no overlay); `done` /
+        // `idle` tear the overlay down.
+        callActions.reset();
+        break;
+    }
+  };
+
+  // When the user hits "End call" inside the embedded Call.tsx, it
+  // sets the store phase to `ended`; mirror that onto the real
+  // session by hanging up (idempotent — a remote-initiated end
+  // already drove the session to `done`).
+  createEffect(() => {
+    if (callUi.phase().kind === "ended" && activeCall !== null) {
+      void activeCall.hangUp("hungUp");
+    }
+  });
+
   /** Build outbound-signaling callback that PUTs raw
    *  bytes onto the chat group's DS journal as an MLS
    *  application message. */
@@ -347,6 +448,8 @@ function ChatView(props: {
       onStateChange: (s, reason) => {
         setCallState(s);
         if (reason !== undefined) setCallEndReason(reason);
+        // G3-3-web-session-bind — drive the full Call.tsx UI store.
+        syncCallUiFromState(s);
         if (s === "done") {
           activeCall = null;
           setRemoteAudioStream(null);
@@ -356,8 +459,22 @@ function ChatView(props: {
         }
       },
       // G3-3-conn-quality — live RTT / bitrate / relay sample,
-      // pushed every 2 s while the call is connected.
-      onConnectionStats: (stats) => setCallConnStats(stats),
+      // pushed every 2 s while the call is connected. Also feeds
+      // the full Call.tsx connection-detail popover + quality dot.
+      onConnectionStats: (stats) => {
+        setCallConnStats(stats);
+        callActions.setConnectionDetail({
+          rttMs: stats.rttMs,
+          downBps: stats.downBps,
+          upBps: stats.upBps,
+          connectionType: stats.relayed
+            ? "relay"
+            : stats.rttMs !== null
+              ? "direct"
+              : "unknown",
+        });
+        callActions.setQuality("local", qualityTierForRtt(stats.rttMs));
+      },
     });
   }
 
@@ -1302,14 +1419,35 @@ function ChatView(props: {
         </div>
       </header>
 
-      {/* Phase 3a8 — call overlay. Renders on top of the
-          timeline whenever a call is in flight. */}
-      <Show
-        when={
-          callState() !== "idle" &&
-          callState() !== "done"
-        }
-      >
+      {/* G3-3-web-session-bind — full in-call UI presented over the
+          chat for live call states (the web analog of iOS/Android
+          call-present). `ringing` keeps the lightweight inline banner
+          below (Accept / Decline) until the call is accepted. */}
+      <Show when={callOverlayVisible()}>
+        <Call
+          embedded={true}
+          onExit={(): void => {
+            void onHangUp();
+          }}
+        />
+      </Show>
+
+      {/* Hidden audio sink for the remote stream. Rendered for the
+          whole call lifetime (ringing → ending) in a stable slot so
+          it does not unmount when the inline banner gives way to the
+          full overlay — otherwise remote audio would cut out. */}
+      <Show when={callState() !== "idle" && callState() !== "done"}>
+        <audio
+          ref={(el) => setAudioRef(el)}
+          autoplay
+          style={{ display: "none" }}
+        />
+      </Show>
+
+      {/* Phase 3a8 — inline incoming-call banner. Now shown ONLY
+          while `ringing` (Accept / Decline); live states use the
+          full overlay above. */}
+      <Show when={callState() === "ringing"}>
         <div
           style={{
             position: "sticky",
@@ -1446,12 +1584,6 @@ function ChatView(props: {
               </button>
             </Show>
           </div>
-          {/* Hidden audio sink for the remote stream. */}
-          <audio
-            ref={(el) => setAudioRef(el)}
-            autoplay
-            style={{ display: "none" }}
-          />
         </div>
       </Show>
 

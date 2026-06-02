@@ -1623,7 +1623,24 @@ function seedMockParticipants(): void {
 // Top-level route
 // ============================================================================
 
-const Call: Component = () => {
+/**
+ * In-call screen.
+ *
+ * Two modes:
+ *   * Standalone design route (`/call/:id`, no props) — seeds mock
+ *     participants on Join; the reference UI for the design system.
+ *   * Embedded over a live chat (G3-3-web-session-bind) — `embedded`
+ *     is set and the parent (Chat.tsx) drives `callState` from the
+ *     real `CallSession`. In this mode the screen skips the
+ *     mount-time `reset()` (the parent owns lifecycle), routes
+ *     end-call + the ended-overlay dismissal through `onExit`
+ *     instead of navigating home, and hides the text E2EE pill
+ *     (the 1×1 web path is P2P DTLS-SRTP, not SFrame — the pill
+ *     would mislead, and a text chip during the call is poor UX).
+ */
+const Call: Component<{ embedded?: boolean; onExit?: () => void }> = (
+  props,
+) => {
   const navigate = useNavigate();
 
   // Sound cues — one controller per Call mount; disposed on
@@ -1632,15 +1649,23 @@ const Call: Component = () => {
   const sounds = new CallSoundController();
 
   onMount(() => {
-    callActions.reset();
-    // Note: `reset()` leaves us in `prejoin` phase. The mock
-    // participants + E2EE state get seeded only after the user
-    // clicks "Join" on the prejoin screen (handled by
-    // `seedMockParticipants` inside the onJoin callback below).
+    // Embedded mode: the parent already drove `callState` to a
+    // live phase before mounting us — resetting would wipe it.
+    if (props.embedded !== true) {
+      callActions.reset();
+      // Note: `reset()` leaves us in `prejoin` phase. The mock
+      // participants + E2EE state get seeded only after the user
+      // clicks "Join" on the prejoin screen (handled by
+      // `seedMockParticipants` inside the onJoin callback below).
+    }
   });
   onCleanup(() => {
     sounds.dispose();
-    callActions.reset();
+    // Embedded mode: the parent owns the call lifecycle and resets
+    // `callState` when the session reaches `done`.
+    if (props.embedded !== true) {
+      callActions.reset();
+    }
   });
 
   // Phase → sound mapping. Mirrors the same trigger map on
@@ -1767,7 +1792,13 @@ const Call: Component = () => {
             "z-index": "5",
           }}
         >
-          <E2eePill />
+          {/* G3-3-web-session-bind — the text E2EE pill is hidden in
+              the embedded (live-call) view: the 1×1 web path is P2P
+              DTLS-SRTP, not SFrame, so a "secured" text chip would
+              mislead. It stays on the standalone design route. */}
+          <Show when={props.embedded !== true} fallback={<span />}>
+            <E2eePill />
+          </Show>
           <QualityIndicator />
         </header>
 
@@ -1843,7 +1874,18 @@ const Call: Component = () => {
         <SettingsPanel />
 
         <Show when={callState.phase().kind === "ended"}>
-          <CallEndedOverlay onDismiss={(): void => navigate(paths.home)} />
+          <CallEndedOverlay
+            onDismiss={(): void => {
+              // Embedded: hand control back to the parent (Chat
+              // tears the overlay down + resets state). Standalone
+              // design route: navigate home as before.
+              if (props.embedded === true) {
+                props.onExit?.();
+              } else {
+                navigate(paths.home);
+              }
+            }}
+          />
         </Show>
       </div>
     </Show>
