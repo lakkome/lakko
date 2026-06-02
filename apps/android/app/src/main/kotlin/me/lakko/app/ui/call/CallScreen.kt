@@ -155,6 +155,12 @@ public fun CallScreen(
     // real call and the end-call button routes to
     // `session.hangUp()`.
     session: CallSession? = null,
+    // G3-2-prejoin-join — when the screen is driven by a real
+    // session, Join dials it (with the prejoin mic / camera
+    // choice) and Cancel abandons the prepped-but-undialed call.
+    // `null` on the mock design path (Join seeds mock state).
+    onPrejoinJoin: ((micOn: Boolean, camOn: Boolean) -> Unit)? = null,
+    onPrejoinCancel: (() -> Unit)? = null,
 ) {
     // One sound controller per CallScreen lifetime; released
     // in the same DisposableEffect that resets the UI state so
@@ -233,7 +239,12 @@ public fun CallScreen(
     }
 
     when (phase) {
-        is CallUiState.CallPhase.Prejoin -> PrejoinScreen(state)
+        is CallUiState.CallPhase.Prejoin ->
+            PrejoinScreen(
+                state = state,
+                onPrejoinJoin = onPrejoinJoin,
+                onPrejoinCancel = onPrejoinCancel,
+            )
         else -> InCallView(
             state = state,
             onExit = onExit,
@@ -253,7 +264,11 @@ public fun CallScreen(
 // ============================================================
 
 @Composable
-private fun PrejoinScreen(state: CallUiState) {
+private fun PrejoinScreen(
+    state: CallUiState,
+    onPrejoinJoin: ((micOn: Boolean, camOn: Boolean) -> Unit)? = null,
+    onPrejoinCancel: (() -> Unit)? = null,
+) {
     var displayName by remember { mutableStateOf("") }
     var camOn by remember { mutableStateOf(true) }
     var micOn by remember { mutableStateOf(true) }
@@ -408,11 +423,18 @@ private fun PrejoinScreen(state: CallUiState) {
 
         IconButton(
             onClick = {
-                state.seedMockState()
-                state.setMic(micOn)
-                state.setCamera(camOn)
-                // displayName unused — production maps via contact name lookup.
-                state.join()
+                // G3-2-prejoin-join — with a real session, Join dials
+                // it carrying the chosen mic / camera. Without one
+                // (mock design path) seed the mock state as before.
+                if (onPrejoinJoin != null) {
+                    onPrejoinJoin(micOn, camOn)
+                } else {
+                    state.seedMockState()
+                    state.setMic(micOn)
+                    state.setCamera(camOn)
+                    // displayName unused — production maps via contact name lookup.
+                    state.join()
+                }
             },
             modifier = Modifier
                 .background(CallTheme.accentBlue, RoundedCornerShape(10.dp))
@@ -425,6 +447,21 @@ private fun PrejoinScreen(state: CallUiState) {
                 fontWeight = FontWeight.SemiBold,
                 fontSize = 16.sp,
             )
+        }
+
+        // G3-2-prejoin-join — Cancel abandons a prepped-but-undialed
+        // call (real session only); absent on the mock design path.
+        if (onPrejoinCancel != null) {
+            IconButton(
+                onClick = onPrejoinCancel,
+                modifier = Modifier.padding(horizontal = 24.dp, vertical = 4.dp),
+            ) {
+                Text(
+                    "Cancel",
+                    color = CallTheme.textSecondary,
+                    fontSize = 14.sp,
+                )
+            }
         }
     }
 }

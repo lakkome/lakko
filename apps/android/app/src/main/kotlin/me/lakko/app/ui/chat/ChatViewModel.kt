@@ -89,21 +89,48 @@ public class ChatViewModel(
         }
     }
 
-    /** Tap-to-call from the chat header. */
+    /** Tap-to-call from the chat header. G3-2-prejoin-join: this
+     *  now only PREPARES the session — it builds it and arms the
+     *  SFrame key, but does NOT dial. The session sits `Idle`
+     *  (mapped to the prejoin phase), the call screen presents the
+     *  prejoin (mic / camera preview), and the Join button calls
+     *  [dialActiveCall]. */
     public fun startCall(audio: Boolean = true, video: Boolean = false) {
         if (mutableActiveCall.value != null) return
+        @Suppress("UNUSED_PARAMETER") val ignored = audio to video
         val callId = CallSession.mintCallId()
         val session = makeSession(callId)
         mutableActiveCall.value = session
-        // G3-2-call-key — arm the SFrame seed from the MLS
-        // exporter BEFORE dialing (dial arms SFrame in
-        // completeDial; without the key it refuses per
-        // invariant #4). The session sits Idle — and the call
-        // screen stays unpresented — for the brief derivation.
+        // G3-2-call-key — arm the SFrame seed from the MLS exporter
+        // so it is ready by the time the user taps Join. Without it
+        // dial refuses per invariant #4 (no non-E2EE fallback).
         viewModelScope.launch {
             armCallKey(session, callId)
+        }
+    }
+
+    /** G3-2-prejoin-join — dial the prepped session from the
+     *  prejoin Join button, carrying the user's mic / camera
+     *  choice. Re-arms the key first (idempotent) so dial never
+     *  races ahead of the seed. No-op if the session already
+     *  left `Idle`. */
+    public fun dialActiveCall(audio: Boolean = true, video: Boolean = false) {
+        val session = mutableActiveCall.value ?: return
+        if (session.state.value != CallSession.WebCallState.Idle) return
+        viewModelScope.launch {
+            armCallKey(session, session.callId)
             session.dial(audio = audio, video = video)
         }
+    }
+
+    /** G3-2-prejoin-join — abandon a prepped-but-undialed call
+     *  from the prejoin Cancel button: hang up the `Idle` session
+     *  and clear it immediately (no "Call ended" overlay for a
+     *  call that never connected). */
+    public fun cancelActiveCall() {
+        val session = mutableActiveCall.value ?: return
+        session.hangUp()
+        mutableActiveCall.value = null
     }
 
     /** G3-2-call-key — derive + set the per-call SFrame seed

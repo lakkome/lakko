@@ -579,6 +579,11 @@ private struct ParticipantListDrawer: View {
 private struct PrejoinView: View {
     @ObservedObject var state: CallUiState
     let onJoin: (_ displayName: String, _ micOn: Bool, _ camOn: Bool) -> Void
+    /// G3-1-prejoin-join — when the screen is driven by a real
+    /// session (presented over the chat before dialing), a Cancel
+    /// button tears the prepped-but-undialed session down. `nil`
+    /// on the standalone design route (no session to abandon).
+    var onCancel: (() -> Void)?
 
     @State private var displayName: String = ""
     @State private var camOn: Bool = true
@@ -710,6 +715,17 @@ private struct PrejoinView: View {
                         .shadow(color: CallTheme.accentBlue.opacity(0.4), radius: 4, y: 2)
                 }
                 .accessibilityLabel("Join the call")
+
+                if let onCancel = onCancel {
+                    Button(action: onCancel) {
+                        Text("Cancel")
+                            .font(.subheadline)
+                            .foregroundColor(CallTheme.textSecondary)
+                            .padding(.horizontal, 24)
+                            .padding(.vertical, 10)
+                    }
+                    .accessibilityLabel("Cancel the call")
+                }
             }
             .padding(24)
         }
@@ -828,32 +844,41 @@ public struct CallScreen: View {
         ZStack {
             switch state.phase {
             case .prejoin:
-                PrejoinView(state: state) { displayName, micOn, camOn in
-                    // G3-1-session-bind — when a real session
-                    // drives the screen, the call is already
-                    // active (the presenter dialed / accepted
-                    // before pushing this screen) and phase is
-                    // driven by `driveFrom`, so the mock seed is
-                    // skipped. The prejoin Join → `dial` /
-                    // `acceptCall` wiring (which would let the
-                    // user pick mic/cam *before* dialing) is a
-                    // deferred follow-up; for now an injected
-                    // session means we never sit in `.prejoin`.
-                    guard session == nil else {
-                        _ = (displayName, micOn, camOn)
-                        return
-                    }
-                    state.seedMockState()
-                    // Apply prejoin toggles to local participant.
-                    state.setMic(micOn)
-                    state.setCamera(camOn)
-                    // displayName intentionally not wired into state —
-                    // production code maps it onto the local
-                    // participant's displayName via the contact-id
-                    // → name resolution path the chat layer owns.
-                    _ = displayName
-                    state.join()
-                }
+                PrejoinView(
+                    state: state,
+                    onJoin: { displayName, micOn, camOn in
+                        // G3-1-prejoin-join — with a real session the
+                        // user picks mic / camera here and Join dials.
+                        // `startCall` builds the session in `.idle`
+                        // (mapped to `.prejoin`) without dialing, so
+                        // this is the first SDP-producing call. Web is
+                        // audio-only; iOS carries the camera choice.
+                        if let session = session {
+                            _ = displayName
+                            session.dial(audio: micOn, video: camOn)
+                            return
+                        }
+                        // Mock design route — no session injected.
+                        state.seedMockState()
+                        state.setMic(micOn)
+                        state.setCamera(camOn)
+                        // displayName intentionally not wired into state —
+                        // production code maps it onto the local
+                        // participant's displayName via the contact-id
+                        // → name resolution path the chat layer owns.
+                        _ = displayName
+                        state.join()
+                    },
+                    onCancel: session == nil
+                        ? nil
+                        : {
+                            // Abandon a prepped-but-undialed call:
+                            // hanging up an `.idle` session drives it
+                            // to `.done`, and `onExit` clears it.
+                            session?.hangUp(reason: .hungUp)
+                            onExit()
+                        }
+                )
             default:
                 callView
             }

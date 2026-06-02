@@ -169,7 +169,12 @@ public fun ChatScreen(
     // G3-2-call-present — a "live" call (placed or accepted)
     // owns the full screen; `ringing` (incoming, pre-accept)
     // stays a lightweight inline banner.
+    // G3-2-prejoin-join — `Idle` is included so a prepped-but-
+    // undialed outgoing call presents the prejoin (mic / camera
+    // preview) before the user taps Join. There's no `activeCall`
+    // in `Idle` outside that prejoin window.
     val callIsLive = when (callStateSnapshot) {
+        me.lakko.app.calls.CallSession.WebCallState.Idle,
         me.lakko.app.calls.CallSession.WebCallState.Outgoing,
         me.lakko.app.calls.CallSession.WebCallState.Connecting,
         me.lakko.app.calls.CallSession.WebCallState.Connected,
@@ -227,6 +232,13 @@ public fun ChatScreen(
                     CallScreen(
                         onExit = { viewModel.clearFinishedCall() },
                         session = liveCall,
+                        // G3-2-prejoin-join — Join dials the prepped
+                        // session with the chosen mic / camera; Cancel
+                        // abandons it.
+                        onPrejoinJoin = { mic, cam ->
+                            viewModel.dialActiveCall(audio = mic, video = cam)
+                        },
+                        onPrejoinCancel = { viewModel.cancelActiveCall() },
                     )
                 }
             }

@@ -125,14 +125,17 @@ public final class ChatViewModel: ObservableObject {
     // MARK: - Phase 3a9 — call surface helpers
 
     /// Tap-to-call from the chat header. Mints a fresh
-    /// `call_id`, builds the outbound Offer, drives the
-    /// overlay.
+    /// `call_id` and builds the session (deriving + arming the
+    /// SFrame key) but does NOT dial yet — the session sits in
+    /// `.idle`, which `driveFrom` maps to the prejoin phase.
+    /// The user picks mic / camera on the prejoin screen and the
+    /// Join button calls `CallSession.dial` (G3-1-prejoin-join).
     public func startCall(audio: Bool = true, video: Bool = false) {
         guard activeCall == nil else { return }
+        _ = (audio, video)
         let callId = CallSession.mintCallId()
         let session = makeSession(callId: callId)
         activeCall = session
-        session.dial(audio: audio, video: video)
     }
 
     /// Accept the in-flight inbound call.
