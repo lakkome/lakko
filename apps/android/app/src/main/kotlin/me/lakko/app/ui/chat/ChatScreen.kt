@@ -55,8 +55,11 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.compose.foundation.background
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import me.lakko.app.ui.call.CallScreen
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
@@ -163,6 +166,18 @@ public fun ChatScreen(
     // Phase 3a10 — call surface.
     val activeCall by viewModel.activeCall.collectAsStateWithLifecycle()
     val callStateSnapshot = activeCall?.state?.collectAsStateWithLifecycle()?.value
+    // G3-2-call-present — a "live" call (placed or accepted)
+    // owns the full screen; `ringing` (incoming, pre-accept)
+    // stays a lightweight inline banner.
+    val callIsLive = when (callStateSnapshot) {
+        me.lakko.app.calls.CallSession.WebCallState.Outgoing,
+        me.lakko.app.calls.CallSession.WebCallState.Connecting,
+        me.lakko.app.calls.CallSession.WebCallState.Connected,
+        me.lakko.app.calls.CallSession.WebCallState.Ending,
+        me.lakko.app.calls.CallSession.WebCallState.Done,
+        -> true
+        else -> false
+    }
 
     Column(modifier = modifier.fillMaxSize()) {
         Header(
@@ -174,17 +189,47 @@ public fun ChatScreen(
             onStartCall = { viewModel.startCall(audio = true, video = false) },
         )
 
-        // Phase 3a10 — sticky call overlay. Renders only
-        // when an active session exists.
-        if (activeCall != null) {
+        // G3-2-call-present — the inline banner now only
+        // handles the `ringing` incoming-call prompt
+        // (Accept / Decline). Once the call is live it is
+        // presented full-screen via the `Dialog` below.
+        if (activeCall != null &&
+            callStateSnapshot == me.lakko.app.calls.CallSession.WebCallState.Ringing
+        ) {
             CallOverlay(
-                state = callStateSnapshot
-                    ?: me.lakko.app.calls.CallSession.WebCallState.Idle,
+                state = me.lakko.app.calls.CallSession.WebCallState.Ringing,
                 onAccept = { viewModel.acceptIncomingCall() },
                 onDecline = { viewModel.declineIncomingCall() },
                 onHangUp = { viewModel.hangUpCall() },
                 onDismiss = { viewModel.clearFinishedCall() },
             )
+        }
+
+        // G3-2-call-present — present the full in-call UI over
+        // the chat as a full-screen Dialog while the call is
+        // live. `CallScreen` drives itself from the injected
+        // `session` (CallUiState.driveFrom). The dialog is torn
+        // down when the call clears (`clearFinishedCall` sets
+        // `activeCall = null`); back-press / outside-tap
+        // dismissal are disabled so the only exit is the
+        // in-screen End button (→ hangUp → done → onExit).
+        val liveCall = activeCall
+        if (liveCall != null && callIsLive) {
+            Dialog(
+                onDismissRequest = { /* exit only via End button */ },
+                properties = DialogProperties(
+                    usePlatformDefaultWidth = false,
+                    dismissOnBackPress = false,
+                    dismissOnClickOutside = false,
+                ),
+            ) {
+                Box(modifier = Modifier.fillMaxSize()) {
+                    CallScreen(
+                        onExit = { viewModel.clearFinishedCall() },
+                        session = liveCall,
+                    )
+                }
+            }
         }
 
         if (!state.threadKnown) {

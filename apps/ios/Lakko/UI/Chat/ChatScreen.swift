@@ -53,7 +53,14 @@ public struct ChatScreen: View {
 
     public var body: some View {
         VStack(spacing: 0) {
-            callOverlay
+            // G3-1-call-present — the call host observes the
+            // live `CallSession` (so state transitions update
+            // the UI), renders the ringing banner inline, and
+            // presents the full `CallScreen` over the chat as a
+            // `fullScreenCover` once the call goes live.
+            if let call = viewModel.activeCall {
+                CallHostView(session: call, viewModel: viewModel)
+            }
             messagesList
             Divider()
             composer
@@ -280,89 +287,79 @@ public struct ChatScreen: View {
         }
     }
 
-    /// Phase 3a9 — sticky overlay rendering active call
-    /// state. Hidden when `activeCall == nil`. Surface
-    /// reproduces the web overlay shape: status caption +
-    /// Accept/Decline (ringing) or Hang up (active).
-    @ViewBuilder
-    private var callOverlay: some View {
-        if let call = viewModel.activeCall {
-            HStack {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(callOverlayHeadline(call.state))
-                        .font(.headline)
-                        .foregroundStyle(.white)
-                    Text(
-                        "Audio · signaling-only scaffold. " +
-                        "WebRTC pod integration is the 3a9-followup."
+    /// G3-1-call-present — host for the active call. Observes
+    /// the live `CallSession` (so state transitions drive the
+    /// UI — the previous `callOverlay` read `call.state` without
+    /// observing the session, so it could go stale). While the
+    /// call is `ringing` (incoming, pre-accept) it shows a
+    /// lightweight inline banner with Accept / Decline; once the
+    /// call goes live (outgoing / connecting / connected /
+    /// ending / done) it presents the full `CallScreen` over the
+    /// chat as a `fullScreenCover`, driven from the session via
+    /// `CallUiState.driveFrom`. The cover is torn down when the
+    /// call clears (`clearFinishedCall` sets `activeCall = nil`,
+    /// which removes this view from the chat body).
+    private struct CallHostView: View {
+        @ObservedObject var session: CallSession
+        @ObservedObject var viewModel: ChatViewModel
+
+        var body: some View {
+            ringingBanner
+                .fullScreenCover(
+                    isPresented: Binding(
+                        get: { Self.isLive(session.state) },
+                        set: { _ in }
                     )
-                    .font(.caption2)
-                    .foregroundStyle(.white.opacity(0.85))
+                ) {
+                    CallScreen(session: session) {
+                        viewModel.clearFinishedCall()
+                    }
                 }
-                Spacer()
-                callOverlayButtons(call)
-            }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 10)
-            .background(callOverlayBackground(call.state))
         }
-    }
 
-    private func callOverlayHeadline(_ s: CallSession.WebCallState) -> String {
-        switch s {
-        case .idle: return "📞"
-        case .outgoing: return "📞 Calling…"
-        case .ringing: return "📞 Incoming call"
-        case .connecting: return "📞 Connecting…"
-        case .connected: return "📞 In call"
-        case .ending: return "📞 Ending…"
-        case .done: return "📞 Call ended"
-        }
-    }
-
-    private func callOverlayBackground(
-        _ s: CallSession.WebCallState
-    ) -> Color {
-        switch s {
-        case .ringing: return .orange
-        case .connected: return .green
-        case .done: return .gray
-        default: return .blue
-        }
-    }
-
-    @ViewBuilder
-    private func callOverlayButtons(_ call: CallSession) -> some View {
-        switch call.state {
-        case .ringing:
-            HStack(spacing: 8) {
-                Button("Accept") {
-                    viewModel.acceptIncomingCall()
+        @ViewBuilder
+        private var ringingBanner: some View {
+            if session.state == .ringing {
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Incoming call")
+                            .font(.headline)
+                            .foregroundStyle(.white)
+                        Text("End-to-end encrypted")
+                            .font(.caption2)
+                            .foregroundStyle(.white.opacity(0.85))
+                    }
+                    Spacer()
+                    HStack(spacing: 8) {
+                        Button("Accept") { viewModel.acceptIncomingCall() }
+                            .buttonStyle(.borderedProminent)
+                            .tint(.white)
+                            .foregroundStyle(.green)
+                        Button("Decline", role: .destructive) {
+                            viewModel.declineIncomingCall()
+                        }
+                        .buttonStyle(.bordered)
+                        .tint(.white)
+                    }
                 }
-                .buttonStyle(.borderedProminent)
-                .tint(.white)
-                .foregroundStyle(.green)
-                Button("Decline", role: .destructive) {
-                    viewModel.declineIncomingCall()
-                }
-                .buttonStyle(.bordered)
-                .tint(.white)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 10)
+                .background(Color.orange)
             }
-        case .done:
-            Button("Dismiss") {
-                viewModel.clearFinishedCall()
+        }
+
+        /// `true` for any non-idle, non-ringing state — the
+        /// full call screen owns the experience from the moment
+        /// an outgoing call is placed or an incoming one is
+        /// accepted, through the terminal `done` (which shows
+        /// the "Call ended" overlay until it auto-dismisses).
+        private static func isLive(_ s: CallSession.WebCallState) -> Bool {
+            switch s {
+            case .outgoing, .connecting, .connected, .ending, .done:
+                return true
+            case .idle, .ringing:
+                return false
             }
-            .buttonStyle(.bordered)
-            .tint(.white)
-        case .idle:
-            EmptyView()
-        default:
-            Button("Hang up", role: .destructive) {
-                viewModel.hangUpCall()
-            }
-            .buttonStyle(.borderedProminent)
-            .tint(.white)
-            .foregroundStyle(.red)
         }
     }
 
