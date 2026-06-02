@@ -73,6 +73,40 @@ export type WebCallEndReason =
   | "timedOut"
   | "error";
 
+/**
+ * G3-3-conn-quality — live connection-quality sample derived
+ * from the active ICE candidate-pair (the web mirror of the
+ * iOS/Android `ConnectionStatsSnapshot`).
+ *
+ * `rttMs` is `null` until WebRTC has a usable round-trip
+ * estimate; `downBps` / `upBps` are `null` until a second poll
+ * sample lands (a single sample carries no rate) and are in
+ * **bits per second**. `relayed` is `true` when either end of
+ * the selected path is a TURN relay candidate.
+ */
+export interface WebConnectionStats {
+  readonly rttMs: number | null;
+  readonly relayed: boolean;
+  readonly downBps: number | null;
+  readonly upBps: number | null;
+}
+
+/** Read a numeric field off an opaque `RTCStats` entry. The
+ *  DOM types these as `any`; we narrow from `unknown` so the
+ *  parse stays type-safe. */
+function statNumber(stat: unknown, key: string): number | null {
+  if (typeof stat !== "object" || stat === null) return null;
+  const v = (stat as Record<string, unknown>)[key];
+  return typeof v === "number" ? v : null;
+}
+
+/** Read a string field off an opaque `RTCStats` entry. */
+function statString(stat: unknown, key: string): string | null {
+  if (typeof stat !== "object" || stat === null) return null;
+  const v = (stat as Record<string, unknown>)[key];
+  return typeof v === "string" ? v : null;
+}
+
 /** Callback set the caller wires in. Each fires on a
  *  state-machine transition. */
 export interface CallSessionCallbacks {
@@ -87,6 +121,10 @@ export interface CallSessionCallbacks {
   onOutboundSignaling(plaintextBytes: Uint8Array): void;
   /** State transition tick. UI re-renders. */
   onStateChange(state: WebCallState, reason?: WebCallEndReason): void;
+  /** G3-3-conn-quality — periodic connection-quality tick while
+   *  the call is connected (every 2 s). Optional: callers that
+   *  render no quality indicator can omit it and skip the poll. */
+  onConnectionStats?(stats: WebConnectionStats): void;
 }
 
 /** Audio / video request flags. Phase 3a8 MVP is audio-only
@@ -135,6 +173,17 @@ export class CallSession {
   private localStream: MediaStream | null = null;
   private pc: RTCPeerConnection | null = null;
   private pendingCandidates: RTCIceCandidateInit[] = [];
+
+  /** G3-3-conn-quality — `getStats()` poll loop handle, armed on
+   *  the first `connected` transition, cleared in `dispose()`. */
+  private statsTimer: ReturnType<typeof setInterval> | null = null;
+  /** Previous candidate-pair byte counters + monotonic timestamp
+   *  (ms) used to derive the down/up bitrate. */
+  private prevStatsBytes: {
+    received: number;
+    sent: number;
+    atMs: number;
+  } | null = null;
 
   constructor(
     callId: Uint8Array,
@@ -301,6 +350,13 @@ export class CallSession {
 
   /** Idempotent tear-down — safe to call multiple times. */
   dispose(): void {
+    // G3-3-conn-quality — stop the stats poll loop before
+    // dropping the peer connection.
+    if (this.statsTimer !== null) {
+      clearInterval(this.statsTimer);
+      this.statsTimer = null;
+    }
+    this.prevStatsBytes = null;
     if (this.pc !== null) {
       try {
         this.pc.close();
@@ -430,6 +486,91 @@ export class CallSession {
 
   private setState(state: WebCallState, reason?: WebCallEndReason): void {
     this.state = state;
+    // G3-3-conn-quality — arm the stats poll loop once, on the
+    // first transition into `connected`.
+    if (state === "connected") {
+      this.startStatsPolling();
+    }
     this.callbacks.onStateChange(state, reason);
+  }
+
+  /**
+   * G3-3-conn-quality — poll `getStats()` every 2 s while
+   * connected and push a derived quality sample to the caller.
+   * No-op when the caller wired no `onConnectionStats` handler
+   * (the poll never starts, so there's zero cost for callers
+   * that don't render a quality indicator). Cleared in
+   * `dispose()`.
+   */
+  private startStatsPolling(): void {
+    if (this.statsTimer !== null) return;
+    const onStats = this.callbacks.onConnectionStats;
+    if (onStats === undefined) return;
+    this.statsTimer = setInterval(() => {
+      void this.sampleConnectionStats().then((sample) => {
+        if (sample !== null) onStats(sample);
+      });
+    }, 2000);
+  }
+
+  /**
+   * Read the active ICE candidate-pair out of `getStats()` and
+   * derive a [`WebConnectionStats`]. Prefers the nominated
+   * succeeded pair, falling back to any succeeded pair (some
+   * stacks don't flag `nominated`). Down/up bitrate is the
+   * candidate-pair byte delta against a monotonic clock
+   * (`performance.now()`), in bits per second; `null` until a
+   * second sample lands. Deltas are clamped `>= 0` to tolerate
+   * counter resets on renegotiation.
+   */
+  private async sampleConnectionStats(): Promise<WebConnectionStats | null> {
+    const pc = this.pc;
+    if (pc === null) return null;
+    let report: RTCStatsReport;
+    try {
+      report = await pc.getStats();
+    } catch {
+      return null;
+    }
+    const byId = new Map<string, unknown>();
+    const pairs: unknown[] = [];
+    report.forEach((value: unknown, id: string) => {
+      byId.set(id, value);
+      if (statString(value, "type") === "candidate-pair") pairs.push(value);
+    });
+    const succeeded = (s: unknown): boolean =>
+      statString(s, "state") === "succeeded";
+    const isNominated = (s: unknown): boolean => {
+      if (typeof s !== "object" || s === null) return false;
+      return (s as Record<string, unknown>)["nominated"] === true;
+    };
+    const active =
+      pairs.find((s) => succeeded(s) && isNominated(s)) ?? pairs.find(succeeded);
+    if (active === undefined) {
+      this.prevStatsBytes = null;
+      return { rttMs: null, relayed: false, downBps: null, upBps: null };
+    }
+    const rttSec = statNumber(active, "currentRoundTripTime");
+    const rttMs = rttSec === null ? null : Math.round(rttSec * 1000);
+    const candType = (id: unknown): string | null =>
+      typeof id === "string" ? statString(byId.get(id), "candidateType") : null;
+    const relayed =
+      candType(statString(active, "localCandidateId")) === "relay" ||
+      candType(statString(active, "remoteCandidateId")) === "relay";
+    const received = statNumber(active, "bytesReceived") ?? 0;
+    const sent = statNumber(active, "bytesSent") ?? 0;
+    const nowMs = performance.now();
+    let downBps: number | null = null;
+    let upBps: number | null = null;
+    const prev = this.prevStatsBytes;
+    if (prev !== null) {
+      const dt = (nowMs - prev.atMs) / 1000;
+      if (dt > 0.1) {
+        downBps = Math.round((Math.max(0, received - prev.received) * 8) / dt);
+        upBps = Math.round((Math.max(0, sent - prev.sent) * 8) / dt);
+      }
+    }
+    this.prevStatsBytes = { received, sent, atMs: nowMs };
+    return { rttMs, relayed, downBps, upBps };
   }
 }

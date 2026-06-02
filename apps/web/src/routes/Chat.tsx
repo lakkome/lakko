@@ -50,7 +50,9 @@ import {
   mintCallId,
   type WebCallState,
   type WebCallEndReason,
+  type WebConnectionStats,
 } from "../calls/call-session";
+import { qualityColour, type QualityTier } from "../state/call-state";
 import { DsClient } from "../ds/client";
 import { loadWasm as loadWasmForCalls } from "../wasm";
 import {
@@ -167,6 +169,47 @@ export default function Chat(): JSX.Element {
 }
 
 // ---------------------------------------------------------------
+// G3-3-conn-quality — in-call connection-quality display helpers
+// ---------------------------------------------------------------
+
+/**
+ * Bucket a measured round-trip time into the shared
+ * [`QualityTier`]. These are UX display bands (NOT measured
+ * SLOs) matching the iOS / Android clients exactly: a `null`
+ * RTT (pre-measurement) reads as `good` so a freshly-connected
+ * call doesn't flash a red dot before the first stats sample.
+ */
+function qualityTierForRtt(rttMs: number | null): QualityTier {
+  if (rttMs === null) return "good";
+  if (rttMs < 100) return "excellent";
+  if (rttMs < 200) return "good";
+  if (rttMs < 350) return "fair";
+  if (rttMs < 600) return "poor";
+  return "bad";
+}
+
+/** Format a bits-per-second rate for the in-call readout.
+ *  Mirrors the `formatBps` in the Call.tsx design route. */
+function formatBps(bps: number | null): string {
+  if (bps === null) return "—";
+  if (bps >= 1_000_000) return `${(bps / 1_000_000).toFixed(1)} Mbps`;
+  if (bps >= 1_000) return `${(bps / 1_000).toFixed(0)} kbps`;
+  return `${bps} bps`;
+}
+
+/** Map a [`QualityTier`] to a concrete CSS colour for the dot. */
+function qualityDotColour(tier: QualityTier): string {
+  switch (qualityColour(tier)) {
+    case "green":
+      return "#22c55e";
+    case "yellow":
+      return "#eab308";
+    case "red":
+      return "#ef4444";
+  }
+}
+
+// ---------------------------------------------------------------
 // Main view
 // ---------------------------------------------------------------
 
@@ -250,6 +293,10 @@ function ChatView(props: {
   // up button.
   const [callState, setCallState] = createSignal<WebCallState>("idle");
   const [callEndReason, setCallEndReason] = createSignal<WebCallEndReason | null>(null);
+  // G3-3-conn-quality — live connection-quality sample from the
+  // session's getStats poll loop. null until the first tick lands.
+  const [callConnStats, setCallConnStats] =
+    createSignal<WebConnectionStats | null>(null);
   let activeCall: CallSession | null = null;
   const [remoteAudioStream, setRemoteAudioStream] = createSignal<MediaStream | null>(
     null,
@@ -303,8 +350,14 @@ function ChatView(props: {
         if (s === "done") {
           activeCall = null;
           setRemoteAudioStream(null);
+          // G3-3-conn-quality — drop the stale sample so the
+          // next call doesn't briefly flash the previous one.
+          setCallConnStats(null);
         }
       },
+      // G3-3-conn-quality — live RTT / bitrate / relay sample,
+      // pushed every 2 s while the call is connected.
+      onConnectionStats: (stats) => setCallConnStats(stats),
     });
   }
 
@@ -1296,6 +1349,47 @@ function ChatView(props: {
             <div style={{ "font-size": "0.85rem", "margin-top": "0.2rem" }}>
               Audio · P2P (DTLS-SRTP). SFU + SFrame land in Phase 3b.
             </div>
+            {/* G3-3-conn-quality — live RTT / bitrate / path readout
+                from the session's getStats poll. Shown only while
+                connected (the sample is meaningless before ICE
+                settles). */}
+            <Show when={callState() === "connected"}>
+              <div
+                style={{
+                  "font-size": "0.8rem",
+                  "margin-top": "0.3rem",
+                  display: "flex",
+                  "align-items": "center",
+                  gap: "0.4rem",
+                }}
+              >
+                <span
+                  aria-hidden="true"
+                  style={{
+                    width: "0.55rem",
+                    height: "0.55rem",
+                    "border-radius": "50%",
+                    "background-color": qualityDotColour(
+                      qualityTierForRtt(callConnStats()?.rttMs ?? null),
+                    ),
+                    display: "inline-block",
+                    "flex-shrink": 0,
+                  }}
+                />
+                <span>
+                  {(() => {
+                    const s = callConnStats();
+                    const rtt =
+                      s?.rttMs != null ? `${s.rttMs} ms` : "measuring…";
+                    const path =
+                      s?.relayed === true ? "relay" : s != null ? "direct" : "—";
+                    return `${rtt} · ${path} · ↓ ${formatBps(
+                      s?.downBps ?? null,
+                    )} · ↑ ${formatBps(s?.upBps ?? null)}`;
+                  })()}
+                </span>
+              </div>
+            </Show>
           </div>
           <div style={{ display: "flex", gap: "0.4rem" }}>
             <Show when={callState() === "ringing"}>
