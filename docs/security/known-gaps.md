@@ -540,72 +540,75 @@ plumbing only.
 MLS suites pin classical curves today. PQ migration
 follows the WG.
 
-### G-26: RFC 9605 §4.3 wire frame header — serializer **landed**, end-to-end interop pending
+### G-26: RFC 9605 §4.3 wire frame — serializer + framed pipeline + cross-platform AAD **landed**, live RTP interop verification pending
 
-**Status (2026-05-25):** partially closed. The serializer
-+ deserializer now lives in
-[`crates/lakko-calls/src/header.rs`](../../crates/lakko-calls/src/header.rs)
-as `SframeHeader::encode` / `SframeHeader::decode`, with
-12 unit tests covering the round trip + pinned wire
-layouts + reserved-bit refusal + truncation handling +
-bit-packing first-byte invariants for every LEN /
-KID / KLEN value in `0..=7`. The implementation is RFC
-9605 §4.3 conformant by construction — every assertion
-that lands in production maps to a clause of the spec.
+**Status (2026-06-02):** nearly closed; only the live
+cross-platform verification step remains. Progress since
+the 2026-05-25 entry:
 
-**What is still open.** Two pieces remain:
-
-1. **Integration into the `seal` / `open` pipeline.**
+1. **Wire serializer.**
+   [`crates/lakko-calls/src/header.rs`](../../crates/lakko-calls/src/header.rs)
+   ships `SframeHeader::encode` / `SframeHeader::decode`
+   (12 unit tests; RFC 9605 §4.3 conformant by
+   construction — round trip + pinned wire layouts +
+   reserved-bit refusal + truncation handling +
+   bit-packing first-byte invariants for every LEN / KID
+   / KLEN value in `0..=7`).
+2. **Framed seal/open pipeline — DONE.**
    [`lakko_calls::sframe`](../../crates/lakko-calls/src/sframe.rs)
-   still exposes the typed
-   `(frame_counter, ciphertext)` tuple instead of
-   prepending `SframeHeader::encode` to the AEAD output.
-   The integration is mechanical and lands with
-   `S-3-B-routing-media` (see
-   `docs/ROADMAP-PHASE3-CLOSEOUT.md`) — the SFU needs to
-   read the KID byte to route by participant without
-   decoding the ciphertext, so the wire form becomes the
-   natural call surface at that sprint.
-2. **External interop verification.** The current tests
-   are self-consistency: encode → decode → equal +
-   layout-pinned constants drawn straight from the spec.
-   They do NOT prove that an mlspp or browser-native
-   SFrame stack reads our bytes the same way. That gap
-   becomes answerable in `S-3-A-acceptance` when at
-   least one external SFrame stack is in the loop
-   (Chrome's `RTCRtpScriptTransform` with SFrame, or
-   mlspp's reference). The plan is to add an interop
-   corpus file at `crates/lakko-calls/tests/sframe_
-   interop.json` populated from the external stack and
-   asserted against `SframeHeader::decode`.
+   now exposes `ParticipantKey::seal_framed` (peeks the
+   counter, builds the header, seals with the header as
+   AEAD AAD, returns `header || ciphertext`) and
+   `open_framed` (decodes the header, binds the EXACT
+   on-wire header bytes as AAD, checks `kid == sender_leaf`,
+   opens). 7 property tests added on top of the prior
+   suite. The SFU reads the KID off the wire to route by
+   participant without touching the ciphertext.
+3. **Cross-platform AAD contract — [ADR-0013](../adr/0013-sframe-cross-platform-aad.md).**
+   The AEAD AAD is the SFrame wire header (KID + CTR), NOT
+   any host RTP `additional_data`. This is the property
+   that lets a frame sealed on one platform open on
+   another: the host metadata is not reconstructible
+   across stacks, so it cannot be in the authenticated set.
+4. **All three client surfaces consume the framed path.**
+   The flat C ABI (`lakko-sframe-native`:
+   `lakko_sframe_seal_framed` / `_open_framed`), UniFFI
+   (`ParticipantKey.seal_framed` / `open_framed`), and
+   wasm-bindgen (`sealFramed` / `openFramed`) all expose
+   it. The native libwebrtc C++ bridge
+   (`apps/shared/sframe-bridge`) calls `seal_framed` /
+   `open_framed` directly (host `additional_data`
+   intentionally unbound); its 8-assertion host test
+   (`just test-sframe-bridge`) proves both that a
+   mismatched host AAD does NOT fail decryption and that a
+   tampered header DOES. The browser side is the
+   `RTCRtpScriptTransform` worker
+   (`apps/web/src/calls/sframe-transform.ts` +
+   `sframe-transform-worker.ts`) calling `sealFramed` /
+   `openFramed` inside a module worker.
 
-**Why this isn't a security gap today.** The current
-production path runs SFrame inside a closed system:
-every participant uses the same `lakko-calls` Rust
-binary, every seal/open exchange threads
-`(frame_counter, ciphertext)` as a Rust tuple through
-WebRTC insertable streams. The counter is the only
-piece of header information the receiver needs, and it
-crosses the boundary as a typed `u32` rather than a
-serialized byte. The keying math (which is what
-determines whether the AEAD opens) is fully RFC 9605
-§4.4 conformant; the wire layout has now caught up with
-a parallel serializer module.
+**What is still open — live cross-platform RTP verification.**
+The byte-level interop is asserted by construction (the
+header is platform-independent; native + web call the same
+`lakko-calls` core through the same framed API) and by the
+native host test. What has NOT been observed firsthand is a
+real media frame sealed on one platform (e.g. a Chrome
+`RTCRtpScriptTransform` sender) decrypting on another (e.g.
+an iOS / Android libwebrtc receiver) over a live SFU
+forwarding path. That requires two real endpoints plus the
+SFU in the middle and cannot be done in a headless build
+environment. The web worker also is not yet wired into a
+live multi-party `CallSession` — that lands with the
+SFU-multiparty client wire-up.
 
-**When the remaining gap matters.** The moment we want to:
-- Interop with a non-Lakko SFrame implementation (e.g.
-  a browser-side WebRTC stack that supports SFrame
-  natively per the Insertable Streams + SFrame W3C
-  draft).
-- Forward SFrame frames through the SFU's selective
-  forwarding path **without decoding** the outer tuple
-  in our Rust binary — the SFU (now Rust, per
-  ADR-0011) parses the wire header to route by KID.
-
-`S-3-B-routing-media` and `S-3-A-acceptance` are the
-sprints that close the remaining two pieces. Recorded
-here so an auditor sees the residual scope, not the
-absence of any progress.
+**Why this isn't a security gap today.** The keying math +
+the AAD set + the wire layout are all RFC 9605 conformant
+and shared across platforms by construction. The residual
+item is a verification step (does a live cross-stack frame
+round-trip?), not a missing mechanism. The fail-closed
+posture holds throughout: a frame that fails to
+parse / authenticate is dropped, never forwarded as
+plaintext (invariant #4), on every surface.
 
 ## Dependency advisories
 

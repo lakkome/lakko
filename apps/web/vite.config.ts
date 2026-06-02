@@ -13,6 +13,17 @@ import wasm from "vite-plugin-wasm";
 export default defineConfig({
   plugins: [solid(), wasm()],
 
+  // The SFrame transform runs inside a module worker
+  // (`src/calls/sframe-transform-worker.ts`) that imports the same
+  // wasm-pack core to call `sealFramed` / `openFramed`. Worker
+  // bundles get their own plugin pipeline in Vite, so `vite-plugin-wasm`
+  // must be repeated here or the worker's wasm import fails to resolve.
+  // `format: "es"` keeps the worker a module (we `import` the core).
+  worker: {
+    format: "es",
+    plugins: () => [wasm()],
+  },
+
   // Phase 1.16a: dev server runs on 5173 (Vite default). Production
   // build target is < 2 MB gzipped — measured against `dist/` after
   // `npm run build`. Bundle optimisation is 1.16c.
