@@ -27,6 +27,7 @@ A Telegram-class secure messenger with **E2EE by default for everything** (1×1,
 | [0010](docs/adr/0010-channels-two-tier-broadcast.md) | Channels — two-tier PublisherGroup + sender-key broadcast for >50k subscribers (Phase 4 design) |
 | [0011](docs/adr/0011-rust-sfu.md) | Rust SFU on `webrtc-rs` / `str0m` — supersedes 0003 (SFU choice) + 0008. Stack winner decided in S-3-B-spike |
 | [0012](docs/adr/0012-ech-hpke-adapter.md) | ECH wire-up via RustCrypto/hpke adapter; ring crypto provider retained. HTTP + WebTransport wired; REALITY architecturally not applicable |
+| [0013](docs/adr/0013-sframe-cross-platform-aad.md) | Cross-platform SFrame AEAD AAD = the RFC 9605 `SframeHeader` bytes (KID+CTR), no host RTP `additional_data` — so web (RTCRtpScriptTransform) and native (FrameEncryptorInterface) interop. Native shim currently binds RTP `additional_data` → reconcile (follow-up). Closes G-26 in design |
 
 The full strategic plan and trade-offs live in `~/.claude/plans/1-nested-wreath.md`.
 The tactical decomposition of all 6 phases with sprint breakdowns lives in [`docs/ROADMAP.md`](docs/ROADMAP.md).
