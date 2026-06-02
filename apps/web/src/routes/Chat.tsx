@@ -415,6 +415,20 @@ function ChatView(props: {
     }
   });
 
+  // G3-3-web-call-controls — drive the real microphone from the
+  // store's local-participant `micOn` flag. The Call.tsx mic button
+  // toggles `callActions.setMic`; this mirrors it onto the live
+  // session (idempotent — `track.enabled = on` is cheap, so the
+  // redundant calls on each quality patch are harmless). Web 1×1 is
+  // audio-only, so this is the only real in-call control; the camera
+  // button stays UI-only until web video calls land.
+  createEffect(() => {
+    const local = callUi.participants().find((p) => p.isLocal);
+    if (local !== undefined && activeCall !== null) {
+      activeCall.setMicrophoneEnabled(local.micOn);
+    }
+  });
+
   /** Build outbound-signaling callback that PUTs raw
    *  bytes onto the chat group's DS journal as an MLS
    *  application message. */

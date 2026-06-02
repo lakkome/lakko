@@ -348,6 +348,22 @@ export class CallSession {
     this.endLocal(reason);
   }
 
+  /**
+   * G3-3-web-call-controls — mute / unmute the local microphone by
+   * flipping the captured audio track's `enabled` flag. This is a
+   * local-only gate (the track stays in the PeerConnection; we just
+   * stop sending real samples), so it needs no renegotiation and
+   * takes effect immediately. Web 1×1 is audio-only, so this is the
+   * one real in-call control; camera capture is a separate
+   * (deferred) web-video feature.
+   */
+  setMicrophoneEnabled(on: boolean): void {
+    if (this.localStream === null) return;
+    for (const track of this.localStream.getAudioTracks()) {
+      track.enabled = on;
+    }
+  }
+
   /** Idempotent tear-down — safe to call multiple times. */
   dispose(): void {
     // G3-3-conn-quality — stop the stats poll loop before
