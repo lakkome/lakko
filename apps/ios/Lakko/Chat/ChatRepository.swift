@@ -412,6 +412,15 @@ public final class ChatRepository: ObservableObject {
         }
     }
 
+    /// Number of members in the live MLS group for `groupIdHex`, or
+    /// `nil` if there is no handle. Used by the call surface to route a
+    /// >2-member chat through the SFU group-call path and a 2-member
+    /// chat through the 1×1 P2P path.
+    public func memberCount(groupIdHex: String) -> Int? {
+        guard let record = groups[groupIdHex] else { return nil }
+        return (try? record.group.memberCount()).map { Int($0) }
+    }
+
     public func sendMessage(
         groupIdHex: String,
         plaintext: String,

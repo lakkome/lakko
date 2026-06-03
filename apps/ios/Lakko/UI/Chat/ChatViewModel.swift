@@ -83,6 +83,11 @@ public final class ChatViewModel: ObservableObject {
     // MARK: - Wiring
 
     private let repository: ChatRepository
+    /// Supplies the current auth session token for minting the SFU
+    /// call-admission JWT. Defaults to `{ nil }` (group calls then
+    /// refuse, fail-closed); the composition root passes
+    /// `{ authRepository.identitySecrets?.sessionToken }`.
+    private let sessionTokenProvider: () -> String?
     private var cancellables: Set<AnyCancellable> = []
     /// Phase 2a3e2b-iOS — cross-device sync. Attached via
     /// [`attachSync`] from the screen so the existing init
@@ -100,9 +105,14 @@ public final class ChatViewModel: ObservableObject {
     private var draftBroadcastWork: DispatchWorkItem?
     private var didSeedDraft: Bool = false
 
-    public init(repository: ChatRepository, groupIdHex: String) {
+    public init(
+        repository: ChatRepository,
+        groupIdHex: String,
+        sessionTokenProvider: @escaping () -> String? = { nil }
+    ) {
         self.repository = repository
         self.groupIdHex = groupIdHex
+        self.sessionTokenProvider = sessionTokenProvider
         sync(state: repository.state)
         repository.$state
             .receive(on: RunLoop.main)
@@ -238,6 +248,69 @@ public final class ChatViewModel: ObservableObject {
     /// Published so the SwiftUI overlay re-renders on every
     /// state transition.
     @Published public private(set) var activeCall: CallSession?
+
+    /// Active multi-party SFU group call for this thread (`nil` when
+    /// none). A group chat (>2 members) routes through this; a 1×1 chat
+    /// stays on `activeCall`. Published so the UI presents the call
+    /// overlay driven by `sfuCallUiState`.
+    @Published private(set) var activeSfuCall: SfuCallUi?
+
+    /// The `CallUiState` the active SFU call drives (roster / phase /
+    /// E2EE). The SwiftUI overlay observes this while `activeSfuCall`
+    /// is non-nil. Reused across calls. `internal` — `SfuCallUi` /
+    /// `CallUiState` are app-module types consumed by `ChatScreen`.
+    let sfuCallUiState = CallUiState()
+
+    /// Start a multi-party SFU group call for this (group) chat. Mints
+    /// the call-admission JWT, derives the per-call SFrame seed + leaf
+    /// from the MLS exporter, and connects through `SfuCallUi`. Fails
+    /// closed (NSLog + no call) on any missing prerequisite — SFU URL,
+    /// session token, or call-key derivation.
+    func startGroupCall() {
+        guard activeSfuCall == nil, activeCall == nil else { return }
+        guard let base = SfuConfig.baseUrl else {
+            NSLog("startGroupCall: SFU URL not configured (LakkoSfuUrl) — refusing")
+            return
+        }
+        guard let token = sessionTokenProvider() else {
+            NSLog("startGroupCall: no session token — re-authenticate to start a group call")
+            return
+        }
+        let callIdBytes = CallSession.mintCallId()
+        let callIdHex = callIdBytes.map { String(format: "%02x", $0) }.joined()
+        guard let key = repository.deriveCallKey(groupIdHex: groupIdHex, callId: callIdBytes) else {
+            NSLog("startGroupCall: call-key derivation failed — refusing per invariant #4")
+            return
+        }
+        let jwt = CallJwtClient()
+        jwt.setSessionToken(token)
+        Task { @MainActor in
+            do {
+                let minted = try await jwt.mint(callId: callIdHex, role: .participant)
+                let config = SfuCallSession.Config(
+                    sfuBaseUrl: base,
+                    jwt: minted.jwt,
+                    seed: key.seed,
+                    localLeaf: key.localLeaf,
+                    audio: true,
+                    video: false
+                )
+                let handle = SfuCallUi(config: config, ui: sfuCallUiState)
+                activeSfuCall = handle
+                try await handle.connect()
+            } catch {
+                NSLog("startGroupCall failed: %@", error.localizedDescription)
+                activeSfuCall?.hangUp()
+                activeSfuCall = nil
+            }
+        }
+    }
+
+    /// Hang up the active SFU group call + clear it.
+    func hangUpGroupCall() {
+        activeSfuCall?.hangUp()
+        activeSfuCall = nil
+    }
 
     /// Phase 2a3e2c-iOS — read-cursor broadcast tracker.
     /// Highest broadcast messageId; the per-`messages` effect

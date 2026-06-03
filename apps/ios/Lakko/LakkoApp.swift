@@ -258,7 +258,10 @@ private struct SessionRoot: View {
                         ChatScreen(
                             viewModel: ChatViewModel(
                                 repository: chatRepository,
-                                groupIdHex: groupIdHex
+                                groupIdHex: groupIdHex,
+                                sessionTokenProvider: {
+                                    authRepository.identitySecrets?.sessionToken
+                                }
                             ),
                             onBack: { destination = .chats }
                         )
