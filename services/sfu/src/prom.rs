@@ -50,6 +50,22 @@ pub mod names {
     /// fire when this exceeds the configured refresh cadence
     /// by a wide margin.
     pub const JWKS_CACHE_AGE_SECS: &str = "lakko_sfu_jwks_cache_age_seconds";
+    /// Cumulative count of RTP frames successfully forwarded
+    /// to a downstream peer (one increment per destination
+    /// peer per frame — a publisher frame fanned out to N
+    /// subscribers bumps this by N). Lets a dashboard see
+    /// aggregate fanout volume; a flat line while
+    /// `peers_active > 1` means media isn't flowing.
+    pub const MEDIA_FRAMES_FORWARDED_TOTAL: &str = "lakko_sfu_media_frames_forwarded_total";
+    /// Cumulative count of fanout attempts that did NOT reach
+    /// the wire, labelled `reason` (`no_writer` —
+    /// renegotiation not yet open / peer torn down;
+    /// `no_codec_match` — destination codec set excludes the
+    /// PT; `write_failed` — str0m refused the write). A spike
+    /// in `no_writer` is the signal that subscribers are
+    /// starved (renegotiation stuck), which is the
+    /// fanout-fairness alarm.
+    pub const MEDIA_FRAMES_DROPPED_TOTAL: &str = "lakko_sfu_media_frames_dropped_total";
 }
 
 /// Failures while installing the recorder. The exporter
@@ -115,6 +131,14 @@ impl MetricsExporter {
             names::JWKS_CACHE_AGE_SECS,
             "JWKS cache age in seconds since last successful refresh"
         );
+        metrics::describe_counter!(
+            names::MEDIA_FRAMES_FORWARDED_TOTAL,
+            "RTP frames forwarded to a downstream peer (one per destination per frame)"
+        );
+        metrics::describe_counter!(
+            names::MEDIA_FRAMES_DROPPED_TOTAL,
+            "Fanout attempts that did not reach the wire, labelled by reason"
+        );
         // Initialise each counter / gauge so it ships a zero
         // sample at the first scrape.
         metrics::counter!(names::PEERS_ADMITTED_TOTAL).absolute(0);
@@ -123,6 +147,7 @@ impl MetricsExporter {
         metrics::counter!(names::SIGNALING_FRAMES_TOTAL).absolute(0);
         metrics::gauge!(names::PEERS_ACTIVE).set(0.0);
         metrics::gauge!(names::JWKS_CACHE_AGE_SECS).set(0.0);
+        metrics::counter!(names::MEDIA_FRAMES_FORWARDED_TOTAL).absolute(0);
         Ok(Self { handle })
     }
 

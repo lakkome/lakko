@@ -1641,11 +1641,27 @@ asserts the **exact same bytes** surface as an
 `Event::MediaData` at B. A pass proves the SFU received
 A's RTP, resolved B's downstream mid via the `tracks_out`
 map, and forwarded the opaque payload verbatim — without
-inspecting, parsing, or peeking the SFrame header. The
-remaining deferred work (3-plus-peer fanout fairness,
-simulcast-layer selection) extends this harness by adding
-peers / tracks; it does not change the verbatim-forwarding
-property this test pins.
+inspecting, parsing, or peeking the SFrame header.
+
+**Fanout fairness (Jun 2026).** `fanout_media_data` now
+returns a `FanoutOutcome { sent, no_writer, no_codec_match,
+write_failed }` tally — one increment per `(frame ×
+destination peer)` — and mirrors it into the
+`lakko_sfu_media_frames_forwarded_total` +
+`lakko_sfu_media_frames_dropped_total{reason}` Prometheus
+counters, so a starved subscriber (a spike in `no_writer`)
+is observable rather than silently dropped. The fairness
+invariant — for one origin frame in an N-peer call, every
+non-origin peer is visited exactly once, the origin never —
+is pinned by `fanout_visits_every_non_origin_peer_for_three_plus`
+(asserts `attempted() == N - 1` for N ∈ {3,4,5}) +
+`fanout_tally_is_per_frame_times_non_origin_peers`. The
+**still-deferred** work is simulcast-layer selection on the
+downstream offer (RID / dependency-descriptor extraction +
+per-receiver layer choice under bandwidth estimation) — a
+wire-touching feature that needs simulcast-capable test
+clients; it does not change the verbatim-forwarding property
+this section pins.
 
 ## Channel-broadcast invariants (Phase 4)
 

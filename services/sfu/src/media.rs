@@ -1365,6 +1365,80 @@ async fn drain_outputs(
     }
 }
 
+/// Per-pass tally of [`fanout_media_data`] outcomes — one
+/// increment per (frame, destination peer). Returned so the
+/// media task + tests can observe fanout health without
+/// scraping the global metrics registry;
+/// [`fanout_media_data`] also mirrors it into the
+/// `lakko_sfu_media_frames_*` Prometheus counters.
+///
+/// The **fairness** property the SFU upholds: for a single
+/// origin frame in an N-peer call, [`Self::attempted`]
+/// equals `N - 1` — every non-origin peer is visited exactly
+/// once (none skipped, none double-served) and the origin is
+/// never offered its own frame.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FanoutOutcome {
+    /// Frames handed to a live downstream writer.
+    pub(crate) sent: u64,
+    /// Skips because the destination's `tracks_out` entry is
+    /// not yet `Open` (renegotiation in flight) or str0m has
+    /// no writer for the mid (peer teardown race).
+    pub(crate) no_writer: u64,
+    /// Skips because the destination codec set excludes the
+    /// incoming PT.
+    pub(crate) no_codec_match: u64,
+    /// str0m refused the write.
+    pub(crate) write_failed: u64,
+}
+
+impl FanoutOutcome {
+    /// Total forward attempts this pass = sum of all
+    /// outcome buckets = `frames × non-origin peers`.
+    pub(crate) fn attempted(&self) -> u64 {
+        self.sent + self.no_writer + self.no_codec_match + self.write_failed
+    }
+}
+
+/// Mirror a [`FanoutOutcome`] into the
+/// `lakko_sfu_media_frames_{forwarded,dropped}_total`
+/// counters. Drops are labelled by `reason`. Each bucket is
+/// only touched when non-zero so we don't create empty
+/// label series on every idle tick (the no-op recorder used
+/// in unit tests makes these calls free either way).
+fn record_fanout_metrics(outcome: &FanoutOutcome) {
+    use crate::prom::names::{MEDIA_FRAMES_DROPPED_TOTAL, MEDIA_FRAMES_FORWARDED_TOTAL};
+    if outcome.sent > 0 {
+        metrics::counter!(MEDIA_FRAMES_FORWARDED_TOTAL).increment(outcome.sent);
+    }
+    if outcome.no_writer > 0 {
+        metrics::counter!(MEDIA_FRAMES_DROPPED_TOTAL, "reason" => "no_writer")
+            .increment(outcome.no_writer);
+    }
+    if outcome.no_codec_match > 0 {
+        metrics::counter!(MEDIA_FRAMES_DROPPED_TOTAL, "reason" => "no_codec_match")
+            .increment(outcome.no_codec_match);
+    }
+    if outcome.write_failed > 0 {
+        metrics::counter!(MEDIA_FRAMES_DROPPED_TOTAL, "reason" => "write_failed")
+            .increment(outcome.write_failed);
+    }
+    // `no_writer` is the expected pre-negotiation transient, so it
+    // is not worth a log line. A write failure or codec mismatch is
+    // unusual — surface a per-pass summary (debug level, off in
+    // production by default) carrying the full tally for diagnosis.
+    if outcome.write_failed > 0 || outcome.no_codec_match > 0 {
+        tracing::debug!(
+            attempted = outcome.attempted(),
+            sent = outcome.sent,
+            no_writer = outcome.no_writer,
+            no_codec_match = outcome.no_codec_match,
+            write_failed = outcome.write_failed,
+            "media: fanout pass had non-transient drops"
+        );
+    }
+}
+
 /// Walk `pending` and forward each frame to every peer
 /// in `router` that is NOT the origin. The write
 /// enqueues bytes into the destination peer's str0m
@@ -1375,9 +1449,13 @@ async fn drain_outputs(
 /// matching writer or codec PT — see [`MediaForward`]
 /// for the per-variant skip semantics and the deferred
 /// TracksIn/TracksOut mapping note.
-pub(crate) fn fanout_media_data(router: &mut MediaRouter, pending: &[PendingFanout]) {
+pub(crate) fn fanout_media_data(
+    router: &mut MediaRouter,
+    pending: &[PendingFanout],
+) -> FanoutOutcome {
+    let mut outcome = FanoutOutcome::default();
     if pending.is_empty() || router.len() < 2 {
-        return;
+        return outcome;
     }
     for event in pending {
         // Walk the peer list manually so we can borrow
@@ -1396,14 +1474,17 @@ pub(crate) fn fanout_media_data(router: &mut MediaRouter, pending: &[PendingFano
             let Some(peer) = router.peers_mut().get_mut(idx) else {
                 continue;
             };
+            // Fairness: every non-origin peer is visited
+            // exactly once per frame, and each outcome is
+            // tallied so a starved subscriber (a spike in
+            // `no_writer`) is observable in the metrics
+            // rather than silently dropped.
             match peer.forward_media_data(&event.origin, &event.data) {
-                MediaForward::Sent | MediaForward::NoWriter | MediaForward::NoCodecMatch => {
-                    // First two are the expected steady-
-                    // state outcomes; we don't log them
-                    // per-packet. NoCodecMatch is rare
-                    // and not actionable per-packet.
-                },
+                MediaForward::Sent => outcome.sent += 1,
+                MediaForward::NoWriter => outcome.no_writer += 1,
+                MediaForward::NoCodecMatch => outcome.no_codec_match += 1,
                 MediaForward::WriteFailed(detail) => {
+                    outcome.write_failed += 1;
                     tracing::warn!(
                         target_peer = %peer.id(),
                         error = %detail,
@@ -1413,6 +1494,8 @@ pub(crate) fn fanout_media_data(router: &mut MediaRouter, pending: &[PendingFano
             }
         }
     }
+    record_fanout_metrics(&outcome);
+    outcome
 }
 
 /// Walk `new_tracks` and push a matching
@@ -1910,6 +1993,73 @@ mod tests {
             last_sender_info: None,
             audio_start_of_talk_spurt: false,
         }
+    }
+
+    // ============================================================
+    // Fanout fairness (C-39 follow-up)
+    // ============================================================
+
+    /// A single origin frame in an N-peer call is offered to
+    /// EVERY non-origin peer exactly once — never to the
+    /// origin, never twice, never skipping one. Unit-test
+    /// peers have no negotiated writer, so every attempt lands
+    /// in `no_writer`; the tally proves the iteration touched
+    /// each of the `N - 1` non-origin peers (the fairness
+    /// invariant), independent of writer state. Verbatim
+    /// delivery through an Open writer is covered by the
+    /// two-client synthetic E2E.
+    #[test]
+    fn fanout_visits_every_non_origin_peer_for_three_plus() {
+        for n_peers in [3usize, 4, 5] {
+            let mut r = MediaRouter::new();
+            let names: Vec<String> = (0..n_peers).map(|i| format!("peer{i}")).collect();
+            for nm in &names {
+                r.add_peer(MediaPeer::new(pid(nm), Instant::now()));
+            }
+            let pending = vec![PendingFanout {
+                origin: pid(&names[0]),
+                data: synthetic_media_data(),
+            }];
+
+            let outcome = fanout_media_data(&mut r, &pending);
+
+            let expected = (n_peers - 1) as u64;
+            assert_eq!(
+                outcome.attempted(),
+                expected,
+                "{n_peers}-peer fanout must touch every non-origin peer exactly once"
+            );
+            assert_eq!(outcome.no_writer, expected, "{n_peers}-peer no_writer");
+            assert_eq!(outcome.sent, 0, "{n_peers}-peer sent");
+            assert_eq!(outcome.no_codec_match, 0, "{n_peers}-peer no_codec_match");
+            assert_eq!(outcome.write_failed, 0, "{n_peers}-peer write_failed");
+        }
+    }
+
+    /// The tally is per `(frame × non-origin peer)`: two
+    /// frames from the same origin in a 3-peer call yield
+    /// `2 × 2 = 4` attempts.
+    #[test]
+    fn fanout_tally_is_per_frame_times_non_origin_peers() {
+        let mut r = MediaRouter::new();
+        for nm in &["a", "b", "c"] {
+            r.add_peer(MediaPeer::new(pid(nm), Instant::now()));
+        }
+        let pending = vec![
+            PendingFanout {
+                origin: pid("a"),
+                data: synthetic_media_data(),
+            },
+            PendingFanout {
+                origin: pid("a"),
+                data: synthetic_media_data(),
+            },
+        ];
+
+        let outcome = fanout_media_data(&mut r, &pending);
+
+        assert_eq!(outcome.attempted(), 4);
+        assert_eq!(outcome.no_writer, 4);
     }
 
     // ============================================================
