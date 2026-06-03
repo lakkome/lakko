@@ -247,6 +247,51 @@ Per [ADR-0011](./adr/0011-rust-sfu.md). Lives in
       alternative verifier exists.
 - [ ] Memory per active call ≤ 20 MB.
 
+## Group C — SFU multi-party client arc (post-Group-B)
+
+Group B brought up the **server** (str0m media + signaling +
+track routing). Group C is the **client** half: wiring web,
+iOS, and Android to that SFU for E2EE group calls, all media
+SFrame-sealed end-to-end (the SFU sees only ciphertext —
+[invariant #2](../CLAUDE.md)). One shared wire protocol
+(`lakko-sfu-proto`) + one shared SFrame core
+(`lakko_calls::sframe`) drive all three clients so nothing
+drifts. **All sprints below are complete.**
+
+| Sprint | Composition | Status |
+|---|---|---|
+| **SFU-1** | `crates/lakko-sfu-proto` — typed `ServerFrame` / `ClientFrame` wire definition shared by `services/sfu` (re-export) + both client FFI crates (UniFFI `parse_sfu_server_frame` / `compose_sfu_*`, wasm-bindgen `validateSfuServerFrame` / `composeSfu*`). Fuzzed (`client_frame_decode`). | done |
+| **SFU-2** | `CallJwtClient` admission (Swift + Kotlin, pre-existing, verified). | done |
+| **SFU-3-sframe** | ADR-0013 cross-platform AAD contract (C-55) + C ABI `seal_framed` / `open_framed` + web `RTCRtpScriptTransform` worker (`sframe-transform{,-worker}.ts`). | done |
+| **SFU-3-web** | Web multi-party `SfuCallSession` + `createSfuCallUi` adapter + `Chat.tsx` group-call trigger (JWT + seed + connect) + per-tile remote video. | done |
+| **SFU-3-native-signaling** | Swift `SfuSignalingClient` (`URLSessionWebSocketTask`) + Kotlin (`Ktor` WebSockets). | done |
+| **SFU-3-native-session** | iOS + Android `SfuCallSession` — one PC to the SFU, `armSFrameEncryptors` before the offer, `armSFrameDecryptor` per remote receiver, SFU-initiated renegotiation, local ICE trickle. | done |
+| **SFU-3-native-callui** | iOS `SfuCallUi.swift` + Android `SfuCallUi.kt` — bind session callbacks onto the shared `CallUiState` (phase / roster / E2EE pill / remote + local video). | done |
+| **SFU-3-native-trigger+present** | `ChatViewModel.startGroupCall` (member-count branch → SFU vs 1×1, JWT mint, seed derive, fail-closed) + `ChatScreen` presentation (iOS `fullScreenCover` w/ external `CallUiState`; Android full-screen `Dialog`). | done |
+| **SFU-3-native-video** | `SfuCallSession` publishes the local camera when `config.video` (capture → add track before SFrame-arm + offer → `onLocalVideoTrack` → self-preview tile → teardown). | done |
+| **SFU-3-native-video-entry** | Chat-header video-call button (iOS `video.fill` / Android `🎥 Video`) → `startGroupCall(video: true)`. | done |
+
+### Group C exit criteria
+
+- [x] One wire protocol (`lakko-sfu-proto`) drives server +
+      all three clients with no drift; fuzzed parser.
+- [x] All three clients reach the SFU through the identical
+      framed `seal_framed` / `open_framed` SFrame core
+      (C-55, ADR-0013).
+- [x] Native clients arm SFrame on every sender (audio +
+      video) before the offer + every remote receiver; a
+      failed arm aborts the call (fail-closed, invariant #4).
+- [x] Group calls carry SFrame-sealed video, reachable from
+      a chat-header video-call button (native).
+- [x] Both native apps compile green
+      (`xcodebuild` + `:app:compileDebugKotlin`).
+- [ ] **Deferred** — live cross-platform RTP verification
+      over a deployed SFU ([G-26](./security/known-gaps.md));
+      web client-initiated mid-call renegotiation +
+      web video-call entry point (perfect-negotiation glare);
+      SFU server 3-plus-peer fanout fairness + simulcast
+      layer selection ([C-39](./security/calls.md) follow-up).
+
 ## Wave plan
 
 ```

@@ -613,11 +613,24 @@ stream-id to the source peer id (`add_media(..,
 Some(source_peer.to_string()), ..)` in
 `services/sfu/src/media.rs`), and that string is the same
 `PeerId` the signaling roster carries, so
-`ev.streams[0].id` maps straight onto the roster tile. What
-remains is only the live cross-platform RTP verification
-above (a real frame round-tripping web↔native through a
-deployed SFU) — a verification step, not a missing
-mechanism.
+`ev.streams[0].id` maps straight onto the roster tile. The
+**native** iOS + Android clients are now wired to the same
+extent (SFU multi-party arc, complete): `SfuSignalingClient`
+(WS + typed `lakko_sfu_proto` frames) + `SfuCallSession`
+(one `RTCPeerConnection`/`PeerConnection` to the SFU,
+`armSFrameEncryptors` on every local sender before the offer,
+`armSFrameDecryptor` on every remote receiver, SFU-initiated
+renegotiation) + the `SfuCallUi` adapter driving the shared
+`CallUiState` + the chat-header trigger/presentation. Both
+publish SFrame-sealed video when the call is started with the
+video-call button (the local camera is captured, the video
+track added before `armSFrameEncryptors` + the offer, so the
+video sender is sealed alongside audio). All three platforms
+therefore reach the SFU through the identical framed
+`seal_framed` / `open_framed` core. What remains is only the
+live cross-platform RTP verification above (a real frame
+round-tripping web↔native through a deployed SFU) — a
+verification step, not a missing mechanism.
 
 **Why this isn't a security gap today.** The keying math +
 the AAD set + the wire layout are all RFC 9605 conformant

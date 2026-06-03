@@ -2454,6 +2454,73 @@ zeroed, custom-cadence policy round-trip. FFI mirrors at
 Web orchestration `tsc --noEmit` clean at
 `apps/web/src/channels/rotation-cron.ts`.
 
+### C-55: SFU multi-party media is SFrame-sealed end-to-end on every client; the AEAD AAD is the cross-platform wire header, not host RTP metadata
+
+The SFU multi-party call arc wires three independent clients
+(web, iOS, Android) to the Rust SFU, and the property that
+makes their media interoperable while keeping the SFU blind
+([invariant #2](../../CLAUDE.md)) is a single keying contract,
+[ADR-0013](../adr/0013-sframe-cross-platform-aad.md): the
+SFrame AEAD **additional authenticated data is the RFC 9605
+§4.3 wire header bytes (KID + CTR), never any host-stack RTP
+`additional_data`**. Host RTP metadata is not reconstructible
+across libwebrtc (native) and `RTCRtpScriptTransform` (web),
+so binding it would make a frame sealed on one platform fail
+to open on another; binding only the wire header — which every
+platform produces identically — is what lets a frame cross
+stacks. This is the same `lakko_calls::sframe`
+`seal_framed` / `open_framed` core pinned by C-37 / C-38;
+C-55 records that all three SFU clients now reach it.
+
+Four sub-invariants:
+
+1. **One framed core, three call sites.** The browser worker
+   (`apps/web/src/calls/sframe-transform.ts` +
+   `sframe-transform-worker.ts`, via wasm-bindgen
+   `sealFramed` / `openFramed`) and the native C++ bridge
+   (`apps/shared/sframe-bridge`, via the
+   `lakko-sframe-native` C ABI `lakko_sframe_seal_framed` /
+   `_open_framed`) call byte-for-byte the same Rust pipeline.
+   No platform re-implements the AEAD, the header, or the
+   AAD choice.
+
+2. **Every sender is armed before the offer; every receiver
+   on arrival.** The native `SfuCallSession` (iOS
+   `SfuCallSession.swift` + Android `SfuCallSession.kt`)
+   calls `armSFrameEncryptors` over **all** local senders
+   (audio + video) BEFORE `createOffer`, and
+   `armSFrameDecryptor` on **every** remote receiver in the
+   `onRemoteReceiver` delegate (audio + video). A video
+   call adds the camera track before the arm so the video
+   sender is sealed alongside audio — the SFU never sees a
+   plaintext frame on either track. A failed arm aborts the
+   call (fail-closed, invariant #4).
+
+3. **The SFU routes by the on-wire KID without touching the
+   ciphertext.** `open_framed` checks `kid == sender_leaf`
+   and binds the exact on-wire header; the SFU reads the KID
+   to fan out by participant (`services/sfu/src/media.rs`
+   pins the downstream MSID stream-id to the source `PeerId`)
+   but never decodes the body — the SFrame ciphertext is
+   opaque on the forwarding path (C-39).
+
+4. **Fail-closed on every surface.** A frame that fails to
+   parse or authenticate is dropped, never forwarded as
+   plaintext — the web worker, the native bridge, and the
+   `lakko-calls` core all hold this.
+
+**Verification status.** The byte-level interop is asserted
+by construction (one shared core + a platform-independent
+header) and by the native host test
+(`apps/shared/sframe-bridge/test_bridge.cc`, C-53: a
+mismatched host AAD does NOT fail decryption, a tampered
+header DOES). What is NOT yet observed firsthand is a live
+media frame sealed on one platform decrypting on another over
+a deployed SFU forwarding path — that needs two real
+endpoints plus the SFU and cannot run in a headless build.
+This residual item is tracked as [G-26](known-gaps.md#g-26)
+and is a verification step, not a missing mechanism.
+
 ## Exporter labels (call-side)
 
 | Label | Length | Context | Source | Used for |

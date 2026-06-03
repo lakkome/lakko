@@ -44,7 +44,10 @@ media-key pipeline (C-1..C-14), call-admission JWT
 (C-15..C-23), link-based invite + composer + dispatcher
 (C-24..C-36), SFrame + RFC 9605 + SFU signaling
 (C-37..C-39), channel-broadcast backend opacity
-(C-40..C-44).
+(C-40..C-44), then per-arc additions C-45..C-55
+(SFrame native shim, TURN, PublisherGroup persistence,
+host-side bridge validation, rotation policy, and the
+SFU multi-party client SFrame coverage).
 
 ### C-1..C-14 — media-key pipeline (SFrame + overlap window)
 
@@ -150,6 +153,12 @@ media-key pipeline (C-1..C-14), call-admission JWT
 |---|---|
 | C-54 | Scheduled rotation cadence is governed by a pure policy, identical across all three platforms, with clock-skew-tolerant arithmetic |
 
+### C-55 — SFU multi-party client SFrame coverage + cross-platform AAD (SFU-3 arc, ADR-0013)
+
+| ID   | Title |
+|---|---|
+| C-55 | SFU multi-party media is SFrame-sealed end-to-end on every client (web / iOS / Android); the AEAD AAD is the cross-platform wire header, not host RTP metadata |
+
 ## Transport-layer invariants (T-1..T-11)
 
 Source: [`transport.md`](./transport.md). Anti-censorship
@@ -235,7 +244,7 @@ should not re-discover them.
 | G-20 | Call recording is out of scope (deferred per ROADMAP 3c8) |
 | G-21 | Link-based call invites are single-joiner in V1 — **CLOSED** by C-33/C-35 KP-forward + multi-party tests |
 | G-22 | Per-joiner dedup for call invites lands with multi-use orchestration — **CLOSED** by C-33/C-35 |
-| G-26 | RFC 9605 §4.3 wire frame header — serializer **landed** (C-38); end-to-end interop pending |
+| G-26 | RFC 9605 §4.3 wire frame header — serializer + framed pipeline + cross-platform AAD **landed** (C-38 / C-55, ADR-0013); SFrame now sealed end-to-end on all three SFU clients; only the live cross-platform RTP verification over a deployed SFU remains |
 | G-27 | Channel PublisherGroup — **web wired** (G4-2-mls-publisher); iOS / Android still using `newChannelSeedForTest`; persistence + rotation deferred to G4-2-mls-persistence |
 
 ### Dependency advisories
