@@ -223,7 +223,7 @@ should not re-discover them.
 
 | ID   | Title |
 |---|---|
-| G-12 | Session token validation is single-process in-memory |
+| G-12 | Session token validation is single-process in-memory — **CLOSED** (stale text; tokens are the stateless HMAC-SHA256 `lakko-auth-token` shape under a shared `LAKKO_SESSION_TOKEN_SECRET` — any instance validates without coordination, survives restarts) |
 | G-13 | WebAuthn passkey lacks per-credential authentic-action attestation |
 
 ### Out-of-protocol

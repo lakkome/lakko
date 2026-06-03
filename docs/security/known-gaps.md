@@ -160,13 +160,35 @@ X is h, signed at time t").
 
 ## Auth
 
-### G-12: Session token validation is single-process in-memory
+### G-12: Session token validation is single-process in-memory — **CLOSED (was already addressed; text was stale)**
 
-The auth service's bearer-token map is per-process.
-Horizontal scaling (or a service restart) invalidates
-every outstanding token. Phase 2c can add a signed-token
-shape (JWT-ish but with our own crypto) so any auth
-instance validates without coordination.
+**Closed (2026-06-03) — verified already implemented.** The
+described per-process in-memory bearer-token map no longer
+exists (and a code audit confirms there is none anywhere in
+`services/auth` / `services/discovery` — the only `HashMap`
+is discovery's IP rate-limit buckets). Session tokens are the
+**stateless** HMAC-SHA256 shape in
+[`crates/lakko-auth-token`](../../crates/lakko-auth-token/src/lib.rs):
+`v1.<account_id_b64>.<expires_at_ms>.<tag>`, where the tag is
+HMAC-SHA256 over the prefix under a 32+-byte secret loaded
+from the shared `LAKKO_SESSION_TOKEN_SECRET` env var. Both
+`services/auth` (issue + `webauthn.rs` / `opaque.rs` verify)
+and `services/discovery` (`auth.rs` verify) load the SAME
+secret, so:
+
+- **Any instance validates without coordination** — exactly
+  G-12's ask. No DB row, no shared cache, no sticky sessions.
+- **Restarts don't invalidate tokens** — the secret is
+  config, not process state.
+
+Verification is constant-time (`subtle::ConstantTimeEq`),
+version-pinned (`v1`), and expiry-checked; 11 unit tests
+cover round-trip, wrong-secret, tamper, expiry, malformed
+shapes. The one explicit non-goal documented in the crate is
+a **revocation list** (a leaked token is valid until its TTL
+expires) — that lands "when the threat model expects targeted
+token-theft (Phase 2+)" and is a distinct concern from the
+"single-process" claim this gap raised.
 
 ### G-13: WebAuthn passkey lacks per-credential authentic-action attestation
 
