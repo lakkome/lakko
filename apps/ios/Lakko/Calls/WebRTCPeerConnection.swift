@@ -85,14 +85,25 @@ public final class WebRTCPeerConnection: NSObject {
         /// path there is exactly one remote track and the
         /// caller renders it for the sole remote participant.
         public let onRemoteVideoTrack: (RTCVideoTrack?, _ streamId: String?) -> Void
+        /// Emitted for EVERY freshly-added remote `RTCRtpReceiver`
+        /// (audio AND video), unlike `onRemoteVideoTrack` which only
+        /// surfaces video to the UI. The SFU session uses this to arm
+        /// the SFrame decryptor on each incoming track via
+        /// `armSFrameDecryptor(for:seed:)` — invariant #4 requires every
+        /// remote track be decrypting, not just video. `streamId` is the
+        /// MSID stream group = the source peer id on an SFU-routed call.
+        /// Default no-op so the 1×1 direct path is unaffected.
+        public let onRemoteReceiver: (RTCRtpReceiver, _ streamId: String?) -> Void
         public init(
             onLocalCandidate: @escaping (String, Int32, String) -> Void,
             onConnectionState: @escaping (RTCPeerConnectionState) -> Void,
-            onRemoteVideoTrack: @escaping (RTCVideoTrack?, String?) -> Void = { _, _ in }
+            onRemoteVideoTrack: @escaping (RTCVideoTrack?, String?) -> Void = { _, _ in },
+            onRemoteReceiver: @escaping (RTCRtpReceiver, String?) -> Void = { _, _ in }
         ) {
             self.onLocalCandidate = onLocalCandidate
             self.onConnectionState = onConnectionState
             self.onRemoteVideoTrack = onRemoteVideoTrack
+            self.onRemoteReceiver = onRemoteReceiver
         }
     }
 
@@ -687,12 +698,19 @@ extension WebRTCPeerConnection: RTCPeerConnectionDelegate {
         didAdd rtpReceiver: RTCRtpReceiver,
         streams mediaStreams: [RTCMediaStream]
     ) {
-        guard let videoTrack = rtpReceiver.track as? RTCVideoTrack else {
-            return
-        }
         // The MSID stream group id — on an SFU-routed call this
         // is the originating peer id (see Delegate doc).
         let streamId = mediaStreams.first?.streamId
+        // Surface EVERY receiver (audio + video) so the SFU session can
+        // arm the SFrame decryptor on each incoming track (invariant #4).
+        Task { @MainActor [weak self] in
+            self?.delegate?.onRemoteReceiver(rtpReceiver, streamId)
+        }
+        // Video tracks additionally surface to the UI for rendering;
+        // audio plays out through the SDK's audio device automatically.
+        guard let videoTrack = rtpReceiver.track as? RTCVideoTrack else {
+            return
+        }
         Task { @MainActor [weak self] in
             self?.delegate?.onRemoteVideoTrack(videoTrack, streamId)
         }
