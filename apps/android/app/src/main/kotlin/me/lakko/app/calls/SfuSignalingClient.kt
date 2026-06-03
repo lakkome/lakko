@@ -1,0 +1,226 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+package me.lakko.app.calls
+
+import io.ktor.client.HttpClient
+import io.ktor.client.engine.okhttp.OkHttp
+import io.ktor.client.plugins.websocket.DefaultClientWebSocketSession
+import io.ktor.client.plugins.websocket.WebSockets
+import io.ktor.client.plugins.websocket.webSocketSession
+import io.ktor.client.request.header
+import io.ktor.websocket.Frame
+import io.ktor.websocket.close
+import io.ktor.websocket.readText
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.launch
+import uniffi.lakko_ffi_uniffi.SfuErrorCode
+import uniffi.lakko_ffi_uniffi.SfuPeerSnapshot
+import uniffi.lakko_ffi_uniffi.SfuServerFrame
+import uniffi.lakko_ffi_uniffi.composeSfuIceCandidate
+import uniffi.lakko_ffi_uniffi.composeSfuPing
+import uniffi.lakko_ffi_uniffi.composeSfuSdpAnswer
+import uniffi.lakko_ffi_uniffi.composeSfuSdpOffer
+import uniffi.lakko_ffi_uniffi.composeSfuSignalRelayToCall
+import uniffi.lakko_ffi_uniffi.composeSfuSignalRelayToPeer
+import uniffi.lakko_ffi_uniffi.parseSfuServerFrame
+
+/** The WebSocket subprotocol the SFU requires on the upgrade. */
+const val SFU_SUBPROTOCOL: String = "lakko-sfu-v1"
+
+/**
+ * Handlers the caller wires in. Every method has a no-op default, so a
+ * caller overrides only the frames it cares about. Dispatched from the
+ * receive-loop coroutine (the caller hops to the main thread itself if
+ * it touches UI state).
+ */
+interface SfuSignalingCallbacks {
+    /** First frame after admission — seeds the roster. */
+    fun onWelcome(selfPeerId: String, callId: String, roster: List<SfuPeerSnapshot>) {}
+
+    /** A participant joined the same call. */
+    fun onPeerJoined(peerId: String, accountPseudonym: String) {}
+
+    /** A participant left. */
+    fun onPeerLeft(peerId: String) {}
+
+    /** Opaque payload relayed from another peer (base64url). */
+    fun onSignalRelay(from: String, payloadB64: String) {}
+
+    /** SFU's answer to our publish offer. */
+    fun onSdpAnswer(sdp: String) {}
+
+    /** SFU-initiated offer (a new downstream subscription). */
+    fun onSdpOffer(sdp: String) {}
+
+    /** Application-layer pong reply. */
+    fun onPong(nonce: ULong) {}
+
+    /** Server reported a protocol-level error. */
+    fun onServerError(code: SfuErrorCode, detail: String) {}
+
+    /** A frame the shared validator / parser rejected. The connection
+     *  is NOT closed automatically. */
+    fun onParseError(raw: String, error: Throwable) {}
+
+    /** The receive loop ended (socket closed, clean or not). */
+    fun onClosed() {}
+}
+
+/**
+ * SFU WebSocket signaling client (SFU multi-party arc, native half) —
+ * the Swift mirror lives at
+ * `apps/ios/Lakko/Calls/SfuSignalingClient.swift`, and both mirror the
+ * web `apps/web/src/calls/sfu-signaling-client.ts`.
+ *
+ * Connects to the Rust SFU's `lakko-sfu-v1` WebSocket
+ * (`{baseUrl}/v1/connect?token=<jwt>`), parses the typed server frames
+ * through the shared `lakko_sfu_proto` definition (via the UniFFI
+ * `parseSfuServerFrame`), and sends the typed client frames via the
+ * `composeSfu*` helpers — so the client and `services/sfu` agree on the
+ * wire shape from one definition.
+ *
+ * Transport + framing only — it does not touch the `PeerConnection`.
+ * The CallSession SFU-mode wiring (route the local SDP offer through
+ * [sendSdpOffer], apply the answer, trickle ICE via [sendIceCandidate],
+ * drive SFU-initiated renegotiation from [SfuSignalingCallbacks.onSdpOffer])
+ * is the next step on top of this client.
+ *
+ * One instance per call. Construct with the SFU base URL (an http(s) or
+ * ws(s) origin, no path) + the call-admission JWT (from
+ * [CallJwtClient]) + a [CoroutineScope] the receive loop rides, then
+ * [connect]. Frames arrive on the wired callbacks; send with the
+ * `send*` methods. Tear down with [close] (idempotent).
+ */
+class SfuSignalingClient(
+    private val baseUrl: String,
+    private val jwt: String,
+    private val scope: CoroutineScope,
+    private val callbacks: SfuSignalingCallbacks,
+) {
+    private val client = HttpClient(OkHttp) { install(WebSockets) }
+    private var session: DefaultClientWebSocketSession? = null
+    private var receiveJob: Job? = null
+
+    /** True once the WebSocket session is open. */
+    val isOpen: Boolean
+        get() = session != null
+
+    /**
+     * Open the WebSocket and start dispatching frames. Suspends until
+     * the session is established (the SFU's Welcome frame then follows
+     * on [SfuSignalingCallbacks.onWelcome]); throws if the upgrade
+     * fails. Idempotent-guarded: throws if already connected.
+     */
+    suspend fun connect() {
+        check(session == null) { "connect() called twice" }
+        // http(s) -> ws(s); the SFU upgrade endpoint speaks WebSocket.
+        val wsBase = baseUrl
+            .replaceFirst("http://", "ws://")
+            .replaceFirst("https://", "wss://")
+            .trimEnd('/')
+        val wsUrl = "$wsBase/v1/connect?token=$jwt"
+        val s = client.webSocketSession(urlString = wsUrl) {
+            // The SFU refuses upgrades without this subprotocol header.
+            header("Sec-WebSocket-Protocol", SFU_SUBPROTOCOL)
+        }
+        session = s
+        receiveJob = scope.launch { receiveLoop(s) }
+    }
+
+    private suspend fun receiveLoop(s: DefaultClientWebSocketSession) {
+        try {
+            for (frame in s.incoming) {
+                val text = when (frame) {
+                    is Frame.Text -> frame.readText()
+                    // Binary frames are not part of lakko-sfu-v1 — ignore.
+                    else -> continue
+                }
+                val parsed = try {
+                    parseSfuServerFrame(text)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Throwable) {
+                    callbacks.onParseError(text, e)
+                    continue
+                }
+                dispatch(parsed)
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Throwable) {
+            // Transport-level failure — fall through to onClosed.
+        } finally {
+            callbacks.onClosed()
+        }
+    }
+
+    private fun dispatch(frame: SfuServerFrame) {
+        when (frame) {
+            is SfuServerFrame.Welcome ->
+                callbacks.onWelcome(frame.peerId, frame.callId, frame.roster)
+            is SfuServerFrame.PeerJoined ->
+                callbacks.onPeerJoined(frame.peerId, frame.accountPseudonym)
+            is SfuServerFrame.PeerLeft -> callbacks.onPeerLeft(frame.peerId)
+            is SfuServerFrame.SignalRelay ->
+                callbacks.onSignalRelay(frame.from, frame.payloadB64)
+            is SfuServerFrame.SdpAnswer -> callbacks.onSdpAnswer(frame.sdp)
+            is SfuServerFrame.SdpOffer -> callbacks.onSdpOffer(frame.sdp)
+            is SfuServerFrame.Pong -> callbacks.onPong(frame.nonce)
+            is SfuServerFrame.Error -> callbacks.onServerError(frame.code, frame.detail)
+        }
+    }
+
+    // ---- Send (client -> SFU) ---------------------------------------
+
+    /** Send a client -> SFU SDP offer (publish path). */
+    fun sendSdpOffer(sdp: String) = enqueue(composeSfuSdpOffer(sdp))
+
+    /** Send a client -> SFU SDP answer (responds to a SFU-initiated
+     *  offer). */
+    fun sendSdpAnswer(sdp: String) = enqueue(composeSfuSdpAnswer(sdp))
+
+    /** Send a trickle-ICE candidate (the `candidate` line value). */
+    fun sendIceCandidate(candidateSdp: String) =
+        enqueue(composeSfuIceCandidate(candidateSdp))
+
+    /** Relay an opaque payload to a single peer. */
+    fun sendSignalRelayToPeer(peerId: String, payload: ByteArray) =
+        enqueue(composeSfuSignalRelayToPeer(peerId, payload))
+
+    /** Relay an opaque payload to every other peer in the call. */
+    fun sendSignalRelayToCall(payload: ByteArray) =
+        enqueue(composeSfuSignalRelayToCall(payload))
+
+    /** Application-layer keepalive; the SFU echoes a Pong. */
+    fun sendPing(nonce: ULong) = enqueue(composeSfuPing(nonce))
+
+    /** Enqueue a composed wire string onto the session's outbound
+     *  channel. Non-suspending (`trySend`) so call sites — ICE
+     *  callbacks, UI handlers — stay synchronous; ordering is preserved
+     *  because a single channel serialises the writes. A full channel
+     *  drops the frame (back-pressure), mirroring the web's behaviour. */
+    private fun enqueue(json: String) {
+        session?.outgoing?.trySend(Frame.Text(json))
+    }
+
+    /** Close the socket + cancel the receive loop. Idempotent. */
+    fun close() {
+        receiveJob?.cancel()
+        receiveJob = null
+        val s = session
+        session = null
+        if (s != null) {
+            scope.launch {
+                try {
+                    s.close()
+                } catch (_: Throwable) {
+                    // best-effort
+                }
+            }
+        }
+        client.close()
+    }
+}

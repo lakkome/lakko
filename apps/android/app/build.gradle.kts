@@ -192,6 +192,10 @@ dependencies {
     implementation(libs.ktor.client.okhttp)
     implementation(libs.ktor.client.content.negotiation)
     implementation(libs.ktor.serialization.kotlinx.json)
+    // SFU group-call signaling (SfuSignalingClient.kt) rides Ktor's
+    // WebSocket plugin over the OkHttp engine above. (Also an
+    // androidTest dep for the SFU instrumented test.)
+    implementation(libs.ktor.client.websockets)
 
     // kotlinx-coroutines on Android. Ktor pulls -core in
     // transitively, but the -android dispatcher (`Dispatchers.Main`
