@@ -261,6 +261,14 @@ public final class ChatViewModel: ObservableObject {
     /// `CallUiState` are app-module types consumed by `ChatScreen`.
     let sfuCallUiState = CallUiState()
 
+    /// `true` when this chat has >2 MLS members — the call button then
+    /// routes through the SFU group-call path; a 2-member chat stays on
+    /// the 1×1 P2P `CallSession`. `nil` member count (no handle) reads
+    /// as a 1×1.
+    var isGroupChat: Bool {
+        (repository.memberCount(groupIdHex: groupIdHex) ?? 0) > 2
+    }
+
     /// Start a multi-party SFU group call for this (group) chat. Mints
     /// the call-admission JWT, derives the per-call SFrame seed + leaf
     /// from the MLS exporter, and connects through `SfuCallUi`. Fails

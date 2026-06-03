@@ -72,6 +72,21 @@ public struct ChatScreen: View {
             // Combine subscriptions stay intact.
             viewModel.attachSync(deviceGroupSync)
         }
+        // SFU group call — present the in-call UI over the chat,
+        // driven by the `CallUiState` the `SfuCallUi` adapter updates.
+        // Dismissing (or the call ending) hangs the SFU session up.
+        .fullScreenCover(
+            isPresented: Binding(
+                get: { viewModel.activeSfuCall != nil },
+                set: { presented in
+                    if !presented { viewModel.hangUpGroupCall() }
+                }
+            )
+        ) {
+            CallScreen(externalState: viewModel.sfuCallUiState) {
+                viewModel.hangUpGroupCall()
+            }
+        }
         .navigationTitle(headline)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
@@ -95,11 +110,17 @@ public struct ChatScreen: View {
             // Accept / Decline / Hang up affordances).
             ToolbarItem(placement: .navigationBarTrailing) {
                 Button {
-                    viewModel.startCall(audio: true, video: false)
+                    // A group chat (>2 members) routes through the SFU
+                    // (multi-party + SFrame); a 1×1 chat stays P2P.
+                    if viewModel.isGroupChat {
+                        viewModel.startGroupCall()
+                    } else {
+                        viewModel.startCall(audio: true, video: false)
+                    }
                 } label: {
                     Image(systemName: "phone.fill")
                 }
-                .disabled(viewModel.activeCall != nil)
+                .disabled(viewModel.activeCall != nil || viewModel.activeSfuCall != nil)
             }
         }
         .task {

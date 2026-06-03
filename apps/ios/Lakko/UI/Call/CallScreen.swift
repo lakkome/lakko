@@ -833,17 +833,32 @@ public struct CallScreen: View {
     /// Combine subscriptions from `driveFrom(session:)`, held
     /// for the screen's lifetime.
     @State private var sessionBindings: [AnyCancellable] = []
+    /// `true` when the screen renders an externally-owned `CallUiState`
+    /// (the SFU group-call path, where `SfuCallUi` drives the state).
+    /// In that mode there is no `session` to `driveFrom` and no prejoin
+    /// screen — the call is already connecting when presented.
+    private let externallyDriven: Bool
     let onExit: () -> Void
 
     public init(session: CallSession? = nil, onExit: @escaping () -> Void) {
         self.session = session
+        self.externallyDriven = false
+        self.onExit = onExit
+    }
+
+    /// SFU group-call init: render a `CallUiState` that an external
+    /// owner (`SfuCallUi`) already drives. No `session`, no prejoin.
+    public init(externalState: CallUiState, onExit: @escaping () -> Void) {
+        _state = StateObject(wrappedValue: externalState)
+        self.session = nil
+        self.externallyDriven = true
         self.onExit = onExit
     }
 
     public var body: some View {
         ZStack {
             switch state.phase {
-            case .prejoin:
+            case .prejoin where !externallyDriven:
                 PrejoinView(
                     state: state,
                     onJoin: { displayName, micOn, camOn in
