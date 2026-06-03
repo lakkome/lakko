@@ -1557,6 +1557,13 @@ function ChatView(props: {
           onExit={(): void => {
             onCallExit();
           }}
+          remoteStreamFor={(participantId): MediaStream | undefined => {
+            // Roster id is `peer-<peerId>`; the SFU sets the downstream
+            // MSID stream id to that same peer id, so strip the prefix
+            // to look the stream up. 1×1 path has no SFU handle → undefined.
+            const peerId = participantId.replace(/^peer-/, "");
+            return sfuHandle()?.remoteStreams().get(peerId);
+          }}
         />
       </Show>
 

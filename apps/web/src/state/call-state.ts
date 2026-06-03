@@ -409,6 +409,13 @@ export const callActions = {
   setQuality(id: string, tier: QualityTier): void {
     patchParticipant(id, { quality: tier });
   },
+  /** Set a specific participant's camera flag. Used for REMOTE
+   *  participants when a video track arrives / ends (the SFU adapter
+   *  flips it so the tile switches between the video surface and the
+   *  avatar). The LOCAL camera uses `setCamera`. No-op on unknown id. */
+  setParticipantCamera(id: string, on: boolean): void {
+    patchParticipant(id, { camOn: on });
+  },
   /** Set the currently-speaking participant. Pass `null` to
    *  clear (no one speaking). The UI promotes the speaker to
    *  the big tile unless a manual pin is active. */

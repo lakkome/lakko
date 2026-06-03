@@ -291,11 +291,22 @@ interface TileProps {
   participant: Participant;
   large: boolean;
   onPin?: (id: string) => void;
+  /** SFU group-call only: resolve this participant to its remote
+   *  `MediaStream` (see the `Call` prop of the same name). */
+  remoteStreamFor?:
+    | ((participantId: string) => MediaStream | undefined)
+    | undefined;
 }
 
 const ParticipantTile: Component<TileProps> = (props) => {
   const isPinned = (): boolean =>
     callState.pinnedId() === props.participant.id;
+  /** The live remote stream for this tile, if any (SFU path). Reading
+   *  it inside JSX tracks the underlying remoteStreams signal. */
+  const remoteStream = (): MediaStream | undefined =>
+    props.participant.isLocal
+      ? undefined
+      : props.remoteStreamFor?.(props.participant.id);
   return (
     <div
       onClick={(): void => {
@@ -340,25 +351,52 @@ const ParticipantTile: Component<TileProps> = (props) => {
           </div>
         }
       >
-        {/* Placeholder for the live video element. A real
-            implementation replaces this <div> with a <video>
-            attached to the WebRTC RTCRtpReceiver's MediaStream;
-            the 3a-pod-followup sprint wires that up. */}
-        <div
-          style={{
-            position: "absolute",
-            inset: "0",
-            "background-image":
-              "linear-gradient(135deg, #1f2937, #111827, #0b0f19)",
-            display: "flex",
-            "align-items": "center",
-            "justify-content": "center",
-            color: COLOURS.textSecondary,
-            "font-size": "0.85rem",
-          }}
+        {/* SFU group call: a real <video> bound to the remote
+            MediaStream. Muted — audio plays through the dedicated
+            hidden <audio> sinks (one per stream) so this element
+            never doubles the audio. The 1×1 + mock paths pass no
+            `remoteStreamFor`, so they fall through to the placeholder. */}
+        <Show
+          when={remoteStream()}
+          fallback={
+            <div
+              style={{
+                position: "absolute",
+                inset: "0",
+                "background-image":
+                  "linear-gradient(135deg, #1f2937, #111827, #0b0f19)",
+                display: "flex",
+                "align-items": "center",
+                "justify-content": "center",
+                color: COLOURS.textSecondary,
+                "font-size": "0.85rem",
+              }}
+            >
+              <span style={{ opacity: "0.6" }}>(video)</span>
+            </div>
+          }
         >
-          <span style={{ opacity: "0.6" }}>(video)</span>
-        </div>
+          {(stream) => (
+            <video
+              autoplay
+              playsinline
+              muted
+              ref={(el) => {
+                el.srcObject = stream();
+              }}
+              style={{
+                position: "absolute",
+                inset: "0",
+                width: "100%",
+                height: "100%",
+                "object-fit": "cover",
+                // Remote video is never mirrored (only the local
+                // self-preview is, and that is the 1×1 path).
+                transform: "none",
+              }}
+            />
+          )}
+        </Show>
       </Show>
 
       {/* Large mute overlay — central icon when the remote is
@@ -1638,9 +1676,16 @@ function seedMockParticipants(): void {
  *     (the 1×1 web path is P2P DTLS-SRTP, not SFrame — the pill
  *     would mislead, and a text chip during the call is poor UX).
  */
-const Call: Component<{ embedded?: boolean; onExit?: () => void }> = (
-  props,
-) => {
+const Call: Component<{
+  embedded?: boolean;
+  onExit?: () => void;
+  /** SFU group-call only: resolve a roster participant id to its live
+   *  remote `MediaStream` so the tile can render real video. Omitted on
+   *  the 1×1 and mock paths (tiles fall back to the avatar / placeholder). */
+  remoteStreamFor?:
+    | ((participantId: string) => MediaStream | undefined)
+    | undefined;
+}> = (props) => {
   const navigate = useNavigate();
 
   // Sound cues — one controller per Call mount; disposed on
@@ -1839,6 +1884,7 @@ const Call: Component<{ embedded?: boolean; onExit?: () => void }> = (
                 onPin={(id): void =>
                   callActions.pin(id === "" ? null : id)
                 }
+                remoteStreamFor={props.remoteStreamFor}
               />
             </div>
           </Show>
@@ -1862,6 +1908,7 @@ const Call: Component<{ embedded?: boolean; onExit?: () => void }> = (
                   onPin={(id): void =>
                     callActions.pin(id === "" ? null : id)
                   }
+                  remoteStreamFor={props.remoteStreamFor}
                 />
               )}
             </For>

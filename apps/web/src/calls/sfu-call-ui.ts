@@ -125,17 +125,34 @@ export function createSfuCallUi(
     screenSharing: false,
   });
 
+  // The roster participant id for a peer is `peer-<peerId>`, and the SFU
+  // sets the downstream MSID stream id to the source peer id (verified:
+  // PeerId Display == the wire peer_id == the MSID), so `rt.streamId` IS
+  // that peer id. This lets the tile correlate a stream to its roster
+  // entry, and lets us flip the participant's camera flag when a video
+  // track arrives.
   const addStream = (rt: SfuRemoteTrack): void => {
     setRemoteStreams((prev) => {
       const next = new Map(prev);
       next.set(rt.streamId, rt.stream);
       return next;
     });
+    const participantId = peerParticipantId(rt.streamId);
+    if (rt.track.kind === "video") {
+      callActions.setParticipantCamera(participantId, true);
+    }
     // Prune when the SFU stops forwarding this track (peer left /
-    // unpublished) — the `ended` event is the reliable signal since the
-    // MSID → peer mapping that `peer-left` carries is not yet pinned.
+    // unpublished). The `ended` event is the reliable signal.
     rt.track.addEventListener("ended", () => {
+      if (rt.track.kind === "video") {
+        callActions.setParticipantCamera(participantId, false);
+      }
       setRemoteStreams((prev) => {
+        // Only drop the stream entry when no live tracks remain on it
+        // (a peer that toggles camera off keeps its audio track + entry).
+        if (rt.stream.getTracks().some((t) => t.readyState === "live")) {
+          return prev;
+        }
         if (!prev.has(rt.streamId)) return prev;
         const next = new Map(prev);
         next.delete(rt.streamId);

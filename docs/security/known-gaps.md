@@ -605,12 +605,19 @@ the `lakko-sfu-v1` signaling client + the call-admission JWT
 renegotiation) is now wired into the chat UI: a group chat
 (>2 members) routes the call button through
 `createSfuCallUi`, which drives the shared call-UI store
-roster + plays remote audio, while 1×1 chats stay on the P2P
-path. Two pieces remain — neither a security gap: per-tile
-remote VIDEO rendering (blocked on pinning the SFU's MSID
-stream-id → source-peer convention; audio + roster work
-without it) and the live cross-platform RTP verification
-above.
+roster, plays remote audio, and renders per-tile remote
+video, while 1×1 chats stay on the P2P path. The MSID
+stream-id → source-peer correlation the video tiles need is
+pinned by construction — the SFU sets the downstream MSID
+stream-id to the source peer id (`add_media(..,
+Some(source_peer.to_string()), ..)` in
+`services/sfu/src/media.rs`), and that string is the same
+`PeerId` the signaling roster carries, so
+`ev.streams[0].id` maps straight onto the roster tile. What
+remains is only the live cross-platform RTP verification
+above (a real frame round-tripping web↔native through a
+deployed SFU) — a verification step, not a missing
+mechanism.
 
 **Why this isn't a security gap today.** The keying math +
 the AAD set + the wire layout are all RFC 9605 conformant
