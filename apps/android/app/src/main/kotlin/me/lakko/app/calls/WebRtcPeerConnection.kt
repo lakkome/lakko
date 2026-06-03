@@ -120,6 +120,17 @@ public class WebRtcPeerConnection(
          * stay source-compatible.
          */
         public val onRemoteVideoTrack: (track: VideoTrack?, streamId: String?) -> Unit = { _, _ -> },
+        /**
+         * Emitted for EVERY freshly-added remote `RtpReceiver` (audio
+         * AND video), unlike [onRemoteVideoTrack] which only surfaces
+         * video to the UI. The SFU session uses this to arm the SFrame
+         * decryptor on each incoming track via [armSFrameDecryptor] —
+         * invariant #4 requires every remote track be decrypting, not
+         * just video. `streamId` is the MSID stream group = the source
+         * peer id on an SFU-routed call. Defaulted no-op so the 1×1
+         * direct path is unaffected.
+         */
+        public val onRemoteReceiver: (receiver: RtpReceiver, streamId: String?) -> Unit = { _, _ -> },
     )
 
     private var delegate: Delegate? = null
@@ -190,16 +201,18 @@ public class WebRtcPeerConnection(
         override fun onDataChannel(channel: DataChannel?) {}
         override fun onRenegotiationNeeded() {}
         override fun onAddTrack(receiver: RtpReceiver?, streams: Array<out MediaStream>?) {
-            // G3-2-remote-video — surface only video tracks to
-            // the UI. The incoming audio track is played out by
-            // libwebrtc's audio device automatically and needs
-            // no UI handle. SFrame on the receive path is armed
-            // separately via [armSFrameDecryptors] from the
-            // call's exporter-seed dispatch.
-            val track = receiver?.track() as? VideoTrack ?: return
+            val r = receiver ?: return
             // MSID stream group id — on an SFU-routed call this
             // is the originating peer id (see Delegate doc).
             val streamId = streams?.firstOrNull()?.id
+            // Surface EVERY receiver (audio + video) so the SFU session
+            // can arm the SFrame decryptor on each incoming track
+            // (invariant #4).
+            delegate?.onRemoteReceiver(r, streamId)
+            // Video tracks additionally surface to the UI for rendering;
+            // the incoming audio track plays out via libwebrtc's audio
+            // device automatically and needs no UI handle.
+            val track = r.track() as? VideoTrack ?: return
             delegate?.onRemoteVideoTrack(track, streamId)
         }
         override fun onConnectionChange(state: PeerConnection.PeerConnectionState?) {
