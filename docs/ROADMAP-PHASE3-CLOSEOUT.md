@@ -285,12 +285,24 @@ drifts. **All sprints below are complete.**
       a chat-header video-call button (native).
 - [x] Both native apps compile green
       (`xcodebuild` + `:app:compileDebugKotlin`).
-- [ ] **Deferred** — live cross-platform RTP verification
-      over a deployed SFU ([G-26](./security/known-gaps.md));
-      web client-initiated mid-call renegotiation +
-      web video-call entry point (perfect-negotiation glare);
-      SFU server 3-plus-peer fanout fairness + simulcast
-      layer selection ([C-39](./security/calls.md) follow-up).
+- [x] Production deploy artifacts ready (ADR-0011 Rust SFU,
+      co-located on the main VPS): `infra/systemd/lakko-sfu.service`
+      (env-var configured, in `lakko.target`),
+      `infra/nginx/sites-available/sfu.conf` (`/v1/connect` WS +
+      `/health` `/ready` + mTLS `/metrics`), `deploy-sfu.sh`
+      one-time setup (cert + vhost + UDP media firewall),
+      `deploy.sh` builds `lakko-svc-sfu`, `lakko.env.example`
+      `LAKKO_SFU_*` block, justfile `dev-sfu` / `deploy-sfu` /
+      `restart-sfu` / `logs-sfu`. The LiveKit-fork infra
+      (ADR-0008) was retired in the process.
+- [ ] **Deferred** — the actual `just deploy` + a live 2-client
+      group-call smoke (maintainer-run against the VPS); the
+      live cross-platform RTP verification
+      ([G-26](./security/known-gaps.md)); web client-initiated
+      mid-call renegotiation + web video-call entry point
+      (perfect-negotiation glare); SFU server 3-plus-peer fanout
+      fairness + simulcast layer selection
+      ([C-39](./security/calls.md) follow-up).
 
 ## Wave plan
 

@@ -25,29 +25,37 @@ remember which VPS owns what.
        │                                            │
        ▼                                            ▼
 ┌─────────────────┐                          ┌─────────────────┐
-│  SFU CCX22      │                          │  coturn CX22    │
-│  • lakko-sfu    │                          │  • coturn       │
-│  • nginx (TLS)  │                          │  • nginx (TLS)  │
-│  • node_exporter│                          │  • node_exporter│
-│  sfu.lakko.me   │                          │  turn.lakko.me  │
-└─────────────────┘                          └─────────────────┘
+│  Main VPS       │                          │  coturn CX22    │
+│  • API services │                          │  • coturn       │
+│  • lakko-sfu    │                          │  • nginx (TLS)  │
+│  • nginx (TLS)  │                          │  • node_exporter│
+│  • node_exporter│                          │  turn.lakko.me  │
+│  api/sfu.lakko.me│                         └─────────────────┘
+└─────────────────┘
 ```
 
-Three independent VPSes. **Don't co-locate** — an SFU crash
-shouldn't drag TURN down with it, and the monitoring host's
-job is to watch the others, not to share their failure
-modes.
+**SFU co-location (ADR-0011).** The Rust str0m SFU
+(`lakko-svc-sfu`) is light (target <= 20 MB per active call), so
+for V1 it co-locates with the API services on the main VPS
+rather than the separate CCX22 the LiveKit-fork plan assumed
+(ADR-0008). nginx fronts both `api.lakko.me` and `sfu.lakko.me`;
+the SFU's UDP media plane is a direct public port. coturn +
+monitoring stay on their own boxes (TURN is bandwidth-heavy; the
+monitoring host watches the others, not shares their failure
+modes). If load outgrows the shared box, the unit + vhost move
+to a dedicated VPS unchanged — only DNS + the firewall move with
+them.
 
 ## Sub-sprint → file map
 
 | Sprint | Status | Files |
 |---|---|---|
 | **3a2** ICE infrastructure | Configs + deploy + nginx mTLS + renew hook + smoke ready (G3-turn-deploy May 2026) | [`coturn/turnserver.conf`](coturn/turnserver.conf), [`systemd/lakko-coturn.service`](systemd/lakko-coturn.service), [`scripts/deploy-coturn.sh`](scripts/deploy-coturn.sh), [`nginx/sites-available/turn.conf`](nginx/sites-available/turn.conf), [`letsencrypt/lakko-coturn-renew-hook.sh`](letsencrypt/lakko-coturn-renew-hook.sh), [`scripts/turn-smoke.sh`](scripts/turn-smoke.sh) |
-| **3b2** SFU deployment | Configs ready | [`systemd/lakko-sfu.service`](systemd/lakko-sfu.service), [`nginx/sites-available/sfu.conf`](nginx/sites-available/sfu.conf), [`scripts/deploy-sfu.sh`](scripts/deploy-sfu.sh) |
+| **3b2** SFU deployment (ADR-0011 Rust SFU, co-located) | Configs ready — Rust `lakko-svc-sfu`, env-var configured, in `lakko.target`, built by `just deploy`; one-time setup via `just deploy-sfu` | [`systemd/lakko-sfu.service`](systemd/lakko-sfu.service), [`nginx/sites-available/sfu.conf`](nginx/sites-available/sfu.conf), [`scripts/deploy-sfu.sh`](scripts/deploy-sfu.sh) |
 | **3b3** TURN-over-TLS | Bundled with 3a2 | Same files — coturn handles both `:3478` STUN/TURN and `:443` TURN-over-TLS in one binary |
 | **3b5** Monitoring | Configs ready | [`prometheus/prometheus.yml`](prometheus/prometheus.yml), [`prometheus/rules/calls.yml`](prometheus/rules/calls.yml) |
 | **3b6** Cost analysis | Pending real-load measurements | See "Cost model" below; locked off real bandwidth + active-call counts |
-| **3b1c** LiveKit Go fork | Vendor work | [`services/sfu/UPSTREAM.md`](../services/sfu/UPSTREAM.md), [`services/sfu/PLAYBOOK.md`](../services/sfu/PLAYBOOK.md) |
+| **3b1c** LiveKit Go fork | **Superseded by ADR-0011** (Rust str0m SFU) — the Go-fork vendor work no longer applies | [`services/sfu/UPSTREAM.md`](../services/sfu/UPSTREAM.md), [`services/sfu/PLAYBOOK.md`](../services/sfu/PLAYBOOK.md) |
 
 ## First-time deploy
 
@@ -55,40 +63,38 @@ Order matters — `services/auth` needs `TURN_SHARED_SECRET`
 before clients can build TURN credentials.
 
 ```bash
-# 1. Provision three Hetzner VPSes (CCX22 for SFU; CX22 for
-#    coturn + monitoring). Set DNS A + AAAA records:
-#      sfu.lakko.me   → SFU VPS
+# 1. Provision the VPSes. The SFU co-locates on the main API
+#    VPS (ADR-0011), so for V1 you need only the main VPS +
+#    coturn (+ optional monitoring). Set DNS A + AAAA records:
+#      api.lakko.me   → main VPS
+#      sfu.lakko.me   → main VPS  (same IP — SFU co-located)
 #      turn.lakko.me  → coturn VPS
 #      monitor.lakko.me (optional) → monitoring VPS
 
-# 2. Build the SFU binary from the fork. On a CI runner or
-#    your laptop:
-cd services/sfu
-go build -o /tmp/lakko-sfu ./...
-scp /tmp/lakko-sfu root@sfu.lakko.me:/usr/local/bin/lakko-sfu
+# 2. SFU config. The binary (`lakko-svc-sfu`) is a regular
+#    workspace crate — NO go build, NO livekit.yaml; all config
+#    is env-vars. On the main VPS, add the LAKKO_SFU_* block from
+#    infra/etc-lakko/lakko.env.example to /etc/lakko/lakko.env:
+#      LAKKO_SFU_JWKS_URL=https://auth.lakko.me/.well-known/jwks.json
+#      LAKKO_SFU_MEDIA_BIND=0.0.0.0:43210
+#    (LAKKO_SFU_BIND / _METRICS_BIND default to loopback 7880 / 9641).
 
-# 3. Author livekit.yaml on the SFU VPS. Critical fields:
-#      port: 7880
-#      tcp_port: 7881
-#      rtc.port_range_start: 50000
-#      rtc.port_range_end:   60000
-#      prometheus_port: 6789
-#      keys:
-#        jwks_url: https://auth.lakko.me/.well-known/jwks.json
-#    (see services/sfu/README.md for the canonical shape)
-ssh root@sfu.lakko.me 'install -m 640 -g lakkome /dev/stdin /etc/lakko/livekit.yaml' < livekit.yaml
-
-# 4. Run the bootstrap on each VPS. Each script is idempotent.
-#    The `just deploy-coturn` recipe wraps step (a) — same
-#    posture as `just deploy` for the main fleet.
-just deploy-coturn   # equivalent to:
-                     #   rsync infra/ → root@turn.lakko.me + run deploy-coturn.sh
+# 3. coturn VPS bootstrap (idempotent). `just deploy-coturn`
+#    wraps it — same posture as `just deploy` for the main fleet.
+just deploy-coturn   # rsync infra/ → root@turn.lakko.me + run deploy-coturn.sh
 # Note the TURN_SHARED_SECRET it prints — paste it into
-# /etc/lakko/lakko.env on the auth VPS too.
+# /etc/lakko/lakko.env on the main VPS too.
 # Day-to-day: `just restart-coturn`, `just reload-coturn`,
 # `just logs-coturn`, `just turn-smoke` (local smoke probe).
 
-ssh root@sfu.lakko.me 'bash -s' < infra/scripts/deploy-sfu.sh
+# 4. SFU one-time setup on the main VPS: issue the sfu.lakko.me
+#    cert, install the nginx vhost, open the UDP media port. The
+#    BINARY + systemd unit ride the regular `just deploy`
+#    (deploy.sh builds + installs lakko-svc-sfu; lakko.target
+#    Wants lakko-sfu.service).
+just deploy-sfu      # ssh main VPS + sudo bash infra/scripts/deploy-sfu.sh
+just deploy          # build + install all service binaries (incl. sfu) + restart lakko.target
+# Day-to-day: `just restart-sfu`, `just logs-sfu`.
 
 # 5. Monitoring VPS. Issue the mTLS client CA + scrape cert
 #    on your laptop (one-off operation; private CA lives only

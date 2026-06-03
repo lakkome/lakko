@@ -2,124 +2,106 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # SPDX-FileCopyrightText: 2026 Lakko Contributors
 #
-# Bootstrap script for the LiveKit SFU VPS (Phase 3b2).
+# One-time SFU setup on the MAIN VPS (ADR-0011 — Rust SFU,
+# supersedes the LiveKit-fork CCX22 bootstrap of ADR-0008).
 #
-# Run once on a fresh Hetzner CCX22 (Ubuntu 24.04 LTS). Idempotent
-# — safe to re-run; existing artefacts are left untouched.
+# The Rust SFU (`lakko-svc-sfu`) co-locates with the API services
+# on the main VPS. Its BINARY + systemd unit + lakko.env are
+# handled by the regular flow:
+#   - `just deploy` builds + installs /usr/local/bin/lakko-svc-sfu
+#     (deploy.sh now includes `sfu` in SERVICES) and restarts
+#     lakko.target (which now Wants lakko-sfu.service).
+#   - lakko.env carries the LAKKO_SFU_* vars (see
+#     infra/etc-lakko/lakko.env.example).
 #
-# Prereqs:
-#   - DNS A + AAAA for sfu.lakko.me → this VPS's IP.
-#   - The Lakko-flavoured `lakko-sfu` binary already built on a
-#     CI runner (or your laptop with `go build`) and uploaded to
-#     /usr/local/bin/lakko-sfu on this host.
-#   - /etc/lakko/livekit.yaml authored separately (see
-#     services/sfu/README.md for the canonical shape).
-#   - /etc/lakko/lakko.env carrying TURN_SHARED_SECRET so the
-#     SFU can mint matching TURN creds for clients.
+# This script does ONLY the SFU-specific one-time bits that
+# `just deploy` does not:
+#   1. Issue / ensure the Let's Encrypt cert for sfu.lakko.me
+#      (the SFU runs behind its own nginx vhost / subdomain).
+#   2. Install + enable the nginx vhost
+#      (infra/nginx/sites-available/sfu.conf).
+#   3. Open the firewall for the public UDP media port
+#      (LAKKO_SFU_MEDIA_BIND port; default 43210/udp). 443/tcp is
+#      already open for the API.
+#
+# Idempotent — safe to re-run. Run as root on the main VPS:
+#   sudo SFU_DOMAIN=sfu.lakko.me MEDIA_UDP_PORT=43210 \
+#        bash infra/scripts/deploy-sfu.sh
 
 set -euo pipefail
 
 SFU_DOMAIN="${SFU_DOMAIN:-sfu.lakko.me}"
-LAKKO_USER="${LAKKO_USER:-lakkome}"
+# Must match the port in LAKKO_SFU_MEDIA_BIND (lakko.env). str0m
+# gathers host ICE candidates on this UDP port; clients send RTP
+# straight to it (it does NOT go through nginx).
+MEDIA_UDP_PORT="${MEDIA_UDP_PORT:-43210}"
+CERTBOT_EMAIL="${CERTBOT_EMAIL:-ops@lakko.me}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 note() { printf '\n\033[1;36m==>\033[0m %s\n' "$*"; }
 warn() { printf '\n\033[1;33mWARN:\033[0m %s\n' "$*"; }
 
 # ----------------------------------------------------------
-# 0. Sanity — must be root + Ubuntu 24+.
+# 0. Sanity — must be root.
 # ----------------------------------------------------------
 if [[ $EUID -ne 0 ]]; then
   echo "must run as root (sudo $0)" >&2
   exit 1
 fi
-if ! grep -q "ID=ubuntu" /etc/os-release; then
-  warn "non-Ubuntu host — proceed at your own risk"
-fi
 
 # ----------------------------------------------------------
-# 1. System packages.
+# 1. Pre-flight reminders (binary + env are NOT this script's job).
 # ----------------------------------------------------------
-note "installing system packages"
-apt-get update
-DEBIAN_FRONTEND=noninteractive apt-get install -y \
-  nginx certbot python3-certbot-nginx \
-  ufw prometheus-node-exporter
-
-# ----------------------------------------------------------
-# 2. Service user.
-# ----------------------------------------------------------
-if ! id -u "$LAKKO_USER" >/dev/null 2>&1; then
-  note "creating service user '$LAKKO_USER'"
-  useradd --system --shell /usr/sbin/nologin --home-dir /var/lib/lakko-sfu "$LAKKO_USER"
-fi
-
-# ----------------------------------------------------------
-# 3. State + config dirs.
-# ----------------------------------------------------------
-note "creating /var/lib/lakko-sfu + /var/log/lakko-sfu + /etc/lakko"
-install -d -o "$LAKKO_USER" -g "$LAKKO_USER" -m 750 /var/lib/lakko-sfu /var/log/lakko-sfu
-install -d -m 750 /etc/lakko
-install -d -m 700 /etc/lakko/mtls
-
-if [[ ! -f /etc/lakko/livekit.yaml ]]; then
-  warn "/etc/lakko/livekit.yaml is missing — author it before starting the service"
-  warn "see services/sfu/README.md for the canonical shape"
+if [[ ! -x /usr/local/bin/lakko-svc-sfu ]]; then
+  warn "/usr/local/bin/lakko-svc-sfu missing — run 'just deploy' first (it builds + installs it)"
 fi
 if [[ ! -f /etc/lakko/lakko.env ]]; then
-  warn "/etc/lakko/lakko.env is missing — author it (TURN_SHARED_SECRET at minimum)"
+  warn "/etc/lakko/lakko.env missing — author it from infra/etc-lakko/lakko.env.example"
+  warn "(LAKKO_SFU_JWKS_URL + LAKKO_SFU_MEDIA_BIND=0.0.0.0:${MEDIA_UDP_PORT} at minimum)"
+fi
+# The mTLS CA for the /metrics scrape (shared with the other
+# services' monitoring setup).
+install -d -m 700 /etc/lakko/mtls
+if [[ ! -f /etc/lakko/mtls/monitoring-ca.crt ]]; then
+  warn "/etc/lakko/mtls/monitoring-ca.crt missing — the /metrics location will 400 until the monitoring CA cert is installed"
 fi
 
 # ----------------------------------------------------------
-# 4. Binary.
-# ----------------------------------------------------------
-if [[ ! -x /usr/local/bin/lakko-sfu ]]; then
-  echo "/usr/local/bin/lakko-sfu missing — build from services/sfu and scp it here first" >&2
-  exit 2
-fi
-
-# ----------------------------------------------------------
-# 5. systemd unit.
-# ----------------------------------------------------------
-note "installing lakko-sfu.service"
-install -m 644 "$REPO_ROOT/systemd/lakko-sfu.service" /etc/systemd/system/
-systemctl daemon-reload
-
-# ----------------------------------------------------------
-# 6. TLS cert.
+# 2. TLS cert for the SFU subdomain.
 # ----------------------------------------------------------
 if [[ ! -d /etc/letsencrypt/live/$SFU_DOMAIN ]]; then
   note "issuing Let's Encrypt cert for $SFU_DOMAIN"
-  certbot certonly --standalone -d "$SFU_DOMAIN" \
-    --non-interactive --agree-tos -m "ops@$SFU_DOMAIN"
+  # --nginx plugin: the main VPS already runs nginx for the API
+  # domains, so reuse it rather than --standalone (which would
+  # need port 80 free).
+  certbot certonly --nginx -d "$SFU_DOMAIN" \
+    --non-interactive --agree-tos -m "$CERTBOT_EMAIL"
+else
+  note "cert for $SFU_DOMAIN already present — skipping"
 fi
 
 # ----------------------------------------------------------
-# 7. nginx vhost.
+# 3. nginx vhost.
 # ----------------------------------------------------------
-note "installing nginx vhost"
+note "installing nginx vhost for $SFU_DOMAIN"
 install -m 644 "$REPO_ROOT/nginx/sites-available/sfu.conf" /etc/nginx/sites-available/sfu.conf
 ln -sf /etc/nginx/sites-available/sfu.conf /etc/nginx/sites-enabled/sfu.conf
 nginx -t
 systemctl reload nginx
 
 # ----------------------------------------------------------
-# 8. Firewall.
+# 4. Firewall — open the public UDP media port. 443/tcp is
+#    already open for the API; the SFU signaling rides it.
 # ----------------------------------------------------------
-note "configuring ufw"
-ufw allow 22/tcp comment 'ssh'
-ufw allow 443/tcp comment 'sfu signaling + metrics (nginx)'
-ufw allow 7881/tcp comment 'livekit tcp fallback'
-ufw allow 50000:60000/udp comment 'livekit media (RTP)'
-ufw allow 5349/udp comment 'livekit ICE-lite'
-ufw allow 9100/tcp comment 'node_exporter'  # mTLS-protected
-ufw --force enable
+if command -v ufw >/dev/null 2>&1; then
+  note "opening ${MEDIA_UDP_PORT}/udp for SFU media (RTP)"
+  ufw allow "${MEDIA_UDP_PORT}/udp" comment 'lakko sfu media (str0m RTP)'
+else
+  warn "ufw not found — open ${MEDIA_UDP_PORT}/udp for SFU media manually"
+fi
 
-# ----------------------------------------------------------
-# 9. Bring it up.
-# ----------------------------------------------------------
-note "enabling + starting lakko-sfu"
-systemctl enable --now lakko-sfu
-
-note "done. tail logs with: journalctl -u lakko-sfu -f"
-note "verify TLS:           curl -sI https://$SFU_DOMAIN/health"
+note "done."
+note "  - ensure lakko.env has LAKKO_SFU_JWKS_URL + LAKKO_SFU_MEDIA_BIND=0.0.0.0:${MEDIA_UDP_PORT}"
+note "  - run 'just deploy' to build + install lakko-svc-sfu + start it via lakko.target"
+note "  - verify:  curl -sI https://${SFU_DOMAIN}/health"
+note "  - logs:    just logs-sfu"

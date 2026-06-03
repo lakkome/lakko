@@ -295,6 +295,14 @@ dev-push-gw:
 dev-channels:
     cargo run -p lakko-svc-channels
 
+# Run the Rust SFU locally (ADR-0011). Requires LAKKO_SFU_JWKS_URL
+# in .env (point it at a running dev auth service's JWKS, or the
+# fixture JWKS from ci/sfu-e2e/). Set LAKKO_SFU_MEDIA_BIND to a
+# local UDP port (e.g. 0.0.0.0:43210) to exercise media; leave it
+# unset for a signaling-only smoke.
+dev-sfu:
+    cargo run -p lakko-svc-sfu
+
 # Run the web client (apps/web) dev server. Drives `wasm-pack` in
 # `--dev` mode against `crates/lakko-ffi-wasm` first, then starts
 # Vite on http://127.0.0.1:5173.
@@ -640,6 +648,26 @@ logs service:
 # Status of the whole stack.
 status:
     ssh {{vps_user}}@{{vps_host}} 'sudo systemctl status lakko.target --no-pager'
+
+# One-time SFU setup on the MAIN VPS (ADR-0011 — Rust SFU,
+# co-located). Issues the sfu.lakko.me cert, installs the nginx
+# vhost, and opens the public UDP media port in the firewall. The
+# BINARY itself rides the regular `just deploy` (deploy.sh now
+# builds + installs lakko-svc-sfu, and lakko.target Wants it).
+# Run this once after pointing DNS for sfu.lakko.me at the VPS and
+# adding the LAKKO_SFU_* vars to /etc/lakko/lakko.env.
+deploy-sfu:
+    ssh {{vps_user}}@{{vps_host}} 'sudo bash ~/lakko/infra/scripts/deploy-sfu.sh'
+
+# Restart only the SFU (drops live calls — there is no graceful
+# drain yet). The systemd unit is `lakko-sfu`, not `lakko-svc-sfu`,
+# so this can't go through `restart-svc`.
+restart-sfu:
+    ssh {{vps_user}}@{{vps_host}} 'sudo systemctl restart lakko-sfu'
+
+# Tail SFU logs (journald — no separate file).
+logs-sfu:
+    ssh {{vps_user}}@{{vps_host}} 'journalctl -u lakko-sfu -f'
 
 # G3-turn-deploy — bootstrap or refresh the coturn VPS.
 # Idempotent — safe to re-run after editing turnserver.conf or

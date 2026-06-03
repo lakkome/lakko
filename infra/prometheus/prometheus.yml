@@ -6,7 +6,9 @@
 #
 # Sits on the monitoring VPS (CX22 is plenty — Prometheus is
 # light, Grafana is the heavier neighbour). Scrapes:
-#   - LiveKit SFU's /metrics (mTLS to sfu.lakko.me)
+#   - Rust SFU's /metrics (mTLS to sfu.lakko.me; ADR-0011 —
+#     nginx fronts the lakko-svc-sfu exporter on 127.0.0.1:9641;
+#     metric names are lakko_sfu_*)
 #   - coturn's prometheus exporter (mTLS to turn.lakko.me)
 #   - node_exporter on every VPS in the fleet for system
 #     metrics (CPU, RAM, disk, network bytes).
