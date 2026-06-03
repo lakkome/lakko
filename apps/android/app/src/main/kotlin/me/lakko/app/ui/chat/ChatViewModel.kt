@@ -19,7 +19,12 @@ import me.lakko.app.chat.UploadStage
 import me.lakko.app.chat.ChatMessage
 import me.lakko.app.chat.ChatRepository
 import me.lakko.app.chat.ChatThread
+import me.lakko.app.calls.CallJwtClient
 import me.lakko.app.calls.CallSession
+import me.lakko.app.calls.CallUiState
+import me.lakko.app.calls.SfuCallSession
+import me.lakko.app.calls.SfuCallUi
+import me.lakko.app.calls.SfuConfig
 import me.lakko.app.calls.parseCallSignalingBytes
 import me.lakko.app.devices.sync.DeviceGroupSyncRepository
 import uniffi.lakko_ffi_uniffi.AttachmentRef
@@ -40,6 +45,13 @@ import uniffi.lakko_ffi_uniffi.FfiCallSignalingBody
 public class ChatViewModel(
     private val repo: ChatRepository,
     public val groupIdHex: String,
+    /** SFU group-call admission needs the account's session bearer to
+     *  mint a call JWT. Threaded in from `MainActivity` (where the
+     *  `AuthRepository` lives) as a closure so the VM has no auth-layer
+     *  dependency. Returns `null` when signed out — `startGroupCall`
+     *  then refuses with a clear log line. Defaults to `{ null }` so
+     *  existing call sites + tests compile unchanged. */
+    private val sessionTokenProvider: () -> String? = { null },
 ) : ViewModel() {
 
     private val composer: MutableStateFlow<ComposerState> =
@@ -167,6 +179,109 @@ public class ChatViewModel(
         if (cur.state.value == CallSession.WebCallState.Done) {
             mutableActiveCall.value = null
         }
+    }
+
+    // -------------------------------------------------------------
+    // SFU multi-party group call (>2 members)
+    // -------------------------------------------------------------
+
+    private val mutableActiveSfuCall: MutableStateFlow<SfuCallUi?> =
+        MutableStateFlow(null)
+
+    /** Active multi-party SFU group call for this thread, or `null`. A
+     *  group chat (>2 members) routes through this; a 1x1 chat stays on
+     *  [activeCall]. The UI presents the call overlay (driven by
+     *  [sfuCallUiState]) while this is non-null. */
+    public val activeSfuCall: StateFlow<SfuCallUi?> = mutableActiveSfuCall.asStateFlow()
+
+    /** The [CallUiState] the active SFU call drives (roster / phase /
+     *  E2EE). The Compose overlay observes this while [activeSfuCall] is
+     *  non-null. Reused across calls. */
+    public val sfuCallUiState: CallUiState = CallUiState()
+
+    /** `true` when this chat has >2 MLS members — the call button then
+     *  routes through the SFU group-call path; a 2-member chat stays on
+     *  the 1x1 P2P [CallSession]. A `null` member count (no handle yet)
+     *  reads as a 1x1. */
+    public val isGroupChat: Boolean
+        get() = (repo.memberCount(groupIdHex) ?: 0) > 2
+
+    /**
+     * Start a multi-party SFU group call for this (group) chat. Mints the
+     * call-admission JWT, derives the per-call SFrame seed + leaf from the
+     * MLS exporter, and connects through [SfuCallUi]. Fails closed (logs +
+     * no call) on any missing prerequisite — SFU URL, session token, or
+     * call-key derivation (security invariant #4 — never fall back to
+     * non-E2EE).
+     */
+    public fun startGroupCall() {
+        if (mutableActiveSfuCall.value != null || mutableActiveCall.value != null) return
+        val base = SfuConfig.baseUrl ?: run {
+            android.util.Log.w(
+                "ChatViewModel",
+                "startGroupCall: SFU URL not configured (lakko.sfu.url) — refusing",
+            )
+            return
+        }
+        val token = sessionTokenProvider() ?: run {
+            android.util.Log.w(
+                "ChatViewModel",
+                "startGroupCall: no session token — re-authenticate to start a group call",
+            )
+            return
+        }
+        val callIdBytes = CallSession.mintCallId()
+        val callIdHex = callIdBytes.joinToString("") { "%02x".format(it.toInt() and 0xff) }
+        // Mark connecting up front so the externally-driven CallScreen
+        // never flashes the prejoin (Join) screen for an auto-connecting
+        // SFU call — the overlay appears only once `activeSfuCall` flips
+        // non-null, by which point the phase is already Connecting.
+        sfuCallUiState.setPhase(CallUiState.CallPhase.Connecting)
+        viewModelScope.launch {
+            val key = repo.deriveCallKey(groupIdHex = groupIdHex, callId = callIdBytes)
+            if (key == null) {
+                android.util.Log.w(
+                    "ChatViewModel",
+                    "startGroupCall: call-key derivation failed — refusing per invariant #4",
+                )
+                sfuCallUiState.setPhase(CallUiState.CallPhase.Ended(System.currentTimeMillis()))
+                return@launch
+            }
+            val jwt = CallJwtClient()
+            try {
+                jwt.setSessionToken(token)
+                val minted = jwt.mint(callId = callIdHex)
+                val config = SfuCallSession.Config(
+                    sfuBaseUrl = base,
+                    jwt = minted.jwt,
+                    seed = key.seed,
+                    localLeaf = key.localLeaf,
+                    audio = true,
+                    video = false,
+                )
+                val handle = SfuCallUi(
+                    applicationContext = repo.context,
+                    config = config,
+                    scope = viewModelScope,
+                    ui = sfuCallUiState,
+                )
+                mutableActiveSfuCall.value = handle
+                handle.connect()
+            } catch (cause: Throwable) {
+                android.util.Log.w("ChatViewModel", "startGroupCall failed", cause)
+                mutableActiveSfuCall.value?.hangUp()
+                mutableActiveSfuCall.value = null
+                sfuCallUiState.setPhase(CallUiState.CallPhase.Ended(System.currentTimeMillis()))
+            } finally {
+                jwt.close()
+            }
+        }
+    }
+
+    /** Hang up the active SFU group call + clear it. */
+    public fun hangUpGroupCall() {
+        mutableActiveSfuCall.value?.hangUp()
+        mutableActiveSfuCall.value = null
     }
 
     private fun makeSession(callId: ByteArray): CallSession =

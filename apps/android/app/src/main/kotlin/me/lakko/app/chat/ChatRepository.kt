@@ -441,6 +441,26 @@ public class ChatRepository(
         }
     }
 
+    /**
+     * SFU group-call routing — the current MLS member count for
+     * [groupIdHex], or `null` when the repository is not bootstrapped
+     * or has no handle for that group. The chat-call trigger routes a
+     * chat with >2 members through the multi-party SFU path and a
+     * 2-member chat through the 1x1 P2P [me.lakko.app.calls.CallSession].
+     * Reads are lock-free under [groupsLock] semantics (a concurrent
+     * commit only ever grows / shrinks the count by one, which is fine
+     * for a >2 routing decision).
+     */
+    public fun memberCount(groupIdHex: String): Int? {
+        val record = groups[groupIdHex] ?: return null
+        return try {
+            record.group.memberCount().toInt()
+        } catch (cause: Throwable) {
+            android.util.Log.w("ChatRepository", "memberCount failed for $groupIdHex", cause)
+            null
+        }
+    }
+
     public suspend fun publishApplicationMessage(
         groupIdHex: String,
         plaintextBytes: ByteArray,

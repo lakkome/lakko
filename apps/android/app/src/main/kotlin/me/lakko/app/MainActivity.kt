@@ -443,7 +443,18 @@ private fun SessionRoot(
             val chatVm: ChatViewModel = viewModel(
                 key = "chat-$groupIdHex",
                 factory = singletonViewModelFactory {
-                    ChatViewModel(chatRepository, groupIdHex)
+                    ChatViewModel(
+                        repo = chatRepository,
+                        groupIdHex = groupIdHex,
+                        // SFU group-call admission mints a JWT from the
+                        // account session bearer. The AuthRepository owns
+                        // it; thread it in as a closure so the VM has no
+                        // auth-layer dependency. `null` when signed out →
+                        // startGroupCall refuses.
+                        sessionTokenProvider = {
+                            authRepository.identitySecrets.value?.sessionToken
+                        },
+                    )
                 },
             )
             // Phase 2a3e2b-Android — wire cross-device sync

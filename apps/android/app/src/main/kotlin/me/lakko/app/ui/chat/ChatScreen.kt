@@ -165,6 +165,9 @@ public fun ChatScreen(
 
     // Phase 3a10 — call surface.
     val activeCall by viewModel.activeCall.collectAsStateWithLifecycle()
+    // SFU multi-party group call (>2 members). Mutually exclusive with
+    // `activeCall` — the call button routes to exactly one.
+    val activeSfuCall by viewModel.activeSfuCall.collectAsStateWithLifecycle()
     val callStateSnapshot = activeCall?.state?.collectAsStateWithLifecycle()?.value
     // G3-2-call-present — a "live" call (placed or accepted)
     // owns the full screen; `ringing` (incoming, pre-accept)
@@ -188,10 +191,20 @@ public fun ChatScreen(
         Header(
             groupIdHex = state.groupIdHex,
             refreshing = state.refreshing,
-            callActive = activeCall != null,
+            callActive = activeCall != null || activeSfuCall != null,
             onNavigateBack = onNavigateBack,
             onRefresh = viewModel::onRefreshClicked,
-            onStartCall = { viewModel.startCall(audio = true, video = false) },
+            // A group chat (>2 MLS members) routes through the
+            // multi-party SFU path; a 1x1 chat stays on the P2P
+            // CallSession. The button is disabled (callActive) while
+            // either kind of call is already up.
+            onStartCall = {
+                if (viewModel.isGroupChat) {
+                    viewModel.startGroupCall()
+                } else {
+                    viewModel.startCall(audio = true, video = false)
+                }
+            },
         )
 
         // G3-2-call-present — the inline banner now only
@@ -239,6 +252,32 @@ public fun ChatScreen(
                             viewModel.dialActiveCall(audio = mic, video = cam)
                         },
                         onPrejoinCancel = { viewModel.cancelActiveCall() },
+                    )
+                }
+            }
+        }
+
+        // SFU multi-party group call — presented full-screen over the
+        // chat while live. Unlike the 1x1 path there is no prejoin: the
+        // session auto-connects (phase is driven to Connecting before
+        // the overlay appears), so `CallScreen` gets the externally
+        // driven `sfuCallUiState` (NO `session` — the SfuCallUi adapter
+        // owns the state) and no prejoin callbacks. End routes to
+        // `hangUpGroupCall`, which clears `activeSfuCall` and drops this
+        // Dialog.
+        if (activeSfuCall != null) {
+            Dialog(
+                onDismissRequest = { /* exit only via End button */ },
+                properties = DialogProperties(
+                    usePlatformDefaultWidth = false,
+                    dismissOnBackPress = false,
+                    dismissOnClickOutside = false,
+                ),
+            ) {
+                Box(modifier = Modifier.fillMaxSize()) {
+                    CallScreen(
+                        onExit = { viewModel.hangUpGroupCall() },
+                        state = viewModel.sfuCallUiState,
                     )
                 }
             }

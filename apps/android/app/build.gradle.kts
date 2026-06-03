@@ -89,6 +89,21 @@ android {
             "\"${project.findProperty("lakko.fcm.senderId") as String? ?: ""}\"",
         )
 
+        // SFU multi-party group-call endpoint. The Rust SFU is a
+        // WebSocket origin (`ws://` / `wss://`, no trailing path);
+        // `SfuConfig` trims it and `SfuSignalingClient` appends
+        // `/v1/connect`. Sourced from a gradle property (set via
+        // `apps/android/local.properties` or `-P lakko.sfu.url=...`)
+        // so it never lands in version control. Empty when unset —
+        // `SfuConfig.baseUrl` then returns null and the group-call
+        // trigger refuses with a clear log line (1x1 P2P calls are
+        // unaffected). Emulator dev: `ws://10.0.2.2:8085`.
+        buildConfigField(
+            "String",
+            "LAKKO_SFU_URL",
+            "\"${project.findProperty("lakko.sfu.url") as String? ?: ""}\"",
+        )
+
         // G3-4-mobile — wire androidx.test runner for the
         // `app/src/androidTest/` instrumented test source set.
         // `./gradlew :app:connectedDebugAndroidTest` boots a
