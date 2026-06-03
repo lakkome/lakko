@@ -50,8 +50,12 @@ import uniffi.lakko_ffi_uniffi.SfuPeerSnapshot
  * touching session state. Pass a main-confined scope (e.g. a
  * ViewModel scope) so state mutations stay single-threaded.
  *
- * Scope: audio publish on the first pass (video capture into the SFU
- * session + the `CallUiState` / chat wire-up are follow-ups). `connect`
+ * Media: when [Config.video] is set the session captures the local
+ * camera ([CameraVideoCapture]), adds the video track BEFORE arming
+ * SFrame + building the offer (so the offer advertises a video m-line
+ * and the video sender is SFrame-sealed alongside audio), and surfaces
+ * the local track through [Callbacks.onLocalVideoTrack] for the
+ * self-preview tile. Audio-only calls skip all of that. `connect`
  * refuses before any capture if the SFrame shim is unavailable
  * (invariant #4).
  */
@@ -82,6 +86,10 @@ class SfuCallSession(
         val onPeerJoined: (peerId: String, accountPseudonym: String) -> Unit = { _, _ -> },
         val onPeerLeft: (peerId: String) -> Unit = {},
         val onRemoteVideoTrack: (track: VideoTrack?, streamId: String?) -> Unit = { _, _ -> },
+        /** The LOCAL camera video track became available (`config.video`
+         *  publish) or was torn down (`null`). Drives the self-preview
+         *  tile. */
+        val onLocalVideoTrack: (track: VideoTrack?) -> Unit = {},
         val onServerError: (code: SfuErrorCode, detail: String) -> Unit = { _, _ -> },
     )
 
@@ -92,6 +100,11 @@ class SfuCallSession(
 
     private var signaling: SfuSignalingClient? = null
     private var pc: WebRtcPeerConnection? = null
+    /** Local camera capturer — held for the call's lifetime so it
+     *  outlives [openPeerConnectionAndPublish] and is torn down in
+     *  [hangUp]. `null` for an audio-only call (or when no camera
+     *  exists). */
+    private var localCameraCapture: CameraVideoCapture? = null
     private val offerQueue = ArrayDeque<String>()
     private var drainingOffers = false
 
@@ -136,6 +149,14 @@ class SfuCallSession(
 
     /** Tear down. Idempotent. */
     fun hangUp() {
+        // Stop + release the camera first (stop blocks until libwebrtc
+        // releases the device; dispose frees the capturer + EGL pool).
+        localCameraCapture?.let { capture ->
+            capture.stop()
+            capture.dispose()
+        }
+        localCameraCapture = null
+        callbacks.onLocalVideoTrack(null)
         signaling?.close()
         signaling = null
         pc?.close()
@@ -156,14 +177,74 @@ class SfuCallSession(
         connection.installDelegate(peerDelegate())
         pc = connection
 
+        // Publish the mic, and the camera when this is a video call.
+        // Both tracks must be added BEFORE arming SFrame + building the
+        // offer: armSFrameEncryptors walks the present senders, and the
+        // offer's m-lines are fixed at createOffer time (client-initiated
+        // add-track post-offer is the deferred renegotiation path). So:
+        // add audio -> (add video) -> arm SFrame -> offer, guaranteeing
+        // the SFU never sees a plaintext frame on either track (#2/#4).
         connection.addLocalAudioTrack(enabled = config.audio)
-        // Arm SFrame on the sender BEFORE the offer so the SFU never
-        // sees a plaintext frame. A failed arm is fail-closed (#4).
+        if (config.video) {
+            startLocalCameraCapture(connection)
+        }
         if (!connection.armSFrameEncryptors(config.seed, config.localLeaf)) {
             throw SfuCallException("SFrame encryptor arm failed — refusing call (invariant #4)")
         }
         val offer = connection.createOffer(audio = config.audio, video = config.video)
         signaling?.sendSdpOffer(offer)
+    }
+
+    /**
+     * Capture the local camera + add a video track to the peer
+     * connection. Mirrors `CallSession.startLocalCameraCapture`: build a
+     * fresh `VideoSource` + shared EGL context, wrap them in a
+     * [CameraVideoCapture] (front camera, 720p/30), add the backing
+     * `VideoTrack` to the PC (so the upcoming offer advertises a video
+     * m-line + `armSFrameEncryptors` finds the sender), surface the track
+     * for the self-preview tile, and start the capturer. Soft-fails to
+     * audio-only (no camera / null source / start failure) — the call
+     * proceeds; a silent video sender keeps the m=video line and the
+     * receiver sees a black frame.
+     */
+    private fun startLocalCameraCapture(connection: WebRtcPeerConnection) {
+        if (!CameraVideoCapture.hasUsableCamera(applicationContext)) {
+            android.util.Log.i("SfuCallSession", "no camera available; publishing audio-only")
+            return
+        }
+        val source = WebRtcPeerConnection.newVideoSource(applicationContext)
+        val eglContext = WebRtcPeerConnection.sharedEglContext()
+        if (source == null || eglContext == null) {
+            android.util.Log.w(
+                "SfuCallSession",
+                "newVideoSource / sharedEglContext returned null — publishing audio-only",
+            )
+            return
+        }
+        val capture = CameraVideoCapture.create(applicationContext, source, eglContext)
+        if (capture == null) {
+            android.util.Log.w("SfuCallSession", "CameraVideoCapture.create returned null")
+            return
+        }
+        connection.addLocalVideoTrack(source)
+        localCameraCapture = capture
+        callbacks.onLocalVideoTrack(connection.currentLocalVideoTrack())
+        try {
+            capture.start()
+        } catch (cause: CameraVideoCapture.CaptureError) {
+            android.util.Log.w("SfuCallSession", "camera start failed", cause)
+            capture.dispose()
+            localCameraCapture = null
+            callbacks.onLocalVideoTrack(null)
+        }
+    }
+
+    /** Enable / disable the local camera track (local-only gate — only
+     *  meaningful when the call was started with [Config.video], since
+     *  the video track is added at connect; toggling without a track is
+     *  a no-op). */
+    fun setCameraEnabled(on: Boolean) {
+        pc?.setCameraEnabled(on)
     }
 
     // ---- Signaling --------------------------------------------------

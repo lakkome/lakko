@@ -89,6 +89,10 @@ final class SfuCallUi {
                 // follow-up, like the web side.
                 ui.setRemoteVideoTrack(track)
             },
+            onLocalVideoTrack: { track in
+                // Local camera (video call) -> self-preview tile.
+                ui.setLocalVideoTrack(track)
+            },
             onServerError: { _, _ in }
         )
         self.session = SfuCallSession(config: config, callbacks: callbacks)
@@ -110,6 +114,14 @@ final class SfuCallUi {
     func setMicrophoneEnabled(_ on: Bool) {
         session.setMicrophoneEnabled(on)
         ui.setMic(on)
+    }
+
+    /// Enable / disable the local camera — drives the real track + mirrors
+    /// the store's local-participant flag. Only meaningful for a video
+    /// call (the video track is added at connect when `config.video`).
+    func setCameraEnabled(_ on: Bool) {
+        session.setCameraEnabled(on)
+        ui.setCamera(on)
     }
 
     // MARK: - Roster helpers

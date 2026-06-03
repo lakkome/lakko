@@ -89,6 +89,10 @@ class SfuCallUi(
                 // video needs a per-participant track map — a follow-up.
                 ui.setRemoteVideoTrack(track)
             },
+            onLocalVideoTrack = { track ->
+                // Local camera (video call) -> self-preview tile.
+                ui.setLocalVideoTrack(track)
+            },
             onServerError = { _, _ -> },
         )
         session = SfuCallSession(
@@ -115,6 +119,14 @@ class SfuCallUi(
     fun setMicrophoneEnabled(on: Boolean) {
         session.setMicrophoneEnabled(on)
         ui.setMic(on)
+    }
+
+    /** Enable / disable the local camera — drives the real track + mirrors
+     *  the store's local-participant flag. Only meaningful for a video
+     *  call (the video track is added at connect when `config.video`). */
+    fun setCameraEnabled(on: Boolean) {
+        session.setCameraEnabled(on)
+        ui.setCamera(on)
     }
 
     private companion object {

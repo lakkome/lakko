@@ -36,10 +36,13 @@ import WebRTC
 /// only trickles its LOCAL candidates up via `sendIceCandidate` (the
 /// wire protocol has no server -> client ICE frame).
 ///
-/// Scope: audio publish on the first pass (video capture into the SFU
-/// session is a follow-up; the receive path already renders remote
-/// video). `connect()` refuses before any capture if the SFrame native
-/// shim is unavailable (invariant #4).
+/// Media: when `config.video` is set the session captures the local
+/// camera (`LocalCameraCapture`), adds the video track BEFORE arming
+/// SFrame + building the offer (so the offer advertises a video m-line
+/// and the video sender is SFrame-sealed alongside audio), and surfaces
+/// the local track through `onLocalVideoTrack` for the self-preview tile.
+/// Audio-only calls skip all of that. `connect()` refuses before any
+/// capture if the SFrame native shim is unavailable (invariant #4).
 @MainActor
 final class SfuCallSession {
 
@@ -66,6 +69,10 @@ final class SfuCallSession {
         /// A remote video track (with its MSID stream id = source peer
         /// id) arrived or was removed (`nil`).
         var onRemoteVideoTrack: ((RTCVideoTrack?, _ streamId: String?) -> Void)?
+        /// The LOCAL camera video track became available (`config.video`
+        /// publish) or was torn down (`nil`). Drives the self-preview
+        /// tile.
+        var onLocalVideoTrack: ((RTCVideoTrack?) -> Void)?
         var onServerError: ((SfuErrorCode, String) -> Void)?
     }
 
@@ -73,6 +80,10 @@ final class SfuCallSession {
     private let callbacks: Callbacks
     private var signaling: SfuSignalingClient?
     private var pc: WebRTCPeerConnection?
+    /// Local camera capturer — held for the call's lifetime so it
+    /// outlives `openPeerConnectionAndPublish` and is torn down in
+    /// `hangUp`. `nil` for an audio-only call (or when no camera exists).
+    private var localCameraCapture: LocalCameraCapture?
     private(set) var state: State = .idle
 
     /// Serializes SFU-initiated offers so two `createAnswer` cycles
@@ -126,6 +137,14 @@ final class SfuCallSession {
 
     /// Tear down. Idempotent.
     func hangUp() {
+        // Stop the camera first (fire-and-forget — `LocalCameraCapture`
+        // also stops in its deinit, but the explicit stop releases the
+        // `AVCaptureSession` promptly).
+        if let capture = localCameraCapture {
+            localCameraCapture = nil
+            callbacks.onLocalVideoTrack?(nil)
+            Task { await capture.stop() }
+        }
         signaling?.close()
         signaling = nil
         pc?.close()
@@ -145,15 +164,68 @@ final class SfuCallSession {
         connection.installDelegate(makePeerDelegate())
         pc = connection
 
-        // Publish the local mic. Arm SFrame on the sender BEFORE the
-        // offer so the SFU never sees a plaintext frame.
+        // Publish the local mic, and the camera when this is a video
+        // call. Both tracks must be added BEFORE arming SFrame + building
+        // the offer: `armSFrameEncryptors` walks the present senders, and
+        // the offer's m-lines are fixed at `createOffer` time (client-
+        // initiated add-track post-offer is the deferred renegotiation
+        // path). So order is: add audio -> (add video) -> arm SFrame ->
+        // offer, guaranteeing the SFU never sees a plaintext frame on
+        // either track (invariant #2/#4).
         connection.addLocalAudioTrack(enabled: config.audio)
+        if config.video {
+            startLocalCameraCapture(on: connection)
+        }
         guard connection.armSFrameEncryptors(seed: config.seed, localLeaf: config.localLeaf) else {
             // A failed arm is fail-closed (invariant #4).
             throw SfuCallError.sframeUnavailable
         }
         let offer = try await connection.createOffer(audio: config.audio, video: config.video)
         signaling?.sendSdpOffer(offer)
+    }
+
+    /// Capture the local camera + add a video track to the peer
+    /// connection. Mirrors `CallSession.startLocalCameraCapture`: build a
+    /// fresh `RTCVideoSource`, wrap it in a `LocalCameraCapture` (front
+    /// camera, 720p/30), add the backing `RTCVideoTrack` to the PC (so the
+    /// upcoming offer advertises a video m-line + `armSFrameEncryptors`
+    /// finds the sender), surface the track for the self-preview tile, and
+    /// start the `AVCaptureSession` off the main actor (`startCapture`
+    /// blocks briefly). A camera that fails to start leaves the (silent)
+    /// video sender in place — the call proceeds; the receiver sees a
+    /// black frame — and clears the preview track so the UI hides it.
+    private func startLocalCameraCapture(on connection: WebRTCPeerConnection) {
+        guard LocalCameraCapture.hasUsableCamera() else {
+            NSLog("SfuCallSession: no camera available; publishing audio-only")
+            return
+        }
+        let source = WebRTCPeerConnection.newVideoSource()
+        guard let capture = LocalCameraCapture(source: source) else {
+            NSLog("SfuCallSession: LocalCameraCapture init returned nil")
+            return
+        }
+        connection.addLocalVideoTrack(source)
+        localCameraCapture = capture
+        callbacks.onLocalVideoTrack?(connection.currentLocalVideoTrack())
+        Task { [weak self] in
+            do {
+                try await capture.start()
+            } catch {
+                NSLog("SfuCallSession: camera start failed: %@", String(describing: error))
+                await MainActor.run {
+                    self?.localCameraCapture = nil
+                    self?.callbacks.onLocalVideoTrack?(nil)
+                }
+            }
+        }
+    }
+
+    /// Enable / disable the local camera track (local-only gate — only
+    /// meaningful when the call was started with `config.video`, since the
+    /// video track is added at connect; toggling without a track is a
+    /// no-op).
+    func setCameraEnabled(_ on: Bool) {
+        pc?.setCameraEnabled(on)
     }
 
     // MARK: - Signaling
