@@ -598,14 +598,19 @@ an iOS / Android libwebrtc receiver) over a live SFU
 forwarding path. That requires two real endpoints plus the
 SFU in the middle and cannot be done in a headless build
 environment. The web multi-party session that drives the
-worker now exists as a module
-(`apps/web/src/calls/sfu-call-session.ts` — composes the
-`lakko-sfu-v1` signaling client + the call-admission JWT +
-one `RTCPeerConnection` to the SFU + `attachSenderSFrame` /
+worker (`apps/web/src/calls/sfu-call-session.ts` — composes
+the `lakko-sfu-v1` signaling client + the call-admission JWT
++ one `RTCPeerConnection` to the SFU + `attachSenderSFrame` /
 `attachReceiverSFrame` on every track + SFU-initiated
-renegotiation), but is not yet wired into the chat UI; that
-last hop (group-call button → roster tiles → remote-track
-rendering) is the remaining client wire-up.
+renegotiation) is now wired into the chat UI: a group chat
+(>2 members) routes the call button through
+`createSfuCallUi`, which drives the shared call-UI store
+roster + plays remote audio, while 1×1 chats stay on the P2P
+path. Two pieces remain — neither a security gap: per-tile
+remote VIDEO rendering (blocked on pinning the SFU's MSID
+stream-id → source-peer convention; audio + roster work
+without it) and the live cross-platform RTP verification
+above.
 
 **Why this isn't a security gap today.** The keying math +
 the AAD set + the wire layout are all RFC 9605 conformant

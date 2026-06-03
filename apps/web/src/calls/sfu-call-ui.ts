@@ -195,13 +195,11 @@ export function createSfuCallUi(
       setRemoteStreams(new Map());
       callActions.reset();
     },
-    setMicrophoneEnabled: (on): void => {
-      session.setMicrophoneEnabled(on);
-      callActions.setMic(on);
-    },
-    setCameraEnabled: (on): void => {
-      session.setCameraEnabled(on);
-      callActions.setCamera(on);
-    },
+    // Track-only gates — the store's local-participant micOn / camOn is
+    // the source of truth (driven by the Call.tsx buttons), so these do
+    // NOT write back to the store (that would loop the Chat.tsx effect
+    // that reads the store and calls these). Mirrors the 1×1 path.
+    setMicrophoneEnabled: (on): void => session.setMicrophoneEnabled(on),
+    setCameraEnabled: (on): void => session.setCameraEnabled(on),
   };
 }

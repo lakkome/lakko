@@ -59,6 +59,9 @@ import {
   type Participant,
   type QualityTier,
 } from "../state/call-state";
+import { createSfuCallUi, type SfuCallUiHandle } from "../calls/sfu-call-ui";
+import { sfuBaseUrl } from "../calls/sfu-config";
+import { CallJwtClient } from "../calls/call-jwt-client";
 import Call from "./Call";
 import { DsClient } from "../ds/client";
 import { loadWasm as loadWasmForCalls } from "../wasm";
@@ -309,6 +312,14 @@ function ChatView(props: {
     null,
   );
   const [audioRef, setAudioRef] = createSignal<HTMLAudioElement | null>(null);
+  // SFU multi-party (group) call. Distinct from the 1×1 `activeCall`
+  // above — a group chat (>2 members) routes through the Rust SFU with
+  // SFrame, while a 1×1 chat stays P2P DTLS-SRTP. `sfuHandle` is held in
+  // a signal so the remote-stream accessor reads reactively in JSX;
+  // `sfuActive` gates the in-call overlay (the SFU path leaves the 1×1
+  // `callState()` at `idle`).
+  const [sfuHandle, setSfuHandle] = createSignal<SfuCallUiHandle | null>(null);
+  const [sfuActive, setSfuActive] = createSignal(false);
   createEffect(() => {
     const el = audioRef();
     const stream = remoteAudioStream();
@@ -334,6 +345,7 @@ function ChatView(props: {
    *  `ringing` is excluded — an incoming call shows the inline
    *  banner until accepted. */
   const callOverlayVisible = (): boolean => {
+    if (sfuActive()) return true;
     const s = callState();
     return (
       s === "outgoing" ||
@@ -410,8 +422,15 @@ function ChatView(props: {
   // session by hanging up (idempotent — a remote-initiated end
   // already drove the session to `done`).
   createEffect(() => {
-    if (callUi.phase().kind === "ended" && activeCall !== null) {
+    if (callUi.phase().kind !== "ended") return;
+    if (activeCall !== null) {
       void activeCall.hangUp("hungUp");
+    }
+    const h = sfuHandle();
+    if (h !== null) {
+      h.hangUp();
+      setSfuHandle(null);
+      setSfuActive(false);
     }
   });
 
@@ -424,8 +443,13 @@ function ChatView(props: {
   // button stays UI-only until web video calls land.
   createEffect(() => {
     const local = callUi.participants().find((p) => p.isLocal);
-    if (local !== undefined && activeCall !== null) {
+    if (local === undefined) return;
+    if (activeCall !== null) {
       activeCall.setMicrophoneEnabled(local.micOn);
+    }
+    const h = sfuHandle();
+    if (h !== null) {
+      h.setMicrophoneEnabled(local.micOn);
     }
   });
 
@@ -506,9 +530,84 @@ function ChatView(props: {
     }
   }
 
+  // SFU multi-party (group) call. Routed for group chats (>2 members);
+  // 1×1 stays on `onCallClicked` (P2P DTLS-SRTP). Derives the per-call
+  // SFrame seed + leaf from the MLS group, mints the call-admission JWT
+  // bound to the live session token, and drives the shared call-UI
+  // store through `createSfuCallUi`. Fail-closed throughout: any missing
+  // prerequisite (SFU URL / session / seed) aborts before media.
+  async function startGroupCall(): Promise<void> {
+    if (sfuHandle() !== null || activeCall !== null) return;
+    const base = sfuBaseUrl();
+    if (base === null) {
+      setError(
+        "Group calls need an SFU endpoint — set VITE_LAKKO_SFU_URL and rebuild.",
+      );
+      return;
+    }
+    const id = chats.identity();
+    const secrets = auth.identitySecrets();
+    if (id === null || secrets === null) {
+      setError("Re-authenticate to start a group call (no live session token).");
+      return;
+    }
+    try {
+      const wasm = await loadWasmForCalls();
+      const callIdBytes = mintCallId();
+      const callIdHex = hexOf(callIdBytes);
+      // Per-call SFrame seed + this client's leaf. Deterministic per MLS
+      // epoch (audit-pack C-1) so every participant derives identical
+      // bytes. `ownLeafIndex` is the KID this client stamps into frames.
+      const seed = props.entry.group.exportSecret(
+        id,
+        "lakko/call/v1",
+        callIdBytes,
+        32,
+      );
+      const localLeaf = props.entry.group.ownLeafIndex;
+      // Call-admission JWT (JWS Compact, EdDSA) bound to the session.
+      const jwt = new CallJwtClient(wasm);
+      jwt.setSessionToken(secrets.sessionToken);
+      const minted = await jwt.mint(callIdHex, "participant");
+      const handle = createSfuCallUi(
+        {
+          sfuBaseUrl: base,
+          jwt: minted.jwt,
+          seed,
+          localLeaf,
+          media: { audio: true, video: false },
+        },
+        { localDisplayName: "You" },
+      );
+      setSfuHandle(handle);
+      setSfuActive(true);
+      await handle.connect();
+    } catch (err) {
+      setError(
+        `Could not start group call: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      sfuHandle()?.hangUp();
+      setSfuHandle(null);
+      setSfuActive(false);
+    }
+  }
+
   async function onHangUp(): Promise<void> {
     if (activeCall === null) return;
     await activeCall.hangUp("hungUp");
+  }
+
+  /** Exit the in-call overlay — tears down whichever session is live
+   *  (SFU group call or 1×1 P2P). Wired to `Call`'s `onExit`. */
+  function onCallExit(): void {
+    const h = sfuHandle();
+    if (h !== null) {
+      h.hangUp();
+      setSfuHandle(null);
+      setSfuActive(false);
+      return;
+    }
+    void onHangUp();
   }
 
   async function onAcceptCall(): Promise<void> {
@@ -563,6 +662,12 @@ function ChatView(props: {
     if (activeCall !== null) {
       activeCall.dispose();
       activeCall = null;
+    }
+    const h = sfuHandle();
+    if (h !== null) {
+      h.hangUp();
+      setSfuHandle(null);
+      setSfuActive(false);
     }
   });
 
@@ -1416,11 +1521,20 @@ function ChatView(props: {
           </button>
           {/* Phase 3a8 — call button. Visible whenever no
               call is active in this thread. */}
-          <Show when={callState() === "idle" || callState() === "done"}>
+          <Show
+            when={
+              (callState() === "idle" || callState() === "done") && !sfuActive()
+            }
+          >
             <button
               type="button"
               onClick={() => {
-                void onCallClicked();
+                // Group chat (>2 members) → SFU + SFrame; 1×1 → P2P.
+                if (memberCount() > 2) {
+                  void startGroupCall();
+                } else {
+                  void onCallClicked();
+                }
               }}
               disabled={busy()}
             >
@@ -1441,7 +1555,7 @@ function ChatView(props: {
         <Call
           embedded={true}
           onExit={(): void => {
-            void onHangUp();
+            onCallExit();
           }}
         />
       </Show>
@@ -1456,6 +1570,32 @@ function ChatView(props: {
           autoplay
           style={{ display: "none" }}
         />
+      </Show>
+
+      {/* SFU group-call remote audio — one hidden sink per remote
+          MediaStream, keyed by the stream object identity (a stable
+          stream keeps its element, so audio does not cut on roster
+          churn). The participant video tiles render from the store
+          roster the adapter drives; per-tile remote VIDEO is deferred
+          on the SFU MSID stream-id → peer mapping. */}
+      <Show when={sfuActive()}>
+        <For
+          each={[
+            ...(
+              sfuHandle()?.remoteStreams() ?? new Map<string, MediaStream>()
+            ).values(),
+          ]}
+        >
+          {(stream) => (
+            <audio
+              autoplay
+              style={{ display: "none" }}
+              ref={(el) => {
+                el.srcObject = stream;
+              }}
+            />
+          )}
+        </For>
       </Show>
 
       {/* Phase 3a8 — inline incoming-call banner. Now shown ONLY
