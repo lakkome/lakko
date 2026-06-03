@@ -200,9 +200,20 @@ public fun ChatScreen(
             // either kind of call is already up.
             onStartCall = {
                 if (viewModel.isGroupChat) {
-                    viewModel.startGroupCall()
+                    viewModel.startGroupCall(video = false)
                 } else {
                     viewModel.startCall(audio = true, video = false)
+                }
+            },
+            // Video call — publishes the local camera. Group chats
+            // SFrame-seal the video through the SFU; 1x1 chats open a
+            // P2P video call (the prejoin still lets the user toggle
+            // the camera before joining).
+            onStartVideoCall = {
+                if (viewModel.isGroupChat) {
+                    viewModel.startGroupCall(video = true)
+                } else {
+                    viewModel.startCall(audio = true, video = true)
                 }
             },
         )
@@ -399,6 +410,7 @@ private fun Header(
     onNavigateBack: () -> Unit,
     onRefresh: () -> Unit,
     onStartCall: () -> Unit,
+    onStartVideoCall: () -> Unit,
 ) {
     Column {
         Row(
@@ -415,11 +427,13 @@ private fun Header(
                 fontFamily = FontFamily.Monospace,
                 modifier = Modifier.weight(1f),
             )
-            // Phase 3a10 — call button. Hidden when a call
+            // Phase 3a10 — call buttons. Hidden when a call
             // is already active (the overlay carries the
-            // Accept / Decline / Hang up affordances).
+            // Accept / Decline / Hang up affordances). Audio
+            // call + video call (publishes the local camera).
             if (!callActive) {
                 TextButton(onClick = onStartCall) { Text("📞 Call") }
+                TextButton(onClick = onStartVideoCall) { Text("🎥 Video") }
             }
             if (refreshing) {
                 CircularProgressIndicator(

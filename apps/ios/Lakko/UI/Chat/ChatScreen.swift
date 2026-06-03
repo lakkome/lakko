@@ -105,7 +105,7 @@ public struct ChatScreen: View {
                 }
                 .disabled(viewModel.refreshing)
             }
-            // Phase 3a9 — Call button. Hidden when a call
+            // Phase 3a9 — audio Call button. Hidden when a call
             // overlay is up (the overlay carries the
             // Accept / Decline / Hang up affordances).
             ToolbarItem(placement: .navigationBarTrailing) {
@@ -113,12 +113,28 @@ public struct ChatScreen: View {
                     // A group chat (>2 members) routes through the SFU
                     // (multi-party + SFrame); a 1×1 chat stays P2P.
                     if viewModel.isGroupChat {
-                        viewModel.startGroupCall()
+                        viewModel.startGroupCall(video: false)
                     } else {
                         viewModel.startCall(audio: true, video: false)
                     }
                 } label: {
                     Image(systemName: "phone.fill")
+                }
+                .disabled(viewModel.activeCall != nil || viewModel.activeSfuCall != nil)
+            }
+            // Video-call button — starts the call with the local
+            // camera published (`config.video`). Group chats publish
+            // SFrame-sealed video through the SFU; a 1×1 chat opens a
+            // P2P video call.
+            ToolbarItem(placement: .navigationBarTrailing) {
+                Button {
+                    if viewModel.isGroupChat {
+                        viewModel.startGroupCall(video: true)
+                    } else {
+                        viewModel.startCall(audio: true, video: true)
+                    }
+                } label: {
+                    Image(systemName: "video.fill")
                 }
                 .disabled(viewModel.activeCall != nil || viewModel.activeSfuCall != nil)
             }

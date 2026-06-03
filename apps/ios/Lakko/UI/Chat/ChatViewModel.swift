@@ -274,7 +274,7 @@ public final class ChatViewModel: ObservableObject {
     /// from the MLS exporter, and connects through `SfuCallUi`. Fails
     /// closed (NSLog + no call) on any missing prerequisite — SFU URL,
     /// session token, or call-key derivation.
-    func startGroupCall() {
+    func startGroupCall(video: Bool = false) {
         guard activeSfuCall == nil, activeCall == nil else { return }
         guard let base = SfuConfig.baseUrl else {
             NSLog("startGroupCall: SFU URL not configured (LakkoSfuUrl) — refusing")
@@ -301,7 +301,7 @@ public final class ChatViewModel: ObservableObject {
                     seed: key.seed,
                     localLeaf: key.localLeaf,
                     audio: true,
-                    video: false
+                    video: video
                 )
                 let handle = SfuCallUi(config: config, ui: sfuCallUiState)
                 activeSfuCall = handle

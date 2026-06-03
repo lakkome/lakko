@@ -214,7 +214,7 @@ public class ChatViewModel(
      * call-key derivation (security invariant #4 — never fall back to
      * non-E2EE).
      */
-    public fun startGroupCall() {
+    public fun startGroupCall(video: Boolean = false) {
         if (mutableActiveSfuCall.value != null || mutableActiveCall.value != null) return
         val base = SfuConfig.baseUrl ?: run {
             android.util.Log.w(
@@ -257,7 +257,7 @@ public class ChatViewModel(
                     seed = key.seed,
                     localLeaf = key.localLeaf,
                     audio = true,
-                    video = false,
+                    video = video,
                 )
                 val handle = SfuCallUi(
                     applicationContext = repo.context,
