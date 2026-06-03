@@ -32,6 +32,7 @@ import {
   generateRendezvousPseudonym,
   parsePairingQrPayload,
 } from "./pairing";
+import { DsClient } from "../ds/client";
 import { ensureDeviceGroup, persistDeviceGroupSnapshot } from "./lifecycle";
 import {
   publishWelcome,
@@ -247,17 +248,37 @@ export async function runScanFlow(args: {
       ensured.identity,
       decoded.keyPackage,
     );
+
+    // G-7 — persist the advanced DeviceGroup snapshot BEFORE any
+    // publish. `addDeviceFromWire` already merged the pending
+    // commit, so the in-memory view is one epoch ahead; writing it
+    // to disk first closes the window where a crash between the
+    // publishes and the persist leaves the on-disk envelope an
+    // epoch behind (which would make the next launch try to add the
+    // same device twice).
+    await persistDeviceGroupSnapshot(
+      ensured.identity,
+      args.accountIdB64,
+      args.deviceKey,
+    );
+
     // Push the Welcome to the rendezvous mailbox the joining
     // device is polling.
     await publishWelcome(decoded.rendezvousPseudonym, addition.welcome);
-    // TODO(2a3b2-followup): once the DS group journal is
-    // wired for DeviceGroup commits, broadcast
-    // `addition.commit` here too so any other
-    // already-paired devices on this account advance to the
-    // new epoch. For the founder + first-pair case the
-    // commit is a no-op (the founder is the only existing
-    // member, and the merge-pending-commit already advanced
-    // its local view inside addDeviceFromWire).
+
+    // G-5 — broadcast the Commit to the DeviceGroup DS journal so
+    // any OTHER already-paired devices on this account advance to
+    // the new epoch; their DeviceGroup poll loop runs
+    // `processIncoming` on this row (see `DeviceGroupSyncContext`).
+    // MLS requires in-order epoch processing, so this is on the
+    // critical path (not best-effort) — a missed commit would
+    // permanently strand a third device. For the founder +
+    // first-pair case there is no other member, so the row is a
+    // harmless no-op (the joiner ratchets forward from the Welcome,
+    // not this journal entry). Mirrors the `removeDeviceAt`
+    // broadcast in `remove.ts`.
+    const ds = new DsClient();
+    await ds.publishGroup(ensured.group.groupId(), addition.commit);
 
     // Phase 2a3d8-ui — best-effort history catch-up bundle.
     // Read the local message log, derive the post-add
@@ -281,11 +302,6 @@ export async function runScanFlow(args: {
       console.warn("history bundle publish failed", err);
     }
 
-    await persistDeviceGroupSnapshot(
-      ensured.identity,
-      args.accountIdB64,
-      args.deviceKey,
-    );
     // member count: founder + freshly-added leaf, plus any
     // prior members. We don't expose `devices()` through FFI
     // yet (2a3c), so surface a best-effort estimate.

@@ -201,9 +201,9 @@ should not re-discover them.
 | ID  | Title |
 |---|---|
 | G-4 | AccountIdentity rotation on password change has no KT-log supersession proof yet |
-| G-5 | Commit broadcast on `add_device_from_wire` to other pre-paired devices |
+| G-5 | Commit broadcast on `add_device_from_wire` to other pre-paired devices — **CLOSED** (all three orchestrators publish the commit to the DeviceGroup DS journal) |
 | G-6 | History bundle `payload_bytes` use a JSON placeholder, not raw MLS application-payload bytes |
-| G-7 | DeviceGroup snapshot persistence may briefly diverge across in-flight ratchet operations |
+| G-7 | DeviceGroup snapshot persistence may briefly diverge across in-flight ratchet operations — **CLOSED** (persist-before-publish reorder on all three clients) |
 
 ### Web client
 

@@ -51,21 +51,24 @@ trust.
 
 ROADMAP: Phase 2c (transparency log).
 
-### G-5: Commit broadcast on `add_device_from_wire` to other pre-paired devices
+### G-5: Commit broadcast on `add_device_from_wire` to other pre-paired devices — **CLOSED**
 
-Today's `runScanFlow` PUTs the Welcome to the joiner's
-rendezvous mailbox but does NOT broadcast the commit to
-the DeviceGroup DS journal for the other already-paired
-devices. The first-pair case (founder + first joiner) is
-unaffected — there's no other device to advance — but a
-third pairing wouldn't ratchet the second device forward
-until that device's `add_device_from_wire` happens to
-serialise after.
-
-Mitigation: each device's DeviceGroup poll loop already
-processes commits from the journal; the post-add commit
-just needs to be published. Marked `TODO(2a3b-followup)`
-in every per-client `runScanFlow`.
+**Closed (2026-06-03).** All three `runScanFlow` /
+`PairingOrchestrator` implementations now broadcast the
+`MemberAddition.commit` to the DeviceGroup DS journal
+(`DsClient.publishGroup(group_id, commit)`) right after the
+Welcome PUT, mirroring the established `removeDeviceAt`
+broadcast. Other already-paired devices advance to the new
+epoch when their DeviceGroup poll loop runs `processIncoming`
+on the row (web `DeviceGroupSyncContext`, native lifecycle
+poll). MLS requires in-order epoch processing, so the
+broadcast is on the critical path (not best-effort) — a
+missed commit would permanently strand a third device. For
+the founder + first-pair case there is no other member, so
+the row is a harmless no-op. Touchpoints:
+`apps/web/src/devices/orchestrator.ts`,
+`apps/ios/Lakko/Devices/PairingOrchestrator.swift`,
+`apps/android/.../devices/PairingOrchestrator.kt`.
 
 ### G-6: History bundle `payload_bytes` use a JSON placeholder, not raw MLS application-payload bytes
 
@@ -81,17 +84,22 @@ original wire bytes (smaller + lets a future "verify-replay"
 step re-process every old message through the chat envelope
 parser) and swap the placeholder for the real thing.
 
-### G-7: DeviceGroup snapshot persistence may briefly diverge across in-flight ratchet operations
+### G-7: DeviceGroup snapshot persistence may briefly diverge across in-flight ratchet operations — **CLOSED**
 
-The current flow is `add_device_from_wire` → publish
-Welcome → publish bundle → persist snapshot. If the
-process crashes between the publish and the persist, the
-in-memory state has advanced but the on-disk envelope is
-one epoch behind. On next launch, the load + a fresh
-`addDeviceFromWire` would attempt to add the same device
-twice. The DS journal's epoch check rejects the duplicate
-gracefully, but the local snapshot would benefit from a
-"persist before publish" reordering.
+**Closed (2026-06-03).** The scan flow was reordered to
+**persist-before-publish** on all three clients:
+`add_device_from_wire` (merges the pending commit, advancing
+the local view one epoch) → **persist snapshot** → publish
+Welcome → broadcast commit (G-5) → best-effort history
+bundle. Writing the advanced snapshot to disk before any
+publish closes the window where a crash between the publishes
+and the persist left the on-disk envelope an epoch behind
+(which would make the next launch attempt to add the same
+device twice). A crash after persist but before the publishes
+leaves the on-disk state correctly advanced; the joiner
+simply never receives the Welcome and retries the QR with a
+fresh KeyPackage. Touchpoints: the three
+`runScanFlow` / `PairingOrchestrator` files (see G-5).
 
 ## Web client
 
