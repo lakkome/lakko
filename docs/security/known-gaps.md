@@ -597,9 +597,15 @@ real media frame sealed on one platform (e.g. a Chrome
 an iOS / Android libwebrtc receiver) over a live SFU
 forwarding path. That requires two real endpoints plus the
 SFU in the middle and cannot be done in a headless build
-environment. The web worker also is not yet wired into a
-live multi-party `CallSession` — that lands with the
-SFU-multiparty client wire-up.
+environment. The web multi-party session that drives the
+worker now exists as a module
+(`apps/web/src/calls/sfu-call-session.ts` — composes the
+`lakko-sfu-v1` signaling client + the call-admission JWT +
+one `RTCPeerConnection` to the SFU + `attachSenderSFrame` /
+`attachReceiverSFrame` on every track + SFU-initiated
+renegotiation), but is not yet wired into the chat UI; that
+last hop (group-call button → roster tiles → remote-track
+rendering) is the remaining client wire-up.
 
 **Why this isn't a security gap today.** The keying math +
 the AAD set + the wire layout are all RFC 9605 conformant
