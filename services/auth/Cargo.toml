@@ -126,3 +126,16 @@ sha1 = "0.10"
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
+
+# Software WebAuthn authenticator (kanidm), test-only. Drives the full
+# action-binding round-trip in `webauthn_action` property tests: register a
+# passkey, then sign an assertion over the action-bound challenge so we can
+# assert (a) a correctly-bound assertion verifies and (b) an assertion
+# produced for action A is REJECTED on action B's session. `softpasskey`
+# (no default features) avoids the USB / NFC / BLE / HID transport stack —
+# it only pulls crypto (openssl, already in-tree via webauthn-rs-core) +
+# tokio. `webauthn-rs-proto` unifies to 0.5.5, so its `PublicKeyCredential`
+# / `RequestChallengeResponse` are the SAME types our forked core consumes.
+webauthn-authenticator-rs = { version = "0.5", default-features = false, features = [
+    "softpasskey",
+] }

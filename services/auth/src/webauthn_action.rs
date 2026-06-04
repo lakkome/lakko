@@ -290,3 +290,122 @@ mod tests {
         assert_ne!(real, other, "domain separation must change the challenge");
     }
 }
+
+/// Full action-binding round-trip property tests (ADR-0014). These drive a
+/// real software WebAuthn authenticator (`SoftPasskey`) end-to-end: register
+/// a passkey, then have it sign an assertion over the action-bound challenge.
+/// The security property under test is that an assertion produced for action
+/// A cannot be accepted on action B's session — the whole point of G-13.
+///
+/// The assertion *verification* (`finish_action_auth` →
+/// `authenticate_credential`) is upstream-verbatim; these tests prove the
+/// Lakko wiring feeds it the action-bound challenge so the binding holds
+/// through a genuine signature, not just at the derivation layer.
+#[cfg(test)]
+mod action_roundtrip_tests {
+    use super::{build_action_core, finish_action_auth, start_action_auth, ACTION_HASH_LEN};
+    use url::Url;
+    use uuid::Uuid;
+    use webauthn_authenticator_rs::softpasskey::SoftPasskey;
+    use webauthn_authenticator_rs::WebauthnAuthenticator;
+    use webauthn_rs::prelude::{Passkey, Webauthn, WebauthnBuilder};
+
+    const RP_ID: &str = "lakko.app";
+    const RP_ORIGIN: &str = "https://lakko.app";
+    const RP_NAME: &str = "Lakko";
+
+    fn rp_origin() -> Url {
+        Url::parse(RP_ORIGIN).expect("static RP origin parses")
+    }
+
+    /// The high-level `Webauthn` used only to register a passkey for the test
+    /// (its RP config matches `build_action_core`, so the resulting passkey
+    /// verifies under the action-bound core).
+    fn high_level() -> Webauthn {
+        WebauthnBuilder::new(RP_ID, &rp_origin())
+            .expect("WebauthnBuilder::new")
+            .rp_name(RP_NAME)
+            .build()
+            .expect("WebauthnBuilder::build")
+    }
+
+    /// Register a fresh passkey with the software authenticator and return the
+    /// server-side `Passkey` record.
+    fn register_passkey(wa: &mut WebauthnAuthenticator<SoftPasskey>, hl: &Webauthn) -> Passkey {
+        let (ccr, reg_state) = hl
+            .start_passkey_registration(Uuid::new_v4(), "tester", "Tester", None)
+            .expect("start_passkey_registration");
+        let rpkc = wa
+            .do_registration(rp_origin(), ccr)
+            .expect("software authenticator registration");
+        hl.finish_passkey_registration(&rpkc, &reg_state)
+            .expect("finish_passkey_registration")
+    }
+
+    #[test]
+    fn action_bound_assertion_round_trips() {
+        let hl = high_level();
+        // falsify_uv = true → set the user-verified flag (the high-level
+        // default policy is Preferred), so verification accepts the UV bit.
+        let mut wa = WebauthnAuthenticator::new(SoftPasskey::new(true));
+        let passkey = register_passkey(&mut wa, &hl);
+
+        let core = build_action_core(RP_NAME, RP_ID, &rp_origin());
+        let action = [0xAAu8; ACTION_HASH_LEN];
+
+        let (rcr, state, _nonce) = start_action_auth(&core, std::slice::from_ref(&passkey), &action)
+            .expect("start_action_auth");
+        // The authenticator signs the assertion over the action-bound
+        // challenge carried in `rcr`.
+        let pkc = wa
+            .do_authentication(rp_origin(), rcr)
+            .expect("software authenticator assertion");
+
+        let result = finish_action_auth(&core, &pkc, &state)
+            .expect("correctly-bound assertion must verify");
+        assert_eq!(
+            result.cred_id(),
+            passkey.cred_id(),
+            "verification must resolve to the registered credential"
+        );
+    }
+
+    #[test]
+    fn assertion_is_rejected_on_a_different_action() {
+        let hl = high_level();
+        let mut wa = WebauthnAuthenticator::new(SoftPasskey::new(true));
+        let passkey = register_passkey(&mut wa, &hl);
+
+        let core = build_action_core(RP_NAME, RP_ID, &rp_origin());
+        let action_a = [0xAAu8; ACTION_HASH_LEN];
+        let action_b = [0xBBu8; ACTION_HASH_LEN];
+
+        // Two independent action-bound sessions: A and B carry different
+        // challenges (different action hash AND different fresh nonce).
+        let (rcr_a, state_a, _) =
+            start_action_auth(&core, std::slice::from_ref(&passkey), &action_a)
+                .expect("start_action_auth A");
+        let (_rcr_b, state_b, _) =
+            start_action_auth(&core, std::slice::from_ref(&passkey), &action_b)
+                .expect("start_action_auth B");
+
+        // The authenticator signs ONLY action A's challenge.
+        let pkc_a = wa
+            .do_authentication(rp_origin(), rcr_a)
+            .expect("assertion over action A");
+
+        // Sanity: it verifies on its own session A.
+        assert!(
+            finish_action_auth(&core, &pkc_a, &state_a).is_ok(),
+            "the action-A assertion must verify on the action-A session"
+        );
+
+        // Security property: the SAME assertion must be REJECTED on action
+        // B's session — the authenticator never attested to action B.
+        let swapped = finish_action_auth(&core, &pkc_a, &state_b);
+        assert!(
+            swapped.is_err(),
+            "an assertion bound to action A must not verify on action B (got {swapped:?})"
+        );
+    }
+}
