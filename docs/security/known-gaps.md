@@ -119,11 +119,37 @@ the placeholder encode/decode into the **shared Rust core**
 (one canonical codec exposed via UniFFI + wasm-bindgen, so all
 three platforms encode/decode identically and it is unit-
 testable in Rust), OR ship the raw `mls_app::v1::ApplicationPayload`
-proto bytes directly (proto is the cross-platform wire format
-by definition, and re-projection on the joiner side reuses the
-chat-envelope parser). Either is a dedicated multi-platform
-wiring sprint (native parts are not headlessly testable);
-deferred rather than half-built.
+proto bytes directly.
+
+**Step 1 landed (2026-06-04) — shared-core codec.**
+[`crates/lakko-mls/src/history_placeholder.rs`](../../crates/lakko-mls/src/history_placeholder.rs)
+is the canonical codec: a versioned, bounded, deterministic
+binary layout carrying `(message_id: u64, direction, created_at,
+text, attachments[{blob_id, key, nonce, size, mime?, name?}])`.
+`message_id` / `size` ride as typed `u64` (each platform renders
+its own way — web decimal string, native integer); `created_at`
+rides as the platform's display string verbatim. Exposed
+identically through both FFI crates — `encode_history_placeholder`
+/ `decode_history_placeholder` + records in
+`lakko-ffi-uniffi` (Swift / Kotlin) and `encodeHistoryPlaceholder`
+/ `decodeHistoryPlaceholder` + classes in `lakko-ffi-wasm` (web)
+— so every platform produces and consumes the **same bytes**.
+13 Rust unit tests cover round-trip, all directions,
+determinism, and bounded-parse rejection (wrong version,
+truncation, over-cap length, non-UTF-8, bad direction tag,
+trailing bytes).
+
+**Step 2 still open — per-platform wiring.** Each platform's
+`HistoryBundleCodec` must switch from its local JSON placeholder
+to the FFI codec (web `encodeMessagePlaceholder` /
+`decodeMessagePlaceholder`, iOS `JSONEncoder`/`JSONDecoder`,
+Android `kotlinx.serialization`), and the sibling
+`HistoryMessage.message_id` field must converge on one encoding
+(the native 8-byte big-endian `u64`; web currently sends UTF-8
+of a decimal string). That wiring touches all three clients;
+the native halves compile-check only (not headlessly testable),
+so it is a separate sprint. Until it lands, the live web↔native
+interop is unchanged (iOS↔Android still works).
 
 ### G-7: DeviceGroup snapshot persistence may briefly diverge across in-flight ratchet operations — **CLOSED**
 

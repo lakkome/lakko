@@ -20,6 +20,7 @@ pub mod device_group;
 pub mod error;
 pub mod group;
 pub mod history_bundle;
+pub mod history_placeholder;
 pub mod identity;
 pub mod key_package;
 pub mod pairing;

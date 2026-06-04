@@ -1339,6 +1339,160 @@ fn build_history_bundle_proto(
     }
 }
 
+// ============================================================================
+// History-bundle per-message placeholder codec (G-6)
+//
+// Canonical cross-platform encode/decode for the
+// `StructuredHistoryMessage.payload_bytes` display projection.
+// Web / iOS / Android all call these so the bytes agree on the
+// wire (previously each platform JSON-encoded its own
+// `PersistedMessage` shape, which did NOT interoperate web <->
+// native — see lakko_mls::history_placeholder + known-gaps G-6).
+// ============================================================================
+
+/// Message direction relative to the local account.
+#[derive(uniffi::Enum)]
+pub enum HistoryMessageDirection {
+    /// Sent by this account.
+    Outgoing,
+    /// Received from a peer.
+    Incoming,
+    /// System / control message.
+    System,
+}
+
+impl From<HistoryMessageDirection> for lakko_mls::history_placeholder::HistoryDirection {
+    fn from(d: HistoryMessageDirection) -> Self {
+        match d {
+            HistoryMessageDirection::Outgoing => Self::Outgoing,
+            HistoryMessageDirection::Incoming => Self::Incoming,
+            HistoryMessageDirection::System => Self::System,
+        }
+    }
+}
+
+impl From<lakko_mls::history_placeholder::HistoryDirection> for HistoryMessageDirection {
+    fn from(d: lakko_mls::history_placeholder::HistoryDirection) -> Self {
+        use lakko_mls::history_placeholder::HistoryDirection as D;
+        match d {
+            D::Outgoing => Self::Outgoing,
+            D::Incoming => Self::Incoming,
+            D::System => Self::System,
+        }
+    }
+}
+
+/// One attachment reference inside a [`HistoryPlaceholder`].
+/// `blob_id` / `key` MUST be 32 bytes, `nonce` 12 bytes.
+#[derive(uniffi::Record)]
+pub struct HistoryAttachment {
+    /// 32-byte SHA-256 blob id.
+    pub blob_id: Vec<u8>,
+    /// 32-byte content-encryption key.
+    pub key: Vec<u8>,
+    /// 12-byte AEAD nonce.
+    pub nonce: Vec<u8>,
+    /// Plaintext size in bytes.
+    pub size: u64,
+    /// Optional MIME type.
+    pub mime: Option<String>,
+    /// Optional file name.
+    pub name: Option<String>,
+}
+
+/// The display projection of one history-bundle message —
+/// the structured form of `StructuredHistoryMessage.payload_bytes`.
+#[derive(uniffi::Record)]
+pub struct HistoryPlaceholder {
+    /// HLC-derived message id.
+    pub message_id: u64,
+    /// Direction relative to the local account.
+    pub direction: HistoryMessageDirection,
+    /// Display timestamp string as the platform stores it
+    /// (ISO-8601 today), carried verbatim.
+    pub created_at: String,
+    /// Message text.
+    pub text: String,
+    /// Attachment references.
+    pub attachments: Vec<HistoryAttachment>,
+}
+
+fn fixed_bytes<const N: usize>(v: &[u8], field: &str) -> Result<[u8; N], FfiError> {
+    if v.len() != N {
+        return Err(FfiError::Codec(format!(
+            "history placeholder: {field} must be {N} bytes, got {}",
+            v.len()
+        )));
+    }
+    let mut arr = [0u8; N];
+    arr.copy_from_slice(v);
+    Ok(arr)
+}
+
+/// Encode a [`HistoryPlaceholder`] to the canonical wire bytes
+/// for `StructuredHistoryMessage.payload_bytes`.
+///
+/// # Errors
+///
+/// [`FfiError::Codec`] on a wrong-length `blob_id` / `key` /
+/// `nonce`, or when a field exceeds the codec's hard caps
+/// (see `lakko_mls::history_placeholder`).
+#[uniffi::export]
+pub fn encode_history_placeholder(placeholder: HistoryPlaceholder) -> Result<Vec<u8>, FfiError> {
+    use lakko_mls::history_placeholder::{HistoryAttachmentPlaceholder, HistoryMessagePlaceholder};
+    let mut attachments = Vec::with_capacity(placeholder.attachments.len());
+    for a in placeholder.attachments {
+        attachments.push(HistoryAttachmentPlaceholder {
+            blob_id: fixed_bytes::<32>(&a.blob_id, "blob_id")?,
+            key: fixed_bytes::<32>(&a.key, "key")?,
+            nonce: fixed_bytes::<12>(&a.nonce, "nonce")?,
+            size: a.size,
+            mime: a.mime,
+            name: a.name,
+        });
+    }
+    let msg = HistoryMessagePlaceholder {
+        message_id: placeholder.message_id,
+        direction: placeholder.direction.into(),
+        created_at: placeholder.created_at,
+        text: placeholder.text,
+        attachments,
+    };
+    Ok(msg.encode()?)
+}
+
+/// Decode canonical `StructuredHistoryMessage.payload_bytes`
+/// produced by [`encode_history_placeholder`] (on any platform)
+/// back into a [`HistoryPlaceholder`].
+///
+/// # Errors
+///
+/// [`FfiError::Codec`] on a malformed buffer (bad version,
+/// truncation, over-cap length, non-UTF-8 string, unknown
+/// direction tag, trailing bytes).
+#[uniffi::export]
+pub fn decode_history_placeholder(bytes: Vec<u8>) -> Result<HistoryPlaceholder, FfiError> {
+    let msg = lakko_mls::history_placeholder::HistoryMessagePlaceholder::decode(&bytes)?;
+    Ok(HistoryPlaceholder {
+        message_id: msg.message_id,
+        direction: msg.direction.into(),
+        created_at: msg.created_at,
+        text: msg.text,
+        attachments: msg
+            .attachments
+            .into_iter()
+            .map(|a| HistoryAttachment {
+                blob_id: a.blob_id.to_vec(),
+                key: a.key.to_vec(),
+                nonce: a.nonce.to_vec(),
+                size: a.size,
+                mime: a.mime,
+                name: a.name,
+            })
+            .collect(),
+    })
+}
+
 /// Compute the deterministic DeviceGroup `group_id` from an
 /// account_id, without building a `DeviceGroup` instance.
 /// Useful on the joining-device side when polling the DS

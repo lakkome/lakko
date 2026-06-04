@@ -1320,6 +1320,233 @@ fn build_history_bundle_proto(
     }
 }
 
+// ============================================================================
+// History-bundle per-message placeholder codec (G-6)
+//
+// Canonical cross-platform encode/decode for the per-message
+// `payload_bytes` display projection. The byte format is produced
+// by the SAME `lakko_mls::history_placeholder` encoder on every
+// platform (web here, native via UniFFI), so the bytes interop
+// web <-> native — closing the divergence where each platform
+// JSON-encoded its own `PersistedMessage` shape (known-gaps G-6).
+//
+// `direction` crosses the wasm boundary as a u8: 0 = outgoing,
+// 1 = incoming, 2 = system (wasm-bindgen does not ergonomically
+// round-trip a data-less enum through plain functions, and the
+// web TS layer already maps these onto its string union).
+// ============================================================================
+
+fn direction_from_u8(tag: u8) -> Result<lakko_mls::history_placeholder::HistoryDirection, JsError> {
+    use lakko_mls::history_placeholder::HistoryDirection as D;
+    match tag {
+        0 => Ok(D::Outgoing),
+        1 => Ok(D::Incoming),
+        2 => Ok(D::System),
+        other => Err(JsError::new(&format!(
+            "history placeholder: direction must be 0/1/2, got {other}"
+        ))),
+    }
+}
+
+/// One attachment the caller adds to a placeholder before
+/// encoding. `blobId` / `key` MUST be 32 bytes, `nonce` 12 bytes.
+/// JS-side `new HistoryAttachmentInput(...)`.
+#[wasm_bindgen]
+#[allow(clippy::struct_field_names)]
+pub struct HistoryAttachmentInput {
+    blob_id_val: Vec<u8>,
+    key_val: Vec<u8>,
+    nonce_val: Vec<u8>,
+    size_val: u64,
+    mime_val: Option<String>,
+    name_val: Option<String>,
+}
+
+#[wasm_bindgen]
+impl HistoryAttachmentInput {
+    /// JS constructor — one call per attachment.
+    #[wasm_bindgen(constructor)]
+    pub fn new(
+        blob_id: &[u8],
+        key: &[u8],
+        nonce: &[u8],
+        size: u64,
+        mime: Option<String>,
+        name: Option<String>,
+    ) -> HistoryAttachmentInput {
+        HistoryAttachmentInput {
+            blob_id_val: blob_id.to_vec(),
+            key_val: key.to_vec(),
+            nonce_val: nonce.to_vec(),
+            size_val: size,
+            mime_val: mime,
+            name_val: name,
+        }
+    }
+}
+
+fn fixed_bytes<const N: usize>(v: &[u8], field: &str) -> Result<[u8; N], JsError> {
+    if v.len() != N {
+        return Err(JsError::new(&format!(
+            "history placeholder: {field} must be {N} bytes, got {}",
+            v.len()
+        )));
+    }
+    let mut arr = [0u8; N];
+    arr.copy_from_slice(v);
+    Ok(arr)
+}
+
+/// Encode a placeholder to the canonical `payload_bytes` wire
+/// bytes. `direction` is 0 = outgoing, 1 = incoming, 2 = system.
+/// `attachments` is an `Array<HistoryAttachmentInput>`.
+#[wasm_bindgen(js_name = encodeHistoryPlaceholder)]
+pub fn encode_history_placeholder(
+    message_id: u64,
+    direction: u8,
+    created_at: &str,
+    text: &str,
+    attachments: Vec<HistoryAttachmentInput>,
+) -> Result<Vec<u8>, JsError> {
+    use lakko_mls::history_placeholder::{HistoryAttachmentPlaceholder, HistoryMessagePlaceholder};
+    let dir = direction_from_u8(direction)?;
+    let mut atts = Vec::with_capacity(attachments.len());
+    for a in attachments {
+        atts.push(HistoryAttachmentPlaceholder {
+            blob_id: fixed_bytes::<32>(&a.blob_id_val, "blob_id")?,
+            key: fixed_bytes::<32>(&a.key_val, "key")?,
+            nonce: fixed_bytes::<12>(&a.nonce_val, "nonce")?,
+            size: a.size_val,
+            mime: a.mime_val,
+            name: a.name_val,
+        });
+    }
+    let msg = HistoryMessagePlaceholder {
+        message_id,
+        direction: dir,
+        created_at: created_at.to_string(),
+        text: text.to_string(),
+        attachments: atts,
+    };
+    msg.encode().map_err(mls_err)
+}
+
+/// One attachment after the decode path — flat getters.
+#[wasm_bindgen]
+#[allow(clippy::struct_field_names, missing_docs)]
+pub struct OpenedHistoryAttachment {
+    blob_id_val: Vec<u8>,
+    key_val: Vec<u8>,
+    nonce_val: Vec<u8>,
+    size_val: u64,
+    mime_val: Option<String>,
+    name_val: Option<String>,
+}
+
+#[wasm_bindgen]
+#[allow(missing_docs)]
+impl OpenedHistoryAttachment {
+    #[wasm_bindgen(getter, js_name = blobId)]
+    pub fn blob_id(&self) -> Vec<u8> {
+        self.blob_id_val.clone()
+    }
+    #[wasm_bindgen(getter)]
+    pub fn key(&self) -> Vec<u8> {
+        self.key_val.clone()
+    }
+    #[wasm_bindgen(getter)]
+    pub fn nonce(&self) -> Vec<u8> {
+        self.nonce_val.clone()
+    }
+    #[wasm_bindgen(getter)]
+    pub fn size(&self) -> u64 {
+        self.size_val
+    }
+    #[wasm_bindgen(getter)]
+    pub fn mime(&self) -> Option<String> {
+        self.mime_val.clone()
+    }
+    #[wasm_bindgen(getter)]
+    pub fn name(&self) -> Option<String> {
+        self.name_val.clone()
+    }
+}
+
+/// A decoded placeholder — flat getters for the JS caller.
+/// `direction` is 0 = outgoing, 1 = incoming, 2 = system.
+#[wasm_bindgen]
+#[allow(clippy::struct_field_names, missing_docs)]
+pub struct OpenedHistoryPlaceholder {
+    message_id_val: u64,
+    direction_val: u8,
+    created_at_val: String,
+    text_val: String,
+    attachments_val: Vec<OpenedHistoryAttachment>,
+}
+
+#[wasm_bindgen]
+#[allow(missing_docs)]
+impl OpenedHistoryPlaceholder {
+    #[wasm_bindgen(getter, js_name = messageId)]
+    pub fn message_id(&self) -> u64 {
+        self.message_id_val
+    }
+    #[wasm_bindgen(getter)]
+    pub fn direction(&self) -> u8 {
+        self.direction_val
+    }
+    #[wasm_bindgen(getter, js_name = createdAt)]
+    pub fn created_at(&self) -> String {
+        self.created_at_val.clone()
+    }
+    #[wasm_bindgen(getter)]
+    pub fn text(&self) -> String {
+        self.text_val.clone()
+    }
+    /// `Array<OpenedHistoryAttachment>`.
+    #[wasm_bindgen(getter)]
+    pub fn attachments(&self) -> Vec<OpenedHistoryAttachment> {
+        self.attachments_val
+            .iter()
+            .map(|a| OpenedHistoryAttachment {
+                blob_id_val: a.blob_id_val.clone(),
+                key_val: a.key_val.clone(),
+                nonce_val: a.nonce_val.clone(),
+                size_val: a.size_val,
+                mime_val: a.mime_val.clone(),
+                name_val: a.name_val.clone(),
+            })
+            .collect()
+    }
+}
+
+/// Decode canonical `payload_bytes` (produced by
+/// `encodeHistoryPlaceholder` on any platform) into an
+/// [`OpenedHistoryPlaceholder`].
+#[wasm_bindgen(js_name = decodeHistoryPlaceholder)]
+pub fn decode_history_placeholder(bytes: &[u8]) -> Result<OpenedHistoryPlaceholder, JsError> {
+    let msg = lakko_mls::history_placeholder::HistoryMessagePlaceholder::decode(bytes)
+        .map_err(mls_err)?;
+    Ok(OpenedHistoryPlaceholder {
+        message_id_val: msg.message_id,
+        direction_val: msg.direction.tag(),
+        created_at_val: msg.created_at,
+        text_val: msg.text,
+        attachments_val: msg
+            .attachments
+            .into_iter()
+            .map(|a| OpenedHistoryAttachment {
+                blob_id_val: a.blob_id.to_vec(),
+                key_val: a.key.to_vec(),
+                nonce_val: a.nonce.to_vec(),
+                size_val: a.size,
+                mime_val: a.mime,
+                name_val: a.name,
+            })
+            .collect(),
+    })
+}
+
 /// One message after the open path — flat getters for the JS
 /// caller. wasm-bindgen doesn't expose tuple-style returns, so
 /// each opened message is a class instance.
