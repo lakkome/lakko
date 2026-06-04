@@ -1046,21 +1046,27 @@ impl WebauthnCore {
     // (G-13). The verification path (`authenticate_credential`) is upstream,
     // UNCHANGED — we do not touch WebAuthn's dangerous verification logic.
     //
+    // The challenge crosses the crate boundary as raw `Vec<u8>` (not
+    // `Challenge`) because `Challenge::new` is `pub(crate)` upstream — taking
+    // bytes keeps the fork from widening the public surface of `Challenge`.
+    //
     // Re-base checklist on each upstream bump: diff this method against
     // `generate_challenge_authenticate` and confirm the ONLY difference is the
     // `chal` source, and that `authenticate_credential` is unchanged.
 
     /// Like [`Self::generate_challenge_authenticate`], but uses the
-    /// caller-supplied `chal` instead of a fresh random challenge.
+    /// caller-supplied `chal_bytes` as the challenge instead of a fresh
+    /// random one.
     ///
-    /// The caller is responsible for `chal` being unpredictable enough to be a
-    /// valid WebAuthn challenge (Lakko derives it as a keyed BLAKE3 of an
-    /// action hash and a 32-byte server nonce — see ADR-0014).
+    /// The caller is responsible for `chal_bytes` being unpredictable enough
+    /// to be a valid WebAuthn challenge (Lakko derives it as a keyed BLAKE3 of
+    /// an action hash and a 32-byte server nonce — see ADR-0014).
     pub fn generate_challenge_authenticate_with_challenge(
         &self,
         challenge_builder: ChallengeAuthenticateBuilder,
-        chal: Challenge,
+        chal_bytes: Vec<u8>,
     ) -> Result<(RequestChallengeResponse, AuthenticationState), WebauthnError> {
+        let chal = Challenge::new(chal_bytes);
         let ChallengeAuthenticateBuilder {
             creds,
             policy,

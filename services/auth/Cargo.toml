@@ -94,7 +94,21 @@ webauthn-rs = { version = "0.5", features = [
     # path where the authenticator picks the credential without
     # the user typing a username — the consumer-facing flow.
     "conditional-ui",
+    # WebAuthn action binding (G-13, ADR-0014). Exposes
+    # `From<Passkey> for Credential` + `prelude::Credential` so the
+    # action-bound flow can feed stored passkeys into the
+    # webauthn-rs-core challenge builder. The "danger" name is about
+    # not mutating Credential internals — we only read/convert.
+    "danger-credential-internals",
 ] }
+# WebAuthn action binding (G-13, ADR-0014). The low-level core — used
+# ONLY by the action-bound flow to set a per-action challenge
+# (`generate_challenge_authenticate_with_challenge`, our one fork-delta
+# method) and to run `authenticate_credential` (upstream-verbatim
+# verification). Resolves to the vendored fork via `[patch.crates-io]`
+# in the root Cargo.toml. The username/discoverable LOGIN flows stay on
+# the safe high-level `webauthn-rs` above.
+webauthn-rs-core = "0.5"
 url = "2"
 
 # G3-{1,2}-turn — HMAC-SHA1 for the coturn `static-auth-secret`
