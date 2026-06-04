@@ -60,6 +60,10 @@ uuid = { version = "1", features = ["v7", "serde"] }
 equix = { version = "0.6", features = ["compiler"] }
 sha2 = "0.10"
 
+# WebAuthn action binding (G-13, ADR-0014) — domain-separated keyed
+# BLAKE3 derivation of the per-action assertion challenge.
+lakko-crypto.workspace = true
+
 # Session-token issuance — Phase 1.5b. Stateless HMAC-SHA256 tokens
 # shared with `services/discovery`'s verifier middleware via the
 # `LAKKO_SESSION_TOKEN_SECRET` env var.

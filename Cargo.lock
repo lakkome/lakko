@@ -2653,6 +2653,7 @@ dependencies = [
  "http-body-util",
  "lakko-auth-token",
  "lakko-call-jwt",
+ "lakko-crypto",
  "opaque-ke",
  "rand 0.8.6",
  "serde",

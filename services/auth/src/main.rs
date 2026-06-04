@@ -67,6 +67,7 @@ mod opaque;
 mod pow;
 mod turn;
 mod webauthn;
+mod webauthn_action;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
