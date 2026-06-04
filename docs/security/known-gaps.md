@@ -154,9 +154,11 @@ decimal string):
 * **iOS** ([`apps/ios/Lakko/Devices/HistoryBundleCodec.swift`](../../apps/ios/Lakko/Devices/HistoryBundleCodec.swift))
   — `encodePlaceholder` / `decodePlaceholder` over the UniFFI
   `HistoryPlaceholder` record; `message_id` already BE-u64.
-  Code-complete against the regenerated Swift binding; full
-  xcodebuild verification requires rebuilding
-  `LakkoCore.xcframework` (maintainer step).
+  Verified: `LakkoCore.xcframework` rebuilt (`just build-ios`)
+  with the new FFI symbols, then `xcodebuild build -scheme Lakko
+  -destination 'generic/platform=iOS Simulator'` exited 0 with
+  zero errors — the app compiles + links against the rebuilt
+  framework.
 * **Android** ([`apps/android/.../devices/HistoryBundleCodec.kt`](../../apps/android/app/src/main/kotlin/me/lakko/app/devices/HistoryBundleCodec.kt))
   — `encodePlaceholder` / `decodePlaceholder` over the UniFFI
   `HistoryPlaceholder` data class; `message_id` already BE-u64.
@@ -167,9 +169,10 @@ All three feed the same Rust `encode`/`decode`, so the
 a web↔native history catch-up now interoperates by construction.
 A live cross-platform pairing roundtrip is not headlessly
 runnable here; the codec-layer determinism + 13 Rust unit tests
-+ web tsc + Android compile + iOS binding-alignment are the
-evidence. **The cross-platform interop bug (the G-9 concern and
-the web↔native break) is closed.**
++ web tsc + Android `compileDebugKotlin` + iOS `xcodebuild` (with
+the rebuilt xcframework) are the evidence. **The cross-platform
+interop bug (the G-9 concern and the web↔native break) is
+closed.**
 
 **Still open (downgraded to a nice-to-have):** the placeholder
 is a canonical *projection* `(message_id, direction, text,
