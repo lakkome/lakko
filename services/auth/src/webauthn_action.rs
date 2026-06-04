@@ -30,14 +30,11 @@
 //!
 //! The challenge-derivation here is the Lakko-owned crypto; the surrounding
 //! WebAuthn assertion *verification* stays in upstream `webauthn-rs-core`
-//! (ADR-0014). The `start_action_auth` / `finish_action_auth` wiring + the
-//! `/auth/action/{start,finish}` endpoints + `webauthn_states.action_hash`
-//! migration are the next ADR-0014 steps; this module lands the derivation
-//! primitive + its tests first.
-
-// Consumed by the `/auth/action/{start,finish}` handlers in a follow-up
-// ADR-0014 step; the derivation primitive lands (and is tested) first.
-#![allow(dead_code)]
+//! (ADR-0014). This module owns the whole action-bound flow: the challenge
+//! derivation primitive, the `start_action_auth` / `finish_action_auth`
+//! wiring over the vendored fork, and the bearer-authenticated
+//! `POST /auth/action/{start,finish}` HTTP endpoints (backed by the
+//! `webauthn_states.action_hash` column from migration 0008).
 
 use rand::rngs::OsRng;
 use rand::RngCore;
@@ -164,6 +161,358 @@ pub(crate) fn finish_action_auth(
     state: &AuthenticationState,
 ) -> Result<AuthenticationResult, WebauthnError> {
     core.authenticate_credential(credential, state)
+}
+
+// ----------------------------------------------------------------
+// HTTP endpoints — POST /auth/action/{start,finish} (G-13, ADR-0014)
+//
+// Both are bearer-authenticated: the caller is an already-logged-in
+// account proving possession of one of its registered passkeys over a
+// specific action. The action core is configured from the SAME RP env
+// vars as the high-level login `Webauthn`, so a passkey registered there
+// verifies here (matching rpIdHash + origin). The username / discoverable
+// LOGIN flows are untouched.
+// ----------------------------------------------------------------
+
+use std::sync::Arc;
+
+use axum::extract::State;
+use axum::response::Json;
+use axum::Extension;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine as _;
+use serde::{Deserialize, Serialize};
+use sqlx::MySqlPool;
+
+use crate::webauthn::{
+    hex_lower, load_passkeys_for, parse_state_id, random_state_id, state_kind, ApiError,
+    AuthenticatedAccount, STATE_TTL_SECS,
+};
+use crate::AppState;
+
+/// Build the action-binding [`WebauthnCore`] from the same relying-party
+/// env vars the high-level login flow reads (`LAKKO_WEBAUTHN_RP_ID` /
+/// `_RP_NAME` / `_RP_ORIGIN`), so the action core's rpIdHash + origin
+/// check are byte-identical to the config the account's passkeys were
+/// registered under. Returns `None` when `LAKKO_WEBAUTHN_RP_ID` is unset —
+/// mirrors `webauthn::load_webauthn`: the service still runs and the
+/// `/auth/action/*` routes return 503.
+///
+/// # Errors
+///
+/// Propagates a configuration error when `LAKKO_WEBAUTHN_RP_ID` is set but
+/// `LAKKO_WEBAUTHN_RP_ORIGIN` is missing or unparseable.
+pub(crate) fn load_action_core() -> anyhow::Result<Option<Arc<WebauthnCore>>> {
+    let Ok(rp_id) = std::env::var("LAKKO_WEBAUTHN_RP_ID") else {
+        return Ok(None);
+    };
+    let rp_name = std::env::var("LAKKO_WEBAUTHN_RP_NAME").unwrap_or_else(|_| "Lakko".into());
+    let rp_origin = std::env::var("LAKKO_WEBAUTHN_RP_ORIGIN").map_err(|_| {
+        anyhow::anyhow!(
+            "LAKKO_WEBAUTHN_RP_ID is set but LAKKO_WEBAUTHN_RP_ORIGIN is not — pass the full origin (e.g. https://lakko.me)"
+        )
+    })?;
+    let origin =
+        Url::parse(&rp_origin).map_err(|e| anyhow::anyhow!("LAKKO_WEBAUTHN_RP_ORIGIN parse: {e}"))?;
+    Ok(Some(Arc::new(build_action_core(&rp_name, &rp_id, &origin))))
+}
+
+/// Decode the URL-safe base64 32-byte action hash from the wire.
+fn decode_action_hash(b64: &str) -> Result<[u8; ACTION_HASH_LEN], ApiError> {
+    let bytes = URL_SAFE_NO_PAD
+        .decode(b64)
+        .map_err(|_| ApiError::BadInput("action_hash_b64 not URL-safe base64"))?;
+    if bytes.len() != ACTION_HASH_LEN {
+        return Err(ApiError::BadInput("action_hash must decode to 32 bytes"));
+    }
+    let mut out = [0u8; ACTION_HASH_LEN];
+    out.copy_from_slice(&bytes);
+    Ok(out)
+}
+
+/// `POST /auth/action/start` — issue an action-bound passkey challenge.
+///
+/// Bearer-authenticated. Loads the caller's registered passkeys, derives
+/// `challenge = BLAKE3_keyed(DOMAIN, action_hash || nonce)`, builds the
+/// allow-list challenge over the forked core, and persists the
+/// `AuthenticationState` plus the `action_hash` in `webauthn_states`
+/// (kind = action). The authenticator will sign over this challenge, so
+/// its signature attests to `action_hash`.
+#[axum::debug_handler]
+pub(crate) async fn action_start(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthenticatedAccount>,
+    Json(req): Json<ActionStartReq>,
+) -> Result<Json<ActionStartRes>, ApiError> {
+    let core = state
+        .webauthn_action_core
+        .as_ref()
+        .ok_or(ApiError::Disabled)?
+        .clone();
+    let action_hash = decode_action_hash(&req.action_hash_b64)?;
+
+    let passkeys = load_passkeys_for(&state.db, &auth.0).await?;
+    if passkeys.is_empty() {
+        return Err(ApiError::NoCredentials);
+    }
+
+    let (rcr, auth_state, _nonce) =
+        start_action_auth(&core, &passkeys, &action_hash).map_err(ApiError::Webauthn)?;
+    let state_bytes = serde_json::to_vec(&auth_state).map_err(ApiError::SerdeJson)?;
+    let state_id = random_state_id();
+    persist_action_state(&state.db, &state_id, &auth.0, &action_hash, &state_bytes).await?;
+
+    Ok(Json(ActionStartRes {
+        state_id: hex_lower(&state_id),
+        options: rcr,
+    }))
+}
+
+/// `POST /auth/action/finish` — verify an action-bound assertion.
+///
+/// Bearer-authenticated. Loads the issued state, refuses if the state is
+/// not bound to the calling account, re-checks the presented `action_hash`
+/// against the stored one (defence in depth), runs upstream-verbatim
+/// `authenticate_credential` (which fails unless the authenticator signed
+/// over our action-bound challenge), deletes the single-use state row, and
+/// advances the credential's signature counter.
+#[axum::debug_handler]
+pub(crate) async fn action_finish(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthenticatedAccount>,
+    Json(req): Json<ActionFinishReq>,
+) -> Result<Json<ActionFinishRes>, ApiError> {
+    let core = state
+        .webauthn_action_core
+        .as_ref()
+        .ok_or(ApiError::Disabled)?
+        .clone();
+    let presented = decode_action_hash(&req.action_hash_b64)?;
+    let state_id = parse_state_id(&req.state_id)?;
+
+    let row = load_action_state(&state.db, &state_id)
+        .await?
+        .ok_or(ApiError::StateMissing)?;
+
+    // Bind the state to the calling account. Don't leak which side
+    // mismatched — same posture as `webauthn::register_finish`.
+    if row.account_id != auth.0 {
+        return Err(ApiError::StateMissing);
+    }
+    // Defence in depth: the caller must re-present the `action_hash` the
+    // challenge was minted for. The signature already guarantees this (the
+    // challenge is a function of `action_hash`), so this compare is
+    // belt-and-braces — refuse before touching the crypto verifier.
+    if row.action_hash != presented {
+        return Err(ApiError::BadInput(
+            "action_hash does not match the issued challenge",
+        ));
+    }
+
+    let auth_state: AuthenticationState =
+        serde_json::from_slice(&row.state_bytes).map_err(ApiError::SerdeJson)?;
+    let result = finish_action_auth(&core, &req.credential, &auth_state)
+        .map_err(ApiError::Webauthn)?;
+
+    // Single-use: drop the in-flight row so a verified action-bound
+    // assertion cannot be replayed (mirrors `webauthn::auth_finish`).
+    let _ = sqlx::query("DELETE FROM webauthn_states WHERE state_id = ?")
+        .bind(state_id.as_slice())
+        .execute(&state.db)
+        .await;
+
+    // Advance the credential's signature counter / last_used_at and catch
+    // a counter regression (possible cloned authenticator). Same shape as
+    // `webauthn::auth_finish`'s counter block.
+    bump_action_credential(&state.db, &auth.0, &result).await?;
+
+    Ok(Json(ActionFinishRes {
+        account_id_b64: URL_SAFE_NO_PAD.encode(auth.0),
+        action_hash_b64: URL_SAFE_NO_PAD.encode(presented),
+        credential_id_b64: URL_SAFE_NO_PAD.encode(result.cred_id().as_ref()),
+    }))
+}
+
+/// Decoded `webauthn_states` row for an action-bound `/finish`. Both
+/// `account_id` and `action_hash` are non-NULL for kind = action rows.
+struct ActionStateRow {
+    account_id: [u8; 16],
+    action_hash: [u8; ACTION_HASH_LEN],
+    state_bytes: Vec<u8>,
+}
+
+/// Raw query projection — the DB columns are nullable in general (the
+/// other `webauthn_states` kinds leave `action_hash` NULL), so we read
+/// `Option` and validate before decoding into [`ActionStateRow`].
+#[derive(sqlx::FromRow)]
+struct ActionStateQueryRow {
+    account_id: Option<Vec<u8>>,
+    action_hash: Option<Vec<u8>>,
+    state_bytes: Vec<u8>,
+}
+
+async fn persist_action_state(
+    pool: &MySqlPool,
+    state_id: &[u8; 16],
+    account_id: &[u8; 16],
+    action_hash: &[u8; ACTION_HASH_LEN],
+    state_bytes: &[u8],
+) -> Result<(), ApiError> {
+    sqlx::query(
+        "INSERT INTO webauthn_states \
+            (state_id, account_id, kind, action_hash, state_bytes, expires_at) \
+         VALUES (?, ?, ?, ?, ?, NOW(3) + INTERVAL ? SECOND)",
+    )
+    .bind(state_id.as_slice())
+    .bind(account_id.as_slice())
+    .bind(state_kind::ACTION)
+    .bind(action_hash.as_slice())
+    .bind(state_bytes)
+    .bind(STATE_TTL_SECS)
+    .execute(pool)
+    .await
+    .map_err(ApiError::Db)?;
+    Ok(())
+}
+
+async fn load_action_state(
+    pool: &MySqlPool,
+    state_id: &[u8; 16],
+) -> Result<Option<ActionStateRow>, ApiError> {
+    let row: Option<ActionStateQueryRow> = sqlx::query_as(
+        "SELECT account_id, action_hash, state_bytes \
+         FROM webauthn_states \
+         WHERE state_id = ? AND kind = ? AND expires_at > NOW(3)",
+    )
+    .bind(state_id.as_slice())
+    .bind(state_kind::ACTION)
+    .fetch_optional(pool)
+    .await
+    .map_err(ApiError::Db)?;
+
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    // Both columns are non-NULL for kind = action rows; a NULL or
+    // wrong-length value means a corrupt row — refuse as StateMissing.
+    let account_id = row
+        .account_id
+        .filter(|v| v.len() == 16)
+        .map(|v| {
+            let mut a = [0u8; 16];
+            a.copy_from_slice(&v);
+            a
+        })
+        .ok_or(ApiError::StateMissing)?;
+    let action_hash = row
+        .action_hash
+        .filter(|v| v.len() == ACTION_HASH_LEN)
+        .map(|v| {
+            let mut a = [0u8; ACTION_HASH_LEN];
+            a.copy_from_slice(&v);
+            a
+        })
+        .ok_or(ApiError::StateMissing)?;
+    Ok(Some(ActionStateRow {
+        account_id,
+        action_hash,
+        state_bytes: row.state_bytes,
+    }))
+}
+
+/// Advance the credential's signature counter + `last_used_at` after a
+/// successful action-bound assertion. Mirrors `webauthn::auth_finish`'s
+/// counter block; kept local so the audited login handler is untouched.
+async fn bump_action_credential(
+    pool: &MySqlPool,
+    account_id: &[u8; 16],
+    result: &AuthenticationResult,
+) -> Result<(), ApiError> {
+    let cred_id_bytes: Vec<u8> = result.cred_id().as_ref().to_vec();
+    let row: Option<(Vec<u8>, Vec<u8>)> = sqlx::query_as(
+        "SELECT passkey_bytes, account_id FROM webauthn_credentials WHERE credential_id = ?",
+    )
+    .bind(&cred_id_bytes)
+    .fetch_optional(pool)
+    .await
+    .map_err(ApiError::Db)?;
+    let (passkey_bytes, row_account) = row.ok_or(ApiError::StateMissing)?;
+    // Defence in depth: the credential must belong to the calling account.
+    if row_account.len() != 16 || row_account.as_slice() != account_id.as_slice() {
+        tracing::warn!("webauthn action: credential account mismatch");
+        return Err(ApiError::StateMissing);
+    }
+    let mut passkey: Passkey =
+        serde_json::from_slice(&passkey_bytes).map_err(ApiError::SerdeJson)?;
+    let changed = passkey.update_credential(result).unwrap_or(false);
+    if changed {
+        let serialised = serde_json::to_vec(&passkey).map_err(ApiError::SerdeJson)?;
+        sqlx::query(
+            "UPDATE webauthn_credentials \
+             SET passkey_bytes = ?, last_used_at = NOW(3) \
+             WHERE credential_id = ?",
+        )
+        .bind(&serialised)
+        .bind(&cred_id_bytes)
+        .execute(pool)
+        .await
+        .map_err(ApiError::Db)?;
+    } else {
+        sqlx::query("UPDATE webauthn_credentials SET last_used_at = NOW(3) WHERE credential_id = ?")
+            .bind(&cred_id_bytes)
+            .execute(pool)
+            .await
+            .map_err(ApiError::Db)?;
+    }
+    Ok(())
+}
+
+// ----------------------------------------------------------------
+// Wire shapes — /auth/action/{start,finish}
+// ----------------------------------------------------------------
+
+#[derive(Deserialize)]
+pub(crate) struct ActionStartReq {
+    /// URL-safe base64 of the 32-byte opaque action hash to bind the
+    /// assertion to (e.g. `BLAKE3` of the canonical action description).
+    /// The server treats it as opaque bytes.
+    pub action_hash_b64: String,
+}
+
+#[derive(Serialize)]
+pub(crate) struct ActionStartRes {
+    /// Hex-lowercase 16-byte state id. Echo back on `/auth/action/finish`.
+    pub state_id: String,
+    /// `RequestChallengeResponse` whose `challenge` is the action-bound
+    /// value — feed into `navigator.credentials.get({publicKey})` on web
+    /// or the platform authenticator API, exactly like the login flow.
+    pub options: RequestChallengeResponse,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct ActionFinishReq {
+    /// The `state_id` issued by `/auth/action/start`.
+    pub state_id: String,
+    /// The same `action_hash_b64` presented at `/start` (re-checked
+    /// against the stored value as defence in depth).
+    pub action_hash_b64: String,
+    /// `PublicKeyCredential` produced by the authenticator (the asserted
+    /// signature + clientDataJSON + authenticatorData).
+    pub credential: PublicKeyCredential,
+}
+
+#[derive(Serialize)]
+// The `_b64` suffix is the wire convention across this service (it tells the
+// client the field is URL-safe base64); keeping it is clearer than dropping
+// it just because every field in this particular response happens to be one.
+#[allow(clippy::struct_field_names)]
+pub(crate) struct ActionFinishRes {
+    /// URL-safe base64 of the 16-byte account id (the authenticated caller).
+    pub account_id_b64: String,
+    /// Echo of the verified action hash the passkey attested to.
+    pub action_hash_b64: String,
+    /// URL-safe base64 of the credential id that signed.
+    pub credential_id_b64: String,
 }
 
 #[cfg(test)]

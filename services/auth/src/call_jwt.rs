@@ -282,6 +282,7 @@ mod tests {
             session_token_secret: Arc::new(token_secret.clone()),
             session_token_ttl_ms: 86_400_000,
             webauthn: None,
+            webauthn_action_core: None,
             call_jwt_signing: signing,
             turn: None,
         }

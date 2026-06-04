@@ -5,7 +5,7 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 # ADR-0014: WebAuthn action binding via a minimal webauthn-rs-core challenge-injection fork
 
-- **Status:** Proposed
+- **Status:** Accepted (server-side implemented 2026-06-04; client-side wiring + fork-delta CI guard pending)
 - **Date:** 2026-06-04
 - **Context:** G-13 (`docs/security/known-gaps.md`) — bind a passkey assertion to the specific action it authorises, so a verified assertion cannot be replayed against (or reordered onto) a different request inside the same TLS session.
 

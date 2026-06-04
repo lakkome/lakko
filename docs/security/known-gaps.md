@@ -313,25 +313,42 @@ session is implausible but not impossible — Phase 2c can
 mix the OPAQUE message hash into the WebAuthn assertion
 challenge.
 
-**Design landed (2026-06-04) — [ADR-0014](../adr/0014-webauthn-action-binding.md), implementation pending.**
-A spike confirmed the cryptographic binding is not a small
-change: `webauthn-rs 0.5.5` (and the low-level
-`webauthn-rs-core`) randomise the challenge internally with
-no injection hook, and `AuthenticationState.challenge` is
-`pub(crate)` — so RP-controlled `challenge = H(action_hash ‖
-nonce)` requires either owning verification or a fork.
-ADR-0014 chooses a **minimal vendored fork** of
-`webauthn-rs-core` that adds one challenge-injection method
-(`generate_challenge_authenticate_with_challenge`) while
-reusing upstream's `authenticate_credential` verification
-**verbatim** (no reimplementation of the dangerous
-verification path), plus a new additive action-bound
-`/auth/action/{start,finish}` endpoint pair. The existing
-login flows stay on the safe high-level `Webauthn`. See the
-ADR for the threat model, the rejected alternatives
-(server-side-only binding, full hand-roll, serde-patch hack,
-deprecated `txAuthSimple`), the supply-chain handling of the
-fork, and the property-test plan.
+**Server-side implementation landed (2026-06-04) —
+[ADR-0014](../adr/0014-webauthn-action-binding.md).** A spike
+confirmed the cryptographic binding is not a small change:
+`webauthn-rs 0.5.5` (and the low-level `webauthn-rs-core`)
+randomise the challenge internally with no injection hook, and
+`AuthenticationState.challenge` is `pub(crate)` — so
+RP-controlled `challenge = H(action_hash ‖ nonce)` requires
+either owning verification or a fork. ADR-0014 chose a
+**minimal vendored fork** of `webauthn-rs-core`
+(`crates/vendor/webauthn-rs-core`, MPL-2.0, consumed via
+`[patch.crates-io]`) that adds one challenge-injection method
+(`generate_challenge_authenticate_with_challenge`, takes the
+challenge as raw `Vec<u8>`) while reusing upstream's
+`authenticate_credential` verification **verbatim**. Shipped in
+`services/auth`:
+
+- the action-challenge derivation primitive
+  `BLAKE3_keyed(derive_key("lakko/webauthn-action/v1"),
+  action_hash ‖ server_nonce_32)` (`webauthn_action.rs`);
+- `start_action_auth` / `finish_action_auth` over the fork;
+- the bearer-authenticated `POST /auth/action/{start,finish}`
+  endpoint pair, backed by migration `0008_webauthn_action.sql`
+  (`webauthn_states.action_hash`, kind = 3) with single-use
+  state deletion, account binding, and a defence-in-depth
+  `action_hash` re-check on `/finish`;
+- property tests driving a real software authenticator
+  (`webauthn-authenticator-rs` `SoftPasskey`, dev-only) that
+  prove a correctly-bound assertion verifies and an assertion
+  produced for action A is **rejected** on action B's session.
+
+The existing username/discoverable login flows stay on the
+safe high-level `Webauthn`. **Remaining:** client-side wiring
+(web / iOS / Android compute `action_hash` and drive the
+ceremony) and the ADR test-plan item 5 (a CI fork-delta guard
+asserting `authenticate_credential` is byte-identical to the
+pinned upstream).
 
 ## Calls
 

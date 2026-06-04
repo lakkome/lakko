@@ -126,6 +126,13 @@ pub(crate) struct AppState {
     /// `/webauthn/*` routes then return 503 instead of registering
     /// passkeys with an undefined RP identity.
     pub(crate) webauthn: Option<Arc<Webauthn>>,
+    /// G-13 (ADR-0014) — WebAuthn action binding. The low-level
+    /// `WebauthnCore` configured from the SAME RP env vars as
+    /// `webauthn` above, used ONLY by the `/auth/action/{start,finish}`
+    /// endpoints to issue + verify per-action challenges over the
+    /// vendored fork. `None` (routes return 503) under the same
+    /// condition as `webauthn` — `LAKKO_WEBAUTHN_RP_ID` unset.
+    pub(crate) webauthn_action_core: Option<Arc<webauthn_rs_core::WebauthnCore>>,
     /// Phase 3b4 forward — Ed25519 keypair the service uses
     /// to sign call JWTs (consumed by `services/sfu` per
     /// ADR-0008). Loaded (or generated on first run) at
@@ -214,6 +221,13 @@ async fn main() -> Result<()> {
         tracing::info!("webauthn disabled (LAKKO_WEBAUTHN_RP_ID not set)");
     }
 
+    // G-13 (ADR-0014) — action-binding core, configured from the same RP
+    // env vars. Enabled together with `webauthn` (both gate on
+    // `LAKKO_WEBAUTHN_RP_ID`); the `/auth/action/*` routes return 503 when
+    // it is `None`.
+    let webauthn_action_core =
+        webauthn_action::load_action_core().context("load WebAuthn action-binding core")?;
+
     // Phase 3b4 forward — load (or generate on first run)
     // the Ed25519 call-JWT signing key. Same load_or_init
     // pattern as OPAQUE server setup.
@@ -241,6 +255,7 @@ async fn main() -> Result<()> {
         session_token_secret: Arc::new(session_token_secret),
         session_token_ttl_ms,
         webauthn: webauthn_instance,
+        webauthn_action_core,
         call_jwt_signing: Arc::new(call_jwt_signing),
         turn: turn_config.map(Arc::new),
     };
@@ -284,6 +299,17 @@ fn build_app(state: AppState) -> Router {
         .route(
             "/webauthn/credentials/{credential_id_b64}",
             delete(webauthn::delete_credential),
+        )
+        // G-13 (ADR-0014) — action-binding ceremony. Bearer-auth: the
+        // caller is an already-logged-in account attesting to a specific
+        // action with one of its registered passkeys.
+        .route(
+            "/auth/action/start",
+            post(webauthn_action::action_start),
+        )
+        .route(
+            "/auth/action/finish",
+            post(webauthn_action::action_finish),
         )
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),

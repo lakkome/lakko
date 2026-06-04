@@ -96,10 +96,13 @@ const PRUNE_INTERVAL: Duration = Duration::from_secs(60);
 
 /// `webauthn_states.kind` discriminator. Stored as
 /// `TINYINT UNSIGNED` in the DB.
-mod state_kind {
-    pub(super) const REGISTRATION: u8 = 0;
-    pub(super) const AUTHENTICATION: u8 = 1;
-    pub(super) const DISCOVERABLE: u8 = 2;
+pub(crate) mod state_kind {
+    pub(crate) const REGISTRATION: u8 = 0;
+    pub(crate) const AUTHENTICATION: u8 = 1;
+    pub(crate) const DISCOVERABLE: u8 = 2;
+    /// Action-bound `AuthenticationState` (G-13, ADR-0014). Rows of
+    /// this kind also carry a non-NULL `action_hash`.
+    pub(crate) const ACTION: u8 = 3;
 }
 
 /// Bearer-authenticated endpoint that prepares a fresh passkey
@@ -574,7 +577,7 @@ fn decode_account_id(b64: &str) -> Result<[u8; 16], ApiError> {
 /// the allow-list /start handler (to populate `allowCredentials`)
 /// and the discoverable /finish handler (to look up the user's
 /// keys after `identify_discoverable_authentication`).
-async fn load_passkeys_for(
+pub(crate) async fn load_passkeys_for(
     pool: &MySqlPool,
     account_id: &[u8; 16],
 ) -> Result<Vec<Passkey>, ApiError> {
@@ -648,13 +651,13 @@ async fn persist_state(
     Ok(())
 }
 
-fn random_state_id() -> [u8; 16] {
+pub(crate) fn random_state_id() -> [u8; 16] {
     let mut id = [0u8; 16];
     OsRng.fill_bytes(&mut id);
     id
 }
 
-fn parse_state_id(s: &str) -> Result<[u8; 16], ApiError> {
+pub(crate) fn parse_state_id(s: &str) -> Result<[u8; 16], ApiError> {
     if s.len() != 32 {
         return Err(ApiError::BadInput(
             "state_id must be 32 lowercase hex chars",
@@ -669,7 +672,7 @@ fn parse_state_id(s: &str) -> Result<[u8; 16], ApiError> {
     Ok(out)
 }
 
-fn hex_lower(bytes: &[u8]) -> String {
+pub(crate) fn hex_lower(bytes: &[u8]) -> String {
     use std::fmt::Write as _;
     let mut s = String::with_capacity(bytes.len() * 2);
     for b in bytes {
