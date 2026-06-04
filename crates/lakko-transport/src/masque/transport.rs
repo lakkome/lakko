@@ -259,6 +259,11 @@ impl Transport for MasqueTransport {
 
         Ok(Box::new(MasqueConnection {
             quinn_conn: datagram_conn,
+            // Keep the sole `SendRequest` alive for the
+            // tunnel's lifetime — dropping it here would
+            // close the HTTP/3 connection (`H3_NO_ERROR`)
+            // and tear the datagram tunnel down immediately.
+            _send_request: send_request,
             driver_handle: Some(driver_handle),
             stream_handle: Some(stream_handle),
             closed: false,
@@ -304,6 +309,18 @@ fn build_http_request_from(req: &ConnectUdpRequest) -> Result<http::Request<()>>
 /// — no multiplex value-add).
 struct MasqueConnection {
     quinn_conn: quinn::Connection,
+    /// The h3 `SendRequest` handle for the CONNECT-UDP
+    /// control channel. Held — never used again after the
+    /// initial request — purely to keep the HTTP/3
+    /// connection open: h3's `SendRequest::drop` closes the
+    /// whole connection with `H3_NO_ERROR` the moment the
+    /// **last** sender handle is dropped (sender refcount
+    /// 1 -> 0). Dropping it at the end of `connect` would
+    /// therefore tear the QUIC connection — and thus the
+    /// datagram tunnel — down the instant it was
+    /// established. Keeping it on the connection ties its
+    /// lifetime to the tunnel's.
+    _send_request: h3::client::SendRequest<h3_quinn::OpenStreams, Bytes>,
     driver_handle: Option<tokio::task::JoinHandle<()>>,
     stream_handle: Option<tokio::task::JoinHandle<()>>,
     closed: bool,

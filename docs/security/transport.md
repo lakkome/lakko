@@ -1227,19 +1227,36 @@ its custom verifier. A future sprint may still add a
 `cert_hashes_b64` pin analogous to `WebTransportConfig` for
 strict single-cert pinning.
 
-**Not covered yet — live in-process proxy roundtrip.** A live
-MASQUE handshake test against an in-process h3 CONNECT-UDP
-server (+ datagram echo). The trust hook above is the
-prerequisite (it lets a test trust a self-signed loopback
-server); what remains is the server itself — a server-side
-h3 + quinn extended-CONNECT-UDP stack, which needs new
-dev-dependencies (`quinn` / `h3` / `h3-quinn` / `rcgen`) and a
-non-trivial h3-server implementation. The negative test
-(`connect_to_unreachable_proxy_surfaces_io_error`) exercises
-the full client handshake path against `127.0.0.1:1` and
-confirms the typed-error contract; the client `connect` is
-otherwise fully wired (quinn + h3 extended-CONNECT + datagram
-send/recv).
+**Live in-process proxy roundtrip — covered (G5-2).** The
+`masque_loopback_roundtrip` integration test
+([`crates/lakko-transport/tests/masque_e2e.rs`](../../crates/lakko-transport/tests/masque_e2e.rs))
+stands up a real in-process h3 CONNECT-UDP proxy — a `quinn`
+server endpoint with the `h3` ALPN, an `h3::server` with
+`enable_extended_connect` + `enable_datagram`, and a verbatim
+QUIC-datagram echo on a clone of the accepted connection — then
+drives the production `MasqueTransport::connect` (built via
+`with_extra_roots` pinning the server's self-signed cert)
+through the full handshake, `Connection::send`, and
+`Connection::recv`. The echo is byte-verbatim at the raw
+QUIC-datagram level (the client codec adds/strips the RFC 9297
+Context-ID, so the proxy never needs to understand the
+HTTP-Datagram wire shape), proving cross-side compatibility of
+our codec. The negative test
+(`connect_to_unreachable_proxy_surfaces_io_error`) still guards
+the typed-error contract against an unreachable proxy.
+
+This test caught a real bug in `connect`: it dropped the h3
+`SendRequest` handle at return, and h3's `SendRequest::drop`
+closes the whole HTTP/3 connection with `H3_NO_ERROR` once the
+last sender handle is gone — tearing the QUIC datagram tunnel
+down the instant it was established. The wiring/spike sprints
+(S-5-masque-handshake) validated compilation and the request
+path but never a datagram roundtrip, so it slipped through. The
+fix stores the `SendRequest` on `MasqueConnection` so its
+lifetime equals the tunnel's; it is dropped (gracefully closing
+the connection) only when the caller drops the connection. No
+plaintext-fallback path is involved — the fix is purely about
+keeping the established encrypted tunnel alive.
 
 ## Known soft spots — out of scope for Phase 5 scaffold
 
