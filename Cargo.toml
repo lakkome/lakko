@@ -47,6 +47,11 @@ members = [
 exclude = [
     "crates/lakko-mls/fuzz",
     "crates/lakko-proto/fuzz",
+    # Vendored fork of webauthn-rs-core (ADR-0014) — consumed via
+    # `[patch.crates-io]` below, not as a workspace member. Upstream
+    # MPL-2.0 third-party code (carries `unsafe`, its own deps), so it
+    # sits outside our workspace lint / forbid-unsafe posture.
+    "crates/vendor/webauthn-rs-core",
 ]
 
 [workspace.package]
@@ -140,3 +145,12 @@ debug = true
 opt-level = 0
 debug = true
 overflow-checks = true
+
+# ADR-0014 — WebAuthn action binding. Replace the upstream
+# `webauthn-rs-core` with our vendored fork under `crates/vendor/`, which
+# adds exactly one method (`generate_challenge_authenticate_with_challenge`)
+# for RP-controlled action-bound challenges. The verification path is
+# upstream-verbatim. The high-level `webauthn-rs` crate transparently picks
+# up the patched core.
+[patch.crates-io]
+webauthn-rs-core = { path = "crates/vendor/webauthn-rs-core" }

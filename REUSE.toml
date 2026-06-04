@@ -12,3 +12,15 @@ path = "**"
 precedence = "aggregate"
 SPDX-FileCopyrightText = "2026 Lakko Contributors"
 SPDX-License-Identifier = "AGPL-3.0-or-later"
+
+# Vendored upstream third-party crate (ADR-0014). It keeps its own
+# MPL-2.0 license — the AGPL `**` fallback above must NOT relicense it.
+# `precedence = "override"` makes this win over the aggregate default.
+# The single Lakko addition
+# (`generate_challenge_authenticate_with_challenge` in core.rs) is a
+# derivative of the surrounding MPL-2.0 file and stays MPL-2.0.
+[[annotations]]
+path = "crates/vendor/webauthn-rs-core/**"
+precedence = "override"
+SPDX-FileCopyrightText = "The webauthn-rs Authors (https://github.com/kanidm/webauthn-rs)"
+SPDX-License-Identifier = "MPL-2.0"
