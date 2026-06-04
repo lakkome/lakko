@@ -84,6 +84,47 @@ original wire bytes (smaller + lets a future "verify-replay"
 step re-process every old message through the chat envelope
 parser) and swap the placeholder for the real thing.
 
+**Audited 2026-06-04 — the placeholder is currently
+same-platform-only (web↔native is non-functional).** Reading
+the three codecs end-to-end surfaced that the placeholder is
+NOT cross-platform-interoperable today, which is broader than
+the "JSON field-ordering" framing G-9 carried:
+
+* **`HistoryMessage.message_id` field encoding diverges.** Web
+  ([`history-bundle.ts`](../../apps/web/src/devices/history-bundle.ts))
+  sends `textEncoder.encode(m.messageId)` — the UTF-8 bytes of
+  the **decimal string**. iOS
+  ([`HistoryBundleCodec.swift`](../../apps/ios/Lakko/Devices/HistoryBundleCodec.swift))
+  and Android
+  ([`HistoryBundleCodec.kt`](../../apps/android/app/src/main/kotlin/me/lakko/app/devices/HistoryBundleCodec.kt))
+  send the **8-byte big-endian u64**. Different bytes for the
+  same logical id.
+* **`payload_bytes` placeholder shape diverges.** Web encodes
+  `PersistedMessage.messageId` as a JSON **string** (the type
+  is `string`); iOS (`Int64`) and Android (`Long`) encode it
+  as a JSON **number**. A native `JSONDecoder` /
+  `kotlinx.serialization` decode of web's string-typed field
+  throws → the message is silently dropped (`continue`); web's
+  `JSON.parse` of a native number lands a non-string where the
+  `PersistedMessage` contract says string, mis-driving the
+  downstream `messageId` string ops.
+
+Net: **iOS↔Android history catch-up interoperates** (matching
+field encodings + order-tolerant decode); **web↔native does
+not** — a cross-platform pairing falls back to "joiner starts
+with no history" (no data loss, but the catch-up is a no-op).
+
+The proper fix closes G-6 and the interop gap together: move
+the placeholder encode/decode into the **shared Rust core**
+(one canonical codec exposed via UniFFI + wasm-bindgen, so all
+three platforms encode/decode identically and it is unit-
+testable in Rust), OR ship the raw `mls_app::v1::ApplicationPayload`
+proto bytes directly (proto is the cross-platform wire format
+by definition, and re-projection on the joiner side reuses the
+chat-envelope parser). Either is a dedicated multi-platform
+wiring sprint (native parts are not headlessly testable);
+deferred rather than half-built.
+
 ### G-7: DeviceGroup snapshot persistence may briefly diverge across in-flight ratchet operations — **CLOSED**
 
 **Closed (2026-06-03).** The scan flow was reordered to
@@ -113,14 +154,28 @@ list re-mounts. iOS / Android use `@Published` /
 needs an IDB `change` listener (or a `BroadcastChannel`-
 backed pub/sub) to match.
 
-### G-9: Web `payload_bytes` JSON placeholder strings are NOT byte-stable
+### G-9: Web `payload_bytes` JSON placeholder strings are NOT byte-stable — **CLOSED**
 
-JSON.stringify field ordering is not guaranteed across
-JS engines. Cross-engine pairings (e.g. Chrome → Safari)
-should still decode correctly via JSON.parse (which is
-forgiving of field ordering), but a future sprint can
-switch to a canonical encoding (RFC 8785 / JCS) for
-byte-stable wire representations.
+**Closed (2026-06-04).** `encodeMessagePlaceholder`
+([`apps/web/src/devices/history-bundle.ts`](../../apps/web/src/devices/history-bundle.ts))
+now serializes via a recursive sorted-key `canonicalJson`
+helper instead of `JSON.stringify(m)` (whose key order is
+insertion order, not byte-stable across JS engines — a
+Chrome-scanner → Safari-joiner pairing on the same account is
+a real case). Every `PersistedMessage` field is a string, so
+recursive key sorting is the whole of RFC 8785 / JCS that
+applies to this shape (no numeric canonicalization needed);
+the doc-comment flags that a future numeric field would
+require ECMAScript number canonicalization. Decode is
+unaffected — `JSON.parse` is order-tolerant — so this is a
+pure determinism improvement with no wire-compat change for
+the web↔web path. `tsc --noEmit` clean. This matches the
+canonical-encoding convention iOS already uses
+(`JSONEncoder.outputFormatting = [.sortedKeys]`).
+
+Note: this closes byte-stability of the **web-emitted** bytes;
+it does NOT address cross-platform web↔native interop, which
+is a deeper, separate problem tracked under G-6 below.
 
 ## Backup
 

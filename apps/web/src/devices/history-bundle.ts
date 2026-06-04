@@ -219,7 +219,42 @@ const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
 
 function encodeMessagePlaceholder(m: PersistedMessage): Uint8Array {
-  return textEncoder.encode(JSON.stringify(m));
+  // G-9: emit a canonical (recursively sorted-key) JSON
+  // serialization rather than `JSON.stringify(m)`, whose key
+  // order follows insertion order and is therefore not
+  // byte-stable across JS engines (Chrome scanner -> Safari
+  // joiner is a real same-account, two-browser pairing). Every
+  // `PersistedMessage` field is a string today, so there are no
+  // numbers to canonicalize — recursive key sorting is the
+  // whole of RFC 8785 / JCS that applies to this shape. Decode
+  // is unaffected (`JSON.parse` is order-tolerant); this only
+  // makes the emitted bytes deterministic.
+  return textEncoder.encode(canonicalJson(m));
+}
+
+/**
+ * Recursively serialize a JSON value with object keys sorted
+ * lexicographically (UTF-16 code-unit order, matching
+ * `Array.prototype.sort`'s default and iOS `JSONEncoder`'s
+ * `.sortedKeys`). Arrays preserve order; primitives serialize
+ * via `JSON.stringify`. Sufficient for the all-string
+ * `PersistedMessage` shape; revisit if numeric fields are
+ * added (full JCS would then need ECMAScript number
+ * canonicalization).
+ */
+function canonicalJson(value: unknown): string {
+  if (value === null || typeof value !== "object") {
+    return JSON.stringify(value) ?? "null";
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map(canonicalJson).join(",")}]`;
+  }
+  const obj = value as Record<string, unknown>;
+  const keys = Object.keys(obj).sort();
+  const entries = keys.map(
+    (k) => `${JSON.stringify(k)}:${canonicalJson(obj[k])}`,
+  );
+  return `{${entries.join(",")}}`;
 }
 
 function decodeMessagePlaceholder(
