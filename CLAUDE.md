@@ -143,6 +143,7 @@ just ci                        # everything CI does, locally
 Current targets:
 - **`lakko-mls/mls_message`** — `MlsMessageIn` wire-format parser (TLS codec)
 - **`lakko-mls/key_package`** — `KeyPackage` wire-format parser
+- **`lakko-mls/history_placeholder`** — `HistoryMessagePlaceholder::decode` bounded parser for the cross-platform history-bundle `payload_bytes` placeholder (G-6); attacker-touchable after AEAD-open. Also asserts the encode/decode round-trip is stable on any input that parses
 - **`lakko-proto/wire_envelope`** — `wire::v1::Envelope` prost decoder
 - **`lakko-proto/mls_app_payload`** — `mls_app::v1::ApplicationPayload` prost decoder
 - **`lakko-proto/media_call_key`** — `media::v1::CallKeyEpoch` + `CodecCapability` decoders

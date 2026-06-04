@@ -61,4 +61,14 @@ pub mod fuzz_api {
     pub fn parse_key_package(bytes: &[u8]) -> bool {
         crate::key_package::deserialize(bytes).is_ok()
     }
+
+    /// Try to decode a history-bundle per-message placeholder. Returns
+    /// `true` on a successful bounded parse. The bytes are
+    /// attacker-controlled: a malicious history bundle reaches this
+    /// parser after the AEAD-open succeeds (e.g. a compromised peer
+    /// device on the same account).
+    #[must_use]
+    pub fn parse_history_placeholder(bytes: &[u8]) -> bool {
+        crate::history_placeholder::HistoryMessagePlaceholder::decode(bytes).is_ok()
+    }
 }

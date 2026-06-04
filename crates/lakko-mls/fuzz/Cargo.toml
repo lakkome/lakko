@@ -31,3 +31,10 @@ path = "fuzz_targets/key_package.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "history_placeholder"
+path = "fuzz_targets/history_placeholder.rs"
+test = false
+doc = false
+bench = false
