@@ -4,14 +4,20 @@
 package me.lakko.app.devices
 
 import android.content.Context
+import android.util.Base64
 import android.util.Log
-import kotlinx.serialization.json.Json
 import me.lakko.app.chat.MessageLogPayload
 import me.lakko.app.chat.MessageLogStore
+import me.lakko.app.chat.PersistedAttachment
 import me.lakko.app.chat.PersistedGroup
 import me.lakko.app.chat.PersistedMessage
+import uniffi.lakko_ffi_uniffi.HistoryAttachment
+import uniffi.lakko_ffi_uniffi.HistoryMessageDirection
+import uniffi.lakko_ffi_uniffi.HistoryPlaceholder
 import uniffi.lakko_ffi_uniffi.StructuredHistoryGroup
 import uniffi.lakko_ffi_uniffi.StructuredHistoryMessage
+import uniffi.lakko_ffi_uniffi.decodeHistoryPlaceholder
+import uniffi.lakko_ffi_uniffi.encodeHistoryPlaceholder
 import uniffi.lakko_ffi_uniffi.openHistoryBundleStructured
 import uniffi.lakko_ffi_uniffi.sealHistoryBundleStructured
 
@@ -51,12 +57,6 @@ public object HistoryBundleCodec {
 
     private const val LOG_TAG = "HistoryBundleCodec"
 
-    private val json: Json = Json {
-        ignoreUnknownKeys = false
-        prettyPrint = false
-        explicitNulls = true
-    }
-
     /**
      * Build the sealed history-bundle wire bytes from the
      * scanner device's local message log. Returns `null` when
@@ -84,9 +84,13 @@ public object HistoryBundleCodec {
             val capped = trimmed.size < slot.messages.size
             val messages = mutableListOf<StructuredHistoryMessage>()
             for (m in trimmed) {
+                // G-6 step 2: encode the canonical cross-platform
+                // placeholder via the shared Rust core. Web / iOS
+                // call the SAME codec, so the bytes agree on the
+                // wire (replacing the Android-only kotlinx JSON
+                // shape that did not interoperate with web).
                 val placeholder = try {
-                    json.encodeToString(PersistedMessage.serializer(), m)
-                        .toByteArray(Charsets.UTF_8)
+                    encodePlaceholder(m)
                 } catch (_: Throwable) {
                     continue
                 }
@@ -156,11 +160,11 @@ public object HistoryBundleCodec {
             val existingIds = slot.messages.map { it.messageId }.toMutableSet()
             val merged = slot.messages.toMutableList()
             for (m in g.messages) {
+                // G-6 step 2: decode the canonical cross-platform
+                // placeholder via the shared Rust core. Bytes from
+                // a web or iOS scanner decode identically here.
                 val decoded = try {
-                    json.decodeFromString(
-                        PersistedMessage.serializer(),
-                        String(m.payloadBytes, Charsets.UTF_8),
-                    )
+                    decodePlaceholder(m.payloadBytes)
                 } catch (cause: Throwable) {
                     Log.v(LOG_TAG, "decode placeholder failed", cause)
                     continue
@@ -197,6 +201,69 @@ public object HistoryBundleCodec {
             ),
         )
         return applied
+    }
+
+    // ----------------------------------------------------------------
+    // Placeholder codec (G-6 step 2)
+    // ----------------------------------------------------------------
+
+    /** Encode a local-store message row into the canonical
+     *  cross-platform placeholder bytes via the shared Rust core. */
+    private fun encodePlaceholder(m: PersistedMessage): ByteArray {
+        val attachments = m.attachments.map { a ->
+            HistoryAttachment(
+                blobId = Base64.decode(a.blobIdB64, Base64.NO_WRAP),
+                key = Base64.decode(a.keyB64, Base64.NO_WRAP),
+                nonce = Base64.decode(a.nonceB64, Base64.NO_WRAP),
+                size = a.size,
+                mime = a.mime,
+                name = a.name,
+            )
+        }
+        val placeholder = HistoryPlaceholder(
+            messageId = m.messageId.toULong(),
+            direction = directionFromString(m.direction),
+            createdAt = m.createdAt,
+            text = m.text,
+            attachments = attachments,
+        )
+        return encodeHistoryPlaceholder(placeholder)
+    }
+
+    /** Decode canonical placeholder bytes (from any platform) back
+     *  into a local-store message row. Throws on malformed input;
+     *  callers wrap in try/catch. */
+    private fun decodePlaceholder(bytes: ByteArray): PersistedMessage {
+        val placeholder = decodeHistoryPlaceholder(bytes)
+        val attachments = placeholder.attachments.map { a ->
+            PersistedAttachment(
+                blobIdB64 = Base64.encodeToString(a.blobId, Base64.NO_WRAP),
+                keyB64 = Base64.encodeToString(a.key, Base64.NO_WRAP),
+                nonceB64 = Base64.encodeToString(a.nonce, Base64.NO_WRAP),
+                mime = a.mime,
+                size = a.size,
+                name = a.name,
+            )
+        }
+        return PersistedMessage(
+            messageId = placeholder.messageId.toLong(),
+            direction = directionToString(placeholder.direction),
+            text = placeholder.text,
+            attachments = attachments,
+            createdAt = placeholder.createdAt,
+        )
+    }
+
+    private fun directionFromString(s: String): HistoryMessageDirection = when (s) {
+        "outgoing" -> HistoryMessageDirection.OUTGOING
+        "incoming" -> HistoryMessageDirection.INCOMING
+        else -> HistoryMessageDirection.SYSTEM
+    }
+
+    private fun directionToString(d: HistoryMessageDirection): String = when (d) {
+        HistoryMessageDirection.OUTGOING -> "outgoing"
+        HistoryMessageDirection.INCOMING -> "incoming"
+        HistoryMessageDirection.SYSTEM -> "system"
     }
 
     // ----------------------------------------------------------------

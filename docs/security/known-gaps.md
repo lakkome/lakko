@@ -70,7 +70,7 @@ the row is a harmless no-op. Touchpoints:
 `apps/ios/Lakko/Devices/PairingOrchestrator.swift`,
 `apps/android/.../devices/PairingOrchestrator.kt`.
 
-### G-6: History bundle `payload_bytes` use a JSON placeholder, not raw MLS application-payload bytes
+### G-6: History bundle `payload_bytes` placeholder — **cross-platform interop CLOSED; raw-ApplicationPayload-bytes aspiration still open**
 
 `MessageLogStore` carries the projected `(text, attachments,
 direction, createdAt)` shape — not the original wire
@@ -139,17 +139,47 @@ determinism, and bounded-parse rejection (wrong version,
 truncation, over-cap length, non-UTF-8, bad direction tag,
 trailing bytes).
 
-**Step 2 still open — per-platform wiring.** Each platform's
-`HistoryBundleCodec` must switch from its local JSON placeholder
-to the FFI codec (web `encodeMessagePlaceholder` /
-`decodeMessagePlaceholder`, iOS `JSONEncoder`/`JSONDecoder`,
-Android `kotlinx.serialization`), and the sibling
-`HistoryMessage.message_id` field must converge on one encoding
-(the native 8-byte big-endian `u64`; web currently sends UTF-8
-of a decimal string). That wiring touches all three clients;
-the native halves compile-check only (not headlessly testable),
-so it is a separate sprint. Until it lands, the live web↔native
-interop is unchanged (iOS↔Android still works).
+**Step 2 landed (2026-06-04) — per-platform wiring.** All three
+clients now call the shared FFI codec for `payload_bytes`, and
+the sibling `HistoryMessage.message_id` field converged on the
+native 8-byte big-endian `u64` (web previously sent UTF-8 of a
+decimal string):
+
+* **web** ([`apps/web/src/devices/history-bundle.ts`](../../apps/web/src/devices/history-bundle.ts))
+  — `encodeMessagePlaceholder` / `decodeMessagePlaceholder` call
+  `encodeHistoryPlaceholder` / `decodeHistoryPlaceholder`
+  (wasm), base64-decoding the attachment refs to raw bytes; the
+  `message_id` field is now `messageIdToBeBytes` (BE-u64).
+  `tsc --noEmit` clean.
+* **iOS** ([`apps/ios/Lakko/Devices/HistoryBundleCodec.swift`](../../apps/ios/Lakko/Devices/HistoryBundleCodec.swift))
+  — `encodePlaceholder` / `decodePlaceholder` over the UniFFI
+  `HistoryPlaceholder` record; `message_id` already BE-u64.
+  Code-complete against the regenerated Swift binding; full
+  xcodebuild verification requires rebuilding
+  `LakkoCore.xcframework` (maintainer step).
+* **Android** ([`apps/android/.../devices/HistoryBundleCodec.kt`](../../apps/android/app/src/main/kotlin/me/lakko/app/devices/HistoryBundleCodec.kt))
+  — `encodePlaceholder` / `decodePlaceholder` over the UniFFI
+  `HistoryPlaceholder` data class; `message_id` already BE-u64.
+  `:app:compileDebugKotlin` BUILD SUCCESSFUL.
+
+All three feed the same Rust `encode`/`decode`, so the
+`payload_bytes` bytes agree and the `message_id` field agrees —
+a web↔native history catch-up now interoperates by construction.
+A live cross-platform pairing roundtrip is not headlessly
+runnable here; the codec-layer determinism + 13 Rust unit tests
++ web tsc + Android compile + iOS binding-alignment are the
+evidence. **The cross-platform interop bug (the G-9 concern and
+the web↔native break) is closed.**
+
+**Still open (downgraded to a nice-to-have):** the placeholder
+is a canonical *projection* `(message_id, direction, text,
+created_at, attachments)`, not the raw
+`mls_app::v1::ApplicationPayload` wire bytes. Carrying the raw
+bytes instead would be marginally smaller and would unlock a
+future "verify-replay" step (re-parse every catch-up message
+through the chat-envelope parser). That is a separate,
+non-blocking enhancement — the interop and byte-stability
+problems are fully resolved without it.
 
 ### G-7: DeviceGroup snapshot persistence may briefly diverge across in-flight ratchet operations — **CLOSED**
 

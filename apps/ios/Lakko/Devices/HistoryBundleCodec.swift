@@ -58,8 +58,6 @@ public enum HistoryBundleCodec {
 
         var groupInputs: [StructuredHistoryGroup] = []
         var maxHlc: UInt64 = 0
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.sortedKeys]
 
         for hex in groupHexes {
             guard let slot = log.groups[hex] else { continue }
@@ -68,9 +66,14 @@ public enum HistoryBundleCodec {
             let capped = trimmed.count < slot.messages.count
             var messages: [StructuredHistoryMessage] = []
             for m in trimmed {
+                // G-6 step 2: encode the canonical cross-platform
+                // placeholder via the shared Rust core. Web /
+                // Android call the SAME codec, so the bytes agree
+                // on the wire (replacing the iOS-only JSONEncoder
+                // shape that did not interoperate with web).
                 let placeholder: Data
                 do {
-                    placeholder = try encoder.encode(m)
+                    placeholder = try Self.encodePlaceholder(m)
                 } catch {
                     continue
                 }
@@ -131,7 +134,6 @@ public enum HistoryBundleCodec {
 
         var nextGroups = existing.groups
         var applied = 0
-        let decoder = JSONDecoder()
 
         for g in opened.groups {
             let hex = Self.bytesToHex(g.groupId)
@@ -139,10 +141,10 @@ public enum HistoryBundleCodec {
             var existingIds = Set(slot.messages.map { $0.messageId })
             var merged = slot.messages
             for m in g.messages {
-                guard let decoded = try? decoder.decode(
-                    PersistedMessage.self,
-                    from: m.payloadBytes
-                ) else {
+                // G-6 step 2: decode the canonical cross-platform
+                // placeholder via the shared Rust core. Bytes from
+                // a web or Android scanner decode identically here.
+                guard let decoded = Self.decodePlaceholder(m.payloadBytes) else {
                     continue
                 }
                 if existingIds.contains(decoded.messageId) { continue }
@@ -167,6 +169,73 @@ public enum HistoryBundleCodec {
             )
         )
         return applied
+    }
+
+    // MARK: - Placeholder codec (G-6 step 2)
+
+    /// Encode a local-store message row into the canonical
+    /// cross-platform placeholder bytes via the shared Rust core.
+    private static func encodePlaceholder(_ m: PersistedMessage) throws -> Data {
+        let attachments = m.attachments.map { a in
+            HistoryAttachment(
+                blobId: Data(base64Encoded: a.blobIdB64) ?? Data(),
+                key: Data(base64Encoded: a.keyB64) ?? Data(),
+                nonce: Data(base64Encoded: a.nonceB64) ?? Data(),
+                size: a.size,
+                mime: a.mime,
+                name: a.name
+            )
+        }
+        let placeholder = HistoryPlaceholder(
+            messageId: UInt64(bitPattern: m.messageId),
+            direction: Self.directionFromString(m.direction),
+            createdAt: m.createdAt,
+            text: m.text,
+            attachments: attachments
+        )
+        return try encodeHistoryPlaceholder(placeholder: placeholder)
+    }
+
+    /// Decode canonical placeholder bytes (from any platform)
+    /// back into a local-store message row; `nil` on malformed
+    /// input.
+    private static func decodePlaceholder(_ bytes: Data) -> PersistedMessage? {
+        guard let placeholder = try? decodeHistoryPlaceholder(bytes: bytes) else {
+            return nil
+        }
+        let attachments = placeholder.attachments.map { a in
+            PersistedAttachment(
+                blobIdB64: a.blobId.base64EncodedString(),
+                keyB64: a.key.base64EncodedString(),
+                nonceB64: a.nonce.base64EncodedString(),
+                mime: a.mime,
+                size: a.size,
+                name: a.name
+            )
+        }
+        return PersistedMessage(
+            messageId: Int64(bitPattern: placeholder.messageId),
+            direction: Self.directionToString(placeholder.direction),
+            text: placeholder.text,
+            attachments: attachments,
+            createdAt: placeholder.createdAt
+        )
+    }
+
+    private static func directionFromString(_ s: String) -> HistoryMessageDirection {
+        switch s {
+        case "outgoing": return .outgoing
+        case "incoming": return .incoming
+        default: return .system
+        }
+    }
+
+    private static func directionToString(_ d: HistoryMessageDirection) -> String {
+        switch d {
+        case .outgoing: return "outgoing"
+        case .incoming: return "incoming"
+        case .system: return "system"
+        }
     }
 
     // MARK: - Helpers

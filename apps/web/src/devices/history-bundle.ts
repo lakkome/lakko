@@ -31,16 +31,22 @@
  * is enough to prove the catch-up path.
  */
 import { loadWasm } from "../wasm";
+import type { Wasm } from "../wasm";
 import type {
+  HistoryAttachmentInput,
   HistoryGroupInput,
   HistoryMessageInput,
+  OpenedHistoryAttachment,
   OpenedHistoryGroup,
   OpenedHistoryMessage,
+  OpenedHistoryPlaceholder,
 } from "../../wasm/lakko_ffi_wasm";
+import { base64Decode, base64Encode } from "../auth/account-id";
 import {
   loadMessageLog,
   saveMessageLog,
   type MessageLogPayload,
+  type PersistedAttachment,
   type PersistedGroup,
   type PersistedMessage,
 } from "../chat/message-log-store";
@@ -100,14 +106,14 @@ export async function buildHistoryBundleFromLog(args: {
     const capped = trimmed.length < slot.messages.length;
     const messages: HistoryMessageInput[] = [];
     for (const m of trimmed) {
-      // `payload_bytes` would ideally be the original wire
-      // ApplicationPayload bytes; the message log doesn't
-      // carry them today, so the MVP path round-trips the
-      // text + attachment ref via a synthetic blob that the
-      // receiver's `applyHistoryBundleToLog` decodes back.
-      // Wire format identical to the proto field so a future
-      // sprint can swap the placeholder for true plaintext.
-      const placeholder = encodeMessagePlaceholder(m);
+      // G-6 step 2: `payload_bytes` is now the canonical
+      // cross-platform placeholder produced by the shared Rust
+      // core (`encodeHistoryPlaceholder`), identical bytes to
+      // what iOS / Android emit. The sibling `message_id` field
+      // is the 8-byte big-endian u64 (the native convention),
+      // replacing the old web-only UTF-8-of-decimal encoding so
+      // a web-scanner -> native-joiner pairing interoperates.
+      const placeholder = encodeMessagePlaceholder(wasm, m);
       const createdMs = (() => {
         if (m.createdAt === undefined || m.createdAt === null) return 0;
         const v = Date.parse(m.createdAt);
@@ -117,7 +123,7 @@ export async function buildHistoryBundleFromLog(args: {
         new wasm.HistoryMessageInput(
           placeholder,
           /* sender_leaf */ 0,
-          textEncoder.encode(m.messageId),
+          messageIdToBeBytes(m.messageId),
           BigInt(createdMs),
         ),
       );
@@ -176,7 +182,7 @@ export async function applyHistoryBundleToLog(args: {
     const merged = [...slot.messages];
     for (const m of incomingMessages) {
       const msg = m as OpenedHistoryMessage;
-      const decoded = decodeMessagePlaceholder(msg);
+      const decoded = decodeMessagePlaceholder(wasm, msg);
       if (decoded === null) continue;
       if (existingIds.has(decoded.messageId)) continue;
       merged.push(decoded);
@@ -205,68 +211,111 @@ export async function applyHistoryBundleToLog(args: {
   return applied;
 }
 
-// ---- placeholder encode / decode --------------------------------
+// ---- placeholder encode / decode (G-6 step 2) -------------------
 
-// MVP path: the message log carries the already-projected
-// `(text, attachments, createdAt, direction)` shape, not the
-// original wire ApplicationPayload bytes. To keep the bundle
-// schema honest we encode the runtime row into a self-describing
-// JSON blob and stuff it into `payload_bytes`. A future sprint
-// can replace this with the true MLS application-payload bytes
-// once the message log starts retaining them.
+// `payload_bytes` is the canonical cross-platform placeholder
+// produced by the shared Rust core via wasm
+// (`encodeHistoryPlaceholder` / `decodeHistoryPlaceholder`).
+// iOS / Android call the SAME codec through UniFFI, so the bytes
+// agree on the wire — a web-scanner -> native-joiner pairing now
+// interoperates (closing the JSON-shape divergence documented in
+// known-gaps G-6). The wasm boundary carries `direction` as a
+// u8: 0 = outgoing, 1 = incoming, 2 = system.
 
-const textEncoder = new TextEncoder();
-const textDecoder = new TextDecoder();
+const DIRECTION_OUTGOING = 0;
+const DIRECTION_INCOMING = 1;
+const DIRECTION_SYSTEM = 2;
 
-function encodeMessagePlaceholder(m: PersistedMessage): Uint8Array {
-  // G-9: emit a canonical (recursively sorted-key) JSON
-  // serialization rather than `JSON.stringify(m)`, whose key
-  // order follows insertion order and is therefore not
-  // byte-stable across JS engines (Chrome scanner -> Safari
-  // joiner is a real same-account, two-browser pairing). Every
-  // `PersistedMessage` field is a string today, so there are no
-  // numbers to canonicalize — recursive key sorting is the
-  // whole of RFC 8785 / JCS that applies to this shape. Decode
-  // is unaffected (`JSON.parse` is order-tolerant); this only
-  // makes the emitted bytes deterministic.
-  return textEncoder.encode(canonicalJson(m));
+function directionToTag(d: PersistedMessage["direction"]): number {
+  switch (d) {
+    case "outgoing":
+      return DIRECTION_OUTGOING;
+    case "incoming":
+      return DIRECTION_INCOMING;
+    default:
+      return DIRECTION_SYSTEM;
+  }
 }
 
-/**
- * Recursively serialize a JSON value with object keys sorted
- * lexicographically (UTF-16 code-unit order, matching
- * `Array.prototype.sort`'s default and iOS `JSONEncoder`'s
- * `.sortedKeys`). Arrays preserve order; primitives serialize
- * via `JSON.stringify`. Sufficient for the all-string
- * `PersistedMessage` shape; revisit if numeric fields are
- * added (full JCS would then need ECMAScript number
- * canonicalization).
- */
-function canonicalJson(value: unknown): string {
-  if (value === null || typeof value !== "object") {
-    return JSON.stringify(value) ?? "null";
+function tagToDirection(tag: number): PersistedMessage["direction"] {
+  switch (tag) {
+    case DIRECTION_OUTGOING:
+      return "outgoing";
+    case DIRECTION_INCOMING:
+      return "incoming";
+    default:
+      return "system";
   }
-  if (Array.isArray(value)) {
-    return `[${value.map(canonicalJson).join(",")}]`;
-  }
-  const obj = value as Record<string, unknown>;
-  const keys = Object.keys(obj).sort();
-  const entries = keys.map(
-    (k) => `${JSON.stringify(k)}:${canonicalJson(obj[k])}`,
+}
+
+/** Encode the local-store message row into the canonical
+ *  cross-platform placeholder bytes. */
+function encodeMessagePlaceholder(wasm: Wasm, m: PersistedMessage): Uint8Array {
+  const messageId = safeBigInt(m.messageId) ?? 0n;
+  const attachments: HistoryAttachmentInput[] = m.attachments.map((a) => {
+    const size = safeBigInt(a.sizeStr) ?? 0n;
+    return new wasm.HistoryAttachmentInput(
+      base64Decode(a.blobIdB64),
+      base64Decode(a.keyB64),
+      base64Decode(a.nonceB64),
+      size,
+      a.mime ?? undefined,
+      a.name ?? undefined,
+    );
+  });
+  return wasm.encodeHistoryPlaceholder(
+    messageId,
+    directionToTag(m.direction),
+    m.createdAt,
+    m.text,
+    attachments,
   );
-  return `{${entries.join(",")}}`;
 }
 
+/** Decode canonical placeholder bytes back into a local-store
+ *  message row. Returns `null` on any malformed payload. */
 function decodeMessagePlaceholder(
+  wasm: Wasm,
   m: OpenedHistoryMessage,
 ): PersistedMessage | null {
+  let opened: OpenedHistoryPlaceholder;
   try {
-    const obj = JSON.parse(textDecoder.decode(m.payloadBytes));
-    if (typeof obj !== "object" || obj === null) return null;
-    return obj as PersistedMessage;
+    opened = wasm.decodeHistoryPlaceholder(m.payloadBytes);
   } catch {
     return null;
   }
+  const attachments: PersistedAttachment[] = (
+    opened.attachments as unknown as OpenedHistoryAttachment[]
+  ).map((a) => ({
+    blobIdB64: base64Encode(a.blobId),
+    keyB64: base64Encode(a.key),
+    nonceB64: base64Encode(a.nonce),
+    mime: a.mime ?? null,
+    sizeStr: a.size.toString(),
+    name: a.name ?? null,
+  }));
+  return {
+    messageId: opened.messageId.toString(),
+    direction: tagToDirection(opened.direction),
+    text: opened.text,
+    attachments,
+    createdAt: opened.createdAt,
+  };
+}
+
+/** Serialize a decimal message-id string as the 8-byte
+ *  big-endian u64 the `HistoryMessage.message_id` field uses on
+ *  every platform (the native convention; previously web emitted
+ *  UTF-8 of the decimal string, which broke web<->native). */
+function messageIdToBeBytes(id: string): Uint8Array {
+  const value = safeBigInt(id) ?? 0n;
+  const out = new Uint8Array(8);
+  let v = value & 0xff_ff_ff_ff_ff_ff_ff_ffn;
+  for (let i = 7; i >= 0; i -= 1) {
+    out[i] = Number(v & 0xffn);
+    v >>= 8n;
+  }
+  return out;
 }
 
 function safeBigInt(s: string): bigint | null {
