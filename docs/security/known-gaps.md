@@ -344,11 +344,13 @@ challenge as raw `Vec<u8>`) while reusing upstream's
   produced for action A is **rejected** on action B's session.
 
 The existing username/discoverable login flows stay on the
-safe high-level `Webauthn`. **Remaining:** client-side wiring
-(web / iOS / Android compute `action_hash` and drive the
-ceremony) and the ADR test-plan item 5 (a CI fork-delta guard
-asserting `authenticate_credential` is byte-identical to the
-pinned upstream).
+safe high-level `Webauthn`. The fork-delta guard (ADR
+test-plan item 5) landed as
+`services/auth/tests/fork_delta_guard.rs`: it pins the SHA-256
+of the vendored `core.rs` plus structural assertions, so any
+edit to the verification path fails CI. **Remaining:**
+client-side wiring (web / iOS / Android compute `action_hash`
+and drive the ceremony).
 
 ## Calls
 

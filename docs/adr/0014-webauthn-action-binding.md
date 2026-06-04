@@ -178,7 +178,15 @@ entry point, and **reuse upstream's verification verbatim**.
 5. **Fork-delta guard.** A test (or CI check) asserting the vendored
    `authenticate_credential` is byte-identical to the pinned upstream
    (e.g. a checked-in hash of the function body / file), so an
-   accidental edit to the verification path is caught.
+   accidental edit to the verification path is caught. — **Done:**
+   `services/auth/tests/fork_delta_guard.rs` pins the SHA-256 of the
+   vendored `core.rs` (LF-normalized) plus structural assertions
+   (exactly one fork-delta method; `authenticate_credential` /
+   `verify_credential_internal` present). Any edit to the file fails CI
+   with a re-pin procedure. The pinned state was confirmed verbatim on
+   2026-06-04 by diffing against the registry-cached pristine 0.5.5: a
+   single additive hunk (the fork method), zero deletions, zero changes
+   to the verification path.
 
 ## References
 
