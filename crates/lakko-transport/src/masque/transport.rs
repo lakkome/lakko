@@ -65,6 +65,17 @@ use crate::transport::{Connection, Transport};
 #[derive(Debug)]
 pub struct MasqueTransport {
     cfg: MasqueConfig,
+    /// Extra trust anchors folded into the rustls root store
+    /// alongside the OS native certs at connect time. Empty in
+    /// the default [`Self::new`] path (production proxies use a
+    /// publicly-trusted cert). Populated via
+    /// [`Self::with_extra_roots`] to pin a **private-CA** MASQUE
+    /// proxy (an operator running their own gateway) — the same
+    /// "trust only this CA" posture the DoH fetcher takes with
+    /// IP-pinning and REALITY takes with its custom verifier. It
+    /// is also what lets the loopback e2e test trust a
+    /// self-signed server cert.
+    extra_roots: Vec<rustls::pki_types::CertificateDer<'static>>,
 }
 
 impl MasqueTransport {
@@ -80,7 +91,31 @@ impl MasqueTransport {
     pub fn new(cfg: MasqueConfig) -> Result<Self> {
         cfg.parse()
             .map_err(|e| Error::Config(format!("masque config: {e}")))?;
-        Ok(Self { cfg })
+        Ok(Self {
+            cfg,
+            extra_roots: Vec::new(),
+        })
+    }
+
+    /// Build the transport with additional DER-encoded trust
+    /// anchors folded into the connect-time root store on top of
+    /// the OS native certs. Use this to pin a private-CA proxy
+    /// (or, in tests, a self-signed loopback server). The certs
+    /// are added to the same WebPKI root set the standard path
+    /// uses — they do NOT replace the native roots, so a proxy
+    /// presenting a publicly-trusted cert still validates.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Config`] when
+    /// [`MasqueConfig::parse`] fails.
+    pub fn with_extra_roots(
+        cfg: MasqueConfig,
+        extra_roots: Vec<rustls::pki_types::CertificateDer<'static>>,
+    ) -> Result<Self> {
+        cfg.parse()
+            .map_err(|e| Error::Config(format!("masque config: {e}")))?;
+        Ok(Self { cfg, extra_roots })
     }
 
     /// Borrow the underlying config — handy for tests + for
@@ -128,6 +163,12 @@ impl Transport for MasqueTransport {
             // matches what web-transport-quinn::ClientBuilder
             // does on its own with_system_roots branch.
             let _ = roots.add(cert);
+        }
+        // Fold in any caller-supplied trust anchors (private-CA
+        // proxy pin / loopback test cert). These ADD to the
+        // native roots, never replace them.
+        for cert in &self.extra_roots {
+            let _ = roots.add(cert.clone());
         }
         let provider = Arc::new(rustls::crypto::ring::default_provider());
         let mut tls = rustls::ClientConfig::builder_with_provider(provider)
@@ -369,6 +410,41 @@ mod tests {
         let err = MasqueTransport::new(cfg).expect_err("missing-port must reject");
         match err {
             Error::Config(_) => {},
+            other => panic!("expected Config error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn new_has_no_extra_roots_by_default() {
+        let t = MasqueTransport::new(happy_config()).expect("valid config");
+        assert!(
+            t.extra_roots.is_empty(),
+            "default path must not pin any extra trust anchors"
+        );
+    }
+
+    #[test]
+    fn with_extra_roots_stores_the_anchors_and_validates_config() {
+        let cfg = happy_config();
+        // The constructor does NOT parse the cert bytes — it only
+        // validates the config + stashes the DER for connect-time
+        // root-store loading — so a placeholder DER is fine here.
+        let anchor = rustls::pki_types::CertificateDer::from(vec![0xABu8; 16]);
+        let t = MasqueTransport::with_extra_roots(cfg.clone(), vec![anchor.clone()])
+            .expect("valid config");
+        assert_eq!(t.config(), &cfg);
+        assert_eq!(t.extra_roots.len(), 1);
+        assert_eq!(t.extra_roots[0], anchor);
+    }
+
+    #[test]
+    fn with_extra_roots_still_rejects_bad_config() {
+        let mut cfg = happy_config();
+        cfg.proxy_url = "http://example.com/".into();
+        let err = MasqueTransport::with_extra_roots(cfg, vec![])
+            .expect_err("non-https must reject even with extra roots");
+        match err {
+            Error::Config(msg) => assert!(msg.contains("https"), "msg: {msg}"),
             other => panic!("expected Config error, got {other:?}"),
         }
     }

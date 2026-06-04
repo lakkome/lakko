@@ -1214,20 +1214,32 @@ audit-surface dep without losing wire compatibility —
 the bytes we feed `quinn::Connection::send_datagram` are
 already in the RFC 9297 §3 + RFC 9298 §3 wire shape.
 
-**Why system roots.** MASQUE proxies are typically
-operated by CDNs with proper CA-signed certs; the
-bootstrap config does not currently carry SPKI pins for
-the proxy. A future sprint may add `MasqueConfig::cert_hashes_b64`
-analogous to `WebTransportConfig` if we want strict
-pinning here.
+**Why system roots — plus a private-CA hook (G5-2).** MASQUE
+proxies are typically operated by CDNs with proper CA-signed
+certs, so the default `connect` path validates against the OS
+native roots. For an operator running their own gateway (or a
+loopback test), [`MasqueTransport::with_extra_roots`](../../crates/lakko-transport/src/masque/transport.rs)
+folds caller-supplied DER trust anchors into the connect-time
+root store **on top of** the native roots (it adds, never
+replaces) — the same "trust only this CA in addition" posture
+the DoH fetcher takes with IP-pinning and REALITY takes with
+its custom verifier. A future sprint may still add a
+`cert_hashes_b64` pin analogous to `WebTransportConfig` for
+strict single-cert pinning.
 
-**Not covered yet.** A live MASQUE handshake test against
-an in-process proxy server. That would require standing
-up a server-side h3+quinn stack with extended-CONNECT
-support; deferred. The negative test
-(`connect_to_unreachable_proxy_surfaces_io_error`)
-exercises the full handshake path against `127.0.0.1:1`
-and confirms the typed-error contract.
+**Not covered yet — live in-process proxy roundtrip.** A live
+MASQUE handshake test against an in-process h3 CONNECT-UDP
+server (+ datagram echo). The trust hook above is the
+prerequisite (it lets a test trust a self-signed loopback
+server); what remains is the server itself — a server-side
+h3 + quinn extended-CONNECT-UDP stack, which needs new
+dev-dependencies (`quinn` / `h3` / `h3-quinn` / `rcgen`) and a
+non-trivial h3-server implementation. The negative test
+(`connect_to_unreachable_proxy_surfaces_io_error`) exercises
+the full client handshake path against `127.0.0.1:1` and
+confirms the typed-error contract; the client `connect` is
+otherwise fully wired (quinn + h3 extended-CONNECT + datagram
+send/recv).
 
 ## Known soft spots — out of scope for Phase 5 scaffold
 
