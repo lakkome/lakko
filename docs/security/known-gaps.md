@@ -388,25 +388,32 @@ delete consumes it (204), a delete without a grant is refused
 (403), and a non-existent credential is an idempotent 204.
 
 **Remove-device — analysed in [ADR-0015](../adr/0015-device-removal-authorization.md);
-server enforcement deferred with a documented residual.** A
-device removal is an MLS `Remove` commit signed by the removing
-device's per-device MLS signature key, whose seed is stored
-encrypted under a non-extractable device key (invariant #7). So a
-remote attacker holding only a stolen session token **cannot**
-forge a removal — peers reject an invalidly-signed commit — which
-already closes the token-replay threat that motivated the
-delete-passkey grant. The DS is zero-trust opaque and cannot
-interpret an `action_hash`, and the auth service is never in the
-removal path, so there is no server request to gate; the only
-design that adds enforcement is peer-verified server attestation
-embedded in the commit (ADR-0015), a multi-sprint `lakko-mls`
-protocol change gated by invariant #3. The **residual** the
-current client-side gate does not cover is **on-device malware
-that bypasses the app UI and drives the MLS FFI directly** — an
-attacker already inside the device trust boundary. This is
-accepted and documented per ADR-0015, to be revisited (and the
-attestation design implemented) only if the threat model
-elevates.
+peer-verified attestation in progress.** A device removal is an
+MLS `Remove` commit signed by the removing device's per-device
+MLS signature key, whose seed is stored encrypted under a
+non-extractable device key (invariant #7). So a remote attacker
+holding only a stolen session token **cannot** forge a removal —
+peers reject an invalidly-signed commit — which already closes the
+token-replay threat that motivated the delete-passkey grant. The
+DS is zero-trust opaque and cannot interpret an `action_hash`, and
+the auth service is never in the removal path, so there is no
+server request to gate. The **residual** the current client-side
+gate does not cover is **on-device malware that bypasses the app
+UI and drives the MLS FFI directly**.
+
+ADR-0015 was accepted to close that residual via **peer-verified
+attestation**: `services/auth` signs a compact Ed25519 attestation
+over `(account_id, action_hash, expiry)` on `/auth/action/finish`,
+the removing device carries it alongside its `Remove` commit, and
+the receiving devices verify it in the `lakko-mls` apply path
+before applying. **Sprint 1 landed** — the `lakko-attest` crate
+(the `ActionAttestation` format + `sign` + strict `verify_bound`,
+7 unit/property tests). **Remaining sprints:** auth issuance + a
+dedicated attestation key/JWKS (2); the `device_group.rs`
+apply-path verification + refuse-to-apply invariant (3, gated by
+invariant #3); the OPAQUE-only DeviceGroup policy flag, pending an
+OpenMLS-0.8 GroupContext-extension feasibility spike (4); and the
+per-platform client embedding (5).
 
 ## Calls
 

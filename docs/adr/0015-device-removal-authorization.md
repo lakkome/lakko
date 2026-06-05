@@ -5,7 +5,7 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 # ADR-0015: Device-removal authorization — threat analysis and (deferred) peer-verified passkey attestation
 
-- **Status:** Proposed
+- **Status:** Accepted — implement the peer-verified attestation design (the maintainer elected to close the on-device-malware residual rather than accept it; 2026-06-05)
 - **Date:** 2026-06-05
 - **Context:** G-13 (`docs/security/known-gaps.md`) — the WebAuthn
   action-binding work added a *client-side* passkey gate before removing a
@@ -134,23 +134,61 @@ only honest parties that actually read the commit:
 
 ## Decision
 
-**Defer the peer-verified attestation protocol; document the residual.**
-The current posture for device-removal is:
+**Implement the peer-verified attestation design.** The analysis above
+showed the remote-token-replay threat is already closed by the
+hardware-backed MLS key; the maintainer elected to additionally close the
+on-device-malware-bypasses-the-UI residual rather than accept it. Because
+this touches the audited `lakko-mls` core, it is gated by invariant #3
+(ADR — this one — plus property tests, and the apply-path change is in
+scope for the Phase 2 external crypto audit).
 
-- remote token-only attacker — **blocked** by the hardware-protected
-  per-device MLS signing key (not by anything client- or auth-side);
-- the client-side passkey gate (already shipped) raises the bar for the
-  normal app flow on a non-compromised device;
-- the remaining residual — **on-device malware bypassing the UI** — is
-  documented in known-gaps G-13 as an accepted limitation, to be revisited
-  if the threat model elevates (e.g. a high-risk / enterprise profile),
-  at which point this ADR's peer-attestation design is the path.
+### Attestation token (foundational primitive)
 
-This keeps the audited `lakko-mls` core untouched for a narrow,
-partially-mitigated residual, rather than taking on a multi-sprint
-protocol change with external-audit implications. The decision is
-explicitly reversible: if device-removal becomes a higher-value target,
-re-open this ADR and implement the design above.
+A compact, domain-separated, Ed25519-signed binary blob — NOT a JWT, to
+keep the audited-core verifier trivial and fuzzable:
+
+```text
+ActionAttestation = version(1) ‖ account_id(16) ‖ action_hash(32)
+                    ‖ expires_at_unix_secs(8, BE i64) ‖ Ed25519_sig(64)
+signing input      = "lakko/device-attest/v1" ‖ version ‖ account_id
+                     ‖ action_hash ‖ expires_at
+```
+
+`sign`/`verify` build on `lakko_crypto::signing` (the same Ed25519
+primitive `lakko-call-jwt` uses), so both `services/auth` (sign) and
+`lakko-mls` (verify) reuse one implementation with no JWS / JWKS-fetch
+dependency in the audited core — the trusted verifying key is supplied by
+the caller (the FFI / client holds it from pinned/bootstrap config). The
+key SHOULD be a dedicated attestation key (key separation from the
+call-JWT key), published alongside the existing JWKS.
+
+### Sprint breakdown
+
+1. **`lakko-attest` crate (this sprint).** The `ActionAttestation`
+   format + `sign` + strict `verify_bound(bytes, vk, expected_account,
+   expected_action_hash, now)` + unit/property tests (+ a later fuzz
+   target on the parser). Self-contained; no MLS or auth changes.
+2. **Auth issuance.** A dedicated attestation signing key in
+   `services/auth` (published via JWKS), and `/auth/action/finish`
+   returns the signed attestation alongside its existing response.
+3. **MLS apply-path verification.** `device_group.rs` carries the
+   attestation alongside the `Remove` commit (envelope framing) and
+   `process_incoming` refuses to apply a `Remove` whose attestation is
+   absent / invalid / unbound to the removed leaf's signature key — a new
+   refuse-to-apply invariant with property tests.
+4. **OPAQUE-only policy.** A DeviceGroup policy flag ("require attested
+   removals") so peers know when to enforce; requires an OpenMLS 0.8
+   GroupContext-extension spike first (lakko-mls uses no custom
+   extensions today — feasibility is unverified). If custom extensions
+   prove infeasible in 0.8, fall back to encoding the policy in an
+   application-level group-state record the DeviceGroup layer owns.
+5. **Client embedding.** Each platform threads the `/auth/action/finish`
+   attestation into the remove-device commit; the verify is already in
+   the shared core.
+
+The decision remains reversible per-sprint: if the sprint-4 OpenMLS spike
+shows the policy flag is infeasible without forking OpenMLS, re-evaluate
+whether to ship enforcement only for passkey-mandatory DeviceGroups.
 
 ## Alternatives considered
 
@@ -169,10 +207,18 @@ re-open this ADR and implement the design above.
 
 ## Consequences
 
-- Device-removal keeps its shipped client-side passkey gate; no change to
-  the audited `lakko-mls` core.
-- known-gaps G-13 records the residual (on-device-malware UI bypass) as an
-  accepted, documented limitation with this ADR as the implementation path
-  if it is ever elevated.
-- If re-opened, the work is gated by invariant #3 (ADR + property tests +
-  external crypto audit for the `lakko-mls` apply-path change).
+- The shipped client-side passkey gate stays; the attestation work makes
+  it peer-enforced so on-device malware that bypasses the app UI can no
+  longer evict a device without a real passkey gesture.
+- The `lakko-mls` apply-path change (sprint 3) is gated by invariant #3:
+  this ADR + property tests, and the change is in scope for the Phase 2
+  external crypto audit.
+- A new signing key + JWKS surface is added to `services/auth` (sprint 2);
+  the attestation verifying key is distributed to clients via the same
+  pinned/bootstrap channel the rest of the trust anchors use.
+- Sprint 4 carries an OpenMLS-0.8 feasibility risk (custom GroupContext
+  extensions are unused today); the ADR names a fallback (application-level
+  group-state policy record) if the extension route is infeasible.
+- Until sprints 3–5 land, known-gaps G-13 continues to record the
+  on-device-malware residual as open (now *in progress* rather than
+  accepted).

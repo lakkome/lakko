@@ -1,0 +1,20 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+[package]
+name = "lakko-attest"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Action attestation (G-13, ADR-0015) — a compact Ed25519-signed, domain-separated proof that an account completed a passkey ceremony for a specific action, verifiable by peer devices."
+
+[lints]
+workspace = true
+
+[dependencies]
+lakko-crypto.workspace = true
+thiserror.workspace = true

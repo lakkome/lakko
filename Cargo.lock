@@ -2381,6 +2381,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "lakko-attest"
+version = "0.0.0"
+dependencies = [
+ "lakko-crypto",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "lakko-auth-client"
 version = "0.0.0"
 dependencies = [
