@@ -49,6 +49,19 @@ pub(crate) const ACTION_HASH_LEN: usize = 32;
 /// Length of the per-challenge server nonce.
 pub(crate) const ACTION_NONCE_LEN: usize = 32;
 
+/// Lifetime of a single-use action grant written on `/auth/action/finish`.
+/// The grant is meant to be consumed by the sensitive endpoint immediately
+/// after the passkey gesture, so the window is short; it is also strictly
+/// single-use (consumption deletes the row).
+pub(crate) const ACTION_GRANT_TTL_SECS: i64 = 120;
+
+/// Domain separator for the *delete-passkey-credential* action. MUST match
+/// the clients' `ACTION_DOMAIN_DELETE_CREDENTIAL` byte-for-byte so the
+/// server recomputes the same `action_hash` the client bound the assertion
+/// to. Kept here (the action module) because the server-side enforcement
+/// lives next to the grant machinery.
+pub(crate) const ACTION_DOMAIN_DELETE_CREDENTIAL: &str = "lakko/action/delete-credential/v1";
+
 /// Generate a fresh 32-byte server nonce for an action-bound challenge.
 pub(crate) fn random_action_nonce() -> [u8; ACTION_NONCE_LEN] {
     let mut nonce = [0u8; ACTION_NONCE_LEN];
@@ -182,6 +195,7 @@ use axum::Extension;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use sqlx::MySqlPool;
 
 use crate::webauthn::{
@@ -326,6 +340,12 @@ pub(crate) async fn action_finish(
     // `webauthn::auth_finish`'s counter block.
     bump_action_credential(&state.db, &auth.0, &result).await?;
 
+    // Server-side enforcement (G-13): write a short-lived single-use grant
+    // bound to (account, action_hash). The sensitive endpoint recomputes
+    // the same action_hash and consumes this grant, so a stolen token
+    // cannot perform the action without a fresh passkey gesture.
+    write_action_grant(&state.db, &auth.0, &presented).await?;
+
     Ok(Json(ActionFinishRes {
         account_id_b64: URL_SAFE_NO_PAD.encode(auth.0),
         action_hash_b64: URL_SAFE_NO_PAD.encode(presented),
@@ -465,6 +485,71 @@ async fn bump_action_credential(
             .map_err(ApiError::Db)?;
     }
     Ok(())
+}
+
+// ----------------------------------------------------------------
+// Server-side action grants (G-13, ADR-0014)
+//
+// `/auth/action/finish` writes a single-use grant; the sensitive endpoint
+// recomputes the expected action_hash from its own parameters and consumes
+// a matching grant before acting. This is what makes the gate real rather
+// than client-side-only: a stolen session token cannot mint a grant (that
+// needs a passkey gesture at /finish).
+// ----------------------------------------------------------------
+
+/// Recompute the action hash a *delete-passkey-credential* ceremony binds
+/// to: `SHA-256(domain ‖ credential_id)`. The clients use the same domain
+/// and identifier (the raw credential id bytes), so a grant written from a
+/// client ceremony matches what `webauthn::delete_credential` computes.
+pub(crate) fn delete_credential_action_hash(credential_id: &[u8]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(ACTION_DOMAIN_DELETE_CREDENTIAL.as_bytes());
+    hasher.update(credential_id);
+    let digest = hasher.finalize();
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&digest);
+    out
+}
+
+/// Write (or refresh) a single-use action grant for `(account_id, action_hash)`.
+async fn write_action_grant(
+    pool: &MySqlPool,
+    account_id: &[u8; 16],
+    action_hash: &[u8; ACTION_HASH_LEN],
+) -> Result<(), ApiError> {
+    sqlx::query(
+        "INSERT INTO webauthn_action_grants (account_id, action_hash, expires_at) \
+         VALUES (?, ?, NOW(3) + INTERVAL ? SECOND) \
+         ON DUPLICATE KEY UPDATE expires_at = VALUES(expires_at)",
+    )
+    .bind(account_id.as_slice())
+    .bind(action_hash.as_slice())
+    .bind(ACTION_GRANT_TTL_SECS)
+    .execute(pool)
+    .await
+    .map_err(ApiError::Db)?;
+    Ok(())
+}
+
+/// Atomically consume a non-expired action grant for `(account_id,
+/// action_hash)`. Returns `true` iff a matching live grant existed and was
+/// consumed — a single `DELETE` whose `rows_affected == 1`, so the consume
+/// is race-free and strictly single-use.
+pub(crate) async fn consume_action_grant(
+    pool: &MySqlPool,
+    account_id: &[u8; 16],
+    action_hash: &[u8; ACTION_HASH_LEN],
+) -> Result<bool, ApiError> {
+    let result = sqlx::query(
+        "DELETE FROM webauthn_action_grants \
+         WHERE account_id = ? AND action_hash = ? AND expires_at > NOW(3)",
+    )
+    .bind(account_id.as_slice())
+    .bind(action_hash.as_slice())
+    .execute(pool)
+    .await
+    .map_err(ApiError::Db)?;
+    Ok(result.rows_affected() == 1)
 }
 
 // ----------------------------------------------------------------
@@ -637,6 +722,37 @@ mod tests {
         let other = lakko_crypto::hash::blake3_keyed(&other_key, &input);
 
         assert_ne!(real, other, "domain separation must change the challenge");
+    }
+
+    #[test]
+    fn delete_credential_action_hash_matches_client_convention() {
+        // The server recomputes the same action_hash the clients send
+        // (`SHA-256("lakko/action/delete-credential/v1" || credential_id)`)
+        // so a grant minted from a client ceremony matches the delete. Pin
+        // both the domain string and the hash construction here — a drift
+        // would silently make every delete fail the grant check (or, worse,
+        // accept a grant for the wrong action).
+        use sha2::{Digest, Sha256};
+        assert_eq!(
+            ACTION_DOMAIN_DELETE_CREDENTIAL, "lakko/action/delete-credential/v1",
+            "server domain must match the clients' ACTION_DOMAIN_DELETE_CREDENTIAL"
+        );
+        let credential_id = b"a-credential-id-of-some-bytes";
+        let expected = {
+            let mut h = Sha256::new();
+            h.update(b"lakko/action/delete-credential/v1");
+            h.update(credential_id);
+            let d = h.finalize();
+            let mut out = [0u8; 32];
+            out.copy_from_slice(&d);
+            out
+        };
+        assert_eq!(delete_credential_action_hash(credential_id), expected);
+        // Distinct credential ids must bind to distinct grants.
+        assert_ne!(
+            delete_credential_action_hash(b"id-one"),
+            delete_credential_action_hash(b"id-two"),
+        );
     }
 }
 

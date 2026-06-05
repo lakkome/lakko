@@ -294,6 +294,34 @@ pub(crate) async fn delete_credential(
         .decode(credential_id_b64)
         .map_err(|_| ApiError::BadInput("credential_id_b64 not URL-safe base64"))?;
 
+    // Idempotent no-op when the credential doesn't exist for this account —
+    // there is nothing to protect, so no action authorization is required.
+    let exists: Option<i64> = sqlx::query_scalar(
+        "SELECT 1 FROM webauthn_credentials WHERE credential_id = ? AND account_id = ?",
+    )
+    .bind(&credential_id)
+    .bind(auth.0.as_slice())
+    .fetch_optional(&state.db)
+    .await
+    .map_err(ApiError::Db)?;
+    if exists.is_none() {
+        return Ok(StatusCode::NO_CONTENT);
+    }
+
+    // G-13 (ADR-0014) server-side enforcement: the credential exists, so
+    // deleting it requires a fresh single-use action grant bound to THIS
+    // credential. The client obtains the grant by completing the
+    // `/auth/action/{start,finish}` passkey ceremony immediately before
+    // calling delete. Recompute the action hash the ceremony bound to and
+    // consume the grant atomically; refuse if none is present — a stolen
+    // session token alone (no passkey gesture) cannot pass this gate.
+    let action_hash = crate::webauthn_action::delete_credential_action_hash(&credential_id);
+    let consumed =
+        crate::webauthn_action::consume_action_grant(&state.db, &auth.0, &action_hash).await?;
+    if !consumed {
+        return Err(ApiError::ActionRequired);
+    }
+
     sqlx::query("DELETE FROM webauthn_credentials WHERE credential_id = ? AND account_id = ?")
         .bind(&credential_id)
         .bind(auth.0.as_slice())
@@ -699,6 +727,19 @@ pub(crate) fn spawn_state_pruner(pool: MySqlPool) -> tokio::task::JoinHandle<()>
                 Ok(_) => {},
                 Err(e) => tracing::warn!(error = %e, "webauthn_states prune failed"),
             }
+            // G-13 (ADR-0014): sweep expired single-use action grants on the
+            // same timer. Consumed grants are deleted on use; this catches
+            // the ones a ceremony minted but no delete ever consumed.
+            let grants = sqlx::query("DELETE FROM webauthn_action_grants WHERE expires_at < NOW(3)")
+                .execute(&pool)
+                .await;
+            match grants {
+                Ok(r) if r.rows_affected() > 0 => {
+                    tracing::debug!(rows = r.rows_affected(), "pruned expired webauthn_action_grants");
+                },
+                Ok(_) => {},
+                Err(e) => tracing::warn!(error = %e, "webauthn_action_grants prune failed"),
+            }
         }
     })
 }
@@ -870,6 +911,11 @@ pub(crate) enum ApiError {
     /// credentials are registered for the resolved account.
     /// Surfaced as 404 so the UI can fall back to password.
     NoCredentials,
+    /// G-13 (ADR-0014): a sensitive operation requires a completed
+    /// action-binding ceremony (a fresh passkey gesture) and no valid
+    /// single-use grant was present. Surfaced as 403 so the client knows
+    /// it must run `/auth/action/{start,finish}` first.
+    ActionRequired,
     /// 2a2b: catch-all for unrecoverable server-side errors
     /// (session-token issuance failures). The OPAQUE module
     /// folds the same case into a tuple-StatusCode; we keep an
@@ -888,6 +934,7 @@ impl IntoResponse for ApiError {
             Self::BadInput(m) => (StatusCode::BAD_REQUEST, m),
             Self::StateMissing => (StatusCode::GONE, "state-missing-or-expired"),
             Self::NoCredentials => (StatusCode::NOT_FOUND, "no-passkeys-for-account"),
+            Self::ActionRequired => (StatusCode::FORBIDDEN, "action-authorization-required"),
             Self::Internal => (StatusCode::INTERNAL_SERVER_ERROR, "internal"),
             Self::Db(e) => {
                 tracing::error!(error = %e, "webauthn db error");

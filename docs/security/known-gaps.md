@@ -364,16 +364,32 @@ existing passkey-assertion machinery (web `navigator.
 credentials.get`, iOS `ASAuthorizationController`, Android
 `CredentialManager`).
 
-**Remaining:** *server-side endpoint enforcement* — the gate is
-currently client-side (it forces a live passkey gesture in the
-app flow), so a stolen session token replayed directly against
-the sensitive endpoint bypasses it. Making it real requires the
-sensitive endpoint to demand a completed ceremony (e.g. a
-single-use server-side action grant the `DELETE` credential
-endpoint consumes). For the DeviceGroup remove-commit this is
-additionally bounded by the DS's zero-trust opacity (the DS
-cannot interpret an `action_hash`), so that path would need a
-different enforcement point.
+**Server-side enforcement landed for delete-passkey.** The gate
+is no longer client-side-only there: `/auth/action/finish` writes
+a short-lived single-use grant `(account_id, action_hash)`
+(table `webauthn_action_grants`, migration 0009, TTL 120 s,
+pruned on the existing timer), and `DELETE
+/webauthn/credentials/:id` recomputes `action_hash =
+SHA-256("lakko/action/delete-credential/v1" ‖ credential_id)`,
+atomically consumes a matching grant (`DELETE … rows_affected ==
+1`, so it is race-free + strictly single-use), and refuses with
+403 `action-authorization-required` if none is present. A stolen
+session token alone cannot mint a grant (that needs a passkey
+gesture at `/finish`), so the gate now resists token replay. The
+no-op case (deleting a credential that does not exist) stays an
+idempotent 204 with no grant required. A unit test pins the
+server's `delete_credential_action_hash` to the clients'
+convention so the two cannot drift.
+
+**Remaining:** (1) the *remove-device* path stays client-gated
+only — its effect is an MLS Remove commit posted to the DS, which
+is zero-trust opaque and cannot interpret an `action_hash`, so
+server enforcement there needs a different point (e.g. a
+DeviceGroup-side policy commit) tracked separately; (2) an
+HTTP-level integration test of the grant flow (ceremony → grant →
+consume → delete) needs a live DB and is a follow-up — the
+current coverage is the action-hash unit test plus the
+authenticator round-trip property tests.
 
 ## Calls
 
