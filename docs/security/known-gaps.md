@@ -387,11 +387,26 @@ router end-to-end: it proves a ceremony writes a grant, the
 delete consumes it (204), a delete without a grant is refused
 (403), and a non-existent credential is an idempotent 204.
 
-**Remaining:** the *remove-device* path stays client-gated only —
-its effect is an MLS Remove commit posted to the DS, which is
-zero-trust opaque and cannot interpret an `action_hash`, so server
-enforcement there needs a different point (e.g. a DeviceGroup-side
-policy commit) tracked separately.
+**Remove-device — analysed in [ADR-0015](../adr/0015-device-removal-authorization.md);
+server enforcement deferred with a documented residual.** A
+device removal is an MLS `Remove` commit signed by the removing
+device's per-device MLS signature key, whose seed is stored
+encrypted under a non-extractable device key (invariant #7). So a
+remote attacker holding only a stolen session token **cannot**
+forge a removal — peers reject an invalidly-signed commit — which
+already closes the token-replay threat that motivated the
+delete-passkey grant. The DS is zero-trust opaque and cannot
+interpret an `action_hash`, and the auth service is never in the
+removal path, so there is no server request to gate; the only
+design that adds enforcement is peer-verified server attestation
+embedded in the commit (ADR-0015), a multi-sprint `lakko-mls`
+protocol change gated by invariant #3. The **residual** the
+current client-side gate does not cover is **on-device malware
+that bypasses the app UI and drives the MLS FFI directly** — an
+attacker already inside the device trust boundary. This is
+accepted and documented per ADR-0015, to be revisited (and the
+attestation design implemented) only if the threat model
+elevates.
 
 ## Calls
 
