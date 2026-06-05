@@ -184,12 +184,26 @@ public class PasskeysViewModel(
         }
     }
 
-    public fun deleteCredential(credentialIdB64: String, nickname: String) {
+    public fun deleteCredential(
+        context: Context,
+        credentialIdB64: String,
+        nickname: String,
+    ) {
         rebindSession()
         if (mutableState.value.busy) return
         mutableState.update { it.copy(busy = true, message = null) }
         viewModelScope.launch {
             try {
+                // G-13 (ADR-0014): require a fresh passkey gesture
+                // cryptographically bound to THIS credential's removal
+                // before deleting it. A throw (incl. the user dismissing
+                // the sheet) aborts the delete — fail-closed.
+                val actionHashB64 = actionHashForDeleteCredential(credentialIdB64)
+                client.assertAction(
+                    context = context,
+                    actionHashB64 = actionHashB64,
+                    registration = registration,
+                )
                 client.deleteCredential(credentialIdB64)
                 mutableState.update {
                     it.copy(
@@ -198,6 +212,13 @@ public class PasskeysViewModel(
                     )
                 }
                 refresh()
+            } catch (e: WebauthnUserCancelledError) {
+                mutableState.update {
+                    it.copy(
+                        busy = false,
+                        message = Message.Error("Cancelled. The passkey was not removed."),
+                    )
+                }
             } catch (e: WebauthnHttpError) {
                 mutableState.update {
                     it.copy(busy = false, message = Message.Error(explain(e)))

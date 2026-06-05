@@ -193,6 +193,18 @@ public final class WebauthnClient {
 
     // MARK: - Internal HTTP
 
+    /// Bearer-authenticated JSON POST, reachable from same-module
+    /// extensions (the action-binding ceremony in
+    /// ``WebauthnActionBinding``). Thin wrapper over the private
+    /// ``postJson(endpoint:body:authed:)`` so the transport,
+    /// auth-header attach, and error mapping stay single-sourced.
+    func postJsonAuthed<Req: Encodable, Res: Decodable>(
+        endpoint: String,
+        body: Req
+    ) async throws -> Res {
+        try await postJson(endpoint: endpoint, body: body, authed: true)
+    }
+
     private func postJson<Req: Encodable, Res: Decodable>(
         endpoint: String,
         body: Req,

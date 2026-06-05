@@ -159,9 +159,26 @@ public final class PasskeysViewModel: ObservableObject {
         message = nil
         defer { isBusy = false }
         do {
+            // G-13 (ADR-0014): require a fresh passkey gesture
+            // cryptographically bound to THIS credential's removal
+            // before deleting it. A throw (e.g. the user dismisses
+            // the sheet) aborts the delete — fail-closed.
+            let actionHashB64 = try actionHashForDeleteCredential(
+                credentialIdB64: cred.credential_id_b64
+            )
+            _ = try await client.assertAction(actionHashB64: actionHashB64)
             try await client.deleteCredential(credentialIdB64: cred.credential_id_b64)
             message = .ok("Removed \"\(cred.nickname)\".")
             await refresh()
+        } catch let error as WebauthnAssertion.AssertionError {
+            switch error {
+            case .cancelled:
+                message = .error("Cancelled. The passkey was not removed.")
+            case .noCredential:
+                message = .error("Authenticator did not return a credential.")
+            case .underlying(let underlying):
+                message = .error(underlying.localizedDescription)
+            }
         } catch let error as WebauthnClientError {
             message = .error(Self.explain(error))
         } catch {

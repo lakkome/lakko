@@ -225,6 +225,51 @@ interface AuthPublicKeyCredentialJSON {
   readonly extensions?: Record<string, unknown>;
 }
 
+// ---- Action binding (G-13, ADR-0014) ----------------------------
+//
+// Action binding elevates a *specific* sensitive operation to require a
+// fresh passkey gesture: the server issues a challenge that is a function
+// of an opaque 32-byte `action_hash`, so the authenticator's signature
+// attests to THAT action. `assertAction` drives the
+// `/auth/action/{start,finish}` ceremony; the caller computes the
+// `action_hash` with one of the `actionHashFor*` helpers below and runs
+// the ceremony as a gate *before* performing the operation.
+//
+// NOTE: this is the client-side gate (it forces a live passkey gesture in
+// the app flow). Server-side endpoint enforcement — the sensitive endpoint
+// itself demanding a completed ceremony — is a tracked follow-up; for the
+// DeviceGroup remove-commit it is additionally bounded by the DS's
+// zero-trust opacity (the DS cannot interpret an action_hash).
+
+/** Domain separators bound into each action's `action_hash`. Keep these in
+ *  lockstep with the iOS / Android clients so the stored hash means the
+ *  same thing on every platform. */
+export const ACTION_DOMAIN_DELETE_CREDENTIAL = "lakko/action/delete-credential/v1";
+export const ACTION_DOMAIN_REMOVE_DEVICE = "lakko/action/remove-device/v1";
+
+export interface ActionStartRequest {
+  /** URL-safe base64 of the 32-byte action hash. */
+  readonly action_hash_b64: string;
+}
+
+export interface ActionStartResponse {
+  readonly state_id: string;
+  readonly options: ServerRequestOptions;
+}
+
+export interface ActionFinishRequest {
+  readonly state_id: string;
+  readonly action_hash_b64: string;
+  readonly credential: AuthPublicKeyCredentialJSON;
+}
+
+export interface ActionFinishResponse {
+  readonly account_id_b64: string;
+  /** Echo of the action hash the passkey attested to. */
+  readonly action_hash_b64: string;
+  readonly credential_id_b64: string;
+}
+
 // ---- Client ------------------------------------------------------
 
 export class WebauthnClient {
@@ -372,6 +417,52 @@ export class WebauthnClient {
     );
   }
 
+  /**
+   * Drive the action-binding ceremony (G-13, ADR-0014):
+   *
+   * 1. `POST /auth/action/start` with the opaque `actionHashB64`.
+   *    Server derives `challenge = H(action_hash ‖ nonce)`, returns
+   *    `(state_id, options)`.
+   * 2. `navigator.credentials.get({publicKey: options})` — the user
+   *    performs the passkey gesture, signing over the action-bound
+   *    challenge.
+   * 3. `POST /auth/action/finish` with the same `action_hash_b64` and
+   *    the asserted credential. Resolves only if the server verifies the
+   *    signature attests to this action.
+   *
+   * Bearer-auth required ([`setSessionToken`]). Throws the same error
+   * family as [`loginWithPasskey`] — in particular
+   * [`WebauthnUserCancelledError`] when the user dismisses the sheet, so
+   * the caller MUST treat a throw as "do not perform the action".
+   */
+  async assertAction(actionHashB64: string): Promise<ActionFinishResponse> {
+    if (!WebauthnClient.isWebauthnAvailable()) {
+      throw new WebauthnUnsupportedError();
+    }
+    const start = await this.post<ActionStartRequest, ActionStartResponse>(
+      "/auth/action/start",
+      { action_hash_b64: actionHashB64 },
+    );
+    const publicKey = decodeRequestOptions(start.options.publicKey);
+    let cred: Credential | null;
+    try {
+      cred = await navigator.credentials.get({ publicKey });
+    } catch (err) {
+      throw mapDomError(err);
+    }
+    if (cred === null) {
+      throw new WebauthnUserCancelledError();
+    }
+    return this.post<ActionFinishRequest, ActionFinishResponse>(
+      "/auth/action/finish",
+      {
+        state_id: start.state_id,
+        action_hash_b64: actionHashB64,
+        credential: encodeAuthCredential(cred as PublicKeyCredential),
+      },
+    );
+  }
+
   // -----------------------------------------------------------------
   // Low-level transport
   // -----------------------------------------------------------------
@@ -434,6 +525,38 @@ function mapDomError(err: unknown): Error {
 }
 
 // ---- base64url ↔ ArrayBuffer / encoders -------------------------
+
+// ---- action_hash derivation (G-13, ADR-0014) --------------------
+
+/** `action_hash = SHA-256(domain_utf8 ‖ identifier)`, URL-safe base64.
+ *  SHA-256 is native everywhere (WebCrypto / CryptoKit / MessageDigest),
+ *  so the same convention computes identically on every client. The
+ *  server treats the result as opaque 32 bytes. */
+async function deriveActionHash(domain: string, identifier: Uint8Array): Promise<string> {
+  const domainBytes = new TextEncoder().encode(domain);
+  const input = new Uint8Array(domainBytes.length + identifier.length);
+  input.set(domainBytes, 0);
+  input.set(identifier, domainBytes.length);
+  const digest = await crypto.subtle.digest("SHA-256", input);
+  return bufferToBase64url(digest);
+}
+
+/** Action hash for deleting the passkey credential identified by
+ *  `credentialIdB64` (the value [`listCredentials`] returns). */
+export async function actionHashForDeleteCredential(
+  credentialIdB64: string,
+): Promise<string> {
+  const idBytes = new Uint8Array(base64urlToBuffer(credentialIdB64));
+  return deriveActionHash(ACTION_DOMAIN_DELETE_CREDENTIAL, idBytes);
+}
+
+/** Action hash for removing the DeviceGroup leaf whose MLS signature
+ *  public key is `signaturePublicKey`. */
+export async function actionHashForRemoveDevice(
+  signaturePublicKey: Uint8Array,
+): Promise<string> {
+  return deriveActionHash(ACTION_DOMAIN_REMOVE_DEVICE, signaturePublicKey);
+}
 
 function base64urlToBuffer(s: string): ArrayBuffer {
   // The server emits no-pad; restore if needed.

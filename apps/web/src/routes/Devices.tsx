@@ -39,6 +39,11 @@ import {
 import { useAuth } from "../auth/AuthContext";
 import { getDeviceKey } from "../auth/key-store";
 import {
+  WebauthnClient,
+  WebauthnHttpError,
+  actionHashForRemoveDevice,
+} from "../auth/webauthn-client";
+import {
   prepareJoinFlow,
   runScanFlow,
   type JoinSession,
@@ -137,6 +142,9 @@ function DevicesListView(props: {
   readonly accountIdB64: string;
   readonly accountIdBytes: Uint8Array;
 }): JSX.Element {
+  // Same auth context the outer page reads — used to bind the device-
+  // removal action to a fresh passkey gesture (G-13).
+  const auth = useAuth();
   type State =
     | { kind: "loading" }
     | { kind: "ready"; devices: readonly DeviceListItem[] }
@@ -185,6 +193,30 @@ function DevicesListView(props: {
         });
         return;
       }
+
+      // G-13 (ADR-0014): gate the eviction on a fresh passkey gesture
+      // cryptographically bound to the removed leaf — but only if the
+      // account actually has a passkey. OPAQUE-only accounts (no passkey)
+      // fall through on session-token auth alone (a 404 from the ceremony
+      // start signals "no credentials"). A user-cancelled gesture or any
+      // other failure aborts the removal (fail-closed).
+      const sessionToken = auth.identitySecrets()?.sessionToken ?? null;
+      const target = devices.find((d) => d.leafIndex === leafIndex);
+      if (sessionToken !== null && target !== undefined) {
+        const wc = new WebauthnClient();
+        wc.setSessionToken(sessionToken);
+        try {
+          const actionHashB64 = await actionHashForRemoveDevice(
+            target.signaturePublicKey,
+          );
+          await wc.assertAction(actionHashB64);
+        } catch (err) {
+          if (!(err instanceof WebauthnHttpError && err.status === 404)) {
+            throw err;
+          }
+        }
+      }
+
       await removeDeviceAt({
         accountIdBytes: props.accountIdBytes,
         accountIdB64: props.accountIdB64,

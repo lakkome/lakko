@@ -126,6 +126,7 @@ public fun PasskeysScreen(
                                 disabled = state.busy,
                                 onDelete = {
                                     viewModel.deleteCredential(
+                                        context,
                                         cred.credentialIdB64,
                                         cred.nickname,
                                     )

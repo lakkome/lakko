@@ -52,6 +52,9 @@ import me.lakko.app.auth.AuthState
 import me.lakko.app.devices.DeviceRemoval
 import me.lakko.app.devices.PairingOrchestrator
 import me.lakko.app.devices.WelcomeCourier
+import me.lakko.app.webauthn.WebauthnClient
+import me.lakko.app.webauthn.WebauthnHttpError
+import me.lakko.app.webauthn.actionHashForRemoveDevice
 
 /**
  * `DevicesScreen` — multi-device management surface
@@ -148,6 +151,7 @@ public fun DevicesScreen(
                 0 -> DevicesListTab(
                     accountIdBytes = secrets.accountId,
                     accountIdB64 = account.accountIdB64,
+                    sessionToken = secrets.sessionToken,
                 )
                 1 -> PairTab(
                     accountIdBytes = secrets.accountId,
@@ -531,6 +535,7 @@ private sealed interface DevicesListUi {
 private fun DevicesListTab(
     accountIdBytes: ByteArray,
     accountIdB64: String,
+    sessionToken: String?,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -606,9 +611,37 @@ private fun DevicesListTab(
                             OutlinedButton(
                                 onClick = {
                                     val leaf = device.leafIndex
+                                    val signaturePublicKey = device.signaturePublicKey
                                     removingLeaf = leaf
                                     scope.launch {
                                         try {
+                                            // G-13 (ADR-0014): gate the eviction on a
+                                            // fresh passkey gesture cryptographically
+                                            // bound to the removed leaf — but only if the
+                                            // account actually has a passkey. OPAQUE-only
+                                            // accounts (no passkey) fall through on
+                                            // session-token auth alone: a 404 from the
+                                            // ceremony start signals "no credentials". A
+                                            // user-cancelled gesture or any other failure
+                                            // aborts the removal (fail-closed).
+                                            if (sessionToken != null) {
+                                                WebauthnClient().use { wc ->
+                                                    wc.setSessionToken(sessionToken)
+                                                    try {
+                                                        val actionHashB64 =
+                                                            actionHashForRemoveDevice(
+                                                                signaturePublicKey,
+                                                            )
+                                                        wc.assertAction(
+                                                            context = context,
+                                                            actionHashB64 = actionHashB64,
+                                                        )
+                                                    } catch (e: WebauthnHttpError) {
+                                                        if (e.status != 404) throw e
+                                                    }
+                                                }
+                                            }
+
                                             DeviceRemoval.removeDeviceAt(
                                                 context = context,
                                                 accountIdBytes = accountIdBytes,

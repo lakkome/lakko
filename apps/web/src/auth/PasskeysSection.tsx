@@ -45,6 +45,7 @@ import {
   WebauthnNetworkError,
   WebauthnUnsupportedError,
   WebauthnUserCancelledError,
+  actionHashForDeleteCredential,
   type CredentialSummary,
 } from "./webauthn-client";
 
@@ -153,6 +154,13 @@ export default function PasskeysSection(): JSX.Element {
     setBusy(true);
     setMessage(null);
     try {
+      // G-13 (ADR-0014): require a fresh passkey gesture cryptographically
+      // bound to THIS credential's removal before deleting it. A throw
+      // (e.g. the user dismisses the sheet) aborts the delete — fail-closed.
+      const actionHashB64 = await actionHashForDeleteCredential(
+        cred.credential_id_b64,
+      );
+      await c.assertAction(actionHashB64);
       await c.deleteCredential(cred.credential_id_b64);
       setMessage({
         kind: "ok",

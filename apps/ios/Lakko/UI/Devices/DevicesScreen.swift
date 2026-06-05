@@ -75,7 +75,8 @@ public struct DevicesScreen: View {
                         case .list:
                             DevicesListView(
                                 accountIdBytes: session.accountIdBytes,
-                                accountIdB64: session.accountIdB64
+                                accountIdB64: session.accountIdB64,
+                                sessionToken: session.sessionToken
                             )
                         case .pair:
                             PairView(
@@ -105,14 +106,16 @@ public struct DevicesScreen: View {
         }
     }
 
-    private func currentSession() -> (accountIdBytes: Data, accountIdB64: String)? {
+    private func currentSession()
+        -> (accountIdBytes: Data, accountIdB64: String, sessionToken: String)?
+    {
         guard
             let secrets = authRepository.identitySecrets,
             case .session(let account) = authRepository.state
         else {
             return nil
         }
-        return (secrets.accountId, account.accountIdB64)
+        return (secrets.accountId, account.accountIdB64, secrets.sessionToken)
     }
 }
 
@@ -350,6 +353,11 @@ private struct DevicesListView: View {
 
     let accountIdBytes: Data
     let accountIdB64: String
+    /// Bearer token for the action-binding ceremony (G-13). The
+    /// device-removal gate is conditional: it only runs when the
+    /// account has a passkey, so the token is enough to drive the
+    /// authed `/auth/action/start` probe.
+    let sessionToken: String
 
     @State private var state: ListState = .loading
     @State private var removingLeaf: UInt32?
@@ -445,6 +453,35 @@ private struct DevicesListView: View {
         removingLeaf = leafIndex
         defer { removingLeaf = nil }
         do {
+            // G-13 (ADR-0014): gate the eviction on a fresh passkey
+            // gesture cryptographically bound to the removed leaf —
+            // but only if the account actually has a passkey.
+            // OPAQUE-only accounts (no passkey) fall through on
+            // session-token auth alone: a 404 from the ceremony
+            // start signals "no credentials". A user-cancelled
+            // gesture or any other failure aborts the removal
+            // (fail-closed).
+            if let target = currentDevices().first(where: { $0.leafIndex == leafIndex }) {
+                let wc = WebauthnClient()
+                wc.setSessionToken(sessionToken)
+                let actionHashB64 = actionHashForRemoveDevice(
+                    signaturePublicKey: target.signaturePublicKey
+                )
+                do {
+                    _ = try await wc.assertAction(actionHashB64: actionHashB64)
+                } catch let error as WebauthnClientError {
+                    // 404 = the account has no passkey credential
+                    // (the server's NoCredentials path). Proceed
+                    // without the gate; any other HTTP / network /
+                    // decode failure aborts.
+                    if case .http(404, _, _) = error {
+                        // No passkey — fall through to the removal.
+                    } else {
+                        throw error
+                    }
+                }
+            }
+
             try await DeviceRemoval.removeDeviceAt(
                 accountIdBytes: accountIdBytes,
                 accountIdB64: accountIdB64,
@@ -454,6 +491,15 @@ private struct DevicesListView: View {
         } catch {
             state = .error(error.localizedDescription)
         }
+    }
+
+    /// Snapshot of the currently-listed devices, for resolving the
+    /// removed leaf's signature public key in ``remove(leafIndex:)``.
+    private func currentDevices() -> [DeviceRemoval.DeviceListItem] {
+        if case .ready(let devices) = state {
+            return devices
+        }
+        return []
     }
 
     private func hexPrefix(_ data: Data, n: Int) -> String {

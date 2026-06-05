@@ -24,6 +24,7 @@ import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
+import java.security.MessageDigest
 
 /**
  * Ktor-based client for `lakko-svc-auth`'s `/webauthn/`
@@ -203,6 +204,93 @@ public class WebauthnClient(
     }
 
     // -----------------------------------------------------------------
+    // Action binding (G-13, ADR-0014)
+    // -----------------------------------------------------------------
+
+    public suspend fun startAction(
+        actionHashB64: String,
+    ): ActionStartResponse {
+        val req = ActionStartRequest(actionHashB64 = actionHashB64)
+        val response = client.post("$baseUrl/auth/action/start") {
+            contentType(ContentType.Application.Json)
+            sessionToken?.let { header(HttpHeaders.Authorization, "Bearer $it") }
+            setBody(req)
+        }
+        ensure2xx(response, "/auth/action/start")
+        return response.body()
+    }
+
+    public suspend fun finishAction(
+        stateId: String,
+        actionHashB64: String,
+        credential: JsonElement,
+    ): ActionFinishResponse {
+        val req = ActionFinishRequest(
+            stateId = stateId,
+            actionHashB64 = actionHashB64,
+            credential = credential,
+        )
+        val response = client.post("$baseUrl/auth/action/finish") {
+            contentType(ContentType.Application.Json)
+            sessionToken?.let { header(HttpHeaders.Authorization, "Bearer $it") }
+            setBody(req)
+        }
+        ensure2xx(response, "/auth/action/finish")
+        return response.body()
+    }
+
+    /**
+     * Drive the action-binding ceremony (G-13, ADR-0014):
+     *
+     *   1. `POST /auth/action/start` with the opaque
+     *      [actionHashB64]. The server derives
+     *      `challenge = H(action_hash || nonce)`, returns
+     *      `(state_id, options)`.
+     *   2. [WebauthnRegistration.authenticate] drives Credential
+     *      Manager's `getCredential` — the user performs the
+     *      passkey gesture, signing over the action-bound
+     *      challenge.
+     *   3. `POST /auth/action/finish` with the same
+     *      [actionHashB64] and the asserted credential. Resolves
+     *      only if the server verifies the signature attests to
+     *      this action.
+     *
+     * Bearer-auth required ([setSessionToken]). Mirror of
+     * `WebauthnClient.assertAction` on web + iOS.
+     *
+     * The ceremony is the existing passkey-LOGIN (assertion)
+     * flow with two differences: the `/auth/action/{start,finish}`
+     * endpoints, and an extra `action_hash_b64` field in both
+     * request bodies.
+     *
+     * Throws on every non-success outcome so the caller can use
+     * it as a fail-closed gate: a [WebauthnUserCancelledError]
+     * when the user dismisses the sheet, the underlying cause on
+     * any authenticator failure, or a [WebauthnHttpError] on a
+     * server hiccup (in particular HTTP 404 when the account has
+     * no passkey — callers that want a conditional gate branch on
+     * that status).
+     */
+    public suspend fun assertAction(
+        context: android.content.Context,
+        actionHashB64: String,
+        registration: WebauthnRegistration = WebauthnRegistration(),
+    ): ActionFinishResponse {
+        val start = startAction(actionHashB64)
+        val publicKey = start.options.publicKeyField()
+        return when (val outcome = registration.authenticate(context, publicKey)) {
+            is WebauthnRegistration.Outcome.Success -> finishAction(
+                stateId = start.stateId,
+                actionHashB64 = actionHashB64,
+                credential = outcome.value,
+            )
+            WebauthnRegistration.Outcome.Cancelled ->
+                throw WebauthnUserCancelledError()
+            is WebauthnRegistration.Outcome.Failed -> throw outcome.cause
+        }
+    }
+
+    // -----------------------------------------------------------------
     // Credential management
     // -----------------------------------------------------------------
 
@@ -305,6 +393,43 @@ public data class AuthFinishResponse(
     @SerialName("session_expires_at_ms") public val sessionExpiresAtMs: Long,
 )
 
+// -----------------------------------------------------------------
+// Action binding wire shapes (G-13, ADR-0014)
+// -----------------------------------------------------------------
+
+@Serializable
+public data class ActionStartRequest(
+    /** URL-safe base64 of the 32-byte action hash. */
+    @SerialName("action_hash_b64") public val actionHashB64: String,
+)
+
+@Serializable
+public data class ActionStartResponse(
+    @SerialName("state_id") public val stateId: String,
+    /** `RequestChallengeResponse` from webauthn-rs — same shape
+     *  as [AuthStartResponse.options]. Carried as an opaque
+     *  [JsonElement] because the Credential Manager API takes the
+     *  JSON form directly. */
+    public val options: JsonElement,
+)
+
+@Serializable
+public data class ActionFinishRequest(
+    @SerialName("state_id") public val stateId: String,
+    @SerialName("action_hash_b64") public val actionHashB64: String,
+    /** `authenticationResponseJson` from Credential Manager,
+     *  parsed into JSON — identical to [AuthFinishRequest.credential]. */
+    public val credential: JsonElement,
+)
+
+@Serializable
+public data class ActionFinishResponse(
+    @SerialName("account_id_b64") public val accountIdB64: String,
+    /** Echo of the action hash the passkey attested to. */
+    @SerialName("action_hash_b64") public val actionHashB64: String,
+    @SerialName("credential_id_b64") public val credentialIdB64: String,
+)
+
 /**
  * Phase 2a2c2-android — high-level result of
  * [WebauthnClient.loginWithPasskey]. Mirror of the OPAQUE
@@ -344,6 +469,13 @@ public class WebauthnHttpError(
     public val body: String,
 ) : WebauthnClientError("webauthn $endpoint → $status: $body")
 
+/** The user dismissed the platform sheet, or the authenticator
+ *  refused. Mirror of the web `WebauthnUserCancelledError`; the
+ *  action-binding gates treat a throw as "do not perform the
+ *  action" (fail-closed). */
+public class WebauthnUserCancelledError :
+    WebauthnClientError("webauthn gesture cancelled")
+
 private suspend fun HttpResponse.safeReadBody(): String {
     return try {
         val text = bodyAsText()
@@ -352,3 +484,55 @@ private suspend fun HttpResponse.safeReadBody(): String {
         ""
     }
 }
+
+// -----------------------------------------------------------------
+// action_hash derivation (G-13, ADR-0014)
+// -----------------------------------------------------------------
+//
+// `action_hash = SHA-256(domain_utf8 || identifier)`, URL-safe
+// base64 (no padding, no wrap). SHA-256 is native everywhere
+// (WebCrypto / CryptoKit / MessageDigest), so the same convention
+// computes identically on every client; the server treats the
+// result as opaque 32 bytes. Keep these domain separators in
+// lockstep with `apps/web/src/auth/webauthn-client.ts` and the iOS
+// client so the stored hash means the same thing on every platform.
+
+/** Domain separator bound into the delete-credential action hash. */
+public const val ACTION_DOMAIN_DELETE_CREDENTIAL: String =
+    "lakko/action/delete-credential/v1"
+
+/** Domain separator bound into the remove-device action hash. */
+public const val ACTION_DOMAIN_REMOVE_DEVICE: String =
+    "lakko/action/remove-device/v1"
+
+/** `action_hash = SHA-256(domain_utf8 || identifier)`, URL-safe
+ *  base64 with no padding and no wrap. */
+private fun deriveActionHash(domain: String, identifier: ByteArray): String {
+    val domainBytes = domain.toByteArray(Charsets.UTF_8)
+    val input = ByteArray(domainBytes.size + identifier.size)
+    System.arraycopy(domainBytes, 0, input, 0, domainBytes.size)
+    System.arraycopy(identifier, 0, input, domainBytes.size, identifier.size)
+    val digest = MessageDigest.getInstance("SHA-256").digest(input)
+    return android.util.Base64.encodeToString(
+        digest,
+        android.util.Base64.URL_SAFE or android.util.Base64.NO_PADDING or
+            android.util.Base64.NO_WRAP,
+    )
+}
+
+/** Action hash for deleting the passkey credential identified by
+ *  [credentialIdB64] (the value [WebauthnClient.listCredentials]
+ *  returns). The identifier is the credential id BYTES. */
+public fun actionHashForDeleteCredential(credentialIdB64: String): String {
+    val idBytes = android.util.Base64.decode(
+        credentialIdB64,
+        android.util.Base64.URL_SAFE or android.util.Base64.NO_PADDING or
+            android.util.Base64.NO_WRAP,
+    )
+    return deriveActionHash(ACTION_DOMAIN_DELETE_CREDENTIAL, idBytes)
+}
+
+/** Action hash for removing the DeviceGroup leaf whose MLS
+ *  signature public key is [signaturePublicKey]. */
+public fun actionHashForRemoveDevice(signaturePublicKey: ByteArray): String =
+    deriveActionHash(ACTION_DOMAIN_REMOVE_DEVICE, signaturePublicKey)

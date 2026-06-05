@@ -348,9 +348,32 @@ safe high-level `Webauthn`. The fork-delta guard (ADR
 test-plan item 5) landed as
 `services/auth/tests/fork_delta_guard.rs`: it pins the SHA-256
 of the vendored `core.rs` plus structural assertions, so any
-edit to the verification path fails CI. **Remaining:**
-client-side wiring (web / iOS / Android compute `action_hash`
-and drive the ceremony).
+edit to the verification path fails CI.
+
+**Client-side wiring landed** (web / iOS / Android) for two
+sensitive actions, each gated on a fresh passkey gesture
+cryptographically bound to the action via
+`action_hash = SHA-256("lakko/action/<op>/v1" ‖ identifier)`:
+*delete-passkey* (identifier = credential id) is a strict gate;
+*remove-device* (identifier = the removed DeviceGroup leaf's
+MLS signature public key) is conditional — required only when
+the account has a passkey (a 404 / `NoCredentials` from the
+ceremony start means OPAQUE-only → proceed), and fail-closed on
+a user-cancelled gesture. `assertAction` reuses each platform's
+existing passkey-assertion machinery (web `navigator.
+credentials.get`, iOS `ASAuthorizationController`, Android
+`CredentialManager`).
+
+**Remaining:** *server-side endpoint enforcement* — the gate is
+currently client-side (it forces a live passkey gesture in the
+app flow), so a stolen session token replayed directly against
+the sensitive endpoint bypasses it. Making it real requires the
+sensitive endpoint to demand a completed ceremony (e.g. a
+single-use server-side action grant the `DELETE` credential
+endpoint consumes). For the DeviceGroup remove-commit this is
+additionally bounded by the DS's zero-trust opacity (the DS
+cannot interpret an `action_hash`), so that path would need a
+different enforcement point.
 
 ## Calls
 
