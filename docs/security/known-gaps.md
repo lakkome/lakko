@@ -379,17 +379,19 @@ gesture at `/finish`), so the gate now resists token replay. The
 no-op case (deleting a credential that does not exist) stays an
 idempotent 204 with no grant required. A unit test pins the
 server's `delete_credential_action_hash` to the clients'
-convention so the two cannot drift.
+convention so the two cannot drift, and a DB-gated HTTP
+integration test (`action_grant_e2e_tests`, gated on
+`LAKKO_AUTH_TEST_DATABASE_URL`, skips when no DB is provided)
+drives a real `SoftPasskey` authenticator through the production
+router end-to-end: it proves a ceremony writes a grant, the
+delete consumes it (204), a delete without a grant is refused
+(403), and a non-existent credential is an idempotent 204.
 
-**Remaining:** (1) the *remove-device* path stays client-gated
-only — its effect is an MLS Remove commit posted to the DS, which
-is zero-trust opaque and cannot interpret an `action_hash`, so
-server enforcement there needs a different point (e.g. a
-DeviceGroup-side policy commit) tracked separately; (2) an
-HTTP-level integration test of the grant flow (ceremony → grant →
-consume → delete) needs a live DB and is a follow-up — the
-current coverage is the action-hash unit test plus the
-authenticator round-trip property tests.
+**Remaining:** the *remove-device* path stays client-gated only —
+its effect is an MLS Remove commit posted to the DS, which is
+zero-trust opaque and cannot interpret an `action_hash`, so server
+enforcement there needs a different point (e.g. a DeviceGroup-side
+policy commit) tracked separately.
 
 ## Calls
 

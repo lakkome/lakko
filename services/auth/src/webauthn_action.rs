@@ -874,3 +874,307 @@ mod action_roundtrip_tests {
         );
     }
 }
+
+/// End-to-end HTTP test of the server-side action-grant enforcement
+/// (G-13, ADR-0014). Drives a real software authenticator through the
+/// production router + a live MariaDB: register passkeys, run the
+/// `/auth/action/{start,finish}` ceremony to mint a grant, and prove that
+/// `DELETE /webauthn/credentials/:id` succeeds only with the grant and is
+/// refused (403) without it.
+///
+/// Gated on `LAKKO_AUTH_TEST_DATABASE_URL` — skips (does not fail) when no
+/// test database is provided, so `cargo test` stays green in DB-less CI.
+/// Run it with, e.g.:
+/// `LAKKO_AUTH_TEST_DATABASE_URL=mysql://lakko:devpass@127.0.0.1:13306/lakko_auth_test \`
+/// `  cargo test -p lakko-svc-auth action_grant_enforces`.
+#[cfg(test)]
+mod action_grant_e2e_tests {
+    use super::{build_action_core, delete_credential_action_hash};
+    use axum::body::{Body, Bytes};
+    use axum::http::{header, Method, Request, StatusCode};
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use base64::Engine as _;
+    use http_body_util::BodyExt as _;
+    use sqlx::mysql::MySqlPoolOptions;
+    use sqlx::MySqlPool;
+    use std::sync::Arc;
+    use std::time::{SystemTime, UNIX_EPOCH};
+    use tower::ServiceExt as _;
+    use url::Url;
+    use uuid::Uuid;
+    use webauthn_authenticator_rs::softpasskey::SoftPasskey;
+    use webauthn_authenticator_rs::WebauthnAuthenticator;
+    use webauthn_rs::prelude::{
+        Passkey, PublicKeyCredential, RequestChallengeResponse, Webauthn, WebauthnBuilder,
+    };
+
+    const RP_ID: &str = "lakko.app";
+    const RP_ORIGIN: &str = "https://lakko.app";
+    const RP_NAME: &str = "Lakko";
+
+    fn rp_origin() -> Url {
+        Url::parse(RP_ORIGIN).expect("static origin")
+    }
+
+    fn high_level() -> Webauthn {
+        WebauthnBuilder::new(RP_ID, &rp_origin())
+            .expect("builder")
+            .rp_name(RP_NAME)
+            .build()
+            .expect("build")
+    }
+
+    fn build_state(pool: MySqlPool) -> (crate::AppState, lakko_auth_token::TokenSecret) {
+        use opaque_ke::ServerSetup;
+        use rand::rngs::OsRng;
+        let token_secret = lakko_auth_token::TokenSecret::new(vec![7u8; 64]).expect("token secret");
+        let opaque_setup = ServerSetup::<crate::opaque::LakkoCipherSuite>::new(&mut OsRng);
+        let action_core = build_action_core(RP_NAME, RP_ID, &rp_origin());
+        let state = crate::AppState {
+            db: pool,
+            opaque_setup: Arc::new(opaque_setup),
+            session_token_secret: Arc::new(token_secret.clone()),
+            session_token_ttl_ms: 86_400_000,
+            webauthn: Some(Arc::new(high_level())),
+            webauthn_action_core: Some(Arc::new(action_core)),
+            call_jwt_signing: Arc::new(lakko_call_jwt::CallSigningKey::from_seed(&[0xAB; 32])),
+            turn: None,
+        };
+        (state, token_secret)
+    }
+
+    /// Register a fresh passkey with the software authenticator and persist
+    /// it exactly as `webauthn::register_finish` does.
+    async fn register_and_store(
+        pool: &MySqlPool,
+        account_id: &[u8; 16],
+        hl: &Webauthn,
+        wa: &mut WebauthnAuthenticator<SoftPasskey>,
+    ) -> Passkey {
+        let (ccr, reg_state) = hl
+            .start_passkey_registration(Uuid::from_bytes(*account_id), "tester", "Tester", None)
+            .expect("reg start");
+        let rpkc = wa.do_registration(rp_origin(), ccr).expect("soft register");
+        let passkey = hl
+            .finish_passkey_registration(&rpkc, &reg_state)
+            .expect("reg finish");
+        let cred_id = passkey.cred_id().as_ref().to_vec();
+        let passkey_bytes = serde_json::to_vec(&passkey).expect("serialize passkey");
+        sqlx::query(
+            "INSERT INTO webauthn_credentials (credential_id, account_id, passkey_bytes, nickname) \
+             VALUES (?, ?, ?, '')",
+        )
+        .bind(&cred_id)
+        .bind(account_id.as_slice())
+        .bind(&passkey_bytes)
+        .execute(pool)
+        .await
+        .expect("insert credential");
+        passkey
+    }
+
+    async fn send(state: &crate::AppState, req: Request<Body>) -> (StatusCode, Bytes) {
+        let resp = crate::build_app(state.clone())
+            .oneshot(req)
+            .await
+            .expect("router oneshot");
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.expect("body").to_bytes();
+        (status, bytes)
+    }
+
+    fn now_ms() -> i64 {
+        i64::try_from(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_or(0, |d| d.as_millis()),
+        )
+        .unwrap_or(i64::MAX)
+    }
+
+    #[tokio::test]
+    // a/b-suffixed bindings (pk_a/pk_b, cred_a/cred_b) are intentional and
+    // clear in a positive-vs-negative test; the single linear flow is long
+    // by design (it drives the full ceremony + three delete cases).
+    #[allow(clippy::too_many_lines, clippy::similar_names)]
+    async fn action_grant_enforces_passkey_delete() {
+        let Ok(url) = std::env::var("LAKKO_AUTH_TEST_DATABASE_URL") else {
+            eprintln!(
+                "skipping action_grant_enforces_passkey_delete: LAKKO_AUTH_TEST_DATABASE_URL unset"
+            );
+            return;
+        };
+        let pool = MySqlPoolOptions::new()
+            .max_connections(4)
+            .connect(&url)
+            .await
+            .expect("connect test DB");
+        crate::MIGRATIONS.run(&pool).await.expect("run migrations");
+
+        let (state, token_secret) = build_state(pool.clone());
+        let hl = high_level();
+        let mut wa = WebauthnAuthenticator::new(SoftPasskey::new(true));
+
+        // Fresh isolated account + two registered passkeys.
+        let account_id: [u8; 16] = Uuid::new_v4().into_bytes();
+        sqlx::query("INSERT INTO accounts (id) VALUES (?)")
+            .bind(account_id.as_slice())
+            .execute(&pool)
+            .await
+            .expect("insert account");
+        let pk_a = register_and_store(&pool, &account_id, &hl, &mut wa).await;
+        let pk_b = register_and_store(&pool, &account_id, &hl, &mut wa).await;
+
+        let token = token_secret
+            .issue(&account_id, now_ms() + 3_600_000)
+            .expect("mint session token");
+        let bearer = format!("Bearer {token}");
+
+        // ---- Positive: ceremony writes a grant, delete consumes it. ----
+        let cred_a = pk_a.cred_id().as_ref().to_vec();
+        let action_hash = delete_credential_action_hash(&cred_a);
+        let action_hash_b64 = URL_SAFE_NO_PAD.encode(action_hash);
+
+        let (st, body) = send(
+            &state,
+            Request::builder()
+                .method(Method::POST)
+                .uri("/auth/action/start")
+                .header(header::AUTHORIZATION, &bearer)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&serde_json::json!({ "action_hash_b64": action_hash_b64 }))
+                        .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(
+            st,
+            StatusCode::OK,
+            "action/start: {}",
+            String::from_utf8_lossy(&body)
+        );
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let state_id = v["state_id"].as_str().unwrap().to_string();
+        let rcr: RequestChallengeResponse =
+            serde_json::from_value(v["options"].clone()).expect("parse options");
+
+        // The software authenticator signs the action-bound challenge.
+        let pkc: PublicKeyCredential = wa
+            .do_authentication(rp_origin(), rcr)
+            .expect("soft assertion");
+
+        let (st, body) = send(
+            &state,
+            Request::builder()
+                .method(Method::POST)
+                .uri("/auth/action/finish")
+                .header(header::AUTHORIZATION, &bearer)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&serde_json::json!({
+                        "state_id": state_id,
+                        "action_hash_b64": action_hash_b64,
+                        "credential": pkc,
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(
+            st,
+            StatusCode::OK,
+            "action/finish: {}",
+            String::from_utf8_lossy(&body)
+        );
+
+        let grants: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM webauthn_action_grants WHERE account_id = ?")
+                .bind(account_id.as_slice())
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(grants, 1, "finish must write exactly one grant");
+
+        let cred_a_b64 = URL_SAFE_NO_PAD.encode(&cred_a);
+        let (st, _b) = send(
+            &state,
+            Request::builder()
+                .method(Method::DELETE)
+                .uri(format!("/webauthn/credentials/{cred_a_b64}"))
+                .header(header::AUTHORIZATION, &bearer)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(st, StatusCode::NO_CONTENT, "delete WITH a grant must 204");
+
+        let grants: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM webauthn_action_grants WHERE account_id = ?")
+                .bind(account_id.as_slice())
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(grants, 0, "the delete must consume the grant");
+        let left_a: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM webauthn_credentials WHERE credential_id = ?")
+                .bind(&cred_a)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(left_a, 0, "pk_a must be gone");
+
+        // ---- Negative: deleting an existing credential WITHOUT a grant 403s. ----
+        let cred_b = pk_b.cred_id().as_ref().to_vec();
+        let cred_b_b64 = URL_SAFE_NO_PAD.encode(&cred_b);
+        let (st, _b) = send(
+            &state,
+            Request::builder()
+                .method(Method::DELETE)
+                .uri(format!("/webauthn/credentials/{cred_b_b64}"))
+                .header(header::AUTHORIZATION, &bearer)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(
+            st,
+            StatusCode::FORBIDDEN,
+            "delete WITHOUT a grant must 403 (action-authorization-required)"
+        );
+        let left_b: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM webauthn_credentials WHERE credential_id = ?")
+                .bind(&cred_b)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(left_b, 1, "pk_b must survive a grant-less delete");
+
+        // ---- Idempotent no-op: deleting a non-existent credential needs no grant. ----
+        let ghost = URL_SAFE_NO_PAD.encode([0x77u8; 20]);
+        let (st, _b) = send(
+            &state,
+            Request::builder()
+                .method(Method::DELETE)
+                .uri(format!("/webauthn/credentials/{ghost}"))
+                .header(header::AUTHORIZATION, &bearer)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(
+            st,
+            StatusCode::NO_CONTENT,
+            "deleting a non-existent credential is an idempotent no-op"
+        );
+
+        // Cleanup — cascade drops credentials + grants.
+        sqlx::query("DELETE FROM accounts WHERE id = ?")
+            .bind(account_id.as_slice())
+            .execute(&pool)
+            .await
+            .ok();
+    }
+}
