@@ -141,6 +141,11 @@ pub(crate) struct AppState {
     /// Crypto + wire shape lives in the shared `lakko-call-jwt`
     /// crate so client FFI uses the same types.
     pub(crate) call_jwt_signing: Arc<lakko_call_jwt::CallSigningKey>,
+    /// G-13 (ADR-0015) — dedicated Ed25519 key for signing device-removal
+    /// attestations on `/auth/action/finish`. Separate from
+    /// `call_jwt_signing` (key separation). The public half is published at
+    /// `GET /.well-known/device-attest-jwks.json`.
+    pub(crate) attest_key: Arc<lakko_call_jwt::CallSigningKey>,
     /// G3-{1,2}-turn step 1 — short-lived TURN-credential
     /// minter. `None` when `LAKKO_TURN_URIS` /
     /// `LAKKO_TURN_SHARED_SECRET` are unset; the
@@ -239,6 +244,12 @@ async fn main() -> Result<()> {
         "call-JWT signing key loaded"
     );
 
+    // G-13 (ADR-0015) — dedicated device-removal attestation signing key.
+    let attest_key = webauthn_action::load_or_init_attest_key(&pool)
+        .await
+        .context("load action-attestation signing key")?;
+    tracing::info!(kid = %attest_key.kid, "action-attestation signing key loaded");
+
     // G3-{1,2}-turn step 1 — TURN-credential config. Loud-
     // fail on malformed env vars (typo in base64 / scheme);
     // soft-disable when both env vars are simply unset.
@@ -257,6 +268,7 @@ async fn main() -> Result<()> {
         webauthn: webauthn_instance,
         webauthn_action_core,
         call_jwt_signing: Arc::new(call_jwt_signing),
+        attest_key: Arc::new(attest_key),
         turn: turn_config.map(Arc::new),
     };
 
@@ -370,6 +382,10 @@ fn build_app(state: AppState) -> Router {
         // public key is public; the SFU fetches it at
         // startup + refreshes every 24 h.
         .route("/.well-known/jwks.json", get(call_jwt::jwks_handler))
+        .route(
+            "/.well-known/device-attest-jwks.json",
+            get(webauthn_action::device_attest_jwks_handler),
+        )
         .merge(webauthn_routes)
         .merge(call_jwt_routes)
         .merge(turn_routes)

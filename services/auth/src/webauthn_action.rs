@@ -62,6 +62,14 @@ pub(crate) const ACTION_GRANT_TTL_SECS: i64 = 120;
 /// lives next to the grant machinery.
 pub(crate) const ACTION_DOMAIN_DELETE_CREDENTIAL: &str = "lakko/action/delete-credential/v1";
 
+/// Lifetime of the action attestation signed on `/auth/action/finish`
+/// (G-13, ADR-0015). It must comfortably cover the removing device posting
+/// its `Remove` commit and online peers applying it. The apply-path
+/// freshness semantics for late-polling (offline) peers — possibly relative
+/// to the commit's epoch rather than wall-clock now — are a sprint-3
+/// decision; this is the issuance-time window.
+pub(crate) const ATTESTATION_TTL_SECS: i64 = 3600;
+
 /// Generate a fresh 32-byte server nonce for an action-bound challenge.
 pub(crate) fn random_action_nonce() -> [u8; ACTION_NONCE_LEN] {
     let mut nonce = [0u8; ACTION_NONCE_LEN];
@@ -188,12 +196,15 @@ pub(crate) fn finish_action_auth(
 // ----------------------------------------------------------------
 
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::extract::State;
 use axum::response::Json;
 use axum::Extension;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
+use lakko_attest::ActionAttestation;
+use lakko_call_jwt::{CallSigningKey, Jwk, Jwks};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::MySqlPool;
@@ -229,6 +240,73 @@ pub(crate) fn load_action_core() -> anyhow::Result<Option<Arc<WebauthnCore>>> {
     let origin =
         Url::parse(&rp_origin).map_err(|e| anyhow::anyhow!("LAKKO_WEBAUTHN_RP_ORIGIN parse: {e}"))?;
     Ok(Some(Arc::new(build_action_core(&rp_name, &rp_id, &origin))))
+}
+
+/// Load (or generate + persist on first run) the dedicated Ed25519 key the
+/// auth service uses to sign device-removal attestations (G-13, ADR-0015).
+/// Mirrors `call_jwt::load_or_init_call_signing_key`, but a SEPARATE key
+/// (key separation from the call-JWT key). Returns a [`CallSigningKey`],
+/// reused purely as an Ed25519 keypair + kid holder; the kid lets clients
+/// identify the published verifying key.
+///
+/// # Errors
+///
+/// Propagates sqlx / DB-corruption errors (a stored seed of the wrong
+/// length); fatal at bootstrap.
+pub(crate) async fn load_or_init_attest_key(pool: &MySqlPool) -> anyhow::Result<CallSigningKey> {
+    use anyhow::Context as _;
+    use rand::RngCore as _;
+
+    let row: Option<(Vec<u8>,)> =
+        sqlx::query_as("SELECT seed FROM action_attest_signing_key WHERE id = 1")
+            .fetch_optional(pool)
+            .await
+            .context("read action_attest_signing_key")?;
+    if let Some((seed_bytes,)) = row {
+        return Ok(CallSigningKey::from_seed(&attest_seed_from_bytes(&seed_bytes)?));
+    }
+
+    // No row — generate + insert. `INSERT IGNORE` so two racing startups
+    // don't both insert; the re-read below lets a racing insert win.
+    let mut seed = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut seed);
+    sqlx::query("INSERT IGNORE INTO action_attest_signing_key (id, seed) VALUES (1, ?)")
+        .bind(&seed[..])
+        .execute(pool)
+        .await
+        .context("insert action_attest_signing_key")?;
+    let (seed_bytes,): (Vec<u8>,) =
+        sqlx::query_as("SELECT seed FROM action_attest_signing_key WHERE id = 1")
+            .fetch_one(pool)
+            .await
+            .context("re-read action_attest_signing_key after insert")?;
+    Ok(CallSigningKey::from_seed(&attest_seed_from_bytes(&seed_bytes)?))
+}
+
+fn attest_seed_from_bytes(bytes: &[u8]) -> anyhow::Result<[u8; 32]> {
+    if bytes.len() != 32 {
+        anyhow::bail!(
+            "action_attest_signing_key.seed length {} != 32 — DB corruption?",
+            bytes.len()
+        );
+    }
+    let mut seed = [0u8; 32];
+    seed.copy_from_slice(bytes);
+    Ok(seed)
+}
+
+/// `GET /.well-known/device-attest-jwks.json` — publish the attestation
+/// verifying key (as an Ed25519 / OKP JWK) so operators can pin it and
+/// clients can distribute it. Unauthenticated, like the call-JWT JWKS.
+///
+/// The zero-trust verification path does NOT fetch the key from here — peer
+/// devices hold it from pinned / bootstrap trust config; this endpoint is
+/// for discovery.
+#[axum::debug_handler]
+pub(crate) async fn device_attest_jwks_handler(State(state): State<AppState>) -> Json<Jwks> {
+    Json(Jwks {
+        keys: vec![Jwk::from_signing_key(&state.attest_key)],
+    })
 }
 
 /// Decode the URL-safe base64 32-byte action hash from the wire.
@@ -340,16 +418,32 @@ pub(crate) async fn action_finish(
     // `webauthn::auth_finish`'s counter block.
     bump_action_credential(&state.db, &auth.0, &result).await?;
 
-    // Server-side enforcement (G-13): write a short-lived single-use grant
-    // bound to (account, action_hash). The sensitive endpoint recomputes
-    // the same action_hash and consumes this grant, so a stolen token
-    // cannot perform the action without a fresh passkey gesture.
+    // Server-side enforcement (G-13, ADR-0014): write a short-lived
+    // single-use grant bound to (account, action_hash). The auth-service
+    // endpoint (delete-passkey) recomputes the same action_hash and consumes
+    // this grant, so a stolen token cannot perform the action without a
+    // fresh passkey gesture.
     write_action_grant(&state.db, &auth.0, &presented).await?;
+
+    // Peer-verified enforcement (G-13, ADR-0015): sign an attestation over
+    // (account, action_hash, expiry). The remove-device client carries it
+    // alongside its MLS Remove commit; peer devices verify it in the
+    // lakko-mls apply path (delete-passkey ignores it — it uses the grant).
+    let now_secs = i64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs()),
+    )
+    .unwrap_or(i64::MAX);
+    let attestation =
+        ActionAttestation::new(auth.0, presented, now_secs.saturating_add(ATTESTATION_TTL_SECS))
+            .sign(&state.attest_key.signing);
 
     Ok(Json(ActionFinishRes {
         account_id_b64: URL_SAFE_NO_PAD.encode(auth.0),
         action_hash_b64: URL_SAFE_NO_PAD.encode(presented),
         credential_id_b64: URL_SAFE_NO_PAD.encode(result.cred_id().as_ref()),
+        attestation_b64: URL_SAFE_NO_PAD.encode(attestation),
     }))
 }
 
@@ -598,6 +692,11 @@ pub(crate) struct ActionFinishRes {
     pub action_hash_b64: String,
     /// URL-safe base64 of the credential id that signed.
     pub credential_id_b64: String,
+    /// URL-safe base64 of the signed `ActionAttestation` (G-13, ADR-0015).
+    /// The remove-device client carries this alongside its MLS Remove commit
+    /// for peer verification; the delete-passkey client ignores it (it relies
+    /// on the server-side grant instead).
+    pub attestation_b64: String,
 }
 
 #[cfg(test)]
@@ -911,6 +1010,9 @@ mod action_grant_e2e_tests {
     const RP_ID: &str = "lakko.app";
     const RP_ORIGIN: &str = "https://lakko.app";
     const RP_NAME: &str = "Lakko";
+    /// Fixed seed for the test attestation key so the test can reconstruct
+    /// the verifying key and check the attestation `/finish` returns.
+    const ATTEST_SEED: [u8; 32] = [0xCD; 32];
 
     fn rp_origin() -> Url {
         Url::parse(RP_ORIGIN).expect("static origin")
@@ -938,6 +1040,7 @@ mod action_grant_e2e_tests {
             webauthn: Some(Arc::new(high_level())),
             webauthn_action_core: Some(Arc::new(action_core)),
             call_jwt_signing: Arc::new(lakko_call_jwt::CallSigningKey::from_seed(&[0xAB; 32])),
+            attest_key: Arc::new(lakko_call_jwt::CallSigningKey::from_seed(&ATTEST_SEED)),
             turn: None,
         };
         (state, token_secret)
@@ -1088,6 +1191,58 @@ mod action_grant_e2e_tests {
             StatusCode::OK,
             "action/finish: {}",
             String::from_utf8_lossy(&body)
+        );
+
+        // G-13 (ADR-0015): the finish response carries a signed attestation
+        // that verifies under the published attestation key and is bound to
+        // this (account, action_hash).
+        let fin: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let att_b64 = fin["attestation_b64"]
+            .as_str()
+            .expect("attestation_b64 present");
+        let att_bytes = URL_SAFE_NO_PAD.decode(att_b64).expect("attestation decodes");
+        let attest_vk = lakko_call_jwt::CallSigningKey::from_seed(&ATTEST_SEED).verifying;
+        let verified = lakko_attest::verify_bound(
+            &att_bytes,
+            &attest_vk,
+            &account_id,
+            &action_hash,
+            now_ms() / 1000,
+        )
+        .expect("attestation verifies + is bound to this account/action");
+        assert_eq!(verified.account_id, account_id);
+        assert_eq!(verified.action_hash, action_hash);
+        // A different action must not verify against this attestation.
+        assert!(
+            lakko_attest::verify_bound(
+                &att_bytes,
+                &attest_vk,
+                &account_id,
+                &[0x00; 32],
+                now_ms() / 1000,
+            )
+            .is_err(),
+            "attestation must not verify for a different action_hash"
+        );
+
+        // The published JWKS exposes exactly the key that signed it.
+        let (st, jwks_body) = send(
+            &state,
+            Request::builder()
+                .method(Method::GET)
+                .uri("/.well-known/device-attest-jwks.json")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "device-attest jwks must serve");
+        let jwks: serde_json::Value = serde_json::from_slice(&jwks_body).unwrap();
+        let published_x = jwks["keys"][0]["x"].as_str().expect("jwks x present");
+        let published_pubkey = URL_SAFE_NO_PAD.decode(published_x).expect("jwks x decodes");
+        assert_eq!(
+            published_pubkey,
+            attest_vk.to_bytes().to_vec(),
+            "the published attestation key must be the one that signed"
         );
 
         let grants: i64 =

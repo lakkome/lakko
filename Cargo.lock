@@ -2681,6 +2681,7 @@ dependencies = [
  "equix",
  "hmac",
  "http-body-util",
+ "lakko-attest",
  "lakko-auth-token",
  "lakko-call-jwt",
  "lakko-crypto",

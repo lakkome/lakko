@@ -406,14 +406,21 @@ attestation**: `services/auth` signs a compact Ed25519 attestation
 over `(account_id, action_hash, expiry)` on `/auth/action/finish`,
 the removing device carries it alongside its `Remove` commit, and
 the receiving devices verify it in the `lakko-mls` apply path
-before applying. **Sprint 1 landed** — the `lakko-attest` crate
-(the `ActionAttestation` format + `sign` + strict `verify_bound`,
-7 unit/property tests). **Remaining sprints:** auth issuance + a
-dedicated attestation key/JWKS (2); the `device_group.rs`
-apply-path verification + refuse-to-apply invariant (3, gated by
-invariant #3); the OPAQUE-only DeviceGroup policy flag, pending an
-OpenMLS-0.8 GroupContext-extension feasibility spike (4); and the
-per-platform client embedding (5).
+before applying. **Sprints 1–2 landed.** Sprint 1: the
+`lakko-attest` crate (`ActionAttestation` format + `sign` +
+strict `verify_bound`, 7 unit/property tests). Sprint 2: a
+dedicated Ed25519 attestation key in `services/auth` (migration
+0010 `action_attest_signing_key`, generated on first boot,
+separate from the call-JWT key), `/auth/action/finish` now signs
++ returns the attestation (`attestation_b64`, 1 h TTL), and the
+verifying key is published at `GET
+/.well-known/device-attest-jwks.json` — the DB-gated HTTP e2e test
+verifies the issued attestation under the published key + its
+(account, action) binding. **Remaining sprints:** the
+`device_group.rs` apply-path verification + refuse-to-apply
+invariant (3, gated by invariant #3); the OPAQUE-only DeviceGroup
+policy flag, pending an OpenMLS-0.8 GroupContext-extension
+feasibility spike (4); and the per-platform client embedding (5).
 
 ## Calls
 
