@@ -452,12 +452,19 @@ gesture can no longer make honest peers drop it. **Sprint 5
 and the free `remove_device_action_hash` are exposed on both the
 UniFFI (Swift / Kotlin) and wasm-bindgen (web) DeviceGroup
 surfaces (regenerated bindings carry all four; FFI-crate tests
-green). **Remaining (sprint 5, per-platform wiring):** the three
-clients capture the `attestation_b64` from `/auth/action/finish`,
-carry it alongside the Remove commit over the DS journal, apply
-incoming commits through `processIncomingVerifyingRemovals` with
-the device-attest JWKS key, and call `setRequireAttestedRemovals`
-when the account first enables a passkey.
+green). The **web transport primitives** are in place — a
+DeviceGroup journal envelope codec (`apps/web/src/devices/journal-envelope.ts`,
+`version ‖ attestation_len ‖ attestation ‖ mls_message`) that lets a
+Remove commit carry its attestation through the opaque journal, a
+device-attest JWKS client (`apps/web/src/auth/device-attest-key.ts`)
+that fetches the 32-byte verifying key, and the `attestation_b64`
+field surfaced on the `ActionFinishResponse` type. **Remaining
+(sprint 5, per-platform wiring):** thread those primitives through
+the live flow on each client — capture the `attestation_b64` from
+`/auth/action/finish`, wrap it with the Remove commit at the
+`publishGroup` sites + unwrap + `processIncomingVerifyingRemovals`
+in the receive loop, and call `setRequireAttestedRemovals` when the
+account first enables a passkey.
 
 ## Calls
 

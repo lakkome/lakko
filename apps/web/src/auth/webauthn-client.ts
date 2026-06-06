@@ -268,6 +268,11 @@ export interface ActionFinishResponse {
   /** Echo of the action hash the passkey attested to. */
   readonly action_hash_b64: string;
   readonly credential_id_b64: string;
+  /** URL-safe base64 of the signed `ActionAttestation` (G-13, ADR-0015).
+   *  The remove-device flow carries this alongside its MLS Remove commit so
+   *  peers can verify it; the delete-passkey flow ignores it (the server
+   *  enforces that one via a single-use grant). */
+  readonly attestation_b64: string;
 }
 
 // ---- Client ------------------------------------------------------
