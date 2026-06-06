@@ -177,18 +177,27 @@ call-JWT key), published alongside the existing JWKS.
    absent / invalid / unbound to the removed leaf's signature key — a new
    refuse-to-apply invariant with property tests.
 4. **OPAQUE-only policy.** A DeviceGroup policy flag ("require attested
-   removals") so peers know when to enforce; requires an OpenMLS 0.8
-   GroupContext-extension spike first (lakko-mls uses no custom
-   extensions today — feasibility is unverified). If custom extensions
-   prove infeasible in 0.8, fall back to encoding the policy in an
-   application-level group-state record the DeviceGroup layer owns.
+   removals") so peers know when to enforce. **Feasibility spike done
+   (2026-06-06) — CONFIRMED.** `device_group.rs::spike_custom_group_context_extension_propagates_to_joiners`
+   proves OpenMLS 0.8.1 accepts a custom `Extension::Unknown(0xFF01, …)`
+   in the GroupContext at creation, the founder reads it back via
+   `group.extensions().unknown(type_id)`, and a second device that joins
+   via Welcome sees the identical flag — so peers can enforce a policy
+   carried in shared, authenticated group state. The application-level
+   fallback is NOT needed. The one requirement the spike surfaced: every
+   device's leaf capabilities (both the founder's and each joiner's
+   `KeyPackage`) must advertise `ExtensionType::Unknown(type_id)`, so
+   `Identity::create_key_package` + `DeviceGroup::create_founder` gain that
+   capability in the implementation. Flipping the flag on later (when an
+   account first enables a passkey) uses `update_group_context_extensions`.
 5. **Client embedding.** Each platform threads the `/auth/action/finish`
    attestation into the remove-device commit; the verify is already in
    the shared core.
 
-The decision remains reversible per-sprint: if the sprint-4 OpenMLS spike
-shows the policy flag is infeasible without forking OpenMLS, re-evaluate
-whether to ship enforcement only for passkey-mandatory DeviceGroups.
+The decision remains reversible per-sprint. The sprint-4 OpenMLS spike has
+since run and **confirmed** the GroupContext policy-flag approach is
+feasible on 0.8.1 (custom extensions create + read + propagate), so the
+main remaining risk is retired.
 
 ## Alternatives considered
 
@@ -216,9 +225,11 @@ whether to ship enforcement only for passkey-mandatory DeviceGroups.
 - A new signing key + JWKS surface is added to `services/auth` (sprint 2);
   the attestation verifying key is distributed to clients via the same
   pinned/bootstrap channel the rest of the trust anchors use.
-- Sprint 4 carries an OpenMLS-0.8 feasibility risk (custom GroupContext
-  extensions are unused today); the ADR names a fallback (application-level
-  group-state policy record) if the extension route is infeasible.
+- Sprint 4's OpenMLS-0.8 feasibility risk is **retired** — a spike
+  confirmed custom GroupContext extensions create + read back + propagate
+  to joiners on 0.8.1 (the application-level fallback is unnecessary);
+  the only implementation requirement is advertising the extension type in
+  every device's leaf capabilities.
 - Until sprints 3–5 land, known-gaps G-13 continues to record the
   on-device-malware residual as open (now *in progress* rather than
   accepted).

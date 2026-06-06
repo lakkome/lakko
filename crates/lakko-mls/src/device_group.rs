@@ -819,6 +819,109 @@ mod tests {
         }
     }
 
+    // ADR-0015 sprint-4 spike: can OpenMLS 0.8 carry a CUSTOM GroupContext
+    // extension (the DeviceGroup "require attested removals" policy flag) and
+    // does a joining member see it? GroupContext is shared authenticated
+    // state, so if creation accepts it and a joiner reconstructs it, peers
+    // can enforce the policy. This is a feasibility test kept as a regression
+    // guard on the OpenMLS API the policy flag will rely on.
+    #[test]
+    fn spike_custom_group_context_extension_propagates_to_joiners() {
+        use openmls::extensions::{Extension, Extensions, ExtensionType, UnknownExtension};
+        use openmls::framing::{MlsMessageBodyIn, MlsMessageIn};
+        use openmls::group::{GroupId, MlsGroupJoinConfig, StagedWelcome};
+        use openmls::key_packages::KeyPackage;
+        use openmls::prelude::Capabilities;
+        use tls_codec::{Deserialize as _, Serialize as _};
+
+        // 0xFF01 is outside OpenMLS's recognised extension types -> it is
+        // surfaced as `Extension::Unknown`, a private-use custom extension.
+        const POLICY_EXT: u16 = 0xFF01;
+
+        let account = fixture_account_id();
+        let id_a = Identity::generate("A").unwrap();
+        let id_b = Identity::generate("B").unwrap();
+
+        // Leaf capabilities must advertise the custom extension type so
+        // OpenMLS accepts a group / leaf node that carries it.
+        let cs = id_a.ciphersuite();
+        let caps = Capabilities::new(
+            None,
+            Some(&[cs]),
+            Some(&[ExtensionType::Unknown(POLICY_EXT)]),
+            None,
+            None,
+        );
+
+        let gc_exts = Extensions::single(Extension::Unknown(
+            POLICY_EXT,
+            UnknownExtension(vec![0x01]),
+        ))
+        .unwrap();
+
+        let cfg = MlsGroupCreateConfig::builder()
+            .ciphersuite(cs)
+            .use_ratchet_tree_extension(true)
+            .capabilities(caps.clone())
+            .with_group_context_extensions(gc_exts)
+            .build();
+
+        let group_id = DeviceGroup::group_id_for(&account);
+        let mut group_a = MlsGroup::new_with_group_id(
+            &id_a.provider,
+            &id_a.signature_keys,
+            &cfg,
+            GroupId::from_slice(&group_id),
+            id_a.credential.clone(),
+        )
+        .expect("create group A with a custom GroupContext extension");
+
+        // (1) The founder reads its own policy flag back.
+        let on_a = group_a
+            .extensions()
+            .unknown(POLICY_EXT)
+            .expect("policy ext present on A");
+        assert_eq!(on_a.0, vec![0x01]);
+
+        // (2) B's KeyPackage advertises the same capability.
+        let kp_b = KeyPackage::builder()
+            .leaf_node_capabilities(caps)
+            .build(cs, &id_b.provider, &id_b.signature_keys, id_b.credential.clone())
+            .expect("B key package")
+            .key_package()
+            .clone();
+
+        // (3) Add B, then merge the commit on A.
+        let (_commit, welcome, _gi) = group_a
+            .add_members(&id_a.provider, &id_a.signature_keys, &[kp_b])
+            .expect("add B");
+        group_a
+            .merge_pending_commit(&id_a.provider)
+            .expect("merge pending commit");
+
+        // (4) B joins from the Welcome.
+        let welcome_bytes = welcome.tls_serialize_detached().expect("serialize welcome");
+        let mls_in = MlsMessageIn::tls_deserialize(&mut welcome_bytes.as_slice()).unwrap();
+        let MlsMessageBodyIn::Welcome(welcome_in) = mls_in.extract() else {
+            panic!("expected a Welcome message");
+        };
+        let join_cfg = MlsGroupJoinConfig::builder()
+            .use_ratchet_tree_extension(true)
+            .build();
+        let group_b = StagedWelcome::new_from_welcome(&id_b.provider, &join_cfg, welcome_in, None)
+            .expect("staged welcome")
+            .into_group(&id_b.provider)
+            .expect("B joins");
+
+        // (5) B sees the SAME policy flag -> the GroupContext extension
+        // propagates to joiners, so peers can enforce the policy.
+        let on_b = group_b
+            .extensions()
+            .unknown(POLICY_EXT)
+            .expect("policy ext present on B");
+        assert_eq!(on_b.0, vec![0x01], "joiner must see the GroupContext policy flag");
+    }
+
     #[test]
     fn remove_device_at_rejects_unknown_leaf() {
         let account = fixture_account_id();

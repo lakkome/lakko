@@ -416,11 +416,18 @@ separate from the call-JWT key), `/auth/action/finish` now signs
 verifying key is published at `GET
 /.well-known/device-attest-jwks.json` — the DB-gated HTTP e2e test
 verifies the issued attestation under the published key + its
-(account, action) binding. **Remaining sprints:** the
-`device_group.rs` apply-path verification + refuse-to-apply
-invariant (3, gated by invariant #3); the OPAQUE-only DeviceGroup
-policy flag, pending an OpenMLS-0.8 GroupContext-extension
-feasibility spike (4); and the per-platform client embedding (5).
+(account, action) binding. The **sprint-4 OpenMLS feasibility
+spike** also ran and **confirmed** the OPAQUE-only policy flag is
+viable: `device_group.rs::spike_custom_group_context_extension_propagates_to_joiners`
+proves OpenMLS 0.8.1 carries a custom `Extension::Unknown` in the
+GroupContext, reads it back, and propagates it to a joining
+device — so the application-level fallback is unneeded (the one
+requirement: every device's leaf capabilities must advertise the
+extension type). **Remaining sprints:** the `device_group.rs`
+apply-path verification + refuse-to-apply invariant (3, gated by
+invariant #3); wiring the confirmed policy flag into DeviceGroup
+creation + the set-policy flow (4); and the per-platform client
+embedding (5).
 
 ## Calls
 
