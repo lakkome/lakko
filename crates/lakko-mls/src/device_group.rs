@@ -57,13 +57,57 @@
 //!   * **Application payloads** — see 2a3e + the protobuf in
 //!     `schemas/mls-app/devicegroup.proto`.
 
+use openmls::extensions::{
+    Extension, ExtensionType, Extensions, RequiredCapabilitiesExtension, UnknownExtension,
+};
 use openmls::framing::MlsMessageOut;
 use openmls::group::{MlsGroup, MlsGroupCreateConfig};
-use openmls::prelude::{GroupId, KeyPackage, LeafNodeIndex};
+use openmls::prelude::{Capabilities, Ciphersuite, GroupId, KeyPackage, LeafNodeIndex};
 
 use crate::error::{Error, Result};
 use crate::group::{Group, Incoming, MemberAddition, MemberRecord};
 use crate::identity::Identity;
+
+/// Custom GroupContext extension type carrying the DeviceGroup removal
+/// policy (G-13, [ADR-0015]). `0xFF01` is in the private-use range, so
+/// OpenMLS surfaces it as `Extension::Unknown`. Every Lakko device leaf
+/// advertises support for this type (see [`device_leaf_capabilities`]) so a
+/// DeviceGroup can carry the policy and any device can join one that does.
+///
+/// [ADR-0015]: ../../../docs/adr/0015-device-removal-authorization.md
+pub(crate) const DEVICE_POLICY_EXTENSION_TYPE: u16 = 0xFF01;
+
+/// Policy payload byte: device removals require a peer-verified attestation.
+const POLICY_REQUIRE_ATTESTED_REMOVALS: u8 = 1;
+
+/// Leaf capabilities every Lakko device advertises so it can participate in
+/// a DeviceGroup that carries the removal-policy GroupContext extension
+/// (G-13, ADR-0015). Shared by DeviceGroup creation and KeyPackage creation
+/// (a device may need to JOIN such a group, and OpenMLS validates that every
+/// member's leaf advertises a GroupContext extension type in use).
+pub(crate) fn device_leaf_capabilities(cs: Ciphersuite) -> Capabilities {
+    Capabilities::new(
+        None,
+        Some(&[cs]),
+        Some(&[ExtensionType::Unknown(DEVICE_POLICY_EXTENSION_TYPE)]),
+        None,
+        None,
+    )
+}
+
+/// The `required_capabilities` GroupContext extension a DeviceGroup carries
+/// from creation. It lists the removal-policy extension type, which OpenMLS
+/// requires before a `GroupContextExtensions` proposal may *add* that
+/// extension later — i.e. it is what lets the policy be flipped on after the
+/// fact (G-13, ADR-0015). It does NOT set the policy itself; the group stays
+/// policy-off until [`DeviceGroup::set_require_attested_removals`].
+fn device_required_capabilities() -> Extension {
+    Extension::RequiredCapabilities(RequiredCapabilitiesExtension::new(
+        &[ExtensionType::Unknown(DEVICE_POLICY_EXTENSION_TYPE)],
+        &[],
+        &[],
+    ))
+}
 
 /// Domain-separation tag for the deterministic group_id hash.
 /// Pinned ASCII; any change is a breaking protocol change to
@@ -117,12 +161,21 @@ impl DeviceGroup {
     /// (signature, storage, etc.).
     pub fn create_founder(identity: &Identity, account_id: &AccountId) -> Result<Self> {
         let group_id_bytes = Self::group_id_for(account_id);
+        // G-13 (ADR-0015): declare the removal-policy extension type in
+        // `required_capabilities` at creation, so a later
+        // `GroupContextExtensions` proposal may add the policy flag (OpenMLS
+        // refuses to add an extension that isn't in required_capabilities).
+        let required = Extensions::single(device_required_capabilities())
+            .map_err(|e| Error::Group(format!("required_capabilities: {e:?}")))?;
         let cfg = MlsGroupCreateConfig::builder()
             .ciphersuite(identity.ciphersuite())
             // Same posture as `Group::create` — the ratchet tree
             // travels inside Welcomes so a freshly-paired device
             // doesn't need an out-of-band tree fetch.
             .use_ratchet_tree_extension(true)
+            // Advertise support for the removal-policy GroupContext extension.
+            .capabilities(device_leaf_capabilities(identity.ciphersuite()))
+            .with_group_context_extensions(required)
             .build();
 
         let mls = MlsGroup::new_with_group_id(
@@ -354,6 +407,49 @@ impl DeviceGroup {
             .inner
             .remove_member(identity, LeafNodeIndex::new(leaf_index))?;
         crate::group::encode_message(&commit_out)
+    }
+
+    /// Flip this DeviceGroup's policy to **require peer-verified attestation
+    /// for device removals** (G-13, ADR-0015). Returns the wire-encoded
+    /// commit to broadcast over the DeviceGroup journal; every device that
+    /// processes it then reads the policy from its authenticated
+    /// GroupContext via [`Self::require_attested_removals`].
+    ///
+    /// Called when the account first enables a passkey. OPAQUE-only accounts
+    /// never call it, so their DeviceGroups stay policy-off and removals are
+    /// not attestation-gated (peers cannot demand an attestation the account
+    /// has no passkey to produce).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Group`] on the OpenMLS update / merge, or [`Error::Codec`] on
+    /// commit encoding.
+    pub fn set_require_attested_removals(&mut self, identity: &Identity) -> Result<Vec<u8>> {
+        // `update_group_context_extensions` REPLACES the whole GroupContext
+        // extension set, so we must re-include `required_capabilities`
+        // alongside the policy flag (and the policy type must be in
+        // required_capabilities for the proposal to validate).
+        let exts = Extensions::from_vec(vec![
+            device_required_capabilities(),
+            Extension::Unknown(
+                DEVICE_POLICY_EXTENSION_TYPE,
+                UnknownExtension(vec![POLICY_REQUIRE_ATTESTED_REMOVALS]),
+            ),
+        ])
+        .map_err(|e| Error::Group(format!("build policy extension: {e:?}")))?;
+        let commit = self.inner.set_group_context_extensions(identity, exts)?;
+        crate::group::encode_message(&commit)
+    }
+
+    /// Whether this DeviceGroup currently requires a peer-verified
+    /// attestation for removals (G-13, ADR-0015). Read from the
+    /// authenticated GroupContext, so every device that has applied the
+    /// policy commit agrees on the answer.
+    #[must_use]
+    pub fn require_attested_removals(&self) -> bool {
+        self.inner
+            .group_context_extension(DEVICE_POLICY_EXTENSION_TYPE)
+            .is_some_and(|v| v.first() == Some(&POLICY_REQUIRE_ATTESTED_REMOVALS))
     }
 
     /// List every device leaf currently in the group. Useful
@@ -920,6 +1016,52 @@ mod tests {
             .unknown(POLICY_EXT)
             .expect("policy ext present on B");
         assert_eq!(on_b.0, vec![0x01], "joiner must see the GroupContext policy flag");
+    }
+
+    #[test]
+    fn device_group_default_has_no_removal_policy() {
+        // A fresh DeviceGroup (OPAQUE-only account, no passkey) must NOT
+        // require attested removals — peers cannot demand an attestation the
+        // account has no passkey to produce.
+        let account = fixture_account_id();
+        let id_a = Identity::generate("A").unwrap();
+        let group_a = DeviceGroup::create_founder(&id_a, &account).unwrap();
+        assert!(!group_a.require_attested_removals());
+    }
+
+    #[test]
+    fn set_require_attested_removals_propagates_to_a_joined_device() {
+        let account = fixture_account_id();
+
+        let id_a = Identity::generate("device-A").unwrap();
+        let mut group_a = DeviceGroup::create_founder(&id_a, &account).unwrap();
+
+        // B joins via Welcome.
+        let id_b = Identity::generate("device-B").unwrap();
+        let kp_b = id_b.create_key_package().unwrap();
+        let addition = group_a.add_device(&id_a, kp_b).unwrap();
+        let welcome_bytes = crate::group::encode_message(&addition.welcome).unwrap();
+        let mut group_b =
+            DeviceGroup::join_from_welcome(&welcome_bytes, &id_b, &account).unwrap();
+
+        // Both start policy-off.
+        assert!(!group_a.require_attested_removals());
+        assert!(!group_b.require_attested_removals());
+
+        // A flips the policy on and broadcasts the commit.
+        let commit = group_a.set_require_attested_removals(&id_a).unwrap();
+        assert!(
+            group_a.require_attested_removals(),
+            "setter must update the founder's own view"
+        );
+
+        // B applies the policy commit and now agrees.
+        let incoming = group_b.process_incoming(&id_b, &commit).unwrap();
+        assert!(matches!(incoming, Incoming::Commit));
+        assert!(
+            group_b.require_attested_removals(),
+            "the policy flag must propagate through the GroupContext to B"
+        );
     }
 
     #[test]

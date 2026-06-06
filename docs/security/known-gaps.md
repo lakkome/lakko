@@ -423,11 +423,22 @@ proves OpenMLS 0.8.1 carries a custom `Extension::Unknown` in the
 GroupContext, reads it back, and propagates it to a joining
 device — so the application-level fallback is unneeded (the one
 requirement: every device's leaf capabilities must advertise the
-extension type). **Remaining sprints:** the `device_group.rs`
-apply-path verification + refuse-to-apply invariant (3, gated by
-invariant #3); wiring the confirmed policy flag into DeviceGroup
-creation + the set-policy flow (4); and the per-platform client
-embedding (5).
+extension type). **Sprint 4 landed** — the policy flag is wired
+into `lakko-mls`: every device `KeyPackage` + `DeviceGroup`
+founder now advertises the removal-policy extension capability,
+DeviceGroups carry `required_capabilities` for it from creation
+(so it can be added later), `DeviceGroup::set_require_attested_removals`
+flips it on via a `GroupContextExtensions` commit, and
+`require_attested_removals` reads it from authenticated group
+state; a property test proves the flip propagates to a joined
+device through `process_incoming`. (Format note: this changes
+DeviceGroup creation + KeyPackages — pre-existing groups/KPs
+would need re-keying to gain the capability; immaterial pre-launch.)
+**Remaining sprints:** the `device_group.rs` apply-path
+verification + refuse-to-apply invariant, conditioned on this
+policy flag (3, gated by invariant #3); and the per-platform
+client embedding — derive the attestation, carry it with the
+Remove commit, flip the policy on passkey-enable (5).
 
 ## Calls
 

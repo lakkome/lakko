@@ -26,6 +26,14 @@ impl Identity {
     /// Returns [`Error::KeyPackage`] on any OpenMLS-side failure.
     pub fn create_key_package(&self) -> Result<KeyPackage> {
         let bundle = KeyPackage::builder()
+            // G-13 (ADR-0015): advertise the DeviceGroup removal-policy
+            // extension type so this device can join a DeviceGroup that
+            // carries the policy (OpenMLS validates every member's leaf
+            // advertises a GroupContext extension type in use). Harmless for
+            // non-DeviceGroup uses — they simply never carry the extension.
+            .leaf_node_capabilities(crate::device_group::device_leaf_capabilities(
+                self.ciphersuite,
+            ))
             .build(
                 self.ciphersuite,
                 &self.provider,

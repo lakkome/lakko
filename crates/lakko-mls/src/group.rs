@@ -13,8 +13,11 @@
 //! - [`Group::process_incoming`] — decrypt / advance the state machine
 //! - [`Group::export_secret`] — derive a key for non-MLS uses (SFrame, etc.)
 
+use openmls::extensions::Extensions;
 use openmls::framing::{MlsMessageBodyIn, MlsMessageIn, MlsMessageOut};
-use openmls::group::{MlsGroup, MlsGroupCreateConfig, MlsGroupJoinConfig, StagedWelcome};
+use openmls::group::{
+    GroupContext, MlsGroup, MlsGroupCreateConfig, MlsGroupJoinConfig, StagedWelcome,
+};
 use openmls::prelude::{KeyPackage, LeafNodeIndex, ProcessedMessageContent, ProtocolVersion};
 use openmls_traits::OpenMlsProvider as _;
 use tls_codec::{Deserialize as _, Serialize as _};
@@ -292,6 +295,45 @@ impl Group {
             .map_err(|e| Error::Group(format!("merge_pending_commit: {e:?}")))?;
 
         Ok(commit)
+    }
+
+    /// Replace this group's GroupContext extensions, returning the commit to
+    /// broadcast (G-13, ADR-0015). The commit carries a
+    /// `GroupContextExtensions` proposal; every member that processes it sees
+    /// the new extensions in their authenticated GroupContext. Merges the
+    /// pending commit locally, mirroring [`Self::remove_member`].
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Group`] on the OpenMLS update / merge (e.g. a member whose
+    /// leaf capabilities do not advertise an added extension type).
+    pub fn set_group_context_extensions(
+        &mut self,
+        identity: &Identity,
+        extensions: Extensions<GroupContext>,
+    ) -> Result<MlsMessageOut> {
+        let (commit, _welcome, _group_info) = self
+            .inner
+            .update_group_context_extensions(
+                &identity.provider,
+                extensions,
+                &identity.signature_keys,
+            )
+            .map_err(|e| Error::Group(format!("update_group_context_extensions: {e:?}")))?;
+
+        self.inner
+            .merge_pending_commit(&identity.provider)
+            .map_err(|e| Error::Group(format!("merge_pending_commit: {e:?}")))?;
+
+        Ok(commit)
+    }
+
+    /// Read a custom (`Unknown`) GroupContext extension's payload by type id,
+    /// if present. Used to read DeviceGroup policy flags from authenticated
+    /// group state (G-13, ADR-0015).
+    #[must_use]
+    pub fn group_context_extension(&self, type_id: u16) -> Option<Vec<u8>> {
+        self.inner.extensions().unknown(type_id).map(|e| e.0.clone())
     }
 
     /// Encrypt an application payload for the current group epoch.
