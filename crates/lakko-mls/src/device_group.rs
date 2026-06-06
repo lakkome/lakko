@@ -64,6 +64,8 @@ use openmls::framing::MlsMessageOut;
 use openmls::group::{MlsGroup, MlsGroupCreateConfig};
 use openmls::prelude::{Capabilities, Ciphersuite, GroupId, KeyPackage, LeafNodeIndex};
 
+use lakko_crypto::signing::VerifyingKey;
+
 use crate::error::{Error, Result};
 use crate::group::{Group, Incoming, MemberAddition, MemberRecord};
 use crate::identity::Identity;
@@ -107,6 +109,25 @@ fn device_required_capabilities() -> Extension {
         &[],
         &[],
     ))
+}
+
+/// Domain separator for the remove-device action hash (G-13, ADR-0015).
+/// MUST match the clients' `ACTION_DOMAIN` for remove-device so the peer
+/// recomputes the same `action_hash` the auth service signed the
+/// attestation over.
+const REMOVE_DEVICE_ACTION_DOMAIN: &str = "lakko/action/remove-device/v1";
+
+/// The action hash a remove-device attestation binds to:
+/// `SHA-256(domain ‖ removed_leaf_signature_pubkey)`. The removing client
+/// computes this from the leaf it is evicting, the auth service signs an
+/// attestation over it, and a peer recomputes it here from the removed
+/// leaf's signature key to verify (G-13, ADR-0015).
+pub(crate) fn remove_device_action_hash(removed_signature_pubkey: &[u8]) -> [u8; 32] {
+    let mut input =
+        Vec::with_capacity(REMOVE_DEVICE_ACTION_DOMAIN.len() + removed_signature_pubkey.len());
+    input.extend_from_slice(REMOVE_DEVICE_ACTION_DOMAIN.as_bytes());
+    input.extend_from_slice(removed_signature_pubkey);
+    lakko_crypto::hash::sha256(&input)
 }
 
 /// Domain-separation tag for the deterministic group_id hash.
@@ -450,6 +471,68 @@ impl DeviceGroup {
         self.inner
             .group_context_extension(DEVICE_POLICY_EXTENSION_TYPE)
             .is_some_and(|v| v.first() == Some(&POLICY_REQUIRE_ATTESTED_REMOVALS))
+    }
+
+    /// Apply an incoming DeviceGroup commit, **enforcing the attested-removal
+    /// policy** (G-13, ADR-0015). This is the peer-verification side: when
+    /// this group [`requires attested removals`](Self::require_attested_removals)
+    /// and the commit removes one or more leaves, EVERY removed leaf must be
+    /// covered by an attestation in `attestations` that verifies against
+    /// `attest_vk`, is bound to this account and to the removed leaf's
+    /// [`remove_device_action_hash`], and is fresh at `now_unix_secs`. If any
+    /// removed leaf lacks a valid attestation the commit is **refused** — not
+    /// merged — so on-device malware that evicts a device without a real
+    /// passkey gesture cannot make peers drop that device.
+    ///
+    /// When the policy is off, or the commit removes nothing (an add, an
+    /// update, the policy-set commit itself), no attestation is required and
+    /// this behaves like [`process_incoming`](Self::process_incoming).
+    ///
+    /// The attestation(s) travel alongside the commit at the application /
+    /// transport layer (a client concern); the core only needs the commit
+    /// bytes plus whatever attestations accompanied them.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Group`] when a required attestation is missing or invalid (the
+    /// commit is left un-merged), plus the usual decode / process errors.
+    pub fn process_incoming_verifying_removals(
+        &mut self,
+        identity: &Identity,
+        commit_bytes: &[u8],
+        attestations: &[Vec<u8>],
+        attest_vk: &VerifyingKey,
+        now_unix_secs: i64,
+    ) -> Result<Incoming> {
+        let require = self.require_attested_removals();
+        let account_id = self.account_id;
+        self.inner
+            .process_incoming_gated(identity, commit_bytes, |removed| {
+                if !require || removed.is_empty() {
+                    return Ok(());
+                }
+                for (leaf, pubkey) in removed {
+                    let action_hash = remove_device_action_hash(pubkey);
+                    let covered = attestations.iter().any(|att| {
+                        lakko_attest::verify_bound(
+                            att,
+                            attest_vk,
+                            &account_id,
+                            &action_hash,
+                            now_unix_secs,
+                        )
+                        .is_ok()
+                    });
+                    if !covered {
+                        return Err(Error::Group(format!(
+                            "DeviceGroup: removal of leaf {} lacks a valid attestation \
+                             (policy requires attested removals)",
+                            leaf.u32()
+                        )));
+                    }
+                }
+                Ok(())
+            })
     }
 
     /// List every device leaf currently in the group. Useful
@@ -1062,6 +1145,240 @@ mod tests {
             group_b.require_attested_removals(),
             "the policy flag must propagate through the GroupContext to B"
         );
+    }
+
+    // ---- ADR-0015 sprint 3: apply-path attestation verification ----
+
+    use lakko_attest::ActionAttestation;
+    use lakko_crypto::signing::SigningKey;
+
+    /// Fixed seed for the test attestation signing key.
+    const REMOVAL_ATTEST_SEED: [u8; 32] = [0x55; 32];
+
+    fn make_attestation(account: &AccountId, action_hash: [u8; 32], sk: &SigningKey) -> Vec<u8> {
+        ActionAttestation::new(*account, action_hash, 10_000)
+            .sign(sk)
+            .to_vec()
+    }
+
+    /// Build a 3-device DeviceGroup (A founder + B + C), flip the
+    /// attested-removal policy ON, sync the verifying peer B, then have A
+    /// remove C. Returns `(id_b, group_b, encoded_remove_commit, c_pubkey,
+    /// account)`; the caller drives `process_incoming_verifying_removals` on
+    /// B with chosen attestations. B sits at the pre-remove epoch, policy-on.
+    fn attested_removal_fixture() -> (Identity, DeviceGroup, Vec<u8>, Vec<u8>, AccountId) {
+        let account = fixture_account_id();
+        let id_a = Identity::generate("A").unwrap();
+        let mut group_a = DeviceGroup::create_founder(&id_a, &account).unwrap();
+
+        let id_b = Identity::generate("B").unwrap();
+        let kp_b = id_b.create_key_package().unwrap();
+        let add_b = group_a.add_device(&id_a, kp_b).unwrap();
+        let mut group_b = DeviceGroup::join_from_welcome(
+            &crate::group::encode_message(&add_b.welcome).unwrap(),
+            &id_b,
+            &account,
+        )
+        .unwrap();
+
+        let id_c = Identity::generate("C").unwrap();
+        let kp_c = id_c.create_key_package().unwrap();
+        let add_c = group_a.add_device(&id_a, kp_c).unwrap();
+        // B advances past the add-C commit so it stays in lockstep with A.
+        group_b
+            .process_incoming(&id_b, &crate::group::encode_message(&add_c.commit).unwrap())
+            .unwrap();
+
+        // Flip the policy on; B applies it.
+        let commit_policy = group_a.set_require_attested_removals(&id_a).unwrap();
+        group_b.process_incoming(&id_b, &commit_policy).unwrap();
+        assert!(group_b.require_attested_removals());
+
+        // C's leaf + signature pubkey in A's view.
+        let c_pubkey = id_c.signature_keys.public().to_vec();
+        let c_leaf = group_a
+            .devices()
+            .into_iter()
+            .find(|m| m.signature_public_key == c_pubkey)
+            .expect("A sees C's leaf")
+            .leaf_index;
+
+        // A removes C.
+        let commit_remove = group_a.remove_device_at(&id_a, c_leaf).unwrap();
+
+        (id_b, group_b, commit_remove, c_pubkey, account)
+    }
+
+    fn b_still_has(group_b: &DeviceGroup, pubkey: &[u8]) -> bool {
+        group_b
+            .devices()
+            .iter()
+            .any(|m| m.signature_public_key == pubkey)
+    }
+
+    #[test]
+    fn attested_removal_applies_with_a_valid_attestation() {
+        let (id_b, mut group_b, commit_remove, c_pubkey, account) = attested_removal_fixture();
+        let sk = SigningKey::from_seed(&REMOVAL_ATTEST_SEED);
+        let att = make_attestation(&account, remove_device_action_hash(&c_pubkey), &sk);
+
+        let incoming = group_b
+            .process_incoming_verifying_removals(
+                &id_b,
+                &commit_remove,
+                &[att],
+                &sk.verifying_key(),
+                100,
+            )
+            .expect("a valid attestation authorises the removal");
+        assert!(matches!(incoming, Incoming::Commit));
+        assert!(!b_still_has(&group_b, &c_pubkey), "C must be removed from B's view");
+    }
+
+    #[test]
+    fn attested_removal_refused_without_attestation() {
+        let (id_b, mut group_b, commit_remove, c_pubkey, _account) = attested_removal_fixture();
+        let sk = SigningKey::from_seed(&REMOVAL_ATTEST_SEED);
+
+        let res = group_b.process_incoming_verifying_removals(
+            &id_b,
+            &commit_remove,
+            &[],
+            &sk.verifying_key(),
+            100,
+        );
+        assert!(res.is_err(), "a removal with no attestation must be refused under the policy");
+        assert!(
+            b_still_has(&group_b, &c_pubkey),
+            "the refused commit must NOT be merged — C stays present"
+        );
+    }
+
+    #[test]
+    fn attested_removal_refused_for_a_different_leaf() {
+        let (id_b, mut group_b, commit_remove, c_pubkey, account) = attested_removal_fixture();
+        let sk = SigningKey::from_seed(&REMOVAL_ATTEST_SEED);
+        // Attestation bound to a DIFFERENT pubkey than the one being removed.
+        let att = make_attestation(
+            &account,
+            remove_device_action_hash(b"a-different-leaf-signature-key"),
+            &sk,
+        );
+
+        let res = group_b.process_incoming_verifying_removals(
+            &id_b,
+            &commit_remove,
+            &[att],
+            &sk.verifying_key(),
+            100,
+        );
+        assert!(res.is_err(), "an attestation for another leaf must not authorise this removal");
+        assert!(b_still_has(&group_b, &c_pubkey));
+    }
+
+    #[test]
+    fn attested_removal_refused_with_a_forged_signing_key() {
+        let (id_b, mut group_b, commit_remove, c_pubkey, account) = attested_removal_fixture();
+        let real = SigningKey::from_seed(&REMOVAL_ATTEST_SEED);
+        let forged = SigningKey::from_seed(&[0x66; 32]);
+        // Correct binding, but signed by the wrong key.
+        let att = make_attestation(&account, remove_device_action_hash(&c_pubkey), &forged);
+
+        let res = group_b.process_incoming_verifying_removals(
+            &id_b,
+            &commit_remove,
+            &[att],
+            &real.verifying_key(),
+            100,
+        );
+        assert!(res.is_err(), "an attestation signed by the wrong key must be refused");
+        assert!(b_still_has(&group_b, &c_pubkey));
+    }
+
+    #[test]
+    fn unattested_removal_applies_when_policy_is_off() {
+        // Same shape as the fixture but the policy is never flipped on.
+        let account = fixture_account_id();
+        let id_a = Identity::generate("A").unwrap();
+        let mut group_a = DeviceGroup::create_founder(&id_a, &account).unwrap();
+        let id_b = Identity::generate("B").unwrap();
+        let kp_b = id_b.create_key_package().unwrap();
+        let add_b = group_a.add_device(&id_a, kp_b).unwrap();
+        let mut group_b = DeviceGroup::join_from_welcome(
+            &crate::group::encode_message(&add_b.welcome).unwrap(),
+            &id_b,
+            &account,
+        )
+        .unwrap();
+        let id_c = Identity::generate("C").unwrap();
+        let kp_c = id_c.create_key_package().unwrap();
+        let add_c = group_a.add_device(&id_a, kp_c).unwrap();
+        group_b
+            .process_incoming(&id_b, &crate::group::encode_message(&add_c.commit).unwrap())
+            .unwrap();
+        assert!(!group_b.require_attested_removals());
+
+        let c_pubkey = id_c.signature_keys.public().to_vec();
+        let c_leaf = group_a
+            .devices()
+            .into_iter()
+            .find(|m| m.signature_public_key == c_pubkey)
+            .unwrap()
+            .leaf_index;
+        let commit_remove = group_a.remove_device_at(&id_a, c_leaf).unwrap();
+
+        // No attestation supplied, yet the removal applies (policy off).
+        let sk = SigningKey::from_seed(&REMOVAL_ATTEST_SEED);
+        let incoming = group_b
+            .process_incoming_verifying_removals(
+                &id_b,
+                &commit_remove,
+                &[],
+                &sk.verifying_key(),
+                100,
+            )
+            .expect("policy off -> no attestation required");
+        assert!(matches!(incoming, Incoming::Commit));
+        assert!(!b_still_has(&group_b, &c_pubkey));
+    }
+
+    #[test]
+    fn non_remove_commit_needs_no_attestation_under_policy() {
+        // Policy ON, but the incoming commit is an ADD (no removals), so it
+        // must apply without any attestation.
+        let account = fixture_account_id();
+        let id_a = Identity::generate("A").unwrap();
+        let mut group_a = DeviceGroup::create_founder(&id_a, &account).unwrap();
+        let id_b = Identity::generate("B").unwrap();
+        let kp_b = id_b.create_key_package().unwrap();
+        let add_b = group_a.add_device(&id_a, kp_b).unwrap();
+        let mut group_b = DeviceGroup::join_from_welcome(
+            &crate::group::encode_message(&add_b.welcome).unwrap(),
+            &id_b,
+            &account,
+        )
+        .unwrap();
+        let commit_policy = group_a.set_require_attested_removals(&id_a).unwrap();
+        group_b.process_incoming(&id_b, &commit_policy).unwrap();
+        assert!(group_b.require_attested_removals());
+
+        // A adds a third device D — an Add commit, no removals.
+        let id_d = Identity::generate("D").unwrap();
+        let kp_d = id_d.create_key_package().unwrap();
+        let add_d = group_a.add_device(&id_a, kp_d).unwrap();
+
+        let sk = SigningKey::from_seed(&REMOVAL_ATTEST_SEED);
+        let incoming = group_b
+            .process_incoming_verifying_removals(
+                &id_b,
+                &crate::group::encode_message(&add_d.commit).unwrap(),
+                &[],
+                &sk.verifying_key(),
+                100,
+            )
+            .expect("a non-remove commit needs no attestation");
+        assert!(matches!(incoming, Incoming::Commit));
+        assert_eq!(group_b.devices().len(), 3, "D must have been added on B's view");
     }
 
     #[test]

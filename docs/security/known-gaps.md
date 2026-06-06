@@ -434,11 +434,23 @@ state; a property test proves the flip propagates to a joined
 device through `process_incoming`. (Format note: this changes
 DeviceGroup creation + KeyPackages — pre-existing groups/KPs
 would need re-keying to gain the capability; immaterial pre-launch.)
-**Remaining sprints:** the `device_group.rs` apply-path
-verification + refuse-to-apply invariant, conditioned on this
-policy flag (3, gated by invariant #3); and the per-platform
-client embedding — derive the attestation, carry it with the
-Remove commit, flip the policy on passkey-enable (5).
+**Sprint 3 landed** — the apply-path verification:
+`Group::process_incoming_gated` exposes a Remove commit's removed
+`(leaf, signature pubkey)` pairs to a gate *before* merging, and
+`DeviceGroup::process_incoming_verifying_removals` uses it to
+**refuse** (not merge) a removal when `require_attested_removals`
+is on and a removed leaf lacks a valid `lakko-attest` attestation
+bound to this account + `SHA-256("lakko/action/remove-device/v1"
+‖ removed_leaf_pubkey)` + fresh. Six property tests cover valid /
+missing / wrong-leaf / wrong-key attestations, policy-off
+pass-through, and non-remove-commit pass-through; a refused
+removal leaves the device present (commit not merged). So
+on-device malware that evicts a device without a real passkey
+gesture can no longer make honest peers drop it. **Remaining
+sprint:** the per-platform client embedding (5) — derive the
+attestation on remove-device, carry it alongside the Remove
+commit over the journal, and call `set_require_attested_removals`
+when the account first enables a passkey.
 
 ## Calls
 

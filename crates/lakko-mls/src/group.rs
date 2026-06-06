@@ -392,6 +392,77 @@ impl Group {
         }
     }
 
+    /// Like [`Self::process_incoming`], but for a Commit the `gate` is invoked
+    /// with the set of `(removed_leaf_index, that leaf's CURRENT signature
+    /// public key)` pairs **before** the commit is merged. If `gate` returns
+    /// `Err`, the commit is NOT merged and the error propagates — the
+    /// refuse-to-apply hook for peer-verified device-removal authorisation
+    /// (G-13, [ADR-0015]). Non-commit messages bypass the gate entirely.
+    ///
+    /// The removed leaves' signature keys are read from the pre-merge tree
+    /// (the leaves still exist), so the caller can recompute what a removal
+    /// attestation must bind to.
+    ///
+    /// # Errors
+    ///
+    /// Propagates [`Self::process_incoming`]'s errors, plus whatever `gate`
+    /// returns on a refused removal.
+    ///
+    /// [ADR-0015]: ../../../docs/adr/0015-device-removal-authorization.md
+    pub fn process_incoming_gated<F>(
+        &mut self,
+        identity: &Identity,
+        bytes: &[u8],
+        gate: F,
+    ) -> Result<Incoming>
+    where
+        F: FnOnce(&[(LeafNodeIndex, Vec<u8>)]) -> Result<()>,
+    {
+        let mls_in = decode_message(bytes)?;
+        let protocol = mls_in
+            .try_into_protocol_message()
+            .map_err(|e| Error::Message(format!("not a protocol message: {e:?}")))?;
+
+        let processed = self
+            .inner
+            .process_message(&identity.provider, protocol)
+            .map_err(|e| Error::Message(format!("process_message: {e:?}")))?;
+
+        match processed.into_content() {
+            ProcessedMessageContent::ApplicationMessage(app) => {
+                Ok(Incoming::Application(app.into_bytes()))
+            },
+            ProcessedMessageContent::StagedCommitMessage(staged) => {
+                // Read removed leaves + their pre-merge signature keys.
+                let members = self.members();
+                let removed: Vec<(LeafNodeIndex, Vec<u8>)> = staged
+                    .remove_proposals()
+                    .map(|qrp| qrp.remove_proposal().removed())
+                    .map(|leaf| {
+                        let pk = members
+                            .iter()
+                            .find(|m| m.leaf_index == leaf.u32())
+                            .map(|m| m.signature_public_key.clone())
+                            .unwrap_or_default();
+                        (leaf, pk)
+                    })
+                    .collect();
+
+                // Refuse-to-apply hook — runs before the merge.
+                gate(&removed)?;
+
+                self.inner
+                    .merge_staged_commit(&identity.provider, *staged)
+                    .map_err(|e| Error::Group(format!("merge_staged_commit: {e:?}")))?;
+                Ok(Incoming::Commit)
+            },
+            ProcessedMessageContent::ProposalMessage(_) => Ok(Incoming::Proposal),
+            ProcessedMessageContent::ExternalJoinProposalMessage(_) => {
+                Ok(Incoming::ExternalJoinProposal)
+            },
+        }
+    }
+
     /// Derive a `length`-byte secret bound to this group's current epoch.
     ///
     /// Wraps `MlsGroup::export_secret` (RFC 9420 §8.5). The output is the
