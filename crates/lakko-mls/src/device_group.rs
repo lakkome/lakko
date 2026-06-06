@@ -122,7 +122,8 @@ const REMOVE_DEVICE_ACTION_DOMAIN: &str = "lakko/action/remove-device/v1";
 /// computes this from the leaf it is evicting, the auth service signs an
 /// attestation over it, and a peer recomputes it here from the removed
 /// leaf's signature key to verify (G-13, ADR-0015).
-pub(crate) fn remove_device_action_hash(removed_signature_pubkey: &[u8]) -> [u8; 32] {
+#[must_use]
+pub fn remove_device_action_hash(removed_signature_pubkey: &[u8]) -> [u8; 32] {
     let mut input =
         Vec::with_capacity(REMOVE_DEVICE_ACTION_DOMAIN.len() + removed_signature_pubkey.len());
     input.extend_from_slice(REMOVE_DEVICE_ACTION_DOMAIN.as_bytes());

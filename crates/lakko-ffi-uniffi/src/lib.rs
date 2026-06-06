@@ -1105,6 +1105,72 @@ impl DeviceGroup {
             lakko_mls::Incoming::ExternalJoinProposal => ProcessedMessage::ExternalJoinProposal,
         })
     }
+
+    /// G-13 (ADR-0015): flip this DeviceGroup's policy to **require a
+    /// peer-verified attestation for device removals**. Returns the encoded
+    /// Commit the caller broadcasts over the DS group journal; every device
+    /// that processes it then enforces the policy. Call when the account
+    /// first enables a passkey (OPAQUE-only accounts never call it).
+    pub fn set_require_attested_removals(
+        &self,
+        identity: &Identity,
+    ) -> Result<Vec<u8>, FfiError> {
+        let mut g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
+        let bytes = g.set_require_attested_removals(&identity.inner)?;
+        Ok(bytes)
+    }
+
+    /// G-13 (ADR-0015): whether this DeviceGroup currently requires attested
+    /// removals (read from authenticated group state).
+    pub fn require_attested_removals(&self) -> Result<bool, FfiError> {
+        let g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
+        Ok(g.require_attested_removals())
+    }
+
+    /// G-13 (ADR-0015): apply an incoming DeviceGroup commit **enforcing the
+    /// attested-removal policy**. When the policy is on and the commit
+    /// removes leaves, every removed leaf must be covered by an attestation
+    /// in `attestations` that verifies under `attest_verifying_key` (the
+    /// 32-byte Ed25519 key the auth service publishes at the device-attest
+    /// JWKS) — bound to this account, the removed leaf, and fresh at
+    /// `now_unix_secs`. A removal lacking a valid attestation is refused (the
+    /// commit is NOT merged) and surfaces as `FfiError::Group`. Policy-off /
+    /// non-remove commits behave like [`Self::process_incoming`].
+    pub fn process_incoming_verifying_removals(
+        &self,
+        identity: &Identity,
+        message_bytes: Vec<u8>,
+        attestations: Vec<Vec<u8>>,
+        attest_verifying_key: Vec<u8>,
+        now_unix_secs: i64,
+    ) -> Result<ProcessedMessage, FfiError> {
+        let vk = lakko_crypto::signing::VerifyingKey::from_bytes(&attest_verifying_key)
+            .map_err(|_| FfiError::Identity("invalid attestation verifying key".into()))?;
+        let mut g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
+        let incoming = g.process_incoming_verifying_removals(
+            &identity.inner,
+            &message_bytes,
+            &attestations,
+            &vk,
+            now_unix_secs,
+        )?;
+        Ok(match incoming {
+            lakko_mls::Incoming::Application(data) => ProcessedMessage::Application { data },
+            lakko_mls::Incoming::Commit => ProcessedMessage::Commit,
+            lakko_mls::Incoming::Proposal => ProcessedMessage::Proposal,
+            lakko_mls::Incoming::ExternalJoinProposal => ProcessedMessage::ExternalJoinProposal,
+        })
+    }
+}
+
+/// G-13 (ADR-0015): the action hash a remove-device passkey ceremony and its
+/// attestation bind to — `SHA-256("lakko/action/remove-device/v1" ‖
+/// removed_leaf_signature_pubkey)`. A client computes this from the leaf it
+/// is about to remove to drive the `/auth/action/{start,finish}` ceremony,
+/// so it matches what a peer recomputes when verifying the attestation.
+#[uniffi::export]
+pub fn remove_device_action_hash(removed_signature_pubkey: Vec<u8>) -> Vec<u8> {
+    lakko_mls::device_group::remove_device_action_hash(&removed_signature_pubkey).to_vec()
 }
 
 /// Parse a DeviceGroup application-payload plaintext into the

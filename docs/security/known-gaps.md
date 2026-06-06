@@ -446,10 +446,17 @@ missing / wrong-leaf / wrong-key attestations, policy-off
 pass-through, and non-remove-commit pass-through; a refused
 removal leaves the device present (commit not merged). So
 on-device malware that evicts a device without a real passkey
-gesture can no longer make honest peers drop it. **Remaining
-sprint:** the per-platform client embedding (5) — derive the
-attestation on remove-device, carry it alongside the Remove
-commit over the journal, and call `set_require_attested_removals`
+gesture can no longer make honest peers drop it. **Sprint 5
+(FFI surface) landed** — `set_require_attested_removals`,
+`require_attested_removals`, `process_incoming_verifying_removals`,
+and the free `remove_device_action_hash` are exposed on both the
+UniFFI (Swift / Kotlin) and wasm-bindgen (web) DeviceGroup
+surfaces (regenerated bindings carry all four; FFI-crate tests
+green). **Remaining (sprint 5, per-platform wiring):** the three
+clients capture the `attestation_b64` from `/auth/action/finish`,
+carry it alongside the Remove commit over the DS journal, apply
+incoming commits through `processIncomingVerifyingRemovals` with
+the device-attest JWKS key, and call `setRequireAttestedRemovals`
 when the account first enables a passkey.
 
 ## Calls

@@ -939,6 +939,91 @@ impl DeviceGroup {
         })
     }
 
+    /// G-13 (ADR-0015): flip this DeviceGroup's policy to **require a
+    /// peer-verified attestation for device removals**. Returns the encoded
+    /// Commit to broadcast over the DS group journal. Call when the account
+    /// first enables a passkey (OPAQUE-only accounts never call it).
+    #[wasm_bindgen(js_name = setRequireAttestedRemovals)]
+    pub fn set_require_attested_removals(&self, identity: &Identity) -> Result<Vec<u8>, JsError> {
+        let mut g = self
+            .inner
+            .lock()
+            .map_err(|_| JsError::new("internal lock poisoned"))?;
+        g.set_require_attested_removals(&identity.inner)
+            .map_err(mls_err)
+    }
+
+    /// G-13 (ADR-0015): whether this DeviceGroup currently requires attested
+    /// removals (read from authenticated group state).
+    #[wasm_bindgen(js_name = requireAttestedRemovals)]
+    pub fn require_attested_removals(&self) -> Result<bool, JsError> {
+        let g = self
+            .inner
+            .lock()
+            .map_err(|_| JsError::new("internal lock poisoned"))?;
+        Ok(g.require_attested_removals())
+    }
+
+    /// G-13 (ADR-0015): apply an incoming DeviceGroup commit **enforcing the
+    /// attested-removal policy**. When the policy is on and the commit
+    /// removes a leaf, `attestation` must be the attestation the auth service
+    /// issued for that removal — verified under `attestVerifyingKey` (the
+    /// 32-byte Ed25519 key from the device-attest JWKS), bound to this
+    /// account + the removed leaf + fresh at `nowUnixSecs`. A removal without
+    /// a valid attestation is refused (the commit is NOT merged). An empty
+    /// `attestation` means "none supplied". Policy-off / non-remove commits
+    /// behave like [`Self::dg_process_incoming`].
+    #[wasm_bindgen(js_name = processIncomingVerifyingRemovals)]
+    pub fn dg_process_incoming_verifying_removals(
+        &self,
+        identity: &Identity,
+        message_bytes: &[u8],
+        attestation: &[u8],
+        attest_verifying_key: &[u8],
+        now_unix_secs: i64,
+    ) -> Result<ProcessedMessage, JsError> {
+        let vk = lakko_crypto::signing::VerifyingKey::from_bytes(attest_verifying_key)
+            .map_err(|_| JsError::new("invalid attestation verifying key"))?;
+        // The wasm surface carries a single attestation (the web remove-device
+        // flow evicts one leaf); empty means none.
+        let attestations: Vec<Vec<u8>> = if attestation.is_empty() {
+            Vec::new()
+        } else {
+            vec![attestation.to_vec()]
+        };
+        let mut g = self
+            .inner
+            .lock()
+            .map_err(|_| JsError::new("internal lock poisoned"))?;
+        let incoming = g
+            .process_incoming_verifying_removals(
+                &identity.inner,
+                message_bytes,
+                &attestations,
+                &vk,
+                now_unix_secs,
+            )
+            .map_err(mls_err)?;
+        Ok(match incoming {
+            lakko_mls::Incoming::Application(data) => ProcessedMessage {
+                kind: ProcessedMessageKind::Application,
+                application_data: Some(data),
+            },
+            lakko_mls::Incoming::Commit => ProcessedMessage {
+                kind: ProcessedMessageKind::Commit,
+                application_data: None,
+            },
+            lakko_mls::Incoming::Proposal => ProcessedMessage {
+                kind: ProcessedMessageKind::Proposal,
+                application_data: None,
+            },
+            lakko_mls::Incoming::ExternalJoinProposal => ProcessedMessage {
+                kind: ProcessedMessageKind::ExternalJoinProposal,
+                application_data: None,
+            },
+        })
+    }
+
     /// Shared compose plumbing — wire-encodes via OpenMLS +
     /// returns the bytes.
     fn create_devicegroup_body(
@@ -1711,6 +1796,16 @@ pub fn open_history_bundle_structured(
             })
             .collect(),
     })
+}
+
+/// G-13 (ADR-0015): the action hash a remove-device passkey ceremony and its
+/// attestation bind to — `SHA-256("lakko/action/remove-device/v1" ‖
+/// removed_leaf_signature_pubkey)`. The web client computes this from the
+/// leaf it is about to remove to drive the `/auth/action/{start,finish}`
+/// ceremony, so it matches what a peer recomputes when verifying.
+#[wasm_bindgen(js_name = removeDeviceActionHash)]
+pub fn remove_device_action_hash(removed_signature_pubkey: &[u8]) -> Vec<u8> {
+    lakko_mls::device_group::remove_device_action_hash(removed_signature_pubkey).to_vec()
 }
 
 /// Compute the deterministic DeviceGroup `group_id` from an
