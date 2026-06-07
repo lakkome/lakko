@@ -27,6 +27,7 @@
  * server already accepts as opaque bytes.
  */
 import { ensureDeviceGroup, persistDeviceGroupSnapshot } from "./lifecycle";
+import { encodeJournalEntry } from "./journal-envelope";
 import { DsClient } from "../ds/client";
 
 /** One row of the device list. Shape matches the wasm
@@ -132,6 +133,12 @@ export async function removeDeviceAt(args: {
   readonly accountIdB64: string;
   readonly deviceKey: CryptoKey;
   readonly leafIndex: number;
+  /** G-13 (ADR-0015): the removal attestation bytes from
+   *  `/auth/action/finish` (decoded from `attestation_b64`). Carried in the
+   *  journal envelope so peers can verify the removal when the DeviceGroup
+   *  policy requires it. `null` when the account has no passkey (policy off).
+   */
+  readonly attestation?: Uint8Array | null;
 }): Promise<RemoveResult> {
   const { ensureDeviceIdentitySeed } = await import("../auth/device-identity-store");
   const seed = await ensureDeviceIdentitySeed(args.accountIdB64, args.deviceKey);
@@ -151,10 +158,11 @@ export async function removeDeviceAt(args: {
     // Broadcast to the DeviceGroup journal. The wasm `groupId`
     // accessor returns the deterministic 32-byte
     // BLAKE3-domain-tagged value; the DS treats it as opaque
-    // bytes.
+    // bytes. G-13 (ADR-0015): wrap the commit + removal attestation in the
+    // journal envelope so peers can verify the removal under the policy.
     const groupId = ensured.group.groupId();
     const ds = new DsClient();
-    await ds.publishGroup(groupId, commitBytes);
+    await ds.publishGroup(groupId, encodeJournalEntry(commitBytes, args.attestation ?? null));
 
     await persistDeviceGroupSnapshot(
       ensured.identity,

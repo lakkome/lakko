@@ -202,6 +202,11 @@ function DevicesListView(props: {
       // other failure aborts the removal (fail-closed).
       const sessionToken = auth.identitySecrets()?.sessionToken ?? null;
       const target = devices.find((d) => d.leafIndex === leafIndex);
+      // G-13 (ADR-0015): the passkey ceremony yields an attestation bound to
+      // the leaf being removed; carry it with the Remove commit so peers can
+      // verify it. A 404 means the account has no passkey (OPAQUE-only) —
+      // proceed without an attestation (the DeviceGroup policy is off there).
+      let attestation: Uint8Array | null = null;
       if (sessionToken !== null && target !== undefined) {
         const wc = new WebauthnClient();
         wc.setSessionToken(sessionToken);
@@ -209,7 +214,8 @@ function DevicesListView(props: {
           const actionHashB64 = await actionHashForRemoveDevice(
             target.signaturePublicKey,
           );
-          await wc.assertAction(actionHashB64);
+          const result = await wc.assertAction(actionHashB64);
+          attestation = base64UrlDecodeNoPad(result.attestation_b64);
         } catch (err) {
           if (!(err instanceof WebauthnHttpError && err.status === 404)) {
             throw err;
@@ -222,6 +228,7 @@ function DevicesListView(props: {
         accountIdB64: props.accountIdB64,
         deviceKey,
         leafIndex,
+        attestation,
       });
       // Re-fetch — the new epoch has its own leaf numbering.
       await refresh();

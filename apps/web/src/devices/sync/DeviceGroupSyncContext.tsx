@@ -60,6 +60,8 @@ import type {
 } from "../../../wasm/lakko_ffi_wasm";
 
 import { ensureDeviceGroup, persistDeviceGroupSnapshot } from "../lifecycle";
+import { decodeJournalEntry, encodeJournalEntry } from "../journal-envelope";
+import { fetchDeviceAttestKey } from "../../auth/device-attest-key";
 import { mintHlc } from "./hlc";
 import {
   groupIdHex,
@@ -315,17 +317,50 @@ export function DeviceGroupSyncProvider(props: {
         continue;
       }
 
+      // G-13 (ADR-0015): the 32-byte verifying key peers feed to
+      // `processIncomingVerifyingRemovals`. Cached (24 h). A zero key is a
+      // fail-closed fallback — a removal the policy requires to be attested
+      // is refused rather than applied unverified; while the policy is off,
+      // non-remove entries and unattested removals pass through regardless.
+      let attestVk: Uint8Array;
+      try {
+        attestVk = await fetchDeviceAttestKey();
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn("device-attest key fetch failed; attested removals will be refused", err);
+        attestVk = new Uint8Array(32);
+      }
+
       let mutated = false;
       for (const message of raw.messages) {
         cursor = message.id;
+        // Unwrap the DeviceGroup journal envelope (the commit / message plus
+        // any removal attestation that travelled with it).
+        let entry;
+        try {
+          entry = decodeJournalEntry(message.payload);
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.warn("DeviceGroup journal envelope decode failed", message.id, err);
+          continue;
+        }
+        const attestation = entry.attestation ?? new Uint8Array(0);
         let processed;
         try {
-          processed = g.processIncoming(id, message.payload);
+          // Refuse-to-apply an unattested removal under the policy.
+          processed = g.processIncomingVerifyingRemovals(
+            id,
+            entry.message,
+            attestation,
+            attestVk,
+            BigInt(Math.floor(Date.now() / 1000)),
+          );
         } catch (err) {
-          // Bad frame / wrong epoch / our own echo at the
-          // wrong epoch — log + skip. Cursor still advances.
+          // Bad frame / wrong epoch / our own echo at the wrong epoch / a
+          // removal refused for want of a valid attestation — log + skip.
+          // Cursor still advances.
           // eslint-disable-next-line no-console
-          console.warn("DeviceGroup processIncoming failed", message.id, err);
+          console.warn("DeviceGroup processIncomingVerifyingRemovals failed", message.id, err);
           continue;
         }
         mutated = true;
@@ -424,7 +459,9 @@ export function DeviceGroupSyncProvider(props: {
       throw new Error("DeviceGroupSyncProvider is not ready");
     }
     const ds = new DsClient();
-    await ds.publishGroup(group.groupId(), wireBytes);
+    // G-13 (ADR-0015): wrap in the journal envelope (application messages
+    // carry no attestation).
+    await ds.publishGroup(group.groupId(), encodeJournalEntry(wireBytes, null));
     const deviceKey = await getDeviceKey(activeAccountIdB64);
     if (deviceKey !== null) {
       await persistDeviceGroupSnapshot(

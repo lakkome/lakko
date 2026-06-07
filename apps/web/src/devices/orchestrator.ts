@@ -33,6 +33,7 @@ import {
   parsePairingQrPayload,
 } from "./pairing";
 import { DsClient } from "../ds/client";
+import { encodeJournalEntry } from "./journal-envelope";
 import { ensureDeviceGroup, persistDeviceGroupSnapshot } from "./lifecycle";
 import {
   publishWelcome,
@@ -278,7 +279,12 @@ export async function runScanFlow(args: {
     // not this journal entry). Mirrors the `removeDeviceAt`
     // broadcast in `remove.ts`.
     const ds = new DsClient();
-    await ds.publishGroup(ensured.group.groupId(), addition.commit);
+    // G-13 (ADR-0015): every DeviceGroup journal entry is wrapped; an
+    // add-device commit carries no attestation.
+    await ds.publishGroup(
+      ensured.group.groupId(),
+      encodeJournalEntry(addition.commit, null),
+    );
 
     // Phase 2a3d8-ui — best-effort history catch-up bundle.
     // Read the local message log, derive the post-add

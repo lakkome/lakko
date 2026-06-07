@@ -458,13 +458,22 @@ DeviceGroup journal envelope codec (`apps/web/src/devices/journal-envelope.ts`,
 Remove commit carry its attestation through the opaque journal, a
 device-attest JWKS client (`apps/web/src/auth/device-attest-key.ts`)
 that fetches the 32-byte verifying key, and the `attestation_b64`
-field surfaced on the `ActionFinishResponse` type. **Remaining
-(sprint 5, per-platform wiring):** thread those primitives through
-the live flow on each client — capture the `attestation_b64` from
-`/auth/action/finish`, wrap it with the Remove commit at the
-`publishGroup` sites + unwrap + `processIncomingVerifyingRemovals`
-in the receive loop, and call `setRequireAttestedRemovals` when the
-account first enables a passkey.
+field surfaced on the `ActionFinishResponse` type. The **web
+client wiring landed** — `Devices.tsx` captures the
+`attestation_b64` from the remove-device ceremony, `remove.ts`
+wraps it with the Remove commit, every DeviceGroup `publishGroup`
+site (add / remove / application message) emits the envelope, and
+the `DeviceGroupSyncContext` receive loop unwraps + applies via
+`processIncomingVerifyingRemovals` against the fetched device-attest
+key (a zero-key fail-closed fallback when the JWKS endpoint is
+unreachable: harmless while the policy is off, refuses removals
+once it is on). `tsc --noEmit` + `vite build` clean; the wasm
+bindings were rebuilt to expose the methods. **Remaining (sprint
+5):** the iOS + Android client wiring (same shape over the UniFFI
+surface), and turning the policy ON — call
+`setRequireAttestedRemovals` when the account first enables a
+passkey (deliberately deferred until all platforms carry the
+attestation, so enabling it cannot strand a not-yet-wired client).
 
 ## Calls
 
