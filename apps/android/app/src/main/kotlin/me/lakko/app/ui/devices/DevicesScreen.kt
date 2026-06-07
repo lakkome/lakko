@@ -624,6 +624,10 @@ private fun DevicesListTab(
                                             // ceremony start signals "no credentials". A
                                             // user-cancelled gesture or any other failure
                                             // aborts the removal (fail-closed).
+                                            // G-13 (ADR-0015): the ceremony yields an
+                                            // attestation bound to the removed leaf; carry it
+                                            // with the Remove commit so peers verify it.
+                                            var attestation: ByteArray? = null
                                             if (sessionToken != null) {
                                                 WebauthnClient().use { wc ->
                                                     wc.setSessionToken(sessionToken)
@@ -632,9 +636,12 @@ private fun DevicesListTab(
                                                             actionHashForRemoveDevice(
                                                                 signaturePublicKey,
                                                             )
-                                                        wc.assertAction(
+                                                        val result = wc.assertAction(
                                                             context = context,
                                                             actionHashB64 = actionHashB64,
+                                                        )
+                                                        attestation = base64UrlDecodeNoPad(
+                                                            result.attestationB64,
                                                         )
                                                     } catch (e: WebauthnHttpError) {
                                                         if (e.status != 404) throw e
@@ -647,6 +654,7 @@ private fun DevicesListTab(
                                                 accountIdBytes = accountIdBytes,
                                                 accountIdB64 = accountIdB64,
                                                 leafIndex = leaf,
+                                                attestation = attestation,
                                             )
                                             removingLeaf = null
                                             refresh()

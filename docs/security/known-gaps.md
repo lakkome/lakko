@@ -468,12 +468,23 @@ the `DeviceGroupSyncContext` receive loop unwraps + applies via
 key (a zero-key fail-closed fallback when the JWKS endpoint is
 unreachable: harmless while the policy is off, refuses removals
 once it is on). `tsc --noEmit` + `vite build` clean; the wasm
-bindings were rebuilt to expose the methods. **Remaining (sprint
-5):** the iOS + Android client wiring (same shape over the UniFFI
-surface), and turning the policy ON — call
+bindings were rebuilt to expose the methods. The **iOS + Android
+client wiring also landed** — the same shape over the UniFFI
+surface: a Swift / Kotlin `DeviceGroupJournalEnvelope` codec + a
+`DeviceAttestKey` JWKS fetch, `DevicesScreen` captures the
+attestation, `DeviceRemoval.removeDeviceAt` wraps it, every
+DeviceGroup `publishGroup` site (pairing add / remove / sync app
+message) emits the envelope, and the `DeviceGroupSyncRepository`
+receive loop unwraps + applies via `processIncomingVerifyingRemovals`
+against the fetched device-attest key (same zero-key fail-closed
+fallback). `xcodebuild` (iOS, after rebuilding the
+`LakkoCore.xcframework`) and `:app:compileDebugKotlin` (Android)
+both green. **Remaining (sprint 5):** turning the policy ON — call
 `setRequireAttestedRemovals` when the account first enables a
-passkey (deliberately deferred until all platforms carry the
-attestation, so enabling it cannot strand a not-yet-wired client).
+passkey (deliberately deferred until all three platforms are
+verified end-to-end against a live deployment, so enabling it
+cannot strand a client; the verifying key should also move to a
+pinned bootstrap anchor rather than the JWKS fetch).
 
 ## Calls
 

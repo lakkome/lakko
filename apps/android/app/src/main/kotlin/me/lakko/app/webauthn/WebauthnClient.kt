@@ -428,6 +428,10 @@ public data class ActionFinishResponse(
     /** Echo of the action hash the passkey attested to. */
     @SerialName("action_hash_b64") public val actionHashB64: String,
     @SerialName("credential_id_b64") public val credentialIdB64: String,
+    /** URL-safe base64 of the signed `ActionAttestation` (G-13, ADR-0015).
+     *  The remove-device flow carries this alongside its MLS Remove commit so
+     *  peers can verify it; the delete-passkey flow ignores it. */
+    @SerialName("attestation_b64") public val attestationB64: String,
 )
 
 /**

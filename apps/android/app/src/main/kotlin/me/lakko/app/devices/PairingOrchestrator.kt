@@ -272,10 +272,13 @@ public object PairingOrchestrator {
             // so the row is a harmless no-op (the joiner ratchets
             // forward from the Welcome). Mirrors the
             // DeviceRemoval.removeDeviceAt broadcast.
+            // G-13 (ADR-0015): every DeviceGroup journal entry is wrapped; an
+            // add-device commit carries no attestation.
+            val envelope = DeviceGroupJournalEnvelope.encode(addition.commit, null)
             DsClient().use { ds ->
                 ds.publishGroup(
                     groupId = ensured.group.groupId(),
-                    payload = addition.commit,
+                    payload = envelope,
                 )
             }
 

@@ -155,6 +155,10 @@ public object DeviceRemoval {
         accountIdBytes: ByteArray,
         accountIdB64: String,
         leafIndex: UInt,
+        // G-13 (ADR-0015): the removal attestation from `/auth/action/finish`,
+        // carried in the journal envelope so peers can verify the removal when
+        // the DeviceGroup policy requires it. `null` for OPAQUE-only accounts.
+        attestation: ByteArray? = null,
     ) {
         val seed = DeviceIdentityStore.ensureDeviceIdentitySeed(
             context = context,
@@ -175,11 +179,13 @@ public object DeviceRemoval {
             )
             val groupId = ensured.group.groupId()
 
-            // Broadcast to the DeviceGroup journal. The DS
-            // treats the deterministic 32-byte group_id as
-            // opaque bytes.
+            // Broadcast to the DeviceGroup journal. The DS treats the
+            // deterministic 32-byte group_id as opaque bytes. G-13
+            // (ADR-0015): wrap the commit + removal attestation in the journal
+            // envelope so peers can verify the removal under the policy.
+            val envelope = DeviceGroupJournalEnvelope.encode(commitBytes, attestation)
             DsClient().use { ds ->
-                ds.publishGroup(groupId = groupId, payload = commitBytes)
+                ds.publishGroup(groupId = groupId, payload = envelope)
             }
 
             DeviceGroupLifecycle.persistSnapshot(

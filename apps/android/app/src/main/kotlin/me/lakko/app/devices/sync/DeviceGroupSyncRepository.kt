@@ -20,6 +20,8 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import me.lakko.app.auth.IdentitySecrets
 import me.lakko.app.auth.base64Encode
+import me.lakko.app.devices.DeviceAttestKey
+import me.lakko.app.devices.DeviceGroupJournalEnvelope
 import me.lakko.app.devices.DeviceGroupLifecycle
 import me.lakko.app.ds.DsClient
 import me.lakko.app.ds.DsHttpError
@@ -287,8 +289,11 @@ public class DeviceGroupSyncRepository(
             ?: error("DeviceGroupSync not bootstrapped")
         val wireBytes = g.createDevicegroupMessage(id, body, hlc)
         val groupId = g.groupId()
+        // G-13 (ADR-0015): wrap in the journal envelope (application messages
+        // carry no attestation).
+        val envelope = DeviceGroupJournalEnvelope.encode(wireBytes, null)
         DsClient().use { ds ->
-            ds.publishGroup(groupId, wireBytes)
+            ds.publishGroup(groupId, envelope)
         }
         DeviceGroupLifecycle.persistSnapshot(
             context = applicationContext,
@@ -331,15 +336,43 @@ public class DeviceGroupSyncRepository(
                     continue
                 }
 
+                // G-13 (ADR-0015): the 32-byte verifying key peers feed to
+                // processIncomingVerifyingRemovals. A zero key is a fail-closed
+                // fallback when the device-attest endpoint is unreachable — it
+                // parses but verifies nothing, so a removal the policy requires
+                // to be attested is refused rather than applied unverified;
+                // while the policy is off, entries apply normally regardless.
+                val attestVk: ByteArray = try {
+                    DeviceAttestKey.fetch()
+                } catch (cause: Throwable) {
+                    Log.w(LOG_TAG, "device-attest key fetch failed", cause)
+                    ByteArray(32)
+                }
+
                 var mutated = false
                 for (message in result.messages) {
                     cursor = message.id
                     val g = group.get() ?: return
                     val id = identity.get() ?: return
-                    val processed: ProcessedMessage = try {
-                        g.processIncoming(id, message.payload)
+                    // Unwrap the journal envelope (MLS message + any attestation).
+                    val entry = try {
+                        DeviceGroupJournalEnvelope.decode(message.payload)
                     } catch (cause: Throwable) {
-                        Log.w(LOG_TAG, "processIncoming failed at ${message.id}", cause)
+                        Log.w(LOG_TAG, "journal envelope decode failed at ${message.id}", cause)
+                        continue
+                    }
+                    val attestations: List<ByteArray> =
+                        entry.second?.let { listOf(it) } ?: emptyList()
+                    val processed: ProcessedMessage = try {
+                        g.processIncomingVerifyingRemovals(
+                            id,
+                            entry.first,
+                            attestations,
+                            attestVk,
+                            System.currentTimeMillis() / 1000,
+                        )
+                    } catch (cause: Throwable) {
+                        Log.w(LOG_TAG, "processIncomingVerifyingRemovals failed at ${message.id}", cause)
                         continue
                     }
                     mutated = true
