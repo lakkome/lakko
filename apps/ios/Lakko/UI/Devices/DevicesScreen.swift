@@ -461,6 +461,9 @@ private struct DevicesListView: View {
             // start signals "no credentials". A user-cancelled
             // gesture or any other failure aborts the removal
             // (fail-closed).
+            // G-13 (ADR-0015): the ceremony yields an attestation bound to the
+            // removed leaf; carry it with the Remove commit so peers verify it.
+            var attestation: Data?
             if let target = currentDevices().first(where: { $0.leafIndex == leafIndex }) {
                 let wc = WebauthnClient()
                 wc.setSessionToken(sessionToken)
@@ -468,7 +471,8 @@ private struct DevicesListView: View {
                     signaturePublicKey: target.signaturePublicKey
                 )
                 do {
-                    _ = try await wc.assertAction(actionHashB64: actionHashB64)
+                    let result = try await wc.assertAction(actionHashB64: actionHashB64)
+                    attestation = base64UrlDecodeNoPad(result.attestation_b64)
                 } catch let error as WebauthnClientError {
                     // 404 = the account has no passkey credential
                     // (the server's NoCredentials path). Proceed
@@ -485,7 +489,8 @@ private struct DevicesListView: View {
             try await DeviceRemoval.removeDeviceAt(
                 accountIdBytes: accountIdBytes,
                 accountIdB64: accountIdB64,
-                leafIndex: leafIndex
+                leafIndex: leafIndex,
+                attestation: attestation
             )
             refresh()
         } catch {

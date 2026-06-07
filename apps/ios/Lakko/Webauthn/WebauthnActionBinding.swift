@@ -66,6 +66,10 @@ public struct ActionFinishResponse: Decodable {
     /// Echo of the action hash the passkey attested to.
     public let action_hash_b64: String
     public let credential_id_b64: String
+    /// URL-safe base64 of the signed `ActionAttestation` (G-13, ADR-0015).
+    /// The remove-device flow carries this alongside its MLS Remove commit so
+    /// peers can verify it; the delete-passkey flow ignores it.
+    public let attestation_b64: String
 }
 
 // MARK: - Ceremony

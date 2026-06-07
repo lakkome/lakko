@@ -116,7 +116,11 @@ public enum DeviceRemoval {
     public static func removeDeviceAt(
         accountIdBytes: Data,
         accountIdB64: String,
-        leafIndex: UInt32
+        leafIndex: UInt32,
+        // G-13 (ADR-0015): the removal attestation from `/auth/action/finish`,
+        // carried in the journal envelope so peers can verify the removal when
+        // the DeviceGroup policy requires it. `nil` for OPAQUE-only accounts.
+        attestation: Data? = nil
     ) async throws {
         let seed = try DeviceIdentityStore.ensureDeviceIdentitySeed(
             accountIdB64: accountIdB64
@@ -133,10 +137,16 @@ public enum DeviceRemoval {
         )
         let groupId = try ensured.group.groupId()
 
-        // Broadcast to the DeviceGroup journal. The DS treats
-        // the deterministic 32-byte group_id as opaque bytes.
+        // Broadcast to the DeviceGroup journal. The DS treats the
+        // deterministic 32-byte group_id as opaque bytes. G-13 (ADR-0015):
+        // wrap the commit + removal attestation in the journal envelope so
+        // peers can verify the removal under the policy.
         let ds = DsClient()
-        _ = try await ds.publishGroup(groupId: groupId, payload: commitBytes)
+        let envelope = DeviceGroupJournalEnvelope.encode(
+            message: commitBytes,
+            attestation: attestation
+        )
+        _ = try await ds.publishGroup(groupId: groupId, payload: envelope)
 
         DeviceGroupLifecycle.persistSnapshot(
             identity: ensured.identity,

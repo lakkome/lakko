@@ -219,7 +219,13 @@ public enum PairingOrchestrator {
         // DeviceRemoval.removeDeviceAt broadcast.
         let groupId = try ensured.group.groupId()
         let ds = DsClient()
-        _ = try await ds.publishGroup(groupId: groupId, payload: addition.commit)
+        // G-13 (ADR-0015): every DeviceGroup journal entry is wrapped; an
+        // add-device commit carries no attestation.
+        let envelope = DeviceGroupJournalEnvelope.encode(
+            message: addition.commit,
+            attestation: nil
+        )
+        _ = try await ds.publishGroup(groupId: groupId, payload: envelope)
 
         // Phase 2a3d8-ui — best-effort history catch-up bundle.
         // Read the local message log, derive the post-add

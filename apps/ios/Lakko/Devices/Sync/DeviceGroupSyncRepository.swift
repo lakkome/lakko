@@ -248,7 +248,13 @@ public final class DeviceGroupSyncRepository: ObservableObject {
         )
         let groupId = try group.groupId()
         let ds = DsClient()
-        _ = try await ds.publishGroup(groupId: groupId, payload: wireBytes)
+        // G-13 (ADR-0015): wrap in the journal envelope (application messages
+        // carry no attestation).
+        let envelope = DeviceGroupJournalEnvelope.encode(
+            message: wireBytes,
+            attestation: nil
+        )
+        _ = try await ds.publishGroup(groupId: groupId, payload: envelope)
         DeviceGroupLifecycle.persistSnapshot(
             identity: identity,
             accountIdB64: accountIdB64
@@ -285,18 +291,44 @@ public final class DeviceGroupSyncRepository: ObservableObject {
                 continue
             }
 
+            // G-13 (ADR-0015): the 32-byte verifying key peers feed to
+            // processIncomingVerifyingRemovals. A zero key is a fail-closed
+            // fallback when the device-attest endpoint is unreachable — it
+            // parses but verifies nothing, so a removal the policy requires to
+            // be attested is refused rather than applied unverified; while the
+            // policy is off, entries apply normally regardless.
+            var attestVk: Data
+            do {
+                attestVk = try await DeviceAttestKey.fetch()
+            } catch {
+                NSLog("DeviceGroupSync device-attest key fetch failed: %@", error.localizedDescription)
+                attestVk = Data(count: 32)
+            }
+
             var mutated = false
             for message in result.messages {
                 cursor = message.id
                 guard let id = identity, let g = group else { return }
+                // Unwrap the journal envelope (MLS message + any attestation).
+                let entry: (message: Data, attestation: Data?)
+                do {
+                    entry = try DeviceGroupJournalEnvelope.decode(message.payload)
+                } catch {
+                    NSLog("DeviceGroupSync envelope decode failed: %@", error.localizedDescription)
+                    continue
+                }
+                let attestations: [Data] = entry.attestation.map { [$0] } ?? []
                 let processed: ProcessedMessage
                 do {
-                    processed = try g.processIncoming(
+                    processed = try g.processIncomingVerifyingRemovals(
                         identity: id,
-                        messageBytes: message.payload
+                        messageBytes: entry.message,
+                        attestations: attestations,
+                        attestVerifyingKey: attestVk,
+                        nowUnixSecs: Int64(Date().timeIntervalSince1970)
                     )
                 } catch {
-                    NSLog("DeviceGroupSync processIncoming failed: %@", error.localizedDescription)
+                    NSLog("DeviceGroupSync processIncomingVerifyingRemovals failed: %@", error.localizedDescription)
                     continue
                 }
                 mutated = true
