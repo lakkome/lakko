@@ -39,6 +39,8 @@ import {
   type JSX,
 } from "solid-js";
 import { useAuth } from "./AuthContext";
+import { getDeviceKey } from "./key-store";
+import { enableAttestedRemovalsIfNeeded } from "../devices/attested-removal-policy";
 import {
   WebauthnClient,
   WebauthnHttpError,
@@ -125,6 +127,26 @@ export default function PasskeysSection(): JSX.Element {
     setMessage(null);
     try {
       await c.registerPasskey({ user_name: name, nickname: label });
+      // G-13 (ADR-0015): now that the account has a passkey, enable attested
+      // removals so device removals require a peer-verified passkey gesture.
+      // Non-fatal: the policy can be enabled on a later passkey action.
+      const s = auth.state();
+      const secrets = auth.identitySecrets();
+      if (s.kind === "session" && secrets !== null) {
+        const deviceKey = await getDeviceKey(s.account.accountId);
+        if (deviceKey !== null) {
+          try {
+            await enableAttestedRemovalsIfNeeded({
+              accountIdBytes: secrets.accountId,
+              accountIdB64: s.account.accountId,
+              deviceKey,
+            });
+          } catch (err) {
+            // eslint-disable-next-line no-console
+            console.warn("failed to enable attested removals", err);
+          }
+        }
+      }
       setMessage({
         kind: "ok",
         text: `Passkey "${label}" added.`,

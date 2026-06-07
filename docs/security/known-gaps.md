@@ -479,12 +479,19 @@ receive loop unwraps + applies via `processIncomingVerifyingRemovals`
 against the fetched device-attest key (same zero-key fail-closed
 fallback). `xcodebuild` (iOS, after rebuilding the
 `LakkoCore.xcframework`) and `:app:compileDebugKotlin` (Android)
-both green. **Remaining (sprint 5):** turning the policy ON — call
-`setRequireAttestedRemovals` when the account first enables a
-passkey (deliberately deferred until all three platforms are
-verified end-to-end against a live deployment, so enabling it
-cannot strand a client; the verifying key should also move to a
-pinned bootstrap anchor rather than the JWKS fetch).
+both green. The **policy is now turned ON automatically** — all
+three clients call `setRequireAttestedRemovals` (a
+GroupContextExtensions commit, broadcast over the journal,
+idempotent / no-op when already on) right after a passkey is first
+registered (`PasskeysSection` on web, `PasskeysViewModel` on iOS +
+Android; the shared `enableAttestedRemovalsIfNeeded` helper).
+G-13 is thus **implemented end-to-end** — server attestation +
+peer-verified apply path (6 `lakko-mls` property tests) + the
+3-platform transport + auto-enable on passkey-enable. **Residual
+hardening (follow-up, not blocking):** move the attestation
+verifying key from the JWKS fetch to a pinned bootstrap trust
+anchor (zero-trust purity), and add cross-platform RTP-style live
+e2e (an ops/deploy concern, outside the code path).
 
 ## Calls
 

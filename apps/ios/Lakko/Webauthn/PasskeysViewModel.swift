@@ -132,6 +132,19 @@ public final class PasskeysViewModel: ObservableObject {
                 nickname: start.nickname,
                 credential: credentialJSON
             )
+            // G-13 (ADR-0015): now that the account has a passkey, enable
+            // attested removals so device removals require a peer-verified
+            // gesture. Non-fatal: it can be enabled on a later passkey action.
+            if let secrets = authRepository.identitySecrets {
+                do {
+                    try await DeviceRemoval.enableAttestedRemovalsIfNeeded(
+                        accountIdBytes: secrets.accountId,
+                        accountIdB64: base64Encode(secrets.accountId)
+                    )
+                } catch {
+                    NSLog("failed to enable attested removals: %@", error.localizedDescription)
+                }
+            }
             message = .ok("Passkey \"\(trimmed)\" added.")
             nickname = ""
             await refresh()

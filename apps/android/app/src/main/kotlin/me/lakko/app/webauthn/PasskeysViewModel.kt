@@ -4,6 +4,7 @@
 package me.lakko.app.webauthn
 
 import android.content.Context
+import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -13,6 +14,8 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import me.lakko.app.auth.AuthRepository
 import me.lakko.app.auth.AuthState
+import me.lakko.app.auth.base64Encode
+import me.lakko.app.devices.DeviceRemoval
 
 /**
  * State + dispatcher for the [PasskeysScreen] (Phase 2a2e).
@@ -136,6 +139,24 @@ public class PasskeysViewModel(
                             nickname = start.nickname,
                             credential = outcome.value,
                         )
+                        // G-13 (ADR-0015): enable attested removals now that the
+                        // account has a passkey, so device removals require a
+                        // peer-verified gesture. Non-fatal.
+                        repo.identitySecrets.value?.let { secrets ->
+                            try {
+                                DeviceRemoval.enableAttestedRemovalsIfNeeded(
+                                    context = context,
+                                    accountIdBytes = secrets.accountId,
+                                    accountIdB64 = base64Encode(secrets.accountId),
+                                )
+                            } catch (cause: Throwable) {
+                                Log.w(
+                                    "PasskeysViewModel",
+                                    "failed to enable attested removals",
+                                    cause,
+                                )
+                            }
+                        }
                         mutableState.update {
                             it.copy(
                                 busy = false,

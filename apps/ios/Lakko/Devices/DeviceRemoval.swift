@@ -153,4 +153,38 @@ public enum DeviceRemoval {
             accountIdB64: accountIdB64
         )
     }
+
+    /// G-13 (ADR-0015): enable the attested-removal policy on the local
+    /// DeviceGroup if it is not already on, broadcasting the
+    /// GroupContextExtensions commit over the journal so every device enforces
+    /// it on subsequent removals. Called after a passkey is first enabled.
+    /// Idempotent — a no-op when the policy is already set.
+    public static func enableAttestedRemovalsIfNeeded(
+        accountIdBytes: Data,
+        accountIdB64: String
+    ) async throws {
+        let seed = try DeviceIdentityStore.ensureDeviceIdentitySeed(
+            accountIdB64: accountIdB64
+        )
+        let ensured = try DeviceGroupLifecycle.ensureDeviceGroup(
+            accountIdBytes: accountIdBytes,
+            accountIdB64: accountIdB64,
+            deviceIdentitySeed: seed
+        )
+        if try ensured.group.requireAttestedRemovals() {
+            return
+        }
+        let commit = try ensured.group.setRequireAttestedRemovals(
+            identity: ensured.identity
+        )
+        let groupId = try ensured.group.groupId()
+        // The policy commit removes nothing, so it carries no attestation.
+        let envelope = DeviceGroupJournalEnvelope.encode(message: commit, attestation: nil)
+        let ds = DsClient()
+        _ = try await ds.publishGroup(groupId: groupId, payload: envelope)
+        DeviceGroupLifecycle.persistSnapshot(
+            identity: ensured.identity,
+            accountIdB64: accountIdB64
+        )
+    }
 }

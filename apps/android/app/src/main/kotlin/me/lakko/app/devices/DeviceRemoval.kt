@@ -206,4 +206,57 @@ public object DeviceRemoval {
             }
         }
     }
+
+    /**
+     * G-13 (ADR-0015): enable the attested-removal policy on the local
+     * DeviceGroup if it is not already on, broadcasting the
+     * GroupContextExtensions commit over the journal so every device enforces
+     * it on subsequent removals. Called after a passkey is first enabled.
+     * Idempotent — a no-op when the policy is already set.
+     */
+    public suspend fun enableAttestedRemovalsIfNeeded(
+        context: Context,
+        accountIdBytes: ByteArray,
+        accountIdB64: String,
+    ) {
+        val seed = DeviceIdentityStore.ensureDeviceIdentitySeed(
+            context = context,
+            accountIdB64 = accountIdB64,
+        )
+        val ensured = DeviceGroupLifecycle.ensureDeviceGroup(
+            context = context,
+            accountIdBytes = accountIdBytes,
+            accountIdB64 = accountIdB64,
+            deviceIdentitySeed = seed,
+        )
+        seed.fill(0)
+        try {
+            if (ensured.group.requireAttestedRemovals()) {
+                return
+            }
+            val commit = ensured.group.setRequireAttestedRemovals(ensured.identity)
+            val groupId = ensured.group.groupId()
+            // The policy commit removes nothing, so it carries no attestation.
+            val envelope = DeviceGroupJournalEnvelope.encode(commit, null)
+            DsClient().use { ds ->
+                ds.publishGroup(groupId = groupId, payload = envelope)
+            }
+            DeviceGroupLifecycle.persistSnapshot(
+                context = context,
+                identity = ensured.identity,
+                accountIdB64 = accountIdB64,
+            )
+        } finally {
+            try {
+                ensured.group.close()
+            } catch (_: Throwable) {
+                // best-effort
+            }
+            try {
+                ensured.identity.close()
+            } catch (_: Throwable) {
+                // best-effort
+            }
+        }
+    }
 }
