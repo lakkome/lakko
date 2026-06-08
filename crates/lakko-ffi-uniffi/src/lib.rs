@@ -2421,6 +2421,84 @@ pub fn accept_call_invite(
     }))
 }
 
+// ---------------------------------------------------------------------------
+// Identity supersession proof (G-4, ADR-0007 §6).
+//
+// On rotation (e.g. recover-from-words minting a fresh account identity) the
+// OLD identity signs a proof authorising the NEW identity as its successor.
+// Peers verify it against the old key they already pin and rotate their pin to
+// the new key — bridging trust WITHOUT a blind TOFU re-accept (security
+// invariant #6: old keys never silently come back).
+//
+// This is the proof primitive only. The KT-log chain verifier
+// (`verify_supersession_chain`) ties a proof to an operator-signed Merkle
+// inclusion; it consumes log types that have no FFI wire format yet and lands
+// with the transparency service.
+// ---------------------------------------------------------------------------
+
+/// Build the [`lakko_crypto::signing::SigningKey`] for an identity from its
+/// 32-byte Ed25519 seed (the bytes `Identity::ed25519_seed()` returns).
+fn signing_key_from_seed(
+    seed: &[u8],
+) -> Result<lakko_crypto::signing::SigningKey, FfiError> {
+    let arr: [u8; 32] = seed
+        .try_into()
+        .map_err(|_| FfiError::Identity("ed25519 seed must be 32 bytes".to_string()))?;
+    Ok(lakko_crypto::signing::SigningKey::from_seed(&arr))
+}
+
+/// Sign an identity supersession proof (G-4): the OLD identity authorises the
+/// NEW identity as its successor, valid in `[issued_at, expires_at]` (the
+/// verifier additionally caps the window at 30 days). Pass each identity's
+/// `ed25519_seed()`; both public keys are derived internally so the proof's
+/// embedded `old_pubkey` always matches the signing key. Returns the wire-form
+/// proof to publish alongside the rotation.
+///
+/// # Errors
+///
+/// [`FfiError::Identity`] if either seed is not exactly 32 bytes.
+#[uniffi::export]
+pub fn sign_supersession_proof(
+    old_ed25519_seed: Vec<u8>,
+    new_ed25519_seed: Vec<u8>,
+    issued_at_unix_secs: i64,
+    expires_at_unix_secs: i64,
+) -> Result<Vec<u8>, FfiError> {
+    let old_sk = signing_key_from_seed(&old_ed25519_seed)?;
+    let new_sk = signing_key_from_seed(&new_ed25519_seed)?;
+    let proof = lakko_transparency::SupersessionProof::new(
+        old_sk.verifying_key().to_bytes(),
+        new_sk.verifying_key().to_bytes(),
+        issued_at_unix_secs,
+        expires_at_unix_secs,
+    );
+    Ok(proof.sign(&old_sk).to_vec())
+}
+
+/// Verify an identity supersession proof (G-4) against the old key the caller
+/// already pins for this account. Returns the authorised NEW public key
+/// (32 bytes) the caller should re-pin on success.
+///
+/// # Errors
+///
+/// [`FfiError::Identity`] if `trusted_old_pubkey` is not 32 bytes, or the proof
+/// is malformed / not signed by the trusted old key / carries an out-of-range
+/// (>30-day) window / has expired relative to `now_unix_secs`.
+#[uniffi::export]
+pub fn verify_supersession(
+    proof_bytes: Vec<u8>,
+    trusted_old_pubkey: Vec<u8>,
+    now_unix_secs: i64,
+) -> Result<Vec<u8>, FfiError> {
+    let old: [u8; 32] = trusted_old_pubkey
+        .as_slice()
+        .try_into()
+        .map_err(|_| FfiError::Identity("trusted old pubkey must be 32 bytes".to_string()))?;
+    let new = lakko_transparency::verify_supersession(&proof_bytes, &old, now_unix_secs)
+        .map_err(|e| FfiError::Identity(format!("supersession verify: {e}")))?;
+    Ok(new.to_vec())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2799,5 +2877,57 @@ mod tests {
         let seed_a = pg_a.channel_seed(&alice).unwrap();
         let seed_b = pg_b.channel_seed(&alice).unwrap();
         assert_ne!(seed_a, seed_b);
+    }
+
+    fn ed25519_pub_of(id: &Identity) -> Vec<u8> {
+        signing_key_from_seed(&id.ed25519_seed())
+            .unwrap()
+            .verifying_key()
+            .to_bytes()
+            .to_vec()
+    }
+
+    #[test]
+    fn supersession_proof_roundtrips_through_ffi() {
+        let old = Identity::new("super-old".into()).unwrap();
+        let new = Identity::new("super-new".into()).unwrap();
+        let old_pub = ed25519_pub_of(&old);
+        let new_pub = ed25519_pub_of(&new);
+        let now = 1_000_000_i64;
+        let proof =
+            sign_supersession_proof(old.ed25519_seed(), new.ed25519_seed(), now, now + 3600)
+                .unwrap();
+        let authorised = verify_supersession(proof, old_pub, now + 10).unwrap();
+        assert_eq!(authorised, new_pub);
+    }
+
+    #[test]
+    fn supersession_proof_rejected_under_wrong_old_key() {
+        let old = Identity::new("super-old-2".into()).unwrap();
+        let new = Identity::new("super-new-2".into()).unwrap();
+        let wrong_pub = ed25519_pub_of(&Identity::new("super-wrong".into()).unwrap());
+        let now = 2_000_000_i64;
+        let proof =
+            sign_supersession_proof(old.ed25519_seed(), new.ed25519_seed(), now, now + 3600)
+                .unwrap();
+        assert!(verify_supersession(proof, wrong_pub, now + 10).is_err());
+    }
+
+    #[test]
+    fn supersession_proof_rejected_when_expired() {
+        let old = Identity::new("super-old-3".into()).unwrap();
+        let new = Identity::new("super-new-3".into()).unwrap();
+        let old_pub = ed25519_pub_of(&old);
+        let now = 3_000_000_i64;
+        let proof =
+            sign_supersession_proof(old.ed25519_seed(), new.ed25519_seed(), now, now + 60)
+                .unwrap();
+        assert!(verify_supersession(proof, old_pub, now + 1000).is_err());
+    }
+
+    #[test]
+    fn supersession_sign_rejects_bad_seed_length() {
+        let new = Identity::new("super-new-4".into()).unwrap();
+        assert!(sign_supersession_proof(vec![0u8; 31], new.ed25519_seed(), 0, 60).is_err());
     }
 }

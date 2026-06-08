@@ -38,7 +38,7 @@ lights it up.
 
 ## Multi-device
 
-### G-4: AccountIdentity rotation on password change has no KT-log supersession proof yet — **primitive landed (sprint 1)**
+### G-4: AccountIdentity rotation on password change has no KT-log supersession proof yet — **proof + chain verifier + FFI landed (sprints 1-3)**
 
 The recover flow rotates the exportKey → rotates the
 deterministic AccountIdentity. Today the old identity is
@@ -79,11 +79,25 @@ structurally: the Merkle leaf commits to the
 signature bytes, so Ed25519 point-malleability cannot fork a log
 entry. Six new tests (valid chain / wrong account / non-newer
 version / proof-for-a-different-key / expired proof / forged
-root). **Remaining sprints:** the auth / transparency *service*
-accepting + serving the entries + proofs; and the per-platform
-client wiring — emit the proof on recover-rotation (signed by the
-pre-rotation identity) and verify it on a peer's pubkey change
-instead of a blind TOFU.
+root). **Sprint 3 landed — the FFI surface for the proof primitive.**
+`sign_supersession_proof(old_ed25519_seed, new_ed25519_seed, issued_at,
+expires_at)` + `verify_supersession(proof, trusted_old_pubkey, now)` are
+exposed on both UniFFI (`lakko-ffi-uniffi`, Swift / Kotlin) and
+wasm-bindgen (`lakko-ffi-wasm`, web — `signSupersessionProof` /
+`verifySupersession`, `i64` timestamps as `bigint`, byte slices as
+`Uint8Array`, errors thrown). The sign helper takes each identity's
+`ed25519_seed()` and derives both public keys internally, so the proof's
+embedded `old_pubkey` always matches the signing key; verify returns the
+authorised new key to re-pin. The chain verifier
+(`verify_supersession_chain`) stays Rust-internal for now — it consumes
+KT-log types (`SignedRoot` / `LogEntry` / `InclusionProof`) that have no
+FFI wire format yet; that surface lands with the service. Four UniFFI
+round-trip / reject tests; web `.d.ts` regenerated. **Remaining sprints:**
+the auth / transparency *service* accepting + serving the entries +
+proofs (which also defines the wire format the chain-verifier FFI needs);
+and the per-platform client wiring — emit the proof on recover-rotation
+(signed by the pre-rotation identity) and verify it on a peer's pubkey
+change instead of a blind TOFU.
 
 ROADMAP: Phase 2c (transparency log).
 

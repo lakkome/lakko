@@ -83,6 +83,7 @@ pub mod push;
 pub mod sframe;
 pub mod sfu_signaling;
 pub mod shamir;
+pub mod supersession;
 pub mod storage;
 pub mod sync;
 
