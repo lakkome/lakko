@@ -585,6 +585,10 @@ pub fn channel_should_rotate_js(
     Ok(p.should_rotate(now_ms, s))
 }
 
+// Every `f64 as u{32,64}` below is guarded by an immediately-preceding range
+// check (non-negative + finite, and `<= u32::MAX` for the u32 casts), so the
+// truncation / sign-loss clippy flags are false positives here.
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 fn rotation_policy_from_js(
     policy: &ChannelRotationPolicy,
 ) -> Result<lakko_channels::RotationPolicy, JsError> {
@@ -617,6 +621,8 @@ fn rotation_policy_from_js(
     ))
 }
 
+// Same guarded-cast posture as `rotation_policy_from_js` above.
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 fn rotation_state_from_js(
     state: &ChannelRotationState,
 ) -> Result<lakko_channels::RotationState, JsError> {

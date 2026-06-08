@@ -275,18 +275,21 @@ pub struct WasmUnwrappedFrame {
 
 #[wasm_bindgen(js_class = "UnwrappedFrame")]
 impl WasmUnwrappedFrame {
+    /// The sender's MLS leaf index, parsed from the SFrame header KID.
     #[wasm_bindgen(getter, js_name = "senderLeaf")]
     #[must_use]
     pub fn sender_leaf(&self) -> u32 {
         self.sender_leaf
     }
 
+    /// The per-sender frame counter, parsed from the SFrame header CTR.
     #[wasm_bindgen(getter, js_name = "counter")]
     #[must_use]
     pub fn counter(&self) -> u32 {
         self.counter
     }
 
+    /// The frame ciphertext body (the bytes after the SFrame header).
     #[wasm_bindgen(getter, js_name = "ciphertext")]
     #[must_use]
     pub fn ciphertext(&self) -> Vec<u8> {
