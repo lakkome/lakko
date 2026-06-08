@@ -138,17 +138,23 @@ public struct IdentityUploadRequest: Codable, Equatable {
     public let signaturePubkey: String
     /// base64(X25519 public key) — 32 bytes after decode.
     public let x25519Pubkey: String
+    /// G-4 (ADR-0016): base64 of an optional old-key-signed supersession
+    /// proof bridging an AccountIdentity rotation. `nil` for a normal upload
+    /// — its absence clears any stored proof server-side.
+    public let supersessionProof: String?
 
     public init(
         pow: PowProofPayload,
         accountId: String,
         signaturePubkey: String,
-        x25519Pubkey: String
+        x25519Pubkey: String,
+        supersessionProof: String? = nil
     ) {
         self.pow = pow
         self.accountId = accountId
         self.signaturePubkey = signaturePubkey
         self.x25519Pubkey = x25519Pubkey
+        self.supersessionProof = supersessionProof
     }
 
     enum CodingKeys: String, CodingKey {
@@ -156,6 +162,7 @@ public struct IdentityUploadRequest: Codable, Equatable {
         case accountId = "account_id"
         case signaturePubkey = "signature_pubkey"
         case x25519Pubkey = "x25519_pubkey"
+        case supersessionProof = "supersession_proof"
     }
 }
 
@@ -173,15 +180,25 @@ public struct IdentityUploadResponse: Codable, Equatable {
 public struct IdentityFetchResponse: Codable, Equatable {
     public let signaturePubkey: String
     public let x25519Pubkey: String
+    /// G-4 (ADR-0016): base64 of the stored supersession proof when the
+    /// account rotated recently; `nil` otherwise. Verified locally by the
+    /// peer — the server passes the bytes through opaquely.
+    public let supersessionProof: String?
 
-    public init(signaturePubkey: String, x25519Pubkey: String) {
+    public init(
+        signaturePubkey: String,
+        x25519Pubkey: String,
+        supersessionProof: String? = nil
+    ) {
         self.signaturePubkey = signaturePubkey
         self.x25519Pubkey = x25519Pubkey
+        self.supersessionProof = supersessionProof
     }
 
     enum CodingKeys: String, CodingKey {
         case signaturePubkey = "signature_pubkey"
         case x25519Pubkey = "x25519_pubkey"
+        case supersessionProof = "supersession_proof"
     }
 }
 

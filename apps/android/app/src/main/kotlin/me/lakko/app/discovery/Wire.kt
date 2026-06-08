@@ -108,6 +108,10 @@ data class IdentityUploadRequest(
     val signature_pubkey: String,
     /** base64(X25519 public key) — 32 bytes after decode. */
     val x25519_pubkey: String,
+    /** G-4 (ADR-0016): base64 of an optional old-key-signed supersession
+     *  proof bridging an AccountIdentity rotation. `null` for a normal
+     *  upload — its absence clears any stored proof server-side. */
+    val supersession_proof: String? = null,
 )
 
 /** Response body of `POST /discovery/identity`. */
@@ -122,6 +126,10 @@ data class IdentityUploadResponse(
 data class IdentityFetchResponse(
     val signature_pubkey: String,
     val x25519_pubkey: String,
+    /** G-4 (ADR-0016): base64 of the stored supersession proof when the
+     *  account rotated recently; `null` otherwise. Verified locally by the
+     *  peer — the server passes the bytes through opaquely. */
+    val supersession_proof: String? = null,
 )
 
 // ----------------------------------------------------------------------------

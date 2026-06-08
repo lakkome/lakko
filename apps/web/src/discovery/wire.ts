@@ -90,6 +90,10 @@ export interface IdentityUploadRequest {
   signature_pubkey: string;
   /** base64(X25519 public key)  — 32 bytes after decode. */
   x25519_pubkey: string;
+  /** G-4 (ADR-0016): base64 of an optional old-key-signed supersession
+   *  proof bridging an AccountIdentity rotation. Omit for a normal upload
+   *  — its absence clears any previously stored proof server-side. */
+  supersession_proof?: string;
 }
 
 /** Response body of `POST /discovery/identity`. */
@@ -103,6 +107,10 @@ export interface IdentityUploadResponse {
 export interface IdentityFetchResponse {
   signature_pubkey: string;
   x25519_pubkey: string;
+  /** G-4 (ADR-0016): base64 of the stored supersession proof when the
+   *  account rotated recently; absent otherwise. The peer verifies it
+   *  locally — the server passes the bytes through opaquely. */
+  supersession_proof?: string;
 }
 
 // ----------------------------------------------------------------------------
