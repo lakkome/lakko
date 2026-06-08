@@ -1,0 +1,43 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+[package]
+name = "lakko-transparency-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+# Opt out of the parent workspace.
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+lakko-transparency = { path = ".." }
+# supersession_verify needs a fixed trusted old key — derive it
+# deterministically from an all-zero seed via the crypto crate's
+# SigningKey, so the harness is reproducible.
+lakko-crypto = { path = "../../lakko-crypto" }
+
+# G-4 (ADR-0007 sec.6) identity-supersession proof. The wire form is an
+# attacker-touchable bounded parser: a peer hands these bytes in after a
+# rotation, and the verify path is now FFI-exposed (`verify_supersession`
+# on UniFFI + wasm), so a malicious peer reaches `SupersessionProof::open`
+# with arbitrary bytes. Any panic / overflow / stack abuse on arbitrary
+# input is a vulnerability.
+
+[[bin]]
+name = "supersession_open"
+path = "fuzz_targets/supersession_open.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "supersession_verify"
+path = "fuzz_targets/supersession_verify.rs"
+test = false
+doc = false
+bench = false

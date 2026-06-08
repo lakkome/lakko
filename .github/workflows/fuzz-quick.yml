@@ -74,6 +74,8 @@ jobs:
             manifest: crates/lakko-call-jwt/fuzz/Cargo.toml
           - crate: lakko-backup
             manifest: crates/lakko-backup/fuzz/Cargo.toml
+          - crate: lakko-transparency
+            manifest: crates/lakko-transparency/fuzz/Cargo.toml
           - crate: lakko-svc-sfu
             manifest: services/sfu/fuzz/Cargo.toml
 

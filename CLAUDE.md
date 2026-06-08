@@ -141,7 +141,7 @@ just ci                        # everything CI does, locally
 
 ## Fuzz harnesses
 
-`crates/lakko-mls/fuzz/`, `crates/lakko-proto/fuzz/`, `crates/lakko-contacts/fuzz/`, `crates/lakko-channels/fuzz/`, `crates/lakko-transport/fuzz/`, `crates/lakko-tuf/fuzz/`, `crates/lakko-call-jwt/fuzz/`, `crates/lakko-backup/fuzz/`, and `services/sfu/fuzz/` are separate crates outside the main workspace (they need nightly + libfuzzer-sys). Targets live in `fuzz/fuzz_targets/*.rs`.
+`crates/lakko-mls/fuzz/`, `crates/lakko-proto/fuzz/`, `crates/lakko-contacts/fuzz/`, `crates/lakko-channels/fuzz/`, `crates/lakko-transport/fuzz/`, `crates/lakko-tuf/fuzz/`, `crates/lakko-call-jwt/fuzz/`, `crates/lakko-backup/fuzz/`, `crates/lakko-transparency/fuzz/`, and `services/sfu/fuzz/` are separate crates outside the main workspace (they need nightly + libfuzzer-sys). Targets live in `fuzz/fuzz_targets/*.rs`.
 
 Current targets:
 - **`lakko-mls/mls_message`** — `MlsMessageIn` wire-format parser (TLS codec)
@@ -175,12 +175,14 @@ Current targets:
 - **`lakko-call-jwt/jwt_parse_unverified`** — JWS Compact parser (3 dot-segments → base64url-decode → JSON-decode header + claims). UTF-8 gate at the harness edge keeps coverage focused on the base64 / JSON parser branches
 - **`lakko-call-jwt/jwt_verify_with_jwks`** — full JWS pipeline: signature path + kid lookup + algorithm-confusion check + base64 of signature + `Signature::from_bytes` length check + `exp` clock comparison. Fixed all-zero-seed single-key JWKS + fixed `now_secs` so the harness is reproducible and the fuzzer can learn the deterministic `kid`
 - **`lakko-call-jwt/jwks_parse`** — `parse_jwks(doc_bytes)` JSON decoder; the auth service publishes the JWKS at `/.well-known/jwks.json` and a compromised publish endpoint can serve arbitrary bytes
+- **`lakko-transparency/supersession_open`** — `SupersessionProof::open` bounded wire parser (G-4): the fixed 145-byte layout (version ‖ old_pubkey ‖ new_pubkey ‖ issued_at ‖ expires_at ‖ sig) + Ed25519-verify against the embedded old key. Attacker-touchable — a peer hands these bytes in after a rotation, and the verify path is now FFI-exposed
+- **`lakko-transparency/supersession_verify`** — full `verify_supersession(bytes, trusted_old_pubkey, now)` pipeline: parse + embedded-key sig check, then the trusted-old-key match + `<= 30-day` window gate + freshness/expiry. Fixed all-zero-seed trusted old key + fixed `now` so the harness is reproducible
 
 The `fuzz_api` module in `lakko-mls` (marked `#[doc(hidden)]`) is the only public entry point for harnesses; it is not part of the supported public API.
 
 Fuzzing corpora are not committed (`fuzz/corpus/`, `fuzz/artifacts/` are gitignored); they are spun up locally.
 
-The `.github/workflows/fuzz-quick.yml` workflow actually RUNS every fuzz target for a bounded budget (60s default, configurable via `workflow_dispatch`) on nightly cron (03:00 UTC) — `just fuzz-check` only smoke-builds. Matrix runs one job per fuzz crate (9 jobs, ~30 targets total); crashes upload to the workflow run page as 14-day-retention artifacts. Concurrency limited to 1 so overlapping nightly runs don't pile up.
+The `.github/workflows/fuzz-quick.yml` workflow actually RUNS every fuzz target for a bounded budget (60s default, configurable via `workflow_dispatch`) on nightly cron (03:00 UTC) — `just fuzz-check` only smoke-builds. Matrix runs one job per fuzz crate (10 jobs, ~32 targets total); crashes upload to the workflow run page as 14-day-retention artifacts. Concurrency limited to 1 so overlapping nightly runs don't pile up.
 
 ## Local dev
 
