@@ -36,6 +36,8 @@
  * the MLS snapshot blob.
  */
 
+import { publishMessageLogChanged } from "./message-log-events";
+
 const DB_NAME = "lakko-message-log";
 const DB_VERSION = 1;
 const STORE = "logs";
@@ -173,6 +175,9 @@ export async function saveMessageLog(
   } finally {
     db.close();
   }
+  // G-8: notify any unread badge (in this or another tab/route) that the log
+  // changed, so it can reload instead of waiting for its next mount.
+  publishMessageLogChanged(accountIdB64);
 }
 
 /**

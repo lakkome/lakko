@@ -23,7 +23,7 @@
  * up front rather than letting the user click into a flow that
  * will fail at the WASM boundary.
  */
-import { createMemo, createSignal, For, onMount, Show, type JSX } from "solid-js";
+import { createMemo, createSignal, For, onCleanup, onMount, Show, type JSX } from "solid-js";
 import { A } from "@solidjs/router";
 import { useAuth } from "../auth/AuthContext";
 import {
@@ -38,6 +38,7 @@ import { useChats, type ActiveGroup } from "../chat/ChatContext";
 import { useDeviceGroupSync } from "../devices/sync/DeviceGroupSyncContext";
 import { groupIdHex as syncGroupIdHex } from "../devices/sync/state";
 import { loadMessageLog } from "../chat/message-log-store";
+import { subscribeMessageLogChanged } from "../chat/message-log-events";
 import { getDeviceKey } from "../auth/key-store";
 import { loadWasm } from "../wasm";
 import { paths } from "./paths";
@@ -1098,33 +1099,47 @@ function ActiveGroupsPanel(props: {
   const [incomingIds, setIncomingIds] = createSignal<
     { readonly [groupIdHex: string]: readonly bigint[] }
   >({});
-  onMount(() => {
-    void (async (): Promise<void> => {
-      const s = auth.state();
-      if (s.kind !== "session") return;
-      const accountIdB64 = s.account.accountId;
-      const deviceKey = await getDeviceKey(accountIdB64);
-      if (deviceKey === null) return;
-      const log = await loadMessageLog(accountIdB64, deviceKey);
-      if (log === null) return;
-      const map: { [hex: string]: bigint[] } = {};
-      for (const [hex, slot] of Object.entries(log.groups)) {
-        const ids: bigint[] = [];
-        for (const m of slot.messages) {
-          if (m.direction === "outgoing") continue;
-          try {
-            ids.push(BigInt(m.messageId));
-          } catch {
-            // Non-numeric message id — skip.
-          }
-        }
-        if (ids.length > 0) {
-          ids.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
-          map[hex] = ids;
+
+  async function reloadIncomingIds(): Promise<void> {
+    const s = auth.state();
+    if (s.kind !== "session") return;
+    const accountIdB64 = s.account.accountId;
+    const deviceKey = await getDeviceKey(accountIdB64);
+    if (deviceKey === null) return;
+    const log = await loadMessageLog(accountIdB64, deviceKey);
+    if (log === null) return;
+    const map: { [hex: string]: bigint[] } = {};
+    for (const [hex, slot] of Object.entries(log.groups)) {
+      const ids: bigint[] = [];
+      for (const m of slot.messages) {
+        if (m.direction === "outgoing") continue;
+        try {
+          ids.push(BigInt(m.messageId));
+        } catch {
+          // Non-numeric message id — skip.
         }
       }
-      setIncomingIds(map);
-    })();
+      if (ids.length > 0) {
+        ids.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+        map[hex] = ids;
+      }
+    }
+    setIncomingIds(map);
+  }
+
+  onMount(() => {
+    void reloadIncomingIds();
+    // G-8: the badge used to refresh only on its next mount. Subscribe to
+    // message-log changes (a message written from another tab / the Chat
+    // route) so it reloads live. Same-account filter so an unrelated
+    // account's write (multi-account on one browser) is ignored.
+    const unsubscribe = subscribeMessageLogChanged((account) => {
+      const s = auth.state();
+      if (s.kind === "session" && s.account.accountId === account) {
+        void reloadIncomingIds();
+      }
+    });
+    onCleanup(unsubscribe);
   });
 
   function unreadFor(groupIdBytes: Uint8Array): number {

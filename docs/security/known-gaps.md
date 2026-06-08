@@ -203,15 +203,24 @@ fresh KeyPackage. Touchpoints: the three
 
 ## Web client
 
-### G-8: Web has no Service Worker-side message-log mutation listener
+### G-8: Web message-log change listener — **CLOSED**
 
-`ActiveGroupsPanel`'s unread badge is sourced from a
-one-shot `loadMessageLog(...)` on mount. Live updates from
-another tab / route don't refresh the badge until the
-list re-mounts. iOS / Android use `@Published` /
-`StateFlow` so the in-memory store stays in sync; web
-needs an IDB `change` listener (or a `BroadcastChannel`-
-backed pub/sub) to match.
+The unread badge (in `Contacts.tsx`) was sourced from a
+one-shot `loadMessageLog(...)` on mount, so a message
+written from another tab / the Chat route did not refresh
+it until the next mount. A `BroadcastChannel`-backed pub/sub
+now closes the gap (`apps/web/src/chat/message-log-events.ts`):
+`saveMessageLog` calls `publishMessageLogChanged(accountIdB64)`
+after every write, and the badge subscribes via
+`subscribeMessageLogChanged` and reloads (filtered to the
+active account). `BroadcastChannel` carries the signal across
+tabs; because it never echoes to the posting instance, the
+publisher also notifies in-process subscribers directly, so the
+same-tab / different-route case works too. Degrades to a no-op
+where `BroadcastChannel` is absent (the in-process path still
+fires). This brings web to parity with the iOS / Android
+`@Published` / `StateFlow` in-memory stores. Verified: web
+`tsc --noEmit` + `vite build` green.
 
 ### G-9: Web `payload_bytes` JSON placeholder strings are NOT byte-stable — **CLOSED**
 
