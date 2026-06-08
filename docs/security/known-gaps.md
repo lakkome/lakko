@@ -487,11 +487,24 @@ registered (`PasskeysSection` on web, `PasskeysViewModel` on iOS +
 Android; the shared `enableAttestedRemovalsIfNeeded` helper).
 G-13 is thus **implemented end-to-end** — server attestation +
 peer-verified apply path (6 `lakko-mls` property tests) + the
-3-platform transport + auto-enable on passkey-enable. **Residual
-hardening (follow-up, not blocking):** move the attestation
-verifying key from the JWKS fetch to a pinned bootstrap trust
-anchor (zero-trust purity), and add cross-platform RTP-style live
-e2e (an ops/deploy concern, outside the code path).
+3-platform transport + auto-enable on passkey-enable. **Key
+pinning landed** — all three `DeviceAttestKey` clients accept a
+build-time pinned verifying key (`VITE_LAKKO_DEVICE_ATTEST_KEY` on
+web, `Info.plist` `LakkoDeviceAttestKey` on iOS,
+`BuildConfig.LAKKO_DEVICE_ATTEST_KEY` on Android); when set they
+**never consult the JWKS endpoint**, so a compromised
+JWKS-serving tier cannot substitute a key it controls (the
+key-isolation deployment posture). Unset → JWKS fetch, unchanged.
+The threat boundary: this defends a compromised serving tier, not
+a fully-compromised auth service that also holds the signing key
+(which could mint valid attestations regardless) — the latter is
+the inherent trust G-13 places in the auth service's
+passkey-ceremony verification. **Residual (optional, not
+blocking):** distributing the pinned key via the *signed*
+bootstrap config (vouched by an independent trust anchor) instead
+of a build constant — needs the client-side bootstrap-config
+consumption (a Phase-5 transport concern) that does not exist
+yet, so it is out of G-13's scope.
 
 ## Calls
 

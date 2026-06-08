@@ -10,11 +10,14 @@ import Foundation
 /// OKP / Ed25519 JWK at `GET /.well-known/device-attest-jwks.json`. Mirror of
 /// `apps/web/src/auth/device-attest-key.ts`.
 ///
-/// In the zero-trust posture this key should ideally be PINNED via the signed
-/// bootstrap config rather than fetched from the protected origin; this is the
-/// discovery path for the current single-origin deployment. The fetched key is
-/// only ever handed to `DeviceGroup.processIncomingVerifyingRemovals`, which
-/// performs the Ed25519 verification in the audited Rust core.
+/// The strongest posture PINS this key out-of-band so the client never trusts
+/// the auth origin to serve it. A build-time pin is supported via the
+/// `Info.plist` key `LakkoDeviceAttestKey` (base64url of the 32-byte key); when
+/// set, the JWKS endpoint is never consulted. This defends the case where the
+/// JWKS-serving infra is compromised but the (isolated) signing key is not.
+/// When unset, the JWKS fetch is the discovery path. Either way the key is only
+/// ever handed to `DeviceGroup.processIncomingVerifyingRemovals`, which performs
+/// the Ed25519 verification in the audited Rust core.
 enum DeviceAttestKey {
     private struct Jwks: Decodable { let keys: [Jwk]? }
     private struct Jwk: Decodable { let x: String? }
@@ -30,11 +33,30 @@ enum DeviceAttestKey {
         case badUrl
     }
 
+    /// The build-time pinned key (`Info.plist` `LakkoDeviceAttestKey`,
+    /// base64url of 32 bytes), or `nil` when unset / malformed.
+    private static func pinnedKey() -> Data? {
+        guard
+            let raw = Bundle.main.object(forInfoDictionaryKey: "LakkoDeviceAttestKey") as? String
+        else {
+            return nil
+        }
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, let key = base64UrlDecodeNoPad(trimmed), key.count == 32 else {
+            return nil
+        }
+        return key
+    }
+
     /// Fetch (and cache for 24 h) the 32-byte device-attestation verifying key.
     static func fetch(
         baseURL: String = WebauthnClient.defaultBaseURL,
         now: Date = Date()
     ) async throws -> Data {
+        // A build-time pinned key wins outright — never consult the JWKS endpoint.
+        if let pinned = pinnedKey() {
+            return pinned
+        }
         if let key = cachedKey, let at = cachedAt, now.timeIntervalSince(at) < ttl {
             return key
         }

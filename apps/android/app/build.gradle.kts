@@ -104,6 +104,18 @@ android {
             "\"${project.findProperty("lakko.sfu.url") as String? ?: ""}\"",
         )
 
+        // G-13 (ADR-0015) — optional build-time pin of the device-attestation
+        // verifying key (base64url of the 32-byte Ed25519 key). When set,
+        // `DeviceAttestKey` never consults the JWKS endpoint, so a compromised
+        // JWKS-serving tier can't substitute a key it controls. Sourced from a
+        // gradle property (`apps/android/local.properties` or
+        // `-P lakko.device.attest.key=...`); empty when unset (JWKS fallback).
+        buildConfigField(
+            "String",
+            "LAKKO_DEVICE_ATTEST_KEY",
+            "\"${project.findProperty("lakko.device.attest.key") as String? ?: ""}\"",
+        )
+
         // G3-4-mobile — wire androidx.test runner for the
         // `app/src/androidTest/` instrumented test source set.
         // `./gradlew :app:connectedDebugAndroidTest` boots a

@@ -9,12 +9,16 @@
  * OKP / Ed25519 JWK at `GET /.well-known/device-attest-jwks.json` (the
  * dedicated device-attest key, separate from the call-JWT key).
  *
- * NOTE on trust: in the zero-trust posture this key is ideally PINNED via
- * the signed bootstrap / trust config rather than fetched from the same
- * origin it protects against. This module is the fetch path for discovery /
- * the current single-origin deployment; pinning is a follow-up. The fetched
- * key is only ever handed to `DeviceGroup.processIncomingVerifyingRemovals`,
- * which performs the Ed25519 verification in the audited Rust core.
+ * NOTE on trust: the strongest posture PINS this key out-of-band so the
+ * client never trusts the auth origin to serve it. A build-time pin is
+ * supported via the `VITE_LAKKO_DEVICE_ATTEST_KEY` env var (base64url of the
+ * 32-byte key); when set, the JWKS endpoint is never consulted. This defends
+ * the case where the JWKS-serving infra is compromised but the (isolated)
+ * signing key is not — a deployment that keeps the attestation signing key
+ * off the web tier. When unset, the JWKS fetch below is the discovery path.
+ * Either way the key is only ever handed to
+ * `DeviceGroup.processIncomingVerifyingRemovals`, which performs the Ed25519
+ * verification in the audited Rust core.
  */
 
 import { DEFAULT_BASE_URL } from "./client";
@@ -42,6 +46,20 @@ interface CacheEntry {
 
 let cache: CacheEntry | null = null;
 
+/** The build-time pinned key (`VITE_LAKKO_DEVICE_ATTEST_KEY`, base64url of
+ *  32 bytes), or `null` when unset / malformed. */
+function pinnedKey(): Uint8Array | null {
+  const env = import.meta.env as Record<string, string | undefined>;
+  const raw = env["VITE_LAKKO_DEVICE_ATTEST_KEY"];
+  if (typeof raw !== "string" || raw.trim().length === 0) return null;
+  try {
+    const key = base64UrlDecodeNoPad(raw.trim());
+    return key.length === 32 ? key : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Fetch (and cache) the 32-byte Ed25519 device-attestation verifying key.
  *
@@ -54,6 +72,10 @@ export async function fetchDeviceAttestKey(
   baseUrl: string = DEFAULT_BASE_URL,
   nowMs: number = Date.now(),
 ): Promise<Uint8Array> {
+  // A build-time pinned key wins outright — never consult the JWKS endpoint.
+  const pinned = pinnedKey();
+  if (pinned !== null) return pinned;
+
   if (cache && nowMs - cache.fetchedAtMs < DEFAULT_TTL_MS) {
     return cache.key;
   }
