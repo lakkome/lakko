@@ -42,6 +42,37 @@ pub enum Error {
     /// Crypto-layer failure surfaced from `lakko-crypto`.
     #[error(transparent)]
     Crypto(#[from] lakko_crypto::Error),
+
+    /// A supersession proof was not the expected wire length (G-4).
+    #[error("supersession proof has wrong length: {got} bytes")]
+    SupersessionBadLength {
+        /// The actual length received.
+        got: usize,
+    },
+
+    /// A supersession proof carried an unsupported version byte (G-4).
+    #[error("unsupported supersession proof version: {0}")]
+    SupersessionBadVersion(u8),
+
+    /// A supersession proof's Ed25519 signature did not verify against the
+    /// old key it names (G-4).
+    #[error("supersession proof signature is invalid")]
+    SupersessionBadSignature,
+
+    /// A supersession proof's old key did not match the key the caller
+    /// already trusts (G-4).
+    #[error("supersession proof old key does not match the trusted key")]
+    SupersessionOldKeyMismatch,
+
+    /// A supersession proof has expired relative to `now` (G-4).
+    #[error("supersession proof has expired")]
+    SupersessionExpired,
+
+    /// A supersession proof's validity window is invalid — either
+    /// `expires_at < issued_at`, or it exceeds the 30-day maximum (G-4,
+    /// invariant #6: a leaked old key cannot indefinitely re-authorise).
+    #[error("supersession proof validity window is invalid")]
+    SupersessionInvalidValidityWindow,
 }
 
 /// Convenience alias.
