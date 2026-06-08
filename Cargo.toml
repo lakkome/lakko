@@ -53,6 +53,10 @@ exclude = [
     # MPL-2.0 third-party code (carries `unsafe`, its own deps), so it
     # sits outside our workspace lint / forbid-unsafe posture.
     "crates/vendor/webauthn-rs-core",
+    # Vendored fork of hpke-rs-libcrux (G-23) — Cargo.toml-only delta
+    # bumping libcrux-aead 0.0.7 -> 0.0.8 + libcrux-traits 0.0.6 -> 0.0.7
+    # to pull the RUSTSEC-2026-0124 fix; consumed via `[patch.crates-io]`.
+    "crates/vendor/hpke-rs-libcrux",
 ]
 
 [workspace.package]
@@ -156,3 +160,12 @@ overflow-checks = true
 # up the patched core.
 [patch.crates-io]
 webauthn-rs-core = { path = "crates/vendor/webauthn-rs-core" }
+
+# G-23 — RUSTSEC-2026-0124 (libcrux-chacha20poly1305 0.0.7 overlong-buffer
+# panic, HIGH 8.2). Replace upstream `hpke-rs-libcrux` 0.6.1 with a
+# Cargo.toml-only vendored fork that bumps `libcrux-aead` 0.0.7 -> 0.0.8
+# (which pulls the fixed `libcrux-chacha20poly1305 0.0.8`) and its own
+# `libcrux-traits` 0.0.6 -> 0.0.7 to match the AEAD trait the new aead
+# impls. No source changes — hpke-rs-libcrux only uses libcrux-traits for
+# the AEAD trait, so ecdh / hkdf staying on libcrux-traits 0.0.6 is fine.
+hpke-rs-libcrux = { path = "crates/vendor/hpke-rs-libcrux" }

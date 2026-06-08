@@ -1010,51 +1010,51 @@ upstream releases. Each entry below lists severity,
 reachability analysis, and the upstream tracker the fix
 is gated on.
 
-### G-23: `libcrux-chacha20poly1305 0.0.7` — RUSTSEC-2026-0124 (HIGH 8.2)
+### G-23: `libcrux-chacha20poly1305 0.0.7` — RUSTSEC-2026-0124 (HIGH 8.2) — **CLOSED (fixed)**
 
 > Potential Panic on Overlong Ciphertext Buffer.
 > Upgrade to >= 0.0.8.
 
-Transitive dependency chain:
+Vulnerable as a transitive dep:
 `libcrux-chacha20poly1305 0.0.7 → libcrux-aead 0.0.7 →
 hpke-rs-libcrux 0.6.1 → hpke-rs 0.6.1 →
-openmls_rust_crypto 0.5.1 → lakko-mls`.
+openmls_rust_crypto 0.5.1 → lakko-mls` (HPKE seal/open inside
+OpenMLS).
 
-**Why we can't just bump it.** The fix in 0.0.8 ships with
-breaking internal dependency changes (`rand ^0.10` from
-`^0.9`, `libcrux-traits =0.0.7` from `=0.0.6`); a
-`[patch.crates-io]` override that pins
-`libcrux-chacha20poly1305 = 0.0.8` breaks the
-`libcrux-aead 0.0.7` we still depend on. The cleanest fix
-is upstream `hpke-rs-libcrux` cutting a release that
-bumps to `libcrux-aead 0.0.8` — tracked by
-[cryspen/hpke-rs](https://github.com/cryspen/hpke-rs)
-issues.
+**Fix — a Cargo.toml-only vendored fork of `hpke-rs-libcrux`.**
+The published `hpke-rs-libcrux 0.6.1` hard-pins
+`libcrux-aead ^0.0.7` (which transitively pins the vulnerable
+`libcrux-chacha20poly1305 0.0.7`), and a `[patch.crates-io]`
+cannot relax a semver requirement. So we vendor `hpke-rs-libcrux`
+under `crates/vendor/hpke-rs-libcrux` and patch it in via the root
+`[patch.crates-io]`. The delta is **two version bumps in its
+`Cargo.toml` only** — `libcrux-aead 0.0.7 → 0.0.8` (which pulls
+the fixed `libcrux-chacha20poly1305 0.0.8`) and its own
+`libcrux-traits 0.0.6 → 0.0.7` so the AEAD trait it imports
+matches what `libcrux-aead 0.0.8` implements. **The `src/` is
+byte-identical to upstream 0.6.1** (verified) — zero crypto-code
+changes.
 
-**Reachability.** The vulnerable code path is HPKE
-seal/open inside OpenMLS. Every byte that reaches
-`libcrux-chacha20poly1305::decrypt` first passes through
-OpenMLS's `MlsMessageIn` parser (length-bounded by the
-TLS-codec spec — `lakko-mls-fuzz/mls_message` fuzz target
-exercises this surface) and the HPKE-RS wrapper's own
-length checks. We have not been able to construct an
-input that reaches the panic via the OpenMLS public API.
-The risk in practice is bounded to a per-request DoS on
-the calling service (services run with `RUST_BACKTRACE=1`
-+ tokio's panic-catching at the request boundary, so a
-panic in one handler does NOT down the whole process).
+The earlier worry about an "irreconcilable `libcrux-traits`
+0.0.6-vs-0.0.7 conflict" was wrong: `hpke-rs-libcrux` uses
+`libcrux-traits` only for the AEAD trait, so `libcrux-ecdh` /
+`libcrux-hkdf` staying on `libcrux-traits 0.0.6` while the AEAD
+path uses `0.0.7` is fine — Cargo carries both versions and no
+trait type crosses the boundary. The fix **compiles + the full
+workspace checks clean + all `lakko-mls` tests pass**, and
+`cargo audit` now reports the libcrux advisory gone (only the
+accepted-risk `rsa` G-24 remains).
 
-**Mitigation pending upstream**: client-side
-ContactRequest envelope inputs are gated by a
-session-token rate limit + PoW + Privacy Pass before
-they reach the OpenMLS parser. An attacker would need
-to burn one PoW solve per crash attempt and tie a
-session token — high enough cost that this isn't a
-realistic DoS path even if reachable.
+Regression-guarded by the existing `cargo audit` / `cargo deny`
+CI gate: if the bump were reverted, `libcrux-chacha20poly1305
+0.0.7` would return and the advisory check would fail.
 
-**Status**: accepted risk pending upstream
-`hpke-rs-libcrux` release. Re-audit every sprint and
-upgrade as soon as a compatible version lands.
+(The vulnerable path was, in any case, not demonstrably reachable
+— every byte reaching `libcrux-chacha20poly1305::decrypt` first
+passes OpenMLS's length-bounded `MlsMessageIn` parser + the
+HPKE-RS length checks, and the attacker-facing ingest is gated by
+a rate limit + PoW + Privacy Pass — so this was a low-risk DoS at
+worst even before the fix.)
 
 ### G-24: `rsa 0.9.10` — RUSTSEC-2023-0071 (MEDIUM 5.9) — Marvin Attack
 

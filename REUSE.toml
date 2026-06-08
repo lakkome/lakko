@@ -24,3 +24,14 @@ path = "crates/vendor/webauthn-rs-core/**"
 precedence = "override"
 SPDX-FileCopyrightText = "The webauthn-rs Authors (https://github.com/kanidm/webauthn-rs)"
 SPDX-License-Identifier = "MPL-2.0"
+
+# Vendored upstream third-party crate (G-23). MPL-2.0 — the AGPL `**`
+# fallback must NOT relicense it. The Lakko delta is Cargo.toml-only
+# (bump libcrux-aead 0.0.7 -> 0.0.8 + libcrux-traits 0.0.6 -> 0.0.7 to
+# pull the RUSTSEC-2026-0124 fix); `src/` is byte-identical to upstream
+# hpke-rs-libcrux 0.6.1.
+[[annotations]]
+path = "crates/vendor/hpke-rs-libcrux/**"
+precedence = "override"
+SPDX-FileCopyrightText = "The hpke-rs Authors (https://github.com/cryspen/hpke-rs)"
+SPDX-License-Identifier = "MPL-2.0"

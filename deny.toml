@@ -26,6 +26,10 @@ ignore = [
     # Track: https://github.com/launchbadge/sqlx/issues/2911 — sqlx is
     # waiting on the rsa 0.10.0 release.
     "RUSTSEC-2023-0071",
+    # NB: RUSTSEC-2026-0124 (libcrux-chacha20poly1305 0.0.7 overlong-buffer
+    # panic) is FIXED, not ignored — the vendored `hpke-rs-libcrux` fork in
+    # `crates/vendor/` ([patch.crates-io]) pulls libcrux-chacha20poly1305
+    # 0.0.8. See known-gaps G-23.
 ]
 
 [licenses]
