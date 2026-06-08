@@ -934,7 +934,17 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         // phrase under the freshly-rotated device root key and
         // posts a baseline backup envelope. Best-effort end-to-end;
         // each step logs and continues on failure.
-        void (async () => {
+        //
+        // G-10 (ADR-0015 area / known-gaps): this is AWAITED, not
+        // fire-and-forget. The baseline re-seals the backup envelope
+        // under the freshly-rotated export-key material; until it
+        // lands, the server still holds the pre-recover envelope.
+        // Awaiting folds the rewrite into the recover round-trip so
+        // the "stale envelope" window collapses to the upload latency
+        // instead of "whenever the next baseline happens to fire".
+        // The bootstrap is wrapped best-effort so a backup hiccup
+        // still does not fail the recover itself.
+        await (async () => {
           // Phase 2a3d4 — capture the restored MLS snapshot (if
           // any) so the post-restore bootstrap re-uploads the
           // same state instead of nuking the server-side
@@ -989,17 +999,22 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
             // eslint-disable-next-line no-console
             console.warn("restoreFromServerBackup threw (recover)", err);
           }
-          await bootstrapBackupFromPhraseString(
-            {
-              accountId: accountIdBytes,
-              accountIdB64: cached.accountIdB64,
-              ed25519Seed: canonical.ed25519Seed,
-              deviceKey,
-              sessionToken: result.sessionToken,
-              wholeStorageSnapshot: restoredSnapshot,
-            },
-            mnemonicPhrase,
-          );
+          try {
+            await bootstrapBackupFromPhraseString(
+              {
+                accountId: accountIdBytes,
+                accountIdB64: cached.accountIdB64,
+                ed25519Seed: canonical.ed25519Seed,
+                deviceKey,
+                sessionToken: result.sessionToken,
+                wholeStorageSnapshot: restoredSnapshot,
+              },
+              mnemonicPhrase,
+            );
+          } catch (err) {
+            // eslint-disable-next-line no-console
+            console.warn("post-recover backup bootstrap failed", err);
+          }
         })();
         // 1.20b: best-effort push subscribe after recovery —
         // the new password changes the device key, but the

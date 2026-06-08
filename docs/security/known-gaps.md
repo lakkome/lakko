@@ -238,16 +238,29 @@ is a deeper, separate problem tracked under G-6 below.
 
 ## Backup
 
-### G-10: Backup envelope rotation on password change happens on the next baseline write, not the recover round-trip itself
+### G-10: Backup envelope rotation folded into the recover round-trip — **CLOSED**
 
 After `/recover` rotates the OPAQUE envelope on the
-server, the client's NEXT baseline upload (signup-flow
-path) refreshes the backup envelope under the new
-exportKey-derived material. The window between recover
-and that baseline write is "old phrase still recovers";
-in practice the baseline write fires within seconds.
-A future sprint can fold the baseline write into the
-recover round-trip so the window collapses.
+server, the backup baseline upload re-seals the backup
+envelope under the new exportKey-derived material. That
+upload used to be **fire-and-forget** (web: an un-awaited
+`void (async () => …)()` IIFE; iOS: a detached `Task { … }`),
+so `recover()` resolved before it landed — leaving a window
+in which the server still held the pre-recover envelope
+("old phrase still recovers").
+
+The baseline write is now **awaited inside the recover
+round-trip** on every platform, so `recover()` does not
+resolve until the re-seal has been posted (collapsing the
+window to the upload latency): web `AuthContext.recover`
+awaits the restore-then-bootstrap IIFE (with the bootstrap
+wrapped best-effort so a backup hiccup still cannot fail the
+recover); iOS `AuthRepository.recover` calls
+`bootstrapBackupBestEffort` directly instead of in a detached
+`Task` (it is non-throwing, so awaiting cannot fail recover).
+Android already awaited it (a direct `suspend` call in the
+`recover` coroutine), so it needed no change. Verified: web
+`tsc --noEmit` + iOS `xcodebuild` green.
 
 ### G-11: No tamper-evident chain across backup versions — **partial: client-with-state case CLOSED**
 

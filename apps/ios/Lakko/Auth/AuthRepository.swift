@@ -636,20 +636,26 @@ public final class AuthRepository: ObservableObject {
         // the phrase under the freshly-rotated device root key
         // and post a baseline /backup envelope that re-publishes
         // the restored snapshot (so the next device-recover
-        // sees the same state we just rebuilt). Best-effort,
-        // fire-and-forget — the state flip above already drove
-        // the UI; bootstrap is housekeeping.
-        Task {
-            await Self.bootstrapBackupBestEffort(
-                accountId: accountIdBytes,
-                accountIdB64: cached.accountIdB64,
-                exportKey: result.exportKey,
-                sessionToken: result.sessionToken,
-                phrase: trimmedPhrase,
-                context: "recover",
-                wholeStorageSnapshot: restoredSnapshot
-            )
-        }
+        // sees the same state we just rebuilt).
+        //
+        // G-10 (known-gaps): AWAITED, not a detached `Task`. The
+        // baseline re-seals the backup envelope under the
+        // freshly-rotated export-key material; until it lands the
+        // server still holds the pre-recover envelope. Awaiting
+        // folds the rewrite into the recover round-trip so the
+        // "stale envelope" window collapses to the upload latency.
+        // `bootstrapBackupBestEffort` is non-throwing (it logs +
+        // continues on any internal failure), so awaiting it cannot
+        // fail the recover itself.
+        await Self.bootstrapBackupBestEffort(
+            accountId: accountIdBytes,
+            accountIdB64: cached.accountIdB64,
+            exportKey: result.exportKey,
+            sessionToken: result.sessionToken,
+            phrase: trimmedPhrase,
+            context: "recover",
+            wholeStorageSnapshot: restoredSnapshot
+        )
         // 1.20c — best-effort push subscribe.
         Task { await Self.subscribePushBestEffort(context: "recover") }
     }
