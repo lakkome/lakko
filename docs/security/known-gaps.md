@@ -63,9 +63,24 @@ re-authorise, invariant #6) → freshness) returning the authorised
 new key. `#![forbid(unsafe_code)]`, bounded parser, 7
 unit/property tests (roundtrip, per-field tamper, stranger-forge,
 old-key-mismatch, expiry, 30-day-window, malformed envelope).
-**Remaining sprints:** carry the proof in a KT-log entry +
-inclusion-proof check (so the operator cannot equivocate); the
-auth / transparency service accepting + serving it; and the
+**Sprint 2 landed — the peer-side chain verifier.**
+`verify_supersession_chain(pinned, evidence, now)` ties the proof
+to the KT log: it checks the operator's `SignedRoot` signature →
+no-rollback vs the peer's last-seen root → the rotation
+`LogEntry`'s Merkle inclusion under that root → the entry is for
+this account (`username_hash` matches the pin) → a strictly newer
+version → the supersession proof (old key signed, fresh, ≤30 d)
+authorises **exactly** the entry's new key. So a rotation is both
+cryptographically authorised AND non-equivocable, and the peer
+re-pins to the returned `RotatedIdentity` without a blind TOFU.
+This addresses the sprint-1 review's malleability note
+structurally: the Merkle leaf commits to the
+`(username_hash, version, pubkey)` tuple, **not** the supersession
+signature bytes, so Ed25519 point-malleability cannot fork a log
+entry. Six new tests (valid chain / wrong account / non-newer
+version / proof-for-a-different-key / expired proof / forged
+root). **Remaining sprints:** the auth / transparency *service*
+accepting + serving the entries + proofs; and the per-platform
 client wiring — emit the proof on recover-rotation (signed by the
 pre-rotation identity) and verify it on a peer's pubkey change
 instead of a blind TOFU.

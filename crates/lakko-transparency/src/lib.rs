@@ -31,5 +31,6 @@ pub use log::{
 };
 pub use merkle::TreeHash;
 pub use supersession::{
-    verify_supersession, SupersessionProof, MAX_VALIDITY_SECS, SUPERSESSION_PROOF_LEN,
+    verify_supersession, verify_supersession_chain, PinnedIdentity, RotatedIdentity,
+    RotationEvidence, SupersessionProof, MAX_VALIDITY_SECS, SUPERSESSION_PROOF_LEN,
 };

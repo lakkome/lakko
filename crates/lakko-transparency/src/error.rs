@@ -73,6 +73,26 @@ pub enum Error {
     /// invariant #6: a leaked old key cannot indefinitely re-authorise).
     #[error("supersession proof validity window is invalid")]
     SupersessionInvalidValidityWindow,
+
+    /// A rotation log entry is for a different account than the one being
+    /// verified (its `username_hash` does not match) (G-4).
+    #[error("supersession log entry is for a different account")]
+    SupersessionEntryUsernameMismatch,
+
+    /// A rotation log entry's version is not strictly newer than the
+    /// version the peer already trusts (a downgrade / replay) (G-4).
+    #[error("supersession log entry version {entry} is not newer than pinned {pinned}")]
+    SupersessionEntryVersionNotNewer {
+        /// The version on the presented entry.
+        entry: u64,
+        /// The version the peer currently pins.
+        pinned: u64,
+    },
+
+    /// A supersession proof authorises a different key than the one in the
+    /// log entry it accompanies (G-4).
+    #[error("supersession proof authorises a different key than the log entry")]
+    SupersessionEntryKeyMismatch,
 }
 
 /// Convenience alias.

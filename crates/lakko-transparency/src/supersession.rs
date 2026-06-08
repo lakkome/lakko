@@ -58,6 +58,7 @@
 use lakko_crypto::signing::{Signature, SigningKey, VerifyingKey, PUBLIC_KEY_LEN, SIGNATURE_LEN};
 
 use crate::error::{Error, Result};
+use crate::log::{check_no_rollback, verify_inclusion, InclusionProof, LogEntry, SignedRoot};
 
 /// Domain separator mixed into the signing input.
 const DOMAIN: &[u8] = b"lakko/identity-supersession/v1";
@@ -244,6 +245,110 @@ pub fn verify_supersession(
     Ok(proof.new_pubkey)
 }
 
+/// The identity a peer should re-pin after a verified rotation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RotatedIdentity {
+    /// The authorised successor public key.
+    pub new_pubkey: [u8; PUBLIC_KEY_LEN],
+    /// The log-entry version it was pinned at.
+    pub version: u64,
+}
+
+/// What a peer currently pins for an account — its rotation trust anchor.
+pub struct PinnedIdentity<'a> {
+    /// BLAKE3 hash of the account's canonical username.
+    pub username_hash: &'a [u8; 32],
+    /// The identity key the peer currently trusts.
+    pub old_pubkey: &'a [u8; PUBLIC_KEY_LEN],
+    /// The KT-log version the peer pinned that key at.
+    pub version: u64,
+    /// The most recent signed root the peer has accepted (for the
+    /// no-rollback check against the newly-presented root).
+    pub last_seen_root: &'a SignedRoot,
+}
+
+/// The operator-served evidence for a single rotation.
+pub struct RotationEvidence<'a> {
+    /// The KT-log operator's verifying key (pinned out-of-band).
+    pub operator: &'a VerifyingKey,
+    /// The signed root the rotation entry is claimed to be under.
+    pub new_root: &'a SignedRoot,
+    /// The new log entry `(username_hash, new_pubkey, version)`.
+    pub new_entry: &'a LogEntry,
+    /// Its Merkle inclusion proof under `new_root`.
+    pub inclusion: &'a InclusionProof,
+    /// The wire-form [`SupersessionProof`] authorising the transition.
+    pub supersession_proof: &'a [u8],
+}
+
+/// Verify a complete identity-rotation chain against the KT log (G-4,
+/// invariant #6).
+///
+/// Given what the peer currently pins (`pinned`) and the operator's served
+/// `evidence`, confirm a rotation by checking, in order:
+///
+/// 1. the operator actually signed `new_root`;
+/// 2. no rollback vs the peer's last-seen root;
+/// 3. the new entry is included under `new_root` (Merkle inclusion proof);
+/// 4. the entry is for THIS account (its `username_hash` matches the pin);
+/// 5. the entry's version is strictly newer than the pinned version;
+/// 6. the supersession proof is signed by the pinned old key, fresh, within
+///    the 30-day window, and authorises **exactly** the entry's new key.
+///
+/// On success the peer may re-pin to the returned [`RotatedIdentity`]. The
+/// rotation is thus both **cryptographically authorised** (the old key signed
+/// the successor) and **non-equivocable** (the entry is committed in the
+/// append-only log under a signed root) — closing the blind-TOFU gap.
+///
+/// The entry's `username_hash` ties the proof to the account, so a proof
+/// minted for one account cannot be presented for another (step 4 + step 6's
+/// `old_pubkey == pinned` check). The Merkle leaf commits to the
+/// `(username_hash, version, pubkey)` tuple, not the supersession signature
+/// bytes, so the Ed25519 point-malleability of the signature cannot fork a
+/// log entry.
+///
+/// # Errors
+///
+/// Propagates the per-step verification errors:
+/// [`Error::SignedRootInvalid`] / [`Error::SignedRootRollback`] /
+/// [`Error::InclusionProofMismatch`] /
+/// [`Error::SupersessionEntryUsernameMismatch`] /
+/// [`Error::SupersessionEntryVersionNotNewer`] / the
+/// [`verify_supersession`] errors / [`Error::SupersessionEntryKeyMismatch`].
+pub fn verify_supersession_chain(
+    pinned: &PinnedIdentity,
+    evidence: &RotationEvidence,
+    now_unix_secs: i64,
+) -> Result<RotatedIdentity> {
+    // 1. The operator actually signed the newly-presented root.
+    evidence.new_root.verify(evidence.operator)?;
+    // 2. No rollback vs the last root the peer trusted.
+    check_no_rollback(pinned.last_seen_root, evidence.new_root)?;
+    // 3. The entry is included under the (now-verified) new root.
+    verify_inclusion(evidence.new_entry, evidence.inclusion, evidence.new_root)?;
+    // 4. The entry is for THIS account.
+    if &evidence.new_entry.username_hash != pinned.username_hash {
+        return Err(Error::SupersessionEntryUsernameMismatch);
+    }
+    // 5. Strictly newer version — no downgrade / replay of an old rotation.
+    if evidence.new_entry.version <= pinned.version {
+        return Err(Error::SupersessionEntryVersionNotNewer {
+            entry: evidence.new_entry.version,
+            pinned: pinned.version,
+        });
+    }
+    // 6. The supersession proof authorises exactly this entry's new key.
+    let authorised =
+        verify_supersession(evidence.supersession_proof, pinned.old_pubkey, now_unix_secs)?;
+    if evidence.new_entry.identity_pubkey.as_slice() != authorised.as_slice() {
+        return Err(Error::SupersessionEntryKeyMismatch);
+    }
+    Ok(RotatedIdentity {
+        new_pubkey: authorised,
+        version: evidence.new_entry.version,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -364,6 +469,210 @@ mod tests {
         assert!(matches!(
             SupersessionProof::open(&wire),
             Err(Error::SupersessionBadVersion(9))
+        ));
+    }
+
+    // ---- chain verification against the KT log (sprint 2) ----
+
+    use crate::log::InMemoryLog;
+
+    struct ChainFixture {
+        operator_pub: VerifyingKey,
+        username_hash: [u8; 32],
+        old: SigningKey,
+        old_pub: [u8; PUBLIC_KEY_LEN],
+        new_pub: [u8; PUBLIC_KEY_LEN],
+        last_seen: crate::log::SignedRoot,
+        new_root: crate::log::SignedRoot,
+        entry: LogEntry,
+        inclusion: InclusionProof,
+    }
+
+    /// A two-entry KT log: genesis `(alice, old_pub, v1)` then a rotation
+    /// `(alice, new_pub, v2)`, with a last-seen root taken after genesis and
+    /// a current root + inclusion proof for the rotation entry.
+    fn chain_fixture() -> ChainFixture {
+        let mut log = InMemoryLog::new(SigningKey::from_seed(&[0x77; 32]));
+        let operator_pub = log.operator_key();
+        let username_hash = lakko_crypto::hash::blake3(b"alice");
+        let old = SigningKey::from_seed(&[0x11; 32]);
+        let old_pub = old.verifying_key().to_bytes();
+        let new_pub = SigningKey::from_seed(&[0x22; 32]).verifying_key().to_bytes();
+
+        log.append(LogEntry {
+            username_hash,
+            identity_pubkey: old_pub.to_vec(),
+            version: 1,
+        });
+        let last_seen = log.sign_current_root(100);
+        let idx = log.append(LogEntry {
+            username_hash,
+            identity_pubkey: new_pub.to_vec(),
+            version: 2,
+        });
+        let new_root = log.sign_current_root(200);
+        let inclusion = log.prove_inclusion(idx).expect("inclusion proof");
+        let entry = log.entry(idx).expect("entry").clone();
+
+        ChainFixture {
+            operator_pub,
+            username_hash,
+            old,
+            old_pub,
+            new_pub,
+            last_seen,
+            new_root,
+            entry,
+            inclusion,
+        }
+    }
+
+    fn proof_for(f: &ChainFixture, new_key: [u8; PUBLIC_KEY_LEN]) -> Vec<u8> {
+        SupersessionProof::new(f.old_pub, new_key, 1_000, 1_000 + MAX_VALIDITY_SECS)
+            .sign(&f.old)
+            .to_vec()
+    }
+
+    #[test]
+    fn chain_verifies_a_valid_rotation() {
+        let f = chain_fixture();
+        let proof = proof_for(&f, f.new_pub);
+        let pinned = PinnedIdentity {
+            username_hash: &f.username_hash,
+            old_pubkey: &f.old_pub,
+            version: 1,
+            last_seen_root: &f.last_seen,
+        };
+        let evidence = RotationEvidence {
+            operator: &f.operator_pub,
+            new_root: &f.new_root,
+            new_entry: &f.entry,
+            inclusion: &f.inclusion,
+            supersession_proof: &proof,
+        };
+        let rotated =
+            verify_supersession_chain(&pinned, &evidence, 1_500).expect("valid chain verifies");
+        assert_eq!(rotated.new_pubkey, f.new_pub);
+        assert_eq!(rotated.version, 2);
+    }
+
+    #[test]
+    fn chain_rejects_an_entry_for_a_different_account() {
+        let f = chain_fixture();
+        let proof = proof_for(&f, f.new_pub);
+        let other_account = lakko_crypto::hash::blake3(b"mallory");
+        let pinned = PinnedIdentity {
+            username_hash: &other_account, // peer is verifying a DIFFERENT account
+            old_pubkey: &f.old_pub,
+            version: 1,
+            last_seen_root: &f.last_seen,
+        };
+        let evidence = RotationEvidence {
+            operator: &f.operator_pub,
+            new_root: &f.new_root,
+            new_entry: &f.entry,
+            inclusion: &f.inclusion,
+            supersession_proof: &proof,
+        };
+        assert!(matches!(
+            verify_supersession_chain(&pinned, &evidence, 1_500),
+            Err(Error::SupersessionEntryUsernameMismatch)
+        ));
+    }
+
+    #[test]
+    fn chain_rejects_a_non_newer_version() {
+        let f = chain_fixture();
+        let proof = proof_for(&f, f.new_pub);
+        let pinned = PinnedIdentity {
+            username_hash: &f.username_hash,
+            old_pubkey: &f.old_pub,
+            version: 2, // already at the entry's version — not a forward rotation
+            last_seen_root: &f.last_seen,
+        };
+        let evidence = RotationEvidence {
+            operator: &f.operator_pub,
+            new_root: &f.new_root,
+            new_entry: &f.entry,
+            inclusion: &f.inclusion,
+            supersession_proof: &proof,
+        };
+        assert!(matches!(
+            verify_supersession_chain(&pinned, &evidence, 1_500),
+            Err(Error::SupersessionEntryVersionNotNewer { entry: 2, pinned: 2 })
+        ));
+    }
+
+    #[test]
+    fn chain_rejects_a_proof_authorising_a_different_key() {
+        let f = chain_fixture();
+        // A valid proof, but it authorises some OTHER key, not the one the
+        // log entry actually rotates to.
+        let proof = proof_for(&f, [0xEE; PUBLIC_KEY_LEN]);
+        let pinned = PinnedIdentity {
+            username_hash: &f.username_hash,
+            old_pubkey: &f.old_pub,
+            version: 1,
+            last_seen_root: &f.last_seen,
+        };
+        let evidence = RotationEvidence {
+            operator: &f.operator_pub,
+            new_root: &f.new_root,
+            new_entry: &f.entry,
+            inclusion: &f.inclusion,
+            supersession_proof: &proof,
+        };
+        assert!(matches!(
+            verify_supersession_chain(&pinned, &evidence, 1_500),
+            Err(Error::SupersessionEntryKeyMismatch)
+        ));
+    }
+
+    #[test]
+    fn chain_rejects_an_expired_proof() {
+        let f = chain_fixture();
+        let proof = proof_for(&f, f.new_pub); // expires at 1000 + 30d
+        let pinned = PinnedIdentity {
+            username_hash: &f.username_hash,
+            old_pubkey: &f.old_pub,
+            version: 1,
+            last_seen_root: &f.last_seen,
+        };
+        let evidence = RotationEvidence {
+            operator: &f.operator_pub,
+            new_root: &f.new_root,
+            new_entry: &f.entry,
+            inclusion: &f.inclusion,
+            supersession_proof: &proof,
+        };
+        assert!(matches!(
+            verify_supersession_chain(&pinned, &evidence, 1_000 + MAX_VALIDITY_SECS + 1),
+            Err(Error::SupersessionExpired)
+        ));
+    }
+
+    #[test]
+    fn chain_rejects_a_forged_root() {
+        let f = chain_fixture();
+        let proof = proof_for(&f, f.new_pub);
+        // A peer that pins a DIFFERENT operator key rejects the root sig.
+        let wrong_operator = SigningKey::from_seed(&[0xAA; 32]).verifying_key();
+        let pinned = PinnedIdentity {
+            username_hash: &f.username_hash,
+            old_pubkey: &f.old_pub,
+            version: 1,
+            last_seen_root: &f.last_seen,
+        };
+        let evidence = RotationEvidence {
+            operator: &wrong_operator,
+            new_root: &f.new_root,
+            new_entry: &f.entry,
+            inclusion: &f.inclusion,
+            supersession_proof: &proof,
+        };
+        assert!(matches!(
+            verify_supersession_chain(&pinned, &evidence, 1_500),
+            Err(Error::SignedRootInvalid)
         ));
     }
 }
