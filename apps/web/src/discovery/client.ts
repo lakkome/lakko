@@ -562,11 +562,24 @@ export class DiscoveryClient {
    * `INSERT … ON DUPLICATE KEY UPDATE`. Calling this on every
    * login with a deterministically-derived Identity (1.16d3b2)
    * is a cheap no-op when the keys haven't changed.
+   *
+   * G-4 (ADR-0016): on an AccountIdentity rotation (recover) the
+   * caller passes `supersessionProof` — the old-key-signed proof
+   * bridging old→new. It rides in the SAME request as the new
+   * keys (ADR-0016 rule #1, atomic emit), and the server stores
+   * it opaquely (invariant #2). Omitting it (the signup / login /
+   * passkey paths) clears any previously-stored proof server-side,
+   * which is exactly the "non-rotation re-upload" behaviour.
+   *
+   * @param supersessionProof  Raw proof bytes (from
+   *        `signSupersessionProof`) or a pre-base64'd string.
+   *        Omit on non-rotation uploads.
    */
   async uploadIdentityBundle(
     accountId: Uint8Array,
     signaturePubkey: Uint8Array,
     x25519Pubkey: Uint8Array,
+    supersessionProof?: Uint8Array | string,
   ): Promise<void> {
     if (accountId.length !== 16) {
       throw new DiscoveryClientArgError("accountId must be 16 bytes");
@@ -582,6 +595,19 @@ export class DiscoveryClient {
       );
     }
 
+    // Normalise the optional proof to a base64 string for the
+    // wire (the field is `supersession_proof?: string`). A raw
+    // `Uint8Array` gets encoded here; a string is passed through
+    // as-is (already base64). `undefined` stays `undefined` so the
+    // field is omitted entirely (server clears the stored proof).
+    let proofB64: string | undefined;
+    if (supersessionProof !== undefined) {
+      proofB64 =
+        typeof supersessionProof === "string"
+          ? supersessionProof
+          : base64Encode(supersessionProof);
+    }
+
     const challenge = await this.fetchChallenge();
     const pow = await solvePow(challenge.seed, challenge.effort_bits);
 
@@ -590,6 +616,7 @@ export class DiscoveryClient {
       account_id: base64Encode(accountId),
       signature_pubkey: base64Encode(signaturePubkey),
       x25519_pubkey: base64Encode(x25519Pubkey),
+      ...(proofB64 !== undefined ? { supersession_proof: proofB64 } : {}),
     });
     if (!resp.ok) {
       throw new DiscoveryHttpError(

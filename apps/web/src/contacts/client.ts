@@ -43,13 +43,15 @@
  */
 import { loadWasm } from "../wasm";
 import { DiscoveryClient } from "../discovery/client";
-import { base64Decode } from "../auth/account-id";
+import { base64Decode, base64Encode } from "../auth/account-id";
 import { DsClient } from "../ds/client";
 import type { IdentitySecrets } from "../auth/AuthContext";
 import type {
   Group as WasmGroup,
   Identity as WasmIdentity,
 } from "../../wasm/lakko_ffi_wasm";
+import type { IdentityFetchResponse } from "../discovery/wire";
+import { readPin, setPin } from "./local-store";
 import {
   KIND_CONTACT_ACK,
   KIND_CONTACT_REQUEST,
@@ -245,6 +247,87 @@ export class ContactsError extends Error {
   }
 }
 
+/**
+ * G-4 (ADR-0016) — thrown when a peer's fetched discovery
+ * identity bundle carries an AccountIdentity `signature_pubkey`
+ * that DIFFERS from the locally-pinned key AND the change cannot
+ * be authorised by a valid supersession proof.
+ *
+ * This is the **fail-closed** path (ADR-0016 rule #2): we refuse
+ * to send a ContactRequest / start a group / add a member to the
+ * unverified new key. The UI is expected to catch this and prompt
+ * the user to re-verify the peer **out of band** (compare safety
+ * numbers, re-scan a QR, etc.) before proceeding. We never
+ * blind-TOFU a CHANGED key.
+ *
+ * `reason` discriminates the failure mode for diagnostics — the
+ * UX is the same OOB-reverify prompt regardless.
+ */
+export type SupersessionRefusedReason =
+  /** The bundle carried no `supersession_proof` at all. */
+  | "proof-absent"
+  /** `verifySupersession` threw (malformed / wrong-old-key /
+   *  expired / out-of-range window). */
+  | "proof-invalid"
+  /** The proof verified but authorised a DIFFERENT key than the
+   *  one the bundle actually served (defence in depth). */
+  | "key-mismatch"
+  /** The marker would move backwards — a within-window rollback
+   *  to an older successor (rule #4). */
+  | "marker-backward";
+
+export class SupersessionRefused extends Error {
+  override name = "SupersessionRefused";
+  constructor(
+    public readonly reason: SupersessionRefusedReason,
+    /** base64 of the account_id whose key change was refused. */
+    public readonly accountIdB64: string,
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
+/** Fixed serialized length of a supersession proof — mirrors
+ *  `lakko_transparency::supersession::SUPERSESSION_PROOF_LEN`
+ *  (`version(1) ‖ old(32) ‖ new(32) ‖ issued(8) ‖ expires(8) ‖
+ *  sig(64)` = 145). */
+const SUPERSESSION_PROOF_LEN = 1 + 32 + 32 + 8 + 8 + 64;
+/** Byte offset of the big-endian i64 `expires_at` field within a
+ *  supersession proof: after version(1) + old(32) + new(32) +
+ *  issued(8). */
+const SUPERSESSION_EXPIRES_AT_OFFSET = 1 + 32 + 32 + 8;
+
+/**
+ * Read the big-endian i64 `expires_at_unix_secs` field out of a
+ * supersession proof's wire bytes (G-4). Used ONLY after
+ * `verifySupersession` has authenticated the proof, so the parse
+ * runs on trusted, fixed-length data — we still bound-check the
+ * length defensively.
+ *
+ * Returns the value as a JS `number`. Unix-second timestamps are
+ * ~1.7e9 (and the verifier caps the window at 30 days from issue),
+ * well within `Number.MAX_SAFE_INTEGER`, so no precision is lost.
+ */
+function readProofExpiresAtSecs(proofBytes: Uint8Array): number {
+  if (proofBytes.length < SUPERSESSION_PROOF_LEN) {
+    // Should be unreachable — the verifier already accepted these
+    // bytes — but never index past the buffer.
+    throw new Error(
+      `supersession proof too short (${proofBytes.length} bytes)`,
+    );
+  }
+  const view = new DataView(
+    proofBytes.buffer,
+    proofBytes.byteOffset,
+    proofBytes.byteLength,
+  );
+  // `getBigInt64` reads a signed 64-bit big-endian integer at the
+  // expires_at offset; convert to a JS number for the marker store.
+  const expiresBig = view.getBigInt64(SUPERSESSION_EXPIRES_AT_OFFSET, false);
+  return Number(expiresBig);
+}
+
 export class ContactsClient {
   private readonly identityProvider: (() => WasmIdentity | null) | undefined;
   private readonly onPersist: (() => Promise<void>) | undefined;
@@ -299,6 +382,136 @@ export class ContactsClient {
   }
 
   /**
+   * G-4 (ADR-0016) — verify a freshly-fetched peer identity
+   * bundle's AccountIdentity key against the local pin, re-pinning
+   * (via a supersession proof) when the key rotated. MUST be
+   * called after every `discovery.identityFetch` and BEFORE the
+   * bundle's keys are used to send a ContactRequest / start a
+   * group / add a member.
+   *
+   * Decision table (ADR-0016 rule #2, fail-closed):
+   *   1. No existing pin → TOFU-pin the fetched key (marker 0).
+   *      Trust-on-first-use is unchanged for a first observation.
+   *   2. Pin matches the fetched `signature_pubkey` → proceed (no
+   *      key change; the common steady-state case).
+   *   3. Pin DIFFERS → REQUIRE `bundle.supersession_proof`:
+   *        a. absent → throw `SupersessionRefused("proof-absent")`.
+   *        b. `verifySupersession(proof, pinnedOldKey, now)` throws
+   *           → `SupersessionRefused("proof-invalid")`.
+   *        c. the verifier's authorised new key !==
+   *           `bundle.signature_pubkey` → `SupersessionRefused(
+   *           "key-mismatch")` (defence in depth — the proof must
+   *           authorise exactly the served key).
+   *        d. re-pin advancing the monotonic marker to the proof's
+   *           expiry; a backward marker → `SupersessionRefused(
+   *           "marker-backward")`.
+   *      Only on a clean verify do we proceed with the new key.
+   *
+   * NEVER blind-TOFU a CHANGED key — that is the whole point of
+   * the gate.
+   *
+   * @param accountId  The peer's raw 16-byte account_id (the
+   *                   stable pin key, NOT the pubkey — rule #3).
+   * @param bundle     The fetched `IdentityFetchResponse`.
+   * @throws `SupersessionRefused` on any fail-closed branch.
+   */
+  private async verifyBundleAccountKey(
+    accountId: Uint8Array,
+    bundle: IdentityFetchResponse,
+  ): Promise<void> {
+    const accountIdB64 = base64Encode(accountId);
+    const fetchedPubkeyB64 = bundle.signature_pubkey;
+
+    const existing = readPin(accountIdB64);
+
+    // Case 1 — first-ever observation. TOFU-pin and proceed.
+    if (existing === undefined) {
+      setPin(accountIdB64, fetchedPubkeyB64, 0);
+      return;
+    }
+
+    // Case 2 — unchanged key. Nothing to verify.
+    if (existing.pinnedSignaturePubkeyB64 === fetchedPubkeyB64) {
+      return;
+    }
+
+    // Case 3 — the AccountIdentity key changed. A proof is now
+    // mandatory; absence is an immediate fail-closed refusal.
+    if (
+      bundle.supersession_proof === undefined ||
+      bundle.supersession_proof.length === 0
+    ) {
+      throw new SupersessionRefused(
+        "proof-absent",
+        accountIdB64,
+        "the peer's account key changed and no supersession proof " +
+          "was provided — refusing to trust the new key. Please " +
+          "re-verify this contact out of band.",
+      );
+    }
+
+    const wasm = await loadWasm();
+    const proofBytes = base64Decode(bundle.supersession_proof);
+    const pinnedOldPubkey = base64Decode(existing.pinnedSignaturePubkeyB64);
+    const nowSecs = BigInt(Math.floor(Date.now() / 1000));
+
+    // The verifier returns the authorised NEW pubkey, or THROWS on
+    // a malformed / wrong-old-key / expired / out-of-window proof.
+    let authorisedNewPubkey: Uint8Array;
+    try {
+      authorisedNewPubkey = wasm.verifySupersession(
+        proofBytes,
+        pinnedOldPubkey,
+        nowSecs,
+      );
+    } catch (err) {
+      throw new SupersessionRefused(
+        "proof-invalid",
+        accountIdB64,
+        `the peer's account key changed and the supersession proof ` +
+          `did not verify against the pinned key (${String(err)}) — ` +
+          `refusing the new key. Please re-verify out of band.`,
+      );
+    }
+
+    // Defence in depth — the proof must authorise EXACTLY the key
+    // the bundle served. A proof that verifies but names a third
+    // key is rejected (a malicious server splicing an unrelated
+    // valid proof onto a substituted key).
+    const authorisedNewPubkeyB64 = base64Encode(authorisedNewPubkey);
+    if (authorisedNewPubkeyB64 !== fetchedPubkeyB64) {
+      throw new SupersessionRefused(
+        "key-mismatch",
+        accountIdB64,
+        "the supersession proof verified but authorised a different " +
+          "key than the bundle served — refusing. Please re-verify " +
+          "out of band.",
+      );
+    }
+
+    // Advance the monotonic marker (ADR-0016 rule #4) to the
+    // proof's own `expires_at`. A genuine later rotation carries a
+    // strictly-newer `issued_at` (hence a newer `expires_at` for a
+    // fixed emit window), so a stale older successor's proof —
+    // whose `expires_at` predates the current marker — is refused.
+    // Re-observing the SAME transition re-pins at the same marker
+    // (`>=`, allowed). We read `expires_at` from the already-
+    // verified proof bytes (the verifier confirmed the signature
+    // over exactly these fields, so the parse is on trusted data).
+    const proofExpiresAt = readProofExpiresAtSecs(proofBytes);
+    const result = setPin(accountIdB64, fetchedPubkeyB64, proofExpiresAt);
+    if (result === "rejected-backward") {
+      throw new SupersessionRefused(
+        "marker-backward",
+        accountIdB64,
+        "the supersession proof would move the rotation marker " +
+          "backwards (an older successor) — refusing. Please " +
+          "re-verify out of band.",
+      );
+    }
+  }
+
+  /**
    * Send a `ContactRequest` envelope to `@recipientUsername`,
    * sealed under the recipient's published X25519 key.
    *
@@ -343,6 +556,13 @@ export class ContactsClient {
     if (bundle === null) {
       throw ContactsError.noIdentityBundle(recipientAccountId);
     }
+    // G-4 (ADR-0016) — verify the recipient's AccountIdentity key
+    // against the local pin BEFORE using it. TOFU-pins on first
+    // contact; on a changed key, REQUIRES + verifies a supersession
+    // proof and re-pins. Throws `SupersessionRefused` (fail-closed)
+    // on a changed key with no valid proof — the UI surfaces an
+    // OOB re-verify prompt. We never blind-TOFU a changed key.
+    await this.verifyBundleAccountKey(recipientAccountId, bundle);
     const recipientSignaturePub = base64Decode(bundle.signature_pubkey);
     const recipientX25519Pub = base64Decode(bundle.x25519_pubkey);
 
@@ -905,6 +1125,10 @@ export class ContactsClient {
     if (bundle === null) {
       throw ContactsError.noIdentityBundle(lookup.account);
     }
+    // G-4 (ADR-0016) — gate the group-init key the same way as the
+    // contact-request path: TOFU on first sight, verified re-pin on
+    // a key change, fail-closed (`SupersessionRefused`) otherwise.
+    await this.verifyBundleAccountKey(lookup.account, bundle);
     const recipientSignaturePubkey = base64Decode(bundle.signature_pubkey);
 
     const out = await this.startGroupWith(
@@ -1139,6 +1363,11 @@ export class ContactsClient {
     if (bundle === null) {
       throw ContactsError.noIdentityBundle(lookup.account);
     }
+    // G-4 (ADR-0016) — gate the new member's AccountIdentity key
+    // through the pin store before adding them: TOFU on first
+    // sight, verified re-pin on a key change, fail-closed
+    // (`SupersessionRefused`) on a changed key with no valid proof.
+    await this.verifyBundleAccountKey(lookup.account, bundle);
     const recipientSignaturePubkey = base64Decode(bundle.signature_pubkey);
 
     const out = await this.addMemberToGroup(

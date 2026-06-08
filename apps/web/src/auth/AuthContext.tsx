@@ -75,7 +75,7 @@ import {
   WebauthnUnsupportedError,
   WebauthnUserCancelledError,
 } from "./webauthn-client";
-import { loadWasm } from "../wasm";
+import { loadWasm, type Wasm } from "../wasm";
 import {
   DiscoveryClient,
   DiscoveryHttpError,
@@ -801,6 +801,24 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       const wasm = await loadWasm();
       const mnemonic = wasm.RecoveryMnemonic.fromPhrase(mnemonicPhrase);
       const seed = mnemonic.toSeed();
+
+      // G-4 (ADR-0016) — capture the OLD export key BEFORE the
+      // recover rotates the device key (L~817) and overwrites the
+      // cached export key (L~842). The old AccountIdentity Ed25519
+      // key is what signs the supersession proof bridging old→new;
+      // without the old key we cannot mint a proof, and ADR-0016
+      // rule #1 (atomic emit-or-abort) then forbids publishing the
+      // new keys at all on the rotation path.
+      //
+      // Two sources, in order: the in-memory session secrets (set
+      // if the user recovered from an active session), then the
+      // IDB-cached export key unwrapped under the still-current
+      // (pre-rotation) device key. Either yields the same 32 bytes.
+      const oldExportKey = await captureOldExportKey(
+        cached.accountIdB64,
+        identitySecrets(),
+      );
+
       try {
         const accountIdBytes = base64Decode(cached.accountIdB64);
         const result = await client.recover(
@@ -893,11 +911,62 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         // (the recovered Identity has the same long-lived
         // pubkeys, but the KeyPackage's init key is new and
         // its private bytes live in the canonical provider).
-        try {
-          await uploadIdentityBundle(discovery, accountIdBytes, canonical);
-        } catch (err) {
+        //
+        // G-4 (ADR-0016) — ATOMIC emit-or-abort (rule #1). On
+        // recover the AccountIdentity Ed25519 key rotates, so a
+        // peer that pinned the OLD key needs a supersession proof
+        // to bridge to the new one without a blind TOFU. We mint
+        // the proof from the OLD export key (captured above) and
+        // the NEW one, then publish `{new keys + proof}` in a
+        // single request. If we CANNOT mint the proof (the old
+        // export key was unavailable, or the sign call throws),
+        // we MUST NOT publish the new keys without it — that is a
+        // self-inflicted downgrade (every peer would see a changed
+        // key with no proof and fail closed). So we skip the
+        // bundle upload entirely and leave the OLD bundle live;
+        // the user can re-run recover from a device that still has
+        // the old export key, or the peers fall back to OOB
+        // re-verify. The KeyPackage refresh is decoupled below so
+        // an abort here doesn't strand MLS init keys.
+        const supersessionProof = await mintSupersessionProof(
+          wasm,
+          oldExportKey,
+          result.exportKey,
+        );
+        if (supersessionProof !== null) {
+          try {
+            await uploadIdentityBundle(
+              discovery,
+              accountIdBytes,
+              canonical,
+              supersessionProof,
+            );
+          } catch (err) {
+            // eslint-disable-next-line no-console
+            console.warn("post-recover identity bundle upload failed", err);
+          }
+        } else {
           // eslint-disable-next-line no-console
-          console.warn("post-recover identity bundle upload failed", err);
+          console.warn(
+            "post-recover: no mintable supersession proof (old export " +
+              "key unavailable on this device) — SKIPPING the identity " +
+              "bundle re-upload to avoid publishing rotated keys without " +
+              "a proof (ADR-0016 rule #1, atomic emit). Refreshing the " +
+              "KeyPackage only; the old bundle stays live.",
+          );
+          try {
+            // Still refresh the MLS KeyPackage so peers can start
+            // new groups — the KeyPackage carries no AccountIdentity
+            // rotation state, so publishing it is not a downgrade.
+            const keyPackageBytes = canonical.createKeyPackage();
+            await discovery.uploadKeyPackage(accountIdBytes, keyPackageBytes);
+          } catch (err) {
+            // eslint-disable-next-line no-console
+            console.warn(
+              "post-recover KeyPackage-only refresh failed",
+              err,
+            );
+          }
         }
         try {
           await chats.persistSnapshot(cached.accountIdB64);
@@ -1275,11 +1344,20 @@ async function hydrateFromStorage(): Promise<{
  * caller to pass the **canonical** Identity that ChatProvider
  * is holding — so the freshly-generated init / leaf private
  * keys land in the provider we'll snapshot at persist time.
+ *
+ * G-4 (ADR-0016): `supersessionProof`, when present, is the
+ * old-key-signed proof bridging an AccountIdentity rotation
+ * (recover). It threads straight into the discovery
+ * `uploadIdentityBundle` call so the new keys + proof ship in the
+ * same request (ADR-0016 rule #1, atomic emit). The signup /
+ * login / passkey callers pass nothing — a normal upload clears
+ * any stale server-side proof.
  */
 async function uploadIdentityBundle(
   discovery: DiscoveryClient,
   accountId: Uint8Array,
   identity: WasmIdentity,
+  supersessionProof?: Uint8Array | string,
 ): Promise<void> {
   // 1.16e2: generate a fresh KeyPackage. RFC 9420 forward
   // secrecy on new groups argues for one-shot init_keys; in
@@ -1298,9 +1376,90 @@ async function uploadIdentityBundle(
       accountId,
       identity.signaturePublicKey,
       identity.x25519PublicKey,
+      supersessionProof,
     ),
     discovery.uploadKeyPackage(accountId, keyPackageBytes),
   ]);
+}
+
+/** G-4 (ADR-0016) emit window. The supersession proof is valid
+ *  for 14 days from issue — well under the verifier's 30-day
+ *  `MAX_VALIDITY_SECS` ceiling (ADR-0016 rule #5), which bounds
+ *  replay without widening the hard cap. */
+const SUPERSESSION_EMIT_WINDOW_SECS = 14 * 24 * 60 * 60; // 1_209_600
+
+/**
+ * G-4 (ADR-0016) — recover the OLD OPAQUE export key on the
+ * rotation path, BEFORE the recover flow rotates the device key
+ * and overwrites the cached export key. This is the seed for the
+ * OLD AccountIdentity Ed25519 key that signs the supersession
+ * proof.
+ *
+ * Sources, in order of preference:
+ *   1. The in-memory session secrets — present when the user
+ *      recovered from an active session.
+ *   2. The IDB-cached export key, unwrapped under the
+ *      still-current (pre-rotation) device root key.
+ *
+ * Returns `null` when neither is available (a cold device that
+ * never cached the key, or a device-key/ciphertext mismatch). A
+ * `null` here makes the caller abort the bundle re-upload per the
+ * atomic-emit rule — we never publish rotated keys with no proof.
+ */
+async function captureOldExportKey(
+  accountIdB64: string,
+  sessionSecrets: IdentitySecrets | null,
+): Promise<Uint8Array | null> {
+  if (sessionSecrets !== null && sessionSecrets.exportKey.length === 32) {
+    return sessionSecrets.exportKey;
+  }
+  let oldDeviceKey: CryptoKey | null;
+  try {
+    oldDeviceKey = await getDeviceKey(accountIdB64);
+  } catch {
+    oldDeviceKey = null;
+  }
+  if (oldDeviceKey === null) return null;
+  try {
+    return await getExportKey(accountIdB64, oldDeviceKey);
+  } catch {
+    // Device key rotated / ciphertext mismatch — treat as "no old
+    // key available" and let the caller fail closed.
+    return null;
+  }
+}
+
+/**
+ * G-4 (ADR-0016) — mint the supersession proof bridging the OLD
+ * AccountIdentity to the NEW one, given both OPAQUE export keys.
+ *
+ * Derives each identity's Ed25519 seed via `Identity.fromSeed`
+ * (the proof's embedded old key is derived internally from the
+ * old seed, so it always matches the signer), then calls
+ * `signSupersessionProof` over a 14-day window (rule #5).
+ *
+ * Returns the raw proof bytes, or `null` when the proof cannot be
+ * minted — either `oldExportKey` is absent (cold device) or the
+ * sign call throws. The caller treats `null` as "abort the
+ * rotation upload" (rule #1).
+ */
+async function mintSupersessionProof(
+  wasm: Wasm,
+  oldExportKey: Uint8Array | null,
+  newExportKey: Uint8Array,
+): Promise<Uint8Array | null> {
+  if (oldExportKey === null) return null;
+  try {
+    const oldSeed = wasm.Identity.fromSeed(oldExportKey).ed25519Seed;
+    const newSeed = wasm.Identity.fromSeed(newExportKey).ed25519Seed;
+    const nowSecs = BigInt(Math.floor(Date.now() / 1000));
+    const expiresSecs = nowSecs + BigInt(SUPERSESSION_EMIT_WINDOW_SECS);
+    return wasm.signSupersessionProof(oldSeed, newSeed, nowSecs, expiresSecs);
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.warn("supersession proof mint failed", err);
+    return null;
+  }
 }
 
 /**
