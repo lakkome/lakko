@@ -83,8 +83,8 @@ pub mod push;
 pub mod sframe;
 pub mod sfu_signaling;
 pub mod shamir;
-pub mod supersession;
 pub mod storage;
+pub mod supersession;
 pub mod sync;
 
 // Phase 1.16f3 — wasm-bindgen-test smoke suite. Gated on BOTH

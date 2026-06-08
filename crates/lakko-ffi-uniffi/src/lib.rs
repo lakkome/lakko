@@ -2438,9 +2438,7 @@ pub fn accept_call_invite(
 
 /// Build the [`lakko_crypto::signing::SigningKey`] for an identity from its
 /// 32-byte Ed25519 seed (the bytes `Identity::ed25519_seed()` returns).
-fn signing_key_from_seed(
-    seed: &[u8],
-) -> Result<lakko_crypto::signing::SigningKey, FfiError> {
+fn signing_key_from_seed(seed: &[u8]) -> Result<lakko_crypto::signing::SigningKey, FfiError> {
     let arr: [u8; 32] = seed
         .try_into()
         .map_err(|_| FfiError::Identity("ed25519 seed must be 32 bytes".to_string()))?;
@@ -2920,8 +2918,7 @@ mod tests {
         let old_pub = ed25519_pub_of(&old);
         let now = 3_000_000_i64;
         let proof =
-            sign_supersession_proof(old.ed25519_seed(), new.ed25519_seed(), now, now + 60)
-                .unwrap();
+            sign_supersession_proof(old.ed25519_seed(), new.ed25519_seed(), now, now + 60).unwrap();
         assert!(verify_supersession(proof, old_pub, now + 1000).is_err());
     }
 
