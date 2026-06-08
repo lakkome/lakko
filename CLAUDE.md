@@ -266,8 +266,30 @@ curl -i http://127.0.0.1:8081/version  # → 200, JSON
 - [ ] Changes in `schemas/` are backwards-compatible (proto reserved fields, never delete numbers)
 - [ ] If security-relevant — a property test or fuzz target has been added
 
+## Specialized skills — routing (read BEFORE writing code)
+
+This repo ships domain-specialist skills under `.claude/skills/`. They carry the per-area invariants, build commands, and review checklists so you do not rediscover them each turn. **Routing is mandatory, not optional** — before editing files in an area, invoke the owning skill via the `Skill` tool so its SKILL.md loads into context. This OVERRIDES the default "just start editing" behavior.
+
+| When the task touches… | Invoke this skill FIRST |
+|---|---|
+| `crates/` or `services/` (general Rust) | `rust-core` |
+| `services/sfu/` or `crates/lakko-calls/` (SFU / media / SFrame) | `sfu-media` |
+| `apps/ios/` | `ios-client` |
+| `apps/android/` | `android-client` |
+| `apps/web/` | `web-client` |
+| `infra/` or deploy / ops | `infra-deploy` |
+| A task spanning >1 area, or unsure which area owns it | `lakko-dev` (coordinator — it classifies, routes, and sequences cross-cutting work) |
+| Reviewing security-sensitive changes (crypto / MLS / transport / auth) | `lakko-security` (run ONLY on explicit maintainer request — never auto-gate) |
+
+Rules:
+- **Single-domain task** → invoke the one owning skill, then do the work.
+- **Cross-cutting task** (e.g. a Rust change wired through FFI to all 3 clients) → invoke `lakko-dev` and let it sequence the work (schema → Rust core → FFI → parallel client fan-out → verify) via sub-agents.
+- The background skills (`rust-core`, `ios-client`, `android-client`, `web-client`, `sfu-media`, `infra-deploy`) are model-invocation only — YOU must call them; they do not self-trigger by path. Skipping the routing step is a process violation.
+- `lakko-security` is an explicit-request gate. You MAY remind the maintainer it is available when crypto/MLS/transport/auth is touched, but do NOT run it unprompted.
+
 ## Workflow for the AI agent
 
+- **Skill routing first** — before editing code, invoke the owning specialist skill per the routing table above (or `lakko-dev` for cross-cutting work). This is a hard step, not a suggestion.
 - **Plan mode** for architectural tasks (a new crate, a protocol change, a schema migration)
 - **TodoWrite** for multi-step tasks (>3 steps)
 - **Do not bake in future features** — write for the concrete task at hand. The spec roadmap lives in the plan; we implement phase by phase
