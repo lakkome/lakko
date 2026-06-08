@@ -23,9 +23,13 @@
 pub mod error;
 pub mod log;
 pub mod merkle;
+pub mod supersession;
 
 pub use error::{Error, Result};
 pub use log::{
     check_no_rollback, verify_inclusion, InMemoryLog, InclusionProof, LogEntry, SignedRoot,
 };
 pub use merkle::TreeHash;
+pub use supersession::{
+    verify_supersession, SupersessionProof, MAX_VALIDITY_SECS, SUPERSESSION_PROOF_LEN,
+};

@@ -38,7 +38,7 @@ lights it up.
 
 ## Multi-device
 
-### G-4: AccountIdentity rotation on password change has no KT-log supersession proof yet
+### G-4: AccountIdentity rotation on password change has no KT-log supersession proof yet — **primitive landed (sprint 1)**
 
 The recover flow rotates the exportKey → rotates the
 deterministic AccountIdentity. Today the old identity is
@@ -48,6 +48,27 @@ to publish a supersession proof to the KT log that
 attests the old key → new key transition for ≤ 30 days,
 so peers can verify the rotation without bouncing the
 trust.
+
+**Sprint 1 landed — the supersession proof primitive**
+(`crates/lakko-transparency/src/supersession.rs`). A compact
+fixed-layout Ed25519-signed blob
+`version‖old_pubkey(32)‖new_pubkey(32)‖issued_at(8 BE)‖expires_at(8 BE)‖sig(64)`
+(145 B) signed by the **old** identity key over the **new** key.
+`SupersessionProof::sign` (rotating side) + the strict
+`verify_supersession(bytes, trusted_old_pubkey, now)` (peer side:
+signature against the embedded old key → the embedded key equals
+the caller's trusted pin → a `<= 30-day` validity window
+([`MAX_VALIDITY_SECS`], so a leaked old key cannot indefinitely
+re-authorise, invariant #6) → freshness) returning the authorised
+new key. `#![forbid(unsafe_code)]`, bounded parser, 7
+unit/property tests (roundtrip, per-field tamper, stranger-forge,
+old-key-mismatch, expiry, 30-day-window, malformed envelope).
+**Remaining sprints:** carry the proof in a KT-log entry +
+inclusion-proof check (so the operator cannot equivocate); the
+auth / transparency service accepting + serving it; and the
+client wiring — emit the proof on recover-rotation (signed by the
+pre-rotation identity) and verify it on a peer's pubkey change
+instead of a blind TOFU.
 
 ROADMAP: Phase 2c (transparency log).
 
