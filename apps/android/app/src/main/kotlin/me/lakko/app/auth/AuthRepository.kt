@@ -973,17 +973,20 @@ public class AuthRepository(
                     "from snapshot at ${parsed.createdAtMs}, " +
                     "MLS snapshot ${parsed.wholeStorageSnapshot.size} bytes",
             )
-            // TODO(2a1d-followup): once the Android persistent
-            // contact store lands, apply `parsed.acceptedContacts` here
-            // via a contacts-merge hook.
+            // The returned `wholeStorageSnapshot` IS applied locally by the
+            // recover caller: it writes the blob to `IdentitySnapshotStore`
+            // before flipping to `AuthState.Session`, so `ChatRepository`'s
+            // rehydrate path restores the same MLS group state the
+            // upload-side device had (mirror of the iOS recover flow). The
+            // caller also re-publishes it on the next /backup PUT so a
+            // further device-recover sees it too.
             //
-            // TODO(2a3d6-followup): apply `parsed.wholeStorageSnapshot`
-            // to ChatRepository's Identity via an
-            // AppEnvironment-injected hook so the recovered
-            // device lands with the same MLS group state the
-            // upload-side device had. For now the snapshot is
-            // returned so the post-restore bootstrap re-publishes
-            // it on the next /backup PUT.
+            // TODO(2a1d-followup): the restored `parsed.acceptedContacts`
+            // are not yet merged into a persistent contact list — Android
+            // keeps the accepted-contacts set in memory and rebuilds it by
+            // re-polling the stranger inbox from cursor 0 on launch, so the
+            // restore-merge is an optimization, not a correctness gap. It
+            // lands with the Android contact-persistence sub-sprint.
             return parsed.wholeStorageSnapshot
         } finally {
             client.close()
