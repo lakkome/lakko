@@ -63,6 +63,7 @@
 #![forbid(unsafe_code)]
 
 mod call_jwt;
+mod device_authorize;
 mod opaque;
 mod pow;
 mod turn;
@@ -323,6 +324,14 @@ fn build_app(state: AppState) -> Router {
             "/auth/action/finish",
             post(webauthn_action::action_finish),
         )
+        // ADR-0018 factor (a) — mint a single-use device grant. Bearer-auth:
+        // the caller is the ALREADY-authenticated existing device
+        // authorizing a fresh device. PoW-gated inside the handler. The
+        // matching `/device/authorize/redeem` is anonymous (public router).
+        .route(
+            "/device/authorize/start",
+            post(device_authorize::start),
+        )
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
             webauthn::require_session,
@@ -378,6 +387,15 @@ fn build_app(state: AppState) -> Router {
         // the session token.
         .route("/webauthn/auth/start", post(webauthn::auth_start))
         .route("/webauthn/auth/finish", post(webauthn::auth_finish))
+        // ADR-0018 factor (a) — redeem a device grant for a session token.
+        // ANONYMOUS: the fresh device has no token yet (the whole point is
+        // to mint it). PoW-gated inside the handler; the grant token (held
+        // by the fresh device over the rendezvous channel) is the
+        // authorization.
+        .route(
+            "/device/authorize/redeem",
+            post(device_authorize::redeem),
+        )
         // Phase 3b4 forward — anonymous JWKS endpoint. The
         // public key is public; the SFU fetches it at
         // startup + refreshes every 24 h.

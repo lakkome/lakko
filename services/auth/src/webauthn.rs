@@ -740,6 +740,20 @@ pub(crate) fn spawn_state_pruner(pool: MySqlPool) -> tokio::task::JoinHandle<()>
                 Ok(_) => {},
                 Err(e) => tracing::warn!(error = %e, "webauthn_action_grants prune failed"),
             }
+            // ADR-0018 (factor (a)): sweep expired single-use device grants
+            // on the same timer. Redeemed grants are deleted on use; this
+            // catches the ones a /start minted but no /redeem ever consumed.
+            let device_grants =
+                sqlx::query("DELETE FROM device_grants WHERE expires_at < NOW(3)")
+                    .execute(&pool)
+                    .await;
+            match device_grants {
+                Ok(r) if r.rows_affected() > 0 => {
+                    tracing::debug!(rows = r.rows_affected(), "pruned expired device_grants");
+                },
+                Ok(_) => {},
+                Err(e) => tracing::warn!(error = %e, "device_grants prune failed"),
+            }
         }
     })
 }
@@ -916,6 +930,18 @@ pub(crate) enum ApiError {
     /// single-use grant was present. Surfaced as 403 so the client knows
     /// it must run `/auth/action/{start,finish}` first.
     ActionRequired,
+    /// ADR-0018 (device-authorization redeem): the presented credential
+    /// (a device grant token) did not match a live grant. Surfaced as a
+    /// GENERIC `401` so it is indistinguishable from "account does not
+    /// exist" / "grant expired" / "grant never existed" — the same
+    /// enumeration-safe shape an OPAQUE bad-credential login returns.
+    InvalidCredential,
+    /// ADR-0018: a PoW-gated endpoint in this module (`/device/authorize/*`)
+    /// rejected the proof. Delegates to [`crate::pow::PowError`]'s existing
+    /// `(StatusCode, String)` mapping so the HTTP response is byte-identical
+    /// to every other PoW-gated endpoint (400 bad encoding / 401 unknown,
+    /// expired, insufficient, invalid / 500 db).
+    Pow(crate::pow::PowError),
     /// 2a2b: catch-all for unrecoverable server-side errors
     /// (session-token issuance failures). The OPAQUE module
     /// folds the same case into a tuple-StatusCode; we keep an
@@ -935,6 +961,12 @@ impl IntoResponse for ApiError {
             Self::StateMissing => (StatusCode::GONE, "state-missing-or-expired"),
             Self::NoCredentials => (StatusCode::NOT_FOUND, "no-passkeys-for-account"),
             Self::ActionRequired => (StatusCode::FORBIDDEN, "action-authorization-required"),
+            Self::InvalidCredential => (StatusCode::UNAUTHORIZED, "invalid credentials"),
+            Self::Pow(e) => {
+                // Reuse PoW's own status+message mapping verbatim.
+                let (code, msg): (StatusCode, String) = e.into();
+                return (code, msg).into_response();
+            },
             Self::Internal => (StatusCode::INTERNAL_SERVER_ERROR, "internal"),
             Self::Db(e) => {
                 tracing::error!(error = %e, "webauthn db error");
@@ -950,5 +982,11 @@ impl IntoResponse for ApiError {
             },
         };
         (code, msg).into_response()
+    }
+}
+
+impl From<crate::pow::PowError> for ApiError {
+    fn from(e: crate::pow::PowError) -> Self {
+        Self::Pow(e)
     }
 }
