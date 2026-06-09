@@ -74,6 +74,11 @@ import {
   deleteDeviceIdentitySeed,
   ensureDeviceIdentitySeed,
 } from "./device-identity-store";
+import {
+  deleteAccountIdentitySeed,
+  getAccountIdentitySeed,
+  putAccountIdentitySeed,
+} from "./account-identity-seed-store";
 import { deleteDeviceGroupSnapshot } from "../devices/device-group-snapshot-store";
 import {
   WebauthnClient,
@@ -115,7 +120,18 @@ export type AuthState =
        *  the username so the login form can pre-fill it. */
       readonly cachedUsername?: string;
     }
-  | { readonly kind: "session"; readonly account: SessionAccount };
+  | { readonly kind: "session"; readonly account: SessionAccount }
+  /** ADR-0017 fresh-device fail-safe. The user authenticated
+   *  successfully (password or passkey ACCESS) but this device has
+   *  NO cached AccountIdentity (phrase) seed, so we cannot rebuild
+   *  the canonical identity. We MUST NOT derive it from the export
+   *  key (wrong identity now) nor silently mint a fresh one (breaks
+   *  every contact's pin). The UI renders a recovery-phrase prompt;
+   *  `provideRecoveryPhrase(phrase)` completes the session. */
+  | {
+      readonly kind: "needs-recovery-phrase";
+      readonly account: SessionAccount;
+    };
 
 /** Result handed back to the signup form so it can display the
  *  freshly-generated 24-word recovery passphrase exactly once. */
@@ -124,6 +140,21 @@ export interface SignupOutcome {
    *  to the user and require an explicit "I have written it down"
    *  acknowledgement before navigating away. */
   recoveryPhrase: string;
+}
+
+/** ADR-0017 — thrown by `provideRecoveryPhrase` when the typed
+ *  recovery phrase derives an AccountIdentity pubkey that does NOT
+ *  match the account's published bundle. Surfaced to the UI as
+ *  "that phrase doesn't match this account" — we refuse rather than
+ *  cache a forked identity that would break every contact's pin. */
+export class SupersessionPhraseMismatch extends Error {
+  constructor() {
+    super(
+      "That recovery phrase doesn't match this account's identity. " +
+        "Check the phrase, or pair an existing device instead.",
+    );
+    this.name = "SupersessionPhraseMismatch";
+  }
 }
 
 /** Identity secrets held in memory for the current session.
@@ -146,15 +177,26 @@ export interface SignupOutcome {
  *   * a WASM instance carries lifetime baggage and a heavy
  *     `free()` requirement;
  *   * downstream callers reconstruct an `Identity` on demand
- *     via `wasm.Identity.fromSeed(exportKey)` when needed —
- *     each reconstruction is sub-millisecond.
+ *     via `wasm.Identity.fromSeed(accountIdentitySeed)` when
+ *     needed (ADR-0017 — was `exportKey` pre-ADR-0017) — each
+ *     reconstruction is sub-millisecond.
  */
 export interface IdentitySecrets {
   /** Raw 16-byte UUIDv7. */
   readonly accountId: Uint8Array;
   /** OPAQUE password export key (64 bytes for `LakkoCipherSuite`).
-   *  Used as the seed for `Identity.fromSeed`. */
+   *  ADR-0017: NO LONGER the seed for the canonical AccountIdentity
+   *  — it is retained only as an auth factor and as the
+   *  device-root-key seed (`deriveDeviceRootKey`). */
   readonly exportKey: Uint8Array;
+  /** ADR-0017: the BIP39 recovery-phrase seed
+   *  (`RecoveryMnemonic.toSeed()`, 64 bytes). This is the seed for
+   *  the canonical AccountIdentity (`Identity.fromSeed`) — stable
+   *  across password changes and recovery, so the pubkey contacts
+   *  pin never churns on a routine recover. Every `fromSeed` site
+   *  that builds the canonical identity reads THIS, not
+   *  `exportKey`. */
+  readonly accountIdentitySeed: Uint8Array;
   /** Phase 1.5b: HMAC-SHA256 bearer token. Thread through every
    *  protected `lakko-svc-discovery` write via the
    *  `Authorization: Bearer <token>` header. */
@@ -195,13 +237,26 @@ export interface AuthApi {
    *  drives `AuthClient.recover` to rotate the server's password
    *  envelope, derives a fresh device root key from the new
    *  export key, persists it via the IDB pipeline, and flips
-   *  state to `session`. Unlike `login`, the recover path does
-   *  NOT do a discovery lookup — it requires the account_id to
-   *  already be cached on this device (cross-device recovery via
-   *  discovery is an outstanding follow-up; see the throw in the
-   *  method body). Throws on any failure — bad mnemonic, network,
-   *  server rejection, etc. */
-  recover(mnemonicPhrase: string, newPassword: string): Promise<void>;
+   *  state to `session`.
+   *
+   *  Resolves the account_id like `login`: a local cache hit, else
+   *  a `discovery.lookup(username)` round-trip — so recover works
+   *  on a FRESH device given the username + phrase. `username` is
+   *  required only when no account is cached on this device; when a
+   *  cached account exists it is optional (and the cached id wins).
+   *
+   *  ADR-0017: the canonical AccountIdentity is derived from the
+   *  (unchanged) BIP39 phrase seed, so a routine recover preserves
+   *  the identity — the supersession proof emit is SKIPPED because
+   *  the old and new account pubkeys are equal.
+   *
+   *  Throws on any failure — bad mnemonic, unknown username,
+   *  network, server rejection, etc. */
+  recover(
+    mnemonicPhrase: string,
+    newPassword: string,
+    username?: string,
+  ): Promise<void>;
   /** Phase 2a2c2 — sign in with a WebAuthn passkey on the SAME
    *  device the user previously logged in / signed up from.
    *
@@ -219,6 +274,14 @@ export interface AuthApi {
    *  auth-convenience, not a fresh-device onboarding path. The
    *  recovery phrase remains the only fresh-device entry route. */
   loginWithPasskey(): Promise<void>;
+  /** ADR-0017 fresh-device fail-safe completion. Called only while
+   *  the state is `needs-recovery-phrase`: the user typed their
+   *  recovery phrase, we derive the BIP39 seed, cache it under the
+   *  device key, rebuild the canonical AccountIdentity from it, and
+   *  flip to a full `session`. Throws on a bad / mismatched phrase
+   *  (the derived pubkey does not match the account's published
+   *  bundle) so the user cannot silently fork their identity. */
+  provideRecoveryPhrase(mnemonicPhrase: string): Promise<void>;
   /** Drop the in-memory session. Does NOT erase the localStorage
    *  cache or the IDB-stored device key — re-login on the same
    *  device should be cheap, and the device key remains usable
@@ -233,6 +296,24 @@ export interface AuthApi {
 }
 
 const AuthContext = createContext<AuthApi>();
+
+/** ADR-0017 fresh-device fail-safe: everything needed to finish a
+ *  session once the user supplies their recovery phrase. The auth
+ *  factor (password / passkey) already succeeded; only the
+ *  AccountIdentity (phrase) seed is missing on this device. */
+interface PendingRecovery {
+  readonly accountIdBytes: Uint8Array;
+  readonly accountIdB64: string;
+  /** OPAQUE export key from the just-completed auth — retained for
+   *  the device-key derivation + as the in-memory `exportKey`. */
+  readonly exportKey: Uint8Array;
+  /** The wrapping device key, already derived from `exportKey`, so
+   *  the supplied phrase seed can be cached without re-deriving. */
+  readonly deviceKey: CryptoKey;
+  readonly sessionToken: string;
+  readonly sessionExpiresAtMs: number;
+  readonly username: string;
+}
 
 const STORAGE_KEY = "lakko.auth.v1";
 
@@ -295,12 +376,73 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
   // session restore from IDB (the export key isn't persisted).
   const [identitySecrets, setIdentitySecrets] =
     createSignal<IdentitySecrets | null>(null);
+  // ADR-0017 fresh-device fail-safe: when a password / passkey
+  // auth succeeds but no AccountIdentity (phrase) seed is cached on
+  // this device, we stash everything needed to finish the session
+  // here and flip the state to `needs-recovery-phrase`. The UI then
+  // calls `provideRecoveryPhrase`, which reads this back.
+  const [pendingRecovery, setPendingRecovery] =
+    createSignal<PendingRecovery | null>(null);
 
   const client = new AuthClient();
   const discovery = new DiscoveryClient();
   // 1.16e5: drop active groups on logout/forgetDevice so MLS
   // state doesn't bleed across user sessions on the same tab.
   const chats = useChats();
+
+  /**
+   * ADR-0017 — finish a session once the canonical AccountIdentity
+   * (phrase) seed is in hand: build the canonical Identity from the
+   * seed, rehydrate MLS, refresh the published bundle, persist the
+   * snapshot, set the in-memory secrets, and flip to `session`.
+   * Shared by the warm same-device login / passkey paths and the
+   * fresh-device `provideRecoveryPhrase` completion.
+   */
+  async function finishCanonicalSession(args: {
+    wasm: Wasm;
+    accountIdentitySeed: Uint8Array;
+    accountIdBytes: Uint8Array;
+    accountIdB64: string;
+    exportKey: Uint8Array;
+    sessionToken: string;
+    sessionExpiresAtMs: number;
+    username: string;
+  }): Promise<void> {
+    const canonical = args.wasm.Identity.fromSeed(args.accountIdentitySeed);
+    chats.setIdentity(canonical);
+
+    await rehydrateMlsState(chats, args.accountIdB64);
+
+    try {
+      await uploadIdentityBundle(discovery, args.accountIdBytes, canonical);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("identity bundle refresh failed", err);
+    }
+    try {
+      await chats.persistSnapshot(args.accountIdB64);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("post-login MLS snapshot failed", err);
+    }
+
+    setIdentitySecrets({
+      accountId: args.accountIdBytes,
+      exportKey: args.exportKey,
+      accountIdentitySeed: args.accountIdentitySeed,
+      sessionToken: args.sessionToken,
+      sessionExpiresAtMs: args.sessionExpiresAtMs,
+    });
+    setPendingRecovery(null);
+    setState({
+      kind: "session",
+      account: { accountId: args.accountIdB64, username: args.username },
+    });
+    void subscribeToPush().catch((err) => {
+      // eslint-disable-next-line no-console
+      console.warn("push subscribe failed", err);
+    });
+  }
 
   onMount(() => {
     // Phase 1.13c: hydrate both the AuthState AND the persisted
@@ -418,14 +560,50 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         console.warn("device-identity ensure (signup) failed", err);
       }
 
+      // ADR-0017: the canonical AccountIdentity is now derived
+      // from the stable BIP39 recovery-phrase seed, NOT the
+      // password export key — so a future recover / password
+      // change preserves the identity. We need the phrase here,
+      // so fail loud BEFORE deriving the identity if it is absent
+      // (1.16c3c1 always enrols recovery; a missing phrase is a
+      // code-path bypass we must not navigate the user past).
+      if (result.recoveryPhrase === undefined) {
+        throw new Error(
+          "internal: signup completed without a recovery phrase",
+        );
+      }
+      const wasm = await loadWasm();
+      const mnemonic = wasm.RecoveryMnemonic.fromPhrase(
+        result.recoveryPhrase,
+      );
+      const accountIdentitySeed = mnemonic.toSeed();
+      mnemonic.free();
+
+      // ADR-0017: cache the AccountIdentity (phrase) seed under the
+      // device root key — same wrapping as the export-key cache — so
+      // a same-device login / passkey-resume can rebuild the
+      // canonical identity without re-entering the phrase.
+      // Best-effort: a persistence failure just means a future
+      // fresh-resume on this device will fall into the
+      // "needs recovery phrase" fail-safe.
+      try {
+        await putAccountIdentitySeed(
+          accountIdB64,
+          accountIdentitySeed,
+          deviceKey,
+        );
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn("account-identity-seed persist (signup) failed", err);
+      }
+
       // 1.16e6c1: build the canonical session-wide Identity
       // before uploading the KeyPackage so the freshly-minted
       // init/leaf private keys land in the provider we'll
       // snapshot. ChatProvider holds the reference for the
       // lifetime of the session and will free() it on
-      // logout/forgetDevice.
-      const wasm = await loadWasm();
-      const canonical = wasm.Identity.fromSeed(result.exportKey);
+      // logout/forgetDevice. ADR-0017: seeded from the phrase seed.
+      const canonical = wasm.Identity.fromSeed(accountIdentitySeed);
       chats.setIdentity(canonical);
 
       // 1.16e6c3: rehydrate prior MLS state if any. For signup
@@ -457,11 +635,14 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
 
       // 1.16d3c: hand off the export key for in-memory use by
       // ContactsClient + similar. Cleared on logout.
+      // ADR-0017: also carry the phrase seed — the canonical
+      // identity seed downstream callers rebuild from.
       // Phase 1.5b: also stash the bearer token so DiscoveryClient
       // can thread it through every protected write.
       setIdentitySecrets({
         accountId: result.accountId,
         exportKey: result.exportKey,
+        accountIdentitySeed,
         sessionToken: result.sessionToken,
         sessionExpiresAtMs: result.sessionExpiresAtMs,
       });
@@ -469,15 +650,6 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         kind: "session",
         account: { accountId: accountIdB64, username: normalisedUsername },
       });
-      if (result.recoveryPhrase === undefined) {
-        // 1.16c3c1 always enrols recovery — a missing phrase here
-        // means a code-path bypass we want to fail loud on, not
-        // silently navigate the user past their only recovery
-        // option.
-        throw new Error(
-          "internal: signup completed without a recovery phrase",
-        );
-      }
       // Phase 2a1c: post-auth backup bootstrap. Caches the
       // phrase under the device root key + posts a baseline
       // backup envelope to /backup. Best-effort end-to-end; the
@@ -580,63 +752,60 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       }
       savePersisted({ v: 1, accountIdB64, username: resolvedUsername });
 
-      // 1.16e6c1: build the canonical Identity for this session
-      // (see signup() above for the rationale). ChatProvider
-      // free()s any prior canonical Identity automatically.
+      // ADR-0017: the canonical AccountIdentity is seeded from the
+      // BIP39 phrase seed, NOT the export key. Read the cached seed
+      // (warm same-device path). If present, finish the session
+      // with it. If ABSENT (fresh device, or a device that only
+      // ever held the export key), we MUST NOT (a) derive the
+      // identity from the export key — that is the wrong identity
+      // now — nor (b) silently mint a fresh one — that breaks every
+      // contact's pin. Instead we flip to the `needs-recovery-phrase`
+      // fail-safe state and let the user supply their phrase.
       const wasm = await loadWasm();
-      const canonical = wasm.Identity.fromSeed(result.exportKey);
-      chats.setIdentity(canonical);
-
-      // 1.16e6c3: rehydrate prior MLS state from the IDB
-      // snapshot. This is the load case that justifies the
-      // entire 1.16e6 sub-sprint — same accountId on the same
-      // device picks up every active group from the prior
-      // session. Failures inside the helper are logged + best-
-      // effort; the user still gets a working authenticated
-      // session.
-      await rehydrateMlsState(chats, accountIdB64);
-
-      // 1.16d3b2: refresh the identity bundle on every login.
-      // Best-effort — a network blip here shouldn't block the
-      // user from getting into a session they already
-      // authenticated. The bundle is deterministic, so the
-      // next login will retry naturally.
+      let accountIdentitySeed: Uint8Array | null = null;
       try {
-        await uploadIdentityBundle(discovery, accountIdBytes, canonical);
+        accountIdentitySeed = await getAccountIdentitySeed(
+          accountIdB64,
+          deviceKey,
+        );
       } catch (err) {
-        // Surface as a console warning, not a thrown error.
+        // Decrypt failure (device key rotated, ciphertext tampered)
+        // — treat as "no cached seed" and fall into the fail-safe
+        // rather than the wrong-identity branch.
         // eslint-disable-next-line no-console
-        console.warn("identity bundle refresh failed", err);
+        console.warn("account-identity-seed decrypt failed (login)", err);
+        accountIdentitySeed = null;
       }
 
-      // 1.16e6c1: persist the freshly-uploaded KeyPackage's
-      // private key state. Best-effort.
-      try {
-        await chats.persistSnapshot(accountIdB64);
-      } catch (err) {
-        // eslint-disable-next-line no-console
-        console.warn("post-login MLS snapshot failed", err);
+      if (accountIdentitySeed === null) {
+        // Fresh-device fail-safe (ADR-0017). Auth succeeded; identity
+        // restore is pending the phrase. Stash the context and flip
+        // state — `provideRecoveryPhrase` finishes from here.
+        setPendingRecovery({
+          accountIdBytes,
+          accountIdB64,
+          exportKey: result.exportKey,
+          deviceKey,
+          sessionToken: result.sessionToken,
+          sessionExpiresAtMs: result.sessionExpiresAtMs,
+          username: resolvedUsername,
+        });
+        setState({
+          kind: "needs-recovery-phrase",
+          account: { accountId: accountIdB64, username: resolvedUsername },
+        });
+        return;
       }
 
-      // 1.16d3c: stash the export key for ContactsClient.
-      // Phase 1.5b: also stash the bearer token.
-      setIdentitySecrets({
-        accountId: accountIdBytes,
+      await finishCanonicalSession({
+        wasm,
+        accountIdentitySeed,
+        accountIdBytes,
+        accountIdB64,
         exportKey: result.exportKey,
         sessionToken: result.sessionToken,
         sessionExpiresAtMs: result.sessionExpiresAtMs,
-      });
-      setState({
-        kind: "session",
-        account: { accountId: accountIdB64, username: resolvedUsername },
-      });
-      // 1.20b: best-effort push subscribe. Idempotent — a
-      // returning user with an already-cached PushSubscription
-      // gets a no-op browser-side, then re-registers the same
-      // token with `push-gw` (the server UPSERTs).
-      void subscribeToPush().catch((err) => {
-        // eslint-disable-next-line no-console
-        console.warn("push subscribe (login) failed", err);
+        username: resolvedUsername,
       });
     },
     async loginWithPasskey() {
@@ -753,56 +922,163 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         console.warn("session-token persist (passkey login) failed", err);
       }
 
-      // Build the canonical Identity from the cached export
-      // key. Same shape as `login()`.
+      // ADR-0017: build the canonical Identity from the cached
+      // AccountIdentity (phrase) seed, NOT the export key. Passkey
+      // resume only runs on a device that already cached the export
+      // key, so the phrase seed is normally present too — but a
+      // device that last logged in before this cache existed may
+      // lack it, in which case we fail closed into the
+      // `needs-recovery-phrase` state (never derive from exportKey,
+      // never mint fresh).
       const wasm = await loadWasm();
-      const canonical = wasm.Identity.fromSeed(exportKey);
-      chats.setIdentity(canonical);
-
-      // Rehydrate MLS state from the on-device snapshot. For a
-      // passkey-login on the SAME device this is the warm path
-      // — every prior group lights back up without a peer
-      // round-trip.
-      await rehydrateMlsState(chats, accountIdB64);
-
-      // Refresh the identity bundle. Best-effort — a network
-      // blip shouldn't block the user from getting into a
-      // session they've already authenticated.
+      let accountIdentitySeed: Uint8Array | null = null;
       try {
-        await uploadIdentityBundle(discovery, accountIdBytes, canonical);
+        accountIdentitySeed = await getAccountIdentitySeed(
+          accountIdB64,
+          newDeviceKey,
+        );
       } catch (err) {
         // eslint-disable-next-line no-console
-        console.warn("identity bundle refresh (passkey login) failed", err);
-      }
-      try {
-        await chats.persistSnapshot(accountIdB64);
-      } catch (err) {
-        // eslint-disable-next-line no-console
-        console.warn("post-passkey-login MLS snapshot failed", err);
+        console.warn(
+          "account-identity-seed decrypt failed (passkey login)",
+          err,
+        );
+        accountIdentitySeed = null;
       }
 
-      setIdentitySecrets({
-        accountId: accountIdBytes,
+      if (accountIdentitySeed === null) {
+        setPendingRecovery({
+          accountIdBytes,
+          accountIdB64,
+          exportKey,
+          deviceKey: newDeviceKey,
+          sessionToken: assertion.session_token,
+          sessionExpiresAtMs: assertion.session_expires_at_ms,
+          username: cached.username,
+        });
+        setState({
+          kind: "needs-recovery-phrase",
+          account: { accountId: accountIdB64, username: cached.username },
+        });
+        return;
+      }
+
+      await finishCanonicalSession({
+        wasm,
+        accountIdentitySeed,
+        accountIdBytes,
+        accountIdB64,
         exportKey,
         sessionToken: assertion.session_token,
         sessionExpiresAtMs: assertion.session_expires_at_ms,
-      });
-      setState({
-        kind: "session",
-        account: { accountId: accountIdB64, username: cached.username },
-      });
-      void subscribeToPush().catch((err) => {
-        // eslint-disable-next-line no-console
-        console.warn("push subscribe (passkey login) failed", err);
+        username: cached.username,
       });
     },
-    async recover(mnemonicPhrase, newPassword) {
-      const cached = loadPersisted();
-      if (cached === null) {
+    async provideRecoveryPhrase(mnemonicPhrase) {
+      // ADR-0017 fresh-device fail-safe completion. Only valid while
+      // a `pendingRecovery` is parked (set by login / passkey when
+      // the auth succeeded but no AccountIdentity seed was cached).
+      const pending = pendingRecovery();
+      if (pending === null) {
         throw new Error(
-          "no account on this device — recovery requires the " +
-            "account_id cached locally (cross-device recovery " +
-            "via the discovery service is not wired in the recover path)",
+          "no pending identity recovery — sign in first",
+        );
+      }
+      const wasm = await loadWasm();
+      // Parse the phrase → derive the BIP39 seed → derive the
+      // canonical AccountIdentity pubkey from it.
+      const mnemonic = wasm.RecoveryMnemonic.fromPhrase(mnemonicPhrase);
+      const accountIdentitySeed = mnemonic.toSeed();
+      mnemonic.free();
+      const derivedIdentity = wasm.Identity.fromSeed(accountIdentitySeed);
+      const derivedPubkey = derivedIdentity.signaturePublicKey;
+      derivedIdentity.free();
+
+      // FAIL CLOSED: the supplied phrase must reproduce the account's
+      // PUBLISHED AccountIdentity key. If it does not, the user typed
+      // the wrong phrase (or a phrase for a different account) — we
+      // refuse rather than cache a forked identity that would break
+      // every contact's pin. Best-effort fetch: a 404 (no bundle yet)
+      // or a network blip does not hard-block — without a published
+      // key to compare against, the supplied phrase simply becomes
+      // the identity (first-publish TOFU). A bundle that IS present
+      // and MISMATCHES is a hard refusal.
+      try {
+        const bundle = await discovery.identityFetch(pending.accountIdBytes);
+        if (bundle !== null) {
+          const published = base64Decode(bundle.signature_pubkey);
+          if (!bytesEqual(published, derivedPubkey)) {
+            accountIdentitySeed.fill(0);
+            throw new SupersessionPhraseMismatch();
+          }
+        }
+      } catch (err) {
+        if (err instanceof SupersessionPhraseMismatch) throw err;
+        // Network / parse error fetching the bundle — log and
+        // proceed (we cannot verify, so we fall back to TOFU on the
+        // supplied phrase rather than locking the user out).
+        // eslint-disable-next-line no-console
+        console.warn(
+          "could not verify recovery phrase against published bundle",
+          err,
+        );
+      }
+
+      // Cache the phrase seed under the (already-derived) device key
+      // so future warm logins skip the prompt. Best-effort.
+      try {
+        await putAccountIdentitySeed(
+          pending.accountIdB64,
+          accountIdentitySeed,
+          pending.deviceKey,
+        );
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn(
+          "account-identity-seed persist (provideRecoveryPhrase) failed",
+          err,
+        );
+      }
+
+      await finishCanonicalSession({
+        wasm,
+        accountIdentitySeed,
+        accountIdBytes: pending.accountIdBytes,
+        accountIdB64: pending.accountIdB64,
+        exportKey: pending.exportKey,
+        sessionToken: pending.sessionToken,
+        sessionExpiresAtMs: pending.sessionExpiresAtMs,
+        username: pending.username,
+      });
+    },
+    async recover(mnemonicPhrase, newPassword, username) {
+      const cached = loadPersisted();
+      // Resolve the account_id the same way `login` does so recover
+      // works on a FRESH device: a local cache hit wins; otherwise a
+      // discovery.lookup on the supplied username binds it. Without
+      // either we cannot target the recover.
+      const trimmedUsername = username?.trim() ?? "";
+      let accountIdB64: string;
+      let resolvedUsername: string;
+      if (
+        cached !== null &&
+        (trimmedUsername.length === 0 || cached.username === trimmedUsername)
+      ) {
+        accountIdB64 = cached.accountIdB64;
+        resolvedUsername = cached.username;
+      } else if (trimmedUsername.length > 0) {
+        const lookup = await discovery.lookup(trimmedUsername);
+        if (lookup.account === null) {
+          // Collapsed with "bad phrase" downstream by the OPAQUE
+          // rejection — we don't help probe the username space.
+          throw new Error("invalid recovery");
+        }
+        accountIdB64 = base64Encode(lookup.account);
+        resolvedUsername = lookup.normalisedUsername;
+      } else {
+        throw new Error(
+          "no account on this device — enter your username so we can " +
+            "look up the account to recover",
         );
       }
       // Parse the phrase up front so a bad mnemonic surfaces
@@ -812,26 +1088,30 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       const wasm = await loadWasm();
       const mnemonic = wasm.RecoveryMnemonic.fromPhrase(mnemonicPhrase);
       const seed = mnemonic.toSeed();
+      // ADR-0017: the canonical AccountIdentity is derived from this
+      // BIP39 phrase seed. `seed` itself is zeroed in the `finally`
+      // (it doubles as the OPAQUE recovery input), so keep a private
+      // copy for the identity cache + in-memory secrets, which must
+      // outlive this call.
+      const accountIdentitySeed = seed.slice();
+      mnemonic.free();
 
-      // G-4 (ADR-0016) — capture the OLD export key BEFORE the
-      // recover rotates the device key (L~817) and overwrites the
-      // cached export key (L~842). The old AccountIdentity Ed25519
-      // key is what signs the supersession proof bridging old→new;
-      // without the old key we cannot mint a proof, and ADR-0016
-      // rule #1 (atomic emit-or-abort) then forbids publishing the
-      // new keys at all on the rotation path.
-      //
-      // Two sources, in order: the in-memory session secrets (set
-      // if the user recovered from an active session), then the
-      // IDB-cached export key unwrapped under the still-current
-      // (pre-rotation) device key. Either yields the same 32 bytes.
-      const oldExportKey = await captureOldExportKey(
-        cached.accountIdB64,
-        identitySecrets(),
-      );
+      // G-4 (ADR-0016 / ADR-0017) — capture the OLD AccountIdentity
+      // signature pubkey BEFORE the recover rotates anything, so the
+      // emit path below can compare old-vs-new and SKIP the
+      // supersession proof when they are equal (the ADR-0017 routine
+      // recover case — the phrase is unchanged, so the new account
+      // pubkey equals the old one). The OLD identity is itself
+      // phrase-seeded now, so the old pubkey is exactly
+      // `fromSeed(accountIdentitySeed).signaturePublicKey` — which is
+      // what the new identity derives too. We snapshot it here for an
+      // explicit equality assertion rather than assuming it.
+      const oldIdentity = wasm.Identity.fromSeed(accountIdentitySeed);
+      const oldAccountPubkey = oldIdentity.signaturePublicKey;
+      oldIdentity.free();
 
       try {
-        const accountIdBytes = base64Decode(cached.accountIdB64);
+        const accountIdBytes = base64Decode(accountIdB64);
         const result = await client.recover(
           accountIdBytes,
           seed,
@@ -845,16 +1125,19 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         // from the new password; the upsert in IDB drops it.
         const deviceKey = await deriveDeviceRootKey(
           result.exportKey,
-          cached.accountIdB64,
+          accountIdB64,
         );
-        await putDeviceKey(cached.accountIdB64, deviceKey);
+        await putDeviceKey(accountIdB64, deviceKey);
+        // Persist the localStorage account marker — important on the
+        // fresh-device recover path where there was no cached row.
+        savePersisted({ v: 1, accountIdB64, username: resolvedUsername });
         // Phase 1.13c: persist the new session token under the
         // new device key — the old token (if any) was wrapped
         // under the prior device key and now sits in IDB as
         // undecryptable bytes; the next decrypt attempt drops it.
         try {
           await putSessionToken(
-            cached.accountIdB64,
+            accountIdB64,
             result.sessionToken,
             result.sessionExpiresAtMs,
             deviceKey,
@@ -868,10 +1151,27 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         // wrapped under the OLD device key and is now
         // undecryptable; the upsert here overwrites it cleanly.
         try {
-          await putExportKey(cached.accountIdB64, result.exportKey, deviceKey);
+          await putExportKey(accountIdB64, result.exportKey, deviceKey);
         } catch (err) {
           // eslint-disable-next-line no-console
           console.warn("export-key persist (recover) failed", err);
+        }
+        // ADR-0017: cache the AccountIdentity (phrase) seed under
+        // the freshly-rotated device key. This is what makes the
+        // warm same-device path (and a later passkey resume) rebuild
+        // the SAME canonical identity without re-entering the phrase.
+        try {
+          await putAccountIdentitySeed(
+            accountIdB64,
+            accountIdentitySeed,
+            deviceKey,
+          );
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.warn(
+            "account-identity-seed persist (recover) failed",
+            err,
+          );
         }
         // Phase 2a3b0 (ADR-0007) — DeviceIdentity seed is
         // decoupled from the OPAQUE password (ADR-0007 §
@@ -885,7 +1185,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         // user's other devices (or by an eventual
         // server-driven prune).
         try {
-          await ensureDeviceIdentitySeed(cached.accountIdB64, deviceKey);
+          await ensureDeviceIdentitySeed(accountIdB64, deviceKey);
         } catch (err) {
           // eslint-disable-next-line no-console
           console.warn("device-identity ensure (recover) failed", err);
@@ -900,87 +1200,76 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         // re-bootstrap via the discovery directory's KeyPackage
         // upserts on the peer's next refresh.
         try {
-          await deleteMlsSnapshot(cached.accountIdB64);
+          await deleteMlsSnapshot(accountIdB64);
         } catch (err) {
           // eslint-disable-next-line no-console
           console.warn("deleteMlsSnapshot during recover failed", err);
         }
 
-        // 1.16e6c1: build the new canonical Identity from the
-        // rotated export key. ChatProvider free()s the prior
+        // ADR-0017: build the new canonical Identity from the
+        // (UNCHANGED) BIP39 phrase seed — NOT the rotated export
+        // key. The recovered identity is byte-for-byte the same as
+        // before the recover, which is the whole point: contacts
+        // never re-verify. ChatProvider free()s the prior
         // (pre-recovery) Identity if anything was lingering.
-        const canonical = wasm.Identity.fromSeed(result.exportKey);
+        const canonical = wasm.Identity.fromSeed(accountIdentitySeed);
         chats.setIdentity(canonical);
 
         // 1.16e6c3: rehydrate path is a guaranteed no-op here —
         // we just deleted the snapshot row above — but routing
         // through the same helper keeps the auth flows uniform
         // and resilient to future re-orderings.
-        await rehydrateMlsState(chats, cached.accountIdB64);
+        await rehydrateMlsState(chats, accountIdB64);
 
-        // Re-publish the identity bundle + a fresh KeyPackage
-        // (the recovered Identity has the same long-lived
-        // pubkeys, but the KeyPackage's init key is new and
-        // its private bytes live in the canonical provider).
+        // Re-publish the identity bundle + a fresh KeyPackage.
         //
-        // G-4 (ADR-0016) — ATOMIC emit-or-abort (rule #1). On
-        // recover the AccountIdentity Ed25519 key rotates, so a
-        // peer that pinned the OLD key needs a supersession proof
-        // to bridge to the new one without a blind TOFU. We mint
-        // the proof from the OLD export key (captured above) and
-        // the NEW one, then publish `{new keys + proof}` in a
-        // single request. If we CANNOT mint the proof (the old
-        // export key was unavailable, or the sign call throws),
-        // we MUST NOT publish the new keys without it — that is a
-        // self-inflicted downgrade (every peer would see a changed
-        // key with no proof and fail closed). So we skip the
-        // bundle upload entirely and leave the OLD bundle live;
-        // the user can re-run recover from a device that still has
-        // the old export key, or the peers fall back to OOB
-        // re-verify. The KeyPackage refresh is decoupled below so
-        // an abort here doesn't strand MLS init keys.
-        const supersessionProof = await mintSupersessionProof(
-          wasm,
-          oldExportKey,
-          result.exportKey,
+        // G-4 (ADR-0016) emit path — now DORMANT per ADR-0017. With
+        // a phrase-seeded AccountIdentity, a routine recover does NOT
+        // rotate the account key: the phrase is unchanged, so the new
+        // account signature pubkey EQUALS the old one. We compare
+        // them explicitly and, when equal (the only case on a routine
+        // recover), SKIP the supersession proof mint + upload
+        // entirely — emitting a proof for a key nobody's pin changed
+        // would be spurious. The "old == new account pubkey ⇒ skip"
+        // rule is the load-bearing ADR-0017 emit invariant.
+        //
+        // The bundle is still re-published WITHOUT a proof: the
+        // public keys are identical, but the fresh KeyPackage's init
+        // key is new and its private bytes live in the canonical
+        // provider, so the upsert keeps the directory's KeyPackage
+        // current. A plain (proof-less) upload also clears any stale
+        // server-side proof column. We deliberately do NOT mint a
+        // proof even if the keys somehow differed here — a genuine
+        // identity rotation is a separate explicit action (ADR-0017
+        // "rotate my identity"), out of scope for Part 1.
+        const newAccountPubkey = canonical.signaturePublicKey;
+        const accountKeyUnchanged = bytesEqual(
+          oldAccountPubkey,
+          newAccountPubkey,
         );
-        if (supersessionProof !== null) {
-          try {
-            await uploadIdentityBundle(
-              discovery,
-              accountIdBytes,
-              canonical,
-              supersessionProof,
-            );
-          } catch (err) {
-            // eslint-disable-next-line no-console
-            console.warn("post-recover identity bundle upload failed", err);
-          }
-        } else {
-          // eslint-disable-next-line no-console
-          console.warn(
-            "post-recover: no mintable supersession proof (old export " +
-              "key unavailable on this device) — SKIPPING the identity " +
-              "bundle re-upload to avoid publishing rotated keys without " +
-              "a proof (ADR-0016 rule #1, atomic emit). Refreshing the " +
-              "KeyPackage only; the old bundle stays live.",
+        if (!accountKeyUnchanged) {
+          // Defence-in-depth: on a phrase-seeded recover this can
+          // never happen (same seed ⇒ same key). If it ever does, it
+          // means the phrase that authenticated the OPAQUE recover
+          // differs from the one seeding the identity — a logic bug.
+          // Fail loud rather than silently publish a changed key with
+          // no proof (which would break every contact's pin).
+          throw new Error(
+            "internal: recover produced a different AccountIdentity " +
+              "pubkey than expected (ADR-0017 invariant: same phrase ⇒ " +
+              "same identity)",
           );
-          try {
-            // Still refresh the MLS KeyPackage so peers can start
-            // new groups — the KeyPackage carries no AccountIdentity
-            // rotation state, so publishing it is not a downgrade.
-            const keyPackageBytes = canonical.createKeyPackage();
-            await discovery.uploadKeyPackage(accountIdBytes, keyPackageBytes);
-          } catch (err) {
-            // eslint-disable-next-line no-console
-            console.warn(
-              "post-recover KeyPackage-only refresh failed",
-              err,
-            );
-          }
         }
         try {
-          await chats.persistSnapshot(cached.accountIdB64);
+          // Proof-less re-publish (account key unchanged). Refreshes
+          // the KeyPackage + clears any stale server proof column.
+          await uploadIdentityBundle(discovery, accountIdBytes, canonical);
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.warn("post-recover identity bundle upload failed", err);
+        }
+        try {
+          await chats.persistSnapshot(accountIdB64);
         } catch (err) {
           // eslint-disable-next-line no-console
           console.warn("post-recover MLS snapshot failed", err);
@@ -988,18 +1277,24 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
 
         // 1.16d3c: stash the new export key so ContactsClient
         // works without a re-login round-trip.
+        // ADR-0017: also carry the phrase seed (the canonical
+        // identity seed). Cleared on logout.
         // Phase 1.5b: also stash the bearer token.
         setIdentitySecrets({
           accountId: accountIdBytes,
           exportKey: result.exportKey,
+          accountIdentitySeed,
           sessionToken: result.sessionToken,
           sessionExpiresAtMs: result.sessionExpiresAtMs,
         });
+        // Clear any pending fresh-device fail-safe — recover just
+        // restored the identity directly.
+        setPendingRecovery(null);
         setState({
           kind: "session",
           account: {
-            accountId: cached.accountIdB64,
-            username: cached.username,
+            accountId: accountIdB64,
+            username: resolvedUsername,
           },
         });
         // Phase 2a1d: post-recovery the prior accepted-contacts
@@ -1052,7 +1347,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
                   // copy carries the restored state instead of
                   // the just-bootstrapped empty one.
                   try {
-                    await chats.persistSnapshot(cached.accountIdB64);
+                    await chats.persistSnapshot(accountIdB64);
                   } catch (err) {
                     // eslint-disable-next-line no-console
                     console.warn(
@@ -1083,7 +1378,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
             await bootstrapBackupFromPhraseString(
               {
                 accountId: accountIdBytes,
-                accountIdB64: cached.accountIdB64,
+                accountIdB64,
                 ed25519Seed: canonical.ed25519Seed,
                 deviceKey,
                 sessionToken: result.sessionToken,
@@ -1224,6 +1519,17 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         // remove-device flow runs from a sibling device.
         try {
           await deleteDeviceIdentitySeed(cached.accountIdB64);
+        } catch {
+          // best-effort
+        }
+        // ADR-0017: drop the cached AccountIdentity (phrase) seed.
+        // It is the highest-sensitivity on-device secret; the
+        // ciphertext is unreadable once the device key is gone, but
+        // a stale row would confuse a future signup on the same
+        // accountId. After this wipe the only way back into the
+        // account is the recovery phrase (or a paired device).
+        try {
+          await deleteAccountIdentitySeed(cached.accountIdB64);
         } catch {
           // best-effort
         }
@@ -1393,85 +1699,31 @@ async function uploadIdentityBundle(
   ]);
 }
 
-/** G-4 (ADR-0016) emit window. The supersession proof is valid
- *  for 14 days from issue — well under the verifier's 30-day
- *  `MAX_VALIDITY_SECS` ceiling (ADR-0016 rule #5), which bounds
- *  replay without widening the hard cap. */
-const SUPERSESSION_EMIT_WINDOW_SECS = 14 * 24 * 60 * 60; // 1_209_600
-
 /**
- * G-4 (ADR-0016) — recover the OLD OPAQUE export key on the
- * rotation path, BEFORE the recover flow rotates the device key
- * and overwrites the cached export key. This is the seed for the
- * OLD AccountIdentity Ed25519 key that signs the supersession
- * proof.
- *
- * Sources, in order of preference:
- *   1. The in-memory session secrets — present when the user
- *      recovered from an active session.
- *   2. The IDB-cached export key, unwrapped under the
- *      still-current (pre-rotation) device root key.
- *
- * Returns `null` when neither is available (a cold device that
- * never cached the key, or a device-key/ciphertext mismatch). A
- * `null` here makes the caller abort the bundle re-upload per the
- * atomic-emit rule — we never publish rotated keys with no proof.
+ * Constant-time-ish byte equality for two `Uint8Array`s. Used by
+ * the recover flow's ADR-0017 emit gate to assert the old and new
+ * AccountIdentity pubkeys are equal (so the supersession proof is
+ * skipped). Length-first, then per-byte; we OR the diffs so the
+ * loop does not early-exit on the first mismatch.
  */
-async function captureOldExportKey(
-  accountIdB64: string,
-  sessionSecrets: IdentitySecrets | null,
-): Promise<Uint8Array | null> {
-  if (sessionSecrets !== null && sessionSecrets.exportKey.length === 32) {
-    return sessionSecrets.exportKey;
+function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) {
+    diff |= (a[i] ?? 0) ^ (b[i] ?? 0);
   }
-  let oldDeviceKey: CryptoKey | null;
-  try {
-    oldDeviceKey = await getDeviceKey(accountIdB64);
-  } catch {
-    oldDeviceKey = null;
-  }
-  if (oldDeviceKey === null) return null;
-  try {
-    return await getExportKey(accountIdB64, oldDeviceKey);
-  } catch {
-    // Device key rotated / ciphertext mismatch — treat as "no old
-    // key available" and let the caller fail closed.
-    return null;
-  }
+  return diff === 0;
 }
 
-/**
- * G-4 (ADR-0016) — mint the supersession proof bridging the OLD
- * AccountIdentity to the NEW one, given both OPAQUE export keys.
- *
- * Derives each identity's Ed25519 seed via `Identity.fromSeed`
- * (the proof's embedded old key is derived internally from the
- * old seed, so it always matches the signer), then calls
- * `signSupersessionProof` over a 14-day window (rule #5).
- *
- * Returns the raw proof bytes, or `null` when the proof cannot be
- * minted — either `oldExportKey` is absent (cold device) or the
- * sign call throws. The caller treats `null` as "abort the
- * rotation upload" (rule #1).
- */
-async function mintSupersessionProof(
-  wasm: Wasm,
-  oldExportKey: Uint8Array | null,
-  newExportKey: Uint8Array,
-): Promise<Uint8Array | null> {
-  if (oldExportKey === null) return null;
-  try {
-    const oldSeed = wasm.Identity.fromSeed(oldExportKey).ed25519Seed;
-    const newSeed = wasm.Identity.fromSeed(newExportKey).ed25519Seed;
-    const nowSecs = BigInt(Math.floor(Date.now() / 1000));
-    const expiresSecs = nowSecs + BigInt(SUPERSESSION_EMIT_WINDOW_SECS);
-    return wasm.signSupersessionProof(oldSeed, newSeed, nowSecs, expiresSecs);
-  } catch (err) {
-    // eslint-disable-next-line no-console
-    console.warn("supersession proof mint failed", err);
-    return null;
-  }
-}
+// ADR-0017: the G-4 / ADR-0016 supersession EMIT helpers
+// (`captureOldExportKey`, `mintSupersessionProof`,
+// `SUPERSESSION_EMIT_WINDOW_SECS`) were removed here. With a
+// phrase-seeded AccountIdentity a routine recover does not rotate
+// the account key, so no proof is ever minted on this path (the
+// recover emit gate above compares old-vs-new and skips). The
+// proof primitive itself (`wasm.signSupersessionProof` /
+// `verifySupersession`) is retained in `lakko-transparency` as the
+// substrate for a future explicit "rotate my identity" action.
 
 /**
  * Hook — every component that needs to read or drive the session

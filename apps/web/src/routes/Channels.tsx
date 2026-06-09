@@ -231,12 +231,14 @@ const NewChannel: Component = () => {
       // comes from an MLS PublisherGroup exporter
       // (ADR-0010 Tier 1), the signing-key seed is a
       // fresh Ed25519 keypair seed. Identity is rebuilt
-      // here from the OPAQUE export key on every call;
-      // a future sub-sprint (G4-2-mls-persistence) keeps
-      // the PublisherGroup alive across composer calls
-      // so it can be rotated rather than rebuilt fresh.
+      // here from the canonical AccountIdentity (phrase)
+      // seed on every call (ADR-0017 — was the OPAQUE
+      // export key); a future sub-sprint
+      // (G4-2-mls-persistence) keeps the PublisherGroup
+      // alive across composer calls so it can be rotated
+      // rather than rebuilt fresh.
       const wasm = await loadWasm();
-      const identity = wasm.Identity.fromSeed(secrets.exportKey);
+      const identity = wasm.Identity.fromSeed(secrets.accountIdentitySeed);
       let keys;
       try {
         keys = await freshPublisherKeys(identity, id);

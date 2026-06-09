@@ -51,7 +51,8 @@
  *
  * Pre-1.16e6c2 fallback: if `identityProvider` is unset (tests,
  * direct callers without a ChatProvider), each call rebuilds an
- * `Identity.fromSeed(secrets.exportKey)` and discards it. That
+ * `Identity.fromSeed(secrets.accountIdentitySeed)` (ADR-0017 — the
+ * phrase seed, was the export key) and discards it. That
  * still works for stateless ops but means provider-storage
  * mutations vanish at the end of each call. Production paths
  * MUST wire the canonical accessor.
@@ -223,7 +224,9 @@ export class ChatClient {
       throw new ChatClientArgError("session has no Identity in memory");
     }
     const wasm = await loadWasm();
-    return wasm.Identity.fromSeed(secrets.exportKey);
+    // ADR-0017: the canonical AccountIdentity is seeded from the
+    // BIP39 phrase seed, not the OPAQUE export key.
+    return wasm.Identity.fromSeed(secrets.accountIdentitySeed);
   }
 
   /** Run the persist hook, swallow + log failures. The

@@ -64,6 +64,11 @@ export default function Recover(): JSX.Element {
     return null;
   };
 
+  // ADR-0017: recover now resolves the account_id via
+  // discovery.lookup on a fresh device, so we collect the username
+  // here. Pre-filled from the device cache when present.
+  const [username, setUsername] = createSignal(cachedUsername() ?? "");
+
   async function onSubmit(e: SubmitEvent): Promise<void> {
     e.preventDefault();
     setError(null);
@@ -73,6 +78,10 @@ export default function Recover(): JSX.Element {
     }
     if (password().length < 8) {
       setError("Password must be at least 8 characters.");
+      return;
+    }
+    if (username().trim().length === 0) {
+      setError("Enter the username of the account to recover.");
       return;
     }
     setBusy(true);
@@ -103,7 +112,7 @@ export default function Recover(): JSX.Element {
       } else {
         resolved = phrase();
       }
-      await auth.recover(resolved, password());
+      await auth.recover(resolved, password(), username().trim());
       // Drop the phrase / shares + password fields immediately
       // — the mnemonic is a long-term secret the user has to
       // keep on paper; we don't need it any more after the
@@ -124,31 +133,33 @@ export default function Recover(): JSX.Element {
     <div class="auth-shell">
       <section class="auth-card">
         <h1>Recover account</h1>
-        <Show when={cachedUsername() !== null} fallback={<NoCachedAccount />}>
-          <RecoverForm
-            cachedUsername={cachedUsername() ?? ""}
-            mode={mode}
-            setMode={setMode}
-            phrase={phrase}
-            setPhrase={setPhrase}
-            sharesInput={sharesInput}
-            setSharesInput={setSharesInput}
-            password={password}
-            setPassword={setPassword}
-            confirm={confirm}
-            setConfirm={setConfirm}
-            busy={busy}
-            error={error}
-            onSubmit={onSubmit}
-          />
-        </Show>
+        <RecoverForm
+          cachedUsername={cachedUsername()}
+          username={username}
+          setUsername={setUsername}
+          mode={mode}
+          setMode={setMode}
+          phrase={phrase}
+          setPhrase={setPhrase}
+          sharesInput={sharesInput}
+          setSharesInput={setSharesInput}
+          password={password}
+          setPassword={setPassword}
+          confirm={confirm}
+          setConfirm={setConfirm}
+          busy={busy}
+          error={error}
+          onSubmit={onSubmit}
+        />
       </section>
     </div>
   );
 }
 
 interface RecoverFormProps {
-  readonly cachedUsername: string;
+  readonly cachedUsername: string | null;
+  readonly username: () => string;
+  readonly setUsername: (v: string) => void;
   readonly mode: () => RecoverMode;
   readonly setMode: (v: RecoverMode) => void;
   readonly phrase: () => string;
@@ -170,11 +181,26 @@ function RecoverForm(props: RecoverFormProps): JSX.Element {
       <p style={{ color: "var(--surface-muted)", "margin-top": 0 }}>
         Recover your account using either the 24-word phrase or 3+
         social-recovery shares. We'll prove ownership to the server
-        and rotate the password envelope. Account on this device:{" "}
-        <strong>@{props.cachedUsername}</strong>.
+        and rotate the password envelope.{" "}
+        <Show when={props.cachedUsername !== null}>
+          Account on this device:{" "}
+          <strong>@{props.cachedUsername}</strong>.
+        </Show>
       </p>
       <ModeTabs mode={props.mode} setMode={props.setMode} busy={props.busy} />
       <form onSubmit={props.onSubmit}>
+        <label>
+          Username
+          <input
+            type="text"
+            autocomplete="username"
+            required
+            value={props.username()}
+            onInput={(e) => props.setUsername(e.currentTarget.value)}
+            disabled={props.busy()}
+            placeholder="alice"
+          />
+        </label>
         <Show
           when={props.mode() === "phrase"}
           fallback={
@@ -345,25 +371,5 @@ function SharesField(props: {
         form <code>&lt;index&gt;:&lt;base64&gt;</code>.
       </small>
     </label>
-  );
-}
-
-function NoCachedAccount(): JSX.Element {
-  return (
-    <>
-      <p style={{ color: "var(--surface-muted)", "margin-top": 0 }}>
-        This device has no cached account, so there's no
-        <code> account_id </code>
-        for the recovery flow to target. Cross-device recovery
-        (using just the mnemonic from a fresh browser) arrives
-        in Phase 1.16d together with the username discovery
-        service.
-      </p>
-      <p>
-        <A href={paths.signup}>Create a new account</A>, or{" "}
-        <A href={paths.login}>log in</A> if you already have one
-        elsewhere.
-      </p>
-    </>
   );
 }

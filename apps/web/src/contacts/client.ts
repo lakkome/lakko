@@ -348,8 +348,10 @@ export class ContactsClient {
    * the same provider — MLS state mutations accumulate, and
    * `onPersist` snapshots them to disk.
    *
-   * Falls back to a one-shot `Identity.fromSeed(secrets.exportKey)`
-   * when the canonical isn't wired (tests, direct callers). MLS
+   * Falls back to a one-shot
+   * `Identity.fromSeed(secrets.accountIdentitySeed)` (ADR-0017 —
+   * the phrase seed, was the export key) when the canonical isn't
+   * wired (tests, direct callers). MLS
    * mutations on the throwaway are **lost on return** — fine for
    * stateless ops (signing a ContactRequest, opening an HPKE
    * envelope), broken for `startGroupWith` / `joinGroupFromWelcome`,
@@ -367,7 +369,9 @@ export class ContactsClient {
       throw ContactsError.noIdentitySecrets();
     }
     const wasm = await loadWasm();
-    return wasm.Identity.fromSeed(secrets.exportKey);
+    // ADR-0017: the canonical AccountIdentity is seeded from the
+    // BIP39 phrase seed, not the OPAQUE export key.
+    return wasm.Identity.fromSeed(secrets.accountIdentitySeed);
   }
 
   /** Fire the persist hook, swallow + log failures. */

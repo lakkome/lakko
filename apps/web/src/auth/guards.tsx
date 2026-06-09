@@ -24,6 +24,7 @@ import { Show, type JSX } from "solid-js";
 import { Navigate } from "@solidjs/router";
 import { useAuth } from "./AuthContext";
 import { paths } from "../routes/paths";
+import RestoreIdentityPrompt from "./RestoreIdentityPrompt";
 
 /** Gate every route inside the AppShell behind a real session. */
 export function RequireSession(props: { children: JSX.Element }): JSX.Element {
@@ -55,29 +56,48 @@ export function RequireAnonymous(props: {
 
 function UnauthenticatedFallback(): JSX.Element {
   const auth = useAuth();
-  // While the context is still resolving (it starts in the
-  // "loading" state on mount while it reads localStorage + IDB) we
-  // render a placeholder instead of an instant redirect — bouncing
-  // the user to /login during a half-second rehydration is jarring.
+  // ADR-0017: an authenticated-but-identity-pending user (fresh
+  // device, no cached phrase seed) must NOT be bounced to /login —
+  // that would loop (login thinks they're already authenticated).
+  // Render the recovery-phrase prompt in place instead.
   return (
     <Show
-      when={auth.state().kind !== "loading"}
-      fallback={<p style={{ padding: "1.5rem" }}>Restoring session…</p>}
+      when={auth.state().kind !== "needs-recovery-phrase"}
+      fallback={<RestoreIdentityPrompt />}
     >
-      <Navigate href={paths.login} />
+      {/* While the context is still resolving (it starts in the
+          "loading" state on mount while it reads localStorage + IDB)
+          we render a placeholder instead of an instant redirect —
+          bouncing the user to /login during a half-second
+          rehydration is jarring. */}
+      <Show
+        when={auth.state().kind !== "loading"}
+        fallback={<p style={{ padding: "1.5rem" }}>Restoring session…</p>}
+      >
+        <Navigate href={paths.login} />
+      </Show>
     </Show>
   );
 }
 
 function AlreadyAuthenticatedFallback(): JSX.Element {
-  // If the user is "loading", let it resolve before bouncing them.
   const auth = useAuth();
+  // ADR-0017: the identity-pending state lands here too (the user
+  // just submitted the login form, which is wrapped in
+  // RequireAnonymous). Render the recovery-phrase prompt rather than
+  // an indefinite "Restoring session…".
   return (
     <Show
-      when={auth.state().kind === "session"}
-      fallback={<p style={{ padding: "1.5rem" }}>Restoring session…</p>}
+      when={auth.state().kind !== "needs-recovery-phrase"}
+      fallback={<RestoreIdentityPrompt />}
     >
-      <Navigate href={paths.home} />
+      {/* If the user is "loading", let it resolve before bouncing. */}
+      <Show
+        when={auth.state().kind === "session"}
+        fallback={<p style={{ padding: "1.5rem" }}>Restoring session…</p>}
+      >
+        <Navigate href={paths.home} />
+      </Show>
     </Show>
   );
 }
