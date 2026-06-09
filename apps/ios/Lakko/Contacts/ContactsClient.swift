@@ -43,13 +43,213 @@ public final class ContactsClient {
 
     private let discovery: DiscoveryClient
     private let ds: DsClient
+    /// G-4 (ADR-0016): per-account account-pubkey pin store used by
+    /// ``verifyBundleAccountKey(accountId:bundle:)`` to detect a
+    /// rotated AccountIdentity key and gate it behind a verified
+    /// supersession proof (fail-closed, rule #2).
+    private let pinStore: PeerPinStore
 
     public init(
         discovery: DiscoveryClient = DiscoveryClient(),
-        ds: DsClient = DsClient()
+        ds: DsClient = DsClient(),
+        pinStore: PeerPinStore = PeerPinStore()
     ) {
         self.discovery = discovery
         self.ds = ds
+        self.pinStore = pinStore
+    }
+
+    // MARK: - G-4 (ADR-0016) supersession verify on fetch
+
+    /// G-4 (ADR-0016) — verify a freshly-fetched peer identity
+    /// bundle's AccountIdentity key against the local pin, re-pinning
+    /// (via a supersession proof) when the key rotated. MUST be
+    /// called after every `discovery.identityFetch` and BEFORE the
+    /// bundle's keys are used to send a ContactRequest / start a
+    /// call.
+    ///
+    /// Decision table (ADR-0016 rule #2, fail-closed):
+    ///   1. No existing pin → TOFU-pin the fetched key (marker 0).
+    ///      Trust-on-first-use is unchanged for a first observation.
+    ///   2. Pin matches the fetched `signature_pubkey` → proceed (no
+    ///      key change; the common steady-state case).
+    ///   3. Pin DIFFERS → REQUIRE `bundle.supersessionProof`:
+    ///        a. absent → throw ``SupersessionRefused`` (`.proofAbsent`).
+    ///        b. `verifySupersession(proof, pinnedOldKey, now)` throws
+    ///           → ``SupersessionRefused`` (`.proofInvalid`).
+    ///        c. the verifier's authorised new key !=
+    ///           `bundle.signaturePubkey` → ``SupersessionRefused``
+    ///           (`.keyMismatch`) — defence in depth, the proof must
+    ///           authorise exactly the served key.
+    ///        d. re-pin advancing the monotonic marker to the proof's
+    ///           expiry; a backward marker → ``SupersessionRefused``
+    ///           (`.markerBackward`).
+    ///      Only on a clean verify do we proceed with the new key.
+    ///
+    /// NEVER blind-TOFU a CHANGED key — that is the whole point of
+    /// the gate.
+    ///
+    /// - Parameter accountId: the peer's raw 16-byte account_id (the
+    ///   stable pin key, NOT the pubkey — rule #3).
+    /// - Parameter bundle: the fetched ``IdentityFetchResponse``.
+    /// - Throws: ``SupersessionRefused`` on any fail-closed branch.
+    func verifyBundleAccountKey(
+        accountId: Data,
+        bundle: IdentityFetchResponse
+    ) throws {
+        let accountIdB64 = base64Encode(accountId)
+        let fetchedPubkeyB64 = bundle.signaturePubkey
+
+        guard let existing = pinStore.readPin(accountIdB64: accountIdB64) else {
+            // Case 1 — first-ever observation. TOFU-pin and proceed.
+            pinStore.setPin(
+                accountIdB64: accountIdB64,
+                pinnedSignaturePubkeyB64: fetchedPubkeyB64,
+                rotationMarker: 0
+            )
+            return
+        }
+
+        // Case 2 — unchanged key. Nothing to verify.
+        if existing.pinnedSignaturePubkeyB64 == fetchedPubkeyB64 {
+            return
+        }
+
+        // Case 3 — the AccountIdentity key changed. A proof is now
+        // mandatory; absence is an immediate fail-closed refusal.
+        guard let proofB64 = bundle.supersessionProof, !proofB64.isEmpty else {
+            throw SupersessionRefused(
+                reason: .proofAbsent,
+                accountIdB64: accountIdB64,
+                message: "the peer's account key changed and no supersession " +
+                    "proof was provided — refusing to trust the new key. " +
+                    "Please re-verify this contact out of band."
+            )
+        }
+        guard let proofBytes = base64Decode(proofB64) else {
+            throw SupersessionRefused(
+                reason: .proofInvalid,
+                accountIdB64: accountIdB64,
+                message: "the supersession proof was not valid base64 — " +
+                    "refusing the new key. Please re-verify out of band."
+            )
+        }
+        guard let pinnedOldPubkey = base64Decode(existing.pinnedSignaturePubkeyB64)
+        else {
+            // The stored pin pubkey is somehow not decodable — treat
+            // as an invalid-proof refusal rather than mis-trusting.
+            throw SupersessionRefused(
+                reason: .proofInvalid,
+                accountIdB64: accountIdB64,
+                message: "the pinned old key could not be decoded — " +
+                    "refusing the new key. Please re-verify out of band."
+            )
+        }
+
+        let nowSecs = Int64(Date().timeIntervalSince1970)
+
+        // The verifier returns the authorised NEW pubkey, or THROWS
+        // on a malformed / wrong-old-key / expired / out-of-window
+        // proof.
+        let authorisedNewPubkey: Data
+        do {
+            authorisedNewPubkey = try verifySupersession(
+                proofBytes: proofBytes,
+                trustedOldPubkey: pinnedOldPubkey,
+                nowUnixSecs: nowSecs
+            )
+        } catch {
+            throw SupersessionRefused(
+                reason: .proofInvalid,
+                accountIdB64: accountIdB64,
+                message: "the peer's account key changed and the " +
+                    "supersession proof did not verify against the pinned " +
+                    "key (\(error)) — refusing the new key. Please re-verify " +
+                    "out of band."
+            )
+        }
+
+        // Defence in depth — the proof must authorise EXACTLY the key
+        // the bundle served. A proof that verifies but names a third
+        // key is rejected (a malicious server splicing an unrelated
+        // valid proof onto a substituted key).
+        if base64Encode(authorisedNewPubkey) != fetchedPubkeyB64 {
+            throw SupersessionRefused(
+                reason: .keyMismatch,
+                accountIdB64: accountIdB64,
+                message: "the supersession proof verified but authorised a " +
+                    "different key than the bundle served — refusing. Please " +
+                    "re-verify out of band."
+            )
+        }
+
+        // Advance the monotonic marker (ADR-0016 rule #4) to the
+        // proof's own `expires_at`. A genuine later rotation carries
+        // a strictly-newer `issued_at` (hence a newer `expires_at`
+        // for a fixed emit window), so a stale older successor's
+        // proof — whose `expires_at` predates the current marker — is
+        // refused. Re-observing the SAME transition re-pins at the
+        // same marker (`>=`, allowed). We read `expires_at` from the
+        // already-verified proof bytes (the verifier confirmed the
+        // signature over exactly these fields, so the parse is on
+        // trusted data).
+        let proofExpiresAt: Int64
+        do {
+            proofExpiresAt = try Self.readProofExpiresAtSecs(proofBytes)
+        } catch {
+            throw SupersessionRefused(
+                reason: .proofInvalid,
+                accountIdB64: accountIdB64,
+                message: "could not read the proof's expiry — refusing. " +
+                    "Please re-verify out of band."
+            )
+        }
+        let result = pinStore.setPin(
+            accountIdB64: accountIdB64,
+            pinnedSignaturePubkeyB64: fetchedPubkeyB64,
+            rotationMarker: proofExpiresAt
+        )
+        if result == .rejectedBackward {
+            throw SupersessionRefused(
+                reason: .markerBackward,
+                accountIdB64: accountIdB64,
+                message: "the supersession proof would move the rotation " +
+                    "marker backwards (an older successor) — refusing. " +
+                    "Please re-verify out of band."
+            )
+        }
+    }
+
+    /// Fixed serialized length of a supersession proof — mirrors
+    /// `lakko_transparency::supersession::SUPERSESSION_PROOF_LEN`
+    /// (`version(1) ‖ old(32) ‖ new(32) ‖ issued(8) ‖ expires(8) ‖
+    /// sig(64)` = 145).
+    private static let supersessionProofLen = 1 + 32 + 32 + 8 + 8 + 64
+    /// Byte offset of the big-endian i64 `expires_at` field within a
+    /// supersession proof: after version(1) + old(32) + new(32) +
+    /// issued(8) = 73.
+    private static let supersessionExpiresAtOffset = 1 + 32 + 32 + 8
+
+    /// Read the big-endian i64 `expires_at_unix_secs` field out of a
+    /// supersession proof's wire bytes (G-4). Used ONLY after
+    /// `verifySupersession` has authenticated the proof, so the parse
+    /// runs on trusted, fixed-length data — we still bound-check the
+    /// length defensively. Mirror of the web `readProofExpiresAtSecs`.
+    static func readProofExpiresAtSecs(_ proofBytes: Data) throws -> Int64 {
+        guard proofBytes.count >= supersessionProofLen else {
+            // Should be unreachable — the verifier already accepted
+            // these bytes — but never index past the buffer.
+            throw ContactsError.simple(
+                "supersession proof too short (\(proofBytes.count) bytes)"
+            )
+        }
+        // Eight big-endian bytes at the expires_at offset → i64.
+        let start = proofBytes.startIndex + supersessionExpiresAtOffset
+        var value: Int64 = 0
+        for i in 0..<8 {
+            value = (value << 8) | Int64(proofBytes[start + i])
+        }
+        return value
     }
 
     // MARK: - Send
@@ -82,6 +282,15 @@ public final class ContactsClient {
         guard let bundle = bundle else {
             throw ContactsError.noIdentityBundle(recipientAccountId)
         }
+
+        // G-4 (ADR-0016) — gate the freshly-fetched AccountIdentity
+        // key through the pin store BEFORE we use it to seal a
+        // ContactRequest: TOFU on first sight, verified re-pin on a
+        // key change, fail-closed (`SupersessionRefused`) on a
+        // changed key with no valid proof. Throws on any fail-closed
+        // branch — we never send to an unverified rotated key.
+        try verifyBundleAccountKey(accountId: recipientAccountId, bundle: bundle)
+
         guard let recipientSignaturePub = base64Decode(bundle.signaturePubkey),
               let recipientX25519Pub = base64Decode(bundle.x25519Pubkey) else {
             throw ContactsError.wrap(
@@ -574,4 +783,54 @@ extension ContactsError: LocalizedError {
                 ?? String(describing: cause)
         }
     }
+}
+
+// MARK: - G-4 (ADR-0016) supersession refusal
+
+/// G-4 (ADR-0016) — thrown when a peer's fetched discovery identity
+/// bundle carries an AccountIdentity `signature_pubkey` that DIFFERS
+/// from the locally-pinned key AND the change cannot be authorised by
+/// a valid supersession proof.
+///
+/// This is the **fail-closed** path (ADR-0016 rule #2): we refuse to
+/// send a ContactRequest / start a call to the unverified new key.
+/// The UI is expected to catch this and prompt the user to re-verify
+/// the peer **out of band** (compare safety numbers, re-scan a QR,
+/// etc.) before proceeding. We never blind-TOFU a CHANGED key.
+///
+/// `reason` discriminates the failure mode for diagnostics — the UX
+/// is the same OOB-reverify prompt regardless.
+public struct SupersessionRefused: Error, LocalizedError, Equatable {
+
+    /// Why the supersession check refused the changed key. Mirror of
+    /// the web `SupersessionRefusedReason` union.
+    public enum Reason: String, Equatable {
+        /// The bundle carried no `supersession_proof` at all (or it
+        /// was not valid base64 / could not be set up to verify).
+        case proofAbsent
+        /// `verifySupersession` threw — malformed / wrong-old-key /
+        /// expired / out-of-range window.
+        case proofInvalid
+        /// The proof verified but authorised a DIFFERENT key than the
+        /// one the bundle actually served (defence in depth).
+        case keyMismatch
+        /// The marker would move backwards — a within-window rollback
+        /// to an older successor (rule #4).
+        case markerBackward
+    }
+
+    /// The discriminated failure mode.
+    public let reason: Reason
+    /// base64 of the account_id whose key change was refused.
+    public let accountIdB64: String
+    /// Human-readable detail for logs / the OOB-reverify prompt.
+    public let message: String
+
+    public init(reason: Reason, accountIdB64: String, message: String) {
+        self.reason = reason
+        self.accountIdB64 = accountIdB64
+        self.message = message
+    }
+
+    public var errorDescription: String? { message }
 }

@@ -349,10 +349,20 @@ public final class DiscoveryClient {
     /// produces the same Ed25519 + X25519 public keys, so the
     /// server's row never changes content but the upsert path stays
     /// uniform.
+    ///
+    /// G-4 (ADR-0016): `supersessionProofB64`, when non-`nil`, is the
+    /// base64 of an old-key-signed supersession proof bridging an
+    /// AccountIdentity rotation (recover). It threads straight into
+    /// `IdentityUploadRequest.supersessionProof` so the new keys +
+    /// proof ship in the **same** request (ADR-0016 rule #1, atomic
+    /// emit). Normal (non-rotation) callers pass `nil` — its absence
+    /// clears any stale server-side proof. The server stores the
+    /// bytes opaquely and never parses them (invariant #2).
     public func uploadIdentityBundle(
         accountId: Data,
         signaturePubkey: Data,
-        x25519Pubkey: Data
+        x25519Pubkey: Data,
+        supersessionProofB64: String? = nil
     ) async throws {
         guard accountId.count == Self.accountIdLength else {
             throw DiscoveryClientError.argument(
@@ -381,7 +391,8 @@ public final class DiscoveryClient {
                 pow: pow,
                 accountId: base64Encode(accountId),
                 signaturePubkey: base64Encode(signaturePubkey),
-                x25519Pubkey: base64Encode(x25519Pubkey)
+                x25519Pubkey: base64Encode(x25519Pubkey),
+                supersessionProof: supersessionProofB64
             )
         )
         guard resp.ok else {

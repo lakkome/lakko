@@ -540,6 +540,23 @@ public final class AuthRepository: ObservableObject {
             newPassword: newPassword
         )
 
+        // G-4 (ADR-0016) — capture the OLD OPAQUE export key BEFORE
+        // the lines below overwrite the cached export key (the
+        // `ExportKeyStore.putExportKey` a few statements down). On
+        // recover the AccountIdentity Ed25519 key rotates, and the
+        // OLD key is the only thing that can sign the supersession
+        // proof bridging old→new; without it ADR-0016 rule #1
+        // (atomic emit-or-abort) forbids re-publishing the bundle at
+        // all. Two sources, in order: the in-memory session secrets
+        // (present when the user recovered from an active session),
+        // then the still-current (pre-rotation) Keychain-cached
+        // export key. Either yields the same 32 bytes; `nil` makes
+        // the emit below skip the upload entirely.
+        let oldExportKey = Self.captureOldExportKey(
+            accountIdB64: cached.accountIdB64,
+            sessionSecrets: identitySecrets
+        )
+
         let deviceRootKey = deriveDeviceRootKey(
             exportKey: result.exportKey,
             accountIdB64: cached.accountIdB64
@@ -560,6 +577,31 @@ public final class AuthRepository: ObservableObject {
         } catch {
             NSLog("export-key persist (recover) failed: \(error)")
         }
+
+        // G-4 (ADR-0016) — ATOMIC emit-or-abort (rule #1). Re-publish
+        // the identity bundle carrying the supersession proof so a
+        // peer that pinned the OLD AccountIdentity key can bridge to
+        // the rotated one without a blind TOFU. iOS did NOT call
+        // `uploadIdentityBundle` on recover before this — the bundle
+        // re-publish is added here, not augmented.
+        //
+        // Atomicity: we mint the proof from the OLD export key
+        // (captured above) and the NEW one FIRST. If we cannot mint
+        // it (old key unavailable on this device, or the sign call
+        // throws), we MUST NOT publish `{new keys, no proof}` — that
+        // is a self-inflicted downgrade (every peer would see a
+        // changed key with no proof and fail closed). So we skip the
+        // upload entirely and leave the OLD bundle live; the user can
+        // re-run recover from a device that still has the old export
+        // key, or peers fall back to OOB re-verify. The whole step is
+        // best-effort beyond the atomicity gate: a network failure on
+        // the upload does not fail the recover itself.
+        await Self.emitSupersessionBundleBestEffort(
+            accountId: accountIdBytes,
+            oldExportKey: oldExportKey,
+            newExportKey: result.exportKey,
+            sessionToken: result.sessionToken
+        )
         // Phase 2a3b0 (ADR-0007) — DeviceIdentity seed is
         // decoupled from the OPAQUE password, so recovery does
         // NOT rotate it. `ensureDeviceIdentitySeed` returns
@@ -736,6 +778,137 @@ public final class AuthRepository: ObservableObject {
             _ = try await PushSubscriber.shared.subscribe()
         } catch {
             NSLog("push subscribe (\(context)) failed: \(error)")
+        }
+    }
+
+    // MARK: - G-4 (ADR-0016) identity-supersession emit helpers
+
+    /// G-4 (ADR-0016) emit window: the supersession proof is valid
+    /// for 14 days from issue — well under the verifier's 30-day
+    /// `MAX_VALIDITY_SECS` ceiling (ADR-0016 rule #5), which bounds
+    /// replay without widening the hard cap.
+    private static let supersessionEmitWindowSecs: Int64 = 14 * 24 * 60 * 60
+
+    /// G-4 (ADR-0016) — recover the OLD OPAQUE export key on the
+    /// rotation path, BEFORE the recover flow overwrites the cached
+    /// export key. This is the seed for the OLD AccountIdentity
+    /// Ed25519 key that signs the supersession proof.
+    ///
+    /// Sources, in order of preference:
+    ///   1. The in-memory session secrets — present when the user
+    ///      recovered from an active session and they belong to this
+    ///      same account (the export key is still the pre-rotation
+    ///      one at the moment we read it).
+    ///   2. The still-current (pre-rotation) Keychain-cached export
+    ///      key.
+    ///
+    /// Returns `nil` when neither is available (a cold device that
+    /// never cached the key, or a Keychain read failure). A `nil`
+    /// here makes the caller abort the bundle re-upload per the
+    /// atomic-emit rule — we never publish rotated keys with no proof.
+    private static func captureOldExportKey(
+        accountIdB64: String,
+        sessionSecrets: IdentitySecrets?
+    ) -> Data? {
+        if let secrets = sessionSecrets,
+           base64Encode(secrets.accountId) == accountIdB64,
+           secrets.exportKey.count == ExportKeyStore.exportKeyLength {
+            return secrets.exportKey
+        }
+        do {
+            return try ExportKeyStore.getExportKey(accountIdB64: accountIdB64)
+        } catch {
+            NSLog("supersession: old export-key read (recover) failed: \(error)")
+            return nil
+        }
+    }
+
+    /// G-4 (ADR-0016) — mint the supersession proof bridging the OLD
+    /// AccountIdentity to the NEW one, given both OPAQUE export keys.
+    ///
+    /// Derives each identity's Ed25519 seed via `Identity.fromSeed`
+    /// (the proof's embedded old key is derived internally from the
+    /// old seed, so it always matches the signer), then calls
+    /// `signSupersessionProof` over a 14-day window (rule #5).
+    ///
+    /// Returns the raw proof bytes, or `nil` when the proof cannot be
+    /// minted — either `oldExportKey` is absent (cold device) or a
+    /// derivation / sign call throws. The caller treats `nil` as
+    /// "abort the rotation upload" (rule #1).
+    private static func mintSupersessionProof(
+        oldExportKey: Data?,
+        newExportKey: Data
+    ) -> Data? {
+        guard let oldExportKey = oldExportKey else { return nil }
+        do {
+            let oldSeed = try Identity.fromSeed(seed: oldExportKey).ed25519Seed()
+            let newSeed = try Identity.fromSeed(seed: newExportKey).ed25519Seed()
+            let nowSecs = Int64(Date().timeIntervalSince1970)
+            let expiresSecs = nowSecs + supersessionEmitWindowSecs
+            return try signSupersessionProof(
+                oldEd25519Seed: oldSeed,
+                newEd25519Seed: newSeed,
+                issuedAtUnixSecs: nowSecs,
+                expiresAtUnixSecs: expiresSecs
+            )
+        } catch {
+            NSLog("supersession: proof mint (recover) failed: \(error)")
+            return nil
+        }
+    }
+
+    /// G-4 (ADR-0016) — the atomic emit step on recover. Mints the
+    /// proof first; only if a proof is mintable does it re-publish
+    /// `{new keys + proof}` in a single `uploadIdentityBundle` call.
+    ///
+    /// ADR-0016 rule #1 (atomic emit-or-abort): a `nil` proof means
+    /// we SKIP the upload and leave the OLD bundle live, never
+    /// publishing rotated keys without a proof. The upload itself is
+    /// best-effort beyond that gate — a transport failure is logged
+    /// and does not fail the recover.
+    private static func emitSupersessionBundleBestEffort(
+        accountId: Data,
+        oldExportKey: Data?,
+        newExportKey: Data,
+        sessionToken: String
+    ) async {
+        guard let proof = mintSupersessionProof(
+            oldExportKey: oldExportKey,
+            newExportKey: newExportKey
+        ) else {
+            // No mintable proof (old export key unavailable on this
+            // device). Per rule #1 we do NOT publish the rotated keys
+            // without a proof — skip the bundle upload entirely and
+            // leave the old bundle serving. Peers fall back to OOB
+            // re-verify; a re-run from a device that still holds the
+            // old export key can complete the emit later.
+            NSLog(
+                "supersession: no mintable proof on recover (old export " +
+                "key unavailable) — SKIPPING identity bundle re-upload to " +
+                "avoid publishing rotated keys without a proof " +
+                "(ADR-0016 rule #1, atomic emit). Old bundle stays live."
+            )
+            return
+        }
+
+        let identity: Identity
+        do {
+            identity = try Identity.fromSeed(seed: newExportKey)
+        } catch {
+            NSLog("supersession: new identity derive (recover) failed: \(error)")
+            return
+        }
+
+        let discovery = DiscoveryClient(sessionToken: sessionToken)
+        do {
+            try await discovery.uploadIdentityBundle(
+                accountId: accountId,
+                signaturePubkey: identity.signaturePublicKey(),
+                x25519Pubkey: identity.x25519PublicKey(),
+                supersessionProofB64: base64Encode(proof)
+            )
+        } catch {
+            NSLog("supersession: identity bundle re-upload (recover) failed: \(error)")
         }
     }
 
