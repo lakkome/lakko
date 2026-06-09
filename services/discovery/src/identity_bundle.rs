@@ -78,8 +78,10 @@ fn decode_fixed<const N: usize>(
 }
 
 /// Decode the optional G-4 supersession proof (ADR-0016). `None` (the field
-/// absent) stays `None` and clears any stored proof on upsert. A present
-/// value is base64-decoded and length-capped to [`MAX_SUPERSESSION_PROOF_LEN`]
+/// absent) stays `None`; the upsert then PRESERVES any already-stored proof
+/// (via `COALESCE`), so a non-rotation re-upload does not strip a still-valid
+/// proof. A present value is base64-decoded and length-capped to
+/// [`MAX_SUPERSESSION_PROOF_LEN`]
 /// — the server does NOT parse or verify the bytes (invariant #2); that is the
 /// receiving peer's job via `verify_supersession`.
 fn decode_optional_proof(b64: Option<&str>) -> Result<Option<Vec<u8>>, (StatusCode, String)> {
@@ -149,7 +151,11 @@ pub(crate) async fn upload(
     let x25519_pubkey = decode_fixed::<X25519_PUBKEY_LEN>(&payload.x25519_pubkey, "x25519_pubkey")?;
 
     // G-4 (ADR-0016): decode the optional supersession proof (opaque to the
-    // server). `None` clears any stored proof on upsert.
+    // server). `None` PRESERVES any stored proof (the `COALESCE` below), so a
+    // routine non-rotation re-upload (login refresh, KeyPackage rotation)
+    // does not strip a still-valid proof before peers have pulled it; a new
+    // rotation supplies a fresh proof that replaces it, and the proof
+    // self-expires via its own 14-day window regardless.
     let supersession_proof = decode_optional_proof(payload.supersession_proof.as_deref())?;
 
     // Phase 1.5b anti-impersonation: only the account_id's owner
@@ -174,7 +180,7 @@ pub(crate) async fn upload(
          ON DUPLICATE KEY UPDATE \
             signature_pubkey   = VALUES(signature_pubkey), \
             x25519_pubkey      = VALUES(x25519_pubkey), \
-            supersession_proof = VALUES(supersession_proof)",
+            supersession_proof = COALESCE(VALUES(supersession_proof), supersession_proof)",
     )
     .bind(&account_id[..])
     .bind(&signature_pubkey[..])
@@ -320,7 +326,7 @@ mod tests {
 
     #[test]
     fn decode_optional_proof_handles_absent_present_and_oversized() {
-        // Absent -> None (clears any stored proof on upsert).
+        // Absent -> None (the upsert then PRESERVES any stored proof).
         assert!(decode_optional_proof(None).unwrap().is_none());
 
         // Present, within the cap (the real proof is 145 bytes) -> decoded.

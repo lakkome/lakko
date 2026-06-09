@@ -10,12 +10,14 @@
 -- the old key pinned fetches the bundle, verifies the proof locally, and
 -- re-pins -- bridging trust without a blind TOFU (security invariant #6).
 --
--- The column is NULL by default and is cleared on any non-rotation
--- re-upload (the upsert binds VALUES(supersession_proof), so a fresh
--- upload without a proof writes NULL). The server NEVER parses these
--- bytes -- it stores and serves them verbatim (invariant #2). The proof
--- is a public, old-key-signed artifact (crates/lakko-transparency), so
--- storing it leaks no secret. Width is the 145-byte proof + headroom.
+-- The column is NULL by default. A non-rotation re-upload (no proof)
+-- PRESERVES any stored proof (the upsert uses COALESCE), so a routine
+-- login refresh does not strip a still-valid proof before peers pull it; a
+-- new rotation supplies a fresh proof that replaces it, and the proof
+-- self-expires via its own 14-day window regardless. The server NEVER
+-- parses these bytes -- it stores and serves them verbatim (invariant #2).
+-- The proof is a public, old-key-signed artifact (crates/lakko-transparency),
+-- so storing it leaks no secret. Width is the 145-byte proof + headroom.
 ALTER TABLE identity_bundles
     ADD COLUMN supersession_proof VARBINARY(150) NULL
-        COMMENT 'G-4 (ADR-0016): optional old-key-signed supersession proof, opaque to the server, cleared on non-rotation re-upload';
+        COMMENT 'G-4 (ADR-0016): optional old-key-signed supersession proof, opaque to the server, preserved across non-rotation re-uploads, replaced on a new rotation';

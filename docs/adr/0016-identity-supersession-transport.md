@@ -139,8 +139,10 @@ A hard dependency chain across tiers; fan-out parallel within a tier (the
 
 0. **Server column + wire mirrors** — `identity_bundles` migration adding nullable
    `supersession_proof VARBINARY(150)`; `services/discovery/src/identity_bundle.rs`
-   threads an `Option<base64>` through upload + fetch (cleared on a non-rotation
-   re-upload), never parsing the bytes; the three hand-mirrored wire types add the
+   threads an `Option<base64>` through upload + fetch (the proof is **preserved**
+   across a non-rotation re-upload via `COALESCE` and only replaced by a new
+   rotation's proof — see the post-review note below), never parsing the bytes;
+   the three hand-mirrored wire types add the
    optional field in one logical change.
 1. **Regenerate mobile UniFFI bindings** (`just regen-bindings` + `just build-ios`).
 2. **Persistent per-contact account-pubkey pin store** ×3 (web localStorage schema
@@ -153,6 +155,35 @@ A hard dependency chain across tiers; fan-out parallel within a tier (the
    password-change rotation into the shared emit helper if one exists.
 5. **Verify + re-pin on bundle fetch (fail-closed)** ×3 at every `identityFetch`
    site — the security-critical sprint, routed through `lakko-security`.
+
+## Security review (post-implementation)
+
+A `lakko-security` adversarial pass over the whole feature (server + web/iOS/
+Android emit/verify/pin) returned **APPROVE WITH NOTES**: the fail-closed verify
+gate is correct and consistent across all three platforms, the atomic-emit and
+monotonic-marker rules hold, and server opacity is preserved — no silent
+fail-open in the verify path. Disposition of the findings:
+
+- **#1 (MEDIUM, resolved) — non-rotation re-upload stripped a fresh proof.** The
+  server originally **cleared** the proof on any no-proof re-upload; combined with
+  the web re-uploading its bundle on every login, a routine login right after a
+  recover could strip a still-valid proof before peers pulled it (shrinking the
+  lazy-pull window — an availability/carrier-effectiveness loss, never an integrity
+  break, since peers fail closed). Fixed at the root in the server: the upsert now
+  **preserves** the stored proof on a no-proof re-upload (`COALESCE(VALUES(...),
+  supersession_proof)`) and only replaces it on a new rotation; the proof
+  self-expires via its 14-day window regardless. This fixes all platforms at once.
+- **#2 (LOW, not applicable) — Android `oldExportKey` zeroization.** Reported as
+  missing; on inspection the captured old export key **is** wiped in the recover
+  `finally` (`oldExportKey?.fill(0)`). No change needed.
+- **#3 (INFO, accepted) — Android verify gate is a no-op when its pin store is
+  null.** Production wires a non-null store (verified), so inv #4 is enforced in
+  production; the residual is that a future wiring regression could silently
+  disable the gate. Recommended hardening (deferred): type-enforce a non-null pin
+  store in the production constructor, keeping the nullable seam test-only.
+- **#4 (INFO, no action) — iOS `expires_at` signed-shift** could trap on a
+  top-bit-set value; unreachable (a real `expires_at` is ~1.7e9 and the verifier
+  bounds the window first), and a trap is a crash = fail-closed, not fail-open.
 
 ## Consequences
 
