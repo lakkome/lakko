@@ -3,11 +3,14 @@
 
 package me.lakko.app.contacts
 
+import android.util.Log
 import me.lakko.app.auth.base64Decode
+import me.lakko.app.auth.base64Encode
 import me.lakko.app.discovery.DiscoveryClient
 import me.lakko.app.discovery.DiscoveryClientArgError
 import me.lakko.app.discovery.DiscoveryHttpError
 import me.lakko.app.discovery.DiscoveryNetworkError
+import me.lakko.app.discovery.IdentityFetchResponse
 import me.lakko.app.ds.DsClient
 import me.lakko.app.ds.DsClientArgError
 import me.lakko.app.ds.DsHttpError
@@ -18,6 +21,7 @@ import uniffi.lakko_ffi_uniffi.FfiException
 import uniffi.lakko_ffi_uniffi.IdentityPseudonym
 import uniffi.lakko_ffi_uniffi.composeContactAck
 import uniffi.lakko_ffi_uniffi.composeContactRequest
+import uniffi.lakko_ffi_uniffi.verifySupersession
 
 /**
  * Orchestrates the send / poll sides of the
@@ -73,6 +77,20 @@ import uniffi.lakko_ffi_uniffi.composeContactRequest
 public class ContactsClient(
     private val discovery: DiscoveryClient = DiscoveryClient(),
     private val ds: DsClient = DsClient(),
+    /**
+     * G-4 (ADR-0016) — persistent per-account AccountIdentity-pubkey
+     * pin store driving the fetch-path supersession gate
+     * ([verifyBundleAccountKey]).
+     *
+     * MUST be non-null in production (wired with a
+     * [PeerPinStore] over the app `Context` by
+     * [ContactsRepository]). A `null` here disables the gate and is
+     * permitted ONLY for direct / test callers that have already
+     * verified the peer out of band — production wiring always
+     * supplies the store, so the changed-key fail-closed path is
+     * always active on the real send flow.
+     */
+    private val pinStore: PinStore? = null,
 ) : AutoCloseable {
 
     override fun close() {
@@ -119,6 +137,14 @@ public class ContactsClient(
         } catch (e: DiscoveryNetworkError) {
             throw ContactsError.wrap(e)
         } ?: throw ContactsError.noIdentityBundle(recipientAccountId)
+
+        // G-4 (ADR-0016) rule #2 — verify the fetched bundle's
+        // AccountIdentity key against the local pin BEFORE using its
+        // keys to seal a ContactRequest. A changed key with no valid
+        // supersession proof throws [SupersessionRefused] (fail-
+        // closed) and we never seal to the unverified new key.
+        verifyBundleAccountKey(recipientAccountId, bundle)
+
         val recipientSignaturePub = base64Decode(bundle.signature_pubkey)
         val recipientX25519Pub = base64Decode(bundle.x25519_pubkey)
 
@@ -182,6 +208,170 @@ public class ContactsClient(
             recipientAccountId = recipientAccountId,
             messageId = publish.messageId,
             createdAt = publish.createdAt,
+        )
+    }
+
+    // -----------------------------------------------------------------
+    // G-4 (ADR-0016): fetch-path supersession verify + re-pin
+    // -----------------------------------------------------------------
+
+    /**
+     * G-4 (ADR-0016) — verify a freshly-fetched peer identity
+     * bundle's AccountIdentity key against the local pin, re-pinning
+     * (via a supersession proof) when the key rotated. Called after
+     * every [DiscoveryClient.identityFetch] and BEFORE the bundle's
+     * keys are used to send a [ContactRequest].
+     *
+     * Mirror of the web `ContactsClient.verifyBundleAccountKey`
+     * (`apps/web/src/contacts/client.ts`).
+     *
+     * Decision table (ADR-0016 rule #2, fail-closed):
+     *   1. No [pinStore] (test / direct caller) → skip the gate.
+     *      Production always wires the store, so this never disables
+     *      the gate on the real send flow.
+     *   2. No existing pin → TOFU-pin the fetched key (marker `0`).
+     *      Trust-on-first-use is unchanged for a first observation.
+     *   3. Pin matches the fetched `signature_pubkey` → proceed (no
+     *      key change; the common steady-state case).
+     *   4. Pin DIFFERS → REQUIRE `bundle.supersession_proof`:
+     *        a. absent → throw [SupersessionRefused] (`ProofAbsent`).
+     *        b. [verifySupersession] throws → [SupersessionRefused]
+     *           (`ProofInvalid`).
+     *        c. the verifier's authorised new key !=
+     *           `bundle.signature_pubkey` → [SupersessionRefused]
+     *           (`KeyMismatch`) — defence in depth.
+     *        d. re-pin advancing the monotonic marker to the proof's
+     *           expiry; a backward marker → [SupersessionRefused]
+     *           (`MarkerBackward`).
+     *      Only on a clean verify do we proceed with the new key.
+     *
+     * NEVER blind-TOFU a CHANGED key — that is the whole point of
+     * the gate.
+     *
+     * @param accountId  The peer's raw 16-byte account_id (the
+     *                   stable pin key, NOT the pubkey — rule #3).
+     * @param bundle     The fetched [IdentityFetchResponse].
+     * @throws SupersessionRefused on any fail-closed branch.
+     *
+     * `internal` (not `private`) so the instrumented test suite can
+     * drive the decision table directly with the real native lib +
+     * an [InMemoryPinStore], without standing up the discovery +
+     * DS round-trip. Not part of the public surface.
+     */
+    internal fun verifyBundleAccountKey(
+        accountId: ByteArray,
+        bundle: IdentityFetchResponse,
+    ) {
+        val store = pinStore ?: return
+        val accountIdB64 = base64Encode(accountId)
+        val fetchedPubkeyB64 = bundle.signature_pubkey
+
+        val existing = store.readPin(accountIdB64)
+
+        // Case 2 — first-ever observation. TOFU-pin and proceed.
+        if (existing == null) {
+            store.setPin(accountIdB64, fetchedPubkeyB64, 0L)
+            return
+        }
+
+        // Case 3 — unchanged key. Nothing to verify.
+        if (existing.pinnedSignaturePubkeyB64 == fetchedPubkeyB64) {
+            return
+        }
+
+        // Case 4 — the AccountIdentity key changed. A proof is now
+        // mandatory; absence is an immediate fail-closed refusal.
+        val proofB64 = bundle.supersession_proof
+        if (proofB64.isNullOrEmpty()) {
+            throw SupersessionRefused(
+                reason = SupersessionRefusedReason.ProofAbsent,
+                accountIdB64 = accountIdB64,
+                message = "the peer's account key changed and no " +
+                    "supersession proof was provided — refusing to trust " +
+                    "the new key. Please re-verify this contact out of band.",
+            )
+        }
+
+        val proofBytes = try {
+            base64Decode(proofB64)
+        } catch (cause: IllegalArgumentException) {
+            throw SupersessionRefused(
+                reason = SupersessionRefusedReason.ProofInvalid,
+                accountIdB64 = accountIdB64,
+                message = "the supersession proof was not valid base64 " +
+                    "($cause) — refusing the changed key. Please re-verify " +
+                    "out of band.",
+            )
+        }
+        val pinnedOldPubkey = try {
+            base64Decode(existing.pinnedSignaturePubkeyB64)
+        } catch (cause: IllegalArgumentException) {
+            // The stored pin itself is malformed — fail closed.
+            throw SupersessionRefused(
+                reason = SupersessionRefusedReason.ProofInvalid,
+                accountIdB64 = accountIdB64,
+                message = "the locally-pinned key was malformed ($cause) — " +
+                    "refusing the changed key. Please re-verify out of band.",
+            )
+        }
+        val nowSecs = System.currentTimeMillis() / 1000L
+
+        // The verifier returns the authorised NEW pubkey, or THROWS
+        // on a malformed / wrong-old-key / expired / out-of-window
+        // proof.
+        val authorisedNewPubkey: ByteArray = try {
+            verifySupersession(proofBytes, pinnedOldPubkey, nowSecs)
+        } catch (cause: FfiException) {
+            throw SupersessionRefused(
+                reason = SupersessionRefusedReason.ProofInvalid,
+                accountIdB64 = accountIdB64,
+                message = "the peer's account key changed and the " +
+                    "supersession proof did not verify against the pinned " +
+                    "key ($cause) — refusing the new key. Please re-verify " +
+                    "out of band.",
+            )
+        }
+
+        // Defence in depth — the proof must authorise EXACTLY the
+        // key the bundle served. A proof that verifies but names a
+        // third key is rejected (a malicious server splicing an
+        // unrelated valid proof onto a substituted key).
+        val authorisedNewPubkeyB64 = base64Encode(authorisedNewPubkey)
+        if (authorisedNewPubkeyB64 != fetchedPubkeyB64) {
+            throw SupersessionRefused(
+                reason = SupersessionRefusedReason.KeyMismatch,
+                accountIdB64 = accountIdB64,
+                message = "the supersession proof verified but authorised a " +
+                    "different key than the bundle served — refusing. " +
+                    "Please re-verify out of band.",
+            )
+        }
+
+        // Advance the monotonic marker (ADR-0016 rule #4) to the
+        // proof's own `expires_at`. A genuine later rotation carries
+        // a strictly-newer `issued_at` (hence a newer `expires_at`
+        // for a fixed emit window), so a stale older successor's
+        // proof — whose `expires_at` predates the current marker —
+        // is refused. Re-observing the SAME transition re-pins at
+        // the same marker (`>=`, allowed). We read `expires_at` from
+        // the already-verified proof bytes (the verifier confirmed
+        // the signature over exactly these fields, so the parse is
+        // on trusted data).
+        val proofExpiresAt = readProofExpiresAtSecs(proofBytes)
+        val result = store.setPin(accountIdB64, fetchedPubkeyB64, proofExpiresAt)
+        if (result == SetPinResult.RejectedBackward) {
+            throw SupersessionRefused(
+                reason = SupersessionRefusedReason.MarkerBackward,
+                accountIdB64 = accountIdB64,
+                message = "the supersession proof would move the rotation " +
+                    "marker backwards (an older successor) — refusing. " +
+                    "Please re-verify out of band.",
+            )
+        }
+        Log.i(
+            "lakko-contacts",
+            "supersession: re-pinned account $accountIdB64 to a verified " +
+                "rotated key (marker $proofExpiresAt)",
         )
     }
 
@@ -698,4 +888,87 @@ public class ContactsError(
                 message = cause.message ?: cause::class.simpleName ?: "contacts error",
             )
     }
+}
+
+// ---------------------------------------------------------------------
+// G-4 (ADR-0016): supersession fail-closed refusal
+// ---------------------------------------------------------------------
+
+/**
+ * G-4 (ADR-0016) — discriminates the supersession fail-closed
+ * failure mode for diagnostics. The UX is the same OOB-reverify
+ * prompt regardless. Mirror of the web
+ * `SupersessionRefusedReason`.
+ */
+public enum class SupersessionRefusedReason {
+    /** The bundle carried no `supersession_proof` at all. */
+    ProofAbsent,
+
+    /** [uniffi.lakko_ffi_uniffi.verifySupersession] threw, or the
+     *  proof / pinned key was malformed base64 (wrong-old-key /
+     *  expired / out-of-range window / parse failure). */
+    ProofInvalid,
+
+    /** The proof verified but authorised a DIFFERENT key than the
+     *  one the bundle actually served (defence in depth). */
+    KeyMismatch,
+
+    /** The marker would move backwards — a within-window rollback
+     *  to an older successor (rule #4). */
+    MarkerBackward,
+}
+
+/**
+ * G-4 (ADR-0016) — thrown when a peer's fetched discovery identity
+ * bundle carries an AccountIdentity `signature_pubkey` that DIFFERS
+ * from the locally-pinned key AND the change cannot be authorised
+ * by a valid supersession proof.
+ *
+ * This is the **fail-closed** path (ADR-0016 rule #2): we refuse to
+ * send a [ContactRequest] to the unverified new key. The UI is
+ * expected to catch this and prompt the user to re-verify the peer
+ * **out of band** (compare safety numbers, re-scan a QR, etc.)
+ * before proceeding. We never blind-TOFU a CHANGED key.
+ *
+ * Mirror of the web `SupersessionRefused`.
+ */
+public class SupersessionRefused(
+    /** The cause shape — discriminates the failure mode. */
+    public val reason: SupersessionRefusedReason,
+    /** base64 of the account_id whose key change was refused. */
+    public val accountIdB64: String,
+    message: String,
+) : RuntimeException(message)
+
+/** Fixed serialized length of a supersession proof — mirrors
+ *  `lakko_transparency::supersession::SUPERSESSION_PROOF_LEN`
+ *  (`version(1) ‖ old(32) ‖ new(32) ‖ issued(8) ‖ expires(8) ‖
+ *  sig(64)` = 145). */
+private const val SUPERSESSION_PROOF_LEN = 1 + 32 + 32 + 8 + 8 + 64
+
+/** Byte offset of the big-endian i64 `expires_at` field within a
+ *  supersession proof: after version(1) + old(32) + new(32) +
+ *  issued(8) = 73. */
+private const val SUPERSESSION_EXPIRES_AT_OFFSET = 1 + 32 + 32 + 8
+
+/**
+ * Read the big-endian i64 `expires_at_unix_secs` field out of a
+ * supersession proof's wire bytes (G-4). Used ONLY after
+ * [uniffi.lakko_ffi_uniffi.verifySupersession] has authenticated
+ * the proof, so the parse runs on trusted, fixed-length data — we
+ * still bound-check the length defensively. Mirror of the web
+ * `readProofExpiresAtSecs`.
+ */
+internal fun readProofExpiresAtSecs(proofBytes: ByteArray): Long {
+    require(proofBytes.size >= SUPERSESSION_PROOF_LEN) {
+        // Should be unreachable — the verifier already accepted
+        // these bytes — but never index past the buffer.
+        "supersession proof too short (${proofBytes.size} bytes)"
+    }
+    var value = 0L
+    for (i in 0 until 8) {
+        value = (value shl 8) or
+            (proofBytes[SUPERSESSION_EXPIRES_AT_OFFSET + i].toLong() and 0xFF)
+    }
+    return value
 }

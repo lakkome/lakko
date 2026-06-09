@@ -1028,11 +1028,22 @@ public class DiscoveryClient(
      * derivation property: the same password produces the same
      * Ed25519 + X25519 public keys, so the server's row never
      * changes content but the upsert path stays uniform.
+     *
+     * G-4 (ADR-0016): [supersessionProofB64], when non-null, is the
+     * old-key-signed proof bridging an AccountIdentity rotation
+     * (recover). It rides straight onto
+     * [IdentityUploadRequest.supersession_proof] so the new keys +
+     * proof ship in the same request (ADR-0016 rule #1, atomic
+     * emit). The server stores it opaquely and clears it on a
+     * non-rotation re-upload. Non-rotation callers (signup / login /
+     * passkey) pass `null` — a normal upload clears any stale
+     * server-side proof.
      */
     public suspend fun uploadIdentityBundle(
         accountId: ByteArray,
         signaturePubkey: ByteArray,
         x25519Pubkey: ByteArray,
+        supersessionProofB64: String? = null,
     ) {
         if (accountId.size != ACCOUNT_ID_LEN) {
             throw DiscoveryClientArgError("accountId must be $ACCOUNT_ID_LEN bytes")
@@ -1057,6 +1068,7 @@ public class DiscoveryClient(
                 account_id = base64Encode(accountId),
                 signature_pubkey = base64Encode(signaturePubkey),
                 x25519_pubkey = base64Encode(x25519Pubkey),
+                supersession_proof = supersessionProofB64,
             ),
         )
         if (!resp.ok) {

@@ -125,6 +125,10 @@ class MainActivity : ComponentActivity() {
         val chatRepository = ChatRepository(applicationContext)
         val contactsRepository = ContactsRepository(
             authRepo = authRepository,
+            // G-4 (ADR-0016) — the app context backs the persistent
+            // PeerPinStore so the fetch-path supersession gate is
+            // active on every real send.
+            appContext = applicationContext,
             chatRepo = chatRepository,
         )
         // Phase 2a3e2b-Android — process-scoped cross-device

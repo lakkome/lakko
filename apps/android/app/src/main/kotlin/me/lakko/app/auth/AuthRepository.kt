@@ -12,10 +12,13 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import me.lakko.app.discovery.DiscoveryClient
 import me.lakko.app.push.PushSubscriber
 import me.lakko.app.webauthn.PasskeyLoginResult
 import me.lakko.app.webauthn.WebauthnClient
+import uniffi.lakko_ffi_uniffi.Identity
 import uniffi.lakko_ffi_uniffi.RecoveryMnemonic
+import uniffi.lakko_ffi_uniffi.signSupersessionProof
 
 /**
  * Single source of truth for "is the user authenticated on this
@@ -63,6 +66,11 @@ public class AuthRepository(
      *  ~50 ms (OkHttp engine + thread pool). The login / signup
      *  screens only need it on submit, not on first paint. */
     private val authClientFactory: () -> AuthClient = { AuthClient() },
+    /** G-4 (ADR-0016) — factory for the [DiscoveryClient] used to
+     *  re-publish the identity bundle (+ supersession proof) on
+     *  recover. Lazy for the same reason as [authClientFactory].
+     *  Overridable so tests can supply a stub. */
+    private val discoveryClientFactory: () -> DiscoveryClient = { DiscoveryClient() },
 ) {
     /** 1.20d — dedicated scope for fire-and-forget push
      *  subscribe / unsubscribe coroutines. `SupervisorJob` so
@@ -476,6 +484,19 @@ public class AuthRepository(
             )
         val accountIdBytes = base64Decode(cached.accountIdB64)
 
+        // G-4 (ADR-0016) — capture the OLD OPAQUE export key BEFORE
+        // the recover rotates the device key + overwrites the cached
+        // export key (the `ExportKeyStore.putExportKey` below). The
+        // old AccountIdentity Ed25519 key (derived from this seed) is
+        // what signs the supersession proof bridging old -> new;
+        // without it we cannot mint a proof and ADR-0016 rule #1
+        // (atomic emit-or-abort) then forbids re-publishing the
+        // rotated bundle at all. `null` on a cold device that never
+        // cached the key — the emit helper treats that as "abort the
+        // rotation upload".
+        val oldExportKey: ByteArray? =
+            ExportKeyStore.getExportKey(applicationContext, cached.accountIdB64)
+
         // Parse the mnemonic up front. `fromPhrase` collapses
         // unknown-word and bad-checksum into one FfiException by
         // design (preserves BIP39's no-probing property). Burn
@@ -610,6 +631,27 @@ public class AuthRepository(
                         ),
                     )
 
+                    // G-4 (ADR-0016) — re-publish the identity bundle
+                    // + a fresh KeyPackage. On recover the
+                    // AccountIdentity Ed25519 key rotates, so a peer
+                    // that pinned the OLD key needs a supersession
+                    // proof to bridge to the new one without a blind
+                    // TOFU. ATOMIC emit-or-abort (rule #1): mint the
+                    // proof from the OLD export key (captured above)
+                    // + the NEW one, then publish {new keys + proof}
+                    // in one request; if we CANNOT mint the proof we
+                    // do NOT publish the rotated bundle at all (a
+                    // self-inflicted downgrade), leaving the OLD
+                    // bundle live. Best-effort transport — a transient
+                    // upload failure does not block the session, but a
+                    // missing proof always aborts the upload.
+                    emitRotatedBundleBestEffort(
+                        accountId = accountIdBytes,
+                        oldExportKey = oldExportKey,
+                        newExportKey = result.exportKey,
+                        sessionToken = result.sessionToken,
+                    )
+
                     // Phase 2a1c — post-recover backup
                     // bootstrap: re-cache the phrase + post a
                     // baseline /backup envelope that re-publishes
@@ -635,6 +677,9 @@ public class AuthRepository(
             // BIP39 seed is the highest-value secret we touch in
             // this flow — wipe before GC even thinks about it.
             seed.fill(0)
+            // G-4 — the captured OLD export key is secret material
+            // (the seed for the old AccountIdentity); wipe it too.
+            oldExportKey?.fill(0)
         }
     }
 
@@ -1001,6 +1046,142 @@ public class AuthRepository(
         }
     }
 
+    /**
+     * G-4 (ADR-0016) — re-publish the rotated identity bundle on
+     * recover, ATOMICALLY (rule #1).
+     *
+     * Mint the supersession proof from the OLD export key
+     * ([oldExportKey], captured before the recover overwrote the
+     * cache) + the NEW one ([newExportKey]), then upload
+     * `{new keys + proof}` in one request via
+     * [DiscoveryClient.uploadIdentityBundle]. If the proof CANNOT be
+     * minted — the old export key is absent (cold device) or the
+     * sign call throws — we MUST NOT publish the rotated bundle: a
+     * `{new keys, no proof}` upload is a self-inflicted downgrade
+     * (every peer would see a changed key with no proof and fail
+     * closed). In that case we skip the bundle upload entirely,
+     * leave the OLD bundle live, and refresh the KeyPackage only
+     * (it carries no AccountIdentity rotation state, so publishing
+     * it is not a downgrade — and it keeps new-group bootstrap
+     * working). Mirror of the web `recover` atomic-emit branch.
+     *
+     * Best-effort transport: a transient upload failure logs and
+     * continues (the session is already live); only a missing proof
+     * aborts the bundle upload.
+     */
+    private suspend fun emitRotatedBundleBestEffort(
+        accountId: ByteArray,
+        oldExportKey: ByteArray?,
+        newExportKey: ByteArray,
+        sessionToken: String,
+    ) {
+        val accountIdB64 = base64Encode(accountId)
+        val discovery = discoveryClientFactory()
+        try {
+            discovery.setSessionToken(sessionToken)
+
+            val proofB64 = mintSupersessionProofB64(oldExportKey, newExportKey)
+            if (proofB64 == null) {
+                // Atomic-emit abort (rule #1) — no mintable proof, so
+                // do NOT publish the rotated bundle. Refresh the
+                // KeyPackage only so new-group bootstrap still works.
+                Log.w(
+                    "lakko-auth",
+                    "post-recover: no mintable supersession proof (old " +
+                        "export key unavailable on this device) — SKIPPING " +
+                        "the identity bundle re-upload to avoid publishing " +
+                        "rotated keys without a proof (ADR-0016 rule #1, " +
+                        "atomic emit). Refreshing the KeyPackage only; the " +
+                        "old bundle stays live.",
+                )
+                try {
+                    val keyPackageBytes =
+                        Identity.fromSeed(newExportKey).use { it.createKeyPackage() }
+                    discovery.uploadKeyPackage(accountId, keyPackageBytes)
+                } catch (cause: Throwable) {
+                    Log.w(
+                        "lakko-auth",
+                        "post-recover KeyPackage-only refresh failed",
+                        cause,
+                    )
+                }
+                return
+            }
+
+            // Have a proof — publish {new keys + proof} atomically.
+            try {
+                Identity.fromSeed(newExportKey).use { identity ->
+                    val signaturePubkey = identity.signaturePublicKey()
+                    val x25519Pubkey = identity.x25519PublicKey()
+                    val keyPackageBytes = identity.createKeyPackage()
+                    discovery.uploadIdentityBundle(
+                        accountId = accountId,
+                        signaturePubkey = signaturePubkey,
+                        x25519Pubkey = x25519Pubkey,
+                        supersessionProofB64 = proofB64,
+                    )
+                    // Refresh the MLS KeyPackage alongside — same as
+                    // the web `uploadIdentityBundle` helper, which
+                    // publishes a fresh KeyPackage on every bundle
+                    // upload.
+                    discovery.uploadKeyPackage(accountId, keyPackageBytes)
+                }
+                Log.i(
+                    "lakko-auth",
+                    "post-recover: re-published identity bundle for " +
+                        "$accountIdB64 with a supersession proof (G-4)",
+                )
+            } catch (cause: Throwable) {
+                Log.w(
+                    "lakko-auth",
+                    "post-recover identity bundle upload failed",
+                    cause,
+                )
+            }
+        } finally {
+            discovery.close()
+        }
+    }
+
+    /**
+     * G-4 (ADR-0016) — mint the supersession proof bridging the OLD
+     * AccountIdentity to the NEW one, given both OPAQUE export keys,
+     * and return it as base64.
+     *
+     * Derives each identity's Ed25519 seed via [Identity.fromSeed]
+     * (the proof's embedded old key is derived internally from the
+     * old seed, so it always matches the signer), then calls
+     * [signSupersessionProof] over a 14-day window (rule #5, well
+     * under the verifier's 30-day ceiling).
+     *
+     * Returns `null` when the proof cannot be minted — either
+     * [oldExportKey] is absent (cold device) or the sign call
+     * throws. The caller treats `null` as "abort the rotation
+     * upload" (rule #1). Mirror of the web `mintSupersessionProof`.
+     */
+    private fun mintSupersessionProofB64(
+        oldExportKey: ByteArray?,
+        newExportKey: ByteArray,
+    ): String? {
+        if (oldExportKey == null) return null
+        return try {
+            val oldSeed = Identity.fromSeed(oldExportKey).use { it.ed25519Seed() }
+            val newSeed = Identity.fromSeed(newExportKey).use { it.ed25519Seed() }
+            try {
+                val nowSecs = System.currentTimeMillis() / 1000L
+                val expiresSecs = nowSecs + SUPERSESSION_EMIT_WINDOW_SECS
+                val proof = signSupersessionProof(oldSeed, newSeed, nowSecs, expiresSecs)
+                base64Encode(proof)
+            } finally {
+                oldSeed.fill(0)
+                newSeed.fill(0)
+            }
+        } catch (cause: Throwable) {
+            Log.w("lakko-auth", "supersession proof mint failed", cause)
+            null
+        }
+    }
+
     /** 1.20d — Fire ``PushSubscriber.subscribe`` on the
      *  application-scoped [pushScope] (not the suspend caller's
      *  scope, so cancellation of the auth flow doesn't strand
@@ -1042,6 +1223,13 @@ public class AuthRepository(
         mutableIdentitySecrets.value = null
     }
 }
+
+/** G-4 (ADR-0016) emit window — the supersession proof is valid for
+ *  14 days from issue, well under the verifier's 30-day
+ *  `MAX_VALIDITY_SECS` ceiling (rule #5), which bounds replay
+ *  without widening the hard cap. Mirror of the web
+ *  `SUPERSESSION_EMIT_WINDOW_SECS`. */
+private const val SUPERSESSION_EMIT_WINDOW_SECS: Long = 14L * 24L * 60L * 60L
 
 // =============================================================================
 // State types

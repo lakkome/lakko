@@ -92,12 +92,24 @@ authorised new key to re-pin. The chain verifier
 (`verify_supersession_chain`) stays Rust-internal for now — it consumes
 KT-log types (`SignedRoot` / `LogEntry` / `InclusionProof`) that have no
 FFI wire format yet; that surface lands with the service. Four UniFFI
-round-trip / reject tests; web `.d.ts` regenerated. **Remaining sprints:**
-the auth / transparency *service* accepting + serving the entries +
-proofs (which also defines the wire format the chain-verifier FFI needs);
-and the per-platform client wiring — emit the proof on recover-rotation
-(signed by the pre-rotation identity) and verify it on a peer's pubkey
-change instead of a blind TOFU.
+round-trip / reject tests; web `.d.ts` regenerated. **The transport +
+client wiring landed (ADR-0016, Carrier B — the discovery identity
+bundle).** Sprints 0-5 are wired end-to-end on web + iOS + Android
+(build + unit-test verified): the discovery `identity_bundles` row carries
+an opaque optional `supersession_proof` (migration 0010, server never
+parses it — invariant #2); the recover flow emits a proof **atomically**
+(capture the OLD exportKey before overwrite → sign old→new over a 14-day
+window → upload `{new keys + proof}`, or upload nothing if it can't mint —
+never a self-downgrade); and a per-contact pin store keyed on `account_id`
++ a fail-closed `verifyBundleAccountKey` gate at every `identityFetch` site
+re-pins on a valid proof and **refuses** (typed `SupersessionRefused`, OOB)
+a changed key without one — no blind TOFU. A malicious server can only
+**strip** the proof (→ client fails closed), an availability impact never
+an integrity break. **Remaining:** a `lakko-security` pass on the verify
+path (explicit-request gate) + a live 2-device cross-platform e2e; and —
+separately, for full equivocation resistance — the auth / transparency
+*service* serving the KT-log entries that `verify_supersession_chain`
+consumes (the chain verifier stays Rust-internal until then).
 
 ROADMAP: Phase 2c (transparency log).
 

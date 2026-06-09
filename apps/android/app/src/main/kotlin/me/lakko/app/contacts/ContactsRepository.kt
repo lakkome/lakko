@@ -3,6 +3,7 @@
 
 package me.lakko.app.contacts
 
+import android.content.Context
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -48,7 +49,21 @@ import uniffi.lakko_ffi_uniffi.composeInviteCapability
  */
 public class ContactsRepository(
     private val authRepo: AuthRepository,
-    private val clientFactory: () -> ContactsClient = { ContactsClient() },
+    /**
+     * Application [Context] used to build the production
+     * [PeerPinStore] for the G-4 (ADR-0016) fetch-path supersession
+     * gate. When non-null, the default [clientFactory] wires a
+     * persistent, per-account pin store into every [ContactsClient]
+     * so a changed peer AccountIdentity key fails closed without a
+     * valid supersession proof. `null` (tests) disables the gate;
+     * production (`MainActivity`) always passes `applicationContext`.
+     */
+    appContext: Context? = null,
+    private val clientFactory: () -> ContactsClient = {
+        ContactsClient(
+            pinStore = appContext?.let { PeerPinStore(it) },
+        )
+    },
     /** Factory for the [me.lakko.app.discovery.DiscoveryClient] the invite-
      *  link operations need ([generateInviteLink] /
      *  [revokeInviteLink]). Distinct factory rather than reusing the
