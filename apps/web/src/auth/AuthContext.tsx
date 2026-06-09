@@ -157,6 +157,22 @@ export class SupersessionPhraseMismatch extends Error {
   }
 }
 
+/** ADR-0017 (lakko-security finding #1) — thrown by
+ *  `provideRecoveryPhrase` when the account's published bundle could
+ *  NOT be fetched (404 / network) so the supplied phrase cannot be
+ *  verified against it. We HARD-BLOCK rather than trust-on-first-use a
+ *  possibly-wrong phrase: this path only runs for an already-established
+ *  account, so a missing bundle is an anomaly (a withholding or
+ *  unreachable directory), and a server-forced 404 must not be able to
+ *  push a socially-engineered wrong phrase into the published identity.
+ *  Surfaced as a retryable error, not a dead end. */
+export class IdentityVerificationUnavailable extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "IdentityVerificationUnavailable";
+  }
+}
+
 /** Identity secrets held in memory for the current session.
  *
  *  Populated whenever the user has just authenticated (signup,
@@ -994,33 +1010,49 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       const derivedPubkey = derivedIdentity.signaturePublicKey;
       derivedIdentity.free();
 
-      // FAIL CLOSED: the supplied phrase must reproduce the account's
-      // PUBLISHED AccountIdentity key. If it does not, the user typed
-      // the wrong phrase (or a phrase for a different account) — we
-      // refuse rather than cache a forked identity that would break
-      // every contact's pin. Best-effort fetch: a 404 (no bundle yet)
-      // or a network blip does not hard-block — without a published
-      // key to compare against, the supplied phrase simply becomes
-      // the identity (first-publish TOFU). A bundle that IS present
-      // and MISMATCHES is a hard refusal.
+      // FAIL CLOSED (ADR-0017 + lakko-security finding #1): the supplied
+      // phrase MUST reproduce the account's PUBLISHED AccountIdentity key.
+      // This path only runs on a fresh-device login of an ALREADY-
+      // ESTABLISHED account, so the bundle must exist — a missing bundle
+      // (404) or an unreachable directory is an anomaly, NOT a
+      // first-publish. We therefore HARD-BLOCK on any failure-to-verify
+      // (mismatch, 404, or network) rather than trust-on-first-use a
+      // possibly-wrong phrase: a server-forced 404 must not let a
+      // socially-engineered wrong phrase overwrite the published identity.
+      // (The explicit recover() route stays immune separately — OPAQUE
+      // rejects a wrong phrase cryptographically before any identity is
+      // built.) On every refusal the seed is zeroized.
       try {
         const bundle = await discovery.identityFetch(pending.accountIdBytes);
-        if (bundle !== null) {
-          const published = base64Decode(bundle.signature_pubkey);
-          if (!bytesEqual(published, derivedPubkey)) {
-            accountIdentitySeed.fill(0);
-            throw new SupersessionPhraseMismatch();
-          }
+        if (bundle === null) {
+          accountIdentitySeed.fill(0);
+          throw new IdentityVerificationUnavailable(
+            "No published identity was found to verify your recovery " +
+              "phrase. Try again, or restore from a device that still " +
+              "has your account.",
+          );
+        }
+        const published = base64Decode(bundle.signature_pubkey);
+        if (!bytesEqual(published, derivedPubkey)) {
+          accountIdentitySeed.fill(0);
+          throw new SupersessionPhraseMismatch();
         }
       } catch (err) {
-        if (err instanceof SupersessionPhraseMismatch) throw err;
-        // Network / parse error fetching the bundle — log and
-        // proceed (we cannot verify, so we fall back to TOFU on the
-        // supplied phrase rather than locking the user out).
+        if (
+          err instanceof SupersessionPhraseMismatch ||
+          err instanceof IdentityVerificationUnavailable
+        ) {
+          throw err;
+        }
+        // Could not reach the directory to verify (network/parse). We
+        // cannot confirm the phrase reproduces the published key, so we
+        // refuse rather than cache a possibly-wrong phrase.
+        accountIdentitySeed.fill(0);
         // eslint-disable-next-line no-console
-        console.warn(
-          "could not verify recovery phrase against published bundle",
-          err,
+        console.warn("recovery-phrase verification fetch failed", err);
+        throw new IdentityVerificationUnavailable(
+          "Could not reach the directory to verify your recovery phrase. " +
+            "Check your connection and try again.",
         );
       }
 
