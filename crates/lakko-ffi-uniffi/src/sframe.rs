@@ -424,7 +424,7 @@ mod tests {
             .unwrap_err();
         match err {
             FfiError::Call(msg) => {
-                assert!(msg.contains("aead open") || msg.contains("sframe open"))
+                assert!(msg.contains("aead open") || msg.contains("sframe open"));
             },
             other => panic!("expected FfiError::Call, got {other:?}"),
         }
@@ -466,10 +466,10 @@ mod tests {
         assert_eq!(unwrapped.ciphertext, ct);
     }
 
-    /// Full send-side / receive-side path: alice seals
-    /// + wraps; bob unwraps + opens. This is the shape
-    /// the platform transformers (RTCFrameTransformer on
-    /// iOS, FrameEncryptor + FrameDecryptor on Android)
+    /// Full send-side / receive-side path: alice
+    /// seals-and-wraps; bob unwraps-and-opens. This is the
+    /// shape the platform transformers (RTCFrameTransformer
+    /// on iOS, FrameEncryptor + FrameDecryptor on Android)
     /// stage when they implement
     /// `transform(encryptedFrame)` and
     /// `transform(decryptedFrame)` respectively.

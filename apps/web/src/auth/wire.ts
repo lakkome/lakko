@@ -177,3 +177,46 @@ export interface PasswordResetFinishResponse {
   /** Token expiry as a unix-millisecond timestamp. */
   session_expires_at_ms: number;
 }
+
+// ----------------------------------------------------------------------------
+// Device authorization (services/auth/src/device_authorize.rs — ADR-0018
+// factor (a), "another-device" recovery)
+// ----------------------------------------------------------------------------
+
+/** `POST /device/authorize/start` request body. Bearer-authenticated
+ *  (the EXISTING device's session token rides the `Authorization`
+ *  header, not the body) + PoW. */
+export interface DeviceAuthorizeStartRequest {
+  pow: PowProofPayload;
+}
+
+/** `POST /device/authorize/start` response body. */
+export interface DeviceAuthorizeStartResponse {
+  /** URL-safe base64 (no pad) of the RAW 32-byte single-use grant
+   *  token — the only time it leaves the server (the server stores
+   *  only its SHA-256). The existing device seals it to the fresh
+   *  device over the E2EE pairing channel. */
+  grant_token_b64: string;
+}
+
+/** `POST /device/authorize/redeem` request body. Anonymous (the
+ *  fresh device has no token yet) + PoW. */
+export interface DeviceAuthorizeRedeemRequest {
+  pow: PowProofPayload;
+  /** URL-safe base64 (no pad) of the 16-byte account_id the fresh
+   *  device learned from the pairing QR. */
+  account_id_b64: string;
+  /** URL-safe base64 (no pad) of the raw 32-byte grant token
+   *  received over the rendezvous channel. */
+  grant_token_b64: string;
+}
+
+/** `POST /device/authorize/redeem` response body — the same
+ *  `(account_id, session_token, expiry)` triple every login flow
+ *  returns. */
+export interface DeviceAuthorizeRedeemResponse {
+  /** URL-safe base64 (no pad) of the 16-byte account id (echoed). */
+  account_id_b64: string;
+  session_token: string;
+  session_expires_at_ms: number;
+}

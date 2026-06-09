@@ -787,6 +787,33 @@ impl DeviceGroup {
         Ok(secret.to_vec())
     }
 
+    /// Derive a `length`-byte secret bound to this DeviceGroup's current
+    /// epoch (ADR-0018 Part 2a, factor (a) — "another-device" identity
+    /// transfer, Path B). Mirror of `Group.exportSecret` / the UniFFI
+    /// surface. A **read-only** MLS exporter call (no state mutation). After a
+    /// fresh device joins via [`DeviceGroup::joinFromWelcome`], the existing
+    /// and fresh device sit at the same epoch and derive the SAME bytes for
+    /// the same `(label, context, length)`; the existing device seals
+    /// `(grant_token ‖ phrase_seed)` under this key (via [`sealWithKey`]) and
+    /// the fresh device opens it (via [`openWithKey`]).
+    #[wasm_bindgen(js_name = exportSecret)]
+    pub fn export_secret(
+        &self,
+        identity: &Identity,
+        label: &str,
+        context: &[u8],
+        length: u32,
+    ) -> Result<Vec<u8>, JsError> {
+        let g = self
+            .inner
+            .lock()
+            .map_err(|_| JsError::new("internal lock poisoned"))?;
+        let secret = g
+            .export_secret(&identity.inner, label, context, length as usize)
+            .map_err(mls_err)?;
+        Ok(secret.to_vec())
+    }
+
     // ====================================================================
     // 2a3e2 — typed cross-device payload composer / consumer.
     //
@@ -2750,6 +2777,39 @@ pub fn accept_call_invite(
         own_leaf_index_val: own_leaf_index,
         call_key_seed_val: call_key_seed,
     })
+}
+
+/// Seal `plaintext` under a raw 32-byte AEAD `key` (ADR-0018 Part 2a, factor
+/// (a) — "another-device" identity transfer, Path B). Returns the self-
+/// describing wire blob `nonce(12) ‖ ciphertext+tag` (ChaCha20-Poly1305, empty
+/// AAD; the nonce is generated internally and prepended). The existing device
+/// derives `key` via `deviceGroup.exportSecret(...)` and seals
+/// `(grant_token ‖ phrase_seed)` here, then publishes the blob to the
+/// rendezvous mailbox; the fresh device derives the same `key` and opens it
+/// via [`open_with_key`]. Mirror of the UniFFI `seal_with_key`.
+#[wasm_bindgen(js_name = sealWithKey)]
+pub fn seal_with_key(key: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, JsError> {
+    let key = key_32(key)?;
+    lakko_crypto::aead::seal_with_key(&key, plaintext)
+        .map_err(|e| JsError::new(&format!("sealWithKey: {e}")))
+}
+
+/// Inverse of [`seal_with_key`]: open a `nonce(12) ‖ ciphertext+tag` wire blob
+/// under the same raw 32-byte `key`. Returns the recovered plaintext. Throws
+/// when the key is not 32 bytes, the blob is too short, or authentication
+/// fails (wrong key / tampered blob).
+#[wasm_bindgen(js_name = openWithKey)]
+pub fn open_with_key(key: &[u8], wire: &[u8]) -> Result<Vec<u8>, JsError> {
+    let key = key_32(key)?;
+    lakko_crypto::aead::open_with_key(&key, wire)
+        .map_err(|e| JsError::new(&format!("openWithKey: {e}")))
+}
+
+/// Validate + copy a caller-supplied key into the fixed 32-byte array
+/// `lakko_crypto::aead::{seal_with_key, open_with_key}` require.
+fn key_32(key: &[u8]) -> Result<[u8; 32], JsError> {
+    key.try_into()
+        .map_err(|_| JsError::new(&format!("key must be 32 bytes, got {}", key.len())))
 }
 
 // Tests run on the host target (`cargo test`) — no `wasm-bindgen-test`

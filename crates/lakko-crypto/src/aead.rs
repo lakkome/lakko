@@ -18,6 +18,7 @@ use aes_gcm::Aes256Gcm as AesGcmCipher;
 use chacha20poly1305::ChaCha20Poly1305 as ChaChaCipher;
 
 use crate::error::{Error, Result};
+use crate::random;
 use crate::secret::SecretBytes;
 
 /// AEAD key length in bytes for both supported ciphers.
@@ -114,6 +115,76 @@ pub fn open(
     }
 }
 
+/// Seal `plaintext` under a raw 32-byte `key` with a fresh random nonce,
+/// returning a self-describing wire blob `nonce(12) || ciphertext+tag`.
+///
+/// Unlike [`seal`], this is a turnkey envelope: the nonce is generated
+/// internally and prepended to the output, so the caller stores / transmits
+/// one opaque byte string and never has to manage a nonce out of band. Uses
+/// ChaCha20-Poly1305 with empty associated data. Used by the ADR-0018 Part 2a
+/// "another-device" identity transfer to seal `(grant_token || phrase_seed)`
+/// under a key both devices derive via [`crate::aead`]-keyed MLS exporter, but
+/// the helper is fully generic — any caller with a shared 32-byte key may use
+/// it.
+///
+/// The nonce is fresh-random per call (no counter / reuse risk under the same
+/// key, given the RFC 8439 birthday bound for the number of messages a single
+/// transfer produces — one).
+///
+/// [ADR-0018]: ../../../docs/adr/0018-recovery-factor-cascade.md
+///
+/// # Errors
+///
+/// Returns [`Error::Aead`] on internal cipher failure (essentially impossible
+/// for valid inputs, but the API surfaces it).
+pub fn seal_with_key(key: &[u8; KEY_LEN], plaintext: &[u8]) -> Result<Vec<u8>> {
+    let mut nonce: Nonce = [0u8; NONCE_LEN];
+    random::fill(&mut nonce);
+    let aead_key = AeadKey::new(*key);
+    let ciphertext = seal(
+        Algorithm::ChaCha20Poly1305,
+        &aead_key,
+        &nonce,
+        &[],
+        plaintext,
+    )?;
+    let mut wire = Vec::with_capacity(NONCE_LEN + ciphertext.len());
+    wire.extend_from_slice(&nonce);
+    wire.extend_from_slice(&ciphertext);
+    Ok(wire)
+}
+
+/// Inverse of [`seal_with_key`]: given the `nonce(12) || ciphertext+tag` wire
+/// blob and the same raw 32-byte `key`, slice off the leading nonce and
+/// AEAD-open the remainder.
+///
+/// # Errors
+///
+/// - [`Error::InvalidLength`] when `wire` is too short to contain a nonce plus
+///   a non-empty authentication tag.
+/// - [`Error::Aead`] when authentication fails (wrong key / tampered blob).
+pub fn open_with_key(key: &[u8; KEY_LEN], wire: &[u8]) -> Result<Vec<u8>> {
+    // Must hold at least the nonce and a full tag; an all-empty plaintext
+    // still carries TAG_LEN bytes after the nonce.
+    if wire.len() < NONCE_LEN + TAG_LEN {
+        return Err(Error::InvalidLength {
+            expected: NONCE_LEN + TAG_LEN,
+            actual: wire.len(),
+        });
+    }
+    let (nonce_bytes, ciphertext) = wire.split_at(NONCE_LEN);
+    let mut nonce: Nonce = [0u8; NONCE_LEN];
+    nonce.copy_from_slice(nonce_bytes);
+    let aead_key = AeadKey::new(*key);
+    open(
+        Algorithm::ChaCha20Poly1305,
+        &aead_key,
+        &nonce,
+        &[],
+        ciphertext,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -197,5 +268,71 @@ mod tests {
         let ct = seal(Algorithm::Aes256Gcm, &fresh_key(), &nonce, &[], b"msg").unwrap();
         let result = open(Algorithm::Aes256Gcm, &fresh_key(), &nonce, &[], &ct);
         assert!(matches!(result, Err(Error::Aead)));
+    }
+
+    fn fresh_raw_key() -> [u8; KEY_LEN] {
+        let mut k = [0u8; KEY_LEN];
+        random::fill(&mut k);
+        k
+    }
+
+    #[test]
+    fn seal_open_with_key_roundtrips() {
+        let key = fresh_raw_key();
+        let pt = b"grant_token || phrase_seed";
+        let wire = seal_with_key(&key, pt).unwrap();
+        // Wire = nonce(12) || ciphertext+tag.
+        assert_eq!(wire.len(), NONCE_LEN + pt.len() + TAG_LEN);
+        let recovered = open_with_key(&key, &wire).unwrap();
+        assert_eq!(recovered, pt);
+    }
+
+    #[test]
+    fn seal_with_key_uses_a_fresh_nonce_each_call() {
+        let key = fresh_raw_key();
+        let a = seal_with_key(&key, b"same plaintext").unwrap();
+        let b = seal_with_key(&key, b"same plaintext").unwrap();
+        // Different nonce -> different leading 12 bytes -> different ciphertext.
+        assert_ne!(
+            a, b,
+            "two seals of the same plaintext collided (nonce reuse?)"
+        );
+    }
+
+    #[test]
+    fn open_with_key_rejects_the_wrong_key() {
+        let key = fresh_raw_key();
+        let other = fresh_raw_key();
+        let wire = seal_with_key(&key, b"secret").unwrap();
+        assert!(matches!(open_with_key(&other, &wire), Err(Error::Aead)));
+    }
+
+    #[test]
+    fn open_with_key_rejects_a_tampered_blob() {
+        let key = fresh_raw_key();
+        let mut wire = seal_with_key(&key, b"secret").unwrap();
+        // Flip a bit in the ciphertext body (past the 12-byte nonce).
+        let last = wire.len() - 1;
+        wire[last] ^= 0x01;
+        assert!(matches!(open_with_key(&key, &wire), Err(Error::Aead)));
+    }
+
+    #[test]
+    fn open_with_key_rejects_a_short_blob() {
+        let key = fresh_raw_key();
+        // Shorter than nonce + tag — cannot possibly carry a sealed message.
+        let too_short = vec![0u8; NONCE_LEN + TAG_LEN - 1];
+        assert!(matches!(
+            open_with_key(&key, &too_short),
+            Err(Error::InvalidLength { .. })
+        ));
+    }
+
+    #[test]
+    fn seal_open_with_key_handles_empty_plaintext() {
+        let key = fresh_raw_key();
+        let wire = seal_with_key(&key, b"").unwrap();
+        assert_eq!(wire.len(), NONCE_LEN + TAG_LEN);
+        assert_eq!(open_with_key(&key, &wire).unwrap(), b"");
     }
 }

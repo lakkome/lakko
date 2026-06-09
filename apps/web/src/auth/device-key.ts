@@ -45,6 +45,16 @@ const HKDF_SALT = new TextEncoder().encode("lakko-device-root-v1");
 /** Fixed HKDF info-prefix; the account_id_b64 string is appended. */
 const HKDF_INFO_PREFIX = "lakko/device-root/v1|";
 
+/** ADR-0018 factor (a), path (b): distinct HKDF info for a device
+ *  root key derived from the 64-byte AccountIdentity (phrase) seed
+ *  instead of the OPAQUE export key — used to bootstrap a device
+ *  that was restored via another device and has NO password (so no
+ *  export key) at bootstrap time. A DISTINCT domain string keeps
+ *  the two derivations cryptographically separated even though the
+ *  inputs differ anyway. */
+const HKDF_INFO_PREFIX_IDENTITY_SEED =
+  "lakko/device-root/from-identity-seed/v1|";
+
 /**
  * Derive the non-extractable device root key for a given account.
  *
@@ -81,6 +91,52 @@ export async function deriveDeviceRootKey(
   //    "decrypt"]` — the consumer is `lakko-storage`'s eventual
   //    IDB-backed `EncryptedStore` (1.13c).
   const info = new TextEncoder().encode(HKDF_INFO_PREFIX + accountIdB64);
+  return crypto.subtle.deriveKey(
+    {
+      name: "HKDF",
+      hash: "SHA-512",
+      salt: HKDF_SALT.slice(),
+      info: info.slice(),
+    },
+    baseKey,
+    { name: "AES-GCM", length: 256 },
+    /* extractable */ false,
+    ["encrypt", "decrypt"],
+  );
+}
+
+/**
+ * ADR-0018 factor (a), path (b) — derive the device root key from
+ * the 64-byte AccountIdentity (BIP39 phrase) seed.
+ *
+ * Same HKDF-SHA-512 shape as [`deriveDeviceRootKey`], with a
+ * DISTINCT `info` domain string
+ * (`lakko/device-root/from-identity-seed/v1`). Used exactly once
+ * per device lifetime: bootstrapping a fresh device restored via
+ * another device, where no password (hence no OPAQUE export key)
+ * exists yet. The resulting non-extractable key is `putDeviceKey`'d
+ * and every later login on the device PREFERS the stored key over
+ * re-deriving, so the export-key path never clobbers it.
+ *
+ * @param accountIdentitySeed  64-byte BIP39 phrase seed (ADR-0017).
+ *                             Caller wipes its copy after this call.
+ * @param accountIdB64         Base64 16-byte account id, mixed into
+ *                             the HKDF `info`.
+ */
+export async function deriveDeviceRootKeyFromIdentitySeed(
+  accountIdentitySeed: Uint8Array,
+  accountIdB64: string,
+): Promise<CryptoKey> {
+  const baseKey = await crypto.subtle.importKey(
+    "raw",
+    accountIdentitySeed.slice(),
+    { name: "HKDF" },
+    false,
+    ["deriveKey"],
+  );
+  const info = new TextEncoder().encode(
+    HKDF_INFO_PREFIX_IDENTITY_SEED + accountIdB64,
+  );
   return crypto.subtle.deriveKey(
     {
       name: "HKDF",

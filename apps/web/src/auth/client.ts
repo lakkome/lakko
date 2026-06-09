@@ -24,9 +24,18 @@
  * (see `services/auth/src/opaque.rs::login_finish_inner`).
  */
 import { loadWasm } from "../wasm";
-import { base64Encode, generateAccountId } from "./account-id";
+import {
+  base64Encode,
+  base64UrlDecodeNoPad,
+  base64UrlEncodeNoPad,
+  generateAccountId,
+} from "./account-id";
 import { solvePow } from "./pow";
 import type {
+  DeviceAuthorizeRedeemRequest,
+  DeviceAuthorizeRedeemResponse,
+  DeviceAuthorizeStartRequest,
+  DeviceAuthorizeStartResponse,
   LoginFinishRequest,
   LoginFinishResponse,
   LoginStartRequest,
@@ -91,6 +100,16 @@ export interface LoginResult {
   /** Phase 1.5b: HMAC-SHA256 bearer token. */
   sessionToken: string;
   /** Token expiry as a unix-millisecond timestamp. */
+  sessionExpiresAtMs: number;
+}
+
+/** Result of `AuthClient.deviceAuthorizeRedeem` (ADR-0018 factor (a)).
+ *  The same `(account_id, session_token, expiry)` triple every other
+ *  login flow returns. */
+export interface DeviceAuthorizeRedeemResult {
+  /** Raw 16-byte account id, echoed back by the server. */
+  accountId: Uint8Array;
+  sessionToken: string;
   sessionExpiresAtMs: number;
 }
 
@@ -202,6 +221,78 @@ export class AuthClient {
     req: PasswordResetFinishRequest,
   ): Promise<PasswordResetFinishResponse> {
     return this.post("/password/reset/finish", req);
+  }
+
+  // -----------------------------------------------------------------
+  // Device authorization — ADR-0018 factor (a), "another-device"
+  // recovery
+  // -----------------------------------------------------------------
+
+  /**
+   * `POST /device/authorize/start` — mint a single-use 32-byte
+   * device-authorization grant for this account (ADR-0018 factor
+   * (a), scanner side).
+   *
+   * Bearer-authenticated (the EXISTING device proves it already
+   * holds a session) + PoW-gated. Returns the URL-safe base64
+   * (no pad) of the RAW grant token — the server stores only its
+   * SHA-256. The caller seals it (together with the phrase seed)
+   * to the fresh device over the E2EE pairing channel; it never
+   * travels in plaintext past this response.
+   */
+  async deviceAuthorizeStart(sessionToken: string): Promise<string> {
+    if (sessionToken.length === 0) {
+      throw new AuthClientArgError("sessionToken must be non-empty");
+    }
+    const challenge = await this.powChallenge();
+    const pow = await solvePow(challenge.seed, challenge.effort_bits);
+    const resp = await this.post<
+      DeviceAuthorizeStartRequest,
+      DeviceAuthorizeStartResponse
+    >("/device/authorize/start", { pow }, sessionToken);
+    return resp.grant_token_b64;
+  }
+
+  /**
+   * `POST /device/authorize/redeem` — atomically consume a
+   * single-use device grant for a session-token triple (ADR-0018
+   * factor (a), fresh-device side).
+   *
+   * Anonymous (the fresh device has no token yet) + PoW-gated. A
+   * missing / expired / already-consumed grant fails as an
+   * enumeration-safe 401 (`AuthHttpError`), indistinguishable from
+   * a wrong credential by design.
+   *
+   * @param accountId      Raw 16-byte account id from the pairing QR.
+   * @param grantTokenB64  URL-safe base64 (no pad) of the raw
+   *                       32-byte grant token received over the
+   *                       rendezvous channel.
+   */
+  async deviceAuthorizeRedeem(
+    accountId: Uint8Array,
+    grantTokenB64: string,
+  ): Promise<DeviceAuthorizeRedeemResult> {
+    if (accountId.length !== 16) {
+      throw new AuthClientArgError("accountId must be 16 bytes");
+    }
+    if (grantTokenB64.length === 0) {
+      throw new AuthClientArgError("grantTokenB64 must be non-empty");
+    }
+    const challenge = await this.powChallenge();
+    const pow = await solvePow(challenge.seed, challenge.effort_bits);
+    const resp = await this.post<
+      DeviceAuthorizeRedeemRequest,
+      DeviceAuthorizeRedeemResponse
+    >("/device/authorize/redeem", {
+      pow,
+      account_id_b64: base64UrlEncodeNoPad(accountId),
+      grant_token_b64: grantTokenB64,
+    });
+    return {
+      accountId: base64UrlDecodeNoPad(resp.account_id_b64),
+      sessionToken: resp.session_token,
+      sessionExpiresAtMs: resp.session_expires_at_ms,
+    };
   }
 
   // -----------------------------------------------------------------
@@ -512,13 +603,21 @@ export class AuthClient {
   private async post<Req, Res>(
     endpoint: string,
     body: Req,
+    bearer?: string,
   ): Promise<Res> {
     const url = `${this.baseUrl}${endpoint}`;
+    const headers: Record<string, string> = {};
+    if (body !== undefined) {
+      headers["content-type"] = "application/json";
+    }
+    if (bearer !== undefined) {
+      headers["authorization"] = `Bearer ${bearer}`;
+    }
     let response: Response;
     try {
       response = await fetch(url, {
         method: "POST",
-        headers: body === undefined ? {} : { "content-type": "application/json" },
+        headers,
         body: body === undefined ? null : JSON.stringify(body),
       });
     } catch (err) {

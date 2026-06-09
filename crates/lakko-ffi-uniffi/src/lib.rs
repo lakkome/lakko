@@ -1055,6 +1055,27 @@ impl DeviceGroup {
         Ok(secret.to_vec())
     }
 
+    /// Derive a `length`-byte secret bound to this DeviceGroup's current
+    /// epoch (ADR-0018 Part 2a, factor (a) — "another-device" identity
+    /// transfer, Path B). Mirrors [`Group::export_secret`]. A **read-only**
+    /// MLS exporter call (no state mutation). After a fresh device joins via
+    /// [`DeviceGroup::join_from_welcome`], the existing and fresh device sit at
+    /// the same epoch and derive the SAME bytes for the same
+    /// `(label, context, length)`; the existing device seals
+    /// `(grant_token ‖ phrase_seed)` under this key (via [`seal_with_key`])
+    /// and the fresh device opens it (via [`open_with_key`]).
+    pub fn export_secret(
+        &self,
+        identity: &Identity,
+        label: String,
+        context: Vec<u8>,
+        length: u32,
+    ) -> Result<Vec<u8>, FfiError> {
+        let g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
+        let secret = g.export_secret(&identity.inner, &label, &context, length as usize)?;
+        Ok(secret.to_vec())
+    }
+
     /// Compose + encrypt a typed cross-device payload
     /// (Phase 2a3e2). Wraps
     /// [`lakko_mls::DeviceGroup::create_devicegroup_message`]
@@ -1251,6 +1272,49 @@ pub fn open_history_bundle(secret: Vec<u8>, sealed_bytes: Vec<u8>) -> Result<Vec
         .encode(&mut out)
         .map_err(|e| FfiError::Codec(format!("HistoryBundle re-encode: {e}")))?;
     Ok(out)
+}
+
+/// AEAD-seal `plaintext` under a raw 32-byte `key` (ADR-0018 Part 2a, factor
+/// (a) — "another-device" identity transfer, Path B). Returns the self-
+/// describing wire blob `nonce(12) ‖ ciphertext+tag` (ChaCha20-Poly1305, empty
+/// AAD; the nonce is generated internally and prepended). The existing device
+/// derives `key` via [`DeviceGroup::export_secret`] and seals
+/// `(grant_token ‖ phrase_seed)` here, then publishes the blob to the
+/// rendezvous mailbox; the fresh device derives the same `key` and opens it
+/// via [`open_with_key`].
+///
+/// # Errors
+///
+/// - [`FfiError::Crypto`] when `key` is not exactly 32 bytes, or on internal
+///   AEAD failure.
+#[uniffi::export]
+pub fn seal_with_key(key: Vec<u8>, plaintext: Vec<u8>) -> Result<Vec<u8>, FfiError> {
+    let key = key_32(&key)?;
+    lakko_crypto::aead::seal_with_key(&key, &plaintext)
+        .map_err(|e| FfiError::Crypto(format!("seal_with_key: {e}")))
+}
+
+/// Inverse of [`seal_with_key`]: open a `nonce(12) ‖ ciphertext+tag` wire blob
+/// under the same raw 32-byte `key`. Returns the recovered plaintext.
+///
+/// # Errors
+///
+/// - [`FfiError::Crypto`] when `key` is not exactly 32 bytes, the blob is too
+///   short, or authentication fails (wrong key / tampered blob).
+#[uniffi::export]
+pub fn open_with_key(key: Vec<u8>, wire: Vec<u8>) -> Result<Vec<u8>, FfiError> {
+    let key = key_32(&key)?;
+    lakko_crypto::aead::open_with_key(&key, &wire)
+        .map_err(|e| FfiError::Crypto(format!("open_with_key: {e}")))
+}
+
+/// Validate + copy a caller-supplied key into a fixed 32-byte array, the input
+/// shape [`lakko_crypto::aead::seal_with_key`] / `open_with_key` require.
+fn key_32(key: &[u8]) -> Result<[u8; 32], FfiError> {
+    let arr: [u8; 32] = key
+        .try_into()
+        .map_err(|_| FfiError::Crypto(format!("key must be 32 bytes, got {}", key.len())))?;
+    Ok(arr)
 }
 
 // ============================================================================

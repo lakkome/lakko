@@ -23,6 +23,7 @@
  * single-use and add-device-flavoured.
  */
 import { DsClient, DsHttpError, DsNetworkError } from "../ds/client";
+import { isRecoveryPayloadRow } from "./recovery-payload";
 
 /** Soft cap on how long [`pollForWelcome`] waits before
  *  returning a `null` outcome to give the UI a chance to
@@ -249,6 +250,14 @@ export async function pollForHistoryBundle(
     if (result.messages.length > 0) {
       const first = result.messages[0];
       if (first === undefined) continue;
+      // ADR-0018 factor (a): the rendezvous mailbox can also carry
+      // a tagged recovery-payload row (after the Welcome, in either
+      // FIFO order relative to the bundle). It is NOT the history
+      // bundle — skip it and keep polling.
+      if (isRecoveryPayloadRow(first.payload)) {
+        cursor = first.id;
+        continue;
+      }
       return { kind: "received", sealedBytes: first.payload };
     }
     cursor = result.messages.reduce((acc, m) => Math.max(acc, m.id), cursor);

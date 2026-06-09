@@ -63,6 +63,7 @@ use openmls::extensions::{
 use openmls::framing::MlsMessageOut;
 use openmls::group::{MlsGroup, MlsGroupCreateConfig};
 use openmls::prelude::{Capabilities, Ciphersuite, GroupId, KeyPackage, LeafNodeIndex};
+use zeroize::Zeroizing;
 
 use lakko_crypto::signing::VerifyingKey;
 
@@ -590,6 +591,38 @@ impl DeviceGroup {
         self.inner.process_incoming(identity, message_bytes)
     }
 
+    /// Derive a `length`-byte secret bound to this DeviceGroup's current
+    /// epoch (ADR-0018 Part 2a, factor (a) — "another-device" identity
+    /// transfer, Path B).
+    ///
+    /// A direct mirror of [`Group::export_secret`] (RFC 9420 §8.5) on the
+    /// DeviceGroup wrapper — a **read-only** `MlsGroup::export_secret` call
+    /// that does NOT mutate the state machine. After a fresh device joins the
+    /// DeviceGroup via [`Self::join_from_welcome`], the existing and fresh
+    /// devices share the same epoch secret, so both derive the **same** bytes
+    /// from the same `(label, context, length)` triple. The existing device
+    /// seals `(grant_token ‖ phrase_seed)` under this key and publishes it to
+    /// the rendezvous mailbox; the fresh device derives the same key and opens
+    /// it — no key material crosses the server in the clear.
+    ///
+    /// The output is wrapped in [`Zeroizing`] so it is wiped on drop, matching
+    /// [`Group::export_secret`].
+    ///
+    /// [ADR-0018]: ../../../docs/adr/0018-recovery-factor-cascade.md
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Exporter`] on internal failure (e.g. zero length).
+    pub fn export_secret(
+        &self,
+        identity: &Identity,
+        label: &str,
+        context: &[u8],
+        length: usize,
+    ) -> Result<Zeroizing<Vec<u8>>> {
+        self.inner.export_secret(identity, label, context, length)
+    }
+
     /// Borrow the underlying [`Group`] for callers that need the
     /// raw MLS surface (e.g. exporter secrets for backup
     /// snapshot encryption — 2a3d).
@@ -908,6 +941,92 @@ mod tests {
         let devices_b = group_b.devices();
         assert_eq!(devices_a.len(), 2);
         assert_eq!(devices_b.len(), 2);
+    }
+
+    /// ADR-0018 Part 2a, factor (a) — "another-device" identity transfer,
+    /// **Path B verification**.
+    ///
+    /// The load-bearing assumption of Path B is that once a fresh device joins
+    /// the DeviceGroup, the existing and fresh device sit at the **same** MLS
+    /// epoch and therefore the group exporter yields the **same** bytes on both
+    /// sides for the same `(label, context, length)`. If that held only on one
+    /// side, the existing device could not seal a payload the fresh device can
+    /// open, and Path B would not work. This test is that proof — if both
+    /// devices do not land at the same epoch with the same exporter output, it
+    /// fails.
+    ///
+    /// It also pins domain separation: a different `label` OR a different
+    /// `context` yields different bytes, so the recovery exporter cannot
+    /// collide with any other exporter use of the same DeviceGroup epoch.
+    #[test]
+    fn both_devices_derive_the_same_recovery_exporter_secret() {
+        const RECOVERY_LABEL: &str = "lakko/device-recovery/v1";
+
+        let account = fixture_account_id();
+
+        // Device A bootstraps the group.
+        let id_a = Identity::generate("device-A").expect("generate A");
+        let mut group_a = DeviceGroup::create_founder(&id_a, &account).expect("create founder");
+
+        // Device B publishes a KeyPackage; A adds it (A's view advances via
+        // merge_pending_commit inside add_device).
+        let id_b = Identity::generate("device-B").expect("generate B");
+        let kp_b = id_b.create_key_package().expect("create KP for B");
+        let addition = group_a.add_device(&id_a, kp_b).expect("add device B");
+
+        // B joins from the Welcome -> both are now at the same epoch.
+        let welcome_bytes =
+            crate::group::encode_message(&addition.welcome).expect("serialise welcome");
+        let group_b =
+            DeviceGroup::join_from_welcome(&welcome_bytes, &id_b, &account).expect("B joins");
+
+        // Sanity: both views agree they are at the same epoch.
+        assert_eq!(
+            group_a.as_group().epoch(),
+            group_b.as_group().epoch(),
+            "both devices must be at the same DeviceGroup epoch"
+        );
+
+        // The shared rendezvous context — in production this is something both
+        // sides agree on (e.g. the grant-token nonce); here a fixed value.
+        let context = b"recovery-context";
+
+        // THE PROOF: both devices derive the same 32 bytes.
+        let secret_a = group_a
+            .export_secret(&id_a, RECOVERY_LABEL, context, 32)
+            .expect("A exports recovery secret");
+        let secret_b = group_b
+            .export_secret(&id_b, RECOVERY_LABEL, context, 32)
+            .expect("B exports recovery secret");
+        assert_eq!(secret_a.len(), 32);
+        assert_eq!(
+            secret_a.as_slice(),
+            secret_b.as_slice(),
+            "Path B is broken: the two devices derived different exporter \
+             secrets at the same epoch"
+        );
+        // Not the trivial all-zero output.
+        assert_ne!(secret_a.as_slice(), [0u8; 32].as_slice());
+
+        // Domain separation #1: a DIFFERENT LABEL yields different bytes.
+        let other_label = group_a
+            .export_secret(&id_a, "lakko/device-recovery/v2", context, 32)
+            .expect("A exports under a different label");
+        assert_ne!(
+            secret_a.as_slice(),
+            other_label.as_slice(),
+            "a different label must yield a different exporter secret"
+        );
+
+        // Domain separation #2: a DIFFERENT CONTEXT yields different bytes.
+        let other_context = group_a
+            .export_secret(&id_a, RECOVERY_LABEL, b"a-different-context", 32)
+            .expect("A exports under a different context");
+        assert_ne!(
+            secret_a.as_slice(),
+            other_context.as_slice(),
+            "a different context must yield a different exporter secret"
+        );
     }
 
     #[test]

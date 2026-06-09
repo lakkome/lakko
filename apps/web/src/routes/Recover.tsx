@@ -34,15 +34,35 @@
  *     right collapse — distinguishing "wrong shares" from
  *     "wrong phrase" would leak the social-recovery layer to
  *     the server).
+ *
+ * ## ADR-0018 factor (a) — restore via another device
+ *
+ * A third input mode, "Another device", covers the NO-PASSWORD
+ * entry of the recovery cascade: the user types only the username,
+ * shows a pairing QR to a device that is still signed in, and that
+ * device transfers the AccountIdentity seed + a single-use access
+ * grant over the E2EE rendezvous channel. The grant redeems
+ * anonymously for a session token (`/device/authorize/redeem`), so
+ * neither a password nor the phrase is ever typed here.
  */
 import { createSignal, Show, type JSX } from "solid-js";
 import { A, useNavigate } from "@solidjs/router";
 import { paths } from "./paths";
 import { useAuth } from "../auth/AuthContext";
+import { base64Encode } from "../auth/account-id";
 import { combineSharesToMnemonic } from "../recovery/shamir";
+import { DiscoveryClient } from "../discovery/client";
+import {
+  prepareAnonymousJoinFlow,
+  type AnonymousJoinSession,
+  type JoinRecoveryOutcome,
+} from "../devices/orchestrator";
+import RestoreViaDevicePanel, {
+  type DeviceRestoreFlowHandle,
+} from "../devices/RestoreViaDevicePanel";
 
 /** Which input mode the user is filling. */
-type RecoverMode = "phrase" | "shares";
+type RecoverMode = "phrase" | "shares" | "device";
 
 export default function Recover(): JSX.Element {
   const auth = useAuth();
@@ -133,25 +153,156 @@ export default function Recover(): JSX.Element {
     <div class="auth-shell">
       <section class="auth-card">
         <h1>Recover account</h1>
-        <RecoverForm
-          cachedUsername={cachedUsername()}
-          username={username}
-          setUsername={setUsername}
-          mode={mode}
-          setMode={setMode}
-          phrase={phrase}
-          setPhrase={setPhrase}
-          sharesInput={sharesInput}
-          setSharesInput={setSharesInput}
-          password={password}
-          setPassword={setPassword}
-          confirm={confirm}
-          setConfirm={setConfirm}
-          busy={busy}
-          error={error}
-          onSubmit={onSubmit}
-        />
+        <ModeTabs mode={mode} setMode={setMode} busy={busy} />
+        <Show
+          when={mode() !== "device"}
+          fallback={
+            <DeviceRestoreSection
+              username={username}
+              setUsername={setUsername}
+              onDone={() => navigate(paths.home, { replace: true })}
+            />
+          }
+        >
+          <RecoverForm
+            cachedUsername={cachedUsername()}
+            username={username}
+            setUsername={setUsername}
+            mode={mode}
+            setMode={setMode}
+            phrase={phrase}
+            setPhrase={setPhrase}
+            sharesInput={sharesInput}
+            setSharesInput={setSharesInput}
+            password={password}
+            setPassword={setPassword}
+            confirm={confirm}
+            setConfirm={setConfirm}
+            busy={busy}
+            error={error}
+            onSubmit={onSubmit}
+          />
+        </Show>
       </section>
+    </div>
+  );
+}
+
+// ---- ADR-0018 factor (a): restore via another device -------------
+
+function DeviceRestoreSection(props: {
+  readonly username: () => string;
+  readonly setUsername: (v: string) => void;
+  readonly onDone: () => void;
+}): JSX.Element {
+  const auth = useAuth();
+  const discovery = new DiscoveryClient();
+
+  // Captured across prepare → onRestored (the panel guarantees the
+  // ordering; components run once in Solid, so plain variables work).
+  let resolved: {
+    accountIdBytes: Uint8Array;
+    accountIdB64: string;
+    username: string;
+  } | null = null;
+  let liveSession: AnonymousJoinSession | null = null;
+
+  async function prepare(): Promise<DeviceRestoreFlowHandle> {
+    const trimmed = props.username().trim();
+    if (trimmed.length === 0) {
+      throw new Error("Enter the username of the account to restore.");
+    }
+    const lookup = await discovery.lookup(trimmed);
+    if (lookup.account === null) {
+      throw new Error("Unknown username — check the spelling.");
+    }
+    const accountIdBytes = lookup.account;
+    const accountIdB64 = base64Encode(accountIdBytes);
+    resolved = {
+      accountIdBytes,
+      accountIdB64,
+      username: lookup.normalisedUsername,
+    };
+    // Anonymous join: the DS rendezvous mailbox is pseudonym-keyed
+    // and auth-free; no device key exists yet, so the DeviceIdentity
+    // seed stays in memory until `completeFromDeviceRestore`
+    // bootstraps the key and `persistTo` lands the state.
+    const session = await prepareAnonymousJoinFlow({
+      accountIdBytes,
+      accountIdB64,
+    });
+    liveSession = session;
+    return {
+      qrPayload: session.qrPayload,
+      awaitWelcome: (signal) => session.awaitWelcome(signal),
+      accept: async (welcome, welcomeCursor) => {
+        const outcome = await session.accept(welcome, { welcomeCursor });
+        return outcome.recovery;
+      },
+      dispose: () => {
+        session.dispose();
+        liveSession = null;
+      },
+    };
+  }
+
+  async function onRestored(outcome: JoinRecoveryOutcome): Promise<void> {
+    if (resolved === null) {
+      outcome.phraseSeed.fill(0);
+      throw new Error("internal: no resolved account for restore");
+    }
+    // The redeemed session token is the ONLY access on this path —
+    // there is no password. Without it the restore cannot complete.
+    if (
+      outcome.sessionToken === null ||
+      outcome.sessionExpiresAtMs === null
+    ) {
+      outcome.phraseSeed.fill(0);
+      throw new Error(
+        "Your other device transferred the identity, but the access " +
+          "grant could not be redeemed. Try again, or use your " +
+          "recovery phrase.",
+      );
+    }
+    const session = liveSession;
+    await auth.completeFromDeviceRestore({
+      accountIdBytes: resolved.accountIdBytes,
+      accountIdB64: resolved.accountIdB64,
+      username: resolved.username,
+      phraseSeed: outcome.phraseSeed,
+      sessionToken: outcome.sessionToken,
+      sessionExpiresAtMs: outcome.sessionExpiresAtMs,
+      ...(session !== null
+        ? {
+            persistJoinState: (deviceKey: CryptoKey): Promise<void> =>
+              session.persistTo(deviceKey),
+          }
+        : {}),
+    });
+    props.onDone();
+  }
+
+  return (
+    <div>
+      <p style={{ color: "var(--surface-muted)", "margin-top": 0 }}>
+        Lost your password AND your phrase is not at hand? If another
+        device is still signed in to your account, it can restore this
+        one: enter your username, then scan the code below from that
+        device (Devices → Add a device). Identity and access transfer
+        end-to-end encrypted — the server never sees them.
+      </p>
+      <label>
+        Username
+        <input
+          type="text"
+          autocomplete="username"
+          required
+          value={props.username()}
+          onInput={(e) => props.setUsername(e.currentTarget.value)}
+          placeholder="alice"
+        />
+      </label>
+      <RestoreViaDevicePanel prepare={prepare} onRestored={onRestored} />
     </div>
   );
 }
@@ -187,7 +338,6 @@ function RecoverForm(props: RecoverFormProps): JSX.Element {
           <strong>@{props.cachedUsername}</strong>.
         </Show>
       </p>
-      <ModeTabs mode={props.mode} setMode={props.setMode} busy={props.busy} />
       <form onSubmit={props.onSubmit}>
         <label>
           Username
@@ -278,6 +428,12 @@ function ModeTabs(props: {
         disabled={props.busy()}
         onClick={() => props.setMode("shares")}
         label="Recovery shares"
+      />
+      <TabButton
+        active={props.mode() === "device"}
+        disabled={props.busy()}
+        onClick={() => props.setMode("device")}
+        label="Another device"
       />
     </div>
   );

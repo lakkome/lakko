@@ -542,6 +542,7 @@ mod tests {
         // identity creation transitively — we keep it for
         // documentation of which trait the providers
         // implement, but don't reference it directly.
+        #[allow(clippy::items_after_statements)]
         fn _silence(_: &impl OpenMlsProvider) {}
     }
 

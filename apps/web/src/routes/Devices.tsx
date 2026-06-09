@@ -37,6 +37,7 @@ import {
   type JSX,
 } from "solid-js";
 import { useAuth } from "../auth/AuthContext";
+import { AuthClient } from "../auth/client";
 import { getDeviceKey } from "../auth/key-store";
 import {
   WebauthnClient,
@@ -520,6 +521,10 @@ function ScanView(props: {
   readonly accountIdB64: string;
   readonly accountIdBytes: Uint8Array;
 }): JSX.Element {
+  // ADR-0018 factor (a): the scanner side also transfers ACCESS +
+  // IDENTITY to the fresh device (grant + phrase seed, sealed over
+  // the pairing channel). Needs the live IdentitySecrets.
+  const auth = useAuth();
   type State =
     | { kind: "idle" }
     | { kind: "opening" }
@@ -561,11 +566,26 @@ function ScanView(props: {
         });
         return;
       }
+      // ADR-0018 factor (a): pass the recovery half when the live
+      // session has the AccountIdentity seed + a bearer token —
+      // `runScanFlow` treats it strictly best-effort (a failure
+      // there never breaks the pairing). The seed is passed as a
+      // dedicated copy; `runScanFlow` consumes (zeroizes) it.
+      const secrets = auth.identitySecrets();
+      const recovery =
+        secrets !== null
+          ? {
+              accountIdentitySeed: secrets.accountIdentitySeed.slice(),
+              deviceAuthorizeStart: (): Promise<string> =>
+                new AuthClient().deviceAuthorizeStart(secrets.sessionToken),
+            }
+          : undefined;
       await runScanFlow({
         scannedBytes,
         accountIdBytes: props.accountIdBytes,
         accountIdB64: props.accountIdB64,
         deviceKey,
+        ...(recovery !== undefined ? { recovery } : {}),
       });
       setState({ kind: "done" });
     } catch (err) {

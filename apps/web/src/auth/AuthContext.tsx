@@ -58,7 +58,10 @@ import {
 
 import { AuthClient } from "./client";
 import { base64Decode, base64Encode } from "./account-id";
-import { deriveDeviceRootKey } from "./device-key";
+import {
+  deriveDeviceRootKey,
+  deriveDeviceRootKeyFromIdentitySeed,
+} from "./device-key";
 import { deleteDeviceKey, getDeviceKey, putDeviceKey } from "./key-store";
 import {
   deleteSessionToken,
@@ -75,6 +78,7 @@ import {
   ensureDeviceIdentitySeed,
 } from "./device-identity-store";
 import {
+  ACCOUNT_IDENTITY_SEED_LENGTH,
   deleteAccountIdentitySeed,
   getAccountIdentitySeed,
   putAccountIdentitySeed,
@@ -142,16 +146,18 @@ export interface SignupOutcome {
   recoveryPhrase: string;
 }
 
-/** ADR-0017 — thrown by `provideRecoveryPhrase` when the typed
- *  recovery phrase derives an AccountIdentity pubkey that does NOT
- *  match the account's published bundle. Surfaced to the UI as
- *  "that phrase doesn't match this account" — we refuse rather than
- *  cache a forked identity that would break every contact's pin. */
+/** ADR-0017 — thrown by `provideRecoveryPhrase` (and the ADR-0018
+ *  pairing completions) when the supplied AccountIdentity seed
+ *  derives a pubkey that does NOT match the account's published
+ *  bundle. Surfaced to the UI as "doesn't match this account" — we
+ *  refuse rather than cache a forked identity that would break
+ *  every contact's pin. */
 export class SupersessionPhraseMismatch extends Error {
-  constructor() {
+  constructor(message?: string) {
     super(
-      "That recovery phrase doesn't match this account's identity. " +
-        "Check the phrase, or pair an existing device instead.",
+      message ??
+        "That recovery phrase doesn't match this account's identity. " +
+          "Check the phrase, or pair an existing device instead.",
     );
     this.name = "SupersessionPhraseMismatch";
   }
@@ -298,6 +304,46 @@ export interface AuthApi {
    *  (the derived pubkey does not match the account's published
    *  bundle) so the user cannot silently fork their identity. */
   provideRecoveryPhrase(mnemonicPhrase: string): Promise<void>;
+  /** ADR-0018 factor (a), path (a) — finish the
+   *  `needs-recovery-phrase` state with a seed transferred from
+   *  another device over the E2EE pairing channel instead of a
+   *  typed phrase. Runs the SAME fail-closed verification as
+   *  `provideRecoveryPhrase` (derived pubkey must match the
+   *  published bundle; hard-block + zeroize on mismatch /
+   *  unverifiable), caches the seed under the existing device key,
+   *  and completes the session — preferring the redeemed fresh
+   *  `sessionToken` when present, else the pending login's token.
+   *
+   *  CONSUMES `phraseSeed` (zeroized on every refusal path). */
+  completeFromPairing(
+    phraseSeed: Uint8Array,
+    sessionToken?: string,
+    sessionExpiresAtMs?: number,
+  ): Promise<void>;
+  /** ADR-0018 factor (a), path (b) — the NO-PASSWORD entry of the
+   *  recovery cascade. The fresh device ran the pairing
+   *  anonymously, received `phraseSeed` + a REDEEMED session token
+   *  (mandatory here — there is no other ACCESS), and has no
+   *  device root key yet. This bootstraps the device: fail-closed
+   *  bundle verification first (refuse + zeroize), then a device
+   *  root key derived FROM the identity seed
+   *  (`deriveDeviceRootKeyFromIdentitySeed`), the wrapped stores,
+   *  the localStorage marker, the caller's join-state persistence
+   *  hook, and finally the canonical session. */
+  completeFromDeviceRestore(args: {
+    readonly accountIdBytes: Uint8Array;
+    readonly accountIdB64: string;
+    readonly username: string;
+    /** 64-byte AccountIdentity seed — CONSUMED (zeroized on every
+     *  refusal path). */
+    readonly phraseSeed: Uint8Array;
+    readonly sessionToken: string;
+    readonly sessionExpiresAtMs: number;
+    /** Persist the pairing's in-memory DeviceIdentity seed +
+     *  DeviceGroup snapshot under the freshly-bootstrapped device
+     *  key (`AnonymousJoinSession.persistTo`). Best-effort. */
+    readonly persistJoinState?: (deviceKey: CryptoKey) => Promise<void>;
+  }): Promise<void>;
   /** Drop the in-memory session. Does NOT erase the localStorage
    *  cache or the IDB-stored device key — re-login on the same
    *  device should be cheap, and the device key remains usable
@@ -726,13 +772,23 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       // DiscoveryClient for any protected writes that follow.
       discovery.setSessionToken(result.sessionToken);
 
-      // OPAQUE export_key is deterministic for the same password,
-      // so re-deriving the device root key here yields identical
-      // bytes (and an equivalent CryptoKey). Persisting it again
-      // is harmless — the IDB `put` upserts. We also persist the
-      // (accountId, username) marker so subsequent reloads on
-      // this device skip the lookup round-trip.
-      const deviceKey = await deriveDeviceRootKey(result.exportKey, accountIdB64);
+      // ADR-0018: PREFER an already-stored device root key over
+      // re-deriving from the export key. On a password-bootstrapped
+      // device the two are identical (HKDF of the deterministic
+      // OPAQUE export key — so preferring stored is
+      // behavior-compatible); on a device bootstrapped via
+      // another-device restore (path (b), no password at bootstrap
+      // time) the stored key is identity-seed-derived and a
+      // re-derivation from the export key would orphan every
+      // wrapped store on this browser.
+      let deviceKey = await getDeviceKey(accountIdB64);
+      if (deviceKey === null) {
+        // OPAQUE export_key is deterministic for the same password,
+        // so deriving here yields the same bytes every login.
+        deviceKey = await deriveDeviceRootKey(result.exportKey, accountIdB64);
+      }
+      // Upsert is harmless; also persist the (accountId, username)
+      // marker so subsequent reloads skip the lookup round-trip.
       await putDeviceKey(accountIdB64, deviceKey);
       // Phase 1.13c: refresh the persisted session token alongside
       // the device key. Same best-effort posture as signup —
@@ -915,13 +971,16 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       // WebAuthn /finish response on the DiscoveryClient.
       discovery.setSessionToken(assertion.session_token);
 
-      // Re-derive the device root key from the cached export
-      // key. The result must match the existing `deviceKey` we
-      // already loaded (OPAQUE export key is deterministic) —
-      // the upsert is a no-op but keeps the IDB freshness clock
-      // moving so an eviction policy (future) sees it as
-      // recently-touched.
-      const newDeviceKey = await deriveDeviceRootKey(exportKey, accountIdB64);
+      // ADR-0018: PREFER the stored device root key (we already
+      // loaded it above — it just decrypted the export-key cache,
+      // proving it is the right wrapping key). Pre-ADR-0018 this
+      // path re-derived from the cached export key, which yields
+      // identical bytes on a password-bootstrapped device — but on
+      // an another-device-restored browser the stored key is
+      // identity-seed-derived, and a re-derivation would clobber it
+      // and orphan every wrapped store. The upsert keeps the IDB
+      // freshness clock moving.
+      const newDeviceKey = deviceKey;
       await putDeviceKey(accountIdB64, newDeviceKey);
 
       // Persist the new session token from the passkey /finish
@@ -1001,60 +1060,19 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         );
       }
       const wasm = await loadWasm();
-      // Parse the phrase → derive the BIP39 seed → derive the
-      // canonical AccountIdentity pubkey from it.
+      // Parse the phrase → derive the BIP39 seed → fail-closed
+      // verification of the derived pubkey against the account's
+      // PUBLISHED bundle (shared with the ADR-0018 pairing
+      // completions; zeroizes the seed on every refusal).
       const mnemonic = wasm.RecoveryMnemonic.fromPhrase(mnemonicPhrase);
       const accountIdentitySeed = mnemonic.toSeed();
       mnemonic.free();
-      const derivedIdentity = wasm.Identity.fromSeed(accountIdentitySeed);
-      const derivedPubkey = derivedIdentity.signaturePublicKey;
-      derivedIdentity.free();
-
-      // FAIL CLOSED (ADR-0017 + lakko-security finding #1): the supplied
-      // phrase MUST reproduce the account's PUBLISHED AccountIdentity key.
-      // This path only runs on a fresh-device login of an ALREADY-
-      // ESTABLISHED account, so the bundle must exist — a missing bundle
-      // (404) or an unreachable directory is an anomaly, NOT a
-      // first-publish. We therefore HARD-BLOCK on any failure-to-verify
-      // (mismatch, 404, or network) rather than trust-on-first-use a
-      // possibly-wrong phrase: a server-forced 404 must not let a
-      // socially-engineered wrong phrase overwrite the published identity.
-      // (The explicit recover() route stays immune separately — OPAQUE
-      // rejects a wrong phrase cryptographically before any identity is
-      // built.) On every refusal the seed is zeroized.
-      try {
-        const bundle = await discovery.identityFetch(pending.accountIdBytes);
-        if (bundle === null) {
-          accountIdentitySeed.fill(0);
-          throw new IdentityVerificationUnavailable(
-            "No published identity was found to verify your recovery " +
-              "phrase. Try again, or restore from a device that still " +
-              "has your account.",
-          );
-        }
-        const published = base64Decode(bundle.signature_pubkey);
-        if (!bytesEqual(published, derivedPubkey)) {
-          accountIdentitySeed.fill(0);
-          throw new SupersessionPhraseMismatch();
-        }
-      } catch (err) {
-        if (
-          err instanceof SupersessionPhraseMismatch ||
-          err instanceof IdentityVerificationUnavailable
-        ) {
-          throw err;
-        }
-        // Could not reach the directory to verify (network/parse). We
-        // cannot confirm the phrase reproduces the published key, so we
-        // refuse rather than cache a possibly-wrong phrase.
-        accountIdentitySeed.fill(0);
-        // eslint-disable-next-line no-console
-        console.warn("recovery-phrase verification fetch failed", err);
-        throw new IdentityVerificationUnavailable(
-          "Could not reach the directory to verify your recovery phrase. " +
-            "Check your connection and try again.",
-        );
-      }
+      await verifySeedAgainstPublishedIdentity({
+        wasm,
+        discovery,
+        accountIdBytes: pending.accountIdBytes,
+        accountIdentitySeed,
+      });
 
       // Cache the phrase seed under the (already-derived) device key
       // so future warm logins skip the prompt. Best-effort.
@@ -1081,6 +1099,189 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         sessionToken: pending.sessionToken,
         sessionExpiresAtMs: pending.sessionExpiresAtMs,
         username: pending.username,
+      });
+    },
+    async completeFromPairing(phraseSeed, sessionToken, sessionExpiresAtMs) {
+      // ADR-0018 factor (a), path (a) — same precondition as
+      // `provideRecoveryPhrase`: only valid while a login/passkey
+      // auth is parked in the `needs-recovery-phrase` fail-safe.
+      const pending = pendingRecovery();
+      if (pending === null) {
+        phraseSeed.fill(0);
+        throw new Error("no pending identity recovery — sign in first");
+      }
+      if (phraseSeed.length !== ACCOUNT_IDENTITY_SEED_LENGTH) {
+        phraseSeed.fill(0);
+        throw new Error(
+          "internal: transferred identity seed has the wrong length",
+        );
+      }
+      const wasm = await loadWasm();
+      // SAME fail-closed verification as the typed-phrase path
+      // (ADR-0017 + lakko-security finding #1): the transferred seed
+      // must reproduce the account's PUBLISHED AccountIdentity key;
+      // hard-block + zeroize on mismatch or an unverifiable bundle.
+      await verifySeedAgainstPublishedIdentity({
+        wasm,
+        discovery,
+        accountIdBytes: pending.accountIdBytes,
+        accountIdentitySeed: phraseSeed,
+        mismatchMessage:
+          "The identity received from your other device doesn't match " +
+          "this account's published identity — refusing to use it.",
+      });
+
+      // Cache the seed under the EXISTING device key (the password /
+      // passkey auth already derived + persisted it). Best-effort.
+      try {
+        await putAccountIdentitySeed(
+          pending.accountIdB64,
+          phraseSeed,
+          pending.deviceKey,
+        );
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn(
+          "account-identity-seed persist (completeFromPairing) failed",
+          err,
+        );
+      }
+
+      // Prefer the redeemed fresh session token when the pairing
+      // carried one; the pending login's token otherwise.
+      let effectiveToken = pending.sessionToken;
+      let effectiveExpiry = pending.sessionExpiresAtMs;
+      if (sessionToken !== undefined && sessionExpiresAtMs !== undefined) {
+        effectiveToken = sessionToken;
+        effectiveExpiry = sessionExpiresAtMs;
+        discovery.setSessionToken(sessionToken);
+        try {
+          await putSessionToken(
+            pending.accountIdB64,
+            sessionToken,
+            sessionExpiresAtMs,
+            pending.deviceKey,
+          );
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.warn(
+            "session-token persist (completeFromPairing) failed",
+            err,
+          );
+        }
+      }
+
+      await finishCanonicalSession({
+        wasm,
+        accountIdentitySeed: phraseSeed,
+        accountIdBytes: pending.accountIdBytes,
+        accountIdB64: pending.accountIdB64,
+        exportKey: pending.exportKey,
+        sessionToken: effectiveToken,
+        sessionExpiresAtMs: effectiveExpiry,
+        username: pending.username,
+      });
+    },
+    async completeFromDeviceRestore(restoreArgs) {
+      // ADR-0018 factor (a), path (b) — NO-PASSWORD bootstrap. The
+      // caller ran the anonymous pairing and holds the transferred
+      // seed + the REDEEMED session token (the only ACCESS here).
+      const {
+        accountIdBytes,
+        accountIdB64,
+        username,
+        phraseSeed,
+        sessionToken,
+        sessionExpiresAtMs,
+        persistJoinState,
+      } = restoreArgs;
+      if (phraseSeed.length !== ACCOUNT_IDENTITY_SEED_LENGTH) {
+        phraseSeed.fill(0);
+        throw new Error(
+          "internal: transferred identity seed has the wrong length",
+        );
+      }
+      const wasm = await loadWasm();
+      // FAIL CLOSED FIRST — before ANY persistence. A mismatched /
+      // unverifiable seed must leave this browser untouched.
+      await verifySeedAgainstPublishedIdentity({
+        wasm,
+        discovery,
+        accountIdBytes,
+        accountIdentitySeed: phraseSeed,
+        mismatchMessage:
+          "The identity received from your other device doesn't match " +
+          "this account's published identity — refusing to use it.",
+      });
+
+      // Bootstrap the device root key FROM the identity seed — there
+      // is no password (hence no OPAQUE export key) on this device
+      // yet. Later password logins PREFER this stored key over
+      // re-deriving from the export key, so the wrapped stores stay
+      // readable.
+      const deviceKey = await deriveDeviceRootKeyFromIdentitySeed(
+        phraseSeed,
+        accountIdB64,
+      );
+      await putDeviceKey(accountIdB64, deviceKey);
+      try {
+        await putAccountIdentitySeed(accountIdB64, phraseSeed, deviceKey);
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn(
+          "account-identity-seed persist (completeFromDeviceRestore) failed",
+          err,
+        );
+      }
+      // The redeemed token is REQUIRED on this path — persist it so
+      // a reload re-attaches without any credential. Best-effort.
+      try {
+        await putSessionToken(
+          accountIdB64,
+          sessionToken,
+          sessionExpiresAtMs,
+          deviceKey,
+        );
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn(
+          "session-token persist (completeFromDeviceRestore) failed",
+          err,
+        );
+      }
+      savePersisted({ v: 1, accountIdB64, username });
+      // Land the pairing's in-memory DeviceIdentity seed +
+      // DeviceGroup snapshot under the fresh device key. Best-effort
+      // — a failure orphans the DeviceGroup leaf locally; a re-pair
+      // recovers it.
+      if (persistJoinState !== undefined) {
+        try {
+          await persistJoinState(deviceKey);
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.warn(
+            "join-state persist (completeFromDeviceRestore) failed",
+            err,
+          );
+        }
+      }
+
+      discovery.setSessionToken(sessionToken);
+      setPendingRecovery(null);
+      await finishCanonicalSession({
+        wasm,
+        accountIdentitySeed: phraseSeed,
+        accountIdBytes,
+        accountIdB64,
+        // ADR-0018 path (b): no password on this device yet, so no
+        // OPAQUE export key exists. The device root key is
+        // identity-seed-derived; downstream consumers of
+        // `identitySecrets.exportKey` only use it as an auth-factor
+        // cache, which this device legitimately does not have.
+        exportKey: new Uint8Array(0),
+        sessionToken,
+        sessionExpiresAtMs,
+        username,
       });
     },
     async recover(mnemonicPhrase, newPassword, username) {
@@ -1729,6 +1930,74 @@ async function uploadIdentityBundle(
     ),
     discovery.uploadKeyPackage(accountId, keyPackageBytes),
   ]);
+}
+
+/**
+ * FAIL-CLOSED AccountIdentity-seed verification (ADR-0017 +
+ * lakko-security finding #1, shared by `provideRecoveryPhrase` and
+ * the ADR-0018 factor (a) pairing completions).
+ *
+ * The supplied seed MUST reproduce the account's PUBLISHED
+ * AccountIdentity signature pubkey. These paths only run for an
+ * ALREADY-ESTABLISHED account, so the bundle must exist — a missing
+ * bundle (404) or an unreachable directory is an anomaly, NOT a
+ * first-publish. We therefore HARD-BLOCK on any failure-to-verify
+ * (mismatch, 404, or network) rather than trust-on-first-use a
+ * possibly-wrong seed: a server-forced 404 must not let a
+ * socially-engineered wrong seed overwrite the published identity.
+ *
+ * On EVERY refusal path the seed is zeroized before the throw.
+ * Throws `SupersessionPhraseMismatch` (pubkey mismatch) or
+ * `IdentityVerificationUnavailable` (bundle missing / unreachable).
+ */
+async function verifySeedAgainstPublishedIdentity(args: {
+  readonly wasm: Wasm;
+  readonly discovery: DiscoveryClient;
+  readonly accountIdBytes: Uint8Array;
+  readonly accountIdentitySeed: Uint8Array;
+  /** Override for the mismatch error text — the pairing path says
+   *  "received from your other device" instead of "phrase". */
+  readonly mismatchMessage?: string;
+}): Promise<void> {
+  const derivedIdentity = args.wasm.Identity.fromSeed(
+    args.accountIdentitySeed,
+  );
+  const derivedPubkey = derivedIdentity.signaturePublicKey;
+  derivedIdentity.free();
+
+  try {
+    const bundle = await args.discovery.identityFetch(args.accountIdBytes);
+    if (bundle === null) {
+      args.accountIdentitySeed.fill(0);
+      throw new IdentityVerificationUnavailable(
+        "No published identity was found to verify the recovered " +
+          "identity. Try again, or restore from a device that still " +
+          "has your account.",
+      );
+    }
+    const published = base64Decode(bundle.signature_pubkey);
+    if (!bytesEqual(published, derivedPubkey)) {
+      args.accountIdentitySeed.fill(0);
+      throw new SupersessionPhraseMismatch(args.mismatchMessage);
+    }
+  } catch (err) {
+    if (
+      err instanceof SupersessionPhraseMismatch ||
+      err instanceof IdentityVerificationUnavailable
+    ) {
+      throw err;
+    }
+    // Could not reach the directory to verify (network/parse). We
+    // cannot confirm the seed reproduces the published key, so we
+    // refuse rather than cache a possibly-wrong identity.
+    args.accountIdentitySeed.fill(0);
+    // eslint-disable-next-line no-console
+    console.warn("identity-seed verification fetch failed", err);
+    throw new IdentityVerificationUnavailable(
+      "Could not reach the directory to verify the recovered identity. " +
+        "Check your connection and try again.",
+    );
+  }
 }
 
 /**

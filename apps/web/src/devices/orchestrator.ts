@@ -26,7 +26,13 @@ import type {
   DeviceGroup as WasmDeviceGroup,
   Identity as WasmIdentity,
 } from "../../wasm/lakko_ffi_wasm";
-import { ensureDeviceIdentitySeed } from "../auth/device-identity-store";
+import {
+  DEVICE_IDENTITY_SEED_LENGTH,
+  ensureDeviceIdentitySeed,
+  putDeviceIdentitySeed,
+} from "../auth/device-identity-store";
+import { AuthClient } from "../auth/client";
+import { base64UrlDecodeNoPad, base64UrlEncodeNoPad } from "../auth/account-id";
 import {
   buildPairingQrPayload,
   generateRendezvousPseudonym,
@@ -46,8 +52,43 @@ import {
   buildHistoryBundleFromLog,
   applyHistoryBundleToLog,
 } from "./history-bundle";
+import {
+  RECOVERY_EXPORTER_KEY_LENGTH,
+  RECOVERY_EXPORTER_LABEL,
+  buildRecoveryPayload,
+  parseRecoveryPayload,
+  pollForRecoveryPayload,
+  publishRecoveryPayload,
+} from "./recovery-payload";
 
 // ---- Joining side ------------------------------------------------
+
+/** ADR-0018 factor (a) — what the joiner recovered from the
+ *  scanner-published recovery row (if any). Surfaced from
+ *  [`JoinSession.accept`] / [`AnonymousJoinSession.accept`]. */
+export interface JoinRecoveryOutcome {
+  /** The 64-byte AccountIdentity (BIP39 phrase) seed transferred
+   *  from the existing device (ADR-0017 IDENTITY half). The caller
+   *  OWNS this buffer: verify it fail-closed against the published
+   *  bundle, cache it, and zeroize on any refusal. */
+  readonly phraseSeed: Uint8Array;
+  /** Fresh session token from redeeming the device grant (ACCESS
+   *  half), or `null` when the redeem failed (grant expired /
+   *  already consumed / auth service unreachable) — the seed is
+   *  still usable on a path that already holds its own session. */
+  readonly sessionToken: string | null;
+  /** Expiry of `sessionToken` (unix ms), `null` iff it is. */
+  readonly sessionExpiresAtMs: number | null;
+}
+
+/** Result of [`JoinSession.accept`]. */
+export interface JoinAcceptOutcome {
+  /** Recovery payload outcome — `null` when no recovery row showed
+   *  up (older scanner build, best-effort scanner half failed, or
+   *  the caller didn't opt in via `opts.recovery`). The join itself
+   *  succeeded either way. */
+  readonly recovery: JoinRecoveryOutcome | null;
+}
 
 /** Returned by [`prepareJoinFlow`]. The UI:
  *
@@ -81,11 +122,18 @@ export interface JoinSession {
    *  with the post-join DeviceGroup exporter secret, and
    *  applies the rows into the local message log. Omit to
    *  skip the catch-up step (older callers stay
-   *  backward-compatible). */
+   *  backward-compatible).
+   *
+   *  Optional `opts.recovery` (ADR-0018 factor (a)) also polls
+   *  past the cursor for the scanner-published recovery row,
+   *  opens it with the per-pairing exporter key, redeems the
+   *  embedded grant, and surfaces the result on the returned
+   *  outcome. Absence of the row is tolerated (`recovery: null`)
+   *  — the join completes exactly as without the flag. */
   accept(
     welcomeBytes: Uint8Array,
-    opts?: { readonly welcomeCursor: number },
-  ): Promise<void>;
+    opts?: { readonly welcomeCursor: number; readonly recovery?: boolean },
+  ): Promise<JoinAcceptOutcome>;
   /** Release the ephemeral DeviceIdentity wasm handle. Safe
    *  to call multiple times; safe to call after `accept`
    *  (no-op). */
@@ -134,7 +182,7 @@ export async function prepareJoinFlow(args: {
         signal === undefined ? {} : { signal },
       );
     },
-    async accept(welcomeBytes, opts): Promise<void> {
+    async accept(welcomeBytes, opts): Promise<JoinAcceptOutcome> {
       if (identity === null) {
         throw new Error("join session already disposed");
       }
@@ -154,33 +202,57 @@ export async function prepareJoinFlow(args: {
         args.accountIdB64,
         args.deviceKey,
       );
-      // Phase 2a3d8-ui — poll past the Welcome cursor for the
-      // scanner-side history bundle. Best-effort: a timeout or
-      // a malformed bundle leaves the joiner with an empty
-      // log + the normal DS-poll catch-up takes over going
-      // forward.
+      let recovery: JoinRecoveryOutcome | null = null;
       if (opts !== undefined && group !== null) {
-        try {
-          const sealed = await pollForHistoryBundle(
-            rendezvous,
-            opts.welcomeCursor,
-          );
-          if (sealed.kind === "received") {
-            const secret = group.historyBundleSecret(identity);
-            const applied = await applyHistoryBundleToLog({
-              accountIdB64: args.accountIdB64,
-              deviceKey: args.deviceKey,
-              secret,
-              sealedBytes: sealed.sealedBytes,
-            });
+        // Phase 2a3d8-ui — poll past the Welcome cursor for the
+        // scanner-side history bundle. Best-effort: a timeout or
+        // a malformed bundle leaves the joiner with an empty
+        // log + the normal DS-poll catch-up takes over going
+        // forward.
+        //
+        // ADR-0018 factor (a) — when opted in, ALSO poll for the
+        // recovery row. Both polls start at the Welcome cursor
+        // and filter disjoint row types (the recovery row carries
+        // a plaintext magic the history poll skips and vice
+        // versa), so they run concurrently.
+        const liveGroup = group;
+        const liveIdentity = identity;
+        const historyTask = (async (): Promise<void> => {
+          try {
+            const sealed = await pollForHistoryBundle(
+              rendezvous,
+              opts.welcomeCursor,
+            );
+            if (sealed.kind === "received") {
+              const secret = liveGroup.historyBundleSecret(liveIdentity);
+              const applied = await applyHistoryBundleToLog({
+                accountIdB64: args.accountIdB64,
+                deviceKey: args.deviceKey,
+                secret,
+                sealedBytes: sealed.sealedBytes,
+              });
+              // eslint-disable-next-line no-console
+              console.info(`history catch-up: applied ${applied} rows`);
+            }
+          } catch (err) {
             // eslint-disable-next-line no-console
-            console.info(`history catch-up: applied ${applied} rows`);
+            console.warn("history bundle apply failed", err);
           }
-        } catch (err) {
-          // eslint-disable-next-line no-console
-          console.warn("history bundle apply failed", err);
-        }
+        })();
+        const recoveryTask =
+          opts.recovery === true
+            ? runJoinerRecovery({
+                group: liveGroup,
+                identity: liveIdentity,
+                rendezvous,
+                welcomeCursor: opts.welcomeCursor,
+                accountIdBytes: args.accountIdBytes,
+              })
+            : Promise.resolve<JoinRecoveryOutcome | null>(null);
+        const [, recovered] = await Promise.all([historyTask, recoveryTask]);
+        recovery = recovered;
       }
+      return { recovery };
     },
     dispose(): void {
       if (group !== null) {
@@ -190,6 +262,220 @@ export async function prepareJoinFlow(args: {
       if (identity !== null) {
         identity.free();
         identity = null;
+      }
+    },
+  };
+}
+
+// ---- Joiner-side recovery (ADR-0018 factor (a)) -------------------
+
+/**
+ * Poll the rendezvous mailbox for the scanner-published recovery
+ * row, open it with the per-pairing MLS exporter key (Path B —
+ * both devices sit at the same DeviceGroup epoch post-join, so
+ * both derive the same key), parse `grant ‖ seed`, and redeem the
+ * grant for a session-token triple.
+ *
+ * Tolerant by design:
+ *   - no row within the soft window → `null` (older scanner build
+ *     or the best-effort scanner half failed; the join itself is
+ *     unaffected and the device falls back to phrase entry);
+ *   - row present but the redeem fails → the outcome still carries
+ *     the seed with `sessionToken: null` (a caller that already
+ *     holds its own session can use the seed alone).
+ *
+ * Throws nothing on its own failure paths — a malformed / wrong-key
+ * row logs + returns `null` (fail-closed on identity: nothing is
+ * cached here; the caller verifies the seed against the published
+ * bundle before trusting it).
+ */
+async function runJoinerRecovery(args: {
+  readonly group: WasmDeviceGroup;
+  readonly identity: WasmIdentity;
+  readonly rendezvous: Uint8Array;
+  readonly welcomeCursor: number;
+  readonly accountIdBytes: Uint8Array;
+}): Promise<JoinRecoveryOutcome | null> {
+  let outcome;
+  try {
+    outcome = await pollForRecoveryPayload(args.rendezvous, args.welcomeCursor);
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.warn("recovery payload poll failed", err);
+    return null;
+  }
+  if (outcome.kind !== "received") return null;
+
+  const wasm = await loadWasm();
+  let key: Uint8Array | null = null;
+  let plaintext: Uint8Array | null = null;
+  try {
+    key = args.group.exportSecret(
+      args.identity,
+      RECOVERY_EXPORTER_LABEL,
+      args.rendezvous,
+      RECOVERY_EXPORTER_KEY_LENGTH,
+    );
+    plaintext = wasm.openWithKey(key, outcome.sealedBlob);
+    const parsed = parseRecoveryPayload(plaintext);
+
+    // Redeem the grant for ACCESS. A failure here (expired /
+    // consumed grant, auth service down) downgrades the outcome to
+    // seed-only rather than discarding the IDENTITY half.
+    let sessionToken: string | null = null;
+    let sessionExpiresAtMs: number | null = null;
+    try {
+      const redeemed = await new AuthClient().deviceAuthorizeRedeem(
+        args.accountIdBytes,
+        base64UrlEncodeNoPad(parsed.grantToken),
+      );
+      sessionToken = redeemed.sessionToken;
+      sessionExpiresAtMs = redeemed.sessionExpiresAtMs;
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("device grant redeem failed", err);
+    }
+    parsed.grantToken.fill(0);
+    return { phraseSeed: parsed.phraseSeed, sessionToken, sessionExpiresAtMs };
+  } catch (err) {
+    // Wrong key / tampered blob / malformed payload — drop it.
+    // eslint-disable-next-line no-console
+    console.warn("recovery payload open failed", err);
+    return null;
+  } finally {
+    key?.fill(0);
+    plaintext?.fill(0);
+  }
+}
+
+// ---- Anonymous joining side (ADR-0018 factor (a), path (b)) -------
+
+/**
+ * Returned by [`prepareAnonymousJoinFlow`]. Mirrors [`JoinSession`]
+ * for the NO-PASSWORD restore path: the fresh device has no device
+ * root key yet (nothing to wrap persistence under), so `accept`
+ * skips snapshot / history persistence and ALWAYS consumes the
+ * recovery row; the caller bootstraps the device key from the
+ * recovered seed and then calls [`persistTo`] to land the
+ * DeviceIdentity seed + DeviceGroup snapshot on disk.
+ */
+export interface AnonymousJoinSession {
+  /** Wire-format pairing QR bytes. */
+  readonly qrPayload: Uint8Array;
+  /** 32-byte rendezvous pseudonym for this pairing session. */
+  readonly rendezvous: Uint8Array;
+  /** Long-poll the rendezvous mailbox for the Welcome bytes. */
+  awaitWelcome(signal?: AbortSignal): Promise<WelcomeOutcome>;
+  /** Join the DeviceGroup from the Welcome + consume the recovery
+   *  row. NOTHING is persisted yet — there is no device key. */
+  accept(
+    welcomeBytes: Uint8Array,
+    opts: { readonly welcomeCursor: number },
+  ): Promise<JoinAcceptOutcome>;
+  /** After the caller bootstrapped the device root key from the
+   *  recovered seed: persist the in-memory DeviceIdentity seed +
+   *  the post-join DeviceGroup snapshot under it, then zeroize the
+   *  in-memory seed copy. Call once, after a successful `accept`. */
+  persistTo(deviceKey: CryptoKey): Promise<void>;
+  /** Release the wasm handles + zeroize the in-memory
+   *  DeviceIdentity seed. Idempotent. */
+  dispose(): void;
+}
+
+/**
+ * NO-PASSWORD variant of [`prepareJoinFlow`] (ADR-0018 factor (a),
+ * the full recovery cascade entry). The DS rendezvous mailbox is
+ * pseudonym-keyed and auth-free, so the whole pairing round-trip
+ * runs anonymously; only the grant redeem inside `accept` touches
+ * the auth service (PoW-gated, anonymous by design).
+ *
+ * Because no device root key exists yet, the DeviceIdentity seed is
+ * generated IN MEMORY here and persisted later via
+ * [`AnonymousJoinSession.persistTo`] — right after the caller
+ * derives + stores the device key from the recovered phrase seed.
+ */
+export async function prepareAnonymousJoinFlow(args: {
+  readonly accountIdBytes: Uint8Array;
+  readonly accountIdB64: string;
+}): Promise<AnonymousJoinSession> {
+  const wasm = await loadWasm();
+  // Fresh random per-device seed, held in memory until `persistTo`.
+  let deviceIdentitySeed: Uint8Array | null = crypto.getRandomValues(
+    new Uint8Array(DEVICE_IDENTITY_SEED_LENGTH),
+  );
+  let identity: WasmIdentity | null = wasm.Identity.fromSeed(
+    deviceIdentitySeed,
+  );
+
+  const keyPackage = identity.createKeyPackage();
+  const rendezvous = generateRendezvousPseudonym();
+  const qrPayload = await buildPairingQrPayload(
+    args.accountIdBytes,
+    keyPackage,
+    rendezvous,
+  );
+
+  let group: WasmDeviceGroup | null = null;
+
+  return {
+    qrPayload,
+    rendezvous,
+    async awaitWelcome(signal): Promise<WelcomeOutcome> {
+      return pollForWelcome(
+        rendezvous,
+        signal === undefined ? {} : { signal },
+      );
+    },
+    async accept(welcomeBytes, opts): Promise<JoinAcceptOutcome> {
+      if (identity === null) {
+        throw new Error("join session already disposed");
+      }
+      group = wasm.DeviceGroup.joinFromWelcome(
+        welcomeBytes,
+        identity,
+        args.accountIdBytes,
+      );
+      // No persistence yet (no device key) and no history catch-up
+      // (the message log is wrapped under the device key too); the
+      // recovery row is the whole point of this flow.
+      const recovery = await runJoinerRecovery({
+        group,
+        identity,
+        rendezvous,
+        welcomeCursor: opts.welcomeCursor,
+        accountIdBytes: args.accountIdBytes,
+      });
+      return { recovery };
+    },
+    async persistTo(deviceKey): Promise<void> {
+      if (identity === null || deviceIdentitySeed === null) {
+        throw new Error("join session already disposed");
+      }
+      await putDeviceIdentitySeed(
+        args.accountIdB64,
+        deviceIdentitySeed,
+        deviceKey,
+      );
+      await persistDeviceGroupSnapshot(
+        identity,
+        args.accountIdB64,
+        deviceKey,
+      );
+      deviceIdentitySeed.fill(0);
+      deviceIdentitySeed = null;
+    },
+    dispose(): void {
+      if (group !== null) {
+        group.free();
+        group = null;
+      }
+      if (identity !== null) {
+        identity.free();
+        identity = null;
+      }
+      if (deviceIdentitySeed !== null) {
+        deviceIdentitySeed.fill(0);
+        deviceIdentitySeed = null;
       }
     },
   };
@@ -229,6 +515,24 @@ export async function runScanFlow(args: {
   readonly accountIdBytes: Uint8Array;
   readonly accountIdB64: string;
   readonly deviceKey: CryptoKey;
+  /** ADR-0018 factor (a) — when present, the scanner also mints a
+   *  device-authorization grant and publishes the sealed
+   *  `grant ‖ phrase_seed` recovery row after the Welcome, so the
+   *  fresh device lands with ACCESS + IDENTITY and never types a
+   *  password or phrase. Strictly best-effort: any failure logs +
+   *  continues (the fresh device falls back to phrase entry).
+   *
+   *  `accountIdentitySeed` is CONSUMED — pass a `.slice()` of the
+   *  live session seed; this function zeroizes it after the
+   *  publish attempt. */
+  readonly recovery?: {
+    readonly accountIdentitySeed: Uint8Array;
+    /** Mint a fresh grant via `POST /device/authorize/start`
+     *  (bearer + PoW) and return its URL-safe-base64 raw token —
+     *  typically `(t) => new AuthClient().deviceAuthorizeStart(t)`
+     *  closed over the live session token. */
+    readonly deviceAuthorizeStart: () => Promise<string>;
+  };
 }): Promise<ScanResult> {
   const decoded = await parsePairingQrPayload(
     args.scannedBytes,
@@ -306,6 +610,49 @@ export async function runScanFlow(args: {
     } catch (err) {
       // eslint-disable-next-line no-console
       console.warn("history bundle publish failed", err);
+    }
+
+    // ADR-0018 factor (a) — best-effort recovery payload. Mint a
+    // single-use device grant (bearer + PoW), derive the
+    // per-pairing exporter key at the POST-ADD epoch (the joiner
+    // ratchets to the same epoch from the Welcome, so it derives
+    // identical bytes), seal `grant(32) ‖ phrase_seed(64)`, and
+    // publish the tagged row to the SAME rendezvous mailbox. A
+    // failure anywhere along this chain must NOT break the pairing
+    // itself — log + continue; the fresh device then falls back to
+    // phrase entry exactly as before this feature existed.
+    if (args.recovery !== undefined) {
+      let grant: Uint8Array | null = null;
+      let key: Uint8Array | null = null;
+      let payload: Uint8Array | null = null;
+      try {
+        const wasm = await loadWasm();
+        const grantB64 = await args.recovery.deviceAuthorizeStart();
+        grant = base64UrlDecodeNoPad(grantB64);
+        key = ensured.group.exportSecret(
+          ensured.identity,
+          RECOVERY_EXPORTER_LABEL,
+          decoded.rendezvousPseudonym,
+          RECOVERY_EXPORTER_KEY_LENGTH,
+        );
+        payload = buildRecoveryPayload(
+          grant,
+          args.recovery.accountIdentitySeed,
+        );
+        const sealed = wasm.sealWithKey(key, payload);
+        await publishRecoveryPayload(decoded.rendezvousPseudonym, sealed);
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn("recovery payload publish failed", err);
+      } finally {
+        // Zeroize every local copy of secret material, success or
+        // not. The caller passed a dedicated copy of the seed
+        // (documented contract), so consuming it here is safe.
+        grant?.fill(0);
+        key?.fill(0);
+        payload?.fill(0);
+        args.recovery.accountIdentitySeed.fill(0);
+      }
     }
 
     // member count: founder + freshly-added leaf, plus any
