@@ -152,6 +152,26 @@ struct AppRoot: View {
                 chatRepository: chatRepository,
                 inviteIntake: inviteIntake
             )
+
+        case .needsRecoveryPhrase(let account):
+            // ADR-0017 fresh-device fail-safe. The user authenticated
+            // (password / passkey) but this device has no cached
+            // AccountIdentity (phrase) seed — the canonical identity
+            // cannot be rebuilt without the phrase. We render the
+            // restore-phrase prompt instead of `HomeScreen`; supplying
+            // the phrase flips the state to `.session`.
+            RestoreIdentityPromptScreen(
+                viewModel: RestoreIdentityPromptViewModel(
+                    repository: authRepository,
+                    username: account.username
+                )
+            )
+            .onAppear {
+                // Same defensive teardown as the anon branch — no live
+                // session runtime should linger while we await the
+                // phrase.
+                deviceGroupSync.clear()
+            }
         }
     }
 }

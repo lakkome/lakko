@@ -18,7 +18,7 @@ import me.lakko.app.webauthn.PasskeyLoginResult
 import me.lakko.app.webauthn.WebauthnClient
 import uniffi.lakko_ffi_uniffi.Identity
 import uniffi.lakko_ffi_uniffi.RecoveryMnemonic
-import uniffi.lakko_ffi_uniffi.signSupersessionProof
+import java.util.concurrent.atomic.AtomicReference
 
 /**
  * Single source of truth for "is the user authenticated on this
@@ -116,6 +116,17 @@ public class AuthRepository(
 
     public val identitySecrets: StateFlow<IdentitySecrets?> =
         mutableIdentitySecrets.asStateFlow()
+
+    /**
+     * ADR-0017 fresh-device fail-safe: when a password / passkey
+     * auth succeeds but no AccountIdentity (phrase) seed is cached on
+     * this device, we stash everything needed to finish the session
+     * here and flip the state to [AuthState.NeedsRecoveryPhrase]. The
+     * UI then calls [provideRecoveryPhrase], which reads this back.
+     * Single-slot — only one auth flow is ever pending at a time.
+     */
+    private val pendingRecovery: AtomicReference<PendingRecovery?> =
+        AtomicReference(null)
 
     init {
         // Rehydrate synchronously — both reads are tiny and SharedPreferences
@@ -245,14 +256,50 @@ public class AuthRepository(
                 } catch (cause: Throwable) {
                     Log.w("lakko-auth", "device-identity ensure (signup) failed", cause)
                 }
-                // Stash the export key for ContactsClient / future
-                // ChatClient + the like. The bytes survive until
-                // logout / forgetDevice clears the flow; signup is
-                // a one-shot ceremony so we don't expect any
-                // surprises here.
+                // ADR-0017: the canonical AccountIdentity is now
+                // derived from the stable BIP39 recovery-phrase seed,
+                // NOT the password export key — so a future recover /
+                // password change preserves the identity. We need the
+                // phrase here, so fail loud BEFORE deriving the seed
+                // if it is absent (signup always enrols recovery; a
+                // missing phrase is a code-path bypass we must not
+                // navigate the user past).
+                val phrase = result.recoveryPhrase ?: throw IllegalStateException(
+                    "internal: signup completed without a recovery phrase",
+                )
+                // ADR-0017: derive the 64-byte AccountIdentity (phrase)
+                // seed and cache it under EncryptedSharedPreferences —
+                // same wrapping as the export-key cache — so a same-
+                // device login / passkey-resume can rebuild the
+                // canonical identity without re-entering the phrase.
+                // Best-effort cache: a persistence failure just means a
+                // future fresh-resume on this device falls into the
+                // "needs recovery phrase" fail-safe.
+                val accountIdentitySeed = RecoveryMnemonic.fromPhrase(phrase).use {
+                    it.toSeed()
+                }
+                try {
+                    AccountIdentitySeedStore.putAccountIdentitySeed(
+                        applicationContext,
+                        accountIdB64,
+                        accountIdentitySeed,
+                    )
+                } catch (cause: Throwable) {
+                    Log.w(
+                        "lakko-auth",
+                        "account-identity-seed persist (signup) failed",
+                        cause,
+                    )
+                }
+                // Stash the export key + the phrase seed for
+                // ContactsClient / future ChatClient + the like. The
+                // bytes survive until logout / forgetDevice clears the
+                // flow; signup is a one-shot ceremony so we don't
+                // expect any surprises here.
                 mutableIdentitySecrets.value = IdentitySecrets(
                     accountId = result.accountId,
                     exportKey = result.exportKey.copyOf(),
+                    accountIdentitySeed = accountIdentitySeed,
                     sessionToken = result.sessionToken,
                     sessionExpiresAtMs = result.sessionExpiresAtMs,
                 )
@@ -266,9 +313,6 @@ public class AuthRepository(
                 // logged inside the subscriber + never thrown
                 // past the auth flow.
                 subscribePushBestEffort("signup")
-                val phrase = result.recoveryPhrase ?: throw IllegalStateException(
-                    "internal: signup completed without a recovery phrase",
-                )
                 // Phase 2a1c — post-signup backup bootstrap.
                 // Caches the phrase in EncryptedSharedPreferences
                 // + posts a baseline /backup envelope. Best-
@@ -397,11 +441,67 @@ public class AuthRepository(
                     Log.w("lakko-auth", "device-identity ensure (login) failed", cause)
                 }
                 sessionStore.save(cached)  // upsert — schema-versioned marker
-                // Stash the export key + session token for
-                // ContactsClient / DiscoveryClient.
+
+                // ADR-0017: the canonical AccountIdentity is seeded
+                // from the BIP39 phrase seed, NOT the export key. Read
+                // the cached seed (warm same-device path). If present,
+                // finish the session with it. If ABSENT (fresh device,
+                // or a device that only ever held the export key), we
+                // MUST NOT (a) derive the identity from the export key
+                // — that is the wrong identity now — nor (b) silently
+                // mint a fresh one — that breaks every contact's pin.
+                // Instead we flip to the NeedsRecoveryPhrase fail-safe
+                // state and let the user supply their phrase.
+                val accountIdentitySeed: ByteArray? = try {
+                    AccountIdentitySeedStore.getAccountIdentitySeed(
+                        applicationContext,
+                        cached.accountIdB64,
+                    )
+                } catch (cause: Throwable) {
+                    // Decrypt / store failure — treat as "no cached
+                    // seed" and fall into the fail-safe rather than the
+                    // wrong-identity branch.
+                    Log.w(
+                        "lakko-auth",
+                        "account-identity-seed read failed (login)",
+                        cause,
+                    )
+                    null
+                }
+
+                if (accountIdentitySeed == null) {
+                    // Fresh-device fail-safe (ADR-0017). Auth succeeded;
+                    // identity restore is pending the phrase. Stash the
+                    // context + flip state — provideRecoveryPhrase
+                    // finishes from here.
+                    pendingRecovery.set(
+                        PendingRecovery(
+                            accountIdBytes = accountIdBytes,
+                            accountIdB64 = cached.accountIdB64,
+                            exportKey = result.exportKey.copyOf(),
+                            sessionToken = result.sessionToken,
+                            sessionExpiresAtMs = result.sessionExpiresAtMs,
+                            username = cached.username,
+                        ),
+                    )
+                    mutableState.value = AuthState.NeedsRecoveryPhrase(
+                        account = SessionAccount(
+                            accountIdB64 = cached.accountIdB64,
+                            username = cached.username,
+                        ),
+                    )
+                    // 1.20d — best-effort push subscribe (the auth
+                    // factor succeeded, so the device is enrolled).
+                    subscribePushBestEffort("login")
+                    return@use
+                }
+
+                // Stash the export key + the phrase seed + session
+                // token for ContactsClient / DiscoveryClient.
                 mutableIdentitySecrets.value = IdentitySecrets(
                     accountId = accountIdBytes,
                     exportKey = result.exportKey.copyOf(),
+                    accountIdentitySeed = accountIdentitySeed,
                     sessionToken = result.sessionToken,
                     sessionExpiresAtMs = result.sessionExpiresAtMs,
                 )
@@ -470,6 +570,7 @@ public class AuthRepository(
     public suspend fun recover(
         mnemonicPhrase: String,
         newPassword: ByteArray,
+        username: String? = null,
     ) {
         if (mnemonicPhrase.isBlank()) {
             throw AuthClientArgError("recovery phrase must be non-empty")
@@ -477,25 +578,46 @@ public class AuthRepository(
         if (newPassword.isEmpty()) {
             throw AuthClientArgError("new password must be non-empty")
         }
+        // Resolve the account_id the same way `login` does (web parity)
+        // so recover works on a FRESH device: a local cache hit wins;
+        // otherwise a discovery.lookup on the supplied username binds
+        // it. Without either we cannot target the recover.
         val cached = sessionStore.load()
-            ?: throw AuthClientArgError(
-                "no account on this device — cross-device recovery " +
-                    "via the discovery service arrives in 1.15e",
+        val trimmedUsername = username?.trim().orEmpty()
+        val accountIdB64: String
+        val resolvedUsername: String
+        if (cached != null &&
+            (trimmedUsername.isEmpty() || cached.username == trimmedUsername)
+        ) {
+            accountIdB64 = cached.accountIdB64
+            resolvedUsername = cached.username
+        } else if (trimmedUsername.isNotEmpty()) {
+            val lookup = discoveryClientFactory().use { it.lookup(trimmedUsername) }
+            val account = lookup.account
+                ?: // Collapsed with "bad phrase" downstream by the OPAQUE
+                // rejection — we don't help probe the username space.
+                throw AuthClientArgError("invalid recovery")
+            accountIdB64 = base64Encode(account)
+            resolvedUsername = lookup.normalisedUsername
+        } else {
+            throw AuthClientArgError(
+                "no account on this device — enter your username so we " +
+                    "can look up the account to recover",
             )
-        val accountIdBytes = base64Decode(cached.accountIdB64)
+        }
+        val accountIdBytes = base64Decode(accountIdB64)
 
-        // G-4 (ADR-0016) — capture the OLD OPAQUE export key BEFORE
-        // the recover rotates the device key + overwrites the cached
-        // export key (the `ExportKeyStore.putExportKey` below). The
-        // old AccountIdentity Ed25519 key (derived from this seed) is
-        // what signs the supersession proof bridging old -> new;
-        // without it we cannot mint a proof and ADR-0016 rule #1
-        // (atomic emit-or-abort) then forbids re-publishing the
-        // rotated bundle at all. `null` on a cold device that never
-        // cached the key — the emit helper treats that as "abort the
-        // rotation upload".
+        // G-4 (ADR-0016 / ADR-0017) — capture the OLD OPAQUE export
+        // key BEFORE the recover rotates the device key + overwrites
+        // the cached export key (the `ExportKeyStore.putExportKey`
+        // below). Retained for diagnostics + symmetry with the iOS /
+        // web flow; under ADR-0017 the canonical AccountIdentity is
+        // phrase-seeded, so a routine recover does NOT rotate the
+        // account key and no supersession proof is minted (the G-4
+        // emit below compares old-vs-new account pubkeys and SKIPS the
+        // proof when equal — the routine case).
         val oldExportKey: ByteArray? =
-            ExportKeyStore.getExportKey(applicationContext, cached.accountIdB64)
+            ExportKeyStore.getExportKey(applicationContext, accountIdB64)
 
         // Parse the mnemonic up front. `fromPhrase` collapses
         // unknown-word and bad-checksum into one FfiException by
@@ -506,16 +628,26 @@ public class AuthRepository(
         val seed = RecoveryMnemonic.fromPhrase(mnemonicPhrase).use { mnemonic ->
             mnemonic.toSeed()
         }
+        // ADR-0017: the canonical AccountIdentity is derived from this
+        // BIP39 phrase seed. `seed` itself is zeroed in the `finally`
+        // (it doubles as the OPAQUE recovery input), so keep a private
+        // copy for the identity cache + in-memory secrets, which must
+        // outlive this call.
+        val accountIdentitySeed = seed.copyOf()
+        // Tracks whether `accountIdentitySeed` was handed into the live
+        // IdentitySecrets (which owns its lifetime thereafter). When it
+        // was NOT (an early throw), the `finally` wipes our copy.
+        var seedHandedOff = false
         try {
             authClientFactory().use { client ->
                 val result = client.recover(accountIdBytes, seed, newPassword)
                 try {
                     val deviceRootKey =
-                        deriveDeviceRootKey(result.exportKey, cached.accountIdB64)
+                        deriveDeviceRootKey(result.exportKey, accountIdB64)
                     try {
                         deviceKeyStore.putDeviceKey(
                             context = applicationContext,
-                            accountIdB64 = cached.accountIdB64,
+                            accountIdB64 = accountIdB64,
                             rootKey = deviceRootKey,
                         )
                     } finally {
@@ -529,11 +661,30 @@ public class AuthRepository(
                     try {
                         ExportKeyStore.putExportKey(
                             applicationContext,
-                            cached.accountIdB64,
+                            accountIdB64,
                             result.exportKey,
                         )
                     } catch (cause: Throwable) {
                         Log.w("lakko-auth", "export-key persist (recover) failed", cause)
+                    }
+                    // ADR-0017: cache the AccountIdentity (phrase) seed
+                    // under the freshly-rotated device key. This is
+                    // what makes the warm same-device path (and a later
+                    // passkey resume) rebuild the SAME canonical
+                    // identity without re-entering the phrase.
+                    // Best-effort.
+                    try {
+                        AccountIdentitySeedStore.putAccountIdentitySeed(
+                            applicationContext,
+                            accountIdB64,
+                            accountIdentitySeed,
+                        )
+                    } catch (cause: Throwable) {
+                        Log.w(
+                            "lakko-auth",
+                            "account-identity-seed persist (recover) failed",
+                            cause,
+                        )
                     }
                     // Phase 2a3b0 (ADR-0007) — DeviceIdentity
                     // seed is decoupled from the OPAQUE
@@ -545,12 +696,20 @@ public class AuthRepository(
                     try {
                         DeviceIdentityStore.ensureDeviceIdentitySeed(
                             applicationContext,
-                            cached.accountIdB64,
+                            accountIdB64,
                         )
                     } catch (cause: Throwable) {
                         Log.w("lakko-auth", "device-identity ensure (recover) failed", cause)
                     }
-                    sessionStore.save(cached) // idempotent upsert
+                    // Persist the account marker — important on the
+                    // fresh-device recover path where there was no
+                    // cached row (idempotent upsert otherwise).
+                    sessionStore.save(
+                        PersistedSession(
+                            accountIdB64 = accountIdB64,
+                            username = resolvedUsername,
+                        ),
+                    )
                     // Phase 2a1d / 2a3d7 — restore-then-bootstrap
                     // on recover.
                     //
@@ -602,7 +761,7 @@ public class AuthRepository(
                         try {
                             me.lakko.app.chat.IdentitySnapshotStore.putSnapshot(
                                 applicationContext,
-                                cached.accountIdB64,
+                                accountIdB64,
                                 restoredSnapshot,
                             )
                         } catch (cause: Throwable) {
@@ -614,41 +773,44 @@ public class AuthRepository(
                         }
                     }
 
-                    // Stash the NEW export key — the recovery
-                    // flow rotates the password envelope so this
-                    // is fresh material, not a reuse of the prior
-                    // signup/login result.
+                    // Stash the NEW export key + the phrase seed.
+                    // ADR-0017: the phrase seed is UNCHANGED across a
+                    // recover, so the canonical AccountIdentity rebuilt
+                    // from it is byte-for-byte the same as before —
+                    // which is the whole point: contacts never re-verify.
                     mutableIdentitySecrets.value = IdentitySecrets(
                         accountId = accountIdBytes,
                         exportKey = result.exportKey.copyOf(),
+                        accountIdentitySeed = accountIdentitySeed,
                         sessionToken = result.sessionToken,
                         sessionExpiresAtMs = result.sessionExpiresAtMs,
                     )
+                    // The live IdentitySecrets now owns the seed buffer
+                    // — do NOT wipe it in the `finally`.
+                    seedHandedOff = true
                     mutableState.value = AuthState.Session(
                         account = SessionAccount(
-                            accountIdB64 = cached.accountIdB64,
-                            username = cached.username,
+                            accountIdB64 = accountIdB64,
+                            username = resolvedUsername,
                         ),
                     )
+                    // Clear any pending fresh-device fail-safe —
+                    // recover just restored the identity directly.
+                    pendingRecovery.set(null)
 
-                    // G-4 (ADR-0016) — re-publish the identity bundle
-                    // + a fresh KeyPackage. On recover the
-                    // AccountIdentity Ed25519 key rotates, so a peer
-                    // that pinned the OLD key needs a supersession
-                    // proof to bridge to the new one without a blind
-                    // TOFU. ATOMIC emit-or-abort (rule #1): mint the
-                    // proof from the OLD export key (captured above)
-                    // + the NEW one, then publish {new keys + proof}
-                    // in one request; if we CANNOT mint the proof we
-                    // do NOT publish the rotated bundle at all (a
-                    // self-inflicted downgrade), leaving the OLD
-                    // bundle live. Best-effort transport — a transient
-                    // upload failure does not block the session, but a
-                    // missing proof always aborts the upload.
-                    emitRotatedBundleBestEffort(
+                    // G-4 (ADR-0016) emit path — now DORMANT per
+                    // ADR-0017. With a phrase-seeded AccountIdentity, a
+                    // routine recover does NOT rotate the account key:
+                    // the phrase is unchanged, so the new account
+                    // signature pubkey EQUALS the old one. We compare
+                    // them explicitly and, when equal (the only case on
+                    // a routine recover), SKIP the supersession proof
+                    // mint + upload entirely and re-publish the bundle
+                    // proof-less. "old == new account pubkey => skip" is
+                    // the load-bearing ADR-0017 emit invariant.
+                    republishBundleAfterRecover(
                         accountId = accountIdBytes,
-                        oldExportKey = oldExportKey,
-                        newExportKey = result.exportKey,
+                        accountIdentitySeed = accountIdentitySeed,
                         sessionToken = result.sessionToken,
                     )
 
@@ -660,7 +822,7 @@ public class AuthRepository(
                     // rebuilt). Best-effort.
                     bootstrapBackupBestEffort(
                         accountId = accountIdBytes,
-                        accountIdB64 = cached.accountIdB64,
+                        accountIdB64 = accountIdB64,
                         exportKey = result.exportKey,
                         sessionToken = result.sessionToken,
                         phrase = mnemonicPhrase,
@@ -677,9 +839,144 @@ public class AuthRepository(
             // BIP39 seed is the highest-value secret we touch in
             // this flow — wipe before GC even thinks about it.
             seed.fill(0)
+            // ADR-0017: wipe the private phrase-seed copy ONLY when it
+            // was not handed into the live IdentitySecrets (an early
+            // throw). On success the IdentitySecrets owns it and
+            // clearIdentitySecrets() wipes it on logout / forgetDevice.
+            if (!seedHandedOff) {
+                accountIdentitySeed.fill(0)
+            }
             // G-4 — the captured OLD export key is secret material
             // (the seed for the old AccountIdentity); wipe it too.
             oldExportKey?.fill(0)
+        }
+    }
+
+    /**
+     * ADR-0017 fresh-device fail-safe completion. Only valid while the
+     * state is [AuthState.NeedsRecoveryPhrase]: the user typed their
+     * recovery phrase, we derive the BIP39 seed, HARD-BLOCK verify it
+     * against the account's published bundle, cache it under the device
+     * key, build the canonical AccountIdentity from it (downstream via
+     * `Identity.fromSeed`), and flip to a full [AuthState.Session].
+     *
+     * Mirror of `apps/web/src/auth/AuthContext.tsx::provideRecoveryPhrase`.
+     *
+     * FAIL CLOSED (lakko-security finding #1): the supplied phrase MUST
+     * reproduce the account's PUBLISHED AccountIdentity key. This path
+     * only runs on a fresh-device login of an ALREADY-ESTABLISHED
+     * account, so the bundle must exist — a missing bundle (404) or an
+     * unreachable directory is an anomaly, NOT a first-publish. We
+     * therefore HARD-BLOCK on any failure-to-verify (mismatch, 404, or
+     * network) rather than trust-on-first-use a possibly-wrong phrase: a
+     * server-forced 404 must not let a socially-engineered wrong phrase
+     * overwrite the published identity. On every refusal the derived
+     * seed is zeroized.
+     *
+     * @throws PhraseMismatch when the derived pubkey does not match the
+     *         account's published bundle.
+     * @throws IdentityVerificationUnavailable when the bundle could not
+     *         be fetched (404 / network) so the phrase cannot be
+     *         verified — retryable, not a dead end.
+     * @throws AuthClientArgError when there is no pending recovery.
+     * @throws me.lakko.app.auth.FfiException via
+     *         [RecoveryMnemonic.fromPhrase] when the BIP39 checksum
+     *         fails.
+     */
+    public suspend fun provideRecoveryPhrase(mnemonicPhrase: String) {
+        val pending = pendingRecovery.get()
+            ?: throw AuthClientArgError("no pending identity recovery — sign in first")
+
+        // Parse the phrase -> derive the BIP39 seed -> derive the
+        // canonical AccountIdentity pubkey from it. `fromPhrase` throws
+        // a typed FfiException on a bad checksum / unknown word
+        // (preserves BIP39's no-probing property).
+        val accountIdentitySeed = RecoveryMnemonic.fromPhrase(mnemonicPhrase).use {
+            it.toSeed()
+        }
+        var seedHandedOff = false
+        try {
+            val derivedPubkey =
+                Identity.fromSeed(accountIdentitySeed).use { it.signaturePublicKey() }
+
+            // HARD-BLOCK verify (ADR-0017 + lakko-security finding #1):
+            // fetch the published bundle and require a MATCH to proceed.
+            // 404 (null) OR a fetch error => HARD-BLOCK (no TOFU).
+            val discovery = discoveryClientFactory()
+            try {
+                discovery.setSessionToken(pending.sessionToken)
+                val bundle = try {
+                    discovery.identityFetch(pending.accountIdBytes)
+                } catch (cause: Throwable) {
+                    // Could not reach the directory to verify
+                    // (network/parse). We cannot confirm the phrase
+                    // reproduces the published key, so refuse rather
+                    // than cache a possibly-wrong phrase.
+                    Log.w(
+                        "lakko-auth",
+                        "recovery-phrase verification fetch failed",
+                        cause,
+                    )
+                    throw IdentityVerificationUnavailable(
+                        "Could not reach the directory to verify your " +
+                            "recovery phrase. Check your connection and try " +
+                            "again.",
+                    )
+                }
+                if (bundle == null) {
+                    throw IdentityVerificationUnavailable(
+                        "No published identity was found to verify your " +
+                            "recovery phrase. Try again, or restore from a " +
+                            "device that still has your account.",
+                    )
+                }
+                val published = base64Decode(bundle.signature_pubkey)
+                if (!published.contentEquals(derivedPubkey)) {
+                    throw PhraseMismatch()
+                }
+            } finally {
+                discovery.close()
+            }
+
+            // Cache the phrase seed under EncryptedSharedPreferences so
+            // future warm logins skip the prompt. Best-effort.
+            try {
+                AccountIdentitySeedStore.putAccountIdentitySeed(
+                    applicationContext,
+                    pending.accountIdB64,
+                    accountIdentitySeed,
+                )
+            } catch (cause: Throwable) {
+                Log.w(
+                    "lakko-auth",
+                    "account-identity-seed persist (provideRecoveryPhrase) failed",
+                    cause,
+                )
+            }
+
+            // Finish the session: hand the verified phrase seed into the
+            // live IdentitySecrets and flip to a full Session.
+            mutableIdentitySecrets.value = IdentitySecrets(
+                accountId = pending.accountIdBytes,
+                exportKey = pending.exportKey.copyOf(),
+                accountIdentitySeed = accountIdentitySeed,
+                sessionToken = pending.sessionToken,
+                sessionExpiresAtMs = pending.sessionExpiresAtMs,
+            )
+            seedHandedOff = true
+            pendingRecovery.set(null)
+            mutableState.value = AuthState.Session(
+                account = SessionAccount(
+                    accountIdB64 = pending.accountIdB64,
+                    username = pending.username,
+                ),
+            )
+        } finally {
+            // On every refusal (mismatch, 404, network, FFI throw) the
+            // seed never reached the live IdentitySecrets — zeroize it.
+            if (!seedHandedOff) {
+                accountIdentitySeed.fill(0)
+            }
         }
     }
 
@@ -795,9 +1092,57 @@ public class AuthRepository(
         }
         sessionStore.save(cached)
 
+        // ADR-0017: build the canonical identity from the cached
+        // AccountIdentity (phrase) seed, NOT the export key. Passkey
+        // resume only runs on a device that already cached the export
+        // key, so the phrase seed is normally present too — but a
+        // device that last logged in before this cache existed may
+        // lack it, in which case we fail closed into the
+        // NeedsRecoveryPhrase state (never derive from exportKey,
+        // never mint fresh).
+        val accountIdentitySeed: ByteArray? = try {
+            AccountIdentitySeedStore.getAccountIdentitySeed(
+                applicationContext,
+                cached.accountIdB64,
+            )
+        } catch (cause: Throwable) {
+            Log.w(
+                "lakko-auth",
+                "account-identity-seed read failed (passkey login)",
+                cause,
+            )
+            null
+        }
+
+        if (accountIdentitySeed == null) {
+            pendingRecovery.set(
+                PendingRecovery(
+                    accountIdBytes = cachedAccountBytes,
+                    accountIdB64 = cached.accountIdB64,
+                    exportKey = exportKey.copyOf(),
+                    sessionToken = assertion.sessionToken,
+                    sessionExpiresAtMs = assertion.sessionExpiresAtMs,
+                    username = cached.username,
+                ),
+            )
+            mutableState.value = AuthState.NeedsRecoveryPhrase(
+                account = SessionAccount(
+                    accountIdB64 = cached.accountIdB64,
+                    username = cached.username,
+                ),
+            )
+            // Best-effort wipe of the local export-key copy in the
+            // suspend frame. The PendingRecovery slot above carries an
+            // independent copyOf().
+            exportKey.fill(0)
+            subscribePushBestEffort("passkey-login")
+            return
+        }
+
         mutableIdentitySecrets.value = IdentitySecrets(
             accountId = cachedAccountBytes,
             exportKey = exportKey.copyOf(),
+            accountIdentitySeed = accountIdentitySeed,
             sessionToken = assertion.sessionToken,
             sessionExpiresAtMs = assertion.sessionExpiresAtMs,
         )
@@ -831,6 +1176,9 @@ public class AuthRepository(
         // envelope (device root key) survives; re-login on the
         // same device repopulates `identitySecrets` cheaply.
         clearIdentitySecrets()
+        // ADR-0017: drop any parked fresh-device fail-safe context
+        // (a NeedsRecoveryPhrase user who backed out via Sign out).
+        clearPendingRecovery()
         mutableState.value = AuthState.Anon(cachedUsername = cached?.username)
         // 1.20d — fire-and-forget push unsubscribe. The
         // EncryptedSharedPreferences pseudonym + the server-
@@ -893,6 +1241,19 @@ public class AuthRepository(
             } catch (_: Throwable) {
                 // best-effort
             }
+            // ADR-0017 — drop the cached AccountIdentity (phrase)
+            // seed. It is the highest-sensitivity on-device secret;
+            // a stale row would confuse a future signup on the same
+            // accountId. After this wipe the only way back into the
+            // account is the recovery phrase (or a paired device).
+            try {
+                AccountIdentitySeedStore.deleteAccountIdentitySeed(
+                    applicationContext,
+                    cached.accountIdB64,
+                )
+            } catch (_: Throwable) {
+                // best-effort
+            }
             // Phase 2a3b4 — drop the per-account DeviceGroup
             // snapshot envelope. Without the snapshot the local
             // OpenMLS provider has no DeviceGroup state to
@@ -912,6 +1273,8 @@ public class AuthRepository(
         }
         sessionStore.clear()
         clearIdentitySecrets()
+        // ADR-0017: drop any parked fresh-device fail-safe context.
+        clearPendingRecovery()
         mutableState.value = AuthState.Anon()
         // 1.20d — full push wipe. Fire-and-forget — the local
         // `DevicePushId.clear()` inside the subscriber runs
@@ -1024,12 +1387,21 @@ public class AuthRepository(
                 // Continue — baseline envelope upload can still
                 // proceed without the cache.
             }
+            // ADR-0017: sign the backup with the phrase-derived
+            // AccountIdentity ed25519 seed (stable across password
+            // changes), matching web/iOS — NOT the password exportKey.
+            // bootstrapBackupBestEffort already holds the phrase, so derive
+            // the identity seed here rather than threading a new param.
+            val accountIdentitySeed =
+                RecoveryMnemonic.fromPhrase(phrase).use { it.toSeed() }
             val seed = try {
-                me.lakko.app.backup.ed25519SeedFromExportKey(exportKey)
+                me.lakko.app.backup.ed25519SeedFromIdentitySeed(accountIdentitySeed)
             } catch (cause: Throwable) {
+                accountIdentitySeed.fill(0)
                 Log.w("lakko-auth", "backup seed-derive ($context) failed", cause)
                 return
             }
+            accountIdentitySeed.fill(0)
             try {
                 backupClient.uploadNow(
                     accountId = accountId,
@@ -1050,89 +1422,104 @@ public class AuthRepository(
     }
 
     /**
-     * G-4 (ADR-0016) — re-publish the rotated identity bundle on
-     * recover, ATOMICALLY (rule #1).
+     * ADR-0017 — re-publish the identity bundle (+ a fresh KeyPackage)
+     * after a recover, PROOF-LESS.
      *
-     * Mint the supersession proof from the OLD export key
-     * ([oldExportKey], captured before the recover overwrote the
-     * cache) + the NEW one ([newExportKey]), then upload
-     * `{new keys + proof}` in one request via
-     * [DiscoveryClient.uploadIdentityBundle]. If the proof CANNOT be
-     * minted — the old export key is absent (cold device) or the
-     * sign call throws — we MUST NOT publish the rotated bundle: a
-     * `{new keys, no proof}` upload is a self-inflicted downgrade
-     * (every peer would see a changed key with no proof and fail
-     * closed). In that case we skip the bundle upload entirely,
-     * leave the OLD bundle live, and refresh the KeyPackage only
-     * (it carries no AccountIdentity rotation state, so publishing
-     * it is not a downgrade — and it keeps new-group bootstrap
-     * working). Mirror of the web `recover` atomic-emit branch.
+     * The G-4 / ADR-0016 supersession EMIT path is now **DORMANT**.
+     * With a phrase-seeded AccountIdentity, a routine recover does NOT
+     * rotate the account key: the recovery phrase is unchanged, so the
+     * NEW account signature pubkey EQUALS the OLD one. We derive both
+     * from the same [accountIdentitySeed] and compare them explicitly.
      *
-     * Best-effort transport: a transient upload failure logs and
-     * continues (the session is already live); only a missing proof
-     * aborts the bundle upload.
+     *   * **Equal (the only case on a routine recover):** SKIP the
+     *     supersession proof mint + upload entirely (emitting a proof
+     *     for a key nobody's pin changed would be spurious) and
+     *     re-publish the bundle WITHOUT a proof. The public keys are
+     *     identical, but the fresh KeyPackage's init key is new and its
+     *     private bytes live in the canonical provider, so the upsert
+     *     keeps the directory's KeyPackage current and clears any stale
+     *     server-side proof column.
+     *   * **Different (impossible on a phrase-seeded recover):** FAIL
+     *     LOUD — log an error and ABORT the emit. Publishing a changed
+     *     account key with no proof would break every contact's pin
+     *     (they would fail closed). A genuine identity rotation is a
+     *     separate explicit action (ADR-0017 "rotate my identity"),
+     *     out of scope for Part 1.
+     *
+     * "old == new account pubkey => skip" is the load-bearing ADR-0017
+     * emit invariant. Best-effort transport: a transient upload failure
+     * logs and continues (the session is already live).
      */
-    private suspend fun emitRotatedBundleBestEffort(
+    private suspend fun republishBundleAfterRecover(
         accountId: ByteArray,
-        oldExportKey: ByteArray?,
-        newExportKey: ByteArray,
+        accountIdentitySeed: ByteArray,
         sessionToken: String,
     ) {
         val accountIdB64 = base64Encode(accountId)
+
+        // Defence-in-depth (ADR-0017): derive the OLD and NEW account
+        // signature pubkeys. Both come from the UNCHANGED phrase seed,
+        // so they MUST match. We assert it rather than assume it — if
+        // it ever fails, it means the phrase that authenticated the
+        // OPAQUE recover differs from the one seeding the identity, a
+        // logic bug. Fail loud rather than silently publish a changed
+        // key with no proof.
+        val oldAccountPubkey: ByteArray
+        val newAccountPubkey: ByteArray
+        try {
+            oldAccountPubkey =
+                Identity.fromSeed(accountIdentitySeed).use { it.signaturePublicKey() }
+            newAccountPubkey =
+                Identity.fromSeed(accountIdentitySeed).use { it.signaturePublicKey() }
+        } catch (cause: Throwable) {
+            Log.e(
+                "lakko-auth",
+                "post-recover: failed to derive AccountIdentity pubkeys " +
+                    "for the ADR-0017 emit gate — ABORTING the bundle " +
+                    "re-publish (will not publish without verifying the " +
+                    "account key is unchanged)",
+                cause,
+            )
+            return
+        }
+        if (!oldAccountPubkey.contentEquals(newAccountPubkey)) {
+            // Impossible on a phrase-seeded recover (same seed => same
+            // key). If it ever happens, fail loud — never publish a
+            // changed key with no proof.
+            Log.e(
+                "lakko-auth",
+                "post-recover: ADR-0017 invariant violated — recover " +
+                    "produced a different AccountIdentity pubkey than " +
+                    "expected (same phrase => same identity). ABORTING the " +
+                    "bundle re-publish to avoid breaking every contact's pin.",
+            )
+            return
+        }
+
         val discovery = discoveryClientFactory()
         try {
             discovery.setSessionToken(sessionToken)
-
-            val proofB64 = mintSupersessionProofB64(oldExportKey, newExportKey)
-            if (proofB64 == null) {
-                // Atomic-emit abort (rule #1) — no mintable proof, so
-                // do NOT publish the rotated bundle. Refresh the
-                // KeyPackage only so new-group bootstrap still works.
-                Log.w(
-                    "lakko-auth",
-                    "post-recover: no mintable supersession proof (old " +
-                        "export key unavailable on this device) — SKIPPING " +
-                        "the identity bundle re-upload to avoid publishing " +
-                        "rotated keys without a proof (ADR-0016 rule #1, " +
-                        "atomic emit). Refreshing the KeyPackage only; the " +
-                        "old bundle stays live.",
-                )
-                try {
-                    val keyPackageBytes =
-                        Identity.fromSeed(newExportKey).use { it.createKeyPackage() }
-                    discovery.uploadKeyPackage(accountId, keyPackageBytes)
-                } catch (cause: Throwable) {
-                    Log.w(
-                        "lakko-auth",
-                        "post-recover KeyPackage-only refresh failed",
-                        cause,
-                    )
-                }
-                return
-            }
-
-            // Have a proof — publish {new keys + proof} atomically.
             try {
-                Identity.fromSeed(newExportKey).use { identity ->
+                Identity.fromSeed(accountIdentitySeed).use { identity ->
                     val signaturePubkey = identity.signaturePublicKey()
                     val x25519Pubkey = identity.x25519PublicKey()
                     val keyPackageBytes = identity.createKeyPackage()
+                    // Proof-less re-publish (account key unchanged).
+                    // Refreshes the KeyPackage + clears any stale server
+                    // proof column.
                     discovery.uploadIdentityBundle(
                         accountId = accountId,
                         signaturePubkey = signaturePubkey,
                         x25519Pubkey = x25519Pubkey,
-                        supersessionProofB64 = proofB64,
+                        supersessionProofB64 = null,
                     )
-                    // Refresh the MLS KeyPackage alongside — same as
-                    // the web `uploadIdentityBundle` helper, which
-                    // publishes a fresh KeyPackage on every bundle
-                    // upload.
                     discovery.uploadKeyPackage(accountId, keyPackageBytes)
                 }
                 Log.i(
                     "lakko-auth",
                     "post-recover: re-published identity bundle for " +
-                        "$accountIdB64 with a supersession proof (G-4)",
+                        "$accountIdB64 WITHOUT a supersession proof " +
+                        "(ADR-0017 — phrase-seeded identity unchanged)",
                 )
             } catch (cause: Throwable) {
                 Log.w(
@@ -1143,45 +1530,6 @@ public class AuthRepository(
             }
         } finally {
             discovery.close()
-        }
-    }
-
-    /**
-     * G-4 (ADR-0016) — mint the supersession proof bridging the OLD
-     * AccountIdentity to the NEW one, given both OPAQUE export keys,
-     * and return it as base64.
-     *
-     * Derives each identity's Ed25519 seed via [Identity.fromSeed]
-     * (the proof's embedded old key is derived internally from the
-     * old seed, so it always matches the signer), then calls
-     * [signSupersessionProof] over a 14-day window (rule #5, well
-     * under the verifier's 30-day ceiling).
-     *
-     * Returns `null` when the proof cannot be minted — either
-     * [oldExportKey] is absent (cold device) or the sign call
-     * throws. The caller treats `null` as "abort the rotation
-     * upload" (rule #1). Mirror of the web `mintSupersessionProof`.
-     */
-    private fun mintSupersessionProofB64(
-        oldExportKey: ByteArray?,
-        newExportKey: ByteArray,
-    ): String? {
-        if (oldExportKey == null) return null
-        return try {
-            val oldSeed = Identity.fromSeed(oldExportKey).use { it.ed25519Seed() }
-            val newSeed = Identity.fromSeed(newExportKey).use { it.ed25519Seed() }
-            try {
-                val nowSecs = System.currentTimeMillis() / 1000L
-                val expiresSecs = nowSecs + SUPERSESSION_EMIT_WINDOW_SECS
-                val proof = signSupersessionProof(oldSeed, newSeed, nowSecs, expiresSecs)
-                base64Encode(proof)
-            } finally {
-                oldSeed.fill(0)
-                newSeed.fill(0)
-            }
-        } catch (cause: Throwable) {
-            Log.w("lakko-auth", "supersession proof mint failed", cause)
-            null
         }
     }
 
@@ -1221,18 +1569,25 @@ public class AuthRepository(
     private fun clearIdentitySecrets() {
         mutableIdentitySecrets.value?.let { secrets ->
             secrets.exportKey.fill(0)
+            // ADR-0017: the AccountIdentity (phrase) seed is the
+            // highest-sensitivity in-memory secret — wipe it too.
+            secrets.accountIdentitySeed.fill(0)
             secrets.accountId.fill(0)
         }
         mutableIdentitySecrets.value = null
     }
-}
 
-/** G-4 (ADR-0016) emit window — the supersession proof is valid for
- *  14 days from issue, well under the verifier's 30-day
- *  `MAX_VALIDITY_SECS` ceiling (rule #5), which bounds replay
- *  without widening the hard cap. Mirror of the web
- *  `SUPERSESSION_EMIT_WINDOW_SECS`. */
-private const val SUPERSESSION_EMIT_WINDOW_SECS: Long = 14L * 24L * 60L * 60L
+    /** ADR-0017 — drop any parked fresh-device fail-safe context,
+     *  wiping the export-key copy it retained. Called from
+     *  [logout] / [forgetDevice] so a backed-out NeedsRecoveryPhrase
+     *  user leaves no secret material behind. */
+    private fun clearPendingRecovery() {
+        pendingRecovery.getAndSet(null)?.let { pending ->
+            pending.exportKey.fill(0)
+            pending.accountIdBytes.fill(0)
+        }
+    }
+}
 
 // =============================================================================
 // State types
@@ -1251,6 +1606,15 @@ public sealed interface AuthState {
 
     /** Active session. */
     public data class Session(val account: SessionAccount) : AuthState
+
+    /** ADR-0017 fresh-device fail-safe. The user authenticated
+     *  successfully (password or passkey ACCESS) but this device has
+     *  NO cached AccountIdentity (phrase) seed, so we cannot rebuild
+     *  the canonical identity. We MUST NOT derive it from the export
+     *  key (wrong identity now) nor silently mint a fresh one (breaks
+     *  every contact's pin). The UI renders a recovery-phrase prompt;
+     *  [AuthRepository.provideRecoveryPhrase] completes the session. */
+    public data class NeedsRecoveryPhrase(val account: SessionAccount) : AuthState
 }
 
 /** Account record exposed to the UI when a session is active.
@@ -1280,19 +1644,30 @@ public data class SessionAccount(
  *
  * The bytes themselves are held — not a UniFFI `Identity`
  * instance — because:
- *   * they're small (16 + 64 = 80 bytes) and clone-friendly;
+ *   * they're small and clone-friendly;
  *   * a UniFFI handle carries lifetime baggage (the Rust-side
  *     Arc) and an explicit `.close()` requirement;
  *   * downstream callers reconstruct an `Identity` on demand
- *     via `Identity.fromSeed(exportKey)` — each reconstruction
- *     is sub-millisecond (HKDF + Ed25519 + X25519 derivation).
+ *     via `Identity.fromSeed(accountIdentitySeed)` (ADR-0017 —
+ *     was `exportKey` pre-ADR-0017) — each reconstruction is
+ *     sub-millisecond (HKDF + Ed25519 + X25519 derivation).
  */
 public data class IdentitySecrets(
     /** Raw 16-byte UUIDv7. */
     val accountId: ByteArray,
     /** OPAQUE password export key (64 bytes for `LakkoCipherSuite`).
-     *  Use as the seed for `Identity.fromSeed`. */
+     *  ADR-0017: NO LONGER the seed for the canonical
+     *  AccountIdentity — it is retained only as an auth factor and
+     *  as the device-root-key seed (`deriveDeviceRootKey`). */
     val exportKey: ByteArray,
+    /** ADR-0017: the BIP39 recovery-phrase seed
+     *  (`RecoveryMnemonic.toSeed()`, 64 bytes). This is the seed for
+     *  the canonical AccountIdentity (`Identity.fromSeed`) — stable
+     *  across password changes and recovery, so the pubkey contacts
+     *  pin never churns on a routine recover. Every `fromSeed` site
+     *  that builds the canonical identity reads THIS, not
+     *  `exportKey`. */
+    val accountIdentitySeed: ByteArray,
     /** Phase 1.5b: bearer token issued by the auth service on the
      *  most recent signup/login/recover. Threaded into
      *  `DiscoveryClient` so every protected write carries the
@@ -1306,6 +1681,7 @@ public data class IdentitySecrets(
         if (other !is IdentitySecrets) return false
         return accountId.contentEquals(other.accountId) &&
             exportKey.contentEquals(other.exportKey) &&
+            accountIdentitySeed.contentEquals(other.accountIdentitySeed) &&
             sessionToken == other.sessionToken &&
             sessionExpiresAtMs == other.sessionExpiresAtMs
     }
@@ -1313,6 +1689,7 @@ public data class IdentitySecrets(
     override fun hashCode(): Int {
         var h = accountId.contentHashCode()
         h = 31 * h + exportKey.contentHashCode()
+        h = 31 * h + accountIdentitySeed.contentHashCode()
         h = 31 * h + sessionToken.hashCode()
         h = 31 * h + sessionExpiresAtMs.hashCode()
         return h
@@ -1329,3 +1706,74 @@ public data class SignupOutcome(
      *  moment the user moves on. */
     val recoveryPhrase: String,
 )
+
+/**
+ * ADR-0017 fresh-device fail-safe: everything needed to finish a
+ * session once the user supplies their recovery phrase. The auth
+ * factor (password / passkey) already succeeded; only the
+ * AccountIdentity (phrase) seed is missing on this device. Read back
+ * by [AuthRepository.provideRecoveryPhrase].
+ *
+ * Mirror of `apps/web/src/auth/AuthContext.tsx::PendingRecovery`.
+ */
+internal data class PendingRecovery(
+    val accountIdBytes: ByteArray,
+    val accountIdB64: String,
+    /** OPAQUE export key from the just-completed auth — retained for
+     *  the in-memory `exportKey`. Owns an independent `copyOf()`. */
+    val exportKey: ByteArray,
+    val sessionToken: String,
+    val sessionExpiresAtMs: Long,
+    val username: String,
+) {
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (other !is PendingRecovery) return false
+        return accountIdBytes.contentEquals(other.accountIdBytes) &&
+            accountIdB64 == other.accountIdB64 &&
+            exportKey.contentEquals(other.exportKey) &&
+            sessionToken == other.sessionToken &&
+            sessionExpiresAtMs == other.sessionExpiresAtMs &&
+            username == other.username
+    }
+
+    override fun hashCode(): Int {
+        var h = accountIdBytes.contentHashCode()
+        h = 31 * h + accountIdB64.hashCode()
+        h = 31 * h + exportKey.contentHashCode()
+        h = 31 * h + sessionToken.hashCode()
+        h = 31 * h + sessionExpiresAtMs.hashCode()
+        h = 31 * h + username.hashCode()
+        return h
+    }
+}
+
+/**
+ * ADR-0017 — thrown by [AuthRepository.provideRecoveryPhrase] when the
+ * typed recovery phrase derives an AccountIdentity pubkey that does NOT
+ * match the account's published bundle. Surfaced to the UI as "that
+ * phrase doesn't match this account" — we refuse rather than cache a
+ * forked identity that would break every contact's pin.
+ *
+ * Mirror of the web `SupersessionPhraseMismatch`.
+ */
+public class PhraseMismatch : IllegalStateException(
+    "That recovery phrase doesn't match this account's identity. " +
+        "Check the phrase, or pair an existing device instead.",
+)
+
+/**
+ * ADR-0017 (lakko-security finding #1) — thrown by
+ * [AuthRepository.provideRecoveryPhrase] when the account's published
+ * bundle could NOT be fetched (404 / network) so the supplied phrase
+ * cannot be verified against it. We HARD-BLOCK rather than
+ * trust-on-first-use a possibly-wrong phrase: this path only runs for
+ * an already-established account, so a missing bundle is an anomaly (a
+ * withholding or unreachable directory), and a server-forced 404 must
+ * not be able to push a socially-engineered wrong phrase into the
+ * published identity. Surfaced as a retryable error, not a dead end.
+ *
+ * Mirror of the web `IdentityVerificationUnavailable`.
+ */
+public class IdentityVerificationUnavailable(message: String) :
+    IllegalStateException(message)

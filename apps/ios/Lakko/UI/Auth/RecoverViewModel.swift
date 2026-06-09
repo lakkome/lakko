@@ -38,6 +38,12 @@ public final class RecoverViewModel: ObservableObject {
     @Published public var sharesInput: String = ""
     @Published public var password: String = ""
     @Published public var confirm: String = ""
+    /// ADR-0017 — username for the fresh-device recover path. When no
+    /// account is cached on this device, the recover flow resolves the
+    /// account_id via `DiscoveryClient.lookup(username)`, so the user
+    /// must type their handle. Pre-filled with ``cachedUsername`` when
+    /// present (a cached account wins and ignores this field).
+    @Published public var username: String = ""
 
     // MARK: - Internal status
 
@@ -58,6 +64,9 @@ public final class RecoverViewModel: ObservableObject {
     public init(repository: AuthRepository, cachedUsername: String?) {
         self.repository = repository
         self.cachedUsername = cachedUsername
+        // Pre-fill the username field with the cached handle when one
+        // exists; the fresh-device path leaves it empty for the user.
+        self.username = cachedUsername ?? ""
     }
 
     // MARK: - Submit
@@ -83,6 +92,13 @@ public final class RecoverViewModel: ObservableObject {
         }
         if password.count < Self.minPasswordLength {
             error = "Password must be at least \(Self.minPasswordLength) characters."
+            return
+        }
+        // ADR-0017 — on a fresh device (no cached account) the username
+        // is required to resolve the account_id via discovery.
+        let trimmedUsername = username.trimmingCharacters(in: .whitespacesAndNewlines)
+        if cachedUsername == nil && trimmedUsername.isEmpty {
+            error = "Enter your username so we can find your account."
             return
         }
 
@@ -123,11 +139,14 @@ public final class RecoverViewModel: ObservableObject {
 
         let passwordBytes = Data(password.utf8)
 
+        let usernameSnapshot = trimmedUsername.isEmpty ? nil : trimmedUsername
+
         Task {
             do {
                 try await repository.recover(
                     mnemonicPhrase: phraseSnapshot,
-                    newPassword: passwordBytes
+                    newPassword: passwordBytes,
+                    username: usernameSnapshot
                 )
                 // `repository.recover` flipped AuthState to .session.
                 // The screen will be replaced by the home destination

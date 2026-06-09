@@ -46,23 +46,24 @@ private enum Theme {
 public struct ChannelsRootScreen: View {
     @StateObject private var state = ChannelsUiState()
     private let client: ChannelsClient
-    /// 32-byte OPAQUE export key for the current session.
-    /// `NewChannelScreen.create` rebuilds a transient
-    /// `Identity` from it (`Identity.fromSeed(seed: exportKey)`)
-    /// to drive the MLS PublisherGroup that produces the
-    /// channel content-key seed (G-27).
+    /// ADR-0017: the 64-byte canonical AccountIdentity (phrase) seed
+    /// for the current session. `NewChannelScreen.create` rebuilds a
+    /// transient `Identity` from it
+    /// (`Identity.fromSeed(seed: accountIdentitySeed)`) to drive the
+    /// MLS PublisherGroup that produces the channel content-key seed
+    /// (G-27). Was the OPAQUE export key pre-ADR-0017.
     ///
-    /// The host (`LakkoApp` / a future Channels tab) supplies
-    /// this from `AuthRepository`'s in-memory `IdentitySecrets`
-    /// — same shape `ChatRepository.bootstrap` already uses.
-    private let exportKey: Data
+    /// The host (`LakkoApp` / a future Channels tab) supplies this
+    /// from `AuthRepository`'s in-memory `IdentitySecrets` — same shape
+    /// `ChatRepository.bootstrap` already uses.
+    private let accountIdentitySeed: Data
 
     public init(
         client: ChannelsClient = ChannelsClient(),
-        exportKey: Data
+        accountIdentitySeed: Data
     ) {
         self.client = client
-        self.exportKey = exportKey
+        self.accountIdentitySeed = accountIdentitySeed
     }
 
     public var body: some View {
@@ -70,7 +71,7 @@ public struct ChannelsRootScreen: View {
             ChannelsListScreen(
                 state: state,
                 client: client,
-                exportKey: exportKey
+                accountIdentitySeed: accountIdentitySeed
             )
         }
         .preferredColorScheme(.dark)
@@ -86,8 +87,8 @@ struct ChannelsListScreen: View {
     let client: ChannelsClient
     /// Forwarded down to [`NewChannelScreen`] so the
     /// create-action can build the MLS PublisherGroup
-    /// identity. See [`ChannelsRootScreen.exportKey`].
-    let exportKey: Data
+    /// identity. See [`ChannelsRootScreen.accountIdentitySeed`].
+    let accountIdentitySeed: Data
 
     var body: some View {
         ZStack {
@@ -105,7 +106,7 @@ struct ChannelsListScreen: View {
                     NewChannelScreen(
                         state: state,
                         client: client,
-                        exportKey: exportKey
+                        accountIdentitySeed: accountIdentitySeed
                     )
                 } label: {
                     Image(systemName: "plus")
@@ -174,10 +175,11 @@ struct ChannelsListScreen: View {
 struct NewChannelScreen: View {
     @ObservedObject var state: ChannelsUiState
     let client: ChannelsClient
-    /// OPAQUE export key from the active session. Used to
-    /// build a transient `Identity` inside [`create`] —
-    /// the MLS PublisherGroup founding member.
-    let exportKey: Data
+    /// ADR-0017: the canonical AccountIdentity (phrase) seed from the
+    /// active session. Used to build a transient `Identity` inside
+    /// [`create`] — the MLS PublisherGroup founding member. Was the
+    /// OPAQUE export key pre-ADR-0017.
+    let accountIdentitySeed: Data
     @Environment(\.dismiss) private var dismiss
 
     @State private var name: String = ""
@@ -231,7 +233,8 @@ struct NewChannelScreen: View {
         do {
             _ = try await client.createChannel(channelIdHex: id)
             // G-27: build a transient `Identity` from the
-            // OPAQUE export key, hand it to the composer
+            // canonical AccountIdentity (phrase) seed (ADR-0017 —
+            // was the OPAQUE export key), hand it to the composer
             // so the channel content-key seed comes from a
             // real MLS PublisherGroup exporter (instead of
             // `newChannelSeedForTest`). The identity is
@@ -241,7 +244,7 @@ struct NewChannelScreen: View {
             // `Identity` releases its handle via ARC at
             // scope-exit — UniFFI's Swift surface has no
             // explicit `close()`.
-            let identity = try Identity.fromSeed(seed: exportKey)
+            let identity = try Identity.fromSeed(seed: accountIdentitySeed)
             let keys = try ChannelsComposer.freshPublisherKeys(
                 identity: identity,
                 channelIdHex: id

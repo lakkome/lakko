@@ -165,11 +165,13 @@ public fun buildContactRecords(
     }
 }
 
-/** Derive the Ed25519 signing seed from the OPAQUE export key
- *  using the same `Identity.fromSeed` deterministic flow every
- *  identity-bearing operation uses. Helper so the auth-side
- *  bootstrap can skip threading the seed through the public
- *  surface. */
-public fun ed25519SeedFromExportKey(exportKey: ByteArray): ByteArray {
-    return Identity.fromSeed(exportKey).use { it.ed25519Seed() }
+/** Derive the AccountIdentity Ed25519 signing seed from the
+ *  identity seed (ADR-0017: the BIP39 phrase seed, NOT the password
+ *  exportKey — so the backup is signed with the stable account
+ *  identity that survives a password change, matching web/iOS).
+ *  Uses the same `Identity.fromSeed` deterministic flow every
+ *  identity-bearing operation uses. Helper so the auth-side bootstrap
+ *  can skip threading the seed through the public surface. */
+public fun ed25519SeedFromIdentitySeed(identitySeed: ByteArray): ByteArray {
+    return Identity.fromSeed(identitySeed).use { it.ed25519Seed() }
 }

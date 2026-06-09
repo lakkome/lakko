@@ -93,12 +93,13 @@ public final class ContactsRepository: ObservableObject {
         }
 
         let client = clientFactory()
-        // Build the sender's Identity from the OPAQUE export key.
-        // The build is sub-millisecond (HKDF + Ed25519 + X25519);
-        // a fresh handle per operation keeps the lifetime story
-        // simple — Swift ARC drops the Rust-side handle on scope
+        // Build the sender's canonical AccountIdentity from the
+        // phrase-derived seed (ADR-0017 — was the OPAQUE export key
+        // pre-ADR-0017). The build is sub-millisecond (HKDF + Ed25519
+        // + X25519); a fresh handle per operation keeps the lifetime
+        // story simple — Swift ARC drops the Rust-side handle on scope
         // exit.
-        let identity = try Identity.fromSeed(seed: secrets.exportKey)
+        let identity = try Identity.fromSeed(seed: secrets.accountIdentitySeed)
         let result = try await client.sendContactRequest(
             senderSigningSeed: identity.ed25519Seed(),
             senderAccountId: secrets.accountId,
@@ -149,7 +150,7 @@ public final class ContactsRepository: ObservableObject {
         }
         do {
             let client = clientFactory()
-            let identity = try Identity.fromSeed(seed: secrets.exportKey)
+            let identity = try Identity.fromSeed(seed: secrets.accountIdentitySeed)
             let pollResult = try await client.pollStrangerInbox(
                 mySignaturePubkey: identity.signaturePublicKey(),
                 myX25519Secret: identity.x25519SecretKey(),
@@ -260,7 +261,7 @@ public final class ContactsRepository: ObservableObject {
             )
         }
         let client = clientFactory()
-        let identity = try Identity.fromSeed(seed: secrets.exportKey)
+        let identity = try Identity.fromSeed(seed: secrets.accountIdentitySeed)
         return try await client.sendContactAck(
             accepterSigningSeed: identity.ed25519Seed(),
             accepterAccountId: secrets.accountId,
@@ -287,7 +288,7 @@ public final class ContactsRepository: ObservableObject {
                 )
             )
         }
-        let identity = try Identity.fromSeed(seed: secrets.exportKey)
+        let identity = try Identity.fromSeed(seed: secrets.accountIdentitySeed)
         return try computeSafetyNumber(
             myPubkey: identity.signaturePublicKey(),
             theirPubkey: theirPubkey
@@ -336,7 +337,7 @@ public final class ContactsRepository: ObservableObject {
         let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
         let expiryMs = nowMs + expiryMillisFromNow
 
-        let identity = try Identity.fromSeed(seed: secrets.exportKey)
+        let identity = try Identity.fromSeed(seed: secrets.accountIdentitySeed)
         let capabilityBytes: Data
         do {
             capabilityBytes = try composeInviteCapability(
@@ -390,7 +391,7 @@ public final class ContactsRepository: ObservableObject {
                 )
             )
         }
-        let identity = try Identity.fromSeed(seed: secrets.exportKey)
+        let identity = try Identity.fromSeed(seed: secrets.accountIdentitySeed)
         let discovery = authenticatedDiscoveryClient()
         let result: RevokeInviteResult
         do {
@@ -428,7 +429,7 @@ public final class ContactsRepository: ObservableObject {
                 )
             )
         }
-        let identity = try Identity.fromSeed(seed: secrets.exportKey)
+        let identity = try Identity.fromSeed(seed: secrets.accountIdentitySeed)
         let discovery = authenticatedDiscoveryClient()
         do {
             return try await discovery.listInvitesByOwner(
@@ -550,7 +551,7 @@ public final class ContactsRepository: ObservableObject {
         let sendResult: SendResult
         do {
             let client = clientFactory()
-            let identity = try Identity.fromSeed(seed: secrets.exportKey)
+            let identity = try Identity.fromSeed(seed: secrets.accountIdentitySeed)
             sendResult = try await client.sendContactRequestToBundle(
                 senderSigningSeed: identity.ed25519Seed(),
                 senderAccountId: secrets.accountId,

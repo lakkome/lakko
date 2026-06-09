@@ -319,7 +319,7 @@ public class ContactsRepository(
                     "no identity secrets — please re-enter your password",
                 ),
             )
-        return Identity.fromSeed(secrets.exportKey).use { identity ->
+        return Identity.fromSeed(secrets.accountIdentitySeed).use { identity ->
             uniffi.lakko_ffi_uniffi.computeSafetyNumber(
                 myPubkey = identity.signaturePublicKey(),
                 theirPubkey = theirPubkey,
@@ -548,7 +548,7 @@ public class ContactsRepository(
             )
         val expiryMs = (System.currentTimeMillis() + expiryMillisFromNow).toULong()
 
-        return Identity.fromSeed(secrets.exportKey).use { identity ->
+        return Identity.fromSeed(secrets.accountIdentitySeed).use { identity ->
             val capabilityBytes = try {
                 composeInviteCapability(
                     ownerSigningSeed = identity.ed25519Seed(),
@@ -608,7 +608,7 @@ public class ContactsRepository(
                     "no identity secrets — please re-enter your password",
                 ),
             )
-        return Identity.fromSeed(secrets.exportKey).use { identity ->
+        return Identity.fromSeed(secrets.accountIdentitySeed).use { identity ->
             val signingSeed = identity.ed25519Seed()
             try {
                 val result = authenticatedDiscoveryClient().use { discovery ->
@@ -651,7 +651,7 @@ public class ContactsRepository(
                     "no identity secrets — please re-enter your password",
                 ),
             )
-        return Identity.fromSeed(secrets.exportKey).use { identity ->
+        return Identity.fromSeed(secrets.accountIdentitySeed).use { identity ->
             val signingSeed = identity.ed25519Seed()
             try {
                 authenticatedDiscoveryClient().use { discovery ->
@@ -694,7 +694,9 @@ public class ContactsRepository(
         block: (ContactsClient, SenderMaterial) -> T,
     ): T {
         return clientFactory().use { client ->
-            Identity.fromSeed(secrets.exportKey).use { identity ->
+            // ADR-0017: contact-request sender material is the canonical
+            // AccountIdentity — seeded from the phrase seed, not exportKey.
+            Identity.fromSeed(secrets.accountIdentitySeed).use { identity ->
                 val sender = SenderMaterial(
                     signingSeed = identity.ed25519Seed(),
                     signaturePubkey = identity.signaturePublicKey(),

@@ -166,7 +166,9 @@ public class ChatRepository(
             // attaching the new Identity.
             wipeInMemoryState()
         }
-        val identity = Identity.fromSeed(secrets.exportKey)
+        // ADR-0017: the canonical AccountIdentity is seeded from the
+        // stable BIP39 phrase seed, NOT the password export key.
+        val identity = Identity.fromSeed(secrets.accountIdentitySeed)
         // Restore the snapshot — best-effort. The Identity is
         // valid even if the restore fails (we just lose the
         // prior MLS state, peers re-bootstrap).

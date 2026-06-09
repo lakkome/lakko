@@ -81,6 +81,13 @@ public final class AuthRepository: ObservableObject {
     private let sessionStore: SessionStore
     private let authClientFactory: () -> AuthClient
 
+    /// ADR-0017 fresh-device fail-safe. When a password / passkey
+    /// auth succeeds but no AccountIdentity (phrase) seed is cached on
+    /// this device, everything needed to finish the session is stashed
+    /// here and ``state`` flips to ``AuthState/needsRecoveryPhrase(_:)``.
+    /// ``provideRecoveryPhrase(mnemonicPhrase:)`` reads this back.
+    private var pendingRecovery: PendingRecovery?
+
     public init(
         sessionStore: SessionStore = SessionStore(),
         authClientFactory: @escaping () -> AuthClient = { AuthClient() }
@@ -192,8 +199,8 @@ public final class AuthRepository: ObservableObject {
         // Phase 2a3b0 (ADR-0007) — ensure a random per-device
         // DeviceIdentity seed exists on this device. Distinct
         // from the deterministic AccountIdentity (the
-        // ``exportKey`` above); used as the MLS leaf in the
-        // user's DeviceGroup (2a3a) once the add-device flow
+        // phrase-seeded identity below); used as the MLS leaf in
+        // the user's DeviceGroup (2a3a) once the add-device flow
         // lands. Best-effort.
         do {
             _ = try DeviceIdentityStore.ensureDeviceIdentitySeed(
@@ -203,13 +210,49 @@ public final class AuthRepository: ObservableObject {
             NSLog("device-identity ensure (signup) failed: \(error)")
         }
 
-        // Stash the export key + session token for ContactsClient /
-        // ChatRepository / DiscoveryClient. The bytes survive until
-        // logout / forgetDevice clears the publisher; signup is a
-        // one-shot ceremony so we don't expect any surprises here.
+        // ADR-0017: the canonical AccountIdentity is now derived from
+        // the stable BIP39 recovery-phrase seed, NOT the password
+        // export key — so a future recover / password change preserves
+        // the identity. We need the phrase here, so fail loud BEFORE
+        // building IdentitySecrets if it is absent (`enrolRecovery =
+        // true` always enrols recovery; a missing phrase is a
+        // code-path bypass we must not navigate the user past).
+        guard let phrase = result.recoveryPhrase else {
+            // Should be unreachable — we asked for `enrolRecovery =
+            // true` so the AuthClient always returns a phrase.
+            throw AuthClientError.argument(
+                "internal: signup completed without a recovery phrase"
+            )
+        }
+        let accountIdentitySeed = try RecoveryMnemonic
+            .fromPhrase(phrase: phrase)
+            .toSeed()
+        // ADR-0017: cache the AccountIdentity (phrase) seed in the
+        // Keychain — same hardware-backed posture as the export-key
+        // cache — so a same-device login / passkey-resume can rebuild
+        // the canonical identity without re-entering the phrase.
+        // Best-effort: a persistence failure just means a future
+        // fresh-resume on this device falls into the
+        // `needsRecoveryPhrase` fail-safe.
+        do {
+            try AccountIdentitySeedStore.putAccountIdentitySeed(
+                accountIdB64: accountIdB64,
+                seed: accountIdentitySeed
+            )
+        } catch {
+            NSLog("account-identity-seed persist (signup) failed: \(error)")
+        }
+
+        // Stash the export key + phrase seed + session token for
+        // ContactsClient / ChatRepository / DiscoveryClient. The bytes
+        // survive until logout / forgetDevice clears the publisher;
+        // signup is a one-shot ceremony so we don't expect any
+        // surprises here. ADR-0017: the canonical identity downstream
+        // callers rebuild reads `accountIdentitySeed`.
         identitySecrets = IdentitySecrets(
             accountId: result.accountId,
             exportKey: result.exportKey,
+            accountIdentitySeed: accountIdentitySeed,
             sessionToken: result.sessionToken,
             sessionExpiresAtMs: result.sessionExpiresAtMs
         )
@@ -219,14 +262,6 @@ public final class AuthRepository: ObservableObject {
                 username: trimmed
             )
         )
-
-        guard let phrase = result.recoveryPhrase else {
-            // Should be unreachable — we asked for `enrolRecovery =
-            // true` so the AuthClient always returns a phrase.
-            throw AuthClientError.argument(
-                "internal: signup completed without a recovery phrase"
-            )
-        }
         // Phase 2a1c — post-signup backup bootstrap. Caches the
         // phrase in the Keychain + posts a baseline /backup
         // envelope. Best-effort end-to-end; errors are logged
@@ -236,7 +271,7 @@ public final class AuthRepository: ObservableObject {
             await Self.bootstrapBackupBestEffort(
                 accountId: result.accountId,
                 accountIdB64: accountIdB64,
-                exportKey: result.exportKey,
+                accountIdentitySeed: accountIdentitySeed,
                 sessionToken: result.sessionToken,
                 phrase: phrase,
                 context: "signup"
@@ -343,17 +378,27 @@ public final class AuthRepository: ObservableObject {
         }
         sessionStore.save(cached) // idempotent upsert — schema-versioned
 
-        identitySecrets = IdentitySecrets(
-            accountId: accountIdBytes,
+        // ADR-0017: the canonical AccountIdentity is seeded from the
+        // BIP39 phrase seed, NOT the export key. Read the cached seed
+        // (warm same-device path). If present, finish the session with
+        // it. If ABSENT (fresh device, or a device that only ever held
+        // the export key), we MUST NOT (a) derive the identity from the
+        // export key — that is the wrong identity now — nor (b)
+        // silently mint a fresh one — that breaks every contact's pin.
+        // Instead we flip to the `needsRecoveryPhrase` fail-safe state
+        // and let the user supply their phrase.
+        let accountIdentitySeed = Self.readCachedAccountIdentitySeed(
+            accountIdB64: cached.accountIdB64,
+            context: "login"
+        )
+        finishOrPromptForRecovery(
+            accountIdentitySeed: accountIdentitySeed,
+            accountIdBytes: accountIdBytes,
+            accountIdB64: cached.accountIdB64,
             exportKey: result.exportKey,
             sessionToken: result.sessionToken,
-            sessionExpiresAtMs: result.sessionExpiresAtMs
-        )
-        state = .session(
-            SessionAccount(
-                accountIdB64: cached.accountIdB64,
-                username: cached.username
-            )
+            sessionExpiresAtMs: result.sessionExpiresAtMs,
+            username: cached.username
         )
         // 1.20c — best-effort push subscribe.
         Task { await Self.subscribePushBestEffort(context: "login") }
@@ -464,17 +509,26 @@ public final class AuthRepository: ObservableObject {
         }
         sessionStore.save(cached)
 
-        identitySecrets = IdentitySecrets(
-            accountId: cachedAccountBytes,
+        // ADR-0017: build the canonical Identity from the cached
+        // AccountIdentity (phrase) seed, NOT the export key. Passkey
+        // resume only runs on a device that already cached the export
+        // key, so the phrase seed is normally present too — but a
+        // device that last logged in before this cache existed may lack
+        // it, in which case we fail closed into the
+        // `needsRecoveryPhrase` state (never derive from exportKey,
+        // never mint fresh).
+        let accountIdentitySeed = Self.readCachedAccountIdentitySeed(
+            accountIdB64: cached.accountIdB64,
+            context: "passkey login"
+        )
+        finishOrPromptForRecovery(
+            accountIdentitySeed: accountIdentitySeed,
+            accountIdBytes: cachedAccountBytes,
+            accountIdB64: cached.accountIdB64,
             exportKey: exportKey,
             sessionToken: assertion.sessionToken,
-            sessionExpiresAtMs: assertion.sessionExpiresAtMs
-        )
-        state = .session(
-            SessionAccount(
-                accountIdB64: cached.accountIdB64,
-                username: cached.username
-            )
+            sessionExpiresAtMs: assertion.sessionExpiresAtMs,
+            username: cached.username
         )
         Task { await Self.subscribePushBestEffort(context: "passkey-login") }
     }
@@ -506,9 +560,20 @@ public final class AuthRepository: ObservableObject {
     /// session key, the server returns a generic error code). We
     /// let it bubble unchanged so the UI form can render "invalid
     /// recovery phrase" without leaking further.
+    ///
+    /// ADR-0017: the canonical AccountIdentity is derived from the
+    /// (unchanged) BIP39 phrase seed, so a routine recover preserves
+    /// the identity — the supersession proof emit is SKIPPED because
+    /// the old and new account pubkeys are equal. The `username`
+    /// resolves the account_id like ``login(username:password:)`` does
+    /// (cache hit, else a `DiscoveryClient.lookup`) so recover works
+    /// on a FRESH device given the username + phrase. It is required
+    /// only when no account is cached on this device; a cached account
+    /// wins.
     public func recover(
         mnemonicPhrase: String,
-        newPassword: Data
+        newPassword: Data,
+        username: String? = nil
     ) async throws {
         let trimmedPhrase = mnemonicPhrase.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedPhrase.isEmpty else {
@@ -517,16 +582,38 @@ public final class AuthRepository: ObservableObject {
         guard !newPassword.isEmpty else {
             throw AuthClientError.argument("new password must be non-empty")
         }
-        guard let cached = sessionStore.load() else {
+
+        // ADR-0017: resolve the account_id the same way `login` does so
+        // recover works on a FRESH device: a local cache hit wins;
+        // otherwise a `DiscoveryClient.lookup` on the supplied username
+        // binds it. Without either we cannot target the recover.
+        let cached = sessionStore.load()
+        let trimmedUsername = username?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let accountIdB64: String
+        let resolvedUsername: String
+        if let cached,
+           trimmedUsername.isEmpty || cached.username == trimmedUsername {
+            accountIdB64 = cached.accountIdB64
+            resolvedUsername = cached.username
+        } else if !trimmedUsername.isEmpty {
+            let discovery = DiscoveryClient()
+            let lookup = try await discovery.lookup(username: trimmedUsername)
+            guard let accountBytes = lookup.account else {
+                // Collapsed with "bad phrase" downstream by the OPAQUE
+                // rejection — we don't help probe the username space.
+                throw AuthClientError.argument("invalid recovery")
+            }
+            accountIdB64 = base64Encode(accountBytes)
+            resolvedUsername = lookup.normalisedUsername
+        } else {
             throw AuthClientError.argument(
-                "no account on this device — cross-device recovery " +
-                "via the discovery service arrives in 1.14e"
+                "no account on this device — enter your username so we " +
+                "can look up the account to recover"
             )
         }
-        guard let accountIdBytes = base64Decode(cached.accountIdB64) else {
-            sessionStore.clear()
+        guard let accountIdBytes = base64Decode(accountIdB64) else {
             throw AuthClientError.argument(
-                "stored account id is malformed; please sign up again"
+                "resolved account id is malformed; please try again"
             )
         }
 
@@ -535,6 +622,25 @@ public final class AuthRepository: ObservableObject {
         // (preserves BIP39's no-probing property).
         let mnemonic = try RecoveryMnemonic.fromPhrase(phrase: trimmedPhrase)
         let seed = mnemonic.toSeed()
+        // ADR-0017: the canonical AccountIdentity is derived from this
+        // BIP39 phrase seed. `seed` doubles as the OPAQUE recovery
+        // input below; keep a private copy for the identity cache + the
+        // in-memory secrets, which must outlive this call.
+        let accountIdentitySeed = seed
+
+        // G-4 (ADR-0016 / ADR-0017) — capture the OLD AccountIdentity
+        // signature pubkey BEFORE the recover rotates anything, so the
+        // emit path below can compare old-vs-new and SKIP the
+        // supersession proof when they are equal (the ADR-0017 routine
+        // recover case — the phrase is unchanged, so the new account
+        // pubkey equals the old one). The OLD identity is itself
+        // phrase-seeded now, so the old pubkey is exactly
+        // `Identity.fromSeed(accountIdentitySeed).signaturePublicKey()`
+        // — which is what the new identity derives too. We snapshot it
+        // here for an explicit equality assertion rather than assuming.
+        let oldAccountPubkey = try Identity
+            .fromSeed(seed: accountIdentitySeed)
+            .signaturePublicKey()
 
         let client = authClientFactory()
         let result = try await client.recover(
@@ -543,29 +649,12 @@ public final class AuthRepository: ObservableObject {
             newPassword: newPassword
         )
 
-        // G-4 (ADR-0016) — capture the OLD OPAQUE export key BEFORE
-        // the lines below overwrite the cached export key (the
-        // `ExportKeyStore.putExportKey` a few statements down). On
-        // recover the AccountIdentity Ed25519 key rotates, and the
-        // OLD key is the only thing that can sign the supersession
-        // proof bridging old→new; without it ADR-0016 rule #1
-        // (atomic emit-or-abort) forbids re-publishing the bundle at
-        // all. Two sources, in order: the in-memory session secrets
-        // (present when the user recovered from an active session),
-        // then the still-current (pre-rotation) Keychain-cached
-        // export key. Either yields the same 32 bytes; `nil` makes
-        // the emit below skip the upload entirely.
-        let oldExportKey = Self.captureOldExportKey(
-            accountIdB64: cached.accountIdB64,
-            sessionSecrets: identitySecrets
-        )
-
         let deviceRootKey = deriveDeviceRootKey(
             exportKey: result.exportKey,
-            accountIdB64: cached.accountIdB64
+            accountIdB64: accountIdB64
         )
         try DeviceKeyStore.putDeviceKey(
-            accountIdB64: cached.accountIdB64,
+            accountIdB64: accountIdB64,
             rootKey: deviceRootKey
         )
         // Phase 2a2c2 — refresh the cached export key under the
@@ -574,35 +663,46 @@ public final class AuthRepository: ObservableObject {
         // it cleanly. Best-effort.
         do {
             try ExportKeyStore.putExportKey(
-                accountIdB64: cached.accountIdB64,
+                accountIdB64: accountIdB64,
                 exportKey: result.exportKey
             )
         } catch {
             NSLog("export-key persist (recover) failed: \(error)")
         }
+        // ADR-0017: cache the AccountIdentity (phrase) seed under the
+        // freshly-rotated device. This is what makes the warm
+        // same-device path (and a later passkey resume) rebuild the
+        // SAME canonical identity without re-entering the phrase.
+        do {
+            try AccountIdentitySeedStore.putAccountIdentitySeed(
+                accountIdB64: accountIdB64,
+                seed: accountIdentitySeed
+            )
+        } catch {
+            NSLog("account-identity-seed persist (recover) failed: \(error)")
+        }
 
-        // G-4 (ADR-0016) — ATOMIC emit-or-abort (rule #1). Re-publish
-        // the identity bundle carrying the supersession proof so a
-        // peer that pinned the OLD AccountIdentity key can bridge to
-        // the rotated one without a blind TOFU. iOS did NOT call
-        // `uploadIdentityBundle` on recover before this — the bundle
-        // re-publish is added here, not augmented.
-        //
-        // Atomicity: we mint the proof from the OLD export key
-        // (captured above) and the NEW one FIRST. If we cannot mint
-        // it (old key unavailable on this device, or the sign call
-        // throws), we MUST NOT publish `{new keys, no proof}` — that
-        // is a self-inflicted downgrade (every peer would see a
-        // changed key with no proof and fail closed). So we skip the
-        // upload entirely and leave the OLD bundle live; the user can
-        // re-run recover from a device that still has the old export
-        // key, or peers fall back to OOB re-verify. The whole step is
-        // best-effort beyond the atomicity gate: a network failure on
-        // the upload does not fail the recover itself.
-        await Self.emitSupersessionBundleBestEffort(
+        // G-4 (ADR-0016) emit path — now DORMANT per ADR-0017. With a
+        // phrase-seeded AccountIdentity, a routine recover does NOT
+        // rotate the account key: the phrase is unchanged, so the new
+        // account signature pubkey EQUALS the old one. We re-derive the
+        // NEW canonical identity from the (unchanged) phrase seed,
+        // compare it to the OLD pubkey captured above, and — when equal
+        // (the only case on a routine recover) — SKIP the supersession
+        // proof mint + upload entirely (emitting a proof for a key
+        // nobody's pin changed would be spurious). The bundle is still
+        // re-published WITHOUT a proof so the directory's KeyPackage
+        // upserts current + any stale server-side proof column clears.
+        // A mismatch can NEVER happen on a phrase-seeded recover (same
+        // seed ⇒ same key); if it ever does we fail loud rather than
+        // publish a changed key with no proof (which would break every
+        // contact's pin — a self-inflicted downgrade). See ADR-0017
+        // "old == new account pubkey ⇒ skip" — the load-bearing emit
+        // invariant.
+        await Self.republishBundleSkippingSupersessionProof(
             accountId: accountIdBytes,
-            oldExportKey: oldExportKey,
-            newExportKey: result.exportKey,
+            accountIdentitySeed: accountIdentitySeed,
+            oldAccountPubkey: oldAccountPubkey,
             sessionToken: result.sessionToken
         )
         // Phase 2a3b0 (ADR-0007) — DeviceIdentity seed is
@@ -612,12 +712,20 @@ public final class AuthRepository: ObservableObject {
         // fresh bytes if the Keychain row is missing.
         do {
             _ = try DeviceIdentityStore.ensureDeviceIdentitySeed(
-                accountIdB64: cached.accountIdB64
+                accountIdB64: accountIdB64
             )
         } catch {
             NSLog("device-identity ensure (recover) failed: \(error)")
         }
-        sessionStore.save(cached) // idempotent upsert
+        // Persist the session marker — important on the fresh-device
+        // recover path where there was no cached row (resolved via the
+        // discovery lookup above).
+        sessionStore.save(
+            PersistedSession(
+                accountIdB64: accountIdB64,
+                username: resolvedUsername
+            )
+        )
 
         // Phase 2a1d / 2a3d7 — restore-then-bootstrap on recover.
         //
@@ -659,21 +767,27 @@ public final class AuthRepository: ObservableObject {
             // picks it up automatically — no wiring change
             // needed beyond this single putSnapshot call.
             IdentitySnapshotStore().putSnapshot(
-                accountIdB64: cached.accountIdB64,
+                accountIdB64: accountIdB64,
                 blob: restoredSnapshot
             )
         }
 
+        // ADR-0017: also carry the phrase seed (the canonical identity
+        // seed downstream callers rebuild from). Cleared on logout.
         identitySecrets = IdentitySecrets(
             accountId: accountIdBytes,
             exportKey: result.exportKey,
+            accountIdentitySeed: accountIdentitySeed,
             sessionToken: result.sessionToken,
             sessionExpiresAtMs: result.sessionExpiresAtMs
         )
+        // Clear any pending fresh-device fail-safe — recover just
+        // restored the identity directly.
+        pendingRecovery = nil
         state = .session(
             SessionAccount(
-                accountIdB64: cached.accountIdB64,
-                username: cached.username
+                accountIdB64: accountIdB64,
+                username: resolvedUsername
             )
         )
 
@@ -694,8 +808,8 @@ public final class AuthRepository: ObservableObject {
         // fail the recover itself.
         await Self.bootstrapBackupBestEffort(
             accountId: accountIdBytes,
-            accountIdB64: cached.accountIdB64,
-            exportKey: result.exportKey,
+            accountIdB64: accountIdB64,
+            accountIdentitySeed: accountIdentitySeed,
             sessionToken: result.sessionToken,
             phrase: trimmedPhrase,
             context: "recover",
@@ -742,6 +856,14 @@ public final class AuthRepository: ObservableObject {
             // Phase 2a2c2 — drop the cached export key too. Same
             // clean-wipe rationale.
             ExportKeyStore.deleteExportKey(accountIdB64: cached.accountIdB64)
+            // ADR-0017 — drop the cached AccountIdentity (phrase) seed.
+            // It is the highest-sensitivity on-device secret. After this
+            // wipe the only way back into the account is the recovery
+            // phrase (or a paired device). Same clean-wipe rationale as
+            // the export-key / device-key rows.
+            AccountIdentitySeedStore.deleteAccountIdentitySeed(
+                accountIdB64: cached.accountIdB64
+            )
             // Phase 2a3b0 — drop the cached DeviceIdentity
             // seed. The leaf in the user's DeviceGroup that
             // this seed signed for is orphaned; sibling
@@ -784,134 +906,264 @@ public final class AuthRepository: ObservableObject {
         }
     }
 
-    // MARK: - G-4 (ADR-0016) identity-supersession emit helpers
+    // MARK: - ADR-0017 session-completion helpers
 
-    /// G-4 (ADR-0016) emit window: the supersession proof is valid
-    /// for 14 days from issue — well under the verifier's 30-day
-    /// `MAX_VALIDITY_SECS` ceiling (ADR-0016 rule #5), which bounds
-    /// replay without widening the hard cap.
-    private static let supersessionEmitWindowSecs: Int64 = 14 * 24 * 60 * 60
-
-    /// G-4 (ADR-0016) — recover the OLD OPAQUE export key on the
-    /// rotation path, BEFORE the recover flow overwrites the cached
-    /// export key. This is the seed for the OLD AccountIdentity
-    /// Ed25519 key that signs the supersession proof.
-    ///
-    /// Sources, in order of preference:
-    ///   1. The in-memory session secrets — present when the user
-    ///      recovered from an active session and they belong to this
-    ///      same account (the export key is still the pre-rotation
-    ///      one at the moment we read it).
-    ///   2. The still-current (pre-rotation) Keychain-cached export
-    ///      key.
-    ///
-    /// Returns `nil` when neither is available (a cold device that
-    /// never cached the key, or a Keychain read failure). A `nil`
-    /// here makes the caller abort the bundle re-upload per the
-    /// atomic-emit rule — we never publish rotated keys with no proof.
-    private static func captureOldExportKey(
+    /// ADR-0017 — read the cached AccountIdentity (phrase) seed for
+    /// `accountIdB64` from the Keychain. Returns `nil` on a miss
+    /// (fresh device / never-cached) OR on a Keychain read failure
+    /// (device key rotated, ciphertext tampered) — both fold into the
+    /// `needsRecoveryPhrase` fail-safe rather than the wrong-identity
+    /// branch. A `context` label disambiguates the log line.
+    private static func readCachedAccountIdentitySeed(
         accountIdB64: String,
-        sessionSecrets: IdentitySecrets?
+        context: String
     ) -> Data? {
-        if let secrets = sessionSecrets,
-           base64Encode(secrets.accountId) == accountIdB64,
-           secrets.exportKey.count == ExportKeyStore.exportKeyLength {
-            return secrets.exportKey
-        }
         do {
-            return try ExportKeyStore.getExportKey(accountIdB64: accountIdB64)
-        } catch {
-            NSLog("supersession: old export-key read (recover) failed: \(error)")
-            return nil
-        }
-    }
-
-    /// G-4 (ADR-0016) — mint the supersession proof bridging the OLD
-    /// AccountIdentity to the NEW one, given both OPAQUE export keys.
-    ///
-    /// Derives each identity's Ed25519 seed via `Identity.fromSeed`
-    /// (the proof's embedded old key is derived internally from the
-    /// old seed, so it always matches the signer), then calls
-    /// `signSupersessionProof` over a 14-day window (rule #5).
-    ///
-    /// Returns the raw proof bytes, or `nil` when the proof cannot be
-    /// minted — either `oldExportKey` is absent (cold device) or a
-    /// derivation / sign call throws. The caller treats `nil` as
-    /// "abort the rotation upload" (rule #1).
-    private static func mintSupersessionProof(
-        oldExportKey: Data?,
-        newExportKey: Data
-    ) -> Data? {
-        guard let oldExportKey = oldExportKey else { return nil }
-        do {
-            let oldSeed = try Identity.fromSeed(seed: oldExportKey).ed25519Seed()
-            let newSeed = try Identity.fromSeed(seed: newExportKey).ed25519Seed()
-            let nowSecs = Int64(Date().timeIntervalSince1970)
-            let expiresSecs = nowSecs + supersessionEmitWindowSecs
-            return try signSupersessionProof(
-                oldEd25519Seed: oldSeed,
-                newEd25519Seed: newSeed,
-                issuedAtUnixSecs: nowSecs,
-                expiresAtUnixSecs: expiresSecs
+            return try AccountIdentitySeedStore.getAccountIdentitySeed(
+                accountIdB64: accountIdB64
             )
         } catch {
-            NSLog("supersession: proof mint (recover) failed: \(error)")
+            NSLog("account-identity-seed read failed (\(context)): \(error)")
             return nil
         }
     }
 
-    /// G-4 (ADR-0016) — the atomic emit step on recover. Mints the
-    /// proof first; only if a proof is mintable does it re-publish
-    /// `{new keys + proof}` in a single `uploadIdentityBundle` call.
+    /// ADR-0017 — branch on the presence of the cached AccountIdentity
+    /// (phrase) seed at the tail of `login` / `loginWithPasskey`.
     ///
-    /// ADR-0016 rule #1 (atomic emit-or-abort): a `nil` proof means
-    /// we SKIP the upload and leave the OLD bundle live, never
-    /// publishing rotated keys without a proof. The upload itself is
-    /// best-effort beyond that gate — a transport failure is logged
-    /// and does not fail the recover.
-    private static func emitSupersessionBundleBestEffort(
-        accountId: Data,
-        oldExportKey: Data?,
-        newExportKey: Data,
-        sessionToken: String
-    ) async {
-        guard let proof = mintSupersessionProof(
-            oldExportKey: oldExportKey,
-            newExportKey: newExportKey
-        ) else {
-            // No mintable proof (old export key unavailable on this
-            // device). Per rule #1 we do NOT publish the rotated keys
-            // without a proof — skip the bundle upload entirely and
-            // leave the old bundle serving. Peers fall back to OOB
-            // re-verify; a re-run from a device that still holds the
-            // old export key can complete the emit later.
-            NSLog(
-                "supersession: no mintable proof on recover (old export " +
-                "key unavailable) — SKIPPING identity bundle re-upload to " +
-                "avoid publishing rotated keys without a proof " +
-                "(ADR-0016 rule #1, atomic emit). Old bundle stays live."
+    ///   * seed present → ``finishCanonicalSession`` (set the
+    ///     in-memory secrets carrying the seed + flip to `.session`).
+    ///   * seed absent → stash a ``PendingRecovery`` and flip to
+    ///     `.needsRecoveryPhrase`. We MUST NOT (a) derive the identity
+    ///     from the export key (the wrong identity now) nor (b)
+    ///     silently mint a fresh one (breaks every contact's pin) —
+    ///     the user supplies the phrase via
+    ///     ``provideRecoveryPhrase(mnemonicPhrase:)``.
+    private func finishOrPromptForRecovery(
+        accountIdentitySeed: Data?,
+        accountIdBytes: Data,
+        accountIdB64: String,
+        exportKey: Data,
+        sessionToken: String,
+        sessionExpiresAtMs: Int64,
+        username: String
+    ) {
+        guard let accountIdentitySeed else {
+            // Fresh-device fail-safe (ADR-0017). Auth succeeded; the
+            // identity restore is pending the phrase. Stash the context
+            // and flip — `provideRecoveryPhrase` finishes from here.
+            pendingRecovery = PendingRecovery(
+                accountIdBytes: accountIdBytes,
+                accountIdB64: accountIdB64,
+                exportKey: exportKey,
+                sessionToken: sessionToken,
+                sessionExpiresAtMs: sessionExpiresAtMs,
+                username: username
+            )
+            state = .needsRecoveryPhrase(
+                SessionAccount(accountIdB64: accountIdB64, username: username)
             )
             return
         }
+        finishCanonicalSession(
+            accountIdentitySeed: accountIdentitySeed,
+            accountIdBytes: accountIdBytes,
+            exportKey: exportKey,
+            sessionToken: sessionToken,
+            sessionExpiresAtMs: sessionExpiresAtMs,
+            username: username
+        )
+    }
 
+    /// ADR-0017 — finish a warm session once the canonical
+    /// AccountIdentity (phrase) seed is in hand: set the in-memory
+    /// secrets (carrying the seed downstream callers rebuild the
+    /// canonical identity from) and flip to `.session`. Shared by the
+    /// warm same-device login / passkey paths and the fresh-device
+    /// `provideRecoveryPhrase` completion.
+    private func finishCanonicalSession(
+        accountIdentitySeed: Data,
+        accountIdBytes: Data,
+        exportKey: Data,
+        sessionToken: String,
+        sessionExpiresAtMs: Int64,
+        username: String
+    ) {
+        let accountIdB64 = base64Encode(accountIdBytes)
+        identitySecrets = IdentitySecrets(
+            accountId: accountIdBytes,
+            exportKey: exportKey,
+            accountIdentitySeed: accountIdentitySeed,
+            sessionToken: sessionToken,
+            sessionExpiresAtMs: sessionExpiresAtMs
+        )
+        pendingRecovery = nil
+        state = .session(
+            SessionAccount(accountIdB64: accountIdB64, username: username)
+        )
+    }
+
+    /// ADR-0017 fresh-device fail-safe completion. Called only while
+    /// the state is `.needsRecoveryPhrase`: the user typed their
+    /// recovery phrase, we derive the BIP39 seed, HARD-BLOCK verify it
+    /// against the account's published bundle, cache it under the
+    /// device, and flip to a full `.session`.
+    ///
+    /// FAIL CLOSED (ADR-0017 + lakko-security finding #1): the supplied
+    /// phrase MUST reproduce the account's PUBLISHED AccountIdentity
+    /// key. This path only runs on a fresh-device login of an ALREADY-
+    /// ESTABLISHED account, so the bundle must exist — a missing bundle
+    /// (404) or an unreachable directory is an anomaly, NOT a
+    /// first-publish. We therefore HARD-BLOCK on any failure-to-verify
+    /// (mismatch, 404, or network) rather than trust-on-first-use a
+    /// possibly-wrong phrase: a server-forced 404 must not let a
+    /// socially-engineered wrong phrase overwrite the published
+    /// identity. Throws ``PhraseMismatch`` on a mismatch,
+    /// ``IdentityVerificationUnavailable`` on a 404 / fetch failure.
+    public func provideRecoveryPhrase(mnemonicPhrase: String) async throws {
+        guard let pending = pendingRecovery else {
+            throw AuthClientError.argument(
+                "no pending identity recovery — sign in first"
+            )
+        }
+        // Parse the phrase → derive the BIP39 seed → derive the
+        // canonical AccountIdentity pubkey from it.
+        let mnemonic = try RecoveryMnemonic.fromPhrase(phrase: mnemonicPhrase)
+        var accountIdentitySeed = mnemonic.toSeed()
+        let derivedPubkey = try Identity
+            .fromSeed(seed: accountIdentitySeed)
+            .signaturePublicKey()
+
+        // HARD-BLOCK verify against the published bundle.
+        let bundle: IdentityFetchResponse?
+        do {
+            let discovery = DiscoveryClient(sessionToken: pending.sessionToken)
+            bundle = try await discovery.identityFetch(
+                accountId: pending.accountIdBytes
+            )
+        } catch {
+            // Could not reach the directory to verify (network/parse).
+            // We cannot confirm the phrase reproduces the published key,
+            // so we refuse rather than cache a possibly-wrong phrase.
+            Self.zeroize(&accountIdentitySeed)
+            NSLog("recovery-phrase verification fetch failed: \(error)")
+            throw IdentityVerificationUnavailable(
+                "Could not reach the directory to verify your recovery " +
+                "phrase. Check your connection and try again."
+            )
+        }
+        guard let bundle else {
+            // 404 — no published identity to verify against. On an
+            // established account this is an anomaly; HARD-BLOCK.
+            Self.zeroize(&accountIdentitySeed)
+            throw IdentityVerificationUnavailable(
+                "No published identity was found to verify your recovery " +
+                "phrase. Try again, or restore from a device that still " +
+                "has your account."
+            )
+        }
+        guard let published = base64Decode(bundle.signaturePubkey),
+              published == derivedPubkey else {
+            Self.zeroize(&accountIdentitySeed)
+            throw PhraseMismatch()
+        }
+
+        // Cache the phrase seed under the device so future warm logins
+        // skip the prompt. Best-effort.
+        do {
+            try AccountIdentitySeedStore.putAccountIdentitySeed(
+                accountIdB64: pending.accountIdB64,
+                seed: accountIdentitySeed
+            )
+        } catch {
+            NSLog(
+                "account-identity-seed persist (provideRecoveryPhrase) " +
+                "failed: \(error)"
+            )
+        }
+
+        finishCanonicalSession(
+            accountIdentitySeed: accountIdentitySeed,
+            accountIdBytes: pending.accountIdBytes,
+            exportKey: pending.exportKey,
+            sessionToken: pending.sessionToken,
+            sessionExpiresAtMs: pending.sessionExpiresAtMs,
+            username: pending.username
+        )
+    }
+
+    /// Best-effort wipe of a seed buffer we own — zero it now so the
+    /// next GC / copy cannot hand it to a leaked closure.
+    private static func zeroize(_ data: inout Data) {
+        data.resetBytes(in: 0..<data.count)
+    }
+
+    // MARK: - G-4 (ADR-0016 / ADR-0017) identity-supersession emit
+
+    /// ADR-0017 — re-publish the identity bundle on recover, SKIPPING
+    /// the G-4 supersession proof (now DORMANT).
+    ///
+    /// With a phrase-seeded AccountIdentity, a routine recover does NOT
+    /// rotate the account key: the phrase is unchanged, so the NEW
+    /// account signature pubkey EQUALS `oldAccountPubkey` (captured
+    /// before the recover). We re-derive the new canonical identity
+    /// from the (unchanged) phrase seed and assert the equality:
+    ///
+    ///   * equal (the only case on a routine recover) → re-publish the
+    ///     bundle WITHOUT a proof. The public keys are identical but the
+    ///     fresh KeyPackage's init key is new, so the upsert keeps the
+    ///     directory current + a proof-less upload clears any stale
+    ///     server-side proof column.
+    ///   * NOT equal → this can NEVER happen on a phrase-seeded recover
+    ///     (same seed ⇒ same key). If it ever does, the phrase that
+    ///     authenticated the OPAQUE recover differs from the one seeding
+    ///     the identity — a logic bug. We FAIL LOUD (skip the upload +
+    ///     log loudly) rather than silently publish a changed key with
+    ///     no proof, which would break every contact's pin
+    ///     (self-inflicted downgrade). A genuine identity rotation is a
+    ///     separate explicit action (ADR-0017 "rotate my identity"),
+    ///     out of scope for Part 1.
+    ///
+    /// The upload itself is best-effort beyond the equality gate: a
+    /// network failure does not fail the recover.
+    private static func republishBundleSkippingSupersessionProof(
+        accountId: Data,
+        accountIdentitySeed: Data,
+        oldAccountPubkey: Data,
+        sessionToken: String
+    ) async {
         let identity: Identity
         do {
-            identity = try Identity.fromSeed(seed: newExportKey)
+            identity = try Identity.fromSeed(seed: accountIdentitySeed)
         } catch {
-            NSLog("supersession: new identity derive (recover) failed: \(error)")
+            NSLog("supersession (ADR-0017): new identity derive (recover) failed: \(error)")
+            return
+        }
+        let newAccountPubkey = identity.signaturePublicKey()
+        guard newAccountPubkey == oldAccountPubkey else {
+            // ADR-0017 emit invariant violated. Do NOT publish a changed
+            // key with no proof — fail loud and leave the old bundle
+            // live.
+            NSLog(
+                "supersession (ADR-0017): recover produced a DIFFERENT " +
+                "AccountIdentity pubkey than expected (invariant: same " +
+                "phrase => same identity). SKIPPING bundle re-publish to " +
+                "avoid publishing a changed key with no proof."
+            )
             return
         }
 
         let discovery = DiscoveryClient(sessionToken: sessionToken)
         do {
+            // Proof-less re-publish (account key unchanged). Refreshes
+            // the KeyPackage + clears any stale server proof column.
             try await discovery.uploadIdentityBundle(
                 accountId: accountId,
                 signaturePubkey: identity.signaturePublicKey(),
-                x25519Pubkey: identity.x25519PublicKey(),
-                supersessionProofB64: base64Encode(proof)
+                x25519Pubkey: identity.x25519PublicKey()
             )
         } catch {
-            NSLog("supersession: identity bundle re-upload (recover) failed: \(error)")
+            NSLog("supersession (ADR-0017): proof-less bundle re-publish (recover) failed: \(error)")
         }
     }
 
@@ -976,15 +1228,19 @@ public final class AuthRepository: ObservableObject {
     /// failure so a transient transport hiccup does not block
     /// the user from landing in a working session.
     ///
-    /// `ed25519Seed` is derived from `exportKey` via the same
-    /// `Identity.fromSeed` flow `ChatRepository` already uses
-    /// — re-derive here rather than threading the seed through
-    /// the auth-repository public surface so this helper stays
+    /// ADR-0017: `ed25519Seed` is derived from the canonical
+    /// AccountIdentity (phrase) seed — NOT the OPAQUE export key.
+    /// The backup envelope STORES this account-identity Ed25519 seed
+    /// so a fresh device can restore the SAME identity from the
+    /// phrase; it must therefore be the phrase-seeded identity's seed
+    /// (matching the web `bootstrap` which signs with
+    /// `canonical.ed25519Seed`). Re-derive here rather than threading
+    /// a handle through the public surface so this helper stays
     /// self-contained.
     private static func bootstrapBackupBestEffort(
         accountId: Data,
         accountIdB64: String,
-        exportKey: Data,
+        accountIdentitySeed: Data,
         sessionToken: String,
         phrase: String,
         context: String,
@@ -1009,12 +1265,12 @@ public final class AuthRepository: ObservableObject {
             // re-tries the cache write.
         }
 
-        // Derive the ed25519 signing seed deterministically from
-        // the OPAQUE export key — same `Identity.fromSeed` path
-        // every other identity-bearing operation uses.
+        // ADR-0017: derive the ed25519 seed from the canonical
+        // AccountIdentity (phrase) seed — the same `Identity.fromSeed`
+        // path every other canonical-identity operation now uses.
         let identity: Identity
         do {
-            identity = try Identity.fromSeed(seed: exportKey)
+            identity = try Identity.fromSeed(seed: accountIdentitySeed)
         } catch {
             NSLog("backup identity-derive (\(context)) failed: \(error)")
             return
@@ -1048,6 +1304,16 @@ public enum AuthState: Equatable {
     case anon(cachedUsername: String?)
     /// Active session.
     case session(SessionAccount)
+    /// ADR-0017 fresh-device fail-safe. The user authenticated
+    /// successfully (password or passkey ACCESS) but this device has
+    /// NO cached AccountIdentity (phrase) seed, so we cannot rebuild
+    /// the canonical identity. We MUST NOT derive it from the export
+    /// key (the wrong identity now) nor silently mint a fresh one
+    /// (which would break every contact's pin). The UI renders a
+    /// recovery-phrase prompt
+    /// (``RestoreIdentityPromptScreen``); ``provideRecoveryPhrase(mnemonicPhrase:)``
+    /// completes the session once the user supplies their phrase.
+    case needsRecoveryPhrase(SessionAccount)
 }
 
 /// Account record exposed to the UI when a session is active.
@@ -1092,8 +1358,21 @@ public struct IdentitySecrets: Equatable {
     /// Raw 16-byte UUIDv7.
     public let accountId: Data
     /// OPAQUE password export key (64 bytes for `LakkoCipherSuite`).
-    /// Use as the seed for `Identity.fromSeed(seed:)`.
+    ///
+    /// ADR-0017: NO LONGER the seed for the canonical
+    /// AccountIdentity — it is retained only as an auth factor and
+    /// as the device-root-key seed
+    /// (``deriveDeviceRootKey(exportKey:accountIdB64:)``). Build the
+    /// canonical identity from ``accountIdentitySeed`` instead.
     public let exportKey: Data
+    /// ADR-0017: the BIP39 recovery-phrase seed
+    /// (`RecoveryMnemonic.toSeed()`, 64 bytes). This is the seed for
+    /// the canonical AccountIdentity (`Identity.fromSeed(seed:)`) —
+    /// stable across password changes and recovery, so the pubkey
+    /// contacts pin never churns on a routine recover. Every
+    /// `Identity.fromSeed` site that builds the canonical identity
+    /// reads THIS, not ``exportKey``.
+    public let accountIdentitySeed: Data
     /// Phase 1.5b: bearer token issued by the auth service on the
     /// most recent signup/login/recover. Threaded into
     /// ``DiscoveryClient/setSessionToken(_:)`` by
@@ -1106,11 +1385,13 @@ public struct IdentitySecrets: Equatable {
     public init(
         accountId: Data,
         exportKey: Data,
+        accountIdentitySeed: Data,
         sessionToken: String,
         sessionExpiresAtMs: Int64
     ) {
         self.accountId = accountId
         self.exportKey = exportKey
+        self.accountIdentitySeed = accountIdentitySeed
         self.sessionToken = sessionToken
         self.sessionExpiresAtMs = sessionExpiresAtMs
     }
@@ -1129,4 +1410,53 @@ public struct SignupOutcome: Equatable {
     public init(recoveryPhrase: String) {
         self.recoveryPhrase = recoveryPhrase
     }
+}
+
+// MARK: - ADR-0017 fresh-device fail-safe types
+
+/// ADR-0017 fresh-device fail-safe: everything needed to finish a
+/// session once the user supplies their recovery phrase. The auth
+/// factor (password / passkey) already succeeded; only the
+/// AccountIdentity (phrase) seed is missing on this device.
+struct PendingRecovery {
+    let accountIdBytes: Data
+    let accountIdB64: String
+    /// OPAQUE export key from the just-completed auth — retained for
+    /// the in-memory `exportKey` (device key already derived from it).
+    let exportKey: Data
+    let sessionToken: String
+    let sessionExpiresAtMs: Int64
+    let username: String
+}
+
+/// ADR-0017 — thrown by
+/// ``AuthRepository/provideRecoveryPhrase(mnemonicPhrase:)`` when the
+/// typed recovery phrase derives an AccountIdentity pubkey that does
+/// NOT match the account's published bundle. Surfaced to the UI as
+/// "that phrase doesn't match this account" — we refuse rather than
+/// cache a forked identity that would break every contact's pin.
+public struct PhraseMismatch: Error, LocalizedError {
+    public init() {}
+    public var errorDescription: String? {
+        "That recovery phrase doesn't match this account's identity. " +
+        "Check the phrase, or pair an existing device instead."
+    }
+}
+
+/// ADR-0017 (lakko-security finding #1) — thrown by
+/// ``AuthRepository/provideRecoveryPhrase(mnemonicPhrase:)`` when the
+/// account's published bundle could NOT be fetched (404 / network) so
+/// the supplied phrase cannot be verified against it. We HARD-BLOCK
+/// rather than trust-on-first-use a possibly-wrong phrase: this path
+/// only runs for an already-established account, so a missing bundle
+/// is an anomaly (a withholding or unreachable directory), and a
+/// server-forced 404 must not be able to push a socially-engineered
+/// wrong phrase into the published identity. Surfaced as a retryable
+/// error, not a dead end.
+public struct IdentityVerificationUnavailable: Error, LocalizedError {
+    private let message: String
+    public init(_ message: String) {
+        self.message = message
+    }
+    public var errorDescription: String? { message }
 }

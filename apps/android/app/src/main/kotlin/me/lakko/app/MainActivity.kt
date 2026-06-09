@@ -274,6 +274,15 @@ private fun AppRoot(
             repository = authRepository,
             cachedUsername = current.cachedUsername,
         )
+        // ADR-0017 fresh-device fail-safe: auth succeeded but no
+        // cached AccountIdentity (phrase) seed on this device — prompt
+        // for the recovery phrase (HARD-BLOCK verified) before opening
+        // a full session. NEVER derive the identity from the export key
+        // or mint fresh here.
+        is AuthState.NeedsRecoveryPhrase -> RestoreIdentityRoot(
+            repository = authRepository,
+            account = current.account,
+        )
         is AuthState.Session -> SessionRoot(
             authRepository = authRepository,
             contactsRepository = contactsRepository,
@@ -284,6 +293,30 @@ private fun AppRoot(
             account = current.account,
         )
     }
+}
+
+/**
+ * ADR-0017 fresh-device fail-safe subgraph — renders the
+ * [RestoreIdentityPrompt] that completes the session once the user
+ * supplies their recovery phrase. "Sign out" routes back to the Anon
+ * flow via [AuthRepository.logout] (which clears the parked
+ * fail-safe context).
+ */
+@Composable
+private fun RestoreIdentityRoot(
+    repository: AuthRepository,
+    account: SessionAccount,
+) {
+    val vm: me.lakko.app.ui.auth.RestoreIdentityPromptViewModel = viewModel(
+        factory = singletonViewModelFactory {
+            me.lakko.app.ui.auth.RestoreIdentityPromptViewModel(repo = repository)
+        },
+    )
+    me.lakko.app.ui.auth.RestoreIdentityPrompt(
+        viewModel = vm,
+        username = account.username,
+        onSignOut = { repository.logout() },
+    )
 }
 
 /**

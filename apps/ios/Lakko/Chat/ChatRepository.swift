@@ -121,10 +121,13 @@ public final class ChatRepository: ObservableObject {
         }
         let identity: Identity
         do {
-            identity = try Identity.fromSeed(seed: secrets.exportKey)
+            // ADR-0017: the canonical AccountIdentity is seeded from the
+            // phrase-derived seed, NOT the OPAQUE export key — so a
+            // routine recover / password change preserves the identity.
+            identity = try Identity.fromSeed(seed: secrets.accountIdentitySeed)
         } catch {
             // Identity construction is deterministic + can't fail
-            // unless the export key bytes are malformed (UniFFI
+            // unless the seed bytes are malformed (UniFFI
             // throws on wrong length). Surface as a no-op: the
             // state stays empty + the next login retries.
             return

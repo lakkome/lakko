@@ -52,18 +52,17 @@ public struct RecoverScreen: View {
                     .font(.largeTitle)
                     .fontWeight(.semibold)
 
-                if let cachedUsername = viewModel.cachedUsername {
-                    RecoverForm(
-                        viewModel: viewModel,
-                        cachedUsername: cachedUsername,
-                        onNavigateToLogin: onNavigateToLogin
-                    )
-                } else {
-                    NoCachedAccountPanel(
-                        onNavigateToSignup: onNavigateToSignup,
-                        onNavigateToLogin: onNavigateToLogin
-                    )
-                }
+                // ADR-0017: recover now works on a FRESH device — when
+                // no account is cached we resolve the account_id via
+                // `DiscoveryClient.lookup(username)`, so the form
+                // renders a username field instead of the old
+                // "no cached account" dead-end stub.
+                RecoverForm(
+                    viewModel: viewModel,
+                    cachedUsername: viewModel.cachedUsername,
+                    onNavigateToLogin: onNavigateToLogin,
+                    onNavigateToSignup: onNavigateToSignup
+                )
             }
             .padding(24)
         }
@@ -76,8 +75,12 @@ public struct RecoverScreen: View {
 
 private struct RecoverForm: View {
     @ObservedObject var viewModel: RecoverViewModel
-    let cachedUsername: String
+    /// `nil` on a fresh device — the form then renders a username
+    /// field so the recover flow can resolve the account via
+    /// discovery (ADR-0017).
+    let cachedUsername: String?
     let onNavigateToLogin: () -> Void
+    let onNavigateToSignup: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -89,8 +92,20 @@ private struct RecoverForm: View {
             .font(.body)
             .foregroundStyle(.secondary)
 
-            Text("Account on this device: @\(cachedUsername)")
-                .font(.body)
+            if let cachedUsername {
+                Text("Account on this device: @\(cachedUsername)")
+                    .font(.body)
+            } else {
+                // ADR-0017 fresh-device recover — no cached account, so
+                // ask for the username to look it up via discovery.
+                Text("Username")
+                    .font(.headline)
+                TextField("alice", text: $viewModel.username)
+                    .textFieldStyle(.roundedBorder)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled(true)
+                    .disabled(viewModel.busy)
+            }
 
             // 1.21c2 — mode toggle: phrase | shares. Picker
             // renders as a segmented control which matches the
@@ -151,6 +166,18 @@ private struct RecoverForm: View {
                     .foregroundStyle(.secondary)
                 Button(action: onNavigateToLogin) {
                     Text("Log in")
+                        .font(.footnote)
+                }
+                Spacer()
+            }
+
+            HStack(spacing: 4) {
+                Spacer()
+                Text("No account yet?")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                Button(action: onNavigateToSignup) {
+                    Text("Create one")
                         .font(.footnote)
                 }
                 Spacer()
@@ -238,40 +265,7 @@ private struct RecoverForm: View {
     }
 }
 
-// =============================================================================
-// No cached account stub
-// =============================================================================
-
-private struct NoCachedAccountPanel: View {
-    let onNavigateToSignup: () -> Void
-    let onNavigateToLogin: () -> Void
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text(
-                "This device has no cached account, so there's no account id " +
-                "for the recovery flow to target. Cross-device recovery " +
-                "(using just the mnemonic from a fresh install) arrives in " +
-                "Phase 1.14e together with the username discovery service."
-            )
-            .font(.body)
-            .foregroundStyle(.secondary)
-
-            HStack(spacing: 12) {
-                Button(action: onNavigateToSignup) {
-                    Text("Create account")
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large)
-
-                Button(action: onNavigateToLogin) {
-                    Text("Log in")
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.large)
-            }
-        }
-    }
-}
+// ADR-0017: the old `NoCachedAccountPanel` dead-end stub was removed.
+// Recover now works on a fresh device — `RecoverForm` renders a
+// username field and the flow resolves the account_id via
+// `DiscoveryClient.lookup(username)`.

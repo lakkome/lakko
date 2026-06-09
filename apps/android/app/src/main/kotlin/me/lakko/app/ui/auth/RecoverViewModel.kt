@@ -47,6 +47,15 @@ public class RecoverViewModel(
         mutableState.update { it.copy(phrase = value) }
     }
 
+    /** ADR-0017 — username for the FRESH-device recover path. When
+     *  no account is cached on this device, the user types their
+     *  username so [AuthRepository.recover] can resolve the
+     *  account_id via the discovery service. Ignored (the cached id
+     *  wins) when an account is already on this device. */
+    public fun onUsernameChange(value: String) {
+        mutableState.update { it.copy(username = value) }
+    }
+
     /** 1.21c3 — Shamir-shares textarea content. */
     public fun onSharesInputChange(value: String) {
         mutableState.update { it.copy(sharesInput = value) }
@@ -142,7 +151,15 @@ public class RecoverViewModel(
         viewModelScope.launch {
             val passwordBytes = snapshot.password.toByteArray(Charsets.UTF_8)
             try {
-                repo.recover(resolvedPhrase, passwordBytes)
+                // ADR-0017: pass the typed username so a FRESH-device
+                // recover can resolve the account_id via discovery.
+                // `null` when blank — the cached id wins on a device
+                // that already has an account.
+                repo.recover(
+                    resolvedPhrase,
+                    passwordBytes,
+                    username = snapshot.username.trim().ifEmpty { null },
+                )
                 // `repo.recover` already flipped AuthState to
                 // Session. The screen will be replaced by the
                 // home destination on the next recomposition;
@@ -154,6 +171,7 @@ public class RecoverViewModel(
                         error = null,
                         phrase = "",
                         sharesInput = "",
+                        username = "",
                         password = "",
                         confirm = "",
                     )
@@ -224,6 +242,9 @@ public data class RecoverUiState(
     val phrase: String = "",
     /** Shamir-shares textarea content (one share per line). */
     val sharesInput: String = "",
+    /** ADR-0017 — username for the fresh-device recover path; only
+     *  rendered + consumed when no account is cached on this device. */
+    val username: String = "",
     val password: String = "",
     val confirm: String = "",
     val busy: Boolean = false,

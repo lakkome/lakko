@@ -101,18 +101,20 @@ private sealed class Route {
 @Composable
 public fun ChannelsRootScreen(
     /**
-     * 32-byte OPAQUE export key for the active session.
-     * [NewChannelScreen] rebuilds a transient `Identity`
-     * from it (`Identity.fromSeed(exportKey)`) to drive
-     * the MLS PublisherGroup that produces the channel
-     * content-key seed (G-27).
+     * 64-byte AccountIdentity (BIP39 phrase) seed for the active
+     * session (ADR-0017). [NewChannelScreen] rebuilds a transient
+     * `Identity` from it (`Identity.fromSeed(accountIdentitySeed)`)
+     * to drive the MLS PublisherGroup that produces the channel
+     * content-key seed (G-27). Per ADR-0017 the canonical
+     * AccountIdentity is seeded from the stable phrase seed, NOT the
+     * password-derived OPAQUE export key, so it survives a recover /
+     * password change.
      *
-     * The host (`MainActivity` / a future Channels tab)
-     * supplies this from `AuthRepository`'s in-memory
-     * `IdentitySecrets` — same shape `ChatRepository`
-     * already uses.
+     * The host (`MainActivity` / a future Channels tab) supplies this
+     * from `AuthRepository`'s in-memory `IdentitySecrets` — same shape
+     * `ChatRepository` already uses.
      */
-    exportKey: ByteArray,
+    accountIdentitySeed: ByteArray,
     state: ChannelsUiState = remember { ChannelsUiState() },
     client: ChannelsClient = remember { ChannelsClient() },
 ) {
@@ -126,7 +128,7 @@ public fun ChannelsRootScreen(
         Route.New -> NewChannelScreen(
             state = state,
             client = client,
-            exportKey = exportKey,
+            accountIdentitySeed = accountIdentitySeed,
             onClose = { route = Route.List },
             onCreated = { id -> route = Route.Detail(id) },
         )
@@ -254,14 +256,15 @@ private fun ChannelRow(channel: ChannelHandle, onClick: () -> Unit) {
 // NewChannelScreen
 // ============================================================================
 
-/** G-27: needs `exportKey` so [NewChannelScreen.create]
- *  can rebuild the PublisherGroup founding-member identity. */
+/** G-27 / ADR-0017: needs the AccountIdentity (phrase) seed so
+ *  [NewChannelScreen.create] can rebuild the PublisherGroup
+ *  founding-member identity. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun NewChannelScreen(
     state: ChannelsUiState,
     client: ChannelsClient,
-    exportKey: ByteArray,
+    accountIdentitySeed: ByteArray,
     onClose: () -> Unit,
     onCreated: (String) -> Unit,
 ) {
@@ -330,15 +333,15 @@ private fun NewChannelScreen(
                     scope.launch {
                         try {
                             client.createChannel(id)
-                            // G-27: build a transient
-                            // `Identity` from the OPAQUE
-                            // export key, hand it to the
-                            // composer so the channel
-                            // content-key seed comes from
-                            // a real MLS PublisherGroup
-                            // exporter (instead of
+                            // G-27 / ADR-0017: build a transient
+                            // `Identity` from the canonical
+                            // AccountIdentity (phrase) seed, hand it
+                            // to the composer so the channel
+                            // content-key seed comes from a real MLS
+                            // PublisherGroup exporter (instead of
                             // `newChannelSeedForTest`).
-                            val identity = uniffi.lakko_ffi_uniffi.Identity.fromSeed(exportKey)
+                            val identity =
+                                uniffi.lakko_ffi_uniffi.Identity.fromSeed(accountIdentitySeed)
                             val keys = try {
                                 ChannelsComposer.freshPublisherKeys(
                                     identity = identity,

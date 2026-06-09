@@ -85,24 +85,23 @@ public fun RecoverScreen(
         )
         Spacer(Modifier.height(8.dp))
 
-        if (cachedUsername == null) {
-            NoCachedAccountPanel(
-                onNavigateToSignup = onNavigateToSignup,
-                onNavigateToLogin = onNavigateToLogin,
-            )
-        } else {
-            RecoverForm(
-                state = state,
-                cachedUsername = cachedUsername,
-                onPhraseChange = viewModel::onPhraseChange,
-                onSharesInputChange = viewModel::onSharesInputChange,
-                onModeChange = viewModel::onModeChange,
-                onPasswordChange = viewModel::onPasswordChange,
-                onConfirmChange = viewModel::onConfirmChange,
-                onSubmit = viewModel::onSubmit,
-                onNavigateToLogin = onNavigateToLogin,
-            )
-        }
+        // ADR-0017 — recover now works on a FRESH device too: when no
+        // account is cached, render the same form but with a username
+        // field so [AuthRepository.recover] can resolve the account_id
+        // via the discovery service.
+        RecoverForm(
+            state = state,
+            cachedUsername = cachedUsername,
+            onUsernameChange = viewModel::onUsernameChange,
+            onPhraseChange = viewModel::onPhraseChange,
+            onSharesInputChange = viewModel::onSharesInputChange,
+            onModeChange = viewModel::onModeChange,
+            onPasswordChange = viewModel::onPasswordChange,
+            onConfirmChange = viewModel::onConfirmChange,
+            onSubmit = viewModel::onSubmit,
+            onNavigateToLogin = onNavigateToLogin,
+            onNavigateToSignup = onNavigateToSignup,
+        )
     }
 }
 
@@ -114,7 +113,8 @@ public fun RecoverScreen(
 @Composable
 private fun RecoverForm(
     state: RecoverUiState,
-    cachedUsername: String,
+    cachedUsername: String?,
+    onUsernameChange: (String) -> Unit,
     onPhraseChange: (String) -> Unit,
     onSharesInputChange: (String) -> Unit,
     onModeChange: (RecoverMode) -> Unit,
@@ -122,6 +122,7 @@ private fun RecoverForm(
     onConfirmChange: (String) -> Unit,
     onSubmit: () -> Unit,
     onNavigateToLogin: () -> Unit,
+    onNavigateToSignup: () -> Unit,
 ) {
     Text(
         text = "Recover your account using either the 24-word phrase or 3+ " +
@@ -131,11 +132,33 @@ private fun RecoverForm(
         color = MaterialTheme.colorScheme.onSurfaceVariant,
     )
     Spacer(Modifier.height(4.dp))
-    Text(
-        text = "Account on this device: @$cachedUsername",
-        style = MaterialTheme.typography.bodyMedium,
-    )
-    Spacer(Modifier.height(16.dp))
+    if (cachedUsername != null) {
+        Text(
+            text = "Account on this device: @$cachedUsername",
+            style = MaterialTheme.typography.bodyMedium,
+        )
+        Spacer(Modifier.height(16.dp))
+    } else {
+        // ADR-0017 — fresh-device recover: no account is cached, so
+        // the user types their username to target the recover.
+        Spacer(Modifier.height(12.dp))
+        OutlinedTextField(
+            value = state.username,
+            onValueChange = onUsernameChange,
+            label = { Text("Username") },
+            placeholder = { Text("alice") },
+            singleLine = true,
+            enabled = !state.busy,
+            keyboardOptions = KeyboardOptions(
+                capitalization = KeyboardCapitalization.None,
+                autoCorrect = false,
+                keyboardType = KeyboardType.Ascii,
+                imeAction = ImeAction.Next,
+            ),
+            modifier = Modifier.fillMaxWidth(),
+        )
+        Spacer(Modifier.height(16.dp))
+    }
 
     // 1.21c3 — mode toggle (Phrase / Shares). SegmentedButtonRow
     // is the Material3-native pattern for a two-mode form switch.
@@ -292,42 +315,28 @@ private fun RecoverForm(
                 .clickable(onClick = onNavigateToLogin),
         )
     }
-}
 
-// =============================================================================
-// No cached account stub
-// =============================================================================
-
-@Composable
-private fun NoCachedAccountPanel(
-    onNavigateToSignup: () -> Unit,
-    onNavigateToLogin: () -> Unit,
-) {
-    Text(
-        text = "This device has no cached account, so there's no account id " +
-            "for the recovery flow to target. Cross-device recovery " +
-            "(using just the mnemonic from a fresh install) arrives in " +
-            "Phase 1.15e together with the username discovery service.",
-        style = MaterialTheme.typography.bodyMedium,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-    )
-    Spacer(Modifier.height(24.dp))
-
-    Row(
-        horizontalArrangement = Arrangement.spacedBy(12.dp),
-        modifier = Modifier.fillMaxWidth(),
-    ) {
-        Button(
-            onClick = onNavigateToSignup,
-            modifier = Modifier.weight(1f),
+    if (cachedUsername == null) {
+        Spacer(Modifier.height(8.dp))
+        Row(
+            horizontalArrangement = Arrangement.Center,
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.fillMaxWidth(),
         ) {
-            Text("Create account")
-        }
-        Button(
-            onClick = onNavigateToLogin,
-            modifier = Modifier.weight(1f),
-        ) {
-            Text("Log in")
+            Text(
+                text = "New here? ",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Text(
+                text = "Create account",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier
+                    .padding(start = 4.dp)
+                    .clickable(onClick = onNavigateToSignup),
+            )
         }
     }
 }
+
