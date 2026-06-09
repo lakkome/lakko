@@ -22,13 +22,16 @@
  *      challenge → browser shows the platform sheet → server
  *      finishes the binding. On success the list refreshes.
  *
- * The "Sign in with passkey" path is NOT wired here — that's
- * 2a2c2's job. Passkey-login on the client needs an exportKey
- * recovery story (cached under the device key) because the
- * existing AuthContext flows derive Identity / device key /
- * MLS-bootstrap from the OPAQUE export key, and WebAuthn
- * signatures don't produce one. For now the section is purely
- * about managing the server-side credential set.
+ * The "Sign in with passkey" path is wired ELSEWHERE — see
+ * `AuthContext.loginWithPasskey` (the action) and `Login.tsx`
+ * (the "Sign in with passkey" button on the login screen),
+ * both landed in 2a2c2. That flow re-authenticates to the
+ * server with the passkey, then reconstructs the session from
+ * the exportKey cached under the device key (populated by a
+ * prior OPAQUE login on this device); a fresh device with no
+ * cached exportKey fails closed, since a WebAuthn signature
+ * does not produce one. THIS section is purely about managing
+ * the server-side credential set (list / add / delete).
  */
 import {
   createEffect,
