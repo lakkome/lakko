@@ -157,7 +157,7 @@ class PeerPinStoreTest {
      *  [me.lakko.app.chat.ChatClientTest]. `verifyBundleAccountKey`
      *  never touches the network, so the engine is never actually
      *  hit; it exists only to avoid constructing real engines. */
-    private fun clientWith(store: PinStore?): ContactsClient {
+    private fun clientWith(store: PinStore): ContactsClient {
         val engine = MockEngine { respond(content = "", status = HttpStatusCode.OK) }
         val engine2 = MockEngine { respond(content = "", status = HttpStatusCode.OK) }
         return ContactsClient(
@@ -203,12 +203,8 @@ class PeerPinStoreTest {
         assertEquals(keyA, store.readPin(base64Encode(accountId))?.pinnedSignaturePubkeyB64)
     }
 
-    @Test
-    fun `null pin store disables the gate (direct-caller escape hatch)`() {
-        // No store wired → the gate is skipped entirely. Must not
-        // throw even on a "changed key, no proof" bundle.
-        clientWith(null).use { client ->
-            client.verifyBundleAccountKey(accountId, bundle(keyB, proofB64 = null))
-        }
-    }
+    // Note: the former "null pin store disables the gate" escape hatch was
+    // removed by the post-`lakko-security` hardening (ADR-0016 #3) — the
+    // ContactsClient ctor now REQUIRES a non-null PinStore, so the gate can
+    // never be silently disabled. There is no longer a null case to test.
 }

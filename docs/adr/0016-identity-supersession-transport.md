@@ -176,11 +176,14 @@ fail-open in the verify path. Disposition of the findings:
 - **#2 (LOW, not applicable) — Android `oldExportKey` zeroization.** Reported as
   missing; on inspection the captured old export key **is** wiped in the recover
   `finally` (`oldExportKey?.fill(0)`). No change needed.
-- **#3 (INFO, accepted) — Android verify gate is a no-op when its pin store is
-  null.** Production wires a non-null store (verified), so inv #4 is enforced in
-  production; the residual is that a future wiring regression could silently
-  disable the gate. Recommended hardening (deferred): type-enforce a non-null pin
-  store in the production constructor, keeping the nullable seam test-only.
+- **#3 (INFO, hardened) — Android verify gate could no-op when its pin store was
+  null.** The nullable seam meant a future wiring regression could silently
+  disable the gate. Closed: `ContactsClient`'s constructor now **requires** a
+  non-null `PinStore` (the nullable param + the `pinStore ?: return` skip were
+  removed), and `ContactsRepository` falls back to an ephemeral `InMemoryPinStore`
+  when no `Context` is supplied (tests) — so the gate **always runs** and can no
+  longer be disabled by construction. `:app:compileDebugKotlin` +
+  `:app:testDebugUnitTest` (12 PeerPinStoreTest cases) green.
 - **#4 (INFO, no action) — iOS `expires_at` signed-shift** could trap on a
   top-bit-set value; unreachable (a real `expires_at` is ~1.7e9 and the verifier
   bounds the window first), and a trap is a crash = fail-closed, not fail-open.

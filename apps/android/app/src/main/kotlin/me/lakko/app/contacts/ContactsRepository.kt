@@ -55,13 +55,20 @@ public class ContactsRepository(
      * gate. When non-null, the default [clientFactory] wires a
      * persistent, per-account pin store into every [ContactsClient]
      * so a changed peer AccountIdentity key fails closed without a
-     * valid supersession proof. `null` (tests) disables the gate;
-     * production (`MainActivity`) always passes `applicationContext`.
+     * valid supersession proof. When `null` (tests) the factory falls
+     * back to an ephemeral [InMemoryPinStore] — the gate still runs
+     * (it can never be disabled), it just does not persist across a
+     * relaunch. Production (`MainActivity`) always passes
+     * `applicationContext`, so the pin is persistent there.
      */
     appContext: Context? = null,
     private val clientFactory: () -> ContactsClient = {
         ContactsClient(
-            pinStore = appContext?.let { PeerPinStore(it) },
+            // Non-null by construction (ContactsClient requires a store):
+            // persistent PeerPinStore in production, ephemeral
+            // InMemoryPinStore when no Context is supplied (tests). The
+            // verify gate is therefore never silently disabled.
+            pinStore = appContext?.let { PeerPinStore(it) } ?: InMemoryPinStore(),
         )
     },
     /** Factory for the [me.lakko.app.discovery.DiscoveryClient] the invite-

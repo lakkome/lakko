@@ -78,19 +78,18 @@ public class ContactsClient(
     private val discovery: DiscoveryClient = DiscoveryClient(),
     private val ds: DsClient = DsClient(),
     /**
-     * G-4 (ADR-0016) — persistent per-account AccountIdentity-pubkey
-     * pin store driving the fetch-path supersession gate
-     * ([verifyBundleAccountKey]).
+     * G-4 (ADR-0016) — per-account AccountIdentity-pubkey pin store
+     * driving the fetch-path supersession gate ([verifyBundleAccountKey]).
      *
-     * MUST be non-null in production (wired with a
-     * [PeerPinStore] over the app `Context` by
-     * [ContactsRepository]). A `null` here disables the gate and is
-     * permitted ONLY for direct / test callers that have already
-     * verified the peer out of band — production wiring always
-     * supplies the store, so the changed-key fail-closed path is
-     * always active on the real send flow.
+     * **Non-null and required**, by design: a `null`/absent store would
+     * silently disable the changed-key fail-closed gate (security
+     * invariant #4), so the type system forbids it. Production wires a
+     * persistent [PeerPinStore] over the app `Context` via
+     * [ContactsRepository]; tests / direct callers pass an
+     * [InMemoryPinStore]. The gate therefore always runs — first-ever
+     * observations TOFU-pin (safe), and a changed key always fails closed.
      */
-    private val pinStore: PinStore? = null,
+    private val pinStore: PinStore,
 ) : AutoCloseable {
 
     override fun close() {
@@ -225,15 +224,13 @@ public class ContactsClient(
      * Mirror of the web `ContactsClient.verifyBundleAccountKey`
      * (`apps/web/src/contacts/client.ts`).
      *
-     * Decision table (ADR-0016 rule #2, fail-closed):
-     *   1. No [pinStore] (test / direct caller) → skip the gate.
-     *      Production always wires the store, so this never disables
-     *      the gate on the real send flow.
-     *   2. No existing pin → TOFU-pin the fetched key (marker `0`).
+     * Decision table (ADR-0016 rule #2, fail-closed). The [pinStore] is
+     * non-null by construction, so the gate always runs:
+     *   1. No existing pin → TOFU-pin the fetched key (marker `0`).
      *      Trust-on-first-use is unchanged for a first observation.
-     *   3. Pin matches the fetched `signature_pubkey` → proceed (no
+     *   2. Pin matches the fetched `signature_pubkey` → proceed (no
      *      key change; the common steady-state case).
-     *   4. Pin DIFFERS → REQUIRE `bundle.supersession_proof`:
+     *   3. Pin DIFFERS → REQUIRE `bundle.supersession_proof`:
      *        a. absent → throw [SupersessionRefused] (`ProofAbsent`).
      *        b. [verifySupersession] throws → [SupersessionRefused]
      *           (`ProofInvalid`).
@@ -262,7 +259,9 @@ public class ContactsClient(
         accountId: ByteArray,
         bundle: IdentityFetchResponse,
     ) {
-        val store = pinStore ?: return
+        // `pinStore` is non-null by construction (see the ctor doc), so the
+        // gate can never be silently skipped — it always runs.
+        val store = pinStore
         val accountIdB64 = base64Encode(accountId)
         val fetchedPubkeyB64 = bundle.signature_pubkey
 
