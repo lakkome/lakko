@@ -43,8 +43,10 @@ sqlx = { version = "0.8", default-features = false, features = [
 # .env loading — debug builds only.
 dotenvy = "0.15"
 
-# PoW infrastructure mirrored from services/auth and services/discovery.
-# Phase 2 should DRY this into a shared `lakko-pow` workspace crate.
+# Server-side PoW verify, mirrored from services/auth and services/discovery
+# (still duplicated; per-service DB rule keeps each `pow_challenges` table
+# separate). The `lakko-pow` crate is the CLIENT solver only and does not
+# cover this server verify path.
 equix = { version = "0.6", features = ["compiler"] }
 sha2 = "0.10"
 

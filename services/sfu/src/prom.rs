@@ -42,8 +42,10 @@ pub mod names {
     /// boot.
     pub const CALLS_TOTAL: &str = "lakko_sfu_calls_total";
     /// Cumulative count of signaling frames received from
-    /// peers. Labelled `kind` once we have a typed signaling
-    /// protocol; for now a single bucket.
+    /// peers. A single un-labelled bucket: the typed signaling
+    /// protocol exists (`lakko-sfu-proto`), but this counter is
+    /// not yet broken out by frame `kind` — a per-kind label is
+    /// an observability nice-to-have, not a correctness gap.
     pub const SIGNALING_FRAMES_TOTAL: &str = "lakko_sfu_signaling_frames_total";
     /// JWKS cache age, seconds since the last successful
     /// refresh. The `LakkoSfuJwksStale` alert (future) will

@@ -10,10 +10,11 @@ import SwiftUI
 ///   * `apps/web/src/contacts/ContactsRoute.tsx` (1.17e6)
 ///   * `apps/android/.../ui/contacts/ContactsScreen.kt` (1.15e6)
 ///
-/// **Phase 1.14e4 scope**: send form + pending list with Accept /
-/// Decline + sent log + accepted log + Refresh action. Invite
-/// generate UI lands in 1.14e7; continuous polling
-/// `LaunchedEffect`-equivalent lands in 1.14e5.
+/// **Scope**: send form + pending list with Accept / Decline +
+/// sent log + accepted log + Refresh action (1.14e4), the
+/// invite generate UI / `GeneratedInviteSheet` (1.14e7), and
+/// the `.task`-driven continuous-polling loop (1.14e5) — all
+/// wired.
 ///
 /// `onBack` is the up-affordance back to ``HomeScreen``; the
 /// `AppRoot`-level router observes the

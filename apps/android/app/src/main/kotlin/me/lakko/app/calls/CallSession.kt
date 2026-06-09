@@ -35,21 +35,26 @@ import uniffi.lakko_ffi_uniffi.parseCallSignaling
  * real SDP via [WebRtcPeerConnection], local ICE candidates
  * are emitted through the `IceCandidate` signaling body, and
  * the underlying PeerConnection's connection-state
- * transitions drive [WebCallState]. Audio-only on first pass
- * — video plumbing extension point lives at
- * [WebRtcPeerConnection.addLocalVideoTrack], wired by a
- * follow-up (`G3-2-video`) once the Compose preview surface
- * is in place.
+ * transitions drive [WebCallState]. Video is wired:
+ * [dial]`(video=true)` / [acceptCall]`(withVideo=true)` run
+ * [startLocalCameraCapture] (front camera 720p/30 via
+ * `CameraVideoCapture`), which calls
+ * [WebRtcPeerConnection.addLocalVideoTrack] before the SDP
+ * build so the offer/answer advertises the m=video line;
+ * audio-only calls simply skip it.
  *
- * ## SFrame deferred
+ * ## SFrame end-to-end encryption
  *
- * Today's transport rides plain SRTP (per-hop encryption
- * only). The end-to-end SFrame layer keyed off the call's
- * MLS exporter arrives in a follow-up sub-sprint
- * (`G3-2-sframe`); the Android call surface is **not yet
- * E2EE-complete** despite the wire saying so. This caveat
- * is repeated verbatim in `docs/security/calls.md` so the
- * audit pack doesn't double-count.
+ * SFrame keying is wired and mandatory (G3-sframe-native
+ * arc N-1..N-6). The caller arms the per-call MLS-exporter
+ * seed via [setCallKey] before [dial] / [acceptCall]; both
+ * paths then run [attachSFrame], which attaches the SFrame
+ * encryptors to every local sender via
+ * [WebRtcPeerConnection.armSFrameEncryptors] and **refuses
+ * the call** (no plaintext-media fallback) if the seed is
+ * unset or the boot-time `SFrameAvailability` probe reports
+ * the libwebrtc frame-encryptor selectors are missing —
+ * security invariant #4.
  *
  * ## Threading
  *

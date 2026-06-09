@@ -156,8 +156,8 @@ public class WebRtcPeerConnection(
      *  the per-call MLS exporter seed is known. */
     internal var localAudioSender: org.webrtc.RtpSender? = null
 
-    /** Same shape as [localAudioSender], populated once
-     *  [addLocalVideoTrack] is no longer a stub. */
+    /** Same shape as [localAudioSender], populated by
+     *  [addLocalVideoTrack] on a video-enabled call. */
     internal var localVideoSender: org.webrtc.RtpSender? = null
 
     /** G3-sframe-native N-5 — Kotlin-side strong references to
@@ -392,9 +392,9 @@ public class WebRtcPeerConnection(
      * caller supplies — pinning the capture lifecycle to
      * the UI's preview surface is the caller's job.
      *
-     * First pass: not yet called by anything. Audio-only
-     * calls work today without it. G3-2-video lands once
-     * the Compose call-screen grows a preview surface.
+     * Called from `CallSession.startLocalCameraCapture`
+     * (1×1) and `SfuCallSession` (group) on a video-enabled
+     * call; audio-only calls skip it.
      */
     public fun addLocalVideoTrack(source: VideoSource) {
         val factory = sharedFactory ?: return

@@ -159,16 +159,18 @@ public final class WebRTCPeerConnection: NSObject {
     internal var localAudioSender: RTCRtpSender?
 
     /// Same shape as `localAudioSender`, populated by
-    /// `addLocalVideoTrack(_:)` once it's no longer a stub.
+    /// `addLocalVideoTrack(_:)` on a video-enabled call.
     internal var localVideoSender: RTCRtpSender?
 
     // MARK: - Lifecycle
 
     /// Construct a peer connection.
     ///
-    /// `iceServers` defaults to a Google STUN server +
-    /// Lakko's coturn TURN servers (Phase 3b-ops); the
-    /// caller can override for tests or for a region-pinned
+    /// `iceServers` defaults to the STUN-only base list
+    /// (`defaultIceServers()`); the per-call TURN row is
+    /// appended by `CallSession.resolveIceServers()` before
+    /// it constructs this peer (G3-1-turn). The caller can
+    /// override for tests or for a region-pinned
     /// deployment. The default is supplied as a `nil`
     /// sentinel because Swift refuses to evaluate
     /// `Self.defaultIceServers()` as a default expression
@@ -586,24 +588,26 @@ public final class WebRTCPeerConnection: NSObject {
 
     // MARK: - Defaults
 
-    /// STUN + (placeholder) TURN config. Production wires
-    /// these via the rendezvous bootstrap config; for now a
-    /// single Google STUN server is enough to exercise the
-    /// happy path on most networks.
+    /// STUN-only base ICE-server list. This is the floor every
+    /// call starts from; TURN is layered on top per-call by
+    /// `CallSession.resolveIceServers()`, which appends one
+    /// freshly-minted coturn row via `TurnCredentialClient`
+    /// (G3-1-turn, landed). Keeping the default STUN-only here
+    /// means a call with no `turnClient` injected still attempts
+    /// to connect over STUN (only symmetric-NAT peers fail, as
+    /// `.disconnected`).
     public static func defaultIceServers() -> [RTCIceServer] {
         [
             RTCIceServer(urlStrings: [
                 "stun:stun.l.google.com:19302",
                 "stun:stun1.l.google.com:19302",
             ]),
-            // TURN servers (Lakko's coturn cluster) arrive
-            // via the rendezvous bootstrap config — see
-            // `crates/lakko-transport/src/rendezvous.rs`.
-            // For now we run STUN-only; on a NAT-symmetric
-            // network the call will fail to connect and
-            // surface as `.disconnected`. The follow-up
-            // sub-sprint G3-1-turn wires the bootstrap
-            // config into here.
+            // TURN rows (Lakko's coturn cluster) are NOT added
+            // here — `CallSession.resolveIceServers()` mints one
+            // at call start via `TurnCredentialClient.fetchOrNil()`
+            // and appends it to this base list. See
+            // `services/auth/src/turn.rs` for the credential REST
+            // shape.
         ]
     }
 }

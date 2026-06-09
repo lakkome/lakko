@@ -21,9 +21,11 @@ import LakkoCore
 ///      ``AuthRepository`` + the accepted-contacts list from
 ///      ``ContactsRepository.state.accepted``.
 ///
-/// MLS group snapshots are reserved in the v1 payload but
-/// emitted empty — the DeviceGroup-side snapshot publishing
-/// path lands in 2a3.
+/// The v1 payload carries a whole-storage MLS snapshot from
+/// `Identity.snapshotStorage()` (Phase 2a3d3) — passed through
+/// `uploadNow` / `uploadFromCache` as `wholeStorageSnapshot`,
+/// empty only on the signup baseline before any MLS state
+/// exists.
 public final class BackupClient {
 
     private let storage: StorageClient

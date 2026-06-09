@@ -51,8 +51,10 @@ import kotlinx.serialization.json.jsonObject
  *
  *   * [register] — drive [CreatePublicKeyCredentialRequest].
  *   * [authenticate] — drive [GetCredentialRequest] with a
- *     [GetPublicKeyCredentialOption]. Wired but not yet
- *     consumed by the UI.
+ *     [GetPublicKeyCredentialOption]. Consumed by the UI via
+ *     `WebauthnClient.loginWithPasskey` (login) and
+ *     `WebauthnClient.assertAction` (ADR-0014 action binding
+ *     for remove-device / delete-passkey).
  */
 public class WebauthnRegistration {
 

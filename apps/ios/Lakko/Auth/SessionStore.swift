@@ -18,9 +18,9 @@ import Foundation
 ///     login. Knowing it doesn't help an attacker derive any key
 ///     (OPAQUE is password-blinded) and doesn't reveal anything
 ///     about the user that isn't already on a captured device.
-///   * `username` — human-visible handle. Routinely sent to the
-///     discovery service in plaintext (or rather, OPRF-blinded once
-///     the discovery surface lands in 1.14e).
+///   * `username` — human-visible handle. Sent to the
+///     discovery service OPRF-blinded, never in plaintext
+///     (`OprfBlinder.blind` → `POST /discovery/oprf`, 1.14e1).
 ///
 /// Plain ``UserDefaults`` is the right tool here: small, synchronous,
 /// no encryption overhead. The Keychain-backed material lives in

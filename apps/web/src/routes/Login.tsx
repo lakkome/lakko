@@ -25,10 +25,11 @@ export default function Login(): JSX.Element {
   const navigate = useNavigate();
   const location = useLocation();
 
-  // Pre-fill from the device-cached username (1.16c3b). When 1.16d
-  // brings cross-device discovery the form will accept arbitrary
-  // usernames again; for now the only login candidate on this
-  // device is whoever signed up here last.
+  // Pre-fill from the device-cached username (1.16c3b) as a
+  // convenience. The form accepts arbitrary usernames — 1.16d2
+  // wired cross-device discovery, so `AuthContext.login` resolves
+  // any registered username via `/discovery/lookup` on a cache
+  // miss. The prefill is just the last account seen on this device.
   const cached = (): string => {
     const s = auth.state();
     return s.kind === "anon" && s.cachedUsername !== undefined

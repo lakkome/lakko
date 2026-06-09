@@ -139,7 +139,8 @@ public enum DeviceIdentityStore {
     /// Note: deleting the seed alone does NOT remove the
     /// device's leaf from the user's DeviceGroup — the other
     /// devices need to see an MLS `Remove` commit to ratchet
-    /// past the gone leaf. The full revoke flow lands in 2a3c.
+    /// past the gone leaf. That is the separate revoke flow in
+    /// ``DeviceRemoval/removeDeviceAt`` (2a3c).
     public static func deleteDeviceIdentitySeed(accountIdB64: String) {
         deleteIgnoringMissing(accountIdB64: accountIdB64)
     }

@@ -120,18 +120,21 @@ pub struct RealityConfig {
     /// bootstrap configs that were minted before the field
     /// existed.
     ///
-    /// **When to set false**: only against a REALITY server
-    /// that has not yet implemented the
-    /// `S-5-reality-server-mutual-auth` sub-sprint (which
-    /// requires plumbing a custom `SecureRandom` into the
-    /// rustls `CryptoProvider` — see
-    /// [`crate::reality::server_driver`] doc). With
+    /// The Lakko REALITY server signs `ServerHello.Random`
+    /// (see `compute_server_response` +
+    /// [`crate::reality::server_driver`]), so against a Lakko
+    /// server this stays `true` and the loopback E2E test
+    /// exercises that mutual-auth path.
+    ///
+    /// **When to set false**: only against a REALITY endpoint
+    /// that does NOT sign the random — e.g. an interop target
+    /// outside this codebase, or a passive cover-site proxy
+    /// used in observer tests. With
     /// `require_server_response = false`, the client trusts
-    /// the server purely because the cover-SNI TLS
-    /// handshake completed; an in-line cover-site proxy is
-    /// indistinguishable from a real REALITY server. The
-    /// E2E client/server loopback test sets this to false
-    /// while the server side cannot yet sign the random.
+    /// the server purely because the cover-SNI TLS handshake
+    /// completed; an in-line cover-site proxy is then
+    /// indistinguishable from a real REALITY server (no
+    /// active-probe detection).
     #[serde(default = "default_require_server_response")]
     pub require_server_response: bool,
 }

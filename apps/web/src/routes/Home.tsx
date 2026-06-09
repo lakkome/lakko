@@ -2,8 +2,10 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * Authenticated home — placeholder that 1.16e replaces with the
- * conversation list / inbox view.
+ * Authenticated home — still a placeholder shell. The conversation
+ * list / inbox view is an outstanding follow-up; chat itself (the
+ * 1×1 surface) has shipped and lives under the `/chat/:id` route,
+ * but no inbox landing aggregates it here yet.
  */
 import type { JSX } from "solid-js";
 import { A } from "@solidjs/router";

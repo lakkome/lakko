@@ -18,8 +18,10 @@
  * a route is added or renamed, update both files in the same
  * commit.
  *
- * Phase 1.16b — pure routing scaffold; the screens are stubs that
- * 1.16c (auth), 1.16d (contacts) and 1.16e (chat) fill in.
+ * Introduced in 1.16b as a routing scaffold; the screens it points
+ * at are now implemented — 1.16c (auth), 1.16d (contacts) and 1.16e
+ * (chat) filled them in. The authenticated landing (`home`) remains
+ * a placeholder shell pending the inbox / conversation-list view.
  */
 
 /** Static-path constants. */

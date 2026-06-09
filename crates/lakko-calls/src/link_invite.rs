@@ -59,9 +59,16 @@
 //! wouldn't share a group view — the call wouldn't
 //! actually connect.
 //!
-//! Multi-joiner support requires a server-side rendezvous
-//! (`/call-invite/{blob_id}` discovery endpoint + KP
-//! refresh) and is deferred to a 3c3-multi-use sprint.
+//! Reusing **one** capability for many joiners (the
+//! single-link, multiple-strangers topology) still requires a
+//! server-side rendezvous (`/call-invite/{blob_id}` discovery
+//! endpoint + KP refresh) and is deferred to a 3c3-multi-use
+//! sprint — that endpoint does not exist yet. Multi-party
+//! calls themselves are already supported through a different
+//! topology: the owner ferries each later joiner's KeyPackage
+//! into the group via [`lakko_contacts::wrap_call_kp_forward`]
+//! / [`lakko_contacts::wrap_call_welcome`] (exercised end to
+//! end in this module's integration tests).
 //!
 //! ## What this module does NOT do
 //!

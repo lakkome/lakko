@@ -388,13 +388,22 @@ expires) — that lands "when the threat model expects targeted
 token-theft (Phase 2+)" and is a distinct concern from the
 "single-process" claim this gap raised.
 
-### G-13: WebAuthn passkey lacks per-credential authentic-action attestation
+### G-13: WebAuthn passkey per-credential authentic-action attestation — **CLOSED**
 
-Today the passkey assertion validates the user has the
-device; it doesn't bind to the specific OPAQUE message
-the request carries. A reorder attack inside the same TLS
-session is implausible but not impossible — Phase 2c can
-mix the OPAQUE message hash into the WebAuthn assertion
+**Closed.** WebAuthn action-binding landed via
+[ADR-0014](../adr/0014-webauthn-action-binding.md) (challenge =
+`BLAKE3_keyed(action_hash ‖ nonce)`, `POST /auth/action/{start,finish}`,
+single-use server-side grants gating delete-passkey, client `assertAction`
+on web + iOS + Android) and the device-removal half via
+[ADR-0015](../adr/0015-device-removal-authorization.md) (peer-verified
+`lakko-attest` Ed25519 attestation carried alongside the DeviceGroup Remove
+commit + verified in the `lakko-mls` apply path, auto-enabled on first
+passkey). The original framing below predates that work.
+
+Historical context: the passkey assertion validated the user has the
+device; it didn't bind to the specific OPAQUE message the request carries. A
+reorder attack inside the same TLS session is implausible but not impossible
+— Phase 2c can mix the OPAQUE message hash into the WebAuthn assertion
 challenge.
 
 **Server-side implementation landed (2026-06-04) —
@@ -661,7 +670,18 @@ integration in 3b. **G-18 is now a wiring gap, not a
 place; only the call-into-the-helper at the right moment
 is left.
 
-### G-19: SFU-side JWT validation lands with 3b1c (LiveKit fork)
+### G-19: SFU-side call-admission JWT validation — **CLOSED** (Rust SFU; LiveKit-fork plan superseded)
+
+**Closed.** The validation side landed in the **Rust SFU** (ADR-0011, which
+retired the LiveKit fork referenced below). `lakko-svc-sfu` verifies the
+Ed25519 call-admission JWT against the auth service's JWKS on the
+`/v1/connect` WebSocket admission path before a peer joins a call; the
+dockerised `ci/sfu-e2e` gate exercises exactly this (a fixture JWT →
+`Welcome` frame). The "pending 3b1c / Go-side LiveKit fork" framing below is
+superseded — there is no Go verifier; the load-bearing path is the Rust
+SFU's own `lakko_call_jwt::verify_with_jwks`.
+
+Historical context (pre-ADR-0011):
 
 **Issuance side: shipped in 3b4** — crypto in
 [`crates/lakko-call-jwt/`](../../crates/lakko-call-jwt/src/lib.rs),
@@ -1609,3 +1629,67 @@ above + the iOS spike + (subsequently) MLS-exporter
 seed delivery from each platform's CallSession into
 the freshly-created `ParticipantKey`.
 + replication via DeviceGroup are wired).
+
+### G-29: in-code completion markers swept + reconciled; residual genuinely-open items
+
+**Reconciliation pass (2026-06-09).** The codebase's in-code "TODO / not yet
+wired / for now / lands in X / deferred" annotations had drifted badly out of
+date — a four-area sweep (Rust crates + services, web, iOS, Android) found
+that the large majority described work that had **already landed**, and
+corrected **~45 stale comments** to match the code (e.g. iOS/Android/web call
+surfaces claiming "audio-only / SFrame deferred / video lands later" when
+video + mandatory SFrame are fully wired; "passkey sign-in not wired" when it
+is; invite short-pointer / max-uses / KP-forward "deferred" when the discovery
+endpoints + crate paths exist; the Android recover snapshot "only
+re-published" when it is applied to `IdentitySnapshotStore`). The in-code
+annotations now reflect reality; this entry records what genuinely **remains**
+after the sweep.
+
+**Already tracked elsewhere (cross-references, not new):** identity/invite
+lookups are TOFU pending the deployed transparency service (G-4 / ADR-0016);
+external-stack SFrame RTP interop unverified (G-26); single-link many-stranger
+call rendezvous absent — multi-party works via owner KP-forward (G-21);
+channel PublisherGroup persistence + rotation deferred (G-27); the DS has no
+auth/PoW (pseudonym-unguessability is the Phase-1 gate).
+
+**Genuinely open, security-relevant:**
+
+- **iOS channel keys persist in `UserDefaults`, not the Keychain**
+  (`ChannelsComposer.swift`, `ChannelsUiState.swift`). The publisher signing
+  seed and the subscriber secret X25519 half are stored unencrypted-at-rest
+  rather than under the hardware-backed Keychain — weak key-at-rest protection
+  for channel material specifically (the device-identity keys themselves are
+  Keychain/Secure-Enclave-backed per invariant #7). Fix: migrate the channel
+  secrets to the Keychain. Also on iOS the channel publisher seed is still a
+  demo value, not derived from the PublisherGroup MLS exporter — channel
+  content keying is not production-grade on iOS yet.
+
+**Genuinely open, UX / feature limitations (not correctness or security
+breaks):**
+
+- **Cross-device recover via discovery not wired** (web `AuthContext`, iOS
+  `AuthRepository`): `recover()` requires the `account_id` to already be cached
+  on the device; a fresh device cannot recover-from-words without a discovery
+  account lookup that isn't wired. Recovery works on a device that already
+  knows the account.
+- **Web 1×1 calls are audio-only** (no local camera capture/toggle on the P2P
+  path); the **in-call device picker is mock-populated** (no
+  `enumerateDevices()` on the live-call surface).
+- **iOS contact inbox is foreground-poll only** — no `BGTaskScheduler`
+  background fetch / APNs-driven wake, so new contact requests aren't surfaced
+  while backgrounded.
+- **Android QR pairing scanner can't resume after a non-Lakko QR** without a
+  screen re-mount (the `hasDetected` latch has no reset path).
+- **iOS + Android accepted-contacts list is in-memory only** (rebuilt by
+  re-polling the stranger inbox from cursor 0 on launch). The backup
+  restore-merge of contacts is therefore an optimization, not a correctness
+  gap; the MLS whole-storage snapshot **is** restored on recover on both.
+
+**Genuinely open, maintenance / observability:**
+
+- The PoW challenge-issue/verify/consume logic is duplicated across
+  `services/{auth,discovery,push-gw}/src/pow.rs` (the `lakko-pow` crate is the
+  client *solver*, a different concern) — drift risk, not a correctness gap.
+- `lakko_sfu_signaling_frames_total` is a single un-labelled bucket despite the
+  typed signaling protocol existing — per-`kind` breakdown would aid
+  dashboards; observability only.

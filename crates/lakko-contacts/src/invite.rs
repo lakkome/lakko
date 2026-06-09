@@ -18,24 +18,34 @@
 //!
 //!   * `owner_transparency_proof` (KT-log inclusion) — anchors
 //!     `owner_signature_pubkey` to a verifiable identity record.
-//!     Deferred: `lakko-transparency` does not yet expose
-//!     inclusion proofs end-to-end. Without it, accepting a link
-//!     is TOFU on the inviter's pubkey.
-//!   * `consumed_pubkey_log: HmacBloom` — server-side bloom over
-//!     joiners that have already consumed the link, paired with a
-//!     `max_uses` enforcer. Deferred: needs a `services/discovery`
-//!     `/invite/{blob_id}` endpoint that V1 does not have. The
-//!     `max_uses` field is preserved on the wire as a **hint**
-//!     for the joiner UI ("link can be used N more times") but
-//!     no enforcement happens until 1.18d.
+//!     Deferred: `lakko-transparency` ships the inclusion-proof
+//!     primitives (`prove_inclusion` / `verify_inclusion`), but
+//!     no transparency SERVICE is deployed to anchor identities
+//!     and the capability carries no proof field, so this codec
+//!     cannot bind the proof end-to-end. Without it, accepting a
+//!     link is TOFU on the inviter's pubkey.
+//!   * `consumed_pubkey_log: HmacBloom` — ADR-0005's wire-side
+//!     bloom is not part of this codec; the `max_uses` ceiling is
+//!     carried on the wire and is now ENFORCED server-side. The
+//!     `services/discovery` `/discovery/invite/{blob_id}/consume`
+//!     handler (landed 1.18d2a) does an atomic counter bump plus
+//!     a per-joiner de-dup against the `invite_consumers` side
+//!     table keyed on the server-blind joiner tag this crate
+//!     mints via [`compute_joiner_tag`] (1.18d3b). So the
+//!     `max_uses` field is no longer a mere UI hint — a joiner
+//!     past the ceiling is refused at consume time.
 //!   * `blob_id` storage indirection — the ADR puts the
 //!     capability bytes in `services/storage` and only embeds a
-//!     short pointer in the URL. V1 puts the bytes **directly**
-//!     in the URL. Trade-off: the URL is ~150-220 chars long
-//!     instead of ~30, but no server dependency and no extra
-//!     round-trip. We can swap to the indirection without a
-//!     wire-format break — the capability struct stays the same;
-//!     only the URL shape changes.
+//!     short pointer in the URL. This codec still produces the
+//!     full capability bytes; whether they ride directly in the
+//!     URL or behind an indirection is a transport choice the
+//!     server already supports: `services/discovery` content-
+//!     addresses an uploaded capability as
+//!     `blob_id = SHA-256(capability_bytes)` and serves it from
+//!     `GET /discovery/invite/{blob_id}`, so a client can embed
+//!     the short `/i/<blob_id>` pointer instead of the ~150-220
+//!     char inline form. The capability struct is unchanged
+//!     either way — only the URL shape differs.
 //!   * `ephemeral_prekey` — ADR keeps it for forward secrecy on
 //!     the owner→joiner direction. Our flow has joiner→owner as
 //!     the first sealed message, and the joiner generates a

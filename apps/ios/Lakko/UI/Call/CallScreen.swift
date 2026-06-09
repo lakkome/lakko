@@ -17,10 +17,12 @@ import WebRTC
 /// State lives in `CallUiState` (`apps/ios/Lakko/Calls/CallUiState.swift`),
 /// which is the Swift port of `apps/web/src/state/call-state.ts`.
 ///
-/// No real WebRTC integration here — the live media path
-/// lives in the platform's WebRTC pod (3a-pod-followup). Tiles
-/// render a "(video)" placeholder until the pod wires real
-/// `AVPlayer` / `RTCVideoView`-backed surfaces in.
+/// When a live `CallSession` is bound via `CallUiState`,
+/// tiles render the real local / remote video tracks through
+/// `LocalVideoPreviewView` (`RTCMTLVideoView`-backed). The
+/// "(video)" gradient is the fallback shown only for an
+/// audio-only call, before a track arrives, or on the
+/// mock-design path (no session bound).
 ///
 /// Three-platform parity: the same component tree exists on
 /// web (Solid.js) and Android (Compose). A change to the

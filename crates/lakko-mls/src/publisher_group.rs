@@ -61,10 +61,13 @@
 //!   `services/channels` batch fanout. PublisherGroup
 //!   produces the bytes; subscribers receive them via the
 //!   already-shipped path.
-//! * **The 24 h / N-message scheduled rotation.** That lives
-//!   in a publisher-side timer (deferred — see ROADMAP).
-//!   This module exposes a fresh seed on demand; the timer
-//!   that calls "commit + rotate" sits above it.
+//! * **The 24 h / N-message scheduled rotation.** The cadence
+//!   decision lives in the pure `RotationPolicy::should_rotate`
+//!   in `lakko-channels` (24 h / 1 000 posts by default), driven
+//!   by the per-platform rotation crons (web / iOS / Android).
+//!   This module exposes a fresh seed on demand; that scheduling
+//!   logic sits above it and calls "commit + rotate" when the
+//!   policy fires.
 //!
 //! ## Threading
 //!

@@ -15,11 +15,12 @@ import LakkoCore
 /// ``IdentitySecrets`` from ``AuthRepository``. Exposes a single
 /// `@Published` ``state`` slot for the ViewModel to observe.
 ///
-/// **Phase 1.14e3 scope**: send + poll + accept (local-state-only)
-/// + decline + clear. Invite-link generate / revoke / consume land
-/// in 1.14e7 (owner) and 1.14e8 (joiner) respectively. Welcome-to-
-/// ChatRepository forwarding lands in 1.14f when the chat surface
-/// arrives.
+/// **Scope**: send + poll + accept + decline + clear (1.14e3),
+/// invite-link generate / revoke / consume (1.14e7 owner /
+/// 1.14e8 joiner), and Welcome-to-`ChatRepository` forwarding
+/// plus `startGroupWith`-on-accept (1.14f4) — all wired. The
+/// accepted/pending state itself is still local-state-only
+/// (see the no-persistence note below).
 ///
 /// **No persistence yet** — pending requests + sent log live in
 /// memory only. They drop on process death; on next launch the
@@ -121,12 +122,13 @@ public final class ContactsRepository: ObservableObject {
     /// envelopes. Updates ``ContactsState/pending`` with any new
     /// requests + bumps the cursor.
     ///
-    /// **Welcome forwarding** is a no-op in 1.14e3 — the chat
-    /// surface (and the `ChatRepository` that owns
-    /// `joinGroupFromWelcome`) lands in 1.14f. Welcomes drop on
-    /// the floor; the cursor still advances so we don't re-process
-    /// them. 1.14f wires the forwarding hook through the same
-    /// initializer pattern the Kotlin side uses.
+    /// **Welcome forwarding** (1.14f4) is wired when a
+    /// ``chatRepository`` bridge is attached: each Welcome event
+    /// is forwarded to `ChatRepository.joinGroupFromWelcome`,
+    /// best-effort (a single bad Welcome doesn't block the rest
+    /// of the poll). With no bridge attached the Welcome is
+    /// skipped; the cursor advances either way so we don't
+    /// re-process the row.
     ///
     /// - Parameter waitSecs: DS long-poll budget. `0` (the
     ///   default) returns immediately whatever's there — manual
@@ -474,8 +476,11 @@ public final class ContactsRepository: ObservableObject {
     ///      joinerAccountId)` — atomic counter bump + dedup tag.
     ///   6. `ContactsClient.sendContactRequestToBundle(...)` —
     ///      ship a ContactRequest to the inviter's stranger inbox.
-    ///   7. `ChatRepository.startGroupWith(...)` — lands in 1.14f;
-    ///      `groupIdHex` is always `nil` in 1.14e8.
+    ///   7. `ChatRepository.startGroupWith(...)` (1.14f) — drives
+    ///      a live 1×1 group against the inviter when the chat
+    ///      bridge is wired, returning `groupIdHex`; falls back to
+    ///      `nil` (best-effort) if the bridge is absent or the
+    ///      call fails.
     public func acceptInviteLink(slug: String) async -> AcceptInviteResult {
         guard let secrets = authRepository.identitySecrets else {
             return .requiresReauth
@@ -732,10 +737,11 @@ public struct ContactsState: Equatable {
 /// A request the user has accepted locally.
 public struct AcceptedContact: Equatable {
     public let request: IncomingContactRequest
-    /// Populated when 1.14f's Accept flow has just driven
-    /// `ChatRepository.startGroupWith` for this peer. Until 1.14f
-    /// lands this is always `nil`; the contacts UI surfaces a
-    /// "Open chat (coming in 1.14f)" placeholder hint then.
+    /// Populated when the Accept flow drove
+    /// `ChatRepository.startGroupWith` for this peer (1.14f,
+    /// landed). `nil` only when the chat bridge was absent or
+    /// `startGroupWith` failed — the contacts UI then offers a
+    /// retry instead of the "Open chat" affordance.
     public let groupIdHex: String?
 
     public init(request: IncomingContactRequest, groupIdHex: String? = nil) {
@@ -767,10 +773,10 @@ public struct SentContactRequest: Equatable {
 
 /// An invite link the owner has just generated this session.
 ///
-/// Empty placeholder in 1.14e3 — the generate / revoke methods
-/// land in 1.14e7. We commit the struct shape here so
-/// ``ContactsState/outstandingInvites`` doesn't need a follow-up
-/// type migration when the methods arrive.
+/// Produced by ``ContactsRepository/generateInviteLink(...)``
+/// and cleared by ``ContactsRepository/revokeInviteLink(blobId:)``
+/// (1.14e7, landed). Surfaced via
+/// ``ContactsState/outstandingInvites``.
 public struct GeneratedInvite: Equatable {
     /// Raw 32-byte content-addressed id.
     public let blobId: Data

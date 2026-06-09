@@ -15,26 +15,26 @@ import WebRTC
 ///
 /// ## G3-1 status
 ///
-/// Real WebRTC integration: `dial()` / `acceptCall()` now
+/// Real WebRTC integration: `dial()` / `acceptCall()`
 /// build real SDP via [`WebRTCPeerConnection`], local ICE
 /// candidates are emitted through the `iceCandidate`
 /// signaling body, and the underlying RTCPeerConnection's
 /// connection-state transitions drive `WebCallState`.
-/// Audio-only on the first pass — the video plumbing
-/// extension point (`WebRTCPeerConnection.addLocalVideoTrack`)
-/// lands in a follow-up (`G3-1-video`) once the SwiftUI
-/// preview surface is wired.
+/// Video capture is wired (G3-1-video): a video-enabled
+/// `dial` / `acceptCall` constructs the camera pipeline
+/// (`startLocalCameraCapture`), adds the track via
+/// `WebRTCPeerConnection.addLocalVideoTrack`, and surfaces
+/// it through the published `localVideoTrack` /
+/// `remoteVideoTrack` slots.
 ///
-/// ## SFrame deferred
+/// ## SFrame
 ///
-/// Today's transport rides plain SRTP (per-hop encryption
-/// only). The end-to-end SFrame layer keyed off the call's
-/// MLS exporter arrives in a follow-up sub-sprint
-/// (`G3-1-sframe`); the iOS call surface is **not yet
-/// E2EE-complete** despite the wire saying so. This caveat
-/// is repeated verbatim in
-/// `docs/security/calls.md` so the audit pack doesn't
-/// double-count.
+/// Media is end-to-end encrypted via SFrame keyed off the
+/// call's MLS exporter (G3-sframe-native, G-28). `dial()` /
+/// `acceptCall()` call `attachSFrame` after adding the
+/// senders and **refuse the call** if the attach fails
+/// (security invariant #4: no fallback to non-E2EE);
+/// `e2eeActive` flips true once `setCallKey` arms the seed.
 @MainActor
 public final class CallSession: ObservableObject {
 

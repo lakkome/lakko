@@ -49,16 +49,20 @@
 //!   `lakko-mls`; this crate doesn't know the MLS shape)
 //! - Media-flags bitmap (audio / video)
 //!
-//! What's deferred to a follow-up sprint:
+//! What lives outside this codec (now wired elsewhere):
 //!
-//! - `services/discovery /call-invite/{blob_id}` server
-//!   endpoint that holds the capability blob + enforces
-//!   `max_uses`. V1 puts the bytes directly in the URL
-//!   (same trade-off `invite.rs` shipped with).
-//! - Joiner-side orchestration that turns the embedded
-//!   KP into a live `GroupCallSession`. The codec is
-//!   ready; the orchestration belongs in `lakko-calls`
-//!   or `apps/*`, not here.
+//! - The `services/discovery /discovery/call-invite/{blob_id}`
+//!   server endpoint holds the capability blob and enforces
+//!   `max_uses` (atomic `consume` handler + per-joiner dedup
+//!   via the `call_invite_consumers` side table). A client may
+//!   embed the short `blob_id` pointer or the bytes inline; the
+//!   codec only produces the bytes.
+//! - Joiner-side orchestration that turns the embedded KP into
+//!   a live `GroupCallSession` lives in `lakko-calls`
+//!   (`link_invite::accept_call_invite`).
+//!
+//! Still deferred:
+//!
 //! - KT-log inclusion proof for `owner_signature_pubkey`
 //!   (TOFU until then, same as `invite.rs`).
 //!

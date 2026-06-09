@@ -51,22 +51,21 @@
 //!
 //! ## What is NOT in this module
 //!
-//! - Integration with [`crate::sframe`]'s `seal` /
-//!   `open` — those still expose the typed
-//!   `(frame_counter, ciphertext)` tuple. The integration
-//!   step lands in `S-3-B-routing-media` when the SFU
-//!   needs to read KID bytes to route by participant
-//!   without decrypting; see ROADMAP-PHASE3-CLOSEOUT.md
-//!   Group B.
+//! - The header-as-AAD integration with [`crate::sframe`]
+//!   has landed: [`crate::sframe::ParticipantKey::seal_framed`]
+//!   / `open_framed` prepend this header on the wire and bind
+//!   it as the AEAD AAD per ADR-0013, so the SFU can read KID
+//!   bytes to route by participant without decrypting. The
+//!   raw `(frame_counter, ciphertext)` `seal` / `open` pair
+//!   stays available for callers that supply their own AAD.
 //! - External interop verification against mlspp / browser
-//!   native — deferred to the same media-routing sprint
-//!   where two independent implementations can exchange
-//!   real frames. The self-consistency tests in this
-//!   module cover the entire wire shape against the
-//!   spec; the remaining "do two non-Lakko stacks agree
-//!   with us byte-for-byte?" question becomes answerable
-//!   only when at least one external stack is in the
-//!   loop.
+//!   native — still deferred (known gap G-26): it needs two
+//!   independent implementations exchanging real frames over
+//!   a deployed SFU. The self-consistency tests in this
+//!   module cover the entire wire shape against the spec;
+//!   the remaining "do two non-Lakko stacks agree with us
+//!   byte-for-byte?" question becomes answerable only when at
+//!   least one external stack is in the loop.
 
 use thiserror::Error;
 

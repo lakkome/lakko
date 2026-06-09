@@ -3,11 +3,15 @@
 
 //! Equix proof-of-work for anti-spam.
 //!
-//! Mirrored verbatim from `services/auth/src/pow.rs`. Phase 2 should
-//! DRY this into a shared `lakko-pow` workspace crate; for now the
-//! duplication is intentional — the two services have isolated
-//! databases (per the per-service DB rule) and therefore independent
-//! `pow_challenges` tables.
+//! Mirrored verbatim from `services/auth/src/pow.rs`. This is the
+//! server-side challenge-issue + verify + consume path, which is
+//! still duplicated across `auth` / `discovery` / `push-gw`; the
+//! per-service DB rule gives each its own `pow_challenges` table,
+//! so the duplication is deliberate for now. NOTE: the existing
+//! `lakko-pow` crate is the CLIENT solver only (used by the FFI
+//! surfaces); folding the server verify into it would clash with
+//! that crate's client-only / wasm32 feature posture, so a shared
+//! server-side verifier crate has not been carved out.
 //!
 //! Phase 1.6 gates the expensive push-gw endpoints (`/push/register`,
 //! `/push/unregister`, `/push/notify`) with an Equix PoW —

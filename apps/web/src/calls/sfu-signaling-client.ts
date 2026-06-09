@@ -16,7 +16,8 @@
  * the `RTCPeerConnection`. The CallSession SFU-mode wiring (route the
  * local SDP offer through `sendSdpOffer`, apply the `SdpAnswer`,
  * trickle ICE via `sendIceCandidate`, drive SFU-initiated renegotiation
- * from `onSdpOffer`) lands in the next subsprint on top of this client.
+ * from `onSdpOffer`) is built on top of this client in
+ * `sfu-call-session.ts`.
  *
  * ## Inbound parsing
  *

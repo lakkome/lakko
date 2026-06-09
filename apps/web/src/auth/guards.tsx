@@ -15,8 +15,10 @@
  * Both guards are declarative wrappers — pass children through and
  * the consumer never has to think about navigation imperatively.
  *
- * Phase 1.16b stubs the auth state in-memory. The guards work the
- * same way once 1.16c plugs OPAQUE-PAKE in behind `useAuth()`.
+ * The guards read the real auth state behind `useAuth()` —
+ * `AuthContext` runs OPAQUE-PAKE round-trips (1.16c) and rehydrates
+ * persisted sessions on mount, so the guards see a genuine
+ * `loading` / `anon` / `session` value.
  */
 import { Show, type JSX } from "solid-js";
 import { Navigate } from "@solidjs/router";
@@ -53,10 +55,10 @@ export function RequireAnonymous(props: {
 
 function UnauthenticatedFallback(): JSX.Element {
   const auth = useAuth();
-  // While the context is still resolving (1.16c will start in the
-  // "loading" state) we render a placeholder instead of an instant
-  // redirect — bouncing the user to /login during a half-second
-  // rehydration is jarring.
+  // While the context is still resolving (it starts in the
+  // "loading" state on mount while it reads localStorage + IDB) we
+  // render a placeholder instead of an instant redirect — bouncing
+  // the user to /login during a half-second rehydration is jarring.
   return (
     <Show
       when={auth.state().kind !== "loading"}

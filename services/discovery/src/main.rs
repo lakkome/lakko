@@ -10,8 +10,11 @@
 //! `oprf.rs` for the protocol details and `registry.rs` for the
 //! storage layer.
 //!
-//! KeyPackage bundle delivery and Key Transparency log inclusion
-//! proofs are deferred to Phase 1.5b / Phase 2.
+//! KeyPackage bundle delivery has landed (see `keypackage.rs` —
+//! `POST /discovery/keypackage` upload + `GET
+//! /discovery/keypackage/{account_id}` fetch). Key Transparency
+//! log inclusion proofs remain deferred to Phase 2 (no
+//! transparency service is deployed to anchor identities).
 //!
 //! ## Phase 1.5b — auth-token gating
 //!

@@ -73,11 +73,12 @@
 //!   the capability advertises via `owner_account_id`).
 //! - The owner-side `Group::join_from_welcome` call after
 //!   unwrapping. That's `lakko-mls`.
-//! - Subsequent-joiner KP forwarding (multi-party). Same
-//!   recipe applies — wrap the joiner's KP under a sibling
-//!   domain separator (`lakko/call-keypackage/v1`) and ferry
-//!   via the same path — but that's deferred to the
-//!   3c3-multi-use sprint.
+//! - Subsequent-joiner KP forwarding (multi-party). That has
+//!   landed as a sibling module, [`crate::call_kp_forward`],
+//!   which wraps the joiner's KP under the
+//!   `lakko/call-keypackage/v1` domain separator and ferries it
+//!   via the same path; the owner's polling loop dispatches it
+//!   in [`crate::incoming_envelope`].
 
 use core::result::Result as CoreResult;
 

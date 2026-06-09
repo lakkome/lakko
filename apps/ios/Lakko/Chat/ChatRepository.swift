@@ -29,11 +29,10 @@ import LakkoCore
 /// isn't internally synchronised for concurrent writes against the
 /// same group).
 ///
-/// **Snapshot persistence** runs after every state-mutating call
-/// via ``IdentitySnapshotStore``. Failures are
-/// logged-and-swallowed — the in-memory state is still correct;
-/// the next mutation will retry the persist naturally. The
-/// snapshot wiring lands in 1.14f5.
+/// **Snapshot persistence** (1.14f5) runs after every
+/// state-mutating call via ``IdentitySnapshotStore``. Failures
+/// are logged-and-swallowed — the in-memory state is still
+/// correct; the next mutation will retry the persist naturally.
 ///
 /// ## Lifecycle
 ///

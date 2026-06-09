@@ -14,14 +14,15 @@
  *                     locally, calls
  *                     services/channels::create).
  *   ChannelView     — `/channels/:id` — server epoch +
- *                     posts list + publish stub.
+ *                     posts list + publish form.
  *
  * Real ChannelPost composition + signature verify + AEAD
- * open lands when `lakko-channels` is exposed through
- * `lakko-ffi-wasm` — a follow-up sub-sprint. Until then
- * the publish form sends a stub random body (the server
- * stores opaque bytes and hands them back; the UI shows
- * the post in the list as base64).
+ * open are wired (G4-2-crypto): the publish form composes
+ * a signed encrypted post via `composePost` (the `composer.ts`
+ * shim over `lakko-ffi-wasm`) and the subscriber path opens
+ * the HPKE seed envelope via `openSubscriberSeedEnvelope`.
+ * The server stays opaque — it stores and hands back the
+ * ciphertext bytes without inspecting them.
  */
 
 import {

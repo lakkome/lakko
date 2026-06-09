@@ -10,10 +10,13 @@
  * subscribe via `createSignal` accessors; mutations go through
  * the `actions` object.
  *
- * No WebRTC integration here — the live media path lands in
- * the platform's WebRTC pod (3a-pod-followup). Until then,
- * UI consumes mock data + the BandwidthController (#39) for
- * the connection-quality glyph.
+ * No WebRTC integration here — this is a pure data layer. The
+ * live media path runs in the call sessions (`calls/call-session.ts`
+ * for 1×1, `calls/sfu-call-session.ts` for the SFU); their adapters
+ * (`Chat.tsx`, `calls/sfu-call-ui.ts`) drive this store through the
+ * `actions` object. The standalone design route seeds the same store
+ * with mock data (`Call.tsx::seedMockParticipants`) when no session is
+ * bound.
  */
 
 import { createSignal, createMemo, type Accessor } from "solid-js";

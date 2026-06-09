@@ -34,14 +34,17 @@ import LakkoCore
 /// `Task.detached` for the PoW solve + the URLSession call internally
 /// (see ``AuthClient`` and ``solvePow(seedB64:effortBits:)``).
 ///
-/// ## What this class deliberately doesn't do
+/// ## Division of labor
 ///
-/// The web `AuthContext` also handles username registration on the
-/// discovery service, KeyPackage upload, MLS state rehydration, and
-/// ChatContext fan-out. None of that surface exists on the iOS side
-/// yet (discovery client lands in 1.14e, MLS chat surface in 1.14f).
-/// When those crates show up we extend this repository — the shape
-/// is intentional, not vestigial.
+/// Username registration / KeyPackage upload live on
+/// ``DiscoveryClient`` + ``ContactsRepository``, and MLS state
+/// + chat fan-out on ``ChatRepository`` — both surfaces exist
+/// on iOS (discovery 1.14e, MLS chat 1.14f). This repository
+/// owns the authenticate flows (signup / login / passkey /
+/// recover) and coordinates the post-auth bootstrap: it uploads
+/// the identity bundle via ``DiscoveryClient`` and drives the
+/// backup restore + ``ChatRepository/bootstrap(secrets:)``
+/// hand-off, but does not itself own the discovery or MLS state.
 @MainActor
 public final class AuthRepository: ObservableObject {
 

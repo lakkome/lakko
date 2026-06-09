@@ -462,11 +462,11 @@ function SendPanel(props: SendPanelProps): JSX.Element {
 }
 
 function InvitePanel(): JSX.Element {
-  // Phase 1.18c — local-only state. Form drives
-  // `wasm.InviteCapability.compose(...)` and produces a
-  // `https://<host>/i/<slug>` URL. No server round-trip; the
-  // capability bytes are fully self-contained inside the URL
-  // until 1.18d switches to the short-pointer + blob form.
+  // Form drives `wasm.InviteCapability.compose(...)` and produces a
+  // `https://<host>/i/<slug>` URL. The default path (1.18d1b) uploads
+  // the composed capability to the discovery service and emits a short
+  // pointer URL; it falls back to the self-contained inline-bytes form
+  // (1.18c) when the service is unreachable.
   //
   // We pull the canonical Identity from <ChatProvider> rather
   // than re-deriving from `auth.identitySecrets` so the
@@ -736,7 +736,8 @@ function InvitePanel(): JSX.Element {
                 "margin-top": "0.2rem",
               }}
             >
-              UI hint in V1; server-side enforcement lands in 1.18d.
+              Enforced server-side on the pointer path (1.18d2a);
+              a UI hint only on the inline-fallback path.
             </span>
           </label>
 
@@ -1521,9 +1522,10 @@ function PendingPanel(props: PendingPanelProps): JSX.Element {
 interface AcceptedPanelProps {
   readonly accepted: () => AcceptedContact[];
   /** Local user's Ed25519 verifying key (32 bytes) — required to
-   *  compute safety numbers against accepted contacts. `null`
-   *  when the chat-provider identity isn't wired yet (the
-   *  AcceptedRow falls back to "safety number unavailable"). */
+   *  compute safety numbers against accepted contacts. Read from
+   *  the chat provider's `identity()`; `null` only while that
+   *  identity signal has not resolved yet (the AcceptedRow falls
+   *  back to "safety number unavailable" for that window). */
   readonly myPubkey: () => Uint8Array | null;
   readonly onRemove: (c: AcceptedContact) => void;
 }

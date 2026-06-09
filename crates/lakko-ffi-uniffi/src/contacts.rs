@@ -497,10 +497,15 @@ pub fn compose_invite_capability(
 /// inviter via the Kotlin-side `sendContactRequestToBundle`
 /// orchestrator (1.15e9-side work).
 ///
-/// The v1 wire format is the 1.18a Rust struct verbatim — no
-/// server dependency, capability bytes live in the URL itself
-/// (server-side `/discovery/invite` storage is the discovery
-/// service's job, deferred 1.15e9-side work).
+/// The v1 wire format is the 1.18a Rust struct verbatim. This
+/// FFI surface always returns the full capability bytes, which
+/// can ride directly in the URL with no server dependency.
+/// Alternatively `services/discovery` content-addresses an
+/// uploaded capability and serves it from
+/// `GET /discovery/invite/{blob_id}` (with `max_uses`
+/// enforcement on `/consume`), so the client may instead embed
+/// the short `/i/<blob_id>` pointer — that is a client transport
+/// choice, not a gap in this codec.
 #[derive(uniffi::Object)]
 pub struct InviteCapability {
     inner: RustInviteCapability,

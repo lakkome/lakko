@@ -52,8 +52,10 @@ voprf = { version = "0.5", default-features = false, features = [
 ] }
 generic-array = "0.14"
 
-# PoW infrastructure mirrored from services/auth — Equix puzzle, SHA-256
-# effort filter. Phase 2 should DRY this into a shared `lakko-pow` crate.
+# Server-side PoW verify, mirrored from services/auth — Equix puzzle, SHA-256
+# effort filter (still duplicated; per-service DB rule keeps each
+# `pow_challenges` table separate). The `lakko-pow` crate is the CLIENT
+# solver only and does not cover this server verify path.
 equix = { version = "0.6", features = ["compiler"] }
 sha2 = "0.10"
 

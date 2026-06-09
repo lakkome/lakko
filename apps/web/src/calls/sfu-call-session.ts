@@ -48,10 +48,14 @@
  *   * Client-initiated mid-call renegotiation (add / drop a track
  *     after the first offer) — needs perfect-negotiation glare
  *     handling.
- *   * Mapping a remote `ontrack` to its source participant: the SFU's
- *     MSID stream-id convention (= source peer id) is not yet pinned,
- *     so we surface the raw stream id and let the caller resolve it.
  *   * Per-remote connection-quality stats.
+ *
+ * Mapping a remote `ontrack` to its source participant IS resolved:
+ * the SFU pins the downstream MSID stream-id to the source peer id
+ * (`services/sfu/src/media.rs` `add_media(.., Some(source_peer), ..)`),
+ * and `PeerId Display == the wire peer_id`, so the `streamId` this
+ * session surfaces is exactly that peer id. `sfu-call-ui.ts` keys the
+ * roster tile off it (`peer-<streamId>`).
  *
  * Security invariant #4 (no non-E2EE fallback): if the browser lacks
  * `RTCRtpScriptTransform`, `connect()` throws BEFORE any media is
@@ -119,8 +123,9 @@ export interface SfuCallConfig {
 /** A remote participant's media surfaced to the caller. */
 export interface SfuRemoteTrack {
   /**
-   * The MSID stream id the SFU tagged the track with. The caller maps
-   * this to a participant (see the deferred note in the module doc).
+   * The MSID stream id the SFU tagged the track with. The SFU pins
+   * this to the source peer id (see the module doc), so the caller
+   * maps it straight to a participant (`peer-<streamId>`).
    */
   readonly streamId: string;
   readonly track: MediaStreamTrack;

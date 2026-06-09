@@ -7,8 +7,9 @@
  * `<Outlet />`. Lives outside `routes/` because it is structural
  * UI rather than a route per se.
  *
- * Phase 1.16b: navigation links are wired but every destination
- * (Home, Contacts) is a stub. Real content arrives in 1.16d / 1.16e.
+ * Navigation links are wired (1.16b). Contacts is fully implemented
+ * (OPRF discovery + invite flows, 1.16d). The Home landing is still
+ * a placeholder shell pending the inbox / conversation-list view.
  */
 import type { JSX } from "solid-js";
 import { A, useNavigate } from "@solidjs/router";

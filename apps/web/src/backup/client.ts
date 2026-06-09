@@ -21,8 +21,11 @@
  *      `contacts/local-store.ts`. These feed the payload's
  *      identity-secrets + accepted-contacts fields.
  *
- * MLS group snapshots are reserved in the v1 payload but emitted
- * empty — DeviceGroup-side snapshot publishing lands in 2a3.
+ * The payload also carries a whole-storage MLS snapshot
+ * (`Identity.snapshotStorage()`, Phase 2a3d3) so a restored device
+ * lands with the same group state the upload-side device had at
+ * backup time; it is empty only on the signup baseline (no MLS state
+ * to publish yet) or when the backup pre-dates 2a3d.
  *
  * ## Two entry points
  *

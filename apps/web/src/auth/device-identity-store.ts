@@ -193,7 +193,9 @@ export async function getDeviceIdentitySeed(
  * Note: deleting the seed alone does NOT remove the device's
  * leaf from the user's DeviceGroup — the other devices need to
  * see an MLS `Remove` commit to ratchet past the gone leaf.
- * The full revoke flow lands in 2a3c.
+ * That full revoke flow lives in `devices/remove.ts`
+ * (`removeDeviceAt`, broadcast to the DeviceGroup DS journal);
+ * this helper only wipes the local seed cache on `forgetDevice`.
  */
 export async function deleteDeviceIdentitySeed(
   accountIdB64: string,

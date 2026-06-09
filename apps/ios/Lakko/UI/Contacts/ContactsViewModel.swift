@@ -12,10 +12,10 @@ import Foundation
 ///   * `apps/android/.../ui/contacts/ContactsViewModel.kt`
 ///     (1.15e6 + 1.15e7's `pollOnceLongPoll`)
 ///
-/// **Phase 1.14e4 scope**: search/send + refresh + accept/decline +
-/// requires-reauth panel. Invite generate/revoke surface (1.15e10
-/// on Android) is wired here in 1.14e7. Continuous polling
-/// `pollOnceLongPoll` lands in 1.14e5.
+/// **Scope**: search/send + refresh + accept/decline +
+/// requires-reauth panel (1.14e4), the invite generate/revoke
+/// surface (1.14e7; 1.15e10 on Android), and continuous
+/// `pollOnceLongPoll` (1.14e5) — all wired.
 ///
 /// `@MainActor` because every mutation writes to a `@Published`
 /// slot that SwiftUI reads on the main runloop. The repository's

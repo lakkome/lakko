@@ -356,9 +356,10 @@ function ChatView(props: {
   };
 
   /** Synthesised local participant. Web 1×1 is audio-only, so
-   *  `camOn` is false; mic is always on (the web `CallSession`
-   *  has no mic-toggle yet — a deferred follow-up). Quality dot
-   *  tracks the live RTT sample. */
+   *  `camOn` is false. `micOn` seeds true; the live mic state is
+   *  driven through `callActions.setMic` ↔ `setMicrophoneEnabled`
+   *  (see the effect below). Quality dot tracks the live RTT
+   *  sample. */
   const localParticipant = (): Participant => ({
     id: "local",
     displayName: "You",
@@ -1582,9 +1583,9 @@ function ChatView(props: {
       {/* SFU group-call remote audio — one hidden sink per remote
           MediaStream, keyed by the stream object identity (a stable
           stream keeps its element, so audio does not cut on roster
-          churn). The participant video tiles render from the store
-          roster the adapter drives; per-tile remote VIDEO is deferred
-          on the SFU MSID stream-id → peer mapping. */}
+          churn). Remote VIDEO renders per-tile from the store roster:
+          the `remoteStreamFor` prop above resolves a tile's stream via
+          the SFU MSID-stream-id-to-peer mapping (`peer-<peerId>`). */}
       <Show when={sfuActive()}>
         <For
           each={[

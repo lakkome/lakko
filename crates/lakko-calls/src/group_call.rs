@@ -30,13 +30,17 @@
 //!     The ledger uses that fresh group as the keying
 //!     substrate.
 //!
-//! ## Phase 3c1 scope
+//! ## Scope
 //!
-//! This module ships the **ledger + key derivation** for a
-//! group call. The signaling shape (who notifies whom about
-//! join / leave on the wire) is the 3c2 follow-up; for now
-//! the ledger consumes already-known `(leaf_index, joined?)`
-//! events the caller produces.
+//! This module owns the **ledger + key derivation** for a
+//! group call. The signaling wire shape (who notifies whom
+//! about join / leave) lives in [`crate::signaling`]
+//! ([`SignalingBody`]); the ledger folds those events in via
+//! [`GroupCallSession::apply_remote_signaling`] (and the
+//! lower-level [`GroupCallSession::apply_remote_join`] /
+//! [`GroupCallSession::apply_remote_leave`]). The caller may
+//! also drive the `(leaf_index, joined?)` toggle directly
+//! through [`GroupCallSession::set_joined`].
 //!
 //! ## Rotation policy (Phase 3c5)
 //!

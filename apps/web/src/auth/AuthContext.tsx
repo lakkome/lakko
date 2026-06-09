@@ -33,11 +33,18 @@
  * stays cheap. `forgetDevice()` wipes both — full reset, requires
  * the recovery passphrase to come back.
  *
- * ## What is NOT here yet (1.16c3c3 / 1.16d)
+ * ## What is wired and what is not
  *
- *   * Recover-from-mnemonic flow at `/recover`.
+ *   * Recover-from-mnemonic — DONE. `recover()` drives the
+ *     `/recover` route + `AuthClient.recover`. It still requires
+ *     the target account_id to be cached on this device (no
+ *     discovery lookup in the recover path — see `recover()`).
  *   * `username → accountId` lookup for first-time login on a
- *     fresh device.
+ *     fresh device — DONE. `login()` resolves the typed username
+ *     via `discovery.lookup()` on a local-cache miss.
+ *
+ * Still not here:
+ *
  *   * Multi-account on a single device.
  */
 import {
@@ -175,10 +182,12 @@ export interface AuthApi {
   signup(username: string, password: string): Promise<SignupOutcome>;
   /** Run the OPAQUE-PAKE login flow.
    *
-   *  In 1.16c3b, login is only available for the cached account
-   *  on this device. If the typed `username` does not match the
-   *  cached one, throws — the user has to sign up first or wait
-   *  for 1.16d's discovery service. */
+   *  Resolves the typed `username` to an account_id from the local
+   *  `(accountId, username)` cache, falling back to a
+   *  `discovery.lookup()` round-trip on a cache miss — so a fresh
+   *  browser can log in to any account whose username is
+   *  registered (1.16d2). Throws on unknown username or wrong
+   *  password (both surface the same error — by design). */
   login(username: string, password: string): Promise<void>;
   /** Run the recover-from-mnemonic flow.
    *
@@ -186,10 +195,12 @@ export interface AuthApi {
    *  drives `AuthClient.recover` to rotate the server's password
    *  envelope, derives a fresh device root key from the new
    *  export key, persists it via the IDB pipeline, and flips
-   *  state to `session`. Same single-device limitation as
-   *  `login` — until 1.16d, the user must already have an
-   *  account_id cached on this device. Throws on any failure —
-   *  bad mnemonic, network, server rejection, etc. */
+   *  state to `session`. Unlike `login`, the recover path does
+   *  NOT do a discovery lookup — it requires the account_id to
+   *  already be cached on this device (cross-device recovery via
+   *  discovery is an outstanding follow-up; see the throw in the
+   *  method body). Throws on any failure — bad mnemonic, network,
+   *  server rejection, etc. */
   recover(mnemonicPhrase: string, newPassword: string): Promise<void>;
   /** Phase 2a2c2 — sign in with a WebAuthn passkey on the SAME
    *  device the user previously logged in / signed up from.
@@ -791,7 +802,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         throw new Error(
           "no account on this device — recovery requires the " +
             "account_id cached locally (cross-device recovery " +
-            "arrives in 1.16d via the discovery service)",
+            "via the discovery service is not wired in the recover path)",
         );
       }
       // Parse the phrase up front so a bad mnemonic surfaces

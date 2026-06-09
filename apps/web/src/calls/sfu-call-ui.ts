@@ -26,10 +26,11 @@
  * them in the {@link SfuCallConfig}; this adapter is pure glue + has no
  * opinion on where they come from.
  *
- * Mapping a remote stream id to a roster participant is deferred until
- * the SFU's MSID convention (= source peer id) is pinned — so for now
- * the roster (from `Welcome` / `peer-joined`) and the stream map are
- * surfaced independently and the view correlates them.
+ * A remote stream id maps directly to a roster participant: the SFU
+ * pins the downstream MSID stream id to the source peer id (PeerId
+ * Display == wire peer_id == MSID), so `rt.streamId` IS the peer id.
+ * `addStream` correlates the stream to its `peer-<id>` roster entry
+ * (and flips that participant's camera flag on a video track).
  */
 
 import { createSignal, type Accessor } from "solid-js";
@@ -80,8 +81,8 @@ function peerParticipantId(peerId: string): string {
 }
 
 /** Build a store `Participant` for a remote peer. Camera starts off
- *  (no video track yet); it is not flipped on here because the
- *  stream-id → peer mapping is deferred (see module doc). */
+ *  (no video track yet); `addStream` flips it on when a video track
+ *  arrives, keyed by the SFU's MSID-stream-id-to-peer mapping. */
 function remoteParticipant(displayName: string, peerId: string): Participant {
   return {
     id: peerParticipantId(peerId),

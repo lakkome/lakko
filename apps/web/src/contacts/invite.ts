@@ -8,8 +8,10 @@
  *
  *   * URL plumbing — `composeInviteUrl(...)` + `parseInviteSlug(...)`.
  *     The capability bytes are base64url-no-pad encoded into the URL
- *     itself (V1 — see ROADMAP 1.18a for the trade-off vs the
- *     short-pointer + server-blob form deferred to 1.18d).
+ *     itself (the V1 inline form — see ROADMAP 1.18a for the
+ *     trade-off). The short-pointer + server-blob form landed in
+ *     1.18d1b (`composePointerInviteUrl` below + `DiscoveryClient`
+ *     upload/fetch); inline is now the back-compat fallback.
  *   * Form-side enums — `ExpiryPreset` and `MaxUsesPreset` —
  *     translate UI dropdown choices into the wire-level
  *     `InviteCapability.compose` arguments. Putting them here

@@ -29,8 +29,10 @@ import Foundation
 ///     driven by ``WebauthnRegistration``.
 ///   * ``startAuthentication(accountIdB64:)`` /
 ///     ``finishAuthentication(stateId:credential:)`` — login
-///     halves. Wired but not yet consumed by the UI;
-///     sign-in-with-passkey lands in 2a2c2.
+///     halves, driven end-to-end by ``loginWithPasskey()``.
+///     Consumed by the UI: the Login screen's "Sign in with
+///     passkey" button → ``AuthRepository/loginWithPasskey()``
+///     (2a2c2, landed).
 public final class WebauthnClient {
 
     public static let defaultBaseURL: String = "http://localhost:8081"
