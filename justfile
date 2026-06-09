@@ -239,6 +239,28 @@ target-size:
 
 # ---- Local dev (on your machine) ------------------------------------------
 
+# Bring up the WHOLE backend stack (MariaDB + auth + ds + storage +
+# discovery + push-gw + channels) via Docker Compose. One command, every
+# service a client needs for the core flow. See infra/docker/README.md.
+stack-up:
+    docker compose -f infra/docker/docker-compose.yml up --build -d
+    @echo ""
+    @echo "Stack up. Services on 127.0.0.1: auth:8081 ds:8082 storage:8083"
+    @echo "  discovery:8084 push-gw:8085 channels:8086 (db:3306)."
+    @echo "  Logs: just stack-logs   Down: just stack-down"
+
+# Tear the full stack down (keeps the DB + blob volumes).
+stack-down:
+    docker compose -f infra/docker/docker-compose.yml down
+
+# Tear the full stack down AND wipe the DB + blob volumes.
+stack-down-clean:
+    docker compose -f infra/docker/docker-compose.yml down -v
+
+# Follow logs from every service in the full stack.
+stack-logs:
+    docker compose -f infra/docker/docker-compose.yml logs -f
+
 # Bring up an ephemeral MariaDB via docker/podman for local dev. Stop it
 # with `just dev-mariadb-stop`. Data is not persisted across stops.
 # Requires `docker` OR `podman` on PATH.

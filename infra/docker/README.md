@@ -1,0 +1,117 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+<!-- SPDX-FileCopyrightText: 2026 Lakko Contributors -->
+
+# Local full-stack run (Docker Compose)
+
+Bring up every Lakko backend service a client needs for the core flow —
+**register → recover → username discovery → identity bundle + KeyPackage →
+MLS 1×1 chat over the Delivery Service**, plus channels and push — with one
+command. This is the reproducible local/dev/CI run of the whole stack.
+
+> Production deploys via systemd on a single VPS — see
+> [`infra/README.md`](../README.md) and [`infra/systemd/`](../systemd/). This
+> Compose stack is the local mirror; it does **not** replace the systemd
+> deployment.
+
+## Prerequisites
+
+- Docker Engine + the Compose v2 plugin (`docker compose version`).
+- ~3 GB free disk for the build cache + images.
+
+## Bring it up
+
+```bash
+docker compose -f infra/docker/docker-compose.yml up --build
+```
+
+First run compiles the whole Rust workspace once inside the builder image
+(several minutes); subsequent runs reuse the build cache. Each service
+applies its own SQL migrations against its own database on startup. Add
+`-d` to detach. Bring it down with:
+
+```bash
+docker compose -f infra/docker/docker-compose.yml down          # keep data
+docker compose -f infra/docker/docker-compose.yml down -v       # wipe DB + blobs
+```
+
+Convenience recipes are wired into the justfile:
+
+```bash
+just stack-up        # docker compose up --build -d
+just stack-down      # docker compose down
+just stack-logs      # follow all service logs
+```
+
+## Services + ports
+
+All ports are published on `127.0.0.1` only.
+
+| Service | Port | Purpose |
+|---|---|---|
+| `db` (MariaDB 11) | 3306 | one database per service (`lakko_auth`, `lakko_ds`, `lakko_discovery`, `lakko_channels`, `lakko_push_gw`) |
+| `auth` | 8081 | OPAQUE register/login, session-token + call-JWT mint, WebAuthn, TURN creds, JWKS |
+| `ds` | 8082 | MLS group journal + stranger-inbox mailbox |
+| `storage` | 8083 | ciphertext blob proxy (local blob dir in this profile) |
+| `discovery` | 8084 | OPRF username register/lookup, identity bundle, KeyPackage |
+| `push-gw` | 8085 | encrypted push fan-out (LogOnlyProvider until real creds — below) |
+| `channels` | 8086 | channel broadcast backend |
+
+Health: `curl -sf http://127.0.0.1:8081/ready` (and `/health`). `channels`
+exposes `/health` only.
+
+## Pointing a client at the stack
+
+The web client proxies `/api/{auth,discovery,ds,storage,push}` to these
+ports in `apps/web/vite.config.ts`; run `just dev-web` alongside this stack.
+Native clients take the base URLs from their build config (`LAKKO_*_URL` /
+Info.plist / `BuildConfig`).
+
+## Configuration
+
+All secrets in the compose file are **fixed local-dev fixtures**, never
+production values. Override per run via the environment (the compose reads
+`${VAR:-default}`):
+
+```bash
+LAKKO_POW_EFFORT_BITS=1 LAKKO_DISCOVERY_POW_EFFORT_BITS=1 \
+  docker compose -f infra/docker/docker-compose.yml up --build
+```
+
+| Variable | Default | Notes |
+|---|---|---|
+| `LAKKO_SESSION_TOKEN_SECRET` | dev fixture (base64) | MUST be identical across auth + discovery + storage + push-gw (auth mints, the rest verify) |
+| `LAKKO_POW_EFFORT_BITS` / `LAKKO_DISCOVERY_POW_EFFORT_BITS` / `LAKKO_PUSH_GW_POW_EFFORT_BITS` | 8 | proof-of-work cost; set to `1` for fast scripted tests |
+| `LAKKO_TURN_SHARED_SECRET` / `LAKKO_TURN_URIS` | dev fixtures | base64 secret; only used by the call-credential endpoint |
+
+### Enabling real push delivery
+
+Without APNs / FCM / WebPush credentials, `push-gw` uses the
+`LogOnlyProvider` (records envelopes instead of delivering them). To deliver
+for real, add to the `push-gw` service's `environment:` block: the
+`LAKKO_APNS_*` set (`KEY_PATH`, `KEY_ID`, `TEAM_ID`, `TOPIC`, `ENDPOINT`),
+`LAKKO_FCM_SA_PATH`, and/or the `LAKKO_WEBPUSH_VAPID_*` set, and mount the
+key files as read-only volumes.
+
+### Calls (SFU)
+
+The SFU carries a UDP media plane and ships its own image
+([`services/sfu/Dockerfile`](../../services/sfu/Dockerfile)). To add it to
+this stack, append an `sfu` service that builds from that Dockerfile, point
+its JWKS fetch at `http://auth:8081/.well-known/jwks.json`, and publish its
+signaling port (and the UDP media port if you exercise media). The
+standalone SFU e2e stack lives at [`ci/sfu-e2e/`](../../ci/sfu-e2e/).
+
+> `edge` (broadcast cascade / audio rooms) and `transport-rendezvous`
+> (anti-censorship bootstrap) are later-phase services and are not wired
+> into this Compose file yet.
+
+## Troubleshooting
+
+- **A service exits immediately** — check `docker compose logs <svc>`. A
+  missing/garbled required env var (e.g. a non-base64
+  `LAKKO_TURN_SHARED_SECRET`) makes auth refuse to start, by design.
+- **`depends_on` waits forever** — the `db` healthcheck only passes once
+  `initdb.sql` finished creating every database; give it the
+  `start_period`. A corrupt volume: `down -v` and retry.
+- **Migrations "missing"** — each service owns its own database; never point
+  two services at the same one (sqlx tracks applied migrations per-DB).

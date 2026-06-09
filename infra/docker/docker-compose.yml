@@ -1,0 +1,204 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+# Local full-stack run of the Lakko core HTTP services. One command
+# (`docker compose -f infra/docker/docker-compose.yml up --build`) brings up
+# every backend a client needs for the core flow: register -> recover ->
+# username discovery -> identity bundle + KeyPackage -> MLS 1x1 chat over the
+# Delivery Service, plus channels + push.
+#
+#   db        - MariaDB 11, seeded by ./initdb.sql (one DB per service).
+#   auth      :8081 - OPAQUE register/login, session-token + call-JWT mint,
+#                     WebAuthn, TURN credentials, the JWKS the SFU verifies.
+#   ds        :8082 - MLS group journal + the stranger-inbox mailbox.
+#   storage   :8083 - ciphertext blob proxy (local blob dir in this profile).
+#   discovery :8084 - OPRF username register/lookup, identity bundle, KeyPackage.
+#   push-gw   :8085 - encrypted push fan-out (LogOnlyProvider until real APNs /
+#                     FCM / WebPush creds are supplied - see the README).
+#   channels  :8086 - channel broadcast backend.
+#
+# The SFU (calls) carries a UDP media plane and its own image; run it via
+# ci/sfu-e2e/ or wire it into this file with a JWKS URL pointing at
+# http://auth:8081/.well-known/jwks.json (see the README).
+#
+# ALL secrets here are FIXED LOCAL-DEV FIXTURES, never production values.
+# Production deploys via systemd (infra/README.md + infra/systemd/).
+
+services:
+  db:
+    image: mariadb:11
+    container_name: lakko-db
+    restart: unless-stopped
+    environment:
+      MARIADB_ROOT_PASSWORD: rootpw
+      MARIADB_USER: lakko
+      MARIADB_PASSWORD: devpass
+    volumes:
+      - ./initdb.sql:/docker-entrypoint-initdb.d/00-init.sql:ro
+      - lakko-db-data:/var/lib/mysql
+    ports:
+      - "127.0.0.1:3306:3306"
+    healthcheck:
+      # Passes only once the init script created the last DB (lakko_push_gw)
+      # AND granted the lakko user - so depends_on: service_healthy never
+      # races the one-time bootstrap.
+      test:
+        - CMD-SHELL
+        - "mariadb -ulakko -pdevpass -e 'USE lakko_push_gw' || exit 1"
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+
+  auth:
+    build:
+      context: ../..
+      dockerfile: infra/docker/Dockerfile
+      target: auth-runtime
+    container_name: lakko-auth
+    restart: unless-stopped
+    depends_on:
+      db: { condition: service_healthy }
+    environment:
+      LAKKO_BIND: 0.0.0.0:8081
+      LAKKO_AUTH_DATABASE_URL: mysql://lakko:devpass@db:3306/lakko_auth
+      DATABASE_URL: mysql://lakko:devpass@db:3306/lakko_auth
+      LAKKO_SESSION_TOKEN_SECRET: ${LAKKO_SESSION_TOKEN_SECRET:-ZGV2LXNlc3Npb24tdG9rZW4tc2VjcmV0LWZvci1sb2NhbC10ZXN0aW5nLW9ubHkhIQ==}
+      LAKKO_WEBAUTHN_RP_ID: localhost
+      LAKKO_WEBAUTHN_RP_NAME: Lakko (dev)
+      LAKKO_WEBAUTHN_RP_ORIGIN: http://localhost:5173
+      LAKKO_TURN_SHARED_SECRET: ${LAKKO_TURN_SHARED_SECRET:-ZHVtbXktdHVybi1zZWNyZXQ=}
+      LAKKO_TURN_URIS: ${LAKKO_TURN_URIS:-turn:localhost:3478}
+      LAKKO_POW_EFFORT_BITS: ${LAKKO_POW_EFFORT_BITS:-8}
+    ports:
+      - "127.0.0.1:8081:8081"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:8081/ready || exit 1"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 3s
+
+  ds:
+    build:
+      context: ../..
+      dockerfile: infra/docker/Dockerfile
+      target: ds-runtime
+    container_name: lakko-ds
+    restart: unless-stopped
+    depends_on:
+      db: { condition: service_healthy }
+    environment:
+      LAKKO_BIND: 0.0.0.0:8082
+      LAKKO_DS_DATABASE_URL: mysql://lakko:devpass@db:3306/lakko_ds
+      DATABASE_URL: mysql://lakko:devpass@db:3306/lakko_ds
+    ports:
+      - "127.0.0.1:8082:8082"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:8082/ready || exit 1"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 3s
+
+  storage:
+    build:
+      context: ../..
+      dockerfile: infra/docker/Dockerfile
+      target: storage-runtime
+    container_name: lakko-storage
+    restart: unless-stopped
+    environment:
+      LAKKO_BIND: 0.0.0.0:8083
+      LAKKO_BLOB_DIR: /var/lib/lakko/blobs
+      LAKKO_SESSION_TOKEN_SECRET: ${LAKKO_SESSION_TOKEN_SECRET:-ZGV2LXNlc3Npb24tdG9rZW4tc2VjcmV0LWZvci1sb2NhbC10ZXN0aW5nLW9ubHkhIQ==}
+    volumes:
+      - lakko-blobs:/var/lib/lakko/blobs
+    ports:
+      - "127.0.0.1:8083:8083"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:8083/ready || exit 1"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 3s
+
+  discovery:
+    build:
+      context: ../..
+      dockerfile: infra/docker/Dockerfile
+      target: discovery-runtime
+    container_name: lakko-discovery
+    restart: unless-stopped
+    depends_on:
+      db: { condition: service_healthy }
+    environment:
+      LAKKO_BIND: 0.0.0.0:8084
+      LAKKO_DISCOVERY_DATABASE_URL: mysql://lakko:devpass@db:3306/lakko_discovery
+      DATABASE_URL: mysql://lakko:devpass@db:3306/lakko_discovery
+      # MUST match auth's secret - discovery verifies the bearer session
+      # tokens auth mints (identity-bundle upload is gated).
+      LAKKO_SESSION_TOKEN_SECRET: ${LAKKO_SESSION_TOKEN_SECRET:-ZGV2LXNlc3Npb24tdG9rZW4tc2VjcmV0LWZvci1sb2NhbC10ZXN0aW5nLW9ubHkhIQ==}
+      LAKKO_DISCOVERY_POW_EFFORT_BITS: ${LAKKO_DISCOVERY_POW_EFFORT_BITS:-8}
+    ports:
+      - "127.0.0.1:8084:8084"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:8084/ready || exit 1"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 3s
+
+  push-gw:
+    build:
+      context: ../..
+      dockerfile: infra/docker/Dockerfile
+      target: push-gw-runtime
+    container_name: lakko-push-gw
+    restart: unless-stopped
+    depends_on:
+      db: { condition: service_healthy }
+    environment:
+      LAKKO_BIND: 0.0.0.0:8085
+      LAKKO_PUSH_GW_DATABASE_URL: mysql://lakko:devpass@db:3306/lakko_push_gw
+      DATABASE_URL: mysql://lakko:devpass@db:3306/lakko_push_gw
+      LAKKO_SESSION_TOKEN_SECRET: ${LAKKO_SESSION_TOKEN_SECRET:-ZGV2LXNlc3Npb24tdG9rZW4tc2VjcmV0LWZvci1sb2NhbC10ZXN0aW5nLW9ubHkhIQ==}
+      LAKKO_PUSH_GW_POW_EFFORT_BITS: ${LAKKO_PUSH_GW_POW_EFFORT_BITS:-8}
+      # No APNS_/FCM_/WEBPUSH_ creds in dev -> the LogOnlyProvider records
+      # envelopes instead of delivering. Supply real creds to enable
+      # delivery (see the README).
+    ports:
+      - "127.0.0.1:8085:8085"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:8085/ready || exit 1"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 3s
+
+  channels:
+    build:
+      context: ../..
+      dockerfile: infra/docker/Dockerfile
+      target: channels-runtime
+    container_name: lakko-channels
+    restart: unless-stopped
+    depends_on:
+      db: { condition: service_healthy }
+    environment:
+      LAKKO_CHANNELS_BIND: 0.0.0.0:8086
+      LAKKO_CHANNELS_DATABASE_URL: mysql://lakko:devpass@db:3306/lakko_channels
+      DATABASE_URL: mysql://lakko:devpass@db:3306/lakko_channels
+    ports:
+      - "127.0.0.1:8086:8086"
+    healthcheck:
+      # channels exposes /health (+ /version) but no /ready probe.
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:8086/health || exit 1"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 3s
+
+volumes:
+  lakko-db-data:
+  lakko-blobs:
