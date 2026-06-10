@@ -896,47 +896,11 @@ public class AuthRepository(
         }
         var seedHandedOff = false
         try {
-            val derivedPubkey =
-                Identity.fromSeed(accountIdentitySeed).use { it.signaturePublicKey() }
-
-            // HARD-BLOCK verify (ADR-0017 + lakko-security finding #1):
-            // fetch the published bundle and require a MATCH to proceed.
-            // 404 (null) OR a fetch error => HARD-BLOCK (no TOFU).
-            val discovery = discoveryClientFactory()
-            try {
-                discovery.setSessionToken(pending.sessionToken)
-                val bundle = try {
-                    discovery.identityFetch(pending.accountIdBytes)
-                } catch (cause: Throwable) {
-                    // Could not reach the directory to verify
-                    // (network/parse). We cannot confirm the phrase
-                    // reproduces the published key, so refuse rather
-                    // than cache a possibly-wrong phrase.
-                    Log.w(
-                        "lakko-auth",
-                        "recovery-phrase verification fetch failed",
-                        cause,
-                    )
-                    throw IdentityVerificationUnavailable(
-                        "Could not reach the directory to verify your " +
-                            "recovery phrase. Check your connection and try " +
-                            "again.",
-                    )
-                }
-                if (bundle == null) {
-                    throw IdentityVerificationUnavailable(
-                        "No published identity was found to verify your " +
-                            "recovery phrase. Try again, or restore from a " +
-                            "device that still has your account.",
-                    )
-                }
-                val published = base64Decode(bundle.signature_pubkey)
-                if (!published.contentEquals(derivedPubkey)) {
-                    throw PhraseMismatch()
-                }
-            } finally {
-                discovery.close()
-            }
+            verifySeedAgainstPublishedIdentity(
+                accountIdBytes = pending.accountIdBytes,
+                sessionToken = pending.sessionToken,
+                accountIdentitySeed = accountIdentitySeed,
+            )
 
             // Cache the phrase seed under EncryptedSharedPreferences so
             // future warm logins skip the prompt. Best-effort.
@@ -976,6 +940,221 @@ public class AuthRepository(
             // seed never reached the live IdentitySecrets — zeroize it.
             if (!seedHandedOff) {
                 accountIdentitySeed.fill(0)
+            }
+        }
+    }
+
+    /**
+     * Shared HARD-BLOCK verification (ADR-0017 + lakko-security
+     * finding #1): the supplied AccountIdentity seed MUST reproduce
+     * the account's PUBLISHED identity key. 404 (null bundle) or a
+     * fetch error refuses ([IdentityVerificationUnavailable]); a
+     * mismatch refuses ([PhraseMismatch]). Never trust-on-first-use.
+     * Used by [provideRecoveryPhrase], [completeFromPairing] and
+     * [completeFromDeviceRestore]; the CALLER owns zeroizing the
+     * seed on refusal.
+     */
+    private suspend fun verifySeedAgainstPublishedIdentity(
+        accountIdBytes: ByteArray,
+        sessionToken: String?,
+        accountIdentitySeed: ByteArray,
+    ) {
+        val derivedPubkey =
+            Identity.fromSeed(accountIdentitySeed).use { it.signaturePublicKey() }
+        val discovery = discoveryClientFactory()
+        try {
+            discovery.setSessionToken(sessionToken)
+            val bundle = try {
+                discovery.identityFetch(accountIdBytes)
+            } catch (cause: Throwable) {
+                // Could not reach the directory to verify
+                // (network/parse). We cannot confirm the seed
+                // reproduces the published key, so refuse rather
+                // than cache a possibly-wrong identity.
+                Log.w(
+                    "lakko-auth",
+                    "identity-seed verification fetch failed",
+                    cause,
+                )
+                throw IdentityVerificationUnavailable(
+                    "Could not reach the directory to verify the " +
+                        "restored identity. Check your connection and " +
+                        "try again.",
+                )
+            }
+            if (bundle == null) {
+                throw IdentityVerificationUnavailable(
+                    "No published identity was found to verify against. " +
+                        "Try again, or restore with your recovery phrase.",
+                )
+            }
+            val published = base64Decode(bundle.signature_pubkey)
+            if (!published.contentEquals(derivedPubkey)) {
+                throw PhraseMismatch()
+            }
+        } finally {
+            discovery.close()
+        }
+    }
+
+    /**
+     * ADR-0018 factor (a), path (a) — complete a pending
+     * `NeedsRecoveryPhrase` login using the identity seed received
+     * from ANOTHER DEVICE over the E2EE pairing channel (instead of
+     * typing the 24 words). Same fail-closed gate as
+     * [provideRecoveryPhrase]; prefers the freshly REDEEMED session
+     * token when the joiner's grant redeem succeeded.
+     *
+     * Takes ownership of `phraseSeed` (zeroized on every refusal).
+     *
+     * @throws PhraseMismatch / IdentityVerificationUnavailable — same
+     *         semantics as [provideRecoveryPhrase].
+     * @throws AuthClientArgError when there is no pending recovery.
+     */
+    public suspend fun completeFromPairing(
+        phraseSeed: ByteArray,
+        sessionToken: String? = null,
+        sessionExpiresAtMs: Long? = null,
+    ) {
+        val pending = pendingRecovery.get()
+            ?: throw AuthClientArgError("no pending identity recovery — sign in first")
+        var seedHandedOff = false
+        try {
+            verifySeedAgainstPublishedIdentity(
+                accountIdBytes = pending.accountIdBytes,
+                sessionToken = sessionToken ?: pending.sessionToken,
+                accountIdentitySeed = phraseSeed,
+            )
+            try {
+                AccountIdentitySeedStore.putAccountIdentitySeed(
+                    applicationContext,
+                    pending.accountIdB64,
+                    phraseSeed,
+                )
+            } catch (cause: Throwable) {
+                Log.w(
+                    "lakko-auth",
+                    "account-identity-seed persist (completeFromPairing) failed",
+                    cause,
+                )
+            }
+            mutableIdentitySecrets.value = IdentitySecrets(
+                accountId = pending.accountIdBytes,
+                exportKey = pending.exportKey.copyOf(),
+                accountIdentitySeed = phraseSeed,
+                sessionToken = sessionToken ?: pending.sessionToken,
+                sessionExpiresAtMs = sessionExpiresAtMs
+                    ?: pending.sessionExpiresAtMs,
+            )
+            seedHandedOff = true
+            pendingRecovery.set(null)
+            mutableState.value = AuthState.Session(
+                account = SessionAccount(
+                    accountIdB64 = pending.accountIdB64,
+                    username = pending.username,
+                ),
+            )
+        } finally {
+            if (!seedHandedOff) {
+                phraseSeed.fill(0)
+            }
+        }
+    }
+
+    /**
+     * ADR-0018 factor (a), path (b) — NO-PASSWORD restore: the fresh
+     * device ran the anonymous pairing join and holds the transferred
+     * identity seed + the REDEEMED session token (the only ACCESS on
+     * this device — there is no password, hence no OPAQUE export key).
+     *
+     * FAIL CLOSED FIRST — the seed is verified against the published
+     * identity BEFORE any persistence; a mismatched / unverifiable
+     * seed leaves this device untouched.
+     *
+     * The device root key (the rehydration existence-gate) is derived
+     * from the identity seed via [deriveDeviceRootKeyFromIdentitySeed]
+     * — distinct HKDF domain from the exportKey-derived variant.
+     * Unlike web, nothing is wrapped under the Android device key
+     * (stores ride the Keystore master key), so a later password
+     * login overwriting it with the exportKey-derived value is
+     * harmless.
+     *
+     * `IdentitySecrets.exportKey` is set EMPTY on this path — no
+     * consumer outside this repository reads it (grep-verified; the
+     * canonical identity + backup signing are phrase-seeded per
+     * ADR-0017), and a later password login replaces it.
+     *
+     * Takes ownership of `phraseSeed` (zeroized on every refusal).
+     */
+    public suspend fun completeFromDeviceRestore(
+        accountIdBytes: ByteArray,
+        accountIdB64: String,
+        username: String,
+        phraseSeed: ByteArray,
+        sessionToken: String,
+        sessionExpiresAtMs: Long,
+    ) {
+        var seedHandedOff = false
+        try {
+            verifySeedAgainstPublishedIdentity(
+                accountIdBytes = accountIdBytes,
+                sessionToken = sessionToken,
+                accountIdentitySeed = phraseSeed,
+            )
+            val deviceRootKey =
+                deriveDeviceRootKeyFromIdentitySeed(phraseSeed, accountIdB64)
+            try {
+                deviceKeyStore.putDeviceKey(
+                    context = applicationContext,
+                    accountIdB64 = accountIdB64,
+                    rootKey = deviceRootKey,
+                )
+            } catch (cause: Throwable) {
+                Log.w(
+                    "lakko-auth",
+                    "device-key persist (completeFromDeviceRestore) failed",
+                    cause,
+                )
+            } finally {
+                deviceRootKey.fill(0)
+            }
+            try {
+                AccountIdentitySeedStore.putAccountIdentitySeed(
+                    applicationContext,
+                    accountIdB64,
+                    phraseSeed,
+                )
+            } catch (cause: Throwable) {
+                Log.w(
+                    "lakko-auth",
+                    "account-identity-seed persist (completeFromDeviceRestore) failed",
+                    cause,
+                )
+            }
+            sessionStore.save(
+                PersistedSession(
+                    accountIdB64 = accountIdB64,
+                    username = username,
+                ),
+            )
+            mutableIdentitySecrets.value = IdentitySecrets(
+                accountId = accountIdBytes.copyOf(),
+                exportKey = ByteArray(0),
+                accountIdentitySeed = phraseSeed,
+                sessionToken = sessionToken,
+                sessionExpiresAtMs = sessionExpiresAtMs,
+            )
+            seedHandedOff = true
+            pendingRecovery.set(null)
+            mutableState.value = AuthState.Session(
+                account = SessionAccount(
+                    accountIdB64 = accountIdB64,
+                    username = username,
+                ),
+            )
+        } finally {
+            if (!seedHandedOff) {
+                phraseSeed.fill(0)
             }
         }
     }

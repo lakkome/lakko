@@ -92,48 +92,57 @@ private struct RecoverForm: View {
             .font(.body)
             .foregroundStyle(.secondary)
 
-            if let cachedUsername {
-                Text("Account on this device: @\(cachedUsername)")
-                    .font(.body)
+            if viewModel.mode != .anotherDevice {
+                if let cachedUsername {
+                    Text("Account on this device: @\(cachedUsername)")
+                        .font(.body)
+                } else {
+                    // ADR-0017 fresh-device recover — no cached account, so
+                    // ask for the username to look it up via discovery.
+                    Text("Username")
+                        .font(.headline)
+                    TextField("alice", text: $viewModel.username)
+                        .textFieldStyle(.roundedBorder)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled(true)
+                        .disabled(viewModel.busy)
+                }
+            }
+
+            // 1.21c2 — mode toggle: phrase | shares. Picker renders
+            // as a segmented control which matches the iOS native
+            // pattern for a small-mode form switch. ADR-0018 adds the
+            // "Device" segment: restore via an already-linked device
+            // (no password, no phrase typing).
+            Picker("Recovery mode", selection: $viewModel.mode) {
+                Text("Phrase").tag(RecoverViewModel.Mode.phrase)
+                Text("Shares").tag(RecoverViewModel.Mode.shares)
+                Text("Device").tag(RecoverViewModel.Mode.anotherDevice)
+            }
+            .pickerStyle(.segmented)
+            .disabled(viewModel.busy)
+
+            if viewModel.mode == .anotherDevice {
+                anotherDeviceSection
             } else {
-                // ADR-0017 fresh-device recover — no cached account, so
-                // ask for the username to look it up via discovery.
-                Text("Username")
-                    .font(.headline)
-                TextField("alice", text: $viewModel.username)
+                if viewModel.mode == .phrase {
+                    phraseEditor
+                } else {
+                    sharesEditor
+                }
+
+                SecureField("New password", text: $viewModel.password)
+                    .textFieldStyle(.roundedBorder)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled(true)
+                    .disabled(viewModel.busy)
+
+                SecureField("Confirm new password", text: $viewModel.confirm)
                     .textFieldStyle(.roundedBorder)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled(true)
                     .disabled(viewModel.busy)
             }
-
-            // 1.21c2 — mode toggle: phrase | shares. Picker
-            // renders as a segmented control which matches the
-            // iOS native pattern for a two-mode form switch.
-            Picker("Recovery mode", selection: $viewModel.mode) {
-                Text("24-word phrase").tag(RecoverViewModel.Mode.phrase)
-                Text("Recovery shares").tag(RecoverViewModel.Mode.shares)
-            }
-            .pickerStyle(.segmented)
-            .disabled(viewModel.busy)
-
-            if viewModel.mode == .phrase {
-                phraseEditor
-            } else {
-                sharesEditor
-            }
-
-            SecureField("New password", text: $viewModel.password)
-                .textFieldStyle(.roundedBorder)
-                .textInputAutocapitalization(.never)
-                .autocorrectionDisabled(true)
-                .disabled(viewModel.busy)
-
-            SecureField("Confirm new password", text: $viewModel.confirm)
-                .textFieldStyle(.roundedBorder)
-                .textInputAutocapitalization(.never)
-                .autocorrectionDisabled(true)
-                .disabled(viewModel.busy)
 
             if let error = viewModel.error {
                 Text(error)
@@ -141,23 +150,25 @@ private struct RecoverForm: View {
                     .foregroundStyle(.red)
             }
 
-            Button(action: viewModel.onSubmit) {
-                HStack {
-                    if viewModel.busy {
-                        ProgressView()
-                            .controlSize(.small)
-                            .progressViewStyle(.circular)
-                            .tint(.white)
-                        Text("Verifying…")
-                    } else {
-                        Text("Recover account")
+            if viewModel.mode != .anotherDevice {
+                Button(action: viewModel.onSubmit) {
+                    HStack {
+                        if viewModel.busy {
+                            ProgressView()
+                                .controlSize(.small)
+                                .progressViewStyle(.circular)
+                                .tint(.white)
+                            Text("Verifying…")
+                        } else {
+                            Text("Recover account")
+                        }
                     }
+                    .frame(maxWidth: .infinity)
                 }
-                .frame(maxWidth: .infinity)
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                .disabled(viewModel.busy)
             }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.large)
-            .disabled(viewModel.busy)
 
             HStack(spacing: 4) {
                 Spacer()
@@ -182,6 +193,53 @@ private struct RecoverForm: View {
                 }
                 Spacer()
             }
+        }
+    }
+
+    /// ADR-0018 factor (a), path (b) — no-password restore via an
+    /// already-linked device. Resolve the username first (the pairing
+    /// QR embeds the account id), then run the QR join with the
+    /// recovery payload opted in. Mirror of Android's `RecoverScreen`
+    /// AnotherDevice branch.
+    @ViewBuilder
+    private var anotherDeviceSection: some View {
+        if let target = viewModel.deviceRestoreTarget {
+            Text("Restoring @\(target.username)")
+                .font(.body)
+            RestoreViaDevicePanel(
+                accountIdBytes: target.accountIdBytes,
+                accountIdB64: target.accountIdB64,
+                onRecovered: { outcome in
+                    try await viewModel.completeFromDeviceRestore(
+                        outcome: outcome
+                    )
+                }
+            )
+        } else {
+            Text("Username")
+                .font(.headline)
+            TextField("alice", text: $viewModel.username)
+                .textFieldStyle(.roundedBorder)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled(true)
+                .disabled(viewModel.busy)
+            Button(action: viewModel.lookupForDeviceRestore) {
+                HStack {
+                    if viewModel.busy {
+                        ProgressView()
+                            .controlSize(.small)
+                            .progressViewStyle(.circular)
+                            .tint(.white)
+                        Text("Looking up…")
+                    } else {
+                        Text("Find account")
+                    }
+                }
+                .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.large)
+            .disabled(viewModel.busy)
         }
     }
 

@@ -31,9 +31,25 @@ public final class RecoverViewModel: ObservableObject {
     /// reuses the original 24-word path; `shares` parses one
     /// Shamir share per line and combines them into the same
     /// canonical phrase via the BIP39 `from_entropy` round-trip.
-    public enum Mode: Equatable { case phrase, shares }
+    /// ADR-0018 adds `anotherDevice`: restore via an already-linked
+    /// device (no password, no phrase typing).
+    public enum Mode: Equatable { case phrase, shares, anotherDevice }
 
-    @Published public var mode: Mode = .phrase
+    @Published public var mode: Mode = .phrase {
+        didSet {
+            // ADR-0018 — clear the resolved restore target + any
+            // stale error when leaving the AnotherDevice mode
+            // (mirror of Android's `onModeChange`).
+            if mode != .anotherDevice {
+                deviceRestoreTarget = nil
+            }
+            error = nil
+        }
+    }
+
+    /// ADR-0018 — non-nil once the AnotherDevice mode resolved the
+    /// typed username to an account id via discovery.
+    @Published public private(set) var deviceRestoreTarget: DeviceRestoreTarget?
     @Published public var phrase: String = ""
     @Published public var sharesInput: String = ""
     @Published public var password: String = ""
@@ -108,6 +124,12 @@ public final class RecoverViewModel: ObservableObject {
         // phrase then drives the existing OPAQUE recovery flow.
         let phraseSnapshot: String
         switch mode {
+        case .anotherDevice:
+            // ADR-0018 — the AnotherDevice mode never reaches the
+            // OPAQUE submit: the RestoreViaDevicePanel drives
+            // completeFromDeviceRestore directly. Defensive no-op.
+            error = "Use the QR flow above to restore."
+            return
         case .phrase:
             if phrase.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 error = "Recovery phrase must be non-empty."
@@ -186,6 +208,83 @@ public final class RecoverViewModel: ObservableObject {
         }
     }
 
+    // MARK: - ADR-0018 factor (a), path (b) — another-device restore
+
+    /// Resolve the typed username to an account id via the discovery
+    /// service so the AnotherDevice restore can build the pairing QR.
+    /// Anonymous (OPRF-blinded lookup, no session needed). Mirror of
+    /// Android's `RecoverViewModel.lookupForDeviceRestore`.
+    public func lookupForDeviceRestore() {
+        guard !busy else { return }
+        let typed = username.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !typed.isEmpty else {
+            error = "Enter your username first."
+            return
+        }
+        busy = true
+        error = nil
+        Task {
+            do {
+                let discovery = DiscoveryClient()
+                let resolved = try await discovery.lookup(username: typed)
+                guard let account = resolved.account else {
+                    busy = false
+                    error = "No account found for that username."
+                    return
+                }
+                deviceRestoreTarget = DeviceRestoreTarget(
+                    accountIdBytes: account,
+                    accountIdB64: base64Encode(account),
+                    username: resolved.normalisedUsername
+                )
+                busy = false
+            } catch {
+                busy = false
+                self.error = (error as? LocalizedError)?.errorDescription
+                    ?? "Lookup failed. Try again."
+            }
+        }
+    }
+
+    /// Complete the no-password restore with the identity + redeemed
+    /// session token received from the other device. Async passthrough
+    /// to ``AuthRepository/completeFromDeviceRestore(accountIdBytes:accountIdB64:username:phraseSeed:sessionToken:sessionExpiresAtMs:)``;
+    /// verification failures propagate to the calling panel. Requires
+    /// the redeemed token (without it this device has no ACCESS) —
+    /// refused otherwise with a clear message. Mirror of Android's
+    /// `RecoverViewModel.completeFromDeviceRestore`.
+    public func completeFromDeviceRestore(
+        outcome: PairingOrchestrator.JoinRecoveryOutcome
+    ) async throws {
+        guard let target = deviceRestoreTarget else {
+            throw AuthClientError.argument(
+                "no resolved account — look up your username first"
+            )
+        }
+        guard let token = outcome.sessionToken,
+              let expiry = outcome.sessionExpiresAtMs else {
+            // Seed-only outcome: the grant redeem failed, so this
+            // device has IDENTITY but no ACCESS. Refuse rather than
+            // leave a half-restored profile; the user retries (a
+            // fresh pairing mints a fresh grant). Best-effort wipe of
+            // the local seed copy.
+            var seed = outcome.phraseSeed
+            seed.resetBytes(in: 0..<seed.count)
+            throw AuthClientError.argument(
+                "The other device transferred your identity but the " +
+                "sign-in grant could not be redeemed. Try again."
+            )
+        }
+        try await repository.completeFromDeviceRestore(
+            accountIdBytes: target.accountIdBytes,
+            accountIdB64: target.accountIdB64,
+            username: target.username,
+            phraseSeed: outcome.phraseSeed,
+            sessionToken: token,
+            sessionExpiresAtMs: expiry
+        )
+    }
+
     // MARK: - Error mapping
 
     /// Map server-side HTTP errors to user-facing copy. The
@@ -218,4 +317,19 @@ public final class RecoverViewModel: ObservableObject {
     /// Mirror of ``SignupViewModel/minPasswordLength``. The recovery
     /// flow sets a **new** password so the same floor applies.
     public static let minPasswordLength: Int = 8
+}
+
+/// ADR-0018 factor (a), path (b) — the resolved restore target the
+/// AnotherDevice mode pairs against. Mirror of Android's
+/// `DeviceRestoreTarget`.
+public struct DeviceRestoreTarget: Equatable {
+    public let accountIdBytes: Data
+    public let accountIdB64: String
+    public let username: String
+
+    public init(accountIdBytes: Data, accountIdB64: String, username: String) {
+        self.accountIdBytes = accountIdBytes
+        self.accountIdB64 = accountIdB64
+        self.username = username
+    }
 }

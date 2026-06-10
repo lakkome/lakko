@@ -99,6 +99,8 @@ public fun RecoverScreen(
             onPasswordChange = viewModel::onPasswordChange,
             onConfirmChange = viewModel::onConfirmChange,
             onSubmit = viewModel::onSubmit,
+            onLookupForDeviceRestore = viewModel::lookupForDeviceRestore,
+            onCompleteFromDeviceRestore = viewModel::completeFromDeviceRestore,
             onNavigateToLogin = onNavigateToLogin,
             onNavigateToSignup = onNavigateToSignup,
         )
@@ -121,6 +123,9 @@ private fun RecoverForm(
     onPasswordChange: (String) -> Unit,
     onConfirmChange: (String) -> Unit,
     onSubmit: () -> Unit,
+    onLookupForDeviceRestore: () -> Unit,
+    onCompleteFromDeviceRestore:
+        suspend (me.lakko.app.devices.PairingOrchestrator.JoinRecoveryOutcome) -> Unit,
     onNavigateToLogin: () -> Unit,
     onNavigateToSignup: () -> Unit,
 ) {
@@ -138,9 +143,10 @@ private fun RecoverForm(
             style = MaterialTheme.typography.bodyMedium,
         )
         Spacer(Modifier.height(16.dp))
-    } else {
+    } else if (state.mode != RecoverMode.AnotherDevice) {
         // ADR-0017 — fresh-device recover: no account is cached, so
-        // the user types their username to target the recover.
+        // the user types their username to target the recover. (The
+        // AnotherDevice mode renders its own username field below.)
         Spacer(Modifier.height(12.dp))
         OutlinedTextField(
             value = state.username,
@@ -160,23 +166,92 @@ private fun RecoverForm(
         Spacer(Modifier.height(16.dp))
     }
 
-    // 1.21c3 — mode toggle (Phrase / Shares). SegmentedButtonRow
-    // is the Material3-native pattern for a two-mode form switch.
+    // 1.21c3 — mode toggle (Phrase / Shares; ADR-0018 adds
+    // AnotherDevice). SegmentedButtonRow is the Material3-native
+    // pattern for a small-mode form switch.
     SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
         SegmentedButton(
             selected = state.mode == RecoverMode.Phrase,
             onClick = { onModeChange(RecoverMode.Phrase) },
-            shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2),
+            shape = SegmentedButtonDefaults.itemShape(index = 0, count = 3),
             enabled = !state.busy,
-        ) { Text("24-word phrase") }
+        ) { Text("Phrase") }
         SegmentedButton(
             selected = state.mode == RecoverMode.Shares,
             onClick = { onModeChange(RecoverMode.Shares) },
-            shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2),
+            shape = SegmentedButtonDefaults.itemShape(index = 1, count = 3),
             enabled = !state.busy,
-        ) { Text("Recovery shares") }
+        ) { Text("Shares") }
+        SegmentedButton(
+            selected = state.mode == RecoverMode.AnotherDevice,
+            onClick = { onModeChange(RecoverMode.AnotherDevice) },
+            shape = SegmentedButtonDefaults.itemShape(index = 2, count = 3),
+            enabled = !state.busy,
+        ) { Text("Device") }
     }
     Spacer(Modifier.height(16.dp))
+
+    if (state.mode == RecoverMode.AnotherDevice) {
+        // ADR-0018 factor (a), path (b) — no-password restore via an
+        // already-linked device. Resolve the username first (the
+        // pairing QR embeds the account id), then run the QR join
+        // with the recovery payload opted in.
+        val target = state.deviceRestoreTarget
+        if (target == null) {
+            OutlinedTextField(
+                value = state.username,
+                onValueChange = onUsernameChange,
+                label = { Text("Username") },
+                placeholder = { Text("alice") },
+                singleLine = true,
+                enabled = !state.busy,
+                keyboardOptions = KeyboardOptions(
+                    capitalization = KeyboardCapitalization.None,
+                    autoCorrect = false,
+                    keyboardType = KeyboardType.Ascii,
+                    imeAction = ImeAction.Done,
+                ),
+                modifier = Modifier.fillMaxWidth(),
+            )
+            if (state.error != null) {
+                Spacer(Modifier.height(12.dp))
+                Text(
+                    text = state.error,
+                    color = MaterialTheme.colorScheme.error,
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+            }
+            Spacer(Modifier.height(16.dp))
+            Button(
+                onClick = onLookupForDeviceRestore,
+                enabled = !state.busy,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                if (state.busy) {
+                    CircularProgressIndicator(
+                        modifier = Modifier
+                            .height(20.dp)
+                            .width(20.dp),
+                        strokeWidth = 2.dp,
+                        color = MaterialTheme.colorScheme.onPrimary,
+                    )
+                } else {
+                    Text("Find account")
+                }
+            }
+        } else {
+            Text(
+                text = "Restoring @${target.username}",
+                style = MaterialTheme.typography.bodyMedium,
+            )
+            Spacer(Modifier.height(12.dp))
+            me.lakko.app.ui.devices.RestoreViaDevicePanel(
+                accountIdBytes = target.accountIdBytes,
+                accountIdB64 = target.accountIdB64,
+                onRecovered = onCompleteFromDeviceRestore,
+            )
+        }
+    }
 
     if (state.mode == RecoverMode.Phrase) {
         OutlinedTextField(
@@ -203,7 +278,7 @@ private fun RecoverForm(
                 .fillMaxWidth()
                 .heightIn(min = 120.dp),
         )
-    } else {
+    } else if (state.mode == RecoverMode.Shares) {
         OutlinedTextField(
             value = state.sharesInput,
             onValueChange = onSharesInputChange,
@@ -238,59 +313,61 @@ private fun RecoverForm(
             },
         )
     }
-    Spacer(Modifier.height(12.dp))
-
-    OutlinedTextField(
-        value = state.password,
-        onValueChange = onPasswordChange,
-        label = { Text("New password") },
-        singleLine = true,
-        enabled = !state.busy,
-        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-        visualTransformation = PasswordVisualTransformation(),
-        modifier = Modifier.fillMaxWidth(),
-    )
-    Spacer(Modifier.height(12.dp))
-
-    OutlinedTextField(
-        value = state.confirm,
-        onValueChange = onConfirmChange,
-        label = { Text("Confirm new password") },
-        singleLine = true,
-        enabled = !state.busy,
-        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-        visualTransformation = PasswordVisualTransformation(),
-        modifier = Modifier.fillMaxWidth(),
-    )
-
-    if (state.error != null) {
+    if (state.mode != RecoverMode.AnotherDevice) {
         Spacer(Modifier.height(12.dp))
-        Text(
-            text = state.error,
-            color = MaterialTheme.colorScheme.error,
-            style = MaterialTheme.typography.bodyMedium,
+
+        OutlinedTextField(
+            value = state.password,
+            onValueChange = onPasswordChange,
+            label = { Text("New password") },
+            singleLine = true,
+            enabled = !state.busy,
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+            visualTransformation = PasswordVisualTransformation(),
+            modifier = Modifier.fillMaxWidth(),
         )
-    }
+        Spacer(Modifier.height(12.dp))
 
-    Spacer(Modifier.height(24.dp))
+        OutlinedTextField(
+            value = state.confirm,
+            onValueChange = onConfirmChange,
+            label = { Text("Confirm new password") },
+            singleLine = true,
+            enabled = !state.busy,
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+            visualTransformation = PasswordVisualTransformation(),
+            modifier = Modifier.fillMaxWidth(),
+        )
 
-    Button(
-        onClick = onSubmit,
-        enabled = !state.busy,
-        modifier = Modifier.fillMaxWidth(),
-    ) {
-        if (state.busy) {
-            CircularProgressIndicator(
-                modifier = Modifier
-                    .height(20.dp)
-                    .width(20.dp),
-                strokeWidth = 2.dp,
-                color = MaterialTheme.colorScheme.onPrimary,
+        if (state.error != null) {
+            Spacer(Modifier.height(12.dp))
+            Text(
+                text = state.error,
+                color = MaterialTheme.colorScheme.error,
+                style = MaterialTheme.typography.bodyMedium,
             )
-            Spacer(Modifier.width(8.dp))
-            Text("Verifying…")
-        } else {
-            Text("Recover account")
+        }
+
+        Spacer(Modifier.height(24.dp))
+
+        Button(
+            onClick = onSubmit,
+            enabled = !state.busy,
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            if (state.busy) {
+                CircularProgressIndicator(
+                    modifier = Modifier
+                        .height(20.dp)
+                        .width(20.dp),
+                    strokeWidth = 2.dp,
+                    color = MaterialTheme.colorScheme.onPrimary,
+                )
+                Spacer(Modifier.width(8.dp))
+                Text("Verifying…")
+            } else {
+                Text("Recover account")
+            }
         }
     }
 

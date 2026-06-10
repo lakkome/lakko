@@ -162,6 +162,92 @@ public final class AuthClient {
         try await post(endpoint: "/password/reset/finish", body: request)
     }
 
+    // MARK: - Device authorization — ADR-0018 factor (a),
+    // "another-device" recovery
+
+    /// `POST /device/authorize/start` — mint a single-use 32-byte
+    /// device-authorization grant for this account (ADR-0018 factor
+    /// (a), scanner side). Mirror of the web
+    /// `AuthClient.deviceAuthorizeStart` + the Android
+    /// `AuthClient.deviceAuthorizeStart`.
+    ///
+    /// Bearer-authenticated (the EXISTING device proves it already
+    /// holds a session) + PoW-gated. Returns the URL-safe base64
+    /// (no pad) of the RAW grant token — the server stores only its
+    /// SHA-256. The caller seals it (together with the phrase seed)
+    /// to the fresh device over the E2EE pairing channel; it never
+    /// travels in plaintext past this response.
+    public func deviceAuthorizeStart(sessionToken: String) async throws -> String {
+        guard !sessionToken.isEmpty else {
+            throw AuthClientError.argument("sessionToken must be non-empty")
+        }
+        let challenge = try await powChallenge()
+        let pow = try await solvePow(
+            seedB64: challenge.seed,
+            effortBits: challenge.effortBits
+        )
+        let resp: DeviceAuthorizeStartResponse = try await post(
+            endpoint: "/device/authorize/start",
+            body: DeviceAuthorizeStartRequest(pow: pow),
+            bearer: sessionToken
+        )
+        return resp.grantTokenB64
+    }
+
+    /// `POST /device/authorize/redeem` — atomically consume a
+    /// single-use device grant for a session-token triple (ADR-0018
+    /// factor (a), fresh-device side). Mirror of the web / Android
+    /// `AuthClient.deviceAuthorizeRedeem`.
+    ///
+    /// Anonymous (the fresh device has no token yet) + PoW-gated. A
+    /// missing / expired / already-consumed grant fails as an
+    /// enumeration-safe 401 (``AuthClientError/http(status:endpoint:body:)``),
+    /// indistinguishable from a wrong credential by design.
+    ///
+    /// - Parameters:
+    ///   - accountId:     Raw 16-byte account id from the pairing QR.
+    ///   - grantTokenB64: URL-safe base64 (no pad) of the raw
+    ///                    32-byte grant token received over the
+    ///                    rendezvous channel.
+    public func deviceAuthorizeRedeem(
+        accountId: Data,
+        grantTokenB64: String
+    ) async throws -> DeviceAuthorizeRedeemResult {
+        guard accountId.count == accountIdLength else {
+            throw AuthClientError.argument(
+                "accountId must be \(accountIdLength) bytes"
+            )
+        }
+        guard !grantTokenB64.isEmpty else {
+            throw AuthClientError.argument("grantTokenB64 must be non-empty")
+        }
+        let challenge = try await powChallenge()
+        let pow = try await solvePow(
+            seedB64: challenge.seed,
+            effortBits: challenge.effortBits
+        )
+        let resp: DeviceAuthorizeRedeemResponse = try await post(
+            endpoint: "/device/authorize/redeem",
+            body: DeviceAuthorizeRedeemRequest(
+                pow: pow,
+                accountIdB64: base64UrlEncodeNoPad(accountId),
+                grantTokenB64: grantTokenB64
+            )
+        )
+        guard let accountIdBytes = base64UrlDecodeNoPad(resp.accountIdB64) else {
+            throw AuthClientError.http(
+                status: 200,
+                endpoint: "/device/authorize/redeem",
+                body: "malformed account_id_b64 in response"
+            )
+        }
+        return DeviceAuthorizeRedeemResult(
+            accountId: accountIdBytes,
+            sessionToken: resp.sessionToken,
+            sessionExpiresAtMs: resp.sessionExpiresAtMs
+        )
+    }
+
     // MARK: - High-level: full signup / login / recover flows
 
     /// Drive the full signup flow:
@@ -463,12 +549,19 @@ public final class AuthClient {
 
     private func post<Req: Encodable, Res: Decodable>(
         endpoint: String,
-        body: Req
+        body: Req,
+        bearer: String? = nil
     ) async throws -> Res {
         let url = try buildURL(endpoint: endpoint)
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if let bearer {
+            request.setValue(
+                "Bearer \(bearer)",
+                forHTTPHeaderField: "Authorization"
+            )
+        }
         do {
             request.httpBody = try encoder.encode(body)
         } catch {
@@ -635,6 +728,29 @@ public struct RecoverResult: Equatable {
     ) {
         self.accountId = accountId
         self.exportKey = exportKey
+        self.sessionToken = sessionToken
+        self.sessionExpiresAtMs = sessionExpiresAtMs
+    }
+}
+
+/// Result of ``AuthClient/deviceAuthorizeRedeem(accountId:grantTokenB64:)``
+/// — the same `(account_id, session_token, expiry)` triple every other
+/// login flow returns (ADR-0018 factor (a)).
+public struct DeviceAuthorizeRedeemResult: Equatable {
+    /// Raw 16-byte account id echoed back by the server.
+    public let accountId: Data
+    /// Bearer token issued by the auth service — the fresh device's
+    /// only ACCESS on the no-password restore path.
+    public let sessionToken: String
+    /// Token expiry as a unix-millisecond timestamp.
+    public let sessionExpiresAtMs: Int64
+
+    public init(
+        accountId: Data,
+        sessionToken: String,
+        sessionExpiresAtMs: Int64
+    ) {
+        self.accountId = accountId
         self.sessionToken = sessionToken
         self.sessionExpiresAtMs = sessionExpiresAtMs
     }

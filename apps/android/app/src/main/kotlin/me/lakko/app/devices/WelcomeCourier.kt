@@ -250,6 +250,16 @@ public object WelcomeCourier {
             }
             val first = result.messages.firstOrNull()
             if (first != null) {
+                // ADR-0018 factor (a): the rendezvous mailbox can also
+                // carry a tagged recovery-payload row (after the
+                // Welcome, in either FIFO order relative to the
+                // bundle). It is NOT the history bundle — skip it and
+                // keep polling. Mirror of the web's
+                // `welcome-courier.ts` skip.
+                if (RecoveryPayload.isRecoveryPayloadRow(first.payload)) {
+                    cursor = first.id
+                    continue
+                }
                 return@use HistoryBundleOutcome.Received(first.payload)
             }
             cursor = result.messages.fold(cursor) { acc, msg -> maxOf(acc, msg.id) }

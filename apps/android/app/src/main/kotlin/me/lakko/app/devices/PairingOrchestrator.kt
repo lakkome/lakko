@@ -4,10 +4,15 @@
 package me.lakko.app.devices
 
 import android.content.Context
+import me.lakko.app.auth.AuthClient
 import me.lakko.app.auth.DeviceIdentityStore
+import me.lakko.app.auth.base64UrlDecodeNoPad
+import me.lakko.app.auth.base64UrlEncodeNoPad
 import me.lakko.app.ds.DsClient
 import uniffi.lakko_ffi_uniffi.DeviceGroup
 import uniffi.lakko_ffi_uniffi.Identity
+import uniffi.lakko_ffi_uniffi.openWithKey
+import uniffi.lakko_ffi_uniffi.sealWithKey
 
 /**
  * High-level orchestration for the two add-device sides on
@@ -33,6 +38,21 @@ import uniffi.lakko_ffi_uniffi.Identity
  *     leaf, publish the Welcome, persist the snapshot.
  */
 public object PairingOrchestrator {
+
+    /**
+     * ADR-0018 factor (a) — what the joiner recovered from the
+     * scanner's sealed rendezvous row. `phraseSeed` is the 64-byte
+     * AccountIdentity seed (IDENTITY — always present when this
+     * object is non-null); the session token pair is ACCESS and is
+     * `null` when the grant redeem failed (seed-only degradation).
+     * The consumer (AuthRepository.completeFromPairing /
+     * completeFromDeviceRestore) owns zeroizing `phraseSeed`.
+     */
+    public class JoinRecoveryOutcome(
+        public val phraseSeed: ByteArray,
+        public val sessionToken: String?,
+        public val sessionExpiresAtMs: Long?,
+    )
 
     /**
      * Joining-side session handle. The Compose view:
@@ -80,11 +100,20 @@ public object PairingOrchestrator {
          * deterministic `BLAKE3("lakko-device-group/v1" ||
          * account_id)` value for this account — defensive
          * against a misrouted Welcome from a different user.
+         *
+         * With `recovery = true` (ADR-0018 factor (a)) also polls
+         * past the Welcome for the scanner's sealed recovery row,
+         * opens it under the shared post-join exporter key, redeems
+         * the grant for a session token, and returns the typed
+         * outcome. Absence of the row (older scanner, or its
+         * best-effort half failed) returns `null` — the join itself
+         * is unaffected and the caller falls back to phrase entry.
          */
         public suspend fun accept(
             welcomeBytes: ByteArray,
             welcomeCursor: Long? = null,
-        ) {
+            recovery: Boolean = false,
+        ): JoinRecoveryOutcome? {
             check(!disposed) { "JoinSession.accept called after dispose" }
             // The deterministic group_id check inside
             // DeviceGroup.joinFromWelcome rejects a misrouted
@@ -128,6 +157,90 @@ public object PairingOrchestrator {
                         cause,
                     )
                 }
+            }
+
+            // ADR-0018 factor (a) — opt-in recovery payload.
+            if (recovery && welcomeCursor != null) {
+                return runJoinerRecovery(joined, welcomeCursor)
+            }
+            return null
+        }
+
+        /**
+         * Poll for the scanner's sealed recovery row, open it under
+         * the shared post-join exporter key, redeem the grant.
+         * Every failure degrades (row absent → `null`; redeem
+         * failure → seed-only outcome) — the join is never broken
+         * by this path. Transient secrets are zeroized.
+         */
+        private suspend fun runJoinerRecovery(
+            joined: DeviceGroup,
+            welcomeCursor: Long,
+        ): JoinRecoveryOutcome? {
+            val outcome = try {
+                RecoveryPayload.pollForRecoveryPayload(
+                    rendezvousPseudonym = rendezvous,
+                    afterCursor = welcomeCursor,
+                )
+            } catch (cause: Throwable) {
+                android.util.Log.w(
+                    "PairingOrchestrator",
+                    "recovery payload poll failed (join unaffected)",
+                    cause,
+                )
+                return null
+            }
+            if (outcome !is RecoveryPayload.RecoveryPayloadOutcome.Received) {
+                return null
+            }
+            var exporterKey: ByteArray? = null
+            var payload: ByteArray? = null
+            var grantToken: ByteArray? = null
+            try {
+                exporterKey = joined.exportSecret(
+                    identity,
+                    RecoveryPayload.RECOVERY_EXPORTER_LABEL,
+                    rendezvous,
+                    RecoveryPayload.RECOVERY_EXPORTER_KEY_LENGTH.toUInt(),
+                )
+                payload = openWithKey(exporterKey, outcome.sealedBlob)
+                val parsed = RecoveryPayload.parseRecoveryPayload(payload)
+                grantToken = parsed.grantToken
+                // Redeem the single-use grant for a session token.
+                // A redeem failure (endpoint down, grant expired)
+                // degrades to a seed-only outcome — the identity
+                // still restores; only ACCESS needs another factor.
+                val redeemed = try {
+                    AuthClient().use { client ->
+                        client.deviceAuthorizeRedeem(
+                            accountId = accountIdBytes,
+                            grantTokenB64 = base64UrlEncodeNoPad(parsed.grantToken),
+                        )
+                    }
+                } catch (cause: Throwable) {
+                    android.util.Log.w(
+                        "PairingOrchestrator",
+                        "device grant redeem failed (seed-only outcome)",
+                        cause,
+                    )
+                    null
+                }
+                return JoinRecoveryOutcome(
+                    phraseSeed = parsed.phraseSeed,
+                    sessionToken = redeemed?.sessionToken,
+                    sessionExpiresAtMs = redeemed?.sessionExpiresAtMs,
+                )
+            } catch (cause: Throwable) {
+                android.util.Log.w(
+                    "PairingOrchestrator",
+                    "recovery payload open failed (join unaffected)",
+                    cause,
+                )
+                return null
+            } finally {
+                exporterKey?.fill(0)
+                payload?.fill(0)
+                grantToken?.fill(0)
             }
         }
 
@@ -212,11 +325,28 @@ public object PairingOrchestrator {
      *   * The Welcome PUT fails (DS-mailbox unreachable).
      *   * The DeviceGroup state on this device is corrupt.
      */
+    /**
+     * ADR-0018 factor (a) — inputs for the best-effort recovery
+     * payload the scanner publishes alongside the Welcome, so the
+     * fresh device gets ACCESS (a single-use grant) + IDENTITY (the
+     * phrase seed) with no password or phrase entry.
+     */
+    public class ScanRecovery(
+        /** Defensive copy of the 64-byte account-identity (phrase)
+         *  seed; consumed and zeroized by the scan flow. */
+        internal val accountIdentitySeed: ByteArray,
+        /** Mints a single-use device grant
+         *  (`AuthClient.deviceAuthorizeStart`, bearer + PoW);
+         *  returns the URL-safe-base64 raw grant token. */
+        internal val deviceAuthorizeStart: suspend () -> String,
+    )
+
     public suspend fun runScanFlow(
         context: Context,
         scannedBytes: ByteArray,
         accountIdBytes: ByteArray,
         accountIdB64: String,
+        recovery: ScanRecovery? = null,
     ): ScanResult {
         val decoded = PairingCodec.parsePairingQrPayload(
             wireBytes = scannedBytes,
@@ -311,8 +441,53 @@ public object PairingOrchestrator {
                 )
             }
 
+            // ADR-0018 factor (a) — best-effort recovery payload.
+            // Mint a single-use device grant, derive the exporter key
+            // at the POST-ADD epoch (both devices share it after the
+            // joiner processes the Welcome), seal
+            // (grant ‖ account-identity seed) and publish the tagged
+            // rendezvous row. Any failure is non-fatal: the pairing
+            // completes and the joiner falls back to phrase entry.
+            // The server never sees the seed (it travels only inside
+            // the AEAD blob — invariant #2); transient copies are
+            // zeroized below.
+            if (recovery != null) {
+                var grant: ByteArray? = null
+                var exporterKey: ByteArray? = null
+                var payload: ByteArray? = null
+                try {
+                    grant = base64UrlDecodeNoPad(recovery.deviceAuthorizeStart())
+                    exporterKey = ensured.group.exportSecret(
+                        ensured.identity,
+                        RecoveryPayload.RECOVERY_EXPORTER_LABEL,
+                        decoded.rendezvousPseudonym,
+                        RecoveryPayload.RECOVERY_EXPORTER_KEY_LENGTH.toUInt(),
+                    )
+                    payload = RecoveryPayload.buildRecoveryPayload(
+                        grantToken = grant,
+                        phraseSeed = recovery.accountIdentitySeed,
+                    )
+                    val sealed = sealWithKey(exporterKey, payload)
+                    RecoveryPayload.publishRecoveryPayload(
+                        rendezvousPseudonym = decoded.rendezvousPseudonym,
+                        sealedBlob = sealed,
+                    )
+                } catch (cause: Throwable) {
+                    android.util.Log.w(
+                        "PairingOrchestrator",
+                        "recovery payload publish failed (pairing unaffected)",
+                        cause,
+                    )
+                } finally {
+                    grant?.fill(0)
+                    exporterKey?.fill(0)
+                    payload?.fill(0)
+                }
+            }
+
             return ScanResult(memberCount = if (ensured.bootstrapped) 2 else 0)
         } finally {
+            recovery?.accountIdentitySeed?.fill(0)
             try {
                 ensured.group.close()
             } catch (_: Throwable) {

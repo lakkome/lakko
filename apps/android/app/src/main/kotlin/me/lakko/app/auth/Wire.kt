@@ -208,3 +208,51 @@ data class PasswordResetFinishResponse(
     /** Token expiry as a unix-millisecond timestamp. */
     val session_expires_at_ms: Long,
 )
+
+// ----------------------------------------------------------------------------
+// Device authorization (services/auth/src/device_authorize.rs —
+// ADR-0018 factor (a), "another-device" recovery)
+// ----------------------------------------------------------------------------
+
+/** `POST /device/authorize/start` request body. Bearer-authenticated
+ *  (the EXISTING device's session token rides the `Authorization`
+ *  header, not the body). */
+@Serializable
+data class DeviceAuthorizeStartRequest(
+    val pow: PowProofPayload,
+)
+
+/** `POST /device/authorize/start` response body. */
+@Serializable
+data class DeviceAuthorizeStartResponse(
+    /** URL-safe base64 (no pad) of the RAW 32-byte grant token —
+     *  the only time it leaves the server (it stores only the
+     *  SHA-256). Seal it to the fresh device over the E2EE pairing
+     *  channel; never log or persist it. */
+    val grant_token_b64: String,
+)
+
+/** `POST /device/authorize/redeem` request body. Anonymous — the
+ *  fresh device has no token yet; the PoW is the only anti-spam
+ *  gate. */
+@Serializable
+data class DeviceAuthorizeRedeemRequest(
+    val pow: PowProofPayload,
+    /** URL-safe base64 (no pad) of the 16-byte account id the fresh
+     *  device learned from the pairing QR. */
+    val account_id_b64: String,
+    /** URL-safe base64 (no pad) of the raw 32-byte grant token
+     *  received over the rendezvous channel. */
+    val grant_token_b64: String,
+)
+
+/** `POST /device/authorize/redeem` response body — the same
+ *  `(account_id, session_token, expiry)` triple every other login
+ *  flow returns. */
+@Serializable
+data class DeviceAuthorizeRedeemResponse(
+    /** URL-safe base64 (no pad) of the 16-byte account id. */
+    val account_id_b64: String,
+    val session_token: String,
+    val session_expires_at_ms: Long,
+)

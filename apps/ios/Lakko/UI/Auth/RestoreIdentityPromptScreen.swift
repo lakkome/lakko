@@ -27,6 +27,11 @@ public struct RestoreIdentityPromptScreen: View {
 
     @ObservedObject public var viewModel: RestoreIdentityPromptViewModel
 
+    /// ADR-0018 factor (a): phrase entry OR restore from another
+    /// device. Local UI-only toggle (no persisted state) — mirror of
+    /// the Android `RestoreIdentityPrompt` FilterChip pair.
+    @State private var viaDevice: Bool = false
+
     public init(viewModel: RestoreIdentityPromptViewModel) {
         self.viewModel = viewModel
     }
@@ -48,42 +53,54 @@ public struct RestoreIdentityPromptScreen: View {
                 .font(.body)
                 .foregroundStyle(.secondary)
 
-                Text("Recovery phrase (24 words)")
-                    .font(.headline)
-
-                phraseEditor
-
-                if let error = viewModel.error {
-                    Text(error)
-                        .font(.body)
-                        .foregroundStyle(.red)
+                Picker("Restore mode", selection: $viaDevice) {
+                    Text("Recovery phrase").tag(false)
+                    Text("Another device").tag(true)
                 }
-
-                Button(action: viewModel.onSubmit) {
-                    HStack {
-                        if viewModel.busy {
-                            ProgressView()
-                                .controlSize(.small)
-                                .progressViewStyle(.circular)
-                                .tint(.white)
-                            Text("Restoring…")
-                        } else {
-                            Text("Restore identity")
-                        }
-                    }
-                    .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large)
+                .pickerStyle(.segmented)
                 .disabled(viewModel.busy)
 
-                Text(
-                    "Don't have your phrase? Pair an existing signed-in " +
-                    "device to carry your identity across (coming soon), or " +
-                    "sign out and start a new account."
-                )
-                .font(.footnote)
-                .foregroundStyle(.secondary)
+                if viaDevice {
+                    viaDevicePanel
+                } else {
+                    Text("Recovery phrase (24 words)")
+                        .font(.headline)
+
+                    phraseEditor
+
+                    if let error = viewModel.error {
+                        Text(error)
+                            .font(.body)
+                            .foregroundStyle(.red)
+                    }
+
+                    Button(action: viewModel.onSubmit) {
+                        HStack {
+                            if viewModel.busy {
+                                ProgressView()
+                                    .controlSize(.small)
+                                    .progressViewStyle(.circular)
+                                    .tint(.white)
+                                Text("Restoring…")
+                            } else {
+                                Text("Restore identity")
+                            }
+                        }
+                        .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.large)
+                    .disabled(viewModel.busy)
+
+                    Text(
+                        "Don't have your phrase? Switch to \"Another " +
+                        "device\" above to carry your identity across " +
+                        "from a signed-in device, or sign out and start " +
+                        "a new account."
+                    )
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                }
 
                 HStack {
                     Spacer()
@@ -96,6 +113,29 @@ public struct RestoreIdentityPromptScreen: View {
                 }
             }
             .padding(24)
+        }
+    }
+
+    /// ADR-0018 factor (a), path (a) — the QR-join flow with the
+    /// recovery payload opted in; completion routes through
+    /// ``RestoreIdentityPromptViewModel/completeFromPairing(outcome:)``.
+    @ViewBuilder
+    private var viaDevicePanel: some View {
+        if let accountIdBytes = viewModel.accountIdBytes {
+            RestoreViaDevicePanel(
+                accountIdBytes: accountIdBytes,
+                accountIdB64: viewModel.accountIdB64,
+                onRecovered: { outcome in
+                    try await viewModel.completeFromPairing(outcome: outcome)
+                }
+            )
+        } else {
+            Text(
+                "The stored account id is malformed. Sign out and sign " +
+                "in again, or restore with your recovery phrase."
+            )
+            .font(.footnote)
+            .foregroundStyle(.red)
         }
     }
 

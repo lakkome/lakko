@@ -101,6 +101,37 @@ public fun deriveDeviceRootKey(
     )
 }
 
+/** Fixed HKDF info-prefix for the IDENTITY-SEED-derived variant —
+ *  must match `apps/web/src/auth/device-key.ts`. Distinct from
+ *  [HKDF_INFO_PREFIX] so the two derivations can never collide. */
+private const val HKDF_INFO_PREFIX_FROM_IDENTITY_SEED =
+    "lakko/device-root/from-identity-seed/v1|"
+
+/**
+ * Derive the 32-byte device root key from the ACCOUNT-IDENTITY
+ * (BIP39 phrase) seed instead of the OPAQUE export key — ADR-0018
+ * factor (a), path (b): a device restored via another device has no
+ * password (hence no export key) yet, but the rehydration gate
+ * ([DeviceKeyStore]) still needs a key to exist. Same HKDF shape as
+ * [deriveDeviceRootKey] with a distinct domain-separated info string
+ * (mirror of web's `deriveDeviceRootKeyFromIdentitySeed`).
+ *
+ * @param accountIdentitySeed 64-byte BIP39 phrase seed. Caller wipes.
+ */
+public fun deriveDeviceRootKeyFromIdentitySeed(
+    accountIdentitySeed: ByteArray,
+    accountIdB64: String,
+): ByteArray {
+    val info = (HKDF_INFO_PREFIX_FROM_IDENTITY_SEED + accountIdB64)
+        .toByteArray(Charsets.US_ASCII)
+    return hkdfSha512(
+        ikm = accountIdentitySeed,
+        salt = HKDF_SALT_BYTES,
+        info = info,
+        length = DEVICE_ROOT_KEY_LEN,
+    )
+}
+
 // ============================================================================
 // HKDF-SHA-512 (RFC 5869) — minimal, dep-free implementation
 // ============================================================================

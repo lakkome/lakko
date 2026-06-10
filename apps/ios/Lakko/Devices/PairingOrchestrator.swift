@@ -23,6 +23,30 @@ import LakkoCore
 ///     leaf, publish the Welcome, persist the snapshot.
 public enum PairingOrchestrator {
 
+    /// ADR-0018 factor (a) — what the joiner recovered from the
+    /// scanner's sealed rendezvous row. `phraseSeed` is the 64-byte
+    /// AccountIdentity seed (IDENTITY — always present when this
+    /// value is non-nil); the session token pair is ACCESS and is
+    /// `nil` when the grant redeem failed (seed-only degradation).
+    /// The consumer (`AuthRepository.completeFromPairing` /
+    /// `completeFromDeviceRestore`) owns zeroizing `phraseSeed`
+    /// (best-effort under Swift `Data` value semantics).
+    public struct JoinRecoveryOutcome {
+        public let phraseSeed: Data
+        public let sessionToken: String?
+        public let sessionExpiresAtMs: Int64?
+
+        public init(
+            phraseSeed: Data,
+            sessionToken: String?,
+            sessionExpiresAtMs: Int64?
+        ) {
+            self.phraseSeed = phraseSeed
+            self.sessionToken = sessionToken
+            self.sessionExpiresAtMs = sessionExpiresAtMs
+        }
+    }
+
     /// Joining-side session handle. The SwiftUI view:
     ///
     ///   1. Reads `qrPayload`, feeds it into the
@@ -79,10 +103,20 @@ public enum PairingOrchestrator {
         /// exporter secret, and applies the rows to the local
         /// message log. Failures along that chain log + are
         /// swallowed — the join itself still succeeds.
+        ///
+        /// With `recovery = true` (ADR-0018 factor (a)) also polls
+        /// past the Welcome for the scanner's sealed recovery row,
+        /// opens it under the shared post-join exporter key, redeems
+        /// the grant for a session token, and returns the typed
+        /// outcome. Absence of the row (older scanner, or its
+        /// best-effort half failed) returns `nil` — the join itself
+        /// is unaffected and the caller falls back to phrase entry.
+        @discardableResult
         public func accept(
             welcomeBytes: Data,
-            welcomeCursor: Int64? = nil
-        ) async throws {
+            welcomeCursor: Int64? = nil,
+            recovery: Bool = false
+        ) async throws -> JoinRecoveryOutcome? {
             // The deterministic group_id check inside
             // DeviceGroup.joinFromWelcome rejects a misrouted
             // Welcome before any state advance.
@@ -117,6 +151,90 @@ public enum PairingOrchestrator {
                 } catch {
                     NSLog("history bundle apply failed: %@", error.localizedDescription)
                 }
+            }
+
+            // ADR-0018 factor (a) — opt-in recovery payload.
+            if recovery, let cursor = welcomeCursor {
+                return await runJoinerRecovery(
+                    joined: joined,
+                    welcomeCursor: cursor
+                )
+            }
+            return nil
+        }
+
+        /// Poll for the scanner's sealed recovery row, open it under
+        /// the shared post-join exporter key, redeem the grant.
+        /// Every failure degrades (row absent → `nil`; redeem
+        /// failure → seed-only outcome) — the join is never broken
+        /// by this path. Transient secrets are zeroized
+        /// (best-effort under Swift `Data` value semantics).
+        private func runJoinerRecovery(
+            joined: DeviceGroup,
+            welcomeCursor: Int64
+        ) async -> JoinRecoveryOutcome? {
+            let outcome: RecoveryPayload.RecoveryPayloadOutcome
+            do {
+                outcome = try await RecoveryPayload.pollForRecoveryPayload(
+                    rendezvousPseudonym: rendezvous,
+                    afterCursor: welcomeCursor
+                )
+            } catch {
+                NSLog(
+                    "recovery payload poll failed (join unaffected): %@",
+                    error.localizedDescription
+                )
+                return nil
+            }
+            guard case .received(let sealedBlob) = outcome else {
+                return nil
+            }
+            var exporterKey = Data()
+            var payload = Data()
+            var grantToken = Data()
+            defer {
+                exporterKey.resetBytes(in: 0..<exporterKey.count)
+                payload.resetBytes(in: 0..<payload.count)
+                grantToken.resetBytes(in: 0..<grantToken.count)
+            }
+            do {
+                exporterKey = try joined.exportSecret(
+                    identity: identity,
+                    label: RecoveryPayload.recoveryExporterLabel,
+                    context: rendezvous,
+                    length: UInt32(RecoveryPayload.recoveryExporterKeyLength)
+                )
+                payload = try openWithKey(key: exporterKey, wire: sealedBlob)
+                let parsed = try RecoveryPayload.parseRecoveryPayload(payload)
+                grantToken = parsed.grantToken
+                // Redeem the single-use grant for a session token.
+                // A redeem failure (endpoint down, grant expired)
+                // degrades to a seed-only outcome — the identity
+                // still restores; only ACCESS needs another factor.
+                var redeemed: DeviceAuthorizeRedeemResult?
+                do {
+                    redeemed = try await AuthClient().deviceAuthorizeRedeem(
+                        accountId: accountIdBytes,
+                        grantTokenB64: base64UrlEncodeNoPad(parsed.grantToken)
+                    )
+                } catch {
+                    NSLog(
+                        "device grant redeem failed (seed-only outcome): %@",
+                        error.localizedDescription
+                    )
+                    redeemed = nil
+                }
+                return JoinRecoveryOutcome(
+                    phraseSeed: parsed.phraseSeed,
+                    sessionToken: redeemed?.sessionToken,
+                    sessionExpiresAtMs: redeemed?.sessionExpiresAtMs
+                )
+            } catch {
+                NSLog(
+                    "recovery payload open failed (join unaffected): %@",
+                    error.localizedDescription
+                )
+                return nil
             }
         }
     }
@@ -157,6 +275,34 @@ public enum PairingOrchestrator {
         public let memberCount: Int
     }
 
+    /// ADR-0018 factor (a) — inputs for the best-effort recovery
+    /// payload the scanner publishes alongside the Welcome, so the
+    /// fresh device gets ACCESS (a single-use grant) + IDENTITY (the
+    /// phrase seed) with no password or phrase entry.
+    public final class ScanRecovery {
+        /// Defensive copy of the 64-byte account-identity (phrase)
+        /// seed; consumed and zeroized by the scan flow.
+        fileprivate var accountIdentitySeed: Data
+        /// Mints a single-use device grant
+        /// (`AuthClient.deviceAuthorizeStart`, bearer + PoW);
+        /// returns the URL-safe-base64 raw grant token.
+        fileprivate let deviceAuthorizeStart: () async throws -> String
+
+        public init(
+            accountIdentitySeed: Data,
+            deviceAuthorizeStart: @escaping () async throws -> String
+        ) {
+            // Defensive copy — the scan flow consumes + wipes it.
+            self.accountIdentitySeed = Data(accountIdentitySeed)
+            self.deviceAuthorizeStart = deviceAuthorizeStart
+        }
+
+        /// Best-effort wipe of the seed copy this object owns.
+        fileprivate func wipeSeed() {
+            accountIdentitySeed.resetBytes(in: 0..<accountIdentitySeed.count)
+        }
+    }
+
     /// Scanner-device side entry point. One-shot: decode the
     /// QR, run `addDeviceFromWire`, publish the Welcome,
     /// persist the snapshot.
@@ -170,8 +316,13 @@ public enum PairingOrchestrator {
     public static func runScanFlow(
         scannedBytes: Data,
         accountIdBytes: Data,
-        accountIdB64: String
+        accountIdB64: String,
+        recovery: ScanRecovery? = nil
     ) async throws -> ScanResult {
+        // Wipe the seed copy on every exit path — including a
+        // thrown pairing error before the recovery block runs.
+        defer { recovery?.wipeSeed() }
+
         let decoded = try PairingCodec.parsePairingQrPayload(
             wireBytes: scannedBytes,
             expectedAccountId: accountIdBytes
@@ -248,6 +399,56 @@ public enum PairingOrchestrator {
             }
         } catch {
             NSLog("history bundle publish failed: %@", error.localizedDescription)
+        }
+
+        // ADR-0018 factor (a) — best-effort recovery payload.
+        // Mint a single-use device grant, derive the exporter key
+        // at the POST-ADD epoch (both devices share it after the
+        // joiner processes the Welcome), seal
+        // (grant ‖ account-identity seed) and publish the tagged
+        // rendezvous row. Any failure is non-fatal: the pairing
+        // completes and the joiner falls back to phrase entry.
+        // The server never sees the seed (it travels only inside
+        // the AEAD blob — invariant #2); transient copies are
+        // zeroized below (best-effort under Swift `Data` value
+        // semantics).
+        if let recovery {
+            var grant = Data()
+            var exporterKey = Data()
+            var payload = Data()
+            do {
+                guard let grantBytes = base64UrlDecodeNoPad(
+                    try await recovery.deviceAuthorizeStart()
+                ) else {
+                    throw RecoveryPayloadError.argument(
+                        "grant token is not URL-safe base64"
+                    )
+                }
+                grant = grantBytes
+                exporterKey = try ensured.group.exportSecret(
+                    identity: ensured.identity,
+                    label: RecoveryPayload.recoveryExporterLabel,
+                    context: decoded.rendezvousPseudonym,
+                    length: UInt32(RecoveryPayload.recoveryExporterKeyLength)
+                )
+                payload = try RecoveryPayload.buildRecoveryPayload(
+                    grantToken: grant,
+                    phraseSeed: recovery.accountIdentitySeed
+                )
+                let sealed = try sealWithKey(key: exporterKey, plaintext: payload)
+                try await RecoveryPayload.publishRecoveryPayload(
+                    rendezvousPseudonym: decoded.rendezvousPseudonym,
+                    sealedBlob: sealed
+                )
+            } catch {
+                NSLog(
+                    "recovery payload publish failed (pairing unaffected): %@",
+                    error.localizedDescription
+                )
+            }
+            grant.resetBytes(in: 0..<grant.count)
+            exporterKey.resetBytes(in: 0..<exporterKey.count)
+            payload.resetBytes(in: 0..<payload.count)
         }
 
         return ScanResult(memberCount: ensured.bootstrapped ? 2 : 0)

@@ -36,6 +36,12 @@ import uniffi.lakko_ffi_uniffi.FfiException
 public class RecoverViewModel(
     private val repo: AuthRepository,
     public val cachedUsername: String?,
+    /** ADR-0018 — factory for the discovery client the AnotherDevice
+     *  mode uses to resolve the typed username to an account id.
+     *  Overridable for tests. */
+    private val discoveryClientFactory: () -> me.lakko.app.discovery.DiscoveryClient = {
+        me.lakko.app.discovery.DiscoveryClient()
+    },
 ) : ViewModel() {
 
     private val mutableState: MutableStateFlow<RecoverUiState> =
@@ -61,9 +67,111 @@ public class RecoverViewModel(
         mutableState.update { it.copy(sharesInput = value) }
     }
 
-    /** 1.21c3 — toggle between Phrase and Shares input modes. */
+    /** 1.21c3 — toggle between Phrase and Shares input modes
+     *  (ADR-0018: + AnotherDevice). Clears the resolved restore
+     *  target when leaving the AnotherDevice mode. */
     public fun onModeChange(mode: RecoverMode) {
-        mutableState.update { it.copy(mode = mode) }
+        mutableState.update {
+            it.copy(
+                mode = mode,
+                error = null,
+                deviceRestoreTarget = if (mode == RecoverMode.AnotherDevice) {
+                    it.deviceRestoreTarget
+                } else {
+                    null
+                },
+            )
+        }
+    }
+
+    /**
+     * ADR-0018 factor (a), path (b) — resolve the typed username to
+     * an account id via the discovery service so the AnotherDevice
+     * restore can build the pairing QR. Anonymous (OPRF-blinded
+     * lookup, no session needed).
+     */
+    public fun lookupForDeviceRestore() {
+        val snapshot = mutableState.value
+        if (snapshot.busy) return
+        val typed = snapshot.username.trim()
+        if (typed.isEmpty()) {
+            mutableState.update {
+                it.copy(error = "Enter your username first.")
+            }
+            return
+        }
+        mutableState.update { it.copy(busy = true, error = null) }
+        viewModelScope.launch {
+            try {
+                val resolved = discoveryClientFactory().use { discovery ->
+                    discovery.lookup(typed)
+                }
+                val account = resolved.account
+                if (account == null) {
+                    mutableState.update {
+                        it.copy(
+                            busy = false,
+                            error = "No account found for that username.",
+                        )
+                    }
+                    return@launch
+                }
+                mutableState.update {
+                    it.copy(
+                        busy = false,
+                        deviceRestoreTarget = DeviceRestoreTarget(
+                            accountIdBytes = account,
+                            accountIdB64 = me.lakko.app.auth.base64Encode(account),
+                            username = resolved.normalisedUsername,
+                        ),
+                    )
+                }
+            } catch (cause: Throwable) {
+                mutableState.update {
+                    it.copy(
+                        busy = false,
+                        error = cause.message ?: "Lookup failed. Try again.",
+                    )
+                }
+            }
+        }
+    }
+
+    /**
+     * ADR-0018 factor (a), path (b) — complete the no-password
+     * restore with the identity + redeemed session token received
+     * from the other device. Suspend passthrough to
+     * [AuthRepository.completeFromDeviceRestore]; verification
+     * failures propagate to the calling panel. Requires the redeemed
+     * token (without it this device has no ACCESS) — refused
+     * otherwise with a clear message.
+     */
+    public suspend fun completeFromDeviceRestore(
+        outcome: me.lakko.app.devices.PairingOrchestrator.JoinRecoveryOutcome,
+    ) {
+        val target = mutableState.value.deviceRestoreTarget
+            ?: throw AuthClientArgError("no resolved account — look up your username first")
+        val token = outcome.sessionToken
+        val expiry = outcome.sessionExpiresAtMs
+        if (token == null || expiry == null) {
+            // Seed-only outcome: the grant redeem failed, so this
+            // device has IDENTITY but no ACCESS. Refuse rather than
+            // leave a half-restored profile; the user retries (a
+            // fresh pairing mints a fresh grant).
+            outcome.phraseSeed.fill(0)
+            throw AuthClientArgError(
+                "The other device transferred your identity but the " +
+                    "sign-in grant could not be redeemed. Try again.",
+            )
+        }
+        repo.completeFromDeviceRestore(
+            accountIdBytes = target.accountIdBytes,
+            accountIdB64 = target.accountIdB64,
+            username = target.username,
+            phraseSeed = outcome.phraseSeed,
+            sessionToken = token,
+            sessionExpiresAtMs = expiry,
+        )
     }
 
     public fun onPasswordChange(value: String) {
@@ -144,6 +252,15 @@ public class RecoverViewModel(
                     }
                     return
                 }
+            }
+            RecoverMode.AnotherDevice -> {
+                // ADR-0018 — the AnotherDevice mode never reaches the
+                // OPAQUE submit: the RestoreViaDevicePanel drives
+                // completeFromDeviceRestore directly. Defensive no-op.
+                mutableState.update {
+                    it.copy(error = "Use the QR flow above to restore.")
+                }
+                return
             }
         }
 
@@ -233,8 +350,33 @@ public class RecoverViewModel(
     }
 }
 
-/** 1.21c3 — which input mode the user is filling. */
-public enum class RecoverMode { Phrase, Shares }
+/** 1.21c3 — which input mode the user is filling. ADR-0018 adds
+ *  [AnotherDevice]: restore via an already-linked device (no
+ *  password, no phrase typing). */
+public enum class RecoverMode { Phrase, Shares, AnotherDevice }
+
+/** ADR-0018 factor (a), path (b) — the resolved restore target the
+ *  AnotherDevice mode pairs against. */
+public data class DeviceRestoreTarget(
+    val accountIdBytes: ByteArray,
+    val accountIdB64: String,
+    val username: String,
+) {
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (other !is DeviceRestoreTarget) return false
+        return accountIdBytes.contentEquals(other.accountIdBytes) &&
+            accountIdB64 == other.accountIdB64 &&
+            username == other.username
+    }
+
+    override fun hashCode(): Int {
+        var h = accountIdBytes.contentHashCode()
+        h = 31 * h + accountIdB64.hashCode()
+        h = 31 * h + username.hashCode()
+        return h
+    }
+}
 
 /** Snapshot of every field the [RecoverScreen] renders. */
 public data class RecoverUiState(
@@ -249,4 +391,7 @@ public data class RecoverUiState(
     val confirm: String = "",
     val busy: Boolean = false,
     val error: String? = null,
+    /** ADR-0018 — non-null once the AnotherDevice mode resolved the
+     *  typed username to an account id via discovery. */
+    val deviceRestoreTarget: DeviceRestoreTarget? = null,
 )

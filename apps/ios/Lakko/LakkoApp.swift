@@ -163,7 +163,8 @@ struct AppRoot: View {
             RestoreIdentityPromptScreen(
                 viewModel: RestoreIdentityPromptViewModel(
                     repository: authRepository,
-                    username: account.username
+                    username: account.username,
+                    accountIdB64: account.accountIdB64
                 )
             )
             .onAppear {

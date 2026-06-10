@@ -186,6 +186,17 @@ public enum WelcomeCourier {
                 throw err
             }
             if let first = result.messages.first {
+                // ADR-0018 factor (a): the rendezvous mailbox can also
+                // carry a tagged recovery-payload row (after the
+                // Welcome, in either FIFO order relative to the
+                // bundle). It is NOT the history bundle — skip it and
+                // keep polling. Mirror of the web's
+                // `welcome-courier.ts` + Android's
+                // `WelcomeCourier.kt` skip.
+                if RecoveryPayload.isRecoveryPayloadRow(first.payload) {
+                    cursor = first.id
+                    continue
+                }
                 return .received(first.payload)
             }
             cursor = result.messages.reduce(cursor) { max($0, $1.id) }

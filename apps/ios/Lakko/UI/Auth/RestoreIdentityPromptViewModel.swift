@@ -31,11 +31,45 @@ public final class RestoreIdentityPromptViewModel: ObservableObject {
     /// "...for @alice" line.
     public let username: String
 
+    /// ADR-0018 factor (a) — base64 account id for the
+    /// restore-via-device panel (the pairing QR embeds the raw id).
+    public let accountIdB64: String
+
+    /// Raw 16-byte account id decoded from ``accountIdB64``; `nil`
+    /// only on a malformed stored marker (the via-device toggle is
+    /// hidden in that case).
+    public var accountIdBytes: Data? {
+        base64Decode(accountIdB64)
+    }
+
     private let repository: AuthRepository
 
-    public init(repository: AuthRepository, username: String) {
+    public init(
+        repository: AuthRepository,
+        username: String,
+        accountIdB64: String
+    ) {
         self.repository = repository
         self.username = username
+        self.accountIdB64 = accountIdB64
+    }
+
+    /// ADR-0018 factor (a), path (a) — complete the pending restore
+    /// with the identity received from ANOTHER DEVICE instead of a
+    /// typed phrase. Async passthrough to
+    /// ``AuthRepository/completeFromPairing(phraseSeed:sessionToken:sessionExpiresAtMs:)``;
+    /// verification failures (`PhraseMismatch` /
+    /// `IdentityVerificationUnavailable`) propagate to the calling
+    /// panel, which surfaces them inline. On success the repository
+    /// flips the auth state to `.session`.
+    public func completeFromPairing(
+        outcome: PairingOrchestrator.JoinRecoveryOutcome
+    ) async throws {
+        try await repository.completeFromPairing(
+            phraseSeed: outcome.phraseSeed,
+            sessionToken: outcome.sessionToken,
+            sessionExpiresAtMs: outcome.sessionExpiresAtMs
+        )
     }
 
     /// Submit the recovery phrase. On success the auth state flips to

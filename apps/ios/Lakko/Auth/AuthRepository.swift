@@ -1026,46 +1026,21 @@ public final class AuthRepository: ObservableObject {
                 "no pending identity recovery — sign in first"
             )
         }
-        // Parse the phrase → derive the BIP39 seed → derive the
-        // canonical AccountIdentity pubkey from it.
+        // Parse the phrase → derive the BIP39 seed → HARD-BLOCK verify
+        // against the published bundle (shared gate).
         let mnemonic = try RecoveryMnemonic.fromPhrase(phrase: mnemonicPhrase)
         var accountIdentitySeed = mnemonic.toSeed()
-        let derivedPubkey = try Identity
-            .fromSeed(seed: accountIdentitySeed)
-            .signaturePublicKey()
-
-        // HARD-BLOCK verify against the published bundle.
-        let bundle: IdentityFetchResponse?
         do {
-            let discovery = DiscoveryClient(sessionToken: pending.sessionToken)
-            bundle = try await discovery.identityFetch(
-                accountId: pending.accountIdBytes
+            try await verifySeedAgainstPublishedIdentity(
+                accountIdBytes: pending.accountIdBytes,
+                sessionToken: pending.sessionToken,
+                accountIdentitySeed: accountIdentitySeed
             )
         } catch {
-            // Could not reach the directory to verify (network/parse).
-            // We cannot confirm the phrase reproduces the published key,
-            // so we refuse rather than cache a possibly-wrong phrase.
+            // On every refusal (mismatch, 404, network) the seed never
+            // reached the live IdentitySecrets — zeroize it.
             Self.zeroize(&accountIdentitySeed)
-            NSLog("recovery-phrase verification fetch failed: \(error)")
-            throw IdentityVerificationUnavailable(
-                "Could not reach the directory to verify your recovery " +
-                "phrase. Check your connection and try again."
-            )
-        }
-        guard let bundle else {
-            // 404 — no published identity to verify against. On an
-            // established account this is an anomaly; HARD-BLOCK.
-            Self.zeroize(&accountIdentitySeed)
-            throw IdentityVerificationUnavailable(
-                "No published identity was found to verify your recovery " +
-                "phrase. Try again, or restore from a device that still " +
-                "has your account."
-            )
-        }
-        guard let published = base64Decode(bundle.signaturePubkey),
-              published == derivedPubkey else {
-            Self.zeroize(&accountIdentitySeed)
-            throw PhraseMismatch()
+            throw error
         }
 
         // Cache the phrase seed under the device so future warm logins
@@ -1089,6 +1064,217 @@ public final class AuthRepository: ObservableObject {
             sessionToken: pending.sessionToken,
             sessionExpiresAtMs: pending.sessionExpiresAtMs,
             username: pending.username
+        )
+    }
+
+    /// Shared HARD-BLOCK verification (ADR-0017 + lakko-security
+    /// finding #1): the supplied AccountIdentity seed MUST reproduce
+    /// the account's PUBLISHED identity key. 404 (nil bundle) or a
+    /// fetch error refuses (``IdentityVerificationUnavailable``); a
+    /// mismatch refuses (``PhraseMismatch``). Never trust-on-first-use.
+    /// Used by ``provideRecoveryPhrase(mnemonicPhrase:)``,
+    /// ``completeFromPairing(phraseSeed:sessionToken:sessionExpiresAtMs:)``
+    /// and
+    /// ``completeFromDeviceRestore(accountIdBytes:accountIdB64:username:phraseSeed:sessionToken:sessionExpiresAtMs:)``;
+    /// the CALLER owns zeroizing the seed on refusal.
+    private func verifySeedAgainstPublishedIdentity(
+        accountIdBytes: Data,
+        sessionToken: String?,
+        accountIdentitySeed: Data
+    ) async throws {
+        let derivedPubkey = try Identity
+            .fromSeed(seed: accountIdentitySeed)
+            .signaturePublicKey()
+
+        let bundle: IdentityFetchResponse?
+        do {
+            let discovery = DiscoveryClient(sessionToken: sessionToken)
+            bundle = try await discovery.identityFetch(
+                accountId: accountIdBytes
+            )
+        } catch {
+            // Could not reach the directory to verify (network/parse).
+            // We cannot confirm the seed reproduces the published key,
+            // so we refuse rather than cache a possibly-wrong identity.
+            NSLog("identity-seed verification fetch failed: \(error)")
+            throw IdentityVerificationUnavailable(
+                "Could not reach the directory to verify the restored " +
+                "identity. Check your connection and try again."
+            )
+        }
+        guard let bundle else {
+            // 404 — no published identity to verify against. On an
+            // established account this is an anomaly; HARD-BLOCK.
+            throw IdentityVerificationUnavailable(
+                "No published identity was found to verify against. " +
+                "Try again, or restore with your recovery phrase."
+            )
+        }
+        guard let published = base64Decode(bundle.signaturePubkey),
+              published == derivedPubkey else {
+            throw PhraseMismatch()
+        }
+    }
+
+    /// ADR-0018 factor (a), path (a) — complete a pending
+    /// `needsRecoveryPhrase` login using the identity seed received
+    /// from ANOTHER DEVICE over the E2EE pairing channel (instead of
+    /// typing the 24 words). Same fail-closed gate as
+    /// ``provideRecoveryPhrase(mnemonicPhrase:)``; prefers the freshly
+    /// REDEEMED session token when the joiner's grant redeem succeeded.
+    ///
+    /// Takes ownership of `phraseSeed` (zeroized on every refusal —
+    /// best-effort under Swift `Data` value semantics).
+    ///
+    /// - Throws: ``PhraseMismatch`` / ``IdentityVerificationUnavailable``
+    ///   — same semantics as ``provideRecoveryPhrase(mnemonicPhrase:)``;
+    ///   ``AuthClientError/argument(_:)`` when there is no pending
+    ///   recovery.
+    public func completeFromPairing(
+        phraseSeed: Data,
+        sessionToken: String? = nil,
+        sessionExpiresAtMs: Int64? = nil
+    ) async throws {
+        guard let pending = pendingRecovery else {
+            throw AuthClientError.argument(
+                "no pending identity recovery — sign in first"
+            )
+        }
+        var seed = phraseSeed
+        do {
+            try await verifySeedAgainstPublishedIdentity(
+                accountIdBytes: pending.accountIdBytes,
+                sessionToken: sessionToken ?? pending.sessionToken,
+                accountIdentitySeed: seed
+            )
+        } catch {
+            Self.zeroize(&seed)
+            throw error
+        }
+        do {
+            try AccountIdentitySeedStore.putAccountIdentitySeed(
+                accountIdB64: pending.accountIdB64,
+                seed: seed
+            )
+        } catch {
+            NSLog(
+                "account-identity-seed persist (completeFromPairing) " +
+                "failed: \(error)"
+            )
+        }
+        identitySecrets = IdentitySecrets(
+            accountId: pending.accountIdBytes,
+            exportKey: pending.exportKey,
+            accountIdentitySeed: seed,
+            sessionToken: sessionToken ?? pending.sessionToken,
+            sessionExpiresAtMs: sessionExpiresAtMs
+                ?? pending.sessionExpiresAtMs
+        )
+        pendingRecovery = nil
+        state = .session(
+            SessionAccount(
+                accountIdB64: pending.accountIdB64,
+                username: pending.username
+            )
+        )
+    }
+
+    /// ADR-0018 factor (a), path (b) — NO-PASSWORD restore: the fresh
+    /// device ran the anonymous pairing join and holds the transferred
+    /// identity seed + the REDEEMED session token (the only ACCESS on
+    /// this device — there is no password, hence no OPAQUE export key).
+    ///
+    /// FAIL CLOSED FIRST — the seed is verified against the published
+    /// identity BEFORE any persistence; a mismatched / unverifiable
+    /// seed leaves this device untouched.
+    ///
+    /// The device root key (the ``rehydrate()`` existence-gate) is
+    /// derived from the identity seed via
+    /// `deriveDeviceRootKeyFromIdentitySeed` — distinct HKDF domain
+    /// from the exportKey-derived variant. The iOS per-account stores
+    /// (`AccountIdentitySeedStore` / `DeviceIdentityStore` / …) are
+    /// direct Keychain rows, NOT wrapped under the device root key, so
+    /// a later password login overwriting it with the exportKey-derived
+    /// value is harmless — same posture as Android.
+    ///
+    /// `IdentitySecrets.exportKey` is set EMPTY on this path — no
+    /// consumer outside this repository reads it (grep-verified; the
+    /// canonical identity + backup signing are phrase-seeded per
+    /// ADR-0017), and a later password login replaces it.
+    ///
+    /// Takes ownership of `phraseSeed` (zeroized on every refusal —
+    /// best-effort under Swift `Data` value semantics).
+    public func completeFromDeviceRestore(
+        accountIdBytes: Data,
+        accountIdB64: String,
+        username: String,
+        phraseSeed: Data,
+        sessionToken: String,
+        sessionExpiresAtMs: Int64
+    ) async throws {
+        var seed = phraseSeed
+        do {
+            try await verifySeedAgainstPublishedIdentity(
+                accountIdBytes: accountIdBytes,
+                sessionToken: sessionToken,
+                accountIdentitySeed: seed
+            )
+        } catch {
+            Self.zeroize(&seed)
+            throw error
+        }
+        // Bootstrap the device root key from the identity seed so the
+        // next-launch rehydrate gate sees a key on this device.
+        // Best-effort: a Keychain failure leaves the in-memory session
+        // working; the next password login re-derives + persists.
+        var deviceRootKey = deriveDeviceRootKeyFromIdentitySeed(
+            accountIdentitySeed: seed,
+            accountIdB64: accountIdB64
+        )
+        do {
+            try DeviceKeyStore.putDeviceKey(
+                accountIdB64: accountIdB64,
+                rootKey: deviceRootKey
+            )
+        } catch {
+            NSLog(
+                "device-key persist (completeFromDeviceRestore) " +
+                "failed: \(error)"
+            )
+        }
+        Self.zeroize(&deviceRootKey)
+        do {
+            try AccountIdentitySeedStore.putAccountIdentitySeed(
+                accountIdB64: accountIdB64,
+                seed: seed
+            )
+        } catch {
+            NSLog(
+                "account-identity-seed persist (completeFromDeviceRestore) " +
+                "failed: \(error)"
+            )
+        }
+        // Persist the account marker — there is no prior session row
+        // on this fresh device.
+        sessionStore.save(
+            PersistedSession(
+                accountIdB64: accountIdB64,
+                username: username
+            )
+        )
+        identitySecrets = IdentitySecrets(
+            accountId: accountIdBytes,
+            exportKey: Data(),
+            accountIdentitySeed: seed,
+            sessionToken: sessionToken,
+            sessionExpiresAtMs: sessionExpiresAtMs
+        )
+        pendingRecovery = nil
+        state = .session(
+            SessionAccount(
+                accountIdB64: accountIdB64,
+                username: username
+            )
         )
     }
 

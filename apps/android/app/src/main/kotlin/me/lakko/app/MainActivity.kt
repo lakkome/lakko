@@ -315,6 +315,7 @@ private fun RestoreIdentityRoot(
     me.lakko.app.ui.auth.RestoreIdentityPrompt(
         viewModel = vm,
         username = account.username,
+        accountIdB64 = account.accountIdB64,
         onSignOut = { repository.logout() },
     )
 }

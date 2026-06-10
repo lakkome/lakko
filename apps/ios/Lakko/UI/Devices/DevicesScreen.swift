@@ -86,7 +86,9 @@ public struct DevicesScreen: View {
                         case .scan:
                             ScanView(
                                 accountIdBytes: session.accountIdBytes,
-                                accountIdB64: session.accountIdB64
+                                accountIdB64: session.accountIdB64,
+                                accountIdentitySeed: session.accountIdentitySeed,
+                                sessionToken: session.sessionToken
                             )
                         }
                     } else {
@@ -107,7 +109,12 @@ public struct DevicesScreen: View {
     }
 
     private func currentSession()
-        -> (accountIdBytes: Data, accountIdB64: String, sessionToken: String)?
+        -> (
+            accountIdBytes: Data,
+            accountIdB64: String,
+            sessionToken: String,
+            accountIdentitySeed: Data
+        )?
     {
         guard
             let secrets = authRepository.identitySecrets,
@@ -115,7 +122,12 @@ public struct DevicesScreen: View {
         else {
             return nil
         }
-        return (secrets.accountId, account.accountIdB64, secrets.sessionToken)
+        return (
+            secrets.accountId,
+            account.accountIdB64,
+            secrets.sessionToken,
+            secrets.accountIdentitySeed
+        )
     }
 }
 
@@ -251,6 +263,13 @@ private struct ScanView: View {
 
     let accountIdBytes: Data
     let accountIdB64: String
+    /// ADR-0018 factor (a) — the scanner's cached AccountIdentity
+    /// (phrase) seed, sealed to the fresh device alongside a
+    /// single-use device grant. `ScanRecovery` makes a defensive
+    /// copy; `runScanFlow` consumes + zeroizes it.
+    let accountIdentitySeed: Data
+    /// Bearer token for the `/device/authorize/start` grant mint.
+    let sessionToken: String
 
     @State private var state: ScanState = .idle
 
@@ -325,10 +344,26 @@ private struct ScanView: View {
         state = .processing
         Task { @MainActor in
             do {
+                // ADR-0018 factor (a): pass the recovery half —
+                // `runScanFlow` treats it strictly best-effort (a
+                // failure there never breaks the pairing). The seed
+                // rides as a dedicated copy inside `ScanRecovery`;
+                // `runScanFlow` consumes (zeroizes) it. Mirror of the
+                // web `Devices.tsx` scanner wiring.
+                let token = sessionToken
+                let recovery = PairingOrchestrator.ScanRecovery(
+                    accountIdentitySeed: accountIdentitySeed,
+                    deviceAuthorizeStart: {
+                        try await AuthClient().deviceAuthorizeStart(
+                            sessionToken: token
+                        )
+                    }
+                )
                 _ = try await PairingOrchestrator.runScanFlow(
                     scannedBytes: bytes,
                     accountIdBytes: accountIdBytes,
-                    accountIdB64: accountIdB64
+                    accountIdB64: accountIdB64,
+                    recovery: recovery
                 )
                 state = .done
             } catch {

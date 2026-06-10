@@ -113,6 +113,25 @@ public class RestoreIdentityPromptViewModel(
             }
         }
     }
+
+    /**
+     * ADR-0018 factor (a), path (a) — complete the pending restore
+     * with the identity received from ANOTHER DEVICE instead of a
+     * typed phrase. Suspend passthrough to
+     * [AuthRepository.completeFromPairing]; verification failures
+     * (`PhraseMismatch` / `IdentityVerificationUnavailable`)
+     * propagate to the calling panel, which surfaces them inline.
+     * On success the repository flips the auth state to `Session`.
+     */
+    public suspend fun completeFromPairing(
+        outcome: me.lakko.app.devices.PairingOrchestrator.JoinRecoveryOutcome,
+    ) {
+        repo.completeFromPairing(
+            phraseSeed = outcome.phraseSeed,
+            sessionToken = outcome.sessionToken,
+            sessionExpiresAtMs = outcome.sessionExpiresAtMs,
+        )
+    }
 }
 
 /** Snapshot of the [RestoreIdentityPrompt] field state. */

@@ -152,6 +152,19 @@ opt-level = 0
 debug = true
 overflow-checks = true
 
+# tls_codec 0.4.2 guards its QUIC-varint parser with `debug_assert!`s that
+# fire BEFORE the graceful `Err(InvalidVectorLength)` returns right below
+# them (`src/quic_vec.rs`) — so attacker-shaped input (e.g. a corrupted
+# KeyPackage length byte) PANICS in dev/test builds while release builds
+# (debug-assertions off) and fuzz builds (`cfg(fuzzing)` carve-out upstream)
+# take the graceful error path. Disable debug assertions for this one
+# dependency so tests exercise exactly the production behaviour — pinned by
+# `lakko-calls::link_invite::tests::accept_invite_with_corrupted_kp_rejects`.
+# Every cfg(debug_assertions) branch in the crate is a self-check followed by
+# a graceful return (audited 0.4.2); nothing semantic changes.
+[profile.dev.package.tls_codec]
+debug-assertions = false
+
 # ADR-0014 — WebAuthn action binding. Replace the upstream
 # `webauthn-rs-core` with our vendored fork under `crates/vendor/`, which
 # adds exactly one method (`generate_challenge_authenticate_with_challenge`)

@@ -23,6 +23,8 @@ Map the task to one or more domains:
 | SFU / media | `services/sfu/`, `crates/lakko-calls/` (str0m, SFrame, signaling) | sfu-media (auto-applies) |
 | FFI surface | `crates/lakko-ffi-uniffi`, `crates/lakko-ffi-wasm` | rust-core, then platform specialists |
 | Infra / deploy | `infra/`, ops, systemd/nginx/MariaDB, `just deploy-*` | infra-deploy (auto-applies; deploy cmds have side effects) |
+| Tests / verification | test suites, fuzz, CI, triage | qa |
+| UX / UI | user-facing screens, theming, cross-platform design consistency | ux-ui |
 | Security review | invariant index, ADRs, gaps | lakko-security (explicit request ONLY) |
 
 The background skills (rust-core, ios-client, android-client, web-client, sfu-media, infra-deploy) **auto-apply by path** — you do not invoke them; they inject themselves when an agent edits files under their directory. Your job is routing and sequencing, not loading them.
@@ -44,7 +46,9 @@ The canonical ordering for a "new capability through the stack" task:
    - Spawn an iOS agent (targets `apps/ios/`, builds with `xcodebuild`)
    - Spawn an Android agent (targets `apps/android/`, builds with `:app:compileDebugKotlin`)
    - Spawn a Web agent (targets `apps/web/`, builds with `tsc --noEmit` + `vite build`)
-5. **Verify** — each platform agent reports its own build-green status. Do NOT claim green for a platform you did not observe building.
+5. **Verify (qa)** — each platform agent reports its own build-green status; route the verification pass through `qa` for the test layers + the "only claim green after running" rule. Do NOT claim green for a platform you did not observe building.
+
+If the change is user-facing, fold in `ux-ui` at the design stage (before the platform fan-out) so the three clients stay visually consistent, and have each platform agent honor the established interaction patterns.
 
 Steps 1–3 are a strict chain (each depends on the previous). Step 4 is a parallel fan-out — send all three Agent calls in ONE message so they run concurrently.
 

@@ -88,3 +88,39 @@ public func deriveDeviceRootKey(
     )
     return derived.withUnsafeBytes { Data($0) }
 }
+
+/// Fixed HKDF info-prefix for the IDENTITY-SEED-derived variant —
+/// must match `apps/web/src/auth/device-key.ts` and
+/// `apps/android/.../auth/DeviceKey.kt`. Distinct from
+/// `hkdfInfoPrefix` so the two derivations can never collide.
+private let hkdfInfoPrefixFromIdentitySeed: String =
+    "lakko/device-root/from-identity-seed/v1|"
+
+/// Derive the 32-byte device root key from the ACCOUNT-IDENTITY
+/// (BIP39 phrase) seed instead of the OPAQUE export key — ADR-0018
+/// factor (a), path (b): a device restored via another device has no
+/// password (hence no export key) yet, but the rehydration gate
+/// (``DeviceKeyStore`` existence check in `AuthRepository.rehydrate`)
+/// still needs a key to exist. Same HKDF shape as
+/// ``deriveDeviceRootKey(exportKey:accountIdB64:)`` with a distinct
+/// domain-separated info string (mirror of the web's
+/// `deriveDeviceRootKeyFromIdentitySeed` + Android's twin).
+///
+/// - Parameters:
+///   - accountIdentitySeed: 64-byte BIP39 phrase seed. Caller wipes.
+///   - accountIdB64:        Base64 16-byte account id, mixed into
+///                          the HKDF `info`.
+public func deriveDeviceRootKeyFromIdentitySeed(
+    accountIdentitySeed: Data,
+    accountIdB64: String
+) -> Data {
+    let info = Data((hkdfInfoPrefixFromIdentitySeed + accountIdB64).utf8)
+    let ikm = SymmetricKey(data: accountIdentitySeed)
+    let derived = HKDF<SHA512>.deriveKey(
+        inputKeyMaterial: ikm,
+        salt: hkdfSaltBytes,
+        info: info,
+        outputByteCount: deviceRootKeyLength
+    )
+    return derived.withUnsafeBytes { Data($0) }
+}

@@ -365,6 +365,90 @@ public struct PasswordResetFinishRequest: Codable, Equatable {
     }
 }
 
+// ----------------------------------------------------------------------------
+// Device authorization (services/auth/src/device_authorize.rs —
+// ADR-0018 factor (a), "another-device" recovery)
+// ----------------------------------------------------------------------------
+
+/// `POST /device/authorize/start` request body. Bearer-authenticated
+/// (the EXISTING device's session token rides the `Authorization`
+/// header, not the body).
+public struct DeviceAuthorizeStartRequest: Codable, Equatable {
+    public let pow: PowProofPayload
+
+    public init(pow: PowProofPayload) {
+        self.pow = pow
+    }
+}
+
+/// `POST /device/authorize/start` response body.
+public struct DeviceAuthorizeStartResponse: Codable, Equatable {
+    /// URL-safe base64 (no pad) of the RAW 32-byte grant token —
+    /// the only time it leaves the server (it stores only the
+    /// SHA-256). Seal it to the fresh device over the E2EE pairing
+    /// channel; never log or persist it.
+    public let grantTokenB64: String
+
+    public init(grantTokenB64: String) {
+        self.grantTokenB64 = grantTokenB64
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case grantTokenB64 = "grant_token_b64"
+    }
+}
+
+/// `POST /device/authorize/redeem` request body. Anonymous — the
+/// fresh device has no token yet; the PoW is the only anti-spam
+/// gate.
+public struct DeviceAuthorizeRedeemRequest: Codable, Equatable {
+    public let pow: PowProofPayload
+    /// URL-safe base64 (no pad) of the 16-byte account id the fresh
+    /// device learned from the pairing QR.
+    public let accountIdB64: String
+    /// URL-safe base64 (no pad) of the raw 32-byte grant token
+    /// received over the rendezvous channel.
+    public let grantTokenB64: String
+
+    public init(pow: PowProofPayload, accountIdB64: String, grantTokenB64: String) {
+        self.pow = pow
+        self.accountIdB64 = accountIdB64
+        self.grantTokenB64 = grantTokenB64
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case pow
+        case accountIdB64 = "account_id_b64"
+        case grantTokenB64 = "grant_token_b64"
+    }
+}
+
+/// `POST /device/authorize/redeem` response body — the same
+/// `(account_id, session_token, expiry)` triple every other login
+/// flow returns.
+public struct DeviceAuthorizeRedeemResponse: Codable, Equatable {
+    /// URL-safe base64 (no pad) of the 16-byte account id.
+    public let accountIdB64: String
+    public let sessionToken: String
+    public let sessionExpiresAtMs: Int64
+
+    public init(
+        accountIdB64: String,
+        sessionToken: String,
+        sessionExpiresAtMs: Int64
+    ) {
+        self.accountIdB64 = accountIdB64
+        self.sessionToken = sessionToken
+        self.sessionExpiresAtMs = sessionExpiresAtMs
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case accountIdB64 = "account_id_b64"
+        case sessionToken = "session_token"
+        case sessionExpiresAtMs = "session_expires_at_ms"
+    }
+}
+
 /// `POST /password/reset/finish` response body.
 public struct PasswordResetFinishResponse: Codable, Equatable {
     public let ok: Bool

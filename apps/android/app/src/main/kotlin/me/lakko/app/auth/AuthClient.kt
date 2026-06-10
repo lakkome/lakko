@@ -9,11 +9,13 @@ import io.ktor.client.engine.HttpClientEngine
 import io.ktor.client.engine.okhttp.OkHttp
 import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.client.request.HttpRequestBuilder
+import io.ktor.client.request.header
 import io.ktor.client.request.post
 import io.ktor.client.request.setBody
 import io.ktor.client.statement.HttpResponse
 import io.ktor.client.statement.bodyAsText
 import io.ktor.http.ContentType
+import io.ktor.http.HttpHeaders
 import io.ktor.http.contentType
 import io.ktor.http.isSuccess
 import io.ktor.serialization.kotlinx.json.json
@@ -164,6 +166,81 @@ public class AuthClient(
         req: PasswordResetFinishRequest,
     ): PasswordResetFinishResponse =
         post("/password/reset/finish", req)
+
+    // -----------------------------------------------------------------
+    // Device authorization — ADR-0018 factor (a), "another-device"
+    // recovery
+    // -----------------------------------------------------------------
+
+    /**
+     * `POST /device/authorize/start` — mint a single-use 32-byte
+     * device-authorization grant for this account (ADR-0018 factor
+     * (a), scanner side). Mirror of the web
+     * `AuthClient.deviceAuthorizeStart`.
+     *
+     * Bearer-authenticated (the EXISTING device proves it already
+     * holds a session) + PoW-gated. Returns the URL-safe base64
+     * (no pad) of the RAW grant token — the server stores only its
+     * SHA-256. The caller seals it (together with the phrase seed)
+     * to the fresh device over the E2EE pairing channel; it never
+     * travels in plaintext past this response.
+     */
+    public suspend fun deviceAuthorizeStart(sessionToken: String): String {
+        if (sessionToken.isEmpty()) {
+            throw AuthClientArgError("sessionToken must be non-empty")
+        }
+        val challenge = powChallenge()
+        val pow = solvePow(challenge.seed, challenge.effort_bits, powDispatcher)
+        val resp: DeviceAuthorizeStartResponse = post(
+            "/device/authorize/start",
+            DeviceAuthorizeStartRequest(pow = pow),
+            bearer = sessionToken,
+        )
+        return resp.grant_token_b64
+    }
+
+    /**
+     * `POST /device/authorize/redeem` — atomically consume a
+     * single-use device grant for a session-token triple (ADR-0018
+     * factor (a), fresh-device side). Mirror of the web
+     * `AuthClient.deviceAuthorizeRedeem`.
+     *
+     * Anonymous (the fresh device has no token yet) + PoW-gated. A
+     * missing / expired / already-consumed grant fails as an
+     * enumeration-safe 401 ([AuthHttpError]), indistinguishable from
+     * a wrong credential by design.
+     *
+     * @param accountId      Raw 16-byte account id from the pairing QR.
+     * @param grantTokenB64  URL-safe base64 (no pad) of the raw
+     *                       32-byte grant token received over the
+     *                       rendezvous channel.
+     */
+    public suspend fun deviceAuthorizeRedeem(
+        accountId: ByteArray,
+        grantTokenB64: String,
+    ): DeviceAuthorizeRedeemResult {
+        if (accountId.size != ACCOUNT_ID_LEN) {
+            throw AuthClientArgError("accountId must be $ACCOUNT_ID_LEN bytes")
+        }
+        if (grantTokenB64.isEmpty()) {
+            throw AuthClientArgError("grantTokenB64 must be non-empty")
+        }
+        val challenge = powChallenge()
+        val pow = solvePow(challenge.seed, challenge.effort_bits, powDispatcher)
+        val resp: DeviceAuthorizeRedeemResponse = post(
+            "/device/authorize/redeem",
+            DeviceAuthorizeRedeemRequest(
+                pow = pow,
+                account_id_b64 = base64UrlEncodeNoPad(accountId),
+                grant_token_b64 = grantTokenB64,
+            ),
+        )
+        return DeviceAuthorizeRedeemResult(
+            accountId = base64UrlDecodeNoPad(resp.account_id_b64),
+            sessionToken = resp.session_token,
+            sessionExpiresAtMs = resp.session_expires_at_ms,
+        )
+    }
 
     // -----------------------------------------------------------------
     // High-level: full signup / login / recover flows
@@ -485,8 +562,12 @@ public class AuthClient(
     private suspend inline fun <reified Req : Any, reified Res : Any> post(
         endpoint: String,
         body: Req,
+        bearer: String? = null,
     ): Res = doPost(endpoint) {
         contentType(ContentType.Application.Json)
+        if (bearer != null) {
+            header(HttpHeaders.Authorization, "Bearer $bearer")
+        }
         setBody(body)
     }
 
@@ -679,6 +760,32 @@ public data class RecoverResult(
     override fun hashCode(): Int {
         var result = accountId.contentHashCode()
         result = 31 * result + exportKey.contentHashCode()
+        result = 31 * result + sessionToken.hashCode()
+        result = 31 * result + sessionExpiresAtMs.hashCode()
+        return result
+    }
+}
+
+/** Result of [AuthClient.deviceAuthorizeRedeem] — the same
+ *  `(account_id, session_token, expiry)` triple every other login
+ *  flow returns (ADR-0018 factor (a), fresh-device side). No
+ *  exportKey: this path has no password, so no OPAQUE export key
+ *  exists on this device until the user later sets one. */
+public data class DeviceAuthorizeRedeemResult(
+    val accountId: ByteArray,
+    val sessionToken: String,
+    val sessionExpiresAtMs: Long,
+) {
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (other !is DeviceAuthorizeRedeemResult) return false
+        return accountId.contentEquals(other.accountId) &&
+            sessionToken == other.sessionToken &&
+            sessionExpiresAtMs == other.sessionExpiresAtMs
+    }
+
+    override fun hashCode(): Int {
+        var result = accountId.contentHashCode()
         result = 31 * result + sessionToken.hashCode()
         result = 31 * result + sessionExpiresAtMs.hashCode()
         return result
