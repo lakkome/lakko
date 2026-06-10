@@ -47,6 +47,7 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
+import me.lakko.app.auth.AuthClient
 import me.lakko.app.auth.AuthRepository
 import me.lakko.app.auth.AuthState
 import me.lakko.app.devices.DeviceRemoval
@@ -160,6 +161,8 @@ public fun DevicesScreen(
                 else -> ScanTab(
                     accountIdBytes = secrets.accountId,
                     accountIdB64 = account.accountIdB64,
+                    accountIdentitySeed = secrets.accountIdentitySeed,
+                    sessionToken = secrets.sessionToken,
                 )
             }
         }
@@ -347,6 +350,21 @@ private sealed interface ScanUi {
     data object Idle : ScanUi
     data object NeedsPermission : ScanUi
     data object Scanning : ScanUi
+
+    /** ADR-0018 / lakko-security finding #1 — a decoded pairing QR
+     *  parks here until the user explicitly confirms: the scan now
+     *  transfers DeviceGroup membership AND the identity seed AND a
+     *  session grant, so it must not run on a bare camera glance. */
+    data class ConfirmTransfer(val scannedBytes: ByteArray) : ScanUi {
+        override fun equals(other: Any?): Boolean {
+            if (this === other) return true
+            if (other !is ConfirmTransfer) return false
+            return scannedBytes.contentEquals(other.scannedBytes)
+        }
+
+        override fun hashCode(): Int = scannedBytes.contentHashCode()
+    }
+
     data object Processing : ScanUi
     data object Done : ScanUi
     data class Error(val message: String) : ScanUi
@@ -356,6 +374,8 @@ private sealed interface ScanUi {
 private fun ScanTab(
     accountIdBytes: ByteArray,
     accountIdB64: String,
+    accountIdentitySeed: ByteArray,
+    sessionToken: String,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -446,22 +466,10 @@ private fun ScanTab(
                                 )
                                 return@QrScannerComposable
                             }
-                            state = ScanUi.Processing
-                            scope.launch {
-                                try {
-                                    PairingOrchestrator.runScanFlow(
-                                        context = context,
-                                        scannedBytes = bytes,
-                                        accountIdBytes = accountIdBytes,
-                                        accountIdB64 = accountIdB64,
-                                    )
-                                    state = ScanUi.Done
-                                } catch (cause: Throwable) {
-                                    state = ScanUi.Error(
-                                        cause.message ?: "Pairing failed",
-                                    )
-                                }
-                            }
+                            // ADR-0018 / lakko-security finding #1 —
+                            // park for explicit confirmation instead of
+                            // running the transfer on a bare decode.
+                            state = ScanUi.ConfirmTransfer(bytes)
                         },
                         onError = { msg ->
                             state = ScanUi.Error(msg)
@@ -472,6 +480,66 @@ private fun ScanTab(
                     onClick = { state = ScanUi.Idle },
                 ) {
                     Text("Cancel")
+                }
+            }
+
+            is ScanUi.ConfirmTransfer -> Column(
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                Text(
+                    "Link this device?",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Text(
+                    "This gives the scanned device FULL access to your " +
+                        "account: your messages, your contacts, and your " +
+                        "secure identity. Only continue if the QR code is " +
+                        "on YOUR OWN new device.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(
+                        onClick = {
+                            state = ScanUi.Processing
+                            scope.launch {
+                                try {
+                                    // ADR-0018 factor (a): seal the
+                                    // identity seed + a single-use
+                                    // grant to the new device alongside
+                                    // the Welcome (best-effort inside
+                                    // runScanFlow; the copy is consumed
+                                    // + zeroized there).
+                                    PairingOrchestrator.runScanFlow(
+                                        context = context,
+                                        scannedBytes = s.scannedBytes,
+                                        accountIdBytes = accountIdBytes,
+                                        accountIdB64 = accountIdB64,
+                                        recovery = PairingOrchestrator.ScanRecovery(
+                                            accountIdentitySeed =
+                                                accountIdentitySeed.copyOf(),
+                                            deviceAuthorizeStart = {
+                                                AuthClient().use { client ->
+                                                    client.deviceAuthorizeStart(
+                                                        sessionToken,
+                                                    )
+                                                }
+                                            },
+                                        ),
+                                    )
+                                    state = ScanUi.Done
+                                } catch (cause: Throwable) {
+                                    state = ScanUi.Error(
+                                        cause.message ?: "Pairing failed",
+                                    )
+                                }
+                            }
+                        },
+                    ) { Text("Link device") }
+                    OutlinedButton(
+                        onClick = { state = ScanUi.Idle },
+                    ) { Text("Cancel") }
                 }
             }
 

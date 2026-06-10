@@ -276,6 +276,12 @@ private struct ScanView: View {
     private enum ScanState: Equatable {
         case idle
         case scanning
+        /// ADR-0018 / lakko-security finding #1 — a decoded pairing
+        /// QR parks here until the user explicitly confirms: the scan
+        /// now transfers DeviceGroup membership AND the identity seed
+        /// AND a session grant, so it must not run on a bare camera
+        /// glance.
+        case confirm(Data)
         case processing
         case done
         case error(String)
@@ -310,6 +316,27 @@ private struct ScanView: View {
                         .padding(.top, 4)
                 }
 
+            case .confirm(let scannedBytes):
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("Link this device?")
+                        .font(.headline)
+                    Text(
+                        "This gives the scanned device FULL access to " +
+                        "your account: your messages, your contacts, and " +
+                        "your secure identity. Only continue if the QR " +
+                        "code is on YOUR OWN new device."
+                    )
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    HStack {
+                        Button(action: { runTransfer(bytes: scannedBytes) }) {
+                            Text("Link device")
+                        }
+                        .buttonStyle(.borderedProminent)
+                        Button("Cancel", role: .cancel, action: { state = .idle })
+                    }
+                }
+
             case .processing:
                 ProgressView("Adding the device…")
 
@@ -341,6 +368,12 @@ private struct ScanView: View {
             // re-aim at the right code.
             return
         }
+        // Park for explicit confirmation (lakko-security #1) rather
+        // than running the transfer on a bare decode.
+        state = .confirm(bytes)
+    }
+
+    private func runTransfer(bytes: Data) {
         state = .processing
         Task { @MainActor in
             do {

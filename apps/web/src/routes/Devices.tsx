@@ -529,6 +529,11 @@ function ScanView(props: {
     | { kind: "idle" }
     | { kind: "opening" }
     | { kind: "scanning" }
+    // ADR-0018 / lakko-security finding #1 — a decoded pairing QR
+    // parks here until the user explicitly confirms: the scan now
+    // transfers DeviceGroup membership AND the identity seed AND a
+    // session grant, so it must not run on a bare camera glance.
+    | { kind: "confirm"; scannedBytes: Uint8Array }
     | { kind: "processing" }
     | { kind: "done" }
     | { kind: "error"; message: string };
@@ -648,7 +653,10 @@ function ScanView(props: {
       if (detected !== null) {
         const bytes = base64UrlDecodeNoPad(detected.data);
         if (bytes !== null) {
-          void handleDecoded(bytes);
+          // Park for explicit confirmation (lakko-security #1)
+          // rather than running the transfer on a bare decode.
+          stopCamera();
+          setState({ kind: "confirm", scannedBytes: bytes });
           return;
         }
         // Decoded text wasn't our base64url payload; keep
@@ -692,6 +700,37 @@ function ScanView(props: {
               Cancel
             </button>
           </div>
+        </Match>
+        <Match when={state().kind === "confirm"}>
+          {(_) => {
+            const s = state();
+            const scanned = s.kind === "confirm" ? s.scannedBytes : null;
+            return (
+              <div>
+                <p>
+                  <strong>Link this device?</strong>
+                </p>
+                <p>
+                  This gives the scanned device FULL access to your
+                  account: your messages, your contacts, and your
+                  secure identity. Only continue if the QR code is on
+                  YOUR OWN new device.
+                </p>
+                <button
+                  class="primary"
+                  type="button"
+                  onClick={() => {
+                    if (scanned !== null) void handleDecoded(scanned);
+                  }}
+                >
+                  Link device
+                </button>{" "}
+                <button type="button" onClick={reset}>
+                  Cancel
+                </button>
+              </div>
+            );
+          }}
         </Match>
         <Match when={state().kind === "processing"}>
           <p>Adding the device…</p>
