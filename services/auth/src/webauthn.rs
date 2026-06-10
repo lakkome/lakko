@@ -754,6 +754,25 @@ pub(crate) fn spawn_state_pruner(pool: MySqlPool) -> tokio::task::JoinHandle<()>
                 Ok(_) => {},
                 Err(e) => tracing::warn!(error = %e, "device_grants prune failed"),
             }
+
+            // ADR-0018 factor (d) — sweep expired phone/email OTP challenges
+            // on the same timer (migration 0013). A consumed challenge is
+            // deleted on a successful recover; this catches the ones a
+            // recover/start sent but no recover/finish ever consumed. The
+            // verify path already filters `expires_at > NOW(3)`, so this is
+            // hygiene (the PK is `(account_id, kind)`, so growth is bounded
+            // anyway), not a correctness requirement.
+            let otp_challenges =
+                sqlx::query("DELETE FROM otp_challenges WHERE expires_at < NOW(3)")
+                    .execute(&pool)
+                    .await;
+            match otp_challenges {
+                Ok(r) if r.rows_affected() > 0 => {
+                    tracing::debug!(rows = r.rows_affected(), "pruned expired otp_challenges");
+                },
+                Ok(_) => {},
+                Err(e) => tracing::warn!(error = %e, "otp_challenges prune failed"),
+            }
         }
     })
 }
