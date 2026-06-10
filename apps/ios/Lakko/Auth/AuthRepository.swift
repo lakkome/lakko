@@ -1043,6 +1043,18 @@ public final class AuthRepository: ObservableObject {
             throw error
         }
 
+        // ADR-0018 factor (c): a TOTP-recovered fresh device parked
+        // with NO device root key (no password => no export key to
+        // derive one from). Bootstrap it from the VERIFIED identity
+        // seed — exactly what `completeFromDeviceRestore` does — and
+        // ONLY here, strictly AFTER the fail-closed verification
+        // above: a refusal must leave this device untouched.
+        bootstrapDeviceKeyFromVerifiedSeedIfAbsent(
+            accountIdB64: pending.accountIdB64,
+            accountIdentitySeed: accountIdentitySeed,
+            context: "provideRecoveryPhrase"
+        )
+
         // Cache the phrase seed under the device so future warm logins
         // skip the prompt. Best-effort.
         do {
@@ -1151,6 +1163,16 @@ public final class AuthRepository: ObservableObject {
             Self.zeroize(&seed)
             throw error
         }
+        // ADR-0018 factor (c): a TOTP-recovered fresh device parked
+        // with NO device root key. Bootstrap it from the VERIFIED
+        // transferred seed (the `completeFromDeviceRestore` recipe),
+        // strictly AFTER the fail-closed verification above — a
+        // refusal must leave this device untouched.
+        bootstrapDeviceKeyFromVerifiedSeedIfAbsent(
+            accountIdB64: pending.accountIdB64,
+            accountIdentitySeed: seed,
+            context: "completeFromPairing"
+        )
         do {
             try AccountIdentitySeedStore.putAccountIdentitySeed(
                 accountIdB64: pending.accountIdB64,
@@ -1276,6 +1298,170 @@ public final class AuthRepository: ObservableObject {
                 username: username
             )
         )
+    }
+
+    /// ADR-0018 factor (c) — recover ACCESS with an authenticator
+    /// (TOTP) code. Mirror of the web `recoverWithTotp`.
+    ///
+    /// ACCESS only: the server verifies the code and issues the
+    /// session triple; identity acquisition runs the ADR-0017 state
+    /// machine below. NO password is involved, so there is NO OPAQUE
+    /// export key on this path — `exportKey` is empty `Data()` (the
+    /// ``completeFromDeviceRestore(accountIdBytes:accountIdB64:username:phraseSeed:sessionToken:sessionExpiresAtMs:)``
+    /// convention).
+    ///
+    ///   * **Warm case** — a cached AccountIdentity (phrase) seed on
+    ///     this device rebuilds the canonical identity directly. If
+    ///     the device root key is missing (e.g. post-Keychain-reset),
+    ///     it is bootstrapped from the cached (already-verified) seed
+    ///     so the ``rehydrate()`` existence-gate passes on the next
+    ///     launch.
+    ///   * **Cold case** — park a ``PendingRecovery`` (empty
+    ///     exportKey) and flip to `.needsRecoveryPhrase`; the
+    ///     completion paths (`provideRecoveryPhrase` /
+    ///     `completeFromPairing`) verify the supplied seed fail-closed
+    ///     and bootstrap the device key from it.
+    public func recoverWithTotp(username: String, code: String) async throws {
+        let trimmed = username.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            throw AuthClientError.argument(
+                "enter the username of the account to recover"
+            )
+        }
+        // Resolve the username -> account_id exactly like `login` /
+        // `recover`: a local cache hit wins, else a discovery lookup
+        // round-trip binds it.
+        let cached = sessionStore.load()
+        let accountIdB64: String
+        let resolvedUsername: String
+        if let cached, cached.username == trimmed {
+            accountIdB64 = cached.accountIdB64
+            resolvedUsername = cached.username
+        } else {
+            let discovery = DiscoveryClient()
+            let lookup = try await discovery.lookup(username: trimmed)
+            guard let accountBytes = lookup.account else {
+                throw AuthClientError.argument("username not found")
+            }
+            accountIdB64 = base64Encode(accountBytes)
+            resolvedUsername = lookup.normalisedUsername
+        }
+        guard let accountIdBytes = base64Decode(accountIdB64) else {
+            throw AuthClientError.argument(
+                "resolved account id is malformed; please try again"
+            )
+        }
+
+        let client = authClientFactory()
+        let result = try await client.totpRecover(
+            accountId: accountIdBytes,
+            code: code
+        )
+
+        // Persist the session marker — important on a fresh device
+        // where no row existed (resolved via the discovery lookup).
+        sessionStore.save(
+            PersistedSession(
+                accountIdB64: accountIdB64,
+                username: resolvedUsername
+            )
+        )
+
+        // ADR-0017 identity acquisition. TOTP carried NO password, so
+        // there is no OPAQUE export key — the only same-device
+        // shortcut is an already-cached AccountIdentity seed.
+        let accountIdentitySeed = Self.readCachedAccountIdentitySeed(
+            accountIdB64: accountIdB64,
+            context: "totp recover"
+        )
+        if let accountIdentitySeed {
+            // Warm case. The cached seed was verified against the
+            // published bundle when it was stored, so bootstrapping
+            // the device root key from it (when absent — the
+            // rehydrate existence-gate) is safe here.
+            bootstrapDeviceKeyFromVerifiedSeedIfAbsent(
+                accountIdB64: accountIdB64,
+                accountIdentitySeed: accountIdentitySeed,
+                context: "totp recover"
+            )
+            finishCanonicalSession(
+                accountIdentitySeed: accountIdentitySeed,
+                accountIdBytes: accountIdBytes,
+                exportKey: Data(),
+                sessionToken: result.sessionToken,
+                sessionExpiresAtMs: result.sessionExpiresAtMs,
+                username: resolvedUsername
+            )
+            Task { await Self.subscribePushBestEffort(context: "totp-recover") }
+            return
+        }
+
+        // Cold case — fresh-device fail-safe (ADR-0017): ACCESS
+        // succeeded, identity restore is pending. exportKey EMPTY (no
+        // password); the completion paths bootstrap the device key
+        // from the VERIFIED seed.
+        pendingRecovery = PendingRecovery(
+            accountIdBytes: accountIdBytes,
+            accountIdB64: accountIdB64,
+            exportKey: Data(),
+            sessionToken: result.sessionToken,
+            sessionExpiresAtMs: result.sessionExpiresAtMs,
+            username: resolvedUsername
+        )
+        state = .needsRecoveryPhrase(
+            SessionAccount(
+                accountIdB64: accountIdB64,
+                username: resolvedUsername
+            )
+        )
+    }
+
+    /// ADR-0018 factor (c) — bootstrap the device root key from a
+    /// VERIFIED AccountIdentity seed when the Keychain has none (the
+    /// ``rehydrate()`` existence-gate would otherwise bounce the next
+    /// launch to the login form). Mirror of the web's nullable-
+    /// deviceKey bootstrap in `provideRecoveryPhrase` /
+    /// `completeFromPairing`.
+    ///
+    /// SECURITY: the caller MUST only invoke this with a seed that
+    /// already passed ``verifySeedAgainstPublishedIdentity`` (or was
+    /// cached AFTER passing it) — never bootstrap before
+    /// verification; a refusal must leave this device untouched.
+    ///
+    /// Best-effort: a Keychain failure leaves the in-memory session
+    /// working; a later password login re-derives + persists. A probe
+    /// failure is treated as "no key" (same as ``rehydrate()``) — the
+    /// iOS per-account stores are direct Keychain rows, NOT wrapped
+    /// under the device root key, so an overwrite is harmless.
+    private func bootstrapDeviceKeyFromVerifiedSeedIfAbsent(
+        accountIdB64: String,
+        accountIdentitySeed: Data,
+        context: String
+    ) {
+        do {
+            if try DeviceKeyStore.getDeviceKey(accountIdB64: accountIdB64) != nil {
+                // A stored device key exists (e.g. a prior password
+                // login on this device) — keep it.
+                return
+            }
+        } catch {
+            NSLog("device-key probe failed (\(context)): \(error)")
+            // Fall through — same "treat as no key" posture as
+            // rehydrate().
+        }
+        var deviceRootKey = deriveDeviceRootKeyFromIdentitySeed(
+            accountIdentitySeed: accountIdentitySeed,
+            accountIdB64: accountIdB64
+        )
+        do {
+            try DeviceKeyStore.putDeviceKey(
+                accountIdB64: accountIdB64,
+                rootKey: deviceRootKey
+            )
+        } catch {
+            NSLog("device-key bootstrap (\(context)) failed: \(error)")
+        }
+        Self.zeroize(&deviceRootKey)
     }
 
     /// Best-effort wipe of a seed buffer we own — zero it now so the
@@ -1609,6 +1795,10 @@ struct PendingRecovery {
     let accountIdB64: String
     /// OPAQUE export key from the just-completed auth — retained for
     /// the in-memory `exportKey` (device key already derived from it).
+    /// EMPTY `Data()` on the ADR-0018 factor (c) TOTP path: no
+    /// password was involved, so there is no export key and no device
+    /// root key yet — the completion paths bootstrap one from the
+    /// verified identity seed (`bootstrapDeviceKeyFromVerifiedSeedIfAbsent`).
     let exportKey: Data
     let sessionToken: String
     let sessionExpiresAtMs: Int64

@@ -449,6 +449,102 @@ public struct DeviceAuthorizeRedeemResponse: Codable, Equatable {
     }
 }
 
+// ----------------------------------------------------------------------------
+// TOTP (services/auth/src/totp.rs — ADR-0018 factor (c),
+// authenticator-code recovery)
+// ----------------------------------------------------------------------------
+
+/// `POST /totp/enroll/start` request body. Bearer-authenticated (the
+/// already-logged-in account's session token rides the
+/// `Authorization` header, not the body) + PoW.
+public struct TotpEnrollStartRequest: Codable, Equatable {
+    public let pow: PowProofPayload
+
+    public init(pow: PowProofPayload) {
+        self.pow = pow
+    }
+}
+
+/// `POST /totp/enroll/start` response body — the provisioning
+/// material the authenticator app consumes. The raw secret leaves
+/// the server exactly once, here; display the QR + the manual-entry
+/// secret once, never persist either client-side.
+public struct TotpEnrollStartResponse: Codable, Equatable {
+    /// `otpauth://totp/...` provisioning URI for the QR code.
+    public let otpauthUri: String
+    /// RFC 4648 base32 (no padding) secret for manual entry.
+    public let secretB32: String
+
+    public init(otpauthUri: String, secretB32: String) {
+        self.otpauthUri = otpauthUri
+        self.secretB32 = secretB32
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case otpauthUri = "otpauth_uri"
+        case secretB32 = "secret_b32"
+    }
+}
+
+/// `POST /totp/enroll/finish` request body. Bearer-auth, NO `pow`
+/// field — the server does not gate finish.
+public struct TotpEnrollFinishRequest: Codable, Equatable {
+    /// The first 6-digit code the authenticator produced, proving it
+    /// holds the secret.
+    public let code: String
+
+    public init(code: String) {
+        self.code = code
+    }
+}
+
+/// `POST /totp/recover` request body. Anonymous (the caller lost
+/// their device) + PoW.
+public struct TotpRecoverRequest: Codable, Equatable {
+    public let pow: PowProofPayload
+    /// URL-safe base64 (no pad) of the 16-byte account id.
+    public let accountIdB64: String
+    /// The current 6-digit authenticator code.
+    public let code: String
+
+    public init(pow: PowProofPayload, accountIdB64: String, code: String) {
+        self.pow = pow
+        self.accountIdB64 = accountIdB64
+        self.code = code
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case pow
+        case accountIdB64 = "account_id_b64"
+        case code
+    }
+}
+
+/// `POST /totp/recover` response body — the same `(account_id,
+/// session_token, expiry)` triple every other login flow returns.
+public struct TotpRecoverResponse: Codable, Equatable {
+    /// URL-safe base64 (no pad) of the 16-byte account id.
+    public let accountIdB64: String
+    public let sessionToken: String
+    public let sessionExpiresAtMs: Int64
+
+    public init(
+        accountIdB64: String,
+        sessionToken: String,
+        sessionExpiresAtMs: Int64
+    ) {
+        self.accountIdB64 = accountIdB64
+        self.sessionToken = sessionToken
+        self.sessionExpiresAtMs = sessionExpiresAtMs
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case accountIdB64 = "account_id_b64"
+        case sessionToken = "session_token"
+        case sessionExpiresAtMs = "session_expires_at_ms"
+    }
+}
+
 /// `POST /password/reset/finish` response body.
 public struct PasswordResetFinishResponse: Codable, Equatable {
     public let ok: Bool

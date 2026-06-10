@@ -35,12 +35,14 @@ public struct DevicesScreen: View {
         case list
         case pair
         case scan
+        case totp
         var id: String { rawValue }
         var label: String {
             switch self {
             case .list: return "Your devices"
             case .pair: return "Pair this device"
             case .scan: return "Add a device"
+            case .totp: return "Authenticator"
             }
         }
     }
@@ -90,6 +92,8 @@ public struct DevicesScreen: View {
                                 accountIdentitySeed: session.accountIdentitySeed,
                                 sessionToken: session.sessionToken
                             )
+                        case .totp:
+                            TotpEnrollView(sessionToken: session.sessionToken)
                         }
                     } else {
                         Text("Sign in first to manage devices.")
@@ -578,5 +582,185 @@ private struct DevicesListView: View {
     private func hexPrefix(_ data: Data, n: Int) -> String {
         let take = min(n, data.count)
         return data.prefix(take).map { String(format: "%02x", $0) }.joined()
+    }
+}
+
+// ---- Authenticator (TOTP) enrollment — ADR-0018 factor (c) -------
+
+/// Enroll an authenticator app as an ACCESS-recovery factor:
+/// `/totp/enroll/start` renders the `otpauth://` QR (RAW TEXT —
+/// authenticator apps parse the URI straight out of the QR) + the
+/// manual-entry secret; `/totp/enroll/finish` confirms with a live
+/// 6-digit code. Mirror of the web `TotpEnrollView` / Android
+/// `TotpEnrollTab`.
+///
+/// There is no server "status" endpoint — the Enable button renders
+/// by default and a 409 from either call flips the card to "already
+/// enabled" (honest lazy state derivation, same as web/Android).
+private struct TotpEnrollView: View {
+    let sessionToken: String
+
+    private enum UiState: Equatable {
+        case idle
+        case starting
+        case confirm(otpauthUri: String, secretB32: String)
+        case done
+        case alreadyEnabled
+        case unavailable
+        case error(String)
+    }
+
+    @State private var state: UiState = .idle
+    @State private var code: String = ""
+    @State private var busy: Bool = false
+    @State private var inlineError: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(
+                "Add an authenticator app (TOTP) as a recovery factor. " +
+                "If you lose this device, a 6-digit code recovers ACCESS " +
+                "to your account; your identity then restores from the " +
+                "recovery phrase or another device."
+            )
+            .font(.footnote)
+            .foregroundStyle(.secondary)
+
+            switch state {
+            case .idle:
+                Button(action: start) {
+                    Text("Enable authenticator").frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+
+            case .starting:
+                ProgressView()
+
+            case .confirm(let otpauthUri, let secretB32):
+                Text(
+                    "Scan this QR with your authenticator app (or type " +
+                    "the secret), then enter the current 6-digit code to " +
+                    "confirm."
+                )
+                .font(.footnote)
+                QrTextImageView(text: otpauthUri, size: 220)
+                Text("Secret: \(secretB32)")
+                    .font(.footnote.weight(.semibold))
+                    .textSelection(.enabled)
+                TextField("6-digit code", text: $code)
+                    .textFieldStyle(.roundedBorder)
+                    .keyboardType(.numberPad)
+                    .textContentType(.oneTimeCode)
+                    .disabled(busy)
+                if let inlineError {
+                    Text(inlineError)
+                        .font(.footnote)
+                        .foregroundStyle(.red)
+                }
+                Button(action: { confirm(otpauthUri: otpauthUri, secretB32: secretB32) }) {
+                    Text(busy ? "Confirming…" : "Confirm")
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(busy)
+
+            case .done:
+                Label(
+                    "Authenticator enabled. A 6-digit code can now " +
+                    "recover access to this account.",
+                    systemImage: "checkmark.circle.fill"
+                )
+                .foregroundStyle(.green)
+                .font(.footnote)
+
+            case .alreadyEnabled:
+                Text("An authenticator is already enabled on this account.")
+                    .font(.body)
+
+            case .unavailable:
+                Text("Authenticator enrollment is not available on this server.")
+                    .font(.body)
+                    .foregroundStyle(.red)
+
+            case .error(let message):
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(message)
+                        .font(.footnote)
+                        .foregroundStyle(.red)
+                    Button("Try again", action: { state = .idle })
+                }
+            }
+        }
+    }
+
+    private func start() {
+        state = .starting
+        Task { @MainActor in
+            do {
+                let res = try await AuthClient().totpEnrollStart(
+                    sessionToken: sessionToken
+                )
+                state = .confirm(
+                    otpauthUri: res.otpauthUri,
+                    secretB32: res.secretB32
+                )
+            } catch let err as AuthClientError {
+                state = mapStartError(err)
+            } catch {
+                state = .error(error.localizedDescription)
+            }
+        }
+    }
+
+    private func confirm(otpauthUri: String, secretB32: String) {
+        guard let normalized = normalizeTotpCode(code) else {
+            inlineError = "Enter the 6-digit code from the app."
+            return
+        }
+        busy = true
+        inlineError = nil
+        Task { @MainActor in
+            do {
+                try await AuthClient().totpEnrollFinish(
+                    sessionToken: sessionToken,
+                    code: normalized
+                )
+                busy = false
+                state = .done
+            } catch let err as AuthClientError {
+                busy = false
+                if case .http(let status, _, _) = err {
+                    switch status {
+                    case 401:
+                        inlineError = "Wrong code — check the app and try again."
+                        // Keep the QR up; the user re-reads the code.
+                        state = .confirm(
+                            otpauthUri: otpauthUri,
+                            secretB32: secretB32
+                        )
+                    case 409:
+                        state = .alreadyEnabled
+                    default:
+                        state = .error("Confirmation failed (\(status)).")
+                    }
+                } else {
+                    state = .error("Confirmation failed.")
+                }
+            } catch {
+                busy = false
+                state = .error(error.localizedDescription)
+            }
+        }
+    }
+
+    private func mapStartError(_ err: AuthClientError) -> UiState {
+        if case .http(let status, _, _) = err {
+            switch status {
+            case 409: return .alreadyEnabled
+            case 503: return .unavailable
+            default: return .error("Enrollment failed (\(status)).")
+            }
+        }
+        return .error("Enrollment failed.")
     }
 }

@@ -32,8 +32,12 @@ public final class RecoverViewModel: ObservableObject {
     /// Shamir share per line and combines them into the same
     /// canonical phrase via the BIP39 `from_entropy` round-trip.
     /// ADR-0018 adds `anotherDevice`: restore via an already-linked
-    /// device (no password, no phrase typing).
-    public enum Mode: Equatable { case phrase, shares, anotherDevice }
+    /// device (no password, no phrase typing) — and `totp`
+    /// (factor (c)): username + the current 6-digit code from a
+    /// previously-enrolled authenticator app. TOTP grants ACCESS
+    /// only; identity restore then runs the ADR-0017 state machine
+    /// (warm cached seed, or the `needsRecoveryPhrase` fail-safe).
+    public enum Mode: Equatable { case phrase, shares, anotherDevice, totp }
 
     @Published public var mode: Mode = .phrase {
         didSet {
@@ -65,6 +69,8 @@ public final class RecoverViewModel: ObservableObject {
 
     @Published public private(set) var busy: Bool = false
     @Published public private(set) var error: String?
+    /// ADR-0018 factor (c) — the 6-digit authenticator code field.
+    @Published public var totpCode: String = ""
 
     // MARK: - Read-only inputs
 
@@ -129,6 +135,12 @@ public final class RecoverViewModel: ObservableObject {
             // OPAQUE submit: the RestoreViaDevicePanel drives
             // completeFromDeviceRestore directly. Defensive no-op.
             error = "Use the QR flow above to restore."
+            return
+        case .totp:
+            // ADR-0018 factor (c) — the Authenticator mode submits
+            // via `submitTotp` (no new password on that path).
+            // Defensive no-op.
+            error = "Use the authenticator-code form."
             return
         case .phrase:
             if phrase.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -283,6 +295,74 @@ public final class RecoverViewModel: ObservableObject {
             sessionToken: token,
             sessionExpiresAtMs: expiry
         )
+    }
+
+    /// ADR-0018 factor (c) — submit the Authenticator mode: username
+    /// (cached account wins, else the typed field) + the current
+    /// 6-digit code. `AuthRepository.recoverWithTotp` drives the
+    /// state flip — `.session` on the warm same-device path,
+    /// `.needsRecoveryPhrase` on a fresh device — and the app router
+    /// follows automatically. Mirror of Android's `onSubmitTotp`.
+    public func submitTotp() {
+        guard !busy else { return }
+        let user = (cachedUsername ?? username)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !user.isEmpty else {
+            error = "Enter the username of the account to recover."
+            return
+        }
+        guard let normalized = normalizeTotpCode(totpCode) else {
+            error = "Enter the 6-digit code from your authenticator app."
+            return
+        }
+        busy = true
+        error = nil
+        Task {
+            do {
+                try await repository.recoverWithTotp(
+                    username: user,
+                    code: normalized
+                )
+                // The repository flipped the auth state; wipe the
+                // form buffer before the router replaces this screen.
+                busy = false
+                error = nil
+                totpCode = ""
+            } catch let err as AuthClientError {
+                busy = false
+                error = totpUserFacing(err)
+            } catch {
+                busy = false
+                self.error = (error as? LocalizedError)?.errorDescription
+                    ?? "Recovery failed."
+            }
+        }
+    }
+
+    /// Map a `recoverWithTotp` failure onto friendly inline copy. The
+    /// server is enumeration-safe: 401 covers unknown-account /
+    /// unconfirmed-enrollment / wrong-code / replayed-code uniformly
+    /// (mirror of Android's `totpUserFacingHttpError`).
+    private func totpUserFacing(_ err: AuthClientError) -> String {
+        switch err {
+        case .argument(let message):
+            return message
+        case .http(let status, _, _):
+            switch status {
+            case 401:
+                return "Wrong or expired code."
+            case 429:
+                return "Too many attempts — wait 15 minutes."
+            case 503:
+                return "Authenticator recovery is not available on this server."
+            case 500...599:
+                return "Server error. Please try again shortly."
+            default:
+                return "Recovery failed (\(status))."
+            }
+        case .network:
+            return "Network error. Check your connection and try again."
+        }
     }
 
     // MARK: - Error mapping

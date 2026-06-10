@@ -40,7 +40,7 @@ public struct QrImageView: View {
 
     // MARK: - Internal
 
-    private static func render(text: String, target: CGFloat) -> UIImage? {
+    static func render(text: String, target: CGFloat) -> UIImage? {
         let filter = CIFilter.qrCodeGenerator()
         filter.message = Data(text.utf8)
         // "M" — 15% error correction, the same level the web
@@ -69,5 +69,34 @@ public struct QrImageView: View {
             .replacingOccurrences(of: "+", with: "-")
             .replacingOccurrences(of: "/", with: "_")
             .replacingOccurrences(of: "=", with: "")
+    }
+}
+
+/// RAW-TEXT QR (no base64 wrapping) — for payloads that are already
+/// text a third-party scanner must read verbatim, e.g. the
+/// `otpauth://` provisioning URI an authenticator app consumes
+/// (ADR-0018 factor (c)). The pairing flow keeps the byte + base64url
+/// path of ``QrImageView``.
+public struct QrTextImageView: View {
+
+    public let text: String
+    public let size: CGFloat
+
+    public init(text: String, size: CGFloat = 256) {
+        self.text = text
+        self.size = size
+    }
+
+    public var body: some View {
+        if let image = QrImageView.render(text: text, target: size) {
+            Image(uiImage: image)
+                .interpolation(.none)
+                .resizable()
+                .frame(width: size, height: size)
+        } else {
+            Text("Failed to render QR.")
+                .foregroundStyle(.red)
+                .font(.footnote)
+        }
     }
 }

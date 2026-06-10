@@ -248,6 +248,127 @@ public final class AuthClient {
         )
     }
 
+    // MARK: - TOTP — ADR-0018 factor (c), authenticator-code recovery
+
+    /// `POST /totp/enroll/start` — mint + store an (unconfirmed) TOTP
+    /// secret for this account (ADR-0018 factor (c), enrollment step
+    /// 1). Mirror of the web `AuthClient.totpEnrollStart`.
+    ///
+    /// Bearer-authenticated (the already-logged-in account) + PoW.
+    /// Returns the `otpauth://` provisioning URI (QR) + the base32
+    /// secret (manual entry). The enrollment only becomes usable for
+    /// recovery after ``totpEnrollFinish(sessionToken:code:)``
+    /// confirms it with a live code.
+    ///
+    /// A 409 ``AuthClientError/http(status:endpoint:body:)`` means a
+    /// CONFIRMED authenticator already exists (the server refuses a
+    /// silent swap); a 503 means the server has TOTP disabled
+    /// (`LAKKO_TOTP_ENC_KEY` unset).
+    public func totpEnrollStart(
+        sessionToken: String
+    ) async throws -> TotpEnrollStartResult {
+        guard !sessionToken.isEmpty else {
+            throw AuthClientError.argument("sessionToken must be non-empty")
+        }
+        let challenge = try await powChallenge()
+        let pow = try await solvePow(
+            seedB64: challenge.seed,
+            effortBits: challenge.effortBits
+        )
+        let resp: TotpEnrollStartResponse = try await post(
+            endpoint: "/totp/enroll/start",
+            body: TotpEnrollStartRequest(pow: pow),
+            bearer: sessionToken
+        )
+        return TotpEnrollStartResult(
+            otpauthUri: resp.otpauthUri,
+            secretB32: resp.secretB32
+        )
+    }
+
+    /// `POST /totp/enroll/finish` — confirm the enrollment with the
+    /// first code the authenticator produced (ADR-0018 factor (c),
+    /// enrollment step 2). Mirror of the web
+    /// `AuthClient.totpEnrollFinish`.
+    ///
+    /// Bearer-authenticated, NO PoW — the server does not gate
+    /// finish. A 401 ``AuthClientError/http(status:endpoint:body:)``
+    /// means the code did not verify (wrong app entry / clock skew
+    /// beyond +-30 s); the pending enrollment stays pending, so the
+    /// user can simply retry with the next code.
+    public func totpEnrollFinish(
+        sessionToken: String,
+        code: String
+    ) async throws {
+        guard !sessionToken.isEmpty else {
+            throw AuthClientError.argument("sessionToken must be non-empty")
+        }
+        guard let normalized = normalizeTotpCode(code) else {
+            throw AuthClientError.argument("code must be 6 digits")
+        }
+        // The server replies `{"enabled": true}`; nothing in it is
+        // load-bearing for the client, so decode into an empty shape
+        // (JSONDecoder ignores unknown keys).
+        let _: TotpEnrollFinishAck = try await post(
+            endpoint: "/totp/enroll/finish",
+            body: TotpEnrollFinishRequest(code: normalized),
+            bearer: sessionToken
+        )
+    }
+
+    /// `POST /totp/recover` — recover ACCESS with an authenticator
+    /// code (ADR-0018 factor (c), recovery side). Mirror of the web
+    /// `AuthClient.totpRecover`.
+    ///
+    /// Anonymous (the caller lost their device) + PoW. The server is
+    /// enumeration-safe by design: unknown account, unconfirmed
+    /// enrollment, wrong code, and replayed code all surface the SAME
+    /// generic 401 ``AuthClientError/http(status:endpoint:body:)``;
+    /// 429 signals the 5-failures-in-15-minutes lockout; 503 means
+    /// TOTP is disabled server-side.
+    ///
+    /// TOTP grants ACCESS only — the result carries no key material.
+    /// Identity acquisition is the caller's job (ADR-0017 state
+    /// machine).
+    public func totpRecover(
+        accountId: Data,
+        code: String
+    ) async throws -> TotpRecoverResult {
+        guard accountId.count == accountIdLength else {
+            throw AuthClientError.argument(
+                "accountId must be \(accountIdLength) bytes"
+            )
+        }
+        guard let normalized = normalizeTotpCode(code) else {
+            throw AuthClientError.argument("code must be 6 digits")
+        }
+        let challenge = try await powChallenge()
+        let pow = try await solvePow(
+            seedB64: challenge.seed,
+            effortBits: challenge.effortBits
+        )
+        let resp: TotpRecoverResponse = try await post(
+            endpoint: "/totp/recover",
+            body: TotpRecoverRequest(
+                pow: pow,
+                accountIdB64: base64UrlEncodeNoPad(accountId),
+                code: normalized
+            )
+        )
+        guard let accountIdBytes = base64UrlDecodeNoPad(resp.accountIdB64) else {
+            throw AuthClientError.http(
+                status: 200,
+                endpoint: "/totp/recover",
+                body: "malformed account_id_b64 in response"
+            )
+        }
+        return TotpRecoverResult(
+            accountId: accountIdBytes,
+            sessionToken: resp.sessionToken,
+            sessionExpiresAtMs: resp.sessionExpiresAtMs
+        )
+    }
+
     // MARK: - High-level: full signup / login / recover flows
 
     /// Drive the full signup flow:
@@ -755,6 +876,50 @@ public struct DeviceAuthorizeRedeemResult: Equatable {
         self.sessionExpiresAtMs = sessionExpiresAtMs
     }
 }
+
+/// Result of ``AuthClient/totpEnrollStart(sessionToken:)`` (ADR-0018
+/// factor (c)). Provisioning material for the authenticator app —
+/// display the QR + the manual-entry secret exactly once; neither is
+/// persisted client-side.
+public struct TotpEnrollStartResult: Equatable {
+    /// `otpauth://totp/...` provisioning URI — render as a QR (RAW
+    /// text, not base64url-wrapped bytes — the authenticator app must
+    /// see the URI verbatim).
+    public let otpauthUri: String
+    /// RFC 4648 base32 (no padding) secret for manual entry.
+    public let secretB32: String
+
+    public init(otpauthUri: String, secretB32: String) {
+        self.otpauthUri = otpauthUri
+        self.secretB32 = secretB32
+    }
+}
+
+/// Result of ``AuthClient/totpRecover(accountId:code:)`` (ADR-0018
+/// factor (c)) — the same `(account_id, session_token, expiry)`
+/// triple every other login flow returns. ACCESS only, no identity
+/// material.
+public struct TotpRecoverResult: Equatable {
+    /// Raw 16-byte account id echoed back by the server.
+    public let accountId: Data
+    public let sessionToken: String
+    public let sessionExpiresAtMs: Int64
+
+    public init(
+        accountId: Data,
+        sessionToken: String,
+        sessionExpiresAtMs: Int64
+    ) {
+        self.accountId = accountId
+        self.sessionToken = sessionToken
+        self.sessionExpiresAtMs = sessionExpiresAtMs
+    }
+}
+
+/// Throwaway decode target for the `/totp/enroll/finish` ack
+/// (`{"enabled": true}`) — nothing in the body is load-bearing, and
+/// `JSONDecoder` ignores unknown keys for an empty shape.
+private struct TotpEnrollFinishAck: Decodable {}
 
 // MARK: - Errors
 

@@ -118,12 +118,15 @@ private struct RecoverForm: View {
                 Text("Phrase").tag(RecoverViewModel.Mode.phrase)
                 Text("Shares").tag(RecoverViewModel.Mode.shares)
                 Text("Device").tag(RecoverViewModel.Mode.anotherDevice)
+                Text("Code").tag(RecoverViewModel.Mode.totp)
             }
             .pickerStyle(.segmented)
             .disabled(viewModel.busy)
 
             if viewModel.mode == .anotherDevice {
                 anotherDeviceSection
+            } else if viewModel.mode == .totp {
+                totpSection
             } else {
                 if viewModel.mode == .phrase {
                     phraseEditor
@@ -150,7 +153,7 @@ private struct RecoverForm: View {
                     .foregroundStyle(.red)
             }
 
-            if viewModel.mode != .anotherDevice {
+            if viewModel.mode != .anotherDevice && viewModel.mode != .totp {
                 Button(action: viewModel.onSubmit) {
                     HStack {
                         if viewModel.busy {
@@ -194,6 +197,39 @@ private struct RecoverForm: View {
                 Spacer()
             }
         }
+    }
+
+    /// ADR-0018 factor (c) — recover ACCESS with a 6-digit
+    /// authenticator code. Identity then restores via the post-ACCESS
+    /// state machine (cached seed -> straight to the session;
+    /// otherwise the restore-identity prompt). Mirror of Android's
+    /// `RecoverScreen` Authenticator branch.
+    @ViewBuilder
+    private var totpSection: some View {
+        Text("6-digit code")
+            .font(.headline)
+        TextField("123456", text: $viewModel.totpCode)
+            .textFieldStyle(.roundedBorder)
+            .keyboardType(.numberPad)
+            .textContentType(.oneTimeCode)
+            .disabled(viewModel.busy)
+        Button(action: viewModel.submitTotp) {
+            HStack {
+                if viewModel.busy {
+                    ProgressView()
+                        .controlSize(.small)
+                        .progressViewStyle(.circular)
+                        .tint(.white)
+                    Text("Verifying…")
+                } else {
+                    Text("Recover with code")
+                }
+            }
+            .frame(maxWidth: .infinity)
+        }
+        .buttonStyle(.borderedProminent)
+        .controlSize(.large)
+        .disabled(viewModel.busy)
     }
 
     /// ADR-0018 factor (a), path (b) — no-password restore via an
