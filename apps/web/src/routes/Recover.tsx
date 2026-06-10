@@ -64,6 +64,8 @@ import { paths } from "./paths";
 import { useAuth } from "../auth/AuthContext";
 import { AuthHttpError } from "../auth/client";
 import { normalizeTotpCode } from "../auth/totp-code";
+import { isPlausibleContact } from "../auth/contact-shape";
+import { ContactKind } from "../auth/wire";
 import { base64Encode } from "../auth/account-id";
 import { combineSharesToMnemonic } from "../recovery/shamir";
 import { DiscoveryClient } from "../discovery/client";
@@ -77,7 +79,7 @@ import RestoreViaDevicePanel, {
 } from "../devices/RestoreViaDevicePanel";
 
 /** Which input mode the user is filling. */
-type RecoverMode = "phrase" | "shares" | "device" | "totp";
+type RecoverMode = "phrase" | "shares" | "device" | "totp" | "contact";
 
 export default function Recover(): JSX.Element {
   const auth = useAuth();
@@ -200,6 +202,12 @@ export default function Recover(): JSX.Element {
           </Match>
           <Match when={mode() === "totp"}>
             <TotpRecoverSection
+              username={username}
+              setUsername={setUsername}
+            />
+          </Match>
+          <Match when={mode() === "contact"}>
+            <ContactRecoverSection
               username={username}
               setUsername={setUsername}
             />
@@ -439,6 +447,225 @@ function TotpRecoverSection(props: {
   );
 }
 
+// ---- ADR-0018 factor (d): email / SMS one-time code --------------
+
+/** Map a phone/email OTP recover failure onto a friendly inline
+ *  message. The server is enumeration-safe: 401 covers unknown
+ *  account / no-live-challenge / wrong-code / replayed-code
+ *  uniformly. */
+function contactRecoverErrorMessage(err: unknown): string {
+  if (err instanceof AuthHttpError) {
+    if (err.status === 401) {
+      return "Wrong or expired code. Check the code we sent and try again.";
+    }
+    if (err.status === 429) {
+      return "Too many attempts — wait, then request a fresh code.";
+    }
+    if (err.status === 503) {
+      return "Email / SMS recovery is not available on this server.";
+    }
+    if (err.status === 400) {
+      return "That contact looks malformed. Check it and try again.";
+    }
+  }
+  return err instanceof Error ? err.message : String(err);
+}
+
+function ContactRecoverSection(props: {
+  readonly username: () => string;
+  readonly setUsername: (v: string) => void;
+}): JSX.Element {
+  const auth = useAuth();
+  // Two steps: collect username + contact and send a code, then
+  // collect the 6-digit code and finish.
+  type Step = "request" | "code";
+  const [step, setStep] = createSignal<Step>("request");
+  const [kind, setKind] = createSignal<ContactKind>(ContactKind.Email);
+  const [contact, setContact] = createSignal("");
+  const [code, setCode] = createSignal("");
+  const [busy, setBusy] = createSignal(false);
+  const [error, setError] = createSignal<string | null>(null);
+
+  async function onSendCode(e: SubmitEvent): Promise<void> {
+    e.preventDefault();
+    setError(null);
+    const trimmedUser = props.username().trim();
+    if (trimmedUser.length === 0) {
+      setError("Enter the username of the account to recover.");
+      return;
+    }
+    // Light client-side shape check — saves a PoW solve on an
+    // obviously-malformed contact. The server is authoritative.
+    if (!isPlausibleContact(kind(), contact())) {
+      setError(
+        kind() === ContactKind.Email
+          ? "Enter a valid email address."
+          : "Enter a phone number in international format (e.g. +15551234567).",
+      );
+      return;
+    }
+    setBusy(true);
+    try {
+      await auth.recoverWithContactStart(trimmedUser, kind(), contact());
+      // Enumeration-safe: we advance regardless of whether the
+      // contact matched — the server reveals nothing either way.
+      setCode("");
+      setStep("code");
+    } catch (err) {
+      setError(contactRecoverErrorMessage(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function onSubmitCode(e: SubmitEvent): Promise<void> {
+    e.preventDefault();
+    setError(null);
+    const normalized = normalizeTotpCode(code());
+    if (normalized === null) {
+      setError("Enter the 6-digit code we sent.");
+      return;
+    }
+    setBusy(true);
+    try {
+      await auth.recoverWithContactFinish(normalized);
+      setCode("");
+      // No manual navigation: the auth state just flipped to either
+      // `session` (the route's RequireAnonymous guard bounces home)
+      // or `needs-recovery-phrase` (the guard renders the
+      // RestoreIdentityPrompt in place).
+    } catch (err) {
+      setError(contactRecoverErrorMessage(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div>
+      <p style={{ color: "var(--surface-muted)", "margin-top": 0 }}>
+        Recover access with a one-time code sent to a phone or email you
+        enrolled earlier (under Devices). This restores access to your
+        account; your secure identity is then restored from your recovery
+        phrase or another signed-in device.
+      </p>
+      <Switch>
+        <Match when={step() === "request"}>
+          <form onSubmit={(e) => void onSendCode(e)}>
+            <label>
+              Username
+              <input
+                type="text"
+                autocomplete="username"
+                required
+                value={props.username()}
+                onInput={(e) => props.setUsername(e.currentTarget.value)}
+                disabled={busy()}
+                placeholder="alice"
+              />
+            </label>
+            <KindToggle kind={kind} setKind={setKind} busy={busy} />
+            <label>
+              {kind() === ContactKind.Email ? "Email" : "Phone number"}
+              <input
+                type={kind() === ContactKind.Email ? "email" : "tel"}
+                autocomplete={kind() === ContactKind.Email ? "email" : "tel"}
+                required
+                value={contact()}
+                onInput={(e) => setContact(e.currentTarget.value)}
+                disabled={busy()}
+                placeholder={
+                  kind() === ContactKind.Email
+                    ? "alice@example.com"
+                    : "+15551234567"
+                }
+              />
+            </label>
+            <Show when={error() !== null}>
+              <div class="form-error">{error()}</div>
+            </Show>
+            <button class="primary" type="submit" disabled={busy()}>
+              {busy() ? "Sending…" : "Send code"}
+            </button>
+          </form>
+        </Match>
+        <Match when={step() === "code"}>
+          <form onSubmit={(e) => void onSubmitCode(e)}>
+            <p>
+              If that {kind() === ContactKind.Email ? "email" : "number"} is
+              enrolled for this account, a 6-digit code is on its way. Enter
+              it below.
+            </p>
+            <label>
+              Recovery code
+              <input
+                type="text"
+                inputmode="numeric"
+                autocomplete="one-time-code"
+                pattern="[0-9]{6}"
+                maxlength="6"
+                required
+                value={code()}
+                onInput={(e) => setCode(e.currentTarget.value)}
+                disabled={busy()}
+                placeholder="123456"
+                style={{
+                  "font-family":
+                    "ui-monospace, SFMono-Regular, Menlo, monospace",
+                  "letter-spacing": "0.25em",
+                }}
+              />
+            </label>
+            <Show when={error() !== null}>
+              <div class="form-error">{error()}</div>
+            </Show>
+            <button class="primary" type="submit" disabled={busy()}>
+              {busy() ? "Verifying…" : "Recover access"}
+            </button>{" "}
+            <button
+              type="button"
+              disabled={busy()}
+              onClick={() => {
+                setError(null);
+                setCode("");
+                setStep("request");
+              }}
+            >
+              Use a different contact
+            </button>
+          </form>
+        </Match>
+      </Switch>
+    </div>
+  );
+}
+
+function KindToggle(props: {
+  kind: () => ContactKind;
+  setKind: (v: ContactKind) => void;
+  busy: () => boolean;
+}): JSX.Element {
+  return (
+    <div
+      role="tablist"
+      style={{ display: "flex", gap: "0.4rem", margin: "0.5rem 0" }}
+    >
+      <TabButton
+        active={props.kind() === ContactKind.Email}
+        disabled={props.busy()}
+        onClick={() => props.setKind(ContactKind.Email)}
+        label="Email"
+      />
+      <TabButton
+        active={props.kind() === ContactKind.Phone}
+        disabled={props.busy()}
+        onClick={() => props.setKind(ContactKind.Phone)}
+        label="SMS"
+      />
+    </div>
+  );
+}
+
 interface RecoverFormProps {
   readonly cachedUsername: string | null;
   readonly username: () => string;
@@ -573,6 +800,12 @@ function ModeTabs(props: {
         disabled={props.busy()}
         onClick={() => props.setMode("totp")}
         label="Authenticator"
+      />
+      <TabButton
+        active={props.mode() === "contact"}
+        disabled={props.busy()}
+        onClick={() => props.setMode("contact")}
+        label="Email or SMS code"
       />
     </div>
   );

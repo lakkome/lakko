@@ -45,6 +45,8 @@ import {
 import { useAuth } from "../auth/AuthContext";
 import { AuthClient, AuthHttpError } from "../auth/client";
 import { normalizeTotpCode } from "../auth/totp-code";
+import { isPlausibleContact } from "../auth/contact-shape";
+import { ContactKind } from "../auth/wire";
 import { getDeviceKey } from "../auth/key-store";
 import {
   WebauthnClient,
@@ -64,7 +66,7 @@ import {
 import QRCode from "qrcode";
 import jsQR from "jsqr";
 
-type Tab = "list" | "pair" | "scan" | "totp";
+type Tab = "list" | "pair" | "scan" | "totp" | "contact";
 
 export default function Devices(): JSX.Element {
   const auth = useAuth();
@@ -125,6 +127,13 @@ export default function Devices(): JSX.Element {
           >
             Authenticator
           </button>
+          <button
+            type="button"
+            class={tab() === "contact" ? "primary" : ""}
+            onClick={() => setTab("contact")}
+          >
+            Email or phone
+          </button>
         </div>
         <Switch>
           <Match when={tab() === "list"}>
@@ -147,6 +156,9 @@ export default function Devices(): JSX.Element {
           </Match>
           <Match when={tab() === "totp"}>
             <TotpEnrollView />
+          </Match>
+          <Match when={tab() === "contact"}>
+            <ContactEnrollView />
           </Match>
         </Switch>
       </Show>
@@ -1026,6 +1038,313 @@ function TotpEnrollView(): JSX.Element {
         <Match when={state().kind === "unavailable"}>
           <p class="form-error">
             Authenticator enrollment is not available on this server.
+          </p>
+        </Match>
+        <Match when={state().kind === "error"}>
+          {(_) => {
+            const s = state();
+            const message = s.kind === "error" ? s.message : "Unknown error.";
+            return (
+              <div>
+                <p class="form-error">{message}</p>
+                <button
+                  type="button"
+                  onClick={() => setState({ kind: "idle" })}
+                >
+                  Try again
+                </button>
+              </div>
+            );
+          }}
+        </Match>
+      </Switch>
+    </div>
+  );
+}
+
+// ---- Email / phone OTP enrollment (ADR-0018 factor (d)) ----------
+
+function ContactEnrollView(): JSX.Element {
+  const auth = useAuth();
+  type State =
+    | { kind: "idle" }
+    | { kind: "starting" }
+    // A code has been sent; waiting for the confirm code.
+    | { kind: "confirm"; contactKind: ContactKind; contact: string }
+    | { kind: "finishing"; contactKind: ContactKind; contact: string }
+    | { kind: "done" }
+    | { kind: "already-enabled" }
+    | { kind: "unavailable" }
+    | { kind: "error"; message: string };
+  const [state, setState] = createSignal<State>({ kind: "idle" });
+  const [contactKind, setContactKind] = createSignal<ContactKind>(
+    ContactKind.Email,
+  );
+  const [contact, setContact] = createSignal("");
+  const [code, setCode] = createSignal("");
+  const [confirmError, setConfirmError] = createSignal<string | null>(null);
+  const [requestError, setRequestError] = createSignal<string | null>(null);
+
+  const sessionToken = (): string | null =>
+    auth.identitySecrets()?.sessionToken ?? null;
+
+  async function start(e: SubmitEvent): Promise<void> {
+    e.preventDefault();
+    setRequestError(null);
+    const k = contactKind();
+    // Light client-side shape check — saves a PoW solve on an
+    // obviously-malformed contact. The server is authoritative.
+    if (!isPlausibleContact(k, contact())) {
+      setRequestError(
+        k === ContactKind.Email
+          ? "Enter a valid email address."
+          : "Enter a phone number in international format (e.g. +15551234567).",
+      );
+      return;
+    }
+    const token = sessionToken();
+    if (token === null) {
+      setState({
+        kind: "error",
+        message: "No live session token in this tab. Sign in again.",
+      });
+      return;
+    }
+    setState({ kind: "starting" });
+    try {
+      await new AuthClient().recoveryContactEnrollStart(token, k, contact());
+      setCode("");
+      setConfirmError(null);
+      setState({ kind: "confirm", contactKind: k, contact: contact() });
+    } catch (err) {
+      if (err instanceof AuthHttpError && err.status === 503) {
+        setState({ kind: "unavailable" });
+        return;
+      }
+      if (err instanceof AuthHttpError && err.status === 409) {
+        // The server returns 409 only if it refuses a swap of a
+        // confirmed contact; surface it the same way TOTP does.
+        setState({ kind: "already-enabled" });
+        return;
+      }
+      // A 400 (malformed contact) bounces back to the request step so
+      // the user can correct it.
+      if (err instanceof AuthHttpError && err.status === 400) {
+        setRequestError("That contact looks malformed. Check it and retry.");
+        setState({ kind: "idle" });
+        return;
+      }
+      setState({
+        kind: "error",
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  async function finish(e: SubmitEvent): Promise<void> {
+    e.preventDefault();
+    const s = state();
+    if (s.kind !== "confirm") return;
+    setConfirmError(null);
+    const normalized = normalizeTotpCode(code());
+    if (normalized === null) {
+      setConfirmError("Enter the 6-digit code we sent.");
+      return;
+    }
+    const token = sessionToken();
+    if (token === null) {
+      setState({
+        kind: "error",
+        message: "No live session token in this tab. Sign in again.",
+      });
+      return;
+    }
+    setState({
+      kind: "finishing",
+      contactKind: s.contactKind,
+      contact: s.contact,
+    });
+    try {
+      await new AuthClient().recoveryContactEnrollFinish(
+        token,
+        s.contactKind,
+        normalized,
+      );
+      setCode("");
+      setState({ kind: "done" });
+    } catch (err) {
+      if (err instanceof AuthHttpError && err.status === 401) {
+        // Wrong / stale code — the pending challenge survives, so just
+        // let the user retry with the code (or re-send one).
+        setConfirmError(
+          "That code didn't verify. Check the code we sent, or re-send.",
+        );
+        setState({ kind: "confirm", contactKind: s.contactKind, contact: s.contact });
+        return;
+      }
+      if (err instanceof AuthHttpError && err.status === 409) {
+        setState({ kind: "already-enabled" });
+        return;
+      }
+      if (err instanceof AuthHttpError && err.status === 503) {
+        setState({ kind: "unavailable" });
+        return;
+      }
+      setState({
+        kind: "error",
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  return (
+    <div>
+      <p>
+        Enroll a phone number or email as a recovery factor. If you ever
+        lose this device, a one-time code sent there restores{" "}
+        <em>access</em> to your account — your secure identity is then
+        restored from your recovery phrase or another signed-in device.
+      </p>
+      <Switch>
+        <Match when={state().kind === "idle" || state().kind === "starting"}>
+          {/* HONESTY NOTE: the server exposes no recovery-contact
+              "status" endpoint, so the enrolled/not-enrolled state
+              cannot be probed up front. We render the request form by
+              default; a 503 from enroll/start flips this card to
+              "not available", a 409 (if the server returns one) to
+              "already enabled". */}
+          {(_) => {
+            const busy = state().kind === "starting";
+            return (
+              <form onSubmit={(e) => void start(e)}>
+                <div
+                  role="tablist"
+                  style={{ display: "flex", gap: "0.4rem", margin: "0.5rem 0" }}
+                >
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={contactKind() === ContactKind.Email}
+                    disabled={busy}
+                    class={contactKind() === ContactKind.Email ? "primary" : ""}
+                    onClick={() => setContactKind(ContactKind.Email)}
+                  >
+                    Email
+                  </button>
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={contactKind() === ContactKind.Phone}
+                    disabled={busy}
+                    class={contactKind() === ContactKind.Phone ? "primary" : ""}
+                    onClick={() => setContactKind(ContactKind.Phone)}
+                  >
+                    Phone
+                  </button>
+                </div>
+                <label>
+                  {contactKind() === ContactKind.Email ? "Email" : "Phone number"}
+                  <input
+                    type={contactKind() === ContactKind.Email ? "email" : "tel"}
+                    autocomplete={
+                      contactKind() === ContactKind.Email ? "email" : "tel"
+                    }
+                    required
+                    value={contact()}
+                    onInput={(e) => setContact(e.currentTarget.value)}
+                    disabled={busy}
+                    placeholder={
+                      contactKind() === ContactKind.Email
+                        ? "alice@example.com"
+                        : "+15551234567"
+                    }
+                  />
+                </label>
+                <Show when={requestError() !== null}>
+                  <p class="form-error">{requestError()}</p>
+                </Show>
+                <button class="primary" type="submit" disabled={busy}>
+                  {busy ? "Sending…" : "Send code"}
+                </button>
+              </form>
+            );
+          }}
+        </Match>
+        <Match
+          when={state().kind === "confirm" || state().kind === "finishing"}
+        >
+          {(_) => {
+            const s = state();
+            const k =
+              s.kind === "confirm" || s.kind === "finishing"
+                ? s.contactKind
+                : ContactKind.Email;
+            const to =
+              s.kind === "confirm" || s.kind === "finishing" ? s.contact : "";
+            const busy = s.kind === "finishing";
+            return (
+              <div>
+                <p>
+                  We sent a 6-digit code to{" "}
+                  <code style={{ "word-break": "break-all" }}>{to}</code> (
+                  {k === ContactKind.Email ? "email" : "SMS"}). Enter it below
+                  to confirm.
+                </p>
+                <form onSubmit={(e) => void finish(e)}>
+                  <label>
+                    Confirmation code
+                    <input
+                      type="text"
+                      inputmode="numeric"
+                      autocomplete="one-time-code"
+                      pattern="[0-9]{6}"
+                      maxlength="6"
+                      required
+                      value={code()}
+                      onInput={(e) => setCode(e.currentTarget.value)}
+                      disabled={busy}
+                      placeholder="123456"
+                      style={{
+                        "font-family":
+                          "ui-monospace, SFMono-Regular, Menlo, monospace",
+                        "letter-spacing": "0.25em",
+                      }}
+                    />
+                  </label>
+                  <Show when={confirmError() !== null}>
+                    <p class="form-error">{confirmError()}</p>
+                  </Show>
+                  <button class="primary" type="submit" disabled={busy}>
+                    {busy ? "Confirming…" : "Confirm"}
+                  </button>{" "}
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => setState({ kind: "idle" })}
+                  >
+                    Cancel
+                  </button>
+                </form>
+              </div>
+            );
+          }}
+        </Match>
+        <Match when={state().kind === "done"}>
+          <p class="form-info">
+            Contact enrolled. A code sent there can now recover access to
+            your account (Recover → Email or SMS code).
+          </p>
+        </Match>
+        <Match when={state().kind === "already-enabled"}>
+          <p class="form-info">
+            A confirmed contact is already enabled for this account.
+            Replacing it from a signed-in session is refused by design — a
+            stolen session must not be able to swap your recovery factor.
+          </p>
+        </Match>
+        <Match when={state().kind === "unavailable"}>
+          <p class="form-error">
+            Email / phone recovery is not available on this server.
           </p>
         </Match>
         <Match when={state().kind === "error"}>

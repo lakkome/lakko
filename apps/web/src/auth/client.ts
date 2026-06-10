@@ -33,6 +33,7 @@ import {
 import { solvePow } from "./pow";
 import { normalizeTotpCode } from "./totp-code";
 import type {
+  ContactKind,
   DeviceAuthorizeRedeemRequest,
   DeviceAuthorizeRedeemResponse,
   DeviceAuthorizeStartRequest,
@@ -46,6 +47,12 @@ import type {
   PasswordResetStartRequest,
   PasswordResetStartResponse,
   PowChallengeResponse,
+  RecoveryContactEnrollFinishRequest,
+  RecoveryContactEnrollStartRequest,
+  RecoveryContactRecoverFinishRequest,
+  RecoveryContactRecoverFinishResponse,
+  RecoveryContactRecoverStartRequest,
+  RecoveryContactSentResponse,
   SignupFinishRequest,
   SignupFinishResponse,
   SignupStartRequest,
@@ -134,6 +141,17 @@ export interface TotpEnrollStartResult {
  *  same `(account_id, session_token, expiry)` triple every other
  *  login flow returns — ACCESS only, no identity material. */
 export interface TotpRecoverResult {
+  /** Raw 16-byte account id, echoed back by the server. */
+  accountId: Uint8Array;
+  sessionToken: string;
+  sessionExpiresAtMs: number;
+}
+
+/** Result of `AuthClient.recoveryContactRecoverFinish` (ADR-0018
+ *  factor (d)). The same `(account_id, session_token, expiry)` triple
+ *  every other login flow returns — ACCESS only, no identity
+ *  material. */
+export interface RecoveryContactRecoverResult {
   /** Raw 16-byte account id, echoed back by the server. */
   accountId: Uint8Array;
   sessionToken: string;
@@ -414,6 +432,156 @@ export class AuthClient {
         code: normalized,
       },
     );
+    return {
+      accountId: base64UrlDecodeNoPad(resp.account_id_b64),
+      sessionToken: resp.session_token,
+      sessionExpiresAtMs: resp.session_expires_at_ms,
+    };
+  }
+
+  // -----------------------------------------------------------------
+  // Recovery contact — ADR-0018 factor (d), phone / email OTP
+  // recovery
+  // -----------------------------------------------------------------
+
+  /**
+   * `POST /recovery-contact/enroll/start` — store a phone / email
+   * and send a 6-digit confirmation code (ADR-0018 factor (d),
+   * enrollment step 1).
+   *
+   * Bearer-authenticated (the already-logged-in account's session
+   * token rides the `Authorization` header) + PoW. The enrollment
+   * only becomes usable for recovery after
+   * `recoveryContactEnrollFinish` confirms the code.
+   *
+   * A 503 `AuthHttpError` means the server has the factor disabled
+   * (`LAKKO_RECOVERY_CONTACT_PEPPER` unset); a 400 means the contact
+   * is malformed per the server's normalization.
+   */
+  async recoveryContactEnrollStart(
+    sessionToken: string,
+    kind: ContactKind,
+    contact: string,
+  ): Promise<void> {
+    if (sessionToken.length === 0) {
+      throw new AuthClientArgError("sessionToken must be non-empty");
+    }
+    if (contact.trim().length === 0) {
+      throw new AuthClientArgError("contact must be non-empty");
+    }
+    const challenge = await this.powChallenge();
+    const pow = await solvePow(challenge.seed, challenge.effort_bits);
+    await this.post<
+      RecoveryContactEnrollStartRequest,
+      RecoveryContactSentResponse
+    >(
+      "/recovery-contact/enroll/start",
+      { pow, kind, contact: contact.trim() },
+      sessionToken,
+    );
+  }
+
+  /**
+   * `POST /recovery-contact/enroll/finish` — confirm the contact
+   * with the code that was delivered (ADR-0018 factor (d),
+   * enrollment step 2).
+   *
+   * Bearer-authenticated, NO PoW — the server does not gate finish.
+   * A 401 `AuthHttpError` means the code did not verify (wrong /
+   * expired / replayed); the user can retry by re-sending a code.
+   */
+  async recoveryContactEnrollFinish(
+    sessionToken: string,
+    kind: ContactKind,
+    code: string,
+  ): Promise<void> {
+    if (sessionToken.length === 0) {
+      throw new AuthClientArgError("sessionToken must be non-empty");
+    }
+    const normalized = normalizeTotpCode(code);
+    if (normalized === null) {
+      throw new AuthClientArgError("code must be 6 digits");
+    }
+    await this.post<RecoveryContactEnrollFinishRequest, unknown>(
+      "/recovery-contact/enroll/finish",
+      { kind, code: normalized },
+      sessionToken,
+    );
+  }
+
+  /**
+   * `POST /recovery-contact/recover/start` — request a fresh
+   * recovery code be sent to a previously-confirmed contact
+   * (ADR-0018 factor (d), recovery step 1).
+   *
+   * Anonymous (the caller lost their device) + PoW. The server is
+   * ENUMERATION-SAFE by design: it returns the same `{ sent: true }`
+   * whether or not the supplied contact matches a confirmed row, so
+   * a 2xx here reveals nothing about account / contact existence — it
+   * just means "advance to the code step". A 503 means the factor is
+   * disabled server-side; a 400 means a malformed contact.
+   */
+  async recoveryContactRecoverStart(
+    accountId: Uint8Array,
+    kind: ContactKind,
+    contact: string,
+  ): Promise<void> {
+    if (accountId.length !== 16) {
+      throw new AuthClientArgError("accountId must be 16 bytes");
+    }
+    if (contact.trim().length === 0) {
+      throw new AuthClientArgError("contact must be non-empty");
+    }
+    const challenge = await this.powChallenge();
+    const pow = await solvePow(challenge.seed, challenge.effort_bits);
+    await this.post<
+      RecoveryContactRecoverStartRequest,
+      RecoveryContactSentResponse
+    >("/recovery-contact/recover/start", {
+      pow,
+      account_id_b64: base64UrlEncodeNoPad(accountId),
+      kind,
+      contact: contact.trim(),
+    });
+  }
+
+  /**
+   * `POST /recovery-contact/recover/finish` — recover ACCESS with
+   * the code that was delivered (ADR-0018 factor (d), recovery
+   * step 2).
+   *
+   * Anonymous + PoW. Enumeration-safe: unknown account, no live
+   * challenge, wrong code and replayed code all surface the SAME
+   * generic 401 `AuthHttpError`; 429 signals the attempt-cap
+   * lockout; 503 means the factor is disabled server-side.
+   *
+   * Grants ACCESS only — the result carries no key material.
+   * Identity acquisition is the caller's job (ADR-0017 state
+   * machine).
+   */
+  async recoveryContactRecoverFinish(
+    accountId: Uint8Array,
+    kind: ContactKind,
+    code: string,
+  ): Promise<RecoveryContactRecoverResult> {
+    if (accountId.length !== 16) {
+      throw new AuthClientArgError("accountId must be 16 bytes");
+    }
+    const normalized = normalizeTotpCode(code);
+    if (normalized === null) {
+      throw new AuthClientArgError("code must be 6 digits");
+    }
+    const challenge = await this.powChallenge();
+    const pow = await solvePow(challenge.seed, challenge.effort_bits);
+    const resp = await this.post<
+      RecoveryContactRecoverFinishRequest,
+      RecoveryContactRecoverFinishResponse
+    >("/recovery-contact/recover/finish", {
+      pow,
+      account_id_b64: base64UrlEncodeNoPad(accountId),
+      kind,
+      code: normalized,
+    });
     return {
       accountId: base64UrlDecodeNoPad(resp.account_id_b64),
       sessionToken: resp.session_token,

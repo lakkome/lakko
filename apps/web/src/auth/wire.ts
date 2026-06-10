@@ -270,3 +270,80 @@ export interface TotpRecoverResponse {
   session_token: string;
   session_expires_at_ms: number;
 }
+
+// ----------------------------------------------------------------------------
+// Recovery contact — phone / email OTP (services/auth/src/recovery_contact.rs
+// + otp_sender.rs — ADR-0018 factor (d), one-time-code recovery)
+// ----------------------------------------------------------------------------
+
+/** Wire-format `kind` discriminator for a recovery contact, matching the
+ *  server's `ContactKind::as_db` (`services/auth/src/otp_sender.rs`). These
+ *  integer values are wire-format stable: never renumber. */
+export const ContactKind = {
+  /** Code delivered over email (SMTP). */
+  Email: 1,
+  /** Code delivered over SMS. */
+  Phone: 2,
+} as const;
+
+/** One of the [`ContactKind`] integer discriminators (`1 = email`,
+ *  `2 = phone`). */
+export type ContactKind = (typeof ContactKind)[keyof typeof ContactKind];
+
+/** `POST /recovery-contact/enroll/start` request body. Bearer-authenticated
+ *  (the already-logged-in account's session token rides the `Authorization`
+ *  header) + PoW. */
+export interface RecoveryContactEnrollStartRequest {
+  pow: PowProofPayload;
+  /** `1 = email`, `2 = phone` (see [`ContactKind`]). */
+  kind: ContactKind;
+  /** The raw phone / email plaintext. Used transiently server-side to hash +
+   *  address the message; never stored, never logged (invariant #1). */
+  contact: string;
+}
+
+/** `POST /recovery-contact/enroll/start` response body. Generic "a code was
+ *  sent" marker. */
+export interface RecoveryContactSentResponse {
+  sent: boolean;
+}
+
+/** `POST /recovery-contact/enroll/finish` request body. Bearer-auth, NO `pow`
+ *  — the server does not gate finish. */
+export interface RecoveryContactEnrollFinishRequest {
+  kind: ContactKind;
+  /** The 6-digit code that was delivered to the contact. */
+  code: string;
+}
+
+/** `POST /recovery-contact/recover/start` request body. Anonymous (the caller
+ *  lost their device) + PoW. ENUMERATION-SAFE: the server returns the same
+ *  `{ sent: true }` whether or not the contact matches a confirmed row. */
+export interface RecoveryContactRecoverStartRequest {
+  pow: PowProofPayload;
+  /** URL-safe base64 (no pad) of the 16-byte account_id. */
+  account_id_b64: string;
+  kind: ContactKind;
+  /** The raw phone / email plaintext. */
+  contact: string;
+}
+
+/** `POST /recovery-contact/recover/finish` request body. Anonymous + PoW. */
+export interface RecoveryContactRecoverFinishRequest {
+  pow: PowProofPayload;
+  /** URL-safe base64 (no pad) of the 16-byte account_id. */
+  account_id_b64: string;
+  kind: ContactKind;
+  /** The 6-digit code that was delivered to the contact. */
+  code: string;
+}
+
+/** `POST /recovery-contact/recover/finish` response body — the same
+ *  `(account_id, session_token, expiry)` triple every other login flow
+ *  returns. */
+export interface RecoveryContactRecoverFinishResponse {
+  /** URL-safe base64 (no pad) of the 16-byte account id (echoed). */
+  account_id_b64: string;
+  session_token: string;
+  session_expires_at_ms: number;
+}
