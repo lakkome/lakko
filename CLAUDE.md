@@ -281,6 +281,8 @@ This repo ships domain-specialist skills under `.claude/skills/`. They carry the
 | `apps/android/` | `android-client` |
 | `apps/web/` | `web-client` |
 | `infra/` or deploy / ops | `infra-deploy` |
+| Writing tests, running a verification pass, triaging a failure | `qa` |
+| Designing / reviewing a user-facing screen or flow, cross-platform UI consistency | `ux-ui` |
 | A task spanning >1 area, or unsure which area owns it | `lakko-dev` (coordinator — it classifies, routes, and sequences cross-cutting work) |
 | Reviewing security-sensitive changes (crypto / MLS / transport / auth) | `lakko-security` (run ONLY on explicit maintainer request — never auto-gate) |
 
