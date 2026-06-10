@@ -287,6 +287,8 @@ mod tests {
             attest_key: signing,
             turn: None,
             totp_enc_key: None,
+            recovery_contact_pepper: None,
+            otp_sender: Arc::new(crate::otp_sender::LogOnlyOtpSender),
         }
     }
 

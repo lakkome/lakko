@@ -738,6 +738,8 @@ mod totp_e2e_tests {
             attest_key: Arc::new(lakko_call_jwt::CallSigningKey::from_seed(&[0xCD; 32])),
             turn: None,
             totp_enc_key: with_totp_key.then(|| Arc::new(TOTP_KEY)),
+            recovery_contact_pepper: None,
+            otp_sender: Arc::new(crate::otp_sender::LogOnlyOtpSender),
         };
         (state, token_secret)
     }

@@ -83,6 +83,8 @@ LAKKO_POW_EFFORT_BITS=1 LAKKO_DISCOVERY_POW_EFFORT_BITS=1 \
 | `LAKKO_POW_EFFORT_BITS` / `LAKKO_DISCOVERY_POW_EFFORT_BITS` / `LAKKO_PUSH_GW_POW_EFFORT_BITS` | 8 | proof-of-work cost; set to `1` for fast scripted tests |
 | `LAKKO_TURN_SHARED_SECRET` / `LAKKO_TURN_URIS` | dev fixtures | base64 secret; only used by the call-credential endpoint |
 | `LAKKO_TOTP_ENC_KEY` | dev fixture (base64, 32 B) | encrypts TOTP secrets at rest (ADR-0018 factor (c)); unset disables the `/totp/*` routes (503). A DB-only leak defence, not a host-compromise one |
+| `LAKKO_RECOVERY_CONTACT_PEPPER` | dev fixture (base64, 32 B) | keys the phone/email contact + OTP-code hashes (ADR-0018 factor (d)); unset disables the `/recovery-contact/*` routes (503). The contact plaintext is NEVER stored/logged (invariant #1) — only a keyed hash. A DB-only leak defence, not a host-compromise one |
+| `LAKKO_SMTP_*` / `LAKKO_SMS_*` | unset (LogOnly) | OTP delivery adapters (ADR-0018 factor (d)). Email + SMS both default to a log-only sender in the dev stack (the code is written to the auth log, never sent). Set `LAKKO_SMTP_{HOST,PORT,USERNAME,PASSWORD,FROM}` to arm real SMTP email (lettre, rustls); set `LAKKO_SMS_{API_URL,ACCOUNT_SID,AUTH_TOKEN,FROM}` to arm a Twilio-shaped SMS adapter (reqwest, rustls) |
 
 ### Enabling real push delivery
 

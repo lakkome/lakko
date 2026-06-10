@@ -128,6 +128,42 @@ url = "2"
 hmac = "0.12"
 sha1 = "0.10"
 
+# ----------------------------------------------------------------------------
+# ADR-0018 factor (d) — phone / email one-time-code recovery.
+# ----------------------------------------------------------------------------
+
+# `#[async_trait]` for the OtpSender abstraction — the SAME dispatch
+# mechanism `services/push-gw`'s `Provider` trait uses (async-trait 0.1).
+# Mirrored deliberately so the per-kind LogOnly / real-adapter resolver
+# matches the established posture.
+async-trait = "0.1"
+
+# Real SMTP email adapter. `lettre` is the de-facto Rust SMTP client —
+# battle-tested, maintained, and absorbs the MIME/header/transport surface
+# we have no business writing ourselves. We pin the async-tokio + rustls
+# transport (`tokio1` + `tokio1-rustls-tls`) and EXPLICITLY drop native-tls
+# (`default-features = false`) to match the workspace TLS stack
+# (sqlx `tls-rustls-ring`, reqwest `rustls-tls`). `rustls-native-certs`
+# trusts the OS root store for the relay's certificate. MIT/Apache-2.0
+# licensed (cargo-deny allow-list).
+lettre = { version = "0.11", default-features = false, features = [
+    "smtp-transport",
+    "tokio1",
+    "tokio1-rustls-tls",
+    "rustls-tls",
+    "rustls-native-certs",
+    "builder",
+    "hostname",
+] }
+
+# Twilio-shaped SMS HTTP adapter. Same rustls-ring choice the rest of the
+# workspace makes (reqwest is already used by 4 other services); no
+# native-tls. `json` is unused by the form-encoded Twilio call but kept
+# off — only `rustls-tls` is needed.
+reqwest = { version = "0.12", default-features = false, features = [
+    "rustls-tls",
+] }
+
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"

@@ -73,6 +73,26 @@ services:
       # after decode). Dev fixture only; never a production value. Unset it
       # to disable the /totp/* routes (they return 503).
       LAKKO_TOTP_ENC_KEY: ${LAKKO_TOTP_ENC_KEY:-ZGV2LXRvdHAtZW5jLWtleS0zMi1ieXRlcy1maXhlZCE=}
+      # ADR-0018 factor (d) — recovery-contact pepper that KEYS the contact +
+      # OTP-code hashes (base64, 32 bytes after decode). Dev fixture only;
+      # never a production value. Unset it to disable the /recovery-contact/*
+      # routes (they return 503). The phone/email plaintext is NEVER stored
+      # or logged (invariant #1) — only a keyed hash.
+      LAKKO_RECOVERY_CONTACT_PEPPER: ${LAKKO_RECOVERY_CONTACT_PEPPER:-ZGV2LXJlY292ZXJ5LWNvbnRhY3QtcGVwcGVyLTMyYiE=}
+      # OTP delivery adapters. Email + SMS both default to LogOnly in the dev
+      # stack (no real creds) — the code is written to the auth log, never
+      # actually sent. To arm a real adapter, uncomment + fill the block:
+      #   SMTP (lettre, rustls, no native-tls) — all five required:
+      # LAKKO_SMTP_HOST: smtp.example.com
+      # LAKKO_SMTP_PORT: "465"
+      # LAKKO_SMTP_USERNAME: apikey
+      # LAKKO_SMTP_PASSWORD: change-me
+      # LAKKO_SMTP_FROM: Lakko <no-reply@lakko.me>
+      #   SMS (Twilio-shaped HTTP, reqwest, rustls) — all four required:
+      # LAKKO_SMS_API_URL: https://api.twilio.com/2010-04-01/Accounts/<SID>/Messages.json
+      # LAKKO_SMS_ACCOUNT_SID: AC...
+      # LAKKO_SMS_AUTH_TOKEN: change-me
+      # LAKKO_SMS_FROM: "+15551234567"
       LAKKO_POW_EFFORT_BITS: ${LAKKO_POW_EFFORT_BITS:-8}
     ports:
       - "127.0.0.1:8081:8081"

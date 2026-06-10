@@ -401,6 +401,8 @@ mod device_authorize_e2e_tests {
             attest_key: Arc::new(lakko_call_jwt::CallSigningKey::from_seed(&ATTEST_SEED)),
             turn: None,
             totp_enc_key: None,
+            recovery_contact_pepper: None,
+            otp_sender: Arc::new(crate::otp_sender::LogOnlyOtpSender),
         };
         (state, token_secret)
     }
