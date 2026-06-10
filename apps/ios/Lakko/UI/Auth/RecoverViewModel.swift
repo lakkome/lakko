@@ -37,7 +37,11 @@ public final class RecoverViewModel: ObservableObject {
     /// previously-enrolled authenticator app. TOTP grants ACCESS
     /// only; identity restore then runs the ADR-0017 state machine
     /// (warm cached seed, or the `needsRecoveryPhrase` fail-safe).
-    public enum Mode: Equatable { case phrase, shares, anotherDevice, totp }
+    /// ADR-0018 factor (d) adds `contact`: recover ACCESS with a
+    /// one-time code sent to a previously-enrolled phone or email. Like
+    /// `totp`, it grants ACCESS only; identity restore then runs the
+    /// ADR-0017 state machine.
+    public enum Mode: Equatable { case phrase, shares, anotherDevice, totp, contact }
 
     @Published public var mode: Mode = .phrase {
         didSet {
@@ -46,6 +50,12 @@ public final class RecoverViewModel: ObservableObject {
             // (mirror of Android's `onModeChange`).
             if mode != .anotherDevice {
                 deviceRestoreTarget = nil
+            }
+            // ADR-0018 factor (d) — reset the contact flow to its first
+            // step when leaving the Email/SMS mode so a re-entry starts
+            // clean (mirror of the AnotherDevice reset above).
+            if mode != .contact {
+                contactStep = .request
             }
             error = nil
         }
@@ -71,6 +81,22 @@ public final class RecoverViewModel: ObservableObject {
     @Published public private(set) var error: String?
     /// ADR-0018 factor (c) — the 6-digit authenticator code field.
     @Published public var totpCode: String = ""
+
+    // MARK: - ADR-0018 factor (d) — phone / email OTP form state
+
+    /// Two-step contact-recovery flow: collect the username + contact
+    /// and send a code (`request`), then collect the 6-digit code and
+    /// finish (`code`).
+    public enum ContactStep: Equatable { case request, code }
+
+    /// Which step of the phone / email OTP flow the user is on.
+    @Published public private(set) var contactStep: ContactStep = .request
+    /// Whether the contact is an email or a phone number.
+    @Published public var contactKind: ContactKind = .email
+    /// The raw phone / email the user typed.
+    @Published public var contact: String = ""
+    /// The 6-digit code field for the contact flow's `code` step.
+    @Published public var contactCode: String = ""
 
     // MARK: - Read-only inputs
 
@@ -141,6 +167,12 @@ public final class RecoverViewModel: ObservableObject {
             // via `submitTotp` (no new password on that path).
             // Defensive no-op.
             error = "Use the authenticator-code form."
+            return
+        case .contact:
+            // ADR-0018 factor (d) — the Email/SMS mode submits via
+            // `sendContactCode` / `submitContactCode` (no new password
+            // on that path). Defensive no-op.
+            error = "Use the email / SMS code form."
             return
         case .phrase:
             if phrase.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -355,6 +387,117 @@ public final class RecoverViewModel: ObservableObject {
                 return "Too many attempts — wait 15 minutes."
             case 503:
                 return "Authenticator recovery is not available on this server."
+            case 500...599:
+                return "Server error. Please try again shortly."
+            default:
+                return "Recovery failed (\(status))."
+            }
+        case .network:
+            return "Network error. Check your connection and try again."
+        }
+    }
+
+    // MARK: - ADR-0018 factor (d) — phone / email OTP
+
+    /// Step 1 — send a one-time code to a previously-enrolled phone /
+    /// email. ENUMERATION-SAFE: a non-throwing return advances to the
+    /// code step REGARDLESS of whether the contact matched a confirmed
+    /// row (the server reveals nothing either way). Mirror of the web
+    /// `ContactRecoverSection.onSendCode`.
+    public func sendContactCode() {
+        guard !busy else { return }
+        let user = (cachedUsername ?? username)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !user.isEmpty else {
+            error = "Enter the username of the account to recover."
+            return
+        }
+        // Light client-side shape check — saves a PoW solve on an
+        // obviously-malformed contact. The server is authoritative.
+        guard isPlausibleContact(kind: contactKind, contact: contact) else {
+            error = contactKind == .email
+                ? "Enter a valid email address."
+                : "Enter a phone number in international format (e.g. +15551234567)."
+            return
+        }
+        busy = true
+        error = nil
+        let kindSnapshot = contactKind
+        let contactSnapshot = contact
+        Task {
+            do {
+                try await repository.recoverWithContactStart(
+                    username: user,
+                    kind: kindSnapshot,
+                    contact: contactSnapshot
+                )
+                // Enumeration-safe: advance regardless of match.
+                contactCode = ""
+                contactStep = .code
+                busy = false
+                error = nil
+            } catch let err as AuthClientError {
+                busy = false
+                error = contactUserFacing(err)
+            } catch {
+                busy = false
+                self.error = (error as? LocalizedError)?.errorDescription
+                    ?? "Couldn't send the code."
+            }
+        }
+    }
+
+    /// Step 2 — submit the delivered 6-digit code.
+    /// `AuthRepository.recoverWithContactFinish` verifies it
+    /// server-side and drives the state flip (`.session` on the warm
+    /// same-device path, `.needsRecoveryPhrase` on a fresh device); the
+    /// app router follows automatically. Mirror of the web
+    /// `ContactRecoverSection.onSubmitCode`.
+    public func submitContactCode() {
+        guard !busy else { return }
+        guard let normalized = normalizeTotpCode(contactCode) else {
+            error = "Enter the 6-digit code we sent."
+            return
+        }
+        busy = true
+        error = nil
+        Task {
+            do {
+                try await repository.recoverWithContactFinish(code: normalized)
+                // The repository flipped the auth state; wipe the form
+                // buffer before the router replaces this screen.
+                busy = false
+                error = nil
+                contactCode = ""
+            } catch let err as AuthClientError {
+                busy = false
+                error = contactUserFacing(err)
+            } catch {
+                busy = false
+                self.error = (error as? LocalizedError)?.errorDescription
+                    ?? "Recovery failed."
+            }
+        }
+    }
+
+    /// Map a phone / email OTP recover failure onto friendly inline
+    /// copy. The server is enumeration-safe: 401 covers unknown account
+    /// / no-live-challenge / wrong-code / replayed-code uniformly.
+    /// Mirror of the web `contactRecoverErrorMessage`.
+    private func contactUserFacing(_ err: AuthClientError) -> String {
+        switch err {
+        case .argument(let message):
+            return message
+        case .http(let status, _, _):
+            switch status {
+            case 400:
+                return "That contact looks malformed. Check it and try again."
+            case 401:
+                return "Wrong or expired code. Check the code we sent and try again."
+            case 429:
+                return "Too many attempts — wait, then request a fresh code."
+            case 503:
+                return "Email / SMS recovery is not available on this server."
             case 500...599:
                 return "Server error. Please try again shortly."
             default:

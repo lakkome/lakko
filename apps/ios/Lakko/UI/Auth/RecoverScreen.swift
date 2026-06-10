@@ -119,6 +119,7 @@ private struct RecoverForm: View {
                 Text("Shares").tag(RecoverViewModel.Mode.shares)
                 Text("Device").tag(RecoverViewModel.Mode.anotherDevice)
                 Text("Code").tag(RecoverViewModel.Mode.totp)
+                Text("Email/SMS").tag(RecoverViewModel.Mode.contact)
             }
             .pickerStyle(.segmented)
             .disabled(viewModel.busy)
@@ -127,6 +128,8 @@ private struct RecoverForm: View {
                 anotherDeviceSection
             } else if viewModel.mode == .totp {
                 totpSection
+            } else if viewModel.mode == .contact {
+                contactSection
             } else {
                 if viewModel.mode == .phrase {
                     phraseEditor
@@ -153,7 +156,9 @@ private struct RecoverForm: View {
                     .foregroundStyle(.red)
             }
 
-            if viewModel.mode != .anotherDevice && viewModel.mode != .totp {
+            if viewModel.mode != .anotherDevice
+                && viewModel.mode != .totp
+                && viewModel.mode != .contact {
                 Button(action: viewModel.onSubmit) {
                     HStack {
                         if viewModel.busy {
@@ -230,6 +235,93 @@ private struct RecoverForm: View {
         .buttonStyle(.borderedProminent)
         .controlSize(.large)
         .disabled(viewModel.busy)
+    }
+
+    /// ADR-0018 factor (d) — recover ACCESS with a one-time code sent
+    /// to a previously-enrolled phone / email (under Devices). Identity
+    /// then restores via the post-ACCESS state machine (cached seed ->
+    /// straight to the session; otherwise the restore-identity prompt).
+    /// Two steps: request (kind picker + contact + Send code), then
+    /// code (6-digit field + submit). Mirror of the web
+    /// `ContactRecoverSection`.
+    @ViewBuilder
+    private var contactSection: some View {
+        Text(
+            "Recover access with a one-time code sent to a phone or email " +
+            "you enrolled earlier (under Devices). This restores access to " +
+            "your account; your secure identity is then restored from your " +
+            "recovery phrase or another signed-in device."
+        )
+        .font(.footnote)
+        .foregroundStyle(.secondary)
+
+        switch viewModel.contactStep {
+        case .request:
+            Picker("Contact type", selection: $viewModel.contactKind) {
+                Text("Email").tag(ContactKind.email)
+                Text("SMS").tag(ContactKind.phone)
+            }
+            .pickerStyle(.segmented)
+            .disabled(viewModel.busy)
+
+            Text(viewModel.contactKind == .email ? "Email" : "Phone number")
+                .font(.headline)
+            TextField(
+                viewModel.contactKind == .email
+                    ? "alice@example.com"
+                    : "+15551234567",
+                text: $viewModel.contact
+            )
+            .textFieldStyle(.roundedBorder)
+            .keyboardType(viewModel.contactKind == .email ? .emailAddress : .phonePad)
+            .textInputAutocapitalization(.never)
+            .autocorrectionDisabled(true)
+            .disabled(viewModel.busy)
+
+            Button(action: viewModel.sendContactCode) {
+                HStack {
+                    if viewModel.busy {
+                        ProgressView()
+                            .controlSize(.small)
+                            .progressViewStyle(.circular)
+                            .tint(.white)
+                        Text("Sending…")
+                    } else {
+                        Text("Send code")
+                    }
+                }
+                .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.large)
+            .disabled(viewModel.busy)
+
+        case .code:
+            Text("6-digit code")
+                .font(.headline)
+            TextField("123456", text: $viewModel.contactCode)
+                .textFieldStyle(.roundedBorder)
+                .keyboardType(.numberPad)
+                .textContentType(.oneTimeCode)
+                .disabled(viewModel.busy)
+            Button(action: viewModel.submitContactCode) {
+                HStack {
+                    if viewModel.busy {
+                        ProgressView()
+                            .controlSize(.small)
+                            .progressViewStyle(.circular)
+                            .tint(.white)
+                        Text("Verifying…")
+                    } else {
+                        Text("Recover access")
+                    }
+                }
+                .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.large)
+            .disabled(viewModel.busy)
+        }
     }
 
     /// ADR-0018 factor (a), path (b) — no-password restore via an

@@ -36,6 +36,7 @@ public struct DevicesScreen: View {
         case pair
         case scan
         case totp
+        case contact
         var id: String { rawValue }
         var label: String {
             switch self {
@@ -43,6 +44,7 @@ public struct DevicesScreen: View {
             case .pair: return "Pair this device"
             case .scan: return "Add a device"
             case .totp: return "Authenticator"
+            case .contact: return "Email/SMS"
             }
         }
     }
@@ -94,6 +96,8 @@ public struct DevicesScreen: View {
                             )
                         case .totp:
                             TotpEnrollView(sessionToken: session.sessionToken)
+                        case .contact:
+                            ContactEnrollView(sessionToken: session.sessionToken)
                         }
                     } else {
                         Text("Sign in first to manage devices.")
@@ -759,6 +763,239 @@ private struct TotpEnrollView: View {
             case 409: return .alreadyEnabled
             case 503: return .unavailable
             default: return .error("Enrollment failed (\(status)).")
+            }
+        }
+        return .error("Enrollment failed.")
+    }
+}
+
+// MARK: - Email / phone OTP enrollment (ADR-0018 factor (d))
+
+/// Enroll a phone number or email as an ACCESS-recovery factor:
+/// `/recovery-contact/enroll/start` sends a 6-digit code to the
+/// supplied contact; `/recovery-contact/enroll/finish` confirms it
+/// with a live code. Mirror of the web `ContactEnrollView` (in
+/// `apps/web/src/routes/Devices.tsx`).
+///
+/// HONESTY NOTE: there is no server "status" endpoint for the
+/// recovery contact, so the enrolled/not-enrolled state cannot be
+/// probed up front — the request form renders by default. A 503 from
+/// enroll/start flips this card to "not available", a 409 to "already
+/// enabled" (honest lazy state derivation, same posture as web /
+/// Android and the TOTP card above).
+private struct ContactEnrollView: View {
+    let sessionToken: String
+
+    private enum UiState: Equatable {
+        case request
+        case starting
+        // A code has been sent; waiting for the confirm code.
+        case confirm(kind: ContactKind, contact: String)
+        case finishing(kind: ContactKind, contact: String)
+        case done
+        case alreadyEnabled
+        case unavailable
+        case error(String)
+    }
+
+    @State private var state: UiState = .request
+    @State private var contactKind: ContactKind = .email
+    @State private var contact: String = ""
+    @State private var code: String = ""
+    @State private var requestError: String?
+    @State private var confirmError: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(
+                "Enroll a phone number or email as a recovery factor. If " +
+                "you lose this device, a one-time code sent there restores " +
+                "ACCESS to your account; your identity then restores from " +
+                "the recovery phrase or another device."
+            )
+            .font(.footnote)
+            .foregroundStyle(.secondary)
+
+            switch state {
+            case .request, .starting:
+                let busy = state == .starting
+                Picker("Contact type", selection: $contactKind) {
+                    Text("Email").tag(ContactKind.email)
+                    Text("SMS").tag(ContactKind.phone)
+                }
+                .pickerStyle(.segmented)
+                .disabled(busy)
+
+                TextField(
+                    contactKind == .email
+                        ? "alice@example.com"
+                        : "+15551234567",
+                    text: $contact
+                )
+                .textFieldStyle(.roundedBorder)
+                .keyboardType(contactKind == .email ? .emailAddress : .phonePad)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled(true)
+                .disabled(busy)
+
+                if let requestError {
+                    Text(requestError)
+                        .font(.footnote)
+                        .foregroundStyle(.red)
+                }
+                Button(action: start) {
+                    Text(busy ? "Sending…" : "Send code").frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                .disabled(busy)
+
+            case .confirm(let kind, let contactValue),
+                 .finishing(let kind, let contactValue):
+                let busy: Bool = {
+                    if case .finishing = state { return true }
+                    return false
+                }()
+                Text(
+                    "Enter the 6-digit code we sent to confirm this " +
+                    "\(kind == .email ? "email" : "phone number")."
+                )
+                .font(.footnote)
+                TextField("6-digit code", text: $code)
+                    .textFieldStyle(.roundedBorder)
+                    .keyboardType(.numberPad)
+                    .textContentType(.oneTimeCode)
+                    .disabled(busy)
+                if let confirmError {
+                    Text(confirmError)
+                        .font(.footnote)
+                        .foregroundStyle(.red)
+                }
+                Button(action: { confirm(kind: kind, contact: contactValue) }) {
+                    Text(busy ? "Confirming…" : "Confirm")
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(busy)
+
+            case .done:
+                Label(
+                    "Recovery contact enabled. A one-time code can now " +
+                    "recover access to this account.",
+                    systemImage: "checkmark.circle.fill"
+                )
+                .foregroundStyle(.green)
+                .font(.footnote)
+
+            case .alreadyEnabled:
+                Text("A recovery contact is already enabled on this account.")
+                    .font(.body)
+
+            case .unavailable:
+                Text("Email / SMS recovery is not available on this server.")
+                    .font(.body)
+                    .foregroundStyle(.red)
+
+            case .error(let message):
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(message)
+                        .font(.footnote)
+                        .foregroundStyle(.red)
+                    Button("Try again", action: { state = .request })
+                }
+            }
+        }
+    }
+
+    private func start() {
+        requestError = nil
+        // Light client-side shape check — saves a PoW solve on an
+        // obviously-malformed contact. The server is authoritative.
+        guard isPlausibleContact(kind: contactKind, contact: contact) else {
+            requestError = contactKind == .email
+                ? "Enter a valid email address."
+                : "Enter a phone number in international format (e.g. +15551234567)."
+            return
+        }
+        let kindSnapshot = contactKind
+        let contactSnapshot = contact
+        state = .starting
+        Task { @MainActor in
+            do {
+                try await AuthClient().recoveryContactEnrollStart(
+                    sessionToken: sessionToken,
+                    kind: kindSnapshot,
+                    contact: contactSnapshot
+                )
+                code = ""
+                confirmError = nil
+                state = .confirm(kind: kindSnapshot, contact: contactSnapshot)
+            } catch let err as AuthClientError {
+                state = mapStartError(err, kind: kindSnapshot, contact: contactSnapshot)
+            } catch {
+                state = .error(error.localizedDescription)
+            }
+        }
+    }
+
+    private func confirm(kind: ContactKind, contact contactValue: String) {
+        guard let normalized = normalizeTotpCode(code) else {
+            confirmError = "Enter the 6-digit code we sent."
+            return
+        }
+        confirmError = nil
+        state = .finishing(kind: kind, contact: contactValue)
+        Task { @MainActor in
+            do {
+                try await AuthClient().recoveryContactEnrollFinish(
+                    sessionToken: sessionToken,
+                    kind: kind,
+                    code: normalized
+                )
+                code = ""
+                state = .done
+            } catch let err as AuthClientError {
+                if case .http(let status, _, _) = err {
+                    switch status {
+                    case 401:
+                        // Wrong / stale code — the pending challenge
+                        // survives, so let the user retry with the code.
+                        confirmError =
+                            "That code didn't verify. Check the code we sent, or re-send."
+                        state = .confirm(kind: kind, contact: contactValue)
+                    case 409:
+                        state = .alreadyEnabled
+                    case 503:
+                        state = .unavailable
+                    default:
+                        state = .error("Confirmation failed (\(status)).")
+                    }
+                } else {
+                    state = .error("Confirmation failed.")
+                }
+            } catch {
+                state = .error(error.localizedDescription)
+            }
+        }
+    }
+
+    private func mapStartError(
+        _ err: AuthClientError,
+        kind: ContactKind,
+        contact contactValue: String
+    ) -> UiState {
+        if case .http(let status, _, _) = err {
+            switch status {
+            case 409:
+                return .alreadyEnabled
+            case 503:
+                return .unavailable
+            case 400:
+                // Malformed contact — bounce back to the request step so
+                // the user can correct it (mirror of the web flow).
+                requestError = "That contact looks malformed. Check it and retry."
+                return .request
+            default:
+                return .error("Enrollment failed (\(status)).")
             }
         }
         return .error("Enrollment failed.")
