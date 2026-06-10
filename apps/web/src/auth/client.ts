@@ -31,6 +31,7 @@ import {
   generateAccountId,
 } from "./account-id";
 import { solvePow } from "./pow";
+import { normalizeTotpCode } from "./totp-code";
 import type {
   DeviceAuthorizeRedeemRequest,
   DeviceAuthorizeRedeemResponse,
@@ -49,6 +50,11 @@ import type {
   SignupFinishResponse,
   SignupStartRequest,
   SignupStartResponse,
+  TotpEnrollFinishRequest,
+  TotpEnrollStartRequest,
+  TotpEnrollStartResponse,
+  TotpRecoverRequest,
+  TotpRecoverResponse,
 } from "./wire";
 
 /** Default base URL for the dev environment. Vite's proxy maps
@@ -107,6 +113,27 @@ export interface LoginResult {
  *  The same `(account_id, session_token, expiry)` triple every other
  *  login flow returns. */
 export interface DeviceAuthorizeRedeemResult {
+  /** Raw 16-byte account id, echoed back by the server. */
+  accountId: Uint8Array;
+  sessionToken: string;
+  sessionExpiresAtMs: number;
+}
+
+/** Result of `AuthClient.totpEnrollStart` (ADR-0018 factor (c)).
+ *  Provisioning material for the authenticator app — display the
+ *  QR + the manual-entry secret exactly once; neither is
+ *  persisted client-side. */
+export interface TotpEnrollStartResult {
+  /** `otpauth://totp/...` provisioning URI — render as a QR. */
+  otpauthUri: string;
+  /** RFC 4648 base32 (no padding) secret for manual entry. */
+  secretB32: string;
+}
+
+/** Result of `AuthClient.totpRecover` (ADR-0018 factor (c)). The
+ *  same `(account_id, session_token, expiry)` triple every other
+ *  login flow returns — ACCESS only, no identity material. */
+export interface TotpRecoverResult {
   /** Raw 16-byte account id, echoed back by the server. */
   accountId: Uint8Array;
   sessionToken: string;
@@ -288,6 +315,105 @@ export class AuthClient {
       account_id_b64: base64UrlEncodeNoPad(accountId),
       grant_token_b64: grantTokenB64,
     });
+    return {
+      accountId: base64UrlDecodeNoPad(resp.account_id_b64),
+      sessionToken: resp.session_token,
+      sessionExpiresAtMs: resp.session_expires_at_ms,
+    };
+  }
+
+  // -----------------------------------------------------------------
+  // TOTP — ADR-0018 factor (c), authenticator-code recovery
+  // -----------------------------------------------------------------
+
+  /**
+   * `POST /totp/enroll/start` — mint + store an (unconfirmed) TOTP
+   * secret for this account (ADR-0018 factor (c), enrollment step 1).
+   *
+   * Bearer-authenticated (the already-logged-in account) + PoW.
+   * Returns the `otpauth://` provisioning URI (QR) + the base32
+   * secret (manual entry). The enrollment only becomes usable for
+   * recovery after `totpEnrollFinish` confirms it with a live code.
+   *
+   * A 409 `AuthHttpError` means a CONFIRMED authenticator already
+   * exists (the server refuses a silent swap); a 503 means the
+   * server has TOTP disabled (`LAKKO_TOTP_ENC_KEY` unset).
+   */
+  async totpEnrollStart(sessionToken: string): Promise<TotpEnrollStartResult> {
+    if (sessionToken.length === 0) {
+      throw new AuthClientArgError("sessionToken must be non-empty");
+    }
+    const challenge = await this.powChallenge();
+    const pow = await solvePow(challenge.seed, challenge.effort_bits);
+    const resp = await this.post<TotpEnrollStartRequest, TotpEnrollStartResponse>(
+      "/totp/enroll/start",
+      { pow },
+      sessionToken,
+    );
+    return { otpauthUri: resp.otpauth_uri, secretB32: resp.secret_b32 };
+  }
+
+  /**
+   * `POST /totp/enroll/finish` — confirm the enrollment with the
+   * first code the authenticator produced (ADR-0018 factor (c),
+   * enrollment step 2).
+   *
+   * Bearer-authenticated, NO PoW — the server does not gate finish.
+   * A 401 `AuthHttpError` means the code did not verify (wrong app
+   * entry / clock skew beyond ±30 s); the pending enrollment stays
+   * pending, so the user can simply retry with the next code.
+   */
+  async totpEnrollFinish(sessionToken: string, code: string): Promise<void> {
+    if (sessionToken.length === 0) {
+      throw new AuthClientArgError("sessionToken must be non-empty");
+    }
+    const normalized = normalizeTotpCode(code);
+    if (normalized === null) {
+      throw new AuthClientArgError("code must be 6 digits");
+    }
+    await this.post<TotpEnrollFinishRequest, unknown>(
+      "/totp/enroll/finish",
+      { code: normalized },
+      sessionToken,
+    );
+  }
+
+  /**
+   * `POST /totp/recover` — recover ACCESS with an authenticator
+   * code (ADR-0018 factor (c), recovery side).
+   *
+   * Anonymous (the caller lost their device) + PoW. The server is
+   * enumeration-safe by design: unknown account, unconfirmed
+   * enrollment, wrong code, and replayed code all surface the SAME
+   * generic 401 `AuthHttpError`; 429 signals the
+   * 5-failures-in-15-minutes lockout; 503 means TOTP is disabled
+   * server-side.
+   *
+   * TOTP grants ACCESS only — the result carries no key material.
+   * Identity acquisition is the caller's job (ADR-0017 state
+   * machine).
+   */
+  async totpRecover(
+    accountId: Uint8Array,
+    code: string,
+  ): Promise<TotpRecoverResult> {
+    if (accountId.length !== 16) {
+      throw new AuthClientArgError("accountId must be 16 bytes");
+    }
+    const normalized = normalizeTotpCode(code);
+    if (normalized === null) {
+      throw new AuthClientArgError("code must be 6 digits");
+    }
+    const challenge = await this.powChallenge();
+    const pow = await solvePow(challenge.seed, challenge.effort_bits);
+    const resp = await this.post<TotpRecoverRequest, TotpRecoverResponse>(
+      "/totp/recover",
+      {
+        pow,
+        account_id_b64: base64UrlEncodeNoPad(accountId),
+        code: normalized,
+      },
+    );
     return {
       accountId: base64UrlDecodeNoPad(resp.account_id_b64),
       sessionToken: resp.session_token,

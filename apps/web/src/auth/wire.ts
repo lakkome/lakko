@@ -220,3 +220,53 @@ export interface DeviceAuthorizeRedeemResponse {
   session_token: string;
   session_expires_at_ms: number;
 }
+
+// ----------------------------------------------------------------------------
+// TOTP (services/auth/src/totp.rs — ADR-0018 factor (c),
+// authenticator-code recovery)
+// ----------------------------------------------------------------------------
+
+/** `POST /totp/enroll/start` request body. Bearer-authenticated (the
+ *  already-logged-in account's session token rides the
+ *  `Authorization` header) + PoW. */
+export interface TotpEnrollStartRequest {
+  pow: PowProofPayload;
+}
+
+/** `POST /totp/enroll/start` response body — the provisioning
+ *  material the authenticator app consumes. The raw secret leaves
+ *  the server exactly once, here. */
+export interface TotpEnrollStartResponse {
+  /** `otpauth://totp/...` provisioning URI for the QR code. */
+  otpauth_uri: string;
+  /** RFC 4648 base32 (no padding) of the raw secret, for manual
+   *  entry into the authenticator app. */
+  secret_b32: string;
+}
+
+/** `POST /totp/enroll/finish` request body. Bearer-auth, NO `pow`
+ *  — the server does not gate finish. */
+export interface TotpEnrollFinishRequest {
+  /** The first 6-digit code the authenticator produced, proving it
+   *  holds the secret. */
+  code: string;
+}
+
+/** `POST /totp/recover` request body. Anonymous (the caller lost
+ *  their device) + PoW. */
+export interface TotpRecoverRequest {
+  pow: PowProofPayload;
+  /** URL-safe base64 (no pad) of the 16-byte account_id. */
+  account_id_b64: string;
+  /** Current 6-digit authenticator code. */
+  code: string;
+}
+
+/** `POST /totp/recover` response body — the same `(account_id,
+ *  session_token, expiry)` triple every other login flow returns. */
+export interface TotpRecoverResponse {
+  /** URL-safe base64 (no pad) of the 16-byte account id (echoed). */
+  account_id_b64: string;
+  session_token: string;
+  session_expires_at_ms: number;
+}

@@ -44,11 +44,26 @@
  * grant over the E2EE rendezvous channel. The grant redeems
  * anonymously for a session token (`/device/authorize/redeem`), so
  * neither a password nor the phrase is ever typed here.
+ *
+ * ## ADR-0018 factor (c) — authenticator (TOTP) code
+ *
+ * A fourth input mode, "Authenticator": username + the current
+ * 6-digit code from a previously-enrolled authenticator app.
+ * `recoverWithTotp` grants ACCESS ONLY (a session token — no
+ * password, no identity material); the ADR-0017 identity
+ * acquisition then either finishes the session from a cached seed
+ * (same-device case) or flips to `needs-recovery-phrase`, where the
+ * RestoreIdentityPrompt offers phrase / another-device. No manual
+ * navigation here — the route's `RequireAnonymous` guard reacts to
+ * the state flip (home on `session`; the restore prompt in place on
+ * `needs-recovery-phrase`).
  */
-import { createSignal, Show, type JSX } from "solid-js";
+import { createSignal, Match, Show, Switch, type JSX } from "solid-js";
 import { A, useNavigate } from "@solidjs/router";
 import { paths } from "./paths";
 import { useAuth } from "../auth/AuthContext";
+import { AuthHttpError } from "../auth/client";
+import { normalizeTotpCode } from "../auth/totp-code";
 import { base64Encode } from "../auth/account-id";
 import { combineSharesToMnemonic } from "../recovery/shamir";
 import { DiscoveryClient } from "../discovery/client";
@@ -62,7 +77,7 @@ import RestoreViaDevicePanel, {
 } from "../devices/RestoreViaDevicePanel";
 
 /** Which input mode the user is filling. */
-type RecoverMode = "phrase" | "shares" | "device";
+type RecoverMode = "phrase" | "shares" | "device" | "totp";
 
 export default function Recover(): JSX.Element {
   const auth = useAuth();
@@ -154,35 +169,42 @@ export default function Recover(): JSX.Element {
       <section class="auth-card">
         <h1>Recover account</h1>
         <ModeTabs mode={mode} setMode={setMode} busy={busy} />
-        <Show
-          when={mode() !== "device"}
+        <Switch
           fallback={
+            <RecoverForm
+              cachedUsername={cachedUsername()}
+              username={username}
+              setUsername={setUsername}
+              mode={mode}
+              setMode={setMode}
+              phrase={phrase}
+              setPhrase={setPhrase}
+              sharesInput={sharesInput}
+              setSharesInput={setSharesInput}
+              password={password}
+              setPassword={setPassword}
+              confirm={confirm}
+              setConfirm={setConfirm}
+              busy={busy}
+              error={error}
+              onSubmit={onSubmit}
+            />
+          }
+        >
+          <Match when={mode() === "device"}>
             <DeviceRestoreSection
               username={username}
               setUsername={setUsername}
               onDone={() => navigate(paths.home, { replace: true })}
             />
-          }
-        >
-          <RecoverForm
-            cachedUsername={cachedUsername()}
-            username={username}
-            setUsername={setUsername}
-            mode={mode}
-            setMode={setMode}
-            phrase={phrase}
-            setPhrase={setPhrase}
-            sharesInput={sharesInput}
-            setSharesInput={setSharesInput}
-            password={password}
-            setPassword={setPassword}
-            confirm={confirm}
-            setConfirm={setConfirm}
-            busy={busy}
-            error={error}
-            onSubmit={onSubmit}
-          />
-        </Show>
+          </Match>
+          <Match when={mode() === "totp"}>
+            <TotpRecoverSection
+              username={username}
+              setUsername={setUsername}
+            />
+          </Match>
+        </Switch>
       </section>
     </div>
   );
@@ -307,6 +329,116 @@ function DeviceRestoreSection(props: {
   );
 }
 
+// ---- ADR-0018 factor (c): authenticator (TOTP) code ---------------
+
+/** Map a `recoverWithTotp` failure onto a friendly inline message.
+ *  The server is enumeration-safe: 401 covers unknown-account /
+ *  unconfirmed-enrollment / wrong-code / replayed-code uniformly. */
+function totpRecoverErrorMessage(err: unknown): string {
+  if (err instanceof AuthHttpError) {
+    if (err.status === 401) {
+      return "Wrong or expired code. Check your authenticator app and try again.";
+    }
+    if (err.status === 429) {
+      return "Too many attempts — wait 15 minutes and try again.";
+    }
+    if (err.status === 503) {
+      return "Authenticator recovery is not available on this server.";
+    }
+  }
+  return err instanceof Error ? err.message : String(err);
+}
+
+function TotpRecoverSection(props: {
+  readonly username: () => string;
+  readonly setUsername: (v: string) => void;
+}): JSX.Element {
+  const auth = useAuth();
+  const [code, setCode] = createSignal("");
+  const [busy, setBusy] = createSignal(false);
+  const [error, setError] = createSignal<string | null>(null);
+
+  async function onSubmit(e: SubmitEvent): Promise<void> {
+    e.preventDefault();
+    setError(null);
+    const trimmedUser = props.username().trim();
+    if (trimmedUser.length === 0) {
+      setError("Enter the username of the account to recover.");
+      return;
+    }
+    const normalized = normalizeTotpCode(code());
+    if (normalized === null) {
+      setError("Enter the 6-digit code from your authenticator app.");
+      return;
+    }
+    setBusy(true);
+    try {
+      await auth.recoverWithTotp(trimmedUser, normalized);
+      setCode("");
+      // No manual navigation: the auth state just flipped to either
+      // `session` (the route's RequireAnonymous guard bounces home)
+      // or `needs-recovery-phrase` (the guard renders the
+      // RestoreIdentityPrompt in place — phrase or another-device
+      // completes the identity restore).
+    } catch (err) {
+      setError(totpRecoverErrorMessage(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div>
+      <p style={{ color: "var(--surface-muted)", "margin-top": 0 }}>
+        Recover access with the 6-digit code from your authenticator
+        app (enrolled earlier under Devices). This restores access to
+        your account; your secure identity is then restored from your
+        recovery phrase or another signed-in device.
+      </p>
+      <form onSubmit={(e) => void onSubmit(e)}>
+        <label>
+          Username
+          <input
+            type="text"
+            autocomplete="username"
+            required
+            value={props.username()}
+            onInput={(e) => props.setUsername(e.currentTarget.value)}
+            disabled={busy()}
+            placeholder="alice"
+          />
+        </label>
+        <label>
+          Authenticator code
+          <input
+            type="text"
+            inputmode="numeric"
+            autocomplete="one-time-code"
+            pattern="[0-9]{6}"
+            maxlength="6"
+            required
+            value={code()}
+            onInput={(e) => setCode(e.currentTarget.value)}
+            disabled={busy()}
+            placeholder="123456"
+            style={{
+              "font-family":
+                "ui-monospace, SFMono-Regular, Menlo, monospace",
+              "letter-spacing": "0.25em",
+            }}
+          />
+        </label>
+        <Show when={error() !== null}>
+          <div class="form-error">{error()}</div>
+        </Show>
+        <button class="primary" type="submit" disabled={busy()}>
+          {busy() ? "Verifying…" : "Recover access"}
+        </button>
+      </form>
+    </div>
+  );
+}
+
 interface RecoverFormProps {
   readonly cachedUsername: string | null;
   readonly username: () => string;
@@ -413,6 +545,7 @@ function ModeTabs(props: {
       role="tablist"
       style={{
         display: "flex",
+        "flex-wrap": "wrap",
         gap: "0.4rem",
         "margin-bottom": "0.75rem",
       }}
@@ -434,6 +567,12 @@ function ModeTabs(props: {
         disabled={props.busy()}
         onClick={() => props.setMode("device")}
         label="Another device"
+      />
+      <TabButton
+        active={props.mode() === "totp"}
+        disabled={props.busy()}
+        onClick={() => props.setMode("totp")}
+        label="Authenticator"
       />
     </div>
   );

@@ -279,6 +279,25 @@ export interface AuthApi {
     newPassword: string,
     username?: string,
   ): Promise<void>;
+  /** ADR-0018 factor (c) — recover ACCESS with a TOTP authenticator
+   *  code. Resolves `username` → account_id like `login` (local
+   *  cache hit, else `discovery.lookup`), drives
+   *  `AuthClient.totpRecover` for the session triple, and lands in
+   *  the EXISTING ADR-0017 post-ACCESS identity-acquisition state
+   *  machine: a cached AccountIdentity seed (decryptable under a
+   *  stored device key) finishes the session directly; otherwise the
+   *  state flips to `needs-recovery-phrase` and the
+   *  RestoreIdentityPrompt offers phrase / another-device.
+   *
+   *  TOTP grants ACCESS ONLY — there is no password, hence no
+   *  OPAQUE export key and (on a fresh browser) no device root key
+   *  yet; the completion paths bootstrap the device key from the
+   *  verified identity seed.
+   *
+   *  Throws on unknown username, wrong/expired code (server 401),
+   *  lockout (429), or TOTP disabled server-side (503) — the form
+   *  maps the `AuthHttpError` statuses to friendly messages. */
+  recoverWithTotp(username: string, code: string): Promise<void>;
   /** Phase 2a2c2 — sign in with a WebAuthn passkey on the SAME
    *  device the user previously logged in / signed up from.
    *
@@ -367,11 +386,20 @@ interface PendingRecovery {
   readonly accountIdBytes: Uint8Array;
   readonly accountIdB64: string;
   /** OPAQUE export key from the just-completed auth — retained for
-   *  the device-key derivation + as the in-memory `exportKey`. */
+   *  the device-key derivation + as the in-memory `exportKey`.
+   *  ADR-0018 factor (c): EMPTY (length-0) on the TOTP recover path
+   *  — no password was involved, so no export key exists (the
+   *  established convention from `completeFromDeviceRestore`). */
   readonly exportKey: Uint8Array;
   /** The wrapping device key, already derived from `exportKey`, so
-   *  the supplied phrase seed can be cached without re-deriving. */
-  readonly deviceKey: CryptoKey;
+   *  the supplied phrase seed can be cached without re-deriving.
+   *  ADR-0018 factor (c): `null` on the TOTP recover path when this
+   *  browser has no stored device key — the completion paths
+   *  (`provideRecoveryPhrase` / `completeFromPairing`) bootstrap one
+   *  from the VERIFIED identity seed, exactly like
+   *  `completeFromDeviceRestore`, and only AFTER the fail-closed
+   *  verification succeeds. */
+  readonly deviceKey: CryptoKey | null;
   readonly sessionToken: string;
   readonly sessionExpiresAtMs: number;
   readonly username: string;
@@ -1074,13 +1102,30 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         accountIdentitySeed,
       });
 
-      // Cache the phrase seed under the (already-derived) device key
-      // so future warm logins skip the prompt. Best-effort.
+      // ADR-0018 factor (c): a TOTP-recovered fresh browser parked
+      // with NO device root key (no password ⇒ no export key to
+      // derive one from). Bootstrap it from the VERIFIED identity
+      // seed — exactly what `completeFromDeviceRestore` does — and
+      // ONLY here, strictly AFTER the fail-closed verification
+      // above: a refusal must leave this device untouched.
+      let deviceKey = pending.deviceKey;
+      let bootstrappedDeviceKey = false;
+      if (deviceKey === null) {
+        deviceKey = await deriveDeviceRootKeyFromIdentitySeed(
+          accountIdentitySeed,
+          pending.accountIdB64,
+        );
+        await putDeviceKey(pending.accountIdB64, deviceKey);
+        bootstrappedDeviceKey = true;
+      }
+
+      // Cache the phrase seed under the device key so future warm
+      // logins skip the prompt. Best-effort.
       try {
         await putAccountIdentitySeed(
           pending.accountIdB64,
           accountIdentitySeed,
-          pending.deviceKey,
+          deviceKey,
         );
       } catch (err) {
         // eslint-disable-next-line no-console
@@ -1088,6 +1133,25 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
           "account-identity-seed persist (provideRecoveryPhrase) failed",
           err,
         );
+      }
+      // On a bootstrapped key the pending session token was never
+      // persisted (there was no key at park time) — land it now so a
+      // reload re-attaches. Best-effort.
+      if (bootstrappedDeviceKey) {
+        try {
+          await putSessionToken(
+            pending.accountIdB64,
+            pending.sessionToken,
+            pending.sessionExpiresAtMs,
+            deviceKey,
+          );
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.warn(
+            "session-token persist (provideRecoveryPhrase) failed",
+            err,
+          );
+        }
       }
 
       await finishCanonicalSession({
@@ -1131,13 +1195,30 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
           "this account's published identity — refusing to use it.",
       });
 
-      // Cache the seed under the EXISTING device key (the password /
-      // passkey auth already derived + persisted it). Best-effort.
+      // ADR-0018 factor (c): a TOTP-recovered fresh browser parked
+      // with NO device root key. Bootstrap it from the VERIFIED
+      // transferred seed (the `completeFromDeviceRestore` recipe),
+      // strictly AFTER the fail-closed verification above — a
+      // refusal must leave this device untouched.
+      let deviceKey = pending.deviceKey;
+      let bootstrappedDeviceKey = false;
+      if (deviceKey === null) {
+        deviceKey = await deriveDeviceRootKeyFromIdentitySeed(
+          phraseSeed,
+          pending.accountIdB64,
+        );
+        await putDeviceKey(pending.accountIdB64, deviceKey);
+        bootstrappedDeviceKey = true;
+      }
+
+      // Cache the seed under the device key (on the password /
+      // passkey paths it already existed; on the TOTP path it was
+      // just bootstrapped). Best-effort.
       try {
         await putAccountIdentitySeed(
           pending.accountIdB64,
           phraseSeed,
-          pending.deviceKey,
+          deviceKey,
         );
       } catch (err) {
         // eslint-disable-next-line no-console
@@ -1155,12 +1236,21 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         effectiveToken = sessionToken;
         effectiveExpiry = sessionExpiresAtMs;
         discovery.setSessionToken(sessionToken);
+      }
+      // Persist the effective token when a fresh one arrived (the
+      // pre-existing behavior) OR when the key was just bootstrapped
+      // (the pending token was never persisted — there was no key at
+      // park time). Best-effort.
+      if (
+        (sessionToken !== undefined && sessionExpiresAtMs !== undefined) ||
+        bootstrappedDeviceKey
+      ) {
         try {
           await putSessionToken(
             pending.accountIdB64,
-            sessionToken,
-            sessionExpiresAtMs,
-            pending.deviceKey,
+            effectiveToken,
+            effectiveExpiry,
+            deviceKey,
           );
         } catch (err) {
           // eslint-disable-next-line no-console
@@ -1638,6 +1728,131 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         // hand it to a leaked closure.
         seed.fill(0);
       }
+    },
+    async recoverWithTotp(username, code) {
+      // ADR-0018 factor (c) — authenticator-code recovery. ACCESS
+      // only: the server verifies the TOTP code and issues the
+      // session triple; identity acquisition runs the ADR-0017
+      // state machine below.
+      const trimmed = username.trim();
+      if (trimmed.length === 0) {
+        throw new Error(
+          "enter the username of the account to recover",
+        );
+      }
+      // Resolve the username → account_id exactly like `login` /
+      // `recover`: a local cache hit wins, else a discovery.lookup
+      // round-trip binds it.
+      const cached = loadPersisted();
+      let accountIdBytes: Uint8Array;
+      let resolvedUsername: string;
+      if (cached !== null && cached.username === trimmed) {
+        accountIdBytes = base64Decode(cached.accountIdB64);
+        resolvedUsername = cached.username;
+      } else {
+        const lookup = await discovery.lookup(trimmed);
+        if (lookup.account === null) {
+          throw new Error("username not found");
+        }
+        accountIdBytes = lookup.account;
+        resolvedUsername = lookup.normalisedUsername;
+      }
+
+      const result = await client.totpRecover(accountIdBytes, code);
+      const accountIdB64 = base64Encode(accountIdBytes);
+      // Phase 1.5b: install the fresh bearer token on the
+      // DiscoveryClient for any protected reads/writes that follow.
+      discovery.setSessionToken(result.sessionToken);
+      // Persist the localStorage account marker so a reload knows
+      // the account (important on a fresh browser where no row
+      // existed).
+      savePersisted({ v: 1, accountIdB64, username: resolvedUsername });
+
+      // ADR-0017 identity acquisition. TOTP carried NO password, so
+      // there is no OPAQUE export key to derive a device root key
+      // from — the ONLY same-device shortcut is an already-stored
+      // device key that decrypts a cached AccountIdentity seed.
+      let deviceKey: CryptoKey | null = null;
+      try {
+        deviceKey = await getDeviceKey(accountIdB64);
+      } catch (err) {
+        // IDB unreachable — treat as "no key" and fall into the
+        // fail-safe below.
+        // eslint-disable-next-line no-console
+        console.warn("device-key probe failed (totp recover)", err);
+        deviceKey = null;
+      }
+      let accountIdentitySeed: Uint8Array | null = null;
+      if (deviceKey !== null) {
+        // Refresh the persisted session token under the existing
+        // device key. Best-effort, same posture as login.
+        try {
+          await putSessionToken(
+            accountIdB64,
+            result.sessionToken,
+            result.sessionExpiresAtMs,
+            deviceKey,
+          );
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.warn("session-token persist (totp recover) failed", err);
+        }
+        try {
+          accountIdentitySeed = await getAccountIdentitySeed(
+            accountIdB64,
+            deviceKey,
+          );
+        } catch (err) {
+          // Decrypt failure — treat as "no cached seed" and fall
+          // into the fail-safe rather than the wrong-identity branch.
+          // eslint-disable-next-line no-console
+          console.warn(
+            "account-identity-seed decrypt failed (totp recover)",
+            err,
+          );
+          accountIdentitySeed = null;
+        }
+      }
+
+      if (deviceKey !== null && accountIdentitySeed !== null) {
+        // Same-device case: the cached seed rebuilds the canonical
+        // identity directly. `exportKey` is empty — TOTP involves
+        // no password (the completeFromDeviceRestore convention).
+        const wasm = await loadWasm();
+        await finishCanonicalSession({
+          wasm,
+          accountIdentitySeed,
+          accountIdBytes,
+          accountIdB64,
+          exportKey: new Uint8Array(0),
+          sessionToken: result.sessionToken,
+          sessionExpiresAtMs: result.sessionExpiresAtMs,
+          username: resolvedUsername,
+        });
+        return;
+      }
+
+      // Fresh-device fail-safe (ADR-0017): ACCESS succeeded, identity
+      // restore is pending. Park the context — exportKey EMPTY (no
+      // password) and deviceKey possibly null (no stored key on this
+      // browser; the completion paths bootstrap one from the verified
+      // identity seed). When a stored device key DOES exist (e.g. a
+      // prior password login on this browser whose seed cache is
+      // missing), carry it — overwriting it with an identity-seed-
+      // derived key would orphan every wrapped store.
+      setPendingRecovery({
+        accountIdBytes,
+        accountIdB64,
+        exportKey: new Uint8Array(0),
+        deviceKey,
+        sessionToken: result.sessionToken,
+        sessionExpiresAtMs: result.sessionExpiresAtMs,
+        username: resolvedUsername,
+      });
+      setState({
+        kind: "needs-recovery-phrase",
+        account: { accountId: accountIdB64, username: resolvedUsername },
+      });
     },
     logout() {
       // Keep localStorage + IDB device key intact. Re-login on

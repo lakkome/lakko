@@ -18,6 +18,12 @@
  *      the wire bytes, runs `DeviceGroup.addDeviceFromWire`,
  *      PUTs the resulting Welcome to the rendezvous mailbox.
  *
+ * Plus the account-management "Authenticator" section (ADR-0018
+ * factor (c)): enroll a TOTP authenticator app as an
+ * ACCESS-recovery factor — `/totp/enroll/start` renders the
+ * `otpauth://` QR + manual-entry secret, `/totp/enroll/finish`
+ * confirms with a live 6-digit code.
+ *
  * Both flows pull credentials (accountId, deviceKey) from
  * `useAuth` + `getDeviceKey`. Page renders an "auth required"
  * state when the session isn't ready.
@@ -37,7 +43,8 @@ import {
   type JSX,
 } from "solid-js";
 import { useAuth } from "../auth/AuthContext";
-import { AuthClient } from "../auth/client";
+import { AuthClient, AuthHttpError } from "../auth/client";
+import { normalizeTotpCode } from "../auth/totp-code";
 import { getDeviceKey } from "../auth/key-store";
 import {
   WebauthnClient,
@@ -57,7 +64,7 @@ import {
 import QRCode from "qrcode";
 import jsQR from "jsqr";
 
-type Tab = "list" | "pair" | "scan";
+type Tab = "list" | "pair" | "scan" | "totp";
 
 export default function Devices(): JSX.Element {
   const auth = useAuth();
@@ -111,6 +118,13 @@ export default function Devices(): JSX.Element {
           >
             Add a device
           </button>
+          <button
+            type="button"
+            class={tab() === "totp" ? "primary" : ""}
+            onClick={() => setTab("totp")}
+          >
+            Authenticator
+          </button>
         </div>
         <Switch>
           <Match when={tab() === "list"}>
@@ -130,6 +144,9 @@ export default function Devices(): JSX.Element {
               accountIdB64={session()!.accountIdB64}
               accountIdBytes={session()!.accountIdBytes}
             />
+          </Match>
+          <Match when={tab() === "totp"}>
+            <TotpEnrollView />
           </Match>
         </Switch>
       </Show>
@@ -749,6 +766,279 @@ function ScanView(props: {
               <div>
                 <p class="form-error">{message}</p>
                 <button type="button" onClick={reset}>
+                  Try again
+                </button>
+              </div>
+            );
+          }}
+        </Match>
+      </Switch>
+    </div>
+  );
+}
+
+// ---- Authenticator (TOTP) enrollment — ADR-0018 factor (c) ------
+
+function TotpEnrollView(): JSX.Element {
+  const auth = useAuth();
+  type State =
+    | { kind: "idle" }
+    | { kind: "starting" }
+    // Provisioning material on screen; waiting for the confirm code.
+    | { kind: "confirm"; otpauthUri: string; secretB32: string }
+    | { kind: "finishing"; otpauthUri: string; secretB32: string }
+    | { kind: "done" }
+    | { kind: "already-enabled" }
+    | { kind: "unavailable" }
+    | { kind: "error"; message: string };
+  const [state, setState] = createSignal<State>({ kind: "idle" });
+  const [code, setCode] = createSignal("");
+  const [confirmError, setConfirmError] = createSignal<string | null>(null);
+  const [canvasRef, setCanvasRef] = createSignal<HTMLCanvasElement | null>(
+    null,
+  );
+
+  // Render the otpauth:// provisioning URI as a QR whenever the
+  // confirm card is up. canvasRef is a signal, so this effect
+  // re-runs once the <canvas> mounts after the state flip — no
+  // draw-before-mount race.
+  createEffect(() => {
+    const s = state();
+    const canvas = canvasRef();
+    const uri =
+      s.kind === "confirm" || s.kind === "finishing" ? s.otpauthUri : null;
+    if (uri !== null && canvas !== null) {
+      void QRCode.toCanvas(canvas, uri, {
+        errorCorrectionLevel: "M",
+        width: 224,
+        margin: 1,
+      }).catch((err: unknown) => {
+        // eslint-disable-next-line no-console
+        console.warn("totp provisioning QR render failed", err);
+      });
+    }
+  });
+
+  const sessionToken = (): string | null =>
+    auth.identitySecrets()?.sessionToken ?? null;
+
+  async function start(): Promise<void> {
+    const token = sessionToken();
+    if (token === null) {
+      setState({
+        kind: "error",
+        message: "No live session token in this tab. Sign in again.",
+      });
+      return;
+    }
+    setState({ kind: "starting" });
+    try {
+      const result = await new AuthClient().totpEnrollStart(token);
+      setCode("");
+      setConfirmError(null);
+      setState({
+        kind: "confirm",
+        otpauthUri: result.otpauthUri,
+        secretB32: result.secretB32,
+      });
+    } catch (err) {
+      if (err instanceof AuthHttpError && err.status === 409) {
+        // A CONFIRMED authenticator already exists; the server
+        // refuses a silent swap.
+        setState({ kind: "already-enabled" });
+        return;
+      }
+      if (err instanceof AuthHttpError && err.status === 503) {
+        setState({ kind: "unavailable" });
+        return;
+      }
+      setState({
+        kind: "error",
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  async function finish(e: SubmitEvent): Promise<void> {
+    e.preventDefault();
+    const s = state();
+    if (s.kind !== "confirm") return;
+    setConfirmError(null);
+    const normalized = normalizeTotpCode(code());
+    if (normalized === null) {
+      setConfirmError("Enter the 6-digit code from your authenticator app.");
+      return;
+    }
+    const token = sessionToken();
+    if (token === null) {
+      setState({
+        kind: "error",
+        message: "No live session token in this tab. Sign in again.",
+      });
+      return;
+    }
+    setState({
+      kind: "finishing",
+      otpauthUri: s.otpauthUri,
+      secretB32: s.secretB32,
+    });
+    try {
+      await new AuthClient().totpEnrollFinish(token, normalized);
+      setCode("");
+      setState({ kind: "done" });
+    } catch (err) {
+      if (err instanceof AuthHttpError && err.status === 401) {
+        // Wrong / stale code — the pending enrollment survives, so
+        // just let the user retry with the next code.
+        setConfirmError(
+          "That code didn't verify. Wait for the next code in the app " +
+            "and try again.",
+        );
+        setState({
+          kind: "confirm",
+          otpauthUri: s.otpauthUri,
+          secretB32: s.secretB32,
+        });
+        return;
+      }
+      if (err instanceof AuthHttpError && err.status === 409) {
+        setState({ kind: "already-enabled" });
+        return;
+      }
+      if (err instanceof AuthHttpError && err.status === 503) {
+        setState({ kind: "unavailable" });
+        return;
+      }
+      setState({
+        kind: "error",
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  return (
+    <div>
+      <p>
+        Enroll an authenticator app (TOTP) as a recovery factor. If
+        you ever lose this device, a 6-digit code from the app
+        restores <em>access</em> to your account — your secure
+        identity is then restored from your recovery phrase or
+        another signed-in device.
+      </p>
+      <Switch>
+        <Match when={state().kind === "idle"}>
+          {/* HONESTY NOTE: the server has no TOTP "status" endpoint,
+              so the enrolled/not-enrolled state cannot be probed
+              up front. We render the enable button by default; a
+              409 from /totp/enroll/start flips this card to
+              "already enabled". */}
+          <button class="primary" type="button" onClick={() => void start()}>
+            Enable authenticator
+          </button>
+        </Match>
+        <Match when={state().kind === "starting"}>
+          <p>Generating the authenticator secret…</p>
+        </Match>
+        <Match
+          when={state().kind === "confirm" || state().kind === "finishing"}
+        >
+          {(_) => {
+            const s = state();
+            const secretB32 =
+              s.kind === "confirm" || s.kind === "finishing"
+                ? s.secretB32
+                : "";
+            const busy = s.kind === "finishing";
+            return (
+              <div>
+                <p>
+                  Scan this QR with your authenticator app (or type
+                  the secret in manually), then enter the 6-digit
+                  code it shows to confirm.
+                </p>
+                <div style={{ "text-align": "center", padding: "0.5rem 0" }}>
+                  <canvas ref={(el) => setCanvasRef(el)} />
+                </div>
+                <p>
+                  Manual-entry secret:{" "}
+                  <code
+                    style={{
+                      "user-select": "all",
+                      "word-break": "break-all",
+                    }}
+                  >
+                    {secretB32}
+                  </code>
+                </p>
+                <form onSubmit={(e) => void finish(e)}>
+                  <label>
+                    Confirmation code
+                    <input
+                      type="text"
+                      inputmode="numeric"
+                      autocomplete="one-time-code"
+                      pattern="[0-9]{6}"
+                      maxlength="6"
+                      required
+                      value={code()}
+                      onInput={(e) => setCode(e.currentTarget.value)}
+                      disabled={busy}
+                      placeholder="123456"
+                      style={{
+                        "font-family":
+                          "ui-monospace, SFMono-Regular, Menlo, monospace",
+                        "letter-spacing": "0.25em",
+                      }}
+                    />
+                  </label>
+                  <Show when={confirmError() !== null}>
+                    <p class="form-error">{confirmError()}</p>
+                  </Show>
+                  <button class="primary" type="submit" disabled={busy}>
+                    {busy ? "Confirming…" : "Confirm"}
+                  </button>{" "}
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => setState({ kind: "idle" })}
+                  >
+                    Cancel
+                  </button>
+                </form>
+              </div>
+            );
+          }}
+        </Match>
+        <Match when={state().kind === "done"}>
+          <p class="form-info">
+            Authenticator enabled. A code from the app can now recover
+            access to your account (Recover → Authenticator).
+          </p>
+        </Match>
+        <Match when={state().kind === "already-enabled"}>
+          <p class="form-info">
+            An authenticator is already enabled for this account.
+            Replacing a confirmed authenticator from a signed-in
+            session is refused by design — a stolen session must not
+            be able to swap your recovery factor.
+          </p>
+        </Match>
+        <Match when={state().kind === "unavailable"}>
+          <p class="form-error">
+            Authenticator enrollment is not available on this server.
+          </p>
+        </Match>
+        <Match when={state().kind === "error"}>
+          {(_) => {
+            const s = state();
+            const message = s.kind === "error" ? s.message : "Unknown error.";
+            return (
+              <div>
+                <p class="form-error">{message}</p>
+                <button
+                  type="button"
+                  onClick={() => setState({ kind: "idle" })}
+                >
                   Try again
                 </button>
               </div>
