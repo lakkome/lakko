@@ -66,6 +66,7 @@ mod call_jwt;
 mod device_authorize;
 mod opaque;
 mod pow;
+mod totp;
 mod turn;
 mod webauthn;
 mod webauthn_action;
@@ -153,6 +154,12 @@ pub(crate) struct AppState {
     /// `POST /call/turn-credential` route returns 503 in
     /// that case and clients fall back to STUN-only ICE.
     pub(crate) turn: Option<Arc<turn::TurnConfig>>,
+    /// ADR-0018 factor (c) — server-static AEAD key encrypting TOTP
+    /// secrets at rest (`totp_secrets.secret_enc`). Loaded from
+    /// `LAKKO_TOTP_ENC_KEY` (base64, exactly 32 bytes after decode);
+    /// `None` when unset, in which case the three `/totp/*` routes
+    /// return 503 — loud refusal, no silent fallback.
+    pub(crate) totp_enc_key: Option<Arc<[u8; 32]>>,
 }
 
 #[tokio::main]
@@ -261,6 +268,16 @@ async fn main() -> Result<()> {
         tracing::info!("turn-credential endpoint disabled (LAKKO_TURN_URIS / LAKKO_TURN_SHARED_SECRET not set)");
     }
 
+    // ADR-0018 factor (c) — TOTP secret-encryption key. Loud-fail on a
+    // malformed value (bad base64 / wrong length); soft-disable when the
+    // env var is simply unset (the /totp/* routes then return 503).
+    let totp_enc_key = totp::load_totp_enc_key().context("load LAKKO_TOTP_ENC_KEY")?;
+    if totp_enc_key.is_some() {
+        tracing::info!("totp endpoints enabled");
+    } else {
+        tracing::info!("totp endpoints disabled (LAKKO_TOTP_ENC_KEY not set)");
+    }
+
     let state = AppState {
         db: pool.clone(),
         opaque_setup: Arc::new(opaque_setup),
@@ -271,6 +288,7 @@ async fn main() -> Result<()> {
         call_jwt_signing: Arc::new(call_jwt_signing),
         attest_key: Arc::new(attest_key),
         turn: turn_config.map(Arc::new),
+        totp_enc_key: totp_enc_key.map(Arc::new),
     };
 
     // Background tasks: periodically delete expired rows from the
@@ -332,6 +350,11 @@ fn build_app(state: AppState) -> Router {
             "/device/authorize/start",
             post(device_authorize::start),
         )
+        // ADR-0018 factor (c) — TOTP enrollment. Bearer-auth: the caller
+        // is an already-logged-in account adding an authenticator factor.
+        // The matching `/totp/recover` is anonymous (public router).
+        .route("/totp/enroll/start", post(totp::enroll_start))
+        .route("/totp/enroll/finish", post(totp::enroll_finish))
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
             webauthn::require_session,
@@ -396,6 +419,10 @@ fn build_app(state: AppState) -> Router {
             "/device/authorize/redeem",
             post(device_authorize::redeem),
         )
+        // ADR-0018 factor (c) — recover ACCESS with an authenticator
+        // code. ANONYMOUS (the caller lost their device); PoW-gated +
+        // lockout + replay-protected inside the handler.
+        .route("/totp/recover", post(totp::recover))
         // Phase 3b4 forward — anonymous JWKS endpoint. The
         // public key is public; the SFU fetches it at
         // startup + refreshes every 24 h.

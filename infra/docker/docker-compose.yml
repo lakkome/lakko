@@ -69,6 +69,10 @@ services:
       LAKKO_WEBAUTHN_RP_ORIGIN: http://localhost:5173
       LAKKO_TURN_SHARED_SECRET: ${LAKKO_TURN_SHARED_SECRET:-ZHVtbXktdHVybi1zZWNyZXQ=}
       LAKKO_TURN_URIS: ${LAKKO_TURN_URIS:-turn:localhost:3478}
+      # ADR-0018 factor (c) — TOTP secret-encryption key (base64, 32 bytes
+      # after decode). Dev fixture only; never a production value. Unset it
+      # to disable the /totp/* routes (they return 503).
+      LAKKO_TOTP_ENC_KEY: ${LAKKO_TOTP_ENC_KEY:-ZGV2LXRvdHAtZW5jLWtleS0zMi1ieXRlcy1maXhlZCE=}
       LAKKO_POW_EFFORT_BITS: ${LAKKO_POW_EFFORT_BITS:-8}
     ports:
       - "127.0.0.1:8081:8081"

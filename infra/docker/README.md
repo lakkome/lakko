@@ -82,6 +82,7 @@ LAKKO_POW_EFFORT_BITS=1 LAKKO_DISCOVERY_POW_EFFORT_BITS=1 \
 | `LAKKO_SESSION_TOKEN_SECRET` | dev fixture (base64) | MUST be identical across auth + discovery + storage + push-gw (auth mints, the rest verify) |
 | `LAKKO_POW_EFFORT_BITS` / `LAKKO_DISCOVERY_POW_EFFORT_BITS` / `LAKKO_PUSH_GW_POW_EFFORT_BITS` | 8 | proof-of-work cost; set to `1` for fast scripted tests |
 | `LAKKO_TURN_SHARED_SECRET` / `LAKKO_TURN_URIS` | dev fixtures | base64 secret; only used by the call-credential endpoint |
+| `LAKKO_TOTP_ENC_KEY` | dev fixture (base64, 32 B) | encrypts TOTP secrets at rest (ADR-0018 factor (c)); unset disables the `/totp/*` routes (503). A DB-only leak defence, not a host-compromise one |
 
 ### Enabling real push delivery
 

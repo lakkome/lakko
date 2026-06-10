@@ -286,6 +286,7 @@ mod tests {
             call_jwt_signing: signing.clone(),
             attest_key: signing,
             turn: None,
+            totp_enc_key: None,
         }
     }
 

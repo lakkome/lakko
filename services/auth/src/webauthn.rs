@@ -936,6 +936,14 @@ pub(crate) enum ApiError {
     /// exist" / "grant expired" / "grant never existed" — the same
     /// enumeration-safe shape an OPAQUE bad-credential login returns.
     InvalidCredential,
+    /// ADR-0018 factor (c) (`/totp/recover`): too many consecutive failed
+    /// code attempts — the account is in its lockout window. Surfaced as a
+    /// generic `429` carrying no account-existence information.
+    RateLimited,
+    /// ADR-0018 factor (c) (`/totp/enroll/start`): the account already has a
+    /// CONFIRMED authenticator. Surfaced as `409` so a stolen session cannot
+    /// silently swap the authenticator (the user must disable it first).
+    TotpAlreadyEnabled,
     /// ADR-0018: a PoW-gated endpoint in this module (`/device/authorize/*`)
     /// rejected the proof. Delegates to [`crate::pow::PowError`]'s existing
     /// `(StatusCode, String)` mapping so the HTTP response is byte-identical
@@ -962,6 +970,14 @@ impl IntoResponse for ApiError {
             Self::NoCredentials => (StatusCode::NOT_FOUND, "no-passkeys-for-account"),
             Self::ActionRequired => (StatusCode::FORBIDDEN, "action-authorization-required"),
             Self::InvalidCredential => (StatusCode::UNAUTHORIZED, "invalid credentials"),
+            Self::RateLimited => (
+                StatusCode::TOO_MANY_REQUESTS,
+                "too many attempts; try again later",
+            ),
+            Self::TotpAlreadyEnabled => (
+                StatusCode::CONFLICT,
+                "authenticator already enabled; disable it first",
+            ),
             Self::Pow(e) => {
                 // Reuse PoW's own status+message mapping verbatim.
                 let (code, msg): (StatusCode, String) = e.into();

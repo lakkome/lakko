@@ -400,6 +400,7 @@ mod device_authorize_e2e_tests {
             call_jwt_signing: Arc::new(lakko_call_jwt::CallSigningKey::from_seed(&[0xAB; 32])),
             attest_key: Arc::new(lakko_call_jwt::CallSigningKey::from_seed(&ATTEST_SEED)),
             turn: None,
+            totp_enc_key: None,
         };
         (state, token_secret)
     }
