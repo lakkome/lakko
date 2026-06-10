@@ -102,8 +102,40 @@ private fun renderQrBitmap(payload: ByteArray): Bitmap? {
     // swap two URL-unsafe chars. Same alphabet the iOS / web
     // sides use; the scanner side reverses it via
     // [base64UrlDecodeNoPad].
-    val text = payload.toBase64UrlNoPad()
+    return renderQrBitmapFromText(payload.toBase64UrlNoPad())
+}
 
+/**
+ * Render a RAW-TEXT QR (no base64 wrapping) — for payloads that are
+ * already text a third-party scanner must read verbatim, e.g. the
+ * `otpauth://` provisioning URI an authenticator app consumes
+ * (ADR-0018 factor (c)). The pairing flow keeps the byte +
+ * base64url path above.
+ */
+@Composable
+public fun QrTextImageComposable(
+    text: String,
+    modifier: Modifier = Modifier,
+    size: Dp = 240.dp,
+) {
+    val bitmap = remember(text) { renderQrBitmapFromText(text) }
+    Box(
+        modifier = modifier.size(size),
+        contentAlignment = Alignment.Center,
+    ) {
+        if (bitmap != null) {
+            Image(
+                bitmap = bitmap.asImageBitmap(),
+                contentDescription = "QR code",
+                modifier = Modifier.size(size),
+            )
+        } else {
+            Text(text = "QR render failed")
+        }
+    }
+}
+
+private fun renderQrBitmapFromText(text: String): Bitmap? {
     val hints = mapOf(
         // QR codes pinned to "M" everywhere.
         EncodeHintType.ERROR_CORRECTION to ErrorCorrectionLevel.M,

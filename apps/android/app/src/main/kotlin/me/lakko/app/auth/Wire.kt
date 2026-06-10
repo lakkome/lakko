@@ -256,3 +256,58 @@ data class DeviceAuthorizeRedeemResponse(
     val session_token: String,
     val session_expires_at_ms: Long,
 )
+
+// ----------------------------------------------------------------------------
+// TOTP (services/auth/src/totp.rs — ADR-0018 factor (c),
+// authenticator-code recovery)
+// ----------------------------------------------------------------------------
+
+/** `POST /totp/enroll/start` request body. Bearer-authenticated
+ *  (the already-logged-in account's session token rides the
+ *  `Authorization` header) + PoW. */
+@Serializable
+data class TotpEnrollStartRequest(
+    val pow: PowProofPayload,
+)
+
+/** `POST /totp/enroll/start` response body — the provisioning
+ *  material the authenticator app consumes. The raw secret leaves
+ *  the server exactly once, here. */
+@Serializable
+data class TotpEnrollStartResponse(
+    /** `otpauth://totp/...` provisioning URI for the QR code. */
+    val otpauth_uri: String,
+    /** RFC 4648 base32 (no padding) of the raw secret, for manual
+     *  entry into the authenticator app. */
+    val secret_b32: String,
+)
+
+/** `POST /totp/enroll/finish` request body. Bearer-auth, NO `pow`
+ *  — the server does not gate finish. */
+@Serializable
+data class TotpEnrollFinishRequest(
+    /** The first 6-digit code the authenticator produced, proving
+     *  it holds the secret. */
+    val code: String,
+)
+
+/** `POST /totp/recover` request body. Anonymous (the caller lost
+ *  their device) + PoW. */
+@Serializable
+data class TotpRecoverRequest(
+    val pow: PowProofPayload,
+    /** URL-safe base64 (no pad) of the 16-byte account_id. */
+    val account_id_b64: String,
+    /** Current 6-digit authenticator code. */
+    val code: String,
+)
+
+/** `POST /totp/recover` response body — the same `(account_id,
+ *  session_token, expiry)` triple every other login flow returns. */
+@Serializable
+data class TotpRecoverResponse(
+    /** URL-safe base64 (no pad) of the 16-byte account id (echoed). */
+    val account_id_b64: String,
+    val session_token: String,
+    val session_expires_at_ms: Long,
+)

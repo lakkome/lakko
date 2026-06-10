@@ -22,6 +22,7 @@ import io.ktor.serialization.kotlinx.json.json
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
 import uniffi.lakko_ffi_uniffi.OpaqueLogin
 import uniffi.lakko_ffi_uniffi.OpaqueRegister
 import uniffi.lakko_ffi_uniffi.RecoveryMnemonic
@@ -236,6 +237,111 @@ public class AuthClient(
             ),
         )
         return DeviceAuthorizeRedeemResult(
+            accountId = base64UrlDecodeNoPad(resp.account_id_b64),
+            sessionToken = resp.session_token,
+            sessionExpiresAtMs = resp.session_expires_at_ms,
+        )
+    }
+
+    // -----------------------------------------------------------------
+    // TOTP — ADR-0018 factor (c), authenticator-code recovery
+    // -----------------------------------------------------------------
+
+    /**
+     * `POST /totp/enroll/start` — mint + store an (unconfirmed) TOTP
+     * secret for this account (ADR-0018 factor (c), enrollment step
+     * 1). Mirror of the web `AuthClient.totpEnrollStart`.
+     *
+     * Bearer-authenticated (the already-logged-in account) + PoW.
+     * Returns the `otpauth://` provisioning URI (QR) + the base32
+     * secret (manual entry). The enrollment only becomes usable for
+     * recovery after [totpEnrollFinish] confirms it with a live code.
+     *
+     * A 409 [AuthHttpError] means a CONFIRMED authenticator already
+     * exists (the server refuses a silent swap); a 503 means the
+     * server has TOTP disabled (`LAKKO_TOTP_ENC_KEY` unset).
+     */
+    public suspend fun totpEnrollStart(sessionToken: String): TotpEnrollStartResult {
+        if (sessionToken.isEmpty()) {
+            throw AuthClientArgError("sessionToken must be non-empty")
+        }
+        val challenge = powChallenge()
+        val pow = solvePow(challenge.seed, challenge.effort_bits, powDispatcher)
+        val resp: TotpEnrollStartResponse = post(
+            "/totp/enroll/start",
+            TotpEnrollStartRequest(pow = pow),
+            bearer = sessionToken,
+        )
+        return TotpEnrollStartResult(
+            otpauthUri = resp.otpauth_uri,
+            secretB32 = resp.secret_b32,
+        )
+    }
+
+    /**
+     * `POST /totp/enroll/finish` — confirm the enrollment with the
+     * first code the authenticator produced (ADR-0018 factor (c),
+     * enrollment step 2). Mirror of the web
+     * `AuthClient.totpEnrollFinish`.
+     *
+     * Bearer-authenticated, NO PoW — the server does not gate
+     * finish. A 401 [AuthHttpError] means the code did not verify
+     * (wrong app entry / clock skew beyond +-30 s); the pending
+     * enrollment stays pending, so the user can simply retry with
+     * the next code.
+     */
+    public suspend fun totpEnrollFinish(sessionToken: String, code: String) {
+        if (sessionToken.isEmpty()) {
+            throw AuthClientArgError("sessionToken must be non-empty")
+        }
+        val normalized = normalizeTotpCode(code)
+            ?: throw AuthClientArgError("code must be 6 digits")
+        // The body is `{"enabled": true}` — nothing the caller
+        // consumes; a typed JsonObject keeps the post helper's
+        // non-null contract without inventing a DTO for it.
+        post<TotpEnrollFinishRequest, JsonObject>(
+            "/totp/enroll/finish",
+            TotpEnrollFinishRequest(code = normalized),
+            bearer = sessionToken,
+        )
+    }
+
+    /**
+     * `POST /totp/recover` — recover ACCESS with an authenticator
+     * code (ADR-0018 factor (c), recovery side). Mirror of the web
+     * `AuthClient.totpRecover`.
+     *
+     * Anonymous (the caller lost their device) + PoW. The server is
+     * enumeration-safe by design: unknown account, unconfirmed
+     * enrollment, wrong code, and replayed code all surface the SAME
+     * generic 401 [AuthHttpError]; 429 signals the
+     * 5-failures-in-15-minutes lockout; 503 means TOTP is disabled
+     * server-side.
+     *
+     * TOTP grants ACCESS only — the result carries no key material.
+     * Identity acquisition is the caller's job (ADR-0017 state
+     * machine in [AuthRepository.recoverWithTotp]).
+     */
+    public suspend fun totpRecover(
+        accountId: ByteArray,
+        code: String,
+    ): TotpRecoverResult {
+        if (accountId.size != ACCOUNT_ID_LEN) {
+            throw AuthClientArgError("accountId must be $ACCOUNT_ID_LEN bytes")
+        }
+        val normalized = normalizeTotpCode(code)
+            ?: throw AuthClientArgError("code must be 6 digits")
+        val challenge = powChallenge()
+        val pow = solvePow(challenge.seed, challenge.effort_bits, powDispatcher)
+        val resp: TotpRecoverResponse = post(
+            "/totp/recover",
+            TotpRecoverRequest(
+                pow = pow,
+                account_id_b64 = base64UrlEncodeNoPad(accountId),
+                code = normalized,
+            ),
+        )
+        return TotpRecoverResult(
             accountId = base64UrlDecodeNoPad(resp.account_id_b64),
             sessionToken = resp.session_token,
             sessionExpiresAtMs = resp.session_expires_at_ms,
@@ -779,6 +885,44 @@ public data class DeviceAuthorizeRedeemResult(
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
         if (other !is DeviceAuthorizeRedeemResult) return false
+        return accountId.contentEquals(other.accountId) &&
+            sessionToken == other.sessionToken &&
+            sessionExpiresAtMs == other.sessionExpiresAtMs
+    }
+
+    override fun hashCode(): Int {
+        var result = accountId.contentHashCode()
+        result = 31 * result + sessionToken.hashCode()
+        result = 31 * result + sessionExpiresAtMs.hashCode()
+        return result
+    }
+}
+
+/** Result of [AuthClient.totpEnrollStart] (ADR-0018 factor (c)) —
+ *  the provisioning material the authenticator app consumes. The
+ *  raw secret leaves the server exactly once, here: base32 inside
+ *  the URI + standalone for manual entry. Never log or persist. */
+public data class TotpEnrollStartResult(
+    /** `otpauth://totp/...` provisioning URI — render as a QR
+     *  (RAW TEXT, not base64-wrapped — authenticator apps parse
+     *  the URI string straight out of the QR). */
+    val otpauthUri: String,
+    /** RFC 4648 base32 (no padding) secret for manual entry. */
+    val secretB32: String,
+)
+
+/** Result of [AuthClient.totpRecover] — the same `(account_id,
+ *  session_token, expiry)` triple every other login flow returns
+ *  (ADR-0018 factor (c)). No exportKey: TOTP involves no password,
+ *  so no OPAQUE export key exists on this device. */
+public data class TotpRecoverResult(
+    val accountId: ByteArray,
+    val sessionToken: String,
+    val sessionExpiresAtMs: Long,
+) {
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (other !is TotpRecoverResult) return false
         return accountId.contentEquals(other.accountId) &&
             sessionToken == other.sessionToken &&
             sessionExpiresAtMs == other.sessionExpiresAtMs

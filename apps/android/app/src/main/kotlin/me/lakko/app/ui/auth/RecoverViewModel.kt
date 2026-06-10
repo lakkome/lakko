@@ -14,6 +14,7 @@ import me.lakko.app.auth.AuthClientArgError
 import me.lakko.app.auth.AuthHttpError
 import me.lakko.app.auth.AuthNetworkError
 import me.lakko.app.auth.AuthRepository
+import me.lakko.app.auth.normalizeTotpCode
 import me.lakko.app.recovery.ShamirBridge
 import me.lakko.app.recovery.ShamirBridgeException
 import uniffi.lakko_ffi_uniffi.FfiException
@@ -65,6 +66,11 @@ public class RecoverViewModel(
     /** 1.21c3 — Shamir-shares textarea content. */
     public fun onSharesInputChange(value: String) {
         mutableState.update { it.copy(sharesInput = value) }
+    }
+
+    /** ADR-0018 factor (c) — 6-digit authenticator code field. */
+    public fun onTotpCodeChange(value: String) {
+        mutableState.update { it.copy(totpCode = value) }
     }
 
     /** 1.21c3 — toggle between Phrase and Shares input modes
@@ -262,6 +268,15 @@ public class RecoverViewModel(
                 }
                 return
             }
+            RecoverMode.Authenticator -> {
+                // ADR-0018 factor (c) — the Authenticator mode submits
+                // via [onSubmitTotp] (no new password is set on that
+                // path). Defensive no-op.
+                mutableState.update {
+                    it.copy(error = "Use the authenticator-code form.")
+                }
+                return
+            }
         }
 
         mutableState.update { it.copy(busy = true, error = null) }
@@ -329,6 +344,80 @@ public class RecoverViewModel(
         }
     }
 
+    /**
+     * ADR-0018 factor (c) — submit the Authenticator mode: username
+     * (cached account wins, else the typed field) + the current
+     * 6-digit code. [AuthRepository.recoverWithTotp] drives the state
+     * flip — [me.lakko.app.auth.AuthState.Session] on the warm
+     * same-device path, [me.lakko.app.auth.AuthState.NeedsRecoveryPhrase]
+     * on a fresh device — and MainActivity routes automatically.
+     */
+    public fun onSubmitTotp() {
+        val snapshot = mutableState.value
+        if (snapshot.busy) return  // ignore double-tap
+
+        val user = (cachedUsername ?: snapshot.username).trim()
+        if (user.isEmpty()) {
+            mutableState.update {
+                it.copy(error = "Enter the username of the account to recover.")
+            }
+            return
+        }
+        val normalized = normalizeTotpCode(snapshot.totpCode)
+        if (normalized == null) {
+            mutableState.update {
+                it.copy(
+                    error = "Enter the 6-digit code from your authenticator app.",
+                )
+            }
+            return
+        }
+
+        mutableState.update { it.copy(busy = true, error = null) }
+        viewModelScope.launch {
+            try {
+                repo.recoverWithTotp(user, normalized)
+                // The repository flipped the auth state; wipe the form
+                // buffers before the router replaces this screen.
+                mutableState.update {
+                    it.copy(busy = false, error = null, totpCode = "")
+                }
+            } catch (err: AuthClientArgError) {
+                mutableState.update {
+                    it.copy(busy = false, error = err.message ?: "Invalid input.")
+                }
+            } catch (err: AuthHttpError) {
+                mutableState.update {
+                    it.copy(busy = false, error = totpUserFacingHttpError(err))
+                }
+            } catch (_: AuthNetworkError) {
+                mutableState.update {
+                    it.copy(
+                        busy = false,
+                        error = "Network error. Check your connection and try again.",
+                    )
+                }
+            } catch (err: Throwable) {
+                mutableState.update {
+                    it.copy(busy = false, error = err.message ?: "Recovery failed.")
+                }
+            }
+        }
+    }
+
+    /** Map a `recoverWithTotp` failure onto a friendly inline message.
+     *  The server is enumeration-safe: 401 covers unknown-account /
+     *  unconfirmed-enrollment / wrong-code / replayed-code uniformly
+     *  (mirror of the web `totpRecoverErrorMessage`). */
+    private fun totpUserFacingHttpError(err: AuthHttpError): String =
+        when (err.status) {
+            401 -> "Wrong or expired code."
+            429 -> "Too many attempts — wait 15 minutes."
+            503 -> "Authenticator recovery is not available on this server."
+            in 500..599 -> "Server error. Please try again shortly."
+            else -> err.message ?: "Recovery failed (${err.status})."
+        }
+
     private fun userFacingHttpError(err: AuthHttpError): String =
         when (err.status) {
             // The server's `/password/reset/{start,finish}` pair
@@ -352,8 +441,9 @@ public class RecoverViewModel(
 
 /** 1.21c3 — which input mode the user is filling. ADR-0018 adds
  *  [AnotherDevice]: restore via an already-linked device (no
- *  password, no phrase typing). */
-public enum class RecoverMode { Phrase, Shares, AnotherDevice }
+ *  password, no phrase typing) and [Authenticator]: recover ACCESS
+ *  with a 6-digit RFC 6238 code (factor (c)). */
+public enum class RecoverMode { Phrase, Shares, AnotherDevice, Authenticator }
 
 /** ADR-0018 factor (a), path (b) — the resolved restore target the
  *  AnotherDevice mode pairs against. */
@@ -394,4 +484,6 @@ public data class RecoverUiState(
     /** ADR-0018 — non-null once the AnotherDevice mode resolved the
      *  typed username to an account id via discovery. */
     val deviceRestoreTarget: DeviceRestoreTarget? = null,
+    /** ADR-0018 factor (c) — the 6-digit authenticator code field. */
+    val totpCode: String = "",
 )

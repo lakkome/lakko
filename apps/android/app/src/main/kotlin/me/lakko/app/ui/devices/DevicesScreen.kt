@@ -17,11 +17,13 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.TabRow
 import androidx.compose.material3.Tab
@@ -42,6 +44,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -146,6 +150,11 @@ public fun DevicesScreen(
                     onClick = { tab = 2 },
                     text = { Text("Add a device") },
                 )
+                Tab(
+                    selected = tab == 3,
+                    onClick = { tab = 3 },
+                    text = { Text("Authenticator") },
+                )
             }
 
             when (tab) {
@@ -158,10 +167,13 @@ public fun DevicesScreen(
                     accountIdBytes = secrets.accountId,
                     accountIdB64 = account.accountIdB64,
                 )
-                else -> ScanTab(
+                2 -> ScanTab(
                     accountIdBytes = secrets.accountId,
                     accountIdB64 = account.accountIdB64,
                     accountIdentitySeed = secrets.accountIdentitySeed,
+                    sessionToken = secrets.sessionToken,
+                )
+                else -> TotpEnrollTab(
                     sessionToken = secrets.sessionToken,
                 )
             }
@@ -780,3 +792,185 @@ private fun hexPrefix(bytes: ByteArray, n: Int): String {
 }
 
 private const val HEX_CHARS: String = "0123456789abcdef"
+
+// ---- Authenticator (TOTP) enrollment — ADR-0018 factor (c) -------
+
+/** UI state machine for [TotpEnrollTab]. */
+private sealed interface TotpUi {
+    data object Idle : TotpUi
+    data object Starting : TotpUi
+    data class Confirm(
+        val otpauthUri: String,
+        val secretB32: String,
+        val code: String,
+        val busy: Boolean,
+        val error: String?,
+    ) : TotpUi
+    data object Done : TotpUi
+    data object AlreadyEnabled : TotpUi
+    data object Unavailable : TotpUi
+    data class Error(val message: String) : TotpUi
+}
+
+/**
+ * Enroll an authenticator app as an ACCESS-recovery factor:
+ * `/totp/enroll/start` renders the `otpauth://` QR (RAW TEXT —
+ * authenticator apps parse the URI straight out of the QR) + the
+ * manual-entry secret; `/totp/enroll/finish` confirms with a live
+ * 6-digit code. Mirror of the web `TotpEnrollView`.
+ *
+ * There is no server "status" endpoint — the Enable button renders
+ * by default and a 409 from either call flips the card to "already
+ * enabled" (honest lazy state derivation, same as web).
+ */
+@Composable
+private fun TotpEnrollTab(sessionToken: String) {
+    val scope = rememberCoroutineScope()
+    var ui: TotpUi by remember { mutableStateOf(TotpUi.Idle) }
+
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Text(
+            "Add an authenticator app (TOTP) as a recovery factor. " +
+                "If you lose this device, a 6-digit code recovers " +
+                "ACCESS to your account; your identity then restores " +
+                "from the recovery phrase or another device.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+
+        when (val s = ui) {
+            TotpUi.Idle -> Button(
+                onClick = {
+                    ui = TotpUi.Starting
+                    scope.launch {
+                        ui = try {
+                            val res = AuthClient().use { client ->
+                                client.totpEnrollStart(sessionToken)
+                            }
+                            TotpUi.Confirm(
+                                otpauthUri = res.otpauthUri,
+                                secretB32 = res.secretB32,
+                                code = "",
+                                busy = false,
+                                error = null,
+                            )
+                        } catch (err: me.lakko.app.auth.AuthHttpError) {
+                            when (err.status) {
+                                409 -> TotpUi.AlreadyEnabled
+                                503 -> TotpUi.Unavailable
+                                else -> TotpUi.Error(
+                                    err.message ?: "Enrollment failed (${err.status}).",
+                                )
+                            }
+                        } catch (err: Throwable) {
+                            TotpUi.Error(err.message ?: "Enrollment failed")
+                        }
+                    }
+                },
+            ) { Text("Enable authenticator") }
+
+            TotpUi.Starting -> CircularProgressIndicator()
+
+            is TotpUi.Confirm -> {
+                Text(
+                    "Scan this QR with your authenticator app (or type " +
+                        "the secret), then enter the current 6-digit code " +
+                        "to confirm.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                QrTextImageComposable(text = s.otpauthUri)
+                Text(
+                    "Secret: ${s.secretB32}",
+                    style = MaterialTheme.typography.bodySmall,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                OutlinedTextField(
+                    value = s.code,
+                    onValueChange = { v -> ui = s.copy(code = v, error = null) },
+                    label = { Text("6-digit code") },
+                    singleLine = true,
+                    enabled = !s.busy,
+                    keyboardOptions = KeyboardOptions(
+                        keyboardType = KeyboardType.Number,
+                        imeAction = ImeAction.Done,
+                    ),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                if (s.error != null) {
+                    Text(
+                        s.error,
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+                Button(
+                    onClick = {
+                        val normalized = me.lakko.app.auth.normalizeTotpCode(s.code)
+                        if (normalized == null) {
+                            ui = s.copy(
+                                error = "Enter the 6-digit code from the app.",
+                            )
+                            return@Button
+                        }
+                        ui = s.copy(busy = true, error = null)
+                        scope.launch {
+                            ui = try {
+                                AuthClient().use { client ->
+                                    client.totpEnrollFinish(sessionToken, normalized)
+                                }
+                                TotpUi.Done
+                            } catch (err: me.lakko.app.auth.AuthHttpError) {
+                                when (err.status) {
+                                    401 -> s.copy(
+                                        busy = false,
+                                        error = "Wrong code — check the app and try again.",
+                                    )
+                                    409 -> TotpUi.AlreadyEnabled
+                                    else -> TotpUi.Error(
+                                        err.message ?: "Confirmation failed (${err.status}).",
+                                    )
+                                }
+                            } catch (err: Throwable) {
+                                TotpUi.Error(err.message ?: "Confirmation failed")
+                            }
+                        }
+                    },
+                    enabled = !s.busy,
+                ) { Text(if (s.busy) "Confirming…" else "Confirm") }
+            }
+
+            TotpUi.Done -> Text(
+                "Authenticator enabled. A 6-digit code can now recover " +
+                    "access to this account.",
+                color = Color(0xFF1B5E20),
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.SemiBold,
+            )
+
+            TotpUi.AlreadyEnabled -> Text(
+                "An authenticator is already enabled on this account.",
+                style = MaterialTheme.typography.bodyMedium,
+            )
+
+            TotpUi.Unavailable -> Text(
+                "Authenticator enrollment is not available on this server.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.error,
+            )
+
+            is TotpUi.Error -> Column(
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Text(
+                    s.message,
+                    color = MaterialTheme.colorScheme.error,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                Button(onClick = { ui = TotpUi.Idle }) { Text("Try again") }
+            }
+        }
+    }
+}

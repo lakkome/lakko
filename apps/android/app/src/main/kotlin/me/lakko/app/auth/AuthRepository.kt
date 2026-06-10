@@ -853,6 +853,207 @@ public class AuthRepository(
     }
 
     /**
+     * ADR-0018 factor (c) — recover ACCESS with a TOTP authenticator
+     * code. Mirror of `apps/web/src/auth/AuthContext.tsx::recoverWithTotp`.
+     *
+     * ACCESS only: the server verifies the 6-digit code against the
+     * previously-enrolled secret and issues the session triple. There
+     * is NO password, hence NO OPAQUE export key — `exportKey` is the
+     * EMPTY array on every path here (the [completeFromDeviceRestore]
+     * convention). Identity acquisition runs the ADR-0017 state
+     * machine:
+     *
+     *   * **Warm same-device case** — a cached AccountIdentity
+     *     (phrase) seed exists: finish the session directly. ALSO
+     *     ensure the [DeviceKeyStore] rehydration existence-gate
+     *     passes — with no password there is no export key to derive
+     *     a device root key from, so when none exists we bootstrap it
+     *     from the identity seed (best-effort; on Android nothing is
+     *     wrapped under the device key, it is purely the gate).
+     *   * **Cold fresh-device case** — no cached seed: park a
+     *     [PendingRecovery] (exportKey EMPTY) and flip to
+     *     [AuthState.NeedsRecoveryPhrase]; [provideRecoveryPhrase] /
+     *     [completeFromPairing] complete the identity restore (and
+     *     bootstrap the device key from the VERIFIED seed).
+     *
+     * @throws AuthClientArgError on a blank username or an unknown
+     *         username ("username not found"), or a malformed code.
+     * @throws AuthHttpError 401 on a wrong/expired/replayed code
+     *         (enumeration-safe), 429 under lockout, 503 when TOTP is
+     *         disabled server-side.
+     * @throws AuthNetworkError on transport failure.
+     */
+    public suspend fun recoverWithTotp(username: String, code: String) {
+        val trimmed = username.trim()
+        if (trimmed.isEmpty()) {
+            throw AuthClientArgError(
+                "enter the username of the account to recover",
+            )
+        }
+        // Resolve the username -> account_id exactly like the Recover
+        // AnotherDevice mode: a local cache hit wins, else a
+        // discovery.lookup round-trip binds it.
+        val cached = sessionStore.load()
+        val accountIdBytes: ByteArray
+        val resolvedUsername: String
+        if (cached != null && cached.username == trimmed) {
+            accountIdBytes = base64Decode(cached.accountIdB64)
+            resolvedUsername = cached.username
+        } else {
+            val lookup = discoveryClientFactory().use { it.lookup(trimmed) }
+            val account = lookup.account
+                ?: throw AuthClientArgError("username not found")
+            accountIdBytes = account
+            resolvedUsername = lookup.normalisedUsername
+        }
+        val accountIdB64 = base64Encode(accountIdBytes)
+
+        val result = authClientFactory().use { client ->
+            client.totpRecover(accountIdBytes, code)
+        }
+
+        // Persist the account marker — important on a fresh device
+        // where no row existed (idempotent upsert otherwise).
+        sessionStore.save(
+            PersistedSession(
+                accountIdB64 = accountIdB64,
+                username = resolvedUsername,
+            ),
+        )
+
+        // ADR-0017 identity acquisition. TOTP carried NO password, so
+        // the ONLY same-device shortcut is a cached AccountIdentity
+        // (phrase) seed.
+        val accountIdentitySeed: ByteArray? = try {
+            AccountIdentitySeedStore.getAccountIdentitySeed(
+                applicationContext,
+                accountIdB64,
+            )
+        } catch (cause: Throwable) {
+            // Decrypt / store failure — treat as "no cached seed" and
+            // fall into the fail-safe rather than the wrong-identity
+            // branch.
+            Log.w(
+                "lakko-auth",
+                "account-identity-seed read failed (totp recover)",
+                cause,
+            )
+            null
+        }
+
+        if (accountIdentitySeed != null) {
+            // Warm same-device case. Ensure the DeviceKeyStore
+            // rehydration gate passes: no password => no exportKey-
+            // derived device root key; if none exists, bootstrap it
+            // from the cached (already-trusted) identity seed.
+            bootstrapDeviceKeyFromSeedBestEffort(
+                accountIdB64 = accountIdB64,
+                accountIdentitySeed = accountIdentitySeed,
+                context = "totp recover",
+            )
+            mutableIdentitySecrets.value = IdentitySecrets(
+                accountId = accountIdBytes,
+                exportKey = ByteArray(0),
+                accountIdentitySeed = accountIdentitySeed,
+                sessionToken = result.sessionToken,
+                sessionExpiresAtMs = result.sessionExpiresAtMs,
+            )
+            pendingRecovery.set(null)
+            mutableState.value = AuthState.Session(
+                account = SessionAccount(
+                    accountIdB64 = accountIdB64,
+                    username = resolvedUsername,
+                ),
+            )
+            // 1.20d — best-effort push subscribe (the ACCESS factor
+            // succeeded; same posture as login / passkey).
+            subscribePushBestEffort("totp-recover")
+            return
+        }
+
+        // Fresh-device fail-safe (ADR-0017): ACCESS succeeded,
+        // identity restore is pending the phrase / a paired device.
+        // exportKey EMPTY — there is no password on this path; the
+        // completion paths bootstrap the device key from the VERIFIED
+        // seed.
+        pendingRecovery.set(
+            PendingRecovery(
+                accountIdBytes = accountIdBytes,
+                accountIdB64 = accountIdB64,
+                exportKey = ByteArray(0),
+                sessionToken = result.sessionToken,
+                sessionExpiresAtMs = result.sessionExpiresAtMs,
+                username = resolvedUsername,
+            ),
+        )
+        mutableState.value = AuthState.NeedsRecoveryPhrase(
+            account = SessionAccount(
+                accountIdB64 = accountIdB64,
+                username = resolvedUsername,
+            ),
+        )
+        subscribePushBestEffort("totp-recover")
+    }
+
+    /**
+     * ADR-0018 factor (c) — ensure the [DeviceKeyStore] rehydration
+     * existence-gate passes on a no-password path: when NO device
+     * root key exists for this account, derive one from the
+     * AccountIdentity (phrase) seed via
+     * [deriveDeviceRootKeyFromIdentitySeed] and persist it. A device
+     * key that already exists is NEVER overwritten (a password login
+     * may have derived it from the export key; replacing it is
+     * pointless churn).
+     *
+     * MUST only be called with a seed that is already trusted: either
+     * read back from this device's own [AccountIdentitySeedStore]
+     * (warm TOTP case) or freshly verified against the published
+     * bundle via [verifySeedAgainstPublishedIdentity] (the completion
+     * paths) — NEVER before the fail-closed verification, so a
+     * refusal leaves this device untouched.
+     *
+     * Best-effort (mirror of the web bootstrap, Android posture): on
+     * Android nothing is wrapped under the device key (the encrypted
+     * stores ride the Keystore master key), so the key is purely the
+     * `rehydrate()` existence signal; a persistence failure just
+     * means the next cold start asks the user to authenticate again.
+     */
+    private fun bootstrapDeviceKeyFromSeedBestEffort(
+        accountIdB64: String,
+        accountIdentitySeed: ByteArray,
+        context: String,
+    ) {
+        try {
+            val existing =
+                deviceKeyStore.getDeviceKey(applicationContext, accountIdB64)
+            if (existing != null) {
+                // Only the existence signal matters — wipe immediately.
+                existing.fill(0)
+                return
+            }
+            val deviceRootKey = deriveDeviceRootKeyFromIdentitySeed(
+                accountIdentitySeed,
+                accountIdB64,
+            )
+            try {
+                deviceKeyStore.putDeviceKey(
+                    context = applicationContext,
+                    accountIdB64 = accountIdB64,
+                    rootKey = deviceRootKey,
+                )
+            } finally {
+                deviceRootKey.fill(0)
+            }
+        } catch (cause: Throwable) {
+            Log.w(
+                "lakko-auth",
+                "device-key bootstrap from identity seed ($context) failed",
+                cause,
+            )
+        }
+    }
+
+    /**
      * ADR-0017 fresh-device fail-safe completion. Only valid while the
      * state is [AuthState.NeedsRecoveryPhrase]: the user typed their
      * recovery phrase, we derive the BIP39 seed, HARD-BLOCK verify it
@@ -900,6 +1101,19 @@ public class AuthRepository(
                 accountIdBytes = pending.accountIdBytes,
                 sessionToken = pending.sessionToken,
                 accountIdentitySeed = accountIdentitySeed,
+            )
+
+            // ADR-0018 factor (c): a TOTP-recovered fresh device parked
+            // with NO device root key (no password => no export key to
+            // derive one from). Bootstrap it from the VERIFIED identity
+            // seed — and ONLY here, strictly AFTER the fail-closed
+            // verification above: a refusal must leave this device
+            // untouched. No-op when a key already exists (password /
+            // passkey paths).
+            bootstrapDeviceKeyFromSeedBestEffort(
+                accountIdB64 = pending.accountIdB64,
+                accountIdentitySeed = accountIdentitySeed,
+                context = "provideRecoveryPhrase",
             )
 
             // Cache the phrase seed under EncryptedSharedPreferences so
@@ -1024,6 +1238,16 @@ public class AuthRepository(
                 accountIdBytes = pending.accountIdBytes,
                 sessionToken = sessionToken ?: pending.sessionToken,
                 accountIdentitySeed = phraseSeed,
+            )
+            // ADR-0018 factor (c): a TOTP-recovered fresh device parked
+            // with NO device root key. Bootstrap it from the VERIFIED
+            // transferred seed, strictly AFTER the fail-closed
+            // verification above — a refusal must leave this device
+            // untouched. No-op when a key already exists.
+            bootstrapDeviceKeyFromSeedBestEffort(
+                accountIdB64 = pending.accountIdB64,
+                accountIdentitySeed = phraseSeed,
+                context = "completeFromPairing",
             )
             try {
                 AccountIdentitySeedStore.putAccountIdentitySeed(

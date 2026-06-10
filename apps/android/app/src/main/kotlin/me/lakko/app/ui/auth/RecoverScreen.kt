@@ -101,6 +101,8 @@ public fun RecoverScreen(
             onSubmit = viewModel::onSubmit,
             onLookupForDeviceRestore = viewModel::lookupForDeviceRestore,
             onCompleteFromDeviceRestore = viewModel::completeFromDeviceRestore,
+            onTotpCodeChange = viewModel::onTotpCodeChange,
+            onSubmitTotp = viewModel::onSubmitTotp,
             onNavigateToLogin = onNavigateToLogin,
             onNavigateToSignup = onNavigateToSignup,
         )
@@ -126,6 +128,8 @@ private fun RecoverForm(
     onLookupForDeviceRestore: () -> Unit,
     onCompleteFromDeviceRestore:
         suspend (me.lakko.app.devices.PairingOrchestrator.JoinRecoveryOutcome) -> Unit,
+    onTotpCodeChange: (String) -> Unit,
+    onSubmitTotp: () -> Unit,
     onNavigateToLogin: () -> Unit,
     onNavigateToSignup: () -> Unit,
 ) {
@@ -143,10 +147,14 @@ private fun RecoverForm(
             style = MaterialTheme.typography.bodyMedium,
         )
         Spacer(Modifier.height(16.dp))
-    } else if (state.mode != RecoverMode.AnotherDevice) {
+    } else if (
+        state.mode != RecoverMode.AnotherDevice &&
+        state.mode != RecoverMode.Authenticator
+    ) {
         // ADR-0017 — fresh-device recover: no account is cached, so
         // the user types their username to target the recover. (The
-        // AnotherDevice mode renders its own username field below.)
+        // AnotherDevice + Authenticator modes render their own
+        // username fields below.)
         Spacer(Modifier.height(12.dp))
         OutlinedTextField(
             value = state.username,
@@ -173,23 +181,91 @@ private fun RecoverForm(
         SegmentedButton(
             selected = state.mode == RecoverMode.Phrase,
             onClick = { onModeChange(RecoverMode.Phrase) },
-            shape = SegmentedButtonDefaults.itemShape(index = 0, count = 3),
+            shape = SegmentedButtonDefaults.itemShape(index = 0, count = 4),
             enabled = !state.busy,
         ) { Text("Phrase") }
         SegmentedButton(
             selected = state.mode == RecoverMode.Shares,
             onClick = { onModeChange(RecoverMode.Shares) },
-            shape = SegmentedButtonDefaults.itemShape(index = 1, count = 3),
+            shape = SegmentedButtonDefaults.itemShape(index = 1, count = 4),
             enabled = !state.busy,
         ) { Text("Shares") }
         SegmentedButton(
             selected = state.mode == RecoverMode.AnotherDevice,
             onClick = { onModeChange(RecoverMode.AnotherDevice) },
-            shape = SegmentedButtonDefaults.itemShape(index = 2, count = 3),
+            shape = SegmentedButtonDefaults.itemShape(index = 2, count = 4),
             enabled = !state.busy,
         ) { Text("Device") }
+        SegmentedButton(
+            selected = state.mode == RecoverMode.Authenticator,
+            onClick = { onModeChange(RecoverMode.Authenticator) },
+            shape = SegmentedButtonDefaults.itemShape(index = 3, count = 4),
+            enabled = !state.busy,
+        ) { Text("Code") }
     }
     Spacer(Modifier.height(16.dp))
+
+    if (state.mode == RecoverMode.Authenticator) {
+        // ADR-0018 factor (c) — recover ACCESS with a 6-digit
+        // authenticator code. Identity then restores via the
+        // post-ACCESS state machine (cached seed -> straight to the
+        // session; otherwise the restore-identity prompt).
+        OutlinedTextField(
+            value = state.username,
+            onValueChange = onUsernameChange,
+            label = { Text("Username") },
+            placeholder = { Text("alice") },
+            singleLine = true,
+            enabled = !state.busy,
+            keyboardOptions = KeyboardOptions(
+                capitalization = KeyboardCapitalization.None,
+                autoCorrect = false,
+                keyboardType = KeyboardType.Ascii,
+                imeAction = ImeAction.Next,
+            ),
+            modifier = Modifier.fillMaxWidth(),
+        )
+        Spacer(Modifier.height(12.dp))
+        OutlinedTextField(
+            value = state.totpCode,
+            onValueChange = onTotpCodeChange,
+            label = { Text("6-digit code") },
+            placeholder = { Text("123456") },
+            singleLine = true,
+            enabled = !state.busy,
+            keyboardOptions = KeyboardOptions(
+                keyboardType = KeyboardType.Number,
+                imeAction = ImeAction.Done,
+            ),
+            modifier = Modifier.fillMaxWidth(),
+        )
+        if (state.error != null) {
+            Spacer(Modifier.height(12.dp))
+            Text(
+                text = state.error,
+                color = MaterialTheme.colorScheme.error,
+                style = MaterialTheme.typography.bodyMedium,
+            )
+        }
+        Spacer(Modifier.height(16.dp))
+        Button(
+            onClick = onSubmitTotp,
+            enabled = !state.busy,
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            if (state.busy) {
+                CircularProgressIndicator(
+                    modifier = Modifier
+                        .height(20.dp)
+                        .width(20.dp),
+                    strokeWidth = 2.dp,
+                    color = MaterialTheme.colorScheme.onPrimary,
+                )
+            } else {
+                Text("Recover with code")
+            }
+        }
+    }
 
     if (state.mode == RecoverMode.AnotherDevice) {
         // ADR-0018 factor (a), path (b) — no-password restore via an
@@ -313,7 +389,10 @@ private fun RecoverForm(
             },
         )
     }
-    if (state.mode != RecoverMode.AnotherDevice) {
+    if (
+        state.mode != RecoverMode.AnotherDevice &&
+        state.mode != RecoverMode.Authenticator
+    ) {
         Spacer(Modifier.height(12.dp))
 
         OutlinedTextField(
