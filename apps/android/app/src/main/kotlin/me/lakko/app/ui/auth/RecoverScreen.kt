@@ -37,6 +37,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import me.lakko.app.auth.ContactKind
 
 /**
  * Compose recover-from-mnemonic screen — mirror of
@@ -103,6 +104,11 @@ public fun RecoverScreen(
             onCompleteFromDeviceRestore = viewModel::completeFromDeviceRestore,
             onTotpCodeChange = viewModel::onTotpCodeChange,
             onSubmitTotp = viewModel::onSubmitTotp,
+            onContactKindChange = viewModel::onContactKindChange,
+            onContactChange = viewModel::onContactChange,
+            onContactCodeChange = viewModel::onContactCodeChange,
+            onSendContactCode = viewModel::onSendContactCode,
+            onSubmitContactCode = viewModel::onSubmitContactCode,
             onNavigateToLogin = onNavigateToLogin,
             onNavigateToSignup = onNavigateToSignup,
         )
@@ -130,6 +136,11 @@ private fun RecoverForm(
         suspend (me.lakko.app.devices.PairingOrchestrator.JoinRecoveryOutcome) -> Unit,
     onTotpCodeChange: (String) -> Unit,
     onSubmitTotp: () -> Unit,
+    onContactKindChange: (Int) -> Unit,
+    onContactChange: (String) -> Unit,
+    onContactCodeChange: (String) -> Unit,
+    onSendContactCode: () -> Unit,
+    onSubmitContactCode: () -> Unit,
     onNavigateToLogin: () -> Unit,
     onNavigateToSignup: () -> Unit,
 ) {
@@ -149,12 +160,13 @@ private fun RecoverForm(
         Spacer(Modifier.height(16.dp))
     } else if (
         state.mode != RecoverMode.AnotherDevice &&
-        state.mode != RecoverMode.Authenticator
+        state.mode != RecoverMode.Authenticator &&
+        state.mode != RecoverMode.Contact
     ) {
         // ADR-0017 — fresh-device recover: no account is cached, so
         // the user types their username to target the recover. (The
-        // AnotherDevice + Authenticator modes render their own
-        // username fields below.)
+        // AnotherDevice + Authenticator + Contact modes render their
+        // own username fields below.)
         Spacer(Modifier.height(12.dp))
         OutlinedTextField(
             value = state.username,
@@ -181,27 +193,33 @@ private fun RecoverForm(
         SegmentedButton(
             selected = state.mode == RecoverMode.Phrase,
             onClick = { onModeChange(RecoverMode.Phrase) },
-            shape = SegmentedButtonDefaults.itemShape(index = 0, count = 4),
+            shape = SegmentedButtonDefaults.itemShape(index = 0, count = 5),
             enabled = !state.busy,
         ) { Text("Phrase") }
         SegmentedButton(
             selected = state.mode == RecoverMode.Shares,
             onClick = { onModeChange(RecoverMode.Shares) },
-            shape = SegmentedButtonDefaults.itemShape(index = 1, count = 4),
+            shape = SegmentedButtonDefaults.itemShape(index = 1, count = 5),
             enabled = !state.busy,
         ) { Text("Shares") }
         SegmentedButton(
             selected = state.mode == RecoverMode.AnotherDevice,
             onClick = { onModeChange(RecoverMode.AnotherDevice) },
-            shape = SegmentedButtonDefaults.itemShape(index = 2, count = 4),
+            shape = SegmentedButtonDefaults.itemShape(index = 2, count = 5),
             enabled = !state.busy,
         ) { Text("Device") }
         SegmentedButton(
             selected = state.mode == RecoverMode.Authenticator,
             onClick = { onModeChange(RecoverMode.Authenticator) },
-            shape = SegmentedButtonDefaults.itemShape(index = 3, count = 4),
+            shape = SegmentedButtonDefaults.itemShape(index = 3, count = 5),
             enabled = !state.busy,
-        ) { Text("Code") }
+        ) { Text("Auth") }
+        SegmentedButton(
+            selected = state.mode == RecoverMode.Contact,
+            onClick = { onModeChange(RecoverMode.Contact) },
+            shape = SegmentedButtonDefaults.itemShape(index = 4, count = 5),
+            enabled = !state.busy,
+        ) { Text("Email/SMS") }
     }
     Spacer(Modifier.height(16.dp))
 
@@ -263,6 +281,159 @@ private fun RecoverForm(
                 )
             } else {
                 Text("Recover with code")
+            }
+        }
+    }
+
+    if (state.mode == RecoverMode.Contact) {
+        // ADR-0018 factor (d) — recover ACCESS with a one-time code
+        // sent to a previously-enrolled phone / email. Two steps:
+        // request (username + kind + contact -> send) then code
+        // (6-digit -> finish). Identity then restores via the
+        // post-ACCESS state machine (cached seed -> straight to the
+        // session; otherwise the restore-identity prompt).
+        OutlinedTextField(
+            value = state.username,
+            onValueChange = onUsernameChange,
+            label = { Text("Username") },
+            placeholder = { Text("alice") },
+            singleLine = true,
+            enabled = !state.busy && state.contactStep == ContactRecoverStep.Request,
+            keyboardOptions = KeyboardOptions(
+                capitalization = KeyboardCapitalization.None,
+                autoCorrect = false,
+                keyboardType = KeyboardType.Ascii,
+                imeAction = ImeAction.Next,
+            ),
+            modifier = Modifier.fillMaxWidth(),
+        )
+        Spacer(Modifier.height(12.dp))
+
+        if (state.contactStep == ContactRecoverStep.Request) {
+            // Kind toggle: Email / SMS.
+            SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+                SegmentedButton(
+                    selected = state.contactKind == ContactKind.EMAIL,
+                    onClick = { onContactKindChange(ContactKind.EMAIL) },
+                    shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2),
+                    enabled = !state.busy,
+                ) { Text("Email") }
+                SegmentedButton(
+                    selected = state.contactKind == ContactKind.PHONE,
+                    onClick = { onContactKindChange(ContactKind.PHONE) },
+                    shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2),
+                    enabled = !state.busy,
+                ) { Text("SMS") }
+            }
+            Spacer(Modifier.height(12.dp))
+            OutlinedTextField(
+                value = state.contact,
+                onValueChange = onContactChange,
+                label = {
+                    Text(
+                        if (state.contactKind == ContactKind.EMAIL) {
+                            "Email address"
+                        } else {
+                            "Phone number"
+                        },
+                    )
+                },
+                placeholder = {
+                    Text(
+                        if (state.contactKind == ContactKind.EMAIL) {
+                            "alice@example.com"
+                        } else {
+                            "+15551234567"
+                        },
+                    )
+                },
+                singleLine = true,
+                enabled = !state.busy,
+                keyboardOptions = KeyboardOptions(
+                    capitalization = KeyboardCapitalization.None,
+                    autoCorrect = false,
+                    keyboardType = if (state.contactKind == ContactKind.EMAIL) {
+                        KeyboardType.Email
+                    } else {
+                        KeyboardType.Phone
+                    },
+                    imeAction = ImeAction.Done,
+                ),
+                modifier = Modifier.fillMaxWidth(),
+            )
+            if (state.error != null) {
+                Spacer(Modifier.height(12.dp))
+                Text(
+                    text = state.error,
+                    color = MaterialTheme.colorScheme.error,
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+            }
+            Spacer(Modifier.height(16.dp))
+            Button(
+                onClick = onSendContactCode,
+                enabled = !state.busy,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                if (state.busy) {
+                    CircularProgressIndicator(
+                        modifier = Modifier
+                            .height(20.dp)
+                            .width(20.dp),
+                        strokeWidth = 2.dp,
+                        color = MaterialTheme.colorScheme.onPrimary,
+                    )
+                } else {
+                    Text("Send code")
+                }
+            }
+        } else {
+            // Code step.
+            Text(
+                text = "Enter the 6-digit code we sent to your " +
+                    if (state.contactKind == ContactKind.EMAIL) "email." else "phone.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(12.dp))
+            OutlinedTextField(
+                value = state.contactCode,
+                onValueChange = onContactCodeChange,
+                label = { Text("6-digit code") },
+                placeholder = { Text("123456") },
+                singleLine = true,
+                enabled = !state.busy,
+                keyboardOptions = KeyboardOptions(
+                    keyboardType = KeyboardType.Number,
+                    imeAction = ImeAction.Done,
+                ),
+                modifier = Modifier.fillMaxWidth(),
+            )
+            if (state.error != null) {
+                Spacer(Modifier.height(12.dp))
+                Text(
+                    text = state.error,
+                    color = MaterialTheme.colorScheme.error,
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+            }
+            Spacer(Modifier.height(16.dp))
+            Button(
+                onClick = onSubmitContactCode,
+                enabled = !state.busy,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                if (state.busy) {
+                    CircularProgressIndicator(
+                        modifier = Modifier
+                            .height(20.dp)
+                            .width(20.dp),
+                        strokeWidth = 2.dp,
+                        color = MaterialTheme.colorScheme.onPrimary,
+                    )
+                } else {
+                    Text("Recover with code")
+                }
             }
         }
     }
@@ -391,7 +562,8 @@ private fun RecoverForm(
     }
     if (
         state.mode != RecoverMode.AnotherDevice &&
-        state.mode != RecoverMode.Authenticator
+        state.mode != RecoverMode.Authenticator &&
+        state.mode != RecoverMode.Contact
     ) {
         Spacer(Modifier.height(12.dp))
 

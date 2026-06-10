@@ -311,3 +311,99 @@ data class TotpRecoverResponse(
     val session_token: String,
     val session_expires_at_ms: Long,
 )
+
+// ----------------------------------------------------------------------------
+// Recovery contact — phone / email OTP (services/auth/src/recovery_contact.rs
+// + otp_sender.rs — ADR-0018 factor (d), one-time-code recovery)
+// ----------------------------------------------------------------------------
+
+/**
+ * Wire-format `kind` discriminator for a recovery contact, matching
+ * the server's `ContactKind::as_db` (`services/auth/src/otp_sender.rs`:
+ * `Email => 1`, `Phone => 2`). These integer values are wire-format
+ * stable — never renumber.
+ *
+ * Mirror of `apps/web/src/auth/wire.ts`'s `ContactKind` const object;
+ * a plain `Int` crosses the wire (kotlinx-serialization encodes it as
+ * a JSON number), so we keep the values as named [Int] constants
+ * rather than an `enum class` (which would serialize by name).
+ */
+public object ContactKind {
+    /** Code delivered over email (SMTP). */
+    public const val EMAIL: Int = 1
+
+    /** Code delivered over SMS. */
+    public const val PHONE: Int = 2
+}
+
+/** `POST /recovery-contact/enroll/start` request body.
+ *  Bearer-authenticated (the already-logged-in account's session
+ *  token rides the `Authorization` header) + PoW. */
+@Serializable
+data class RecoveryContactEnrollStartRequest(
+    val pow: PowProofPayload,
+    /** `1 = email`, `2 = phone` (see [ContactKind]). */
+    val kind: Int,
+    /** The raw phone / email plaintext. Used transiently server-side
+     *  to hash + address the message; never stored, never logged
+     *  (invariant #1). */
+    val contact: String,
+)
+
+/** `POST /recovery-contact/enroll/start` (and `recover/start`)
+ *  response body. Generic "a code was sent" marker — returned
+ *  identically on the confirmed-match and no-match recover paths so
+ *  `recover/start` reveals nothing about account / contact existence. */
+@Serializable
+data class RecoveryContactSentResponse(
+    val sent: Boolean,
+)
+
+/** `POST /recovery-contact/enroll/finish` request body. Bearer-auth,
+ *  NO `pow` — the server does not gate finish. */
+@Serializable
+data class RecoveryContactEnrollFinishRequest(
+    /** `1 = email`, `2 = phone` (see [ContactKind]). */
+    val kind: Int,
+    /** The 6-digit code that was delivered to the contact. */
+    val code: String,
+)
+
+/** `POST /recovery-contact/recover/start` request body. Anonymous
+ *  (the caller lost their device) + PoW. ENUMERATION-SAFE: the server
+ *  returns the same `{ sent: true }` whether or not the contact
+ *  matches a confirmed row. */
+@Serializable
+data class RecoveryContactRecoverStartRequest(
+    val pow: PowProofPayload,
+    /** URL-safe base64 (no pad) of the 16-byte account_id. */
+    val account_id_b64: String,
+    /** `1 = email`, `2 = phone` (see [ContactKind]). */
+    val kind: Int,
+    /** The raw phone / email plaintext. */
+    val contact: String,
+)
+
+/** `POST /recovery-contact/recover/finish` request body. Anonymous
+ *  + PoW. */
+@Serializable
+data class RecoveryContactRecoverFinishRequest(
+    val pow: PowProofPayload,
+    /** URL-safe base64 (no pad) of the 16-byte account_id. */
+    val account_id_b64: String,
+    /** `1 = email`, `2 = phone` (see [ContactKind]). */
+    val kind: Int,
+    /** The 6-digit code that was delivered to the contact. */
+    val code: String,
+)
+
+/** `POST /recovery-contact/recover/finish` response body — the same
+ *  `(account_id, session_token, expiry)` triple every other login
+ *  flow returns. */
+@Serializable
+data class RecoveryContactRecoverFinishResponse(
+    /** URL-safe base64 (no pad) of the 16-byte account id (echoed). */
+    val account_id_b64: String,
+    val session_token: String,
+    val session_expires_at_ms: Long,
+)

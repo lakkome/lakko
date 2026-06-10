@@ -51,9 +51,15 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
+import androidx.compose.ui.text.input.KeyboardCapitalization
 import me.lakko.app.auth.AuthClient
 import me.lakko.app.auth.AuthRepository
 import me.lakko.app.auth.AuthState
+import me.lakko.app.auth.ContactKind
+import me.lakko.app.auth.isPlausibleContact
 import me.lakko.app.devices.DeviceRemoval
 import me.lakko.app.devices.PairingOrchestrator
 import me.lakko.app.devices.WelcomeCourier
@@ -155,6 +161,11 @@ public fun DevicesScreen(
                     onClick = { tab = 3 },
                     text = { Text("Authenticator") },
                 )
+                Tab(
+                    selected = tab == 4,
+                    onClick = { tab = 4 },
+                    text = { Text("Email or phone") },
+                )
             }
 
             when (tab) {
@@ -173,7 +184,10 @@ public fun DevicesScreen(
                     accountIdentitySeed = secrets.accountIdentitySeed,
                     sessionToken = secrets.sessionToken,
                 )
-                else -> TotpEnrollTab(
+                3 -> TotpEnrollTab(
+                    sessionToken = secrets.sessionToken,
+                )
+                else -> ContactEnrollTab(
                     sessionToken = secrets.sessionToken,
                 )
             }
@@ -970,6 +984,291 @@ private fun TotpEnrollTab(sessionToken: String) {
                     style = MaterialTheme.typography.bodySmall,
                 )
                 Button(onClick = { ui = TotpUi.Idle }) { Text("Try again") }
+            }
+        }
+    }
+}
+
+// ---- Email / phone OTP enrollment — ADR-0018 factor (d) ----------
+
+/** UI state machine for [ContactEnrollTab]. */
+private sealed interface ContactUi {
+    /** Collecting the kind + contact; not yet sent. */
+    data class Idle(
+        val kind: Int,
+        val contact: String,
+        val error: String?,
+    ) : ContactUi
+    data object Starting : ContactUi
+    /** A code was sent; collecting the confirm code. The kind +
+     *  contact are carried so the finish targets the exact pair. */
+    data class Confirm(
+        val kind: Int,
+        val contact: String,
+        val code: String,
+        val busy: Boolean,
+        val error: String?,
+    ) : ContactUi
+    data object Done : ContactUi
+    data object AlreadyEnabled : ContactUi
+    data object Unavailable : ContactUi
+    data class Error(val message: String) : ContactUi
+}
+
+/**
+ * Enroll a phone / email as an ACCESS-recovery factor (ADR-0018
+ * factor (d)): `/recovery-contact/enroll/start` sends a 6-digit code
+ * to the contact, `/recovery-contact/enroll/finish` confirms it with
+ * the code. Mirror of the web `ContactEnrollView`.
+ *
+ * There is no server "status" endpoint — the form renders by default
+ * and a 409 from either call flips the card to "already enabled"
+ * (honest lazy state derivation, same as the TOTP tab and web);
+ * a 503 means the factor is disabled server-side.
+ */
+@Composable
+private fun ContactEnrollTab(sessionToken: String) {
+    val scope = rememberCoroutineScope()
+    var ui: ContactUi by remember {
+        mutableStateOf(
+            ContactUi.Idle(kind = ContactKind.EMAIL, contact = "", error = null),
+        )
+    }
+
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Text(
+            "Add a phone or email as a recovery factor. If you lose " +
+                "this device, a one-time code sent to it recovers " +
+                "ACCESS to your account; your identity then restores " +
+                "from the recovery phrase or another device. The server " +
+                "never stores the phone / email in plaintext — only a " +
+                "keyed hash.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+
+        when (val s = ui) {
+            is ContactUi.Idle -> {
+                // Kind toggle: Email / SMS.
+                SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+                    SegmentedButton(
+                        selected = s.kind == ContactKind.EMAIL,
+                        onClick = { ui = s.copy(kind = ContactKind.EMAIL, error = null) },
+                        shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2),
+                    ) { Text("Email") }
+                    SegmentedButton(
+                        selected = s.kind == ContactKind.PHONE,
+                        onClick = { ui = s.copy(kind = ContactKind.PHONE, error = null) },
+                        shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2),
+                    ) { Text("SMS") }
+                }
+                OutlinedTextField(
+                    value = s.contact,
+                    onValueChange = { v -> ui = s.copy(contact = v, error = null) },
+                    label = {
+                        Text(
+                            if (s.kind == ContactKind.EMAIL) {
+                                "Email address"
+                            } else {
+                                "Phone number"
+                            },
+                        )
+                    },
+                    placeholder = {
+                        Text(
+                            if (s.kind == ContactKind.EMAIL) {
+                                "alice@example.com"
+                            } else {
+                                "+15551234567"
+                            },
+                        )
+                    },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(
+                        capitalization = KeyboardCapitalization.None,
+                        autoCorrect = false,
+                        keyboardType = if (s.kind == ContactKind.EMAIL) {
+                            KeyboardType.Email
+                        } else {
+                            KeyboardType.Phone
+                        },
+                        imeAction = ImeAction.Done,
+                    ),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                if (s.error != null) {
+                    Text(
+                        s.error,
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+                Button(
+                    onClick = {
+                        // Light client-side shape check — saves a PoW
+                        // solve on an obviously-malformed contact. The
+                        // server is authoritative.
+                        if (!isPlausibleContact(s.kind, s.contact)) {
+                            ui = s.copy(
+                                error = if (s.kind == ContactKind.EMAIL) {
+                                    "Enter a valid email address."
+                                } else {
+                                    "Enter a phone number in international " +
+                                        "format (e.g. +15551234567)."
+                                },
+                            )
+                            return@Button
+                        }
+                        val kind = s.kind
+                        val contact = s.contact
+                        ui = ContactUi.Starting
+                        scope.launch {
+                            ui = try {
+                                AuthClient().use { client ->
+                                    client.recoveryContactEnrollStart(
+                                        sessionToken,
+                                        kind,
+                                        contact,
+                                    )
+                                }
+                                ContactUi.Confirm(
+                                    kind = kind,
+                                    contact = contact,
+                                    code = "",
+                                    busy = false,
+                                    error = null,
+                                )
+                            } catch (err: me.lakko.app.auth.AuthHttpError) {
+                                when (err.status) {
+                                    409 -> ContactUi.AlreadyEnabled
+                                    503 -> ContactUi.Unavailable
+                                    400 -> ContactUi.Idle(
+                                        kind = kind,
+                                        contact = contact,
+                                        error = "That contact looks malformed. " +
+                                            "Check it and retry.",
+                                    )
+                                    else -> ContactUi.Error(
+                                        err.message
+                                            ?: "Enrollment failed (${err.status}).",
+                                    )
+                                }
+                            } catch (err: Throwable) {
+                                ContactUi.Error(err.message ?: "Enrollment failed")
+                            }
+                        }
+                    },
+                ) { Text("Send code") }
+            }
+
+            ContactUi.Starting -> CircularProgressIndicator()
+
+            is ContactUi.Confirm -> {
+                Text(
+                    "Enter the 6-digit code we sent to " +
+                        (if (s.kind == ContactKind.EMAIL) "your email." else "your phone.") +
+                        " to confirm.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                OutlinedTextField(
+                    value = s.code,
+                    onValueChange = { v -> ui = s.copy(code = v, error = null) },
+                    label = { Text("6-digit code") },
+                    placeholder = { Text("123456") },
+                    singleLine = true,
+                    enabled = !s.busy,
+                    keyboardOptions = KeyboardOptions(
+                        keyboardType = KeyboardType.Number,
+                        imeAction = ImeAction.Done,
+                    ),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                if (s.error != null) {
+                    Text(
+                        s.error,
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+                Button(
+                    onClick = {
+                        val normalized = me.lakko.app.auth.normalizeTotpCode(s.code)
+                        if (normalized == null) {
+                            ui = s.copy(error = "Enter the 6-digit code we sent.")
+                            return@Button
+                        }
+                        ui = s.copy(busy = true, error = null)
+                        scope.launch {
+                            ui = try {
+                                AuthClient().use { client ->
+                                    client.recoveryContactEnrollFinish(
+                                        sessionToken,
+                                        s.kind,
+                                        normalized,
+                                    )
+                                }
+                                ContactUi.Done
+                            } catch (err: me.lakko.app.auth.AuthHttpError) {
+                                when (err.status) {
+                                    401 -> s.copy(
+                                        busy = false,
+                                        error = "Wrong or expired code — check " +
+                                            "the code we sent and try again.",
+                                    )
+                                    409 -> ContactUi.AlreadyEnabled
+                                    else -> ContactUi.Error(
+                                        err.message
+                                            ?: "Confirmation failed (${err.status}).",
+                                    )
+                                }
+                            } catch (err: Throwable) {
+                                ContactUi.Error(err.message ?: "Confirmation failed")
+                            }
+                        }
+                    },
+                    enabled = !s.busy,
+                ) { Text(if (s.busy) "Confirming…" else "Confirm") }
+            }
+
+            ContactUi.Done -> Text(
+                "Recovery contact enabled. A one-time code can now " +
+                    "recover access to this account.",
+                color = Color(0xFF1B5E20),
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.SemiBold,
+            )
+
+            ContactUi.AlreadyEnabled -> Text(
+                "A recovery contact is already enabled on this account.",
+                style = MaterialTheme.typography.bodyMedium,
+            )
+
+            ContactUi.Unavailable -> Text(
+                "Email / phone recovery is not available on this server.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.error,
+            )
+
+            is ContactUi.Error -> Column(
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Text(
+                    s.message,
+                    color = MaterialTheme.colorScheme.error,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                Button(
+                    onClick = {
+                        ui = ContactUi.Idle(
+                            kind = ContactKind.EMAIL,
+                            contact = "",
+                            error = null,
+                        )
+                    },
+                ) { Text("Try again") }
             }
         }
     }

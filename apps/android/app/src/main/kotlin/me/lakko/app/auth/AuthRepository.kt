@@ -128,6 +128,18 @@ public class AuthRepository(
     private val pendingRecovery: AtomicReference<PendingRecovery?> =
         AtomicReference(null)
 
+    /**
+     * ADR-0018 factor (d) — between [recoverWithContactStart] (which
+     * sends the one-time code) and [recoverWithContactFinish] (which
+     * submits it), we stash the resolved `(accountId, username, kind)`
+     * here so the finish step targets the exact `(account, kind)` the
+     * code was sent for without re-resolving the username. Cleared on
+     * a successful finish (the code is single-use server-side; a retry
+     * must re-send). Single-slot — only one recovery flow at a time.
+     */
+    private val pendingContactRecover: AtomicReference<PendingContactRecover?> =
+        AtomicReference(null)
+
     init {
         // Rehydrate synchronously — both reads are tiny and SharedPreferences
         // is on-disk-but-process-cached. If we ever switch to DataStore
@@ -912,18 +924,181 @@ public class AuthRepository(
             client.totpRecover(accountIdBytes, code)
         }
 
+        // Shared ADR-0018 ACCESS-only landing (warm cached-seed finish
+        // OR cold fail-safe park) — identical to the cascade's other
+        // ACCESS factor (factor (d) phone/email OTP).
+        landAfterAccessRecovery(
+            username = resolvedUsername,
+            accountIdBytes = accountIdBytes,
+            accountIdB64 = accountIdB64,
+            sessionToken = result.sessionToken,
+            sessionExpiresAtMs = result.sessionExpiresAtMs,
+            pushContext = "totp-recover",
+        )
+    }
+
+    /**
+     * ADR-0018 factor (d), step 1 — send a one-time code to a
+     * previously-enrolled phone / email. Mirror of
+     * `apps/web/src/auth/AuthContext.tsx::recoverWithContactStart`.
+     *
+     * ACCESS only: [recoverWithContactFinish] verifies the code and
+     * issues the session triple; identity acquisition runs the
+     * ADR-0017 state machine afterward.
+     *
+     * ENUMERATION-SAFE: the server returns the same `{ sent: true }`
+     * whether or not the contact matches a confirmed row, so a
+     * non-throwing return here only means "advance to the code step".
+     * The resolved `(accountId, username, kind)` is stashed for the
+     * finish step.
+     *
+     * @param kind     [ContactKind.EMAIL] (1) or [ContactKind.PHONE] (2).
+     * @param contact  The raw phone / email plaintext.
+     * @throws AuthClientArgError on a blank / unknown username or a
+     *         malformed contact.
+     * @throws AuthHttpError 503 when the factor is disabled
+     *         server-side, 400 on a malformed contact.
+     * @throws AuthNetworkError on transport failure.
+     */
+    public suspend fun recoverWithContactStart(
+        username: String,
+        kind: Int,
+        contact: String,
+    ) {
+        val trimmed = username.trim()
+        if (trimmed.isEmpty()) {
+            throw AuthClientArgError(
+                "enter the username of the account to recover",
+            )
+        }
+        // Resolve the username -> account_id exactly like
+        // [recoverWithTotp]: a local cache hit wins, else a
+        // discovery.lookup round-trip binds it.
+        val cached = sessionStore.load()
+        val accountIdBytes: ByteArray
+        val resolvedUsername: String
+        if (cached != null && cached.username == trimmed) {
+            accountIdBytes = base64Decode(cached.accountIdB64)
+            resolvedUsername = cached.username
+        } else {
+            val lookup = discoveryClientFactory().use { it.lookup(trimmed) }
+            val account = lookup.account
+                ?: throw AuthClientArgError("username not found")
+            accountIdBytes = account
+            resolvedUsername = lookup.normalisedUsername
+        }
+
+        // Send the code. ENUMERATION-SAFE server-side: a non-throwing
+        // return only means "advance to the code step".
+        authClientFactory().use { client ->
+            client.recoveryContactRecoverStart(accountIdBytes, kind, contact)
+        }
+
+        // Stash the resolved context so [recoverWithContactFinish] can
+        // submit the code without re-resolving. The kind is carried
+        // verbatim so the finish targets the exact (account, kind) the
+        // code was sent for.
+        pendingContactRecover.set(
+            PendingContactRecover(
+                accountIdBytes = accountIdBytes,
+                accountIdB64 = base64Encode(accountIdBytes),
+                username = resolvedUsername,
+                kind = kind,
+            ),
+        )
+    }
+
+    /**
+     * ADR-0018 factor (d), step 2 — submit the delivered code. Mirror
+     * of `apps/web/src/auth/AuthContext.tsx::recoverWithContactFinish`.
+     *
+     * Uses the `(accountId, username, kind)` stashed by
+     * [recoverWithContactStart]. On success the session triple drives
+     * the shared [landAfterAccessRecovery] (warm same-device finish OR
+     * cold fail-safe park), and the stash is consumed (the code is
+     * single-use server-side; a retry must re-send via step 1).
+     *
+     * @throws AuthClientArgError when no code was requested first, or a
+     *         malformed code.
+     * @throws AuthHttpError 401 on a wrong/expired/replayed code
+     *         (enumeration-safe), 429 under lockout, 503 when disabled.
+     * @throws AuthNetworkError on transport failure.
+     */
+    public suspend fun recoverWithContactFinish(code: String) {
+        val pending = pendingContactRecover.get()
+            ?: throw AuthClientArgError(
+                "request a code first (no pending phone / email recovery)",
+            )
+        val result = authClientFactory().use { client ->
+            client.recoveryContactRecoverFinish(
+                pending.accountIdBytes,
+                pending.kind,
+                code,
+            )
+        }
+        // Consume the stash — the code is single-use server-side.
+        pendingContactRecover.set(null)
+        // Shared ADR-0018 ACCESS-only landing — identical to the
+        // cascade's other ACCESS factor (factor (c) TOTP).
+        landAfterAccessRecovery(
+            username = pending.username,
+            accountIdBytes = pending.accountIdBytes,
+            accountIdB64 = pending.accountIdB64,
+            sessionToken = result.sessionToken,
+            sessionExpiresAtMs = result.sessionExpiresAtMs,
+            pushContext = "contact-recover",
+        )
+    }
+
+    /**
+     * ADR-0018 — the shared post-ACCESS landing for the password-less
+     * recovery factors (factor (c) TOTP, factor (d) phone/email OTP).
+     * Mirror of `apps/web/src/auth/AuthContext.tsx::landAfterAccessRecovery`.
+     *
+     * Extracted verbatim from the original [recoverWithTotp] tail — the
+     * warm / cold branches are byte-for-byte the prior behavior:
+     *
+     *   * persist the account marker (important on a fresh device);
+     *   * **WARM same-device case** — a cached AccountIdentity (phrase)
+     *     seed exists: bootstrap the [DeviceKeyStore] existence-gate
+     *     from it ([bootstrapDeviceKeyFromSeedBestEffort], no password
+     *     => no exportKey-derived key), build the live [IdentitySecrets]
+     *     (exportKey EMPTY — these factors carry no password), clear any
+     *     pending recovery, flip to [AuthState.Session];
+     *   * **COLD fresh-device case** — no cached seed: park a
+     *     [PendingRecovery] (exportKey EMPTY) and flip to
+     *     [AuthState.NeedsRecoveryPhrase], where [provideRecoveryPhrase]
+     *     / [completeFromPairing] complete the identity restore.
+     *
+     * Always issues a best-effort push subscribe (the ACCESS factor
+     * succeeded; same posture as login / passkey), tagged with
+     * [pushContext].
+     *
+     * FAIL-CLOSED note: the warm branch only fires for a seed read back
+     * from THIS device's own [AccountIdentitySeedStore] (already
+     * trusted), never a freshly-supplied one — so verify-before-persist
+     * stays untouched.
+     */
+    private fun landAfterAccessRecovery(
+        username: String,
+        accountIdBytes: ByteArray,
+        accountIdB64: String,
+        sessionToken: String,
+        sessionExpiresAtMs: Long,
+        pushContext: String,
+    ) {
         // Persist the account marker — important on a fresh device
         // where no row existed (idempotent upsert otherwise).
         sessionStore.save(
             PersistedSession(
                 accountIdB64 = accountIdB64,
-                username = resolvedUsername,
+                username = username,
             ),
         )
 
-        // ADR-0017 identity acquisition. TOTP carried NO password, so
-        // the ONLY same-device shortcut is a cached AccountIdentity
-        // (phrase) seed.
+        // ADR-0017 identity acquisition. These factors carried NO
+        // password, so the ONLY same-device shortcut is a cached
+        // AccountIdentity (phrase) seed.
         val accountIdentitySeed: ByteArray? = try {
             AccountIdentitySeedStore.getAccountIdentitySeed(
                 applicationContext,
@@ -935,7 +1110,7 @@ public class AuthRepository(
             // branch.
             Log.w(
                 "lakko-auth",
-                "account-identity-seed read failed (totp recover)",
+                "account-identity-seed read failed (access recover)",
                 cause,
             )
             null
@@ -949,25 +1124,25 @@ public class AuthRepository(
             bootstrapDeviceKeyFromSeedBestEffort(
                 accountIdB64 = accountIdB64,
                 accountIdentitySeed = accountIdentitySeed,
-                context = "totp recover",
+                context = "access recover",
             )
             mutableIdentitySecrets.value = IdentitySecrets(
                 accountId = accountIdBytes,
                 exportKey = ByteArray(0),
                 accountIdentitySeed = accountIdentitySeed,
-                sessionToken = result.sessionToken,
-                sessionExpiresAtMs = result.sessionExpiresAtMs,
+                sessionToken = sessionToken,
+                sessionExpiresAtMs = sessionExpiresAtMs,
             )
             pendingRecovery.set(null)
             mutableState.value = AuthState.Session(
                 account = SessionAccount(
                     accountIdB64 = accountIdB64,
-                    username = resolvedUsername,
+                    username = username,
                 ),
             )
             // 1.20d — best-effort push subscribe (the ACCESS factor
             // succeeded; same posture as login / passkey).
-            subscribePushBestEffort("totp-recover")
+            subscribePushBestEffort(pushContext)
             return
         }
 
@@ -981,18 +1156,18 @@ public class AuthRepository(
                 accountIdBytes = accountIdBytes,
                 accountIdB64 = accountIdB64,
                 exportKey = ByteArray(0),
-                sessionToken = result.sessionToken,
-                sessionExpiresAtMs = result.sessionExpiresAtMs,
-                username = resolvedUsername,
+                sessionToken = sessionToken,
+                sessionExpiresAtMs = sessionExpiresAtMs,
+                username = username,
             ),
         )
         mutableState.value = AuthState.NeedsRecoveryPhrase(
             account = SessionAccount(
                 accountIdB64 = accountIdB64,
-                username = resolvedUsername,
+                username = username,
             ),
         )
-        subscribePushBestEffort("totp-recover")
+        subscribePushBestEffort(pushContext)
     }
 
     /**
@@ -1983,12 +2158,15 @@ public class AuthRepository(
     /** ADR-0017 — drop any parked fresh-device fail-safe context,
      *  wiping the export-key copy it retained. Called from
      *  [logout] / [forgetDevice] so a backed-out NeedsRecoveryPhrase
-     *  user leaves no secret material behind. */
+     *  user leaves no secret material behind. Also drops any pending
+     *  ADR-0018 phone/email recovery routing context (no secrets, but
+     *  it should not survive a sign-out). */
     private fun clearPendingRecovery() {
         pendingRecovery.getAndSet(null)?.let { pending ->
             pending.exportKey.fill(0)
             pending.accountIdBytes.fill(0)
         }
+        pendingContactRecover.set(null)
     }
 }
 
@@ -2147,6 +2325,40 @@ internal data class PendingRecovery(
         h = 31 * h + sessionToken.hashCode()
         h = 31 * h + sessionExpiresAtMs.hashCode()
         h = 31 * h + username.hashCode()
+        return h
+    }
+}
+
+/**
+ * ADR-0018 factor (d) — the resolved `(accountId, username, kind)`
+ * stashed between [AuthRepository.recoverWithContactStart] (which
+ * sends the one-time code) and [AuthRepository.recoverWithContactFinish]
+ * (which submits it). Carries NO secret material — just the routing
+ * context for the finish call.
+ *
+ * Mirror of the web `AuthContext`'s `pendingContactRecover` signal.
+ */
+internal data class PendingContactRecover(
+    val accountIdBytes: ByteArray,
+    val accountIdB64: String,
+    val username: String,
+    /** [ContactKind.EMAIL] (1) or [ContactKind.PHONE] (2). */
+    val kind: Int,
+) {
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (other !is PendingContactRecover) return false
+        return accountIdBytes.contentEquals(other.accountIdBytes) &&
+            accountIdB64 == other.accountIdB64 &&
+            username == other.username &&
+            kind == other.kind
+    }
+
+    override fun hashCode(): Int {
+        var h = accountIdBytes.contentHashCode()
+        h = 31 * h + accountIdB64.hashCode()
+        h = 31 * h + username.hashCode()
+        h = 31 * h + kind
         return h
     }
 }

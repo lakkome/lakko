@@ -349,6 +349,165 @@ public class AuthClient(
     }
 
     // -----------------------------------------------------------------
+    // Recovery contact — ADR-0018 factor (d), phone / email OTP
+    // recovery
+    // -----------------------------------------------------------------
+
+    /**
+     * `POST /recovery-contact/enroll/start` — store a phone / email
+     * and send a 6-digit confirmation code (ADR-0018 factor (d),
+     * enrollment step 1). Mirror of the web
+     * `AuthClient.recoveryContactEnrollStart`.
+     *
+     * Bearer-authenticated (the already-logged-in account's session
+     * token rides the `Authorization` header) + PoW. The enrollment
+     * only becomes usable for recovery after [recoveryContactEnrollFinish]
+     * confirms the code.
+     *
+     * A 503 [AuthHttpError] means the server has the factor disabled
+     * (`LAKKO_RECOVERY_CONTACT_PEPPER` unset); a 400 means the contact
+     * is malformed per the server's normalization.
+     *
+     * @param kind     [ContactKind.EMAIL] (1) or [ContactKind.PHONE] (2).
+     * @param contact  The raw phone / email plaintext; trimmed before
+     *                 send. Used transiently server-side to hash +
+     *                 address the message; never stored (invariant #1).
+     */
+    public suspend fun recoveryContactEnrollStart(
+        sessionToken: String,
+        kind: Int,
+        contact: String,
+    ) {
+        if (sessionToken.isEmpty()) {
+            throw AuthClientArgError("sessionToken must be non-empty")
+        }
+        if (contact.trim().isEmpty()) {
+            throw AuthClientArgError("contact must be non-empty")
+        }
+        val challenge = powChallenge()
+        val pow = solvePow(challenge.seed, challenge.effort_bits, powDispatcher)
+        // The body is `{"sent": true}` — a typed response keeps the
+        // post helper's non-null contract; the caller ignores it (the
+        // enroll path has no enumeration concern).
+        post<RecoveryContactEnrollStartRequest, RecoveryContactSentResponse>(
+            "/recovery-contact/enroll/start",
+            RecoveryContactEnrollStartRequest(
+                pow = pow,
+                kind = kind,
+                contact = contact.trim(),
+            ),
+            bearer = sessionToken,
+        )
+    }
+
+    /**
+     * `POST /recovery-contact/enroll/finish` — confirm the contact
+     * with the code that was delivered (ADR-0018 factor (d),
+     * enrollment step 2). Mirror of the web
+     * `AuthClient.recoveryContactEnrollFinish`.
+     *
+     * Bearer-authenticated, NO PoW — the server does not gate finish.
+     * A 401 [AuthHttpError] means the code did not verify (wrong /
+     * expired / replayed); the user can retry by re-sending a code.
+     */
+    public suspend fun recoveryContactEnrollFinish(
+        sessionToken: String,
+        kind: Int,
+        code: String,
+    ) {
+        if (sessionToken.isEmpty()) {
+            throw AuthClientArgError("sessionToken must be non-empty")
+        }
+        val normalized = normalizeTotpCode(code)
+            ?: throw AuthClientArgError("code must be 6 digits")
+        post<RecoveryContactEnrollFinishRequest, JsonObject>(
+            "/recovery-contact/enroll/finish",
+            RecoveryContactEnrollFinishRequest(kind = kind, code = normalized),
+            bearer = sessionToken,
+        )
+    }
+
+    /**
+     * `POST /recovery-contact/recover/start` — request a fresh
+     * recovery code be sent to a previously-confirmed contact
+     * (ADR-0018 factor (d), recovery step 1). Mirror of the web
+     * `AuthClient.recoveryContactRecoverStart`.
+     *
+     * Anonymous (the caller lost their device) + PoW. The server is
+     * ENUMERATION-SAFE by design: it returns the same `{ sent: true }`
+     * whether or not the supplied contact matches a confirmed row, so
+     * a non-throwing return here reveals nothing about account /
+     * contact existence — it just means "advance to the code step".
+     * A 503 means the factor is disabled server-side; a 400 means a
+     * malformed contact.
+     */
+    public suspend fun recoveryContactRecoverStart(
+        accountId: ByteArray,
+        kind: Int,
+        contact: String,
+    ) {
+        if (accountId.size != ACCOUNT_ID_LEN) {
+            throw AuthClientArgError("accountId must be $ACCOUNT_ID_LEN bytes")
+        }
+        if (contact.trim().isEmpty()) {
+            throw AuthClientArgError("contact must be non-empty")
+        }
+        val challenge = powChallenge()
+        val pow = solvePow(challenge.seed, challenge.effort_bits, powDispatcher)
+        post<RecoveryContactRecoverStartRequest, RecoveryContactSentResponse>(
+            "/recovery-contact/recover/start",
+            RecoveryContactRecoverStartRequest(
+                pow = pow,
+                account_id_b64 = base64UrlEncodeNoPad(accountId),
+                kind = kind,
+                contact = contact.trim(),
+            ),
+        )
+    }
+
+    /**
+     * `POST /recovery-contact/recover/finish` — recover ACCESS with
+     * the code that was delivered (ADR-0018 factor (d), recovery
+     * step 2). Mirror of the web `AuthClient.recoveryContactRecoverFinish`.
+     *
+     * Anonymous + PoW. Enumeration-safe: unknown account, no live
+     * challenge, wrong code and replayed code all surface the SAME
+     * generic 401 [AuthHttpError]; 429 signals the attempt-cap
+     * lockout; 503 means the factor is disabled server-side.
+     *
+     * Grants ACCESS only — the result carries no key material.
+     * Identity acquisition is the caller's job (ADR-0017 state
+     * machine in [AuthRepository.recoverWithContactFinish]).
+     */
+    public suspend fun recoveryContactRecoverFinish(
+        accountId: ByteArray,
+        kind: Int,
+        code: String,
+    ): RecoveryContactRecoverResult {
+        if (accountId.size != ACCOUNT_ID_LEN) {
+            throw AuthClientArgError("accountId must be $ACCOUNT_ID_LEN bytes")
+        }
+        val normalized = normalizeTotpCode(code)
+            ?: throw AuthClientArgError("code must be 6 digits")
+        val challenge = powChallenge()
+        val pow = solvePow(challenge.seed, challenge.effort_bits, powDispatcher)
+        val resp: RecoveryContactRecoverFinishResponse = post(
+            "/recovery-contact/recover/finish",
+            RecoveryContactRecoverFinishRequest(
+                pow = pow,
+                account_id_b64 = base64UrlEncodeNoPad(accountId),
+                kind = kind,
+                code = normalized,
+            ),
+        )
+        return RecoveryContactRecoverResult(
+            accountId = base64UrlDecodeNoPad(resp.account_id_b64),
+            sessionToken = resp.session_token,
+            sessionExpiresAtMs = resp.session_expires_at_ms,
+        )
+    }
+
+    // -----------------------------------------------------------------
     // High-level: full signup / login / recover flows
     // -----------------------------------------------------------------
 
@@ -923,6 +1082,31 @@ public data class TotpRecoverResult(
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
         if (other !is TotpRecoverResult) return false
+        return accountId.contentEquals(other.accountId) &&
+            sessionToken == other.sessionToken &&
+            sessionExpiresAtMs == other.sessionExpiresAtMs
+    }
+
+    override fun hashCode(): Int {
+        var result = accountId.contentHashCode()
+        result = 31 * result + sessionToken.hashCode()
+        result = 31 * result + sessionExpiresAtMs.hashCode()
+        return result
+    }
+}
+
+/** Result of [AuthClient.recoveryContactRecoverFinish] — the same
+ *  `(account_id, session_token, expiry)` triple every other login
+ *  flow returns (ADR-0018 factor (d)). No exportKey: this path has
+ *  no password, so no OPAQUE export key exists on this device. */
+public data class RecoveryContactRecoverResult(
+    val accountId: ByteArray,
+    val sessionToken: String,
+    val sessionExpiresAtMs: Long,
+) {
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (other !is RecoveryContactRecoverResult) return false
         return accountId.contentEquals(other.accountId) &&
             sessionToken == other.sessionToken &&
             sessionExpiresAtMs == other.sessionExpiresAtMs

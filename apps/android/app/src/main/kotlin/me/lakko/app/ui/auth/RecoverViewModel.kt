@@ -14,6 +14,8 @@ import me.lakko.app.auth.AuthClientArgError
 import me.lakko.app.auth.AuthHttpError
 import me.lakko.app.auth.AuthNetworkError
 import me.lakko.app.auth.AuthRepository
+import me.lakko.app.auth.ContactKind
+import me.lakko.app.auth.isPlausibleContact
 import me.lakko.app.auth.normalizeTotpCode
 import me.lakko.app.recovery.ShamirBridge
 import me.lakko.app.recovery.ShamirBridgeException
@@ -73,6 +75,22 @@ public class RecoverViewModel(
         mutableState.update { it.copy(totpCode = value) }
     }
 
+    /** ADR-0018 factor (d) — Email / SMS toggle for the Contact mode.
+     *  Clears the error so a kind switch starts clean. */
+    public fun onContactKindChange(kind: Int) {
+        mutableState.update { it.copy(contactKind = kind, error = null) }
+    }
+
+    /** ADR-0018 factor (d) — phone / email field for the Contact mode. */
+    public fun onContactChange(value: String) {
+        mutableState.update { it.copy(contact = value) }
+    }
+
+    /** ADR-0018 factor (d) — 6-digit delivered-code field. */
+    public fun onContactCodeChange(value: String) {
+        mutableState.update { it.copy(contactCode = value) }
+    }
+
     /** 1.21c3 — toggle between Phrase and Shares input modes
      *  (ADR-0018: + AnotherDevice). Clears the resolved restore
      *  target when leaving the AnotherDevice mode. */
@@ -85,6 +103,15 @@ public class RecoverViewModel(
                     it.deviceRestoreTarget
                 } else {
                     null
+                },
+                // ADR-0018 factor (d): leaving the Contact mode resets
+                // its two-step state so a re-entry starts at the
+                // request step (a stale "code" step would otherwise
+                // dangle with no pending challenge).
+                contactStep = if (mode == RecoverMode.Contact) {
+                    it.contactStep
+                } else {
+                    ContactRecoverStep.Request
                 },
             )
         }
@@ -277,6 +304,15 @@ public class RecoverViewModel(
                 }
                 return
             }
+            RecoverMode.Contact -> {
+                // ADR-0018 factor (d) — the Contact mode submits via
+                // [onSendContactCode] / [onSubmitContactCode] (no new
+                // password is set on that path). Defensive no-op.
+                mutableState.update {
+                    it.copy(error = "Use the email / SMS code form.")
+                }
+                return
+            }
         }
 
         mutableState.update { it.copy(busy = true, error = null) }
@@ -405,6 +441,147 @@ public class RecoverViewModel(
         }
     }
 
+    /**
+     * ADR-0018 factor (d), step 1 — send a one-time code to a
+     * previously-enrolled phone / email. Username (cached account
+     * wins, else the typed field) + the chosen kind + contact.
+     * [AuthRepository.recoverWithContactStart] is ENUMERATION-SAFE:
+     * it returns the same result whether or not the contact matches a
+     * confirmed row, so on success we ALWAYS advance to the code step.
+     */
+    public fun onSendContactCode() {
+        val snapshot = mutableState.value
+        if (snapshot.busy) return  // ignore double-tap
+
+        val user = (cachedUsername ?: snapshot.username).trim()
+        if (user.isEmpty()) {
+            mutableState.update {
+                it.copy(error = "Enter the username of the account to recover.")
+            }
+            return
+        }
+        // Light client-side shape check — saves a PoW solve on an
+        // obviously-malformed contact. The server is authoritative.
+        if (!isPlausibleContact(snapshot.contactKind, snapshot.contact)) {
+            mutableState.update {
+                it.copy(
+                    error = if (snapshot.contactKind == ContactKind.EMAIL) {
+                        "Enter a valid email address."
+                    } else {
+                        "Enter a phone number in international format " +
+                            "(e.g. +15551234567)."
+                    },
+                )
+            }
+            return
+        }
+
+        mutableState.update { it.copy(busy = true, error = null) }
+        viewModelScope.launch {
+            try {
+                repo.recoverWithContactStart(
+                    user,
+                    snapshot.contactKind,
+                    snapshot.contact,
+                )
+                // Enumeration-safe: advance regardless of whether the
+                // contact matched — the server reveals nothing either
+                // way.
+                mutableState.update {
+                    it.copy(
+                        busy = false,
+                        error = null,
+                        contactStep = ContactRecoverStep.Code,
+                        contactCode = "",
+                    )
+                }
+            } catch (err: AuthClientArgError) {
+                mutableState.update {
+                    it.copy(busy = false, error = err.message ?: "Invalid input.")
+                }
+            } catch (err: AuthHttpError) {
+                mutableState.update {
+                    it.copy(busy = false, error = contactUserFacingHttpError(err))
+                }
+            } catch (_: AuthNetworkError) {
+                mutableState.update {
+                    it.copy(
+                        busy = false,
+                        error = "Network error. Check your connection and try again.",
+                    )
+                }
+            } catch (err: Throwable) {
+                mutableState.update {
+                    it.copy(busy = false, error = err.message ?: "Recovery failed.")
+                }
+            }
+        }
+    }
+
+    /**
+     * ADR-0018 factor (d), step 2 — submit the delivered code.
+     * [AuthRepository.recoverWithContactFinish] drives the state flip
+     * (Session on the warm same-device path, NeedsRecoveryPhrase on a
+     * fresh device) and MainActivity routes automatically.
+     */
+    public fun onSubmitContactCode() {
+        val snapshot = mutableState.value
+        if (snapshot.busy) return  // ignore double-tap
+
+        val normalized = normalizeTotpCode(snapshot.contactCode)
+        if (normalized == null) {
+            mutableState.update {
+                it.copy(error = "Enter the 6-digit code we sent.")
+            }
+            return
+        }
+
+        mutableState.update { it.copy(busy = true, error = null) }
+        viewModelScope.launch {
+            try {
+                repo.recoverWithContactFinish(normalized)
+                // The repository flipped the auth state; wipe the form
+                // buffers before the router replaces this screen.
+                mutableState.update {
+                    it.copy(busy = false, error = null, contactCode = "")
+                }
+            } catch (err: AuthClientArgError) {
+                mutableState.update {
+                    it.copy(busy = false, error = err.message ?: "Invalid input.")
+                }
+            } catch (err: AuthHttpError) {
+                mutableState.update {
+                    it.copy(busy = false, error = contactUserFacingHttpError(err))
+                }
+            } catch (_: AuthNetworkError) {
+                mutableState.update {
+                    it.copy(
+                        busy = false,
+                        error = "Network error. Check your connection and try again.",
+                    )
+                }
+            } catch (err: Throwable) {
+                mutableState.update {
+                    it.copy(busy = false, error = err.message ?: "Recovery failed.")
+                }
+            }
+        }
+    }
+
+    /** Map a phone/email-OTP recovery failure onto a friendly inline
+     *  message. The server is enumeration-safe: 401 covers unknown-
+     *  account / no-live-challenge / wrong-code / replayed-code
+     *  uniformly (mirror of the web `contactRecoverErrorMessage`). */
+    private fun contactUserFacingHttpError(err: AuthHttpError): String =
+        when (err.status) {
+            401 -> "Wrong or expired code."
+            429 -> "Too many attempts — wait, then request a fresh code."
+            503 -> "Email / SMS recovery is not available on this server."
+            400 -> "That contact looks malformed. Check it and try again."
+            in 500..599 -> "Server error. Please try again shortly."
+            else -> err.message ?: "Recovery failed (${err.status})."
+        }
+
     /** Map a `recoverWithTotp` failure onto a friendly inline message.
      *  The server is enumeration-safe: 401 covers unknown-account /
      *  unconfirmed-enrollment / wrong-code / replayed-code uniformly
@@ -441,9 +618,16 @@ public class RecoverViewModel(
 
 /** 1.21c3 — which input mode the user is filling. ADR-0018 adds
  *  [AnotherDevice]: restore via an already-linked device (no
- *  password, no phrase typing) and [Authenticator]: recover ACCESS
- *  with a 6-digit RFC 6238 code (factor (c)). */
-public enum class RecoverMode { Phrase, Shares, AnotherDevice, Authenticator }
+ *  password, no phrase typing); [Authenticator]: recover ACCESS with
+ *  a 6-digit RFC 6238 code (factor (c)); and [Contact]: recover
+ *  ACCESS with a one-time code sent to a previously-enrolled phone /
+ *  email (factor (d)). */
+public enum class RecoverMode { Phrase, Shares, AnotherDevice, Authenticator, Contact }
+
+/** ADR-0018 factor (d) — the two steps of the phone/email recovery
+ *  flow. [Request] collects the username + contact and sends a code;
+ *  [Code] collects the 6-digit code and finishes. */
+public enum class ContactRecoverStep { Request, Code }
 
 /** ADR-0018 factor (a), path (b) — the resolved restore target the
  *  AnotherDevice mode pairs against. */
@@ -486,4 +670,15 @@ public data class RecoverUiState(
     val deviceRestoreTarget: DeviceRestoreTarget? = null,
     /** ADR-0018 factor (c) — the 6-digit authenticator code field. */
     val totpCode: String = "",
+    /** ADR-0018 factor (d) — which step of the phone/email recovery
+     *  flow the Contact mode is on. */
+    val contactStep: ContactRecoverStep = ContactRecoverStep.Request,
+    /** ADR-0018 factor (d) — [ContactKind.EMAIL] / [ContactKind.PHONE]
+     *  toggle for the Contact mode. */
+    val contactKind: Int = me.lakko.app.auth.ContactKind.EMAIL,
+    /** ADR-0018 factor (d) — the phone / email the code is sent to. */
+    val contact: String = "",
+    /** ADR-0018 factor (d) — the 6-digit code delivered to the
+     *  contact. */
+    val contactCode: String = "",
 )
