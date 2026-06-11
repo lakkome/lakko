@@ -145,9 +145,11 @@ private fun RecoverForm(
     onNavigateToSignup: () -> Unit,
 ) {
     Text(
-        text = "Recover your account using either the 24-word phrase or 3+ " +
-            "social-recovery shares. We'll prove ownership to the server " +
-            "and rotate the password envelope.",
+        text = "Choose how to prove this account is yours. Your 24-word " +
+            "phrase or another signed-in device restores your full identity " +
+            "— your contacts keep trusting you. An authenticator or email/SMS " +
+            "code restores access only; if this device doesn't already hold " +
+            "your identity, you'll then save a new recovery phrase.",
         style = MaterialTheme.typography.bodyMedium,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
     )
