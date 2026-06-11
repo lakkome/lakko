@@ -88,6 +88,11 @@ public final class AuthRepository: ObservableObject {
     /// ``provideRecoveryPhrase(mnemonicPhrase:)`` reads this back.
     private var pendingRecovery: PendingRecovery?
 
+    /// ADR-0017 lost-everything fallback — the minted fresh phrase +
+    /// completion context, parked between ``mintFreshIdentity()`` and
+    /// ``confirmFreshPhraseSaved()``.
+    private var pendingFreshPhrase: PendingFreshPhrase?
+
     /// ADR-0018 factor (d) — the resolved context for an in-flight
     /// phone / email OTP recovery. ``recoverWithContactStart(username:kind:contact:)``
     /// stashes the resolved `(accountId, username, kind)` here after
@@ -837,6 +842,8 @@ public final class AuthRepository: ObservableObject {
     public func logout() {
         let cached = sessionStore.load()
         identitySecrets = nil
+        pendingRecovery = nil
+        pendingFreshPhrase = nil
         state = .anon(cachedUsername: cached?.username)
         // 1.20c — fire-and-forget unsubscribe so the next page
         // reload doesn't silently keep accepting pushes against
@@ -1470,6 +1477,132 @@ public final class AuthRepository: ObservableObject {
         )
     }
 
+    /// The just-minted fresh recovery phrase, for the
+    /// ``AuthState/saveFreshPhrase(_:)`` screen to display. `nil` outside
+    /// that flow. Kept off the ``AuthState`` so it is not threaded through
+    /// the router (mirror of the web `freshPhrase()` accessor).
+    public func freshPhrase() -> String? { pendingFreshPhrase?.phrase }
+
+    /// ADR-0017 lost-everything fallback. Mint a brand-new recovery phrase
+    /// + AccountIdentity for the SAME account when the user recovered
+    /// ACCESS via an ADR-0018 factor but has NO recovery phrase and NO
+    /// other device.
+    ///
+    /// This is the ONLY sanctioned path that publishes a CHANGED
+    /// AccountIdentity key WITHOUT a supersession proof — correct because
+    /// there is genuinely no old seed to sign with. The user's contacts
+    /// then re-verify out of band (the accepted, documented degradation).
+    ///
+    /// Reachable ONLY while a ``PendingRecovery`` is parked (post-ACCESS,
+    /// from ``AuthState/needsRecoveryPhrase(_:)``) and ONLY via the
+    /// explicit UI button. Does NOT land the session — it flips to
+    /// ``AuthState/saveFreshPhrase(_:)`` and returns the new phrase;
+    /// ``confirmFreshPhraseSaved()`` lands the session after the user
+    /// acknowledges. Mirror of the web `mintFreshIdentity`.
+    public func mintFreshIdentity() async throws -> String {
+        guard let pending = pendingRecovery else {
+            throw AuthClientError.argument("no pending identity recovery — sign in first")
+        }
+
+        // Generate a fresh 24-word phrase + seed (same client-side
+        // generation signup uses).
+        let mnemonic = RecoveryMnemonic.generate()
+        let phrase = mnemonic.phrase()
+        let seed = mnemonic.toSeed()
+
+        // Bootstrap the device-key existence gate from the fresh seed
+        // (no password on this path); no-op if a key already exists.
+        bootstrapDeviceKeyFromVerifiedSeedIfAbsent(
+            accountIdB64: pending.accountIdB64,
+            accountIdentitySeed: seed,
+            context: "mintFreshIdentity"
+        )
+
+        // Cache the fresh seed locally (best-effort).
+        do {
+            try AccountIdentitySeedStore.putAccountIdentitySeed(
+                accountIdB64: pending.accountIdB64,
+                seed: seed
+            )
+        } catch {
+            NSLog("fresh-identity seed persist failed: \(error)")
+        }
+
+        // Publish the NEW bundle WITHOUT a supersession proof. Best-effort.
+        await publishFreshIdentityBundleBestEffort(
+            accountId: pending.accountIdBytes,
+            sessionToken: pending.sessionToken,
+            seed: seed
+        )
+
+        // Stash the completion + phrase; flip to the save-phrase state.
+        pendingFreshPhrase = PendingFreshPhrase(
+            seed: seed,
+            accountIdBytes: pending.accountIdBytes,
+            accountIdB64: pending.accountIdB64,
+            sessionToken: pending.sessionToken,
+            sessionExpiresAtMs: pending.sessionExpiresAtMs,
+            username: pending.username,
+            phrase: phrase
+        )
+        pendingRecovery = nil
+        state = .saveFreshPhrase(
+            SessionAccount(
+                accountIdB64: pending.accountIdB64,
+                username: pending.username
+            )
+        )
+        return phrase
+    }
+
+    /// ADR-0017 lost-everything fallback — finish the session once the user
+    /// acknowledged the new recovery phrase. Valid ONLY while a
+    /// ``PendingFreshPhrase`` is parked.
+    public func confirmFreshPhraseSaved() throws {
+        guard let pending = pendingFreshPhrase else {
+            throw AuthClientError.argument("no fresh identity to confirm")
+        }
+        pendingFreshPhrase = nil
+        sessionStore.save(
+            PersistedSession(
+                accountIdB64: pending.accountIdB64,
+                username: pending.username
+            )
+        )
+        finishCanonicalSession(
+            accountIdentitySeed: pending.seed,
+            accountIdBytes: pending.accountIdBytes,
+            exportKey: Data(),
+            sessionToken: pending.sessionToken,
+            sessionExpiresAtMs: pending.sessionExpiresAtMs,
+            username: pending.username
+        )
+    }
+
+    /// Publish the fresh-identity bundle (+ KeyPackage) for `accountId`
+    /// WITHOUT a supersession proof (ADR-0017 lost-everything). Best-effort.
+    private func publishFreshIdentityBundleBestEffort(
+        accountId: Data,
+        sessionToken: String,
+        seed: Data
+    ) async {
+        do {
+            let discovery = DiscoveryClient(sessionToken: sessionToken)
+            let identity = try Identity.fromSeed(seed: seed)
+            try await discovery.uploadIdentityBundle(
+                accountId: accountId,
+                signaturePubkey: identity.signaturePublicKey(),
+                x25519Pubkey: identity.x25519PublicKey()
+            )
+            try await discovery.uploadKeyPackage(
+                accountId: accountId,
+                keyPackageBytes: identity.createKeyPackage()
+            )
+        } catch {
+            NSLog("fresh-identity bundle publish failed (will retry on session finish): \(error)")
+        }
+    }
+
     /// ADR-0018 factor (d), step 1 — send a one-time code to a
     /// previously-enrolled phone / email. ACCESS only: the finish step
     /// verifies the code and issues the session triple; identity
@@ -1849,6 +1982,12 @@ public enum AuthState: Equatable {
     /// (``RestoreIdentityPromptScreen``); ``provideRecoveryPhrase(mnemonicPhrase:)``
     /// completes the session once the user supplies their phrase.
     case needsRecoveryPhrase(SessionAccount)
+    /// ADR-0017 lost-everything fallback. The user recovered ACCESS via
+    /// an ADR-0018 factor but had NO recovery phrase and NO other device,
+    /// and chose to mint a brand-new identity (already published, without
+    /// a supersession proof). The UI must show the new phrase to save
+    /// before the session lands; ``confirmFreshPhraseSaved()`` finishes it.
+    case saveFreshPhrase(SessionAccount)
 }
 
 /// Account record exposed to the UI when a session is active.
@@ -1966,6 +2105,20 @@ struct PendingRecovery {
     let sessionToken: String
     let sessionExpiresAtMs: Int64
     let username: String
+}
+
+/// ADR-0017 lost-everything fallback — the completion context stashed by
+/// ``AuthRepository/mintFreshIdentity()`` between minting the fresh identity
+/// (already published) and the user acknowledging the new phrase. Holds no
+/// password material; `seed` is the just-minted fresh AccountIdentity seed.
+struct PendingFreshPhrase {
+    let seed: Data
+    let accountIdBytes: Data
+    let accountIdB64: String
+    let sessionToken: String
+    let sessionExpiresAtMs: Int64
+    let username: String
+    let phrase: String
 }
 
 /// ADR-0018 factor (d) — the resolved context for an in-flight phone /

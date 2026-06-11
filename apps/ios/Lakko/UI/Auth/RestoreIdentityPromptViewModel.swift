@@ -120,6 +120,29 @@ public final class RestoreIdentityPromptViewModel: ObservableObject {
         }
     }
 
+    /// ADR-0017 lost-everything fallback — the user has NO recovery phrase
+    /// and NO other device. Mint a brand-new identity via
+    /// ``AuthRepository/mintFreshIdentity()``; the repository flips the auth
+    /// state to `.saveFreshPhrase` and the router shows the new phrase. An
+    /// error leaves an inline message.
+    public func startFresh() {
+        guard !busy else { return }
+        busy = true
+        error = nil
+        Task {
+            do {
+                _ = try await repository.mintFreshIdentity()
+                // Repository flipped to .saveFreshPhrase — clear busy.
+                busy = false
+                error = nil
+            } catch {
+                busy = false
+                self.error = (error as? LocalizedError)?.errorDescription
+                    ?? "Could not create a new identity."
+            }
+        }
+    }
+
     /// Sign out of the pending session (the user does not have their
     /// phrase). Returns to the anon surface.
     public func onSignOut() {

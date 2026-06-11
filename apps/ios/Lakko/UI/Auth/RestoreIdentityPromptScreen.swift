@@ -102,6 +102,36 @@ public struct RestoreIdentityPromptScreen: View {
                     .foregroundStyle(.secondary)
                 }
 
+                // ADR-0017 lost-everything fallback — an explicit escape
+                // hatch for a user with NO phrase and NO other device.
+                // Collapsed behind a warning; the button is intentionally
+                // not the primary action.
+                DisclosureGroup(
+                    "I don't have my recovery phrase or another device"
+                ) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text(
+                            "This creates a brand-new secure identity for your " +
+                            "account. Your existing contacts will have to verify " +
+                            "you again, any encrypted history on your lost device " +
+                            "stays inaccessible, and you'll get a new recovery " +
+                            "phrase to save. Only do this if you truly cannot " +
+                            "recover any other way."
+                        )
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+
+                        Button(action: viewModel.startFresh) {
+                            Text("Create a new identity")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(viewModel.busy)
+                    }
+                    .padding(.top, 4)
+                }
+                .disabled(viewModel.busy)
+
                 HStack {
                     Spacer()
                     Button(action: viewModel.onSignOut) {

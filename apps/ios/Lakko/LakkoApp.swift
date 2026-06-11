@@ -173,6 +173,15 @@ struct AppRoot: View {
                 // phrase.
                 deviceGroupSync.clear()
             }
+        case .saveFreshPhrase:
+            // ADR-0017 lost-everything fallback — the user minted a
+            // brand-new identity (already published, no proof); show the
+            // new recovery phrase for them to save before the session lands.
+            SaveFreshPhraseScreen(
+                phrase: authRepository.freshPhrase() ?? "",
+                onConfirm: { try? authRepository.confirmFreshPhraseSaved() }
+            )
+            .onAppear { deviceGroupSync.clear() }
         }
     }
 }
