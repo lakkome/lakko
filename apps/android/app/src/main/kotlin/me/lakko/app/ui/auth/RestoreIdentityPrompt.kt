@@ -18,6 +18,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
@@ -176,6 +177,46 @@ public fun RestoreIdentityPrompt(
                 } else {
                     Text("Restore identity")
                 }
+            }
+        }
+
+        Spacer(Modifier.height(16.dp))
+
+        // ADR-0017 lost-everything fallback — an explicit escape hatch for a
+        // user with NO phrase and NO other device. Collapsed behind a
+        // warning; the button is intentionally not the primary action.
+        var showFresh by remember { mutableStateOf(false) }
+        Text(
+            text = if (showFresh) {
+                "I don't have my recovery phrase or another device ▾"
+            } else {
+                "I don't have my recovery phrase or another device ▸"
+            },
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.primary,
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable(enabled = !state.busy) { showFresh = !showFresh },
+        )
+        if (showFresh) {
+            Spacer(Modifier.height(8.dp))
+            Text(
+                text = "This creates a brand-new secure identity for your " +
+                    "account. Your existing contacts will have to verify you " +
+                    "again, any encrypted history on your lost device stays " +
+                    "inaccessible, and you'll get a new recovery phrase to " +
+                    "save. Only do this if you truly cannot recover any other " +
+                    "way.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(8.dp))
+            OutlinedButton(
+                onClick = viewModel::startFresh,
+                enabled = !state.busy,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text("Create a new identity")
             }
         }
 

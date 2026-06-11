@@ -283,6 +283,12 @@ private fun AppRoot(
             repository = authRepository,
             account = current.account,
         )
+        // ADR-0017 lost-everything fallback: the user minted a brand-new
+        // identity (already published, no proof); show the new recovery
+        // phrase for them to save before the session lands.
+        is AuthState.SaveFreshPhrase -> SaveFreshPhraseRoot(
+            repository = authRepository,
+        )
         is AuthState.Session -> SessionRoot(
             authRepository = authRepository,
             contactsRepository = contactsRepository,
@@ -317,6 +323,21 @@ private fun RestoreIdentityRoot(
         username = account.username,
         accountIdB64 = account.accountIdB64,
         onSignOut = { repository.logout() },
+    )
+}
+
+/**
+ * ADR-0017 lost-everything fallback — renders the freshly-minted recovery
+ * phrase for the user to save, then finishes the session.
+ */
+@Composable
+private fun SaveFreshPhraseRoot(
+    repository: AuthRepository,
+) {
+    val phrase = repository.freshPhrase() ?: ""
+    me.lakko.app.ui.auth.SaveFreshPhraseScreen(
+        phrase = phrase,
+        onConfirm = { repository.confirmFreshPhraseSaved() },
     )
 }
 

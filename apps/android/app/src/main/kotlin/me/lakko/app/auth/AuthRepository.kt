@@ -140,6 +140,12 @@ public class AuthRepository(
     private val pendingContactRecover: AtomicReference<PendingContactRecover?> =
         AtomicReference(null)
 
+    /** ADR-0017 lost-everything fallback — the minted fresh phrase +
+     *  completion context, parked between [mintFreshIdentity] and
+     *  [confirmFreshPhraseSaved]. */
+    private val pendingFreshPhrase: AtomicReference<PendingFreshPhrase?> =
+        AtomicReference(null)
+
     init {
         // Rehydrate synchronously — both reads are tiny and SharedPreferences
         // is on-disk-but-process-cached. If we ever switch to DataStore
@@ -1334,6 +1340,158 @@ public class AuthRepository(
     }
 
     /**
+     * ADR-0017 lost-everything fallback. Mint a brand-new recovery phrase
+     * + AccountIdentity for the SAME account when the user recovered ACCESS
+     * via an ADR-0018 factor but has NO recovery phrase and NO other device.
+     *
+     * This is the ONLY sanctioned path that publishes a CHANGED
+     * AccountIdentity key WITHOUT a supersession proof — correct because
+     * there is genuinely no old seed to sign with (the user lost it). The
+     * user's contacts then see a changed key with no proof and re-verify
+     * out of band (the accepted, documented degradation).
+     *
+     * Reachable ONLY while a [PendingRecovery] is parked (i.e. post-ACCESS,
+     * from [AuthState.NeedsRecoveryPhrase]) and ONLY via the explicit UI
+     * button. Mirror of the web `AuthContext.mintFreshIdentity`. Does NOT
+     * land the session here — it flips to [AuthState.SaveFreshPhrase] and
+     * returns the new phrase so the UI can show it; [confirmFreshPhraseSaved]
+     * lands the session after the user acknowledges.
+     *
+     * @throws AuthClientArgError when there is no pending recovery.
+     */
+    public suspend fun mintFreshIdentity(): String {
+        val pending = pendingRecovery.get()
+            ?: throw AuthClientArgError("no pending identity recovery — sign in first")
+
+        // Generate a fresh 24-word recovery phrase + its seed (same client-
+        // side generation signup uses).
+        val (phrase, seed) = RecoveryMnemonic.generate().use { mnemonic ->
+            mnemonic.phrase() to mnemonic.toSeed()
+        }
+
+        // Bootstrap the device-key existence gate from the fresh seed (no
+        // password on this path). No-op if a key already exists.
+        bootstrapDeviceKeyFromSeedBestEffort(
+            accountIdB64 = pending.accountIdB64,
+            accountIdentitySeed = seed,
+            context = "mintFreshIdentity",
+        )
+
+        // Cache the fresh seed locally (best-effort) so warm relaunch works.
+        try {
+            AccountIdentitySeedStore.putAccountIdentitySeed(
+                applicationContext,
+                pending.accountIdB64,
+                seed,
+            )
+        } catch (cause: Throwable) {
+            Log.w("lakko-auth", "fresh-identity seed persist failed", cause)
+        }
+
+        // Publish the NEW bundle WITHOUT a supersession proof. Best-effort:
+        // the seed is cached locally regardless, and the next session-finish
+        // re-publishes; a failure here only delays contact discovery.
+        publishFreshIdentityBundleBestEffort(
+            accountId = pending.accountIdBytes,
+            sessionToken = pending.sessionToken,
+            seed = seed,
+        )
+
+        // Stash the completion + phrase; flip to the save-phrase state.
+        pendingFreshPhrase.set(
+            PendingFreshPhrase(
+                seed = seed,
+                accountIdBytes = pending.accountIdBytes,
+                accountIdB64 = pending.accountIdB64,
+                sessionToken = pending.sessionToken,
+                sessionExpiresAtMs = pending.sessionExpiresAtMs,
+                username = pending.username,
+                phrase = phrase,
+            ),
+        )
+        pendingRecovery.set(null)
+        mutableState.value = AuthState.SaveFreshPhrase(
+            account = SessionAccount(
+                accountIdB64 = pending.accountIdB64,
+                username = pending.username,
+            ),
+        )
+        return phrase
+    }
+
+    /**
+     * ADR-0017 lost-everything fallback — finish the session once the user
+     * has acknowledged the new recovery phrase. Valid ONLY while a
+     * [PendingFreshPhrase] is parked. Hands the fresh seed into the live
+     * [IdentitySecrets] (empty exportKey — ACCESS-only) and flips to
+     * [AuthState.Session]. Mirror of the web `confirmFreshPhraseSaved`.
+     */
+    /** The just-minted fresh recovery phrase, for the
+     *  [AuthState.SaveFreshPhrase] screen to display. `null` outside that
+     *  flow. Kept off the [AuthState] object so it is not threaded through
+     *  the router (mirror of the web `freshPhrase()` accessor). */
+    public fun freshPhrase(): String? = pendingFreshPhrase.get()?.phrase
+
+    public fun confirmFreshPhraseSaved() {
+        val pending = pendingFreshPhrase.getAndSet(null)
+            ?: throw AuthClientArgError("no fresh identity to confirm")
+        mutableIdentitySecrets.value = IdentitySecrets(
+            accountId = pending.accountIdBytes,
+            exportKey = ByteArray(0),
+            accountIdentitySeed = pending.seed,
+            sessionToken = pending.sessionToken,
+            sessionExpiresAtMs = pending.sessionExpiresAtMs,
+        )
+        sessionStore.save(
+            PersistedSession(
+                accountIdB64 = pending.accountIdB64,
+                username = pending.username,
+            ),
+        )
+        mutableState.value = AuthState.Session(
+            account = SessionAccount(
+                accountIdB64 = pending.accountIdB64,
+                username = pending.username,
+            ),
+        )
+    }
+
+    /**
+     * Publish the fresh-identity bundle (+ KeyPackage) for [accountId]
+     * WITHOUT a supersession proof (ADR-0017 lost-everything). Best-effort.
+     */
+    private suspend fun publishFreshIdentityBundleBestEffort(
+        accountId: ByteArray,
+        sessionToken: String,
+        seed: ByteArray,
+    ) {
+        try {
+            val discovery = discoveryClientFactory()
+            try {
+                discovery.setSessionToken(sessionToken)
+                Identity.fromSeed(seed).use { identity ->
+                    discovery.uploadIdentityBundle(
+                        accountId = accountId,
+                        signaturePubkey = identity.signaturePublicKey(),
+                        x25519Pubkey = identity.x25519PublicKey(),
+                        supersessionProofB64 = null,
+                    )
+                    discovery.uploadKeyPackage(accountId, identity.createKeyPackage())
+                }
+            } finally {
+                discovery.close()
+            }
+        } catch (cause: Throwable) {
+            Log.w(
+                "lakko-auth",
+                "fresh-identity bundle publish failed (will retry on next " +
+                    "session finish)",
+                cause,
+            )
+        }
+    }
+
+    /**
      * Shared HARD-BLOCK verification (ADR-0017 + lakko-security
      * finding #1): the supplied AccountIdentity seed MUST reproduce
      * the account's PUBLISHED identity key. 404 (null bundle) or a
@@ -2167,6 +2325,7 @@ public class AuthRepository(
             pending.accountIdBytes.fill(0)
         }
         pendingContactRecover.set(null)
+        pendingFreshPhrase.getAndSet(null)?.let { it.seed.fill(0) }
     }
 }
 
@@ -2196,6 +2355,14 @@ public sealed interface AuthState {
      *  every contact's pin). The UI renders a recovery-phrase prompt;
      *  [AuthRepository.provideRecoveryPhrase] completes the session. */
     public data class NeedsRecoveryPhrase(val account: SessionAccount) : AuthState
+
+    /** ADR-0017 lost-everything fallback. The user recovered ACCESS via
+     *  an ADR-0018 factor but has NO recovery phrase and NO other device,
+     *  and chose to mint a brand-new identity. The new bundle is already
+     *  published (without a supersession proof) and the new phrase minted;
+     *  the UI must show the phrase for the user to save before the session
+     *  lands. [AuthRepository.confirmFreshPhraseSaved] finishes it. */
+    public data class SaveFreshPhrase(val account: SessionAccount) : AuthState
 }
 
 /** Account record exposed to the UI when a session is active.
@@ -2359,6 +2526,48 @@ internal data class PendingContactRecover(
         h = 31 * h + accountIdB64.hashCode()
         h = 31 * h + username.hashCode()
         h = 31 * h + kind
+        return h
+    }
+}
+
+/**
+ * ADR-0017 lost-everything fallback — the completion context stashed by
+ * [AuthRepository.mintFreshIdentity] between minting the fresh identity
+ * (already published) and the user acknowledging the new phrase. Holds no
+ * password material (there is none on this path); the seed is the
+ * just-minted fresh AccountIdentity seed, zeroized if the flow is abandoned.
+ *
+ * Mirror of the web `pendingFreshPhrase` signal.
+ */
+internal data class PendingFreshPhrase(
+    val seed: ByteArray,
+    val accountIdBytes: ByteArray,
+    val accountIdB64: String,
+    val sessionToken: String,
+    val sessionExpiresAtMs: Long,
+    val username: String,
+    val phrase: String,
+) {
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (other !is PendingFreshPhrase) return false
+        return seed.contentEquals(other.seed) &&
+            accountIdBytes.contentEquals(other.accountIdBytes) &&
+            accountIdB64 == other.accountIdB64 &&
+            sessionToken == other.sessionToken &&
+            sessionExpiresAtMs == other.sessionExpiresAtMs &&
+            username == other.username &&
+            phrase == other.phrase
+    }
+
+    override fun hashCode(): Int {
+        var h = seed.contentHashCode()
+        h = 31 * h + accountIdBytes.contentHashCode()
+        h = 31 * h + accountIdB64.hashCode()
+        h = 31 * h + sessionToken.hashCode()
+        h = 31 * h + sessionExpiresAtMs.hashCode()
+        h = 31 * h + username.hashCode()
+        h = 31 * h + phrase.hashCode()
         return h
     }
 }

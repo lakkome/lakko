@@ -132,6 +132,33 @@ public class RestoreIdentityPromptViewModel(
             sessionExpiresAtMs = outcome.sessionExpiresAtMs,
         )
     }
+
+    /**
+     * ADR-0017 lost-everything fallback — the user has NO recovery phrase
+     * and NO other device. Mint a brand-new identity via
+     * [AuthRepository.mintFreshIdentity]; the repository flips the auth
+     * state to `SaveFreshPhrase` and the router shows the new phrase. An
+     * error leaves the prompt with an inline message.
+     */
+    public fun startFresh() {
+        val snapshot = mutableState.value
+        if (snapshot.busy) return
+        mutableState.update { it.copy(busy = true, error = null) }
+        viewModelScope.launch {
+            try {
+                repo.mintFreshIdentity()
+                // Repository flipped to SaveFreshPhrase — clear local busy.
+                mutableState.update { it.copy(busy = false, error = null) }
+            } catch (err: Throwable) {
+                mutableState.update {
+                    it.copy(
+                        busy = false,
+                        error = err.message ?: "Could not create a new identity.",
+                    )
+                }
+            }
+        }
+    }
 }
 
 /** Snapshot of the [RestoreIdentityPrompt] field state. */
