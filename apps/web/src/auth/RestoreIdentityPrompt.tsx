@@ -189,6 +189,7 @@ export default function RestoreIdentityPrompt(): JSX.Element {
             </button>
           </form>
         </Show>
+        <LostEverythingPanel busy={busy()} />
         <p class="form-footer">
           <button
             type="button"
@@ -200,5 +201,88 @@ export default function RestoreIdentityPrompt(): JSX.Element {
         </p>
       </section>
     </div>
+  );
+}
+
+/**
+ * ADR-0017 lost-everything fallback entry point.
+ *
+ * The THIRD restore option, below recovery-phrase + another-device:
+ * for a user who recovered ACCESS via a factor (TOTP / phone-OTP) but
+ * has NEITHER their recovery phrase NOR another signed-in device.
+ * Without this they are stuck. This is the ONLY sanctioned path that
+ * publishes a CHANGED AccountIdentity key WITHOUT a supersession proof
+ * — so it is deliberately NOT the default action: collapsed by default
+ * behind a clear warning, and the "Create a new identity" button is a
+ * plain (non-primary) destructive-ish action the user must opt into.
+ */
+function LostEverythingPanel(props: { busy: boolean }): JSX.Element {
+  const auth = useAuth();
+  const [open, setOpen] = createSignal(false);
+  const [busy, setBusy] = createSignal(false);
+  const [error, setError] = createSignal<string | null>(null);
+
+  async function onCreate(): Promise<void> {
+    setError(null);
+    setBusy(true);
+    try {
+      // Mints + publishes the new identity (without a proof — none is
+      // mintable) and flips the state to `save-fresh-phrase`, which
+      // the guard renders as the phrase-save screen. We discard the
+      // returned phrase here — the save screen reads it back from
+      // `auth.freshPhrase()`.
+      await auth.mintFreshIdentity();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <details
+      open={open()}
+      onToggle={(e) => setOpen(e.currentTarget.open)}
+      style={{
+        "margin-top": "1rem",
+        padding: "0.5rem 0.75rem",
+        border: "1px solid var(--surface-border)",
+        "border-radius": "var(--radius-sm)",
+        background: "var(--surface-elevated)",
+      }}
+    >
+      <summary style={{ cursor: "pointer", "font-size": "0.9rem" }}>
+        I don't have my recovery phrase or another device
+      </summary>
+      <div
+        role="alert"
+        style={{
+          margin: "0.75rem 0",
+          padding: "0.6rem 0.75rem",
+          border: "1px solid var(--danger, #b00020)",
+          "border-radius": "var(--radius-sm)",
+          background: "var(--surface-bg)",
+          "font-size": "0.85rem",
+        }}
+      >
+        <strong>This creates a brand-new secure identity for your
+        account.</strong>{" "}
+        Your existing contacts will have to verify you again, any
+        encrypted history on your lost device stays inaccessible, and
+        you'll get a new recovery phrase to save. Only do this if you
+        have genuinely lost both your recovery phrase and every other
+        device.
+      </div>
+      <Show when={error() !== null}>
+        <div class="form-error">{error()}</div>
+      </Show>
+      <button
+        type="button"
+        disabled={busy() || props.busy}
+        onClick={() => void onCreate()}
+      >
+        {busy() ? "Creating new identity…" : "Create a new identity"}
+      </button>
+    </details>
   );
 }

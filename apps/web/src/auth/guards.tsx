@@ -25,6 +25,7 @@ import { Navigate } from "@solidjs/router";
 import { useAuth } from "./AuthContext";
 import { paths } from "../routes/paths";
 import RestoreIdentityPrompt from "./RestoreIdentityPrompt";
+import SaveFreshPhrasePrompt from "./SaveFreshPhrasePrompt";
 
 /** Gate every route inside the AppShell behind a real session. */
 export function RequireSession(props: { children: JSX.Element }): JSX.Element {
@@ -59,11 +60,23 @@ function UnauthenticatedFallback(): JSX.Element {
   // ADR-0017: an authenticated-but-identity-pending user (fresh
   // device, no cached phrase seed) must NOT be bounced to /login —
   // that would loop (login thinks they're already authenticated).
-  // Render the recovery-phrase prompt in place instead.
+  // Render the recovery-phrase prompt in place instead. The
+  // lost-everything fallback (`save-fresh-phrase`) lands here too —
+  // render the phrase-save screen rather than redirect.
   return (
     <Show
-      when={auth.state().kind !== "needs-recovery-phrase"}
-      fallback={<RestoreIdentityPrompt />}
+      when={
+        auth.state().kind !== "needs-recovery-phrase" &&
+        auth.state().kind !== "save-fresh-phrase"
+      }
+      fallback={
+        <Show
+          when={auth.state().kind === "save-fresh-phrase"}
+          fallback={<RestoreIdentityPrompt />}
+        >
+          <SaveFreshPhrasePrompt />
+        </Show>
+      }
     >
       {/* While the context is still resolving (it starts in the
           "loading" state on mount while it reads localStorage + IDB)
@@ -85,11 +98,24 @@ function AlreadyAuthenticatedFallback(): JSX.Element {
   // ADR-0017: the identity-pending state lands here too (the user
   // just submitted the login form, which is wrapped in
   // RequireAnonymous). Render the recovery-phrase prompt rather than
-  // an indefinite "Restoring session…".
+  // an indefinite "Restoring session…". The lost-everything fallback
+  // (`save-fresh-phrase`) lands here too (the user clicked
+  // "Create a new identity" from within RestoreIdentityPrompt) —
+  // render the phrase-save screen.
   return (
     <Show
-      when={auth.state().kind !== "needs-recovery-phrase"}
-      fallback={<RestoreIdentityPrompt />}
+      when={
+        auth.state().kind !== "needs-recovery-phrase" &&
+        auth.state().kind !== "save-fresh-phrase"
+      }
+      fallback={
+        <Show
+          when={auth.state().kind === "save-fresh-phrase"}
+          fallback={<RestoreIdentityPrompt />}
+        >
+          <SaveFreshPhrasePrompt />
+        </Show>
+      }
     >
       {/* If the user is "loading", let it resolve before bouncing. */}
       <Show

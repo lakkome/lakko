@@ -136,6 +136,21 @@ export type AuthState =
   | {
       readonly kind: "needs-recovery-phrase";
       readonly account: SessionAccount;
+    }
+  /** ADR-0017 lost-everything fallback (the ONLY sanctioned
+   *  publish-without-a-supersession-proof path). Reached ONLY from
+   *  `needs-recovery-phrase` (i.e. after ACCESS was granted by a
+   *  factor) and ONLY via the explicit `mintFreshIdentity()` button —
+   *  never automatically. A brand-new recovery phrase + AccountIdentity
+   *  has just been minted + published for the SAME account; this state
+   *  renders the new 24-word phrase for the user to save before the
+   *  session lands. `confirmFreshPhraseSaved()` completes the session
+   *  from the stashed context. The user's contacts then see a changed
+   *  key with no proof and re-verify out-of-band — the accepted,
+   *  documented degradation. */
+  | {
+      readonly kind: "save-fresh-phrase";
+      readonly account: SessionAccount;
     };
 
 /** Result handed back to the signup form so it can display the
@@ -236,6 +251,14 @@ export interface AuthApi {
    *  — see [`IdentitySecrets`] for the full shape and lifetime
    *  story. */
   readonly identitySecrets: Accessor<IdentitySecrets | null>;
+  /** ADR-0017 lost-everything fallback — the freshly-minted 24-word
+   *  recovery phrase awaiting the user's save acknowledgement. Non-null
+   *  ONLY while the state is `save-fresh-phrase` (between
+   *  `mintFreshIdentity` and `confirmFreshPhraseSaved`); `null`
+   *  otherwise. The phrase lives in memory only and is dropped when the
+   *  session lands. Kept off the `AuthState` object so it is not
+   *  threaded through the route guards. */
+  readonly freshPhrase: Accessor<string | null>;
   /** Run the OPAQUE-PAKE registration flow.
    *
    *  Throws on network / server errors (the form surfaces them).
@@ -397,6 +420,33 @@ export interface AuthApi {
      *  key (`AnonymousJoinSession.persistTo`). Best-effort. */
     readonly persistJoinState?: (deviceKey: CryptoKey) => Promise<void>;
   }): Promise<void>;
+  /** ADR-0017 lost-everything fallback — the ONLY sanctioned path
+   *  that publishes a CHANGED AccountIdentity key WITHOUT a
+   *  supersession proof. Callable ONLY while `pendingRecovery() !==
+   *  null` (i.e. the user recovered ACCESS via an ADR-0018 factor and
+   *  is parked in `needs-recovery-phrase` with NO phrase and NO other
+   *  device) — throws otherwise. It mints a BRAND-NEW recovery phrase
+   *  + AccountIdentity for the SAME account, bootstraps a device key
+   *  from the new seed when none is parked, publishes the new bundle
+   *  WITHOUT a proof (none is mintable — there is no old seed), then
+   *  STASHES the completion context and flips to `save-fresh-phrase`
+   *  so the UI can display the new phrase for the user to save.
+   *  Returns the new 24-word phrase string.
+   *
+   *  This does NOT immediately land the session — the caller MUST
+   *  show the phrase, then call `confirmFreshPhraseSaved()`.
+   *
+   *  SECURITY: reachable ONLY post-ACCESS, behind the explicit user
+   *  button. The publish-without-proof is correct ONLY here because no
+   *  old seed exists. The user's contacts then see a changed key with
+   *  no proof and re-verify out-of-band — the accepted degradation. */
+  mintFreshIdentity(): Promise<string>;
+  /** ADR-0017 lost-everything fallback, step 2 — only valid while the
+   *  state is `save-fresh-phrase`. The user has saved the freshly-minted
+   *  recovery phrase; this lands the canonical session from the stashed
+   *  context (empty exportKey — the ACCESS-only convention) and clears
+   *  the stash. Throws if called outside `save-fresh-phrase`. */
+  confirmFreshPhraseSaved(): Promise<void>;
   /** Drop the in-memory session. Does NOT erase the localStorage
    *  cache or the IDB-stored device key — re-login on the same
    *  device should be cheap, and the device key remains usable
@@ -437,6 +487,28 @@ interface PendingRecovery {
   readonly sessionToken: string;
   readonly sessionExpiresAtMs: number;
   readonly username: string;
+}
+
+/** ADR-0017 lost-everything fallback: everything needed to finish a
+ *  session once the user has saved the freshly-minted recovery phrase.
+ *  The new AccountIdentity has ALREADY been published (without a
+ *  proof) by `mintFreshIdentity`; this just carries the bits
+ *  `confirmFreshPhraseSaved` hands to `finishCanonicalSession`. The
+ *  `exportKey` is always EMPTY here — this is an ACCESS-only path
+ *  (recovered via an ADR-0018 factor, no password in scope). */
+interface PendingFreshPhrase {
+  /** The 64-byte BIP39 seed of the BRAND-NEW phrase, already cached
+   *  under the device key by `mintFreshIdentity`. CONSUMED by
+   *  `finishCanonicalSession`. */
+  readonly seed: Uint8Array;
+  readonly accountIdBytes: Uint8Array;
+  readonly accountIdB64: string;
+  readonly sessionToken: string;
+  readonly sessionExpiresAtMs: number;
+  readonly username: string;
+  /** The freshly-minted 24-word recovery phrase — re-exposed to the
+   *  UI by the `save-fresh-phrase` render so the user can save it. */
+  readonly phrase: string;
 }
 
 const STORAGE_KEY = "lakko.auth.v1";
@@ -507,6 +579,15 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
   // calls `provideRecoveryPhrase`, which reads this back.
   const [pendingRecovery, setPendingRecovery] =
     createSignal<PendingRecovery | null>(null);
+  // ADR-0017 lost-everything fallback: after `mintFreshIdentity`
+  // has minted + published a brand-new AccountIdentity (without a
+  // proof — none is mintable), it stashes the completion context
+  // here and flips to `save-fresh-phrase`. The UI shows the new
+  // 24-word phrase; `confirmFreshPhraseSaved` reads this back to
+  // land the session, then clears it. The seed never leaves this
+  // closure until the session is finished.
+  const [pendingFreshPhrase, setPendingFreshPhrase] =
+    createSignal<PendingFreshPhrase | null>(null);
   // ADR-0018 factor (d): two-step phone/email OTP recover. `…Start`
   // resolves the username → account_id, sends a code, and stashes the
   // resolved context here so `…Finish` can submit the code without
@@ -727,6 +808,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
   const api: AuthApi = {
     state,
     identitySecrets,
+    freshPhrase: () => pendingFreshPhrase()?.phrase ?? null,
     async signup(username, password) {
       const trimmed = username.trim();
       if (trimmed.length === 0) {
@@ -1546,6 +1628,154 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         username,
       });
     },
+    async mintFreshIdentity() {
+      // ADR-0017 lost-everything fallback — the ONLY sanctioned path
+      // that publishes a CHANGED AccountIdentity key WITHOUT a
+      // supersession proof. Reachable ONLY while a `pendingRecovery`
+      // is parked: the user recovered ACCESS via an ADR-0018 factor
+      // and is sitting in `needs-recovery-phrase` with NO phrase and
+      // NO other device. The explicit user button is the ONLY trigger
+      // (the RestoreIdentityPrompt gates it behind a collapsible
+      // warning); this method never runs automatically.
+      const pending = pendingRecovery();
+      if (pending === null) {
+        throw new Error(
+          "no pending identity recovery — sign in first",
+        );
+      }
+      const wasm = await loadWasm();
+
+      // Mint a BRAND-NEW recovery phrase + derive its 64-byte BIP39
+      // seed. This is a fresh random identity for the SAME account —
+      // there is no old seed to bridge from, which is exactly why
+      // publishing without a proof is correct here.
+      const mnemonic = wasm.RecoveryMnemonic.generate();
+      const phrase = mnemonic.phrase;
+      const accountIdentitySeed = mnemonic.toSeed();
+      mnemonic.free();
+
+      // Bootstrap a device key from the new seed when the pending
+      // context has none (the ACCESS-only fresh-browser case — no
+      // password, hence no OPAQUE export key to derive one from).
+      // When a device key IS parked (e.g. a prior password login on
+      // this browser whose seed cache was missing), reuse it — minting
+      // a fresh identity-seed-derived key would orphan its wrapped
+      // stores. Mirrors the bootstrap recipe in provideRecoveryPhrase /
+      // completeFromDeviceRestore.
+      let deviceKey = pending.deviceKey;
+      let bootstrappedDeviceKey = false;
+      if (deviceKey === null) {
+        deviceKey = await deriveDeviceRootKeyFromIdentitySeed(
+          accountIdentitySeed,
+          pending.accountIdB64,
+        );
+        await putDeviceKey(pending.accountIdB64, deviceKey);
+        bootstrappedDeviceKey = true;
+      }
+
+      // Cache the new seed under the device key so a future warm
+      // login skips the prompt. Best-effort.
+      try {
+        await putAccountIdentitySeed(
+          pending.accountIdB64,
+          accountIdentitySeed,
+          deviceKey,
+        );
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn(
+          "account-identity-seed persist (mintFreshIdentity) failed",
+          err,
+        );
+      }
+      // On a freshly-bootstrapped key the pending session token was
+      // never persisted (there was no key at park time) — land it now
+      // so a reload re-attaches. Best-effort.
+      if (bootstrappedDeviceKey) {
+        try {
+          await putSessionToken(
+            pending.accountIdB64,
+            pending.sessionToken,
+            pending.sessionExpiresAtMs,
+            deviceKey,
+          );
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.warn(
+            "session-token persist (mintFreshIdentity) failed",
+            err,
+          );
+        }
+      }
+
+      // Publish the NEW bundle WITHOUT a supersession proof — none is
+      // mintable (there is no old seed). This is the single accepted
+      // publish-without-proof case: the user's contacts will see a
+      // changed key with no proof, fail closed, and re-verify
+      // out-of-band. We surface a publish failure rather than landing
+      // a session whose published identity nobody can verify.
+      const canonical = wasm.Identity.fromSeed(accountIdentitySeed);
+      try {
+        await uploadIdentityBundle(
+          discovery,
+          pending.accountIdBytes,
+          canonical,
+        );
+      } finally {
+        canonical.free();
+      }
+
+      // Stash the completion context + flip to `save-fresh-phrase`.
+      // We do NOT finish the session here — the UI must show the new
+      // phrase first and call `confirmFreshPhraseSaved`. `pendingRecovery`
+      // is cleared now; the flow is committed past the point of
+      // returning to the recovery prompt.
+      setPendingFreshPhrase({
+        seed: accountIdentitySeed,
+        accountIdBytes: pending.accountIdBytes,
+        accountIdB64: pending.accountIdB64,
+        sessionToken: pending.sessionToken,
+        sessionExpiresAtMs: pending.sessionExpiresAtMs,
+        username: pending.username,
+        phrase,
+      });
+      setPendingRecovery(null);
+      setState({
+        kind: "save-fresh-phrase",
+        account: {
+          accountId: pending.accountIdB64,
+          username: pending.username,
+        },
+      });
+      return phrase;
+    },
+    async confirmFreshPhraseSaved() {
+      // ADR-0017 lost-everything fallback, step 2. Only valid while a
+      // `pendingFreshPhrase` is parked (set by `mintFreshIdentity`
+      // after the new bundle was published). The user has saved the
+      // new phrase; land the canonical session from the stashed
+      // context (empty exportKey — ACCESS-only) and clear the stash.
+      const pending = pendingFreshPhrase();
+      if (pending === null) {
+        throw new Error(
+          "no pending fresh-identity phrase to confirm",
+        );
+      }
+      const wasm = await loadWasm();
+      // CONSUME the stash so the parked seed cannot be replayed.
+      setPendingFreshPhrase(null);
+      await finishCanonicalSession({
+        wasm,
+        accountIdentitySeed: pending.seed,
+        accountIdBytes: pending.accountIdBytes,
+        accountIdB64: pending.accountIdB64,
+        // ACCESS-only convention (no password ⇒ no OPAQUE export key).
+        exportKey: new Uint8Array(0),
+        sessionToken: pending.sessionToken,
+        sessionExpiresAtMs: pending.sessionExpiresAtMs,
+        username: pending.username,
+      });
+    },
     async recover(mnemonicPhrase, newPassword, username) {
       const cached = loadPersisted();
       // Resolve the account_id the same way `login` does so recover
@@ -2019,6 +2249,15 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       // signed out.
       const cached = loadPersisted();
       setIdentitySecrets(null);
+      // ADR-0017: drop any parked recovery / fresh-phrase context so a
+      // stashed seed cannot linger past a sign-out. Zeroize the
+      // fresh-phrase seed before dropping the reference.
+      setPendingRecovery(null);
+      const fresh = pendingFreshPhrase();
+      if (fresh !== null) {
+        fresh.seed.fill(0);
+        setPendingFreshPhrase(null);
+      }
       // Phase 1.5b: drop the bearer token so a subsequent
       // protected write surfaces a clean 401 instead of silently
       // using a stale token.
@@ -2169,6 +2408,14 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       // 1.16e6c1: also free()s the canonical Identity.
       chats.clear();
       setIdentitySecrets(null);
+      // ADR-0017: drop any parked recovery / fresh-phrase context.
+      // Zeroize the fresh-phrase seed before dropping the reference.
+      setPendingRecovery(null);
+      const fresh = pendingFreshPhrase();
+      if (fresh !== null) {
+        fresh.seed.fill(0);
+        setPendingFreshPhrase(null);
+      }
       // Phase 1.5b: drop the bearer token.
       discovery.setSessionToken(null);
       setState({ kind: "anon" });
