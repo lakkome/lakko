@@ -170,6 +170,15 @@ export default function Recover(): JSX.Element {
     <div class="auth-shell">
       <section class="auth-card">
         <h1>Recover account</h1>
+        <p style={{ color: "var(--surface-muted)", "margin-top": 0 }}>
+          Choose how to prove this account is yours. Your{" "}
+          <strong>24-word phrase</strong> or <strong>another signed-in
+          device</strong> restores your full identity — your contacts keep
+          trusting you. An <strong>authenticator</strong> or{" "}
+          <strong>email/SMS code</strong> restores access only; if this
+          device doesn't already hold your identity, you'll then save a new
+          recovery phrase.
+        </p>
         <ModeTabs mode={mode} setMode={setMode} busy={busy} />
         <Switch
           fallback={

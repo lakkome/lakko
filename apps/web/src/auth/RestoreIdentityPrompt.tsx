@@ -27,7 +27,10 @@ import { createSignal, Show, type JSX } from "solid-js";
 import { useAuth } from "./AuthContext";
 import { base64Decode } from "./account-id";
 import { getDeviceKey } from "./key-store";
-import { prepareJoinFlow } from "../devices/orchestrator";
+import {
+  prepareAnonymousJoinFlow,
+  prepareJoinFlow,
+} from "../devices/orchestrator";
 import RestoreViaDevicePanel, {
   type DeviceRestoreFlowHandle,
 } from "../devices/RestoreViaDevicePanel";
@@ -67,20 +70,40 @@ export default function RestoreIdentityPrompt(): JSX.Element {
     }
   }
 
-  // ADR-0018 factor (a), path (a) — the user is password/passkey
-  // authenticated (so a device key exists); run the standard
-  // authenticated join flow with the recovery consumption opted in.
+  // ADR-0018 factor (a), path (a) — restore the identity from another
+  // signed-in device. When this browser already has a device key (a
+  // password/passkey session ran here before), use the standard
+  // authenticated join flow. On a FRESH browser with no device key yet
+  // (e.g. ACCESS came via the ADR-0018 TOTP / phone-OTP factor, which
+  // does not derive one until the identity is acquired), fall back to the
+  // ANONYMOUS join flow: it mints an ephemeral per-device seed in memory,
+  // so it needs no pre-existing device key. Either way the transferred
+  // phrase seed + session land via `completeFromPairing`, which caches the
+  // seed and bootstraps a device key from it.
   async function prepareDeviceFlow(): Promise<DeviceRestoreFlowHandle> {
     const acct = account();
     if (acct === null) {
       throw new Error("no pending identity recovery — sign in first");
     }
+    const accountIdBytes = base64Decode(acct.accountIdB64);
     const deviceKey = await getDeviceKey(acct.accountIdB64);
     if (deviceKey === null) {
-      throw new Error("No device key on this browser. Sign in again.");
+      const anon = await prepareAnonymousJoinFlow({
+        accountIdBytes,
+        accountIdB64: acct.accountIdB64,
+      });
+      return {
+        qrPayload: anon.qrPayload,
+        awaitWelcome: (signal) => anon.awaitWelcome(signal),
+        accept: async (welcome, welcomeCursor) => {
+          const outcome = await anon.accept(welcome, { welcomeCursor });
+          return outcome.recovery;
+        },
+        dispose: () => anon.dispose(),
+      };
     }
     const session = await prepareJoinFlow({
-      accountIdBytes: base64Decode(acct.accountIdB64),
+      accountIdBytes,
       accountIdB64: acct.accountIdB64,
       deviceKey,
     });
