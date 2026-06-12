@@ -30,6 +30,34 @@ public enum LogVerifyStatus: String, Equatable {
     case off
 }
 
+/// The outcome of ``TransparencyVerify/verifyIdentityInLog(accountId:publishedSignaturePubkey:)``
+/// (KT-log S4). Mirror of the web `LogVerifyResult`.
+///
+/// Adds the `is_reset` marker the log serves on its `/latest` entry to
+/// the bare status. ``isReset`` lets a contact DISTINGUISH an
+/// owner-initiated identity RESET (the lost-everything fresh-identity
+/// mint — logged with `is_reset=true`, ADR-0017) from an unexplained key
+/// change (a possible compromise — `is_reset` false/absent).
+///
+/// ``isReset`` is the `/latest` entry's marker WHENEVER a latest entry
+/// was observed — i.e. on `.confirmed` AND on `.mismatch` (both imply a
+/// latest exists). It is `nil` when there was no latest entry to read it
+/// from: `.absent` (account not yet logged), `.rollback` (short-circuited
+/// before the latest lookup), `.unreachable` (network/log fault), and
+/// `.off` (the integration is unconfigured).
+public struct LogVerifyResult: Equatable {
+    /// The S3d state-machine verdict.
+    public let status: LogVerifyStatus
+    /// The `/latest` entry's `is_reset` marker when a latest entry was
+    /// read (`.confirmed` / `.mismatch`); `nil` otherwise.
+    public let isReset: Bool?
+
+    public init(status: LogVerifyStatus, isReset: Bool?) {
+        self.status = status
+        self.isReset = isReset
+    }
+}
+
 /// Transparency-log inclusion verification (KT-log S3d) — the
 /// equivocation-detection / gossip layer on top of the ADR-0016
 /// supersession/pin gate.
@@ -106,14 +134,18 @@ public struct TransparencyVerify {
     ///   - accountId: the peer's raw 16-byte account_id.
     ///   - publishedSignaturePubkey: the 32-byte Ed25519 key discovery
     ///     returned for that account.
-    /// - Returns: the ``LogVerifyStatus`` verdict — never throws.
+    /// - Returns: a ``LogVerifyResult`` carrying the ``LogVerifyStatus``
+    ///   verdict and the `/latest` entry's `is_reset` marker (KT-log
+    ///   S4); the marker is non-`nil` only when a latest entry was read
+    ///   (`.confirmed` / `.mismatch`). Never throws.
     public func verifyIdentityInLog(
         accountId: Data,
         publishedSignaturePubkey: Data
-    ) async -> LogVerifyStatus {
-        // off — the integration is unconfigured. Skip entirely.
+    ) async -> LogVerifyResult {
+        // off — the integration is unconfigured. Skip entirely. No
+        // latest entry was read, so `isReset` is nil.
         guard let client = client, let operatorKey = operatorKey else {
-            return .off
+            return LogVerifyResult(status: .off, isReset: nil)
         }
 
         do {
@@ -121,10 +153,11 @@ public struct TransparencyVerify {
             //    gate against our persisted high-water mark BEFORE
             //    trusting it. (We do NOT verify the root signature
             //    first: a shrink is suspicious regardless of who signed
-            //    it, and the rollback verdict is the strongest.)
+            //    it, and the rollback verdict is the strongest.) We
+            //    short-circuit BEFORE the latest lookup, so no `isReset`.
             let root = try await client.fetchRoot()
             if lastSeenRoot.checkAndAdvance(root.logSize) == .rollback {
-                return .rollback
+                return LogVerifyResult(status: .rollback, isReset: nil)
             }
 
             // 2. Look up the account's latest logged entry. The
@@ -136,13 +169,21 @@ public struct TransparencyVerify {
             guard let latest = try await client.fetchLatest(usernameHash: accountKey) else {
                 // Not yet logged. Benign under eventual consistency OR
                 // an off-log equivocation — surfaced, not auto-trusted.
-                return .absent
+                // No latest entry, so no `isReset`.
+                return LogVerifyResult(status: .absent, isReset: nil)
             }
+
+            // From here a latest entry EXISTS — capture its `is_reset`
+            // marker (KT-log S4). It rides out on both the `.mismatch`
+            // and `.confirmed` verdicts below; the caller surfaces it to
+            // distinguish an owner-initiated reset from an unexplained
+            // key change.
+            let isReset = latest.isReset
 
             // 3. The log's latest pubkey must equal what discovery
             //    served. A divergence is the equivocation signal.
             if latest.identityPubkey != publishedSignaturePubkey {
-                return .mismatch
+                return LogVerifyResult(status: .mismatch, isReset: isReset)
             }
 
             // 4. Prove the exact (account_key, pubkey, version) leaf is
@@ -182,16 +223,75 @@ public struct TransparencyVerify {
                 // The inclusion / root-signature gate failed: the served
                 // key is not provably committed by the pinned operator →
                 // treat as a mismatch (a log/server divergence from what
-                // we were told).
-                return .mismatch
+                // we were told). A latest entry still existed, so the
+                // marker rides out.
+                return LogVerifyResult(status: .mismatch, isReset: isReset)
             }
-            return .confirmed
+            return LogVerifyResult(status: .confirmed, isReset: isReset)
         } catch {
             // A network fault, a non-404 HTTP fault, or a malformed body
             // — the log is effectively unusable for this check.
             // Fail-open to `.unreachable` (the caller does not block on
             // it); the supersession/pin gate is the primary trust.
-            return .unreachable
+            return LogVerifyResult(status: .unreachable, isReset: nil)
+        }
+    }
+
+    /// KT-log S4 — a LIGHTER, best-effort lookup of the `is_reset`
+    /// marker for a SERVED key, used to ENRICH a fail-closed
+    /// ``SupersessionRefused`` (an unproven changed key — the moment the
+    /// reset/compromise distinction matters most).
+    ///
+    /// Unlike ``verifyIdentityInLog(accountId:publishedSignaturePubkey:)``,
+    /// this does NOT run the inclusion proof or the no-rollback gate: it
+    /// is a context-only enrichment that can never change a trust
+    /// decision (gate 1 throws regardless). It only answers: "for this
+    /// account, does the log's latest entry COMMIT TO EXACTLY the served
+    /// key, and was that entry an owner reset?"
+    ///
+    /// Returns:
+    ///   * `true`  — the log's latest pubkey matches `servedPubkey` AND
+    ///     its `is_reset` marker is set (owner-initiated fresh-start).
+    ///   * `false` — the log's latest pubkey matches `servedPubkey` AND
+    ///     its `is_reset` marker is NOT set (an unexplained change —
+    ///     possible compromise).
+    ///   * `nil`   — the integration is off, the log is unreachable, the
+    ///     account is absent from the log, OR the log's latest pubkey
+    ///     does NOT match the served key (the marker is then about a
+    ///     different key and tells us nothing about the served one).
+    ///
+    /// Best-effort: ANY fault maps to `nil`. This helper NEVER throws.
+    ///
+    /// Mirror of the web `lookupServedKeyReset`.
+    ///
+    /// - Parameters:
+    ///   - accountId: the peer's raw 16-byte account_id.
+    ///   - servedPubkey: the 32-byte Ed25519 key discovery served.
+    public func lookupServedKeyReset(
+        accountId: Data,
+        servedPubkey: Data
+    ) async -> Bool? {
+        // off — no client, nothing to look up.
+        guard let client = client else {
+            return nil
+        }
+        do {
+            let accountKey = transparencyAccountKey(accountId: accountId)
+            guard let latest = try await client.fetchLatest(usernameHash: accountKey) else {
+                // Account not yet logged — no marker to read.
+                return nil
+            }
+            // The marker is only meaningful for the served key if the
+            // log's latest entry actually commits to it. A divergence
+            // means the marker describes some other key — return nil
+            // (unknown).
+            if latest.identityPubkey != servedPubkey {
+                return nil
+            }
+            return latest.isReset
+        } catch {
+            // Best-effort enrichment — any fault is "unknown".
+            return nil
         }
     }
 }

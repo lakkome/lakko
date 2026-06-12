@@ -96,6 +96,10 @@ public final class ContactsViewModel: ObservableObject {
         sendError = nil
         let intro = introInput
 
+        // The handle the user typed, prefixed with `@`, as the subject
+        // of a reset-aware ``SupersessionRefused`` message (KT-log S4).
+        let peerLabel = "@\(username)"
+
         Task {
             do {
                 _ = try await repository.sendContactRequest(
@@ -106,6 +110,21 @@ public final class ContactsViewModel: ObservableObject {
                 sendError = nil
                 usernameInput = ""
                 introInput = ""
+            } catch let refused as SupersessionRefused {
+                // KT-log S4 — the peer's AccountIdentity key changed and
+                // could not be authorised by a supersession proof
+                // (fail-closed, ADR-0016). Surface a RESET-AWARE message
+                // so the user can distinguish an owner-initiated identity
+                // reset (ADR-0017 lost-everything fresh-start) from a
+                // possible compromise, using the best-effort
+                // transparency-log marker the refusal carries. The gate
+                // already refused regardless of the log — this only
+                // colours the prompt.
+                sending = false
+                sendError = Self.supersessionRefusedMessage(
+                    loggedReset: refused.loggedReset,
+                    peerLabel: peerLabel
+                )
             } catch let err as ContactsError {
                 sending = false
                 sendError = userFacing(err)
@@ -348,5 +367,48 @@ public final class ContactsViewModel: ObservableObject {
             return (cause as? LocalizedError)?.errorDescription
                 ?? String(describing: cause)
         }
+    }
+
+    /// KT-log S4 — render the reset-aware copy for a fail-closed
+    /// ``SupersessionRefused``. The PURE `(loggedReset, peerLabel)` → copy
+    /// mapping (mirror of the web `supersessionRefusedMessage`); kept a
+    /// `static` so it can be unit-tested without the SwiftUI view.
+    ///
+    /// The refusal itself is NEVER changed by the log — gate 1 throws
+    /// regardless of `loggedReset`; this only colours the message.
+    ///
+    /// - Parameters:
+    ///   - loggedReset: the best-effort transparency-log reset marker the
+    ///     refusal carries (`true` = confirmed owner reset, `false` = no
+    ///     owner reset shown, `nil` = off / unreachable / inconclusive).
+    ///   - peerLabel: the handle the user typed (e.g. `@alice`), rendered
+    ///     verbatim as the subject; falls back to "This contact" when
+    ///     `nil` / empty.
+    nonisolated static func supersessionRefusedMessage(
+        loggedReset: Bool?,
+        peerLabel: String?
+    ) -> String {
+        let who: String
+        if let label = peerLabel, !label.isEmpty {
+            who = label
+        } else {
+            who = "This contact"
+        }
+        if loggedReset == true {
+            return "\(who) reset their secure identity (for example, they "
+                + "lost their device). The transparency log confirms this "
+                + "was an owner-initiated reset. If you trust this is really "
+                + "them, re-verify their safety number out of band before "
+                + "continuing."
+        }
+        if loggedReset == false {
+            return "\(who)'s secure identity changed, and the transparency "
+                + "log does NOT show an owner reset — treat this as a "
+                + "possible account compromise. Verify out of band before "
+                + "trusting."
+        }
+        return "\(who)'s secure identity changed and could not be confirmed "
+            + "against the transparency log. Verify out of band before "
+            + "trusting."
     }
 }

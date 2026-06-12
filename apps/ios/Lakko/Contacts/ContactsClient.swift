@@ -105,7 +105,22 @@ public final class ContactsClient {
     ) async throws {
         // Gate 1 (primary, fail-closed). A throw here short-circuits
         // gate 2.
-        try verifySupersessionGate(accountId: accountId, bundle: bundle)
+        do {
+            try verifySupersessionGate(accountId: accountId, bundle: bundle)
+        } catch var refused as SupersessionRefused {
+            // KT-log S4 — on a fail-closed refusal of an UNPROVEN
+            // CHANGED key (the moment the reset-vs-compromise distinction
+            // matters most), enrich the error with a BEST-EFFORT
+            // transparency lookup of the NEW key's `is_reset` marker.
+            // This NEVER weakens the gate: gate 1 already threw, we
+            // re-throw it unchanged save for the added context. Any log
+            // fault leaves `loggedReset` nil.
+            refused.loggedReset = await bestEffortServedKeyReset(
+                accountId: accountId,
+                bundle: bundle
+            )
+            throw refused
+        }
 
         // Gate 2 (additive, best-effort). Hard-fails only on rollback.
         let accountIdB64 = base64Encode(accountId)
@@ -118,6 +133,30 @@ public final class ContactsClient {
         try await checkTransparencyLog(
             accountId: accountId,
             accountIdB64: accountIdB64,
+            servedPubkey: servedPubkey
+        )
+    }
+
+    /// KT-log S4 — best-effort lookup of the served (refused) key's
+    /// `is_reset` marker, used ONLY to enrich a ``SupersessionRefused``.
+    ///
+    /// Wraps ``TransparencyVerify/lookupServedKeyReset(accountId:servedPubkey:)``
+    /// (which never throws) and falls back to `nil` if the served pubkey
+    /// is not decodable. Returns `true` / `false` only when the log's
+    /// latest entry commits to exactly the served key; `nil` otherwise
+    /// (off / unreachable / absent / pubkey-divergence). The enrichment
+    /// must never break the already-failing refusal path.
+    ///
+    /// Mirror of the web `bestEffortServedKeyReset`.
+    private func bestEffortServedKeyReset(
+        accountId: Data,
+        bundle: IdentityFetchResponse
+    ) async -> Bool? {
+        guard let servedPubkey = base64Decode(bundle.signaturePubkey) else {
+            return nil
+        }
+        return await transparencyVerify.lookupServedKeyReset(
+            accountId: accountId,
             servedPubkey: servedPubkey
         )
     }
@@ -313,10 +352,11 @@ public final class ContactsClient {
         accountIdB64: String,
         servedPubkey: Data
     ) async throws {
-        let status = await transparencyVerify.verifyIdentityInLog(
+        let result = await transparencyVerify.verifyIdentityInLog(
             accountId: accountId,
             publishedSignaturePubkey: servedPubkey
         )
+        let status = result.status
 
         // Rollback is the one hard failure (unambiguous attack).
         if status == .rollback {
@@ -324,8 +364,12 @@ public final class ContactsClient {
         }
 
         // Record the verdict on the pin record (best-effort; the pin
-        // exists because the supersession gate ran first).
+        // exists because the supersession gate ran first). KT-log S4
+        // also persists the `/latest` entry's `is_reset` marker next to
+        // the status (a `nil` clears any stale marker — no latest was
+        // read).
         pinStore.recordLogStatus(accountIdB64: accountIdB64, logStatus: status.rawValue)
+        pinStore.recordLogReset(accountIdB64: accountIdB64, isReset: result.isReset)
 
         switch status {
         case .mismatch:
@@ -962,10 +1006,39 @@ public struct SupersessionRefused: Error, LocalizedError, Equatable {
     /// Human-readable detail for logs / the OOB-reverify prompt.
     public let message: String
 
-    public init(reason: Reason, accountIdB64: String, message: String) {
+    /// KT-log S4 — best-effort transparency-log context for the NEW
+    /// (refused) key, attached so the UI can distinguish an
+    /// owner-initiated identity RESET from an unexplained key change.
+    ///
+    ///   * `true`  — the log's latest entry commits to EXACTLY the
+    ///     served new key AND records it as an owner-initiated reset
+    ///     (ADR-0017 lost-everything fresh-start).
+    ///   * `false` — the log's latest entry commits to the served new
+    ///     key but does NOT record a reset (an unexplained change →
+    ///     possible compromise).
+    ///   * `nil`   — the log is off / unreachable / the account is
+    ///     absent / the log's latest pubkey does not match the served
+    ///     key (the marker is then about a different key, so it is
+    ///     unknown).
+    ///
+    /// This is **best-effort enrichment only**: a log failure NEVER
+    /// changes the refusal — gate 1 (the supersession/pin gate) throws
+    /// regardless. It only colours the OOB-reverify prompt. Mutable so
+    /// the async `verifyBundleAccountKey` can populate it on the
+    /// already-thrown error before re-throwing (mirror of the web
+    /// `loggedReset` field).
+    public var loggedReset: Bool?
+
+    public init(
+        reason: Reason,
+        accountIdB64: String,
+        message: String,
+        loggedReset: Bool? = nil
+    ) {
         self.reason = reason
         self.accountIdB64 = accountIdB64
         self.message = message
+        self.loggedReset = loggedReset
     }
 
     public var errorDescription: String? { message }

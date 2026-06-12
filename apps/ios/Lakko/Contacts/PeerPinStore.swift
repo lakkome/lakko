@@ -79,15 +79,27 @@ public final class PeerPinStore {
         /// written before S3d (or by a path that did not run the
         /// check). Mirror of the web pin-record `logStatus`.
         public let logStatus: String?
+        /// KT-log S4: the `is_reset` marker the transparency log's
+        /// `/latest` entry carried for the CURRENTLY-PINNED key, when a
+        /// latest entry was read (`confirmed` / `mismatch`). `true`
+        /// means the log records an owner-initiated identity RESET
+        /// (ADR-0017 lost-everything fresh-start); `false` means a
+        /// non-reset entry; `nil` when no latest entry was read (or the
+        /// pin predates S4). Stored next to ``logStatus`` so the UI can
+        /// surface the reset-vs-compromise distinction. Mirror of the
+        /// web pin-record `isReset`.
+        public let isReset: Bool?
 
         public init(
             pinnedSignaturePubkeyB64: String,
             rotationMarker: Int64,
-            logStatus: String? = nil
+            logStatus: String? = nil,
+            isReset: Bool? = nil
         ) {
             self.pinnedSignaturePubkeyB64 = pinnedSignaturePubkeyB64
             self.rotationMarker = rotationMarker
             self.logStatus = logStatus
+            self.isReset = isReset
         }
     }
 
@@ -182,14 +194,17 @@ public final class PeerPinStore {
            rotationMarker < existing.rotationMarker {
             return .rejectedBackward
         }
-        // Preserve any recorded `logStatus` (KT-log S3d) across a re-pin
-        // — it is an orthogonal, separately-written field, and a key
-        // rotation shouldn't silently drop the last log verdict (mirror
-        // of the web `setPin`).
+        // Preserve any recorded `logStatus` (KT-log S3d) + `isReset`
+        // (KT-log S4) across a re-pin — they are orthogonal,
+        // separately-written fields, and a key rotation shouldn't
+        // silently drop the last log verdict / reset marker. The fetch
+        // path re-records both right after a re-pin, so a stale carried
+        // value is replaced immediately (mirror of the web `setPin`).
         map[accountIdB64] = AccountPubkeyPin(
             pinnedSignaturePubkeyB64: pinnedSignaturePubkeyB64,
             rotationMarker: rotationMarker,
-            logStatus: existing?.logStatus
+            logStatus: existing?.logStatus,
+            isReset: existing?.isReset
         )
         saveMap(map)
         return .set
@@ -214,7 +229,8 @@ public final class PeerPinStore {
         map[accountIdB64] = AccountPubkeyPin(
             pinnedSignaturePubkeyB64: existing.pinnedSignaturePubkeyB64,
             rotationMarker: existing.rotationMarker,
-            logStatus: logStatus
+            logStatus: logStatus,
+            isReset: existing.isReset
         )
         saveMap(map)
         return true
@@ -225,6 +241,41 @@ public final class PeerPinStore {
     /// `readLogStatus`.
     public func readLogStatus(accountIdB64: String) -> String? {
         loadMap()[accountIdB64]?.logStatus
+    }
+
+    /// Record the transparency log's `is_reset` marker (KT-log S4) for
+    /// an account, keyed on the same stable `account_id` as the pin.
+    ///
+    /// Mirrors ``recordLogStatus(accountIdB64:logStatus:)``: writes onto
+    /// the existing pin record so the marker travels with the pinned
+    /// key, and is a **no-op when no pin exists** (the log check runs
+    /// right after the supersession gate, which TOFU-pins on first
+    /// sight, so a pin is present by the time a marker is recorded). A
+    /// `nil` argument (no latest entry was read — `absent` /
+    /// `unreachable` / `off` / `rollback`) CLEARS any stale marker so
+    /// the UI never surfaces a reset claim that the current log state no
+    /// longer supports. Returns whether a write happened (a present
+    /// pin). Mirror of the web `recordLogReset`.
+    @discardableResult
+    public func recordLogReset(accountIdB64: String, isReset: Bool?) -> Bool {
+        var map = loadMap()
+        guard let existing = map[accountIdB64] else { return false }
+        if existing.isReset == isReset { return true } // idempotent (incl. nil==nil)
+        map[accountIdB64] = AccountPubkeyPin(
+            pinnedSignaturePubkeyB64: existing.pinnedSignaturePubkeyB64,
+            rotationMarker: existing.rotationMarker,
+            logStatus: existing.logStatus,
+            isReset: isReset
+        )
+        saveMap(map)
+        return true
+    }
+
+    /// Read the recorded `is_reset` marker (KT-log S4) for an account,
+    /// or `nil` when no pin / no recorded marker. Exposed for the UI.
+    /// Mirror of the web `readLogReset`.
+    public func readLogReset(accountIdB64: String) -> Bool? {
+        loadMap()[accountIdB64]?.isReset
     }
 
     /// Remove the pin for `accountIdB64`. No-op when absent. Exposed
