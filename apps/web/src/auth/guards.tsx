@@ -35,7 +35,48 @@ export function RequireSession(props: { children: JSX.Element }): JSX.Element {
       when={auth.state().kind === "session"}
       fallback={<UnauthenticatedFallback />}
     >
+      <IdentitySecurityBanner />
       {props.children}
+    </Show>
+  );
+}
+
+/**
+ * ADR-0017 defence-in-depth (lakko-security Phase-3A follow-up (i)) — a
+ * dismissible security banner shown when the account's published identity
+ * did not match this device's at login (someone replaced it; the
+ * ACCESS-hijack signature). Renders nothing in the normal case.
+ */
+function IdentitySecurityBanner(): JSX.Element {
+  const auth = useAuth();
+  return (
+    <Show when={auth.identityAlert() !== null}>
+      <div
+        role="alert"
+        style={{
+          background: "var(--danger-bg, #3a1414)",
+          color: "var(--danger-fg, #ffb4b4)",
+          border: "1px solid var(--danger-border, #c0392b)",
+          "border-radius": "8px",
+          padding: "0.75rem 1rem",
+          margin: "0.5rem",
+          display: "flex",
+          gap: "0.75rem",
+          "align-items": "flex-start",
+        }}
+      >
+        <div style={{ flex: "1" }}>
+          <strong>Your account's secure identity was changed.</strong>{" "}
+          Someone published a different identity key for this account. If
+          this was you (you reset your identity on another device), you can
+          dismiss this. If it was NOT you, your account may be compromised —
+          re-verify your safety number with your contacts out of band, and
+          rotate your password / passkeys.
+        </div>
+        <button type="button" onClick={() => auth.dismissIdentityAlert()}>
+          Dismiss
+        </button>
+      </div>
     </Show>
   );
 }

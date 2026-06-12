@@ -259,6 +259,13 @@ export interface AuthApi {
    *  session lands. Kept off the `AuthState` object so it is not
    *  threaded through the route guards. */
   readonly freshPhrase: Accessor<string | null>;
+  /** ADR-0017 defence-in-depth — a non-null value means this account's
+   *  published identity did NOT match this device's at login (someone
+   *  replaced it; the ACCESS-hijack signature). Surfaced as a dismissible
+   *  security banner. `null` in the normal case. */
+  readonly identityAlert: Accessor<IdentityAlert | null>;
+  /** Dismiss the identity-changed security banner. */
+  dismissIdentityAlert(): void;
   /** Run the OPAQUE-PAKE registration flow.
    *
    *  Throws on network / server errors (the form surfaces them).
@@ -511,6 +518,20 @@ interface PendingFreshPhrase {
   readonly phrase: string;
 }
 
+/**
+ * ADR-0017 defence-in-depth (lakko-security Phase-3A follow-up (i)) — a
+ * security alert raised when this device's canonical AccountIdentity did
+ * not match the account's currently-published bundle at login. The
+ * load-bearing case is `published-identity-changed`: someone published a
+ * DIFFERENT identity for this account (the ACCESS-hijack signature — an
+ * attacker minted a fresh identity via the lost-everything path). Carried
+ * as a dismissible banner so the owner finds out even if the attacker
+ * acted first.
+ */
+export interface IdentityAlert {
+  readonly kind: "published-identity-changed";
+}
+
 const STORAGE_KEY = "lakko.auth.v1";
 
 interface PersistedSession {
@@ -588,6 +609,15 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
   // closure until the session is finished.
   const [pendingFreshPhrase, setPendingFreshPhrase] =
     createSignal<PendingFreshPhrase | null>(null);
+  // ADR-0017 defence-in-depth (lakko-security Phase-3A follow-up (i)):
+  // a non-null value means this device's canonical AccountIdentity did
+  // NOT match the account's currently-published bundle at login — i.e.
+  // someone published a DIFFERENT identity for this account (the
+  // ACCESS-hijack signature: an attacker minted a fresh identity via the
+  // lost-everything path). Surfaced as a dismissible security banner so
+  // the owner sees it even if the attacker beat them to it.
+  const [identityAlert, setIdentityAlert] =
+    createSignal<IdentityAlert | null>(null);
   // ADR-0018 factor (d): two-step phone/email OTP recover. `…Start`
   // resolves the username → account_id, sends a code, and stashes the
   // resolved context here so `…Finish` can submit the code without
@@ -629,6 +659,33 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     chats.setIdentity(canonical);
 
     await rehydrateMlsState(chats, args.accountIdB64);
+
+    // ADR-0017 defence-in-depth (lakko-security Phase-3A follow-up (i)) —
+    // BEFORE re-publishing our own bundle, observe what is currently
+    // published. If a DIFFERENT identity is on file for this account, it
+    // means someone replaced it (the ACCESS-hijack signature: an attacker
+    // minted a fresh identity via the lost-everything path). Raise a
+    // dismissible alert so the owner finds out even if the attacker acted
+    // first. Best-effort: a 404 (nothing published yet — fresh signup) or a
+    // fetch error never alerts (the recover-path fail-closed gates own the
+    // refuse-vs-alert distinction; this is a passive self-check). The
+    // re-publish just below then heals the owner's published identity.
+    setIdentityAlert(null);
+    try {
+      const current = await discovery.identityFetch(args.accountIdBytes);
+      if (
+        current !== null &&
+        !bytesEqual(
+          base64Decode(current.signature_pubkey),
+          canonical.signaturePublicKey,
+        )
+      ) {
+        setIdentityAlert({ kind: "published-identity-changed" });
+      }
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("self-identity consistency check failed", err);
+    }
 
     try {
       await uploadIdentityBundle(discovery, args.accountIdBytes, canonical);
@@ -809,6 +866,8 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
     state,
     identitySecrets,
     freshPhrase: () => pendingFreshPhrase()?.phrase ?? null,
+    identityAlert,
+    dismissIdentityAlert: () => setIdentityAlert(null),
     async signup(username, password) {
       const trimmed = username.trim();
       if (trimmed.length === 0) {
@@ -2284,6 +2343,7 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         console.warn("push unsubscribe (logout) failed", err);
       });
       chats.clear();
+      setIdentityAlert(null);
       setState({
         kind: "anon",
         ...(cached !== null ? { cachedUsername: cached.username } : {}),
