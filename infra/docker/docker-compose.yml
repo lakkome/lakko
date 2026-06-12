@@ -164,6 +164,11 @@ services:
       # tokens auth mints (identity-bundle upload is gated).
       LAKKO_SESSION_TOKEN_SECRET: ${LAKKO_SESSION_TOKEN_SECRET:-ZGV2LXNlc3Npb24tdG9rZW4tc2VjcmV0LWZvci1sb2NhbC10ZXN0aW5nLW9ubHkhIQ==}
       LAKKO_DISCOVERY_POW_EFFORT_BITS: ${LAKKO_DISCOVERY_POW_EFFORT_BITS:-8}
+      # ADR-0017 (ii) — per-account cool-down (seconds) on UNPROVEN
+      # AccountIdentity changes to a NEW key (the lost-everything publish),
+      # blunting attacker churn. Default 1 h; 0 disables. A heal-back to the
+      # previous key and a proven rotation are never gated.
+      LAKKO_DISCOVERY_FRESH_IDENTITY_COOLDOWN_SECS: ${LAKKO_DISCOVERY_FRESH_IDENTITY_COOLDOWN_SECS:-3600}
     ports:
       - "127.0.0.1:8084:8084"
     healthcheck:

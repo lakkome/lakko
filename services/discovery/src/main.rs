@@ -131,6 +131,12 @@ pub(crate) struct AppState {
     /// endpoints. Defense in depth on top of the
     /// existing PoW gate.
     pub(crate) rate_limiter: Arc<rate_limit::RateLimiter>,
+    /// ADR-0017 defence-in-depth (lakko-security Phase-3A follow-up (ii))
+    /// — the per-account cool-down (seconds) between UNPROVEN
+    /// AccountIdentity changes to a NEW key, blunting attacker churn on the
+    /// lost-everything path. `0` disables the gate. From
+    /// `LAKKO_DISCOVERY_FRESH_IDENTITY_COOLDOWN_SECS` (default 3600).
+    pub(crate) fresh_identity_cooldown_secs: i64,
 }
 
 #[tokio::main]
@@ -193,11 +199,25 @@ async fn main() -> Result<()> {
     let rate_limiter = Arc::new(rate_limit::RateLimiter::new(rate_per_min, rate_burst));
     tracing::info!(rate_per_min, rate_burst, "discovery rate limiter armed",);
 
+    // ADR-0017 (ii) — fresh-identity-publish cool-down (seconds). Default
+    // 1 h; 0 disables. A negative value is clamped to 0 (disabled).
+    let fresh_identity_cooldown_secs: i64 =
+        std::env::var("LAKKO_DISCOVERY_FRESH_IDENTITY_COOLDOWN_SECS")
+            .ok()
+            .and_then(|v| v.parse::<i64>().ok())
+            .unwrap_or(3600)
+            .max(0);
+    tracing::info!(
+        fresh_identity_cooldown_secs,
+        "identity fresh-publish cool-down armed",
+    );
+
     let state = AppState {
         db: pool.clone(),
         oprf: Arc::new(oprf_server),
         session_token_secret: Arc::new(session_token_secret),
         rate_limiter: Arc::clone(&rate_limiter),
+        fresh_identity_cooldown_secs,
     };
 
     let _pow_pruner = pow::spawn_pruner(pool.clone());

@@ -173,34 +173,276 @@ pub(crate) async fn upload(
         ));
     }
 
-    sqlx::query(
-        "INSERT INTO identity_bundles \
-            (account_id, signature_pubkey, x25519_pubkey, supersession_proof) \
-         VALUES (?, ?, ?, ?) \
-         ON DUPLICATE KEY UPDATE \
-            signature_pubkey   = VALUES(signature_pubkey), \
-            x25519_pubkey      = VALUES(x25519_pubkey), \
-            supersession_proof = COALESCE(VALUES(supersession_proof), supersession_proof)",
+    // ADR-0017 defence-in-depth (lakko-security Phase-3A follow-up (ii)) —
+    // the upsert is gated by a per-account cool-down on UNPROVEN key changes
+    // (see `apply_identity_upload_gated`); a fresh-publish flood gets 429.
+    apply_identity_upload_gated(
+        &state.db,
+        state.fresh_identity_cooldown_secs,
+        &account_id,
+        &signature_pubkey,
+        &x25519_pubkey,
+        supersession_proof.as_deref(),
     )
-    .bind(&account_id[..])
-    .bind(&signature_pubkey[..])
-    .bind(&x25519_pubkey[..])
-    .bind(supersession_proof.as_deref())
-    .execute(&state.db)
-    .await
-    .map_err(|e| {
-        tracing::error!(error = %e, "upsert identity_bundles");
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "internal db error".to_string(),
-        )
-    })?;
+    .await?;
 
     tracing::info!(
         account_id = %B64.encode(account_id),
         "identity bundle upserted",
     );
     Ok(Json(UploadResponse { ok: true }))
+}
+
+/// Map a sqlx error from the cool-down transaction to a 500.
+fn cooldown_db_err(e: sqlx::Error) -> (StatusCode, String) {
+    tracing::error!(error = %e, "identity_bundles cool-down tx");
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "internal db error".to_string(),
+    )
+}
+
+/// Apply the identity-bundle upsert under the ADR-0017 (ii) fresh-identity
+/// cool-down. Read-compare-conditional-write under a row lock so the check
+/// is race-free. NEVER gates: a no-change re-upload, a proven rotation (a
+/// valid supersession proof — sanctioned, ADR-0016), or a HEAL back to the
+/// immediately-previous key (the owner's warm-login re-publish after an
+/// attacker replaced their key — so the cool-down can never lock a
+/// legitimate owner out of restoring their identity). The gated case is a
+/// CHANGE to a brand-new key with NO proof while still cooling down → 429.
+async fn apply_identity_upload_gated(
+    db: &sqlx::MySqlPool,
+    cooldown_secs: i64,
+    account_id: &[u8],
+    signature_pubkey: &[u8],
+    x25519_pubkey: &[u8],
+    supersession_proof: Option<&[u8]>,
+) -> Result<(), (StatusCode, String)> {
+    let mut tx = db.begin().await.map_err(cooldown_db_err)?;
+
+    // Row lock + the three facts we need: the current key, the
+    // immediately-previous key, and whether the last unproven NEW-key
+    // change is still within the cool-down window (computed server-side to
+    // avoid any Rust/DB clock skew; a `0`-second window never matches,
+    // since the elapsed seconds are always `>= 0`).
+    let existing: Option<(Vec<u8>, Option<Vec<u8>>, i64)> = sqlx::query_as(
+        "SELECT signature_pubkey, previous_signature_pubkey, \
+            CAST( \
+                last_unproven_key_change_at IS NOT NULL \
+                AND TIMESTAMPDIFF(SECOND, last_unproven_key_change_at, NOW(3)) < ? \
+            AS SIGNED) \
+         FROM identity_bundles WHERE account_id = ? FOR UPDATE",
+    )
+    .bind(cooldown_secs)
+    .bind(account_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(cooldown_db_err)?;
+
+    match existing {
+        None => {
+            // First publish for this account — nothing to gate.
+            sqlx::query(
+                "INSERT INTO identity_bundles \
+                    (account_id, signature_pubkey, x25519_pubkey, supersession_proof) \
+                 VALUES (?, ?, ?, ?)",
+            )
+            .bind(account_id)
+            .bind(signature_pubkey)
+            .bind(x25519_pubkey)
+            .bind(supersession_proof)
+            .execute(&mut *tx)
+            .await
+            .map_err(cooldown_db_err)?;
+        },
+        Some((current, previous, within_cooldown)) => {
+            let outcome = cooldown_outcome(
+                &current,
+                previous.as_deref(),
+                within_cooldown != 0,
+                signature_pubkey,
+                supersession_proof.is_some(),
+            );
+
+            let CooldownOutcome::Apply {
+                previous_becomes_current,
+                bump_marker,
+            } = outcome
+            else {
+                // Gated: a CHANGE to a brand-new key, no proof, not a heal,
+                // still cooling down.
+                tx.rollback().await.map_err(cooldown_db_err)?;
+                tracing::warn!(
+                    account_id = %B64.encode(account_id),
+                    "identity fresh-publish refused — cool-down active",
+                );
+                return Err((
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "identity changed too recently — try again later".to_string(),
+                ));
+            };
+
+            // On any key change, the OLD current becomes `previous`;
+            // otherwise keep the stored `previous`. Bump the cool-down
+            // marker ONLY for an unproven change to a new key (the churn
+            // surface); heals + proven rotations leave it untouched.
+            let new_previous: Option<&[u8]> = if previous_becomes_current {
+                Some(current.as_slice())
+            } else {
+                previous.as_deref()
+            };
+            let bump_marker: i64 = i64::from(bump_marker);
+
+            sqlx::query(
+                "UPDATE identity_bundles SET \
+                    signature_pubkey            = ?, \
+                    x25519_pubkey               = ?, \
+                    supersession_proof          = COALESCE(?, supersession_proof), \
+                    previous_signature_pubkey   = ?, \
+                    last_unproven_key_change_at = IF(?, NOW(3), last_unproven_key_change_at) \
+                 WHERE account_id = ?",
+            )
+            .bind(signature_pubkey)
+            .bind(x25519_pubkey)
+            .bind(supersession_proof)
+            .bind(new_previous)
+            .bind(bump_marker)
+            .bind(account_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(cooldown_db_err)?;
+        },
+    }
+
+    tx.commit().await.map_err(cooldown_db_err)?;
+    Ok(())
+}
+
+/// The ADR-0017 (ii) cool-down decision for an upload against an existing
+/// row. `Reject` = a CHANGE to a brand-new key, with no proof, that is not
+/// a heal-back, while still cooling down. `Apply` carries the two writes the
+/// caller must perform.
+#[derive(Debug, PartialEq, Eq)]
+enum CooldownOutcome {
+    /// Refuse — 429 (still cooling down on a new-key churn).
+    Reject,
+    /// Proceed with the upsert.
+    Apply {
+        /// The OLD current key becomes `previous` (true on any key change).
+        previous_becomes_current: bool,
+        /// Bump `last_unproven_key_change_at` to now (true only for an
+        /// unproven change to a brand-new key — the churn surface).
+        bump_marker: bool,
+    },
+}
+
+/// Pure decision matrix for the fresh-identity cool-down (no I/O so it is
+/// unit-testable). NEVER rejects a no-change re-upload, a proven rotation,
+/// or a HEAL back to the immediately-previous key.
+fn cooldown_outcome(
+    current: &[u8],
+    previous: Option<&[u8]>,
+    within_cooldown: bool,
+    new_sig: &[u8],
+    has_proof: bool,
+) -> CooldownOutcome {
+    let key_changed = current != new_sig;
+    let is_heal = previous == Some(new_sig);
+    let unproven_new_key = key_changed && !has_proof && !is_heal;
+
+    if unproven_new_key && within_cooldown {
+        CooldownOutcome::Reject
+    } else {
+        CooldownOutcome::Apply {
+            previous_becomes_current: key_changed,
+            bump_marker: unproven_new_key,
+        }
+    }
+}
+
+#[cfg(test)]
+mod cooldown_tests {
+    use super::{cooldown_outcome, CooldownOutcome};
+
+    const A: &[u8] = b"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    const B: &[u8] = b"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB";
+    const C: &[u8] = b"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC";
+
+    #[test]
+    fn no_change_never_gated_and_never_bumps() {
+        // Re-upload of the SAME key, even within the cool-down → Apply, no
+        // previous swap, no marker bump.
+        assert_eq!(
+            cooldown_outcome(A, Some(B), true, A, false),
+            CooldownOutcome::Apply {
+                previous_becomes_current: false,
+                bump_marker: false,
+            }
+        );
+    }
+
+    #[test]
+    fn proven_rotation_never_gated_and_never_bumps() {
+        // Key change WITH a proof, even within the cool-down → Apply, swap
+        // previous, but do NOT bump the marker (proven rotations are not
+        // rate-limited).
+        assert_eq!(
+            cooldown_outcome(A, None, true, B, true),
+            CooldownOutcome::Apply {
+                previous_becomes_current: true,
+                bump_marker: false,
+            }
+        );
+    }
+
+    #[test]
+    fn first_unproven_change_allowed_and_bumps() {
+        // Unproven change to a new key while NOT cooling down → Apply +
+        // bump the marker (arms the cool-down for the next one).
+        assert_eq!(
+            cooldown_outcome(A, None, false, B, false),
+            CooldownOutcome::Apply {
+                previous_becomes_current: true,
+                bump_marker: true,
+            }
+        );
+    }
+
+    #[test]
+    fn second_unproven_new_key_within_cooldown_rejected() {
+        // The churn case: a DIFFERENT brand-new key, no proof, still
+        // cooling down → Reject.
+        assert_eq!(
+            cooldown_outcome(B, Some(A), true, C, false),
+            CooldownOutcome::Reject
+        );
+    }
+
+    #[test]
+    fn heal_back_to_previous_allowed_within_cooldown() {
+        // The owner's warm-login re-publish after an attacker replaced the
+        // key: current=B (attacker), previous=A (owner), new=A. Even within
+        // the cool-down this is a HEAL → Apply, never Reject.
+        assert_eq!(
+            cooldown_outcome(B, Some(A), true, A, false),
+            CooldownOutcome::Apply {
+                previous_becomes_current: true,
+                bump_marker: false,
+            }
+        );
+    }
+
+    #[test]
+    fn unproven_new_key_outside_cooldown_allowed() {
+        // A new key, no proof, but the cool-down has elapsed → Apply + bump.
+        assert_eq!(
+            cooldown_outcome(B, Some(A), false, C, false),
+            CooldownOutcome::Apply {
+                previous_becomes_current: true,
+                bump_marker: true,
+            }
+        );
+    }
 }
 
 // ============================================================================
