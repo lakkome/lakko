@@ -2558,6 +2558,138 @@ pub fn verify_supersession(
     Ok(new.to_vec())
 }
 
+/// Verify a complete identity-rotation chain against the KT log (G-30 #2,
+/// ADR-0019). Unlike [`verify_supersession`] — which checks only the bundle's
+/// standalone proof against the local pin — this anchors the rotation to the
+/// operator-signed, append-only log: a rotation is bound to a SINGLE committed
+/// version under a no-rollback root, which closes the leaked-old-key
+/// equivocation gate.
+///
+/// The decomposed fields mirror the JSON a client gathers from
+/// `/transparency/{root,latest,proof}` plus the `supersession_proof` carried in
+/// the peer's identity bundle and what the peer currently pins. On success the
+/// caller re-pins to the returned NEW public key (32 bytes) at `entry_version`.
+///
+/// `last_seen_log_size` is the client's persisted monotone high-water mark; the
+/// chain's no-rollback check reads only the size, so the stale `SignedRoot`'s
+/// other fields are reconstructed as zero (never inspected).
+///
+/// # Errors
+///
+/// [`FfiError::Identity`] if any fixed-length field is the wrong length
+/// (`*_tree_root` / `entry_username_hash` / `pinned_old_pubkey` != 32,
+/// `root_signature` != 64, `audit_path` not a multiple of 32), `operator_pubkey`
+/// is not a valid Ed25519 key, or any chain gate fails (forged root, rollback,
+/// inclusion mismatch, wrong account, non-newer version, or a supersession proof
+/// that is absent / not signed by the pinned old key / out-of-window / expired /
+/// not authorising exactly the entry's new key).
+#[uniffi::export]
+#[allow(clippy::too_many_arguments)]
+pub fn verify_supersession_chain(
+    // The operator key the client pinned out-of-band.
+    operator_pubkey: Vec<u8>,
+    // The newly-presented signed root (from `/transparency/root`).
+    new_tree_root: Vec<u8>,
+    new_log_size: u64,
+    new_timestamp_unix: u64,
+    new_root_signature: Vec<u8>,
+    // The new log entry (from `/transparency/latest/:account_key`). The
+    // `entry_username_hash` is the account_key the client queried with and is
+    // used for both the entry and the pin (the inclusion proof is what binds it
+    // to the root).
+    entry_username_hash: Vec<u8>,
+    entry_identity_pubkey: Vec<u8>,
+    entry_version: u64,
+    // Its Merkle inclusion proof (from `/transparency/proof/:idx`).
+    inclusion_leaf_index: u64,
+    inclusion_audit_path: Vec<u8>,
+    // The supersession proof authorising the transition (from the peer's
+    // identity bundle).
+    supersession_proof: Vec<u8>,
+    // What the peer currently pins.
+    pinned_old_pubkey: Vec<u8>,
+    pinned_version: u64,
+    last_seen_log_size: u64,
+    now_unix_secs: i64,
+) -> Result<Vec<u8>, FfiError> {
+    let operator =
+        lakko_crypto::signing::VerifyingKey::from_bytes(&operator_pubkey).map_err(|_| {
+            FfiError::Identity("operator pubkey is not a valid Ed25519 key".to_string())
+        })?;
+    let new_tree_root: lakko_transparency::TreeHash = new_tree_root
+        .as_slice()
+        .try_into()
+        .map_err(|_| FfiError::Identity("new_tree_root must be 32 bytes".to_string()))?;
+    let new_root_signature = lakko_crypto::signing::Signature::from_bytes(&new_root_signature)
+        .map_err(|_| FfiError::Identity("root_signature must be 64 bytes".to_string()))?;
+    let username_hash: [u8; 32] = entry_username_hash
+        .as_slice()
+        .try_into()
+        .map_err(|_| FfiError::Identity("entry_username_hash must be 32 bytes".to_string()))?;
+    let pinned_old: [u8; 32] = pinned_old_pubkey
+        .as_slice()
+        .try_into()
+        .map_err(|_| FfiError::Identity("pinned_old_pubkey must be 32 bytes".to_string()))?;
+
+    if inclusion_audit_path.len() % 32 != 0 {
+        return Err(FfiError::Identity(
+            "audit_path length must be a multiple of 32 bytes".to_string(),
+        ));
+    }
+    let audit_path: Vec<lakko_transparency::TreeHash> = inclusion_audit_path
+        .chunks_exact(32)
+        .map(|c| {
+            let mut h = [0u8; 32];
+            h.copy_from_slice(c);
+            h
+        })
+        .collect();
+
+    let new_root = lakko_transparency::SignedRoot {
+        tree_root: new_tree_root,
+        log_size: new_log_size,
+        timestamp_unix: new_timestamp_unix,
+        signature: new_root_signature,
+    };
+    let new_entry = lakko_transparency::LogEntry {
+        username_hash,
+        identity_pubkey: entry_identity_pubkey,
+        version: entry_version,
+    };
+    let inclusion = lakko_transparency::InclusionProof {
+        leaf_index: inclusion_leaf_index,
+        audit_path,
+    };
+    // The chain's `check_no_rollback` reads only `log_size`; reconstruct the
+    // stale root from the client's high-water mark with zeroed other fields
+    // (never inspected). A zero signature parses fine — it is never verified.
+    let last_seen_root = lakko_transparency::SignedRoot {
+        tree_root: [0u8; 32],
+        log_size: last_seen_log_size,
+        timestamp_unix: 0,
+        signature: lakko_crypto::signing::Signature::from_bytes(&[0u8; 64])
+            .map_err(|_| FfiError::Identity("zero signature parse".to_string()))?,
+    };
+
+    let pinned = lakko_transparency::PinnedIdentity {
+        username_hash: &username_hash,
+        old_pubkey: &pinned_old,
+        version: pinned_version,
+        last_seen_root: &last_seen_root,
+    };
+    let evidence = lakko_transparency::RotationEvidence {
+        operator: &operator,
+        new_root: &new_root,
+        new_entry: &new_entry,
+        inclusion: &inclusion,
+        supersession_proof: &supersession_proof,
+    };
+
+    let rotated = lakko_transparency::verify_supersession_chain(&pinned, &evidence, now_unix_secs)
+        .map_err(|e| FfiError::Identity(format!("supersession chain verify: {e}")))?;
+    Ok(rotated.new_pubkey.to_vec())
+}
+
 // ---------------------------------------------------------------------------
 // Key-transparency inclusion verifier (KT-log S3b).
 //
@@ -3279,5 +3411,175 @@ mod tests {
         );
 
         call_inclusion(&base).expect("base fixture still valid");
+    }
+
+    // -- G-30 #2 / ADR-0019: verify_supersession_chain --
+
+    /// Decomposed FFI fields for a rotation-chain call: a `(v1 old key) ->
+    /// (v2 new key)` log plus the supersession proof + the pin.
+    struct DecomposedChain {
+        operator_pubkey: Vec<u8>,
+        new_tree_root: Vec<u8>,
+        new_log_size: u64,
+        new_timestamp_unix: u64,
+        new_root_signature: Vec<u8>,
+        entry_username_hash: Vec<u8>,
+        entry_identity_pubkey: Vec<u8>,
+        entry_version: u64,
+        inclusion_leaf_index: u64,
+        inclusion_audit_path: Vec<u8>,
+        supersession_proof: Vec<u8>,
+        pinned_old_pubkey: Vec<u8>,
+        pinned_version: u64,
+        last_seen_log_size: u64,
+        now_unix_secs: i64,
+        new_pubkey: Vec<u8>,
+    }
+
+    /// Build a 2-entry log for `alice` — v1 under `old`, v2 under `new` — sign
+    /// the root, mint an old->new supersession proof, and decompose into the
+    /// chain FFI field shape pinned at v1.
+    fn build_chain_fixture() -> DecomposedChain {
+        use lakko_transparency::{InMemoryLog, LogEntry, SupersessionProof};
+        let operator = lakko_crypto::signing::SigningKey::generate();
+        let old_sk = lakko_crypto::signing::SigningKey::generate();
+        let new_sk = lakko_crypto::signing::SigningKey::generate();
+        let account_key = lakko_crypto::hash::blake3(b"alice");
+
+        let mut log = InMemoryLog::new(operator);
+        log.append(LogEntry {
+            username_hash: account_key,
+            identity_pubkey: old_sk.verifying_key().to_bytes().to_vec(),
+            version: 1,
+        });
+        let v2_idx = log.append(LogEntry {
+            username_hash: account_key,
+            identity_pubkey: new_sk.verifying_key().to_bytes().to_vec(),
+            version: 2,
+        });
+        let signed = log.sign_current_root(1_700_000_000);
+        let proof = log.prove_inclusion(v2_idx).expect("proof");
+        let entry = log.entry(v2_idx).expect("entry").clone();
+
+        let issued = 1_700_000_000_i64;
+        let expires = issued + 1000;
+        let supersession_proof = SupersessionProof::new(
+            old_sk.verifying_key().to_bytes(),
+            new_sk.verifying_key().to_bytes(),
+            issued,
+            expires,
+        )
+        .sign(&old_sk)
+        .to_vec();
+
+        let mut audit_path = Vec::new();
+        for h in &proof.audit_path {
+            audit_path.extend_from_slice(h);
+        }
+
+        DecomposedChain {
+            operator_pubkey: log.operator_key().to_bytes().to_vec(),
+            new_tree_root: signed.tree_root.to_vec(),
+            new_log_size: signed.log_size,
+            new_timestamp_unix: signed.timestamp_unix,
+            new_root_signature: signed.signature.to_bytes().to_vec(),
+            entry_username_hash: entry.username_hash.to_vec(),
+            entry_identity_pubkey: entry.identity_pubkey,
+            entry_version: entry.version,
+            inclusion_leaf_index: proof.leaf_index,
+            inclusion_audit_path: audit_path,
+            supersession_proof,
+            pinned_old_pubkey: old_sk.verifying_key().to_bytes().to_vec(),
+            pinned_version: 1,
+            last_seen_log_size: 1,
+            now_unix_secs: issued + 10,
+            new_pubkey: new_sk.verifying_key().to_bytes().to_vec(),
+        }
+    }
+
+    fn call_chain(d: &DecomposedChain) -> Result<Vec<u8>, FfiError> {
+        verify_supersession_chain(
+            d.operator_pubkey.clone(),
+            d.new_tree_root.clone(),
+            d.new_log_size,
+            d.new_timestamp_unix,
+            d.new_root_signature.clone(),
+            d.entry_username_hash.clone(),
+            d.entry_identity_pubkey.clone(),
+            d.entry_version,
+            d.inclusion_leaf_index,
+            d.inclusion_audit_path.clone(),
+            d.supersession_proof.clone(),
+            d.pinned_old_pubkey.clone(),
+            d.pinned_version,
+            d.last_seen_log_size,
+            d.now_unix_secs,
+        )
+    }
+
+    #[test]
+    fn chain_valid_rotation_returns_authorised_new_key() {
+        let d = build_chain_fixture();
+        let got = call_chain(&d).expect("valid rotation chain verifies");
+        assert_eq!(got, d.new_pubkey, "re-pin to the authorised new key");
+    }
+
+    #[test]
+    fn chain_forged_root_signature_fails() {
+        let mut d = build_chain_fixture();
+        d.new_root_signature[0] ^= 0x01;
+        assert!(call_chain(&d).is_err(), "forged root fails gate 1");
+    }
+
+    #[test]
+    fn chain_wrong_pinned_old_key_fails() {
+        let mut d = build_chain_fixture();
+        d.pinned_old_pubkey = lakko_crypto::signing::SigningKey::generate()
+            .verifying_key()
+            .to_bytes()
+            .to_vec();
+        assert!(
+            call_chain(&d).is_err(),
+            "a proof not signed by the pinned old key fails"
+        );
+    }
+
+    #[test]
+    fn chain_non_newer_version_fails() {
+        let mut d = build_chain_fixture();
+        d.pinned_version = 2; // entry is also v2 → not strictly newer
+        assert!(call_chain(&d).is_err(), "non-newer version is a downgrade");
+    }
+
+    #[test]
+    fn chain_rollback_fails() {
+        let mut d = build_chain_fixture();
+        d.last_seen_log_size = d.new_log_size + 1; // shrinking log
+        assert!(call_chain(&d).is_err(), "a rollback fails the no-rollback gate");
+    }
+
+    #[test]
+    fn chain_expired_proof_fails() {
+        let mut d = build_chain_fixture();
+        d.now_unix_secs = 1_700_000_000 + 5000; // past the 1000s window
+        assert!(call_chain(&d).is_err(), "an expired proof fails");
+    }
+
+    #[test]
+    fn chain_malformed_lengths_fail_fast() {
+        let mut d = build_chain_fixture();
+        d.new_tree_root.pop();
+        assert!(call_chain(&d).is_err(), "31-byte tree_root rejected");
+
+        let mut d = build_chain_fixture();
+        d.pinned_old_pubkey.pop();
+        assert!(call_chain(&d).is_err(), "31-byte pinned key rejected");
+
+        let mut d = build_chain_fixture();
+        d.inclusion_audit_path.push(0x00);
+        assert!(
+            call_chain(&d).is_err(),
+            "non-multiple-of-32 audit path rejected"
+        );
     }
 }
