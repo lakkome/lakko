@@ -253,7 +253,7 @@ impl<'a> Router<'a> {
                     return Err(RouterError::MediaNotWired);
                 };
                 let answer = media
-                    .accept_offer(sender.id.clone(), sdp)
+                    .accept_offer(sender.id.clone(), sender.call_id.clone(), sdp)
                     .await
                     .map_err(RouterError::from)?;
                 Ok(Some(ServerFrame::SdpAnswer { sdp: answer }))

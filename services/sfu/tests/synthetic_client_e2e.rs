@@ -413,7 +413,11 @@ async fn synthetic_client_completes_handshake_with_media_task() {
     // 3. Offer / answer exchange.
     let (offer_sdp, pending, _mid) = client.create_audio_publisher_offer();
     let answer_sdp = media
-        .accept_offer(client_id.clone(), offer_sdp)
+        .accept_offer(
+            client_id.clone(),
+            "handshake-test-call".to_owned(),
+            offer_sdp,
+        )
         .await
         .expect("SFU accepts a real str0m-produced SDP offer");
     client
@@ -617,7 +621,7 @@ async fn two_clients_cross_fanout_forwards_media_verbatim() {
     // upstream track.
     let (b_offer, b_pending) = b.create_subscriber_offer();
     let b_answer = media
-        .accept_offer(b_id.clone(), b_offer)
+        .accept_offer(b_id.clone(), "fanout-test-call".to_owned(), b_offer)
         .await
         .expect("SFU accepts B's RecvOnly subscriber offer");
     b.accept_answer(b_pending, &b_answer)
@@ -626,7 +630,7 @@ async fn two_clients_cross_fanout_forwards_media_verbatim() {
     // A joins as a publisher (SendOnly audio).
     let (a_offer, a_pending, publisher_mid) = a.create_audio_publisher_offer();
     let a_answer = media
-        .accept_offer(a_id.clone(), a_offer)
+        .accept_offer(a_id.clone(), "fanout-test-call".to_owned(), a_offer)
         .await
         .expect("SFU accepts A's SendOnly publisher offer");
     a.accept_answer(a_pending, &a_answer)
@@ -727,7 +731,7 @@ async fn sframe_sealed_frame_round_trips_through_the_live_sfu() {
 
     let (b_offer, b_pending) = b.create_subscriber_offer();
     let b_answer = media
-        .accept_offer(b_id.clone(), b_offer)
+        .accept_offer(b_id.clone(), "fanout-test-call".to_owned(), b_offer)
         .await
         .expect("SFU accepts B's RecvOnly subscriber offer");
     b.accept_answer(b_pending, &b_answer)
@@ -735,7 +739,7 @@ async fn sframe_sealed_frame_round_trips_through_the_live_sfu() {
 
     let (a_offer, a_pending, publisher_mid) = a.create_audio_publisher_offer();
     let a_answer = media
-        .accept_offer(a_id.clone(), a_offer)
+        .accept_offer(a_id.clone(), "fanout-test-call".to_owned(), a_offer)
         .await
         .expect("SFU accepts A's SendOnly publisher offer");
     a.accept_answer(a_pending, &a_answer)
@@ -810,5 +814,125 @@ async fn sframe_sealed_frame_round_trips_through_the_live_sfu() {
         opened.as_slice(),
         plaintext,
         "B must recover A's exact plaintext after the SFU relayed the sealed frame"
+    );
+}
+
+/// Cross-call isolation over the LIVE SFU (a hard SFU
+/// invariant): a publisher A in call ALPHA and a subscriber B
+/// in call BETA both complete their handshakes against the one
+/// process-wide media task, but the SFU NEVER renegotiates a
+/// downstream track toward B and B NEVER receives A's media —
+/// because `propagate_new_tracks_in` + `fanout_media_data` are
+/// call-scoped.
+///
+/// The negative is observed structurally + fast: once A is
+/// connected its SendOnly track is live, so the SFU would have
+/// opened a downstream track + dispatched a `ServerFrame::SdpOffer`
+/// to B within a renegotiation cycle IF B shared A's call (the
+/// same-call path is proven by
+/// `two_clients_cross_fanout_forwards_media_verbatim`). Here B is
+/// in a DIFFERENT call, so across a generous settle window B's
+/// outbound channel receives NO offer and B drains NO media.
+#[tokio::test]
+async fn fanout_never_crosses_calls_over_the_live_sfu() {
+    let peers = PeerRegistry::new();
+    let b_id = PeerId::fresh();
+    let (b_tx, mut b_rx) = mpsc::channel::<ServerFrame>(64);
+    let registered = peers
+        .register(Peer {
+            id: b_id.clone(),
+            call_id: "call-beta".to_owned(),
+            account_id: "subscriber-b".to_owned(),
+            outbound: Some(b_tx),
+        })
+        .await;
+    assert!(registered, "fresh PeerId must register cleanly");
+
+    let (media, sfu_addr) = spawn_media_task("127.0.0.1:0".parse().unwrap(), peers)
+        .await
+        .expect("UDP bind on loopback:0 succeeds");
+
+    let mut a = SyntheticClient::new().await;
+    let mut b = SyntheticClient::new().await;
+    let a_id = PeerId::fresh();
+
+    // B subscribes in call BETA; A publishes in call ALPHA.
+    let (b_offer, b_pending) = b.create_subscriber_offer();
+    let b_answer = media
+        .accept_offer(b_id.clone(), "call-beta".to_owned(), b_offer)
+        .await
+        .expect("SFU accepts B's RecvOnly subscriber offer");
+    b.accept_answer(b_pending, &b_answer)
+        .expect("B applies the SFU's answer");
+
+    let (a_offer, a_pending, publisher_mid) = a.create_audio_publisher_offer();
+    let a_answer = media
+        .accept_offer(a_id.clone(), "call-alpha".to_owned(), a_offer)
+        .await
+        .expect("SFU accepts A's SendOnly publisher offer");
+    a.accept_answer(a_pending, &a_answer)
+        .expect("A applies the SFU's answer");
+
+    // Bounded settle window — long enough for the handshakes +
+    // several SFU renegotiation cycles, short enough to keep the
+    // test fast (the same-call reneg lands well under a second).
+    let settle_deadline = Instant::now() + Duration::from_secs(6);
+    let mut b_got_offer = false;
+    let mut b_got_media = false;
+    let mut frame_idx: u64 = 0;
+
+    while Instant::now() < settle_deadline {
+        let _ = a.drain().await;
+        if !b.drain().await.is_empty() {
+            b_got_media = true;
+        }
+        while let Ok(frame) = b_rx.try_recv() {
+            if matches!(frame, ServerFrame::SdpOffer { .. }) {
+                b_got_offer = true;
+            }
+        }
+        // Keep publishing once A is up so the SFU has a live
+        // track to (not) propagate across the call boundary.
+        if a.is_connected() {
+            a.write_audio_frame(publisher_mid, b"cross-call-must-not-arrive", frame_idx);
+            frame_idx += 1;
+        }
+
+        let a_sock = a.socket.clone();
+        let b_sock = b.socket.clone();
+        let mut abuf = [0u8; 2048];
+        let mut bbuf = [0u8; 2048];
+        tokio::select! {
+            r = a_sock.recv_from(&mut abuf) => {
+                if let Ok((n, src)) = r { a.feed_receive(&abuf[..n], src, sfu_addr); }
+            }
+            r = b_sock.recv_from(&mut bbuf) => {
+                if let Ok((n, src)) = r { b.feed_receive(&bbuf[..n], src, sfu_addr); }
+            }
+            () = tokio::time::sleep(Duration::from_millis(5)) => {
+                a.feed_timeout();
+                b.feed_timeout();
+            }
+        }
+    }
+
+    // A must have connected — otherwise its track never went live
+    // and the negative would be vacuous (B got nothing because
+    // nothing was ever published, not because of isolation).
+    assert!(
+        a.is_connected(),
+        "publisher A must connect so its track is live (else the test is vacuous)"
+    );
+    assert!(
+        b.is_connected(),
+        "subscriber B must connect — isolation, not a broken transport"
+    );
+    assert!(
+        !b_got_offer,
+        "cross-call isolation breach: the SFU renegotiated a downstream track toward a peer in a DIFFERENT call"
+    );
+    assert!(
+        !b_got_media,
+        "cross-call isolation breach: a peer in call BETA received media from a publisher in call ALPHA"
     );
 }

@@ -254,6 +254,14 @@ pub struct TrackOutEntry {
 /// *their* `MediaPeer` instances, not by this one.
 pub struct MediaPeer {
     id: MediaPeerId,
+    /// The call this peer is admitted to. Set from the
+    /// signaling-layer admission (`crate::peer::Peer::call_id`)
+    /// when the peer's first SDP offer creates it. Media is
+    /// fanned out ONLY between peers sharing a `call_id`
+    /// (cross-call isolation — a hard SFU invariant); an
+    /// empty value (a peer created by a stray pre-offer ICE
+    /// candidate, or a bare test peer) matches no real call.
+    call_id: String,
     rtc: Rtc,
     /// Incoming tracks this peer announced via
     /// `Event::MediaAdded`. Populated in
@@ -301,10 +309,30 @@ impl MediaPeer {
     pub fn new(id: MediaPeerId, now: Instant) -> Self {
         Self {
             id,
+            call_id: String::new(),
             rtc: Rtc::new(now),
             tracks_in: Vec::new(),
             tracks_out: Vec::new(),
             pending_offer: None,
+        }
+    }
+
+    /// The call this peer is admitted to (empty until the
+    /// peer's first SDP offer sets it).
+    #[must_use]
+    pub fn call_id(&self) -> &str {
+        &self.call_id
+    }
+
+    /// Bind this peer to its call. Idempotent — the
+    /// signaling layer sets the same `call_id` on every
+    /// offer from the peer. Once a non-empty call is bound,
+    /// a later empty value never clears it (defends against
+    /// a stray pre-offer command that constructed the peer
+    /// with no call).
+    pub fn set_call_id(&mut self, call_id: String) {
+        if !call_id.is_empty() {
+            self.call_id = call_id;
         }
     }
 
@@ -852,6 +880,10 @@ pub enum MediaCommand {
     AcceptOffer {
         /// Originating peer id.
         peer_id: MediaPeerId,
+        /// The call this peer is admitted to — binds the
+        /// media peer to its call so fanout stays
+        /// call-scoped (cross-call isolation).
+        call_id: String,
         /// Client-supplied SDP offer text.
         offer_sdp: String,
         /// One-shot reply channel.
@@ -949,12 +981,14 @@ impl MediaTaskHandle {
     pub async fn accept_offer(
         &self,
         peer_id: MediaPeerId,
+        call_id: String,
         offer_sdp: String,
     ) -> std::result::Result<String, MediaCommandError> {
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
         self.tx
             .try_send(MediaCommand::AcceptOffer {
                 peer_id,
+                call_id,
                 offer_sdp,
                 reply: reply_tx,
             })
@@ -1105,10 +1139,15 @@ fn handle_command(router: &mut MediaRouter, cmd: MediaCommand, local_addr: Optio
     match cmd {
         MediaCommand::AcceptOffer {
             peer_id,
+            call_id,
             offer_sdp,
             reply,
         } => {
             let peer = router.peer_or_insert(peer_id, Instant::now());
+            // Bind the peer to its call so fanout stays
+            // call-scoped (cross-call isolation). Idempotent
+            // across the peer's offers.
+            peer.set_call_id(call_id);
             // Best-effort: if the host candidate fails
             // we still try to accept the offer; the
             // resulting answer just won't carry our
@@ -1458,17 +1497,31 @@ pub(crate) fn fanout_media_data(
         return outcome;
     }
     for event in pending {
+        // Cross-call isolation: media is forwarded ONLY to
+        // peers in the SAME call as the origin. Look up the
+        // origin's call once; if the origin is gone (pruned)
+        // or unbound (empty call), forward nothing. A peer in
+        // a different call NEVER receives this frame.
+        let origin_call = router
+            .peers()
+            .iter()
+            .find(|p| p.id() == &event.origin)
+            .map(|p| p.call_id().to_owned());
+        let Some(origin_call) = origin_call.filter(|c| !c.is_empty()) else {
+            continue;
+        };
         // Walk the peer list manually so we can borrow
         // each non-origin peer mutably one at a time.
         let n = router.len();
         for idx in 0..n {
             // Borrow check: re-borrow per-iteration so we
-            // can compare ids before touching the writer.
-            let target_is_origin = router
-                .peers()
-                .get(idx)
-                .is_some_and(|p| p.id() == &event.origin);
-            if target_is_origin {
+            // can compare ids + call before touching the
+            // writer. Skip the origin AND any peer not in the
+            // origin's call.
+            let skip = router.peers().get(idx).map_or(true, |p| {
+                p.id() == &event.origin || p.call_id() != origin_call
+            });
+            if skip {
                 continue;
             }
             let Some(peer) = router.peers_mut().get_mut(idx) else {
@@ -1510,13 +1563,25 @@ pub(crate) fn propagate_new_tracks_in(router: &mut MediaRouter, new_tracks: &[Pe
         return;
     }
     for event in new_tracks {
+        // Cross-call isolation: a peer's new upstream track is
+        // only propagated to downstream peers in the SAME call,
+        // so the SFU never opens a cross-call `TrackOut` (which
+        // would later let `fanout_media_data` forward across
+        // calls). Same origin-call lookup as the fanout path.
+        let origin_call = router
+            .peers()
+            .iter()
+            .find(|p| p.id() == &event.origin)
+            .map(|p| p.call_id().to_owned());
+        let Some(origin_call) = origin_call.filter(|c| !c.is_empty()) else {
+            continue;
+        };
         let n = router.len();
         for idx in 0..n {
-            let target_is_origin = router
-                .peers()
-                .get(idx)
-                .is_some_and(|p| p.id() == &event.origin);
-            if target_is_origin {
+            let skip = router.peers().get(idx).map_or(true, |p| {
+                p.id() == &event.origin || p.call_id() != origin_call
+            });
+            if skip {
                 continue;
             }
             let Some(peer) = router.peers_mut().get_mut(idx) else {
@@ -1656,6 +1721,15 @@ mod tests {
         crate::peer::PeerId::from_str_for_test(name)
     }
 
+    /// A media peer bound to `call` — used by the fanout
+    /// tests, which (post cross-call-isolation) only forward
+    /// between same-call peers.
+    fn peer_in_call(name: &str, call: &str) -> MediaPeer {
+        let mut p = MediaPeer::new(pid(name), Instant::now());
+        p.set_call_id(call.to_owned());
+        p
+    }
+
     #[test]
     fn media_peer_constructs_and_reports_alive() {
         let p = MediaPeer::new(pid("alice"), Instant::now());
@@ -1786,7 +1860,7 @@ mod tests {
     async fn task_accept_offer_surfaces_bad_sdp_through_channel() {
         let handle = spawn_media_task_no_socket();
         let err = handle
-            .accept_offer(pid("alice"), "garbage".into())
+            .accept_offer(pid("alice"), "test-call".to_owned(), "garbage".into())
             .await
             .expect_err("malformed SDP must surface as BadSdp through the task");
         match err {
@@ -1856,7 +1930,7 @@ mod tests {
         // parser to confirm the bound task is wired the
         // same way as the no-socket variant.
         let err = handle
-            .accept_offer(pid("alice"), "garbage".into())
+            .accept_offer(pid("alice"), "test-call".to_owned(), "garbage".into())
             .await
             .expect_err("malformed SDP must surface as BadSdp");
         assert!(matches!(
@@ -2014,7 +2088,7 @@ mod tests {
             let mut r = MediaRouter::new();
             let names: Vec<String> = (0..n_peers).map(|i| format!("peer{i}")).collect();
             for nm in &names {
-                r.add_peer(MediaPeer::new(pid(nm), Instant::now()));
+                r.add_peer(peer_in_call(nm, "fanout-call"));
             }
             let pending = vec![PendingFanout {
                 origin: pid(&names[0]),
@@ -2043,7 +2117,7 @@ mod tests {
     fn fanout_tally_is_per_frame_times_non_origin_peers() {
         let mut r = MediaRouter::new();
         for nm in &["a", "b", "c"] {
-            r.add_peer(MediaPeer::new(pid(nm), Instant::now()));
+            r.add_peer(peer_in_call(nm, "fanout-call"));
         }
         let pending = vec![
             PendingFanout {
@@ -2060,6 +2134,58 @@ mod tests {
 
         assert_eq!(outcome.attempted(), 4);
         assert_eq!(outcome.no_writer, 4);
+    }
+
+    /// Cross-call isolation (a hard SFU invariant): a frame
+    /// from a peer in call A is forwarded ONLY to the other
+    /// peer in call A — NEVER to peers in call B, even though
+    /// they share the one process-wide router. With one
+    /// same-call subscriber + two cross-call peers, exactly
+    /// ONE forward attempt is made (the same-call subscriber);
+    /// the two foreign-call peers are never touched.
+    #[test]
+    fn fanout_never_crosses_calls() {
+        let mut r = MediaRouter::new();
+        r.add_peer(peer_in_call("a-pub", "call-A"));
+        r.add_peer(peer_in_call("a-sub", "call-A"));
+        r.add_peer(peer_in_call("b-sub1", "call-B"));
+        r.add_peer(peer_in_call("b-sub2", "call-B"));
+        let pending = vec![PendingFanout {
+            origin: pid("a-pub"),
+            data: synthetic_media_data(),
+        }];
+
+        let outcome = fanout_media_data(&mut r, &pending);
+
+        // Exactly one non-origin SAME-call peer (a-sub) is
+        // offered the frame; the two call-B peers are never
+        // visited. (No writer is negotiated, so the single
+        // attempt lands in `no_writer` — the count is what
+        // proves the iteration reached exactly one peer.)
+        assert_eq!(
+            outcome.attempted(),
+            1,
+            "a frame from call A must reach exactly the one other call-A peer"
+        );
+        assert_eq!(outcome.no_writer, 1, "the single same-call attempt");
+    }
+
+    /// A frame whose origin has no bound call (an incomplete
+    /// peer that never completed an SDP offer) is forwarded to
+    /// NOBODY — fail-closed, so a half-set-up peer can never
+    /// leak into any call.
+    #[test]
+    fn fanout_unbound_origin_forwards_to_nobody() {
+        let mut r = MediaRouter::new();
+        r.add_peer(MediaPeer::new(pid("ghost"), Instant::now())); // empty call
+        r.add_peer(peer_in_call("a-sub", "call-A"));
+        let pending = vec![PendingFanout {
+            origin: pid("ghost"),
+            data: synthetic_media_data(),
+        }];
+
+        let outcome = fanout_media_data(&mut r, &pending);
+        assert_eq!(outcome.attempted(), 0, "an unbound origin forwards nothing");
     }
 
     // ============================================================
@@ -2135,9 +2261,9 @@ mod tests {
     #[test]
     fn propagate_new_tracks_in_skips_origin_and_is_idempotent() {
         let mut r = MediaRouter::new();
-        r.add_peer(MediaPeer::new(pid("alice"), Instant::now()));
-        r.add_peer(MediaPeer::new(pid("bob"), Instant::now()));
-        r.add_peer(MediaPeer::new(pid("charlie"), Instant::now()));
+        r.add_peer(peer_in_call("alice", "track-call"));
+        r.add_peer(peer_in_call("bob", "track-call"));
+        r.add_peer(peer_in_call("charlie", "track-call"));
         let mid = Mid::new();
         let pending = vec![PendingTrackIn {
             origin: pid("alice"),
