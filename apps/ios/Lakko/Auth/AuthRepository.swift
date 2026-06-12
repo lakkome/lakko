@@ -55,6 +55,12 @@ public final class AuthRepository: ObservableObject {
     /// scheduled atomically with the assignment.
     @Published public private(set) var state: AuthState = .loading
 
+    /// ADR-0017 defence-in-depth (lakko-security Phase-3A follow-up (i)) —
+    /// non-nil when this device's canonical AccountIdentity did NOT match
+    /// the account's currently-published bundle at login (someone replaced
+    /// it; the ACCESS-hijack signature). Surfaced as a dismissible banner.
+    @Published public private(set) var identityAlert: IdentityAlert?
+
     /// In-memory identity secrets — the OPAQUE export key + the raw
     /// account id bytes for the active session.
     ///
@@ -844,6 +850,7 @@ public final class AuthRepository: ObservableObject {
         identitySecrets = nil
         pendingRecovery = nil
         pendingFreshPhrase = nil
+        identityAlert = nil
         state = .anon(cachedUsername: cached?.username)
         // 1.20c — fire-and-forget unsubscribe so the next page
         // reload doesn't silently keep accepting pushes against
@@ -901,6 +908,7 @@ public final class AuthRepository: ObservableObject {
         // lost-everything mint leaves no in-memory seed behind.
         pendingRecovery = nil
         pendingFreshPhrase = nil
+        identityAlert = nil
         state = .anon(cachedUsername: nil)
         // 1.20c — full wipe of push state too. The contract is
         // "leave NOTHING per-account behind on this device", so
@@ -1021,6 +1029,51 @@ public final class AuthRepository: ObservableObject {
         state = .session(
             SessionAccount(accountIdB64: accountIdB64, username: username)
         )
+        // ADR-0017 defence-in-depth (lakko-security Phase-3A follow-up (i))
+        // — fire-and-forget self-check: is the account's published identity
+        // still OURS? A mismatch means someone replaced it (the ACCESS-hijack
+        // signature). iOS does not re-publish on a warm login, so this is
+        // race-free; best-effort (a 404 / fetch error never alerts).
+        Task { [weak self] in
+            await self?.checkPublishedIdentityConsistency(
+                accountIdBytes: accountIdBytes,
+                accountIdentitySeed: accountIdentitySeed,
+                sessionToken: sessionToken
+            )
+        }
+    }
+
+    /// ADR-0017 defence-in-depth — set ``identityAlert`` when the account's
+    /// published AccountIdentity differs from this device's. Best-effort:
+    /// a 404 (fresh signup) or a fetch error never alerts. Resets the alert
+    /// each call so a clean login clears a stale one.
+    private func checkPublishedIdentityConsistency(
+        accountIdBytes: Data,
+        accountIdentitySeed: Data,
+        sessionToken: String
+    ) async {
+        identityAlert = nil
+        do {
+            let derivedPubkey = try Identity
+                .fromSeed(seed: accountIdentitySeed)
+                .signaturePublicKey()
+            let discovery = DiscoveryClient(sessionToken: sessionToken)
+            guard let bundle = try await discovery.identityFetch(
+                accountId: accountIdBytes
+            ) else {
+                return // 404 — nothing published yet; do not alert.
+            }
+            if base64Decode(bundle.signaturePubkey) != derivedPubkey {
+                identityAlert = .publishedIdentityChanged
+            }
+        } catch {
+            NSLog("self-identity consistency check failed: \(error)")
+        }
+    }
+
+    /// Dismiss the identity-changed security banner.
+    public func dismissIdentityAlert() {
+        identityAlert = nil
     }
 
     /// ADR-0017 fresh-device fail-safe completion. Called only while
@@ -1998,6 +2051,17 @@ public enum AuthState: Equatable {
     /// a supersession proof). The UI must show the new phrase to save
     /// before the session lands; ``confirmFreshPhraseSaved()`` finishes it.
     case saveFreshPhrase(SessionAccount)
+}
+
+/// ADR-0017 defence-in-depth (lakko-security Phase-3A follow-up (i)) — a
+/// security alert raised when this device's canonical AccountIdentity did
+/// not match the account's currently-published bundle at login. Mirror of
+/// the web `IdentityAlert`.
+public enum IdentityAlert: Equatable {
+    /// Someone published a DIFFERENT identity for this account (the
+    /// ACCESS-hijack signature — an attacker minted a fresh identity via
+    /// the lost-everything path).
+    case publishedIdentityChanged
 }
 
 /// Account record exposed to the UI when a session is active.

@@ -145,13 +145,22 @@ struct AppRoot: View {
             }
 
         case .session(let account):
-            SessionRoot(
-                account: account,
-                authRepository: authRepository,
-                contactsRepository: contactsRepository,
-                chatRepository: chatRepository,
-                inviteIntake: inviteIntake
-            )
+            VStack(spacing: 0) {
+                // ADR-0017 defence-in-depth — surface the identity-changed
+                // security alert above the session content.
+                if authRepository.identityAlert != nil {
+                    IdentitySecurityBanner(
+                        onDismiss: { authRepository.dismissIdentityAlert() }
+                    )
+                }
+                SessionRoot(
+                    account: account,
+                    authRepository: authRepository,
+                    contactsRepository: contactsRepository,
+                    chatRepository: chatRepository,
+                    inviteIntake: inviteIntake
+                )
+            }
 
         case .needsRecoveryPhrase(let account):
             // ADR-0017 fresh-device fail-safe. The user authenticated
