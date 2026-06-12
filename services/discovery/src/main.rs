@@ -48,6 +48,16 @@
 //!   shared with `services/auth`. **Required** — middleware
 //!   fails fast at startup if missing or shorter than 32 bytes
 //!   after decode.
+//! - `LAKKO_TRANSPARENCY_URL` — base URL of `services/transparency`
+//!   (e.g. `http://127.0.0.1:8087`). **Optional** — when unset the
+//!   KT-log S2 append integration is OFF (identity-key changes are not
+//!   logged). When set, a best-effort POST is made to the transparency
+//!   append endpoint on every identity-key CHANGE (fail-open — never
+//!   fails the discovery upload).
+//! - `LAKKO_TRANSPARENCY_APPEND_SECRET` — base64-encoded shared service
+//!   secret (the SAME value `services/transparency` holds). Required to
+//!   ARM the append integration alongside `LAKKO_TRANSPARENCY_URL`;
+//!   presented as `Authorization: Bearer <secret-b64>`.
 //! - `RUST_LOG` — `tracing-subscriber` env-filter spec.
 //!
 //! ## Endpoints
@@ -84,6 +94,7 @@ mod oprf;
 mod pow;
 mod rate_limit;
 mod registry;
+mod transparency_log;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -137,6 +148,12 @@ pub(crate) struct AppState {
     /// lost-everything path. `0` disables the gate. From
     /// `LAKKO_DISCOVERY_FRESH_IDENTITY_COOLDOWN_SECS` (default 3600).
     pub(crate) fresh_identity_cooldown_secs: i64,
+    /// KT-log S2 — the transparency-log append client. `Some` when
+    /// `LAKKO_TRANSPARENCY_URL` is set; `None` when unset (the log
+    /// integration is OFF — `identity_bundle::upload` skips the append
+    /// entirely). A best-effort POST on every identity-key CHANGE; never
+    /// fails the discovery upload (decision E, fail-open).
+    pub(crate) transparency: Option<transparency_log::TransparencyClient>,
 }
 
 #[tokio::main]
@@ -212,12 +229,28 @@ async fn main() -> Result<()> {
         "identity fresh-publish cool-down armed",
     );
 
+    // KT-log S2 — transparency-log append integration. Both vars must be
+    // set to arm it: `LAKKO_TRANSPARENCY_URL` (the service base URL) and
+    // `LAKKO_TRANSPARENCY_APPEND_SECRET` (the SAME shared secret the
+    // transparency service holds). When the URL is unset the integration
+    // is OFF (the append is skipped per request) — logged once here.
+    let transparency = build_transparency_client();
+    if transparency.is_some() {
+        tracing::info!("KT-log S2: transparency append integration armed");
+    } else {
+        tracing::info!(
+            "KT-log S2: transparency append integration OFF \
+             (LAKKO_TRANSPARENCY_URL unset) — identity-key changes are not logged"
+        );
+    }
+
     let state = AppState {
         db: pool.clone(),
         oprf: Arc::new(oprf_server),
         session_token_secret: Arc::new(session_token_secret),
         rate_limiter: Arc::clone(&rate_limiter),
         fresh_identity_cooldown_secs,
+        transparency,
     };
 
     let _pow_pruner = pow::spawn_pruner(pool.clone());
@@ -392,6 +425,38 @@ pub(crate) fn build_app(state: AppState) -> Router {
         .with_state(state)
 }
 
+/// Build the KT-log S2 transparency-append client from the environment.
+///
+/// Returns `Some` only when BOTH `LAKKO_TRANSPARENCY_URL` and
+/// `LAKKO_TRANSPARENCY_APPEND_SECRET` are set and non-empty; otherwise
+/// `None` (the integration is off — the append is skipped per request).
+/// A missing append secret while the URL is set is a misconfiguration we
+/// surface with a `warn!` and treat as off, rather than appending without
+/// auth (which the transparency side would reject with 401 anyway).
+fn build_transparency_client() -> Option<transparency_log::TransparencyClient> {
+    let url = std::env::var("LAKKO_TRANSPARENCY_URL")
+        .ok()
+        .filter(|s| !s.is_empty())?;
+    let Some(secret) = std::env::var("LAKKO_TRANSPARENCY_APPEND_SECRET")
+        .ok()
+        .filter(|s| !s.is_empty())
+    else {
+        tracing::warn!(
+            "LAKKO_TRANSPARENCY_URL is set but LAKKO_TRANSPARENCY_APPEND_SECRET is not — \
+             KT-log S2 append integration stays OFF (an unauthenticated append would be \
+             rejected with 401)"
+        );
+        return None;
+    };
+    match transparency_log::TransparencyClient::new(&url, &secret) {
+        Ok(client) => Some(client),
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to build transparency append client — KT-log S2 OFF");
+            None
+        },
+    }
+}
+
 /// Parse a float env var, falling back to `default`
 /// on absent/invalid values (logs a warning so the
 /// operator notices a typo).
@@ -517,5 +582,19 @@ mod tests {
         let body = response.into_body().collect().await.unwrap().to_bytes();
         let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(parsed["service"], "lakko-svc-discovery");
+    }
+
+    /// KT-log S2 (decision E) — when `LAKKO_TRANSPARENCY_URL` is unset the
+    /// integration is OFF: `build_transparency_client` returns `None`
+    /// cleanly (no panic, no append attempted). This mutates a process-
+    /// global env var, so it removes both vars first to isolate from any
+    /// ambient `.env`.
+    #[test]
+    fn transparency_client_off_when_url_unset() {
+        // SAFETY of correctness (not memory): single isolated assertion;
+        // we clear the URL var so the function takes the `None` path
+        // regardless of the host environment.
+        std::env::remove_var("LAKKO_TRANSPARENCY_URL");
+        assert!(super::build_transparency_client().is_none());
     }
 }

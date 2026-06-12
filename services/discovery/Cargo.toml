@@ -87,6 +87,16 @@ lakko-crypto.workspace = true
 # tokens with a 401.
 lakko-auth-token.workspace = true
 
+# KT-log S2 — best-effort POST to the transparency append endpoint on
+# every identity-key CHANGE. `default-features = false` + rustls keeps the
+# TLS provider aligned with sqlx (`tls-rustls-ring`); same feature shape as
+# the four other services that already depend on reqwest (auth, sfu,
+# channels, push-gw).
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "rustls-tls",
+] }
+
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"

@@ -171,6 +171,12 @@ services:
       # blunting attacker churn. Default 1 h; 0 disables. A heal-back to the
       # previous key and a proven rotation are never gated.
       LAKKO_DISCOVERY_FRESH_IDENTITY_COOLDOWN_SECS: ${LAKKO_DISCOVERY_FRESH_IDENTITY_COOLDOWN_SECS:-3600}
+      # KT-log S2 — discovery appends an identity-key CHANGE to the
+      # transparency log (best-effort, fail-open). Both vars arm it; the
+      # secret MUST match the transparency service's
+      # LAKKO_TRANSPARENCY_APPEND_SECRET. Unset the URL to disable.
+      LAKKO_TRANSPARENCY_URL: ${LAKKO_TRANSPARENCY_URL:-http://transparency:8087}
+      LAKKO_TRANSPARENCY_APPEND_SECRET: ${LAKKO_TRANSPARENCY_APPEND_SECRET:-ZGV2LXRyYW5zcGFyZW5jeS1hcHBlbmQtc2VjcmV0LTMyYiE=}
     ports:
       - "127.0.0.1:8084:8084"
     healthcheck:
@@ -220,9 +226,12 @@ services:
       LAKKO_BIND: 0.0.0.0:8087
       LAKKO_TRANSPARENCY_DATABASE_URL: mysql://lakko:devpass@db:3306/lakko_transparency
       DATABASE_URL: mysql://lakko:devpass@db:3306/lakko_transparency
-      # MUST match auth's secret - the transparency append endpoint
-      # verifies the bearer session tokens auth mints.
-      LAKKO_SESSION_TOKEN_SECRET: ${LAKKO_SESSION_TOKEN_SECRET:-ZGV2LXNlc3Npb24tdG9rZW4tc2VjcmV0LWZvci1sb2NhbC10ZXN0aW5nLW9ubHkhIQ==}
+      # KT-log S2 — shared service secret gating POST /transparency/append.
+      # The SAME value the discovery service presents as a bearer (below).
+      # Base64, >= 16 bytes after decode. Dev fixture only; unset it to
+      # disable the append endpoint (it then serves 503). Read paths stay
+      # anonymous regardless.
+      LAKKO_TRANSPARENCY_APPEND_SECRET: ${LAKKO_TRANSPARENCY_APPEND_SECRET:-ZGV2LXRyYW5zcGFyZW5jeS1hcHBlbmQtc2VjcmV0LTMyYiE=}
     ports:
       - "127.0.0.1:8087:8087"
     healthcheck:

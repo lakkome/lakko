@@ -176,7 +176,7 @@ pub(crate) async fn upload(
     // ADR-0017 defence-in-depth (lakko-security Phase-3A follow-up (ii)) —
     // the upsert is gated by a per-account cool-down on UNPROVEN key changes
     // (see `apply_identity_upload_gated`); a fresh-publish flood gets 429.
-    apply_identity_upload_gated(
+    let decision = apply_identity_upload_gated(
         &state.db,
         state.fresh_identity_cooldown_secs,
         &account_id,
@@ -190,6 +190,21 @@ pub(crate) async fn upload(
         account_id = %B64.encode(account_id),
         "identity bundle upserted",
     );
+
+    // KT-log S2 (decision E) — best-effort transparency-log append on a
+    // KEY CHANGE only. The identity bundle is ALREADY published above; the
+    // append is fail-open: a transparency-side failure NEVER fails this
+    // upload (a missed append is closed by the S2.5 reconciliation sweep,
+    // future work). When `LAKKO_TRANSPARENCY_URL` is unset the client is
+    // `None` and the integration is off (logged once at startup).
+    if let (LogAppendDecision::Append { is_reset }, Some(client)) =
+        (decision, state.transparency.as_ref())
+    {
+        client
+            .append_key_change(&account_id, &signature_pubkey, is_reset)
+            .await;
+    }
+
     Ok(Json(UploadResponse { ok: true }))
 }
 
@@ -208,10 +223,32 @@ fn is_unique_violation(e: &sqlx::Error) -> bool {
     matches!(e, sqlx::Error::Database(db) if db.is_unique_violation())
 }
 
+/// Whether the upsert that just committed CHANGED the published identity
+/// key, and therefore whether the discovery service must append a leaf to
+/// the transparency log (KT-log S2 decision D).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LogAppendDecision {
+    /// No key change — a no-change re-upload (e.g. a routine login refresh
+    /// or KeyPackage rotation that re-sends the same identity key). Do NOT
+    /// append to the transparency log.
+    Skip,
+    /// A key change happened — append a leaf to the transparency log. The
+    /// `is_reset` flag is the unproven-new-key marker (decision F ==
+    /// `bump_marker`): `false` for a first publish, a proven rotation, or
+    /// a heal-back to a previously-seen key; `true` only for an unproven
+    /// change to a brand-new key (the lost-everything reset).
+    Append {
+        /// ADR-0017 fresh-start marker (== `cooldown_outcome`'s
+        /// `bump_marker`).
+        is_reset: bool,
+    },
+}
+
 /// One attempt's outcome (see [`apply_identity_upload_gated`]).
 enum ApplyAttempt {
-    /// The upsert committed.
-    Done,
+    /// The upsert committed; carries whether the key changed (and thus
+    /// whether the transparency log must be appended).
+    Done(LogAppendDecision),
     /// A concurrent FIRST publish for the same account won the INSERT race;
     /// the row now exists, so the caller should retry into the UPDATE path.
     RetryRace,
@@ -222,6 +259,10 @@ enum ApplyAttempt {
 /// loser takes the cool-down-checked UPDATE path instead of surfacing a 500.
 /// Contention on a single account is rare (only the account's own concurrent
 /// devices), so a small bounded retry suffices.
+///
+/// On success returns the [`LogAppendDecision`] (KT-log S2 decision D): the
+/// caller appends a transparency-log leaf iff the published key CHANGED. The
+/// gated-429 case still returns `Err`.
 async fn apply_identity_upload_gated(
     db: &sqlx::MySqlPool,
     cooldown_secs: i64,
@@ -229,7 +270,7 @@ async fn apply_identity_upload_gated(
     signature_pubkey: &[u8],
     x25519_pubkey: &[u8],
     supersession_proof: Option<&[u8]>,
-) -> Result<(), (StatusCode, String)> {
+) -> Result<LogAppendDecision, (StatusCode, String)> {
     const MAX_ATTEMPTS: u32 = 3;
     for _ in 0..MAX_ATTEMPTS {
         match try_apply_identity_once(
@@ -242,7 +283,7 @@ async fn apply_identity_upload_gated(
         )
         .await?
         {
-            ApplyAttempt::Done => return Ok(()),
+            ApplyAttempt::Done(decision) => return Ok(decision),
             ApplyAttempt::RetryRace => {},
         }
     }
@@ -303,7 +344,7 @@ async fn try_apply_identity_once(
     .await
     .map_err(cooldown_db_err)?;
 
-    match existing {
+    let decision: LogAppendDecision = match existing {
         None => {
             // First publish for this account — nothing to gate.
             let inserted = sqlx::query(
@@ -318,7 +359,11 @@ async fn try_apply_identity_once(
             .execute(&mut *tx)
             .await;
             match inserted {
-                Ok(_) => {},
+                // A first publish is a key change from "nothing" to a key,
+                // and is never a fresh-start reset → Append{is_reset:false}
+                // (decision D). Routed through the same pure mapping as the
+                // existing-row case for a single source of truth.
+                Ok(_) => log_append_decision(true, false),
                 Err(e) if is_unique_violation(&e) => {
                     // A concurrent first publish won the INSERT race — the row
                     // now exists; abandon this tx and retry into the UPDATE
@@ -365,7 +410,7 @@ async fn try_apply_identity_once(
             } else {
                 previous.as_deref()
             };
-            let bump_marker: i64 = i64::from(bump_marker);
+            let bump_marker_i: i64 = i64::from(bump_marker);
 
             sqlx::query(
                 "UPDATE identity_bundles SET \
@@ -380,16 +425,20 @@ async fn try_apply_identity_once(
             .bind(x25519_pubkey)
             .bind(supersession_proof)
             .bind(new_previous)
-            .bind(bump_marker)
+            .bind(bump_marker_i)
             .bind(account_id)
             .execute(&mut *tx)
             .await
             .map_err(cooldown_db_err)?;
+
+            // Decision D mapping for the existing-row case (pure, so it is
+            // unit-testable — see `log_append_decision`).
+            log_append_decision(previous_becomes_current, bump_marker)
         },
-    }
+    };
 
     tx.commit().await.map_err(cooldown_db_err)?;
-    Ok(ApplyAttempt::Done)
+    Ok(ApplyAttempt::Done(decision))
 }
 
 /// The ADR-0017 (ii) cool-down decision for an upload against an existing
@@ -408,6 +457,27 @@ enum CooldownOutcome {
         /// unproven change to a brand-new key — the churn surface).
         bump_marker: bool,
     },
+}
+
+/// Pure KT-log S2 (decision D) mapping for the EXISTING-row case: given
+/// the cool-down outcome's two booleans, decide whether discovery must
+/// append a transparency-log leaf.
+///
+/// - `key_changed` (== `cooldown_outcome`'s `previous_becomes_current`) is
+///   exactly "the published key changed". `false` → [`LogAppendDecision::Skip`]
+///   (a no-change re-upload — no append).
+/// - On a change, `unproven_new_key` (== `bump_marker`) is exactly the
+///   ADR-0017 fresh-start reset marker (decision F == `is_reset`). A proven
+///   rotation or a heal-back to a previously-seen key changes the key but is
+///   NOT a reset → `Append { is_reset: false }`.
+const fn log_append_decision(key_changed: bool, unproven_new_key: bool) -> LogAppendDecision {
+    if key_changed {
+        LogAppendDecision::Append {
+            is_reset: unproven_new_key,
+        }
+    } else {
+        LogAppendDecision::Skip
+    }
 }
 
 /// Pure decision matrix for the fresh-identity cool-down (no I/O so it is
@@ -515,6 +585,84 @@ mod cooldown_tests {
                 previous_becomes_current: true,
                 bump_marker: true,
             }
+        );
+    }
+}
+
+#[cfg(test)]
+mod log_append_decision_tests {
+    use super::{cooldown_outcome, log_append_decision, CooldownOutcome, LogAppendDecision};
+
+    const A: &[u8] = b"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    const B: &[u8] = b"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB";
+    const C: &[u8] = b"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC";
+
+    /// Fold a cool-down `Apply` outcome through the KT-log S2 (decision D)
+    /// mapping, the way `try_apply_identity_once` does for an existing row.
+    /// A gated `Reject` can never reach the mapping (it returns 429 before),
+    /// so this helper only handles the `Apply` arm.
+    fn decide(
+        current: &[u8],
+        previous: Option<&[u8]>,
+        within_cooldown: bool,
+        new_sig: &[u8],
+        has_proof: bool,
+    ) -> LogAppendDecision {
+        match cooldown_outcome(current, previous, within_cooldown, new_sig, has_proof) {
+            CooldownOutcome::Apply {
+                previous_becomes_current,
+                bump_marker,
+            } => log_append_decision(previous_becomes_current, bump_marker),
+            CooldownOutcome::Reject => panic!("test fed a gated case to the decision mapping"),
+        }
+    }
+
+    #[test]
+    fn first_publish_appends_non_reset() {
+        // The `None` (first-publish) branch in `try_apply_identity_once`
+        // routes through `log_append_decision(true, false)` — a key change
+        // from nothing, never a reset.
+        assert_eq!(
+            log_append_decision(true, false),
+            LogAppendDecision::Append { is_reset: false }
+        );
+    }
+
+    #[test]
+    fn same_key_reupload_skips() {
+        // No key change → Skip (no transparency append).
+        assert_eq!(decide(A, Some(B), false, A, false), LogAppendDecision::Skip);
+        // Even within the cool-down, a same-key re-upload still Skips.
+        assert_eq!(decide(A, Some(B), true, A, false), LogAppendDecision::Skip);
+    }
+
+    #[test]
+    fn proven_rotation_appends_non_reset() {
+        // Key change WITH a supersession proof → Append, NOT a reset.
+        assert_eq!(
+            decide(A, None, false, B, true),
+            LogAppendDecision::Append { is_reset: false }
+        );
+    }
+
+    #[test]
+    fn unproven_new_key_appends_reset() {
+        // Key change to a brand-new key, no proof, cool-down elapsed → the
+        // lost-everything case → Append{is_reset:true}.
+        assert_eq!(
+            decide(B, Some(A), false, C, false),
+            LogAppendDecision::Append { is_reset: true }
+        );
+    }
+
+    #[test]
+    fn heal_back_appends_non_reset() {
+        // A heal IS a key change (back to a previously-seen key) → it must be
+        // LOGGED as a real identity version, but it is NOT a fresh-start
+        // reset → Append{is_reset:false}.
+        assert_eq!(
+            decide(B, Some(A), true, A, false),
+            LogAppendDecision::Append { is_reset: false }
         );
     }
 }

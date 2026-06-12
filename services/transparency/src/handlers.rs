@@ -5,7 +5,7 @@
 //!
 //! Four endpoints:
 //!
-//! - `POST /transparency/append`           — bearer-authed leaf append.
+//! - `POST /transparency/append`           — service-secret-authed leaf append.
 //! - `GET  /transparency/root`             — anon current signed root.
 //! - `GET  /transparency/proof/:idx`       — anon inclusion proof.
 //! - `GET  /transparency/operator-key`     — anon operator pubkey to pin.
@@ -36,7 +36,6 @@ use axum::http::StatusCode;
 use axum::response::Json;
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
-use lakko_transparency::LogEntry;
 use serde::{Deserialize, Serialize};
 
 use crate::AppState;
@@ -51,15 +50,22 @@ const MAX_PUBKEY_LEN: usize = 64;
 // ----------------------------------------------------------------
 
 /// `POST /transparency/append` request body.
+///
+/// The caller does NOT supply the version — the transparency service
+/// assigns it monotonically per `username_hash` under the append lock
+/// (KT-log S2 decision B).
 #[derive(Debug, Deserialize)]
 pub(crate) struct AppendReq {
-    /// BLAKE3 username hash, base64-standard (32 bytes after decode).
+    /// BLAKE3 account-key hash, base64-standard (32 bytes after decode).
+    /// This is the opaque `username_hash` field — for the discovery
+    /// integration it carries
+    /// `BLAKE3("lakko/transparency/account/v1" || account_id)`, but the
+    /// service treats it as 32 opaque bytes and never learns the
+    /// account_id-to-username mapping.
     pub username_hash_b64: String,
     /// Identity public key, base64-standard (1..=64 bytes after decode;
     /// Ed25519 is 32).
     pub identity_pubkey_b64: String,
-    /// Monotonic per-username version; must be `>= 1`.
-    pub version: u64,
     /// ADR-0017 fresh-start marker — a no-supersession-proof owner
     /// reset. Defaults to `false` (a normal proven publish / rotation).
     #[serde(default)]
@@ -71,12 +77,17 @@ pub(crate) struct AppendReq {
 pub(crate) struct AppendRes {
     /// The 0-based leaf index the entry was appended at.
     pub idx: u64,
+    /// The server-assigned monotonic per-`username_hash` version
+    /// (`>= 1`).
+    pub version: u64,
 }
 
-/// Append a leaf to the log. Bearer-session-authed (the
-/// `require_session` middleware gates the route for S1). Validates the
-/// decoded shapes, builds a [`LogEntry`], persists it, and replies with
-/// the assigned index.
+/// Append a leaf to the log. Service-secret-authed (the
+/// `service_auth::require_service_secret` middleware gates the route —
+/// KT-log S2). Validates the decoded shapes, hands the
+/// `(username_hash, identity_pubkey, is_reset)` to the store which
+/// ASSIGNS the version under its lock, and replies with the assigned
+/// `(idx, version)`.
 pub(crate) async fn append(
     State(state): State<AppState>,
     Json(req): Json<AppendReq>,
@@ -107,26 +118,19 @@ pub(crate) async fn append(
         ));
     }
 
-    if req.version < 1 {
-        return Err((StatusCode::BAD_REQUEST, "version must be >= 1"));
-    }
-
-    let entry = LogEntry {
-        username_hash,
-        identity_pubkey,
-        version: req.version,
-    };
-
-    let idx = state
+    let result = state
         .store
-        .append(&state.db, entry, req.is_reset)
+        .append(&state.db, username_hash, identity_pubkey, req.is_reset)
         .await
         .map_err(|e| {
             tracing::error!(error = %e, "transparency append failed");
             (StatusCode::INTERNAL_SERVER_ERROR, "append failed")
         })?;
 
-    Ok(Json(AppendRes { idx }))
+    Ok(Json(AppendRes {
+        idx: result.idx,
+        version: result.version,
+    }))
 }
 
 // ----------------------------------------------------------------
@@ -253,7 +257,7 @@ mod tests {
     use super::*;
     use crate::store::LogStore;
     use lakko_crypto::signing;
-    use lakko_transparency::{verify_inclusion, InMemoryLog, InclusionProof, SignedRoot};
+    use lakko_transparency::{verify_inclusion, InMemoryLog, InclusionProof, LogEntry, SignedRoot};
     use std::sync::Arc;
 
     /// Reconstruct a `SignedRoot` from a `RootRes` the way a client

@@ -68,6 +68,18 @@ pub(crate) enum StoreError {
 /// as MariaDB `TINYINT(1)` → `i8`.
 type LeafRow = (u64, Vec<u8>, Vec<u8>, u64, i8);
 
+/// The outcome of a successful [`LogStore::append`] — the assigned leaf
+/// index and the server-assigned per-username version (KT-log S2
+/// decision B).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AppendResult {
+    /// The 0-based leaf index the entry was appended at.
+    pub(crate) idx: u64,
+    /// The monotonic per-`username_hash` version assigned to this entry
+    /// (`>= 1`).
+    pub(crate) version: u64,
+}
+
 /// Persistent append-only transparency log.
 pub(crate) struct LogStore {
     inner: Mutex<InMemoryLog>,
@@ -129,24 +141,55 @@ impl LogStore {
         }
     }
 
-    /// Append `entry` to the log and persist the leaf row.
+    /// Append a leaf for `username_hash` → `identity_pubkey` to the log
+    /// and persist the leaf row. The transparency service ASSIGNS the
+    /// `version` (KT-log S2 decision B): the caller does NOT supply it.
     ///
-    /// Appends in-memory FIRST to learn the index, then INSERTs the row
+    /// Under the same `Mutex` lock that serialises the in-memory append,
+    /// we FIRST query `MAX(version)` for this `username_hash` and use
+    /// `max + 1` (so versions are monotonic per `username_hash`, assigned
+    /// atomically — two concurrent appends for the same username can
+    /// never collide because the lock serialises them and the
+    /// `MAX`-query reflects the loser's committed row).
+    ///
+    /// Then we append in-memory to learn the index and INSERT the row
     /// with that exact index. See the module docs for the consistency
     /// model: a DB failure after the in-memory append is logged at
     /// `error` and returned (→ 500); the in-memory and durable state are
     /// then out of sync until a restart re-syncs them.
     ///
+    /// Returns the assigned `(idx, version)`.
+    ///
     /// # Errors
     ///
-    /// Returns [`StoreError::Db`] if the INSERT fails.
+    /// Returns [`StoreError::Db`] if the `MAX`-query or the INSERT fails.
     pub(crate) async fn append(
         &self,
         pool: &MySqlPool,
-        entry: LogEntry,
+        username_hash: [u8; 32],
+        identity_pubkey: Vec<u8>,
         is_reset: bool,
-    ) -> Result<u64, StoreError> {
+    ) -> Result<AppendResult, StoreError> {
         let mut log = self.inner.lock().await;
+
+        // Assign the version: max existing for this username_hash, + 1.
+        // COALESCE(MAX, 0) so a brand-new username starts at version 1.
+        // Run under the lock so the assignment is race-free against a
+        // concurrent append for the same username.
+        let max_version: u64 = sqlx::query_scalar(
+            "SELECT COALESCE(MAX(version), 0) FROM log_entries WHERE username_hash = ?",
+        )
+        .bind(&username_hash[..])
+        .fetch_one(pool)
+        .await?;
+        let version = max_version.saturating_add(1);
+
+        let entry = LogEntry {
+            username_hash,
+            identity_pubkey,
+            version,
+        };
+
         // Allocate the index by appending in-memory.
         let idx = log.append(entry.clone());
 
@@ -174,7 +217,7 @@ impl LogStore {
             return Err(StoreError::Db(e));
         }
 
-        Ok(idx)
+        Ok(AppendResult { idx, version })
     }
 
     /// Sign the current root with the operator key at `timestamp_unix`.
@@ -281,5 +324,67 @@ mod tests {
     async fn proof_out_of_bounds_errors() {
         let store = LogStore::from_log(InMemoryLog::new(signing::SigningKey::generate()));
         assert!(matches!(store.proof(0).await, Err(StoreError::Log(_))));
+    }
+
+    /// KT-log S2 decision B — the store ASSIGNS the version monotonically
+    /// per `username_hash`. DB-gated on
+    /// `LAKKO_TRANSPARENCY_TEST_DATABASE_URL` (skips, does not fail, when
+    /// unset — mirrors `tests/db_reload_e2e.rs`).
+    ///
+    /// Appending twice for the same username_hash yields versions 1 then
+    /// 2; a different username_hash starts again at version 1.
+    #[tokio::test]
+    async fn append_assigns_monotonic_version_per_username() {
+        use sqlx::mysql::MySqlPoolOptions;
+
+        let Ok(url) = std::env::var("LAKKO_TRANSPARENCY_TEST_DATABASE_URL") else {
+            eprintln!(
+                "skipping append_assigns_monotonic_version_per_username: \
+                 LAKKO_TRANSPARENCY_TEST_DATABASE_URL unset"
+            );
+            return;
+        };
+
+        let pool = MySqlPoolOptions::new()
+            .max_connections(4)
+            .connect(&url)
+            .await
+            .expect("connect test DB");
+        crate::MIGRATIONS.run(&pool).await.expect("run migrations");
+        sqlx::query("DELETE FROM log_entries")
+            .execute(&pool)
+            .await
+            .expect("clear log_entries");
+
+        let store = LogStore::from_log(InMemoryLog::new(signing::SigningKey::generate()));
+
+        let alice = lakko_crypto::hash::blake3(b"alice");
+        let bob = lakko_crypto::hash::blake3(b"bob");
+
+        // Two appends for alice -> versions 1, 2; indices 0, 1.
+        let r0 = store
+            .append(&pool, alice, vec![0x01; 32], false)
+            .await
+            .expect("append alice v1");
+        assert_eq!((r0.idx, r0.version), (0, 1));
+        let r1 = store
+            .append(&pool, alice, vec![0x02; 32], false)
+            .await
+            .expect("append alice v2");
+        assert_eq!((r1.idx, r1.version), (1, 2));
+
+        // First append for bob -> version 1 (a different username_hash
+        // restarts the version counter), index 2.
+        let r2 = store
+            .append(&pool, bob, vec![0x03; 32], true)
+            .await
+            .expect("append bob v1");
+        assert_eq!((r2.idx, r2.version), (2, 1));
+
+        sqlx::query("DELETE FROM log_entries")
+            .execute(&pool)
+            .await
+            .expect("clear log_entries");
+        pool.close().await;
     }
 }

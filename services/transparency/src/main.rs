@@ -16,8 +16,9 @@
 //!   first boot and persisted (`transparency_operator_key`). The
 //!   derived verifying key is the trust anchor clients pin out-of-band
 //!   (see `operator_key.rs`).
-//! - **HTTP** — append (bearer-authed for S1), current signed root,
-//!   inclusion proof, operator-key publication (see `handlers.rs`).
+//! - **HTTP** — append (shared-service-secret-authed; KT-log S2),
+//!   current signed root, inclusion proof, operator-key publication
+//!   (see `handlers.rs`).
 //!
 //! ## Configuration
 //!
@@ -28,10 +29,12 @@
 //! - `LAKKO_TRANSPARENCY_DATABASE_URL` (or `DATABASE_URL` fallback) —
 //!   sqlx-style MariaDB DSN; the database must be exclusive to this
 //!   service per the per-service DB isolation rule.
-//! - `LAKKO_SESSION_TOKEN_SECRET` — base64-encoded HMAC-SHA256 key
-//!   shared with `services/auth`. **Required** — fails fast at startup
-//!   if missing or shorter than 32 bytes after decode. Gates the
-//!   append endpoint.
+//! - `LAKKO_TRANSPARENCY_APPEND_SECRET` — base64-encoded shared service
+//!   secret (`>= 16` bytes after decode) that gates the append
+//!   endpoint (KT-log S2). Only the discovery service holds it. When
+//!   UNSET the append endpoint serves **503** (loud — there is no
+//!   anonymous-append fallback); a SET-but-malformed value fails fast
+//!   at startup. The read paths stay anonymous regardless.
 //! - `RUST_LOG` — `tracing-subscriber` env-filter spec.
 //!
 //! ## Endpoints
@@ -39,16 +42,16 @@
 //! - `GET  /health`                      — liveness, 200 OK
 //! - `GET  /ready`                       — readiness (DB ping), 200 / 503
 //! - `GET  /version`
-//! - `POST /transparency/append`         — bearer-authed leaf append
+//! - `POST /transparency/append`         — service-secret-authed leaf append
 //! - `GET  /transparency/root`           — anon current signed root
 //! - `GET  /transparency/proof/{idx}`    — anon inclusion proof
 //! - `GET  /transparency/operator-key`   — anon operator pubkey to pin
 
 #![forbid(unsafe_code)]
 
-pub(crate) mod auth;
 pub(crate) mod handlers;
 pub(crate) mod operator_key;
+pub(crate) mod service_auth;
 pub(crate) mod store;
 
 use std::net::SocketAddr;
@@ -61,7 +64,6 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json};
 use axum::routing::{get, post};
 use axum::Router;
-use lakko_auth_token::TokenSecret;
 use serde_json::json;
 use sqlx::mysql::MySqlPoolOptions;
 use sqlx::MySqlPool;
@@ -92,10 +94,13 @@ pub(crate) struct AppState {
     /// at boot) behind a mutex, plus the operator signing key. `Arc` so
     /// cloning the state for axum is free.
     pub(crate) store: Arc<LogStore>,
-    /// Shared HMAC secret for session-token verification — same value as
-    /// `services/auth`'s `state.session_token_secret`. Consumed by the
-    /// `auth::require_session` middleware on the append route.
-    pub(crate) session_token_secret: Arc<TokenSecret>,
+    /// Shared service secret gating `POST /transparency/append` (KT-log
+    /// S2). Decoded bytes from `LAKKO_TRANSPARENCY_APPEND_SECRET`; `None`
+    /// when the env var is unset, in which case the append endpoint
+    /// serves 503 (loud — no anonymous-append fallback). Consumed by the
+    /// `service_auth::require_service_secret` middleware on the append
+    /// route via a constant-time compare.
+    pub(crate) append_secret: Option<Arc<Vec<u8>>>,
 }
 
 #[tokio::main]
@@ -143,18 +148,27 @@ async fn main() -> Result<()> {
         .await
         .context("rebuild transparency log from DB")?;
 
-    // Session-token verifier. Same env var + shape as `services/auth`;
-    // fail-fast at startup so an unconfigured service does not reject
-    // every append with a cryptic 401.
-    let session_token_secret_raw = std::env::var("LAKKO_SESSION_TOKEN_SECRET")
-        .context("LAKKO_SESSION_TOKEN_SECRET env var must be set (base64-encoded HMAC-SHA256 key, >= 32 bytes after decode)")?;
-    let session_token_secret = TokenSecret::from_base64(&session_token_secret_raw)
-        .context("parse LAKKO_SESSION_TOKEN_SECRET as base64")?;
+    // Append service secret (KT-log S2). Only the discovery service
+    // holds it. A SET-but-malformed value fails fast at startup; UNSET
+    // is allowed here (the append endpoint then serves 503 loud — see
+    // `service_auth::require_service_secret`) so a fresh deploy can boot
+    // the read paths before the shared secret is provisioned.
+    let append_secret = service_auth::load_append_secret()
+        .map_err(anyhow::Error::msg)
+        .context("load LAKKO_TRANSPARENCY_APPEND_SECRET")?;
+    if append_secret.is_some() {
+        tracing::info!("transparency append secret configured — append endpoint armed");
+    } else {
+        tracing::warn!(
+            "LAKKO_TRANSPARENCY_APPEND_SECRET unset — POST /transparency/append disabled \
+             (serves 503); read paths remain open"
+        );
+    }
 
     let state = AppState {
         db: pool.clone(),
         store: Arc::new(store),
-        session_token_secret: Arc::new(session_token_secret),
+        append_secret,
     };
 
     let app = build_app(state);
@@ -177,10 +191,11 @@ async fn main() -> Result<()> {
 /// Build the public router. Extracted so tests can drive it directly
 /// without binding a TCP listener.
 ///
-/// `POST /transparency/append` sits behind the `require_session`
-/// middleware (S1 gate). The read paths (`/root`, `/proof`,
-/// `/operator-key`) plus the probes stay open — they take no
-/// account-bound input and serve only public artefacts.
+/// `POST /transparency/append` sits behind the
+/// `require_service_secret` middleware (KT-log S2 gate — only the
+/// discovery service holds the shared secret). The read paths
+/// (`/root`, `/proof`, `/operator-key`) plus the probes stay open —
+/// they take no account-bound input and serve only public artefacts.
 pub(crate) fn build_app(state: AppState) -> Router {
     use axum::middleware;
 
@@ -188,7 +203,7 @@ pub(crate) fn build_app(state: AppState) -> Router {
         .route("/transparency/append", post(handlers::append))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
-            auth::require_session,
+            service_auth::require_service_secret,
         ));
 
     let open = Router::new()
