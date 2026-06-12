@@ -15,6 +15,12 @@ import me.lakko.app.ds.DsClient
 import me.lakko.app.ds.DsClientArgError
 import me.lakko.app.ds.DsHttpError
 import me.lakko.app.ds.DsNetworkError
+import me.lakko.app.transparency.InMemoryLastSeenRoot
+import me.lakko.app.transparency.LastSeenRootStore
+import me.lakko.app.transparency.LogVerifyStatus
+import me.lakko.app.transparency.TransparencyClient
+import me.lakko.app.transparency.TransparencyConfig
+import me.lakko.app.transparency.verifyIdentityInLog
 import uniffi.lakko_ffi_uniffi.ContactAck
 import uniffi.lakko_ffi_uniffi.ContactRequest
 import uniffi.lakko_ffi_uniffi.FfiException
@@ -90,6 +96,26 @@ public class ContactsClient(
      * observations TOFU-pin (safe), and a changed key always fails closed.
      */
     private val pinStore: PinStore,
+    /**
+     * KT-log S3e — the no-rollback high-water-mark store for the ADDITIVE
+     * transparency-log inclusion check ([checkTransparencyLog]). Backed by
+     * a persistent [me.lakko.app.transparency.LastSeenRoot] in production
+     * (wired by [ContactsRepository]); an
+     * [me.lakko.app.transparency.InMemoryLastSeenRoot] otherwise. Never
+     * `null` — but the log check is OFF unless a transparency URL +
+     * operator key are also build-time configured.
+     */
+    private val lastSeenRoot: LastSeenRootStore = InMemoryLastSeenRoot(),
+    /**
+     * KT-log S3e — factory for the [TransparencyClient] the log check
+     * uses. Returns `null` when the integration is OFF (no URL / no pinned
+     * operator key) — the default delegates to
+     * [TransparencyClient.forOptionalConfig]. Tests inject a factory over
+     * a `MockEngine`-backed client to exercise the verdict mapping.
+     */
+    private val transparencyClientFactory: () -> TransparencyClient? = {
+        TransparencyClient.forOptionalConfig()
+    },
 ) : AutoCloseable {
 
     override fun close() {
@@ -141,8 +167,22 @@ public class ContactsClient(
         // AccountIdentity key against the local pin BEFORE using its
         // keys to seal a ContactRequest. A changed key with no valid
         // supersession proof throws [SupersessionRefused] (fail-
-        // closed) and we never seal to the unverified new key.
+        // closed) and we never seal to the unverified new key. The
+        // supersession gate runs FIRST (and may throw) so a pin always
+        // exists for the additive log check below to record on.
         verifyBundleAccountKey(recipientAccountId, bundle)
+
+        // KT-log S3e — ADDITIVE equivocation-detection layer on top of the
+        // supersession/pin gate. HARD-FAILS only on a ROLLBACK (the log
+        // shrank — an unambiguous attack, [LogRollbackDetected]); every
+        // other verdict is recorded + surfaced but does NOT block (the log
+        // is eventually-consistent and the supersession/pin gate is the
+        // primary trust). NEVER weakens the gate above — a
+        // [SupersessionRefused] propagates before this runs at all.
+        checkTransparencyLog(
+            recipientAccountId,
+            base64Decode(bundle.signature_pubkey),
+        )
 
         val recipientSignaturePub = base64Decode(bundle.signature_pubkey)
         val recipientX25519Pub = base64Decode(bundle.x25519_pubkey)
@@ -372,6 +412,124 @@ public class ContactsClient(
             "supersession: re-pinned account $accountIdB64 to a verified " +
                 "rotated key (marker $proofExpiresAt)",
         )
+    }
+
+    /**
+     * KT-log S3e — consult the operator-signed transparency log to confirm
+     * the served identity is in the public append-only log (equivocation
+     * detection on top of the supersession/pin gate).
+     *
+     * Mirror of the web `ContactsClient.checkTransparencyLog`. Runs AFTER
+     * [verifyBundleAccountKey]'s supersession gate has TOFU-pinned /
+     * verified the key, so a pin always exists when we record the verdict.
+     * Best-effort POSTURE (ADR-0016 stays the primary, fail-closed trust):
+     *
+     *   * [LogVerifyStatus.ROLLBACK]  → HARD FAIL. Throw
+     *     [LogRollbackDetected]. The log shrank — an unambiguous attack.
+     *     This is the ONLY blocking verdict for S3e.
+     *   * [LogVerifyStatus.MISMATCH]  → record + prominent [Log.w], but DO
+     *     NOT block (S3e). Hard-blocking on mismatch is the natural
+     *     fail-closed refinement and is flagged for `lakko-security` to
+     *     rule on.
+     *   * [LogVerifyStatus.ABSENT] / [LogVerifyStatus.UNREACHABLE] →
+     *     record + a [Log.w] and proceed. The log is eventually-consistent;
+     *     the supersession/pin gate already authorised the key.
+     *   * [LogVerifyStatus.CONFIRMED] / [LogVerifyStatus.OFF] → quiet (the
+     *     happy path / disabled).
+     *
+     * The recorded status travels on the account's pin record
+     * ([PinStore.recordLogStatus]) so the UI can surface it. Any UNEXPECTED
+     * throw from the log machinery (it is designed not to throw except for
+     * the deliberate rollback, which it surfaces as the
+     * [LogVerifyStatus.ROLLBACK] return) is swallowed + logged — the
+     * additive check must never break the primary fetch path.
+     *
+     * `internal` (not `private`) so the instrumented test suite can drive
+     * the verdict→posture mapping directly against a `MockEngine`-backed
+     * transparency client + the real native lib.
+     *
+     * @param accountId    the peer's raw 16-byte account_id.
+     * @param servedPubkey the 32-byte Ed25519 key discovery served.
+     * @throws LogRollbackDetected ONLY on a [LogVerifyStatus.ROLLBACK].
+     */
+    internal suspend fun checkTransparencyLog(
+        accountId: ByteArray,
+        servedPubkey: ByteArray,
+    ) {
+        val accountIdB64 = base64Encode(accountId)
+        // Build the transparency client (OFF → null → verdict OFF below).
+        val client = try {
+            transparencyClientFactory()
+        } catch (cause: Throwable) {
+            // A factory that throws (misconfiguration) must NOT break the
+            // primary fetch path — treat as OFF.
+            Log.w(
+                "lakko-contacts",
+                "transparency: client factory threw; skipping the additive " +
+                    "log check (supersession/pin gate already authorised " +
+                    "the key)",
+                cause,
+            )
+            return
+        }
+
+        val status: LogVerifyStatus = try {
+            client.use { c ->
+                verifyIdentityInLog(
+                    accountId = accountId,
+                    publishedSignaturePubkey = servedPubkey,
+                    client = c,
+                    operatorKey = TransparencyConfig.pinnedOperatorKey(),
+                    lastSeenRoot = lastSeenRoot,
+                )
+            }
+        } catch (cause: Throwable) {
+            // The verifier is designed to map faults to a status and only
+            // signal the rollback semantics via the [LogVerifyStatus.ROLLBACK]
+            // RETURN (not a throw). An unexpected throw here must NOT break
+            // the additive check — log + proceed.
+            Log.w(
+                "lakko-contacts",
+                "transparency: log check threw unexpectedly (proceeding; " +
+                    "supersession/pin gate already authorised the key)",
+                cause,
+            )
+            return
+        }
+
+        // Rollback is the one hard failure (unambiguous attack).
+        if (status == LogVerifyStatus.ROLLBACK) {
+            throw LogRollbackDetected(accountIdB64)
+        }
+
+        // Record the verdict on the pin record (best-effort; the pin
+        // exists because the supersession gate ran first).
+        pinStore.recordLogStatus(accountIdB64, status)
+
+        when (status) {
+            LogVerifyStatus.MISMATCH ->
+                // Surfaced-but-not-blocked for S3e. The natural fail-closed
+                // refinement (hard-block on mismatch) is deferred to a
+                // lakko-security ruling — see the method doc + the S3e report.
+                Log.w(
+                    "lakko-contacts",
+                    "transparency: MISMATCH for account $accountIdB64 — the " +
+                        "log's latest key differs from what discovery served " +
+                        "(or the inclusion proof failed). Proceeding for S3e " +
+                        "(supersession/pin gate is primary); flag for review.",
+                )
+            LogVerifyStatus.ABSENT, LogVerifyStatus.UNREACHABLE ->
+                Log.w(
+                    "lakko-contacts",
+                    "transparency: check inconclusive ($status) for account " +
+                        "$accountIdB64 — proceeding; the log is eventually-" +
+                        "consistent and the pin gate is primary.",
+                )
+            // CONFIRMED / OFF are quiet (the happy path / disabled).
+            LogVerifyStatus.CONFIRMED, LogVerifyStatus.OFF -> Unit
+            // ROLLBACK already threw above; unreachable here.
+            LogVerifyStatus.ROLLBACK -> Unit
+        }
     }
 
     /**
@@ -938,6 +1096,28 @@ public class SupersessionRefused(
     public val accountIdB64: String,
     message: String,
 ) : RuntimeException(message)
+
+/**
+ * KT-log S3e — thrown when the transparency log's signed root reports a
+ * `log_size` SMALLER than the highest this client has ever seen. An
+ * append-only log cannot shrink, so a rollback is an unambiguous attack (a
+ * server trying to hide a leaf it later appended). This is the ONE
+ * transparency-log verdict that hard-fails the identity-fetch path; all
+ * other verdicts (`ABSENT` / `UNREACHABLE` / `OFF` / `MISMATCH`) are
+ * recorded + surfaced but do NOT block, because the log is
+ * eventually-consistent and the supersession/pin gate is the primary
+ * trust (see [ContactsClient.checkTransparencyLog]).
+ *
+ * Mirror of the web `LogRollbackDetected`.
+ */
+public class LogRollbackDetected(
+    /** base64 of the account_id whose fetch tripped the rollback. */
+    public val accountIdB64: String,
+) : RuntimeException(
+    "the transparency log appears to have shrunk (a smaller log_size than " +
+        "previously observed) — an append-only log cannot do this, so this " +
+        "is an unambiguous rollback attack. Refusing to proceed.",
+)
 
 /** Fixed serialized length of a supersession proof — mirrors
  *  `lakko_transparency::supersession::SUPERSESSION_PROOF_LEN`

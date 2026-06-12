@@ -116,6 +116,34 @@ android {
             "\"${project.findProperty("lakko.device.attest.key") as String? ?: ""}\"",
         )
 
+        // KT-log S3e — transparency-log verification config (the Android
+        // mirror of the web `VITE_LAKKO_TRANSPARENCY_*` env vars). Both
+        // sourced from gradle properties (set via
+        // `apps/android/local.properties` or `-P lakko.transparency.url=...`)
+        // so they never land in version control; empty when unset.
+        //
+        // `LAKKO_TRANSPARENCY_URL` — the transparency service base URL (no
+        // trailing path). Blank → the whole log check is OFF.
+        // `LAKKO_TRANSPARENCY_OPERATOR_KEY` — base64 (standard alphabet) of
+        // the operator's 32-byte Ed25519 verifying key, pinned out-of-band.
+        // The client NEVER trusts `/transparency/operator-key` for
+        // verification. Blank / malformed → the log check is OFF.
+        //
+        // The skip path is fail-OPEN: the log is an equivocation-detection
+        // layer on top of the fail-closed supersession/pin gate (ADR-0016),
+        // so an unprovisioned build runs without the extra check rather
+        // than refusing to start.
+        buildConfigField(
+            "String",
+            "LAKKO_TRANSPARENCY_URL",
+            "\"${project.findProperty("lakko.transparency.url") as String? ?: ""}\"",
+        )
+        buildConfigField(
+            "String",
+            "LAKKO_TRANSPARENCY_OPERATOR_KEY",
+            "\"${project.findProperty("lakko.transparency.operator.key") as String? ?: ""}\"",
+        )
+
         // G3-4-mobile — wire androidx.test runner for the
         // `app/src/androidTest/` instrumented test source set.
         // `./gradlew :app:connectedDebugAndroidTest` boots a

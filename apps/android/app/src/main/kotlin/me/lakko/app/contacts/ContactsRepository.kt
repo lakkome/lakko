@@ -69,6 +69,14 @@ public class ContactsRepository(
             // InMemoryPinStore when no Context is supplied (tests). The
             // verify gate is therefore never silently disabled.
             pinStore = appContext?.let { PeerPinStore(it) } ?: InMemoryPinStore(),
+            // KT-log S3e — persistent no-rollback high-water-mark store in
+            // production (so a relaunch can't re-arm a rollback by
+            // forgetting the highest log_size); ephemeral in tests. The log
+            // check itself is still OFF unless a transparency URL +
+            // operator key are build-time configured.
+            lastSeenRoot = appContext?.let {
+                me.lakko.app.transparency.LastSeenRoot(it)
+            } ?: me.lakko.app.transparency.InMemoryLastSeenRoot(),
         )
     },
     /** Factory for the [me.lakko.app.discovery.DiscoveryClient] the invite-
