@@ -5,9 +5,10 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 # ADR-0018: Recovery factor cascade — ACCESS-only factors
 
-- **Status:** Accepted — Part 2 of the account-recovery overhaul. Factor (a)
-  another-device: implementing now. Factors (b)/(c)/(d): designed here, built in
-  later sprints; 2026-06-09
+- **Status:** Accepted — **built + reviewed** (Part 2 of the account-recovery
+  overhaul). All four factors landed end-to-end (server + web + iOS + Android);
+  `lakko-security` passed on factor (a) (APPROVE) and on (c)+(d) (APPROVE-WITH-NOTES,
+  finding closed). 2026-06-09 (designed) → 2026-06-12 (built)
 - **Date:** 2026-06-09
 - **Context:** ADR-0017 decoupled the AccountIdentity from the password so a
   routine recovery preserves identity. This ADR adds the **access**-recovery side:
@@ -120,6 +121,44 @@ machine is unchanged (no `lakko-mls` ADR/property-test burden beyond the envelop
   (hash) + `otp_challenges` (code hash, TTL, attempt-cap) migrations; recover is
   anon + PoW, attempt-capped, "code sent" claimed indistinguishably on no-match.
   Needs an external SMS/email provider. Weakest factor → last in the cascade.
+
+## Implementation status (built + reviewed)
+
+All four factors landed (server + 3 clients), each build/test-verified:
+
+- **(a) Another device.** `device_grants` (migration `0011`, hash-at-rest, atomic
+  single-use `DELETE … rows_affected==1`) + `POST /device/authorize/{start,redeem}`.
+  IDENTITY via **Path B (MLS exporter)**: at the post-add/post-join epoch both devices
+  derive the same key via `DeviceGroup::export_secret`; the existing device seals
+  `(grant_token ‖ phrase seed)` with `seal_with_key` (ChaCha20-Poly1305) into a
+  magic-tagged rendezvous mailbox row; the fresh device opens it, redeems the grant
+  for ACCESS, caches the seed for IDENTITY. Server stays opaque (the seed crosses the
+  wire only sealed). `lakko-security`: **APPROVE**.
+- **(b) Passkey.** Already issued a session token; the only change is the post-ACCESS
+  ADR-0017 identity acquisition.
+- **(c) TOTP — RFC 4226/6238, in-house (no new dep).** `totp_secrets` (migration
+  `0012`, secret AEAD-encrypted at rest under `LAKKO_TOTP_ENC_KEY`); enroll bearer +
+  recover anon + PoW; ±1-step window, replay via strictly-newer matched step + atomic
+  CAS, 5-in-15-min lockout, enumeration-safe 401 with a dummy verify, 503 when
+  unconfigured.
+- **(d) Phone/email OTP — invariant #1 preserved.** `recovery_contacts` +
+  `otp_challenges` (migration `0013`) store **only** a pepper-keyed BLAKE3 hash
+  (purpose-byte-separated for contact vs code); the plaintext is transient, never
+  stored or logged. Delivery behind a pluggable `OtpSender` (`LogOnlyOtpSender` default
+  + a real `SmtpOtpSender` (lettre) + a Twilio-shaped `SmsOtpSender`, resolved per kind
+  from env). recover/start is enumeration-safe (`{sent:true}` regardless, send only on
+  a confirmed match); recover/finish is single-use + attempt-capped; expired challenges
+  swept by the state pruner. `lakko-security` (c)+(d): **APPROVE-WITH-NOTES** — both
+  load-bearing claims hold (ACCESS-only / never key material; plaintext never
+  stored-or-logged); the one finding (an inaccurate pruner comment) was fixed.
+
+The cross-cutting property holds: every factor lands the client in the **same**
+post-ACCESS ADR-0017 identity-acquisition state machine. The lost-everything tail of
+that machine (fresh-identity fallback) landed in Phase 3 — see ADR-0017
+§"Implementation status".
+
+**Deferred (out of scope here):** a live cross-platform 2-device e2e (no deployed
+environment); the optional (d) SMS adapter is a config slot armed by deploy-time creds.
 
 ## Relationship to prior ADRs
 

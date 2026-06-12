@@ -5,7 +5,11 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 # ADR-0017: Phrase-seeded AccountIdentity — decouple identity from the password
 
-- **Status:** Accepted — implement (Part 1 of the account-recovery overhaul); 2026-06-09
+- **Status:** Accepted — **built + reviewed** (Part 1 of the account-recovery
+  overhaul). Phrase-seeded identity + on-device seed store + fresh-device
+  acquisition + G-4 emit-skip landed on web + iOS + Android; the lost-everything
+  fallback landed (Phase 3, see below); `lakko-security` passed (APPROVE-WITH-NOTES,
+  findings closed). 2026-06-09 (designed) → 2026-06-12 (built)
 - **Date:** 2026-06-09
 - **Context:** Account recovery must be self-service and must not change the
   user's long-term identity on a routine recover. Today
@@ -116,6 +120,41 @@ old=`fromSeed(oldExportKey)`, new=`fromSeed(phraseSeed)`. Default: don't.)
   explicit "rotate my identity (phrase compromised)" action, which would
   deliberately re-activate the supersession + (eventual) KT-log chain path.
   Dormant is not deleted.
+
+## Implementation status (built + reviewed)
+
+Landed end-to-end on web + iOS + Android, each step build/test-verified:
+
+- **Phrase-seeded identity + seed store.** `AccountIdentity = fromSeed(phraseSeed)`
+  at every canonical site; the `account-identity-seed-store` (web IndexedDB AES-GCM,
+  iOS Keychain, Android EncryptedSharedPreferences) wraps the 64-byte seed under the
+  hardware-backed device key and is wiped on `forgetDevice`.
+- **Fresh-device acquisition + hard-closed verify.** A fresh device with no cached
+  seed parks `needs-recovery-phrase`; `provideRecoveryPhrase` derives the seed and
+  **HARD-BLOCKS** against the published bundle (`verifySeedAgainstPublishedIdentity`):
+  a mismatch / 404 / network error refuses (`SupersessionPhraseMismatch` /
+  `IdentityVerificationUnavailable`), never blind-TOFU (`lakko-security` Part-1 #1).
+- **G-4 emit-skip.** `recover` compares old vs new AccountIdentity pubkey and skips
+  the supersession proof when equal — always, on a phrase-seeded recover — and
+  fail-loud on the impossible mismatch. Supersession is dormant as designed.
+- **Lost-everything fallback (Phase 3).** The explicit escape hatch for a user who
+  recovered ACCESS via an ADR-0018 factor but has no phrase and no other device:
+  `mintFreshIdentity` (reachable only post-ACCESS, behind an explicit warned button)
+  mints a fresh random phrase + AccountIdentity, **publishes the new bundle WITHOUT a
+  proof — the single sanctioned publish-without-proof — and propagates a publish
+  failure before any local mutation** so a network blip never strands the account,
+  shows the new phrase (acknowledge-gated), then lands the session. Contacts then
+  re-verify once OOB (the accepted degradation). `lakko-security` Phase-3A:
+  APPROVE-WITH-NOTES — adjudged **consistent with invariant #6** (no proof is mintable
+  when the old seed is gone; the acceptance-side fail-closed gate is intact) and the
+  ACCESS-hijack residual **strictly no-worse** than the pre-existing ACCESS threat
+  (OOB safety-number re-verify is the backstop); the torn-state + cleanup findings
+  were fixed.
+
+**Deferred (defence-in-depth, not blockers):** a notification / audit entry on
+fresh-identity mint; a server-side per-account cool-down on fresh-identity publishes;
+a KT-log "fresh start" marker (needs the KT-log chain verifier — a separate work item)
+to let contacts distinguish an owner reset from an active attacker.
 
 ## Relationship to prior ADRs
 
