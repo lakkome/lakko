@@ -6,6 +6,7 @@ package me.lakko.app.transparency
 import uniffi.lakko_ffi_uniffi.FfiException
 import uniffi.lakko_ffi_uniffi.transparencyAccountKey
 import uniffi.lakko_ffi_uniffi.verifyLogInclusion
+import uniffi.lakko_ffi_uniffi.verifySupersessionChain
 
 /**
  * Transparency-log inclusion verification (KT-log S3e) — the Android
@@ -143,6 +144,83 @@ public object NativeInclusionGate : InclusionGate {
 }
 
 /**
+ * Rotation-chain-gate seam (G-30 #2, ADR-0019) — abstracts the native
+ * `verifySupersessionChain` call so the status-mapping decision logic in
+ * [verifyRotationChain] is unit-testable on the host JVM without
+ * `liblakko_ffi_uniffi.so`.
+ *
+ * The production implementation ([NativeChainGate]) calls the real UniFFI
+ * `verifySupersessionChain`, which THROWS [FfiException] on ANY chain-gate
+ * sub-failure (root sig / no-rollback / inclusion / supersession proof from
+ * the old key / non-newer version / freshness) and RETURNS the authorised
+ * new pubkey on success. Tests inject a stub that throws (to simulate a
+ * chain contradiction) or returns (to simulate a passing chain) — exactly
+ * that contract — so the `CONFIRMED` / chain-fail `MISMATCH` branches can be
+ * exercised without building a real Merkle proof + a real supersession proof
+ * (both need the Rust log builder, not exposed to the FFI).
+ */
+public fun interface ChainGate {
+    /**
+     * Verify the rotation transition old→new is anchored to the
+     * operator-signed log: the served key is the log's head for the account
+     * AND the supersession chain holds. MUST throw to signal a chain-gate
+     * failure; returning the authorised new pubkey means the chain verified.
+     */
+    public fun verify(
+        operatorKey: ByteArray,
+        root: SignedRoot,
+        usernameHash: ByteArray,
+        servedPubkey: ByteArray,
+        version: ULong,
+        proof: InclusionProof,
+        supersessionProof: ByteArray,
+        pinnedOldPubkey: ByteArray,
+        pinnedLogVersion: ULong,
+        lastSeenLogSize: ULong,
+        nowUnixSecs: Long,
+    ): ByteArray
+}
+
+/** Production [ChainGate] — the real native `verifySupersessionChain`. */
+public object NativeChainGate : ChainGate {
+    override fun verify(
+        operatorKey: ByteArray,
+        root: SignedRoot,
+        usernameHash: ByteArray,
+        servedPubkey: ByteArray,
+        version: ULong,
+        proof: InclusionProof,
+        supersessionProof: ByteArray,
+        pinnedOldPubkey: ByteArray,
+        pinnedLogVersion: ULong,
+        lastSeenLogSize: ULong,
+        nowUnixSecs: Long,
+    ): ByteArray =
+        // Throws FfiException on any chain-gate sub-failure (bad root
+        // signature, rollback, tampered inclusion proof, invalid / wrong-key /
+        // expired supersession proof, non-newer logged version). Returns the
+        // authorised new pubkey on success. The caller maps a throw to
+        // MISMATCH.
+        verifySupersessionChain(
+            operatorPubkey = operatorKey,
+            newTreeRoot = root.treeRoot,
+            newLogSize = root.logSize,
+            newTimestampUnix = root.timestampUnix,
+            newRootSignature = root.signature,
+            entryUsernameHash = usernameHash,
+            entryIdentityPubkey = servedPubkey,
+            entryVersion = version,
+            inclusionLeafIndex = proof.idx,
+            inclusionAuditPath = proof.auditPath,
+            supersessionProof = supersessionProof,
+            pinnedOldPubkey = pinnedOldPubkey,
+            pinnedVersion = pinnedLogVersion,
+            lastSeenLogSize = lastSeenLogSize,
+            nowUnixSecs = nowUnixSecs,
+        )
+}
+
+/**
  * Derive the transparency-log account-key (`username_hash`) for a raw
  * 16-byte `account_id`, via the audited Rust core. Abstracted behind a
  * seam ([accountKeyOf] below) only so the host-JVM status-mapping test can
@@ -260,6 +338,179 @@ public suspend fun verifyIdentityInLog(
         // (the caller does not block on it); the supersession/pin gate is
         // the primary trust.
         LogVerifyResult(LogVerifyStatus.UNREACHABLE, isReset = null)
+    }
+}
+
+/**
+ * The outcome of [verifyRotationChain] (G-30 #2, ADR-0019).
+ *
+ * Extends the [verifyIdentityInLog] result with the chain-confirmed
+ * per-account-key [version]: the transparency-log version the served
+ * (rotated-to) key was proven included at, so the caller can persist it as
+ * the next rotation's downgrade floor. [version] is non-`null` ONLY on a
+ * [LogVerifyStatus.CONFIRMED] verdict (a latest entry was read AND the chain
+ * gate passed); `null` on every other status (no chain confirmation to
+ * anchor a version on).
+ */
+public data class RotationChainResult(
+    /** The verdict — same union as [verifyIdentityInLog]. */
+    val status: LogVerifyStatus,
+    /** The `/latest` entry's `is_reset` marker when a latest entry was read
+     *  ([LogVerifyStatus.CONFIRMED] / [LogVerifyStatus.MISMATCH]); `null`
+     *  otherwise. */
+    val isReset: Boolean?,
+    /** The chain-confirmed log version on [LogVerifyStatus.CONFIRMED]; `null`
+     *  otherwise. */
+    val version: Long?,
+)
+
+/**
+ * G-30 #2 (ADR-0019) — verify that a peer's KEY ROTATION is
+ * cryptographically anchored to the operator-signed transparency log.
+ *
+ * Where [verifyIdentityInLog] proves a SINGLE served key is in the log, this
+ * proves the TRANSITION old→new: the served (rotated-to) key is the log's
+ * current head for the account AND a supersession chain — root signature,
+ * no-rollback, Merkle inclusion, the embedded supersession proof from the
+ * OLD pinned key, a strictly-newer logged version than the pinned floor, and
+ * freshness — all hold. The heavy lifting is one native
+ * `verifySupersessionChain` call (which THROWS on any chain-gate failure and
+ * returns the authorised new pubkey on success).
+ *
+ * Called by [me.lakko.app.contacts.ContactsClient.checkTransparencyLog] ONLY
+ * on the rotation branch (a pin exists, the served key differs from it, and
+ * the bundle carried a supersession proof). It is BEST-EFFORT with the SAME
+ * posture contract as [verifyIdentityInLog]: it never throws — every fault
+ * maps to a status, and the caller (not this function) decides the posture.
+ * Only [LogVerifyStatus.ROLLBACK] is surfaced as a hard verdict; a chain
+ * contradiction is surfaced as [LogVerifyStatus.MISMATCH] (an equivocation
+ * signal), NOT a block.
+ *
+ * Status mapping:
+ *   * [LogVerifyStatus.OFF]         — the integration is unconfigured (no
+ *                                     client / no pinned operator key).
+ *                                     `version` null.
+ *   * [LogVerifyStatus.ROLLBACK]    — the signed root's `log_size` shrank
+ *                                     below our high-water mark. `version`
+ *                                     null.
+ *   * [LogVerifyStatus.ABSENT]      — `/latest` 404s (the rotated key is not
+ *                                     yet logged), OR the log's latest pubkey
+ *                                     is NOT the served key (a not-yet-logged
+ *                                     rotation or a third key — we cannot
+ *                                     chain-prove the served key, so we do
+ *                                     NOT block; the standalone gate-1 result
+ *                                     stands). `version` null.
+ *   * [LogVerifyStatus.CONFIRMED]   — the chain gate passed. `version` is the
+ *                                     latest entry's logged version.
+ *   * [LogVerifyStatus.MISMATCH]    — the chain gate THREW (the log
+ *                                     contradicts the proof — an equivocation
+ *                                     signal). `version` null.
+ *   * [LogVerifyStatus.UNREACHABLE] — a network/log fault. `version` null.
+ *
+ * @param accountId          the peer's raw 16-byte account_id.
+ * @param servedPubkey       the 32-byte Ed25519 key discovery served (the
+ *                           rotated-TO key).
+ * @param supersessionProof  the bundle's `supersession_proof` (raw bytes) —
+ *                           the chain's old-key authorisation.
+ * @param pinnedOldPubkey    the locally-pinned OLD pubkey (32 bytes).
+ * @param pinnedLogVersion   the pinned log-version floor (the downgrade
+ *                           protection); `0` when never chain-confirmed.
+ * @param client             pre-built client, or `null` to mean "off".
+ * @param operatorKey        the pinned operator verifying key, or `null` for
+ *                           "off".
+ * @param lastSeenRoot       the no-rollback high-water-mark store.
+ * @param accountKeyDeriver  derives the `username_hash` (native by default).
+ * @param chainGate          the chain verifier (native by default; a test
+ *                           seam otherwise).
+ */
+public suspend fun verifyRotationChain(
+    accountId: ByteArray,
+    servedPubkey: ByteArray,
+    supersessionProof: ByteArray,
+    pinnedOldPubkey: ByteArray,
+    pinnedLogVersion: Long,
+    client: TransparencyClient?,
+    operatorKey: ByteArray?,
+    lastSeenRoot: LastSeenRootStore,
+    accountKeyDeriver: AccountKeyDeriver = NativeAccountKeyDeriver,
+    chainGate: ChainGate = NativeChainGate,
+): RotationChainResult {
+    // OFF — the integration is unconfigured. Skip entirely.
+    if (client == null || operatorKey == null) {
+        return RotationChainResult(LogVerifyStatus.OFF, isReset = null, version = null)
+    }
+
+    return try {
+        // 1. Fetch the operator-signed root and run the no-rollback gate
+        //    against our high-water mark BEFORE trusting it.
+        val root = client.fetchRoot()
+        if (!lastSeenRoot.checkAndAdvance(root.logSize.toLong())) {
+            return RotationChainResult(LogVerifyStatus.ROLLBACK, isReset = null, version = null)
+        }
+
+        // 2. Look up the account's latest logged entry.
+        val usernameHash = accountKeyDeriver.derive(accountId)
+        val latest = client.fetchLatest(usernameHash)
+            ?: // The rotated key is not yet logged. Benign under eventual
+            //  consistency — we cannot chain-prove it, so we do NOT block.
+            return RotationChainResult(LogVerifyStatus.ABSENT, isReset = null, version = null)
+
+        // 3. The log's latest pubkey must BE the served key for the chain to
+        //    prove the served key. If it is a not-yet-logged rotation or a
+        //    third key, we cannot chain-prove the served key here; the
+        //    standalone gate-1 (supersession/pin) result stands. Surface
+        //    ABSENT (no chain confirmation) — do NOT block on it.
+        if (!latest.identityPubkey.contentEquals(servedPubkey)) {
+            return RotationChainResult(
+                LogVerifyStatus.ABSENT,
+                isReset = latest.isReset,
+                version = null,
+            )
+        }
+
+        // 4. Fetch the inclusion proof and run the full chain gate. The
+        //    verifier throws on any sub-gate failure (root sig / rollback /
+        //    inclusion / supersession proof / non-newer version / freshness).
+        val proof = client.fetchProof(latest.idx)
+        try {
+            chainGate.verify(
+                operatorKey = operatorKey,
+                root = root,
+                usernameHash = usernameHash,
+                servedPubkey = servedPubkey,
+                version = latest.version,
+                proof = proof,
+                supersessionProof = supersessionProof,
+                pinnedOldPubkey = pinnedOldPubkey,
+                pinnedLogVersion = pinnedLogVersion.toULong(),
+                lastSeenLogSize = lastSeenRoot.loadLastSeenLogSize().toULong(),
+                nowUnixSecs = System.currentTimeMillis() / 1000L,
+            )
+        } catch (_: FfiException) {
+            // The chain gate failed: the log CONTRADICTS the supersession
+            // proof (an equivocation signal). Surface MISMATCH — the caller
+            // records + warns but does NOT block (S3e posture). A latest
+            // entry existed, so the marker rides out.
+            return RotationChainResult(
+                LogVerifyStatus.MISMATCH,
+                isReset = latest.isReset,
+                version = null,
+            )
+        }
+        // The chain is proven — anchor the confirmed version for the next
+        // rotation's downgrade floor.
+        RotationChainResult(
+            LogVerifyStatus.CONFIRMED,
+            isReset = latest.isReset,
+            version = latest.version.toLong(),
+        )
+    } catch (_: TransparencyNetworkError) {
+        RotationChainResult(LogVerifyStatus.UNREACHABLE, isReset = null, version = null)
+    } catch (_: TransparencyHttpError) {
+        // A non-404 HTTP fault or a malformed body — the chain is unusable
+        // for this check. Fail-open to UNREACHABLE (the caller does not block
+        // on it); the standalone supersession/pin gate is primary.
+        RotationChainResult(LogVerifyStatus.UNREACHABLE, isReset = null, version = null)
     }
 }
 

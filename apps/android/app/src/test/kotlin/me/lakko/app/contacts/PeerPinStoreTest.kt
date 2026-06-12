@@ -220,7 +220,13 @@ class PeerPinStoreTest {
     fun `serializePin keeps the legacy two-field shape with no verdict or reset`() {
         assertEquals(
             "$keyA|42",
-            PeerPinStore.serializePin(keyA, 42L, logStatus = null, isReset = null),
+            PeerPinStore.serializePin(
+                keyA,
+                42L,
+                logStatus = null,
+                isReset = null,
+                pinnedLogVersion = null,
+            ),
         )
     }
 
@@ -228,7 +234,13 @@ class PeerPinStoreTest {
     fun `serializePin keeps the three-field shape for a verdict with no reset`() {
         assertEquals(
             "$keyA|42|CONFIRMED",
-            PeerPinStore.serializePin(keyA, 42L, LogVerifyStatus.CONFIRMED, isReset = null),
+            PeerPinStore.serializePin(
+                keyA,
+                42L,
+                LogVerifyStatus.CONFIRMED,
+                isReset = null,
+                pinnedLogVersion = null,
+            ),
         )
     }
 
@@ -238,15 +250,57 @@ class PeerPinStoreTest {
         // index 3 by writing an empty verdict at index 2.
         assertEquals(
             "$keyA|42||true",
-            PeerPinStore.serializePin(keyA, 42L, logStatus = null, isReset = true),
+            PeerPinStore.serializePin(
+                keyA,
+                42L,
+                logStatus = null,
+                isReset = true,
+                pinnedLogVersion = null,
+            ),
         )
     }
 
     @Test
-    fun `serializePin writes all four fields when both are set`() {
+    fun `serializePin writes four fields for a verdict plus reset with no version`() {
         assertEquals(
             "$keyA|42|MISMATCH|false",
-            PeerPinStore.serializePin(keyA, 42L, LogVerifyStatus.MISMATCH, isReset = false),
+            PeerPinStore.serializePin(
+                keyA,
+                42L,
+                LogVerifyStatus.MISMATCH,
+                isReset = false,
+                pinnedLogVersion = null,
+            ),
+        )
+    }
+
+    @Test
+    fun `serializePin writes all five fields when the chain version is set`() {
+        assertEquals(
+            "$keyA|42|CONFIRMED|false|7",
+            PeerPinStore.serializePin(
+                keyA,
+                42L,
+                LogVerifyStatus.CONFIRMED,
+                isReset = false,
+                pinnedLogVersion = 7L,
+            ),
+        )
+    }
+
+    @Test
+    fun `serializePin writes empty earlier slots when only the chain version is set`() {
+        // A version with neither a verdict nor a reset writes empty slots at
+        // indices 2 and 3 so the positional version lands at index 4.
+        assertEquals(
+            "$keyA|42|||9",
+            PeerPinStore.serializePin(
+                keyA,
+                42L,
+                logStatus = null,
+                isReset = null,
+                pinnedLogVersion = 9L,
+            ),
         )
     }
 
@@ -290,6 +344,95 @@ class PeerPinStoreTest {
         store.setPin(accountIdB64, keyB, 200L)
         // A key rotation must not silently drop the last reset marker.
         assertEquals(true, store.readPin(accountIdB64)?.isReset)
+    }
+
+    // -----------------------------------------------------------------
+    // G-30 #2 (ADR-0019) — pinnedLogVersion persistence
+    // -----------------------------------------------------------------
+
+    @Test
+    fun `recordLogVersion round-trips on InMemory`() {
+        val store = InMemoryPinStore()
+        store.setPin(accountIdB64, keyA, 0L)
+        assertEquals(true, store.recordLogVersion(accountIdB64, 5L))
+        assertEquals(5L, store.readPin(accountIdB64)?.pinnedLogVersion)
+        assertEquals(5L, store.readLogVersion(accountIdB64))
+    }
+
+    @Test
+    fun `recordLogVersion null clears a stored version`() {
+        val store = InMemoryPinStore()
+        store.setPin(accountIdB64, keyA, 0L)
+        store.recordLogVersion(accountIdB64, 5L)
+        store.recordLogVersion(accountIdB64, null)
+        assertNull(store.readPin(accountIdB64)?.pinnedLogVersion)
+        assertNull(store.readLogVersion(accountIdB64))
+    }
+
+    @Test
+    fun `recordLogVersion is a no-op with no pin`() {
+        val store = InMemoryPinStore()
+        assertEquals(false, store.recordLogVersion(accountIdB64, 5L))
+        assertNull(store.readPin(accountIdB64))
+        assertNull(store.readLogVersion(accountIdB64))
+    }
+
+    @Test
+    fun `setPin preserves pinnedLogVersion across a forward re-pin`() {
+        val store = InMemoryPinStore()
+        store.setPin(accountIdB64, keyA, 100L)
+        store.recordLogVersion(accountIdB64, 3L)
+        store.setPin(accountIdB64, keyB, 200L)
+        // The chain-version downgrade floor must survive a key rotation —
+        // the fetch path re-records it right after a confirmed rotation.
+        assertEquals(3L, store.readPin(accountIdB64)?.pinnedLogVersion)
+    }
+
+    @Test
+    fun `readLogVersion is null before any chain confirmation`() {
+        val store = InMemoryPinStore()
+        store.setPin(accountIdB64, keyA, 0L)
+        // A TOFU pin has no chain version — degrades to the 0 floor at the
+        // caller.
+        assertNull(store.readLogVersion(accountIdB64))
+    }
+
+    @Test
+    fun `serializePin then a round-trip parse recovers the chain version`() {
+        // The on-disk five-field shape parses back via the same split path
+        // PeerPinStore.readPin uses (mirrors the front-to-back back-compat
+        // contract). We exercise the serialize→split→reconstruct round-trip
+        // here without an Android Context; the read-guard junk-version drop is
+        // covered by `a junk chain-version token degrades safely to no floor`
+        // below.
+        val serialized = PeerPinStore.serializePin(
+            keyA,
+            42L,
+            LogVerifyStatus.CONFIRMED,
+            isReset = true,
+            pinnedLogVersion = 11L,
+        )
+        val parts = serialized.split('|', limit = 5)
+        assertEquals(keyA, parts[0])
+        assertEquals("42", parts[1])
+        assertEquals("CONFIRMED", parts[2])
+        assertEquals("true", parts[3])
+        assertEquals("11", parts[4])
+    }
+
+    @Test
+    fun `a junk chain-version token degrades safely to no floor`() {
+        // The readPin guard drops a non-numeric or negative version while
+        // keeping the pin valid. We model the guard here (the real readPin
+        // needs an Android Context); the logic is `toLongOrNull()?.takeIf {
+        // it >= 0 }`.
+        fun parseVersion(token: String?): Long? = token?.toLongOrNull()?.takeIf { it >= 0L }
+        assertNull(parseVersion("not-a-number"))
+        assertNull(parseVersion("-1"))
+        assertNull(parseVersion(""))
+        assertNull(parseVersion(null))
+        assertEquals(0L, parseVersion("0"))
+        assertEquals(11L, parseVersion("11"))
     }
 
     // -----------------------------------------------------------------
@@ -367,6 +510,76 @@ class PeerPinStoreTest {
             )
             assertNull(marker)
         }
+    }
+
+    // -----------------------------------------------------------------
+    // G-30 #2 (ADR-0019) — checkTransparencyLog routes a rotation through
+    // the chain verifier, with the same best-effort / non-blocking posture
+    // -----------------------------------------------------------------
+
+    /** A 145-byte synthetic supersession proof, base64. Never reaches a real
+     *  verifier on the OFF path (the chain check short-circuits); on the
+     *  native path the real verifier rejects it (→ MISMATCH, not a block). */
+    private val syntheticProofB64 = base64Encode(ByteArray(145) { 0x07 })
+
+    @Test
+    fun `rotation routes through the chain but stays best-effort when the log is OFF`() = runTest {
+        // A pin exists for keyA; the served key is keyB (a rotation) and a
+        // proof is present — so checkTransparencyLog takes the rotation
+        // branch. With the transparency integration OFF (null client), the
+        // chain verdict is OFF: NOT a block, NO version recorded, and the
+        // (gate-1-re-pinned) pin is left intact. Proves the rotation branch
+        // is reachable + non-blocking without the native lib.
+        val store = InMemoryPinStore()
+        // Gate 1 would have re-pinned to keyB before gate 2 runs; model that
+        // post-gate-1 state, and capture the OLD pin (keyA) for the chain.
+        store.setPin(base64Encode(accountId), keyA, 0L)
+        val oldPin = store.readPin(base64Encode(accountId))
+        store.setPin(base64Encode(accountId), keyB, 100L) // gate-1 re-pin
+        clientWithTransparency(store, transparency = null).use { client ->
+            // Does not throw (OFF is not ROLLBACK) — best-effort, no block.
+            client.checkTransparencyLog(
+                accountId = accountId,
+                servedPubkey = me.lakko.app.auth.base64Decode(keyB),
+                oldPin = oldPin,
+                supersessionProofB64 = syntheticProofB64,
+            )
+        }
+        val pin = store.readPin(base64Encode(accountId))
+        // OFF records the verdict but NEVER a chain version (no confirmation).
+        assertEquals(LogVerifyStatus.OFF, pin?.logStatus)
+        assertNull(pin?.pinnedLogVersion)
+        // The re-pinned key is untouched.
+        assertEquals(keyB, pin?.pinnedSignaturePubkeyB64)
+    }
+
+    @Test
+    fun `rotation through a live chain verifier does NOT block on a bogus proof`() = runTest {
+        // NOTE: requires liblakko_ffi_uniffi.so for transparencyAccountKey +
+        // verifySupersessionChain. Guard so the host suite (no native lib)
+        // skips rather than fails.
+        org.junit.Assume.assumeTrue(nativeLibAvailable())
+        // The chain verifier (native) rejects the synthetic proof → MISMATCH,
+        // which is SURFACED, never a block (S3e posture). The /latest commits
+        // to the served key (keyB) so the rotation branch reaches the chain
+        // gate. No CONFIRMED ⇒ no version recorded.
+        val store = InMemoryPinStore()
+        store.setPin(base64Encode(accountId), keyA, 0L)
+        val oldPin = store.readPin(base64Encode(accountId))
+        store.setPin(base64Encode(accountId), keyB, 100L) // gate-1 re-pin
+        clientWithTransparency(store, transparencyClient(keyB, isReset = false)).use { client ->
+            // Does not throw — MISMATCH is surfaced, not blocked.
+            client.checkTransparencyLog(
+                accountId = accountId,
+                servedPubkey = me.lakko.app.auth.base64Decode(keyB),
+                oldPin = oldPin,
+                supersessionProofB64 = syntheticProofB64,
+            )
+        }
+        val pin = store.readPin(base64Encode(accountId))
+        assertEquals(LogVerifyStatus.MISMATCH, pin?.logStatus)
+        // A transient (non-confirmed) verdict never writes a chain version.
+        assertNull(pin?.pinnedLogVersion)
     }
 
     /** True when the UniFFI native lib loads (the host JVM suite usually

@@ -54,6 +54,24 @@ class TransparencyVerifyTest {
         throw FfiException.Identity("simulated inclusion failure")
     }
 
+    /** Rotation chain gate that always succeeds — returns the served
+     *  (authorised-new) pubkey, exactly the native `verifySupersessionChain`
+     *  contract on a passing chain (G-30 #2). */
+    private val chainPass = ChainGate { _, _, _, served, _, _, _, _, _, _, _ -> served }
+
+    /** Rotation chain gate that always fails (throws as the native verifier
+     *  would on a chain contradiction — bad root sig / rollback / inclusion /
+     *  supersession proof / non-newer version / freshness). */
+    private val chainFail = ChainGate { _, _, _, _, _, _, _, _, _, _, _ ->
+        throw FfiException.Identity("simulated chain failure")
+    }
+
+    /** A fixed 145-byte supersession proof + an old pubkey. These never
+     *  reach a real verifier in the host suite (the [ChainGate] seam is
+     *  stubbed), so their bytes are arbitrary. */
+    private val supersessionProof = ByteArray(145) { 0x07 }
+    private val pinnedOldPubkey = ByteArray(32) { 0x42 }
+
     // -----------------------------------------------------------------
     // Mock-engine JSON response builders (match the Rust handler shapes)
     // -----------------------------------------------------------------
@@ -370,5 +388,127 @@ class TransparencyVerifyTest {
                 servedPubkey = servedPubkey,
             ),
         )
+    }
+
+    // -----------------------------------------------------------------
+    // G-30 #2 (ADR-0019) — verifyRotationChain verdict mapping
+    // -----------------------------------------------------------------
+
+    private suspend fun rotation(
+        client: TransparencyClient?,
+        operatorKey: ByteArray?,
+        lastSeen: LastSeenRootStore = InMemoryLastSeenRoot(),
+        pubkey: ByteArray = servedPubkey,
+        gate: ChainGate = chainPass,
+        pinnedLogVersion: Long = 0L,
+    ): RotationChainResult = verifyRotationChain(
+        accountId = accountId,
+        servedPubkey = pubkey,
+        supersessionProof = supersessionProof,
+        pinnedOldPubkey = pinnedOldPubkey,
+        pinnedLogVersion = pinnedLogVersion,
+        client = client,
+        operatorKey = operatorKey,
+        lastSeenRoot = lastSeen,
+        accountKeyDeriver = deriver,
+        chainGate = gate,
+    )
+
+    @Test
+    fun `rotation off when client is null`() = runTest {
+        val r = rotation(client = null, operatorKey = operatorKey)
+        assertEquals(LogVerifyStatus.OFF, r.status)
+        assertNull(r.isReset)
+        assertNull(r.version)
+    }
+
+    @Test
+    fun `rotation off when operator key is null`() = runTest {
+        val r = rotation(client = mockClient(), operatorKey = null)
+        assertEquals(LogVerifyStatus.OFF, r.status)
+        assertNull(r.version)
+    }
+
+    @Test
+    fun `rotation confirmed carries the latest version on a passing chain`() = runTest {
+        // mockClient's latest defaults to version 2.
+        val r = rotation(
+            client = mockClient(latestIsReset = true),
+            operatorKey = operatorKey,
+            gate = chainPass,
+        )
+        assertEquals(LogVerifyStatus.CONFIRMED, r.status)
+        assertEquals(true, r.isReset)
+        assertEquals(2L, r.version)
+    }
+
+    @Test
+    fun `rotation mismatch (no throw) when the chain gate fails`() = runTest {
+        // A chain contradiction is surfaced as MISMATCH, NOT a throw / block.
+        val r = rotation(
+            client = mockClient(latestIsReset = false),
+            operatorKey = operatorKey,
+            gate = chainFail,
+        )
+        assertEquals(LogVerifyStatus.MISMATCH, r.status)
+        // A latest entry existed, so the marker rides out.
+        assertEquals(false, r.isReset)
+        // No chain confirmation — no version to anchor a floor on.
+        assertNull(r.version)
+    }
+
+    @Test
+    fun `rotation rollback when the signed root shrank below the high-water mark`() = runTest {
+        val lastSeen = InMemoryLastSeenRoot()
+        lastSeen.checkAndAdvance(100L)
+        val r = rotation(
+            client = mockClient(rootLogSize = 6),
+            operatorKey = operatorKey,
+            lastSeen = lastSeen,
+        )
+        assertEquals(LogVerifyStatus.ROLLBACK, r.status)
+        assertNull(r.version)
+    }
+
+    @Test
+    fun `rotation absent when latest 404s`() = runTest {
+        val r = rotation(
+            client = mockClient(latestStatus = HttpStatusCode.NotFound),
+            operatorKey = operatorKey,
+        )
+        assertEquals(LogVerifyStatus.ABSENT, r.status)
+        assertNull(r.version)
+    }
+
+    @Test
+    fun `rotation absent (no block) when the log head is not the served key`() = runTest {
+        // The log's latest pubkey is NOT the served key (a not-yet-logged
+        // rotation or a third key). We cannot chain-prove the served key, so
+        // we surface ABSENT — the standalone gate-1 result stands; no block.
+        val r = rotation(
+            client = mockClient(latestPubkey = otherPubkey, latestIsReset = true),
+            operatorKey = operatorKey,
+        )
+        assertEquals(LogVerifyStatus.ABSENT, r.status)
+        // The marker is read off the (divergent) latest entry.
+        assertEquals(true, r.isReset)
+        assertNull(r.version)
+    }
+
+    @Test
+    fun `rotation unreachable on a server error fetching the root`() = runTest {
+        val r = rotation(
+            client = mockClient(rootServerError = true),
+            operatorKey = operatorKey,
+        )
+        assertEquals(LogVerifyStatus.UNREACHABLE, r.status)
+        assertNull(r.version)
+    }
+
+    @Test
+    fun `a confirmed rotation advances the no-rollback high-water mark`() = runTest {
+        val lastSeen = InMemoryLastSeenRoot()
+        rotation(client = mockClient(rootLogSize = 6), operatorKey = operatorKey, lastSeen = lastSeen)
+        assertEquals(6L, lastSeen.loadLastSeenLogSize())
     }
 }

@@ -22,6 +22,7 @@ import me.lakko.app.transparency.TransparencyClient
 import me.lakko.app.transparency.TransparencyConfig
 import me.lakko.app.transparency.lookupServedKeyReset
 import me.lakko.app.transparency.verifyIdentityInLog
+import me.lakko.app.transparency.verifyRotationChain
 import uniffi.lakko_ffi_uniffi.ContactAck
 import uniffi.lakko_ffi_uniffi.ContactRequest
 import uniffi.lakko_ffi_uniffi.FfiException
@@ -164,6 +165,13 @@ public class ContactsClient(
             throw ContactsError.wrap(e)
         } ?: throw ContactsError.noIdentityBundle(recipientAccountId)
 
+        // G-30 #2 (ADR-0019): snapshot the pin BEFORE gate 1 runs. Gate 1
+        // re-pins to the new key on a verified rotation (overwriting the
+        // pin), but gate 2's rotation-chain check needs the OLD pinned key +
+        // the OLD chain-version floor to anchor the chain. Capturing it here
+        // keeps gate 1 untouched.
+        val oldPin = pinStore.readPin(base64Encode(recipientAccountId))
+
         // G-4 (ADR-0016) rule #2 — verify the fetched bundle's
         // AccountIdentity key against the local pin BEFORE using its
         // keys to seal a ContactRequest. A changed key with no valid
@@ -194,9 +202,15 @@ public class ContactsClient(
         // is eventually-consistent and the supersession/pin gate is the
         // primary trust). NEVER weakens the gate above — a
         // [SupersessionRefused] propagates before this runs at all.
+        // G-30 #2 (ADR-0019): pass the OLD pin + the bundle's supersession
+        // proof so the log check can route a key ROTATION through the chain
+        // verifier (anchoring the transition to the operator-signed log)
+        // instead of the standalone single-key inclusion check.
         checkTransparencyLog(
             recipientAccountId,
             base64Decode(bundle.signature_pubkey),
+            oldPin,
+            bundle.supersession_proof,
         )
 
         val recipientSignaturePub = base64Decode(bundle.signature_pubkey)
@@ -517,17 +531,36 @@ public class ContactsClient(
      * [LogVerifyStatus.ROLLBACK] return) is swallowed + logged — the
      * additive check must never break the primary fetch path.
      *
+     * G-30 #2 (ADR-0019): when the served key is a ROTATION away from the
+     * pinned one AND the bundle carried a supersession proof, the check
+     * routes through [verifyRotationChain] (the chain verifier — root sig +
+     * no-rollback + Merkle inclusion + the supersession proof from the OLD
+     * pinned key + a strictly-newer logged version + freshness) instead of
+     * the standalone single-key [verifyIdentityInLog]. The POSTURE is
+     * unchanged: only [LogVerifyStatus.ROLLBACK] hard-fails; a chain
+     * contradiction surfaces as [LogVerifyStatus.MISMATCH] (NOT a block); a
+     * not-logged / unreachable / off rotation falls back to the standalone
+     * gate-1 result (no over-block). On a [LogVerifyStatus.CONFIRMED] chain
+     * the proven log version is persisted as the next rotation's downgrade
+     * floor.
+     *
      * `internal` (not `private`) so the instrumented test suite can drive
      * the verdict→posture mapping directly against a `MockEngine`-backed
      * transparency client + the real native lib.
      *
      * @param accountId    the peer's raw 16-byte account_id.
      * @param servedPubkey the 32-byte Ed25519 key discovery served.
+     * @param oldPin       the pin AS IT WAS BEFORE gate 1 re-pinned (G-30
+     *                     #2) — `null` on a first-ever observation.
+     * @param supersessionProofB64 the bundle's `supersession_proof` (base64),
+     *                     when present — the chain's old-key authorisation.
      * @throws LogRollbackDetected ONLY on a [LogVerifyStatus.ROLLBACK].
      */
     internal suspend fun checkTransparencyLog(
         accountId: ByteArray,
         servedPubkey: ByteArray,
+        oldPin: Pin? = null,
+        supersessionProofB64: String? = null,
     ) {
         val accountIdB64 = base64Encode(accountId)
         // Build the transparency client (OFF → null → verdict OFF below).
@@ -546,15 +579,48 @@ public class ContactsClient(
             return
         }
 
-        val result: me.lakko.app.transparency.LogVerifyResult = try {
+        // G-30 #2 — a ROTATION is: a pin existed, its key DIFFERS from the
+        // served key, and the bundle carried a supersession proof. Only then
+        // can the chain verifier anchor the transition. Anything else (first
+        // observation / unchanged key / no proof) keeps the existing
+        // single-key inclusion check unchanged.
+        val isRotation =
+            oldPin != null &&
+                oldPin.pinnedSignaturePubkeyB64 != base64Encode(servedPubkey) &&
+                !supersessionProofB64.isNullOrEmpty()
+
+        // The verdict triple. `version` is non-null ONLY on a CONFIRMED
+        // rotation chain; the single-key inclusion path leaves it null.
+        val verdict: Triple<LogVerifyStatus, Boolean?, Long?> = try {
             client.use { c ->
-                verifyIdentityInLog(
-                    accountId = accountId,
-                    publishedSignaturePubkey = servedPubkey,
-                    client = c,
-                    operatorKey = TransparencyConfig.pinnedOperatorKey(),
-                    lastSeenRoot = lastSeenRoot,
-                )
+                if (isRotation) {
+                    // `oldPin` + `supersessionProofB64` are non-null in this
+                    // branch (the `isRotation` guard). A malformed-base64
+                    // proof or pinned key is treated like any log fault — the
+                    // chain check is best-effort and never blocks the fetch.
+                    val supersessionProof = base64Decode(supersessionProofB64)
+                    val pinnedOldPubkey = base64Decode(oldPin.pinnedSignaturePubkeyB64)
+                    val result = verifyRotationChain(
+                        accountId = accountId,
+                        servedPubkey = servedPubkey,
+                        supersessionProof = supersessionProof,
+                        pinnedOldPubkey = pinnedOldPubkey,
+                        pinnedLogVersion = oldPin.pinnedLogVersion ?: 0L,
+                        client = c,
+                        operatorKey = TransparencyConfig.pinnedOperatorKey(),
+                        lastSeenRoot = lastSeenRoot,
+                    )
+                    Triple(result.status, result.isReset, result.version)
+                } else {
+                    val result = verifyIdentityInLog(
+                        accountId = accountId,
+                        publishedSignaturePubkey = servedPubkey,
+                        client = c,
+                        operatorKey = TransparencyConfig.pinnedOperatorKey(),
+                        lastSeenRoot = lastSeenRoot,
+                    )
+                    Triple(result.status, result.isReset, null)
+                }
             }
         } catch (cause: Throwable) {
             // The verifier is designed to map faults to a status and only
@@ -569,8 +635,9 @@ public class ContactsClient(
             )
             return
         }
-        val status = result.status
-        val isReset = result.isReset
+        val status = verdict.first
+        val isReset = verdict.second
+        val version = verdict.third
 
         // Rollback is the one hard failure (unambiguous attack).
         if (status == LogVerifyStatus.ROLLBACK) {
@@ -583,6 +650,12 @@ public class ContactsClient(
         // status (a `null` clears any stale marker — no latest was read).
         pinStore.recordLogStatus(accountIdB64, status)
         pinStore.recordLogReset(accountIdB64, isReset)
+
+        // G-30 #2 — persist the chain-confirmed log version ONLY on a
+        // CONFIRMED rotation chain (where `version != null`). A transient
+        // UNREACHABLE / MISMATCH / ABSENT verdict must NOT clear a
+        // previously-confirmed floor, so we never pass `null` here.
+        version?.let { pinStore.recordLogVersion(accountIdB64, it) }
 
         when (status) {
             LogVerifyStatus.MISMATCH ->

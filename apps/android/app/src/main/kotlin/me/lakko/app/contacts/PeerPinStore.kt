@@ -67,6 +67,12 @@ import me.lakko.app.transparency.LogVerifyStatus
  *     `/latest` `is_reset` marker. The `<logStatus>` segment may be empty
  *     (an `is_reset` recorded with no verdict yet), and `<isReset>` is
  *     `"true"` / `"false"` (absent = the marker is unknown / null).
+ *   * `"<pubkeyB64>|<marker>|<logStatus>|<isReset>|<pinnedLogVersion>"` —
+ *     G-30 #2 (ADR-0019) added the chain-confirmed transparency-log version.
+ *     Earlier segments may be empty to keep the positional layout (a version
+ *     recorded with no verdict / reset writes empty slots at indices 2 and 3);
+ *     `<pinnedLogVersion>` is a base-10 non-negative `Long` (absent = no
+ *     chain-confirmed version floor, treated as `0`).
  */
 
 /** A pinned AccountIdentity pubkey for one peer (ADR-0016). */
@@ -95,6 +101,16 @@ public data class Pin(
      *  pin predates S4 / the check did not run. Lets the UI distinguish a
      *  reset from a possible compromise on a changed key. */
     val isReset: Boolean? = null,
+    /** G-30 #2 (ADR-0019): the transparency-log VERSION at which the
+     *  currently-pinned key was chain-confirmed (the `/latest` entry's
+     *  per-account-key `version`). Written ONLY on a `CONFIRMED`
+     *  rotation-chain verdict ([PinStore.recordLogVersion]). The next
+     *  rotation's chain proof must reference a STRICTLY-NEWER logged version,
+     *  so persisting it gives the chain verifier its downgrade-protection
+     *  floor. `null` on a pin that has never been chain-confirmed (a TOFU pin,
+     *  or one written before G-30 #2); a missing floor degrades safely to
+     *  `0`. */
+    val pinnedLogVersion: Long? = null,
 )
 
 /** Outcome of [PinStore.setPin]. [Set] covers both a first-time
@@ -181,6 +197,31 @@ public interface PinStore {
      * whether a write happened (a present pin).
      */
     public fun recordLogReset(accountIdB64: String, isReset: Boolean?): Boolean
+
+    /**
+     * G-30 #2 (ADR-0019) — record the chain-confirmed transparency-log
+     * VERSION for an account, keyed on the same stable `account_id` as the
+     * pin and written next to [recordLogReset].
+     *
+     * Writes onto the existing pin record so the version travels with the
+     * pinned key. A `null` clears any stored version. The caller persists it
+     * ONLY on a `CONFIRMED` rotation-chain verdict — a transient
+     * `UNREACHABLE` / `MISMATCH` / `ABSENT` outcome must NOT wipe a
+     * previously-confirmed version, so the caller does not pass `null` on
+     * those (see [ContactsClient.checkTransparencyLog]). **No-op when no pin
+     * exists** (same rationale as [recordLogReset] — the supersession gate
+     * TOFU-pins first). Idempotent on an unchanged value (no write). Returns
+     * whether a write happened (a present pin).
+     */
+    public fun recordLogVersion(accountIdB64: String, version: Long?): Boolean
+
+    /**
+     * G-30 #2 (ADR-0019) — read the chain-confirmed log version for an
+     * account, or `null` when no pin / no recorded version. The next
+     * rotation's chain proof is checked against this as the downgrade floor
+     * (default `0` when absent).
+     */
+    public fun readLogVersion(accountIdB64: String): Long?
 }
 
 /**
@@ -198,19 +239,21 @@ public class PeerPinStore(context: Context) : PinStore {
             .getString(KEY_PREFIX + accountIdB64, null)
             ?: return null
         // Stored as one of (KT-log back-compat, see the class doc):
-        //   "<pubkeyB64>|<marker>"                              (original)
-        //   "<pubkeyB64>|<marker>|<logStatus>"                  (S3e)
-        //   "<pubkeyB64>|<marker>|<logStatus>|<isReset>"        (S4)
+        //   "<pubkeyB64>|<marker>"                                   (original)
+        //   "<pubkeyB64>|<marker>|<logStatus>"                       (S3e)
+        //   "<pubkeyB64>|<marker>|<logStatus>|<isReset>"             (S4)
+        //   "<pubkeyB64>|<marker>|<logStatus>|<isReset>|<version>"   (G-30 #2)
         // Base64 standard alphabet never emits `|`, so the fields split
-        // cleanly. We split into AT MOST 4 segments from the FRONT so the
+        // cleanly. We split into AT MOST 5 segments from the FRONT so the
         // pubkey is segment 0 regardless of how many later fields exist.
-        val parts = raw.split('|', limit = 4)
+        val parts = raw.split('|', limit = 5)
         if (parts.size < 2) return null
         val pubkeyB64 = parts[0]
         if (pubkeyB64.isEmpty()) return null
         val markerStr = parts[1]
         val logStatusStr: String? = parts.getOrNull(2)?.ifEmpty { null }
         val isResetStr: String? = parts.getOrNull(3)?.ifEmpty { null }
+        val versionStr: String? = parts.getOrNull(4)?.ifEmpty { null }
         val marker = markerStr.toLongOrNull() ?: return null
         // Defensive: the pubkey segment must be valid base64.
         try {
@@ -235,11 +278,16 @@ public class PeerPinStore(context: Context) : PinStore {
             "false" -> false
             else -> null
         }
+        // G-30 #2: a present-but-junk (non-numeric or negative) version is
+        // dropped (forward-compat / tamper guard) while the pin itself stays
+        // valid — a missing chain-version floor degrades safely to 0.
+        val pinnedLogVersion: Long? = versionStr?.toLongOrNull()?.takeIf { it >= 0L }
         return Pin(
             pinnedSignaturePubkeyB64 = pubkeyB64,
             rotationMarker = marker,
             logStatus = logStatus,
             isReset = isReset,
+            pinnedLogVersion = pinnedLogVersion,
         )
     }
 
@@ -253,15 +301,18 @@ public class PeerPinStore(context: Context) : PinStore {
             return SetPinResult.RejectedBackward
         }
         // Preserve any recorded logStatus (KT-log S3e) + isReset (KT-log
-        // S4) across a re-pin — they are orthogonal, separately-written
-        // fields, and a key rotation shouldn't silently drop the last log
-        // verdict / marker.
+        // S4) + pinnedLogVersion (G-30 #2) across a re-pin — they are
+        // orthogonal, separately-written fields, and a key rotation shouldn't
+        // silently drop the last log verdict / reset marker / downgrade
+        // floor. The fetch path re-records each right after a re-pin, so a
+        // stale carried value is replaced immediately.
         write(
             accountIdB64,
             pinnedSignaturePubkeyB64,
             rotationMarker,
             existing?.logStatus,
             existing?.isReset,
+            existing?.pinnedLogVersion,
         )
         return SetPinResult.Set
     }
@@ -279,6 +330,7 @@ public class PeerPinStore(context: Context) : PinStore {
             existing.rotationMarker,
             logStatus,
             existing.isReset,
+            existing.pinnedLogVersion,
         )
         return true
     }
@@ -292,23 +344,43 @@ public class PeerPinStore(context: Context) : PinStore {
             existing.rotationMarker,
             existing.logStatus,
             isReset,
+            existing.pinnedLogVersion,
         )
         return true
     }
 
+    override fun recordLogVersion(accountIdB64: String, version: Long?): Boolean {
+        val existing = readPin(accountIdB64) ?: return false
+        if (existing.pinnedLogVersion == version) return true // idempotent, no write
+        write(
+            accountIdB64,
+            existing.pinnedSignaturePubkeyB64,
+            existing.rotationMarker,
+            existing.logStatus,
+            existing.isReset,
+            version,
+        )
+        return true
+    }
+
+    override fun readLogVersion(accountIdB64: String): Long? =
+        readPin(accountIdB64)?.pinnedLogVersion
+
     /** Serialize + persist one pin record. Trailing fields are emitted
      *  only as far as the last present value, so a pin with no verdict and
-     *  no marker stays in the legacy two-field shape. When `isReset` is set
-     *  but `logStatus` is null, the logStatus segment is written empty so
-     *  the positional `isReset` slot stays at index 3. */
+     *  no marker stays in the legacy two-field shape. When a later field is
+     *  set but an earlier one is null, the earlier slot is written empty so
+     *  the positional layout is preserved (e.g. an `isReset` with no
+     *  `logStatus`, or a `pinnedLogVersion` with neither). */
     private fun write(
         accountIdB64: String,
         pubkeyB64: String,
         marker: Long,
         logStatus: LogVerifyStatus?,
         isReset: Boolean?,
+        pinnedLogVersion: Long?,
     ) {
-        val value = serializePin(pubkeyB64, marker, logStatus, isReset)
+        val value = serializePin(pubkeyB64, marker, logStatus, isReset, pinnedLogVersion)
         openPrefs(appContext).edit().putString(KEY_PREFIX + accountIdB64, value).apply()
     }
 
@@ -320,18 +392,24 @@ public class PeerPinStore(context: Context) : PinStore {
          * Serialize a pin record to the `|`-separated on-disk form. Visible
          * for the parser unit test so the round-trip is exercised without an
          * Android `Context`. Trailing fields collapse: a pin with neither a
-         * verdict nor a reset marker stays in the legacy two-field shape; an
-         * isReset with no verdict writes an empty verdict slot to keep the
-         * positional layout.
+         * verdict, reset marker, nor chain version stays in the legacy
+         * two-field shape; a later-set field writes empty slots for any
+         * earlier null ones to keep the positional layout (e.g. an isReset
+         * with no verdict writes an empty verdict slot; a pinnedLogVersion
+         * with neither writes empty verdict + reset slots).
          */
         internal fun serializePin(
             pubkeyB64: String,
             marker: Long,
             logStatus: LogVerifyStatus?,
             isReset: Boolean?,
+            pinnedLogVersion: Long?,
         ): String {
+            val versionToken = pinnedLogVersion?.toString()
             val resetToken = isReset?.toString()
             return when {
+                versionToken != null ->
+                    "$pubkeyB64|$marker|${logStatus?.name ?: ""}|${resetToken ?: ""}|$versionToken"
                 resetToken != null ->
                     "$pubkeyB64|$marker|${logStatus?.name ?: ""}|$resetToken"
                 logStatus != null -> "$pubkeyB64|$marker|${logStatus.name}"
@@ -375,13 +453,14 @@ public class InMemoryPinStore : PinStore {
         if (existing != null && rotationMarker < existing.rotationMarker) {
             return SetPinResult.RejectedBackward
         }
-        // Preserve any recorded logStatus (KT-log S3e) + isReset (S4)
-        // across a re-pin.
+        // Preserve any recorded logStatus (KT-log S3e) + isReset (S4) +
+        // pinnedLogVersion (G-30 #2) across a re-pin.
         pins[accountIdB64] = Pin(
             pinnedSignaturePubkeyB64 = pinnedSignaturePubkeyB64,
             rotationMarker = rotationMarker,
             logStatus = existing?.logStatus,
             isReset = existing?.isReset,
+            pinnedLogVersion = existing?.pinnedLogVersion,
         )
         return SetPinResult.Set
     }
@@ -403,4 +482,14 @@ public class InMemoryPinStore : PinStore {
         pins[accountIdB64] = existing.copy(isReset = isReset)
         return true
     }
+
+    override fun recordLogVersion(accountIdB64: String, version: Long?): Boolean {
+        val existing = pins[accountIdB64] ?: return false
+        if (existing.pinnedLogVersion == version) return true
+        pins[accountIdB64] = existing.copy(pinnedLogVersion = version)
+        return true
+    }
+
+    override fun readLogVersion(accountIdB64: String): Long? =
+        pins[accountIdB64]?.pinnedLogVersion
 }
