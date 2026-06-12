@@ -31,6 +31,8 @@ import { fileURLToPath } from "node:url";
 import init from "../../wasm/lakko_ffi_wasm";
 import {
   verifyIdentityInLog,
+  lookupServedKeyReset,
+  type LogVerifyResult,
   type LogVerifyStatus,
   type VerifyDeps,
 } from "./verify";
@@ -99,13 +101,14 @@ function rootAt(logSize: bigint): SignedRoot {
   };
 }
 
-/** Build a `LatestEntry` fixture serving `pubkey`. */
-function latestWith(pubkey: Uint8Array): LatestEntry {
+/** Build a `LatestEntry` fixture serving `pubkey` with an optional
+ *  `is_reset` marker (default `false`). */
+function latestWith(pubkey: Uint8Array, isReset = false): LatestEntry {
   return {
     idx: 3n,
     version: 1n,
     identityPubkey: pubkey,
-    isReset: false,
+    isReset,
   };
 }
 
@@ -136,11 +139,11 @@ function mockClient(impl: {
 }
 
 /** Run the verifier with a fixed operator key + a default-pass
- *  inclusion stub unless overridden. */
-function run(
+ *  inclusion stub unless overridden, returning the full result. */
+function runFull(
   client: TransparencyClient | null,
   extra: Partial<VerifyDeps> = {},
-): Promise<LogVerifyStatus> {
+): Promise<LogVerifyResult> {
   return verifyIdentityInLog(ACCOUNT_ID, SERVED_PUBKEY, {
     client,
     operatorKey: OPERATOR_KEY,
@@ -152,6 +155,14 @@ function run(
   });
 }
 
+/** Convenience — run the verifier and return only its `status`. */
+async function run(
+  client: TransparencyClient | null,
+  extra: Partial<VerifyDeps> = {},
+): Promise<LogVerifyStatus> {
+  return (await runFull(client, extra)).status;
+}
+
 describe("verifyIdentityInLog (KT-log S3c status machine)", () => {
   it('returns "off" when the client is null (integration unconfigured)', async () => {
     expect(await run(null)).toBe("off");
@@ -160,10 +171,12 @@ describe("verifyIdentityInLog (KT-log S3c status machine)", () => {
   it('returns "off" when the operator key is null', async () => {
     const client = mockClient({});
     expect(
-      await verifyIdentityInLog(ACCOUNT_ID, SERVED_PUBKEY, {
-        client,
-        operatorKey: null,
-      }),
+      (
+        await verifyIdentityInLog(ACCOUNT_ID, SERVED_PUBKEY, {
+          client,
+          operatorKey: null,
+        })
+      ).status,
     ).toBe("off");
   });
 
@@ -248,5 +261,136 @@ describe("verifyIdentityInLog (KT-log S3c status machine)", () => {
     // A subsequent smaller root is now a rollback.
     const client2 = mockClient({ fetchRoot: vi.fn(async () => rootAt(41n)) });
     expect(await run(client2)).toBe("rollback");
+  });
+});
+
+describe("verifyIdentityInLog — KT-log S4 isReset capture", () => {
+  it("confirmed carries isReset=true when the latest entry is a reset", async () => {
+    const client = mockClient({
+      fetchLatest: vi.fn(async () => latestWith(SERVED_PUBKEY, true)),
+    });
+    const result = await runFull(client);
+    expect(result.status).toBe("confirmed");
+    expect(result.isReset).toBe(true);
+  });
+
+  it("confirmed carries isReset=false when the latest entry is NOT a reset", async () => {
+    const client = mockClient({
+      fetchLatest: vi.fn(async () => latestWith(SERVED_PUBKEY, false)),
+    });
+    const result = await runFull(client);
+    expect(result.status).toBe("confirmed");
+    expect(result.isReset).toBe(false);
+  });
+
+  it("mismatch (key divergence) still carries the latest's isReset", async () => {
+    // A latest entry exists (so isReset is meaningful), but its pubkey
+    // differs from the served key → mismatch. The marker still rides out.
+    const client = mockClient({
+      fetchLatest: vi.fn(async () => latestWith(OTHER_PUBKEY, true)),
+    });
+    const result = await runFull(client);
+    expect(result.status).toBe("mismatch");
+    expect(result.isReset).toBe(true);
+  });
+
+  it("mismatch (proof-fail) carries the latest's isReset", async () => {
+    const client = mockClient({
+      fetchLatest: vi.fn(async () => latestWith(SERVED_PUBKEY, true)),
+    });
+    const result = await runFull(client, {
+      verifyInclusion: () => {
+        throw new Error("inclusion verify failed");
+      },
+    });
+    expect(result.status).toBe("mismatch");
+    expect(result.isReset).toBe(true);
+  });
+
+  it("absent → isReset is null (no latest entry to read)", async () => {
+    const client = mockClient({ fetchLatest: vi.fn(async () => null) });
+    const result = await runFull(client);
+    expect(result.status).toBe("absent");
+    expect(result.isReset).toBeNull();
+  });
+
+  it("rollback → isReset is null (short-circuits before the latest lookup)", async () => {
+    checkAndAdvance(20n);
+    const client = mockClient({ fetchRoot: vi.fn(async () => rootAt(10n)) });
+    const result = await runFull(client);
+    expect(result.status).toBe("rollback");
+    expect(result.isReset).toBeNull();
+  });
+
+  it("unreachable → isReset is null", async () => {
+    const client = mockClient({
+      fetchLatest: vi.fn(async () => {
+        throw new TransparencyNetworkError("/transparency/latest", "down");
+      }),
+    });
+    const result = await runFull(client);
+    expect(result.status).toBe("unreachable");
+    expect(result.isReset).toBeNull();
+  });
+
+  it("off → isReset is null", async () => {
+    const result = await verifyIdentityInLog(ACCOUNT_ID, SERVED_PUBKEY, {
+      client: null,
+      operatorKey: OPERATOR_KEY,
+    });
+    expect(result.status).toBe("off");
+    expect(result.isReset).toBeNull();
+  });
+});
+
+describe("lookupServedKeyReset — KT-log S4 best-effort enrichment", () => {
+  it("returns true when the log's latest matches the served key AND is a reset", async () => {
+    const client = mockClient({
+      fetchLatest: vi.fn(async () => latestWith(SERVED_PUBKEY, true)),
+    });
+    expect(await lookupServedKeyReset(ACCOUNT_ID, SERVED_PUBKEY, { client })).toBe(
+      true,
+    );
+  });
+
+  it("returns false when the log's latest matches the served key but is NOT a reset", async () => {
+    const client = mockClient({
+      fetchLatest: vi.fn(async () => latestWith(SERVED_PUBKEY, false)),
+    });
+    expect(await lookupServedKeyReset(ACCOUNT_ID, SERVED_PUBKEY, { client })).toBe(
+      false,
+    );
+  });
+
+  it("returns null when the log's latest pubkey does NOT match the served key", async () => {
+    // The marker then describes a different key — unknown for the served one.
+    const client = mockClient({
+      fetchLatest: vi.fn(async () => latestWith(OTHER_PUBKEY, true)),
+    });
+    expect(
+      await lookupServedKeyReset(ACCOUNT_ID, SERVED_PUBKEY, { client }),
+    ).toBeNull();
+  });
+
+  it("returns null when the account is absent from the log", async () => {
+    const client = mockClient({ fetchLatest: vi.fn(async () => null) });
+    expect(
+      await lookupServedKeyReset(ACCOUNT_ID, SERVED_PUBKEY, { client }),
+    ).toBeNull();
+  });
+
+  it("returns null when the integration is off (client null)", async () => {
+    expect(await lookupServedKeyReset(ACCOUNT_ID, SERVED_PUBKEY, { client: null })).toBeNull();
+  });
+
+  it("returns null on a network fault (best-effort, never throws)", async () => {
+    const client = mockClient({
+      fetchLatest: vi.fn(async () => {
+        throw new TransparencyNetworkError("/transparency/latest", "down");
+      }),
+    });
+    expect(
+      await lookupServedKeyReset(ACCOUNT_ID, SERVED_PUBKEY, { client }),
+    ).toBeNull();
   });
 });

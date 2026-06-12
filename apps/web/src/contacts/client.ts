@@ -51,8 +51,11 @@ import type {
   Identity as WasmIdentity,
 } from "../../wasm/lakko_ffi_wasm";
 import type { IdentityFetchResponse } from "../discovery/wire";
-import { readPin, setPin, recordLogStatus } from "./local-store";
-import { verifyIdentityInLog } from "../transparency/verify";
+import { readPin, setPin, recordLogStatus, recordLogReset } from "./local-store";
+import {
+  verifyIdentityInLog,
+  lookupServedKeyReset,
+} from "../transparency/verify";
 import type { LogVerifyStatus } from "../transparency/verify";
 import {
   KIND_CONTACT_ACK,
@@ -280,6 +283,28 @@ export type SupersessionRefusedReason =
 
 export class SupersessionRefused extends Error {
   override name = "SupersessionRefused";
+
+  /**
+   * KT-log S4 — best-effort transparency-log context for the NEW
+   * (refused) key, attached so the UI can distinguish an
+   * owner-initiated identity RESET from an unexplained key change.
+   *
+   *   * `true`  — the log's latest entry commits to EXACTLY the served
+   *     new key AND records it as an owner-initiated reset (ADR-0017
+   *     lost-everything fresh-start).
+   *   * `false` — the log's latest entry commits to the served new key
+   *     but does NOT record a reset (an unexplained change → possible
+   *     compromise).
+   *   * `null`  — the log is off / unreachable / the account is absent
+   *     / the log's latest pubkey does not match the served key (the
+   *     marker is then about a different key, so it is unknown).
+   *
+   * This is **best-effort enrichment only**: a log failure NEVER
+   * changes the refusal — gate 1 (the supersession/pin gate) throws
+   * regardless. It only colours the OOB-reverify prompt.
+   */
+  public loggedReset: boolean | null = null;
+
   constructor(
     public readonly reason: SupersessionRefusedReason,
     /** base64 of the account_id whose key change was refused. */
@@ -446,12 +471,56 @@ export class ContactsClient {
     bundle: IdentityFetchResponse,
   ): Promise<void> {
     // Gate 1 (primary, fail-closed). A throw here short-circuits gate 2.
-    await this.verifySupersessionGate(accountId, bundle);
+    try {
+      await this.verifySupersessionGate(accountId, bundle);
+    } catch (err) {
+      // KT-log S4 — on a fail-closed refusal of an UNPROVEN CHANGED key
+      // (the moment the reset-vs-compromise distinction matters most),
+      // enrich the error with a BEST-EFFORT transparency lookup of the
+      // NEW key's `is_reset` marker. This NEVER weakens the gate: gate 1
+      // already threw, we re-throw it unchanged save for the added
+      // context. Any log fault leaves `loggedReset` null.
+      if (err instanceof SupersessionRefused) {
+        err.loggedReset = await this.bestEffortServedKeyReset(
+          accountId,
+          bundle,
+        );
+      }
+      throw err;
+    }
 
     // Gate 2 (additive, best-effort). Hard-fails only on rollback.
     const accountIdB64 = base64Encode(accountId);
     const servedPubkey = base64Decode(bundle.signature_pubkey);
     await this.checkTransparencyLog(accountId, accountIdB64, servedPubkey);
+  }
+
+  /**
+   * KT-log S4 — best-effort lookup of the served (refused) key's
+   * `is_reset` marker, used ONLY to enrich a `SupersessionRefused`.
+   *
+   * Wraps `lookupServedKeyReset` and swallows any throw to a `null`
+   * (the enrichment must never break the already-failing refusal path).
+   * Returns `true` / `false` only when the log's latest entry commits
+   * to exactly the served key; `null` otherwise (off / unreachable /
+   * absent / pubkey-divergence).
+   */
+  private async bestEffortServedKeyReset(
+    accountId: Uint8Array,
+    bundle: IdentityFetchResponse,
+  ): Promise<boolean | null> {
+    try {
+      const servedPubkey = base64Decode(bundle.signature_pubkey);
+      return await lookupServedKeyReset(accountId, servedPubkey);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        "ContactsClient: best-effort transparency reset lookup threw " +
+          "(refusal stands; loggedReset stays null)",
+        err,
+      );
+      return null;
+    }
   }
 
   /**
@@ -623,8 +692,9 @@ export class ContactsClient {
     servedPubkey: Uint8Array,
   ): Promise<void> {
     let status: LogVerifyStatus;
+    let isReset: boolean | null;
     try {
-      status = await verifyIdentityInLog(accountId, servedPubkey);
+      ({ status, isReset } = await verifyIdentityInLog(accountId, servedPubkey));
     } catch (err) {
       // The verifier is designed to map faults to a status and only
       // throw on `LogRollbackDetected` semantics (which it surfaces as
@@ -645,8 +715,11 @@ export class ContactsClient {
     }
 
     // Record the verdict on the pin record (best-effort; the pin
-    // exists because the supersession gate ran first).
+    // exists because the supersession gate ran first). KT-log S4 also
+    // persists the `/latest` entry's `is_reset` marker next to the
+    // status (a `null` clears any stale marker — no latest was read).
     recordLogStatus(accountIdB64, status);
+    recordLogReset(accountIdB64, isReset);
 
     if (status === "mismatch") {
       // Surfaced-but-not-blocked for S3c. The natural fail-closed

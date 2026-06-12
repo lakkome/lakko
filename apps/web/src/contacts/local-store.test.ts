@@ -56,6 +56,9 @@ import {
   setPin,
   loadAccepted,
   loadCursor,
+  recordLogStatus,
+  recordLogReset,
+  readLogReset,
 } from "./local-store";
 
 const ACCT_A = "YWNjb3VudC1hLTAwMDAwMDAwMA=="; // arbitrary base64
@@ -124,6 +127,70 @@ describe("account-pubkey PIN store (G-4)", () => {
     setPin(ACCT_A, PUB_OLD, 0);
     removePin(ACCT_A);
     expect(readPin(ACCT_A)).toBeUndefined();
+  });
+});
+
+describe("KT-log S4 — isReset marker on the pin record", () => {
+  it("recordLogReset is a no-op when no pin exists", () => {
+    expect(recordLogReset(ACCT_A, true)).toBe(false);
+    expect(readLogReset(ACCT_A)).toBeUndefined();
+  });
+
+  it("records true/false onto an existing pin and reads it back", () => {
+    setPin(ACCT_A, PUB_OLD, 0);
+    expect(recordLogReset(ACCT_A, true)).toBe(true);
+    expect(readLogReset(ACCT_A)).toBe(true);
+    expect(recordLogReset(ACCT_A, false)).toBe(true);
+    expect(readLogReset(ACCT_A)).toBe(false);
+  });
+
+  it("a null marker CLEARS a previously-recorded value", () => {
+    setPin(ACCT_A, PUB_OLD, 0);
+    recordLogReset(ACCT_A, true);
+    expect(readLogReset(ACCT_A)).toBe(true);
+    // null = no latest entry read → clear the stale marker.
+    expect(recordLogReset(ACCT_A, null)).toBe(true);
+    expect(readLogReset(ACCT_A)).toBeUndefined();
+  });
+
+  it("carries the isReset marker across a forward re-pin", () => {
+    setPin(ACCT_A, PUB_OLD, 100);
+    recordLogReset(ACCT_A, true);
+    // A monotonic forward re-pin keeps the recorded marker.
+    expect(setPin(ACCT_A, PUB_NEW, 200)).toBe("set");
+    expect(readLogReset(ACCT_A)).toBe(true);
+  });
+
+  it("isReset and logStatus are independent fields on the same pin", () => {
+    setPin(ACCT_A, PUB_OLD, 0);
+    recordLogStatus(ACCT_A, "confirmed");
+    recordLogReset(ACCT_A, true);
+    const pin = readPin(ACCT_A);
+    expect(pin?.logStatus).toBe("confirmed");
+    expect(pin?.isReset).toBe(true);
+  });
+
+  it("drops a junk (non-boolean) isReset on read (forward-compat guard)", () => {
+    // Hand-craft a v2 row with a corrupt isReset value.
+    localStorage.setItem(
+      "lakko.contacts.v2",
+      JSON.stringify({
+        v: 2,
+        cursor: 0,
+        accepted: [],
+        pins: {
+          [ACCT_A]: {
+            pinnedSignaturePubkeyB64: PUB_OLD,
+            rotationMarker: 0,
+            isReset: "yes-please", // junk
+          },
+        },
+      }),
+    );
+    const pin = readPin(ACCT_A);
+    // The pin survives (structural fields valid); the junk marker is dropped.
+    expect(pin?.pinnedSignaturePubkeyB64).toBe(PUB_OLD);
+    expect(pin?.isReset).toBeUndefined();
   });
 });
 

@@ -103,6 +103,15 @@ export interface AccountPubkeyPin {
    *  best-effort outcome so the UI can surface it. Absent on a pin
    *  written before S3c (or by a path that did not run the check). */
   logStatus?: LogVerifyStatus;
+  /** KT-log S4: the `is_reset` marker the transparency log's
+   *  `/latest` entry carried for the CURRENTLY-PINNED key, when a
+   *  latest entry was read (`confirmed` / `mismatch`). `true` means
+   *  the log records an owner-initiated identity RESET (ADR-0017
+   *  lost-everything fresh-start); `false` means a non-reset entry;
+   *  absent when no latest entry was read (or the pin predates S4).
+   *  Stored next to `logStatus` so the UI can surface the
+   *  reset-vs-compromise distinction. */
+  isReset?: boolean;
 }
 
 /** Mirror of `transparency/verify.ts::LogVerifyStatus` — duplicated
@@ -169,6 +178,13 @@ function isAccountPubkeyPin(p: unknown): p is AccountPubkeyPin {
     // A present-but-junk logStatus is dropped (the structural fields
     // are still valid, so we keep the pin itself).
     delete (p as { logStatus?: unknown }).logStatus;
+  }
+  // KT-log S4: validate the optional `isReset` marker. A present-but-
+  // non-boolean value is dropped (forward-compat / tamper guard); the
+  // pin itself stays valid.
+  const ir = (p as AccountPubkeyPin).isReset;
+  if (ir !== undefined && typeof ir !== "boolean") {
+    delete (p as { isReset?: unknown }).isReset;
   }
   return true;
 }
@@ -366,16 +382,22 @@ export function setPin(
   if (existing !== undefined && rotationMarker < existing.rotationMarker) {
     return "rejected-backward";
   }
-  // Preserve any recorded `logStatus` (KT-log S3c) across a re-pin —
-  // it is an orthogonal, separately-written field, and a key rotation
-  // shouldn't silently drop the last log verdict.
+  // Preserve any recorded `logStatus` (KT-log S3c) + `isReset` (KT-log
+  // S4) across a re-pin — they are orthogonal, separately-written
+  // fields, and a key rotation shouldn't silently drop the last log
+  // verdict / reset marker. The fetch path re-records both right after
+  // a re-pin, so a stale carried value is replaced immediately; we
+  // carry it so a re-pin that does NOT re-run the log check (or one
+  // whose check is inconclusive) doesn't blank a previously-known value.
   const carriedLogStatus = existing?.logStatus;
+  const carriedIsReset = existing?.isReset;
   const nextPins: Record<string, AccountPubkeyPin> = {
     ...current.pins,
     [accountIdB64]: {
       pinnedSignaturePubkeyB64,
       rotationMarker,
       ...(carriedLogStatus !== undefined ? { logStatus: carriedLogStatus } : {}),
+      ...(carriedIsReset !== undefined ? { isReset: carriedIsReset } : {}),
     },
   };
   save({ ...current, pins: nextPins });
@@ -425,6 +447,53 @@ export function readLogStatus(
   accountIdB64: string,
 ): LogVerifyStatus | undefined {
   return load().pins[accountIdB64]?.logStatus;
+}
+
+/**
+ * Record the transparency log's `is_reset` marker (KT-log S4) for an
+ * account, keyed on the same stable `account_id` as the pin.
+ *
+ * Mirrors `recordLogStatus`: writes onto the existing pin record so the
+ * marker travels with the pinned key, and is a **no-op when no pin
+ * exists** (the log check runs right after the supersession gate, which
+ * TOFU-pins on first sight, so a pin is present by the time a marker is
+ * recorded). A `null` argument (no latest entry was read — `absent` /
+ * `unreachable` / `off` / `rollback`) CLEARS any stale marker so the UI
+ * never surfaces a reset claim that the current log state no longer
+ * supports. Returns whether a write happened (a present pin).
+ */
+export function recordLogReset(
+  accountIdB64: string,
+  isReset: boolean | null,
+): boolean {
+  const current = load();
+  const existing = current.pins[accountIdB64];
+  if (existing === undefined) return false;
+  const currentValue = existing.isReset;
+  // Normalise: `null` means "clear" (no marker), a boolean means "set".
+  if (isReset === null) {
+    if (currentValue === undefined) return true; // already clear, no write
+    const cleared: AccountPubkeyPin = { ...existing };
+    delete cleared.isReset;
+    save({
+      ...current,
+      pins: { ...current.pins, [accountIdB64]: cleared },
+    });
+    return true;
+  }
+  if (currentValue === isReset) return true; // idempotent, no write
+  const nextPins: Record<string, AccountPubkeyPin> = {
+    ...current.pins,
+    [accountIdB64]: { ...existing, isReset },
+  };
+  save({ ...current, pins: nextPins });
+  return true;
+}
+
+/** Read the recorded `is_reset` marker (KT-log S4) for an account, or
+ *  `undefined` when no pin / no recorded marker. Exposed for the UI. */
+export function readLogReset(accountIdB64: string): boolean | undefined {
+  return load().pins[accountIdB64]?.isReset;
 }
 
 /** Render a short human-readable hex prefix for a public key.

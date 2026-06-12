@@ -32,8 +32,13 @@ import {
   base64UrlDecodeNoPad,
   base64UrlEncodeNoPad,
 } from "../auth/account-id";
-import { ContactsClient, ContactsError } from "../contacts/client";
+import {
+  ContactsClient,
+  ContactsError,
+  SupersessionRefused,
+} from "../contacts/client";
 import type { IncomingContactRequest, SendResult } from "../contacts/client";
+import { supersessionRefusedMessage } from "../contacts/supersession-message";
 import { useChats, type ActiveGroup } from "../chat/ChatContext";
 import { useDeviceGroupSync } from "../devices/sync/DeviceGroupSyncContext";
 import { groupIdHex as syncGroupIdHex } from "../devices/sync/state";
@@ -157,7 +162,7 @@ function ConnectedContacts(props: ConnectedContactsProps): JSX.Element {
       setSearchInput("");
       setIntroInput("");
     } catch (err) {
-      setSendError(formatError(err));
+      setSendError(formatError(err, atLabel(searchInput())));
     } finally {
       setSendBusy(false);
     }
@@ -189,7 +194,7 @@ function ConnectedContacts(props: ConnectedContactsProps): JSX.Element {
       setSearchInput("");
       setIntroInput("");
     } catch (err) {
-      setSendError(formatError(err));
+      setSendError(formatError(err, atLabel(searchInput())));
     } finally {
       setSendBusy(false);
     }
@@ -323,8 +328,10 @@ function ConnectedContacts(props: ConnectedContactsProps): JSX.Element {
         group: result.group,
       });
     } catch (err) {
-      // Don't unwind the acceptance; just surface the error.
-      setPollError(formatError(err));
+      // Don't unwind the acceptance; just surface the error. The peer
+      // here is identified by their key fingerprint (no @handle on the
+      // Accept path) — pass it as the label for any reset-aware copy.
+      setPollError(formatError(err, `@${fingerprintShort(req.fromPubkey)}`));
     }
   }
 
@@ -1733,7 +1740,24 @@ function rowStyle(): JSX.CSSProperties {
 // Error formatting
 // ----------------------------------------------------------------------
 
-function formatError(err: unknown): string {
+/** Render a typed-username into an `@handle` label for error copy.
+ *  Trims surrounding whitespace + a leading `@` the user may have typed
+ *  so we never double it; returns `undefined` for an empty input (the
+ *  formatter then falls back to its neutral "This contact" subject). */
+function atLabel(raw: string): string | undefined {
+  const trimmed = raw.trim().replace(/^@+/, "");
+  return trimmed.length > 0 ? `@${trimmed}` : undefined;
+}
+
+function formatError(err: unknown, peerLabel?: string): string {
+  // KT-log S4 — a fail-closed supersession refusal (an unproven CHANGED
+  // key) is the moment the reset-vs-compromise distinction matters most.
+  // Render a reset-AWARE message driven by the best-effort log marker
+  // the client attached (`loggedReset`). The refusal itself is unchanged
+  // — gate 1 threw regardless of the log; this only colours the prompt.
+  if (err instanceof SupersessionRefused) {
+    return supersessionRefusedMessage(err.loggedReset, peerLabel);
+  }
   if (err instanceof ContactsError) {
     switch (err.variant.kind) {
       case "no-identity-secrets":

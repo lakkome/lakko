@@ -30,23 +30,41 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 import init, * as wasm from "../../wasm/lakko_ffi_wasm";
-import type { LogVerifyStatus } from "../transparency/verify";
+import type {
+  LogVerifyResult,
+  LogVerifyStatus,
+} from "../transparency/verify";
 import type { IdentityFetchResponse } from "../discovery/wire";
 
 // Mock the transparency verifier — the contacts client calls
-// `verifyIdentityInLog`, we control its verdict per test.
+// `verifyIdentityInLog` (gate 2) and `lookupServedKeyReset` (the gate-1
+// S4 enrichment); we control both per test.
 const verifyIdentityInLogMock = vi.fn<
-  (a: Uint8Array, b: Uint8Array) => Promise<LogVerifyStatus>
+  (a: Uint8Array, b: Uint8Array) => Promise<LogVerifyResult>
+>();
+const lookupServedKeyResetMock = vi.fn<
+  (a: Uint8Array, b: Uint8Array) => Promise<boolean | null>
 >();
 vi.mock("../transparency/verify", () => ({
   verifyIdentityInLog: (a: Uint8Array, b: Uint8Array) =>
     verifyIdentityInLogMock(a, b),
+  lookupServedKeyReset: (a: Uint8Array, b: Uint8Array) =>
+    lookupServedKeyResetMock(a, b),
 }));
+
+/** Helper — wrap a bare status into the `{status, isReset}` shape the
+ *  client now consumes. `isReset` defaults to `null` (no latest read). */
+function result(
+  status: LogVerifyStatus,
+  isReset: boolean | null = null,
+): LogVerifyResult {
+  return { status, isReset };
+}
 
 // Import AFTER the mock is registered.
 const { ContactsClient, SupersessionRefused, LogRollbackDetected } =
   await import("./client");
-const { readPin, readLogStatus } = await import("./local-store");
+const { readPin, readLogStatus, readLogReset } = await import("./local-store");
 
 /** In-memory `localStorage` shim. */
 class MemoryStorage {
@@ -115,6 +133,10 @@ beforeEach(() => {
   (globalThis as unknown as { localStorage: Storage }).localStorage =
     new MemoryStorage() as unknown as Storage;
   verifyIdentityInLogMock.mockReset();
+  lookupServedKeyResetMock.mockReset();
+  // Default the gate-1 enrichment lookup to "unknown" unless a test
+  // overrides it; gate 1 throws regardless of this value.
+  lookupServedKeyResetMock.mockResolvedValue(null);
   // Silence the best-effort console.warn calls during the suite.
   vi.spyOn(console, "warn").mockImplementation(() => undefined);
 });
@@ -127,7 +149,7 @@ afterEach(() => {
 describe("transparency-log posture in verifyBundleAccountKey (S3c)", () => {
   it('"rollback" HARD-FAILS with LogRollbackDetected (after TOFU-pin)', async () => {
     const peer = identityFromSeed(11);
-    verifyIdentityInLogMock.mockResolvedValue("rollback");
+    verifyIdentityInLogMock.mockResolvedValue(result("rollback"));
     let thrown: unknown;
     try {
       await gate({
@@ -147,7 +169,7 @@ describe("transparency-log posture in verifyBundleAccountKey (S3c)", () => {
 
   it('"confirmed" records the verdict and does NOT block', async () => {
     const peer = identityFromSeed(12);
-    verifyIdentityInLogMock.mockResolvedValue("confirmed");
+    verifyIdentityInLogMock.mockResolvedValue(result("confirmed", false));
     await expect(
       gate({
         signature_pubkey: peer.signaturePubkeyB64,
@@ -155,11 +177,13 @@ describe("transparency-log posture in verifyBundleAccountKey (S3c)", () => {
       }),
     ).resolves.toBeUndefined();
     expect(readLogStatus(b64(ACCOUNT_ID))).toBe("confirmed");
+    // KT-log S4: the latest entry's isReset marker is persisted too.
+    expect(readLogReset(b64(ACCOUNT_ID))).toBe(false);
   });
 
   it('"mismatch" is recorded + surfaced but does NOT block (S3c)', async () => {
     const peer = identityFromSeed(13);
-    verifyIdentityInLogMock.mockResolvedValue("mismatch");
+    verifyIdentityInLogMock.mockResolvedValue(result("mismatch", false));
     await expect(
       gate({
         signature_pubkey: peer.signaturePubkeyB64,
@@ -173,7 +197,7 @@ describe("transparency-log posture in verifyBundleAccountKey (S3c)", () => {
     '"%s" is recorded and does NOT block',
     async (status) => {
       const peer = identityFromSeed(14);
-      verifyIdentityInLogMock.mockResolvedValue(status);
+      verifyIdentityInLogMock.mockResolvedValue(result(status));
       await expect(
         gate({
           signature_pubkey: peer.signaturePubkeyB64,
@@ -204,7 +228,7 @@ describe("transparency-log posture in verifyBundleAccountKey (S3c)", () => {
     const original = identityFromSeed(21);
     const rotated = identityFromSeed(22);
     // First contact TOFU-pins the original key (log says off).
-    verifyIdentityInLogMock.mockResolvedValue("off");
+    verifyIdentityInLogMock.mockResolvedValue(result("off"));
     await gate({
       signature_pubkey: original.signaturePubkeyB64,
       x25519_pubkey: original.x25519PubkeyB64,
@@ -232,5 +256,83 @@ describe("transparency-log posture in verifyBundleAccountKey (S3c)", () => {
     expect(readPin(b64(ACCOUNT_ID))?.pinnedSignaturePubkeyB64).toBe(
       original.signaturePubkeyB64,
     );
+  });
+});
+
+describe("KT-log S4 — SupersessionRefused.loggedReset enrichment", () => {
+  /** TOFU-pin an original key, then attempt an UNPROVEN changed key and
+   *  capture the thrown `SupersessionRefused`. `loggedReset` is driven
+   *  by the mocked `lookupServedKeyReset` result for that test. */
+  async function refuseChangedKey(
+    loggedReset: boolean | null,
+  ): Promise<InstanceType<typeof SupersessionRefused>> {
+    const original = identityFromSeed(31);
+    const rotated = identityFromSeed(32);
+    verifyIdentityInLogMock.mockResolvedValue(result("off"));
+    await gate({
+      signature_pubkey: original.signaturePubkeyB64,
+      x25519_pubkey: original.x25519PubkeyB64,
+    });
+    // The gate-1 enrichment lookup returns the requested marker.
+    lookupServedKeyResetMock.mockResolvedValue(loggedReset);
+    let thrown: unknown;
+    try {
+      await gate({
+        signature_pubkey: rotated.signaturePubkeyB64,
+        x25519_pubkey: rotated.x25519PubkeyB64,
+      });
+    } catch (e) {
+      thrown = e;
+    }
+    expect(thrown).toBeInstanceOf(SupersessionRefused);
+    return thrown as InstanceType<typeof SupersessionRefused>;
+  }
+
+  it("attaches loggedReset=true when the log shows an owner reset", async () => {
+    const err = await refuseChangedKey(true);
+    expect(err.reason).toBe("proof-absent");
+    expect(err.loggedReset).toBe(true);
+  });
+
+  it("attaches loggedReset=false when the log shows NO owner reset", async () => {
+    const err = await refuseChangedKey(false);
+    expect(err.loggedReset).toBe(false);
+  });
+
+  it("attaches loggedReset=null when the log is off/unreachable/absent", async () => {
+    const err = await refuseChangedKey(null);
+    expect(err.loggedReset).toBeNull();
+  });
+
+  it("the gate still THROWS regardless of the log lookup (gate unweakened)", async () => {
+    // Even with loggedReset=true (a confirmed reset), the refusal stands —
+    // the log only colours the message, it never authorises the new key.
+    const err = await refuseChangedKey(true);
+    expect(err).toBeInstanceOf(SupersessionRefused);
+  });
+
+  it("a throwing enrichment lookup leaves loggedReset null (best-effort, refusal stands)", async () => {
+    const original = identityFromSeed(41);
+    const rotated = identityFromSeed(42);
+    verifyIdentityInLogMock.mockResolvedValue(result("off"));
+    await gate({
+      signature_pubkey: original.signaturePubkeyB64,
+      x25519_pubkey: original.x25519PubkeyB64,
+    });
+    // The enrichment lookup itself throws — must not break the refusal.
+    lookupServedKeyResetMock.mockRejectedValue(new Error("log boom"));
+    let thrown: unknown;
+    try {
+      await gate({
+        signature_pubkey: rotated.signaturePubkeyB64,
+        x25519_pubkey: rotated.x25519PubkeyB64,
+      });
+    } catch (e) {
+      thrown = e;
+    }
+    expect(thrown).toBeInstanceOf(SupersessionRefused);
+    expect(
+      (thrown as InstanceType<typeof SupersessionRefused>).loggedReset,
+    ).toBeNull();
   });
 });
