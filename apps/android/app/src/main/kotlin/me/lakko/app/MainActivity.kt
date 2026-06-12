@@ -15,6 +15,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -289,15 +290,27 @@ private fun AppRoot(
         is AuthState.SaveFreshPhrase -> SaveFreshPhraseRoot(
             repository = authRepository,
         )
-        is AuthState.Session -> SessionRoot(
-            authRepository = authRepository,
-            contactsRepository = contactsRepository,
-            chatRepository = chatRepository,
-            deviceGroupSync = deviceGroupSync,
-            inviteIntake = inviteIntake,
-            pushIntake = pushIntake,
-            account = current.account,
-        )
+        is AuthState.Session -> {
+            // ADR-0017 defence-in-depth — surface the identity-changed
+            // security alert above the session content.
+            val identityAlert by authRepository.identityAlert.collectAsState()
+            androidx.compose.foundation.layout.Column {
+                if (identityAlert != null) {
+                    me.lakko.app.ui.auth.IdentitySecurityBanner(
+                        onDismiss = { authRepository.dismissIdentityAlert() },
+                    )
+                }
+                SessionRoot(
+                    authRepository = authRepository,
+                    contactsRepository = contactsRepository,
+                    chatRepository = chatRepository,
+                    deviceGroupSync = deviceGroupSync,
+                    inviteIntake = inviteIntake,
+                    pushIntake = pushIntake,
+                    account = current.account,
+                )
+            }
+        }
     }
 }
 

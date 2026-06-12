@@ -87,6 +87,18 @@ public class AuthRepository(
     public val state: StateFlow<AuthState> = mutableState.asStateFlow()
 
     /**
+     * ADR-0017 defence-in-depth (lakko-security Phase-3A follow-up (i)) —
+     * non-null when this device's canonical AccountIdentity did NOT match
+     * the account's currently-published bundle at login (someone replaced
+     * it; the ACCESS-hijack signature). Surfaced as a dismissible banner.
+     */
+    private val mutableIdentityAlert: MutableStateFlow<IdentityAlert?> =
+        MutableStateFlow(null)
+
+    public val identityAlert: StateFlow<IdentityAlert?> =
+        mutableIdentityAlert.asStateFlow()
+
+    /**
      * In-memory identity secrets — the OPAQUE export key + the
      * raw account id bytes for the active session.
      *
@@ -528,6 +540,13 @@ public class AuthRepository(
                         accountIdB64 = cached.accountIdB64,
                         username = cached.username,
                     ),
+                )
+                // ADR-0017 defence-in-depth — is our published identity
+                // still ours? (Fire-and-forget; alerts on a mismatch.)
+                kickIdentityConsistencyCheck(
+                    accountIdBytes = accountIdBytes,
+                    accountIdentitySeed = accountIdentitySeed,
+                    sessionToken = result.sessionToken,
                 )
                 // 1.20d — best-effort push subscribe.
                 subscribePushBestEffort("login")
@@ -1146,6 +1165,13 @@ public class AuthRepository(
                     username = username,
                 ),
             )
+            // ADR-0017 defence-in-depth — is our published identity still
+            // ours? (Fire-and-forget; alerts on a mismatch.)
+            kickIdentityConsistencyCheck(
+                accountIdBytes = accountIdBytes,
+                accountIdentitySeed = accountIdentitySeed,
+                sessionToken = sessionToken,
+            )
             // 1.20d — best-effort push subscribe (the ACCESS factor
             // succeeded; same posture as login / passkey).
             subscribePushBestEffort(pushContext)
@@ -1436,6 +1462,55 @@ public class AuthRepository(
      *  flow. Kept off the [AuthState] object so it is not threaded through
      *  the router (mirror of the web `freshPhrase()` accessor). */
     public fun freshPhrase(): String? = pendingFreshPhrase.get()?.phrase
+
+    /** Dismiss the identity-changed security banner. */
+    public fun dismissIdentityAlert() {
+        mutableIdentityAlert.value = null
+    }
+
+    /**
+     * ADR-0017 defence-in-depth (lakko-security Phase-3A follow-up (i)) —
+     * fire-and-forget self-check kicked off from a warm-login completion:
+     * is the account's published AccountIdentity still OURS? A mismatch
+     * means someone replaced it (the ACCESS-hijack signature — an attacker
+     * minted a fresh identity via the lost-everything path). Best-effort: a
+     * 404 (fresh signup) or a fetch error never alerts. Android does not
+     * re-publish on a warm login, so this is race-free. The helper owns the
+     * passed seed copy and zeroizes it.
+     */
+    private fun kickIdentityConsistencyCheck(
+        accountIdBytes: ByteArray,
+        accountIdentitySeed: ByteArray,
+        sessionToken: String,
+    ) {
+        val accountId = accountIdBytes.copyOf()
+        val seed = accountIdentitySeed.copyOf()
+        pushScope.launch {
+            try {
+                val derived =
+                    Identity.fromSeed(seed).use { it.signaturePublicKey() }
+                val discovery = discoveryClientFactory()
+                try {
+                    discovery.setSessionToken(sessionToken)
+                    val bundle = discovery.identityFetch(accountId)
+                    mutableIdentityAlert.value = if (
+                        bundle != null &&
+                        !base64Decode(bundle.signature_pubkey).contentEquals(derived)
+                    ) {
+                        IdentityAlert.PublishedIdentityChanged
+                    } else {
+                        null
+                    }
+                } finally {
+                    discovery.close()
+                }
+            } catch (cause: Throwable) {
+                Log.w("lakko-auth", "self-identity consistency check failed", cause)
+            } finally {
+                seed.fill(0)
+            }
+        }
+    }
 
     public fun confirmFreshPhraseSaved() {
         val pending = pendingFreshPhrase.getAndSet(null)
@@ -1886,6 +1961,13 @@ public class AuthRepository(
                 username = cached.username,
             ),
         )
+        // ADR-0017 defence-in-depth — is our published identity still ours?
+        // (Fire-and-forget; alerts on a mismatch.)
+        kickIdentityConsistencyCheck(
+            accountIdBytes = cachedAccountBytes,
+            accountIdentitySeed = accountIdentitySeed,
+            sessionToken = assertion.sessionToken,
+        )
         // Best-effort wipe of the local export-key copy in the
         // suspend frame. The `IdentitySecrets.exportKey` slot
         // above carries an independent `copyOf()` for the
@@ -2324,6 +2406,7 @@ public class AuthRepository(
         }
         pendingContactRecover.set(null)
         pendingFreshPhrase.getAndSet(null)?.let { it.seed.fill(0) }
+        mutableIdentityAlert.value = null
     }
 }
 
@@ -2361,6 +2444,19 @@ public sealed interface AuthState {
      *  the UI must show the phrase for the user to save before the session
      *  lands. [AuthRepository.confirmFreshPhraseSaved] finishes it. */
     public data class SaveFreshPhrase(val account: SessionAccount) : AuthState
+}
+
+/**
+ * ADR-0017 defence-in-depth (lakko-security Phase-3A follow-up (i)) — a
+ * security alert raised when this device's canonical AccountIdentity did
+ * not match the account's currently-published bundle at login. Mirror of
+ * the web / iOS `IdentityAlert`.
+ */
+public enum class IdentityAlert {
+    /** Someone published a DIFFERENT identity for this account (the
+     *  ACCESS-hijack signature — an attacker minted a fresh identity via
+     *  the lost-everything path). */
+    PublishedIdentityChanged,
 }
 
 /** Account record exposed to the UI when a session is active.
