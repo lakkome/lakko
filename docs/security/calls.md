@@ -1550,16 +1550,41 @@ integration) asserts:
    `payload_b64 == "AAAA"` survives the round-trip
    byte-exact.
 
-3. **Cross-call isolation is structural, not policy.**
-   Peer A in call-X cannot receive `peer-joined` /
-   `peer-left` / `signal-relay` frames originating in
-   call-Y. The router's broadcast filter is keyed on the
-   `call_id` field of the inbound JWT — a peer that
-   attempts to send to a peer in a different call gets
+3. **Cross-call isolation is structural, not policy —
+   across BOTH the signaling AND the media plane.**
+   *Signaling:* peer A in call-X cannot receive
+   `peer-joined` / `peer-left` / `signal-relay` frames
+   originating in call-Y. The router's broadcast filter is
+   keyed on the `call_id` field of the inbound JWT — a peer
+   that attempts to send to a peer in a different call gets
    `ErrorCode::UnknownPeer` back; the SFU does not
-   "helpfully" cross-route by account id even when the
-   same account is in both calls. Test:
-   `cross_call_isolation`.
+   "helpfully" cross-route by account id even when the same
+   account is in both calls. Test: `cross_call_isolation`.
+
+   *Media (RTP):* the media plane is the same — a frame from
+   a publisher in call-X is forwarded ONLY to peers in
+   call-X, never to peers in call-Y, even though they share
+   the one process-wide `MediaRouter`. The binding `call_id`
+   is the **server-authoritative** JWT claim (set on the
+   `MediaPeer` from `Peer::call_id` at the peer's first SDP
+   offer — `media.rs::set_call_id`, never client-supplied
+   SDP), and both `fanout_media_data` (RTP forwarding) and
+   `propagate_new_tracks_in` (downstream-track opening) skip
+   any non-origin peer whose `call_id` differs from the
+   origin's; the renegotiation path is transitively scoped
+   because it only acts on already-opened (same-call)
+   `TrackOut` entries. Fail-closed: an origin with no bound
+   call forwards to nobody. (This media-plane enforcement
+   was added as a security fix — before it, the fanout
+   walked every router peer with no `call_id` filter, so a
+   peer admitted to any call received the SFrame-encrypted
+   media of all concurrent calls; SFrame kept the payload
+   confidential, but the isolation invariant — a metadata /
+   DoS surface — was violated.) Tests:
+   `media::tests::fanout_never_crosses_calls` +
+   `fanout_unbound_origin_forwards_to_nobody` (unit) +
+   `fanout_never_crosses_calls_over_the_live_sfu`
+   (live e2e). `lakko-security`: APPROVE.
 
 4. **Account ids are pseudonymised in every outbound
    frame and every log line.** The `account_pseudonym`

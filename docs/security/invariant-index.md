@@ -106,7 +106,7 @@ SFU multi-party client SFrame coverage).
 |---|---|
 | C-37 | SFrame keying math + AEAD pipeline pinned |
 | C-38 | RFC 9605 §4.3 wire-header round-trip pinned |
-| C-39 | SFU signaling layer enforces zero-payload-inspection + cross-call isolation |
+| C-39 | SFU enforces zero-payload-inspection + cross-call isolation across BOTH the signaling AND the media (RTP) plane. Media-plane fanout (`fanout_media_data`) + downstream-track opening (`propagate_new_tracks_in`) are call-scoped on the server-authoritative JWT `call_id` (fail-closed; renegotiation transitively scoped). The media-plane enforcement was a security fix — before it the fanout had no `call_id` filter, leaking SFrame-encrypted media across calls (confidentiality held via SFrame, isolation/metadata invariant did not); `lakko-security` APPROVE |
 
 ### C-40..C-44 — channel-broadcast backend
 
