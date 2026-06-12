@@ -112,6 +112,15 @@ export interface AccountPubkeyPin {
    *  Stored next to `logStatus` so the UI can surface the
    *  reset-vs-compromise distinction. */
   isReset?: boolean;
+  /** G-30 #2 (ADR-0019): the transparency-log VERSION at which the
+   *  currently-pinned key was chain-confirmed (the `/latest` entry's
+   *  per-account-key `version`). Written ONLY on a `confirmed`
+   *  rotation-chain verdict (`verifyRotationChain`). The next
+   *  rotation's chain proof must reference a STRICTLY-NEWER logged
+   *  version, so persisting it gives the chain verifier its
+   *  downgrade-protection floor. Absent on a pin that has never been
+   *  chain-confirmed (a TOFU pin, or one written before G-30 #2). */
+  pinnedLogVersion?: number;
 }
 
 /** Mirror of `transparency/verify.ts::LogVerifyStatus` — duplicated
@@ -185,6 +194,17 @@ function isAccountPubkeyPin(p: unknown): p is AccountPubkeyPin {
   const ir = (p as AccountPubkeyPin).isReset;
   if (ir !== undefined && typeof ir !== "boolean") {
     delete (p as { isReset?: unknown }).isReset;
+  }
+  // G-30 #2 (ADR-0019): validate the optional `pinnedLogVersion`. A
+  // present-but-junk value (non-number, non-finite, or negative) is
+  // dropped (forward-compat / tamper guard) while the pin itself stays
+  // valid — a missing chain-version floor degrades safely to 0.
+  const lv = (p as AccountPubkeyPin).pinnedLogVersion;
+  if (
+    lv !== undefined &&
+    (typeof lv !== "number" || !Number.isFinite(lv) || lv < 0)
+  ) {
+    delete (p as { pinnedLogVersion?: unknown }).pinnedLogVersion;
   }
   return true;
 }
@@ -391,6 +411,12 @@ export function setPin(
   // whose check is inconclusive) doesn't blank a previously-known value.
   const carriedLogStatus = existing?.logStatus;
   const carriedIsReset = existing?.isReset;
+  // G-30 #2 (ADR-0019): carry the chain-confirmed log version across a
+  // re-pin too. It is a separately-written field (only `recordLogVersion`
+  // touches it, on a `confirmed` chain verdict), so a re-pin must not
+  // silently drop the downgrade floor; the fetch path re-records it right
+  // after a confirmed rotation, so a stale carried value is replaced.
+  const carriedLogVersion = existing?.pinnedLogVersion;
   const nextPins: Record<string, AccountPubkeyPin> = {
     ...current.pins,
     [accountIdB64]: {
@@ -398,6 +424,9 @@ export function setPin(
       rotationMarker,
       ...(carriedLogStatus !== undefined ? { logStatus: carriedLogStatus } : {}),
       ...(carriedIsReset !== undefined ? { isReset: carriedIsReset } : {}),
+      ...(carriedLogVersion !== undefined
+        ? { pinnedLogVersion: carriedLogVersion }
+        : {}),
     },
   };
   save({ ...current, pins: nextPins });
@@ -494,6 +523,58 @@ export function recordLogReset(
  *  `undefined` when no pin / no recorded marker. Exposed for the UI. */
 export function readLogReset(accountIdB64: string): boolean | undefined {
   return load().pins[accountIdB64]?.isReset;
+}
+
+/**
+ * Record the chain-confirmed transparency-log VERSION (G-30 #2,
+ * ADR-0019) for an account, keyed on the same stable `account_id` as
+ * the pin.
+ *
+ * Mirrors `recordLogReset`: writes onto the existing pin record so the
+ * version travels with the pinned key, and is a **no-op when no pin
+ * exists** (the supersession gate TOFU-pins on first sight, so a pin is
+ * present by the time a chain verdict is recorded). A `null` argument
+ * CLEARS any stored version. The caller persists it ONLY on a
+ * `confirmed` rotation-chain verdict — a transient `unreachable` /
+ * `mismatch` / `absent` outcome must NOT wipe a previously-confirmed
+ * version, so the caller does not pass `null` on those (see
+ * `checkTransparencyLog`). Idempotent on an unchanged value (no write).
+ * Returns whether a write happened (a present pin).
+ */
+export function recordLogVersion(
+  accountIdB64: string,
+  version: number | null,
+): boolean {
+  const current = load();
+  const existing = current.pins[accountIdB64];
+  if (existing === undefined) return false;
+  const currentValue = existing.pinnedLogVersion;
+  // Normalise: `null` means "clear" (no version), a number means "set".
+  if (version === null) {
+    if (currentValue === undefined) return true; // already clear, no write
+    const cleared: AccountPubkeyPin = { ...existing };
+    delete cleared.pinnedLogVersion;
+    save({
+      ...current,
+      pins: { ...current.pins, [accountIdB64]: cleared },
+    });
+    return true;
+  }
+  if (currentValue === version) return true; // idempotent, no write
+  const nextPins: Record<string, AccountPubkeyPin> = {
+    ...current.pins,
+    [accountIdB64]: { ...existing, pinnedLogVersion: version },
+  };
+  save({ ...current, pins: nextPins });
+  return true;
+}
+
+/** Read the recorded chain-confirmed log version (G-30 #2) for an
+ *  account, or `undefined` when no pin / no recorded version. The next
+ *  rotation's chain proof is checked against this as the downgrade
+ *  floor (default `0` when absent). */
+export function readLogVersion(accountIdB64: string): number | undefined {
+  return load().pins[accountIdB64]?.pinnedLogVersion;
 }
 
 /** Render a short human-readable hex prefix for a public key.

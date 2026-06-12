@@ -51,9 +51,17 @@ import type {
   Identity as WasmIdentity,
 } from "../../wasm/lakko_ffi_wasm";
 import type { IdentityFetchResponse } from "../discovery/wire";
-import { readPin, setPin, recordLogStatus, recordLogReset } from "./local-store";
+import type { AccountPubkeyPin } from "./local-store";
+import {
+  readPin,
+  setPin,
+  recordLogStatus,
+  recordLogReset,
+  recordLogVersion,
+} from "./local-store";
 import {
   verifyIdentityInLog,
+  verifyRotationChain,
   lookupServedKeyReset,
 } from "../transparency/verify";
 import type { LogVerifyStatus } from "../transparency/verify";
@@ -470,6 +478,13 @@ export class ContactsClient {
     accountId: Uint8Array,
     bundle: IdentityFetchResponse,
   ): Promise<void> {
+    // G-30 #2 (ADR-0019): snapshot the pin BEFORE gate 1 runs. Gate 1
+    // re-pins to the new key on a verified rotation (overwriting the pin),
+    // but gate 2's rotation-chain check needs the OLD pinned key + the
+    // OLD chain-version floor to anchor the chain. Capturing it here keeps
+    // gate 1 untouched.
+    const oldPin = readPin(base64Encode(accountId));
+
     // Gate 1 (primary, fail-closed). A throw here short-circuits gate 2.
     try {
       await this.verifySupersessionGate(accountId, bundle);
@@ -490,9 +505,19 @@ export class ContactsClient {
     }
 
     // Gate 2 (additive, best-effort). Hard-fails only on rollback.
+    // G-30 #2 (ADR-0019): pass the OLD pin + the bundle's supersession
+    // proof so the log check can route a key ROTATION through the
+    // chain verifier (anchoring the transition to the operator-signed
+    // log) instead of the standalone single-key inclusion check.
     const accountIdB64 = base64Encode(accountId);
     const servedPubkey = base64Decode(bundle.signature_pubkey);
-    await this.checkTransparencyLog(accountId, accountIdB64, servedPubkey);
+    await this.checkTransparencyLog(
+      accountId,
+      accountIdB64,
+      servedPubkey,
+      oldPin,
+      bundle.supersession_proof,
+    );
   }
 
   /**
@@ -681,20 +706,64 @@ export class ContactsClient {
    * swallowed and logged — the additive check must never break the
    * primary fetch path.
    *
+   * G-30 #2 (ADR-0019): when the served key is a ROTATION away from the
+   * pinned one AND the bundle carried a supersession proof, the check
+   * routes through `verifyRotationChain` (the chain verifier — root sig +
+   * no-rollback + Merkle inclusion + the supersession proof from the OLD
+   * pinned key + a strictly-newer logged version + freshness) instead of
+   * the standalone single-key `verifyIdentityInLog`. The POSTURE is
+   * unchanged: only `"rollback"` hard-fails; a chain contradiction
+   * surfaces as `"mismatch"` (NOT a block); a not-logged / unreachable /
+   * off rotation falls back to the standalone gate-1 result (no
+   * over-block). On a `"confirmed"` chain the proven log version is
+   * persisted as the next rotation's downgrade floor.
+   *
    * @param accountId    the peer's raw 16-byte account_id.
    * @param accountIdB64 its base64 form (the pin-store key).
    * @param servedPubkey the 32-byte Ed25519 key discovery served.
+   * @param oldPin       the pin AS IT WAS BEFORE gate 1 re-pinned (G-30
+   *                     #2) — `undefined` on a first-ever observation.
+   * @param supersessionProofB64 the bundle's `supersession_proof`
+   *                     (base64), when present — the chain's old-key
+   *                     authorisation.
    * @throws `LogRollbackDetected` ONLY on a `"rollback"` verdict.
    */
   private async checkTransparencyLog(
     accountId: Uint8Array,
     accountIdB64: string,
     servedPubkey: Uint8Array,
+    oldPin?: AccountPubkeyPin,
+    supersessionProofB64?: string,
   ): Promise<void> {
+    // G-30 #2 — a ROTATION is: a pin existed, its key DIFFERS from the
+    // served key, and the bundle carried a supersession proof. Only then
+    // can the chain verifier anchor the transition. Anything else (first
+    // observation / unchanged key / no proof) keeps the existing
+    // single-key inclusion check unchanged.
+    const isRotation =
+      oldPin !== undefined &&
+      oldPin.pinnedSignaturePubkeyB64 !== base64Encode(servedPubkey) &&
+      supersessionProofB64 !== undefined &&
+      supersessionProofB64.length > 0;
+
     let status: LogVerifyStatus;
     let isReset: boolean | null;
+    let version: number | null;
     try {
-      ({ status, isReset } = await verifyIdentityInLog(accountId, servedPubkey));
+      if (isRotation) {
+        // `oldPin` is defined in this branch (the `isRotation` guard).
+        const result = await verifyRotationChain(accountId, servedPubkey, {
+          supersessionProofB64: supersessionProofB64 as string,
+          pinnedOldPubkey: base64Decode(oldPin.pinnedSignaturePubkeyB64),
+          pinnedLogVersion: oldPin.pinnedLogVersion ?? 0,
+        });
+        ({ status, isReset, version } = result);
+      } else {
+        const r = await verifyIdentityInLog(accountId, servedPubkey);
+        status = r.status;
+        isReset = r.isReset;
+        version = null;
+      }
     } catch (err) {
       // The verifier is designed to map faults to a status and only
       // throw on `LogRollbackDetected` semantics (which it surfaces as
@@ -720,6 +789,14 @@ export class ContactsClient {
     // status (a `null` clears any stale marker — no latest was read).
     recordLogStatus(accountIdB64, status);
     recordLogReset(accountIdB64, isReset);
+
+    // G-30 #2 — persist the chain-confirmed log version ONLY on a
+    // `"confirmed"` rotation chain (where `version !== null`). A transient
+    // `unreachable` / `mismatch` / `absent` verdict must NOT clear a
+    // previously-confirmed floor, so we never pass `null` here.
+    if (version !== null) {
+      recordLogVersion(accountIdB64, version);
+    }
 
     if (status === "mismatch") {
       // Surfaced-but-not-blocked for S3c. The natural fail-closed

@@ -31,9 +31,11 @@ import { fileURLToPath } from "node:url";
 import init from "../../wasm/lakko_ffi_wasm";
 import {
   verifyIdentityInLog,
+  verifyRotationChain,
   lookupServedKeyReset,
   type LogVerifyResult,
   type LogVerifyStatus,
+  type RotationChainResult,
   type VerifyDeps,
 } from "./verify";
 import {
@@ -392,5 +394,159 @@ describe("lookupServedKeyReset — KT-log S4 best-effort enrichment", () => {
     expect(
       await lookupServedKeyReset(ACCOUNT_ID, SERVED_PUBKEY, { client }),
     ).toBeNull();
+  });
+});
+
+describe("verifyRotationChain (G-30 #2, ADR-0019)", () => {
+  // The rotation context the chain verifier consumes. `pinnedOldPubkey`
+  // and `supersessionProofB64` are arbitrary in these tests because the
+  // `verifyChain` SEAM replaces the real wasm gate (a valid supersession
+  // proof + Merkle proof can only be built by the Rust log builder).
+  const OLD_PUBKEY = new Uint8Array(32).fill(0x99);
+  const ROTATION_CTX = {
+    supersessionProofB64: btoa("fake-supersession-proof-bytes"),
+    pinnedOldPubkey: OLD_PUBKEY,
+    pinnedLogVersion: 1,
+  };
+
+  /** Run the rotation-chain verifier with a fixed operator key + a
+   *  default-PASS chain stub (returns the served pubkey) unless
+   *  overridden. */
+  function runChain(
+    client: TransparencyClient | null,
+    extra: Partial<VerifyDeps> = {},
+  ): Promise<RotationChainResult> {
+    return verifyRotationChain(ACCOUNT_ID, SERVED_PUBKEY, ROTATION_CTX, {
+      client,
+      operatorKey: OPERATOR_KEY,
+      // Default chain stub: PASS — returns the authorised new pubkey.
+      verifyChain: () => SERVED_PUBKEY,
+      ...extra,
+    });
+  }
+
+  it('returns "off" + version null when the client is null', async () => {
+    const r = await runChain(null);
+    expect(r.status).toBe("off");
+    expect(r.version).toBeNull();
+    expect(r.isReset).toBeNull();
+  });
+
+  it('returns "off" when the operator key is null', async () => {
+    const client = mockClient({});
+    const r = await verifyRotationChain(ACCOUNT_ID, SERVED_PUBKEY, ROTATION_CTX, {
+      client,
+      operatorKey: null,
+      verifyChain: () => SERVED_PUBKEY,
+    });
+    expect(r.status).toBe("off");
+    expect(r.version).toBeNull();
+  });
+
+  it('returns "confirmed" + the logged version on a passing chain', async () => {
+    // latest serves the SERVED key at version 7 → confirmed carries 7.
+    const client = mockClient({
+      fetchLatest: vi.fn(async () => ({
+        idx: 3n,
+        version: 7n,
+        identityPubkey: SERVED_PUBKEY,
+        isReset: false,
+      })),
+    });
+    const r = await runChain(client);
+    expect(r.status).toBe("confirmed");
+    expect(r.version).toBe(7);
+    expect(r.isReset).toBe(false);
+  });
+
+  it('carries the latest isReset through a confirmed chain', async () => {
+    const client = mockClient({
+      fetchLatest: vi.fn(async () => latestWith(SERVED_PUBKEY, true)),
+    });
+    const r = await runChain(client);
+    expect(r.status).toBe("confirmed");
+    expect(r.isReset).toBe(true);
+  });
+
+  it('returns "mismatch" (NO throw) when the chain gate throws', async () => {
+    const client = mockClient({});
+    const r = await runChain(client, {
+      verifyChain: () => {
+        throw new Error("chain verify failed");
+      },
+    });
+    expect(r.status).toBe("mismatch");
+    // mismatch never anchors a version (the chain did not prove it).
+    expect(r.version).toBeNull();
+    // A latest entry existed, so its marker still rides out.
+    expect(r.isReset).toBe(false);
+  });
+
+  it('returns "absent" + version null when /latest is null (rotated key not yet logged)', async () => {
+    const client = mockClient({ fetchLatest: vi.fn(async () => null) });
+    const r = await runChain(client);
+    expect(r.status).toBe("absent");
+    expect(r.version).toBeNull();
+    expect(r.isReset).toBeNull();
+  });
+
+  it('returns "absent" when the log head is NOT the served key (cannot chain-prove it)', async () => {
+    // The log's latest commits to a DIFFERENT key — the served rotation
+    // is not (yet) the log head, so the chain cannot prove it. We surface
+    // `absent` (no chain confirmation) and do NOT block; the standalone
+    // gate-1 result stands. The latest's isReset still rides out.
+    const fetchProof = vi.fn(async () => PROOF_FIXTURE);
+    const client = mockClient({
+      fetchLatest: vi.fn(async () => latestWith(OTHER_PUBKEY, true)),
+      fetchProof,
+    });
+    const r = await runChain(client);
+    expect(r.status).toBe("absent");
+    expect(r.version).toBeNull();
+    expect(r.isReset).toBe(true);
+    // We never even fetched a proof — the head divergence short-circuits.
+    expect(fetchProof).not.toHaveBeenCalled();
+  });
+
+  it('returns "rollback" when the root log_size shrank below last-seen', async () => {
+    checkAndAdvance(20n);
+    const client = mockClient({ fetchRoot: vi.fn(async () => rootAt(10n)) });
+    const r = await runChain(client);
+    expect(r.status).toBe("rollback");
+    expect(r.version).toBeNull();
+  });
+
+  it("checks rollback BEFORE the latest lookup (a shrink short-circuits)", async () => {
+    checkAndAdvance(20n);
+    const fetchLatest = vi.fn(async () => latestWith(SERVED_PUBKEY));
+    const client = mockClient({
+      fetchRoot: vi.fn(async () => rootAt(10n)),
+      fetchLatest,
+    });
+    const r = await runChain(client);
+    expect(r.status).toBe("rollback");
+    expect(fetchLatest).not.toHaveBeenCalled();
+  });
+
+  it('returns "unreachable" on a network error fetching the root', async () => {
+    const client = mockClient({
+      fetchRoot: vi.fn(async () => {
+        throw new TransparencyNetworkError("/transparency/root", "down");
+      }),
+    });
+    const r = await runChain(client);
+    expect(r.status).toBe("unreachable");
+    expect(r.version).toBeNull();
+  });
+
+  it('returns "unreachable" on a network error fetching the proof', async () => {
+    const client = mockClient({
+      fetchProof: vi.fn(async () => {
+        throw new TransparencyNetworkError("/transparency/proof", "down");
+      }),
+    });
+    const r = await runChain(client);
+    expect(r.status).toBe("unreachable");
+    expect(r.version).toBeNull();
   });
 });

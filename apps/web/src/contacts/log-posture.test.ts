@@ -33,14 +33,27 @@ import init, * as wasm from "../../wasm/lakko_ffi_wasm";
 import type {
   LogVerifyResult,
   LogVerifyStatus,
+  RotationChainResult,
 } from "../transparency/verify";
 import type { IdentityFetchResponse } from "../discovery/wire";
 
 // Mock the transparency verifier — the contacts client calls
-// `verifyIdentityInLog` (gate 2) and `lookupServedKeyReset` (the gate-1
-// S4 enrichment); we control both per test.
+// `verifyIdentityInLog` (gate 2, non-rotation), `verifyRotationChain`
+// (gate 2, G-30 #2 rotation), and `lookupServedKeyReset` (the gate-1 S4
+// enrichment); we control all three per test.
 const verifyIdentityInLogMock = vi.fn<
   (a: Uint8Array, b: Uint8Array) => Promise<LogVerifyResult>
+>();
+const verifyRotationChainMock = vi.fn<
+  (
+    a: Uint8Array,
+    b: Uint8Array,
+    ctx: {
+      supersessionProofB64: string;
+      pinnedOldPubkey: Uint8Array;
+      pinnedLogVersion: number;
+    },
+  ) => Promise<RotationChainResult>
 >();
 const lookupServedKeyResetMock = vi.fn<
   (a: Uint8Array, b: Uint8Array) => Promise<boolean | null>
@@ -48,6 +61,15 @@ const lookupServedKeyResetMock = vi.fn<
 vi.mock("../transparency/verify", () => ({
   verifyIdentityInLog: (a: Uint8Array, b: Uint8Array) =>
     verifyIdentityInLogMock(a, b),
+  verifyRotationChain: (
+    a: Uint8Array,
+    b: Uint8Array,
+    ctx: {
+      supersessionProofB64: string;
+      pinnedOldPubkey: Uint8Array;
+      pinnedLogVersion: number;
+    },
+  ) => verifyRotationChainMock(a, b, ctx),
   lookupServedKeyReset: (a: Uint8Array, b: Uint8Array) =>
     lookupServedKeyResetMock(a, b),
 }));
@@ -61,10 +83,21 @@ function result(
   return { status, isReset };
 }
 
+/** Helper — build a `RotationChainResult` for the chain mock. */
+function chainResult(
+  status: LogVerifyStatus,
+  isReset: boolean | null = null,
+  version: number | null = null,
+): RotationChainResult {
+  return { status, isReset, version };
+}
+
 // Import AFTER the mock is registered.
 const { ContactsClient, SupersessionRefused, LogRollbackDetected } =
   await import("./client");
-const { readPin, readLogStatus, readLogReset } = await import("./local-store");
+const { readPin, readLogStatus, readLogReset, readLogVersion } = await import(
+  "./local-store"
+);
 
 /** In-memory `localStorage` shim. */
 class MemoryStorage {
@@ -102,13 +135,19 @@ const ACCOUNT_ID = new Uint8Array([
 function identityFromSeed(seed: number): {
   signaturePubkeyB64: string;
   x25519PubkeyB64: string;
+  ed25519Seed: Uint8Array;
 } {
   const id = wasm.Identity.fromSeed(new Uint8Array(32).fill(seed));
   return {
     signaturePubkeyB64: b64(id.signaturePublicKey),
     x25519PubkeyB64: b64(id.x25519PublicKey),
+    ed25519Seed: id.ed25519Seed,
   };
 }
+
+/** Window (seconds) for a minted supersession proof — well within the
+ *  verifier's 30-day ceiling. */
+const PROOF_WINDOW_SECS = 14n * 24n * 60n * 60n;
 
 function gate(bundle: IdentityFetchResponse): Promise<void> {
   const client = new ContactsClient();
@@ -133,6 +172,7 @@ beforeEach(() => {
   (globalThis as unknown as { localStorage: Storage }).localStorage =
     new MemoryStorage() as unknown as Storage;
   verifyIdentityInLogMock.mockReset();
+  verifyRotationChainMock.mockReset();
   lookupServedKeyResetMock.mockReset();
   // Default the gate-1 enrichment lookup to "unknown" unless a test
   // overrides it; gate 1 throws regardless of this value.
@@ -256,6 +296,208 @@ describe("transparency-log posture in verifyBundleAccountKey (S3c)", () => {
     expect(readPin(b64(ACCOUNT_ID))?.pinnedSignaturePubkeyB64).toBe(
       original.signaturePubkeyB64,
     );
+  });
+});
+
+describe("G-30 #2 — rotation routes through the chain verifier", () => {
+  /** Mint a real supersession proof old→new and drive a verified
+   *  rotation through gate 1, returning the bundle the rotation served.
+   *  The default gate-2 verdict is supplied via the chain mock. */
+  async function driveRotation(
+    chainVerdict: RotationChainResult,
+    oldSeed: number,
+    newSeed: number,
+  ): Promise<{ accountIdB64: string; newSig: string }> {
+    const oldPeer = identityFromSeed(oldSeed);
+    const newPeer = identityFromSeed(newSeed);
+    const accountIdB64 = b64(ACCOUNT_ID);
+
+    // First contact TOFU-pins the OLD key (a non-rotation; routes
+    // through verifyIdentityInLog → "off").
+    verifyIdentityInLogMock.mockResolvedValue(result("off"));
+    await gate({
+      signature_pubkey: oldPeer.signaturePubkeyB64,
+      x25519_pubkey: oldPeer.x25519PubkeyB64,
+    });
+    verifyIdentityInLogMock.mockClear();
+
+    // Mint a genuine proof so gate 1 re-pins (does NOT refuse).
+    const now = BigInt(Math.floor(Date.now() / 1000));
+    const proof = wasm.signSupersessionProof(
+      oldPeer.ed25519Seed,
+      newPeer.ed25519Seed,
+      now,
+      now + PROOF_WINDOW_SECS,
+    );
+
+    // The rotation's gate-2 verdict comes from the chain mock.
+    verifyRotationChainMock.mockResolvedValue(chainVerdict);
+
+    await gate({
+      signature_pubkey: newPeer.signaturePubkeyB64,
+      x25519_pubkey: newPeer.x25519PubkeyB64,
+      supersession_proof: b64(proof),
+    });
+    return { accountIdB64, newSig: newPeer.signaturePubkeyB64 };
+  }
+
+  it("a verified rotation routes through verifyRotationChain, NOT verifyIdentityInLog", async () => {
+    const { newSig } = await driveRotation(
+      chainResult("confirmed", false, 5),
+      61,
+      62,
+    );
+    // The chain verifier ran for the rotation; the single-key check did not.
+    expect(verifyRotationChainMock).toHaveBeenCalledTimes(1);
+    expect(verifyIdentityInLogMock).not.toHaveBeenCalled();
+    // Gate 1 re-pinned to the new key (untouched by this sprint).
+    expect(readPin(b64(ACCOUNT_ID))?.pinnedSignaturePubkeyB64).toBe(newSig);
+  });
+
+  it("a confirmed chain records the proven log version on the pin", async () => {
+    const { accountIdB64 } = await driveRotation(
+      chainResult("confirmed", false, 9),
+      63,
+      64,
+    );
+    expect(readLogStatus(accountIdB64)).toBe("confirmed");
+    expect(readLogVersion(accountIdB64)).toBe(9);
+  });
+
+  it("passes the OLD pinned key + the pinned log-version floor into the chain", async () => {
+    // Seed a chain-version floor on the original pin before the rotation
+    // by confirming a prior chain... simpler: assert the ctx the mock saw.
+    await driveRotation(chainResult("confirmed", false, 3), 65, 66);
+    const ctx = verifyRotationChainMock.mock.calls[0]?.[2];
+    expect(ctx).toBeDefined();
+    // The OLD key (seed 65) is what gate 1 had pinned before re-pinning.
+    const oldPeer = identityFromSeed(65);
+    expect(b64(ctx?.pinnedOldPubkey as Uint8Array)).toBe(
+      oldPeer.signaturePubkeyB64,
+    );
+    // No prior chain confirmation → the floor defaults to 0.
+    expect(ctx?.pinnedLogVersion).toBe(0);
+    expect(ctx?.supersessionProofB64.length).toBeGreaterThan(0);
+  });
+
+  it('a chain "mismatch" is recorded + surfaced but does NOT block, and does NOT record a version', async () => {
+    const { accountIdB64 } = await driveRotation(
+      chainResult("mismatch", false, null),
+      67,
+      68,
+    );
+    expect(readLogStatus(accountIdB64)).toBe("mismatch");
+    // mismatch carries version=null → no version recorded.
+    expect(readLogVersion(accountIdB64)).toBeUndefined();
+  });
+
+  it('a chain "rollback" HARD-FAILS with LogRollbackDetected', async () => {
+    const oldPeer = identityFromSeed(71);
+    const newPeer = identityFromSeed(72);
+    verifyIdentityInLogMock.mockResolvedValue(result("off"));
+    await gate({
+      signature_pubkey: oldPeer.signaturePubkeyB64,
+      x25519_pubkey: oldPeer.x25519PubkeyB64,
+    });
+    const now = BigInt(Math.floor(Date.now() / 1000));
+    const proof = wasm.signSupersessionProof(
+      oldPeer.ed25519Seed,
+      newPeer.ed25519Seed,
+      now,
+      now + PROOF_WINDOW_SECS,
+    );
+    verifyRotationChainMock.mockResolvedValue(chainResult("rollback"));
+    let thrown: unknown;
+    try {
+      await gate({
+        signature_pubkey: newPeer.signaturePubkeyB64,
+        x25519_pubkey: newPeer.x25519PubkeyB64,
+        supersession_proof: b64(proof),
+      });
+    } catch (e) {
+      thrown = e;
+    }
+    expect(thrown).toBeInstanceOf(LogRollbackDetected);
+  });
+
+  it("a non-rotation (unchanged key) still routes through verifyIdentityInLog", async () => {
+    const peer = identityFromSeed(73);
+    verifyIdentityInLogMock.mockResolvedValue(result("confirmed", false));
+    // First sight: TOFU + single-key check.
+    await gate({
+      signature_pubkey: peer.signaturePubkeyB64,
+      x25519_pubkey: peer.x25519PubkeyB64,
+    });
+    expect(verifyIdentityInLogMock).toHaveBeenCalledTimes(1);
+    expect(verifyRotationChainMock).not.toHaveBeenCalled();
+
+    // Re-fetch the SAME key: still a non-rotation (no key change).
+    await gate({
+      signature_pubkey: peer.signaturePubkeyB64,
+      x25519_pubkey: peer.x25519PubkeyB64,
+    });
+    expect(verifyIdentityInLogMock).toHaveBeenCalledTimes(2);
+    expect(verifyRotationChainMock).not.toHaveBeenCalled();
+  });
+
+  it("a changed key with NO proof stays a non-rotation refusal (gate 1, chain never runs)", async () => {
+    const oldPeer = identityFromSeed(74);
+    const newPeer = identityFromSeed(75);
+    verifyIdentityInLogMock.mockResolvedValue(result("off"));
+    await gate({
+      signature_pubkey: oldPeer.signaturePubkeyB64,
+      x25519_pubkey: oldPeer.x25519PubkeyB64,
+    });
+    verifyIdentityInLogMock.mockClear();
+    // A changed key WITHOUT a proof → gate 1 refuses BEFORE gate 2.
+    let thrown: unknown;
+    try {
+      await gate({
+        signature_pubkey: newPeer.signaturePubkeyB64,
+        x25519_pubkey: newPeer.x25519PubkeyB64,
+      });
+    } catch (e) {
+      thrown = e;
+    }
+    expect(thrown).toBeInstanceOf(SupersessionRefused);
+    // NEITHER gate-2 path ran — gate 1 short-circuited.
+    expect(verifyRotationChainMock).not.toHaveBeenCalled();
+    expect(verifyIdentityInLogMock).not.toHaveBeenCalled();
+  });
+
+  it("the chain floor reflects a previously-confirmed version on the SECOND rotation", async () => {
+    // Rotation 1 confirms version 4 → floor stored.
+    const { accountIdB64 } = await driveRotation(
+      chainResult("confirmed", false, 4),
+      81,
+      82,
+    );
+    expect(readLogVersion(accountIdB64)).toBe(4);
+    verifyRotationChainMock.mockClear();
+
+    // Rotation 2: from key (seed 82) to a third key (seed 83). Mint a
+    // proof old(82)→new(83); the chain floor should now be 4.
+    const midPeer = identityFromSeed(82);
+    const thirdPeer = identityFromSeed(83);
+    const now = BigInt(Math.floor(Date.now() / 1000));
+    const proof = wasm.signSupersessionProof(
+      midPeer.ed25519Seed,
+      thirdPeer.ed25519Seed,
+      now,
+      now + PROOF_WINDOW_SECS,
+    );
+    verifyRotationChainMock.mockResolvedValue(
+      chainResult("confirmed", false, 5),
+    );
+    await gate({
+      signature_pubkey: thirdPeer.signaturePubkeyB64,
+      x25519_pubkey: thirdPeer.x25519PubkeyB64,
+      supersession_proof: b64(proof),
+    });
+    const ctx = verifyRotationChainMock.mock.calls[0]?.[2];
+    expect(ctx?.pinnedLogVersion).toBe(4);
+    // The confirmed v5 advances the floor.
+    expect(readLogVersion(accountIdB64)).toBe(5);
   });
 });
 

@@ -59,6 +59,8 @@ import {
   recordLogStatus,
   recordLogReset,
   readLogReset,
+  recordLogVersion,
+  readLogVersion,
 } from "./local-store";
 
 const ACCT_A = "YWNjb3VudC1hLTAwMDAwMDAwMA=="; // arbitrary base64
@@ -191,6 +193,88 @@ describe("KT-log S4 — isReset marker on the pin record", () => {
     // The pin survives (structural fields valid); the junk marker is dropped.
     expect(pin?.pinnedSignaturePubkeyB64).toBe(PUB_OLD);
     expect(pin?.isReset).toBeUndefined();
+  });
+});
+
+describe("G-30 #2 — pinnedLogVersion on the pin record", () => {
+  it("recordLogVersion is a no-op when no pin exists", () => {
+    expect(recordLogVersion(ACCT_A, 5)).toBe(false);
+    expect(readLogVersion(ACCT_A)).toBeUndefined();
+  });
+
+  it("records a version onto an existing pin and reads it back", () => {
+    setPin(ACCT_A, PUB_OLD, 0);
+    expect(recordLogVersion(ACCT_A, 7)).toBe(true);
+    expect(readLogVersion(ACCT_A)).toBe(7);
+    // Advancing to a newer version overwrites.
+    expect(recordLogVersion(ACCT_A, 9)).toBe(true);
+    expect(readLogVersion(ACCT_A)).toBe(9);
+  });
+
+  it("a null argument CLEARS a previously-recorded version", () => {
+    setPin(ACCT_A, PUB_OLD, 0);
+    recordLogVersion(ACCT_A, 7);
+    expect(readLogVersion(ACCT_A)).toBe(7);
+    expect(recordLogVersion(ACCT_A, null)).toBe(true);
+    expect(readLogVersion(ACCT_A)).toBeUndefined();
+  });
+
+  it("is idempotent on an unchanged version (no write)", () => {
+    setPin(ACCT_A, PUB_OLD, 0);
+    recordLogVersion(ACCT_A, 3);
+    expect(recordLogVersion(ACCT_A, 3)).toBe(true);
+    expect(readLogVersion(ACCT_A)).toBe(3);
+    // Clearing when already clear is a no-op too.
+    recordLogVersion(ACCT_A, null);
+    expect(recordLogVersion(ACCT_A, null)).toBe(true);
+    expect(readLogVersion(ACCT_A)).toBeUndefined();
+  });
+
+  it("carries the version across a forward re-pin", () => {
+    setPin(ACCT_A, PUB_OLD, 100);
+    recordLogVersion(ACCT_A, 4);
+    // A monotonic forward re-pin keeps the recorded version.
+    expect(setPin(ACCT_A, PUB_NEW, 200)).toBe("set");
+    expect(readLogVersion(ACCT_A)).toBe(4);
+  });
+
+  it("pinnedLogVersion is independent of logStatus + isReset", () => {
+    setPin(ACCT_A, PUB_OLD, 0);
+    recordLogStatus(ACCT_A, "confirmed");
+    recordLogReset(ACCT_A, false);
+    recordLogVersion(ACCT_A, 11);
+    const pin = readPin(ACCT_A);
+    expect(pin?.logStatus).toBe("confirmed");
+    expect(pin?.isReset).toBe(false);
+    expect(pin?.pinnedLogVersion).toBe(11);
+  });
+
+  it("drops a junk (non-finite / negative / non-number) pinnedLogVersion on read", () => {
+    localStorage.setItem(
+      "lakko.contacts.v2",
+      JSON.stringify({
+        v: 2,
+        cursor: 0,
+        accepted: [],
+        pins: {
+          [ACCT_A]: {
+            pinnedSignaturePubkeyB64: PUB_OLD,
+            rotationMarker: 0,
+            pinnedLogVersion: -1, // junk (negative)
+          },
+          [ACCT_B]: {
+            pinnedSignaturePubkeyB64: PUB_NEW,
+            rotationMarker: 0,
+            pinnedLogVersion: "lots", // junk (non-number)
+          },
+        },
+      }),
+    );
+    // The pins survive (structural fields valid); the junk version is dropped.
+    expect(readPin(ACCT_A)?.pinnedSignaturePubkeyB64).toBe(PUB_OLD);
+    expect(readLogVersion(ACCT_A)).toBeUndefined();
+    expect(readPin(ACCT_B)?.pinnedSignaturePubkeyB64).toBe(PUB_NEW);
+    expect(readLogVersion(ACCT_B)).toBeUndefined();
   });
 });
 
