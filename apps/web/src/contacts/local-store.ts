@@ -96,7 +96,38 @@ export interface AccountPubkeyPin {
    *  `0` for a plain TOFU-pin. A re-pin that would lower this is
    *  refused. */
   rotationMarker: number;
+  /** KT-log S3c: the last transparency-log inclusion verdict
+   *  observed for this account on the identity-fetch path. The
+   *  log check is the equivocation-detection layer ON TOP of the
+   *  supersession/pin gate (ADR-0016); this records the latest
+   *  best-effort outcome so the UI can surface it. Absent on a pin
+   *  written before S3c (or by a path that did not run the check). */
+  logStatus?: LogVerifyStatus;
 }
+
+/** Mirror of `transparency/verify.ts::LogVerifyStatus` — duplicated
+ *  here (rather than imported) to keep the persistence layer free of a
+ *  dependency on the transparency module + its wasm loader. Kept in
+ *  lock-step with that union; a value the guard does not recognise is
+ *  dropped on read. */
+export type LogVerifyStatus =
+  | "confirmed"
+  | "absent"
+  | "rollback"
+  | "mismatch"
+  | "unreachable"
+  | "off";
+
+/** The set of valid `LogVerifyStatus` strings, for the read-path
+ *  narrowing guard. */
+const LOG_VERIFY_STATUSES: ReadonlySet<string> = new Set([
+  "confirmed",
+  "absent",
+  "rollback",
+  "mismatch",
+  "unreachable",
+  "off",
+]);
 
 interface PersistedV2 {
   v: 2;
@@ -121,14 +152,25 @@ function isAcceptedContact(a: unknown): a is AcceptedContact {
   );
 }
 
-/** Narrowing guard for one persisted `AccountPubkeyPin`. */
+/** Narrowing guard for one persisted `AccountPubkeyPin`. The optional
+ *  `logStatus` (KT-log S3c) is validated when present and dropped when
+ *  it is an unrecognised string — a forward-compat / tamper guard. */
 function isAccountPubkeyPin(p: unknown): p is AccountPubkeyPin {
-  return (
-    typeof p === "object" &&
-    p !== null &&
-    typeof (p as AccountPubkeyPin).pinnedSignaturePubkeyB64 === "string" &&
-    typeof (p as AccountPubkeyPin).rotationMarker === "number"
-  );
+  if (
+    typeof p !== "object" ||
+    p === null ||
+    typeof (p as AccountPubkeyPin).pinnedSignaturePubkeyB64 !== "string" ||
+    typeof (p as AccountPubkeyPin).rotationMarker !== "number"
+  ) {
+    return false;
+  }
+  const ls = (p as AccountPubkeyPin).logStatus;
+  if (ls !== undefined && (typeof ls !== "string" || !LOG_VERIFY_STATUSES.has(ls))) {
+    // A present-but-junk logStatus is dropped (the structural fields
+    // are still valid, so we keep the pin itself).
+    delete (p as { logStatus?: unknown }).logStatus;
+  }
+  return true;
 }
 
 function emptyRecord(): PersistedV2 {
@@ -324,9 +366,17 @@ export function setPin(
   if (existing !== undefined && rotationMarker < existing.rotationMarker) {
     return "rejected-backward";
   }
+  // Preserve any recorded `logStatus` (KT-log S3c) across a re-pin —
+  // it is an orthogonal, separately-written field, and a key rotation
+  // shouldn't silently drop the last log verdict.
+  const carriedLogStatus = existing?.logStatus;
   const nextPins: Record<string, AccountPubkeyPin> = {
     ...current.pins,
-    [accountIdB64]: { pinnedSignaturePubkeyB64, rotationMarker },
+    [accountIdB64]: {
+      pinnedSignaturePubkeyB64,
+      rotationMarker,
+      ...(carriedLogStatus !== undefined ? { logStatus: carriedLogStatus } : {}),
+    },
   };
   save({ ...current, pins: nextPins });
   return "set";
@@ -340,6 +390,41 @@ export function removePin(accountIdB64: string): void {
   const nextPins = { ...current.pins };
   delete nextPins[accountIdB64];
   save({ ...current, pins: nextPins });
+}
+
+/**
+ * Record the latest transparency-log inclusion verdict (KT-log S3c)
+ * for an account, keyed on the same stable `account_id` as the pin.
+ *
+ * Writes onto the existing pin record so the verdict travels with the
+ * pinned key. **No-op when no pin exists** — the log check is always
+ * run right after the supersession gate (which TOFU-pins on first
+ * sight), so by the time a verdict is recorded a pin is present; if
+ * for any reason it is not, we do not fabricate a pin entry with no
+ * pubkey. Returns whether a write happened (a present pin).
+ */
+export function recordLogStatus(
+  accountIdB64: string,
+  logStatus: LogVerifyStatus,
+): boolean {
+  const current = load();
+  const existing = current.pins[accountIdB64];
+  if (existing === undefined) return false;
+  if (existing.logStatus === logStatus) return true; // idempotent, no write
+  const nextPins: Record<string, AccountPubkeyPin> = {
+    ...current.pins,
+    [accountIdB64]: { ...existing, logStatus },
+  };
+  save({ ...current, pins: nextPins });
+  return true;
+}
+
+/** Read the recorded log-verify status for an account, or `undefined`
+ *  when no pin / no status. Exposed for the UI signal. */
+export function readLogStatus(
+  accountIdB64: string,
+): LogVerifyStatus | undefined {
+  return load().pins[accountIdB64]?.logStatus;
 }
 
 /** Render a short human-readable hex prefix for a public key.

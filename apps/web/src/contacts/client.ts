@@ -51,7 +51,9 @@ import type {
   Identity as WasmIdentity,
 } from "../../wasm/lakko_ffi_wasm";
 import type { IdentityFetchResponse } from "../discovery/wire";
-import { readPin, setPin } from "./local-store";
+import { readPin, setPin, recordLogStatus } from "./local-store";
+import { verifyIdentityInLog } from "../transparency/verify";
+import type { LogVerifyStatus } from "../transparency/verify";
 import {
   KIND_CONTACT_ACK,
   KIND_CONTACT_REQUEST,
@@ -288,6 +290,31 @@ export class SupersessionRefused extends Error {
   }
 }
 
+/**
+ * KT-log S3c — thrown when the transparency log's signed root reports a
+ * `log_size` SMALLER than the highest this client has ever seen. An
+ * append-only log cannot shrink, so a rollback is an unambiguous attack
+ * (a server trying to hide a leaf it later appended). This is the ONE
+ * transparency-log verdict that hard-fails the identity-fetch path; all
+ * other verdicts (`absent` / `unreachable` / `off` / `mismatch`) are
+ * recorded + surfaced but do NOT block, because the log is
+ * eventually-consistent and the supersession/pin gate is the primary
+ * trust (see `verifyBundleAccountKey`).
+ */
+export class LogRollbackDetected extends Error {
+  override name = "LogRollbackDetected";
+  constructor(
+    /** base64 of the account_id whose fetch tripped the rollback. */
+    public readonly accountIdB64: string,
+  ) {
+    super(
+      "the transparency log appears to have shrunk (a smaller log_size " +
+        "than previously observed) — an append-only log cannot do this, " +
+        "so this is an unambiguous rollback attack. Refusing to proceed.",
+    );
+  }
+}
+
 /** Fixed serialized length of a supersession proof — mirrors
  *  `lakko_transparency::supersession::SUPERSESSION_PROOF_LEN`
  *  (`version(1) ‖ old(32) ‖ new(32) ‖ issued(8) ‖ expires(8) ‖
@@ -386,6 +413,48 @@ export class ContactsClient {
   }
 
   /**
+   * Verify a freshly-fetched peer identity bundle before its keys are
+   * used. Two layers, in order:
+   *
+   *   1. **Supersession/pin gate (ADR-0016, G-4)** — the primary,
+   *      fail-closed trust. TOFU-pins on first sight; on a changed key
+   *      REQUIRES + verifies a supersession proof and re-pins; throws
+   *      `SupersessionRefused` otherwise. See `verifySupersessionGate`.
+   *
+   *   2. **Transparency-log inclusion (KT-log S3c)** — the ADDITIVE
+   *      equivocation-detection / gossip layer. Best-effort: it HARD
+   *      FAILS only on a `"rollback"` (the log shrank — an unambiguous
+   *      attack, surfaced as `LogRollbackDetected`); every other
+   *      verdict is recorded on the pin record + surfaced but does NOT
+   *      block (the log is eventually-consistent). See
+   *      `checkTransparencyLog`.
+   *
+   * MUST be called after every `discovery.identityFetch` and BEFORE
+   * the bundle's keys are used to send a ContactRequest / start a group
+   * / add a member. The supersession gate runs FIRST so a pin exists
+   * for the log check to record its verdict on; the log check NEVER
+   * weakens the supersession gate — a `SupersessionRefused` from gate 1
+   * propagates before gate 2 runs at all.
+   *
+   * @param accountId  the peer's raw 16-byte account_id.
+   * @param bundle     the fetched `IdentityFetchResponse`.
+   * @throws `SupersessionRefused` on a fail-closed supersession branch,
+   *   `LogRollbackDetected` on a transparency-log rollback.
+   */
+  private async verifyBundleAccountKey(
+    accountId: Uint8Array,
+    bundle: IdentityFetchResponse,
+  ): Promise<void> {
+    // Gate 1 (primary, fail-closed). A throw here short-circuits gate 2.
+    await this.verifySupersessionGate(accountId, bundle);
+
+    // Gate 2 (additive, best-effort). Hard-fails only on rollback.
+    const accountIdB64 = base64Encode(accountId);
+    const servedPubkey = base64Decode(bundle.signature_pubkey);
+    await this.checkTransparencyLog(accountId, accountIdB64, servedPubkey);
+  }
+
+  /**
    * G-4 (ADR-0016) — verify a freshly-fetched peer identity
    * bundle's AccountIdentity key against the local pin, re-pinning
    * (via a supersession proof) when the key rotated. MUST be
@@ -419,7 +488,7 @@ export class ContactsClient {
    * @param bundle     The fetched `IdentityFetchResponse`.
    * @throws `SupersessionRefused` on any fail-closed branch.
    */
-  private async verifyBundleAccountKey(
+  private async verifySupersessionGate(
     accountId: Uint8Array,
     bundle: IdentityFetchResponse,
   ): Promise<void> {
@@ -513,6 +582,92 @@ export class ContactsClient {
           "re-verify out of band.",
       );
     }
+  }
+
+  /**
+   * KT-log S3c — consult the operator-signed transparency log to
+   * confirm the served identity is in the public append-only log
+   * (equivocation detection on top of the supersession/pin gate).
+   *
+   * Runs AFTER `verifyBundleAccountKey`'s supersession gate has
+   * TOFU-pinned / verified the key, so a pin always exists when we
+   * record the verdict. Best-effort POSTURE (ADR-0016 stays the
+   * primary, fail-closed trust):
+   *
+   *   * `"rollback"`  → HARD FAIL. Throw `LogRollbackDetected`. The
+   *     log shrank — an unambiguous attack. This is the ONLY blocking
+   *     verdict for S3c.
+   *   * `"mismatch"`  → record + prominent `console.warn`, but DO NOT
+   *     block (S3c). Hard-blocking on mismatch is the natural
+   *     fail-closed refinement and is flagged for `lakko-security` to
+   *     rule on.
+   *   * `"absent"` / `"unreachable"` / `"off"` → record + a
+   *     `console.warn` (for absent/unreachable) and proceed. The log
+   *     is eventually-consistent; the supersession/pin gate already
+   *     authorised the key.
+   *
+   * The recorded status travels on the account's pin record so the UI
+   * can surface it. Any UNEXPECTED throw from the log machinery (it is
+   * designed not to throw except for the deliberate rollback) is
+   * swallowed and logged — the additive check must never break the
+   * primary fetch path.
+   *
+   * @param accountId    the peer's raw 16-byte account_id.
+   * @param accountIdB64 its base64 form (the pin-store key).
+   * @param servedPubkey the 32-byte Ed25519 key discovery served.
+   * @throws `LogRollbackDetected` ONLY on a `"rollback"` verdict.
+   */
+  private async checkTransparencyLog(
+    accountId: Uint8Array,
+    accountIdB64: string,
+    servedPubkey: Uint8Array,
+  ): Promise<void> {
+    let status: LogVerifyStatus;
+    try {
+      status = await verifyIdentityInLog(accountId, servedPubkey);
+    } catch (err) {
+      // The verifier is designed to map faults to a status and only
+      // throw on `LogRollbackDetected` semantics (which it surfaces as
+      // the `"rollback"` return, not a throw). An unexpected throw here
+      // must NOT break the additive check — log + proceed.
+      // eslint-disable-next-line no-console
+      console.warn(
+        "ContactsClient: transparency-log check threw unexpectedly " +
+          "(proceeding; supersession/pin gate already authorised the key)",
+        err,
+      );
+      return;
+    }
+
+    // Rollback is the one hard failure (unambiguous attack).
+    if (status === "rollback") {
+      throw new LogRollbackDetected(accountIdB64);
+    }
+
+    // Record the verdict on the pin record (best-effort; the pin
+    // exists because the supersession gate ran first).
+    recordLogStatus(accountIdB64, status);
+
+    if (status === "mismatch") {
+      // Surfaced-but-not-blocked for S3c. The natural fail-closed
+      // refinement (hard-block on mismatch) is deferred to a
+      // lakko-security ruling — see the method doc + the S3c report.
+      // eslint-disable-next-line no-console
+      console.warn(
+        `ContactsClient: transparency-log MISMATCH for account ` +
+          `${accountIdB64} — the log's latest key differs from what ` +
+          `discovery served (or the inclusion proof failed). Proceeding ` +
+          `for S3c (supersession/pin gate is primary); flag for review.`,
+      );
+    } else if (status === "absent" || status === "unreachable") {
+      // eslint-disable-next-line no-console
+      console.warn(
+        `ContactsClient: transparency-log check inconclusive ` +
+          `(${status}) for account ${accountIdB64} — proceeding; the ` +
+          `log is eventually-consistent and the pin gate is primary.`,
+      );
+    }
+    // `confirmed` / `off` are quiet (the happy path / disabled).
   }
 
   /**
