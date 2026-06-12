@@ -582,6 +582,57 @@ mod tests {
 
     // -- ADR-0013: seal_framed / open_framed (header-as-AAD) -------------
 
+    /// G-26 cross-stack interop golden vector. The SAME `(seed, leaf,
+    /// plaintext, counter=0)` MUST seal to these EXACT bytes on every stack
+    /// that consumes the `lakko_calls::sframe` core — the Rust core (this
+    /// test), the wasm/web `RTCRtpScriptTransform` worker
+    /// (`apps/web/src/calls/sframe-golden.test.ts`), and the native iOS /
+    /// Android FFI (`LakkoTests/SFrameGoldenTests.swift`,
+    /// `SframeGoldenTest.kt`). All four pin THIS hex, so a frame sealed on
+    /// any stack opens on any other (the deferred-no-longer cross-runtime
+    /// half of G-26 — proven by construction without a live SFU, since the
+    /// SFU forwards the wire verbatim, which the live str0m e2e already
+    /// shows). A drift on any platform fails its test loudly.
+    ///
+    /// To regenerate after an intentional wire change: seal `(seed=[0x42;32],
+    /// leaf=3, plaintext=b"lakko sframe golden vector v1")` on a fresh
+    /// `ParticipantKey` (counter 0) and update the hex on all four stacks.
+    const GOLDEN_SEED: [u8; CALL_KEY_LEN] = [0x42; CALL_KEY_LEN];
+    const GOLDEN_LEAF: u32 = 3;
+    const GOLDEN_PLAINTEXT: &[u8] = b"lakko sframe golden vector v1";
+    const GOLDEN_WIRE_HEX: &str =
+        "0301a6d1fee0dd6f091a0071e56d66a889f734a5b2fa6ef8f079d2e6b3e9b27adc41071764928ce5d6d0747fb7fd7c";
+
+    fn golden_wire() -> Vec<u8> {
+        (0..GOLDEN_WIRE_HEX.len() / 2)
+            .map(|i| u8::from_str_radix(&GOLDEN_WIRE_HEX[i * 2..i * 2 + 2], 16).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn golden_vector_seals_to_the_canonical_cross_stack_wire() {
+        let mut sender = CallKey::from_seed(GOLDEN_SEED)
+            .participant_key(GOLDEN_LEAF)
+            .unwrap();
+        let wire = sender.seal_framed(GOLDEN_PLAINTEXT).expect("seal_framed");
+        assert_eq!(
+            wire,
+            golden_wire(),
+            "Rust core sealed a different wire than the cross-stack golden — \
+             either a wire-format regression or an intentional change that \
+             must be mirrored on web + iOS + Android"
+        );
+    }
+
+    #[test]
+    fn golden_vector_opens_to_the_plaintext() {
+        let receiver = CallKey::from_seed(GOLDEN_SEED)
+            .participant_key(GOLDEN_LEAF)
+            .unwrap();
+        let opened = receiver.open_framed(&golden_wire()).expect("open_framed");
+        assert_eq!(opened.as_slice(), GOLDEN_PLAINTEXT);
+    }
+
     #[test]
     fn seal_framed_round_trips_through_open_framed() {
         let key = CallKey::from_seed([0x13; CALL_KEY_LEN]);

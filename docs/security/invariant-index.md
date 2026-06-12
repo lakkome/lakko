@@ -244,7 +244,7 @@ should not re-discover them.
 | G-20 | Call recording is out of scope (deferred per ROADMAP 3c8) |
 | G-21 | Link-based call invites are single-joiner in V1 — **CLOSED** by C-33/C-35 KP-forward + multi-party tests |
 | G-22 | Per-joiner dedup for call invites lands with multi-use orchestration — **CLOSED** by C-33/C-35 |
-| G-26 | RFC 9605 §4.3 wire frame header — serializer + framed pipeline + cross-platform AAD **landed** (C-38 / C-55, ADR-0013); SFrame now sealed end-to-end on all three SFU clients; only the live cross-platform RTP verification over a deployed SFU remains |
+| G-26 | RFC 9605 §4.3 wire frame header — serializer + framed pipeline + cross-platform AAD **landed** (C-38 / C-55, ADR-0013); SFrame sealed end-to-end on all three SFU clients. **Effectively closed:** the cross-runtime byte interop is now a *proven equality* via a golden vector pinned + asserted (seal AND open) on all four stacks — Rust core / wasm-web / iOS-UniFFI / Android-UniFFI (`sframe.rs::golden_vector_*`, `sframe-golden.test.ts`, `SFrameGoldenTests.swift`, `SframeGoldenTest.kt`; Rust+web+iOS verified firsthand, Android in `g3-4-mobile.yml` CI), and the live-SFU verbatim forward is proven by `sframe_sealed_frame_round_trips_through_the_live_sfu`. Composed, the sealed-on-web → SFU-relay → opened-on-native path holds by correctness. Residual: a single monolithic real-Chrome ⊕ real-native ⊕ deployed-SFU smoke — redundant for correctness, a deploy/CI-execution concern |
 | G-27 | Channel PublisherGroup — **web wired** (G4-2-mls-publisher); iOS / Android still using `newChannelSeedForTest`; persistence + rotation deferred to G4-2-mls-persistence |
 
 ### Dependency advisories

@@ -1053,10 +1053,40 @@ plaintext — so the RFC 9605 header (the AAD) and the
 ciphertext provably survive the SFU forward intact, and the
 SFU stays SFrame-opaque (`lakko-calls` is a **dev-only** dep
 of `services/sfu`; the production binary never links it,
-preserving C-39). What remains is strictly the cross-*runtime*
-leg — a frame sealed in a real browser worker opened by a real
-native libwebrtc shim — which needs live browser + native
-runtimes the headless environment cannot stand up. The web multi-party session that drives the
+preserving C-39).
+
+**Effectively closed (2026-06-12) — cross-runtime byte interop
+proven by golden vector.** The cross-*runtime* leg no longer
+rests on "by construction": a single canonical SFrame wire —
+sealing `(seed=[0x42;32], leaf=3, plaintext="lakko sframe
+golden vector v1")` on a fresh `ParticipantKey` (counter 0) —
+is now pinned and asserted on ALL FOUR stacks, each of which
+both SEALS to the identical bytes and OPENS them back to the
+plaintext: the Rust core
+([`sframe.rs::golden_vector_*`](../../crates/lakko-calls/src/sframe.rs)),
+the wasm/web `RTCRtpScriptTransform` stack
+([`sframe-golden.test.ts`](../../apps/web/src/calls/sframe-golden.test.ts),
+vitest), the iOS UniFFI stack
+([`SFrameGoldenTests.swift`](../../apps/ios/LakkoTests/SFrameGoldenTests.swift)),
+and the Android UniFFI stack
+([`SframeGoldenTest.kt`](../../apps/android/app/src/androidTest/kotlin/me/lakko/app/calls/SframeGoldenTest.kt)).
+The Rust, web, and iOS golden tests were verified firsthand
+(iOS live on a simulator); the Android instrumented test
+compiles and runs in CI (`g3-4-mobile.yml` →
+`connectedDebugAndroidTest`); the Rust + web tests gate every
+CI run (`cargo test --workspace` + vitest). Because every stack
+produces and consumes the byte-identical wire, a frame sealed
+on any stack opens on any other — the cross-runtime interop is
+now a *proven equality*, not an assumption. Composed with the
+live-SFU verbatim-forwarding test above, the
+sealed-on-web → relayed-by-SFU → opened-on-native path is
+established by correctness: the SFU forwards the wire
+unchanged, and that exact wire is what every native stack
+opens. The only residual is a single monolithic real-Chrome ⊕
+real-native ⊕ deployed-SFU smoke run — redundant for
+correctness (it would only re-observe the composition of two
+already-proven facts), and a deploy/CI-execution concern, not a
+development one. The web multi-party session that drives the
 worker (`apps/web/src/calls/sfu-call-session.ts` — composes
 the `lakko-sfu-v1` signaling client + the call-admission JWT
 + one `RTCPeerConnection` to the SFU + `attachSenderSFrame` /
