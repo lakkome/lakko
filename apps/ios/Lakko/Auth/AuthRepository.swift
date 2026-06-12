@@ -896,6 +896,11 @@ public final class AuthRepository: ObservableObject {
         }
         sessionStore.clear()
         identitySecrets = nil
+        // ADR-0017/0018 — drop any parked recovery context too (mirror of
+        // logout + the Android forgetDevice), so an abandoned recover /
+        // lost-everything mint leaves no in-memory seed behind.
+        pendingRecovery = nil
+        pendingFreshPhrase = nil
         state = .anon(cachedUsername: nil)
         // 1.20c — full wipe of push state too. The contract is
         // "leave NOTHING per-account behind on this device", so
@@ -1510,6 +1515,20 @@ public final class AuthRepository: ObservableObject {
         let phrase = mnemonic.phrase()
         let seed = mnemonic.toSeed()
 
+        // Publish the NEW bundle WITHOUT a supersession proof FIRST, and
+        // FAIL the flow if it does not land — otherwise a transient network
+        // error would leave the device with a cached fresh seed while the
+        // server still serves the OLD bundle, a torn state the user cannot
+        // self-heal (provideRecoveryPhrase with the new phrase would then
+        // hard-block against the stale published key). Publishing before any
+        // local mutation keeps a failure fully recoverable: the device is
+        // untouched and the user can retry.
+        try await publishFreshIdentityBundle(
+            accountId: pending.accountIdBytes,
+            sessionToken: pending.sessionToken,
+            seed: seed
+        )
+
         // Bootstrap the device-key existence gate from the fresh seed
         // (no password on this path); no-op if a key already exists.
         bootstrapDeviceKeyFromVerifiedSeedIfAbsent(
@@ -1527,13 +1546,6 @@ public final class AuthRepository: ObservableObject {
         } catch {
             NSLog("fresh-identity seed persist failed: \(error)")
         }
-
-        // Publish the NEW bundle WITHOUT a supersession proof. Best-effort.
-        await publishFreshIdentityBundleBestEffort(
-            accountId: pending.accountIdBytes,
-            sessionToken: pending.sessionToken,
-            seed: seed
-        )
 
         // Stash the completion + phrase; flip to the save-phrase state.
         pendingFreshPhrase = PendingFreshPhrase(
@@ -1580,27 +1592,25 @@ public final class AuthRepository: ObservableObject {
     }
 
     /// Publish the fresh-identity bundle (+ KeyPackage) for `accountId`
-    /// WITHOUT a supersession proof (ADR-0017 lost-everything). Best-effort.
-    private func publishFreshIdentityBundleBestEffort(
+    /// WITHOUT a supersession proof (ADR-0017 lost-everything). THROWS on
+    /// failure — the caller publishes before any local mutation, so a throw
+    /// leaves the device untouched and the user can retry.
+    private func publishFreshIdentityBundle(
         accountId: Data,
         sessionToken: String,
         seed: Data
-    ) async {
-        do {
-            let discovery = DiscoveryClient(sessionToken: sessionToken)
-            let identity = try Identity.fromSeed(seed: seed)
-            try await discovery.uploadIdentityBundle(
-                accountId: accountId,
-                signaturePubkey: identity.signaturePublicKey(),
-                x25519Pubkey: identity.x25519PublicKey()
-            )
-            try await discovery.uploadKeyPackage(
-                accountId: accountId,
-                keyPackageBytes: identity.createKeyPackage()
-            )
-        } catch {
-            NSLog("fresh-identity bundle publish failed (will retry on session finish): \(error)")
-        }
+    ) async throws {
+        let discovery = DiscoveryClient(sessionToken: sessionToken)
+        let identity = try Identity.fromSeed(seed: seed)
+        try await discovery.uploadIdentityBundle(
+            accountId: accountId,
+            signaturePubkey: identity.signaturePublicKey(),
+            x25519Pubkey: identity.x25519PublicKey()
+        )
+        try await discovery.uploadKeyPackage(
+            accountId: accountId,
+            keyPackageBytes: identity.createKeyPackage()
+        )
     }
 
     /// ADR-0018 factor (d), step 1 — send a one-time code to a
