@@ -1038,7 +1038,25 @@ real media frame sealed on one platform (e.g. a Chrome
 an iOS / Android libwebrtc receiver) over a live SFU
 forwarding path. That requires two real endpoints plus the
 SFU in the middle and cannot be done in a headless build
-environment. The web multi-party session that drives the
+environment.
+
+**Narrowed (2026-06-12).** The "does an SFrame frame survive
+the live SFU at all?" question is now answered firsthand in a
+headless test:
+[`sframe_sealed_frame_round_trips_through_the_live_sfu`](../../services/sfu/tests/synthetic_client_e2e.rs)
+seals a frame with the real `lakko_calls::sframe`
+`seal_framed`, pushes it through the production
+`spawn_media_task` over a real `str0m` ICE + DTLS handshake +
+the cross-fanout renegotiation, and the subscriber
+`open_framed`s the forwarded bytes back to the exact
+plaintext — so the RFC 9605 header (the AAD) and the
+ciphertext provably survive the SFU forward intact, and the
+SFU stays SFrame-opaque (`lakko-calls` is a **dev-only** dep
+of `services/sfu`; the production binary never links it,
+preserving C-39). What remains is strictly the cross-*runtime*
+leg — a frame sealed in a real browser worker opened by a real
+native libwebrtc shim — which needs live browser + native
+runtimes the headless environment cannot stand up. The web multi-party session that drives the
 worker (`apps/web/src/calls/sfu-call-session.ts` — composes
 the `lakko-sfu-v1` signaling client + the call-admission JWT
 + one `RTCPeerConnection` to the SFU + `attachSenderSFrame` /

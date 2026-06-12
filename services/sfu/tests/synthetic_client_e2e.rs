@@ -40,6 +40,17 @@
 //! payload bytes between peers without inspecting or
 //! mutating them.
 //!
+//! [`sframe_sealed_frame_round_trips_through_the_live_sfu`]
+//! (G-26, headless slice) goes one layer further: the
+//! payload is a REAL `lakko_calls::sframe` sealed frame, and
+//! after the SFU forwards it verbatim the subscriber
+//! `open_framed`s it back to the original plaintext — proving
+//! the SFrame layer round-trips over the live ICE + DTLS +
+//! fanout path (the RFC 9605 header / AAD survives intact).
+//! The cross-*runtime* leg (a browser-worker-sealed frame
+//! opened by a native shim over a deployed SFU) stays
+//! deferred — it needs live runtimes, not headless CI.
+//!
 //! ## What these tests catch
 //!
 //! - Any regression in `MediaPeer::accept_offer`'s SDP
@@ -664,4 +675,140 @@ async fn two_clients_cross_fanout_forwards_media_verbatim() {
         "the SFU-initiated renegotiation toward B must have been answered"
     );
     assert!(a.is_alive() && b.is_alive(), "both Rtc must stay alive");
+}
+
+/// G-26 (the last open SFrame interop gate, headless slice) — a frame
+/// SEALED with the real `lakko_calls::sframe` core (ADR-0013: the RFC 9605
+/// SFrame wire header is the AEAD AAD) survives the **live** SFU media path
+/// and OPENS back to the original plaintext at the subscriber.
+///
+/// This is the cross-fanout test with the opaque payload replaced by a real
+/// sealed SFrame frame. It proves, end-to-end over a real `str0m` ICE +
+/// DTLS handshake + the production `spawn_media_task` fanout, that:
+///
+///   1. the SFU forwards the SEALED ciphertext **verbatim** (it never
+///      inspects or mutates `payload_b64` — the opacity invariant, C-39);
+///   2. the SFrame layer round-trips: `seal_framed` → SFU forward →
+///      `open_framed` recovers the exact plaintext — which can only happen
+///      if the RFC 9605 header (the AAD) and the ciphertext arrive intact.
+///
+/// A + B derive the SAME `CallKey` from a shared seed — the integration-side
+/// stand-in for the MLS exporter handing both peers identical bytes (C-1).
+/// The remaining (deferred) part of G-26 is the *cross-runtime* leg: a frame
+/// sealed in a real browser worker opened by a real native shim over a
+/// deployed SFU — that needs live browser + native runtimes, not headless CI.
+#[tokio::test]
+async fn sframe_sealed_frame_round_trips_through_the_live_sfu() {
+    use lakko_calls::sframe::CALL_KEY_LEN;
+    use lakko_calls::CallKey;
+
+    // 1. Media task + registry (B is the subscriber with an intercept
+    //    channel; A publishes). Identical to the verbatim cross-fanout.
+    let peers = PeerRegistry::new();
+    let b_id = PeerId::fresh();
+    let (b_tx, mut b_rx) = mpsc::channel::<ServerFrame>(64);
+    let registered = peers
+        .register(Peer {
+            id: b_id.clone(),
+            call_id: "sframe-fanout-test".to_owned(),
+            account_id: "subscriber-b".to_owned(),
+            outbound: Some(b_tx),
+        })
+        .await;
+    assert!(registered, "fresh PeerId must register cleanly");
+
+    let (media, sfu_addr) = spawn_media_task("127.0.0.1:0".parse().unwrap(), peers)
+        .await
+        .expect("UDP bind on loopback:0 succeeds");
+
+    let mut a = SyntheticClient::new().await;
+    let mut b = SyntheticClient::new().await;
+    let a_id = PeerId::fresh();
+
+    let (b_offer, b_pending) = b.create_subscriber_offer();
+    let b_answer = media
+        .accept_offer(b_id.clone(), b_offer)
+        .await
+        .expect("SFU accepts B's RecvOnly subscriber offer");
+    b.accept_answer(b_pending, &b_answer)
+        .expect("B applies the SFU's answer");
+
+    let (a_offer, a_pending, publisher_mid) = a.create_audio_publisher_offer();
+    let a_answer = media
+        .accept_offer(a_id.clone(), a_offer)
+        .await
+        .expect("SFU accepts A's SendOnly publisher offer");
+    a.accept_answer(a_pending, &a_answer)
+        .expect("A applies the SFU's answer");
+
+    // 2. Derive the SAME per-call key on both ends (C-1 stand-in) and seal
+    //    a plaintext frame as A's sender. `a_leaf` is A's MLS leaf index;
+    //    B opens A's frames with the participant key for that leaf.
+    let seed = [0x5a_u8; CALL_KEY_LEN];
+    let a_leaf: u32 = 7;
+    let mut a_sender = CallKey::from_seed(seed)
+        .participant_key(a_leaf)
+        .expect("A derives its sender participant key");
+    let b_receiver = CallKey::from_seed(seed)
+        .participant_key(a_leaf)
+        .expect("B derives the receiver participant key for A's leaf");
+
+    let plaintext: &[u8] = b"lakko encrypted media plane -- G-26 round-trip";
+    let sealed = a_sender.seal_framed(plaintext).expect("A seals the frame");
+    // Sanity: the wire is genuinely encrypted (not the plaintext) and is a
+    // plausible RTP-payload size for the loopback path.
+    assert_ne!(
+        sealed.as_slice(),
+        plaintext,
+        "sealed wire must be ciphertext"
+    );
+    assert!(
+        sealed.len() <= 1024,
+        "sealed frame fits a single RTP payload"
+    );
+
+    // 3. The SFU must forward the SEALED bytes verbatim to B.
+    let outcome = run_cross_fanout(
+        &mut a,
+        &mut b,
+        sfu_addr,
+        &media,
+        b_id.clone(),
+        &mut b_rx,
+        publisher_mid,
+        &sealed,
+    )
+    .await;
+
+    assert!(
+        outcome.received_expected,
+        "subscriber B never received A's SEALED frame verbatim within \
+         {CROSS_FANOUT_DEADLINE:?}; final state: a_connected={} b_connected={} \
+         reneg_answered={} a_alive={} b_alive={}",
+        outcome.a_connected,
+        outcome.b_connected,
+        outcome.reneg_answered,
+        a.is_alive(),
+        b.is_alive(),
+    );
+    assert!(outcome.a_connected, "publisher A must reach Connected");
+    assert!(outcome.b_connected, "subscriber B must reach Connected");
+    assert!(
+        outcome.reneg_answered,
+        "the SFU-initiated renegotiation toward B must have been answered"
+    );
+    assert!(a.is_alive() && b.is_alive(), "both Rtc must stay alive");
+
+    // 4. The forwarded bytes (just asserted byte-equal to `sealed`) OPEN
+    //    back to the original plaintext — so the RFC 9605 header (AAD) and
+    //    the ciphertext survived the SFU forward intact. This is the
+    //    SFrame-over-live-SFU round-trip that G-26 is about.
+    let opened = b_receiver
+        .open_framed(&sealed)
+        .expect("B opens the SFrame frame the SFU forwarded");
+    assert_eq!(
+        opened.as_slice(),
+        plaintext,
+        "B must recover A's exact plaintext after the SFU relayed the sealed frame"
+    );
 }

@@ -2884,6 +2884,7 @@ dependencies = [
  "dotenvy",
  "futures",
  "lakko-call-jwt",
+ "lakko-calls",
  "lakko-sfu-proto",
  "metrics",
  "metrics-exporter-prometheus",

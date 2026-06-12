@@ -92,3 +92,9 @@ tokio-tungstenite = "0.24"
 # JWT-tampering tests use base64url to splice a bogus
 # signature segment.
 base64 = "0.22"
+# DEV-ONLY (G-26): the synthetic-client e2e seals a frame with the real
+# SFrame core and opens it after the SFU forwards it, proving the SFU is
+# SFrame-opaque over the live media path. The SFU production binary NEVER
+# depends on lakko-calls — the opacity invariant (C-39); this is a test-only
+# dep, same posture as `lakko-channels` in `services/channels`.
+lakko-calls.workspace = true
