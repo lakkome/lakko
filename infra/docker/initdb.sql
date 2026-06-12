@@ -13,12 +13,14 @@ CREATE DATABASE IF NOT EXISTS lakko_auth      CHARACTER SET utf8mb4 COLLATE utf8
 CREATE DATABASE IF NOT EXISTS lakko_ds        CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 CREATE DATABASE IF NOT EXISTS lakko_discovery CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 CREATE DATABASE IF NOT EXISTS lakko_channels  CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE DATABASE IF NOT EXISTS lakko_transparency CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 CREATE DATABASE IF NOT EXISTS lakko_push_gw   CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 
 CREATE USER IF NOT EXISTS 'lakko'@'%' IDENTIFIED BY 'devpass';
-GRANT ALL PRIVILEGES ON lakko_auth.*      TO 'lakko'@'%';
-GRANT ALL PRIVILEGES ON lakko_ds.*        TO 'lakko'@'%';
-GRANT ALL PRIVILEGES ON lakko_discovery.* TO 'lakko'@'%';
-GRANT ALL PRIVILEGES ON lakko_channels.*  TO 'lakko'@'%';
-GRANT ALL PRIVILEGES ON lakko_push_gw.*   TO 'lakko'@'%';
+GRANT ALL PRIVILEGES ON lakko_auth.*         TO 'lakko'@'%';
+GRANT ALL PRIVILEGES ON lakko_ds.*           TO 'lakko'@'%';
+GRANT ALL PRIVILEGES ON lakko_discovery.*    TO 'lakko'@'%';
+GRANT ALL PRIVILEGES ON lakko_channels.*     TO 'lakko'@'%';
+GRANT ALL PRIVILEGES ON lakko_transparency.* TO 'lakko'@'%';
+GRANT ALL PRIVILEGES ON lakko_push_gw.*      TO 'lakko'@'%';
 FLUSH PRIVILEGES;

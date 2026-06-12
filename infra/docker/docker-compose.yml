@@ -16,6 +16,8 @@
 #   push-gw   :8085 - encrypted push fan-out (LogOnlyProvider until real APNs /
 #                     FCM / WebPush creds are supplied - see the README).
 #   channels  :8086 - channel broadcast backend.
+#   transparency :8087 - persistent CONIKS key-transparency log (signed roots
+#                     + inclusion proofs; identity trust anchor).
 #
 # The SFU (calls) carries a UDP media plane and its own image; run it via
 # ci/sfu-e2e/ or wire it into this file with a JWKS URL pointing at
@@ -200,6 +202,31 @@ services:
       - "127.0.0.1:8085:8085"
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://127.0.0.1:8085/ready || exit 1"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 3s
+
+  transparency:
+    build:
+      context: ../..
+      dockerfile: infra/docker/Dockerfile
+      target: transparency-runtime
+    container_name: lakko-transparency
+    restart: unless-stopped
+    depends_on:
+      db: { condition: service_healthy }
+    environment:
+      LAKKO_BIND: 0.0.0.0:8087
+      LAKKO_TRANSPARENCY_DATABASE_URL: mysql://lakko:devpass@db:3306/lakko_transparency
+      DATABASE_URL: mysql://lakko:devpass@db:3306/lakko_transparency
+      # MUST match auth's secret - the transparency append endpoint
+      # verifies the bearer session tokens auth mints.
+      LAKKO_SESSION_TOKEN_SECRET: ${LAKKO_SESSION_TOKEN_SECRET:-ZGV2LXNlc3Npb24tdG9rZW4tc2VjcmV0LWZvci1sb2NhbC10ZXN0aW5nLW9ubHkhIQ==}
+    ports:
+      - "127.0.0.1:8087:8087"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:8087/ready || exit 1"]
       interval: 2s
       timeout: 3s
       retries: 30

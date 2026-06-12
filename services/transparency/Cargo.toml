@@ -1,0 +1,66 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+[package]
+name = "lakko-svc-transparency"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Transparency — persistent CONIKS-style key-transparency log with signed roots"
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "lakko-svc-transparency"
+path = "src/main.rs"
+
+[dependencies]
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+axum = { version = "0.8", features = ["macros", "http2"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["trace", "limit"] }
+sqlx = { version = "0.8", default-features = false, features = [
+    "runtime-tokio",
+    "tls-rustls-ring",
+    "mysql",
+    "migrate",
+    "macros",
+    "chrono",
+] }
+
+# .env loading — debug builds only; production uses systemd
+# `EnvironmentFile=/etc/lakko/lakko.env`.
+dotenvy = "0.15"
+
+base64 = "0.22"
+rand = "0.8"
+
+# The append-only Merkle log + signed roots + inclusion proofs. This
+# service wraps the crate's `InMemoryLog` with MariaDB persistence and
+# an HTTP surface; the crate carries all the crypto + tree logic.
+lakko-transparency.workspace = true
+# Ed25519 operator signing key — generated on first boot, persisted as a
+# 32-byte seed, rebuilt at every process start. The derived verifying
+# key is the trust anchor clients pin out-of-band.
+lakko-crypto.workspace = true
+
+# Session-token verification middleware — shares the HMAC secret with
+# `services/auth` via `LAKKO_SESSION_TOKEN_SECRET`. Gates the append
+# endpoint until S2 wires the discovery service to call it directly.
+lakko-auth-token.workspace = true
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"

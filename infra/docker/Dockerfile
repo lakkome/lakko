@@ -8,8 +8,8 @@
 # builder layer across all images instead of rebuilding the workspace once
 # per service.
 #
-# Covers: auth, ds, discovery, storage, push-gw, channels. The SFU has its
-# own image (services/sfu/Dockerfile) because it carries a different runtime
+# Covers: auth, ds, discovery, storage, push-gw, channels, transparency. The
+# SFU has its own image (services/sfu/Dockerfile) because it carries a different runtime
 # (UDP media plane); the local compose references that one directly. edge +
 # transport-rendezvous are later-phase services and are not wired into the
 # local compose yet.
@@ -37,7 +37,8 @@ RUN cargo build --release \
     --bin lakko-svc-discovery \
     --bin lakko-svc-storage \
     --bin lakko-svc-push-gw \
-    --bin lakko-svc-channels
+    --bin lakko-svc-channels \
+    --bin lakko-svc-transparency
 
 # -----------------------------------------------------------
 # Shared runtime base
@@ -96,3 +97,9 @@ COPY --from=builder /build/target/release/lakko-svc-channels /usr/local/bin/lakk
 ENV LAKKO_CHANNELS_BIND=0.0.0.0:8086
 EXPOSE 8086
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/lakko-svc-channels"]
+
+FROM runtime-base AS transparency-runtime
+COPY --from=builder /build/target/release/lakko-svc-transparency /usr/local/bin/lakko-svc-transparency
+ENV LAKKO_BIND=0.0.0.0:8087
+EXPOSE 8087
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/lakko-svc-transparency"]
