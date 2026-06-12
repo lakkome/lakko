@@ -70,10 +70,24 @@ public final class PeerPinStore {
         /// `0` for a plain TOFU-pin. A re-pin that would lower this
         /// is refused.
         public let rotationMarker: Int64
+        /// KT-log S3d: the last transparency-log inclusion verdict
+        /// observed for this account on the identity-fetch path (the
+        /// raw-value string of a ``LogVerifyStatus``). The log check is
+        /// the equivocation-detection layer ON TOP of the
+        /// supersession/pin gate (ADR-0016); this records the latest
+        /// best-effort outcome so the UI can surface it. `nil` on a pin
+        /// written before S3d (or by a path that did not run the
+        /// check). Mirror of the web pin-record `logStatus`.
+        public let logStatus: String?
 
-        public init(pinnedSignaturePubkeyB64: String, rotationMarker: Int64) {
+        public init(
+            pinnedSignaturePubkeyB64: String,
+            rotationMarker: Int64,
+            logStatus: String? = nil
+        ) {
             self.pinnedSignaturePubkeyB64 = pinnedSignaturePubkeyB64
             self.rotationMarker = rotationMarker
+            self.logStatus = logStatus
         }
     }
 
@@ -163,16 +177,54 @@ public final class PeerPinStore {
         rotationMarker: Int64
     ) -> SetPinResult {
         var map = loadMap()
-        if let existing = map[accountIdB64],
+        let existing = map[accountIdB64]
+        if let existing = existing,
            rotationMarker < existing.rotationMarker {
             return .rejectedBackward
         }
+        // Preserve any recorded `logStatus` (KT-log S3d) across a re-pin
+        // — it is an orthogonal, separately-written field, and a key
+        // rotation shouldn't silently drop the last log verdict (mirror
+        // of the web `setPin`).
         map[accountIdB64] = AccountPubkeyPin(
             pinnedSignaturePubkeyB64: pinnedSignaturePubkeyB64,
-            rotationMarker: rotationMarker
+            rotationMarker: rotationMarker,
+            logStatus: existing?.logStatus
         )
         saveMap(map)
         return .set
+    }
+
+    /// Record the latest transparency-log inclusion verdict (KT-log
+    /// S3d) for an account, keyed on the same stable `account_id` as the
+    /// pin. Mirror of the web `recordLogStatus`.
+    ///
+    /// Writes onto the existing pin record so the verdict travels with
+    /// the pinned key. **No-op when no pin exists** — the log check is
+    /// always run right after the supersession gate (which TOFU-pins on
+    /// first sight), so by the time a verdict is recorded a pin is
+    /// present; if for any reason it is not, we do not fabricate a pin
+    /// entry with no pubkey. Returns whether a write happened (a present
+    /// pin).
+    @discardableResult
+    public func recordLogStatus(accountIdB64: String, logStatus: String) -> Bool {
+        var map = loadMap()
+        guard let existing = map[accountIdB64] else { return false }
+        if existing.logStatus == logStatus { return true } // idempotent
+        map[accountIdB64] = AccountPubkeyPin(
+            pinnedSignaturePubkeyB64: existing.pinnedSignaturePubkeyB64,
+            rotationMarker: existing.rotationMarker,
+            logStatus: logStatus
+        )
+        saveMap(map)
+        return true
+    }
+
+    /// Read the recorded log-verify status for an account, or `nil` when
+    /// no pin / no status. Exposed for the UI signal. Mirror of the web
+    /// `readLogStatus`.
+    public func readLogStatus(accountIdB64: String) -> String? {
+        loadMap()[accountIdB64]?.logStatus
     }
 
     /// Remove the pin for `accountIdB64`. No-op when absent. Exposed

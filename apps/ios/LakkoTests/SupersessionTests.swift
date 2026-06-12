@@ -12,7 +12,7 @@ import LakkoCore
 ///
 ///   * Sprint 2i — the ``PeerPinStore`` persistence + monotonic
 ///     marker (rules #3 + #4).
-///   * Sprint 5i — ``ContactsClient.verifyBundleAccountKey`` decision
+///   * Sprint 5i — ``ContactsClient.verifySupersessionGate`` decision
 ///     table: TOFU on first sight, no-op on an unchanged key, a
 ///     verified re-pin on a rotation with a valid proof, and the
 ///     fail-closed refusals (rule #2) when the proof is absent,
@@ -167,7 +167,7 @@ final class SupersessionTests: XCTestCase {
         store.removePin(accountIdB64: acct)
     }
 
-    // MARK: - Sprint 5i: verifyBundleAccountKey decision table
+    // MARK: - Sprint 5i: verifySupersessionGate decision table
 
     /// Build a `ContactsClient` over an isolated pin suite so the
     /// verify tests don't share state.
@@ -195,7 +195,7 @@ final class SupersessionTests: XCTestCase {
         let accountId = Data(repeating: 0x11, count: 16)
         let pubB64 = try sigPubB64(forSeed: seed(1))
 
-        try client.verifyBundleAccountKey(
+        try client.verifySupersessionGate(
             accountId: accountId,
             bundle: bundle(sigPubB64: pubB64)
         )
@@ -212,10 +212,10 @@ final class SupersessionTests: XCTestCase {
         let pubB64 = try sigPubB64(forSeed: seed(2))
         let b = bundle(sigPubB64: pubB64)
 
-        try client.verifyBundleAccountKey(accountId: accountId, bundle: b)
+        try client.verifySupersessionGate(accountId: accountId, bundle: b)
         // Second call with the same key must not throw either.
         XCTAssertNoThrow(
-            try client.verifyBundleAccountKey(accountId: accountId, bundle: b)
+            try client.verifySupersessionGate(accountId: accountId, bundle: b)
         )
     }
 
@@ -231,7 +231,7 @@ final class SupersessionTests: XCTestCase {
         let expires = nowSecs + 14 * 24 * 60 * 60
 
         // TOFU the OLD key first.
-        try client.verifyBundleAccountKey(
+        try client.verifySupersessionGate(
             accountId: accountId,
             bundle: bundle(sigPubB64: oldPubB64)
         )
@@ -243,7 +243,7 @@ final class SupersessionTests: XCTestCase {
             issued: nowSecs,
             expires: expires
         )
-        try client.verifyBundleAccountKey(
+        try client.verifySupersessionGate(
             accountId: accountId,
             bundle: bundle(sigPubB64: newPubB64, proofB64: base64Encode(proof))
         )
@@ -262,13 +262,13 @@ final class SupersessionTests: XCTestCase {
         let oldPubB64 = try sigPubB64(forSeed: seed(20))
         let newPubB64 = try sigPubB64(forSeed: seed(21))
 
-        try client.verifyBundleAccountKey(
+        try client.verifySupersessionGate(
             accountId: accountId,
             bundle: bundle(sigPubB64: oldPubB64)
         )
 
         XCTAssertThrowsError(
-            try client.verifyBundleAccountKey(
+            try client.verifySupersessionGate(
                 accountId: accountId,
                 bundle: bundle(sigPubB64: newPubB64, proofB64: nil)
             )
@@ -299,7 +299,7 @@ final class SupersessionTests: XCTestCase {
         let newPubB64 = try sigPubB64(forSeed: newExport)
 
         // TOFU the REAL old key.
-        try client.verifyBundleAccountKey(
+        try client.verifySupersessionGate(
             accountId: accountId,
             bundle: bundle(sigPubB64: realOldPubB64)
         )
@@ -312,7 +312,7 @@ final class SupersessionTests: XCTestCase {
             expires: nowSecs + 14 * 24 * 60 * 60
         )
         XCTAssertThrowsError(
-            try client.verifyBundleAccountKey(
+            try client.verifySupersessionGate(
                 accountId: accountId,
                 bundle: bundle(
                     sigPubB64: newPubB64,
@@ -345,7 +345,7 @@ final class SupersessionTests: XCTestCase {
         let oldPubB64 = try sigPubB64(forSeed: oldExport)
         let servedPubB64 = try sigPubB64(forSeed: servedExport)
 
-        try client.verifyBundleAccountKey(
+        try client.verifySupersessionGate(
             accountId: accountId,
             bundle: bundle(sigPubB64: oldPubB64)
         )
@@ -359,7 +359,7 @@ final class SupersessionTests: XCTestCase {
             expires: nowSecs + 14 * 24 * 60 * 60
         )
         XCTAssertThrowsError(
-            try client.verifyBundleAccountKey(
+            try client.verifySupersessionGate(
                 accountId: accountId,
                 bundle: bundle(
                     sigPubB64: servedPubB64,
@@ -386,13 +386,13 @@ final class SupersessionTests: XCTestCase {
         let oldPubB64 = try sigPubB64(forSeed: seed(50))
         let newPubB64 = try sigPubB64(forSeed: seed(51))
 
-        try client.verifyBundleAccountKey(
+        try client.verifySupersessionGate(
             accountId: accountId,
             bundle: bundle(sigPubB64: oldPubB64)
         )
 
         XCTAssertThrowsError(
-            try client.verifyBundleAccountKey(
+            try client.verifySupersessionGate(
                 accountId: accountId,
                 bundle: bundle(
                     sigPubB64: newPubB64,
