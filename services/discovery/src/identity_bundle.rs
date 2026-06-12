@@ -202,9 +202,60 @@ fn cooldown_db_err(e: sqlx::Error) -> (StatusCode, String) {
     )
 }
 
+/// `true` when a sqlx error is a unique-key (duplicate) violation — used to
+/// detect a concurrent first-publish INSERT race.
+fn is_unique_violation(e: &sqlx::Error) -> bool {
+    matches!(e, sqlx::Error::Database(db) if db.is_unique_violation())
+}
+
+/// One attempt's outcome (see [`apply_identity_upload_gated`]).
+enum ApplyAttempt {
+    /// The upsert committed.
+    Done,
+    /// A concurrent FIRST publish for the same account won the INSERT race;
+    /// the row now exists, so the caller should retry into the UPDATE path.
+    RetryRace,
+}
+
 /// Apply the identity-bundle upsert under the ADR-0017 (ii) fresh-identity
-/// cool-down. Read-compare-conditional-write under a row lock so the check
-/// is race-free. NEVER gates: a no-change re-upload, a proven rotation (a
+/// cool-down, retrying the (rare) concurrent-first-publish INSERT race so the
+/// loser takes the cool-down-checked UPDATE path instead of surfacing a 500.
+/// Contention on a single account is rare (only the account's own concurrent
+/// devices), so a small bounded retry suffices.
+async fn apply_identity_upload_gated(
+    db: &sqlx::MySqlPool,
+    cooldown_secs: i64,
+    account_id: &[u8],
+    signature_pubkey: &[u8],
+    x25519_pubkey: &[u8],
+    supersession_proof: Option<&[u8]>,
+) -> Result<(), (StatusCode, String)> {
+    const MAX_ATTEMPTS: u32 = 3;
+    for _ in 0..MAX_ATTEMPTS {
+        match try_apply_identity_once(
+            db,
+            cooldown_secs,
+            account_id,
+            signature_pubkey,
+            x25519_pubkey,
+            supersession_proof,
+        )
+        .await?
+        {
+            ApplyAttempt::Done => return Ok(()),
+            ApplyAttempt::RetryRace => {},
+        }
+    }
+    // Exhausted retries — extreme single-account contention. Transient, so the
+    // client can safely retry.
+    Err((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "identity upsert contended — retry".to_string(),
+    ))
+}
+
+/// A single attempt of the gated upsert. Read-compare-conditional-write under
+/// a row lock so the check is race-free. NEVER gates: a no-change re-upload, a proven rotation (a
 /// supersession proof — sanctioned, ADR-0016), or a HEAL back to the
 /// immediately-previous key (the owner's warm-login re-publish after an
 /// attacker replaced their key — so the cool-down can never lock a
@@ -223,14 +274,14 @@ fn cooldown_db_err(e: sqlx::Error) -> (StatusCode, String) {
 /// (The only "free" unproven move is healing to `previous`, so the reachable
 /// identity set within one window is at most 2 keys — a flip-flop, never N-key
 /// churn.)
-async fn apply_identity_upload_gated(
+async fn try_apply_identity_once(
     db: &sqlx::MySqlPool,
     cooldown_secs: i64,
     account_id: &[u8],
     signature_pubkey: &[u8],
     x25519_pubkey: &[u8],
     supersession_proof: Option<&[u8]>,
-) -> Result<(), (StatusCode, String)> {
+) -> Result<ApplyAttempt, (StatusCode, String)> {
     let mut tx = db.begin().await.map_err(cooldown_db_err)?;
 
     // Row lock + the three facts we need: the current key, the
@@ -255,7 +306,7 @@ async fn apply_identity_upload_gated(
     match existing {
         None => {
             // First publish for this account — nothing to gate.
-            sqlx::query(
+            let inserted = sqlx::query(
                 "INSERT INTO identity_bundles \
                     (account_id, signature_pubkey, x25519_pubkey, supersession_proof) \
                  VALUES (?, ?, ?, ?)",
@@ -265,8 +316,18 @@ async fn apply_identity_upload_gated(
             .bind(x25519_pubkey)
             .bind(supersession_proof)
             .execute(&mut *tx)
-            .await
-            .map_err(cooldown_db_err)?;
+            .await;
+            match inserted {
+                Ok(_) => {},
+                Err(e) if is_unique_violation(&e) => {
+                    // A concurrent first publish won the INSERT race — the row
+                    // now exists; abandon this tx and retry into the UPDATE
+                    // path (which runs the cool-down check).
+                    let _ = tx.rollback().await;
+                    return Ok(ApplyAttempt::RetryRace);
+                },
+                Err(e) => return Err(cooldown_db_err(e)),
+            }
         },
         Some((current, previous, within_cooldown)) => {
             let outcome = cooldown_outcome(
@@ -328,7 +389,7 @@ async fn apply_identity_upload_gated(
     }
 
     tx.commit().await.map_err(cooldown_db_err)?;
-    Ok(())
+    Ok(ApplyAttempt::Done)
 }
 
 /// The ADR-0017 (ii) cool-down decision for an upload against an existing
