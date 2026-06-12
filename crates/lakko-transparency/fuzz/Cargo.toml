@@ -41,3 +41,10 @@ path = "fuzz_targets/supersession_verify.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "verify_log_inclusion"
+path = "fuzz_targets/verify_log_inclusion.rs"
+test = false
+doc = false
+bench = false

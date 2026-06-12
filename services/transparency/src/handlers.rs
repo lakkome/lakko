@@ -91,6 +91,23 @@ pub(crate) struct AppendRes {
 /// `(username_hash, identity_pubkey, is_reset)` to the store which
 /// ASSIGNS the version under its lock, and replies with the assigned
 /// `(idx, version)`.
+///
+/// **Trust assumption (lakko-security KT-log review, finding 2).** This
+/// service sees only the 32-byte `username_hash`, never the `account_id`, so
+/// it CANNOT verify the `account_id ↔ username_hash` binding. Anyone holding
+/// `LAKKO_TRANSPARENCY_APPEND_SECRET` (i.e. the discovery service, or a leaked
+/// server-to-server secret) can therefore append a leaf for ANY account-key
+/// with ANY pubkey, and it will carry a valid inclusion proof under the
+/// operator-signed root. The log's integrity is thus bounded by "discovery +
+/// the append secret are honest". This is NOT a silent key substitution: a
+/// forged leaf still has to pass the client's fail-closed ADR-0016
+/// supersession gate (which runs FIRST and refuses a changed key with no
+/// old-key-signed proof), so the worst a forged append achieves is
+/// log-poisoning / a confusing `mismatch` surfaced to the user — not
+/// auto-trust. Closing this fully (so the service/auditors verify the binding
+/// WITHOUT trusting discovery) needs a client-supplied signature by the
+/// account-identity key over its own `(username_hash, pubkey, version)` —
+/// tracked as future work (G-30).
 pub(crate) async fn append(
     State(state): State<AppState>,
     Json(req): Json<AppendReq>,

@@ -1741,3 +1741,64 @@ breaks):**
 - `lakko_sfu_signaling_frames_total` is a single un-labelled bucket despite the
   typed signaling protocol existing — per-`kind` breakdown would aid
   dashboards; observability only.
+
+### G-30: KT-log (S1-S3) deployed-verifier scope + append-binding trust + equivocation residual
+
+**Status (2026-06-12):** the key-transparency log is built end-to-end —
+`services/transparency` (operator-signed append-only CONIKS log: S1), discovery
+logging every identity-key change (S2) + a reconciliation sweep (S2.5), and all
+three clients verifying a fetched contact's published identity against the log
+(S3: `verify_log_inclusion` FFI + `TransparencyVerify` on web/iOS/Android).
+`lakko-security` reviewed the whole arc: **APPROVE-WITH-NOTES**. Three residuals
+are recorded here so a future reader does not over-trust the deployed check:
+
+1. **The deployed verifier is NOT the chain verifier — no equivocation
+   resistance.** S3 wires the single-client `lakko_transparency::verify_inclusion`
+   path (latest entry + inclusion proof + a monotone last-seen `log_size`
+   no-rollback check), NOT `verify_supersession_chain`. A malicious operator
+   (it holds the signing key) can sign two different valid roots and show each
+   to a different victim (split-view / equivocation); each client sees a
+   monotone, self-consistent view and CANNOT detect it. Detecting split-view
+   needs gossip (clients cross-checking roots) or witness co-signing — **not
+   built**. What the deployed design DOES defend: a server that strips / omits /
+   rolls back (→ `absent` / `unreachable` surfaced, `rollback` hard-blocked) and
+   a serving-tier (CDN / proxy / DB) key swap (defeated by the build-time
+   operator-key pin — the client never trusts `GET /operator-key` for
+   verification). The operator pin is a real reduction (compromised *serving*
+   tier ≠ compromised *signing* tier), not theatre, even before gossip. The
+   signing seed lives in the service env, so a host compromise forges roots
+   freely — the same threat boundary as every other server-held signing key
+   (call-JWT ADR-0008, device-attest ADR-0015, OPAQUE setup). Cross-ref
+   ADR-0016 §equivocation.
+
+2. **Append-binding trust — the log is only as honest as discovery + the append
+   secret.** The transparency service sees only `username_hash =
+   BLAKE3("lakko/transparency/account/v1" || account_id)`, never the
+   `account_id`, so it cannot verify the `account_id ↔ username_hash` binding.
+   Anyone holding `LAKKO_TRANSPARENCY_APPEND_SECRET` (the discovery service, or
+   a leaked server-to-server secret) can append a leaf for any account-key with
+   any pubkey, carrying a valid inclusion proof under the operator-signed root.
+   This is NOT a silent key substitution — a forged leaf still has to pass the
+   client's fail-closed ADR-0016 supersession gate (runs FIRST, refuses a
+   changed key with no old-key-signed proof), so the worst it achieves is
+   log-poisoning / a confusing `mismatch` surfaced to the user. Closing it fully
+   needs a client-supplied signature by the account-identity key over its own
+   `(username_hash, pubkey, version)`, so the service / auditors verify the
+   binding without trusting discovery — **future work**.
+
+3. **Mismatch / absent posture is surface-not-block (adjudicated correct, for
+   now).** A `mismatch` (the log's latest pubkey ≠ the served pubkey) or
+   `absent` (no log entry) is recorded + surfaced but does NOT block the
+   contact; only `rollback` hard-blocks. Correct because the fail-closed
+   supersession/pin gate (ADR-0016) is the PRIMARY trust and runs first, and
+   because discovery's append is best-effort fail-open (S2), so a legitimate
+   rotation reaching discovery before the S2.5 reconciler runs produces a
+   transient `mismatch`/`absent`; hard-blocking would break legit contacts
+   during the consistency window. The condition to flip `mismatch` (not
+   `absent`) to fail-closed: the append moves onto discovery's **transactional
+   critical path** (synchronous — "logged" becomes an invariant of "published",
+   collapsing the consistency window) plus a bounded staleness SLA.
+
+A `verify_log_inclusion` fuzz target was added
+(`crates/lakko-transparency/fuzz/fuzz_targets/verify_log_inclusion.rs`) closing
+the "new attacker-touchable verify surface → fuzz target" rule.
