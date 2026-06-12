@@ -205,11 +205,24 @@ fn cooldown_db_err(e: sqlx::Error) -> (StatusCode, String) {
 /// Apply the identity-bundle upsert under the ADR-0017 (ii) fresh-identity
 /// cool-down. Read-compare-conditional-write under a row lock so the check
 /// is race-free. NEVER gates: a no-change re-upload, a proven rotation (a
-/// valid supersession proof — sanctioned, ADR-0016), or a HEAL back to the
+/// supersession proof — sanctioned, ADR-0016), or a HEAL back to the
 /// immediately-previous key (the owner's warm-login re-publish after an
 /// attacker replaced their key — so the cool-down can never lock a
 /// legitimate owner out of restoring their identity). The gated case is a
 /// CHANGE to a brand-new key with NO proof while still cooling down → 429.
+///
+/// **Trust model (lakko-security 3A (ii)):** the server treats the *presence*
+/// of a supersession proof as "proven rotation, not gated" — it does NOT and
+/// MUST NOT verify the proof bytes (invariant #2 — the server stays opaque).
+/// So a compromised-ACCESS attacker can attach an arbitrary present-but-invalid
+/// proof to skip the cool-down. This does NOT defeat the feature: the
+/// load-bearing integrity gate is the *client-side* fail-closed verify (a peer
+/// fetching a changed pin with an unverifiable proof REFUSES, ADR-0016), which
+/// this bypass cannot touch. The cool-down is defence-in-depth against
+/// directory churn / squatting / row growth, not the integrity primitive.
+/// (The only "free" unproven move is healing to `previous`, so the reachable
+/// identity set within one window is at most 2 keys — a flip-flop, never N-key
+/// churn.)
 async fn apply_identity_upload_gated(
     db: &sqlx::MySqlPool,
     cooldown_secs: i64,

@@ -151,10 +151,33 @@ Landed end-to-end on web + iOS + Android, each step build/test-verified:
   (OOB safety-number re-verify is the backstop); the torn-state + cleanup findings
   were fixed.
 
-**Deferred (defence-in-depth, not blockers):** a notification / audit entry on
-fresh-identity mint; a server-side per-account cool-down on fresh-identity publishes;
-a KT-log "fresh start" marker (needs the KT-log chain verifier — a separate work item)
-to let contacts distinguish an owner reset from an active attacker.
+**Phase-3A defence-in-depth follow-ups (built + reviewed):**
+
+- **(i) Self-identity consistency alert (clients).** On a warm login each client
+  derives its AccountIdentity pubkey and compares it to the account's published
+  bundle; a mismatch (someone published a different key — the ACCESS-hijack
+  signature) raises a dismissible security banner so the owner finds out even if
+  the attacker acted first. Best-effort; no server change. `lakko-security`:
+  APPROVE-WITH-NOTES.
+- **(ii) Fresh-identity-publish cool-down (discovery server).** A per-account
+  cool-down on UNPROVEN changes to a NEW key (`identity_bundles` gains
+  `previous_signature_pubkey` + `last_unproven_key_change_at`, migration `0011`;
+  `LAKKO_DISCOVERY_FRESH_IDENTITY_COOLDOWN_SECS`, default 1 h). A race-free
+  read-compare-conditional-write refuses (429) only a change to a brand-new key,
+  no proof, not a heal-back, while cooling down; a no-change re-upload, a proven
+  rotation, and a HEAL back to the immediately-previous key are never gated (so
+  it can never lock a legitimate owner out). **Load-bearing caveat:** the server
+  trusts the *presence* of a proof, not its validity (it must not parse it,
+  invariant #2) — so a present-but-invalid proof bypasses the gate; this is
+  acceptable because the *client-side fail-closed verify* is the real integrity
+  gate (a peer refuses an unverifiable changed-key proof), and the cool-down is
+  only defence-in-depth (churn / row growth). The reachable identity set within
+  one window is at most 2 keys (a flip-flop), never N-key churn.
+  `lakko-security`: APPROVE-WITH-NOTES.
+
+**Still deferred:** a KT-log "fresh start" marker (needs the KT-log chain
+verifier — a separate work item) to let contacts distinguish an owner reset from
+an active attacker.
 
 ## Relationship to prior ADRs
 
