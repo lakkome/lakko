@@ -58,6 +58,12 @@
 //!   secret (the SAME value `services/transparency` holds). Required to
 //!   ARM the append integration alongside `LAKKO_TRANSPARENCY_URL`;
 //!   presented as `Authorization: Bearer <secret-b64>`.
+//! - `LAKKO_DISCOVERY_TRANSPARENCY_RECONCILE_SECS` — KT-log S2.5
+//!   reconciliation-sweep interval (seconds, default 300). The background
+//!   reconciler eventually appends every account's CURRENT published
+//!   identity to the transparency log, closing the S2 best-effort
+//!   fail-open gap. Spawned ONLY when the transparency integration is
+//!   armed (`LAKKO_TRANSPARENCY_URL` set); `0` disables the sweep.
 //! - `RUST_LOG` — `tracing-subscriber` env-filter spec.
 //!
 //! ## Endpoints
@@ -265,6 +271,11 @@ async fn main() -> Result<()> {
     // the limiter's memory ceiling stays bounded.
     let _rate_pruner = rate_limit::spawn_pruner((*rate_limiter).clone());
 
+    // KT-log S2.5 — the transparency-log reconciliation sweep. Spawned
+    // ONLY when the transparency integration is armed; best-effort +
+    // idempotent, so it never blocks startup or any request path.
+    let _transparency_reconciler = maybe_spawn_reconciler(state.transparency.clone(), pool.clone());
+
     let app = build_app(state);
 
     let listener = tokio::net::TcpListener::bind(bind)
@@ -455,6 +466,59 @@ fn build_transparency_client() -> Option<transparency_log::TransparencyClient> {
             None
         },
     }
+}
+
+/// KT-log S2.5 — spawn the transparency reconciliation sweep when both the
+/// integration is armed (`transparency` is `Some`) AND the interval is
+/// non-zero. Returns the task handle to hold (so the task lives for the
+/// process), or `None` when the integration is off or the sweep is disabled
+/// (`LAKKO_DISCOVERY_TRANSPARENCY_RECONCILE_SECS=0`). Logs the decision once.
+fn maybe_spawn_reconciler(
+    transparency: Option<transparency_log::TransparencyClient>,
+    pool: MySqlPool,
+) -> Option<tokio::task::JoinHandle<()>> {
+    let client = transparency?;
+    let Some(interval) = reconcile_interval() else {
+        tracing::info!(
+            "KT-log S2.5: transparency reconciler DISABLED \
+             (LAKKO_DISCOVERY_TRANSPARENCY_RECONCILE_SECS=0)"
+        );
+        return None;
+    };
+    tracing::info!(
+        interval_secs = interval.as_secs(),
+        "KT-log S2.5: transparency reconciler armed",
+    );
+    Some(transparency_log::spawn_transparency_reconciler(
+        pool, client, interval,
+    ))
+}
+
+/// KT-log S2.5 — the reconciliation-sweep interval from
+/// `LAKKO_DISCOVERY_TRANSPARENCY_RECONCILE_SECS`.
+///
+/// Returns `Some(interval)` for a positive value (default 300 s when
+/// unset/unparseable), or `None` when set to `0` — meaning the reconciler
+/// is DISABLED and must not be spawned. A negative or unparseable value
+/// falls back to the default rather than disabling, so a typo does not
+/// silently turn the sweep off.
+fn reconcile_interval() -> Option<Duration> {
+    /// Default reconciliation cadence (seconds) when the env var is unset.
+    const DEFAULT_RECONCILE_SECS: u64 = 300;
+
+    let secs = match std::env::var("LAKKO_DISCOVERY_TRANSPARENCY_RECONCILE_SECS") {
+        Ok(raw) if !raw.is_empty() => raw.parse::<u64>().unwrap_or_else(|_| {
+            tracing::warn!(
+                value = %raw,
+                default = DEFAULT_RECONCILE_SECS,
+                "could not parse LAKKO_DISCOVERY_TRANSPARENCY_RECONCILE_SECS as u64 \
+                 — falling back to the default",
+            );
+            DEFAULT_RECONCILE_SECS
+        }),
+        _ => DEFAULT_RECONCILE_SECS,
+    };
+    (secs != 0).then(|| Duration::from_secs(secs))
 }
 
 /// Parse a float env var, falling back to `default`

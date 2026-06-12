@@ -145,8 +145,19 @@ impl LogStore {
     /// and persist the leaf row. The transparency service ASSIGNS the
     /// `version` (KT-log S2 decision B): the caller does NOT supply it.
     ///
-    /// Under the same `Mutex` lock that serialises the in-memory append,
-    /// we FIRST query `MAX(version)` for this `username_hash` and use
+    /// ## Idempotency (KT-log S2.5)
+    ///
+    /// Under the same `Mutex` lock, BEFORE appending we query the LATEST
+    /// entry for this `username_hash`. If one exists AND its
+    /// `identity_pubkey` already equals the requested pubkey, this is a
+    /// re-append of the already-current identity (a retry, or the S2.5
+    /// reconciliation sweep re-asserting a key that was actually logged)
+    /// — we RETURN that existing `(idx, version)` WITHOUT appending, so a
+    /// sweep can never create a duplicate leaf. Only a DIFFERENT pubkey
+    /// (a genuine new version) appends.
+    ///
+    /// Otherwise, still under the same lock that serialises the in-memory
+    /// append, we query `MAX(version)` for this `username_hash` and use
     /// `max + 1` (so versions are monotonic per `username_hash`, assigned
     /// atomically — two concurrent appends for the same username can
     /// never collide because the lock serialises them and the
@@ -158,11 +169,13 @@ impl LogStore {
     /// `error` and returned (→ 500); the in-memory and durable state are
     /// then out of sync until a restart re-syncs them.
     ///
-    /// Returns the assigned `(idx, version)`.
+    /// Returns the assigned (or, on a no-op re-append, the already-stored)
+    /// `(idx, version)`.
     ///
     /// # Errors
     ///
-    /// Returns [`StoreError::Db`] if the `MAX`-query or the INSERT fails.
+    /// Returns [`StoreError::Db`] if the latest-entry query, the
+    /// `MAX`-query, or the INSERT fails.
     pub(crate) async fn append(
         &self,
         pool: &MySqlPool,
@@ -172,17 +185,41 @@ impl LogStore {
     ) -> Result<AppendResult, StoreError> {
         let mut log = self.inner.lock().await;
 
-        // Assign the version: max existing for this username_hash, + 1.
-        // COALESCE(MAX, 0) so a brand-new username starts at version 1.
-        // Run under the lock so the assignment is race-free against a
-        // concurrent append for the same username.
-        let max_version: u64 = sqlx::query_scalar(
-            "SELECT COALESCE(MAX(version), 0) FROM log_entries WHERE username_hash = ?",
+        // KT-log S2.5 idempotency: read the latest entry for this
+        // username_hash FIRST, under the same lock. If the already-latest
+        // identity matches the requested pubkey, this is a no-op
+        // re-append (a retry / a reconciliation sweep) — return the
+        // existing coordinates without writing a duplicate leaf. The query
+        // runs against the DB (the durable source of truth) so it sees the
+        // committed history even for a freshly-restarted process.
+        let latest: Option<(Vec<u8>, u64, u64)> = sqlx::query_as(
+            "SELECT identity_pubkey, idx, version FROM log_entries \
+             WHERE username_hash = ? ORDER BY version DESC LIMIT 1",
         )
         .bind(&username_hash[..])
-        .fetch_one(pool)
+        .fetch_optional(pool)
         .await?;
-        let version = max_version.saturating_add(1);
+        if let Some((latest_pubkey, latest_idx, latest_version)) = &latest {
+            if latest_pubkey.as_slice() == identity_pubkey.as_slice() {
+                tracing::debug!(
+                    idx = latest_idx,
+                    version = latest_version,
+                    "transparency append is a no-op (identity already latest) — \
+                     returning existing coordinates"
+                );
+                return Ok(AppendResult {
+                    idx: *latest_idx,
+                    version: *latest_version,
+                });
+            }
+        }
+
+        // Assign the version: latest existing for this username_hash, + 1.
+        // We already hold the latest row above; `latest_version + 1` (or 1
+        // for a brand-new username) is the next version. Run under the lock
+        // so the assignment is race-free against a concurrent append for
+        // the same username.
+        let version = latest.map_or(1, |(_, _, v)| v.saturating_add(1));
 
         let entry = LogEntry {
             username_hash,
@@ -380,6 +417,83 @@ mod tests {
             .await
             .expect("append bob v1");
         assert_eq!((r2.idx, r2.version), (2, 1));
+
+        sqlx::query("DELETE FROM log_entries")
+            .execute(&pool)
+            .await
+            .expect("clear log_entries");
+        pool.close().await;
+    }
+
+    /// KT-log S2.5 idempotency — re-appending the SAME
+    /// `(username_hash, pubkey)` is a no-op (identical `{idx, version}`,
+    /// log size unchanged); a DIFFERENT pubkey for the same username
+    /// bumps the version. DB-gated on
+    /// `LAKKO_TRANSPARENCY_TEST_DATABASE_URL` (skips, does not fail, when
+    /// unset).
+    #[tokio::test]
+    async fn append_is_idempotent_for_same_pubkey() {
+        use sqlx::mysql::MySqlPoolOptions;
+
+        let Ok(url) = std::env::var("LAKKO_TRANSPARENCY_TEST_DATABASE_URL") else {
+            eprintln!(
+                "skipping append_is_idempotent_for_same_pubkey: \
+                 LAKKO_TRANSPARENCY_TEST_DATABASE_URL unset"
+            );
+            return;
+        };
+
+        let pool = MySqlPoolOptions::new()
+            .max_connections(4)
+            .connect(&url)
+            .await
+            .expect("connect test DB");
+        crate::MIGRATIONS.run(&pool).await.expect("run migrations");
+        sqlx::query("DELETE FROM log_entries")
+            .execute(&pool)
+            .await
+            .expect("clear log_entries");
+
+        let store = LogStore::from_log(InMemoryLog::new(signing::SigningKey::generate()));
+        let alice = lakko_crypto::hash::blake3(b"alice");
+
+        // First append for alice -> idx 0, version 1, size 1.
+        let r0 = store
+            .append(&pool, alice, vec![0x01; 32], false)
+            .await
+            .expect("append alice v1");
+        assert_eq!((r0.idx, r0.version), (0, 1));
+        assert_eq!(store.size().await, 1);
+
+        // Re-append the SAME pubkey -> no-op: identical coordinates, size
+        // unchanged (no duplicate leaf written).
+        let r0_again = store
+            .append(&pool, alice, vec![0x01; 32], false)
+            .await
+            .expect("re-append alice same pubkey");
+        assert_eq!((r0_again.idx, r0_again.version), (0, 1));
+        assert_eq!(
+            store.size().await,
+            1,
+            "no-op re-append must not grow the log"
+        );
+
+        // A reset-flagged re-append of the SAME pubkey is STILL a no-op
+        // (the dedup keys on the pubkey, not the is_reset flag).
+        let r0_reset = store
+            .append(&pool, alice, vec![0x01; 32], true)
+            .await
+            .expect("re-append alice same pubkey is_reset=true");
+        assert_eq!((r0_reset.idx, r0_reset.version), (0, 1));
+        assert_eq!(store.size().await, 1);
+
+        // A DIFFERENT pubkey for the same username -> version+1, new leaf.
+        let r1 = store
+            .append(&pool, alice, vec![0x02; 32], false)
+            .await
+            .expect("append alice v2 (different pubkey)");
+        assert_eq!((r1.idx, r1.version), (1, 2));
+        assert_eq!(store.size().await, 2);
 
         sqlx::query("DELETE FROM log_entries")
             .execute(&pool)

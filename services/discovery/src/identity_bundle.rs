@@ -194,18 +194,47 @@ pub(crate) async fn upload(
     // KT-log S2 (decision E) — best-effort transparency-log append on a
     // KEY CHANGE only. The identity bundle is ALREADY published above; the
     // append is fail-open: a transparency-side failure NEVER fails this
-    // upload (a missed append is closed by the S2.5 reconciliation sweep,
-    // future work). When `LAKKO_TRANSPARENCY_URL` is unset the client is
-    // `None` and the integration is off (logged once at startup).
+    // upload (a missed append is closed by the S2.5 reconciliation sweep).
+    // When `LAKKO_TRANSPARENCY_URL` is unset the client is `None` and the
+    // integration is off (logged once at startup).
+    //
+    // KT-log S2.5: on a CONFIRMED append, best-effort advance the
+    // `logged_pubkey` marker to the just-logged key, so the reconciler
+    // skips this account. A failed marker UPDATE is fine (the reconciler
+    // heals it) — warn + proceed; NEVER fail the upload because of it.
     if let (LogAppendDecision::Append { is_reset }, Some(client)) =
         (decision, state.transparency.as_ref())
     {
-        client
+        let confirmed = client
             .append_key_change(&account_id, &signature_pubkey, is_reset)
             .await;
+        if confirmed {
+            mark_logged_pubkey(&state.db, &account_id, &signature_pubkey).await;
+        }
     }
 
     Ok(Json(UploadResponse { ok: true }))
+}
+
+/// KT-log S2.5 — best-effort advance of the `logged_pubkey` marker after a
+/// CONFIRMED transparency append. Records the just-logged key so the
+/// reconciler skips this account on its next sweep. A failure here NEVER
+/// fails the upload: the reconciler will heal a stale marker. We `warn!`
+/// and return.
+async fn mark_logged_pubkey(db: &sqlx::MySqlPool, account_id: &[u8], signature_pubkey: &[u8]) {
+    let result = sqlx::query("UPDATE identity_bundles SET logged_pubkey = ? WHERE account_id = ?")
+        .bind(signature_pubkey)
+        .bind(account_id)
+        .execute(db)
+        .await;
+    if let Err(e) = result {
+        tracing::warn!(
+            account_id = %B64.encode(account_id),
+            error = %e,
+            "KT-log S2.5: failed to advance logged_pubkey after a confirmed append \
+             — the reconciler will heal it",
+        );
+    }
 }
 
 /// Map a sqlx error from the cool-down transaction to a 500.

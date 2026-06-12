@@ -177,6 +177,12 @@ services:
       # LAKKO_TRANSPARENCY_APPEND_SECRET. Unset the URL to disable.
       LAKKO_TRANSPARENCY_URL: ${LAKKO_TRANSPARENCY_URL:-http://transparency:8087}
       LAKKO_TRANSPARENCY_APPEND_SECRET: ${LAKKO_TRANSPARENCY_APPEND_SECRET:-ZGV2LXRyYW5zcGFyZW5jeS1hcHBlbmQtc2VjcmV0LTMyYiE=}
+      # KT-log S2.5 — the reconciliation-sweep interval (seconds, default
+      # 300). The reconciler back-fills every account's CURRENT published
+      # identity into the transparency log, closing the S2 best-effort
+      # fail-open gap. Spawned only when LAKKO_TRANSPARENCY_URL is set; 0
+      # disables the sweep.
+      LAKKO_DISCOVERY_TRANSPARENCY_RECONCILE_SECS: ${LAKKO_DISCOVERY_TRANSPARENCY_RECONCILE_SECS:-300}
     ports:
       - "127.0.0.1:8084:8084"
     healthcheck:
