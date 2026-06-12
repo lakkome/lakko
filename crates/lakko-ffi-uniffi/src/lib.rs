@@ -2562,8 +2562,9 @@ pub fn verify_supersession(
 /// ADR-0019). Unlike [`verify_supersession`] — which checks only the bundle's
 /// standalone proof against the local pin — this anchors the rotation to the
 /// operator-signed, append-only log: a rotation is bound to a SINGLE committed
-/// version under a no-rollback root, which closes the leaked-old-key
-/// equivocation gate.
+/// version under a no-rollback root, which makes a leaked-old-key equivocation
+/// DETECTABLE (two distinct successors cannot both be log-confirmed at one
+/// version; the second peer to fetch sees a version-floor or inclusion failure).
 ///
 /// The decomposed fields mirror the JSON a client gathers from
 /// `/transparency/{root,latest,proof}` plus the `supersession_proof` carried in

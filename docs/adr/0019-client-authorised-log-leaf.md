@@ -65,10 +65,14 @@ client keeps today's standalone gate-1 path.
 
 **What this buys:** a rotation is now bound to a SINGLE committed log version
 under a no-rollback signed root — one monotonic successor per version, plus a
-permanent auditable record. This closes the **leaked-old-key equivocation**
-above. (Honest scope: it does not defend a live-compromised *current* key — that
-key can sign anything; the backstop there remains the OOB safety-number
-re-verify.)
+permanent auditable record, with the peer re-pinning the chain-confirmed version
+as its next downgrade floor. This makes the **leaked-old-key equivocation** above
+**detectable** (not prevented): two distinct successors cannot both be
+log-confirmed at the same version, so the second peer to fetch sees a
+version-floor or inclusion failure → surfaced (`mismatch`) for an OOB
+safety-number re-verify. Detection depends on at least one honest fetch + that
+OOB backstop. (Honest scope: it does not defend a live-compromised *current* key
+— that key can sign anything; the backstop there is likewise the OOB re-verify.)
 
 ### Sprint 2 — genesis (version 1) self-authorisation + server-side reject
 
