@@ -58,6 +58,33 @@ public enum class LogVerifyStatus {
 }
 
 /**
+ * The outcome of [verifyIdentityInLog] (KT-log S4).
+ *
+ * Adds the `is_reset` marker the log serves on its `/latest` entry to the
+ * bare [status]. [isReset] lets a contact DISTINGUISH an owner-initiated
+ * identity RESET (the lost-everything fresh-identity mint — logged with
+ * `is_reset=true`, ADR-0017) from an unexplained key change (a possible
+ * compromise — `is_reset` false/absent).
+ *
+ * [isReset] is the `/latest` entry's marker WHENEVER a latest entry was
+ * observed — i.e. on [LogVerifyStatus.CONFIRMED] AND on
+ * [LogVerifyStatus.MISMATCH] (both imply a latest exists). It is `null`
+ * when there was no latest entry to read it from:
+ * [LogVerifyStatus.ABSENT] (account not yet logged),
+ * [LogVerifyStatus.ROLLBACK] (short-circuited before the latest lookup),
+ * [LogVerifyStatus.UNREACHABLE] (network/log fault), and
+ * [LogVerifyStatus.OFF] (the integration is unconfigured).
+ */
+public data class LogVerifyResult(
+    /** The S3e state-machine verdict. */
+    val status: LogVerifyStatus,
+    /** The `/latest` entry's `is_reset` marker when a latest entry was
+     *  read ([LogVerifyStatus.CONFIRMED] / [LogVerifyStatus.MISMATCH]);
+     *  `null` otherwise. */
+    val isReset: Boolean?,
+)
+
+/**
  * Inclusion-gate seam — abstracts the native `verifyLogInclusion` call so
  * the status-mapping decision logic in [verifyIdentityInLog] is
  * unit-testable on the host JVM without `liblakko_ffi_uniffi.so`.
@@ -164,10 +191,11 @@ public suspend fun verifyIdentityInLog(
     lastSeenRoot: LastSeenRootStore,
     accountKeyDeriver: AccountKeyDeriver = NativeAccountKeyDeriver,
     inclusionGate: InclusionGate = NativeInclusionGate,
-): LogVerifyStatus {
-    // OFF — the integration is unconfigured. Skip entirely.
+): LogVerifyResult {
+    // OFF — the integration is unconfigured. Skip entirely. No latest
+    // entry was read, so `isReset` is null.
     if (client == null || operatorKey == null) {
-        return LogVerifyStatus.OFF
+        return LogVerifyResult(LogVerifyStatus.OFF, isReset = null)
     }
 
     return try {
@@ -178,21 +206,29 @@ public suspend fun verifyIdentityInLog(
             // The log shrank — hard, unambiguous attack. (We do NOT
             // verify the root signature first: a shrink is suspicious
             // regardless of who signed it, and the rollback verdict is
-            // the strongest.)
-            return LogVerifyStatus.ROLLBACK
+            // the strongest.) We short-circuit BEFORE the latest lookup,
+            // so no `isReset`.
+            return LogVerifyResult(LogVerifyStatus.ROLLBACK, isReset = null)
         }
 
         // 2. Look up the account's latest logged entry.
         val usernameHash = accountKeyDeriver.derive(accountId)
         val latest = client.fetchLatest(usernameHash)
             ?: // Not yet logged. Benign under eventual consistency OR an
-            //  off-log equivocation — surfaced, not auto-trusted.
-            return LogVerifyStatus.ABSENT
+            //  off-log equivocation — surfaced, not auto-trusted. No
+            //  latest entry, so no `isReset`.
+            return LogVerifyResult(LogVerifyStatus.ABSENT, isReset = null)
+
+        // From here a latest entry EXISTS — capture its `is_reset` marker
+        // (KT-log S4). It rides out on both the MISMATCH and CONFIRMED
+        // verdicts below; the caller surfaces it to distinguish an
+        // owner-initiated reset from an unexplained key change.
+        val isReset = latest.isReset
 
         // 3. The log's latest pubkey must equal what discovery served.
         //    A divergence is the equivocation signal.
         if (!latest.identityPubkey.contentEquals(publishedSignaturePubkey)) {
-            return LogVerifyStatus.MISMATCH
+            return LogVerifyResult(LogVerifyStatus.MISMATCH, isReset = isReset)
         }
 
         // 4. Prove the exact (account_key, pubkey, version) leaf is
@@ -212,16 +248,77 @@ public suspend fun verifyIdentityInLog(
             // The inclusion / root-signature gate failed: the served key
             // is not provably committed by the pinned operator → treat as
             // a mismatch (a log/server divergence from what we were told).
-            return LogVerifyStatus.MISMATCH
+            // A latest entry still existed, so the marker rides out.
+            return LogVerifyResult(LogVerifyStatus.MISMATCH, isReset = isReset)
         }
-        LogVerifyStatus.CONFIRMED
+        LogVerifyResult(LogVerifyStatus.CONFIRMED, isReset = isReset)
     } catch (_: TransparencyNetworkError) {
-        LogVerifyStatus.UNREACHABLE
+        LogVerifyResult(LogVerifyStatus.UNREACHABLE, isReset = null)
     } catch (_: TransparencyHttpError) {
         // A non-404 HTTP fault or a malformed body — the log is
         // effectively unusable for this check. Fail-open to UNREACHABLE
         // (the caller does not block on it); the supersession/pin gate is
         // the primary trust.
-        LogVerifyStatus.UNREACHABLE
+        LogVerifyResult(LogVerifyStatus.UNREACHABLE, isReset = null)
+    }
+}
+
+/**
+ * KT-log S4 — a LIGHTER, best-effort lookup of the `is_reset` marker for a
+ * SERVED key, used to ENRICH a fail-closed `SupersessionRefused` (an
+ * unproven changed key — the moment the reset/compromise distinction
+ * matters most).
+ *
+ * Unlike [verifyIdentityInLog], this does NOT run the inclusion proof or
+ * the no-rollback gate: it is a context-only enrichment that can never
+ * change a trust decision (gate 1 throws regardless). It only answers:
+ * "for this account, does the log's latest entry COMMIT TO EXACTLY the
+ * served key, and was that entry an owner reset?"
+ *
+ * Returns:
+ *   * `true`  — the log's latest pubkey matches [servedSignaturePubkey]
+ *     AND its `is_reset` marker is set (owner-initiated fresh-start).
+ *   * `false` — the log's latest pubkey matches [servedSignaturePubkey]
+ *     AND its `is_reset` marker is NOT set (an unexplained change —
+ *     possible compromise).
+ *   * `null`  — the integration is off, the log is unreachable, the
+ *     account is absent from the log, OR the log's latest pubkey does NOT
+ *     match the served key (the marker is then about a different key and
+ *     tells us nothing about the served one).
+ *
+ * Best-effort: ANY fault maps to `null`. This helper NEVER throws.
+ *
+ * @param accountId             the peer's raw 16-byte account_id.
+ * @param servedSignaturePubkey the 32-byte Ed25519 key discovery served.
+ * @param client                pre-built client, or `null` to mean
+ *                              "integration off".
+ * @param accountKeyDeriver     derives the `username_hash` from the
+ *                              account_id (native by default).
+ */
+public suspend fun lookupServedKeyReset(
+    accountId: ByteArray,
+    servedSignaturePubkey: ByteArray,
+    client: TransparencyClient?,
+    accountKeyDeriver: AccountKeyDeriver = NativeAccountKeyDeriver,
+): Boolean? {
+    if (client == null) {
+        return null
+    }
+    return try {
+        val usernameHash = accountKeyDeriver.derive(accountId)
+        val latest = client.fetchLatest(usernameHash)
+            // Account not yet logged — no marker to read.
+            ?: return null
+        // The marker is only meaningful for the served key if the log's
+        // latest entry actually commits to it. A divergence means the
+        // marker describes some other key — return null (unknown).
+        if (!latest.identityPubkey.contentEquals(servedSignaturePubkey)) {
+            null
+        } else {
+            latest.isReset
+        }
+    } catch (_: Throwable) {
+        // Best-effort enrichment — any fault is "unknown".
+        null
     }
 }

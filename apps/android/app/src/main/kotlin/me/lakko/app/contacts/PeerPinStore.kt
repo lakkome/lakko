@@ -58,9 +58,15 @@ import me.lakko.app.transparency.LogVerifyStatus
  * ## Storage layout
  *
  * `EncryptedSharedPreferences` named `"lakko-peer-pins"`. Keys:
- * `"pin-v1:<accountIdB64>"`. Value: `"<pubkeyB64>|<marker>"` — the
- * pubkey base64 and the decimal `rotationMarker`, separated by a
- * single `|` (the pubkey base64 never contains `|`).
+ * `"pin-v1:<accountIdB64>"`. Value is a `|`-separated record (the pubkey
+ * base64 never contains `|`), parsed front-to-back so older shapes stay
+ * readable (back-compat):
+ *   * `"<pubkeyB64>|<marker>"` — the original two-field shape.
+ *   * `"<pubkeyB64>|<marker>|<logStatus>"` — KT-log S3e added the verdict.
+ *   * `"<pubkeyB64>|<marker>|<logStatus>|<isReset>"` — KT-log S4 added the
+ *     `/latest` `is_reset` marker. The `<logStatus>` segment may be empty
+ *     (an `is_reset` recorded with no verdict yet), and `<isReset>` is
+ *     `"true"` / `"false"` (absent = the marker is unknown / null).
  */
 
 /** A pinned AccountIdentity pubkey for one peer (ADR-0016). */
@@ -81,6 +87,14 @@ public data class Pin(
      *  can surface it. `null` on a pin written before S3e (or by a path
      *  that did not run the check). */
     val logStatus: LogVerifyStatus? = null,
+    /** KT-log S4: the `/latest` entry's `is_reset` marker captured on the
+     *  identity-fetch path, alongside [logStatus]. `true` = the latest
+     *  logged entry was an owner-initiated reset (ADR-0017 fresh-start);
+     *  `false` = it was not (an unexplained change); `null` = there was no
+     *  latest entry to read it from (off / unreachable / absent), or the
+     *  pin predates S4 / the check did not run. Lets the UI distinguish a
+     *  reset from a possible compromise on a changed key. */
+    val isReset: Boolean? = null,
 )
 
 /** Outcome of [PinStore.setPin]. [Set] covers both a first-time
@@ -154,6 +168,19 @@ public interface PinStore {
      * pubkey. Returns whether a write happened (a present pin).
      */
     public fun recordLogStatus(accountIdB64: String, logStatus: LogVerifyStatus): Boolean
+
+    /**
+     * KT-log S4 — record the `/latest` entry's `is_reset` marker for an
+     * account, keyed on the same stable `account_id` as the pin and written
+     * next to [recordLogStatus].
+     *
+     * Writes onto the existing pin record so the marker travels with the
+     * pinned key. A `null` clears any stale marker — no latest entry was
+     * read this round. **No-op when no pin exists** (same rationale as
+     * [recordLogStatus] — the supersession gate TOFU-pins first). Returns
+     * whether a write happened (a present pin).
+     */
+    public fun recordLogReset(accountIdB64: String, isReset: Boolean?): Boolean
 }
 
 /**
@@ -170,25 +197,20 @@ public class PeerPinStore(context: Context) : PinStore {
         val raw = openPrefs(appContext)
             .getString(KEY_PREFIX + accountIdB64, null)
             ?: return null
-        // Stored as "<pubkeyB64>|<marker>" or, since KT-log S3e,
-        // "<pubkeyB64>|<marker>|<logStatus>". Base64 standard alphabet
-        // never emits `|`, so the fields split cleanly. We parse from the
-        // FRONT: the first `|` ends the pubkey; the remainder is
-        // "<marker>" or "<marker>|<logStatus>".
-        val firstSep = raw.indexOf('|')
-        if (firstSep <= 0 || firstSep == raw.length - 1) return null
-        val pubkeyB64 = raw.substring(0, firstSep)
-        val rest = raw.substring(firstSep + 1)
-        val secondSep = rest.indexOf('|')
-        val markerStr: String
-        val logStatusStr: String?
-        if (secondSep < 0) {
-            markerStr = rest
-            logStatusStr = null
-        } else {
-            markerStr = rest.substring(0, secondSep)
-            logStatusStr = rest.substring(secondSep + 1).ifEmpty { null }
-        }
+        // Stored as one of (KT-log back-compat, see the class doc):
+        //   "<pubkeyB64>|<marker>"                              (original)
+        //   "<pubkeyB64>|<marker>|<logStatus>"                  (S3e)
+        //   "<pubkeyB64>|<marker>|<logStatus>|<isReset>"        (S4)
+        // Base64 standard alphabet never emits `|`, so the fields split
+        // cleanly. We split into AT MOST 4 segments from the FRONT so the
+        // pubkey is segment 0 regardless of how many later fields exist.
+        val parts = raw.split('|', limit = 4)
+        if (parts.size < 2) return null
+        val pubkeyB64 = parts[0]
+        if (pubkeyB64.isEmpty()) return null
+        val markerStr = parts[1]
+        val logStatusStr: String? = parts.getOrNull(2)?.ifEmpty { null }
+        val isResetStr: String? = parts.getOrNull(3)?.ifEmpty { null }
         val marker = markerStr.toLongOrNull() ?: return null
         // Defensive: the pubkey segment must be valid base64.
         try {
@@ -206,10 +228,18 @@ public class PeerPinStore(context: Context) : PinStore {
                 null
             }
         }
+        // KT-log S4: only the exact tokens "true" / "false" are honoured;
+        // anything else (including an absent segment) means "unknown".
+        val isReset: Boolean? = when (isResetStr) {
+            "true" -> true
+            "false" -> false
+            else -> null
+        }
         return Pin(
             pinnedSignaturePubkeyB64 = pubkeyB64,
             rotationMarker = marker,
             logStatus = logStatus,
+            isReset = isReset,
         )
     }
 
@@ -222,10 +252,17 @@ public class PeerPinStore(context: Context) : PinStore {
         if (existing != null && rotationMarker < existing.rotationMarker) {
             return SetPinResult.RejectedBackward
         }
-        // Preserve any recorded logStatus (KT-log S3e) across a re-pin —
-        // it is an orthogonal, separately-written field, and a key
-        // rotation shouldn't silently drop the last log verdict.
-        write(accountIdB64, pinnedSignaturePubkeyB64, rotationMarker, existing?.logStatus)
+        // Preserve any recorded logStatus (KT-log S3e) + isReset (KT-log
+        // S4) across a re-pin — they are orthogonal, separately-written
+        // fields, and a key rotation shouldn't silently drop the last log
+        // verdict / marker.
+        write(
+            accountIdB64,
+            pinnedSignaturePubkeyB64,
+            rotationMarker,
+            existing?.logStatus,
+            existing?.isReset,
+        )
         return SetPinResult.Set
     }
 
@@ -241,30 +278,66 @@ public class PeerPinStore(context: Context) : PinStore {
             existing.pinnedSignaturePubkeyB64,
             existing.rotationMarker,
             logStatus,
+            existing.isReset,
         )
         return true
     }
 
-    /** Serialize + persist one pin record. The logStatus segment is
-     *  appended only when present, so a pin with no verdict stays in the
-     *  legacy two-field shape. */
+    override fun recordLogReset(accountIdB64: String, isReset: Boolean?): Boolean {
+        val existing = readPin(accountIdB64) ?: return false
+        if (existing.isReset == isReset) return true // idempotent, no write
+        write(
+            accountIdB64,
+            existing.pinnedSignaturePubkeyB64,
+            existing.rotationMarker,
+            existing.logStatus,
+            isReset,
+        )
+        return true
+    }
+
+    /** Serialize + persist one pin record. Trailing fields are emitted
+     *  only as far as the last present value, so a pin with no verdict and
+     *  no marker stays in the legacy two-field shape. When `isReset` is set
+     *  but `logStatus` is null, the logStatus segment is written empty so
+     *  the positional `isReset` slot stays at index 3. */
     private fun write(
         accountIdB64: String,
         pubkeyB64: String,
         marker: Long,
         logStatus: LogVerifyStatus?,
+        isReset: Boolean?,
     ) {
-        val value = if (logStatus == null) {
-            "$pubkeyB64|$marker"
-        } else {
-            "$pubkeyB64|$marker|${logStatus.name}"
-        }
+        val value = serializePin(pubkeyB64, marker, logStatus, isReset)
         openPrefs(appContext).edit().putString(KEY_PREFIX + accountIdB64, value).apply()
     }
 
     public companion object {
         private const val PREFS_NAME = "lakko-peer-pins"
         private const val KEY_PREFIX = "pin-v1:"
+
+        /**
+         * Serialize a pin record to the `|`-separated on-disk form. Visible
+         * for the parser unit test so the round-trip is exercised without an
+         * Android `Context`. Trailing fields collapse: a pin with neither a
+         * verdict nor a reset marker stays in the legacy two-field shape; an
+         * isReset with no verdict writes an empty verdict slot to keep the
+         * positional layout.
+         */
+        internal fun serializePin(
+            pubkeyB64: String,
+            marker: Long,
+            logStatus: LogVerifyStatus?,
+            isReset: Boolean?,
+        ): String {
+            val resetToken = isReset?.toString()
+            return when {
+                resetToken != null ->
+                    "$pubkeyB64|$marker|${logStatus?.name ?: ""}|$resetToken"
+                logStatus != null -> "$pubkeyB64|$marker|${logStatus.name}"
+                else -> "$pubkeyB64|$marker"
+            }
+        }
 
         private fun openPrefs(
             context: Context,
@@ -302,11 +375,13 @@ public class InMemoryPinStore : PinStore {
         if (existing != null && rotationMarker < existing.rotationMarker) {
             return SetPinResult.RejectedBackward
         }
-        // Preserve any recorded logStatus (KT-log S3e) across a re-pin.
+        // Preserve any recorded logStatus (KT-log S3e) + isReset (S4)
+        // across a re-pin.
         pins[accountIdB64] = Pin(
             pinnedSignaturePubkeyB64 = pinnedSignaturePubkeyB64,
             rotationMarker = rotationMarker,
             logStatus = existing?.logStatus,
+            isReset = existing?.isReset,
         )
         return SetPinResult.Set
     }
@@ -319,6 +394,13 @@ public class InMemoryPinStore : PinStore {
         val existing = pins[accountIdB64] ?: return false
         if (existing.logStatus == logStatus) return true
         pins[accountIdB64] = existing.copy(logStatus = logStatus)
+        return true
+    }
+
+    override fun recordLogReset(accountIdB64: String, isReset: Boolean?): Boolean {
+        val existing = pins[accountIdB64] ?: return false
+        if (existing.isReset == isReset) return true
+        pins[accountIdB64] = existing.copy(isReset = isReset)
         return true
     }
 }

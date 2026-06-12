@@ -10,6 +10,7 @@ import io.ktor.http.headersOf
 import kotlinx.coroutines.test.runTest
 import me.lakko.app.auth.base64Encode
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Test
 import uniffi.lakko_ffi_uniffi.FfiException
 
@@ -64,9 +65,14 @@ class TransparencyVerifyTest {
             """"log_size":$logSize,"timestamp_unix":1700000000,""" +
             """"signature_b64":"${base64Encode(ByteArray(64))}"}"""
 
-    private fun latestJson(pubkey: ByteArray, idx: Long = 3, version: Long = 2): String =
+    private fun latestJson(
+        pubkey: ByteArray,
+        idx: Long = 3,
+        version: Long = 2,
+        isReset: Boolean = false,
+    ): String =
         """{"idx":$idx,"version":$version,""" +
-            """"identity_pubkey_b64":"${base64Encode(pubkey)}","is_reset":false}"""
+            """"identity_pubkey_b64":"${base64Encode(pubkey)}","is_reset":$isReset}"""
 
     private fun proofJson(idx: Long = 3, logSize: Long = 6): String =
         """{"idx":$idx,"leaf_b64":"${base64Encode(ByteArray(8))}",""" +
@@ -83,6 +89,7 @@ class TransparencyVerifyTest {
         latestPubkey: ByteArray = servedPubkey,
         latestStatus: HttpStatusCode = HttpStatusCode.OK,
         rootServerError: Boolean = false,
+        latestIsReset: Boolean = false,
     ): TransparencyClient {
         val engine = MockEngine { request ->
             val path = request.url.encodedPath
@@ -95,7 +102,11 @@ class TransparencyVerifyTest {
                     }
                 path.contains("/transparency/latest/") ->
                     if (latestStatus == HttpStatusCode.OK) {
-                        respond(latestJson(latestPubkey), HttpStatusCode.OK, jsonHeaders)
+                        respond(
+                            latestJson(latestPubkey, isReset = latestIsReset),
+                            HttpStatusCode.OK,
+                            jsonHeaders,
+                        )
                     } else {
                         respond("not found", latestStatus, jsonHeaders)
                     }
@@ -107,13 +118,13 @@ class TransparencyVerifyTest {
         return TransparencyClient("http://transparency.test", engine)
     }
 
-    private suspend fun verify(
+    private suspend fun verifyResult(
         client: TransparencyClient?,
         operatorKey: ByteArray?,
         lastSeen: LastSeenRootStore = InMemoryLastSeenRoot(),
         pubkey: ByteArray = servedPubkey,
         gate: InclusionGate = gatePass,
-    ): LogVerifyStatus = verifyIdentityInLog(
+    ): LogVerifyResult = verifyIdentityInLog(
         accountId = accountId,
         publishedSignaturePubkey = pubkey,
         client = client,
@@ -122,6 +133,16 @@ class TransparencyVerifyTest {
         accountKeyDeriver = deriver,
         inclusionGate = gate,
     )
+
+    /** Status-only convenience wrapper for the existing verdict tests. */
+    private suspend fun verify(
+        client: TransparencyClient?,
+        operatorKey: ByteArray?,
+        lastSeen: LastSeenRootStore = InMemoryLastSeenRoot(),
+        pubkey: ByteArray = servedPubkey,
+        gate: InclusionGate = gatePass,
+    ): LogVerifyStatus =
+        verifyResult(client, operatorKey, lastSeen, pubkey, gate).status
 
     // -----------------------------------------------------------------
     // Verdict mapping
@@ -206,5 +227,148 @@ class TransparencyVerifyTest {
         val lastSeen = InMemoryLastSeenRoot()
         verify(client = mockClient(rootLogSize = 6), operatorKey = operatorKey, lastSeen = lastSeen)
         assertEquals(6L, lastSeen.loadLastSeenLogSize())
+    }
+
+    // -----------------------------------------------------------------
+    // KT-log S4 — the `is_reset` marker rides out on a read latest entry
+    // -----------------------------------------------------------------
+
+    @Test
+    fun `confirmed carries the latest entry is_reset true`() = runTest {
+        val result = verifyResult(
+            client = mockClient(latestIsReset = true),
+            operatorKey = operatorKey,
+            gate = gatePass,
+        )
+        assertEquals(LogVerifyStatus.CONFIRMED, result.status)
+        assertEquals(true, result.isReset)
+    }
+
+    @Test
+    fun `confirmed carries the latest entry is_reset false`() = runTest {
+        val result = verifyResult(
+            client = mockClient(latestIsReset = false),
+            operatorKey = operatorKey,
+            gate = gatePass,
+        )
+        assertEquals(LogVerifyStatus.CONFIRMED, result.status)
+        assertEquals(false, result.isReset)
+    }
+
+    @Test
+    fun `mismatch on a divergent pubkey still carries the latest is_reset`() = runTest {
+        // A latest entry EXISTS (its pubkey just differs from what was
+        // served), so the marker rides out on the MISMATCH verdict.
+        val result = verifyResult(
+            client = mockClient(latestPubkey = otherPubkey, latestIsReset = true),
+            operatorKey = operatorKey,
+        )
+        assertEquals(LogVerifyStatus.MISMATCH, result.status)
+        assertEquals(true, result.isReset)
+    }
+
+    @Test
+    fun `mismatch on a proof failure still carries the latest is_reset`() = runTest {
+        val result = verifyResult(
+            client = mockClient(latestIsReset = true),
+            operatorKey = operatorKey,
+            gate = gateFail,
+        )
+        assertEquals(LogVerifyStatus.MISMATCH, result.status)
+        assertEquals(true, result.isReset)
+    }
+
+    @Test
+    fun `absent has a null is_reset (no latest entry was read)`() = runTest {
+        val result = verifyResult(
+            client = mockClient(latestStatus = HttpStatusCode.NotFound),
+            operatorKey = operatorKey,
+        )
+        assertEquals(LogVerifyStatus.ABSENT, result.status)
+        assertNull(result.isReset)
+    }
+
+    @Test
+    fun `off has a null is_reset`() = runTest {
+        val result = verifyResult(client = null, operatorKey = operatorKey)
+        assertEquals(LogVerifyStatus.OFF, result.status)
+        assertNull(result.isReset)
+    }
+
+    @Test
+    fun `unreachable has a null is_reset`() = runTest {
+        val result = verifyResult(
+            client = mockClient(rootServerError = true),
+            operatorKey = operatorKey,
+        )
+        assertEquals(LogVerifyStatus.UNREACHABLE, result.status)
+        assertNull(result.isReset)
+    }
+
+    @Test
+    fun `rollback has a null is_reset (short-circuited before latest)`() = runTest {
+        val lastSeen = InMemoryLastSeenRoot()
+        lastSeen.checkAndAdvance(100L)
+        val result = verifyResult(
+            client = mockClient(rootLogSize = 6),
+            operatorKey = operatorKey,
+            lastSeen = lastSeen,
+        )
+        assertEquals(LogVerifyStatus.ROLLBACK, result.status)
+        assertNull(result.isReset)
+    }
+
+    // -----------------------------------------------------------------
+    // KT-log S4 — lookupServedKeyReset best-effort marker
+    // -----------------------------------------------------------------
+
+    private suspend fun lookup(
+        client: TransparencyClient?,
+        servedPubkey: ByteArray = this.servedPubkey,
+    ): Boolean? = lookupServedKeyReset(
+        accountId = accountId,
+        servedSignaturePubkey = servedPubkey,
+        client = client,
+        accountKeyDeriver = deriver,
+    )
+
+    @Test
+    fun `lookupServedKeyReset returns true when latest commits to the served key with reset`() =
+        runTest {
+            assertEquals(
+                true,
+                lookup(client = mockClient(latestPubkey = servedPubkey, latestIsReset = true)),
+            )
+        }
+
+    @Test
+    fun `lookupServedKeyReset returns false when latest commits to the served key without reset`() =
+        runTest {
+            assertEquals(
+                false,
+                lookup(client = mockClient(latestPubkey = servedPubkey, latestIsReset = false)),
+            )
+        }
+
+    @Test
+    fun `lookupServedKeyReset returns null when the log is off`() = runTest {
+        assertNull(lookup(client = null))
+    }
+
+    @Test
+    fun `lookupServedKeyReset returns null when the account is absent`() = runTest {
+        assertNull(lookup(client = mockClient(latestStatus = HttpStatusCode.NotFound)))
+    }
+
+    @Test
+    fun `lookupServedKeyReset returns null when latest commits to a different key`() = runTest {
+        // The marker (even if true) describes some OTHER key, so it tells
+        // us nothing about the served one — null.
+        assertNull(
+            lookup(
+                client = mockClient(latestPubkey = otherPubkey, latestIsReset = true),
+                servedPubkey = servedPubkey,
+            ),
+        )
     }
 }

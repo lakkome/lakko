@@ -15,6 +15,7 @@ import me.lakko.app.contacts.ContactsError
 import me.lakko.app.contacts.ContactsRepository
 import me.lakko.app.contacts.ContactsState
 import me.lakko.app.contacts.GeneratedInvite
+import me.lakko.app.contacts.SupersessionRefused
 
 /**
  * State + dispatcher for the [ContactsScreen].
@@ -130,6 +131,23 @@ public class ContactsViewModel(
                         sendError = null,
                         usernameInput = "",
                         introInput = "",
+                    )
+                }
+            } catch (refused: SupersessionRefused) {
+                // KT-log S4 — a fail-closed supersession refusal (an
+                // unproven CHANGED key) is the moment the reset-vs-
+                // compromise distinction matters most. Surface a reset-
+                // AWARE message driven by the best-effort log marker the
+                // client attached (`loggedReset`). The refusal itself is
+                // unchanged — gate 1 threw regardless of the log; this only
+                // colours the prompt.
+                mutableUi.update {
+                    it.copy(
+                        sending = false,
+                        sendError = supersessionRefusedMessage(
+                            refused.loggedReset,
+                            atLabel(username),
+                        ),
                     )
                 }
             } catch (err: ContactsError) {
@@ -449,3 +467,65 @@ public data class ContactsUiState(
     val refreshError: String?,
     val requiresReauth: Boolean,
 )
+
+// =============================================================================
+// KT-log S4 — reset-aware supersession-refusal copy (pure + testable)
+// =============================================================================
+
+/**
+ * Render a typed-username into an `@handle` label for error copy. Trims
+ * surrounding whitespace + a leading `@` the user may have typed so we
+ * never double it; returns `null` for an empty input (the formatter then
+ * falls back to its neutral "This contact" subject). Mirror of the web
+ * `atLabel`.
+ */
+internal fun atLabel(raw: String): String? {
+    val trimmed = raw.trim().trimStart('@')
+    return if (trimmed.isNotEmpty()) "@$trimmed" else null
+}
+
+/**
+ * KT-log S4 — the PURE 3-way mapping from `(loggedReset, peerLabel)` to the
+ * user-facing string for a fail-closed [SupersessionRefused].
+ *
+ * A [SupersessionRefused] is thrown when a peer's discovery bundle carries
+ * an AccountIdentity key that DIFFERS from the locally-pinned one and the
+ * change cannot be authorised by a supersession proof (ADR-0016,
+ * fail-closed). KT-log S4 enriches that refusal with a best-effort
+ * transparency-log marker ([SupersessionRefused.loggedReset]) so the UI can
+ * let a contact DISTINGUISH an owner-initiated identity RESET (the
+ * lost-everything fresh-start, ADR-0017 — logged with `is_reset=true`) from
+ * an unexplained key change (a possible compromise).
+ *
+ * The refusal itself is NEVER changed by the log — gate 1 throws regardless
+ * of `loggedReset`; this only colours the message. A pure top-level
+ * function (not a member) so it is unit-testable without the Compose VM.
+ * Mirror of the web `supersessionRefusedMessage`.
+ *
+ * @param loggedReset the best-effort log marker attached to the refusal:
+ *   `true` (confirmed owner reset), `false` (no owner reset → possible
+ *   compromise), `null` (off / unreachable / absent / inconclusive).
+ * @param peerLabel   the handle the user typed (e.g. `@alice`), rendered
+ *                    verbatim as the subject; falls back to "This contact"
+ *                    when `null` / empty.
+ */
+internal fun supersessionRefusedMessage(
+    loggedReset: Boolean?,
+    peerLabel: String?,
+): String {
+    val who = if (!peerLabel.isNullOrEmpty()) peerLabel else "This contact"
+    return when (loggedReset) {
+        true ->
+            "$who reset their secure identity (for example, they lost " +
+                "their device). The transparency log confirms this was an " +
+                "owner-initiated reset. If you trust this is really them, " +
+                "re-verify their safety number out of band before continuing."
+        false ->
+            "$who's secure identity changed, and the transparency log does " +
+                "NOT show an owner reset — treat this as a possible account " +
+                "compromise. Verify out of band before trusting."
+        null ->
+            "$who's secure identity changed and could not be confirmed " +
+                "against the transparency log. Verify out of band before trusting."
+    }
+}

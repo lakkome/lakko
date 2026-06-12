@@ -6,10 +6,14 @@ package me.lakko.app.contacts
 import io.ktor.client.engine.mock.MockEngine
 import io.ktor.client.engine.mock.respond
 import io.ktor.http.HttpStatusCode
+import io.ktor.http.headersOf
+import kotlinx.coroutines.test.runTest
 import me.lakko.app.auth.base64Encode
 import me.lakko.app.discovery.DiscoveryClient
 import me.lakko.app.discovery.IdentityFetchResponse
 import me.lakko.app.ds.DsClient
+import me.lakko.app.transparency.LogVerifyStatus
+import me.lakko.app.transparency.TransparencyClient
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
@@ -207,4 +211,171 @@ class PeerPinStoreTest {
     // removed by the post-`lakko-security` hardening (ADR-0016 #3) — the
     // ContactsClient ctor now REQUIRES a non-null PinStore, so the gate can
     // never be silently disabled. There is no longer a null case to test.
+
+    // -----------------------------------------------------------------
+    // KT-log S4 — isReset persistence: serialize / parse back-compat
+    // -----------------------------------------------------------------
+
+    @Test
+    fun `serializePin keeps the legacy two-field shape with no verdict or reset`() {
+        assertEquals(
+            "$keyA|42",
+            PeerPinStore.serializePin(keyA, 42L, logStatus = null, isReset = null),
+        )
+    }
+
+    @Test
+    fun `serializePin keeps the three-field shape for a verdict with no reset`() {
+        assertEquals(
+            "$keyA|42|CONFIRMED",
+            PeerPinStore.serializePin(keyA, 42L, LogVerifyStatus.CONFIRMED, isReset = null),
+        )
+    }
+
+    @Test
+    fun `serializePin writes an empty verdict slot when only isReset is set`() {
+        // Positional layout: an isReset with no verdict keeps the reset at
+        // index 3 by writing an empty verdict at index 2.
+        assertEquals(
+            "$keyA|42||true",
+            PeerPinStore.serializePin(keyA, 42L, logStatus = null, isReset = true),
+        )
+    }
+
+    @Test
+    fun `serializePin writes all four fields when both are set`() {
+        assertEquals(
+            "$keyA|42|MISMATCH|false",
+            PeerPinStore.serializePin(keyA, 42L, LogVerifyStatus.MISMATCH, isReset = false),
+        )
+    }
+
+    @Test
+    fun `recordLogReset round-trips true on InMemory`() {
+        val store = InMemoryPinStore()
+        store.setPin(accountIdB64, keyA, 0L)
+        assertEquals(true, store.recordLogReset(accountIdB64, true))
+        assertEquals(true, store.readPin(accountIdB64)?.isReset)
+    }
+
+    @Test
+    fun `recordLogReset round-trips false on InMemory`() {
+        val store = InMemoryPinStore()
+        store.setPin(accountIdB64, keyA, 0L)
+        store.recordLogReset(accountIdB64, false)
+        assertEquals(false, store.readPin(accountIdB64)?.isReset)
+    }
+
+    @Test
+    fun `recordLogReset null clears a stale marker`() {
+        val store = InMemoryPinStore()
+        store.setPin(accountIdB64, keyA, 0L)
+        store.recordLogReset(accountIdB64, true)
+        store.recordLogReset(accountIdB64, null)
+        assertNull(store.readPin(accountIdB64)?.isReset)
+    }
+
+    @Test
+    fun `recordLogReset is a no-op with no pin`() {
+        val store = InMemoryPinStore()
+        assertEquals(false, store.recordLogReset(accountIdB64, true))
+        assertNull(store.readPin(accountIdB64))
+    }
+
+    @Test
+    fun `setPin preserves isReset across a forward re-pin`() {
+        val store = InMemoryPinStore()
+        store.setPin(accountIdB64, keyA, 100L)
+        store.recordLogReset(accountIdB64, true)
+        store.setPin(accountIdB64, keyB, 200L)
+        // A key rotation must not silently drop the last reset marker.
+        assertEquals(true, store.readPin(accountIdB64)?.isReset)
+    }
+
+    // -----------------------------------------------------------------
+    // KT-log S4 — bestEffortServedKeyReset enriches a SupersessionRefused
+    // -----------------------------------------------------------------
+
+    private val jsonHeaders = headersOf("Content-Type", "application/json")
+
+    private fun latestJson(pubkeyB64: String, isReset: Boolean): String =
+        """{"idx":3,"version":2,"identity_pubkey_b64":"$pubkeyB64","is_reset":$isReset}"""
+
+    /**
+     * A transparency client whose `/latest` commits to [servedPubkeyB64]
+     * with the given [isReset] marker. Root + proof are stubbed so the
+     * best-effort lookup (which only hits `/latest`) resolves. Note:
+     * `bestEffortServedKeyReset` derives the username_hash via the NATIVE
+     * `transparencyAccountKey` (no seam on that helper), so the
+     * `/latest/:slug` path is matched by prefix here rather than by an
+     * exact slug — the engine returns the same body for any account-key.
+     */
+    private fun transparencyClient(servedPubkeyB64: String, isReset: Boolean): TransparencyClient {
+        val engine = MockEngine { request ->
+            val path = request.url.encodedPath
+            when {
+                path.contains("/transparency/latest/") ->
+                    respond(latestJson(servedPubkeyB64, isReset), HttpStatusCode.OK, jsonHeaders)
+                else -> respond("not found", HttpStatusCode.NotFound, jsonHeaders)
+            }
+        }
+        return TransparencyClient("http://transparency.test", engine)
+    }
+
+    private fun clientWithTransparency(
+        store: PinStore,
+        transparency: TransparencyClient?,
+    ): ContactsClient {
+        val engine = MockEngine { respond(content = "", status = HttpStatusCode.OK) }
+        val engine2 = MockEngine { respond(content = "", status = HttpStatusCode.OK) }
+        return ContactsClient(
+            discovery = DiscoveryClient(baseUrl = "http://test.invalid", engine = engine),
+            ds = DsClient(baseUrl = "http://test.invalid", engine = engine2),
+            pinStore = store,
+            transparencyClientFactory = { transparency },
+        )
+    }
+
+    @Test
+    fun `bestEffortServedKeyReset returns true when the log commits to the served key with reset`() =
+        runTest {
+            // NOTE: requires liblakko_ffi_uniffi.so for transparencyAccountKey.
+            // Guard so the host suite (no native lib) skips rather than fails.
+            org.junit.Assume.assumeTrue(nativeLibAvailable())
+            val store = InMemoryPinStore()
+            clientWithTransparency(store, transparencyClient(keyB, isReset = true)).use { client ->
+                val refused = SupersessionRefused(
+                    reason = SupersessionRefusedReason.ProofAbsent,
+                    accountIdB64 = base64Encode(accountId),
+                    message = "changed key, no proof",
+                )
+                refused.loggedReset = client.bestEffortServedKeyReset(
+                    accountId,
+                    me.lakko.app.auth.base64Decode(keyB),
+                )
+                assertEquals(true, refused.loggedReset)
+            }
+        }
+
+    @Test
+    fun `bestEffortServedKeyReset returns null when the log is off`() = runTest {
+        val store = InMemoryPinStore()
+        clientWithTransparency(store, transparency = null).use { client ->
+            val marker = client.bestEffortServedKeyReset(
+                accountId,
+                me.lakko.app.auth.base64Decode(keyB),
+            )
+            assertNull(marker)
+        }
+    }
+
+    /** True when the UniFFI native lib loads (the host JVM suite usually
+     *  lacks it; the instrumented suite has it). */
+    private fun nativeLibAvailable(): Boolean =
+        try {
+            uniffi.lakko_ffi_uniffi.transparencyAccountKey(accountId)
+            true
+        } catch (_: Throwable) {
+            false
+        }
 }

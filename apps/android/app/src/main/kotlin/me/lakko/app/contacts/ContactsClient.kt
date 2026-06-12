@@ -20,6 +20,7 @@ import me.lakko.app.transparency.LastSeenRootStore
 import me.lakko.app.transparency.LogVerifyStatus
 import me.lakko.app.transparency.TransparencyClient
 import me.lakko.app.transparency.TransparencyConfig
+import me.lakko.app.transparency.lookupServedKeyReset
 import me.lakko.app.transparency.verifyIdentityInLog
 import uniffi.lakko_ffi_uniffi.ContactAck
 import uniffi.lakko_ffi_uniffi.ContactRequest
@@ -170,7 +171,21 @@ public class ContactsClient(
         // closed) and we never seal to the unverified new key. The
         // supersession gate runs FIRST (and may throw) so a pin always
         // exists for the additive log check below to record on.
-        verifyBundleAccountKey(recipientAccountId, bundle)
+        try {
+            verifyBundleAccountKey(recipientAccountId, bundle)
+        } catch (refused: SupersessionRefused) {
+            // KT-log S4 — on a fail-closed refusal of an UNPROVEN CHANGED
+            // key (the moment the reset-vs-compromise distinction matters
+            // most), enrich the error with a BEST-EFFORT transparency
+            // lookup of the NEW key's `is_reset` marker. This NEVER weakens
+            // the gate: it already threw, we re-throw it unchanged save for
+            // the added context. Any log fault leaves `loggedReset` null.
+            refused.loggedReset = bestEffortServedKeyReset(
+                recipientAccountId,
+                base64Decode(bundle.signature_pubkey),
+            )
+            throw refused
+        }
 
         // KT-log S3e — ADDITIVE equivocation-detection layer on top of the
         // supersession/pin gate. HARD-FAILS only on a ROLLBACK (the log
@@ -415,6 +430,64 @@ public class ContactsClient(
     }
 
     /**
+     * KT-log S4 — best-effort lookup of the served (refused) key's
+     * `is_reset` marker, used ONLY to enrich a [SupersessionRefused].
+     *
+     * Mirror of the web `ContactsClient.bestEffortServedKeyReset`. Wraps
+     * [lookupServedKeyReset] (which itself never throws) and swallows any
+     * throw — including a factory misconfiguration — to a `null`, so the
+     * enrichment can never break the already-failing refusal path. Returns
+     * `true` / `false` only when the log's latest entry commits to exactly
+     * the served key; `null` otherwise (off / unreachable / absent /
+     * pubkey-divergence).
+     *
+     * `internal` (not `private`) so the instrumented test suite can drive
+     * it directly against a `MockEngine`-backed transparency client.
+     *
+     * @param accountId    the peer's raw 16-byte account_id.
+     * @param servedPubkey the 32-byte Ed25519 key discovery served (the
+     *                     refused NEW key).
+     */
+    internal suspend fun bestEffortServedKeyReset(
+        accountId: ByteArray,
+        servedPubkey: ByteArray,
+    ): Boolean? {
+        val client = try {
+            transparencyClientFactory()
+        } catch (cause: Throwable) {
+            // A factory that throws (misconfiguration) must NOT break the
+            // refusal enrichment — the marker is simply unknown.
+            Log.w(
+                "lakko-contacts",
+                "transparency: client factory threw during best-effort reset " +
+                    "lookup (refusal stands; loggedReset stays null)",
+                cause,
+            )
+            return null
+        }
+        if (client == null) return null
+        return try {
+            client.use { c ->
+                lookupServedKeyReset(
+                    accountId = accountId,
+                    servedSignaturePubkey = servedPubkey,
+                    client = c,
+                )
+            }
+        } catch (cause: Throwable) {
+            // lookupServedKeyReset is designed not to throw, but the .use
+            // close() or any unexpected path must never break the refusal.
+            Log.w(
+                "lakko-contacts",
+                "transparency: best-effort reset lookup threw (refusal " +
+                    "stands; loggedReset stays null)",
+                cause,
+            )
+            null
+        }
+    }
+
+    /**
      * KT-log S3e — consult the operator-signed transparency log to confirm
      * the served identity is in the public append-only log (equivocation
      * detection on top of the supersession/pin gate).
@@ -473,7 +546,7 @@ public class ContactsClient(
             return
         }
 
-        val status: LogVerifyStatus = try {
+        val result: me.lakko.app.transparency.LogVerifyResult = try {
             client.use { c ->
                 verifyIdentityInLog(
                     accountId = accountId,
@@ -496,6 +569,8 @@ public class ContactsClient(
             )
             return
         }
+        val status = result.status
+        val isReset = result.isReset
 
         // Rollback is the one hard failure (unambiguous attack).
         if (status == LogVerifyStatus.ROLLBACK) {
@@ -503,8 +578,11 @@ public class ContactsClient(
         }
 
         // Record the verdict on the pin record (best-effort; the pin
-        // exists because the supersession gate ran first).
+        // exists because the supersession gate ran first). KT-log S4 also
+        // persists the `/latest` entry's `is_reset` marker next to the
+        // status (a `null` clears any stale marker — no latest was read).
         pinStore.recordLogStatus(accountIdB64, status)
+        pinStore.recordLogReset(accountIdB64, isReset)
 
         when (status) {
             LogVerifyStatus.MISMATCH ->
@@ -1095,7 +1173,29 @@ public class SupersessionRefused(
     /** base64 of the account_id whose key change was refused. */
     public val accountIdB64: String,
     message: String,
-) : RuntimeException(message)
+) : RuntimeException(message) {
+    /**
+     * KT-log S4 — best-effort transparency-log context for the NEW
+     * (refused) key, attached so the UI can distinguish an
+     * owner-initiated identity RESET from an unexplained key change.
+     *
+     *   * `true`  — the log's latest entry commits to EXACTLY the served
+     *     new key AND records it as an owner-initiated reset (ADR-0017
+     *     lost-everything fresh-start).
+     *   * `false` — the log's latest entry commits to the served new key
+     *     but does NOT record a reset (an unexplained change → possible
+     *     compromise).
+     *   * `null`  — the log is off / unreachable / the account is absent /
+     *     the log's latest pubkey does not match the served key (the marker
+     *     is then about a different key, so it is unknown).
+     *
+     * This is **best-effort enrichment only**: a log failure NEVER changes
+     * the refusal — gate 1 (the supersession/pin gate) throws regardless.
+     * It only colours the OOB-reverify prompt. Mirror of the web
+     * `SupersessionRefused.loggedReset`.
+     */
+    public var loggedReset: Boolean? = null
+}
 
 /**
  * KT-log S3e — thrown when the transparency log's signed root reports a
