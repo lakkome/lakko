@@ -89,17 +89,32 @@ public final class PeerPinStore {
         /// surface the reset-vs-compromise distinction. Mirror of the
         /// web pin-record `isReset`.
         public let isReset: Bool?
+        /// G-30 #2 (ADR-0019): the transparency-log VERSION at which the
+        /// currently-pinned key was chain-confirmed (the `/latest` entry's
+        /// per-account-key `version`). Written ONLY on a `confirmed`
+        /// rotation-chain verdict
+        /// (``TransparencyVerify/verifyRotationChain(accountId:servedPubkey:ctx:)``).
+        /// The next rotation's chain proof must reference a
+        /// STRICTLY-NEWER logged version, so persisting it gives the chain
+        /// verifier its downgrade-protection floor. `nil` on a pin that
+        /// has never been chain-confirmed (a TOFU pin, or one written
+        /// before G-30 #2 — synthesized `Codable` decodes an absent key
+        /// to `nil`, so old blobs migrate transparently). Mirror of the
+        /// web pin-record `pinnedLogVersion`.
+        public let pinnedLogVersion: UInt64?
 
         public init(
             pinnedSignaturePubkeyB64: String,
             rotationMarker: Int64,
             logStatus: String? = nil,
-            isReset: Bool? = nil
+            isReset: Bool? = nil,
+            pinnedLogVersion: UInt64? = nil
         ) {
             self.pinnedSignaturePubkeyB64 = pinnedSignaturePubkeyB64
             self.rotationMarker = rotationMarker
             self.logStatus = logStatus
             self.isReset = isReset
+            self.pinnedLogVersion = pinnedLogVersion
         }
     }
 
@@ -195,16 +210,19 @@ public final class PeerPinStore {
             return .rejectedBackward
         }
         // Preserve any recorded `logStatus` (KT-log S3d) + `isReset`
-        // (KT-log S4) across a re-pin — they are orthogonal,
-        // separately-written fields, and a key rotation shouldn't
-        // silently drop the last log verdict / reset marker. The fetch
-        // path re-records both right after a re-pin, so a stale carried
-        // value is replaced immediately (mirror of the web `setPin`).
+        // (KT-log S4) + `pinnedLogVersion` (G-30 #2) across a re-pin —
+        // they are orthogonal, separately-written fields, and a key
+        // rotation shouldn't silently drop the last log verdict / reset
+        // marker / downgrade floor. The fetch path re-records all of them
+        // right after a re-pin (the chain-confirmed version only on a
+        // `confirmed` rotation), so a stale carried value is replaced
+        // immediately (mirror of the web `setPin`).
         map[accountIdB64] = AccountPubkeyPin(
             pinnedSignaturePubkeyB64: pinnedSignaturePubkeyB64,
             rotationMarker: rotationMarker,
             logStatus: existing?.logStatus,
-            isReset: existing?.isReset
+            isReset: existing?.isReset,
+            pinnedLogVersion: existing?.pinnedLogVersion
         )
         saveMap(map)
         return .set
@@ -230,7 +248,8 @@ public final class PeerPinStore {
             pinnedSignaturePubkeyB64: existing.pinnedSignaturePubkeyB64,
             rotationMarker: existing.rotationMarker,
             logStatus: logStatus,
-            isReset: existing.isReset
+            isReset: existing.isReset,
+            pinnedLogVersion: existing.pinnedLogVersion
         )
         saveMap(map)
         return true
@@ -265,7 +284,8 @@ public final class PeerPinStore {
             pinnedSignaturePubkeyB64: existing.pinnedSignaturePubkeyB64,
             rotationMarker: existing.rotationMarker,
             logStatus: existing.logStatus,
-            isReset: isReset
+            isReset: isReset,
+            pinnedLogVersion: existing.pinnedLogVersion
         )
         saveMap(map)
         return true
@@ -276,6 +296,48 @@ public final class PeerPinStore {
     /// Mirror of the web `readLogReset`.
     public func readLogReset(accountIdB64: String) -> Bool? {
         loadMap()[accountIdB64]?.isReset
+    }
+
+    /// Record the chain-confirmed transparency-log VERSION (G-30 #2,
+    /// ADR-0019) for an account, keyed on the same stable `account_id`
+    /// as the pin.
+    ///
+    /// Mirrors ``recordLogReset(accountIdB64:isReset:)``: writes onto the
+    /// existing pin record so the version travels with the pinned key,
+    /// and is a **no-op when no pin exists** (the supersession gate
+    /// TOFU-pins on first sight, so a pin is present by the time a chain
+    /// verdict is recorded). A `nil` argument CLEARS any stored version.
+    /// The caller persists it ONLY on a `confirmed` rotation-chain
+    /// verdict — a transient `unreachable` / `mismatch` / `absent`
+    /// outcome must NOT wipe a previously-confirmed version, so the
+    /// caller does not pass `nil` on those (see
+    /// ``ContactsClient/checkTransparencyLog(accountId:accountIdB64:servedPubkey:oldPin:supersessionProofB64:)``).
+    /// Idempotent on an unchanged value (no write). Returns whether a
+    /// write happened (a present pin). Mirror of the web
+    /// `recordLogVersion`.
+    @discardableResult
+    public func recordLogVersion(accountIdB64: String, version: UInt64?) -> Bool {
+        var map = loadMap()
+        guard let existing = map[accountIdB64] else { return false }
+        if existing.pinnedLogVersion == version { return true } // idempotent (incl. nil==nil)
+        map[accountIdB64] = AccountPubkeyPin(
+            pinnedSignaturePubkeyB64: existing.pinnedSignaturePubkeyB64,
+            rotationMarker: existing.rotationMarker,
+            logStatus: existing.logStatus,
+            isReset: existing.isReset,
+            pinnedLogVersion: version
+        )
+        saveMap(map)
+        return true
+    }
+
+    /// Read the recorded chain-confirmed log version (G-30 #2) for an
+    /// account, or `nil` when no pin / no recorded version. The next
+    /// rotation's chain proof is checked against this as the downgrade
+    /// floor (default `0` when absent). Mirror of the web
+    /// `readLogVersion`.
+    public func readLogVersion(accountIdB64: String) -> UInt64? {
+        loadMap()[accountIdB64]?.pinnedLogVersion
     }
 
     /// Remove the pin for `accountIdB64`. No-op when absent. Exposed

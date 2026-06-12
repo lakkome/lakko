@@ -103,6 +103,13 @@ public final class ContactsClient {
         accountId: Data,
         bundle: IdentityFetchResponse
     ) async throws {
+        // G-30 #2 (ADR-0019): snapshot the pin BEFORE gate 1 runs. Gate 1
+        // re-pins to the new key on a verified rotation (overwriting the
+        // pin), but gate 2's rotation-chain check needs the OLD pinned key
+        // + the OLD chain-version floor to anchor the chain. Capturing it
+        // here keeps gate 1 untouched.
+        let oldPin = pinStore.readPin(accountIdB64: base64Encode(accountId))
+
         // Gate 1 (primary, fail-closed). A throw here short-circuits
         // gate 2.
         do {
@@ -123,6 +130,10 @@ public final class ContactsClient {
         }
 
         // Gate 2 (additive, best-effort). Hard-fails only on rollback.
+        // G-30 #2 (ADR-0019): pass the OLD pin + the bundle's supersession
+        // proof so the log check can route a key ROTATION through the
+        // chain verifier (anchoring the transition to the operator-signed
+        // log) instead of the standalone single-key inclusion check.
         let accountIdB64 = base64Encode(accountId)
         guard let servedPubkey = base64Decode(bundle.signaturePubkey) else {
             // The supersession gate already accepted this bundle's
@@ -133,7 +144,9 @@ public final class ContactsClient {
         try await checkTransparencyLog(
             accountId: accountId,
             accountIdB64: accountIdB64,
-            servedPubkey: servedPubkey
+            servedPubkey: servedPubkey,
+            oldPin: oldPin,
+            supersessionProofB64: bundle.supersessionProof
         )
     }
 
@@ -342,21 +355,72 @@ public final class ContactsClient {
     /// The recorded status travels on the account's pin record so the
     /// UI can surface it. Mirror of the web `checkTransparencyLog`.
     ///
+    /// G-30 #2 (ADR-0019): when the served key is a ROTATION away from
+    /// the pinned one AND the bundle carried a supersession proof, the
+    /// check routes through
+    /// ``TransparencyVerify/verifyRotationChain(accountId:servedPubkey:ctx:)``
+    /// (the chain verifier — root sig + no-rollback + Merkle inclusion +
+    /// the supersession proof from the OLD pinned key + a strictly-newer
+    /// logged version + freshness) instead of the standalone single-key
+    /// ``TransparencyVerify/verifyIdentityInLog(accountId:publishedSignaturePubkey:)``.
+    /// The POSTURE is unchanged: only `.rollback` hard-fails; a chain
+    /// contradiction surfaces as `.mismatch` (NOT a block); a
+    /// not-logged / unreachable / off rotation falls back to the
+    /// standalone gate-1 result (no over-block). On a `.confirmed` chain
+    /// the proven log version is persisted as the next rotation's
+    /// downgrade floor.
+    ///
     /// - Parameter accountId: the peer's raw 16-byte account_id.
     /// - Parameter accountIdB64: its base64 form (the pin-store key).
     /// - Parameter servedPubkey: the 32-byte Ed25519 key discovery
     ///   served.
+    /// - Parameter oldPin: the pin AS IT WAS BEFORE gate 1 re-pinned
+    ///   (G-30 #2) — `nil` on a first-ever observation.
+    /// - Parameter supersessionProofB64: the bundle's
+    ///   `supersession_proof` (base64), when present — the chain's
+    ///   old-key authorisation.
     /// - Throws: ``LogRollbackDetected`` ONLY on a `.rollback` verdict.
     func checkTransparencyLog(
         accountId: Data,
         accountIdB64: String,
-        servedPubkey: Data
+        servedPubkey: Data,
+        oldPin: PeerPinStore.AccountPubkeyPin? = nil,
+        supersessionProofB64: String? = nil
     ) async throws {
-        let result = await transparencyVerify.verifyIdentityInLog(
-            accountId: accountId,
-            publishedSignaturePubkey: servedPubkey
-        )
-        let status = result.status
+        // G-30 #2 — a ROTATION is: a pin existed, its key DIFFERS from
+        // the served key, and the bundle carried a supersession proof.
+        // Only then can the chain verifier anchor the transition. Anything
+        // else (first observation / unchanged key / no proof) keeps the
+        // existing single-key inclusion check unchanged.
+        let status: LogVerifyStatus
+        let isReset: Bool?
+        let version: UInt64?
+        if let oldPin = oldPin,
+           oldPin.pinnedSignaturePubkeyB64 != base64Encode(servedPubkey),
+           let proofB64 = supersessionProofB64, !proofB64.isEmpty,
+           let proofBytes = base64Decode(proofB64),
+           let pinnedOldPubkey = base64Decode(oldPin.pinnedSignaturePubkeyB64) {
+            let result = await transparencyVerify.verifyRotationChain(
+                accountId: accountId,
+                servedPubkey: servedPubkey,
+                ctx: RotationContext(
+                    supersessionProof: proofBytes,
+                    pinnedOldPubkey: pinnedOldPubkey,
+                    pinnedLogVersion: oldPin.pinnedLogVersion ?? 0
+                )
+            )
+            status = result.status
+            isReset = result.isReset
+            version = result.version
+        } else {
+            let result = await transparencyVerify.verifyIdentityInLog(
+                accountId: accountId,
+                publishedSignaturePubkey: servedPubkey
+            )
+            status = result.status
+            isReset = result.isReset
+            version = nil
+        }
 
         // Rollback is the one hard failure (unambiguous attack).
         if status == .rollback {
@@ -369,7 +433,16 @@ public final class ContactsClient {
         // the status (a `nil` clears any stale marker — no latest was
         // read).
         pinStore.recordLogStatus(accountIdB64: accountIdB64, logStatus: status.rawValue)
-        pinStore.recordLogReset(accountIdB64: accountIdB64, isReset: result.isReset)
+        pinStore.recordLogReset(accountIdB64: accountIdB64, isReset: isReset)
+
+        // G-30 #2 — persist the chain-confirmed log version ONLY on a
+        // `.confirmed` rotation chain (where `version != nil`). A
+        // transient `unreachable` / `mismatch` / `absent` verdict must
+        // NOT clear a previously-confirmed floor, so we never pass `nil`
+        // here.
+        if let version = version {
+            pinStore.recordLogVersion(accountIdB64: accountIdB64, version: version)
+        }
 
         switch status {
         case .mismatch:

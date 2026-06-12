@@ -58,6 +58,58 @@ public struct LogVerifyResult: Equatable {
     }
 }
 
+/// The rotation context handed to
+/// ``TransparencyVerify/verifyRotationChain(accountId:servedPubkey:ctx:)``
+/// (G-30 #2, ADR-0019). Mirror of the web `verifyRotationChain`'s `ctx`
+/// argument — the bundle's supersession proof bytes, the locally-pinned
+/// OLD pubkey, and the pinned log-version floor.
+public struct RotationContext: Equatable {
+    /// The bundle's `supersession_proof` bytes (already base64-decoded)
+    /// — the chain's OLD-key authorisation.
+    public let supersessionProof: Data
+    /// The 32-byte AccountIdentity pubkey pinned for this account BEFORE
+    /// the rotation re-pinned (the chain's trusted old key).
+    public let pinnedOldPubkey: Data
+    /// The transparency-log version the pinned key was last
+    /// chain-confirmed at (the downgrade floor; `0` when never
+    /// chain-confirmed). The chain proof must reference a STRICTLY-NEWER
+    /// logged version.
+    public let pinnedLogVersion: UInt64
+
+    public init(supersessionProof: Data, pinnedOldPubkey: Data, pinnedLogVersion: UInt64) {
+        self.supersessionProof = supersessionProof
+        self.pinnedOldPubkey = pinnedOldPubkey
+        self.pinnedLogVersion = pinnedLogVersion
+    }
+}
+
+/// The outcome of
+/// ``TransparencyVerify/verifyRotationChain(accountId:servedPubkey:ctx:)``
+/// (G-30 #2, ADR-0019). Mirror of the web `RotationChainResult`.
+///
+/// Extends the ``LogVerifyResult`` shape with the chain-confirmed
+/// per-account-key ``version``: the transparency-log version the served
+/// (rotated-to) key was proven included at, so the caller can persist it
+/// as the next rotation's downgrade floor. ``version`` is non-`nil` ONLY
+/// on a `.confirmed` verdict (a latest entry was read AND the chain gate
+/// passed); `nil` on every other status (no chain confirmation to anchor
+/// a version on).
+public struct RotationChainResult: Equatable {
+    /// The verdict — same enum as ``LogVerifyResult``.
+    public let status: LogVerifyStatus
+    /// The `/latest` entry's `is_reset` marker when a latest entry was
+    /// read (`.confirmed` / `.mismatch`); `nil` otherwise.
+    public let isReset: Bool?
+    /// The chain-confirmed log version on `.confirmed`; `nil` otherwise.
+    public let version: UInt64?
+
+    public init(status: LogVerifyStatus, isReset: Bool?, version: UInt64?) {
+        self.status = status
+        self.isReset = isReset
+        self.version = version
+    }
+}
+
 /// Transparency-log inclusion verification (KT-log S3d) — the
 /// equivocation-detection / gossip layer on top of the ADR-0016
 /// supersession/pin gate.
@@ -89,6 +141,23 @@ public struct TransparencyVerify {
         public let version: UInt64
     }
 
+    /// The operator key + signed-root + proof + supersession bundle
+    /// handed to the rotation-chain-gate seam (G-30 #2, ADR-0019). Lets
+    /// tests drive the `confirmed` / chain-fail `mismatch` branches
+    /// without minting a real Merkle proof AND a real supersession proof
+    /// (both are Rust-internal, not FFI-exposed).
+    public struct ChainArgs {
+        public let operatorKey: Data
+        public let root: SignedRoot
+        public let accountKey: Data
+        public let servedPubkey: Data
+        public let proof: InclusionProof
+        public let version: UInt64
+        public let supersessionProof: Data
+        public let pinnedOldPubkey: Data
+        public let pinnedLogVersion: UInt64
+    }
+
     private let client: TransparencyFetching?
     private let operatorKey: Data?
     private let lastSeenRoot: LastSeenRoot
@@ -100,6 +169,17 @@ public struct TransparencyVerify {
     /// builder (not FFI-exposed), so tests stub this seam to cover the
     /// `confirmed` / proof-fail `mismatch` branches.
     private let verifyInclusion: ((InclusionArgs) throws -> Void)?
+    /// Rotation-chain-gate override (TEST SEAM ONLY) — G-30 #2
+    /// (ADR-0019). When supplied, this REPLACES the real
+    /// `verifySupersessionChain` FFI call in
+    /// ``verifyRotationChain(accountId:servedPubkey:ctx:)``: it RETURNS
+    /// the authorised new pubkey to simulate a passing chain and THROWS
+    /// to simulate a chain-gate failure — exactly the FFI contract.
+    /// Production callers pass `nil`; building a real Merkle proof + a
+    /// real supersession proof needs the Rust log builder (not
+    /// FFI-exposed), so tests stub this seam to cover the `confirmed` /
+    /// chain-fail `mismatch` branches.
+    private let verifyChain: ((ChainArgs) throws -> Data)?
 
     /// Build a verifier from the build-time config (production path) or
     /// from injected dependencies (tests).
@@ -114,16 +194,20 @@ public struct TransparencyVerify {
     ///   - lastSeenRoot: the no-rollback high-water store. Defaults to
     ///     a `.standard`-backed ``LastSeenRoot``.
     ///   - verifyInclusion: the test-only inclusion seam (see above).
+    ///   - verifyChain: the test-only rotation-chain seam (G-30 #2; see
+    ///     above).
     public init(
         client: TransparencyFetching? = TransparencyClient.forOptionalConfig(),
         operatorKey: Data? = TransparencyConfig.pinnedOperatorKey,
         lastSeenRoot: LastSeenRoot = LastSeenRoot(),
-        verifyInclusion: ((InclusionArgs) throws -> Void)? = nil
+        verifyInclusion: ((InclusionArgs) throws -> Void)? = nil,
+        verifyChain: ((ChainArgs) throws -> Data)? = nil
     ) {
         self.client = client
         self.operatorKey = operatorKey
         self.lastSeenRoot = lastSeenRoot
         self.verifyInclusion = verifyInclusion
+        self.verifyChain = verifyChain
     }
 
     /// Verify that `publishedSignaturePubkey` (the AccountIdentity
@@ -234,6 +318,166 @@ public struct TransparencyVerify {
             // Fail-open to `.unreachable` (the caller does not block on
             // it); the supersession/pin gate is the primary trust.
             return LogVerifyResult(status: .unreachable, isReset: nil)
+        }
+    }
+
+    /// G-30 #2 (ADR-0019) — verify that a peer's KEY ROTATION is
+    /// cryptographically anchored to the operator-signed transparency
+    /// log.
+    ///
+    /// Where ``verifyIdentityInLog(accountId:publishedSignaturePubkey:)``
+    /// proves a SINGLE served key is in the log, this proves the
+    /// TRANSITION old→new: the served (rotated-to) key is the log's
+    /// current head for the account AND a supersession chain — root
+    /// signature, no-rollback, Merkle inclusion, the embedded
+    /// supersession proof from the OLD pinned key, a strictly-newer
+    /// logged version than the pinned floor, and freshness — all hold.
+    /// The heavy lifting is one `verifySupersessionChain` FFI call (which
+    /// THROWS on any chain-gate failure and returns the authorised new
+    /// pubkey on success).
+    ///
+    /// Called by
+    /// ``ContactsClient/checkTransparencyLog(accountId:accountIdB64:servedPubkey:oldPin:supersessionProofB64:)``
+    /// ONLY on the rotation branch (a pin exists, the served key differs
+    /// from it, and the bundle carried a supersession proof). It is
+    /// BEST-EFFORT with the SAME posture contract as
+    /// ``verifyIdentityInLog(accountId:publishedSignaturePubkey:)``: it
+    /// never throws — every fault maps to a status, and the caller (not
+    /// this function) decides the posture. Only `.rollback` is surfaced
+    /// as a hard verdict; a chain contradiction is surfaced as
+    /// `.mismatch` (an equivocation signal), NOT a block.
+    ///
+    /// Status mapping (mirror of the web `verifyRotationChain`):
+    ///   * `.off`         — the integration is unconfigured (no client /
+    ///                      no pinned operator key). `version` nil.
+    ///   * `.rollback`    — the signed root's `log_size` shrank below our
+    ///                      high-water mark. `version` nil.
+    ///   * `.absent`      — `/latest` 404s (the rotated key is not yet
+    ///                      logged), OR the log's latest pubkey is NOT the
+    ///                      served key (a not-yet-logged rotation or a
+    ///                      third key — we cannot chain-prove the served
+    ///                      key, so we do NOT block; the standalone gate-1
+    ///                      result stands). `version` nil.
+    ///   * `.confirmed`   — the chain gate passed. `version` is the
+    ///                      latest entry's logged version.
+    ///   * `.mismatch`    — the chain gate THREW (the log contradicts the
+    ///                      proof — an equivocation signal). `version`
+    ///                      nil.
+    ///   * `.unreachable` — a network/log fault. `version` nil.
+    ///
+    /// - Parameters:
+    ///   - accountId: the peer's raw 16-byte account_id.
+    ///   - servedPubkey: the 32-byte Ed25519 key discovery served (the
+    ///     rotated-TO key).
+    ///   - ctx: the rotation context — the bundle's supersession proof
+    ///     bytes, the locally-pinned OLD pubkey, and the pinned
+    ///     log-version floor.
+    /// - Returns: a ``RotationChainResult``. Never throws.
+    public func verifyRotationChain(
+        accountId: Data,
+        servedPubkey: Data,
+        ctx: RotationContext
+    ) async -> RotationChainResult {
+        // off — the integration is unconfigured. Skip entirely.
+        guard let client = client, let operatorKey = operatorKey else {
+            return RotationChainResult(status: .off, isReset: nil, version: nil)
+        }
+
+        do {
+            // 1. Fetch the operator-signed root and run the no-rollback
+            //    gate against our high-water mark BEFORE trusting it.
+            let root = try await client.fetchRoot()
+            if lastSeenRoot.checkAndAdvance(root.logSize) == .rollback {
+                return RotationChainResult(status: .rollback, isReset: nil, version: nil)
+            }
+
+            // 2. Look up the account's latest logged entry. The
+            //    account-key derivation runs in the audited Rust core via
+            //    `transparencyAccountKey`, so it cannot drift from the
+            //    server's `account_key(...)`.
+            let accountKey = transparencyAccountKey(accountId: accountId)
+            guard let latest = try await client.fetchLatest(usernameHash: accountKey) else {
+                // The rotated key is not yet logged. Benign under
+                // eventual consistency — we cannot chain-prove it, so we
+                // do NOT block.
+                return RotationChainResult(status: .absent, isReset: nil, version: nil)
+            }
+
+            // 3. The log's latest pubkey must BE the served key for the
+            //    chain to prove the served key. If it is a not-yet-logged
+            //    rotation or a third key, we cannot chain-prove the served
+            //    key here; the standalone gate-1 (supersession/pin) result
+            //    stands. Surface `.absent` (no chain confirmation) — do
+            //    NOT block on it.
+            if latest.identityPubkey != servedPubkey {
+                return RotationChainResult(
+                    status: .absent, isReset: latest.isReset, version: nil
+                )
+            }
+
+            // 4. Fetch the inclusion proof and run the full chain gate.
+            //    The FFI verifier throws on any sub-gate failure (root
+            //    sig / rollback / inclusion / supersession proof /
+            //    non-newer version / freshness).
+            let proof = try await client.fetchProof(idx: latest.idx)
+            do {
+                let args = ChainArgs(
+                    operatorKey: operatorKey,
+                    root: root,
+                    accountKey: accountKey,
+                    servedPubkey: servedPubkey,
+                    proof: proof,
+                    version: latest.version,
+                    supersessionProof: ctx.supersessionProof,
+                    pinnedOldPubkey: ctx.pinnedOldPubkey,
+                    pinnedLogVersion: ctx.pinnedLogVersion
+                )
+                if let seam = verifyChain {
+                    // Test seam — stubbed chain gate (throws to fail).
+                    _ = try seam(args)
+                } else {
+                    // Production — the audited Rust core does the
+                    // root-signature + Merkle-inclusion + supersession +
+                    // no-downgrade + freshness check.
+                    _ = try verifySupersessionChain(
+                        operatorPubkey: operatorKey,
+                        newTreeRoot: root.treeRoot,
+                        newLogSize: root.logSize,
+                        newTimestampUnix: root.timestampUnix,
+                        newRootSignature: root.signature,
+                        entryUsernameHash: accountKey,
+                        entryIdentityPubkey: servedPubkey,
+                        entryVersion: latest.version,
+                        inclusionLeafIndex: proof.idx,
+                        inclusionAuditPath: proof.auditPath,
+                        supersessionProof: ctx.supersessionProof,
+                        pinnedOldPubkey: ctx.pinnedOldPubkey,
+                        pinnedVersion: ctx.pinnedLogVersion,
+                        lastSeenLogSize: lastSeenRoot.loadLastSeenLogSize(),
+                        nowUnixSecs: Int64(Date().timeIntervalSince1970)
+                    )
+                }
+            } catch {
+                // The chain gate failed: the log CONTRADICTS the
+                // supersession proof (an equivocation signal). Surface
+                // `.mismatch` — the caller records + warns but does NOT
+                // block (S3d posture). A latest entry existed, so the
+                // marker rides out.
+                return RotationChainResult(
+                    status: .mismatch, isReset: latest.isReset, version: nil
+                )
+            }
+            // The chain is proven — anchor the confirmed version for the
+            // next rotation's downgrade floor.
+            return RotationChainResult(
+                status: .confirmed, isReset: latest.isReset, version: latest.version
+            )
+        } catch {
+            // A network fault, a non-404 HTTP fault, or a malformed body
+            // — the chain is unusable for this check. Fail-open to
+            // `.unreachable` (the caller does not block on it); the
+            // standalone supersession/pin gate is primary.
+            return RotationChainResult(status: .unreachable, isReset: nil, version: nil)
         }
     }
 

@@ -629,6 +629,470 @@ final class TransparencyVerifyTests: XCTestCase {
         let c = ContactsViewModel.supersessionRefusedMessage(loggedReset: nil, peerLabel: "@x")
         XCTAssertEqual(Set([a, b, c]).count, 3)
     }
+
+    // MARK: - G-30 #2 (ADR-0019): verifyRotationChain outcome mapping
+
+    private let pinnedOldPubkey = Data(repeating: 0x01, count: 32)
+    private let supersessionProofBytes = Data(repeating: 0xEE, count: 145)
+
+    /// Build a verifier whose rotation-chain gate is driven by the test
+    /// seam (a valid Merkle + supersession proof can only be minted by
+    /// the Rust log builder, which is not FFI-exposed).
+    private func chainVerifier(
+        client: TransparencyFetching?,
+        operatorKey: Data? = nil,
+        lastSeenRoot: LastSeenRoot? = nil,
+        chain: ((TransparencyVerify.ChainArgs) throws -> Data)? = nil
+    ) -> TransparencyVerify {
+        TransparencyVerify(
+            client: client,
+            operatorKey: operatorKey ?? self.operatorKey,
+            lastSeenRoot: lastSeenRoot ?? LastSeenRoot(defaults: freshDefaults()),
+            verifyInclusion: { _ in },
+            verifyChain: chain
+        )
+    }
+
+    private func runChain(_ v: TransparencyVerify) async -> RotationChainResult {
+        await v.verifyRotationChain(
+            accountId: accountId,
+            servedPubkey: servedPubkey,
+            ctx: RotationContext(
+                supersessionProof: supersessionProofBytes,
+                pinnedOldPubkey: pinnedOldPubkey,
+                pinnedLogVersion: 0
+            )
+        )
+    }
+
+    func testChainConfirmedCarriesVersion() async {
+        // The latest entry commits to the served key at version 7; the
+        // chain gate passes → `.confirmed` with version == 7.
+        let v = chainVerifier(
+            client: FakeFetcher(
+                root: rootAt(10),
+                latest: LatestEntry(
+                    idx: 3, version: 7, identityPubkey: servedPubkey, isReset: false
+                ),
+                proof: proofFixture
+            ),
+            chain: { _ in self.servedPubkey } // pass → authorised new pubkey
+        )
+        let result = await runChain(v)
+        XCTAssertEqual(result.status, .confirmed)
+        XCTAssertEqual(result.version, 7)
+        XCTAssertEqual(result.isReset, false)
+    }
+
+    func testChainConfirmedCarriesResetMarker() async {
+        let v = chainVerifier(
+            client: FakeFetcher(
+                root: rootAt(10),
+                latest: latestWith(servedPubkey, isReset: true),
+                proof: proofFixture
+            ),
+            chain: { _ in self.servedPubkey }
+        )
+        let result = await runChain(v)
+        XCTAssertEqual(result.status, .confirmed)
+        XCTAssertEqual(result.isReset, true)
+        // `latestWith` fixes version == 1.
+        XCTAssertEqual(result.version, 1)
+    }
+
+    func testChainMismatchDoesNotThrowAndHasNilVersion() async {
+        // The chain gate THROWS (the log contradicts the proof) →
+        // `.mismatch`, no version, marker still rides out, NEVER throws.
+        let v = chainVerifier(
+            client: FakeFetcher(
+                root: rootAt(10),
+                latest: latestWith(servedPubkey, isReset: true),
+                proof: proofFixture
+            ),
+            chain: { _ in throw FakeError.inclusionFailed }
+        )
+        let result = await runChain(v)
+        XCTAssertEqual(result.status, .mismatch)
+        XCTAssertNil(result.version)
+        XCTAssertEqual(result.isReset, true)
+    }
+
+    func testChainAbsentWhenLatest404s() async {
+        let v = chainVerifier(
+            client: FakeFetcher(root: rootAt(10), latest: nil, proof: proofFixture),
+            chain: { _ in self.servedPubkey }
+        )
+        let result = await runChain(v)
+        XCTAssertEqual(result.status, .absent)
+        XCTAssertNil(result.version)
+        XCTAssertNil(result.isReset)
+    }
+
+    func testChainAbsentWhenLatestCommitsToDifferentKey() async {
+        // The log's latest pubkey is NOT the served key — we cannot
+        // chain-prove the served key, so `.absent` (no chain
+        // confirmation), the chain gate is NOT invoked, and we do NOT
+        // block. The marker still rides out (a latest existed).
+        var chainCalls = 0
+        let v = chainVerifier(
+            client: FakeFetcher(
+                root: rootAt(10),
+                latest: latestWith(otherPubkey, isReset: true),
+                proof: proofFixture
+            ),
+            chain: { _ in chainCalls += 1; return self.servedPubkey }
+        )
+        let result = await runChain(v)
+        XCTAssertEqual(result.status, .absent)
+        XCTAssertNil(result.version)
+        XCTAssertEqual(result.isReset, true)
+        XCTAssertEqual(chainCalls, 0)
+    }
+
+    func testChainRollbackWhenRootShrinks() async {
+        let store = LastSeenRoot(defaults: freshDefaults())
+        XCTAssertEqual(store.checkAndAdvance(20), .ok)
+        let fake = FakeFetcher(root: rootAt(10), latest: latestWith(servedPubkey), proof: proofFixture)
+        let v = chainVerifier(client: fake, lastSeenRoot: store, chain: { _ in self.servedPubkey })
+        let result = await runChain(v)
+        XCTAssertEqual(result.status, .rollback)
+        XCTAssertNil(result.version)
+        XCTAssertNil(result.isReset)
+        // Rollback short-circuits — the latest lookup must NOT run.
+        XCTAssertEqual(fake.fetchLatestCalls, 0)
+    }
+
+    func testChainOffWhenClientNil() async {
+        let v = chainVerifier(client: nil, chain: { _ in self.servedPubkey })
+        let result = await runChain(v)
+        XCTAssertEqual(result.status, .off)
+        XCTAssertNil(result.version)
+        XCTAssertNil(result.isReset)
+    }
+
+    func testChainOffWhenOperatorKeyNil() async {
+        let v = TransparencyVerify(
+            client: FakeFetcher(root: rootAt(10), latest: latestWith(servedPubkey), proof: proofFixture),
+            operatorKey: nil,
+            lastSeenRoot: LastSeenRoot(defaults: freshDefaults()),
+            verifyInclusion: { _ in },
+            verifyChain: { _ in self.servedPubkey }
+        )
+        let result = await runChain(v)
+        XCTAssertEqual(result.status, .off)
+        XCTAssertNil(result.version)
+    }
+
+    func testChainUnreachableOnRootNetworkError() async {
+        let v = chainVerifier(
+            client: FakeFetcher(rootError: FakeError.network),
+            chain: { _ in self.servedPubkey }
+        )
+        let result = await runChain(v)
+        XCTAssertEqual(result.status, .unreachable)
+        XCTAssertNil(result.version)
+        XCTAssertNil(result.isReset)
+    }
+
+    func testChainUnreachableOnProofNetworkError() async {
+        let v = chainVerifier(
+            client: FakeFetcher(
+                root: rootAt(10),
+                latest: latestWith(servedPubkey),
+                proofError: FakeError.network
+            ),
+            chain: { _ in self.servedPubkey }
+        )
+        let result = await runChain(v)
+        XCTAssertEqual(result.status, .unreachable)
+        XCTAssertNil(result.version)
+    }
+
+    func testChainPassesPinnedFloorAndProofToSeam() async {
+        // Confirm the chain seam receives the pinned old key, the proof
+        // bytes, and the pinned-version floor from the context.
+        var observed: TransparencyVerify.ChainArgs?
+        let v = chainVerifier(
+            client: FakeFetcher(
+                root: rootAt(10),
+                latest: LatestEntry(idx: 3, version: 5, identityPubkey: servedPubkey, isReset: false),
+                proof: proofFixture
+            ),
+            chain: { args in observed = args; return self.servedPubkey }
+        )
+        let result = await v.verifyRotationChain(
+            accountId: accountId,
+            servedPubkey: servedPubkey,
+            ctx: RotationContext(
+                supersessionProof: supersessionProofBytes,
+                pinnedOldPubkey: pinnedOldPubkey,
+                pinnedLogVersion: 4
+            )
+        )
+        XCTAssertEqual(result.status, .confirmed)
+        let args = observed
+        XCTAssertNotNil(args)
+        XCTAssertEqual(args?.pinnedOldPubkey, pinnedOldPubkey)
+        XCTAssertEqual(args?.supersessionProof, supersessionProofBytes)
+        XCTAssertEqual(args?.pinnedLogVersion, 4)
+        XCTAssertEqual(args?.servedPubkey, servedPubkey)
+        XCTAssertEqual(args?.version, 5)
+    }
+
+    func testChainAdvancesLastSeenFloor() async {
+        // A `.confirmed` chain advances the no-rollback high-water mark to
+        // the root's log size (the verifier runs `checkAndAdvance`).
+        let store = LastSeenRoot(defaults: freshDefaults())
+        let v = chainVerifier(
+            client: FakeFetcher(root: rootAt(42), latest: latestWith(servedPubkey), proof: proofFixture),
+            lastSeenRoot: store,
+            chain: { _ in self.servedPubkey }
+        )
+        let result = await runChain(v)
+        XCTAssertEqual(result.status, .confirmed)
+        XCTAssertEqual(store.loadLastSeenLogSize(), 42)
+    }
+
+    // MARK: - G-30 #2: ContactsClient routes a rotation through the chain
+
+    /// A verified rotation (gate 1 re-pins via a real supersession proof)
+    /// then routes gate 2 through the CHAIN verifier (not the single-key
+    /// inclusion check) and persists the chain-confirmed version as the
+    /// downgrade floor. We assert the floor advanced — proof the rotation
+    /// branch ran and `recordLogVersion` fired on `.confirmed`.
+    ///
+    /// We cannot mint a real supersession proof here, so we drive gate 1
+    /// with a TOFU pin whose pubkey EQUALS the served key (no rotation in
+    /// gate 1 — it just matches + proceeds) and feed gate 2 the rotation
+    /// context directly via `checkTransparencyLog`. That isolates the
+    /// gate-2 routing + version-persist without needing a valid proof
+    /// through gate 1's `verifySupersession` FFI.
+    func testRotationRoutesThroughChainAndPersistsFloor() async {
+        let pinStore = PeerPinStore(defaults: freshDefaults())
+        let accountIdB64 = base64Encode(accountId)
+        // Seed an OLD pin keyed on a DIFFERENT pubkey + a stale floor.
+        pinStore.setPin(
+            accountIdB64: accountIdB64,
+            pinnedSignaturePubkeyB64: base64Encode(pinnedOldPubkey),
+            rotationMarker: 0
+        )
+        pinStore.recordLogVersion(accountIdB64: accountIdB64, version: 2)
+
+        let tv = chainVerifier(
+            client: FakeFetcher(
+                root: rootAt(10),
+                latest: LatestEntry(idx: 3, version: 9, identityPubkey: servedPubkey, isReset: false),
+                proof: proofFixture
+            ),
+            chain: { _ in self.servedPubkey } // chain passes
+        )
+        let client = ContactsClient(pinStore: pinStore, transparencyVerify: tv)
+
+        // Call gate 2 directly with the rotation context (oldPin's key
+        // differs from the served key + a non-empty proof) → routes
+        // through the chain.
+        try? await client.checkTransparencyLog(
+            accountId: accountId,
+            accountIdB64: accountIdB64,
+            servedPubkey: servedPubkey,
+            oldPin: pinStore.readPin(accountIdB64: accountIdB64),
+            supersessionProofB64: base64Encode(supersessionProofBytes)
+        )
+
+        // The chain-confirmed version (9) replaced the stale floor (2).
+        XCTAssertEqual(pinStore.readLogVersion(accountIdB64: accountIdB64), 9)
+        XCTAssertEqual(pinStore.readLogStatus(accountIdB64: accountIdB64), "confirmed")
+    }
+
+    /// A chain `.mismatch` (the chain gate threw) must NOT clear a
+    /// previously-confirmed floor — `recordLogVersion` is skipped on a
+    /// non-confirmed verdict (version == nil), and it does NOT block.
+    func testChainMismatchKeepsPreviousFloorAndDoesNotBlock() async {
+        let pinStore = PeerPinStore(defaults: freshDefaults())
+        let accountIdB64 = base64Encode(accountId)
+        pinStore.setPin(
+            accountIdB64: accountIdB64,
+            pinnedSignaturePubkeyB64: base64Encode(pinnedOldPubkey),
+            rotationMarker: 0
+        )
+        pinStore.recordLogVersion(accountIdB64: accountIdB64, version: 5)
+
+        let tv = chainVerifier(
+            client: FakeFetcher(
+                root: rootAt(10),
+                latest: latestWith(servedPubkey),
+                proof: proofFixture
+            ),
+            chain: { _ in throw FakeError.inclusionFailed } // chain throws
+        )
+        let client = ContactsClient(pinStore: pinStore, transparencyVerify: tv)
+
+        var threw = false
+        do {
+            try await client.checkTransparencyLog(
+                accountId: accountId,
+                accountIdB64: accountIdB64,
+                servedPubkey: servedPubkey,
+                oldPin: pinStore.readPin(accountIdB64: accountIdB64),
+                supersessionProofB64: base64Encode(supersessionProofBytes)
+            )
+        } catch {
+            threw = true
+        }
+        XCTAssertFalse(threw) // mismatch surfaces, never blocks
+        // The previously-confirmed floor (5) is untouched.
+        XCTAssertEqual(pinStore.readLogVersion(accountIdB64: accountIdB64), 5)
+        XCTAssertEqual(pinStore.readLogStatus(accountIdB64: accountIdB64), "mismatch")
+    }
+
+    /// A non-rotation fetch (no oldPin / unchanged key / no proof) keeps
+    /// the SINGLE-KEY inclusion check — the chain seam is NOT invoked.
+    func testNonRotationKeepsSingleKeyInclusionCheck() async {
+        let pinStore = PeerPinStore(defaults: freshDefaults())
+        let accountIdB64 = base64Encode(accountId)
+        // Pin already EQUALS the served key — not a rotation.
+        pinStore.setPin(
+            accountIdB64: accountIdB64,
+            pinnedSignaturePubkeyB64: base64Encode(servedPubkey),
+            rotationMarker: 0
+        )
+        var chainCalls = 0
+        var inclusionCalls = 0
+        let tv = TransparencyVerify(
+            client: FakeFetcher(
+                root: rootAt(10),
+                latest: latestWith(servedPubkey),
+                proof: proofFixture
+            ),
+            operatorKey: operatorKey,
+            lastSeenRoot: LastSeenRoot(defaults: freshDefaults()),
+            verifyInclusion: { _ in inclusionCalls += 1 },
+            verifyChain: { _ in chainCalls += 1; return self.servedPubkey }
+        )
+        let client = ContactsClient(pinStore: pinStore, transparencyVerify: tv)
+        try? await client.checkTransparencyLog(
+            accountId: accountId,
+            accountIdB64: accountIdB64,
+            servedPubkey: servedPubkey,
+            oldPin: pinStore.readPin(accountIdB64: accountIdB64),
+            supersessionProofB64: nil
+        )
+        XCTAssertEqual(chainCalls, 0)
+        XCTAssertEqual(inclusionCalls, 1)
+        // No version persisted on the single-key path.
+        XCTAssertNil(pinStore.readLogVersion(accountIdB64: accountIdB64))
+    }
+
+    // MARK: - G-30 #2: gate 1 is NOT weakened (fail-closed still throws)
+
+    /// Sanity that gate 1 (the SupersessionRefused path) still throws
+    /// fail-closed on a changed key with no proof — the chain wiring in
+    /// gate 2 must NEVER make gate 1 more permissive. (Gate 2 never runs
+    /// here — gate 1 short-circuits.)
+    func testGate1StillFailsClosedOnChangedKeyNoProof() async {
+        let pinStore = PeerPinStore(defaults: freshDefaults())
+        let oldPubkey = Data(repeating: 0x01, count: 32)
+        pinStore.setPin(
+            accountIdB64: base64Encode(accountId),
+            pinnedSignaturePubkeyB64: base64Encode(oldPubkey),
+            rotationMarker: 0
+        )
+        // Served a DIFFERENT key with NO proof → gate 1 must refuse.
+        let bundle = IdentityFetchResponse(
+            signaturePubkey: base64Encode(servedPubkey),
+            x25519Pubkey: base64Encode(Data(repeating: 0x09, count: 32)),
+            supersessionProof: nil
+        )
+        let tv = chainVerifier(
+            client: FakeFetcher(
+                root: rootAt(10),
+                latest: latestWith(servedPubkey, isReset: true),
+                proof: proofFixture
+            ),
+            chain: { _ in self.servedPubkey }
+        )
+        let client = ContactsClient(pinStore: pinStore, transparencyVerify: tv)
+        do {
+            try await client.verifyBundleAccountKey(accountId: accountId, bundle: bundle)
+            XCTFail("expected SupersessionRefused")
+        } catch let refused as SupersessionRefused {
+            XCTAssertEqual(refused.reason, .proofAbsent)
+            // Gate-1 enrichment still attaches the loggedReset context.
+            XCTAssertEqual(refused.loggedReset, true)
+        } catch {
+            XCTFail("unexpected error: \(error)")
+        }
+    }
+
+    // MARK: - G-30 #2: PeerPinStore.recordLogVersion / readLogVersion
+
+    func testRecordLogVersionRoundTrip() {
+        let store = PeerPinStore(defaults: freshDefaults())
+        let key = base64Encode(accountId)
+        store.setPin(accountIdB64: key, pinnedSignaturePubkeyB64: base64Encode(servedPubkey), rotationMarker: 0)
+        XCTAssertNil(store.readLogVersion(accountIdB64: key))
+        XCTAssertTrue(store.recordLogVersion(accountIdB64: key, version: 12))
+        XCTAssertEqual(store.readLogVersion(accountIdB64: key), 12)
+    }
+
+    func testRecordLogVersionClear() {
+        let store = PeerPinStore(defaults: freshDefaults())
+        let key = base64Encode(accountId)
+        store.setPin(accountIdB64: key, pinnedSignaturePubkeyB64: base64Encode(servedPubkey), rotationMarker: 0)
+        store.recordLogVersion(accountIdB64: key, version: 8)
+        XCTAssertEqual(store.readLogVersion(accountIdB64: key), 8)
+        XCTAssertTrue(store.recordLogVersion(accountIdB64: key, version: nil))
+        XCTAssertNil(store.readLogVersion(accountIdB64: key))
+    }
+
+    func testRecordLogVersionNoOpWithoutPin() {
+        let store = PeerPinStore(defaults: freshDefaults())
+        let key = base64Encode(accountId)
+        // No pin → no write, returns false, nothing to read.
+        XCTAssertFalse(store.recordLogVersion(accountIdB64: key, version: 3))
+        XCTAssertNil(store.readLogVersion(accountIdB64: key))
+    }
+
+    func testRecordLogVersionCarriedAcrossRePin() {
+        let store = PeerPinStore(defaults: freshDefaults())
+        let key = base64Encode(accountId)
+        store.setPin(accountIdB64: key, pinnedSignaturePubkeyB64: base64Encode(pinnedOldPubkey), rotationMarker: 0)
+        store.recordLogVersion(accountIdB64: key, version: 6)
+        // A forward re-pin to a new key must CARRY the version (it is a
+        // separately-written field; the fetch path re-records it).
+        XCTAssertEqual(
+            store.setPin(accountIdB64: key, pinnedSignaturePubkeyB64: base64Encode(servedPubkey), rotationMarker: 10),
+            .set
+        )
+        XCTAssertEqual(store.readLogVersion(accountIdB64: key), 6)
+        // recordLogStatus / recordLogReset must also preserve it.
+        store.recordLogStatus(accountIdB64: key, logStatus: "confirmed")
+        store.recordLogReset(accountIdB64: key, isReset: true)
+        XCTAssertEqual(store.readLogVersion(accountIdB64: key), 6)
+    }
+
+    func testRecordLogVersionIdempotentNoChange() {
+        let store = PeerPinStore(defaults: freshDefaults())
+        let key = base64Encode(accountId)
+        store.setPin(accountIdB64: key, pinnedSignaturePubkeyB64: base64Encode(servedPubkey), rotationMarker: 0)
+        store.recordLogVersion(accountIdB64: key, version: 4)
+        // Re-writing the same value is idempotent (still returns true).
+        XCTAssertTrue(store.recordLogVersion(accountIdB64: key, version: 4))
+        XCTAssertEqual(store.readLogVersion(accountIdB64: key), 4)
+    }
+
+    func testReadLogVersionDecodesBackCompatBlobWithoutVersion() {
+        // A pin blob written BEFORE G-30 #2 (no `pinnedLogVersion` key)
+        // must decode with version == nil (synthesized Codable). Simulate
+        // by writing a pin via the v1-shape init and reading it back.
+        let store = PeerPinStore(defaults: freshDefaults())
+        let key = base64Encode(accountId)
+        store.setPin(accountIdB64: key, pinnedSignaturePubkeyB64: base64Encode(servedPubkey), rotationMarker: 0)
+        // setPin writes no version → absent key → nil on read.
+        XCTAssertNil(store.readLogVersion(accountIdB64: key))
+        // And the pin itself is intact.
+        XCTAssertNotNil(store.readPin(accountIdB64: key))
+    }
 }
 
 // MARK: - Test doubles
