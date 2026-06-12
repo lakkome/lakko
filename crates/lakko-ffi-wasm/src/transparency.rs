@@ -174,6 +174,38 @@ fn verify_log_inclusion_inner(
     Ok(())
 }
 
+/// Domain-separation string for the transparency-log account-key
+/// derivation. MUST stay byte-identical to discovery's
+/// `services/discovery/src/transparency_log.rs::ACCOUNT_KEY_DOMAIN`
+/// — both sides derive the same `username_hash` from it, so a change
+/// here is a wire break with the server's append path.
+const ACCOUNT_KEY_DOMAIN: &str = "lakko/transparency/account/v1";
+
+/// Derive the transparency-log account-key (the leaf's opaque
+/// `username_hash`) for an `account_id`:
+/// `BLAKE3("lakko/transparency/account/v1" || account_id)`.
+///
+/// The web client needs this to (a) query
+/// `GET /transparency/latest/:account_key` and (b) pass the exact
+/// `entry_username_hash` into [`verify_log_inclusion`]. We expose it
+/// from the audited Rust core rather than bundle a JS BLAKE3 — the
+/// derivation must match discovery's `account_key(...)` byte-for-byte,
+/// and re-implementing it in TS would be a second, drift-prone copy of
+/// a security-relevant primitive.
+///
+/// Mirrors the un-keyed `lakko_crypto::hash::blake3` over the
+/// domain-prefixed `account_id`. `account_id` is public, so the result
+/// reveals nothing new; the domain separator only stops a collision
+/// with any other BLAKE3 use of the same bytes.
+#[wasm_bindgen(js_name = transparencyAccountKey)]
+#[must_use]
+pub fn transparency_account_key(account_id: &[u8]) -> Vec<u8> {
+    let mut input = Vec::with_capacity(ACCOUNT_KEY_DOMAIN.len() + account_id.len());
+    input.extend_from_slice(ACCOUNT_KEY_DOMAIN.as_bytes());
+    input.extend_from_slice(account_id);
+    lakko_crypto::hash::blake3(&input).to_vec()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -247,6 +279,36 @@ mod tests {
             &d.identity_pubkey,
             d.version,
         )
+    }
+
+    #[test]
+    fn account_key_matches_domain_separated_blake3() {
+        // Pin the exact derivation discovery uses
+        // (`services/discovery/src/transparency_log.rs::account_key`):
+        // BLAKE3("lakko/transparency/account/v1" || account_id).
+        let id = [0xABu8; 16];
+        let got = transparency_account_key(&id);
+
+        let mut expected_input = Vec::new();
+        expected_input.extend_from_slice(b"lakko/transparency/account/v1");
+        expected_input.extend_from_slice(&id);
+        let expected = lakko_crypto::hash::blake3(&expected_input);
+
+        assert_eq!(got.as_slice(), expected.as_slice());
+        assert_eq!(got.len(), 32);
+
+        // Domain-separated: the bare account_id hash must NOT collide.
+        assert_ne!(got.as_slice(), lakko_crypto::hash::blake3(&id).as_slice());
+
+        // Deterministic + distinct per account.
+        assert_eq!(transparency_account_key(&id), got);
+        assert_ne!(
+            transparency_account_key(&[0u8; 16]),
+            transparency_account_key(&[1u8; 16])
+        );
+
+        // The pinned domain string itself — a change is a wire break.
+        assert_eq!(ACCOUNT_KEY_DOMAIN, "lakko/transparency/account/v1");
     }
 
     #[test]

@@ -2683,6 +2683,25 @@ pub fn verify_log_inclusion(
     Ok(())
 }
 
+/// Domain separator for the transparency-log account-key. MUST stay
+/// byte-identical to the discovery service's `ACCOUNT_KEY_DOMAIN` and the wasm
+/// `transparencyAccountKey` so all three derive the same log key.
+const TRANSPARENCY_ACCOUNT_KEY_DOMAIN: &str = "lakko/transparency/account/v1";
+
+/// Derive the 32-byte transparency-log account-key for an account id:
+/// `BLAKE3(domain || account_id)`. Clients use it to look up + verify a
+/// contact's identity in the KT log (KT-log S3). The account id is already
+/// public, so the derived key leaks nothing new.
+#[uniffi::export]
+#[must_use]
+pub fn transparency_account_key(account_id: Vec<u8>) -> Vec<u8> {
+    let mut input =
+        Vec::with_capacity(TRANSPARENCY_ACCOUNT_KEY_DOMAIN.len() + account_id.len());
+    input.extend_from_slice(TRANSPARENCY_ACCOUNT_KEY_DOMAIN.as_bytes());
+    input.extend_from_slice(&account_id);
+    lakko_crypto::hash::blake3(&input).to_vec()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
