@@ -1369,6 +1369,20 @@ public class AuthRepository(
             mnemonic.phrase() to mnemonic.toSeed()
         }
 
+        // Publish the NEW bundle WITHOUT a supersession proof FIRST, and FAIL
+        // the flow if it does not land — otherwise a transient network error
+        // would leave the device with a cached fresh seed while the server
+        // still serves the OLD bundle, a torn state the user cannot self-heal
+        // (provideRecoveryPhrase with the new phrase would then hard-block
+        // against the stale published key). Publishing before any local
+        // mutation keeps a failure fully recoverable: the device is untouched
+        // and the user can retry.
+        publishFreshIdentityBundle(
+            accountId = pending.accountIdBytes,
+            sessionToken = pending.sessionToken,
+            seed = seed,
+        )
+
         // Bootstrap the device-key existence gate from the fresh seed (no
         // password on this path). No-op if a key already exists.
         bootstrapDeviceKeyFromSeedBestEffort(
@@ -1387,15 +1401,6 @@ public class AuthRepository(
         } catch (cause: Throwable) {
             Log.w("lakko-auth", "fresh-identity seed persist failed", cause)
         }
-
-        // Publish the NEW bundle WITHOUT a supersession proof. Best-effort:
-        // the seed is cached locally regardless, and the next session-finish
-        // re-publishes; a failure here only delays contact discovery.
-        publishFreshIdentityBundleBestEffort(
-            accountId = pending.accountIdBytes,
-            sessionToken = pending.sessionToken,
-            seed = seed,
-        )
 
         // Stash the completion + phrase; flip to the save-phrase state.
         pendingFreshPhrase.set(
@@ -1458,36 +1463,29 @@ public class AuthRepository(
 
     /**
      * Publish the fresh-identity bundle (+ KeyPackage) for [accountId]
-     * WITHOUT a supersession proof (ADR-0017 lost-everything). Best-effort.
+     * WITHOUT a supersession proof (ADR-0017 lost-everything). THROWS on
+     * failure — the caller publishes before any local mutation, so a throw
+     * leaves the device untouched and the user can retry.
      */
-    private suspend fun publishFreshIdentityBundleBestEffort(
+    private suspend fun publishFreshIdentityBundle(
         accountId: ByteArray,
         sessionToken: String,
         seed: ByteArray,
     ) {
+        val discovery = discoveryClientFactory()
         try {
-            val discovery = discoveryClientFactory()
-            try {
-                discovery.setSessionToken(sessionToken)
-                Identity.fromSeed(seed).use { identity ->
-                    discovery.uploadIdentityBundle(
-                        accountId = accountId,
-                        signaturePubkey = identity.signaturePublicKey(),
-                        x25519Pubkey = identity.x25519PublicKey(),
-                        supersessionProofB64 = null,
-                    )
-                    discovery.uploadKeyPackage(accountId, identity.createKeyPackage())
-                }
-            } finally {
-                discovery.close()
+            discovery.setSessionToken(sessionToken)
+            Identity.fromSeed(seed).use { identity ->
+                discovery.uploadIdentityBundle(
+                    accountId = accountId,
+                    signaturePubkey = identity.signaturePublicKey(),
+                    x25519Pubkey = identity.x25519PublicKey(),
+                    supersessionProofB64 = null,
+                )
+                discovery.uploadKeyPackage(accountId, identity.createKeyPackage())
             }
-        } catch (cause: Throwable) {
-            Log.w(
-                "lakko-auth",
-                "fresh-identity bundle publish failed (will retry on next " +
-                    "session finish)",
-                cause,
-            )
+        } finally {
+            discovery.close()
         }
     }
 
