@@ -45,6 +45,7 @@
 //! - `POST /transparency/append`         — service-secret-authed leaf append
 //! - `GET  /transparency/root`           — anon current signed root
 //! - `GET  /transparency/proof/{idx}`    — anon inclusion proof
+//! - `GET  /transparency/latest/{username_hash_b64}` — anon latest entry
 //! - `GET  /transparency/operator-key`   — anon operator pubkey to pin
 
 #![forbid(unsafe_code)]
@@ -212,6 +213,10 @@ pub(crate) fn build_app(state: AppState) -> Router {
         .route("/version", get(version))
         .route("/transparency/root", get(handlers::root))
         .route("/transparency/proof/{idx}", get(handlers::proof))
+        .route(
+            "/transparency/latest/{username_hash_b64}",
+            get(handlers::latest),
+        )
         .route("/transparency/operator-key", get(handlers::operator_key));
 
     open.merge(protected)

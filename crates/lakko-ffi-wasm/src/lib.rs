@@ -86,6 +86,7 @@ pub mod shamir;
 pub mod storage;
 pub mod supersession;
 pub mod sync;
+pub mod transparency;
 
 // Phase 1.16f3 — wasm-bindgen-test smoke suite. Gated on BOTH
 // `cfg(test)` (so the lib build never tries to pull in the

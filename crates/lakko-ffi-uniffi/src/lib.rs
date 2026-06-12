@@ -1132,10 +1132,7 @@ impl DeviceGroup {
     /// Commit the caller broadcasts over the DS group journal; every device
     /// that processes it then enforces the policy. Call when the account
     /// first enables a passkey (OPAQUE-only accounts never call it).
-    pub fn set_require_attested_removals(
-        &self,
-        identity: &Identity,
-    ) -> Result<Vec<u8>, FfiError> {
+    pub fn set_require_attested_removals(&self, identity: &Identity) -> Result<Vec<u8>, FfiError> {
         let mut g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
         let bytes = g.set_require_attested_removals(&identity.inner)?;
         Ok(bytes)
@@ -2561,6 +2558,131 @@ pub fn verify_supersession(
     Ok(new.to_vec())
 }
 
+// ---------------------------------------------------------------------------
+// Key-transparency inclusion verifier (KT-log S3b).
+//
+// After fetching `GET /transparency/root` (the operator-signed Merkle root),
+// `GET /transparency/latest/:account_key` (the latest entry's
+// `{idx, version, identity_pubkey}`) and `GET /transparency/proof/:idx` (the
+// audit path), a client calls `verify_log_inclusion` to prove the identity it
+// is about to trust is committed by the operator-signed log — NOT just whatever
+// the zero-trust server returned. Two gates, BOTH must pass:
+//
+//   1. `SignedRoot::verify` against the CLIENT-PINNED operator key — a forged
+//      root (signed by anyone but the pinned operator) fails here.
+//   2. `verify_inclusion` — this exact `(account_key, identity_pubkey, version)`
+//      leaf is at `leaf_index` of the tree that root commits to. A different
+//      pubkey / version / index / a tampered audit path fails here.
+//
+// The verdict is bound to the exact tuple the caller cares about, so a malicious
+// server cannot substitute a different identity and pass.
+//
+// The no-rollback (append-only) check stays CLIENT-side: the client compares
+// the fetched `log_size` against its last-seen monotone value. This verifier is
+// stateless and does not persist or compare any last-seen size.
+// ---------------------------------------------------------------------------
+
+/// Verify that `entry_identity_pubkey` (at `entry_version`) for the account-key
+/// `entry_username_hash` is committed by the operator-signed transparency log
+/// (KT-log S3b). The decomposed fields mirror the JSON a client decodes from
+/// `/transparency/{root,latest,proof}`.
+///
+/// Runs two gates and returns successfully only if BOTH pass: (1) the root is
+/// signed by the client-pinned `operator_pubkey`; (2) this exact
+/// `(account_key, pubkey, version)` leaf is at `leaf_index` of that root's tree.
+///
+/// The no-rollback (append-only) check is the CALLER's job: compare the fetched
+/// `log_size` against the last-seen monotone value before trusting the result.
+/// This function is stateless.
+///
+/// # Errors
+///
+/// [`FfiError::Identity`] if any fixed-length field is the wrong length
+/// (`tree_root` / `entry_username_hash` != 32, `root_signature` != 64,
+/// `audit_path` length not a multiple of 32), `operator_pubkey` is not 1..=64
+/// bytes / not a valid Ed25519 key, the root signature does not verify under
+/// `operator_pubkey`, or the inclusion proof does not bind the entry to the
+/// root.
+#[uniffi::export]
+#[allow(clippy::too_many_arguments)]
+pub fn verify_log_inclusion(
+    operator_pubkey: Vec<u8>,
+    tree_root: Vec<u8>,
+    log_size: u64,
+    timestamp_unix: u64,
+    root_signature: Vec<u8>,
+    leaf_index: u64,
+    audit_path: Vec<u8>,
+    entry_username_hash: Vec<u8>,
+    entry_identity_pubkey: Vec<u8>,
+    entry_version: u64,
+) -> Result<(), FfiError> {
+    // The operator key is client-pinned out-of-band; accept the same 1..=64
+    // byte range the log column allows, but it must parse as a valid Ed25519
+    // verifying key (32 bytes canonical).
+    if operator_pubkey.is_empty() || operator_pubkey.len() > 64 {
+        return Err(FfiError::Identity(
+            "operator pubkey must be 1..=64 bytes".to_string(),
+        ));
+    }
+    let operator =
+        lakko_crypto::signing::VerifyingKey::from_bytes(&operator_pubkey).map_err(|_| {
+            FfiError::Identity("operator pubkey is not a valid Ed25519 key".to_string())
+        })?;
+
+    let tree_root: lakko_transparency::TreeHash = tree_root
+        .as_slice()
+        .try_into()
+        .map_err(|_| FfiError::Identity("tree_root must be 32 bytes".to_string()))?;
+    let signature = lakko_crypto::signing::Signature::from_bytes(&root_signature)
+        .map_err(|_| FfiError::Identity("root_signature must be 64 bytes".to_string()))?;
+    let username_hash: [u8; 32] = entry_username_hash
+        .as_slice()
+        .try_into()
+        .map_err(|_| FfiError::Identity("entry_username_hash must be 32 bytes".to_string()))?;
+
+    if audit_path.len() % 32 != 0 {
+        return Err(FfiError::Identity(
+            "audit_path length must be a multiple of 32 bytes".to_string(),
+        ));
+    }
+    let audit_path: Vec<lakko_transparency::TreeHash> = audit_path
+        .chunks_exact(32)
+        .map(|c| {
+            let mut h = [0u8; 32];
+            h.copy_from_slice(c);
+            h
+        })
+        .collect();
+
+    let signed_root = lakko_transparency::SignedRoot {
+        tree_root,
+        log_size,
+        timestamp_unix,
+        signature,
+    };
+    let proof = lakko_transparency::InclusionProof {
+        leaf_index,
+        audit_path,
+    };
+    let entry = lakko_transparency::LogEntry {
+        username_hash,
+        identity_pubkey: entry_identity_pubkey,
+        version: entry_version,
+    };
+
+    // Gate 1: the root is operator-signed. A forged root fails here.
+    signed_root
+        .verify(&operator)
+        .map_err(|e| FfiError::Identity(format!("signed root verify: {e}")))?;
+
+    // Gate 2: this exact entry is committed by that root.
+    lakko_transparency::verify_inclusion(&entry, &proof, &signed_root)
+        .map_err(|e| FfiError::Identity(format!("inclusion verify: {e}")))?;
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2990,5 +3112,153 @@ mod tests {
     fn supersession_sign_rejects_bad_seed_length() {
         let new = Identity::new("super-new-4".into()).unwrap();
         assert!(sign_supersession_proof(vec![0u8; 31], new.ed25519_seed(), 0, 60).is_err());
+    }
+
+    // -- KT-log S3b: verify_log_inclusion --
+
+    /// Decomposed FFI fields for one entry's inclusion call, mirroring the
+    /// JSON a client decodes from `/transparency/{root,latest,proof}`.
+    struct DecomposedInclusion {
+        operator_pubkey: Vec<u8>,
+        tree_root: Vec<u8>,
+        log_size: u64,
+        timestamp_unix: u64,
+        root_signature: Vec<u8>,
+        leaf_index: u64,
+        audit_path: Vec<u8>,
+        username_hash: Vec<u8>,
+        identity_pubkey: Vec<u8>,
+        version: u64,
+    }
+
+    /// Build a 4-entry in-memory log, sign the current root, and decompose
+    /// the proof for `idx` into the FFI field shape.
+    fn build_inclusion_fixture(idx: u64) -> DecomposedInclusion {
+        use lakko_transparency::{InMemoryLog, LogEntry};
+        let operator = lakko_crypto::signing::SigningKey::generate();
+        let mut log = InMemoryLog::new(operator);
+        for i in 0..4u64 {
+            log.append(LogEntry {
+                username_hash: lakko_crypto::hash::blake3(format!("u{i}").as_bytes()),
+                identity_pubkey: vec![0x10 + u8::try_from(i).unwrap(); 32],
+                version: 1,
+            });
+        }
+        let signed = log.sign_current_root(1_700_000_000);
+        let proof = log.prove_inclusion(idx).expect("proof");
+        let entry = log.entry(idx).expect("entry").clone();
+
+        let mut audit_path = Vec::new();
+        for h in &proof.audit_path {
+            audit_path.extend_from_slice(h);
+        }
+
+        DecomposedInclusion {
+            operator_pubkey: log.operator_key().to_bytes().to_vec(),
+            tree_root: signed.tree_root.to_vec(),
+            log_size: signed.log_size,
+            timestamp_unix: signed.timestamp_unix,
+            root_signature: signed.signature.to_bytes().to_vec(),
+            leaf_index: proof.leaf_index,
+            audit_path,
+            username_hash: entry.username_hash.to_vec(),
+            identity_pubkey: entry.identity_pubkey,
+            version: entry.version,
+        }
+    }
+
+    fn call_inclusion(d: &DecomposedInclusion) -> Result<(), FfiError> {
+        verify_log_inclusion(
+            d.operator_pubkey.clone(),
+            d.tree_root.clone(),
+            d.log_size,
+            d.timestamp_unix,
+            d.root_signature.clone(),
+            d.leaf_index,
+            d.audit_path.clone(),
+            d.username_hash.clone(),
+            d.identity_pubkey.clone(),
+            d.version,
+        )
+    }
+
+    #[test]
+    fn log_inclusion_valid_passes_both_gates() {
+        for idx in 0..4 {
+            let d = build_inclusion_fixture(idx);
+            call_inclusion(&d).expect("valid inclusion verifies");
+        }
+    }
+
+    #[test]
+    fn log_inclusion_flipped_root_signature_fails() {
+        let mut d = build_inclusion_fixture(2);
+        d.root_signature[0] ^= 0x01;
+        assert!(call_inclusion(&d).is_err());
+    }
+
+    #[test]
+    fn log_inclusion_flipped_audit_path_fails() {
+        let mut d = build_inclusion_fixture(2);
+        assert!(!d.audit_path.is_empty());
+        d.audit_path[0] ^= 0x01;
+        assert!(call_inclusion(&d).is_err());
+    }
+
+    #[test]
+    fn log_inclusion_wrong_operator_key_fails() {
+        let mut d = build_inclusion_fixture(1);
+        d.operator_pubkey = lakko_crypto::signing::SigningKey::generate()
+            .verifying_key()
+            .to_bytes()
+            .to_vec();
+        assert!(call_inclusion(&d).is_err());
+    }
+
+    #[test]
+    fn log_inclusion_wrong_identity_pubkey_fails() {
+        let mut d = build_inclusion_fixture(1);
+        d.identity_pubkey = vec![0xFF; 32];
+        assert!(call_inclusion(&d).is_err());
+    }
+
+    #[test]
+    fn log_inclusion_wrong_version_fails() {
+        let mut d = build_inclusion_fixture(1);
+        d.version = d.version.wrapping_add(1);
+        assert!(call_inclusion(&d).is_err());
+    }
+
+    #[test]
+    fn log_inclusion_malformed_lengths_fail_fast() {
+        let base = build_inclusion_fixture(0);
+
+        let mut d = build_inclusion_fixture(0);
+        d.tree_root.pop();
+        assert!(call_inclusion(&d).is_err(), "31-byte tree_root rejected");
+
+        let mut d = build_inclusion_fixture(0);
+        d.root_signature.push(0x00);
+        assert!(call_inclusion(&d).is_err(), "65-byte signature rejected");
+
+        let mut d = build_inclusion_fixture(2);
+        d.audit_path.push(0x00);
+        assert!(
+            call_inclusion(&d).is_err(),
+            "non-multiple-of-32 audit path rejected"
+        );
+
+        let mut d = build_inclusion_fixture(0);
+        d.operator_pubkey.clear();
+        assert!(call_inclusion(&d).is_err(), "empty operator key rejected");
+
+        let mut d = build_inclusion_fixture(0);
+        d.username_hash.pop();
+        assert!(
+            call_inclusion(&d).is_err(),
+            "31-byte username_hash rejected"
+        );
+
+        call_inclusion(&base).expect("base fixture still valid");
     }
 }

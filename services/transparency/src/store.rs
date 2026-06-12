@@ -80,6 +80,25 @@ pub(crate) struct AppendResult {
     pub(crate) version: u64,
 }
 
+/// The latest (highest-version) log entry for a given `username_hash`
+/// (KT-log S3a). What a client needs to learn the current identity for
+/// an account-key and then locate its leaf for an inclusion proof: the
+/// leaf `idx`, the assigned `version`, the `identity_pubkey`, and the
+/// `is_reset` fresh-start marker.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LatestEntry {
+    /// The 0-based leaf index of the latest entry (== `/proof` idx).
+    pub(crate) idx: u64,
+    /// The monotonic per-`username_hash` version of the latest entry
+    /// (`>= 1`).
+    pub(crate) version: u64,
+    /// The identity public key the account currently publishes.
+    pub(crate) identity_pubkey: Vec<u8>,
+    /// ADR-0017 fresh-start marker — `true` if the latest entry was a
+    /// no-supersession-proof owner reset.
+    pub(crate) is_reset: bool,
+}
+
 /// Persistent append-only transparency log.
 pub(crate) struct LogStore {
     inner: Mutex<InMemoryLog>,
@@ -275,6 +294,41 @@ impl LogStore {
         let entry = log.entry(idx)?.clone();
         let proof = log.prove_inclusion(idx)?;
         Ok((entry, proof))
+    }
+
+    /// Look up the latest (highest-version) entry for `username_hash`
+    /// (KT-log S3a). Read-only against the durable DB — no in-memory lock
+    /// is taken because the query touches only committed rows (the source
+    /// of truth) and never mutates the Merkle tree. Returns `None` when
+    /// no entry for that account-key has ever been logged.
+    ///
+    /// The `idx_username (username_hash, version)` index covers the
+    /// `ORDER BY version DESC LIMIT 1`, so this is a single index seek.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::Db`] on a query failure.
+    pub(crate) async fn latest(
+        &self,
+        pool: &MySqlPool,
+        username_hash: [u8; 32],
+    ) -> Result<Option<LatestEntry>, StoreError> {
+        // `is_reset` BOOLEAN comes back as MariaDB `TINYINT(1)` → `i8`.
+        let row: Option<(u64, Vec<u8>, u64, i8)> = sqlx::query_as(
+            "SELECT idx, identity_pubkey, version, is_reset FROM log_entries \
+             WHERE username_hash = ? ORDER BY version DESC LIMIT 1",
+        )
+        .bind(&username_hash[..])
+        .fetch_optional(pool)
+        .await?;
+        Ok(
+            row.map(|(idx, identity_pubkey, version, is_reset)| LatestEntry {
+                idx,
+                version,
+                identity_pubkey,
+                is_reset: is_reset != 0,
+            }),
+        )
     }
 
     /// The operator's verifying key — clients pin this out-of-band.
@@ -494,6 +548,95 @@ mod tests {
             .expect("append alice v2 (different pubkey)");
         assert_eq!((r1.idx, r1.version), (1, 2));
         assert_eq!(store.size().await, 2);
+
+        sqlx::query("DELETE FROM log_entries")
+            .execute(&pool)
+            .await
+            .expect("clear log_entries");
+        pool.close().await;
+    }
+
+    /// KT-log S3a — `latest` returns the highest-version entry for a
+    /// `username_hash` (or `None` for an unseen account-key), carrying the
+    /// leaf `idx`, `version`, `identity_pubkey`, and `is_reset`. DB-gated
+    /// on `LAKKO_TRANSPARENCY_TEST_DATABASE_URL` (skips, does not fail,
+    /// when unset).
+    #[tokio::test]
+    async fn latest_returns_highest_version_entry() {
+        use sqlx::mysql::MySqlPoolOptions;
+
+        let Ok(url) = std::env::var("LAKKO_TRANSPARENCY_TEST_DATABASE_URL") else {
+            eprintln!(
+                "skipping latest_returns_highest_version_entry: \
+                 LAKKO_TRANSPARENCY_TEST_DATABASE_URL unset"
+            );
+            return;
+        };
+
+        let pool = MySqlPoolOptions::new()
+            .max_connections(4)
+            .connect(&url)
+            .await
+            .expect("connect test DB");
+        crate::MIGRATIONS.run(&pool).await.expect("run migrations");
+        sqlx::query("DELETE FROM log_entries")
+            .execute(&pool)
+            .await
+            .expect("clear log_entries");
+
+        let store = LogStore::from_log(InMemoryLog::new(signing::SigningKey::generate()));
+        let alice = lakko_crypto::hash::blake3(b"alice");
+        let bob = lakko_crypto::hash::blake3(b"bob");
+
+        // Unseen account-key -> None.
+        assert_eq!(store.latest(&pool, alice).await.expect("latest none"), None);
+
+        // alice v1 (idx 0), then alice v2 (idx 1, is_reset=true).
+        store
+            .append(&pool, alice, vec![0x01; 32], false)
+            .await
+            .expect("append alice v1");
+        store
+            .append(&pool, alice, vec![0x02; 32], true)
+            .await
+            .expect("append alice v2");
+        // bob v1 (idx 2) — a different account-key in between.
+        store
+            .append(&pool, bob, vec![0x03; 32], false)
+            .await
+            .expect("append bob v1");
+
+        // latest(alice) must be v2 (the highest version), not v1.
+        let latest = store
+            .latest(&pool, alice)
+            .await
+            .expect("latest alice")
+            .expect("alice has an entry");
+        assert_eq!(
+            latest,
+            LatestEntry {
+                idx: 1,
+                version: 2,
+                identity_pubkey: vec![0x02; 32],
+                is_reset: true,
+            }
+        );
+
+        // latest(bob) is its sole v1 entry, is_reset=false.
+        let latest_bob = store
+            .latest(&pool, bob)
+            .await
+            .expect("latest bob")
+            .expect("bob has an entry");
+        assert_eq!(
+            latest_bob,
+            LatestEntry {
+                idx: 2,
+                version: 1,
+                identity_pubkey: vec![0x03; 32],
+                is_reset: false,
+            }
+        );
 
         sqlx::query("DELETE FROM log_entries")
             .execute(&pool)
