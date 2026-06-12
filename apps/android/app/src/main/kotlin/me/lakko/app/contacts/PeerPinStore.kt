@@ -7,6 +7,7 @@ import android.content.Context
 import android.util.Base64
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
+import me.lakko.app.transparency.LogVerifyStatus
 
 /**
  * G-4 (ADR-0016) — persistent per-account AccountIdentity pubkey
@@ -73,6 +74,13 @@ public data class Pin(
      *  `0` for a plain TOFU-pin. A re-pin that would lower this is
      *  refused. */
     val rotationMarker: Long,
+    /** KT-log S3e: the last transparency-log inclusion verdict observed
+     *  for this account on the identity-fetch path. The log check is the
+     *  equivocation-detection layer ON TOP of the supersession/pin gate
+     *  (ADR-0016); this records the latest best-effort outcome so the UI
+     *  can surface it. `null` on a pin written before S3e (or by a path
+     *  that did not run the check). */
+    val logStatus: LogVerifyStatus? = null,
 )
 
 /** Outcome of [PinStore.setPin]. [Set] covers both a first-time
@@ -133,6 +141,19 @@ public interface PinStore {
      *  Exposed for the "forget contact" / re-verify-from-scratch
      *  flows. */
     public fun removePin(accountIdB64: String)
+
+    /**
+     * KT-log S3e — record the latest transparency-log inclusion verdict
+     * for an account, keyed on the same stable `account_id` as the pin.
+     *
+     * Writes onto the existing pin record so the verdict travels with the
+     * pinned key. **No-op when no pin exists** — the log check is always
+     * run right after the supersession gate (which TOFU-pins on first
+     * sight), so by the time a verdict is recorded a pin is present; if
+     * for any reason it is not, we do not fabricate a pin entry with no
+     * pubkey. Returns whether a write happened (a present pin).
+     */
+    public fun recordLogStatus(accountIdB64: String, logStatus: LogVerifyStatus): Boolean
 }
 
 /**
@@ -149,21 +170,47 @@ public class PeerPinStore(context: Context) : PinStore {
         val raw = openPrefs(appContext)
             .getString(KEY_PREFIX + accountIdB64, null)
             ?: return null
-        // Stored as "<pubkeyB64>|<marker>". Split on the LAST `|`
-        // so a (theoretically impossible) `|` in the pubkey base64
-        // can't corrupt the marker parse; base64 standard alphabet
-        // never emits `|`, so in practice there is exactly one.
-        val sep = raw.lastIndexOf('|')
-        if (sep <= 0 || sep == raw.length - 1) return null
-        val pubkeyB64 = raw.substring(0, sep)
-        val marker = raw.substring(sep + 1).toLongOrNull() ?: return null
+        // Stored as "<pubkeyB64>|<marker>" or, since KT-log S3e,
+        // "<pubkeyB64>|<marker>|<logStatus>". Base64 standard alphabet
+        // never emits `|`, so the fields split cleanly. We parse from the
+        // FRONT: the first `|` ends the pubkey; the remainder is
+        // "<marker>" or "<marker>|<logStatus>".
+        val firstSep = raw.indexOf('|')
+        if (firstSep <= 0 || firstSep == raw.length - 1) return null
+        val pubkeyB64 = raw.substring(0, firstSep)
+        val rest = raw.substring(firstSep + 1)
+        val secondSep = rest.indexOf('|')
+        val markerStr: String
+        val logStatusStr: String?
+        if (secondSep < 0) {
+            markerStr = rest
+            logStatusStr = null
+        } else {
+            markerStr = rest.substring(0, secondSep)
+            logStatusStr = rest.substring(secondSep + 1).ifEmpty { null }
+        }
+        val marker = markerStr.toLongOrNull() ?: return null
         // Defensive: the pubkey segment must be valid base64.
         try {
             Base64.decode(pubkeyB64, Base64.NO_WRAP)
         } catch (_: IllegalArgumentException) {
             return null
         }
-        return Pin(pinnedSignaturePubkeyB64 = pubkeyB64, rotationMarker = marker)
+        // A present-but-unrecognised logStatus is dropped (forward-compat
+        // / tamper guard); the structural fields are still valid so the
+        // pin itself is kept.
+        val logStatus = logStatusStr?.let { s ->
+            try {
+                LogVerifyStatus.valueOf(s)
+            } catch (_: IllegalArgumentException) {
+                null
+            }
+        }
+        return Pin(
+            pinnedSignaturePubkeyB64 = pubkeyB64,
+            rotationMarker = marker,
+            logStatus = logStatus,
+        )
     }
 
     override fun setPin(
@@ -175,18 +222,44 @@ public class PeerPinStore(context: Context) : PinStore {
         if (existing != null && rotationMarker < existing.rotationMarker) {
             return SetPinResult.RejectedBackward
         }
-        openPrefs(appContext)
-            .edit()
-            .putString(
-                KEY_PREFIX + accountIdB64,
-                "$pinnedSignaturePubkeyB64|$rotationMarker",
-            )
-            .apply()
+        // Preserve any recorded logStatus (KT-log S3e) across a re-pin —
+        // it is an orthogonal, separately-written field, and a key
+        // rotation shouldn't silently drop the last log verdict.
+        write(accountIdB64, pinnedSignaturePubkeyB64, rotationMarker, existing?.logStatus)
         return SetPinResult.Set
     }
 
     override fun removePin(accountIdB64: String) {
         openPrefs(appContext).edit().remove(KEY_PREFIX + accountIdB64).apply()
+    }
+
+    override fun recordLogStatus(accountIdB64: String, logStatus: LogVerifyStatus): Boolean {
+        val existing = readPin(accountIdB64) ?: return false
+        if (existing.logStatus == logStatus) return true // idempotent, no write
+        write(
+            accountIdB64,
+            existing.pinnedSignaturePubkeyB64,
+            existing.rotationMarker,
+            logStatus,
+        )
+        return true
+    }
+
+    /** Serialize + persist one pin record. The logStatus segment is
+     *  appended only when present, so a pin with no verdict stays in the
+     *  legacy two-field shape. */
+    private fun write(
+        accountIdB64: String,
+        pubkeyB64: String,
+        marker: Long,
+        logStatus: LogVerifyStatus?,
+    ) {
+        val value = if (logStatus == null) {
+            "$pubkeyB64|$marker"
+        } else {
+            "$pubkeyB64|$marker|${logStatus.name}"
+        }
+        openPrefs(appContext).edit().putString(KEY_PREFIX + accountIdB64, value).apply()
     }
 
     public companion object {
@@ -229,11 +302,23 @@ public class InMemoryPinStore : PinStore {
         if (existing != null && rotationMarker < existing.rotationMarker) {
             return SetPinResult.RejectedBackward
         }
-        pins[accountIdB64] = Pin(pinnedSignaturePubkeyB64, rotationMarker)
+        // Preserve any recorded logStatus (KT-log S3e) across a re-pin.
+        pins[accountIdB64] = Pin(
+            pinnedSignaturePubkeyB64 = pinnedSignaturePubkeyB64,
+            rotationMarker = rotationMarker,
+            logStatus = existing?.logStatus,
+        )
         return SetPinResult.Set
     }
 
     override fun removePin(accountIdB64: String) {
         pins.remove(accountIdB64)
+    }
+
+    override fun recordLogStatus(accountIdB64: String, logStatus: LogVerifyStatus): Boolean {
+        val existing = pins[accountIdB64] ?: return false
+        if (existing.logStatus == logStatus) return true
+        pins[accountIdB64] = existing.copy(logStatus = logStatus)
+        return true
     }
 }
