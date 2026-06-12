@@ -20,6 +20,10 @@
 	<string>1.0</string>
 	<key>CFBundleVersion</key>
 	<string>1</string>
+	<key>LakkoTransparencyOperatorKey</key>
+	<string></string>
+	<key>LakkoTransparencyUrl</key>
+	<string></string>
 	<key>NSCameraUsageDescription</key>
 	<string>Lakko uses the camera to scan a QR codes from devices you want to link to your account and to capture video for in-call streams. The camera is never recorded server-side — every call frame is end-to-end encrypted under SFrame keys derived from the call's MLS group.</string>
 	<key>NSMicrophoneUsageDescription</key>

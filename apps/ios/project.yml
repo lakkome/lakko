@@ -77,6 +77,19 @@ targets:
         UILaunchScreen: {}  # blank launch screen
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
+        # KT-log S3d — transparency-log integration config (mirror of
+        # the web `VITE_LAKKO_TRANSPARENCY_URL` /
+        # `VITE_LAKKO_TRANSPARENCY_OPERATOR_KEY`). Both default to EMPTY
+        # so the additive log check is OFF until a deployment provisions
+        # them per build configuration — the supersession/pin gate
+        # (ADR-0016) remains the primary, fail-closed trust either way.
+        #   * LakkoTransparencyUrl — service base URL, no trailing path.
+        #   * LakkoTransparencyOperatorKey — base64 (standard alphabet)
+        #     of the operator's 32-byte Ed25519 verifying key, pinned
+        #     OUT-OF-BAND at build time. The client never trusts the
+        #     `/transparency/operator-key` endpoint for verification.
+        LakkoTransparencyUrl: ""
+        LakkoTransparencyOperatorKey: ""
         # Phase 2a3b3-ui — camera access for the add-device QR
         # scanner + G3-1 video calls. Apple's permission dialog
         # surfaces this string verbatim; keep the wording
