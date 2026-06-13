@@ -1093,6 +1093,76 @@ final class TransparencyVerifyTests: XCTestCase {
         // And the pin itself is intact.
         XCTAssertNotNil(store.readPin(accountIdB64: key))
     }
+
+    // MARK: - G-30 #2 (ADR-0019) first-observation genesis self-sig
+
+    /// A REAL identity whose `signaturePublicKey` is the served key, plus a
+    /// real genesis self-sig over `(account_key, served_key)`. The inclusion
+    /// gate is stubbed to pass so the genesis gate is reached; the genesis
+    /// check itself runs the REAL `verifyLeafGenesis` FFI.
+    private func genesisFixture(tamper: Bool) throws -> (Data, LatestEntry) {
+        let identity = try Identity.fromSeed(seed: Data(repeating: 0x5A, count: 32))
+        let served = identity.signaturePublicKey()
+        let ak = transparencyAccountKey(accountId: accountId)
+        var sig = try signLeafGenesis(ed25519Seed: identity.ed25519Seed(), usernameHash: ak)
+        if tamper {
+            sig[0] ^= 0x01
+        }
+        let latest = LatestEntry(
+            idx: 3, version: 1, identityPubkey: served, isReset: false, leafAuth: sig
+        )
+        return (served, latest)
+    }
+
+    func testGenesisSelfSigConfirmsWhenValid() async throws {
+        let (served, latest) = try genesisFixture(tamper: false)
+        let v = TransparencyVerify(
+            client: FakeFetcher(root: rootAt(10), latest: latest, proof: proofFixture),
+            operatorKey: operatorKey,
+            lastSeenRoot: LastSeenRoot(defaults: freshDefaults()),
+            verifyInclusion: { _ in }
+        )
+        let result = await v.verifyIdentityInLog(
+            accountId: accountId, publishedSignaturePubkey: served
+        )
+        XCTAssertEqual(result.status, .confirmed)
+    }
+
+    func testGenesisSelfSigMismatchWhenTampered() async throws {
+        let (served, latest) = try genesisFixture(tamper: true)
+        let v = TransparencyVerify(
+            client: FakeFetcher(root: rootAt(10), latest: latest, proof: proofFixture),
+            operatorKey: operatorKey,
+            lastSeenRoot: LastSeenRoot(defaults: freshDefaults()),
+            verifyInclusion: { _ in }
+        )
+        let result = await v.verifyIdentityInLog(
+            accountId: accountId, publishedSignaturePubkey: served
+        )
+        XCTAssertEqual(result.status, .mismatch)
+    }
+
+    func testGenesisCheckSkippedForRotationLengthLeafAuth() async throws {
+        // A 145-byte supersession proof is the rotation case — the genesis
+        // gate skips it (the chain verifies a rotation), so a clean inclusion
+        // is still confirmed even though the bytes are not a genesis self-sig.
+        let identity = try Identity.fromSeed(seed: Data(repeating: 0x5A, count: 32))
+        let served = identity.signaturePublicKey()
+        let latest = LatestEntry(
+            idx: 3, version: 1, identityPubkey: served, isReset: false,
+            leafAuth: Data(repeating: 0x52, count: 145)
+        )
+        let v = TransparencyVerify(
+            client: FakeFetcher(root: rootAt(10), latest: latest, proof: proofFixture),
+            operatorKey: operatorKey,
+            lastSeenRoot: LastSeenRoot(defaults: freshDefaults()),
+            verifyInclusion: { _ in }
+        )
+        let result = await v.verifyIdentityInLog(
+            accountId: accountId, publishedSignaturePubkey: served
+        )
+        XCTAssertEqual(result.status, .confirmed)
+    }
 }
 
 // MARK: - Test doubles
