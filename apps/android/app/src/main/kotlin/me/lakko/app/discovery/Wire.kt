@@ -112,6 +112,13 @@ data class IdentityUploadRequest(
      *  proof bridging an AccountIdentity rotation. `null` for a normal
      *  upload — its absence clears any stored proof server-side. */
     val supersession_proof: String? = null,
+    /** G-30 #2 (ADR-0019): base64 of an optional client leaf authorisation
+     *  (a genesis / fresh-start self-signature over the `(account_key,
+     *  pubkey)` binding) so the transparency append can verify the account
+     *  authorised a NEW log entry. `null` for a same-key re-publish (the
+     *  append is idempotent and needs no authorisation). Opaque to the
+     *  server. */
+    val leaf_auth: String? = null,
 )
 
 /** Response body of `POST /discovery/identity`. */

@@ -1044,6 +1044,7 @@ public class DiscoveryClient(
         signaturePubkey: ByteArray,
         x25519Pubkey: ByteArray,
         supersessionProofB64: String? = null,
+        leafAuth: ByteArray? = null,
     ) {
         if (accountId.size != ACCOUNT_ID_LEN) {
             throw DiscoveryClientArgError("accountId must be $ACCOUNT_ID_LEN bytes")
@@ -1069,6 +1070,7 @@ public class DiscoveryClient(
                 signature_pubkey = base64Encode(signaturePubkey),
                 x25519_pubkey = base64Encode(x25519Pubkey),
                 supersession_proof = supersessionProofB64,
+                leaf_auth = leafAuth?.let { base64Encode(it) },
             ),
         )
         if (!resp.ok) {

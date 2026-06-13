@@ -18,6 +18,8 @@ import me.lakko.app.webauthn.PasskeyLoginResult
 import me.lakko.app.webauthn.WebauthnClient
 import uniffi.lakko_ffi_uniffi.Identity
 import uniffi.lakko_ffi_uniffi.RecoveryMnemonic
+import uniffi.lakko_ffi_uniffi.signLeafGenesis
+import uniffi.lakko_ffi_uniffi.transparencyAccountKey
 import java.util.concurrent.atomic.AtomicReference
 
 /**
@@ -1551,11 +1553,19 @@ public class AuthRepository(
         try {
             discovery.setSessionToken(sessionToken)
             Identity.fromSeed(seed).use { identity ->
+                // G-30 #2 (ADR-0019): a fresh-start mint publishes a NEW key
+                // with no supersession proof, so authorise the log entry with a
+                // genesis self-signature over the (account_key, pubkey) binding.
+                val leafAuth = signLeafGenesis(
+                    identity.ed25519Seed(),
+                    transparencyAccountKey(accountId),
+                )
                 discovery.uploadIdentityBundle(
                     accountId = accountId,
                     signaturePubkey = identity.signaturePublicKey(),
                     x25519Pubkey = identity.x25519PublicKey(),
                     supersessionProofB64 = null,
+                    leafAuth = leafAuth,
                 )
                 discovery.uploadKeyPackage(accountId, identity.createKeyPackage())
             }
@@ -2320,6 +2330,18 @@ public class AuthRepository(
                     val signaturePubkey = identity.signaturePublicKey()
                     val x25519Pubkey = identity.x25519PublicKey()
                     val keyPackageBytes = identity.createKeyPackage()
+                    // G-30 #2 (ADR-0019): carry a genesis self-signature over
+                    // the (account_key, pubkey) binding. On a TRUE re-publish
+                    // (the key is already logged) discovery Skips the
+                    // transparency append, so this is ignored; but on this
+                    // platform `signup` does not itself publish the bundle, so
+                    // a recover can be the FIRST time discovery sees the
+                    // account — then this self-sig authorises the genesis log
+                    // entry. The key is unchanged, so the self-sig is valid.
+                    val leafAuth = signLeafGenesis(
+                        identity.ed25519Seed(),
+                        transparencyAccountKey(accountId),
+                    )
                     // Proof-less re-publish (account key unchanged).
                     // Refreshes the KeyPackage + clears any stale server
                     // proof column.
@@ -2328,6 +2350,7 @@ public class AuthRepository(
                         signaturePubkey = signaturePubkey,
                         x25519Pubkey = x25519Pubkey,
                         supersessionProofB64 = null,
+                        leafAuth = leafAuth,
                     )
                     discovery.uploadKeyPackage(accountId, keyPackageBytes)
                 }
