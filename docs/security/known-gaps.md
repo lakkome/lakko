@@ -1802,3 +1802,44 @@ are recorded here so a future reader does not over-trust the deployed check:
 A `verify_log_inclusion` fuzz target was added
 (`crates/lakko-transparency/fuzz/fuzz_targets/verify_log_inclusion.rs`) closing
 the "new attacker-touchable verify surface → fuzz target" rule.
+
+**Update — G-30 #2 closed by ADR-0019 (client-authorised log leaf), 2026-06-12.**
+Finding 2 is CLOSED and finding 1's rotation case is materially addressed:
+
+- **Rotations are now chain-verified (finding 1, rotation case).**
+  `verify_supersession_chain` is FFI-exposed (UniFFI + wasm) and wired into all
+  three clients' gate 2 (`verifyRotationChain`): on a key change the rotation is
+  bound to a SINGLE committed log version under a no-rollback signed root
+  (operator-root sig → no-rollback → inclusion → username match → strictly-newer
+  version → old-key supersession proof → leaf-pubkey == proof key). This makes
+  leaked-old-key equivocation **detectable** (two distinct successors cannot both
+  be log-confirmed at the same version → the second peer to fetch sees a
+  version-floor / inclusion failure → `mismatch`). It is detection (depends on
+  ≥1 honest fetch + the OOB safety-number backstop), NOT full split-view
+  resistance — operator equivocation across DIFFERENT signed roots still needs
+  gossip / witness co-signing (finding 1, still future work).
+
+- **Append is now client-authorised (finding 2, CLOSED).** Every new
+  `(account_key → pubkey)` binding must carry a `leaf_auth`: a genesis / reset
+  self-signature by the leaf's own key (domain `lakko/transparency/leaf-genesis/v1`),
+  or a rotation supersession proof signed by the previous key. The transparency
+  `append` handler verifies it under the append lock and REJECTS an invalid one
+  (403); `LAKKO_TRANSPARENCY_REQUIRE_LEAF_AUTH` (default on) also refuses an
+  ABSENT one. Discovery threads `leaf_auth` opaquely — stored + forwarded, never
+  parsed (invariant #2). All three clients mint the genesis self-sig on a
+  new-key publish and verify a served genesis self-sig against the served key on
+  a first observation. A leaked append secret can no longer fabricate a keyless
+  leaf. **Residual: genesis is TOFU** — a self-sig does not PREVENT first-entry
+  squatting (an attacker with the append secret can self-sign their OWN key for a
+  victim's never-used account_key); it is detected via CONIKS self-monitoring +
+  the ADR-0016 fail-closed peer gate. The auth-attested-genesis hardening (which
+  PREVENTS squatting) is recorded as the elective alternative in ADR-0019.
+
+- Finding 3 (mismatch / absent posture) is UNCHANGED — still surface-not-block
+  (a chain contradiction maps to `mismatch`, not a block; only `rollback`
+  hard-fails), consistent with the deferred `lakko-security` ruling.
+
+Two new attacker-touchable verify surfaces got fuzz targets:
+`verify_supersession_chain` (rotation chain) and `verify_leaf_genesis` (genesis
+self-sig). `lakko-security` re-reviewed Sprints 1+2: **APPROVE-WITH-NOTES**
+(invariants #2/#4/#6 hold or strengthened; cleared to merge). See ADR-0019.

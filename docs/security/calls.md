@@ -2562,6 +2562,68 @@ endpoints plus the SFU and cannot run in a headless build.
 This residual item is tracked as [G-26](known-gaps.md#g-26)
 and is a verification step, not a missing mechanism.
 
+### C-56: Every new KT-log binding is account-authorised (not discovery-asserted)
+
+G-30 #2 ([ADR-0019](../adr/0019-client-authorised-log-leaf.md))
+closes the append-binding trust gap
+([G-30](known-gaps.md#g-30) finding 2): a new transparency-log
+`(account_key → pubkey)` binding is no longer merely asserted
+by the discovery service, it carries a cryptographic
+**account authorisation** that the operator verifies and a
+client re-checks.
+
+Four sub-invariants:
+
+1. **Rotations are chain-verified against the log.**
+   `verify_supersession_chain`
+   (`crates/lakko-transparency/src/supersession.rs`) is
+   FFI-exposed (UniFFI + wasm) and wired into all three
+   clients' gate 2 (`verifyRotationChain`). On a key change the
+   rotation is bound to a SINGLE committed log version under a
+   no-rollback signed root (operator-root sig → no-rollback →
+   Merkle inclusion → `username_hash` match → strictly-newer
+   version → old-key supersession proof → leaf-pubkey == proof
+   key). Gate 1 (the ADR-0016 fail-closed supersession gate)
+   is untouched and remains the only hard-block on a key
+   change; the chain lives in gate 2 (a contradiction surfaces
+   as `mismatch`, only `rollback` hard-fails). This makes
+   leaked-old-key equivocation **detectable** (two distinct
+   successors cannot both be log-confirmed at one version).
+
+2. **Genesis / reset bindings carry a self-signature.**
+   `sign_leaf_genesis` / `verify_leaf_genesis`
+   (`leaf_auth.rs`, domain `lakko/transparency/leaf-genesis/v1`,
+   version-independent) authorise a first entry or an
+   `is_reset` mint by signing `(account_key, pubkey)` with the
+   leaf's OWN key. All three clients mint it on a new-key
+   publish and verify a served genesis self-sig against the
+   served key on a first observation.
+
+3. **The operator REJECTS an unauthorised append.** The
+   transparency `append` handler verifies the `leaf_auth`
+   under the append lock (genesis: self-sig; rotation: the
+   supersession proof against the previous entry's pubkey) and
+   returns 403 on an invalid one;
+   `LAKKO_TRANSPARENCY_REQUIRE_LEAF_AUTH` (default on) also
+   refuses an absent one. Defence-in-depth — the client chain
+   stays the real gate (the server is untrusted) — but a
+   leaked append secret can no longer fabricate a keyless leaf.
+
+4. **Discovery treats `leaf_auth` as OPAQUE
+   ([invariant #2](../../CLAUDE.md)).** It stores + COALESCE-
+   preserves + forwards the bytes, and NEVER decodes, parses,
+   or verifies them (length-cap is storage-bounding only).
+
+Residual: genesis is TOFU — a self-sig does not PREVENT
+first-entry squatting (an attacker with the append secret can
+self-sign their own key for a victim's never-used
+account_key); it is detected via CONIKS self-monitoring + the
+ADR-0016 fail-closed peer gate. The auth-attested-genesis
+hardening (which prevents squatting) is the elective
+alternative recorded in ADR-0019. Two new fuzz targets cover
+the new verify surfaces (`verify_supersession_chain`,
+`verify_leaf_genesis`). `lakko-security`: **APPROVE-WITH-NOTES**.
+
 ## Exporter labels (call-side)
 
 | Label | Length | Context | Source | Used for |

@@ -159,6 +159,12 @@ SFU multi-party client SFrame coverage).
 |---|---|
 | C-55 | SFU multi-party media is SFrame-sealed end-to-end on every client (web / iOS / Android); the AEAD AAD is the cross-platform wire header, not host RTP metadata |
 
+### C-56 — Client-authorised transparency-log leaf (G-30 #2, ADR-0019)
+
+| ID   | Title |
+|---|---|
+| C-56 | Every new KT-log `(account_key → pubkey)` binding is account-authorised, not discovery-asserted: a rotation is chain-verified against a single committed, no-rollback log version on all three clients (`verify_supersession_chain`, gate 2), and a genesis / reset binding carries a self-signature by the leaf's own key (`verify_leaf_genesis`, domain-separated). The transparency `append` handler verifies the authorisation under the append lock and REJECTS an invalid one (403; absent refused when `LAKKO_TRANSPARENCY_REQUIRE_LEAF_AUTH` is on); discovery stores + forwards `leaf_auth` OPAQUE (never parsed, invariant #2). Clients mint the genesis self-sig on a new-key publish + verify a served genesis self-sig on first observation. Closes G-30 finding 2; rotation equivocation is now detectable (finding 1, rotation case). Residual: genesis is TOFU (squatting detected, not prevented). `lakko-security` APPROVE-WITH-NOTES |
+
 ## Transport-layer invariants (T-1..T-11)
 
 Source: [`transport.md`](./transport.md). Anti-censorship
