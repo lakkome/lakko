@@ -104,3 +104,10 @@ http-body-util = "0.1"
 # dev-dep override needed. The round-trip test in
 # `invite::tests::server_side_decode_and_verify_round_trip`
 # uses the same dep.
+# Recovery + KT-log live e2e (`tests/recovery_kt_e2e.rs`, `#[ignore]`-gated):
+# the driver mints a session token, solves the PoW, derives an AccountIdentity,
+# mints genesis self-sigs + supersession proofs, and verifies inclusion /
+# genesis / chain against the live transparency log — all client-side crypto.
+lakko-pow.workspace = true
+lakko-mls.workspace = true
+lakko-transparency.workspace = true

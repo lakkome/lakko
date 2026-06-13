@@ -1,0 +1,109 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+# Recovery + KT-log live e2e CI gate.
+#
+# Brings up the dockerised discovery + transparency stack from
+# `ci/recovery-e2e/`, runs the `#[ignore]`-gated driver in
+# `services/discovery/tests/recovery_kt_e2e.rs` (publish -> genesis-log-append
+# -> fetch-verify -> recovery -> rotation-chain, all with the real client-side
+# crypto), and tears everything down. Closes the deferred "live 2-device e2e"
+# residual of ADR-0016 / 0017 / 0018 + G-30 #2 (ADR-0019) at the server + crypto
+# layer (the three client RUNTIMES stay deferred — they need browser + sims).
+#
+# Trigger: `workflow_dispatch` only, for now (quota-conservation, matching
+# `sfu-e2e.yml`). The `recovery-e2e` PR-label gate + nightly cron are kept
+# commented below to re-arm when a paid tier / self-hosted runner lands.
+
+name: recovery-e2e
+
+on:
+  workflow_dispatch: {}
+  # pull_request:
+  #   types: [labeled, synchronize, reopened]
+  # schedule:
+  #   - cron: "0 4 * * *" # nightly 04:00 UTC
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  CARGO_INCREMENTAL: 0
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  recovery-e2e:
+    # workflow_dispatch is the only live trigger today; the `if:` stays in
+    # place for the PR-label arm above when it returns.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' &&
+       contains(github.event.pull_request.labels.*.name, 'recovery-e2e'))
+
+    name: dockerised discovery + transparency recovery+KT pipeline
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "recovery-e2e"
+
+      # Pre-build the test binary on the host so it does not serialise with
+      # the compose image build.
+      - name: cargo test --no-run
+        run: |
+          cargo test \
+            --package lakko-svc-discovery \
+            --test recovery_kt_e2e \
+            --no-run
+
+      # `--wait` blocks until every healthchecked service is healthy, so the
+      # driver never races a still-migrating DB or a booting service.
+      - name: docker compose up
+        run: |
+          docker compose -f ci/recovery-e2e/docker-compose.yml up \
+            --build \
+            --detach \
+            --wait \
+            --wait-timeout 300
+
+      - name: docker compose ps
+        run: docker compose -f ci/recovery-e2e/docker-compose.yml ps
+
+      - name: cargo test --include-ignored
+        run: |
+          cargo test \
+            --package lakko-svc-discovery \
+            --test recovery_kt_e2e \
+            -- \
+            --include-ignored \
+            --nocapture
+
+      - name: docker compose logs (on failure)
+        if: failure()
+        run: |
+          mkdir -p artifacts
+          for svc in discovery transparency discovery-db transparency-db; do
+            docker compose -f ci/recovery-e2e/docker-compose.yml logs --no-color "$svc" \
+              > "artifacts/$svc.log" || true
+          done
+
+      - name: upload logs artefact (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: recovery-e2e-logs
+          path: artifacts/
+          retention-days: 14
+
+      - name: docker compose down
+        if: always()
+        run: |
+          docker compose -f ci/recovery-e2e/docker-compose.yml down --volumes

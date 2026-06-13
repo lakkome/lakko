@@ -1,0 +1,116 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+# Recovery + KT-log live e2e — brings up the minimal stack the
+# `services/discovery/tests/recovery_kt_e2e.rs` driver needs:
+#
+#   - `transparency-db` / `discovery-db` — one MariaDB per service (each
+#     service tracks its own `_sqlx_migrations`; sharing a DB would make them
+#     see each other's migrations as missing).
+#   - `transparency` — the KT log; verifies + rejects an unauthorised leaf
+#     (`LAKKO_TRANSPARENCY_REQUIRE_LEAF_AUTH=1`, G-30 #2 / ADR-0019).
+#   - `discovery` — fronts the identity-bundle upload; on a key change it
+#     best-effort appends to `transparency` (+ a fast reconciler sweep).
+#
+# NO auth service: discovery's upload is gated by a shared-secret session
+# token, so the driver mints it directly (see the test's `session_secret()`).
+#
+# The driver runs on the HOST and connects to the published ports
+# (127.0.0.1:8084 discovery, 127.0.0.1:8087 transparency). The build context
+# is the workspace root (`../..`) so each Dockerfile's `COPY . .` sees every
+# workspace crate.
+
+services:
+  transparency-db:
+    image: mariadb:11
+    container_name: lakko-recovery-e2e-transparency-db
+    restart: "no"
+    environment:
+      MARIADB_ROOT_PASSWORD: rootpw
+      MARIADB_DATABASE: lakko_transparency
+      MARIADB_USER: lakko
+      MARIADB_PASSWORD: devpass
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+
+  discovery-db:
+    image: mariadb:11
+    container_name: lakko-recovery-e2e-discovery-db
+    restart: "no"
+    environment:
+      MARIADB_ROOT_PASSWORD: rootpw
+      MARIADB_DATABASE: lakko_discovery
+      MARIADB_USER: lakko
+      MARIADB_PASSWORD: devpass
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+
+  transparency:
+    build:
+      context: ../..
+      dockerfile: services/transparency/Dockerfile
+    container_name: lakko-recovery-e2e-transparency
+    restart: "no"
+    depends_on:
+      transparency-db:
+        condition: service_healthy
+    environment:
+      LAKKO_BIND: "0.0.0.0:8087"
+      LAKKO_TRANSPARENCY_DATABASE_URL: "mysql://lakko:devpass@transparency-db:3306/lakko_transparency"
+      # base64(16x 0x42). Shared with discovery (presented as a Bearer on
+      # the append POST). >= 16 bytes after decode.
+      LAKKO_TRANSPARENCY_APPEND_SECRET: "QkJCQkJCQkJCQkJCQkJCQg=="
+      # G-30 #2: refuse a new binding with no leaf_auth (the e2e's step-5
+      # negative depends on this).
+      LAKKO_TRANSPARENCY_REQUIRE_LEAF_AUTH: "1"
+      RUST_LOG: "info,lakko_svc_transparency=debug"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8087/ready || exit 1"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+      start_period: 3s
+    ports:
+      - "127.0.0.1:8087:8087"
+
+  discovery:
+    build:
+      context: ../..
+      dockerfile: services/discovery/Dockerfile
+    container_name: lakko-recovery-e2e-discovery
+    restart: "no"
+    depends_on:
+      discovery-db:
+        condition: service_healthy
+      transparency:
+        condition: service_healthy
+    environment:
+      LAKKO_BIND: "0.0.0.0:8084"
+      LAKKO_DISCOVERY_DATABASE_URL: "mysql://lakko:devpass@discovery-db:3306/lakko_discovery"
+      # MUST match the driver's default session secret (base64(32x 0x5e)).
+      LAKKO_SESSION_TOKEN_SECRET: "Xl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl4="
+      # Arm the KT-log append integration toward the transparency container.
+      LAKKO_TRANSPARENCY_URL: "http://transparency:8087"
+      LAKKO_TRANSPARENCY_APPEND_SECRET: "QkJCQkJCQkJCQkJCQkJCQg=="
+      # Fast reconciler so a best-effort-missed append lands within a poll
+      # cycle.
+      LAKKO_DISCOVERY_TRANSPARENCY_RECONCILE_SECS: "2"
+      # Trivial PoW so the host-side driver solves instantly.
+      LAKKO_DISCOVERY_POW_EFFORT_BITS: "0"
+      RUST_LOG: "info,lakko_svc_discovery=debug"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8084/ready || exit 1"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+      start_period: 3s
+    ports:
+      - "127.0.0.1:8084:8084"
