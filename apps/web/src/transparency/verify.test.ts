@@ -104,13 +104,19 @@ function rootAt(logSize: bigint): SignedRoot {
 }
 
 /** Build a `LatestEntry` fixture serving `pubkey` with an optional
- *  `is_reset` marker (default `false`). */
-function latestWith(pubkey: Uint8Array, isReset = false): LatestEntry {
+ *  `is_reset` marker (default `false`) and an optional `leafAuth`
+ *  (G-30 #2; default `null` — no genesis self-sig to check). */
+function latestWith(
+  pubkey: Uint8Array,
+  isReset = false,
+  leafAuth: Uint8Array | null = null,
+): LatestEntry {
   return {
     idx: 3n,
     version: 1n,
     identityPubkey: pubkey,
     isReset,
+    leafAuth,
   };
 }
 
@@ -451,6 +457,7 @@ describe("verifyRotationChain (G-30 #2, ADR-0019)", () => {
         version: 7n,
         identityPubkey: SERVED_PUBKEY,
         isReset: false,
+        leafAuth: null,
       })),
     });
     const r = await runChain(client);
@@ -548,5 +555,66 @@ describe("verifyRotationChain (G-30 #2, ADR-0019)", () => {
     const r = await runChain(client);
     expect(r.status).toBe("unreachable");
     expect(r.version).toBeNull();
+  });
+});
+
+describe("verifyIdentityInLog — G-30 #2 genesis self-sig", () => {
+  const GENESIS_SIG = new Uint8Array(64).fill(0x47);
+  const ROTATION_PROOF = new Uint8Array(145).fill(0x52);
+
+  it('confirmed when a 64-byte genesis leaf_auth verifies', async () => {
+    const client = mockClient({
+      fetchLatest: vi.fn(async () =>
+        latestWith(SERVED_PUBKEY, false, GENESIS_SIG),
+      ),
+    });
+    const r = await runFull(client, {
+      verifyGenesis: () => {
+        /* pass */
+      },
+    });
+    expect(r.status).toBe("confirmed");
+  });
+
+  it('mismatch when a 64-byte genesis leaf_auth FAILS to verify', async () => {
+    const client = mockClient({
+      fetchLatest: vi.fn(async () =>
+        latestWith(SERVED_PUBKEY, false, GENESIS_SIG),
+      ),
+    });
+    const r = await runFull(client, {
+      verifyGenesis: () => {
+        throw new Error("bad genesis self-sig");
+      },
+    });
+    expect(r.status).toBe("mismatch");
+  });
+
+  it("confirmed (genesis check skipped) when leaf_auth is null", async () => {
+    const client = mockClient({
+      fetchLatest: vi.fn(async () => latestWith(SERVED_PUBKEY, false, null)),
+    });
+    const verifyGenesis = vi.fn(() => {
+      throw new Error("genesis check must NOT run for a null leaf_auth");
+    });
+    const r = await runFull(client, { verifyGenesis });
+    expect(r.status).toBe("confirmed");
+    expect(verifyGenesis).not.toHaveBeenCalled();
+  });
+
+  it("confirmed (genesis check skipped) when leaf_auth is a 145-byte rotation proof", async () => {
+    // A 145-byte supersession proof is the rotation case — verified by the
+    // chain in verifyRotationChain, not the genesis gate here.
+    const client = mockClient({
+      fetchLatest: vi.fn(async () =>
+        latestWith(SERVED_PUBKEY, false, ROTATION_PROOF),
+      ),
+    });
+    const verifyGenesis = vi.fn(() => {
+      throw new Error("genesis check must NOT run for a 145-byte proof");
+    });
+    const r = await runFull(client, { verifyGenesis });
+    expect(r.status).toBe("confirmed");
+    expect(verifyGenesis).not.toHaveBeenCalled();
   });
 });

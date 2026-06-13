@@ -56,6 +56,12 @@ export interface LatestEntry {
   /** ADR-0017 fresh-start marker — `true` if the latest entry was a
    *  no-supersession-proof owner reset. */
   readonly isReset: boolean;
+  /** G-30 #2 (ADR-0019): the opaque client leaf authorisation stored with
+   *  this entry (a 64-byte genesis self-sig or a 145-byte supersession
+   *  proof), or `null` for a pre-Sprint-2 / unauthenticated row. A client
+   *  verifies a genesis self-sig against the served key on a first
+   *  observation. */
+  readonly leafAuth: Uint8Array | null;
 }
 
 /** Decoded `GET /transparency/proof/:idx` response — bytes, not base64.
@@ -110,6 +116,9 @@ interface LatestResWire {
   version: number;
   identity_pubkey_b64: string;
   is_reset: boolean;
+  /** G-30 #2 (ADR-0019): base64 of the entry's leaf authorisation, or
+   *  absent for a pre-Sprint-2 / unauthenticated row. */
+  leaf_auth_b64?: string;
 }
 
 /** Wire shape of `GET /transparency/proof/:idx` (Rust `ProofRes`). */
@@ -162,6 +171,10 @@ export class TransparencyClient {
       version: BigInt(wire.version),
       identityPubkey: base64Decode(wire.identity_pubkey_b64),
       isReset: wire.is_reset,
+      leafAuth:
+        wire.leaf_auth_b64 !== undefined && wire.leaf_auth_b64.length > 0
+          ? base64Decode(wire.leaf_auth_b64)
+          : null,
     };
   }
 

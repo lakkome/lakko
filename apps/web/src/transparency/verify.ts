@@ -132,6 +132,18 @@ export interface VerifyDeps {
     pinnedOldPubkey: Uint8Array;
     pinnedLogVersion: number;
   }) => Uint8Array;
+  /**
+   * Genesis self-sig gate override (TEST SEAM ONLY) — G-30 #2 (ADR-0019).
+   * When supplied, replaces the real wasm `verifyLeafGenesis` call: it
+   * should THROW to simulate a failed genesis-authorisation check and
+   * RETURN to simulate success — exactly the wasm contract. Production
+   * callers never pass this.
+   */
+  verifyGenesis?: (args: {
+    sig: Uint8Array;
+    accountKey: Uint8Array;
+    servedPubkey: Uint8Array;
+  }) => void;
 }
 
 /**
@@ -232,6 +244,32 @@ export async function verifyIdentityInLog(
       // mismatch (a log/server divergence from what we were told). A
       // latest entry still existed, so the marker rides out.
       return { status: "mismatch", isReset };
+    }
+
+    // 5. G-30 #2 (ADR-0019) — first-observation genesis check. If the
+    //    latest entry carries a GENESIS self-signature (64 bytes — a
+    //    rotation's 145-byte supersession proof is verified by the chain in
+    //    `verifyRotationChain`, not here; a pre-Sprint-2 row carries none),
+    //    confirm it authorises EXACTLY the served key. A failure means the
+    //    log entry's self-authorisation does not check out against the
+    //    served key → surface as a mismatch. This never establishes trust
+    //    at TOFU (the served key signs its own genesis); it is a
+    //    consistency gate on the log entry's authorisation.
+    if (latest.leafAuth !== null && latest.leafAuth.length === 64) {
+      try {
+        if (deps.verifyGenesis !== undefined) {
+          deps.verifyGenesis({
+            sig: latest.leafAuth,
+            accountKey: ak,
+            servedPubkey: publishedSignaturePubkey,
+          });
+        } else {
+          const wasm = await loadWasm();
+          wasm.verifyLeafGenesis(latest.leafAuth, ak, publishedSignaturePubkey);
+        }
+      } catch {
+        return { status: "mismatch", isReset };
+      }
     }
     return { status: "confirmed", isReset };
   } catch (err) {
