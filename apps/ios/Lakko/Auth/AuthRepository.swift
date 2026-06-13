@@ -1655,10 +1655,18 @@ public final class AuthRepository: ObservableObject {
     ) async throws {
         let discovery = DiscoveryClient(sessionToken: sessionToken)
         let identity = try Identity.fromSeed(seed: seed)
+        // G-30 #2 (ADR-0019): a fresh-start mint publishes a NEW key with no
+        // supersession proof, so authorise the log entry with a genesis
+        // self-signature over the (account_key, pubkey) binding.
+        let leafAuth = try signLeafGenesis(
+            ed25519Seed: identity.ed25519Seed(),
+            usernameHash: transparencyAccountKey(accountId: accountId)
+        )
         try await discovery.uploadIdentityBundle(
             accountId: accountId,
             signaturePubkey: identity.signaturePublicKey(),
-            x25519Pubkey: identity.x25519PublicKey()
+            x25519Pubkey: identity.x25519PublicKey(),
+            leafAuth: leafAuth
         )
         try await discovery.uploadKeyPackage(
             accountId: accountId,
@@ -1886,12 +1894,24 @@ public final class AuthRepository: ObservableObject {
 
         let discovery = DiscoveryClient(sessionToken: sessionToken)
         do {
+            // G-30 #2 (ADR-0019): carry a genesis self-signature over the
+            // (account_key, pubkey) binding. On a TRUE re-publish (the key is
+            // already logged) discovery Skips the transparency append, so this
+            // is ignored; but on this platform `signup` does not itself publish
+            // the bundle, so a recover can be the FIRST time discovery sees the
+            // account — then this self-sig authorises the genesis log entry.
+            // The key is unchanged, so the self-sig is valid.
+            let leafAuth = try signLeafGenesis(
+                ed25519Seed: identity.ed25519Seed(),
+                usernameHash: transparencyAccountKey(accountId: accountId)
+            )
             // Proof-less re-publish (account key unchanged). Refreshes
             // the KeyPackage + clears any stale server proof column.
             try await discovery.uploadIdentityBundle(
                 accountId: accountId,
                 signaturePubkey: identity.signaturePublicKey(),
-                x25519Pubkey: identity.x25519PublicKey()
+                x25519Pubkey: identity.x25519PublicKey(),
+                leafAuth: leafAuth
             )
         } catch {
             NSLog("supersession (ADR-0017): proof-less bundle re-publish (recover) failed: \(error)")

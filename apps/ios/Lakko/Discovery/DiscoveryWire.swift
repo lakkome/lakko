@@ -142,19 +142,28 @@ public struct IdentityUploadRequest: Codable, Equatable {
     /// proof bridging an AccountIdentity rotation. `nil` for a normal upload
     /// — its absence clears any stored proof server-side.
     public let supersessionProof: String?
+    /// G-30 #2 (ADR-0019): base64 of an optional client leaf authorisation
+    /// (a genesis / fresh-start self-signature over the `(account_key,
+    /// pubkey)` binding) so the transparency append can verify the account
+    /// authorised a NEW log entry. `nil` for a same-key re-publish (the
+    /// append is idempotent and needs no authorisation). Opaque to the
+    /// server.
+    public let leafAuth: String?
 
     public init(
         pow: PowProofPayload,
         accountId: String,
         signaturePubkey: String,
         x25519Pubkey: String,
-        supersessionProof: String? = nil
+        supersessionProof: String? = nil,
+        leafAuth: String? = nil
     ) {
         self.pow = pow
         self.accountId = accountId
         self.signaturePubkey = signaturePubkey
         self.x25519Pubkey = x25519Pubkey
         self.supersessionProof = supersessionProof
+        self.leafAuth = leafAuth
     }
 
     enum CodingKeys: String, CodingKey {
@@ -163,6 +172,7 @@ public struct IdentityUploadRequest: Codable, Equatable {
         case signaturePubkey = "signature_pubkey"
         case x25519Pubkey = "x25519_pubkey"
         case supersessionProof = "supersession_proof"
+        case leafAuth = "leaf_auth"
     }
 }
 

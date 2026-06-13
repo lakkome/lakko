@@ -362,7 +362,8 @@ public final class DiscoveryClient {
         accountId: Data,
         signaturePubkey: Data,
         x25519Pubkey: Data,
-        supersessionProofB64: String? = nil
+        supersessionProofB64: String? = nil,
+        leafAuth: Data? = nil
     ) async throws {
         guard accountId.count == Self.accountIdLength else {
             throw DiscoveryClientError.argument(
@@ -392,7 +393,8 @@ public final class DiscoveryClient {
                 accountId: base64Encode(accountId),
                 signaturePubkey: base64Encode(signaturePubkey),
                 x25519Pubkey: base64Encode(x25519Pubkey),
-                supersessionProof: supersessionProofB64
+                supersessionProof: supersessionProofB64,
+                leafAuth: leafAuth.map { base64Encode($0) }
             )
         )
         guard resp.ok else {
