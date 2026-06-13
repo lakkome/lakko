@@ -36,7 +36,9 @@
 //! API hands the index out only on append, so first-write-to-DB is not
 //! possible without duplicating the index-allocation logic here.
 
-use lakko_transparency::{InMemoryLog, InclusionProof, LogEntry, SignedRoot};
+use lakko_transparency::{
+    verify_leaf_genesis, verify_supersession, InMemoryLog, InclusionProof, LogEntry, SignedRoot,
+};
 use sqlx::MySqlPool;
 use tokio::sync::Mutex;
 
@@ -61,12 +63,22 @@ pub(crate) enum StoreError {
     /// on a proof request).
     #[error("transparency log error: {0}")]
     Log(#[from] lakko_transparency::Error),
+    /// The leaf authorisation (G-30 #2, ADR-0019) for a NEW binding was
+    /// absent or did not verify — the operator refuses to append a
+    /// fabricated / unauthorised leaf. Maps to HTTP 403.
+    #[error("leaf authorisation rejected: {0}")]
+    Unauthorised(&'static str),
 }
 
 /// One replayed `log_entries` row: `(idx, username_hash,
 /// identity_pubkey, version, is_reset)`. `is_reset` BOOLEAN comes back
 /// as MariaDB `TINYINT(1)` → `i8`.
 type LeafRow = (u64, Vec<u8>, Vec<u8>, u64, i8);
+
+/// One `latest`-query row: `(idx, identity_pubkey, version, is_reset,
+/// leaf_auth)`. `is_reset` → `i8`; `leaf_auth` VARBINARY NULL →
+/// `Option<Vec<u8>>` (G-30 #2).
+type LatestRow = (u64, Vec<u8>, u64, i8, Option<Vec<u8>>);
 
 /// The outcome of a successful [`LogStore::append`] — the assigned leaf
 /// index and the server-assigned per-username version (KT-log S2
@@ -97,6 +109,11 @@ pub(crate) struct LatestEntry {
     /// ADR-0017 fresh-start marker — `true` if the latest entry was a
     /// no-supersession-proof owner reset.
     pub(crate) is_reset: bool,
+    /// G-30 #2 (ADR-0019): the opaque client leaf authorisation stored
+    /// with this entry (a genesis self-sig or a supersession proof), or
+    /// `None` for a pre-Sprint-2 / unauthenticated row. Served so a client
+    /// can verify the genesis self-sig on a first observation.
+    pub(crate) leaf_auth: Option<Vec<u8>>,
 }
 
 /// Persistent append-only transparency log.
@@ -201,6 +218,8 @@ impl LogStore {
         username_hash: [u8; 32],
         identity_pubkey: Vec<u8>,
         is_reset: bool,
+        leaf_auth: Option<&[u8]>,
+        now_unix_secs: i64,
     ) -> Result<AppendResult, StoreError> {
         let mut log = self.inner.lock().await;
 
@@ -233,6 +252,46 @@ impl LogStore {
             }
         }
 
+        // G-30 #2 (ADR-0019): a NEW binding (a pubkey different from the
+        // current latest) must be AUTHORISED by the account. We verify the
+        // `leaf_auth` when it is present; the handler's presence policy
+        // (`LAKKO_TRANSPARENCY_REQUIRE_LEAF_AUTH`) governs whether an ABSENT
+        // value is refused. This is the operator-side defence-in-depth reject
+        // — the client rotation chain stays the real gate (the server is
+        // untrusted), but a self-respecting operator never appends a
+        // fabricated / unauthorised leaf.
+        //
+        //   * genesis (no prior entry) OR a fresh-start reset (`is_reset` —
+        //     the old key is gone, so no supersession proof can exist): a
+        //     SELF-signature by the leaf's OWN key over the
+        //     `(account_key, pubkey)` binding.
+        //   * a normal rotation (a prior entry exists, not a reset): a
+        //     SUPERSESSION proof signed by the PREVIOUS key, authorising
+        //     EXACTLY the new key.
+        if let Some(auth) = leaf_auth {
+            match latest.as_ref() {
+                Some((prev_pubkey, _, _)) if !is_reset => {
+                    let prev: [u8; 32] = prev_pubkey.as_slice().try_into().map_err(|_| {
+                        StoreError::Unauthorised("previous pubkey is not 32 bytes")
+                    })?;
+                    let authorised =
+                        verify_supersession(auth, &prev, now_unix_secs).map_err(|_| {
+                            StoreError::Unauthorised("supersession proof did not verify")
+                        })?;
+                    if authorised.as_slice() != identity_pubkey.as_slice() {
+                        return Err(StoreError::Unauthorised(
+                            "supersession proof authorises a different key",
+                        ));
+                    }
+                }
+                _ => {
+                    verify_leaf_genesis(auth, &username_hash, &identity_pubkey).map_err(|_| {
+                        StoreError::Unauthorised("genesis self-signature did not verify")
+                    })?;
+                }
+            }
+        }
+
         // Assign the version: latest existing for this username_hash, + 1.
         // We already hold the latest row above; `latest_version + 1` (or 1
         // for a brand-new username) is the next version. Run under the lock
@@ -252,14 +311,16 @@ impl LogStore {
         // Persist the leaf. If this fails the in-memory tree now holds a
         // leaf the DB does not — fatal-ish, see module docs.
         let insert = sqlx::query(
-            "INSERT INTO log_entries (idx, username_hash, identity_pubkey, version, is_reset) \
-             VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO log_entries \
+             (idx, username_hash, identity_pubkey, version, is_reset, leaf_auth) \
+             VALUES (?, ?, ?, ?, ?, ?)",
         )
         .bind(idx)
         .bind(&entry.username_hash[..])
         .bind(&entry.identity_pubkey[..])
         .bind(entry.version)
         .bind(is_reset)
+        .bind(leaf_auth)
         .execute(pool)
         .await;
 
@@ -313,20 +374,22 @@ impl LogStore {
         pool: &MySqlPool,
         username_hash: [u8; 32],
     ) -> Result<Option<LatestEntry>, StoreError> {
-        // `is_reset` BOOLEAN comes back as MariaDB `TINYINT(1)` → `i8`.
-        let row: Option<(u64, Vec<u8>, u64, i8)> = sqlx::query_as(
-            "SELECT idx, identity_pubkey, version, is_reset FROM log_entries \
+        // `is_reset` BOOLEAN comes back as MariaDB `TINYINT(1)` → `i8`;
+        // `leaf_auth` VARBINARY NULL → `Option<Vec<u8>>` (G-30 #2).
+        let row: Option<LatestRow> = sqlx::query_as(
+            "SELECT idx, identity_pubkey, version, is_reset, leaf_auth FROM log_entries \
              WHERE username_hash = ? ORDER BY version DESC LIMIT 1",
         )
         .bind(&username_hash[..])
         .fetch_optional(pool)
         .await?;
         Ok(
-            row.map(|(idx, identity_pubkey, version, is_reset)| LatestEntry {
+            row.map(|(idx, identity_pubkey, version, is_reset, leaf_auth)| LatestEntry {
                 idx,
                 version,
                 identity_pubkey,
                 is_reset: is_reset != 0,
+                leaf_auth,
             }),
         )
     }
@@ -454,12 +517,12 @@ mod tests {
 
         // Two appends for alice -> versions 1, 2; indices 0, 1.
         let r0 = store
-            .append(&pool, alice, vec![0x01; 32], false)
+            .append(&pool, alice, vec![0x01; 32], false, None, 0)
             .await
             .expect("append alice v1");
         assert_eq!((r0.idx, r0.version), (0, 1));
         let r1 = store
-            .append(&pool, alice, vec![0x02; 32], false)
+            .append(&pool, alice, vec![0x02; 32], false, None, 0)
             .await
             .expect("append alice v2");
         assert_eq!((r1.idx, r1.version), (1, 2));
@@ -467,7 +530,7 @@ mod tests {
         // First append for bob -> version 1 (a different username_hash
         // restarts the version counter), index 2.
         let r2 = store
-            .append(&pool, bob, vec![0x03; 32], true)
+            .append(&pool, bob, vec![0x03; 32], true, None, 0)
             .await
             .expect("append bob v1");
         assert_eq!((r2.idx, r2.version), (2, 1));
@@ -513,7 +576,7 @@ mod tests {
 
         // First append for alice -> idx 0, version 1, size 1.
         let r0 = store
-            .append(&pool, alice, vec![0x01; 32], false)
+            .append(&pool, alice, vec![0x01; 32], false, None, 0)
             .await
             .expect("append alice v1");
         assert_eq!((r0.idx, r0.version), (0, 1));
@@ -522,7 +585,7 @@ mod tests {
         // Re-append the SAME pubkey -> no-op: identical coordinates, size
         // unchanged (no duplicate leaf written).
         let r0_again = store
-            .append(&pool, alice, vec![0x01; 32], false)
+            .append(&pool, alice, vec![0x01; 32], false, None, 0)
             .await
             .expect("re-append alice same pubkey");
         assert_eq!((r0_again.idx, r0_again.version), (0, 1));
@@ -535,7 +598,7 @@ mod tests {
         // A reset-flagged re-append of the SAME pubkey is STILL a no-op
         // (the dedup keys on the pubkey, not the is_reset flag).
         let r0_reset = store
-            .append(&pool, alice, vec![0x01; 32], true)
+            .append(&pool, alice, vec![0x01; 32], true, None, 0)
             .await
             .expect("re-append alice same pubkey is_reset=true");
         assert_eq!((r0_reset.idx, r0_reset.version), (0, 1));
@@ -543,11 +606,112 @@ mod tests {
 
         // A DIFFERENT pubkey for the same username -> version+1, new leaf.
         let r1 = store
-            .append(&pool, alice, vec![0x02; 32], false)
+            .append(&pool, alice, vec![0x02; 32], false, None, 0)
             .await
             .expect("append alice v2 (different pubkey)");
         assert_eq!((r1.idx, r1.version), (1, 2));
         assert_eq!(store.size().await, 2);
+
+        sqlx::query("DELETE FROM log_entries")
+            .execute(&pool)
+            .await
+            .expect("clear log_entries");
+        pool.close().await;
+    }
+
+    /// G-30 #2 (ADR-0019) — the store's append-side leaf-authorisation gate.
+    /// A PRESENT `leaf_auth` is verified: a valid genesis self-sig and a valid
+    /// rotation supersession proof are accepted; a garbage auth and a proof
+    /// authorising a DIFFERENT key are refused with `Unauthorised`. (Absence
+    /// is governed by the handler's presence policy, not the store.) DB-gated
+    /// on `LAKKO_TRANSPARENCY_TEST_DATABASE_URL`.
+    #[tokio::test]
+    async fn append_verifies_leaf_authorisation() {
+        use lakko_transparency::{sign_leaf_genesis, SupersessionProof};
+        use sqlx::mysql::MySqlPoolOptions;
+
+        let Ok(url) = std::env::var("LAKKO_TRANSPARENCY_TEST_DATABASE_URL") else {
+            eprintln!(
+                "skipping append_verifies_leaf_authorisation: \
+                 LAKKO_TRANSPARENCY_TEST_DATABASE_URL unset"
+            );
+            return;
+        };
+
+        let pool = MySqlPoolOptions::new()
+            .max_connections(4)
+            .connect(&url)
+            .await
+            .expect("connect test DB");
+        crate::MIGRATIONS.run(&pool).await.expect("run migrations");
+        sqlx::query("DELETE FROM log_entries")
+            .execute(&pool)
+            .await
+            .expect("clear log_entries");
+
+        let store = LogStore::from_log(InMemoryLog::new(signing::SigningKey::generate()));
+        let alice = lakko_crypto::hash::blake3(b"alice");
+        let now = 1_700_000_000_i64;
+
+        // Genesis: a valid self-sig by the leaf's OWN key is accepted.
+        let k1 = signing::SigningKey::from_seed(&[0x11; 32]);
+        let pk1 = k1.verifying_key().to_bytes().to_vec();
+        let genesis = sign_leaf_genesis(&k1, &alice, &pk1).to_vec();
+        let r0 = store
+            .append(&pool, alice, pk1.clone(), false, Some(&genesis), now)
+            .await
+            .expect("genesis self-sig accepted");
+        assert_eq!(r0.version, 1);
+
+        // A new key carrying a GARBAGE auth is refused.
+        let k_bad = signing::SigningKey::from_seed(&[0x55; 32]);
+        let pk_bad = k_bad.verifying_key().to_bytes().to_vec();
+        let bad = store
+            .append(&pool, alice, pk_bad, false, Some(&[0u8; 64]), now)
+            .await;
+        assert!(
+            matches!(bad, Err(StoreError::Unauthorised(_))),
+            "garbage auth must be refused"
+        );
+
+        // Rotation: a supersession proof signed by the PREVIOUS key (k1)
+        // authorising the new key (k2) is accepted.
+        let k2 = signing::SigningKey::from_seed(&[0x22; 32]);
+        let pk2 = k2.verifying_key().to_bytes().to_vec();
+        let proof = SupersessionProof::new(
+            k1.verifying_key().to_bytes(),
+            k2.verifying_key().to_bytes(),
+            now,
+            now + 1000,
+        )
+        .sign(&k1)
+        .to_vec();
+        let r1 = store
+            .append(&pool, alice, pk2, false, Some(&proof), now + 10)
+            .await
+            .expect("rotation proof accepted");
+        assert_eq!(r1.version, 2);
+
+        // A proof signed by the current key (k2) that authorises k3, but used
+        // to append a DIFFERENT key (k4), is refused.
+        let k3 = signing::SigningKey::from_seed(&[0x33; 32]);
+        let k4 = signing::SigningKey::from_seed(&[0x44; 32]);
+        let pk4 = k4.verifying_key().to_bytes().to_vec();
+        let proof2 = SupersessionProof::new(
+            k2.verifying_key().to_bytes(),
+            k3.verifying_key().to_bytes(),
+            now,
+            now + 1000,
+        )
+        .sign(&k2)
+        .to_vec();
+        let mismatch = store
+            .append(&pool, alice, pk4, false, Some(&proof2), now + 10)
+            .await;
+        assert!(
+            matches!(mismatch, Err(StoreError::Unauthorised(_))),
+            "a proof authorising a different key must be refused"
+        );
 
         sqlx::query("DELETE FROM log_entries")
             .execute(&pool)
@@ -593,16 +757,16 @@ mod tests {
 
         // alice v1 (idx 0), then alice v2 (idx 1, is_reset=true).
         store
-            .append(&pool, alice, vec![0x01; 32], false)
+            .append(&pool, alice, vec![0x01; 32], false, None, 0)
             .await
             .expect("append alice v1");
         store
-            .append(&pool, alice, vec![0x02; 32], true)
+            .append(&pool, alice, vec![0x02; 32], true, None, 0)
             .await
             .expect("append alice v2");
         // bob v1 (idx 2) — a different account-key in between.
         store
-            .append(&pool, bob, vec![0x03; 32], false)
+            .append(&pool, bob, vec![0x03; 32], false, None, 0)
             .await
             .expect("append bob v1");
 
@@ -619,6 +783,7 @@ mod tests {
                 version: 2,
                 identity_pubkey: vec![0x02; 32],
                 is_reset: true,
+                leaf_auth: None,
             }
         );
 
@@ -635,6 +800,7 @@ mod tests {
                 version: 1,
                 identity_pubkey: vec![0x03; 32],
                 is_reset: false,
+                leaf_auth: None,
             }
         );
 
