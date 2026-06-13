@@ -93,6 +93,7 @@ import {
   WebauthnUserCancelledError,
 } from "./webauthn-client";
 import { loadWasm, type Wasm } from "../wasm";
+import { accountKey as transparencyAccountKey } from "../transparency/account-key";
 import {
   DiscoveryClient,
   DiscoveryHttpError,
@@ -1016,13 +1017,30 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       await rehydrateMlsState(chats, accountIdB64);
 
       // 1.16d3b2: derive the Identity deterministically from the
-      // OPAQUE export key, upload its public bundle to the
-      // discovery directory. Because Identity::fromSeed is
-      // deterministic, the SAME bytes will be uploaded on every
-      // future login — the server upserts. We do this BEFORE
-      // flipping state so a failure here surfaces as a signup
-      // error rather than a half-broken session.
-      await uploadIdentityBundle(discovery, result.accountId, canonical);
+      // (phrase) seed, upload its public bundle to the discovery
+      // directory. Because Identity::fromSeed is deterministic, the
+      // SAME bytes will be uploaded on every future login — the
+      // server upserts. We do this BEFORE flipping state so a failure
+      // here surfaces as a signup error rather than a half-broken
+      // session.
+      //
+      // G-30 #2 (ADR-0019): this is the FIRST-EVER bundle publish — a
+      // brand-new `(account_key -> pubkey)` transparency-log binding.
+      // Mint the genesis leaf self-signature and ship it as
+      // `leafAuth` so the append-side authorisation check accepts the
+      // new binding. Fail-loud: a mint failure rejects the signup
+      // here rather than publishing a bundle the server will refuse.
+      const signupLeafAuth = await mintLeafGenesisAuth(
+        canonical,
+        result.accountId,
+      );
+      await uploadIdentityBundle(
+        discovery,
+        result.accountId,
+        canonical,
+        undefined,
+        signupLeafAuth,
+      );
 
       // 1.16e6c1: persist the freshly-built provider state
       // (the just-uploaded KeyPackage's private key material)
@@ -1773,12 +1791,27 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       // changed key with no proof, fail closed, and re-verify
       // out-of-band. We surface a publish failure rather than landing
       // a session whose published identity nobody can verify.
+      //
+      // G-30 #2 (ADR-0019): the fresh-start mints a brand-new key, so
+      // the transparency log treats it as a NEW binding (a "fresh
+      // start", not a rotation — there is no old key to sign a
+      // supersession proof). Authorise it with a genesis leaf
+      // self-signature instead. Minted from `canonical` BEFORE the
+      // upload (and before the `finally` free); a mint failure rejects
+      // the whole mint flow rather than publishing an unauthorised
+      // bundle the server will refuse.
       const canonical = wasm.Identity.fromSeed(accountIdentitySeed);
       try {
+        const freshLeafAuth = await mintLeafGenesisAuth(
+          canonical,
+          pending.accountIdBytes,
+        );
         await uploadIdentityBundle(
           discovery,
           pending.accountIdBytes,
           canonical,
+          undefined,
+          freshLeafAuth,
         );
       } finally {
         canonical.free();
@@ -2581,12 +2614,21 @@ async function hydrateFromStorage(): Promise<{
  * same request (ADR-0016 rule #1, atomic emit). The signup /
  * login / passkey callers pass nothing — a normal upload clears
  * any stale server-side proof.
+ *
+ * G-30 #2 (ADR-0019): `leafAuth`, when present, is the genesis leaf
+ * self-signature (from `signLeafGenesis`) authorising a NEW
+ * `(account_key -> pubkey)` transparency-log binding. Only the two
+ * publish sites that introduce a new key supply it — the first-ever
+ * signup and the lost-everything `mintFreshIdentity` fresh-start. The
+ * routine same-key paths (login / passkey / recover) omit it: the log
+ * append is idempotent there, so no authorisation is needed.
  */
 async function uploadIdentityBundle(
   discovery: DiscoveryClient,
   accountId: Uint8Array,
   identity: WasmIdentity,
   supersessionProof?: Uint8Array | string,
+  leafAuth?: Uint8Array | string,
 ): Promise<void> {
   // 1.16e2: generate a fresh KeyPackage. RFC 9420 forward
   // secrecy on new groups argues for one-shot init_keys; in
@@ -2606,9 +2648,44 @@ async function uploadIdentityBundle(
       identity.signaturePublicKey,
       identity.x25519PublicKey,
       supersessionProof,
+      leafAuth,
     ),
     discovery.uploadKeyPackage(accountId, keyPackageBytes),
   ]);
+}
+
+/**
+ * G-30 #2 (ADR-0019): mint the genesis leaf self-signature
+ * authorising a NEW `(account_key -> pubkey)` transparency-log
+ * binding.
+ *
+ * The transparency append now REFUSES a new binding that carries
+ * neither a `leaf_auth` (a fresh-start self-signature by the leaf's
+ * own identity key) nor a rotation supersession proof. The two web
+ * publish sites that introduce a new key — the first-ever signup and
+ * the lost-everything `mintFreshIdentity` fresh-start — call this and
+ * attach the result.
+ *
+ * The signature binds `account_key -> identity_pubkey` and is
+ * version-INDEPENDENT (the operator-assigned log version is unknown
+ * to a fresh-start minter), so it is signed over the BLAKE3
+ * `account_key` only — the same key the S3/S4 transparency code
+ * already derives.
+ *
+ * FAIL-LOUD: any failure here (seed unavailable, account-key
+ * derivation, signing) rejects so the caller surfaces a clear local
+ * error rather than publishing a bundle the server will refuse — a
+ * publish that cannot succeed is worse than a visible failure.
+ */
+async function mintLeafGenesisAuth(
+  identity: WasmIdentity,
+  accountId: Uint8Array,
+): Promise<Uint8Array> {
+  const wasm = await loadWasm();
+  const usernameHash = await transparencyAccountKey(accountId);
+  return Uint8Array.from(
+    wasm.signLeafGenesis(identity.ed25519Seed, usernameHash),
+  );
 }
 
 /**

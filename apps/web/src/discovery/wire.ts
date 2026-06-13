@@ -94,6 +94,15 @@ export interface IdentityUploadRequest {
    *  proof bridging an AccountIdentity rotation. Omit for a normal upload
    *  — its absence clears any previously stored proof server-side. */
   supersession_proof?: string;
+  /** G-30 #2 (ADR-0019): base64 of an optional genesis leaf
+   *  self-signature authorising a NEW `(account_key -> pubkey)`
+   *  transparency-log binding. Minted via `signLeafGenesis` at the
+   *  publish sites that introduce a new key (first-ever signup +
+   *  the lost-everything fresh-start mint). The transparency append
+   *  refuses a new binding that carries neither this nor a
+   *  `supersession_proof`. Omit on a routine same-key re-upload — the
+   *  log append is idempotent there, so no authorisation is needed. */
+  leaf_auth?: string;
 }
 
 /** Response body of `POST /discovery/identity`. */
