@@ -145,6 +145,31 @@ public object NativeInclusionGate : InclusionGate {
 }
 
 /**
+ * Genesis-self-sig-gate seam (G-30 #2, ADR-0019) — abstracts the native
+ * `verifyLeafGenesis` call so the first-observation genesis decision in
+ * [verifyIdentityInLog] is unit-testable on the host JVM without the native
+ * lib + a real Ed25519 self-sig. The production [NativeGenesisGate] calls the
+ * real FFI, which THROWS [FfiException] on a failed check; a test double can
+ * THROW (fail) or RETURN (pass) — exactly that contract.
+ */
+public fun interface GenesisGate {
+    /**
+     * Verify that [sig] is a valid genesis self-signature by [servedPubkey]
+     * over the `(usernameHash, servedPubkey)` binding. MUST throw to signal a
+     * failure; returning normally means the self-sig verified.
+     */
+    public fun verify(sig: ByteArray, usernameHash: ByteArray, servedPubkey: ByteArray)
+}
+
+/** Production [GenesisGate] — the real native `verifyLeafGenesis`. */
+public object NativeGenesisGate : GenesisGate {
+    override fun verify(sig: ByteArray, usernameHash: ByteArray, servedPubkey: ByteArray) {
+        // Throws FfiException on a failed check; the caller maps it to MISMATCH.
+        verifyLeafGenesis(sig, usernameHash, servedPubkey)
+    }
+}
+
+/**
  * Rotation-chain-gate seam (G-30 #2, ADR-0019) — abstracts the native
  * `verifySupersessionChain` call so the status-mapping decision logic in
  * [verifyRotationChain] is unit-testable on the host JVM without
@@ -270,6 +295,7 @@ public suspend fun verifyIdentityInLog(
     lastSeenRoot: LastSeenRootStore,
     accountKeyDeriver: AccountKeyDeriver = NativeAccountKeyDeriver,
     inclusionGate: InclusionGate = NativeInclusionGate,
+    genesisGate: GenesisGate = NativeGenesisGate,
 ): LogVerifyResult {
     // OFF — the integration is unconfigured. Skip entirely. No latest
     // entry was read, so `isReset` is null.
@@ -343,7 +369,7 @@ public suspend fun verifyIdentityInLog(
         val leafAuth = latest.leafAuth
         if (leafAuth != null && leafAuth.size == 64) {
             try {
-                verifyLeafGenesis(leafAuth, usernameHash, publishedSignaturePubkey)
+                genesisGate.verify(leafAuth, usernameHash, publishedSignaturePubkey)
             } catch (_: FfiException) {
                 return LogVerifyResult(LogVerifyStatus.MISMATCH, isReset = isReset)
             }

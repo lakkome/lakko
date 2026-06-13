@@ -54,6 +54,16 @@ class TransparencyVerifyTest {
         throw FfiException.Identity("simulated inclusion failure")
     }
 
+    /** Genesis gate that always succeeds — returns normally, exactly the
+     *  native `verifyLeafGenesis` contract on a valid self-sig (G-30 #2). */
+    private val genesisPass = GenesisGate { _, _, _ -> }
+
+    /** Genesis gate that always fails (throws as the native verifier would
+     *  on a self-sig that does not match the served key). */
+    private val genesisFail = GenesisGate { _, _, _ ->
+        throw FfiException.Identity("simulated genesis failure")
+    }
+
     /** Rotation chain gate that always succeeds — returns the served
      *  (authorised-new) pubkey, exactly the native `verifySupersessionChain`
      *  contract on a passing chain (G-30 #2). */
@@ -88,9 +98,12 @@ class TransparencyVerifyTest {
         idx: Long = 3,
         version: Long = 2,
         isReset: Boolean = false,
+        leafAuthB64: String? = null,
     ): String =
         """{"idx":$idx,"version":$version,""" +
-            """"identity_pubkey_b64":"${base64Encode(pubkey)}","is_reset":$isReset}"""
+            """"identity_pubkey_b64":"${base64Encode(pubkey)}","is_reset":$isReset""" +
+            (leafAuthB64?.let { ""","leaf_auth_b64":"$it"""" } ?: "") +
+            "}"
 
     private fun proofJson(idx: Long = 3, logSize: Long = 6): String =
         """{"idx":$idx,"leaf_b64":"${base64Encode(ByteArray(8))}",""" +
@@ -108,6 +121,7 @@ class TransparencyVerifyTest {
         latestStatus: HttpStatusCode = HttpStatusCode.OK,
         rootServerError: Boolean = false,
         latestIsReset: Boolean = false,
+        latestLeafAuthB64: String? = null,
     ): TransparencyClient {
         val engine = MockEngine { request ->
             val path = request.url.encodedPath
@@ -121,7 +135,11 @@ class TransparencyVerifyTest {
                 path.contains("/transparency/latest/") ->
                     if (latestStatus == HttpStatusCode.OK) {
                         respond(
-                            latestJson(latestPubkey, isReset = latestIsReset),
+                            latestJson(
+                                latestPubkey,
+                                isReset = latestIsReset,
+                                leafAuthB64 = latestLeafAuthB64,
+                            ),
                             HttpStatusCode.OK,
                             jsonHeaders,
                         )
@@ -142,6 +160,7 @@ class TransparencyVerifyTest {
         lastSeen: LastSeenRootStore = InMemoryLastSeenRoot(),
         pubkey: ByteArray = servedPubkey,
         gate: InclusionGate = gatePass,
+        genesisGate: GenesisGate = genesisPass,
     ): LogVerifyResult = verifyIdentityInLog(
         accountId = accountId,
         publishedSignaturePubkey = pubkey,
@@ -150,6 +169,7 @@ class TransparencyVerifyTest {
         lastSeenRoot = lastSeen,
         accountKeyDeriver = deriver,
         inclusionGate = gate,
+        genesisGate = genesisGate,
     )
 
     /** Status-only convenience wrapper for the existing verdict tests. */
@@ -181,6 +201,62 @@ class TransparencyVerifyTest {
         assertEquals(
             LogVerifyStatus.CONFIRMED,
             verify(client = mockClient(), operatorKey = operatorKey, gate = gatePass),
+        )
+    }
+
+    // G-30 #2 (ADR-0019) — first-observation genesis self-sig.
+
+    @Test
+    fun `genesis self-sig confirms when valid`() = runTest {
+        val leafAuth = base64Encode(ByteArray(64) { 0x47 })
+        assertEquals(
+            LogVerifyStatus.CONFIRMED,
+            verifyResult(
+                client = mockClient(latestLeafAuthB64 = leafAuth),
+                operatorKey = operatorKey,
+                genesisGate = genesisPass,
+            ).status,
+        )
+    }
+
+    @Test
+    fun `genesis self-sig is mismatch when verification fails`() = runTest {
+        val leafAuth = base64Encode(ByteArray(64) { 0x47 })
+        assertEquals(
+            LogVerifyStatus.MISMATCH,
+            verifyResult(
+                client = mockClient(latestLeafAuthB64 = leafAuth),
+                operatorKey = operatorKey,
+                genesisGate = genesisFail,
+            ).status,
+        )
+    }
+
+    @Test
+    fun `genesis check is skipped for a 145-byte rotation proof`() = runTest {
+        // genesisFail would throw IF called; a 145-byte leaf_auth is the
+        // rotation case (verified by the chain elsewhere), so the genesis gate
+        // must NOT run — a clean inclusion stays CONFIRMED.
+        val rotationProof = base64Encode(ByteArray(145) { 0x52 })
+        assertEquals(
+            LogVerifyStatus.CONFIRMED,
+            verifyResult(
+                client = mockClient(latestLeafAuthB64 = rotationProof),
+                operatorKey = operatorKey,
+                genesisGate = genesisFail,
+            ).status,
+        )
+    }
+
+    @Test
+    fun `genesis check is skipped when leaf_auth is absent`() = runTest {
+        assertEquals(
+            LogVerifyStatus.CONFIRMED,
+            verifyResult(
+                client = mockClient(latestLeafAuthB64 = null),
+                operatorKey = operatorKey,
+                genesisGate = genesisFail,
+            ).status,
         )
     }
 
