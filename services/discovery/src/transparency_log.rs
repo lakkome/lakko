@@ -93,6 +93,14 @@ struct AppendReq<'a> {
     username_hash_b64: &'a str,
     identity_pubkey_b64: &'a str,
     is_reset: bool,
+    /// G-30 #2 (ADR-0019): the client leaf authorisation, base64-standard.
+    /// Opaque to discovery — it forwards the stored bytes verbatim and never
+    /// parses them (invariant #2); the transparency service verifies it.
+    /// Omitted from the JSON when the bundle row has no leaf_auth (a null
+    /// value), so a missing leaf authorisation is governed by the
+    /// transparency-side `LAKKO_TRANSPARENCY_REQUIRE_LEAF_AUTH` policy.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    leaf_auth_b64: Option<&'a str>,
 }
 
 impl TransparencyClient {
@@ -135,12 +143,18 @@ impl TransparencyClient {
         account_id: &[u8],
         signature_pubkey: &[u8],
         is_reset: bool,
+        leaf_auth: Option<&[u8]>,
     ) -> bool {
         let username_hash = account_key(account_id);
+        // G-30 #2 (ADR-0019): re-encode the stored leaf authorisation as
+        // base64-standard for the append body. Opaque pass-through — the
+        // bytes are never parsed here (invariant #2).
+        let leaf_auth_b64 = leaf_auth.map(|a| B64.encode(a));
         let body = AppendReq {
             username_hash_b64: &B64.encode(username_hash),
             identity_pubkey_b64: &B64.encode(signature_pubkey),
             is_reset,
+            leaf_auth_b64: leaf_auth_b64.as_deref(),
         };
         let url = format!("{}/transparency/append", self.base_url);
 
@@ -190,6 +204,11 @@ impl TransparencyClient {
 /// transparency service un-flooded.
 const RECONCILE_BATCH: i64 = 256;
 
+/// One reconciler scan row: `(account_id, signature_pubkey, leaf_auth?)`.
+/// `leaf_auth` (G-30 #2, ADR-0019) is nullable and carried verbatim into the
+/// backfill append — opaque to discovery (invariant #2).
+type ReconcileRow = (Vec<u8>, Vec<u8>, Option<Vec<u8>>);
+
 /// Spawn the KT-log S2.5 reconciliation sweep — a background task that
 /// eventually appends every account's CURRENT published identity to the
 /// transparency log, closing the S2 best-effort-append fail-open gap.
@@ -201,14 +220,19 @@ const RECONCILE_BATCH: i64 = 256;
 ///
 /// ## Each sweep
 ///
-/// 1. SELECT up to [`RECONCILE_BATCH`] `(account_id, signature_pubkey)`
-///    rows where `logged_pubkey IS NULL OR logged_pubkey <> signature_pubkey`
-///    — the un-logged / stale accounts. (On a huge table this is a cheap
-///    scan but not index-backed; a follow-up could add a cursor / partial
-///    index. Noted, out of scope here.)
+/// 1. SELECT up to [`RECONCILE_BATCH`] `(account_id, signature_pubkey,
+///    leaf_auth)` rows where
+///    `logged_pubkey IS NULL OR logged_pubkey <> signature_pubkey` — the
+///    un-logged / stale accounts. (On a huge table this is a cheap scan but
+///    not index-backed; a follow-up could add a cursor / partial index.
+///    Noted, out of scope here.) The row's `leaf_auth` (G-30 #2, ADR-0019)
+///    is carried verbatim into the append so a backfilled entry keeps its
+///    leaf authorisation; a NULL `leaf_auth` forwards `None` (governed by the
+///    transparency-side presence policy).
 /// 2. For each row, call
 ///    [`TransparencyClient::append_key_change`]`(account_id,
-///    signature_pubkey, is_reset = false)`. **`is_reset` is conservatively
+///    signature_pubkey, is_reset = false, leaf_auth)`. **`is_reset` is
+///    conservatively
 ///    `false`** on a reconciled backfill: the reconciler runs for entries
 ///    whose hot-path append failed and it does NOT know whether the current
 ///    identity was published as an unproven reset. Logging a reset as a
@@ -248,9 +272,11 @@ pub(crate) fn spawn_transparency_reconciler(
 /// append makes that harmless).
 async fn reconcile_once(pool: &sqlx::MySqlPool, client: &TransparencyClient) {
     // The un-logged / stale accounts: never-confirmed (NULL) or whose
-    // current key differs from the last confirmed one.
-    let rows: Vec<(Vec<u8>, Vec<u8>)> = match sqlx::query_as(
-        "SELECT account_id, signature_pubkey FROM identity_bundles \
+    // current key differs from the last confirmed one. `leaf_auth` (G-30 #2,
+    // ADR-0019) is carried verbatim so a backfilled entry keeps its leaf
+    // authorisation; opaque to discovery (invariant #2).
+    let rows: Vec<ReconcileRow> = match sqlx::query_as(
+        "SELECT account_id, signature_pubkey, leaf_auth FROM identity_bundles \
          WHERE logged_pubkey IS NULL OR logged_pubkey <> signature_pubkey \
          LIMIT ?",
     )
@@ -271,11 +297,12 @@ async fn reconcile_once(pool: &sqlx::MySqlPool, client: &TransparencyClient) {
 
     let mut reconciled: u64 = 0;
     let mut append_failures: u64 = 0;
-    for (account_id, signature_pubkey) in &rows {
+    for (account_id, signature_pubkey, leaf_auth) in &rows {
         // is_reset = false: conservative backfill (see fn docs) — a lost
         // reset-marker makes a client re-verify out-of-band (fail-SAFE).
+        // leaf_auth (G-30 #2) is forwarded verbatim, NULL -> None.
         let confirmed = client
-            .append_key_change(account_id, signature_pubkey, false)
+            .append_key_change(account_id, signature_pubkey, false, leaf_auth.as_deref())
             .await;
         if !confirmed {
             append_failures += 1;

@@ -52,6 +52,15 @@ const X25519_PUBKEY_LEN: usize = 32;
 /// #2); validation is the receiving peer's job.
 const MAX_SUPERSESSION_PROOF_LEN: usize = 150;
 
+/// Maximum leaf-authorisation length discovery will store (G-30 #2,
+/// ADR-0019). The widest leaf_auth is a 145-byte supersession proof (a
+/// genesis self-sig is only 64 bytes); the cap leaves headroom and matches
+/// the `VARBINARY(200)` column (and the transparency-side `log_entries`
+/// column). Discovery caps the length only to bound storage — it never
+/// parses the bytes (invariant #2); the leaf authorisation is verified
+/// operator-side in `services/transparency` and by the client rotation chain.
+const MAX_LEAF_AUTH_LEN: usize = 200;
+
 /// A fetched `identity_bundles` row: `(signature_pubkey, x25519_pubkey,
 /// supersession_proof?)` — the proof column is nullable (G-4, ADR-0016).
 type IdentityBundleRow = (Vec<u8>, Vec<u8>, Option<Vec<u8>>);
@@ -103,6 +112,33 @@ fn decode_optional_proof(b64: Option<&str>) -> Result<Option<Vec<u8>>, (StatusCo
     Ok(Some(bytes))
 }
 
+/// Decode the optional G-30 #2 leaf authorisation (ADR-0019). Mirrors
+/// [`decode_optional_proof`] exactly: `None` (the field absent) stays `None`
+/// and the upsert PRESERVES any already-stored value (via `COALESCE`), so a
+/// non-rotation re-upload does not strip a still-valid leaf authorisation. A
+/// present value is base64-decoded and length-capped to [`MAX_LEAF_AUTH_LEN`]
+/// — discovery does NOT parse or verify the bytes (invariant #2); the leaf
+/// authorisation is verified operator-side in `services/transparency` and by
+/// the client rotation chain.
+fn decode_optional_leaf_auth(b64: Option<&str>) -> Result<Option<Vec<u8>>, (StatusCode, String)> {
+    let Some(b64) = b64 else {
+        return Ok(None);
+    };
+    let bytes = B64.decode(b64).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("invalid leaf_auth base64: {e}"),
+        )
+    })?;
+    if bytes.len() > MAX_LEAF_AUTH_LEN {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("leaf_auth exceeds {MAX_LEAF_AUTH_LEN} bytes"),
+        ));
+    }
+    Ok(Some(bytes))
+}
+
 // ============================================================================
 // POST /discovery/identity   — upsert
 // ============================================================================
@@ -125,6 +161,14 @@ pub(crate) struct UploadRequest {
     /// it opaque and never parses it (invariant #2).
     #[serde(default)]
     pub(crate) supersession_proof: Option<String>,
+    /// G-30 #2 (ADR-0019): base64 of an optional client leaf authorisation
+    /// for this upload — a genesis / fresh-start self-signature or a
+    /// normal-rotation supersession proof. Absent for a non-rotation
+    /// re-upload, which PRESERVES any stored value (the upsert uses
+    /// `COALESCE`). Discovery stores it opaque and never parses it
+    /// (invariant #2); it is forwarded verbatim to the transparency append.
+    #[serde(default)]
+    pub(crate) leaf_auth: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -158,6 +202,15 @@ pub(crate) async fn upload(
     // self-expires via its own 14-day window regardless.
     let supersession_proof = decode_optional_proof(payload.supersession_proof.as_deref())?;
 
+    // G-30 #2 (ADR-0019): decode the optional leaf authorisation (opaque to
+    // discovery). Mirrors `supersession_proof`: `None` PRESERVES any stored
+    // value (the `COALESCE` in the upsert), so a routine non-rotation
+    // re-upload does not strip a still-valid leaf authorisation before it has
+    // been forwarded to the transparency log. Discovery NEVER parses these
+    // bytes (invariant #2); verification is the transparency service's job
+    // and, definitively, the client rotation chain's.
+    let leaf_auth = decode_optional_leaf_auth(payload.leaf_auth.as_deref())?;
+
     // Phase 1.5b anti-impersonation: only the account_id's owner
     // can upload its identity bundle. Same check shape as
     // `registry::register`.
@@ -183,6 +236,7 @@ pub(crate) async fn upload(
         &signature_pubkey,
         &x25519_pubkey,
         supersession_proof.as_deref(),
+        leaf_auth.as_deref(),
     )
     .await?;
 
@@ -205,8 +259,20 @@ pub(crate) async fn upload(
     if let (LogAppendDecision::Append { is_reset }, Some(client)) =
         (decision, state.transparency.as_ref())
     {
+        // G-30 #2 (ADR-0019): forward the leaf authorisation supplied with
+        // this upload. An `Append` only fires on a key CHANGE, and a key
+        // change always carries a fresh leaf authorisation; a missing value
+        // is governed by the transparency-side presence policy. Opaque
+        // pass-through — discovery never parses these bytes (invariant #2).
+        // A missed append here is closed by the S2.5 reconciler, which reads
+        // the persisted `leaf_auth` from the row.
         let confirmed = client
-            .append_key_change(&account_id, &signature_pubkey, is_reset)
+            .append_key_change(
+                &account_id,
+                &signature_pubkey,
+                is_reset,
+                leaf_auth.as_deref(),
+            )
             .await;
         if confirmed {
             mark_logged_pubkey(&state.db, &account_id, &signature_pubkey).await;
@@ -299,6 +365,7 @@ async fn apply_identity_upload_gated(
     signature_pubkey: &[u8],
     x25519_pubkey: &[u8],
     supersession_proof: Option<&[u8]>,
+    leaf_auth: Option<&[u8]>,
 ) -> Result<LogAppendDecision, (StatusCode, String)> {
     const MAX_ATTEMPTS: u32 = 3;
     for _ in 0..MAX_ATTEMPTS {
@@ -309,6 +376,7 @@ async fn apply_identity_upload_gated(
             signature_pubkey,
             x25519_pubkey,
             supersession_proof,
+            leaf_auth,
         )
         .await?
         {
@@ -351,6 +419,7 @@ async fn try_apply_identity_once(
     signature_pubkey: &[u8],
     x25519_pubkey: &[u8],
     supersession_proof: Option<&[u8]>,
+    leaf_auth: Option<&[u8]>,
 ) -> Result<ApplyAttempt, (StatusCode, String)> {
     let mut tx = db.begin().await.map_err(cooldown_db_err)?;
 
@@ -378,13 +447,14 @@ async fn try_apply_identity_once(
             // First publish for this account — nothing to gate.
             let inserted = sqlx::query(
                 "INSERT INTO identity_bundles \
-                    (account_id, signature_pubkey, x25519_pubkey, supersession_proof) \
-                 VALUES (?, ?, ?, ?)",
+                    (account_id, signature_pubkey, x25519_pubkey, supersession_proof, leaf_auth) \
+                 VALUES (?, ?, ?, ?, ?)",
             )
             .bind(account_id)
             .bind(signature_pubkey)
             .bind(x25519_pubkey)
             .bind(supersession_proof)
+            .bind(leaf_auth)
             .execute(&mut *tx)
             .await;
             match inserted {
@@ -446,6 +516,7 @@ async fn try_apply_identity_once(
                     signature_pubkey            = ?, \
                     x25519_pubkey               = ?, \
                     supersession_proof          = COALESCE(?, supersession_proof), \
+                    leaf_auth                   = COALESCE(?, leaf_auth), \
                     previous_signature_pubkey   = ?, \
                     last_unproven_key_change_at = IF(?, NOW(3), last_unproven_key_change_at) \
                  WHERE account_id = ?",
@@ -453,6 +524,7 @@ async fn try_apply_identity_once(
             .bind(signature_pubkey)
             .bind(x25519_pubkey)
             .bind(supersession_proof)
+            .bind(leaf_auth)
             .bind(new_previous)
             .bind(bump_marker_i)
             .bind(account_id)
@@ -842,6 +914,43 @@ mod tests {
 
         // Non-base64 -> 400.
         let err = decode_optional_proof(Some("not-base64!!!")).unwrap_err();
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn decode_optional_leaf_auth_handles_absent_present_and_oversized() {
+        // Absent -> None (the upsert then PRESERVES any stored leaf_auth).
+        assert!(decode_optional_leaf_auth(None).unwrap().is_none());
+
+        // Present, a 64-byte genesis self-sig -> decoded.
+        let genesis = B64.encode([5u8; 64]);
+        let decoded = decode_optional_leaf_auth(Some(&genesis)).unwrap().unwrap();
+        assert_eq!(decoded.len(), 64);
+        assert!(decoded.iter().all(|&b| b == 5));
+
+        // Present, a 145-byte supersession proof (the widest real value) ->
+        // decoded.
+        let proof = B64.encode([7u8; 145]);
+        assert_eq!(
+            decode_optional_leaf_auth(Some(&proof)).unwrap().unwrap().len(),
+            145
+        );
+
+        // Boundary: exactly the cap is accepted.
+        let at_cap = B64.encode([0u8; MAX_LEAF_AUTH_LEN]);
+        assert_eq!(
+            decode_optional_leaf_auth(Some(&at_cap)).unwrap().unwrap().len(),
+            MAX_LEAF_AUTH_LEN
+        );
+
+        // Over the cap -> 400 (bounds storage; not a crypto check —
+        // discovery never parses leaf_auth, invariant #2).
+        let oversized = B64.encode([0u8; MAX_LEAF_AUTH_LEN + 1]);
+        let err = decode_optional_leaf_auth(Some(&oversized)).unwrap_err();
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+
+        // Non-base64 -> 400.
+        let err = decode_optional_leaf_auth(Some("not-base64!!!")).unwrap_err();
         assert_eq!(err.0, StatusCode::BAD_REQUEST);
     }
 
