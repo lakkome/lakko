@@ -21,11 +21,13 @@
 #![forbid(unsafe_code)]
 
 pub mod error;
+pub mod leaf_auth;
 pub mod log;
 pub mod merkle;
 pub mod supersession;
 
 pub use error::{Error, Result};
+pub use leaf_auth::{sign_leaf_genesis, verify_leaf_genesis};
 pub use log::{
     check_no_rollback, verify_inclusion, InMemoryLog, InclusionProof, LogEntry, SignedRoot,
 };

@@ -93,6 +93,21 @@ pub enum Error {
     /// log entry it accompanies (G-4).
     #[error("supersession proof authorises a different key than the log entry")]
     SupersessionEntryKeyMismatch,
+
+    /// A genesis leaf's embedded identity pubkey is not a valid Ed25519 key
+    /// (G-30 #2, ADR-0019).
+    #[error("leaf genesis: identity pubkey is not a valid Ed25519 key")]
+    LeafGenesisBadKey,
+
+    /// A genesis leaf self-signature was not the expected 64-byte length
+    /// (G-30 #2, ADR-0019).
+    #[error("leaf genesis: signature has wrong length")]
+    LeafGenesisBadLength,
+
+    /// A genesis leaf self-signature did not verify against the key embedded in
+    /// the leaf (G-30 #2, ADR-0019).
+    #[error("leaf genesis self-signature is invalid")]
+    LeafGenesisInvalid,
 }
 
 /// Convenience alias.

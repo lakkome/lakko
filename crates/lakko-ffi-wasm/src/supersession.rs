@@ -70,3 +70,43 @@ pub fn verify_supersession(
         .map_err(|e| JsError::new(&format!("supersession verify: {e}")))?;
     Ok(new.to_vec())
 }
+
+/// Sign a genesis / fresh-start KT-log leaf's account-to-key binding with the
+/// leaf's OWN identity key (G-30 #2, ADR-0019). Used for the first-ever publish
+/// and a lost-everything fresh-start mint (a new key with NO supersession
+/// proof). Pass the identity's `ed25519Seed`; the leaf's pubkey is derived from
+/// it internally so the self-signature always matches the embedded key. The
+/// signature is version-INDEPENDENT (the version is operator-assigned and
+/// unknown to a fresh-start minter). Returns the 64-byte signature to carry as
+/// the leaf's `leaf_auth`.
+///
+/// Throws if the seed is not 32 bytes or `usernameHash` is not 32 bytes.
+#[wasm_bindgen(js_name = signLeafGenesis)]
+pub fn sign_leaf_genesis(ed25519_seed: &[u8], username_hash: &[u8]) -> Result<Vec<u8>, JsError> {
+    let sk = signing_key_from_seed(ed25519_seed)?;
+    let username_hash: [u8; 32] = username_hash
+        .try_into()
+        .map_err(|_| JsError::new("username_hash must be 32 bytes"))?;
+    let pubkey = sk.verifying_key().to_bytes();
+    Ok(lakko_transparency::sign_leaf_genesis(&sk, &username_hash, &pubkey).to_vec())
+}
+
+/// Verify a genesis self-signature against the embedded `identityPubkey`
+/// (G-30 #2, ADR-0019). A pass proves the holder of `identityPubkey` authorised
+/// this `(usernameHash, pubkey)` account-to-key binding.
+///
+/// Throws if `usernameHash` is not 32 bytes, the embedded `identityPubkey` is
+/// not a valid Ed25519 key, `sig` is not 64 bytes, or the signature does not
+/// verify.
+#[wasm_bindgen(js_name = verifyLeafGenesis)]
+pub fn verify_leaf_genesis(
+    sig: &[u8],
+    username_hash: &[u8],
+    identity_pubkey: &[u8],
+) -> Result<(), JsError> {
+    let username_hash: [u8; 32] = username_hash
+        .try_into()
+        .map_err(|_| JsError::new("username_hash must be 32 bytes"))?;
+    lakko_transparency::verify_leaf_genesis(sig, &username_hash, identity_pubkey)
+        .map_err(|e| JsError::new(&format!("leaf genesis verify: {e}")))
+}

@@ -2691,6 +2691,56 @@ pub fn verify_supersession_chain(
     Ok(rotated.new_pubkey.to_vec())
 }
 
+/// Sign a genesis / fresh-start KT-log leaf's account-to-key binding with the
+/// leaf's OWN identity key (G-30 #2, ADR-0019). Used for the first-ever publish
+/// and a lost-everything fresh-start mint (a new key with NO supersession
+/// proof). Pass the identity's `ed25519_seed()`; the leaf's pubkey is derived
+/// from it internally so the self-signature always matches the embedded key.
+/// The signature is version-INDEPENDENT (the version is operator-assigned and
+/// unknown to a fresh-start minter). Returns the 64-byte signature to carry as
+/// the leaf's `leaf_auth`.
+///
+/// # Errors
+///
+/// [`FfiError::Identity`] if the seed is not 32 bytes or `username_hash` is not
+/// 32 bytes.
+#[uniffi::export]
+pub fn sign_leaf_genesis(
+    ed25519_seed: Vec<u8>,
+    username_hash: Vec<u8>,
+) -> Result<Vec<u8>, FfiError> {
+    let sk = signing_key_from_seed(&ed25519_seed)?;
+    let username_hash: [u8; 32] = username_hash
+        .as_slice()
+        .try_into()
+        .map_err(|_| FfiError::Identity("username_hash must be 32 bytes".to_string()))?;
+    let pubkey = sk.verifying_key().to_bytes();
+    Ok(lakko_transparency::sign_leaf_genesis(&sk, &username_hash, &pubkey).to_vec())
+}
+
+/// Verify a genesis self-signature against the embedded `identity_pubkey`
+/// (G-30 #2, ADR-0019). A pass proves the holder of `identity_pubkey` authorised
+/// this `(username_hash, pubkey)` account-to-key binding.
+///
+/// # Errors
+///
+/// [`FfiError::Identity`] if `username_hash` is not 32 bytes, the embedded
+/// `identity_pubkey` is not a valid Ed25519 key, `sig` is not 64 bytes, or the
+/// signature does not verify.
+#[uniffi::export]
+pub fn verify_leaf_genesis(
+    sig: Vec<u8>,
+    username_hash: Vec<u8>,
+    identity_pubkey: Vec<u8>,
+) -> Result<(), FfiError> {
+    let username_hash: [u8; 32] = username_hash
+        .as_slice()
+        .try_into()
+        .map_err(|_| FfiError::Identity("username_hash must be 32 bytes".to_string()))?;
+    lakko_transparency::verify_leaf_genesis(&sig, &username_hash, &identity_pubkey)
+        .map_err(|e| FfiError::Identity(format!("leaf genesis verify: {e}")))
+}
+
 // ---------------------------------------------------------------------------
 // Key-transparency inclusion verifier (KT-log S3b).
 //
@@ -3582,5 +3632,39 @@ mod tests {
             call_chain(&d).is_err(),
             "non-multiple-of-32 audit path rejected"
         );
+    }
+
+    // -- G-30 #2 / ADR-0019: sign/verify_leaf_genesis --
+
+    #[test]
+    fn leaf_genesis_sign_verify_roundtrips() {
+        let id = Identity::new("genesis-1".into()).unwrap();
+        let username_hash = vec![0xAB; 32];
+        let pubkey = ed25519_pub_of(&id);
+        let sig = sign_leaf_genesis(id.ed25519_seed(), username_hash.clone()).unwrap();
+        verify_leaf_genesis(sig, username_hash, pubkey).expect("genesis self-sig verifies");
+    }
+
+    #[test]
+    fn leaf_genesis_wrong_account_key_fails() {
+        let id = Identity::new("genesis-2".into()).unwrap();
+        let pubkey = ed25519_pub_of(&id);
+        let sig = sign_leaf_genesis(id.ed25519_seed(), vec![0xCD; 32]).unwrap();
+        // A different account_key → the signed binding differs → fail.
+        assert!(verify_leaf_genesis(sig, vec![0x01; 32], pubkey).is_err());
+    }
+
+    #[test]
+    fn leaf_genesis_wrong_pubkey_fails() {
+        let id = Identity::new("genesis-3".into()).unwrap();
+        let other = Identity::new("genesis-3b".into()).unwrap();
+        let username_hash = vec![0xEF; 32];
+        let sig = sign_leaf_genesis(id.ed25519_seed(), username_hash.clone()).unwrap();
+        assert!(verify_leaf_genesis(sig, username_hash, ed25519_pub_of(&other)).is_err());
+    }
+
+    #[test]
+    fn leaf_genesis_sign_rejects_bad_seed() {
+        assert!(sign_leaf_genesis(vec![0u8; 31], vec![0u8; 32]).is_err());
     }
 }
