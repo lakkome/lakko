@@ -311,6 +311,26 @@ public struct TransparencyVerify {
                 // marker rides out.
                 return LogVerifyResult(status: .mismatch, isReset: isReset)
             }
+
+            // G-30 #2 (ADR-0019) — first-observation genesis check. If the
+            // latest entry carries a GENESIS self-signature (64 bytes — a
+            // rotation's 145-byte supersession proof is verified by the chain
+            // in verifyRotationChain, not here; a pre-Sprint-2 row carries
+            // none), confirm it authorises EXACTLY the served key. A failure
+            // means the log entry's self-authorisation does not check out →
+            // mismatch. This never establishes trust at TOFU (the served key
+            // signs its own genesis); it is a consistency gate on the entry.
+            if let leafAuth = latest.leafAuth, leafAuth.count == 64 {
+                do {
+                    try verifyLeafGenesis(
+                        sig: leafAuth,
+                        usernameHash: accountKey,
+                        identityPubkey: publishedSignaturePubkey
+                    )
+                } catch {
+                    return LogVerifyResult(status: .mismatch, isReset: isReset)
+                }
+            }
             return LogVerifyResult(status: .confirmed, isReset: isReset)
         } catch {
             // A network fault, a non-404 HTTP fault, or a malformed body

@@ -108,7 +108,8 @@ public final class TransparencyClient: TransparencyFetching {
             idx: wire.idx,
             version: wire.version,
             identityPubkey: identityPubkey,
-            isReset: wire.isReset
+            isReset: wire.isReset,
+            leafAuth: wire.leafAuthB64.flatMap { base64Decode($0) }
         )
     }
 
@@ -251,12 +252,24 @@ public struct LatestEntry: Equatable {
     /// ADR-0017 fresh-start marker — `true` if the latest entry was a
     /// no-supersession-proof owner reset.
     public let isReset: Bool
+    /// G-30 #2 (ADR-0019): the entry's opaque leaf authorisation (a 64-byte
+    /// genesis self-sig or a 145-byte supersession proof), or `nil` for a
+    /// pre-Sprint-2 / unauthenticated row. A client verifies a genesis
+    /// self-sig against the served key on a first observation.
+    public let leafAuth: Data?
 
-    public init(idx: UInt64, version: UInt64, identityPubkey: Data, isReset: Bool) {
+    public init(
+        idx: UInt64,
+        version: UInt64,
+        identityPubkey: Data,
+        isReset: Bool,
+        leafAuth: Data? = nil
+    ) {
         self.idx = idx
         self.version = version
         self.identityPubkey = identityPubkey
         self.isReset = isReset
+        self.leafAuth = leafAuth
     }
 }
 
@@ -304,12 +317,16 @@ private struct LatestResWire: Decodable {
     let version: UInt64
     let identityPubkeyB64: String
     let isReset: Bool
+    /// G-30 #2 (ADR-0019): base64 of the entry's leaf authorisation, or
+    /// absent for a pre-Sprint-2 / unauthenticated row.
+    let leafAuthB64: String?
 
     enum CodingKeys: String, CodingKey {
         case idx
         case version
         case identityPubkeyB64 = "identity_pubkey_b64"
         case isReset = "is_reset"
+        case leafAuthB64 = "leaf_auth_b64"
     }
 }
 
