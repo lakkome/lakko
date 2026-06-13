@@ -154,6 +154,128 @@ pub fn verify_inclusion(
     &current == expected_root
 }
 
+/// Generate an RFC 6962 §2.1.2 **consistency proof** that the tree of the
+/// first `old_size` leaves is an append-only prefix of the tree of all
+/// `leaves` (size `new_size = leaves.len()`).
+///
+/// The proof lets a verifier holding only `old_root` + `new_root` confirm the
+/// new tree extends the old without re-hashing the whole log. Returns an empty
+/// proof for the degenerate `old_size == 0` (empty is a prefix of anything) and
+/// `old_size >= new_size` (no extension) cases; the matching
+/// [`verify_consistency`] handles those.
+#[must_use]
+pub fn consistency_proof(old_size: usize, leaves: &[Vec<u8>]) -> Vec<TreeHash> {
+    let n = leaves.len();
+    if old_size == 0 || old_size >= n {
+        return Vec::new();
+    }
+    let hashes: Vec<TreeHash> = leaves.iter().map(|l| hash_leaf(l)).collect();
+    subproof(old_size, &hashes, true)
+}
+
+/// RFC 6962 §2.1.2 `SUBPROOF(m, D, b)`. `b` records whether this subtree is
+/// entirely the old tree's right edge (so the old root is reconstructed from
+/// the path, no node emitted) or a left subtree the verifier must be handed.
+fn subproof(m: usize, hashes: &[TreeHash], b: bool) -> Vec<TreeHash> {
+    let n = hashes.len();
+    if m == n {
+        return if b {
+            Vec::new()
+        } else {
+            vec![root_from_hashes(hashes)]
+        };
+    }
+    let k = largest_pow2_strictly_less(n);
+    if m <= k {
+        let mut proof = subproof(m, &hashes[..k], b);
+        proof.push(root_from_hashes(&hashes[k..]));
+        proof
+    } else {
+        let mut proof = subproof(m - k, &hashes[k..], false);
+        proof.push(root_from_hashes(&hashes[..k]));
+        proof
+    }
+}
+
+/// Verify an RFC 6962 §2.1.2 consistency proof: that `old_root` (the root over
+/// the first `old_size` leaves) is an append-only prefix of `new_root` (the
+/// root over `new_size` leaves). Reconstructs BOTH roots from the proof and
+/// requires both to match — so a fork (a different `new_root` at the same size,
+/// or a history that does not extend `old_root`) is rejected.
+#[must_use]
+pub fn verify_consistency(
+    old_size: u64,
+    old_root: &TreeHash,
+    new_size: u64,
+    new_root: &TreeHash,
+    proof: &[TreeHash],
+) -> bool {
+    if old_size > new_size {
+        return false;
+    }
+    if old_size == new_size {
+        return proof.is_empty() && old_root == new_root;
+    }
+    if old_size == 0 {
+        // The empty tree is a prefix of any tree; the claim carries no nodes
+        // (we cannot bind it to a specific `old_root` here).
+        return proof.is_empty();
+    }
+
+    // Iterative reconstruction. `node` walks the old tree's rightmost leaf up;
+    // `last` the new tree's rightmost leaf up.
+    let mut node = old_size - 1;
+    let mut last = new_size - 1;
+    while node & 1 == 1 {
+        node >>= 1;
+        last >>= 1;
+    }
+
+    let mut it = proof.iter();
+    // Seed: when the old subtree is itself a complete subtree (node == 0 after
+    // the climb) its root IS `old_root`; otherwise the first proof node is the
+    // shared right-edge hash.
+    let (mut h_old, mut h_new) = if node > 0 {
+        match it.next() {
+            Some(seed) => (*seed, *seed),
+            None => return false,
+        }
+    } else {
+        (*old_root, *old_root)
+    };
+
+    while node > 0 {
+        if node & 1 == 1 {
+            // Right child: a left sibling joins BOTH reconstructions.
+            let Some(p) = it.next() else {
+                return false;
+            };
+            h_old = hash_node(p, &h_old);
+            h_new = hash_node(p, &h_new);
+        } else if node < last {
+            // Left child that has a right sibling only in the bigger tree.
+            let Some(p) = it.next() else {
+                return false;
+            };
+            h_new = hash_node(&h_new, p);
+        }
+        // else: left child at the tree edge — lifted, no sibling.
+        node >>= 1;
+        last >>= 1;
+    }
+
+    // Remaining proof nodes extend the new reconstruction up to `new_root`.
+    while last > 0 {
+        let Some(p) = it.next() else {
+            return false;
+        };
+        h_new = hash_node(&h_new, p);
+        last >>= 1;
+    }
+
+    it.next().is_none() && &h_old == old_root && &h_new == new_root
+}
+
 /// Largest power of two strictly less than `n` (n >= 2).
 fn largest_pow2_strictly_less(n: usize) -> usize {
     debug_assert!(n >= 2);
@@ -293,6 +415,114 @@ mod tests {
                     &r,
                 ));
             }
+        }
+    }
+
+    // -- RFC 6962 §2.1.2 consistency proofs (ADR-0020) --
+
+    fn other_leaves(n: usize) -> Vec<Vec<u8>> {
+        (0..n).map(|i| format!("other-{i}").into_bytes()).collect()
+    }
+
+    #[test]
+    fn consistency_proof_roundtrip_exhaustive() {
+        for n in 2..=40usize {
+            let all = leaves(n);
+            let new_root = root(&all);
+            for m in 1..n {
+                let old_root = root(&all[..m]);
+                let proof = consistency_proof(m, &all);
+                assert!(
+                    verify_consistency(m as u64, &old_root, n as u64, &new_root, &proof),
+                    "consistency round-trip failed for m={m}, n={n}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn consistency_same_size_requires_equal_roots() {
+        let a = leaves(5);
+        let ra = root(&a);
+        // Same size + same root + empty proof → consistent.
+        assert!(verify_consistency(5, &ra, 5, &ra, &[]));
+        // Same size + a DIFFERENT root → a fork at the same size, rejected.
+        let rb = root(&other_leaves(5));
+        assert!(!verify_consistency(5, &ra, 5, &rb, &[]));
+    }
+
+    #[test]
+    fn consistency_rejects_wrong_new_root() {
+        let all = leaves(9);
+        let old_root = root(&all[..3]);
+        let proof = consistency_proof(3, &all);
+        assert!(!verify_consistency(3, &old_root, 9, &[0xAB; 32], &proof));
+    }
+
+    #[test]
+    fn consistency_rejects_wrong_old_root() {
+        let all = leaves(9);
+        let new_root = root(&all);
+        let proof = consistency_proof(3, &all);
+        assert!(!verify_consistency(3, &[0xCD; 32], 9, &new_root, &proof));
+    }
+
+    #[test]
+    fn consistency_rejects_fork_history() {
+        // The old tree is the first 4 of A; tree B shares no history with A.
+        let a = leaves(8);
+        let old_root = root(&a[..4]);
+        let b = other_leaves(8);
+        let new_root_b = root(&b);
+        // Neither A's nor B's proof can bridge old_root(A[..4]) → root(B).
+        assert!(!verify_consistency(4, &old_root, 8, &new_root_b, &consistency_proof(4, &a)));
+        assert!(!verify_consistency(4, &old_root, 8, &new_root_b, &consistency_proof(4, &b)));
+    }
+
+    #[test]
+    fn consistency_rejects_tampered_proof() {
+        let all = leaves(12);
+        let old_root = root(&all[..5]);
+        let new_root = root(&all);
+        let mut proof = consistency_proof(5, &all);
+        assert!(!proof.is_empty());
+        proof[0][0] ^= 0x01;
+        assert!(!verify_consistency(5, &old_root, 12, &new_root, &proof));
+    }
+
+    #[test]
+    fn consistency_rejects_truncated_and_extra_proof() {
+        let all = leaves(11);
+        let old_root = root(&all[..4]);
+        let new_root = root(&all);
+        let proof = consistency_proof(4, &all);
+
+        let mut trunc = proof.clone();
+        trunc.pop();
+        assert!(!verify_consistency(4, &old_root, 11, &new_root, &trunc));
+
+        let mut extra = proof;
+        extra.push([0x00; 32]);
+        assert!(!verify_consistency(4, &old_root, 11, &new_root, &extra));
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn proptest_consistency_arbitrary(
+            data in proptest::collection::vec(
+                proptest::collection::vec(proptest::num::u8::ANY, 0..24),
+                2..40usize,
+            ),
+            m_frac in 1..1_000u32,
+        ) {
+            let n = data.len();
+            let m = 1 + (m_frac as usize % (n - 1)); // 1..=n-1
+            let new_root = root(&data);
+            let old_root = root(&data[..m]);
+            let proof = consistency_proof(m, &data);
+            proptest::prop_assert!(
+                verify_consistency(m as u64, &old_root, n as u64, &new_root, &proof)
+            );
         }
     }
 }

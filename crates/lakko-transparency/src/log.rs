@@ -258,6 +258,32 @@ pub fn check_no_rollback(seen: &SignedRoot, new: &SignedRoot) -> Result<()> {
     }
 }
 
+/// Verify that `new` append-only-extends `old` via an RFC 6962 §2.1.2
+/// consistency proof (ADR-0020). This is the witness's gate: it co-signs a new
+/// root only when this passes against its last-co-signed root, so the operator
+/// cannot get a co-signature on a forked history.
+///
+/// This binds only the `(tree_root, log_size)` of each root — the caller is
+/// responsible for having verified each root's operator signature first.
+///
+/// # Errors
+///
+/// Returns [`Error::ConsistencyProofMismatch`] if the proof does not prove
+/// `new.tree_root` is the append-only successor of `old.tree_root`.
+pub fn verify_consistency(old: &SignedRoot, new: &SignedRoot, proof: &[TreeHash]) -> Result<()> {
+    if merkle::verify_consistency(
+        old.log_size,
+        &old.tree_root,
+        new.log_size,
+        &new.tree_root,
+        proof,
+    ) {
+        Ok(())
+    } else {
+        Err(Error::ConsistencyProofMismatch)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

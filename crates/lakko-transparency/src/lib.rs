@@ -29,9 +29,10 @@ pub mod supersession;
 pub use error::{Error, Result};
 pub use leaf_auth::{sign_leaf_genesis, verify_leaf_genesis};
 pub use log::{
-    check_no_rollback, verify_inclusion, InMemoryLog, InclusionProof, LogEntry, SignedRoot,
+    check_no_rollback, verify_consistency as verify_root_consistency, verify_inclusion,
+    InMemoryLog, InclusionProof, LogEntry, SignedRoot,
 };
-pub use merkle::TreeHash;
+pub use merkle::{consistency_proof, verify_consistency, TreeHash};
 pub use supersession::{
     verify_supersession, verify_supersession_chain, PinnedIdentity, RotatedIdentity,
     RotationEvidence, SupersessionProof, MAX_VALIDITY_SECS, SUPERSESSION_PROOF_LEN,
