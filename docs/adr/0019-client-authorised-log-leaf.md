@@ -5,7 +5,14 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 # ADR-0019: Client-authorised transparency-log leaf (G-30 #2)
 
-- **Status:** Accepted — Sprint 1 (rotations) in progress. 2026-06-12
+- **Status:** Accepted — **built + reviewed**. Sprint 1 (rotation chain
+  verifier FFI + 3-client gate-2 wiring) and Sprint 2 (genesis self-auth
+  primitive + transparency server verify/reject + discovery opacity threading +
+  3-client genesis mint) both landed end to end. `lakko-security`:
+  **APPROVE-WITH-NOTES** — invariants #2/#4/#6 hold or are strengthened, the
+  genesis-TOFU squatting residual is correctly bounded + documented; the one
+  cosmetic note (a duplicate `fuzz-check` line) is fixed; cleared to merge.
+  2026-06-12
 - **Date:** 2026-06-12
 - **Context:** The KT log (ADR-0016 supersession transport + the KT-log S1–S4
   workstream: `services/transparency`, the discovery append + reconciler, the
