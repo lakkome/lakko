@@ -574,12 +574,19 @@ export class DiscoveryClient {
    * @param supersessionProof  Raw proof bytes (from
    *        `signSupersessionProof`) or a pre-base64'd string.
    *        Omit on non-rotation uploads.
+   * @param leafAuth  G-30 #2 (ADR-0019): raw 64-byte genesis leaf
+   *        self-signature bytes (from `signLeafGenesis`) or a
+   *        pre-base64'd string, authorising a NEW transparency-log
+   *        binding. Supplied by the signup + fresh-start-mint callers
+   *        (where a new key is published). Omit on a routine same-key
+   *        re-upload — the log append is idempotent there.
    */
   async uploadIdentityBundle(
     accountId: Uint8Array,
     signaturePubkey: Uint8Array,
     x25519Pubkey: Uint8Array,
     supersessionProof?: Uint8Array | string,
+    leafAuth?: Uint8Array | string,
   ): Promise<void> {
     if (accountId.length !== 16) {
       throw new DiscoveryClientArgError("accountId must be 16 bytes");
@@ -608,6 +615,16 @@ export class DiscoveryClient {
           : base64Encode(supersessionProof);
     }
 
+    // G-30 #2 (ADR-0019): normalise the optional genesis leaf
+    // self-signature to base64 for the wire (`leaf_auth?: string`),
+    // mirroring the supersession-proof handling above. `undefined`
+    // stays omitted — the server only requires it for a NEW binding.
+    let leafAuthB64: string | undefined;
+    if (leafAuth !== undefined) {
+      leafAuthB64 =
+        typeof leafAuth === "string" ? leafAuth : base64Encode(leafAuth);
+    }
+
     const challenge = await this.fetchChallenge();
     const pow = await solvePow(challenge.seed, challenge.effort_bits);
 
@@ -617,6 +634,7 @@ export class DiscoveryClient {
       signature_pubkey: base64Encode(signaturePubkey),
       x25519_pubkey: base64Encode(x25519Pubkey),
       ...(proofB64 !== undefined ? { supersession_proof: proofB64 } : {}),
+      ...(leafAuthB64 !== undefined ? { leaf_auth: leafAuthB64 } : {}),
     });
     if (!resp.ok) {
       throw new DiscoveryHttpError(
