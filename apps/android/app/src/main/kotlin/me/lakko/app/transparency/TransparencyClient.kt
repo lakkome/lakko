@@ -99,6 +99,7 @@ public class TransparencyClient(
             version = wire.version,
             identityPubkey = base64Decode(wire.identity_pubkey_b64),
             isReset = wire.is_reset,
+            leafAuth = wire.leaf_auth_b64?.let { base64Decode(it) },
         )
     }
 
@@ -231,14 +232,23 @@ public data class LatestEntry(
     /** ADR-0017 fresh-start marker — `true` if the latest entry was a
      *  no-supersession-proof owner reset. */
     val isReset: Boolean,
+    /** G-30 #2 (ADR-0019): the entry's opaque leaf authorisation (a 64-byte
+     *  genesis self-sig or a 145-byte supersession proof), or `null` for a
+     *  pre-Sprint-2 / unauthenticated row. A client verifies a genesis
+     *  self-sig against the served key on a first observation. */
+    val leafAuth: ByteArray? = null,
 ) {
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
         if (other !is LatestEntry) return false
-        return idx == other.idx &&
-            version == other.version &&
-            identityPubkey.contentEquals(other.identityPubkey) &&
-            isReset == other.isReset
+        if (idx != other.idx) return false
+        if (version != other.version) return false
+        if (!identityPubkey.contentEquals(other.identityPubkey)) return false
+        if (isReset != other.isReset) return false
+        val a = leafAuth
+        val b = other.leafAuth
+        if (a == null) return b == null
+        return b != null && a.contentEquals(b)
     }
 
     override fun hashCode(): Int {
@@ -246,6 +256,7 @@ public data class LatestEntry(
         result = 31 * result + version.hashCode()
         result = 31 * result + identityPubkey.contentHashCode()
         result = 31 * result + isReset.hashCode()
+        result = 31 * result + (leafAuth?.contentHashCode() ?: 0)
         return result
     }
 }
@@ -322,6 +333,9 @@ private data class LatestResWire(
     val version: ULong,
     val identity_pubkey_b64: String,
     val is_reset: Boolean,
+    // G-30 #2 (ADR-0019): base64 of the entry's leaf authorisation, or
+    // absent for a pre-Sprint-2 / unauthenticated row.
+    val leaf_auth_b64: String? = null,
 )
 
 /** Wire shape of `GET /transparency/proof/:idx` (Rust `ProofRes`). */
