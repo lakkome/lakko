@@ -73,6 +73,15 @@ pub(crate) struct AppendReq {
     /// reset. Defaults to `false` (a normal proven publish / rotation).
     #[serde(default)]
     pub is_reset: bool,
+    /// G-30 #2 (ADR-0019): the client leaf authorisation, base64-standard.
+    /// A genesis / fresh-start SELF-signature (64 bytes, signed by the
+    /// leaf's own key over the `(account_key, pubkey)` binding) for a first
+    /// entry or an `is_reset` mint, OR a normal-rotation supersession proof
+    /// (145 bytes, signed by the previous key). When present the operator
+    /// verifies it and REFUSES an invalid one; whether ABSENCE is refused is
+    /// governed by `LAKKO_TRANSPARENCY_REQUIRE_LEAF_AUTH`. Opaque otherwise.
+    #[serde(default)]
+    pub leaf_auth_b64: Option<String>,
 }
 
 /// `POST /transparency/append` response body.
@@ -92,22 +101,20 @@ pub(crate) struct AppendRes {
 /// ASSIGNS the version under its lock, and replies with the assigned
 /// `(idx, version)`.
 ///
-/// **Trust assumption (lakko-security KT-log review, finding 2).** This
-/// service sees only the 32-byte `username_hash`, never the `account_id`, so
-/// it CANNOT verify the `account_id ↔ username_hash` binding. Anyone holding
-/// `LAKKO_TRANSPARENCY_APPEND_SECRET` (i.e. the discovery service, or a leaked
-/// server-to-server secret) can therefore append a leaf for ANY account-key
-/// with ANY pubkey, and it will carry a valid inclusion proof under the
-/// operator-signed root. The log's integrity is thus bounded by "discovery +
-/// the append secret are honest". This is NOT a silent key substitution: a
-/// forged leaf still has to pass the client's fail-closed ADR-0016
-/// supersession gate (which runs FIRST and refuses a changed key with no
-/// old-key-signed proof), so the worst a forged append achieves is
-/// log-poisoning / a confusing `mismatch` surfaced to the user — not
-/// auto-trust. Closing this fully (so the service/auditors verify the binding
-/// WITHOUT trusting discovery) needs a client-supplied signature by the
-/// account-identity key over its own `(username_hash, pubkey, version)` —
-/// tracked as future work (G-30).
+/// **Trust model (G-30 #2, ADR-0019).** This service sees only the 32-byte
+/// `username_hash`, never the `account_id`, so it CANNOT verify the
+/// `account_id ↔ username_hash` binding. But it DOES now verify that the ACCOUNT
+/// authorised the `(account_key → pubkey)` binding: a NEW binding must carry a
+/// `leaf_auth` — a genesis / fresh-start self-signature (signed by the leaf's
+/// own key) or a normal-rotation supersession proof (signed by the previous
+/// key) — which the store verifies under its append lock; an invalid one is
+/// REFUSED (403). When `LAKKO_TRANSPARENCY_REQUIRE_LEAF_AUTH` is set, an ABSENT
+/// `leaf_auth` is refused too. This is the operator-side defence-in-depth reject
+/// — a leaked append secret can no longer pollute the log with a fabricated
+/// (keyless) leaf. The CLIENT rotation chain (`verify_supersession_chain`)
+/// stays the real integrity gate (the server is untrusted). Genesis remains
+/// TOFU (a self-sig does not PREVENT first-entry squatting — that residual is
+/// detected via CONIKS self-monitoring + the ADR-0016 fail-closed peer gate).
 pub(crate) async fn append(
     State(state): State<AppState>,
     Json(req): Json<AppendReq>,
@@ -138,13 +145,41 @@ pub(crate) async fn append(
         ));
     }
 
+    // G-30 #2 (ADR-0019): decode the optional client leaf authorisation.
+    let leaf_auth: Option<Vec<u8>> = match req.leaf_auth_b64.as_deref() {
+        Some(s) => Some(
+            B64.decode(s.as_bytes())
+                .map_err(|_| (StatusCode::BAD_REQUEST, "leaf_auth_b64 not valid base64"))?,
+        ),
+        None => None,
+    };
+    // Presence policy: when configured to require leaf authorisation, an absent
+    // value is the operator-side reject. The store still verifies a PRESENT
+    // value regardless of this flag (an invalid auth is always refused).
+    if state.require_leaf_auth && leaf_auth.is_none() {
+        return Err((StatusCode::FORBIDDEN, "leaf authorisation required"));
+    }
+
     let result = state
         .store
-        .append(&state.db, username_hash, identity_pubkey, req.is_reset)
+        .append(
+            &state.db,
+            username_hash,
+            identity_pubkey,
+            req.is_reset,
+            leaf_auth.as_deref(),
+            now_unix_secs_i64(),
+        )
         .await
-        .map_err(|e| {
-            tracing::error!(error = %e, "transparency append failed");
-            (StatusCode::INTERNAL_SERVER_ERROR, "append failed")
+        .map_err(|e| match e {
+            crate::store::StoreError::Unauthorised(detail) => {
+                tracing::warn!(detail, "transparency append refused: leaf authorisation");
+                (StatusCode::FORBIDDEN, "leaf authorisation rejected")
+            }
+            other => {
+                tracing::error!(error = %other, "transparency append failed");
+                (StatusCode::INTERNAL_SERVER_ERROR, "append failed")
+            }
         })?;
 
     Ok(Json(AppendRes {
@@ -283,6 +318,12 @@ pub(crate) struct LatestRes {
     /// ADR-0017 fresh-start marker — `true` if the latest entry was a
     /// no-supersession-proof owner reset.
     pub is_reset: bool,
+    /// G-30 #2 (ADR-0019): the opaque client leaf authorisation stored with
+    /// this entry (a genesis self-sig or a supersession proof), base64, or
+    /// absent for a pre-Sprint-2 / unauthenticated row. A client can verify a
+    /// genesis self-sig on a first observation against the served pubkey.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub leaf_auth_b64: Option<String>,
 }
 
 /// Return the latest entry for the account-key carried in the path
@@ -323,6 +364,7 @@ pub(crate) async fn latest(
         version: entry.version,
         identity_pubkey_b64: B64.encode(entry.identity_pubkey),
         is_reset: entry.is_reset,
+        leaf_auth_b64: entry.leaf_auth.map(|a| B64.encode(a)),
     }))
 }
 
@@ -337,6 +379,12 @@ fn now_unix_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_secs())
+}
+
+/// `now_unix_secs` as an `i64` for the supersession-proof freshness check
+/// (G-30 #2). Saturates rather than wrapping on the (far-future) overflow.
+fn now_unix_secs_i64() -> i64 {
+    i64::try_from(now_unix_secs()).unwrap_or(i64::MAX)
 }
 
 /// Decode a base64 string accepting either alphabet (standard or
@@ -483,11 +531,11 @@ mod tests {
 
         // alice v1 then v2 (a rotation), v2 is_reset=false.
         store
-            .append(&pool, alice, vec![0x01; 32], false)
+            .append(&pool, alice, vec![0x01; 32], false, None, 0)
             .await
             .expect("append alice v1");
         store
-            .append(&pool, alice, vec![0x02; 32], false)
+            .append(&pool, alice, vec![0x02; 32], false, None, 0)
             .await
             .expect("append alice v2");
 
@@ -495,6 +543,7 @@ mod tests {
             db: pool.clone(),
             store,
             append_secret: None,
+            require_leaf_auth: false,
         };
         let app = crate::build_app(state);
 

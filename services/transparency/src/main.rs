@@ -102,6 +102,11 @@ pub(crate) struct AppState {
     /// `service_auth::require_service_secret` middleware on the append
     /// route via a constant-time compare.
     pub(crate) append_secret: Option<Arc<Vec<u8>>>,
+    /// G-30 #2 (ADR-0019): when `true`, `POST /transparency/append` REFUSES
+    /// a request with no `leaf_auth` (the operator-side presence policy).
+    /// A PRESENT-but-invalid `leaf_auth` is always refused regardless. Read
+    /// from `LAKKO_TRANSPARENCY_REQUIRE_LEAF_AUTH` (default `true`).
+    pub(crate) require_leaf_auth: bool,
 }
 
 #[tokio::main]
@@ -166,10 +171,28 @@ async fn main() -> Result<()> {
         );
     }
 
+    // G-30 #2 (ADR-0019) leaf-authorisation presence policy. Default ON: a
+    // new binding with no `leaf_auth` is refused. Set
+    // `LAKKO_TRANSPARENCY_REQUIRE_LEAF_AUTH=0` (or `false`) to allow an
+    // absent value during a transition / local dev.
+    let require_leaf_auth = std::env::var("LAKKO_TRANSPARENCY_REQUIRE_LEAF_AUTH")
+        .map_or(true, |v| {
+            !matches!(v.trim(), "0" | "false" | "FALSE" | "no" | "off")
+        });
+    if require_leaf_auth {
+        tracing::info!("leaf-authorisation policy ON — append refuses a missing leaf_auth");
+    } else {
+        tracing::warn!(
+            "LAKKO_TRANSPARENCY_REQUIRE_LEAF_AUTH disabled — append accepts a missing \
+             leaf_auth (a present-but-invalid one is still refused)"
+        );
+    }
+
     let state = AppState {
         db: pool.clone(),
         store: Arc::new(store),
         append_secret,
+        require_leaf_auth,
     };
 
     let app = build_app(state);
