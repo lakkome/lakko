@@ -210,6 +210,18 @@ impl InMemoryLog {
             audit_path,
         })
     }
+
+    /// Build an RFC 6962 §2.1.2 consistency proof from `old_size` to the
+    /// current log size — proving the current tree append-only-extends the tree
+    /// of the first `old_size` leaves (ADR-0020). The operator hands this to the
+    /// witness, which verifies it before co-signing the new root. An `old_size`
+    /// of 0 or `>=` the current size yields an empty proof (the matching
+    /// [`verify_consistency`](crate::verify_consistency) handles those).
+    #[must_use]
+    pub fn consistency_proof(&self, old_size: u64) -> Vec<TreeHash> {
+        let old = usize::try_from(old_size).unwrap_or(usize::MAX);
+        merkle::consistency_proof(old, &self.leaf_bytes)
+    }
 }
 
 /// Verify an inclusion proof for `entry` against a `signed_root` previously
@@ -406,5 +418,41 @@ mod tests {
         // Both entries have the same username_hash but different versions.
         assert_eq!(alice_v1.username_hash, alice_v2.username_hash);
         assert_ne!(alice_v1.version, alice_v2.version);
+    }
+
+    #[test]
+    fn consistency_proof_extends_old_root() {
+        // The operator's consistency proof from an old size to the current size
+        // verifies the current root append-only-extends the old root (ADR-0020).
+        let mut log = InMemoryLog::new(signing::SigningKey::generate());
+        for i in 0..4 {
+            log.append(entry(&format!("u{i}"), 1));
+        }
+        let old_root = log.current_root();
+        let old_size = log.size();
+        for i in 4..10 {
+            log.append(entry(&format!("u{i}"), 1));
+        }
+        let new_root = log.current_root();
+        let new_size = log.size();
+
+        let proof = log.consistency_proof(old_size);
+        assert!(crate::merkle::verify_consistency(
+            old_size, &old_root, new_size, &new_root, &proof
+        ));
+        // And the SignedRoot-level wrapper agrees.
+        let old = SignedRoot {
+            tree_root: old_root,
+            log_size: old_size,
+            timestamp_unix: 1,
+            signature: lakko_crypto::signing::Signature::from_bytes(&[0u8; 64]).unwrap(),
+        };
+        let new = SignedRoot {
+            tree_root: new_root,
+            log_size: new_size,
+            timestamp_unix: 2,
+            signature: lakko_crypto::signing::Signature::from_bytes(&[0u8; 64]).unwrap(),
+        };
+        crate::verify_root_consistency(&old, &new, &proof).expect("root consistency");
     }
 }
