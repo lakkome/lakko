@@ -110,3 +110,31 @@ pub fn verify_leaf_genesis(
     lakko_transparency::verify_leaf_genesis(sig, &username_hash, identity_pubkey)
         .map_err(|e| JsError::new(&format!("leaf genesis verify: {e}")))
 }
+
+/// Verify a witness co-signature (ADR-0020) over a transparency root's
+/// `(treeRoot, logSize)` against the CLIENT-PINNED `witnessKey` — the defence
+/// against an operator split-view (G-30 #1). A client requires this AND the
+/// operator's own root signature before trusting a root. `cosig` is the
+/// self-describing wire blob served alongside the root.
+///
+/// Throws if `expectedTreeRoot` is not 32 bytes, the co-sig is the wrong length
+/// / version, its embedded root differs from `expectedTreeRoot` /
+/// `expectedLogSize`, or the signature does not verify under `witnessKey`.
+#[wasm_bindgen(js_name = verifyWitnessCosig)]
+pub fn verify_witness_cosig(
+    cosig: &[u8],
+    witness_key: &[u8],
+    expected_tree_root: &[u8],
+    expected_log_size: u64,
+) -> Result<(), JsError> {
+    let expected_tree_root: [u8; 32] = expected_tree_root
+        .try_into()
+        .map_err(|_| JsError::new("expected_tree_root must be 32 bytes"))?;
+    lakko_transparency::verify_witness_cosig(
+        cosig,
+        witness_key,
+        &expected_tree_root,
+        expected_log_size,
+    )
+    .map_err(|e| JsError::new(&format!("witness co-sig verify: {e}")))
+}

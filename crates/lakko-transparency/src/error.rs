@@ -108,6 +108,28 @@ pub enum Error {
     /// the leaf (G-30 #2, ADR-0019).
     #[error("leaf genesis self-signature is invalid")]
     LeafGenesisInvalid,
+
+    /// A witness co-signature was not the expected wire length (ADR-0020).
+    #[error("witness co-signature has wrong length: {got} bytes")]
+    WitnessCosigBadLength {
+        /// The actual length received.
+        got: usize,
+    },
+
+    /// A witness co-signature carried an unsupported version byte (ADR-0020).
+    #[error("unsupported witness co-signature version: {0}")]
+    WitnessCosigBadVersion(u8),
+
+    /// A witness co-signature's Ed25519 signature did not verify against the
+    /// pinned witness key (ADR-0020).
+    #[error("witness co-signature signature is invalid")]
+    WitnessCosigInvalid,
+
+    /// A witness co-signature's embedded `(tree_root, log_size)` did not match
+    /// the root the caller is verifying — a co-sig spliced from a different
+    /// root (ADR-0020).
+    #[error("witness co-signature is bound to a different root")]
+    WitnessCosigBindingMismatch,
 }
 
 /// Convenience alias.

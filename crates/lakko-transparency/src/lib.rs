@@ -25,9 +25,11 @@ pub mod leaf_auth;
 pub mod log;
 pub mod merkle;
 pub mod supersession;
+pub mod witness;
 
 pub use error::{Error, Result};
 pub use leaf_auth::{sign_leaf_genesis, verify_leaf_genesis};
+pub use witness::{sign_witness_cosig, verify_witness_cosig, WITNESS_COSIG_LEN};
 pub use log::{
     check_no_rollback, verify_consistency as verify_root_consistency, verify_inclusion,
     InMemoryLog, InclusionProof, LogEntry, SignedRoot,
