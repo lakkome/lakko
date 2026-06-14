@@ -1,0 +1,61 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+[package]
+name = "lakko-svc-witness"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Witness — independent co-signer of KT-log roots for split-view resistance (ADR-0020)"
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "lakko-svc-witness"
+path = "src/main.rs"
+
+[dependencies]
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+axum = { version = "0.8", features = ["macros", "http2"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["trace", "limit"] }
+sqlx = { version = "0.8", default-features = false, features = [
+    "runtime-tokio",
+    "tls-rustls-ring",
+    "mysql",
+    "migrate",
+    "macros",
+    "chrono",
+] }
+
+# .env loading — debug builds only; production uses systemd EnvironmentFile.
+dotenvy = "0.15"
+
+base64 = "0.22"
+rand = "0.8"
+
+# Constant-time comparison of the cosign shared secret.
+subtle = "2"
+
+# The Merkle consistency proof + witness co-signature primitives (ADR-0020).
+# The witness verifies consistency + signs; the crate carries all the crypto.
+lakko-transparency.workspace = true
+# Ed25519 witness signing key (first-boot generate + persist) + the operator
+# verifying key the witness pins to authenticate incoming roots.
+lakko-crypto.workspace = true
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"

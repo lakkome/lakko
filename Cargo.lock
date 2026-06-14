@@ -2963,6 +2963,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "lakko-svc-witness"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "base64 0.22.1",
+ "dotenvy",
+ "http-body-util",
+ "lakko-crypto",
+ "lakko-transparency",
+ "rand 0.8.6",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "subtle",
+ "thiserror 1.0.69",
+ "tokio",
+ "tower",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "lakko-sync"
 version = "0.0.0"
 dependencies = [

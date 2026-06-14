@@ -41,6 +41,7 @@ members = [
     "services/push-gw",
     "services/sfu",
     "services/transparency",
+    "services/witness",
     "services/transport-rendezvous",
 ]
 # Fuzz crates require nightly + libfuzzer-sys; they opt out of this
