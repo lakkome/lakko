@@ -1104,6 +1104,32 @@ mod tests {
     }
 
     #[test]
+    fn parse_devicegroup_payload_rejects_malformed_input_gracefully() {
+        use prost::Message as _;
+
+        // The receiver-side parser sees bytes from the ZERO-TRUST, opaque DS, so
+        // malformed input must surface as a graceful Err, never a panic. (The
+        // `devicegroup_payload` fuzz target drives this exhaustively; these pin
+        // the named cases.)
+        assert!(DeviceGroup::parse_devicegroup_payload(&[]).is_err());
+        assert!(DeviceGroup::parse_devicegroup_payload(&[0xff, 0xff, 0xff, 0xff, 0x7f]).is_err());
+
+        // A well-formed proto with NO body -> Unsupported (an older client
+        // reading a future/empty payload must refuse, not silently Ok).
+        let mut buf = Vec::new();
+        lakko_proto::mls_app::devicegroup::v1::DeviceGroupPayload {
+            hlc: 7,
+            sender_leaf: 1,
+            body: None,
+        }
+        .encode(&mut buf)
+        .expect("encode body-less payload");
+        let err = DeviceGroup::parse_devicegroup_payload(&buf)
+            .expect_err("a body-less payload must be refused");
+        assert!(matches!(err, Error::Unsupported(_)), "got {err:?}");
+    }
+
+    #[test]
     fn remove_device_at_rejects_own_leaf() {
         let account = fixture_account_id();
         let id_a = Identity::generate("device-A").unwrap();
@@ -1126,7 +1152,7 @@ mod tests {
     // guard on the OpenMLS API the policy flag will rely on.
     #[test]
     fn spike_custom_group_context_extension_propagates_to_joiners() {
-        use openmls::extensions::{Extension, Extensions, ExtensionType, UnknownExtension};
+        use openmls::extensions::{Extension, ExtensionType, Extensions, UnknownExtension};
         use openmls::framing::{MlsMessageBodyIn, MlsMessageIn};
         use openmls::group::{GroupId, MlsGroupJoinConfig, StagedWelcome};
         use openmls::key_packages::KeyPackage;
@@ -1152,11 +1178,9 @@ mod tests {
             None,
         );
 
-        let gc_exts = Extensions::single(Extension::Unknown(
-            POLICY_EXT,
-            UnknownExtension(vec![0x01]),
-        ))
-        .unwrap();
+        let gc_exts =
+            Extensions::single(Extension::Unknown(POLICY_EXT, UnknownExtension(vec![0x01])))
+                .unwrap();
 
         let cfg = MlsGroupCreateConfig::builder()
             .ciphersuite(cs)
@@ -1185,7 +1209,12 @@ mod tests {
         // (2) B's KeyPackage advertises the same capability.
         let kp_b = KeyPackage::builder()
             .leaf_node_capabilities(caps)
-            .build(cs, &id_b.provider, &id_b.signature_keys, id_b.credential.clone())
+            .build(
+                cs,
+                &id_b.provider,
+                &id_b.signature_keys,
+                id_b.credential.clone(),
+            )
             .expect("B key package")
             .key_package()
             .clone();
@@ -1218,7 +1247,11 @@ mod tests {
             .extensions()
             .unknown(POLICY_EXT)
             .expect("policy ext present on B");
-        assert_eq!(on_b.0, vec![0x01], "joiner must see the GroupContext policy flag");
+        assert_eq!(
+            on_b.0,
+            vec![0x01],
+            "joiner must see the GroupContext policy flag"
+        );
     }
 
     #[test]
@@ -1244,8 +1277,7 @@ mod tests {
         let kp_b = id_b.create_key_package().unwrap();
         let addition = group_a.add_device(&id_a, kp_b).unwrap();
         let welcome_bytes = crate::group::encode_message(&addition.welcome).unwrap();
-        let mut group_b =
-            DeviceGroup::join_from_welcome(&welcome_bytes, &id_b, &account).unwrap();
+        let mut group_b = DeviceGroup::join_from_welcome(&welcome_bytes, &id_b, &account).unwrap();
 
         // Both start policy-off.
         assert!(!group_a.require_attested_removals());
@@ -1352,7 +1384,10 @@ mod tests {
             )
             .expect("a valid attestation authorises the removal");
         assert!(matches!(incoming, Incoming::Commit));
-        assert!(!b_still_has(&group_b, &c_pubkey), "C must be removed from B's view");
+        assert!(
+            !b_still_has(&group_b, &c_pubkey),
+            "C must be removed from B's view"
+        );
     }
 
     #[test]
@@ -1367,7 +1402,10 @@ mod tests {
             &sk.verifying_key(),
             100,
         );
-        assert!(res.is_err(), "a removal with no attestation must be refused under the policy");
+        assert!(
+            res.is_err(),
+            "a removal with no attestation must be refused under the policy"
+        );
         assert!(
             b_still_has(&group_b, &c_pubkey),
             "the refused commit must NOT be merged — C stays present"
@@ -1392,7 +1430,10 @@ mod tests {
             &sk.verifying_key(),
             100,
         );
-        assert!(res.is_err(), "an attestation for another leaf must not authorise this removal");
+        assert!(
+            res.is_err(),
+            "an attestation for another leaf must not authorise this removal"
+        );
         assert!(b_still_has(&group_b, &c_pubkey));
     }
 
@@ -1411,7 +1452,10 @@ mod tests {
             &real.verifying_key(),
             100,
         );
-        assert!(res.is_err(), "an attestation signed by the wrong key must be refused");
+        assert!(
+            res.is_err(),
+            "an attestation signed by the wrong key must be refused"
+        );
         assert!(b_still_has(&group_b, &c_pubkey));
     }
 
@@ -1498,7 +1542,11 @@ mod tests {
             )
             .expect("a non-remove commit needs no attestation");
         assert!(matches!(incoming, Incoming::Commit));
-        assert_eq!(group_b.devices().len(), 3, "D must have been added on B's view");
+        assert_eq!(
+            group_b.devices().len(),
+            3,
+            "D must have been added on B's view"
+        );
     }
 
     #[test]

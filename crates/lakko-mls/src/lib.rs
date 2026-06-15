@@ -71,4 +71,16 @@ pub mod fuzz_api {
     pub fn parse_history_placeholder(bytes: &[u8]) -> bool {
         crate::history_placeholder::HistoryMessagePlaceholder::decode(bytes).is_ok()
     }
+
+    /// Try to parse a `DeviceGroupPayload` (the receiver-side
+    /// `DeviceGroup::parse_devicegroup_payload`). Returns `true` on a
+    /// successful prost decode + body-variant extraction. The bytes are
+    /// attacker-touchable: a DeviceGroup journal `Incoming::Application`
+    /// payload arrives from the zero-trust, opaque Delivery Service, so a
+    /// malicious / corrupt entry reaches this parser before any state is
+    /// consulted.
+    #[must_use]
+    pub fn parse_devicegroup_payload(bytes: &[u8]) -> bool {
+        crate::DeviceGroup::parse_devicegroup_payload(bytes).is_ok()
+    }
 }

@@ -38,3 +38,10 @@ path = "fuzz_targets/history_placeholder.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "devicegroup_payload"
+path = "fuzz_targets/devicegroup_payload.rs"
+test = false
+doc = false
+bench = false

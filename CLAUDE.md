@@ -154,6 +154,7 @@ Current targets:
 - **`lakko-mls/mls_message`** — `MlsMessageIn` wire-format parser (TLS codec)
 - **`lakko-mls/key_package`** — `KeyPackage` wire-format parser
 - **`lakko-mls/history_placeholder`** — `HistoryMessagePlaceholder::decode` bounded parser for the cross-platform history-bundle `payload_bytes` placeholder (G-6); attacker-touchable after AEAD-open. Also asserts the encode/decode round-trip is stable on any input that parses
+- **`lakko-mls/devicegroup_payload`** — `DeviceGroup::parse_devicegroup_payload` (the receiver-side DeviceGroup journal parser, I-8): prost-decode + body-variant extraction on bytes that arrive as an `Incoming::Application` payload from the ZERO-TRUST, opaque Delivery Service, so a malicious / corrupt journal entry reaches this path before any group state is consulted. A body-less or unrecognised-variant payload must surface as a graceful `Err`, never a panic
 - **`lakko-proto/wire_envelope`** — `wire::v1::Envelope` prost decoder
 - **`lakko-proto/mls_app_payload`** — `mls_app::v1::ApplicationPayload` prost decoder
 - **`lakko-proto/media_call_key`** — `media::v1::CallKeyEpoch` + `CodecCapability` decoders

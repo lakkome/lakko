@@ -333,7 +333,10 @@ impl Group {
     /// group state (G-13, ADR-0015).
     #[must_use]
     pub fn group_context_extension(&self, type_id: u16) -> Option<Vec<u8>> {
-        self.inner.extensions().unknown(type_id).map(|e| e.0.clone())
+        self.inner
+            .extensions()
+            .unknown(type_id)
+            .map(|e| e.0.clone())
     }
 
     /// Encrypt an application payload for the current group epoch.

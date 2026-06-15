@@ -798,6 +798,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "lakko-attest"
+version = "0.0.0"
+dependencies = [
+ "lakko-crypto",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "lakko-crypto"
 version = "0.0.0"
 dependencies = [
@@ -821,6 +829,7 @@ dependencies = [
 name = "lakko-mls"
 version = "0.0.0"
 dependencies = [
+ "lakko-attest",
  "lakko-crypto",
  "lakko-proto",
  "openmls",
