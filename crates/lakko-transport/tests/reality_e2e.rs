@@ -20,6 +20,10 @@ use lakko_transport::{
     build_reality_server_config, make_self_signed_cert, Endpoint, RealityConfig, RealityListener,
     RealityShortId, RealityTagSecret, RealityTransport, Transport,
 };
+use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+use rustls::{ClientConfig, DigitallySignedStruct, SignatureScheme};
+use rustls_pki_types::{CertificateDer, ServerName, UnixTime};
+use tokio_rustls::TlsConnector;
 
 static RUSTLS_INIT: Once = Once::new();
 
@@ -207,4 +211,128 @@ async fn reality_v2_listener_refuses_active_prober() {
         server_result.is_err(),
         "server must reject the attacker (Ok = false-positive admit)"
     );
+}
+
+/// G5-7-reality-probe — a VANILLA active prober (a plain rustls TLS client, NOT
+/// a REALITY client) probing the REALITY listener is REFUSED. Where
+/// `reality_v2_listener_refuses_active_prober` uses a REALITY-shaped client with
+/// a WRONG tag_secret, this covers the commonest real-world probe vector: a
+/// censor simply opening an ordinary TLS connection. The plain ClientHello's
+/// `legacy_session_id` is not a valid REALITY authenticator, so the listener
+/// fails the HMAC check and drops the handshake (`ClientAuth`).
+///
+/// PROBE-REFUSAL vs PROBE-RESISTANCE: this proves the listener does not ADMIT a
+/// prober (no false-positive tunnel). It does NOT prove full indistinguishability
+/// from the cover site — the current impl REFUSES by DROPPING the connection,
+/// which a sophisticated active prober could flag as anomalous (a real
+/// www.microsoft.com would complete the handshake). Looking byte-identical to the
+/// cover site needs the live-cover-proxy fallback — a deferred publisher-operator
+/// concern (see the `reality::server_driver` module doc + ADR-0004).
+#[tokio::test]
+async fn reality_v2_listener_refuses_a_vanilla_tls_prober() {
+    install_crypto_provider();
+
+    let tag_secret_bytes = [0x42u8; 32];
+    let short_id_bytes = [0xABu8; 8];
+    let cover_sni = "www.microsoft.com";
+
+    let (chain, key) = make_self_signed_cert(cover_sni).expect("self-signed cert");
+    let tls_cfg = build_reality_server_config(chain, key).expect("server config builds");
+
+    let tcp_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let bound_addr = tcp_listener.local_addr().unwrap();
+    let mut reality_listener = RealityListener::new(
+        tcp_listener,
+        Arc::new(tls_cfg),
+        vec![(
+            RealityShortId(short_id_bytes),
+            RealityTagSecret(tag_secret_bytes),
+        )],
+        300,
+    );
+
+    let server_task = tokio::spawn(async move { reality_listener.accept().await });
+
+    // A VANILLA rustls TLS client — no REALITY authenticator in the
+    // ClientHello at all (the real-world censor probe).
+    let client_cfg = ClientConfig::builder()
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(AcceptAnyCert))
+        .with_no_client_auth();
+    let connector = TlsConnector::from(Arc::new(client_cfg));
+    let server_name =
+        ServerName::try_from(cover_sni.to_owned()).expect("cover SNI is a valid DNS name");
+    let stream = tokio::net::TcpStream::connect(bound_addr)
+        .await
+        .expect("tcp connect to REALITY listener");
+    let handshake = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        connector.connect(server_name, stream),
+    )
+    .await;
+
+    // The vanilla TLS handshake must NOT complete: a timeout (the listener
+    // dropped after refusing) or a TLS error — never a completed handshake.
+    let admitted = matches!(handshake, Ok(Ok(_)));
+    assert!(
+        !admitted,
+        "a vanilla TLS prober must NOT complete a REALITY handshake (no false-positive admit)"
+    );
+
+    let server_result = server_task.await.expect("server task joins");
+    assert!(
+        server_result.is_err(),
+        "the REALITY listener must refuse a vanilla TLS prober (Ok = false-positive admit)"
+    );
+}
+
+/// Accept-any server-cert verifier for the prober client — it is testing
+/// whether the listener ADMITS it, not validating PKI. (The handshake fails at
+/// the REALITY auth gate, server-side, well before cert validation matters.)
+#[derive(Debug)]
+struct AcceptAnyCert;
+
+impl ServerCertVerifier for AcceptAnyCert {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp: &[u8],
+        _now: UnixTime,
+    ) -> Result<ServerCertVerified, rustls::Error> {
+        Ok(ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        Ok(HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        Ok(HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        vec![
+            SignatureScheme::ECDSA_NISTP256_SHA256,
+            SignatureScheme::ECDSA_NISTP384_SHA384,
+            SignatureScheme::ED25519,
+            SignatureScheme::RSA_PSS_SHA256,
+            SignatureScheme::RSA_PSS_SHA384,
+            SignatureScheme::RSA_PSS_SHA512,
+            SignatureScheme::RSA_PKCS1_SHA256,
+            SignatureScheme::RSA_PKCS1_SHA384,
+            SignatureScheme::RSA_PKCS1_SHA512,
+        ]
+    }
 }

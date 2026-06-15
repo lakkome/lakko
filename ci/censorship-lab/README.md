@@ -63,7 +63,8 @@ follow-up sub-sprints.
 |-----------------------------------------------------|---------------|--------------------------------------------------|
 | Passive SNI observation                             | ✅            | this wave — `sni-observer/`                      |
 | Passive TLS-fingerprint observation (JA3 / JA4)     | ✅            | `G5-7-fingerprint` (landed)                      |
-| Active probing against REALITY endpoints            | ❌ deferred   | `G5-7-reality-probe` follow-up                   |
+| Active probing against REALITY endpoints (refusal)  | ✅            | `G5-7-reality-probe` — `reality_e2e.rs`          |
+| ... full probe-indistinguishability (cover-proxy)   | ❌ deferred   | needs the live-cover-proxy fallback              |
 | SNI string-match blocking (GFW-style censor)        | ✅            | `G5-7-gfw-string` (`detector` module)            |
 | Connection throttling (IR-style speed cap)          | ❌ deferred   | `G5-7-throttle` follow-up                        |
 | Forwarded-to-target obfuscation effectiveness       | ❌ deferred   | `G5-7-transport-matrix` follow-up                |

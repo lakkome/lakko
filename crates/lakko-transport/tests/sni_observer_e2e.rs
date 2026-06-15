@@ -505,9 +505,7 @@ async fn observer_records_shadowsocks_as_non_tls() {
     let last = body
         .lines()
         .rev()
-        .find(|l| {
-            l.contains(r#""transport":"tcp""#) && l.contains(r#""observed_sni":null"#)
-        })
+        .find(|l| l.contains(r#""transport":"tcp""#) && l.contains(r#""observed_sni":null"#))
         .unwrap_or_else(|| {
             panic!(
                 "observer log has no tcp null-SNI line (the shadowsocks observation): {}",
