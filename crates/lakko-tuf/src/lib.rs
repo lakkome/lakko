@@ -87,6 +87,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod mirrors;
 pub mod urls;
 
 use std::collections::BTreeMap;
@@ -1394,8 +1395,9 @@ fn role_matches(role: &DelegatedRole, name: &str) -> Result<bool> {
 /// `*` matches any run of chars (including `/`), `?` matches
 /// exactly one char, everything else is literal. Iterative
 /// with backtracking on the last `*` — O(len(pattern) ×
-/// len(name)) worst case, NO regex (ReDoS-safe).
-fn glob_match(pattern: &str, name: &str) -> bool {
+/// len(name)) worst case, NO regex (ReDoS-safe). Shared with
+/// the [`mirrors`] module for confined-target-dir matching.
+pub(crate) fn glob_match(pattern: &str, name: &str) -> bool {
     let pat: Vec<char> = pattern.chars().collect();
     let txt: Vec<char> = name.chars().collect();
     let (mut p, mut t) = (0usize, 0usize);
