@@ -18,6 +18,8 @@
 //!   without it, since it could otherwise co-sign any root).
 //! - `LAKKO_WITNESS_COSIGN_SECRET` — shared secret gating `POST /witness/cosign`.
 
+#![forbid(unsafe_code)]
+
 mod handlers;
 mod service_auth;
 mod store;
