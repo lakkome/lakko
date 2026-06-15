@@ -49,14 +49,20 @@
 //! what the upstream returns because there is no
 //! upstream.
 //!
-//! Not a real GFW / TSPU / IR emulator — those land as
+//! GFW-style SNI string-match censorship IS emulated (the
+//! [`detector`] module): set `LAKKO_SNI_BLOCKLIST` to a
+//! comma-separated pattern list (`example.com` exact /
+//! `*.example.com` suffix / `~keyword` substring) and each
+//! observation line gains `"blocked"` + `"blocked_by"`. A
+//! HIDDEN SNI (ECH / REALITY cover → `observed_sni: null`) is
+//! always Allowed — the evasion the lab proves. The richer
+//! TSPU / IR-throttle / active-probe emulators still land as
 //! follow-up sub-sprints documented in
 //! `ci/censorship-lab/README.md` ("Capability matrix").
-//! What this one observer demonstrates is the lab
-//! **infrastructure pattern** that the follow-ups reuse.
 
 #![forbid(unsafe_code)]
 
+mod detector;
 mod quic_initial;
 
 use std::fmt::Write as _;
@@ -116,6 +122,20 @@ async fn main() -> Result<()> {
         .with_context(|| format!("open log {}", log_path.display()))?;
     let log = Arc::new(Mutex::new(log_file));
 
+    // G5-7 — GFW-style SNI string-match censor emulation. The blocklist is a
+    // comma-separated pattern list (`example.com` exact / `*.example.com`
+    // suffix / `~keyword` substring); unset = the censor blocks nothing (pure
+    // observation). Each observation line then carries `blocked` + `blocked_by`
+    // so the transport-matrix tests can assert a real-SNI flow is Blocked while
+    // a Lakko cover/ECH flow (hidden SNI) is Allowed.
+    let blocklist = Arc::new(detector::Blocklist::from_csv(
+        &std::env::var("LAKKO_SNI_BLOCKLIST").unwrap_or_default(),
+    ));
+    info!(
+        blocking = !blocklist.is_empty(),
+        "sni-observer censor emulation"
+    );
+
     let listener = TcpListener::bind(bind)
         .await
         .with_context(|| format!("bind {bind}"))?;
@@ -137,8 +157,9 @@ async fn main() -> Result<()> {
     info!(%udp_bind, "sni-observer udp listener up");
 
     let udp_log = log.clone();
+    let udp_blocklist = blocklist.clone();
     tokio::spawn(async move {
-        if let Err(e) = run_udp_loop(udp_socket, udp_log).await {
+        if let Err(e) = run_udp_loop(udp_socket, udp_log, udp_blocklist).await {
             warn!(error = %e, "udp loop exited");
         }
     });
@@ -147,8 +168,9 @@ async fn main() -> Result<()> {
         match listener.accept().await {
             Ok((stream, peer)) => {
                 let log = log.clone();
+                let blocklist = blocklist.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = handle_one(stream, peer, log).await {
+                    if let Err(e) = handle_one(stream, peer, log, blocklist).await {
                         warn!(%peer, error = %e, "observation failed");
                     }
                 });
@@ -157,6 +179,22 @@ async fn main() -> Result<()> {
                 warn!(error = %e, "accept failed");
             },
         }
+    }
+}
+
+/// The censor-verdict JSON fragment appended to each observation line (G5-7):
+/// `,"blocked":true,"blocked_by":"exact:x.example"` when the SNI hits the
+/// blocklist, else `,"blocked":false,"blocked_by":null`. A hidden SNI
+/// (`None` — ECH / REALITY cover) is always Allowed (the evasion case).
+fn verdict_fragment(blocklist: &detector::Blocklist, sni: Option<&str>) -> String {
+    match blocklist.classify(sni) {
+        detector::Verdict::Blocked { rule } => {
+            format!(
+                ",\"blocked\":true,\"blocked_by\":\"{}\"",
+                escape_json(&rule)
+            )
+        },
+        detector::Verdict::Allowed => ",\"blocked\":false,\"blocked_by\":null".to_owned(),
     }
 }
 
@@ -170,6 +208,7 @@ async fn main() -> Result<()> {
 async fn run_udp_loop(
     socket: tokio::net::UdpSocket,
     log: Arc<Mutex<tokio::fs::File>>,
+    blocklist: Arc<detector::Blocklist>,
 ) -> Result<()> {
     // UDP datagrams in QUIC v1 are capped at the path MTU
     // (~1500 typical, ~9000 jumbo). 64 KiB is the wire
@@ -195,7 +234,7 @@ async fn run_udp_loop(
 
         let line = match &observed {
             Some(ch) => format!(
-                "{{\"ts_ms\":{},\"transport\":\"udp\",\"observed_sni\":{},\"ja3\":\"{}\",\"ja3_string\":\"{}\",\"ja4\":\"{}\",\"peer\":\"{}\",\"first_bytes_hex\":\"{}\"}}\n",
+                "{{\"ts_ms\":{},\"transport\":\"udp\",\"observed_sni\":{},\"ja3\":\"{}\",\"ja3_string\":\"{}\",\"ja4\":\"{}\",\"peer\":\"{}\",\"first_bytes_hex\":\"{}\"{}}}\n",
                 ts_ms,
                 match &ch.sni {
                     Some(name) => format!("\"{}\"", escape_json(name)),
@@ -206,6 +245,7 @@ async fn run_udp_loop(
                 ch.ja4,
                 peer,
                 hex_head(datagram, 16),
+                verdict_fragment(&blocklist, ch.sni.as_deref()),
             ),
             None => format!(
                 // QUIC Initial decryption failed (or the
@@ -213,10 +253,11 @@ async fn run_udp_loop(
                 // negative observation; first_bytes_hex
                 // disambiguates "non-QUIC noise" from "QUIC
                 // we failed to decrypt".
-                "{{\"ts_ms\":{},\"transport\":\"udp\",\"observed_sni\":null,\"ja3\":null,\"ja3_string\":null,\"ja4\":null,\"peer\":\"{}\",\"first_bytes_hex\":\"{}\"}}\n",
+                "{{\"ts_ms\":{},\"transport\":\"udp\",\"observed_sni\":null,\"ja3\":null,\"ja3_string\":null,\"ja4\":null,\"peer\":\"{}\",\"first_bytes_hex\":\"{}\"{}}}\n",
                 ts_ms,
                 peer,
                 hex_head(datagram, 16),
+                verdict_fragment(&blocklist, None),
             ),
         };
 
@@ -244,6 +285,7 @@ async fn handle_one(
     mut stream: TcpStream,
     peer: SocketAddr,
     log: Arc<Mutex<tokio::fs::File>>,
+    blocklist: Arc<detector::Blocklist>,
 ) -> Result<()> {
     let mut buf = vec![0u8; MAX_CLIENT_HELLO_BYTES];
     // tokio's `timeout` wraps the entire read; an idle
@@ -265,7 +307,7 @@ async fn handle_one(
 
     let line = match &observed {
         Some(ch) => format!(
-            "{{\"ts_ms\":{},\"transport\":\"tcp\",\"observed_sni\":{},\"ja3\":\"{}\",\"ja3_string\":\"{}\",\"ja4\":\"{}\",\"peer\":\"{}\",\"first_bytes_hex\":\"{}\"}}\n",
+            "{{\"ts_ms\":{},\"transport\":\"tcp\",\"observed_sni\":{},\"ja3\":\"{}\",\"ja3_string\":\"{}\",\"ja4\":\"{}\",\"peer\":\"{}\",\"first_bytes_hex\":\"{}\"{}}}\n",
             ts_ms,
             match &ch.sni {
                 Some(name) => format!("\"{}\"", escape_json(name)),
@@ -276,16 +318,18 @@ async fn handle_one(
             ch.ja4,
             peer,
             hex_head(&buf, 16),
+            verdict_fragment(&blocklist, ch.sni.as_deref()),
         ),
         None => format!(
             // No parseable ClientHello — log the negative
             // observation so the test harness can
             // distinguish "non-TLS" from "TLS we failed to
             // parse". `first_bytes_hex` is the disambiguator.
-            "{{\"ts_ms\":{},\"transport\":\"tcp\",\"observed_sni\":null,\"ja3\":null,\"ja3_string\":null,\"ja4\":null,\"peer\":\"{}\",\"first_bytes_hex\":\"{}\"}}\n",
+            "{{\"ts_ms\":{},\"transport\":\"tcp\",\"observed_sni\":null,\"ja3\":null,\"ja3_string\":null,\"ja4\":null,\"peer\":\"{}\",\"first_bytes_hex\":\"{}\"{}}}\n",
             ts_ms,
             peer,
             hex_head(&buf, 16),
+            verdict_fragment(&blocklist, None),
         ),
     };
 
@@ -441,8 +485,12 @@ pub fn parse_client_hello_from_handshake(buf: &[u8]) -> Option<ClientHelloFinger
                         let mut lp = Parser::new(list);
                         while !lp.is_empty() {
                             let Some(name_type) = lp.u8() else { break };
-                            let Some(name_len) = lp.u16().map(|v| v as usize) else { break };
-                            let Some(name) = lp.bytes(name_len) else { break };
+                            let Some(name_len) = lp.u16().map(|v| v as usize) else {
+                                break;
+                            };
+                            let Some(name) = lp.bytes(name_len) else {
+                                break;
+                            };
                             if name_type == 0x00 {
                                 sni = std::str::from_utf8(name).ok().map(str::to_owned);
                                 break;
@@ -586,11 +634,17 @@ fn compute_ja3(
     let mut s = String::new();
     let _ = write!(s, "{legacy_client_version}");
     s.push(',');
-    join_decimal_csv_u16(&mut s, cipher_suites.iter().copied().filter(|v| !is_grease(*v)));
+    join_decimal_csv_u16(
+        &mut s,
+        cipher_suites.iter().copied().filter(|v| !is_grease(*v)),
+    );
     s.push(',');
     join_decimal_csv_u16(&mut s, ext_types.iter().copied().filter(|v| !is_grease(*v)));
     s.push(',');
-    join_decimal_csv_u16(&mut s, supported_groups.iter().copied().filter(|v| !is_grease(*v)));
+    join_decimal_csv_u16(
+        &mut s,
+        supported_groups.iter().copied().filter(|v| !is_grease(*v)),
+    );
     s.push(',');
     join_decimal_csv_u8(&mut s, ec_point_formats.iter().copied());
 
@@ -999,14 +1053,14 @@ mod tests {
         // fixture), groups 29-23, ec-point-formats 0.
         // Field separator is `,`; intra-field separator
         // is `-`.
-        assert_eq!(
-            ch.ja3_string,
-            "771,4865-4867,0-10-11-13-16-43,29-23,0",
-        );
+        assert_eq!(ch.ja3_string, "771,4865-4867,0-10-11-13-16-43,29-23,0",);
 
         // JA3 hash — 32 lowercase hex chars.
         assert_eq!(ch.ja3.len(), 32);
-        assert!(ch.ja3.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+        assert!(ch
+            .ja3
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
 
         // JA4 prefix — TCP TLS 1.3 with SNI domain, 2
         // non-GREASE ciphers (`02`), 6 extensions (`06`),
