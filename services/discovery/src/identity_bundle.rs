@@ -932,14 +932,20 @@ mod tests {
         // decoded.
         let proof = B64.encode([7u8; 145]);
         assert_eq!(
-            decode_optional_leaf_auth(Some(&proof)).unwrap().unwrap().len(),
+            decode_optional_leaf_auth(Some(&proof))
+                .unwrap()
+                .unwrap()
+                .len(),
             145
         );
 
         // Boundary: exactly the cap is accepted.
         let at_cap = B64.encode([0u8; MAX_LEAF_AUTH_LEN]);
         assert_eq!(
-            decode_optional_leaf_auth(Some(&at_cap)).unwrap().unwrap().len(),
+            decode_optional_leaf_auth(Some(&at_cap))
+                .unwrap()
+                .unwrap()
+                .len(),
             MAX_LEAF_AUTH_LEN
         );
 

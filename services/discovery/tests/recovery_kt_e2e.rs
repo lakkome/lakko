@@ -65,11 +65,25 @@ fn witness_url() -> String {
         .unwrap_or_else(|_| "http://127.0.0.1:8088".to_owned())
 }
 
+/// The witness cosign shared secret (base64), presented as `Bearer <b64>` on
+/// `POST /witness/cosign`. Must match the witness container's
+/// `LAKKO_WITNESS_COSIGN_SECRET` (the compose default is base64(16x 0x77)).
+fn witness_cosign_secret() -> String {
+    std::env::var("LAKKO_RECOVERY_E2E_WITNESS_COSIGN_SECRET")
+        .unwrap_or_else(|_| B64.encode([0x77_u8; 16]))
+}
+
+/// The FIXED operator seed the e2e transparency container runs with
+/// (`LAKKO_TRANSPARENCY_OPERATOR_SEED_HEX = 0xAB x 32`). The fork-refusal step
+/// reconstructs the operator SIGNING key from it to mint a valid operator
+/// signature over a forged root — so the witness rejects the root on the
+/// consistency check (a real fork), not on the operator-signature gate.
+const E2E_OPERATOR_SEED: [u8; 32] = [0xAB; 32];
+
 /// The shared session-token secret (base64). Must match the discovery
 /// container's `LAKKO_SESSION_TOKEN_SECRET`.
 fn session_secret() -> String {
-    std::env::var("LAKKO_RECOVERY_E2E_SESSION_SECRET")
-        .unwrap_or_else(|_| B64.encode([0x5e_u8; 32]))
+    std::env::var("LAKKO_RECOVERY_E2E_SESSION_SECRET").unwrap_or_else(|_| B64.encode([0x5e_u8; 32]))
 }
 
 /// The account-key domain — MUST stay byte-identical to discovery's
@@ -407,7 +421,9 @@ async fn recovery_kt_pipeline_publish_log_fetch_verify_rotate() {
     };
     let operator_vk =
         lakko_crypto::signing::VerifyingKey::from_bytes(&operator).expect("operator vk");
-    root_v1.verify(&operator_vk).expect("root v1 operator-signed");
+    root_v1
+        .verify(&operator_vk)
+        .expect("root v1 operator-signed");
     verify_inclusion(&entry_v1, &proof_v1, &root_v1).expect("genesis inclusion verifies");
     let served_leaf_auth = B64
         .decode(
@@ -554,4 +570,85 @@ async fn recovery_kt_pipeline_publish_log_fetch_verify_rotate() {
         served_root.log_size,
     )
     .expect("the witness co-signature verifies over the served root");
+
+    // Step 7 — ADR-0020 split-view defence, LIVE fork-refusal. A validly
+    // operator-signed but FORKED root (the SAME log_size as the witness's
+    // last-co-signed head, a DIFFERENT tree_root) is refused by the witness
+    // with 409. This proves against the REAL witness service that the honest
+    // witness will not co-sign two mutually-inconsistent roots — a malicious
+    // operator cannot fork even WITH a valid operator signature.
+    //
+    // The witness pins the operator key derived from the compose's fixed seed
+    // (E2E_OPERATOR_SEED); reconstruct the same SIGNING key here so the forged
+    // root carries a VALID operator signature (else it would be rejected at the
+    // operator-sig gate, masking the consistency-check assertion). Assert the
+    // derived verifying key matches the live operator key first, so a seed
+    // drift fails loud.
+    let operator_signing_key = SigningKey::from_seed(&E2E_OPERATOR_SEED);
+    assert_eq!(
+        operator_signing_key.verifying_key().to_bytes(),
+        operator_vk.to_bytes(),
+        "the test's E2E_OPERATOR_SEED must match the transparency container's \
+         LAKKO_TRANSPARENCY_OPERATOR_SEED_HEX (0xAB x 32)"
+    );
+
+    // The witness co-signed the current head (served_root) via co-sign-on-read
+    // in step 6, so its high-water is (served_root.tree_root, log_size). Forge
+    // a DIFFERENT root at the SAME size and operator-sign it.
+    let mut forged_tree_root = served_root.tree_root;
+    forged_tree_root[0] ^= 0xFF; // flip a byte -> a divergent same-size root
+    let forged_payload = SignedRoot::signing_payload(
+        &forged_tree_root,
+        served_root.log_size,
+        served_root.timestamp_unix,
+    );
+    let forged_sig = operator_signing_key.sign(&forged_payload);
+    let fork_status = client
+        .post(format!("{}/witness/cosign", witness_url()))
+        .bearer_auth(witness_cosign_secret())
+        .json(&json!({
+            "new_root": {
+                "tree_root_b64": B64.encode(forged_tree_root),
+                "log_size": served_root.log_size,
+                "timestamp_unix": served_root.timestamp_unix,
+                "signature_b64": B64.encode(forged_sig.to_bytes()),
+            },
+            // A same-size fork: no consistency proof can reconcile N == N with
+            // two different roots, so an empty proof is correct — the
+            // same-size-requires-equal-roots check rejects it regardless.
+            "consistency_proof_b64": [],
+        }))
+        .send()
+        .await
+        .expect("witness cosign (fork) request")
+        .status();
+    assert_eq!(
+        fork_status,
+        reqwest::StatusCode::CONFLICT,
+        "the witness MUST refuse a same-size forked root (split-view defence, 409)"
+    );
+
+    // And a root carrying an INVALID operator signature is refused at the
+    // operator-sig gate (400) — never reaching the consistency check.
+    let bad_sig_status = client
+        .post(format!("{}/witness/cosign", witness_url()))
+        .bearer_auth(witness_cosign_secret())
+        .json(&json!({
+            "new_root": {
+                "tree_root_b64": B64.encode(forged_tree_root),
+                "log_size": served_root.log_size + 1,
+                "timestamp_unix": served_root.timestamp_unix,
+                "signature_b64": B64.encode([0u8; 64]),
+            },
+            "consistency_proof_b64": [],
+        }))
+        .send()
+        .await
+        .expect("witness cosign (bad sig) request")
+        .status();
+    assert_eq!(
+        bad_sig_status,
+        reqwest::StatusCode::BAD_REQUEST,
+        "the witness MUST refuse a root with an invalid operator signature (400)"
+    );
 }

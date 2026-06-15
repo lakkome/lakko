@@ -33,6 +33,15 @@ The driver is `services/discovery/tests/recovery_kt_e2e.rs` (`#[ignore]`-gated).
    operator signature verifies too. This proves the transparency -> witness
    cosign round-trip live: the operator cannot serve a root the independent
    witness has not co-signed (the split-view defence).
+7. **Live fork-refusal (ADR-0020 split-view defence)** — the driver reconstructs
+   the operator SIGNING key from the container's fixed seed
+   (`LAKKO_TRANSPARENCY_OPERATOR_SEED_HEX`), mints a VALIDLY operator-signed but
+   FORKED root (the same `log_size` as the witness's last-co-signed head, a
+   different `tree_root`), and POSTs it directly to `POST /witness/cosign`. The
+   live witness REFUSES it with **409** (`CosignError::NotConsistent`) — proving
+   against the real service that the honest witness will not co-sign two
+   mutually-inconsistent roots even with a valid operator signature. A root with
+   an INVALID operator signature is refused with **400** at the operator-sig gate.
 
 ## Scope
 
