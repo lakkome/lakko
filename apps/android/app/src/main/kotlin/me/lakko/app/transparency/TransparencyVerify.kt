@@ -8,6 +8,7 @@ import uniffi.lakko_ffi_uniffi.transparencyAccountKey
 import uniffi.lakko_ffi_uniffi.verifyLeafGenesis
 import uniffi.lakko_ffi_uniffi.verifyLogInclusion
 import uniffi.lakko_ffi_uniffi.verifySupersessionChain
+import uniffi.lakko_ffi_uniffi.verifyWitnessCosig
 
 /**
  * Transparency-log inclusion verification (KT-log S3e) — the Android
@@ -247,6 +248,75 @@ public object NativeChainGate : ChainGate {
 }
 
 /**
+ * Witness-co-sig-gate seam (ADR-0020) — abstracts the native
+ * `verifyWitnessCosig` call so the witness-gate decision in
+ * [verifyIdentityInLog] / [verifyRotationChain] is unit-testable on the
+ * host JVM without `liblakko_ffi_uniffi.so` + a real Ed25519 co-sig.
+ *
+ * The production [NativeWitnessGate] calls the real UniFFI
+ * `verifyWitnessCosig`, which THROWS [FfiException] on an invalid co-sig
+ * (bad length / version / binding / signature) and RETURNS on a valid one.
+ * A test double can THROW (fail) or RETURN (pass) — exactly that contract.
+ */
+public fun interface WitnessGate {
+    /**
+     * Verify that [cosig] is a valid witness co-signature by [witnessKey]
+     * over the served `(treeRoot, logSize)`. MUST throw to signal an
+     * invalid co-sig; returning normally means it verified.
+     */
+    public fun verify(
+        cosig: ByteArray,
+        witnessKey: ByteArray,
+        treeRoot: ByteArray,
+        logSize: ULong,
+    )
+}
+
+/** Production [WitnessGate] — the real native `verifyWitnessCosig`. */
+public object NativeWitnessGate : WitnessGate {
+    override fun verify(
+        cosig: ByteArray,
+        witnessKey: ByteArray,
+        treeRoot: ByteArray,
+        logSize: ULong,
+    ) {
+        // Throws FfiException on any invalid co-sig (length / version /
+        // binding-to-served-root / Ed25519). The caller maps a throw to a
+        // fail-closed refusal of the root.
+        verifyWitnessCosig(cosig, witnessKey, treeRoot, logSize)
+    }
+}
+
+/**
+ * ADR-0020 — the witness co-signature gate over a fetched root. Returns
+ * `true` when the gate REFUSES the root (the caller then fails closed →
+ * MISMATCH), `false` when it passes (or the gate is off). Mirror of the
+ * web `witnessGateRefuses`:
+ *   * `witnessKey == null` → gate OFF, never refuses (transition posture).
+ *   * pinned key + a root with NO co-sig → REFUSE (fail-closed).
+ *   * pinned key + a co-sig that does not verify → REFUSE.
+ *   * pinned key + a valid co-sig → pass.
+ */
+private fun witnessGateRefuses(
+    root: SignedRoot,
+    witnessKey: ByteArray?,
+    witnessGate: WitnessGate,
+): Boolean {
+    // Gate off — operator-only transition posture.
+    if (witnessKey == null) return false
+    // A witness key is pinned: a root WITHOUT a co-sig is refused.
+    val cosig = root.witnessCosig ?: return true
+    return try {
+        witnessGate.verify(cosig, witnessKey, root.treeRoot, root.logSize)
+        false
+    } catch (_: FfiException) {
+        // The co-sig did not verify against the pinned witness key over
+        // the served root → fail closed.
+        true
+    }
+}
+
+/**
  * Derive the transparency-log account-key (`username_hash`) for a raw
  * 16-byte `account_id`, via the audited Rust core. Abstracted behind a
  * seam ([accountKeyOf] below) only so the host-JVM status-mapping test can
@@ -293,9 +363,11 @@ public suspend fun verifyIdentityInLog(
     client: TransparencyClient?,
     operatorKey: ByteArray?,
     lastSeenRoot: LastSeenRootStore,
+    witnessKey: ByteArray?,
     accountKeyDeriver: AccountKeyDeriver = NativeAccountKeyDeriver,
     inclusionGate: InclusionGate = NativeInclusionGate,
     genesisGate: GenesisGate = NativeGenesisGate,
+    witnessGate: WitnessGate = NativeWitnessGate,
 ): LogVerifyResult {
     // OFF — the integration is unconfigured. Skip entirely. No latest
     // entry was read, so `isReset` is null.
@@ -314,6 +386,16 @@ public suspend fun verifyIdentityInLog(
             // the strongest.) We short-circuit BEFORE the latest lookup,
             // so no `isReset`.
             return LogVerifyResult(LogVerifyStatus.ROLLBACK, isReset = null)
+        }
+
+        // 1b. ADR-0020 — the witness co-signature gate. When a witness key
+        //     is pinned, the root must carry a valid co-sig over its
+        //     (tree_root, log_size) or we fail closed: an operator that
+        //     forks cannot get both forks witness-co-signed (the split-view
+        //     defence). Surfaced as MISMATCH (the root is untrusted, so any
+        //     inclusion proof against it is meaningless). No latest read yet.
+        if (witnessGateRefuses(root, witnessKey, witnessGate)) {
+            return LogVerifyResult(LogVerifyStatus.MISMATCH, isReset = null)
         }
 
         // 2. Look up the account's latest logged entry.
@@ -477,8 +559,10 @@ public suspend fun verifyRotationChain(
     client: TransparencyClient?,
     operatorKey: ByteArray?,
     lastSeenRoot: LastSeenRootStore,
+    witnessKey: ByteArray?,
     accountKeyDeriver: AccountKeyDeriver = NativeAccountKeyDeriver,
     chainGate: ChainGate = NativeChainGate,
+    witnessGate: WitnessGate = NativeWitnessGate,
 ): RotationChainResult {
     // OFF — the integration is unconfigured. Skip entirely.
     if (client == null || operatorKey == null) {
@@ -491,6 +575,14 @@ public suspend fun verifyRotationChain(
         val root = client.fetchRoot()
         if (!lastSeenRoot.checkAndAdvance(root.logSize.toLong())) {
             return RotationChainResult(LogVerifyStatus.ROLLBACK, isReset = null, version = null)
+        }
+
+        // 1b. ADR-0020 — the witness co-signature gate (see
+        //     `witnessGateRefuses`). When a witness key is pinned, a root
+        //     lacking a valid co-sig is refused (the split-view defence,
+        //     fail-closed); surfaced as MISMATCH.
+        if (witnessGateRefuses(root, witnessKey, witnessGate)) {
+            return RotationChainResult(LogVerifyStatus.MISMATCH, isReset = null, version = null)
         }
 
         // 2. Look up the account's latest logged entry.

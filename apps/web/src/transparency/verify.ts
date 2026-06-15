@@ -44,7 +44,7 @@ import {
 import type { SignedRoot, InclusionProof } from "./client";
 import { accountKey } from "./account-key";
 import { checkAndAdvance, loadLastSeenLogSize } from "./last-seen-root";
-import { pinnedOperatorKey } from "./config";
+import { pinnedOperatorKey, pinnedWitnessKey } from "./config";
 import { base64Decode } from "../auth/account-id";
 import { loadWasm } from "../wasm";
 
@@ -94,6 +94,24 @@ export interface VerifyDeps {
   /** The pinned operator verifying key (32 bytes), or `null` for
    *  "off". When omitted, `pinnedOperatorKey()` is used. */
   operatorKey?: Uint8Array | null;
+  /** ADR-0020 — the pinned WITNESS verifying key (32 bytes), or `null`
+   *  for "no witness gate" (the operator-only transition posture). When
+   *  omitted, `pinnedWitnessKey()` is used. When non-null, a fetched root
+   *  MUST carry a valid witness co-signature over its `(tree_root,
+   *  log_size)` or the verify fails closed (surfaced as a `mismatch`). */
+  witnessKey?: Uint8Array | null;
+  /**
+   * Witness co-sig gate override (TEST SEAM ONLY) — ADR-0020. When
+   * supplied, replaces the real wasm `verifyWitnessCosig` call: it should
+   * THROW to simulate an invalid co-sig and RETURN to simulate a valid
+   * one — exactly the wasm contract. Production callers never pass this.
+   */
+  verifyWitness?: (args: {
+    cosig: Uint8Array;
+    witnessKey: Uint8Array;
+    treeRoot: Uint8Array;
+    logSize: bigint;
+  }) => void;
   /**
    * Inclusion-gate override (TEST SEAM ONLY). When supplied, this
    * replaces the real wasm `verifyLogInclusion` call: it should THROW
@@ -184,6 +202,17 @@ export async function verifyIdentityInLog(
       // who signed it, and the rollback verdict is the strongest.) We
       // short-circuit BEFORE the latest lookup, so no `isReset`.
       return { status: "rollback", isReset: null };
+    }
+
+    // 1b. ADR-0020 — the witness co-signature gate. When a witness key is
+    //     pinned, the root must carry a valid co-sig over its
+    //     `(tree_root, log_size)` or we fail closed: an operator that
+    //     forks cannot get both forks witness-co-signed (the split-view
+    //     defence). Surfaced as a `mismatch` (the root is untrusted, so
+    //     any inclusion proof against it is meaningless). No latest read
+    //     yet → no `isReset`.
+    if (await witnessGateRefuses(root, deps)) {
+      return { status: "mismatch", isReset: null };
     }
 
     // 2. Look up the account's latest logged entry.
@@ -381,6 +410,14 @@ export async function verifyRotationChain(
       return { status: "rollback", isReset: null, version: null };
     }
 
+    // 1b. ADR-0020 — the witness co-signature gate (see
+    //     `witnessGateRefuses`). When a witness key is pinned, a root
+    //     lacking a valid co-sig is refused (the split-view defence,
+    //     fail-closed); surfaced as a `mismatch`. No latest read yet.
+    if (await witnessGateRefuses(root, deps)) {
+      return { status: "mismatch", isReset: null, version: null };
+    }
+
     // 2. Look up the account's latest logged entry.
     const ak = await accountKey(accountId);
     const latest = await client.fetchLatest(ak);
@@ -528,4 +565,59 @@ function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
     if (a[i] !== b[i]) return false;
   }
   return true;
+}
+
+/**
+ * ADR-0020 — the witness co-signature gate over a fetched root.
+ *
+ * Returns `true` when the gate REFUSES the root (the caller then fails
+ * closed → `mismatch`), `false` when the root passes (or the gate is
+ * off). The witness gate is the split-view defence: an independent
+ * witness co-signs a root only after verifying it append-only-extends
+ * its last-co-signed root, so an operator that forks cannot get BOTH
+ * forks co-signed.
+ *
+ * Posture:
+ *   * no pinned witness key (unconfigured) → gate OFF, never refuses
+ *     (the operator-only transition fallback).
+ *   * pinned key + a root with NO co-sig → REFUSE (the operator is not
+ *     serving witnessed roots; we required one, so fail closed).
+ *   * pinned key + a co-sig that does not verify against the pinned key
+ *     over the served `(tree_root, log_size)` → REFUSE.
+ *   * pinned key + a valid co-sig → pass.
+ */
+async function witnessGateRefuses(
+  root: SignedRoot,
+  deps: VerifyDeps,
+): Promise<boolean> {
+  const witnessKey =
+    deps.witnessKey !== undefined ? deps.witnessKey : pinnedWitnessKey();
+  // Gate off — operator-only transition posture.
+  if (witnessKey === null) return false;
+  // A witness key is pinned: a root WITHOUT a co-sig is refused (we
+  // required the witness's attestation and the server served none).
+  if (root.witnessCosig === null) return true;
+  try {
+    if (deps.verifyWitness !== undefined) {
+      deps.verifyWitness({
+        cosig: root.witnessCosig,
+        witnessKey,
+        treeRoot: root.treeRoot,
+        logSize: root.logSize,
+      });
+    } else {
+      const wasm = await loadWasm();
+      wasm.verifyWitnessCosig(
+        root.witnessCosig,
+        witnessKey,
+        root.treeRoot,
+        root.logSize,
+      );
+    }
+    return false;
+  } catch {
+    // The co-sig did not verify against the pinned witness key over the
+    // served root → fail closed.
+    return true;
+  }
 }

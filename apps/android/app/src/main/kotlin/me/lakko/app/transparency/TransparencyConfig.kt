@@ -65,6 +65,29 @@ object TransparencyConfig {
         }
     }
 
+    /**
+     * The build-time pinned WITNESS verifying key (32 bytes), or `null`
+     * when the [BuildConfig] field is blank / malformed / wrong-length
+     * (ADR-0020 split-view defence).
+     *
+     * Standard-alphabet base64, read from the build config (never the
+     * network — like the operator key). When set, the client REQUIRES a
+     * valid witness co-signature over every fetched root (a root without
+     * one is refused, fail-closed); when `null`, the witness gate is OFF
+     * and the client keeps the operator-only posture (the transition
+     * fallback). Mirror of the web `pinnedWitnessKey()`.
+     */
+    fun pinnedWitnessKey(): ByteArray? {
+        val raw = BuildConfig.LAKKO_TRANSPARENCY_WITNESS_KEY.trim()
+        if (raw.isEmpty()) return null
+        return try {
+            val key = base64Decode(raw)
+            if (key.size == OPERATOR_KEY_LEN) key else null
+        } catch (_: IllegalArgumentException) {
+            null
+        }
+    }
+
     /** Ed25519 verifying-key length. */
     private const val OPERATOR_KEY_LEN: Int = 32
 }

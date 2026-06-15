@@ -5,8 +5,10 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 # ADR-0020: Witness co-signing for KT-log split-view resistance (G-30 #1)
 
-- **Status:** Accepted — Sprint 1 (Merkle consistency proof) in progress.
-  2026-06-13
+- **Status:** Accepted — Sprints 1-6 landed (Merkle consistency proof + witness
+  co-sig format + FFI + `services/witness` + transparency integration + the
+  3-client co-sig gate + the live recovery-e2e). Only the `lakko-security` gate
+  on the audited-core changes remains before merge. 2026-06-13
 - **Date:** 2026-06-13
 - **Context:** The KT log (`services/transparency` + `crates/lakko-transparency`
   + the 3-client verify) is operator-signed + append-only, and the G-30 #2 chain
@@ -84,9 +86,21 @@ proof per co-sign — light).
 4. **Operator integration** (`services/transparency`) — after signing a root,
    call the witness, persist + serve the co-sig on `GET /transparency/root`;
    publish the witness key.
-5. **Client co-sig gate** (web / iOS / Android + FFI) — pin the witness key
-   (build-time), require a valid co-sig over the same `(tree_root, log_size)` in
-   the root-fetch gate, fail-closed.
+5. **Client co-sig gate** (web / iOS / Android + FFI) — **landed.** Each client
+   pins the witness key build-time (`VITE_LAKKO_TRANSPARENCY_WITNESS_KEY` /
+   Info.plist `LakkoTransparencyWitnessKey` / `BuildConfig.LAKKO_TRANSPARENCY_WITNESS_KEY`),
+   decodes the optional `witness_cosig_b64` from `GET /transparency/root`, and
+   runs a `witnessGateRefuses` gate immediately after the no-rollback gate in BOTH
+   `verifyIdentityInLog` + `verifyRotationChain`: with a pinned witness key, a root
+   with NO co-sig OR a co-sig that fails `verifyWitnessCosig` (the FFI/wasm
+   primitive over the served `(tree_root, log_size)`) is refused → surfaced as a
+   `mismatch` (the root is untrusted, so any inclusion/chain proof against it is
+   meaningless). With NO pinned witness key the gate is OFF (the operator-only
+   transition posture). The gate is a test-seam (`verifyWitness` / `WitnessGate`)
+   mirroring the existing inclusion/chain seams. Verified: web `tsc` + 63 vitest
+   (9 new witness cases) + `vite build`; iOS `xcodebuild` BUILD + TEST BUILD
+   SUCCEEDED (8 new `XCTest` cases); Android `:app:compileDebugKotlin` + the
+   isolated `TransparencyVerifyTest` 43/0 (8 new cases).
 6. **Extend the recovery-e2e** — a co-located witness container; assert a served
    root carries a valid co-sig + a simulated fork is refused.
 

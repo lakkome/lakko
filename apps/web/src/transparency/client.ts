@@ -43,6 +43,10 @@ export interface SignedRoot {
   readonly timestampUnix: bigint;
   /** 64-byte Ed25519 signature over the canonical root pre-image. */
   readonly signature: Uint8Array;
+  /** ADR-0020: the witness co-signature wire blob over `(treeRoot, logSize)`,
+   *  or `null` when the server serves no witness co-signature. A client that
+   *  pins a witness key requires a valid one (the split-view defence). */
+  readonly witnessCosig: Uint8Array | null;
 }
 
 /** Decoded `GET /transparency/latest/:account_key` response. */
@@ -108,6 +112,8 @@ interface RootResWire {
   log_size: number;
   timestamp_unix: number;
   signature_b64: string;
+  /** ADR-0020: base64 witness co-signature, absent when unconfigured. */
+  witness_cosig_b64?: string;
 }
 
 /** Wire shape of `GET /transparency/latest/:key` (Rust `LatestRes`). */
@@ -152,6 +158,10 @@ export class TransparencyClient {
       logSize: BigInt(wire.log_size),
       timestampUnix: BigInt(wire.timestamp_unix),
       signature: base64Decode(wire.signature_b64),
+      witnessCosig:
+        wire.witness_cosig_b64 !== undefined && wire.witness_cosig_b64.length > 0
+          ? base64Decode(wire.witness_cosig_b64)
+          : null,
     };
   }
 

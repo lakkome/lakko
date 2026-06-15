@@ -609,6 +609,7 @@ public class ContactsClient(
                         client = c,
                         operatorKey = TransparencyConfig.pinnedOperatorKey(),
                         lastSeenRoot = lastSeenRoot,
+                        witnessKey = TransparencyConfig.pinnedWitnessKey(),
                     )
                     Triple(result.status, result.isReset, result.version)
                 } else {
@@ -618,6 +619,7 @@ public class ContactsClient(
                         client = c,
                         operatorKey = TransparencyConfig.pinnedOperatorKey(),
                         lastSeenRoot = lastSeenRoot,
+                        witnessKey = TransparencyConfig.pinnedWitnessKey(),
                     )
                     Triple(result.status, result.isReset, null)
                 }

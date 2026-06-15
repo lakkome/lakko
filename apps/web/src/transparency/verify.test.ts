@@ -92,14 +92,23 @@ const ACCOUNT_ID = new Uint8Array([
 const SERVED_PUBKEY = new Uint8Array(32).fill(0xab);
 const OTHER_PUBKEY = new Uint8Array(32).fill(0xcd);
 const OPERATOR_KEY = new Uint8Array(32).fill(0x07);
+const WITNESS_KEY = new Uint8Array(32).fill(0x5a);
+/** A witness co-sig blob fixture (105 bytes — the gate stub ignores the
+ *  contents; the real verify is covered by the Rust `witness.rs` tests). */
+const COSIG_FIXTURE = new Uint8Array(105).fill(0x6c);
 
-/** Build a `SignedRoot` fixture at the given log size. */
-function rootAt(logSize: bigint): SignedRoot {
+/** Build a `SignedRoot` fixture at the given log size, optionally with a
+ *  witness co-sig (ADR-0020; default `null` — no co-sig served). */
+function rootAt(
+  logSize: bigint,
+  witnessCosig: Uint8Array | null = null,
+): SignedRoot {
   return {
     treeRoot: new Uint8Array(32).fill(0x11),
     logSize,
     timestampUnix: 1_700_000_000n,
     signature: new Uint8Array(64).fill(0x22),
+    witnessCosig,
   };
 }
 
@@ -616,5 +625,159 @@ describe("verifyIdentityInLog — G-30 #2 genesis self-sig", () => {
     const r = await runFull(client, { verifyGenesis });
     expect(r.status).toBe("confirmed");
     expect(verifyGenesis).not.toHaveBeenCalled();
+  });
+});
+
+describe("witness co-sig gate (ADR-0020)", () => {
+  const ROTATION_CTX = {
+    supersessionProofB64: btoa("fake-supersession-proof-bytes"),
+    pinnedOldPubkey: new Uint8Array(32).fill(0x99),
+    pinnedLogVersion: 1,
+  };
+
+  describe("verifyIdentityInLog", () => {
+    it("no pinned witness key → gate OFF, a root with no co-sig still confirms", async () => {
+      // The transition posture: with no witness key pinned, the operator-only
+      // path is unchanged — a root without a co-sig is fine.
+      const client = mockClient({
+        fetchRoot: vi.fn(async () => rootAt(10n, null)),
+      });
+      const r = await runFull(client, { witnessKey: null });
+      expect(r.status).toBe("confirmed");
+    });
+
+    it("pinned witness key + valid co-sig → proceeds (confirmed)", async () => {
+      // Capture the gate args directly (the gate is handed the served
+      // root's (tree_root, log_size) + co-sig + the pinned witness key).
+      let captured: {
+        cosig: Uint8Array;
+        witnessKey: Uint8Array;
+        treeRoot: Uint8Array;
+        logSize: bigint;
+      } | null = null;
+      let calls = 0;
+      const client = mockClient({
+        fetchRoot: vi.fn(async () => rootAt(10n, COSIG_FIXTURE)),
+      });
+      const r = await runFull(client, {
+        witnessKey: WITNESS_KEY,
+        verifyWitness: (args) => {
+          calls += 1;
+          captured = args;
+        },
+      });
+      expect(r.status).toBe("confirmed");
+      expect(calls).toBe(1);
+      expect(captured).not.toBeNull();
+      expect(captured!.cosig).toBe(COSIG_FIXTURE);
+      expect(captured!.witnessKey).toBe(WITNESS_KEY);
+      expect(captured!.logSize).toBe(10n);
+    });
+
+    it("pinned witness key + NO co-sig on the root → mismatch (fail-closed)", async () => {
+      const client = mockClient({
+        fetchRoot: vi.fn(async () => rootAt(10n, null)),
+        // The latest lookup must never run — the witness gate short-circuits.
+        fetchLatest: vi.fn(async () => latestWith(SERVED_PUBKEY)),
+      });
+      const fetchLatest = client.fetchLatest as ReturnType<typeof vi.fn>;
+      const r = await runFull(client, { witnessKey: WITNESS_KEY });
+      expect(r.status).toBe("mismatch");
+      expect(r.isReset).toBeNull();
+      expect(fetchLatest).not.toHaveBeenCalled();
+    });
+
+    it("pinned witness key + co-sig that FAILS to verify → mismatch (fail-closed)", async () => {
+      const client = mockClient({
+        fetchRoot: vi.fn(async () => rootAt(10n, COSIG_FIXTURE)),
+      });
+      const r = await runFull(client, {
+        witnessKey: WITNESS_KEY,
+        verifyWitness: () => {
+          throw new Error("witness co-sig does not verify");
+        },
+      });
+      expect(r.status).toBe("mismatch");
+      expect(r.isReset).toBeNull();
+    });
+
+    it("witness gate runs AFTER the rollback gate (a shrink is still rollback)", async () => {
+      // A shrunk root is rollback regardless of the witness co-sig.
+      checkAndAdvance(20n);
+      const verifyWitness = vi.fn(() => {
+        /* would pass, but must not even be consulted */
+      });
+      const client = mockClient({
+        fetchRoot: vi.fn(async () => rootAt(10n, COSIG_FIXTURE)),
+      });
+      const r = await runFull(client, { witnessKey: WITNESS_KEY, verifyWitness });
+      expect(r.status).toBe("rollback");
+      expect(verifyWitness).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("verifyRotationChain", () => {
+    it("pinned witness key + valid co-sig → proceeds (confirmed)", async () => {
+      const client = mockClient({
+        fetchRoot: vi.fn(async () => rootAt(10n, COSIG_FIXTURE)),
+      });
+      const r = await verifyRotationChain(ACCOUNT_ID, SERVED_PUBKEY, ROTATION_CTX, {
+        client,
+        operatorKey: OPERATOR_KEY,
+        witnessKey: WITNESS_KEY,
+        verifyWitness: () => {
+          /* valid */
+        },
+        verifyChain: () => SERVED_PUBKEY,
+      });
+      expect(r.status).toBe("confirmed");
+    });
+
+    it("pinned witness key + NO co-sig → mismatch (fail-closed)", async () => {
+      const fetchLatest = vi.fn(async () => latestWith(SERVED_PUBKEY));
+      const client = mockClient({
+        fetchRoot: vi.fn(async () => rootAt(10n, null)),
+        fetchLatest,
+      });
+      const r = await verifyRotationChain(ACCOUNT_ID, SERVED_PUBKEY, ROTATION_CTX, {
+        client,
+        operatorKey: OPERATOR_KEY,
+        witnessKey: WITNESS_KEY,
+        verifyChain: () => SERVED_PUBKEY,
+      });
+      expect(r.status).toBe("mismatch");
+      expect(r.version).toBeNull();
+      expect(fetchLatest).not.toHaveBeenCalled();
+    });
+
+    it("pinned witness key + co-sig that FAILS → mismatch (fail-closed)", async () => {
+      const client = mockClient({
+        fetchRoot: vi.fn(async () => rootAt(10n, COSIG_FIXTURE)),
+      });
+      const r = await verifyRotationChain(ACCOUNT_ID, SERVED_PUBKEY, ROTATION_CTX, {
+        client,
+        operatorKey: OPERATOR_KEY,
+        witnessKey: WITNESS_KEY,
+        verifyWitness: () => {
+          throw new Error("witness co-sig does not verify");
+        },
+        verifyChain: () => SERVED_PUBKEY,
+      });
+      expect(r.status).toBe("mismatch");
+      expect(r.version).toBeNull();
+    });
+
+    it("no pinned witness key → gate OFF, unchanged rotation behaviour", async () => {
+      const client = mockClient({
+        fetchRoot: vi.fn(async () => rootAt(10n, null)),
+      });
+      const r = await verifyRotationChain(ACCOUNT_ID, SERVED_PUBKEY, ROTATION_CTX, {
+        client,
+        operatorKey: OPERATOR_KEY,
+        witnessKey: null,
+        verifyChain: () => SERVED_PUBKEY,
+      });
+      expect(r.status).toBe("confirmed");
+    });
   });
 });

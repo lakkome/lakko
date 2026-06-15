@@ -88,8 +88,14 @@ targets:
         #     of the operator's 32-byte Ed25519 verifying key, pinned
         #     OUT-OF-BAND at build time. The client never trusts the
         #     `/transparency/operator-key` endpoint for verification.
+        #   * LakkoTransparencyWitnessKey — base64 of the witness's
+        #     32-byte Ed25519 verifying key (ADR-0020 split-view defence),
+        #     pinned out-of-band like the operator key. When set, a root
+        #     without a valid witness co-sig is refused (fail-closed);
+        #     blank → the witness gate is OFF (operator-only transition).
         LakkoTransparencyUrl: ""
         LakkoTransparencyOperatorKey: ""
+        LakkoTransparencyWitnessKey: ""
         # Phase 2a3b3-ui — camera access for the add-device QR
         # scanner + G3-1 video calls. Apple's permission dialog
         # surfaces this string verbatim; keep the wording

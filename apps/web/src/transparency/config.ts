@@ -61,3 +61,25 @@ export function pinnedOperatorKey(): Uint8Array | null {
     return null;
   }
 }
+
+/**
+ * The build-time pinned WITNESS verifying key (32 bytes), or `null` when the
+ * env var is unset / malformed (ADR-0020). Standard-alphabet base64, read from
+ * the build env (never the network — like the operator key).
+ *
+ * When set, the client REQUIRES a valid witness co-signature over every fetched
+ * root (the split-view defence) — a root without one is refused. When unset,
+ * the witness gate is OFF and the client keeps the operator-only posture (the
+ * transition fallback), independent of whether the operator key is pinned.
+ */
+export function pinnedWitnessKey(): Uint8Array | null {
+  const env = import.meta.env as Record<string, string | undefined>;
+  const raw = env["VITE_LAKKO_TRANSPARENCY_WITNESS_KEY"];
+  if (typeof raw !== "string" || raw.trim().length === 0) return null;
+  try {
+    const key = base64Decode(raw.trim());
+    return key.length === 32 ? key : null;
+  } catch {
+    return null;
+  }
+}

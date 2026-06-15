@@ -72,4 +72,29 @@ public enum TransparencyConfig {
         }
         return key
     }
+
+    /// The build-time pinned WITNESS verifying key (32 bytes), or `nil`
+    /// when the `Info.plist` key (`LakkoTransparencyWitnessKey`) is unset
+    /// / blank / malformed / wrong-length (ADR-0020 split-view defence).
+    ///
+    /// Standard-alphabet base64, read from the build config (never the
+    /// network — like the operator key). When set, the client REQUIRES a
+    /// valid witness co-signature over every fetched root (a root without
+    /// one is refused, fail-closed); when `nil`, the witness gate is OFF
+    /// and the client keeps the operator-only posture (the transition
+    /// fallback). Mirror of the web `pinnedWitnessKey()`.
+    public static var pinnedWitnessKey: Data? {
+        guard
+            let raw = Bundle.main.object(
+                forInfoDictionaryKey: "LakkoTransparencyWitnessKey"
+            ) as? String
+        else {
+            return nil
+        }
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, let key = base64Decode(trimmed), key.count == 32 else {
+            return nil
+        }
+        return key
+    }
 }

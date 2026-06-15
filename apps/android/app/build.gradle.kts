@@ -143,6 +143,17 @@ android {
             "LAKKO_TRANSPARENCY_OPERATOR_KEY",
             "\"${project.findProperty("lakko.transparency.operator.key") as String? ?: ""}\"",
         )
+        // `LAKKO_TRANSPARENCY_WITNESS_KEY` (ADR-0020 split-view defence) —
+        // base64 (standard alphabet) of the witness's 32-byte Ed25519
+        // verifying key, pinned out-of-band like the operator key. When
+        // set, the client REQUIRES a valid witness co-signature over every
+        // fetched root (fail-closed); blank → the witness gate is OFF and
+        // the client keeps the operator-only posture (transition fallback).
+        buildConfigField(
+            "String",
+            "LAKKO_TRANSPARENCY_WITNESS_KEY",
+            "\"${project.findProperty("lakko.transparency.witness.key") as String? ?: ""}\"",
+        )
 
         // G3-4-mobile — wire androidx.test runner for the
         // `app/src/androidTest/` instrumented test source set.

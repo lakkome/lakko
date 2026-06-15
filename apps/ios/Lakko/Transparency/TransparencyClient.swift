@@ -79,11 +79,19 @@ public final class TransparencyClient: TransparencyFetching {
                 detail: "tree_root_b64 / signature_b64 not valid base64"
             )
         }
+        // ADR-0020: the witness co-signature is optional on the wire
+        // (absent when the operator runs without a witness). A present-
+        // but-undecodable value is treated as absent — the witness gate
+        // then fails closed when a witness key is pinned.
+        let witnessCosig: Data? = wire.witnessCosigB64.flatMap { b64 in
+            b64.isEmpty ? nil : base64Decode(b64)
+        }
         return SignedRoot(
             treeRoot: treeRoot,
             logSize: wire.logSize,
             timestampUnix: wire.timestampUnix,
-            signature: signature
+            signature: signature,
+            witnessCosig: witnessCosig
         )
     }
 
@@ -232,12 +240,24 @@ public struct SignedRoot: Equatable {
     public let timestampUnix: UInt64
     /// 64-byte Ed25519 signature over the canonical root pre-image.
     public let signature: Data
+    /// ADR-0020: the witness co-signature wire blob over `(treeRoot,
+    /// logSize)`, or `nil` when the server serves no witness
+    /// co-signature. A client that pins a witness key requires a valid
+    /// one (the split-view defence).
+    public let witnessCosig: Data?
 
-    public init(treeRoot: Data, logSize: UInt64, timestampUnix: UInt64, signature: Data) {
+    public init(
+        treeRoot: Data,
+        logSize: UInt64,
+        timestampUnix: UInt64,
+        signature: Data,
+        witnessCosig: Data? = nil
+    ) {
         self.treeRoot = treeRoot
         self.logSize = logSize
         self.timestampUnix = timestampUnix
         self.signature = signature
+        self.witnessCosig = witnessCosig
     }
 }
 
@@ -303,12 +323,15 @@ private struct RootResWire: Decodable {
     let logSize: UInt64
     let timestampUnix: UInt64
     let signatureB64: String
+    /// ADR-0020: base64 witness co-signature, absent when unconfigured.
+    let witnessCosigB64: String?
 
     enum CodingKeys: String, CodingKey {
         case treeRootB64 = "tree_root_b64"
         case logSize = "log_size"
         case timestampUnix = "timestamp_unix"
         case signatureB64 = "signature_b64"
+        case witnessCosigB64 = "witness_cosig_b64"
     }
 }
 

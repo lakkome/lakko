@@ -158,8 +158,20 @@ public struct TransparencyVerify {
         public let pinnedLogVersion: UInt64
     }
 
+    /// The pinned-witness-key + co-sig + served-root bundle handed to the
+    /// witness-gate seam (ADR-0020). Lets a test drive the gate's
+    /// pass/fail branches without a real Ed25519 co-sig (the witness
+    /// signer is the `services/witness` service, not FFI-exposed).
+    public struct WitnessArgs {
+        public let cosig: Data
+        public let witnessKey: Data
+        public let treeRoot: Data
+        public let logSize: UInt64
+    }
+
     private let client: TransparencyFetching?
     private let operatorKey: Data?
+    private let witnessKey: Data?
     private let lastSeenRoot: LastSeenRoot
     /// Inclusion-gate override (TEST SEAM ONLY). When supplied, this
     /// replaces the real `verifyLogInclusion` FFI call: it THROWS to
@@ -180,6 +192,13 @@ public struct TransparencyVerify {
     /// FFI-exposed), so tests stub this seam to cover the `confirmed` /
     /// chain-fail `mismatch` branches.
     private let verifyChain: ((ChainArgs) throws -> Data)?
+    /// Witness-co-sig-gate override (TEST SEAM ONLY) — ADR-0020. When
+    /// supplied, this REPLACES the real `verifyWitnessCosig` FFI call: it
+    /// THROWS to simulate an invalid co-sig and RETURNS to simulate a
+    /// valid one — exactly the FFI contract. Production callers pass
+    /// `nil`; minting a real co-sig needs the `services/witness` signer
+    /// (not FFI-exposed), so tests stub this seam.
+    private let verifyWitness: ((WitnessArgs) throws -> Void)?
 
     /// Build a verifier from the build-time config (production path) or
     /// from injected dependencies (tests).
@@ -191,23 +210,72 @@ public struct TransparencyVerify {
     ///   - operatorKey: the pinned operator verifying key (32 bytes),
     ///     or `nil` for "off". Defaults to
     ///     ``TransparencyConfig/pinnedOperatorKey``.
+    ///   - witnessKey: the pinned WITNESS verifying key (32 bytes), or
+    ///     `nil` for "no witness gate" (the operator-only transition
+    ///     posture). Defaults to ``TransparencyConfig/pinnedWitnessKey``.
     ///   - lastSeenRoot: the no-rollback high-water store. Defaults to
     ///     a `.standard`-backed ``LastSeenRoot``.
     ///   - verifyInclusion: the test-only inclusion seam (see above).
     ///   - verifyChain: the test-only rotation-chain seam (G-30 #2; see
     ///     above).
+    ///   - verifyWitness: the test-only witness-co-sig seam (ADR-0020;
+    ///     see above).
     public init(
         client: TransparencyFetching? = TransparencyClient.forOptionalConfig(),
         operatorKey: Data? = TransparencyConfig.pinnedOperatorKey,
+        witnessKey: Data? = TransparencyConfig.pinnedWitnessKey,
         lastSeenRoot: LastSeenRoot = LastSeenRoot(),
         verifyInclusion: ((InclusionArgs) throws -> Void)? = nil,
-        verifyChain: ((ChainArgs) throws -> Data)? = nil
+        verifyChain: ((ChainArgs) throws -> Data)? = nil,
+        verifyWitness: ((WitnessArgs) throws -> Void)? = nil
     ) {
         self.client = client
         self.operatorKey = operatorKey
+        self.witnessKey = witnessKey
         self.lastSeenRoot = lastSeenRoot
         self.verifyInclusion = verifyInclusion
         self.verifyChain = verifyChain
+        self.verifyWitness = verifyWitness
+    }
+
+    /// ADR-0020 — the witness co-signature gate over a fetched root.
+    /// Returns `true` when the gate REFUSES the root (the caller then
+    /// fails closed → `.mismatch`), `false` when it passes (or the gate
+    /// is off). See the web `witnessGateRefuses` for the full posture:
+    ///   * no pinned witness key → gate OFF, never refuses (transition).
+    ///   * pinned key + a root with NO co-sig → REFUSE (fail-closed).
+    ///   * pinned key + a co-sig that does not verify → REFUSE.
+    ///   * pinned key + a valid co-sig → pass.
+    private func witnessGateRefuses(_ root: SignedRoot) -> Bool {
+        // Gate off — operator-only transition posture.
+        guard let witnessKey = witnessKey else { return false }
+        // A witness key is pinned: a root WITHOUT a co-sig is refused.
+        guard let cosig = root.witnessCosig else { return true }
+        do {
+            let args = WitnessArgs(
+                cosig: cosig,
+                witnessKey: witnessKey,
+                treeRoot: root.treeRoot,
+                logSize: root.logSize
+            )
+            if let seam = verifyWitness {
+                try seam(args)
+            } else {
+                // Production — the audited Rust core verifies the co-sig
+                // against the pinned witness key over the served root.
+                try verifyWitnessCosig(
+                    cosig: cosig,
+                    witnessKey: witnessKey,
+                    expectedTreeRoot: root.treeRoot,
+                    expectedLogSize: root.logSize
+                )
+            }
+            return false
+        } catch {
+            // The co-sig did not verify against the pinned witness key
+            // over the served root → fail closed.
+            return true
+        }
     }
 
     /// Verify that `publishedSignaturePubkey` (the AccountIdentity
@@ -242,6 +310,17 @@ public struct TransparencyVerify {
             let root = try await client.fetchRoot()
             if lastSeenRoot.checkAndAdvance(root.logSize) == .rollback {
                 return LogVerifyResult(status: .rollback, isReset: nil)
+            }
+
+            // 1b. ADR-0020 — the witness co-signature gate. When a
+            //     witness key is pinned, the root must carry a valid
+            //     co-sig over its (tree_root, log_size) or we fail
+            //     closed: an operator that forks cannot get both forks
+            //     witness-co-signed (the split-view defence). Surfaced as
+            //     `.mismatch` (the root is untrusted, so any inclusion
+            //     proof against it is meaningless). No latest read yet.
+            if witnessGateRefuses(root) {
+                return LogVerifyResult(status: .mismatch, isReset: nil)
             }
 
             // 2. Look up the account's latest logged entry. The
@@ -409,6 +488,14 @@ public struct TransparencyVerify {
             let root = try await client.fetchRoot()
             if lastSeenRoot.checkAndAdvance(root.logSize) == .rollback {
                 return RotationChainResult(status: .rollback, isReset: nil, version: nil)
+            }
+
+            // 1b. ADR-0020 — the witness co-signature gate (see
+            //     `witnessGateRefuses`). When a witness key is pinned, a
+            //     root lacking a valid co-sig is refused (the split-view
+            //     defence, fail-closed); surfaced as `.mismatch`.
+            if witnessGateRefuses(root) {
+                return RotationChainResult(status: .mismatch, isReset: nil, version: nil)
             }
 
             // 2. Look up the account's latest logged entry. The

@@ -82,16 +82,32 @@ class TransparencyVerifyTest {
     private val supersessionProof = ByteArray(145) { 0x07 }
     private val pinnedOldPubkey = ByteArray(32) { 0x42 }
 
+    /** ADR-0020 — a pinned witness key + a co-sig blob fixture. The bytes
+     *  never reach a real verifier (the [WitnessGate] seam is stubbed). */
+    private val witnessKey = ByteArray(32) { 0x5A }
+    private val cosigB64 = base64Encode(ByteArray(105) { 0x6C })
+
+    /** Witness gate that always succeeds (returns normally). */
+    private val witnessPass = WitnessGate { _, _, _, _ -> }
+
+    /** Witness gate that always fails (throws as the native verifier would
+     *  on an invalid co-sig). */
+    private val witnessFail = WitnessGate { _, _, _, _ ->
+        throw FfiException.Identity("simulated witness co-sig failure")
+    }
+
     // -----------------------------------------------------------------
     // Mock-engine JSON response builders (match the Rust handler shapes)
     // -----------------------------------------------------------------
 
     private val jsonHeaders = headersOf("Content-Type", "application/json")
 
-    private fun rootJson(logSize: Long): String =
+    private fun rootJson(logSize: Long, witnessCosigB64: String? = null): String =
         """{"tree_root_b64":"${base64Encode(ByteArray(32))}",""" +
             """"log_size":$logSize,"timestamp_unix":1700000000,""" +
-            """"signature_b64":"${base64Encode(ByteArray(64))}"}"""
+            """"signature_b64":"${base64Encode(ByteArray(64))}"""" +
+            (witnessCosigB64?.let { ""","witness_cosig_b64":"$it"""" } ?: "") +
+            "}"
 
     private fun latestJson(
         pubkey: ByteArray,
@@ -122,6 +138,7 @@ class TransparencyVerifyTest {
         rootServerError: Boolean = false,
         latestIsReset: Boolean = false,
         latestLeafAuthB64: String? = null,
+        rootWitnessCosigB64: String? = null,
     ): TransparencyClient {
         val engine = MockEngine { request ->
             val path = request.url.encodedPath
@@ -130,7 +147,11 @@ class TransparencyVerifyTest {
                     if (rootServerError) {
                         respond("boom", HttpStatusCode.InternalServerError, jsonHeaders)
                     } else {
-                        respond(rootJson(rootLogSize), HttpStatusCode.OK, jsonHeaders)
+                        respond(
+                            rootJson(rootLogSize, witnessCosigB64 = rootWitnessCosigB64),
+                            HttpStatusCode.OK,
+                            jsonHeaders,
+                        )
                     }
                 path.contains("/transparency/latest/") ->
                     if (latestStatus == HttpStatusCode.OK) {
@@ -161,15 +182,19 @@ class TransparencyVerifyTest {
         pubkey: ByteArray = servedPubkey,
         gate: InclusionGate = gatePass,
         genesisGate: GenesisGate = genesisPass,
+        witnessKey: ByteArray? = null,
+        witnessGate: WitnessGate = witnessPass,
     ): LogVerifyResult = verifyIdentityInLog(
         accountId = accountId,
         publishedSignaturePubkey = pubkey,
         client = client,
         operatorKey = operatorKey,
         lastSeenRoot = lastSeen,
+        witnessKey = witnessKey,
         accountKeyDeriver = deriver,
         inclusionGate = gate,
         genesisGate = genesisGate,
+        witnessGate = witnessGate,
     )
 
     /** Status-only convenience wrapper for the existing verdict tests. */
@@ -477,6 +502,8 @@ class TransparencyVerifyTest {
         pubkey: ByteArray = servedPubkey,
         gate: ChainGate = chainPass,
         pinnedLogVersion: Long = 0L,
+        witnessKey: ByteArray? = null,
+        witnessGate: WitnessGate = witnessPass,
     ): RotationChainResult = verifyRotationChain(
         accountId = accountId,
         servedPubkey = pubkey,
@@ -486,8 +513,10 @@ class TransparencyVerifyTest {
         client = client,
         operatorKey = operatorKey,
         lastSeenRoot = lastSeen,
+        witnessKey = witnessKey,
         accountKeyDeriver = deriver,
         chainGate = gate,
+        witnessGate = witnessGate,
     )
 
     @Test
@@ -586,5 +615,104 @@ class TransparencyVerifyTest {
         val lastSeen = InMemoryLastSeenRoot()
         rotation(client = mockClient(rootLogSize = 6), operatorKey = operatorKey, lastSeen = lastSeen)
         assertEquals(6L, lastSeen.loadLastSeenLogSize())
+    }
+
+    // -----------------------------------------------------------------
+    // ADR-0020 — witness co-sig gate
+    // -----------------------------------------------------------------
+
+    @Test
+    fun `witness gate off confirms a root without a co-sig`() = runTest {
+        // No pinned witness key → operator-only transition posture.
+        val result = verifyResult(
+            client = mockClient(rootWitnessCosigB64 = null),
+            operatorKey = operatorKey,
+            witnessKey = null,
+        )
+        assertEquals(LogVerifyStatus.CONFIRMED, result.status)
+    }
+
+    @Test
+    fun `witness gate proceeds on a valid co-sig`() = runTest {
+        val result = verifyResult(
+            client = mockClient(rootWitnessCosigB64 = cosigB64),
+            operatorKey = operatorKey,
+            witnessKey = witnessKey,
+            witnessGate = witnessPass,
+        )
+        assertEquals(LogVerifyStatus.CONFIRMED, result.status)
+    }
+
+    @Test
+    fun `witness gate fails closed when a pinned key but no co-sig`() = runTest {
+        val result = verifyResult(
+            client = mockClient(rootWitnessCosigB64 = null),
+            operatorKey = operatorKey,
+            witnessKey = witnessKey,
+        )
+        assertEquals(LogVerifyStatus.MISMATCH, result.status)
+        assertNull(result.isReset)
+    }
+
+    @Test
+    fun `witness gate fails closed when the co-sig does not verify`() = runTest {
+        val result = verifyResult(
+            client = mockClient(rootWitnessCosigB64 = cosigB64),
+            operatorKey = operatorKey,
+            witnessKey = witnessKey,
+            witnessGate = witnessFail,
+        )
+        assertEquals(LogVerifyStatus.MISMATCH, result.status)
+        assertNull(result.isReset)
+    }
+
+    @Test
+    fun `witness gate runs after the rollback gate`() = runTest {
+        // A shrunk root is rollback regardless of the witness co-sig.
+        val lastSeen = InMemoryLastSeenRoot()
+        lastSeen.checkAndAdvance(100L)
+        val result = verifyResult(
+            client = mockClient(rootLogSize = 6, rootWitnessCosigB64 = cosigB64),
+            operatorKey = operatorKey,
+            lastSeen = lastSeen,
+            witnessKey = witnessKey,
+            witnessGate = witnessFail, // would refuse, but must not be reached
+        )
+        assertEquals(LogVerifyStatus.ROLLBACK, result.status)
+    }
+
+    @Test
+    fun `rotation witness gate proceeds on a valid co-sig`() = runTest {
+        val r = rotation(
+            client = mockClient(rootWitnessCosigB64 = cosigB64),
+            operatorKey = operatorKey,
+            witnessKey = witnessKey,
+            witnessGate = witnessPass,
+        )
+        assertEquals(LogVerifyStatus.CONFIRMED, r.status)
+        assertEquals(2L, r.version)
+    }
+
+    @Test
+    fun `rotation witness gate fails closed without a co-sig`() = runTest {
+        val r = rotation(
+            client = mockClient(rootWitnessCosigB64 = null),
+            operatorKey = operatorKey,
+            witnessKey = witnessKey,
+        )
+        assertEquals(LogVerifyStatus.MISMATCH, r.status)
+        assertNull(r.version)
+    }
+
+    @Test
+    fun `rotation witness gate fails closed when the co-sig does not verify`() = runTest {
+        val r = rotation(
+            client = mockClient(rootWitnessCosigB64 = cosigB64),
+            operatorKey = operatorKey,
+            witnessKey = witnessKey,
+            witnessGate = witnessFail,
+        )
+        assertEquals(LogVerifyStatus.MISMATCH, r.status)
+        assertNull(r.version)
     }
 }

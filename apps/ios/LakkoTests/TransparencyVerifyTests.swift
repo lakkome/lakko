@@ -40,13 +40,19 @@ final class TransparencyVerifyTests: XCTestCase {
     private let servedPubkey = Data(repeating: 0xAB, count: 32)
     private let otherPubkey = Data(repeating: 0xCD, count: 32)
     private let operatorKey = Data(repeating: 0x07, count: 32)
+    private let witnessKey = Data(repeating: 0x5A, count: 32)
+    /// A witness co-sig blob fixture (105 bytes — the gate seam ignores
+    /// the contents; the real verify is covered by the Rust `witness.rs`
+    /// tests).
+    private let cosigFixture = Data(repeating: 0x6C, count: 105)
 
-    private func rootAt(_ logSize: UInt64) -> SignedRoot {
+    private func rootAt(_ logSize: UInt64, witnessCosig: Data? = nil) -> SignedRoot {
         SignedRoot(
             treeRoot: Data(repeating: 0x11, count: 32),
             logSize: logSize,
             timestampUnix: 1_700_000_000,
-            signature: Data(repeating: 0x22, count: 64)
+            signature: Data(repeating: 0x22, count: 64),
+            witnessCosig: witnessCosig
         )
     }
 
@@ -1162,6 +1168,148 @@ final class TransparencyVerifyTests: XCTestCase {
             accountId: accountId, publishedSignaturePubkey: served
         )
         XCTAssertEqual(result.status, .confirmed)
+    }
+
+    // MARK: - ADR-0020: witness co-sig gate
+
+    func testWitnessGateOffConfirmsRootWithoutCosig() async {
+        // No pinned witness key → operator-only transition posture: a
+        // root with no co-sig still confirms.
+        let v = TransparencyVerify(
+            client: FakeFetcher(
+                root: rootAt(10, witnessCosig: nil),
+                latest: latestWith(servedPubkey),
+                proof: proofFixture
+            ),
+            operatorKey: operatorKey,
+            witnessKey: nil,
+            lastSeenRoot: LastSeenRoot(defaults: freshDefaults()),
+            verifyInclusion: { _ in }
+        )
+        let status = await runStatus(v)
+        XCTAssertEqual(status, .confirmed)
+    }
+
+    func testWitnessGateValidCosigProceeds() async {
+        var captured: TransparencyVerify.WitnessArgs?
+        let v = TransparencyVerify(
+            client: FakeFetcher(
+                root: rootAt(10, witnessCosig: cosigFixture),
+                latest: latestWith(servedPubkey),
+                proof: proofFixture
+            ),
+            operatorKey: operatorKey,
+            witnessKey: witnessKey,
+            lastSeenRoot: LastSeenRoot(defaults: freshDefaults()),
+            verifyInclusion: { _ in },
+            verifyWitness: { args in captured = args }
+        )
+        let status = await runStatus(v)
+        XCTAssertEqual(status, .confirmed)
+        XCTAssertEqual(captured?.cosig, cosigFixture)
+        XCTAssertEqual(captured?.witnessKey, witnessKey)
+        XCTAssertEqual(captured?.logSize, 10)
+    }
+
+    func testWitnessGateNoCosigFailsClosed() async {
+        // Pinned witness key + a root with NO co-sig → mismatch, and the
+        // latest lookup must not run (the gate short-circuits).
+        let fake = FakeFetcher(
+            root: rootAt(10, witnessCosig: nil),
+            latest: latestWith(servedPubkey),
+            proof: proofFixture
+        )
+        let v = TransparencyVerify(
+            client: fake,
+            operatorKey: operatorKey,
+            witnessKey: witnessKey,
+            lastSeenRoot: LastSeenRoot(defaults: freshDefaults()),
+            verifyInclusion: { _ in }
+        )
+        let result = await run(v)
+        XCTAssertEqual(result.status, .mismatch)
+        XCTAssertNil(result.isReset)
+        XCTAssertEqual(fake.fetchLatestCalls, 0)
+    }
+
+    func testWitnessGateInvalidCosigFailsClosed() async {
+        let v = TransparencyVerify(
+            client: FakeFetcher(
+                root: rootAt(10, witnessCosig: cosigFixture),
+                latest: latestWith(servedPubkey),
+                proof: proofFixture
+            ),
+            operatorKey: operatorKey,
+            witnessKey: witnessKey,
+            lastSeenRoot: LastSeenRoot(defaults: freshDefaults()),
+            verifyInclusion: { _ in },
+            verifyWitness: { _ in throw FakeError.inclusionFailed }
+        )
+        let result = await run(v)
+        XCTAssertEqual(result.status, .mismatch)
+        XCTAssertNil(result.isReset)
+    }
+
+    func testWitnessGateRunsAfterRollback() async {
+        // A shrunk root is rollback regardless of the witness co-sig; the
+        // witness seam must not even be consulted.
+        let store = LastSeenRoot(defaults: freshDefaults())
+        XCTAssertEqual(store.checkAndAdvance(20), .ok)
+        var witnessConsulted = false
+        let v = TransparencyVerify(
+            client: FakeFetcher(
+                root: rootAt(10, witnessCosig: cosigFixture),
+                latest: latestWith(servedPubkey),
+                proof: proofFixture
+            ),
+            operatorKey: operatorKey,
+            witnessKey: witnessKey,
+            lastSeenRoot: store,
+            verifyInclusion: { _ in },
+            verifyWitness: { _ in witnessConsulted = true }
+        )
+        let status = await runStatus(v)
+        XCTAssertEqual(status, .rollback)
+        XCTAssertFalse(witnessConsulted)
+    }
+
+    func testChainWitnessGateValidCosigProceeds() async {
+        let v = TransparencyVerify(
+            client: FakeFetcher(
+                root: rootAt(10, witnessCosig: cosigFixture),
+                latest: LatestEntry(
+                    idx: 3, version: 7, identityPubkey: servedPubkey, isReset: false
+                ),
+                proof: proofFixture
+            ),
+            operatorKey: operatorKey,
+            witnessKey: witnessKey,
+            lastSeenRoot: LastSeenRoot(defaults: freshDefaults()),
+            verifyChain: { _ in self.servedPubkey },
+            verifyWitness: { _ in /* valid */ }
+        )
+        let result = await runChain(v)
+        XCTAssertEqual(result.status, .confirmed)
+        XCTAssertEqual(result.version, 7)
+    }
+
+    func testChainWitnessGateNoCosigFailsClosed() async {
+        let fake = FakeFetcher(
+            root: rootAt(10, witnessCosig: nil),
+            latest: latestWith(servedPubkey),
+            proof: proofFixture
+        )
+        let v = TransparencyVerify(
+            client: fake,
+            operatorKey: operatorKey,
+            witnessKey: witnessKey,
+            lastSeenRoot: LastSeenRoot(defaults: freshDefaults()),
+            verifyChain: { _ in self.servedPubkey }
+        )
+        let result = await runChain(v)
+        XCTAssertEqual(result.status, .mismatch)
+        XCTAssertNil(result.version)
+        XCTAssertEqual(fake.fetchLatestCalls, 0)
     }
 }
 

@@ -82,6 +82,12 @@ public class TransparencyClient(
             logSize = wire.log_size,
             timestampUnix = wire.timestamp_unix,
             signature = base64Decode(wire.signature_b64),
+            // ADR-0020: optional witness co-signature (absent when the
+            // operator runs without a witness). The witness gate fails
+            // closed when a witness key is pinned and this is null.
+            witnessCosig = wire.witness_cosig_b64
+                ?.takeIf { it.isNotEmpty() }
+                ?.let { base64Decode(it) },
         )
     }
 
@@ -202,14 +208,23 @@ public data class SignedRoot(
     val timestampUnix: ULong,
     /** 64-byte Ed25519 signature over the canonical root pre-image. */
     val signature: ByteArray,
+    /** ADR-0020: the witness co-signature wire blob over `(treeRoot,
+     *  logSize)`, or `null` when the server serves no witness
+     *  co-signature. A client that pins a witness key requires a valid one
+     *  (the split-view defence). */
+    val witnessCosig: ByteArray? = null,
 ) {
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
         if (other !is SignedRoot) return false
-        return treeRoot.contentEquals(other.treeRoot) &&
-            logSize == other.logSize &&
-            timestampUnix == other.timestampUnix &&
-            signature.contentEquals(other.signature)
+        if (!treeRoot.contentEquals(other.treeRoot)) return false
+        if (logSize != other.logSize) return false
+        if (timestampUnix != other.timestampUnix) return false
+        if (!signature.contentEquals(other.signature)) return false
+        val a = witnessCosig
+        val b = other.witnessCosig
+        if (a == null) return b == null
+        return b != null && a.contentEquals(b)
     }
 
     override fun hashCode(): Int {
@@ -217,6 +232,7 @@ public data class SignedRoot(
         result = 31 * result + logSize.hashCode()
         result = 31 * result + timestampUnix.hashCode()
         result = 31 * result + signature.contentHashCode()
+        result = 31 * result + (witnessCosig?.contentHashCode() ?: 0)
         return result
     }
 }
@@ -324,6 +340,8 @@ private data class RootResWire(
     val log_size: ULong,
     val timestamp_unix: ULong,
     val signature_b64: String,
+    // ADR-0020: base64 witness co-signature, absent when unconfigured.
+    val witness_cosig_b64: String? = null,
 )
 
 /** Wire shape of `GET /transparency/latest/:key` (Rust `LatestRes`). */
