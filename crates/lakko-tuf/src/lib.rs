@@ -250,6 +250,17 @@ pub enum TufError {
         /// The configured maximum walk depth.
         max: usize,
     },
+    /// The walk consulted more delegated roles on a single
+    /// resolution than the verifier's budget allows — a
+    /// second DoS bound (on top of the depth cap + cycle
+    /// guard) against a wide fan-out tree. Distinct from
+    /// [`TufError::DelegationTooDeep`] so operator triage can
+    /// tell a deep chain from a broad one.
+    #[error("delegation walk exceeds the max of {max} roles consulted")]
+    DelegationBudgetExhausted {
+        /// The configured maximum roles consulted per walk.
+        max: usize,
+    },
     /// A delegated role was reached more than once on a
     /// single resolution — a cycle in the delegation graph.
     /// Refused (a cycle can never legitimately help resolve
@@ -1168,8 +1179,18 @@ pub struct ResolvedTarget {
 ///
 /// Bounded against a malicious graph: recursion depth at
 /// [`MAX_DELEGATION_DEPTH`], the total roles consulted at
-/// [`MAX_DELEGATED_ROLES_VISITED`], and a role revisited on
-/// one resolution is a [`TufError::DelegationCycle`].
+/// [`MAX_DELEGATED_ROLES_VISITED`] ([`TufError::DelegationBudgetExhausted`]),
+/// and a role revisited on one resolution is a
+/// [`TufError::DelegationCycle`].
+///
+/// The cycle guard tracks visited roles GLOBALLY across the
+/// whole resolution (not per branch), so a role reachable via
+/// two distinct legitimate branches — a "diamond" delegation,
+/// rare but spec-legal — is conservatively refused as a cycle.
+/// This is fail-closed (it never wrongly ACCEPTS a target,
+/// only over-refuses an exotic graph), the correct bias for a
+/// supply-chain verifier; per-branch tracking is the hardening
+/// path if real repos ever use diamonds.
 ///
 /// # Errors
 ///
@@ -1248,8 +1269,8 @@ fn walk_delegations(
             });
         }
         if *budget == 0 {
-            return Err(TufError::DelegationTooDeep {
-                max: MAX_DELEGATION_DEPTH,
+            return Err(TufError::DelegationBudgetExhausted {
+                max: MAX_DELEGATED_ROLES_VISITED,
             });
         }
         *budget -= 1;
@@ -1333,8 +1354,25 @@ fn role_matches(role: &DelegatedRole, name: &str) -> Result<bool> {
             role: role.name.clone(),
             reason: "declares neither paths nor path_hash_prefixes",
         }),
-        (Some(paths), None) => Ok(paths.iter().any(|p| glob_match(p, name))),
+        (Some(paths), None) => {
+            // An empty selector list is malformed (TUF §5.6.7
+            // expects at least one pattern) — refuse rather
+            // than silently match nothing.
+            if paths.is_empty() {
+                return Err(TufError::BadDelegatedRole {
+                    role: role.name.clone(),
+                    reason: "empty paths list",
+                });
+            }
+            Ok(paths.iter().any(|p| glob_match(p, name)))
+        },
         (None, Some(prefixes)) => {
+            if prefixes.is_empty() {
+                return Err(TufError::BadDelegatedRole {
+                    role: role.name.clone(),
+                    reason: "empty path_hash_prefixes list",
+                });
+            }
             let digest = hex::encode(lakko_crypto::hash::sha256(name.as_bytes()));
             for prefix in prefixes {
                 if prefix.is_empty() || !prefix.bytes().all(|b| b.is_ascii_hexdigit()) {
@@ -2437,6 +2475,40 @@ mod tests {
             threshold: 1,
             paths: Some(vec!["*".into()]),
             path_hash_prefixes: Some(vec!["ab".into()]),
+            terminating: false,
+        };
+        let mut keys = BTreeMap::new();
+        keys.insert(kid, PublicKey::ed25519(&vk));
+        let top = targets_body_with(
+            &[],
+            Some(Delegations {
+                keys,
+                roles: vec![role],
+            }),
+            now,
+        );
+        let mut provider = |_role: &str| -> Option<Vec<u8>> { None };
+        let err = resolve_target("anything", &top, &mut provider, now).unwrap_err();
+        assert!(
+            matches!(err, TufError::BadDelegatedRole { .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn resolve_target_refuses_an_empty_selector_list() {
+        let now = Utc::now();
+        let ds = SigningKey::from_seed(&[0x33; 32]);
+        let vk = ds.verifying_key();
+        let kid = KeyId::from_verifying_key(&vk);
+        // `paths: Some(vec![])` is malformed (TUF expects >= 1
+        // pattern) — must refuse, not silently match nothing.
+        let role = DelegatedRole {
+            name: "empty".into(),
+            keyids: vec![kid.clone()],
+            threshold: 1,
+            paths: Some(vec![]),
+            path_hash_prefixes: None,
             terminating: false,
         };
         let mut keys = BTreeMap::new();
