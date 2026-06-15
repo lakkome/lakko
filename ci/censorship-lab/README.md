@@ -66,7 +66,8 @@ follow-up sub-sprints.
 | Active probing against REALITY endpoints (refusal)  | ✅            | `G5-7-reality-probe` — `reality_e2e.rs`          |
 | ... full probe-indistinguishability (cover-proxy)   | ❌ deferred   | needs the live-cover-proxy fallback              |
 | SNI string-match blocking (GFW-style censor)        | ✅            | `G5-7-gfw-string` (`detector` module)            |
-| Connection throttling (IR-style speed cap)          | ❌ deferred   | `G5-7-throttle` follow-up                        |
+| Connection throttling (IR-style speed cap) — model  | ✅            | `G5-7-throttle` — `throttle.rs` (model + tests)  |
+| ... applied to a live forwarded flow                | ❌ deferred   | needs a proxy layer (observer is drop-only)      |
 | Forwarded-to-target obfuscation effectiveness       | ❌ deferred   | `G5-7-transport-matrix` follow-up                |
 
 Each follow-up reuses the same Dockerfile + compose

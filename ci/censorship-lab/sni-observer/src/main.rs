@@ -64,6 +64,7 @@
 
 mod detector;
 mod quic_initial;
+mod throttle;
 
 use std::fmt::Write as _;
 use std::net::SocketAddr;
@@ -135,6 +136,29 @@ async fn main() -> Result<()> {
         blocking = !blocklist.is_empty(),
         "sni-observer censor emulation"
     );
+
+    // G5-7-throttle — IR-style bandwidth-cap MODEL. When
+    // `LAKKO_SNI_THROTTLE_BYTES_PER_SEC` is set, log how that cap would degrade
+    // a reference 1 MiB transfer (burst defaults to one second of rate). This
+    // is a DIAGNOSTIC of the modelled throttle (see `throttle.rs`) — the
+    // observer is drop-only and never actually throttles a flow; applying the
+    // cap to a live forwarded flow is a future proxy-layer follow-up.
+    if let Some(rate) = std::env::var("LAKKO_SNI_THROTTLE_BYTES_PER_SEC")
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+    {
+        let burst = std::env::var("LAKKO_SNI_THROTTLE_BURST_BYTES")
+            .ok()
+            .and_then(|s| s.trim().parse::<u64>().ok())
+            .unwrap_or(rate);
+        let modelled_1mib_ms = throttle::model_transfer_ms(1024 * 1024, rate, burst);
+        info!(
+            rate_bytes_per_sec = rate,
+            burst,
+            modelled_1mib_ms,
+            "sni-observer IR-throttle model (diagnostic only — the observer never throttles)"
+        );
+    }
 
     let listener = TcpListener::bind(bind)
         .await
