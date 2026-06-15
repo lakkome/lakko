@@ -1742,7 +1742,7 @@ breaks):**
   typed signaling protocol existing — per-`kind` breakdown would aid
   dashboards; observability only.
 
-### G-30: KT-log (S1-S3) deployed-verifier scope + append-binding trust + equivocation residual
+### G-30: KT-log (S1-S3) deployed-verifier scope + append-binding trust + equivocation residual — **#2 closed (ADR-0019), #1 closed (ADR-0020)**
 
 **Status (2026-06-12):** the key-transparency log is built end-to-end —
 `services/transparency` (operator-signed append-only CONIKS log: S1), discovery
@@ -1816,8 +1816,9 @@ Finding 2 is CLOSED and finding 1's rotation case is materially addressed:
   be log-confirmed at the same version → the second peer to fetch sees a
   version-floor / inclusion failure → `mismatch`). It is detection (depends on
   ≥1 honest fetch + the OOB safety-number backstop), NOT full split-view
-  resistance — operator equivocation across DIFFERENT signed roots still needs
-  gossip / witness co-signing (finding 1, still future work).
+  resistance — operator equivocation across DIFFERENT signed roots needs
+  witness co-signing (finding 1, **now closed by ADR-0020** — see the update
+  below).
 
 - **Append is now client-authorised (finding 2, CLOSED).** Every new
   `(account_key → pubkey)` binding must carry a `leaf_auth`: a genesis / reset
@@ -1843,3 +1844,37 @@ Two new attacker-touchable verify surfaces got fuzz targets:
 `verify_supersession_chain` (rotation chain) and `verify_leaf_genesis` (genesis
 self-sig). `lakko-security` re-reviewed Sprints 1+2: **APPROVE-WITH-NOTES**
 (invariants #2/#4/#6 hold or strengthened; cleared to merge). See ADR-0019.
+
+**Update — G-30 #1 closed by ADR-0020 (witness co-signing), 2026-06-13.**
+Finding 1 (operator split-view / equivocation across DIFFERENT signed roots) is
+CLOSED for the single-witness model:
+
+- **An independent witness co-signs every operator root** — but ONLY after
+  verifying a Merkle **consistency proof** (RFC 6962 §2.1.2,
+  `crates/lakko-transparency/src/merkle.rs`) that the new root append-only-extends
+  the witness's last-co-signed root. Two divergent forks cannot both extend one
+  root, so a malicious operator cannot obtain a co-signature on a fork: the honest
+  witness (`services/witness`, `POST /witness/cosign`) refuses (409 `NotConsistent`)
+  and advances its `(root, log_size)` high-water under a lock.
+- **Clients require operator AND witness.** All three pin the witness key
+  build-time and run `witnessGateRefuses` immediately after the no-rollback gate
+  in `verifyIdentityInLog` + `verifyRotationChain`: a root with no cosig OR an
+  invalid one (`verify_witness_cosig` over the served `(tree_root, log_size)`,
+  domain `lakko/transparency/witness/v1`) is **refused** (`mismatch`, fail-closed,
+  invariant #4). No pinned key → operator-only transition posture. The FFI is
+  verify-only; signing stays server-side.
+- **The operator serves co-signs-on-read, fail-closed.** `services/transparency`
+  signs the head root fresh per `/root`, reuses the cached cosig keyed on
+  `(tree_root, log_size)`, re-obtains it only on growth, and serves **None**
+  (never a stale cosig) when the witness is unreachable — a stale cosig can never
+  bind-mismatch a client.
+- Two new fuzz targets: `verify_consistency` (the RFC 6962 verifier, a fork must
+  fail) + `verify_witness_cosig` (the 105-byte cosig blob parse + bind + verify).
+- **Residual:** operator+witness COLLUSION (single witness — K-of-N is a config
+  slot for later) and the witness's INDEPENDENCE is a deploy property (a different
+  trust domain), not code-enforced. The deferred client-gossip layer would remove
+  the collusion residual entirely.
+
+`lakko-security` reviewed the full arc (Sprints 1-6): **APPROVE-WITH-NOTES**
+(invariants #2/#4/#6 hold or strengthened; one trivial hygiene finding —
+`#![forbid(unsafe_code)]` on the witness service — applied). See ADR-0020.
