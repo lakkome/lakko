@@ -319,6 +319,40 @@ pub enum TokenError {
     BadSignature,
 }
 
+/// Fuzz-only entry point. Marked `#[doc(hidden)]` — the sole harness
+/// surface for `crates/lakko-auth-token/fuzz/`, **not** part of the
+/// supported public API.
+#[doc(hidden)]
+pub mod fuzz_api {
+    use super::{TokenSecret, MIN_SECRET_LEN};
+
+    /// Drive [`TokenSecret::verify`] on an attacker-controlled token
+    /// string.
+    ///
+    /// A client or peer presents this token to the server on every
+    /// protected discovery request, so the bytes are fully untrusted.
+    /// The harness verifies against a FIXED 32-byte secret (the fuzzer
+    /// cannot forge a valid HMAC, so it exercises the parse + verify
+    /// path: dot-split, version gate, base64url account_id decode with a
+    /// 16-byte length check, `i64` expiry parse, base64url tag decode
+    /// with a 32-byte length check, HMAC compute, constant-time compare,
+    /// and the expiry check) at a FIXED `now_ms`. A UTF-8 gate at the
+    /// harness edge keeps coverage on the token parser rather than the
+    /// UTF-8 boundary (`verify` takes `&str`; only valid UTF-8 reaches it
+    /// in production — tokens ride in HTTP headers). Any panic / overflow
+    /// here is a vulnerability.
+    #[must_use]
+    pub fn verify_token(bytes: &[u8]) -> bool {
+        let Ok(token) = core::str::from_utf8(bytes) else {
+            return false;
+        };
+        let Ok(secret) = TokenSecret::new(vec![0x11; MIN_SECRET_LEN]) else {
+            return false;
+        };
+        secret.verify(token, 0).is_ok()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

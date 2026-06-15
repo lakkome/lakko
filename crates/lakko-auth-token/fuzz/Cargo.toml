@@ -1,0 +1,31 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+[package]
+name = "lakko-auth-token-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+# Opt out of the parent workspace — cargo-fuzz crates require nightly and
+# libfuzzer-sys, which we don't want as a workspace-wide dep.
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+lakko-auth-token = { path = ".." }
+
+# `TokenSecret::verify` is the session-token parser + verifier: a client or
+# peer presents this token to the server on every protected discovery request,
+# so the token string is fully attacker-controlled and reaches the dot-split /
+# base64url / i64-parse / HMAC path before admission. Any panic / overflow /
+# slice-out-of-bounds here is a vulnerability.
+[[bin]]
+name = "token_verify"
+path = "fuzz_targets/token_verify.rs"
+test = false
+doc = false
+bench = false
