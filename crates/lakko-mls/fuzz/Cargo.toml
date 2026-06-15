@@ -45,3 +45,10 @@ path = "fuzz_targets/devicegroup_payload.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "pairing_qr"
+path = "fuzz_targets/pairing_qr.rs"
+test = false
+doc = false
+bench = false

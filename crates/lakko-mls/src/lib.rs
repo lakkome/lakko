@@ -83,4 +83,18 @@ pub mod fuzz_api {
     pub fn parse_devicegroup_payload(bytes: &[u8]) -> bool {
         crate::DeviceGroup::parse_devicegroup_payload(bytes).is_ok()
     }
+
+    /// Try to decode a device-pairing QR payload (`pairing::decode`). Returns
+    /// `true` on a successful prost decode + the structural binding checks
+    /// (version / account_id-length + match / rendezvous-pseudonym-length). The
+    /// bytes are the MOST attacker-controllable input in the system — a victim
+    /// physically scans a QR a malicious actor crafted — so this parser must
+    /// stay panic-free on arbitrary input. A fixed all-zero `expected_account_id`
+    /// keeps the harness reproducible; the fuzzer exercises the decode + the
+    /// length/version gates (the account_id-equality path is reachable for a
+    /// matching embedded id).
+    #[must_use]
+    pub fn decode_pairing_qr(bytes: &[u8]) -> bool {
+        crate::pairing::decode(bytes, &[0u8; 16]).is_ok()
+    }
 }
