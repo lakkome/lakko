@@ -269,6 +269,27 @@ fn decode_pseudonym_b64(b64: &str) -> Result<[u8; PSEUDONYM_LEN]> {
     Ok(out)
 }
 
+/// Fuzz-only entry point. Marked `#[doc(hidden)]` — the sole harness
+/// surface for `crates/lakko-push/fuzz/`, **not** part of the supported
+/// public API.
+#[doc(hidden)]
+pub mod fuzz_api {
+    use super::PushPayload;
+
+    /// Drive [`PushPayload::decode_json`] on attacker-controlled bytes.
+    ///
+    /// A push payload is relayed verbatim by the OS push pipeline (APNs /
+    /// FCM / UnifiedPush) and reaches this JSON parser on the device
+    /// before any further processing, so the input is fully untrusted: it
+    /// exercises `serde_json::from_slice` → the schema-version gate → the
+    /// kind dispatch → the base64 pseudonym decode + 32-byte length check.
+    /// Any panic / overflow / slice-out-of-bounds here is a vulnerability.
+    #[must_use]
+    pub fn decode_push_payload(bytes: &[u8]) -> bool {
+        PushPayload::decode_json(bytes).is_ok()
+    }
+}
+
 // ============================================================================
 // Tests
 // ============================================================================
