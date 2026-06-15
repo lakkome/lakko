@@ -405,6 +405,42 @@ pub fn combine(shares: &[Share]) -> Result<Vec<u8>, ShamirError> {
     Ok(secret)
 }
 
+/// Fuzz-only entry point. Marked `#[doc(hidden)]` — the sole harness
+/// surface for `crates/lakko-shamir/fuzz/`, **not** part of the
+/// supported public API.
+#[doc(hidden)]
+pub mod fuzz_api {
+    use super::{combine, Share};
+
+    /// Drive the share-recovery parse + reconstruct path on
+    /// attacker-controlled bytes.
+    ///
+    /// Shares are distributed to and later collected from peers /
+    /// guardians during social recovery, so a malicious holder can
+    /// submit crafted share strings. The harness treats the input as
+    /// newline-separated candidate shares, decodes each via
+    /// [`Share::decode`] (the `<index>:<base64>` parser — `split_once`,
+    /// `u8` index parse, the index-zero gate, base64 decode, the
+    /// empty / oversize length checks), then [`combine`]s the
+    /// successfully-decoded set (exercising the share-count / length /
+    /// duplicate-index guards and the GF(256) Lagrange interpolation —
+    /// the duplicate-index check is what keeps the field division from
+    /// dividing by zero). The unique-index space is `u8`, so the
+    /// quadratic `combine` work is naturally bounded. Any panic /
+    /// overflow / divide-by-zero here is a vulnerability.
+    #[must_use]
+    pub fn decode_and_combine(bytes: &[u8]) -> bool {
+        let Ok(text) = core::str::from_utf8(bytes) else {
+            return false;
+        };
+        let shares: Vec<Share> = text
+            .split('\n')
+            .filter_map(|line| Share::decode(line).ok())
+            .collect();
+        combine(&shares).is_ok()
+    }
+}
+
 // ============================================================================
 // Tests
 // ============================================================================
