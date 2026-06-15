@@ -240,16 +240,68 @@ pub enum TufError {
         /// triage.
         available: Vec<String>,
     },
-    /// The signed `Targets` metadata carries a
-    /// `delegations` block. The scaffold does not follow
-    /// delegations yet — refusing to install is the
-    /// audit-safe stance, since an attacker who compromised
-    /// the top-level targets signing key could otherwise
-    /// indirect through a weaker delegated key whose
-    /// authority the scaffold can neither verify nor
-    /// revoke. Removed once delegation walk lands.
-    #[error("targets role carries a `delegations` block — not yet supported")]
-    DelegationsNotSupported,
+    /// The delegation tree is deeper than the verifier's
+    /// hard cap. A bound on recursion depth so a malicious
+    /// (or pathological) metadata graph cannot exhaust the
+    /// stack / time. TUF §5.6.7 walks are finite in a
+    /// well-formed repo; an over-deep tree is refused.
+    #[error("delegation tree exceeds the max depth of {max}")]
+    DelegationTooDeep {
+        /// The configured maximum walk depth.
+        max: usize,
+    },
+    /// A delegated role was reached more than once on a
+    /// single resolution — a cycle in the delegation graph.
+    /// Refused (a cycle can never legitimately help resolve
+    /// a target and is a DoS / confusion vector).
+    #[error("delegation cycle revisiting role {role}")]
+    DelegationCycle {
+        /// The role name that was revisited.
+        role: String,
+    },
+    /// The caller's provider returned no metadata bytes for
+    /// a delegated role the walk needed to consult. The
+    /// crate never fetches (network is the caller's job);
+    /// a missing role is a hard failure, not a silent skip.
+    #[error("no metadata available for delegated role {role}")]
+    DelegatedMetadataMissing {
+        /// The role whose metadata the provider lacked.
+        role: String,
+    },
+    /// A delegated role's metadata failed verification
+    /// (signature threshold, key authorisation, `_type`, or
+    /// expiry) against the keys its delegating role
+    /// published. `reason` carries the underlying check's
+    /// message; the role name is preserved for triage.
+    #[error("delegated role {role} failed verification: {reason}")]
+    DelegatedRoleInvalid {
+        /// The delegated role name.
+        role: String,
+        /// The underlying verification failure.
+        reason: String,
+    },
+    /// A delegated role is malformed: it declares neither
+    /// `paths` nor `path_hash_prefixes`, or BOTH (TUF §5.6.7
+    /// requires exactly one), or carries an unparseable
+    /// hash-prefix. Such a role can match nothing safely, so
+    /// the walk refuses rather than silently skipping it.
+    #[error("malformed delegated role {role}: {reason}")]
+    BadDelegatedRole {
+        /// The delegated role name.
+        role: String,
+        /// Static description of the defect.
+        reason: &'static str,
+    },
+    /// The requested target name was not provided by the
+    /// top-level targets map nor by any matching delegated
+    /// role reachable in the walk. Distinct from a
+    /// verification failure — the chain is sound, the target
+    /// simply is not published.
+    #[error("target not found in the delegation tree: {name}")]
+    TargetNotFound {
+        /// The target name that could not be resolved.
+        name: String,
+    },
     /// A target name (key from `Targets.targets` map) is
     /// not safe to plug into a URL. Surfaced by
     /// [`urls::target_artifact_url`].
@@ -488,22 +540,71 @@ pub struct Targets {
     /// Map from target path (`"lakko-svc-channels"`) to
     /// target metadata.
     pub targets: BTreeMap<String, TargetMeta>,
-    /// Per TUF spec §5.5, the targets role may carry a
-    /// `delegations` block authorising sub-paths to other
-    /// signing keys. `lakko-tuf` does NOT yet follow
-    /// delegations — `verify_chain` refuses to install any
-    /// `Targets` whose `delegations` field is set, the
-    /// audit-safe stance until the delegation walk is
-    /// implemented.
+    /// Per TUF spec §5.5 / §5.6, the targets role may carry
+    /// a `delegations` block authorising sub-paths to other
+    /// signing keys. Resolved by [`resolve_target`], which
+    /// walks the delegation tree honouring each delegated
+    /// role's key set, threshold, path patterns, and
+    /// `terminating` flag.
     ///
-    /// The field is decoded as opaque [`serde_json::Value`]:
-    /// the verifier never trusts its contents, only its
-    /// presence. Once delegation support lands, this field
-    /// becomes a strongly-typed struct and the rejection
-    /// in `verify_chain` is replaced with the recursive
-    /// walk.
+    /// `verify_chain` itself returns only the TOP-LEVEL
+    /// direct `targets` map; a target that lives in a
+    /// delegated role is resolved by [`resolve_target`]
+    /// against a caller-supplied metadata provider (the
+    /// crate never fetches — network is the caller's job).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub delegations: Option<serde_json::Value>,
+    pub delegations: Option<Delegations>,
+}
+
+/// TUF delegations block (spec §5.6) — the typed form of a
+/// targets role's `delegations` field.
+///
+/// `keys` is the id → public-key map for every key any
+/// delegated role names; `roles` is the ORDERED list of
+/// delegated roles (order is significant — the walk tries
+/// them in sequence and a `terminating` role short-circuits
+/// the search down its branch).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Delegations {
+    /// Key id → public key for every key referenced by a
+    /// delegated role's `keyids`.
+    pub keys: BTreeMap<KeyId, PublicKey>,
+    /// Ordered list of delegated roles.
+    pub roles: Vec<DelegatedRole>,
+}
+
+/// One delegated role inside a [`Delegations`] block.
+///
+/// A role authorises EITHER an explicit `paths` glob list
+/// OR a `path_hash_prefixes` list (TUF §5.6.7 — the two are
+/// mutually exclusive); a role with neither, or both,
+/// matches nothing and is rejected during the walk.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DelegatedRole {
+    /// Role name — the metadata file the provider fetches
+    /// (`{name}.json`).
+    pub name: String,
+    /// Key ids (a subset of the parent [`Delegations::keys`])
+    /// authorised to sign this role.
+    pub keyids: Vec<KeyId>,
+    /// Minimum distinct valid signatures to accept the role.
+    pub threshold: u32,
+    /// Glob patterns (fnmatch-style; `*` matches any run,
+    /// `?` one char) the target name must match for this
+    /// role to be consulted. Mutually exclusive with
+    /// `path_hash_prefixes`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paths: Option<Vec<String>>,
+    /// Hex SHA-256-prefix patterns: the target name's
+    /// SHA-256 hex digest must start with one of these.
+    /// Mutually exclusive with `paths`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path_hash_prefixes: Option<Vec<String>>,
+    /// When true, if this role's subtree does not provide
+    /// the target the search STOPS (later sibling roles are
+    /// not consulted) — TUF §5.6.7.1.
+    #[serde(default)]
+    pub terminating: bool,
 }
 
 /// Timestamp metadata — short-lived proof of freshness
@@ -540,7 +641,7 @@ pub struct MetaPin {
 
 /// Target metadata — per-artefact entry in
 /// [`Targets::targets`].
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TargetMeta {
     /// Length in bytes of the actual artefact.
     pub length: u64,
@@ -768,17 +869,15 @@ pub fn verify_chain(
     let targets_spec = role_spec(&root.signed, "targets")?;
     verify_signatures("targets", targets, targets_spec, &root.signed.keys)?;
 
-    // 7. Refuse `delegations`. The scaffold can verify the
-    //    top-level targets map but cannot yet walk a
-    //    delegation tree — an attacker who compromised the
-    //    targets signing key could otherwise indirect
-    //    through a weaker delegated key whose authority we
-    //    can neither verify nor revoke. Refusing is the
-    //    audit-safe stance until the walk lands.
-    if targets.signed.delegations.is_some() {
-        return Err(TufError::DelegationsNotSupported);
-    }
-
+    // 7. Return the TOP-LEVEL direct targets map. A
+    //    `delegations` block is no longer refused: a target
+    //    that lives in a delegated role is resolved by
+    //    `resolve_target`, which walks the delegation tree
+    //    verifying each delegated role against the keys +
+    //    threshold its delegating role published. `verify_chain`
+    //    itself stays the root→timestamp→snapshot→targets
+    //    chain verifier; the delegated walk is a separate,
+    //    caller-provider-driven step (the crate never fetches).
     Ok(targets.signed.targets.clone())
 }
 
@@ -999,6 +1098,357 @@ pub fn verify_target_bytes(meta: &TargetMeta, bytes: &[u8]) -> Result<()> {
     }
 
     Ok(())
+}
+
+// =========================================================
+// Delegated-targets walk (TUF §5.6)
+// =========================================================
+
+/// Maximum delegation-tree depth the walk descends. A hard
+/// bound so a malicious metadata graph cannot exhaust the
+/// stack or burn unbounded time; well-formed repos nest far
+/// shallower.
+pub const MAX_DELEGATION_DEPTH: usize = 32;
+
+/// Maximum number of delegated roles a single resolution may
+/// consult — a second DoS bound on top of the depth cap +
+/// cycle guard (a wide-but-shallow fan-out tree).
+pub const MAX_DELEGATED_ROLES_VISITED: usize = 256;
+
+/// Supplies the raw bytes of a delegated targets metadata
+/// file by role name. The crate NEVER fetches — the caller
+/// owns the network (the offline-verifier posture); returning
+/// `None` means "no such role / not available", which the
+/// walk treats as a hard failure
+/// ([`TufError::DelegatedMetadataMissing`]). Any closure
+/// `FnMut(&str) -> Option<Vec<u8>>` implements this.
+pub trait DelegatedTargetsProvider {
+    /// Return the raw `{role}.json` metadata bytes, or `None`
+    /// if unavailable.
+    fn fetch(&mut self, role: &str) -> Option<Vec<u8>>;
+}
+
+impl<F: FnMut(&str) -> Option<Vec<u8>>> DelegatedTargetsProvider for F {
+    fn fetch(&mut self, role: &str) -> Option<Vec<u8>> {
+        self(role)
+    }
+}
+
+/// The outcome of a successful [`resolve_target`]: the
+/// verified [`TargetMeta`] plus the role that provided it
+/// (`"targets"` for a top-level direct target, else the
+/// delegated role name).
+#[derive(Clone, Debug)]
+pub struct ResolvedTarget {
+    /// The role that published the target.
+    pub role: String,
+    /// The verified target metadata (length + hashes).
+    pub meta: TargetMeta,
+}
+
+/// Resolve a single target name through the TUF delegation
+/// tree (spec §5.6).
+///
+/// `top_targets` MUST be the targets metadata already
+/// verified by [`verify_chain`] (this function does not
+/// re-verify it). The walk:
+///
+/// 1. Returns the top-level direct target if `top_targets`
+///    lists `name`.
+/// 2. Otherwise descends `top_targets.delegations.roles` in
+///    order. For each role whose path patterns match `name`,
+///    it fetches the role's metadata via `provider`, verifies
+///    it against the keys + threshold the DELEGATING role
+///    published (`delegations.keys` + the role's
+///    `(keyids, threshold)`), checks `_type` + `expires`,
+///    then recurses into that role's own delegations.
+/// 3. Honours `terminating`: if a terminating role's subtree
+///    does not provide `name`, the search STOPS (later
+///    sibling roles are not consulted) — TUF §5.6.7.1.
+///
+/// Bounded against a malicious graph: recursion depth at
+/// [`MAX_DELEGATION_DEPTH`], the total roles consulted at
+/// [`MAX_DELEGATED_ROLES_VISITED`], and a role revisited on
+/// one resolution is a [`TufError::DelegationCycle`].
+///
+/// # Errors
+///
+/// [`TufError::TargetNotFound`] if no role provides the
+/// target; [`TufError::DelegatedRoleInvalid`] /
+/// [`TufError::DelegatedMetadataMissing`] /
+/// [`TufError::BadDelegatedRole`] on a verification / fetch /
+/// shape failure; the depth / cycle bounds on a hostile tree.
+pub fn resolve_target(
+    name: &str,
+    top_targets: &Targets,
+    provider: &mut dyn DelegatedTargetsProvider,
+    now: DateTime<Utc>,
+) -> Result<ResolvedTarget> {
+    let mut visited: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut budget: usize = MAX_DELEGATED_ROLES_VISITED;
+    match walk_delegations(
+        "targets",
+        top_targets,
+        name,
+        provider,
+        now,
+        0,
+        &mut visited,
+        &mut budget,
+    )? {
+        Some(resolved) => Ok(resolved),
+        None => Err(TufError::TargetNotFound {
+            name: name.to_owned(),
+        }),
+    }
+}
+
+/// Recursive worker for [`resolve_target`]. Returns
+/// `Ok(Some(_))` if THIS subtree provides `name`, `Ok(None)`
+/// if it provably does not (the search may continue in a
+/// sibling unless a terminating role intervened), `Err(_)` on
+/// a verification / bound failure.
+#[allow(clippy::too_many_arguments)]
+fn walk_delegations(
+    role_name: &str,
+    targets: &Targets,
+    name: &str,
+    provider: &mut dyn DelegatedTargetsProvider,
+    now: DateTime<Utc>,
+    depth: usize,
+    visited: &mut std::collections::BTreeSet<String>,
+    budget: &mut usize,
+) -> Result<Option<ResolvedTarget>> {
+    if depth > MAX_DELEGATION_DEPTH {
+        return Err(TufError::DelegationTooDeep {
+            max: MAX_DELEGATION_DEPTH,
+        });
+    }
+
+    // 1. Direct hit in this role's own targets map.
+    if let Some(meta) = targets.targets.get(name) {
+        return Ok(Some(ResolvedTarget {
+            role: role_name.to_owned(),
+            meta: meta.clone(),
+        }));
+    }
+
+    // 2. Descend delegations, in order.
+    let Some(delegations) = &targets.delegations else {
+        return Ok(None);
+    };
+    for role in &delegations.roles {
+        if !role_matches(role, name)? {
+            continue;
+        }
+        // Cycle + budget guards BEFORE any fetch.
+        if visited.contains(&role.name) {
+            return Err(TufError::DelegationCycle {
+                role: role.name.clone(),
+            });
+        }
+        if *budget == 0 {
+            return Err(TufError::DelegationTooDeep {
+                max: MAX_DELEGATION_DEPTH,
+            });
+        }
+        *budget -= 1;
+
+        let bytes =
+            provider
+                .fetch(&role.name)
+                .ok_or_else(|| TufError::DelegatedMetadataMissing {
+                    role: role.name.clone(),
+                })?;
+        let signed: Signed<Targets> =
+            serde_json::from_slice(&bytes).map_err(|e| TufError::DelegatedRoleInvalid {
+                role: role.name.clone(),
+                reason: format!("metadata parse: {e}"),
+            })?;
+
+        // Verify the delegated metadata against the keys +
+        // threshold THIS (delegating) role published, reusing
+        // the audited verify_signatures + check_* helpers.
+        let role_spec = RoleSpec {
+            keyids: role.keyids.clone(),
+            threshold: role.threshold,
+        };
+        verify_delegated(&role.name, &signed, &role_spec, &delegations.keys, now)?;
+
+        visited.insert(role.name.clone());
+        // Recurse into the delegated role's own delegations.
+        let found = walk_delegations(
+            &role.name,
+            &signed.signed,
+            name,
+            provider,
+            now,
+            depth + 1,
+            visited,
+            budget,
+        )?;
+        if found.is_some() {
+            return Ok(found);
+        }
+        // A terminating role whose subtree did not yield the
+        // target STOPS the search (no later siblings).
+        if role.terminating {
+            return Ok(None);
+        }
+    }
+    Ok(None)
+}
+
+/// Verify a delegated targets metadata's `_type`, expiry, and
+/// signature threshold against its delegating role's keys,
+/// preserving the role name on failure.
+fn verify_delegated(
+    role_name: &str,
+    signed: &Signed<Targets>,
+    role_spec: &RoleSpec,
+    keys: &BTreeMap<KeyId, PublicKey>,
+    now: DateTime<Utc>,
+) -> Result<()> {
+    let wrap = |e: TufError| TufError::DelegatedRoleInvalid {
+        role: role_name.to_owned(),
+        reason: e.to_string(),
+    };
+    check_type(&signed.signed.type_, "targets").map_err(wrap)?;
+    check_expiry("delegated-targets", signed.signed.expires, now).map_err(wrap)?;
+    verify_signatures("delegated-targets", signed, role_spec, keys).map_err(wrap)?;
+    Ok(())
+}
+
+/// Does `name` match this delegated role's selector? A role
+/// authorises EITHER `paths` (fnmatch glob) XOR
+/// `path_hash_prefixes` (SHA-256 hex prefix); neither / both
+/// is a [`TufError::BadDelegatedRole`].
+fn role_matches(role: &DelegatedRole, name: &str) -> Result<bool> {
+    match (&role.paths, &role.path_hash_prefixes) {
+        (Some(_), Some(_)) => Err(TufError::BadDelegatedRole {
+            role: role.name.clone(),
+            reason: "declares both paths and path_hash_prefixes",
+        }),
+        (None, None) => Err(TufError::BadDelegatedRole {
+            role: role.name.clone(),
+            reason: "declares neither paths nor path_hash_prefixes",
+        }),
+        (Some(paths), None) => Ok(paths.iter().any(|p| glob_match(p, name))),
+        (None, Some(prefixes)) => {
+            let digest = hex::encode(lakko_crypto::hash::sha256(name.as_bytes()));
+            for prefix in prefixes {
+                if prefix.is_empty() || !prefix.bytes().all(|b| b.is_ascii_hexdigit()) {
+                    return Err(TufError::BadDelegatedRole {
+                        role: role.name.clone(),
+                        reason: "path_hash_prefix is empty or not hex",
+                    });
+                }
+                if digest.starts_with(&prefix.to_ascii_lowercase()) {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        },
+    }
+}
+
+/// Bounded fnmatch-style glob (TUF path patterns, §5.6.7):
+/// `*` matches any run of chars (including `/`), `?` matches
+/// exactly one char, everything else is literal. Iterative
+/// with backtracking on the last `*` — O(len(pattern) ×
+/// len(name)) worst case, NO regex (ReDoS-safe).
+fn glob_match(pattern: &str, name: &str) -> bool {
+    let pat: Vec<char> = pattern.chars().collect();
+    let txt: Vec<char> = name.chars().collect();
+    let (mut p, mut t) = (0usize, 0usize);
+    let mut star: Option<usize> = None;
+    let mut star_t: usize = 0;
+    while t < txt.len() {
+        if p < pat.len() && (pat[p] == '?' || pat[p] == txt[t]) {
+            p += 1;
+            t += 1;
+        } else if p < pat.len() && pat[p] == '*' {
+            star = Some(p);
+            star_t = t;
+            p += 1;
+        } else if let Some(sp) = star {
+            // Backtrack: let the last `*` swallow one more char.
+            p = sp + 1;
+            star_t += 1;
+            t = star_t;
+        } else {
+            return false;
+        }
+    }
+    while p < pat.len() && pat[p] == '*' {
+        p += 1;
+    }
+    p == pat.len()
+}
+
+// =========================================================
+// Fuzz-only entry points
+// =========================================================
+
+/// Fuzz-only harness entry points. NOT part of the supported
+/// public API (`#[doc(hidden)]`) — exposed solely so the
+/// out-of-tree `fuzz/` crate drives internal pipelines without
+/// a chrono / crypto dependency of its own (mirroring the
+/// `lakko-mls` `fuzz_api` posture).
+#[doc(hidden)]
+pub mod fuzz_api {
+    use super::{resolve_target, DelegatedRole, Delegations, KeyId, KeyVal, PublicKey, Targets};
+    use chrono::{DateTime, Utc};
+    use std::collections::BTreeMap;
+
+    /// Drive [`resolve_target`] over a FIXED top-level targets
+    /// that delegates `"*"` to one role, with the attacker-
+    /// controlled `data` returned as that role's delegated
+    /// metadata. Exercises the delegated-metadata parse +
+    /// `verify_delegated` + the walk's bounds on hostile bytes
+    /// (a compromised mirror serving arbitrary delegated
+    /// targets). The fuzzer only cares that no panic / overflow
+    /// / runaway occurs.
+    pub fn resolve_delegated_from_bytes(data: &[u8]) {
+        let kid = KeyId("fuzz-delegated-key".to_owned());
+        let mut keys = BTreeMap::new();
+        keys.insert(
+            kid.clone(),
+            PublicKey {
+                keytype: "ed25519".to_owned(),
+                scheme: "ed25519".to_owned(),
+                keyval: KeyVal {
+                    public: "00".repeat(32),
+                },
+            },
+        );
+        let (Some(expires), Some(now)) = (
+            DateTime::<Utc>::from_timestamp(4_000_000_000, 0),
+            DateTime::<Utc>::from_timestamp(3_000_000_000, 0),
+        ) else {
+            return;
+        };
+        let top = Targets {
+            type_: "targets".to_owned(),
+            spec_version: "1.0".to_owned(),
+            version: 1,
+            expires,
+            targets: BTreeMap::new(),
+            delegations: Some(Delegations {
+                keys,
+                roles: vec![DelegatedRole {
+                    name: "x".to_owned(),
+                    keyids: vec![kid],
+                    threshold: 1,
+                    paths: Some(vec!["*".to_owned()]),
+                    path_hash_prefixes: None,
+                    terminating: false,
+                }],
+            }),
+        };
+        let mut provider = |role: &str| (role == "x").then(|| data.to_vec());
+        let _ = resolve_target("fuzz-target-name", &top, &mut provider, now);
+    }
 }
 
 // =========================================================
@@ -1616,29 +2066,460 @@ mod tests {
     // ---------------------------------------------------
 
     #[test]
-    fn verify_chain_rejects_targets_with_delegations() {
+    fn verify_chain_accepts_targets_with_delegations_returning_top_level() {
+        // verify_chain no longer refuses a `delegations` block:
+        // it returns the TOP-LEVEL direct targets map, and a
+        // delegated target is resolved by `resolve_target`. A
+        // present-but-empty delegations block must not change
+        // the top-level result.
         let signer = SigningKey::from_seed(&[0x99; 32]);
         let now = Utc::now();
         let (root, timestamp, snapshot, targets) = build_chain(&signer, now);
 
-        // Re-sign the targets body with the delegations
-        // field populated. Any non-null JSON value triggers
-        // the rejection — the scaffold does not inspect the
-        // contents, just refuses on presence.
         let mut delegated_body = targets.signed.clone();
-        delegated_body.delegations = Some(serde_json::json!({
-            "keys": {},
-            "roles": [],
-        }));
+        let expected_top = delegated_body.targets.clone();
+        delegated_body.delegations = Some(Delegations {
+            keys: BTreeMap::new(),
+            roles: vec![],
+        });
         let key_id = KeyId::from_verifying_key(&signer.verifying_key());
         let delegated = sign(delegated_body, &signer, &key_id);
 
-        let err = verify_chain(&root, &timestamp, &snapshot, &delegated, now, None)
-            .expect_err("delegations must be rejected");
-        assert!(
-            matches!(err, TufError::DelegationsNotSupported),
-            "expected DelegationsNotSupported, got {err:?}"
+        let map = verify_chain(&root, &timestamp, &snapshot, &delegated, now, None)
+            .expect("delegations block is accepted; top-level map returned");
+        assert_eq!(
+            map, expected_top,
+            "verify_chain must return the top-level direct targets even with a delegations block"
         );
+    }
+
+    // ---------------------------------------------------
+    // Delegated-targets walk (resolve_target, TUF §5.6)
+    // ---------------------------------------------------
+
+    /// A standalone targets body listing exactly `entries`
+    /// (name → length), with `delegations`. Far-future expiry.
+    fn targets_body_with(
+        entries: &[(&str, u64)],
+        delegations: Option<Delegations>,
+        now: DateTime<Utc>,
+    ) -> Targets {
+        let mut targets = BTreeMap::new();
+        for (name, length) in entries {
+            let mut hashes = BTreeMap::new();
+            hashes.insert("sha256".into(), "ab".repeat(32));
+            targets.insert(
+                (*name).to_owned(),
+                TargetMeta {
+                    length: *length,
+                    hashes,
+                },
+            );
+        }
+        Targets {
+            type_: "targets".into(),
+            spec_version: "1.0".into(),
+            version: 1,
+            expires: now + Duration::days(30),
+            targets,
+            delegations,
+        }
+    }
+
+    /// A single delegated role over `paths`, signed by a fresh
+    /// key whose pubkey is returned so the caller can publish
+    /// it in the delegating role's `keys`.
+    fn role_over(
+        name: &str,
+        signer: &SigningKey,
+        paths: &[&str],
+        terminating: bool,
+    ) -> (DelegatedRole, KeyId, PublicKey) {
+        let vk = signer.verifying_key();
+        let kid = KeyId::from_verifying_key(&vk);
+        let role = DelegatedRole {
+            name: name.to_owned(),
+            keyids: vec![kid.clone()],
+            threshold: 1,
+            paths: Some(paths.iter().map(|p| (*p).to_owned()).collect()),
+            path_hash_prefixes: None,
+            terminating,
+        };
+        (role, kid, PublicKey::ed25519(&vk))
+    }
+
+    /// JSON bytes of a signed delegated targets metadata.
+    fn signed_bytes(body: Targets, signer: &SigningKey, kid: &KeyId) -> Vec<u8> {
+        serde_json::to_vec(&sign(body, signer, kid)).unwrap()
+    }
+
+    #[test]
+    fn resolve_target_top_level_direct_hit_skips_provider() {
+        let now = Utc::now();
+        let top = targets_body_with(&[("lakko-svc-channels", 7)], None, now);
+        let mut called = false;
+        let mut provider = |_role: &str| -> Option<Vec<u8>> {
+            called = true;
+            None
+        };
+        let r = resolve_target("lakko-svc-channels", &top, &mut provider, now).unwrap();
+        assert_eq!(r.role, "targets");
+        assert_eq!(r.meta.length, 7);
+        assert!(
+            !called,
+            "a top-level direct hit must not consult the provider"
+        );
+    }
+
+    #[test]
+    fn resolve_target_via_delegated_role() {
+        let now = Utc::now();
+        let ds = SigningKey::from_seed(&[0x33; 32]);
+        let (role, kid, pubkey) = role_over("phase5", &ds, &["lakko-svc-*"], false);
+        let mut keys = BTreeMap::new();
+        keys.insert(kid.clone(), pubkey);
+        let top = targets_body_with(
+            &[],
+            Some(Delegations {
+                keys,
+                roles: vec![role],
+            }),
+            now,
+        );
+        let deleg = signed_bytes(
+            targets_body_with(&[("lakko-svc-sfu", 42)], None, now),
+            &ds,
+            &kid,
+        );
+        let mut provider = |role: &str| (role == "phase5").then(|| deleg.clone());
+        let r = resolve_target("lakko-svc-sfu", &top, &mut provider, now).unwrap();
+        assert_eq!(r.role, "phase5");
+        assert_eq!(r.meta.length, 42);
+    }
+
+    #[test]
+    fn resolve_target_refuses_metadata_signed_by_wrong_key() {
+        let now = Utc::now();
+        let ds = SigningKey::from_seed(&[0x33; 32]);
+        let (role, kid, pubkey) = role_over("phase5", &ds, &["lakko-svc-*"], false);
+        let mut keys = BTreeMap::new();
+        keys.insert(kid, pubkey);
+        let top = targets_body_with(
+            &[],
+            Some(Delegations {
+                keys,
+                roles: vec![role],
+            }),
+            now,
+        );
+        // Sign the delegated metadata with an IMPOSTER key not
+        // in the role's keyids.
+        let imposter = SigningKey::from_seed(&[0x77; 32]);
+        let imposter_kid = KeyId::from_verifying_key(&imposter.verifying_key());
+        let deleg = signed_bytes(
+            targets_body_with(&[("lakko-svc-sfu", 42)], None, now),
+            &imposter,
+            &imposter_kid,
+        );
+        let mut provider = |role: &str| (role == "phase5").then(|| deleg.clone());
+        let err = resolve_target("lakko-svc-sfu", &top, &mut provider, now)
+            .expect_err("imposter-signed delegated metadata must be refused");
+        assert!(
+            matches!(err, TufError::DelegatedRoleInvalid { .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn resolve_target_non_matching_path_is_not_found_without_fetch() {
+        let now = Utc::now();
+        let ds = SigningKey::from_seed(&[0x33; 32]);
+        let (role, kid, pubkey) = role_over("phase5", &ds, &["lakko-svc-*"], false);
+        let mut keys = BTreeMap::new();
+        keys.insert(kid, pubkey);
+        let top = targets_body_with(
+            &[],
+            Some(Delegations {
+                keys,
+                roles: vec![role],
+            }),
+            now,
+        );
+        let mut called = false;
+        let mut provider = |_role: &str| -> Option<Vec<u8>> {
+            called = true;
+            None
+        };
+        // "other-artifact" does not match "lakko-svc-*".
+        let err = resolve_target("other-artifact", &top, &mut provider, now).unwrap_err();
+        assert!(
+            matches!(err, TufError::TargetNotFound { .. }),
+            "got {err:?}"
+        );
+        assert!(!called, "a non-matching path must not fetch the role");
+    }
+
+    #[test]
+    fn resolve_target_missing_provider_metadata_is_refused() {
+        let now = Utc::now();
+        let ds = SigningKey::from_seed(&[0x33; 32]);
+        let (role, kid, pubkey) = role_over("phase5", &ds, &["lakko-svc-*"], false);
+        let mut keys = BTreeMap::new();
+        keys.insert(kid, pubkey);
+        let top = targets_body_with(
+            &[],
+            Some(Delegations {
+                keys,
+                roles: vec![role],
+            }),
+            now,
+        );
+        let mut provider = |_role: &str| -> Option<Vec<u8>> { None };
+        let err = resolve_target("lakko-svc-sfu", &top, &mut provider, now).unwrap_err();
+        assert!(
+            matches!(err, TufError::DelegatedMetadataMissing { .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn resolve_target_terminating_role_stops_the_search() {
+        let now = Utc::now();
+        let ds = SigningKey::from_seed(&[0x33; 32]);
+        // First role is TERMINATING + matches but does NOT have
+        // the target; a second (later) role WOULD match + have
+        // it. The terminating role must stop the search →
+        // TargetNotFound, the later sibling never consulted.
+        let (mut term_role, term_kid, term_pub) = role_over("first", &ds, &["lakko-svc-*"], true);
+        term_role.terminating = true;
+        let backup = SigningKey::from_seed(&[0x44; 32]);
+        let (late_role, late_kid, late_pub) = role_over("second", &backup, &["lakko-svc-*"], false);
+        let mut keys = BTreeMap::new();
+        keys.insert(term_kid.clone(), term_pub);
+        keys.insert(late_kid.clone(), late_pub);
+        let top = targets_body_with(
+            &[],
+            Some(Delegations {
+                keys,
+                roles: vec![term_role, late_role],
+            }),
+            now,
+        );
+        // `first` has an unrelated target only; `second` HAS the
+        // wanted one — but must never be reached.
+        let first_bytes = signed_bytes(
+            targets_body_with(&[("lakko-svc-other", 1)], None, now),
+            &ds,
+            &term_kid,
+        );
+        let second_bytes = signed_bytes(
+            targets_body_with(&[("lakko-svc-sfu", 42)], None, now),
+            &backup,
+            &late_kid,
+        );
+        let mut second_called = false;
+        let mut provider = |role: &str| match role {
+            "first" => Some(first_bytes.clone()),
+            "second" => {
+                second_called = true;
+                Some(second_bytes.clone())
+            },
+            _ => None,
+        };
+        let err = resolve_target("lakko-svc-sfu", &top, &mut provider, now).unwrap_err();
+        assert!(
+            matches!(err, TufError::TargetNotFound { .. }),
+            "got {err:?}"
+        );
+        assert!(
+            !second_called,
+            "a terminating role must stop the search before the later sibling"
+        );
+    }
+
+    #[test]
+    fn resolve_target_refuses_a_delegation_cycle() {
+        let now = Utc::now();
+        // a delegates to b (paths *), b delegates back to a.
+        let a_signer = SigningKey::from_seed(&[0x33; 32]);
+        let b_signer = SigningKey::from_seed(&[0x44; 32]);
+        let (role_b, b_kid, b_pub) = role_over("b", &b_signer, &["*"], false);
+        let (role_a, a_kid, a_pub) = role_over("a", &a_signer, &["*"], false);
+
+        let mut top_keys = BTreeMap::new();
+        top_keys.insert(b_kid.clone(), b_pub.clone());
+        let top = targets_body_with(
+            &[],
+            Some(Delegations {
+                keys: top_keys,
+                roles: vec![role_b.clone()],
+            }),
+            now,
+        );
+        // b's metadata delegates to a; a's metadata delegates
+        // back to b — a cycle that never provides the target.
+        let mut b_keys = BTreeMap::new();
+        b_keys.insert(a_kid.clone(), a_pub);
+        let b_body = targets_body_with(
+            &[],
+            Some(Delegations {
+                keys: b_keys,
+                roles: vec![role_a],
+            }),
+            now,
+        );
+        let mut a_keys = BTreeMap::new();
+        a_keys.insert(b_kid.clone(), b_pub);
+        let a_body = targets_body_with(
+            &[],
+            Some(Delegations {
+                keys: a_keys,
+                roles: vec![role_b],
+            }),
+            now,
+        );
+        let b_bytes = signed_bytes(b_body, &b_signer, &b_kid);
+        let a_bytes = signed_bytes(a_body, &a_signer, &a_kid);
+        let mut provider = |role: &str| match role {
+            "b" => Some(b_bytes.clone()),
+            "a" => Some(a_bytes.clone()),
+            _ => None,
+        };
+        let err = resolve_target("anything", &top, &mut provider, now).unwrap_err();
+        assert!(
+            matches!(err, TufError::DelegationCycle { .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn resolve_target_path_hash_prefix_matches() {
+        let now = Utc::now();
+        let target = "lakko-svc-sfu";
+        let digest = hex::encode(lakko_crypto::hash::sha256(target.as_bytes()));
+        let prefix = digest[..4].to_owned();
+        let ds = SigningKey::from_seed(&[0x33; 32]);
+        let vk = ds.verifying_key();
+        let kid = KeyId::from_verifying_key(&vk);
+        let role = DelegatedRole {
+            name: "hashed".into(),
+            keyids: vec![kid.clone()],
+            threshold: 1,
+            paths: None,
+            path_hash_prefixes: Some(vec![prefix]),
+            terminating: false,
+        };
+        let mut keys = BTreeMap::new();
+        keys.insert(kid.clone(), PublicKey::ed25519(&vk));
+        let top = targets_body_with(
+            &[],
+            Some(Delegations {
+                keys,
+                roles: vec![role],
+            }),
+            now,
+        );
+        let deleg = signed_bytes(targets_body_with(&[(target, 5)], None, now), &ds, &kid);
+        let mut provider = |role: &str| (role == "hashed").then(|| deleg.clone());
+        let r = resolve_target(target, &top, &mut provider, now).unwrap();
+        assert_eq!(r.role, "hashed");
+    }
+
+    #[test]
+    fn resolve_target_role_with_both_selectors_is_refused() {
+        let now = Utc::now();
+        let ds = SigningKey::from_seed(&[0x33; 32]);
+        let vk = ds.verifying_key();
+        let kid = KeyId::from_verifying_key(&vk);
+        let role = DelegatedRole {
+            name: "bad".into(),
+            keyids: vec![kid.clone()],
+            threshold: 1,
+            paths: Some(vec!["*".into()]),
+            path_hash_prefixes: Some(vec!["ab".into()]),
+            terminating: false,
+        };
+        let mut keys = BTreeMap::new();
+        keys.insert(kid, PublicKey::ed25519(&vk));
+        let top = targets_body_with(
+            &[],
+            Some(Delegations {
+                keys,
+                roles: vec![role],
+            }),
+            now,
+        );
+        let mut provider = |_role: &str| -> Option<Vec<u8>> { None };
+        let err = resolve_target("anything", &top, &mut provider, now).unwrap_err();
+        assert!(
+            matches!(err, TufError::BadDelegatedRole { .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn resolve_target_refuses_an_over_deep_delegation_chain() {
+        let now = Utc::now();
+        // A LINEAR chain lvl1 -> lvl2 -> ... deeper than
+        // MAX_DELEGATION_DEPTH, each delegating "*" to the next,
+        // none providing the target. The walk must refuse with
+        // DelegationTooDeep rather than run away (the DoS bound).
+        let depth = MAX_DELEGATION_DEPTH + 3;
+        let signer = |i: usize| SigningKey::from_seed(&[u8::try_from(i % 250 + 1).unwrap(); 32]);
+        let role_at = |i: usize| -> (DelegatedRole, KeyId, PublicKey) {
+            role_over(&format!("lvl{i}"), &signer(i), &["*"], false)
+        };
+
+        let (role1, kid1, pub1) = role_at(1);
+        let mut top_keys = BTreeMap::new();
+        top_keys.insert(kid1, pub1);
+        let top = targets_body_with(
+            &[],
+            Some(Delegations {
+                keys: top_keys,
+                roles: vec![role1],
+            }),
+            now,
+        );
+
+        let mut bytes_by_role: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+        for i in 1..=depth {
+            let body = if i < depth {
+                let (role_next, kid_next, pub_next) = role_at(i + 1);
+                let mut keys = BTreeMap::new();
+                keys.insert(kid_next, pub_next);
+                targets_body_with(
+                    &[],
+                    Some(Delegations {
+                        keys,
+                        roles: vec![role_next],
+                    }),
+                    now,
+                )
+            } else {
+                targets_body_with(&[], None, now)
+            };
+            let kid_i = KeyId::from_verifying_key(&signer(i).verifying_key());
+            bytes_by_role.insert(format!("lvl{i}"), signed_bytes(body, &signer(i), &kid_i));
+        }
+        let mut provider = |role: &str| bytes_by_role.get(role).cloned();
+        let err = resolve_target("never", &top, &mut provider, now).unwrap_err();
+        assert!(
+            matches!(err, TufError::DelegationTooDeep { .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn glob_match_semantics() {
+        assert!(glob_match("*", "anything/with/slash"));
+        assert!(glob_match("lakko-svc-*", "lakko-svc-sfu"));
+        assert!(glob_match("lakko-svc-?fu", "lakko-svc-sfu"));
+        assert!(glob_match("a*b*c", "axxbyyc"));
+        assert!(glob_match("exact", "exact"));
+        assert!(!glob_match("lakko-svc-*", "other"));
+        assert!(!glob_match("a?c", "abbc"));
+        assert!(!glob_match("exact", "exacto"));
     }
 
     #[test]

@@ -55,3 +55,15 @@ path = "fuzz_targets/signed_timestamp_from_json.rs"
 test = false
 doc = false
 bench = false
+
+# GA-5 — the delegated-targets walk. Feeds the fuzz input as a
+# delegated role's metadata through `resolve_target`: the
+# delegated-metadata parse + signature/threshold/type/expiry
+# verification + the walk's depth / cycle / budget bounds, all
+# on attacker-controlled bytes (a compromised mirror).
+[[bin]]
+name = "delegation_walk"
+path = "fuzz_targets/delegation_walk.rs"
+test = false
+doc = false
+bench = false
