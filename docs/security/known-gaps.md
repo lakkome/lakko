@@ -1082,10 +1082,28 @@ live-SFU verbatim-forwarding test above, the
 sealed-on-web → relayed-by-SFU → opened-on-native path is
 established by correctness: the SFU forwards the wire
 unchanged, and that exact wire is what every native stack
-opens. The only residual is a single monolithic real-Chrome ⊕
+opens.
+
+**Composition now observed in one headless test (2026-06-15).**
+The "two already-proven facts" no longer need to be composed
+mentally: [`golden_vector_round_trips_through_the_live_sfu`](../../services/sfu/tests/synthetic_client_e2e.rs)
+seals the EXACT canonical golden vector (`seed=[0x42;32]`,
+`leaf=3`, `"lakko sframe golden vector v1"`), asserts the sealed
+wire equals the byte-pinned `GOLDEN_WIRE_HEX` that the Rust /
+web / iOS / Android golden tests all pin, pushes THOSE bytes
+through the production `spawn_media_task` over a real `str0m`
+ICE + DTLS + cross-fanout renegotiation, and the subscriber
+`open_framed`s the forwarded bytes back to the golden plaintext.
+So the bytes a real web / iOS / Android client emits ARE the
+bytes observed to cross the live SFU intact — the composition is
+a single firsthand-verified fact, not a mental join. Verified
+firsthand (`cargo test -p lakko-svc-sfu --test
+synthetic_client_e2e` → 5 passed) and gates every CI run.
+
+The only residual is a single monolithic real-Chrome ⊕
 real-native ⊕ deployed-SFU smoke run — redundant for
-correctness (it would only re-observe the composition of two
-already-proven facts), and a deploy/CI-execution concern, not a
+correctness (it would only re-observe the same composition with
+real codec pipelines), and a deploy/CI-execution concern, not a
 development one. The web multi-party session that drives the
 worker (`apps/web/src/calls/sfu-call-session.ts` — composes
 the `lakko-sfu-v1` signaling client + the call-admission JWT

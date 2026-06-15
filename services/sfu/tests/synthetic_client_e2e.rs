@@ -817,6 +817,148 @@ async fn sframe_sealed_frame_round_trips_through_the_live_sfu() {
     );
 }
 
+/// G-26 — the CANONICAL cross-stack golden vector survives the live SFU.
+///
+/// `sframe_sealed_frame_round_trips_through_the_live_sfu` (above) proves an
+/// ARBITRARY sealed frame round-trips the SFU. This sibling pins the SAME
+/// canonical SFrame wire the cross-runtime golden-vector tests assert on EVERY
+/// stack — the Rust core (`lakko_calls::sframe` `golden_vector_*`), web
+/// (`apps/web/src/calls/sframe-golden.test.ts`), iOS
+/// (`apps/ios/LakkoTests/SFrameGoldenTests.swift`), Android
+/// (`apps/android/.../calls/SframeGoldenTest.kt`): sealing
+/// `(seed=[0x42;32], leaf=3, "lakko sframe golden vector v1")` on a fresh
+/// `ParticipantKey` yields a byte-pinned wire.
+///
+/// By asserting the seal produces EXACTLY that wire AND that the live SFU
+/// forwards it verbatim + the subscriber opens it back to the golden plaintext,
+/// this composes the two previously-separate facts — "every stack produces +
+/// consumes these exact bytes" and "these exact bytes survive the real `str0m`
+/// forward" — into ONE observed fact: the bytes a real web / iOS / Android
+/// client emits are the bytes proven to cross the SFU intact. The only residual
+/// is the live real-browser (+) real-native (+) deployed-SFU smoke (needs
+/// runtimes, not headless CI), redundant for correctness given this composition.
+///
+/// The golden constants are RE-DECLARED here, not imported — they live in
+/// `lakko-calls`'s `#[cfg(test)]` module. This is the same hand-mirrored-fixture
+/// posture the per-platform golden tests use; an intentional cross-check, so a
+/// core wire-format change fails BOTH this test and the `lakko-calls` golden
+/// test (and the three client golden tests).
+#[tokio::test]
+async fn golden_vector_round_trips_through_the_live_sfu() {
+    use lakko_calls::sframe::CALL_KEY_LEN;
+    use lakko_calls::CallKey;
+
+    // The cross-stack canonical SFrame golden vector — MUST stay byte-identical
+    // to `crates/lakko-calls/src/sframe.rs` GOLDEN_* + the web / iOS / Android
+    // golden tests.
+    const GOLDEN_SEED: [u8; CALL_KEY_LEN] = [0x42; CALL_KEY_LEN];
+    const GOLDEN_LEAF: u32 = 3;
+    const GOLDEN_PLAINTEXT: &[u8] = b"lakko sframe golden vector v1";
+    const GOLDEN_WIRE_HEX: &str =
+        "0301a6d1fee0dd6f091a0071e56d66a889f734a5b2fa6ef8f079d2e6b3e9b27adc41071764928ce5d6d0747fb7fd7c";
+    let golden_wire: Vec<u8> = (0..GOLDEN_WIRE_HEX.len() / 2)
+        .map(|i| u8::from_str_radix(&GOLDEN_WIRE_HEX[i * 2..i * 2 + 2], 16).expect("golden hex"))
+        .collect();
+
+    // 1. Media task + A-publisher / B-subscriber over the live SFU (same setup
+    //    as the arbitrary-payload sibling above).
+    let peers = PeerRegistry::new();
+    let b_id = PeerId::fresh();
+    let (b_tx, mut b_rx) = mpsc::channel::<ServerFrame>(64);
+    let registered = peers
+        .register(Peer {
+            id: b_id.clone(),
+            call_id: "golden-fanout-call".to_owned(),
+            account_id: "subscriber-b".to_owned(),
+            outbound: Some(b_tx),
+        })
+        .await;
+    assert!(registered, "fresh PeerId must register cleanly");
+
+    let (media, sfu_addr) = spawn_media_task("127.0.0.1:0".parse().unwrap(), peers)
+        .await
+        .expect("UDP bind on loopback:0 succeeds");
+
+    let mut a = SyntheticClient::new().await;
+    let mut b = SyntheticClient::new().await;
+    let a_id = PeerId::fresh();
+
+    let (b_offer, b_pending) = b.create_subscriber_offer();
+    let b_answer = media
+        .accept_offer(b_id.clone(), "golden-fanout-call".to_owned(), b_offer)
+        .await
+        .expect("SFU accepts B's RecvOnly subscriber offer");
+    b.accept_answer(b_pending, &b_answer)
+        .expect("B applies the SFU's answer");
+
+    let (a_offer, a_pending, publisher_mid) = a.create_audio_publisher_offer();
+    let a_answer = media
+        .accept_offer(a_id.clone(), "golden-fanout-call".to_owned(), a_offer)
+        .await
+        .expect("SFU accepts A's SendOnly publisher offer");
+    a.accept_answer(a_pending, &a_answer)
+        .expect("A applies the SFU's answer");
+
+    // 2. Seal the GOLDEN VECTOR as A's sender and assert the wire is EXACTLY the
+    //    canonical cross-stack bytes — the same wire web / iOS / Android each
+    //    produce + consume. This is what links the live-SFU forward to the
+    //    cross-runtime golden equality.
+    let mut a_sender = CallKey::from_seed(GOLDEN_SEED)
+        .participant_key(GOLDEN_LEAF)
+        .expect("A derives the golden sender participant key");
+    let b_receiver = CallKey::from_seed(GOLDEN_SEED)
+        .participant_key(GOLDEN_LEAF)
+        .expect("B derives the golden receiver participant key");
+    let sealed = a_sender
+        .seal_framed(GOLDEN_PLAINTEXT)
+        .expect("A seals the golden frame");
+    assert_eq!(
+        sealed, golden_wire,
+        "the sealed wire must be the canonical cross-stack golden vector — a \
+         mismatch is a wire-format regression (also caught by the lakko-calls \
+         golden test + the web / iOS / Android golden tests)"
+    );
+
+    // 3. The SFU forwards the golden bytes VERBATIM to B (`received_expected`
+    //    asserts B's forwarded payload is byte-equal to `sealed`).
+    let outcome = run_cross_fanout(
+        &mut a,
+        &mut b,
+        sfu_addr,
+        &media,
+        b_id.clone(),
+        &mut b_rx,
+        publisher_mid,
+        &sealed,
+    )
+    .await;
+    assert!(
+        outcome.received_expected,
+        "subscriber B never received the golden frame verbatim within \
+         {CROSS_FANOUT_DEADLINE:?}; a_connected={} b_connected={} reneg_answered={}",
+        outcome.a_connected, outcome.b_connected, outcome.reneg_answered,
+    );
+    assert!(
+        outcome.a_connected && outcome.b_connected,
+        "both peers must reach Connected"
+    );
+    assert!(
+        outcome.reneg_answered,
+        "the SFU-initiated renegotiation toward B must have been answered"
+    );
+
+    // 4. The forwarded golden bytes open back to the golden plaintext — the
+    //    canonical cross-stack wire survives the real SFU forward intact.
+    let opened = b_receiver
+        .open_framed(&sealed)
+        .expect("B opens the golden SFrame frame the SFU forwarded");
+    assert_eq!(
+        opened.as_slice(),
+        GOLDEN_PLAINTEXT,
+        "B must recover the golden plaintext after the SFU relayed the golden wire"
+    );
+}
+
 /// Cross-call isolation over the LIVE SFU (a hard SFU
 /// invariant): a publisher A in call ALPHA and a subscriber B
 /// in call BETA both complete their handshakes against the one
