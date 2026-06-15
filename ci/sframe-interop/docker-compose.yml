@@ -1,0 +1,78 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+# G-26 residual — live cross-runtime SFrame interop smoke (web leg).
+#
+# Brings up a MEDIA-ENABLED lakko-svc-sfu (the signaling-only sfu-e2e stack
+# does NOT route RTP; this one does) plus the fixture JWKS sidecar, so a real
+# headless-Chrome peer can publish + a second real headless-Chrome peer can
+# subscribe SFrame-sealed RTP through the production media task. The
+# `apps/web/e2e/sframe-interop/` Playwright spec drives the two browser peers
+# and asserts (via WebRTC `getStats`) that the subscriber DECODED the relayed
+# media — which can only happen if the receiver's real `RTCRtpScriptTransform`
+# SFrame worker opened the frames the publisher's real worker sealed.
+#
+# WHY `network_mode: host` (Linux CI only):
+#   The SFU media plane binds a UDP socket and `str0m` advertises ICE
+#   candidates from the BOUND address. Inside a bridge-networked container that
+#   address is the container-internal IP, unreachable from a host browser, and
+#   the SFU has no advertised-public-IP config. Host networking makes the SFU
+#   bind the media UDP port directly on the host, so the candidate it offers IS
+#   host-reachable by a Chromium running on the same host. This is a standard
+#   SFU-in-CI posture and works on `ubuntu-latest`; it does NOT work the same
+#   way on Docker Desktop for macOS (no host networking), so the LOCAL dev run
+#   of this smoke is Linux-only. The headless `cargo` SFrame-over-SFU proof
+#   (`services/sfu/tests/synthetic_client_e2e.rs`
+#   `golden_vector_round_trips_through_the_live_sfu`) needs no browser and runs
+#   everywhere; this stack adds the REAL-browser leg on top.
+
+services:
+  test-jwks:
+    image: nginx:1.27-alpine
+    container_name: lakko-sframe-interop-jwks
+    restart: "no"
+    # Reuse the sfu-e2e fixture JWKS + nginx config verbatim (the smoke mints a
+    # JWT signed by the matching fixture seed, exactly like sfu-e2e /
+    # g3-4-mobile).
+    volumes:
+      - ../sfu-e2e/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ../sfu-e2e/test-jwks/jwks.json:/srv/jwks.json:ro
+    network_mode: host
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - "wget --quiet --spider http://127.0.0.1:8080/.well-known/jwks.json || exit 1"
+      interval: 1s
+      timeout: 2s
+      retries: 10
+      start_period: 2s
+
+  sfu:
+    build:
+      context: ../..
+      dockerfile: services/sfu/Dockerfile
+    container_name: lakko-sframe-interop-sfu
+    restart: "no"
+    depends_on:
+      test-jwks:
+        condition: service_healthy
+    # Host networking — the media UDP candidate must be host-reachable (see the
+    # header note). The SFU binds the signaling WS on :7880, the metrics
+    # exporter on :9641, and the media plane on the UDP port below, all on the
+    # host's network namespace.
+    network_mode: host
+    environment:
+      # test-jwks listens on the host loopback under host networking.
+      LAKKO_SFU_JWKS_URL: "http://127.0.0.1:8080/.well-known/jwks.json"
+      LAKKO_SFU_JWKS_REFRESH_SECS: "5"
+      LAKKO_SFU_BIND: "0.0.0.0:7880"
+      LAKKO_SFU_METRICS_BIND: "0.0.0.0:9641"
+      # MEDIA ON — the whole point of this stack. A fixed UDP port so the CI
+      # firewall / runner can predict it; str0m advertises the host address as
+      # the ICE candidate.
+      LAKKO_SFU_MEDIA_BIND: "0.0.0.0:43210"
+      RUST_LOG: "info,lakko_svc_sfu=debug,lakko_call_jwt=info"
+    # No in-container healthcheck: the runtime image ships no wget/curl (only
+    # ca-certificates + libssl3 + tini). Under host networking the WORKFLOW
+    # polls `http://127.0.0.1:7880/health` from the host directly, which is
+    # more reliable than a shell-less in-container probe.

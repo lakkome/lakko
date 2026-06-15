@@ -1,0 +1,137 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+# G-26 residual — live cross-runtime SFrame interop smoke (web leg).
+#
+# The headless-achievable half of G-26 is already proven firsthand and gates
+# every CI run: `services/sfu/tests/synthetic_client_e2e.rs`
+# `golden_vector_round_trips_through_the_live_sfu` seals the canonical
+# cross-stack golden vector, pushes it through the production media task over a
+# real str0m ICE+DTLS forward, and the subscriber opens it back — so the exact
+# bytes every web / iOS / Android stack produces are proven to survive the live
+# SFU. What that test does NOT exercise is a REAL browser's
+# `RTCRtpScriptTransform` worker (it runs the wasm core directly). This
+# workflow adds that real-browser leg: two headless-Chrome peers join one SFU
+# call through the real `SfuCallSession` (real Encoded-Transform SFrame worker)
+# and the subscriber must DECODE the relayed media — observable via WebRTC
+# `getStats` — which can only happen if its worker opened what the publisher's
+# worker sealed.
+#
+# Trigger: `workflow_dispatch` only (needs a Linux runner with host networking
+# + Chromium; ~media-plane UDP). The native (iOS / Android) leg is a documented
+# extension on top of `g3-4-mobile.yml`'s emulator-runner — see
+# `ci/sframe-interop/README.md`.
+#
+# STATUS: orchestration scaffold. The compose is `docker compose config`-valid
+# and the workflow shape mirrors `sfu-e2e.yml` / `g3-4-mobile.yml`, but the
+# end-to-end browser run has NOT been executed firsthand (it needs the runner
+# environment). The Playwright harness under `apps/web/e2e/sframe-interop/` is
+# the starting artifact; wiring `@playwright/test` + the assertion is the first
+# task when this is armed.
+
+name: sframe-interop
+
+on:
+  workflow_dispatch: {}
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  web-leg:
+    name: real-browser SFrame interop over the live SFU (web leg)
+    # Linux is required: the SFU media plane uses host networking so str0m's
+    # ICE candidate is reachable by Chromium on the same host (see the compose
+    # header). macOS Docker has no host networking.
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "sframe-interop"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      # Mint a call-admission JWT signed by the fixture seed the test-jwks
+      # sidecar publishes — the same mechanism sfu-e2e + g3-4-mobile use. The
+      # example prints the compact JWS to stdout.
+      - name: mint a fixture-signed call JWT
+        id: jwt
+        run: |
+          # Signed by the fixture seed (0x42 x 32) the test-jwks sidecar pins
+          # (`ci/sfu-e2e/test-jwks/jwks.json`) — the same mechanism g3-4-mobile
+          # uses. Both browser peers share this call_id (same SFU call); a
+          # production arming may mint per-account tokens (see the README).
+          jwt=$(cargo run --quiet --release -p lakko-call-jwt \
+            --example mint_test_jwt -- \
+            --call-id deadbeef0000000000000000000000aa \
+            --account cafef00d0000000000000000000000bb \
+            --role participant \
+            --ttl-secs 600)
+          echo "::add-mask::$jwt"
+          echo "jwt=$jwt" >> "$GITHUB_OUTPUT"
+
+      # Build the wasm core the SFrame worker loads.
+      - name: build wasm
+        run: |
+          cd apps/web
+          npm ci
+          npm run build:wasm
+
+      # Bring up the media-enabled SFU + JWKS sidecar (host networking).
+      - name: docker compose up
+        run: |
+          docker compose -f ci/sframe-interop/docker-compose.yml up \
+            --build --detach --wait --wait-timeout 300
+
+      # The SFU has no in-container healthcheck (no wget in the image); poll the
+      # host port directly under host networking.
+      - name: wait for the SFU /health
+        run: |
+          for i in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:7880/health >/dev/null; then
+              echo "SFU healthy"; exit 0
+            fi
+            sleep 2
+          done
+          echo "SFU never became healthy"; exit 1
+
+      # Drive the two headless-Chrome peers. The harness reads the SFU URL + the
+      # minted JWT + the per-call SFrame seed from env. Chromium runs with fake
+      # media devices so a publisher has a track to seal without hardware.
+      #
+      # NOTE: this step is the residual work — it depends on `@playwright/test`
+      # (not yet a repo dependency) + the assertion wiring in
+      # `apps/web/e2e/sframe-interop/sframe-interop.spec.ts`. Until that lands,
+      # the step is a placeholder that fails loud rather than silently passing.
+      - name: run the real-browser SFrame interop smoke
+        env:
+          LAKKO_SFRAME_INTEROP_SFU_URL: "ws://127.0.0.1:7880"
+          LAKKO_SFRAME_INTEROP_JWT: ${{ steps.jwt.outputs.jwt }}
+        run: |
+          if [ ! -f apps/web/e2e/sframe-interop/sframe-interop.spec.ts ]; then
+            echo "harness spec missing"; exit 1
+          fi
+          echo "TODO(arming): cd apps/web && npx playwright test e2e/sframe-interop"
+          echo "scaffold not yet armed — see ci/sframe-interop/README.md"
+          exit 1
+
+      - name: SFU logs (on failure)
+        if: failure()
+        run: docker compose -f ci/sframe-interop/docker-compose.yml logs --no-color sfu || true
+
+      - name: docker compose down
+        if: always()
+        run: docker compose -f ci/sframe-interop/docker-compose.yml down --volumes
