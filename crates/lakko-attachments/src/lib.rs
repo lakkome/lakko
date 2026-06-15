@@ -406,6 +406,37 @@ pub enum AttachmentError {
     WireFormat(String),
 }
 
+/// Fuzz-only entry point. Marked `#[doc(hidden)]` — the sole harness
+/// surface for `crates/lakko-attachments/fuzz/`, **not** part of the
+/// supported public API.
+#[doc(hidden)]
+pub mod fuzz_api {
+    use super::parse;
+
+    /// Drive the receiver-side message-body decode chain on
+    /// attacker-controlled bytes.
+    ///
+    /// The input is an MLS Application message body, which a malicious
+    /// or compromised group member can craft arbitrarily. The harness
+    /// runs the full receive path a peer's message reaches: [`parse`]
+    /// (the `serde_json::from_slice::<Envelope>` decode → the
+    /// schema-version gate → the bare-UTF-8 `from_utf8_lossy` fallback),
+    /// then the per-ref base64 decoders ([`super::AttachmentRef::decode_blob_id`]
+    /// / `decode_key` / `decode_nonce`, each a base64 decode + a fixed
+    /// length check) on every decoded reference. Any panic / overflow /
+    /// slice-out-of-bounds here is a vulnerability.
+    #[must_use]
+    pub fn parse_message_body(bytes: &[u8]) -> bool {
+        let (_text, refs) = parse(bytes);
+        for r in &refs {
+            let _ = r.decode_blob_id();
+            let _ = r.decode_key();
+            let _ = r.decode_nonce();
+        }
+        !refs.is_empty()
+    }
+}
+
 // ============================================================================
 // Tests
 // ============================================================================
