@@ -52,3 +52,10 @@ path = "fuzz_targets/pairing_qr.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "history_bundle_open"
+path = "fuzz_targets/history_bundle_open.rs"
+test = false
+doc = false
+bench = false

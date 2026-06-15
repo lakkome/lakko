@@ -97,4 +97,19 @@ pub mod fuzz_api {
     pub fn decode_pairing_qr(bytes: &[u8]) -> bool {
         crate::pairing::decode(bytes, &[0u8; 16]).is_ok()
     }
+
+    /// Try to open a history-bundle (`history_bundle::open_bundle`), the
+    /// receiver-side I-6/I-7 path: the OUTER `SealedBundle` prost-decode + the
+    /// pinned-`algorithm` discriminator gate + the nonce-length check + the
+    /// AEAD-open + the inner `HistoryBundle` decode. `sealed_bytes` is
+    /// attacker-controlled — a malicious / corrupt bundle reaches this parser
+    /// before any authentication — so a bad `algorithm`, a wrong nonce length,
+    /// or a forged ciphertext must surface as a graceful `Err`, never a panic.
+    /// A fixed all-zero secret keeps the harness reproducible (the fuzzer cannot
+    /// forge a valid AEAD tag against it, so it exercises the decode + the gates
+    /// + the auth-failure path, which is exactly I-6/I-7).
+    #[must_use]
+    pub fn open_history_bundle(bytes: &[u8]) -> bool {
+        crate::history_bundle::open_bundle(&[0u8; 32], bytes).is_ok()
+    }
 }
