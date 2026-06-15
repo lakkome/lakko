@@ -90,7 +90,7 @@ jobs:
         if: failure()
         run: |
           mkdir -p artifacts
-          for svc in discovery transparency discovery-db transparency-db; do
+          for svc in discovery transparency witness discovery-db transparency-db witness-db; do
             docker compose -f ci/recovery-e2e/docker-compose.yml logs --no-color "$svc" \
               > "artifacts/$svc.log" || true
           done

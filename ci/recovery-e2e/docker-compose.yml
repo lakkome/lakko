@@ -53,6 +53,55 @@ services:
       retries: 20
       start_period: 5s
 
+  # ADR-0020 — the independent witness co-signer. Its own DB; pins the
+  # operator key (the fixed-seed fixture below); shares the cosign secret with
+  # transparency. In production the witness MUST run in a separate trust domain;
+  # here it is co-located for the test.
+  witness-db:
+    image: mariadb:11
+    container_name: lakko-recovery-e2e-witness-db
+    restart: "no"
+    environment:
+      MARIADB_ROOT_PASSWORD: rootpw
+      MARIADB_DATABASE: lakko_witness
+      MARIADB_USER: lakko
+      MARIADB_PASSWORD: devpass
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+
+  witness:
+    build:
+      context: ../..
+      dockerfile: services/witness/Dockerfile
+    container_name: lakko-recovery-e2e-witness
+    restart: "no"
+    depends_on:
+      witness-db:
+        condition: service_healthy
+    environment:
+      LAKKO_BIND: "0.0.0.0:8088"
+      LAKKO_WITNESS_DATABASE_URL: "mysql://lakko:devpass@witness-db:3306/lakko_witness"
+      # The PINNED operator key — base64 of the Ed25519 verifying key derived
+      # from the transparency container's fixed seed (0xAB x 32). Pinned by the
+      # `fixed_seed_env_override_derives_deterministic_key` test.
+      LAKKO_WITNESS_OPERATOR_PUBKEY: "JIrL26+eBQGW3nBL6i1odw5RkVDRA7WH2uLZytU92TA="
+      # base64(16x 0x77). Shared with transparency (presented as a Bearer on
+      # POST /witness/cosign).
+      LAKKO_WITNESS_COSIGN_SECRET: "d3d3d3d3d3d3d3d3d3d3dw=="
+      RUST_LOG: "info,lakko_svc_witness=debug"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8088/ready || exit 1"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+      start_period: 3s
+    ports:
+      - "127.0.0.1:8088:8088"
+
   transparency:
     build:
       context: ../..
@@ -61,6 +110,8 @@ services:
     restart: "no"
     depends_on:
       transparency-db:
+        condition: service_healthy
+      witness:
         condition: service_healthy
     environment:
       LAKKO_BIND: "0.0.0.0:8087"
@@ -71,6 +122,12 @@ services:
       # G-30 #2: refuse a new binding with no leaf_auth (the e2e's step-5
       # negative depends on this).
       LAKKO_TRANSPARENCY_REQUIRE_LEAF_AUTH: "1"
+      # ADR-0020: a FIXED operator seed (0xAB x 32) so the witness can pin the
+      # derived verifying key (dev / e2e only).
+      LAKKO_TRANSPARENCY_OPERATOR_SEED_HEX: "abababababababababababababababababababababababababababababababab"
+      # Arm witness co-signing toward the witness container.
+      LAKKO_TRANSPARENCY_WITNESS_URL: "http://witness:8088"
+      LAKKO_TRANSPARENCY_WITNESS_COSIGN_SECRET: "d3d3d3d3d3d3d3d3d3d3dw=="
       RUST_LOG: "info,lakko_svc_transparency=debug"
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8087/ready || exit 1"]

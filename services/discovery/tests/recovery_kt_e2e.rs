@@ -40,8 +40,8 @@ use lakko_mls::Identity;
 use lakko_pow::solve;
 use lakko_transparency::{
     sign_leaf_genesis, verify_inclusion, verify_leaf_genesis, verify_supersession_chain,
-    InclusionProof, LogEntry, PinnedIdentity, RotationEvidence, SignedRoot, SupersessionProof,
-    TreeHash,
+    verify_witness_cosig, InclusionProof, LogEntry, PinnedIdentity, RotationEvidence, SignedRoot,
+    SupersessionProof, TreeHash,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -58,6 +58,11 @@ fn discovery_url() -> String {
 fn transparency_url() -> String {
     std::env::var("LAKKO_RECOVERY_E2E_TRANSPARENCY_URL")
         .unwrap_or_else(|_| "http://127.0.0.1:8087".to_owned())
+}
+
+fn witness_url() -> String {
+    std::env::var("LAKKO_RECOVERY_E2E_WITNESS_URL")
+        .unwrap_or_else(|_| "http://127.0.0.1:8088".to_owned())
 }
 
 /// The shared session-token secret (base64). Must match the discovery
@@ -109,6 +114,15 @@ struct RootRes {
     log_size: u64,
     timestamp_unix: u64,
     signature_b64: String,
+    /// ADR-0020: the witness co-signature, present when the witness
+    /// integration is on.
+    #[serde(default)]
+    witness_cosig_b64: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct WitnessKeyRes {
+    witness_pubkey_b64: String,
 }
 
 #[derive(Deserialize)]
@@ -224,6 +238,11 @@ async fn poll_latest(
 }
 
 async fn fetch_root(client: &reqwest::Client) -> SignedRoot {
+    fetch_root_with_cosig(client).await.0
+}
+
+/// Fetch the signed root AND its optional witness co-signature (ADR-0020).
+async fn fetch_root_with_cosig(client: &reqwest::Client) -> (SignedRoot, Option<Vec<u8>>) {
     let r: RootRes = client
         .get(format!("{}/transparency/root", transparency_url()))
         .send()
@@ -244,12 +263,35 @@ async fn fetch_root(client: &reqwest::Client) -> SignedRoot {
         &B64.decode(r.signature_b64.as_bytes()).expect("sig b64"),
     )
     .expect("signature is 64 bytes");
-    SignedRoot {
-        tree_root,
-        log_size: r.log_size,
-        timestamp_unix: r.timestamp_unix,
-        signature,
-    }
+    let cosig = r
+        .witness_cosig_b64
+        .as_ref()
+        .map(|c| B64.decode(c.as_bytes()).expect("witness cosig b64"));
+    (
+        SignedRoot {
+            tree_root,
+            log_size: r.log_size,
+            timestamp_unix: r.timestamp_unix,
+            signature,
+        },
+        cosig,
+    )
+}
+
+/// Fetch the witness's published verifying key (ADR-0020).
+async fn fetch_witness_key(client: &reqwest::Client) -> Vec<u8> {
+    let r: WitnessKeyRes = client
+        .get(format!("{}/witness/key", witness_url()))
+        .send()
+        .await
+        .expect("witness key request")
+        .error_for_status()
+        .expect("witness key status")
+        .json()
+        .await
+        .expect("witness key body");
+    B64.decode(r.witness_pubkey_b64.as_bytes())
+        .expect("witness pubkey b64")
 }
 
 /// Fetch + flatten the audit path for a leaf index.
@@ -492,4 +534,24 @@ async fn recovery_kt_pipeline_publish_log_fetch_verify_rotate() {
         reqwest::StatusCode::NOT_FOUND,
         "a keyless (no leaf_auth) binding must never enter the log"
     );
+
+    // Step 6 — ADR-0020 witness co-signing: the served root carries a witness
+    // co-signature that verifies against the witness's published key over the
+    // served (tree_root, log_size), AND the operator signature verifies too.
+    // This proves the transparency -> witness cosign round-trip live — the
+    // operator cannot serve a root the independent witness has not co-signed
+    // (the split-view defence).
+    let witness_key = fetch_witness_key(&client).await;
+    let (served_root, cosig) = fetch_root_with_cosig(&client).await;
+    let cosig = cosig.expect("the served root carries a witness co-signature");
+    served_root
+        .verify(&operator_vk)
+        .expect("operator signature on the served root verifies");
+    verify_witness_cosig(
+        &cosig,
+        &witness_key,
+        &served_root.tree_root,
+        served_root.log_size,
+    )
+    .expect("the witness co-signature verifies over the served root");
 }

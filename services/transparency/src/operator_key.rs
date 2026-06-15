@@ -61,6 +61,52 @@ pub(crate) async fn load_or_init_operator_key(
     signing_key_from_seed_bytes(&seed_bytes)
 }
 
+/// Dev / e2e override: when `LAKKO_TRANSPARENCY_OPERATOR_SEED_HEX` is set (64
+/// hex chars = 32 bytes), use that FIXED operator seed instead of the
+/// DB-generated key. This makes the operator verifying key DETERMINISTIC so a
+/// test / e2e can compute it ahead of time (e.g. for the witness to pin, or for
+/// a committed fixture, mirroring the sfu-e2e `LAKKO_SFU_E2E_SEED_HEX` pattern).
+///
+/// Returns `None` when the env var is unset/empty (production: the random
+/// DB-generated key via [`load_or_init_operator_key`]).
+///
+/// # Errors
+///
+/// Fails loud when the value is set but not 64 valid hex chars.
+pub(crate) fn operator_key_from_env() -> anyhow::Result<Option<signing::SigningKey>> {
+    let Ok(hex) = std::env::var("LAKKO_TRANSPARENCY_OPERATOR_SEED_HEX") else {
+        return Ok(None);
+    };
+    let hex = hex.trim();
+    if hex.is_empty() {
+        return Ok(None);
+    }
+    let bytes = decode_hex(hex)
+        .context("LAKKO_TRANSPARENCY_OPERATOR_SEED_HEX is not valid hex")?;
+    if bytes.len() != 32 {
+        anyhow::bail!(
+            "LAKKO_TRANSPARENCY_OPERATOR_SEED_HEX decodes to {} bytes; need 32 (64 hex chars)",
+            bytes.len()
+        );
+    }
+    let mut seed = [0u8; 32];
+    seed.copy_from_slice(&bytes);
+    Ok(Some(signing::SigningKey::from_seed(&seed)))
+}
+
+/// Decode a hex string to bytes (no `hex` crate dep for one call site).
+fn decode_hex(s: &str) -> anyhow::Result<Vec<u8>> {
+    if s.len() % 2 != 0 {
+        anyhow::bail!("hex string has odd length");
+    }
+    (0..s.len())
+        .step_by(2)
+        .map(|i| {
+            u8::from_str_radix(&s[i..i + 2], 16).map_err(|e| anyhow::anyhow!("bad hex: {e}"))
+        })
+        .collect()
+}
+
 /// Rebuild a [`signing::SigningKey`] from a persisted 32-byte seed,
 /// failing loud on a wrong length.
 fn signing_key_from_seed_bytes(seed_bytes: &[u8]) -> anyhow::Result<signing::SigningKey> {
@@ -99,5 +145,19 @@ mod tests {
         assert!(signing_key_from_seed_bytes(&[0u8; 16]).is_err());
         assert!(signing_key_from_seed_bytes(&[0u8; 33]).is_err());
         assert!(signing_key_from_seed_bytes(&[]).is_err());
+    }
+
+    #[test]
+    fn fixed_seed_env_override_derives_deterministic_key() {
+        // The e2e pins the operator key via a fixed seed; assert the derived
+        // verifying key is the committed fixture (ci/recovery-e2e wires the
+        // witness's LAKKO_WITNESS_OPERATOR_PUBKEY to this).
+        use base64::engine::general_purpose::STANDARD as B64;
+        use base64::Engine as _;
+        let key = signing::SigningKey::from_seed(&[0xAB; 32]);
+        assert_eq!(
+            B64.encode(key.verifying_key().to_bytes()),
+            "JIrL26+eBQGW3nBL6i1odw5RkVDRA7WH2uLZytU92TA="
+        );
     }
 }

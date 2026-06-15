@@ -149,9 +149,18 @@ async fn main() -> Result<()> {
     // Operator signing key — generated on first boot, persisted, rebuilt
     // from the seed at every start. The derived verifying key is the
     // trust anchor.
-    let operator = operator_key::load_or_init_operator_key(&pool)
-        .await
-        .context("load operator signing key")?;
+    let operator = match operator_key::operator_key_from_env()? {
+        Some(k) => {
+            tracing::warn!(
+                "using LAKKO_TRANSPARENCY_OPERATOR_SEED_HEX — a FIXED operator seed \
+                 (dev / e2e only; production uses the DB-generated key)"
+            );
+            k
+        }
+        None => operator_key::load_or_init_operator_key(&pool)
+            .await
+            .context("load operator signing key")?,
+    };
 
     // Rebuild the Merkle tree from the durable rows. Fails loud on a
     // corrupt (non-contiguous) `idx` sequence rather than serving a

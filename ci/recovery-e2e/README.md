@@ -27,6 +27,12 @@ The driver is `services/discovery/tests/recovery_kt_e2e.rs` (`#[ignore]`-gated).
 5. **Negative (C-56)** — a new-key binding with NO `leaf_auth` is refused at the
    transparency append (`LAKKO_TRANSPARENCY_REQUIRE_LEAF_AUTH=1`), so it never
    enters the log.
+6. **Witness co-signing (ADR-0020)** — `GET /transparency/root` carries a
+   witness co-signature; it verifies (`verify_witness_cosig`) against the
+   witness's published key over the served `(tree_root, log_size)`, and the
+   operator signature verifies too. This proves the transparency -> witness
+   cosign round-trip live: the operator cannot serve a root the independent
+   witness has not co-signed (the split-view defence).
 
 ## Scope
 
@@ -38,12 +44,18 @@ The driver is `services/discovery/tests/recovery_kt_e2e.rs` (`#[ignore]`-gated).
 - **No auth / OPAQUE.** Discovery's upload is gated by a shared-secret session
   token (`lakko-auth-token`, `LAKKO_SESSION_TOKEN_SECRET`), so the driver mints
   it directly — the auth service is not in the stack.
-- **No committed operator-key fixture.** The transparency operator key is
-  generated + persisted on first boot; the driver fetches it from
-  `GET /transparency/operator-key` at runtime and uses it as the trust anchor.
-  (A production client PINS the operator key out-of-band; for this server-side
-  test, fetching it is correct — the test validates the log mechanics, not the
-  client's pin-security.)
+- **Operator key fetched at runtime; witness pins a fixed-seed fixture.** The
+  driver fetches the operator key from `GET /transparency/operator-key` and the
+  witness key from `GET /witness/key` at runtime (a production client PINS both
+  out-of-band; for this server-side test, fetching is correct — it validates the
+  log mechanics, not the pin-security). The transparency container runs with a
+  FIXED operator seed (`LAKKO_TRANSPARENCY_OPERATOR_SEED_HEX = 0xAB×32`) so the
+  witness can PIN the derived verifying key via `LAKKO_WITNESS_OPERATOR_PUBKEY`
+  (the `fixed_seed_env_override_derives_deterministic_key` test pins the value);
+  this mirrors the sfu-e2e fixture-seed pattern.
+- **The witness is co-located here; production needs a separate trust domain.**
+  ADR-0020's split-view guarantee holds only when the witness runs in a
+  different trust domain from the operator. The e2e co-locates it for testing.
 
 ## Run it locally
 
@@ -74,6 +86,7 @@ at a non-default stack:
 |---|---|---|
 | `LAKKO_RECOVERY_E2E_DISCOVERY_URL` | `http://127.0.0.1:8084` | discovery base URL |
 | `LAKKO_RECOVERY_E2E_TRANSPARENCY_URL` | `http://127.0.0.1:8087` | transparency base URL |
+| `LAKKO_RECOVERY_E2E_WITNESS_URL` | `http://127.0.0.1:8088` | witness base URL (ADR-0020) |
 | `LAKKO_RECOVERY_E2E_SESSION_SECRET` | `base64(32× 0x5e)` | session-token secret (must match the discovery container's `LAKKO_SESSION_TOKEN_SECRET`) |
 
 The compose sets the discovery container's PoW difficulty to `0`
