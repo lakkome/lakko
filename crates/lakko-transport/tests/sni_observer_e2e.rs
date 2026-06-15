@@ -320,6 +320,88 @@ fn extract_string_field<'a>(line: &'a str, field: &str) -> Option<&'a str> {
 }
 
 // ===========================================================
+// G5-7-gfw-string — the observer as a string-match censor
+// ===========================================================
+
+/// Open a TLS connection to the observer carrying `sni` (the handshake is
+/// dropped after the ClientHello — the observer never forwards), let the log
+/// flush, and return the most recent JSONL line carrying that SNI. Panics with
+/// a tail dump if none is found.
+async fn observe_with_sni(sni: &str) -> String {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let config = ClientConfig::builder()
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(AcceptAnyCert))
+        .with_no_client_auth();
+    let connector = TlsConnector::from(Arc::new(config));
+    let server_name = ServerName::try_from(sni.to_owned()).expect("test SNI is a valid DNS name");
+    let stream = TcpStream::connect(observer_addr())
+        .await
+        .expect("TCP connect to observer must succeed — is the compose stack up?");
+    let _ = tokio::time::timeout(
+        Duration::from_secs(3),
+        connector.connect(server_name, stream),
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let log_path = observer_log_path();
+    let body = tokio::fs::read_to_string(&log_path)
+        .await
+        .unwrap_or_else(|e| panic!("open observer log {}: {e}", log_path.display()));
+    body.lines()
+        .rev()
+        .find(|line| line.contains(&format!(r#""observed_sni":"{sni}""#)))
+        .map(str::to_owned)
+        .unwrap_or_else(|| {
+            panic!(
+                "observer log must contain a line with observed_sni={sni:?}.\nTail:\n{}",
+                body.lines().rev().take(5).collect::<Vec<_>>().join("\n"),
+            )
+        })
+}
+
+/// G5-7-gfw-string — with `LAKKO_SNI_BLOCKLIST` set (the compose pins
+/// `blocked-target.example,*.evil.example`), the observer acts as a GFW-style
+/// string-match censor: a listed SNI is flagged `blocked:true` (exact AND
+/// suffix forms), an unlisted SNI stays `blocked:false`. Proves the detection
+/// end-to-end over the dockerised observer.
+#[tokio::test]
+#[ignore = "requires ci/censorship-lab docker compose stack — see ci/censorship-lab/README.md"]
+async fn observer_blocks_a_listed_sni_and_allows_others() {
+    // Exact match -> blocked, with the rule named.
+    let blocked = observe_with_sni("blocked-target.example").await;
+    assert!(
+        blocked.contains(r#""blocked":true"#),
+        "a blocklisted SNI must be flagged blocked:true.\nline: {blocked}"
+    );
+    assert_eq!(
+        extract_string_field(&blocked, "blocked_by"),
+        Some("exact:blocked-target.example"),
+        "blocked_by must name the matched rule.\nline: {blocked}"
+    );
+
+    // Suffix match (`*.evil.example`) -> blocked too.
+    let sub = observe_with_sni("node.evil.example").await;
+    assert!(
+        sub.contains(r#""blocked":true"#),
+        "a *.evil.example subdomain must be blocked.\nline: {sub}"
+    );
+
+    // An unlisted SNI is allowed (the censor lets it through).
+    let allowed = observe_with_sni("allowed-clienthello.example").await;
+    assert!(
+        allowed.contains(r#""blocked":false"#),
+        "an unlisted SNI must be allowed (blocked:false).\nline: {allowed}"
+    );
+    assert_eq!(
+        extract_string_field(&allowed, "blocked_by"),
+        Some("null"),
+        "an allowed SNI must carry blocked_by:null.\nline: {allowed}"
+    );
+}
+
+// ===========================================================
 // G5-7-transport-matrix iter1 — Shadowsocks-2022 leaks-nothing
 // ===========================================================
 //
@@ -414,15 +496,24 @@ async fn observer_records_shadowsocks_as_non_tls() {
     let mut body = String::new();
     file.read_to_string(&mut body).await.expect("read log");
 
-    // The most recent line should be ours. SS-2022 does
-    // not embed a SNI we could grep for, so we identify
-    // our line by the timestamp ordering: tail of file =
-    // most recent. We then assert the shape.
+    // SS-2022 does not embed a SNI we could grep for, so we
+    // identify our line as the most recent TCP observation
+    // with a null SNI (the only non-TLS TCP producer in the
+    // suite is this test). We do NOT take the bare file tail:
+    // other tests' TLS connections append non-null-SNI lines
+    // concurrently, so the tail is not reliably ours.
     let last = body
         .lines()
         .rev()
-        .next()
-        .unwrap_or_else(|| panic!("observer log is empty: {}", log_path.display()));
+        .find(|l| {
+            l.contains(r#""transport":"tcp""#) && l.contains(r#""observed_sni":null"#)
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "observer log has no tcp null-SNI line (the shadowsocks observation): {}",
+                log_path.display()
+            )
+        });
 
     // `observed_sni: null` is what an unparseable / non-
     // TLS prelude looks like in the JSONL. The extractor
@@ -450,6 +541,16 @@ async fn observer_records_shadowsocks_as_non_tls() {
     assert_eq!(
         ja4, "null",
         "shadowsocks bytes must not yield a JA4 fingerprint. line: {last}",
+    );
+
+    // G5-7-gfw-string evasion — a non-TLS / null-SNI flow is ALLOWED by the
+    // string-match censor (LAKKO_SNI_BLOCKLIST is armed in the compose): a
+    // GFW-style filter cannot block what it cannot read. This is the load-
+    // bearing anti-censorship property — Shadowsocks-2022 leaks no SNI, so the
+    // censor has nothing to match.
+    assert!(
+        last.contains(r#""blocked":false"#),
+        "a null-SNI (non-TLS) flow must evade the string-match censor (blocked:false). line: {last}",
     );
 
     // first_bytes_hex must be present + non-empty (the

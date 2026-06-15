@@ -25,6 +25,12 @@ services:
     environment:
       LAKKO_SNI_BIND: "0.0.0.0:8443"
       LAKKO_SNI_LOG: "/var/log/sni-observer/observed.jsonl"
+      # G5-7-gfw-string — run the observer as a GFW-style SNI
+      # string-match censor. `observer_blocks_a_listed_sni_and_allows_others`
+      # connects with a SNI in this list (-> blocked:true) + one outside it
+      # (-> blocked:false), and a Shadowsocks non-TLS flow (observed_sni null)
+      # is blocked:false (the evasion). Exact + suffix forms.
+      LAKKO_SNI_BLOCKLIST: "blocked-target.example,*.evil.example"
       RUST_LOG: "info,sni_observer=debug"
     ports:
       # Pinned to 127.0.0.1 so a stray Internet host
