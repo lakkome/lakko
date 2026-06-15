@@ -148,7 +148,7 @@ just ci                        # everything CI does, locally
 
 ## Fuzz harnesses
 
-`crates/lakko-mls/fuzz/`, `crates/lakko-proto/fuzz/`, `crates/lakko-contacts/fuzz/`, `crates/lakko-channels/fuzz/`, `crates/lakko-transport/fuzz/`, `crates/lakko-tuf/fuzz/`, `crates/lakko-call-jwt/fuzz/`, `crates/lakko-backup/fuzz/`, `crates/lakko-transparency/fuzz/`, and `services/sfu/fuzz/` are separate crates outside the main workspace (they need nightly + libfuzzer-sys). Targets live in `fuzz/fuzz_targets/*.rs`.
+`crates/lakko-mls/fuzz/`, `crates/lakko-proto/fuzz/`, `crates/lakko-contacts/fuzz/`, `crates/lakko-channels/fuzz/`, `crates/lakko-transport/fuzz/`, `crates/lakko-tuf/fuzz/`, `crates/lakko-call-jwt/fuzz/`, `crates/lakko-backup/fuzz/`, `crates/lakko-transparency/fuzz/`, `crates/lakko-attest/fuzz/`, and `services/sfu/fuzz/` are separate crates outside the main workspace (they need nightly + libfuzzer-sys). Targets live in `fuzz/fuzz_targets/*.rs`.
 
 Current targets:
 - **`lakko-mls/mls_message`** — `MlsMessageIn` wire-format parser (TLS codec)
@@ -193,6 +193,7 @@ Current targets:
 - **`lakko-transparency/verify_supersession_chain`** — the full rotation chain gate: root sig + no-rollback + Merkle inclusion + the old-key supersession proof + strictly-newer version + freshness, on attacker-controlled inputs
 - **`lakko-transparency/verify_consistency`** — `verify_consistency(old_size, old_root, new_size, new_root, proof)` (G-30 #1, ADR-0020): the RFC 6962 §2.1.2 consistency-proof verifier, reconstructing both roots from attacker-controlled proof bytes (a fork must fail)
 - **`lakko-transparency/verify_witness_cosig`** — `verify_witness_cosig(bytes, witness_key, expected_tree_root, expected_log_size)` (ADR-0020): the 105-byte cosig blob bounded parse + binding-to-served-root + Ed25519-verify, the FFI surface a malicious serving tier can feed arbitrary bytes
+- **`lakko-attest/attestation_open`** — `ActionAttestation::open(bytes, verifying_key)` (G-13, [ADR-0015](docs/adr/0015-device-removal-authorization.md)): the device-removal attestation parser — a fixed-layout 121-byte blob (`version‖account_id(16)‖action_hash(32)‖expires_at(8 BE)‖sig(64)`) that arrives ALONGSIDE a peer's DeviceGroup `Remove` commit, so a malformed envelope is fully attacker-controlled and reaches this bounded parser before any state is consulted. Opened against a FIXED verifying key (the fuzzer cannot forge a valid Ed25519 sig, so it exercises the length / version / field-slicing / signature-parse / verify-fail path)
 
 The `fuzz_api` module in `lakko-mls` (marked `#[doc(hidden)]`) is the only public entry point for harnesses; it is not part of the supported public API.
 

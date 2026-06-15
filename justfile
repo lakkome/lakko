@@ -87,6 +87,7 @@ fuzz-check:
     cargo check --manifest-path crates/lakko-transparency/fuzz/Cargo.toml
     cargo check --manifest-path crates/lakko-call-jwt/fuzz/Cargo.toml
     cargo check --manifest-path crates/lakko-backup/fuzz/Cargo.toml
+    cargo check --manifest-path crates/lakko-attest/fuzz/Cargo.toml
     cargo check --manifest-path services/sfu/fuzz/Cargo.toml
 
 # Build `lakko-ffi-wasm` for `wasm32-unknown-unknown`. CI runs this
@@ -129,10 +130,14 @@ fuzz-list:
     @ls crates/lakko-transport/fuzz/fuzz_targets/ | sed 's/\.rs$//' | sed 's/^/  /'
     @echo "lakko-tuf:"
     @ls crates/lakko-tuf/fuzz/fuzz_targets/ | sed 's/\.rs$//' | sed 's/^/  /'
+    @echo "lakko-transparency:"
+    @ls crates/lakko-transparency/fuzz/fuzz_targets/ | sed 's/\.rs$//' | sed 's/^/  /'
     @echo "lakko-call-jwt:"
     @ls crates/lakko-call-jwt/fuzz/fuzz_targets/ | sed 's/\.rs$//' | sed 's/^/  /'
     @echo "lakko-backup:"
     @ls crates/lakko-backup/fuzz/fuzz_targets/ | sed 's/\.rs$//' | sed 's/^/  /'
+    @echo "lakko-attest:"
+    @ls crates/lakko-attest/fuzz/fuzz_targets/ | sed 's/\.rs$//' | sed 's/^/  /'
     @echo "lakko-svc-sfu:"
     @ls services/sfu/fuzz/fuzz_targets/ | sed 's/\.rs$//' | sed 's/^/  /'
 

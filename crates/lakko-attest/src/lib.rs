@@ -222,6 +222,29 @@ pub fn verify_bound(
     Ok(att)
 }
 
+/// Fuzz-only harness entry points (`#[doc(hidden)]`, not part of the supported
+/// public API) — the lakko-mls `fuzz_api` posture, letting the out-of-tree
+/// `fuzz/` crate drive the attestation parser without a lakko-crypto dependency
+/// of its own.
+#[doc(hidden)]
+pub mod fuzz_api {
+    use super::{ActionAttestation, SigningKey};
+
+    /// Try to [`ActionAttestation::open`] the bytes against a FIXED verifying
+    /// key. The bytes are attacker-controlled — an attestation rides alongside a
+    /// peer's DeviceGroup `Remove` commit (ADR-0015), so a malformed envelope
+    /// reaches this bounded parser before any state is consulted — and the
+    /// parser must stay panic-free on any input. The fuzzer cannot forge a valid
+    /// signature against the fixed key, so it exercises the length / version /
+    /// field-slicing / signature-parse / verify-fail path. Returns `true` on a
+    /// (vanishingly rare) success.
+    #[must_use]
+    pub fn open_attestation(bytes: &[u8]) -> bool {
+        let vk = SigningKey::from_seed(&[0x11; 32]).verifying_key();
+        ActionAttestation::open(bytes, &vk).is_ok()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
