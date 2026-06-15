@@ -164,6 +164,7 @@ mod tests {
             store: Arc::new(LogStore::from_log(log)),
             append_secret: secret,
             require_leaf_auth: false,
+            witness: None,
         }
     }
 

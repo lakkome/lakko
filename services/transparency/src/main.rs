@@ -54,6 +54,7 @@ pub(crate) mod handlers;
 pub(crate) mod operator_key;
 pub(crate) mod service_auth;
 pub(crate) mod store;
+pub(crate) mod witness_client;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -107,6 +108,11 @@ pub(crate) struct AppState {
     /// A PRESENT-but-invalid `leaf_auth` is always refused regardless. Read
     /// from `LAKKO_TRANSPARENCY_REQUIRE_LEAF_AUTH` (default `true`).
     pub(crate) require_leaf_auth: bool,
+    /// ADR-0020 Sprint 4: the witness cosign client, or `None` when the
+    /// integration is unconfigured (`GET /transparency/root` then serves the
+    /// root WITHOUT a witness co-signature — the transition fallback). Built
+    /// from `LAKKO_TRANSPARENCY_WITNESS_URL` + `…_WITNESS_COSIGN_SECRET`.
+    pub(crate) witness: Option<Arc<witness_client::WitnessClient>>,
 }
 
 #[tokio::main]
@@ -188,11 +194,23 @@ async fn main() -> Result<()> {
         );
     }
 
+    // ADR-0020 Sprint 4: the witness cosign client (off when unconfigured).
+    let witness = witness_client::WitnessClient::from_env().map(Arc::new);
+    if witness.is_some() {
+        tracing::info!("witness co-signing ON — /transparency/root serves a witness co-signature");
+    } else {
+        tracing::warn!(
+            "witness co-signing OFF (LAKKO_TRANSPARENCY_WITNESS_URL / _COSIGN_SECRET unset) — \
+             roots served without a co-signature (split-view resistance disabled)"
+        );
+    }
+
     let state = AppState {
         db: pool.clone(),
         store: Arc::new(store),
         append_secret,
         require_leaf_auth,
+        witness,
     };
 
     let app = build_app(state);

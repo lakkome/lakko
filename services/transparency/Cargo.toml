@@ -61,6 +61,13 @@ lakko-transparency.workspace = true
 # key is the trust anchor clients pin out-of-band.
 lakko-crypto.workspace = true
 
+# ADR-0020 Sprint 4 — the witness-cosign client (transparency -> witness
+# /witness/cosign). Same rustls posture as the discovery service's reqwest.
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "rustls-tls",
+] }
+
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"

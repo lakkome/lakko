@@ -38,11 +38,14 @@
 
 use lakko_transparency::{
     verify_leaf_genesis, verify_supersession, InMemoryLog, InclusionProof, LogEntry, SignedRoot,
+    TreeHash,
 };
 use sqlx::MySqlPool;
 use tokio::sync::Mutex;
 
 use lakko_crypto::signing;
+
+use crate::witness_client::WitnessClient;
 
 /// Errors the store surfaces to the HTTP layer.
 #[derive(Debug, thiserror::Error)]
@@ -116,9 +119,22 @@ pub(crate) struct LatestEntry {
     pub(crate) leaf_auth: Option<Vec<u8>>,
 }
 
+/// The last witness-co-signed root (ADR-0020 Sprint 4). Only the
+/// `(tree_root, log_size)` bind the co-signature (the served root is re-signed
+/// fresh each request — the operator signature carries a timestamp, the
+/// co-signature does not), so that pair + the opaque co-sig blob is all we keep.
+#[derive(Clone)]
+struct Witnessed {
+    tree_root: TreeHash,
+    log_size: u64,
+    cosig: Vec<u8>,
+}
+
 /// Persistent append-only transparency log.
 pub(crate) struct LogStore {
     inner: Mutex<InMemoryLog>,
+    /// The last witness-co-signed root, cached + DB-backed (ADR-0020 Sprint 4).
+    witnessed: Mutex<Option<Witnessed>>,
 }
 
 impl LogStore {
@@ -163,8 +179,18 @@ impl LogStore {
         }
 
         tracing::info!(size = log.size(), "transparency log rebuilt from DB");
+
+        // ADR-0020 Sprint 4: restore the last witness-co-signed root, so a
+        // restart serves the same co-signed `(tree_root, log_size)` without
+        // re-co-signing from scratch.
+        let witnessed = load_witnessed(pool).await?;
+        if let Some(w) = &witnessed {
+            tracing::info!(log_size = w.log_size, "restored witnessed root co-signature");
+        }
+
         Ok(Self {
             inner: Mutex::new(log),
+            witnessed: Mutex::new(witnessed),
         })
     }
 
@@ -174,6 +200,7 @@ impl LogStore {
     pub(crate) fn from_log(log: InMemoryLog) -> Self {
         Self {
             inner: Mutex::new(log),
+            witnessed: Mutex::new(None),
         }
     }
 
@@ -343,6 +370,73 @@ impl LogStore {
         log.sign_current_root(timestamp_unix)
     }
 
+    /// Sign the current head root and (when the witness integration is on)
+    /// attach a valid witness co-signature (ADR-0020 Sprint 4).
+    ///
+    /// Lazy co-signing: when the head has grown past the last-co-signed size it
+    /// calls the witness with a consistency proof + caches the result; otherwise
+    /// it reuses the cached co-signature, which binds the same
+    /// `(tree_root, log_size)` and so stays valid for the freshly-signed root.
+    /// Returns `(signed_root, Some(cosig))`, or `(signed_root, None)` when the
+    /// witness integration is off or the witness is unreachable / refuses (a
+    /// stale co-sig would bind-mismatch the client, so `None` is the honest
+    /// fail-closed signal — the client retries once co-signing catches up).
+    pub(crate) async fn root_with_cosig(
+        &self,
+        pool: &MySqlPool,
+        witness: Option<&WitnessClient>,
+        timestamp_unix: u64,
+    ) -> (SignedRoot, Option<Vec<u8>>) {
+        let cached = self.witnessed.lock().await.clone();
+        let witnessed_size = cached.as_ref().map_or(0, |w| w.log_size);
+
+        // Snapshot the head under the inner lock, then DROP it before any
+        // witness network call so appends never block on the round-trip.
+        let (head_root, head_size, proof) = {
+            let log = self.inner.lock().await;
+            let head_root = log.sign_current_root(timestamp_unix);
+            let head_size = log.size();
+            let proof = if head_size > witnessed_size {
+                log.consistency_proof(witnessed_size)
+            } else {
+                Vec::new()
+            };
+            (head_root, head_size, proof)
+        };
+
+        // The head is still at the witnessed size + root → the cached co-sig
+        // binds the same `(tree_root, log_size)`, valid for the fresh root.
+        if let Some(w) = &cached {
+            if w.log_size == head_size && w.tree_root == head_root.tree_root {
+                return (head_root, Some(w.cosig.clone()));
+            }
+        }
+
+        // The head grew (or nothing co-signed yet) — co-sign it.
+        let Some(witness) = witness else {
+            return (head_root, None);
+        };
+        match witness.cosign(&head_root, &proof).await {
+            Ok(cosig) => {
+                if let Err(e) =
+                    persist_witnessed(pool, &head_root.tree_root, head_size, &cosig).await
+                {
+                    tracing::error!(error = %e, "persist witnessed root failed (cached in-memory)");
+                }
+                *self.witnessed.lock().await = Some(Witnessed {
+                    tree_root: head_root.tree_root,
+                    log_size: head_size,
+                    cosig: cosig.clone(),
+                });
+                (head_root, Some(cosig))
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, head_size, "witness cosign failed — serving uncosigned");
+                (head_root, None)
+            }
+        }
+    }
+
     /// Build an inclusion proof for the entry at `idx`, returning the
     /// proven entry alongside it (the leaf's canonical bytes are what a
     /// client feeds to `verify_inclusion`).
@@ -417,6 +511,40 @@ fn clamp_hash(bytes: &[u8]) -> [u8; 32] {
     let n = bytes.len().min(32);
     out[..n].copy_from_slice(&bytes[..n]);
     out
+}
+
+/// UPSERT the single `witnessed_root` row with the last co-signed
+/// `(tree_root, log_size, cosig)` (ADR-0020 Sprint 4).
+async fn persist_witnessed(
+    pool: &MySqlPool,
+    tree_root: &TreeHash,
+    log_size: u64,
+    cosig: &[u8],
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO witnessed_root (id, tree_root, log_size, cosig) VALUES (1, ?, ?, ?) \
+         ON DUPLICATE KEY UPDATE tree_root = VALUES(tree_root), \
+         log_size = VALUES(log_size), cosig = VALUES(cosig)",
+    )
+    .bind(&tree_root[..])
+    .bind(log_size)
+    .bind(cosig)
+    .execute(pool)
+    .await
+    .map(|_| ())
+}
+
+/// Load the persisted witnessed root, if any (ADR-0020 Sprint 4).
+async fn load_witnessed(pool: &MySqlPool) -> Result<Option<Witnessed>, StoreError> {
+    let row: Option<(Vec<u8>, u64, Vec<u8>)> =
+        sqlx::query_as("SELECT tree_root, log_size, cosig FROM witnessed_root WHERE id = 1")
+            .fetch_optional(pool)
+            .await?;
+    Ok(row.map(|(tree_root, log_size, cosig)| Witnessed {
+        tree_root: clamp_hash(&tree_root),
+        log_size,
+        cosig,
+    }))
 }
 
 #[cfg(test)]
