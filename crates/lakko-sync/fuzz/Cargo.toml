@@ -1,0 +1,34 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+[package]
+name = "lakko-sync-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+# Opt out of the parent workspace — cargo-fuzz crates require nightly and
+# libfuzzer-sys, which we don't want as a workspace-wide dep.
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+lakko-sync = { path = ".." }
+
+# `lakko-sync` has no on-the-wire byte parser of its own — the DeviceGroup
+# substrate (Phase 2) owns deserialization. The attacker-relevant surface is
+# the LWW / HLC logic fed by a peer device's ops after AEAD-open: a malicious
+# peer supplies adversarial HLC stamps and op orderings. `replay_and_check`
+# decodes the fuzzer bytes into such a receive sequence and verifies the
+# ordering-integrity invariants (HLC monotonicity, merge==append, resolve
+# idempotence). A `false` return becomes a crash via the target's `assert!`,
+# so a regression that lets a peer wind the local clock backwards is caught.
+[[bin]]
+name = "sync_replay"
+path = "fuzz_targets/sync_replay.rs"
+test = false
+doc = false
+bench = false

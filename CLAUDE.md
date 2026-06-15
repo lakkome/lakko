@@ -148,7 +148,7 @@ just ci                        # everything CI does, locally
 
 ## Fuzz harnesses
 
-`crates/lakko-mls/fuzz/`, `crates/lakko-proto/fuzz/`, `crates/lakko-contacts/fuzz/`, `crates/lakko-channels/fuzz/`, `crates/lakko-transport/fuzz/`, `crates/lakko-tuf/fuzz/`, `crates/lakko-call-jwt/fuzz/`, `crates/lakko-backup/fuzz/`, `crates/lakko-transparency/fuzz/`, `crates/lakko-attest/fuzz/`, and `services/sfu/fuzz/` are separate crates outside the main workspace (they need nightly + libfuzzer-sys). Targets live in `fuzz/fuzz_targets/*.rs`.
+`crates/lakko-mls/fuzz/`, `crates/lakko-proto/fuzz/`, `crates/lakko-contacts/fuzz/`, `crates/lakko-channels/fuzz/`, `crates/lakko-transport/fuzz/`, `crates/lakko-tuf/fuzz/`, `crates/lakko-call-jwt/fuzz/`, `crates/lakko-backup/fuzz/`, `crates/lakko-transparency/fuzz/`, `crates/lakko-attest/fuzz/`, `crates/lakko-sync/fuzz/`, and `services/sfu/fuzz/` are separate crates outside the main workspace (they need nightly + libfuzzer-sys). Targets live in `fuzz/fuzz_targets/*.rs`.
 
 Current targets:
 - **`lakko-mls/mls_message`** — `MlsMessageIn` wire-format parser (TLS codec)
@@ -194,6 +194,7 @@ Current targets:
 - **`lakko-transparency/verify_consistency`** — `verify_consistency(old_size, old_root, new_size, new_root, proof)` (G-30 #1, ADR-0020): the RFC 6962 §2.1.2 consistency-proof verifier, reconstructing both roots from attacker-controlled proof bytes (a fork must fail)
 - **`lakko-transparency/verify_witness_cosig`** — `verify_witness_cosig(bytes, witness_key, expected_tree_root, expected_log_size)` (ADR-0020): the 105-byte cosig blob bounded parse + binding-to-served-root + Ed25519-verify, the FFI surface a malicious serving tier can feed arbitrary bytes
 - **`lakko-attest/attestation_open`** — `ActionAttestation::open(bytes, verifying_key)` (G-13, [ADR-0015](docs/adr/0015-device-removal-authorization.md)): the device-removal attestation parser — a fixed-layout 121-byte blob (`version‖account_id(16)‖action_hash(32)‖expires_at(8 BE)‖sig(64)`) that arrives ALONGSIDE a peer's DeviceGroup `Remove` commit, so a malformed envelope is fully attacker-controlled and reaches this bounded parser before any state is consulted. Opened against a FIXED verifying key (the fuzzer cannot forge a valid Ed25519 sig, so it exercises the length / version / field-slicing / signature-parse / verify-fail path)
+- **`lakko-sync/sync_replay`** — the multi-device sync receive path (`fuzz_api::replay_and_check`). `lakko-sync` carries no on-the-wire byte parser of its own (the DeviceGroup substrate owns deserialization, Phase 2); the attacker-relevant surface is the LWW / HLC **logic** fed by a peer device's ops after AEAD-open. The harness decodes the fuzz bytes into a receive sequence of adversarial `Hlc` stamps + ops and asserts the ordering-integrity invariants a malicious/compromised peer must not break: HLC monotonicity (`tick` / `merge_remote` never wind the local clock backwards), `EditChain::merge` == append (documented commutativity), and resolve idempotence — a property oracle, not a parse-crash target (the arithmetic is already saturating). Order-independence under HLC ties is deliberately NOT asserted (`current` tie-breaks by vector position by design)
 
 The `fuzz_api` module in `lakko-mls` (marked `#[doc(hidden)]`) is the only public entry point for harnesses; it is not part of the supported public API.
 
