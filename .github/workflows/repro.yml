@@ -68,23 +68,11 @@ jobs:
           echo "===== Build B hashes =====" && cat /tmp/build-b-hashes.txt
       - name: Compare hashes
         run: |
-          # Filter known non-reproducible artifacts before diffing
-          # so real regressions don't get drowned in noise.
-          # liblakko_ffi_uniffi.rlib: uniffi 0.28 proc-macros embed
-          # non-deterministic state (track upstream). Every other
-          # .rlib and binary must match byte-for-byte.
-          KNOWN_FLAKY='liblakko_ffi_uniffi\.rlib'
-
-          grep -v -E "$KNOWN_FLAKY" /tmp/build-a-hashes.txt > /tmp/a-filtered.txt
-          grep -v -E "$KNOWN_FLAKY" /tmp/build-b-hashes.txt > /tmp/b-filtered.txt
-
-          if diff -u /tmp/a-filtered.txt /tmp/b-filtered.txt; then
-            echo "✅ Reproducible: byte-identical artifacts (excluding known flaky: $KNOWN_FLAKY)"
-          else
-            echo "⚠️ Non-reproducible: artifacts differ between builds"
-            echo "(this job is non-blocking until we tune flags for stable byte-identicality)"
-            exit 1
-          fi
+          # Single source of truth for the diff + known-flaky filter
+          # (liblakko_ffi_uniffi.rlib — uniffi 0.28 proc-macros embed
+          # non-deterministic state). See ci/repro/compare-build-hashes.sh.
+          bash "$GITHUB_WORKSPACE/ci/repro/compare-build-hashes.sh" \
+            /tmp/build-a-hashes.txt /tmp/build-b-hashes.txt "release artifacts (same runner)"
 
   web-repro:
     # Phase 1.17b — apps/web reproducibility verifier. Mirror of
@@ -146,20 +134,13 @@ jobs:
           (cd dist && find . -type f | sort | xargs sha256sum) > /tmp/web-build-b.txt
           echo "===== Web build B hashes =====" && cat /tmp/web-build-b.txt
       - name: Compare hashes
+        # The web pipeline has no known-flaky artifact (source maps
+        # embed host paths but both builds share the cwd) — pass an
+        # empty filter so EVERY dist file must match.
         run: |
-          # Source maps embed the host file paths of the inputs,
-          # which `vite build` derives relative to `apps/web/`.
-          # Both builds run from the same cwd in the same checkout,
-          # so paths match — but if a future Vite reshape drifts
-          # this, add a filter line here. For now no known-flaky
-          # entries are expected.
-          if diff -u /tmp/web-build-a.txt /tmp/web-build-b.txt; then
-            echo "OK Reproducible: byte-identical apps/web/dist between two clean builds"
-          else
-            echo "WARN Non-reproducible: apps/web/dist differs between builds"
-            echo "(this job is non-blocking until web byte-identicality is stable)"
-            exit 1
-          fi
+          LAKKO_REPRO_KNOWN_FLAKY="" \
+            bash "$GITHUB_WORKSPACE/ci/repro/compare-build-hashes.sh" \
+            /tmp/web-build-a.txt /tmp/web-build-b.txt "apps/web/dist"
 
   # ----------------------------------------------------------------
   # Cross-runner reproducibility (GA-4 partial)
@@ -223,6 +204,9 @@ jobs:
     # job's posture above.
     continue-on-error: true
     steps:
+      # Checkout only the comparison script (the verifier builds
+      # nothing — it just diffs the two runners' manifests).
+      - uses: actions/checkout@v5
       - name: Download runner-a hashes
         uses: actions/download-artifact@v4
         with:
@@ -234,25 +218,8 @@ jobs:
           name: cross-runner-hashes-b
           path: b/
       - name: Diff across runners
+        # Same single-source-of-truth diff + known-flaky filter as
+        # the same-runner job; SLSA L3 prerequisite per plan §8.
         run: |
-          # Same known-flaky filter the single-runner repro
-          # job applies; centralised here so a future
-          # change happens in one place.
-          KNOWN_FLAKY='liblakko_ffi_uniffi\.rlib'
-
-          grep -v -E "$KNOWN_FLAKY" a/hashes.txt > /tmp/a-filtered.txt || true
-          grep -v -E "$KNOWN_FLAKY" b/hashes.txt > /tmp/b-filtered.txt || true
-
-          echo "===== Runner A (filtered) ====="
-          cat /tmp/a-filtered.txt
-          echo "===== Runner B (filtered) ====="
-          cat /tmp/b-filtered.txt
-
-          if diff -u /tmp/a-filtered.txt /tmp/b-filtered.txt; then
-            echo "OK Cross-runner reproducible: byte-identical artifacts across independent runners (excluding known flaky: $KNOWN_FLAKY)"
-          else
-            echo "WARN Cross-runner non-reproducible: artifacts differ between independent runners"
-            echo "(this job is non-blocking until cross-runner byte-identicality is stable;"
-            echo " SLSA L3 prerequisite per plan section 8)"
-            exit 1
-          fi
+          bash "$GITHUB_WORKSPACE/ci/repro/compare-build-hashes.sh" \
+            a/hashes.txt b/hashes.txt "release artifacts (cross-runner)"
