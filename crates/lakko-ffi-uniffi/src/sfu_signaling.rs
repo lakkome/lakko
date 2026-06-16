@@ -42,8 +42,13 @@ pub struct SfuPeerSnapshot {
     /// Server-assigned peer id.
     pub peer_id: String,
     /// First 8 hex chars of the account id (the SFU never publishes
-    /// the full `sub`).
+    /// the full `sub`). Legacy display tag — superseded by `peer_tag`
+    /// (ADR-0021); kept during the rollout.
     pub account_pseudonym: String,
+    /// Per-call peer tag (ADR-0021). Re-derive the same over a
+    /// contact's account id with [`sfu_peer_tag`] to resolve this entry
+    /// to a display name. Empty if the SFU predates ADR-0021.
+    pub peer_tag: String,
 }
 
 impl From<lakko_sfu_proto::PeerSnapshot> for SfuPeerSnapshot {
@@ -51,6 +56,7 @@ impl From<lakko_sfu_proto::PeerSnapshot> for SfuPeerSnapshot {
         Self {
             peer_id: p.peer_id,
             account_pseudonym: p.account_pseudonym,
+            peer_tag: p.peer_tag,
         }
     }
 }
@@ -110,8 +116,12 @@ pub enum SfuServerFrame {
     PeerJoined {
         /// New peer's id.
         peer_id: String,
-        /// Pseudonymised account id (first 8 hex chars).
+        /// Pseudonymised account id (first 8 hex chars). Legacy —
+        /// superseded by `peer_tag` (ADR-0021).
         account_pseudonym: String,
+        /// Per-call peer tag (ADR-0021). Re-derive with
+        /// [`sfu_peer_tag`] over a contact's account id to resolve.
+        peer_tag: String,
     },
     /// A peer disconnected.
     PeerLeft {
@@ -167,12 +177,11 @@ impl From<ServerFrame> for SfuServerFrame {
             ServerFrame::PeerJoined {
                 peer_id,
                 account_pseudonym,
-                // `peer_tag` (ADR-0021) is surfaced to clients in a
-                // follow-up FFI sprint; ignored here for now.
-                ..
+                peer_tag,
             } => Self::PeerJoined {
                 peer_id,
                 account_pseudonym,
+                peer_tag,
             },
             ServerFrame::PeerLeft { peer_id } => Self::PeerLeft { peer_id },
             ServerFrame::SignalRelay { from, payload_b64 } => Self::SignalRelay { from, payload_b64 },
@@ -191,6 +200,19 @@ impl From<ServerFrame> for SfuServerFrame {
 #[uniffi::export]
 pub fn parse_sfu_server_frame(json: String) -> Result<SfuServerFrame, FfiError> {
     Ok(decode_server_frame(&json)?.into())
+}
+
+/// Re-derive the per-call peer tag (ADR-0021) for a `(call_id,
+/// account_id)` pair — the same canonical derivation the SFU applies.
+///
+/// The client computes this over each of its contacts' account ids and
+/// matches the result against a roster entry's `peer_tag` to resolve it
+/// to a display name. The tag is one-way (reveals nothing about the
+/// account id) and per-call (keyed on `call_id`).
+#[uniffi::export]
+#[must_use]
+pub fn sfu_peer_tag(call_id: String, account_id: String) -> String {
+    lakko_sfu_proto::peer_tag(&call_id, &account_id)
 }
 
 /// Compose a `SignalRelay` to a single peer. `payload` is the raw
