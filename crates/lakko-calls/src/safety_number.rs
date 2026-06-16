@@ -28,10 +28,13 @@
 //!
 //! # Canonical format
 //!
-//! [`SAFETY_NUMBER_GROUPS`] groups of five decimal digits, single-space
-//! separated (e.g. `"01234 56789 24680 13579 00042 99999"`). The format
-//! is fixed so web / iOS / Android render byte-identical strings for the
-//! same seed — the cross-platform interop the golden-vector test pins.
+//! [`SAFETY_NUMBER_GROUPS`] groups of four decimal digits, single-space
+//! separated (e.g. `"0123 4567 8901 2345"`). The format is fixed so web
+//! / iOS / Android render byte-identical strings for the same seed — the
+//! cross-platform interop the golden-vector test pins. Sixteen digits
+//! (~53 bits) is comfortably beyond what an active man-in-the-middle
+//! could second-preimage within a call-setup window, while staying short
+//! enough for an in-call status pill and an aloud read.
 
 use lakko_crypto::hash::blake3_derive_key_from_material;
 
@@ -40,29 +43,28 @@ use lakko_crypto::hash::blake3_derive_key_from_material;
 /// any other key derived from the same seed.
 const DOMAIN: &str = "lakko/call/safety-number/v1";
 
-/// Number of five-digit groups in a rendered safety number. Six groups
-/// = 30 decimal digits, drawn from 24 of the 32 derived bytes — enough
-/// fingerprint entropy for an out-of-band read-aloud comparison.
-pub const SAFETY_NUMBER_GROUPS: usize = 6;
+/// Number of four-digit groups in a rendered safety number. Four groups
+/// = 16 decimal digits, drawn from 16 of the 32 derived bytes.
+pub const SAFETY_NUMBER_GROUPS: usize = 4;
 
 /// Derive the human-comparable call safety number from the shared
 /// 32-byte per-call seed.
 ///
-/// The result is [`SAFETY_NUMBER_GROUPS`] groups of five decimal digits,
+/// The result is [`SAFETY_NUMBER_GROUPS`] groups of four decimal digits,
 /// single-space separated. Deterministic and canonical: the same seed
 /// always yields the same string on every platform.
 #[must_use]
 pub fn call_safety_number(seed: &[u8; 32]) -> String {
     let material = blake3_derive_key_from_material(DOMAIN, seed);
-    // Each group consumes four big-endian bytes reduced into a 0..=99_999
+    // Each group consumes four big-endian bytes reduced into a 0..=9_999
     // bucket. `chunks_exact(4)` over the 32-byte material yields eight
     // chunks; we take the first SAFETY_NUMBER_GROUPS.
     material
         .chunks_exact(4)
         .take(SAFETY_NUMBER_GROUPS)
         .map(|c| {
-            let value = u32::from_be_bytes([c[0], c[1], c[2], c[3]]) % 100_000;
-            format!("{value:05}")
+            let value = u32::from_be_bytes([c[0], c[1], c[2], c[3]]) % 10_000;
+            format!("{value:04}")
         })
         .collect::<Vec<_>>()
         .join(" ")
@@ -84,11 +86,11 @@ mod tests {
         let groups: Vec<&str> = s.split(' ').collect();
         assert_eq!(groups.len(), SAFETY_NUMBER_GROUPS);
         for g in groups {
-            assert_eq!(g.len(), 5, "group {g} is not five digits");
+            assert_eq!(g.len(), 4, "group {g} is not four digits");
             assert!(g.chars().all(|c| c.is_ascii_digit()), "group {g} not all digits");
         }
-        // 6 groups * 5 digits + 5 separating spaces.
-        assert_eq!(s.len(), SAFETY_NUMBER_GROUPS * 5 + (SAFETY_NUMBER_GROUPS - 1));
+        // 4 groups * 4 digits + 3 separating spaces.
+        assert_eq!(s.len(), SAFETY_NUMBER_GROUPS * 4 + (SAFETY_NUMBER_GROUPS - 1));
     }
 
     #[test]
@@ -115,5 +117,5 @@ mod tests {
         assert_eq!(call_safety_number(&[0u8; 32]), GOLDEN_ALL_ZERO);
     }
 
-    const GOLDEN_ALL_ZERO: &str = "46397 95175 80657 33748 45670 60282";
+    const GOLDEN_ALL_ZERO: &str = "6397 5175 0657 3748";
 }

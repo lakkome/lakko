@@ -545,7 +545,7 @@ mod tests {
     #[test]
     fn call_safety_number_matches_core_golden() {
         let out = call_safety_number(vec![0u8; 32]).expect("32-byte seed");
-        assert_eq!(out, "46397 95175 80657 33748 45670 60282");
+        assert_eq!(out, "6397 5175 0657 3748");
         assert!(call_safety_number(vec![0u8; 31]).is_err());
     }
 }
