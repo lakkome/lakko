@@ -42,6 +42,13 @@ final class SfuCallUi {
         self.ui = ui
         let audio = config.audio
         let video = config.video
+        // Canonical call safety number derived from the shared seed — the
+        // same string every participant derives, shown in the E2EE pill
+        // for an out-of-band man-in-the-middle check. Display-only +
+        // non-critical: a derivation failure (only on a wrong-length seed,
+        // which the MLS exporter never emits) must never break the call,
+        // so it degrades to no fingerprint.
+        let safetyNumber = try? callSafetyNumber(seed: config.seed)
 
         let callbacks = SfuCallSession.Callbacks(
             onStateChange: { state in
@@ -51,9 +58,10 @@ final class SfuCallUi {
                 case .connected:
                     ui.setPhase(.connected)
                     // SFrame is armed at connect, so media is E2E
-                    // encrypted the moment we are connected. Fingerprint
-                    // string is a deferred follow-up.
-                    ui.setE2ee(CallUiState.E2eeState(active: true, shortFingerprint: nil))
+                    // encrypted the moment we are connected. The safety
+                    // number (derived from the same shared seed) lets
+                    // participants verify the E2EE root key out-of-band.
+                    ui.setE2ee(CallUiState.E2eeState(active: true, shortFingerprint: safetyNumber))
                 case .failed, .closed:
                     ui.setPhase(.ended(endedAt: Date()))
                 case .idle:

@@ -566,6 +566,16 @@ function ChatView(props: {
         32,
       );
       const localLeaf = props.entry.group.ownLeafIndex;
+      // Canonical call safety number — the same string every participant
+      // derives from the shared seed, shown in the E2EE pill for an
+      // out-of-band man-in-the-middle check. Display-only + non-critical:
+      // a derivation failure must never abort the call.
+      let safetyNumber: string | undefined;
+      try {
+        safetyNumber = wasm.callSafetyNumber(seed);
+      } catch {
+        safetyNumber = undefined;
+      }
       // Call-admission JWT (JWS Compact, EdDSA) bound to the session.
       const jwt = new CallJwtClient(wasm);
       jwt.setSessionToken(secrets.sessionToken);
@@ -578,7 +588,7 @@ function ChatView(props: {
           localLeaf,
           media: { audio: true, video: false },
         },
-        { localDisplayName: "You" },
+        { localDisplayName: "You", safetyNumber },
       );
       setSfuHandle(handle);
       setSfuActive(true);

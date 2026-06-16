@@ -53,6 +53,11 @@ export interface SfuCallUiOptions {
     peerId: string,
     accountPseudonym: string,
   ) => string;
+  /** Canonical call safety number (`callSafetyNumber(seed)` from the
+   *  wasm core) for the in-call E2EE pill — the same string every
+   *  participant derives from the shared seed, read aloud out-of-band to
+   *  detect a man-in-the-middle. Omitted → the pill shows no fingerprint. */
+  readonly safetyNumber?: string | undefined;
 }
 
 /** Handle returned by {@link createSfuCallUi}. */
@@ -170,10 +175,14 @@ export function createSfuCallUi(
           break;
         case "connected":
           callActions.setPhase({ kind: "connected" });
-          // SFrame keying is armed at connect (the seed is present),
-          // so media is end-to-end encrypted the moment we are
-          // connected. Fingerprint string is a deferred follow-up.
-          callActions.setE2ee({ active: true, shortFingerprint: null });
+          // SFrame keying is armed at connect (the seed is present), so
+          // media is end-to-end encrypted the moment we are connected.
+          // The safety number (derived from the same shared seed) lets
+          // participants verify the E2EE root key out-of-band.
+          callActions.setE2ee({
+            active: true,
+            shortFingerprint: options.safetyNumber ?? null,
+          });
           break;
         case "failed":
         case "closed":

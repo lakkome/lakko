@@ -6,6 +6,7 @@ package me.lakko.app.calls
 import android.content.Context
 import kotlinx.coroutines.CoroutineScope
 import org.webrtc.VideoTrack
+import uniffi.lakko_ffi_uniffi.callSafetyNumber
 
 /**
  * Chat-UI adapter for the Android native [SfuCallSession] — the Kotlin
@@ -45,6 +46,18 @@ class SfuCallUi(
     val session: SfuCallSession
 
     init {
+        // Canonical call safety number derived from the shared seed — the
+        // same string every participant derives, shown in the E2EE pill
+        // for an out-of-band man-in-the-middle check. Display-only +
+        // non-critical: a derivation failure (only on a wrong-length seed,
+        // which the MLS exporter never emits) must never break the call.
+        val safetyNumber: String? =
+            try {
+                callSafetyNumber(config.seed)
+            } catch (e: Exception) {
+                null
+            }
+
         val callbacks = SfuCallSession.Callbacks(
             onStateChange = { state ->
                 when (state) {
@@ -53,9 +66,14 @@ class SfuCallUi(
                     SfuCallSession.State.CONNECTED -> {
                         ui.setPhase(CallUiState.CallPhase.Connected)
                         // SFrame is armed at connect, so media is E2E
-                        // encrypted the moment we are connected.
+                        // encrypted the moment we are connected. The safety
+                        // number (from the same shared seed) lets
+                        // participants verify the E2EE root key out-of-band.
                         ui.setE2ee(
-                            CallUiState.E2eeState(active = true, shortFingerprint = null)
+                            CallUiState.E2eeState(
+                                active = true,
+                                shortFingerprint = safetyNumber,
+                            )
                         )
                     }
                     SfuCallSession.State.FAILED,
