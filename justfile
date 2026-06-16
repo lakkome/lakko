@@ -243,6 +243,18 @@ clean-release:
     rm -rf target/release
     @echo "release/ removed."
 
+# Full reclaim — empties the cargo workspace target/ (the bulk; grows to
+# ~60-70GB / ~350k files after a few feature arcs) AND the out-of-workspace
+# fuzz-crate targets (~3GB). Everything removed is reproducible from source;
+# the next native / web build needs a one-time binding regen (`just
+# build-ios` / `just regen-bindings` / `npm run build:wasm`). Run at ADR /
+# big-feature boundaries — NOT mid-feature (it forces a full rebuild).
+clean-all:
+    @echo "Before: $(du -sh target 2>/dev/null | cut -f1 || echo 'absent') workspace + fuzz targets"
+    cargo clean
+    rm -rf crates/*/fuzz/target services/sfu/fuzz/target
+    @echo "target/ + out-of-workspace fuzz targets removed."
+
 # Clean clippy + doc caches — they each keep separate incremental trees
 # from the main debug build. Safe to drop; next `just lint` / `cargo doc`
 # rebuilds.
