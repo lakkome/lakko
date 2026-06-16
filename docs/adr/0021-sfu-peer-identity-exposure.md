@@ -162,14 +162,20 @@ posture as ADR's call safety number.
   (consequence is a benign wrong-name, not an auth break). Both `low`
   findings fixed (collision-falls-back-to-pseudonym +
   `#![forbid(unsafe_code)]` on `lakko-sfu-proto`).
-- **Native (iOS + Android) — `peer_tag` threaded, resolver BLOCKED.** The
-  tag is plumbed through the native call signaling (both compile), but the
-  contact-name resolver is **not active**: the native `ContactsRepository`
-  is in-memory only ("No persistence yet"), so there is no persisted
-  account_id store to re-derive + match the tag against. Native group-call
-  name resolution is blocked on **native contacts persistence** (a
-  pre-existing gap) + a contacts source in the native call view-models;
-  the pseudonym fallback is used until then.
+- **Native (iOS + Android) — landed.** The tag is plumbed through the
+  native call signaling, and the resolver is active on both platforms.
+  Closing the prerequisite "No persistence yet" gap (for the accepted
+  list) was part of this: a per-platform `AcceptedContactsStore`
+  (iOS `UserDefaults` + `Codable`; Android `SharedPreferences` + a
+  `@Serializable` base64 DTO) rehydrated on the `ContactsRepository` and
+  saved on every accept, and `ChatViewModel.startGroupCall` precomputes
+  the `peer_tag → label` map + a `resolveDisplayName` for `SfuCallUi`
+  (collision → pseudonym, matching web). **Caveat:** the native label is
+  the peer's short pubkey fingerprint (`shortFingerprintLabel`), the same
+  identifier the contacts UI shows — iOS/Android contacts carry **no
+  user-chosen display name** (unlike web), so the full "human name in the
+  roster" payoff awaits editable native contact display names (a separate
+  follow-up).
 
 ## Open questions
 
@@ -178,11 +184,10 @@ posture as ADR's call safety number.
   short but birthday-safe). **Resolved:** 8-byte / 16-hex, `lakko/sfu/peer-tag/v1`.
 - Backfill existing contacts' account_ids from discovery (one pass) vs.
   lazy re-resolution on next contact interaction.
-- The native clients consume the same tag scheme symmetrically (the
-  derivation is FFI-shared + the tag is threaded), but the per-platform
-  resolver is **blocked on native contacts persistence** (see
-  Implementation status) — the native `ContactsRepository` has no
-  persisted account_id store to match against yet.
+- The native resolver shows the peer's short pubkey fingerprint, not a
+  human name, because iOS/Android contacts have no user-chosen display
+  name. Adding editable native contact display names is the follow-up
+  that makes the native roster show real names like the web.
 - The web backup/restore (`lakko-backup`) does not carry `accountIdHex`,
   so a restored contact loses it until re-accepted — a `lakko-backup`
   schema follow-up if round-trip name resolution matters.
