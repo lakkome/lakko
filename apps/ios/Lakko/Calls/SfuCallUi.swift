@@ -35,7 +35,7 @@ final class SfuCallUi {
         config: SfuCallSession.Config,
         ui: CallUiState,
         localDisplayName: String = "You",
-        resolveDisplayName: @escaping (_ peerId: String, _ accountPseudonym: String) -> String = { _, pseudonym in
+        resolveDisplayName: @escaping (_ peerId: String, _ accountPseudonym: String, _ peerTag: String) -> String = { _, pseudonym, _ in
             pseudonym.isEmpty ? "Peer" : String(pseudonym.prefix(8))
         }
     ) {
@@ -74,16 +74,16 @@ final class SfuCallUi {
                     .filter { $0.peerId != selfPeerId }
                     .map {
                         Self.remoteParticipant(
-                            resolveDisplayName($0.peerId, $0.accountPseudonym),
+                            resolveDisplayName($0.peerId, $0.accountPseudonym, $0.peerTag),
                             peerId: $0.peerId
                         )
                     }
                 ui.setParticipants([local] + remotes)
             },
-            onPeerJoined: { peerId, accountPseudonym in
+            onPeerJoined: { peerId, accountPseudonym, peerTag in
                 ui.participantJoined(
                     Self.remoteParticipant(
-                        resolveDisplayName(peerId, accountPseudonym),
+                        resolveDisplayName(peerId, accountPseudonym, peerTag),
                         peerId: peerId
                     )
                 )

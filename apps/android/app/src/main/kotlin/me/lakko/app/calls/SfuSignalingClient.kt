@@ -40,8 +40,9 @@ interface SfuSignalingCallbacks {
     /** First frame after admission — seeds the roster. */
     fun onWelcome(selfPeerId: String, callId: String, roster: List<SfuPeerSnapshot>) {}
 
-    /** A participant joined the same call. */
-    fun onPeerJoined(peerId: String, accountPseudonym: String) {}
+    /** A participant joined the same call. `peerTag` is the ADR-0021
+     *  per-call tag (empty from a pre-ADR-0021 SFU). */
+    fun onPeerJoined(peerId: String, accountPseudonym: String, peerTag: String) {}
 
     /** A participant left. */
     fun onPeerLeft(peerId: String) {}
@@ -162,7 +163,7 @@ class SfuSignalingClient(
             is SfuServerFrame.Welcome ->
                 callbacks.onWelcome(frame.peerId, frame.callId, frame.roster)
             is SfuServerFrame.PeerJoined ->
-                callbacks.onPeerJoined(frame.peerId, frame.accountPseudonym)
+                callbacks.onPeerJoined(frame.peerId, frame.accountPseudonym, frame.peerTag)
             is SfuServerFrame.PeerLeft -> callbacks.onPeerLeft(frame.peerId)
             is SfuServerFrame.SignalRelay ->
                 callbacks.onSignalRelay(frame.from, frame.payloadB64)

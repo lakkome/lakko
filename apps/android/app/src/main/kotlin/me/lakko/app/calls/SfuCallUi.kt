@@ -38,9 +38,10 @@ class SfuCallUi(
     scope: CoroutineScope,
     private val ui: CallUiState,
     localDisplayName: String = "You",
-    resolveDisplayName: (peerId: String, accountPseudonym: String) -> String = { _, pseudonym ->
-        if (pseudonym.isEmpty()) "Peer" else pseudonym.take(8)
-    },
+    resolveDisplayName: (peerId: String, accountPseudonym: String, peerTag: String) -> String =
+        { _, pseudonym, _ ->
+            if (pseudonym.isEmpty()) "Peer" else pseudonym.take(8)
+        },
 ) {
     /** The underlying session (for direct control if needed). */
     val session: SfuCallSession
@@ -88,15 +89,18 @@ class SfuCallUi(
                     .filter { it.peerId != selfPeerId }
                     .map {
                         remoteParticipant(
-                            resolveDisplayName(it.peerId, it.accountPseudonym),
+                            resolveDisplayName(it.peerId, it.accountPseudonym, it.peerTag),
                             it.peerId,
                         )
                     }
                 ui.setParticipants(listOf(local) + remotes)
             },
-            onPeerJoined = { peerId, accountPseudonym ->
+            onPeerJoined = { peerId, accountPseudonym, peerTag ->
                 ui.participantJoined(
-                    remoteParticipant(resolveDisplayName(peerId, accountPseudonym), peerId)
+                    remoteParticipant(
+                        resolveDisplayName(peerId, accountPseudonym, peerTag),
+                        peerId,
+                    )
                 )
             },
             onPeerLeft = { peerId ->

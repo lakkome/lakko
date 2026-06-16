@@ -18,7 +18,7 @@ enum SfuSignalingError: Error {
 /// caller hops to `@MainActor` itself if it touches UI state).
 struct SfuSignalingCallbacks {
     var onWelcome: ((_ selfPeerId: String, _ callId: String, _ roster: [SfuPeerSnapshot]) -> Void)?
-    var onPeerJoined: ((_ peerId: String, _ accountPseudonym: String) -> Void)?
+    var onPeerJoined: ((_ peerId: String, _ accountPseudonym: String, _ peerTag: String) -> Void)?
     var onPeerLeft: ((_ peerId: String) -> Void)?
     var onSignalRelay: ((_ from: String, _ payloadB64: String) -> Void)?
     var onSdpAnswer: ((_ sdp: String) -> Void)?
@@ -137,8 +137,8 @@ final class SfuSignalingClient {
         switch frame {
         case let .welcome(peerId, callId, roster, _):
             callbacks.onWelcome?(peerId, callId, roster)
-        case let .peerJoined(peerId, accountPseudonym):
-            callbacks.onPeerJoined?(peerId, accountPseudonym)
+        case let .peerJoined(peerId, accountPseudonym, peerTag):
+            callbacks.onPeerJoined?(peerId, accountPseudonym, peerTag)
         case let .peerLeft(peerId):
             callbacks.onPeerLeft?(peerId)
         case let .signalRelay(from, payloadB64):

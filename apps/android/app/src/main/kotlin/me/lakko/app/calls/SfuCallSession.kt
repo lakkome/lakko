@@ -83,7 +83,8 @@ class SfuCallSession(
     data class Callbacks(
         val onStateChange: (State) -> Unit = {},
         val onWelcome: (selfPeerId: String, roster: List<SfuPeerSnapshot>) -> Unit = { _, _ -> },
-        val onPeerJoined: (peerId: String, accountPseudonym: String) -> Unit = { _, _ -> },
+        val onPeerJoined: (peerId: String, accountPseudonym: String, peerTag: String) -> Unit =
+            { _, _, _ -> },
         val onPeerLeft: (peerId: String) -> Unit = {},
         val onRemoteVideoTrack: (track: VideoTrack?, streamId: String?) -> Unit = { _, _ -> },
         /** The LOCAL camera video track became available (`config.video`
@@ -259,8 +260,8 @@ class SfuCallSession(
                 callbacks.onWelcome(selfPeerId, roster)
             }
 
-            override fun onPeerJoined(peerId: String, accountPseudonym: String) {
-                callbacks.onPeerJoined(peerId, accountPseudonym)
+            override fun onPeerJoined(peerId: String, accountPseudonym: String, peerTag: String) {
+                callbacks.onPeerJoined(peerId, accountPseudonym, peerTag)
             }
 
             override fun onPeerLeft(peerId: String) {

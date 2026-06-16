@@ -64,7 +64,7 @@ final class SfuCallSession {
     struct Callbacks {
         var onStateChange: ((State) -> Void)?
         var onWelcome: ((_ selfPeerId: String, _ roster: [SfuPeerSnapshot]) -> Void)?
-        var onPeerJoined: ((_ peerId: String, _ accountPseudonym: String) -> Void)?
+        var onPeerJoined: ((_ peerId: String, _ accountPseudonym: String, _ peerTag: String) -> Void)?
         var onPeerLeft: ((_ peerId: String) -> Void)?
         /// A remote video track (with its MSID stream id = source peer
         /// id) arrived or was removed (`nil`).
@@ -235,8 +235,8 @@ final class SfuCallSession {
         cb.onWelcome = { [weak self] selfPeerId, _, roster in
             Task { @MainActor in self?.callbacks.onWelcome?(selfPeerId, roster) }
         }
-        cb.onPeerJoined = { [weak self] peerId, pseudonym in
-            Task { @MainActor in self?.callbacks.onPeerJoined?(peerId, pseudonym) }
+        cb.onPeerJoined = { [weak self] peerId, pseudonym, peerTag in
+            Task { @MainActor in self?.callbacks.onPeerJoined?(peerId, pseudonym, peerTag) }
         }
         cb.onPeerLeft = { [weak self] peerId in
             Task { @MainActor in self?.callbacks.onPeerLeft?(peerId) }
