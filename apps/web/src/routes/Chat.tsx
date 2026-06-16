@@ -372,13 +372,13 @@ function ChatView(props: {
     screenSharing: false,
   });
 
-  /** Synthesised sole remote participant for the 1×1 call. The
-   *  web P2P path carries no roster, so the peer is a single
-   *  placeholder ("Peer") — a real display name folds in when
-   *  the SFU multi-party roster lands. */
+  /** Synthesised sole remote participant for the 1×1 call. The web
+   *  P2P path carries no roster, so the single remote IS this chat's
+   *  contact — use the same label the header shows (falling back to
+   *  "Peer" only if the entry has no label). */
   const remoteParticipant = (): Participant => ({
     id: "peer",
-    displayName: "Peer",
+    displayName: props.entry.label.length > 0 ? props.entry.label : "Peer",
     isLocal: false,
     micOn: true,
     camOn: false,
