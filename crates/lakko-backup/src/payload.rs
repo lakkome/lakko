@@ -46,7 +46,12 @@
 //! [32 bytes]   x25519_pubkey
 //! u16be        display_name length (UTF-8 bytes, ≤ MAX_DISPLAY_NAME_LEN)
 //! [..]         display_name bytes
+//! u8           account_id presence (v3+ only): 0 = absent, 1 = present
+//! [16 bytes]   account_id (only when the presence byte is 1)
 //! ```
+//!
+//! The trailing `account_id` (ADR-0021) is written only by v3+ producers;
+//! v1/v2 records end after the display name and decode to `None`.
 //!
 //! ## What's stored, what's not
 //!
@@ -76,8 +81,15 @@
 
 use crate::error::{BackupError, Result};
 
-/// Current payload schema version emitted on encode.
-pub const PAYLOAD_VERSION: u8 = 2;
+/// Current payload schema version emitted on encode. v3 adds an
+/// optional per-contact `account_id` (ADR-0021) after each contact's
+/// display name, so a restored contact can be matched to an SFU
+/// group-call roster tag. v1/v2 backups (no account_id) still decode.
+pub const PAYLOAD_VERSION: u8 = 3;
+
+/// Phase 2a3d1 schema — whole-storage snapshot tail, no per-contact
+/// account_id. Accepted on decode; contacts map to `account_id: None`.
+const PAYLOAD_VERSION_V2: u8 = 2;
 
 /// Phase 2a1 schema. Accepted on decode for forward
 /// compatibility; mapped to a v2-shaped `BackupPayload` with
@@ -115,6 +127,11 @@ pub struct AcceptedContactRecord {
     /// User-chosen display name (UTF-8). Empty string is valid;
     /// `MAX_DISPLAY_NAME_LEN` bytes max.
     pub display_name: String,
+    /// Sender's 16-byte account_id (ADR-0021), when known. Persisted
+    /// from v3; `None` for a contact restored from a v1/v2 backup or
+    /// accepted before the account_id was learned. Lets a restored
+    /// contact resolve to an SFU group-call roster `peer_tag`.
+    pub account_id: Option<[u8; ACCOUNT_ID_LEN]>,
 }
 
 /// The structured state we want to roundtrip through the
@@ -221,10 +238,13 @@ impl BackupPayload {
         let mut cur = wire;
 
         let version = take_u8(&mut cur)?;
-        if version != PAYLOAD_VERSION && version != PAYLOAD_VERSION_V1 {
+        if version != PAYLOAD_VERSION
+            && version != PAYLOAD_VERSION_V2
+            && version != PAYLOAD_VERSION_V1
+        {
             return Err(BackupError::InvalidPayload(format!(
                 "unsupported payload version {version} \
-                 (expected {PAYLOAD_VERSION_V1} or {PAYLOAD_VERSION})",
+                 (expected {PAYLOAD_VERSION_V1}, {PAYLOAD_VERSION_V2} or {PAYLOAD_VERSION})",
             )));
         }
 
@@ -247,7 +267,7 @@ impl BackupPayload {
         ) as usize;
         let mut accepted_contacts = Vec::with_capacity(contact_count);
         for _ in 0..contact_count {
-            accepted_contacts.push(decode_contact(&mut cur)?);
+            accepted_contacts.push(decode_contact(&mut cur, version == PAYLOAD_VERSION)?);
         }
 
         let snapshot_count = u32::from_be_bytes(
@@ -266,7 +286,9 @@ impl BackupPayload {
         // producer never wrote the field, while a v2 producer
         // always writes at least the 4-byte length prefix
         // (which may be 0 for an empty snapshot).
-        let whole_storage_snapshot = if version == PAYLOAD_VERSION {
+        let whole_storage_snapshot = if version == PAYLOAD_VERSION
+            || version == PAYLOAD_VERSION_V2
+        {
             let snapshot_len = u32::from_be_bytes(
                 take_n(&mut cur, 4)?
                     .try_into()
@@ -314,10 +336,21 @@ fn encode_contact(out: &mut Vec<u8>, c: &AcceptedContactRecord) -> Result<()> {
     let len = u16::try_from(name_bytes.len()).expect("bounded by MAX_DISPLAY_NAME_LEN above");
     out.extend_from_slice(&len.to_be_bytes());
     out.extend_from_slice(name_bytes);
+
+    // v3 — optional account_id: a 1-byte presence flag, then 16 bytes
+    // when present. (Always emitted; `encode` only ever writes the
+    // current PAYLOAD_VERSION = v3.)
+    match c.account_id {
+        Some(id) => {
+            out.push(1);
+            out.extend_from_slice(&id);
+        }
+        None => out.push(0),
+    }
     Ok(())
 }
 
-fn decode_contact(cur: &mut &[u8]) -> Result<AcceptedContactRecord> {
+fn decode_contact(cur: &mut &[u8], with_account_id: bool) -> Result<AcceptedContactRecord> {
     let mut ed25519_pubkey = [0u8; PUBKEY_LEN];
     ed25519_pubkey.copy_from_slice(take_n(cur, PUBKEY_LEN)?);
 
@@ -336,10 +369,31 @@ fn decode_contact(cur: &mut &[u8]) -> Result<AcceptedContactRecord> {
         .map_err(|e| BackupError::InvalidPayload(format!("display_name not utf-8: {e}")))?
         .to_owned();
 
+    // v3 — optional account_id (presence flag + 16 bytes). Absent on
+    // v1/v2 records, where `with_account_id` is false → `None`.
+    let account_id = if with_account_id {
+        match take_u8(cur)? {
+            0 => None,
+            1 => {
+                let mut id = [0u8; ACCOUNT_ID_LEN];
+                id.copy_from_slice(take_n(cur, ACCOUNT_ID_LEN)?);
+                Some(id)
+            }
+            other => {
+                return Err(BackupError::InvalidPayload(format!(
+                    "invalid account_id presence byte {other} (expected 0 or 1)",
+                )));
+            }
+        }
+    } else {
+        None
+    };
+
     Ok(AcceptedContactRecord {
         ed25519_pubkey,
         x25519_pubkey,
         display_name,
+        account_id,
     })
 }
 
@@ -406,11 +460,13 @@ mod tests {
                     ed25519_pubkey: [0x01; PUBKEY_LEN],
                     x25519_pubkey: [0x02; PUBKEY_LEN],
                     display_name: "alice".to_string(),
+                    account_id: Some([0xCC; ACCOUNT_ID_LEN]),
                 },
                 AcceptedContactRecord {
                     ed25519_pubkey: [0x03; PUBKEY_LEN],
                     x25519_pubkey: [0x04; PUBKEY_LEN],
                     display_name: String::new(),
+                    account_id: None,
                 },
             ],
             mls_snapshots: vec![(b"group-id-bytes".to_vec(), b"opaque-snapshot".to_vec())],
@@ -473,6 +529,33 @@ mod tests {
     }
 
     #[test]
+    fn v2_payload_decodes_contact_without_account_id() {
+        // ADR-0021 backwards-compat: a v2 backup (no per-contact
+        // account_id byte) must still restore — the contact's account_id
+        // folds to None and the v2 whole-storage-snapshot tail is read.
+        let mut wire = Vec::new();
+        wire.push(PAYLOAD_VERSION_V2);
+        wire.extend_from_slice(&[0xB2; ACCOUNT_ID_LEN]);
+        wire.extend_from_slice(&1_700_000_000_000u64.to_be_bytes());
+        wire.extend_from_slice(&[0x42; SEED_LEN]);
+        wire.extend_from_slice(&1u32.to_be_bytes()); // contact_count = 1
+        // One contact — v2 layout has NO account_id byte after the name.
+        wire.extend_from_slice(&[0x01; PUBKEY_LEN]);
+        wire.extend_from_slice(&[0x02; PUBKEY_LEN]);
+        wire.extend_from_slice(&5u16.to_be_bytes());
+        wire.extend_from_slice(b"alice");
+        wire.extend_from_slice(&0u32.to_be_bytes()); // snapshot_count = 0
+        wire.extend_from_slice(&3u32.to_be_bytes()); // whole_storage_len = 3
+        wire.extend_from_slice(b"abc");
+
+        let decoded = BackupPayload::decode(&wire).expect("v2 decode");
+        assert_eq!(decoded.accepted_contacts.len(), 1);
+        assert_eq!(decoded.accepted_contacts[0].display_name, "alice");
+        assert_eq!(decoded.accepted_contacts[0].account_id, None);
+        assert_eq!(decoded.whole_storage_snapshot, b"abc");
+    }
+
+    #[test]
     fn empty_whole_storage_snapshot_roundtrips() {
         let mut payload = sample_payload();
         payload.whole_storage_snapshot = Vec::new();
@@ -515,6 +598,7 @@ mod tests {
                 ed25519_pubkey: [0; PUBKEY_LEN],
                 x25519_pubkey: [0; PUBKEY_LEN],
                 display_name: "x".repeat(MAX_DISPLAY_NAME_LEN + 1),
+                account_id: None,
             }],
             mls_snapshots: vec![],
             whole_storage_snapshot: Vec::new(),
@@ -533,6 +617,7 @@ mod tests {
                 ed25519_pubkey: [0; PUBKEY_LEN],
                 x25519_pubkey: [0; PUBKEY_LEN],
                 display_name: "x".repeat(MAX_DISPLAY_NAME_LEN),
+                account_id: None,
             }],
             mls_snapshots: vec![],
             whole_storage_snapshot: Vec::new(),
