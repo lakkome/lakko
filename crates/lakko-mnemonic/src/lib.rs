@@ -66,3 +66,34 @@ mod secret;
 pub use error::MnemonicError;
 pub use mnemonic::{Mnemonic, SecretEntropy, SecretSeed, ENTROPY_LEN, WORD_COUNT};
 pub use secret::SecretMnemonic;
+
+/// Fuzz-only entry point. Marked `#[doc(hidden)]` — the sole harness
+/// surface for `crates/lakko-mnemonic/fuzz/`, **not** part of the
+/// supported public API.
+#[doc(hidden)]
+pub mod fuzz_api {
+    use crate::Mnemonic;
+
+    /// Drive the BIP39 phrase + entropy parsers on attacker-influenced
+    /// bytes.
+    ///
+    /// [`Mnemonic::from_phrase`] is the recovery-phrase parser (the
+    /// phrase is user-typed or device-relayed during recovery);
+    /// [`Mnemonic::from_entropy`] is the social-recovery reconstruction
+    /// path, fed by `lakko_shamir::combine` output, which a malicious
+    /// guardian's shares can influence. The harness runs both on the
+    /// same input — the raw bytes through `from_entropy` (the 32-byte
+    /// length gate → the BIP39 checksum reconstruction) and, when the
+    /// bytes are valid UTF-8, the string through `from_phrase` (the
+    /// 24-word count gate → the wordlist lookup → the checksum). Any
+    /// panic / overflow here is a vulnerability.
+    #[must_use]
+    pub fn parse_mnemonic(bytes: &[u8]) -> bool {
+        let entropy_ok = Mnemonic::from_entropy(bytes).is_ok();
+        let phrase_ok = match core::str::from_utf8(bytes) {
+            Ok(s) => Mnemonic::from_phrase(s).is_ok(),
+            Err(_) => false,
+        };
+        entropy_ok || phrase_ok
+    }
+}

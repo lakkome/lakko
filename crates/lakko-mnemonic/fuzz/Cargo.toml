@@ -1,0 +1,31 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+[package]
+name = "lakko-mnemonic-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+# Opt out of the parent workspace — cargo-fuzz crates require nightly and
+# libfuzzer-sys, which we don't want as a workspace-wide dep.
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+lakko-mnemonic = { path = ".." }
+
+# `Mnemonic::from_phrase` / `from_entropy` are the BIP39 recovery parsers.
+# `from_phrase` parses a user-typed / device-relayed recovery phrase;
+# `from_entropy` reconstructs from `lakko_shamir::combine` output, which a
+# malicious guardian's shares can influence. Any panic / overflow in these
+# parsers is a vulnerability.
+[[bin]]
+name = "mnemonic_parse"
+path = "fuzz_targets/mnemonic_parse.rs"
+test = false
+doc = false
+bench = false

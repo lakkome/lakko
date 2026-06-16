@@ -93,6 +93,7 @@ fuzz-check:
     cargo check --manifest-path crates/lakko-attachments/fuzz/Cargo.toml
     cargo check --manifest-path crates/lakko-auth-token/fuzz/Cargo.toml
     cargo check --manifest-path crates/lakko-shamir/fuzz/Cargo.toml
+    cargo check --manifest-path crates/lakko-mnemonic/fuzz/Cargo.toml
     cargo check --manifest-path services/sfu/fuzz/Cargo.toml
 
 # Build `lakko-ffi-wasm` for `wasm32-unknown-unknown`. CI runs this
@@ -153,6 +154,8 @@ fuzz-list:
     @ls crates/lakko-auth-token/fuzz/fuzz_targets/ | sed 's/\.rs$//' | sed 's/^/  /'
     @echo "lakko-shamir:"
     @ls crates/lakko-shamir/fuzz/fuzz_targets/ | sed 's/\.rs$//' | sed 's/^/  /'
+    @echo "lakko-mnemonic:"
+    @ls crates/lakko-mnemonic/fuzz/fuzz_targets/ | sed 's/\.rs$//' | sed 's/^/  /'
     @echo "lakko-svc-sfu:"
     @ls services/sfu/fuzz/fuzz_targets/ | sed 's/\.rs$//' | sed 's/^/  /'
 
