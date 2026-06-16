@@ -129,8 +129,8 @@ impl CallKey {
 /// safety number is identical for everyone on the call. Render it in the
 /// in-call UI for an out-of-band man-in-the-middle check: two
 /// participants read the code aloud and a match proves they share the
-/// same E2EE root key (security invariant #4). The format is six
-/// space-separated five-digit groups.
+/// same E2EE root key (security invariant #4). The format is four
+/// space-separated four-digit groups.
 ///
 /// # Errors
 ///
