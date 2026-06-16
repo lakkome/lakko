@@ -19,5 +19,6 @@
 //! (`payload_b64` is opaque to the SFU) and the full frame catalogue.
 
 pub use lakko_sfu_proto::{
-    ClientFrame, ErrorCode, PeerSnapshot, RelayTarget, ServerFrame, MAX_INBOUND_FRAME_BYTES,
+    peer_tag, ClientFrame, ErrorCode, PeerSnapshot, RelayTarget, ServerFrame,
+    MAX_INBOUND_FRAME_BYTES,
 };

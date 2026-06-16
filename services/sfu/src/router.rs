@@ -35,7 +35,9 @@ use tracing::warn;
 
 use crate::peer::{Peer, PeerId, PeerRegistry};
 use crate::prom::names;
-use crate::protocol::{ClientFrame, ErrorCode, PeerSnapshot, RelayTarget, ServerFrame};
+use crate::protocol::{
+    peer_tag, ClientFrame, ErrorCode, PeerSnapshot, RelayTarget, ServerFrame,
+};
 
 /// Failure modes of a single relay attempt.
 #[derive(Debug, Error)]
@@ -171,6 +173,9 @@ impl<'a> Router<'a> {
             .map(|p| PeerSnapshot {
                 peer_id: p.id.to_string(),
                 account_pseudonym: pseudonymise(&p.account_id),
+                // ADR-0021 — per-call tag over the (JWT-verified)
+                // account_id; the client resolves it to a contact name.
+                peer_tag: peer_tag(&peer.call_id, &p.account_id),
             })
             .collect();
         ServerFrame::Welcome {
@@ -189,6 +194,8 @@ impl<'a> Router<'a> {
         let frame = ServerFrame::PeerJoined {
             peer_id: peer.id.to_string(),
             account_pseudonym: pseudonymise(&peer.account_id),
+            // ADR-0021 — per-call tag for the joining peer.
+            peer_tag: peer_tag(&peer.call_id, &peer.account_id),
         };
         self.broadcast_to_call(&peer.call_id, Some(&peer.id), frame)
             .await;
@@ -420,9 +427,16 @@ mod tests {
             ServerFrame::PeerJoined {
                 peer_id,
                 account_pseudonym,
+                peer_tag: tag,
             } => {
                 assert_eq!(peer_id, "p2");
                 assert_eq!(account_pseudonym, "bbbbbbbb");
+                // ADR-0021 — the join announcement now carries the
+                // canonical per-call tag the client resolves.
+                assert_eq!(
+                    tag,
+                    peer_tag("call-a", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+                );
             },
             other => panic!("expected PeerJoined, got {other:?}"),
         }

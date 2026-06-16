@@ -64,6 +64,46 @@ pub enum SfuProtoError {
     FrameTooLarge(usize),
 }
 
+/// Domain-separation context for the per-call peer tag (ADR-0021).
+const PEER_TAG_CONTEXT: &str = "lakko/sfu/peer-tag/v1";
+
+/// Length of the per-call peer tag in bytes (rendered as `2×` lower-case
+/// hex chars). 8 bytes = 64 bits — birthday-safe for the few-hundred
+/// participants a call holds, and short on the wire / as a fallback
+/// display label.
+pub const PEER_TAG_LEN: usize = 8;
+
+/// Derive the per-call **peer tag** (ADR-0021).
+///
+/// A privacy-preserving, collision-resistant, per-call identifier the SFU
+/// emits for each peer (over the JWT-verified `account_id`) and the
+/// clients re-derive over their contacts' account ids to resolve a roster
+/// entry to a display name.
+///
+/// `peer_tag = BLAKE3_derive_key(PEER_TAG_CONTEXT, len(call_id) ‖ call_id
+/// ‖ len(account_id) ‖ account_id)` truncated to [`PEER_TAG_LEN`] bytes,
+/// lower-case hex. The big-endian length framing prevents a
+/// `(call_id, account_id)` concatenation ambiguity; keying on `call_id`
+/// makes the tag fresh per call (unlinkable across calls); the one-way
+/// hash never reveals the `account_id`. Deterministic + canonical, so the
+/// SFU and every client compute byte-identical strings.
+#[must_use]
+pub fn peer_tag(call_id: &str, account_id: &str) -> String {
+    use core::fmt::Write as _;
+    let mut hasher = blake3::Hasher::new_derive_key(PEER_TAG_CONTEXT);
+    hasher.update(&(call_id.len() as u64).to_be_bytes());
+    hasher.update(call_id.as_bytes());
+    hasher.update(&(account_id.len() as u64).to_be_bytes());
+    hasher.update(account_id.as_bytes());
+    let digest = hasher.finalize();
+    let mut out = String::with_capacity(PEER_TAG_LEN * 2);
+    for b in &digest.as_bytes()[..PEER_TAG_LEN] {
+        // Writing a `u8` as hex into a `String` is infallible.
+        let _ = write!(out, "{b:02x}");
+    }
+    out
+}
+
 /// Server-to-client frame.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
@@ -88,8 +128,14 @@ pub enum ServerFrame {
         /// New peer's id.
         peer_id: String,
         /// Pseudonymised account id (first 8 hex chars). The SFU
-        /// never broadcasts the raw `sub`.
+        /// never broadcasts the raw `sub`. Legacy display tag — kept
+        /// during the ADR-0021 rollout; superseded by `peer_tag`.
         account_pseudonym: String,
+        /// Per-call peer tag (ADR-0021) — [`peer_tag`] over the
+        /// JWT-verified `account_id` + the `call_id`. `#[serde(default)]`
+        /// for forward/backward compatibility during rollout.
+        #[serde(default)]
+        peer_tag: String,
     },
 
     /// A peer disconnected.
@@ -238,8 +284,17 @@ pub struct PeerSnapshot {
     /// Server-assigned peer id.
     pub peer_id: String,
     /// First 8 hex chars of the account id. The SFU never publishes
-    /// the full `sub`.
+    /// the full `sub`. Legacy display tag — kept during the ADR-0021
+    /// rollout; superseded by [`PeerSnapshot::peer_tag`].
     pub account_pseudonym: String,
+    /// Per-call peer tag (ADR-0021) — [`peer_tag`] over the JWT-verified
+    /// `account_id` + the `call_id`. The client re-derives it over its
+    /// contacts' account ids to resolve this entry to a display name.
+    /// `#[serde(default)]` so a frame from a pre-ADR-0021 SFU (or a
+    /// fixture) still decodes (empty tag → no resolution, falls back to
+    /// the pseudonym).
+    #[serde(default)]
+    pub peer_tag: String,
 }
 
 /// Machine-readable error codes the SFU may emit.
@@ -328,6 +383,7 @@ mod tests {
             roster: vec![PeerSnapshot {
                 peer_id: "p100".into(),
                 account_pseudonym: "deadbeef".into(),
+                peer_tag: peer_tag("0123456789abcdef0123456789abcdef", "p100acct"),
             }],
             server_ts: 1_700_000_000,
         };
@@ -445,5 +501,61 @@ mod tests {
     #[test]
     fn payload_b64_rejects_non_base64url() {
         assert!(decode_payload_b64("not valid base64!!").is_err());
+    }
+
+    // -- ADR-0021 per-call peer tag ----------------------------------
+
+    const ACCT_A: &str = "deadbeefdeadbeefdeadbeefdeadbeef";
+
+    #[test]
+    fn peer_tag_is_deterministic() {
+        assert_eq!(peer_tag("call-1", ACCT_A), peer_tag("call-1", ACCT_A));
+    }
+
+    #[test]
+    fn peer_tag_shape_is_lowercase_hex() {
+        let t = peer_tag("call-1", ACCT_A);
+        assert_eq!(t.len(), PEER_TAG_LEN * 2);
+        assert!(t.chars().all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)));
+    }
+
+    #[test]
+    fn peer_tag_is_per_call_unlinkable() {
+        // Same account, different call → different tag.
+        assert_ne!(peer_tag("call-1", ACCT_A), peer_tag("call-2", ACCT_A));
+    }
+
+    #[test]
+    fn peer_tag_distinguishes_accounts() {
+        assert_ne!(
+            peer_tag("call-1", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+            peer_tag("call-1", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+        );
+    }
+
+    #[test]
+    fn peer_tag_length_framing_avoids_concatenation_ambiguity() {
+        // ("ab","c") vs ("a","bc") must not collide.
+        assert_ne!(peer_tag("ab", "c"), peer_tag("a", "bc"));
+    }
+
+    #[test]
+    fn peer_tag_golden_vector() {
+        // Pins the canonical derivation so the SFU + every client agree.
+        assert_eq!(
+            peer_tag("call-golden", "00000000000000000000000000000000"),
+            PEER_TAG_GOLDEN,
+        );
+    }
+
+    const PEER_TAG_GOLDEN: &str = "2151ad585010e90b";
+
+    #[test]
+    fn peer_snapshot_decodes_without_peer_tag() {
+        // serde(default) — a pre-ADR-0021 frame (no peer_tag) still parses.
+        let json = r#"{"peer_id":"p1","account_pseudonym":"deadbeef…"}"#;
+        let snap: PeerSnapshot = serde_json::from_str(json).expect("decode");
+        assert_eq!(snap.peer_tag, "");
+        assert_eq!(snap.peer_id, "p1");
     }
 }

@@ -167,6 +167,9 @@ impl From<ServerFrame> for SfuServerFrame {
             ServerFrame::PeerJoined {
                 peer_id,
                 account_pseudonym,
+                // `peer_tag` (ADR-0021) is surfaced to clients in a
+                // follow-up FFI sprint; ignored here for now.
+                ..
             } => Self::PeerJoined {
                 peer_id,
                 account_pseudonym,
