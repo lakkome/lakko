@@ -79,6 +79,14 @@ export interface AcceptedContact {
   displayName: string;
   /** When the user accepted the request (ms since epoch). */
   acceptedAtMs: number;
+  /** The peer's 16-byte account_id as lower-case unseparated hex —
+   *  captured at accept (the contact flow already learns it via
+   *  discovery). ADR-0021: the SFU group-call roster carries a
+   *  per-call tag derived from this account_id; re-deriving the tag
+   *  over this field resolves a roster entry to this contact's
+   *  `displayName`. Optional — pre-ADR-0021 contacts lack it and
+   *  fall back to the SFU pseudonym until re-resolved. */
+  accountIdHex?: string;
 }
 
 /**
@@ -166,7 +174,11 @@ function isAcceptedContact(a: unknown): a is AcceptedContact {
     a !== null &&
     typeof (a as AcceptedContact).signaturePubkeyB64 === "string" &&
     typeof (a as AcceptedContact).displayName === "string" &&
-    typeof (a as AcceptedContact).acceptedAtMs === "number"
+    typeof (a as AcceptedContact).acceptedAtMs === "number" &&
+    // Optional ADR-0021 field — validated when present, tolerated when
+    // absent (pre-ADR-0021 contacts).
+    ((a as AcceptedContact).accountIdHex === undefined ||
+      typeof (a as AcceptedContact).accountIdHex === "string")
   );
 }
 

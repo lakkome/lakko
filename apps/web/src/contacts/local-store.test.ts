@@ -55,6 +55,7 @@ import {
   removePin,
   setPin,
   loadAccepted,
+  upsertAccepted,
   loadCursor,
   recordLogStatus,
   recordLogReset,
@@ -313,5 +314,30 @@ describe("v1 -> v2 localStorage migration", () => {
     expect(readPin(ACCT_A)?.pinnedSignaturePubkeyB64).toBe(PUB_OLD);
     // Cursor is still intact after the pin write.
     expect(loadCursor()).toBe(7);
+  });
+});
+
+describe("AcceptedContact accountIdHex (ADR-0021)", () => {
+  it("round-trips accountIdHex through upsert + load", () => {
+    upsertAccepted({
+      signaturePubkeyB64: PUB_OLD,
+      displayName: "alice",
+      acceptedAtMs: 1,
+      accountIdHex: "deadbeefdeadbeefdeadbeefdeadbeef",
+    });
+    const back = loadAccepted();
+    expect(back).toHaveLength(1);
+    expect(back[0]?.accountIdHex).toBe("deadbeefdeadbeefdeadbeefdeadbeef");
+  });
+
+  it("tolerates a contact without accountIdHex (pre-ADR-0021)", () => {
+    upsertAccepted({
+      signaturePubkeyB64: PUB_NEW,
+      displayName: "bob",
+      acceptedAtMs: 2,
+    });
+    const back = loadAccepted();
+    expect(back).toHaveLength(1);
+    expect(back[0]?.accountIdHex).toBeUndefined();
   });
 });

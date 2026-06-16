@@ -259,6 +259,9 @@ function ConnectedContacts(props: ConnectedContactsProps): JSX.Element {
             x25519PubkeyB64: base64Encode(ev.ack.accepterX25519Pubkey),
             displayName: `@${fingerprintShort(ev.ack.accepterPubkey)}`,
             acceptedAtMs: Date.now(),
+            // ADR-0021 — persist the peer's account_id (hex) so the SFU
+            // group-call roster can resolve to this contact's name.
+            accountIdHex: syncGroupIdHex(ev.ack.accepterAccountId),
           };
           setAccepted(upsertAccepted(accepterContact));
         }
@@ -289,6 +292,11 @@ function ConnectedContacts(props: ConnectedContactsProps): JSX.Element {
       signaturePubkeyB64: base64Encode(req.fromPubkey),
       displayName: `@${fingerprintShort(req.fromPubkey)}`,
       acceptedAtMs: Date.now(),
+      // ADR-0021 — persist the peer's account_id (hex) when the request
+      // carried it, so the SFU group-call roster can resolve names.
+      ...(req.fromAccountId
+        ? { accountIdHex: syncGroupIdHex(req.fromAccountId) }
+        : {}),
     };
     setAccepted(upsertAccepted(contact));
     setPending(pending().filter((r) => r.messageId !== req.messageId));
