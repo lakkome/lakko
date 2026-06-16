@@ -143,16 +143,49 @@ posture as ADR's call safety number.
   (a `lakko-sfu-proto` schema change — keep the old field until clients
   migrate, then drop).
 
+## Implementation status (Jun 2026)
+
+- **Derivation + SFU wire + FFI — landed.** `lakko_sfu_proto::peer_tag`
+  (BLAKE3 `derive_key("lakko/sfu/peer-tag/v1", len-framed call_id ‖
+  account_id)` → 8 bytes / 16 hex, golden-pinned `2151ad585010e90b`);
+  `PeerSnapshot` + `ServerFrame::PeerJoined` carry a `#[serde(default)]`
+  `peer_tag`; `services/sfu` derives it at both wire sites over the
+  JWT-verified `account_id`; FFI exposes `sfu_peer_tag` / `sfuPeerTag` +
+  the field on the projections.
+- **Web vertical — landed end-to-end.** `AcceptedContact.accountIdHex`
+  captured at accept; `Chat.tsx` precomputes a `peer_tag → displayName`
+  map and the resolver matches a roster entry (collision → pseudonym,
+  ADR-exact). Names render in web group calls.
+- **`lakko-security` — APPROVE-WITH-NOTES.** Confirmed one-way /
+  per-call-unlinkable / spoof-proof (tag bound to the JWT `sub`, no
+  self-assertion) / no fail-open; 64-bit collision budget adequate
+  (consequence is a benign wrong-name, not an auth break). Both `low`
+  findings fixed (collision-falls-back-to-pseudonym +
+  `#![forbid(unsafe_code)]` on `lakko-sfu-proto`).
+- **Native (iOS + Android) — `peer_tag` threaded, resolver BLOCKED.** The
+  tag is plumbed through the native call signaling (both compile), but the
+  contact-name resolver is **not active**: the native `ContactsRepository`
+  is in-memory only ("No persistence yet"), so there is no persisted
+  account_id store to re-derive + match the tag against. Native group-call
+  name resolution is blocked on **native contacts persistence** (a
+  pre-existing gap) + a contacts source in the native call view-models;
+  the pseudonym fallback is used until then.
+
 ## Open questions
 
 - Domain-separation context string + truncation length (collision budget
   is trivial for ≤ a few hundred participants; pick N so the hex stays
-  short but birthday-safe).
+  short but birthday-safe). **Resolved:** 8-byte / 16-hex, `lakko/sfu/peer-tag/v1`.
 - Backfill existing contacts' account_ids from discovery (one pass) vs.
   lazy re-resolution on next contact interaction.
-- The native clients consume the same tag scheme symmetrically (yes —
-  the derivation is FFI-shared); the per-platform resolver + the
-  `accountIdHex` persistence land per client.
+- The native clients consume the same tag scheme symmetrically (the
+  derivation is FFI-shared + the tag is threaded), but the per-platform
+  resolver is **blocked on native contacts persistence** (see
+  Implementation status) — the native `ContactsRepository` has no
+  persisted account_id store to match against yet.
+- The web backup/restore (`lakko-backup`) does not carry `accountIdHex`,
+  so a restored contact loses it until re-accepted — a `lakko-backup`
+  schema follow-up if round-trip name resolution matters.
 - Channels (Phase 4) broadcast rosters are out of scope.
 
 ## References
