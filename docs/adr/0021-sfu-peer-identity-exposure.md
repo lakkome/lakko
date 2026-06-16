@@ -5,7 +5,7 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 # ADR-0021: SFU peer-identity exposure for group-call roster names
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-15
 - **Context:** Phase 3 (Rust SFU group calls)
 
