@@ -588,10 +588,14 @@ public class CallUiState(
         _participants.value = roster
         _localVideoTrack.value = session.localVideoTrack.value
         _remoteVideoTrack.value = remoteTrack
-        // G3-2-e2ee-active — pill reflects real SFrame keying.
-        // No comparable fingerprint yet (canonical cross-platform
-        // hash is a deferred follow-up), so shortFingerprint=null.
-        _e2ee.value = E2eeState(active = session.e2eeActive.value, shortFingerprint = null)
+        // G3-2-e2ee-active — pill reflects real SFrame keying; the
+        // safety number (canonical hash of the same seed, set alongside
+        // e2eeActive in setCallKey) is the out-of-band MITM code.
+        _e2ee.value =
+            E2eeState(
+                active = session.e2eeActive.value,
+                shortFingerprint = session.safetyNumber.value,
+            )
         // G3-2-conn-quality — header detail from getStats sampling.
         // iter2 adds the down/up bitrate from the candidate-pair byte
         // delta; RTT + path type from iter1.

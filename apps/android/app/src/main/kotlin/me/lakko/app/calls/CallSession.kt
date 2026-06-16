@@ -19,6 +19,7 @@ import org.webrtc.PeerConnection
 import uniffi.lakko_ffi_uniffi.FfiCallEndReason
 import uniffi.lakko_ffi_uniffi.FfiCallMediaFlags
 import uniffi.lakko_ffi_uniffi.FfiCallSignalingBody
+import uniffi.lakko_ffi_uniffi.callSafetyNumber
 import uniffi.lakko_ffi_uniffi.composeCallSignaling
 import uniffi.lakko_ffi_uniffi.parseCallSignaling
 
@@ -160,6 +161,15 @@ public class CallSession(
     private val mutableE2eeActive: MutableStateFlow<Boolean> = MutableStateFlow(false)
     public val e2eeActive: StateFlow<Boolean> = mutableE2eeActive.asStateFlow()
 
+    /** Canonical call safety number — `callSafetyNumber(seed)` over the
+     *  shared per-call seed, set alongside [e2eeActive] in [setCallKey].
+     *  The same digits every participant derives; `CallUiState.driveFrom`
+     *  maps it onto the E2EE pill for an out-of-band man-in-the-middle
+     *  check. `null` until the key is armed (or if the derivation fails —
+     *  display-only, never fatal). */
+    private val mutableSafetyNumber: MutableStateFlow<String?> = MutableStateFlow(null)
+    public val safetyNumber: StateFlow<String?> = mutableSafetyNumber.asStateFlow()
+
     /** G3-2-conn-quality — live connection stats polled from the
      *  pod's `RTCStatsReport` every couple of seconds while
      *  connected. `rttMs` null until ICE settles; `connectionRelayed`
@@ -215,9 +225,18 @@ public class CallSession(
         this.callKeySeed = seed
         this.localLeaf = localLeaf
         // G3-2-e2ee-active — SFrame seed present → E2EE keying
-        // armed; the UI pill mirrors this. Comparable short
-        // fingerprint is a deferred follow-up.
+        // armed; the UI pill mirrors this.
         mutableE2eeActive.value = true
+        // The safety number is a canonical hash of the same seed — shown
+        // in the pill for an out-of-band MITM check. Display-only: a
+        // derivation failure (wrong-length seed, which the exporter never
+        // emits) leaves it null and never breaks the call.
+        mutableSafetyNumber.value =
+            try {
+                callSafetyNumber(seed)
+            } catch (e: Exception) {
+                null
+            }
     }
 
     /**

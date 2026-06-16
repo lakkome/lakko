@@ -723,10 +723,12 @@ extension CallUiState {
             self.setLocalVideoTrack(session.localVideoTrack)
             self.setRemoteVideoTrack(remoteTrack)
             // G3-1-e2ee-active — the pill reflects real SFrame
-            // keying. No comparable fingerprint yet (canonical
-            // cross-platform hash is a deferred follow-up), so
-            // `shortFingerprint` stays nil.
-            self.setE2ee(E2eeState(active: session.e2eeActive, shortFingerprint: nil))
+            // keying; the safety number (canonical hash of the same
+            // seed, set alongside `e2eeActive` in `setCallKey`) is the
+            // out-of-band MITM-verification code.
+            self.setE2ee(
+                E2eeState(active: session.e2eeActive, shortFingerprint: session.safetyNumber)
+            )
             // G3-1-conn-quality — RTT + connection type from the
             // live getStats sample; iter2 adds the down/up bitrate
             // derived from the candidate-pair byte delta.

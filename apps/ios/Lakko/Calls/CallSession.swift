@@ -111,10 +111,16 @@ public final class CallSession: ObservableObject {
     /// SFrame seed (the call's media is end-to-end encrypted).
     /// `CallUiState.driveFrom` maps this onto the E2EE pill so
     /// it shows the green lock only when keying is real, not
-    /// optimistically. The short comparable fingerprint is a
-    /// deferred follow-up (needs a canonical cross-platform
-    /// hash of the seed so both parties + web agree).
+    /// optimistically.
     @Published public private(set) var e2eeActive: Bool = false
+
+    /// Canonical call safety number — `callSafetyNumber(seed)` over the
+    /// shared per-call seed, set alongside `e2eeActive` when the key is
+    /// armed. The same digits every participant derives; the UI shows it
+    /// in the E2EE pill for an out-of-band man-in-the-middle check. `nil`
+    /// until the key is armed (or if the derivation fails — display-only,
+    /// never fatal).
+    @Published public private(set) var safetyNumber: String?
 
     /// G3-1-conn-quality — live connection stats, polled from
     /// the pod's `RTCStatisticsReport` every couple of seconds
@@ -188,11 +194,13 @@ public final class CallSession: ObservableObject {
         self.localLeaf = localLeaf
         // G3-1-e2ee-active — the SFrame seed is now present, so
         // the call's E2EE keying is armed. The UI's E2EE pill
-        // mirrors this (green-lock vs negotiating). A
-        // comparable short fingerprint (a canonical
-        // cross-platform hash of the seed) is a deferred
-        // follow-up.
+        // mirrors this (green-lock vs negotiating).
         self.e2eeActive = true
+        // The safety number is a canonical hash of the same seed —
+        // shown in the pill for an out-of-band MITM check. Display-only:
+        // a derivation failure (wrong-length seed, which the exporter
+        // never emits) leaves it nil and never breaks the call.
+        self.safetyNumber = try? callSafetyNumber(seed: seed)
     }
 
     /// Generate a fresh 16-byte call_id.
