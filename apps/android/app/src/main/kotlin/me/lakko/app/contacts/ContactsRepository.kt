@@ -112,10 +112,26 @@ public class ContactsRepository(
         return client
     }
 
+    /** Application context for the accepted-contacts persistence
+     *  (ADR-0021). `null` in tests → in-memory only, as before. */
+    private val appCtx: Context? = appContext
+
     private val mutableState: MutableStateFlow<ContactsState> =
-        MutableStateFlow(ContactsState())
+        // Rehydrate the persisted accepted list (ADR-0021); only the
+        // accepted list is persisted, pending re-polls from cursor 0.
+        MutableStateFlow(
+            ContactsState(
+                accepted = appContext?.let { AcceptedContactsStore.load(it) } ?: emptyList(),
+            ),
+        )
 
     public val state: StateFlow<ContactsState> = mutableState.asStateFlow()
+
+    /** Persist the current accepted list (best-effort; no-op in tests
+     *  where no Context was supplied). Called after every accept. */
+    private fun persistAccepted() {
+        appCtx?.let { AcceptedContactsStore.save(it, mutableState.value.accepted) }
+    }
 
     /**
      * Resolve the username typed in the search box, compose a
@@ -275,6 +291,7 @@ public class ContactsRepository(
                 },
             )
         }
+        persistAccepted()
     }
 
     /**
@@ -508,6 +525,7 @@ public class ContactsRepository(
                     ),
                 )
             }
+            persistAccepted()
             AcceptInviteResult.Accepted(
                 recipientAccountId = inviterAccountId,
                 inviterFingerprint = capability.ownerFingerprint(),
@@ -682,6 +700,9 @@ public class ContactsRepository(
         // heap if some collector cached them, but our reference
         // drops here.
         mutableState.value = ContactsState()
+        // Wipe the persisted accepted list too — Android contacts state
+        // does not survive a logout (ADR-0021 store follows that intent).
+        persistAccepted()
     }
 
     /**
@@ -921,7 +942,19 @@ private const val INVITE_URL_PREFIX: String = "https://lakko.me/i/"
 public data class AcceptedContact(
     val request: IncomingContactRequest,
     val groupIdHex: String? = null,
-)
+) {
+    /** Short pubkey-fingerprint label this peer is shown by elsewhere in
+     *  the app (first 8 bytes of the Ed25519 pubkey, colon-grouped hex) —
+     *  the identifier the ADR-0021 group-call roster resolver surfaces
+     *  for a recognised contact (Android contacts carry no user name). */
+    public val shortFingerprintLabel: String
+        get() =
+            request.fromPubkey
+                .take(8)
+                .joinToString("") { "%02x".format(it.toInt() and 0xff) }
+                .chunked(4)
+                .joinToString(":")
+}
 
 /** Outgoing contact request, surfaced on the UI as an "I asked
  *  @<name> to connect" row. */

@@ -27,8 +27,10 @@ import me.lakko.app.calls.SfuCallUi
 import me.lakko.app.calls.SfuConfig
 import me.lakko.app.calls.parseCallSignalingBytes
 import me.lakko.app.devices.sync.DeviceGroupSyncRepository
+import me.lakko.app.contacts.AcceptedContactsStore
 import uniffi.lakko_ffi_uniffi.AttachmentRef
 import uniffi.lakko_ffi_uniffi.FfiCallSignalingBody
+import uniffi.lakko_ffi_uniffi.sfuPeerTag
 
 /**
  * State + dispatcher for the per-thread [ChatScreen].
@@ -259,11 +261,42 @@ public class ChatViewModel(
                     audio = true,
                     video = video,
                 )
+                // ADR-0021 — precompute the per-call peer_tag -> contact
+                // label map once over the persisted accepted contacts, so
+                // the SFU roster resolves to the identifier the rest of
+                // the app shows. The tag is re-derived locally (the SFU
+                // never sends a name); a collision falls back to the
+                // pseudonym.
+                val tagToLabel = HashMap<String, String>()
+                val collidedTags = HashSet<String>()
+                for (c in AcceptedContactsStore.load(repo.context)) {
+                    val accountId = c.request.fromAccountId ?: continue
+                    val accountIdHex =
+                        accountId.joinToString("") { "%02x".format(it.toInt() and 0xff) }
+                    val tag = sfuPeerTag(callId = callIdHex, accountId = accountIdHex)
+                    if (tagToLabel.containsKey(tag)) {
+                        collidedTags.add(tag)
+                    } else {
+                        tagToLabel[tag] = c.shortFingerprintLabel
+                    }
+                }
+                val resolveDisplayName: (String, String, String) -> String = { _, pseudonym, peerTag ->
+                    if (peerTag.isNotEmpty() && !collidedTags.contains(peerTag) &&
+                        tagToLabel.containsKey(peerTag)
+                    ) {
+                        tagToLabel.getValue(peerTag)
+                    } else if (pseudonym.isEmpty()) {
+                        "Peer"
+                    } else {
+                        pseudonym.take(8)
+                    }
+                }
                 val handle = SfuCallUi(
                     applicationContext = repo.context,
                     config = config,
                     scope = viewModelScope,
                     ui = sfuCallUiState,
+                    resolveDisplayName = resolveDisplayName,
                 )
                 mutableActiveSfuCall.value = handle
                 handle.connect()
