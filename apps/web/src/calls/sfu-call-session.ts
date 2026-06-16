@@ -138,8 +138,13 @@ export interface SfuCallCallbacks {
   onStateChange?(state: SfuCallState): void;
   /** Initial roster (from the SFU `Welcome`). */
   onWelcome?(selfPeerId: string, roster: readonly SfuPeerSnapshot[]): void;
-  /** A participant joined the call. */
-  onPeerJoined?(peerId: string, accountPseudonym: string): void;
+  /** A participant joined the call. `peerTag` is the ADR-0021 per-call
+   *  tag (absent from a pre-ADR-0021 SFU). */
+  onPeerJoined?(
+    peerId: string,
+    accountPseudonym: string,
+    peerTag: string | undefined,
+  ): void;
   /** A participant left. */
   onPeerLeft?(peerId: string): void;
   /** A remote media track arrived (already SFrame-decrypting). */
@@ -368,7 +373,11 @@ export class SfuCallSession {
   }
 
   private onPeerJoined(frame: SfuPeerJoined): void {
-    this.callbacks.onPeerJoined?.(frame.peer_id, frame.account_pseudonym);
+    this.callbacks.onPeerJoined?.(
+      frame.peer_id,
+      frame.account_pseudonym,
+      frame.peer_tag,
+    );
   }
 
   private onPeerLeft(frame: SfuPeerLeft): void {

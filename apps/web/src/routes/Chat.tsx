@@ -580,6 +580,23 @@ function ChatView(props: {
       const jwt = new CallJwtClient(wasm);
       jwt.setSessionToken(secrets.sessionToken);
       const minted = await jwt.mint(callIdHex, "participant");
+      // ADR-0021 — precompute the per-call peer_tag -> contact name map
+      // once, so the SFU roster resolves to real contact names instead of
+      // a pseudonym. The tag is derived locally (the SFU never sends a
+      // name); a peer with no matching contact keeps the pseudonym slice.
+      const tagToName = new Map<string, string>();
+      for (const c of loadAccepted()) {
+        if (c.accountIdHex !== undefined) {
+          tagToName.set(wasm.sfuPeerTag(callIdHex, c.accountIdHex), c.displayName);
+        }
+      }
+      const resolveDisplayName = (
+        _peerId: string,
+        pseudonym: string,
+        peerTag: string | undefined,
+      ): string =>
+        (peerTag !== undefined ? tagToName.get(peerTag) : undefined) ??
+        (pseudonym.length > 0 ? pseudonym.slice(0, 8) : "Peer");
       const handle = createSfuCallUi(
         {
           sfuBaseUrl: base,
@@ -588,7 +605,7 @@ function ChatView(props: {
           localLeaf,
           media: { audio: true, video: false },
         },
-        { localDisplayName: "You", safetyNumber },
+        { localDisplayName: "You", safetyNumber, resolveDisplayName },
       );
       setSfuHandle(handle);
       setSfuActive(true);

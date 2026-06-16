@@ -48,10 +48,13 @@ export interface SfuCallUiOptions {
   /** Display name for the local participant tile. Defaults to "You". */
   readonly localDisplayName?: string;
   /** Resolve a peer to a human-readable name (contact-card lookup).
-   *  Falls back to a short slice of the account pseudonym. */
+   *  `peerTag` is the ADR-0021 per-call tag (when the SFU emits one);
+   *  the resolver matches it against the caller's contacts. Falls back
+   *  to a short slice of the account pseudonym. */
   readonly resolveDisplayName?: (
     peerId: string,
     accountPseudonym: string,
+    peerTag: string | undefined,
   ) => string;
   /** Canonical call safety number (`callSafetyNumber(seed)` from the
    *  wasm core) for the in-call E2EE pill — the same string every
@@ -115,8 +118,12 @@ export function createSfuCallUi(
   >(new Map());
 
   const localName = options.localDisplayName ?? "You";
-  const nameOf = (peerId: string, pseudonym: string): string =>
-    options.resolveDisplayName?.(peerId, pseudonym) ??
+  const nameOf = (
+    peerId: string,
+    pseudonym: string,
+    peerTag: string | undefined,
+  ): string =>
+    options.resolveDisplayName?.(peerId, pseudonym, peerTag) ??
     (pseudonym.length > 0 ? pseudonym.slice(0, 8) : "Peer");
 
   const localParticipant = (): Participant => ({
@@ -196,13 +203,16 @@ export function createSfuCallUi(
       const remotes = roster
         .filter((p: SfuPeerSnapshot) => p.peer_id !== selfPeerId)
         .map((p: SfuPeerSnapshot) =>
-          remoteParticipant(nameOf(p.peer_id, p.account_pseudonym), p.peer_id),
+          remoteParticipant(
+            nameOf(p.peer_id, p.account_pseudonym, p.peer_tag),
+            p.peer_id,
+          ),
         );
       callActions.setParticipants([localParticipant(), ...remotes]);
     },
-    onPeerJoined: (peerId, accountPseudonym): void => {
+    onPeerJoined: (peerId, accountPseudonym, peerTag): void => {
       callActions.participantJoined(
-        remoteParticipant(nameOf(peerId, accountPseudonym), peerId),
+        remoteParticipant(nameOf(peerId, accountPseudonym, peerTag), peerId),
       );
     },
     onPeerLeft: (peerId): void => {

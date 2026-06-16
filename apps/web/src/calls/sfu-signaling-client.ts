@@ -39,6 +39,10 @@ import { loadWasm } from "../wasm";
 export interface SfuPeerSnapshot {
   readonly peer_id: string;
   readonly account_pseudonym: string;
+  /** Per-call peer tag (ADR-0021). Re-derive `sfuPeerTag(call_id,
+   *  account_id)` over a contact's account id and match to resolve this
+   *  entry to a name. Optional — absent from a pre-ADR-0021 SFU. */
+  readonly peer_tag?: string;
 }
 
 /** Machine-readable SFU error code (kebab-case wire form). */
@@ -63,6 +67,8 @@ export interface SfuPeerJoined {
   readonly kind: "peer-joined";
   readonly peer_id: string;
   readonly account_pseudonym: string;
+  /** Per-call peer tag (ADR-0021) — see {@link SfuPeerSnapshot.peer_tag}. */
+  readonly peer_tag?: string;
 }
 export interface SfuPeerLeft {
   readonly kind: "peer-left";
