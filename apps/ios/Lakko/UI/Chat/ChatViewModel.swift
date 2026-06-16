@@ -303,7 +303,38 @@ public final class ChatViewModel: ObservableObject {
                     audio: true,
                     video: video
                 )
-                let handle = SfuCallUi(config: config, ui: sfuCallUiState)
+                // ADR-0021 — precompute the per-call peer_tag -> contact
+                // label map once, so the SFU roster resolves to the
+                // identifier the rest of the app shows for that contact.
+                // The tag is re-derived locally (the SFU never sends a
+                // name); a tag collision falls back to the pseudonym.
+                var tagToLabel: [String: String] = [:]
+                var collidedTags = Set<String>()
+                for c in AcceptedContactsStore.load() {
+                    guard let accountId = c.request.fromAccountId else { continue }
+                    let accountIdHex = accountId
+                        .map { String(format: "%02x", $0) }
+                        .joined()
+                    let tag = sfuPeerTag(callId: callIdHex, accountId: accountIdHex)
+                    if tagToLabel[tag] != nil {
+                        collidedTags.insert(tag)
+                    } else {
+                        tagToLabel[tag] = c.shortFingerprintLabel
+                    }
+                }
+                let resolveDisplayName: (String, String, String) -> String = {
+                    _, pseudonym, peerTag in
+                    if !peerTag.isEmpty, !collidedTags.contains(peerTag),
+                        let label = tagToLabel[peerTag] {
+                        return label
+                    }
+                    return pseudonym.isEmpty ? "Peer" : String(pseudonym.prefix(8))
+                }
+                let handle = SfuCallUi(
+                    config: config,
+                    ui: sfuCallUiState,
+                    resolveDisplayName: resolveDisplayName
+                )
                 activeSfuCall = handle
                 try await handle.connect()
             } catch {

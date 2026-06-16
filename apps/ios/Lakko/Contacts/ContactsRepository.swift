@@ -766,6 +766,22 @@ public struct AcceptedContact: Equatable, Codable {
         self.request = request
         self.groupIdHex = groupIdHex
     }
+
+    /// Short pubkey-fingerprint label this peer is shown by elsewhere in
+    /// the app (first 8 bytes of the Ed25519 pubkey, colon-grouped hex) —
+    /// the identifier the ADR-0021 group-call roster resolver surfaces
+    /// for a recognised contact (iOS contacts carry no user-chosen name).
+    public var shortFingerprintLabel: String {
+        let hex = request.fromPubkey.prefix(8)
+            .map { String(format: "%02x", $0) }
+            .joined()
+        var out = ""
+        for (i, ch) in hex.enumerated() {
+            if i > 0 && i % 4 == 0 { out.append(":") }
+            out.append(ch)
+        }
+        return out
+    }
 }
 
 /// Outgoing contact request, surfaced on the UI as an "I asked
