@@ -1051,7 +1051,12 @@ private fun formatChatTimestamp(epochMs: Long): String {
 
 @Composable
 private fun E2eePill(state: CallUiState.E2eeState) {
-    val activeColour = if (state.active) CallTheme.qualityGreen else CallTheme.qualityYellow
+    // Green (verified-comparable) only when keying is real AND a safety
+    // number is present to read out-of-band; otherwise yellow, so "E2EE
+    // active but no comparable number" stays visually distinct from
+    // "active + number present" (matches the web pill's gate).
+    val verified = state.active && state.shortFingerprint != null
+    val activeColour = if (verified) CallTheme.qualityGreen else CallTheme.qualityYellow
     Row(
         modifier = Modifier
             .background(CallTheme.surface, RoundedCornerShape(50))

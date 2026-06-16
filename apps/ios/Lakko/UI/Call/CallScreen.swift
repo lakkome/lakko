@@ -76,7 +76,7 @@ private struct E2eePill: View {
                 .font(.system(.caption2, design: .monospaced))
                 .fontWeight(.semibold)
         }
-        .foregroundColor(state.active ? CallTheme.qualityGreen : CallTheme.qualityYellow)
+        .foregroundColor(verified ? CallTheme.qualityGreen : CallTheme.qualityYellow)
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
         .background(CallTheme.surface)
@@ -96,6 +96,14 @@ private struct E2eePill: View {
             return fp
         }
         return "…"
+    }
+
+    /// Green (verified-comparable) only when keying is real AND a safety
+    /// number is present to read out-of-band; otherwise yellow, so
+    /// "E2EE active but no comparable number" stays visually distinct
+    /// from "active + number present" (matches the web pill's gate).
+    private var verified: Bool {
+        state.active && state.shortFingerprint != nil
     }
 }
 
