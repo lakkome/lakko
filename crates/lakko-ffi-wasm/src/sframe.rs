@@ -88,6 +88,26 @@ impl WasmCallKey {
     }
 }
 
+/// Derive the human-comparable call **safety number** from the shared
+/// 32-byte per-call seed.
+///
+/// Every participant derives the same seed via the MLS exporter, so the
+/// safety number is identical for everyone on the call. Render it in the
+/// in-call UI for an out-of-band man-in-the-middle check: matching codes
+/// prove a shared E2EE root key (security invariant #4). The format is
+/// six space-separated five-digit groups.
+///
+/// # Errors
+///
+/// `JsError` if `seed` is not exactly 32 bytes.
+#[wasm_bindgen(js_name = "callSafetyNumber")]
+pub fn call_safety_number(seed: &[u8]) -> Result<String, JsError> {
+    let arr: [u8; core::CALL_KEY_LEN] = seed
+        .try_into()
+        .map_err(|_| JsError::new("call safety-number seed must be exactly 32 bytes"))?;
+    Ok(lakko_calls::safety_number::call_safety_number(&arr))
+}
+
 /// Per-participant AEAD key + per-participant nonce salt
 /// + per-participant frame counter. Sealing increments
 /// the counter under a `Mutex` so the transformer's

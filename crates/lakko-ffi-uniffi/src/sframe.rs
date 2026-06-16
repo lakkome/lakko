@@ -122,6 +122,28 @@ impl CallKey {
     }
 }
 
+/// Derive the human-comparable call **safety number** from the shared
+/// 32-byte per-call seed.
+///
+/// Every participant derives the same seed via the MLS exporter, so the
+/// safety number is identical for everyone on the call. Render it in the
+/// in-call UI for an out-of-band man-in-the-middle check: two
+/// participants read the code aloud and a match proves they share the
+/// same E2EE root key (security invariant #4). The format is six
+/// space-separated five-digit groups.
+///
+/// # Errors
+///
+/// [`FfiError::Call`] if `seed` is not exactly 32 bytes.
+#[uniffi::export]
+pub fn call_safety_number(seed: Vec<u8>) -> Result<String, FfiError> {
+    let arr: [u8; core::CALL_KEY_LEN] = seed
+        .as_slice()
+        .try_into()
+        .map_err(|_| FfiError::Call("call safety-number seed must be exactly 32 bytes".into()))?;
+    Ok(lakko_calls::safety_number::call_safety_number(&arr))
+}
+
 /// Per-participant AEAD key + per-participant nonce salt
 /// + per-participant frame counter.
 ///
@@ -514,5 +536,16 @@ mod tests {
             Err(FfiError::Call(msg)) => assert!(msg.contains("decode")),
             other => panic!("expected decode error, got {other:?}"),
         }
+    }
+
+    /// The FFI wrapper reproduces the core safety-number golden
+    /// vector (so the Swift / Kotlin binding renders byte-identical
+    /// strings to the web wasm binding) and refuses a wrong-length
+    /// seed.
+    #[test]
+    fn call_safety_number_matches_core_golden() {
+        let out = call_safety_number(vec![0u8; 32]).expect("32-byte seed");
+        assert_eq!(out, "46397 95175 80657 33748 45670 60282");
+        assert!(call_safety_number(vec![0u8; 31]).is_err());
     }
 }

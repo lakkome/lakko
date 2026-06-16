@@ -54,6 +54,7 @@ pub mod group_call;
 pub mod header;
 pub mod link_invite;
 pub mod quality;
+pub mod safety_number;
 pub mod session;
 pub mod sframe;
 pub mod signaling;
