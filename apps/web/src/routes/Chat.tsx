@@ -585,18 +585,31 @@ function ChatView(props: {
       // a pseudonym. The tag is derived locally (the SFU never sends a
       // name); a peer with no matching contact keeps the pseudonym slice.
       const tagToName = new Map<string, string>();
+      // ADR-0021: on a (vanishingly rare) tag collision between two
+      // contacts, do NOT show one of their names — fall back to the
+      // pseudonym, so a collision never surfaces a wrong contact name.
+      const collidedTags = new Set<string>();
       for (const c of loadAccepted()) {
         if (c.accountIdHex !== undefined) {
-          tagToName.set(wasm.sfuPeerTag(callIdHex, c.accountIdHex), c.displayName);
+          const tag = wasm.sfuPeerTag(callIdHex, c.accountIdHex);
+          if (tagToName.has(tag)) {
+            collidedTags.add(tag);
+          } else {
+            tagToName.set(tag, c.displayName);
+          }
         }
       }
       const resolveDisplayName = (
         _peerId: string,
         pseudonym: string,
         peerTag: string | undefined,
-      ): string =>
-        (peerTag !== undefined ? tagToName.get(peerTag) : undefined) ??
-        (pseudonym.length > 0 ? pseudonym.slice(0, 8) : "Peer");
+      ): string => {
+        if (peerTag !== undefined && !collidedTags.has(peerTag)) {
+          const name = tagToName.get(peerTag);
+          if (name !== undefined) return name;
+        }
+        return pseudonym.length > 0 ? pseudonym.slice(0, 8) : "Peer";
+      };
       const handle = createSfuCallUi(
         {
           sfuBaseUrl: base,
