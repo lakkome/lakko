@@ -31,7 +31,17 @@ public final class ContactsRepository: ObservableObject {
 
     // MARK: - Published state
 
-    @Published public private(set) var state: ContactsState = ContactsState()
+    @Published public private(set) var state: ContactsState = ContactsState() {
+        didSet {
+            // Persist the accepted list so it survives a relaunch
+            // (ADR-0021 group-call name resolution needs it). Only the
+            // accepted list is persisted; pending re-polls from cursor 0
+            // as before.
+            if state.accepted != oldValue.accepted {
+                AcceptedContactsStore.save(state.accepted)
+            }
+        }
+    }
 
     // MARK: - Wiring
 
@@ -74,6 +84,13 @@ public final class ContactsRepository: ObservableObject {
         self.authRepository = authRepository
         self.clientFactory = clientFactory
         self.discoveryClientFactory = discoveryClientFactory
+        // Rehydrate the persisted accepted list (ADR-0021). If the
+        // `didSet` fires for this set it harmlessly re-saves the same
+        // list, so the round-trip is idempotent.
+        let persisted = AcceptedContactsStore.load()
+        if !persisted.isEmpty {
+            state = state.with(accepted: persisted)
+        }
     }
 
     // MARK: - Send
@@ -736,7 +753,7 @@ public struct ContactsState: Equatable {
 }
 
 /// A request the user has accepted locally.
-public struct AcceptedContact: Equatable {
+public struct AcceptedContact: Equatable, Codable {
     public let request: IncomingContactRequest
     /// Populated when the Accept flow drove
     /// `ChatRepository.startGroupWith` for this peer (1.14f,

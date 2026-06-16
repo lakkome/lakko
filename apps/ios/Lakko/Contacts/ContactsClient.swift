@@ -866,7 +866,7 @@ public struct SendResult: Equatable {
 }
 
 /// One verified incoming ContactRequest.
-public struct IncomingContactRequest: Equatable {
+public struct IncomingContactRequest: Equatable, Codable {
     public let messageId: Int64
     /// Sender's Ed25519 identity public key (32 bytes). The
     /// signature on the request was verified against this.
