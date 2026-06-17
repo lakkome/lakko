@@ -13,10 +13,10 @@ section that describes it.
 | Class | Count | Range | Source file |
 |---|---|---|---|
 | **I-** | 8   | I-1..I-8   | [`mls-state-machine.md`](./mls-state-machine.md) |
-| **C-** | 54  | C-1..C-54  | [`calls.md`](./calls.md) |
+| **C-** | 57  | C-1..C-57  | [`calls.md`](./calls.md) |
 | **T-** | 15  | T-1..T-15  | [`transport.md`](./transport.md) |
 | **G-** | 27  | G-1..G-27 (G-28 closed via the G3-sframe-native arc N-1..N-6) | [`known-gaps.md`](./known-gaps.md) — open / deferred |
-| Total invariants  | 77  | (I + C + T) | live properties |
+| Total invariants  | 80  | (I + C + T) | live properties |
 | Total open gaps   | 27  | (G)         | tracked + scoped |
 
 ## MLS state machine invariants (I-1..I-8)
@@ -37,7 +37,7 @@ in `crates/lakko-mls/`.
 | I-7 | Opening a `SealedBundle` with an unknown `algorithm` discriminator is rejected before AEAD-open is attempted | Forward-compat ratchet |
 | I-8 | `create_devicegroup_message` round-trips through `parse_devicegroup_payload` losslessly for every typed body variant | Wire-format byte-stability |
 
-## Call-side invariants (C-1..C-54)
+## Call-side invariants (C-1..C-57)
 
 Source: [`calls.md`](./calls.md). Five sub-sections —
 media-key pipeline (C-1..C-14), call-admission JWT
@@ -256,7 +256,7 @@ should not re-discover them.
 | G-20 | Call recording is out of scope (deferred per ROADMAP 3c8) |
 | G-21 | Link-based call invites are single-joiner in V1 — **CLOSED** by C-33/C-35 KP-forward + multi-party tests |
 | G-22 | Per-joiner dedup for call invites lands with multi-use orchestration — **CLOSED** by C-33/C-35 |
-| G-26 | RFC 9605 §4.3 wire frame header — serializer + framed pipeline + cross-platform AAD **landed** (C-38 / C-55, ADR-0013); SFrame sealed end-to-end on all three SFU clients. **Effectively closed:** the cross-runtime byte interop is now a *proven equality* via a golden vector pinned + asserted (seal AND open) on all four stacks — Rust core / wasm-web / iOS-UniFFI / Android-UniFFI (`sframe.rs::golden_vector_*`, `sframe-golden.test.ts`, `SFrameGoldenTests.swift`, `SframeGoldenTest.kt`; Rust+web+iOS verified firsthand, Android in `g3-4-mobile.yml` CI), and the live-SFU verbatim forward is proven by `sframe_sealed_frame_round_trips_through_the_live_sfu`. Composed, the sealed-on-web → SFU-relay → opened-on-native path holds by correctness. Residual: a single monolithic real-Chrome ⊕ real-native ⊕ deployed-SFU smoke — redundant for correctness, a deploy/CI-execution concern |
+| G-26 | RFC 9605 §4.3 wire frame header — serializer + framed pipeline + cross-platform AAD **landed** (C-38 / C-55, ADR-0013); SFrame sealed end-to-end on all three SFU clients. **Effectively closed:** the cross-runtime byte interop is now a *proven equality* via a golden vector pinned + asserted (seal AND open) on all four stacks — Rust core / wasm-web / iOS-UniFFI / Android-UniFFI (`sframe.rs::golden_vector_*`, `sframe-golden.test.ts`, `SFrameGoldenTests.swift`, `SframeGoldenTest.kt`; Rust+web+iOS verified firsthand, Android in `g3-4-mobile.yml` CI), and now ALSO on the two NATIVE-stack layers the platform shims wrap: the flat C ABI (`crates/lakko-sframe-native/tests/golden_cross_stack.rs` — `extern "C"` `seal_framed`/`open_framed`) and the C++ bridge (`apps/shared/sframe-bridge/test_bridge.cc` `test_cross_stack_golden_vector` — the `LakkoFrameEncryptor`/`LakkoFrameDecryptor` webrtc-interface impls), both pinned to the same `GOLDEN_WIRE_HEX`, so every native-stack layer is byte-identical to web/core down to the libwebrtc handoff. The live-SFU verbatim forward is proven by `sframe_sealed_frame_round_trips_through_the_live_sfu`. Composed, the sealed-on-web → SFU-relay → opened-on-native path holds by correctness. Residual: a single monolithic real-Chrome ⊕ real-native ⊕ deployed-SFU smoke — redundant for correctness, a deploy/CI-execution concern |
 | G-27 | Channel PublisherGroup — **web wired** (G4-2-mls-publisher); iOS / Android still using `newChannelSeedForTest`; persistence + rotation deferred to G4-2-mls-persistence |
 
 ### Dependency advisories
