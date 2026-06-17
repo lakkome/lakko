@@ -1974,32 +1974,14 @@ public final class AuthRepository: ObservableObject {
         // a negative messageId (never collides with a real DS id), a zero
         // pseudonym, no intro.
         let existingContacts = AcceptedContactsStore.load()
-        let knownPubkeys = Set(existingContacts.map { $0.request.fromPubkey })
-        var merged = existingContacts
-        var added = 0
-        for (idx, rec) in parsed.acceptedContacts.enumerated()
-        where !knownPubkeys.contains(rec.ed25519Pubkey) {
-            let request = IncomingContactRequest(
-                messageId: Int64(-(idx + 1)),
-                fromPubkey: rec.ed25519Pubkey,
-                fromAccountId: rec.accountId,
-                fromPseudonym: Data(count: 32),
-                validAfterMs: parsed.createdAtMs,
-                intro: nil,
-                createdAt: ""
-            )
-            merged.append(
-                AcceptedContact(
-                    request: request,
-                    groupIdHex: nil,
-                    displayName: rec.displayName.isEmpty ? nil : rec.displayName
-                )
-            )
-            added += 1
-        }
-        if added > 0 {
-            AcceptedContactsStore.save(merged)
-            NSLog("backup restore (\(context)): merged \(added) contact(s)")
+        let restoredContacts = reconstructRestoredContacts(
+            existing: existingContacts,
+            restored: parsed.acceptedContacts,
+            createdAtMs: parsed.createdAtMs
+        )
+        if !restoredContacts.isEmpty {
+            AcceptedContactsStore.save(existingContacts + restoredContacts)
+            NSLog("backup restore (\(context)): merged \(restoredContacts.count) contact(s)")
         }
         return parsed.wholeStorageSnapshot
     }

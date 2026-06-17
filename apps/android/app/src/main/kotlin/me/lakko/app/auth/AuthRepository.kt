@@ -2180,27 +2180,12 @@ public class AuthRepository(
             try {
                 val existing =
                     me.lakko.app.contacts.AcceptedContactsStore.load(applicationContext)
-                val known = existing.mapTo(HashSet()) { it.request.fromPubkey.toList() }
                 val restored =
-                    parsed.acceptedContacts.mapIndexedNotNull { idx, rec ->
-                        if (rec.ed25519Pubkey.toList() in known) {
-                            return@mapIndexedNotNull null
-                        }
-                        me.lakko.app.contacts.AcceptedContact(
-                            request =
-                                me.lakko.app.contacts.IncomingContactRequest(
-                                    messageId = -(idx.toLong() + 1),
-                                    fromPubkey = rec.ed25519Pubkey,
-                                    fromAccountId = rec.accountId,
-                                    fromPseudonym = ByteArray(32),
-                                    validAfterMs = parsed.createdAtMs.toULong(),
-                                    intro = null,
-                                    createdAt = "",
-                                ),
-                            groupIdHex = null,
-                            displayName = rec.displayName.ifEmpty { null },
-                        )
-                    }
+                    me.lakko.app.contacts.reconstructRestoredContacts(
+                        existing,
+                        parsed.acceptedContacts,
+                        parsed.createdAtMs.toULong(),
+                    )
                 if (restored.isNotEmpty()) {
                     me.lakko.app.contacts.AcceptedContactsStore.save(
                         applicationContext,
