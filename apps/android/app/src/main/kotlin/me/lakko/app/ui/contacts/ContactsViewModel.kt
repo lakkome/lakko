@@ -408,6 +408,13 @@ public class ContactsViewModel(
         repo.declineContactRequest(messageId)
     }
 
+    /** Set (or clear, when blank) the user-chosen display name for an
+     *  accepted contact (ADR-0021 follow-up). The repository persists it
+     *  and the group-call roster picks it up on the next call. */
+    public fun onRenameContactClicked(messageId: Long, name: String) {
+        repo.renameContact(messageId, name)
+    }
+
     /** Map a [ContactsError] to a user-facing message. */
     private fun userFacingError(err: ContactsError): String =
         when (val v = err.variant) {

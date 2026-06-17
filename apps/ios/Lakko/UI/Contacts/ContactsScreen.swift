@@ -196,7 +196,13 @@ public struct ContactsScreen: View {
                 ) { entry in
                     AcceptedContactRow(
                         entry: entry,
-                        onOpenChat: onOpenChat
+                        onOpenChat: onOpenChat,
+                        onRename: { messageId, name in
+                            viewModel.onRenameContactClicked(
+                                messageId: messageId,
+                                name: name
+                            )
+                        }
                     )
                 }
             }
@@ -422,12 +428,32 @@ private struct PendingRequestRow: View {
 private struct AcceptedContactRow: View {
     let entry: AcceptedContact
     let onOpenChat: (String) -> Void
+    /// (messageId, newName) — a blank name clears the override
+    /// (ADR-0021 follow-up: editable per-contact display name).
+    let onRename: (Int64, String) -> Void
+
+    @State private var renaming = false
+    @State private var draftName = ""
 
     var body: some View {
         HStack {
             VStack(alignment: .leading, spacing: 4) {
-                Text(shortFingerprint(entry.request.fromPubkey))
-                    .font(.system(.body, design: .monospaced))
+                // Primary label: the user-chosen name when set, else the
+                // short pubkey fingerprint (monospaced when it IS the
+                // fingerprint, so it reads as a key rather than a name).
+                Text(entry.displayLabel)
+                    .font(
+                        entry.displayName == nil
+                            ? .system(.body, design: .monospaced)
+                            : .body
+                    )
+                // When a name is set, keep the fingerprint visible as a
+                // secondary line — it stays the identity the user verifies.
+                if entry.displayName != nil {
+                    Text(entry.shortFingerprintLabel)
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                }
                 if entry.groupIdHex == nil {
                     Text("Chat creation failed — retry from Chats")
                         .font(.footnote)
@@ -439,6 +465,14 @@ private struct AcceptedContactRow: View {
                 }
             }
             Spacer()
+            Button(action: {
+                draftName = entry.displayName ?? ""
+                renaming = true
+            }) {
+                Text("Rename")
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
             if let groupIdHex = entry.groupIdHex {
                 Button(action: { onOpenChat(groupIdHex) }) {
                     Text("Open")
@@ -448,10 +482,16 @@ private struct AcceptedContactRow: View {
             }
         }
         .padding(.vertical, 4)
-    }
-
-    private func shortFingerprint(_ pubkey: Data) -> String {
-        pubkey.prefix(8).map { String(format: "%02x", $0) }.joined()
+        .alert("Rename contact", isPresented: $renaming) {
+            TextField("Display name", text: $draftName)
+            Button("Save") { onRename(entry.request.messageId, draftName) }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(
+                "Shown in chats and group-call rosters. "
+                    + "Leave blank to use the key fingerprint."
+            )
+        }
     }
 }
 

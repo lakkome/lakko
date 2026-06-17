@@ -229,6 +229,13 @@ public final class ContactsViewModel: ObservableObject {
         repository.declineContactRequest(messageId: messageId)
     }
 
+    /// Set (or clear, when blank) the user-chosen display name for an
+    /// accepted contact (ADR-0021 follow-up). The repository persists the
+    /// change and the group-call roster picks it up on the next call.
+    public func onRenameContactClicked(messageId: Int64, name: String) {
+        repository.renameContact(messageId: messageId, to: name)
+    }
+
     // MARK: - Invite link actions (1.14e7)
 
     /// Generate a fresh single-use 7-day invite link. Surfaces the

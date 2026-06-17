@@ -295,6 +295,28 @@ public class ContactsRepository(
     }
 
     /**
+     * Set (or clear, when blank) the user-chosen display name for an
+     * accepted contact (ADR-0021 follow-up). A blank name reverts the UI +
+     * the group-call roster to the short pubkey fingerprint. Persists the
+     * accepted list so the change survives a relaunch.
+     */
+    public fun renameContact(messageId: Long, newDisplayName: String) {
+        val trimmed = newDisplayName.trim()
+        mutableState.update { state ->
+            state.copy(
+                accepted = state.accepted.map { contact ->
+                    if (contact.request.messageId == messageId) {
+                        contact.copy(displayName = trimmed.ifBlank { null })
+                    } else {
+                        contact
+                    }
+                },
+            )
+        }
+        persistAccepted()
+    }
+
+    /**
      * Send a `ContactAck` back to the original sender's stranger
      * inbox so their UI flips from "pending" to "accepted"
      * without waiting on the Welcome arrival (Phase 1.9b1).
@@ -942,11 +964,16 @@ private const val INVITE_URL_PREFIX: String = "https://lakko.me/i/"
 public data class AcceptedContact(
     val request: IncomingContactRequest,
     val groupIdHex: String? = null,
+    /** User-chosen display name (ADR-0021 follow-up). `null` until the
+     *  user renames the contact; the UI + the group-call roster then fall
+     *  back to [shortFingerprintLabel]. Persisted optionally, so a contact
+     *  stored before this field existed loads with `displayName == null`. */
+    val displayName: String? = null,
 ) {
     /** Short pubkey-fingerprint label this peer is shown by elsewhere in
      *  the app (first 8 bytes of the Ed25519 pubkey, colon-grouped hex) —
-     *  the identifier the ADR-0021 group-call roster resolver surfaces
-     *  for a recognised contact (Android contacts carry no user name). */
+     *  the fallback the ADR-0021 group-call roster resolver surfaces for a
+     *  recognised contact that has no user-chosen [displayName] yet. */
     public val shortFingerprintLabel: String
         get() =
             request.fromPubkey
@@ -954,6 +981,13 @@ public data class AcceptedContact(
                 .joinToString("") { "%02x".format(it.toInt() and 0xff) }
                 .chunked(4)
                 .joinToString(":")
+
+    /** The label to show for this contact: the user-chosen [displayName]
+     *  when set (and non-blank), else the short pubkey fingerprint. The
+     *  single source the contacts UI + the group-call roster resolver both
+     *  read, so a rename surfaces everywhere consistently. */
+    public val displayLabel: String
+        get() = displayName?.takeIf { it.isNotBlank() } ?: shortFingerprintLabel
 }
 
 /** Outgoing contact request, surfaced on the UI as an "I asked

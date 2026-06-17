@@ -43,6 +43,10 @@ object AcceptedContactsStore {
         val intro: String?,
         val createdAt: String,
         val groupIdHex: String?,
+        // ADR-0021 follow-up: user-chosen display name. Optional with a
+        // default so a record persisted before this field existed decodes
+        // with `displayName == null` (ignoreUnknownKeys also tolerates it).
+        val displayName: String? = null,
     )
 
     private fun b64(bytes: ByteArray): String = Base64.encodeToString(bytes, Base64.NO_WRAP)
@@ -66,6 +70,7 @@ object AcceptedContactsStore {
                         createdAt = s.createdAt,
                     ),
                     groupIdHex = s.groupIdHex,
+                    displayName = s.displayName,
                 )
             }
         } catch (e: Exception) {
@@ -86,6 +91,7 @@ object AcceptedContactsStore {
                 intro = c.request.intro,
                 createdAt = c.request.createdAt,
                 groupIdHex = c.groupIdHex,
+                displayName = c.displayName,
             )
         }
         prefs(context).edit().putString(KEY, json.encodeToString(stored)).apply()

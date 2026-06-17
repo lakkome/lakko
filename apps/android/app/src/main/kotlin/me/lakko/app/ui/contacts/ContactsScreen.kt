@@ -17,6 +17,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -30,6 +31,9 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
@@ -185,7 +189,11 @@ public fun ContactsScreen(
             )
 
             Spacer(Modifier.height(24.dp))
-            AcceptedSection(accepted = state.accepted, onOpenChat = onOpenChat)
+            AcceptedSection(
+                accepted = state.accepted,
+                onOpenChat = onOpenChat,
+                onRename = viewModel::onRenameContactClicked,
+            )
 
             Spacer(Modifier.height(24.dp))
             SentSection(sent = state.sent)
@@ -678,12 +686,21 @@ private fun PendingRow(
 private fun AcceptedSection(
     accepted: List<AcceptedContact>,
     onOpenChat: ((groupIdHex: String) -> Unit)?,
+    /** (messageId, newName) — a blank name clears the override
+     *  (ADR-0021 follow-up: editable per-contact display name). */
+    onRename: (messageId: Long, newName: String) -> Unit,
 ) {
     SectionHeader(title = "Accepted", count = accepted.size)
     if (accepted.isEmpty()) {
         EmptyHint(text = "No accepted contacts.")
         return
     }
+
+    // A single rename dialog, driven by the contact currently being
+    // edited (`null` = closed) + the draft name field.
+    var editing by remember { mutableStateOf<AcceptedContact?>(null) }
+    var draftName by remember { mutableStateOf("") }
+
     Spacer(Modifier.height(8.dp))
     for (c in accepted) {
         Row(
@@ -692,12 +709,39 @@ private fun AcceptedSection(
                 .fillMaxWidth()
                 .padding(vertical = 4.dp),
         ) {
-            Text(
-                text = shortHex(c.request.fromPubkey),
-                style = MaterialTheme.typography.bodyMedium,
-                fontFamily = FontFamily.Monospace,
-                modifier = Modifier.weight(1f),
-            )
+            Column(modifier = Modifier.weight(1f)) {
+                // Primary label: the user-chosen name when set, else the
+                // short pubkey fingerprint (monospaced when it IS the
+                // fingerprint, so it reads as a key rather than a name).
+                Text(
+                    text = c.displayLabel,
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontFamily =
+                        if (c.displayName == null) {
+                            FontFamily.Monospace
+                        } else {
+                            FontFamily.Default
+                        },
+                )
+                // When a name is set, keep the fingerprint visible as a
+                // secondary line — it stays the identity the user verifies.
+                if (c.displayName != null) {
+                    Text(
+                        text = c.shortFingerprintLabel,
+                        style = MaterialTheme.typography.bodySmall,
+                        fontFamily = FontFamily.Monospace,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+            TextButton(
+                onClick = {
+                    draftName = c.displayName ?: ""
+                    editing = c
+                },
+            ) {
+                Text("Rename")
+            }
             // "Open chat" affordance — shown only when the
             // 1.15f4c bridge wired the chat handshake at
             // Accept time. `null` for legacy v1 envelopes (no
@@ -719,6 +763,45 @@ private fun AcceptedSection(
                 )
             }
         }
+    }
+
+    val target = editing
+    if (target != null) {
+        AlertDialog(
+            onDismissRequest = { editing = null },
+            title = { Text("Rename contact") },
+            text = {
+                Column {
+                    Text(
+                        text = "Shown in chats and group-call rosters. " +
+                            "Leave blank to use the key fingerprint.",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = draftName,
+                        onValueChange = { draftName = it },
+                        singleLine = true,
+                        label = { Text("Display name") },
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        onRename(target.request.messageId, draftName)
+                        editing = null
+                    },
+                ) {
+                    Text("Save")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { editing = null }) {
+                    Text("Cancel")
+                }
+            },
+        )
     }
 }
 

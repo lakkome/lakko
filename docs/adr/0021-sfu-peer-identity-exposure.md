@@ -170,12 +170,20 @@ posture as ADR's call safety number.
   `@Serializable` base64 DTO) rehydrated on the `ContactsRepository` and
   saved on every accept, and `ChatViewModel.startGroupCall` precomputes
   the `peer_tag → label` map + a `resolveDisplayName` for `SfuCallUi`
-  (collision → pseudonym, matching web). **Caveat:** the native label is
-  the peer's short pubkey fingerprint (`shortFingerprintLabel`), the same
-  identifier the contacts UI shows — iOS/Android contacts carry **no
-  user-chosen display name** (unlike web), so the full "human name in the
-  roster" payoff awaits editable native contact display names (a separate
-  follow-up).
+  (collision → pseudonym, matching web).
+- **Native editable contact display names — landed (Jun 2026).**
+  `AcceptedContact` gained an optional user-chosen `displayName` on both
+  platforms (iOS `Codable`; Android `@Serializable`, both backwards-compat
+  — a record persisted before the field decodes to `nil`/`null`), a
+  `displayLabel` convenience (the name when set + non-blank, else the
+  fingerprint), a `renameContact` repository mutation that persists, and a
+  Contacts-screen rename affordance (iOS `.alert` + `TextField`; Android
+  `AlertDialog` + `OutlinedTextField`). The group-call roster resolver now
+  keys on `displayLabel`, so a renamed native contact shows its human name
+  in the roster — closing the prior fingerprint-only caveat. The fingerprint
+  stays visible as a secondary line when a name is set (it remains the
+  identity the user verifies). `xcodebuild` + `:app:compileDebugKotlin`
+  green.
 
 ## Open questions
 
@@ -184,10 +192,14 @@ posture as ADR's call safety number.
   short but birthday-safe). **Resolved:** 8-byte / 16-hex, `lakko/sfu/peer-tag/v1`.
 - Backfill existing contacts' account_ids from discovery (one pass) vs.
   lazy re-resolution on next contact interaction.
-- The native resolver shows the peer's short pubkey fingerprint, not a
+- ~~The native resolver shows the peer's short pubkey fingerprint, not a
   human name, because iOS/Android contacts have no user-chosen display
-  name. Adding editable native contact display names is the follow-up
-  that makes the native roster show real names like the web.
+  name.~~ **Resolved (Jun 2026).** iOS + Android `AcceptedContact` gained
+  an editable `displayName` (rename affordance in the Contacts screen,
+  persisted); the roster resolver keys on `displayLabel` (name when set,
+  else fingerprint), so a renamed native contact shows its real name in the
+  group-call roster like the web. The fingerprint stays visible as a
+  secondary line for OOB identity verification.
 - ~~The web backup/restore (`lakko-backup`) does not carry
   `accountIdHex`, so a restored contact loses it until re-accepted.~~
   **Resolved (Jun 2026).** `lakko-backup` payload format bumped to v3:

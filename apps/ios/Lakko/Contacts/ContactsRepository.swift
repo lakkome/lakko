@@ -258,6 +258,23 @@ public final class ContactsRepository: ObservableObject {
         state = state.with(pending: remaining, accepted: newAccepted)
     }
 
+    /// Set (or clear) the user-chosen display name for an accepted contact
+    /// (ADR-0021 follow-up). A blank name clears it, reverting the UI + the
+    /// group-call roster to the short pubkey fingerprint. The mutation flows
+    /// through `state`'s `didSet`, which persists the accepted list.
+    public func renameContact(messageId: Int64, to displayName: String) {
+        let trimmed = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let accepted = state.accepted
+        guard let idx = accepted.firstIndex(
+            where: { $0.request.messageId == messageId }
+        ) else {
+            return
+        }
+        var updated = accepted
+        updated[idx].displayName = trimmed.isEmpty ? nil : trimmed
+        state = state.with(accepted: updated)
+    }
+
     /// Send a `ContactAck` back to the original sender's stranger
     /// inbox so their UI flips from "pending" to "accepted"
     /// without waiting on the Welcome arrival (Phase 1.9b1).
@@ -761,16 +778,27 @@ public struct AcceptedContact: Equatable, Codable {
     /// `startGroupWith` failed — the contacts UI then offers a
     /// retry instead of the "Open chat" affordance.
     public let groupIdHex: String?
+    /// User-chosen display name for this contact (ADR-0021 follow-up).
+    /// `nil` until the user renames the contact; the UI + the group-call
+    /// roster then fall back to `shortFingerprintLabel`. A `Codable`
+    /// optional — a contact persisted before this field existed decodes
+    /// with `displayName == nil`, preserving the old fingerprint display.
+    public var displayName: String?
 
-    public init(request: IncomingContactRequest, groupIdHex: String? = nil) {
+    public init(
+        request: IncomingContactRequest,
+        groupIdHex: String? = nil,
+        displayName: String? = nil
+    ) {
         self.request = request
         self.groupIdHex = groupIdHex
+        self.displayName = displayName
     }
 
     /// Short pubkey-fingerprint label this peer is shown by elsewhere in
     /// the app (first 8 bytes of the Ed25519 pubkey, colon-grouped hex) —
-    /// the identifier the ADR-0021 group-call roster resolver surfaces
-    /// for a recognised contact (iOS contacts carry no user-chosen name).
+    /// the fallback the ADR-0021 group-call roster resolver surfaces for a
+    /// recognised contact that has no user-chosen `displayName` yet.
     public var shortFingerprintLabel: String {
         let hex = request.fromPubkey.prefix(8)
             .map { String(format: "%02x", $0) }
@@ -781,6 +809,15 @@ public struct AcceptedContact: Equatable, Codable {
             out.append(ch)
         }
         return out
+    }
+
+    /// The label to show for this contact: the user-chosen `displayName`
+    /// when set (and non-blank), else the short pubkey fingerprint. This is
+    /// the single source the contacts UI + the group-call roster resolver
+    /// both read, so a rename surfaces everywhere consistently.
+    public var displayLabel: String {
+        if let name = displayName, !name.isEmpty { return name }
+        return shortFingerprintLabel
     }
 }
 

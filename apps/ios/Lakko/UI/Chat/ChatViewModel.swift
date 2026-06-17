@@ -319,7 +319,9 @@ public final class ChatViewModel: ObservableObject {
                     if tagToLabel[tag] != nil {
                         collidedTags.insert(tag)
                     } else {
-                        tagToLabel[tag] = c.shortFingerprintLabel
+                        // Prefer the user-chosen display name; fall back to
+                        // the short pubkey fingerprint (ADR-0021 follow-up).
+                        tagToLabel[tag] = c.displayLabel
                     }
                 }
                 let resolveDisplayName: (String, String, String) -> String = {

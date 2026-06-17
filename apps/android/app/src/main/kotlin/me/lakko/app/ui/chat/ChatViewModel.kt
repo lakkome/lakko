@@ -277,7 +277,9 @@ public class ChatViewModel(
                     if (tagToLabel.containsKey(tag)) {
                         collidedTags.add(tag)
                     } else {
-                        tagToLabel[tag] = c.shortFingerprintLabel
+                        // Prefer the user-chosen display name; fall back to
+                        // the short pubkey fingerprint (ADR-0021 follow-up).
+                        tagToLabel[tag] = c.displayLabel
                     }
                 }
                 val resolveDisplayName: (String, String, String) -> String = { _, pseudonym, peerTag ->
