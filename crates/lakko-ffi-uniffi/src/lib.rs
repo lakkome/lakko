@@ -511,6 +511,20 @@ impl Identity {
     }
 }
 
+/// One member of a chat [`Group`] at the current epoch — the roster row the
+/// group-chat UI renders (member list + per-member Remove affordance). Mirror
+/// of the wasm `Group.members()` shape + the [`DeviceLeaf`] device-roster row.
+#[derive(uniffi::Record)]
+pub struct GroupMember {
+    /// OpenMLS leaf position. Stable inside an epoch; can renumber on the next
+    /// add/remove cycle, so the UI MUST NOT cache it across a state change.
+    pub leaf_index: u32,
+    /// 32-byte Ed25519 verifying key for the member's signature credential.
+    /// The UI matches it against the contacts list (the same key a
+    /// `ContactRequest` is signed with) to render a name, else a fingerprint.
+    pub signature_public_key: Vec<u8>,
+}
+
 /// Lakko MLS conversation group.
 #[derive(uniffi::Object)]
 pub struct Group {
@@ -617,6 +631,23 @@ impl Group {
     pub fn member_count(&self) -> Result<u32, FfiError> {
         let g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
         Ok(u32::try_from(g.member_count()).unwrap_or(u32::MAX))
+    }
+
+    /// Snapshot of every member's `(leaf_index, signature_public_key)` at the
+    /// current epoch — the roster the group-chat UI renders. Ordering matches
+    /// `lakko_mls::Group::members` (left-to-right over the leaf tree, stable
+    /// inside one epoch). Mirror of the wasm `Group.members()`; the native
+    /// clients match each `signature_public_key` against their contacts to
+    /// label a row, and offer a Remove on every leaf but [`Self::own_leaf_index`].
+    pub fn members(&self) -> Result<Vec<GroupMember>, FfiError> {
+        let g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
+        Ok(g.members()
+            .into_iter()
+            .map(|m| GroupMember {
+                leaf_index: m.leaf_index,
+                signature_public_key: m.signature_public_key,
+            })
+            .collect())
     }
 
     /// Group identifier bytes (RFC 9420 `group_id`).
