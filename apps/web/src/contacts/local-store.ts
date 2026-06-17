@@ -87,6 +87,14 @@ export interface AcceptedContact {
    *  `displayName`. Optional — pre-ADR-0021 contacts lack it and
    *  fall back to the SFU pseudonym until re-resolved. */
   accountIdHex?: string;
+  /** base64(group_id) of the 1×1 chat created with this contact at
+   *  accept time (ADR-0021 follow-up). Links the chat back to this
+   *  contact so the in-call roster + chat label resolve to the
+   *  user-chosen `displayName`. Optional — set only on the accept side
+   *  (where the contact + the group are created together); a chat
+   *  joined from a Welcome has no contact link and falls back to the
+   *  group label. */
+  groupIdB64?: string;
 }
 
 /**
@@ -175,10 +183,12 @@ function isAcceptedContact(a: unknown): a is AcceptedContact {
     typeof (a as AcceptedContact).signaturePubkeyB64 === "string" &&
     typeof (a as AcceptedContact).displayName === "string" &&
     typeof (a as AcceptedContact).acceptedAtMs === "number" &&
-    // Optional ADR-0021 field — validated when present, tolerated when
+    // Optional ADR-0021 fields — validated when present, tolerated when
     // absent (pre-ADR-0021 contacts).
     ((a as AcceptedContact).accountIdHex === undefined ||
-      typeof (a as AcceptedContact).accountIdHex === "string")
+      typeof (a as AcceptedContact).accountIdHex === "string") &&
+    ((a as AcceptedContact).groupIdB64 === undefined ||
+      typeof (a as AcceptedContact).groupIdB64 === "string")
   );
 }
 

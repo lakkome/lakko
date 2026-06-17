@@ -331,10 +331,17 @@ function ConnectedContacts(props: ConnectedContactsProps): JSX.Element {
         req.fromAccountId,
         req.fromPubkey,
       );
-      chats.add({
+      const active = chats.add({
         label: `Group with @${fingerprintShort(req.fromPubkey)}`,
         group: result.group,
       });
+      // ADR-0021 follow-up: link the just-created 1×1 chat back to this
+      // contact (by its base64 group id) so the in-call roster + chat
+      // label resolve to the user-chosen displayName. Re-upsert by the
+      // same signature pubkey, preserving the fields set above.
+      setAccepted(
+        upsertAccepted({ ...contact, groupIdB64: active.groupIdB64 }),
+      );
     } catch (err) {
       // Don't unwind the acceptance; just surface the error. The peer
       // here is identified by their key fingerprint (no @handle on the
@@ -353,6 +360,18 @@ function ConnectedContacts(props: ConnectedContactsProps): JSX.Element {
   );
   function onRemoveAccepted(contact: AcceptedContact): void {
     setAccepted(removeAccepted(contact.signaturePubkeyB64));
+  }
+  /** ADR-0021 follow-up: set the contact's user-chosen display name. A
+   *  blank value resets it to the `@<fingerprint>` accept-time default.
+   *  Re-upserts by the same signature pubkey, so the link + account_id
+   *  + group id are preserved. */
+  function onRenameAccepted(contact: AcceptedContact, newName: string): void {
+    const trimmed = newName.trim();
+    const displayName =
+      trimmed.length > 0
+        ? trimmed
+        : `@${fingerprintShort(base64Decode(contact.signaturePubkeyB64))}`;
+    setAccepted(upsertAccepted({ ...contact, displayName }));
   }
 
   return (
@@ -392,7 +411,7 @@ function ConnectedContacts(props: ConnectedContactsProps): JSX.Element {
         onDecline={onDecline}
       />
 
-      <ActiveGroupsPanel groups={chats.groups} />
+      <ActiveGroupsPanel groups={chats.groups} accepted={accepted} />
 
       <AcceptedPanel
         accepted={accepted}
@@ -401,6 +420,7 @@ function ConnectedContacts(props: ConnectedContactsProps): JSX.Element {
           return id?.signaturePublicKey ?? null;
         }}
         onRemove={onRemoveAccepted}
+        onRename={onRenameAccepted}
       />
     </>
   );
@@ -1093,7 +1113,21 @@ function GeneratedUrlPanel(props: {
 
 function ActiveGroupsPanel(props: {
   groups: () => readonly ActiveGroup[];
+  /** Reactive accepted-contacts list (ADR-0021 follow-up). A chat
+   *  linked to a contact (by group id) renders the contact's
+   *  user-chosen displayName instead of the static creation-time
+   *  label, so a rename propagates here too. */
+  accepted: () => AcceptedContact[];
 }): JSX.Element {
+  /** Best label for a chat row: the linked contact's displayName
+   *  (matched by group id), else the chat's own label. */
+  const chatLabel = (g: ActiveGroup): string => {
+    const contact = props
+      .accepted()
+      .find((c) => c.groupIdB64 === g.groupIdB64);
+    const name = contact?.displayName ?? "";
+    return name.length > 0 ? name : g.label;
+  };
   // Phase 2a3e2c-web — reactive flags from the cross-device
   // sync runtime. Reads here drive (a) the pin / mute /
   // archive indicators next to each row, (b) the sort
@@ -1284,7 +1318,7 @@ function ActiveGroupsPanel(props: {
                   <div style={{ flex: 1 }}>
                     <strong>
                       <Show when={flags().pinned}>📌 </Show>
-                      {g.label}
+                      {chatLabel(g)}
                       <Show when={flags().muted}>
                         <span
                           style={{
@@ -1543,6 +1577,9 @@ interface AcceptedPanelProps {
    *  back to "safety number unavailable" for that window). */
   readonly myPubkey: () => Uint8Array | null;
   readonly onRemove: (c: AcceptedContact) => void;
+  /** Set this contact's user-chosen display name (ADR-0021 follow-up).
+   *  A blank name resets it to the key-fingerprint default. */
+  readonly onRename: (c: AcceptedContact, newName: string) => void;
 }
 
 function AcceptedPanel(props: AcceptedPanelProps): JSX.Element {
@@ -1578,6 +1615,7 @@ function AcceptedPanel(props: AcceptedPanelProps): JSX.Element {
                 contact={c}
                 myPubkey={props.myPubkey}
                 onRemove={() => props.onRemove(c)}
+                onRename={(name) => props.onRename(c, name)}
               />
             )}
           </For>
@@ -1596,6 +1634,9 @@ interface AcceptedRowProps {
   readonly contact: AcceptedContact;
   readonly myPubkey: () => Uint8Array | null;
   readonly onRemove: () => void;
+  /** Set this contact's display name; a blank value resets to the
+   *  key-fingerprint default (ADR-0021 follow-up). */
+  readonly onRename: (newName: string) => void;
 }
 
 function AcceptedRow(props: AcceptedRowProps): JSX.Element {
@@ -1603,6 +1644,18 @@ function AcceptedRow(props: AcceptedRowProps): JSX.Element {
   const [number, setNumber] = createSignal<string | null>(null);
   const [busy, setBusy] = createSignal(false);
   const [err, setErr] = createSignal<string | null>(null);
+  // ADR-0021 follow-up: inline display-name editor.
+  const [editing, setEditing] = createSignal(false);
+  const [draft, setDraft] = createSignal("");
+
+  function startEdit(): void {
+    setDraft(props.contact.displayName);
+    setEditing(true);
+  }
+  function saveEdit(): void {
+    props.onRename(draft());
+    setEditing(false);
+  }
 
   async function ensureNumber(): Promise<void> {
     if (number() !== null) return;
@@ -1635,7 +1688,27 @@ function AcceptedRow(props: AcceptedRowProps): JSX.Element {
   return (
     <li style={rowStyle()}>
       <div style={{ flex: 1 }}>
-        <strong>{props.contact.displayName}</strong>
+        <Show when={editing()} fallback={<strong>{props.contact.displayName}</strong>}>
+          <div style={{ display: "flex", gap: "0.25rem", "align-items": "center" }}>
+            <input
+              type="text"
+              value={draft()}
+              placeholder="Display name"
+              onInput={(e) => setDraft(e.currentTarget.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") saveEdit();
+                if (e.key === "Escape") setEditing(false);
+              }}
+              style={{ flex: 1, "font-size": "0.9rem" }}
+            />
+            <button type="button" onClick={saveEdit}>
+              Save
+            </button>
+            <button type="button" onClick={() => setEditing(false)}>
+              Cancel
+            </button>
+          </div>
+        </Show>
         <div
           style={{
             color: "var(--surface-muted)",
@@ -1682,6 +1755,18 @@ function AcceptedRow(props: AcceptedRowProps): JSX.Element {
           disabled={busy()}
         >
           {open() ? "Hide safety number" : "Show safety number"}
+        </button>
+        <button
+          type="button"
+          onClick={() => {
+            if (editing()) {
+              setEditing(false);
+            } else {
+              startEdit();
+            }
+          }}
+        >
+          {editing() ? "Close" : "Rename"}
         </button>
         <button type="button" onClick={props.onRemove}>
           Remove

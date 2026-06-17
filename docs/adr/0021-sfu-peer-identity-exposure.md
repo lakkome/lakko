@@ -156,6 +156,20 @@ posture as ADR's call safety number.
   captured at accept; `Chat.tsx` precomputes a `peer_tag → displayName`
   map and the resolver matches a roster entry (collision → pseudonym,
   ADR-exact). Names render in web group calls.
+- **Web 1×1 roster + editable name — landed (Jun 2026).** The 1×1 P2P
+  call carries no SFU roster, so the sole-remote name was the static chat
+  group label, not the contact's editable `displayName`. Now:
+  `AcceptedContact` gained an optional `groupIdB64` (the 1×1 chat's group
+  id, captured at accept where the contact + the group are created
+  together — Welcome-joined chats have no link and keep the group label);
+  `Contacts.tsx` `AcceptedRow` gained an inline Rename editor (edits
+  `displayName` via `upsertAccepted`; blank resets to the `@<fingerprint>`
+  default); and the 1×1 in-call roster + chat header (`Chat.tsx`
+  `resolvePeerName`) + the chat list (`ActiveGroupsPanel`, reactive on the
+  `accepted` signal) all resolve the linked contact's `displayName` by
+  group id, falling back to the chat label. A web contact rename now shows
+  in the 1×1 call like the native group roster. `tsc` + 28 local-store
+  vitest + `vite build` green.
 - **`lakko-security` — APPROVE-WITH-NOTES.** Confirmed one-way /
   per-call-unlinkable / spoof-proof (tag bound to the JWT `sub`, no
   self-assertion) / no fail-open; 64-bit collision budget adequate

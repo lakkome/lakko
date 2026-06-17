@@ -374,11 +374,14 @@ function ChatView(props: {
 
   /** Synthesised sole remote participant for the 1×1 call. The web
    *  P2P path carries no roster, so the single remote IS this chat's
-   *  contact — use the same label the header shows (falling back to
-   *  "Peer" only if the entry has no label). */
+   *  contact. ADR-0021 follow-up: resolve the linked contact's
+   *  user-chosen displayName (matched by this chat's group id), so a
+   *  rename shows in the in-call roster; fall back to the chat label,
+   *  then "Peer". Read at connect time, so a pre-call rename is
+   *  reflected. */
   const remoteParticipant = (): Participant => ({
     id: "peer",
-    displayName: props.entry.label.length > 0 ? props.entry.label : "Peer",
+    displayName: resolvePeerName(),
     isLocal: false,
     micOn: true,
     camOn: false,
@@ -387,6 +390,17 @@ function ChatView(props: {
     speaking: false,
     screenSharing: false,
   });
+
+  /** Best contact name for this 1×1 chat: the linked contact's
+   *  displayName (ADR-0021), else the chat label, else "Peer". */
+  const resolvePeerName = (): string => {
+    const contact = loadAccepted().find(
+      (c) => c.groupIdB64 === props.entry.groupIdB64,
+    );
+    const name = contact?.displayName ?? "";
+    if (name.length > 0) return name;
+    return props.entry.label.length > 0 ? props.entry.label : "Peer";
+  };
 
   /** Map the session's `WebCallState` onto the shared call-UI
    *  store (phase + 1×1 roster). Called from `onStateChange`. */
@@ -1510,7 +1524,9 @@ function ChatView(props: {
         }}
       >
         <div>
-          <h1 style={{ margin: 0 }}>{props.entry.label}</h1>
+          {/* ADR-0021 follow-up: show the linked contact's user-chosen
+              name in the chat header (falls back to the chat label). */}
+          <h1 style={{ margin: 0 }}>{resolvePeerName()}</h1>
           <div
             style={{
               color: "var(--surface-muted)",

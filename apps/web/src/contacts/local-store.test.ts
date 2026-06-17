@@ -341,3 +341,50 @@ describe("AcceptedContact accountIdHex (ADR-0021)", () => {
     expect(back[0]?.accountIdHex).toBeUndefined();
   });
 });
+
+describe("AcceptedContact groupIdB64 + rename (ADR-0021 follow-up)", () => {
+  it("round-trips groupIdB64 through upsert + load", () => {
+    upsertAccepted({
+      signaturePubkeyB64: PUB_OLD,
+      displayName: "alice",
+      acceptedAtMs: 1,
+      groupIdB64: "Z3JvdXAtaWQtYjY0",
+    });
+    const back = loadAccepted();
+    expect(back).toHaveLength(1);
+    expect(back[0]?.groupIdB64).toBe("Z3JvdXAtaWQtYjY0");
+  });
+
+  it("tolerates a contact without groupIdB64 (Welcome-joined chat)", () => {
+    upsertAccepted({
+      signaturePubkeyB64: PUB_NEW,
+      displayName: "bob",
+      acceptedAtMs: 2,
+    });
+    const back = loadAccepted();
+    expect(back).toHaveLength(1);
+    expect(back[0]?.groupIdB64).toBeUndefined();
+  });
+
+  it("a rename replaces displayName by signature pubkey, preserving the link", () => {
+    upsertAccepted({
+      signaturePubkeyB64: PUB_OLD,
+      displayName: "@abcd1234",
+      acceptedAtMs: 1,
+      accountIdHex: "deadbeefdeadbeefdeadbeefdeadbeef",
+      groupIdB64: "Z3JvdXAtaWQtYjY0",
+    });
+    // Simulate the rename handler: re-upsert by the same pubkey with a
+    // new displayName, keeping the other fields.
+    const existing = loadAccepted()[0];
+    expect(existing).toBeDefined();
+    if (existing === undefined) return;
+    upsertAccepted({ ...existing, displayName: "Alice" });
+    const back = loadAccepted();
+    expect(back).toHaveLength(1);
+    expect(back[0]?.displayName).toBe("Alice");
+    // The chat link + account_id survive the rename.
+    expect(back[0]?.groupIdB64).toBe("Z3JvdXAtaWQtYjY0");
+    expect(back[0]?.accountIdHex).toBe("deadbeefdeadbeefdeadbeefdeadbeef");
+  });
+});
