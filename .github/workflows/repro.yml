@@ -47,7 +47,7 @@ jobs:
       SOURCE_DATE_EPOCH: "1735689600"  # 2025-01-01 UTC, fixed
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.95.0
       - name: First build
         run: |
           cargo build --workspace --release --locked
@@ -102,7 +102,7 @@ jobs:
         working-directory: apps/web
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.95.0
         with:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
@@ -177,7 +177,7 @@ jobs:
       SOURCE_DATE_EPOCH: "1735689600"
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.95.0
       - name: Release build
         run: cargo build --workspace --release --locked
       - name: Hash release artifacts

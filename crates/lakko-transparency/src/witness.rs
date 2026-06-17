@@ -155,7 +155,9 @@ mod tests {
     #[test]
     fn wrong_witness_key_fails() {
         let wk = SigningKey::from_seed(&[0x33; 32]);
-        let other = SigningKey::from_seed(&[0x44; 32]).verifying_key().to_bytes();
+        let other = SigningKey::from_seed(&[0x44; 32])
+            .verifying_key()
+            .to_bytes();
         let tr = root_at(0xAB);
         let cosig = sign_witness_cosig(&wk, &tr, 42);
         assert!(matches!(

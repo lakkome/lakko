@@ -730,12 +730,16 @@ pub(crate) fn spawn_state_pruner(pool: MySqlPool) -> tokio::task::JoinHandle<()>
             // G-13 (ADR-0014): sweep expired single-use action grants on the
             // same timer. Consumed grants are deleted on use; this catches
             // the ones a ceremony minted but no delete ever consumed.
-            let grants = sqlx::query("DELETE FROM webauthn_action_grants WHERE expires_at < NOW(3)")
-                .execute(&pool)
-                .await;
+            let grants =
+                sqlx::query("DELETE FROM webauthn_action_grants WHERE expires_at < NOW(3)")
+                    .execute(&pool)
+                    .await;
             match grants {
                 Ok(r) if r.rows_affected() > 0 => {
-                    tracing::debug!(rows = r.rows_affected(), "pruned expired webauthn_action_grants");
+                    tracing::debug!(
+                        rows = r.rows_affected(),
+                        "pruned expired webauthn_action_grants"
+                    );
                 },
                 Ok(_) => {},
                 Err(e) => tracing::warn!(error = %e, "webauthn_action_grants prune failed"),
@@ -743,10 +747,9 @@ pub(crate) fn spawn_state_pruner(pool: MySqlPool) -> tokio::task::JoinHandle<()>
             // ADR-0018 (factor (a)): sweep expired single-use device grants
             // on the same timer. Redeemed grants are deleted on use; this
             // catches the ones a /start minted but no /redeem ever consumed.
-            let device_grants =
-                sqlx::query("DELETE FROM device_grants WHERE expires_at < NOW(3)")
-                    .execute(&pool)
-                    .await;
+            let device_grants = sqlx::query("DELETE FROM device_grants WHERE expires_at < NOW(3)")
+                .execute(&pool)
+                .await;
             match device_grants {
                 Ok(r) if r.rows_affected() > 0 => {
                     tracing::debug!(rows = r.rows_affected(), "pruned expired device_grants");

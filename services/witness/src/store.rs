@@ -77,10 +77,9 @@ impl WitnessStore {
                 .fetch_one(pool)
                 .await
                 .context("read witness_state")?;
-        let tree_root: TreeHash = root_bytes
-            .as_slice()
-            .try_into()
-            .map_err(|_| anyhow::anyhow!("witness_state.tree_root is not 32 bytes — corruption?"))?;
+        let tree_root: TreeHash = root_bytes.as_slice().try_into().map_err(|_| {
+            anyhow::anyhow!("witness_state.tree_root is not 32 bytes — corruption?")
+        })?;
 
         Ok(Self {
             witness_key,
@@ -218,7 +217,12 @@ mod tests {
         //    consistency proof is empty). The returned co-sig verifies.
         let r3 = sign_root(3);
         let cosig3 = store
-            .cosign(&pool, &operator_vk, &r3, &lakko_transparency::consistency_proof(0, &leaves[..3]))
+            .cosign(
+                &pool,
+                &operator_vk,
+                &r3,
+                &lakko_transparency::consistency_proof(0, &leaves[..3]),
+            )
             .await
             .expect("genesis co-sign");
         verify_witness_cosig(&cosig3, &witness_vk, &r3.tree_root, 3)
@@ -227,7 +231,12 @@ mod tests {
         // 2. A consistent extension to size 6 is co-signed.
         let r6 = sign_root(6);
         store
-            .cosign(&pool, &operator_vk, &r6, &lakko_transparency::consistency_proof(3, &leaves[..6]))
+            .cosign(
+                &pool,
+                &operator_vk,
+                &r6,
+                &lakko_transparency::consistency_proof(3, &leaves[..6]),
+            )
             .await
             .expect("consistent extension co-signed");
 

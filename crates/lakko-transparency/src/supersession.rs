@@ -338,8 +338,11 @@ pub fn verify_supersession_chain(
         });
     }
     // 6. The supersession proof authorises exactly this entry's new key.
-    let authorised =
-        verify_supersession(evidence.supersession_proof, pinned.old_pubkey, now_unix_secs)?;
+    let authorised = verify_supersession(
+        evidence.supersession_proof,
+        pinned.old_pubkey,
+        now_unix_secs,
+    )?;
     if evidence.new_entry.identity_pubkey.as_slice() != authorised.as_slice() {
         return Err(Error::SupersessionEntryKeyMismatch);
     }
@@ -399,7 +402,9 @@ mod tests {
         let old = old_key();
         let wire = sample(&old).sign(&old);
         // A peer that trusts a DIFFERENT old key must reject it.
-        let other = SigningKey::from_seed(&[0x22; 32]).verifying_key().to_bytes();
+        let other = SigningKey::from_seed(&[0x22; 32])
+            .verifying_key()
+            .to_bytes();
         assert!(matches!(
             verify_supersession(&wire, &other, 1_500),
             Err(Error::SupersessionOldKeyMismatch)
@@ -443,8 +448,8 @@ mod tests {
         let old = old_key();
         let pk = old.verifying_key().to_bytes();
         // expires more than 30 days after issued -> rejected.
-        let too_long = SupersessionProof::new(pk, [0xBB; 32], 1_000, 1_000 + MAX_VALIDITY_SECS + 1)
-            .sign(&old);
+        let too_long =
+            SupersessionProof::new(pk, [0xBB; 32], 1_000, 1_000 + MAX_VALIDITY_SECS + 1).sign(&old);
         assert!(matches!(
             verify_supersession(&too_long, &pk, 1_500),
             Err(Error::SupersessionInvalidValidityWindow)
@@ -497,7 +502,9 @@ mod tests {
         let username_hash = lakko_crypto::hash::blake3(b"alice");
         let old = SigningKey::from_seed(&[0x11; 32]);
         let old_pub = old.verifying_key().to_bytes();
-        let new_pub = SigningKey::from_seed(&[0x22; 32]).verifying_key().to_bytes();
+        let new_pub = SigningKey::from_seed(&[0x22; 32])
+            .verifying_key()
+            .to_bytes();
 
         log.append(LogEntry {
             username_hash,
@@ -599,7 +606,10 @@ mod tests {
         };
         assert!(matches!(
             verify_supersession_chain(&pinned, &evidence, 1_500),
-            Err(Error::SupersessionEntryVersionNotNewer { entry: 2, pinned: 2 })
+            Err(Error::SupersessionEntryVersionNotNewer {
+                entry: 2,
+                pinned: 2
+            })
         ));
     }
 

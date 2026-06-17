@@ -352,13 +352,15 @@ async fn observe_with_sni(sni: &str) -> String {
     body.lines()
         .rev()
         .find(|line| line.contains(&format!(r#""observed_sni":"{sni}""#)))
-        .map(str::to_owned)
-        .unwrap_or_else(|| {
-            panic!(
-                "observer log must contain a line with observed_sni={sni:?}.\nTail:\n{}",
-                body.lines().rev().take(5).collect::<Vec<_>>().join("\n"),
-            )
-        })
+        .map_or_else(
+            || {
+                panic!(
+                    "observer log must contain a line with observed_sni={sni:?}.\nTail:\n{}",
+                    body.lines().rev().take(5).collect::<Vec<_>>().join("\n"),
+                )
+            },
+            str::to_owned,
+        )
 }
 
 /// G5-7-gfw-string — with `LAKKO_SNI_BLOCKLIST` set (the compose pins

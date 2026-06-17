@@ -87,10 +87,16 @@ mod tests {
         assert_eq!(groups.len(), SAFETY_NUMBER_GROUPS);
         for g in groups {
             assert_eq!(g.len(), 4, "group {g} is not four digits");
-            assert!(g.chars().all(|c| c.is_ascii_digit()), "group {g} not all digits");
+            assert!(
+                g.chars().all(|c| c.is_ascii_digit()),
+                "group {g} not all digits"
+            );
         }
         // 4 groups * 4 digits + 3 separating spaces.
-        assert_eq!(s.len(), SAFETY_NUMBER_GROUPS * 4 + (SAFETY_NUMBER_GROUPS - 1));
+        assert_eq!(
+            s.len(),
+            SAFETY_NUMBER_GROUPS * 4 + (SAFETY_NUMBER_GROUPS - 1)
+        );
     }
 
     #[test]

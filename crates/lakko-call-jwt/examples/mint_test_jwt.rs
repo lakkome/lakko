@@ -47,6 +47,9 @@ use lakko_call_jwt::{
     mint_jwt, CallJwtClaims, CallRole, CallSigningKey, JWT_AUDIENCE, JWT_ISSUER, JWT_TTL_SECS,
 };
 
+// A single flat arg-parse + mint + print example binary; the length is
+// inherent to a self-contained CLI helper, not a refactor smell.
+#[allow(clippy::too_many_lines)]
 fn main() -> ExitCode {
     let mut call_id = "deadbeef0000000000000000000000aa".to_owned();
     let mut account = "cafef00d0000000000000000000000bb".to_owned();
@@ -135,13 +138,11 @@ fn main() -> ExitCode {
     }
 
     let signing = CallSigningKey::from_seed(&[0x42_u8; 32]);
-    let now = match SystemTime::now().duration_since(UNIX_EPOCH) {
-        Ok(d) => d.as_secs(),
-        Err(_) => {
-            eprintln!("system clock is before the unix epoch — refusing to mint");
-            return ExitCode::from(1);
-        },
+    let Ok(since_epoch) = SystemTime::now().duration_since(UNIX_EPOCH) else {
+        eprintln!("system clock is before the unix epoch — refusing to mint");
+        return ExitCode::from(1);
     };
+    let now = since_epoch.as_secs();
     let claims = CallJwtClaims {
         iss: JWT_ISSUER.into(),
         aud: JWT_AUDIENCE.into(),

@@ -186,7 +186,7 @@ async fn ready(State(state): State<AppState>) -> impl IntoResponse {
         Err(e) => {
             tracing::warn!(error = %e, "readiness probe: db ping failed");
             (StatusCode::SERVICE_UNAVAILABLE, "not ready\n").into_response()
-        }
+        },
     }
 }
 

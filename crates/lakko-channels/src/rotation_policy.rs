@@ -284,7 +284,7 @@ mod tests {
             max_posts: 0,
         };
         let mut s = RotationState::after_rotation(0);
-        for _ in 0..u32::MAX.min(10_000) {
+        for _ in 0..10_000u32 {
             s = s.after_post();
         }
         assert!(!p.should_rotate(HOUR_MS - 1, s));

@@ -97,7 +97,10 @@ impl WitnessClient {
         if !status.is_success() {
             anyhow::bail!("witness cosign returned HTTP {status}");
         }
-        let res: CosignRes = resp.json().await.context("decode witness cosign response")?;
+        let res: CosignRes = resp
+            .json()
+            .await
+            .context("decode witness cosign response")?;
         B64.decode(res.cosig_b64.as_bytes())
             .context("witness cosig is not valid base64")
     }

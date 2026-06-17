@@ -64,7 +64,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.95.0
 
       # Reuse the workspace cache so the cargo-side build
       # of the test binary stays fast across runs.

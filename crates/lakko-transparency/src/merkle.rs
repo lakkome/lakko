@@ -475,8 +475,20 @@ mod tests {
         let b = other_leaves(8);
         let new_root_b = root(&b);
         // Neither A's nor B's proof can bridge old_root(A[..4]) → root(B).
-        assert!(!verify_consistency(4, &old_root, 8, &new_root_b, &consistency_proof(4, &a)));
-        assert!(!verify_consistency(4, &old_root, 8, &new_root_b, &consistency_proof(4, &b)));
+        assert!(!verify_consistency(
+            4,
+            &old_root,
+            8,
+            &new_root_b,
+            &consistency_proof(4, &a)
+        ));
+        assert!(!verify_consistency(
+            4,
+            &old_root,
+            8,
+            &new_root_b,
+            &consistency_proof(4, &b)
+        ));
     }
 
     #[test]

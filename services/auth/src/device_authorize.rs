@@ -124,7 +124,10 @@ fn decode_grant_token(b64: &str) -> Result<[u8; GRANT_TOKEN_LEN], ApiError> {
 /// Issue a fresh session token for `account_id`. Mirrors
 /// `opaque::issue_token_for` (the `now_ms` + `saturating_add(ttl)` math),
 /// re-expressed against this module's [`ApiError`] surface.
-fn issue_session_token(state: &AppState, account_id: &[u8; ACCOUNT_ID_LEN]) -> Result<(String, i64), ApiError> {
+fn issue_session_token(
+    state: &AppState,
+    account_id: &[u8; ACCOUNT_ID_LEN],
+) -> Result<(String, i64), ApiError> {
     let now_ms: i64 = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX));

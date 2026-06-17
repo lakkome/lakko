@@ -175,11 +175,11 @@ pub(crate) async fn append(
             crate::store::StoreError::Unauthorised(detail) => {
                 tracing::warn!(detail, "transparency append refused: leaf authorisation");
                 (StatusCode::FORBIDDEN, "leaf authorisation rejected")
-            }
+            },
             other => {
                 tracing::error!(error = %other, "transparency append failed");
                 (StatusCode::INTERNAL_SERVER_ERROR, "append failed")
-            }
+            },
         })?;
 
     Ok(Json(AppendRes {

@@ -96,7 +96,10 @@ unsafe fn golden_participant_key() -> (*mut CallKey, *mut ParticipantKey) {
         LakkoSframeStatus::Ok,
         "participant_key_new must succeed"
     );
-    assert!(!pk.is_null(), "participant_key_new must populate the handle");
+    assert!(
+        !pk.is_null(),
+        "participant_key_new must populate the handle"
+    );
     (call_key, pk)
 }
 

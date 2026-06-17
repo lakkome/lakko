@@ -286,8 +286,7 @@ impl BackupPayload {
         // producer never wrote the field, while a v2 producer
         // always writes at least the 4-byte length prefix
         // (which may be 0 for an empty snapshot).
-        let whole_storage_snapshot = if version == PAYLOAD_VERSION
-            || version == PAYLOAD_VERSION_V2
+        let whole_storage_snapshot = if version == PAYLOAD_VERSION || version == PAYLOAD_VERSION_V2
         {
             let snapshot_len = u32::from_be_bytes(
                 take_n(&mut cur, 4)?
@@ -344,7 +343,7 @@ fn encode_contact(out: &mut Vec<u8>, c: &AcceptedContactRecord) -> Result<()> {
         Some(id) => {
             out.push(1);
             out.extend_from_slice(&id);
-        }
+        },
         None => out.push(0),
     }
     Ok(())
@@ -378,12 +377,12 @@ fn decode_contact(cur: &mut &[u8], with_account_id: bool) -> Result<AcceptedCont
                 let mut id = [0u8; ACCOUNT_ID_LEN];
                 id.copy_from_slice(take_n(cur, ACCOUNT_ID_LEN)?);
                 Some(id)
-            }
+            },
             other => {
                 return Err(BackupError::InvalidPayload(format!(
                     "invalid account_id presence byte {other} (expected 0 or 1)",
                 )));
-            }
+            },
         }
     } else {
         None
@@ -539,7 +538,7 @@ mod tests {
         wire.extend_from_slice(&1_700_000_000_000u64.to_be_bytes());
         wire.extend_from_slice(&[0x42; SEED_LEN]);
         wire.extend_from_slice(&1u32.to_be_bytes()); // contact_count = 1
-        // One contact — v2 layout has NO account_id byte after the name.
+                                                     // One contact — v2 layout has NO account_id byte after the name.
         wire.extend_from_slice(&[0x01; PUBKEY_LEN]);
         wire.extend_from_slice(&[0x02; PUBKEY_LEN]);
         wire.extend_from_slice(&5u16.to_be_bytes());

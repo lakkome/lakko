@@ -81,8 +81,7 @@ pub(crate) fn operator_key_from_env() -> anyhow::Result<Option<signing::SigningK
     if hex.is_empty() {
         return Ok(None);
     }
-    let bytes = decode_hex(hex)
-        .context("LAKKO_TRANSPARENCY_OPERATOR_SEED_HEX is not valid hex")?;
+    let bytes = decode_hex(hex).context("LAKKO_TRANSPARENCY_OPERATOR_SEED_HEX is not valid hex")?;
     if bytes.len() != 32 {
         anyhow::bail!(
             "LAKKO_TRANSPARENCY_OPERATOR_SEED_HEX decodes to {} bytes; need 32 (64 hex chars)",
@@ -101,9 +100,7 @@ fn decode_hex(s: &str) -> anyhow::Result<Vec<u8>> {
     }
     (0..s.len())
         .step_by(2)
-        .map(|i| {
-            u8::from_str_radix(&s[i..i + 2], 16).map_err(|e| anyhow::anyhow!("bad hex: {e}"))
-        })
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).map_err(|e| anyhow::anyhow!("bad hex: {e}")))
         .collect()
 }
 

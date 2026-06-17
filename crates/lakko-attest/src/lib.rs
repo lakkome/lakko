@@ -172,8 +172,8 @@ impl ActionAttestation {
         off += EXPIRES_LEN;
         let expires_at_unix_secs = i64::from_be_bytes(exp);
 
-        let sig =
-            Signature::from_bytes(&bytes[off..off + SIGNATURE_LEN]).map_err(|_| AttestError::BadSignature)?;
+        let sig = Signature::from_bytes(&bytes[off..off + SIGNATURE_LEN])
+            .map_err(|_| AttestError::BadSignature)?;
         let claims = Self {
             account_id,
             action_hash,
@@ -334,7 +334,10 @@ mod tests {
         );
         let mut wire = sample().sign(&sk);
         wire[0] = 9; // bad version
-        assert_eq!(ActionAttestation::open(&wire, &vk), Err(AttestError::BadVersion(9)));
+        assert_eq!(
+            ActionAttestation::open(&wire, &vk),
+            Err(AttestError::BadVersion(9))
+        );
     }
 
     #[test]

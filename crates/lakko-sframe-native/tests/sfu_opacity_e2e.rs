@@ -101,7 +101,7 @@ fn decrypt_frame(
         std::collections::hash_map::Entry::Vacant(e) => {
             let pk = call_key.participant_key(sender_leaf).map_err(|_| ())?;
             e.insert(pk)
-        }
+        },
     };
 
     pk.open(aad, ciphertext, counter).map_err(|_| ())

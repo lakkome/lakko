@@ -156,7 +156,7 @@ async fn main() -> Result<()> {
                  (dev / e2e only; production uses the DB-generated key)"
             );
             k
-        }
+        },
         None => operator_key::load_or_init_operator_key(&pool)
             .await
             .context("load operator signing key")?,

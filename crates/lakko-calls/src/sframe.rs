@@ -672,7 +672,10 @@ mod tests {
             let (header, _) = SframeHeader::decode(&wire).expect("decode");
             assert_eq!(header.ctr, expected_ctr);
             // A fresh receiver opens any frame by its header counter.
-            assert_eq!(receiver.open_framed(&wire).expect("open").as_slice(), b"frame");
+            assert_eq!(
+                receiver.open_framed(&wire).expect("open").as_slice(),
+                b"frame"
+            );
         }
     }
 
@@ -735,6 +738,10 @@ mod tests {
             Err(Error::CounterExhausted) => {},
             other => panic!("expected CounterExhausted, got {other:?}"),
         }
-        assert_eq!(p.counter(), u32::MAX, "counter must not advance on exhaustion");
+        assert_eq!(
+            p.counter(),
+            u32::MAX,
+            "counter must not advance on exhaustion"
+        );
     }
 }

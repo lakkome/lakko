@@ -1,7 +1,12 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # SPDX-FileCopyrightText: 2026 Lakko Contributors
 
+# Pinned to an exact stable release (not the floating `stable` channel) so a
+# rustfmt / clippy bump cannot silently drift formatting + lints out from under
+# committed code. Bump deliberately (and re-run `just fmt` + `just lint`) when
+# adopting a newer toolchain; keep the CI workflows' `dtolnay/rust-toolchain@`
+# ref in lock-step with this version.
 [toolchain]
-channel = "stable"
+channel = "1.95.0"
 components = ["rustfmt", "clippy", "rust-src"]
 profile = "minimal"

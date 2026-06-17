@@ -153,7 +153,14 @@ pub(crate) fn start_action_auth(
     core: &WebauthnCore,
     passkeys: &[Passkey],
     action_hash: &[u8; ACTION_HASH_LEN],
-) -> Result<(RequestChallengeResponse, AuthenticationState, [u8; ACTION_NONCE_LEN]), WebauthnError> {
+) -> Result<
+    (
+        RequestChallengeResponse,
+        AuthenticationState,
+        [u8; ACTION_NONCE_LEN],
+    ),
+    WebauthnError,
+> {
     let nonce = random_action_nonce();
     let challenge = derive_action_challenge(action_hash, &nonce);
 
@@ -237,8 +244,8 @@ pub(crate) fn load_action_core() -> anyhow::Result<Option<Arc<WebauthnCore>>> {
             "LAKKO_WEBAUTHN_RP_ID is set but LAKKO_WEBAUTHN_RP_ORIGIN is not — pass the full origin (e.g. https://lakko.me)"
         )
     })?;
-    let origin =
-        Url::parse(&rp_origin).map_err(|e| anyhow::anyhow!("LAKKO_WEBAUTHN_RP_ORIGIN parse: {e}"))?;
+    let origin = Url::parse(&rp_origin)
+        .map_err(|e| anyhow::anyhow!("LAKKO_WEBAUTHN_RP_ORIGIN parse: {e}"))?;
     Ok(Some(Arc::new(build_action_core(&rp_name, &rp_id, &origin))))
 }
 
@@ -263,7 +270,9 @@ pub(crate) async fn load_or_init_attest_key(pool: &MySqlPool) -> anyhow::Result<
             .await
             .context("read action_attest_signing_key")?;
     if let Some((seed_bytes,)) = row {
-        return Ok(CallSigningKey::from_seed(&attest_seed_from_bytes(&seed_bytes)?));
+        return Ok(CallSigningKey::from_seed(&attest_seed_from_bytes(
+            &seed_bytes,
+        )?));
     }
 
     // No row — generate + insert. `INSERT IGNORE` so two racing startups
@@ -280,7 +289,9 @@ pub(crate) async fn load_or_init_attest_key(pool: &MySqlPool) -> anyhow::Result<
             .fetch_one(pool)
             .await
             .context("re-read action_attest_signing_key after insert")?;
-    Ok(CallSigningKey::from_seed(&attest_seed_from_bytes(&seed_bytes)?))
+    Ok(CallSigningKey::from_seed(&attest_seed_from_bytes(
+        &seed_bytes,
+    )?))
 }
 
 fn attest_seed_from_bytes(bytes: &[u8]) -> anyhow::Result<[u8; 32]> {
@@ -403,8 +414,8 @@ pub(crate) async fn action_finish(
 
     let auth_state: AuthenticationState =
         serde_json::from_slice(&row.state_bytes).map_err(ApiError::SerdeJson)?;
-    let result = finish_action_auth(&core, &req.credential, &auth_state)
-        .map_err(ApiError::Webauthn)?;
+    let result =
+        finish_action_auth(&core, &req.credential, &auth_state).map_err(ApiError::Webauthn)?;
 
     // Single-use: drop the in-flight row so a verified action-bound
     // assertion cannot be replayed (mirrors `webauthn::auth_finish`).
@@ -435,9 +446,12 @@ pub(crate) async fn action_finish(
             .map_or(0, |d| d.as_secs()),
     )
     .unwrap_or(i64::MAX);
-    let attestation =
-        ActionAttestation::new(auth.0, presented, now_secs.saturating_add(ATTESTATION_TTL_SECS))
-            .sign(&state.attest_key.signing);
+    let attestation = ActionAttestation::new(
+        auth.0,
+        presented,
+        now_secs.saturating_add(ATTESTATION_TTL_SECS),
+    )
+    .sign(&state.attest_key.signing);
 
     Ok(Json(ActionFinishRes {
         account_id_b64: URL_SAFE_NO_PAD.encode(auth.0),
@@ -572,11 +586,13 @@ async fn bump_action_credential(
         .await
         .map_err(ApiError::Db)?;
     } else {
-        sqlx::query("UPDATE webauthn_credentials SET last_used_at = NOW(3) WHERE credential_id = ?")
-            .bind(&cred_id_bytes)
-            .execute(pool)
-            .await
-            .map_err(ApiError::Db)?;
+        sqlx::query(
+            "UPDATE webauthn_credentials SET last_used_at = NOW(3) WHERE credential_id = ?",
+        )
+        .bind(&cred_id_bytes)
+        .execute(pool)
+        .await
+        .map_err(ApiError::Db)?;
     }
     Ok(())
 }
@@ -719,7 +735,10 @@ mod tests {
         let nonce = [0x22u8; ACTION_NONCE_LEN];
         let a = derive_action_challenge(&[0x11u8; ACTION_HASH_LEN], &nonce);
         let b = derive_action_challenge(&[0x12u8; ACTION_HASH_LEN], &nonce);
-        assert_ne!(a, b, "different action hashes must bind to different challenges");
+        assert_ne!(
+            a, b,
+            "different action hashes must bind to different challenges"
+        );
     }
 
     #[test]
@@ -917,16 +936,17 @@ mod action_roundtrip_tests {
         let core = build_action_core(RP_NAME, RP_ID, &rp_origin());
         let action = [0xAAu8; ACTION_HASH_LEN];
 
-        let (rcr, state, _nonce) = start_action_auth(&core, std::slice::from_ref(&passkey), &action)
-            .expect("start_action_auth");
+        let (rcr, state, _nonce) =
+            start_action_auth(&core, std::slice::from_ref(&passkey), &action)
+                .expect("start_action_auth");
         // The authenticator signs the assertion over the action-bound
         // challenge carried in `rcr`.
         let pkc = wa
             .do_authentication(rp_origin(), rcr)
             .expect("software authenticator assertion");
 
-        let result = finish_action_auth(&core, &pkc, &state)
-            .expect("correctly-bound assertion must verify");
+        let result =
+            finish_action_auth(&core, &pkc, &state).expect("correctly-bound assertion must verify");
         assert_eq!(
             result.cred_id(),
             passkey.cred_id(),
@@ -1203,7 +1223,9 @@ mod action_grant_e2e_tests {
         let att_b64 = fin["attestation_b64"]
             .as_str()
             .expect("attestation_b64 present");
-        let att_bytes = URL_SAFE_NO_PAD.decode(att_b64).expect("attestation decodes");
+        let att_bytes = URL_SAFE_NO_PAD
+            .decode(att_b64)
+            .expect("attestation decodes");
         let attest_vk = lakko_call_jwt::CallSigningKey::from_seed(&ATTEST_SEED).verifying;
         let verified = lakko_attest::verify_bound(
             &att_bytes,

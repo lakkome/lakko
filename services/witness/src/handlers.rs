@@ -70,10 +70,20 @@ pub(crate) async fn cosign(
     for h in &req.consistency_proof_b64 {
         let node: TreeHash = B64
             .decode(h.as_bytes())
-            .map_err(|_| (StatusCode::BAD_REQUEST, "consistency proof hash not valid base64"))?
+            .map_err(|_| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    "consistency proof hash not valid base64",
+                )
+            })?
             .as_slice()
             .try_into()
-            .map_err(|_| (StatusCode::BAD_REQUEST, "consistency proof hash must be 32 bytes"))?;
+            .map_err(|_| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    "consistency proof hash must be 32 bytes",
+                )
+            })?;
         proof.push(node);
     }
 
@@ -84,7 +94,7 @@ pub(crate) async fn cosign(
         .map_err(|e| match e {
             CosignError::BadOperatorSignature => {
                 (StatusCode::BAD_REQUEST, "operator signature is invalid")
-            }
+            },
             CosignError::NotConsistent => (
                 StatusCode::CONFLICT,
                 "root does not extend the witnessed log (fork refused)",
@@ -93,7 +103,7 @@ pub(crate) async fn cosign(
             CosignError::Db(detail) => {
                 tracing::error!(detail, "witness cosign storage error");
                 (StatusCode::INTERNAL_SERVER_ERROR, "cosign failed")
-            }
+            },
         })?;
 
     Ok(Json(CosignRes {

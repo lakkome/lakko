@@ -185,7 +185,10 @@ impl LogStore {
         // re-co-signing from scratch.
         let witnessed = load_witnessed(pool).await?;
         if let Some(w) = &witnessed {
-            tracing::info!(log_size = w.log_size, "restored witnessed root co-signature");
+            tracing::info!(
+                log_size = w.log_size,
+                "restored witnessed root co-signature"
+            );
         }
 
         Ok(Self {
@@ -298,9 +301,10 @@ impl LogStore {
         if let Some(auth) = leaf_auth {
             match latest.as_ref() {
                 Some((prev_pubkey, _, _)) if !is_reset => {
-                    let prev: [u8; 32] = prev_pubkey.as_slice().try_into().map_err(|_| {
-                        StoreError::Unauthorised("previous pubkey is not 32 bytes")
-                    })?;
+                    let prev: [u8; 32] = prev_pubkey
+                        .as_slice()
+                        .try_into()
+                        .map_err(|_| StoreError::Unauthorised("previous pubkey is not 32 bytes"))?;
                     let authorised =
                         verify_supersession(auth, &prev, now_unix_secs).map_err(|_| {
                             StoreError::Unauthorised("supersession proof did not verify")
@@ -310,12 +314,12 @@ impl LogStore {
                             "supersession proof authorises a different key",
                         ));
                     }
-                }
+                },
                 _ => {
                     verify_leaf_genesis(auth, &username_hash, &identity_pubkey).map_err(|_| {
                         StoreError::Unauthorised("genesis self-signature did not verify")
                     })?;
-                }
+                },
             }
         }
 
@@ -429,11 +433,11 @@ impl LogStore {
                     cosig: cosig.clone(),
                 });
                 (head_root, Some(cosig))
-            }
+            },
             Err(e) => {
                 tracing::warn!(error = %e, head_size, "witness cosign failed — serving uncosigned");
                 (head_root, None)
-            }
+            },
         }
     }
 
@@ -477,15 +481,15 @@ impl LogStore {
         .bind(&username_hash[..])
         .fetch_optional(pool)
         .await?;
-        Ok(
-            row.map(|(idx, identity_pubkey, version, is_reset, leaf_auth)| LatestEntry {
+        Ok(row.map(
+            |(idx, identity_pubkey, version, is_reset, leaf_auth)| LatestEntry {
                 idx,
                 version,
                 identity_pubkey,
                 is_reset: is_reset != 0,
                 leaf_auth,
-            }),
-        )
+            },
+        ))
     }
 
     /// The operator's verifying key — clients pin this out-of-band.

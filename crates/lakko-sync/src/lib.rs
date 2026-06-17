@@ -125,7 +125,7 @@ pub mod fuzz_api {
                         hlc: Hlc::new(pt, lc),
                         body,
                     }));
-                }
+                },
                 // Remote Delete (tombstone) carrying an adversarial HLC.
                 _ => {
                     let pt = take_u64(bytes, &mut i);
@@ -133,7 +133,7 @@ pub mod fuzz_api {
                     evs.push(Ev::Remote(EditOp::Delete {
                         hlc: Hlc::new(pt, lc),
                     }));
-                }
+                },
             }
         }
         evs
@@ -174,7 +174,7 @@ pub mod fuzz_api {
                 Ev::Remote(op) => {
                     ops.push(op.clone());
                     clock.merge_remote(op.hlc(), 0)
-                }
+                },
             };
             if issued < prev {
                 return false;

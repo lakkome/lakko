@@ -2911,8 +2911,7 @@ const TRANSPARENCY_ACCOUNT_KEY_DOMAIN: &str = "lakko/transparency/account/v1";
 #[uniffi::export]
 #[must_use]
 pub fn transparency_account_key(account_id: Vec<u8>) -> Vec<u8> {
-    let mut input =
-        Vec::with_capacity(TRANSPARENCY_ACCOUNT_KEY_DOMAIN.len() + account_id.len());
+    let mut input = Vec::with_capacity(TRANSPARENCY_ACCOUNT_KEY_DOMAIN.len() + account_id.len());
     input.extend_from_slice(TRANSPARENCY_ACCOUNT_KEY_DOMAIN.as_bytes());
     input.extend_from_slice(&account_id);
     lakko_crypto::hash::blake3(&input).to_vec()
@@ -3639,7 +3638,10 @@ mod tests {
     fn chain_rollback_fails() {
         let mut d = build_chain_fixture();
         d.last_seen_log_size = d.new_log_size + 1; // shrinking log
-        assert!(call_chain(&d).is_err(), "a rollback fails the no-rollback gate");
+        assert!(
+            call_chain(&d).is_err(),
+            "a rollback fails the no-rollback gate"
+        );
     }
 
     #[test]

@@ -35,9 +35,7 @@ use tracing::warn;
 
 use crate::peer::{Peer, PeerId, PeerRegistry};
 use crate::prom::names;
-use crate::protocol::{
-    peer_tag, ClientFrame, ErrorCode, PeerSnapshot, RelayTarget, ServerFrame,
-};
+use crate::protocol::{peer_tag, ClientFrame, ErrorCode, PeerSnapshot, RelayTarget, ServerFrame};
 
 /// Failure modes of a single relay attempt.
 #[derive(Debug, Error)]
@@ -433,10 +431,7 @@ mod tests {
                 assert_eq!(account_pseudonym, "bbbbbbbb");
                 // ADR-0021 — the join announcement now carries the
                 // canonical per-call tag the client resolves.
-                assert_eq!(
-                    tag,
-                    peer_tag("call-a", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
-                );
+                assert_eq!(tag, peer_tag("call-a", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"));
             },
             other => panic!("expected PeerJoined, got {other:?}"),
         }

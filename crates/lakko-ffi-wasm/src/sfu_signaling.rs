@@ -28,8 +28,8 @@
 //!   body.
 
 use lakko_sfu_proto::{
-    ClientFrame, RelayTarget, ServerFrame, decode_payload_b64, decode_server_frame,
-    encode_client_frame, encode_payload_b64,
+    decode_payload_b64, decode_server_frame, encode_client_frame, encode_payload_b64, ClientFrame,
+    RelayTarget, ServerFrame,
 };
 use wasm_bindgen::prelude::*;
 

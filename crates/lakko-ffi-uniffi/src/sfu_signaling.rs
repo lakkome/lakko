@@ -24,8 +24,8 @@
 //!   SFrame-key envelope; opaque to the SFU).
 
 use lakko_sfu_proto::{
-    ClientFrame, ErrorCode, RelayTarget, ServerFrame, decode_payload_b64, decode_server_frame,
-    encode_client_frame, encode_payload_b64,
+    decode_payload_b64, decode_server_frame, encode_client_frame, encode_payload_b64, ClientFrame,
+    ErrorCode, RelayTarget, ServerFrame,
 };
 
 use crate::FfiError;
@@ -184,7 +184,9 @@ impl From<ServerFrame> for SfuServerFrame {
                 peer_tag,
             },
             ServerFrame::PeerLeft { peer_id } => Self::PeerLeft { peer_id },
-            ServerFrame::SignalRelay { from, payload_b64 } => Self::SignalRelay { from, payload_b64 },
+            ServerFrame::SignalRelay { from, payload_b64 } => {
+                Self::SignalRelay { from, payload_b64 }
+            },
             ServerFrame::Error { code, detail } => Self::Error {
                 code: code.into(),
                 detail,
@@ -256,7 +258,9 @@ pub fn compose_sfu_sdp_answer(sdp: String) -> Result<String, FfiError> {
 /// Compose a client → SFU trickle-ICE candidate.
 #[uniffi::export]
 pub fn compose_sfu_ice_candidate(candidate_sdp: String) -> Result<String, FfiError> {
-    Ok(encode_client_frame(&ClientFrame::IceCandidate { candidate_sdp })?)
+    Ok(encode_client_frame(&ClientFrame::IceCandidate {
+        candidate_sdp,
+    })?)
 }
 
 /// Compose an application-layer ping (the SFU echoes a `Pong`).
@@ -295,7 +299,7 @@ mod tests {
                 assert_eq!(roster.len(), 1);
                 assert_eq!(roster[0].account_pseudonym, "deadbeef");
                 assert_eq!(server_ts, 1_700_000_000);
-            }
+            },
             _ => panic!("expected Welcome"),
         }
     }
@@ -306,7 +310,7 @@ mod tests {
         match parse_sfu_server_frame(json.into()).expect("parse") {
             SfuServerFrame::Error { code, .. } => {
                 assert!(matches!(code, SfuErrorCode::BadSdp));
-            }
+            },
             _ => panic!("expected Error"),
         }
     }
@@ -326,7 +330,7 @@ mod tests {
             } => {
                 assert_eq!(peer_id, "p2");
                 assert_eq!(sfu_decode_payload(payload_b64).expect("payload"), payload);
-            }
+            },
             _ => panic!("expected SignalRelay to peer"),
         }
     }

@@ -41,8 +41,8 @@
 
 #![forbid(unsafe_code)]
 
-use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 
 /// Maximum size of an inbound signaling frame, bytes. The hard cap
@@ -518,7 +518,9 @@ mod tests {
     fn peer_tag_shape_is_lowercase_hex() {
         let t = peer_tag("call-1", ACCT_A);
         assert_eq!(t.len(), PEER_TAG_LEN * 2);
-        assert!(t.chars().all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)));
+        assert!(t
+            .chars()
+            .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)));
     }
 
     #[test]

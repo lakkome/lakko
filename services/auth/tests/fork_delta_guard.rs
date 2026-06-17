@@ -35,8 +35,10 @@ use sha2::{Digest, Sha256};
 
 /// Path to the vendored fork's `core.rs`, relative to this crate's
 /// manifest dir (`services/auth`).
-const VENDORED_CORE_RS: &str =
-    concat!(env!("CARGO_MANIFEST_DIR"), "/../../crates/vendor/webauthn-rs-core/src/core.rs");
+const VENDORED_CORE_RS: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../crates/vendor/webauthn-rs-core/src/core.rs"
+);
 
 /// SHA-256 of the LF-normalized vendored `core.rs`, pinned at the reviewed
 /// fork state (upstream 0.5.5 + the one additive method). See the module
