@@ -31,6 +31,21 @@ namespace {
 
 constexpr std::size_t kSeedLen = 32;
 
+// Decode a lowercase-hex string into bytes (golden-vector helper).
+std::vector<uint8_t> hex_decode(const char* hex) {
+  auto nibble = [](char c) -> int {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return 0;
+  };
+  std::vector<uint8_t> out;
+  for (std::size_t i = 0; hex[i] != '\0' && hex[i + 1] != '\0'; i += 2) {
+    out.push_back(static_cast<uint8_t>((nibble(hex[i]) << 4) | nibble(hex[i + 1])));
+  }
+  return out;
+}
+
 // Mock seed — in production this comes from
 // `Group::export_secret("lakko/call/v1", call_id, 32)`.
 constexpr std::array<uint8_t, kSeedLen> kTestSeed = {
@@ -552,6 +567,86 @@ void test_payload_size_extremes() {
   std::printf("ok\n");
 }
 
+// Cross-stack golden vector (ADR-0013 / C-55, the automatable slice of G-26).
+// The canonical wire (`seed = 0x42 x 32`, `leaf = 3`,
+// `"lakko sframe golden vector v1"`) is pinned byte-for-byte in the Rust core
+// (`lakko-calls`), web (`apps/web/.../sframe-golden.test.ts`), iOS
+// (`SFrameGoldenTests.swift`), Android (`SframeGoldenTest.kt`), and the
+// `lakko-sframe-native` C ABI golden tests. This asserts the C++ bridge — the
+// `LakkoFrameEncryptor` / `LakkoFrameDecryptor` that the iOS Obj-C++ shim +
+// Android JNI module actually wrap before handing bytes to libwebrtc —
+// produces and consumes the SAME wire. So a media frame sealed on the native
+// path is byte-identical to what every other stack opens (and vice versa).
+void test_cross_stack_golden_vector() {
+  std::printf("test_cross_stack_golden_vector ... ");
+
+  std::array<uint8_t, kSeedLen> golden_seed{};
+  golden_seed.fill(0x42);
+  constexpr uint32_t kGoldenLeaf = 3;
+  const char* kGoldenPlaintextStr = "lakko sframe golden vector v1";
+  const std::vector<uint8_t> golden_plaintext(
+      kGoldenPlaintextStr,
+      kGoldenPlaintextStr + std::strlen(kGoldenPlaintextStr));
+  const std::vector<uint8_t> golden_wire = hex_decode(
+      "0301a6d1fee0dd6f091a0071e56d66a889f734a5b2fa6ef8f079d2e6b3e9b27a"
+      "dc41071764928ce5d6d0747fb7fd7c");
+
+  auto* enc = lakko::sframe::LakkoFrameEncryptor::Create(
+      golden_seed.data(), golden_seed.size(), kGoldenLeaf);
+  assert(enc != nullptr && "golden Encryptor::Create returned nullptr");
+  enc->AddRef();
+
+  // A non-empty host additional_data deliberately differs from the empty AAD
+  // the other stacks sealed the golden with — yet the produced wire MUST still
+  // equal the golden, because the host additional_data is not in the AEAD AAD
+  // (ADR-0013: the SFrame wire header is the only authenticated metadata).
+  const std::vector<uint8_t> host_aad = {0xDE, 0xAD, 0xBE, 0xEF};
+
+  std::vector<uint8_t> ciphertext(enc->GetMaxCiphertextByteSize(
+      cricket::MEDIA_TYPE_AUDIO, golden_plaintext.size()));
+  std::size_t ct_written = 0;
+  int rc = enc->Encrypt(
+      cricket::MEDIA_TYPE_AUDIO, /*ssrc=*/0,
+      rtc::MakeArrayView(host_aad.data(), host_aad.size()),
+      rtc::MakeArrayView(golden_plaintext.data(), golden_plaintext.size()),
+      rtc::MakeArrayView(ciphertext.data(), ciphertext.size()),
+      &ct_written);
+  assert(rc == 0 && "golden Encrypt failed");
+  assert(ct_written == golden_wire.size() &&
+         "the C++ bridge Encrypt produced a wire of the wrong length");
+  assert(std::memcmp(ciphertext.data(), golden_wire.data(),
+                     golden_wire.size()) == 0 &&
+         "the C++ bridge Encrypt MUST produce the canonical cross-stack "
+         "golden wire — a native-sealed frame must be byte-identical to "
+         "web / iOS / Android / the core (ADR-0013 / C-55)");
+
+  // The decryptor opens the canonical golden wire back to the golden plaintext
+  // — a frame any other stack seals opens on the native media path.
+  auto* dec = lakko::sframe::LakkoFrameDecryptor::Create(
+      golden_seed.data(), golden_seed.size());
+  assert(dec != nullptr && "golden Decryptor::Create returned nullptr");
+  dec->AddRef();
+
+  std::vector<uint8_t> recovered(dec->GetMaxPlaintextByteSize(
+      cricket::MEDIA_TYPE_AUDIO, golden_wire.size()));
+  auto result = dec->Decrypt(
+      cricket::MEDIA_TYPE_AUDIO, std::vector<uint32_t>{},
+      rtc::MakeArrayView(host_aad.data(), host_aad.size()),
+      rtc::MakeArrayView(golden_wire.data(), golden_wire.size()),
+      rtc::MakeArrayView(recovered.data(), recovered.size()));
+  assert(result.status == webrtc::FrameDecryptorInterface::Status::kOk &&
+         "the C++ bridge Decrypt of the golden wire did not return kOk");
+  assert(result.bytes_written == golden_plaintext.size());
+  assert(std::memcmp(recovered.data(), golden_plaintext.data(),
+                     golden_plaintext.size()) == 0 &&
+         "the C++ bridge Decrypt of the golden wire returned the wrong "
+         "plaintext");
+
+  enc->Release();
+  dec->Release();
+  std::printf("ok\n");
+}
+
 }  // namespace
 
 int main() {
@@ -563,6 +658,7 @@ int main() {
   test_counter_monotonicity_and_out_of_order();
   test_per_call_key_isolation();
   test_payload_size_extremes();
+  test_cross_stack_golden_vector();
   std::printf("all sframe-bridge tests passed\n");
   return 0;
 }

@@ -1119,6 +1119,20 @@ live `str0m` SFU round-trip now ALL agree on the one canonical wire.
 Verified firsthand (`cargo test -p lakko-sframe-native --test
 golden_cross_stack` → 3 passed).
 
+The C++ bridge ONE LAYER up is now golden-pinned too: a
+`test_cross_stack_golden_vector` assertion in
+[`apps/shared/sframe-bridge/test_bridge.cc`](../../apps/shared/sframe-bridge/test_bridge.cc)
+drives the actual `LakkoFrameEncryptor::Encrypt` /
+`LakkoFrameDecryptor::Decrypt` (the concrete `webrtc::FrameEncryptorInterface`
+/ `FrameDecryptorInterface` impls the iOS Obj-C++ shim + Android JNI module
+wrap before handing bytes to libwebrtc) over the golden vector — `Encrypt`
+produces the EXACT `GOLDEN_WIRE_HEX` (even with a non-empty host
+`additional_data`, re-proving ADR-0013 host-AAD-independence) and `Decrypt`
+recovers the golden plaintext. Verified firsthand (`just test-sframe-bridge`
+→ 9 assertions pass). So every layer of the native media stack — the C ABI,
+the C++ bridge, and the webrtc-interface impls — is proven byte-identical to
+web / iOS-Android-UniFFI / the core, all the way down to the libwebrtc handoff.
+
 The only residual is a single monolithic real-Chrome ⊕
 real-native ⊕ deployed-SFU smoke run — redundant for
 correctness (it would only re-observe the same composition with
