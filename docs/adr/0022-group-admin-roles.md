@@ -5,7 +5,12 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 # ADR-0022: Group-admin roles — owner / admin / member, peer-verified
 
-- **Status:** Proposed
+- **Status:** Proposed — design reviewed by `lakko-security`: **APPROVE WITH
+  NOTES** (2026-06-17). Findings 1 (single-account-leaf assumption + Phase-2b
+  path), 2 (pre-merge epoch read as a stated invariant), 3 (owner device loss +
+  ADR-0017 mitigation), 4 (version fail-closed), 5 (self-Remove test) folded
+  into the text below. Awaiting maintainer acceptance; the landed code still
+  requires the mandatory post-implementation `lakko-security` pass (invariant #3).
 - **Date:** 2026-06-17
 - **Context:** Phase 3 closeout — blocker **C** (group-admin roles). Group-chat
   membership (add / remove / roster) now ships on all three clients (A4), but
@@ -85,7 +90,25 @@ every add/remove cycle; the per-account signature key (the same key a
 `ContactRequest` is signed with and the roster matches against, ADR-0021) is
 stable for the account's lifetime in the group. The body is bounded
 (`admin_count` capped, e.g. 256) and parsed with the no-`unwrap` / no-`panic`
-discipline; it is opaque to the server (invariant #2).
+discipline; it is opaque to the server (invariant #2). **An unrecognised
+`version` is refused before any further parsing — the extension is treated as
+absent/invalid (fail-closed), not best-effort parsed** (the I-7 history-bundle
+discriminator precedent).
+
+**v1 assumes one account-level leaf per member in a conversation group**
+(`lakko-security` ADR-0022 review, Finding 1). Conversation groups today are
+created and committed with `Identity::from_seed(account_identity_seed)` — the
+account-level deterministic identity (ADR-0017) — so a committer's leaf
+signature key **equals** the account key stored in `0xFF02`, and the lookup
+`committer leaf → signature pubkey → role table` resolves directly. ADR-0007
+Phase 2b moves conversation groups to **per-device random** leaves; when that
+lands, a committer's leaf key will be the *device* key, not the account key, and
+the gate must first resolve the device leaf back to its account (via the
+DeviceGroup membership ADR-0007 binds per-device identities to the account)
+before the role lookup. **This is an explicit v1 boundary, recorded as a
+stated invariant, not a silent assumption** — the gate and its property tests
+assert the single-account-leaf model, and Phase 2b carries the device→account
+resolution as a prerequisite.
 
 The extension is part of the initial `GroupContext` at `Group::create` (owner =
 creator, empty admin set) and travels to every joiner inside the Welcome, so a
@@ -119,6 +142,26 @@ a member cannot forge a commit *as* another member; the only way to bypass the
 gate is to run a patched client, whose unauthorized commit every honest peer
 then refuses — so the offender forks themselves out of the honest members'
 shared state rather than mutating it.
+
+**Design invariant — the role table is read from the PRE-MERGE epoch**
+(`lakko-security` ADR-0022 review, Finding 2; this is load-bearing fail-closed
+correctness, not a nice-to-have). The gate reads `owner_pubkey` /
+`admin_pubkeys` from the group's **pre-merge** authenticated `GroupContext`
+(the `group_context_extension(0xFF02)` accessor *before* `merge_staged_commit`,
+mirroring how `process_incoming_gated` reads `members()` pre-merge). Reading the
+table from the *post-merge* epoch would let a single commit that *both*
+self-promotes the committer to admin *and* adds/removes a member self-authorize
+— the commit would rewrite the role table and then be judged against its own
+rewrite. The committer's authorization is therefore always evaluated against the
+epoch the commit targets, never the epoch it produces. A property test asserts
+this directly: **a commit that both self-promotes and acts is refused, because
+the committer is not yet an admin in the pre-commit role table.**
+
+**Self-Remove ("leave") is distinguished by leaf identity**: the gate compares
+the committer's leaf to the removed leaf and allows the removal only when they
+are the same (a member may remove *only their own* leaf, never another's, when
+not owner/admin). A property test asserts a non-admin member cannot remove any
+leaf but their own.
 
 ### Default-off + opt-in
 
@@ -186,7 +229,14 @@ only to the owner). The gate is the security boundary; the UI gating is just UX
   malicious members could agree among themselves to ignore the policy — the same
   residual as ADR-0015, and inherent to a leaderless protocol); v1 keeps admin
   powers deliberately narrow (admins cannot demote each other), which some flows
-  may find limiting.
+  may find limiting. **Owner device loss (v1 consequence, explicit):** because
+  the owner is fixed at creation and v1 has neither ownership transfer nor
+  admin-quorum recovery, a group whose owner permanently loses the account key
+  becomes un-administrable (no one can promote/demote/transfer). This is
+  **substantially mitigated** by ADR-0017: the owner's account key is the
+  phrase-derived `AccountIdentity`, so recovering on a new device from the
+  recovery phrase restores the owner key (and thus owner powers) — the group is
+  only orphaned if the owner loses *both* every device *and* the recovery phrase.
 - **Neutral:** the role table grows the GroupContext by `32·(1+admin_count)`
   bytes; ownership transfer + the admin-can-manage-admins question are explicit
   follow-ups; the clients gain a role-management surface that only the owner
@@ -201,18 +251,25 @@ only to the owner). The gate is the security boundary; the UI gating is just UX
 - **Can an admin manage other admins?** v1 says no (only the owner promotes /
   demotes). Some products let admins demote *members* but not *admins*; revisit
   after dogfooding.
-- **Interaction with ADR-0015 attested removals on DeviceGroups.** Both are
-  refuse-to-apply gates on `GroupContext` policy; a group that wants *both*
-  message-group role enforcement and device-group attested removal carries two
-  extensions. Confirm they compose cleanly (different group types, so expected
-  to be orthogonal).
-- **Role changes vs. concurrent membership commits.** If the owner demotes an
-  admin in epoch N while that admin's Add lands concurrently, MLS's commit
-  ordering decides; confirm the gate reads the role table from the *correct*
-  (pre-merge) epoch so a just-demoted admin's in-flight commit is evaluated
-  against the epoch it targets.
-- **lakko-security review** is required before Sprint 1 merges (crypto / MLS
-  state-machine change, invariant #3).
+- **Phase 2b per-device leaves (Finding 1 forward path).** When ADR-0007 moves
+  conversation groups to per-device random leaves, the gate must resolve a
+  committer's *device* leaf back to its *account* before the role lookup. The
+  resolution mechanism (a DeviceGroup-membership check vs. embedding the account
+  key in the device leaf credential) is deferred to that phase; v1 asserts the
+  single-account-leaf model as a stated invariant.
+- **Interaction with ADR-0015 attested removals on DeviceGroups.** Confirmed
+  **orthogonal** by the `lakko-security` review: different group types
+  (DeviceGroup `0xFF01` vs. conversation Group `0xFF02`), distinct extension
+  IDs, no shared state — a group wanting both simply chains two independent
+  gates.
+- **Role changes vs. concurrent membership commits** is now resolved by the
+  stated pre-merge-epoch invariant above (a just-demoted admin's in-flight
+  commit is evaluated against the epoch it targets); the property test pins it.
+- **lakko-security DESIGN review: done** (APPROVE WITH NOTES, above). The
+  mandatory **post-implementation** `lakko-security` pass on the landed code
+  remains required before Sprint 1 merges (crypto / MLS state-machine change,
+  invariant #3), together with the `0xFF02` fuzz target + the gate property
+  tests.
 
 ## References
 
