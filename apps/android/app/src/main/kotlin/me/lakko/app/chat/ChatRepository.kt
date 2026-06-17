@@ -25,6 +25,7 @@ import me.lakko.app.discovery.DiscoveryClient
 import me.lakko.app.ds.DsClient
 import uniffi.lakko_ffi_uniffi.FfiException
 import uniffi.lakko_ffi_uniffi.Group
+import uniffi.lakko_ffi_uniffi.GroupMember
 import uniffi.lakko_ffi_uniffi.Identity
 import uniffi.lakko_ffi_uniffi.loadGroup
 
@@ -460,6 +461,130 @@ public class ChatRepository(
         } catch (cause: Throwable) {
             android.util.Log.w("ChatRepository", "memberCount failed for $groupIdHex", cause)
             null
+        }
+    }
+
+    /**
+     * Live MLS roster for [groupIdHex] at the current epoch — `(leafIndex,
+     * signaturePublicKey)` per member — or `null` when there is no handle.
+     * The group-chat UI matches each key against the accepted contacts to
+     * render a name, else a fingerprint. Lock-free read (same as
+     * [memberCount]); the UI MUST refresh after every add / remove.
+     */
+    public fun members(groupIdHex: String): List<GroupMember>? {
+        val record = groups[groupIdHex] ?: return null
+        return try {
+            record.group.members()
+        } catch (cause: Throwable) {
+            android.util.Log.w("ChatRepository", "members failed for $groupIdHex", cause)
+            null
+        }
+    }
+
+    /**
+     * Our own leaf index in [groupIdHex], or `null` when there is no handle.
+     * The roster marks the local member "(you)" and refuses self-removal.
+     */
+    public fun ownLeafIndex(groupIdHex: String): UInt? {
+        val record = groups[groupIdHex] ?: return null
+        return try {
+            record.group.ownLeafIndex()
+        } catch (cause: Throwable) {
+            null
+        }
+    }
+
+    /**
+     * Add an already-resolved recipient to an EXISTING group (mirror of
+     * [startGroupWith] but for a live group). The caller resolves +
+     * G-4-verifies `@username -> (accountId, signaturePubkey)` first (the
+     * pin-store verify lives in [me.lakko.app.contacts.ContactsClient]).
+     *
+     * Unlike the 1x1 create, the resulting commit MUST be published to the
+     * group journal so existing members advance their epoch, and marked own
+     * so the poll loop suppresses the echo — re-applying our own commit would
+     * fork the MLS epoch. Returns the commit's DS message id.
+     */
+    public suspend fun addMemberToGroup(
+        groupIdHex: String,
+        recipientAccountId: ByteArray,
+        recipientSignaturePubkey: ByteArray,
+    ): Long {
+        val identity = canonicalIdentity.get()
+            ?: throw IllegalStateException(
+                "ChatRepository not bootstrapped — call bootstrap() first",
+            )
+        val keyPackageBytes = discovery.fetchKeyPackage(recipientAccountId)
+            ?: throw ChatError(
+                "recipient has no KeyPackage uploaded yet",
+                IllegalStateException("fetchKeyPackage returned null"),
+            )
+        return groupsLock.withLock {
+            val record = groups[groupIdHex]
+                ?: throw ChatError(
+                    "no live Group handle for $groupIdHex",
+                    IllegalStateException("missing group record"),
+                )
+            val addResult = try {
+                record.group.addMemberFromWire(identity, keyPackageBytes)
+            } catch (e: FfiException) {
+                throw ChatError("addMemberFromWire failed", e)
+            }
+            val commitPublish = try {
+                dsClient.publishGroup(record.groupId, addResult.commit)
+            } catch (e: Throwable) {
+                throw ChatError("DS publishGroup (add-member commit) failed", e)
+            }
+            chatClient.markOwnPublishedCommit(commitPublish.id)
+            val welcomeEnvelope = wrapEnvelope(KIND_WELCOME, addResult.welcome)
+            val recipientPseudonym =
+                uniffi.lakko_ffi_uniffi.IdentityPseudonym
+                    .fromIdentity(recipientSignaturePubkey)
+                    .use { it.asBytes() }
+            try {
+                dsClient.publishMailbox(recipientPseudonym, welcomeEnvelope)
+            } catch (e: Throwable) {
+                throw ChatError("DS publishMailbox (Welcome) failed", e)
+            }
+            persistSnapshotBestEffort()
+            publishThreadList()
+            commitPublish.id
+        }
+    }
+
+    /**
+     * Remove a member from an EXISTING group by leaf index. Publishes the
+     * removal commit to the group journal (own-marked for echo suppression).
+     * Returns the commit's DS message id.
+     */
+    public suspend fun removeMemberFromGroup(
+        groupIdHex: String,
+        leafIndex: UInt,
+    ): Long {
+        val identity = canonicalIdentity.get()
+            ?: throw IllegalStateException(
+                "ChatRepository not bootstrapped — call bootstrap() first",
+            )
+        return groupsLock.withLock {
+            val record = groups[groupIdHex]
+                ?: throw ChatError(
+                    "no live Group handle for $groupIdHex",
+                    IllegalStateException("missing group record"),
+                )
+            val commitBytes = try {
+                record.group.removeMember(identity, leafIndex)
+            } catch (e: FfiException) {
+                throw ChatError("removeMember failed", e)
+            }
+            val commitPublish = try {
+                dsClient.publishGroup(record.groupId, commitBytes)
+            } catch (e: Throwable) {
+                throw ChatError("DS publishGroup (remove-member commit) failed", e)
+            }
+            chatClient.markOwnPublishedCommit(commitPublish.id)
+            persistSnapshotBestEffort()
+            publishThreadList()
+            commitPublish.id
         }
     }
 

@@ -30,6 +30,7 @@ import me.lakko.app.devices.sync.DeviceGroupSyncRepository
 import me.lakko.app.contacts.AcceptedContactsStore
 import uniffi.lakko_ffi_uniffi.AttachmentRef
 import uniffi.lakko_ffi_uniffi.FfiCallSignalingBody
+import uniffi.lakko_ffi_uniffi.GroupMember
 import uniffi.lakko_ffi_uniffi.sfuPeerTag
 
 /**
@@ -54,6 +55,14 @@ public class ChatViewModel(
      *  then refuses with a clear log line. Defaults to `{ null }` so
      *  existing call sites + tests compile unchanged. */
     private val sessionTokenProvider: () -> String? = { null },
+    /** Resolves `@username -> (accountId, signaturePubkey)` through the
+     *  G-4-verified contacts path for the add-member flow (A4). Threaded
+     *  from `MainActivity` as `{ contactsRepository.resolveVerifiedRecipient(it) }`.
+     *  Defaults to a fail-closed stub so existing call sites + tests compile
+     *  unchanged (add-member then refuses). */
+    private val resolveRecipient: suspend (String) -> Pair<ByteArray, ByteArray> = {
+        throw IllegalStateException("no @username resolver wired — add-member unavailable")
+    },
 ) : ViewModel() {
 
     private val composer: MutableStateFlow<ComposerState> =
@@ -207,6 +216,127 @@ public class ChatViewModel(
      *  reads as a 1x1. */
     public val isGroupChat: Boolean
         get() = (repo.memberCount(groupIdHex) ?: 0) > 2
+
+    // --- Group membership (A4) ---
+
+    private val mutableMembers: MutableStateFlow<List<GroupMember>> =
+        MutableStateFlow(emptyList())
+
+    /** Live MLS roster for this group at the current epoch. */
+    public val members: StateFlow<List<GroupMember>> = mutableMembers.asStateFlow()
+
+    private val mutableMembersPanelOpen: MutableStateFlow<Boolean> =
+        MutableStateFlow(false)
+
+    /** `true` while the members sheet is shown. */
+    public val membersPanelOpen: StateFlow<Boolean> = mutableMembersPanelOpen.asStateFlow()
+
+    private val mutableAddMemberInput: MutableStateFlow<String> = MutableStateFlow("")
+
+    /** `@username` typed into the add-member field. */
+    public val addMemberInput: StateFlow<String> = mutableAddMemberInput.asStateFlow()
+
+    private val mutableMembershipBusy: MutableStateFlow<Boolean> = MutableStateFlow(false)
+
+    /** `true` while an add / remove commit is in flight. */
+    public val membershipBusy: StateFlow<Boolean> = mutableMembershipBusy.asStateFlow()
+
+    private val mutableMembershipError: MutableStateFlow<String?> = MutableStateFlow(null)
+
+    /** Last add / remove error surfaced to the sheet, else `null`. */
+    public val membershipError: StateFlow<String?> = mutableMembershipError.asStateFlow()
+
+    /** Update the add-member text field. */
+    public fun setAddMemberInput(value: String) {
+        mutableAddMemberInput.value = value
+    }
+
+    /** Open / close the members sheet; refresh the roster on open. */
+    public fun toggleMembersPanel() {
+        val opening = !mutableMembersPanelOpen.value
+        mutableMembersPanelOpen.value = opening
+        if (opening) {
+            mutableMembershipError.value = null
+            refreshMembers()
+        }
+    }
+
+    /** Re-read the live MLS roster from the repository. */
+    public fun refreshMembers() {
+        mutableMembers.value = repo.members(groupIdHex) ?: emptyList()
+    }
+
+    /** Our own leaf index — the roster marks it "(you)" and blocks self-removal. */
+    public fun ownLeafIndex(): UInt? = repo.ownLeafIndex(groupIdHex)
+
+    /**
+     * Human label for a roster member: a matched contact's chosen name (or its
+     * fingerprint), else a short fingerprint of the signature key. "(you)" is
+     * appended for the local leaf. Mirrors the ADR-0021 call-roster resolution,
+     * keyed on the member's signature public key.
+     */
+    public fun memberLabel(member: GroupMember): String {
+        val suffix = if (ownLeafIndex() == member.leafIndex) " (you)" else ""
+        for (c in AcceptedContactsStore.load(repo.context)) {
+            if (c.request.fromPubkey.contentEquals(member.signaturePublicKey)) {
+                return c.displayLabel + suffix
+            }
+        }
+        val fp = member.signaturePublicKey.take(4)
+            .joinToString("") { "%02x".format(it.toInt() and 0xff) }
+        return "Member $fp$suffix"
+    }
+
+    /**
+     * Resolve the typed `@username` (G-4-verified) and add it to this group:
+     * publish the add commit to the journal (own-marked) + ferry the Welcome.
+     * Fail-closed — a resolve / verify / publish failure surfaces an error and
+     * leaves the group untouched.
+     */
+    public fun onAddMember() {
+        val username = mutableAddMemberInput.value.trim().removePrefix("@")
+        if (username.isEmpty() || mutableMembershipBusy.value) return
+        mutableMembershipBusy.value = true
+        mutableMembershipError.value = null
+        viewModelScope.launch {
+            try {
+                val (accountId, signaturePubkey) = resolveRecipient(username)
+                repo.addMemberToGroup(groupIdHex, accountId, signaturePubkey)
+                mutableAddMemberInput.value = ""
+                refreshMembers()
+            } catch (e: Throwable) {
+                mutableMembershipError.value = e.message ?: e.toString()
+                android.util.Log.w("ChatViewModel", "onAddMember failed", e)
+            } finally {
+                mutableMembershipBusy.value = false
+            }
+        }
+    }
+
+    /**
+     * Remove a member by leaf index: publish the removal commit to the journal
+     * (own-marked). Refuses to remove the local leaf. Fail-closed on error.
+     */
+    public fun onRemoveMember(leafIndex: UInt) {
+        if (ownLeafIndex() == leafIndex) {
+            mutableMembershipError.value = "You cannot remove yourself from the group."
+            return
+        }
+        if (mutableMembershipBusy.value) return
+        mutableMembershipBusy.value = true
+        mutableMembershipError.value = null
+        viewModelScope.launch {
+            try {
+                repo.removeMemberFromGroup(groupIdHex, leafIndex)
+                refreshMembers()
+            } catch (e: Throwable) {
+                mutableMembershipError.value = e.message ?: e.toString()
+                android.util.Log.w("ChatViewModel", "onRemoveMember failed", e)
+            } finally {
+                mutableMembershipBusy.value = false
+            }
+        }
+    }
 
     /**
      * Start a multi-party SFU group call for this (group) chat. Mints the

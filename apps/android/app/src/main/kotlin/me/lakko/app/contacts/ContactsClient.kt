@@ -234,6 +234,62 @@ public class ContactsClient(
     }
 
     /**
+     * Resolve `@username -> (accountId, signaturePubkey)` through the SAME
+     * G-4-verified gate [sendContactRequest] runs: discovery lookup ->
+     * identityFetch -> the supersession/pin verify (fail-closed
+     * [SupersessionRefused] on an unproven changed key) + the additive KT-log
+     * rollback check. Used by the group-chat add-member flow
+     * ([me.lakko.app.chat.ChatRepository.addMemberToGroup]) — adding a member
+     * seals a Welcome under the resolved key exactly like a 1x1
+     * ContactRequest, so this verify MUST NOT be skipped.
+     *
+     * Mirrors the resolve+verify sequence above (kept in lock-step by hand —
+     * any change to the gate there must be reflected here). Returns
+     * `(accountId, signaturePubkey)`.
+     */
+    public suspend fun resolveVerifiedRecipient(
+        username: String,
+    ): Pair<ByteArray, ByteArray> {
+        val lookup = try {
+            discovery.lookup(username)
+        } catch (e: DiscoveryHttpError) {
+            throw ContactsError.wrap(e)
+        } catch (e: DiscoveryNetworkError) {
+            throw ContactsError.wrap(e)
+        } catch (e: DiscoveryClientArgError) {
+            throw ContactsError.wrap(e)
+        }
+        val recipientAccountId = lookup.account
+            ?: throw ContactsError.usernameUnknown(lookup.normalisedUsername)
+
+        val bundle = try {
+            discovery.identityFetch(recipientAccountId)
+        } catch (e: DiscoveryHttpError) {
+            throw ContactsError.wrap(e)
+        } catch (e: DiscoveryNetworkError) {
+            throw ContactsError.wrap(e)
+        } ?: throw ContactsError.noIdentityBundle(recipientAccountId)
+
+        val oldPin = pinStore.readPin(base64Encode(recipientAccountId))
+        try {
+            verifyBundleAccountKey(recipientAccountId, bundle)
+        } catch (refused: SupersessionRefused) {
+            refused.loggedReset = bestEffortServedKeyReset(
+                recipientAccountId,
+                base64Decode(bundle.signature_pubkey),
+            )
+            throw refused
+        }
+        checkTransparencyLog(
+            recipientAccountId,
+            base64Decode(bundle.signature_pubkey),
+            oldPin,
+            bundle.supersession_proof,
+        )
+        return Pair(recipientAccountId, base64Decode(bundle.signature_pubkey))
+    }
+
+    /**
      * Send a [ContactRequest] directly against a known recipient
      * bundle — i.e. **without** going through the discovery
      * `lookup → identityFetch` round-trip.

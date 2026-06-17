@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
@@ -216,7 +217,15 @@ public fun ChatScreen(
                     viewModel.startCall(audio = true, video = true)
                 }
             },
+            onShowMembers = viewModel::toggleMembersPanel,
         )
+
+        // A4 — the group-membership sheet (roster + add / remove),
+        // presented as a Dialog while `membersPanelOpen` is true.
+        val membersPanelOpen by viewModel.membersPanelOpen.collectAsStateWithLifecycle()
+        if (membersPanelOpen) {
+            MembersSheet(viewModel = viewModel)
+        }
 
         // G3-2-call-present — the inline banner now only
         // handles the `ringing` incoming-call prompt
@@ -411,6 +420,7 @@ private fun Header(
     onRefresh: () -> Unit,
     onStartCall: () -> Unit,
     onStartVideoCall: () -> Unit,
+    onShowMembers: () -> Unit,
 ) {
     Column {
         Row(
@@ -435,6 +445,8 @@ private fun Header(
                 TextButton(onClick = onStartCall) { Text("📞 Call") }
                 TextButton(onClick = onStartVideoCall) { Text("🎥 Video") }
             }
+            // A4 — members sheet: roster + add / remove.
+            TextButton(onClick = onShowMembers) { Text("Members") }
             if (refreshing) {
                 CircularProgressIndicator(
                     modifier = Modifier
@@ -951,5 +963,93 @@ private fun shareDecryptedBytes(
             Intent.createChooser(send, "Save attachment")
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
         )
+    }
+}
+
+// =============================================================================
+// A4 — group-membership sheet: add a member by @username (G-4-verified) and
+// view / remove the live MLS roster. Names resolve through the accepted
+// contacts list (ADR-0021), falling back to a short key fingerprint.
+// =============================================================================
+
+@Composable
+private fun MembersSheet(viewModel: ChatViewModel) {
+    val members by viewModel.members.collectAsStateWithLifecycle()
+    val input by viewModel.addMemberInput.collectAsStateWithLifecycle()
+    val busy by viewModel.membershipBusy.collectAsStateWithLifecycle()
+    val error by viewModel.membershipError.collectAsStateWithLifecycle()
+    val ownLeaf = viewModel.ownLeafIndex()
+
+    Dialog(
+        onDismissRequest = viewModel::toggleMembersPanel,
+        properties = DialogProperties(usePlatformDefaultWidth = false),
+    ) {
+        Surface(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
+            shape = MaterialTheme.shapes.large,
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Text(
+                    text = "Members (${members.size})",
+                    style = MaterialTheme.typography.titleMedium,
+                )
+                Spacer(Modifier.height(12.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    OutlinedTextField(
+                        value = input,
+                        onValueChange = viewModel::setAddMemberInput,
+                        label = { Text("@username") },
+                        singleLine = true,
+                        enabled = !busy,
+                        keyboardOptions = KeyboardOptions(
+                            capitalization = KeyboardCapitalization.None,
+                        ),
+                        modifier = Modifier.weight(1f),
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Button(
+                        onClick = viewModel::onAddMember,
+                        enabled = !busy && input.trim().isNotEmpty(),
+                    ) { Text("Add") }
+                }
+                error?.let { message ->
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        text = message,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+                Spacer(Modifier.height(12.dp))
+                LazyColumn(modifier = Modifier.heightIn(max = 360.dp)) {
+                    items(members) { member ->
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 4.dp),
+                        ) {
+                            Text(
+                                text = viewModel.memberLabel(member),
+                                modifier = Modifier.weight(1f),
+                            )
+                            if (ownLeaf != member.leafIndex) {
+                                TextButton(
+                                    onClick = { viewModel.onRemoveMember(member.leafIndex) },
+                                    enabled = !busy,
+                                ) { Text("Remove") }
+                            }
+                        }
+                    }
+                }
+                Spacer(Modifier.height(12.dp))
+                Row(modifier = Modifier.fillMaxWidth()) {
+                    Spacer(Modifier.weight(1f))
+                    TextButton(onClick = viewModel::toggleMembersPanel) { Text("Done") }
+                }
+            }
+        }
     }
 }

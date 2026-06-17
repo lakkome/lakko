@@ -526,6 +526,11 @@ private fun SessionRoot(
                         sessionTokenProvider = {
                             authRepository.identitySecrets.value?.sessionToken
                         },
+                        // A4 — resolve @username -> (accountId, signaturePubkey)
+                        // through the G-4-verified contacts path for add-member.
+                        resolveRecipient = { username ->
+                            contactsRepository.resolveVerifiedRecipient(username)
+                        },
                     )
                 },
             )

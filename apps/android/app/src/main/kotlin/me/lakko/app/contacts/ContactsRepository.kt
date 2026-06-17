@@ -178,6 +178,18 @@ public class ContactsRepository(
     }
 
     /**
+     * Resolve `@username -> (accountId, signaturePubkey)` through the
+     * G-4-verified [ContactsClient.resolveVerifiedRecipient]. Used by the
+     * group-chat add-member flow ([me.lakko.app.chat.ChatViewModel]); the
+     * fresh [clientFactory] client carries the same pin store the 1x1
+     * ContactRequest path verifies against.
+     */
+    public suspend fun resolveVerifiedRecipient(
+        username: String,
+    ): Pair<ByteArray, ByteArray> =
+        clientFactory().use { it.resolveVerifiedRecipient(username) }
+
+    /**
      * Poll the stranger inbox for new ContactRequest / Welcome
      * envelopes. Updates [ContactsState.pending] with any new
      * requests + bumps the cursor.
