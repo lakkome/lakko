@@ -2170,12 +2170,50 @@ public class AuthRepository(
             // caller also re-publishes it on the next /backup PUT so a
             // further device-recover sees it too.
             //
-            // TODO(2a1d-followup): the restored `parsed.acceptedContacts`
-            // are not yet merged into a persistent contact list — Android
-            // keeps the accepted-contacts set in memory and rebuilds it by
-            // re-polling the stranger inbox from cursor 0 on launch, so the
-            // restore-merge is an optimization, not a correctness gap. It
-            // lands with the Android contact-persistence sub-sprint.
+            // Contact-in-backup restore (ADR-0021): reconstruct the accepted
+            // contacts (with their account_id) and MERGE into the persistent
+            // store — skip a pubkey already present so a contact accepted after
+            // the backup is not clobbered. The backup does not carry the inbox
+            // metadata, so reconstruct an IncomingContactRequest with sentinels:
+            // a negative messageId (never collides with a real DS id), a zero
+            // pseudonym, no intro.
+            try {
+                val existing =
+                    me.lakko.app.contacts.AcceptedContactsStore.load(applicationContext)
+                val known = existing.mapTo(HashSet()) { it.request.fromPubkey.toList() }
+                val restored =
+                    parsed.acceptedContacts.mapIndexedNotNull { idx, rec ->
+                        if (rec.ed25519Pubkey.toList() in known) {
+                            return@mapIndexedNotNull null
+                        }
+                        me.lakko.app.contacts.AcceptedContact(
+                            request =
+                                me.lakko.app.contacts.IncomingContactRequest(
+                                    messageId = -(idx.toLong() + 1),
+                                    fromPubkey = rec.ed25519Pubkey,
+                                    fromAccountId = rec.accountId,
+                                    fromPseudonym = ByteArray(32),
+                                    validAfterMs = parsed.createdAtMs.toULong(),
+                                    intro = null,
+                                    createdAt = "",
+                                ),
+                            groupIdHex = null,
+                            displayName = rec.displayName.ifEmpty { null },
+                        )
+                    }
+                if (restored.isNotEmpty()) {
+                    me.lakko.app.contacts.AcceptedContactsStore.save(
+                        applicationContext,
+                        existing + restored,
+                    )
+                    Log.i(
+                        "lakko-auth",
+                        "backup restore ($context): merged ${restored.size} contact(s)",
+                    )
+                }
+            } catch (cause: Throwable) {
+                Log.w("lakko-auth", "backup restore ($context): contact merge failed", cause)
+            }
             return parsed.wholeStorageSnapshot
         } finally {
             client.close()
@@ -2228,12 +2266,28 @@ public class AuthRepository(
                 return
             }
             accountIdentitySeed.fill(0)
+            // Contact-in-backup (ADR-0021): include the accepted contacts so a
+            // restore on a fresh device rebuilds the list + resolves group-call
+            // roster names. The native AcceptedContact carries no X25519 pubkey,
+            // so zero-fill it (matches web's legacy-contact handling); the
+            // backup carries ed25519 + display name + the 16-byte account_id.
+            // displayName stays null/"" when unset so a restore does not promote
+            // the fingerprint fallback into a "chosen" name.
+            val contactRecords =
+                me.lakko.app.contacts.AcceptedContactsStore.load(applicationContext).map { c ->
+                    uniffi.lakko_ffi_uniffi.BackupContactRecord(
+                        ed25519Pubkey = c.request.fromPubkey,
+                        x25519Pubkey = ByteArray(32),
+                        displayName = c.displayName ?: "",
+                        accountId = c.request.fromAccountId,
+                    )
+                }
             try {
                 backupClient.uploadNow(
                     accountId = accountId,
                     ed25519Seed = seed,
                     phraseBytes = phraseBytes,
-                    contacts = emptyList(),  // 2a3 wires the cross-device sync
+                    contacts = contactRecords,
                     wholeStorageSnapshot = wholeStorageSnapshot,
                 )
             } catch (cause: Throwable) {

@@ -239,6 +239,23 @@ posture as ADR's call safety number.
   A restored contact now resolves in a group-call roster without
   re-accepting. The fixed-layout presence-byte parser stays fuzz-safe
   (an unrecognised presence byte → `InvalidPayload`).
+- **Native contact-in-backup round-trip — landed (Jun 2026).** The
+  v3 `account_id` was first exposed only on the wasm surface; the UniFFI
+  `BackupContactRecord` gained an optional `account_id: Option<Vec<u8>>`
+  (regen'd Swift/Kotlin) with a 16-byte validation on compose. Closing the
+  bigger gap underneath: native backup did NOT round-trip contacts at all
+  (both clients composed `contacts: []` and DROPPED the restored contacts —
+  two deferred TODOs). Both `AuthRepository`s now compose the accepted
+  contacts into the backup (ed25519 + display name + the 16-byte
+  `account_id`; X25519 zero-filled — native contacts carry none, matching
+  web's legacy handling; `displayName` stays unset rather than promoting the
+  fingerprint fallback) and, on restore, reconstruct each
+  `IncomingContactRequest` with sentinels (negative `messageId` that never
+  collides with a real DS id, zero pseudonym, no intro) and **merge** into
+  the persistent `AcceptedContactsStore` (skip a pubkey already present, so
+  a contact accepted after the backup is not clobbered). A restored native
+  contact now resolves in a group-call roster. `:app:compileDebugKotlin` +
+  `xcodebuild` green.
 - Channels (Phase 4) broadcast rosters are out of scope.
 
 ## References

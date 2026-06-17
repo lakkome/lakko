@@ -49,6 +49,10 @@ pub struct BackupContactRecord {
     pub x25519_pubkey: Vec<u8>,
     /// User-chosen display label (UTF-8, may be empty).
     pub display_name: String,
+    /// The peer's 16-byte account_id (ADR-0021), or `None` when the
+    /// contact predates it. Round-trips so a restored native contact
+    /// resolves in a group-call roster — mirrors the wasm surface.
+    pub account_id: Option<Vec<u8>>,
 }
 
 /// Structured view of a decoded backup payload — what
@@ -130,17 +134,29 @@ pub fn build_backup_payload(
         e.copy_from_slice(&c.ed25519_pubkey);
         let mut x = [0u8; 32];
         x.copy_from_slice(&c.x25519_pubkey);
+        // ADR-0021: round-trip the per-contact account_id (16 bytes) so a
+        // restored native contact resolves in a group-call roster, matching
+        // the wasm surface. A malformed length is a hard error rather than a
+        // silent drop, so the caller learns its contact list is corrupt.
+        let account_id = match c.account_id {
+            None => None,
+            Some(id) if id.len() == 16 => {
+                let mut a = [0u8; 16];
+                a.copy_from_slice(&id);
+                Some(a)
+            }
+            Some(id) => {
+                return Err(FfiError::Backup(format!(
+                    "contact account_id must be 16 bytes, got {}",
+                    id.len()
+                )));
+            }
+        };
         accepted_contacts.push(AcceptedContactRecord {
             ed25519_pubkey: e,
             x25519_pubkey: x,
             display_name: c.display_name,
-            // ADR-0021: the per-contact account_id round-trips on the web
-            // (wasm) backup surface; the native (Swift/Kotlin) backup does
-            // not carry it yet (iOS/Android persist contacts in their own
-            // AcceptedContactsStore, not via lakko-backup), so it is None
-            // here. Threading it through the UniFFI BackupContact is a
-            // parity follow-up if native backup ever round-trips contacts.
-            account_id: None,
+            account_id,
         });
     }
 
@@ -173,6 +189,7 @@ pub fn parse_backup_payload(wire: Vec<u8>) -> Result<ParsedBackupPayload, FfiErr
             ed25519_pubkey: c.ed25519_pubkey.to_vec(),
             x25519_pubkey: c.x25519_pubkey.to_vec(),
             display_name: c.display_name.clone(),
+            account_id: c.account_id.map(|id| id.to_vec()),
         })
         .collect();
     Ok(ParsedBackupPayload {
@@ -221,7 +238,47 @@ mod tests {
             ed25519_pubkey: vec![0x01u8; 32],
             x25519_pubkey: vec![0x02u8; 32],
             display_name: "alice".to_string(),
+            account_id: None,
         }
+    }
+
+    #[test]
+    fn account_id_round_trips_through_uniffi_surface() {
+        // ADR-0021: a contact with a 16-byte account_id round-trips; one
+        // without stays absent.
+        let with_id = BackupContactRecord {
+            ed25519_pubkey: vec![0x01u8; 32],
+            x25519_pubkey: vec![0x02u8; 32],
+            display_name: "alice".to_string(),
+            account_id: Some(vec![0xABu8; 16]),
+        };
+        let wire = build_backup_payload(
+            vec![0xA1u8; 16],
+            1,
+            vec![0x42u8; 32],
+            vec![with_id, sample_contact()],
+            vec![],
+        )
+        .expect("build");
+        let parsed = parse_backup_payload(wire).expect("parse");
+        assert_eq!(parsed.accepted_contacts.len(), 2);
+        assert_eq!(
+            parsed.accepted_contacts[0].account_id,
+            Some(vec![0xABu8; 16])
+        );
+        assert_eq!(parsed.accepted_contacts[1].account_id, None);
+    }
+
+    #[test]
+    fn bad_account_id_length_is_rejected() {
+        let bad = BackupContactRecord {
+            ed25519_pubkey: vec![0x01u8; 32],
+            x25519_pubkey: vec![0x02u8; 32],
+            display_name: "alice".to_string(),
+            account_id: Some(vec![0xABu8; 8]), // wrong length
+        };
+        let err = build_backup_payload(vec![0xA1u8; 16], 1, vec![0x42u8; 32], vec![bad], vec![]);
+        assert!(err.is_err(), "an 8-byte account_id must be rejected");
     }
 
     #[test]

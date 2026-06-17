@@ -151,20 +151,6 @@ public sealed interface UploadResult {
     public data class TransportFailed(val cause: Throwable) : UploadResult
 }
 
-/** Build a list of [BackupContactRecord] from the local accepted-
- *  contacts list. Convenience for the orchestration layer. */
-public fun buildContactRecords(
-    contacts: List<Triple<ByteArray, ByteArray, String>>,
-): List<BackupContactRecord> {
-    return contacts.map { (ed, x, name) ->
-        BackupContactRecord(
-            ed25519Pubkey = ed,
-            x25519Pubkey = x,
-            displayName = name,
-        )
-    }
-}
-
 /** Derive the AccountIdentity Ed25519 signing seed from the
  *  identity seed (ADR-0017: the BIP39 phrase seed, NOT the password
  *  exportKey — so the backup is signed with the stable account

@@ -1966,9 +1966,41 @@ public final class AuthRepository: ObservableObject {
             + "from snapshot at \(parsed.createdAtMs), "
             + "MLS snapshot \(parsed.wholeStorageSnapshot.count) bytes"
         )
-        // TODO(2a1d-followup): once the iOS persistent contact
-        // store lands, apply `parsed.acceptedContacts` here via a
-        // contacts-merge hook.
+        // Contact-in-backup restore (ADR-0021): reconstruct the accepted
+        // contacts (with their account_id) and MERGE into the persistent
+        // store — skip a pubkey already present so a contact accepted after
+        // the backup is not clobbered. The backup does not carry the inbox
+        // metadata, so reconstruct an IncomingContactRequest with sentinels:
+        // a negative messageId (never collides with a real DS id), a zero
+        // pseudonym, no intro.
+        let existingContacts = AcceptedContactsStore.load()
+        let knownPubkeys = Set(existingContacts.map { $0.request.fromPubkey })
+        var merged = existingContacts
+        var added = 0
+        for (idx, rec) in parsed.acceptedContacts.enumerated()
+        where !knownPubkeys.contains(rec.ed25519Pubkey) {
+            let request = IncomingContactRequest(
+                messageId: Int64(-(idx + 1)),
+                fromPubkey: rec.ed25519Pubkey,
+                fromAccountId: rec.accountId,
+                fromPseudonym: Data(count: 32),
+                validAfterMs: parsed.createdAtMs,
+                intro: nil,
+                createdAt: ""
+            )
+            merged.append(
+                AcceptedContact(
+                    request: request,
+                    groupIdHex: nil,
+                    displayName: rec.displayName.isEmpty ? nil : rec.displayName
+                )
+            )
+            added += 1
+        }
+        if added > 0 {
+            AcceptedContactsStore.save(merged)
+            NSLog("backup restore (\(context)): merged \(added) contact(s)")
+        }
         return parsed.wholeStorageSnapshot
     }
 
@@ -2028,12 +2060,28 @@ public final class AuthRepository: ObservableObject {
         }
         let seedBytes = identity.ed25519Seed()
 
+        // Contact-in-backup (ADR-0021): include the accepted contacts so a
+        // restore on a fresh device rebuilds the list + resolves group-call
+        // roster names. The native AcceptedContact carries no X25519 pubkey,
+        // so zero-fill it (matches web's legacy-contact handling); the backup
+        // carries ed25519 + display name + the 16-byte account_id. displayName
+        // stays "" when unset so a restore does not promote the fingerprint
+        // fallback into a "chosen" name.
+        let contactRecords = AcceptedContactsStore.load().map { c in
+            BackupContactRecord(
+                ed25519Pubkey: c.request.fromPubkey,
+                x25519Pubkey: Data(count: 32),
+                displayName: c.displayName ?? "",
+                accountId: c.request.fromAccountId
+            )
+        }
+
         do {
             try await backupClient.uploadNow(
                 accountId: accountId,
                 ed25519Seed: seedBytes,
                 phraseBytes: phraseBytes,
-                contacts: [],  // 2a3 wires the cross-device-synced contact list
+                contacts: contactRecords,
                 wholeStorageSnapshot: wholeStorageSnapshot
             )
         } catch {
