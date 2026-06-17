@@ -102,7 +102,16 @@ proof per co-sign — light).
    SUCCEEDED (8 new `XCTest` cases); Android `:app:compileDebugKotlin` + the
    isolated `TransparencyVerifyTest` 43/0 (8 new cases).
 6. **Extend the recovery-e2e** — a co-located witness container; assert a served
-   root carries a valid co-sig + a simulated fork is refused.
+   root carries a valid co-sig + a simulated fork is refused. **Landed +
+   verified firsthand.** `ci/recovery-e2e/` runs a 6-container stack
+   (discovery + transparency + witness + 3 MariaDB); `recovery_kt_e2e.rs`
+   step 6 asserts the served root carries a witness co-sig that verifies, and
+   step 7 (Finding-2) POSTs a validly operator-signed but FORKED root (same
+   `log_size`, different `tree_root`) to the live `POST /witness/cosign` and
+   asserts a **409** refusal (`NotConsistent`), plus a **400** for an
+   invalid-operator-signature root. Observed green against the live stack
+   (`recovery_kt_pipeline_publish_log_fetch_verify_rotate` passes). No
+   deferred items remain for ADR-0020.
 
 ## Consequences
 
