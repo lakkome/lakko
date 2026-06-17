@@ -350,7 +350,7 @@ Rules:
 
 ## Technical invariants
 
-- **Rust edition 2021**, MSRV pinned in `rust-toolchain.toml`
+- **Rust edition 2021**, toolchain pinned to an exact stable release in `rust-toolchain.toml` (currently `1.95.0` — NOT the floating `stable` channel, so a rustfmt/clippy bump cannot silently drift; the CI workflows pin `dtolnay/rust-toolchain@1.95.0` and the `build-ios` / `build-android` recipes self-heal the cross-targets, all in lock-step). Bump deliberately + re-run `just fmt` + `just lint`
 - **Cargo workspace** — a single `Cargo.toml` at the root, all crates and services live inside it
 - **Workspace dependencies** — versions of shared deps pinned in `[workspace.dependencies]`, crates inherit via `dep.workspace = true`
 - **Reproducible builds** — the Nix flake pins the entire toolchain; CI checks byte-identicality between runners
