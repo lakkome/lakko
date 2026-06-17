@@ -77,7 +77,10 @@ import { getDeviceKey } from "../auth/key-store";
 import { base64Encode, base64UrlDecodeNoPad } from "../auth/account-id";
 import { ChatClient } from "../chat/client";
 import { ContactsClient } from "../contacts/client";
-import { loadAccepted } from "../contacts/local-store";
+import {
+  loadAccepted,
+  peerContactByMemberPubkeys,
+} from "../contacts/local-store";
 import type { IncomingChatEvent } from "../chat/client";
 import {
   composeEnvelope,
@@ -394,11 +397,29 @@ function ChatView(props: {
   /** Best contact name for this 1×1 chat: the linked contact's
    *  displayName (ADR-0021), else the chat label, else "Peer". */
   const resolvePeerName = (): string => {
-    const contact = loadAccepted().find(
-      (c) => c.groupIdB64 === props.entry.groupIdB64,
-    );
-    const name = contact?.displayName ?? "";
-    if (name.length > 0) return name;
+    const accepted = loadAccepted();
+    // Fast path: a chat created from an accepted request carries a stored
+    // groupIdB64 link to its contact.
+    const byId = accepted.find((c) => c.groupIdB64 === props.entry.groupIdB64);
+    if (byId !== undefined && byId.displayName.length > 0) {
+      return byId.displayName;
+    }
+    // Universal: match the 1×1 peer by the group's non-self member pubkey, so
+    // an outbound or Welcome-joined chat (no stored link) still resolves.
+    const own = chats.identity();
+    const ownB64 = own === null ? null : base64Encode(own.signaturePublicKey);
+    let memberB64s: string[] = [];
+    try {
+      memberB64s = (
+        props.entry.group.members() as Array<{ signaturePublicKey: Uint8Array }>
+      ).map((m) => base64Encode(m.signaturePublicKey));
+    } catch {
+      // members() can throw on a torn group; fall through to the label.
+    }
+    const byMember = peerContactByMemberPubkeys(memberB64s, ownB64, accepted);
+    if (byMember !== undefined && byMember.displayName.length > 0) {
+      return byMember.displayName;
+    }
     return props.entry.label.length > 0 ? props.entry.label : "Peer";
   };
 

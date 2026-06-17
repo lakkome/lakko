@@ -166,10 +166,22 @@ posture as ADR's call safety number.
   `displayName` via `upsertAccepted`; blank resets to the `@<fingerprint>`
   default); and the 1×1 in-call roster + chat header (`Chat.tsx`
   `resolvePeerName`) + the chat list (`ActiveGroupsPanel`, reactive on the
-  `accepted` signal) all resolve the linked contact's `displayName` by
-  group id, falling back to the chat label. A web contact rename now shows
-  in the 1×1 call like the native group roster. `tsc` + 28 local-store
-  vitest + `vite build` green.
+  `accepted` signal) all resolve the contact's `displayName`, falling back
+  to the chat label.
+- **Web 1×1 universal peer resolution — landed (Jun 2026).** The earlier
+  `groupIdB64` link only covered accept-created chats; an outbound
+  (`startGroupWithUsername`) or Welcome-joined chat had no stored link and
+  fell back to the group label. `peerContactByMemberPubkeys`
+  (`contacts/local-store.ts`) closes that: it reads the peer identity LIVE
+  from the MLS group — `Group.members()[].signaturePublicKey` for the
+  non-self member, matched against `AcceptedContact.signaturePubkeyB64` —
+  so EVERY 1×1 chat resolves to the contact's name regardless of how the
+  group was created (and even for pre-existing chats with no captured
+  link). `resolvePeerName` + `chatLabel` use it as the universal resolver
+  after the `groupIdB64` fast-path. The `wasm Group.members()` API exists
+  for exactly this (its doc: "`signaturePublicKey` to look the member up in
+  the contacts"). `tsc` + 32 local-store vitest (4 new resolver cases) +
+  `vite build` green.
 - **`lakko-security` — APPROVE-WITH-NOTES.** Confirmed one-way /
   per-call-unlinkable / spoof-proof (tag bound to the JWT `sub`, no
   self-assertion) / no fail-open; 64-bit collision budget adequate

@@ -56,6 +56,7 @@ import {
   setPin,
   loadAccepted,
   upsertAccepted,
+  peerContactByMemberPubkeys,
   loadCursor,
   recordLogStatus,
   recordLogReset,
@@ -386,5 +387,46 @@ describe("AcceptedContact groupIdB64 + rename (ADR-0021 follow-up)", () => {
     // The chat link + account_id survive the rename.
     expect(back[0]?.groupIdB64).toBe("Z3JvdXAtaWQtYjY0");
     expect(back[0]?.accountIdHex).toBe("deadbeefdeadbeefdeadbeefdeadbeef");
+  });
+});
+
+describe("peerContactByMemberPubkeys (ADR-0021 universal 1×1 resolver)", () => {
+  const alice = {
+    signaturePubkeyB64: PUB_OLD,
+    displayName: "Alice",
+    acceptedAtMs: 1,
+  };
+  const bob = {
+    signaturePubkeyB64: PUB_NEW,
+    displayName: "Bob",
+    acceptedAtMs: 2,
+  };
+
+  it("resolves the non-self member to its contact", () => {
+    // Members = [me (ownB64), Alice]; the non-self member is a known contact.
+    const got = peerContactByMemberPubkeys(["bXktb3duLXB1YmtleQ==", PUB_OLD], "bXktb3duLXB1YmtleQ==", [
+      alice,
+      bob,
+    ]);
+    expect(got?.displayName).toBe("Alice");
+  });
+
+  it("skips the self member even when self is also a (stale) contact", () => {
+    // Own pubkey appears first; it must be skipped, returning the peer.
+    const got = peerContactByMemberPubkeys([PUB_NEW, PUB_OLD], PUB_NEW, [alice, bob]);
+    expect(got?.displayName).toBe("Alice");
+  });
+
+  it("returns undefined when no non-self member is a known contact", () => {
+    const got = peerContactByMemberPubkeys(["bXktb3duLXB1YmtleQ==", "c3RyYW5nZXItcHVia2V5"], "bXktb3duLXB1YmtleQ==", [
+      alice,
+      bob,
+    ]);
+    expect(got).toBeUndefined();
+  });
+
+  it("returns undefined when the only member is self", () => {
+    const got = peerContactByMemberPubkeys([PUB_OLD], PUB_OLD, [alice, bob]);
+    expect(got).toBeUndefined();
   });
 });

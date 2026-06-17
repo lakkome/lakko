@@ -331,6 +331,33 @@ export function loadAccepted(): AcceptedContact[] {
   return load().accepted;
 }
 
+/**
+ * Resolve the accepted contact behind a 1×1 chat by matching the chat
+ * group's non-self member against the accepted list on the Ed25519
+ * signature pubkey (ADR-0021). The caller passes the group members'
+ * base64 signature pubkeys (`Group.members()[].signaturePublicKey`) and its
+ * own base64 signature pubkey; the first member that is NOT self and IS a
+ * known contact wins.
+ *
+ * This is the UNIVERSAL resolver: it works for every 1×1 chat regardless of
+ * how the group was created (outbound `startGroupWithUsername`, an accepted
+ * request, or a Welcome-joined group with no stored link), because the peer
+ * identity is read live from the MLS group rather than captured at creation.
+ * Returns `undefined` when no non-self member is a known contact.
+ */
+export function peerContactByMemberPubkeys(
+  memberSigPubkeysB64: readonly string[],
+  ownSigPubkeyB64: string | null,
+  accepted: readonly AcceptedContact[],
+): AcceptedContact | undefined {
+  for (const b64 of memberSigPubkeysB64) {
+    if (b64 === ownSigPubkeyB64) continue;
+    const contact = accepted.find((c) => c.signaturePubkeyB64 === b64);
+    if (contact !== undefined) return contact;
+  }
+  return undefined;
+}
+
 /** Append (or replace by `signaturePubkeyB64`) an accepted
  *  contact and persist. Returns the new list. */
 export function upsertAccepted(contact: AcceptedContact): AcceptedContact[] {

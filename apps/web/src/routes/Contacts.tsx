@@ -61,6 +61,7 @@ import {
   fingerprintShort,
   loadAccepted,
   loadCursor,
+  peerContactByMemberPubkeys,
   removeAccepted,
   saveCursor,
   upsertAccepted,
@@ -1119,14 +1120,33 @@ function ActiveGroupsPanel(props: {
    *  label, so a rename propagates here too. */
   accepted: () => AcceptedContact[];
 }): JSX.Element {
-  /** Best label for a chat row: the linked contact's displayName
-   *  (matched by group id), else the chat's own label. */
+  const chats = useChats();
+  /** Best label for a chat row: the linked contact's user-chosen
+   *  displayName, else the chat's own label. Resolves the contact by the
+   *  stored groupIdB64 fast-path (accept-created chats) and, universally,
+   *  by the group's non-self member pubkey (outbound + Welcome-joined
+   *  chats that carry no stored link) — ADR-0021. */
   const chatLabel = (g: ActiveGroup): string => {
-    const contact = props
-      .accepted()
-      .find((c) => c.groupIdB64 === g.groupIdB64);
-    const name = contact?.displayName ?? "";
-    return name.length > 0 ? name : g.label;
+    const accepted = props.accepted();
+    const byId = accepted.find((c) => c.groupIdB64 === g.groupIdB64);
+    if (byId !== undefined && byId.displayName.length > 0) {
+      return byId.displayName;
+    }
+    const own = chats.identity();
+    const ownB64 = own === null ? null : base64Encode(own.signaturePublicKey);
+    let memberB64s: string[] = [];
+    try {
+      memberB64s = (
+        g.group.members() as Array<{ signaturePublicKey: Uint8Array }>
+      ).map((m) => base64Encode(m.signaturePublicKey));
+    } catch {
+      // members() can throw on a torn group; fall through to the label.
+    }
+    const byMember = peerContactByMemberPubkeys(memberB64s, ownB64, accepted);
+    if (byMember !== undefined && byMember.displayName.length > 0) {
+      return byMember.displayName;
+    }
+    return g.label;
   };
   // Phase 2a3e2c-web — reactive flags from the cross-device
   // sync runtime. Reads here drive (a) the pin / mute /
