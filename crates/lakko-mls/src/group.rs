@@ -24,6 +24,7 @@ use tls_codec::{Deserialize as _, Serialize as _};
 use zeroize::Zeroizing;
 
 use crate::error::{Error, Result};
+use crate::group_roles::{Role, RoleTable, ROLE_EXTENSION_TYPE};
 use crate::identity::Identity;
 
 /// Lakko MLS conversation group.
@@ -337,6 +338,29 @@ impl Group {
             .extensions()
             .unknown(type_id)
             .map(|e| e.0.clone())
+    }
+
+    /// The group's ADR-0022 admin role table, if it has opted into the role
+    /// policy — i.e. the `0xFF02` GroupContext extension is present and
+    /// well-formed. `None` means an **open** group: no role policy, any member
+    /// may add / remove (today's default, and every 1×1 / legacy group). A
+    /// malformed `0xFF02` body also reads as `None` (fail-open *for the read
+    /// accessor* — the enforcing apply path treats a malformed-but-present
+    /// table conservatively; see `process_incoming_verifying_roles`).
+    #[must_use]
+    pub fn group_roles(&self) -> Option<RoleTable> {
+        self.group_context_extension(ROLE_EXTENSION_TYPE)
+            .and_then(|body| RoleTable::decode(&body).ok())
+    }
+
+    /// This member's role in the group, or `None` when the group has no role
+    /// table (open group). Resolved by matching our own account-level signature
+    /// key against the table — the single-account-leaf model ADR-0022 v1 assumes
+    /// (Finding 1). A member not named in the table is [`Role::Member`].
+    #[must_use]
+    pub fn own_role(&self, identity: &Identity) -> Option<Role> {
+        self.group_roles()
+            .map(|table| table.role_of(identity.signature_public_key()))
     }
 
     /// Encrypt an application payload for the current group epoch.

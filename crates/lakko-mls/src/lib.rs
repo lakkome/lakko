@@ -19,6 +19,7 @@ pub mod ciphersuite;
 pub mod device_group;
 pub mod error;
 pub mod group;
+pub mod group_roles;
 pub mod history_bundle;
 pub mod history_placeholder;
 pub mod identity;
@@ -29,6 +30,7 @@ pub mod publisher_group;
 pub use device_group::{AccountId, DeviceGroup};
 pub use error::{Error, Result};
 pub use group::{Group, Incoming, MemberAddition, MemberRecord};
+pub use group_roles::{Role, RoleTable};
 pub use identity::Identity;
 pub use publisher_group::{ChannelId, PublisherGroup, CHANNEL_EXPORTER_LABEL, CHANNEL_ID_LEN};
 

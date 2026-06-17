@@ -5,12 +5,12 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 # ADR-0022: Group-admin roles — owner / admin / member, peer-verified
 
-- **Status:** Proposed — design reviewed by `lakko-security`: **APPROVE WITH
-  NOTES** (2026-06-17). Findings 1 (single-account-leaf assumption + Phase-2b
+- **Status:** Accepted (2026-06-17) — design reviewed by `lakko-security`:
+  **APPROVE WITH NOTES**. Findings 1 (single-account-leaf assumption + Phase-2b
   path), 2 (pre-merge epoch read as a stated invariant), 3 (owner device loss +
   ADR-0017 mitigation), 4 (version fail-closed), 5 (self-Remove test) folded
-  into the text below. Awaiting maintainer acceptance; the landed code still
-  requires the mandatory post-implementation `lakko-security` pass (invariant #3).
+  into the text below. The landed code still requires the mandatory
+  post-implementation `lakko-security` pass (invariant #3).
 - **Date:** 2026-06-17
 - **Context:** Phase 3 closeout — blocker **C** (group-admin roles). Group-chat
   membership (add / remove / roster) now ships on all three clients (A4), but
