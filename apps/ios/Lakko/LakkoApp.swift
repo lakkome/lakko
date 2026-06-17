@@ -300,6 +300,10 @@ private struct SessionRoot: View {
                                 groupIdHex: groupIdHex,
                                 sessionTokenProvider: {
                                     authRepository.identitySecrets?.sessionToken
+                                },
+                                resolveRecipient: { username in
+                                    try await contactsRepository
+                                        .resolveVerifiedRecipient(username: username)
                                 }
                             ),
                             onBack: { destination = .chats }

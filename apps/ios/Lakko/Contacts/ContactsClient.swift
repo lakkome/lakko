@@ -503,6 +503,51 @@ public final class ContactsClient {
         return value
     }
 
+    // MARK: - Resolve
+
+    /// Resolve `@username -> (accountId, signaturePubkey)` through the same
+    /// G-4-verified path ``sendContactRequest`` uses: discovery `lookup` ->
+    /// `identityFetch` -> ``verifyBundleAccountKey`` (the ADR-0016 pin-store
+    /// gate — TOFU on first sight, verified re-pin on rotation, fail-closed
+    /// `SupersessionRefused` otherwise) -> extract the signature key.
+    ///
+    /// Used by the group-chat add-member flow, which then hands the resolved
+    /// pair to ``ChatRepository/addMemberToGroup(groupIdHex:recipientAccountId:recipientSignaturePubkey:)``.
+    /// The verify must NOT be skipped — adding a member to a group seals a
+    /// Welcome under the resolved key, exactly like a 1×1 ContactRequest.
+    public func resolveVerifiedRecipient(
+        username: String
+    ) async throws -> (accountId: Data, signaturePubkey: Data) {
+        let lookup: LookupResult
+        do {
+            lookup = try await discovery.lookup(username: username)
+        } catch {
+            throw ContactsError.wrap(error)
+        }
+        guard let recipientAccountId = lookup.account else {
+            throw ContactsError.usernameUnknown(lookup.normalisedUsername)
+        }
+
+        let bundle: IdentityFetchResponse?
+        do {
+            bundle = try await discovery.identityFetch(accountId: recipientAccountId)
+        } catch {
+            throw ContactsError.wrap(error)
+        }
+        guard let bundle = bundle else {
+            throw ContactsError.noIdentityBundle(recipientAccountId)
+        }
+
+        try await verifyBundleAccountKey(accountId: recipientAccountId, bundle: bundle)
+
+        guard let recipientSignaturePub = base64Decode(bundle.signaturePubkey) else {
+            throw ContactsError.wrap(
+                ContactsError.simple("malformed identity bundle on the wire")
+            )
+        }
+        return (recipientAccountId, recipientSignaturePub)
+    }
+
     // MARK: - Send
 
     /// Send a `ContactRequest` envelope to `@recipientUsername`,

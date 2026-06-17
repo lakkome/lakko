@@ -423,6 +423,130 @@ public final class ChatRepository: ObservableObject {
         return (try? record.group.memberCount()).map { Int($0) }
     }
 
+    /// Roster of the live MLS group for `groupIdHex` — `(leafIndex,
+    /// signaturePublicKey)` per member at the current epoch — or `nil` when
+    /// there is no handle. The group-chat UI matches each `signaturePublicKey`
+    /// against the accepted-contacts list to render a name, else a fingerprint.
+    public func members(groupIdHex: String) -> [GroupMember]? {
+        guard let record = groups[groupIdHex] else { return nil }
+        return try? record.group.members()
+    }
+
+    /// Our own leaf index in `groupIdHex`, or `nil` when there is no handle.
+    /// The roster UI uses it to mark the local member "(you)" and to refuse
+    /// removing ourselves.
+    public func ownLeafIndex(groupIdHex: String) -> UInt32? {
+        guard let record = groups[groupIdHex] else { return nil }
+        return try? record.group.ownLeafIndex()
+    }
+
+    /// Add an already-resolved recipient to an EXISTING group (mirror of
+    /// ``startGroupWith`` but for a live group). The caller resolves +
+    /// G-4-verifies `@username -> (accountId, signaturePubkey)` first (the
+    /// pin-store verify lives in `ContactsClient`).
+    ///
+    /// Unlike the 1×1 create, the resulting commit MUST be published to the
+    /// group journal so existing members advance their epoch, and marked as
+    /// own so the poll loop suppresses the echo — re-applying our own commit
+    /// would fork the MLS epoch. Returns the commit's DS message id.
+    public func addMemberToGroup(
+        groupIdHex: String,
+        recipientAccountId: Data,
+        recipientSignaturePubkey: Data
+    ) async throws -> Int64 {
+        guard let identity = canonicalIdentity else {
+            throw ChatError.argument("ChatRepository not bootstrapped — call bootstrap() first")
+        }
+        guard let record = groups[groupIdHex] else {
+            throw ChatError.argument("no live Group handle for \(groupIdHex)")
+        }
+        guard let keyPackageBytes = try await discovery.fetchKeyPackage(
+            accountId: recipientAccountId
+        ) else {
+            throw ChatError.argument("recipient has no KeyPackage uploaded yet")
+        }
+
+        let addResult: AddMember
+        do {
+            addResult = try record.group.addMemberFromWire(
+                identity: identity,
+                keyPackage: keyPackageBytes
+            )
+        } catch {
+            throw ChatError.wrapped("addMemberFromWire failed", underlying: error)
+        }
+
+        let commitPublish: PublishResult
+        do {
+            commitPublish = try await dsClient.publishGroup(
+                groupId: record.groupId,
+                payload: addResult.commit
+            )
+        } catch {
+            throw ChatError.wrapped("DS publishGroup (add-member commit) failed", underlying: error)
+        }
+        chatClient.markOwnPublishedCommit(messageId: commitPublish.id)
+
+        let welcomeEnvelope = wrapEnvelope(kind: .welcome, body: addResult.welcome)
+        let recipientPseudonym: Data
+        do {
+            recipientPseudonym = try IdentityPseudonym
+                .fromIdentity(pubkey: recipientSignaturePubkey)
+                .asBytes()
+        } catch {
+            throw ChatError.wrapped("IdentityPseudonym derivation failed", underlying: error)
+        }
+        do {
+            _ = try await dsClient.publishMailbox(
+                pseudonym: recipientPseudonym,
+                payload: welcomeEnvelope
+            )
+        } catch {
+            throw ChatError.wrapped("DS publishMailbox (Welcome) failed", underlying: error)
+        }
+
+        persistSnapshotBestEffort()
+        state = state.with(threads: buildThreadList())
+        return commitPublish.id
+    }
+
+    /// Remove a member from an EXISTING group by leaf index. Publishes the
+    /// removal commit to the group journal (own-marked for echo suppression).
+    /// Returns the commit's DS message id.
+    public func removeMemberFromGroup(
+        groupIdHex: String,
+        leafIndex: UInt32
+    ) async throws -> Int64 {
+        guard let identity = canonicalIdentity else {
+            throw ChatError.argument("ChatRepository not bootstrapped — call bootstrap() first")
+        }
+        guard let record = groups[groupIdHex] else {
+            throw ChatError.argument("no live Group handle for \(groupIdHex)")
+        }
+        let commitBytes: Data
+        do {
+            commitBytes = try record.group.removeMember(
+                identity: identity,
+                leafIndex: leafIndex
+            )
+        } catch {
+            throw ChatError.wrapped("removeMember failed", underlying: error)
+        }
+        let commitPublish: PublishResult
+        do {
+            commitPublish = try await dsClient.publishGroup(
+                groupId: record.groupId,
+                payload: commitBytes
+            )
+        } catch {
+            throw ChatError.wrapped("DS publishGroup (remove-member commit) failed", underlying: error)
+        }
+        chatClient.markOwnPublishedCommit(messageId: commitPublish.id)
+        persistSnapshotBestEffort()
+        state = state.with(threads: buildThreadList())
+        return commitPublish.id
+    }
+
     public func sendMessage(
         groupIdHex: String,
         plaintext: String,

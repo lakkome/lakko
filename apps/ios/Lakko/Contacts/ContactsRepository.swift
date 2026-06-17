@@ -134,6 +134,18 @@ public final class ContactsRepository: ObservableObject {
         return result
     }
 
+    /// Resolve `@username -> (accountId, signaturePubkey)` through the
+    /// G-4-verified ``ContactsClient/resolveVerifiedRecipient(username:)``
+    /// path. Used by the group-chat add-member flow (``ChatViewModel``);
+    /// the fresh `clientFactory()` client carries the same pin store the
+    /// 1×1 ContactRequest path verifies against.
+    public func resolveVerifiedRecipient(
+        username: String
+    ) async throws -> (accountId: Data, signaturePubkey: Data) {
+        let client = clientFactory()
+        return try await client.resolveVerifiedRecipient(username: username)
+    }
+
     // MARK: - Poll
 
     /// Poll the stranger inbox for new ContactRequest / Welcome

@@ -105,6 +105,15 @@ public struct ChatScreen: View {
                 }
                 .disabled(viewModel.refreshing)
             }
+            // A4 — Members sheet: roster + add / remove. Available on
+            // any chat (a 1×1 becomes a group by adding the first member).
+            ToolbarItem(placement: .navigationBarTrailing) {
+                Button {
+                    viewModel.toggleMembersPanel()
+                } label: {
+                    Image(systemName: "person.2.fill")
+                }
+            }
             // Phase 3a9 — audio Call button. Hidden when a call
             // overlay is up (the overlay carries the
             // Accept / Decline / Hang up affordances).
@@ -138,6 +147,9 @@ public struct ChatScreen: View {
                 }
                 .disabled(viewModel.activeCall != nil || viewModel.activeSfuCall != nil)
             }
+        }
+        .sheet(isPresented: $viewModel.membersPanelOpen) {
+            MembersSheet(viewModel: viewModel)
         }
         .task {
             // Continuous foreground polling. SwiftUI's `.task`
@@ -820,5 +832,73 @@ private struct AttachmentChip: View {
         } catch {
             return nil
         }
+    }
+}
+
+/// A4 — the group-membership sheet: add a member by `@username` (G-4-verified)
+/// and view / remove the live MLS roster. Names resolve through the accepted
+/// contacts list (ADR-0021), falling back to a short key fingerprint.
+private struct MembersSheet: View {
+    @ObservedObject var viewModel: ChatViewModel
+
+    private var trimmedInput: String {
+        viewModel.addMemberInput.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section("Add member") {
+                    HStack {
+                        TextField("@username", text: $viewModel.addMemberInput)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled(true)
+                            .disabled(viewModel.membershipBusy)
+                        Button("Add") { viewModel.onAddMember() }
+                            .disabled(viewModel.membershipBusy || trimmedInput.isEmpty)
+                    }
+                    if let err = viewModel.membershipError {
+                        Text(err)
+                            .font(.footnote)
+                            .foregroundStyle(.red)
+                    }
+                }
+                Section(memberCountLabel) {
+                    ForEach(viewModel.members, id: \.leafIndex) { member in
+                        HStack {
+                            Text(viewModel.memberLabel(member))
+                            Spacer()
+                            if viewModel.ownLeafIndex != member.leafIndex {
+                                Button(role: .destructive) {
+                                    viewModel.onRemoveMember(leafIndex: member.leafIndex)
+                                } label: {
+                                    Text("Remove")
+                                }
+                                .buttonStyle(.borderless)
+                                .disabled(viewModel.membershipBusy)
+                            }
+                        }
+                    }
+                }
+            }
+            .navigationTitle("Members")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    if viewModel.membershipBusy {
+                        ProgressView().controlSize(.small)
+                    }
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") { viewModel.membersPanelOpen = false }
+                }
+            }
+            .onAppear { viewModel.refreshMembers() }
+        }
+    }
+
+    private var memberCountLabel: String {
+        let n = viewModel.members.count
+        return "\(n) member" + (n == 1 ? "" : "s")
     }
 }

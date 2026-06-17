@@ -80,6 +80,20 @@ public final class ChatViewModel: ObservableObject {
     /// the handle is missing).
     @Published public private(set) var threadKnown: Bool = false
 
+    // MARK: - Group membership (A4)
+
+    /// Live MLS roster for this group at the current epoch — refreshed by
+    /// ``refreshMembers()`` and after every add / remove.
+    @Published public private(set) var members: [GroupMember] = []
+    /// `true` while the members sheet is presented.
+    @Published public var membersPanelOpen: Bool = false
+    /// `@username` typed into the add-member field.
+    @Published public var addMemberInput: String = ""
+    /// `true` while an add or remove commit is in flight (disables the form).
+    @Published public private(set) var membershipBusy: Bool = false
+    /// Last add/remove error surfaced to the sheet, else `nil`.
+    @Published public private(set) var membershipError: String?
+
     // MARK: - Wiring
 
     private let repository: ChatRepository
@@ -88,6 +102,11 @@ public final class ChatViewModel: ObservableObject {
     /// refuse, fail-closed); the composition root passes
     /// `{ authRepository.identitySecrets?.sessionToken }`.
     private let sessionTokenProvider: () -> String?
+    /// Resolves `@username -> (accountId, signaturePubkey)` through the
+    /// G-4-verified contacts path for the add-member flow. Defaults to a
+    /// fail-closed stub (add-member then refuses); the composition root
+    /// passes `{ try await contactsClient.resolveVerifiedRecipient(...) }`.
+    private let resolveRecipient: (String) async throws -> (accountId: Data, signaturePubkey: Data)
     private var cancellables: Set<AnyCancellable> = []
     /// Phase 2a3e2b-iOS — cross-device sync. Attached via
     /// [`attachSync`] from the screen so the existing init
@@ -108,11 +127,18 @@ public final class ChatViewModel: ObservableObject {
     public init(
         repository: ChatRepository,
         groupIdHex: String,
-        sessionTokenProvider: @escaping () -> String? = { nil }
+        sessionTokenProvider: @escaping () -> String? = { nil },
+        resolveRecipient: @escaping (String) async throws
+            -> (accountId: Data, signaturePubkey: Data) = { _ in
+                throw ChatError.argument(
+                    "no @username resolver wired — add-member unavailable"
+                )
+            }
     ) {
         self.repository = repository
         self.groupIdHex = groupIdHex
         self.sessionTokenProvider = sessionTokenProvider
+        self.resolveRecipient = resolveRecipient
         sync(state: repository.state)
         repository.$state
             .receive(on: RunLoop.main)
@@ -351,6 +377,98 @@ public final class ChatViewModel: ObservableObject {
     func hangUpGroupCall() {
         activeSfuCall?.hangUp()
         activeSfuCall = nil
+    }
+
+    // MARK: - Group membership actions (A4)
+
+    /// Open / close the members sheet. Refreshes the roster on open.
+    func toggleMembersPanel() {
+        membersPanelOpen.toggle()
+        if membersPanelOpen {
+            membershipError = nil
+            refreshMembers()
+        }
+    }
+
+    /// Re-read the live MLS roster from the repository.
+    func refreshMembers() {
+        members = repository.members(groupIdHex: groupIdHex) ?? []
+    }
+
+    /// Our own leaf index — the roster marks it "(you)" and blocks self-removal.
+    var ownLeafIndex: UInt32? {
+        repository.ownLeafIndex(groupIdHex: groupIdHex)
+    }
+
+    /// Human label for a roster member: a matched contact's chosen name (or its
+    /// fingerprint), else a short fingerprint of the signature key. "(you)" is
+    /// appended for the local leaf. Mirrors the ADR-0021 resolution the call
+    /// roster uses, keyed on the member's signature public key.
+    func memberLabel(_ member: GroupMember) -> String {
+        let isYou = ownLeafIndex == member.leafIndex
+        let suffix = isYou ? " (you)" : ""
+        for c in AcceptedContactsStore.load()
+        where c.request.fromPubkey == member.signaturePublicKey {
+            return c.displayLabel + suffix
+        }
+        let fp = member.signaturePublicKey.prefix(4)
+            .map { String(format: "%02x", $0) }
+            .joined()
+        return "Member " + fp + suffix
+    }
+
+    /// Resolve the typed `@username` (G-4-verified) and add it to this group:
+    /// publish the add commit to the journal (own-marked) + ferry the Welcome.
+    /// Fail-closed — a resolve / verify / publish failure surfaces an error and
+    /// leaves the group untouched.
+    func onAddMember() {
+        let raw = addMemberInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        let username = raw.hasPrefix("@") ? String(raw.dropFirst()) : raw
+        guard !username.isEmpty else { return }
+        guard !membershipBusy else { return }
+        membershipBusy = true
+        membershipError = nil
+        Task { @MainActor in
+            defer { membershipBusy = false }
+            do {
+                let resolved = try await resolveRecipient(username)
+                _ = try await repository.addMemberToGroup(
+                    groupIdHex: groupIdHex,
+                    recipientAccountId: resolved.accountId,
+                    recipientSignaturePubkey: resolved.signaturePubkey
+                )
+                addMemberInput = ""
+                refreshMembers()
+            } catch {
+                membershipError = error.localizedDescription
+                NSLog("onAddMember failed: %@", error.localizedDescription)
+            }
+        }
+    }
+
+    /// Remove a member by leaf index: publish the removal commit to the journal
+    /// (own-marked). Refuses to remove the local leaf. Fail-closed on error.
+    func onRemoveMember(leafIndex: UInt32) {
+        guard ownLeafIndex != leafIndex else {
+            membershipError = "You cannot remove yourself from the group."
+            return
+        }
+        guard !membershipBusy else { return }
+        membershipBusy = true
+        membershipError = nil
+        Task { @MainActor in
+            defer { membershipBusy = false }
+            do {
+                _ = try await repository.removeMemberFromGroup(
+                    groupIdHex: groupIdHex,
+                    leafIndex: leafIndex
+                )
+                refreshMembers()
+            } catch {
+                membershipError = error.localizedDescription
+                NSLog("onRemoveMember failed: %@", error.localizedDescription)
+            }
+        }
     }
 
     /// Phase 2a3e2c-iOS — read-cursor broadcast tracker.
