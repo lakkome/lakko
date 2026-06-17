@@ -16,7 +16,9 @@ You are working in a security-critical E2EE messenger. Every change to `crates/`
 - No `println!` / `eprintln!` — use `tracing::{info, warn, error, debug, trace}`.
 - `clippy::all` + `clippy::pedantic` + `clippy::nursery` with `-D warnings`.
 - `missing_docs` warning on all public items.
+<!-- REUSE-IgnoreStart -->
 - SPDX header `// SPDX-License-Identifier: AGPL-3.0-or-later` on every file.
+<!-- REUSE-IgnoreEnd -->
 
 ## Dependency discipline
 

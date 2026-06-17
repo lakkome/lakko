@@ -108,7 +108,9 @@ The Phase 3 closeout punch list — gap inventory + sprint waves with exit crite
 ## Code-style rules
 
 - **Language: English only** in code, comments, doc strings, commit messages, and documentation (`docs/`, `README.md`, ADRs, migration headers). Russian is allowed only in interactive chat between the maintainer and the AI agent. AI agents must produce English when committing or editing files.
+<!-- REUSE-IgnoreStart -->
 - **Every file** carries the `SPDX-License-Identifier: AGPL-3.0-or-later` header. Rust: `// SPDX-…`; Markdown: `<!-- SPDX-… -->`. No exceptions. CI blocks otherwise.
+<!-- REUSE-IgnoreEnd -->
 - **`#![forbid(unsafe_code)]`** on every crate, except `lakko-ffi-uniffi` and `lakko-ffi-wasm` (which carry justified unsafe — document it with a `// SAFETY:` comment).
 - **No `unwrap()` / `expect()`** in production code — only in tests and benchmarks. Use `?` and `thiserror` for errors.
 - **No `panic!()`** in library code (allowed in `bin` for unrecoverable startup errors).

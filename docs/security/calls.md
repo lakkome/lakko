@@ -2624,6 +2624,57 @@ alternative recorded in ADR-0019. Two new fuzz targets cover
 the new verify surfaces (`verify_supersession_chain`,
 `verify_leaf_genesis`). `lakko-security`: **APPROVE-WITH-NOTES**.
 
+### C-57: An operator root is trusted only with an independent witness co-signature (split-view resistance)
+
+G-30 #1 ([ADR-0020](../adr/0020-witness-cosigning.md)) closes the
+operator-equivocation gap ([G-30](known-gaps.md#g-30) finding 1):
+the operator alone signs each KT-log root, so a malicious operator
+could sign two divergent roots and show each to a different victim
+(a split view). An independent **witness** now co-signs each root,
+and a client trusts a root only with BOTH signatures.
+
+Four sub-invariants:
+
+1. **The witness co-signs only an append-only extension.** Before
+   co-signing a new root the witness verifies a Merkle consistency
+   proof (RFC 6962 §2.1.2, `crates/lakko-transparency/src/merkle.rs`
+   `verify_consistency` — reconstructs both roots) that it
+   append-only-extends the witness's last-co-signed root. Two
+   divergent forks cannot both extend one root, so the operator
+   cannot get a co-signature on a fork — the honest witness refuses
+   (`services/witness` `POST /witness/cosign` → 409 `NotConsistent`,
+   proven live in `recovery_kt_e2e.rs` step 7).
+
+2. **Clients fail closed on a missing / invalid co-signature.** All
+   three clients run `witnessGateRefuses` immediately after the
+   no-rollback gate in `verifyIdentityInLog` + `verifyRotationChain`:
+   a root without a valid co-signature from the build-time-pinned
+   witness key → `mismatch` (invariant #4). No pinned witness key →
+   operator-only transition posture (unconfigured fallback).
+
+3. **The co-signature is a verify-only public artefact.** A 105-byte
+   blob (`version ‖ tree_root(32) ‖ log_size(8 BE) ‖ sig(64)`, domain
+   `lakko/transparency/witness/v1`, distinct from the operator root
+   sig); the FFI is verify-only (`verify_witness_cosig` — signing
+   stays server-side). `services/transparency` co-signs-on-read (fresh
+   head-root sig, cached cosig keyed on `(tree_root, log_size)`,
+   re-obtained only on growth; witness unreachable → serve `None`,
+   never a stale cosig).
+
+4. **The witness materialises no accounts ([invariant #5](../../CLAUDE.md)).**
+   It persists only its last-co-signed `(tree_root, log_size)`
+   high-water — never any account, username, or pubkey. The cosig +
+   the consistency proof are public artefacts over public roots
+   ([invariant #2](../../CLAUDE.md)).
+
+Strengthens invariant #4 (the root gate now needs operator AND
+witness) + invariant #6 (a rotation is anchored to a non-forkable
+root). Residual: operator+witness collusion (a K-of-N witness
+threshold is a config slot for later) + independence-as-deploy-
+property (the witness must run in a different trust domain). Two
+fuzz targets cover the new surfaces (`verify_consistency`,
+`verify_witness_cosig`). `lakko-security`: **APPROVE-WITH-NOTES**.
+
 ## Exporter labels (call-side)
 
 | Label | Length | Context | Source | Used for |

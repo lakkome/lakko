@@ -30,7 +30,9 @@ Do NOT fire on trivial edits (a bugfix, a clippy cleanup, a single-file change t
 
 1. Read `docs/adr/0000-template.md` for the canonical structure. Read 2-3 recent ADRs (e.g. `0019`, `0020`) to match the established voice and depth.
 2. Number it next in sequence (check `ls docs/adr/` — current highest wins +1).
+<!-- REUSE-IgnoreStart -->
 3. Fill: Status (`Proposed` → `Accepted` once the maintainer agrees), Date, Supersedes/Superseded-by links, Context, Decision, Alternatives considered, Consequences. SPDX header is mandatory (`<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->`).
+<!-- REUSE-IgnoreEnd -->
 4. If it supersedes an earlier ADR, add the bi-directional links (the old ADR gets a `Superseded by` note; the new one a `Supersedes`).
 5. Surface which of the 7 security invariants and which invariant-index entries (I/C/T) the decision touches — flag for `lakko-security` if crypto/MLS/transport/auth is involved.
 6. The ADR is a proposal until the maintainer accepts it. Architectural decisions are the maintainer's call — present the trade-offs, recommend, do not unilaterally mark `Accepted`.

@@ -1,8 +1,4 @@
 {
-  "//": [
-    "SPDX-License-Identifier: AGPL-3.0-or-later",
-    "SPDX-FileCopyrightText: 2026 Lakko Contributors"
-  ],
   "name": "@lakko/web",
   "version": "0.0.0",
   "private": true,
