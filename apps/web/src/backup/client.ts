@@ -46,6 +46,7 @@
  */
 import { loadWasm } from "../wasm";
 import { base64Decode, base64Encode } from "../auth/account-id";
+import { groupIdHex } from "../devices/sync/state";
 import { StorageClient } from "../storage/client";
 import {
   loadAccepted,
@@ -54,6 +55,31 @@ import {
 } from "../contacts/local-store";
 import { getPhrase } from "./phrase-store";
 import type { BackupContact as WasmBackupContact } from "../../wasm/lakko_ffi_wasm";
+
+/** Canonical account_id length (UUIDv7) the backup format round-trips. */
+const ACCOUNT_ID_BYTES = 16;
+
+/**
+ * Decode a `AcceptedContact.accountIdHex` (32 hex chars) into the 16-byte
+ * account_id for the `BackupContact` constructor. Returns `undefined`
+ * (-> None on the wasm side) for an absent or malformed value, so a
+ * pre-ADR-0021 contact composes a backup with no account_id rather than
+ * failing the whole upload.
+ */
+function accountIdFromHex(hex: string | undefined): Uint8Array | undefined {
+  if (hex === undefined || hex.length !== ACCOUNT_ID_BYTES * 2) {
+    return undefined;
+  }
+  const out = new Uint8Array(ACCOUNT_ID_BYTES);
+  for (let i = 0; i < ACCOUNT_ID_BYTES; i += 1) {
+    const byte = Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+    if (Number.isNaN(byte)) {
+      return undefined;
+    }
+    out[i] = byte;
+  }
+  return out;
+}
 
 /** Discriminated upload-flow outcome. */
 export type UploadResult =
@@ -210,11 +236,18 @@ export class BackupClient {
       const c: WasmBackupContact = parsed.contacts[i] as WasmBackupContact;
       const ed = c.ed25519Pubkey;
       const x = c.x25519Pubkey;
+      // ADR-0021: restore the per-contact account_id (16 bytes -> hex) when
+      // the backup carried one; a v1/v2 backup (or absent field) leaves it
+      // unset, so the contact degrades to the peer-tag until re-resolved.
+      const accountId = c.accountId;
       acceptedContacts.push({
         signaturePubkeyB64: base64Encode(ed),
         x25519PubkeyB64: base64Encode(x),
         displayName: c.displayName,
         acceptedAtMs: Number(parsed.createdAtMs),
+        ...(accountId !== undefined && accountId.length === ACCOUNT_ID_BYTES
+          ? { accountIdHex: groupIdHex(accountId) }
+          : {}),
       });
     }
     return {
@@ -247,7 +280,11 @@ export class BackupClient {
       const x = c.x25519PubkeyB64 === undefined
         ? new Uint8Array(32) // zero pubkey when legacy ref carries no X25519
         : base64Decode(c.x25519PubkeyB64);
-      return new wasm.BackupContact(ed, x, c.displayName);
+      // ADR-0021: round-trip the per-contact account_id so a restored
+      // contact resolves in a group-call roster. A pre-ADR-0021 contact
+      // (or a malformed hex) carries no account_id -> None.
+      const accountId = accountIdFromHex(c.accountIdHex);
+      return new wasm.BackupContact(ed, x, c.displayName, accountId);
     });
 
     const payload = wasm.buildBackupPayload(

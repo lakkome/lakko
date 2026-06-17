@@ -188,9 +188,19 @@ posture as ADR's call safety number.
   human name, because iOS/Android contacts have no user-chosen display
   name. Adding editable native contact display names is the follow-up
   that makes the native roster show real names like the web.
-- The web backup/restore (`lakko-backup`) does not carry `accountIdHex`,
-  so a restored contact loses it until re-accepted — a `lakko-backup`
-  schema follow-up if round-trip name resolution matters.
+- ~~The web backup/restore (`lakko-backup`) does not carry
+  `accountIdHex`, so a restored contact loses it until re-accepted.~~
+  **Resolved (Jun 2026).** `lakko-backup` payload format bumped to v3:
+  `AcceptedContactRecord` gained an optional `account_id: [u8; 16]`
+  encoded as a presence byte (`0` = absent, `1` ‖ 16 bytes = present),
+  so a v1/v2 backup still decodes (account_id → `None`). The wasm
+  `BackupContact` surface threads `account_id` (constructor 4th arg +
+  `accountId` getter), and the web `backup/client.ts` compose passes each
+  contact's `accountIdHex` (hex → 16 bytes; malformed/absent → `None`) and
+  restore reads it back (`groupIdHex`) into `AcceptedContact.accountIdHex`.
+  A restored contact now resolves in a group-call roster without
+  re-accepting. The fixed-layout presence-byte parser stays fuzz-safe
+  (an unrecognised presence byte → `InvalidPayload`).
 - Channels (Phase 4) broadcast rosters are out of scope.
 
 ## References

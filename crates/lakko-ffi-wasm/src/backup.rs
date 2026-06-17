@@ -52,6 +52,8 @@ pub struct BackupContact {
     ed25519_pubkey: Vec<u8>,
     x25519_pubkey: Vec<u8>,
     display_name: String,
+    /// Optional 16-byte account_id (ADR-0021); `None` when unknown.
+    account_id: Option<Vec<u8>>,
 }
 
 #[wasm_bindgen]
@@ -69,6 +71,7 @@ impl BackupContact {
         ed25519_pubkey: Vec<u8>,
         x25519_pubkey: Vec<u8>,
         display_name: String,
+        account_id: Option<Vec<u8>>,
     ) -> Result<BackupContact, JsError> {
         if ed25519_pubkey.len() != 32 {
             return Err(JsError::new("ed25519_pubkey must be 32 bytes"));
@@ -83,10 +86,16 @@ impl BackupContact {
                 lakko_backup::payload::MAX_DISPLAY_NAME_LEN,
             )));
         }
+        if let Some(ref id) = account_id {
+            if id.len() != 16 {
+                return Err(JsError::new("account_id must be 16 bytes when present"));
+            }
+        }
         Ok(Self {
             ed25519_pubkey,
             x25519_pubkey,
             display_name,
+            account_id,
         })
     }
 
@@ -107,6 +116,12 @@ impl BackupContact {
     pub fn display_name(&self) -> String {
         self.display_name.clone()
     }
+
+    /// Optional 16-byte account_id (ADR-0021); `undefined` when unknown.
+    #[wasm_bindgen(getter, js_name = accountId)]
+    pub fn account_id(&self) -> Option<Vec<u8>> {
+        self.account_id.clone()
+    }
 }
 
 impl BackupContact {
@@ -118,10 +133,16 @@ impl BackupContact {
         e.copy_from_slice(&self.ed25519_pubkey);
         let mut x = [0u8; 32];
         x.copy_from_slice(&self.x25519_pubkey);
+        // Constructor validated len == 16 when present; a wrong-length
+        // value degrades to None rather than panicking.
+        let account_id = self
+            .account_id
+            .and_then(|v| <[u8; 16]>::try_from(v.as_slice()).ok());
         AcceptedContactRecord {
             ed25519_pubkey: e,
             x25519_pubkey: x,
             display_name: self.display_name,
+            account_id,
         }
     }
 }
@@ -227,6 +248,7 @@ impl ParsedBackupPayload {
                 ed25519_pubkey: c.ed25519_pubkey.to_vec(),
                 x25519_pubkey: c.x25519_pubkey.to_vec(),
                 display_name: c.display_name.clone(),
+                account_id: c.account_id.map(|id| id.to_vec()),
             })
             .collect()
     }
