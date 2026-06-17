@@ -403,6 +403,12 @@ build-web:
 # Flip to `--profile dev` only for active debugging.
 build-android:
     @test -n "${ANDROID_NDK_HOME:-}" || (echo "ERROR: ANDROID_NDK_HOME unset — see apps/android/README.md" && exit 1)
+    # Self-heal the Android std targets for the pinned toolchain (cargo-ndk
+    # maps arm64-v8a -> aarch64-linux-android, x86_64 -> x86_64-linux-android).
+    # The exact-version pin in rust-toolchain.toml means these must be installed
+    # FOR that version; `rustup target add` here does so (idempotent).
+    @rustup target list --installed | grep -qx "aarch64-linux-android" || rustup target add aarch64-linux-android
+    @rustup target list --installed | grep -qx "x86_64-linux-android" || rustup target add x86_64-linux-android
     cargo ndk \
         --target arm64-v8a \
         --target x86_64 \
@@ -520,9 +526,9 @@ build-android-all: build-android cross-build-sframe-native-android
 # the matching arch out of the fat archive automatically.
 cross-build-sframe-native-ios:
     @command -v lipo >/dev/null 2>&1 || (echo "ERROR: lipo not found — install Xcode Command Line Tools via 'xcode-select --install'" && exit 1)
-    @rustup target list --installed | grep -q "aarch64-apple-ios" || rustup target add aarch64-apple-ios
-    @rustup target list --installed | grep -q "aarch64-apple-ios-sim" || rustup target add aarch64-apple-ios-sim
-    @rustup target list --installed | grep -q "x86_64-apple-ios" || rustup target add x86_64-apple-ios
+    @rustup target list --installed | grep -qx "aarch64-apple-ios" || rustup target add aarch64-apple-ios
+    @rustup target list --installed | grep -qx "aarch64-apple-ios-sim" || rustup target add aarch64-apple-ios-sim
+    @rustup target list --installed | grep -qx "x86_64-apple-ios" || rustup target add x86_64-apple-ios
     cargo build -p lakko-sframe-native --release --target aarch64-apple-ios
     cargo build -p lakko-sframe-native --release --target aarch64-apple-ios-sim
     cargo build -p lakko-sframe-native --release --target x86_64-apple-ios
@@ -538,6 +544,14 @@ cross-build-sframe-native-ios:
 [macos]
 build-ios:
     @command -v xcodebuild >/dev/null 2>&1 || (echo "ERROR: xcodebuild not found — install Xcode Command Line Tools via 'xcode-select --install'" && exit 1)
+    # Self-heal the iOS std targets for the pinned toolchain (rust-toolchain.toml
+    # pins an exact version, so `rustup target add` here installs them FOR that
+    # version — the floating `stable` previously had them, the pin does not).
+    # `grep -qx` matches the exact line: `aarch64-apple-ios` must NOT match the
+    # `-sim` variant.
+    @rustup target list --installed | grep -qx "aarch64-apple-ios" || rustup target add aarch64-apple-ios
+    @rustup target list --installed | grep -qx "aarch64-apple-ios-sim" || rustup target add aarch64-apple-ios-sim
+    @rustup target list --installed | grep -qx "x86_64-apple-ios" || rustup target add x86_64-apple-ios
     cargo build --release --target aarch64-apple-ios -p lakko-ffi-uniffi
     cargo build --release --target aarch64-apple-ios-sim -p lakko-ffi-uniffi
     cargo build --release --target x86_64-apple-ios -p lakko-ffi-uniffi
