@@ -96,11 +96,13 @@ fn decrypt_frame(
     let counter: u32 = u32::try_from(header.ctr).map_err(|_| ())?;
     let ciphertext = &wire[consumed..];
 
-    if !cache.contains_key(&sender_leaf) {
-        let pk = call_key.participant_key(sender_leaf).map_err(|_| ())?;
-        cache.insert(sender_leaf, pk);
-    }
-    let pk = cache.get(&sender_leaf).expect("just inserted");
+    let pk = match cache.entry(sender_leaf) {
+        std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
+        std::collections::hash_map::Entry::Vacant(e) => {
+            let pk = call_key.participant_key(sender_leaf).map_err(|_| ())?;
+            e.insert(pk)
+        }
+    };
 
     pk.open(aad, ciphertext, counter).map_err(|_| ())
 }

@@ -1100,6 +1100,25 @@ a single firsthand-verified fact, not a mental join. Verified
 firsthand (`cargo test -p lakko-svc-sfu --test
 synthetic_client_e2e` → 5 passed) and gates every CI run.
 
+**Native C ABI golden pin added (2026-06-17).** The flat
+`lakko-sframe-native` `extern "C"` surface — the path the iOS
+Obj-C++ shim + Android JNI module actually call before handing
+bytes to libwebrtc's `FrameEncryptorInterface` /
+`FrameDecryptorInterface` — is now itself pinned to the canonical
+golden in
+[`crates/lakko-sframe-native/tests/golden_cross_stack.rs`](../../crates/lakko-sframe-native/tests/golden_cross_stack.rs):
+`lakko_sframe_seal_framed` over the golden seed / leaf / plaintext
+produces the EXACT `GOLDEN_WIRE_HEX`, and `lakko_sframe_open_framed`
+recovers the golden plaintext from that wire. Previously the C ABI
+was only opacity-tested with arbitrary per-test seeds
+(`sfu_opacity_e2e.rs`); the cross-stack golden was pinned on the
+core + web/wasm + iOS/Android UniFFI surfaces but NOT on the C ABI
+the native media shims wrap. This closes that last in-codebase
+coverage gap — core, web (wasm), UniFFI, the native C ABI, and the
+live `str0m` SFU round-trip now ALL agree on the one canonical wire.
+Verified firsthand (`cargo test -p lakko-sframe-native --test
+golden_cross_stack` → 3 passed).
+
 The only residual is a single monolithic real-Chrome ⊕
 real-native ⊕ deployed-SFU smoke run — redundant for
 correctness (it would only re-observe the same composition with
