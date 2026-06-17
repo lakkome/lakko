@@ -317,7 +317,7 @@ mod tests {
     use super::*;
 
     fn sample_contact() -> BackupContact {
-        BackupContact::new(vec![0x01; 32], vec![0x02; 32], "alice".to_string()).unwrap()
+        BackupContact::new(vec![0x01; 32], vec![0x02; 32], "alice".to_string(), None).unwrap()
     }
 
     #[test]
@@ -336,6 +336,30 @@ mod tests {
         assert_eq!(recovered.len(), 1);
         assert_eq!(recovered[0].display_name(), "alice");
         assert_eq!(parsed.whole_storage_snapshot(), snapshot);
+    }
+
+    #[test]
+    fn account_id_round_trips_through_wasm_surface() {
+        // ADR-0021: a contact carrying a 16-byte account_id round-trips
+        // through the wasm BackupContact -> build -> parse surface, and a
+        // contact without one stays absent.
+        let with_id = BackupContact::new(
+            vec![0x01; 32],
+            vec![0x02; 32],
+            "alice".to_string(),
+            Some(vec![0xAB; 16]),
+        )
+        .unwrap();
+        let without_id = sample_contact();
+        let account_id = vec![0xA1u8; 16];
+        let seed = vec![0x42u8; 32];
+        let wire =
+            build_backup_payload(&account_id, 1, &seed, vec![with_id, without_id], &[]).unwrap();
+        let parsed = parse_backup_payload(&wire).unwrap();
+        let recovered = parsed.contacts();
+        assert_eq!(recovered.len(), 2);
+        assert_eq!(recovered[0].account_id(), Some(vec![0xAB; 16]));
+        assert_eq!(recovered[1].account_id(), None);
     }
 
     #[test]

@@ -134,6 +134,13 @@ pub fn build_backup_payload(
             ed25519_pubkey: e,
             x25519_pubkey: x,
             display_name: c.display_name,
+            // ADR-0021: the per-contact account_id round-trips on the web
+            // (wasm) backup surface; the native (Swift/Kotlin) backup does
+            // not carry it yet (iOS/Android persist contacts in their own
+            // AcceptedContactsStore, not via lakko-backup), so it is None
+            // here. Threading it through the UniFFI BackupContact is a
+            // parity follow-up if native backup ever round-trips contacts.
+            account_id: None,
         });
     }
 
