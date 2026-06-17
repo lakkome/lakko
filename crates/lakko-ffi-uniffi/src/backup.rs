@@ -144,13 +144,13 @@ pub fn build_backup_payload(
                 let mut a = [0u8; 16];
                 a.copy_from_slice(&id);
                 Some(a)
-            }
+            },
             Some(id) => {
                 return Err(FfiError::Backup(format!(
                     "contact account_id must be 16 bytes, got {}",
                     id.len()
                 )));
-            }
+            },
         };
         accepted_contacts.push(AcceptedContactRecord {
             ed25519_pubkey: e,
