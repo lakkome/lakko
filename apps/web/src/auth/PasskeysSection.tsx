@@ -261,6 +261,46 @@ export default function PasskeysSection(): JSX.Element {
     }
   }
 
+  // A3 (GDPR data-portability) — download a JSON of what the server holds about
+  // this account + the locally-known username. The actual E2EE content
+  // (messages, contacts, groups) lives only on-device and is exported via the
+  // encrypted Backup, not here.
+  async function onExportData(): Promise<void> {
+    const c = client();
+    if (c === null) {
+      setMessage({ kind: "error", text: "Session not ready." });
+      return;
+    }
+    setBusy(true);
+    setMessage(null);
+    try {
+      const server = await c.exportAccount();
+      const exportDoc = {
+        schema: "lakko/account-export/v1",
+        exported_at: new Date().toISOString(),
+        username: username(),
+        server,
+        note:
+          "Your messages, contacts, and group state are end-to-end encrypted " +
+          "and live only on your devices — export them via the encrypted Backup.",
+      };
+      const blob = new Blob([JSON.stringify(exportDoc, null, 2)], {
+        type: "application/json",
+      });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = "lakko-account-export.json";
+      anchor.click();
+      URL.revokeObjectURL(url);
+      setMessage({ kind: "ok", text: "Exported your account data." });
+    } catch (err) {
+      setMessage({ kind: "error", text: explainError(err) });
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <section class="passkeys-section">
       <h2 style={{ "margin-bottom": "0.5rem" }}>Passkeys</h2>
@@ -357,6 +397,25 @@ export default function PasskeysSection(): JSX.Element {
           </div>
         )}
       </Show>
+
+      {/* A3 (GDPR) — data portability: download what the server holds. */}
+      <div
+        style={{
+          "margin-top": "2rem",
+          "padding-top": "1rem",
+          "border-top": "1px solid var(--surface-border, #ccc)",
+        }}
+      >
+        <h3 style={{ "margin-bottom": "0.25rem" }}>Your data</h3>
+        <p style={{ color: "var(--surface-muted)", "margin-top": 0 }}>
+          Download a copy of what the server holds about your account. Your
+          messages and contacts are end-to-end encrypted on your devices —
+          export those via the encrypted Backup.
+        </p>
+        <button type="button" disabled={busy()} onClick={() => void onExportData()}>
+          Export my data
+        </button>
+      </div>
 
       {/* A3 (GDPR) — danger zone: permanent account deletion. */}
       <div

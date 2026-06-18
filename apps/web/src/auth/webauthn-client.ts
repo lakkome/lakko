@@ -170,6 +170,17 @@ export interface ListCredentialsResponse {
   readonly credentials: readonly CredentialSummary[];
 }
 
+/** A3 — `GET /account/export` shape: what `services/auth` holds about the
+ *  account (metadata + auth-factor existence; never the factor secrets). */
+export interface AccountExport {
+  readonly account_id_b64: string;
+  readonly created_at_ms: number;
+  readonly identity_version: number;
+  readonly passkey_count: number;
+  readonly has_totp: boolean;
+  readonly recovery_contact_kinds: readonly number[];
+}
+
 export interface AuthStartRequest {
   /** Optional. When set, server returns an allow-list challenge
    *  for that account. When omitted, server returns a
@@ -381,6 +392,13 @@ export class WebauthnClient {
       const body = await safeReadBody(response);
       throw new WebauthnHttpError(response.status, endpoint, body);
     }
+  }
+
+  /** A3 (GDPR portability) — `GET /account/export`. Returns what
+   *  `services/auth` holds about the account (bearer-auth). */
+  async exportAccount(): Promise<AccountExport> {
+    const response = await this.fetchAuthed("/account/export", { method: "GET" });
+    return parseJsonOrThrow(response, "/account/export");
   }
 
   /**
