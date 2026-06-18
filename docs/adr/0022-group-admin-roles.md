@@ -9,8 +9,11 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
   **APPROVE WITH NOTES**. Findings 1 (single-account-leaf assumption + Phase-2b
   path), 2 (pre-merge epoch read as a stated invariant), 3 (owner device loss +
   ADR-0017 mitigation), 4 (version fail-closed), 5 (self-Remove test) folded
-  into the text below. The landed code still requires the mandatory
-  post-implementation `lakko-security` pass (invariant #3).
+  into the text below. **Sprint 1 (lakko-mls core) landed + passed the
+  post-implementation `lakko-security` review (APPROVE WITH NOTES)** — both the
+  design and the landed-code gates are green (invariant #3). Remaining: Sprint 2
+  (FFI) + Sprint 3 (client wiring), with the two post-code notes (SelfRemove,
+  call-path) in Open Questions.
 - **Date:** 2026-06-17
 - **Context:** Phase 3 closeout — blocker **C** (group-admin roles). Group-chat
   membership (add / remove / roster) now ships on all three clients (A4), but
@@ -280,11 +283,31 @@ only to the owner). The gate is the security boundary; the UI gating is just UX
 - **Role changes vs. concurrent membership commits** is now resolved by the
   stated pre-merge-epoch invariant above (a just-demoted admin's in-flight
   commit is evaluated against the epoch it targets); the property test pins it.
-- **lakko-security DESIGN review: done** (APPROVE WITH NOTES, above). The
-  mandatory **post-implementation** `lakko-security` pass on the landed code
-  remains required before Sprint 1 merges (crypto / MLS state-machine change,
-  invariant #3), together with the `0xFF02` fuzz target + the gate property
-  tests.
+- **lakko-security reviews: both done — APPROVE WITH NOTES.** The DESIGN review
+  (above) and the **post-implementation** pass on the landed Sprint 1 code
+  (crypto / MLS state-machine change, invariant #3). The post-code pass verified
+  the pre-merge gate ordering against openmls 0.8.1, confirmed the 4 negative
+  property tests fail via the gate's own refusal (not an incidental MLS error),
+  and confirmed the decode parser is bounded + panic-free; all invariants
+  (#2/#3/#4/#5) pass and the ADR-0015 DeviceGroup path does not regress. Two
+  forward-looking notes recorded below for the client-wiring sprint.
+- **SelfRemove is invisible to the gate (defense-in-depth, post-code Finding 1).**
+  `authorise_role_commit` detects removals only via `staged.remove_proposals()`,
+  which surfaces `Proposal::Remove` exclusively — a `Proposal::SelfRemove`
+  (type `0x000a`) is not seen. Benign in v1: a SelfRemove can only evict its own
+  sender's leaf (so it cannot remove a non-consenting member), and lakko exposes
+  no self-remove API today (OpenMLS's constructor is `pub(crate)`). **If a future
+  sprint makes "leaving" a controlled action, the gate MUST add SelfRemove
+  detection** (`crates/lakko-mls/src/group.rs` `authorise_role_commit`).
+- **Call-path caveat for the client-wiring sprint (post-code Finding 2).** The
+  multi-party **call** group is created via the same role-enabled `Group::create`
+  as a chat group, so it now carries a `0xFF02` table (owner = the call
+  originator). Clients MUST route call-group receives through the **open**
+  `process_incoming`, NOT the verifying gate — a legitimate non-owner
+  welcome-ferry / KP-forward add (ADR-0009) would otherwise be refused. Only the
+  chat-message receive loop uses `process_incoming_verifying_roles`.
+  PublisherGroup is unaffected (it uses `create_with_id`, which does not seed
+  `0xFF02`).
 
 ## References
 
