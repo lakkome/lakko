@@ -132,7 +132,6 @@ The gate then enforces, *before merge*:
 | Add a member | owner or admin |
 | Remove a non-owner member | owner or admin |
 | Remove the owner | **nobody** → refuse |
-| Self-Remove (leave) | the leaving member themselves |
 | Change the role extension (GroupContextExtensions) | owner only |
 
 A commit that fails the check returns `Err` and is **not merged** (fail-closed,
@@ -157,22 +156,38 @@ epoch the commit targets, never the epoch it produces. A property test asserts
 this directly: **a commit that both self-promotes and acts is refused, because
 the committer is not yet an admin in the pre-commit role table.**
 
-**Self-Remove ("leave") is distinguished by leaf identity**: the gate compares
-the committer's leaf to the removed leaf and allows the removal only when they
-are the same (a member may remove *only their own* leaf, never another's, when
-not owner/admin). A property test asserts a non-admin member cannot remove any
-leaf but their own.
+**No member self-leave in v1 (implementation finding).** The original draft had
+a "self-Remove (leave)" row allowing a member to remove their own leaf. OpenMLS
+0.8.1 forbids this at the protocol level (`CreateCommitError::CannotRemoveSelf`)
+— a member cannot *commit* the removal of their own leaf, so a committer is
+never inside their own commit's removed set, and the gate's self-Remove branch
+was unreachable dead code (removed). Consequently v1 has **no member-initiated
+self-leave**: a member leaves by an owner/admin committing the removal
+(authorised normally), or — as a follow-up — a member-sent self-remove proposal
+an admin commits. A property test (`admin_can_remove_member`) covers the
+admin-removes-member path; the residual UX gap (a member cannot leave on their
+own) is documented, not a security issue.
 
-### Default-off + opt-in
+### Owner at creation (option A)
 
-If the extension is absent (every group created before this lands, and 1×1
-chats), the posture stays **open** — any member may add/remove, today's
-behavior — so nothing regresses. A group gains role enforcement when the owner
-enables it via a GroupContextExtensions commit
-(`set_group_roles`), the same opt-in shape as ADR-0015's
-`set_require_attested_removals`. Device KeyPackages + group founders advertise
-support for the `0xFF02` extension type via leaf capabilities so the commit is
-accepted by conformant members.
+A conversation group is **role-enabled from creation**, with the creator as
+owner: `Group::create` seeds the initial GroupContext with the `0xFF02` role
+table (owner = creator, no admins) plus the required-capabilities declaration
+that lets a later `set_group_roles` commit rewrite it. This **closes the
+bootstrap window** — there is never a moment when a new group has no owner for a
+malicious member to claim (the rejected alternatives were founder-gated first
+opt-in, which needs a fragile "leaf 0 == creator" assumption, and
+first-claimer-owns, which is racy). The maintainer chose option A over the
+draft's "default-off + opt-in" precisely to avoid that ungated window.
+
+Groups created **before** ADR-0022 carry no `0xFF02` table; the gate's "no role
+table → open" branch preserves today's behavior for them (and for any legacy
+group), so nothing regresses. Every leaf (KeyPackage + both group founders)
+advertises the `0xFF02` capability via the unified `lakko_leaf_capabilities`, so
+a role-enabled group can add any Lakko member and later rewrite its table. A 1×1
+chat is a 2-member role-enabled group: the creator is owner, the other member is
+a plain member (so only the creator can convert it to a larger group by adding —
+an acceptable v1 behavior).
 
 ### Surfaced to the clients
 
