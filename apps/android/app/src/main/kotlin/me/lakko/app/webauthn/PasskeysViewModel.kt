@@ -4,6 +4,7 @@
 package me.lakko.app.webauthn
 
 import android.content.Context
+import android.content.Intent
 import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -12,6 +13,10 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.serialization.SerialName
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
 import me.lakko.app.auth.AuthRepository
 import me.lakko.app.discovery.DiscoveryClient
 import me.lakko.app.auth.AuthState
@@ -322,6 +327,57 @@ public class PasskeysViewModel(
         }
     }
 
+    /**
+     * A3 (GDPR portability) — fetch what the server holds about the account,
+     * wrap it in a portable JSON document, and hand it to the OS share sheet.
+     * The E2EE content lives on-device and is exported via the encrypted
+     * Backup, not here.
+     */
+    public fun exportData(context: Context) {
+        rebindSession()
+        if (mutableState.value.busy) return
+        mutableState.update { it.copy(busy = true, message = null) }
+        viewModelScope.launch {
+            try {
+                val server = client.exportAccount()
+                val doc = ExportDoc(
+                    schema = "lakko/account-export/v1",
+                    exportedAt = java.time.Instant.now().toString(),
+                    server = server,
+                    note = "Your messages, contacts, and group state are " +
+                        "end-to-end encrypted and live only on your devices — " +
+                        "export them via the encrypted Backup.",
+                )
+                val jsonText = exportJson.encodeToString(doc)
+                val send = Intent(Intent.ACTION_SEND).apply {
+                    type = "application/json"
+                    putExtra(Intent.EXTRA_TITLE, "lakko-account-export.json")
+                    putExtra(Intent.EXTRA_TEXT, jsonText)
+                }
+                val chooser = Intent.createChooser(send, "Export my data").apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                context.startActivity(chooser)
+                mutableState.update {
+                    it.copy(busy = false, message = Message.Ok("Exported your account data."))
+                }
+            } catch (e: WebauthnHttpError) {
+                mutableState.update {
+                    it.copy(busy = false, message = Message.Error(explain(e)))
+                }
+            } catch (e: Throwable) {
+                mutableState.update {
+                    it.copy(
+                        busy = false,
+                        message = Message.Error(e.message ?: "Could not export your data."),
+                    )
+                }
+            }
+        }
+    }
+
+    private val exportJson = Json { prettyPrint = true }
+
     private fun explain(e: WebauthnHttpError): String = when (e.status) {
         401 -> "Session expired. Sign in again."
         503 -> "Server hasn't enabled passkey support."
@@ -342,3 +398,13 @@ public sealed interface Message {
     public data class Ok(val text: String) : Message
     public data class Error(val text: String) : Message
 }
+
+/** A3 — the portable JSON document handed to the share sheet. Wraps the
+ *  server-held [AccountExport] with provenance + an E2EE-content note. */
+@Serializable
+private data class ExportDoc(
+    val schema: String,
+    @SerialName("exported_at") val exportedAt: String,
+    val server: AccountExport,
+    val note: String,
+)

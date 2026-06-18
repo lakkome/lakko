@@ -173,6 +173,23 @@ public fun PasskeysScreen(
                 null -> Spacer(Modifier.height(0.dp))
             }
 
+            // A3 (GDPR) — data portability.
+            HorizontalDivider(modifier = Modifier.padding(vertical = 16.dp))
+            Text(text = "Your data")
+            Text(
+                text = "Download a copy of what the server holds about your " +
+                    "account. Messages and contacts are end-to-end encrypted " +
+                    "on your devices — export those via Backup.",
+                style = MaterialTheme.typography.bodySmall,
+            )
+            Button(
+                onClick = { viewModel.exportData(context) },
+                enabled = !state.busy,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text("Export my data")
+            }
+
             // A3 (GDPR) — permanent account deletion (danger zone).
             HorizontalDivider(modifier = Modifier.padding(vertical = 16.dp))
             Text(

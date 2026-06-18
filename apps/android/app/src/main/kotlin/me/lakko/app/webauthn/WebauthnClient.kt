@@ -302,6 +302,17 @@ public class WebauthnClient(
         return response.body()
     }
 
+    /** A3 (GDPR portability) — `GET /account/export`. Bearer-auth; returns what
+     *  `services/auth` holds about the account (metadata + auth-factor
+     *  existence). */
+    public suspend fun exportAccount(): AccountExport {
+        val response = client.get("$baseUrl/account/export") {
+            sessionToken?.let { header(HttpHeaders.Authorization, "Bearer $it") }
+        }
+        ensure2xx(response, "/account/export")
+        return response.body()
+    }
+
     public suspend fun deleteCredential(credentialIdB64: String) {
         val endpoint = "/webauthn/credentials/$credentialIdB64"
         val response = client.delete("$baseUrl$endpoint") {
@@ -465,6 +476,18 @@ public data class PasskeyLoginResult(
 @Serializable
 public data class ListCredentialsResponse(
     public val credentials: List<CredentialSummary>,
+)
+
+/** A3 — `GET /account/export` shape: what `services/auth` holds about the
+ *  account (metadata + auth-factor existence; never the factor secrets). */
+@Serializable
+public data class AccountExport(
+    @SerialName("account_id_b64") public val accountIdB64: String,
+    @SerialName("created_at_ms") public val createdAtMs: Long,
+    @SerialName("identity_version") public val identityVersion: Long,
+    @SerialName("passkey_count") public val passkeyCount: Long,
+    @SerialName("has_totp") public val hasTotp: Boolean,
+    @SerialName("recovery_contact_kinds") public val recoveryContactKinds: List<Long>,
 )
 
 @Serializable
