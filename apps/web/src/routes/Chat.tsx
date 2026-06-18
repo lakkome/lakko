@@ -887,6 +887,38 @@ function ChatView(props: {
       }));
     },
   );
+
+  // ADR-0022 — the local member's role in this group ("owner" / "admin" /
+  // "member"), or `null` for an open / legacy group with no role table. Drives
+  // the add / remove affordance gating below. UX only — the receive-loop gate
+  // (`processIncomingVerifyingRoles`) is the real boundary; this just hides
+  // affordances a plain member's commit would be refused for anyway.
+  const [ownRole, setOwnRole] = createSignal<"owner" | "admin" | "member" | null>(null);
+  createEffect(() => {
+    membersVersion(); // recompute when the roster / epoch changes
+    const secrets = props.requireIdentity();
+    void (async () => {
+      try {
+        const wasm = await loadWasmForCalls();
+        const identity = wasm.Identity.fromSeed(secrets.accountIdentitySeed);
+        try {
+          const r = props.entry.group.ownRole(identity);
+          if (r === wasm.Role.Owner) setOwnRole("owner");
+          else if (r === wasm.Role.Admin) setOwnRole("admin");
+          else if (r === wasm.Role.Member) setOwnRole("member");
+          else setOwnRole(null);
+        } finally {
+          identity.free();
+        }
+      } catch {
+        setOwnRole(null);
+      }
+    })();
+  });
+  // A plain member may not add / remove; everyone else (owner, admin, or an
+  // open/legacy group where `ownRole` is `null`) may.
+  const canManageMembers = (): boolean => ownRole() !== "member";
+
   let nextTempId = 1;
 
   async function refresh(): Promise<void> {
@@ -1577,17 +1609,21 @@ function ChatView(props: {
           >
             {membersOpen() ? "Hide members" : "Members"}
           </button>
-          <button
-            type="button"
-            onClick={() => {
-              setAddMemberOpen(!addMemberOpen());
-              setNotice(null);
-              setError(null);
-            }}
-            disabled={busy()}
-          >
-            {addMemberOpen() ? "Cancel add" : "Add member"}
-          </button>
+          {/* ADR-0022 — only owner/admin (or an open/legacy group) sees the
+              add affordance; a plain member's add would be refused by peers. */}
+          <Show when={canManageMembers()}>
+            <button
+              type="button"
+              onClick={() => {
+                setAddMemberOpen(!addMemberOpen());
+                setNotice(null);
+                setError(null);
+              }}
+              disabled={busy()}
+            >
+              {addMemberOpen() ? "Cancel add" : "Add member"}
+            </button>
+          </Show>
           <button
             type="button"
             onClick={() => {
@@ -1961,19 +1997,23 @@ function ChatView(props: {
                         </span>
                       }
                     >
-                      <button
-                        type="button"
-                        onClick={() => {
-                          void onRemoveMember(m.leafIndex);
-                        }}
-                        disabled={busy()}
-                        style={{
-                          "font-size": "0.8rem",
-                          color: "var(--error)",
-                        }}
-                      >
-                        Remove
-                      </button>
+                      {/* ADR-0022 — only owner/admin (or an open/legacy
+                          group) sees Remove; a member's removal is refused. */}
+                      <Show when={canManageMembers()}>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            void onRemoveMember(m.leafIndex);
+                          }}
+                          disabled={busy()}
+                          style={{
+                            "font-size": "0.8rem",
+                            color: "var(--error)",
+                          }}
+                        >
+                          Remove
+                        </button>
+                      </Show>
                     </Show>
                   </li>
                 );

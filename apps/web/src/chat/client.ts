@@ -383,12 +383,19 @@ export class ChatClient {
       }
       let processed;
       try {
-        processed = group.processIncoming(myIdentity, message.payload);
+        // ADR-0022 — the CHAT receive loop enforces the group-admin role
+        // policy: an add / remove / role-change commit whose committer's role
+        // does not authorise it is REFUSED (throws here) and skipped, never
+        // merged (fail-closed). A group with no role table (legacy) behaves
+        // like the open `processIncoming`. This is the chat group, not the
+        // SFU call group (the call path reuses the chat exporter, not a
+        // separate Group), so the call-path caveat does not apply here.
+        processed = group.processIncomingVerifyingRoles(myIdentity, message.payload);
       } catch (err) {
-        // Bad frame, wrong epoch, malformed wire — log and
-        // skip. Cursor still advances.
+        // Bad frame, wrong epoch, malformed wire, OR a role-unauthorized
+        // commit refused by the gate — log and skip. Cursor still advances.
         // eslint-disable-next-line no-console
-        console.warn("processIncoming failed", message.id, err);
+        console.warn("processIncomingVerifyingRoles failed", message.id, err);
         continue;
       }
       // processIncoming touched provider storage even when the
