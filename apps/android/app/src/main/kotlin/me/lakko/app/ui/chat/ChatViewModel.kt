@@ -32,6 +32,7 @@ import uniffi.lakko_ffi_uniffi.AttachmentRef
 import uniffi.lakko_ffi_uniffi.FfiCallSignalingBody
 import uniffi.lakko_ffi_uniffi.GroupMember
 import uniffi.lakko_ffi_uniffi.Role
+import uniffi.lakko_ffi_uniffi.RoleTable
 import uniffi.lakko_ffi_uniffi.sfuPeerTag
 
 /**
@@ -254,6 +255,19 @@ public class ChatViewModel(
      *  The sheet hides the add field + per-member Remove when this is `false`. */
     public val canManageMembers: StateFlow<Boolean> = mutableCanManageMembers.asStateFlow()
 
+    private val mutableIsOwner: MutableStateFlow<Boolean> = MutableStateFlow(false)
+
+    /** ADR-0022 — `true` when the local member is the owner (only the owner sees
+     *  the per-member promote / demote toggle). */
+    public val isOwner: StateFlow<Boolean> = mutableIsOwner.asStateFlow()
+
+    private val mutableRoleTable: MutableStateFlow<RoleTable?> = MutableStateFlow(null)
+
+    /** The group's current role table (owner + admins), or `null` for an open
+     *  group — the members sheet reads it reactively to label + gate the
+     *  per-member promote / demote toggle. */
+    public val roleTable: StateFlow<RoleTable?> = mutableRoleTable.asStateFlow()
+
     /** Update the add-member text field. */
     public fun setAddMemberInput(value: String) {
         mutableAddMemberInput.value = value
@@ -272,7 +286,10 @@ public class ChatViewModel(
     /** Re-read the live MLS roster from the repository. */
     public fun refreshMembers() {
         mutableMembers.value = repo.members(groupIdHex) ?: emptyList()
-        mutableCanManageMembers.value = repo.ownRole(groupIdHex) != Role.MEMBER
+        val role = repo.ownRole(groupIdHex)
+        mutableCanManageMembers.value = role != Role.MEMBER
+        mutableIsOwner.value = role == Role.OWNER
+        mutableRoleTable.value = repo.groupRoles(groupIdHex)
     }
 
     /** Our own leaf index — the roster marks it "(you)" and blocks self-removal. */
@@ -341,6 +358,27 @@ public class ChatViewModel(
             } catch (e: Throwable) {
                 mutableMembershipError.value = e.message ?: e.toString()
                 android.util.Log.w("ChatViewModel", "onRemoveMember failed", e)
+            } finally {
+                mutableMembershipBusy.value = false
+            }
+        }
+    }
+
+    /**
+     * Promote / demote a member as admin (owner only — the toggle is shown only
+     * when [isOwner]). Publishes the `setGroupRoles` commit. Fail-closed.
+     */
+    public fun onToggleAdmin(member: GroupMember, makeAdmin: Boolean) {
+        if (mutableMembershipBusy.value) return
+        mutableMembershipBusy.value = true
+        mutableMembershipError.value = null
+        viewModelScope.launch {
+            try {
+                repo.setMemberAdmin(groupIdHex, member.signaturePublicKey, makeAdmin)
+                refreshMembers()
+            } catch (e: Throwable) {
+                mutableMembershipError.value = e.message ?: e.toString()
+                android.util.Log.w("ChatViewModel", "onToggleAdmin failed", e)
             } finally {
                 mutableMembershipBusy.value = false
             }

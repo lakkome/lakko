@@ -979,6 +979,8 @@ private fun MembersSheet(viewModel: ChatViewModel) {
     val busy by viewModel.membershipBusy.collectAsStateWithLifecycle()
     val error by viewModel.membershipError.collectAsStateWithLifecycle()
     val canManage by viewModel.canManageMembers.collectAsStateWithLifecycle()
+    val isOwner by viewModel.isOwner.collectAsStateWithLifecycle()
+    val roleTable by viewModel.roleTable.collectAsStateWithLifecycle()
     val ownLeaf = viewModel.ownLeafIndex()
 
     Dialog(
@@ -1040,6 +1042,18 @@ private fun MembersSheet(viewModel: ChatViewModel) {
                                 text = viewModel.memberLabel(member),
                                 modifier = Modifier.weight(1f),
                             )
+                            // ADR-0022 — owner-only promote / demote toggle;
+                            // never the owner's own row.
+                            val isMemberOwner = roleTable?.owner
+                                ?.contentEquals(member.signaturePublicKey) ?: false
+                            if (isOwner && !isMemberOwner) {
+                                val isAdmin = roleTable?.admins
+                                    ?.any { it.contentEquals(member.signaturePublicKey) } ?: false
+                                TextButton(
+                                    onClick = { viewModel.onToggleAdmin(member, !isAdmin) },
+                                    enabled = !busy,
+                                ) { Text(if (isAdmin) "Remove admin" else "Make admin") }
+                            }
                             // ADR-0022 — Remove only when we may manage members
                             // (owner / admin / open group) and not our own leaf.
                             if (canManage && ownLeaf != member.leafIndex) {

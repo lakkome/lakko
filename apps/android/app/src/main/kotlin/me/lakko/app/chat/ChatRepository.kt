@@ -27,6 +27,7 @@ import uniffi.lakko_ffi_uniffi.FfiException
 import uniffi.lakko_ffi_uniffi.Group
 import uniffi.lakko_ffi_uniffi.GroupMember
 import uniffi.lakko_ffi_uniffi.Role
+import uniffi.lakko_ffi_uniffi.RoleTable
 import uniffi.lakko_ffi_uniffi.Identity
 import uniffi.lakko_ffi_uniffi.loadGroup
 
@@ -507,6 +508,72 @@ public class ChatRepository(
             record.group.ownRole(identity)
         } catch (cause: Throwable) {
             null
+        }
+    }
+
+    /**
+     * The group's ADR-0022 role table (`owner` + `admins` signature keys), or
+     * `null` for an open / legacy group. The members UI uses it to label the
+     * per-member promote / demote toggle.
+     */
+    public fun groupRoles(groupIdHex: String): RoleTable? {
+        val record = groups[groupIdHex] ?: return null
+        return try {
+            record.group.groupRoles()
+        } catch (cause: Throwable) {
+            null
+        }
+    }
+
+    /**
+     * Promote / demote a member as admin (owner only — enforced on the
+     * receiving side). Reads the role table, adds or removes the member's
+     * signature key from the admin set, and publishes the `setGroupRoles`
+     * commit (own-marked for echo suppression). Returns the commit's DS id.
+     */
+    public suspend fun setMemberAdmin(
+        groupIdHex: String,
+        memberSignaturePubkey: ByteArray,
+        makeAdmin: Boolean,
+    ): Long {
+        val identity = canonicalIdentity.get()
+            ?: throw IllegalStateException(
+                "ChatRepository not bootstrapped — call bootstrap() first",
+            )
+        return groupsLock.withLock {
+            val record = groups[groupIdHex]
+                ?: throw ChatError(
+                    "no live Group handle for $groupIdHex",
+                    IllegalStateException("missing group record"),
+                )
+            val table = try {
+                record.group.groupRoles()
+            } catch (e: Throwable) {
+                null
+            } ?: throw ChatError(
+                "group has no role table",
+                IllegalStateException("no role table"),
+            )
+            val admins = table.admins
+                .filterNot { it.contentEquals(memberSignaturePubkey) }
+                .toMutableList()
+            if (makeAdmin) {
+                admins.add(memberSignaturePubkey)
+            }
+            val commitBytes = try {
+                record.group.setGroupRoles(identity, table.owner, admins)
+            } catch (e: FfiException) {
+                throw ChatError("setGroupRoles failed", e)
+            }
+            val commitPublish = try {
+                dsClient.publishGroup(record.groupId, commitBytes)
+            } catch (e: Throwable) {
+                throw ChatError("DS publishGroup (role change) failed", e)
+            }
+            chatClient.markOwnPublishedCommit(commitPublish.id)
+            persistSnapshotBestEffort()
+            publishThreadList()
+            commitPublish.id
         }
     }
 
