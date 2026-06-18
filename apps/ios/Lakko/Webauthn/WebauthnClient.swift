@@ -193,6 +193,36 @@ public final class WebauthnClient {
         }
     }
 
+    /// A3 (GDPR erasure) — `DELETE /account`. Deletes the whole account on
+    /// `services/auth` (FK-cascade over all auth state). Bearer-auth; when the
+    /// account has a passkey the server answers 403 unless a fresh action grant
+    /// was minted, so the caller runs ``WebauthnActionBinding/assertAction(actionHashB64:)``
+    /// with ``actionHashForDeleteAccount(accountId:)`` first and retries.
+    public func deleteAccount() async throws {
+        let endpoint = "/account"
+        var request = try buildRequest(endpoint: endpoint, method: "DELETE")
+        attachAuth(to: &request)
+        let (data, response) = try await performRequest(request, endpoint: endpoint)
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw WebauthnClientError.http(
+                status: 0,
+                endpoint: endpoint,
+                body: "no HTTP response"
+            )
+        }
+        switch httpResponse.statusCode {
+        case 200, 204:
+            return
+        default:
+            let body = String(data: data, encoding: .utf8) ?? ""
+            throw WebauthnClientError.http(
+                status: httpResponse.statusCode,
+                endpoint: endpoint,
+                body: Self.truncate(body)
+            )
+        }
+    }
+
     // MARK: - Internal HTTP
 
     /// Bearer-authenticated JSON POST, reachable from same-module

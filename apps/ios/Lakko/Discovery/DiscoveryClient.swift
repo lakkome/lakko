@@ -699,6 +699,45 @@ public final class DiscoveryClient {
         )
     }
 
+    /// A3 (GDPR erasure) — `DELETE /discovery/account`. Purges this account's
+    /// discovery footprint (username binding, identity bundle, KeyPackage,
+    /// owned invites). Bearer-auth; the server keys the purge on the verified
+    /// session token's account_id. Idempotent (204).
+    public func deleteAccount() async throws {
+        let endpoint = "/discovery/account"
+        let url = try buildURL(endpoint: endpoint)
+        var request = URLRequest(url: url)
+        request.httpMethod = "DELETE"
+        attachAuthorizationHeader(to: &request)
+        let raw: (Data, URLResponse)
+        do {
+            raw = try await session.data(for: request)
+        } catch {
+            throw DiscoveryClientError.network(
+                endpoint: "\(endpoint) (DELETE)",
+                underlying: error
+            )
+        }
+        guard let httpResponse = raw.1 as? HTTPURLResponse else {
+            throw DiscoveryClientError.http(
+                status: 0,
+                endpoint: "\(endpoint) (DELETE)",
+                body: "non-HTTP response"
+            )
+        }
+        if (200..<300).contains(httpResponse.statusCode) {
+            return
+        }
+        let bodyText = Self.truncate(
+            String(data: raw.0, encoding: .utf8) ?? "<binary>"
+        )
+        throw DiscoveryClientError.http(
+            status: httpResponse.statusCode,
+            endpoint: "\(endpoint) (DELETE)",
+            body: bodyText
+        )
+    }
+
     /// `POST /discovery/call-invite` — upload a verified
     /// `CallInviteCapability` blob (Phase 3c3-server). Sibling
     /// of ``inviteUpload(_:)`` — wire shape

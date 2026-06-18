@@ -22,6 +22,8 @@ public struct PasskeysView: View {
 
     @StateObject private var viewModel: PasskeysViewModel
     public var onBack: () -> Void
+    /// A3 — drives the delete-account confirmation dialog.
+    @State private var confirmingDelete = false
 
     public init(
         viewModel: @autoclosure @escaping () -> PasskeysViewModel,
@@ -104,6 +106,37 @@ public struct PasskeysView: View {
                 if let message = viewModel.message {
                     statusBanner(for: message)
                         .padding(.top, 4)
+                }
+
+                Divider().padding(.vertical, 12)
+
+                // A3 (GDPR) — permanent account deletion (danger zone).
+                Button(role: .destructive) {
+                    confirmingDelete = true
+                } label: {
+                    Text("Delete my account")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.large)
+                .disabled(viewModel.isBusy)
+                Text(
+                    "Permanently erase your account from the server (username, "
+                        + "keys, recovery factors, backup) and wipe this device. "
+                        + "This cannot be undone."
+                )
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .padding(.top, 4)
+                .confirmationDialog(
+                    "Delete your account permanently?",
+                    isPresented: $confirmingDelete,
+                    titleVisibility: .visible
+                ) {
+                    Button("Delete my account", role: .destructive) {
+                        Task { await viewModel.deleteAccount() }
+                    }
+                    Button("Cancel", role: .cancel) {}
                 }
 
                 Spacer()

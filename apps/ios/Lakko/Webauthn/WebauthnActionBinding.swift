@@ -37,6 +37,11 @@ public let actionDomainDeleteCredential = "lakko/action/delete-credential/v1"
 /// DeviceGroup leaf.
 public let actionDomainRemoveDevice = "lakko/action/remove-device/v1"
 
+/// Domain separator bound into the `action_hash` for deleting the whole
+/// account (A3 — GDPR erasure). Matches `services/auth`'s
+/// `ACTION_DOMAIN_DELETE_ACCOUNT`.
+public let actionDomainDeleteAccount = "lakko/action/delete-account/v1"
+
 // MARK: - Wire shapes (mirror server-side `auth/action`)
 
 /// Body of `POST /auth/action/start`.
@@ -166,4 +171,11 @@ public func actionHashForDeleteCredential(credentialIdB64: String) throws -> Str
 /// signature public key is `signaturePublicKey`.
 public func actionHashForRemoveDevice(signaturePublicKey: Data) -> String {
     deriveActionHash(domain: actionDomainRemoveDevice, identifier: signaturePublicKey)
+}
+
+/// Action hash for deleting the account identified by its raw 16-byte
+/// `accountId` (A3 — GDPR erasure). Matches `services/auth`'s
+/// `delete_account_action_hash`.
+public func actionHashForDeleteAccount(accountId: Data) -> String {
+    deriveActionHash(domain: actionDomainDeleteAccount, identifier: accountId)
 }

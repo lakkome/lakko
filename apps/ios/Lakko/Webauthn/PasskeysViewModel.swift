@@ -199,6 +199,59 @@ public final class PasskeysViewModel: ObservableObject {
         }
     }
 
+    /// A3 (GDPR erasure) — delete the whole account across services + wipe this
+    /// device. Auth `DELETE /account` (on a 403, the account has a passkey, so
+    /// run the action ceremony bound to this account + retry once, fail-closed)
+    /// -> best-effort discovery purge -> local `forgetDevice` wipe + sign-out.
+    public func deleteAccount() async {
+        rebindSession()
+        guard let secrets = authRepository.identitySecrets else {
+            message = .error("Session not ready.")
+            return
+        }
+        isBusy = true
+        message = nil
+        defer { isBusy = false }
+        do {
+            do {
+                try await client.deleteAccount()
+            } catch let error as WebauthnClientError {
+                if case .http(let status, _, _) = error, status == 403 {
+                    let actionHashB64 = actionHashForDeleteAccount(
+                        accountId: secrets.accountId
+                    )
+                    _ = try await client.assertAction(actionHashB64: actionHashB64)
+                    try await client.deleteAccount()
+                } else {
+                    throw error
+                }
+            }
+            // Best-effort discovery purge — the auth tier is the critical
+            // erasure; the session token is about to be invalidated anyway.
+            do {
+                let discovery = DiscoveryClient(sessionToken: secrets.sessionToken)
+                try await discovery.deleteAccount()
+            } catch {
+                // best-effort
+            }
+            // Local wipe + full sign-out on this device.
+            authRepository.forgetDevice()
+        } catch let error as WebauthnAssertion.AssertionError {
+            switch error {
+            case .cancelled:
+                message = .error("Cancelled. Your account was not deleted.")
+            case .noCredential:
+                message = .error("Authenticator did not return a credential.")
+            case .underlying(let underlying):
+                message = .error(underlying.localizedDescription)
+            }
+        } catch let error as WebauthnClientError {
+            message = .error(Self.explain(error))
+        } catch {
+            message = .error(error.localizedDescription)
+        }
+    }
+
     // MARK: - Helpers
 
     private static func explain(_ error: WebauthnClientError) -> String {
