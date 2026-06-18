@@ -31,6 +31,7 @@ import me.lakko.app.contacts.AcceptedContactsStore
 import uniffi.lakko_ffi_uniffi.AttachmentRef
 import uniffi.lakko_ffi_uniffi.FfiCallSignalingBody
 import uniffi.lakko_ffi_uniffi.GroupMember
+import uniffi.lakko_ffi_uniffi.Role
 import uniffi.lakko_ffi_uniffi.sfuPeerTag
 
 /**
@@ -246,6 +247,13 @@ public class ChatViewModel(
     /** Last add / remove error surfaced to the sheet, else `null`. */
     public val membershipError: StateFlow<String?> = mutableMembershipError.asStateFlow()
 
+    private val mutableCanManageMembers: MutableStateFlow<Boolean> = MutableStateFlow(true)
+
+    /** ADR-0022 — `true` when the local member may add / remove (owner, admin,
+     *  or an open/legacy group with no role table); `false` for a plain member.
+     *  The sheet hides the add field + per-member Remove when this is `false`. */
+    public val canManageMembers: StateFlow<Boolean> = mutableCanManageMembers.asStateFlow()
+
     /** Update the add-member text field. */
     public fun setAddMemberInput(value: String) {
         mutableAddMemberInput.value = value
@@ -264,6 +272,7 @@ public class ChatViewModel(
     /** Re-read the live MLS roster from the repository. */
     public fun refreshMembers() {
         mutableMembers.value = repo.members(groupIdHex) ?: emptyList()
+        mutableCanManageMembers.value = repo.ownRole(groupIdHex) != Role.MEMBER
     }
 
     /** Our own leaf index — the roster marks it "(you)" and blocks self-removal. */

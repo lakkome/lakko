@@ -204,10 +204,18 @@ public class ChatClient(
             }
 
             val processed = try {
-                group.processIncoming(identity, message.payload)
+                // ADR-0022 — the CHAT receive loop enforces the group-admin
+                // role policy: an add / remove / role-change commit whose
+                // committer's role does not authorise it is REFUSED (throws)
+                // and skipped, never merged (fail-closed). A group with no role
+                // table (legacy) behaves like the open `processIncoming`. This
+                // is the chat group, not the SFU call group (the call path
+                // reuses the chat exporter, not a separate Group), so the
+                // call-path caveat does not apply here.
+                group.processIncomingVerifyingRoles(identity, message.payload)
             } catch (_: FfiException) {
-                // Bad frame, wrong epoch, malformed wire. Drop +
-                // advance the cursor.
+                // Bad frame, wrong epoch, malformed wire, OR a role-unauthorized
+                // commit refused by the gate. Drop + advance the cursor.
                 continue
             }
             events.add(toEvent(message.id, message.createdAt, processed))

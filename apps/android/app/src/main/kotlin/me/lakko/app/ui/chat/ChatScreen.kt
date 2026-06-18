@@ -978,6 +978,7 @@ private fun MembersSheet(viewModel: ChatViewModel) {
     val input by viewModel.addMemberInput.collectAsStateWithLifecycle()
     val busy by viewModel.membershipBusy.collectAsStateWithLifecycle()
     val error by viewModel.membershipError.collectAsStateWithLifecycle()
+    val canManage by viewModel.canManageMembers.collectAsStateWithLifecycle()
     val ownLeaf = viewModel.ownLeafIndex()
 
     Dialog(
@@ -996,23 +997,27 @@ private fun MembersSheet(viewModel: ChatViewModel) {
                     style = MaterialTheme.typography.titleMedium,
                 )
                 Spacer(Modifier.height(12.dp))
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    OutlinedTextField(
-                        value = input,
-                        onValueChange = viewModel::setAddMemberInput,
-                        label = { Text("@username") },
-                        singleLine = true,
-                        enabled = !busy,
-                        keyboardOptions = KeyboardOptions(
-                            capitalization = KeyboardCapitalization.None,
-                        ),
-                        modifier = Modifier.weight(1f),
-                    )
-                    Spacer(Modifier.width(8.dp))
-                    Button(
-                        onClick = viewModel::onAddMember,
-                        enabled = !busy && input.trim().isNotEmpty(),
-                    ) { Text("Add") }
+                // ADR-0022 — only owner/admin (or an open/legacy group) sees the
+                // add affordance; a plain member's add would be refused by peers.
+                if (canManage) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        OutlinedTextField(
+                            value = input,
+                            onValueChange = viewModel::setAddMemberInput,
+                            label = { Text("@username") },
+                            singleLine = true,
+                            enabled = !busy,
+                            keyboardOptions = KeyboardOptions(
+                                capitalization = KeyboardCapitalization.None,
+                            ),
+                            modifier = Modifier.weight(1f),
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Button(
+                            onClick = viewModel::onAddMember,
+                            enabled = !busy && input.trim().isNotEmpty(),
+                        ) { Text("Add") }
+                    }
                 }
                 error?.let { message ->
                     Spacer(Modifier.height(6.dp))
@@ -1035,7 +1040,9 @@ private fun MembersSheet(viewModel: ChatViewModel) {
                                 text = viewModel.memberLabel(member),
                                 modifier = Modifier.weight(1f),
                             )
-                            if (ownLeaf != member.leafIndex) {
+                            // ADR-0022 — Remove only when we may manage members
+                            // (owner / admin / open group) and not our own leaf.
+                            if (canManage && ownLeaf != member.leafIndex) {
                                 TextButton(
                                     onClick = { viewModel.onRemoveMember(member.leafIndex) },
                                     enabled = !busy,

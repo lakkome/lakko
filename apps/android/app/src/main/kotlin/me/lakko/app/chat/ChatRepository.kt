@@ -26,6 +26,7 @@ import me.lakko.app.ds.DsClient
 import uniffi.lakko_ffi_uniffi.FfiException
 import uniffi.lakko_ffi_uniffi.Group
 import uniffi.lakko_ffi_uniffi.GroupMember
+import uniffi.lakko_ffi_uniffi.Role
 import uniffi.lakko_ffi_uniffi.Identity
 import uniffi.lakko_ffi_uniffi.loadGroup
 
@@ -489,6 +490,21 @@ public class ChatRepository(
         val record = groups[groupIdHex] ?: return null
         return try {
             record.group.ownLeafIndex()
+        } catch (cause: Throwable) {
+            null
+        }
+    }
+
+    /**
+     * Our own ADR-0022 role in [groupIdHex] (OWNER / ADMIN / MEMBER), or `null`
+     * for an open / legacy group with no role table (or no handle). The members
+     * UI gates the add / remove affordances on this.
+     */
+    public fun ownRole(groupIdHex: String): Role? {
+        val identity = canonicalIdentity.get() ?: return null
+        val record = groups[groupIdHex] ?: return null
+        return try {
+            record.group.ownRole(identity)
         } catch (cause: Throwable) {
             null
         }
