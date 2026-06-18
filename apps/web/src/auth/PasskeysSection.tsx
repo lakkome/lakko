@@ -51,8 +51,10 @@ import {
   WebauthnUnsupportedError,
   WebauthnUserCancelledError,
   actionHashForDeleteCredential,
+  actionHashForDeleteAccount,
   type CredentialSummary,
 } from "./webauthn-client";
+import { DiscoveryClient } from "../discovery/client";
 
 const SUPPORTED = WebauthnClient.isWebauthnAvailable();
 
@@ -199,6 +201,66 @@ export default function PasskeysSection(): JSX.Element {
     }
   }
 
+  // A3 (GDPR right-to-erasure) — delete the whole account across services +
+  // wipe this device. Orchestration: auth `DELETE /account` (with a passkey
+  // action gesture when the account has a passkey) -> best-effort discovery
+  // purge -> local `forgetDevice` wipe + sign-out.
+  async function onDeleteAccount(): Promise<void> {
+    const c = client();
+    const secrets = auth.identitySecrets();
+    if (c === null || secrets === null) {
+      setMessage({ kind: "error", text: "Session not ready." });
+      return;
+    }
+    if (
+      !window.confirm(
+        "Permanently delete your account? This erases your server-side " +
+          "identity (username, keys, recovery factors, backup) and signs you " +
+          "out everywhere. Your local messages are wiped from this device too. " +
+          "This cannot be undone.",
+      )
+    ) {
+      return;
+    }
+    setBusy(true);
+    setMessage(null);
+    try {
+      // Raw 16-byte account_id for the delete-account action hash.
+      const accountId = secrets.accountId;
+      // Auth tier: try the delete; if the server demands a passkey gesture
+      // (the account has a passkey) it answers 403, so run the action ceremony
+      // bound to this account and retry once. A throw (the user dismisses the
+      // sheet) aborts — fail-closed.
+      try {
+        await c.deleteAccount();
+      } catch (err) {
+        if (err instanceof WebauthnHttpError && err.status === 403) {
+          const actionHashB64 = await actionHashForDeleteAccount(accountId);
+          await c.assertAction(actionHashB64);
+          await c.deleteAccount();
+        } else {
+          throw err;
+        }
+      }
+      // Discovery tier: best-effort (the auth tier is the critical erasure;
+      // the session token is about to be invalidated anyway, and what is left
+      // behind is only opaque public artefacts).
+      try {
+        const d = new DiscoveryClient();
+        d.setSessionToken(secrets.sessionToken);
+        await d.deleteAccount();
+      } catch {
+        /* best-effort */
+      }
+      // Local wipe + full sign-out on this device.
+      await auth.forgetDevice();
+    } catch (err) {
+      setMessage({ kind: "error", text: explainError(err) });
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <section class="passkeys-section">
       <h2 style={{ "margin-bottom": "0.5rem" }}>Passkeys</h2>
@@ -295,6 +357,32 @@ export default function PasskeysSection(): JSX.Element {
           </div>
         )}
       </Show>
+
+      {/* A3 (GDPR) — danger zone: permanent account deletion. */}
+      <div
+        style={{
+          "margin-top": "2rem",
+          "padding-top": "1rem",
+          "border-top": "1px solid var(--surface-border, #ccc)",
+        }}
+      >
+        <h3 style={{ "margin-bottom": "0.25rem", color: "var(--error)" }}>
+          Delete account
+        </h3>
+        <p style={{ color: "var(--surface-muted)", "margin-top": 0 }}>
+          Permanently erase your account from the server (username, keys,
+          recovery factors, backup) and wipe this device. This cannot be undone.
+        </p>
+        <button
+          type="button"
+          class="danger"
+          style={{ color: "var(--error)" }}
+          disabled={busy()}
+          onClick={() => void onDeleteAccount()}
+        >
+          Delete my account
+        </button>
+      </div>
     </section>
   );
 }

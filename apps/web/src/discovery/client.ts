@@ -363,6 +363,28 @@ export class DiscoveryClient {
     throw new DiscoveryHttpError(response.status, `${endpoint} (DELETE)`, text);
   }
 
+  /** A3 (GDPR erasure) — `DELETE /discovery/account`. Purges this account's
+   *  discovery footprint (username binding, identity bundle, KeyPackage, owned
+   *  invites). Bearer-auth; the server keys the purge on the verified session
+   *  token's account_id, so the caller can only erase their own. Idempotent
+   *  (204). */
+  async deleteAccount(): Promise<void> {
+    const endpoint = "/discovery/account";
+    const url = `${this.baseUrl}${endpoint}`;
+    let response: Response;
+    try {
+      response = await fetch(url, {
+        method: "DELETE",
+        headers: { ...this.authHeaders() },
+      });
+    } catch (err) {
+      throw new DiscoveryNetworkError(`${endpoint} (DELETE)`, err);
+    }
+    if (response.status === 204) return;
+    const text = await safeReadBody(response);
+    throw new DiscoveryHttpError(response.status, `${endpoint} (DELETE)`, text);
+  }
+
   /** Wire-level `POST /discovery/invite/by-owner` (Phase
    *  1.18d2b-list). Returns the raw wire response on 200,
    *  `null` on 404, throws `DiscoveryHttpError` on any other

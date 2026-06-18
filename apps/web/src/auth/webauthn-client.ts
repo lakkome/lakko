@@ -246,6 +246,7 @@ interface AuthPublicKeyCredentialJSON {
  *  same thing on every platform. */
 export const ACTION_DOMAIN_DELETE_CREDENTIAL = "lakko/action/delete-credential/v1";
 export const ACTION_DOMAIN_REMOVE_DEVICE = "lakko/action/remove-device/v1";
+export const ACTION_DOMAIN_DELETE_ACCOUNT = "lakko/action/delete-account/v1";
 
 export interface ActionStartRequest {
   /** URL-safe base64 of the 32-byte action hash. */
@@ -362,6 +363,20 @@ export class WebauthnClient {
     const response = await this.fetchAuthed(endpoint, {
       method: "DELETE",
     });
+    if (!response.ok) {
+      const body = await safeReadBody(response);
+      throw new WebauthnHttpError(response.status, endpoint, body);
+    }
+  }
+
+  /** A3 (GDPR erasure) — delete the whole account on `services/auth`
+   *  (`DELETE /account`, FK-cascade over all auth state). Bearer-auth; when the
+   *  account has a passkey the server ALSO requires a fresh action grant, so the
+   *  caller must run [`assertAction`] with [`actionHashForDeleteAccount`] first
+   *  (a 403 `ActionRequired` surfaces here if the grant is missing). */
+  async deleteAccount(): Promise<void> {
+    const endpoint = "/account";
+    const response = await this.fetchAuthed(endpoint, { method: "DELETE" });
     if (!response.ok) {
       const body = await safeReadBody(response);
       throw new WebauthnHttpError(response.status, endpoint, body);
@@ -561,6 +576,14 @@ export async function actionHashForRemoveDevice(
   signaturePublicKey: Uint8Array,
 ): Promise<string> {
   return deriveActionHash(ACTION_DOMAIN_REMOVE_DEVICE, signaturePublicKey);
+}
+
+/** A3 — action hash for deleting the account identified by its raw 16-byte
+ *  `accountId`. Matches `services/auth::delete_account_action_hash`. */
+export async function actionHashForDeleteAccount(
+  accountId: Uint8Array,
+): Promise<string> {
+  return deriveActionHash(ACTION_DOMAIN_DELETE_ACCOUNT, accountId);
 }
 
 function base64urlToBuffer(s: string): ArrayBuffer {
