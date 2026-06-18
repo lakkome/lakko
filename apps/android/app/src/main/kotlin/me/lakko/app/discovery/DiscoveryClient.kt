@@ -336,6 +336,30 @@ public class DiscoveryClient(
         )
     }
 
+    /** A3 (GDPR erasure) — `DELETE /discovery/account`. Purges this account's
+     *  discovery footprint (username binding, identity bundle, KeyPackage,
+     *  owned invites). Bearer-auth; the server keys the purge on the verified
+     *  session token's account_id. Idempotent (204). */
+    public suspend fun deleteAccount() {
+        val endpoint = "/discovery/account"
+        val url = "$baseUrl$endpoint"
+        val response: HttpResponse = try {
+            client.delete(url) {
+                sessionToken?.let {
+                    header(io.ktor.http.HttpHeaders.Authorization, "Bearer $it")
+                }
+            }
+        } catch (cause: Throwable) {
+            throw DiscoveryNetworkError("$endpoint (DELETE)", cause)
+        }
+        if (response.status.isSuccess()) return
+        throw DiscoveryHttpError(
+            status = response.status.value,
+            endpoint = "$endpoint (DELETE)",
+            body = response.safeReadBody(),
+        )
+    }
+
     /** Wire-level `DELETE /discovery/call-invite/{blob_id}` —
      *  owner-signed revocation of a [CallInviteCapability] blob
      *  (Phase 3c3-revoke). Sibling of [inviteRevoke]; the wire

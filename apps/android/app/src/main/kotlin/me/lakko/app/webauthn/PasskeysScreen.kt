@@ -15,8 +15,10 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -27,6 +29,9 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -65,6 +70,8 @@ public fun PasskeysScreen(
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val context = LocalContext.current
+    // A3 — drives the delete-account confirmation dialog.
+    var confirmingDelete by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) { viewModel.refresh() }
 
@@ -165,7 +172,51 @@ public fun PasskeysScreen(
                 is Message.Error -> StatusBanner(text = m.text, isError = true)
                 null -> Spacer(Modifier.height(0.dp))
             }
+
+            // A3 (GDPR) — permanent account deletion (danger zone).
+            HorizontalDivider(modifier = Modifier.padding(vertical = 16.dp))
+            Text(
+                text = "Delete account",
+                color = MaterialTheme.colorScheme.error,
+            )
+            Text(
+                text = "Permanently erase your account from the server (username, " +
+                    "keys, recovery factors, backup) and wipe this device. This " +
+                    "cannot be undone.",
+                style = MaterialTheme.typography.bodySmall,
+            )
+            Button(
+                onClick = { confirmingDelete = true },
+                enabled = !state.busy,
+                modifier = Modifier.fillMaxWidth(),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = MaterialTheme.colorScheme.error,
+                ),
+            ) {
+                Text("Delete my account")
+            }
         }
+    }
+
+    if (confirmingDelete) {
+        AlertDialog(
+            onDismissRequest = { confirmingDelete = false },
+            title = { Text("Delete your account permanently?") },
+            text = {
+                Text("This erases your server-side identity and wipes this device. It cannot be undone.")
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmingDelete = false
+                    viewModel.deleteAccount(context)
+                }) {
+                    Text("Delete my account", color = MaterialTheme.colorScheme.error)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmingDelete = false }) { Text("Cancel") }
+            },
+        )
     }
 }
 

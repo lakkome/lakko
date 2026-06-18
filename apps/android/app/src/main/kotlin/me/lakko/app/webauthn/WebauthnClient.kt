@@ -312,6 +312,20 @@ public class WebauthnClient(
         ensure2xx(response, endpoint)
     }
 
+    /** A3 (GDPR erasure) — `DELETE /account`. Deletes the whole account on
+     *  `services/auth` (FK-cascade over all auth state). Bearer-auth; when the
+     *  account has a passkey the server answers 403 unless a fresh action grant
+     *  was minted, so the caller runs [assertAction] with
+     *  [actionHashForDeleteAccount] first and retries — the 403 surfaces here as
+     *  a [WebauthnHttpError]. */
+    public suspend fun deleteAccount() {
+        val endpoint = "/account"
+        val response = client.delete("$baseUrl$endpoint") {
+            sessionToken?.let { header(HttpHeaders.Authorization, "Bearer $it") }
+        }
+        ensure2xx(response, endpoint)
+    }
+
     // -----------------------------------------------------------------
     // Internal
     // -----------------------------------------------------------------
@@ -509,6 +523,11 @@ public const val ACTION_DOMAIN_DELETE_CREDENTIAL: String =
 public const val ACTION_DOMAIN_REMOVE_DEVICE: String =
     "lakko/action/remove-device/v1"
 
+/** Domain separator bound into the delete-account action hash (A3 — GDPR
+ *  erasure). Matches `services/auth`'s `ACTION_DOMAIN_DELETE_ACCOUNT`. */
+public const val ACTION_DOMAIN_DELETE_ACCOUNT: String =
+    "lakko/action/delete-account/v1"
+
 /** `action_hash = SHA-256(domain_utf8 || identifier)`, URL-safe
  *  base64 with no padding and no wrap. */
 private fun deriveActionHash(domain: String, identifier: ByteArray): String {
@@ -540,3 +559,8 @@ public fun actionHashForDeleteCredential(credentialIdB64: String): String {
  *  signature public key is [signaturePublicKey]. */
 public fun actionHashForRemoveDevice(signaturePublicKey: ByteArray): String =
     deriveActionHash(ACTION_DOMAIN_REMOVE_DEVICE, signaturePublicKey)
+
+/** Action hash for deleting the account identified by its raw 16-byte
+ *  [accountId] (A3). Matches `services/auth`'s `delete_account_action_hash`. */
+public fun actionHashForDeleteAccount(accountId: ByteArray): String =
+    deriveActionHash(ACTION_DOMAIN_DELETE_ACCOUNT, accountId)

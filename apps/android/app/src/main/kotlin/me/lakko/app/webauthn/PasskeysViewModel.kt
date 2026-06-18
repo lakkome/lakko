@@ -13,6 +13,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import me.lakko.app.auth.AuthRepository
+import me.lakko.app.discovery.DiscoveryClient
 import me.lakko.app.auth.AuthState
 import me.lakko.app.auth.base64Encode
 import me.lakko.app.devices.DeviceRemoval
@@ -251,6 +252,70 @@ public class PasskeysViewModel(
                         message = Message.Error(
                             e.message ?: "Could not remove the passkey.",
                         ),
+                    )
+                }
+            }
+        }
+    }
+
+    /**
+     * A3 (GDPR erasure) — delete the whole account across services + wipe this
+     * device. Auth `DELETE /account` (on a 403, the account has a passkey, so
+     * run the action ceremony bound to this account + retry once, fail-closed)
+     * -> best-effort discovery purge -> local `forgetDevice` wipe + sign-out.
+     */
+    public fun deleteAccount(context: Context) {
+        rebindSession()
+        val secrets = repo.identitySecrets.value ?: run {
+            mutableState.update { it.copy(message = Message.Error("Session not ready.")) }
+            return
+        }
+        if (mutableState.value.busy) return
+        mutableState.update { it.copy(busy = true, message = null) }
+        viewModelScope.launch {
+            try {
+                try {
+                    client.deleteAccount()
+                } catch (e: WebauthnHttpError) {
+                    if (e.status == 403) {
+                        val actionHashB64 = actionHashForDeleteAccount(secrets.accountId)
+                        client.assertAction(
+                            context = context,
+                            actionHashB64 = actionHashB64,
+                            registration = registration,
+                        )
+                        client.deleteAccount()
+                    } else {
+                        throw e
+                    }
+                }
+                // Best-effort discovery purge — the auth tier is the critical
+                // erasure; the session token is about to be invalidated anyway.
+                try {
+                    val discovery = DiscoveryClient()
+                    discovery.setSessionToken(secrets.sessionToken)
+                    discovery.deleteAccount()
+                } catch (_: Throwable) {
+                    // best-effort
+                }
+                // Local wipe + full sign-out on this device.
+                repo.forgetDevice()
+            } catch (e: WebauthnUserCancelledError) {
+                mutableState.update {
+                    it.copy(
+                        busy = false,
+                        message = Message.Error("Cancelled. Your account was not deleted."),
+                    )
+                }
+            } catch (e: WebauthnHttpError) {
+                mutableState.update {
+                    it.copy(busy = false, message = Message.Error(explain(e)))
+                }
+            } catch (e: Throwable) {
+                mutableState.update {
+                    it.copy(
+                        busy = false,
+                        message = Message.Error(e.message ?: "Could not delete the account."),
                     )
                 }
             }
