@@ -449,6 +449,60 @@ public final class ChatRepository: ObservableObject {
         return try? record.group.ownRole(identity: identity)
     }
 
+    /// The group's ADR-0022 role table (`owner` + `admins` signature keys), or
+    /// `nil` for an open / legacy group. The members UI uses it to label the
+    /// per-member promote / demote toggle.
+    public func groupRoles(groupIdHex: String) -> RoleTable? {
+        guard let record = groups[groupIdHex] else { return nil }
+        return try? record.group.groupRoles()
+    }
+
+    /// Promote / demote a member as admin (owner only — enforced on the
+    /// receiving side). Reads the role table, adds or removes the member's
+    /// signature key from the admin set, and publishes the `setGroupRoles`
+    /// commit (own-marked for echo suppression). Returns the commit's DS id.
+    public func setMemberAdmin(
+        groupIdHex: String,
+        memberSignaturePubkey: Data,
+        makeAdmin: Bool
+    ) async throws -> Int64 {
+        guard let identity = canonicalIdentity else {
+            throw ChatError.argument("ChatRepository not bootstrapped — call bootstrap() first")
+        }
+        guard let record = groups[groupIdHex] else {
+            throw ChatError.argument("no live Group handle for \(groupIdHex)")
+        }
+        guard let table = try? record.group.groupRoles() else {
+            throw ChatError.argument("group has no role table")
+        }
+        var admins = table.admins.filter { $0 != memberSignaturePubkey }
+        if makeAdmin {
+            admins.append(memberSignaturePubkey)
+        }
+        let commitBytes: Data
+        do {
+            commitBytes = try record.group.setGroupRoles(
+                identity: identity,
+                owner: table.owner,
+                admins: admins
+            )
+        } catch {
+            throw ChatError.wrapped("setGroupRoles failed", underlying: error)
+        }
+        let commitPublish: PublishResult
+        do {
+            commitPublish = try await dsClient.publishGroup(
+                groupId: record.groupId,
+                payload: commitBytes
+            )
+        } catch {
+            throw ChatError.wrapped("DS publishGroup (role change) failed", underlying: error)
+        }
+        chatClient.markOwnPublishedCommit(messageId: commitPublish.id)
+        persistSnapshotBestEffort()
+        return commitPublish.id
+    }
+
     /// Add an already-resolved recipient to an EXISTING group (mirror of
     /// ``startGroupWith`` but for a live group). The caller resolves +
     /// G-4-verifies `@username -> (accountId, signaturePubkey)` first (the

@@ -97,6 +97,12 @@ public final class ChatViewModel: ObservableObject {
     /// or an open/legacy group with no role table); `false` for a plain member.
     /// The sheet hides the add field + per-member Remove when this is `false`.
     @Published public private(set) var canManageMembers: Bool = true
+    /// ADR-0022 — `true` when the local member is the owner (only the owner sees
+    /// the per-member promote / demote toggle).
+    @Published public private(set) var isOwner: Bool = false
+    /// The group's current role table (owner + admins), or `nil` for an open
+    /// group — drives the per-member admin labelling.
+    @Published public private(set) var roleTable: RoleTable?
 
     // MARK: - Wiring
 
@@ -397,7 +403,21 @@ public final class ChatViewModel: ObservableObject {
     /// Re-read the live MLS roster + the local member's role from the repository.
     func refreshMembers() {
         members = repository.members(groupIdHex: groupIdHex) ?? []
-        canManageMembers = repository.ownRole(groupIdHex: groupIdHex) != .member
+        let role = repository.ownRole(groupIdHex: groupIdHex)
+        canManageMembers = role != .member
+        isOwner = role == .owner
+        roleTable = repository.groupRoles(groupIdHex: groupIdHex)
+    }
+
+    /// `true` when `member` is an admin in the current role table.
+    func memberIsAdmin(_ member: GroupMember) -> Bool {
+        roleTable?.admins.contains(member.signaturePublicKey) ?? false
+    }
+
+    /// `true` when `member` is the group owner (the owner row never shows a
+    /// promote / demote toggle).
+    func memberIsOwner(_ member: GroupMember) -> Bool {
+        roleTable?.owner == member.signaturePublicKey
     }
 
     /// Our own leaf index — the roster marks it "(you)" and blocks self-removal.
@@ -472,6 +492,28 @@ public final class ChatViewModel: ObservableObject {
             } catch {
                 membershipError = error.localizedDescription
                 NSLog("onRemoveMember failed: %@", error.localizedDescription)
+            }
+        }
+    }
+
+    /// Promote / demote a member as admin (owner only — the toggle is shown
+    /// only when `isOwner`). Publishes the `setGroupRoles` commit. Fail-closed.
+    func onToggleAdmin(member: GroupMember, makeAdmin: Bool) {
+        guard !membershipBusy else { return }
+        membershipBusy = true
+        membershipError = nil
+        Task { @MainActor in
+            defer { membershipBusy = false }
+            do {
+                _ = try await repository.setMemberAdmin(
+                    groupIdHex: groupIdHex,
+                    memberSignaturePubkey: member.signaturePublicKey,
+                    makeAdmin: makeAdmin
+                )
+                refreshMembers()
+            } catch {
+                membershipError = error.localizedDescription
+                NSLog("onToggleAdmin failed: %@", error.localizedDescription)
             }
         }
     }

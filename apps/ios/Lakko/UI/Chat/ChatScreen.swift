@@ -872,6 +872,21 @@ private struct MembersSheet: View {
                         HStack {
                             Text(viewModel.memberLabel(member))
                             Spacer()
+                            // Owner-only promote / demote toggle; never the
+                            // owner's own row (ADR-0022).
+                            if viewModel.isOwner, !viewModel.memberIsOwner(member) {
+                                let isAdmin = viewModel.memberIsAdmin(member)
+                                Button {
+                                    viewModel.onToggleAdmin(
+                                        member: member,
+                                        makeAdmin: !isAdmin
+                                    )
+                                } label: {
+                                    Text(isAdmin ? "Remove admin" : "Make admin")
+                                }
+                                .buttonStyle(.borderless)
+                                .disabled(viewModel.membershipBusy)
+                            }
                             // Remove only when we may manage members (owner /
                             // admin / open group) and it is not our own leaf.
                             if viewModel.canManageMembers,
