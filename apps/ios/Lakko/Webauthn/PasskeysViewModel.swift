@@ -28,6 +28,8 @@ public final class PasskeysViewModel: ObservableObject {
     @Published public private(set) var isBusy: Bool = false
     @Published public var nickname: String = ""
     @Published public private(set) var message: StatusMessage?
+    /// A3 — the prepared data-export file, ready for a share sheet once set.
+    @Published public private(set) var exportFileUrl: URL?
 
     public enum StatusMessage: Equatable {
         case ok(String)
@@ -250,6 +252,47 @@ public final class PasskeysViewModel: ObservableObject {
         } catch {
             message = .error(error.localizedDescription)
         }
+    }
+
+    /// A3 (GDPR portability) — fetch what the server holds about the account,
+    /// wrap it in a portable JSON document, write it to a temp file, and expose
+    /// the file URL for a share sheet. The E2EE content lives on-device and is
+    /// exported via the encrypted Backup, not here.
+    public func exportData() async {
+        rebindSession()
+        isBusy = true
+        message = nil
+        defer { isBusy = false }
+        do {
+            let server = try await client.exportAccount()
+            let doc = ExportDoc(
+                schema: "lakko/account-export/v1",
+                exported_at: ISO8601DateFormatter().string(from: Date()),
+                server: server,
+                note: "Your messages, contacts, and group state are end-to-end "
+                    + "encrypted and live only on your devices — export them via "
+                    + "the encrypted Backup."
+            )
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            let data = try encoder.encode(doc)
+            let url = FileManager.default.temporaryDirectory
+                .appendingPathComponent("lakko-account-export.json")
+            try data.write(to: url, options: .atomic)
+            exportFileUrl = url
+            message = .ok("Export ready — tap Share to save it.")
+        } catch let error as WebauthnClientError {
+            message = .error(Self.explain(error))
+        } catch {
+            message = .error(error.localizedDescription)
+        }
+    }
+
+    private struct ExportDoc: Encodable {
+        let schema: String
+        let exported_at: String
+        let server: AccountExport
+        let note: String
     }
 
     // MARK: - Helpers

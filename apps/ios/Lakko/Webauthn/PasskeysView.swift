@@ -110,6 +110,32 @@ public struct PasskeysView: View {
 
                 Divider().padding(.vertical, 12)
 
+                // A3 (GDPR) — data portability.
+                Text("Your data")
+                Text(
+                    "Download a copy of what the server holds about your "
+                        + "account. Messages and contacts are end-to-end "
+                        + "encrypted on your devices — export those via Backup."
+                )
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                Button {
+                    Task { await viewModel.exportData() }
+                } label: {
+                    Text("Export my data")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.large)
+                .disabled(viewModel.isBusy)
+                if let url = viewModel.exportFileUrl {
+                    ShareLink(item: url) {
+                        Label("Share export", systemImage: "square.and.arrow.up")
+                    }
+                }
+
+                Divider().padding(.vertical, 12)
+
                 // A3 (GDPR) — permanent account deletion (danger zone).
                 Button(role: .destructive) {
                     confirmingDelete = true

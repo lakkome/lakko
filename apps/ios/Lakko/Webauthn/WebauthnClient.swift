@@ -164,6 +164,12 @@ public final class WebauthnClient {
         try await getJson(endpoint: "/webauthn/credentials", authed: true)
     }
 
+    /// A3 (GDPR portability) — `GET /account/export`. Bearer-auth; returns what
+    /// `services/auth` holds about the account (metadata + auth-factor existence).
+    public func exportAccount() async throws -> AccountExport {
+        try await getJson(endpoint: "/account/export", authed: true)
+    }
+
     public func deleteCredential(credentialIdB64: String) async throws {
         let endpoint = "/webauthn/credentials/\(credentialIdB64)"
         var request = try buildRequest(endpoint: endpoint, method: "DELETE")
@@ -516,6 +522,17 @@ public struct PasskeyLoginResult {
 
 public struct ListCredentialsResponse: Decodable {
     public let credentials: [CredentialSummary]
+}
+
+/// A3 — `GET /account/export` shape: what `services/auth` holds about the
+/// account (metadata + auth-factor existence; never the factor secrets).
+public struct AccountExport: Codable {
+    public let account_id_b64: String
+    public let created_at_ms: Int64
+    public let identity_version: Int64
+    public let passkey_count: Int64
+    public let has_totp: Bool
+    public let recovery_contact_kinds: [Int64]
 }
 
 public struct CredentialSummary: Decodable, Identifiable {
