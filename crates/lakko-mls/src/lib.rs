@@ -114,4 +114,14 @@ pub mod fuzz_api {
     pub fn open_history_bundle(bytes: &[u8]) -> bool {
         crate::history_bundle::open_bundle(&[0u8; 32], bytes).is_ok()
     }
+
+    /// Decode the ADR-0022 `0xFF02` role-table body (`RoleTable::decode`). The
+    /// bytes are attacker-touchable: the role table travels inside a Welcome or
+    /// a `GroupContextExtensions` commit a malicious group founder / member can
+    /// craft, reaching this bounded, fail-closed parser before any role lookup.
+    /// Any panic / overflow / runaway allocation here is a vulnerability.
+    #[must_use]
+    pub fn decode_role_table(bytes: &[u8]) -> bool {
+        crate::group_roles::RoleTable::decode(bytes).is_ok()
+    }
 }

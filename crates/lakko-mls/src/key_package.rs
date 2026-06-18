@@ -26,12 +26,13 @@ impl Identity {
     /// Returns [`Error::KeyPackage`] on any OpenMLS-side failure.
     pub fn create_key_package(&self) -> Result<KeyPackage> {
         let bundle = KeyPackage::builder()
-            // G-13 (ADR-0015): advertise the DeviceGroup removal-policy
-            // extension type so this device can join a DeviceGroup that
-            // carries the policy (OpenMLS validates every member's leaf
-            // advertises a GroupContext extension type in use). Harmless for
-            // non-DeviceGroup uses — they simply never carry the extension.
-            .leaf_node_capabilities(crate::device_group::device_leaf_capabilities(
+            // Advertise support for all Lakko custom GroupContext extension
+            // types (DeviceGroup removal-policy 0xFF01, ADR-0015; conversation
+            // role table 0xFF02, ADR-0022) so this KeyPackage can be added to
+            // either kind of group — OpenMLS validates every member's leaf
+            // advertises each GroupContext extension type the group has in use.
+            // Harmless for a group that uses neither.
+            .leaf_node_capabilities(crate::device_group::lakko_leaf_capabilities(
                 self.ciphersuite,
             ))
             .build(

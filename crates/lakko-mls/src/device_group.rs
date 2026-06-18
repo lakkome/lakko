@@ -83,16 +83,24 @@ pub(crate) const DEVICE_POLICY_EXTENSION_TYPE: u16 = 0xFF01;
 /// Policy payload byte: device removals require a peer-verified attestation.
 const POLICY_REQUIRE_ATTESTED_REMOVALS: u8 = 1;
 
-/// Leaf capabilities every Lakko device advertises so it can participate in
-/// a DeviceGroup that carries the removal-policy GroupContext extension
-/// (G-13, ADR-0015). Shared by DeviceGroup creation and KeyPackage creation
-/// (a device may need to JOIN such a group, and OpenMLS validates that every
-/// member's leaf advertises a GroupContext extension type in use).
-pub(crate) fn device_leaf_capabilities(cs: Ciphersuite) -> Capabilities {
+/// Leaf capabilities every Lakko leaf advertises so it can participate in any
+/// Lakko group that carries one of our custom GroupContext-extension policies.
+/// Lists **all** Lakko extension types — the DeviceGroup removal-policy
+/// `0xFF01` (G-13, ADR-0015) and the conversation-group role table `0xFF02`
+/// (ADR-0022) — because OpenMLS validates that every member's leaf advertises
+/// each GroupContext extension type a group it joins has in use, and a single
+/// device leaf / KeyPackage may join either kind of group. Declaring both is
+/// harmless for a group that uses neither (it simply never carries them).
+/// Shared by DeviceGroup creation, conversation `Group::create`, and
+/// KeyPackage creation.
+pub(crate) fn lakko_leaf_capabilities(cs: Ciphersuite) -> Capabilities {
     Capabilities::new(
         None,
         Some(&[cs]),
-        Some(&[ExtensionType::Unknown(DEVICE_POLICY_EXTENSION_TYPE)]),
+        Some(&[
+            ExtensionType::Unknown(DEVICE_POLICY_EXTENSION_TYPE),
+            ExtensionType::Unknown(crate::group_roles::ROLE_EXTENSION_TYPE),
+        ]),
         None,
         None,
     )
@@ -196,8 +204,8 @@ impl DeviceGroup {
             // travels inside Welcomes so a freshly-paired device
             // doesn't need an out-of-band tree fetch.
             .use_ratchet_tree_extension(true)
-            // Advertise support for the removal-policy GroupContext extension.
-            .capabilities(device_leaf_capabilities(identity.ciphersuite()))
+            // Advertise support for all Lakko GroupContext extensions.
+            .capabilities(lakko_leaf_capabilities(identity.ciphersuite()))
             .with_group_context_extensions(required)
             .build();
 

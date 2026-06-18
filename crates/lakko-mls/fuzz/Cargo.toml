@@ -59,3 +59,10 @@ path = "fuzz_targets/history_bundle_open.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "role_table_decode"
+path = "fuzz_targets/role_table_decode.rs"
+test = false
+doc = false
+bench = false

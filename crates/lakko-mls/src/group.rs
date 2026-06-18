@@ -13,11 +13,14 @@
 //! - [`Group::process_incoming`] — decrypt / advance the state machine
 //! - [`Group::export_secret`] — derive a key for non-MLS uses (SFrame, etc.)
 
-use openmls::extensions::Extensions;
-use openmls::framing::{MlsMessageBodyIn, MlsMessageIn, MlsMessageOut};
-use openmls::group::{
-    GroupContext, MlsGroup, MlsGroupCreateConfig, MlsGroupJoinConfig, StagedWelcome,
+use openmls::extensions::{
+    Extension, ExtensionType, Extensions, RequiredCapabilitiesExtension, UnknownExtension,
 };
+use openmls::framing::{MlsMessageBodyIn, MlsMessageIn, MlsMessageOut, Sender};
+use openmls::group::{
+    GroupContext, MlsGroup, MlsGroupCreateConfig, MlsGroupJoinConfig, StagedCommit, StagedWelcome,
+};
+use openmls::messages::proposals::Proposal;
 use openmls::prelude::{KeyPackage, LeafNodeIndex, ProcessedMessageContent, ProtocolVersion};
 use openmls_traits::OpenMlsProvider as _;
 use tls_codec::{Deserialize as _, Serialize as _};
@@ -92,6 +95,23 @@ impl Group {
     ///
     /// Returns [`Error::Group`] for any OpenMLS-side failure.
     pub fn create(identity: &Identity) -> Result<Self> {
+        // ADR-0022 (owner-bootstrap option A) — a conversation group is
+        // role-enabled from creation with the creator as owner. The initial
+        // GroupContext carries the `0xFF02` role table (owner = creator, no
+        // admins) plus the required-capabilities declaration that lets a later
+        // `set_group_roles` commit rewrite it (promote / demote). Seeding the
+        // owner at creation closes the bootstrap window — there is never a
+        // moment when the group has no owner for a member to claim.
+        let owner: [u8; 32] = identity
+            .signature_public_key()
+            .try_into()
+            .map_err(|_| Error::Group("identity signature key is not 32 bytes".into()))?;
+        let initial = RoleTable::owner_only(owner);
+        let exts = Extensions::from_vec(vec![
+            role_required_capabilities(),
+            Extension::Unknown(ROLE_EXTENSION_TYPE, UnknownExtension(initial.encode())),
+        ])
+        .map_err(|e| Error::Group(format!("build role extensions: {e:?}")))?;
         let cfg = MlsGroupCreateConfig::builder()
             .ciphersuite(identity.ciphersuite())
             // Embed the ratchet tree in Welcomes so joiners can reconstruct
@@ -99,6 +119,12 @@ impl Group {
             // this for very large groups (Phase 4 channels) where the tree
             // can dominate Welcome size.
             .use_ratchet_tree_extension(true)
+            // Advertise support for all Lakko GroupContext extensions (so the
+            // role table can be carried + later rewritten).
+            .capabilities(crate::device_group::lakko_leaf_capabilities(
+                identity.ciphersuite(),
+            ))
+            .with_group_context_extensions(exts)
             .build();
 
         let inner = MlsGroup::new(
@@ -363,6 +389,103 @@ impl Group {
             .map(|table| table.role_of(identity.signature_public_key()))
     }
 
+    /// Rewrite the group's ADR-0022 role table (promote / demote admins).
+    /// Produces a `GroupContextExtensions` commit the caller broadcasts to the
+    /// group journal. **Authorisation is enforced on the RECEIVING side** by
+    /// [`process_incoming_verifying_roles`](Self::process_incoming_verifying_roles)
+    /// — only the owner's role-change commit is merged. This method just
+    /// produces the commit, so a non-owner who calls it has their commit
+    /// refused by every conformant peer.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Group`] on any OpenMLS-side failure.
+    pub fn set_group_roles(&mut self, identity: &Identity, roles: &RoleTable) -> Result<Vec<u8>> {
+        // `set_group_context_extensions` replaces the whole extension set, so
+        // re-include the required-capabilities declaration alongside the new
+        // table (the role type must stay in required_capabilities).
+        let exts = Extensions::from_vec(vec![
+            role_required_capabilities(),
+            Extension::Unknown(ROLE_EXTENSION_TYPE, UnknownExtension(roles.encode())),
+        ])
+        .map_err(|e| Error::Group(format!("build role extensions: {e:?}")))?;
+        let commit = self.set_group_context_extensions(identity, exts)?;
+        encode_message(&commit)
+    }
+
+    /// Apply an incoming conversation-group commit, **enforcing the ADR-0022
+    /// role policy**. When the group carries a role table (every group created
+    /// after ADR-0022 does, owner-bootstrap option A), a membership- or
+    /// role-changing commit is merged only if the committer's role authorises
+    /// it; otherwise it is **refused** — not merged — fail-closed (invariant
+    /// #4). A group with no role table (legacy / pre-ADR-0022) is **open**: this
+    /// behaves exactly like [`process_incoming`](Self::process_incoming).
+    ///
+    /// Authorisation is evaluated against the **pre-merge** role table (ADR-0022
+    /// Finding 2 — a self-promoting commit is judged against the table it
+    /// inherits, never the one it writes):
+    ///
+    /// * add a member               -> committer is owner or admin
+    /// * remove a non-owner member  -> committer is owner or admin
+    /// * remove the owner           -> refused (the owner is unremovable)
+    /// * remove only your own leaf  -> always allowed (leaving)
+    /// * change the role table       -> committer is the owner only
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Group`] when the committer's role does not authorise the commit
+    /// (left un-merged), plus the usual decode / process errors.
+    pub fn process_incoming_verifying_roles(
+        &mut self,
+        identity: &Identity,
+        bytes: &[u8],
+    ) -> Result<Incoming> {
+        let mls_in = decode_message(bytes)?;
+        let protocol = mls_in
+            .try_into_protocol_message()
+            .map_err(|e| Error::Message(format!("not a protocol message: {e:?}")))?;
+        let processed = self
+            .inner
+            .process_message(&identity.provider, protocol)
+            .map_err(|e| Error::Message(format!("process_message: {e:?}")))?;
+
+        // Capture the committer's leaf from the message envelope BEFORE
+        // consuming it. A non-member (external) sender is `None`, treated as
+        // unauthorised for every gated action below (fail-closed).
+        let committer_leaf: Option<u32> = match processed.sender() {
+            Sender::Member(idx) => Some(idx.u32()),
+            _ => None,
+        };
+
+        match processed.into_content() {
+            ProcessedMessageContent::ApplicationMessage(app) => {
+                Ok(Incoming::Application(app.into_bytes()))
+            },
+            ProcessedMessageContent::StagedCommitMessage(staged) => {
+                // Read the role table from the PRE-MERGE GroupContext. `None` =>
+                // an open (legacy) group, no enforcement.
+                if let Some(table) = self.group_roles() {
+                    let members = self.members();
+                    let committer_pubkey: Option<Vec<u8>> = committer_leaf.and_then(|leaf| {
+                        members
+                            .iter()
+                            .find(|m| m.leaf_index == leaf)
+                            .map(|m| m.signature_public_key.clone())
+                    });
+                    authorise_role_commit(&table, &members, committer_pubkey.as_deref(), &staged)?;
+                }
+                self.inner
+                    .merge_staged_commit(&identity.provider, *staged)
+                    .map_err(|e| Error::Group(format!("merge_staged_commit: {e:?}")))?;
+                Ok(Incoming::Commit)
+            },
+            ProcessedMessageContent::ProposalMessage(_) => Ok(Incoming::Proposal),
+            ProcessedMessageContent::ExternalJoinProposalMessage(_) => {
+                Ok(Incoming::ExternalJoinProposal)
+            },
+        }
+    }
+
     /// Encrypt an application payload for the current group epoch.
     ///
     /// # Errors
@@ -611,6 +734,80 @@ impl Group {
     pub(crate) fn from_mls_group(inner: MlsGroup) -> Self {
         Self { inner }
     }
+}
+
+/// The conversation-group `required_capabilities` extension declaring the
+/// ADR-0022 role-table type (`0xFF02`), so a `GroupContextExtensions` commit
+/// may carry / rewrite the table (OpenMLS refuses to add an extension whose
+/// type is not in `required_capabilities`).
+fn role_required_capabilities() -> Extension {
+    Extension::RequiredCapabilities(RequiredCapabilitiesExtension::new(
+        &[ExtensionType::Unknown(ROLE_EXTENSION_TYPE)],
+        &[],
+        &[],
+    ))
+}
+
+/// Enforce the ADR-0022 role policy on a staged commit BEFORE it is merged,
+/// against the **pre-merge** `table`. Returns `Err` (the commit must NOT be
+/// merged) when the committer's role does not authorise the commit's effect.
+/// `committer_pubkey` is the committer leaf's pre-merge signature key (`None`
+/// for an external / unresolved sender — treated as unauthorised).
+///
+/// Note on "leaving": MLS (OpenMLS `CannotRemoveSelf`) forbids a member from
+/// committing the removal of their **own** leaf, so a committer is never inside
+/// their own commit's removed set — a self-Remove-by-self never reaches this
+/// gate. A member leaves by an admin/owner committing the removal (authorised
+/// here normally) or, as a follow-up, a self-remove proposal an admin commits.
+fn authorise_role_commit(
+    table: &RoleTable,
+    members: &[MemberRecord],
+    committer_pubkey: Option<&[u8]>,
+    staged: &StagedCommit,
+) -> Result<()> {
+    let has_add = staged.add_proposals().next().is_some();
+    let removed_leaves: Vec<LeafNodeIndex> = staged
+        .remove_proposals()
+        .map(|qrp| qrp.remove_proposal().removed())
+        .collect();
+    let removes_owner = removed_leaves.iter().any(|leaf| {
+        members
+            .iter()
+            .find(|m| m.leaf_index == leaf.u32())
+            .is_some_and(|m| table.is_owner(&m.signature_public_key))
+    });
+    let has_role_change = staged
+        .queued_proposals()
+        .any(|qp| matches!(qp.proposal(), Proposal::GroupContextExtensions(_)));
+
+    let committer_is_owner = committer_pubkey.is_some_and(|pk| table.is_owner(pk));
+    let committer_can_admin = committer_pubkey.is_some_and(|pk| table.can_administer(pk));
+
+    // A role-table change (GroupContextExtensions) is owner-only.
+    if has_role_change && !committer_is_owner {
+        return Err(Error::Group(
+            "role-table change refused: committer is not the owner".into(),
+        ));
+    }
+    // The owner is unremovable, by anyone.
+    if removes_owner {
+        return Err(Error::Group(
+            "removal refused: the group owner cannot be removed".into(),
+        ));
+    }
+    // Any other removal, and any add, needs owner / admin.
+    if !removed_leaves.is_empty() && !committer_can_admin {
+        return Err(Error::Group(
+            "removal refused: committer is not owner or admin".into(),
+        ));
+    }
+    if has_add && !committer_can_admin {
+        return Err(Error::Group(
+            "add refused: committer is not owner or admin".into(),
+        ));
+    }
+
+    Ok(())
 }
 
 /// Encode any [`MlsMessageOut`] to its TLS wire form.
