@@ -369,6 +369,11 @@ fn build_app(state: AppState) -> Router {
             "/webauthn/credentials/{credential_id_b64}",
             delete(webauthn::delete_credential),
         )
+        // A3 (GDPR erasure) — delete the whole account (FK cascade purges all
+        // auth state). Bearer-auth + a passkey action grant when the account
+        // has a passkey (the discovery + storage tiers are purged by the client
+        // via their own bearer-auth'd deletes).
+        .route("/account", delete(webauthn::delete_account))
         // G-13 (ADR-0014) — action-binding ceremony. Bearer-auth: the
         // caller is an already-logged-in account attesting to a specific
         // action with one of its registered passkeys.

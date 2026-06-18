@@ -90,6 +90,7 @@
 
 #![forbid(unsafe_code)]
 
+mod account;
 pub(crate) mod auth;
 mod call_invite;
 mod channel_names;
@@ -319,6 +320,13 @@ pub(crate) fn build_app(state: AppState) -> Router {
     // matches the token's (anti-impersonation).
     let protected = Router::new()
         .route("/discovery/register", post(registry::register))
+        // A3 (GDPR erasure) — purge this account's discovery footprint
+        // (username binding, identity bundle, KeyPackage, owned invites).
+        // Session-token-gated; the account_id comes from the verified token.
+        .route(
+            "/discovery/account",
+            axum::routing::delete(account::delete_account),
+        )
         .route("/discovery/identity", post(identity_bundle::upload))
         .route("/discovery/keypackage", post(keypackage::upload))
         .route("/discovery/invite", post(invite::upload))

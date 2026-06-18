@@ -331,6 +331,57 @@ pub(crate) async fn delete_credential(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// A3 (GDPR right-to-erasure) — delete the authenticated account and ALL of its
+/// server-side **auth** state. `DELETE FROM accounts` cascades to every
+/// account-keyed table (OPAQUE registrations, passkeys, recovery factors,
+/// in-flight states + grants), so a single statement purges the auth tier.
+///
+/// Authorization: the session token proves the account (bearer middleware).
+/// When the account has a passkey, deletion ALSO requires a fresh single-use
+/// action grant bound to `SHA-256("lakko/action/delete-account/v1" ‖
+/// account_id)` — the client completes the `/auth/action/{start,finish}` passkey
+/// ceremony immediately before calling delete — so a stolen session token alone
+/// cannot erase an account that has a passkey (defence-in-depth, fail-closed,
+/// the remove-device posture of ADR-0015). A password-only account is deleted on
+/// the session token alone (there is no passkey to gesture with).
+///
+/// The discovery + storage tiers (username binding, identity bundle, KeyPackage,
+/// owned invites, backup blob) are account-keyed in their own DBs; the client
+/// purges them via their bearer-auth'd delete endpoints. The DS / push /
+/// channels / transparency tiers are account-opaque (invariant #5) and hold
+/// nothing to delete.
+pub(crate) async fn delete_account(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthenticatedAccount>,
+) -> Result<StatusCode, ApiError> {
+    // Does the account have at least one passkey? If so, require the passkey
+    // action grant (defence-in-depth); otherwise the session token alone
+    // authorizes deletion (a password-only account has no passkey to gesture).
+    let has_passkey: Option<i64> =
+        sqlx::query_scalar("SELECT 1 FROM webauthn_credentials WHERE account_id = ? LIMIT 1")
+            .bind(auth.0.as_slice())
+            .fetch_optional(&state.db)
+            .await
+            .map_err(ApiError::Db)?;
+
+    if has_passkey.is_some() {
+        let action_hash = crate::webauthn_action::delete_account_action_hash(&auth.0);
+        let consumed =
+            crate::webauthn_action::consume_action_grant(&state.db, &auth.0, &action_hash).await?;
+        if !consumed {
+            return Err(ApiError::ActionRequired);
+        }
+    }
+
+    // One statement; FK ON DELETE CASCADE purges every account-keyed auth table.
+    sqlx::query("DELETE FROM accounts WHERE id = ?")
+        .bind(auth.0.as_slice())
+        .execute(&state.db)
+        .await
+        .map_err(ApiError::Db)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 // ----------------------------------------------------------------
 // 2a2b — Authentication (anonymous)
 // ----------------------------------------------------------------

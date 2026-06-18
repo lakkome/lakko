@@ -62,6 +62,13 @@ pub(crate) const ACTION_GRANT_TTL_SECS: i64 = 120;
 /// lives next to the grant machinery.
 pub(crate) const ACTION_DOMAIN_DELETE_CREDENTIAL: &str = "lakko/action/delete-credential/v1";
 
+/// Domain separator for the *delete-account* action (A3 — GDPR erasure). MUST
+/// match the clients' `ACTION_DOMAIN_DELETE_ACCOUNT` byte-for-byte so a grant
+/// written from a client passkey ceremony matches what `webauthn::delete_account`
+/// recomputes. Account deletion is the most destructive op, so when the account
+/// has a passkey it is gated by this single-use grant on top of the session token.
+pub(crate) const ACTION_DOMAIN_DELETE_ACCOUNT: &str = "lakko/action/delete-account/v1";
+
 /// Lifetime of the action attestation signed on `/auth/action/finish`
 /// (G-13, ADR-0015). It must comfortably cover the removing device posting
 /// its `Remove` commit and online peers applying it. The apply-path
@@ -615,6 +622,20 @@ pub(crate) fn delete_credential_action_hash(credential_id: &[u8]) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(ACTION_DOMAIN_DELETE_CREDENTIAL.as_bytes());
     hasher.update(credential_id);
+    let digest = hasher.finalize();
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&digest);
+    out
+}
+
+/// Recompute the action hash a *delete-account* ceremony binds to:
+/// `SHA-256(domain ‖ account_id)` (A3). The clients use the same domain and the
+/// raw 16-byte account_id, so a grant from a client ceremony matches what
+/// `webauthn::delete_account` computes.
+pub(crate) fn delete_account_action_hash(account_id: &[u8; 16]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(ACTION_DOMAIN_DELETE_ACCOUNT.as_bytes());
+    hasher.update(account_id);
     let digest = hasher.finalize();
     let mut out = [0u8; 32];
     out.copy_from_slice(&digest);
