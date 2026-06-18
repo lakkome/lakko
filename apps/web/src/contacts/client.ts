@@ -1637,6 +1637,57 @@ export class ContactsClient {
     return { commitMessageId: commitPublish.id };
   }
 
+  /** ADR-0022 — promote / demote a member as an admin (owner only). Reads the
+   *  group's current role table, adds or removes `memberSigPubkey` from the
+   *  admin set, and produces + publishes the `setGroupRoles`
+   *  GroupContextExtensions commit. Peers accept it only because the committer
+   *  is the owner (the gate enforces that), so the caller must already be the
+   *  owner — the UI shows the toggle only then. The caller registers the
+   *  returned `commitMessageId` with `ChatClient.markOwnPublishedCommit`. */
+  async setMemberAdmin(
+    identity: IdentitySecrets | null,
+    group: WasmGroup,
+    memberSigPubkey: Uint8Array,
+    makeAdmin: boolean,
+  ): Promise<{ commitMessageId: number }> {
+    const myIdentity = await this.resolveIdentity(identity);
+
+    const owner = group.roleTableOwner();
+    if (owner === undefined) {
+      throw ContactsError.wrap(new Error("group has no role table"));
+    }
+    // Current admins, chunked into 32-byte keys.
+    const flat = group.roleTableAdmins();
+    const eq = (a: Uint8Array, b: Uint8Array): boolean =>
+      a.length === b.length && a.every((x, i) => x === b[i]);
+    const current: Uint8Array[] = [];
+    for (let i = 0; i + 32 <= flat.length; i += 32) {
+      current.push(flat.slice(i, i + 32));
+    }
+    let next = current.filter((a) => !eq(a, memberSigPubkey));
+    if (makeAdmin) next = [...next, memberSigPubkey];
+    const adminsFlat = new Uint8Array(next.length * 32);
+    next.forEach((a, i) => adminsFlat.set(a, i * 32));
+
+    let commitBytes: Uint8Array;
+    try {
+      commitBytes = group.setGroupRoles(myIdentity, owner, adminsFlat);
+    } catch (err) {
+      throw ContactsError.wrap(err);
+    }
+
+    let commitPublish;
+    try {
+      commitPublish = await this.ds.publishGroup(group.groupId, commitBytes);
+    } catch (err) {
+      throw ContactsError.wrap(err);
+    }
+
+    await this.persistBestEffort();
+
+    return { commitMessageId: commitPublish.id };
+  }
+
   /** Convenience wrapper around [`addMemberToGroup`] that
    *  resolves `@username` first. Mirror of
    *  [`startGroupWithUsername`] for the existing-group path. */

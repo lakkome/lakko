@@ -918,6 +918,35 @@ function ChatView(props: {
   // A plain member may not add / remove; everyone else (owner, admin, or an
   // open/legacy group where `ownRole` is `null`) may.
   const canManageMembers = (): boolean => ownRole() !== "member";
+  // ADR-0022 — only the owner may promote / demote admins.
+  const isOwner = (): boolean => ownRole() === "owner";
+
+  // The current admin set as hex sig-pubkey strings (re-read per
+  // `membersVersion`) — drives the per-member "Make/Remove admin" label.
+  const adminPubkeys = createMemo<Set<string>>(() => {
+    membersVersion();
+    const set = new Set<string>();
+    try {
+      const flat = props.entry.group.roleTableAdmins() as Uint8Array;
+      for (let i = 0; i + 32 <= flat.length; i += 32) {
+        set.add(hexOf(flat.slice(i, i + 32)));
+      }
+    } catch {
+      // open / legacy group with no role table — no admins.
+    }
+    return set;
+  });
+  // Owner sig-pubkey (hex), re-read per `membersVersion` — the owner row never
+  // shows a promote/demote toggle (the owner is fixed).
+  const ownerPubkeyHex = createMemo<string | null>(() => {
+    membersVersion();
+    try {
+      const o = props.entry.group.roleTableOwner() as Uint8Array | undefined;
+      return o ? hexOf(o) : null;
+    } catch {
+      return null;
+    }
+  });
 
   let nextTempId = 1;
 
@@ -1330,6 +1359,37 @@ function ChatView(props: {
       setMemberCount(props.entry.group.memberCount);
       setMembersVersion(membersVersion() + 1);
       setNotice(`Member at leaf #${leafIndex} removed (commit #${result.commitMessageId}).`);
+      void refresh();
+    } catch (err) {
+      setError(formatError(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // ADR-0022 — promote / demote a member as admin (owner only). Publishes the
+  // setGroupRoles commit + suppresses the echo, same shape as add / remove.
+  async function onToggleAdmin(
+    member: { leafIndex: number; sigPubkey: Uint8Array },
+    makeAdmin: boolean,
+  ): Promise<void> {
+    setError(null);
+    setNotice(null);
+    setBusy(true);
+    try {
+      const result = await contacts.setMemberAdmin(
+        props.requireIdentity(),
+        props.entry.group,
+        member.sigPubkey,
+        makeAdmin,
+      );
+      chat.markOwnPublishedCommit(result.commitMessageId);
+      setMembersVersion(membersVersion() + 1);
+      setNotice(
+        makeAdmin
+          ? `Promoted to admin (commit #${result.commitMessageId}).`
+          : `Removed as admin (commit #${result.commitMessageId}).`,
+      );
       void refresh();
     } catch (err) {
       setError(formatError(err));
@@ -1997,6 +2057,25 @@ function ChatView(props: {
                         </span>
                       }
                     >
+                      {/* ADR-0022 — only the owner promotes / demotes admins;
+                          never the owner's own row. */}
+                      <Show when={isOwner() && ownerPubkeyHex() !== hexOf(m.sigPubkey)}>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            void onToggleAdmin(
+                              m,
+                              !adminPubkeys().has(hexOf(m.sigPubkey)),
+                            );
+                          }}
+                          disabled={busy()}
+                          style={{ "font-size": "0.8rem" }}
+                        >
+                          {adminPubkeys().has(hexOf(m.sigPubkey))
+                            ? "Remove admin"
+                            : "Make admin"}
+                        </button>
+                      </Show>
                       {/* ADR-0022 — only owner/admin (or an open/legacy
                           group) sees Remove; a member's removal is refused. */}
                       <Show when={canManageMembers()}>
