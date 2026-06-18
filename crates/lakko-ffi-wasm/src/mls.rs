@@ -12,7 +12,7 @@ use lakko_mls::group::MemberAddition;
 use lakko_mls::{
     group, key_package, ChannelId as MlsChannelId, DeviceGroup as MlsDeviceGroup,
     Group as MlsGroup, Identity as MlsIdentity, Incoming as MlsIncoming,
-    PublisherGroup as MlsPublisherGroup,
+    PublisherGroup as MlsPublisherGroup, Role as MlsRole, RoleTable as MlsRoleTable,
 };
 use wasm_bindgen::prelude::*;
 
@@ -262,6 +262,20 @@ impl ProcessedMessage {
     }
 }
 
+/// A member's role in an ADR-0022 role-enabled group. Mirror of UniFFI's
+/// `Role`. The web gates the add / remove / promote affordances on this.
+#[wasm_bindgen]
+#[derive(Clone, Copy)]
+pub enum Role {
+    /// The group creator — exactly one, unremovable, the only role that may
+    /// change the role table.
+    Owner,
+    /// Appointed by the owner — may add / remove non-owner members.
+    Admin,
+    /// May not add or remove anyone.
+    Member,
+}
+
 // ============================================================================
 // Group
 // ============================================================================
@@ -378,6 +392,113 @@ impl Group {
             .map_err(|_| JsError::new("internal lock poisoned"))?;
         let result = g
             .process_incoming(&identity.inner, bytes)
+            .map_err(mls_err)?;
+        Ok(match result {
+            MlsIncoming::Application(data) => ProcessedMessage {
+                kind: ProcessedMessageKind::Application,
+                application_data: Some(data),
+            },
+            MlsIncoming::Commit => ProcessedMessage {
+                kind: ProcessedMessageKind::Commit,
+                application_data: None,
+            },
+            MlsIncoming::Proposal => ProcessedMessage {
+                kind: ProcessedMessageKind::Proposal,
+                application_data: None,
+            },
+            MlsIncoming::ExternalJoinProposal => ProcessedMessage {
+                kind: ProcessedMessageKind::ExternalJoinProposal,
+                application_data: None,
+            },
+        })
+    }
+
+    /// This member's ADR-0022 role, or `undefined` for an open / legacy group
+    /// (no role table). The web gates the add / remove / promote UI on this.
+    #[wasm_bindgen(js_name = ownRole)]
+    pub fn own_role(&self, identity: &Identity) -> Result<Option<Role>, JsError> {
+        let g = self
+            .inner
+            .lock()
+            .map_err(|_| JsError::new("internal lock poisoned"))?;
+        Ok(g.own_role(&identity.inner).map(|r| match r {
+            MlsRole::Owner => Role::Owner,
+            MlsRole::Admin => Role::Admin,
+            MlsRole::Member => Role::Member,
+        }))
+    }
+
+    /// The role table's owner signature key (32 bytes), or `undefined` for an
+    /// open / legacy group. A non-null return signals the group is role-enabled.
+    #[wasm_bindgen(js_name = roleTableOwner)]
+    pub fn role_table_owner(&self) -> Result<Option<Vec<u8>>, JsError> {
+        let g = self
+            .inner
+            .lock()
+            .map_err(|_| JsError::new("internal lock poisoned"))?;
+        Ok(g.group_roles().map(|t| t.owner().to_vec()))
+    }
+
+    /// The role table's admin signature keys, concatenated (each 32 bytes);
+    /// empty for an open group or one with no admins. The web slices this into
+    /// 32-byte chunks.
+    #[wasm_bindgen(js_name = roleTableAdmins)]
+    pub fn role_table_admins(&self) -> Result<Vec<u8>, JsError> {
+        let g = self
+            .inner
+            .lock()
+            .map_err(|_| JsError::new("internal lock poisoned"))?;
+        Ok(g.group_roles()
+            .map_or_else(Vec::new, |t| t.admins().concat()))
+    }
+
+    /// Rewrite the ADR-0022 role table (owner only — enforced on receive).
+    /// `owner` is 32 bytes; `admins_flat` is the concatenation of 32-byte admin
+    /// keys. Returns the `GroupContextExtensions` commit wire bytes to broadcast.
+    #[wasm_bindgen(js_name = setGroupRoles)]
+    pub fn set_group_roles(
+        &self,
+        identity: &Identity,
+        owner: &[u8],
+        admins_flat: &[u8],
+    ) -> Result<Vec<u8>, JsError> {
+        let owner: [u8; 32] = owner
+            .try_into()
+            .map_err(|_| JsError::new("owner key must be 32 bytes"))?;
+        if admins_flat.len() % 32 != 0 {
+            return Err(JsError::new("admins must be a multiple of 32 bytes"));
+        }
+        let mut admins = Vec::with_capacity(admins_flat.len() / 32);
+        for chunk in admins_flat.chunks_exact(32) {
+            let mut k = [0u8; 32];
+            k.copy_from_slice(chunk);
+            admins.push(k);
+        }
+        let table = MlsRoleTable::new(owner, admins);
+        let mut g = self
+            .inner
+            .lock()
+            .map_err(|_| JsError::new("internal lock poisoned"))?;
+        g.set_group_roles(&identity.inner, &table).map_err(mls_err)
+    }
+
+    /// Apply an incoming commit ENFORCING the ADR-0022 role policy — a commit
+    /// whose committer's role does not authorise its effect is REFUSED (not
+    /// merged), fail-closed. A group with no role table behaves like
+    /// [`Self::process_incoming`]. Use on the chat-message receive loop only;
+    /// do NOT use for call-group receives (ADR-0022 call-path caveat).
+    #[wasm_bindgen(js_name = processIncomingVerifyingRoles)]
+    pub fn process_incoming_verifying_roles(
+        &self,
+        identity: &Identity,
+        bytes: &[u8],
+    ) -> Result<ProcessedMessage, JsError> {
+        let mut g = self
+            .inner
+            .lock()
+            .map_err(|_| JsError::new("internal lock poisoned"))?;
+        let result = g
+            .process_incoming_verifying_roles(&identity.inner, bytes)
             .map_err(mls_err)?;
         Ok(match result {
             MlsIncoming::Application(data) => ProcessedMessage {

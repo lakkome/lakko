@@ -33,7 +33,7 @@ use lakko_mls::group::MemberAddition;
 use lakko_mls::{
     group, key_package, ChannelId as MlsChannelId, DeviceGroup as MlsDeviceGroup,
     Group as MlsGroup, Identity as MlsIdentity, Incoming as MlsIncoming,
-    PublisherGroup as MlsPublisherGroup,
+    PublisherGroup as MlsPublisherGroup, Role as MlsRole, RoleTable as MlsRoleTable,
 };
 
 pub mod attachments;
@@ -525,6 +525,30 @@ pub struct GroupMember {
     pub signature_public_key: Vec<u8>,
 }
 
+/// A member's role in an ADR-0022 role-enabled group. The UI gates the
+/// add / remove / promote affordances on the local member's role.
+#[derive(uniffi::Enum)]
+pub enum Role {
+    /// The group creator — exactly one, unremovable, the only role that may
+    /// change the role table.
+    Owner,
+    /// Appointed by the owner — may add / remove non-owner members.
+    Admin,
+    /// May not add or remove anyone.
+    Member,
+}
+
+/// The ADR-0022 admin role table: the owner's signature key + the admin set,
+/// each a raw 32-byte Ed25519 signature public key (the same key the roster
+/// matches against). Mirror of `lakko_mls::RoleTable`.
+#[derive(uniffi::Record)]
+pub struct RoleTable {
+    /// Owner signature public key (32 bytes).
+    pub owner: Vec<u8>,
+    /// Admin signature public keys (each 32 bytes), sorted + deduplicated.
+    pub admins: Vec<Vec<u8>>,
+}
+
 /// Lakko MLS conversation group.
 #[derive(uniffi::Object)]
 pub struct Group {
@@ -648,6 +672,75 @@ impl Group {
                 signature_public_key: m.signature_public_key,
             })
             .collect())
+    }
+
+    /// This member's ADR-0022 role in the group, or `None` when the group has
+    /// no role table (an open / legacy group). The UI gates the
+    /// add / remove / promote affordances on this.
+    pub fn own_role(&self, identity: &Identity) -> Result<Option<Role>, FfiError> {
+        let g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
+        Ok(g.own_role(&identity.inner).map(|r| match r {
+            MlsRole::Owner => Role::Owner,
+            MlsRole::Admin => Role::Admin,
+            MlsRole::Member => Role::Member,
+        }))
+    }
+
+    /// The group's ADR-0022 role table, or `None` for an open / legacy group.
+    pub fn group_roles(&self) -> Result<Option<RoleTable>, FfiError> {
+        let g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
+        Ok(g.group_roles().map(|t| RoleTable {
+            owner: t.owner().to_vec(),
+            admins: t.admins().iter().map(|a| a.to_vec()).collect(),
+        }))
+    }
+
+    /// Rewrite the group's ADR-0022 role table (promote / demote admins). Only
+    /// the owner's commit is merged by peers (enforced on the receiving side by
+    /// [`Self::process_incoming_verifying_roles`]). `owner` and every `admins`
+    /// entry must be a 32-byte Ed25519 signature public key. Returns the
+    /// `GroupContextExtensions` commit wire bytes to broadcast to the journal.
+    pub fn set_group_roles(
+        &self,
+        identity: &Identity,
+        owner: Vec<u8>,
+        admins: Vec<Vec<u8>>,
+    ) -> Result<Vec<u8>, FfiError> {
+        let owner: [u8; 32] = owner
+            .try_into()
+            .map_err(|_| FfiError::Codec("owner key must be 32 bytes".into()))?;
+        let mut admin_keys = Vec::with_capacity(admins.len());
+        for a in admins {
+            let k: [u8; 32] = a
+                .try_into()
+                .map_err(|_| FfiError::Codec("admin key must be 32 bytes".into()))?;
+            admin_keys.push(k);
+        }
+        let table = MlsRoleTable::new(owner, admin_keys);
+        let mut g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
+        Ok(g.set_group_roles(&identity.inner, &table)?)
+    }
+
+    /// Apply an incoming commit ENFORCING the ADR-0022 role policy — a commit
+    /// whose committer's role does not authorise its add / remove / role change
+    /// is REFUSED (not merged), fail-closed. A group with no role table behaves
+    /// like [`Self::process_incoming`]. Use this on the chat-message receive
+    /// loop; do NOT use it for call-group receives (the call group is
+    /// role-enabled but its welcome-ferry / KP-forward adds are legitimately
+    /// non-owner — ADR-0022 call-path caveat).
+    pub fn process_incoming_verifying_roles(
+        &self,
+        identity: &Identity,
+        bytes: Vec<u8>,
+    ) -> Result<ProcessedMessage, FfiError> {
+        let mut g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
+        let result = g.process_incoming_verifying_roles(&identity.inner, &bytes)?;
+        Ok(match result {
+            MlsIncoming::Application(data) => ProcessedMessage::Application { data },
+            MlsIncoming::Commit => ProcessedMessage::Commit,
+            MlsIncoming::Proposal => ProcessedMessage::Proposal,
+            MlsIncoming::ExternalJoinProposal => ProcessedMessage::ExternalJoinProposal,
+        })
     }
 
     /// Group identifier bytes (RFC 9420 `group_id`).
