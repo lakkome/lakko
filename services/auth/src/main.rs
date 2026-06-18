@@ -374,6 +374,9 @@ fn build_app(state: AppState) -> Router {
         // has a passkey (the discovery + storage tiers are purged by the client
         // via their own bearer-auth'd deletes).
         .route("/account", delete(webauthn::delete_account))
+        // A3 (GDPR data-portability) — export the account's auth-tier metadata
+        // + auth-factor existence (never the factor secrets, invariant #1).
+        .route("/account/export", get(webauthn::export_account))
         // G-13 (ADR-0014) — action-binding ceremony. Bearer-auth: the
         // caller is an already-logged-in account attesting to a specific
         // action with one of its registered passkeys.

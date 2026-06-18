@@ -382,6 +382,82 @@ pub(crate) async fn delete_account(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// A3 (GDPR data-portability) — what `services/auth` holds about the
+/// authenticated account. Deliberately thin: a zero-trust auth tier stores only
+/// account metadata + auth-factor EXISTENCE, never the factor secrets/hashes
+/// (invariant #1 — exporting the recovery-contact hash or TOTP secret would be
+/// both useless to the user and a security risk). The user's actual content
+/// (messages, contacts) lives client-side and is exported there from the backup.
+#[derive(serde::Serialize)]
+pub(crate) struct AccountExport {
+    /// URL-safe base64 of the raw 16-byte account_id.
+    account_id_b64: String,
+    /// Account creation time, unix-milliseconds.
+    created_at_ms: i64,
+    /// KT-log identity version (bumped on each rotation).
+    identity_version: i64,
+    /// Number of registered passkeys.
+    passkey_count: i64,
+    /// Whether a confirmed TOTP authenticator is enrolled.
+    has_totp: bool,
+    /// The confirmed recovery-contact KINDS (e.g. 1=phone, 2=email) — the
+    /// kinds only, never the contact values (invariant #1).
+    recovery_contact_kinds: Vec<i64>,
+}
+
+/// `GET /account/export` (A3) — bearer-auth; returns [`AccountExport`] for the
+/// authenticated account.
+pub(crate) async fn export_account(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthenticatedAccount>,
+) -> Result<Json<AccountExport>, ApiError> {
+    let account: Option<(i64, i64)> = sqlx::query_as(
+        "SELECT CAST(UNIX_TIMESTAMP(created_at) * 1000 AS SIGNED) AS created_at_ms, \
+                CAST(identity_version AS SIGNED) AS identity_version \
+         FROM accounts WHERE id = ?",
+    )
+    .bind(auth.0.as_slice())
+    .fetch_optional(&state.db)
+    .await
+    .map_err(ApiError::Db)?;
+    // A valid session token implies the account exists; a missing row is a
+    // benign deleted-account-vs-stale-token race — report zeros, not a 500.
+    let (created_at_ms, identity_version) = account.unwrap_or((0, 0));
+
+    let passkey_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM webauthn_credentials WHERE account_id = ?")
+            .bind(auth.0.as_slice())
+            .fetch_one(&state.db)
+            .await
+            .map_err(ApiError::Db)?;
+
+    let has_totp: Option<i64> = sqlx::query_scalar(
+        "SELECT 1 FROM totp_secrets WHERE account_id = ? AND confirmed_at IS NOT NULL LIMIT 1",
+    )
+    .bind(auth.0.as_slice())
+    .fetch_optional(&state.db)
+    .await
+    .map_err(ApiError::Db)?;
+
+    let recovery_contact_kinds: Vec<i64> = sqlx::query_scalar(
+        "SELECT CAST(kind AS SIGNED) FROM recovery_contacts \
+         WHERE account_id = ? AND confirmed_at IS NOT NULL ORDER BY kind",
+    )
+    .bind(auth.0.as_slice())
+    .fetch_all(&state.db)
+    .await
+    .map_err(ApiError::Db)?;
+
+    Ok(Json(AccountExport {
+        account_id_b64: URL_SAFE_NO_PAD.encode(auth.0),
+        created_at_ms,
+        identity_version,
+        passkey_count,
+        has_totp: has_totp.is_some(),
+        recovery_contact_kinds,
+    }))
+}
+
 // ----------------------------------------------------------------
 // 2a2b — Authentication (anonymous)
 // ----------------------------------------------------------------
