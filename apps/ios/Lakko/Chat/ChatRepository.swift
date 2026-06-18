@@ -440,6 +440,15 @@ public final class ChatRepository: ObservableObject {
         return try? record.group.ownLeafIndex()
     }
 
+    /// Our own ADR-0022 role in `groupIdHex` (`.owner` / `.admin` / `.member`),
+    /// or `nil` for an open / legacy group with no role table (or no handle).
+    /// The members UI gates the add / remove affordances on this.
+    public func ownRole(groupIdHex: String) -> Role? {
+        guard let identity = canonicalIdentity else { return nil }
+        guard let record = groups[groupIdHex] else { return nil }
+        return try? record.group.ownRole(identity: identity)
+    }
+
     /// Add an already-resolved recipient to an EXISTING group (mirror of
     /// ``startGroupWith`` but for a live group). The caller resolves +
     /// G-4-verifies `@username -> (accountId, signaturePubkey)` first (the

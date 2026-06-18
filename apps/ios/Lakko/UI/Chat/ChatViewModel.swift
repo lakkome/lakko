@@ -93,6 +93,10 @@ public final class ChatViewModel: ObservableObject {
     @Published public private(set) var membershipBusy: Bool = false
     /// Last add/remove error surfaced to the sheet, else `nil`.
     @Published public private(set) var membershipError: String?
+    /// ADR-0022 — `true` when the local member may add / remove (owner, admin,
+    /// or an open/legacy group with no role table); `false` for a plain member.
+    /// The sheet hides the add field + per-member Remove when this is `false`.
+    @Published public private(set) var canManageMembers: Bool = true
 
     // MARK: - Wiring
 
@@ -390,9 +394,10 @@ public final class ChatViewModel: ObservableObject {
         }
     }
 
-    /// Re-read the live MLS roster from the repository.
+    /// Re-read the live MLS roster + the local member's role from the repository.
     func refreshMembers() {
         members = repository.members(groupIdHex: groupIdHex) ?? []
+        canManageMembers = repository.ownRole(groupIdHex: groupIdHex) != .member
     }
 
     /// Our own leaf index — the roster marks it "(you)" and blocks self-removal.

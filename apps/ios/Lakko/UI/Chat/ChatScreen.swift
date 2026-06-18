@@ -848,19 +848,23 @@ private struct MembersSheet: View {
     var body: some View {
         NavigationStack {
             List {
-                Section("Add member") {
-                    HStack {
-                        TextField("@username", text: $viewModel.addMemberInput)
-                            .textInputAutocapitalization(.never)
-                            .autocorrectionDisabled(true)
-                            .disabled(viewModel.membershipBusy)
-                        Button("Add") { viewModel.onAddMember() }
-                            .disabled(viewModel.membershipBusy || trimmedInput.isEmpty)
-                    }
-                    if let err = viewModel.membershipError {
-                        Text(err)
-                            .font(.footnote)
-                            .foregroundStyle(.red)
+                // ADR-0022 — only owner/admin (or an open/legacy group) sees
+                // the add affordance; a plain member's add would be refused.
+                if viewModel.canManageMembers {
+                    Section("Add member") {
+                        HStack {
+                            TextField("@username", text: $viewModel.addMemberInput)
+                                .textInputAutocapitalization(.never)
+                                .autocorrectionDisabled(true)
+                                .disabled(viewModel.membershipBusy)
+                            Button("Add") { viewModel.onAddMember() }
+                                .disabled(viewModel.membershipBusy || trimmedInput.isEmpty)
+                        }
+                        if let err = viewModel.membershipError {
+                            Text(err)
+                                .font(.footnote)
+                                .foregroundStyle(.red)
+                        }
                     }
                 }
                 Section(memberCountLabel) {
@@ -868,7 +872,10 @@ private struct MembersSheet: View {
                         HStack {
                             Text(viewModel.memberLabel(member))
                             Spacer()
-                            if viewModel.ownLeafIndex != member.leafIndex {
+                            // Remove only when we may manage members (owner /
+                            // admin / open group) and it is not our own leaf.
+                            if viewModel.canManageMembers,
+                                viewModel.ownLeafIndex != member.leafIndex {
                                 Button(role: .destructive) {
                                     viewModel.onRemoveMember(leafIndex: member.leafIndex)
                                 } label: {
