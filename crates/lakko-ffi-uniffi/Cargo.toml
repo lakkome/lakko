@@ -83,6 +83,14 @@ lakko-call-jwt.workspace = true
 # the wasm surface 1:1.
 base64 = "0.22"
 
+# ADR-0026 Phase 3 — the obfs transport stack + tunneled HTTP client, exposed to
+# native clients. Pulls the (audited) transport crate into the mobile binary so
+# REALITY / MASQUE / Shadowsocks run on-device; tokio drives the dial+request,
+# serde_json parses the signed bootstrap config.
+lakko-transport.workspace = true
+tokio.workspace = true
+serde_json.workspace = true
+
 # `build` powers the `uniffi::setup_scaffolding!()` proc-macro
 # the lib uses to register types; `cli` enables
 # `uniffi::uniffi_bindgen_main()` in `src/bin/uniffi-bindgen.rs`

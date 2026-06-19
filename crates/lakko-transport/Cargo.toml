@@ -84,8 +84,11 @@ subtle = "2"
 # quinn 0.11 — version-aligned with the rest of this crate's
 # QUIC stack and crypto-provider-agnostic (works with rustls
 # `ring` like the rest of lakko-transport, unlike `wtransport`
-# 0.6 which hard-codes `aws_lc_rs`).
-web-transport-quinn = "0.11"
+# 0.6 which hard-codes `aws_lc_rs`). NOTE: its `default`
+# feature is `aws-lc-rs`, so we MUST pin `default-features =
+# false` + `ring` — otherwise it drags `aws-lc-sys` into the
+# build, which fails to link on iOS (ADR-0026 Phase 3).
+web-transport-quinn = { version = "0.11", default-features = false, features = ["ring"] }
 
 # G5-6-wireup: RustCrypto/hpke implements RFC 9180 HPKE.
 # rustls 0.23's ECH wire-up requires `&[&'static dyn

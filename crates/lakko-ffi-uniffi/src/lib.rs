@@ -48,6 +48,7 @@ pub mod pow;
 pub mod sframe;
 pub mod sfu_signaling;
 pub mod shamir;
+pub mod transport;
 
 uniffi::setup_scaffolding!();
 
@@ -191,6 +192,14 @@ pub enum FfiError {
     /// message is for logs, the variant for the wire.
     #[error("sfu signaling error: {0}")]
     Sfu(String),
+
+    /// Anti-censorship transport / tunneled-HTTP error (ADR-0026 Phase 3).
+    /// Covers: bad bootstrap config, trust-anchor verify failure, a fail-closed
+    /// dial (no transport connected — never a silent direct fallback), and a
+    /// tunneled-request transport/parse failure. Message for logs, variant for
+    /// the wire.
+    #[error("transport error: {0}")]
+    Transport(String),
 
     /// Lock contention / poisoned mutex on the shared Group state.
     #[error("internal lock error")]
