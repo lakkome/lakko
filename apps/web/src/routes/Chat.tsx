@@ -87,6 +87,8 @@ import {
   composeEditEnvelope,
   composeDeleteEnvelope,
   composeReactionEnvelope,
+  composeTypingEnvelope,
+  composeReadReceiptEnvelope,
   downloadAndDecryptRef,
   encryptAndUploadFile,
   formatAttachmentSize,
@@ -105,6 +107,18 @@ import {
   REACTION_EMOJI,
   type MessageOpState,
 } from "../chat/message-ops";
+import {
+  foldTyping,
+  activeTypers,
+  pruneTyping,
+  foldReadWatermark,
+  isReadByEveryOther,
+  shouldSendTyping,
+  shouldSendReadReceipt,
+  TYPING_EXPIRY_MS,
+  type TypingMap,
+  type ReadWatermarkMap,
+} from "../chat/presence-ops";
 import { paths } from "./paths";
 
 /** A timeline entry — verified incoming events PLUS optimistic
@@ -332,6 +346,22 @@ function ChatView(props: {
   const [editText, setEditText] = createSignal("");
   // The messageId whose reaction picker is open (or `null`).
   const [reactPickerId, setReactPickerId] = createSignal<number | null>(null);
+
+  // ADR-0024 — ephemeral typing registry, keyed on the sender's MLS
+  // leaf. Never persisted; a reload starts empty (a stale `true` row
+  // re-downloaded on the next poll is dropped by the stale-ignore
+  // guard in `foldTyping`). The receive loop folds incoming typing
+  // signals in; an interval prunes expired entries; the indicator
+  // above the composer reads `activeTypers`.
+  const [typingMap, setTypingMap] = createSignal<TypingMap>(new Map());
+  // ADR-0024 — monotone per-leaf read watermark: senderLeaf → the
+  // highest messageId that leaf has read. Session state (multi-
+  // device convergence is Phase-2 future work). The own-message
+  // bubble reads it to flip "Sent" → "Read"; a lower value never
+  // lowers a higher one (re-sync idempotent).
+  const [readWatermarks, setReadWatermarks] = createSignal<ReadWatermarkMap>(
+    new Map(),
+  );
 
   // Phase 2a3f1-web — persistent message log. The plaintext
   // timeline survives reloads under the device root key in
@@ -1019,6 +1049,45 @@ function ChatView(props: {
     }
   });
 
+  // ADR-0024 — `currentTime` ticks every 2 s so the typing label
+  // re-evaluates `activeTypers(nowMs)` even with no traffic (an
+  // entry whose `true` aged out drops without waiting for the next
+  // poll). Driven by the same interval that prunes the map.
+  const [currentTime, setCurrentTime] = createSignal(Date.now());
+
+  /** ADR-0024 — resolve a member's display label from its MLS leaf,
+   *  reusing the roster's pubkey → accepted-contact-displayName
+   *  resolution. Falls back to `Member #<leaf>` when the leaf isn't
+   *  a known accepted contact (matching the roster's fingerprint
+   *  posture). */
+  const labelForLeaf = (leaf: number): string => {
+    const m = members().find((mm) => mm.leafIndex === leaf);
+    if (m !== undefined) {
+      const name = acceptedByPubkey().get(base64Encode(m.sigPubkey));
+      if (name !== undefined && name.length > 0) return name;
+    }
+    return `Member #${leaf}`;
+  };
+
+  /** ADR-0024 — the typing-indicator string, or `null` when nobody
+   *  (other than us) is currently typing. For a 1×1 chat a bare
+   *  "typing…" reads cleaner than a name; for a group we name the
+   *  single typer, else "Several people are typing…". */
+  const typingIndicator = createMemo<string | null>(() => {
+    const now = currentTime();
+    const own = ownLeaf();
+    const leaves = activeTypers(typingMap(), now).filter((l) => l !== own);
+    if (leaves.length === 0) return null;
+    // A 1×1 chat has exactly one peer — skip the name (the chat
+    // header already shows who it is).
+    const oneOnOne = memberCount() <= 2;
+    if (leaves.length === 1) {
+      const leaf = leaves[0] as number;
+      return oneOnOne ? "typing…" : `${labelForLeaf(leaf)} is typing…`;
+    }
+    return "Several people are typing…";
+  });
+
   /** Look up the author leaf of the displayed message with this
    *  DS `messageId` — incoming app messages carry the original
    *  `senderLeaf`, outgoing rows are authored by us. `undefined`
@@ -1117,12 +1186,53 @@ function ChatView(props: {
       const fresh: TimelineRow[] = [];
       let ops = msgOps();
       let opsChanged = false;
+      // ADR-0024 — accumulate typing / read-receipt folds across the
+      // batch, then write each signal once at the end.
+      let typing = typingMap();
+      let typingChanged = false;
+      let watermarks = readWatermarks();
+      let watermarksChanged = false;
+      const nowMs = Date.now();
       for (const e of result.events) {
         if (e.kind === "op") {
-          // Fold the op into the overlay first so a chat row + an
-          // op that targets it that arrive in the same batch both
-          // land (the chat row appears in `fresh` below; the
-          // author-leaf lookup also scans `fresh`).
+          // ADR-0024 — typing / read-receipt are ephemeral status,
+          // not message overlays: fold them into their own state.
+          if (e.op === "typing") {
+            if (e.senderLeaf !== undefined) {
+              const createdAtMs = Date.parse(e.createdAt);
+              // A malformed timestamp parses to NaN — treat it as
+              // stale (drop the `true`) rather than resurrecting it.
+              const stamp = Number.isNaN(createdAtMs)
+                ? nowMs - TYPING_EXPIRY_MS
+                : createdAtMs;
+              const next = foldTyping(
+                typing,
+                e.senderLeaf,
+                e.isTyping ?? false,
+                stamp,
+                nowMs,
+              );
+              if (next !== typing) {
+                typing = next;
+                typingChanged = true;
+              }
+            }
+            continue;
+          }
+          if (e.op === "read-receipt") {
+            if (e.senderLeaf !== undefined) {
+              const next = foldReadWatermark(watermarks, e.senderLeaf, e.target);
+              if (next !== watermarks) {
+                watermarks = next;
+                watermarksChanged = true;
+              }
+            }
+            continue;
+          }
+          // Fold the edit/delete/reaction op into the overlay first
+          // so a chat row + an op that targets it that arrive in the
+          // same batch both land (the chat row appears in `fresh`
+          // below; the author-leaf lookup also scans `fresh`).
           const next = applyIncomingOp(e, fresh, ops);
           if (next !== ops) {
             ops = next;
@@ -1138,6 +1248,12 @@ function ChatView(props: {
       }
       if (opsChanged) {
         setMsgOps(ops);
+      }
+      if (typingChanged) {
+        setTypingMap(typing);
+      }
+      if (watermarksChanged) {
+        setReadWatermarks(watermarks);
       }
       setCursor(result.cursor);
       // 1.18g — mirror the post-poll member count so the
@@ -1167,6 +1283,11 @@ function ChatView(props: {
     // input is the all-empty composer.
     if (text.length === 0 && attached.length === 0) return;
     setError(null);
+
+    // ADR-0024 — sending a message is a typing-stop transition;
+    // emit one `typing:false` (best-effort) so peers clear our
+    // indicator immediately rather than waiting for the ~6 s expiry.
+    sendTypingStop();
 
     // Optimistic outbound bubble.
     const tempId = nextTempId++;
@@ -1300,6 +1421,112 @@ function ChatView(props: {
       setError(formatError(err));
     }
   }
+
+  // ----- ADR-0024 typing + read-receipt send path ----------------
+  //
+  // Typing + read receipts ride the same application send path as
+  // chat / edit / etc. (`chat.sendMessage`), so the DS echo is
+  // dropped via `ownPublishedIds` exactly like the ADR-0023 ops.
+  // They are best-effort fire-and-forget — a transient failure must
+  // never wedge the composer or surface a user-facing error (the
+  // signals are non-essential status). They render no optimistic
+  // bubble.
+
+  /** Publish an already-composed ephemeral envelope (typing /
+   *  read-receipt) without an optimistic bubble. Swallows failures
+   *  (these signals are non-essential; the next one supersedes a
+   *  dropped one). */
+  async function publishEphemeral(envelopeBytes: Uint8Array): Promise<void> {
+    try {
+      await chat.sendMessage(
+        props.requireIdentity(),
+        props.entry.group,
+        envelopeBytes,
+      );
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("publishEphemeral failed", err);
+    }
+  }
+
+  // Outbound typing — throttled to ≤ 1 `true` / TYPING_SEND_THROTTLE_MS
+  // while the user is actively editing. `typingActiveSent` tracks
+  // whether we've already emitted a `true` since the last stop, so
+  // the stop transition fires exactly one `false`.
+  let lastSentTypingTrueAtMs: number | null = null;
+  let typingActiveSent = false;
+  createEffect(() => {
+    const text = input();
+    const isEditing = text.length > 0;
+    if (!isEditing) return; // an empty composer is handled by the stop path
+    if (shouldSendTyping(isEditing, lastSentTypingTrueAtMs, Date.now())) {
+      lastSentTypingTrueAtMs = Date.now();
+      typingActiveSent = true;
+      void (async (): Promise<void> => {
+        void publishEphemeral(await composeTypingEnvelope(true));
+      })();
+    }
+  });
+
+  /** Emit a single `typing:false` on the stop transition (blur OR
+   *  on sending a message). No-op if we never sent a `true` since
+   *  the last stop — ADR-0024 says do NOT spam `false`. */
+  function sendTypingStop(): void {
+    if (!typingActiveSent) return;
+    typingActiveSent = false;
+    lastSentTypingTrueAtMs = null;
+    void (async (): Promise<void> => {
+      void publishEphemeral(await composeTypingEnvelope(false));
+    })();
+  }
+
+  // Outbound read receipt — when the chat view is open (this route
+  // is mounted) and the highest received messageId advances past our
+  // own last-published watermark, broadcast it (throttled by the
+  // debounce + the monotone `shouldSendReadReceipt` guard). Mirrors
+  // the existing read-cursor effect's shape but rides the chat group
+  // (a peer-visible receipt) rather than the DeviceGroup.
+  let lastPublishedReadId: number | null = null;
+  let readReceiptTimer: ReturnType<typeof setTimeout> | null = null;
+  const READ_RECEIPT_DEBOUNCE_MS = 1200;
+  createEffect(() => {
+    const list = rows();
+    if (list.length === 0) return;
+    let highest: number | null = null;
+    for (const r of list) {
+      const id = rowMessageId(r);
+      if (id !== undefined && (highest === null || id > highest)) highest = id;
+    }
+    const target = shouldSendReadReceipt(highest, lastPublishedReadId);
+    if (target === null) return;
+    if (readReceiptTimer !== null) clearTimeout(readReceiptTimer);
+    readReceiptTimer = setTimeout(() => {
+      readReceiptTimer = null;
+      lastPublishedReadId = target;
+      void (async (): Promise<void> => {
+        void publishEphemeral(await composeReadReceiptEnvelope(target));
+      })();
+    }, READ_RECEIPT_DEBOUNCE_MS);
+  });
+  onCleanup(() => {
+    if (readReceiptTimer !== null) {
+      clearTimeout(readReceiptTimer);
+      readReceiptTimer = null;
+    }
+  });
+
+  // ADR-0024 — typing auto-expire sweep. An entry whose last fresh
+  // `true` aged out is dropped from the indicator even with no
+  // further traffic. Cheap (one pass over a tiny map); the interval
+  // is cleared on unmount.
+  const typingSweep = setInterval(() => {
+    const now = Date.now();
+    setCurrentTime(now);
+    const cur = typingMap();
+    const pruned = pruneTyping(cur, now);
+    if (pruned !== cur) setTypingMap(pruned);
+  }, 2_000);
+  onCleanup(() => clearInterval(typingSweep));
 
   /**
    * Encrypt + upload an iterable of files sequentially (so a
@@ -2382,6 +2609,9 @@ function ChatView(props: {
                 getCachedUrl={getCachedAttachmentUrl}
                 ownLeaf={ownLeaf()}
                 opState={(id) => msgOps().get(id)}
+                readByOthers={(id) =>
+                  isReadByEveryOther(readWatermarks(), id, ownLeaf())
+                }
                 editingId={editingId()}
                 editText={editText()}
                 setEditText={setEditText}
@@ -2488,6 +2718,24 @@ function ChatView(props: {
         </div>
       </Show>
 
+      {/* ADR-0024 — typing indicator. Sits just above the compose
+          bar; auto-hides when nobody is typing (the memo returns
+          null) and after the ~6 s expiry sweep. */}
+      <Show when={typingIndicator() !== null}>
+        <div
+          style={{
+            "font-size": "0.8rem",
+            "font-style": "italic",
+            color: "var(--surface-muted)",
+            padding: "0.15rem 0.25rem",
+            "min-height": "1.1rem",
+          }}
+          aria-live="polite"
+        >
+          {typingIndicator()}
+        </div>
+      </Show>
+
       <form
         onSubmit={onSend}
         style={{
@@ -2534,6 +2782,9 @@ function ChatView(props: {
           autocomplete="off"
           value={input()}
           onInput={(e) => setInput(e.currentTarget.value)}
+          // ADR-0024 — leaving the composer is a typing-stop
+          // transition; emit one `typing:false` (best-effort).
+          onBlur={() => sendTypingStop()}
           style={{ flex: 1 }}
         />
         <button
@@ -2565,6 +2816,10 @@ function TimelineBubble(props: {
   ownLeaf: number | undefined;
   /** Reactive overlay accessor for a given target messageId. */
   opState: (messageId: number) => MessageOpState | undefined;
+  /** ADR-0024 — reactive read-state accessor: has this messageId
+   *  been read by EVERY other member? Drives the own-message
+   *  Sent → Read indicator. */
+  readByOthers: (messageId: number) => boolean;
   editingId: number | null;
   editText: string;
   setEditText: (v: string) => void;
@@ -2670,6 +2925,7 @@ function ChatBubbleBody(props: {
   getCachedUrl: (ref: AttachmentRefBytes) => string | null;
   ownLeaf: number | undefined;
   opState: (messageId: number) => MessageOpState | undefined;
+  readByOthers: (messageId: number) => boolean;
   editingId: number | null;
   editText: string;
   setEditText: (v: string) => void;
@@ -2882,9 +3138,42 @@ function ChatBubbleBody(props: {
           color: metaColour,
           "font-size": "0.75rem",
           "margin-top": "0.2rem",
+          display: "flex",
+          "align-items": "center",
+          gap: "0.35rem",
         }}
       >
-        {props.meta}
+        <span>{props.meta}</span>
+        {/* ADR-0024 — read state on our OWN acked messages. A single
+            check once published ("Sent"); a filled double check once
+            EVERY other member's read watermark covers this message
+            ("Read"). Gated on a present messageId. */}
+        <Show
+          when={
+            props.isOwn &&
+            props.ack === "sent" &&
+            props.messageId !== undefined
+          }
+        >
+          {(() => {
+            const read = (): boolean =>
+              props.messageId !== undefined &&
+              props.readByOthers(props.messageId);
+            return (
+              <span
+                title={read() ? "Read" : "Sent"}
+                aria-label={read() ? "Read" : "Sent"}
+                style={{
+                  "font-size": "0.72rem",
+                  opacity: read() ? 1 : 0.8,
+                  "font-weight": read() ? 600 : 400,
+                }}
+              >
+                {read() ? "✓✓ Read" : "✓ Sent"}
+              </span>
+            );
+          })()}
+        </Show>
       </div>
 
       {/* Per-message action menu — gated on the message having a

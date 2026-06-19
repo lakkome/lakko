@@ -312,7 +312,12 @@ export type ParsedBodyResult =
   | { kind: "chat"; text: string; attachments: AttachmentRefBytes[] }
   | { kind: "edit"; target: number; text: string }
   | { kind: "delete"; target: number }
-  | { kind: "reaction"; target: number; emoji: string };
+  | { kind: "reaction"; target: number; emoji: string }
+  // ADR-0024 — ephemeral status signals (typing / read receipt).
+  // Neither renders a bubble; the receive loop folds them into the
+  // ephemeral typing registry / the monotone read watermark.
+  | { kind: "typing"; isTyping: boolean }
+  | { kind: "read-receipt"; target: number };
 
 /**
  * Parse an incoming MLS Application-message body into the
@@ -350,6 +355,16 @@ export async function parseBodyEnvelope(
         target: Number(parsed.target ?? 0n),
         emoji: parsed.emoji ?? "",
       };
+    }
+    // ADR-0024 — typing signal. `isTyping` is the new wasm getter
+    // (undefined unless `kind === "typing"`); default to `false`
+    // (treated as a clear) if the FFI couldn't surface it.
+    if (kind === "typing") {
+      return { kind: "typing", isTyping: parsed.isTyping ?? false };
+    }
+    // ADR-0024 — read receipt. `target` is the read-up-to messageId.
+    if (kind === "read-receipt") {
+      return { kind: "read-receipt", target: Number(parsed.target ?? 0n) };
     }
     // "chat" (and any unexpected discriminator) — surface text +
     // attachments. The same memory dance parseEnvelope runs.
@@ -417,6 +432,36 @@ export async function composeReactionEnvelope(
 ): Promise<Uint8Array> {
   const wasm = await loadWasm();
   return wasm.composeReactionEnvelope(BigInt(targetMessageId), emoji);
+}
+
+/**
+ * ADR-0024 — compose a **typing** signal envelope. `isTyping`:
+ * `true` while the user is actively editing the composer (throttled
+ * by the caller to ~1/4 s), `false` once on blur / on sending a
+ * message. The receiver folds it into an ephemeral per-leaf typing
+ * state; it never renders a bubble. The result is a normal MLS
+ * Application message body; the caller publishes it through the
+ * existing application send path.
+ */
+export async function composeTypingEnvelope(
+  isTyping: boolean,
+): Promise<Uint8Array> {
+  const wasm = await loadWasm();
+  return wasm.composeTypingEnvelope(isTyping);
+}
+
+/**
+ * ADR-0024 — compose a **read-receipt** envelope: broadcast that the
+ * sender has read up to (and including) DS `upToMessageId` in this
+ * group. The receiver advances a monotone per-leaf watermark (a
+ * lower value never lowers a higher one, so re-sync replay is
+ * idempotent). Never renders a bubble.
+ */
+export async function composeReadReceiptEnvelope(
+  upToMessageId: number,
+): Promise<Uint8Array> {
+  const wasm = await loadWasm();
+  return wasm.composeReadReceiptEnvelope(BigInt(upToMessageId));
 }
 
 /**

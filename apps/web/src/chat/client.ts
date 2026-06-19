@@ -123,27 +123,38 @@ export type IncomingChatEvent =
       createdAt: string;
     }
   | {
-      /** ADR-0023 — an edit / delete / reaction op carried in
-       *  the same JSON envelope as a chat message. The UI folds
-       *  it into the *target* message (by `target` === the
-       *  target's DS `messageId`) rather than rendering it as a
-       *  standalone bubble. The op itself still consumes a DS
-       *  `messageId` and surfaces here so the receive loop can
-       *  apply it once (the poll is incremental). */
+      /** ADR-0023 / ADR-0024 — an edit / delete / reaction op OR a
+       *  typing / read-receipt status signal, carried in the same
+       *  JSON envelope as a chat message. None of them render a
+       *  standalone bubble: the UI folds an edit/delete/reaction
+       *  into the *target* message (by `target` === the target's DS
+       *  `messageId`), a `typing` into the ephemeral per-leaf typing
+       *  registry, and a `read-receipt` into the monotone per-leaf
+       *  read watermark. The op itself still consumes a DS
+       *  `messageId` and surfaces here so the receive loop can apply
+       *  it once (the poll is incremental). */
       kind: "op";
       /** This op message's own DS-assigned id. */
       messageId: number;
-      /** `"edit" | "delete" | "reaction"`. */
-      op: "edit" | "delete" | "reaction";
-      /** The DS `messageId` of the message this op acts on. */
+      /** `"edit" | "delete" | "reaction" | "typing" | "read-receipt"`. */
+      op: "edit" | "delete" | "reaction" | "typing" | "read-receipt";
+      /** The DS `messageId` the op acts on. For edit/delete/reaction
+       *  + read-receipt this is the target message; for `typing` it
+       *  is unused (`0`). */
       target: number;
-      /** Edit text (empty for delete / reaction). */
+      /** Edit text (empty for delete / reaction / typing /
+       *  read-receipt). */
       text: string;
       /** Reaction emoji (only for `op === "reaction"`). */
       emoji: string | undefined;
+      /** ADR-0024 — the typing state (only for `op === "typing"`):
+       *  `true` = started typing, `false` = stopped. `undefined`
+       *  for every other op. */
+      isTyping: boolean | undefined;
       /** The op sender's MLS leaf index — the author-only gate
        *  (edit/delete) checks it against the target's stored
-       *  author leaf, and reactions attribute the toggle to it.
+       *  author leaf, reactions attribute the toggle to it, and
+       *  typing / read receipts are keyed on it.
        *  `undefined` ⇒ the op is dropped (fail-closed). */
       senderLeaf: number | undefined;
       createdAt: string;
@@ -510,9 +521,12 @@ async function toEvent(
       kind: "op",
       messageId,
       op: body.kind,
-      target: body.target,
+      // ADR-0024 — `typing` carries no target; `read-receipt`'s
+      // `target` is the read-up-to messageId.
+      target: body.kind === "typing" ? 0 : body.target,
       text: body.kind === "edit" ? body.text : "",
       emoji: body.kind === "reaction" ? body.emoji : undefined,
+      isTyping: body.kind === "typing" ? body.isTyping : undefined,
       senderLeaf,
       createdAt,
     };
