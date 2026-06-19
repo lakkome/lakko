@@ -9,14 +9,19 @@
 //! (`/health` `/ready` `/version`) serves ops + load-balancer probes; the obfs
 //! port itself is raw, not HTTP.
 //!
-//! Shadowsocks-2022, MASQUE, and WebTransport listeners (the QUIC/UDP ones)
-//! slot in beside the REALITY accept loop in a follow-up — the relay is
-//! transport-agnostic (it only needs a `Box<dyn Connection>`).
+//! REALITY + Shadowsocks-2022 listeners run side by side; the relay is
+//! transport-agnostic (it only needs a `Box<dyn Connection>`). MASQUE +
+//! WebTransport (the QUIC/UDP transports) have no server-side terminating
+//! listener in `lakko-transport` yet — adding them is a separate transport-side
+//! task, not a proxy wiring one.
+
+use std::sync::Arc;
 
 use axum::routing::get;
 use axum::Router;
 use lakko_svc_obfs_proxy::{config, relay};
 use tokio::net::TcpListener;
+use tokio::sync::Mutex;
 use tracing::{info, warn};
 
 #[tokio::main]
@@ -37,7 +42,13 @@ async fn main() -> anyhow::Result<()> {
     if let Some(reality) = cfg.reality {
         spawn_reality_listener(reality, cfg.internal_target).await?;
     } else {
-        warn!("REALITY listener not configured (LAKKO_OBFS_PROXY_REALITY_BIND unset) — control-plane only");
+        warn!("REALITY listener not configured (LAKKO_OBFS_PROXY_REALITY_BIND unset)");
+    }
+
+    if let Some(shadowsocks) = cfg.shadowsocks {
+        spawn_shadowsocks_listener(shadowsocks, cfg.internal_target).await?;
+    } else {
+        warn!("Shadowsocks-2022 listener not configured (LAKKO_OBFS_PROXY_SS_BIND unset)");
     }
 
     let app = Router::new()
@@ -83,6 +94,47 @@ async fn spawn_reality_listener(
                 },
                 Err(error) => {
                     warn!(%error, "REALITY accept failed");
+                },
+            }
+        }
+    });
+    Ok(())
+}
+
+/// Bind the Shadowsocks-2022 listener + spawn its accept loop. A single
+/// `ReplayWindow` is shared across accepts (the SS-2022 anti-replay state); the
+/// handshake holds the lock briefly, then each tunnel relays independently.
+async fn spawn_shadowsocks_listener(
+    shadowsocks: config::ShadowsocksProxyConfig,
+    internal_target: std::net::SocketAddr,
+) -> anyhow::Result<()> {
+    let tcp = TcpListener::bind(shadowsocks.bind).await?;
+    info!(bind = %shadowsocks.bind, "Shadowsocks-2022 listener up");
+    let psk = shadowsocks.psk;
+    let window = Arc::new(Mutex::new(lakko_transport::ShadowsocksReplayWindow::new()));
+    tokio::spawn(async move {
+        loop {
+            match tcp.accept().await {
+                Ok((stream, _peer)) => {
+                    let window = window.clone();
+                    tokio::spawn(async move {
+                        let tunnel = {
+                            let mut w = window.lock().await;
+                            lakko_transport::shadowsocks_accept_inbound(stream, &psk, &mut w).await
+                        };
+                        match tunnel {
+                            Ok(conn) => {
+                                info!("accepted SS-2022 tunnel; relaying to internal target");
+                                if let Err(error) = relay::relay(conn, internal_target).await {
+                                    warn!(%error, "relay ended with error");
+                                }
+                            },
+                            Err(error) => warn!(%error, "SS-2022 handshake failed"),
+                        }
+                    });
+                },
+                Err(error) => {
+                    warn!(%error, "SS-2022 accept failed");
                 },
             }
         }

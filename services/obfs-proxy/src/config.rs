@@ -33,6 +33,16 @@ pub struct ProxyConfig {
     pub control_bind: SocketAddr,
     /// REALITY listener config, or `None` to run control-plane only.
     pub reality: Option<RealityProxyConfig>,
+    /// Shadowsocks-2022 listener config, or `None` if not configured.
+    pub shadowsocks: Option<ShadowsocksProxyConfig>,
+}
+
+/// Shadowsocks-2022-listener-specific config.
+pub struct ShadowsocksProxyConfig {
+    /// Public TCP bind for the SS-2022 listener.
+    pub bind: SocketAddr,
+    /// The 32-byte master PSK.
+    pub psk: [u8; 32],
 }
 
 /// REALITY-listener-specific config.
@@ -93,12 +103,32 @@ impl ProxyConfig {
             _ => None,
         };
 
+        let shadowsocks = match std::env::var("LAKKO_OBFS_PROXY_SS_BIND") {
+            Ok(bind) if !bind.is_empty() => Some(parse_shadowsocks(&bind)?),
+            _ => None,
+        };
+
         Ok(Self {
             internal_target,
             control_bind,
             reality,
+            shadowsocks,
         })
     }
+}
+
+fn parse_shadowsocks(bind: &str) -> Result<ShadowsocksProxyConfig, ConfigError> {
+    let bind: SocketAddr = bind.parse().map_err(|e| ConfigError::Invalid {
+        var: "LAKKO_OBFS_PROXY_SS_BIND",
+        detail: format!("not a socket address: {e}"),
+    })?;
+    let psk_b64 = req("LAKKO_OBFS_PROXY_SS_PSK")?;
+    let psk =
+        lakko_transport::shadowsocks_psk_from_b64(&psk_b64).map_err(|e| ConfigError::Invalid {
+            var: "LAKKO_OBFS_PROXY_SS_PSK",
+            detail: format!("not a valid 32-byte base64 PSK: {e}"),
+        })?;
+    Ok(ShadowsocksProxyConfig { bind, psk })
 }
 
 fn req(var: &'static str) -> Result<String, ConfigError> {
