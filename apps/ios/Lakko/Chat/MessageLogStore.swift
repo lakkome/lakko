@@ -286,19 +286,72 @@ public struct PersistedMessage: Codable, Equatable {
     public let text: String
     public let attachments: [PersistedAttachment]
     public let createdAt: String
+    /// ADR-0023 — original author's MLS leaf index. Optional so
+    /// a pre-ADR-0023 envelope (no field) decodes cleanly.
+    public let authorLeaf: UInt32?
+    /// ADR-0023 — edited / deleted markers. Default `false` for
+    /// older blobs without the field.
+    public let edited: Bool
+    public let deleted: Bool
+    /// ADR-0023 — folded reactions. Empty for older blobs.
+    public let reactions: [PersistedReaction]
 
     public init(
         messageId: Int64,
         direction: String,
         text: String,
         attachments: [PersistedAttachment],
-        createdAt: String
+        createdAt: String,
+        authorLeaf: UInt32? = nil,
+        edited: Bool = false,
+        deleted: Bool = false,
+        reactions: [PersistedReaction] = []
     ) {
         self.messageId = messageId
         self.direction = direction
         self.text = text
         self.attachments = attachments
         self.createdAt = createdAt
+        self.authorLeaf = authorLeaf
+        self.edited = edited
+        self.deleted = deleted
+        self.reactions = reactions
+    }
+
+    // ADR-0023 — custom decoder so a pre-ADR-0023 blob (which has
+    // no authorLeaf / edited / deleted / reactions keys) decodes
+    // without throwing. `decodeIfPresent` + defaults keep older
+    // envelopes loadable.
+    enum CodingKeys: String, CodingKey {
+        case messageId, direction, text, attachments, createdAt
+        case authorLeaf, edited, deleted, reactions
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.messageId = try c.decode(Int64.self, forKey: .messageId)
+        self.direction = try c.decode(String.self, forKey: .direction)
+        self.text = try c.decode(String.self, forKey: .text)
+        self.attachments = try c.decode([PersistedAttachment].self, forKey: .attachments)
+        self.createdAt = try c.decode(String.self, forKey: .createdAt)
+        self.authorLeaf = try c.decodeIfPresent(UInt32.self, forKey: .authorLeaf)
+        self.edited = try c.decodeIfPresent(Bool.self, forKey: .edited) ?? false
+        self.deleted = try c.decodeIfPresent(Bool.self, forKey: .deleted) ?? false
+        self.reactions = try c.decodeIfPresent(
+            [PersistedReaction].self,
+            forKey: .reactions
+        ) ?? []
+    }
+}
+
+/// ADR-0023 — JSON projection of a folded ``Reaction``.
+public struct PersistedReaction: Codable, Equatable {
+    public let reactorLeaf: UInt32
+    public let emoji: String
+
+    public init(reactorLeaf: UInt32, emoji: String) {
+        self.reactorLeaf = reactorLeaf
+        self.emoji = emoji
     }
 }
 
@@ -347,6 +400,12 @@ extension PersistedMessage {
         self.text = msg.text
         self.attachments = msg.attachments.map(PersistedAttachment.init(from:))
         self.createdAt = msg.createdAt
+        self.authorLeaf = msg.authorLeaf
+        self.edited = msg.edited
+        self.deleted = msg.deleted
+        self.reactions = msg.reactions.map {
+            PersistedReaction(reactorLeaf: $0.reactorLeaf, emoji: $0.emoji)
+        }
     }
 
     /// Inverse — reconstruct a runtime ``ChatMessage`` from
@@ -366,7 +425,13 @@ extension PersistedMessage {
             direction: dir,
             text: text,
             attachments: attachments.compactMap { $0.toAttachmentRef() },
-            createdAt: createdAt
+            createdAt: createdAt,
+            authorLeaf: authorLeaf,
+            edited: edited,
+            deleted: deleted,
+            reactions: reactions.map {
+                Reaction(reactorLeaf: $0.reactorLeaf, emoji: $0.emoji)
+            }
         )
     }
 }

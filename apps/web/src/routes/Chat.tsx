@@ -84,6 +84,9 @@ import {
 import type { IncomingChatEvent } from "../chat/client";
 import {
   composeEnvelope,
+  composeEditEnvelope,
+  composeDeleteEnvelope,
+  composeReactionEnvelope,
   downloadAndDecryptRef,
   encryptAndUploadFile,
   formatAttachmentSize,
@@ -95,6 +98,13 @@ import {
   MAX_ATTACHMENT_BYTES,
 } from "../chat/attachments";
 import { useChats, type ActiveGroup } from "../chat/ChatContext";
+import {
+  applyOp,
+  editDeleteAuthorized,
+  OWN_REACTION_SENTINEL,
+  REACTION_EMOJI,
+  type MessageOpState,
+} from "../chat/message-ops";
 import { paths } from "./paths";
 
 /** A timeline entry — verified incoming events PLUS optimistic
@@ -118,6 +128,32 @@ type TimelineRow =
       messageId?: number;
       createdAt?: string;
     };
+
+/** Read the author leaf a displayed row should be gated on:
+ *  incoming application messages carry the original author's
+ *  `senderLeaf`; outgoing rows are authored by us. `undefined`
+ *  ⇒ no author leaf is known for this row (a reloaded message,
+ *  a control frame) — its edit/delete gate fails closed. */
+function rowAuthorLeaf(
+  row: TimelineRow,
+  ownLeaf: number | undefined,
+): number | undefined {
+  if (row.kind === "outgoing") return ownLeaf;
+  if (row.event.kind === "application") return row.event.senderLeaf;
+  return undefined;
+}
+
+/** The DS `messageId` of a displayed row, or `undefined` when
+ *  it doesn't have one yet (an un-acked outgoing bubble). Every
+ *  edit/delete/react affordance is gated on this being present
+ *  (the op references its target by id). */
+function rowMessageId(row: TimelineRow): number | undefined {
+  if (row.kind === "outgoing") {
+    return row.ack === "sent" ? row.messageId : undefined;
+  }
+  if (row.event.kind === "application") return row.event.messageId;
+  return undefined;
+}
 
 export default function Chat(): JSX.Element {
   const auth = useAuth();
@@ -276,6 +312,26 @@ function ChatView(props: {
 
   const [rows, setRows] = createSignal<TimelineRow[]>([]);
   const [cursor, setCursor] = createSignal(0);
+
+  // ADR-0023 — per-message op overlay (edit / delete / reaction).
+  // Keyed on the target's DS `messageId`. In-memory + session-
+  // scoped: multi-device convergence (the persisted-log replay
+  // of ops) is deferred to Phase 2, so a reload starts the
+  // overlay empty. The render path reads it by messageId and
+  // folds it onto the bubble; the receive loop folds incoming
+  // ops into it; the send handlers apply the own-op locally
+  // (the sender never receives its own application message
+  // back). A fresh Map replaces the signal on every mutation so
+  // SolidJS re-renders the affected bubbles.
+  const [msgOps, setMsgOps] = createSignal<Map<number, MessageOpState>>(
+    new Map(),
+  );
+  // Inline-edit composer state — the messageId currently being
+  // edited (or `null`), plus the working text.
+  const [editingId, setEditingId] = createSignal<number | null>(null);
+  const [editText, setEditText] = createSignal("");
+  // The messageId whose reaction picker is open (or `null`).
+  const [reactPickerId, setReactPickerId] = createSignal<number | null>(null);
 
   // Phase 2a3f1-web — persistent message log. The plaintext
   // timeline survives reloads under the device root key in
@@ -950,6 +1006,89 @@ function ChatView(props: {
 
   let nextTempId = 1;
 
+  // ADR-0023 — our own MLS leaf in this group. Used to author-
+  // stamp outgoing messages (for the edit/delete gate against an
+  // incoming op) and to attribute our own reactions. Re-read on
+  // every membersVersion bump (a Remove/Add can renumber leaves).
+  const ownLeaf = createMemo<number | undefined>(() => {
+    membersVersion();
+    try {
+      return props.entry.group.ownLeafIndex;
+    } catch {
+      return undefined;
+    }
+  });
+
+  /** Look up the author leaf of the displayed message with this
+   *  DS `messageId` — incoming app messages carry the original
+   *  `senderLeaf`, outgoing rows are authored by us. `undefined`
+   *  ⇒ the target is unknown or has no known author (a reloaded
+   *  message), so the edit/delete gate fails closed. `extra`
+   *  lets the receive loop also scan rows arriving in the same
+   *  batch (which aren't in `rows()` yet). */
+  function authorLeafForMessageId(
+    messageId: number,
+    extra: readonly TimelineRow[] = [],
+  ): number | undefined {
+    for (const row of rows()) {
+      if (rowMessageId(row) !== messageId) continue;
+      return rowAuthorLeaf(row, ownLeaf());
+    }
+    for (const row of extra) {
+      if (rowMessageId(row) !== messageId) continue;
+      return rowAuthorLeaf(row, ownLeaf());
+    }
+    return undefined;
+  }
+
+  /** Whether the target message is known at all (in the live
+   *  timeline or this batch). An op against an unknown target is
+   *  dropped (fail-closed; the ADR — we never materialise a
+   *  bubble for a target we've never displayed). */
+  function targetKnown(
+    messageId: number,
+    extra: readonly TimelineRow[],
+  ): boolean {
+    return (
+      rows().some((r) => rowMessageId(r) === messageId) ||
+      extra.some((r) => rowMessageId(r) === messageId)
+    );
+  }
+
+  /** ADR-0023 — fold one incoming op event into the overlay map,
+   *  enforcing the author-only gate for edit/delete. Returns the
+   *  (possibly unchanged) map; `===` to the input when the op was
+   *  dropped, so the caller can skip a needless signal write.
+   *
+   *  Gate (fail-closed, invariant #4):
+   *   - target unknown                  → DROP
+   *   - op.senderLeaf undefined          → DROP (control frame)
+   *   - edit/delete + senderLeaf ≠ author → DROP
+   *   - reaction                          → accept from any member */
+  function applyIncomingOp(
+    e: Extract<IncomingChatEvent, { kind: "op" }>,
+    extra: readonly TimelineRow[],
+    prev: Map<number, MessageOpState>,
+  ): Map<number, MessageOpState> {
+    if (!targetKnown(e.target, extra)) return prev;
+    if (e.senderLeaf === undefined) return prev;
+    if (e.op === "reaction") {
+      return applyOp(prev, {
+        op: "reaction",
+        target: e.target,
+        emoji: e.emoji ?? "",
+        reactorLeaf: e.senderLeaf,
+      });
+    }
+    // edit / delete — author-only (fail-closed, invariant #4).
+    const author = authorLeafForMessageId(e.target, extra);
+    if (!editDeleteAuthorized(author, e.senderLeaf)) return prev;
+    if (e.op === "edit") {
+      return applyOp(prev, { op: "edit", target: e.target, text: e.text });
+    }
+    return applyOp(prev, { op: "delete", target: e.target });
+  }
+
   async function refresh(): Promise<void> {
     setError(null);
     setBusy(true);
@@ -970,13 +1109,35 @@ function ChatView(props: {
           r.kind === "incoming" ? [r.event.messageId] : [],
         ),
       );
-      const fresh = result.events
-        .filter((e) => !incomingIds.has(e.messageId))
-        .map(
-          (e): TimelineRow => ({ kind: "incoming", event: e }),
-        );
+      // ADR-0023 — split the batch: chat / system / callSignaling
+      // events become timeline rows as before; edit / delete /
+      // reaction OPS fold into the per-message overlay instead of
+      // rendering as standalone bubbles. Each op is applied once
+      // (the poll is incremental, so a given op id arrives once).
+      const fresh: TimelineRow[] = [];
+      let ops = msgOps();
+      let opsChanged = false;
+      for (const e of result.events) {
+        if (e.kind === "op") {
+          // Fold the op into the overlay first so a chat row + an
+          // op that targets it that arrive in the same batch both
+          // land (the chat row appears in `fresh` below; the
+          // author-leaf lookup also scans `fresh`).
+          const next = applyIncomingOp(e, fresh, ops);
+          if (next !== ops) {
+            ops = next;
+            opsChanged = true;
+          }
+          continue;
+        }
+        if (incomingIds.has(e.messageId)) continue;
+        fresh.push({ kind: "incoming", event: e });
+      }
       if (fresh.length > 0) {
         setRows([...rows(), ...fresh]);
+      }
+      if (opsChanged) {
+        setMsgOps(ops);
       }
       setCursor(result.cursor);
       // 1.18g — mirror the post-poll member count so the
@@ -1053,6 +1214,89 @@ function ChatView(props: {
         rows().filter((r) => !(r.kind === "outgoing" && r.tempId === tempId)),
       );
       setPendingAttachments(attached);
+      setError(formatError(err));
+    }
+  }
+
+  // ----- ADR-0023 edit / delete / reaction send handlers -------
+  //
+  // The sender never receives its own application message back
+  // (the echo is filtered in ChatClient), so each handler BOTH
+  // publishes the op AND applies it locally. The op carries a DS
+  // `messageId` target; the local apply uses the same overlay
+  // map the receive loop folds into. Failures roll the local
+  // apply back (or never apply, for delete/react where we apply
+  // only after the publish resolves).
+
+  /** Save an inline edit of our own message. Author-gated by the
+   *  UI affordance (offered on own messages only) + by the
+   *  receive-side gate every peer runs. */
+  async function onSaveEdit(messageId: number): Promise<void> {
+    const newText = editText();
+    // An empty edit is a no-op rather than a silent delete — the
+    // user must use Delete explicitly.
+    if (newText.length === 0) {
+      setEditingId(null);
+      return;
+    }
+    setEditingId(null);
+    setError(null);
+    try {
+      const envelopeBytes = await composeEditEnvelope(messageId, newText);
+      await chat.sendMessage(
+        props.requireIdentity(),
+        props.entry.group,
+        envelopeBytes,
+      );
+      // Apply locally (no echo). Author == us, so the gate the
+      // receive loop runs would accept it; we mirror that here.
+      setMsgOps(applyOp(msgOps(), { op: "edit", target: messageId, text: newText }));
+    } catch (err) {
+      setError(formatError(err));
+    }
+  }
+
+  /** Delete our own message — publish a delete op + tombstone it
+   *  locally. */
+  async function onDeleteMessage(messageId: number): Promise<void> {
+    setError(null);
+    try {
+      const envelopeBytes = await composeDeleteEnvelope(messageId);
+      await chat.sendMessage(
+        props.requireIdentity(),
+        props.entry.group,
+        envelopeBytes,
+      );
+      setMsgOps(applyOp(msgOps(), { op: "delete", target: messageId }));
+    } catch (err) {
+      setError(formatError(err));
+    }
+  }
+
+  /** React to any message with `emoji` — publish a reaction op +
+   *  toggle it locally under our own leaf. Re-reacting with the
+   *  same emoji toggles it off (the op + the local apply are both
+   *  toggles, so they stay in sync). */
+  async function onReact(messageId: number, emoji: string): Promise<void> {
+    setReactPickerId(null);
+    setError(null);
+    try {
+      const envelopeBytes = await composeReactionEnvelope(messageId, emoji);
+      await chat.sendMessage(
+        props.requireIdentity(),
+        props.entry.group,
+        envelopeBytes,
+      );
+      const reactorLeaf = ownLeaf() ?? OWN_REACTION_SENTINEL;
+      setMsgOps(
+        applyOp(msgOps(), {
+          op: "reaction",
+          target: messageId,
+          emoji,
+          reactorLeaf,
+        }),
+      );
+    } catch (err) {
       setError(formatError(err));
     }
   }
@@ -2136,6 +2380,26 @@ function ChatView(props: {
                 onPreview={onPreviewAttachment}
                 onHidePreview={onHideAttachmentPreview}
                 getCachedUrl={getCachedAttachmentUrl}
+                ownLeaf={ownLeaf()}
+                opState={(id) => msgOps().get(id)}
+                editingId={editingId()}
+                editText={editText()}
+                setEditText={setEditText}
+                onStartEdit={(id, current) => {
+                  setEditText(current);
+                  setEditingId(id);
+                  setReactPickerId(null);
+                }}
+                onCancelEdit={() => setEditingId(null)}
+                onSaveEdit={onSaveEdit}
+                onDeleteMessage={onDeleteMessage}
+                reactPickerId={reactPickerId()}
+                onOpenReactPicker={(id) => {
+                  setReactPickerId(id);
+                  setEditingId(null);
+                }}
+                onCloseReactPicker={() => setReactPickerId(null)}
+                onReact={onReact}
               />
             )}
           </For>
@@ -2297,7 +2561,23 @@ function TimelineBubble(props: {
   onPreview: (ref: AttachmentRefBytes) => void | Promise<void>;
   onHidePreview: (ref: AttachmentRefBytes) => void;
   getCachedUrl: (ref: AttachmentRefBytes) => string | null;
+  /** ADR-0023 — our own MLS leaf (for own-reaction highlight). */
+  ownLeaf: number | undefined;
+  /** Reactive overlay accessor for a given target messageId. */
+  opState: (messageId: number) => MessageOpState | undefined;
+  editingId: number | null;
+  editText: string;
+  setEditText: (v: string) => void;
+  onStartEdit: (messageId: number, current: string) => void;
+  onCancelEdit: () => void;
+  onSaveEdit: (messageId: number) => void | Promise<void>;
+  onDeleteMessage: (messageId: number) => void | Promise<void>;
+  reactPickerId: number | null;
+  onOpenReactPicker: (messageId: number) => void;
+  onCloseReactPicker: () => void;
+  onReact: (messageId: number, emoji: string) => void | Promise<void>;
 }): JSX.Element {
+  // System rows + call signaling never carry an op overlay.
   if (props.row.kind === "incoming") {
     const ev = props.row.event;
     if (ev.kind === "system") {
@@ -2321,78 +2601,417 @@ function TimelineBubble(props: {
       // it into the state machine; nothing renders here.
       return null;
     }
+    if (ev.kind === "op") {
+      // ADR-0023 — ops are folded into the target message's
+      // overlay by the receive loop, never rendered as a
+      // standalone bubble. (Defensive: ops don't enter `rows()`,
+      // but keep the timeline render total.)
+      return null;
+    }
+    // Incoming application message — never our own → Edit/Delete
+    // are not offered (the author-only gate would reject our op
+    // anyway); React is.
     return (
-      <li
-        style={{
-          padding: "0.5rem 0.75rem",
-          background: "var(--surface-elevated)",
-          border: "1px solid var(--surface-border)",
-          "border-radius": "var(--radius-md)",
-          "align-self": "flex-start",
-          "max-width": "75%",
-        }}
-      >
-        <Show when={ev.text.length > 0}>
-          <div style={{ "white-space": "pre-wrap" }}>{ev.text}</div>
-        </Show>
-        <Show when={ev.attachments.length > 0}>
-          <AttachmentChips
-            attachments={ev.attachments}
-            onDownload={props.onDownload}
-            onPreview={props.onPreview}
-            onHidePreview={props.onHidePreview}
-            getCachedUrl={props.getCachedUrl}
-            tone="incoming"
-          />
-        </Show>
-        <div
-          style={{
-            color: "var(--surface-muted)",
-            "font-size": "0.75rem",
-            "margin-top": "0.2rem",
-          }}
-        >
-          peer · #{ev.messageId} · {ev.createdAt}
-        </div>
-      </li>
+      <ChatBubbleBody
+        messageId={ev.messageId}
+        isOwn={false}
+        ack="sent"
+        originalText={ev.text}
+        attachments={ev.attachments}
+        meta={`peer · #${ev.messageId} · ${ev.createdAt}`}
+        tone="incoming"
+        {...props}
+      />
     );
   }
-  // outgoing
+  // Outgoing — our own message. Edit/Delete offered once acked
+  // (a pending bubble has no messageId yet).
   const r = props.row;
   return (
-    <li
-      style={{
+    <ChatBubbleBody
+      messageId={r.ack === "sent" ? r.messageId : undefined}
+      isOwn={true}
+      ack={r.ack}
+      originalText={r.plaintext}
+      attachments={r.attachments}
+      meta={
+        r.ack === "pending"
+          ? "you · sending…"
+          : `you · sent · #${r.messageId ?? "?"} · ${r.createdAt ?? ""}`
+      }
+      tone="outgoing"
+      {...props}
+    />
+  );
+}
+
+/**
+ * ADR-0023 — the shared bubble body for both incoming + outgoing
+ * messages, carrying the op overlay (edited text / deleted
+ * tombstone / reaction chips) and the per-message action menu.
+ *
+ * Reactivity: `opState(messageId)` is read inside the render so a
+ * later op fold (or a local own-op apply) re-renders just this
+ * bubble. The action affordances are gated on `messageId !==
+ * undefined` (an un-acked outgoing bubble has no DS id to
+ * reference yet).
+ */
+function ChatBubbleBody(props: {
+  messageId: number | undefined;
+  isOwn: boolean;
+  ack: "pending" | "sent";
+  originalText: string;
+  attachments: AttachmentRefBytes[];
+  meta: string;
+  tone: "incoming" | "outgoing";
+  onDownload: (ref: AttachmentRefBytes) => void | Promise<void>;
+  onPreview: (ref: AttachmentRefBytes) => void | Promise<void>;
+  onHidePreview: (ref: AttachmentRefBytes) => void;
+  getCachedUrl: (ref: AttachmentRefBytes) => string | null;
+  ownLeaf: number | undefined;
+  opState: (messageId: number) => MessageOpState | undefined;
+  editingId: number | null;
+  editText: string;
+  setEditText: (v: string) => void;
+  onStartEdit: (messageId: number, current: string) => void;
+  onCancelEdit: () => void;
+  onSaveEdit: (messageId: number) => void | Promise<void>;
+  onDeleteMessage: (messageId: number) => void | Promise<void>;
+  reactPickerId: number | null;
+  onOpenReactPicker: (messageId: number) => void;
+  onCloseReactPicker: () => void;
+  onReact: (messageId: number, emoji: string) => void | Promise<void>;
+}): JSX.Element {
+  const isIncoming = props.tone === "incoming";
+  // The live overlay for this message (reactive). `undefined`
+  // until an op lands.
+  const state = (): MessageOpState | undefined =>
+    props.messageId === undefined ? undefined : props.opState(props.messageId);
+  const isDeleted = (): boolean => state()?.deleted === true;
+  const editedText = (): string | undefined => state()?.editedText;
+  const displayText = (): string => editedText() ?? props.originalText;
+  const isEdited = (): boolean => editedText() !== undefined;
+  const isEditing = (): boolean =>
+    props.messageId !== undefined && props.editingId === props.messageId;
+  const pickerOpen = (): boolean =>
+    props.messageId !== undefined && props.reactPickerId === props.messageId;
+  // Reactions sorted for a stable chip order.
+  const reactionEntries = (): Array<{
+    emoji: string;
+    count: number;
+    mine: boolean;
+  }> => {
+    const m = state()?.reactions;
+    if (m === undefined) return [];
+    const own = props.ownLeaf ?? OWN_REACTION_SENTINEL;
+    return [...m.entries()]
+      .map(([emoji, reactors]) => ({
+        emoji,
+        count: reactors.size,
+        mine: reactors.has(own),
+      }))
+      .filter((e) => e.count > 0)
+      .sort((a, b) => a.emoji.localeCompare(b.emoji));
+  };
+
+  const bubbleStyle = isIncoming
+    ? {
+        padding: "0.5rem 0.75rem",
+        background: "var(--surface-elevated)",
+        border: "1px solid var(--surface-border)",
+        "border-radius": "var(--radius-md)",
+        "align-self": "flex-start",
+        "max-width": "75%",
+      }
+    : {
         padding: "0.5rem 0.75rem",
         background: "var(--accent)",
         color: "var(--accent-fg)",
         "border-radius": "var(--radius-md)",
         "align-self": "flex-end",
         "max-width": "75%",
-        opacity: r.ack === "pending" ? 0.7 : 1,
-      }}
-    >
-      <Show when={r.plaintext.length > 0}>
-        <div style={{ "white-space": "pre-wrap" }}>{r.plaintext}</div>
+        opacity: props.ack === "pending" ? 0.7 : 1,
+      };
+  const metaColour = isIncoming ? "var(--surface-muted)" : undefined;
+
+  return (
+    <li style={{ ...bubbleStyle, position: "relative" }}>
+      <Show
+        when={!isDeleted()}
+        fallback={
+          <div
+            style={{
+              "font-style": "italic",
+              opacity: 0.7,
+              "white-space": "pre-wrap",
+            }}
+          >
+            message deleted
+          </div>
+        }
+      >
+        <Show
+          when={isEditing()}
+          fallback={
+            <>
+              <Show when={displayText().length > 0}>
+                <div style={{ "white-space": "pre-wrap" }}>
+                  {displayText()}
+                  <Show when={isEdited()}>
+                    <span
+                      style={{
+                        "font-size": "0.7rem",
+                        opacity: 0.6,
+                        "margin-left": "0.35rem",
+                      }}
+                    >
+                      (edited)
+                    </span>
+                  </Show>
+                </div>
+              </Show>
+              <Show when={props.attachments.length > 0}>
+                <AttachmentChips
+                  attachments={props.attachments}
+                  onDownload={props.onDownload}
+                  onPreview={props.onPreview}
+                  onHidePreview={props.onHidePreview}
+                  getCachedUrl={props.getCachedUrl}
+                  tone={props.tone}
+                />
+              </Show>
+            </>
+          }
+        >
+          {/* Inline edit composer — pre-filled with the current
+              text; Save publishes the edit op, Cancel discards. */}
+          <div style={{ display: "flex", "flex-direction": "column", gap: "0.35rem" }}>
+            <textarea
+              value={props.editText}
+              onInput={(e) => props.setEditText(e.currentTarget.value)}
+              rows={2}
+              style={{
+                width: "100%",
+                "box-sizing": "border-box",
+                "font-family": "inherit",
+                "font-size": "inherit",
+                padding: "0.3rem 0.4rem",
+                "border-radius": "var(--radius-sm)",
+                border: "1px solid var(--surface-border)",
+                color: "var(--surface-fg)",
+                background: "var(--surface-bg)",
+                resize: "vertical",
+              }}
+            />
+            <div style={{ display: "flex", gap: "0.4rem" }}>
+              <button
+                type="button"
+                onClick={() => {
+                  if (props.messageId !== undefined) {
+                    void props.onSaveEdit(props.messageId);
+                  }
+                }}
+                style={bubbleActionBtnStyle}
+              >
+                Save
+              </button>
+              <button
+                type="button"
+                onClick={() => props.onCancelEdit()}
+                style={bubbleActionBtnStyle}
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </Show>
       </Show>
-      <Show when={r.attachments.length > 0}>
-        <AttachmentChips
-          attachments={r.attachments}
-          onDownload={props.onDownload}
-          onPreview={props.onPreview}
-          onHidePreview={props.onHidePreview}
-          getCachedUrl={props.getCachedUrl}
-          tone="outgoing"
-        />
+
+      {/* Reaction chips — rendered under the body (incl. on a
+          deleted message: a reaction can outlive the text). */}
+      <Show when={reactionEntries().length > 0}>
+        <div
+          style={{
+            display: "flex",
+            "flex-wrap": "wrap",
+            gap: "0.3rem",
+            "margin-top": "0.35rem",
+          }}
+        >
+          <For each={reactionEntries()}>
+            {(re) => (
+              <button
+                type="button"
+                title={re.mine ? "Remove your reaction" : "React"}
+                onClick={() => {
+                  if (props.messageId !== undefined) {
+                    void props.onReact(props.messageId, re.emoji);
+                  }
+                }}
+                style={{
+                  display: "inline-flex",
+                  "align-items": "center",
+                  gap: "0.2rem",
+                  padding: "0.05rem 0.4rem",
+                  "font-size": "0.8rem",
+                  cursor: "pointer",
+                  "border-radius": "999px",
+                  border: re.mine
+                    ? "1px solid var(--accent)"
+                    : "1px solid var(--surface-border)",
+                  background: re.mine
+                    ? "var(--accent-soft, rgba(99,102,241,0.18))"
+                    : isIncoming
+                      ? "var(--surface-bg)"
+                      : "rgba(255,255,255,0.15)",
+                  color: "inherit",
+                }}
+              >
+                <span>{re.emoji}</span>
+                <span style={{ "font-size": "0.72rem", opacity: 0.85 }}>
+                  {re.count}
+                </span>
+              </button>
+            )}
+          </For>
+        </div>
       </Show>
-      <div style={{ "font-size": "0.75rem", "margin-top": "0.2rem" }}>
-        you ·{" "}
-        {r.ack === "pending"
-          ? "sending…"
-          : `sent · #${r.messageId ?? "?"} · ${r.createdAt ?? ""}`}
+
+      <div
+        style={{
+          color: metaColour,
+          "font-size": "0.75rem",
+          "margin-top": "0.2rem",
+        }}
+      >
+        {props.meta}
       </div>
+
+      {/* Per-message action menu — gated on the message having a
+          DS messageId (the op references its target by id). The
+          hover-revealed strip carries React on any message, plus
+          Edit + Delete on our own. Inline-edit mode hides it. */}
+      <Show when={props.messageId !== undefined && !isEditing() && !isDeleted()}>
+        <div
+          class="lakko-msg-actions"
+          style={{
+            position: "absolute",
+            top: "-0.6rem",
+            [isIncoming ? "right" : "left"]: "0.4rem",
+            display: "flex",
+            gap: "0.2rem",
+            padding: "0.1rem",
+            "border-radius": "var(--radius-sm)",
+            background: "var(--surface-bg)",
+            border: "1px solid var(--surface-border)",
+            "box-shadow": "0 1px 3px rgba(0,0,0,0.18)",
+          }}
+        >
+          <button
+            type="button"
+            title="React"
+            onClick={() =>
+              pickerOpen()
+                ? props.onCloseReactPicker()
+                : props.onOpenReactPicker(props.messageId as number)
+            }
+            style={bubbleMiniBtnStyle}
+          >
+            🙂
+          </button>
+          <Show when={props.isOwn}>
+            <button
+              type="button"
+              title="Edit"
+              onClick={() =>
+                props.onStartEdit(props.messageId as number, displayText())
+              }
+              style={bubbleMiniBtnStyle}
+            >
+              ✎
+            </button>
+            <button
+              type="button"
+              title="Delete"
+              onClick={() => {
+                if (props.messageId !== undefined) {
+                  void props.onDeleteMessage(props.messageId);
+                }
+              }}
+              style={bubbleMiniBtnStyle}
+            >
+              🗑
+            </button>
+          </Show>
+        </div>
+      </Show>
+
+      {/* Emoji picker popover. */}
+      <Show when={pickerOpen()}>
+        <div
+          style={{
+            position: "absolute",
+            top: "1.2rem",
+            [isIncoming ? "right" : "left"]: "0.4rem",
+            "z-index": 5,
+            display: "flex",
+            gap: "0.15rem",
+            padding: "0.25rem",
+            "border-radius": "var(--radius-md)",
+            background: "var(--surface-bg)",
+            border: "1px solid var(--surface-border)",
+            "box-shadow": "0 2px 6px rgba(0,0,0,0.22)",
+          }}
+        >
+          <For each={REACTION_EMOJI}>
+            {(emoji) => (
+              <button
+                type="button"
+                onClick={() => {
+                  if (props.messageId !== undefined) {
+                    void props.onReact(props.messageId, emoji);
+                  }
+                }}
+                style={{
+                  border: "none",
+                  background: "transparent",
+                  "font-size": "1.1rem",
+                  cursor: "pointer",
+                  padding: "0.1rem 0.2rem",
+                  "line-height": 1,
+                }}
+              >
+                {emoji}
+              </button>
+            )}
+          </For>
+        </div>
+      </Show>
     </li>
   );
 }
+
+/** Shared style for the Save / Cancel buttons in the inline
+ *  edit composer. */
+const bubbleActionBtnStyle = {
+  padding: "0.2rem 0.6rem",
+  "font-size": "0.78rem",
+  cursor: "pointer",
+  "border-radius": "var(--radius-sm)",
+  border: "1px solid var(--surface-border)",
+  background: "var(--surface-bg)",
+  color: "var(--surface-fg)",
+} as const;
+
+/** Shared style for the tiny hover-strip action buttons. */
+const bubbleMiniBtnStyle = {
+  border: "none",
+  background: "transparent",
+  "font-size": "0.85rem",
+  cursor: "pointer",
+  padding: "0.1rem 0.25rem",
+  "line-height": 1,
+} as const;
 
 /**
  * Render the attachment-chip strip below a bubble's text body.
@@ -2687,6 +3306,12 @@ function timelineRowToPersisted(row: TimelineRow): PersistedMessage | null {
     // Already filtered out at the top of this function.
     return null;
   }
+  if (row.event.kind === "op") {
+    // ADR-0023 — op events are folded into the target message's
+    // overlay by the receive loop, never materialised as timeline
+    // rows, so this branch is unreachable. Never persist them.
+    return null;
+  }
   // system
   return {
     messageId: String(row.event.messageId),
@@ -2739,6 +3364,13 @@ function persistedToTimelineRow(m: PersistedMessage): TimelineRow {
         text: m.text,
         plaintext: m.text,
         attachments,
+        // ADR-0023 — the author leaf is not persisted (the
+        // op overlay is session-scoped, multi-device replay
+        // deferred to Phase 2), so a reloaded message's
+        // edit/delete gate fails closed. Acceptable: a peer
+        // editing across the reload boundary just won't apply
+        // until the next live message re-establishes authorship.
+        senderLeaf: undefined,
         createdAt: m.createdAt,
       },
     };

@@ -248,6 +248,10 @@ pub enum ProcessedMessage {
     Application {
         /// Plaintext bytes the application can consume.
         data: Vec<u8>,
+        /// The sender's leaf index (ADR-0023), or `None` for an external
+        /// sender. The chat receive path uses it for the author-only
+        /// edit/delete gate + reaction attribution.
+        sender_leaf: Option<u32>,
     },
     /// A commit was processed and merged. Group state advanced.
     Commit,
@@ -619,7 +623,10 @@ impl Group {
         let mut g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
         let result = g.process_incoming(&identity.inner, &bytes)?;
         Ok(match result {
-            MlsIncoming::Application(data) => ProcessedMessage::Application { data },
+            MlsIncoming::Application { bytes, sender_leaf } => ProcessedMessage::Application {
+                data: bytes,
+                sender_leaf,
+            },
             MlsIncoming::Commit => ProcessedMessage::Commit,
             MlsIncoming::Proposal => ProcessedMessage::Proposal,
             MlsIncoming::ExternalJoinProposal => ProcessedMessage::ExternalJoinProposal,
@@ -736,7 +743,10 @@ impl Group {
         let mut g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
         let result = g.process_incoming_verifying_roles(&identity.inner, &bytes)?;
         Ok(match result {
-            MlsIncoming::Application(data) => ProcessedMessage::Application { data },
+            MlsIncoming::Application { bytes, sender_leaf } => ProcessedMessage::Application {
+                data: bytes,
+                sender_leaf,
+            },
             MlsIncoming::Commit => ProcessedMessage::Commit,
             MlsIncoming::Proposal => ProcessedMessage::Proposal,
             MlsIncoming::ExternalJoinProposal => ProcessedMessage::ExternalJoinProposal,
@@ -1244,7 +1254,12 @@ impl DeviceGroup {
         let mut g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
         let incoming = g.process_incoming(&identity.inner, &message_bytes)?;
         Ok(match incoming {
-            lakko_mls::Incoming::Application(data) => ProcessedMessage::Application { data },
+            lakko_mls::Incoming::Application { bytes, sender_leaf } => {
+                ProcessedMessage::Application {
+                    data: bytes,
+                    sender_leaf,
+                }
+            },
             lakko_mls::Incoming::Commit => ProcessedMessage::Commit,
             lakko_mls::Incoming::Proposal => ProcessedMessage::Proposal,
             lakko_mls::Incoming::ExternalJoinProposal => ProcessedMessage::ExternalJoinProposal,
@@ -1297,7 +1312,12 @@ impl DeviceGroup {
             now_unix_secs,
         )?;
         Ok(match incoming {
-            lakko_mls::Incoming::Application(data) => ProcessedMessage::Application { data },
+            lakko_mls::Incoming::Application { bytes, sender_leaf } => {
+                ProcessedMessage::Application {
+                    data: bytes,
+                    sender_leaf,
+                }
+            },
             lakko_mls::Incoming::Commit => ProcessedMessage::Commit,
             lakko_mls::Incoming::Proposal => ProcessedMessage::Proposal,
             lakko_mls::Incoming::ExternalJoinProposal => ProcessedMessage::ExternalJoinProposal,
@@ -1791,7 +1811,7 @@ pub fn load_device_group(
 impl core::fmt::Debug for ProcessedMessage {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::Application { data } => write!(f, "Application {{ {} bytes }}", data.len()),
+            Self::Application { data, .. } => write!(f, "Application {{ {} bytes }}", data.len()),
             Self::Commit => write!(f, "Commit"),
             Self::Proposal => write!(f, "Proposal"),
             Self::ExternalJoinProposal => write!(f, "ExternalJoinProposal"),
@@ -3066,8 +3086,10 @@ mod tests {
             .unwrap();
         let received = bob_group.process_incoming(&bob, msg).unwrap();
         match received {
-            ProcessedMessage::Application { data } => {
+            ProcessedMessage::Application { data, sender_leaf } => {
                 assert_eq!(data, b"hello via ffi");
+                // ADR-0023 — the sender's leaf is surfaced (Alice's, here).
+                assert_eq!(sender_leaf, Some(alice_group.own_leaf_index().unwrap()));
             },
             other => panic!("expected application, got {other:?}"),
         }

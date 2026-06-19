@@ -1,6 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
+@file:OptIn(
+    androidx.compose.foundation.ExperimentalFoundationApi::class,
+    androidx.compose.foundation.layout.ExperimentalLayoutApi::class,
+)
+
 package me.lakko.app.ui.chat
 
 import android.content.Context
@@ -21,11 +26,13 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.AlertDialog
@@ -33,6 +40,8 @@ import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AssistChipDefaults
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -110,6 +119,14 @@ public fun ChatScreen(
     // the main thread + populate this, which surfaces an
     // AlertDialog with the decoded bitmap.
     var previewImage by remember { mutableStateOf<ImageBitmap?>(null) }
+
+    // ADR-0023 — the message being edited (the small pre-filled
+    // dialog), or `null` when no edit is in progress.
+    var editTarget by remember { mutableStateOf<ChatMessage?>(null) }
+    // ADR-0023 — our own leaf in this chat group, sampled once
+    // per composition; the UI marks which reaction chips we
+    // contributed (and can toggle off).
+    val ownLeaf = remember(state.groupIdHex) { viewModel.ownChatLeafIndex() }
 
     // 1.19c4 — system-picker launchers. `ACTION_OPEN_DOCUMENT`
     // surfaces both files and photos through the same code path
@@ -336,6 +353,7 @@ public fun ChatScreen(
                     items(items = state.messages, key = { it.messageId }) { msg ->
                         MessageRow(
                             msg = msg,
+                            ownLeaf = ownLeaf,
                             onPreview = { ref ->
                                 scope.launch {
                                     val bytes = withContext(Dispatchers.IO) {
@@ -360,6 +378,12 @@ public fun ChatScreen(
                                         shareDecryptedBytes(context, ref, bytes)
                                     }
                                 }
+                            },
+                            // ADR-0023 — open the pre-filled edit dialog.
+                            onEdit = { editTarget = msg },
+                            onDelete = { viewModel.onDeleteMessage(msg.messageId) },
+                            onReact = { emoji ->
+                                viewModel.onReactToMessage(msg.messageId, emoji)
                             },
                         )
                     }
@@ -402,6 +426,20 @@ public fun ChatScreen(
                     bitmap = preview,
                     contentDescription = "attachment preview",
                 )
+            },
+        )
+    }
+
+    // ADR-0023 — edit dialog: a small text field pre-filled with
+    // the target's current text + Save / Cancel.
+    val editing = editTarget
+    if (editing != null) {
+        EditMessageDialog(
+            initialText = editing.text,
+            onCancel = { editTarget = null },
+            onSave = { newText ->
+                viewModel.onEditMessage(editing.messageId, newText)
+                editTarget = null
             },
         )
     }
@@ -549,8 +587,12 @@ private fun CallOverlay(
 @Composable
 private fun MessageRow(
     msg: ChatMessage,
+    ownLeaf: UInt?,
     onPreview: (AttachmentRef) -> Unit,
     onSave: (AttachmentRef) -> Unit,
+    onEdit: () -> Unit,
+    onDelete: () -> Unit,
+    onReact: (String) -> Unit,
 ) {
     when (msg.direction) {
         Direction.Outgoing -> Row(
@@ -558,12 +600,16 @@ private fun MessageRow(
             horizontalArrangement = Arrangement.End,
         ) {
             Bubble(
-                text = msg.text,
-                attachments = msg.attachments,
+                msg = msg,
+                ownLeaf = ownLeaf,
+                isOwn = true,
                 background = MaterialTheme.colorScheme.primaryContainer,
                 contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
                 onPreview = onPreview,
                 onSave = onSave,
+                onEdit = onEdit,
+                onDelete = onDelete,
+                onReact = onReact,
             )
         }
 
@@ -572,12 +618,16 @@ private fun MessageRow(
             horizontalArrangement = Arrangement.Start,
         ) {
             Bubble(
-                text = msg.text,
-                attachments = msg.attachments,
+                msg = msg,
+                ownLeaf = ownLeaf,
+                isOwn = false,
                 background = MaterialTheme.colorScheme.surfaceVariant,
                 contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
                 onPreview = onPreview,
                 onSave = onSave,
+                onEdit = onEdit,
+                onDelete = onDelete,
+                onReact = onReact,
             )
         }
 
@@ -596,44 +646,240 @@ private fun MessageRow(
     }
 }
 
+/** ADR-0023 — the per-message action menu's emoji picker set. */
+private val REACTION_EMOJIS: List<String> =
+    listOf("👍", "❤️", "😂", "😮", "😢", "🙏")
+
 @Composable
 private fun Bubble(
-    text: String,
-    attachments: List<AttachmentRef>,
+    msg: ChatMessage,
+    ownLeaf: UInt?,
+    isOwn: Boolean,
     background: Color,
     contentColor: Color,
     onPreview: (AttachmentRef) -> Unit,
     onSave: (AttachmentRef) -> Unit,
+    onEdit: () -> Unit,
+    onDelete: () -> Unit,
+    onReact: (String) -> Unit,
 ) {
-    Surface(
-        shape = RoundedCornerShape(12.dp),
-        color = background,
-        contentColor = contentColor,
-        modifier = Modifier.widthIn(max = 280.dp),
+    // ADR-0023 — every affordance is gated on the message having a
+    // real DS messageId (0 ⇒ a not-yet-acked outgoing row that no
+    // op can target). Edit / Delete are own-message-only; React is
+    // offered on any message with an id.
+    val hasId = msg.messageId != 0L
+    var menuOpen by remember { mutableStateOf(false) }
+    var pickingReaction by remember { mutableStateOf(false) }
+
+    Column(
+        horizontalAlignment = if (isOwn) Alignment.End else Alignment.Start,
+        verticalArrangement = Arrangement.spacedBy(2.dp),
     ) {
-        Column(
-            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-            verticalArrangement = Arrangement.spacedBy(6.dp),
-        ) {
-            if (text.isNotEmpty()) {
-                Text(
-                    text = text,
-                    style = MaterialTheme.typography.bodyMedium,
-                )
+        Box {
+            Surface(
+                shape = RoundedCornerShape(12.dp),
+                color = background,
+                contentColor = contentColor,
+                modifier = Modifier
+                    .widthIn(max = 280.dp)
+                    .then(
+                        if (hasId && !msg.deleted) {
+                            Modifier.combinedClickable(
+                                onClick = {},
+                                onLongClick = {
+                                    pickingReaction = false
+                                    menuOpen = true
+                                },
+                            )
+                        } else {
+                            Modifier
+                        },
+                    ),
+            ) {
+                Column(
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    if (msg.deleted) {
+                        // ADR-0023 — muted tombstone, no text / attachments.
+                        Text(
+                            text = "message deleted",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = contentColor.copy(alpha = 0.6f),
+                            fontStyle = androidx.compose.ui.text.font.FontStyle.Italic,
+                        )
+                    } else {
+                        if (msg.text.isNotEmpty()) {
+                            Text(
+                                text = msg.text,
+                                style = MaterialTheme.typography.bodyMedium,
+                            )
+                        }
+                        if (msg.attachments.isNotEmpty()) {
+                            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                for (ref in msg.attachments) {
+                                    AttachmentChipRow(
+                                        ref = ref,
+                                        onPreview = { onPreview(ref) },
+                                        onSave = { onSave(ref) },
+                                    )
+                                }
+                            }
+                        }
+                        // ADR-0023 — subtle "(edited)" marker.
+                        if (msg.edited) {
+                            Text(
+                                text = "(edited)",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = contentColor.copy(alpha = 0.6f),
+                            )
+                        }
+                    }
+                }
             }
-            if (attachments.isNotEmpty()) {
-                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    for (ref in attachments) {
-                        AttachmentChipRow(
-                            ref = ref,
-                            onPreview = { onPreview(ref) },
-                            onSave = { onSave(ref) },
+
+            // ADR-0023 — long-press action menu anchored to the bubble.
+            DropdownMenu(
+                expanded = menuOpen,
+                onDismissRequest = {
+                    menuOpen = false
+                    pickingReaction = false
+                },
+            ) {
+                if (pickingReaction) {
+                    // Emoji picker — a single row of the six core
+                    // reactions. Tapping one sends the toggle op.
+                    Row(
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        for (emoji in REACTION_EMOJIS) {
+                            TextButton(onClick = {
+                                onReact(emoji)
+                                menuOpen = false
+                                pickingReaction = false
+                            }) { Text(emoji) }
+                        }
+                    }
+                } else {
+                    DropdownMenuItem(
+                        text = { Text("React") },
+                        onClick = { pickingReaction = true },
+                    )
+                    // Edit / Delete only on our own (outgoing) messages.
+                    if (isOwn) {
+                        DropdownMenuItem(
+                            text = { Text("Edit") },
+                            onClick = {
+                                menuOpen = false
+                                onEdit()
+                            },
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Delete") },
+                            onClick = {
+                                menuOpen = false
+                                onDelete()
+                            },
                         )
                     }
                 }
             }
         }
+
+        // ADR-0023 — reaction chips with counts under the bubble.
+        // Tapping a chip we contributed toggles it off.
+        if (!msg.deleted && msg.reactions.isNotEmpty()) {
+            ReactionChips(
+                reactions = msg.reactions,
+                ownLeaf = ownLeaf,
+                onToggle = { emoji -> if (hasId) onReact(emoji) },
+            )
+        }
     }
+}
+
+/** ADR-0023 — aggregate reactions into `emoji ×count` chips. A
+ *  chip the local user contributed is tinted + tappable to
+ *  toggle off. */
+@Composable
+private fun ReactionChips(
+    reactions: List<me.lakko.app.chat.Reaction>,
+    ownLeaf: UInt?,
+    onToggle: (String) -> Unit,
+) {
+    // Aggregate by emoji preserving first-seen order; track
+    // whether our own leaf is in each bucket.
+    val order = ArrayList<String>()
+    val counts = LinkedHashMap<String, Int>()
+    val mine = HashSet<String>()
+    for (r in reactions) {
+        if (!counts.containsKey(r.emoji)) order.add(r.emoji)
+        counts[r.emoji] = (counts[r.emoji] ?: 0) + 1
+        if (ownLeaf != null && r.reactorLeaf == ownLeaf) mine.add(r.emoji)
+    }
+    FlowRow(
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        for (emoji in order) {
+            val count = counts[emoji] ?: 0
+            val isMine = mine.contains(emoji)
+            Surface(
+                shape = RoundedCornerShape(10.dp),
+                color = if (isMine) {
+                    MaterialTheme.colorScheme.primary.copy(alpha = 0.18f)
+                } else {
+                    MaterialTheme.colorScheme.surfaceVariant
+                },
+                contentColor = MaterialTheme.colorScheme.onSurface,
+                modifier = Modifier.combinedClickable(
+                    onClick = { onToggle(emoji) },
+                    onLongClick = {},
+                ),
+            ) {
+                Text(
+                    text = "$emoji $count",
+                    style = MaterialTheme.typography.labelMedium,
+                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+                )
+            }
+        }
+    }
+}
+
+/** ADR-0023 — the pre-filled edit dialog (Save / Cancel). */
+@Composable
+private fun EditMessageDialog(
+    initialText: String,
+    onCancel: () -> Unit,
+    onSave: (String) -> Unit,
+) {
+    var draft by remember { mutableStateOf(initialText) }
+    AlertDialog(
+        onDismissRequest = onCancel,
+        title = { Text("Edit message") },
+        text = {
+            OutlinedTextField(
+                value = draft,
+                onValueChange = { draft = it },
+                singleLine = false,
+                keyboardOptions = KeyboardOptions(
+                    capitalization = KeyboardCapitalization.Sentences,
+                ),
+                modifier = Modifier.fillMaxWidth(),
+            )
+        },
+        confirmButton = {
+            TextButton(
+                onClick = { onSave(draft) },
+                enabled = draft.trim().isNotEmpty() && draft.trim() != initialText.trim(),
+            ) { Text("Save") }
+        },
+        dismissButton = {
+            TextButton(onClick = onCancel) { Text("Cancel") }
+        },
+    )
 }
 
 /** Single attachment chip rendered inside a bubble. Hosts the

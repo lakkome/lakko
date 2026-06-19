@@ -238,6 +238,29 @@ pub enum ProcessedMessageKind {
 pub struct ProcessedMessage {
     kind: ProcessedMessageKind,
     application_data: Option<Vec<u8>>,
+    sender_leaf: Option<u32>,
+}
+
+impl ProcessedMessage {
+    /// Construct an Application result carrying the sender's leaf
+    /// (ADR-0023).
+    fn application(data: Vec<u8>, sender_leaf: Option<u32>) -> Self {
+        Self {
+            kind: ProcessedMessageKind::Application,
+            application_data: Some(data),
+            sender_leaf,
+        }
+    }
+
+    /// Construct a control-message result (commit / proposal) — no
+    /// payload, no sender leaf.
+    const fn control(kind: ProcessedMessageKind) -> Self {
+        Self {
+            kind,
+            application_data: None,
+            sender_leaf: None,
+        }
+    }
 }
 
 #[wasm_bindgen]
@@ -259,6 +282,15 @@ impl ProcessedMessage {
     #[wasm_bindgen(getter, js_name = applicationData)]
     pub fn application_data(&self) -> Option<Vec<u8>> {
         self.application_data.clone()
+    }
+
+    /// The sender's leaf index for an Application message (ADR-0023),
+    /// or `undefined` for a control message / external sender. The
+    /// chat receive path uses it for the author-only edit/delete gate
+    /// + reaction attribution.
+    #[wasm_bindgen(getter, js_name = senderLeaf)]
+    pub fn sender_leaf(&self) -> Option<u32> {
+        self.sender_leaf
     }
 }
 
@@ -394,21 +426,13 @@ impl Group {
             .process_incoming(&identity.inner, bytes)
             .map_err(mls_err)?;
         Ok(match result {
-            MlsIncoming::Application(data) => ProcessedMessage {
-                kind: ProcessedMessageKind::Application,
-                application_data: Some(data),
+            MlsIncoming::Application { bytes, sender_leaf } => {
+                ProcessedMessage::application(bytes, sender_leaf)
             },
-            MlsIncoming::Commit => ProcessedMessage {
-                kind: ProcessedMessageKind::Commit,
-                application_data: None,
-            },
-            MlsIncoming::Proposal => ProcessedMessage {
-                kind: ProcessedMessageKind::Proposal,
-                application_data: None,
-            },
-            MlsIncoming::ExternalJoinProposal => ProcessedMessage {
-                kind: ProcessedMessageKind::ExternalJoinProposal,
-                application_data: None,
+            MlsIncoming::Commit => ProcessedMessage::control(ProcessedMessageKind::Commit),
+            MlsIncoming::Proposal => ProcessedMessage::control(ProcessedMessageKind::Proposal),
+            MlsIncoming::ExternalJoinProposal => {
+                ProcessedMessage::control(ProcessedMessageKind::ExternalJoinProposal)
             },
         })
     }
@@ -501,21 +525,13 @@ impl Group {
             .process_incoming_verifying_roles(&identity.inner, bytes)
             .map_err(mls_err)?;
         Ok(match result {
-            MlsIncoming::Application(data) => ProcessedMessage {
-                kind: ProcessedMessageKind::Application,
-                application_data: Some(data),
+            MlsIncoming::Application { bytes, sender_leaf } => {
+                ProcessedMessage::application(bytes, sender_leaf)
             },
-            MlsIncoming::Commit => ProcessedMessage {
-                kind: ProcessedMessageKind::Commit,
-                application_data: None,
-            },
-            MlsIncoming::Proposal => ProcessedMessage {
-                kind: ProcessedMessageKind::Proposal,
-                application_data: None,
-            },
-            MlsIncoming::ExternalJoinProposal => ProcessedMessage {
-                kind: ProcessedMessageKind::ExternalJoinProposal,
-                application_data: None,
+            MlsIncoming::Commit => ProcessedMessage::control(ProcessedMessageKind::Commit),
+            MlsIncoming::Proposal => ProcessedMessage::control(ProcessedMessageKind::Proposal),
+            MlsIncoming::ExternalJoinProposal => {
+                ProcessedMessage::control(ProcessedMessageKind::ExternalJoinProposal)
             },
         })
     }
@@ -1068,21 +1084,15 @@ impl DeviceGroup {
             .process_incoming(&identity.inner, message_bytes)
             .map_err(mls_err)?;
         Ok(match incoming {
-            lakko_mls::Incoming::Application(data) => ProcessedMessage {
-                kind: ProcessedMessageKind::Application,
-                application_data: Some(data),
+            lakko_mls::Incoming::Application { bytes, sender_leaf } => {
+                ProcessedMessage::application(bytes, sender_leaf)
             },
-            lakko_mls::Incoming::Commit => ProcessedMessage {
-                kind: ProcessedMessageKind::Commit,
-                application_data: None,
+            lakko_mls::Incoming::Commit => ProcessedMessage::control(ProcessedMessageKind::Commit),
+            lakko_mls::Incoming::Proposal => {
+                ProcessedMessage::control(ProcessedMessageKind::Proposal)
             },
-            lakko_mls::Incoming::Proposal => ProcessedMessage {
-                kind: ProcessedMessageKind::Proposal,
-                application_data: None,
-            },
-            lakko_mls::Incoming::ExternalJoinProposal => ProcessedMessage {
-                kind: ProcessedMessageKind::ExternalJoinProposal,
-                application_data: None,
+            lakko_mls::Incoming::ExternalJoinProposal => {
+                ProcessedMessage::control(ProcessedMessageKind::ExternalJoinProposal)
             },
         })
     }
@@ -1153,21 +1163,15 @@ impl DeviceGroup {
             )
             .map_err(mls_err)?;
         Ok(match incoming {
-            lakko_mls::Incoming::Application(data) => ProcessedMessage {
-                kind: ProcessedMessageKind::Application,
-                application_data: Some(data),
+            lakko_mls::Incoming::Application { bytes, sender_leaf } => {
+                ProcessedMessage::application(bytes, sender_leaf)
             },
-            lakko_mls::Incoming::Commit => ProcessedMessage {
-                kind: ProcessedMessageKind::Commit,
-                application_data: None,
+            lakko_mls::Incoming::Commit => ProcessedMessage::control(ProcessedMessageKind::Commit),
+            lakko_mls::Incoming::Proposal => {
+                ProcessedMessage::control(ProcessedMessageKind::Proposal)
             },
-            lakko_mls::Incoming::Proposal => ProcessedMessage {
-                kind: ProcessedMessageKind::Proposal,
-                application_data: None,
-            },
-            lakko_mls::Incoming::ExternalJoinProposal => ProcessedMessage {
-                kind: ProcessedMessageKind::ExternalJoinProposal,
-                application_data: None,
+            lakko_mls::Incoming::ExternalJoinProposal => {
+                ProcessedMessage::control(ProcessedMessageKind::ExternalJoinProposal)
             },
         })
     }
@@ -3090,22 +3094,17 @@ mod tests {
     fn processed_message_kind_strings_match_uniffi_enum() {
         // Every variant has a string literal — guards against
         // accidental rename on the Rust side breaking the JS API.
-        let app = ProcessedMessage {
-            kind: ProcessedMessageKind::Application,
-            application_data: Some(vec![1, 2, 3]),
-        };
+        let app = ProcessedMessage::application(vec![1, 2, 3], Some(0));
         assert_eq!(app.kind(), "Application");
         assert_eq!(app.application_data().as_deref(), Some(&[1, 2, 3][..]));
+        assert_eq!(app.sender_leaf(), Some(0));
 
         for k in [
             ProcessedMessageKind::Commit,
             ProcessedMessageKind::Proposal,
             ProcessedMessageKind::ExternalJoinProposal,
         ] {
-            let m = ProcessedMessage {
-                kind: k,
-                application_data: None,
-            };
+            let m = ProcessedMessage::control(k);
             // Each non-Application case has no data.
             assert!(m.application_data().is_none(), "kind={k:?}");
             // And a non-empty discriminator string.

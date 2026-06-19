@@ -196,6 +196,54 @@ public enum AttachmentBridge {
         return (parsed.text, parsed.attachments)
     }
 
+    /// ADR-0023 — parse an incoming MLS Application-message body
+    /// into the structured `MessageBody` shape (chat / edit /
+    /// delete / reaction). Wraps the UniFFI `parseBodyEnvelope`
+    /// free function, which returns a `ParsedBody` carrying a
+    /// `kind` discriminator + the per-kind fields.
+    ///
+    /// **Never throws.** The Rust parser is bounded + fail-closed:
+    /// a malformed, ambiguous (more than one op field set), or
+    /// unknown-version envelope degrades to `.chat` with the raw
+    /// text, never panics. The chat receive loop branches on
+    /// `kind` to fold ops into their target rather than rendering
+    /// them as bubbles.
+    public static func parseBodyEnvelopeBytes(_ bytes: Data) -> ParsedBody {
+        parseBodyEnvelope(bytes: bytes)
+    }
+
+    /// ADR-0023 — compose an **edit** op envelope: rewrite the
+    /// text of the message identified by the DS `target` id to
+    /// `newText`. The result is a normal MLS Application message
+    /// body; the caller publishes it via the existing application
+    /// send path. Only the original author's edit is accepted by
+    /// peers (the receive-side author-only gate enforces it).
+    public static func composeEditBytes(
+        target: Int64,
+        newText: String
+    ) throws -> Data {
+        try composeEditEnvelope(target: target, newText: newText)
+    }
+
+    /// ADR-0023 — compose a **delete** op envelope: tombstone the
+    /// message identified by the DS `target` id. Author-only on
+    /// the receive side.
+    public static func composeDeleteBytes(target: Int64) throws -> Data {
+        try composeDeleteEnvelope(target: target)
+    }
+
+    /// ADR-0023 — compose a **reaction** op envelope: react to the
+    /// message identified by the DS `target` id with `emoji`. Any
+    /// member may react; re-sending the same emoji toggles it off
+    /// on the receive side. Throws if `emoji` is empty or exceeds
+    /// the Rust-side `MAX_EMOJI_BYTES` cap (64 bytes).
+    public static func composeReactionBytes(
+        target: Int64,
+        emoji: String
+    ) throws -> Data {
+        try composeReactionEnvelope(target: target, emoji: emoji)
+    }
+
     /// Format an attachment size for UI display — `42 B`,
     /// `1.2 kB`, `4.7 MB`. SI-decimal (matches the iOS Files
     /// app); base-2 conversion is too pedantic for chat UI.

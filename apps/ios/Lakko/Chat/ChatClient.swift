@@ -233,7 +233,7 @@ public final class ChatClient {
         processed: ProcessedMessage
     ) -> IncomingChatEvent {
         switch processed {
-        case .application(let data):
+        case .application(let data, let senderLeaf):
             // Phase 3a8/9 — sniff for call-signaling proto
             // bytes before running the chat-envelope parser.
             // Cheap unambiguous discriminator: the proto's
@@ -248,22 +248,61 @@ public final class ChatClient {
                     createdAt: createdAt
                 )
             }
-            // 1.19c3: feed the application bytes through the
-            // UniFFI ``parseEnvelope(bytes:)`` surface. The
-            // plaintext was already authenticated by the MLS
-            // Application message's MAC, so the worst case is a
-            // malformed envelope from a buggy peer — never a
-            // tampered payload. Legacy pre-1.19 plain-UTF-8
-            // bytes collapse cleanly to
-            // `(text: <utf-8 lossy>, attachments: [])` via the
-            // parser's documented fallback paths.
-            let parsed = AttachmentBridge.parseEnvelopeBytes(data)
-            return .application(
-                messageId: messageId,
-                text: parsed.text,
-                attachments: parsed.attachments,
-                createdAt: createdAt
-            )
+            // ADR-0023: feed the application bytes through the
+            // structured ``parseBodyEnvelope(bytes:)`` surface,
+            // which branches a plain chat message from an
+            // edit / delete / reaction op. The plaintext was
+            // already authenticated by the MLS Application
+            // message's MAC, so the worst case is a malformed
+            // envelope from a buggy peer — never a tampered
+            // payload. Legacy pre-1.19 plain-UTF-8 bytes and
+            // unknown / ambiguous op envelopes degrade to a
+            // `.chat` body via the parser's bounded fail-closed
+            // fallback. The `senderLeaf` (the original author's
+            // MLS leaf index) rides every event so the receive
+            // loop can enforce the author-only edit/delete gate
+            // + attribute reactions.
+            let parsed = AttachmentBridge.parseBodyEnvelopeBytes(data)
+            switch parsed.kind {
+            case .chat:
+                return .application(
+                    messageId: messageId,
+                    text: parsed.text,
+                    attachments: parsed.attachments,
+                    senderLeaf: senderLeaf,
+                    createdAt: createdAt
+                )
+            case .edit:
+                return .op(
+                    messageId: messageId,
+                    op: .edit,
+                    target: parsed.target ?? 0,
+                    text: parsed.text,
+                    emoji: nil,
+                    senderLeaf: senderLeaf,
+                    createdAt: createdAt
+                )
+            case .delete:
+                return .op(
+                    messageId: messageId,
+                    op: .delete,
+                    target: parsed.target ?? 0,
+                    text: "",
+                    emoji: nil,
+                    senderLeaf: senderLeaf,
+                    createdAt: createdAt
+                )
+            case .reaction:
+                return .op(
+                    messageId: messageId,
+                    op: .reaction,
+                    target: parsed.target ?? 0,
+                    text: "",
+                    emoji: parsed.emoji,
+                    senderLeaf: senderLeaf,
+                    createdAt: createdAt
+                )
+            }
         case .commit:
             return .system(
                 messageId: messageId,
@@ -327,10 +366,38 @@ public struct SendMessageResult: Equatable {
 /// unchanged.
 public enum IncomingChatEvent: Equatable {
     /// Application-data message (user-visible chat row).
+    ///
+    /// ADR-0023: now carries the original author's MLS leaf
+    /// index (`senderLeaf`). `nil` for a frame whose sender
+    /// leaf the FFI couldn't surface (a control message, an
+    /// external sender) — such a message can never be a valid
+    /// edit / delete target.
     case application(
         messageId: Int64,
         text: String,
         attachments: [AttachmentRef],
+        senderLeaf: UInt32?,
+        createdAt: String
+    )
+    /// ADR-0023 — an edit / delete / reaction op carried in the
+    /// same JSON envelope shape as a chat message. The
+    /// repository folds it into the *target* message (by
+    /// `target` == the target's DS `messageId`) rather than
+    /// rendering it as a standalone bubble. The op itself still
+    /// consumes a DS `messageId` and surfaces here so the
+    /// receive loop applies it exactly once (the poll is
+    /// incremental).
+    case op(
+        messageId: Int64,
+        op: OpKind,
+        target: Int64,
+        text: String,
+        emoji: String?,
+        /// The op sender's MLS leaf index. The author-only gate
+        /// (edit / delete) checks it against the target's
+        /// stored author leaf; reactions attribute the toggle
+        /// to it. `nil` ⇒ the op is dropped (fail-closed).
+        senderLeaf: UInt32?,
         createdAt: String
     )
     /// Commit / proposal / external-join-proposal frame. MLS
@@ -341,6 +408,13 @@ public enum IncomingChatEvent: Equatable {
     /// dispatches it into the ``CallSession`` state machine
     /// instead of the chat timeline.
     case callSignaling(messageId: Int64, payloadBytes: Data, createdAt: String)
+}
+
+/// ADR-0023 — which mutation an ``IncomingChatEvent/op`` carries.
+public enum OpKind: Equatable {
+    case edit
+    case delete
+    case reaction
 }
 
 /// Kind discriminator for ``IncomingChatEvent/system(messageId:systemKind:createdAt:)``.

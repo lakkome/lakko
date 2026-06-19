@@ -77,8 +77,17 @@ pub struct MemberRecord {
 /// Result of [`Group::process_incoming`].
 #[derive(Debug)]
 pub enum Incoming {
-    /// Decrypted application payload.
-    Application(Vec<u8>),
+    /// Decrypted application payload, plus the sender's leaf index when the
+    /// message came from a group member (`None` for an external sender). The
+    /// sender leaf is what the chat receive path needs for ADR-0023's
+    /// author-only edit/delete gate + reaction attribution; for non-chat
+    /// payloads (DeviceGroup journal, call signaling) it is simply ignored.
+    Application {
+        /// The decrypted application bytes.
+        bytes: Vec<u8>,
+        /// The sender's leaf index, or `None` for an external sender.
+        sender_leaf: Option<u32>,
+    },
     /// A commit was processed and merged into the group state. The local
     /// view advanced to a new epoch.
     Commit,
@@ -458,9 +467,10 @@ impl Group {
         };
 
         match processed.into_content() {
-            ProcessedMessageContent::ApplicationMessage(app) => {
-                Ok(Incoming::Application(app.into_bytes()))
-            },
+            ProcessedMessageContent::ApplicationMessage(app) => Ok(Incoming::Application {
+                bytes: app.into_bytes(),
+                sender_leaf: committer_leaf,
+            }),
             ProcessedMessageContent::StagedCommitMessage(staged) => {
                 // Read the role table from the PRE-MERGE GroupContext. `None` =>
                 // an open (legacy) group, no enforcement.
@@ -525,10 +535,18 @@ impl Group {
             .process_message(&identity.provider, protocol)
             .map_err(|e| Error::Message(format!("process_message: {e:?}")))?;
 
+        // Capture the sender's leaf before consuming the message (ADR-0023 —
+        // the chat receive path needs it for the author-only edit/delete gate).
+        let sender_leaf: Option<u32> = match processed.sender() {
+            Sender::Member(idx) => Some(idx.u32()),
+            _ => None,
+        };
+
         match processed.into_content() {
-            ProcessedMessageContent::ApplicationMessage(app) => {
-                Ok(Incoming::Application(app.into_bytes()))
-            },
+            ProcessedMessageContent::ApplicationMessage(app) => Ok(Incoming::Application {
+                bytes: app.into_bytes(),
+                sender_leaf,
+            }),
             ProcessedMessageContent::StagedCommitMessage(staged) => {
                 self.inner
                     .merge_staged_commit(&identity.provider, *staged)
@@ -578,10 +596,16 @@ impl Group {
             .process_message(&identity.provider, protocol)
             .map_err(|e| Error::Message(format!("process_message: {e:?}")))?;
 
+        let sender_leaf: Option<u32> = match processed.sender() {
+            Sender::Member(idx) => Some(idx.u32()),
+            _ => None,
+        };
+
         match processed.into_content() {
-            ProcessedMessageContent::ApplicationMessage(app) => {
-                Ok(Incoming::Application(app.into_bytes()))
-            },
+            ProcessedMessageContent::ApplicationMessage(app) => Ok(Incoming::Application {
+                bytes: app.into_bytes(),
+                sender_leaf,
+            }),
             ProcessedMessageContent::StagedCommitMessage(staged) => {
                 // Read removed leaves + their pre-merge signature keys.
                 let members = self.members();

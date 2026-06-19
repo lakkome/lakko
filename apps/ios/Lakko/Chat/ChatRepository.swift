@@ -644,11 +644,16 @@ public final class ChatRepository: ObservableObject {
             group: record.group,
             plaintext: envelopeBytes
         )
+        // ADR-0023 — stamp our own leaf as the author so a
+        // later edit / delete of this message passes the
+        // author-only gate on every peer (and locally).
+        let ownLeaf = try? record.group.ownLeafIndex()
         record.appendOutgoing(
             text: plaintext,
             attachments: attachments,
             messageId: result.messageId,
-            createdAt: result.createdAt
+            createdAt: result.createdAt,
+            authorLeaf: ownLeaf
         )
         persistSnapshotBestEffort()
         state = state.with(threads: buildThreadList())
@@ -664,6 +669,108 @@ public final class ChatRepository: ObservableObject {
                 messageId: messageId
             )
         }
+    }
+
+    /// ADR-0023 — edit our own message `target` to `newText`.
+    /// Composes the edit op envelope, publishes it via the
+    /// existing application send path, and applies the new text
+    /// locally (the sender never receives its own app message
+    /// back). The author-only gate is enforced on every peer's
+    /// receive side; locally we only edit our own outgoing rows.
+    public func editMessage(
+        groupIdHex: String,
+        target: Int64,
+        newText: String
+    ) async throws {
+        guard let identity = canonicalIdentity else {
+            throw ChatError.argument("ChatRepository not bootstrapped")
+        }
+        guard let record = groups[groupIdHex] else {
+            throw ChatError.argument("no live Group handle for \(groupIdHex)")
+        }
+        let envelopeBytes: Data
+        do {
+            envelopeBytes = try AttachmentBridge.composeEditBytes(
+                target: target,
+                newText: newText
+            )
+        } catch {
+            throw ChatError.wrapped("edit envelope compose failed", underlying: error)
+        }
+        _ = try await chatClient.sendMessage(
+            identity: identity,
+            group: record.group,
+            plaintext: envelopeBytes
+        )
+        record.applyLocalEdit(target: target, newText: newText)
+        persistSnapshotBestEffort()
+        state = state.with(threads: buildThreadList())
+    }
+
+    /// ADR-0023 — delete (tombstone) our own message `target`.
+    /// Composes the delete op envelope, publishes it, and marks
+    /// the message deleted locally.
+    public func deleteMessage(
+        groupIdHex: String,
+        target: Int64
+    ) async throws {
+        guard let identity = canonicalIdentity else {
+            throw ChatError.argument("ChatRepository not bootstrapped")
+        }
+        guard let record = groups[groupIdHex] else {
+            throw ChatError.argument("no live Group handle for \(groupIdHex)")
+        }
+        let envelopeBytes: Data
+        do {
+            envelopeBytes = try AttachmentBridge.composeDeleteBytes(target: target)
+        } catch {
+            throw ChatError.wrapped("delete envelope compose failed", underlying: error)
+        }
+        _ = try await chatClient.sendMessage(
+            identity: identity,
+            group: record.group,
+            plaintext: envelopeBytes
+        )
+        record.applyLocalDelete(target: target)
+        persistSnapshotBestEffort()
+        state = state.with(threads: buildThreadList())
+    }
+
+    /// ADR-0023 — react to message `target` with `emoji`.
+    /// Composes the reaction op envelope, publishes it, and
+    /// toggles our own `(ownLeaf, emoji)` pair locally. Any
+    /// member may react (no author gate); re-reacting with the
+    /// same emoji removes it.
+    public func reactToMessage(
+        groupIdHex: String,
+        target: Int64,
+        emoji: String
+    ) async throws {
+        guard let identity = canonicalIdentity else {
+            throw ChatError.argument("ChatRepository not bootstrapped")
+        }
+        guard let record = groups[groupIdHex] else {
+            throw ChatError.argument("no live Group handle for \(groupIdHex)")
+        }
+        let envelopeBytes: Data
+        do {
+            envelopeBytes = try AttachmentBridge.composeReactionBytes(
+                target: target,
+                emoji: emoji
+            )
+        } catch {
+            throw ChatError.wrapped("reaction envelope compose failed", underlying: error)
+        }
+        _ = try await chatClient.sendMessage(
+            identity: identity,
+            group: record.group,
+            plaintext: envelopeBytes
+        )
+        if let ownLeaf = try? record.group.ownLeafIndex() {
+            record.applyLocalReaction(target: target, emoji: emoji, ownLeaf: ownLeaf)
+        }
+        persistSnapshotBestEffort()
+        state = state.with(threads: buildThreadList())
     }
 
     /// Phase 3a9 — publish raw plaintext bytes as an MLS
@@ -887,28 +994,108 @@ public struct ChatThread: Equatable {
 public struct ChatMessage: Equatable, Identifiable {
     public let messageId: Int64
     public let direction: Direction
-    public let text: String
+    public internal(set) var text: String
     public let attachments: [AttachmentRef]
     public let createdAt: String
+    /// ADR-0023 — the original author's MLS leaf index. Set on
+    /// arrival from the Application frame's sender leaf; for our
+    /// own outgoing messages it is `ownLeafIndex()`. `nil` for a
+    /// frame whose sender leaf was unavailable (a system row, an
+    /// external sender) — such a message can never be a valid
+    /// edit / delete target (the author-only gate fails closed).
+    public let authorLeaf: UInt32?
+    /// ADR-0023 — `true` after an author-gated edit op folded its
+    /// new text into this message. The UI renders a subtle
+    /// "(edited)" marker.
+    public internal(set) var edited: Bool
+    /// ADR-0023 — `true` after an author-gated delete op
+    /// tombstoned this message. The UI renders a muted "message
+    /// deleted" placeholder in place of the body.
+    public internal(set) var deleted: Bool
+    /// ADR-0023 — reactions folded onto this message, one entry
+    /// per `(reactorLeaf, emoji)`. Re-receiving the same pair
+    /// toggles the entry off. The UI aggregates by emoji into
+    /// chips with counts.
+    public internal(set) var reactions: [Reaction]
 
     public init(
         messageId: Int64,
         direction: Direction,
         text: String,
         attachments: [AttachmentRef] = [],
-        createdAt: String
+        createdAt: String,
+        authorLeaf: UInt32? = nil,
+        edited: Bool = false,
+        deleted: Bool = false,
+        reactions: [Reaction] = []
     ) {
         self.messageId = messageId
         self.direction = direction
         self.text = text
         self.attachments = attachments
         self.createdAt = createdAt
+        self.authorLeaf = authorLeaf
+        self.edited = edited
+        self.deleted = deleted
+        self.reactions = reactions
     }
 
     /// `Identifiable` conformance for SwiftUI `ForEach`. The
     /// messageId is server-assigned + monotonic per journal, so
     /// it doubles as the stable identity.
     public var id: Int64 { messageId }
+
+    /// ADR-0023 — aggregate the reaction list into `(emoji,
+    /// count, reactedByOwnLeaf)` rows for the chip UI. A nil
+    /// `ownLeaf` (no handle) renders the chips without the
+    /// "reacted by you" highlight.
+    public func reactionSummary(ownLeaf: UInt32?) -> [ReactionTally] {
+        var order: [String] = []
+        var counts: [String: Int] = [:]
+        var mine: Set<String> = []
+        for r in reactions {
+            if counts[r.emoji] == nil { order.append(r.emoji) }
+            counts[r.emoji, default: 0] += 1
+            if let own = ownLeaf, r.reactorLeaf == own { mine.insert(r.emoji) }
+        }
+        return order.map {
+            ReactionTally(
+                emoji: $0,
+                count: counts[$0] ?? 0,
+                reactedByMe: mine.contains($0)
+            )
+        }
+    }
+}
+
+/// ADR-0023 — a single reaction: who (MLS leaf) reacted with
+/// which emoji. Attribution is per-epoch + ephemeral (the
+/// open-question on leaf renumbering is accepted for v1).
+public struct Reaction: Equatable {
+    public let reactorLeaf: UInt32
+    public let emoji: String
+
+    public init(reactorLeaf: UInt32, emoji: String) {
+        self.reactorLeaf = reactorLeaf
+        self.emoji = emoji
+    }
+}
+
+/// ADR-0023 — aggregated reaction row for the chip UI.
+public struct ReactionTally: Equatable, Identifiable {
+    public let emoji: String
+    public let count: Int
+    /// `true` when the local member contributed this emoji —
+    /// tapping the chip toggles it back off.
+    public let reactedByMe: Bool
+
+    public var id: String { emoji }
+
+    public init(emoji: String, count: Int, reactedByMe: Bool) {
+        self.emoji = emoji
+        self.count = count
+        self.reactedByMe = reactedByMe
+    }
 }
 
 public enum Direction: Equatable {
@@ -953,7 +1140,8 @@ private final class GroupRecord {
         text: String,
         attachments: [AttachmentRef] = [],
         messageId: Int64,
-        createdAt: String
+        createdAt: String,
+        authorLeaf: UInt32?
     ) {
         messages.append(
             ChatMessage(
@@ -961,9 +1149,32 @@ private final class GroupRecord {
                 direction: .outgoing,
                 text: text,
                 attachments: attachments,
-                createdAt: createdAt
+                createdAt: createdAt,
+                authorLeaf: authorLeaf
             )
         )
+    }
+
+    /// ADR-0023 — apply an edit op locally to our own outgoing
+    /// message (the sender never receives its own app message
+    /// back, so the send path mutates the timeline directly).
+    func applyLocalEdit(target: Int64, newText: String) {
+        guard let idx = messages.firstIndex(where: { $0.messageId == target }) else { return }
+        guard !messages[idx].deleted else { return }
+        messages[idx].text = newText
+        messages[idx].edited = true
+    }
+
+    /// ADR-0023 — apply a delete op locally to our own outgoing
+    /// message.
+    func applyLocalDelete(target: Int64) {
+        guard let idx = messages.firstIndex(where: { $0.messageId == target }) else { return }
+        messages[idx].deleted = true
+    }
+
+    /// ADR-0023 — toggle our own reaction locally on `target`.
+    func applyLocalReaction(target: Int64, emoji: String, ownLeaf: UInt32) {
+        toggleReaction(target: target, reactorLeaf: ownLeaf, emoji: emoji)
     }
 
     func applyPollResult(
@@ -972,15 +1183,24 @@ private final class GroupRecord {
     ) {
         for event in result.events {
             switch event {
-            case .application(let messageId, let text, let attachments, let createdAt):
+            case .application(let messageId, let text, let attachments, let senderLeaf, let createdAt):
                 messages.append(
                     ChatMessage(
                         messageId: messageId,
                         direction: .incoming,
                         text: text,
                         attachments: attachments,
-                        createdAt: createdAt
+                        createdAt: createdAt,
+                        authorLeaf: senderLeaf
                     )
+                )
+            case .op(_, let op, let target, let text, let emoji, let senderLeaf, _):
+                applyIncomingOp(
+                    op: op,
+                    target: target,
+                    text: text,
+                    emoji: emoji,
+                    senderLeaf: senderLeaf
                 )
             case .system(let messageId, let systemKind, let createdAt):
                 messages.append(
@@ -999,6 +1219,58 @@ private final class GroupRecord {
             }
         }
         cursor = result.cursor
+    }
+
+    /// ADR-0023 — fold an incoming edit / delete / reaction op
+    /// into its target message. The poll is incremental so each
+    /// op is applied exactly once.
+    ///
+    /// **Author-only gate** (the security core): an edit or
+    /// delete is applied ONLY when the op's sender leaf equals
+    /// the target message's stored author leaf; otherwise it is
+    /// dropped (fail-closed — invariant #4). An unknown target or
+    /// an op with no sender leaf is likewise dropped. A reaction
+    /// is accepted from any member (reacting to others' messages
+    /// is the point) but attributed to its sender leaf for dedup
+    /// + per-user toggle.
+    private func applyIncomingOp(
+        op: OpKind,
+        target: Int64,
+        text: String,
+        emoji: String?,
+        senderLeaf: UInt32?
+    ) {
+        guard let senderLeaf = senderLeaf else { return }
+        guard let idx = messages.firstIndex(where: { $0.messageId == target }) else { return }
+        switch op {
+        case .edit:
+            guard messages[idx].authorLeaf == senderLeaf else { return }
+            guard !messages[idx].deleted else { return }
+            messages[idx].text = text
+            messages[idx].edited = true
+        case .delete:
+            guard messages[idx].authorLeaf == senderLeaf else { return }
+            messages[idx].deleted = true
+        case .reaction:
+            guard let emoji = emoji, !emoji.isEmpty else { return }
+            toggleReaction(target: target, reactorLeaf: senderLeaf, emoji: emoji)
+        }
+    }
+
+    /// Toggle a `(reactorLeaf, emoji)` pair on `target`: present
+    /// → remove, else add. Shared by the incoming-op fold + the
+    /// local own-reaction path.
+    private func toggleReaction(target: Int64, reactorLeaf: UInt32, emoji: String) {
+        guard let idx = messages.firstIndex(where: { $0.messageId == target }) else { return }
+        if let existing = messages[idx].reactions.firstIndex(
+            where: { $0.reactorLeaf == reactorLeaf && $0.emoji == emoji }
+        ) {
+            messages[idx].reactions.remove(at: existing)
+        } else {
+            messages[idx].reactions.append(
+                Reaction(reactorLeaf: reactorLeaf, emoji: emoji)
+            )
+        }
     }
 
     func toThread() -> ChatThread {

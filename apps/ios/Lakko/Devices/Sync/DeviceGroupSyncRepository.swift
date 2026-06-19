@@ -333,7 +333,12 @@ public final class DeviceGroupSyncRepository: ObservableObject {
                 }
                 mutated = true
                 switch processed {
-                case .application(let data):
+                case .application(let data, _):
+                    // ADR-0023 added the sender leaf to the
+                    // Application case; the DeviceGroup sync path
+                    // doesn't authorise on it (removals are gated
+                    // upstream by the attestation verify), so it's
+                    // ignored here.
                     do {
                         let parsed = try parseDevicegroupPayload(plaintext: data)
                         applyParsed(parsed)

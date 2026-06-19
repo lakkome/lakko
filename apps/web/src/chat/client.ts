@@ -73,7 +73,10 @@ import type {
   Identity as WasmIdentity,
 } from "../../wasm/lakko_ffi_wasm";
 import type { IdentitySecrets } from "../auth/AuthContext";
-import { parseEnvelope, type AttachmentRefBytes } from "./attachments";
+import {
+  parseBodyEnvelope,
+  type AttachmentRefBytes,
+} from "./attachments";
 
 /** Result of `sendMessage`. */
 export interface SendMessageResult {
@@ -110,6 +113,39 @@ export type IncomingChatEvent =
       /** Alias of `text` — kept for the few call sites that
        *  still read `plaintext`. New code should read `text`. */
       plaintext: string;
+      /** ADR-0023 — the original author's MLS leaf index, used
+       *  by the UI to remember authorship for the author-only
+       *  edit/delete gate + reaction attribution. `undefined`
+       *  for a frame whose sender leaf the FFI couldn't surface
+       *  (a control message, an external sender) — such a
+       *  message can never be a valid edit/delete target. */
+      senderLeaf: number | undefined;
+      createdAt: string;
+    }
+  | {
+      /** ADR-0023 — an edit / delete / reaction op carried in
+       *  the same JSON envelope as a chat message. The UI folds
+       *  it into the *target* message (by `target` === the
+       *  target's DS `messageId`) rather than rendering it as a
+       *  standalone bubble. The op itself still consumes a DS
+       *  `messageId` and surfaces here so the receive loop can
+       *  apply it once (the poll is incremental). */
+      kind: "op";
+      /** This op message's own DS-assigned id. */
+      messageId: number;
+      /** `"edit" | "delete" | "reaction"`. */
+      op: "edit" | "delete" | "reaction";
+      /** The DS `messageId` of the message this op acts on. */
+      target: number;
+      /** Edit text (empty for delete / reaction). */
+      text: string;
+      /** Reaction emoji (only for `op === "reaction"`). */
+      emoji: string | undefined;
+      /** The op sender's MLS leaf index — the author-only gate
+       *  (edit/delete) checks it against the target's stored
+       *  author leaf, and reactions attribute the toggle to it.
+       *  `undefined` ⇒ the op is dropped (fail-closed). */
+      senderLeaf: number | undefined;
       createdAt: string;
     }
   | {
@@ -428,6 +464,11 @@ async function toEvent(
   // "ExternalJoinProposal" (see lakko-ffi-wasm/src/mls.rs).
   if (processed.kind === "Application" && processed.applicationData !== undefined) {
     const bytes = processed.applicationData;
+    // ADR-0023 — the original author's MLS leaf for this
+    // Application message. `undefined` for a control frame /
+    // external sender (which can never be a valid edit/delete
+    // target nor a reaction attribution).
+    const senderLeaf = processed.senderLeaf;
     // Phase 3a8 — sniff for call-signaling bytes before
     // running the chat-envelope parser. Call signaling is a
     // prost-encoded `CallSignalingPayload` proto; chat
@@ -444,21 +485,35 @@ async function toEvent(
         createdAt,
       };
     }
-    // 1.19c2: feed the application bytes through the wasm
-    // `parseEnvelope` surface. Legacy pre-1.19 plain-UTF-8
-    // bytes collapse cleanly to `{ text: <utf-8 lossy>,
-    // attachments: [] }` — bubbles from older builds still
-    // render unchanged. New 1.19 envelopes surface a
-    // populated attachments list the UI can render as chips.
-    const { text, attachments } = await parseEnvelope(bytes);
+    // ADR-0023 — feed the application bytes through the
+    // structured body parser, which surfaces the chat / edit /
+    // delete / reaction discriminator. A plain chat message
+    // (or any legacy / malformed envelope, which the parser
+    // degrades to `chat` with the raw text) returns an
+    // `application` event; an op returns the `op` event the UI
+    // folds into the target message.
+    const body = await parseBodyEnvelope(bytes);
+    if (body.kind === "chat") {
+      return {
+        kind: "application",
+        messageId,
+        text: body.text,
+        attachments: body.attachments,
+        // Alias kept for transitional call-site compatibility;
+        // identical to `text`.
+        plaintext: body.text,
+        senderLeaf,
+        createdAt,
+      };
+    }
     return {
-      kind: "application",
+      kind: "op",
       messageId,
-      text,
-      attachments,
-      // Alias kept for transitional call-site compatibility;
-      // identical to `text`.
-      plaintext: text,
+      op: body.kind,
+      target: body.target,
+      text: body.kind === "edit" ? body.text : "",
+      emoji: body.kind === "reaction" ? body.emoji : undefined,
+      senderLeaf,
       createdAt,
     };
   }

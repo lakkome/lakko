@@ -726,11 +726,20 @@ public class ChatRepository(
                 group = record.group,
                 plaintext = envelopeBytes,
             )
+            // ADR-0023 — stamp our own leaf as the author so a
+            // later edit/delete op of this row (ours or a peer's
+            // attempt) is gated against the real author.
+            val ownLeaf = try {
+                record.group.ownLeafIndex()
+            } catch (_: Throwable) {
+                null
+            }
             record.appendOutgoing(
                 text = plaintext,
                 attachments = attachments,
                 messageId = result.messageId,
                 createdAt = result.createdAt,
+                authorLeaf = ownLeaf,
             )
             persistSnapshotBestEffort()
             publishThreadList()
@@ -745,6 +754,147 @@ public class ChatRepository(
                     messageId = result.messageId,
                 )
             }
+        }
+    }
+
+    /**
+     * ADR-0023 — edit one of OUR OWN messages: compose an EDIT op
+     * envelope referencing [targetMessageId], publish it on the
+     * application channel (own-marked, so the poll loop drops the
+     * echo), and locally replace the target's text + mark it
+     * edited. The DS never echoes our own application messages
+     * back, so the local apply is the only place our own edit
+     * surfaces. The receive-side author-only gate enforces that
+     * peers accept this edit only because it really comes from
+     * the target's author.
+     */
+    public suspend fun editMessage(
+        groupIdHex: String,
+        targetMessageId: Long,
+        newText: String,
+    ) {
+        val identity = canonicalIdentity.get()
+            ?: throw IllegalStateException("ChatRepository not bootstrapped")
+        val record = groups[groupIdHex]
+            ?: throw ChatError(
+                "no live Group handle for $groupIdHex",
+                IllegalStateException("unknown group"),
+            )
+        groupsLock.withLock {
+            val envelopeBytes = uniffi.lakko_ffi_uniffi.composeEditEnvelope(
+                target = targetMessageId,
+                newText = newText,
+            )
+            chatClient.sendMessage(
+                identity = identity,
+                group = record.group,
+                plaintext = envelopeBytes,
+            )
+            val ownLeaf = try {
+                record.group.ownLeafIndex()
+            } catch (_: Throwable) {
+                null
+            }
+            record.applyOwnOp(
+                op = MessageOp.Edit,
+                target = targetMessageId,
+                text = newText,
+                emoji = null,
+                ownLeaf = ownLeaf,
+            )
+            persistSnapshotBestEffort()
+            publishThreadList()
+        }
+    }
+
+    /**
+     * ADR-0023 — delete one of OUR OWN messages: compose a DELETE
+     * op envelope referencing [targetMessageId], publish it
+     * (own-marked), and locally tombstone the target. Same
+     * receive-side author-only gate as [editMessage].
+     */
+    public suspend fun deleteMessage(
+        groupIdHex: String,
+        targetMessageId: Long,
+    ) {
+        val identity = canonicalIdentity.get()
+            ?: throw IllegalStateException("ChatRepository not bootstrapped")
+        val record = groups[groupIdHex]
+            ?: throw ChatError(
+                "no live Group handle for $groupIdHex",
+                IllegalStateException("unknown group"),
+            )
+        groupsLock.withLock {
+            val envelopeBytes = uniffi.lakko_ffi_uniffi.composeDeleteEnvelope(
+                target = targetMessageId,
+            )
+            chatClient.sendMessage(
+                identity = identity,
+                group = record.group,
+                plaintext = envelopeBytes,
+            )
+            val ownLeaf = try {
+                record.group.ownLeafIndex()
+            } catch (_: Throwable) {
+                null
+            }
+            record.applyOwnOp(
+                op = MessageOp.Delete,
+                target = targetMessageId,
+                text = "",
+                emoji = null,
+                ownLeaf = ownLeaf,
+            )
+            persistSnapshotBestEffort()
+            publishThreadList()
+        }
+    }
+
+    /**
+     * ADR-0023 — react to ANY message (ours or a peer's) with
+     * [emoji]: compose a REACTION op envelope referencing
+     * [targetMessageId], publish it (own-marked), and locally
+     * toggle our own `(ownLeaf, emoji)` on the target. No author
+     * gate — reacting to others' messages is the point. The FFI
+     * compose throws on an empty / over-long emoji; the caller
+     * surfaces that.
+     */
+    public suspend fun reactToMessage(
+        groupIdHex: String,
+        targetMessageId: Long,
+        emoji: String,
+    ) {
+        val identity = canonicalIdentity.get()
+            ?: throw IllegalStateException("ChatRepository not bootstrapped")
+        val record = groups[groupIdHex]
+            ?: throw ChatError(
+                "no live Group handle for $groupIdHex",
+                IllegalStateException("unknown group"),
+            )
+        groupsLock.withLock {
+            val envelopeBytes = uniffi.lakko_ffi_uniffi.composeReactionEnvelope(
+                target = targetMessageId,
+                emoji = emoji,
+            )
+            chatClient.sendMessage(
+                identity = identity,
+                group = record.group,
+                plaintext = envelopeBytes,
+            )
+            val ownLeaf = try {
+                record.group.ownLeafIndex()
+            } catch (_: Throwable) {
+                null
+            }
+            record.applyOwnOp(
+                op = MessageOp.Reaction,
+                target = targetMessageId,
+                text = "",
+                emoji = emoji,
+                ownLeaf = ownLeaf,
+            )
+            persistSnapshotBestEffort()
+            publishThreadList()
         }
     }
 
@@ -1038,6 +1188,31 @@ public data class ChatMessage(
     val attachments: List<uniffi.lakko_ffi_uniffi.AttachmentRef> = emptyList(),
     /** ISO-8601 timestamp from the DS. */
     val createdAt: String,
+    /** ADR-0023 — the original author's MLS leaf index. Set for
+     *  every chat message (our own outgoing rows carry our own
+     *  leaf). The author-only edit/delete gate compares an op's
+     *  sender leaf against this. `null` ⇒ unknown author (a
+     *  rehydrated pre-ADR-0023 row, or a system row) — no op can
+     *  pass the gate against it. */
+    val authorLeaf: UInt? = null,
+    /** ADR-0023 — `true` once a peer-accepted EDIT op replaced
+     *  [text]; the UI appends a subtle "(edited)" marker. */
+    val edited: Boolean = false,
+    /** ADR-0023 — `true` once a peer-accepted DELETE op
+     *  tombstoned the message; the UI renders a muted "message
+     *  deleted" placeholder and drops the text + attachments. */
+    val deleted: Boolean = false,
+    /** ADR-0023 — accumulated reactions, attributed per sender
+     *  leaf. Rendered as emoji chips with counts; re-sending the
+     *  same `(leaf, emoji)` toggles it off. */
+    val reactions: List<Reaction> = emptyList(),
+)
+
+/** ADR-0023 — one reaction on a [ChatMessage], attributed to its
+ *  sender's MLS leaf for dedup + per-user toggle. */
+public data class Reaction(
+    val reactorLeaf: UInt,
+    val emoji: String,
 )
 
 public enum class Direction { Outgoing, Incoming, System }
@@ -1064,6 +1239,10 @@ private class GroupRecord(
         attachments: List<uniffi.lakko_ffi_uniffi.AttachmentRef> = emptyList(),
         messageId: Long,
         createdAt: String,
+        /** ADR-0023 — our own leaf at send time, so a peer's
+         *  later edit/delete op of this row passes the gate only
+         *  if it really comes from us. */
+        authorLeaf: UInt?,
     ) {
         messages.add(
             ChatMessage(
@@ -1072,7 +1251,32 @@ private class GroupRecord(
                 text = text,
                 attachments = attachments,
                 createdAt = createdAt,
+                authorLeaf = authorLeaf,
             ),
+        )
+    }
+
+    /**
+     * ADR-0023 — locally apply an op WE just sent (the DS never
+     * echoes our own application messages back). The
+     * author-only gate is trivially satisfied for our own edit /
+     * delete (we authored the target); a reaction toggles our
+     * own `(ownLeaf, emoji)`. Mirrors [applyOp] but skips the
+     * cross-author gate the receive path enforces.
+     */
+    fun applyOwnOp(
+        op: MessageOp,
+        target: Long,
+        text: String,
+        emoji: String?,
+        ownLeaf: UInt?,
+    ) {
+        applyOpInternal(
+            op = op,
+            target = target,
+            text = text,
+            emoji = emoji,
+            senderLeaf = ownLeaf,
         )
     }
 
@@ -1089,7 +1293,15 @@ private class GroupRecord(
                         text = event.text,
                         attachments = event.attachments,
                         createdAt = event.createdAt,
+                        authorLeaf = event.senderLeaf,
                     ),
+                )
+                is IncomingChatEvent.Op -> applyOpInternal(
+                    op = event.op,
+                    target = event.target,
+                    text = event.text,
+                    emoji = event.emoji,
+                    senderLeaf = event.senderLeaf,
                 )
                 is IncomingChatEvent.System -> messages.add(
                     ChatMessage(
@@ -1108,6 +1320,76 @@ private class GroupRecord(
             }
         }
         cursor = result.cursor
+    }
+
+    /**
+     * ADR-0023 — fold an edit / delete / reaction op into the
+     * target message identified by its DS [target] id.
+     *
+     *   * edit / delete — **author-only gate**: applied only if
+     *     [senderLeaf] equals the target's stored [ChatMessage.authorLeaf]
+     *     (both non-null). Otherwise DROPPED (fail-closed,
+     *     invariant #4). An unknown target is also dropped.
+     *   * reaction — accepted from any member, attributed to
+     *     [senderLeaf]; TOGGLE: an existing `(leaf, emoji)` pair
+     *     is removed, else added. A `null` sender leaf is
+     *     dropped (no attribution possible).
+     *
+     * LWW on the single journal: ops arrive in DS order and the
+     * last edit/delete wins by construction (later op overwrites
+     * earlier state).
+     */
+    private fun applyOpInternal(
+        op: MessageOp,
+        target: Long,
+        text: String,
+        emoji: String?,
+        senderLeaf: UInt?,
+    ) {
+        synchronized(messages) {
+            val idx = messages.indexOfFirst { it.messageId == target }
+            if (idx < 0) return // unknown target — drop
+            val current = messages[idx]
+            when (op) {
+                MessageOp.Edit -> {
+                    // Author-only gate — both leaves must be known
+                    // and equal, else drop.
+                    if (senderLeaf == null || current.authorLeaf == null ||
+                        senderLeaf != current.authorLeaf
+                    ) {
+                        return
+                    }
+                    if (current.deleted) return // a deleted message stays deleted
+                    messages[idx] = current.copy(text = text, edited = true)
+                }
+                MessageOp.Delete -> {
+                    if (senderLeaf == null || current.authorLeaf == null ||
+                        senderLeaf != current.authorLeaf
+                    ) {
+                        return
+                    }
+                    messages[idx] = current.copy(
+                        text = "",
+                        attachments = emptyList(),
+                        deleted = true,
+                    )
+                }
+                MessageOp.Reaction -> {
+                    val e = emoji ?: return
+                    if (senderLeaf == null) return
+                    val existing = current.reactions.indexOfFirst {
+                        it.reactorLeaf == senderLeaf && it.emoji == e
+                    }
+                    val next = current.reactions.toMutableList()
+                    if (existing >= 0) {
+                        next.removeAt(existing) // toggle off
+                    } else {
+                        next.add(Reaction(reactorLeaf = senderLeaf, emoji = e))
+                    }
+                    messages[idx] = current.copy(reactions = next.toList())
+                }
+            }
+        }
     }
 
     fun toThread(): ChatThread = ChatThread(

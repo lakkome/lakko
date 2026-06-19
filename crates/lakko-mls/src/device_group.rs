@@ -1098,7 +1098,7 @@ mod tests {
             .process_incoming(&id_b, &wire)
             .expect("process_incoming");
         let bytes = match incoming {
-            Incoming::Application(b) => b,
+            Incoming::Application { bytes, .. } => bytes,
             other => panic!("expected Application, got {other:?}"),
         };
 

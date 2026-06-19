@@ -392,8 +392,170 @@ pub fn parse_envelope(bytes: &[u8]) -> ParsedEnvelope {
 }
 
 // ============================================================================
+// ADR-0023 — edit / delete / reaction
+// ============================================================================
+
+/// Output of [`parse_body_envelope`] (ADR-0023). `kind` selects
+/// which fields are meaningful: `text` + attachments for `"chat"`
+/// (and `text` for `"edit"`); `target` for every op; `emoji` for
+/// `"reaction"`. JS reads `target` as a `BigInt` (the DS `messageId`),
+/// matching the `AttachmentRef.size` precedent.
+#[wasm_bindgen]
+pub struct ParsedBody {
+    kind: &'static str,
+    text: String,
+    attachments: Vec<AttachmentRef>,
+    target: Option<i64>,
+    emoji: Option<String>,
+}
+
+#[wasm_bindgen]
+impl ParsedBody {
+    /// `"chat" | "edit" | "delete" | "reaction"`.
+    #[wasm_bindgen(getter)]
+    pub fn kind(&self) -> String {
+        self.kind.to_string()
+    }
+
+    /// Chat / edit text (empty for delete / reaction).
+    #[wasm_bindgen(getter)]
+    pub fn text(&self) -> String {
+        self.text.clone()
+    }
+
+    /// The DS `messageId` the op acts on, or `undefined` for `"chat"`.
+    #[wasm_bindgen(getter)]
+    pub fn target(&self) -> Option<i64> {
+        self.target
+    }
+
+    /// The reaction emoji, or `undefined` unless `kind == "reaction"`.
+    #[wasm_bindgen(getter)]
+    pub fn emoji(&self) -> Option<String> {
+        self.emoji.clone()
+    }
+
+    /// Number of attachments (chat only; `0` otherwise).
+    #[wasm_bindgen(getter, js_name = attachmentCount)]
+    pub fn attachment_count(&self) -> u32 {
+        u32::try_from(self.attachments.len()).unwrap_or(u32::MAX)
+    }
+
+    /// Pull one attachment by index (chat only).
+    ///
+    /// # Errors
+    ///
+    /// `RangeError` on out-of-bounds `i`.
+    #[wasm_bindgen]
+    pub fn attachment(&self, i: u32) -> Result<AttachmentRef, JsError> {
+        let idx = usize::try_from(i).map_err(|_| boundary_err(format!("bad index {i}")))?;
+        self.attachments
+            .get(idx)
+            .map(|a| AttachmentRef {
+                blob_id: a.blob_id.clone(),
+                key: a.key.clone(),
+                nonce: a.nonce.clone(),
+                mime: a.mime.clone(),
+                size: a.size,
+                name: a.name.clone(),
+            })
+            .ok_or_else(|| boundary_err(format!("attachment index {i} out of bounds")))
+    }
+}
+
+/// Build an EDIT envelope (ADR-0023) replacing the target message's
+/// body with `new_text`. `target` is the DS `messageId` (`BigInt`).
+///
+/// # Errors
+///
+/// `Error` on serialisation failure.
+#[wasm_bindgen(js_name = composeEditEnvelope)]
+pub fn compose_edit_envelope(target: i64, new_text: &str) -> Result<Vec<u8>, JsError> {
+    inner::compose_edit(target, new_text).map_err(attachment_err)
+}
+
+/// Build a DELETE (tombstone) envelope (ADR-0023) for `target`.
+///
+/// # Errors
+///
+/// `Error` on serialisation failure.
+#[wasm_bindgen(js_name = composeDeleteEnvelope)]
+pub fn compose_delete_envelope(target: i64) -> Result<Vec<u8>, JsError> {
+    inner::compose_delete(target).map_err(attachment_err)
+}
+
+/// Build a REACTION envelope (ADR-0023): `emoji` to `target`.
+///
+/// # Errors
+///
+/// `Error` if `emoji` is empty or exceeds `MAX_EMOJI_BYTES`, or on
+/// serialisation failure.
+#[wasm_bindgen(js_name = composeReactionEnvelope)]
+pub fn compose_reaction_envelope(target: i64, emoji: &str) -> Result<Vec<u8>, JsError> {
+    inner::compose_reaction(target, emoji).map_err(attachment_err)
+}
+
+/// Decode an MLS Application message body into a classified
+/// [`ParsedBody`] (ADR-0023). Never fails — a malformed / ambiguous
+/// op degrades to `"chat"`.
+#[wasm_bindgen(js_name = parseBodyEnvelope)]
+#[must_use]
+pub fn parse_body_envelope(bytes: &[u8]) -> ParsedBody {
+    match inner::parse_body(bytes) {
+        inner::MessageBody::Chat { text, attachments } => ParsedBody {
+            kind: "chat",
+            text,
+            attachments: refs_to_wasm(attachments),
+            target: None,
+            emoji: None,
+        },
+        inner::MessageBody::Edit { target, text } => ParsedBody {
+            kind: "edit",
+            text,
+            attachments: Vec::new(),
+            target: Some(target),
+            emoji: None,
+        },
+        inner::MessageBody::Delete { target } => ParsedBody {
+            kind: "delete",
+            text: String::new(),
+            attachments: Vec::new(),
+            target: Some(target),
+            emoji: None,
+        },
+        inner::MessageBody::Reaction { target, emoji } => ParsedBody {
+            kind: "reaction",
+            text: String::new(),
+            attachments: Vec::new(),
+            target: Some(target),
+            emoji: Some(emoji),
+        },
+    }
+}
+
+// ============================================================================
 // Internal helpers
 // ============================================================================
+
+/// Decode inner `AttachmentRef`s into the wasm shape, dropping any
+/// malformed ref silently (the same policy as [`parse_envelope`]).
+fn refs_to_wasm(refs: Vec<inner::AttachmentRef>) -> Vec<AttachmentRef> {
+    refs.into_iter()
+        .filter_map(|r| {
+            let blob_id = r.decode_blob_id().ok()?;
+            let key = r.decode_key().ok()?;
+            let nonce = r.decode_nonce().ok()?;
+            Some(AttachmentRef {
+                blob_id: blob_id.to_vec(),
+                key: key.as_bytes().to_vec(),
+                nonce: nonce.to_vec(),
+                mime: r.mime,
+                size: r.size,
+                name: r.name,
+            })
+        })
+        .collect()
+}
 
 fn bytes_to_aead_key(bytes: &[u8]) -> Result<AeadKey, JsError> {
     if bytes.len() != inner::ATTACHMENT_KEY_LEN {

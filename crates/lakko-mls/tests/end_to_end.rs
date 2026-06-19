@@ -61,10 +61,16 @@ fn three_party_group_lifecycle_and_exporter_consistency() {
     let bob_received = bob_group
         .process_incoming(&bob, &over_wire(alice_msg))
         .expect("bob decrypts");
-    assert_eq!(
-        bob_received_bytes(bob_received),
-        b"hi bob, this is alice".to_vec()
-    );
+    // ADR-0023: an Application message must surface the sender's leaf index so
+    // the chat receive path can run the author-only edit/delete gate + attribute
+    // reactions. Bob sees Alice's leaf, not his own.
+    match bob_received {
+        Incoming::Application { bytes, sender_leaf } => {
+            assert_eq!(bytes, b"hi bob, this is alice".to_vec());
+            assert_eq!(sender_leaf, Some(alice_group.own_leaf_index().u32()));
+        },
+        other => panic!("expected Application, got {other:?}"),
+    }
 
     let bob_msg = bob_group
         .create_application_message(&bob, b"hi alice, bob here")
@@ -182,7 +188,7 @@ fn three_party_group_lifecycle_and_exporter_consistency() {
 
 fn bob_received_bytes(incoming: Incoming) -> Vec<u8> {
     match incoming {
-        Incoming::Application(b) => b,
+        Incoming::Application { bytes, .. } => bytes,
         other => panic!("expected application message, got {other:?}"),
     }
 }

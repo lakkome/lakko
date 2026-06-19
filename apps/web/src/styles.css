@@ -256,3 +256,27 @@ a:focus-visible {
   font-size: 0.9rem;
   color: var(--surface-muted);
 }
+
+/*
+ * ADR-0023 — per-message action strip (React / Edit / Delete).
+ * Hidden by default; revealed when the hosting bubble (`<li>`)
+ * is hovered or focus-within (keyboard). On touch devices with
+ * no hover, the strip stays visible so the affordance is still
+ * reachable.
+ */
+.lakko-msg-actions {
+  opacity: 0;
+  transition: opacity 0.12s ease-in-out;
+  pointer-events: none;
+}
+li:hover > .lakko-msg-actions,
+li:focus-within > .lakko-msg-actions {
+  opacity: 1;
+  pointer-events: auto;
+}
+@media (hover: none) {
+  .lakko-msg-actions {
+    opacity: 1;
+    pointer-events: auto;
+  }
+}

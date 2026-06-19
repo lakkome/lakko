@@ -12,7 +12,9 @@ import uniffi.lakko_ffi_uniffi.AttachmentRef
 import uniffi.lakko_ffi_uniffi.FfiException
 import uniffi.lakko_ffi_uniffi.Group
 import uniffi.lakko_ffi_uniffi.Identity
+import uniffi.lakko_ffi_uniffi.MessageBodyKind
 import uniffi.lakko_ffi_uniffi.ProcessedMessage
+import uniffi.lakko_ffi_uniffi.parseBodyEnvelope
 
 /**
  * Application-message orchestrator on top of MLS groups.
@@ -257,23 +259,61 @@ private fun toEvent(
                     createdAt = createdAt,
                 )
             } else {
-                // 1.19c4: feed the application bytes
-                // through the UniFFI `parseEnvelope` surface.
-                // The plaintext was already authenticated by
-                // the MLS Application message's MAC, so the
-                // worst case here is a malformed envelope
-                // from a buggy peer — never a tampered
-                // payload. Legacy pre-1.19 plain-UTF-8 bytes
-                // collapse cleanly to `(text = <utf-8 lossy>,
-                // attachments = [])`.
-                val parsed = AttachmentBridge.parseEnvelopeBytes(processed.data)
-                IncomingChatEvent.Application(
-                    messageId = messageId,
-                    text = parsed.text,
-                    attachments = parsed.attachments,
-                    plaintext = parsed.text,
-                    createdAt = createdAt,
-                )
+                // ADR-0023 — feed the application bytes through
+                // the structured body parser, which surfaces the
+                // chat / edit / delete / reaction discriminator.
+                // The plaintext was already authenticated by the
+                // MLS Application message's MAC, so the worst case
+                // here is a malformed envelope from a buggy peer —
+                // never a tampered payload. A malformed / ambiguous
+                // envelope degrades to CHAT with the raw text;
+                // legacy pre-1.19 plain-UTF-8 bytes collapse to
+                // `(text = <utf-8 lossy>, attachments = [])`.
+                //
+                // `senderLeaf` is the ORIGINAL author's MLS leaf for
+                // this Application message (`null` for an external
+                // sender — such a message can never be a valid
+                // edit/delete target). It feeds the author-only
+                // edit/delete gate + reaction attribution.
+                val body = parseBodyEnvelope(processed.data)
+                val senderLeaf = processed.senderLeaf
+                when (body.kind) {
+                    MessageBodyKind.CHAT -> IncomingChatEvent.Application(
+                        messageId = messageId,
+                        text = body.text,
+                        attachments = body.attachments,
+                        plaintext = body.text,
+                        senderLeaf = senderLeaf,
+                        createdAt = createdAt,
+                    )
+                    MessageBodyKind.EDIT -> IncomingChatEvent.Op(
+                        messageId = messageId,
+                        op = MessageOp.Edit,
+                        target = body.target ?: 0L,
+                        text = body.text,
+                        emoji = null,
+                        senderLeaf = senderLeaf,
+                        createdAt = createdAt,
+                    )
+                    MessageBodyKind.DELETE -> IncomingChatEvent.Op(
+                        messageId = messageId,
+                        op = MessageOp.Delete,
+                        target = body.target ?: 0L,
+                        text = "",
+                        emoji = null,
+                        senderLeaf = senderLeaf,
+                        createdAt = createdAt,
+                    )
+                    MessageBodyKind.REACTION -> IncomingChatEvent.Op(
+                        messageId = messageId,
+                        op = MessageOp.Reaction,
+                        target = body.target ?: 0L,
+                        text = "",
+                        emoji = body.emoji,
+                        senderLeaf = senderLeaf,
+                        createdAt = createdAt,
+                    )
+                }
             }
         }
         is ProcessedMessage.Commit -> IncomingChatEvent.System(
@@ -329,6 +369,38 @@ public sealed interface IncomingChatEvent {
          *  still read `plaintext`. New code should read
          *  [text]. */
         val plaintext: String,
+        /** ADR-0023 — the original author's MLS leaf index. The
+         *  timeline records it so a later edit/delete op can be
+         *  gated against it (author-only). `null` for an
+         *  external sender — such a message can never be a valid
+         *  edit/delete target. */
+        val senderLeaf: UInt?,
+        val createdAt: String,
+    ) : IncomingChatEvent
+
+    /** ADR-0023 — an edit / delete / reaction op carried in the
+     *  same JSON envelope as a chat message. The repository
+     *  folds it into the *target* message (keyed on [target] ==
+     *  the target's DS [Application.messageId]) rather than
+     *  rendering it as a standalone bubble. The op itself still
+     *  consumes a DS [messageId] + surfaces here so the
+     *  incremental poll applies it exactly once. */
+    public data class Op(
+        /** This op message's own DS-assigned id. */
+        val messageId: Long,
+        /** Which op this is. */
+        val op: MessageOp,
+        /** The DS [Application.messageId] of the target message. */
+        val target: Long,
+        /** Edit text (empty for delete / reaction). */
+        val text: String,
+        /** Reaction emoji (`null` outside [MessageOp.Reaction]). */
+        val emoji: String?,
+        /** The op sender's MLS leaf index. The author-only gate
+         *  (edit / delete) checks it against the target's stored
+         *  author leaf; a reaction attributes its toggle to it.
+         *  `null` ⇒ the op is dropped (fail-closed). */
+        val senderLeaf: UInt?,
         val createdAt: String,
     ) : IncomingChatEvent
 
@@ -374,6 +446,13 @@ public enum class SystemKind {
     Commit,
     Proposal,
     ExternalJoinProposal,
+}
+
+/** ADR-0023 — op discriminator for [IncomingChatEvent.Op]. */
+public enum class MessageOp {
+    Edit,
+    Delete,
+    Reaction,
 }
 
 /** Result of [ChatClient.pollMessages]. */

@@ -258,6 +258,17 @@ public struct ChatScreen: View {
                 }
             }
         }
+        // ADR-0023 — edit sheet. Presented when the context menu's
+        // "Edit" sets `editingMessage`; pre-filled with the current
+        // body. Save publishes the edit op; Cancel discards.
+        .sheet(
+            isPresented: Binding(
+                get: { viewModel.editingMessage != nil },
+                set: { open in if !open { viewModel.cancelEdit() } }
+            )
+        ) {
+            EditMessageSheet(viewModel: viewModel)
+        }
     }
 
     /// Workaround for `PhotosPicker` lacking a programmatic
@@ -291,7 +302,13 @@ public struct ChatScreen: View {
                         ForEach(viewModel.messages) { message in
                             MessageRow(
                                 message: message,
-                                onPreview: openAttachmentPreview
+                                ownLeaf: viewModel.ownLeaf,
+                                onPreview: openAttachmentPreview,
+                                onEdit: { viewModel.beginEdit(message) },
+                                onDelete: { viewModel.deleteMessage(message) },
+                                onReact: { emoji in
+                                    viewModel.react(to: message, emoji: emoji)
+                                }
                             )
                             .id(message.messageId)
                         }
@@ -662,26 +679,60 @@ private struct AttachmentPayload {
 
 private struct MessageRow: View {
     let message: ChatMessage
+    /// ADR-0023 — the local member's MLS leaf, used to highlight
+    /// reaction chips this user contributed.
+    let ownLeaf: UInt32?
     /// 1.19c3 — bubble taps on attachment chips call into the
     /// screen's preview / share helpers. `onPreview` opens the
     /// inline image sheet; the `ShareLink` is wired inline.
     let onPreview: (AttachmentRef) -> Void
+    /// ADR-0023 — context-menu actions. Edit / Delete only on own
+    /// outgoing messages (gated below); React on any message.
+    let onEdit: () -> Void
+    let onDelete: () -> Void
+    let onReact: (String) -> Void
+
+    /// ADR-0023 — emoji palette for the quick reaction picker.
+    private static let reactionPalette = ["👍", "❤️", "😂", "😮", "😢", "🙏"]
+
+    /// Edit / Delete are offered only on our own outgoing
+    /// messages that carry a server-assigned id and are not
+    /// already deleted (the receive-side author gate is the real
+    /// enforcement — this is just the affordance).
+    private var canEditOrDelete: Bool {
+        message.direction == .outgoing
+            && message.messageId > 0
+            && !message.deleted
+    }
+
+    /// React is offered on any non-system message with an id.
+    private var canReact: Bool {
+        message.direction != .system
+            && message.messageId > 0
+            && !message.deleted
+    }
 
     var body: some View {
         switch message.direction {
         case .outgoing:
             HStack {
                 Spacer(minLength: 48)
-                bubble
-                    .background(Color.accentColor.opacity(0.9))
-                    .foregroundStyle(.white)
-                    .clipShape(RoundedRectangle(cornerRadius: 16))
+                bubbleColumn(alignment: .trailing) {
+                    bubble
+                        .background(Color.accentColor.opacity(0.9))
+                        .foregroundStyle(.white)
+                        .clipShape(RoundedRectangle(cornerRadius: 16))
+                        .contextMenu { menuItems }
+                }
             }
         case .incoming:
             HStack {
-                bubble
-                    .background(Color(.secondarySystemBackground))
-                    .clipShape(RoundedRectangle(cornerRadius: 16))
+                bubbleColumn(alignment: .leading) {
+                    bubble
+                        .background(Color(.secondarySystemBackground))
+                        .clipShape(RoundedRectangle(cornerRadius: 16))
+                        .contextMenu { menuItems }
+                }
                 Spacer(minLength: 48)
             }
         case .system:
@@ -695,16 +746,67 @@ private struct MessageRow: View {
         }
     }
 
+    /// Wrap the bubble + the reaction-chip row in a vertical
+    /// column aligned to the bubble's side, so chips sit just
+    /// under their message.
+    @ViewBuilder
+    private func bubbleColumn<Content: View>(
+        alignment: HorizontalAlignment,
+        @ViewBuilder _ content: () -> Content
+    ) -> some View {
+        VStack(alignment: alignment, spacing: 4) {
+            content()
+            if !message.deleted, !message.reactions.isEmpty {
+                reactionChips
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var menuItems: some View {
+        if canReact {
+            // Quick-react palette — a sub-menu of the six core
+            // emoji; tapping one toggles it on the message.
+            Menu {
+                ForEach(Self.reactionPalette, id: \.self) { emoji in
+                    Button(emoji) { onReact(emoji) }
+                }
+            } label: {
+                Label("React", systemImage: "face.smiling")
+            }
+        }
+        if canEditOrDelete {
+            Button { onEdit() } label: {
+                Label("Edit", systemImage: "pencil")
+            }
+            Button(role: .destructive) { onDelete() } label: {
+                Label("Delete", systemImage: "trash")
+            }
+        }
+    }
+
     @ViewBuilder
     private var bubble: some View {
         VStack(alignment: .leading, spacing: 6) {
-            if !message.text.isEmpty {
-                Text(message.text)
-                    .font(.body)
-                    .textSelection(.enabled)
-            }
-            if !message.attachments.isEmpty {
-                attachmentChips
+            if message.deleted {
+                // Muted tombstone — no original text / attachments.
+                Label("message deleted", systemImage: "trash")
+                    .font(.body.italic())
+                    .foregroundStyle(.secondary)
+            } else {
+                if !message.text.isEmpty {
+                    Text(message.text)
+                        .font(.body)
+                        .textSelection(.enabled)
+                }
+                if !message.attachments.isEmpty {
+                    attachmentChips
+                }
+                if message.edited {
+                    Text("(edited)")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
             }
         }
         .padding(.vertical, 8)
@@ -723,6 +825,84 @@ private struct MessageRow: View {
                     direction: message.direction,
                     onPreview: { onPreview(ref) }
                 )
+            }
+        }
+    }
+
+    /// ADR-0023 — reaction chips under the bubble. Each chip is
+    /// `emoji ×count`; tapping a chip the local user contributed
+    /// toggles it back off (re-sends the same emoji op).
+    @ViewBuilder
+    private var reactionChips: some View {
+        HStack(spacing: 4) {
+            ForEach(message.reactionSummary(ownLeaf: ownLeaf)) { tally in
+                Button {
+                    onReact(tally.emoji)
+                } label: {
+                    HStack(spacing: 2) {
+                        Text(tally.emoji).font(.caption)
+                        if tally.count > 1 {
+                            Text("\(tally.count)")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(
+                        tally.reactedByMe
+                            ? Color.accentColor.opacity(0.18)
+                            : Color(.secondarySystemBackground)
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 10)
+                            .stroke(
+                                tally.reactedByMe
+                                    ? Color.accentColor.opacity(0.6)
+                                    : Color.clear,
+                                lineWidth: 1
+                            )
+                    )
+                    .clipShape(RoundedRectangle(cornerRadius: 10))
+                }
+                .buttonStyle(.plain)
+            }
+        }
+    }
+}
+
+/// ADR-0023 — the edit sheet. A small form pre-filled with the
+/// message's current text; Save publishes the edit op + applies
+/// it locally, Cancel discards.
+private struct EditMessageSheet: View {
+    @ObservedObject var viewModel: ChatViewModel
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Message") {
+                    TextField(
+                        "Message",
+                        text: $viewModel.editText,
+                        axis: .vertical
+                    )
+                    .lineLimit(1...6)
+                }
+            }
+            .navigationTitle("Edit message")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("Cancel") { viewModel.cancelEdit() }
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Save") { viewModel.commitEdit() }
+                        .disabled(
+                            viewModel.editText.trimmingCharacters(
+                                in: .whitespacesAndNewlines
+                            ).isEmpty
+                        )
+                }
             }
         }
     }

@@ -781,6 +781,75 @@ public class ChatViewModel(
     }
 
     /**
+     * ADR-0023 — edit one of OUR OWN messages. Composes + publishes
+     * the EDIT op + locally replaces the target's text (the DS
+     * never echoes our own application messages back). A blank /
+     * unchanged edit is a no-op. Failures surface through
+     * [ChatScreenUiState.sendError].
+     */
+    public fun onEditMessage(targetMessageId: Long, newText: String) {
+        val trimmed = newText.trim()
+        if (trimmed.isEmpty()) return
+        viewModelScope.launch {
+            try {
+                repo.editMessage(
+                    groupIdHex = groupIdHex,
+                    targetMessageId = targetMessageId,
+                    newText = trimmed,
+                )
+            } catch (err: Throwable) {
+                composer.update { it.copy(sendError = err.message ?: "Edit failed.") }
+                android.util.Log.w("ChatViewModel", "onEditMessage failed", err)
+            }
+        }
+    }
+
+    /**
+     * ADR-0023 — delete one of OUR OWN messages. Composes +
+     * publishes the DELETE op + locally tombstones the target.
+     */
+    public fun onDeleteMessage(targetMessageId: Long) {
+        viewModelScope.launch {
+            try {
+                repo.deleteMessage(
+                    groupIdHex = groupIdHex,
+                    targetMessageId = targetMessageId,
+                )
+            } catch (err: Throwable) {
+                composer.update { it.copy(sendError = err.message ?: "Delete failed.") }
+                android.util.Log.w("ChatViewModel", "onDeleteMessage failed", err)
+            }
+        }
+    }
+
+    /**
+     * ADR-0023 — react to ANY message with [emoji]. Composes +
+     * publishes the REACTION op + locally toggles our own
+     * `(ownLeaf, emoji)` on the target. The FFI compose rejects an
+     * empty / over-long emoji.
+     */
+    public fun onReactToMessage(targetMessageId: Long, emoji: String) {
+        if (emoji.isEmpty()) return
+        viewModelScope.launch {
+            try {
+                repo.reactToMessage(
+                    groupIdHex = groupIdHex,
+                    targetMessageId = targetMessageId,
+                    emoji = emoji,
+                )
+            } catch (err: Throwable) {
+                composer.update { it.copy(sendError = err.message ?: "Reaction failed.") }
+                android.util.Log.w("ChatViewModel", "onReactToMessage failed", err)
+            }
+        }
+    }
+
+    /** ADR-0023 — our own leaf in this chat group, used by the UI
+     *  to render which reaction chips we contributed (and can
+     *  toggle off). `null` when there is no live handle. */
+    public fun ownChatLeafIndex(): UInt? = repo.ownLeafIndex(groupIdHex)
+
+    /**
      * Drive the encrypt + upload flow for one picked item.
      * Called by the screen layer after the OS-level picker
      * resolves a URI to raw bytes + MIME + display name.

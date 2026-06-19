@@ -259,8 +259,136 @@ pub fn parse_envelope(bytes: Vec<u8>) -> ParsedEnvelope {
 }
 
 // ============================================================================
+// ADR-0023 — edit / delete / reaction
+// ============================================================================
+
+/// The classification of a decoded message body (ADR-0023). Mirror
+/// of [`lakko_attachments::MessageBody`] flattened for Swift/Kotlin:
+/// the `kind` selects which of [`ParsedBody`]'s optional fields are
+/// meaningful.
+#[derive(uniffi::Enum, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum MessageBodyKind {
+    /// A plain text + attachments message.
+    Chat,
+    /// Edit of `target` — `text` is the new body.
+    Edit,
+    /// Delete (tombstone) of `target`.
+    Delete,
+    /// Reaction `emoji` to `target`.
+    Reaction,
+}
+
+/// Output of [`parse_body_envelope`]: the classified message body
+/// (ADR-0023). `text` + `attachments` are meaningful for `Chat` (and
+/// `text` for `Edit`); `target` for every op; `emoji` for `Reaction`.
+#[derive(uniffi::Record)]
+pub struct ParsedBody {
+    /// Which kind of message this is.
+    pub kind: MessageBodyKind,
+    /// Chat / edit text (empty for delete / reaction).
+    pub text: String,
+    /// Attachment references (chat only; empty otherwise).
+    pub attachments: Vec<AttachmentRef>,
+    /// The DS `messageId` the op acts on (`None` for `Chat`).
+    pub target: Option<i64>,
+    /// The reaction emoji (`Some` only for `Reaction`).
+    pub emoji: Option<String>,
+}
+
+/// Build an EDIT envelope (ADR-0023) replacing the target message's
+/// body with `new_text`. The author-only gate lives on the receiver.
+///
+/// # Errors
+///
+/// [`FfiError::Attachment`] on serialisation failure.
+#[uniffi::export]
+pub fn compose_edit_envelope(target: i64, new_text: String) -> Result<Vec<u8>, FfiError> {
+    inner::compose_edit(target, &new_text).map_err(Into::into)
+}
+
+/// Build a DELETE (tombstone) envelope (ADR-0023) for `target`.
+///
+/// # Errors
+///
+/// [`FfiError::Attachment`] on serialisation failure.
+#[uniffi::export]
+pub fn compose_delete_envelope(target: i64) -> Result<Vec<u8>, FfiError> {
+    inner::compose_delete(target).map_err(Into::into)
+}
+
+/// Build a REACTION envelope (ADR-0023): `emoji` to `target`.
+///
+/// # Errors
+///
+/// [`FfiError::Attachment`] if `emoji` is empty or exceeds
+/// `MAX_EMOJI_BYTES`, or on serialisation failure.
+#[uniffi::export]
+pub fn compose_reaction_envelope(target: i64, emoji: String) -> Result<Vec<u8>, FfiError> {
+    inner::compose_reaction(target, &emoji).map_err(Into::into)
+}
+
+/// Decode an MLS Application message body into a classified
+/// [`ParsedBody`] (ADR-0023). Never fails — a malformed / ambiguous
+/// op degrades to `Chat`, the same fail-safe posture as
+/// [`parse_envelope`].
+#[uniffi::export]
+#[must_use]
+pub fn parse_body_envelope(bytes: Vec<u8>) -> ParsedBody {
+    match inner::parse_body(&bytes) {
+        inner::MessageBody::Chat { text, attachments } => ParsedBody {
+            kind: MessageBodyKind::Chat,
+            text,
+            attachments: refs_to_ffi(attachments),
+            target: None,
+            emoji: None,
+        },
+        inner::MessageBody::Edit { target, text } => ParsedBody {
+            kind: MessageBodyKind::Edit,
+            text,
+            attachments: Vec::new(),
+            target: Some(target),
+            emoji: None,
+        },
+        inner::MessageBody::Delete { target } => ParsedBody {
+            kind: MessageBodyKind::Delete,
+            text: String::new(),
+            attachments: Vec::new(),
+            target: Some(target),
+            emoji: None,
+        },
+        inner::MessageBody::Reaction { target, emoji } => ParsedBody {
+            kind: MessageBodyKind::Reaction,
+            text: String::new(),
+            attachments: Vec::new(),
+            target: Some(target),
+            emoji: Some(emoji),
+        },
+    }
+}
+
+// ============================================================================
 // Internal helpers
 // ============================================================================
+
+/// Decode inner `AttachmentRef`s into the FFI flat shape, dropping
+/// any malformed ref silently (the same policy as [`parse_envelope`]).
+fn refs_to_ffi(refs: Vec<inner::AttachmentRef>) -> Vec<AttachmentRef> {
+    refs.into_iter()
+        .filter_map(|r| {
+            let blob_id = r.decode_blob_id().ok()?;
+            let key = r.decode_key().ok()?;
+            let nonce = r.decode_nonce().ok()?;
+            Some(AttachmentRef {
+                blob_id: blob_id.to_vec(),
+                key: key.as_bytes().to_vec(),
+                nonce: nonce.to_vec(),
+                mime: r.mime,
+                size: r.size,
+                name: r.name,
+            })
+        })
+        .collect()
+}
 
 fn vec_to_aead_key(bytes: &[u8]) -> Result<AeadKey, FfiError> {
     if bytes.len() != inner::ATTACHMENT_KEY_LEN {
@@ -390,5 +518,42 @@ mod tests {
         let parsed = parse_envelope(evil);
         assert_eq!(parsed.text, "[unsupported v99 message]");
         assert!(parsed.attachments.is_empty());
+    }
+
+    // ---- ADR-0023 ----
+
+    #[test]
+    fn edit_envelope_round_trips_through_parse_body() {
+        let bytes = compose_edit_envelope(42, "fixed".to_string()).unwrap();
+        let body = parse_body_envelope(bytes);
+        assert_eq!(body.kind, MessageBodyKind::Edit);
+        assert_eq!(body.target, Some(42));
+        assert_eq!(body.text, "fixed");
+    }
+
+    #[test]
+    fn delete_envelope_round_trips_through_parse_body() {
+        let bytes = compose_delete_envelope(7).unwrap();
+        let body = parse_body_envelope(bytes);
+        assert_eq!(body.kind, MessageBodyKind::Delete);
+        assert_eq!(body.target, Some(7));
+    }
+
+    #[test]
+    fn reaction_envelope_round_trips_through_parse_body() {
+        let bytes = compose_reaction_envelope(9, "\u{1F44D}".to_string()).unwrap();
+        let body = parse_body_envelope(bytes);
+        assert_eq!(body.kind, MessageBodyKind::Reaction);
+        assert_eq!(body.target, Some(9));
+        assert_eq!(body.emoji, Some("\u{1F44D}".to_string()));
+    }
+
+    #[test]
+    fn plain_envelope_parses_as_chat_body() {
+        let bytes = compose_envelope("hi".to_string(), Vec::new()).unwrap();
+        let body = parse_body_envelope(bytes);
+        assert_eq!(body.kind, MessageBodyKind::Chat);
+        assert_eq!(body.text, "hi");
+        assert_eq!(body.target, None);
     }
 }

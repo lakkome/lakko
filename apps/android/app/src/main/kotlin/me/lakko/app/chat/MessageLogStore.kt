@@ -229,11 +229,28 @@ public data class PersistedMessage(
     val text: String,
     val attachments: List<PersistedAttachment>,
     val createdAt: String,
+    /** ADR-0023 — the original author's MLS leaf, or `null`.
+     *  Defaulted so a pre-ADR-0023 envelope (no key) decodes
+     *  cleanly; an unknown author then fails every author-only
+     *  op gate, which is the safe outcome. */
+    val authorLeaf: UInt? = null,
+    /** ADR-0023 — `true` once an edit op replaced the text. */
+    val edited: Boolean = false,
+    /** ADR-0023 — `true` once a delete op tombstoned the row. */
+    val deleted: Boolean = false,
+    /** ADR-0023 — accumulated reactions. */
+    val reactions: List<PersistedReaction> = emptyList(),
 ) {
     /** Explicit companion so the conversion helpers below can
      *  attach as `PersistedMessage.Companion.from(msg)`. */
     public companion object
 }
+
+@Serializable
+public data class PersistedReaction(
+    val reactorLeaf: UInt,
+    val emoji: String,
+)
 
 @Serializable
 public data class PersistedAttachment(
@@ -263,6 +280,12 @@ public fun PersistedMessage.Companion.from(msg: ChatMessage): PersistedMessage =
         text = msg.text,
         attachments = msg.attachments.map(PersistedAttachment.Companion::from),
         createdAt = msg.createdAt,
+        authorLeaf = msg.authorLeaf,
+        edited = msg.edited,
+        deleted = msg.deleted,
+        reactions = msg.reactions.map {
+            PersistedReaction(reactorLeaf = it.reactorLeaf, emoji = it.emoji)
+        },
     )
 
 /** Inverse — reconstruct a runtime [ChatMessage] from the JSON
@@ -281,6 +304,12 @@ public fun PersistedMessage.toChatMessage(): ChatMessage? {
         text = text,
         attachments = attachments.mapNotNull { it.toAttachmentRef() },
         createdAt = createdAt,
+        authorLeaf = authorLeaf,
+        edited = edited,
+        deleted = deleted,
+        reactions = reactions.map {
+            Reaction(reactorLeaf = it.reactorLeaf, emoji = it.emoji)
+        },
     )
 }
 

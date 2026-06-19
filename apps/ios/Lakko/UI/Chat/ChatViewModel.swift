@@ -706,6 +706,94 @@ public final class ChatViewModel: ObservableObject {
         }
     }
 
+    // MARK: - ADR-0023 — edit / delete / reactions
+
+    /// The local member's MLS leaf in this group (the roster
+    /// resolver already exposes it). Used to highlight reaction
+    /// chips the local user contributed.
+    var ownLeaf: UInt32? { ownLeafIndex }
+
+    /// The message currently open in the edit sheet (`nil` when
+    /// closed). Drives the SwiftUI `.sheet` presentation; the
+    /// sheet pre-fills `editText` with the message's current
+    /// body.
+    @Published public var editingMessage: ChatMessage?
+    /// Working draft for the edit sheet.
+    @Published public var editText: String = ""
+
+    /// Open the edit sheet for `message`, pre-filling the field
+    /// with the current text. Only offered for own outgoing
+    /// messages that carry a messageId.
+    func beginEdit(_ message: ChatMessage) {
+        editingMessage = message
+        editText = message.text
+    }
+
+    /// Cancel the edit sheet without publishing.
+    func cancelEdit() {
+        editingMessage = nil
+        editText = ""
+    }
+
+    /// Publish the edit for the message in the sheet. No-op for
+    /// an empty / unchanged body or a missing target.
+    func commitEdit() {
+        guard let message = editingMessage else { return }
+        let trimmed = editText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let target = message.messageId
+        editingMessage = nil
+        editText = ""
+        guard target > 0, !trimmed.isEmpty, trimmed != message.text else { return }
+        Task { @MainActor in
+            do {
+                try await repository.editMessage(
+                    groupIdHex: groupIdHex,
+                    target: target,
+                    newText: trimmed
+                )
+            } catch {
+                sendError = (error as? LocalizedError)?.errorDescription
+                    ?? "Edit failed."
+            }
+        }
+    }
+
+    /// Delete (tombstone) own message `message`.
+    func deleteMessage(_ message: ChatMessage) {
+        let target = message.messageId
+        guard target > 0 else { return }
+        Task { @MainActor in
+            do {
+                try await repository.deleteMessage(
+                    groupIdHex: groupIdHex,
+                    target: target
+                )
+            } catch {
+                sendError = (error as? LocalizedError)?.errorDescription
+                    ?? "Delete failed."
+            }
+        }
+    }
+
+    /// React to `message` with `emoji` — toggles on the receive
+    /// side + locally. Available on any message with a messageId.
+    func react(to message: ChatMessage, emoji: String) {
+        let target = message.messageId
+        guard target > 0, !emoji.isEmpty else { return }
+        Task { @MainActor in
+            do {
+                try await repository.reactToMessage(
+                    groupIdHex: groupIdHex,
+                    target: target,
+                    emoji: emoji
+                )
+            } catch {
+                sendError = (error as? LocalizedError)?.errorDescription
+                    ?? "Reaction failed."
+            }
+        }
+    }
+
     /// Drive the encrypt + upload flow for one picked item.
     /// Called by the screen layer after a photo / document
     /// picker resolves to raw bytes + MIME + filename.

@@ -294,6 +294,132 @@ export async function parseEnvelope(
 }
 
 /**
+ * ADR-0023 — the structured result of `parseBodyEnvelope`. A
+ * discriminated union mirroring the Rust `MessageBody` enum the
+ * wasm `ParsedBody` flat class surfaces. The chat receive loop
+ * branches on `kind`:
+ *
+ *   - `"chat"`     → a normal text + attachments bubble.
+ *   - `"edit"`     → fold into the target message's text.
+ *   - `"delete"`   → tombstone the target message.
+ *   - `"reaction"` → toggle `(reactorLeaf, emoji)` on the target.
+ *
+ * `target` is the DS `messageId` (already converted to a plain
+ * JS `number` here; the wasm side hands it as a `bigint`). Ops
+ * never carry attachments.
+ */
+export type ParsedBodyResult =
+  | { kind: "chat"; text: string; attachments: AttachmentRefBytes[] }
+  | { kind: "edit"; target: number; text: string }
+  | { kind: "delete"; target: number }
+  | { kind: "reaction"; target: number; emoji: string };
+
+/**
+ * Parse an incoming MLS Application-message body into the
+ * structured ADR-0023 `MessageBody` shape (chat / edit / delete
+ * / reaction). Wraps the wasm `parseBodyEnvelope` flat class +
+ * its `kind` discriminator, converting the `bigint` target to a
+ * plain `number` for the timeline bookkeeping.
+ *
+ * **Never throws.** The wasm parser is bounded + fail-closed: a
+ * malformed or ambiguous (more than one op field set) envelope
+ * degrades to `{ kind: "chat" }` with the raw text. An
+ * unrecognised `kind` string likewise collapses to a chat body
+ * so the receive loop always has something safe to render.
+ */
+export async function parseBodyEnvelope(
+  bytes: Uint8Array,
+): Promise<ParsedBodyResult> {
+  const wasm = await loadWasm();
+  const parsed = wasm.parseBodyEnvelope(bytes);
+  try {
+    const kind = parsed.kind;
+    if (kind === "edit") {
+      return {
+        kind: "edit",
+        target: Number(parsed.target ?? 0n),
+        text: parsed.text,
+      };
+    }
+    if (kind === "delete") {
+      return { kind: "delete", target: Number(parsed.target ?? 0n) };
+    }
+    if (kind === "reaction") {
+      return {
+        kind: "reaction",
+        target: Number(parsed.target ?? 0n),
+        emoji: parsed.emoji ?? "",
+      };
+    }
+    // "chat" (and any unexpected discriminator) — surface text +
+    // attachments. The same memory dance parseEnvelope runs.
+    const count = parsed.attachmentCount;
+    const attachments: AttachmentRefBytes[] = [];
+    for (let i = 0; i < count; i++) {
+      const wasmRef: WasmAttachmentRef = parsed.attachment(i);
+      try {
+        attachments.push({
+          blobId: wasmRef.blobId,
+          key: wasmRef.key,
+          nonce: wasmRef.nonce,
+          mime: wasmRef.mime,
+          size: Number(wasmRef.size),
+          name: wasmRef.name,
+        });
+      } finally {
+        wasmRef.free();
+      }
+    }
+    return { kind: "chat", text: parsed.text, attachments };
+  } finally {
+    parsed.free();
+  }
+}
+
+/**
+ * ADR-0023 — compose an **edit** op envelope: rewrite the text of
+ * the message identified by DS `targetMessageId` to `newText`.
+ * The result is a normal MLS Application message body; the caller
+ * publishes it via the existing application send path. Only the
+ * original author's edit is accepted by peers (the receive-side
+ * author-only gate enforces it).
+ */
+export async function composeEditEnvelope(
+  targetMessageId: number,
+  newText: string,
+): Promise<Uint8Array> {
+  const wasm = await loadWasm();
+  return wasm.composeEditEnvelope(BigInt(targetMessageId), newText);
+}
+
+/**
+ * ADR-0023 — compose a **delete** op envelope: tombstone the
+ * message identified by DS `targetMessageId`. Author-only on the
+ * receive side.
+ */
+export async function composeDeleteEnvelope(
+  targetMessageId: number,
+): Promise<Uint8Array> {
+  const wasm = await loadWasm();
+  return wasm.composeDeleteEnvelope(BigInt(targetMessageId));
+}
+
+/**
+ * ADR-0023 — compose a **reaction** op envelope: react to the
+ * message identified by DS `targetMessageId` with `emoji`. Any
+ * member may react; re-sending the same emoji toggles it off on
+ * the receive side. Throws if `emoji` is empty or exceeds the
+ * wasm-side `MAX_EMOJI_BYTES` cap (64 bytes).
+ */
+export async function composeReactionEnvelope(
+  targetMessageId: number,
+  emoji: string,
+): Promise<Uint8Array> {
+  const wasm = await loadWasm();
+  return wasm.composeReactionEnvelope(BigInt(targetMessageId), emoji);
+}
+
+/**
  * Format an attachment size for UI display — `42 B`, `1.2 kB`,
  * `4.7 MB`. Stays SI-decimal (matches macOS / GNOME / Windows
  * 11 file sizes); base-2 conversion is too pedantic for chat

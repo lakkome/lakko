@@ -82,8 +82,16 @@ pub use lakko_crypto::aead::NONCE_LEN as ATTACHMENT_NONCE_LEN;
 pub const MAX_ATTACHMENT_BYTES: usize = 50 * 1024 * 1024;
 
 /// Wire envelope version. Bump in lockstep with breaking changes
-/// to [`Envelope`]; current shape carries `v = 1`.
+/// to [`Envelope`]; current shape carries `v = 1`. Edit / delete /
+/// reaction (ADR-0023) ride as `#[serde(default)]` v1.x fields — a
+/// v1.0 parser tolerates them as unknown, so no version bump.
 pub const WIRE_VERSION: u8 = 1;
+
+/// Hard ceiling on a reaction emoji string (ADR-0023). Generous
+/// enough for a ZWJ grapheme cluster (family / flag / skin-tone
+/// sequences run ~25-30 bytes) while bounding the attacker-touchable
+/// parser — anything longer degrades to a plain chat message.
+pub const MAX_EMOJI_BYTES: usize = 64;
 
 // ============================================================================
 // Encrypted attachment
@@ -323,6 +331,100 @@ pub struct Envelope {
     /// byte-identical to the simplest possible JSON envelope.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<AttachmentRef>,
+    /// ADR-0023 — if set, this message EDITS the message whose DS
+    /// `messageId` equals this value; `text` is the new body. At
+    /// most one of `edit_of` / `delete_of` / `react_to` is set on a
+    /// well-formed message; more than one degrades to a plain chat.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edit_of: Option<i64>,
+    /// ADR-0023 — if set, this message DELETES (tombstones) the
+    /// message whose DS `messageId` equals this value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delete_of: Option<i64>,
+    /// ADR-0023 — if set, this message REACTS to the message whose
+    /// DS `messageId` equals this value with [`Self::emoji`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub react_to: Option<i64>,
+    /// ADR-0023 — the reaction emoji, paired with `react_to`. Capped
+    /// at [`MAX_EMOJI_BYTES`]; an absent/empty/over-long value with a
+    /// set `react_to` degrades the message to a plain chat.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub emoji: Option<String>,
+}
+
+/// The receiver-side classification of a decoded [`Envelope`]
+/// (ADR-0023). A plain message is [`Self::Chat`]; the three op
+/// variants carry the DS `messageId` of the message they act on.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MessageBody {
+    /// A normal text + attachments message.
+    Chat {
+        /// User-visible text.
+        text: String,
+        /// Attachment references.
+        attachments: Vec<AttachmentRef>,
+    },
+    /// Replace the target message's body with `text`.
+    Edit {
+        /// DS `messageId` of the edited message.
+        target: i64,
+        /// The new body.
+        text: String,
+    },
+    /// Tombstone the target message.
+    Delete {
+        /// DS `messageId` of the deleted message.
+        target: i64,
+    },
+    /// React to the target message with `emoji`.
+    Reaction {
+        /// DS `messageId` of the reacted-to message.
+        target: i64,
+        /// The reaction emoji (validated, length-capped).
+        emoji: String,
+    },
+}
+
+impl Envelope {
+    /// Classify a parsed v1 envelope into a [`MessageBody`]. Exactly
+    /// one op field may be set on a well-formed message; an ambiguous
+    /// (more than one set) or malformed (reaction without a valid
+    /// emoji) envelope falls back to [`MessageBody::Chat`] — never
+    /// trust a half-formed op to mutate another message (fail-safe,
+    /// the same posture the rest of the parser takes).
+    #[must_use]
+    fn into_body(self) -> MessageBody {
+        let op_count = u8::from(self.edit_of.is_some())
+            + u8::from(self.delete_of.is_some())
+            + u8::from(self.react_to.is_some());
+        if op_count == 1 {
+            if let Some(target) = self.delete_of {
+                return MessageBody::Delete { target };
+            }
+            if let Some(target) = self.edit_of {
+                return MessageBody::Edit {
+                    target,
+                    text: self.text,
+                };
+            }
+            if let Some(target) = self.react_to {
+                if let Some(emoji) = self.emoji {
+                    if !emoji.is_empty() && emoji.len() <= MAX_EMOJI_BYTES {
+                        return MessageBody::Reaction { target, emoji };
+                    }
+                }
+                // react_to set without a valid emoji → degrade.
+                return MessageBody::Chat {
+                    text: self.text,
+                    attachments: self.attachments,
+                };
+            }
+        }
+        MessageBody::Chat {
+            text: self.text,
+            attachments: self.attachments,
+        }
+    }
 }
 
 /// Encode `(text, attachments)` as the canonical JSON envelope. The
@@ -344,8 +446,84 @@ pub fn compose(text: &str, attachments: Vec<AttachmentRef>) -> Result<Vec<u8>, A
         v: WIRE_VERSION,
         text: text.to_string(),
         attachments,
+        edit_of: None,
+        delete_of: None,
+        react_to: None,
+        emoji: None,
     };
     serde_json::to_vec(&envelope).map_err(|e| AttachmentError::WireFormat(format!("compose: {e}")))
+}
+
+/// Encode an EDIT of the message whose DS `messageId` is `target`,
+/// replacing its body with `new_text` (ADR-0023). The receiver
+/// applies it only if the editor is the target's original sender
+/// (the author-only gate lives in the client; this just frames the
+/// wire bytes).
+///
+/// # Errors
+///
+/// [`AttachmentError::WireFormat`] if serialisation fails.
+pub fn compose_edit(target: i64, new_text: &str) -> Result<Vec<u8>, AttachmentError> {
+    let envelope = Envelope {
+        v: WIRE_VERSION,
+        text: new_text.to_string(),
+        attachments: Vec::new(),
+        edit_of: Some(target),
+        delete_of: None,
+        react_to: None,
+        emoji: None,
+    };
+    serde_json::to_vec(&envelope)
+        .map_err(|e| AttachmentError::WireFormat(format!("compose_edit: {e}")))
+}
+
+/// Encode a DELETE (tombstone) of the message whose DS `messageId`
+/// is `target` (ADR-0023).
+///
+/// # Errors
+///
+/// [`AttachmentError::WireFormat`] if serialisation fails.
+pub fn compose_delete(target: i64) -> Result<Vec<u8>, AttachmentError> {
+    let envelope = Envelope {
+        v: WIRE_VERSION,
+        text: String::new(),
+        attachments: Vec::new(),
+        edit_of: None,
+        delete_of: Some(target),
+        react_to: None,
+        emoji: None,
+    };
+    serde_json::to_vec(&envelope)
+        .map_err(|e| AttachmentError::WireFormat(format!("compose_delete: {e}")))
+}
+
+/// Encode a REACTION (`emoji`) to the message whose DS `messageId`
+/// is `target` (ADR-0023). The emoji is length-capped at
+/// [`MAX_EMOJI_BYTES`]; an over-long value is refused here rather
+/// than silently degrading on the receiver.
+///
+/// # Errors
+///
+/// [`AttachmentError::WireFormat`] if `emoji` is empty or exceeds
+/// [`MAX_EMOJI_BYTES`], or if serialisation fails.
+pub fn compose_reaction(target: i64, emoji: &str) -> Result<Vec<u8>, AttachmentError> {
+    if emoji.is_empty() || emoji.len() > MAX_EMOJI_BYTES {
+        return Err(AttachmentError::WireFormat(format!(
+            "compose_reaction: emoji length {} not in 1..={MAX_EMOJI_BYTES}",
+            emoji.len()
+        )));
+    }
+    let envelope = Envelope {
+        v: WIRE_VERSION,
+        text: String::new(),
+        attachments: Vec::new(),
+        edit_of: None,
+        delete_of: None,
+        react_to: Some(target),
+        emoji: Some(emoji.to_string()),
+    };
+    serde_json::to_vec(&envelope)
+        .map_err(|e| AttachmentError::WireFormat(format!("compose_reaction: {e}")))
 }
 
 /// Decode an MLS Application message body. Returns a tuple of the
@@ -374,6 +552,32 @@ pub fn parse(bytes: &[u8]) -> (String, Vec<AttachmentRef>) {
             String::from_utf8_lossy(bytes).into_owned(),
             Vec::new(),
         ),
+    }
+}
+
+/// Decode an MLS Application message body into a classified
+/// [`MessageBody`] (ADR-0023). This is the richer sibling of
+/// [`parse`]: it surfaces whether the message is a plain chat or an
+/// edit / delete / reaction op so the receiver can route it.
+///
+/// Fail-safe like [`parse`]: a non-JSON body becomes a bare-UTF-8
+/// [`MessageBody::Chat`]; a wrong-`v` envelope becomes a placeholder
+/// chat; an ambiguous or malformed op (more than one op field, or a
+/// reaction without a valid emoji) degrades to chat. The caller's
+/// author-only gate (ADR-0023) decides whether to apply an op — this
+/// function only frames it.
+#[must_use]
+pub fn parse_body(bytes: &[u8]) -> MessageBody {
+    match serde_json::from_slice::<Envelope>(bytes) {
+        Ok(env) if env.v == WIRE_VERSION => env.into_body(),
+        Ok(env) => MessageBody::Chat {
+            text: format!("[unsupported v{} message]", env.v),
+            attachments: Vec::new(),
+        },
+        Err(_) => MessageBody::Chat {
+            text: String::from_utf8_lossy(bytes).into_owned(),
+            attachments: Vec::new(),
+        },
     }
 }
 
@@ -411,7 +615,7 @@ pub enum AttachmentError {
 /// supported public API.
 #[doc(hidden)]
 pub mod fuzz_api {
-    use super::parse;
+    use super::{parse, parse_body, MessageBody};
 
     /// Drive the receiver-side message-body decode chain on
     /// attacker-controlled bytes.
@@ -432,6 +636,25 @@ pub mod fuzz_api {
             let _ = r.decode_blob_id();
             let _ = r.decode_key();
             let _ = r.decode_nonce();
+        }
+        // ADR-0023: also drive the richer classifier on the same
+        // attacker-controlled bytes — the edit/delete/reaction op
+        // fields + the emoji length cap + the >1-op-field degrade
+        // path all sit on this surface. Touch every variant's fields
+        // so the fuzzer explores them.
+        match parse_body(bytes) {
+            MessageBody::Chat { text, attachments } => {
+                let _ = (text.len(), attachments.len());
+            },
+            MessageBody::Edit { target, text } => {
+                let _ = (target, text.len());
+            },
+            MessageBody::Delete { target } => {
+                let _ = target;
+            },
+            MessageBody::Reaction { target, emoji } => {
+                let _ = (target, emoji.len());
+            },
         }
         !refs.is_empty()
     }
@@ -558,5 +781,106 @@ mod tests {
         let (text, refs) = parse(json);
         assert_eq!(text, "hi");
         assert!(refs.is_empty());
+    }
+
+    // ---- ADR-0023: edit / delete / reaction ----
+
+    #[test]
+    fn edit_round_trips_through_compose_parse_body() {
+        let bytes = compose_edit(42, "fixed typo").unwrap();
+        match parse_body(&bytes) {
+            MessageBody::Edit { target, text } => {
+                assert_eq!(target, 42);
+                assert_eq!(text, "fixed typo");
+            },
+            other => panic!("expected Edit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn delete_round_trips_through_compose_parse_body() {
+        let bytes = compose_delete(7).unwrap();
+        assert_eq!(parse_body(&bytes), MessageBody::Delete { target: 7 });
+    }
+
+    #[test]
+    fn reaction_round_trips_through_compose_parse_body() {
+        let bytes = compose_reaction(99, "\u{1F44D}").unwrap();
+        match parse_body(&bytes) {
+            MessageBody::Reaction { target, emoji } => {
+                assert_eq!(target, 99);
+                assert_eq!(emoji, "\u{1F44D}");
+            },
+            other => panic!("expected Reaction, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn plain_chat_parses_as_chat_body() {
+        let bytes = compose("hello", Vec::new()).unwrap();
+        assert_eq!(
+            parse_body(&bytes),
+            MessageBody::Chat {
+                text: "hello".to_string(),
+                attachments: Vec::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn op_envelope_back_compat_parse_reads_text() {
+        // The legacy `parse` (text, attachments) still works on an op
+        // envelope — it just surfaces the text, ignoring the op. This
+        // is the forward-compat degrade for any caller not yet routing
+        // via parse_body.
+        let bytes = compose_edit(1, "new body").unwrap();
+        let (text, refs) = parse(&bytes);
+        assert_eq!(text, "new body");
+        assert!(refs.is_empty());
+    }
+
+    #[test]
+    fn ambiguous_two_op_fields_degrade_to_chat() {
+        // A hand-rolled envelope with BOTH edit_of and delete_of must
+        // NOT be trusted as either op — fail-safe to chat.
+        let json = br#"{"v":1,"text":"x","edit_of":1,"delete_of":2}"#;
+        match parse_body(json) {
+            MessageBody::Chat { text, .. } => assert_eq!(text, "x"),
+            other => panic!("expected Chat degrade, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reaction_without_emoji_degrades_to_chat() {
+        let json = br#"{"v":1,"react_to":5}"#;
+        assert!(matches!(parse_body(json), MessageBody::Chat { .. }));
+    }
+
+    #[test]
+    fn reaction_with_overlong_emoji_degrades_to_chat() {
+        // A react_to with an emoji past the cap degrades rather than
+        // carrying an unbounded string into the reaction path.
+        let big = "x".repeat(MAX_EMOJI_BYTES + 1);
+        let json = format!(r#"{{"v":1,"react_to":5,"emoji":"{big}"}}"#);
+        assert!(matches!(
+            parse_body(json.as_bytes()),
+            MessageBody::Chat { .. }
+        ));
+    }
+
+    #[test]
+    fn compose_reaction_rejects_empty_and_overlong_emoji() {
+        assert!(compose_reaction(1, "").is_err());
+        let big = "x".repeat(MAX_EMOJI_BYTES + 1);
+        assert!(compose_reaction(1, &big).is_err());
+    }
+
+    #[test]
+    fn unknown_version_body_is_chat_placeholder() {
+        let evil = br#"{"v":99,"edit_of":1,"text":"future"}"#;
+        match parse_body(evil) {
+            MessageBody::Chat { text, .. } => assert_eq!(text, "[unsupported v99 message]"),
+            other => panic!("expected placeholder chat, got {other:?}"),
+        }
     }
 }
