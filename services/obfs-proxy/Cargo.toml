@@ -51,4 +51,5 @@ tokio.workspace = true
 bytes = "1"
 base64 = "0.22"
 hex = "0.4"
+sha2 = "0.10"
 rustls = { version = "0.23", default-features = false, features = ["std", "ring"] }

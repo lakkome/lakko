@@ -13,14 +13,16 @@
 use std::net::SocketAddr;
 use std::sync::{Arc, Once};
 
+use base64::engine::general_purpose::STANDARD_NO_PAD as B64_NOPAD;
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use lakko_svc_obfs_proxy::relay::relay;
 use lakko_transport::{
     build_reality_server_config, make_self_signed_cert, shadowsocks_accept_inbound,
     tunneled_request, Endpoint, RealityConfig, RealityListener, RealityShortId, RealityTagSecret,
     RealityTransport, ShadowsocksConfig, ShadowsocksReplayWindow, ShadowsocksTransport, Transport,
-    TunneledRequest,
+    TunneledRequest, WebTransportConfig, WebTransportListener, WebTransportPt,
 };
+use sha2::{Digest as _, Sha256};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::TcpListener;
 
@@ -164,6 +166,57 @@ async fn shadowsocks_tunnel_relays_http_request_to_internal_origin() {
 
     assert_eq!(resp.status, 200, "SS: origin status surfaces");
     assert_eq!(resp.body, b"pong", "SS: origin body surfaces");
+
+    proxy.await.expect("proxy relay task completes");
+}
+
+#[tokio::test]
+async fn webtransport_tunnel_relays_http_request_to_internal_origin() {
+    install_crypto_provider();
+    let origin = spawn_origin().await;
+
+    // Self-signed cover cert; the client pins its SHA-256 (W3C
+    // serverCertificateHashes mode) rather than a CA chain.
+    let (chain, key) = make_self_signed_cert("localhost").expect("cover cert");
+    let cert_hash_b64 = B64_NOPAD.encode(Sha256::digest(chain[0].as_ref()));
+
+    // --- proxy side: WebTransport listener → relay to the internal origin ---
+    let mut listener =
+        WebTransportListener::bind("127.0.0.1:0".parse().unwrap(), chain, key).expect("bind WT");
+    let server_addr = listener.local_addr().expect("WT local_addr");
+    let proxy = tokio::spawn(async move {
+        let conn = listener.accept().await.expect("accept WT tunnel");
+        relay(conn, origin).await.expect("relay to origin");
+    });
+
+    // --- client side: dial the WT tunnel, issue a tunneled request ----------
+    let client = WebTransportPt::new(WebTransportConfig {
+        url: format!("https://127.0.0.1:{}/", server_addr.port()),
+        cert_hashes_b64: vec![cert_hash_b64],
+        ech_config_list_b64: None,
+    })
+    .expect("WT client transport");
+    let conn = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        client.connect(&Endpoint::hostname("127.0.0.1", server_addr.port())),
+    )
+    .await
+    .expect("WT connect did not time out")
+    .expect("client completes the WebTransport handshake");
+
+    let req = TunneledRequest {
+        method: "GET".into(),
+        path: "/health".into(),
+        host: "lakko.invalid".into(),
+        headers: vec![],
+        body: vec![],
+    };
+    let resp = tunneled_request(conn, &req)
+        .await
+        .expect("tunneled request completes");
+
+    assert_eq!(resp.status, 200, "WT: origin status surfaces");
+    assert_eq!(resp.body, b"pong", "WT: origin body surfaces");
 
     proxy.await.expect("proxy relay task completes");
 }

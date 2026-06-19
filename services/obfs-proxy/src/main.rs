@@ -51,6 +51,12 @@ async fn main() -> anyhow::Result<()> {
         warn!("Shadowsocks-2022 listener not configured (LAKKO_OBFS_PROXY_SS_BIND unset)");
     }
 
+    if let Some(webtransport) = cfg.webtransport {
+        spawn_webtransport_listener(webtransport, cfg.internal_target)?;
+    } else {
+        warn!("WebTransport listener not configured (LAKKO_OBFS_PROXY_WT_BIND unset)");
+    }
+
     let app = Router::new()
         .route("/health", get(|| async { "ok" }))
         .route("/ready", get(|| async { "ready" }))
@@ -135,6 +141,38 @@ async fn spawn_shadowsocks_listener(
                 },
                 Err(error) => {
                     warn!(%error, "SS-2022 accept failed");
+                },
+            }
+        }
+    });
+    Ok(())
+}
+
+/// Bind the WebTransport (QUIC) listener + spawn its accept loop. A self-signed
+/// cover cert is fine — the client pins the cert hash via the bootstrap config.
+fn spawn_webtransport_listener(
+    webtransport: config::WebTransportProxyConfig,
+    internal_target: std::net::SocketAddr,
+) -> anyhow::Result<()> {
+    let (cert_chain, key) = lakko_transport::make_self_signed_cert(&webtransport.cover_sni)
+        .map_err(|e| anyhow::anyhow!("build WT cover cert: {e}"))?;
+    let mut listener =
+        lakko_transport::WebTransportListener::bind(webtransport.bind, cert_chain, key)
+            .map_err(|e| anyhow::anyhow!("bind WebTransport listener: {e}"))?;
+    info!(bind = %webtransport.bind, sni = %webtransport.cover_sni, "WebTransport listener up");
+    tokio::spawn(async move {
+        loop {
+            match listener.accept().await {
+                Ok(tunnel) => {
+                    info!("accepted WebTransport tunnel; relaying to internal target");
+                    tokio::spawn(async move {
+                        if let Err(error) = relay::relay(tunnel, internal_target).await {
+                            warn!(%error, "relay ended with error");
+                        }
+                    });
+                },
+                Err(error) => {
+                    warn!(%error, "WebTransport accept failed");
                 },
             }
         }

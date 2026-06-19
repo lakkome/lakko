@@ -108,5 +108,5 @@ pub use tunnel_http::{
 };
 pub use webtransport_pt::{
     ParsedConfig as WebTransportParsedConfig, WebTransportConfig, WebTransportConfigError,
-    WebTransportPt,
+    WebTransportListener, WebTransportPt,
 };

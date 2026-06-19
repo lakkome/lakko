@@ -35,6 +35,8 @@ pub struct ProxyConfig {
     pub reality: Option<RealityProxyConfig>,
     /// Shadowsocks-2022 listener config, or `None` if not configured.
     pub shadowsocks: Option<ShadowsocksProxyConfig>,
+    /// WebTransport listener config, or `None` if not configured.
+    pub webtransport: Option<WebTransportProxyConfig>,
 }
 
 /// Shadowsocks-2022-listener-specific config.
@@ -43,6 +45,16 @@ pub struct ShadowsocksProxyConfig {
     pub bind: SocketAddr,
     /// The 32-byte master PSK.
     pub psk: [u8; 32],
+}
+
+/// WebTransport-listener-specific config.
+pub struct WebTransportProxyConfig {
+    /// Public UDP bind for the WebTransport (QUIC) listener.
+    pub bind: SocketAddr,
+    /// The cover SNI the self-signed server cert is issued for. The client pins
+    /// the cert's SHA-256 hash (published in the bootstrap config), so the SNI
+    /// is cosmetic — but must be non-empty.
+    pub cover_sni: String,
 }
 
 /// REALITY-listener-specific config.
@@ -108,13 +120,34 @@ impl ProxyConfig {
             _ => None,
         };
 
+        let webtransport = match std::env::var("LAKKO_OBFS_PROXY_WT_BIND") {
+            Ok(bind) if !bind.is_empty() => Some(parse_webtransport(&bind)?),
+            _ => None,
+        };
+
         Ok(Self {
             internal_target,
             control_bind,
             reality,
             shadowsocks,
+            webtransport,
         })
     }
+}
+
+fn parse_webtransport(bind: &str) -> Result<WebTransportProxyConfig, ConfigError> {
+    let bind: SocketAddr = bind.parse().map_err(|e| ConfigError::Invalid {
+        var: "LAKKO_OBFS_PROXY_WT_BIND",
+        detail: format!("not a socket address: {e}"),
+    })?;
+    let cover_sni = req("LAKKO_OBFS_PROXY_WT_SNI")?;
+    if cover_sni.is_empty() {
+        return Err(ConfigError::Invalid {
+            var: "LAKKO_OBFS_PROXY_WT_SNI",
+            detail: "cover SNI must be non-empty".into(),
+        });
+    }
+    Ok(WebTransportProxyConfig { bind, cover_sni })
 }
 
 fn parse_shadowsocks(bind: &str) -> Result<ShadowsocksProxyConfig, ConfigError> {

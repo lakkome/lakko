@@ -55,10 +55,11 @@ use async_trait::async_trait;
 use base64::engine::general_purpose::STANDARD_NO_PAD as B64;
 use base64::Engine as _;
 use bytes::Bytes;
+use rustls_pki_types::{CertificateDer, PrivateKeyDer};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use url::Url;
-use web_transport_quinn::{ClientBuilder, RecvStream, SendStream, Session};
+use web_transport_quinn::{ClientBuilder, RecvStream, SendStream, Server, ServerBuilder, Session};
 
 use crate::endpoint::Endpoint;
 use crate::error::{Error, Result};
@@ -540,6 +541,74 @@ impl Connection for WebTransportConnection {
         self.session.close(0u32, b"closed");
         self.closed = true;
         Ok(())
+    }
+}
+
+/// Server-side WebTransport listener (ADR-0026). Mirrors the client
+/// [`WebTransportPt`]: it terminates an inbound WebTransport session into the
+/// same framed [`WebTransportConnection`] (`u32-BE length || payload`), so the
+/// obfs proxy can byte-relay it. The crypto provider follows
+/// `web-transport-quinn`'s `ring`-pinned default (no `aws-lc-rs`).
+pub struct WebTransportListener {
+    server: Server,
+}
+
+impl WebTransportListener {
+    /// Bind a WebTransport server to `addr` with the given TLS cert chain + key
+    /// (a self-signed cover cert is fine — like REALITY, WebTransport's privacy
+    /// is in the obfuscated tunnel, and the client pins the cert hash).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Io`] on a server-config / bind failure.
+    pub fn bind(
+        addr: std::net::SocketAddr,
+        cert_chain: Vec<CertificateDer<'static>>,
+        key: PrivateKeyDer<'static>,
+    ) -> Result<Self> {
+        let server = ServerBuilder::new()
+            .with_addr(addr)
+            .with_certificate(cert_chain, key)
+            .map_err(|e| Error::Io(format!("WebTransport server build: {e}")))?;
+        Ok(Self { server })
+    }
+
+    /// The bound local address (resolves a `:0` port). Useful for logging + for
+    /// a loopback test that pins the client URL to the chosen port.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Io`] if the underlying endpoint has no local address.
+    pub fn local_addr(&self) -> Result<std::net::SocketAddr> {
+        self.server
+            .local_addr()
+            .map_err(|e| Error::Io(format!("WebTransport local_addr: {e}")))
+    }
+
+    /// Accept one inbound WebTransport session and return its framed
+    /// [`Connection`]. Drives the WebTransport CONNECT handshake to a `Session`,
+    /// then accepts the client's single bidirectional stream.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::PeerClosed`] if the endpoint stopped accepting; [`Error::Io`] on
+    /// a handshake / stream-accept failure.
+    pub async fn accept(&mut self) -> Result<Box<dyn Connection>> {
+        let request = self.server.accept().await.ok_or(Error::PeerClosed)?;
+        let session = request
+            .ok()
+            .await
+            .map_err(|e| Error::Io(format!("WebTransport session accept: {e}")))?;
+        let (send, recv) = session
+            .accept_bi()
+            .await
+            .map_err(|e| Error::Io(format!("WebTransport accept_bi: {e}")))?;
+        Ok(Box::new(WebTransportConnection {
+            session,
+            send,
+            recv,
+            closed: false,
+        }))
     }
 }
 
