@@ -77,4 +77,4 @@ pub use datagram::{
 pub use request::{
     build_connect_udp_request, ConnectUdpRequest, MASQUE_PATH_PREFIX, PROTOCOL_CONNECT_UDP,
 };
-pub use transport::MasqueTransport;
+pub use transport::{MasqueListener, MasqueTransport};

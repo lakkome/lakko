@@ -70,7 +70,7 @@ pub use http::{HttpError, HttpResult, HttpTransport, HttpTransportConfig};
 pub use masque::{
     build_connect_udp_request, decode_udp_payload, encode_udp_payload, ConnectUdpRequest,
     DatagramError, MasqueBearer, MasqueConfig, MasqueConfigError, MasqueInnerTarget,
-    MasqueProxyUrl, MasqueTransport, CONNECT_UDP_CONTEXT_ID, MASQUE_PATH_PREFIX,
+    MasqueListener, MasqueProxyUrl, MasqueTransport, CONNECT_UDP_CONTEXT_ID, MASQUE_PATH_PREFIX,
     MAX_DATAGRAM_PAYLOAD, PROTOCOL_CONNECT_UDP,
 };
 pub use pinning::{PinError, PinnedVerifier, SpkiHash, SpkiPinSet};

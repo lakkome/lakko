@@ -52,6 +52,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use h3_quinn::quinn;
 use http::HeaderName;
+use rustls_pki_types::{CertificateDer, PrivateKeyDer};
 
 use crate::endpoint::Endpoint;
 use crate::error::{Error, Result};
@@ -381,6 +382,173 @@ impl Drop for MasqueConnection {
         if let Some(h) = self.stream_handle.take() {
             h.abort();
         }
+        if let Some(h) = self.driver_handle.take() {
+            h.abort();
+        }
+        if !self.closed {
+            self.quinn_conn.close(0u32.into(), b"");
+        }
+    }
+}
+
+/// Server-side MASQUE listener (ADR-0026). Terminates an inbound h3
+/// CONNECT-UDP tunnel into a datagram-based [`Connection`] the obfs proxy can
+/// byte-relay — the server mirror of the client [`MasqueTransport`]. The
+/// quinn/rustls stack pins the `ring` provider (no `aws-lc-rs`).
+pub struct MasqueListener {
+    endpoint: quinn::Endpoint,
+}
+
+impl MasqueListener {
+    /// Bind a MASQUE (QUIC + h3) server to `addr` with the given TLS cert chain
+    /// and key (a self-signed cover cert is fine — the client pins it / fronts a
+    /// cover site).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Io`] on a server-config / bind failure.
+    pub fn bind(
+        addr: std::net::SocketAddr,
+        cert_chain: Vec<CertificateDer<'static>>,
+        key: PrivateKeyDer<'static>,
+    ) -> Result<Self> {
+        let mut tls = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(cert_chain, key)
+            .map_err(|e| Error::Io(format!("masque server cert: {e}")))?;
+        // QUIC requires the h3 ALPN token (RFC 9114 §3.1).
+        tls.alpn_protocols = vec![b"h3".to_vec()];
+        let qsc = quinn::crypto::rustls::QuicServerConfig::try_from(tls)
+            .map_err(|e| Error::Io(format!("masque QuicServerConfig: {e}")))?;
+        let server_config = quinn::ServerConfig::with_crypto(Arc::new(qsc));
+        let endpoint = quinn::Endpoint::server(server_config, addr)
+            .map_err(|e| Error::Io(format!("masque server endpoint: {e}")))?;
+        Ok(Self { endpoint })
+    }
+
+    /// The bound local address (resolves a `:0` port).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Io`] if the endpoint has no local address.
+    pub fn local_addr(&self) -> Result<std::net::SocketAddr> {
+        self.endpoint
+            .local_addr()
+            .map_err(|e| Error::Io(format!("masque local_addr: {e}")))
+    }
+
+    /// Accept one inbound MASQUE tunnel: complete the QUIC handshake, accept the
+    /// h3 extended-CONNECT-UDP request, answer `200`, and return a datagram
+    /// [`Connection`]. The h3 control channel + request stream are held open in
+    /// a background task for the tunnel's lifetime (RFC 9298 §4.2).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::PeerClosed`] if the endpoint stopped accepting / the client did
+    /// not send a request; [`Error::Io`] on a handshake / h3 failure or a
+    /// non-CONNECT request.
+    pub async fn accept(&self) -> Result<Box<dyn Connection>> {
+        let conn = self
+            .endpoint
+            .accept()
+            .await
+            .ok_or(Error::PeerClosed)?
+            .await
+            .map_err(|e| Error::Io(format!("masque quinn accept: {e}")))?;
+        // One clone carries the datagram send/recv path; the other drives h3.
+        let datagram_conn = conn.clone();
+
+        let mut h3_conn = h3::server::builder()
+            .enable_extended_connect(true)
+            .enable_datagram(true)
+            .build::<_, Bytes>(h3_quinn::Connection::new(conn))
+            .await
+            .map_err(|e| Error::Io(format!("masque h3 server build: {e}")))?;
+
+        let (req, mut stream) = match h3_conn.accept().await {
+            Ok(Some(resolver)) => resolver
+                .resolve_request()
+                .await
+                .map_err(|e| Error::Io(format!("masque resolve_request: {e}")))?,
+            Ok(None) => return Err(Error::PeerClosed),
+            Err(e) => return Err(Error::Io(format!("masque h3 accept: {e}"))),
+        };
+        if req.method() != http::Method::CONNECT {
+            return Err(Error::Io(
+                "masque: tunnel request was not CONNECT".to_string(),
+            ));
+        }
+        let resp = http::Response::builder()
+            .status(http::StatusCode::OK)
+            .body(())
+            .map_err(|e| Error::Io(format!("masque build 200: {e}")))?;
+        stream
+            .send_response(resp)
+            .await
+            .map_err(|e| Error::Io(format!("masque send_response: {e}")))?;
+
+        // Hold the CONNECT-UDP request stream open + drive the h3 control
+        // channel for the connection's lifetime; aborted on close/drop.
+        let driver_handle = tokio::spawn(async move {
+            let _stream = stream;
+            while let Ok(Some(_)) = h3_conn.accept().await {}
+        });
+
+        Ok(Box::new(MasqueServerConnection {
+            quinn_conn: datagram_conn,
+            driver_handle: Some(driver_handle),
+            closed: false,
+        }))
+    }
+}
+
+/// Server-side datagram [`Connection`] over an accepted MASQUE tunnel — the
+/// mirror of the client `MasqueConnection`. `send`/`recv` ride raw
+/// `quinn::Connection` datagrams under the same `encode_udp_payload` /
+/// `decode_udp_payload` codec; the h3 control channel is parked in
+/// `driver_handle`.
+struct MasqueServerConnection {
+    quinn_conn: quinn::Connection,
+    driver_handle: Option<tokio::task::JoinHandle<()>>,
+    closed: bool,
+}
+
+#[async_trait]
+impl Connection for MasqueServerConnection {
+    async fn send(&mut self, frame: Bytes) -> Result<()> {
+        let wire = encode_udp_payload(&frame)
+            .map_err(|e| Error::Io(format!("masque encode_udp_payload: {e}")))?;
+        self.quinn_conn
+            .send_datagram(wire.into())
+            .map_err(|e| Error::Io(format!("masque send_datagram: {e}")))
+    }
+
+    async fn recv(&mut self) -> Result<Bytes> {
+        let wire = self
+            .quinn_conn
+            .read_datagram()
+            .await
+            .map_err(|e| Error::Io(format!("masque read_datagram: {e}")))?;
+        let udp = decode_udp_payload(&wire)
+            .map_err(|e| Error::Io(format!("masque decode_udp_payload: {e}")))?;
+        Ok(Bytes::copy_from_slice(udp))
+    }
+
+    async fn close(&mut self) -> Result<()> {
+        if self.closed {
+            return Ok(());
+        }
+        self.quinn_conn.close(0u32.into(), b"");
+        if let Some(h) = self.driver_handle.take() {
+            h.abort();
+        }
+        self.closed = true;
+        Ok(())
+    }
+}
+
+impl Drop for MasqueServerConnection {
+    fn drop(&mut self) {
         if let Some(h) = self.driver_handle.take() {
             h.abort();
         }
