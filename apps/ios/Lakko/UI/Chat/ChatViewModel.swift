@@ -166,6 +166,60 @@ public final class ChatViewModel: ObservableObject {
                 self?.handleIncomingCallSignaling(payloadBytes: payloadBytes)
             }
         }
+        // ADR-0024 — attach the chat-status sink: inbound typing +
+        // read-receipt signals for THIS thread fold into ephemeral
+        // typing state + a monotone read watermark (no bubble). The
+        // poll loop already dispatches on @MainActor.
+        repository.chatStatusSink = { [weak self] hex, status in
+            guard hex == groupIdHex else { return }
+            Task { @MainActor in
+                self?.handleChatStatus(status)
+            }
+        }
+        // ADR-0024 — drive the OUTGOING typing signal off composer
+        // edits (throttled to one `true` per window; a single `false`
+        // on empty / blur / send). The `attachSync` path also observes
+        // `$draft` for the cross-device draft broadcast — independent
+        // sinks, no interference.
+        $draft
+            .receive(on: RunLoop.main)
+            .sink { [weak self] text in
+                self?.onDraftChanged(text)
+            }
+            .store(in: &cancellables)
+        // ADR-0024 — publish a read receipt when the timeline advances
+        // while the screen is open. Gated on `screenVisible` so a
+        // background poll-driven append doesn't mark messages read
+        // before the user has actually looked at the thread.
+        $messages
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                guard let self = self, self.screenVisible else { return }
+                self.maybePublishReadReceipt()
+            }
+            .store(in: &cancellables)
+    }
+
+    /// ADR-0024 — `true` while ``ChatScreen`` is on-screen. The screen
+    /// sets it in `.onAppear` / `.onDisappear`. Read receipts fire only
+    /// while visible (the user is actually reading); blur also clears
+    /// the outgoing typing state.
+    @Published var screenVisible: Bool = false {
+        didSet {
+            if screenVisible {
+                // Newly visible — publish a receipt for whatever's
+                // already loaded.
+                maybePublishReadReceipt()
+            } else {
+                // Left the thread — stop advertising that we're typing.
+                stopTyping()
+            }
+        }
+    }
+
+    deinit {
+        typingExpiryTimer?.invalidate()
+        typingSendThrottle?.cancel()
     }
 
     // MARK: - Phase 3a9 — call surface helpers
@@ -684,6 +738,9 @@ public final class ChatViewModel: ObservableObject {
 
         sending = true
         sendError = nil
+        // ADR-0024 — sending clears the outgoing typing state (publishes
+        // a single `{ typing: false }` if a `true` is outstanding).
+        stopTyping()
         Task {
             do {
                 try await repository.sendMessage(
@@ -794,6 +851,275 @@ public final class ChatViewModel: ObservableObject {
         }
     }
 
+    // MARK: - ADR-0024 — typing indicators + read receipts
+
+    /// Re-sync replay guard + auto-expiry window. A typing signal whose
+    /// DS `created_at` is older than this is ignored on receive (a full
+    /// journal re-download would otherwise resurrect stale typing); and
+    /// a displayed "typing…" auto-clears this long after the last fresh
+    /// `true` from that leaf.
+    private static let typingExpirySecs: TimeInterval = 6
+
+    /// Throttle for the OUTGOING `{ typing: true }` — we publish at
+    /// most one per window while the user is actively editing. A
+    /// 30 s burst is then ~7 tiny journal rows.
+    private static let typingSendThrottleSecs: TimeInterval = 4
+
+    /// Receive-side ephemeral typing state: senderLeaf → the local
+    /// receive time of that leaf's last fresh `typing: true`. A leaf
+    /// is shown "typing…" while its entry is within
+    /// ``typingExpirySecs``; an explicit `false` removes it at once.
+    /// NEVER persisted — pure in-memory session state.
+    private var typingLeaves: [UInt32: Date] = [:]
+
+    /// Receive-side monotone read watermark: senderLeaf → the highest
+    /// messageId that leaf has reported reading. Advance-only (a lower
+    /// value never overwrites a higher one), so a re-sync replay of an
+    /// old receipt is idempotent. Session state, not persisted.
+    @Published private(set) var readWatermarks: [UInt32: Int64] = [:]
+
+    /// The set of leaves currently shown as typing, recomputed from
+    /// ``typingLeaves`` on every change / expiry tick. Drives the
+    /// indicator string. Excludes our own leaf defensively (we never
+    /// publish our own `true` to ourselves, but the poll echo guard is
+    /// belt-and-braces).
+    @Published private(set) var typingLeavesNow: [UInt32] = []
+
+    /// Repeating timer that expires stale typing entries (~1 Hz). Armed
+    /// lazily on the first inbound `true`, invalidated on teardown.
+    private var typingExpiryTimer: Timer?
+
+    /// Outgoing-typing throttle: the pending "send a fresh `true`"
+    /// gate. While set, a keystroke does not re-publish `true`.
+    private var typingSendThrottle: DispatchWorkItem?
+    /// `true` once we've published a `typing: true` that has not yet
+    /// been cleared by a `false` (on blur / send). Guards against
+    /// spamming `false` when we never sent a `true`.
+    private var typingTrueOutstanding: Bool = false
+
+    /// Our own last-published read watermark. We re-publish a receipt
+    /// only when the highest received messageId advances past this.
+    private var lastPublishedReadUpTo: Int64 = -1
+
+    /// Handle an inbound typing / read-receipt status event for this
+    /// thread (dispatched from the repository's `chatStatusSink`).
+    private func handleChatStatus(_ status: ChatStatusEvent) {
+        switch status {
+        case .typing(let senderLeaf, let isTyping, let createdAt):
+            // Drop our own echo defensively (the DS doesn't dedupe).
+            if let own = ownLeafIndex, senderLeaf == own { return }
+            guard isTyping else {
+                // Explicit stop — clear immediately.
+                typingLeaves[senderLeaf] = nil
+                recomputeTypingNow()
+                return
+            }
+            // STALE-IGNORE (re-sync replay guard): drop a `true` whose
+            // DS row is older than the expiry window.
+            if let rowDate = Self.parseDsTimestamp(createdAt),
+               Date().timeIntervalSince(rowDate) > Self.typingExpirySecs {
+                return
+            }
+            typingLeaves[senderLeaf] = Date()
+            armTypingExpiryTimer()
+            recomputeTypingNow()
+        case .readReceipt(let senderLeaf, let upTo):
+            if let own = ownLeafIndex, senderLeaf == own { return }
+            // MONOTONE — advance only.
+            let current = readWatermarks[senderLeaf] ?? -1
+            if upTo > current {
+                readWatermarks[senderLeaf] = upTo
+            }
+        }
+    }
+
+    /// Recompute the live typing-leaf list from ``typingLeaves``,
+    /// dropping any entry past the expiry window, and publish it.
+    private func recomputeTypingNow() {
+        let now = Date()
+        var live: [UInt32] = []
+        for (leaf, stamp) in typingLeaves {
+            if now.timeIntervalSince(stamp) <= Self.typingExpirySecs {
+                live.append(leaf)
+            } else {
+                typingLeaves[leaf] = nil
+            }
+        }
+        live.sort()
+        if live != typingLeavesNow {
+            typingLeavesNow = live
+        }
+        if typingLeaves.isEmpty {
+            typingExpiryTimer?.invalidate()
+            typingExpiryTimer = nil
+        }
+    }
+
+    /// Arm the ~1 Hz expiry tick if it isn't already running.
+    private func armTypingExpiryTimer() {
+        guard typingExpiryTimer == nil else { return }
+        let timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) {
+            [weak self] _ in
+            Task { @MainActor in self?.recomputeTypingNow() }
+        }
+        typingExpiryTimer = timer
+    }
+
+    /// The indicator string shown just above the input bar, or `nil`
+    /// when nobody is typing. 1×1 → bare "typing…"; one named member →
+    /// "<name> is typing…"; multiple → "Several people are typing…".
+    var typingIndicatorText: String? {
+        let leaves = typingLeavesNow
+        guard !leaves.isEmpty else { return nil }
+        if leaves.count > 1 {
+            return "Several people are typing…"
+        }
+        let leaf = leaves[0]
+        // 1×1 chats (2 members) read as a bare "typing…" — naming the
+        // sole peer adds nothing.
+        if !isGroupChat {
+            return "typing…"
+        }
+        if let name = displayName(forLeaf: leaf) {
+            return "\(name) is typing…"
+        }
+        return "typing…"
+    }
+
+    /// Resolve a leaf index to the human label the roster uses (a
+    /// matched contact's chosen name, else a short key fingerprint).
+    /// `nil` when the leaf isn't in the current roster.
+    private func displayName(forLeaf leaf: UInt32) -> String? {
+        guard let member = members.first(where: { $0.leafIndex == leaf })
+            ?? repository.members(groupIdHex: groupIdHex)?
+                .first(where: { $0.leafIndex == leaf })
+        else { return nil }
+        for c in AcceptedContactsStore.load()
+        where c.request.fromPubkey == member.signaturePublicKey {
+            return c.displayLabel
+        }
+        let fp = member.signaturePublicKey.prefix(4)
+            .map { String(format: "%02x", $0) }
+            .joined()
+        return "Member " + fp
+    }
+
+    // MARK: ADR-0024 — send side
+
+    /// Call on every composer keystroke. Publishes a throttled
+    /// `{ typing: true }` (one per ``typingSendThrottleSecs``) while the
+    /// field is non-empty. An empty field is treated as "stopped" and
+    /// clears the typing state once.
+    func onDraftChanged(_ text: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            // Emptying the field = stopped typing.
+            stopTyping()
+            return
+        }
+        // Throttle: if a window is already pending, this keystroke is
+        // absorbed (no new `true`).
+        if typingSendThrottle != nil { return }
+        publishTyping(true)
+        typingTrueOutstanding = true
+        let work = DispatchWorkItem { [weak self] in
+            self?.typingSendThrottle = nil
+        }
+        typingSendThrottle = work
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + Self.typingSendThrottleSecs,
+            execute: work
+        )
+    }
+
+    /// Clear the outgoing typing state — publishes a single
+    /// `{ typing: false }` if we have an outstanding `true`. Called on
+    /// focus-loss, on send, and when the field empties. No `false` spam:
+    /// a no-op when nothing is outstanding.
+    func stopTyping() {
+        typingSendThrottle?.cancel()
+        typingSendThrottle = nil
+        guard typingTrueOutstanding else { return }
+        typingTrueOutstanding = false
+        publishTyping(false)
+    }
+
+    private func publishTyping(_ isTyping: Bool) {
+        Task { @MainActor in
+            do {
+                try await repository.sendTyping(
+                    groupIdHex: groupIdHex,
+                    isTyping: isTyping
+                )
+            } catch {
+                NSLog("sendTyping failed: %@", error.localizedDescription)
+            }
+        }
+    }
+
+    /// ADR-0024 — publish a read receipt when the chat is open and the
+    /// highest received messageId advances past our own last-published
+    /// watermark (monotone). Call when the screen is visible + the
+    /// timeline changes. The receipt broadcasts read-state to the group
+    /// (a deliberate disclosure per the ADR).
+    func maybePublishReadReceipt() {
+        var highest: Int64 = -1
+        for m in messages where m.messageId > 0 {
+            if m.messageId > highest { highest = m.messageId }
+        }
+        guard highest > lastPublishedReadUpTo else { return }
+        lastPublishedReadUpTo = highest
+        let target = highest
+        Task { @MainActor in
+            do {
+                try await repository.sendReadReceipt(
+                    groupIdHex: groupIdHex,
+                    upTo: target
+                )
+            } catch {
+                NSLog("sendReadReceipt failed: %@", error.localizedDescription)
+            }
+        }
+    }
+
+    /// ADR-0024 — read state of one of OUR own messages, for the
+    /// "Sent" / "Read" check. `.read` when EVERY other roster member's
+    /// watermark is ≥ this message's id; `.sent` otherwise. `nil` for a
+    /// message with no server id yet (pre-ack) or a non-own message —
+    /// the row then renders no check.
+    func readState(of message: ChatMessage) -> OwnMessageReadState? {
+        guard message.direction == .outgoing, message.messageId > 0 else {
+            return nil
+        }
+        // Every OTHER member must have read up to this id. The roster
+        // includes ourselves; exclude our own leaf. An empty "others"
+        // set (a solo group) reads as Sent.
+        let roster = members.isEmpty
+            ? (repository.members(groupIdHex: groupIdHex) ?? [])
+            : members
+        let own = ownLeafIndex
+        let others = roster.filter { $0.leafIndex != own }
+        guard !others.isEmpty else { return .sent }
+        for member in others {
+            let wm = readWatermarks[member.leafIndex] ?? -1
+            if wm < message.messageId { return .sent }
+        }
+        return .read
+    }
+
+    /// Parse a DS ISO-8601 timestamp (with or without fractional
+    /// seconds) into a `Date`. `nil` on an unparseable string — the
+    /// caller then keeps the signal (fail-open on the freshness check
+    /// is safe: the receive-time expiry timer still bounds display).
+    private static func parseDsTimestamp(_ s: String) -> Date? {
+        let withFrac = ISO8601DateFormatter()
+        withFrac.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let d = withFrac.date(from: s) { return d }
+        let plain = ISO8601DateFormatter()
+        plain.formatOptions = [.withInternetDateTime]
+        return plain.date(from: s)
+    }
+
     /// Drive the encrypt + upload flow for one picked item.
     /// Called by the screen layer after a photo / document
     /// picker resolves to raw bytes + MIME + filename.
@@ -881,4 +1207,15 @@ public final class ChatViewModel: ObservableObject {
     /// DS long-poll budget — same value as
     /// ``ContactsViewModel/defaultLongPollSecs``.
     public static let defaultLongPollSecs: Int = 30
+}
+
+/// ADR-0024 — read state of one of our own outgoing messages, for the
+/// composer-side "Sent" / "Read" check.
+public enum OwnMessageReadState: Equatable {
+    /// Delivered to the DS but not yet read by every other member —
+    /// renders a single check.
+    case sent
+    /// Read by every other roster member (their watermark covers this
+    /// message's id) — renders a filled double check.
+    case read
 }

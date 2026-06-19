@@ -62,15 +62,36 @@ public struct ChatScreen: View {
                 CallHostView(session: call, viewModel: viewModel)
             }
             messagesList
+            // ADR-0024 — typing indicator, just above the input bar.
+            // Auto-hides when nobody is typing (the VM nils the text).
+            if let typing = viewModel.typingIndicatorText {
+                HStack(spacing: 6) {
+                    Text(typing)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 4)
+                .transition(.opacity)
+            }
             Divider()
             composer
         }
+        .animation(.easeInOut(duration: 0.15), value: viewModel.typingIndicatorText)
         .onAppear {
             // Phase 2a3e2b — wire the cross-device sync hook
             // on first mount. Idempotent: subsequent calls
             // overwrite the weak reference but the existing
             // Combine subscriptions stay intact.
             viewModel.attachSync(deviceGroupSync)
+            // ADR-0024 — mark the thread visible: arms read-receipt
+            // publishing for the loaded timeline.
+            viewModel.screenVisible = true
+        }
+        .onDisappear {
+            // ADR-0024 — leaving the thread stops advertising typing.
+            viewModel.screenVisible = false
         }
         // SFU group call — present the in-call UI over the chat,
         // driven by the `CallUiState` the `SfuCallUi` adapter updates.
@@ -303,6 +324,10 @@ public struct ChatScreen: View {
                             MessageRow(
                                 message: message,
                                 ownLeaf: viewModel.ownLeaf,
+                                // ADR-0024 — "Sent" / "Read" check on
+                                // our own messages, derived from the
+                                // other members' read watermarks.
+                                readState: viewModel.readState(of: message),
                                 onPreview: openAttachmentPreview,
                                 onEdit: { viewModel.beginEdit(message) },
                                 onDelete: { viewModel.deleteMessage(message) },
@@ -682,6 +707,10 @@ private struct MessageRow: View {
     /// ADR-0023 — the local member's MLS leaf, used to highlight
     /// reaction chips this user contributed.
     let ownLeaf: UInt32?
+    /// ADR-0024 — read state for our OWN outgoing messages
+    /// ("Sent" / "Read"). `nil` for incoming / system rows and
+    /// pre-ack outgoing rows (no check rendered).
+    let readState: OwnMessageReadState?
     /// 1.19c3 — bubble taps on attachment chips call into the
     /// screen's preview / share helpers. `onPreview` opens the
     /// inline image sheet; the `ShareLink` is wired inline.
@@ -723,6 +752,9 @@ private struct MessageRow: View {
                         .foregroundStyle(.white)
                         .clipShape(RoundedRectangle(cornerRadius: 16))
                         .contextMenu { menuItems }
+                    // ADR-0024 — "Sent" / "Read" receipt under our own
+                    // bubble. Hidden on a deleted tombstone.
+                    if !message.deleted { readReceiptCheck }
                 }
             }
         case .incoming:
@@ -867,6 +899,32 @@ private struct MessageRow: View {
                 }
                 .buttonStyle(.plain)
             }
+        }
+    }
+
+    /// ADR-0024 — the "Sent" / "Read" receipt label under an own
+    /// outgoing bubble. `nil` read state renders nothing (incoming,
+    /// system, or pre-ack rows). "Sent" is a single check; "Read" is a
+    /// filled double check, both with a tiny caption.
+    @ViewBuilder
+    private var readReceiptCheck: some View {
+        switch readState {
+        case .none:
+            EmptyView()
+        case .sent:
+            HStack(spacing: 3) {
+                Image(systemName: "checkmark")
+                Text("Sent")
+            }
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+        case .read:
+            HStack(spacing: 3) {
+                Image(systemName: "checkmark.circle.fill")
+                Text("Read")
+            }
+            .font(.caption2)
+            .foregroundStyle(Color.accentColor)
         }
     }
 }

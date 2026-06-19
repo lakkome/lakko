@@ -796,6 +796,52 @@ public final class ChatRepository: ObservableObject {
         persistSnapshotBestEffort()
     }
 
+    /// ADR-0024 — publish an ephemeral typing signal for `groupIdHex`.
+    /// Composes the typing op envelope (`{ typing: <bool> }`) and ships
+    /// it through the existing application send path. Renders no bubble
+    /// + no timeline append; the receivers fold it into ephemeral
+    /// per-leaf typing UI state. The view model owns the throttle (one
+    /// `true` per ~4 s) + the single `false` on blur / send — this
+    /// method is the raw publish seam.
+    public func sendTyping(
+        groupIdHex: String,
+        isTyping: Bool
+    ) async throws {
+        let envelopeBytes: Data
+        do {
+            envelopeBytes = try composeTypingEnvelope(isTyping: isTyping)
+        } catch {
+            throw ChatError.wrapped("typing envelope compose failed", underlying: error)
+        }
+        try await publishApplicationMessage(
+            groupIdHex: groupIdHex,
+            plaintextBytes: envelopeBytes
+        )
+    }
+
+    /// ADR-0024 — publish a read receipt for `groupIdHex`: the highest
+    /// messageId the local member has read in this group. Monotone +
+    /// throttled at the view-model layer (only when the watermark
+    /// advances past our own last-published value). Renders no bubble;
+    /// receivers advance a monotone per-leaf watermark and render the
+    /// author's own messages as "Read" once every other member's
+    /// watermark covers them.
+    public func sendReadReceipt(
+        groupIdHex: String,
+        upTo: Int64
+    ) async throws {
+        let envelopeBytes: Data
+        do {
+            envelopeBytes = try composeReadReceiptEnvelope(upTo: upTo)
+        } catch {
+            throw ChatError.wrapped("read-receipt envelope compose failed", underlying: error)
+        }
+        try await publishApplicationMessage(
+            groupIdHex: groupIdHex,
+            plaintextBytes: envelopeBytes
+        )
+    }
+
     /// 1.20e — push-gw wake fan-out. Best-effort, off the
     /// critical path. Errors logged via NSLog, never re-thrown.
     private static func notifyPushGroupBestEffort(
@@ -842,9 +888,15 @@ public final class ChatRepository: ObservableObject {
             after: record.cursor,
             waitSecs: waitSecs
         )
-        record.applyPollResult(result) { [weak self] payload in
-            self?.callSignalingSink?(groupIdHex, payload)
-        }
+        record.applyPollResult(
+            result,
+            callSignalingSink: { [weak self] payload in
+                self?.callSignalingSink?(groupIdHex, payload)
+            },
+            chatStatusSink: { [weak self] status in
+                self?.chatStatusSink?(groupIdHex, status)
+            }
+        )
         if !result.events.isEmpty {
             persistSnapshotBestEffort()
         }
@@ -857,6 +909,14 @@ public final class ChatRepository: ObservableObject {
     /// surface is attached; the per-record poll just drops
     /// the payload.
     public var callSignalingSink: ((String, Data) -> Void)?
+
+    /// ADR-0024 — closure the chat view model attaches to receive
+    /// inbound typing / read-receipt status events for a group (by
+    /// hex id). These render no bubble + never touch the timeline;
+    /// the view model folds them into ephemeral typing state +
+    /// a monotone per-leaf read watermark. `nil` when no chat
+    /// surface is attached; the per-record poll just drops them.
+    public var chatStatusSink: ((String, ChatStatusEvent) -> Void)?
 
     /// Pull new messages for every active group. Per-group
     /// failures are swallowed so one bad apple doesn't block the
@@ -1179,7 +1239,8 @@ private final class GroupRecord {
 
     func applyPollResult(
         _ result: PollMessagesResult,
-        callSignalingSink: ((Data) -> Void)? = nil
+        callSignalingSink: ((Data) -> Void)? = nil,
+        chatStatusSink: ((ChatStatusEvent) -> Void)? = nil
     ) {
         for event in result.events {
             switch event {
@@ -1194,14 +1255,40 @@ private final class GroupRecord {
                         authorLeaf: senderLeaf
                     )
                 )
-            case .op(_, let op, let target, let text, let emoji, let senderLeaf, _):
-                applyIncomingOp(
-                    op: op,
-                    target: target,
-                    text: text,
-                    emoji: emoji,
-                    senderLeaf: senderLeaf
-                )
+            case .op(_, let op, let target, let text, let emoji, let senderLeaf, let createdAt):
+                // ADR-0024 — typing / read-receipt ops render NO bubble
+                // and never touch the timeline. They surface to the view
+                // model via `chatStatusSink` (ephemeral typing state +
+                // monotone read watermark). The ADR-0023 mutation ops
+                // (edit / delete / reaction) still fold into the target.
+                switch op {
+                case .typing(let isTyping):
+                    if let senderLeaf = senderLeaf {
+                        chatStatusSink?(
+                            .typing(
+                                senderLeaf: senderLeaf,
+                                isTyping: isTyping,
+                                createdAt: createdAt
+                            )
+                        )
+                    }
+                    continue
+                case .readReceipt:
+                    if let senderLeaf = senderLeaf {
+                        chatStatusSink?(
+                            .readReceipt(senderLeaf: senderLeaf, upTo: target)
+                        )
+                    }
+                    continue
+                case .edit, .delete, .reaction:
+                    applyIncomingOp(
+                        op: op,
+                        target: target,
+                        text: text,
+                        emoji: emoji,
+                        senderLeaf: senderLeaf
+                    )
+                }
             case .system(let messageId, let systemKind, let createdAt):
                 messages.append(
                     ChatMessage(
@@ -1254,6 +1341,12 @@ private final class GroupRecord {
         case .reaction:
             guard let emoji = emoji, !emoji.isEmpty else { return }
             toggleReaction(target: target, reactorLeaf: senderLeaf, emoji: emoji)
+        case .typing, .readReceipt:
+            // ADR-0024 — typing / read-receipt ops are routed out of
+            // the timeline fold in `applyPollResult` (they render no
+            // bubble), so they never reach this path. Handled here only
+            // to keep the switch exhaustive.
+            return
         }
     }
 

@@ -302,6 +302,32 @@ public final class ChatClient {
                     senderLeaf: senderLeaf,
                     createdAt: createdAt
                 )
+            case .typing:
+                // ADR-0024 — an ephemeral typing signal. `target` is
+                // unused; the bool rides `isTyping`. The receive loop
+                // folds it into per-leaf ephemeral UI state (no bubble).
+                return .op(
+                    messageId: messageId,
+                    op: .typing(isTyping: parsed.isTyping ?? false),
+                    target: 0,
+                    text: "",
+                    emoji: nil,
+                    senderLeaf: senderLeaf,
+                    createdAt: createdAt
+                )
+            case .readReceipt:
+                // ADR-0024 — a read receipt. `target` is the read-up-to
+                // watermark (the highest messageId the sender has read).
+                // The receive loop advances a monotone per-leaf watermark.
+                return .op(
+                    messageId: messageId,
+                    op: .readReceipt,
+                    target: parsed.target ?? 0,
+                    text: "",
+                    emoji: nil,
+                    senderLeaf: senderLeaf,
+                    createdAt: createdAt
+                )
             }
         case .commit:
             return .system(
@@ -410,11 +436,36 @@ public enum IncomingChatEvent: Equatable {
     case callSignaling(messageId: Int64, payloadBytes: Data, createdAt: String)
 }
 
-/// ADR-0023 — which mutation an ``IncomingChatEvent/op`` carries.
+/// ADR-0024 — an inbound ephemeral chat-status signal lifted out of
+/// the poll fold. Typing + read-receipt ops render no bubble and never
+/// touch the message timeline; they surface through the repository's
+/// `chatStatusSink` so the view model can fold them into ephemeral
+/// per-leaf typing state + a monotone per-leaf read watermark.
+public enum ChatStatusEvent: Equatable {
+    /// The member at `senderLeaf` is (or stopped) typing. `createdAt`
+    /// is the DS row's ISO-8601 timestamp — the view model drops a
+    /// signal older than the expiry window (re-sync replay guard).
+    case typing(senderLeaf: UInt32, isTyping: Bool, createdAt: String)
+    /// The member at `senderLeaf` has read up to `upTo` (inclusive).
+    /// The view model advances a monotone watermark (a lower value
+    /// never overwrites a higher one — re-sync replay is idempotent).
+    case readReceipt(senderLeaf: UInt32, upTo: Int64)
+}
+
+/// ADR-0023 / ADR-0024 — which mutation or status signal an
+/// ``IncomingChatEvent/op`` carries.
 public enum OpKind: Equatable {
     case edit
     case delete
     case reaction
+    /// ADR-0024 — an ephemeral typing signal. `true` ⇒ the sender is
+    /// typing now; `false` ⇒ they stopped (blur / sent). Never renders
+    /// a bubble — folds into per-leaf ephemeral UI state.
+    case typing(isTyping: Bool)
+    /// ADR-0024 — a read receipt. The op's `target` is the read-up-to
+    /// watermark (the highest messageId the sender has read). Advances a
+    /// monotone per-leaf watermark; never renders a bubble.
+    case readReceipt
 }
 
 /// Kind discriminator for ``IncomingChatEvent/system(messageId:systemKind:createdAt:)``.
