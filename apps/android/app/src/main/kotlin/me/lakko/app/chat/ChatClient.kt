@@ -313,6 +313,27 @@ private fun toEvent(
                         senderLeaf = senderLeaf,
                         createdAt = createdAt,
                     )
+                    // ADR-0024 — an ephemeral typing signal. Never a
+                    // bubble; the repository folds it into the per-leaf
+                    // typing state (with a stale-`createdAt` re-sync
+                    // guard + auto-expiry). `senderLeaf` attributes it
+                    // (an unattributable signal is dropped on apply).
+                    MessageBodyKind.TYPING -> IncomingChatEvent.Typing(
+                        messageId = messageId,
+                        isTyping = body.isTyping ?: false,
+                        senderLeaf = senderLeaf,
+                        createdAt = createdAt,
+                    )
+                    // ADR-0024 — a read receipt: the sender has read up
+                    // to `target` (the read-up-to messageId watermark).
+                    // The repository folds it into the monotone
+                    // per-leaf `readUpTo` map.
+                    MessageBodyKind.READ_RECEIPT -> IncomingChatEvent.ReadReceipt(
+                        messageId = messageId,
+                        upTo = body.target ?: 0L,
+                        senderLeaf = senderLeaf,
+                        createdAt = createdAt,
+                    )
                 }
             }
         }
@@ -400,6 +421,43 @@ public sealed interface IncomingChatEvent {
          *  (edit / delete) checks it against the target's stored
          *  author leaf; a reaction attributes its toggle to it.
          *  `null` ⇒ the op is dropped (fail-closed). */
+        val senderLeaf: UInt?,
+        val createdAt: String,
+    ) : IncomingChatEvent
+
+    /** ADR-0024 — an ephemeral typing signal carried in the same
+     *  JSON envelope. Never rendered as a bubble: the repository
+     *  folds it into the per-`(group, senderLeaf)` "is typing"
+     *  state with a stale-`createdAt` re-sync guard + auto-expiry.
+     *  Consumes a DS [messageId] like every other op so the
+     *  incremental poll applies it exactly once. */
+    public data class Typing(
+        /** This signal's own DS-assigned id. */
+        val messageId: Long,
+        /** `true` ⇒ the sender is typing now; `false` ⇒ an explicit
+         *  stop (blur / on-send). */
+        val isTyping: Boolean,
+        /** The signal sender's MLS leaf index. `null` ⇒ dropped
+         *  (no attribution possible). */
+        val senderLeaf: UInt?,
+        /** DS row timestamp — the receiver ignores any typing
+         *  signal older than the expiry window (re-sync replay
+         *  guard). */
+        val createdAt: String,
+    ) : IncomingChatEvent
+
+    /** ADR-0024 — a read receipt: the sender has read up to [upTo]
+     *  (the highest read messageId) in this group. The repository
+     *  folds it into a monotone per-`(group, senderLeaf)` watermark
+     *  (a lower value never overwrites a higher one, so re-sync
+     *  replay is idempotent). The message author renders read-state
+     *  on its OWN messages from the other members' watermarks. */
+    public data class ReadReceipt(
+        /** This receipt's own DS-assigned id. */
+        val messageId: Long,
+        /** The read-up-to messageId watermark the sender asserts. */
+        val upTo: Long,
+        /** The receipt sender's MLS leaf index. `null` ⇒ dropped. */
         val senderLeaf: UInt?,
         val createdAt: String,
     ) : IncomingChatEvent

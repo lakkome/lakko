@@ -898,6 +898,69 @@ public class ChatRepository(
         }
     }
 
+    /**
+     * ADR-0024 — publish an ephemeral TYPING signal to the group.
+     * Composes a `{ typing: <isTyping> }` envelope + sends it on
+     * the application channel (own-marked; the DS never echoes our
+     * own application messages back, so there is no local
+     * apply — typing is a sender→peers broadcast only). Throttling
+     * (a `true` at most once per ~4 s) + the `false`-once-on-blur
+     * discipline live in the ViewModel; this is the raw seam.
+     *
+     * Best-effort: a failure is logged + swallowed (a dropped
+     * typing tick is invisible — the receiver auto-expires the
+     * indicator anyway). It NEVER throws past the caller, so a
+     * typing publish can never block the chat.
+     */
+    public suspend fun sendTyping(groupIdHex: String, isTyping: Boolean) {
+        val identity = canonicalIdentity.get() ?: return
+        val record = groups[groupIdHex] ?: return
+        try {
+            val envelopeBytes = uniffi.lakko_ffi_uniffi.composeTypingEnvelope(
+                isTyping = isTyping,
+            )
+            groupsLock.withLock {
+                chatClient.sendMessage(
+                    identity = identity,
+                    group = record.group,
+                    plaintext = envelopeBytes,
+                )
+            }
+        } catch (cause: Throwable) {
+            android.util.Log.w("ChatRepository", "sendTyping failed", cause)
+        }
+    }
+
+    /**
+     * ADR-0024 — publish a READ-RECEIPT watermark to the group:
+     * "I have read up to [upTo]" (a DS messageId). Composes a
+     * `{ read_up_to: <upTo> }` envelope + sends it on the
+     * application channel (own-marked). Monotone + throttle live
+     * in the ViewModel (publish only when the watermark advances
+     * past our own last-published value); this is the raw seam.
+     *
+     * Best-effort: a failure is logged + swallowed (the next
+     * advance re-publishes). Never throws past the caller.
+     */
+    public suspend fun sendReadReceipt(groupIdHex: String, upTo: Long) {
+        val identity = canonicalIdentity.get() ?: return
+        val record = groups[groupIdHex] ?: return
+        try {
+            val envelopeBytes = uniffi.lakko_ffi_uniffi.composeReadReceiptEnvelope(
+                upTo = upTo,
+            )
+            groupsLock.withLock {
+                chatClient.sendMessage(
+                    identity = identity,
+                    group = record.group,
+                    plaintext = envelopeBytes,
+                )
+            }
+        } catch (cause: Throwable) {
+            android.util.Log.w("ChatRepository", "sendReadReceipt failed", cause)
+        }
+    }
+
     /** 1.20e — fire `PushClient.notifyGroup` on the side scope.
      *  Logged-and-swallowed; never re-thrown past sendMessage. */
     private suspend fun notifyPushGroupBestEffort(
@@ -1160,6 +1223,15 @@ public data class ChatThread(
     val messages: List<ChatMessage>,
     /** Cursor for the next [ChatClient.pollMessages] call. */
     val cursor: Long,
+    /** ADR-0024 — the MLS leaf indices currently shown as "is
+     *  typing", already filtered against the expiry window. The
+     *  UI resolves each leaf to a member label (1×1 → bare
+     *  "typing…"). Empty when nobody is typing. */
+    val typingLeaves: Set<UInt> = emptySet(),
+    /** ADR-0024 — the monotone per-leaf read watermark. The author
+     *  renders "Read" on its OWN message once every OTHER member's
+     *  watermark `>=` that message's id. */
+    val readUpToByLeaf: Map<UInt, Long> = emptyMap(),
 )
 
 /** One message in a [ChatThread].
@@ -1229,6 +1301,23 @@ private class GroupRecord(
 ) {
     private val messages: MutableList<ChatMessage> =
         Collections.synchronizedList(mutableListOf())
+
+    /** ADR-0024 — ephemeral per-leaf typing state: the local
+     *  monotonic-clock time (`SystemClock.elapsedRealtime` millis)
+     *  at which we last observed a FRESH `typing:true` from that
+     *  leaf. A leaf auto-expires [TYPING_EXPIRY_MS] after this
+     *  stamp; an explicit `typing:false` removes the entry
+     *  immediately. NEVER persisted (rebuilt purely from live
+     *  signals). */
+    private val typingByLeaf: MutableMap<UInt, Long> =
+        Collections.synchronizedMap(mutableMapOf())
+
+    /** ADR-0024 — monotone per-leaf read watermark: the highest
+     *  read-up-to messageId each member has asserted. A lower
+     *  value never overwrites a higher one (re-sync replay is
+     *  idempotent). Session state — not persisted. */
+    private val readUpToByLeaf: MutableMap<UInt, Long> =
+        Collections.synchronizedMap(mutableMapOf())
 
     @Volatile
     var cursor: Long = 0
@@ -1302,6 +1391,15 @@ private class GroupRecord(
                     text = event.text,
                     emoji = event.emoji,
                     senderLeaf = event.senderLeaf,
+                )
+                is IncomingChatEvent.Typing -> applyTyping(
+                    senderLeaf = event.senderLeaf,
+                    isTyping = event.isTyping,
+                    createdAt = event.createdAt,
+                )
+                is IncomingChatEvent.ReadReceipt -> applyReadReceipt(
+                    senderLeaf = event.senderLeaf,
+                    upTo = event.upTo,
                 )
                 is IncomingChatEvent.System -> messages.add(
                     ChatMessage(
@@ -1392,10 +1490,76 @@ private class GroupRecord(
         }
     }
 
+    /**
+     * ADR-0024 — fold an incoming TYPING signal into the
+     * ephemeral per-leaf state.
+     *
+     *   * `senderLeaf == null` ⇒ dropped (no attribution).
+     *   * STALE-IGNORE: a `true` whose DS [createdAt] is older
+     *     than [TYPING_EXPIRY_MS] is dropped — on a full journal
+     *     re-download a client would otherwise replay old
+     *     `typing:true` rows and resurrect a stale indicator.
+     *   * `true` (fresh) ⇒ stamp the leaf with the current
+     *     monotonic time so it auto-expires [TYPING_EXPIRY_MS]
+     *     later.
+     *   * `false` ⇒ clear the leaf immediately (explicit stop).
+     *
+     * The UI reads [activeTypingLeaves] which re-filters against
+     * the expiry window on every read, so an entry that is never
+     * refreshed simply ages out without a timer here.
+     */
+    fun applyTyping(senderLeaf: UInt?, isTyping: Boolean, createdAt: String) {
+        val leaf = senderLeaf ?: return
+        if (!isTyping) {
+            typingByLeaf.remove(leaf)
+            return
+        }
+        // Stale-`createdAt` re-sync guard: ignore a typing:true
+        // whose DS row is already older than the expiry window.
+        val ageMs = typingSignalAgeMs(createdAt)
+        if (ageMs != null && ageMs > TYPING_EXPIRY_MS) return
+        typingByLeaf[leaf] = android.os.SystemClock.elapsedRealtime()
+    }
+
+    /**
+     * ADR-0024 — fold an incoming READ-RECEIPT into the monotone
+     * per-leaf watermark. A `null` leaf is dropped (no
+     * attribution); a value `<=` the current watermark is ignored
+     * (monotone — re-sync replay is idempotent).
+     */
+    fun applyReadReceipt(senderLeaf: UInt?, upTo: Long) {
+        val leaf = senderLeaf ?: return
+        val current = readUpToByLeaf[leaf] ?: -1L
+        if (upTo > current) readUpToByLeaf[leaf] = upTo
+    }
+
+    /**
+     * ADR-0024 — the set of leaves currently shown as "typing",
+     * re-filtered against the expiry window at read time. A leaf
+     * whose last fresh `typing:true` is older than
+     * [TYPING_EXPIRY_MS] is auto-expired (and pruned from the
+     * backing map as a side effect).
+     */
+    fun activeTypingLeaves(): Set<UInt> {
+        val now = android.os.SystemClock.elapsedRealtime()
+        synchronized(typingByLeaf) {
+            val expired = typingByLeaf.filterValues { now - it > TYPING_EXPIRY_MS }.keys
+            for (leaf in expired) typingByLeaf.remove(leaf)
+            return typingByLeaf.keys.toSet()
+        }
+    }
+
+    /** ADR-0024 — read-only snapshot of the monotone per-leaf read
+     *  watermark for the author-side read-state render. */
+    fun readUpToSnapshot(): Map<UInt, Long> =
+        synchronized(readUpToByLeaf) { readUpToByLeaf.toMap() }
+
     fun toThread(): ChatThread = ChatThread(
         groupIdHex = DsClient.pseudonymHex(groupId),
         messages = messages.toList(),
         cursor = cursor,
+        typingLeaves = activeTypingLeaves(),
+        readUpToByLeaf = readUpToSnapshot(),
     )
 
     /** Read-only snapshot for the persistence layer. */
@@ -1417,5 +1581,47 @@ private class GroupRecord(
         SystemKind.Commit -> "[mls commit]"
         SystemKind.Proposal -> "[mls proposal]"
         SystemKind.ExternalJoinProposal -> "[mls external join]"
+    }
+
+    private companion object {
+        /** ADR-0024 — a typing indicator auto-expires this long
+         *  after the last fresh `typing:true`; the same window is
+         *  the stale-`createdAt` re-sync replay guard. ~6 s per
+         *  the ADR (the sender re-emits every ~4 s while typing,
+         *  so a live typist always refreshes inside this). */
+        const val TYPING_EXPIRY_MS: Long = 6_000L
+
+        /**
+         * ADR-0024 — age (in millis) of a typing signal whose DS
+         * row carries the ISO-8601 [createdAt], measured against
+         * the local wall clock. `null` when the timestamp can't be
+         * parsed — the caller then treats the signal as fresh
+         * (never drops a live signal over a parse quirk; the
+         * expiry window still bounds it). A negative age (DS clock
+         * ahead of ours) is clamped to 0 so it counts as fresh.
+         */
+        fun typingSignalAgeMs(createdAt: String): Long? {
+            val rowMs = parseIsoMillis(createdAt) ?: return null
+            val age = System.currentTimeMillis() - rowMs
+            return if (age < 0L) 0L else age
+        }
+
+        /** Parse a DS ISO-8601 / RFC-3339 timestamp to epoch
+         *  millis. Tries an `Instant` (`...Z`) first, then an
+         *  `OffsetDateTime` (explicit offset); `null` on any
+         *  failure. */
+        fun parseIsoMillis(value: String): Long? {
+            return try {
+                java.time.Instant.parse(value).toEpochMilli()
+            } catch (_: java.time.format.DateTimeParseException) {
+                try {
+                    java.time.OffsetDateTime.parse(value)
+                        .toInstant()
+                        .toEpochMilli()
+                } catch (_: java.time.format.DateTimeParseException) {
+                    null
+                }
+            }
+        }
     }
 }

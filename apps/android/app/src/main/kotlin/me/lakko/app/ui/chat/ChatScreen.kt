@@ -58,6 +58,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
@@ -127,6 +128,13 @@ public fun ChatScreen(
     // per composition; the UI marks which reaction chips we
     // contributed (and can toggle off).
     val ownLeaf = remember(state.groupIdHex) { viewModel.ownChatLeafIndex() }
+    // ADR-0024 — the live roster's other leaves, re-sampled when
+    // the membership / read-watermark map shifts. The Bubble's
+    // "Read" tick needs every other member's watermark `>=` the
+    // message's id.
+    val otherLeaves = remember(state.groupIdHex, state.readUpToByLeaf) {
+        viewModel.otherChatLeaves()
+    }
 
     // 1.19c4 — system-picker launchers. `ACTION_OPEN_DOCUMENT`
     // surfaces both files and photos through the same code path
@@ -354,6 +362,10 @@ public fun ChatScreen(
                         MessageRow(
                             msg = msg,
                             ownLeaf = ownLeaf,
+                            // ADR-0024 — read-state inputs (own
+                            // bubbles render "Sent" / "Read").
+                            otherLeaves = otherLeaves,
+                            readUpToByLeaf = state.readUpToByLeaf,
                             onPreview = { ref ->
                                 scope.launch {
                                     val bytes = withContext(Dispatchers.IO) {
@@ -391,6 +403,11 @@ public fun ChatScreen(
             }
         }
 
+        // ADR-0024 — typing indicator just above the input bar.
+        // Auto-hides when `typingText` is null (nobody typing /
+        // auto-expired).
+        TypingIndicator(text = state.typingText)
+
         Composer(
             draft = state.draft,
             sending = state.sending,
@@ -400,6 +417,7 @@ public fun ChatScreen(
             uploadStage = state.uploadStage,
             onDraftChange = viewModel::onDraftChange,
             onSendClicked = viewModel::onSendClicked,
+            onFocusChanged = viewModel::onComposerFocusChanged,
             onAttachClicked = {
                 // ACTION_OPEN_DOCUMENT — pick any MIME. The
                 // contract returns `Uri` per pick. Wildcard
@@ -588,6 +606,9 @@ private fun CallOverlay(
 private fun MessageRow(
     msg: ChatMessage,
     ownLeaf: UInt?,
+    /** ADR-0024 — live roster minus self; read-state inputs. */
+    otherLeaves: Set<UInt>,
+    readUpToByLeaf: Map<UInt, Long>,
     onPreview: (AttachmentRef) -> Unit,
     onSave: (AttachmentRef) -> Unit,
     onEdit: () -> Unit,
@@ -603,6 +624,13 @@ private fun MessageRow(
                 msg = msg,
                 ownLeaf = ownLeaf,
                 isOwn = true,
+                // ADR-0024 — own bubble: compute the read tick.
+                readState = ownReadStateFor(
+                    messageId = msg.messageId,
+                    ownLeaf = ownLeaf,
+                    otherLeaves = otherLeaves,
+                    readUpToByLeaf = readUpToByLeaf,
+                ),
                 background = MaterialTheme.colorScheme.primaryContainer,
                 contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
                 onPreview = onPreview,
@@ -621,6 +649,8 @@ private fun MessageRow(
                 msg = msg,
                 ownLeaf = ownLeaf,
                 isOwn = false,
+                // Incoming bubbles never show our read state.
+                readState = OwnReadState.None,
                 background = MaterialTheme.colorScheme.surfaceVariant,
                 contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
                 onPreview = onPreview,
@@ -650,11 +680,34 @@ private fun MessageRow(
 private val REACTION_EMOJIS: List<String> =
     listOf("👍", "❤️", "😂", "😮", "😢", "🙏")
 
+/**
+ * ADR-0024 — the typing-indicator line just above the input bar.
+ * Renders nothing when [text] is `null` (nobody typing / the
+ * indicator auto-expired). The text itself ("<name> is typing…" /
+ * "typing…" / "Several people are typing…") is resolved in the
+ * ViewModel.
+ */
+@Composable
+private fun TypingIndicator(text: String?) {
+    if (text == null) return
+    Text(
+        text = text,
+        style = MaterialTheme.typography.labelMedium,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        fontStyle = androidx.compose.ui.text.font.FontStyle.Italic,
+        modifier = Modifier.padding(horizontal = 16.dp, vertical = 2.dp),
+    )
+}
+
 @Composable
 private fun Bubble(
     msg: ChatMessage,
     ownLeaf: UInt?,
     isOwn: Boolean,
+    /** ADR-0024 — read state for an OWN bubble ([OwnReadState.None]
+     *  for incoming / un-acked rows). Renders a "Sent" / "Read"
+     *  line under the bubble. */
+    readState: OwnReadState,
     background: Color,
     contentColor: Color,
     onPreview: (AttachmentRef) -> Unit,
@@ -794,6 +847,28 @@ private fun Bubble(
                 reactions = msg.reactions,
                 ownLeaf = ownLeaf,
                 onToggle = { emoji -> if (hasId) onReact(emoji) },
+            )
+        }
+
+        // ADR-0024 — read-state line under an OWN bubble: a single
+        // check for "Sent", a filled double check for "Read"
+        // (every other member's watermark has reached this id).
+        if (isOwn && readState != OwnReadState.None) {
+            val (glyph, label) = when (readState) {
+                OwnReadState.Read -> "✓✓" to "Read"
+                OwnReadState.Sent -> "✓" to "Sent"
+                OwnReadState.None -> "" to ""
+            }
+            val tint = if (readState == OwnReadState.Read) {
+                MaterialTheme.colorScheme.primary
+            } else {
+                MaterialTheme.colorScheme.onSurfaceVariant
+            }
+            Text(
+                text = "$glyph $label",
+                style = MaterialTheme.typography.labelSmall,
+                color = tint,
+                modifier = Modifier.padding(end = 4.dp),
             )
         }
     }
@@ -966,6 +1041,9 @@ private fun Composer(
     uploadStage: UploadProgress?,
     onDraftChange: (String) -> Unit,
     onSendClicked: () -> Unit,
+    /** ADR-0024 — fired with the composer's focus state. On
+     *  focus-loss the ViewModel publishes `typing:false` once. */
+    onFocusChanged: (Boolean) -> Unit,
     onAttachClicked: () -> Unit,
     onRemoveAttachment: (Int) -> Unit,
 ) {
@@ -1017,7 +1095,11 @@ private fun Composer(
                 keyboardOptions = KeyboardOptions(
                     capitalization = KeyboardCapitalization.Sentences,
                 ),
-                modifier = Modifier.weight(1f),
+                modifier = Modifier
+                    .weight(1f)
+                    // ADR-0024 — surface focus to the ViewModel so a
+                    // blur clears any outstanding typing signal.
+                    .onFocusChanged { onFocusChanged(it.isFocused) },
             )
             Spacer(Modifier.width(8.dp))
             Button(

@@ -100,6 +100,21 @@ public class ChatViewModel(
                 derived.value = buildState(repo.state.value, composerState)
             }
         }
+        // ADR-0024 — read-receipt SEND. Each time the thread's
+        // highest received messageId advances past our own
+        // last-published watermark, publish a throttled
+        // `read_up_to` so peers learn we have read up to it.
+        // Distinct-on-the-highest-id so a no-op repo emission
+        // (e.g. a typing fold) doesn't re-trigger.
+        viewModelScope.launch {
+            repo.state
+                .distinctUntilChanged { a, b ->
+                    highestMessageIdFor(a) == highestMessageIdFor(b)
+                }
+                .collect { repoState ->
+                    scheduleReadReceipt(highestMessageIdFor(repoState))
+                }
+        }
         // Phase 3a10 — attach a call-signaling sink to the
         // repository. The closure runs on whatever
         // dispatcher the per-record poll loop uses; we hop
@@ -568,6 +583,27 @@ public class ChatViewModel(
     private var readCursorJob: Job? = null
     private val READ_CURSOR_DEBOUNCE_MS: Long = 1500L
 
+    // -------------------------------------------------------------
+    // ADR-0024 — typing indicator + read-receipt SEND state
+    // -------------------------------------------------------------
+
+    /** ADR-0024 — wall-clock time (millis) we last published a
+     *  `typing:true`; the throttle suppresses a fresh `true` until
+     *  [TYPING_SEND_THROTTLE_MS] has elapsed. */
+    private var lastTypingTrueSentMs: Long = 0L
+    /** `true` between the first throttled `typing:true` and the
+     *  matching `typing:false`; lets us send `false` exactly once
+     *  on blur / send (no `false` spam when nothing is in flight). */
+    private var typingActive: Boolean = false
+    private val TYPING_SEND_THROTTLE_MS: Long = 4_000L
+
+    /** ADR-0024 — our own last-PUBLISHED read-receipt watermark.
+     *  We re-publish `read_up_to` only when the highest received
+     *  messageId advances past this (monotone + de-duped). */
+    private var lastPublishedReadReceipt: Long = -1L
+    private var readReceiptJob: Job? = null
+    private val READ_RECEIPT_DEBOUNCE_MS: Long = 1_200L
+
     /**
      * Bind to the process-scoped [DeviceGroupSyncRepository]
      * (Phase 2a3e2b). Called from the Compose ChatScreen on
@@ -676,6 +712,43 @@ public class ChatViewModel(
         }
     }
 
+    /** ADR-0024 — the highest server-assigned messageId in this
+     *  thread (the read-receipt watermark candidate). `-1` when
+     *  there is no acked row yet (a pre-ack outgoing row has
+     *  messageId == 0 and is skipped — the ack path re-triggers). */
+    private fun highestMessageIdFor(repoState: me.lakko.app.chat.ChatRepositoryState): Long {
+        val thread = repoState.threads.firstOrNull { it.groupIdHex == groupIdHex }
+            ?: return -1L
+        var highest = -1L
+        for (m in thread.messages) {
+            if (m.messageId > highest) highest = m.messageId
+        }
+        return highest
+    }
+
+    /**
+     * ADR-0024 — publish a read receipt when [highest] advances
+     * past our own last-published watermark. Monotone (a lower /
+     * equal value is a no-op) + throttled (debounced
+     * [READ_RECEIPT_DEBOUNCE_MS] so a burst of incoming rows
+     * collapses to one publish). Tracks [lastPublishedReadReceipt]
+     * so re-sync / repo re-emissions never re-publish.
+     */
+    private fun scheduleReadReceipt(highest: Long) {
+        if (highest <= 0L) return
+        if (highest <= lastPublishedReadReceipt) return
+        val target = highest
+        readReceiptJob?.cancel()
+        readReceiptJob = viewModelScope.launch {
+            delay(READ_RECEIPT_DEBOUNCE_MS)
+            // Re-check under the post-delay state — a newer publish
+            // may have landed while we waited.
+            if (target <= lastPublishedReadReceipt) return@launch
+            lastPublishedReadReceipt = target
+            repo.sendReadReceipt(groupIdHex = groupIdHex, upTo = target)
+        }
+    }
+
     private fun scheduleDraftBroadcast(text: String, gid: ByteArray) {
         if (text == lastBroadcastDraft) return
         draftBroadcastJob?.cancel()
@@ -709,6 +782,44 @@ public class ChatViewModel(
         return out
     }
 
+    /**
+     * ADR-0024 — render the typing indicator line from the set of
+     * leaves currently typing, or `null` when nobody is.
+     *
+     *   * Our own leaf is never shown ("you typing" is noise).
+     *   * 1×1 (a single other typist) → a bare "typing…" (the
+     *     name is redundant in a two-person chat).
+     *   * Exactly one named other in a group → "<name> is typing…"
+     *     resolved via the same contact / fingerprint resolution
+     *     the roster uses ([memberLabel], stripped of the "(you)"
+     *     suffix it never carries for a non-self leaf).
+     *   * More than one → "Several people are typing…".
+     */
+    private fun typingIndicatorText(typingLeaves: Set<UInt>): String? {
+        if (typingLeaves.isEmpty()) return null
+        val own = ownLeafIndex()
+        val others = typingLeaves.filter { it != own }
+        if (others.isEmpty()) return null
+        // 1×1: the chat has exactly two members, so a single other
+        // typist needs no name.
+        val isOneToOne = (repo.memberCount(groupIdHex) ?: 0) <= 2
+        if (others.size == 1) {
+            if (isOneToOne) return "typing…"
+            val name = labelForLeaf(others.first())
+            return if (name != null) "$name is typing…" else "typing…"
+        }
+        return "Several people are typing…"
+    }
+
+    /** ADR-0024 — resolve a single MLS leaf to its member label
+     *  (contact name or fingerprint), or `null` when the leaf is
+     *  not in the live roster. Reuses [memberLabel]. */
+    private fun labelForLeaf(leaf: UInt): String? {
+        val member = repo.members(groupIdHex)?.firstOrNull { it.leafIndex == leaf }
+            ?: return null
+        return memberLabel(member)
+    }
+
     private fun buildState(
         repoState: me.lakko.app.chat.ChatRepositoryState,
         composer: ComposerState,
@@ -725,6 +836,9 @@ public class ChatViewModel(
             pendingAttachments = composer.pendingAttachments,
             uploading = composer.uploading,
             uploadStage = composer.uploadStage,
+            // ADR-0024 — typing indicator + read-state surface.
+            typingText = typingIndicatorText(thread?.typingLeaves ?: emptySet()),
+            readUpToByLeaf = thread?.readUpToByLeaf ?: emptyMap(),
             // We always render the screen as "exists" — if the
             // repo doesn't carry this thread (no Group handle
             // built yet, post-restart pre-bootstrap), the
@@ -737,6 +851,54 @@ public class ChatViewModel(
 
     public fun onDraftChange(value: String) {
         composer.update { it.copy(draft = value) }
+        // ADR-0024 — a non-empty edit means the user is actively
+        // typing: publish `typing:true` (throttled to at most once
+        // per ~4 s). Clearing the field to empty is treated as a
+        // stop (publish `typing:false` once).
+        if (value.isNotEmpty()) {
+            maybeSendTypingTrue()
+        } else {
+            sendTypingStop()
+        }
+    }
+
+    /**
+     * ADR-0024 — publish a throttled `typing:true`. At most one
+     * `true` per [TYPING_SEND_THROTTLE_MS]; a live typist's
+     * keystrokes inside that window collapse to a single signal.
+     * Marks [typingActive] so the matching `false` fires exactly
+     * once on blur / send.
+     */
+    private fun maybeSendTypingTrue() {
+        val now = System.currentTimeMillis()
+        if (typingActive && now - lastTypingTrueSentMs < TYPING_SEND_THROTTLE_MS) return
+        lastTypingTrueSentMs = now
+        typingActive = true
+        viewModelScope.launch {
+            repo.sendTyping(groupIdHex = groupIdHex, isTyping = true)
+        }
+    }
+
+    /**
+     * ADR-0024 — publish `typing:false` exactly once (best-effort
+     * clear). A no-op when no `typing:true` is outstanding, so a
+     * blur / send / field-clear can never spam `false`.
+     */
+    private fun sendTypingStop() {
+        if (!typingActive) return
+        typingActive = false
+        viewModelScope.launch {
+            repo.sendTyping(groupIdHex = groupIdHex, isTyping = false)
+        }
+    }
+
+    /**
+     * ADR-0024 — the composer's focus changed. On focus-loss we
+     * clear any outstanding typing signal (`typing:false` once).
+     * The screen wires this through `onFocusChanged`.
+     */
+    public fun onComposerFocusChanged(focused: Boolean) {
+        if (!focused) sendTypingStop()
     }
 
     public fun onSendClicked() {
@@ -749,6 +911,10 @@ public class ChatViewModel(
         // still valid (≥1 char text + zero attachments). The
         // only invalid input is the all-empty composer.
         if (trimmed.isEmpty() && stagedAttachments.isEmpty()) return
+
+        // ADR-0024 — sending a message clears any outstanding
+        // typing signal (`typing:false` once).
+        sendTypingStop()
 
         composer.update { it.copy(sending = true, sendError = null) }
         viewModelScope.launch {
@@ -848,6 +1014,19 @@ public class ChatViewModel(
      *  to render which reaction chips we contributed (and can
      *  toggle off). `null` when there is no live handle. */
     public fun ownChatLeafIndex(): UInt? = repo.ownLeafIndex(groupIdHex)
+
+    /** ADR-0024 — the live roster's leaves MINUS our own. The
+     *  Bubble's read-state ("Read" only when EVERY other member
+     *  has read it) is gated on every leaf in this set. Empty when
+     *  there is no live handle / no other member. */
+    public fun otherChatLeaves(): Set<UInt> {
+        val own = repo.ownLeafIndex(groupIdHex)
+        return repo.members(groupIdHex)
+            ?.map { it.leafIndex }
+            ?.filter { it != own }
+            ?.toSet()
+            ?: emptySet()
+    }
 
     /**
      * Drive the encrypt + upload flow for one picked item.
@@ -1019,4 +1198,44 @@ public data class ChatScreenUiState(
      *  handles. The UI still renders the composer (sendMessage
      *  surfaces a clear error if the handle is missing). */
     val threadKnown: Boolean,
+    /** ADR-0024 — the typing-indicator line ("<name> is typing…" /
+     *  "typing…" / "Several people are typing…"), or `null` when
+     *  nobody is typing. Rendered just above the input bar. */
+    val typingText: String? = null,
+    /** ADR-0024 — the monotone per-leaf read watermark. The Bubble
+     *  renders "Read" on an OWN message once EVERY other member's
+     *  watermark `>=` that message's id (else "Sent"). */
+    val readUpToByLeaf: Map<UInt, Long> = emptyMap(),
 )
+
+/** ADR-0024 — read state of an OWN outgoing message, derived from
+ *  the per-leaf read watermarks. [None] for a not-yet-acked row
+ *  (messageId == 0). */
+public enum class OwnReadState { None, Sent, Read }
+
+/**
+ * ADR-0024 — compute the read state of an OWN message.
+ *
+ *   * [OwnReadState.None] when the message has no real DS id yet
+ *     (messageId == 0) — no "Sent"/"Read" tick is shown.
+ *   * [OwnReadState.Read] when EVERY OTHER member's read watermark
+ *     `>=` this message's id (the whole group has read it).
+ *   * [OwnReadState.Sent] otherwise.
+ *
+ * [ownLeaf] (excluded from the all-others check) + [otherLeaves]
+ * (the live roster minus self) are supplied by the screen so the
+ * helper is pure + unit-test-friendly.
+ */
+public fun ownReadStateFor(
+    messageId: Long,
+    ownLeaf: UInt?,
+    otherLeaves: Set<UInt>,
+    readUpToByLeaf: Map<UInt, Long>,
+): OwnReadState {
+    if (messageId == 0L) return OwnReadState.None
+    if (otherLeaves.isEmpty()) return OwnReadState.Sent
+    val allRead = otherLeaves.all { leaf ->
+        (readUpToByLeaf[leaf] ?: -1L) >= messageId
+    }
+    return if (allRead) OwnReadState.Read else OwnReadState.Sent
+}
