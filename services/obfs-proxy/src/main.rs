@@ -13,11 +13,9 @@
 //! slot in beside the REALITY accept loop in a follow-up — the relay is
 //! transport-agnostic (it only needs a `Box<dyn Connection>`).
 
-mod config;
-mod relay;
-
 use axum::routing::get;
 use axum::Router;
+use lakko_svc_obfs_proxy::{config, relay};
 use tokio::net::TcpListener;
 use tracing::{info, warn};
 

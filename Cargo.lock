@@ -2856,6 +2856,7 @@ dependencies = [
  "dotenvy",
  "hex",
  "lakko-transport",
+ "rustls",
  "thiserror 1.0.69",
  "tokio",
  "tracing",

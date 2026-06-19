@@ -42,10 +42,7 @@ const RELAY_CHANNEL_DEPTH: usize = 32;
 /// Returns an error only if the initial TCP connect to `target` fails; once
 /// the relay loop is running, a peer/socket close is a normal `Ok(())`
 /// termination (the caller does not distinguish which side hung up).
-pub(crate) async fn relay(
-    mut tunnel: Box<dyn Connection>,
-    target: SocketAddr,
-) -> anyhow::Result<()> {
+pub async fn relay(mut tunnel: Box<dyn Connection>, target: SocketAddr) -> anyhow::Result<()> {
     let tcp = TcpStream::connect(target).await?;
     let (mut tcp_read, mut tcp_write) = tcp.into_split();
     // Internal-socket → tunnel frames flow through this channel so the single

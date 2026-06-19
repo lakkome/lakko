@@ -42,3 +42,13 @@ axum = { version = "0.8", features = ["http2"] }
 
 # .env loading — debug builds only; production uses systemd EnvironmentFile.
 dotenvy = "0.15"
+
+[dev-dependencies]
+# The loopback e2e drives a real REALITY client + listener + this crate's relay
+# against a fake internal HTTP origin (ADR-0026 Phase 2).
+lakko-transport.workspace = true
+tokio.workspace = true
+bytes = "1"
+base64 = "0.22"
+hex = "0.4"
+rustls = { version = "0.23", default-features = false, features = ["std", "ring"] }

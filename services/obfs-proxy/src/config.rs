@@ -24,7 +24,7 @@ const DEFAULT_CONTROL_BIND: &str = "127.0.0.1:8088";
 const DEFAULT_REALITY_TOLERANCE_SECS: u64 = 30;
 
 /// Parsed proxy configuration.
-pub(crate) struct ProxyConfig {
+pub struct ProxyConfig {
     /// The internal HTTP address every tunnel is relayed to (e.g. nginx on
     /// localhost). Fixed — a tunnel can never reach another host (no open
     /// relay).
@@ -36,7 +36,7 @@ pub(crate) struct ProxyConfig {
 }
 
 /// REALITY-listener-specific config.
-pub(crate) struct RealityProxyConfig {
+pub struct RealityProxyConfig {
     /// Public TCP bind for the REALITY listener.
     pub bind: SocketAddr,
     /// The cover SNI the self-signed server cert is issued for (the apparent
@@ -51,7 +51,7 @@ pub(crate) struct RealityProxyConfig {
 /// Configuration errors — surfaced loudly at boot, never silently defaulted
 /// into an insecure state.
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum ConfigError {
+pub enum ConfigError {
     /// A required variable was missing.
     #[error("missing required env var {0}")]
     Missing(&'static str),
@@ -71,7 +71,7 @@ impl ProxyConfig {
     /// # Errors
     ///
     /// [`ConfigError`] if a required var is missing or a value is malformed.
-    pub(crate) fn from_env() -> Result<Self, ConfigError> {
+    pub fn from_env() -> Result<Self, ConfigError> {
         let internal_target =
             req("LAKKO_OBFS_PROXY_TARGET")?
                 .parse()

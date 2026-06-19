@@ -51,6 +51,7 @@ pub mod rendezvous;
 pub mod selector;
 pub mod shadowsocks;
 pub mod transport;
+pub mod tunnel_http;
 pub mod webtransport_pt;
 
 pub use aead_stream::{
@@ -101,6 +102,10 @@ pub use shadowsocks::{
     ShadowsocksHeaderError, ShadowsocksListener, ShadowsocksTransport,
 };
 pub use transport::{Connection, Listener, Transport, MAX_FRAME_BYTES};
+pub use tunnel_http::{
+    tunneled_request, tunneled_request_via_dialer, TunnelHttpError, TunneledRequest,
+    TunneledResponse, MAX_RESPONSE_BYTES,
+};
 pub use webtransport_pt::{
     ParsedConfig as WebTransportParsedConfig, WebTransportConfig, WebTransportConfigError,
     WebTransportPt,
