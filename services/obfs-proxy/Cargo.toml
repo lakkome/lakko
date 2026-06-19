@@ -1,0 +1,44 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+[package]
+name = "lakko-svc-obfs-proxy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Obfs-terminating proxy — terminates REALITY / Shadowsocks-2022 tunnels and byte-relays to the internal HTTP services (ADR-0026, Phase 1)"
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "lakko-svc-obfs-proxy"
+path = "src/main.rs"
+
+[dependencies]
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+
+# The obfs listeners + the framed `Connection` the relay shuttles.
+lakko-transport.workspace = true
+
+# Frame payload type (matches `Connection::send(Bytes)`).
+bytes = "1"
+
+# Decode the env-supplied secrets (REALITY tag_secret / short_id; SS PSK).
+base64 = "0.22"
+hex = "0.4"
+
+# Minimal health/ready/version control surface, consistent with the other
+# services (the obfs ports themselves are raw, not HTTP).
+axum = { version = "0.8", features = ["http2"] }
+
+# .env loading — debug builds only; production uses systemd EnvironmentFile.
+dotenvy = "0.15"

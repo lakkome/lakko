@@ -2846,6 +2846,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "lakko-svc-obfs-proxy"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "base64 0.22.1",
+ "bytes",
+ "dotenvy",
+ "hex",
+ "lakko-transport",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "lakko-svc-push-gw"
 version = "0.0.0"
 dependencies = [

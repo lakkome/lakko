@@ -38,6 +38,7 @@ members = [
     "services/storage",
     "services/edge",
     "services/discovery",
+    "services/obfs-proxy",
     "services/push-gw",
     "services/sfu",
     "services/transparency",
