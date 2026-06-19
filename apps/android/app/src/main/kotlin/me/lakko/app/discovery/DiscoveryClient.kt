@@ -30,6 +30,8 @@ import me.lakko.app.auth.base64Encode
 import me.lakko.app.auth.base64UrlEncodeNoPad
 import me.lakko.app.auth.base64UrlDecodeNoPad
 import me.lakko.app.auth.solvePow
+import me.lakko.app.transport.AntiCensorshipConfig
+import me.lakko.app.transport.AntiCensorshipEngine
 import uniffi.lakko_ffi_uniffi.OprfBlinder
 import uniffi.lakko_ffi_uniffi.computeJoinerInviteTag
 import uniffi.lakko_ffi_uniffi.signCallInviteRevocation
@@ -82,6 +84,13 @@ public class DiscoveryClient(
      *  [Dispatchers.Default]; override to a `TestDispatcher`
      *  inside `runTest`. */
     private val powDispatcher: CoroutineDispatcher = Dispatchers.Default,
+    /** ADR-0026 Phase 4 — when armed, every HTTP call routes
+     *  through the obfuscated tunnel; disarmed by default, so the
+     *  direct OkHttp path is unchanged. DiscoveryClient is the
+     *  first client to adopt the seam; the rest migrate to the same
+     *  engine in a follow-up. Ignored when an explicit test [engine]
+     *  is supplied. */
+    antiCensorship: AntiCensorshipConfig = AntiCensorshipConfig.DISARMED,
 ) : AutoCloseable {
 
     private val json = Json {
@@ -89,12 +98,14 @@ public class DiscoveryClient(
         explicitNulls = false
     }
 
-    private val client: HttpClient = if (engine != null) {
-        HttpClient(engine) {
+    private val client: HttpClient = when {
+        engine != null -> HttpClient(engine) {
             install(ContentNegotiation) { json(json) }
         }
-    } else {
-        HttpClient(OkHttp) {
+        antiCensorship.armed -> HttpClient(AntiCensorshipEngine(OkHttp.create {}, antiCensorship)) {
+            install(ContentNegotiation) { json(json) }
+        }
+        else -> HttpClient(OkHttp) {
             install(ContentNegotiation) { json(json) }
         }
     }

@@ -56,6 +56,12 @@ public final class DiscoveryClient {
     private let encoder: JSONEncoder
     private let decoder: JSONDecoder
 
+    /// ADR-0026 Phase 4 — when armed, every HTTP call routes through the
+    /// obfuscated tunnel; disarmed by default, so the direct path is unchanged.
+    /// DiscoveryClient is the first client to adopt the `perform` seam; the rest
+    /// migrate to it in a follow-up.
+    private let antiCensorship: AntiCensorshipConfig
+
     /// Phase 1.5b: bearer token threaded into the
     /// `Authorization: Bearer <token>` header on every protected
     /// `lakko-svc-discovery` write (register, identity upload,
@@ -73,11 +79,13 @@ public final class DiscoveryClient {
     public init(
         baseURL: String = DiscoveryClient.defaultBaseURL,
         session: URLSession = .shared,
-        sessionToken: String? = nil
+        sessionToken: String? = nil,
+        antiCensorship: AntiCensorshipConfig = .disarmed
     ) {
         self.baseURL = baseURL
         self.session = session
         self.sessionToken = sessionToken
+        self.antiCensorship = antiCensorship
         self.encoder = JSONEncoder()
         self.decoder = JSONDecoder()
     }
@@ -557,7 +565,8 @@ public final class DiscoveryClient {
         // status codes without taking the error path.
         let raw: (Data, URLResponse)
         do {
-            raw = try await session.data(for: request)
+            raw = try await AntiCensorshipTransport.perform(
+                request, session: session, config: antiCensorship)
         } catch {
             throw DiscoveryClientError.network(
                 endpoint: endpoint,
@@ -669,7 +678,8 @@ public final class DiscoveryClient {
 
         let raw: (Data, URLResponse)
         do {
-            raw = try await session.data(for: request)
+            raw = try await AntiCensorshipTransport.perform(
+                request, session: session, config: antiCensorship)
         } catch {
             throw DiscoveryClientError.network(
                 endpoint: "\(endpoint) (DELETE)",
@@ -711,7 +721,8 @@ public final class DiscoveryClient {
         attachAuthorizationHeader(to: &request)
         let raw: (Data, URLResponse)
         do {
-            raw = try await session.data(for: request)
+            raw = try await AntiCensorshipTransport.perform(
+                request, session: session, config: antiCensorship)
         } catch {
             throw DiscoveryClientError.network(
                 endpoint: "\(endpoint) (DELETE)",
@@ -898,7 +909,8 @@ public final class DiscoveryClient {
 
         let raw: (Data, URLResponse)
         do {
-            raw = try await session.data(for: request)
+            raw = try await AntiCensorshipTransport.perform(
+                request, session: session, config: antiCensorship)
         } catch {
             throw DiscoveryClientError.network(
                 endpoint: endpoint,
@@ -1015,7 +1027,8 @@ public final class DiscoveryClient {
 
         let raw: (Data, URLResponse)
         do {
-            raw = try await session.data(for: request)
+            raw = try await AntiCensorshipTransport.perform(
+                request, session: session, config: antiCensorship)
         } catch {
             throw DiscoveryClientError.network(
                 endpoint: "\(endpoint) (DELETE)",
@@ -1100,7 +1113,8 @@ public final class DiscoveryClient {
 
         let raw: (Data, URLResponse)
         do {
-            raw = try await session.data(for: request)
+            raw = try await AntiCensorshipTransport.perform(
+                request, session: session, config: antiCensorship)
         } catch {
             throw DiscoveryClientError.network(
                 endpoint: "\(endpoint) (POST)",
@@ -1163,7 +1177,8 @@ public final class DiscoveryClient {
         request.httpMethod = "GET"
         let raw: (Data, URLResponse)
         do {
-            raw = try await session.data(for: request)
+            raw = try await AntiCensorshipTransport.perform(
+                request, session: session, config: antiCensorship)
         } catch {
             throw DiscoveryClientError.network(
                 endpoint: "\(endpoint) (GET)",
@@ -1290,7 +1305,8 @@ public final class DiscoveryClient {
     ) async throws -> Res {
         let raw: (Data, URLResponse)
         do {
-            raw = try await session.data(for: request)
+            raw = try await AntiCensorshipTransport.perform(
+                request, session: session, config: antiCensorship)
         } catch {
             throw DiscoveryClientError.network(
                 endpoint: endpoint,
@@ -1336,7 +1352,8 @@ public final class DiscoveryClient {
     ) async throws -> Res? {
         let raw: (Data, URLResponse)
         do {
-            raw = try await session.data(for: request)
+            raw = try await AntiCensorshipTransport.perform(
+                request, session: session, config: antiCensorship)
         } catch {
             throw DiscoveryClientError.network(
                 endpoint: endpoint,
