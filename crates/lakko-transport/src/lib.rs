@@ -48,6 +48,7 @@ pub mod pluggable;
 pub mod quic;
 pub mod reality;
 pub mod rendezvous;
+pub mod selector;
 pub mod shadowsocks;
 pub mod transport;
 pub mod webtransport_pt;
@@ -93,6 +94,7 @@ pub use rendezvous::{
     BootstrapConfig, RendezvousError, RendezvousResult, TransportSpec, ISSUED_AT_CLOCK_SKEW_SECS,
     SCHEMA_VERSION,
 };
+pub use selector::{BootstrapDialer, SelectorError};
 pub use shadowsocks::{
     accept_inbound as shadowsocks_accept_inbound, psk_from_b64 as shadowsocks_psk_from_b64,
     ReplayWindow as ShadowsocksReplayWindow, ShadowsocksConfig, ShadowsocksConnection,
