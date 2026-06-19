@@ -350,6 +350,36 @@ pub struct Envelope {
     /// set `react_to` degrades the message to a plain chat.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub emoji: Option<String>,
+    /// ADR-0024 — if set, this is an ephemeral TYPING signal
+    /// (`true` = started, `false` = stopped). Never persisted by the
+    /// receiver; auto-expires after a few seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub typing: Option<bool>,
+    /// ADR-0024 — if set, this is a READ RECEIPT: the sender has read
+    /// up to (and including) the message whose DS `messageId` equals
+    /// this value. Monotone per sender.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_up_to: Option<i64>,
+}
+
+impl Envelope {
+    /// A blank v1 envelope — all op fields `None`, used as the base
+    /// for the `compose_*` builders via struct-update syntax so a new
+    /// optional field does not have to be spelled out at every site.
+    #[must_use]
+    const fn base() -> Self {
+        Self {
+            v: WIRE_VERSION,
+            text: String::new(),
+            attachments: Vec::new(),
+            edit_of: None,
+            delete_of: None,
+            react_to: None,
+            emoji: None,
+            typing: None,
+            read_up_to: None,
+        }
+    }
 }
 
 /// The receiver-side classification of a decoded [`Envelope`]
@@ -383,6 +413,17 @@ pub enum MessageBody {
         /// The reaction emoji (validated, length-capped).
         emoji: String,
     },
+    /// ADR-0024 — an ephemeral typing signal.
+    Typing {
+        /// `true` = started typing, `false` = stopped.
+        is_typing: bool,
+    },
+    /// ADR-0024 — a read receipt: the sender has read up to this
+    /// DS `messageId` (inclusive), monotone per sender.
+    ReadReceipt {
+        /// The highest `messageId` the sender has read.
+        up_to: i64,
+    },
 }
 
 impl Envelope {
@@ -396,7 +437,9 @@ impl Envelope {
     fn into_body(self) -> MessageBody {
         let op_count = u8::from(self.edit_of.is_some())
             + u8::from(self.delete_of.is_some())
-            + u8::from(self.react_to.is_some());
+            + u8::from(self.react_to.is_some())
+            + u8::from(self.typing.is_some())
+            + u8::from(self.read_up_to.is_some());
         if op_count == 1 {
             if let Some(target) = self.delete_of {
                 return MessageBody::Delete { target };
@@ -406,6 +449,12 @@ impl Envelope {
                     target,
                     text: self.text,
                 };
+            }
+            if let Some(is_typing) = self.typing {
+                return MessageBody::Typing { is_typing };
+            }
+            if let Some(up_to) = self.read_up_to {
+                return MessageBody::ReadReceipt { up_to };
             }
             if let Some(target) = self.react_to {
                 if let Some(emoji) = self.emoji {
@@ -443,13 +492,9 @@ impl Envelope {
 /// (essentially impossible for valid inputs).
 pub fn compose(text: &str, attachments: Vec<AttachmentRef>) -> Result<Vec<u8>, AttachmentError> {
     let envelope = Envelope {
-        v: WIRE_VERSION,
         text: text.to_string(),
         attachments,
-        edit_of: None,
-        delete_of: None,
-        react_to: None,
-        emoji: None,
+        ..Envelope::base()
     };
     serde_json::to_vec(&envelope).map_err(|e| AttachmentError::WireFormat(format!("compose: {e}")))
 }
@@ -465,13 +510,9 @@ pub fn compose(text: &str, attachments: Vec<AttachmentRef>) -> Result<Vec<u8>, A
 /// [`AttachmentError::WireFormat`] if serialisation fails.
 pub fn compose_edit(target: i64, new_text: &str) -> Result<Vec<u8>, AttachmentError> {
     let envelope = Envelope {
-        v: WIRE_VERSION,
         text: new_text.to_string(),
-        attachments: Vec::new(),
         edit_of: Some(target),
-        delete_of: None,
-        react_to: None,
-        emoji: None,
+        ..Envelope::base()
     };
     serde_json::to_vec(&envelope)
         .map_err(|e| AttachmentError::WireFormat(format!("compose_edit: {e}")))
@@ -485,13 +526,8 @@ pub fn compose_edit(target: i64, new_text: &str) -> Result<Vec<u8>, AttachmentEr
 /// [`AttachmentError::WireFormat`] if serialisation fails.
 pub fn compose_delete(target: i64) -> Result<Vec<u8>, AttachmentError> {
     let envelope = Envelope {
-        v: WIRE_VERSION,
-        text: String::new(),
-        attachments: Vec::new(),
-        edit_of: None,
         delete_of: Some(target),
-        react_to: None,
-        emoji: None,
+        ..Envelope::base()
     };
     serde_json::to_vec(&envelope)
         .map_err(|e| AttachmentError::WireFormat(format!("compose_delete: {e}")))
@@ -514,16 +550,44 @@ pub fn compose_reaction(target: i64, emoji: &str) -> Result<Vec<u8>, AttachmentE
         )));
     }
     let envelope = Envelope {
-        v: WIRE_VERSION,
-        text: String::new(),
-        attachments: Vec::new(),
-        edit_of: None,
-        delete_of: None,
         react_to: Some(target),
         emoji: Some(emoji.to_string()),
+        ..Envelope::base()
     };
     serde_json::to_vec(&envelope)
         .map_err(|e| AttachmentError::WireFormat(format!("compose_reaction: {e}")))
+}
+
+/// Encode an ephemeral TYPING signal (ADR-0024): `true` = started,
+/// `false` = stopped. The receiver shows it transiently and never
+/// persists it; the sender throttles + auto-stops it client-side.
+///
+/// # Errors
+///
+/// [`AttachmentError::WireFormat`] if serialisation fails.
+pub fn compose_typing(is_typing: bool) -> Result<Vec<u8>, AttachmentError> {
+    let envelope = Envelope {
+        typing: Some(is_typing),
+        ..Envelope::base()
+    };
+    serde_json::to_vec(&envelope)
+        .map_err(|e| AttachmentError::WireFormat(format!("compose_typing: {e}")))
+}
+
+/// Encode a READ RECEIPT (ADR-0024): the sender has read up to (and
+/// including) the message whose DS `messageId` is `up_to`. The
+/// receiver tracks it as a monotone per-sender watermark.
+///
+/// # Errors
+///
+/// [`AttachmentError::WireFormat`] if serialisation fails.
+pub fn compose_read_receipt(up_to: i64) -> Result<Vec<u8>, AttachmentError> {
+    let envelope = Envelope {
+        read_up_to: Some(up_to),
+        ..Envelope::base()
+    };
+    serde_json::to_vec(&envelope)
+        .map_err(|e| AttachmentError::WireFormat(format!("compose_read_receipt: {e}")))
 }
 
 /// Decode an MLS Application message body. Returns a tuple of the
@@ -654,6 +718,12 @@ pub mod fuzz_api {
             },
             MessageBody::Reaction { target, emoji } => {
                 let _ = (target, emoji.len());
+            },
+            MessageBody::Typing { is_typing } => {
+                let _ = is_typing;
+            },
+            MessageBody::ReadReceipt { up_to } => {
+                let _ = up_to;
             },
         }
         !refs.is_empty()
@@ -882,5 +952,45 @@ mod tests {
             MessageBody::Chat { text, .. } => assert_eq!(text, "[unsupported v99 message]"),
             other => panic!("expected placeholder chat, got {other:?}"),
         }
+    }
+
+    // ---- ADR-0024: typing / read receipts ----
+
+    #[test]
+    fn typing_true_round_trips_through_parse_body() {
+        let bytes = compose_typing(true).unwrap();
+        assert_eq!(parse_body(&bytes), MessageBody::Typing { is_typing: true });
+    }
+
+    #[test]
+    fn typing_false_round_trips_through_parse_body() {
+        // `false` must classify as a Typing op, not degrade — clearing
+        // a typing state is a real signal.
+        let bytes = compose_typing(false).unwrap();
+        assert_eq!(parse_body(&bytes), MessageBody::Typing { is_typing: false });
+    }
+
+    #[test]
+    fn read_receipt_round_trips_through_parse_body() {
+        let bytes = compose_read_receipt(1042).unwrap();
+        assert_eq!(parse_body(&bytes), MessageBody::ReadReceipt { up_to: 1042 });
+    }
+
+    #[test]
+    fn typing_envelope_is_not_a_chat_bubble() {
+        // The legacy `parse` surfaces empty text for a typing envelope
+        // (no user-visible content) — a v1.0 client renders nothing.
+        let bytes = compose_typing(true).unwrap();
+        let (text, refs) = parse(&bytes);
+        assert!(text.is_empty());
+        assert!(refs.is_empty());
+    }
+
+    #[test]
+    fn typing_plus_another_op_degrades_to_chat() {
+        // Ambiguity (typing alongside edit) must not be trusted as
+        // either op — fail-safe to chat.
+        let json = br#"{"v":1,"text":"x","typing":true,"edit_of":1}"#;
+        assert!(matches!(parse_body(json), MessageBody::Chat { .. }));
     }
 }

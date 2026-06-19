@@ -276,6 +276,10 @@ pub enum MessageBodyKind {
     Delete,
     /// Reaction `emoji` to `target`.
     Reaction,
+    /// ADR-0024 — an ephemeral typing signal (`is_typing`).
+    Typing,
+    /// ADR-0024 — a read receipt: read up to `target` (inclusive).
+    ReadReceipt,
 }
 
 /// Output of [`parse_body_envelope`]: the classified message body
@@ -289,10 +293,13 @@ pub struct ParsedBody {
     pub text: String,
     /// Attachment references (chat only; empty otherwise).
     pub attachments: Vec<AttachmentRef>,
-    /// The DS `messageId` the op acts on (`None` for `Chat`).
+    /// The DS `messageId` the op acts on (`None` for `Chat`/`Typing`;
+    /// for `ReadReceipt` it is the read-up-to watermark).
     pub target: Option<i64>,
     /// The reaction emoji (`Some` only for `Reaction`).
     pub emoji: Option<String>,
+    /// ADR-0024 — the typing state (`Some` only for `Typing`).
+    pub is_typing: Option<bool>,
 }
 
 /// Build an EDIT envelope (ADR-0023) replacing the target message's
@@ -327,9 +334,29 @@ pub fn compose_reaction_envelope(target: i64, emoji: String) -> Result<Vec<u8>, 
     inner::compose_reaction(target, &emoji).map_err(Into::into)
 }
 
+/// Build an ephemeral TYPING envelope (ADR-0024).
+///
+/// # Errors
+///
+/// [`FfiError::Attachment`] on serialisation failure.
+#[uniffi::export]
+pub fn compose_typing_envelope(is_typing: bool) -> Result<Vec<u8>, FfiError> {
+    inner::compose_typing(is_typing).map_err(Into::into)
+}
+
+/// Build a READ RECEIPT envelope (ADR-0024): read up to `up_to`.
+///
+/// # Errors
+///
+/// [`FfiError::Attachment`] on serialisation failure.
+#[uniffi::export]
+pub fn compose_read_receipt_envelope(up_to: i64) -> Result<Vec<u8>, FfiError> {
+    inner::compose_read_receipt(up_to).map_err(Into::into)
+}
+
 /// Decode an MLS Application message body into a classified
-/// [`ParsedBody`] (ADR-0023). Never fails — a malformed / ambiguous
-/// op degrades to `Chat`, the same fail-safe posture as
+/// [`ParsedBody`] (ADR-0023/0024). Never fails — a malformed /
+/// ambiguous op degrades to `Chat`, the same fail-safe posture as
 /// [`parse_envelope`].
 #[uniffi::export]
 #[must_use]
@@ -341,6 +368,7 @@ pub fn parse_body_envelope(bytes: Vec<u8>) -> ParsedBody {
             attachments: refs_to_ffi(attachments),
             target: None,
             emoji: None,
+            is_typing: None,
         },
         inner::MessageBody::Edit { target, text } => ParsedBody {
             kind: MessageBodyKind::Edit,
@@ -348,6 +376,7 @@ pub fn parse_body_envelope(bytes: Vec<u8>) -> ParsedBody {
             attachments: Vec::new(),
             target: Some(target),
             emoji: None,
+            is_typing: None,
         },
         inner::MessageBody::Delete { target } => ParsedBody {
             kind: MessageBodyKind::Delete,
@@ -355,6 +384,7 @@ pub fn parse_body_envelope(bytes: Vec<u8>) -> ParsedBody {
             attachments: Vec::new(),
             target: Some(target),
             emoji: None,
+            is_typing: None,
         },
         inner::MessageBody::Reaction { target, emoji } => ParsedBody {
             kind: MessageBodyKind::Reaction,
@@ -362,6 +392,23 @@ pub fn parse_body_envelope(bytes: Vec<u8>) -> ParsedBody {
             attachments: Vec::new(),
             target: Some(target),
             emoji: Some(emoji),
+            is_typing: None,
+        },
+        inner::MessageBody::Typing { is_typing } => ParsedBody {
+            kind: MessageBodyKind::Typing,
+            text: String::new(),
+            attachments: Vec::new(),
+            target: None,
+            emoji: None,
+            is_typing: Some(is_typing),
+        },
+        inner::MessageBody::ReadReceipt { up_to } => ParsedBody {
+            kind: MessageBodyKind::ReadReceipt,
+            text: String::new(),
+            attachments: Vec::new(),
+            target: Some(up_to),
+            emoji: None,
+            is_typing: None,
         },
     }
 }
@@ -555,5 +602,22 @@ mod tests {
         assert_eq!(body.kind, MessageBodyKind::Chat);
         assert_eq!(body.text, "hi");
         assert_eq!(body.target, None);
+    }
+
+    #[test]
+    fn typing_envelope_round_trips_through_parse_body() {
+        let body = parse_body_envelope(compose_typing_envelope(true).unwrap());
+        assert_eq!(body.kind, MessageBodyKind::Typing);
+        assert_eq!(body.is_typing, Some(true));
+        let off = parse_body_envelope(compose_typing_envelope(false).unwrap());
+        assert_eq!(off.kind, MessageBodyKind::Typing);
+        assert_eq!(off.is_typing, Some(false));
+    }
+
+    #[test]
+    fn read_receipt_envelope_round_trips_through_parse_body() {
+        let body = parse_body_envelope(compose_read_receipt_envelope(1042).unwrap());
+        assert_eq!(body.kind, MessageBodyKind::ReadReceipt);
+        assert_eq!(body.target, Some(1042));
     }
 }

@@ -407,14 +407,21 @@ pub struct ParsedBody {
     attachments: Vec<AttachmentRef>,
     target: Option<i64>,
     emoji: Option<String>,
+    is_typing: Option<bool>,
 }
 
 #[wasm_bindgen]
 impl ParsedBody {
-    /// `"chat" | "edit" | "delete" | "reaction"`.
+    /// `"chat" | "edit" | "delete" | "reaction" | "typing" | "read-receipt"`.
     #[wasm_bindgen(getter)]
     pub fn kind(&self) -> String {
         self.kind.to_string()
+    }
+
+    /// The typing state, or `undefined` unless `kind == "typing"` (ADR-0024).
+    #[wasm_bindgen(getter, js_name = isTyping)]
+    pub fn is_typing(&self) -> Option<bool> {
+        self.is_typing
     }
 
     /// Chat / edit text (empty for delete / reaction).
@@ -495,9 +502,29 @@ pub fn compose_reaction_envelope(target: i64, emoji: &str) -> Result<Vec<u8>, Js
     inner::compose_reaction(target, emoji).map_err(attachment_err)
 }
 
+/// Build an ephemeral TYPING envelope (ADR-0024).
+///
+/// # Errors
+///
+/// `Error` on serialisation failure.
+#[wasm_bindgen(js_name = composeTypingEnvelope)]
+pub fn compose_typing_envelope(is_typing: bool) -> Result<Vec<u8>, JsError> {
+    inner::compose_typing(is_typing).map_err(attachment_err)
+}
+
+/// Build a READ RECEIPT envelope (ADR-0024): read up to `up_to`.
+///
+/// # Errors
+///
+/// `Error` on serialisation failure.
+#[wasm_bindgen(js_name = composeReadReceiptEnvelope)]
+pub fn compose_read_receipt_envelope(up_to: i64) -> Result<Vec<u8>, JsError> {
+    inner::compose_read_receipt(up_to).map_err(attachment_err)
+}
+
 /// Decode an MLS Application message body into a classified
-/// [`ParsedBody`] (ADR-0023). Never fails — a malformed / ambiguous
-/// op degrades to `"chat"`.
+/// [`ParsedBody`] (ADR-0023/0024). Never fails — a malformed /
+/// ambiguous op degrades to `"chat"`.
 #[wasm_bindgen(js_name = parseBodyEnvelope)]
 #[must_use]
 pub fn parse_body_envelope(bytes: &[u8]) -> ParsedBody {
@@ -508,6 +535,7 @@ pub fn parse_body_envelope(bytes: &[u8]) -> ParsedBody {
             attachments: refs_to_wasm(attachments),
             target: None,
             emoji: None,
+            is_typing: None,
         },
         inner::MessageBody::Edit { target, text } => ParsedBody {
             kind: "edit",
@@ -515,6 +543,7 @@ pub fn parse_body_envelope(bytes: &[u8]) -> ParsedBody {
             attachments: Vec::new(),
             target: Some(target),
             emoji: None,
+            is_typing: None,
         },
         inner::MessageBody::Delete { target } => ParsedBody {
             kind: "delete",
@@ -522,6 +551,7 @@ pub fn parse_body_envelope(bytes: &[u8]) -> ParsedBody {
             attachments: Vec::new(),
             target: Some(target),
             emoji: None,
+            is_typing: None,
         },
         inner::MessageBody::Reaction { target, emoji } => ParsedBody {
             kind: "reaction",
@@ -529,6 +559,23 @@ pub fn parse_body_envelope(bytes: &[u8]) -> ParsedBody {
             attachments: Vec::new(),
             target: Some(target),
             emoji: Some(emoji),
+            is_typing: None,
+        },
+        inner::MessageBody::Typing { is_typing } => ParsedBody {
+            kind: "typing",
+            text: String::new(),
+            attachments: Vec::new(),
+            target: None,
+            emoji: None,
+            is_typing: Some(is_typing),
+        },
+        inner::MessageBody::ReadReceipt { up_to } => ParsedBody {
+            kind: "read-receipt",
+            text: String::new(),
+            attachments: Vec::new(),
+            target: Some(up_to),
+            emoji: None,
+            is_typing: None,
         },
     }
 }
