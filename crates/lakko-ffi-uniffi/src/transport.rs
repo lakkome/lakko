@@ -20,10 +20,16 @@ use std::time::{Duration, SystemTime};
 
 use lakko_crypto::signing::VerifyingKey;
 use lakko_transport::{
-    tunneled_request_via_dialer, BootstrapConfig, BootstrapDialer, Endpoint, TunneledRequest,
+    tunneled_request_via_dialer, BootstrapConfig, BootstrapDialer, DohFetcher, Endpoint,
+    TunneledRequest,
 };
 
 use crate::FfiError;
+
+/// Upper bound on a fetched bootstrap-config body. The signed config is a small
+/// JSON document (a handful of transport descriptors); the cap stops a hostile
+/// origin from streaming an unbounded body before the signature is ever checked.
+const MAX_BOOTSTRAP_CONFIG_BYTES: usize = 64 * 1024;
 
 /// One HTTP header (name, value).
 #[derive(uniffi::Record, Debug)]
@@ -123,6 +129,64 @@ pub fn tunneled_http_request(
     })
 }
 
+/// Fetch + verify the signed bootstrap config used to arm the obfuscated
+/// tunnel (ADR-0026 component 6).
+///
+/// Resolves `doh_domain` over JSON-DoH, IP-pinned-HTTPS-GETs
+/// `https://{doh_domain}{path}` against the resolved address, then parses the
+/// body as a [`BootstrapConfig`] and verifies its Ed25519 signature + expiry /
+/// clock gates against `trust_anchor` (the build-time-pinned 32-byte verifying
+/// key) at `now_secs`. On success it returns the **verified raw JSON bytes**, so
+/// the caller stashes them and later passes them to [`tunneled_http_request`] as
+/// `config_json` (which re-parses + re-verifies independently).
+///
+/// A censor controlling DNS cannot interpose: the resolved IP is pinned into the
+/// HTTPS client, and acceptance hinges on the Ed25519 signature over the config,
+/// not on the network path.
+///
+/// # Errors
+///
+/// [`FfiError::Transport`] for a bad trust anchor, a DoH / HTTPS failure, an
+/// over-cap body, a malformed config, or a failed signature / expiry check.
+/// There is no silent fallback — a caller that cannot obtain a verified config
+/// must leave anti-censorship unavailable (loud), never armed with an
+/// unverified config (invariant #4).
+#[uniffi::export]
+pub fn fetch_bootstrap_config(
+    doh_domain: String,
+    path: String,
+    trust_anchor: Vec<u8>,
+    now_secs: u64,
+) -> Result<Vec<u8>, FfiError> {
+    let anchor = VerifyingKey::from_bytes(&trust_anchor)
+        .map_err(|e| FfiError::Transport(format!("bad trust anchor: {e}")))?;
+    let now = SystemTime::UNIX_EPOCH + Duration::from_secs(now_secs);
+
+    // A private current-thread runtime drives the DoH + HTTPS fetch to
+    // completion; the native caller invokes this off the main thread.
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| FfiError::Transport(format!("runtime: {e}")))?;
+
+    rt.block_on(async {
+        let fetcher =
+            DohFetcher::new().map_err(|e| FfiError::Transport(format!("doh fetcher: {e}")))?;
+        let bytes = fetcher
+            .fetch_pinned_bytes(&doh_domain, &path, MAX_BOOTSTRAP_CONFIG_BYTES)
+            .await
+            .map_err(|e| FfiError::Transport(format!("bootstrap fetch: {e}")))?;
+        // Parse + verify BEFORE returning the bytes: an unverified config never
+        // leaves this function (fail-closed).
+        let config: BootstrapConfig = serde_json::from_slice(&bytes)
+            .map_err(|e| FfiError::Transport(format!("bad bootstrap config json: {e}")))?;
+        config
+            .verify(&anchor, now)
+            .map_err(|e| FfiError::Transport(format!("bootstrap verify: {e}")))?;
+        Ok(bytes)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -155,6 +219,23 @@ mod tests {
         let err = call(vec![0u8; 32], b"not json".to_vec()).unwrap_err();
         match err {
             FfiError::Transport(msg) => assert!(msg.contains("config")),
+            other => panic!("expected Transport, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fetch_bootstrap_config_rejects_wrong_length_trust_anchor() {
+        // 16 bytes, not 32 — the anchor gate fails before any network leg, so
+        // the fail-closed front door is exercised without a live fetcher.
+        let err = fetch_bootstrap_config(
+            "rendezvous.lakko.invalid".into(),
+            "/bootstrap.json".into(),
+            vec![0u8; 16],
+            0,
+        )
+        .unwrap_err();
+        match err {
+            FfiError::Transport(msg) => assert!(msg.contains("trust anchor")),
             other => panic!("expected Transport, got {other:?}"),
         }
     }
