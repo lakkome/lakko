@@ -96,6 +96,21 @@ targets:
         LakkoTransparencyUrl: ""
         LakkoTransparencyOperatorKey: ""
         LakkoTransparencyWitnessKey: ""
+        # ADR-0026 Phase 4 — anti-censorship bootstrap pin. All default
+        # to EMPTY so the build cannot arm (BootstrapPin returns nil →
+        # AntiCensorshipManager stays disarmed) until a deployment
+        # provisions them per build configuration. There is no insecure
+        # default; arming requires the pinned trust anchor.
+        #   * LakkoBootstrapTrustAnchor — base64 of the 32-byte Ed25519
+        #     verifying key the signed bootstrap config is checked
+        #     against, pinned OUT-OF-BAND at build time.
+        #   * LakkoBootstrapDohDomain — the rendezvous domain resolved
+        #     over JSON-DoH (e.g. rendezvous.lakko.me).
+        #   * LakkoBootstrapConfigPath — the signed-config path on that
+        #     domain (e.g. /bootstrap.json).
+        LakkoBootstrapTrustAnchor: ""
+        LakkoBootstrapDohDomain: ""
+        LakkoBootstrapConfigPath: ""
         # Phase 2a3b3-ui — camera access for the add-device QR
         # scanner + G3-1 video calls. Apple's permission dialog
         # surfaces this string verbatim; keep the wording
