@@ -28,6 +28,7 @@ public struct HomeScreen: View {
     public var onOpenChats: () -> Void
     public var onOpenPasskeys: () -> Void
     public var onOpenDevices: () -> Void
+    public var onOpenAntiCensorship: () -> Void
     public var onLogout: () -> Void
     public var onForgetDevice: () -> Void
 
@@ -37,6 +38,7 @@ public struct HomeScreen: View {
         onOpenChats: @escaping () -> Void = {},
         onOpenPasskeys: @escaping () -> Void = {},
         onOpenDevices: @escaping () -> Void = {},
+        onOpenAntiCensorship: @escaping () -> Void = {},
         onLogout: @escaping () -> Void,
         onForgetDevice: @escaping () -> Void
     ) {
@@ -45,6 +47,7 @@ public struct HomeScreen: View {
         self.onOpenChats = onOpenChats
         self.onOpenPasskeys = onOpenPasskeys
         self.onOpenDevices = onOpenDevices
+        self.onOpenAntiCensorship = onOpenAntiCensorship
         self.onLogout = onLogout
         self.onForgetDevice = onForgetDevice
     }
@@ -98,6 +101,16 @@ public struct HomeScreen: View {
             // destination toggle.
             Button(action: onOpenDevices) {
                 Text("Devices")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.large)
+
+            // ADR-0026 — anti-censorship arming surface. Tapping
+            // pushes `AntiCensorshipSettingsView` via the SessionRoot
+            // destination toggle.
+            Button(action: onOpenAntiCensorship) {
+                Text("Anti-censorship")
                     .frame(maxWidth: .infinity)
             }
             .buttonStyle(.bordered)

@@ -46,6 +46,32 @@ public struct AntiCensorshipConfig: Sendable {
         bootstrapConfigJson: Data(),
         trustAnchor: Data()
     )
+
+    // MARK: - Ambient shared config
+
+    /// `DiscoveryClient` (and the other clients as they adopt the seam) is
+    /// constructed ad-hoc in many places rather than injected from one root, so
+    /// the armed config is published here as an ambient value the inits read by
+    /// default. `AntiCensorshipManager.armFromSettings()` sets it once at boot;
+    /// every subsequent `DiscoveryClient()` then picks it up. Disarmed until
+    /// arming succeeds, so the default behaviour is unchanged.
+    private static let currentLock = NSLock()
+    nonisolated(unsafe) private static var _current = AntiCensorshipConfig.disarmed
+
+    /// The ambient config the platform clients route through. Thread-safe; read
+    /// per-construction so a late arm is visible to clients built afterwards.
+    public static var current: AntiCensorshipConfig {
+        get {
+            currentLock.lock()
+            defer { currentLock.unlock() }
+            return _current
+        }
+        set {
+            currentLock.lock()
+            _current = newValue
+            currentLock.unlock()
+        }
+    }
 }
 
 /// Errors specific to the tunnel routing path.

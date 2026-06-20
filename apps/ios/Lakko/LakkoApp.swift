@@ -106,6 +106,15 @@ struct LakkoApp: App {
                 .onOpenURL { url in
                     inviteIntake.handle(url)
                 }
+                // ADR-0026 Phase 4 — apply the persisted anti-censorship
+                // preference at boot: when on, fetch + verify the signed
+                // bootstrap config and publish the armed ambient config so the
+                // clients route through the obfuscated tunnel. Disarmed when
+                // off, so this is a no-op by default. Runs once on AppRoot
+                // appear; the routine is idempotent.
+                .task {
+                    AntiCensorshipManager.shared.armFromSettings()
+                }
         }
     }
 }
@@ -273,6 +282,7 @@ private struct SessionRoot: View {
                         onOpenChats: { destination = .chats },
                         onOpenPasskeys: { destination = .passkeys },
                         onOpenDevices: { destination = .devices },
+                        onOpenAntiCensorship: { destination = .antiCensorship },
                         onLogout: authRepository.logout,
                         onForgetDevice: authRepository.forgetDevice
                     )
@@ -321,6 +331,13 @@ private struct SessionRoot: View {
                         authRepository: authRepository,
                         onBack: { destination = .home }
                     )
+                case .antiCensorship:
+                    NavigationStack {
+                        AntiCensorshipSettingsView(
+                            manager: AntiCensorshipManager.shared,
+                            onBack: { destination = .home }
+                        )
+                    }
                 }
             }
         }
@@ -354,6 +371,7 @@ private enum SessionDestination: Equatable {
     case chat(groupIdHex: String)
     case passkeys
     case devices
+    case antiCensorship
 }
 
 /// Anonymous-state router — three destinations (Signup / Login /

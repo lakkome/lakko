@@ -80,7 +80,7 @@ public final class DiscoveryClient {
         baseURL: String = DiscoveryClient.defaultBaseURL,
         session: URLSession = .shared,
         sessionToken: String? = nil,
-        antiCensorship: AntiCensorshipConfig = .disarmed
+        antiCensorship: AntiCensorshipConfig = .current
     ) {
         self.baseURL = baseURL
         self.session = session
