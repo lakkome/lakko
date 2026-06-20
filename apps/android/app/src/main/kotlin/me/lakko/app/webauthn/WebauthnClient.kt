@@ -7,6 +7,7 @@ import io.ktor.client.HttpClient
 import io.ktor.client.call.body
 import io.ktor.client.engine.HttpClientEngine
 import io.ktor.client.engine.okhttp.OkHttp
+import me.lakko.app.transport.AntiCensorshipEngine
 import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.client.request.delete
 import io.ktor.client.request.get
@@ -80,7 +81,7 @@ public class WebauthnClient(
     private val client: HttpClient = if (engine != null) {
         HttpClient(engine) { install(ContentNegotiation) { json(json) } }
     } else {
-        HttpClient(OkHttp) { install(ContentNegotiation) { json(json) } }
+        HttpClient(AntiCensorshipEngine(OkHttp.create {})) { install(ContentNegotiation) { json(json) } }
     }
 
     /** Bearer token bound to the four authenticated routes

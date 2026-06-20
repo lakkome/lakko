@@ -7,6 +7,7 @@ import io.ktor.client.HttpClient
 import io.ktor.client.call.body
 import io.ktor.client.engine.HttpClientEngine
 import io.ktor.client.engine.okhttp.OkHttp
+import me.lakko.app.transport.AntiCensorshipEngine
 import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.client.request.get
 import io.ktor.client.request.parameter
@@ -50,7 +51,7 @@ public class ChannelsClient(
     private val client: HttpClient = if (engine != null) {
         HttpClient(engine) { install(ContentNegotiation) { json(jsonCodec) } }
     } else {
-        HttpClient(OkHttp) { install(ContentNegotiation) { json(jsonCodec) } }
+        HttpClient(AntiCensorshipEngine(OkHttp.create {})) { install(ContentNegotiation) { json(jsonCodec) } }
     }
 
     override fun close() {

@@ -30,7 +30,6 @@ import me.lakko.app.auth.base64Encode
 import me.lakko.app.auth.base64UrlEncodeNoPad
 import me.lakko.app.auth.base64UrlDecodeNoPad
 import me.lakko.app.auth.solvePow
-import me.lakko.app.transport.AntiCensorshipConfig
 import me.lakko.app.transport.AntiCensorshipEngine
 import uniffi.lakko_ffi_uniffi.OprfBlinder
 import uniffi.lakko_ffi_uniffi.computeJoinerInviteTag
@@ -84,13 +83,6 @@ public class DiscoveryClient(
      *  [Dispatchers.Default]; override to a `TestDispatcher`
      *  inside `runTest`. */
     private val powDispatcher: CoroutineDispatcher = Dispatchers.Default,
-    /** ADR-0026 Phase 4 — when armed, every HTTP call routes
-     *  through the obfuscated tunnel; disarmed by default, so the
-     *  direct OkHttp path is unchanged. DiscoveryClient is the
-     *  first client to adopt the seam; the rest migrate to the same
-     *  engine in a follow-up. Ignored when an explicit test [engine]
-     *  is supplied. */
-    antiCensorship: AntiCensorshipConfig = AntiCensorshipConfig.current,
 ) : AutoCloseable {
 
     private val json = Json {
@@ -98,14 +90,16 @@ public class DiscoveryClient(
         explicitNulls = false
     }
 
-    private val client: HttpClient = when {
-        engine != null -> HttpClient(engine) {
+    // ADR-0026 Phase 4 — the production engine wraps OkHttp in the
+    // anti-censorship engine, which routes through the obfuscated tunnel when
+    // the ambient config is armed and delegates to OkHttp verbatim otherwise
+    // (so the default path is unchanged). A test [engine] bypasses it.
+    private val client: HttpClient = if (engine != null) {
+        HttpClient(engine) {
             install(ContentNegotiation) { json(json) }
         }
-        antiCensorship.armed -> HttpClient(AntiCensorshipEngine(OkHttp.create {}, antiCensorship)) {
-            install(ContentNegotiation) { json(json) }
-        }
-        else -> HttpClient(OkHttp) {
+    } else {
+        HttpClient(AntiCensorshipEngine(OkHttp.create {})) {
             install(ContentNegotiation) { json(json) }
         }
     }

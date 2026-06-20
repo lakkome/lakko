@@ -75,19 +75,21 @@ public class AntiCensorshipException(message: String) : Exception(message)
 
 /**
  * A Ktor [HttpClientEngine] that routes every request through the obfuscated
- * tunnel when [config] is armed, otherwise delegates verbatim to [delegate]
- * (the production OkHttp engine). This is the single chokepoint every Ktor
- * request passes through, so adopting it leaves every request helper in
- * [me.lakko.app.discovery.DiscoveryClient] untouched — the Android analog of
- * the iOS `AntiCensorshipTransport.perform` seam.
+ * tunnel when the ambient [AntiCensorshipConfig.current] is armed, otherwise
+ * delegates verbatim to [delegate] (the production OkHttp engine). This is the
+ * single chokepoint every Ktor request passes through, so adopting it leaves
+ * every request helper in the platform clients untouched — the Android analog
+ * of the iOS `AntiCensorshipTransport.perform` seam.
  *
- * `DiscoveryClient` is the first client to adopt the seam; the rest migrate to
- * the same engine in a follow-up. The on-the-wire tunnel only does anything
- * against a deployed `services/obfs-proxy` (ADR-0026 Phase 5).
+ * The armed config is read **per-request**, not captured at construction, so a
+ * long-lived client built before boot-time arming completes still routes once
+ * `current` flips to armed. Every REST client wraps OkHttp in this engine; it
+ * delegates verbatim while disarmed, so the default behaviour is unchanged.
+ * The on-the-wire tunnel only does anything against a deployed
+ * `services/obfs-proxy` (ADR-0026 Phase 5).
  */
 public class AntiCensorshipEngine(
     private val delegate: HttpClientEngine,
-    private val tunnelConfig: AntiCensorshipConfig,
 ) : HttpClientEngineBase("lakko-anti-censorship") {
 
     override val config: HttpClientEngineConfig = HttpClientEngineConfig()
@@ -97,6 +99,8 @@ public class AntiCensorshipEngine(
 
     @OptIn(InternalAPI::class)
     override suspend fun execute(data: HttpRequestData): HttpResponseData {
+        // Ambient config, read per-request so arming-after-construction works.
+        val tunnelConfig = AntiCensorshipConfig.current
         if (!tunnelConfig.armed) {
             return delegate.execute(data)
         }

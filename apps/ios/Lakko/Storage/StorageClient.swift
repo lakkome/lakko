@@ -173,7 +173,7 @@ public final class StorageClient {
 
         let raw: (Data, URLResponse)
         do {
-            raw = try await session.data(for: request)
+            raw = try await AntiCensorshipTransport.perform(request, session: session, config: .current)
         } catch {
             throw StorageClientError.network(
                 endpoint: endpoint,
@@ -224,7 +224,7 @@ public final class StorageClient {
 
         let raw: (Data, URLResponse)
         do {
-            raw = try await session.data(for: request)
+            raw = try await AntiCensorshipTransport.perform(request, session: session, config: .current)
         } catch {
             throw StorageClientError.network(
                 endpoint: endpoint,
@@ -302,7 +302,7 @@ public final class StorageClient {
 
         let raw: (Data, URLResponse)
         do {
-            raw = try await session.data(for: request)
+            raw = try await AntiCensorshipTransport.perform(request, session: session, config: .current)
         } catch {
             throw StorageClientError.network(endpoint: endpoint, underlying: error)
         }
@@ -336,7 +336,7 @@ public final class StorageClient {
 
         let raw: (Data, URLResponse)
         do {
-            raw = try await session.data(for: request)
+            raw = try await AntiCensorshipTransport.perform(request, session: session, config: .current)
         } catch {
             throw StorageClientError.network(endpoint: endpoint, underlying: error)
         }
