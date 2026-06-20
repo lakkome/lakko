@@ -25,6 +25,13 @@ serde_json.workspace = true
 
 async-trait = "0.1"
 bytes = "1"
+# WS-over-tunnel client (ADR-0026) — RFC 6455 framing + handshake over a
+# `ByteStreamConnection`. `handshake`-only (no `connect`/TLS): the obfuscated
+# tunnel already authenticates + encrypts the bytes. Same `0.24` already in the
+# tree via `services/sfu`, so no new version is pulled.
+tokio-tungstenite = { version = "0.24", default-features = false, features = [
+    "handshake",
+] }
 
 # Phase 5 G5-5 — Ed25519 verify for the signed
 # rendezvous bootstrap config. Reusing the workspace

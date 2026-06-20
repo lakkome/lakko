@@ -36,6 +36,7 @@
 #![forbid(unsafe_code)]
 
 pub mod aead_stream;
+pub mod byte_stream;
 pub mod doh_fetch;
 pub mod ech;
 pub mod endpoint;
@@ -53,12 +54,14 @@ pub mod shadowsocks;
 pub mod transport;
 pub mod tunnel_http;
 pub mod webtransport_pt;
+pub mod ws_tunnel;
 
 pub use aead_stream::{
     AeadStreamError, AeadStreamReader, AeadStreamWriter, ALG as AEAD_STREAM_ALG,
     KEY_LEN_PUB as AEAD_STREAM_KEY_LEN, LENGTH_PREFIX_LEN, MAX_CHUNK as AEAD_STREAM_MAX_CHUNK,
     NONCE_LEN_PUB as AEAD_STREAM_NONCE_LEN, TAG_LEN_PUB as AEAD_STREAM_TAG_LEN,
 };
+pub use byte_stream::ByteStreamConnection;
 pub use doh_fetch::{DohError, DohFetcher, DOH_ENDPOINTS, PER_LEG_TIMEOUT};
 pub use ech::{
     parse_ech_config_list, EchConfig, EchConfigList, EchError, HpkeSymmetricCipherSuite,
@@ -110,3 +113,4 @@ pub use webtransport_pt::{
     ParsedConfig as WebTransportParsedConfig, WebTransportConfig, WebTransportConfigError,
     WebTransportListener, WebTransportPt,
 };
+pub use ws_tunnel::{tunneled_websocket, TunneledWebSocket, WsTunnelError};

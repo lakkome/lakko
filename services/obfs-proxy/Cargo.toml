@@ -53,3 +53,9 @@ base64 = "0.22"
 hex = "0.4"
 sha2 = "0.10"
 rustls = { version = "0.23", default-features = false, features = ["std", "ring"] }
+# WS-over-tunnel e2e — a real WebSocket echo origin (server `accept_async`) the
+# client reaches through the REALITY tunnel + this crate's relay.
+tokio-tungstenite = { version = "0.24", default-features = false, features = [
+    "handshake",
+] }
+futures = "0.3"

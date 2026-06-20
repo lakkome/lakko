@@ -18,10 +18,10 @@ use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use lakko_svc_obfs_proxy::relay::relay;
 use lakko_transport::{
     build_reality_server_config, make_self_signed_cert, shadowsocks_accept_inbound,
-    tunneled_request, Endpoint, MasqueConfig, MasqueListener, MasqueTransport, RealityConfig,
-    RealityListener, RealityShortId, RealityTagSecret, RealityTransport, ShadowsocksConfig,
-    ShadowsocksReplayWindow, ShadowsocksTransport, Transport, TunneledRequest, WebTransportConfig,
-    WebTransportListener, WebTransportPt,
+    tunneled_request, tunneled_websocket, Endpoint, MasqueConfig, MasqueListener, MasqueTransport,
+    RealityConfig, RealityListener, RealityShortId, RealityTagSecret, RealityTransport,
+    ShadowsocksConfig, ShadowsocksReplayWindow, ShadowsocksTransport, Transport, TunneledRequest,
+    WebTransportConfig, WebTransportListener, WebTransportPt,
 };
 use sha2::{Digest as _, Sha256};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
@@ -50,6 +50,47 @@ async fn spawn_origin() -> SocketAddr {
                 let resp = b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\npong";
                 let _ = sock.write_all(resp).await;
                 let _ = sock.shutdown().await;
+            });
+        }
+    });
+    addr
+}
+
+/// A minimal internal WebSocket echo origin: accept the RFC 6455 handshake and
+/// echo every text/binary frame back. Stands in for the SFU signaling endpoint
+/// behind nginx.
+#[allow(clippy::result_large_err)] // the callback's Err type is fixed by tungstenite's API
+async fn spawn_ws_origin() -> SocketAddr {
+    use futures::{SinkExt as _, StreamExt as _};
+    use tokio_tungstenite::tungstenite::handshake::server::{
+        Request as WsRequest, Response as WsResponse,
+    };
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((sock, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                // Echo the requested subprotocol back (as the real SFU does), so
+                // the client's strict negotiation check passes — proving the
+                // `Sec-WebSocket-Protocol` round-trips through the tunnel.
+                let echo_proto = |req: &WsRequest, mut resp: WsResponse| {
+                    if let Some(proto) = req.headers().get("sec-websocket-protocol") {
+                        resp.headers_mut()
+                            .insert("sec-websocket-protocol", proto.clone());
+                    }
+                    Ok(resp)
+                };
+                let Ok(mut ws) = tokio_tungstenite::accept_hdr_async(sock, echo_proto).await else {
+                    return;
+                };
+                while let Some(Ok(msg)) = ws.next().await {
+                    if msg.is_close() {
+                        break;
+                    }
+                    if (msg.is_text() || msg.is_binary()) && ws.send(msg).await.is_err() {
+                        break;
+                    }
+                }
             });
         }
     });
@@ -119,6 +160,85 @@ async fn reality_tunnel_relays_http_request_to_internal_origin() {
         "origin body surfaces through the tunnel"
     );
 
+    proxy.await.expect("proxy relay task completes");
+}
+
+#[tokio::test]
+async fn reality_tunnel_carries_a_websocket_round_trip() {
+    use futures::{SinkExt as _, StreamExt as _};
+    use tokio_tungstenite::tungstenite::Message;
+
+    install_crypto_provider();
+    let origin = spawn_ws_origin().await;
+
+    let tag_secret = [0x42u8; 32];
+    let short_id = [0xABu8; 8];
+    let cover_sni = "www.microsoft.com";
+
+    // --- proxy side: REALITY listener → relay to the internal WS origin ------
+    let (chain, key) = make_self_signed_cert(cover_sni).expect("cover cert");
+    let tls = build_reality_server_config(chain, key).expect("server config");
+    let tcp = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind listener");
+    let bound = tcp.local_addr().unwrap();
+    let mut listener = RealityListener::new(
+        tcp,
+        Arc::new(tls),
+        vec![(RealityShortId(short_id), RealityTagSecret(tag_secret))],
+        300,
+    );
+    let proxy = tokio::spawn(async move {
+        let (conn, _accepted) = listener.accept().await.expect("accept REALITY tunnel");
+        relay(conn, origin).await.expect("relay to origin");
+    });
+
+    // --- client side: dial the tunnel, open a WebSocket over it --------------
+    let client_cfg = RealityConfig {
+        sni: cover_sni.into(),
+        tag_secret_b64: B64.encode(tag_secret),
+        short_id_hex: hex::encode(short_id),
+        allowed_inner_servers: vec![],
+        remote: format!("{bound}"),
+        require_server_response: true,
+    };
+    let client = RealityTransport::new(client_cfg).expect("client transport");
+    let conn = client
+        .connect(&Endpoint::Direct(bound))
+        .await
+        .expect("client completes the REALITY handshake");
+
+    // The RFC 6455 handshake + frames ride inside the obfuscated tunnel.
+    let mut ws = tunneled_websocket(conn, "ws://lakko.invalid/v1/connect", Some("lakko-sfu-v1"))
+        .await
+        .expect("websocket handshake completes over the tunnel");
+
+    ws.send(Message::text("hello sfu"))
+        .await
+        .expect("send a text frame over the tunnel");
+    let reply = ws
+        .next()
+        .await
+        .expect("a reply frame arrives")
+        .expect("the reply frame is not an error");
+    assert_eq!(
+        reply.into_text().expect("reply is text"),
+        "hello sfu",
+        "the WS echo surfaces verbatim through the tunnel"
+    );
+
+    // Binary frame too, to exercise the other opcode.
+    ws.send(Message::binary(vec![1u8, 2, 3, 4]))
+        .await
+        .expect("send a binary frame");
+    let bin = ws
+        .next()
+        .await
+        .expect("a binary reply arrives")
+        .expect("not an error");
+    assert_eq!(&bin.into_data()[..], &[1u8, 2, 3, 4]);
+
+    ws.close(None).await.ok();
     proxy.await.expect("proxy relay task completes");
 }
 
