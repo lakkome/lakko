@@ -276,7 +276,7 @@ public final class WebauthnClient {
         endpoint: String
     ) async throws -> (Data, URLResponse) {
         do {
-            return try await session.data(for: request)
+            return try await AntiCensorshipTransport.perform(request, session: session, config: .current)
         } catch {
             throw WebauthnClientError.network(endpoint: endpoint, underlying: error)
         }

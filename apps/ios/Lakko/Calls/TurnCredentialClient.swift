@@ -102,7 +102,7 @@ public final class TurnCredentialClient: @unchecked Sendable {
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
 
-        let (data, response) = try await session.data(for: request)
+        let (data, response) = try await AntiCensorshipTransport.perform(request, session: session, config: .current)
         guard let http = response as? HTTPURLResponse else {
             throw TurnCredentialClientError.network(endpoint: endpoint, status: -1)
         }

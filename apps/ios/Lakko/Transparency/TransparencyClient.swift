@@ -190,7 +190,7 @@ public final class TransparencyClient: TransparencyFetching {
 
         let raw: (Data, URLResponse)
         do {
-            raw = try await session.data(for: request)
+            raw = try await AntiCensorshipTransport.perform(request, session: session, config: .current)
         } catch {
             throw TransparencyClientError.network(endpoint: endpoint, underlying: error)
         }

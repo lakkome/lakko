@@ -206,7 +206,7 @@ public final class ChannelsClient {
         request.httpMethod = "POST"
         request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
         request.httpBody = envelope
-        let (data, response) = try await session.data(for: request)
+        let (data, response) = try await AntiCensorshipTransport.perform(request, session: session, config: .current)
         guard let http = response as? HTTPURLResponse else {
             throw ChannelsApiError(
                 status: -1,
@@ -296,7 +296,7 @@ public final class ChannelsClient {
     }
 
     private func execute<R: Decodable>(request: URLRequest) async throws -> R {
-        let (data, response) = try await session.data(for: request)
+        let (data, response) = try await AntiCensorshipTransport.perform(request, session: session, config: .current)
         guard let http = response as? HTTPURLResponse else {
             throw ChannelsApiError(
                 status: -1,

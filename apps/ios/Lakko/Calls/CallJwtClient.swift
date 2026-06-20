@@ -308,7 +308,7 @@ public final class CallJwtClient: @unchecked Sendable {
     ) async throws -> Data {
         let raw: (Data, URLResponse)
         do {
-            raw = try await session.data(for: request)
+            raw = try await AntiCensorshipTransport.perform(request, session: session, config: .current)
         } catch {
             throw CallJwtClientError.network(endpoint: endpoint, underlying: error)
         }

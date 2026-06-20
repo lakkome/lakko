@@ -890,7 +890,7 @@ public final class AuthClient {
     ) async throws -> Res {
         let raw: (Data, URLResponse)
         do {
-            raw = try await session.data(for: request)
+            raw = try await AntiCensorshipTransport.perform(request, session: session, config: .current)
         } catch {
             throw AuthClientError.network(endpoint: endpoint, underlying: error)
         }
