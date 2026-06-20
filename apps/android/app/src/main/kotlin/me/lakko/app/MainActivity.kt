@@ -25,6 +25,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import me.lakko.app.auth.AuthRepository
 import me.lakko.app.auth.AuthState
@@ -47,8 +48,10 @@ import me.lakko.app.ui.contacts.ContactsScreen
 import me.lakko.app.ui.contacts.ContactsViewModel
 import me.lakko.app.ui.contacts.InviteLandingScreen
 import me.lakko.app.ui.contacts.InviteLandingViewModel
+import me.lakko.app.transport.AntiCensorshipManager
 import me.lakko.app.ui.devices.DevicesScreen
 import me.lakko.app.ui.home.HomeScreen
+import me.lakko.app.ui.transport.AntiCensorshipSettingsScreen
 
 /**
  * Single-activity Compose host.
@@ -140,6 +143,14 @@ class MainActivity : ComponentActivity() {
         val deviceGroupSync = me.lakko.app.devices.sync
             .DeviceGroupSyncRepository(applicationContext)
 
+        // ADR-0026 Phase 4 — the anti-censorship arming controller.
+        // Apply the persisted preference at boot: when on, fetch +
+        // verify the signed bootstrap config and publish the armed
+        // ambient config so the clients route through the obfuscated
+        // tunnel. Disarmed when off, so this is a no-op by default.
+        val antiCensorship = AntiCensorshipManager(applicationContext, lifecycleScope)
+        antiCensorship.armFromSettings()
+
         // Read the launching Intent — a cold-start tap on
         // `https://lakko.me/i/<slug>` carries the URL in
         // `intent.data`; a cold-start tap on a Lakko push
@@ -162,6 +173,7 @@ class MainActivity : ComponentActivity() {
                         deviceGroupSync = deviceGroupSync,
                         inviteIntake = inviteIntake,
                         pushIntake = pushIntake,
+                        antiCensorship = antiCensorship,
                     )
                 }
             }
@@ -256,6 +268,7 @@ private fun AppRoot(
     deviceGroupSync: me.lakko.app.devices.sync.DeviceGroupSyncRepository,
     inviteIntake: InviteIntake,
     pushIntake: PushIntake,
+    antiCensorship: AntiCensorshipManager,
 ) {
     val state by authRepository.state.collectAsStateWithLifecycle()
 
@@ -307,6 +320,7 @@ private fun AppRoot(
                     deviceGroupSync = deviceGroupSync,
                     inviteIntake = inviteIntake,
                     pushIntake = pushIntake,
+                    antiCensorship = antiCensorship,
                     account = current.account,
                 )
             }
@@ -369,6 +383,7 @@ private fun SessionRoot(
     deviceGroupSync: me.lakko.app.devices.sync.DeviceGroupSyncRepository,
     inviteIntake: InviteIntake,
     pushIntake: PushIntake,
+    antiCensorship: AntiCensorshipManager,
     account: SessionAccount,
 ) {
     // Drive ChatRepository.bootstrap whenever a fresh
@@ -462,6 +477,7 @@ private fun SessionRoot(
             onOpenChats = { destination = SessionDestination.Chats },
             onOpenPasskeys = { destination = SessionDestination.Passkeys },
             onOpenDevices = { destination = SessionDestination.Devices },
+            onOpenAntiCensorship = { destination = SessionDestination.AntiCensorship },
             onLogout = {
                 contactsRepository.clear()
                 chatRepository.clear()
@@ -567,6 +583,11 @@ private fun SessionRoot(
             onBack = { destination = SessionDestination.Home },
         )
 
+        SessionDestination.AntiCensorship -> AntiCensorshipSettingsScreen(
+            manager = antiCensorship,
+            onBack = { destination = SessionDestination.Home },
+        )
+
         is SessionDestination.InviteLanding -> {
             val inviteSlug = current.slug
             // Key the VM by slug so re-tapping a different
@@ -607,6 +628,9 @@ private sealed interface SessionDestination {
     data object Passkeys : SessionDestination
     /** 2a3b4 — DeviceGroup pairing surface. */
     data object Devices : SessionDestination
+
+    /** ADR-0026 — anti-censorship arming surface. */
+    data object AntiCensorship : SessionDestination
 }
 
 /**

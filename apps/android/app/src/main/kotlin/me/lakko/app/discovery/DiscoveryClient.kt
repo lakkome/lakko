@@ -90,7 +90,7 @@ public class DiscoveryClient(
      *  first client to adopt the seam; the rest migrate to the same
      *  engine in a follow-up. Ignored when an explicit test [engine]
      *  is supplied. */
-    antiCensorship: AntiCensorshipConfig = AntiCensorshipConfig.DISARMED,
+    antiCensorship: AntiCensorshipConfig = AntiCensorshipConfig.current,
 ) : AutoCloseable {
 
     private val json = Json {

@@ -39,6 +39,7 @@ public fun HomeScreen(
     onOpenChats: () -> Unit,
     onOpenPasskeys: () -> Unit,
     onOpenDevices: () -> Unit,
+    onOpenAntiCensorship: () -> Unit,
     onLogout: () -> Unit,
     onForgetDevice: () -> Unit,
     modifier: Modifier = Modifier,
@@ -102,6 +103,16 @@ public fun HomeScreen(
             modifier = Modifier.fillMaxWidth(),
         ) {
             Text("Devices")
+        }
+        Spacer(Modifier.height(8.dp))
+        // ADR-0026 — anti-censorship arming surface. Tapping
+        // pushes `AntiCensorshipSettingsScreen` via the
+        // SessionRoot destination toggle.
+        OutlinedButton(
+            onClick = onOpenAntiCensorship,
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Text("Anti-censorship")
         }
         Spacer(Modifier.height(16.dp))
         Text(

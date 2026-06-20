@@ -53,6 +53,20 @@ public class AntiCensorshipConfig(
         /** The default: direct path, no tunnel. Identical to today. */
         public val DISARMED: AntiCensorshipConfig =
             AntiCensorshipConfig(armed = false, bootstrapConfigJson = ByteArray(0), trustAnchor = ByteArray(0))
+
+        /**
+         * The ambient config the platform clients route through. `DiscoveryClient`
+         * (and the other clients as they adopt the seam) is constructed ad-hoc in
+         * many places rather than injected from one root, so the armed config is
+         * published here as an ambient value the inits read by default.
+         * [AntiCensorshipManager.armFromSettings] sets it once at boot; every
+         * subsequent `DiscoveryClient()` then picks it up. Disarmed until arming
+         * succeeds, so the default behaviour is unchanged. `@Volatile` so a late
+         * arm on one thread is visible to a client built on another.
+         */
+        @Volatile
+        @JvmStatic
+        public var current: AntiCensorshipConfig = DISARMED
     }
 }
 

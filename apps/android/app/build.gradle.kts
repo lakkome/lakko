@@ -155,6 +155,37 @@ android {
             "\"${project.findProperty("lakko.transparency.witness.key") as String? ?: ""}\"",
         )
 
+        // ADR-0026 Phase 4 — anti-censorship bootstrap pin. All three
+        // sourced from gradle properties (`apps/android/local.properties`
+        // or `-P lakko.bootstrap.*=...`) so they never land in version
+        // control; empty when unset. There is no insecure default —
+        // `BootstrapPin` returns null on a blank/malformed anchor and
+        // `AntiCensorshipManager` stays disarmed, so an unprovisioned
+        // build cannot arm the tunnel.
+        //
+        // `LAKKO_BOOTSTRAP_TRUST_ANCHOR` — base64 (standard alphabet) of
+        // the 32-byte Ed25519 verifying key the signed bootstrap config is
+        // checked against, pinned out-of-band at build time.
+        // `LAKKO_BOOTSTRAP_DOH_DOMAIN` — the rendezvous domain resolved
+        // over JSON-DoH (e.g. `rendezvous.lakko.me`).
+        // `LAKKO_BOOTSTRAP_CONFIG_PATH` — the signed-config path on that
+        // domain (e.g. `/bootstrap.json`).
+        buildConfigField(
+            "String",
+            "LAKKO_BOOTSTRAP_TRUST_ANCHOR",
+            "\"${project.findProperty("lakko.bootstrap.trust.anchor") as String? ?: ""}\"",
+        )
+        buildConfigField(
+            "String",
+            "LAKKO_BOOTSTRAP_DOH_DOMAIN",
+            "\"${project.findProperty("lakko.bootstrap.doh.domain") as String? ?: ""}\"",
+        )
+        buildConfigField(
+            "String",
+            "LAKKO_BOOTSTRAP_CONFIG_PATH",
+            "\"${project.findProperty("lakko.bootstrap.config.path") as String? ?: ""}\"",
+        )
+
         // G3-4-mobile — wire androidx.test runner for the
         // `app/src/androidTest/` instrumented test source set.
         // `./gradlew :app:connectedDebugAndroidTest` boots a
