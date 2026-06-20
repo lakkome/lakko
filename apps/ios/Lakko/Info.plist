@@ -20,6 +20,12 @@
 	<string>1.0</string>
 	<key>CFBundleVersion</key>
 	<string>1</string>
+	<key>LakkoBootstrapConfigPath</key>
+	<string></string>
+	<key>LakkoBootstrapDohDomain</key>
+	<string></string>
+	<key>LakkoBootstrapTrustAnchor</key>
+	<string></string>
 	<key>LakkoTransparencyOperatorKey</key>
 	<string></string>
 	<key>LakkoTransparencyUrl</key>
