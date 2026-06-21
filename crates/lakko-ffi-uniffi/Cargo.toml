@@ -90,6 +90,13 @@ base64 = "0.22"
 lakko-transport.workspace = true
 tokio.workspace = true
 serde_json.workspace = true
+# WS-over-tunnel FFI (ADR-0026) — split the `tunneled_websocket` stream into a
+# sink + stream and drive RFC 6455 frames. `handshake`-only (the tunnel
+# encrypts); the same `0.24` already in the tree via `services/sfu`.
+futures.workspace = true
+tokio-tungstenite = { version = "0.24", default-features = false, features = [
+    "handshake",
+] }
 
 # `build` powers the `uniffi::setup_scaffolding!()` proc-macro
 # the lib uses to register types; `cli` enables

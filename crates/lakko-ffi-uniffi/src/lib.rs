@@ -49,6 +49,7 @@ pub mod sframe;
 pub mod sfu_signaling;
 pub mod shamir;
 pub mod transport;
+pub mod ws;
 
 uniffi::setup_scaffolding!();
 
