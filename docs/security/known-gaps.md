@@ -665,10 +665,27 @@ All three share the same API surface (`arm(callback)`,
 "newer arm replaces prior" semantics, and the same
 TTL bounds (`[50 ms, 10 s]`, default 1 s per ADR-0008).
 Wiring them into a live call flow lands with the SFU
-integration in 3b. **G-18 is now a wiring gap, not a
-"helper missing" gap** — the schedule machinery is in
-place; only the call-into-the-helper at the right moment
-is left.
+integration in 3b.
+
+**Expiry decision moved into the core (Jun 2026).** The
+per-platform timer no longer owns the 1-second policy:
+`GroupCallSession::refresh_call_key_at(group, identity,
+now_ms, overlap_ms)` stamps the retained previous key with
+`now_ms + clamp(overlap_ms)` (bounds `OVERLAP_MIN_MS` ..
+`OVERLAP_MAX_MS`, default `OVERLAP_DEFAULT_MS` = 1 s), and
+`prune_expired_previous(now_ms)` drops it once the caller's
+clock passes that instant (`has_live_previous(now_ms)`
+reports the window). The core stays time-source-free — the
+platform supplies only `now` — while the TTL bounds + the
+1-second decision are owned + property-tested in one place
+(5 tests in `group_call.rs`: retain-until-expiry, clamp,
+no-clock-never-expires, second-rotation-resets-window,
+saturating-add). The legacy no-clock `refresh_call_key` +
+manual `drop_previous_call_key` remain for callers driving
+their own timer. **The duplicated-logic part of G-18 is now
+closed; the residual is just wiring the platforms onto
+`refresh_call_key_at` + a clock-tick `prune_expired_previous`
+when the live SFU call flow lands (3b).**
 
 ### G-19: SFU-side call-admission JWT validation — **CLOSED** (Rust SFU; LiveKit-fork plan superseded)
 

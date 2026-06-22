@@ -56,12 +56,21 @@
 //! absorbs in-flight frames sealed under the OLD key that
 //! land after the rotation (RTT, jitter, reorder).
 //!
-//! The crate does **not** depend on wall-clock — the
-//! platform calls [`GroupCallSession::drop_previous_call_key`]
-//! when its own overlap timer fires (≈ 1 s in production
-//! per the plan §5). After that, frames under the old key
-//! cease to decode and the seed-boundary forward secrecy
-//! is fully in effect.
+//! The crate does **not** read a wall-clock — but the
+//! expiry **decision** lives here, not in three per-platform
+//! timers (G-18). [`GroupCallSession::refresh_call_key_at`]
+//! stamps the retained previous key with `now_ms + clamp(
+//! overlap_ms)` (default [`OVERLAP_DEFAULT_MS`] ≈ 1 s), and
+//! [`GroupCallSession::prune_expired_previous`] drops it once
+//! the caller's clock passes that instant — so the platform
+//! only supplies `now`, while the bounds + the 1-second policy
+//! are owned + tested in the core. The legacy
+//! [`GroupCallSession::refresh_call_key`] (no clock) +
+//! [`GroupCallSession::drop_previous_call_key`] (manual drop)
+//! remain for callers that drive their own timer. Either way,
+//! once the previous key is dropped, frames under the old key
+//! cease to decode and seed-boundary forward secrecy is fully
+//! in effect.
 
 use std::collections::BTreeMap;
 
@@ -141,8 +150,9 @@ pub struct GroupCallSession {
     /// back to it for frames sealed under the OLD key that
     /// land after rotation. The caller invokes
     /// [`Self::drop_previous_call_key`] when its overlap
-    /// timer fires.
-    previous_call_key: Option<CallKey>,
+    /// timer fires, or — preferred — [`Self::prune_expired_previous`]
+    /// on its clock tick, letting the core own the expiry (G-18).
+    previous_call_key: Option<RetainedCallKey>,
     /// Participant ledger. `BTreeMap` over `HashMap` so
     /// the iter order is stable for snapshot helpers + so
     /// integration tests can pattern-match the layout.
@@ -150,6 +160,34 @@ pub struct GroupCallSession {
     /// Set to `true` on every membership change. The
     /// caller resets it after rekeying.
     needs_rekey: bool,
+}
+
+/// Default SFrame epoch-overlap window — the previous-epoch key is retained
+/// this long after a rotation so in-flight frames sealed under it still decode
+/// (ADR-0008; C-8 / C-9).
+pub const OVERLAP_DEFAULT_MS: u64 = 1_000;
+/// Lower clamp on the overlap window. Below this the retention is too brief to
+/// absorb in-flight frames.
+pub const OVERLAP_MIN_MS: u64 = 50;
+/// Upper clamp on the overlap window. Beyond this the previous key lingers long
+/// enough to weaken seed-boundary forward secrecy (C-9 / C-10).
+pub const OVERLAP_MAX_MS: u64 = 10_000;
+
+/// Clamp a caller-supplied overlap to `[OVERLAP_MIN_MS, OVERLAP_MAX_MS]`.
+#[must_use]
+fn clamp_overlap(overlap_ms: u64) -> u64 {
+    overlap_ms.clamp(OVERLAP_MIN_MS, OVERLAP_MAX_MS)
+}
+
+/// A previous-epoch [`CallKey`] retained for the overlap window, tagged with
+/// the wall-clock instant (the caller's millisecond clock) it expires at.
+///
+/// The core stays time-source-free: the caller supplies `now_ms`; the expiry
+/// **decision** (the 1-second window) lives here, not duplicated across three
+/// platform timers (G-18).
+struct RetainedCallKey {
+    key: CallKey,
+    expires_at_ms: u64,
 }
 
 impl GroupCallSession {
@@ -208,12 +246,47 @@ impl GroupCallSession {
     /// Surfaces the same `Error::Exporter` shapes as
     /// [`Self::create`].
     pub fn refresh_call_key(&mut self, group: &Group, identity: &Identity) -> Result<()> {
+        // No clock supplied → the previous key never auto-expires; the caller
+        // must invoke `drop_previous_call_key`. Preserved for backward compat;
+        // prefer `refresh_call_key_at` so the core owns the expiry (G-18).
+        self.rotate_call_key(group, identity, u64::MAX)
+    }
+
+    /// Clock-aware variant of [`Self::refresh_call_key`] (G-18). Retains the
+    /// previous-epoch key until `now_ms + clamp(overlap_ms)`, so the 1-second
+    /// overlap **decision** lives in the core rather than in three per-platform
+    /// timers. `overlap_ms` is clamped to `[OVERLAP_MIN_MS, OVERLAP_MAX_MS]`
+    /// (pass [`OVERLAP_DEFAULT_MS`] for the ADR-0008 default). The caller still
+    /// owns the wall clock — the core stays time-source-free.
+    ///
+    /// # Errors
+    ///
+    /// Surfaces the same `Error::Exporter` shapes as [`Self::create`].
+    pub fn refresh_call_key_at(
+        &mut self,
+        group: &Group,
+        identity: &Identity,
+        now_ms: u64,
+        overlap_ms: u64,
+    ) -> Result<()> {
+        let expires_at_ms = now_ms.saturating_add(clamp_overlap(overlap_ms));
+        self.rotate_call_key(group, identity, expires_at_ms)
+    }
+
+    fn rotate_call_key(
+        &mut self,
+        group: &Group,
+        identity: &Identity,
+        expires_at_ms: u64,
+    ) -> Result<()> {
         let next = CallKey::derive(group, identity, &self.call_id)?;
-        // Stash the prior seed for the overlap window. We
-        // overwrite any earlier stash — see the doc-comment
-        // contract above.
+        // C-10: overwrite any earlier stash — only the most-recent previous
+        // epoch is retained.
         let prior = std::mem::replace(&mut self.call_key, next);
-        self.previous_call_key = Some(prior);
+        self.previous_call_key = Some(RetainedCallKey {
+            key: prior,
+            expires_at_ms,
+        });
         self.own_leaf_index = group.own_leaf_index().u32();
         self.needs_rekey = true;
         Ok(())
@@ -409,7 +482,7 @@ impl GroupCallSession {
     /// rather than re-deriving from this directly.
     #[must_use]
     pub fn previous_call_key(&self) -> Option<&CallKey> {
-        self.previous_call_key.as_ref()
+        self.previous_call_key.as_ref().map(|r| &r.key)
     }
 
     /// Open a received SFrame with the 1-second overlap
@@ -462,7 +535,7 @@ impl GroupCallSession {
         // window this collapses to a propagated AEAD
         // rejection from path 1.
         if let Some(prev) = self.previous_call_key.as_ref() {
-            let prev_key = prev.participant_key(sender_leaf)?;
+            let prev_key = prev.key.participant_key(sender_leaf)?;
             return prev_key.open(aad, ciphertext, frame_counter);
         }
         Err(crate::Error::Crypto(
@@ -480,6 +553,29 @@ impl GroupCallSession {
     /// seed is a no-op.
     pub fn drop_previous_call_key(&mut self) {
         self.previous_call_key = None;
+    }
+
+    /// Drop the previous-epoch key once it has expired at `now_ms` (G-18). The
+    /// expiry was set by [`Self::refresh_call_key_at`]; the platform calls this
+    /// on its clock tick instead of owning the 1-second decision. Idempotent —
+    /// a no-op when there is no previous key, or it is still inside its window,
+    /// or it was retained with no expiry (via [`Self::refresh_call_key`]).
+    pub fn prune_expired_previous(&mut self, now_ms: u64) {
+        if let Some(prev) = self.previous_call_key.as_ref() {
+            if now_ms >= prev.expires_at_ms {
+                self.previous_call_key = None;
+            }
+        }
+    }
+
+    /// `true` when a previous-epoch key is retained AND still inside its
+    /// overlap window at `now_ms`. A key retained with no expiry (via
+    /// [`Self::refresh_call_key`]) is always live until dropped.
+    #[must_use]
+    pub fn has_live_previous(&self, now_ms: u64) -> bool {
+        self.previous_call_key
+            .as_ref()
+            .is_some_and(|prev| now_ms < prev.expires_at_ms)
     }
 }
 
@@ -546,6 +642,107 @@ mod tests {
         id[0] = 0x10;
         id[15] = 0x10;
         id
+    }
+
+    fn fixture_session() -> (GroupCallSession, Group, Identity) {
+        let (id_a, _id_b, group_a) = make_pair();
+        let session =
+            GroupCallSession::create(GroupCallScope::InChat, fixture_call_id(), &group_a, &id_a)
+                .unwrap();
+        (session, group_a, id_a)
+    }
+
+    // ---- G-18: clock-injected overlap-window expiry --------------------------
+
+    #[test]
+    fn refresh_at_retains_previous_until_expiry_then_prune_drops_it() {
+        let (mut s, g, id) = fixture_session();
+        assert!(s.previous_call_key().is_none(), "no previous at creation");
+
+        // Rotate at t=1000 with a 1 s window → previous expires at 2000.
+        s.refresh_call_key_at(&g, &id, 1_000, OVERLAP_DEFAULT_MS)
+            .unwrap();
+        assert!(s.previous_call_key().is_some());
+        assert!(s.has_live_previous(1_999), "live one ms before expiry");
+        assert!(!s.has_live_previous(2_000), "expired at the boundary");
+
+        // Prune before expiry is a no-op; at/after expiry drops it.
+        s.prune_expired_previous(1_500);
+        assert!(
+            s.previous_call_key().is_some(),
+            "pruning mid-window keeps it"
+        );
+        s.prune_expired_previous(2_000);
+        assert!(
+            s.previous_call_key().is_none(),
+            "pruning at expiry drops it"
+        );
+    }
+
+    #[test]
+    fn refresh_at_clamps_the_overlap_window() {
+        // Below the floor clamps up to OVERLAP_MIN_MS.
+        let (mut s, g, id) = fixture_session();
+        s.refresh_call_key_at(&g, &id, 1_000, 1).unwrap();
+        assert!(s.has_live_previous(1_000 + OVERLAP_MIN_MS - 1));
+        assert!(!s.has_live_previous(1_000 + OVERLAP_MIN_MS));
+
+        // Above the ceiling clamps down to OVERLAP_MAX_MS.
+        let (mut s2, g2, id2) = fixture_session();
+        s2.refresh_call_key_at(&g2, &id2, 0, u64::MAX).unwrap();
+        assert!(s2.has_live_previous(OVERLAP_MAX_MS - 1));
+        assert!(!s2.has_live_previous(OVERLAP_MAX_MS));
+    }
+
+    #[test]
+    fn refresh_without_clock_never_auto_expires() {
+        let (mut s, g, id) = fixture_session();
+        // The legacy no-clock path retains the previous key with no expiry.
+        s.refresh_call_key(&g, &id).unwrap();
+        // The no-clock path parks the expiry at the u64::MAX sentinel, which no
+        // realistic millisecond clock (~584M years) ever reaches.
+        assert!(
+            s.has_live_previous(u64::MAX - 1),
+            "live at any realistic clock"
+        );
+        s.prune_expired_previous(u64::MAX - 1); // never reaches the sentinel → no-op
+        assert!(s.previous_call_key().is_some());
+        // Only the explicit manual drop removes it.
+        s.drop_previous_call_key();
+        assert!(s.previous_call_key().is_none());
+    }
+
+    #[test]
+    fn second_rotation_resets_the_window_to_the_latest() {
+        let (mut s, g, id) = fixture_session();
+        s.refresh_call_key_at(&g, &id, 1_000, OVERLAP_DEFAULT_MS)
+            .unwrap();
+        // A second rotation at t=5000 replaces the retained previous (C-10:
+        // only the most-recent previous epoch is kept) and resets the window.
+        s.refresh_call_key_at(&g, &id, 5_000, OVERLAP_DEFAULT_MS)
+            .unwrap();
+        assert!(
+            s.has_live_previous(5_999),
+            "window tracks the latest rotation"
+        );
+        assert!(!s.has_live_previous(6_000));
+        // The first window (expiring at 2000) is gone — no stale long-lived key.
+        s.prune_expired_previous(2_500);
+        assert!(
+            s.previous_call_key().is_some(),
+            "the latest window is still live"
+        );
+    }
+
+    #[test]
+    fn refresh_at_saturates_near_clock_max() {
+        let (mut s, g, id) = fixture_session();
+        // now_ms + overlap must not overflow.
+        s.refresh_call_key_at(&g, &id, u64::MAX, OVERLAP_DEFAULT_MS)
+            .unwrap();
+        assert!(s.previous_call_key().is_some());
+        // Expiry saturated to u64::MAX → not "live" exactly at MAX, but no panic.
+        assert!(!s.has_live_previous(u64::MAX));
     }
 
     #[test]
