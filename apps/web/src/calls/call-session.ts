@@ -114,6 +114,11 @@ export interface CallSessionCallbacks {
    *  produces for the remote side. UI binds them to
    *  `<audio>` / `<video>` elements. */
   onRemoteStream(stream: MediaStream): void;
+  /** The local capture stream (mic + camera). Fired once after
+   *  `getUserMedia` succeeds, so the UI can bind the local video
+   *  track to a self-preview `<video>`. Optional — an audio-only
+   *  caller can omit it. */
+  onLocalStream?(stream: MediaStream): void;
   /** Outbound signaling bytes to PUT to the chat group's DS
    *  journal. The composer wraps in MLS application
    *  message; transport stays on the existing Phase 1
@@ -364,6 +369,20 @@ export class CallSession {
     }
   }
 
+  /**
+   * Toggle the local camera by flipping the captured video track's
+   * `enabled` flag — a local-only gate (the track stays in the
+   * PeerConnection, no renegotiation), same shape as
+   * {@link setMicrophoneEnabled}. A no-op on an audio-only call (no
+   * video track was captured).
+   */
+  setCameraEnabled(on: boolean): void {
+    if (this.localStream === null) return;
+    for (const track of this.localStream.getVideoTracks()) {
+      track.enabled = on;
+    }
+  }
+
   /** Idempotent tear-down — safe to call multiple times. */
   dispose(): void {
     // G3-3-conn-quality — stop the stats poll loop before
@@ -414,6 +433,9 @@ export class CallSession {
       throw err;
     }
     this.localStream = stream;
+    // Surface the local capture so the UI can render a self-preview
+    // (the video track, if any). Audio-only callers ignore it.
+    this.callbacks.onLocalStream?.(stream);
 
     const pc = new RTCPeerConnection({
       iceServers: PUBLIC_ICE_SERVERS,

@@ -296,16 +296,20 @@ interface TileProps {
   remoteStreamFor?:
     | ((participantId: string) => MediaStream | undefined)
     | undefined;
+  /** 1×1 P2P only: the local capture `MediaStream`, for the
+   *  self-preview `<video>` on the LOCAL tile (see the `Call` prop). */
+  localStream?: (() => MediaStream | undefined) | undefined;
 }
 
 const ParticipantTile: Component<TileProps> = (props) => {
   const isPinned = (): boolean =>
     callState.pinnedId() === props.participant.id;
-  /** The live remote stream for this tile, if any (SFU path). Reading
-   *  it inside JSX tracks the underlying remoteStreams signal. */
-  const remoteStream = (): MediaStream | undefined =>
+  /** The live `MediaStream` for this tile, if any. The local tile reads
+   *  the self-preview capture; a remote tile reads the SFU / P2P remote
+   *  stream. Reading it inside JSX tracks the underlying signals. */
+  const tileStream = (): MediaStream | undefined =>
     props.participant.isLocal
-      ? undefined
+      ? props.localStream?.()
       : props.remoteStreamFor?.(props.participant.id);
   return (
     <div
@@ -357,7 +361,7 @@ const ParticipantTile: Component<TileProps> = (props) => {
             never doubles the audio. The 1×1 + mock paths pass no
             `remoteStreamFor`, so they fall through to the placeholder. */}
         <Show
-          when={remoteStream()}
+          when={tileStream()}
           fallback={
             <div
               style={{
@@ -390,9 +394,9 @@ const ParticipantTile: Component<TileProps> = (props) => {
                 width: "100%",
                 height: "100%",
                 "object-fit": "cover",
-                // Remote video is never mirrored (only the local
-                // self-preview is, and that is the 1×1 path).
-                transform: "none",
+                // The local self-preview is mirrored (front-camera
+                // convention); a remote tile is never mirrored.
+                transform: props.participant.isLocal ? "scaleX(-1)" : "none",
               }}
             />
           )}
@@ -1685,6 +1689,9 @@ const Call: Component<{
   remoteStreamFor?:
     | ((participantId: string) => MediaStream | undefined)
     | undefined;
+  /** 1×1 P2P only: the local capture `MediaStream`, for the LOCAL
+   *  tile's self-preview `<video>`. Omitted on the SFU / mock paths. */
+  localStream?: (() => MediaStream | undefined) | undefined;
 }> = (props) => {
   const navigate = useNavigate();
 
@@ -1885,6 +1892,7 @@ const Call: Component<{
                   callActions.pin(id === "" ? null : id)
                 }
                 remoteStreamFor={props.remoteStreamFor}
+                localStream={props.localStream}
               />
             </div>
           </Show>
@@ -1909,6 +1917,7 @@ const Call: Component<{
                     callActions.pin(id === "" ? null : id)
                   }
                   remoteStreamFor={props.remoteStreamFor}
+                localStream={props.localStream}
                 />
               )}
             </For>

@@ -401,6 +401,15 @@ function ChatView(props: {
     null,
   );
   const [audioRef, setAudioRef] = createSignal<HTMLAudioElement | null>(null);
+  // 1×1 video-call state. `videoCall` is set when the call is dialed
+  // with a camera; `localCallStream` is the local capture (mic + camera)
+  // for the self-preview tile; `remoteHasVideo` tracks whether the remote
+  // peer is sending video (set per `ontrack`).
+  const [videoCall, setVideoCall] = createSignal(false);
+  const [localCallStream, setLocalCallStream] = createSignal<MediaStream | null>(
+    null,
+  );
+  const [remoteHasVideo, setRemoteHasVideo] = createSignal(false);
   // SFU multi-party (group) call. Distinct from the 1×1 `activeCall`
   // above — a group chat (>2 members) routes through the Rust SFU with
   // SFrame, while a 1×1 chat stays P2P DTLS-SRTP. `sfuHandle` is held in
@@ -454,7 +463,11 @@ function ChatView(props: {
     displayName: "You",
     isLocal: true,
     micOn: true,
-    camOn: false,
+    // Initial camera state = whether this is a video call. The live
+    // toggle thereafter is the store's `camOn` (driven by the camera
+    // button + mirrored onto the session below) — this seed is read
+    // once at connect, so it does not fight the toggle.
+    camOn: videoCall(),
     handRaised: false,
     quality: qualityTierForRtt(callConnStats()?.rttMs ?? null),
     speaking: false,
@@ -473,7 +486,9 @@ function ChatView(props: {
     displayName: resolvePeerName(),
     isLocal: false,
     micOn: true,
-    camOn: false,
+    // Lights up the remote video tile once the peer's video track
+    // arrives (the effect below keeps it in sync after connect).
+    camOn: videoCall() && remoteHasVideo(),
     handRaised: false,
     quality: "good",
     speaking: false,
@@ -575,6 +590,28 @@ function ChatView(props: {
     }
   });
 
+  // Web 1×1 camera control. The Call.tsx camera button toggles
+  // `callActions.setCamera`; this mirrors the store's local `camOn`
+  // onto the live session (local-only `track.enabled` gate, no
+  // renegotiation). SFU group calls drive video through their own
+  // adapter, so this is the 1×1 P2P path only.
+  createEffect(() => {
+    const local = callUi.participants().find((p) => p.isLocal);
+    if (local === undefined) return;
+    if (activeCall !== null) {
+      activeCall.setCameraEnabled(local.camOn);
+    }
+  });
+
+  // Keep the remote tile's camera state in sync after connect: the
+  // 1×1 roster is set on the state transition, but the peer's video
+  // track can arrive a beat later (a separate `ontrack`). When
+  // `remoteHasVideo` flips, patch just the remote participant.
+  createEffect(() => {
+    if (callState() !== "connected") return;
+    callActions.setParticipantCamera("peer", videoCall() && remoteHasVideo());
+  });
+
   /** Build outbound-signaling callback that PUTs raw
    *  bytes onto the chat group's DS journal as an MLS
    *  application message. */
@@ -603,7 +640,13 @@ function ChatView(props: {
 
   function buildCallSession(callId: Uint8Array): CallSession {
     return new CallSession(callId, {
-      onRemoteStream: (s) => setRemoteAudioStream(s),
+      onRemoteStream: (s) => {
+        setRemoteAudioStream(s);
+        // `ontrack` fires per track (audio, then video); re-check each
+        // time so the remote video tile lights up when its track arrives.
+        setRemoteHasVideo(s.getVideoTracks().length > 0);
+      },
+      onLocalStream: (s) => setLocalCallStream(s),
       onOutboundSignaling: publishSignalingFor(props.entry),
       onStateChange: (s, reason) => {
         setCallState(s);
@@ -613,6 +656,9 @@ function ChatView(props: {
         if (s === "done") {
           activeCall = null;
           setRemoteAudioStream(null);
+          setLocalCallStream(null);
+          setVideoCall(false);
+          setRemoteHasVideo(false);
           // G3-3-conn-quality — drop the stale sample so the
           // next call doesn't briefly flash the previous one.
           setCallConnStats(null);
@@ -639,16 +685,26 @@ function ChatView(props: {
   }
 
   async function onCallClicked(): Promise<void> {
+    await startOneToOneCall(false);
+  }
+
+  async function onVideoCallClicked(): Promise<void> {
+    await startOneToOneCall(true);
+  }
+
+  async function startOneToOneCall(withVideo: boolean): Promise<void> {
     if (activeCall !== null) return;
+    setVideoCall(withVideo);
     const session = buildCallSession(mintCallId());
     activeCall = session;
     try {
-      await session.dial({ audio: true, video: false });
+      await session.dial({ audio: true, video: withVideo });
     } catch (err) {
       setError(
         `Could not start call: ${err instanceof Error ? err.message : String(err)}`,
       );
       activeCall = null;
+      setVideoCall(false);
     }
   }
 
@@ -2185,6 +2241,17 @@ function ChatView(props: {
             >
               📞 Call
             </button>
+            {/* 1×1 video call (P2P). Group video routes through the SFU
+                and is a separate path. */}
+            <Show when={memberCount() <= 2}>
+              <button
+                type="button"
+                onClick={() => void onVideoCallClicked()}
+                disabled={busy()}
+              >
+                📹 Video
+              </button>
+            </Show>
           </Show>
           <button type="button" onClick={props.onLeave}>
             Back to Contacts
@@ -2203,12 +2270,20 @@ function ChatView(props: {
             onCallExit();
           }}
           remoteStreamFor={(participantId): MediaStream | undefined => {
-            // Roster id is `peer-<peerId>`; the SFU sets the downstream
-            // MSID stream id to that same peer id, so strip the prefix
-            // to look the stream up. 1×1 path has no SFU handle → undefined.
+            // 1×1 P2P: the sole remote tile id is `peer` → the live P2P
+            // remote stream (carries the peer's video track when present).
+            if (participantId === "peer") {
+              return remoteAudioStream() ?? undefined;
+            }
+            // SFU group: roster id is `peer-<peerId>`; the SFU sets the
+            // downstream MSID stream id to that same peer id, so strip the
+            // prefix to look the stream up.
             const peerId = participantId.replace(/^peer-/, "");
             return sfuHandle()?.remoteStreams().get(peerId);
           }}
+          localStream={(): MediaStream | undefined =>
+            localCallStream() ?? undefined
+          }
         />
       </Show>
 

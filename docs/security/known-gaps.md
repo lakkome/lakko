@@ -1771,9 +1771,15 @@ breaks):**
   on the device; a fresh device cannot recover-from-words without a discovery
   account lookup that isn't wired. Recovery works on a device that already
   knows the account.
-- **Web 1×1 calls are audio-only** (no local camera capture/toggle on the P2P
-  path); the **in-call device picker is mock-populated** (no
-  `enumerateDevices()` on the live-call surface).
+- **Web 1×1 video calls landed (Jun 2026).** The web P2P 1×1 path now
+  captures the local camera (a "Video" call button dials `video:true`),
+  renders a mirrored self-preview + the remote video tile, and toggles the
+  camera in-call (`CallSession.setCameraEnabled` + the `onLocalStream`
+  callback; `Call.tsx` `localStream` prop + `tileStream`). tsc + vitest (207)
+  + vite build green; live two-peer video needs a browser with cameras (a
+  runtime gate, like G-26). Residual on this surface: the **in-call device
+  picker is still mock-populated** (no `enumerateDevices()` on the live-call
+  surface).
 - **iOS contact inbox is foreground-poll only** — no `BGTaskScheduler`
   background fetch / APNs-driven wake, so new contact requests aren't surfaced
   while backgrounded.
