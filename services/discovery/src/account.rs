@@ -27,8 +27,7 @@ pub(crate) async fn delete_account(
     axum::Extension(authed): axum::Extension<AuthenticatedAccount>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let account_id = authed.0;
-    let db_err =
-        |e: sqlx::Error| (StatusCode::INTERNAL_SERVER_ERROR, format!("db error: {e}"));
+    let db_err = |e: sqlx::Error| (StatusCode::INTERNAL_SERVER_ERROR, format!("db error: {e}"));
 
     // The username binding, the published identity bundle, and the MLS
     // KeyPackage are keyed on `account_id`.
