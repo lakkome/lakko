@@ -1753,12 +1753,18 @@ auth/PoW (pseudonym-unguessability is the Phase-1 gate).
 
 **Genuinely open, security-relevant:**
 
-- **iOS channel subscriber secret moved to the Keychain (G-29, Jun 2026).**
-  The subscriber-side X25519 secret half (it unwraps the per-subscriber HPKE
-  seed envelopes) used to persist in `UserDefaults` plaintext; it now lives in
-  the hardware-backed Keychain (`ChannelSubscriberKeyStore`,
-  `AfterFirstUnlockThisDeviceOnly`), with a one-time migration that scrubs the
-  legacy plaintext copy (invariant #7). Two prior claims on this surface were
+- **Channel subscriber secret moved to hardware-backed storage (G-29,
+  Jun 2026).** The subscriber-side X25519 secret half (it unwraps the
+  per-subscriber HPKE seed envelopes) now persists encrypted at rest on both
+  native platforms (invariant #7). **iOS:** moved off `UserDefaults` plaintext
+  into the Keychain (`ChannelSubscriberKeyStore`, `AfterFirstUnlockThisDeviceOnly`)
+  with a one-time migration that scrubs the legacy plaintext copy. **Android:**
+  the subscriber-key persistence (previously a `SharedPreferences` path that
+  was never actually wired — `ChannelsUiState` was constructed with no prefs,
+  so the keys were in-memory only and lost on relaunch) is now wired to an
+  `EncryptedSharedPreferences` (Keystore AES-256-GCM, `ChannelKeyStore`), so the
+  secret both survives a relaunch and is encrypted at rest. No Android migration
+  is needed (no prior on-disk copy existed). Two prior claims on this surface were
   stale and are corrected: the publisher `signingKeySeed` is **in-memory only**
   (not persisted, so there is no at-rest exposure — persisting it to the
   Keychain for cross-relaunch publisher continuity is a separate functional

@@ -45,6 +45,8 @@ import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.ui.platform.LocalContext
+import me.lakko.app.channels.ChannelKeyStore
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -98,6 +100,20 @@ private sealed class Route {
     data class Subscribe(val channelId: String) : Route()
 }
 
+/**
+ * Build the process-scoped [ChannelsUiState], persisting the subscriber
+ * keypairs into the hardware-backed Keystore (G-29) rather than plaintext
+ * `SharedPreferences`. Reads `LocalContext` (composable scope) before the
+ * non-composable `remember` block builds the encrypted prefs.
+ */
+@Composable
+private fun rememberChannelsUiState(): ChannelsUiState {
+    val context = LocalContext.current
+    return remember {
+        ChannelsUiState(prefs = ChannelKeyStore.encryptedPrefs(context))
+    }
+}
+
 @Composable
 public fun ChannelsRootScreen(
     /**
@@ -115,7 +131,7 @@ public fun ChannelsRootScreen(
      * `ChatRepository` already uses.
      */
     accountIdentitySeed: ByteArray,
-    state: ChannelsUiState = remember { ChannelsUiState() },
+    state: ChannelsUiState = rememberChannelsUiState(),
     client: ChannelsClient = remember { ChannelsClient() },
 ) {
     var route by remember { mutableStateOf<Route>(Route.List) }

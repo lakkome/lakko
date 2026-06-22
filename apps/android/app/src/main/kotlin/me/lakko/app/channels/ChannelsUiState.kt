@@ -24,12 +24,14 @@ import org.json.JSONObject
  * server.
  *
  * Subscriber-side X25519 keypairs (Phase 4b G4-3c) are
- * persisted into the optional `SharedPreferences`
- * supplied at construction time so a process kill does
- * not strand the user without the secret needed to open
- * future seed envelopes. A follow-up sprint moves the
- * secret half into the Android Keystore via
- * `androidx.security.crypto`.
+ * persisted into the `SharedPreferences` supplied at
+ * construction time so a process kill does not strand the
+ * user without the secret needed to open future seed
+ * envelopes. The production host passes an
+ * `EncryptedSharedPreferences` (Keystore-backed AES-256-GCM,
+ * `ChannelKeyStore.encryptedPrefs`), so the secret half is
+ * encrypted at rest (G-29, invariant #7), never plaintext;
+ * `null` (the test default) disables persistence.
  */
 public class ChannelsUiState(
     private val prefs: SharedPreferences? = null,
