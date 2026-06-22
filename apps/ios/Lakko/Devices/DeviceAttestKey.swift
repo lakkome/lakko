@@ -63,7 +63,10 @@ enum DeviceAttestKey {
         guard let url = URL(string: baseURL + "/.well-known/device-attest-jwks.json") else {
             throw KeyError.badUrl
         }
-        let (data, response) = try await URLSession.shared.data(from: url)
+        // ADR-0026 — route through the obfuscated tunnel when armed (the last
+        // native HTTP surface); disarmed = the direct URLSession path.
+        let (data, response) = try await AntiCensorshipTransport.perform(
+            URLRequest(url: url), session: .shared, config: .current)
         if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
             throw KeyError.http(http.statusCode)
         }

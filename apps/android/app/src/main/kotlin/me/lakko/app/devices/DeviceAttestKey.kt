@@ -13,6 +13,7 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import me.lakko.app.BuildConfig
 import me.lakko.app.auth.base64UrlDecodeNoPad
+import me.lakko.app.transport.AntiCensorshipEngine
 import me.lakko.app.webauthn.WebauthnClient
 
 /**
@@ -41,7 +42,9 @@ object DeviceAttestKey {
     private data class Jwks(@SerialName("keys") val keys: List<Jwk>? = null)
 
     private val json = Json { ignoreUnknownKeys = true }
-    private val client = HttpClient(OkHttp)
+    // ADR-0026 — route the JWKS fetch through the obfuscated tunnel when armed
+    // (the ambient config is read per-request; disarmed = direct OkHttp).
+    private val client = HttpClient(AntiCensorshipEngine(OkHttp.create {}))
     private const val TTL_MS = 24L * 60 * 60 * 1000
 
     @Volatile private var cachedKey: ByteArray? = null
