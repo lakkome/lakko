@@ -61,6 +61,15 @@ final class SfuSignalingClient {
     private var task: URLSessionWebSocketTask?
     private var receiveTask: Task<Void, Never>?
 
+    // ADR-0026 — when anti-censorship is armed, the signaling WebSocket rides the
+    // obfuscated tunnel via the Rust FFI instead of URLSession. The FFI `recv()`
+    // is a blocking call, so the receive loop runs on a dedicated serial GCD
+    // queue (not the Swift cooperative pool); sends go on a separate queue (the
+    // FFI splits the sink + stream, so concurrent send / recv is safe).
+    private let stateLock = NSLock()
+    private var tunneledConn: TunneledWsConnection?
+    private let tunnelRecvQueue = DispatchQueue(label: "me.lakko.sfu.tunnel.recv", qos: .userInitiated)
+
     init(
         baseUrl: String,
         jwt: String,
@@ -73,8 +82,13 @@ final class SfuSignalingClient {
         self.session = session
     }
 
-    /// True once the WebSocket task exists.
-    var isOpen: Bool { task != nil }
+    /// True once the WebSocket (direct or tunneled) exists.
+    var isOpen: Bool {
+        if task != nil { return true }
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return tunneledConn != nil
+    }
 
     /// Open the WebSocket and start dispatching frames. The SFU's
     /// Welcome frame arrives on `onWelcome` shortly after.
@@ -82,7 +96,15 @@ final class SfuSignalingClient {
     /// - Throws: `SfuSignalingError.alreadyConnected` if called twice,
     ///   `.badUrl` if the base URL / JWT cannot form a valid URL.
     func connect() throws {
-        guard task == nil else { throw SfuSignalingError.alreadyConnected }
+        guard task == nil, tunneledConn == nil else {
+            throw SfuSignalingError.alreadyConnected
+        }
+        // ADR-0026 — armed: route the signaling WebSocket through the tunnel.
+        let antiCensorship = AntiCensorshipConfig.current
+        if antiCensorship.armed {
+            try connectTunneled(antiCensorship)
+            return
+        }
         // http(s) -> ws(s); the SFU upgrade endpoint speaks WebSocket.
         var wsBase = baseUrl
             .replacingOccurrences(of: "http://", with: "ws://")
@@ -114,23 +136,91 @@ final class SfuSignalingClient {
                 // Socket closed or errored — end the loop.
                 break
             }
-            let text: String
             switch message {
             case let .string(s):
-                text = s
+                handleFrameText(s)
             case let .data(d):
-                text = String(decoding: d, as: UTF8.self)
+                handleFrameText(String(decoding: d, as: UTF8.self))
             @unknown default:
                 continue
             }
-            do {
-                let frame = try parseSfuServerFrame(json: text)
-                dispatch(frame)
-            } catch {
-                callbacks.onParseError?(text, error)
-            }
         }
         callbacks.onClosed?()
+    }
+
+    /// Parse + dispatch one signaling frame (shared by the direct + tunneled
+    /// receive loops). A parse failure surfaces via `onParseError`, never closes.
+    private func handleFrameText(_ text: String) {
+        do {
+            let frame = try parseSfuServerFrame(json: text)
+            dispatch(frame)
+        } catch {
+            callbacks.onParseError?(text, error)
+        }
+    }
+
+    /// ADR-0026 — open the signaling WebSocket over the obfuscated tunnel and
+    /// run a blocking receive loop on the dedicated serial queue. The dial +
+    /// handshake block, so they run off the calling thread; a failure surfaces
+    /// via `onClosed` (the same loud teardown the direct path uses).
+    private func connectTunneled(_ config: AntiCensorshipConfig) throws {
+        guard
+            let comps = URLComponents(string: baseUrl),
+            let host = comps.host
+        else {
+            throw SfuSignalingError.badUrl
+        }
+        let isSecure = baseUrl.hasPrefix("https") || baseUrl.hasPrefix("wss")
+        let port = UInt16(comps.port ?? (isSecure ? 443 : 80))
+        let escaped =
+            jwt.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? jwt
+        // Inner URL is plain ws:// — the obfuscated tunnel provides the
+        // encryption, so there is no inner TLS.
+        let innerUrl = "ws://\(host)/v1/connect?token=\(escaped)"
+        let now = UInt64(Date().timeIntervalSince1970)
+
+        tunnelRecvQueue.async { [weak self] in
+            guard let self else { return }
+            let conn: TunneledWsConnection
+            do {
+                conn = try openTunneledWebsocket(
+                    configJson: config.bootstrapConfigJson,
+                    trustAnchor: config.trustAnchor,
+                    nowSecs: now,
+                    endpointHost: host,
+                    endpointPort: port,
+                    deadlineMs: config.deadlineMs,
+                    url: innerUrl,
+                    subprotocol: sfuSubprotocol
+                )
+            } catch {
+                self.callbacks.onClosed?()
+                return
+            }
+            self.stateLock.lock()
+            self.tunneledConn = conn
+            self.stateLock.unlock()
+
+            // Blocking receive loop on this dedicated serial queue.
+            while true {
+                let message: FfiWsMessage
+                do {
+                    message = try conn.recv()
+                } catch {
+                    break
+                }
+                switch message {
+                case let .text(text):
+                    self.handleFrameText(text)
+                case let .binary(data):
+                    self.handleFrameText(String(decoding: data, as: UTF8.self))
+                case .closed:
+                    self.callbacks.onClosed?()
+                    return
+                }
+            }
+            self.callbacks.onClosed?()
+        }
     }
 
     private func dispatch(_ frame: SfuServerFrame) {
@@ -185,15 +275,38 @@ final class SfuSignalingClient {
     /// only matters for transport errors, which the receive loop already
     /// surfaces via `onClosed`. A failed compose (nil) is a no-op.
     private func enqueue(_ json: String?) {
-        guard let json, let t = task else { return }
+        guard let json else { return }
+        // Armed: send over the tunnel on a separate thread (the FFI send blocks
+        // on its runtime; the split sink makes it independent of the recv loop).
+        stateLock.lock()
+        let conn = tunneledConn
+        stateLock.unlock()
+        if let conn {
+            DispatchQueue.global(qos: .userInitiated).async {
+                try? conn.sendText(text: json)
+            }
+            return
+        }
+        guard let t = task else { return }
         t.send(.string(json)) { _ in }
     }
 
-    /// Close the socket + cancel the receive loop. Idempotent.
+    /// Close the socket + cancel the receive loop. Idempotent. Closing the
+    /// tunneled connection unblocks the receive loop (its `recv()` returns
+    /// `.closed`).
     func close() {
         receiveTask?.cancel()
         receiveTask = nil
         task?.cancel(with: .normalClosure, reason: nil)
         task = nil
+        stateLock.lock()
+        let conn = tunneledConn
+        tunneledConn = nil
+        stateLock.unlock()
+        if let conn {
+            DispatchQueue.global(qos: .userInitiated).async {
+                try? conn.shutdown()
+            }
+        }
     }
 }

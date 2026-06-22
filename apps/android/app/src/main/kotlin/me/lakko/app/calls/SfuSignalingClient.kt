@@ -14,8 +14,12 @@ import io.ktor.websocket.close
 import io.ktor.websocket.readText
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.launch
+import me.lakko.app.transport.AntiCensorshipConfig
+import uniffi.lakko_ffi_uniffi.FfiWsMessage
 import uniffi.lakko_ffi_uniffi.SfuErrorCode
 import uniffi.lakko_ffi_uniffi.SfuPeerSnapshot
 import uniffi.lakko_ffi_uniffi.SfuServerFrame
@@ -25,7 +29,9 @@ import uniffi.lakko_ffi_uniffi.composeSfuSdpAnswer
 import uniffi.lakko_ffi_uniffi.composeSfuSdpOffer
 import uniffi.lakko_ffi_uniffi.composeSfuSignalRelayToCall
 import uniffi.lakko_ffi_uniffi.composeSfuSignalRelayToPeer
+import uniffi.lakko_ffi_uniffi.openTunneledWebsocket
 import uniffi.lakko_ffi_uniffi.parseSfuServerFrame
+import uniffi.lakko_ffi_uniffi.TunneledWsConnection
 
 /** The WebSocket subprotocol the SFU requires on the upgrade. */
 const val SFU_SUBPROTOCOL: String = "lakko-sfu-v1"
@@ -105,9 +111,19 @@ class SfuSignalingClient(
     private var session: DefaultClientWebSocketSession? = null
     private var receiveJob: Job? = null
 
-    /** True once the WebSocket session is open. */
+    // ADR-0026 — when anti-censorship is armed, the signaling WebSocket rides the
+    // obfuscated tunnel via the Rust FFI instead of Ktor/OkHttp. The FFI `recv()`
+    // blocks, so the receive loop runs on `Dispatchers.IO`; outbound frames go
+    // through a single channel + sender coroutine so order is preserved (mirror
+    // of the direct path's `session.outgoing`).
+    @Volatile
+    private var tunneledConn: TunneledWsConnection? = null
+    private var tunnelSendJob: Job? = null
+    private val tunnelOutbound = Channel<String>(Channel.UNLIMITED)
+
+    /** True once the WebSocket session (direct or tunneled) is open. */
     val isOpen: Boolean
-        get() = session != null
+        get() = session != null || tunneledConn != null
 
     /**
      * Open the WebSocket and start dispatching frames. Suspends until
@@ -116,7 +132,13 @@ class SfuSignalingClient(
      * fails. Idempotent-guarded: throws if already connected.
      */
     suspend fun connect() {
-        check(session == null) { "connect() called twice" }
+        check(session == null && tunneledConn == null) { "connect() called twice" }
+        // ADR-0026 — armed: route the signaling WebSocket through the tunnel.
+        val antiCensorship = AntiCensorshipConfig.current
+        if (antiCensorship.armed) {
+            connectTunneled(antiCensorship)
+            return
+        }
         // http(s) -> ws(s); the SFU upgrade endpoint speaks WebSocket.
         val wsBase = baseUrl
             .replaceFirst("http://", "ws://")
@@ -139,15 +161,7 @@ class SfuSignalingClient(
                     // Binary frames are not part of lakko-sfu-v1 — ignore.
                     else -> continue
                 }
-                val parsed = try {
-                    parseSfuServerFrame(text)
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (e: Throwable) {
-                    callbacks.onParseError(text, e)
-                    continue
-                }
-                dispatch(parsed)
+                handleFrameText(text)
             }
         } catch (e: CancellationException) {
             throw e
@@ -155,6 +169,99 @@ class SfuSignalingClient(
             // Transport-level failure — fall through to onClosed.
         } finally {
             callbacks.onClosed()
+        }
+    }
+
+    /**
+     * Parse + dispatch one signaling frame (shared by the direct + tunneled
+     * receive loops). A parse failure surfaces via [SfuSignalingCallbacks.onParseError]
+     * and never closes the connection.
+     */
+    private fun handleFrameText(text: String) {
+        val parsed = try {
+            parseSfuServerFrame(text)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            callbacks.onParseError(text, e)
+            return
+        }
+        dispatch(parsed)
+    }
+
+    /**
+     * ADR-0026 — open the signaling WebSocket over the obfuscated tunnel and run
+     * a blocking receive loop on [Dispatchers.IO] (the FFI `recv()` blocks). The
+     * dial + handshake also block, so they run on the IO dispatcher; a failure
+     * surfaces via [SfuSignalingCallbacks.onClosed] (the same teardown the direct
+     * path uses). Outbound frames ride [tunnelOutbound] -> a single sender
+     * coroutine so order is preserved.
+     */
+    private fun connectTunneled(config: AntiCensorshipConfig) {
+        receiveJob = scope.launch(Dispatchers.IO) {
+            val uri = try {
+                java.net.URI(baseUrl)
+            } catch (_: Throwable) {
+                callbacks.onClosed()
+                return@launch
+            }
+            val host = uri.host
+            if (host == null) {
+                callbacks.onClosed()
+                return@launch
+            }
+            val isSecure = baseUrl.startsWith("https") || baseUrl.startsWith("wss")
+            val port = (if (uri.port > 0) uri.port else if (isSecure) 443 else 80).toUShort()
+            // Inner URL is plain ws:// — the tunnel provides the encryption.
+            val innerUrl = "ws://$host/v1/connect?token=$jwt"
+            val nowSecs = (System.currentTimeMillis() / 1000L).toULong()
+
+            val conn = try {
+                openTunneledWebsocket(
+                    config.bootstrapConfigJson,
+                    config.trustAnchor,
+                    nowSecs,
+                    host,
+                    port,
+                    config.deadlineMs,
+                    innerUrl,
+                    SFU_SUBPROTOCOL,
+                )
+            } catch (e: Throwable) {
+                callbacks.onClosed()
+                return@launch
+            }
+            tunneledConn = conn
+
+            // Ordered outbound sender on its own IO coroutine.
+            tunnelSendJob = scope.launch(Dispatchers.IO) {
+                try {
+                    for (json in tunnelOutbound) {
+                        runCatching { conn.sendText(json) }
+                    }
+                } catch (_: Throwable) {
+                    // sender torn down — receive loop owns onClosed
+                }
+            }
+
+            // Blocking receive loop.
+            try {
+                while (true) {
+                    val message = try {
+                        conn.recv()
+                    } catch (_: Throwable) {
+                        break
+                    }
+                    when (message) {
+                        is FfiWsMessage.Text -> handleFrameText(message.text)
+                        is FfiWsMessage.Binary ->
+                            handleFrameText(String(message.data, Charsets.UTF_8))
+                        is FfiWsMessage.Closed -> break
+                    }
+                }
+            } finally {
+                callbacks.onClosed()
+            }
         }
     }
 
@@ -204,13 +311,21 @@ class SfuSignalingClient(
      *  because a single channel serialises the writes. A full channel
      *  drops the frame (back-pressure), mirroring the web's behaviour. */
     private fun enqueue(json: String) {
+        // Armed: ordered send over the tunnel (the sender coroutine drains this).
+        if (tunneledConn != null) {
+            tunnelOutbound.trySend(json)
+            return
+        }
         session?.outgoing?.trySend(Frame.Text(json))
     }
 
-    /** Close the socket + cancel the receive loop. Idempotent. */
+    /** Close the socket + cancel the receive loop. Idempotent. Closing the
+     *  tunneled connection unblocks its receive loop (`recv()` returns Closed). */
     fun close() {
         receiveJob?.cancel()
         receiveJob = null
+        tunnelSendJob?.cancel()
+        tunnelSendJob = null
         val s = session
         session = null
         if (s != null) {
@@ -220,6 +335,13 @@ class SfuSignalingClient(
                 } catch (_: Throwable) {
                     // best-effort
                 }
+            }
+        }
+        val conn = tunneledConn
+        tunneledConn = null
+        if (conn != null) {
+            scope.launch(Dispatchers.IO) {
+                runCatching { conn.shutdown() }
             }
         }
         client.close()

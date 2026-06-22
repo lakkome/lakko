@@ -185,8 +185,11 @@ impl TunneledWsConnection {
         }
     }
 
-    /// Close the WebSocket (sends a Close frame + tears the tunnel down).
-    pub fn close(&self) -> Result<(), FfiError> {
+    /// Cleanly shut the WebSocket down (sends a Close frame + tears the tunnel
+    /// down). Named `shutdown` rather than `close` to avoid clashing with the
+    /// UniFFI object-disposal `close()` the foreign bindings generate (dropping
+    /// the object also closes the connection, but without the clean Close frame).
+    pub fn shutdown(&self) -> Result<(), FfiError> {
         let rt = ws_runtime()?;
         let mut sink = self.sink.lock().map_err(|_| FfiError::LockPoisoned)?;
         rt.block_on(sink.close())
@@ -274,6 +277,6 @@ mod tests {
             other => panic!("expected binary, got {other:?}"),
         }
 
-        conn.close().expect("close");
+        conn.shutdown().expect("shutdown");
     }
 }
