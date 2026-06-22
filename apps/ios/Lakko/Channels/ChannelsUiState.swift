@@ -37,11 +37,11 @@ public final class ChannelsUiState: ObservableObject {
     @Published public private(set) var counterByChannel: [String: UInt64] = [:]
 
     /// Per-channel subscriber-side X25519 keypair (Phase 4b
-    /// G4-3c). Persisted in `UserDefaults` under
-    /// ``Self.subscriberKeysStorageKey`` so a relaunch does
-    /// not strand the user without the secret needed to
-    /// open future seed envelopes. A follow-up sprint moves
-    /// the secret half into the device Keychain.
+    /// G4-3c). The secret half is persisted in the hardware-backed
+    /// Keychain (``ChannelSubscriberKeyStore``, G-29) so a relaunch
+    /// does not strand the user without the secret needed to open
+    /// future seed envelopes — never `UserDefaults` plaintext
+    /// (invariant #7).
     @Published public private(set)
     var subscriberKeysByChannel: [String: ChannelSubscriberKeys] = [:]
 
@@ -52,10 +52,11 @@ public final class ChannelsUiState: ObservableObject {
     @Published public private(set)
     var subscribedSeedByChannel: [String: Data] = [:]
 
-    /// `UserDefaults` key used by subscriber-keypair
-    /// persistence. The value is a JSON-encoded
-    /// `[PersistedSubscriberKey]`; see
-    /// ``persistSubscriberKeys()`` for the shape.
+    /// **Legacy** `UserDefaults` key — the pre-G-29 plaintext
+    /// storage location, now read only by ``loadSubscriberKeys()`` for
+    /// the one-time migration into ``ChannelSubscriberKeyStore`` (after
+    /// which the plaintext copy is scrubbed). New writes go to the
+    /// Keychain, never here.
     public static let subscriberKeysStorageKey =
         "lakko.channels.subscriber-keys.v1"
 
@@ -173,6 +174,13 @@ public final class ChannelsUiState: ObservableObject {
     }
 
     private func persistSubscriberKeys() {
+        // G-29 — the X25519 secret half is hardware-backed-Keychain material,
+        // not `UserDefaults` plaintext (invariant #7). An empty set wipes the
+        // item (un-follow-all / reset / logout).
+        if subscriberKeysByChannel.isEmpty {
+            ChannelSubscriberKeyStore.delete()
+            return
+        }
         let rows: [PersistedSubscriberKey] =
             subscriberKeysByChannel.map { (channelId, k) in
                 PersistedSubscriberKey(
@@ -182,14 +190,27 @@ public final class ChannelsUiState: ObservableObject {
                 )
             }
         guard let data = try? JSONEncoder().encode(rows) else { return }
-        UserDefaults.standard.set(data, forKey: Self.subscriberKeysStorageKey)
+        ChannelSubscriberKeyStore.save(data)
     }
 
     private static func loadSubscriberKeys() -> [String: ChannelSubscriberKeys] {
-        guard
-            let data = UserDefaults.standard.data(
+        var blob = ChannelSubscriberKeyStore.load()
+        if blob == nil {
+            // One-time migration: an install that persisted the keys to the
+            // legacy `UserDefaults` plaintext key before G-29 — move the blob
+            // into the Keychain and scrub the plaintext copy.
+            if let legacy = UserDefaults.standard.data(
                 forKey: subscriberKeysStorageKey
-            ),
+            ) {
+                ChannelSubscriberKeyStore.save(legacy)
+                UserDefaults.standard.removeObject(
+                    forKey: subscriberKeysStorageKey
+                )
+                blob = legacy
+            }
+        }
+        guard
+            let data = blob,
             let rows = try? JSONDecoder().decode(
                 [PersistedSubscriberKey].self,
                 from: data

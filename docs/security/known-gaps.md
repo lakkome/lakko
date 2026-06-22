@@ -1753,15 +1753,18 @@ auth/PoW (pseudonym-unguessability is the Phase-1 gate).
 
 **Genuinely open, security-relevant:**
 
-- **iOS channel keys persist in `UserDefaults`, not the Keychain**
-  (`ChannelsComposer.swift`, `ChannelsUiState.swift`). The publisher signing
-  seed and the subscriber secret X25519 half are stored unencrypted-at-rest
-  rather than under the hardware-backed Keychain — weak key-at-rest protection
-  for channel material specifically (the device-identity keys themselves are
-  Keychain/Secure-Enclave-backed per invariant #7). Fix: migrate the channel
-  secrets to the Keychain. Also on iOS the channel publisher seed is still a
-  demo value, not derived from the PublisherGroup MLS exporter — channel
-  content keying is not production-grade on iOS yet.
+- **iOS channel subscriber secret moved to the Keychain (G-29, Jun 2026).**
+  The subscriber-side X25519 secret half (it unwraps the per-subscriber HPKE
+  seed envelopes) used to persist in `UserDefaults` plaintext; it now lives in
+  the hardware-backed Keychain (`ChannelSubscriberKeyStore`,
+  `AfterFirstUnlockThisDeviceOnly`), with a one-time migration that scrubs the
+  legacy plaintext copy (invariant #7). Two prior claims on this surface were
+  stale and are corrected: the publisher `signingKeySeed` is **in-memory only**
+  (not persisted, so there is no at-rest exposure — persisting it to the
+  Keychain for cross-relaunch publisher continuity is a separate functional
+  follow-up), and the publisher content-key seed **is** derived from the
+  PublisherGroup MLS exporter (`publisherGroupOpenOrCreate` + `channelSeed`,
+  G4-2-mls-persistence), not a demo value. `xcodebuild` green.
 
 **Genuinely open, UX / feature limitations (not correctness or security
 breaks):**

@@ -47,10 +47,10 @@ public struct ChannelPublisherKeys: Equatable, Sendable {
 /// seed envelopes the publisher fans out on every
 /// rotation.
 ///
-/// Both halves are 32 bytes. Persisted in `UserDefaults`
-/// by `ChannelsUiState` for now — a follow-up sprint moves
-/// the secret into the device Keychain (same migration
-/// path the publisher's `signingKeySeed` will take).
+/// Both halves are 32 bytes. The secret half is persisted by
+/// `ChannelsUiState` in the hardware-backed Keychain
+/// (``ChannelSubscriberKeyStore``, G-29) — never `UserDefaults`
+/// plaintext (invariant #7).
 public struct ChannelSubscriberKeys: Equatable, Sendable {
     /// 32-byte X25519 secret.
     public let secret: Data
