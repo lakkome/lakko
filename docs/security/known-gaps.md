@@ -1342,47 +1342,80 @@ parroted a stale `deny.toml` comment). The real status:
   `deny.toml` stands in the meantime; residual is near-zero per
   the reachability analysis above.
 
-### G-25: Three unmaintained-crate warnings
+### G-25: Three unmaintained-crate warnings — **two of three CLOSED (Jun 2026); one open (wasm-only, waits on openmls)**
 
-The same `cargo audit` baseline flags three
-unmaintained-crate advisories. None are vulnerabilities
-— maintainers have wound down support, but the code
-itself works. All are transitive dependencies pinned by
-the upstream tooling we depend on; remediation requires
-upstream replacing them.
+The `cargo audit` baseline flagged three unmaintained-crate
+advisories. None are vulnerabilities — the maintainers wound
+down support, but the code works. Two were transitive through
+`uniffi 0.28.x` and **closed** by the `uniffi 0.28 → 0.31` bump
+(the same "major upstream bump drops the dep" remediation that
+closed G-24's `rsa` via sqlx 0.9). The third reaches us only on
+the wasm target via `openmls` and stays an accepted accept until
+openmls ships a release dropping `fluvio-wasm-timer`.
 
-- **`bincode 1.3.3`** (RUSTSEC-2025-0141) — under
-  `uniffi_macros 0.28.3 → uniffi 0.28.3`. Used at build
-  time to serialise UDL → macro outputs. Runtime impact:
-  none. Tracker: `mozilla/uniffi-rs` planning a 0.29
-  release that switches to `bincode 2.x`.
+- **`bincode 1.3.3`** (RUSTSEC-2025-0141) — **CLOSED
+  (Jun 2026).** Was under `uniffi_macros 0.28.3 →
+  uniffi 0.28.3` (build-time macro-output serialisation).
+  `uniffi_macros 0.31.2` no longer depends on `bincode`
+  (verified: `uniffi_macros@0.28.3` declared `bincode ^1.3
+  kind=normal`; `@0.31.2` declares neither). After bumping
+  `crates/lakko-ffi-uniffi` to `uniffi = "0.31"`,
+  `cargo update -p uniffi` reported `Removing bincode v1.3.3`
+  and `cargo tree -i bincode` is now empty.
 
-- **`instant 0.1.13`** (RUSTSEC-2024-0384) — under
-  `parking_lot_core 0.8.6 → parking_lot 0.11.2 →
-  fluvio-wasm-timer 0.2.5 → openmls 0.8.1`. WASM-only
-  timer abstraction. Runtime impact: low — only the
-  WASM target compiles this. Tracker: openmls 0.9
-  drops fluvio-wasm-timer for `web-time`.
+- **`paste 1.0.15`** (RUSTSEC-2024-0436) — **CLOSED
+  (Jun 2026).** Was under `uniffi_core 0.28.3` +
+  `uniffi_bindgen 0.28.3` (compile-time macro helper).
+  Both dropped `paste` at 0.31.2 (replaced by the maintained
+  `pastey` fork). `cargo update -p uniffi` reported
+  `Removing paste v1.0.15` and `cargo tree -i paste` is now
+  empty.
 
-- **`paste 1.0.15`** (RUSTSEC-2024-0436) — under
-  `uniffi_core 0.28.3 → uniffi 0.28.3`. Compile-time
-  macro helper. Runtime impact: none. Tracker: the
-  `dtolnay/paste` archival happened mid-uniffi-0.28
-  cycle; uniffi 0.29 is planning to drop the dep.
+- **`instant 0.1.13`** (RUSTSEC-2024-0384) — **OPEN
+  (accepted).** Under `parking_lot_core 0.8.6 →
+  parking_lot 0.11.2 → fluvio-wasm-timer 0.2.5 →
+  openmls 0.8.1`. A wasm-only timer abstraction — only the
+  wasm target compiles it (`cargo-deny` does not even
+  traverse it on the host target, so it never appears in a
+  `just audit` run here). Runtime impact: low. Not fixable
+  yet: openmls' latest release is **0.8.1** as of
+  2026-06-23 — the planned 0.9 (which drops
+  `fluvio-wasm-timer` for `web-time`) is unreleased. Re-check
+  on each openmls release; the openmls bump is an MLS-core
+  change requiring an ADR + property tests when it lands.
 
-**Status**: accepted upstream debt. CI is configured to
-warn (not fail) on unmaintained-crate advisories so
-they remain visible without blocking releases.
+**The uniffi 0.28 → 0.31 bump cost zero source changes** —
+`lakko-ffi-uniffi` uses proc-macro mode (`setup_scaffolding!`)
+with a crate-local bindgen (`uniffi_bindgen_main()`), so the
+runtime and generator move in lock-step. Verified end-to-end
+firsthand (2026-06-23): `cargo build -p lakko-ffi-uniffi` +
+`cargo test -p lakko-ffi-uniffi` (158 passed) + `cargo clippy`
+clean; `just regen-bindings` (Swift + Kotlin) succeeds; the iOS
+client (`xcodebuild` BUILD SUCCEEDED after `just build-ios`) and
+the Android client (`:app:compileDebugKotlin` BUILD SUCCESSFUL)
+both compile against the uniffi-0.31-generated bindings with no
+hand-written-code changes; `just audit` reports `advisories ok`.
 
-**Cumulative posture**: zero vulnerabilities in Lakko-
-authored code; two open advisories in transitive deps,
-both with reachability analysis above; three
-unmaintained-crate warnings pending upstream
-remediation. The `cargo audit` baseline is captured
-here as of `2026-05-28` (re-run delta vs `2026-05-27`:
-**zero change** — same 2 vulnerabilities, same 3
-unmaintained warnings, no new findings, no advisories
-resolved upstream. Post-G5-6-wireup confirmation: the
+**Status**: bincode + paste closed; instant accepted upstream
+debt (wasm-only, openmls-pinned). CI warns (not fails) on
+unmaintained-crate advisories so they remain visible without
+blocking releases.
+
+**Cumulative posture** (updated 2026-06-23): zero
+vulnerabilities in Lakko-authored code. The transitive-dep
+advisories have since been remediated as the upstream chain
+caught up — `rsa` (RUSTSEC-2023-0071, G-24) closed by sqlx
+0.9, `libcrux-chacha20poly1305` (RUSTSEC-2026-0124, G-23)
+closed by the vendored hpke-rs-libcrux fork, and `bincode` +
+`paste` (G-25) closed by the uniffi 0.31 bump. The only
+remaining unmaintained-crate warning is `instant`
+(RUSTSEC-2024-0384, G-25) — wasm-only, pending an openmls
+release that drops `fluvio-wasm-timer`. The `cargo audit`
+baseline below is captured as of `2026-05-28` (re-run delta
+vs `2026-05-27`: **zero change** — same 2 vulnerabilities,
+same 3 unmaintained warnings, no new findings, no advisories
+resolved upstream at that time. Post-G5-6-wireup
+confirmation: the
 `hpke 0.13` + `rand_core 0.9` deps added by ADR-0012
 brought in their pure-Rust RustCrypto dependencies
 [`x25519-dalek`, `aes-gcm`, `chacha20poly1305`,

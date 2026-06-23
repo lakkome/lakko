@@ -103,12 +103,12 @@ tokio-tungstenite = { version = "0.24", default-features = false, features = [
 # `uniffi::uniffi_bindgen_main()` in `src/bin/uniffi-bindgen.rs`
 # so `just regen-bindings` runs a workspace-pinned bindgen
 # instead of a floating `cargo install`. Both feed the same
-# 0.28 release — no ABI drift between cdylib and Kotlin / Swift
+# 0.31 release — no ABI drift between cdylib and Kotlin / Swift
 # generation.
-uniffi = { version = "0.28", features = ["build", "cli"] }
+uniffi = { version = "0.31", features = ["build", "cli"] }
 
 [build-dependencies]
-uniffi = { version = "0.28", features = ["build"] }
+uniffi = { version = "0.31", features = ["build"] }
 
 # The crate ships two artefacts: the `cdylib` from `[lib]` above
 # (real Swift / Kotlin runtime) plus the `uniffi-bindgen` host
