@@ -172,9 +172,12 @@ export interface CallSettings {
    *  default). On iOS this is a routing hint rather than a
    *  hard pick — AVAudioSession overrides for BT / wired. */
   readonly selectedAudioOutput: string | null;
-  /** Enumerated devices the OS exposes. Mock-populated in
-   *  Phase 3; real enumeration arrives with the WebRTC pod
-   *  sprints once the permission flow is wired. */
+  /** Enumerated devices the OS exposes. Populated by the call
+   *  settings panel from a real
+   *  `navigator.mediaDevices.enumerateDevices()` pull (on open
+   *  + on `devicechange`); empty until the panel first runs it.
+   *  Applying a selection to the live capture
+   *  (re-`getUserMedia` / `replaceTrack`) remains a follow-up. */
   readonly availableDevices: readonly CallDevice[];
   /** Noise-suppression filter — `getUserMedia({ audio: {
    *  noiseSuppression: true } })` on web; equivalent
@@ -526,10 +529,10 @@ export const callActions = {
     setSettingsOpen(open);
   },
   /** Replace the enumerated-devices snapshot. Called by the
-   *  WebRTC pod once it has run `navigator.mediaDevices.
-   *  enumerateDevices()` (with permission granted so labels
-   *  are populated). Idempotent — if the list is unchanged
-   *  by id, no signal change is published. */
+   *  call settings panel after it runs
+   *  `navigator.mediaDevices.enumerateDevices()` (labels are
+   *  populated once getUserMedia has been granted, i.e. during
+   *  a live call). */
   setAvailableDevices(devices: readonly CallDevice[]): void {
     setSettings((s) => ({ ...s, availableDevices: devices }));
   },

@@ -1874,14 +1874,27 @@ breaks):**
   camera in-call (`CallSession.setCameraEnabled` + the `onLocalStream`
   callback; `Call.tsx` `localStream` prop + `tileStream`). tsc + vitest (207)
   + vite build green; live two-peer video needs a browser with cameras (a
-  runtime gate, like G-26). Residual on this surface: the **in-call device
-  picker is still mock-populated** (no `enumerateDevices()` on the live-call
-  surface).
+  runtime gate, like G-26). **In-call device picker — wired to real enumeration
+  (Jun 2026):** `Call.tsx`'s settings panel now pulls
+  `navigator.mediaDevices.enumerateDevices()` into `callActions.setAvailableDevices`
+  on panel-open + on `devicechange` (the picker already rendered the list +
+  blank-label fallback + empty-state hint; nothing fed it before). Residual:
+  *applying* a selection to the live capture (re-`getUserMedia` /
+  `replaceTrack`) is still a follow-up — the picker stores the choice but the
+  capture chain doesn't yet honor it mid-call. tsc + vitest (207) + vite build
+  green.
 - **iOS contact inbox is foreground-poll only** — no `BGTaskScheduler`
   background fetch / APNs-driven wake, so new contact requests aren't surfaced
   while backgrounded.
-- **Android QR pairing scanner can't resume after a non-Lakko QR** without a
-  screen re-mount (the `hasDetected` latch has no reset path).
+- **Android QR pairing scanner — resumable after a non-Lakko QR (CLOSED,
+  Jun 2026).** The `QrScannerComposable` latch changed from a one-shot
+  `AtomicBoolean hasDetected` to an `AtomicReference<String?> lastHandledRaw`:
+  it now fires `onDetected` once per *distinct* decoded value, so the same
+  non-Lakko QR held in frame doesn't busy-loop but a *different* code (the user
+  panning onto the real pairing QR) fires immediately — no screen re-mount.
+  `DevicesScreen` no longer dead-ends to `ScanUi.Error` on a non-pairing QR; it
+  stays in `Scanning` and shows a transient inline hint. `:app:compileDebugKotlin`
+  green.
 - **iOS + Android accepted-contacts list is in-memory only** (rebuilt by
   re-polling the stranger inbox from cursor 0 on launch). The backup
   restore-merge of contacts is therefore an optimization, not a correctness

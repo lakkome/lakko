@@ -26,7 +26,7 @@ import com.google.mlkit.vision.barcode.BarcodeScanning
 import com.google.mlkit.vision.barcode.common.Barcode
 import com.google.mlkit.vision.common.InputImage
 import java.util.concurrent.Executors
-import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 
 /**
  * Compose camera + QR scanner (Phase 2a3b4, mirror of
@@ -46,11 +46,14 @@ import java.util.concurrent.atomic.AtomicBoolean
  *      decoder to QR only (`FORMAT_QR_CODE`) so the SDK doesn't
  *      waste cycles on Code128 / EAN / DataMatrix.
  *
- *   3. **`hasDetected` latch** — same shape as the iOS
- *      `ScannerViewController`. Once we fire [onDetected] for
- *      the first match we stop dispatching subsequent frames to
- *      the callback so SwiftUI / Compose can tear the view down
- *      without us racing on a second "detected" call.
+ *   3. **`lastHandledRaw` de-dup** — we fire [onDetected]
+ *      exactly once per *distinct* decoded value. The same QR
+ *      held in frame does not re-fire (so a non-Lakko QR can't
+ *      busy-loop the callback), but a *different* QR — e.g. the
+ *      user pans from a random code onto the real pairing code —
+ *      fires immediately. This lets the caller keep the scanner
+ *      mounted after a non-pairing QR instead of dead-ending and
+ *      forcing a screen re-mount to resume (G-29).
  *
  * The caller assumes the runtime CAMERA permission has been
  * granted before this composable is mounted —
@@ -64,7 +67,10 @@ public fun QrScannerComposable(
     onError: (String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val hasDetected = remember { AtomicBoolean(false) }
+    // Last decoded value we already dispatched to [onDetected]; a new frame
+    // with the SAME value is ignored, a DIFFERENT value fires again. Survives
+    // recomposition (it is `remember`ed) but is reset on a fresh mount.
+    val lastHandledRaw = remember { AtomicReference<String?>(null) }
 
     // Dedicated background executor for the analyser — CameraX
     // requires a non-main executor for ImageAnalysis or it
@@ -107,7 +113,7 @@ public fun QrScannerComposable(
                 previewView = previewView,
                 analysisExecutor = analysisExecutor,
                 scanner = scanner,
-                hasDetected = hasDetected,
+                lastHandledRaw = lastHandledRaw,
                 onDetected = onDetected,
                 onError = onError,
             )
@@ -122,7 +128,7 @@ private fun bindCamera(
     previewView: PreviewView,
     analysisExecutor: java.util.concurrent.Executor,
     scanner: BarcodeScanner,
-    hasDetected: AtomicBoolean,
+    lastHandledRaw: AtomicReference<String?>,
     onDetected: (String) -> Unit,
     onError: (String) -> Unit,
 ) {
@@ -149,7 +155,7 @@ private fun bindCamera(
                 processFrame(
                     imageProxy = imageProxy,
                     scanner = scanner,
-                    hasDetected = hasDetected,
+                    lastHandledRaw = lastHandledRaw,
                     onDetected = onDetected,
                 )
             }
@@ -188,21 +194,20 @@ private fun bindCamera(
 }
 
 /** ML Kit analyser callback. Decodes the proxied YUV frame
- *  into an [InputImage] + asks the QR-only scanner for hits;
- *  the FIRST hit fires [onDetected] and latches `hasDetected`
- *  so subsequent frames short-circuit until the analyser is
- *  unbound (host composable disposes). */
+ *  into an [InputImage] + asks the QR-only scanner for hits.
+ *  Fires [onDetected] once per *distinct* decoded value
+ *  (tracked via `lastHandledRaw`): the same code held in frame
+ *  does not re-fire, but a different code does — so the caller
+ *  can keep the scanner mounted after a non-pairing QR and
+ *  still catch the real one when the camera pans onto it
+ *  (G-29), without a screen re-mount. */
 @OptIn(ExperimentalGetImage::class)
 private fun processFrame(
     imageProxy: ImageProxy,
     scanner: BarcodeScanner,
-    hasDetected: AtomicBoolean,
+    lastHandledRaw: AtomicReference<String?>,
     onDetected: (String) -> Unit,
 ) {
-    if (hasDetected.get()) {
-        imageProxy.close()
-        return
-    }
     val mediaImage = imageProxy.image
     if (mediaImage == null) {
         imageProxy.close()
@@ -214,11 +219,14 @@ private fun processFrame(
     )
     scanner.process(image)
         .addOnSuccessListener { barcodes ->
-            if (hasDetected.get()) return@addOnSuccessListener
             for (barcode in barcodes) {
                 if (barcode.format != Barcode.FORMAT_QR_CODE) continue
                 val raw = barcode.rawValue ?: continue
-                if (hasDetected.compareAndSet(false, true)) {
+                // Dispatch only when this value differs from the last one we
+                // already handed up — `getAndSet` atomically records it. A
+                // non-Lakko QR thus fires exactly once (no busy-loop); panning
+                // onto a different code fires again with no re-mount.
+                if (lastHandledRaw.getAndSet(raw) != raw) {
                     onDetected(raw)
                 }
                 break

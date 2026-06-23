@@ -944,12 +944,66 @@ const ChatToggleButton: Component = () => (
 // Centred modal on desktop / right side panel on tablet /
 // bottom-sheet on mobile via a `@media` shorthand on the
 // outer container. Holds three device pickers + five
-// processing toggles. Mock-populated device list for now —
-// the WebRTC pod sprint replaces the mock provider with a
-// real `navigator.mediaDevices.enumerateDevices()` pull.
+// processing toggles. The device pickers list the OS's real
+// capture / playback devices via `refreshCallDevices` (below),
+// pulled when the panel opens and on hot-plug (`devicechange`).
 
-const SettingsPanel: Component = () => (
-  <Show when={callState.settingsOpen()}>
+/** Enumerate the OS's real capture / playback devices and publish them into
+ *  the shared call store so the gear-menu pickers list the user's actual
+ *  microphones, cameras, and speakers (replacing the empty placeholder list).
+ *  Device labels populate only once `getUserMedia` has been granted (i.e.
+ *  during a live call); before that the browser returns stable ids with blank
+ *  labels, which the picker renders with a generic fallback. */
+async function refreshCallDevices(): Promise<void> {
+  const md =
+    typeof navigator !== "undefined" ? navigator.mediaDevices : undefined;
+  if (!md?.enumerateDevices) {
+    return;
+  }
+  try {
+    const infos = await md.enumerateDevices();
+    const devices: CallDevice[] = infos
+      .filter(
+        (d) =>
+          d.kind === "audioinput" ||
+          d.kind === "videoinput" ||
+          d.kind === "audiooutput",
+      )
+      .map((d) => ({
+        id: d.deviceId,
+        label: d.label,
+        kind: d.kind as CallDevice["kind"],
+      }));
+    callActions.setAvailableDevices(devices);
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.warn("enumerateDevices failed", err);
+  }
+}
+
+const SettingsPanel: Component = () => {
+  // Refresh the device list whenever the panel opens, and keep it current on
+  // hot-plug (a mic / headset / camera connected or removed mid-call).
+  createEffect(() => {
+    if (!callState.settingsOpen()) {
+      return;
+    }
+    void refreshCallDevices();
+  });
+  onMount(() => {
+    const md =
+      typeof navigator !== "undefined" ? navigator.mediaDevices : undefined;
+    if (!md?.addEventListener) {
+      return;
+    }
+    const handler = (): void => {
+      void refreshCallDevices();
+    };
+    md.addEventListener("devicechange", handler);
+    onCleanup(() => md.removeEventListener("devicechange", handler));
+  });
+  return (
+    <Show when={callState.settingsOpen()}>
     <div
       role="dialog"
       aria-modal="true"
@@ -1069,7 +1123,8 @@ const SettingsPanel: Component = () => (
       </div>
     </div>
   </Show>
-);
+  );
+};
 
 const DevicePicker: Component<{
   label: string;

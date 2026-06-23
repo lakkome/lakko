@@ -411,6 +411,10 @@ private fun ScanTab(
         Manifest.permission.CAMERA,
     ) == PackageManager.PERMISSION_GRANTED
     var state: ScanUi by remember { mutableStateOf(ScanUi.Idle) }
+    // Transient inline hint shown over the live scanner when a non-Lakko QR is
+    // seen — we keep scanning (no dead-end to Error / re-mount) and just nudge
+    // the user (G-29). Cleared once a valid pairing QR is decoded.
+    var scanHint: String? by remember { mutableStateOf(null) }
 
     val cameraPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission(),
@@ -473,28 +477,26 @@ private fun ScanTab(
                 ) {
                     QrScannerComposable(
                         onDetected = { raw ->
-                            // Once we have a detected payload, only process if
-                            // we're still in Scanning state — `hasDetected`
-                            // already guards re-entry from the analyser side,
-                            // but the Compose-state check is the second line.
+                            // The analyser already de-dups by decoded value, so
+                            // this fires once per distinct QR. Only act while
+                            // still Scanning (second line of defence).
                             if (state !is ScanUi.Scanning) return@QrScannerComposable
                             val bytes = base64UrlDecodeNoPad(raw)
                             if (bytes == null) {
-                                // Not our pairing payload — keep the scanner
-                                // running by NOT flipping state. The
-                                // `hasDetected` AtomicBoolean inside the
-                                // composable already latched though, so
-                                // technically we'd need a re-mount to keep
-                                // scanning. For now we surface a soft error
-                                // and let the user retry.
-                                state = ScanUi.Error(
-                                    "Scanned code wasn't a Lakko pairing QR.",
-                                )
+                                // Not a Lakko pairing payload — keep the scanner
+                                // running and nudge the user. The composable
+                                // won't re-fire for this same QR, but will for a
+                                // different one, so the camera can pan straight
+                                // onto the real code with no re-mount (G-29).
+                                scanHint =
+                                    "That code isn't a Lakko pairing QR. Point " +
+                                    "the camera at the QR on your other device."
                                 return@QrScannerComposable
                             }
                             // ADR-0018 / lakko-security finding #1 —
                             // park for explicit confirmation instead of
                             // running the transfer on a bare decode.
+                            scanHint = null
                             state = ScanUi.ConfirmTransfer(bytes)
                         },
                         onError = { msg ->
@@ -502,8 +504,18 @@ private fun ScanTab(
                         },
                     )
                 }
+                scanHint?.let { hint ->
+                    Text(
+                        hint,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
                 OutlinedButton(
-                    onClick = { state = ScanUi.Idle },
+                    onClick = {
+                        scanHint = null
+                        state = ScanUi.Idle
+                    },
                 ) {
                     Text("Cancel")
                 }
