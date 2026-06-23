@@ -126,7 +126,10 @@ impl MetricsExporter {
         );
         metrics::describe_counter!(
             names::SIGNALING_FRAMES_TOTAL,
-            "Cumulative count of signaling frames received from peers"
+            "Cumulative count of signaling frames, labelled by `direction` \
+             (inbound = received from a peer / outbound = broadcast to peers) \
+             and `kind` (the typed frame kind, or `invalid` for an \
+             undecodable inbound frame)"
         );
         metrics::describe_gauge!(names::PEERS_ACTIVE, "Number of peers currently registered");
         metrics::describe_gauge!(
@@ -146,7 +149,11 @@ impl MetricsExporter {
         metrics::counter!(names::PEERS_ADMITTED_TOTAL).absolute(0);
         metrics::counter!(names::PEERS_REJECTED_TOTAL).absolute(0);
         metrics::counter!(names::CALLS_TOTAL).absolute(0);
-        metrics::counter!(names::SIGNALING_FRAMES_TOTAL).absolute(0);
+        // SIGNALING_FRAMES_TOTAL is now labelled by `direction` + `kind`; an
+        // unlabelled zero-init would ship a meaningless empty-label series
+        // alongside the real ones, so — like the labelled
+        // MEDIA_FRAMES_DROPPED_TOTAL — it is not pre-initialised and first
+        // appears once traffic flows.
         metrics::gauge!(names::PEERS_ACTIVE).set(0.0);
         metrics::gauge!(names::JWKS_CACHE_AGE_SECS).set(0.0);
         metrics::counter!(names::MEDIA_FRAMES_FORWARDED_TOTAL).absolute(0);

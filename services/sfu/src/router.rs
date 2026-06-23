@@ -336,7 +336,14 @@ impl<'a> Router<'a> {
             }
         }
         if delivered > 0 {
-            metrics::counter!(names::SIGNALING_FRAMES_TOTAL).increment(delivered as u64);
+            // Outbound fan-out — one increment per recipient the frame reached,
+            // bucketed by the broadcast frame's typed kind.
+            metrics::counter!(
+                names::SIGNALING_FRAMES_TOTAL,
+                "direction" => "outbound",
+                "kind" => frame.kind_str(),
+            )
+            .increment(delivered as u64);
         }
         if dropped > 0 {
             warn!(

@@ -261,24 +261,42 @@ async fn handle_socket(
                     );
                     break;
                 }
-                metrics::counter!(names::SIGNALING_FRAMES_TOTAL).increment(1);
                 match serde_json::from_str::<ClientFrame>(&text) {
-                    Ok(parsed) => match router.handle_client_frame(&peer, parsed).await {
-                        Ok(Some(reply)) => {
-                            let _ = send_via_self(&peer, reply);
-                        },
-                        Ok(None) => {},
-                        Err(e) => {
-                            let _ = send_via_self(
-                                &peer,
-                                ServerFrame::Error {
-                                    code: e.to_wire_code(),
-                                    detail: e.to_string(),
-                                },
-                            );
-                        },
+                    Ok(parsed) => {
+                        // Count the inbound frame by its typed kind. Captured
+                        // before `parsed` is moved into the router.
+                        metrics::counter!(
+                            names::SIGNALING_FRAMES_TOTAL,
+                            "direction" => "inbound",
+                            "kind" => parsed.kind_str(),
+                        )
+                        .increment(1);
+                        match router.handle_client_frame(&peer, parsed).await {
+                            Ok(Some(reply)) => {
+                                let _ = send_via_self(&peer, reply);
+                            },
+                            Ok(None) => {},
+                            Err(e) => {
+                                let _ = send_via_self(
+                                    &peer,
+                                    ServerFrame::Error {
+                                        code: e.to_wire_code(),
+                                        detail: e.to_string(),
+                                    },
+                                );
+                            },
+                        }
                     },
                     Err(decode_err) => {
+                        // A frame that passed the size gate but failed to parse
+                        // still counts as inbound traffic — bucket it as
+                        // `invalid` so an undecodable-frame spike is visible.
+                        metrics::counter!(
+                            names::SIGNALING_FRAMES_TOTAL,
+                            "direction" => "inbound",
+                            "kind" => "invalid",
+                        )
+                        .increment(1);
                         let _ = send_via_self(
                             &peer,
                             ServerFrame::Error {

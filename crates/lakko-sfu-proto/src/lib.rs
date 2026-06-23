@@ -196,6 +196,27 @@ pub enum ServerFrame {
     },
 }
 
+impl ServerFrame {
+    /// Stable kebab-case discriminant for this frame, matching the serde
+    /// `kind` tag. Intended for low-cardinality metric labels and structured
+    /// logs — never derive protocol behaviour from it. Kept in lock-step with
+    /// the `#[serde(rename_all = "kebab-case")]` tags above (a unit test
+    /// asserts they never drift).
+    #[must_use]
+    pub const fn kind_str(&self) -> &'static str {
+        match self {
+            Self::Welcome { .. } => "welcome",
+            Self::PeerJoined { .. } => "peer-joined",
+            Self::PeerLeft { .. } => "peer-left",
+            Self::SignalRelay { .. } => "signal-relay",
+            Self::Error { .. } => "error",
+            Self::Pong { .. } => "pong",
+            Self::SdpAnswer { .. } => "sdp-answer",
+            Self::SdpOffer { .. } => "sdp-offer",
+        }
+    }
+}
+
 /// Client-to-server frame.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
@@ -263,6 +284,24 @@ pub enum ClientFrame {
         /// `createAnswer()`.
         sdp: String,
     },
+}
+
+impl ClientFrame {
+    /// Stable kebab-case discriminant for this frame, matching the serde
+    /// `kind` tag. Intended for low-cardinality metric labels and structured
+    /// logs — never derive protocol behaviour from it. Kept in lock-step with
+    /// the `#[serde(rename_all = "kebab-case")]` tags above (a unit test
+    /// asserts they never drift).
+    #[must_use]
+    pub const fn kind_str(&self) -> &'static str {
+        match self {
+            Self::SignalRelay { .. } => "signal-relay",
+            Self::Ping { .. } => "ping",
+            Self::SdpOffer { .. } => "sdp-offer",
+            Self::IceCandidate { .. } => "ice-candidate",
+            Self::SdpAnswer { .. } => "sdp-answer",
+        }
+    }
 }
 
 /// Destination selector for [`ClientFrame::SignalRelay`].
@@ -561,5 +600,84 @@ mod tests {
         let snap: PeerSnapshot = serde_json::from_str(json).expect("decode");
         assert_eq!(snap.peer_tag, "");
         assert_eq!(snap.peer_id, "p1");
+    }
+
+    // -- kind_str() drift guards (metric labels must match serde tags) -----
+
+    /// `ServerFrame::kind_str()` must equal the serialized `kind` tag for
+    /// every variant — a metric label that drifts from the wire tag is a
+    /// silent dashboard lie.
+    #[test]
+    fn server_frame_kind_str_matches_serde_tag() {
+        let frames = [
+            ServerFrame::Welcome {
+                peer_id: "p".into(),
+                call_id: "c".into(),
+                roster: vec![],
+                server_ts: 0,
+            },
+            ServerFrame::PeerJoined {
+                peer_id: "p".into(),
+                account_pseudonym: "a".into(),
+                peer_tag: "t".into(),
+            },
+            ServerFrame::PeerLeft {
+                peer_id: "p".into(),
+            },
+            ServerFrame::SignalRelay {
+                from: "p".into(),
+                payload_b64: "AAAA".into(),
+            },
+            ServerFrame::Error {
+                code: ErrorCode::BadFrame,
+                detail: "d".into(),
+            },
+            ServerFrame::Pong { nonce: 1 },
+            ServerFrame::SdpAnswer { sdp: "v=0".into() },
+            ServerFrame::SdpOffer { sdp: "v=0".into() },
+        ];
+        for frame in &frames {
+            let json = encode_server_frame(frame).expect("encode");
+            let value: serde_json::Value = serde_json::from_str(&json).expect("parse");
+            let tag = value
+                .get("kind")
+                .and_then(serde_json::Value::as_str)
+                .expect("kind tag present");
+            assert_eq!(
+                frame.kind_str(),
+                tag,
+                "ServerFrame::kind_str drifted from serde tag: {json}"
+            );
+        }
+    }
+
+    /// Same drift guard for every `ClientFrame` variant.
+    #[test]
+    fn client_frame_kind_str_matches_serde_tag() {
+        let frames = [
+            ClientFrame::SignalRelay {
+                to: RelayTarget::Call,
+                payload_b64: "AAAA".into(),
+            },
+            ClientFrame::Ping { nonce: 1 },
+            ClientFrame::SdpOffer { sdp: "v=0".into() },
+            ClientFrame::IceCandidate {
+                candidate_sdp: "candidate:1".into(),
+            },
+            ClientFrame::SdpAnswer { sdp: "v=0".into() },
+        ];
+        for frame in &frames {
+            let json = encode_client_frame(frame).expect("encode");
+            let value: serde_json::Value = serde_json::from_str(&json).expect("parse");
+            let tag = value
+                .get("kind")
+                .and_then(serde_json::Value::as_str)
+                .expect("kind tag present");
+            assert_eq!(
+                frame.kind_str(),
+                tag,
+                "ClientFrame::kind_str drifted from serde tag: {json}"
+            );
+        }
     }
 }

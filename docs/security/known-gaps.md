@@ -1915,9 +1915,17 @@ breaks):**
   `#[cfg(test)]` solver helpers). Verified: `cargo test -p lakko-pow-server`
   (5 passed), clippy `-D warnings` clean on the crate + the 3 services, their
   unit suites green, `just audit` clean.
-- `lakko_sfu_signaling_frames_total` is a single un-labelled bucket despite the
-  typed signaling protocol existing — per-`kind` breakdown would aid
-  dashboards; observability only.
+- **CLOSED (Jun 2026).** `lakko_sfu_signaling_frames_total` is now labelled by
+  `direction` (inbound = received from a peer / outbound = broadcast to peers)
+  + `kind` (the typed frame kind, or `invalid` for an undecodable inbound
+  frame). `lakko-sfu-proto` gained a `kind_str()` accessor on `ServerFrame` +
+  `ClientFrame` (the single source of truth for the kebab tag, with unit tests
+  asserting it never drifts from the serde `kind` tag); `signaling.rs` labels
+  the inbound counter by the parsed `ClientFrame` kind, `router.rs` the
+  outbound broadcast counter by the `ServerFrame` kind. The unlabelled
+  zero-init was dropped (like the labelled `MEDIA_FRAMES_DROPPED_TOTAL`, it
+  first appears once traffic flows). `cargo test -p lakko-sfu-proto`
+  (21 passed) + `-p lakko-svc-sfu` green; clippy `-D warnings` clean.
 
 ### G-30: KT-log (S1-S3) deployed-verifier scope + append-binding trust + equivocation residual — **#2 closed (ADR-0019), #1 closed (ADR-0020)**
 
