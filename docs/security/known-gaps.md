@@ -1304,6 +1304,17 @@ swapping to a constant-time RSA crate (no tracker —
 upstream position is "no fix coming"). Re-audit if MySQL
 auth surface changes.
 
+**Re-verified (Jun 2026).** `cargo update --dry-run -p rsa`
++ `-p sqlx-mysql` report **0 compatible updates** — `rsa`
+0.9.10 + `sqlx` / `sqlx-mysql` 0.8.6 are already the latest
+semver-compatible releases. `rsa` 0.10.0 (the constant-time
+rework `sqlx`#2911 awaits) is a major bump `sqlx` has not
+adopted, so no automatic remediation exists. The advisory
+stays a documented accept in `deny.toml` (`RUSTSEC-2023-0071`
+in `[advisories].ignore`); the reachability + localhost-only
+mitigation above are unchanged. **Not fixable upstream yet;
+accept stands.**
+
 ### G-25: Three unmaintained-crate warnings
 
 The same `cargo audit` baseline flags three
