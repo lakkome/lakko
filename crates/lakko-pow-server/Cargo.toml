@@ -1,0 +1,52 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+[package]
+name = "lakko-pow-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Server-side Equix proof-of-work: challenge issue + verify + consume + prune, shared across the auth / discovery / push-gw services (G-29 dedup)"
+
+[lints]
+workspace = true
+
+[dependencies]
+tokio.workspace = true
+tracing.workspace = true
+serde.workspace = true
+
+# Server-side Equix verify. The `compiler` feature pulls the x86_64 JIT for a
+# 5-10x speedup (server-only; NOT portable to wasm32). The client *solver* is
+# the separate `lakko-pow` crate, which deliberately stays interpreter-only so
+# it can run in the browser — folding this server verify into that crate would
+# clash with its client-only / wasm32 feature posture, hence a dedicated crate.
+equix = { version = "0.6", features = ["compiler"] }
+
+# SHA-256 for the leading-zero-bits effort gate.
+sha2 = "0.10"
+
+# CSPRNG for the per-challenge seed.
+rand = "0.8"
+
+# Base64 for the wire encoding of seed / nonce / solution.
+base64 = "0.22"
+
+# DB-backed single-use challenge store (`pow_challenges`). Each service owns its
+# own table (the per-service-DB rule), but the schema + queries are identical —
+# this crate carries the one copy. Features mirror the services minus the bits
+# this crate does not use (no `migrate` / `macros` / `chrono`).
+sqlx = { version = "0.9", default-features = false, features = [
+    "runtime-tokio",
+    "tls-rustls-ring",
+    "mysql",
+] }
+
+# `From<PowError> for (StatusCode, String)` so the axum handlers in each service
+# can `?`-convert. `axum::http::StatusCode` IS `http::StatusCode`, so depending
+# on the lean `http` crate avoids pulling all of axum into this verifier crate.
+http = "1"

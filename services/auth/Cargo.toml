@@ -53,10 +53,17 @@ rand = "0.8"
 base64 = "0.22"
 uuid = { version = "1", features = ["v7", "serde"] }
 
-# Equix proof-of-work (LGPL-3.0-only — AGPL-compatible). Memory-hard PoW
-# from the Tor Project, used in onion services. Server only verifies;
-# clients (lakko-ffi-uniffi / lakko-ffi-wasm) will need solve later.
-# `compiler` feature speeds up solve via runtime JIT (used in tests).
+# Server-side Equix proof-of-work — challenge issue + verify + consume + prune
+# (G-29 dedup). Previously this service carried its own copy of the verifier in
+# `src/pow.rs`; that logic now lives once in the shared crate, and `src/pow.rs`
+# is a thin re-export + axum handler shim.
+lakko-pow-server.workspace = true
+
+# Equix (LGPL-3.0-only — AGPL-compatible). Memory-hard PoW from the Tor
+# Project. The server-side verify now lives in `lakko-pow-server`; auth still
+# pulls `equix` directly because its `#[cfg(test)]` helpers solve a real puzzle
+# to drive the gated endpoints' integration tests. The `compiler` feature is
+# the runtime JIT speedup used by those test solves.
 equix = { version = "0.6", features = ["compiler"] }
 sha2 = "0.10"
 

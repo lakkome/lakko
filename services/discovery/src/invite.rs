@@ -1127,8 +1127,8 @@ fn within_replay_window(signed_at_ms: u64, now_ms: u64) -> bool {
 /// 7d / 30d), so an hourly sweep is proportionate — much
 /// shorter and we'd be hammering the DB for little value, much
 /// longer and the storage-bloat side leaks across deploys.
-/// `pow::PRUNE_INTERVAL` is 60 s for the same crate's
-/// short-lived challenges; the asymmetry is deliberate.
+/// the `lakko-pow-server` challenge prune is 60 s for the
+/// short-lived PoW challenges; the asymmetry is deliberate.
 const PRUNE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60 * 60);
 
 /// Spawn a background task that periodically deletes expired

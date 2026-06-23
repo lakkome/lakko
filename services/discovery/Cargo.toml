@@ -52,11 +52,13 @@ voprf = { version = "0.5", default-features = false, features = [
 ] }
 generic-array = "0.14"
 
-# Server-side PoW verify, mirrored from services/auth — Equix puzzle, SHA-256
-# effort filter (still duplicated; per-service DB rule keeps each
-# `pow_challenges` table separate). The `lakko-pow` crate is the CLIENT
-# solver only and does not cover this server verify path.
-equix = { version = "0.6", features = ["compiler"] }
+# Server-side PoW verify/issue/consume/prune (G-29 dedup; `src/pow.rs` is now a
+# thin shim over this shared crate). `equix` is no longer a direct dep here —
+# it comes in transitively through `lakko-pow-server`.
+lakko-pow-server.workspace = true
+
+# SHA-256 (used by call-invite / invite hashing). The server-side PoW verify
+# (Equix puzzle + SHA-256 effort filter) moved to `lakko-pow-server` above.
 sha2 = "0.10"
 
 base64 = "0.22"

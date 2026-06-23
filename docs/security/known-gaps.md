@@ -1889,9 +1889,19 @@ breaks):**
 
 **Genuinely open, maintenance / observability:**
 
-- The PoW challenge-issue/verify/consume logic is duplicated across
-  `services/{auth,discovery,push-gw}/src/pow.rs` (the `lakko-pow` crate is the
-  client *solver*, a different concern) — drift risk, not a correctness gap.
+- **CLOSED (Jun 2026).** The PoW challenge-issue/verify/consume/prune logic
+  (previously duplicated near-verbatim across
+  `services/{auth,discovery,push-gw}/src/pow.rs` — a drift risk where a
+  security fix to one copy could miss the others) now lives once in the new
+  `lakko-pow-server` crate (distinct from `lakko-pow`, the wasm-portable client
+  *solver*). The three diverged only in the doc comments + the effort env-var
+  name; the crate parameterises the latter (`configured_effort_bits(var_name)`)
+  and each service's `src/pow.rs` is reduced to a thin re-export + the axum
+  handler that needs its `AppState`. `equix` is dropped as a direct dep of
+  discovery + push-gw (now transitive via the crate; auth keeps it for its
+  `#[cfg(test)]` solver helpers). Verified: `cargo test -p lakko-pow-server`
+  (5 passed), clippy `-D warnings` clean on the crate + the 3 services, their
+  unit suites green, `just audit` clean.
 - `lakko_sfu_signaling_frames_total` is a single un-labelled bucket despite the
   typed signaling protocol existing — per-`kind` breakdown would aid
   dashboards; observability only.
