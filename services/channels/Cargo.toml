@@ -53,7 +53,7 @@ base64 = "0.22"
 # other lakko service uses; production binds to MariaDB
 # via LAKKO_CHANNELS_DATABASE_URL while tests fall back
 # to the in-memory store.
-sqlx = { version = "0.8", default-features = false, features = [
+sqlx = { version = "0.9", default-features = false, features = [
     "runtime-tokio",
     "tls-rustls-ring",
     "mysql",

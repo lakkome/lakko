@@ -1254,7 +1254,21 @@ HPKE-RS length checks, and the attacker-facing ingest is gated by
 a rate limit + PoW + Privacy Pass — so this was a low-risk DoS at
 worst even before the fix.)
 
-### G-24: `rsa 0.9.10` — RUSTSEC-2023-0071 (MEDIUM 5.9) — Marvin Attack
+### G-24: `rsa 0.9.10` — RUSTSEC-2023-0071 (MEDIUM 5.9) — Marvin Attack — **CLOSED (Jun 2026)**
+
+**Closed by dropping rsa, not accepting it.** Bumped `sqlx` 0.8 → 0.9
+(released, `rust-version` 1.94 ≤ our pinned 1.95) across all 7 services and
+omitted the now-feature-gated `rsa` feature (`sqlx-mysql/rsa`), so the crate is
+no longer in the dependency tree at all — `cargo tree -i rsa` is empty and
+`cargo deny check` passes with **no ignore** for RUSTSEC-2023-0071 (the
+`deny.toml` entry was removed). The only 0.9 breaking change for our usage was
+the SQL-injection guard (`SqlSafeStr`): the 4 audited dynamic-SQL sites in
+`services/ds/src/journal.rs` (table/column from a fixed `Queue` enum, never user
+input) now wrap the string in `sqlx::AssertSqlSafe`. Workspace `cargo check` +
+`cargo deny` + the `ds` tests are green. The original analysis below is retained
+for history.
+
+---
 
 > Potential key recovery through timing sidechannels.
 > No fixed upgrade is available.

@@ -204,7 +204,7 @@ async fn publish(
         queue.owner_col(),
     );
 
-    let result = sqlx::query(&sql)
+    let result = sqlx::query(sqlx::AssertSqlSafe(sql))
         .bind(&owner_id[..])
         .bind(bytes.as_ref())
         .execute(pool)
@@ -220,7 +220,7 @@ async fn publish(
 
     // Fetch created_at — cheap, lets the client display "delivered at".
     let sql = format!("SELECT created_at FROM {} WHERE id = ?", queue.table());
-    let row: (DateTime<Utc>,) = sqlx::query_as(&sql)
+    let row: (DateTime<Utc>,) = sqlx::query_as(sqlx::AssertSqlSafe(sql))
         .bind(id)
         .fetch_one(pool)
         .await
@@ -308,7 +308,7 @@ async fn fetch(
         queue.owner_col(),
     );
 
-    let rows: Vec<(u64, Vec<u8>, DateTime<Utc>)> = sqlx::query_as(&sql)
+    let rows: Vec<(u64, Vec<u8>, DateTime<Utc>)> = sqlx::query_as(sqlx::AssertSqlSafe(sql))
         .bind(&owner_id[..])
         .bind(after)
         .bind(probe_limit)
@@ -493,7 +493,11 @@ pub(crate) fn spawn_pruner(pool: MySqlPool) -> tokio::task::JoinHandle<()> {
                     "DELETE FROM {} WHERE created_at < NOW(3) - INTERVAL ? SECOND",
                     queue.table(),
                 );
-                match sqlx::query(&sql).bind(RETENTION_SECS).execute(&pool).await {
+                match sqlx::query(sqlx::AssertSqlSafe(sql))
+                    .bind(RETENTION_SECS)
+                    .execute(&pool)
+                    .await
+                {
                     Ok(r) if r.rows_affected() > 0 => {
                         tracing::debug!(
                             queue = ?queue,

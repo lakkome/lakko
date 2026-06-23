@@ -17,21 +17,10 @@ ignore = [
     "RUSTSEC-2025-0141",
     # paste 1.0.x → uniffi_core / uniffi_bindgen (RUSTSEC-2024-0436, unmaintained).
     "RUSTSEC-2024-0436",
-    # Marvin Attack — rsa 0.9.x. RUSTSEC-2023-0071 has NO patched rsa version
-    # (advisory `patched = []`); the advisory is cleared by DROPPING rsa, not by
-    # upgrading it. Transitive through sqlx-mysql 0.8.x, whose `auth.rs` uses
-    # `rsa::` UNCONDITIONALLY (the `optional = true` dep is not `#[cfg]`-gated),
-    # so on 0.8.x rsa cannot be removed without forking sqlx.
-    # FIX PATH (real, not yet done): sqlx 0.9.0 is released and feature-gates rsa
-    # (`sqlx-mysql/rsa = [dep:rand, dep:rsa]`); bumping 0.8 -> 0.9 and OMITTING
-    # the `rsa` feature drops the crate from the tree entirely — our MariaDB is
-    # localhost-only over a Unix socket / TLS, so the caching_sha2_password
-    # RSA-password-encrypt path is never exercised at runtime anyway. Deferred
-    # only because 0.8 -> 0.9 is a breaking, multi-service migration. Residual
-    # until then is near-zero: encrypt-side only, localhost DB, and the MySQL
-    # connection password is the service's OWN (OPAQUE-PAKE runs above the DB
-    # layer), never a user's. See known-gaps G-24.
-    "RUSTSEC-2023-0071",
+    # NB: RUSTSEC-2023-0071 (rsa 0.9.x Marvin Attack) is FIXED, not ignored —
+    # G-24 closed by the sqlx 0.8 -> 0.9 bump, which feature-gates rsa
+    # (`sqlx-mysql/rsa`); we omit the `rsa` feature, so the crate is no longer
+    # in the tree (`cargo tree -i rsa` is empty). See known-gaps G-24.
     # NB: RUSTSEC-2026-0124 (libcrux-chacha20poly1305 0.0.7 overlong-buffer
     # panic) is FIXED, not ignored — the vendored `hpke-rs-libcrux` fork in
     # `crates/vendor/` ([patch.crates-io]) pulls libcrux-chacha20poly1305
