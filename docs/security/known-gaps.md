@@ -1304,16 +1304,29 @@ swapping to a constant-time RSA crate (no tracker —
 upstream position is "no fix coming"). Re-audit if MySQL
 auth surface changes.
 
-**Re-verified (Jun 2026).** `cargo update --dry-run -p rsa`
-+ `-p sqlx-mysql` report **0 compatible updates** — `rsa`
-0.9.10 + `sqlx` / `sqlx-mysql` 0.8.6 are already the latest
-semver-compatible releases. `rsa` 0.10.0 (the constant-time
-rework `sqlx`#2911 awaits) is a major bump `sqlx` has not
-adopted, so no automatic remediation exists. The advisory
-stays a documented accept in `deny.toml` (`RUSTSEC-2023-0071`
-in `[advisories].ignore`); the reachability + localhost-only
-mitigation above are unchanged. **Not fixable upstream yet;
-accept stands.**
+**Corrected + re-verified (Jun 2026).** An earlier note here
+claimed this was "not fixable upstream" — that was wrong (it
+parroted a stale `deny.toml` comment). The real status:
+- `cargo update --dry-run` shows 0 **semver-compatible** updates
+  — `rsa` 0.9.10 + `sqlx` 0.8.6 are the latest 0.x releases —
+  but that only covers in-range bumps.
+- On `sqlx-mysql` **0.8.x** the `rsa` crate cannot be removed:
+  `optional = true` in the manifest, yet `connection/auth.rs`
+  does `use rsa::{…}` UNCONDITIONALLY (no `#[cfg(feature="rsa")]`),
+  so dropping the feature is a compile error.
+- **`sqlx` 0.9.0 is released** (the stale comment said sqlx was
+  still "waiting on rsa 0.10.0") and **feature-gates rsa**
+  (`sqlx-mysql/rsa = [dep:rand, dep:rsa]`). The advisory itself
+  has `patched = []` — no fixed rsa exists — so the fix is to
+  **drop** rsa, not upgrade it: bump 0.8 → 0.9 and omit the `rsa`
+  feature, and the crate leaves the tree entirely (our MariaDB is
+  localhost-only over a Unix socket / TLS, so the
+  caching_sha2_password RSA path is never exercised).
+- **Status: a real, concrete fix exists (sqlx 0.9 + no rsa
+  feature) — deferred only because the 0.8 → 0.9 bump is a
+  breaking, multi-service migration.** Documented accept in
+  `deny.toml` stands in the meantime; residual is near-zero per
+  the reachability analysis above.
 
 ### G-25: Three unmaintained-crate warnings
 
