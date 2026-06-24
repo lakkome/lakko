@@ -1889,10 +1889,17 @@ breaks):**
   (Jun 2026):** `Call.tsx`'s settings panel now pulls
   `navigator.mediaDevices.enumerateDevices()` into `callActions.setAvailableDevices`
   on panel-open + on `devicechange` (the picker already rendered the list +
-  blank-label fallback + empty-state hint; nothing fed it before). Residual:
-  *applying* a selection to the live capture (re-`getUserMedia` /
-  `replaceTrack`) is still a follow-up — the picker stores the choice but the
-  capture chain doesn't yet honor it mid-call. tsc + vitest (207) + vite build
+  blank-label fallback + empty-state hint; nothing fed it before).
+  **Applying the selection — wired (Jun 2026):** the 1×1 `CallSession` honours
+  the picked mic/camera at capture time (`CallMedia.audioDeviceId`/`videoDeviceId`
+  → `getUserMedia({ deviceId: { exact } })`) and
+  `switchAudioInput`/`switchVideoInput` re-capture + `replaceTrack` on the live
+  sender for a mid-call change (no renegotiation, preserves the mute state);
+  `Chat.tsx` threads the selection into the outgoing dial + a debounced effect
+  applies a mid-call picker change. Residual: the SFU multi-party path drives
+  capture through its own session (no switch there yet), and the answerer
+  captures the OS default at accept (the switch effect then applies any
+  pre-selected device once the call is live). tsc + vitest (207) + vite build
   green.
 - **iOS contact inbox — background refresh wired (Jun 2026).** A
   `BGAppRefreshTask` (`ContactBackgroundRefresh`, registered on the scene via

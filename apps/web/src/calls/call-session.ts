@@ -137,6 +137,26 @@ export interface CallSessionCallbacks {
 export interface CallMedia {
   readonly audio: boolean;
   readonly video: boolean;
+  /** Preferred microphone `deviceId` (from the in-call device picker).
+   *  `null`/absent → the OS default. Honoured at initial capture; a mid-call
+   *  change goes through {@link CallSession.switchAudioInput}. */
+  readonly audioDeviceId?: string | null;
+  /** Preferred camera `deviceId`. `null`/absent → the OS default. */
+  readonly videoDeviceId?: string | null;
+}
+
+/** Build a `getUserMedia` per-kind constraint: `false` when the kind is
+ *  disabled, an `{ deviceId: { exact } }` object when a specific device is
+ *  picked, else `true` (OS default). */
+function trackConstraint(
+  enabled: boolean,
+  deviceId: string | null | undefined,
+): boolean | MediaTrackConstraints {
+  if (!enabled) return false;
+  if (deviceId != null && deviceId.length > 0) {
+    return { deviceId: { exact: deviceId } };
+  }
+  return true;
 }
 
 /** Public STUN fallback. Replaced by self-hosted in Phase
@@ -383,6 +403,81 @@ export class CallSession {
     }
   }
 
+  /**
+   * Switch the live microphone to a specific `deviceId` mid-call (from the
+   * in-call device picker). Re-captures that one kind with the picked device
+   * and `replaceTrack`s it on the existing sender — same-kind, so no
+   * renegotiation. Best-effort: a capture / replace failure keeps the current
+   * track. A no-op when there is no live audio track to replace.
+   */
+  async switchAudioInput(deviceId: string): Promise<void> {
+    await this.switchInput("audio", deviceId);
+  }
+
+  /** Switch the live camera to a specific `deviceId` mid-call. Same shape as
+   *  {@link switchAudioInput}; a no-op on an audio-only call. */
+  async switchVideoInput(deviceId: string): Promise<void> {
+    await this.switchInput("video", deviceId);
+  }
+
+  private async switchInput(
+    kind: "audio" | "video",
+    deviceId: string,
+  ): Promise<void> {
+    if (this.pc === null || this.localStream === null) return;
+    if (deviceId.length === 0) return;
+    // Only meaningful if a sender of this kind is already on the wire.
+    const sender = this.pc
+      .getSenders()
+      .find((s) => s.track?.kind === kind);
+    if (sender === undefined) return;
+
+    const constraints: MediaStreamConstraints =
+      kind === "audio"
+        ? { audio: { deviceId: { exact: deviceId } } }
+        : { video: { deviceId: { exact: deviceId } } };
+
+    let captured: MediaStream;
+    try {
+      captured = await navigator.mediaDevices.getUserMedia(constraints);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn(`getUserMedia (${kind} device switch) failed`, err);
+      return;
+    }
+    const oldTracks =
+      kind === "audio"
+        ? this.localStream.getAudioTracks()
+        : this.localStream.getVideoTracks();
+    const newTrack =
+      kind === "audio"
+        ? captured.getAudioTracks()[0]
+        : captured.getVideoTracks()[0];
+    if (newTrack === undefined) {
+      for (const t of captured.getTracks()) t.stop();
+      return;
+    }
+    // Preserve the current mute (enabled) state so a switch never unmutes.
+    newTrack.enabled = oldTracks[0]?.enabled ?? true;
+
+    try {
+      await sender.replaceTrack(newTrack);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn(`replaceTrack (${kind} device switch) failed`, err);
+      newTrack.stop();
+      return;
+    }
+
+    // Swap the track inside the local stream so the self-preview rebinds.
+    for (const t of oldTracks) {
+      this.localStream.removeTrack(t);
+      t.stop();
+    }
+    this.localStream.addTrack(newTrack);
+    this.callbacks.onLocalStream?.(this.localStream);
+  }
+
   /** Idempotent tear-down — safe to call multiple times. */
   dispose(): void {
     // G3-3-conn-quality — stop the stats poll loop before
@@ -416,12 +511,12 @@ export class CallSession {
   // -----------------------------------------------------------------
 
   private async openPeerConnection(media: CallMedia): Promise<void> {
-    // Phase 3a8 MVP: audio-only. The field is plumbed
-    // through so 3a-followups can switch to AudioVideo
-    // without an API churn.
+    // Honour the picker-selected device at capture time: a non-null
+    // `deviceId` becomes an `{ exact }` constraint, else a bare boolean
+    // (OS default). A disabled kind stays `false`.
     const constraints: MediaStreamConstraints = {
-      audio: media.audio,
-      video: media.video,
+      audio: trackConstraint(media.audio, media.audioDeviceId),
+      video: trackConstraint(media.video, media.videoDeviceId),
     };
     let stream: MediaStream;
     try {

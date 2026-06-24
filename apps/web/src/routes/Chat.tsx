@@ -590,6 +590,33 @@ function ChatView(props: {
     }
   });
 
+  // Apply an in-call device-picker change to the live 1×1 session
+  // (`replaceTrack` on the live sender — no renegotiation). The outgoing dial
+  // already honours the selection at capture time; this covers a mid-call
+  // switch (and an answerer that captured the OS default before the user's
+  // pick). `lastAudio/VideoInput` debounce so an unrelated reactive tick
+  // doesn't re-capture. SFU group calls drive capture through their own
+  // session, so this is the 1×1 P2P path only.
+  let lastAudioInput: string | null = null;
+  let lastVideoInput: string | null = null;
+  createEffect(() => {
+    const audioId = callUi.settings().selectedAudioInput;
+    const videoId = callUi.settings().selectedVideoInput;
+    if (activeCall === null) {
+      lastAudioInput = null;
+      lastVideoInput = null;
+      return;
+    }
+    if (audioId !== null && audioId !== lastAudioInput) {
+      lastAudioInput = audioId;
+      void activeCall.switchAudioInput(audioId);
+    }
+    if (videoId !== null && videoId !== lastVideoInput) {
+      lastVideoInput = videoId;
+      void activeCall.switchVideoInput(videoId);
+    }
+  });
+
   // Web 1×1 camera control. The Call.tsx camera button toggles
   // `callActions.setCamera`; this mirrors the store's local `camOn`
   // onto the live session (local-only `track.enabled` gate, no
@@ -698,7 +725,14 @@ function ChatView(props: {
     const session = buildCallSession(mintCallId());
     activeCall = session;
     try {
-      await session.dial({ audio: true, video: withVideo });
+      await session.dial({
+        audio: true,
+        video: withVideo,
+        // Honour the in-call device picker's current selection at capture
+        // time; `null` falls back to the OS default inside CallSession.
+        audioDeviceId: callUi.settings().selectedAudioInput,
+        videoDeviceId: callUi.settings().selectedVideoInput,
+      });
     } catch (err) {
       setError(
         `Could not start call: ${err instanceof Error ? err.message : String(err)}`,

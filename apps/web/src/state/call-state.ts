@@ -176,8 +176,10 @@ export interface CallSettings {
    *  settings panel from a real
    *  `navigator.mediaDevices.enumerateDevices()` pull (on open
    *  + on `devicechange`); empty until the panel first runs it.
-   *  Applying a selection to the live capture
-   *  (re-`getUserMedia` / `replaceTrack`) remains a follow-up. */
+   *  The 1×1 `CallSession` honours a `selected*` pick at capture
+   *  time + switches the live sender mid-call
+   *  (`switchAudioInput`/`switchVideoInput`); the SFU multi-party
+   *  path drives capture through its own session. */
   readonly availableDevices: readonly CallDevice[];
   /** Noise-suppression filter — `getUserMedia({ audio: {
    *  noiseSuppression: true } })` on web; equivalent
