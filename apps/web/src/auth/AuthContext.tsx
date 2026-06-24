@@ -36,12 +36,16 @@
  * ## What is wired and what is not
  *
  *   * Recover-from-mnemonic — DONE. `recover()` drives the
- *     `/recover` route + `AuthClient.recover`. It still requires
- *     the target account_id to be cached on this device (no
- *     discovery lookup in the recover path — see `recover()`).
+ *     `/recover` route + `AuthClient.recover`, and resolves the
+ *     target account_id the same way `login()` does: a local
+ *     `(accountId, username)` cache hit wins, else a
+ *     `discovery.lookup(username)` round-trip — so recover works
+ *     on a FRESH device given the username + phrase (the optional
+ *     `username` arg is required only when no account is cached).
  *   * `username → accountId` lookup for first-time login on a
  *     fresh device — DONE. `login()` resolves the typed username
- *     via `discovery.lookup()` on a local-cache miss.
+ *     via `discovery.lookup()` on a local-cache miss. The same
+ *     resolution is shared by every ADR-0018 recovery factor.
  *
  * Still not here:
  *

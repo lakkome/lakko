@@ -1863,11 +1863,22 @@ auth/PoW (pseudonym-unguessability is the Phase-1 gate).
 **Genuinely open, UX / feature limitations (not correctness or security
 breaks):**
 
-- **Cross-device recover via discovery not wired** (web `AuthContext`, iOS
-  `AuthRepository`): `recover()` requires the `account_id` to already be cached
-  on the device; a fresh device cannot recover-from-words without a discovery
-  account lookup that isn't wired. Recovery works on a device that already
-  knows the account.
+- **Cross-device recover via discovery — wired (stale-doc reconcile,
+  Jun 2026).** This entry described `recover()` as requiring a cached
+  `account_id`, but the discovery lookup is in fact wired on all three
+  platforms (verified firsthand): web `AuthContext.recover` (the optional
+  `username` arg → `discovery.lookup` on a cache miss), iOS
+  `AuthRepository.recover(mnemonicPhrase:newPassword:username:)`
+  (`DiscoveryClient.lookup`), and Android `AuthRepository.recover`
+  (`discoveryClientFactory().lookup`). All three resolve the `account_id` the
+  same way `login()` does — a local `(accountId, username)` cache hit wins,
+  else a `discovery.lookup(username)` round-trip — so a FRESH device can
+  recover-from-words given the username + phrase; the `username` arg is
+  required only when no account is cached. A username miss collapses into the
+  same error as a bad phrase (no username-space probing). The live recovery
+  `recovery_kt_e2e.rs` exercises the recovery pipeline. No isolated unit test
+  pins the inlined resolution branch — a small regression test would need the
+  resolution logic factored into a testable helper (follow-up).
 - **Web 1×1 video calls landed (Jun 2026).** The web P2P 1×1 path now
   captures the local camera (a "Video" call button dials `video:true`),
   renders a mirrored self-preview + the remote video tile, and toggles the
