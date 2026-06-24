@@ -1876,12 +1876,16 @@ breaks):**
   recover-from-words given the username + phrase; the `username` arg is
   required only when no account is cached. A username miss collapses into the
   same error as a bad phrase (no username-space probing). The live recovery
-  `recovery_kt_e2e.rs` exercises the recovery pipeline, and the web resolution
-  branch is now factored into a pure `resolveRecoverAccount`
-  (`apps/web/src/auth/recover-resolution.ts`) with a 6-case unit test
-  (`recover-resolution.test.ts`: cache-hit / matching-username / fresh-device
-  lookup / username-mismatch / unregistered-username / no-account) locking the
-  cross-device behaviour so it can't silently regress.
+  `recovery_kt_e2e.rs` exercises the recovery pipeline, and the resolution
+  branch is now factored into a pure `resolveRecoverAccount` helper with a
+  6-case unit test (cache-hit / matching-username / fresh-device lookup /
+  username-mismatch / unregistered-username / no-account) on **all three
+  platforms** — web `apps/web/src/auth/recover-resolution.{ts,test.ts}`, iOS
+  `apps/ios/Lakko/Auth/RecoverResolution.swift` + `LakkoTests/RecoverResolutionTests.swift`,
+  Android `.../auth/RecoverResolution.kt` + `test/.../RecoverResolutionTest.kt`
+  — locking the cross-device behaviour so it can't silently regress (each
+  `recover()` is a behaviour-identical refactor onto the shared helper; 6/6
+  green on every platform).
 - **Web 1×1 video calls landed (Jun 2026).** The web P2P 1×1 path now
   captures the local camera (a "Video" call button dials `video:true`),
   renders a mirrored self-preview + the remote video tile, and toggles the

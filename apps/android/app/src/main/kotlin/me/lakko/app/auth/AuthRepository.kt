@@ -620,30 +620,24 @@ public class AuthRepository(
         // Resolve the account_id the same way `login` does (web parity)
         // so recover works on a FRESH device: a local cache hit wins;
         // otherwise a discovery.lookup on the supplied username binds
-        // it. Without either we cannot target the recover.
-        val cached = sessionStore.load()
-        val trimmedUsername = username?.trim().orEmpty()
-        val accountIdB64: String
-        val resolvedUsername: String
-        if (cached != null &&
-            (trimmedUsername.isEmpty() || cached.username == trimmedUsername)
-        ) {
-            accountIdB64 = cached.accountIdB64
-            resolvedUsername = cached.username
-        } else if (trimmedUsername.isNotEmpty()) {
-            val lookup = discoveryClientFactory().use { it.lookup(trimmedUsername) }
-            val account = lookup.account
-                ?: // Collapsed with "bad phrase" downstream by the OPAQUE
-                // rejection — we don't help probe the username space.
-                throw AuthClientArgError("invalid recovery")
-            accountIdB64 = base64Encode(account)
-            resolvedUsername = lookup.normalisedUsername
-        } else {
-            throw AuthClientArgError(
-                "no account on this device — enter your username so we " +
-                    "can look up the account to recover",
-            )
+        // it. Without either we cannot target the recover. Extracted to
+        // the pure [resolveRecoverAccount] helper (G-29) so the
+        // cross-device behaviour is locked by a unit test.
+        val cached = sessionStore.load()?.let {
+            CachedAccount(accountIdB64 = it.accountIdB64, username = it.username)
         }
+        val (accountIdB64, resolvedUsername) = resolveRecoverAccount(
+            cached = cached,
+            username = username,
+            lookup = { name ->
+                val result = discoveryClientFactory().use { it.lookup(name) }
+                RecoverAccountLookup(
+                    account = result.account,
+                    normalisedUsername = result.normalisedUsername,
+                )
+            },
+            encodeAccountId = ::base64Encode,
+        )
         val accountIdBytes = base64Decode(accountIdB64)
 
         // G-4 (ADR-0016 / ADR-0017) — capture the OLD OPAQUE export

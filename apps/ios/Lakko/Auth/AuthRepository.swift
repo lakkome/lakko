@@ -605,31 +605,26 @@ public final class AuthRepository: ObservableObject {
         // ADR-0017: resolve the account_id the same way `login` does so
         // recover works on a FRESH device: a local cache hit wins;
         // otherwise a `DiscoveryClient.lookup` on the supplied username
-        // binds it. Without either we cannot target the recover.
-        let cached = sessionStore.load()
-        let trimmedUsername = username?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let accountIdB64: String
-        let resolvedUsername: String
-        if let cached,
-           trimmedUsername.isEmpty || cached.username == trimmedUsername {
-            accountIdB64 = cached.accountIdB64
-            resolvedUsername = cached.username
-        } else if !trimmedUsername.isEmpty {
-            let discovery = DiscoveryClient()
-            let lookup = try await discovery.lookup(username: trimmedUsername)
-            guard let accountBytes = lookup.account else {
-                // Collapsed with "bad phrase" downstream by the OPAQUE
-                // rejection — we don't help probe the username space.
-                throw AuthClientError.argument("invalid recovery")
-            }
-            accountIdB64 = base64Encode(accountBytes)
-            resolvedUsername = lookup.normalisedUsername
-        } else {
-            throw AuthClientError.argument(
-                "no account on this device — enter your username so we " +
-                "can look up the account to recover"
-            )
+        // binds it. Without either we cannot target the recover. The
+        // branch logic lives in the pure ``resolveRecoverAccount`` helper
+        // (G-29) so it can be unit-tested without a network.
+        let cached = sessionStore.load().map {
+            CachedAccount(accountIdB64: $0.accountIdB64, username: $0.username)
         }
+        let resolved = try await resolveRecoverAccount(
+            cached: cached,
+            username: username,
+            lookup: {
+                let lookup = try await DiscoveryClient().lookup(username: $0)
+                return RecoverAccountLookup(
+                    account: lookup.account,
+                    normalisedUsername: lookup.normalisedUsername
+                )
+            },
+            encodeAccountId: base64Encode
+        )
+        let accountIdB64 = resolved.accountIdB64
+        let resolvedUsername = resolved.resolvedUsername
         guard let accountIdBytes = base64Decode(accountIdB64) else {
             throw AuthClientError.argument(
                 "resolved account id is malformed; please try again"
