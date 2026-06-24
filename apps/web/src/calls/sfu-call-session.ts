@@ -77,6 +77,7 @@ import {
   attachSenderSFrame,
   isSFrameTransformSupported,
 } from "./sframe-transform";
+import { trackConstraint } from "./call-session";
 
 /** Lifecycle phases the SFU session can be in. */
 export type SfuCallState =
@@ -90,6 +91,12 @@ export type SfuCallState =
 export interface SfuCallMedia {
   readonly audio: boolean;
   readonly video: boolean;
+  /** Preferred microphone `deviceId` (from the in-call device picker).
+   *  `null`/absent → OS default. Honoured at publish; a mid-call change goes
+   *  through {@link SfuCallSession.switchAudioInput}. */
+  readonly audioDeviceId?: string | null;
+  /** Preferred camera `deviceId`. `null`/absent → OS default. */
+  readonly videoDeviceId?: string | null;
 }
 
 /** Configuration handed to a session at construction. */
@@ -259,6 +266,82 @@ export class SfuCallSession {
     }
   }
 
+  /**
+   * Switch the published microphone to a specific `deviceId` mid-call (from
+   * the in-call device picker). Re-captures that one kind with the picked
+   * device and `replaceTrack`s it on the existing sender. Crucially the SFrame
+   * transform lives on the SENDER, not the track, so it survives the
+   * replacement — the media stays end-to-end encrypted through the SFU
+   * (invariant #4), no re-attach + no renegotiation (same kind). Best-effort:
+   * a capture / replace failure keeps the current track; a no-op when there is
+   * no live sender of that kind (e.g. switching the camera on an audio-only
+   * group call).
+   */
+  async switchAudioInput(deviceId: string): Promise<void> {
+    await this.switchInput("audio", deviceId);
+  }
+
+  /** Switch the published camera to a specific `deviceId` mid-call. Same shape
+   *  as {@link switchAudioInput}; a no-op while the group call is audio-only. */
+  async switchVideoInput(deviceId: string): Promise<void> {
+    await this.switchInput("video", deviceId);
+  }
+
+  private async switchInput(
+    kind: "audio" | "video",
+    deviceId: string,
+  ): Promise<void> {
+    if (this.pc === null || this.localStream === null) return;
+    if (deviceId.length === 0) return;
+    const sender = this.pc.getSenders().find((s) => s.track?.kind === kind);
+    if (sender === undefined) return;
+
+    const constraints: MediaStreamConstraints =
+      kind === "audio"
+        ? { audio: { deviceId: { exact: deviceId } } }
+        : { video: { deviceId: { exact: deviceId } } };
+
+    let captured: MediaStream;
+    try {
+      captured = await navigator.mediaDevices.getUserMedia(constraints);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn(`getUserMedia (SFU ${kind} device switch) failed`, err);
+      return;
+    }
+    const oldTracks =
+      kind === "audio"
+        ? this.localStream.getAudioTracks()
+        : this.localStream.getVideoTracks();
+    const newTrack =
+      kind === "audio"
+        ? captured.getAudioTracks()[0]
+        : captured.getVideoTracks()[0];
+    if (newTrack === undefined) {
+      for (const t of captured.getTracks()) t.stop();
+      return;
+    }
+    // Preserve the current mute (enabled) state so a switch never unmutes.
+    newTrack.enabled = oldTracks[0]?.enabled ?? true;
+
+    try {
+      // replaceTrack keeps the sender's RTCRtpScriptTransform (the SFrame
+      // encryptor) bound — no re-attach needed.
+      await sender.replaceTrack(newTrack);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn(`replaceTrack (SFU ${kind} device switch) failed`, err);
+      newTrack.stop();
+      return;
+    }
+
+    for (const t of oldTracks) {
+      this.localStream.removeTrack(t);
+      t.stop();
+    }
+    this.localStream.addTrack(newTrack);
+  }
+
   /** User-initiated tear-down. Idempotent. Moves to `closed` unless the
    *  session already reached a terminal state (`closed` / `failed`). */
   hangUp(): void {
@@ -298,9 +381,17 @@ export class SfuCallSession {
   // -----------------------------------------------------------------
 
   private async openPeerConnectionAndPublish(): Promise<void> {
+    // Honour the picker-selected device at publish time (an `{ exact }`
+    // deviceId constraint, else the OS default).
     const stream = await navigator.mediaDevices.getUserMedia({
-      audio: this.config.media.audio,
-      video: this.config.media.video,
+      audio: trackConstraint(
+        this.config.media.audio,
+        this.config.media.audioDeviceId,
+      ),
+      video: trackConstraint(
+        this.config.media.video,
+        this.config.media.videoDeviceId,
+      ),
     });
     this.localStream = stream;
 

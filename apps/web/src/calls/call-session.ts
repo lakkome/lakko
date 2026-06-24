@@ -147,8 +147,8 @@ export interface CallMedia {
 
 /** Build a `getUserMedia` per-kind constraint: `false` when the kind is
  *  disabled, an `{ deviceId: { exact } }` object when a specific device is
- *  picked, else `true` (OS default). */
-function trackConstraint(
+ *  picked, else `true` (OS default). Shared with the SFU session. */
+export function trackConstraint(
   enabled: boolean,
   deviceId: string | null | undefined,
 ): boolean | MediaTrackConstraints {

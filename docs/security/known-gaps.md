@@ -1899,11 +1899,17 @@ breaks):**
   `switchAudioInput`/`switchVideoInput` re-capture + `replaceTrack` on the live
   sender for a mid-call change (no renegotiation, preserves the mute state);
   `Chat.tsx` threads the selection into the outgoing dial + a debounced effect
-  applies a mid-call picker change. Residual: the SFU multi-party path drives
-  capture through its own session (no switch there yet), and the answerer
-  captures the OS default at accept (the switch effect then applies any
-  pre-selected device once the call is live). tsc + vitest (207) + vite build
-  green.
+  applies a mid-call picker change. **The SFU multi-party group call honours +
+  switches too (Jun 2026):** `SfuCallSession` honours the picked mic at publish
+  (`SfuCallMedia.audioDeviceId`) + `switchAudioInput`/`switchVideoInput`
+  `replaceTrack` on the live sender — the sender keeps its SFrame transform, so
+  media stays end-to-end encrypted through the SFU (invariant #4, no re-attach);
+  `trackConstraint` is shared from the 1×1 `CallSession`, the `SfuCallUiHandle`
+  exposes the two methods, and the same Chat.tsx switch effect drives the SFU
+  handle (group calls are audio-only for now, so the camera switch is a
+  graceful no-op). Residual: the answerer captures the OS default at accept
+  (the switch effect then applies any pre-selected device once the call is
+  live). tsc + vitest (213) + vite build green.
 - **iOS contact inbox — background refresh wired (Jun 2026).** A
   `BGAppRefreshTask` (`ContactBackgroundRefresh`, registered on the scene via
   `.backgroundTask(.appRefresh(_:))` in `LakkoApp`, scheduled on the

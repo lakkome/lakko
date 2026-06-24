@@ -590,30 +590,34 @@ function ChatView(props: {
     }
   });
 
-  // Apply an in-call device-picker change to the live 1×1 session
-  // (`replaceTrack` on the live sender — no renegotiation). The outgoing dial
-  // already honours the selection at capture time; this covers a mid-call
-  // switch (and an answerer that captured the OS default before the user's
-  // pick). `lastAudio/VideoInput` debounce so an unrelated reactive tick
-  // doesn't re-capture. SFU group calls drive capture through their own
-  // session, so this is the 1×1 P2P path only.
+  // Apply an in-call device-picker change to the live session
+  // (`replaceTrack` on the live sender — no renegotiation; on the SFU path the
+  // sender keeps its SFrame transform so media stays encrypted). The outgoing
+  // dial / SFU publish already honour the selection at capture time; this
+  // covers a mid-call switch (and an answerer that captured the OS default
+  // before the user's pick). `lastAudio/VideoInput` debounce so an unrelated
+  // reactive tick doesn't re-capture. Drives whichever call kind is live —
+  // 1×1 `activeCall` or the SFU group `sfuHandle`.
   let lastAudioInput: string | null = null;
   let lastVideoInput: string | null = null;
   createEffect(() => {
     const audioId = callUi.settings().selectedAudioInput;
     const videoId = callUi.settings().selectedVideoInput;
-    if (activeCall === null) {
+    const sfu = sfuHandle();
+    if (activeCall === null && sfu === null) {
       lastAudioInput = null;
       lastVideoInput = null;
       return;
     }
     if (audioId !== null && audioId !== lastAudioInput) {
       lastAudioInput = audioId;
-      void activeCall.switchAudioInput(audioId);
+      void activeCall?.switchAudioInput(audioId);
+      void sfu?.switchAudioInput(audioId);
     }
     if (videoId !== null && videoId !== lastVideoInput) {
       lastVideoInput = videoId;
-      void activeCall.switchVideoInput(videoId);
+      void activeCall?.switchVideoInput(videoId);
+      void sfu?.switchVideoInput(videoId);
     }
   });
 
@@ -827,7 +831,14 @@ function ChatView(props: {
           jwt: minted.jwt,
           seed,
           localLeaf,
-          media: { audio: true, video: false },
+          media: {
+            audio: true,
+            video: false,
+            // Honour the in-call device picker's current mic selection at
+            // publish time (the group call is audio-only for now).
+            audioDeviceId: callUi.settings().selectedAudioInput,
+            videoDeviceId: callUi.settings().selectedVideoInput,
+          },
         },
         { localDisplayName: "You", safetyNumber, resolveDisplayName },
       );

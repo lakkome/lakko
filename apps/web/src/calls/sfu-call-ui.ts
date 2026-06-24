@@ -79,6 +79,12 @@ export interface SfuCallUiHandle {
   /** Enable / disable the local camera (drives the real track + the
    *  store). */
   setCameraEnabled(on: boolean): void;
+  /** Switch the published mic to a specific `deviceId` mid-call (in-call
+   *  device picker). `replaceTrack` on the live sender — SFrame stays armed. */
+  switchAudioInput(deviceId: string): Promise<void>;
+  /** Switch the published camera to a specific `deviceId` mid-call (a no-op
+   *  while the group call is audio-only). */
+  switchVideoInput(deviceId: string): Promise<void>;
 }
 
 const PEER_PREFIX = "peer-";
@@ -238,5 +244,9 @@ export function createSfuCallUi(
     // that reads the store and calls these). Mirrors the 1×1 path.
     setMicrophoneEnabled: (on): void => session.setMicrophoneEnabled(on),
     setCameraEnabled: (on): void => session.setCameraEnabled(on),
+    switchAudioInput: (deviceId): Promise<void> =>
+      session.switchAudioInput(deviceId),
+    switchVideoInput: (deviceId): Promise<void> =>
+      session.switchVideoInput(deviceId),
   };
 }
