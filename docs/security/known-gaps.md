@@ -1883,9 +1883,17 @@ breaks):**
   `replaceTrack`) is still a follow-up — the picker stores the choice but the
   capture chain doesn't yet honor it mid-call. tsc + vitest (207) + vite build
   green.
-- **iOS contact inbox is foreground-poll only** — no `BGTaskScheduler`
-  background fetch / APNs-driven wake, so new contact requests aren't surfaced
-  while backgrounded.
+- **iOS contact inbox — background refresh wired (Jun 2026).** A
+  `BGAppRefreshTask` (`ContactBackgroundRefresh`, registered on the scene via
+  `.backgroundTask(.appRefresh(_:))` in `LakkoApp`, scheduled on the
+  foreground→background transition + re-chained after each run) now wakes the
+  app opportunistically to run one quick `refreshInbox()` fetch, so a request
+  that arrives while backgrounded is picked up without a manual reopen.
+  `Info.plist` declares the `fetch` `UIBackgroundMode` +
+  `BGTaskSchedulerPermittedIdentifiers`. `xcodebuild` green. This is
+  opportunistic (iOS decides if/when to run it); an APNs `content-available`
+  silent-push wake for *immediate* surfacing remains a follow-up — it needs the
+  push gateway to emit a silent push on inbox arrival.
 - **Android QR pairing scanner — resumable after a non-Lakko QR (CLOSED,
   Jun 2026).** The `QrScannerComposable` latch changed from a one-shot
   `AtomicBoolean hasDetected` to an `AtomicReference<String?> lastHandledRaw`:

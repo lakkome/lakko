@@ -144,8 +144,11 @@ public final class ContactsViewModel: ObservableObject {
 
     /// One long-poll tick — used by ``ContactsScreen``'s
     /// `.task { … }` modifier in a `while !Task.isCancelled` loop.
-    /// Foreground-only continuous polling; BGTaskScheduler-driven
-    /// background fetch + APNs push land in 1.14e5b/c.
+    /// This is the foreground path; a backgrounded app is covered
+    /// opportunistically by the `BGAppRefreshTask` wired in
+    /// ``LakkoApp`` (G-29, see ``ContactBackgroundRefresh``). An
+    /// APNs `content-available` push for immediate background
+    /// surfacing is a separate follow-up.
     ///
     /// `waitSecs` is passed straight to the DS long-poll budget;
     /// the server clamps to its own `MAX_WAIT_SECS`. 30 matches

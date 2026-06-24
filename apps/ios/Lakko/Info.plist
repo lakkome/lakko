@@ -2,6 +2,10 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<key>BGTaskSchedulerPermittedIdentifiers</key>
+	<array>
+		<string>me.lakko.dev.contact-refresh</string>
+	</array>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleDisplayName</key>
@@ -36,6 +40,10 @@
 	<string>Lakko uses the camera to scan a QR codes from devices you want to link to your account and to capture video for in-call streams. The camera is never recorded server-side — every call frame is end-to-end encrypted under SFrame keys derived from the call's MLS group.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Lakko uses the microphone to capture your voice for end-to-end-encrypted calls. The mic is only on while you are in a call and the captured audio is never recorded server-side — every call frame is encrypted under SFrame keys derived from the call's MLS group before it leaves your device.</string>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>fetch</string>
+	</array>
 	<key>UILaunchScreen</key>
 	<dict/>
 	<key>UISupportedInterfaceOrientations</key>

@@ -111,6 +111,17 @@ targets:
         LakkoBootstrapTrustAnchor: ""
         LakkoBootstrapDohDomain: ""
         LakkoBootstrapConfigPath: ""
+        # G-29 — background contact-inbox refresh. `BGAppRefreshTask`
+        # (registered on the scene via `.backgroundTask(.appRefresh(_:))`
+        # in LakkoApp, scheduled by `ContactBackgroundRefresh`) needs the
+        # `fetch` background mode AND its identifier in the permitted-task
+        # allow-list, or the OS refuses to launch it. Opportunistic only —
+        # iOS decides if/when to run it; an APNs `content-available` wake for
+        # immediate surfacing is a separate follow-up.
+        UIBackgroundModes:
+          - fetch
+        BGTaskSchedulerPermittedIdentifiers:
+          - me.lakko.dev.contact-refresh
         # Phase 2a3b3-ui — camera access for the add-device QR
         # scanner + G3-1 video calls. Apple's permission dialog
         # surfaces this string verbatim; keep the wording

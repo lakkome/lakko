@@ -56,6 +56,10 @@ struct LakkoApp: App {
     /// `.onOpenURL` when iOS hands us a Universal Link.
     @StateObject private var inviteIntake = InviteIntake()
 
+    /// Scene lifecycle — used to schedule a background contact-inbox refresh
+    /// (G-29) when the app leaves the foreground.
+    @Environment(\.scenePhase) private var scenePhase
+
     init() {
         // G3-sframe-native N-4 — runtime probe for the non-public
         // `setFrameEncryptor:` / `setFrameDecryptor:` selectors
@@ -115,6 +119,24 @@ struct LakkoApp: App {
                 .task {
                     AntiCensorshipManager.shared.armFromSettings()
                 }
+                // G-29 — queue a background contact-inbox refresh as we leave
+                // the foreground, so a request that arrives while backgrounded
+                // is picked up by the next opportunistic `BGAppRefreshTask`
+                // wake (handler below) rather than waiting for a reopen. The
+                // foreground long-poll loop covers the active case.
+                .onChange(of: scenePhase) { _, phase in
+                    if phase == .background {
+                        ContactBackgroundRefresh.schedule()
+                    }
+                }
+        }
+        // G-29 — `BGAppRefreshTask` handler. iOS launches this opportunistically;
+        // run one quick (non-long-poll) inbox fetch, then chain the next
+        // request. `refreshInbox` is a no-op when there is no live session, so
+        // an unauthenticated wake costs nothing.
+        .backgroundTask(.appRefresh(ContactBackgroundRefresh.taskIdentifier)) {
+            await contactsRepository.refreshInbox()
+            ContactBackgroundRefresh.schedule()
         }
     }
 }
