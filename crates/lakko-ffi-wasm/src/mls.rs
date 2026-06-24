@@ -239,6 +239,7 @@ pub struct ProcessedMessage {
     kind: ProcessedMessageKind,
     application_data: Option<Vec<u8>>,
     sender_leaf: Option<u32>,
+    external_join_signature_key: Option<Vec<u8>>,
 }
 
 impl ProcessedMessage {
@@ -249,6 +250,7 @@ impl ProcessedMessage {
             kind: ProcessedMessageKind::Application,
             application_data: Some(data),
             sender_leaf,
+            external_join_signature_key: None,
         }
     }
 
@@ -259,6 +261,18 @@ impl ProcessedMessage {
             kind,
             application_data: None,
             sender_leaf: None,
+            external_join_signature_key: None,
+        }
+    }
+
+    /// Construct an external-join-proposal result carrying the joiner's
+    /// signature key (ADR-0027, G-3).
+    fn external_join(joiner_signature_key: Vec<u8>) -> Self {
+        Self {
+            kind: ProcessedMessageKind::ExternalJoinProposal,
+            application_data: None,
+            sender_leaf: None,
+            external_join_signature_key: Some(joiner_signature_key),
         }
     }
 }
@@ -291,6 +305,14 @@ impl ProcessedMessage {
     #[wasm_bindgen(getter, js_name = senderLeaf)]
     pub fn sender_leaf(&self) -> Option<u32> {
         self.sender_leaf
+    }
+
+    /// The prospective joiner's signature key, present iff
+    /// `kind == "ExternalJoinProposal"` (ADR-0027, G-3). The handle the caller
+    /// passes to `approveExternalJoin` / `rejectExternalJoin`.
+    #[wasm_bindgen(getter, js_name = externalJoinSignatureKey)]
+    pub fn external_join_signature_key(&self) -> Option<Vec<u8>> {
+        self.external_join_signature_key.clone()
     }
 }
 
@@ -380,6 +402,54 @@ impl Group {
         })
     }
 
+    /// Approve a retained external-join proposal — adds the joiner to the group
+    /// (ADR-0027, G-3). `proposal_ref` is the joiner's signature key from a
+    /// `ProcessedMessage.externalJoinSignatureKey` or `pendingExternalJoins`.
+    /// Role-gated to owner/admin; returns the Commit + the joiner's Welcome.
+    #[wasm_bindgen(js_name = approveExternalJoin)]
+    pub fn approve_external_join(
+        &self,
+        identity: &Identity,
+        proposal_ref: &[u8],
+    ) -> Result<AddMember, JsError> {
+        let mut g = self
+            .inner
+            .lock()
+            .map_err(|_| JsError::new("internal lock poisoned"))?;
+        let MemberAddition { commit, welcome } = g
+            .approve_external_join(&identity.inner, proposal_ref)
+            .map_err(mls_err)?;
+        Ok(AddMember {
+            commit_bytes: group::encode_message(&commit).map_err(mls_err)?,
+            welcome_bytes: group::encode_message(&welcome).map_err(mls_err)?,
+        })
+    }
+
+    /// Reject a retained external-join proposal — discards it locally without
+    /// adding the joiner or advancing the epoch (ADR-0027).
+    #[wasm_bindgen(js_name = rejectExternalJoin)]
+    pub fn reject_external_join(&self, proposal_ref: &[u8]) -> Result<(), JsError> {
+        let mut g = self
+            .inner
+            .lock()
+            .map_err(|_| JsError::new("internal lock poisoned"))?;
+        g.reject_external_join(proposal_ref).map_err(mls_err)?;
+        Ok(())
+    }
+
+    /// Signature keys of the external-join proposals awaiting a decision
+    /// (ADR-0027), flat-concatenated — each is a fixed 32-byte Ed25519 key, so
+    /// the caller slices into 32-byte chunks (the role-table FFI convention).
+    /// Each chunk is a handle for `approveExternalJoin` / `rejectExternalJoin`.
+    #[wasm_bindgen(js_name = pendingExternalJoins)]
+    pub fn pending_external_joins(&self) -> Result<Vec<u8>, JsError> {
+        let g = self
+            .inner
+            .lock()
+            .map_err(|_| JsError::new("internal lock poisoned"))?;
+        Ok(g.pending_external_joins().concat())
+    }
+
     /// Remove a member by their leaf index. Returns the wire-encoded
     /// commit to broadcast.
     #[wasm_bindgen(js_name = removeMember)]
@@ -431,11 +501,9 @@ impl Group {
             },
             MlsIncoming::Commit => ProcessedMessage::control(ProcessedMessageKind::Commit),
             MlsIncoming::Proposal => ProcessedMessage::control(ProcessedMessageKind::Proposal),
-            // ADR-0027 Phase 1: the core variant now carries the joiner's
-            // signature key; the wasm surface is enriched in Phase 2.
-            MlsIncoming::ExternalJoinProposal { .. } => {
-                ProcessedMessage::control(ProcessedMessageKind::ExternalJoinProposal)
-            },
+            MlsIncoming::ExternalJoinProposal {
+                joiner_signature_key,
+            } => ProcessedMessage::external_join(joiner_signature_key),
         })
     }
 
@@ -532,11 +600,9 @@ impl Group {
             },
             MlsIncoming::Commit => ProcessedMessage::control(ProcessedMessageKind::Commit),
             MlsIncoming::Proposal => ProcessedMessage::control(ProcessedMessageKind::Proposal),
-            // ADR-0027 Phase 1: the core variant now carries the joiner's
-            // signature key; the wasm surface is enriched in Phase 2.
-            MlsIncoming::ExternalJoinProposal { .. } => {
-                ProcessedMessage::control(ProcessedMessageKind::ExternalJoinProposal)
-            },
+            MlsIncoming::ExternalJoinProposal {
+                joiner_signature_key,
+            } => ProcessedMessage::external_join(joiner_signature_key),
         })
     }
 
@@ -1095,11 +1161,9 @@ impl DeviceGroup {
             lakko_mls::Incoming::Proposal => {
                 ProcessedMessage::control(ProcessedMessageKind::Proposal)
             },
-            // ADR-0027 Phase 1: the core variant now carries the joiner's
-            // signature key; the wasm surface is enriched in Phase 2.
-            lakko_mls::Incoming::ExternalJoinProposal { .. } => {
-                ProcessedMessage::control(ProcessedMessageKind::ExternalJoinProposal)
-            },
+            lakko_mls::Incoming::ExternalJoinProposal {
+                joiner_signature_key,
+            } => ProcessedMessage::external_join(joiner_signature_key),
         })
     }
 
@@ -1176,11 +1240,9 @@ impl DeviceGroup {
             lakko_mls::Incoming::Proposal => {
                 ProcessedMessage::control(ProcessedMessageKind::Proposal)
             },
-            // ADR-0027 Phase 1: the core variant now carries the joiner's
-            // signature key; the wasm surface is enriched in Phase 2.
-            lakko_mls::Incoming::ExternalJoinProposal { .. } => {
-                ProcessedMessage::control(ProcessedMessageKind::ExternalJoinProposal)
-            },
+            lakko_mls::Incoming::ExternalJoinProposal {
+                joiner_signature_key,
+            } => ProcessedMessage::external_join(joiner_signature_key),
         })
     }
 

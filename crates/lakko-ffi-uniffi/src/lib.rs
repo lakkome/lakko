@@ -267,8 +267,14 @@ pub enum ProcessedMessage {
     Commit,
     /// A standalone proposal was processed (no state advance).
     Proposal,
-    /// External-join proposal was processed.
-    ExternalJoinProposal,
+    /// A non-member's external-join proposal was processed + retained (ADR-0027,
+    /// G-3). `joiner_signature_key` is the handle for
+    /// [`Group::approve_external_join`] / [`Group::reject_external_join`], and
+    /// the key the contact graph resolves to a display name.
+    ExternalJoinProposal {
+        /// The prospective joiner's leaf signature public key.
+        joiner_signature_key: Vec<u8>,
+    },
 }
 
 /// Typed body of a DeviceGroup cross-device payload
@@ -613,6 +619,42 @@ impl Group {
         Ok(group::encode_message(&commit)?)
     }
 
+    /// Approve a retained external-join proposal — adds the joiner to the group
+    /// (ADR-0027, G-3). `proposal_ref` is the joiner's signature key from a
+    /// `ProcessedMessage::ExternalJoinProposal` or
+    /// [`Self::pending_external_joins`]. Role-gated to owner/admin (fail-closed
+    /// on a group with a role table); returns the Commit to broadcast + the
+    /// joiner's Welcome to deliver to them.
+    pub fn approve_external_join(
+        &self,
+        identity: &Identity,
+        proposal_ref: Vec<u8>,
+    ) -> Result<AddMember, FfiError> {
+        let mut g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
+        let MemberAddition { commit, welcome } =
+            g.approve_external_join(&identity.inner, &proposal_ref)?;
+        Ok(AddMember {
+            commit: group::encode_message(&commit)?,
+            welcome: group::encode_message(&welcome)?,
+        })
+    }
+
+    /// Reject a retained external-join proposal — discards it locally without
+    /// adding the joiner or advancing the epoch (ADR-0027).
+    pub fn reject_external_join(&self, proposal_ref: Vec<u8>) -> Result<(), FfiError> {
+        let mut g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
+        g.reject_external_join(&proposal_ref)?;
+        Ok(())
+    }
+
+    /// The signature key of every external-join proposal currently awaiting a
+    /// decision (ADR-0027) — each is a handle for `approveExternalJoin` /
+    /// `rejectExternalJoin`.
+    pub fn pending_external_joins(&self) -> Result<Vec<Vec<u8>>, FfiError> {
+        let g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
+        Ok(g.pending_external_joins())
+    }
+
     /// Encrypt an application payload for the current epoch.
     pub fn create_application_message(
         &self,
@@ -642,7 +684,11 @@ impl Group {
             // ADR-0027 Phase 1: the core variant now carries the joiner's
             // signature key; the FFI surface is enriched in Phase 2. Match the
             // new shape and drop the field for now.
-            MlsIncoming::ExternalJoinProposal { .. } => ProcessedMessage::ExternalJoinProposal,
+            MlsIncoming::ExternalJoinProposal {
+                joiner_signature_key,
+            } => ProcessedMessage::ExternalJoinProposal {
+                joiner_signature_key,
+            },
         })
     }
 
@@ -765,7 +811,11 @@ impl Group {
             // ADR-0027 Phase 1: the core variant now carries the joiner's
             // signature key; the FFI surface is enriched in Phase 2. Match the
             // new shape and drop the field for now.
-            MlsIncoming::ExternalJoinProposal { .. } => ProcessedMessage::ExternalJoinProposal,
+            MlsIncoming::ExternalJoinProposal {
+                joiner_signature_key,
+            } => ProcessedMessage::ExternalJoinProposal {
+                joiner_signature_key,
+            },
         })
     }
 
@@ -1279,8 +1329,10 @@ impl DeviceGroup {
             lakko_mls::Incoming::Commit => ProcessedMessage::Commit,
             lakko_mls::Incoming::Proposal => ProcessedMessage::Proposal,
             // ADR-0027 Phase 1: drop the new joiner-key field (Phase 2 enriches).
-            lakko_mls::Incoming::ExternalJoinProposal { .. } => {
-                ProcessedMessage::ExternalJoinProposal
+            lakko_mls::Incoming::ExternalJoinProposal {
+                joiner_signature_key,
+            } => ProcessedMessage::ExternalJoinProposal {
+                joiner_signature_key,
             },
         })
     }
@@ -1340,8 +1392,10 @@ impl DeviceGroup {
             lakko_mls::Incoming::Commit => ProcessedMessage::Commit,
             lakko_mls::Incoming::Proposal => ProcessedMessage::Proposal,
             // ADR-0027 Phase 1: drop the new joiner-key field (Phase 2 enriches).
-            lakko_mls::Incoming::ExternalJoinProposal { .. } => {
-                ProcessedMessage::ExternalJoinProposal
+            lakko_mls::Incoming::ExternalJoinProposal {
+                joiner_signature_key,
+            } => ProcessedMessage::ExternalJoinProposal {
+                joiner_signature_key,
             },
         })
     }
@@ -1836,7 +1890,7 @@ impl core::fmt::Debug for ProcessedMessage {
             Self::Application { data, .. } => write!(f, "Application {{ {} bytes }}", data.len()),
             Self::Commit => write!(f, "Commit"),
             Self::Proposal => write!(f, "Proposal"),
-            Self::ExternalJoinProposal => write!(f, "ExternalJoinProposal"),
+            Self::ExternalJoinProposal { .. } => write!(f, "ExternalJoinProposal"),
         }
     }
 }
