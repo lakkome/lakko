@@ -169,6 +169,24 @@ export type IncomingChatEvent =
       createdAt: string;
     }
   | {
+      /** ADR-0027 (G-3) — an external-join *request*: a non-member
+       *  posted a `Sender::NewMemberProposal` external Add proposal
+       *  to this group's journal, and the MLS core retained it
+       *  pending an owner/admin approval. This event surfaces the
+       *  joiner's leaf signature key (the `proposal_ref` handle the
+       *  approve / reject FFI takes) so the members UI can render a
+       *  pending-request row. The retained set is the source of
+       *  truth (`group.pendingExternalJoins()`); this event is the
+       *  reactive nudge that a new request landed. */
+      kind: "externalJoinRequest";
+      messageId: number;
+      /** The joiner's leaf signature public key — the rendezvous
+       *  tag + the `proposal_ref` for `approveExternalJoin` /
+       *  `rejectExternalJoin`. */
+      joinerSignatureKey: Uint8Array;
+      createdAt: string;
+    }
+  | {
       /** Phase 3a8 — call-signaling event lifted from an
        *  MLS application message. Driven into the
        *  CallSession state machine by the chat-route
@@ -528,6 +546,17 @@ async function toEvent(
       emoji: body.kind === "reaction" ? body.emoji : undefined,
       isTyping: body.kind === "typing" ? body.isTyping : undefined,
       senderLeaf,
+      createdAt,
+    };
+  }
+  // ADR-0027 (G-3) — an external-join proposal carries the joiner's
+  // signature key the members UI needs to approve / reject it. Surface
+  // it as a dedicated event rather than a content-less system row.
+  if (processed.kind === "ExternalJoinProposal" && processed.externalJoinSignatureKey) {
+    return {
+      kind: "externalJoinRequest",
+      messageId,
+      joinerSignatureKey: processed.externalJoinSignatureKey,
       createdAt,
     };
   }

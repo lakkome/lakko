@@ -1135,6 +1135,26 @@ function ChatView(props: {
     }
   });
 
+  // ADR-0027 (G-3) — pending external-join requests, re-read per
+  // `membersVersion` (bumped after every poll, so a freshly-retained
+  // request appears). Each entry is the 32-byte joiner leaf signature key —
+  // the `proposal_ref` handle the approve / reject helpers take. The MLS
+  // core's retained set is the source of truth; the `externalJoinRequest`
+  // event is only the nudge that drives the membersVersion bump.
+  const pendingJoins = createMemo<Uint8Array[]>(() => {
+    membersVersion();
+    try {
+      const flat = props.entry.group.pendingExternalJoins();
+      const out: Uint8Array[] = [];
+      for (let i = 0; i + 32 <= flat.length; i += 32) {
+        out.push(flat.slice(i, i + 32));
+      }
+      return out;
+    } catch {
+      return [];
+    }
+  });
+
   let nextTempId = 1;
 
   // ADR-0023 — our own MLS leaf in this group. Used to author-
@@ -1341,6 +1361,11 @@ function ChatView(props: {
           }
           continue;
         }
+        // ADR-0027 (G-3) — an external-join request is not a timeline row; it
+        // surfaces in the members panel via the `pendingJoins` memo. The
+        // membersVersion bump after this loop refreshes that memo, so just
+        // skip it here (don't materialise a chat bubble for it).
+        if (e.kind === "externalJoinRequest") continue;
         if (incomingIds.has(e.messageId)) continue;
         fresh.push({ kind: "incoming", event: e });
       }
@@ -1963,6 +1988,53 @@ function ChatView(props: {
           : `Removed as admin (commit #${result.commitMessageId}).`,
       );
       void refresh();
+    } catch (err) {
+      setError(formatError(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // ADR-0027 (G-3) — approve a pending external-join request (owner / admin
+  // only). Drives the MLS approve (role-gated in the core, fail-closed),
+  // broadcasts the resulting commit so every member admits the joiner, posts
+  // the wrapped Welcome rendezvous to the journal for the joiner to open, then
+  // suppresses the sender's own echo + refreshes the members panel.
+  async function onApproveJoin(proposalRef: Uint8Array): Promise<void> {
+    setError(null);
+    setNotice(null);
+    setBusy(true);
+    try {
+      const result = await contacts.approveExternalJoin(
+        props.requireIdentity(),
+        props.entry.group,
+        proposalRef,
+      );
+      chat.markOwnPublishedCommit(result.commitMessageId);
+      setMemberCount(props.entry.group.memberCount);
+      setMembersVersion(membersVersion() + 1);
+      setNotice(
+        `Join approved (commit #${result.commitMessageId}, welcome #${result.welcomeMessageId}).`,
+      );
+      void refresh();
+    } catch (err) {
+      setError(formatError(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // ADR-0027 (G-3) — reject a pending external-join request (owner / admin
+  // only). Local-only: drops the retained proposal so it leaves the pending
+  // list. No commit, no journal post — the joiner never receives a Welcome.
+  async function onRejectJoin(proposalRef: Uint8Array): Promise<void> {
+    setError(null);
+    setNotice(null);
+    setBusy(true);
+    try {
+      await contacts.rejectExternalJoin(props.entry.group, proposalRef);
+      setMembersVersion(membersVersion() + 1);
+      setNotice("Join request rejected.");
     } catch (err) {
       setError(formatError(err));
     } finally {
@@ -2593,6 +2665,105 @@ function ChatView(props: {
           >
             Members ({members().length})
           </h2>
+          {/* ADR-0027 (G-3) — pending external-join requests. Owner / admin
+              only (same gate as add / remove). Each row offers Approve (drives
+              the MLS approve + posts the commit & Welcome rendezvous) or Reject
+              (drops the retained proposal locally). Hidden when there are no
+              pending requests. */}
+          <Show when={canManageMembers() && pendingJoins().length > 0}>
+            <div
+              style={{
+                margin: "0 0 0.6rem 0",
+                padding: "0.4rem 0.5rem",
+                border: "1px dashed var(--surface-border)",
+                "border-radius": "var(--radius-sm)",
+                background: "var(--surface-bg)",
+              }}
+            >
+              <h3
+                style={{
+                  "font-size": "0.78rem",
+                  "text-transform": "uppercase",
+                  "letter-spacing": "0.04em",
+                  color: "var(--surface-muted)",
+                  margin: "0 0 0.4rem 0",
+                }}
+              >
+                Join requests ({pendingJoins().length})
+              </h3>
+              <ul
+                style={{
+                  "list-style": "none",
+                  padding: 0,
+                  margin: 0,
+                  display: "flex",
+                  "flex-direction": "column",
+                  gap: "0.3rem",
+                }}
+              >
+                <For each={pendingJoins()}>
+                  {(ref) => (
+                    <li
+                      style={{
+                        display: "flex",
+                        "align-items": "center",
+                        "justify-content": "space-between",
+                        gap: "0.5rem",
+                      }}
+                    >
+                      <span
+                        title={hexOf(ref)}
+                        style={{
+                          "font-family": "monospace",
+                          "font-size": "0.78rem",
+                          color: "var(--surface-fg)",
+                          overflow: "hidden",
+                          "text-overflow": "ellipsis",
+                          "white-space": "nowrap",
+                        }}
+                      >
+                        {hexOf(ref).slice(0, 16)}…
+                      </span>
+                      <span style={{ display: "flex", gap: "0.3rem" }}>
+                        <button
+                          type="button"
+                          disabled={busy()}
+                          onClick={() => void onApproveJoin(ref)}
+                          style={{
+                            "font-size": "0.78rem",
+                            padding: "0.2rem 0.5rem",
+                            "border-radius": "var(--radius-sm)",
+                            border: "1px solid var(--accent)",
+                            background: "var(--accent)",
+                            color: "var(--accent-fg)",
+                            cursor: "pointer",
+                          }}
+                        >
+                          Approve
+                        </button>
+                        <button
+                          type="button"
+                          disabled={busy()}
+                          onClick={() => void onRejectJoin(ref)}
+                          style={{
+                            "font-size": "0.78rem",
+                            padding: "0.2rem 0.5rem",
+                            "border-radius": "var(--radius-sm)",
+                            border: "1px solid var(--surface-border)",
+                            background: "transparent",
+                            color: "var(--surface-fg)",
+                            cursor: "pointer",
+                          }}
+                        >
+                          Reject
+                        </button>
+                      </span>
+                    </li>
+                  )}
+                </For>
+              </ul>
+            </div>
+          </Show>
           <ul
             style={{
               "list-style": "none",
@@ -2981,6 +3152,11 @@ function TimelineBubble(props: {
       // overlay by the receive loop, never rendered as a
       // standalone bubble. (Defensive: ops don't enter `rows()`,
       // but keep the timeline render total.)
+      return null;
+    }
+    if (ev.kind === "externalJoinRequest") {
+      // ADR-0027 (G-3) — surfaced in the members panel, never a timeline
+      // bubble (the receive loop skips it before `rows()`). Defensive.
       return null;
     }
     // Incoming application message — never our own → Edit/Delete
@@ -3719,6 +3895,11 @@ function timelineRowToPersisted(row: TimelineRow): PersistedMessage | null {
     // ADR-0023 — op events are folded into the target message's
     // overlay by the receive loop, never materialised as timeline
     // rows, so this branch is unreachable. Never persist them.
+    return null;
+  }
+  if (row.event.kind === "externalJoinRequest") {
+    // ADR-0027 (G-3) — external-join requests never enter `rows()` (the
+    // receive loop skips them), so this branch is unreachable. Never persist.
     return null;
   }
   // system

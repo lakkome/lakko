@@ -1688,6 +1688,81 @@ export class ContactsClient {
     return { commitMessageId: commitPublish.id };
   }
 
+  /** ADR-0027 (G-3) — approve a pending external-join request (owner / admin
+   *  only). `proposalRef` is the joiner's leaf signature key surfaced by an
+   *  `externalJoinRequest` event or `group.pendingExternalJoins()`. Drives the
+   *  MLS approve — which role-gates internally (fail-closed: a non-owner/admin
+   *  caller is refused before any state moves) and reuses the audited
+   *  `add_member`, so it returns `{ commit, welcome }` just like a normal add.
+   *  Step 1: broadcast the commit to the group journal so every existing member
+   *  advances its epoch and admits the joiner. Step 2: wrap the Welcome in a
+   *  `WelcomeRendezvous` envelope keyed on `proposalRef` and post THAT to the
+   *  same journal — the not-yet-member joiner (which knows the group_id because
+   *  it sent its proposal there) polls the journal, matches the envelope to its
+   *  own signature key, and opens the inner Welcome. Existing members skip the
+   *  rendezvous entry: it is not an MLS message, so their receive loop's
+   *  `processIncoming` rejects it and the loop drops it (the DS stores it opaque
+   *  — invariant #2). The caller registers the returned `commitMessageId` with
+   *  `ChatClient.markOwnPublishedCommit` to suppress the sender's own echo. */
+  async approveExternalJoin(
+    identity: IdentitySecrets | null,
+    group: WasmGroup,
+    proposalRef: Uint8Array,
+  ): Promise<{ commitMessageId: number; welcomeMessageId: number }> {
+    const wasm = await loadWasm();
+    const myIdentity = await this.resolveIdentity(identity);
+
+    let added;
+    try {
+      added = group.approveExternalJoin(myIdentity, proposalRef);
+    } catch (err) {
+      throw ContactsError.wrap(err);
+    }
+
+    let commitPublish;
+    try {
+      commitPublish = await this.ds.publishGroup(group.groupId, added.commit);
+    } catch (err) {
+      throw ContactsError.wrap(err);
+    }
+
+    let rendezvous: Uint8Array;
+    try {
+      rendezvous = wasm.wrapWelcomeRendezvous(proposalRef, added.welcome);
+    } catch (err) {
+      throw ContactsError.wrap(err);
+    }
+    let welcomePublish;
+    try {
+      welcomePublish = await this.ds.publishGroup(group.groupId, rendezvous);
+    } catch (err) {
+      throw ContactsError.wrap(err);
+    }
+
+    await this.persistBestEffort();
+
+    return {
+      commitMessageId: commitPublish.id,
+      welcomeMessageId: welcomePublish.id,
+    };
+  }
+
+  /** ADR-0027 (G-3) — reject a pending external-join request. Local-only: drops
+   *  the retained proposal so it no longer surfaces in
+   *  `group.pendingExternalJoins()`. Produces no commit and no journal post —
+   *  the joiner simply never receives a Welcome and its proposal lapses when the
+   *  group epoch next advances. The UI shows the action to owners / admins
+   *  only; there is no peer-verifiable gate because there is no network
+   *  artefact to gate. */
+  async rejectExternalJoin(group: WasmGroup, proposalRef: Uint8Array): Promise<void> {
+    try {
+      group.rejectExternalJoin(proposalRef);
+    } catch (err) {
+      throw ContactsError.wrap(err);
+    }
+    await this.persistBestEffort();
+  }
+
   /** Convenience wrapper around [`addMemberToGroup`] that
    *  resolves `@username` first. Mirror of
    *  [`startGroupWithUsername`] for the existing-group path. */
