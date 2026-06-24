@@ -26,6 +26,7 @@ pub mod identity;
 pub mod key_package;
 pub mod pairing;
 pub mod publisher_group;
+pub mod welcome_rendezvous;
 
 pub use device_group::{AccountId, DeviceGroup};
 pub use error::{Error, Result};
@@ -33,6 +34,7 @@ pub use group::{Group, Incoming, MemberAddition, MemberRecord};
 pub use group_roles::{Role, RoleTable};
 pub use identity::Identity;
 pub use publisher_group::{ChannelId, PublisherGroup, CHANNEL_EXPORTER_LABEL, CHANNEL_ID_LEN};
+pub use welcome_rendezvous::WelcomeRendezvous;
 
 /// Re-exported MLS leaf-node index. Surfaced so callers do not need to
 /// depend on `openmls` directly.
@@ -84,6 +86,17 @@ pub mod fuzz_api {
     #[must_use]
     pub fn parse_devicegroup_payload(bytes: &[u8]) -> bool {
         crate::DeviceGroup::parse_devicegroup_payload(bytes).is_ok()
+    }
+
+    /// Try to decode a Welcome rendezvous envelope
+    /// (`WelcomeRendezvous::decode`, ADR-0027 Phase 3). The bytes are
+    /// attacker-touchable: a prospective joiner decodes group-journal entries
+    /// that a malicious poster / the zero-trust DS could have crafted, before
+    /// any inner Welcome is opened. The bounded, fail-closed parser must stay
+    /// panic-free on arbitrary input.
+    #[must_use]
+    pub fn decode_welcome_rendezvous(bytes: &[u8]) -> bool {
+        crate::WelcomeRendezvous::decode(bytes).is_ok()
     }
 
     /// Try to decode a device-pairing QR payload (`pairing::decode`). Returns

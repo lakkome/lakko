@@ -233,6 +233,54 @@ pub struct AddMember {
     pub welcome: Vec<u8>,
 }
 
+/// FFI projection of [`lakko_mls::WelcomeRendezvous`] (ADR-0027 Phase 3, G-3) —
+/// the carrier that delivers an approved external joiner's Welcome through the
+/// group journal.
+#[derive(uniffi::Record)]
+pub struct WelcomeRendezvous {
+    /// The prospective joiner's signature key — the rendezvous tag the joiner
+    /// matches against its own key.
+    pub joiner_signature_key: Vec<u8>,
+    /// The wire-encoded Welcome the joiner opens via `joinFromWelcome`.
+    pub welcome: Vec<u8>,
+}
+
+/// Wrap an approved joiner's Welcome into a rendezvous envelope the admin posts
+/// to the group journal (ADR-0027 Phase 3). `joiner_signature_key` is the
+/// approved proposal ref; `welcome` is the `AddMember.welcome` from
+/// `approveExternalJoin`.
+///
+/// # Errors
+///
+/// [`FfiError`] if a field is empty or exceeds the envelope bounds.
+#[uniffi::export]
+fn wrap_welcome_rendezvous(
+    joiner_signature_key: Vec<u8>,
+    welcome: Vec<u8>,
+) -> Result<Vec<u8>, FfiError> {
+    Ok(lakko_mls::WelcomeRendezvous {
+        joiner_signature_key,
+        welcome,
+    }
+    .encode()?)
+}
+
+/// Parse a rendezvous envelope from a group-journal entry (ADR-0027 Phase 3) —
+/// the joiner decodes each entry and matches `joiner_signature_key` against its
+/// own key, then opens the inner Welcome. Bounded + fail-closed.
+///
+/// # Errors
+///
+/// [`FfiError`] for a malformed / out-of-bounds envelope.
+#[uniffi::export]
+fn parse_welcome_rendezvous(bytes: Vec<u8>) -> Result<WelcomeRendezvous, FfiError> {
+    let r = lakko_mls::WelcomeRendezvous::decode(&bytes)?;
+    Ok(WelcomeRendezvous {
+        joiner_signature_key: r.joiner_signature_key,
+        welcome: r.welcome,
+    })
+}
+
 /// FFI projection of [`lakko_mls::group::MemberRecord`]
 /// (Phase 2a3c).
 ///

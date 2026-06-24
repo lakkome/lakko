@@ -58,15 +58,32 @@ approve:
   unknown-ref-errors / non-admin-approve-refused); full
   `lakko-mls` suite + clippy green.
 
-**Remaining (ADR-0027 Phases 2-4):** FFI surface
-(`approveExternalJoin` / `rejectExternalJoin` + the joiner
-field on `ProcessedMessage`), the Welcome rendezvous
-transport (the joiner polls the group journal), and the
-3-client members-UI approve/reject affordance. The joiner
-*side* (creating the external proposal — needs the group's
-public params via the Phase-4 channel join-ticket of
-[ADR-0010](../adr/0010-channels-two-tier-broadcast.md)) is
-the live consumer.
+**Phase 2 landed (FFI surface).** `ProcessedMessage`
+carries `joiner_signature_key` (uniffi field /
+`externalJoinSignatureKey` wasm getter), and the Group FFI
+exposes `approveExternalJoin` (→ `AddMember` commit+welcome)
+/ `rejectExternalJoin` / `pendingExternalJoins` on uniffi
+(Swift/Kotlin) + wasm (web). `regen-bindings` + the web
+`.d.ts` emit them.
+
+**Phase 3 landed (Welcome rendezvous transport
+primitive).** `crates/lakko-mls/src/welcome_rendezvous.rs`
+`WelcomeRendezvous` — the carrier the admin posts to the
+group journal (`version ‖ sig_key_len ‖ joiner_signature_key
+‖ welcome`, bounded + fail-closed + panic-free, 8 unit tests
++ a `welcome_rendezvous_decode` fuzz target); FFI
+`wrapWelcomeRendezvous` (admin) + `welcomeRendezvousFor`
+(web non-throwing matcher) / `parse_welcome_rendezvous`
+(uniffi). The Welcome is HPKE-sealed to the joiner's init
+key, so the DS stores it opaque (invariant #2).
+
+**Remaining (ADR-0027 Phase 4):** the 3-client members-UI
+approve/reject affordance + the actual DS posting + the
+joiner's journal poll-loop wiring, and the joiner *side*
+(creating the external proposal — needs the group's public
+params via the Phase-4 channel join-ticket of
+[ADR-0010](../adr/0010-channels-two-tier-broadcast.md)),
+which is the live consumer.
 
 ## Multi-device
 

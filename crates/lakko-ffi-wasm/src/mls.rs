@@ -3267,3 +3267,33 @@ mod tests {
     // `MlsChannelId::try_from_slice` predicate the UniFFI
     // tests already pin.
 }
+
+/// Wrap an approved external joiner's Welcome into a rendezvous envelope the
+/// admin posts to the group journal (ADR-0027 Phase 3, G-3). `welcome` is the
+/// `AddMember.welcomeBytes` from `approveExternalJoin`; `joinerSignatureKey` is
+/// the approved proposal ref.
+#[wasm_bindgen(js_name = wrapWelcomeRendezvous)]
+pub fn wrap_welcome_rendezvous(
+    joiner_signature_key: &[u8],
+    welcome: &[u8],
+) -> Result<Vec<u8>, JsError> {
+    lakko_mls::WelcomeRendezvous {
+        joiner_signature_key: joiner_signature_key.to_vec(),
+        welcome: welcome.to_vec(),
+    }
+    .encode()
+    .map_err(mls_err)
+}
+
+/// Decode a group-journal entry as a rendezvous envelope and, if it is
+/// addressed to `mySignatureKey`, return the inner Welcome (ADR-0027 Phase 3).
+/// Returns `undefined` when the entry is not a rendezvous, is malformed, or is
+/// addressed to someone else — so the joiner can run it over **every** journal
+/// entry without throwing on the non-matching ones.
+#[wasm_bindgen(js_name = welcomeRendezvousFor)]
+pub fn welcome_rendezvous_for(bytes: &[u8], my_signature_key: &[u8]) -> Option<Vec<u8>> {
+    match lakko_mls::WelcomeRendezvous::decode(bytes) {
+        Ok(r) if r.is_for(my_signature_key) => Some(r.welcome),
+        _ => None,
+    }
+}

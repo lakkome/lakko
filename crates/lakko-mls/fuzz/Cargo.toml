@@ -26,6 +26,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "welcome_rendezvous_decode"
+path = "fuzz_targets/welcome_rendezvous_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "key_package"
 path = "fuzz_targets/key_package.rs"
 test = false
