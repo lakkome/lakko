@@ -639,7 +639,10 @@ impl Group {
             },
             MlsIncoming::Commit => ProcessedMessage::Commit,
             MlsIncoming::Proposal => ProcessedMessage::Proposal,
-            MlsIncoming::ExternalJoinProposal => ProcessedMessage::ExternalJoinProposal,
+            // ADR-0027 Phase 1: the core variant now carries the joiner's
+            // signature key; the FFI surface is enriched in Phase 2. Match the
+            // new shape and drop the field for now.
+            MlsIncoming::ExternalJoinProposal { .. } => ProcessedMessage::ExternalJoinProposal,
         })
     }
 
@@ -759,7 +762,10 @@ impl Group {
             },
             MlsIncoming::Commit => ProcessedMessage::Commit,
             MlsIncoming::Proposal => ProcessedMessage::Proposal,
-            MlsIncoming::ExternalJoinProposal => ProcessedMessage::ExternalJoinProposal,
+            // ADR-0027 Phase 1: the core variant now carries the joiner's
+            // signature key; the FFI surface is enriched in Phase 2. Match the
+            // new shape and drop the field for now.
+            MlsIncoming::ExternalJoinProposal { .. } => ProcessedMessage::ExternalJoinProposal,
         })
     }
 
@@ -1272,7 +1278,10 @@ impl DeviceGroup {
             },
             lakko_mls::Incoming::Commit => ProcessedMessage::Commit,
             lakko_mls::Incoming::Proposal => ProcessedMessage::Proposal,
-            lakko_mls::Incoming::ExternalJoinProposal => ProcessedMessage::ExternalJoinProposal,
+            // ADR-0027 Phase 1: drop the new joiner-key field (Phase 2 enriches).
+            lakko_mls::Incoming::ExternalJoinProposal { .. } => {
+                ProcessedMessage::ExternalJoinProposal
+            },
         })
     }
 
@@ -1330,7 +1339,10 @@ impl DeviceGroup {
             },
             lakko_mls::Incoming::Commit => ProcessedMessage::Commit,
             lakko_mls::Incoming::Proposal => ProcessedMessage::Proposal,
-            lakko_mls::Incoming::ExternalJoinProposal => ProcessedMessage::ExternalJoinProposal,
+            // ADR-0027 Phase 1: drop the new joiner-key field (Phase 2 enriches).
+            lakko_mls::Incoming::ExternalJoinProposal { .. } => {
+                ProcessedMessage::ExternalJoinProposal
+            },
         })
     }
 }

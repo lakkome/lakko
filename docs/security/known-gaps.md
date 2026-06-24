@@ -29,12 +29,44 @@ The IETF MLS WG is still landing hybrid PQ cipher suite
 identifiers. We pin classical suites today and migrate
 once the draft stabilises.
 
-### G-3: External-join proposals not wired into a UI surface
+### G-3: External-join proposal approval — **Phase 1 (MLS core) landed ([ADR-0027](../adr/0027-external-join-approval.md)); FFI + transport + UI follow**
 
-`Group::process_incoming` returns
-`Incoming::ExternalJoinProposal` defensively but the
-client UIs ignore it. The Phase 4 channel subscriber path
-lights it up.
+Was: `Group::process_incoming` returned a data-less
+`Incoming::ExternalJoinProposal` unit variant and the
+clients ignored it — no joiner identity, no approve path.
+
+**Phase 1 landed (Jun 2026, ADR-0027).** The `lakko-mls`
+core now surfaces the joiner identity and gates an admin
+approve:
+- `Incoming::ExternalJoinProposal { joiner_signature_key }`
+  — extracted from the external `Add` proposal's KeyPackage
+  (refusing a non-`Add` / non-`NewMemberProposal`-sender
+  proposal, defence in depth), retained in an in-memory
+  per-group queue bounded by `MAX_PENDING_EXTERNAL_JOINS`
+  (anti-spam) + de-duped by signature key.
+- `Group::approve_external_join(identity, proposal_ref)` —
+  **role-gated** (ADR-0022: owner/admin only on a group with
+  a role table, fail-closed; open group stays open) — adds
+  the joiner via the audited `add_member` path (Commit +
+  Welcome); peers re-verify the resulting `Add`'s committer
+  role on receipt, so a forged local approve can't take
+  effect on them either.
+- `Group::reject_external_join(proposal_ref)` (local discard,
+  no epoch advance) + `pending_external_joins()` accessor.
+- 5 property tests (owner-approves-adds-joiner /
+  reject-removes-without-adding / dedup-by-signature-key /
+  unknown-ref-errors / non-admin-approve-refused); full
+  `lakko-mls` suite + clippy green.
+
+**Remaining (ADR-0027 Phases 2-4):** FFI surface
+(`approveExternalJoin` / `rejectExternalJoin` + the joiner
+field on `ProcessedMessage`), the Welcome rendezvous
+transport (the joiner polls the group journal), and the
+3-client members-UI approve/reject affordance. The joiner
+*side* (creating the external proposal — needs the group's
+public params via the Phase-4 channel join-ticket of
+[ADR-0010](../adr/0010-channels-two-tier-broadcast.md)) is
+the live consumer.
 
 ## Multi-device
 

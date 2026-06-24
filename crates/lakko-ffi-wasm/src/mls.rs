@@ -431,7 +431,9 @@ impl Group {
             },
             MlsIncoming::Commit => ProcessedMessage::control(ProcessedMessageKind::Commit),
             MlsIncoming::Proposal => ProcessedMessage::control(ProcessedMessageKind::Proposal),
-            MlsIncoming::ExternalJoinProposal => {
+            // ADR-0027 Phase 1: the core variant now carries the joiner's
+            // signature key; the wasm surface is enriched in Phase 2.
+            MlsIncoming::ExternalJoinProposal { .. } => {
                 ProcessedMessage::control(ProcessedMessageKind::ExternalJoinProposal)
             },
         })
@@ -530,7 +532,9 @@ impl Group {
             },
             MlsIncoming::Commit => ProcessedMessage::control(ProcessedMessageKind::Commit),
             MlsIncoming::Proposal => ProcessedMessage::control(ProcessedMessageKind::Proposal),
-            MlsIncoming::ExternalJoinProposal => {
+            // ADR-0027 Phase 1: the core variant now carries the joiner's
+            // signature key; the wasm surface is enriched in Phase 2.
+            MlsIncoming::ExternalJoinProposal { .. } => {
                 ProcessedMessage::control(ProcessedMessageKind::ExternalJoinProposal)
             },
         })
@@ -1091,7 +1095,9 @@ impl DeviceGroup {
             lakko_mls::Incoming::Proposal => {
                 ProcessedMessage::control(ProcessedMessageKind::Proposal)
             },
-            lakko_mls::Incoming::ExternalJoinProposal => {
+            // ADR-0027 Phase 1: the core variant now carries the joiner's
+            // signature key; the wasm surface is enriched in Phase 2.
+            lakko_mls::Incoming::ExternalJoinProposal { .. } => {
                 ProcessedMessage::control(ProcessedMessageKind::ExternalJoinProposal)
             },
         })
@@ -1170,7 +1176,9 @@ impl DeviceGroup {
             lakko_mls::Incoming::Proposal => {
                 ProcessedMessage::control(ProcessedMessageKind::Proposal)
             },
-            lakko_mls::Incoming::ExternalJoinProposal => {
+            // ADR-0027 Phase 1: the core variant now carries the joiner's
+            // signature key; the wasm surface is enriched in Phase 2.
+            lakko_mls::Incoming::ExternalJoinProposal { .. } => {
                 ProcessedMessage::control(ProcessedMessageKind::ExternalJoinProposal)
             },
         })

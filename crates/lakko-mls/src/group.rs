@@ -18,7 +18,8 @@ use openmls::extensions::{
 };
 use openmls::framing::{MlsMessageBodyIn, MlsMessageIn, MlsMessageOut, Sender};
 use openmls::group::{
-    GroupContext, MlsGroup, MlsGroupCreateConfig, MlsGroupJoinConfig, StagedCommit, StagedWelcome,
+    GroupContext, MlsGroup, MlsGroupCreateConfig, MlsGroupJoinConfig, QueuedProposal, StagedCommit,
+    StagedWelcome,
 };
 use openmls::messages::proposals::Proposal;
 use openmls::prelude::{KeyPackage, LeafNodeIndex, ProcessedMessageContent, ProtocolVersion};
@@ -30,6 +31,23 @@ use crate::error::{Error, Result};
 use crate::group_roles::{Role, RoleTable, ROLE_EXTENSION_TYPE};
 use crate::identity::Identity;
 
+/// Max external-join proposals retained per group awaiting an owner/admin
+/// decision (ADR-0027). A proposal arriving past this cap is surfaced but not
+/// retained — anti-spam, since a non-member can post these.
+const MAX_PENDING_EXTERNAL_JOINS: usize = 64;
+
+/// A non-member's external-join request retained for an owner/admin decision
+/// (ADR-0027, G-3). `joiner_signature_key` is the canonical identity handle the
+/// rest of `lakko-mls` keys on (the role table + the contact graph match on
+/// it); it doubles as the opaque ref the FFI / UI pass back to
+/// [`Group::approve_external_join`] / [`Group::reject_external_join`].
+/// `key_package` is the joiner's KeyPackage that an approve adds via the
+/// existing, audited [`Group::add_member`] path.
+struct PendingExternalJoin {
+    joiner_signature_key: Vec<u8>,
+    key_package: KeyPackage,
+}
+
 /// Lakko MLS conversation group.
 ///
 /// Owns the local view of an MLS group. Per-device state lives in the
@@ -37,6 +55,11 @@ use crate::identity::Identity;
 /// borrowed alongside that identity for every operation.
 pub struct Group {
     inner: MlsGroup,
+    /// External-join proposals (ADR-0027) awaiting an owner/admin approve /
+    /// reject. **In-memory only in v1** — proposals are epoch-bound +
+    /// ephemeral, so an app restart drops them and the joiner re-sends;
+    /// persistence is a follow-up. Bounded by [`MAX_PENDING_EXTERNAL_JOINS`].
+    pending_external_joins: Vec<PendingExternalJoin>,
 }
 
 /// Output of [`Group::add_member`].
@@ -93,8 +116,16 @@ pub enum Incoming {
     Commit,
     /// A standalone proposal was processed (no state advance).
     Proposal,
-    /// An external join proposal was processed.
-    ExternalJoinProposal,
+    /// A non-member's external join proposal was processed and (unless the
+    /// per-group cap is hit) retained for an owner/admin decision (ADR-0027,
+    /// G-3). `joiner_signature_key` is the prospective joiner's leaf signature
+    /// public key — the stable handle the caller passes to
+    /// [`Group::approve_external_join`] / [`Group::reject_external_join`], and
+    /// the key the role table / contact graph resolve to a display name.
+    ExternalJoinProposal {
+        /// The prospective joiner's leaf signature public key.
+        joiner_signature_key: Vec<u8>,
+    },
 }
 
 impl Group {
@@ -144,7 +175,7 @@ impl Group {
         )
         .map_err(|e| Error::Group(format!("create: {e:?}")))?;
 
-        Ok(Self { inner })
+        Ok(Self::from_mls_group(inner))
     }
 
     /// Create a new MLS group with a **caller-supplied** group id.
@@ -186,7 +217,7 @@ impl Group {
         )
         .map_err(|e| Error::Group(format!("create_with_id: {e:?}")))?;
 
-        Ok(Self { inner })
+        Ok(Self::from_mls_group(inner))
     }
 
     /// Join an existing group from a Welcome message.
@@ -223,7 +254,7 @@ impl Group {
             .into_group(&identity.provider)
             .map_err(|e| Error::Group(format!("welcome -> group: {e:?}")))?;
 
-        Ok(Self { inner })
+        Ok(Self::from_mls_group(inner))
     }
 
     /// Add a member by their published [`KeyPackage`].
@@ -398,6 +429,110 @@ impl Group {
             .map(|table| table.role_of(identity.signature_public_key()))
     }
 
+    /// Retain a non-member's external-join proposal for an owner/admin decision
+    /// (ADR-0027, G-3). Validates it is genuinely an `Add` from a
+    /// `NewMemberProposal` sender (defence in depth — a member must not smuggle
+    /// a different proposal through this path), extracts the joiner's signature
+    /// key + KeyPackage, de-dups by signature key, and retains it under the
+    /// [`MAX_PENDING_EXTERNAL_JOINS`] cap. The event is always surfaced even
+    /// when the cap drops the retention.
+    fn retain_external_join(&mut self, qp: &QueuedProposal) -> Result<Incoming> {
+        if !matches!(qp.sender(), Sender::NewMemberProposal) {
+            return Err(Error::Group(
+                "external join proposal from a non-new-member sender refused".into(),
+            ));
+        }
+        let Proposal::Add(add) = qp.proposal() else {
+            return Err(Error::Group(
+                "external join proposal carried a non-Add proposal refused".into(),
+            ));
+        };
+        let key_package = add.key_package().clone();
+        let joiner_signature_key = key_package.leaf_node().signature_key().as_slice().to_vec();
+
+        let already_pending = self
+            .pending_external_joins
+            .iter()
+            .any(|p| p.joiner_signature_key == joiner_signature_key);
+        if !already_pending && self.pending_external_joins.len() < MAX_PENDING_EXTERNAL_JOINS {
+            self.pending_external_joins.push(PendingExternalJoin {
+                joiner_signature_key: joiner_signature_key.clone(),
+                key_package,
+            });
+        }
+        Ok(Incoming::ExternalJoinProposal {
+            joiner_signature_key,
+        })
+    }
+
+    /// The signature key of every external-join proposal currently awaiting a
+    /// decision (ADR-0027). Each is the handle for
+    /// [`approve_external_join`](Self::approve_external_join) /
+    /// [`reject_external_join`](Self::reject_external_join).
+    #[must_use]
+    pub fn pending_external_joins(&self) -> Vec<Vec<u8>> {
+        self.pending_external_joins
+            .iter()
+            .map(|p| p.joiner_signature_key.clone())
+            .collect()
+    }
+
+    /// Approve a retained external-join proposal — adds the joiner to the group
+    /// (ADR-0027, G-3). `proposal_ref` is the joiner's signature key from
+    /// [`Incoming::ExternalJoinProposal`] / [`pending_external_joins`](Self::pending_external_joins).
+    ///
+    /// **Role-gated** (ADR-0022): on a group carrying a role table only an owner
+    /// or admin may approve; a non-admin is refused with no commit produced
+    /// (fail-closed, invariant #4). A legacy group with no table stays open.
+    /// Approving reuses the audited [`add_member`](Self::add_member) path —
+    /// committing the joiner's external `Add` is equivalent to adding their
+    /// KeyPackage — so it returns the in-group Commit + the joiner's Welcome;
+    /// peers re-verify the resulting `Add`'s committer role on receipt
+    /// (`process_incoming_verifying_roles`), so a forged local approve cannot
+    /// take effect on them either.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Group`] if the caller is not owner/admin, if no pending proposal
+    /// matches `proposal_ref`, or on an OpenMLS add failure.
+    pub fn approve_external_join(
+        &mut self,
+        identity: &Identity,
+        proposal_ref: &[u8],
+    ) -> Result<MemberAddition> {
+        if let Some(table) = self.group_roles() {
+            if !table.can_administer(identity.signature_public_key()) {
+                return Err(Error::Group(
+                    "external join approve refused: not owner or admin".into(),
+                ));
+            }
+        }
+        let pos = self
+            .pending_external_joins
+            .iter()
+            .position(|p| p.joiner_signature_key == proposal_ref)
+            .ok_or_else(|| Error::Group("no pending external join for that key".into()))?;
+        let pending = self.pending_external_joins.remove(pos);
+        self.add_member(identity, pending.key_package)
+    }
+
+    /// Reject a retained external-join proposal — discards it locally without
+    /// adding the joiner or advancing the epoch (ADR-0027). Local-only (no
+    /// commit, no peer effect); the clients gate the affordance on `own_role`.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Group`] if no pending proposal matches `proposal_ref`.
+    pub fn reject_external_join(&mut self, proposal_ref: &[u8]) -> Result<()> {
+        let pos = self
+            .pending_external_joins
+            .iter()
+            .position(|p| p.joiner_signature_key == proposal_ref)
+            .ok_or_else(|| Error::Group("no pending external join for that key".into()))?;
+        self.pending_external_joins.remove(pos);
+        Ok(())
+    }
+
     /// Rewrite the group's ADR-0022 role table (promote / demote admins).
     /// Produces a `GroupContextExtensions` commit the caller broadcasts to the
     /// group journal. **Authorisation is enforced on the RECEIVING side** by
@@ -490,8 +625,8 @@ impl Group {
                 Ok(Incoming::Commit)
             },
             ProcessedMessageContent::ProposalMessage(_) => Ok(Incoming::Proposal),
-            ProcessedMessageContent::ExternalJoinProposalMessage(_) => {
-                Ok(Incoming::ExternalJoinProposal)
+            ProcessedMessageContent::ExternalJoinProposalMessage(qp) => {
+                self.retain_external_join(&qp)
             },
         }
     }
@@ -554,8 +689,8 @@ impl Group {
                 Ok(Incoming::Commit)
             },
             ProcessedMessageContent::ProposalMessage(_) => Ok(Incoming::Proposal),
-            ProcessedMessageContent::ExternalJoinProposalMessage(_) => {
-                Ok(Incoming::ExternalJoinProposal)
+            ProcessedMessageContent::ExternalJoinProposalMessage(qp) => {
+                self.retain_external_join(&qp)
             },
         }
     }
@@ -631,8 +766,8 @@ impl Group {
                 Ok(Incoming::Commit)
             },
             ProcessedMessageContent::ProposalMessage(_) => Ok(Incoming::Proposal),
-            ProcessedMessageContent::ExternalJoinProposalMessage(_) => {
-                Ok(Incoming::ExternalJoinProposal)
+            ProcessedMessageContent::ExternalJoinProposalMessage(qp) => {
+                self.retain_external_join(&qp)
             },
         }
     }
@@ -745,7 +880,7 @@ impl Group {
         let id = GroupId::from_slice(group_id);
         let loaded = MlsGroup::load(identity.provider.storage(), &id)
             .map_err(|e| Error::Group(format!("load: {e:?}")))?;
-        Ok(loaded.map(|inner| Self { inner }))
+        Ok(loaded.map(Self::from_mls_group))
     }
 
     /// Wrap an already-constructed [`MlsGroup`] in the Lakko
@@ -756,7 +891,10 @@ impl Group {
     /// [`Group::join_from_welcome`].
     #[doc(hidden)]
     pub(crate) fn from_mls_group(inner: MlsGroup) -> Self {
-        Self { inner }
+        Self {
+            inner,
+            pending_external_joins: Vec::new(),
+        }
     }
 }
 
@@ -852,4 +990,165 @@ pub fn encode_message(msg: &MlsMessageOut) -> Result<Vec<u8>> {
 fn decode_message(bytes: &[u8]) -> Result<MlsMessageIn> {
     let mut slice = bytes;
     MlsMessageIn::tls_deserialize(&mut slice).map_err(|e| Error::Codec(format!("{e:?}")))
+}
+
+// ============================================================================
+// ADR-0027 external-join approval — property tests (G-3)
+// ============================================================================
+
+#[cfg(test)]
+mod external_join_tests {
+    use super::*;
+    use crate::group_roles::RoleTable;
+    use crate::key_package;
+    use openmls::group::{GroupEpoch, GroupId};
+    use openmls::messages::external_proposals::JoinProposal;
+    use openmls_rust_crypto::MemoryStorage;
+
+    fn wire(m: MlsMessageOut) -> Vec<u8> {
+        encode_message(&m).expect("encode")
+    }
+
+    fn kp_wire(id: &Identity) -> Vec<u8> {
+        key_package::serialize(&id.create_key_package().expect("kp")).expect("serialize kp")
+    }
+
+    fn pk(id: &Identity) -> Vec<u8> {
+        id.signature_public_key().to_vec()
+    }
+
+    fn pk32(id: &Identity) -> [u8; 32] {
+        id.signature_public_key()
+            .try_into()
+            .expect("32-byte signature key")
+    }
+
+    /// The joiner-side primitive: a non-member crafts an external Add proposal
+    /// for a group's current id + epoch. (The full join-ticket acquisition is
+    /// Phase 4; here the test supplies the params directly.)
+    fn external_join_proposal(joiner: &Identity, group_id: &[u8], epoch: u64) -> Vec<u8> {
+        let kp = joiner.create_key_package().expect("kp");
+        let msg = JoinProposal::new::<MemoryStorage>(
+            kp,
+            GroupId::from_slice(group_id),
+            GroupEpoch::from(epoch),
+            &joiner.signature_keys,
+        )
+        .expect("join proposal");
+        wire(msg)
+    }
+
+    #[test]
+    fn owner_approves_external_join_adds_joiner() {
+        // Open group (no role table) — approve is allowed for any member.
+        let alice = Identity::from_seed(&[0xA0u8; 64]).expect("alice");
+        let mut alice_g = Group::create(&alice).expect("create");
+        let dave = Identity::from_seed(&[0xD0u8; 64]).expect("dave");
+        let dave_pk = pk(&dave);
+
+        let prop = external_join_proposal(&dave, &alice_g.group_id(), alice_g.epoch());
+        let incoming = alice_g.process_incoming(&alice, &prop).expect("process");
+        assert!(
+            matches!(&incoming, Incoming::ExternalJoinProposal { joiner_signature_key }
+                if *joiner_signature_key == dave_pk),
+            "got {incoming:?}",
+        );
+        assert_eq!(alice_g.pending_external_joins(), vec![dave_pk.clone()]);
+
+        alice_g
+            .approve_external_join(&alice, &dave_pk)
+            .expect("approve");
+        assert!(
+            alice_g
+                .members()
+                .iter()
+                .any(|m| m.signature_public_key == dave_pk),
+            "dave should be a member after approve",
+        );
+        assert!(alice_g.pending_external_joins().is_empty());
+    }
+
+    #[test]
+    fn reject_removes_without_adding() {
+        let alice = Identity::from_seed(&[0xA2u8; 64]).expect("alice");
+        let mut alice_g = Group::create(&alice).expect("create");
+        let dave = Identity::from_seed(&[0xD2u8; 64]).expect("dave");
+        let dave_pk = pk(&dave);
+
+        let prop = external_join_proposal(&dave, &alice_g.group_id(), alice_g.epoch());
+        alice_g.process_incoming(&alice, &prop).expect("process");
+        assert_eq!(alice_g.pending_external_joins().len(), 1);
+
+        alice_g.reject_external_join(&dave_pk).expect("reject");
+        assert!(alice_g.pending_external_joins().is_empty());
+        assert!(
+            !alice_g
+                .members()
+                .iter()
+                .any(|m| m.signature_public_key == dave_pk),
+            "dave must NOT be a member after reject",
+        );
+        // Epoch unchanged (no commit).
+        assert_eq!(alice_g.epoch(), 0);
+    }
+
+    #[test]
+    fn external_join_dedup_by_signature_key() {
+        let alice = Identity::from_seed(&[0xA3u8; 64]).expect("alice");
+        let mut alice_g = Group::create(&alice).expect("create");
+        let dave = Identity::from_seed(&[0xD3u8; 64]).expect("dave");
+
+        let p1 = external_join_proposal(&dave, &alice_g.group_id(), alice_g.epoch());
+        alice_g.process_incoming(&alice, &p1).expect("p1");
+        let p2 = external_join_proposal(&dave, &alice_g.group_id(), alice_g.epoch());
+        alice_g.process_incoming(&alice, &p2).expect("p2");
+        // Same joiner signature key → a single pending entry.
+        assert_eq!(alice_g.pending_external_joins().len(), 1);
+    }
+
+    #[test]
+    fn approve_unknown_ref_errors() {
+        let alice = Identity::from_seed(&[0xA4u8; 64]).expect("alice");
+        let mut alice_g = Group::create(&alice).expect("create");
+        assert!(alice_g.approve_external_join(&alice, b"nope").is_err());
+        assert!(alice_g.reject_external_join(b"nope").is_err());
+    }
+
+    #[test]
+    fn non_admin_approve_refused() {
+        // alice = owner, bob = plain member, role table set.
+        let alice = Identity::from_seed(&[0xA5u8; 64]).expect("alice");
+        let bob = Identity::from_seed(&[0xB5u8; 64]).expect("bob");
+        let mut alice_g = Group::create(&alice).expect("create");
+
+        let add = alice_g
+            .add_member_from_wire(&alice, &kp_wire(&bob))
+            .expect("add bob");
+        let mut bob_g = Group::join_from_welcome(&wire(add.welcome), &bob).expect("bob joins");
+
+        // alice (owner) sets the role table: herself owner, no admins.
+        let roles = RoleTable::new(pk32(&alice), vec![]);
+        let role_commit = alice_g.set_group_roles(&alice, &roles).expect("set roles");
+        bob_g
+            .process_incoming_verifying_roles(&bob, &role_commit)
+            .expect("bob applies roles");
+
+        // A non-member asks to join; bob (a plain member) tries to approve.
+        let dave = Identity::from_seed(&[0xD5u8; 64]).expect("dave");
+        let dave_pk = pk(&dave);
+        let prop = external_join_proposal(&dave, &bob_g.group_id(), bob_g.epoch());
+        bob_g.process_incoming(&bob, &prop).expect("bob processes");
+        assert_eq!(bob_g.pending_external_joins(), vec![dave_pk.clone()]);
+
+        // Role-gated: a plain member is refused, no commit produced.
+        assert!(
+            bob_g.approve_external_join(&bob, &dave_pk).is_err(),
+            "a non-admin must not approve an external join",
+        );
+        // dave still not a member.
+        assert!(!bob_g
+            .members()
+            .iter()
+            .any(|m| m.signature_public_key == dave_pk));
+    }
 }
