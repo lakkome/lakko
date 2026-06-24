@@ -1876,9 +1876,12 @@ breaks):**
   recover-from-words given the username + phrase; the `username` arg is
   required only when no account is cached. A username miss collapses into the
   same error as a bad phrase (no username-space probing). The live recovery
-  `recovery_kt_e2e.rs` exercises the recovery pipeline. No isolated unit test
-  pins the inlined resolution branch — a small regression test would need the
-  resolution logic factored into a testable helper (follow-up).
+  `recovery_kt_e2e.rs` exercises the recovery pipeline, and the web resolution
+  branch is now factored into a pure `resolveRecoverAccount`
+  (`apps/web/src/auth/recover-resolution.ts`) with a 6-case unit test
+  (`recover-resolution.test.ts`: cache-hit / matching-username / fresh-device
+  lookup / username-mismatch / unregistered-username / no-account) locking the
+  cross-device behaviour so it can't silently regress.
 - **Web 1×1 video calls landed (Jun 2026).** The web P2P 1×1 path now
   captures the local camera (a "Video" call button dials `video:true`),
   renders a mirrored self-preview + the remote video tile, and toggles the

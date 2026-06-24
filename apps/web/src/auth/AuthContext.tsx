@@ -63,6 +63,7 @@ import {
 import { AuthClient } from "./client";
 import type { ContactKind } from "./wire";
 import { base64Decode, base64Encode } from "./account-id";
+import { resolveRecoverAccount } from "./recover-resolution";
 import {
   deriveDeviceRootKey,
   deriveDeviceRootKeyFromIdentitySeed,
@@ -1873,35 +1874,16 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       });
     },
     async recover(mnemonicPhrase, newPassword, username) {
-      const cached = loadPersisted();
-      // Resolve the account_id the same way `login` does so recover
-      // works on a FRESH device: a local cache hit wins; otherwise a
-      // discovery.lookup on the supplied username binds it. Without
-      // either we cannot target the recover.
-      const trimmedUsername = username?.trim() ?? "";
-      let accountIdB64: string;
-      let resolvedUsername: string;
-      if (
-        cached !== null &&
-        (trimmedUsername.length === 0 || cached.username === trimmedUsername)
-      ) {
-        accountIdB64 = cached.accountIdB64;
-        resolvedUsername = cached.username;
-      } else if (trimmedUsername.length > 0) {
-        const lookup = await discovery.lookup(trimmedUsername);
-        if (lookup.account === null) {
-          // Collapsed with "bad phrase" downstream by the OPAQUE
-          // rejection — we don't help probe the username space.
-          throw new Error("invalid recovery");
-        }
-        accountIdB64 = base64Encode(lookup.account);
-        resolvedUsername = lookup.normalisedUsername;
-      } else {
-        throw new Error(
-          "no account on this device — enter your username so we can " +
-            "look up the account to recover",
-        );
-      }
+      // Resolve the account_id the same way `login` does so recover works on a
+      // FRESH device: a local cache hit wins; otherwise a discovery.lookup on
+      // the supplied username binds it (extracted to `resolveRecoverAccount`
+      // so the cross-device behaviour is unit-tested — G-29).
+      const { accountIdB64, resolvedUsername } = await resolveRecoverAccount({
+        cached: loadPersisted(),
+        username,
+        lookup: (u) => discovery.lookup(u),
+        encodeAccountId: base64Encode,
+      });
       // Parse the phrase up front so a bad mnemonic surfaces
       // before we burn a PoW solve. `fromPhrase` collapses
       // unknown-word and bad-checksum into one error message —
