@@ -1309,6 +1309,7 @@ private fun MembersSheet(viewModel: ChatViewModel) {
     val canManage by viewModel.canManageMembers.collectAsStateWithLifecycle()
     val isOwner by viewModel.isOwner.collectAsStateWithLifecycle()
     val roleTable by viewModel.roleTable.collectAsStateWithLifecycle()
+    val pendingJoins by viewModel.pendingJoins.collectAsStateWithLifecycle()
     val ownLeaf = viewModel.ownLeafIndex()
 
     Dialog(
@@ -1358,6 +1359,41 @@ private fun MembersSheet(viewModel: ChatViewModel) {
                     )
                 }
                 Spacer(Modifier.height(12.dp))
+                // ADR-0027 (G-3) — pending external-join requests. Owner/admin
+                // only (same gate as add/remove); hidden when there are none.
+                // Approve drives the role-gated MLS approve + posts the commit &
+                // Welcome rendezvous; Reject drops the retained proposal.
+                if (canManage && pendingJoins.isNotEmpty()) {
+                    Text(
+                        text = "Join requests (${pendingJoins.size})",
+                        style = MaterialTheme.typography.titleSmall,
+                    )
+                    Spacer(Modifier.height(6.dp))
+                    pendingJoins.forEach { ref ->
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 2.dp),
+                        ) {
+                            Text(
+                                text = ref.take(8)
+                                    .joinToString("") { "%02x".format(it.toInt() and 0xff) },
+                                style = MaterialTheme.typography.bodySmall,
+                                modifier = Modifier.weight(1f),
+                            )
+                            TextButton(
+                                onClick = { viewModel.onApproveJoin(ref) },
+                                enabled = !busy,
+                            ) { Text("Approve") }
+                            TextButton(
+                                onClick = { viewModel.onRejectJoin(ref) },
+                                enabled = !busy,
+                            ) { Text("Reject") }
+                        }
+                    }
+                    Spacer(Modifier.height(12.dp))
+                }
                 LazyColumn(modifier = Modifier.heightIn(max = 360.dp)) {
                     items(members) { member ->
                         Row(

@@ -103,6 +103,13 @@ public final class ChatViewModel: ObservableObject {
     /// The group's current role table (owner + admins), or `nil` for an open
     /// group — drives the per-member admin labelling.
     @Published public private(set) var roleTable: RoleTable?
+    /// ADR-0027 (G-3) — pending external-join requests. Each entry is a joiner
+    /// leaf signature key (the `proposalRef` for approve / reject). The members
+    /// sheet renders an owner/admin-only section from this; empty hides it. The
+    /// MLS-core retained set (`group.pendingExternalJoins()`) is the source of
+    /// truth — re-read on `refreshMembers()` + on each poll while the sheet is
+    /// open.
+    @Published public private(set) var pendingJoins: [Data] = []
 
     // MARK: - Wiring
 
@@ -461,6 +468,9 @@ public final class ChatViewModel: ObservableObject {
         canManageMembers = role != .member
         isOwner = role == .owner
         roleTable = repository.groupRoles(groupIdHex: groupIdHex)
+        // ADR-0027 (G-3) — refresh the pending external-join list alongside the
+        // roster (the retained set is the source of truth).
+        pendingJoins = repository.pendingExternalJoins(groupIdHex: groupIdHex)
     }
 
     /// `true` when `member` is an admin in the current role table.
@@ -569,6 +579,49 @@ public final class ChatViewModel: ObservableObject {
                 membershipError = error.localizedDescription
                 NSLog("onToggleAdmin failed: %@", error.localizedDescription)
             }
+        }
+    }
+
+    /// ADR-0027 (G-3) — approve a pending external-join request (owner/admin
+    /// only). Drives the role-gated approve (fail-closed in the core),
+    /// broadcasts the commit + posts the wrapped Welcome rendezvous, then
+    /// refreshes the roster + pending list. Fail-closed on error.
+    func onApproveJoin(proposalRef: Data) {
+        guard !membershipBusy else { return }
+        membershipBusy = true
+        membershipError = nil
+        Task { @MainActor in
+            defer { membershipBusy = false }
+            do {
+                _ = try await repository.approveExternalJoin(
+                    groupIdHex: groupIdHex,
+                    proposalRef: proposalRef
+                )
+                refreshMembers()
+            } catch {
+                membershipError = error.localizedDescription
+                NSLog("onApproveJoin failed: %@", error.localizedDescription)
+            }
+        }
+    }
+
+    /// ADR-0027 (G-3) — reject a pending external-join request (owner/admin
+    /// only). Local-only drop of the retained proposal; no commit / journal
+    /// post. Fail-closed on error.
+    func onRejectJoin(proposalRef: Data) {
+        guard !membershipBusy else { return }
+        membershipBusy = true
+        membershipError = nil
+        defer { membershipBusy = false }
+        do {
+            try repository.rejectExternalJoin(
+                groupIdHex: groupIdHex,
+                proposalRef: proposalRef
+            )
+            refreshMembers()
+        } catch {
+            membershipError = error.localizedDescription
+            NSLog("onRejectJoin failed: %@", error.localizedDescription)
         }
     }
 
@@ -722,6 +775,12 @@ public final class ChatViewModel: ObservableObject {
         let thread = state.threads.first { $0.groupIdHex == groupIdHex }
         self.messages = thread?.messages ?? []
         self.threadKnown = thread != nil
+        // ADR-0027 (G-3) — a poll may have retained a fresh external-join
+        // request; refresh the pending list live while the members sheet is
+        // open (cheap in-memory read of the group's retained set).
+        if membersPanelOpen {
+            pendingJoins = repository.pendingExternalJoins(groupIdHex: groupIdHex)
+        }
     }
 
     // MARK: - Actions

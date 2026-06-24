@@ -610,6 +610,96 @@ public final class ChatRepository: ObservableObject {
         return commitPublish.id
     }
 
+    /// ADR-0027 (G-3) — the joiner signature keys of the external-join
+    /// requests this group has retained pending an owner/admin decision. Each
+    /// entry is the `proposalRef` handle `approveExternalJoin` /
+    /// `rejectExternalJoin` take. Empty when there are none (or no live Group
+    /// handle for the id).
+    public func pendingExternalJoins(groupIdHex: String) -> [Data] {
+        guard let record = groups[groupIdHex] else { return [] }
+        return (try? record.group.pendingExternalJoins()) ?? []
+    }
+
+    /// ADR-0027 (G-3) — approve a pending external-join request (owner/admin
+    /// only; the core role-gates it, fail-closed). Drives the MLS approve
+    /// (reuses the audited add path → Commit + Welcome), broadcasts the commit
+    /// to the group journal (own-marked for echo suppression), then wraps the
+    /// Welcome in a `WelcomeRendezvous` keyed on the joiner signature key and
+    /// posts it to the SAME journal — the not-yet-member joiner polls the
+    /// journal, matches the envelope to its own key, and opens the inner
+    /// Welcome. Existing members skip the rendezvous entry (it is not an MLS
+    /// message, so their receive loop drops it). Returns the commit's DS id.
+    public func approveExternalJoin(
+        groupIdHex: String,
+        proposalRef: Data
+    ) async throws -> Int64 {
+        guard let identity = canonicalIdentity else {
+            throw ChatError.argument("ChatRepository not bootstrapped — call bootstrap() first")
+        }
+        guard let record = groups[groupIdHex] else {
+            throw ChatError.argument("no live Group handle for \(groupIdHex)")
+        }
+        let addResult: AddMember
+        do {
+            addResult = try record.group.approveExternalJoin(
+                identity: identity,
+                proposalRef: proposalRef
+            )
+        } catch {
+            throw ChatError.wrapped("approveExternalJoin failed", underlying: error)
+        }
+        let commitPublish: PublishResult
+        do {
+            commitPublish = try await dsClient.publishGroup(
+                groupId: record.groupId,
+                payload: addResult.commit
+            )
+        } catch {
+            throw ChatError.wrapped("DS publishGroup (approve commit) failed", underlying: error)
+        }
+        chatClient.markOwnPublishedCommit(messageId: commitPublish.id)
+
+        let rendezvous: Data
+        do {
+            rendezvous = try wrapWelcomeRendezvous(
+                joinerSignatureKey: proposalRef,
+                welcome: addResult.welcome
+            )
+        } catch {
+            throw ChatError.wrapped("wrapWelcomeRendezvous failed", underlying: error)
+        }
+        do {
+            _ = try await dsClient.publishGroup(
+                groupId: record.groupId,
+                payload: rendezvous
+            )
+        } catch {
+            throw ChatError.wrapped("DS publishGroup (Welcome rendezvous) failed", underlying: error)
+        }
+
+        persistSnapshotBestEffort()
+        state = state.with(threads: buildThreadList())
+        return commitPublish.id
+    }
+
+    /// ADR-0027 (G-3) — reject a pending external-join request (owner/admin
+    /// only). Local-only: drops the retained proposal so it leaves the pending
+    /// list. No commit, no journal post — the joiner never receives a Welcome.
+    public func rejectExternalJoin(
+        groupIdHex: String,
+        proposalRef: Data
+    ) throws {
+        guard let record = groups[groupIdHex] else {
+            throw ChatError.argument("no live Group handle for \(groupIdHex)")
+        }
+        do {
+            try record.group.rejectExternalJoin(proposalRef: proposalRef)
+        } catch {
+            throw ChatError.wrapped("rejectExternalJoin failed", underlying: error)
+        }
+        persistSnapshotBestEffort()
+    }
+
     public func sendMessage(
         groupIdHex: String,
         plaintext: String,
@@ -1303,6 +1393,14 @@ private final class GroupRecord {
                 // state machine. Out-of-band — never
                 // touches the chat timeline.
                 callSignalingSink?(payloadBytes)
+            case .externalJoinRequest:
+                // ADR-0027 (G-3) — a non-member's external Add proposal,
+                // retained pending an owner/admin approval. Not a timeline
+                // row; the members sheet reads the retained set via
+                // `pendingExternalJoins(groupIdHex:)`. The `state` republish
+                // below nudges the view model to re-query when its sheet is
+                // open.
+                break
             }
         }
         cursor = result.cursor

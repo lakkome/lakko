@@ -341,10 +341,13 @@ public final class ChatClient {
                 systemKind: .proposal,
                 createdAt: createdAt
             )
-        case .externalJoinProposal:
-            return .system(
+        case .externalJoinProposal(let joinerSignatureKey):
+            // ADR-0027 (G-3) — surface the joiner's signature key the members
+            // sheet needs to approve / reject the request, rather than a
+            // content-less system row.
+            return .externalJoinRequest(
                 messageId: messageId,
-                systemKind: .externalJoinProposal,
+                joinerSignatureKey: joinerSignatureKey,
                 createdAt: createdAt
             )
         }
@@ -434,6 +437,15 @@ public enum IncomingChatEvent: Equatable {
     /// dispatches it into the ``CallSession`` state machine
     /// instead of the chat timeline.
     case callSignaling(messageId: Int64, payloadBytes: Data, createdAt: String)
+    /// ADR-0027 (G-3) — an external-join *request*: a non-member posted an
+    /// external Add proposal to this group's journal and the MLS core retained
+    /// it pending an owner / admin approval. Carries the joiner's leaf
+    /// signature key (the `proposalRef` handle the approve / reject repository
+    /// methods take). Not a timeline bubble — the view model folds it into a
+    /// pending list rendered in the members sheet (the retained set,
+    /// `group.pendingExternalJoins()`, is the source of truth; this event is
+    /// the nudge that a new request landed).
+    case externalJoinRequest(messageId: Int64, joinerSignatureKey: Data, createdAt: String)
 }
 
 /// ADR-0024 — an inbound ephemeral chat-status signal lifted out of

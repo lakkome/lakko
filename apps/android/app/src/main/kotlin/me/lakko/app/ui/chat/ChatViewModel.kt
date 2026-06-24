@@ -283,6 +283,17 @@ public class ChatViewModel(
      *  per-member promote / demote toggle. */
     public val roleTable: StateFlow<RoleTable?> = mutableRoleTable.asStateFlow()
 
+    private val mutablePendingJoins: MutableStateFlow<List<ByteArray>> =
+        MutableStateFlow(emptyList())
+
+    /** ADR-0027 (G-3) — pending external-join requests. Each entry is a joiner
+     *  leaf signature key (the `proposalRef` for approve / reject). The members
+     *  sheet renders an owner/admin-only section from this; empty hides it. The
+     *  MLS-core retained set (`group.pendingExternalJoins()`) is the source of
+     *  truth — re-read on [refreshMembers] and on each poll while the sheet is
+     *  open. */
+    public val pendingJoins: StateFlow<List<ByteArray>> = mutablePendingJoins.asStateFlow()
+
     /** Update the add-member text field. */
     public fun setAddMemberInput(value: String) {
         mutableAddMemberInput.value = value
@@ -305,6 +316,9 @@ public class ChatViewModel(
         mutableCanManageMembers.value = role != Role.MEMBER
         mutableIsOwner.value = role == Role.OWNER
         mutableRoleTable.value = repo.groupRoles(groupIdHex)
+        // ADR-0027 (G-3) — refresh the pending external-join list alongside the
+        // roster (the retained set is the source of truth).
+        mutablePendingJoins.value = repo.pendingExternalJoins(groupIdHex)
     }
 
     /** Our own leaf index — the roster marks it "(you)" and blocks self-removal. */
@@ -394,6 +408,51 @@ public class ChatViewModel(
             } catch (e: Throwable) {
                 mutableMembershipError.value = e.message ?: e.toString()
                 android.util.Log.w("ChatViewModel", "onToggleAdmin failed", e)
+            } finally {
+                mutableMembershipBusy.value = false
+            }
+        }
+    }
+
+    /**
+     * ADR-0027 (G-3) — approve a pending external-join request (owner/admin
+     * only). Drives the role-gated approve (fail-closed in the core), broadcasts
+     * the commit + posts the wrapped Welcome rendezvous, then refreshes the
+     * roster + pending list. Fail-closed on error.
+     */
+    public fun onApproveJoin(proposalRef: ByteArray) {
+        if (mutableMembershipBusy.value) return
+        mutableMembershipBusy.value = true
+        mutableMembershipError.value = null
+        viewModelScope.launch {
+            try {
+                repo.approveExternalJoin(groupIdHex, proposalRef)
+                refreshMembers()
+            } catch (e: Throwable) {
+                mutableMembershipError.value = e.message ?: e.toString()
+                android.util.Log.w("ChatViewModel", "onApproveJoin failed", e)
+            } finally {
+                mutableMembershipBusy.value = false
+            }
+        }
+    }
+
+    /**
+     * ADR-0027 (G-3) — reject a pending external-join request (owner/admin only).
+     * Local-only drop of the retained proposal; no commit / journal post.
+     * Fail-closed on error.
+     */
+    public fun onRejectJoin(proposalRef: ByteArray) {
+        if (mutableMembershipBusy.value) return
+        mutableMembershipBusy.value = true
+        mutableMembershipError.value = null
+        viewModelScope.launch {
+            try {
+                repo.rejectExternalJoin(groupIdHex, proposalRef)
+                refreshMembers()
+            } catch (e: Throwable) {
+                mutableMembershipError.value = e.message ?: e.toString()
+                android.util.Log.w("ChatViewModel", "onRejectJoin failed", e)
             } finally {
                 mutableMembershipBusy.value = false
             }

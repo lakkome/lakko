@@ -671,6 +671,97 @@ public class ChatRepository(
         }
     }
 
+    /**
+     * ADR-0027 (G-3) — the joiner signature keys of the external-join requests
+     * this group has retained pending an owner/admin decision. Each entry is the
+     * `proposalRef` handle [approveExternalJoin] / [rejectExternalJoin] take.
+     * Empty when there are none (or no live Group handle for the id).
+     */
+    public fun pendingExternalJoins(groupIdHex: String): List<ByteArray> {
+        val record = groups[groupIdHex] ?: return emptyList()
+        return try {
+            record.group.pendingExternalJoins()
+        } catch (e: FfiException) {
+            emptyList()
+        }
+    }
+
+    /**
+     * ADR-0027 (G-3) — approve a pending external-join request (owner/admin only;
+     * the core role-gates it, fail-closed). Drives the MLS approve (reuses the
+     * audited add path -> Commit + Welcome), broadcasts the commit to the group
+     * journal (own-marked for echo suppression), then wraps the Welcome in a
+     * WelcomeRendezvous keyed on the joiner signature key and posts it to the
+     * SAME journal — the not-yet-member joiner polls the journal, matches the
+     * envelope to its own key, and opens the inner Welcome. Existing members skip
+     * the rendezvous entry (it is not an MLS message, so their receive loop drops
+     * it). Returns the commit's DS message id.
+     */
+    public suspend fun approveExternalJoin(
+        groupIdHex: String,
+        proposalRef: ByteArray,
+    ): Long {
+        val identity = canonicalIdentity.get()
+            ?: throw IllegalStateException(
+                "ChatRepository not bootstrapped — call bootstrap() first",
+            )
+        return groupsLock.withLock {
+            val record = groups[groupIdHex]
+                ?: throw ChatError(
+                    "no live Group handle for $groupIdHex",
+                    IllegalStateException("missing group record"),
+                )
+            val addResult = try {
+                record.group.approveExternalJoin(identity, proposalRef)
+            } catch (e: FfiException) {
+                throw ChatError("approveExternalJoin failed", e)
+            }
+            val commitPublish = try {
+                dsClient.publishGroup(record.groupId, addResult.commit)
+            } catch (e: Throwable) {
+                throw ChatError("DS publishGroup (approve commit) failed", e)
+            }
+            chatClient.markOwnPublishedCommit(commitPublish.id)
+            val rendezvous = try {
+                uniffi.lakko_ffi_uniffi.wrapWelcomeRendezvous(proposalRef, addResult.welcome)
+            } catch (e: FfiException) {
+                throw ChatError("wrapWelcomeRendezvous failed", e)
+            }
+            try {
+                dsClient.publishGroup(record.groupId, rendezvous)
+            } catch (e: Throwable) {
+                throw ChatError("DS publishGroup (Welcome rendezvous) failed", e)
+            }
+            persistSnapshotBestEffort()
+            publishThreadList()
+            commitPublish.id
+        }
+    }
+
+    /**
+     * ADR-0027 (G-3) — reject a pending external-join request (owner/admin only).
+     * Local-only: drops the retained proposal so it leaves the pending list. No
+     * commit, no journal post — the joiner never receives a Welcome.
+     */
+    public suspend fun rejectExternalJoin(
+        groupIdHex: String,
+        proposalRef: ByteArray,
+    ) {
+        groupsLock.withLock {
+            val record = groups[groupIdHex]
+                ?: throw ChatError(
+                    "no live Group handle for $groupIdHex",
+                    IllegalStateException("missing group record"),
+                )
+            try {
+                record.group.rejectExternalJoin(proposalRef)
+            } catch (e: FfiException) {
+                throw ChatError("rejectExternalJoin failed", e)
+            }
+            persistSnapshotBestEffort()
+        }
+    }
+
     public suspend fun publishApplicationMessage(
         groupIdHex: String,
         plaintextBytes: ByteArray,
@@ -1414,6 +1505,13 @@ private class GroupRecord(
                     // CallSession state machine. Never
                     // touches the chat timeline.
                     callSignalingSink?.invoke(event.payloadBytes)
+                }
+                is IncomingChatEvent.ExternalJoinRequest -> {
+                    // ADR-0027 (G-3) — a non-member's external Add proposal,
+                    // retained pending an owner/admin approval. Not a timeline
+                    // row; the members sheet reads the retained set via
+                    // ChatRepository.pendingExternalJoins(groupIdHex). No fold.
+                    Unit
                 }
             }
         }

@@ -347,9 +347,11 @@ private fun toEvent(
             systemKind = SystemKind.Proposal,
             createdAt = createdAt,
         )
-        is ProcessedMessage.ExternalJoinProposal -> IncomingChatEvent.System(
+        is ProcessedMessage.ExternalJoinProposal -> IncomingChatEvent.ExternalJoinRequest(
+            // ADR-0027 (G-3) — surface the joiner's signature key the members
+            // sheet needs to approve / reject, not a content-less system row.
             messageId = messageId,
-            systemKind = SystemKind.ExternalJoinProposal,
+            joinerSignatureKey = processed.joinerSignatureKey,
             createdAt = createdAt,
         )
     }
@@ -493,6 +495,34 @@ public sealed interface IncomingChatEvent {
         override fun hashCode(): Int {
             var result = messageId.hashCode()
             result = 31 * result + payloadBytes.contentHashCode()
+            result = 31 * result + createdAt.hashCode()
+            return result
+        }
+    }
+
+    /** ADR-0027 (G-3) — an external-join *request*: a non-member posted an
+     *  external Add proposal to this group's journal and the MLS core retained
+     *  it pending an owner/admin approval. Carries the joiner's leaf signature
+     *  key (the `proposalRef` the approve / reject repository methods take). Not
+     *  a timeline bubble — the view model folds it into a pending list rendered
+     *  in the members sheet (the retained set, `group.pendingExternalJoins()`,
+     *  is the source of truth; this event is the nudge a new request landed). */
+    public data class ExternalJoinRequest(
+        val messageId: Long,
+        val joinerSignatureKey: ByteArray,
+        val createdAt: String,
+    ) : IncomingChatEvent {
+        override fun equals(other: Any?): Boolean {
+            if (this === other) return true
+            if (other !is ExternalJoinRequest) return false
+            return messageId == other.messageId &&
+                joinerSignatureKey.contentEquals(other.joinerSignatureKey) &&
+                createdAt == other.createdAt
+        }
+
+        override fun hashCode(): Int {
+            var result = messageId.hashCode()
+            result = 31 * result + joinerSignatureKey.contentHashCode()
             result = 31 * result + createdAt.hashCode()
             return result
         }

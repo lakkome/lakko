@@ -1105,6 +1105,33 @@ private struct MembersSheet: View {
                         }
                     }
                 }
+                // ADR-0027 (G-3) — pending external-join requests. Owner/admin
+                // only (same gate as add/remove); hidden when there are none.
+                // Approve drives the role-gated MLS approve + posts the commit
+                // & Welcome rendezvous; Reject drops the retained proposal.
+                if viewModel.canManageMembers, !viewModel.pendingJoins.isEmpty {
+                    Section("Join requests (\(viewModel.pendingJoins.count))") {
+                        ForEach(viewModel.pendingJoins, id: \.self) { ref in
+                            HStack {
+                                Text(Self.shortFingerprint(ref))
+                                    .font(.system(.footnote, design: .monospaced))
+                                Spacer()
+                                Button("Approve") {
+                                    viewModel.onApproveJoin(proposalRef: ref)
+                                }
+                                .buttonStyle(.borderless)
+                                .disabled(viewModel.membershipBusy)
+                                Button(role: .destructive) {
+                                    viewModel.onRejectJoin(proposalRef: ref)
+                                } label: {
+                                    Text("Reject")
+                                }
+                                .buttonStyle(.borderless)
+                                .disabled(viewModel.membershipBusy)
+                            }
+                        }
+                    }
+                }
                 Section(memberCountLabel) {
                     ForEach(viewModel.members, id: \.leafIndex) { member in
                         HStack {
@@ -1160,5 +1187,12 @@ private struct MembersSheet: View {
     private var memberCountLabel: String {
         let n = viewModel.members.count
         return "\(n) member" + (n == 1 ? "" : "s")
+    }
+
+    /// ADR-0027 (G-3) — a short hex fingerprint of a joiner's signature key for
+    /// the pending-request row (the full key has no human name yet — the joiner
+    /// is a non-member). Mirrors the roster's fingerprint posture.
+    private static func shortFingerprint(_ data: Data) -> String {
+        data.prefix(8).map { String(format: "%02x", $0) }.joined()
     }
 }
