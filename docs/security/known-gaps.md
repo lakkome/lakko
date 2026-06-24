@@ -29,7 +29,7 @@ The IETF MLS WG is still landing hybrid PQ cipher suite
 identifiers. We pin classical suites today and migrate
 once the draft stabilises.
 
-### G-3: External-join proposal approval — **Phase 1 (MLS core) landed ([ADR-0027](../adr/0027-external-join-approval.md)); FFI + transport + UI follow**
+### G-3: External-join proposal approval — **Phases 1-3 + Phase-4 web landed ([ADR-0027](../adr/0027-external-join-approval.md)); Phase-4 iOS/Android + the joiner side follow**
 
 Was: `Group::process_incoming` returned a data-less
 `Incoming::ExternalJoinProposal` unit variant and the
@@ -77,13 +77,34 @@ group journal (`version ‖ sig_key_len ‖ joiner_signature_key
 (uniffi). The Welcome is HPKE-sealed to the joiner's init
 key, so the DS stores it opaque (invariant #2).
 
-**Remaining (ADR-0027 Phase 4):** the 3-client members-UI
-approve/reject affordance + the actual DS posting + the
-joiner's journal poll-loop wiring, and the joiner *side*
-(creating the external proposal — needs the group's public
-params via the Phase-4 channel join-ticket of
+**Phase 4 web landed (members-UI approve/reject).** The
+chat poll loop classifies an `ExternalJoinProposal` into a
+dedicated `externalJoinRequest` event carrying the joiner
+key (not a timeline bubble — it drives a members-panel
+pending list via `group.pendingExternalJoins()`, the
+MLS-core retained set being the source of truth). An
+owner/admin-only members-panel section (same role gate as
+add/remove) renders pending requests with Approve — which
+drives the role-gated `approveExternalJoin`, broadcasts the
+resulting commit to the group journal, wraps the Welcome in
+a `WelcomeRendezvous` and posts it to the same journal, and
+suppresses the sender's own commit echo — and Reject (a
+local drop of the retained proposal, no commit/journal
+post). Existing members skip the rendezvous entry (not an
+MLS message → their receive loop's `processIncoming`
+rejects + drops it). `tsc`/`vitest` (213)/`vite build`
+green.
+
+**Remaining (ADR-0027 Phase 4+):** the iOS/Android
+members-UI approve/reject affordance (the web mirror), the
+joiner's journal poll-loop wiring (open the rendezvous
+Welcome via `welcomeRendezvousFor` → `joinFromWelcome`), and
+the joiner *side* (creating the external proposal — needs
+the group's public params via the Phase-4 channel
+join-ticket of
 [ADR-0010](../adr/0010-channels-two-tier-broadcast.md)),
-which is the live consumer.
+which is the live consumer that produces a real pending
+request to approve.
 
 ## Multi-device
 
