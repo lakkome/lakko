@@ -1026,6 +1026,9 @@ function ChatView(props: {
   // add or explicit Cancel.
   const [addMemberOpen, setAddMemberOpen] = createSignal(false);
   const [addMemberInput, setAddMemberInput] = createSignal("");
+  // ADR-0028 (G-3) — the minted group invite-link (the owner/admin
+  // "create invite link" affordance), or `null` before it is generated.
+  const [inviteLink, setInviteLink] = createSignal<string | null>(null);
   // `memberCount` mirrors `props.entry.group.memberCount` into
   // a reactive signal so the header re-renders after
   // `addMember`. Without this the WASM-side property read in
@@ -2042,6 +2045,29 @@ function ChatView(props: {
     }
   }
 
+  // ADR-0028 (G-3) — mint a group invite-link (owner/admin only). Signs a
+  // capability over this group's id with the local identity key and shows the
+  // `/g/<slug>` link for the owner to copy/share. A non-member opens it,
+  // requests to join, and an admin approves (ADR-0027). `0n` = never expires.
+  async function onCreateInviteLink(): Promise<void> {
+    setError(null);
+    setNotice(null);
+    setBusy(true);
+    try {
+      const link = await contacts.createGroupInviteLink(
+        props.requireIdentity(),
+        props.entry.group,
+        0n,
+        window.location.origin,
+      );
+      setInviteLink(link);
+    } catch (err) {
+      setError(formatError(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   // Pull the current backlog on mount so a fresh `/chat/:id`
   // visit shows whatever the peer has sent so far.
   //
@@ -2665,6 +2691,82 @@ function ChatView(props: {
           >
             Members ({members().length})
           </h2>
+          {/* ADR-0028 (G-3) — owner/admin "create invite link" affordance.
+              Mints a /g/<slug> link conveying this group's id; a non-member
+              opens it to request to join, approved via the pending list above.
+              Same role gate as add/remove. */}
+          <Show when={canManageMembers()}>
+            <div
+              style={{
+                margin: "0 0 0.6rem 0",
+                display: "flex",
+                "flex-direction": "column",
+                gap: "0.4rem",
+              }}
+            >
+              <button
+                type="button"
+                disabled={busy()}
+                onClick={() => void onCreateInviteLink()}
+                style={{
+                  "font-size": "0.8rem",
+                  padding: "0.3rem 0.6rem",
+                  "border-radius": "var(--radius-sm)",
+                  border: "1px solid var(--surface-border)",
+                  background: "var(--surface-bg)",
+                  color: "var(--surface-fg)",
+                  cursor: "pointer",
+                  "align-self": "flex-start",
+                }}
+              >
+                Create invite link
+              </button>
+              <Show when={inviteLink() !== null}>
+                <div
+                  style={{
+                    display: "flex",
+                    gap: "0.3rem",
+                    "align-items": "center",
+                  }}
+                >
+                  <input
+                    type="text"
+                    readonly
+                    value={inviteLink() ?? ""}
+                    style={{
+                      flex: "1",
+                      "font-size": "0.75rem",
+                      "font-family": "monospace",
+                      padding: "0.25rem 0.4rem",
+                      "border-radius": "var(--radius-sm)",
+                      border: "1px solid var(--surface-border)",
+                      background: "var(--surface)",
+                      color: "var(--surface-fg)",
+                      "min-width": "0",
+                    }}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const l = inviteLink();
+                      if (l) void navigator.clipboard?.writeText(l);
+                    }}
+                    style={{
+                      "font-size": "0.75rem",
+                      padding: "0.25rem 0.5rem",
+                      "border-radius": "var(--radius-sm)",
+                      border: "1px solid var(--accent)",
+                      background: "var(--accent)",
+                      color: "var(--accent-fg)",
+                      cursor: "pointer",
+                    }}
+                  >
+                    Copy
+                  </button>
+                </div>
+              </Show>
+            </div>
+          </Show>
           {/* ADR-0027 (G-3) — pending external-join requests. Owner / admin
               only (same gate as add / remove). Each row offers Approve (drives
               the MLS approve + posts the commit & Welcome rendezvous) or Reject

@@ -43,7 +43,7 @@
  */
 import { loadWasm } from "../wasm";
 import { DiscoveryClient } from "../discovery/client";
-import { base64Decode, base64Encode } from "../auth/account-id";
+import { base64Decode, base64Encode, base64UrlEncodeNoPad } from "../auth/account-id";
 import { DsClient } from "../ds/client";
 import type { IdentitySecrets } from "../auth/AuthContext";
 import type {
@@ -1761,6 +1761,33 @@ export class ContactsClient {
       throw ContactsError.wrap(err);
     }
     await this.persistBestEffort();
+  }
+
+  /** ADR-0028 (G-3) — mint a group invite-link (the owner/admin side). Signs a
+   *  `GroupInviteCapability` over this group's `group_id` with the local
+   *  identity's Ed25519 key and returns the full `<origin>/g/<base64url>` link
+   *  the owner shares out-of-band. A non-member opens it, reads the group's
+   *  current epoch from the journal, and posts an external-join proposal the
+   *  admin approves (ADR-0027). The link conveys only the `group_id` — it
+   *  authorizes nobody; the admin approval gate is the security boundary.
+   *
+   *  `expiryMs` is UNIX millis (`0` = never expires). The UI gates the
+   *  affordance on `ownRole` (owner / admin), matching add / remove. */
+  async createGroupInviteLink(
+    identity: IdentitySecrets | null,
+    group: WasmGroup,
+    expiryMs: bigint,
+    origin: string,
+  ): Promise<string> {
+    const wasm = await loadWasm();
+    const myIdentity = await this.resolveIdentity(identity);
+    let wire: Uint8Array;
+    try {
+      wire = wasm.composeGroupInviteCapability(myIdentity.ed25519Seed, group.groupId, expiryMs);
+    } catch (err) {
+      throw ContactsError.wrap(err);
+    }
+    return `${origin}/g/${base64UrlEncodeNoPad(wire)}`;
   }
 
   /** Convenience wrapper around [`addMemberToGroup`] that
