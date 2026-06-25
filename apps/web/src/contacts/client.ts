@@ -1790,6 +1790,87 @@ export class ContactsClient {
     return `${origin}/g/${base64UrlEncodeNoPad(wire)}`;
   }
 
+  /** ADR-0028 (G-3) — joiner step 1: request to join a group from a `/g/` link
+   *  capability (the wire bytes the slug base64url-decodes to). Decodes +
+   *  verifies the capability (fail-closed on a forged / malformed / expired
+   *  link, before any post), reads the group's current epoch from the journal
+   *  head's public MLS framing (`epochOfMessage`, no group secret), crafts an
+   *  external-join proposal (ADR-0027) for that epoch, and posts it to the
+   *  group journal. Returns the `groupId` + the joiner's signature key — the
+   *  caller drives `pollForJoinWelcome` on a loop until an admin approves and
+   *  the rendezvous Welcome arrives. */
+  async requestToJoinFromLink(
+    identity: IdentitySecrets | null,
+    capabilityWire: Uint8Array,
+    nowMs: number,
+  ): Promise<{ groupId: Uint8Array; joinerSignatureKey: Uint8Array }> {
+    const wasm = await loadWasm();
+    const myIdentity = await this.resolveIdentity(identity);
+    let cap;
+    try {
+      cap = wasm.GroupInviteCapability.decodeAndVerify(capabilityWire);
+    } catch (err) {
+      throw ContactsError.wrap(err);
+    }
+    if (!cap.isValidNow(BigInt(nowMs))) {
+      throw ContactsError.wrap(new Error("group invite link has expired"));
+    }
+    const groupId = cap.groupId;
+    // Read the group's current epoch from the journal head. A non-member can
+    // do this — the epoch rides the public MLS framing, not the encrypted body.
+    // An empty / unreachable journal ⇒ epoch 0 (a freshly-created group).
+    let epoch = 0n;
+    try {
+      const raw = await this.ds.fetchGroup(groupId, { after: 0, waitSecs: 0 });
+      for (const m of raw.messages) {
+        const e = wasm.epochOfMessage(m.payload);
+        if (e !== undefined) epoch = e;
+      }
+    } catch {
+      // keep epoch 0
+    }
+    let proposal: Uint8Array;
+    try {
+      proposal = myIdentity.createExternalJoinProposal(groupId, epoch);
+    } catch (err) {
+      throw ContactsError.wrap(err);
+    }
+    try {
+      await this.ds.publishGroup(groupId, proposal);
+    } catch (err) {
+      throw ContactsError.wrap(err);
+    }
+    return { groupId, joinerSignatureKey: myIdentity.signaturePublicKey };
+  }
+
+  /** ADR-0028 (G-3) — joiner step 2: poll the group journal for the rendezvous
+   *  Welcome an admin posted after approving our request, and join from it. Run
+   *  on a poll loop after `requestToJoinFromLink`. Returns the joined `Group`
+   *  on the first rendezvous envelope addressed to our signature key, or `null`
+   *  if no Welcome has arrived yet (keep polling). The non-MLS rendezvous
+   *  entries that don't match us are skipped (`welcomeRendezvousFor` returns
+   *  `undefined`). */
+  async pollForJoinWelcome(
+    identity: IdentitySecrets | null,
+    groupId: Uint8Array,
+    joinerSignatureKey: Uint8Array,
+  ): Promise<WasmGroup | null> {
+    const wasm = await loadWasm();
+    let raw;
+    try {
+      raw = await this.ds.fetchGroup(groupId, { after: 0, waitSecs: 0 });
+    } catch (err) {
+      throw ContactsError.wrap(err);
+    }
+    for (const m of raw.messages) {
+      const welcome = wasm.welcomeRendezvousFor(m.payload, joinerSignatureKey);
+      if (welcome !== undefined) {
+        return await this.joinGroupFromWelcome(identity, welcome);
+      }
+    }
+    return null;
+  }
+
   /** Convenience wrapper around [`addMemberToGroup`] that
    *  resolves `@username` first. Mirror of
    *  [`startGroupWithUsername`] for the existing-group path. */
