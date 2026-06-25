@@ -3317,3 +3317,13 @@ pub fn welcome_rendezvous_for(bytes: &[u8], my_signature_key: &[u8]) -> Option<V
         _ => None,
     }
 }
+
+/// Read a group's current MLS epoch from a wire-form journal message's public
+/// framing, without any group secret (ADR-0028 §3 — the join-ticket joiner
+/// side). Returns `undefined` for non-MLS bytes or an epoch-less variant
+/// (Welcome / KeyPackage) — the caller treats that as epoch `0`.
+#[wasm_bindgen(js_name = epochOfMessage)]
+#[must_use]
+pub fn epoch_of_message(bytes: &[u8]) -> Option<u64> {
+    lakko_mls::epoch_of_message(bytes)
+}

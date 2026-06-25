@@ -42,6 +42,10 @@ use lakko_contacts::call_welcome::{
     try_unwrap_call_welcome as rust_try_unwrap_call_welcome,
     wrap_call_welcome as rust_wrap_call_welcome, CallWelcomeError, CALL_WELCOME_MIN_PAYLOAD_LEN,
 };
+use lakko_contacts::group_invite::{
+    compose as rust_group_invite_compose, decode_and_verify as rust_group_invite_decode,
+    GroupInviteCapability as RustGroupInviteCapability, MAX_GROUP_ID_LEN,
+};
 use lakko_contacts::incoming_envelope::{
     dispatch_incoming_envelope as rust_dispatch_incoming_envelope, IncomingEnvelope,
 };
@@ -1336,6 +1340,92 @@ pub fn dispatch_incoming_envelope(plaintext: Vec<u8>) -> Result<FfiIncomingEnvel
         IncomingEnvelope::IntroMessage(p) => (FfiIncomingEnvelopeKind::IntroMessage, p.to_vec()),
     };
     Ok(FfiIncomingEnvelope { kind, payload })
+}
+
+// ============================================================================
+// GroupInviteCapability — ADR-0028 (group join-ticket, G-3)
+// ============================================================================
+
+/// Owner-side: compose + sign a group join-ticket capability (ADR-0028).
+///
+/// `issuer_signing_seed` is the 32-byte Ed25519 seed of the owner/admin minting
+/// the link; `group_id` is the target group's opaque MLS `GroupId` bytes;
+/// `expiry_ms` is UNIX millis (`0` = never expires). Returns the wire bytes the
+/// client base64url-encodes into the `/g/<slug>` link.
+///
+/// # Errors
+///
+/// [`FfiError::Contacts`] for a wrong-length seed, an empty / oversized
+/// `group_id`, or a compose failure.
+#[uniffi::export]
+pub fn compose_group_invite_capability(
+    issuer_signing_seed: Vec<u8>,
+    group_id: Vec<u8>,
+    expiry_ms: u64,
+) -> Result<Vec<u8>, FfiError> {
+    if issuer_signing_seed.len() != 32 {
+        return Err(FfiError::Contacts(
+            "issuerSigningSeed must be 32 bytes".to_string(),
+        ));
+    }
+    let mut seed = [0u8; 32];
+    seed.copy_from_slice(&issuer_signing_seed);
+    let signing = SigningKey::from_seed(&seed);
+    if group_id.is_empty() || group_id.len() > MAX_GROUP_ID_LEN {
+        return Err(FfiError::Contacts(format!(
+            "groupId must be 1..={MAX_GROUP_ID_LEN} bytes",
+        )));
+    }
+    Ok(rust_group_invite_compose(&signing, &group_id, expiry_ms)?)
+}
+
+/// Composed + verified group join-ticket capability (ADR-0028). Mirror of
+/// [`lakko_contacts::GroupInviteCapability`].
+#[derive(uniffi::Object)]
+pub struct GroupInviteCapability {
+    pub(crate) inner: RustGroupInviteCapability,
+}
+
+#[uniffi::export]
+impl GroupInviteCapability {
+    /// Joiner-side: decode wire bytes, verify the Ed25519 signature, return the
+    /// validated capability. Does **not** check expiry — call
+    /// [`Self::is_valid_now`] separately.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::Contacts`] on a malformed / forged / truncated link.
+    #[uniffi::constructor]
+    pub fn decode_and_verify(wire: Vec<u8>) -> Result<Self, FfiError> {
+        let inner = rust_group_invite_decode(&wire)?;
+        Ok(Self { inner })
+    }
+
+    /// The target group's opaque MLS `GroupId` bytes — the joiner passes these
+    /// to `Identity.createExternalJoinProposal`.
+    pub fn group_id(&self) -> Vec<u8> {
+        self.inner.group_id.clone()
+    }
+
+    /// The issuer's long-term Ed25519 verifying key (32 bytes).
+    pub fn issuer_signature_pubkey(&self) -> Vec<u8> {
+        self.inner.issuer_signature_pubkey.to_bytes().to_vec()
+    }
+
+    /// UNIX milliseconds when the link stops being valid. `0` = never expires.
+    pub fn expiry_ms(&self) -> u64 {
+        self.inner.expiry_ms
+    }
+
+    /// `true` iff the link has not expired at `now_ms`.
+    pub fn is_valid_now(&self, now_ms: u64) -> bool {
+        self.inner.is_valid_now(now_ms)
+    }
+
+    /// Signal-style anti-phishing fingerprint of the issuer's key.
+    pub fn issuer_fingerprint(&self) -> String {
+        self.inner.issuer_fingerprint()
+    }
 }
 
 #[cfg(test)]

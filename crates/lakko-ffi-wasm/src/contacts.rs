@@ -18,6 +18,10 @@ use lakko_contacts::call_welcome::{
     try_unwrap_call_welcome as rust_try_unwrap_call_welcome,
     wrap_call_welcome as rust_wrap_call_welcome, CallWelcomeError, CALL_WELCOME_MIN_PAYLOAD_LEN,
 };
+use lakko_contacts::group_invite::{
+    compose as rust_group_invite_compose, decode_and_verify as rust_group_invite_decode,
+    GroupInviteCapability as RustGroupInviteCapability, MAX_GROUP_ID_LEN,
+};
 use lakko_contacts::incoming_envelope::{
     dispatch_incoming_envelope as rust_dispatch_incoming_envelope, IncomingEnvelope,
 };
@@ -1188,6 +1192,84 @@ pub fn dispatch_incoming_envelope(plaintext: &[u8]) -> Result<WasmIncomingEnvelo
             payload: p.to_vec(),
         },
     })
+}
+
+// ============================================================================
+// GroupInviteCapability — ADR-0028 (group join-ticket, G-3)
+// ============================================================================
+
+/// Owner-side: compose + sign a group join-ticket capability (ADR-0028).
+/// `issuerSigningSeed` is the 32-byte Ed25519 seed; `groupId` is the target
+/// group's opaque MLS GroupId bytes; `expiryMs` is UNIX millis (`0` = never).
+/// Returns the wire bytes the web client base64url-encodes into `/g/<slug>`.
+#[wasm_bindgen(js_name = composeGroupInviteCapability)]
+pub fn compose_group_invite_capability(
+    issuer_signing_seed: &[u8],
+    group_id: &[u8],
+    expiry_ms: u64,
+) -> Result<Vec<u8>, JsError> {
+    if issuer_signing_seed.len() != 32 {
+        return Err(JsError::new("issuerSigningSeed must be 32 bytes"));
+    }
+    let mut seed = [0u8; 32];
+    seed.copy_from_slice(issuer_signing_seed);
+    let signing = SigningKey::from_seed(&seed);
+    if group_id.is_empty() || group_id.len() > MAX_GROUP_ID_LEN {
+        return Err(JsError::new(&format!(
+            "groupId must be 1..={MAX_GROUP_ID_LEN} bytes"
+        )));
+    }
+    rust_group_invite_compose(&signing, group_id, expiry_ms)
+        .map_err(|e| JsError::new(&format!("{e}")))
+}
+
+/// Composed + verified group join-ticket capability (ADR-0028). Mirror of
+/// [`lakko_contacts::GroupInviteCapability`].
+#[wasm_bindgen]
+pub struct GroupInviteCapability {
+    pub(crate) inner: RustGroupInviteCapability,
+}
+
+#[wasm_bindgen]
+impl GroupInviteCapability {
+    /// Joiner-side: decode wire bytes, verify the Ed25519 signature, return the
+    /// validated capability. Does **not** check expiry — call `isValidNow`.
+    #[wasm_bindgen(js_name = decodeAndVerify)]
+    pub fn decode_and_verify(wire: &[u8]) -> Result<GroupInviteCapability, JsError> {
+        let inner = rust_group_invite_decode(wire).map_err(|e| JsError::new(&format!("{e}")))?;
+        Ok(Self { inner })
+    }
+
+    /// The target group's opaque MLS GroupId bytes — pass to
+    /// `Identity.createExternalJoinProposal`.
+    #[wasm_bindgen(getter, js_name = groupId)]
+    pub fn group_id(&self) -> Vec<u8> {
+        self.inner.group_id.clone()
+    }
+
+    /// The issuer's Ed25519 verifying key (32 bytes).
+    #[wasm_bindgen(getter, js_name = issuerSignaturePubkey)]
+    pub fn issuer_signature_pubkey(&self) -> Vec<u8> {
+        self.inner.issuer_signature_pubkey.to_bytes().to_vec()
+    }
+
+    /// UNIX milliseconds when the link stops being valid. `0` = never expires.
+    #[wasm_bindgen(getter, js_name = expiryMs)]
+    pub fn expiry_ms(&self) -> u64 {
+        self.inner.expiry_ms
+    }
+
+    /// `true` iff the link has not expired at `nowMs`.
+    #[wasm_bindgen(js_name = isValidNow)]
+    pub fn is_valid_now(&self, now_ms: u64) -> bool {
+        self.inner.is_valid_now(now_ms)
+    }
+
+    /// Signal-style anti-phishing fingerprint of the issuer's key.
+    #[wasm_bindgen(js_name = issuerFingerprint)]
+    pub fn issuer_fingerprint(&self) -> String {
+        self.inner.issuer_fingerprint()
+    }
 }
 
 // Tests cover only happy paths — error paths invoke `JsError::new`,

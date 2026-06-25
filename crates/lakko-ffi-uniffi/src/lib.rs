@@ -3202,6 +3202,18 @@ pub fn transparency_account_key(account_id: Vec<u8>) -> Vec<u8> {
     lakko_crypto::hash::blake3(&input).to_vec()
 }
 
+/// ADR-0028 §3 — read a group's current MLS epoch from a wire-form journal
+/// message's public framing, without any group secret. The join-ticket joiner
+/// (a non-member) calls this on the group journal's latest message to craft an
+/// external-join proposal for the right epoch. Returns `None` for non-MLS bytes
+/// or an epoch-less variant (Welcome / KeyPackage) — the caller treats that as
+/// epoch `0` (a freshly-created group).
+#[uniffi::export]
+#[must_use]
+pub fn epoch_of_message(bytes: Vec<u8>) -> Option<u64> {
+    lakko_mls::epoch_of_message(&bytes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

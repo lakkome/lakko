@@ -30,7 +30,7 @@ pub mod welcome_rendezvous;
 
 pub use device_group::{AccountId, DeviceGroup};
 pub use error::{Error, Result};
-pub use group::{Group, Incoming, MemberAddition, MemberRecord};
+pub use group::{epoch_of_message, Group, Incoming, MemberAddition, MemberRecord};
 pub use group_roles::{Role, RoleTable};
 pub use identity::Identity;
 pub use publisher_group::{ChannelId, PublisherGroup, CHANNEL_EXPORTER_LABEL, CHANNEL_ID_LEN};

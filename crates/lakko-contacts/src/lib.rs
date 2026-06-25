@@ -57,6 +57,7 @@ pub mod call_kp_forward;
 pub mod call_welcome;
 pub mod envelope;
 pub mod error;
+pub mod group_invite;
 pub mod incoming_envelope;
 pub mod invite;
 pub mod pseudonym;
@@ -79,6 +80,10 @@ pub use call_welcome::{
     CALL_WELCOME_MIN_PAYLOAD_LEN,
 };
 pub use error::{ContactError, Result};
+pub use group_invite::{
+    compose as compose_group_invite, decode_and_verify as decode_and_verify_group_invite,
+    GroupInviteCapability, GROUP_INVITE_NEVER_EXPIRES, MAX_GROUP_ID_LEN,
+};
 pub use incoming_envelope::{dispatch_incoming_envelope, IncomingEnvelope};
 pub use invite::{
     compute_joiner_tag, owner_list_canonical_bytes, revoke_canonical_bytes, sign_owner_list,

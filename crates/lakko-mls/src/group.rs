@@ -992,6 +992,27 @@ fn decode_message(bytes: &[u8]) -> Result<MlsMessageIn> {
     MlsMessageIn::tls_deserialize(&mut slice).map_err(|e| Error::Codec(format!("{e:?}")))
 }
 
+/// Read the MLS **epoch** out of a wire-form message's public framing, without
+/// any group secret (ADR-0028 §3 — the join-ticket joiner side).
+///
+/// Both `PrivateMessage` and `PublicMessage` carry `group_id` + `epoch` in
+/// cleartext ahead of any encrypted content, so a **non-member** polling a
+/// group's journal can read the group's current epoch from its latest message
+/// to craft an external-join proposal for the right epoch
+/// ([`Identity::create_external_join_proposal`](crate::Identity::create_external_join_proposal)).
+///
+/// Returns `None` for bytes that do not parse as an `MlsMessageIn`, or for a
+/// message variant with no epoch (a `Welcome` / `KeyPackage` / `GroupInfo`) —
+/// the caller treats an empty / epoch-less journal head as epoch `0` (a
+/// freshly created group with no commits yet).
+#[must_use]
+pub fn epoch_of_message(bytes: &[u8]) -> Option<u64> {
+    let mut slice = bytes;
+    let msg = MlsMessageIn::tls_deserialize(&mut slice).ok()?;
+    let proto = msg.try_into_protocol_message().ok()?;
+    Some(proto.epoch().as_u64())
+}
+
 // ============================================================================
 // ADR-0027 external-join approval — property tests (G-3)
 // ============================================================================
@@ -1210,5 +1231,39 @@ mod external_join_tests {
                 .any(|m| m.signature_public_key == dave_pk),
             "dave should be in alice's roster after approve",
         );
+    }
+
+    /// ADR-0028 §3 — a non-member can read a group's current epoch from the
+    /// public MLS framing of a journal message (no group secret), which is what
+    /// lets the join-ticket joiner craft an external-join proposal for the right
+    /// epoch.
+    #[test]
+    fn epoch_of_message_reads_public_framing() {
+        let alice = Identity::from_seed(&[0xE0u8; 64]).expect("alice");
+        let mut alice_g = Group::create(&alice).expect("create"); // epoch 0
+        let bob = Identity::from_seed(&[0xE1u8; 64]).expect("bob");
+
+        // An application message at epoch 0 reports epoch 0 from its framing.
+        let m0 = alice_g
+            .create_application_message(&alice, b"hello")
+            .expect("app msg");
+        assert_eq!(crate::epoch_of_message(&wire(m0)), Some(0));
+
+        // Add bob → alice merges → epoch advances. The Welcome has no epoch.
+        let add = alice_g
+            .add_member_from_wire(&alice, &kp_wire(&bob))
+            .expect("add bob");
+        assert_eq!(crate::epoch_of_message(&wire(add.welcome)), None);
+
+        // A fresh app message now reports the advanced epoch.
+        let m1 = alice_g
+            .create_application_message(&alice, b"world")
+            .expect("app msg 2");
+        assert_eq!(alice_g.epoch(), 1);
+        assert_eq!(crate::epoch_of_message(&wire(m1)), Some(alice_g.epoch()));
+
+        // Non-MLS / empty bytes → None (the caller treats this as epoch 0).
+        assert_eq!(crate::epoch_of_message(&[0xFFu8; 12]), None);
+        assert_eq!(crate::epoch_of_message(&[]), None);
     }
 }

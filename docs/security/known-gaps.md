@@ -118,15 +118,35 @@ signature key + `join_from_welcome` → it is a member at the
 post-approve epoch (lakko-mls 95 lib tests green, clippy +
 fmt clean).
 
-**Remaining (ADR-0027):** the client-side request-to-join UI
-(a non-member surfacing `createExternalJoinProposal` + a
-journal poll-loop that opens the rendezvous Welcome via
-`welcomeRendezvousFor` → `joinFromWelcome`) + the join-ticket
-transport conveying `(group_id, epoch)` to the non-member —
-both gated on the Phase-4 channel join-ticket of
-[ADR-0010](../adr/0010-channels-two-tier-broadcast.md), the
-live consumer that produces a real pending request to
-approve.
+**Join-ticket core + FFI landed
+([ADR-0028](../adr/0028-group-join-ticket.md) Phase 1).** The
+"convey the group params to a non-member" carrier was
+reframed: ADR-0010 channel *subscribers* are not MLS members
+(sender-key broadcast), so the join-ticket is a **general
+group invite-link** for adding a member/publisher, not an
+ADR-0010 artefact. A capability-based `/g/<slug>` link
+(mirroring [ADR-0009](../adr/0009-link-based-call-invitations.md))
+carries only the `group_id`; the joiner reads the **current
+epoch from the journal's public MLS framing**
+(`lakko_mls::epoch_of_message` — openmls
+`ProtocolMessage::epoch()` works without a group secret), so
+the ticket is epoch-independent (no stale-on-commit). The
+security boundary stays the admin approval gate, **not** the
+ticket — a leaked link lets a stranger *ask*, never *in*.
+Landed: `crates/lakko-contacts/src/group_invite.rs`
+(`GroupInviteCapability` + `compose`/`decode_and_verify`, 14
+unit tests + the `group_invite_decode` fuzz target) +
+`epoch_of_message` (1 test) + FFI
+(`composeGroupInviteCapability` / `GroupInviteCapability` /
+`epochOfMessage` on UniFFI + wasm). lakko-contacts 141 + 
+lakko-mls 96 lib tests green, clippy + fmt clean.
+
+**Remaining (ADR-0028 Phases 2-3):** the owner-side "create
+invite link" UI + the joiner-side "open link → request to
+join → poll the journal → open the rendezvous Welcome via
+`welcomeRendezvousFor` → `joinFromWelcome`" UI, on all three
+clients — the live consumer that produces a real pending
+request to approve.
 
 ## Multi-device
 
