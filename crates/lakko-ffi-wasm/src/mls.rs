@@ -139,6 +139,26 @@ impl Identity {
         let kp = self.inner.create_key_package().map_err(mls_err)?;
         key_package::serialize(&kp).map_err(mls_err)
     }
+
+    /// Create an external-join proposal — the joiner side of ADR-0027 (G-3).
+    ///
+    /// A non-member crafts an external Add proposal for a group's current
+    /// `group_id` + `epoch` (learned out-of-band via a join ticket). The
+    /// returned wire bytes are posted to the group journal; an owner/admin
+    /// approves via `Group.approveExternalJoin`, producing a Welcome the joiner
+    /// opens via `Group.joinFromWelcome`. The proposal embeds a fresh KeyPackage
+    /// whose private keys persist in this identity's provider, so the SAME
+    /// identity must later open the Welcome.
+    #[wasm_bindgen(js_name = createExternalJoinProposal)]
+    pub fn create_external_join_proposal(
+        &self,
+        group_id: &[u8],
+        epoch: u64,
+    ) -> Result<Vec<u8>, JsError> {
+        self.inner
+            .create_external_join_proposal(group_id, epoch)
+            .map_err(mls_err)
+    }
 }
 
 // ============================================================================

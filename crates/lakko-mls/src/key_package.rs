@@ -8,7 +8,10 @@
 //! stored inside the [`Identity`]'s provider; the resulting public package
 //! can be transmitted freely.
 
+use openmls::group::{GroupEpoch, GroupId};
+use openmls::messages::external_proposals::JoinProposal;
 use openmls::prelude::{KeyPackage, KeyPackageIn};
+use openmls_rust_crypto::MemoryStorage;
 use tls_codec::{Deserialize as _, Serialize as _};
 
 use crate::error::{Error, Result};
@@ -43,6 +46,40 @@ impl Identity {
             )
             .map_err(|e| Error::KeyPackage(format!("{e:?}")))?;
         Ok(bundle.key_package().clone())
+    }
+
+    /// Create an external-join proposal — the joiner side of ADR-0027 (G-3).
+    ///
+    /// A **non-member** crafts an MLS external `Add` proposal
+    /// ([`Sender::NewMemberProposal`](openmls::prelude::Sender), RFC 9420
+    /// §12.1.8.3) for a group's current `group_id` + `epoch` (both learned
+    /// out-of-band via a join ticket — the channel join-ticket of ADR-0010 is
+    /// the planned carrier). The returned wire bytes are posted to the group's
+    /// DS journal; an owner/admin surfaces the proposal via
+    /// `Group::process_incoming_verifying_roles` (→
+    /// `Incoming::ExternalJoinProposal`) and approves it with
+    /// `Group::approve_external_join`, producing a Welcome the joiner opens with
+    /// `Group::join_from_welcome`.
+    ///
+    /// The proposal embeds a fresh [`KeyPackage`] whose private init/encryption
+    /// keys are persisted in **this** identity's provider, so the SAME identity
+    /// must later open the resulting Welcome (the Welcome is HPKE-sealed to that
+    /// KeyPackage's init key).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::KeyPackage`] on KeyPackage generation failure, [`Error::Group`]
+    /// on proposal construction failure, or [`Error::Codec`] on encode failure.
+    pub fn create_external_join_proposal(&self, group_id: &[u8], epoch: u64) -> Result<Vec<u8>> {
+        let kp = self.create_key_package()?;
+        let msg = JoinProposal::new::<MemoryStorage>(
+            kp,
+            GroupId::from_slice(group_id),
+            GroupEpoch::from(epoch),
+            &self.signature_keys,
+        )
+        .map_err(|e| Error::Group(format!("external join proposal: {e:?}")))?;
+        crate::group::encode_message(&msg)
     }
 }
 

@@ -29,7 +29,7 @@ The IETF MLS WG is still landing hybrid PQ cipher suite
 identifiers. We pin classical suites today and migrate
 once the draft stabilises.
 
-### G-3: External-join proposal approval — **Phases 1-3 + Phase-4 client UI (web + iOS + Android) landed ([ADR-0027](../adr/0027-external-join-approval.md)); only the joiner side follows**
+### G-3: External-join proposal approval — **Phases 1-3 + Phase-4 client UI + the joiner-side core/FFI landed ([ADR-0027](../adr/0027-external-join-approval.md)); only the client request-to-join UI + the ADR-0010 join-ticket transport follow**
 
 Was: `Group::process_incoming` returned a data-less
 `Incoming::ExternalJoinProposal` unit variant and the
@@ -100,14 +100,32 @@ Android unit tests are pre-existing Ktor-mock / base64
 environmental failures, confirmed identical on a clean tree
 — no chat test regressed).
 
-**Remaining (ADR-0027, the joiner side):** the joiner's
-proposal creation (`JoinProposal::new` on a non-member) +
-the joiner's journal poll-loop wiring (open the rendezvous
-Welcome via `welcomeRendezvousFor` → `joinFromWelcome`),
-which needs the group's public params via the Phase-4
-channel join-ticket of
-[ADR-0010](../adr/0010-channels-two-tier-broadcast.md). This
-is the live consumer that produces a real pending request to
+**Joiner-side core + FFI landed.**
+`Identity::create_external_join_proposal(group_id, epoch)`
+(`crates/lakko-mls/src/key_package.rs`) lets a non-member
+craft the external `Add` proposal (`JoinProposal::new`) for a
+group's id+epoch, embedding a fresh KeyPackage whose private
+keys persist in its own provider so the same identity later
+opens the Welcome; FFI-exposed as `createExternalJoinProposal`
+on UniFFI (Swift/Kotlin) + wasm. A full **in-process e2e
+property test**
+(`joiner_api_full_loop_proposes_approves_joins_via_rendezvous`)
+proves the whole G-3 loop end-to-end: a non-member proposes
+→ an admin's `process_incoming_verifying_roles` surfaces it →
+`approve_external_join` → the Welcome rides a
+`WelcomeRendezvous` → the joiner matches it by its own
+signature key + `join_from_welcome` → it is a member at the
+post-approve epoch (lakko-mls 95 lib tests green, clippy +
+fmt clean).
+
+**Remaining (ADR-0027):** the client-side request-to-join UI
+(a non-member surfacing `createExternalJoinProposal` + a
+journal poll-loop that opens the rendezvous Welcome via
+`welcomeRendezvousFor` → `joinFromWelcome`) + the join-ticket
+transport conveying `(group_id, epoch)` to the non-member —
+both gated on the Phase-4 channel join-ticket of
+[ADR-0010](../adr/0010-channels-two-tier-broadcast.md), the
+live consumer that produces a real pending request to
 approve.
 
 ## Multi-device

@@ -1001,9 +1001,6 @@ mod external_join_tests {
     use super::*;
     use crate::group_roles::RoleTable;
     use crate::key_package;
-    use openmls::group::{GroupEpoch, GroupId};
-    use openmls::messages::external_proposals::JoinProposal;
-    use openmls_rust_crypto::MemoryStorage;
 
     fn wire(m: MlsMessageOut) -> Vec<u8> {
         encode_message(&m).expect("encode")
@@ -1024,18 +1021,14 @@ mod external_join_tests {
     }
 
     /// The joiner-side primitive: a non-member crafts an external Add proposal
-    /// for a group's current id + epoch. (The full join-ticket acquisition is
-    /// Phase 4; here the test supplies the params directly.)
+    /// for a group's current id + epoch (ADR-0027 G-3). Delegates to the public
+    /// [`Identity::create_external_join_proposal`] so these tests exercise the
+    /// shipped API. (The full join-ticket acquisition is the joiner-side
+    /// Phase-4 work; here the test supplies the params directly.)
     fn external_join_proposal(joiner: &Identity, group_id: &[u8], epoch: u64) -> Vec<u8> {
-        let kp = joiner.create_key_package().expect("kp");
-        let msg = JoinProposal::new::<MemoryStorage>(
-            kp,
-            GroupId::from_slice(group_id),
-            GroupEpoch::from(epoch),
-            &joiner.signature_keys,
-        )
-        .expect("join proposal");
-        wire(msg)
+        joiner
+            .create_external_join_proposal(group_id, epoch)
+            .expect("join proposal")
     }
 
     #[test]
@@ -1150,5 +1143,72 @@ mod external_join_tests {
             .members()
             .iter()
             .any(|m| m.signature_public_key == dave_pk));
+    }
+
+    /// Full G-3 loop, in-process: a non-member crafts an external-join proposal
+    /// via the public joiner API, an admin approves it, the resulting Welcome
+    /// rides a [`crate::WelcomeRendezvous`] envelope, and the joiner matches it
+    /// by its own signature key + opens the inner Welcome — landing as a member
+    /// at the post-approve epoch. Proves the joiner side closes the loop
+    /// end-to-end (ADR-0027 G-3).
+    #[test]
+    fn joiner_api_full_loop_proposes_approves_joins_via_rendezvous() {
+        let alice = Identity::from_seed(&[0xA9u8; 64]).expect("alice");
+        let mut alice_g = Group::create(&alice).expect("create");
+        let alice_pk = pk(&alice);
+        let dave = Identity::from_seed(&[0xD9u8; 64]).expect("dave");
+        let dave_pk = pk(&dave);
+
+        // Joiner side: craft the proposal via the public API.
+        let prop = dave
+            .create_external_join_proposal(&alice_g.group_id(), alice_g.epoch())
+            .expect("dave proposal");
+
+        // Admin side: surface + approve.
+        let incoming = alice_g.process_incoming(&alice, &prop).expect("process");
+        assert!(
+            matches!(&incoming, Incoming::ExternalJoinProposal { joiner_signature_key }
+                if *joiner_signature_key == dave_pk),
+            "got {incoming:?}",
+        );
+        let add = alice_g
+            .approve_external_join(&alice, &dave_pk)
+            .expect("approve");
+
+        // Transport: wrap the Welcome in a rendezvous envelope (what the admin
+        // posts to the group journal).
+        let envelope = crate::WelcomeRendezvous {
+            joiner_signature_key: dave_pk.clone(),
+            welcome: encode_message(&add.welcome).expect("encode welcome"),
+        }
+        .encode()
+        .expect("encode rendezvous");
+
+        // Joiner side: match the envelope to our own key + open the inner Welcome.
+        let decoded = crate::WelcomeRendezvous::decode(&envelope).expect("decode rendezvous");
+        assert!(decoded.is_for(&dave_pk), "rendezvous must target dave");
+        assert!(
+            !decoded.is_for(&alice_pk),
+            "rendezvous must not target alice"
+        );
+        let dave_g = Group::join_from_welcome(&decoded.welcome, &dave).expect("dave joins");
+
+        // dave is now a member at alice's post-approve epoch; each is in the
+        // other's roster.
+        assert_eq!(dave_g.epoch(), alice_g.epoch());
+        assert!(
+            dave_g
+                .members()
+                .iter()
+                .any(|m| m.signature_public_key == alice_pk),
+            "alice should be in dave's roster after join",
+        );
+        assert!(
+            alice_g
+                .members()
+                .iter()
+                .any(|m| m.signature_public_key == dave_pk),
+            "dave should be in alice's roster after approve",
+        );
     }
 }
