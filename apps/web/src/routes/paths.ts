@@ -123,6 +123,13 @@ export const chatRoutePattern = "/chat/:id" as const;
 export const inviteRoutePattern = "/i/:slug" as const;
 
 /**
+ * The matchable pattern for the group join-ticket route (ADR-0028, G-3) — the
+ * `/g/<slug>` link an owner mints for a non-member to request to join. `slug`
+ * is the base64url-no-pad of the `GroupInviteCapability` wire bytes.
+ */
+export const groupJoinRoutePattern = "/g/:slug" as const;
+
+/**
  * The matchable pattern for the dynamic call route — must
  * stay in sync with `paths.call(...)`. Used in the route
  * table.

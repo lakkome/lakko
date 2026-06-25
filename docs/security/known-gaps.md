@@ -149,12 +149,24 @@ copyable `https://lakko.me/g/<base64url>` link. Verified web
 `tsc`/`vitest`/`vite build`, iOS `xcodebuild`, Android
 `:app:compileDebugKotlin`.
 
-**Remaining (ADR-0028 Phase 3):** the joiner-side "open link
-→ read the epoch from the journal → request to join → poll
-the journal → open the rendezvous Welcome via
-`welcomeRendezvousFor` → `joinFromWelcome`" UI, on all three
-clients — the live consumer that produces a real pending
-request to approve.
+**Phase 3 web landed (joiner flow — the live requester).**
+`contacts/client.ts` `requestToJoinFromLink` (decode +
+verify the capability fail-closed → read the current epoch
+from the journal head's public framing via `epochOfMessage`,
+no group secret → `createExternalJoinProposal` → post the
+proposal to the journal) + `pollForJoinWelcome` (poll →
+`welcomeRendezvousFor` → the audited `joinGroupFromWelcome`).
+A public `/g/:slug` route + `JoinGroup.tsx` screen drives
+decode → "Request to join" → poll-loop → navigate to the
+joined chat (anonymous visitors prompted to log in, mirroring
+`/i/`). This is the **live requester** that produces a real
+pending request — G-3 is now exercisable end-to-end on web
+(modulo a live admin approving). Verified `tsc`/`vitest`
+(213)/`vite build`.
+
+**Remaining (ADR-0028 Phase 3 native):** the iOS + Android
+joiner UI — the same request → poll → join flow behind a
+`/g/` deep link, mirroring the web `JoinGroup` screen.
 
 ## Multi-device
 

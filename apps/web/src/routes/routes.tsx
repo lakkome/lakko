@@ -42,12 +42,14 @@ import Chat from "./Chat";
 import DevProbe from "./DevProbe";
 import Devices from "./Devices";
 import Invite from "./Invite";
+import JoinGroup from "./JoinGroup";
 import NotFound from "./NotFound";
 import {
   callRoutePattern,
   channelRoutePattern,
   channelSubscribeRoutePattern,
   chatRoutePattern,
+  groupJoinRoutePattern,
   inviteRoutePattern,
   paths,
 } from "./paths";
@@ -88,6 +90,12 @@ export const routes: RouteDefinition[] = [
   // <RequireSession> (anon users CAN open it; the component
   // handles the gating).
   { path: inviteRoutePattern, component: Invite },
+
+  // Group join-ticket landing (ADR-0028, G-3) — same public posture as the
+  // contact-invite route: a non-member opens an owner's `/g/<slug>` link, the
+  // component decodes + verifies the capability and drives the request-to-join
+  // flow, prompting anonymous visitors to log in first.
+  { path: groupJoinRoutePattern, component: JoinGroup },
 
   // Protected pages — every child renders inside <AppShell />.
   {
