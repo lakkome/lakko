@@ -294,6 +294,12 @@ public class ChatViewModel(
      *  open. */
     public val pendingJoins: StateFlow<List<ByteArray>> = mutablePendingJoins.asStateFlow()
 
+    private val mutableInviteLink: MutableStateFlow<String?> = MutableStateFlow(null)
+
+    /** ADR-0028 (G-3) — the minted group invite-link (the owner/admin "create
+     *  invite link" affordance), or `null` before it is generated. */
+    public val inviteLink: StateFlow<String?> = mutableInviteLink.asStateFlow()
+
     /** Update the add-member text field. */
     public fun setAddMemberInput(value: String) {
         mutableAddMemberInput.value = value
@@ -456,6 +462,20 @@ public class ChatViewModel(
             } finally {
                 mutableMembershipBusy.value = false
             }
+        }
+    }
+
+    /**
+     * ADR-0028 (G-3) — mint a group invite-link (owner/admin only) and publish
+     * it to [inviteLink] for the members sheet to show + copy. Fail-closed.
+     */
+    public fun onCreateInviteLink() {
+        mutableMembershipError.value = null
+        try {
+            mutableInviteLink.value = repo.createGroupInviteLink(groupIdHex)
+        } catch (e: Throwable) {
+            mutableMembershipError.value = e.message ?: e.toString()
+            android.util.Log.w("ChatViewModel", "onCreateInviteLink failed", e)
         }
     }
 

@@ -700,6 +700,34 @@ public final class ChatRepository: ObservableObject {
         persistSnapshotBestEffort()
     }
 
+    /// ADR-0028 (G-3) — mint a group invite-link (owner/admin side). Signs a
+    /// `GroupInviteCapability` over this group's raw MLS `group_id` with the
+    /// local identity's Ed25519 key and returns the `https://lakko.me/g/<slug>`
+    /// link the owner shares out-of-band. A non-member opens it, reads the
+    /// current epoch from the journal, and posts an external-join proposal an
+    /// admin approves (ADR-0027). The link conveys only the `group_id` — it
+    /// authorizes nobody; the admin gate is the security boundary. `0` = never
+    /// expires.
+    public func createGroupInviteLink(groupIdHex: String) throws -> String {
+        guard let identity = canonicalIdentity else {
+            throw ChatError.argument("ChatRepository not bootstrapped — call bootstrap() first")
+        }
+        guard let record = groups[groupIdHex] else {
+            throw ChatError.argument("no live Group handle for \(groupIdHex)")
+        }
+        let wire: Data
+        do {
+            wire = try composeGroupInviteCapability(
+                issuerSigningSeed: identity.ed25519Seed(),
+                groupId: record.group.groupId(),
+                expiryMs: 0
+            )
+        } catch {
+            throw ChatError.wrapped("composeGroupInviteCapability failed", underlying: error)
+        }
+        return "https://lakko.me/g/" + base64UrlEncodeNoPad(wire)
+    }
+
     public func sendMessage(
         groupIdHex: String,
         plaintext: String,

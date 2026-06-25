@@ -62,7 +62,9 @@ import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.unit.dp
@@ -1310,6 +1312,8 @@ private fun MembersSheet(viewModel: ChatViewModel) {
     val isOwner by viewModel.isOwner.collectAsStateWithLifecycle()
     val roleTable by viewModel.roleTable.collectAsStateWithLifecycle()
     val pendingJoins by viewModel.pendingJoins.collectAsStateWithLifecycle()
+    val inviteLink by viewModel.inviteLink.collectAsStateWithLifecycle()
+    val clipboard = LocalClipboardManager.current
     val ownLeaf = viewModel.ownLeafIndex()
 
     Dialog(
@@ -1348,6 +1352,26 @@ private fun MembersSheet(viewModel: ChatViewModel) {
                             onClick = viewModel::onAddMember,
                             enabled = !busy && input.trim().isNotEmpty(),
                         ) { Text("Add") }
+                    }
+                }
+                // ADR-0028 (G-3) — owner/admin "create invite link" affordance.
+                // Mints a /g/<slug> link conveying this group's id; a non-member
+                // opens it to request to join, approved via the pending list.
+                if (canManage) {
+                    Spacer(Modifier.height(8.dp))
+                    TextButton(
+                        onClick = viewModel::onCreateInviteLink,
+                        enabled = !busy,
+                    ) { Text("Create invite link") }
+                    inviteLink?.let { link ->
+                        Text(
+                            text = link,
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.padding(horizontal = 8.dp),
+                        )
+                        TextButton(onClick = { clipboard.setText(AnnotatedString(link)) }) {
+                            Text("Copy link")
+                        }
                     }
                 }
                 error?.let { message ->

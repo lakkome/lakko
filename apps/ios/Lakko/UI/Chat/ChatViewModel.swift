@@ -110,6 +110,9 @@ public final class ChatViewModel: ObservableObject {
     /// truth — re-read on `refreshMembers()` + on each poll while the sheet is
     /// open.
     @Published public private(set) var pendingJoins: [Data] = []
+    /// ADR-0028 (G-3) — the minted group invite-link (the owner/admin "create
+    /// invite link" affordance), or `nil` before it is generated.
+    @Published public private(set) var inviteLink: String?
 
     // MARK: - Wiring
 
@@ -622,6 +625,18 @@ public final class ChatViewModel: ObservableObject {
         } catch {
             membershipError = error.localizedDescription
             NSLog("onRejectJoin failed: %@", error.localizedDescription)
+        }
+    }
+
+    /// ADR-0028 (G-3) — mint a group invite-link (owner/admin only) and publish
+    /// it to `inviteLink` for the members sheet to show + copy. Fail-closed.
+    func onCreateInviteLink() {
+        membershipError = nil
+        do {
+            inviteLink = try repository.createGroupInviteLink(groupIdHex: groupIdHex)
+        } catch {
+            membershipError = error.localizedDescription
+            NSLog("onCreateInviteLink failed: %@", error.localizedDescription)
         }
     }
 

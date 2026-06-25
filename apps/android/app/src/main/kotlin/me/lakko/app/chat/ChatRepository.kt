@@ -762,6 +762,37 @@ public class ChatRepository(
         }
     }
 
+    /**
+     * ADR-0028 (G-3) — mint a group invite-link (owner/admin side). Signs a
+     * GroupInviteCapability over this group's raw MLS group_id with the local
+     * identity's Ed25519 key and returns the https://lakko.me/g/<slug> link the
+     * owner shares out-of-band. A non-member opens it, reads the current epoch
+     * from the journal, and posts an external-join proposal an admin approves
+     * (ADR-0027). The link conveys only the group_id -- it authorizes nobody;
+     * the admin gate is the security boundary. `0` = never expires.
+     */
+    public fun createGroupInviteLink(groupIdHex: String): String {
+        val identity = canonicalIdentity.get()
+            ?: throw IllegalStateException(
+                "ChatRepository not bootstrapped — call bootstrap() first",
+            )
+        val record = groups[groupIdHex]
+            ?: throw ChatError(
+                "no live Group handle for $groupIdHex",
+                IllegalStateException("missing group record"),
+            )
+        val wire = try {
+            uniffi.lakko_ffi_uniffi.composeGroupInviteCapability(
+                identity.ed25519Seed(),
+                record.group.groupId(),
+                0u,
+            )
+        } catch (e: FfiException) {
+            throw ChatError("composeGroupInviteCapability failed", e)
+        }
+        return "https://lakko.me/g/" + me.lakko.app.auth.base64UrlEncodeNoPad(wire)
+    }
+
     public suspend fun publishApplicationMessage(
         groupIdHex: String,
         plaintextBytes: ByteArray,

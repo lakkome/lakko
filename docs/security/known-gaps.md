@@ -141,9 +141,17 @@ unit tests + the `group_invite_decode` fuzz target) +
 `epochOfMessage` on UniFFI + wasm). lakko-contacts 141 + 
 lakko-mls 96 lib tests green, clippy + fmt clean.
 
-**Remaining (ADR-0028 Phases 2-3):** the owner-side "create
-invite link" UI + the joiner-side "open link → request to
-join → poll the journal → open the rendezvous Welcome via
+**Phase 2 landed (owner create-link UI, web + iOS +
+Android).** A members-panel owner/admin-only "Create invite
+link" button (same role gate as add/remove) signs a
+`GroupInviteCapability` over the group's id and shows the
+copyable `https://lakko.me/g/<base64url>` link. Verified web
+`tsc`/`vitest`/`vite build`, iOS `xcodebuild`, Android
+`:app:compileDebugKotlin`.
+
+**Remaining (ADR-0028 Phase 3):** the joiner-side "open link
+→ read the epoch from the journal → request to join → poll
+the journal → open the rendezvous Welcome via
 `welcomeRendezvousFor` → `joinFromWelcome`" UI, on all three
 clients — the live consumer that produces a real pending
 request to approve.

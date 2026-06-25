@@ -1105,6 +1105,21 @@ private struct MembersSheet: View {
                         }
                     }
                 }
+                // ADR-0028 (G-3) — owner/admin "create invite link" affordance.
+                // Mints a /g/<slug> link conveying this group's id; a non-member
+                // opens it to request to join, approved via the pending list.
+                if viewModel.canManageMembers {
+                    Section("Invite link") {
+                        Button("Create invite link") { viewModel.onCreateInviteLink() }
+                            .disabled(viewModel.membershipBusy)
+                        if let link = viewModel.inviteLink {
+                            Text(link)
+                                .font(.system(.footnote, design: .monospaced))
+                                .textSelection(.enabled)
+                            Button("Copy link") { UIPasteboard.general.string = link }
+                        }
+                    }
+                }
                 // ADR-0027 (G-3) — pending external-join requests. Owner/admin
                 // only (same gate as add/remove); hidden when there are none.
                 // Approve drives the role-gated MLS approve + posts the commit
