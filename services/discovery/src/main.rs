@@ -87,6 +87,9 @@
 //! - `GET    /discovery/call-invite/{blob_id}`   — fetch CallInviteCapability blob (Phase 3c3-server)
 //! - `POST   /discovery/call-invite/{blob_id}/consume` — atomic max_uses bump (Phase 3c3-server)
 //! - `DELETE /discovery/call-invite/{blob_id}`         — owner-signed revocation (Phase 3c3-revoke)
+//! - `POST   /discovery/group-invite`             — upload GroupInviteCapability blob (ADR-0028, G-3)
+//! - `GET    /discovery/group-invite/{blob_id}`   — fetch GroupInviteCapability blob (ADR-0028, G-3)
+//! - `POST   /discovery/group-invite/{blob_id}/consume` — atomic per-joiner consume (ADR-0028, G-3)
 
 #![forbid(unsafe_code)]
 
@@ -94,6 +97,7 @@ mod account;
 pub(crate) mod auth;
 mod call_invite;
 mod channel_names;
+mod group_invite;
 mod identity_bundle;
 mod invite;
 mod keypackage;
@@ -345,6 +349,11 @@ pub(crate) fn build_app(state: AppState) -> Router {
             "/discovery/call-invite/{blob_id}",
             axum::routing::delete(call_invite::revoke),
         )
+        // ADR-0028 (G-3) — group join-ticket blob upload. Session-
+        // token-gated as a DoS / logged-in-user rate-limit; there
+        // is no owner-account binding on the capability to enforce
+        // (the issuer is identified by its Ed25519 pubkey only).
+        .route("/discovery/group-invite", post(group_invite::upload))
         // `DELETE /discovery/invite/{blob_id}` is owner-signed via
         // its body, but we ALSO require a session token: the
         // signature proves "owner of the capability", the token
@@ -392,8 +401,8 @@ pub(crate) fn build_app(state: AppState) -> Router {
     //   * /discovery/identity/{id} + keypackage/{id} —
     //     by-id reads, no enumeration vector (the id is
     //     a 32-byte pseudonym).
-    //   * /discovery/invite, /discovery/call-invite —
-    //     by-blob-id reads, same shape.
+    //   * /discovery/invite, /discovery/call-invite,
+    //     /discovery/group-invite — by-blob-id reads, same shape.
     //   * /discovery/channel/register — write that's
     //     UNIQUE-key-gated server-side.
     let open = Router::new()
@@ -426,6 +435,19 @@ pub(crate) fn build_app(state: AppState) -> Router {
         .route(
             "/discovery/call-invite/{blob_id}/consume",
             post(call_invite::consume),
+        )
+        // ADR-0028 (G-3) — group join-ticket fetch + consume.
+        // Anonymous mirror of the call-invite open routes above; a
+        // joiner needs the capability before they have an
+        // account-bound session, and the consume dedup tag is
+        // self-authenticating (PoW-gated, server-blind).
+        .route(
+            "/discovery/group-invite/{blob_id}",
+            get(group_invite::fetch),
+        )
+        .route(
+            "/discovery/group-invite/{blob_id}/consume",
+            post(group_invite::consume),
         )
         // G4-5 — channel @name discovery via OPRF.
         // Register stays on the open path (no
