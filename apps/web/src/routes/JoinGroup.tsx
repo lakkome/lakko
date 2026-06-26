@@ -21,13 +21,18 @@ import { useAuth } from "../auth/AuthContext";
 import { useChats } from "../chat/ChatContext";
 import { ContactsClient } from "../contacts/client";
 import { loadWasm } from "../wasm";
-import { base64UrlDecodeNoPad, base64UrlEncodeNoPad } from "../auth/account-id";
+import { base64UrlEncodeNoPad } from "../auth/account-id";
 import { paths } from "./paths";
 
 type JoinPhase = "idle" | "requesting" | "waiting" | "joined" | "error";
 
 interface DecodedTicket {
+  /** The capability wire bytes — resolved from the ledger when the slug was a
+   *  pointer, or the inline bytes directly. */
   wire: Uint8Array;
+  /** Non-null only for the server-backed pointer form; drives the consume gate
+   *  (ADR-0028 OQ1). */
+  blobId: Uint8Array | null;
   fingerprint: string;
   valid: boolean;
 }
@@ -38,16 +43,24 @@ export default function JoinGroup() {
   const chats = useChats();
   const navigate = useNavigate();
 
-  // Decode + verify the capability in a memo-driven resource so the panel
+  // Canonical identity provider — the same wasm Identity every Group on this
+  // device uses (mirrors Invite.tsx).
+  const client = new ContactsClient(undefined, undefined, {
+    identityProvider: () => chats.identity(),
+  });
+
+  // Resolve the slug (pointer => ledger fetch, inline => passthrough), then
+  // decode + verify the capability in a memo-driven resource so the panel
   // renders the right state without imperative juggling. Re-runs on navigation.
   const slugSignal = createMemo(() => params.slug);
   const [decoded] = createResource(slugSignal, async (slug): Promise<DecodedTicket | null> => {
     try {
-      const wire = base64UrlDecodeNoPad(slug);
+      const { capabilityWire, blobId } = await client.resolveGroupInviteSlug(slug);
       const wasm = await loadWasm();
-      const cap = wasm.GroupInviteCapability.decodeAndVerify(wire);
+      const cap = wasm.GroupInviteCapability.decodeAndVerify(capabilityWire);
       return {
-        wire,
+        wire: capabilityWire,
+        blobId,
         fingerprint: cap.issuerFingerprint(),
         valid: cap.isValidNow(BigInt(Date.now())),
       };
@@ -58,12 +71,6 @@ export default function JoinGroup() {
     }
   });
 
-  // Canonical identity provider — the same wasm Identity every Group on this
-  // device uses (mirrors Invite.tsx).
-  const client = new ContactsClient(undefined, undefined, {
-    identityProvider: () => chats.identity(),
-  });
-
   const [phase, setPhase] = createSignal<JoinPhase>("idle");
   const [error, setError] = createSignal<string | null>(null);
   let pollTimer: number | undefined;
@@ -71,14 +78,18 @@ export default function JoinGroup() {
     if (pollTimer !== undefined) clearInterval(pollTimer);
   });
 
-  async function onRequest(wire: Uint8Array): Promise<void> {
+  async function onRequest(ticket: DecodedTicket): Promise<void> {
     setError(null);
     setPhase("requesting");
     try {
       const { groupId, joinerSignatureKey } = await client.requestToJoinFromLink(
         auth.identitySecrets(),
-        wire,
+        ticket.wire,
         Date.now(),
+        {
+          blobId: ticket.blobId,
+          joinerAccountId: auth.identitySecrets()?.accountId,
+        },
       );
       setPhase("waiting");
       // Poll the journal for the admin's approval (the WelcomeRendezvous). The
@@ -133,7 +144,7 @@ export default function JoinGroup() {
             Invited by: <code>{decoded()?.fingerprint}</code>
           </p>
           <Show when={phase() === "idle"}>
-            <button type="button" onClick={() => void onRequest(decoded()!.wire)}>
+            <button type="button" onClick={() => void onRequest(decoded()!)}>
               Request to join
             </button>
           </Show>

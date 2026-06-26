@@ -37,6 +37,7 @@ import type {
   IdentityFetchResponse,
   IdentityUploadRequest,
   IdentityUploadResponse,
+  GroupInviteUploadRequest,
   InviteConsumeRequest,
   InviteConsumeResponse,
   InviteFetchResponse,
@@ -1096,6 +1097,177 @@ export class DiscoveryClient {
     const pow = await solvePow(challenge.seed, challenge.effort_bits);
 
     const endpoint = `/discovery/call-invite/${slug}/consume`;
+    const url = `${this.baseUrl}${endpoint}`;
+    let response: Response;
+    try {
+      response = await fetch(url, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          ...this.authHeaders(),
+        },
+        body: JSON.stringify({
+          pow,
+          joiner_tag: base64Encode(joinerTag),
+        } satisfies InviteConsumeRequest),
+      });
+    } catch (err) {
+      throw new DiscoveryNetworkError(endpoint, err);
+    }
+    if (response.status === 404) return { kind: "not-found" };
+    if (response.status === 410) return { kind: "exhausted" };
+    if (!response.ok) {
+      const text = await safeReadBody(response);
+      throw new DiscoveryHttpError(response.status, endpoint, text);
+    }
+    const raw = (await response.json()) as InviteConsumeResponse;
+    return {
+      kind: raw.already_consumed ? "already-consumed" : "consumed",
+      usedCount: raw.used_count,
+      maxUses: raw.max_uses,
+    };
+  }
+
+  /** `POST /discovery/group-invite` — upload a verified
+   *  `GroupInviteCapability` blob, get the content-addressed
+   *  `blob_id` back (ADR-0028, G-3). The high-level
+   *  [`uploadGroupInvite`] wrapper drives the PoW solve. */
+  async groupInviteUpload(
+    req: GroupInviteUploadRequest,
+  ): Promise<InviteUploadResponse> {
+    return this.post("/discovery/group-invite", req);
+  }
+
+  /**
+   * Upload a verified [`GroupInviteCapability`] blob and get its
+   * content-addressed `blob_id` back (ADR-0028, G-3).
+   *
+   * Sibling of [`uploadCallInvite`] for the group join-ticket ledger.
+   * Drives one PoW solve + `POST /discovery/group-invite`. Idempotent —
+   * same bytes yield the same id, the server upserts.
+   *
+   * `maxUses` is a SOFT anti-spam throttle (NOT part of the signed
+   * capability, NOT an access control — the admin approval gate is the
+   * security boundary): `0` = single-use, `0xFFFFFFFF` = unlimited, any
+   * other N = at most N consumes.
+   *
+   * The 512-byte client-side ceiling matches the server's
+   * `MAX_CAPABILITY_BYTES` for the group-invite ledger (the wire format
+   * tops out near 363 bytes).
+   *
+   * @returns The 32-byte `blob_id`, ready to substitute into a
+   *          `/g/<slug>` pointer URL.
+   */
+  async uploadGroupInvite(
+    capabilityBytes: Uint8Array,
+    maxUses: number,
+  ): Promise<Uint8Array> {
+    if (capabilityBytes.length === 0) {
+      throw new DiscoveryClientArgError("capabilityBytes must be non-empty");
+    }
+    const MAX = 512;
+    if (capabilityBytes.length > MAX) {
+      throw new DiscoveryClientArgError(
+        `capabilityBytes exceeds the ${MAX}-byte ceiling ` +
+          `(got ${capabilityBytes.length} bytes)`,
+      );
+    }
+
+    const challenge = await this.fetchChallenge();
+    const pow = await solvePow(challenge.seed, challenge.effort_bits);
+
+    const resp = await this.groupInviteUpload({
+      pow,
+      capability: base64Encode(capabilityBytes),
+      max_uses: maxUses,
+    });
+
+    const blobId = base64UrlDecodeNoPad(resp.blob_id);
+    if (blobId.length !== 32) {
+      throw new DiscoveryHttpError(
+        200,
+        "/discovery/group-invite",
+        `server returned blob_id of ${blobId.length} bytes, expected 32`,
+      );
+    }
+    return blobId;
+  }
+
+  /**
+   * Fetch a previously-uploaded `GroupInviteCapability` by its
+   * content-addressed `blob_id` (ADR-0028, G-3).
+   *
+   * Sibling of [`fetchCallInvite`]. Returns `null` on 404 (server folds
+   * expired blobs into the same status to deny attacker status-code
+   * probing). The caller re-runs `wasm.GroupInviteCapability.decodeAndVerify`
+   * locally so a malicious server cannot serve substituted bytes (+ the
+   * joiner can cross-check `SHA-256(bytes) === blobId`).
+   */
+  async fetchGroupInvite(blobId: Uint8Array): Promise<Uint8Array | null> {
+    if (blobId.length !== 32) {
+      throw new DiscoveryClientArgError("blobId must be 32 bytes");
+    }
+    const slug = base64UrlEncodeNoPad(blobId);
+    const url = `${this.baseUrl}/discovery/group-invite/${slug}`;
+    let response: Response;
+    try {
+      response = await fetch(url, { method: "GET" });
+    } catch (err) {
+      throw new DiscoveryNetworkError("/discovery/group-invite (GET)", err);
+    }
+    if (response.status === 404) return null;
+    if (!response.ok) {
+      const text = await safeReadBody(response);
+      throw new DiscoveryHttpError(
+        response.status,
+        "/discovery/group-invite (GET)",
+        text,
+      );
+    }
+    const raw = (await response.json()) as InviteFetchResponse;
+    return base64Decode(raw.capability);
+  }
+
+  /**
+   * Atomically bump the consume counter for the group-invite at `blobId`
+   * with per-joiner dedup (ADR-0028, G-3).
+   *
+   * Sibling of [`consumeCallInvite`]. The discriminated result shape is
+   * identical: `"consumed"` / `"already-consumed"` (counter NOT bumped) /
+   * `"exhausted"` (410) / `"not-found"` (404, never-issued OR expired). The
+   * consume is anti-spam defence-in-depth — the admin approval gate
+   * (ADR-0027) remains the security boundary.
+   *
+   * Reuses the **same** `wasm.computeJoinerInviteTag(...)` helper as the
+   * contact- and call-invite flows — salt is per-blob, so tags don't
+   * collide across invite kinds.
+   *
+   * @param joinerAccountId  The joiner's 16-byte UUIDv7 account_id. Never
+   *                         crosses the wire in plaintext.
+   */
+  async consumeGroupInvite(
+    blobId: Uint8Array,
+    capabilityBytes: Uint8Array,
+    joinerAccountId: Uint8Array,
+  ): Promise<ConsumeInviteResult> {
+    if (blobId.length !== 32) {
+      throw new DiscoveryClientArgError("blobId must be 32 bytes");
+    }
+    if (joinerAccountId.length !== 16) {
+      throw new DiscoveryClientArgError("joinerAccountId must be 16 bytes");
+    }
+
+    const wasm = await loadWasm();
+    const joinerTag = wasm.computeJoinerInviteTag(
+      capabilityBytes,
+      joinerAccountId,
+    );
+
+    const slug = base64UrlEncodeNoPad(blobId);
+    const challenge = await this.fetchChallenge();
+    const pow = await solvePow(challenge.seed, challenge.effort_bits);
+
+    const endpoint = `/discovery/group-invite/${slug}/consume`;
     const url = `${this.baseUrl}${endpoint}`;
     let response: Response;
     try {

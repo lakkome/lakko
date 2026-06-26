@@ -217,6 +217,24 @@ export interface InviteConsumeResponse {
   already_consumed: boolean;
 }
 
+/** Body of `POST /discovery/group-invite` (ADR-0028, G-3). Mirror of
+ *  [`InviteUploadRequest`] but carries an extra `max_uses` field: a
+ *  `GroupInviteCapability` does NOT embed `max_uses` in its signed wire (it
+ *  conveys only `group_id` + `issuer_pubkey` + `expiry_ms`), so the uploader
+ *  supplies the SOFT consume ceiling out-of-band. It is an anti-spam throttle,
+ *  not an access control — the security boundary is the admin approval gate
+ *  (ADR-0027). The response reuses [`InviteUploadResponse`] (`blob_id`). */
+export interface GroupInviteUploadRequest {
+  pow: PowProofPayload;
+  /** Standard-alphabet base64 of `wasm.composeGroupInviteCapability(...)`
+   *  output. Server runs `decode_and_verify` at ingress + caps decoded size at
+   *  512 bytes. */
+  capability: string;
+  /** SOFT consume ceiling — `0` = single-use, `0xFFFFFFFF` = unlimited, any
+   *  other N = at most N consumes. NOT part of the signed capability. */
+  max_uses: number;
+}
+
 /** Body of `DELETE /discovery/invite/{blob_id_b64url}` (Phase
  *  1.18d2b). The `signature` field carries proof that the
  *  request came from the same Ed25519 key that signed the

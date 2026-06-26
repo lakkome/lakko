@@ -43,7 +43,12 @@
  */
 import { loadWasm } from "../wasm";
 import { DiscoveryClient } from "../discovery/client";
-import { base64Decode, base64Encode, base64UrlEncodeNoPad } from "../auth/account-id";
+import { base64Decode, base64Encode } from "../auth/account-id";
+import {
+  composeInlineGroupInviteUrl,
+  composePointerGroupInviteUrl,
+  parseGroupInviteSlug,
+} from "./group-invite";
 import { DsClient } from "../ds/client";
 import type { IdentitySecrets } from "../auth/AuthContext";
 import type {
@@ -1778,6 +1783,7 @@ export class ContactsClient {
     group: WasmGroup,
     expiryMs: bigint,
     origin: string,
+    maxUses: number = 0xff_ff_ff_ff,
   ): Promise<string> {
     const wasm = await loadWasm();
     const myIdentity = await this.resolveIdentity(identity);
@@ -1787,7 +1793,48 @@ export class ContactsClient {
     } catch (err) {
       throw ContactsError.wrap(err);
     }
-    return `${origin}/g/${base64UrlEncodeNoPad(wire)}`;
+    // Production default (ADR-0028 OQ1): upload to the discovery ledger — the
+    // server-side anti-abuse surface (per-joiner consume dedup + soft max_uses)
+    // — and return the short pointer URL. On an upload failure (a censored /
+    // offline network) fall back to the inline form so the link still works
+    // without the round-trip. `max_uses` is a soft throttle, not an access
+    // control: the admin approval gate stays the security boundary.
+    try {
+      const blobId = await this.discovery.uploadGroupInvite(wire, maxUses);
+      return composePointerGroupInviteUrl(blobId, origin);
+    } catch {
+      return composeInlineGroupInviteUrl(wire, origin);
+    }
+  }
+
+  /** ADR-0028 (G-3) — resolve a `/g/<slug>` slug to the capability wire bytes,
+   *  fetching from the discovery ledger when the slug is a 32-byte content-
+   *  addressed pointer (the production form) or passing the bytes straight
+   *  through when it is an inline capability (the censored-region fallback).
+   *  Returns the `blobId` (non-null only for the pointer form) so the caller
+   *  can drive `consumeGroupInvite` before requesting to join. */
+  async resolveGroupInviteSlug(
+    slug: string,
+  ): Promise<{ capabilityWire: Uint8Array; blobId: Uint8Array | null }> {
+    let parsed;
+    try {
+      parsed = parseGroupInviteSlug(slug);
+    } catch (err) {
+      throw ContactsError.wrap(err);
+    }
+    if (parsed.kind === "inline") {
+      return { capabilityWire: parsed.capabilityBytes, blobId: null };
+    }
+    let fetched: Uint8Array | null;
+    try {
+      fetched = await this.discovery.fetchGroupInvite(parsed.blobId);
+    } catch (err) {
+      throw ContactsError.wrap(err);
+    }
+    if (fetched === null) {
+      throw ContactsError.wrap(new Error("group invite not found or expired"));
+    }
+    return { capabilityWire: fetched, blobId: parsed.blobId };
   }
 
   /** ADR-0028 (G-3) — joiner step 1: request to join a group from a `/g/` link
@@ -1803,6 +1850,10 @@ export class ContactsClient {
     identity: IdentitySecrets | null,
     capabilityWire: Uint8Array,
     nowMs: number,
+    opts?: {
+      blobId?: Uint8Array | null | undefined;
+      joinerAccountId?: Uint8Array | undefined;
+    },
   ): Promise<{ groupId: Uint8Array; joinerSignatureKey: Uint8Array }> {
     const wasm = await loadWasm();
     const myIdentity = await this.resolveIdentity(identity);
@@ -1814,6 +1865,29 @@ export class ContactsClient {
     }
     if (!cap.isValidNow(BigInt(nowMs))) {
       throw ContactsError.wrap(new Error("group invite link has expired"));
+    }
+    // ADR-0028 OQ1 — when the link was a server-backed pointer, register one
+    // consume against the ledger's soft `max_uses` ceiling before posting the
+    // request (anti-abuse defence-in-depth; the admin approval gate remains the
+    // real boundary). A repeat from this joiner is idempotent. Inline links
+    // (no `blobId`) skip this — there is no ledger row to consume.
+    if (opts?.blobId != null && opts.joinerAccountId != null) {
+      let consume;
+      try {
+        consume = await this.discovery.consumeGroupInvite(
+          opts.blobId,
+          capabilityWire,
+          opts.joinerAccountId,
+        );
+      } catch (err) {
+        throw ContactsError.wrap(err);
+      }
+      if (consume.kind === "not-found") {
+        throw ContactsError.wrap(new Error("group invite not found or expired"));
+      }
+      if (consume.kind === "exhausted") {
+        throw ContactsError.wrap(new Error("group invite has reached its use limit"));
+      }
     }
     const groupId = cap.groupId;
     // Read the group's current epoch from the journal head. A non-member can
