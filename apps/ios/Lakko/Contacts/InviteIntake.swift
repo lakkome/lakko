@@ -43,13 +43,20 @@ public final class InviteIntake: ObservableObject {
     /// Link tap. `nil` when no invite is pending.
     @Published public private(set) var pendingSlug: String?
 
+    /// ADR-0028 (G-3) — the slug from the most recent
+    /// `lakko.me/g/<slug>` group join-ticket link tap. `nil` when no
+    /// group-join is pending. Drives ``JoinGroupLandingScreen``.
+    @Published public private(set) var pendingGroupJoinSlug: String?
+
     public init() {}
 
     /// Extract the slug from a URL and stash it. No-op if the URL
-    /// doesn't match the `https://lakko.me/i/<slug>` shape.
+    /// doesn't match the `https://lakko.me/i/<slug>` (contact invite)
+    /// or `https://lakko.me/g/<slug>` (group join-ticket, ADR-0028)
+    /// shape.
     ///
-    /// We accept any URL whose path starts with `/i/`; the host
-    /// match is left loose (`lakko.me`, `lakko.app`, dev sub-
+    /// We accept any URL whose path starts with `/i/` or `/g/`; the
+    /// host match is left loose (`lakko.me`, `lakko.app`, dev sub-
     /// domains) so a future deployment rename doesn't require a
     /// coordinated client release. The `apple-app-site-association`
     /// JSON on the server is the security gate — iOS only invokes
@@ -57,20 +64,34 @@ public final class InviteIntake: ObservableObject {
     /// claiming this bundle id.
     public func handle(_ url: URL) {
         let path = url.path
-        guard path.hasPrefix("/i/") else { return }
-        let slug = String(path.dropFirst("/i/".count))
-        guard !slug.isEmpty else { return }
-        // Strip any trailing slash so `lakko.me/i/<slug>/` works
-        // the same as `lakko.me/i/<slug>`.
-        let trimmed = slug.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-        guard !trimmed.isEmpty else { return }
-        pendingSlug = trimmed
+        if let slug = Self.slug(from: path, prefix: "/i/") {
+            pendingSlug = slug
+        } else if let slug = Self.slug(from: path, prefix: "/g/") {
+            pendingGroupJoinSlug = slug
+        }
     }
 
-    /// Consume the pending slug — called by ``InviteLandingScreen``
-    /// once the result has been surfaced to the user (and the user
-    /// has acknowledged it with Done / Open chat / etc.).
+    /// Extract + trim the slug after `prefix`, or `nil` if the path
+    /// doesn't start with `prefix` / the slug is empty. Strips any
+    /// trailing slash so `…/<slug>/` works the same as `…/<slug>`.
+    private static func slug(from path: String, prefix: String) -> String? {
+        guard path.hasPrefix(prefix) else { return nil }
+        let trimmed = String(path.dropFirst(prefix.count))
+            .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    /// Consume the pending contact-invite slug — called by
+    /// ``InviteLandingScreen`` once the result has been surfaced to
+    /// the user (and the user has acknowledged it with Done / Open
+    /// chat / etc.).
     public func clear() {
         pendingSlug = nil
+    }
+
+    /// ADR-0028 (G-3) — consume the pending group-join slug, called by
+    /// ``JoinGroupLandingScreen`` on dismiss.
+    public func clearGroupJoin() {
+        pendingGroupJoinSlug = nil
     }
 }

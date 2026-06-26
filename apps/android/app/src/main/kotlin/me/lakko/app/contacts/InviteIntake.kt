@@ -46,6 +46,13 @@ public class InviteIntake {
      *  to the [InviteLandingScreen] when non-null. */
     public val pendingInviteSlug: StateFlow<String?> = mutableSlug.asStateFlow()
 
+    private val mutableGroupJoinSlug: MutableStateFlow<String?> = MutableStateFlow(null)
+
+    /** ADR-0028 (G-3) — slug from the most recent unconsumed
+     *  `https://lakko.me/g/<slug>` group join-ticket deep-link, or `null`. The
+     *  router navigates to the group-join landing when non-null. */
+    public val pendingGroupJoinSlug: StateFlow<String?> = mutableGroupJoinSlug.asStateFlow()
+
     /** Publish a new slug — called from
      *  [me.lakko.app.MainActivity.handleInviteIntent]. Replaces
      *  any prior unconsumed value (the user has clearly chosen
@@ -58,5 +65,17 @@ public class InviteIntake {
      *  screen has mounted + read the slug. */
     public fun consume() {
         mutableSlug.value = null
+    }
+
+    /** ADR-0028 (G-3) — publish a group join-ticket slug, called from
+     *  [me.lakko.app.MainActivity.handleGroupJoinIntent]. */
+    public fun publishGroupJoin(slug: String) {
+        mutableGroupJoinSlug.value = slug
+    }
+
+    /** ADR-0028 (G-3) — clear the group-join slot once the landing screen has
+     *  mounted + read the slug. */
+    public fun consumeGroupJoin() {
+        mutableGroupJoinSlug.value = null
     }
 }

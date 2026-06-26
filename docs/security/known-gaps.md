@@ -29,7 +29,7 @@ The IETF MLS WG is still landing hybrid PQ cipher suite
 identifiers. We pin classical suites today and migrate
 once the draft stabilises.
 
-### G-3: External-join proposal approval — **Phases 1-3 + Phase-4 client UI + the joiner-side core/FFI landed ([ADR-0027](../adr/0027-external-join-approval.md)); only the client request-to-join UI + the ADR-0010 join-ticket transport follow**
+### G-3: External-join proposal approval — **CLOSED end-to-end on web + iOS + Android ([ADR-0027](../adr/0027-external-join-approval.md) admin approval + [ADR-0028](../adr/0028-group-join-ticket.md) join-ticket invite-link); residuals are a deployed-env e2e + optional anti-abuse hardenings**
 
 Was: `Group::process_incoming` returned a data-less
 `Incoming::ExternalJoinProposal` unit variant and the
@@ -164,9 +164,28 @@ pending request — G-3 is now exercisable end-to-end on web
 (modulo a live admin approving). Verified `tsc`/`vitest`
 (213)/`vite build`.
 
-**Remaining (ADR-0028 Phase 3 native):** the iOS + Android
-joiner UI — the same request → poll → join flow behind a
-`/g/` deep link, mirroring the web `JoinGroup` screen.
+**Phase 3 native landed (iOS + Android joiner) — G-3
+CLOSED end-to-end.** `ChatRepository.requestToJoinFromLink`
++ `pollForJoinWelcome` mirror the web orchestration (decode
++ verify the capability fail-closed → read the epoch from
+the journal head's public framing → `createExternalJoinProposal`
+→ post → poll → `parseWelcomeRendezvous` match → the audited
+`joinGroupFromWelcome`); a `/g/` deep-link (the extended
+`InviteIntake` + `MainActivity.handleGroupJoinIntent` /
+iOS `onOpenURL`, plus the Android manifest
+`pathPrefix="/g/"`) routes to a `JoinGroupLandingScreen` that
+drives request → poll → join. Verified iOS `xcodebuild`
+BUILD SUCCEEDED + Android `:app:compileDebugKotlin` BUILD
+SUCCESSFUL.
+
+**G-3 is now implemented end-to-end on web + iOS + Android**
+— the admin approval (ADR-0027) + the join-ticket invite-link
+(ADR-0028) form a complete joiner-initiated external-join
+flow. Residuals (deferred, not gaps in the protocol): a live
+admin-approval e2e on a deployed environment, and the
+optional anti-abuse hardenings in ADR-0028's open questions
+(single-use / max-uses tickets via a server blob ledger;
+issuer-in-roster enforcement at the admin UI).
 
 ## Multi-device
 

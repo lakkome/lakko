@@ -114,6 +114,8 @@
                 <data android:scheme="http" />
                 <data android:host="lakko.me" />
                 <data android:pathPrefix="/i/" />
+                <!-- ADR-0028 (G-3) — group join-ticket deep links. -->
+                <data android:pathPrefix="/g/" />
             </intent-filter>
         </activity>
 

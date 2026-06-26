@@ -158,6 +158,7 @@ class MainActivity : ComponentActivity() {
         // (EXTRA_WAKE_GROUP / EXTRA_WAKE_POINTER). `onNewIntent`
         // below handles the warm-start variants of both.
         handleInviteIntent(intent)
+        handleGroupJoinIntent(intent)
         handleWakeIntent(intent)
 
         setContent {
@@ -189,6 +190,7 @@ class MainActivity : ComponentActivity() {
         // publish into the appropriate intake whose StateFlow
         // drives the re-render.
         handleInviteIntent(intent)
+        handleGroupJoinIntent(intent)
         handleWakeIntent(intent)
     }
 
@@ -223,6 +225,22 @@ class MainActivity : ComponentActivity() {
         val slug = path.removePrefix("/i/").trim().removeSuffix("/")
         if (slug.isEmpty()) return
         inviteIntake.publish(slug)
+    }
+
+    /**
+     * ADR-0028 (G-3) — extract a group join-ticket slug from [intent]'s `data`
+     * URI when the URL matches `https?://lakko.me/g/<slug>`, then hand it to
+     * [InviteIntake.publishGroupJoin]. Mirror of [handleInviteIntent] for the
+     * `/g/` deep-link.
+     */
+    private fun handleGroupJoinIntent(intent: Intent) {
+        if (intent.action != Intent.ACTION_VIEW) return
+        val uri = intent.data ?: return
+        val path = uri.path ?: return
+        if (!path.startsWith("/g/")) return
+        val slug = path.removePrefix("/g/").trim().removeSuffix("/")
+        if (slug.isEmpty()) return
+        inviteIntake.publishGroupJoin(slug)
     }
 
     /**
@@ -431,6 +449,15 @@ private fun SessionRoot(
         inviteIntake.consume()
     }
 
+    // ADR-0028 (G-3) — a tapped `/g/<slug>` group join-ticket link routes to
+    // the group-join landing, mirroring the invite-landing flow above.
+    val pendingGroupJoinSlug by inviteIntake.pendingGroupJoinSlug.collectAsStateWithLifecycle()
+    LaunchedEffect(pendingGroupJoinSlug) {
+        val slug = pendingGroupJoinSlug ?: return@LaunchedEffect
+        destination = SessionDestination.GroupJoinLanding(slug)
+        inviteIntake.consumeGroupJoin()
+    }
+
     // Observe pending push wakes (Phase 1.20d2). A notification
     // tap delivers a group-pseudonym hex to MainActivity, which
     // publishes here via `pushIntake`. We route to the matching
@@ -609,6 +636,23 @@ private fun SessionRoot(
                 },
             )
         }
+
+        is SessionDestination.GroupJoinLanding -> {
+            // ADR-0028 (G-3) — request to join the group the `/g/<slug>` link
+            // points at + poll for the admin's approval. Keyed by slug so a
+            // re-tapped link rebuilds a fresh VM.
+            val groupJoinSlug = current.slug
+            val groupJoinVm: me.lakko.app.ui.chat.JoinGroupLandingViewModel = viewModel(
+                key = "group-join-$groupJoinSlug",
+                factory = singletonViewModelFactory {
+                    me.lakko.app.ui.chat.JoinGroupLandingViewModel(chatRepository, groupJoinSlug)
+                },
+            )
+            me.lakko.app.ui.chat.JoinGroupLandingScreen(
+                viewModel = groupJoinVm,
+                onDone = { destination = SessionDestination.Chats },
+            )
+        }
     }
 }
 
@@ -624,6 +668,10 @@ private sealed interface SessionDestination {
     data object Chats : SessionDestination
     data class Chat(val groupIdHex: String) : SessionDestination
     data class InviteLanding(val slug: String) : SessionDestination
+
+    /** ADR-0028 (G-3) — group join-ticket landing for a tapped `/g/<slug>`
+     *  link. Carries the slug so the VM knows which group to request to join. */
+    data class GroupJoinLanding(val slug: String) : SessionDestination
     /** 2a2e — passkey management surface. */
     data object Passkeys : SessionDestination
     /** 2a3b4 — DeviceGroup pairing surface. */

@@ -793,6 +793,96 @@ public class ChatRepository(
         return "https://lakko.me/g/" + me.lakko.app.auth.base64UrlEncodeNoPad(wire)
     }
 
+    /**
+     * ADR-0028 (G-3) — joiner step 1: request to join a group from a `/g/` link
+     * capability (the wire bytes the slug base64url-decodes to). Decodes +
+     * verifies the capability fail-closed (before any post), reads the group's
+     * current epoch from the journal head's public MLS framing
+     * (`epochOfMessage`, no group secret), crafts an external-join proposal
+     * (ADR-0027), and posts it to the group journal. Returns the group id + the
+     * joiner's signature key — the caller drives [pollForJoinWelcome] until an
+     * admin approves and the Welcome arrives.
+     */
+    public suspend fun requestToJoinFromLink(
+        capabilityWire: ByteArray,
+        nowMs: ULong,
+    ): Pair<ByteArray, ByteArray> {
+        val identity = canonicalIdentity.get()
+            ?: throw IllegalStateException(
+                "ChatRepository not bootstrapped — call bootstrap() first",
+            )
+        val cap = try {
+            uniffi.lakko_ffi_uniffi.GroupInviteCapability.decodeAndVerify(capabilityWire)
+        } catch (e: FfiException) {
+            throw ChatError("group invite link decode/verify failed", e)
+        }
+        val groupId: ByteArray
+        val valid: Boolean
+        try {
+            valid = cap.isValidNow(nowMs)
+            groupId = cap.groupId()
+        } finally {
+            cap.close()
+        }
+        if (!valid) {
+            throw ChatError(
+                "group invite link has expired",
+                IllegalStateException("expired"),
+            )
+        }
+        // Read the current epoch from the journal head (public framing; a
+        // non-member can do this). Empty / unreachable journal => epoch 0.
+        var epoch: ULong = 0u
+        try {
+            val raw = dsClient.fetchGroup(groupId, after = 0L, waitSecs = 0)
+            for (m in raw.messages) {
+                uniffi.lakko_ffi_uniffi.epochOfMessage(m.payload)?.let { epoch = it }
+            }
+        } catch (e: Throwable) {
+            // keep epoch 0
+        }
+        val proposal = try {
+            identity.createExternalJoinProposal(groupId, epoch)
+        } catch (e: FfiException) {
+            throw ChatError("createExternalJoinProposal failed", e)
+        }
+        try {
+            dsClient.publishGroup(groupId, proposal)
+        } catch (e: Throwable) {
+            throw ChatError("DS publishGroup (external-join proposal) failed", e)
+        }
+        return Pair(groupId, identity.signaturePublicKey())
+    }
+
+    /**
+     * ADR-0028 (G-3) — joiner step 2: poll the group journal for the rendezvous
+     * Welcome an admin posted after approving our request, and join from it. Run
+     * on a poll loop after [requestToJoinFromLink]. Returns the joined group's
+     * hex id on the first rendezvous addressed to our signature key, or `null`
+     * if no Welcome has arrived yet (keep polling).
+     */
+    public suspend fun pollForJoinWelcome(
+        groupId: ByteArray,
+        joinerSignatureKey: ByteArray,
+    ): String? {
+        val raw = try {
+            dsClient.fetchGroup(groupId, after = 0L, waitSecs = 0)
+        } catch (e: Throwable) {
+            throw ChatError("DS fetchGroup (join poll) failed", e)
+        }
+        for (m in raw.messages) {
+            val rendezvous = try {
+                uniffi.lakko_ffi_uniffi.parseWelcomeRendezvous(m.payload)
+            } catch (e: FfiException) {
+                continue
+            }
+            if (rendezvous.joinerSignatureKey.contentEquals(joinerSignatureKey)) {
+                return joinGroupFromWelcome(rendezvous.welcome)
+            }
+        }
+        return null
+    }
+
     public suspend fun publishApplicationMessage(
         groupIdHex: String,
         plaintextBytes: ByteArray,

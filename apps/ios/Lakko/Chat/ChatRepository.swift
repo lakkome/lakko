@@ -357,6 +357,78 @@ public final class ChatRepository: ObservableObject {
         return groupIdHex
     }
 
+    /// ADR-0028 (G-3) — joiner step 1: request to join a group from a `/g/`
+    /// link capability (the wire bytes the slug base64url-decodes to). Decodes
+    /// + verifies the capability fail-closed (before any post), reads the
+    /// group's current epoch from the journal head's public MLS framing
+    /// (`epochOfMessage`, no group secret), crafts an external-join proposal
+    /// (ADR-0027) for that epoch, and posts it to the group journal. Returns the
+    /// group id + the joiner's signature key — the caller drives
+    /// `pollForJoinWelcome` until an admin approves and the Welcome arrives.
+    public func requestToJoinFromLink(
+        capabilityWire: Data,
+        nowMs: UInt64
+    ) async throws -> (groupId: Data, joinerSignatureKey: Data) {
+        guard let identity = canonicalIdentity else {
+            throw ChatError.argument("ChatRepository not bootstrapped — call bootstrap() first")
+        }
+        let cap: GroupInviteCapability
+        do {
+            cap = try GroupInviteCapability.decodeAndVerify(wire: capabilityWire)
+        } catch {
+            throw ChatError.wrapped("group invite link decode/verify failed", underlying: error)
+        }
+        guard cap.isValidNow(nowMs: nowMs) else {
+            throw ChatError.argument("group invite link has expired")
+        }
+        let groupId = cap.groupId()
+        // Read the current epoch from the journal head (public framing; a
+        // non-member can do this). Empty / unreachable journal ⇒ epoch 0.
+        var epoch: UInt64 = 0
+        if let raw = try? await dsClient.fetchGroup(groupId: groupId, after: 0, waitSecs: 0) {
+            for m in raw.messages {
+                if let e = epochOfMessage(bytes: m.payload) { epoch = e }
+            }
+        }
+        let proposal: Data
+        do {
+            proposal = try identity.createExternalJoinProposal(groupId: groupId, epoch: epoch)
+        } catch {
+            throw ChatError.wrapped("createExternalJoinProposal failed", underlying: error)
+        }
+        do {
+            _ = try await dsClient.publishGroup(groupId: groupId, payload: proposal)
+        } catch {
+            throw ChatError.wrapped(
+                "DS publishGroup (external-join proposal) failed", underlying: error)
+        }
+        return (groupId, identity.signaturePublicKey())
+    }
+
+    /// ADR-0028 (G-3) — joiner step 2: poll the group journal for the
+    /// rendezvous Welcome an admin posted after approving our request, and join
+    /// from it. Run on a poll loop after `requestToJoinFromLink`. Returns the
+    /// joined group's hex id on the first rendezvous addressed to our signature
+    /// key, or `nil` if no Welcome has arrived yet (keep polling).
+    public func pollForJoinWelcome(
+        groupId: Data,
+        joinerSignatureKey: Data
+    ) async throws -> String? {
+        let raw: FetchResult
+        do {
+            raw = try await dsClient.fetchGroup(groupId: groupId, after: 0, waitSecs: 0)
+        } catch {
+            throw ChatError.wrapped("DS fetchGroup (join poll) failed", underlying: error)
+        }
+        for m in raw.messages {
+            guard let rendezvous = try? parseWelcomeRendezvous(bytes: m.payload) else { continue }
+            if rendezvous.joinerSignatureKey == joinerSignatureKey {
+                return try await joinGroupFromWelcome(welcomeBytes: rendezvous.welcome)
+            }
+        }
+        return nil
+    }
+
     /// Compose `(plaintext, attachments)` into the canonical
     /// 1.19a JSON envelope, encrypt for the current epoch of
     /// `groupIdHex`, and post the wire bytes to the DS. Appends

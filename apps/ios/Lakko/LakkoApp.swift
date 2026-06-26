@@ -295,6 +295,18 @@ private struct SessionRoot: View {
                         // lands us back on the prior destination.
                     }
                 )
+            } else if let groupSlug = inviteIntake.pendingGroupJoinSlug {
+                // ADR-0028 (G-3) — a tapped `/g/<slug>` group join-ticket link.
+                // The landing screen requests to join + polls for the admin's
+                // approval; dismiss() flips the publisher back to nil.
+                JoinGroupLandingScreen(
+                    viewModel: JoinGroupLandingViewModel(
+                        slug: groupSlug,
+                        repository: chatRepository,
+                        intake: inviteIntake
+                    ),
+                    onDone: {}
+                )
             } else {
                 switch destination {
                 case .home:
