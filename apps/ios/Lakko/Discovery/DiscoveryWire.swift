@@ -305,6 +305,36 @@ public struct InviteFetchResponse: Codable, Equatable {
     }
 }
 
+/// Body of `POST /discovery/group-invite` (ADR-0028, G-3). Mirror of
+/// ``InviteUploadRequest`` but carries an extra `max_uses`: a
+/// `GroupInviteCapability` does NOT embed `max_uses` in its signed wire (it
+/// conveys only `group_id` + `issuer_pubkey` + `expiry_ms`), so the uploader
+/// supplies the SOFT consume ceiling out-of-band. It is an anti-spam throttle,
+/// not an access control — the security boundary is the admin approval gate
+/// (ADR-0027). The response reuses ``InviteUploadResponse`` (`blob_id`).
+public struct GroupInviteUploadRequest: Codable, Equatable {
+    public let pow: PowProofPayload
+    /// Standard-alphabet base64 of the `composeGroupInviteCapability(...)`
+    /// output. Server runs `decode_and_verify` at ingress + caps decoded size
+    /// at 512 bytes.
+    public let capability: String
+    /// SOFT consume ceiling — `0` = single-use, `0xFFFFFFFF` = unlimited, any
+    /// other N = at most N consumes. NOT part of the signed capability.
+    public let maxUses: UInt32
+
+    public init(pow: PowProofPayload, capability: String, maxUses: UInt32) {
+        self.pow = pow
+        self.capability = capability
+        self.maxUses = maxUses
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case pow
+        case capability
+        case maxUses = "max_uses"
+    }
+}
+
 /// Body of `POST /discovery/invite/{blob_id_b64url}/consume`
 /// (Phase 1.18d3b mandatory shape).
 public struct InviteConsumeRequest: Codable, Equatable {

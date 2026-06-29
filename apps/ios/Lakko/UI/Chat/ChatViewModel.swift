@@ -632,11 +632,13 @@ public final class ChatViewModel: ObservableObject {
     /// it to `inviteLink` for the members sheet to show + copy. Fail-closed.
     func onCreateInviteLink() {
         membershipError = nil
-        do {
-            inviteLink = try repository.createGroupInviteLink(groupIdHex: groupIdHex)
-        } catch {
-            membershipError = error.localizedDescription
-            NSLog("onCreateInviteLink failed: %@", error.localizedDescription)
+        Task { @MainActor in
+            do {
+                inviteLink = try await repository.createGroupInviteLink(groupIdHex: groupIdHex)
+            } catch {
+                membershipError = error.localizedDescription
+                NSLog("onCreateInviteLink failed: %@", error.localizedDescription)
+            }
         }
     }
 

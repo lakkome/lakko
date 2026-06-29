@@ -367,7 +367,8 @@ public final class ChatRepository: ObservableObject {
     /// `pollForJoinWelcome` until an admin approves and the Welcome arrives.
     public func requestToJoinFromLink(
         capabilityWire: Data,
-        nowMs: UInt64
+        nowMs: UInt64,
+        blobId: Data? = nil
     ) async throws -> (groupId: Data, joinerSignatureKey: Data) {
         guard let identity = canonicalIdentity else {
             throw ChatError.argument("ChatRepository not bootstrapped — call bootstrap() first")
@@ -380,6 +381,33 @@ public final class ChatRepository: ObservableObject {
         }
         guard cap.isValidNow(nowMs: nowMs) else {
             throw ChatError.argument("group invite link has expired")
+        }
+        // ADR-0028 OQ1 — when the link was a server-backed pointer, register one
+        // consume against the ledger's soft `max_uses` ceiling before posting
+        // the request (anti-abuse defence-in-depth; the admin approval gate
+        // remains the real boundary). A repeat from this joiner is idempotent.
+        // Inline links (no `blobId`) skip this — there is no ledger row.
+        if let blobId,
+           let accountIdB64 = currentAccountIdB64,
+           let joinerAccountId = base64Decode(accountIdB64) {
+            let outcome: ConsumeInviteResult
+            do {
+                outcome = try await discovery.consumeGroupInvite(
+                    blobId: blobId,
+                    capabilityBytes: capabilityWire,
+                    joinerAccountId: joinerAccountId
+                )
+            } catch {
+                throw ChatError.wrapped("group invite consume failed", underlying: error)
+            }
+            switch outcome {
+            case .notFound:
+                throw ChatError.argument("group invite not found or expired")
+            case .exhausted:
+                throw ChatError.argument("group invite has reached its use limit")
+            case .consumed, .alreadyConsumed:
+                break
+            }
         }
         let groupId = cap.groupId()
         // Read the current epoch from the journal head (public framing; a
@@ -780,7 +808,7 @@ public final class ChatRepository: ObservableObject {
     /// admin approves (ADR-0027). The link conveys only the `group_id` — it
     /// authorizes nobody; the admin gate is the security boundary. `0` = never
     /// expires.
-    public func createGroupInviteLink(groupIdHex: String) throws -> String {
+    public func createGroupInviteLink(groupIdHex: String) async throws -> String {
         guard let identity = canonicalIdentity else {
             throw ChatError.argument("ChatRepository not bootstrapped — call bootstrap() first")
         }
@@ -797,7 +825,52 @@ public final class ChatRepository: ObservableObject {
         } catch {
             throw ChatError.wrapped("composeGroupInviteCapability failed", underlying: error)
         }
-        return "https://lakko.me/g/" + base64UrlEncodeNoPad(wire)
+        // Production default (ADR-0028 OQ1): upload to the discovery ledger —
+        // the server-side anti-abuse surface (per-joiner consume dedup + soft
+        // max_uses) — and share the short pointer URL. On an upload failure (a
+        // censored / offline network) fall back to the inline form so the link
+        // still works without the round-trip. `max_uses` is a soft throttle,
+        // not an access control: the admin approval gate stays the boundary.
+        do {
+            let blobId = try await discovery.uploadGroupInvite(
+                capabilityBytes: wire, maxUses: UInt32.max)
+            return try GroupInviteUrl.composePointerGroupInviteUrl(blobId: blobId)
+        } catch {
+            return (try? GroupInviteUrl.composeInlineGroupInviteUrl(capabilityBytes: wire))
+                ?? ("https://lakko.me/g/" + base64UrlEncodeNoPad(wire))
+        }
+    }
+
+    /// ADR-0028 (G-3) — resolve a `/g/<slug>` slug to the capability wire bytes,
+    /// fetching from the discovery ledger when the slug is a 32-byte
+    /// content-addressed pointer (the production form) or passing the bytes
+    /// straight through when it is an inline capability (the censored-region
+    /// fallback). Returns the `blobId` (non-nil only for the pointer form) so
+    /// the caller can drive the consume gate before requesting to join.
+    public func resolveGroupInviteSlug(
+        slug: String
+    ) async throws -> (capabilityWire: Data, blobId: Data?) {
+        let parsed: GroupInviteUrl.ParsedGroupInvite
+        do {
+            parsed = try GroupInviteUrl.parseGroupInviteSlug(slug)
+        } catch {
+            throw ChatError.wrapped("group invite link is malformed", underlying: error)
+        }
+        switch parsed {
+        case .inline(let capabilityBytes):
+            return (capabilityBytes, nil)
+        case .pointer(let blobId):
+            let fetched: Data?
+            do {
+                fetched = try await discovery.fetchGroupInvite(blobId: blobId)
+            } catch {
+                throw ChatError.wrapped("group invite fetch failed", underlying: error)
+            }
+            guard let capabilityWire = fetched else {
+                throw ChatError.argument("group invite not found or expired")
+            }
+            return (capabilityWire, blobId)
+        }
     }
 
     public func sendMessage(

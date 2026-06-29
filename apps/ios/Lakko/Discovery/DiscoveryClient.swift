@@ -966,6 +966,203 @@ public final class DiscoveryClient {
         }
     }
 
+    // ------------------------------------------------------------------------
+    // ADR-0028 (G-3) — group join-ticket blob ledger
+    // ------------------------------------------------------------------------
+
+    /// `POST /discovery/group-invite` — upload a verified
+    /// `GroupInviteCapability` blob. Low-level helper driven by
+    /// ``uploadGroupInvite(capabilityBytes:maxUses:)``.
+    public func groupInviteUpload(
+        _ request: GroupInviteUploadRequest
+    ) async throws -> InviteUploadResponse {
+        try await post(endpoint: "/discovery/group-invite", body: request)
+    }
+
+    /// `GET /discovery/group-invite/{blob_id_b64url}`. Returns the capability
+    /// wire shape on 200, `nil` on 404 (server folds expired blobs into the
+    /// same status), throws on any other non-2xx.
+    public func groupInviteFetch(blobId: Data) async throws -> InviteFetchResponse? {
+        guard blobId.count == Self.blobIdLength else {
+            throw DiscoveryClientError.argument(
+                "blobId must be \(Self.blobIdLength) bytes"
+            )
+        }
+        let slug = base64UrlEncodeNoPad(blobId)
+        return try await getNullableOn404Public(
+            endpoint: "/discovery/group-invite/\(slug)"
+        )
+    }
+
+    /// Upload a freshly-composed `GroupInviteCapability` blob and receive the
+    /// server-assigned content-addressed `blobId` (raw 32-byte SHA-256). Drives
+    /// one PoW solve + `POST /discovery/group-invite`. Idempotent.
+    ///
+    /// `maxUses` is a SOFT anti-spam throttle (NOT part of the signed
+    /// capability, NOT an access control — the admin approval gate is the
+    /// security boundary): `0` = single-use, `0xFFFFFFFF` = unlimited.
+    public func uploadGroupInvite(
+        capabilityBytes: Data,
+        maxUses: UInt32
+    ) async throws -> Data {
+        guard !capabilityBytes.isEmpty else {
+            throw DiscoveryClientError.argument("capabilityBytes must be non-empty")
+        }
+        guard capabilityBytes.count <= Self.maxGroupCapabilityBytes else {
+            throw DiscoveryClientError.argument(
+                "capabilityBytes exceeds the \(Self.maxGroupCapabilityBytes)-byte ceiling " +
+                "(got \(capabilityBytes.count) bytes)"
+            )
+        }
+
+        let challenge = try await powChallenge()
+        let pow = try await solvePow(
+            seedB64: challenge.seed,
+            effortBits: challenge.effortBits
+        )
+
+        let resp = try await groupInviteUpload(
+            GroupInviteUploadRequest(
+                pow: pow,
+                capability: base64Encode(capabilityBytes),
+                maxUses: maxUses
+            )
+        )
+        guard let blobId = base64UrlDecodeNoPad(resp.blobId),
+              blobId.count == Self.blobIdLength else {
+            throw DiscoveryClientError.http(
+                status: 200,
+                endpoint: "/discovery/group-invite",
+                body: "server returned malformed blob_id"
+            )
+        }
+        return blobId
+    }
+
+    /// Fetch a previously-uploaded `GroupInviteCapability` by its
+    /// content-addressed `blobId`. Returns `nil` on 404, raw capability bytes
+    /// on 200 (the caller drives `GroupInviteCapability.decodeAndVerify` to
+    /// re-verify locally so a malicious server cannot serve substituted bytes).
+    public func fetchGroupInvite(blobId: Data) async throws -> Data? {
+        guard let raw = try await groupInviteFetch(blobId: blobId) else {
+            return nil
+        }
+        return base64Decode(raw.capability)
+    }
+
+    /// Atomically bump the consume counter for the group-invite at `blobId`
+    /// with per-joiner dedup. Returns a discriminated ``ConsumeInviteResult``.
+    /// The consume is anti-spam defence-in-depth — the admin approval gate
+    /// (ADR-0027) remains the security boundary.
+    ///
+    /// Reuses the same `computeJoinerInviteTag(...)` helper as the contact- and
+    /// call-invite flows — salt is per-blob, so tags don't collide across
+    /// invite kinds.
+    public func consumeGroupInvite(
+        blobId: Data,
+        capabilityBytes: Data,
+        joinerAccountId: Data
+    ) async throws -> ConsumeInviteResult {
+        guard blobId.count == Self.blobIdLength else {
+            throw DiscoveryClientError.argument(
+                "blobId must be \(Self.blobIdLength) bytes"
+            )
+        }
+        guard joinerAccountId.count == Self.accountIdLength else {
+            throw DiscoveryClientError.argument(
+                "joinerAccountId must be \(Self.accountIdLength) bytes"
+            )
+        }
+
+        let joinerTag = try computeJoinerInviteTag(
+            capabilityBytes: capabilityBytes,
+            joinerAccountId: joinerAccountId
+        )
+        let slug = base64UrlEncodeNoPad(blobId)
+
+        let challenge = try await powChallenge()
+        let pow = try await solvePow(
+            seedB64: challenge.seed,
+            effortBits: challenge.effortBits
+        )
+
+        let endpoint = "/discovery/group-invite/\(slug)/consume"
+        let url = try buildURL(endpoint: endpoint)
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        attachAuthorizationHeader(to: &request)
+        let body = InviteConsumeRequest(
+            pow: pow,
+            joinerTag: base64Encode(joinerTag)
+        )
+        do {
+            request.httpBody = try encoder.encode(body)
+        } catch {
+            throw DiscoveryClientError.argument(
+                "failed to encode \(endpoint) body: \(error)"
+            )
+        }
+
+        let raw: (Data, URLResponse)
+        do {
+            raw = try await AntiCensorshipTransport.perform(
+                request, session: session, config: antiCensorship)
+        } catch {
+            throw DiscoveryClientError.network(
+                endpoint: endpoint,
+                underlying: error
+            )
+        }
+        guard let httpResponse = raw.1 as? HTTPURLResponse else {
+            throw DiscoveryClientError.http(
+                status: 0,
+                endpoint: endpoint,
+                body: "non-HTTP response"
+            )
+        }
+        switch httpResponse.statusCode {
+        case 404:
+            return .notFound
+        case 410:
+            return .exhausted
+        case 200..<300:
+            let parsed: InviteConsumeResponse
+            do {
+                parsed = try decoder.decode(
+                    InviteConsumeResponse.self,
+                    from: raw.0
+                )
+            } catch {
+                throw DiscoveryClientError.http(
+                    status: httpResponse.statusCode,
+                    endpoint: endpoint,
+                    body: "decode failed: \(error)"
+                )
+            }
+            if parsed.alreadyConsumed {
+                return .alreadyConsumed(
+                    usedCount: parsed.usedCount,
+                    maxUses: parsed.maxUses
+                )
+            } else {
+                return .consumed(
+                    usedCount: parsed.usedCount,
+                    maxUses: parsed.maxUses
+                )
+            }
+        default:
+            let bodyText = Self.truncate(
+                String(data: raw.0, encoding: .utf8) ?? "<binary>"
+            )
+            throw DiscoveryClientError.http(
+                status: httpResponse.statusCode,
+                endpoint: endpoint,
+                body: bodyText
+            )
+        }
+    }
+
     /// Owner-signed revocation of a `CallInviteCapability` blob
     /// (Phase 3c3-revoke).
     ///
@@ -1424,6 +1621,12 @@ public final class DiscoveryClient {
     /// embeds a one-time MLS KeyPackage (~4 KiB upper bound per
     /// `MAX_KEY_PACKAGE_LEN`).
     fileprivate static let maxCallCapabilityBytes: Int = 8192
+
+    /// Mirror of `services/discovery`'s group-invite `MAX_CAPABILITY_BYTES`
+    /// (ADR-0028) — the group join-ticket wire is leaner than a call-invite
+    /// (no embedded KeyPackage); it tops out near 363 bytes, so the ledger
+    /// column + this client-side ceiling are 512.
+    fileprivate static let maxGroupCapabilityBytes: Int = 512
 
     /// SHA-256 → 32-byte content-addressed invite id.
     fileprivate static let blobIdLength: Int = 32

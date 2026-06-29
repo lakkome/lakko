@@ -40,15 +40,17 @@ public final class JoinGroupLandingViewModel: ObservableObject {
     public func run() async {
         guard !didRun else { return }
         didRun = true
-        guard let wire = base64UrlDecodeNoPad(slug) else {
-            state = .failed("Malformed invite link.")
-            return
-        }
         let nowMs = UInt64(Date().timeIntervalSince1970 * 1000)
         do {
+            // Resolve the slug (a pointer fetches the capability from the
+            // ledger; an inline link passes the bytes through), then request to
+            // join — consuming the ledger row when the link was a pointer
+            // (ADR-0028 OQ1).
+            let resolved = try await repository.resolveGroupInviteSlug(slug: slug)
             let result = try await repository.requestToJoinFromLink(
-                capabilityWire: wire,
-                nowMs: nowMs
+                capabilityWire: resolved.capabilityWire,
+                nowMs: nowMs,
+                blobId: resolved.blobId
             )
             state = .waiting
             startPolling(groupId: result.groupId, joinerKey: result.joinerSignatureKey)
