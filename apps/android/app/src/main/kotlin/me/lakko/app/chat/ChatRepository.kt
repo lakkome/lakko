@@ -21,6 +21,7 @@ import me.lakko.app.push.PushClient
 import me.lakko.app.auth.IdentitySecrets
 import me.lakko.app.contacts.KIND_WELCOME
 import me.lakko.app.contacts.wrapEnvelope
+import me.lakko.app.discovery.ConsumeInviteResult
 import me.lakko.app.discovery.DiscoveryClient
 import me.lakko.app.ds.DsClient
 import uniffi.lakko_ffi_uniffi.FfiException
@@ -771,7 +772,7 @@ public class ChatRepository(
      * (ADR-0027). The link conveys only the group_id -- it authorizes nobody;
      * the admin gate is the security boundary. `0` = never expires.
      */
-    public fun createGroupInviteLink(groupIdHex: String): String {
+    public suspend fun createGroupInviteLink(groupIdHex: String): String {
         val identity = canonicalIdentity.get()
             ?: throw IllegalStateException(
                 "ChatRepository not bootstrapped — call bootstrap() first",
@@ -790,7 +791,53 @@ public class ChatRepository(
         } catch (e: FfiException) {
             throw ChatError("composeGroupInviteCapability failed", e)
         }
-        return "https://lakko.me/g/" + me.lakko.app.auth.base64UrlEncodeNoPad(wire)
+        // Production default (ADR-0028 OQ1): upload to the discovery ledger --
+        // the server-side anti-abuse surface (per-joiner consume dedup + soft
+        // max_uses) -- and share the short pointer URL. On an upload failure (a
+        // censored / offline network) fall back to the inline form so the link
+        // still works without the round-trip. `max_uses` is a soft throttle,
+        // not an access control: the admin approval gate stays the boundary.
+        return try {
+            val blobId = discovery.uploadGroupInvite(wire, 0xFFFFFFFFL)
+            composePointerGroupInviteUrl(blobId)
+        } catch (e: Throwable) {
+            try {
+                composeInlineGroupInviteUrl(wire)
+            } catch (fallbackError: Throwable) {
+                "https://lakko.me/g/" + me.lakko.app.auth.base64UrlEncodeNoPad(wire)
+            }
+        }
+    }
+
+    /**
+     * ADR-0028 (G-3) — resolve a `/g/<slug>` slug to the capability wire bytes,
+     * fetching from the discovery ledger when the slug is a 32-byte
+     * content-addressed pointer (the production form) or passing the bytes
+     * straight through when it is an inline capability (the censored-region
+     * fallback). Returns the wire bytes + the `blobId` (non-null only for the
+     * pointer form) so the caller can drive the consume gate before requesting
+     * to join.
+     */
+    public suspend fun resolveGroupInviteSlug(slug: String): Pair<ByteArray, ByteArray?> {
+        val parsed = try {
+            parseGroupInviteSlug(slug)
+        } catch (e: GroupInviteUrlException) {
+            throw ChatError("group invite link is malformed", e)
+        }
+        return when (parsed) {
+            is ParsedGroupInvite.Inline -> Pair(parsed.capabilityBytes, null)
+            is ParsedGroupInvite.Pointer -> {
+                val fetched = try {
+                    discovery.fetchGroupInvite(parsed.blobId)
+                } catch (e: Throwable) {
+                    throw ChatError("group invite fetch failed", e)
+                } ?: throw ChatError(
+                    "group invite not found or expired",
+                    IllegalStateException("404"),
+                )
+                Pair(fetched, parsed.blobId)
+            }
+        }
     }
 
     /**
@@ -806,6 +853,7 @@ public class ChatRepository(
     public suspend fun requestToJoinFromLink(
         capabilityWire: ByteArray,
         nowMs: ULong,
+        blobId: ByteArray? = null,
     ): Pair<ByteArray, ByteArray> {
         val identity = canonicalIdentity.get()
             ?: throw IllegalStateException(
@@ -829,6 +877,38 @@ public class ChatRepository(
                 "group invite link has expired",
                 IllegalStateException("expired"),
             )
+        }
+        // ADR-0028 OQ1 -- when the link was a server-backed pointer, register one
+        // consume against the ledger's soft `max_uses` ceiling before posting the
+        // request (anti-abuse defence-in-depth; the admin approval gate remains
+        // the real boundary). A repeat from this joiner is idempotent. Inline
+        // links (no `blobId`) skip this -- there is no ledger row.
+        val accountIdB64 = currentAccountIdB64.get()
+        if (blobId != null && accountIdB64 != null) {
+            val joinerAccountId = me.lakko.app.auth.base64Decode(accountIdB64)
+            val outcome = try {
+                discovery.consumeGroupInvite(
+                    blobId = blobId,
+                    capabilityBytes = capabilityWire,
+                    joinerAccountId = joinerAccountId,
+                )
+            } catch (e: Throwable) {
+                throw ChatError("group invite consume failed", e)
+            }
+            when (outcome) {
+                is ConsumeInviteResult.NotFound ->
+                    throw ChatError(
+                        "group invite not found or expired",
+                        IllegalStateException("notFound"),
+                    )
+                is ConsumeInviteResult.Exhausted ->
+                    throw ChatError(
+                        "group invite has reached its use limit",
+                        IllegalStateException("exhausted"),
+                    )
+                is ConsumeInviteResult.Consumed -> Unit // proceed
+                is ConsumeInviteResult.AlreadyConsumed -> Unit // proceed
+            }
         }
         // Read the current epoch from the journal head (public framing; a
         // non-member can do this). Empty / unreachable journal => epoch 0.

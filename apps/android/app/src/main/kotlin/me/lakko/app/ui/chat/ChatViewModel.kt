@@ -471,11 +471,13 @@ public class ChatViewModel(
      */
     public fun onCreateInviteLink() {
         mutableMembershipError.value = null
-        try {
-            mutableInviteLink.value = repo.createGroupInviteLink(groupIdHex)
-        } catch (e: Throwable) {
-            mutableMembershipError.value = e.message ?: e.toString()
-            android.util.Log.w("ChatViewModel", "onCreateInviteLink failed", e)
+        viewModelScope.launch {
+            try {
+                mutableInviteLink.value = repo.createGroupInviteLink(groupIdHex)
+            } catch (e: Throwable) {
+                mutableMembershipError.value = e.message ?: e.toString()
+                android.util.Log.w("ChatViewModel", "onCreateInviteLink failed", e)
+            }
         }
     }
 

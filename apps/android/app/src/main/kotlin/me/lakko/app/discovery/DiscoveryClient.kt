@@ -303,6 +303,35 @@ public class DiscoveryClient(
             setBody(req)
         }
 
+    // ------------------------------------------------------------------------
+    // ADR-0028 (G-3) — group join-ticket blob ledger
+    // ------------------------------------------------------------------------
+
+    /** `POST /discovery/group-invite` — upload a verified
+     *  `GroupInviteCapability` blob, get the content-addressed `blob_id` back
+     *  (ADR-0028, G-3). Distinct from [callInviteUpload] because the
+     *  group-invite request carries a `max_uses` the capability does NOT embed.
+     *  The high-level [uploadGroupInvite] wrapper drives the PoW solve. */
+    public suspend fun groupInviteUpload(req: GroupInviteUploadRequest): InviteUploadResponse =
+        doPost("/discovery/group-invite") {
+            contentType(ContentType.Application.Json)
+            setBody(req)
+        }
+
+    /**
+     * `GET /discovery/group-invite/{blob_id_b64url}`. Returns the capability
+     * wire shape on 200, `null` on 404 (the server folds expired blobs into the
+     * same status), throws on any other non-2xx.
+     */
+    public suspend fun groupInviteFetch(blobId: ByteArray): InviteFetchResponse? {
+        if (blobId.size != BLOB_ID_LEN) {
+            throw DiscoveryClientArgError("blobId must be $BLOB_ID_LEN bytes")
+        }
+        val slug = base64UrlEncodeNoPad(blobId)
+        val endpoint = "/discovery/group-invite/$slug"
+        return getNullableOn404(endpoint)
+    }
+
     /**
      * `DELETE /discovery/invite/{blob_id_b64url}` — owner-
      * signed revocation. The body carries `signed_at_ms` + the
@@ -943,6 +972,143 @@ public class DiscoveryClient(
     }
 
     /**
+     * Upload a freshly-composed `GroupInviteCapability` blob and receive the
+     * server-assigned content-addressed `blobId` (raw 32-byte SHA-256). Drives
+     * one PoW solve + `POST /discovery/group-invite`. Idempotent.
+     *
+     * `maxUses` is a SOFT anti-spam throttle (NOT part of the signed capability,
+     * NOT an access control — the admin approval gate is the security
+     * boundary): `0` = single-use, `0xFFFFFFFF` = unlimited.
+     *
+     * Returns the 32-byte `blobId`, ready to substitute into a
+     * `https://<host>/g/<slug>` pointer URL via [base64UrlEncodeNoPad].
+     */
+    public suspend fun uploadGroupInvite(
+        capabilityBytes: ByteArray,
+        maxUses: Long,
+    ): ByteArray {
+        if (capabilityBytes.isEmpty()) {
+            throw DiscoveryClientArgError("capabilityBytes must be non-empty")
+        }
+        if (capabilityBytes.size > MAX_GROUP_CAPABILITY_BYTES) {
+            throw DiscoveryClientArgError(
+                "capabilityBytes exceeds the $MAX_GROUP_CAPABILITY_BYTES-byte ceiling " +
+                    "(got ${capabilityBytes.size} bytes)",
+            )
+        }
+
+        val challenge = powChallenge()
+        val pow = solvePow(challenge.seed, challenge.effort_bits, powDispatcher)
+
+        val resp = groupInviteUpload(
+            GroupInviteUploadRequest(
+                pow = pow,
+                capability = base64Encode(capabilityBytes),
+                max_uses = maxUses,
+            ),
+        )
+        val blobId = base64UrlDecodeNoPad(resp.blob_id)
+        if (blobId.size != BLOB_ID_LEN) {
+            throw DiscoveryHttpError(
+                status = 200,
+                endpoint = "/discovery/group-invite",
+                body = "server returned blob_id of ${blobId.size} bytes, expected $BLOB_ID_LEN",
+            )
+        }
+        return blobId
+    }
+
+    /**
+     * Fetch a previously-uploaded `GroupInviteCapability` by its
+     * content-addressed [blobId]. Returns `null` on 404 (the server folds
+     * expired blobs into the same status), raw capability bytes on 200 (the
+     * caller drives
+     * [uniffi.lakko_ffi_uniffi.GroupInviteCapability.decodeAndVerify] to
+     * re-verify locally so a malicious server cannot serve substituted bytes).
+     */
+    public suspend fun fetchGroupInvite(blobId: ByteArray): ByteArray? {
+        if (blobId.size != BLOB_ID_LEN) {
+            throw DiscoveryClientArgError("blobId must be $BLOB_ID_LEN bytes")
+        }
+        val raw = groupInviteFetch(blobId) ?: return null
+        return base64Decode(raw.capability)
+    }
+
+    /**
+     * Atomically bump the consume counter for the group-invite at [blobId] with
+     * per-joiner dedup. Returns a discriminated [ConsumeInviteResult]. The
+     * consume is anti-spam defence-in-depth — the admin approval gate (ADR-0027)
+     * remains the security boundary.
+     *
+     * Reuses the same `computeJoinerInviteTag(...)` helper as the contact- and
+     * call-invite flows — the salt is per-blob, so tags don't collide across
+     * invite kinds.
+     */
+    public suspend fun consumeGroupInvite(
+        blobId: ByteArray,
+        capabilityBytes: ByteArray,
+        joinerAccountId: ByteArray,
+    ): ConsumeInviteResult {
+        if (blobId.size != BLOB_ID_LEN) {
+            throw DiscoveryClientArgError("blobId must be $BLOB_ID_LEN bytes")
+        }
+        if (joinerAccountId.size != ACCOUNT_ID_LEN) {
+            throw DiscoveryClientArgError("joinerAccountId must be $ACCOUNT_ID_LEN bytes")
+        }
+
+        val joinerTag = computeJoinerInviteTag(capabilityBytes, joinerAccountId)
+        val slug = base64UrlEncodeNoPad(blobId)
+
+        val challenge = powChallenge()
+        val pow = solvePow(challenge.seed, challenge.effort_bits, powDispatcher)
+
+        val endpoint = "/discovery/group-invite/$slug/consume"
+        val url = "$baseUrl$endpoint"
+        val authHeader = sessionToken?.let { "Bearer $it" }
+        val response: HttpResponse = try {
+            client.post(url) {
+                if (authHeader != null) {
+                    header(io.ktor.http.HttpHeaders.Authorization, authHeader)
+                }
+                contentType(ContentType.Application.Json)
+                setBody(
+                    InviteConsumeRequest(
+                        pow = pow,
+                        joiner_tag = base64Encode(joinerTag),
+                    ),
+                )
+            }
+        } catch (cause: Throwable) {
+            throw DiscoveryNetworkError(endpoint, cause)
+        }
+        return when (response.status) {
+            HttpStatusCode.NotFound -> ConsumeInviteResult.NotFound
+            HttpStatusCode.Gone -> ConsumeInviteResult.Exhausted
+            else -> {
+                if (!response.status.isSuccess()) {
+                    throw DiscoveryHttpError(
+                        status = response.status.value,
+                        endpoint = endpoint,
+                        body = response.safeReadBody(),
+                    )
+                }
+                val parsed: InviteConsumeResponse = response.body()
+                if (parsed.already_consumed) {
+                    ConsumeInviteResult.AlreadyConsumed(
+                        usedCount = parsed.used_count,
+                        maxUses = parsed.max_uses,
+                    )
+                } else {
+                    ConsumeInviteResult.Consumed(
+                        usedCount = parsed.used_count,
+                        maxUses = parsed.max_uses,
+                    )
+                }
+            }
+        }
+    }
+
+    /**
      * Owner-signed revocation of a [CallInviteCapability] blob
      * (Phase 3c3-revoke).
      *
@@ -1251,6 +1417,13 @@ public class DiscoveryClient(
          *  one-time MLS KeyPackage (~4 KiB upper bound per
          *  `MAX_KEY_PACKAGE_LEN`). */
         private const val MAX_CALL_CAPABILITY_BYTES: Int = 8192
+
+        /** Mirror of `services/discovery`'s group-invite
+         *  `MAX_CAPABILITY_BYTES`. The ADR-0028 wire format tops
+         *  out around 363 bytes (a 256-byte group_id); the 512
+         *  ceiling has comfortable headroom and matches the
+         *  server's `VARBINARY(512)` column. */
+        private const val MAX_GROUP_CAPABILITY_BYTES: Int = 512
 
         /** SHA-256 → 32-byte content-addressed invite id. */
         private const val BLOB_ID_LEN: Int = 32

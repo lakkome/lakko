@@ -28,7 +28,6 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import me.lakko.app.auth.base64UrlDecodeNoPad
 import me.lakko.app.chat.ChatRepository
 
 /**
@@ -58,16 +57,20 @@ public class JoinGroupLandingViewModel(
         if (started) return
         started = true
         viewModelScope.launch {
-            val wire = base64UrlDecodeNoPad(slug)
-            if (wire == null) {
-                mutableState.value = State.Failed("Malformed invite link.")
-                return@launch
-            }
             val nowMs = System.currentTimeMillis().toULong()
             val groupId: ByteArray
             val joinerKey: ByteArray
             try {
-                val result = repository.requestToJoinFromLink(wire, nowMs)
+                // ADR-0028 OQ1 — resolve the slug (a 32-byte content-addressed
+                // pointer => fetch the capability from the ledger; an inline
+                // capability => pass through), then request to join, registering
+                // a consume against the ledger when the link was a pointer.
+                val resolved = repository.resolveGroupInviteSlug(slug)
+                val result = repository.requestToJoinFromLink(
+                    resolved.first,
+                    nowMs,
+                    resolved.second,
+                )
                 groupId = result.first
                 joinerKey = result.second
             } catch (e: Throwable) {

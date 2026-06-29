@@ -233,6 +233,28 @@ data class InviteConsumeResponse(
     val already_consumed: Boolean,
 )
 
+// ----------------------------------------------------------------------------
+// /discovery/group-invite   (services/discovery/src/group_invite.rs — ADR-0028)
+// ----------------------------------------------------------------------------
+
+/** Body of `POST /discovery/group-invite` (ADR-0028, G-3). Unlike the
+ *  contact-/call-invite uploads (which reuse [InviteUploadRequest]), the
+ *  group-invite carries a separate `max_uses` field: the `GroupInviteCapability`
+ *  wire format does NOT embed it, so the server reads it from the request. It is
+ *  a SOFT anti-spam throttle (`0` = single-use, `0xFFFFFFFF` = unlimited), NOT a
+ *  security boundary — the admin approval gate (ADR-0027) is the boundary. */
+@Serializable
+data class GroupInviteUploadRequest(
+    val pow: PowProofPayload,
+    /** Standard-alphabet base64 of the
+     *  `composeGroupInviteCapability(...)` output. The server decodes + verifies
+     *  the Ed25519 wire signature before storing. */
+    val capability: String,
+    /** Soft consume ceiling. Serialised as a JSON number the server reads as a
+     *  `u32`; `0xFFFFFFFF` (= 4294967295) means unlimited. */
+    val max_uses: Long,
+)
+
 /** Body of `DELETE /discovery/invite/{blob_id_b64url}` (Phase
  *  1.18d2b). The `signature` field carries proof that the
  *  request came from the same Ed25519 key that signed the
