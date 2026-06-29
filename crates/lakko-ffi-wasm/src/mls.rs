@@ -831,6 +831,103 @@ impl PublisherGroup {
             .map_err(|_| JsError::new("internal lock poisoned"))?;
         g.rotate(&identity.inner).map_err(mls_err)
     }
+
+    // ADR-0028 OQ3 — co-publisher external-join surface. A PublisherGroup is a
+    // vanilla MLS group, so adding a publisher reuses the group join-ticket +
+    // external-join machinery (ADR-0027/0028) verbatim. These delegate to the
+    // inner Group; the owner mints a `/g/` link over `groupId`, applies the
+    // joiner's external-add via `processIncomingVerifyingRoles`, and approves.
+
+    /// ADR-0028 OQ3 — the underlying MLS `group_id`. A co-publisher invite-link
+    /// is minted over this; the joiner targets it when crafting its
+    /// external-join proposal.
+    #[wasm_bindgen(js_name = groupId)]
+    pub fn group_id(&self) -> Result<Vec<u8>, JsError> {
+        let g = self
+            .inner
+            .lock()
+            .map_err(|_| JsError::new("internal lock poisoned"))?;
+        Ok(g.group_id())
+    }
+
+    /// ADR-0028 OQ3 — process an incoming MLS message on the publisher tier,
+    /// role-gated (ADR-0022). Surfaces a non-member's external-join proposal as
+    /// `ProcessedMessage.externalJoinSignatureKey` so the owner can approve a
+    /// co-publisher.
+    #[wasm_bindgen(js_name = processIncomingVerifyingRoles)]
+    pub fn process_incoming_verifying_roles(
+        &self,
+        identity: &Identity,
+        bytes: &[u8],
+    ) -> Result<ProcessedMessage, JsError> {
+        let mut g = self
+            .inner
+            .lock()
+            .map_err(|_| JsError::new("internal lock poisoned"))?;
+        let result = g
+            .inner_mut()
+            .process_incoming_verifying_roles(&identity.inner, bytes)
+            .map_err(mls_err)?;
+        Ok(match result {
+            MlsIncoming::Application { bytes, sender_leaf } => {
+                ProcessedMessage::application(bytes, sender_leaf)
+            },
+            MlsIncoming::Commit => ProcessedMessage::control(ProcessedMessageKind::Commit),
+            MlsIncoming::Proposal => ProcessedMessage::control(ProcessedMessageKind::Proposal),
+            MlsIncoming::ExternalJoinProposal {
+                joiner_signature_key,
+            } => ProcessedMessage::external_join(joiner_signature_key),
+        })
+    }
+
+    /// ADR-0028 OQ3 — signature keys of the pending co-publisher external-join
+    /// proposals, flat-concatenated 32-byte chunks (the role-table FFI
+    /// convention). Each chunk is a handle for `approveExternalJoin` /
+    /// `rejectExternalJoin`.
+    #[wasm_bindgen(js_name = pendingExternalJoins)]
+    pub fn pending_external_joins(&self) -> Result<Vec<u8>, JsError> {
+        let g = self
+            .inner
+            .lock()
+            .map_err(|_| JsError::new("internal lock poisoned"))?;
+        Ok(g.inner().pending_external_joins().concat())
+    }
+
+    /// ADR-0028 OQ3 — approve a retained co-publisher external-join (role-gated
+    /// owner/admin); returns the Commit + the joiner's Welcome.
+    #[wasm_bindgen(js_name = approveExternalJoin)]
+    pub fn approve_external_join(
+        &self,
+        identity: &Identity,
+        proposal_ref: &[u8],
+    ) -> Result<AddMember, JsError> {
+        let mut g = self
+            .inner
+            .lock()
+            .map_err(|_| JsError::new("internal lock poisoned"))?;
+        let MemberAddition { commit, welcome } = g
+            .inner_mut()
+            .approve_external_join(&identity.inner, proposal_ref)
+            .map_err(mls_err)?;
+        Ok(AddMember {
+            commit_bytes: group::encode_message(&commit).map_err(mls_err)?,
+            welcome_bytes: group::encode_message(&welcome).map_err(mls_err)?,
+        })
+    }
+
+    /// ADR-0028 OQ3 — reject a retained co-publisher external-join (local drop;
+    /// no epoch advance).
+    #[wasm_bindgen(js_name = rejectExternalJoin)]
+    pub fn reject_external_join(&self, proposal_ref: &[u8]) -> Result<(), JsError> {
+        let mut g = self
+            .inner
+            .lock()
+            .map_err(|_| JsError::new("internal lock poisoned"))?;
+        g.inner_mut()
+            .reject_external_join(proposal_ref)
+            .map_err(mls_err)?;
+        Ok(())
+    }
 }
 
 // ============================================================================

@@ -223,10 +223,30 @@ shipped** (ADR-0027). This ADR adds: the `GroupInviteCapability` codec + FFI;
    boundary; a missing / spoofed attribution only mis-displays the source and
    never blocks or grants. A joiner self-signature over the attribution (binding
    it to the proposing leaf) is a noted future hardening.
-3. **Channel PublisherGroup reuse.** When ADR-0010 channels land, adding a
+3. **Channel PublisherGroup reuse.** ~~When ADR-0010 channels land, adding a
    *publisher* (an MLS member of the PublisherGroup) reuses this ticket
    verbatim; the channel *subscriber* path stays sender-key (ADR-0010) and does
-   not touch this.
+   not touch this.~~ **RESOLVED — proven + enabled in the core + FFI.** A
+   `lakko_mls::PublisherGroup` is a thin wrapper around a vanilla `Group`
+   (`inner: Group`) with a deterministic `group_id =
+   publisher_group_id_bytes(channel_id)`, so the join-ticket reuses verbatim: an
+   owner mints a `GroupInviteCapability` over `PublisherGroup::group_id()`, a
+   non-member crafts an external-join proposal (ADR-0027) for that
+   `group_id`+epoch, the owner approves through the inner Group, and the joiner
+   reconstructs the PublisherGroup under the same deterministic id. Landed:
+   `PublisherGroup::group_id()` + `epoch()` accessors; a property test
+   (`co_publisher_joins_via_external_join_ticket_and_shares_channel_seed`)
+   proving the full loop **and the payoff** — both publishers derive the
+   identical `channel_seed` at the shared post-add epoch, so the joined
+   co-publisher can immediately post; and the owner-side external-join surface
+   (`groupId` / `processIncomingVerifyingRoles` / `pendingExternalJoins` /
+   `approveExternalJoin` / `rejectExternalJoin`) exposed on the FFI
+   `PublisherGroup` (UniFFI + wasm), delegating to the inner Group. The
+   subscriber path stays sender-key (ADR-0010), untouched. **Residual:** a
+   client co-publisher *management UI* (a "create co-publisher link" affordance
+   on the channel screen + a pending-requests panel) — the enabling FFI is now
+   present, but a channel co-admin product surface to drive it is a follow-up
+   (the channel screens are publisher-self / subscriber today).
 
 ## References
 

@@ -1015,6 +1015,81 @@ impl PublisherGroup {
         let mut g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
         Ok(g.rotate(&identity.inner)?)
     }
+
+    // ADR-0028 OQ3 — co-publisher external-join surface. A PublisherGroup is a
+    // vanilla MLS group, so adding a publisher reuses the group join-ticket +
+    // external-join machinery (ADR-0027/0028) verbatim. These delegate to the
+    // inner Group; the owner mints a `/g/` link over `group_id`, applies the
+    // joiner's external-add via `process_incoming_verifying_roles`, and approves.
+
+    /// ADR-0028 OQ3 — the underlying MLS `group_id`. A co-publisher invite-link
+    /// is minted over this; the joiner targets it when crafting its
+    /// external-join proposal.
+    pub fn group_id(&self) -> Result<Vec<u8>, FfiError> {
+        let g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
+        Ok(g.group_id())
+    }
+
+    /// ADR-0028 OQ3 — process an incoming MLS message on the publisher tier,
+    /// role-gated (ADR-0022). Surfaces a non-member's external-join proposal as
+    /// `ProcessedMessage::ExternalJoinProposal` so the owner can approve a
+    /// co-publisher.
+    pub fn process_incoming_verifying_roles(
+        &self,
+        identity: &Identity,
+        bytes: Vec<u8>,
+    ) -> Result<ProcessedMessage, FfiError> {
+        let mut g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
+        let result = g
+            .inner_mut()
+            .process_incoming_verifying_roles(&identity.inner, &bytes)?;
+        Ok(match result {
+            MlsIncoming::Application { bytes, sender_leaf } => ProcessedMessage::Application {
+                data: bytes,
+                sender_leaf,
+            },
+            MlsIncoming::Commit => ProcessedMessage::Commit,
+            MlsIncoming::Proposal => ProcessedMessage::Proposal,
+            MlsIncoming::ExternalJoinProposal {
+                joiner_signature_key,
+            } => ProcessedMessage::ExternalJoinProposal {
+                joiner_signature_key,
+            },
+        })
+    }
+
+    /// ADR-0028 OQ3 — the signature key of every pending co-publisher
+    /// external-join proposal (a handle for `approve_external_join` /
+    /// `reject_external_join`).
+    pub fn pending_external_joins(&self) -> Result<Vec<Vec<u8>>, FfiError> {
+        let g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
+        Ok(g.inner().pending_external_joins())
+    }
+
+    /// ADR-0028 OQ3 — approve a retained co-publisher external-join (role-gated
+    /// owner/admin); returns the Commit + the joiner's Welcome.
+    pub fn approve_external_join(
+        &self,
+        identity: &Identity,
+        proposal_ref: Vec<u8>,
+    ) -> Result<AddMember, FfiError> {
+        let mut g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
+        let MemberAddition { commit, welcome } = g
+            .inner_mut()
+            .approve_external_join(&identity.inner, &proposal_ref)?;
+        Ok(AddMember {
+            commit: group::encode_message(&commit)?,
+            welcome: group::encode_message(&welcome)?,
+        })
+    }
+
+    /// ADR-0028 OQ3 — reject a retained co-publisher external-join (local drop;
+    /// no epoch advance).
+    pub fn reject_external_join(&self, proposal_ref: Vec<u8>) -> Result<(), FfiError> {
+        let mut g = self.inner.lock().map_err(|_| FfiError::LockPoisoned)?;
+        g.inner_mut().reject_external_join(&proposal_ref)?;
+        Ok(())
+    }
 }
 
 /// Load the persisted PublisherGroup for `channel_id` if any.

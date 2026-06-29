@@ -260,6 +260,25 @@ impl PublisherGroup {
         &self.channel_id
     }
 
+    /// The underlying MLS `group_id` — deterministically derived from the
+    /// channel id ([`publisher_group_id_bytes`]). ADR-0028 OQ3: a co-publisher
+    /// invite-link is minted over this, and the joiner targets it when crafting
+    /// an external-join proposal (ADR-0027) — the channel join-ticket works for
+    /// a PublisherGroup verbatim because it is a vanilla MLS group. Stable
+    /// across `load` / `create`.
+    #[must_use]
+    pub fn group_id(&self) -> Vec<u8> {
+        self.inner.group_id()
+    }
+
+    /// The current MLS epoch of the underlying group. A prospective co-publisher
+    /// reads this from the journal's public framing (it is not yet a member);
+    /// this accessor is for a member that already holds the group.
+    #[must_use]
+    pub fn epoch(&self) -> u64 {
+        self.inner.epoch()
+    }
+
     /// Rotate the channel content-key seed by advancing the
     /// MLS group epoch via a self-update commit
     /// (G4-2-mls-persistence step 4).
@@ -564,5 +583,67 @@ mod tests {
         let seed_a = pg_a.channel_seed(&identity_a).expect("seed a");
         let seed_b = pg_b.channel_seed(&identity_b).expect("seed b");
         assert_ne!(seed_a, seed_b);
+    }
+
+    #[test]
+    fn co_publisher_joins_via_external_join_ticket_and_shares_channel_seed() {
+        // ADR-0028 OQ3 — adding a *publisher* to a channel reuses the group
+        // join-ticket + external-join machinery (ADR-0027/0028) VERBATIM,
+        // because a PublisherGroup is a vanilla MLS group. Owner Alice mints the
+        // channel; non-member Bob crafts an external-join proposal over the
+        // PublisherGroup's `group_id` (all the ticket conveys); Alice approves;
+        // Bob joins from the Welcome and reconstructs the PublisherGroup under
+        // the deterministic id — and BOTH derive the same channel content-key
+        // seed at the shared post-add epoch, so Bob can now publish.
+        use crate::group::{encode_message, Group, Incoming};
+
+        let alice = Identity::from_seed(&[0xA7u8; 64]).expect("alice");
+        let bob = Identity::from_seed(&[0xB7u8; 64]).expect("bob");
+        let cid = ChannelId([0x5C; CHANNEL_ID_LEN]);
+
+        let mut alice_pg = PublisherGroup::create(&alice, &cid).expect("alice publisher group");
+        let group_id = alice_pg.group_id();
+        let epoch = alice_pg.epoch();
+
+        // Bob (a non-member) crafts the external-join proposal for the
+        // PublisherGroup's id + epoch — exactly what the `/g/` ticket conveys.
+        let proposal = bob
+            .create_external_join_proposal(&group_id, epoch)
+            .expect("bob external-join proposal");
+
+        // Alice processes it through the inner Group surface; the proposal is
+        // retained, and Alice (a member of the open group) approves it.
+        let incoming = alice_pg
+            .inner_mut()
+            .process_incoming(&alice, &proposal)
+            .expect("process proposal");
+        let bob_joiner_key = match incoming {
+            Incoming::ExternalJoinProposal {
+                joiner_signature_key,
+            } => joiner_signature_key,
+            other => panic!("expected ExternalJoinProposal, got {other:?}"),
+        };
+        let addition = alice_pg
+            .inner_mut()
+            .approve_external_join(&alice, &bob_joiner_key)
+            .expect("approve");
+        let welcome_bytes = encode_message(&addition.welcome).expect("encode welcome");
+
+        // Bob joins from the Welcome → his group is persisted under the
+        // PublisherGroup's deterministic id, so he reconstructs the
+        // PublisherGroup for the same channel.
+        let _bob_group = Group::join_from_welcome(&welcome_bytes, &bob).expect("bob joins");
+        let bob_pg = PublisherGroup::load(&bob, &cid)
+            .expect("bob publisher load")
+            .expect("bob publisher group present");
+
+        // The payoff: both publishers derive the identical channel content-key
+        // seed at the shared post-add epoch — Bob can now post to the channel.
+        let alice_seed = alice_pg.channel_seed(&alice).expect("alice seed");
+        let bob_seed = bob_pg.channel_seed(&bob).expect("bob seed");
+        assert_eq!(
+            alice_seed, bob_seed,
+            "a ticket-joined co-publisher must share the channel seed"
+        );
     }
 }
