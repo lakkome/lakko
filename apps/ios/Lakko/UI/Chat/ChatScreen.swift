@@ -1128,8 +1128,26 @@ private struct MembersSheet: View {
                     Section("Join requests (\(viewModel.pendingJoins.count))") {
                         ForEach(viewModel.pendingJoins, id: \.self) { ref in
                             HStack {
-                                Text(Self.shortFingerprint(ref))
-                                    .font(.system(.footnote, design: .monospaced))
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(Self.shortFingerprint(ref))
+                                        .font(.system(.footnote, design: .monospaced))
+                                    // ADR-0028 OQ2 — which member's link this
+                                    // request arrived on + whether they are still
+                                    // in the roster (advisory).
+                                    if let attr = viewModel.joinAttributions[ref] {
+                                        Text(
+                                            "via \(String(attr.issuerFingerprint.prefix(11)))"
+                                                + (attr.issuerInRoster
+                                                    ? " · member" : " · not a current member")
+                                        )
+                                        .font(.caption2)
+                                        .foregroundColor(attr.issuerInRoster ? .secondary : .red)
+                                    } else {
+                                        Text("invite source unknown")
+                                            .font(.caption2)
+                                            .foregroundColor(.secondary)
+                                    }
+                                }
                                 Spacer()
                                 Button("Approve") {
                                     viewModel.onApproveJoin(proposalRef: ref)

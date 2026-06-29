@@ -1312,6 +1312,7 @@ private fun MembersSheet(viewModel: ChatViewModel) {
     val isOwner by viewModel.isOwner.collectAsStateWithLifecycle()
     val roleTable by viewModel.roleTable.collectAsStateWithLifecycle()
     val pendingJoins by viewModel.pendingJoins.collectAsStateWithLifecycle()
+    val joinAttributions by viewModel.joinAttributions.collectAsStateWithLifecycle()
     val inviteLink by viewModel.inviteLink.collectAsStateWithLifecycle()
     val clipboard = LocalClipboardManager.current
     val ownLeaf = viewModel.ownLeafIndex()
@@ -1400,12 +1401,41 @@ private fun MembersSheet(viewModel: ChatViewModel) {
                                 .fillMaxWidth()
                                 .padding(vertical = 2.dp),
                         ) {
-                            Text(
-                                text = ref.take(8)
-                                    .joinToString("") { "%02x".format(it.toInt() and 0xff) },
-                                style = MaterialTheme.typography.bodySmall,
-                                modifier = Modifier.weight(1f),
-                            )
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = ref.take(8)
+                                        .joinToString("") { "%02x".format(it.toInt() and 0xff) },
+                                    style = MaterialTheme.typography.bodySmall,
+                                )
+                                // ADR-0028 OQ2 — which member's `/g/` link this
+                                // request arrived on + whether they are still in
+                                // the roster (advisory).
+                                val attr = joinAttributions[
+                                    ref.joinToString("") { "%02x".format(it.toInt() and 0xff) },
+                                ]
+                                if (attr != null) {
+                                    Text(
+                                        text = "via ${attr.issuerFingerprint.take(11)}" +
+                                            if (attr.issuerInRoster) {
+                                                " · member"
+                                            } else {
+                                                " · not a current member"
+                                            },
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = if (attr.issuerInRoster) {
+                                            MaterialTheme.colorScheme.onSurfaceVariant
+                                        } else {
+                                            MaterialTheme.colorScheme.error
+                                        },
+                                    )
+                                } else {
+                                    Text(
+                                        text = "invite source unknown",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                            }
                             TextButton(
                                 onClick = { viewModel.onApproveJoin(ref) },
                                 enabled = !busy,

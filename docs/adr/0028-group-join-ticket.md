@@ -202,9 +202,27 @@ shipped** (ADR-0027). This ADR adds: the `GroupInviteCapability` codec + FFI;
 1. **Single-use / max-uses tickets.** v1 mints a non-revocable, expiry-bounded
    link. Revocation + a use counter want the ADR-0009 content-addressed blob
    ledger (alternative 3) — a Phase-2 hardening.
-2. **Issuer-not-in-roster rejection.** The admin UI *can* check
+2. **Issuer-not-in-roster rejection.** ~~The admin UI *can* check
    `issuer_pubkey ∈ roster` before approving (a forged link names a non-member
-   issuer); whether to enforce it or just surface it is a Phase-2 UX call.
+   issuer); whether to enforce it or just surface it is a Phase-2 UX call.~~
+   **RESOLVED (surface, not enforce) — implemented end-to-end on web + iOS +
+   Android.** The blocker was transport: the admin's
+   `Incoming::ExternalJoinProposal { joiner_signature_key }` carries only the
+   joiner's leaf key — NOT the `issuer_pubkey`, which lives in the capability
+   only the joiner holds. The fix is a journal side-channel mirroring the
+   `WelcomeRendezvous` pattern: a new `lakko_contacts::group_join_attribution`
+   envelope (`version ‖ joiner_sig_key_len ‖ joiner_sig_key ‖ cap_len ‖
+   capability`, bounded + fail-closed + fuzzed) the joiner posts alongside its
+   external-join proposal. The admin's members panel reads the journal, decodes
+   each entry (`parse_group_join_attribution` re-verifies the embedded
+   capability's Ed25519 signature — a joiner cannot fabricate an issuer who did
+   not sign), keeps only attributions whose `group_id` matches this group, and
+   surfaces per pending request "via &lt;issuer fingerprint&gt; · member / not a
+   current member" (checking `issuer_pubkey ∈ group.members()`). It is
+   **advisory** — the role-gated approval gate (ADR-0027) stays the security
+   boundary; a missing / spoofed attribution only mis-displays the source and
+   never blocks or grants. A joiner self-signature over the attribution (binding
+   it to the proposing leaf) is a noted future hardening.
 3. **Channel PublisherGroup reuse.** When ADR-0010 channels land, adding a
    *publisher* (an MLS member of the PublisherGroup) reuses this ticket
    verbatim; the channel *subscriber* path stays sender-key (ADR-0010) and does

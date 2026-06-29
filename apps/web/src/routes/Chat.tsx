@@ -1158,6 +1158,37 @@ function ChatView(props: {
     }
   });
 
+  // ADR-0028 OQ2 — resolve which member's `/g/` link each pending request
+  // arrived on. Per `membersVersion`, read the journal's join-attribution
+  // envelopes and build a `joinerKeyB64 -> { issuerFingerprint, issuerInRoster }`
+  // map; `issuerInRoster` checks the attribution's issuer pubkey against the live
+  // roster. Advisory metadata for the admin — the role-gated approval gate is the
+  // boundary, so a missing / failed lookup never blocks Approve.
+  const [joinAttributions, setJoinAttributions] = createSignal<
+    Map<string, { issuerFingerprint: string; issuerInRoster: boolean }>
+  >(new Map());
+  createEffect(() => {
+    membersVersion();
+    if (!canManageMembers()) return;
+    const gid = props.entry.group.groupId;
+    const rosterB64 = new Set(members().map((m) => base64Encode(m.sigPubkey)));
+    void (async () => {
+      try {
+        const attrs = await contacts.fetchJoinAttributions(gid);
+        const map = new Map<string, { issuerFingerprint: string; issuerInRoster: boolean }>();
+        for (const a of attrs) {
+          map.set(base64Encode(a.joinerSignatureKey), {
+            issuerFingerprint: a.issuerFingerprint,
+            issuerInRoster: rosterB64.has(base64Encode(a.issuerSignaturePubkey)),
+          });
+        }
+        setJoinAttributions(map);
+      } catch {
+        // best-effort advisory metadata — leave the map as-is
+      }
+    })();
+  });
+
   let nextTempId = 1;
 
   // ADR-0023 — our own MLS leaf in this group. Used to author-
@@ -2813,19 +2844,58 @@ function ChatView(props: {
                         gap: "0.5rem",
                       }}
                     >
-                      <span
-                        title={hexOf(ref)}
+                      <div
                         style={{
-                          "font-family": "monospace",
-                          "font-size": "0.78rem",
-                          color: "var(--surface-fg)",
+                          display: "flex",
+                          "flex-direction": "column",
+                          gap: "0.1rem",
                           overflow: "hidden",
-                          "text-overflow": "ellipsis",
-                          "white-space": "nowrap",
                         }}
                       >
-                        {hexOf(ref).slice(0, 16)}…
-                      </span>
+                        <span
+                          title={hexOf(ref)}
+                          style={{
+                            "font-family": "monospace",
+                            "font-size": "0.78rem",
+                            color: "var(--surface-fg)",
+                            overflow: "hidden",
+                            "text-overflow": "ellipsis",
+                            "white-space": "nowrap",
+                          }}
+                        >
+                          {hexOf(ref).slice(0, 16)}…
+                        </span>
+                        {(() => {
+                          const attr = joinAttributions().get(base64Encode(ref));
+                          if (!attr) {
+                            return (
+                              <span
+                                style={{
+                                  "font-size": "0.7rem",
+                                  color: "var(--surface-muted)",
+                                }}
+                              >
+                                invite source unknown
+                              </span>
+                            );
+                          }
+                          return (
+                            <span
+                              style={{
+                                "font-size": "0.7rem",
+                                color: attr.issuerInRoster
+                                  ? "var(--surface-muted)"
+                                  : "var(--danger, #c0392b)",
+                              }}
+                            >
+                              via {attr.issuerFingerprint.slice(0, 11)}
+                              {attr.issuerInRoster
+                                ? " · member"
+                                : " · not a current member"}
+                            </span>
+                          );
+                        })()}
+                      </div>
                       <span style={{ display: "flex", gap: "0.3rem" }}>
                         <button
                           type="button"

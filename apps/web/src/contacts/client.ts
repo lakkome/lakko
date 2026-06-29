@@ -1768,6 +1768,53 @@ export class ContactsClient {
     await this.persistBestEffort();
   }
 
+  /** ADR-0028 OQ2 (G-3) — read the join-attribution envelopes from a group's
+   *  journal so the admin UI can show *which member's* `/g/` link each pending
+   *  external-join request arrived on. Fetches the journal, parses every entry
+   *  via `GroupJoinAttribution.parse` (most are MLS messages and throw — those
+   *  are skipped), re-verifies the embedded capability (Ed25519, inside
+   *  `parse`), and keeps only attributions whose `groupId` matches this group
+   *  (defence against a replayed cross-group capability). The caller matches a
+   *  returned `joinerSignatureKey` to a pending request and checks
+   *  `issuerSignaturePubkey ∈ roster` against the live `group.members()`. The
+   *  attribution is advisory — the role-gated approval gate is the boundary. */
+  async fetchJoinAttributions(groupId: Uint8Array): Promise<
+    Array<{
+      joinerSignatureKey: Uint8Array;
+      issuerSignaturePubkey: Uint8Array;
+      issuerFingerprint: string;
+    }>
+  > {
+    const wasm = await loadWasm();
+    let raw;
+    try {
+      raw = await this.ds.fetchGroup(groupId, { after: 0, waitSecs: 0 });
+    } catch (err) {
+      throw ContactsError.wrap(err);
+    }
+    const out: Array<{
+      joinerSignatureKey: Uint8Array;
+      issuerSignaturePubkey: Uint8Array;
+      issuerFingerprint: string;
+    }> = [];
+    for (const m of raw.messages) {
+      let attr;
+      try {
+        attr = wasm.GroupJoinAttribution.parse(m.payload);
+      } catch {
+        continue; // not an attribution envelope (an MLS message / other) — skip
+      }
+      // Only trust an attribution whose capability targets THIS group.
+      if (base64Encode(attr.groupId) !== base64Encode(groupId)) continue;
+      out.push({
+        joinerSignatureKey: attr.joinerSignatureKey,
+        issuerSignaturePubkey: attr.issuerSignaturePubkey,
+        issuerFingerprint: attr.issuerFingerprint,
+      });
+    }
+    return out;
+  }
+
   /** ADR-0028 (G-3) — mint a group invite-link (the owner/admin side). Signs a
    *  `GroupInviteCapability` over this group's `group_id` with the local
    *  identity's Ed25519 key and returns the full `<origin>/g/<base64url>` link
@@ -1913,6 +1960,20 @@ export class ContactsClient {
       await this.ds.publishGroup(groupId, proposal);
     } catch (err) {
       throw ContactsError.wrap(err);
+    }
+    // ADR-0028 OQ2 — post a join-attribution envelope so the approving admin can
+    // see *which member's* link this request arrived on. It binds our signature
+    // key to the capability (whose embedded issuer pubkey the admin checks
+    // against the roster). Best-effort + advisory: a failure here must not block
+    // the join — the admin approval gate (ADR-0027) is the security boundary.
+    try {
+      const attribution = wasm.composeGroupJoinAttribution(
+        myIdentity.signaturePublicKey,
+        capabilityWire,
+      );
+      await this.ds.publishGroup(groupId, attribution);
+    } catch {
+      // advisory only — ignore
     }
     return { groupId, joinerSignatureKey: myIdentity.signaturePublicKey };
   }

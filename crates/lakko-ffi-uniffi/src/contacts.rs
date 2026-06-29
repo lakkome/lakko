@@ -46,6 +46,10 @@ use lakko_contacts::group_invite::{
     compose as rust_group_invite_compose, decode_and_verify as rust_group_invite_decode,
     GroupInviteCapability as RustGroupInviteCapability, MAX_GROUP_ID_LEN,
 };
+use lakko_contacts::group_join_attribution::{
+    compose_attribution as rust_group_join_attribution_compose,
+    decode_attribution as rust_group_join_attribution_decode,
+};
 use lakko_contacts::incoming_envelope::{
     dispatch_incoming_envelope as rust_dispatch_incoming_envelope, IncomingEnvelope,
 };
@@ -1426,6 +1430,71 @@ impl GroupInviteCapability {
     pub fn issuer_fingerprint(&self) -> String {
         self.inner.issuer_fingerprint()
     }
+}
+
+// ============================================================================
+// GroupJoinAttribution — ADR-0028 OQ2 (issuer-in-roster surfacing, G-3)
+// ============================================================================
+
+/// Decoded join-attribution record (ADR-0028 OQ2): which member's `/g/` link a
+/// join request arrived on. Produced by [`parse_group_join_attribution`] from a
+/// group-journal envelope; the admin matches `joiner_signature_key` to a pending
+/// external-join request and surfaces `issuer_fingerprint` + whether
+/// `issuer_signature_pubkey` is in the group roster.
+#[derive(uniffi::Record)]
+pub struct GroupJoinAttribution {
+    /// The joiner's MLS leaf signature key — the rendezvous tag matching the
+    /// pending external-join request.
+    pub joiner_signature_key: Vec<u8>,
+    /// The target group's opaque MLS `GroupId` bytes — the admin checks this
+    /// equals its own group before trusting the attribution.
+    pub group_id: Vec<u8>,
+    /// The issuer's Ed25519 verifying key (32 bytes) — the member who minted
+    /// the link. The admin checks this is in the roster (OQ2).
+    pub issuer_signature_pubkey: Vec<u8>,
+    /// Signal-style anti-phishing fingerprint of the issuer's key.
+    pub issuer_fingerprint: String,
+    /// UNIX milliseconds when the link stops being valid. `0` = never expires.
+    pub expiry_ms: u64,
+}
+
+/// Joiner-side: compose the attribution envelope binding the joiner's MLS leaf
+/// signature key to the `GroupInviteCapability` wire bytes it used (ADR-0028
+/// OQ2). The joiner posts this to the group journal alongside its external-join
+/// proposal so the approving admin can see which member's link it came on.
+///
+/// # Errors
+///
+/// [`FfiError::Contacts`] when either input is empty or exceeds its bound.
+#[uniffi::export]
+pub fn compose_group_join_attribution(
+    joiner_signature_key: Vec<u8>,
+    capability_bytes: Vec<u8>,
+) -> Result<Vec<u8>, FfiError> {
+    Ok(rust_group_join_attribution_compose(
+        &joiner_signature_key,
+        &capability_bytes,
+    )?)
+}
+
+/// Admin-side: decode + verify an attribution envelope from the group journal
+/// (ADR-0028 OQ2). The embedded capability is re-verified (Ed25519); a malformed
+/// or forged envelope is rejected.
+///
+/// # Errors
+///
+/// [`FfiError::Contacts`] on a malformed envelope or a capability whose
+/// signature does not verify.
+#[uniffi::export]
+pub fn parse_group_join_attribution(bytes: Vec<u8>) -> Result<GroupJoinAttribution, FfiError> {
+    let inner = rust_group_join_attribution_decode(&bytes)?;
+    Ok(GroupJoinAttribution {
+        joiner_signature_key: inner.joiner_signature_key,
+        group_id: inner.capability.group_id.clone(),
+        issuer_signature_pubkey: inner.capability.issuer_signature_pubkey.to_bytes().to_vec(),
+        issuer_fingerprint: inner.capability.issuer_fingerprint(),
+        expiry_ms: inner.capability.expiry_ms,
+    })
 }
 
 #[cfg(test)]

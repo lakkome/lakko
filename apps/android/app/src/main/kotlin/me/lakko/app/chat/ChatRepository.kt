@@ -687,6 +687,60 @@ public class ChatRepository(
         }
     }
 
+    /** ADR-0028 OQ2 (G-3) — advisory attribution for a pending request: which
+     *  member minted the `/g/` link it arrived on, and whether that issuer is in
+     *  the current roster. */
+    public data class JoinAttributionInfo(
+        val joinerSignatureKey: ByteArray,
+        val issuerFingerprint: String,
+        val issuerInRoster: Boolean,
+    )
+
+    /**
+     * ADR-0028 OQ2 (G-3) — read the join-attribution envelopes from this group's
+     * journal so the admin UI can show which member's `/g/` link each pending
+     * request arrived on. For every valid attribution targeting this group (the
+     * embedded capability re-verified via `parseGroupJoinAttribution`), returns
+     * the joiner signature key, the issuer fingerprint, and whether the issuer is
+     * in the current roster. Advisory — the role-gated approval gate is the
+     * boundary, so failures degrade to an empty list.
+     */
+    public suspend fun fetchJoinAttributions(groupIdHex: String): List<JoinAttributionInfo> {
+        val record = groups[groupIdHex] ?: return emptyList()
+        val groupId = try {
+            record.group.groupId()
+        } catch (e: Throwable) {
+            return emptyList()
+        }
+        val rosterKeys = try {
+            record.group.members().map { it.signaturePublicKey }
+        } catch (e: Throwable) {
+            emptyList()
+        }
+        val raw = try {
+            dsClient.fetchGroup(groupId, after = 0L, waitSecs = 0)
+        } catch (e: Throwable) {
+            return emptyList()
+        }
+        val out = mutableListOf<JoinAttributionInfo>()
+        for (m in raw.messages) {
+            val attr = try {
+                uniffi.lakko_ffi_uniffi.parseGroupJoinAttribution(m.payload)
+            } catch (e: Throwable) {
+                continue
+            }
+            if (!attr.groupId.contentEquals(groupId)) continue
+            out.add(
+                JoinAttributionInfo(
+                    joinerSignatureKey = attr.joinerSignatureKey,
+                    issuerFingerprint = attr.issuerFingerprint,
+                    issuerInRoster = rosterKeys.any { it.contentEquals(attr.issuerSignaturePubkey) },
+                ),
+            )
+        }
+        return out
+    }
+
     /**
      * ADR-0027 (G-3) — approve a pending external-join request (owner/admin only;
      * the core role-gates it, fail-closed). Drives the MLS approve (reuses the
@@ -930,6 +984,19 @@ public class ChatRepository(
             dsClient.publishGroup(groupId, proposal)
         } catch (e: Throwable) {
             throw ChatError("DS publishGroup (external-join proposal) failed", e)
+        }
+        // ADR-0028 OQ2 — post a join-attribution envelope so the approving admin
+        // can see which member's link this request arrived on. Best-effort +
+        // advisory: a failure must not block the join (the admin approval gate is
+        // the security boundary).
+        try {
+            val attribution = uniffi.lakko_ffi_uniffi.composeGroupJoinAttribution(
+                identity.signaturePublicKey(),
+                capabilityWire,
+            )
+            dsClient.publishGroup(groupId, attribution)
+        } catch (e: Throwable) {
+            // advisory only — ignore
         }
         return Pair(groupId, identity.signaturePublicKey())
     }

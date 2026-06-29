@@ -294,6 +294,22 @@ public class ChatViewModel(
      *  open. */
     public val pendingJoins: StateFlow<List<ByteArray>> = mutablePendingJoins.asStateFlow()
 
+    /** ADR-0028 OQ2 (G-3) — advisory attribution for a pending request: which
+     *  member minted the `/g/` link it arrived on, and whether that issuer is in
+     *  the current roster. */
+    public data class JoinAttributionUi(
+        val issuerFingerprint: String,
+        val issuerInRoster: Boolean,
+    )
+
+    private val mutableJoinAttributions:
+        MutableStateFlow<Map<String, JoinAttributionUi>> = MutableStateFlow(emptyMap())
+
+    /** ADR-0028 OQ2 (G-3) — keyed by joiner signature key (full hex). Refreshed
+     *  alongside [pendingJoins]; a missing entry means no attribution was posted. */
+    public val joinAttributions: StateFlow<Map<String, JoinAttributionUi>> =
+        mutableJoinAttributions.asStateFlow()
+
     private val mutableInviteLink: MutableStateFlow<String?> = MutableStateFlow(null)
 
     /** ADR-0028 (G-3) — the minted group invite-link (the owner/admin "create
@@ -325,6 +341,24 @@ public class ChatViewModel(
         // ADR-0027 (G-3) — refresh the pending external-join list alongside the
         // roster (the retained set is the source of truth).
         mutablePendingJoins.value = repo.pendingExternalJoins(groupIdHex)
+        refreshJoinAttributions()
+    }
+
+    /** ADR-0028 OQ2 (G-3) — refresh the advisory join-attribution map for the
+     *  current pending requests. Best-effort; owner/admin only (the role-gated
+     *  approval gate is the boundary). */
+    private fun refreshJoinAttributions() {
+        if (!mutableCanManageMembers.value) {
+            mutableJoinAttributions.value = emptyMap()
+            return
+        }
+        viewModelScope.launch {
+            val attrs = repo.fetchJoinAttributions(groupIdHex)
+            mutableJoinAttributions.value = attrs.associate { a ->
+                a.joinerSignatureKey.joinToString("") { b -> "%02x".format(b.toInt() and 0xff) } to
+                    JoinAttributionUi(a.issuerFingerprint, a.issuerInRoster)
+            }
+        }
     }
 
     /** Our own leaf index — the roster marks it "(you)" and blocks self-removal. */

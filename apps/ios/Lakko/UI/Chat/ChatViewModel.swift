@@ -110,6 +110,16 @@ public final class ChatViewModel: ObservableObject {
     /// truth — re-read on `refreshMembers()` + on each poll while the sheet is
     /// open.
     @Published public private(set) var pendingJoins: [Data] = []
+    /// ADR-0028 OQ2 (G-3) — advisory attribution for a pending request: which
+    /// member minted the `/g/` link it arrived on, and whether that issuer is in
+    /// the current roster.
+    public struct JoinAttribution: Equatable {
+        public let issuerFingerprint: String
+        public let issuerInRoster: Bool
+    }
+    /// ADR-0028 OQ2 (G-3) — keyed by joiner signature key. Refreshed alongside
+    /// `pendingJoins`; a missing entry means the joiner posted no attribution.
+    @Published public private(set) var joinAttributions: [Data: JoinAttribution] = [:]
     /// ADR-0028 (G-3) — the minted group invite-link (the owner/admin "create
     /// invite link" affordance), or `nil` before it is generated.
     @Published public private(set) var inviteLink: String?
@@ -474,6 +484,28 @@ public final class ChatViewModel: ObservableObject {
         // ADR-0027 (G-3) — refresh the pending external-join list alongside the
         // roster (the retained set is the source of truth).
         pendingJoins = repository.pendingExternalJoins(groupIdHex: groupIdHex)
+        refreshJoinAttributions()
+    }
+
+    /// ADR-0028 OQ2 (G-3) — refresh the advisory join-attribution map for the
+    /// current pending requests. Best-effort: failures leave the map empty (the
+    /// role-gated approval gate is the boundary). Owner/admin only.
+    private func refreshJoinAttributions() {
+        guard canManageMembers else {
+            joinAttributions = [:]
+            return
+        }
+        let hex = groupIdHex
+        Task { [weak self] in
+            guard let self else { return }
+            let attrs = await self.repository.fetchJoinAttributions(groupIdHex: hex)
+            var map: [Data: JoinAttribution] = [:]
+            for a in attrs {
+                map[a.joinerSignatureKey] = JoinAttribution(
+                    issuerFingerprint: a.issuerFingerprint, issuerInRoster: a.issuerInRoster)
+            }
+            self.joinAttributions = map
+        }
     }
 
     /// `true` when `member` is an admin in the current role table.
@@ -797,6 +829,7 @@ public final class ChatViewModel: ObservableObject {
         // open (cheap in-memory read of the group's retained set).
         if membersPanelOpen {
             pendingJoins = repository.pendingExternalJoins(groupIdHex: groupIdHex)
+            refreshJoinAttributions()
         }
     }
 

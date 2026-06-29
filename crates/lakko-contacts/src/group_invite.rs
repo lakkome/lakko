@@ -386,7 +386,7 @@ mod tests {
         wire.extend_from_slice(&[0u8; SIGNATURE_LEN]);
         match decode_and_verify(&wire) {
             Err(ContactError::InvalidEncoding(msg)) => {
-                assert!(msg.contains("group_id_len"), "{msg}")
+                assert!(msg.contains("group_id_len"), "{msg}");
             },
             other => panic!("expected zero-len reject, got {other:?}"),
         }

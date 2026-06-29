@@ -430,6 +430,16 @@ public final class ChatRepository: ObservableObject {
             throw ChatError.wrapped(
                 "DS publishGroup (external-join proposal) failed", underlying: error)
         }
+        // ADR-0028 OQ2 — post a join-attribution envelope so the approving admin
+        // can see which member's link this request arrived on. Best-effort +
+        // advisory: a failure must not block the join (the admin approval gate is
+        // the security boundary).
+        if let attribution = try? composeGroupJoinAttribution(
+            joinerSignatureKey: identity.signaturePublicKey(),
+            capabilityBytes: capabilityWire
+        ) {
+            _ = try? await dsClient.publishGroup(groupId: groupId, payload: attribution)
+        }
         return (groupId, identity.signaturePublicKey())
     }
 
@@ -718,6 +728,32 @@ public final class ChatRepository: ObservableObject {
     public func pendingExternalJoins(groupIdHex: String) -> [Data] {
         guard let record = groups[groupIdHex] else { return [] }
         return (try? record.group.pendingExternalJoins()) ?? []
+    }
+
+    /// ADR-0028 OQ2 (G-3) — read the join-attribution envelopes from this group's
+    /// journal so the admin UI can show which member's `/g/` link each pending
+    /// request arrived on. For every valid attribution targeting this group
+    /// (the embedded capability re-verified via `parseGroupJoinAttribution`),
+    /// returns the joiner signature key, the issuer fingerprint, and whether the
+    /// issuer is in the current roster. Advisory — the role-gated approval gate
+    /// is the boundary, so failures degrade to an empty list.
+    public func fetchJoinAttributions(
+        groupIdHex: String
+    ) async -> [(joinerSignatureKey: Data, issuerFingerprint: String, issuerInRoster: Bool)] {
+        guard let record = groups[groupIdHex] else { return [] }
+        guard let groupId = try? record.group.groupId() else { return [] }
+        let rosterKeys = Set((try? record.group.members())?.map { $0.signaturePublicKey } ?? [])
+        guard let raw = try? await dsClient.fetchGroup(groupId: groupId, after: 0, waitSecs: 0)
+        else { return [] }
+        var out: [(Data, String, Bool)] = []
+        for m in raw.messages {
+            guard let attr = try? parseGroupJoinAttribution(bytes: m.payload) else { continue }
+            if attr.groupId != groupId { continue }
+            out.append(
+                (attr.joinerSignatureKey, attr.issuerFingerprint,
+                 rosterKeys.contains(attr.issuerSignaturePubkey)))
+        }
+        return out
     }
 
     /// ADR-0027 (G-3) — approve a pending external-join request (owner/admin

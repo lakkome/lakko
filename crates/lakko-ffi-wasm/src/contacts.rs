@@ -22,6 +22,11 @@ use lakko_contacts::group_invite::{
     compose as rust_group_invite_compose, decode_and_verify as rust_group_invite_decode,
     GroupInviteCapability as RustGroupInviteCapability, MAX_GROUP_ID_LEN,
 };
+use lakko_contacts::group_join_attribution::{
+    compose_attribution as rust_group_join_attribution_compose,
+    decode_attribution as rust_group_join_attribution_decode,
+    GroupJoinAttribution as RustGroupJoinAttribution,
+};
 use lakko_contacts::incoming_envelope::{
     dispatch_incoming_envelope as rust_dispatch_incoming_envelope, IncomingEnvelope,
 };
@@ -1269,6 +1274,81 @@ impl GroupInviteCapability {
     #[wasm_bindgen(js_name = issuerFingerprint)]
     pub fn issuer_fingerprint(&self) -> String {
         self.inner.issuer_fingerprint()
+    }
+}
+
+// ============================================================================
+// GroupJoinAttribution — ADR-0028 OQ2 (issuer-in-roster surfacing, G-3)
+// ============================================================================
+
+/// Joiner-side: compose the attribution envelope binding the joiner's MLS leaf
+/// signature key to the `GroupInviteCapability` wire bytes it used (ADR-0028
+/// OQ2). The joiner posts this to the group journal alongside its external-join
+/// proposal so the approving admin can see which member's link it came on.
+#[wasm_bindgen(js_name = composeGroupJoinAttribution)]
+pub fn compose_group_join_attribution(
+    joiner_signature_key: &[u8],
+    capability_bytes: &[u8],
+) -> Result<Vec<u8>, JsError> {
+    rust_group_join_attribution_compose(joiner_signature_key, capability_bytes)
+        .map_err(|e| JsError::new(&format!("{e}")))
+}
+
+/// Decoded join-attribution (ADR-0028 OQ2) — which member's `/g/` link a join
+/// request arrived on. Produced by `GroupJoinAttribution.parse`; the embedded
+/// capability is re-verified (Ed25519) on decode.
+#[wasm_bindgen]
+pub struct GroupJoinAttribution {
+    pub(crate) inner: RustGroupJoinAttribution,
+}
+
+#[wasm_bindgen]
+impl GroupJoinAttribution {
+    /// Admin-side: decode + verify an attribution envelope from the group
+    /// journal. A malformed / forged envelope (or a capability whose signature
+    /// fails) is rejected.
+    #[wasm_bindgen(js_name = parse)]
+    pub fn parse(bytes: &[u8]) -> Result<GroupJoinAttribution, JsError> {
+        let inner =
+            rust_group_join_attribution_decode(bytes).map_err(|e| JsError::new(&format!("{e}")))?;
+        Ok(Self { inner })
+    }
+
+    /// The joiner's MLS leaf signature key — the tag matching the pending
+    /// external-join request.
+    #[wasm_bindgen(getter, js_name = joinerSignatureKey)]
+    pub fn joiner_signature_key(&self) -> Vec<u8> {
+        self.inner.joiner_signature_key.clone()
+    }
+
+    /// The target group's opaque MLS GroupId bytes — the admin checks this
+    /// equals its own group before trusting the attribution.
+    #[wasm_bindgen(getter, js_name = groupId)]
+    pub fn group_id(&self) -> Vec<u8> {
+        self.inner.capability.group_id.clone()
+    }
+
+    /// The issuer's Ed25519 verifying key (32 bytes) — checked against the
+    /// roster (OQ2).
+    #[wasm_bindgen(getter, js_name = issuerSignaturePubkey)]
+    pub fn issuer_signature_pubkey(&self) -> Vec<u8> {
+        self.inner
+            .capability
+            .issuer_signature_pubkey
+            .to_bytes()
+            .to_vec()
+    }
+
+    /// Signal-style anti-phishing fingerprint of the issuer's key.
+    #[wasm_bindgen(getter, js_name = issuerFingerprint)]
+    pub fn issuer_fingerprint(&self) -> String {
+        self.inner.capability.issuer_fingerprint()
+    }
+
+    /// UNIX milliseconds when the link stops being valid. `0` = never expires.
+    #[wasm_bindgen(getter, js_name = expiryMs)]
+    pub fn expiry_ms(&self) -> u64 {
+        self.inner.capability.expiry_ms
     }
 }
 
