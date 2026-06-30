@@ -287,9 +287,26 @@ shipped** (ADR-0027). This ADR adds: the `GroupInviteCapability` codec + FFI;
    the New-channel screen drives request → poll → open the channel. The
    `channel_id_from_group_id` inverse derivation landed in `lakko-mls` (+ a
    round-trip/reject unit test) and on the FFI (`channelIdFromPublisherGroupId`,
-   UniFFI + wasm). `tsc` clean, web vitest 222 green. **Residual:** the iOS /
-   Android mirrors (owner + joiner) + a live 2-publisher e2e of the reseal (no
-   deployed channels env, the same gate every other live-channel path carries).
+   UniFFI + wasm). `tsc` clean, web vitest 222 green. **iOS + Android co-publisher
+   landed (owner + joiner)** — `apps/ios/Lakko/Channels/CoPublisher.swift` +
+   a `CoPublishersPanelView` + a `JoinCoPublisherScreen` route in
+   `ChannelsScreen.swift`, and `apps/android/.../channels/CoPublisher.kt` +
+   a `CoPublishersPanel` + a `JoinCoPublisherScreen` route in the Compose
+   `ChannelsScreen.kt`: the same owner shape (open the persistent
+   `PublisherGroup`, mint a `/g/` link over its `group_id`, 5 s DS-journal poll
+   via `processIncomingVerifyingRoles`, approve/reject with the load-bearing
+   reseal-after-add — the rotation-cron fanout WITHOUT a second `rotate()`) and
+   joiner shape (`requestToCoPublish` → recover the channel id via
+   `channelIdFromPublisherGroupId`, read the epoch from the journal head,
+   external-join proposal + a self-signed OQ2 attribution; `pollForCoPublishWelcome`
+   → match the owner's `WelcomeRendezvous` by leaf key, `joinFromWelcome`, then
+   `freshPublisherKeys` at the post-approve epoch the subscribers were resealed
+   to) as web. Verified iOS `xcodebuild` BUILD SUCCEEDED + Android
+   `:app:compileDebugKotlin` BUILD SUCCESSFUL (the native `.so` needs a
+   cargo-ndk rebuild for the OQ3 FFI symbols at CI/deploy — local NDK unset).
+   **OQ3 is now implemented on all three clients. Residual:** a live 2-publisher
+   e2e of the reseal (no deployed channels env, the same gate every other
+   live-channel path carries).
 
 ## References
 
