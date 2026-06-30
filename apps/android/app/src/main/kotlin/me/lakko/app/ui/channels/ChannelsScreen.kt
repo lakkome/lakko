@@ -60,13 +60,17 @@ import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import androidx.compose.foundation.text.selection.SelectionContainer
 import me.lakko.app.channels.ChannelHandle
+import me.lakko.app.channels.ChannelPublisherKeys
 import me.lakko.app.channels.ChannelsApiException
 import me.lakko.app.channels.ChannelsClient
 import me.lakko.app.channels.ChannelsComposer
 import me.lakko.app.channels.ChannelsComposerException
 import me.lakko.app.channels.ChannelsUiState
+import me.lakko.app.channels.CoPublisher
 import me.lakko.app.channels.PostView
+import me.lakko.app.ds.DsClient
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -96,6 +100,7 @@ private object Theme {
 private sealed class Route {
     object List : Route()
     object New : Route()
+    object JoinCoPublisher : Route()
     data class Detail(val channelId: String) : Route()
     data class Subscribe(val channelId: String) : Route()
 }
@@ -140,6 +145,7 @@ public fun ChannelsRootScreen(
             state = state,
             onCreate = { route = Route.New },
             onOpen = { route = Route.Detail(it) },
+            onJoin = { route = Route.JoinCoPublisher },
         )
         Route.New -> NewChannelScreen(
             state = state,
@@ -148,10 +154,17 @@ public fun ChannelsRootScreen(
             onClose = { route = Route.List },
             onCreated = { id -> route = Route.Detail(id) },
         )
+        Route.JoinCoPublisher -> JoinCoPublisherScreen(
+            state = state,
+            accountIdentitySeed = accountIdentitySeed,
+            onClose = { route = Route.List },
+            onJoined = { id -> route = Route.Detail(id) },
+        )
         is Route.Detail -> ChannelDetailScreen(
             channelId = r.channelId,
             state = state,
             client = client,
+            accountIdentitySeed = accountIdentitySeed,
             onBack = { route = Route.List },
             onSubscribe = { route = Route.Subscribe(r.channelId) },
         )
@@ -174,12 +187,18 @@ private fun ChannelsListScreen(
     state: ChannelsUiState,
     onCreate: () -> Unit,
     onOpen: (String) -> Unit,
+    onJoin: () -> Unit,
 ) {
     val channels by state.channels.collectAsState()
     Scaffold(
         topBar = {
             TopAppBar(
                 title = { Text("Channels", color = Theme.textPrimary) },
+                actions = {
+                    TextButton(onClick = onJoin) {
+                        Text("Join", color = Theme.accent)
+                    }
+                },
                 colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = Theme.background,
                 ),
@@ -407,6 +426,7 @@ private fun ChannelDetailScreen(
     channelId: String,
     state: ChannelsUiState,
     client: ChannelsClient,
+    accountIdentitySeed: ByteArray,
     onBack: () -> Unit,
     onSubscribe: () -> Unit,
 ) {
@@ -548,6 +568,11 @@ private fun ChannelDetailScreen(
                     channelId = channelId,
                     state = state,
                     client = client,
+                )
+                CoPublishersPanel(
+                    channelId = channelId,
+                    client = client,
+                    accountIdentitySeed = accountIdentitySeed,
                 )
             } else {
                 SubscriberPlaceholderSection(onOpenSubscribe = onSubscribe)
@@ -1196,4 +1221,316 @@ private fun hexToBytesOrNull(hex: String): ByteArray? {
         out[i] = byte.toByte()
     }
     return out
+}
+
+// ============================================================================
+// CoPublishersPanel — owner-side co-publisher management (ADR-0028 OQ3)
+// ============================================================================
+
+/**
+ * Owner-side co-publisher management panel. Holds a long-lived PublisherGroup +
+ * Identity (the approve path needs the same handle the poll loop populated the
+ * pending set on). Opens both on appear, polls the journal every 5 s, and
+ * surfaces create-link + approve/reject. Kotlin mirror of the iOS
+ * `CoPublishersPanelView`.
+ */
+@Composable
+private fun CoPublishersPanel(
+    channelId: String,
+    client: ChannelsClient,
+    accountIdentitySeed: ByteArray,
+) {
+    var identity by remember { mutableStateOf<uniffi.lakko_ffi_uniffi.Identity?>(null) }
+    var publisherGroup by remember {
+        mutableStateOf<uniffi.lakko_ffi_uniffi.PublisherGroup?>(null)
+    }
+    var link by remember { mutableStateOf<String?>(null) }
+    var pending by remember { mutableStateOf<List<ByteArray>>(emptyList()) }
+    var busy by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf<String?>(null) }
+    val ds = remember { DsClient() }
+    val scope = rememberCoroutineScope()
+
+    LaunchedEffect(channelId) {
+        try {
+            val id = uniffi.lakko_ffi_uniffi.Identity.fromSeed(accountIdentitySeed)
+            val pg = CoPublisher.openPublisherGroup(id, channelId)
+            identity = id
+            publisherGroup = pg
+        } catch (e: Throwable) {
+            error = "Could not open the channel group: ${e.message}"
+            return@LaunchedEffect
+        }
+        while (true) {
+            val id = identity
+            val pg = publisherGroup
+            if (id != null && pg != null) {
+                try {
+                    CoPublisher.pollJournal(ds, id, pg)
+                    pending = CoPublisher.pending(pg)
+                } catch (_: Throwable) {
+                    // best-effort — keep the last good pending list
+                }
+            }
+            delay(5_000L)
+        }
+    }
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = Theme.surface),
+        shape = RoundedCornerShape(8.dp),
+    ) {
+        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Text(
+                "Co-publishers",
+                color = Theme.textPrimary,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Text(
+                "Invite another device or person to publish to this channel.",
+                color = Theme.textSecondary,
+                fontSize = 12.sp,
+            )
+            Button(
+                onClick = {
+                    val id = identity
+                    val pg = publisherGroup
+                    if (busy || id == null || pg == null) return@Button
+                    busy = true
+                    error = null
+                    scope.launch {
+                        try {
+                            link = CoPublisher.createCoPublisherLink(id, pg)
+                        } catch (e: Throwable) {
+                            error = "Could not create the link: ${e.message}"
+                        } finally {
+                            busy = false
+                        }
+                    }
+                },
+                enabled = !busy && publisherGroup != null,
+                colors = ButtonDefaults.buttonColors(containerColor = Theme.accent),
+            ) { Text("Create co-publisher link", color = Color.White) }
+
+            link?.let {
+                SelectionContainer {
+                    Text(
+                        it,
+                        color = Theme.textSecondary,
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 12.sp,
+                    )
+                }
+            }
+
+            if (pending.isNotEmpty()) {
+                Text(
+                    "Requests (${pending.size})",
+                    color = Theme.textPrimary,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                for (ref in pending) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            shortHex(ref),
+                            color = Theme.textSecondary,
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 12.sp,
+                            modifier = Modifier.weight(1f),
+                        )
+                        TextButton(
+                            onClick = {
+                                val id = identity
+                                val pg = publisherGroup
+                                if (busy || id == null || pg == null) return@TextButton
+                                busy = true
+                                error = null
+                                scope.launch {
+                                    try {
+                                        CoPublisher.approve(ds, client, id, pg, ref, channelId)
+                                        pending = CoPublisher.pending(pg)
+                                    } catch (e: Throwable) {
+                                        error = "Approve failed: ${e.message}"
+                                    } finally {
+                                        busy = false
+                                    }
+                                }
+                            },
+                            enabled = !busy,
+                        ) { Text("Approve", color = Theme.accent) }
+                        TextButton(
+                            onClick = {
+                                val pg = publisherGroup ?: return@TextButton
+                                if (busy) return@TextButton
+                                error = null
+                                try {
+                                    CoPublisher.reject(pg, ref)
+                                    pending = CoPublisher.pending(pg)
+                                } catch (e: Throwable) {
+                                    error = "Reject failed: ${e.message}"
+                                }
+                            },
+                            enabled = !busy,
+                        ) { Text("Reject", color = Theme.destructive) }
+                    }
+                }
+            }
+
+            error?.let {
+                Text(it, color = Theme.destructive, fontSize = 12.sp)
+            }
+        }
+    }
+}
+
+private fun shortHex(data: ByteArray): String {
+    val sb = StringBuilder()
+    for (i in 0 until minOf(8, data.size)) {
+        sb.append(String.format("%02x", data[i].toInt() and 0xFF))
+    }
+    sb.append("…")
+    return sb.toString()
+}
+
+// ============================================================================
+// JoinCoPublisherScreen — joiner-side route (ADR-0028 OQ3)
+// ============================================================================
+
+/**
+ * Joiner side: paste a `/g/` co-publisher link, request to join, poll until the
+ * owner approves, then mint local publisher keys + open the channel. Kotlin
+ * mirror of the web `onJoinAsCoPublisher` flow + the iOS `JoinCoPublisherScreen`.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun JoinCoPublisherScreen(
+    state: ChannelsUiState,
+    accountIdentitySeed: ByteArray,
+    onClose: () -> Unit,
+    onJoined: (String) -> Unit,
+) {
+    var link by remember { mutableStateOf("") }
+    var localName by remember { mutableStateOf("") }
+    var busy by remember { mutableStateOf(false) }
+    var status by remember { mutableStateOf<String?>(null) }
+    var error by remember { mutableStateOf<String?>(null) }
+    val ds = remember { DsClient() }
+    val scope = rememberCoroutineScope()
+
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text("Join as co-publisher", color = Theme.textPrimary) },
+                navigationIcon = {
+                    IconButton(onClick = onClose) {
+                        Icon(Icons.Default.ArrowBack, "Back", tint = Theme.textPrimary)
+                    }
+                },
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = Theme.background,
+                ),
+            )
+        },
+        containerColor = Theme.background,
+    ) { inner ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(inner)
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            OutlinedTextField(
+                value = link,
+                onValueChange = { link = it },
+                label = { Text("Paste a /g/ co-publisher link") },
+                enabled = !busy,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            OutlinedTextField(
+                value = localName,
+                onValueChange = { localName = it },
+                label = { Text("Local name (optional)") },
+                enabled = !busy,
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Text(
+                "The channel owner shares a co-publisher link. After they approve " +
+                    "your request, this device can publish to the channel.",
+                color = Theme.textSecondary,
+                fontSize = 13.sp,
+            )
+            Button(
+                onClick = {
+                    val trimmed = link.trim()
+                    if (busy || trimmed.isEmpty()) return@Button
+                    busy = true
+                    error = null
+                    status = "Requesting…"
+                    scope.launch {
+                        try {
+                            val identity =
+                                uniffi.lakko_ffi_uniffi.Identity.fromSeed(accountIdentitySeed)
+                            val request =
+                                CoPublisher.requestToCoPublish(ds, identity, trimmed)
+                            status = "Waiting for the channel owner to approve…"
+                            var keys: ChannelPublisherKeys? = null
+                            var attempts = 0
+                            while (keys == null && attempts < 60) {
+                                keys = CoPublisher.pollForCoPublishWelcome(
+                                    ds,
+                                    identity,
+                                    request.groupId,
+                                    request.joinerKey,
+                                    request.channelIdHex,
+                                )
+                                if (keys == null) {
+                                    delay(3_000L)
+                                    attempts += 1
+                                }
+                            }
+                            val resolved = keys
+                            if (resolved == null) {
+                                error = "Timed out waiting for approval — try again " +
+                                    "once the owner has approved."
+                                return@launch
+                            }
+                            val name = localName.trim()
+                            state.addChannel(
+                                ChannelHandle(
+                                    id = request.channelIdHex,
+                                    localName = name.ifEmpty { "Co-published channel" },
+                                    localDescription = "",
+                                    addedAtMs = System.currentTimeMillis().toULong(),
+                                ),
+                            )
+                            state.setKeys(request.channelIdHex, resolved)
+                            onJoined(request.channelIdHex)
+                        } catch (e: Throwable) {
+                            error = "Co-publish failed: ${e.message}"
+                        } finally {
+                            busy = false
+                            status = null
+                        }
+                    }
+                },
+                enabled = !busy && link.trim().isNotEmpty(),
+                colors = ButtonDefaults.buttonColors(containerColor = Theme.accent),
+            ) { Text(if (busy) "Requesting…" else "Request", color = Color.White) }
+
+            status?.let { Text(it, color = Theme.textSecondary, fontSize = 13.sp) }
+            error?.let { msg ->
+                Card(colors = CardDefaults.cardColors(containerColor = Theme.destructive)) {
+                    Text(
+                        msg,
+                        color = Color.White,
+                        fontSize = 13.sp,
+                        modifier = Modifier.padding(12.dp),
+                    )
+                }
+            }
+        }
+    }
 }
