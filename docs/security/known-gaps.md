@@ -1584,7 +1584,7 @@ up sprint stands up `cargo deny` locally on the
 maintainer's box so the audit pack can mirror its CI
 output here.
 
-### G-27: Channel PublisherGroup — **all three platforms wired** (G4-2-mls-publisher + G-27 iOS / Android slice); persistence + rotation still deferred
+### G-27: Channel PublisherGroup — **CLOSED** — all three platforms wired (G4-2-mls-publisher + G-27 iOS / Android slice) + persistence + rotation landed (G4-2-mls-persistence)
 
 [`apps/web/src/channels/composer.ts::freshPublisherKeys`](../../apps/web/src/channels/composer.ts)
 now derives the channel content-key seed from a real
@@ -1986,8 +1986,7 @@ after the sweep.
 **Already tracked elsewhere (cross-references, not new):** identity/invite
 lookups are TOFU pending the deployed transparency service (G-4 / ADR-0016);
 external-stack SFrame RTP interop unverified (G-26); single-link many-stranger
-call rendezvous absent — multi-party works via owner KP-forward (G-21);
-channel PublisherGroup persistence + rotation deferred (G-27); the DS has no
+call rendezvous absent — multi-party works via owner KP-forward (G-21); the DS has no
 auth/PoW (pseudonym-unguessability is the Phase-1 gate).
 
 **Genuinely open, security-relevant:**
