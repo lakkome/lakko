@@ -136,7 +136,8 @@ struct ChannelsListScreen: View {
                     ChannelDetailScreen(
                         channelId: channel.id,
                         state: state,
-                        client: client
+                        client: client,
+                        accountIdentitySeed: accountIdentitySeed
                     )
                 } label: {
                     channelRow(channel)
@@ -275,6 +276,9 @@ struct ChannelDetailScreen: View {
     let channelId: String
     @ObservedObject var state: ChannelsUiState
     let client: ChannelsClient
+    /// ADR-0028 OQ3 — the canonical AccountIdentity seed, threaded so the
+    /// co-publisher panel can open the channel's PublisherGroup + sign.
+    let accountIdentitySeed: Data
 
     @State private var composeText: String = ""
     @State private var publishBusy = false
@@ -294,6 +298,11 @@ struct ChannelDetailScreen: View {
                             channelId: channelId,
                             state: state,
                             client: client
+                        )
+                        CoPublishersPanelView(
+                            channelId: channelId,
+                            client: client,
+                            accountIdentitySeed: accountIdentitySeed
                         )
                     } else {
                         subscriberPlaceholderSection
@@ -1069,5 +1078,165 @@ private extension Data {
         std.append(String(repeating: "=", count: pad))
         guard let data = Data(base64Encoded: std) else { return nil }
         self = data
+    }
+}
+
+/// ADR-0028 OQ3 — owner-side co-publisher management panel. Holds a long-lived
+/// PublisherGroup + Identity (the approve path needs the same handle the poll
+/// loop populated the pending set on). Opens both on appear, polls the journal
+/// every 5 s, and surfaces create-link + approve/reject.
+struct CoPublishersPanelView: View {
+    let channelId: String
+    let client: ChannelsClient
+    let accountIdentitySeed: Data
+
+    @State private var identity: Identity?
+    @State private var publisherGroup: PublisherGroup?
+    @State private var link: String?
+    @State private var pending: [Data] = []
+    @State private var busy = false
+    @State private var error: String?
+    @State private var pollTask: Task<Void, Never>?
+
+    private let ds = DsClient()
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Co-publishers")
+                .font(.headline)
+                .foregroundStyle(Theme.textPrimary)
+            Text("Invite another device or person to publish to this channel.")
+                .font(.caption)
+                .foregroundStyle(Theme.textSecondary)
+
+            Button {
+                Task { await createLink() }
+            } label: {
+                Text("Create co-publisher link")
+            }
+            .disabled(busy || publisherGroup == nil)
+
+            if let link {
+                Text(link)
+                    .font(.caption.monospaced())
+                    .foregroundStyle(Theme.textSecondary)
+                    .textSelection(.enabled)
+            }
+
+            if !pending.isEmpty {
+                Text("Requests (\(pending.count))")
+                    .font(.subheadline)
+                    .foregroundStyle(Theme.textPrimary)
+                ForEach(pending, id: \.self) { ref in
+                    HStack {
+                        Text(Self.shortHex(ref))
+                            .font(.caption.monospaced())
+                            .foregroundStyle(Theme.textSecondary)
+                        Spacer()
+                        Button("Approve") { Task { await approve(ref) } }
+                            .disabled(busy)
+                        Button(role: .destructive) {
+                            Task { await reject(ref) }
+                        } label: { Text("Reject") }
+                            .disabled(busy)
+                    }
+                }
+            }
+
+            if let error {
+                Text(error)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
+        }
+        .padding()
+        .background(Theme.surface)
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .task { await onAppearLoad() }
+        .onDisappear { teardown() }
+    }
+
+    private func onAppearLoad() async {
+        do {
+            let id = try Identity.fromSeed(seed: accountIdentitySeed)
+            let pg = try CoPublisher.openPublisherGroup(identity: id, channelIdHex: channelId)
+            identity = id
+            publisherGroup = pg
+        } catch {
+            self.error = "Could not open the channel group: \(error.localizedDescription)"
+            return
+        }
+        startPollLoop()
+    }
+
+    private func teardown() {
+        pollTask?.cancel()
+        pollTask = nil
+    }
+
+    private func startPollLoop() {
+        pollTask?.cancel()
+        pollTask = Task { @MainActor in
+            while !Task.isCancelled {
+                await refreshPending()
+                try? await Task.sleep(nanoseconds: 5 * 1_000_000_000)
+            }
+        }
+    }
+
+    private func refreshPending() async {
+        guard let identity, let publisherGroup else { return }
+        do {
+            _ = try await CoPublisher.pollJournal(
+                ds: ds, identity: identity, publisherGroup: publisherGroup)
+            pending = try CoPublisher.pending(publisherGroup: publisherGroup)
+        } catch {
+            // Best-effort — keep the last good pending list.
+        }
+    }
+
+    private func createLink() async {
+        guard let identity, let publisherGroup else { return }
+        busy = true
+        error = nil
+        defer { busy = false }
+        do {
+            link = try CoPublisher.createCoPublisherLink(
+                identity: identity, publisherGroup: publisherGroup)
+        } catch {
+            self.error = "Could not create the link: \(error.localizedDescription)"
+        }
+    }
+
+    private func approve(_ ref: Data) async {
+        guard let identity, let publisherGroup else { return }
+        busy = true
+        error = nil
+        defer { busy = false }
+        do {
+            try await CoPublisher.approve(
+                ds: ds, channelsClient: client, identity: identity,
+                publisherGroup: publisherGroup, proposalRef: ref, channelIdHex: channelId)
+            await refreshPending()
+        } catch {
+            self.error = "Approve failed: \(error.localizedDescription)"
+        }
+    }
+
+    private func reject(_ ref: Data) async {
+        guard let publisherGroup else { return }
+        busy = true
+        error = nil
+        defer { busy = false }
+        do {
+            try CoPublisher.reject(publisherGroup: publisherGroup, proposalRef: ref)
+            await refreshPending()
+        } catch {
+            self.error = "Reject failed: \(error.localizedDescription)"
+        }
+    }
+
+    private static func shortHex(_ data: Data) -> String {
+        data.prefix(8).map { String(format: "%02x", $0) }.joined() + "…"
     }
 }
