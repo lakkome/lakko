@@ -864,6 +864,38 @@ public class ChatRepository(
     }
 
     /**
+     * ADR-0028 revoke — the issuer revokes a previously-created group invite
+     * link. Only the server-backed pointer form (a 32-byte blob_id) is
+     * revocable; an inline link has no ledger row. Returns `true` when a ledger
+     * row was revoked, `false` for an inline / malformed link (nothing to do).
+     */
+    public suspend fun revokeGroupInviteLink(link: String): Boolean {
+        val identity = canonicalIdentity.get()
+            ?: throw IllegalStateException(
+                "ChatRepository not bootstrapped — call bootstrap() first",
+            )
+        val idx = link.lastIndexOf("/g/")
+        if (idx < 0) return false
+        val slug = link.substring(idx + 3)
+        val parsed = try {
+            parseGroupInviteSlug(slug)
+        } catch (e: GroupInviteUrlException) {
+            return false
+        }
+        return when (parsed) {
+            is ParsedGroupInvite.Inline -> false
+            is ParsedGroupInvite.Pointer -> {
+                try {
+                    discovery.revokeGroupInvite(parsed.blobId, identity.ed25519Seed())
+                } catch (e: Throwable) {
+                    throw ChatError("group invite revoke failed", e)
+                }
+                true
+            }
+        }
+    }
+
+    /**
      * ADR-0028 (G-3) — resolve a `/g/<slug>` slug to the capability wire bytes,
      * fetching from the discovery ledger when the slug is a 32-byte
      * content-addressed pointer (the production form) or passing the bytes
@@ -991,7 +1023,7 @@ public class ChatRepository(
         // the security boundary).
         try {
             val attribution = uniffi.lakko_ffi_uniffi.composeGroupJoinAttribution(
-                identity.signaturePublicKey(),
+                identity.ed25519Seed(),
                 capabilityWire,
             )
             dsClient.publishGroup(groupId, attribution)

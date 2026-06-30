@@ -1117,6 +1117,10 @@ private struct MembersSheet: View {
                                 .font(.system(.footnote, design: .monospaced))
                                 .textSelection(.enabled)
                             Button("Copy link") { UIPasteboard.general.string = link }
+                            Button("Revoke link", role: .destructive) {
+                                viewModel.onRevokeInviteLink()
+                            }
+                            .disabled(viewModel.membershipBusy)
                         }
                     }
                 }

@@ -43,7 +43,7 @@
  */
 import { loadWasm } from "../wasm";
 import { DiscoveryClient } from "../discovery/client";
-import { base64Decode, base64Encode } from "../auth/account-id";
+import { base64Decode, base64Encode, base64UrlDecodeNoPad } from "../auth/account-id";
 import {
   composeInlineGroupInviteUrl,
   composePointerGroupInviteUrl,
@@ -1854,6 +1854,35 @@ export class ContactsClient {
     }
   }
 
+  /** ADR-0028 revoke — the issuer revokes a previously-created group invite
+   *  link. Only the server-backed pointer form (a 32-byte `blob_id`) is
+   *  revocable; an inline link has no ledger row. Parses the `blob_id` out of
+   *  the `/g/<slug>` link, signs the revocation with the issuer's identity key,
+   *  and DELETEs the ledger row. Returns `false` (nothing to do) for an inline /
+   *  malformed link. */
+  async revokeGroupInviteLink(
+    identity: IdentitySecrets | null,
+    link: string,
+  ): Promise<boolean> {
+    const idx = link.lastIndexOf("/g/");
+    if (idx < 0) return false;
+    const slug = link.slice(idx + 3);
+    let blobId: Uint8Array;
+    try {
+      blobId = base64UrlDecodeNoPad(slug);
+    } catch {
+      return false;
+    }
+    if (blobId.length !== 32) return false; // inline link — no ledger row
+    const myIdentity = await this.resolveIdentity(identity);
+    try {
+      await this.discovery.revokeGroupInvite(blobId, myIdentity.ed25519Seed);
+    } catch (err) {
+      throw ContactsError.wrap(err);
+    }
+    return true;
+  }
+
   /** ADR-0028 (G-3) — resolve a `/g/<slug>` slug to the capability wire bytes,
    *  fetching from the discovery ledger when the slug is a 32-byte content-
    *  addressed pointer (the production form) or passing the bytes straight
@@ -1968,7 +1997,7 @@ export class ContactsClient {
     // the join — the admin approval gate (ADR-0027) is the security boundary.
     try {
       const attribution = wasm.composeGroupJoinAttribution(
-        myIdentity.signaturePublicKey,
+        myIdentity.ed25519Seed,
         capabilityWire,
       );
       await this.ds.publishGroup(groupId, attribution);

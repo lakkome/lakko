@@ -674,6 +674,23 @@ public final class ChatViewModel: ObservableObject {
         }
     }
 
+    /// ADR-0028 revoke — revoke the currently-shown group invite link (issuer
+    /// only). A pointer link carries a ledger blob the server deletes; an inline
+    /// link has nothing to revoke (we just clear the field). Fail-closed.
+    func onRevokeInviteLink() {
+        guard let link = inviteLink else { return }
+        membershipError = nil
+        Task { @MainActor in
+            do {
+                _ = try await repository.revokeGroupInviteLink(link: link)
+                inviteLink = nil
+            } catch {
+                membershipError = error.localizedDescription
+                NSLog("onRevokeInviteLink failed: %@", error.localizedDescription)
+            }
+        }
+    }
+
     /// Phase 2a3e2c-iOS — read-cursor broadcast tracker.
     /// Highest broadcast messageId; the per-`messages` effect
     /// schedules a fresh `ReadCursor` payload only when the

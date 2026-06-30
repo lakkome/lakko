@@ -1373,6 +1373,10 @@ private fun MembersSheet(viewModel: ChatViewModel) {
                         TextButton(onClick = { clipboard.setText(AnnotatedString(link)) }) {
                             Text("Copy link")
                         }
+                        TextButton(
+                            onClick = viewModel::onRevokeInviteLink,
+                            enabled = !busy,
+                        ) { Text("Revoke link") }
                     }
                 }
                 error?.let { message ->

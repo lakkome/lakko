@@ -354,6 +354,15 @@ pub(crate) fn build_app(state: AppState) -> Router {
         // is no owner-account binding on the capability to enforce
         // (the issuer is identified by its Ed25519 pubkey only).
         .route("/discovery/group-invite", post(group_invite::upload))
+        // ADR-0028 revoke — issuer-signed group-invite delete. Body carries the
+        // Ed25519 signature over the group-invite revoke canonical bytes;
+        // session-token-gated for DoS rate-limiting, the signature is the
+        // authorisation gate (verified against the stored capability's
+        // issuer_signature_pubkey).
+        .route(
+            "/discovery/group-invite/{blob_id}",
+            axum::routing::delete(group_invite::revoke),
+        )
         // `DELETE /discovery/invite/{blob_id}` is owner-signed via
         // its body, but we ALSO require a session token: the
         // signature proves "owner of the capability", the token

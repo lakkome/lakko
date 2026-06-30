@@ -2099,6 +2099,30 @@ function ChatView(props: {
     }
   }
 
+  // ADR-0028 revoke — kill the currently-shown group invite link. A pointer
+  // link carries a ledger blob the server deletes (issuer-signed); an inline
+  // link has no ledger row, so we just clear the field.
+  async function onRevokeInviteLink(): Promise<void> {
+    const link = inviteLink();
+    if (!link) return;
+    setError(null);
+    setNotice(null);
+    setBusy(true);
+    try {
+      const revoked = await contacts.revokeGroupInviteLink(props.requireIdentity(), link);
+      setInviteLink(null);
+      setNotice(
+        revoked
+          ? "Invite link revoked."
+          : "Link cleared (an inline link has nothing to revoke).",
+      );
+    } catch (err) {
+      setError(formatError(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   // Pull the current backlog on mount so a fresh `/chat/:id`
   // visit shows whatever the peer has sent so far.
   //
@@ -2793,6 +2817,22 @@ function ChatView(props: {
                     }}
                   >
                     Copy
+                  </button>
+                  <button
+                    type="button"
+                    disabled={busy()}
+                    onClick={() => void onRevokeInviteLink()}
+                    style={{
+                      "font-size": "0.75rem",
+                      padding: "0.25rem 0.5rem",
+                      "border-radius": "var(--radius-sm)",
+                      border: "1px solid var(--surface-border)",
+                      background: "transparent",
+                      color: "var(--danger, #c0392b)",
+                      cursor: "pointer",
+                    }}
+                  >
+                    Revoke
                   </button>
                 </div>
               </Show>

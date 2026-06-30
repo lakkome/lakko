@@ -34,6 +34,7 @@ import me.lakko.app.transport.AntiCensorshipEngine
 import uniffi.lakko_ffi_uniffi.OprfBlinder
 import uniffi.lakko_ffi_uniffi.computeJoinerInviteTag
 import uniffi.lakko_ffi_uniffi.signCallInviteRevocation
+import uniffi.lakko_ffi_uniffi.signGroupInviteRevocation
 import uniffi.lakko_ffi_uniffi.signInviteRevocation
 import uniffi.lakko_ffi_uniffi.signOwnerListQuery
 
@@ -1105,6 +1106,66 @@ public class DiscoveryClient(
                     )
                 }
             }
+        }
+    }
+
+    /** ADR-0028 revoke — wire-level `DELETE /discovery/group-invite/{blob_id}`.
+     *  Sibling of [callInviteRevoke]; the body carries the issuer-signed
+     *  revocation. The high-level [revokeGroupInvite] wrapper drives the sign. */
+    public suspend fun groupInviteRevoke(blobIdSlug: String, req: InviteRevokeRequest) {
+        val endpoint = "/discovery/group-invite/$blobIdSlug"
+        val url = "$baseUrl$endpoint"
+        val response: HttpResponse = try {
+            client.delete(url) {
+                sessionToken?.let {
+                    header(io.ktor.http.HttpHeaders.Authorization, "Bearer $it")
+                }
+                contentType(ContentType.Application.Json)
+                setBody(req)
+            }
+        } catch (cause: Throwable) {
+            throw DiscoveryNetworkError("$endpoint (DELETE)", cause)
+        }
+        if (response.status == HttpStatusCode.NoContent) return
+        if (response.status.isSuccess()) return
+        throw DiscoveryHttpError(
+            status = response.status.value,
+            endpoint = "$endpoint (DELETE)",
+            body = response.safeReadBody(),
+        )
+    }
+
+    /**
+     * ADR-0028 revoke — issuer-signed delete of a group-invite blob. Sibling of
+     * [revokeCallInvite]: signs the group-invite revoke canonical bytes with
+     * [signingSeed] (the issuer's ed25519 seed) and DELETEs the ledger row; the
+     * server verifies against the stored capability's issuer pubkey. Returns a
+     * discriminated [RevokeInviteResult]; 404 folds into `NotFoundOrNotOwner`.
+     */
+    public suspend fun revokeGroupInvite(
+        blobId: ByteArray,
+        signingSeed: ByteArray,
+    ): RevokeInviteResult {
+        if (blobId.size != BLOB_ID_LEN) {
+            throw DiscoveryClientArgError("blobId must be $BLOB_ID_LEN bytes")
+        }
+        if (signingSeed.size != SIGNING_SEED_LEN) {
+            throw DiscoveryClientArgError("signingSeed must be $SIGNING_SEED_LEN bytes")
+        }
+        val signedAtMs = System.currentTimeMillis()
+        val signature = signGroupInviteRevocation(signingSeed, blobId, signedAtMs.toULong())
+        val slug = base64UrlEncodeNoPad(blobId)
+        return try {
+            groupInviteRevoke(
+                slug,
+                InviteRevokeRequest(
+                    signed_at_ms = signedAtMs,
+                    signature = base64Encode(signature),
+                ),
+            )
+            RevokeInviteResult.Revoked
+        } catch (e: DiscoveryHttpError) {
+            if (e.status == 404) RevokeInviteResult.NotFoundOrNotOwner else throw e
         }
     }
 

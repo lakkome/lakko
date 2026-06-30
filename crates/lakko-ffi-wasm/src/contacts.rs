@@ -20,6 +20,7 @@ use lakko_contacts::call_welcome::{
 };
 use lakko_contacts::group_invite::{
     compose as rust_group_invite_compose, decode_and_verify as rust_group_invite_decode,
+    group_sign_revocation as rust_group_sign_revocation,
     GroupInviteCapability as RustGroupInviteCapability, MAX_GROUP_ID_LEN,
 };
 use lakko_contacts::group_join_attribution::{
@@ -1228,6 +1229,31 @@ pub fn compose_group_invite_capability(
         .map_err(|e| JsError::new(&format!("{e}")))
 }
 
+/// Owner-side: sign a group-invite revocation (ADR-0028 revoke). Returns the
+/// 64-byte Ed25519 signature over the group-invite revoke canonical bytes (the
+/// `DELETE /discovery/group-invite/{blob_id}` body). `issuerSigningSeed` is the
+/// 32-byte Ed25519 seed that minted the link; `blobId` is the 32-byte
+/// content-addressed id.
+#[wasm_bindgen(js_name = signGroupInviteRevocation)]
+pub fn sign_group_invite_revocation(
+    issuer_signing_seed: &[u8],
+    blob_id: &[u8],
+    signed_at_ms: u64,
+) -> Result<Vec<u8>, JsError> {
+    if issuer_signing_seed.len() != 32 {
+        return Err(JsError::new("issuerSigningSeed must be 32 bytes"));
+    }
+    let mut seed = [0u8; 32];
+    seed.copy_from_slice(issuer_signing_seed);
+    let signing = SigningKey::from_seed(&seed);
+    if blob_id.len() != BLOB_ID_LEN {
+        return Err(JsError::new(&format!("blobId must be {BLOB_ID_LEN} bytes")));
+    }
+    let mut blob_id_arr = [0u8; BLOB_ID_LEN];
+    blob_id_arr.copy_from_slice(blob_id);
+    Ok(rust_group_sign_revocation(&signing, &blob_id_arr, signed_at_ms).to_vec())
+}
+
 /// Composed + verified group join-ticket capability (ADR-0028). Mirror of
 /// [`lakko_contacts::GroupInviteCapability`].
 #[wasm_bindgen]
@@ -1281,16 +1307,18 @@ impl GroupInviteCapability {
 // GroupJoinAttribution — ADR-0028 OQ2 (issuer-in-roster surfacing, G-3)
 // ============================================================================
 
-/// Joiner-side: compose the attribution envelope binding the joiner's MLS leaf
-/// signature key to the `GroupInviteCapability` wire bytes it used (ADR-0028
-/// OQ2). The joiner posts this to the group journal alongside its external-join
-/// proposal so the approving admin can see which member's link it came on.
+/// Joiner-side: compose + self-sign the attribution envelope binding the
+/// joiner's `GroupInviteCapability` to its MLS leaf signature key (ADR-0028
+/// OQ2). `joinerSigningSeed` is the joiner's 32-byte Ed25519 identity seed
+/// (`Identity.ed25519Seed`); the envelope embeds the matching verifying key and
+/// is signed with it, so the admin can verify the attribution is authentic. The
+/// joiner posts this to the group journal alongside its external-join proposal.
 #[wasm_bindgen(js_name = composeGroupJoinAttribution)]
 pub fn compose_group_join_attribution(
-    joiner_signature_key: &[u8],
+    joiner_signing_seed: &[u8],
     capability_bytes: &[u8],
 ) -> Result<Vec<u8>, JsError> {
-    rust_group_join_attribution_compose(joiner_signature_key, capability_bytes)
+    rust_group_join_attribution_compose(joiner_signing_seed, capability_bytes)
         .map_err(|e| JsError::new(&format!("{e}")))
 }
 

@@ -1427,6 +1427,67 @@ export class DiscoveryClient {
     }
   }
 
+  /** ADR-0028 revoke — wire-level `DELETE /discovery/group-invite/{blob_id}`.
+   *  Sibling of [`callInviteRevoke`]; the body carries the issuer-signed
+   *  revocation. The high-level [`revokeGroupInvite`] wrapper drives the sign. */
+  async groupInviteRevoke(blobIdSlug: string, req: InviteRevokeRequest): Promise<void> {
+    const endpoint = `/discovery/group-invite/${blobIdSlug}`;
+    const url = `${this.baseUrl}${endpoint}`;
+    let response: Response;
+    try {
+      response = await fetch(url, {
+        method: "DELETE",
+        headers: {
+          "content-type": "application/json",
+          ...this.authHeaders(),
+        },
+        body: JSON.stringify(req),
+      });
+    } catch (err) {
+      throw new DiscoveryNetworkError(`${endpoint} (DELETE)`, err);
+    }
+    if (response.status === 204) return;
+    const text = await safeReadBody(response);
+    throw new DiscoveryHttpError(response.status, `${endpoint} (DELETE)`, text);
+  }
+
+  /** ADR-0028 revoke — issuer-signed delete of a group-invite blob. Signs the
+   *  group-invite revoke canonical bytes with `signingSeed` (the issuer's
+   *  ed25519 seed) and DELETEs the ledger row; the server verifies against the
+   *  stored capability's issuer pubkey. 404 folds into `not-found-or-not-owner`
+   *  (a wrong signer / already-deleted row). */
+  async revokeGroupInvite(
+    blobId: Uint8Array,
+    signingSeed: Uint8Array,
+  ): Promise<RevokeInviteResult> {
+    if (blobId.length !== 32) {
+      throw new DiscoveryClientArgError("blobId must be 32 bytes");
+    }
+    if (signingSeed.length !== 32) {
+      throw new DiscoveryClientArgError("signingSeed must be 32 bytes");
+    }
+    const wasm = await loadWasm();
+    const signedAtMs = Date.now();
+    const signature = wasm.signGroupInviteRevocation(
+      signingSeed,
+      blobId,
+      BigInt(signedAtMs),
+    );
+    const slug = base64UrlEncodeNoPad(blobId);
+    try {
+      await this.groupInviteRevoke(slug, {
+        signed_at_ms: signedAtMs,
+        signature: base64Encode(signature),
+      });
+      return { kind: "revoked" };
+    } catch (err) {
+      if (err instanceof DiscoveryHttpError && err.status === 404) {
+        return { kind: "not-found-or-not-owner" };
+      }
+      throw err;
+    }
+  }
+
   /**
    * Owner-signed list of every live invite this account owns
    * (Phase 1.18d2b-list).

@@ -1255,6 +1255,84 @@ public final class DiscoveryClient {
         )
     }
 
+    /// ADR-0028 revoke — issuer-signed delete of a group-invite blob. Sibling of
+    /// ``revokeCallInvite(blobId:signingSeed:)``: signs the group-invite revoke
+    /// canonical bytes with `signingSeed` (the issuer's ed25519 seed) and DELETEs
+    /// the ledger row; the server verifies against the stored capability's issuer
+    /// pubkey. 404 folds into `.notFoundOrNotOwner`.
+    public func revokeGroupInvite(
+        blobId: Data,
+        signingSeed: Data
+    ) async throws -> RevokeInviteResult {
+        guard blobId.count == Self.blobIdLength else {
+            throw DiscoveryClientError.argument(
+                "blobId must be \(Self.blobIdLength) bytes"
+            )
+        }
+        guard signingSeed.count == Self.signingSeedLength else {
+            throw DiscoveryClientError.argument(
+                "signingSeed must be \(Self.signingSeedLength) bytes"
+            )
+        }
+
+        let signedAtMs = Int64(Date().timeIntervalSince1970 * 1000)
+        let signature = try signGroupInviteRevocation(
+            issuerSigningSeed: signingSeed,
+            blobId: blobId,
+            signedAtMs: UInt64(signedAtMs)
+        )
+        let slug = base64UrlEncodeNoPad(blobId)
+        let endpoint = "/discovery/group-invite/\(slug)"
+        let url = try buildURL(endpoint: endpoint)
+        var request = URLRequest(url: url)
+        request.httpMethod = "DELETE"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        attachAuthorizationHeader(to: &request)
+        let body = InviteRevokeRequest(
+            signedAtMs: signedAtMs,
+            signature: base64Encode(signature)
+        )
+        do {
+            request.httpBody = try encoder.encode(body)
+        } catch {
+            throw DiscoveryClientError.argument(
+                "failed to encode \(endpoint) body: \(error)"
+            )
+        }
+
+        let raw: (Data, URLResponse)
+        do {
+            raw = try await AntiCensorshipTransport.perform(
+                request, session: session, config: antiCensorship)
+        } catch {
+            throw DiscoveryClientError.network(
+                endpoint: "\(endpoint) (DELETE)",
+                underlying: error
+            )
+        }
+        guard let httpResponse = raw.1 as? HTTPURLResponse else {
+            throw DiscoveryClientError.http(
+                status: 0,
+                endpoint: "\(endpoint) (DELETE)",
+                body: "non-HTTP response"
+            )
+        }
+        if (200..<300).contains(httpResponse.statusCode) {
+            return .revoked
+        }
+        if httpResponse.statusCode == 404 {
+            return .notFoundOrNotOwner
+        }
+        let bodyText = Self.truncate(
+            String(data: raw.0, encoding: .utf8) ?? "<binary>"
+        )
+        throw DiscoveryClientError.http(
+            status: httpResponse.statusCode,
+            endpoint: "\(endpoint) (DELETE)",
+            body: bodyText
+        )
+    }
+
     /// Owner-signed list of every live invite this account owns
     /// (Phase 1.18d2b-list). Distinct Ed25519 domain separator
     /// from ``revokeInvite(blobId:signingSeed:)`` ensures a

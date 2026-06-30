@@ -516,6 +516,25 @@ public class ChatViewModel(
     }
 
     /**
+     * ADR-0028 revoke — revoke the currently-shown group invite link (issuer
+     * only). A pointer link carries a ledger blob the server deletes; an inline
+     * link has nothing to revoke (we just clear the field). Fail-closed.
+     */
+    public fun onRevokeInviteLink() {
+        val link = mutableInviteLink.value ?: return
+        mutableMembershipError.value = null
+        viewModelScope.launch {
+            try {
+                repo.revokeGroupInviteLink(link)
+                mutableInviteLink.value = null
+            } catch (e: Throwable) {
+                mutableMembershipError.value = e.message ?: e.toString()
+                android.util.Log.w("ChatViewModel", "onRevokeInviteLink failed", e)
+            }
+        }
+    }
+
+    /**
      * Start a multi-party SFU group call for this (group) chat. Mints the
      * call-admission JWT, derives the per-call SFrame seed + leaf from the
      * MLS exporter, and connects through [SfuCallUi]. Fails closed (logs +

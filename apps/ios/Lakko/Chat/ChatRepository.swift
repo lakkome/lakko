@@ -435,7 +435,7 @@ public final class ChatRepository: ObservableObject {
         // advisory: a failure must not block the join (the admin approval gate is
         // the security boundary).
         if let attribution = try? composeGroupJoinAttribution(
-            joinerSignatureKey: identity.signaturePublicKey(),
+            joinerSigningSeed: identity.ed25519Seed(),
             capabilityBytes: capabilityWire
         ) {
             _ = try? await dsClient.publishGroup(groupId: groupId, payload: attribution)
@@ -874,6 +874,36 @@ public final class ChatRepository: ObservableObject {
         } catch {
             return (try? GroupInviteUrl.composeInlineGroupInviteUrl(capabilityBytes: wire))
                 ?? ("https://lakko.me/g/" + base64UrlEncodeNoPad(wire))
+        }
+    }
+
+    /// ADR-0028 revoke — the issuer revokes a previously-created group invite
+    /// link. Only the server-backed pointer form (a 32-byte `blob_id`) is
+    /// revocable; an inline link has no ledger row. Returns `true` when a ledger
+    /// row was revoked, `false` for an inline / malformed link (nothing to do).
+    public func revokeGroupInviteLink(link: String) async throws -> Bool {
+        guard let identity = canonicalIdentity else {
+            throw ChatError.argument("ChatRepository not bootstrapped — call bootstrap() first")
+        }
+        guard let range = link.range(of: "/g/", options: .backwards) else { return false }
+        let slug = String(link[range.upperBound...])
+        let parsed: GroupInviteUrl.ParsedGroupInvite
+        do {
+            parsed = try GroupInviteUrl.parseGroupInviteSlug(slug)
+        } catch {
+            return false
+        }
+        switch parsed {
+        case .inline:
+            return false
+        case .pointer(let blobId):
+            do {
+                _ = try await discovery.revokeGroupInvite(
+                    blobId: blobId, signingSeed: identity.ed25519Seed())
+            } catch {
+                throw ChatError.wrapped("group invite revoke failed", underlying: error)
+            }
+            return true
         }
     }
 

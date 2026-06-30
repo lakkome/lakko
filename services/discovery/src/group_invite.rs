@@ -41,7 +41,9 @@ use axum::http::StatusCode;
 use axum::Json;
 use base64::engine::general_purpose::{STANDARD as B64, URL_SAFE_NO_PAD as B64URL};
 use base64::Engine as _;
-use lakko_contacts::group_invite::decode_and_verify;
+use lakko_contacts::group_invite::{
+    decode_and_verify, group_revoke_canonical_bytes, GROUP_INVITE_REVOKE_REPLAY_WINDOW_MS,
+};
 use lakko_contacts::invite::{BLOB_ID_LEN, JOINER_TAG_LEN};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -477,8 +479,153 @@ pub(crate) async fn consume(
 }
 
 // ============================================================================
+// DELETE /discovery/group-invite/{blob_id} — issuer-signed revocation
+// ============================================================================
+
+#[derive(Deserialize)]
+pub(crate) struct RevokeRequest {
+    /// UNIX millis at which the body was signed. Must be within
+    /// `GROUP_INVITE_REVOKE_REPLAY_WINDOW_MS` of the server clock.
+    pub(crate) signed_at_ms: u64,
+    /// Standard-alphabet base64 of the 64-byte Ed25519 signature over
+    /// `lakko_contacts::group_invite::group_revoke_canonical_bytes`.
+    pub(crate) signature: String,
+}
+
+/// `DELETE /discovery/group-invite/{blob_id}` — issuer-signed delete (ADR-0028
+/// revoke). Mirror of `call_invite::revoke`:
+///
+///   * **204 No Content** — row deleted (idempotent on success).
+///   * **404 Not Found** — folded over "no row" / "signature did not verify" /
+///     "issuer pubkey could not be recovered" (denies status-code probing).
+///   * **400 Bad Request** — bad base64 / wrong-sized signature / `signed_at_ms`
+///     outside the replay window.
+///
+/// The issuer's verifying key is recovered from the stored capability's
+/// `issuer_signature_pubkey` (the key that minted the link); the signature is
+/// checked against the group-invite revoke domain, so a captured call-invite /
+/// contact-invite revoke signature cannot be replayed here.
+#[allow(clippy::too_many_lines)] // single-shot lifecycle — mirrors call_invite::revoke
+pub(crate) async fn revoke(
+    State(state): State<AppState>,
+    Path(blob_id_b64url): Path<String>,
+    // Session-token-gated via route_layer in `main.rs`. The Ed25519 signature on
+    // the body proves issuer ownership; the token proves "logged-in Lakko user".
+    axum::Extension(_authed): axum::Extension<crate::auth::AuthenticatedAccount>,
+    Json(payload): Json<RevokeRequest>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let blob_id = B64URL.decode(&blob_id_b64url).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("invalid blob_id base64url: {e}"),
+        )
+    })?;
+    if blob_id.len() != BLOB_ID_LEN {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("blob_id must be {BLOB_ID_LEN} bytes after decode"),
+        ));
+    }
+
+    // Replay window check before any DB work — cheap DoS gate.
+    let now_ms = current_unix_ms();
+    if !within_replay_window(payload.signed_at_ms, now_ms) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!(
+                "signed_at_ms {} outside the ±{}ms replay window (now = {})",
+                payload.signed_at_ms, GROUP_INVITE_REVOKE_REPLAY_WINDOW_MS, now_ms,
+            ),
+        ));
+    }
+
+    let signature_bytes = B64.decode(&payload.signature).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("invalid signature base64: {e}"),
+        )
+    })?;
+    if signature_bytes.len() != lakko_crypto::signing::SIGNATURE_LEN {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!(
+                "signature must be {} bytes",
+                lakko_crypto::signing::SIGNATURE_LEN,
+            ),
+        ));
+    }
+    let signature = lakko_crypto::signing::Signature::from_bytes(&signature_bytes)
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("malformed signature: {e}")))?;
+
+    // Recover the issuer's verifying key from the stored capability. "No row"
+    // folds into 404.
+    let row: Option<(Vec<u8>,)> =
+        sqlx::query_as("SELECT capability_bytes FROM group_invites WHERE blob_id = ?")
+            .bind(&blob_id[..])
+            .fetch_optional(&state.db)
+            .await
+            .map_err(|e| {
+                tracing::error!(error = %e, "revoke group_invites SELECT");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal db error".to_string(),
+                )
+            })?;
+    let Some((capability_bytes,)) = row else {
+        return Err((StatusCode::NOT_FOUND, "group-invite not found".to_string()));
+    };
+
+    let cap = match decode_and_verify(&capability_bytes) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!(
+                error = %e,
+                blob_id = %blob_id_b64url,
+                "revoke: stored group-invite did not re-verify",
+            );
+            return Err((StatusCode::NOT_FOUND, "group-invite not found".to_string()));
+        },
+    };
+
+    let mut blob_id_arr = [0_u8; BLOB_ID_LEN];
+    blob_id_arr.copy_from_slice(&blob_id);
+    let canonical = group_revoke_canonical_bytes(&blob_id_arr, payload.signed_at_ms);
+    if cap
+        .issuer_signature_pubkey
+        .verify(&canonical, &signature)
+        .is_err()
+    {
+        // Signature mismatch — fold into 404.
+        return Err((StatusCode::NOT_FOUND, "group-invite not found".to_string()));
+    }
+
+    // Authorised. Delete the row — the FK CASCADE on `group_invite_consumers`
+    // reaps the dedup side-table rows for free.
+    sqlx::query("DELETE FROM group_invites WHERE blob_id = ?")
+        .bind(&blob_id[..])
+        .execute(&state.db)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "revoke group_invites DELETE");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal db error".to_string(),
+            )
+        })?;
+
+    tracing::info!(blob_id = %blob_id_b64url, "group-invite revoked");
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ============================================================================
 // Internal helpers (mirror call_invite.rs)
 // ============================================================================
+
+fn within_replay_window(signed_at_ms: u64, now_ms: u64) -> bool {
+    let lo = now_ms.saturating_sub(GROUP_INVITE_REVOKE_REPLAY_WINDOW_MS);
+    let hi = now_ms.saturating_add(GROUP_INVITE_REVOKE_REPLAY_WINDOW_MS);
+    signed_at_ms >= lo && signed_at_ms <= hi
+}
 
 fn current_unix_ms() -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};

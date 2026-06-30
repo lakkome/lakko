@@ -52,7 +52,7 @@ use lakko_crypto::signing::{
 };
 
 use crate::error::{ContactError, Result};
-use crate::invite::NEVER_EXPIRES;
+use crate::invite::{BLOB_ID_LEN, NEVER_EXPIRES};
 
 /// Current schema version on the wire.
 const SCHEMA_VERSION: u8 = 1;
@@ -247,6 +247,50 @@ fn take_n<'a>(cur: &mut &'a [u8], n: usize) -> Result<&'a [u8]> {
 }
 
 // ============================================================================
+// Revocation (ADR-0028 OQ1 revoke) — owner-signed delete of a `/g/` blob
+// ============================================================================
+
+/// Domain separator for a group-invite revocation signature. Distinct from the
+/// contact-invite ([`crate::invite::revoke_canonical_bytes`]) and call-invite
+/// ([`crate::call_invite::CALL_INVITE_REVOKE_DOMAIN_V1`]) revoke domains, so a
+/// captured revoke signature cannot be replayed across invite kinds.
+pub const GROUP_INVITE_REVOKE_DOMAIN_V1: &[u8] = b"lakko-group-invite-revoke/v1\x00";
+
+/// Build the canonical bytes the issuer signs to revoke a group-invite blob.
+///
+/// Layout: `GROUP_INVITE_REVOKE_DOMAIN_V1 (29 bytes) ‖ blob_id (32 bytes) ‖
+/// signed_at_ms (8 bytes BE)`. The discovery service recovers the issuer's
+/// verifying key from the stored capability's `issuer_signature_pubkey` and
+/// verifies this; `signed_at_ms` gives replay protection bounded by
+/// [`GROUP_INVITE_REVOKE_REPLAY_WINDOW_MS`].
+#[must_use]
+pub fn group_revoke_canonical_bytes(blob_id: &[u8; BLOB_ID_LEN], signed_at_ms: u64) -> Vec<u8> {
+    let mut out = Vec::with_capacity(GROUP_INVITE_REVOKE_DOMAIN_V1.len() + BLOB_ID_LEN + 8);
+    out.extend_from_slice(GROUP_INVITE_REVOKE_DOMAIN_V1);
+    out.extend_from_slice(blob_id);
+    out.extend_from_slice(&signed_at_ms.to_be_bytes());
+    out
+}
+
+/// Sign a group-invite revocation with the issuer's Ed25519 key — the same key
+/// that signed the [`GroupInviteCapability`]. The server verifies the signature
+/// against the embedded `issuer_signature_pubkey` it stored at upload.
+#[must_use]
+pub fn group_sign_revocation(
+    issuer_signing: &SigningKey,
+    blob_id: &[u8; BLOB_ID_LEN],
+    signed_at_ms: u64,
+) -> [u8; SIGNATURE_LEN] {
+    let canonical = group_revoke_canonical_bytes(blob_id, signed_at_ms);
+    issuer_signing.sign(&canonical).to_bytes()
+}
+
+/// Re-export the shared 10-minute symmetric replay window for group-invite
+/// revoke callers (same freshness ceiling as the other revoke surfaces, a
+/// distinct domain separator).
+pub use crate::invite::REVOKE_REPLAY_WINDOW_MS as GROUP_INVITE_REVOKE_REPLAY_WINDOW_MS;
+
+// ============================================================================
 // Tests
 // ============================================================================
 
@@ -419,5 +463,48 @@ mod tests {
         )
         .unwrap();
         assert_ne!(cap_a.issuer_fingerprint(), cap_b.issuer_fingerprint());
+    }
+
+    #[test]
+    fn revoke_canonical_bytes_layout_is_stable() {
+        let blob_id = [0x33u8; BLOB_ID_LEN];
+        let bytes = group_revoke_canonical_bytes(&blob_id, 0x0102_0304_0506_0708);
+        assert_eq!(
+            bytes.len(),
+            GROUP_INVITE_REVOKE_DOMAIN_V1.len() + BLOB_ID_LEN + 8
+        );
+        assert!(bytes.starts_with(GROUP_INVITE_REVOKE_DOMAIN_V1));
+        assert_eq!(
+            &bytes[bytes.len() - 8..],
+            &0x0102_0304_0506_0708u64.to_be_bytes()
+        );
+    }
+
+    #[test]
+    fn revoke_signature_verifies_under_issuer_key() {
+        let issuer = fixture_signing();
+        let blob_id = [0x44u8; BLOB_ID_LEN];
+        let sig_bytes = group_sign_revocation(&issuer, &blob_id, 1_700_000_000_000);
+        let canonical = group_revoke_canonical_bytes(&blob_id, 1_700_000_000_000);
+        let sig = Signature::from_bytes(&sig_bytes).unwrap();
+        assert!(issuer.verifying_key().verify(&canonical, &sig).is_ok());
+        // A different signed_at_ms produces different canonical bytes → reject.
+        let stale = group_revoke_canonical_bytes(&blob_id, 1_699_999_999_999);
+        assert!(issuer.verifying_key().verify(&stale, &sig).is_err());
+    }
+
+    #[test]
+    fn revoke_domain_isolates_from_call_invite() {
+        // A group-invite revoke signature MUST NOT verify against the
+        // call-invite revoke canonical bytes (distinct domain prefix).
+        let issuer = fixture_signing();
+        let blob_id = [0x55u8; BLOB_ID_LEN];
+        let sig_bytes = group_sign_revocation(&issuer, &blob_id, 42);
+        let sig = Signature::from_bytes(&sig_bytes).unwrap();
+        let call_canonical = crate::call_invite::call_revoke_canonical_bytes(&blob_id, 42);
+        assert!(issuer
+            .verifying_key()
+            .verify(&call_canonical, &sig)
+            .is_err());
     }
 }

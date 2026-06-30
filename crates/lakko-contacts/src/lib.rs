@@ -83,7 +83,9 @@ pub use call_welcome::{
 pub use error::{ContactError, Result};
 pub use group_invite::{
     compose as compose_group_invite, decode_and_verify as decode_and_verify_group_invite,
-    GroupInviteCapability, GROUP_INVITE_NEVER_EXPIRES, MAX_GROUP_ID_LEN,
+    group_revoke_canonical_bytes, group_sign_revocation, GroupInviteCapability,
+    GROUP_INVITE_NEVER_EXPIRES, GROUP_INVITE_REVOKE_DOMAIN_V1,
+    GROUP_INVITE_REVOKE_REPLAY_WINDOW_MS, MAX_GROUP_ID_LEN,
 };
 pub use group_join_attribution::{
     compose_attribution as compose_group_join_attribution,

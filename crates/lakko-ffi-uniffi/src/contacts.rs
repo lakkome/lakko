@@ -44,6 +44,7 @@ use lakko_contacts::call_welcome::{
 };
 use lakko_contacts::group_invite::{
     compose as rust_group_invite_compose, decode_and_verify as rust_group_invite_decode,
+    group_sign_revocation as rust_group_sign_revocation,
     GroupInviteCapability as RustGroupInviteCapability, MAX_GROUP_ID_LEN,
 };
 use lakko_contacts::group_join_attribution::{
@@ -1383,6 +1384,39 @@ pub fn compose_group_invite_capability(
     Ok(rust_group_invite_compose(&signing, &group_id, expiry_ms)?)
 }
 
+/// Owner-side: sign a group-invite revocation (ADR-0028 revoke). Returns the
+/// 64-byte Ed25519 signature over the group-invite revoke canonical bytes
+/// (`DELETE /discovery/group-invite/{blob_id}` body). `issuer_signing_seed` is
+/// the 32-byte Ed25519 seed that minted the link; `blob_id` is the 32-byte
+/// content-addressed id.
+///
+/// # Errors
+///
+/// [`FfiError::Contacts`] for a wrong-length seed or `blob_id`.
+#[uniffi::export]
+pub fn sign_group_invite_revocation(
+    issuer_signing_seed: Vec<u8>,
+    blob_id: Vec<u8>,
+    signed_at_ms: u64,
+) -> Result<Vec<u8>, FfiError> {
+    if issuer_signing_seed.len() != 32 {
+        return Err(FfiError::Contacts(
+            "issuerSigningSeed must be 32 bytes".to_string(),
+        ));
+    }
+    let mut seed = [0u8; 32];
+    seed.copy_from_slice(&issuer_signing_seed);
+    let signing = SigningKey::from_seed(&seed);
+    if blob_id.len() != BLOB_ID_LEN {
+        return Err(FfiError::Contacts(format!(
+            "blobId must be {BLOB_ID_LEN} bytes",
+        )));
+    }
+    let mut blob_id_arr = [0u8; BLOB_ID_LEN];
+    blob_id_arr.copy_from_slice(&blob_id);
+    Ok(rust_group_sign_revocation(&signing, &blob_id_arr, signed_at_ms).to_vec())
+}
+
 /// Composed + verified group join-ticket capability (ADR-0028). Mirror of
 /// [`lakko_contacts::GroupInviteCapability`].
 #[derive(uniffi::Object)]
@@ -1458,21 +1492,24 @@ pub struct GroupJoinAttribution {
     pub expiry_ms: u64,
 }
 
-/// Joiner-side: compose the attribution envelope binding the joiner's MLS leaf
-/// signature key to the `GroupInviteCapability` wire bytes it used (ADR-0028
-/// OQ2). The joiner posts this to the group journal alongside its external-join
-/// proposal so the approving admin can see which member's link it came on.
+/// Joiner-side: compose + self-sign the attribution envelope binding the
+/// joiner's `GroupInviteCapability` to its MLS leaf signature key (ADR-0028
+/// OQ2). `joiner_signing_seed` is the joiner's 32-byte Ed25519 identity seed
+/// (`Identity.ed25519Seed`); the envelope embeds the matching verifying key and
+/// is signed with it, so the admin can verify the attribution is authentic. The
+/// joiner posts this to the group journal alongside its external-join proposal.
 ///
 /// # Errors
 ///
-/// [`FfiError::Contacts`] when either input is empty or exceeds its bound.
+/// [`FfiError::Contacts`] when the seed is not 32 bytes or the capability is
+/// empty / exceeds its bound.
 #[uniffi::export]
 pub fn compose_group_join_attribution(
-    joiner_signature_key: Vec<u8>,
+    joiner_signing_seed: Vec<u8>,
     capability_bytes: Vec<u8>,
 ) -> Result<Vec<u8>, FfiError> {
     Ok(rust_group_join_attribution_compose(
-        &joiner_signature_key,
+        &joiner_signing_seed,
         &capability_bytes,
     )?)
 }

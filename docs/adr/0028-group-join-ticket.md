@@ -199,9 +199,22 @@ shipped** (ADR-0027). This ADR adds: the `GroupInviteCapability` codec + FFI;
 
 ## Open questions
 
-1. **Single-use / max-uses tickets.** v1 mints a non-revocable, expiry-bounded
-   link. Revocation + a use counter want the ADR-0009 content-addressed blob
-   ledger (alternative 3) — a Phase-2 hardening.
+1. **Single-use / max-uses tickets + revocation.** ~~v1 mints a non-revocable,
+   expiry-bounded link. Revocation + a use counter want the ADR-0009
+   content-addressed blob ledger (alternative 3) — a Phase-2 hardening.~~
+   **RESOLVED.** The blob ledger landed (`services/discovery/src/group_invite.rs`
+   + migrations `0014`/`0015`) with a soft `max_uses` counter, and **revocation**
+   is now implemented end-to-end: `lakko_contacts::group_invite`
+   (`group_revoke_canonical_bytes` + `group_sign_revocation`, domain
+   `lakko-group-invite-revoke/v1`, ±10-min replay window — cross-kind-isolated
+   from the contact-/call-invite revoke domains) + `DELETE
+   /discovery/group-invite/{blob_id}` (issuer-signed; the server recovers the
+   issuer key from the stored capability's `issuer_signature_pubkey`, verifies,
+   and DELETEs — the FK CASCADE reaps the consumer side-table; 404-folds a
+   wrong-signer / missing row) + FFI `signGroupInviteRevocation` (UniFFI + wasm)
+   + a "Revoke link" affordance on the owner's members panel (web + iOS +
+   Android), revocable for the server-backed pointer form (an inline link has no
+   ledger row). A leaked pointer link can now be killed before any stranger asks.
 2. **Issuer-not-in-roster rejection.** ~~The admin UI *can* check
    `issuer_pubkey ∈ roster` before approving (a forged link names a non-member
    issuer); whether to enforce it or just surface it is a Phase-2 UX call.~~
@@ -220,9 +233,18 @@ shipped** (ADR-0027). This ADR adds: the `GroupInviteCapability` codec + FFI;
    surfaces per pending request "via &lt;issuer fingerprint&gt; · member / not a
    current member" (checking `issuer_pubkey ∈ group.members()`). It is
    **advisory** — the role-gated approval gate (ADR-0027) stays the security
-   boundary; a missing / spoofed attribution only mis-displays the source and
-   never blocks or grants. A joiner self-signature over the attribution (binding
-   it to the proposing leaf) is a noted future hardening.
+   boundary; a missing attribution just shows "invite source unknown" and never
+   blocks or grants. **Anti-spoof (v2):** the envelope is **self-signed by the
+   joiner** — `compose_attribution` takes the joiner's 32-byte Ed25519 identity
+   seed and signs a domain-separated (`lakko/group-join-attribution/v1`) prefix;
+   the embedded `joiner_signature_key` is the matching verifying key, which in
+   Lakko **is** the MLS leaf key (identity signature key, same seed) and exactly
+   the key the admin matches against the proposal's KeyPackage leaf. So
+   `decode_attribution` verifies the signature against the embedded key, binding
+   the attribution to the actual proposing leaf — a stranger cannot post an
+   attribution claiming a joiner key whose private half they do not hold. The
+   wire bumped to v2 (`version ‖ joiner_sig_key(32) ‖ cap_len ‖ capability ‖
+   sig(64)`); an unsigned v1 envelope is refused.
 3. **Channel PublisherGroup reuse.** ~~When ADR-0010 channels land, adding a
    *publisher* (an MLS member of the PublisherGroup) reuses this ticket
    verbatim; the channel *subscriber* path stays sender-key (ADR-0010) and does
