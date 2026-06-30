@@ -264,11 +264,22 @@ shipped** (ADR-0027). This ADR adds: the `GroupInviteCapability` codec + FFI;
    (`groupId` / `processIncomingVerifyingRoles` / `pendingExternalJoins` /
    `approveExternalJoin` / `rejectExternalJoin`) exposed on the FFI
    `PublisherGroup` (UniFFI + wasm), delegating to the inner Group. The
-   subscriber path stays sender-key (ADR-0010), untouched. **Residual:** a
-   client co-publisher *management UI* (a "create co-publisher link" affordance
-   on the channel screen + a pending-requests panel) — the enabling FFI is now
-   present, but a channel co-admin product surface to drive it is a follow-up
-   (the channel screens are publisher-self / subscriber today).
+   subscriber path stays sender-key (ADR-0010), untouched. **Owner-side web UI
+   landed** (`apps/web/src/channels/copublisher.ts` + a `CoPublishersPanel` in
+   `Channels.tsx`): the channel owner opens the persistent `PublisherGroup`
+   handle, mints a `/g/` co-publisher link over its `group_id`, runs a 5 s DS
+   **journal poll loop** (`processIncomingVerifyingRoles` — the first
+   DS-journal/membership transport the channel client ever had; channels were
+   single-publisher before), and approves / rejects pending requests from a
+   panel. **Reseal-after-add (load-bearing):** `approveExternalJoin` commits the
+   Add → the MLS epoch advances → the channel content-key seed changes, so the
+   approve path RESEALS the new-epoch seed to every subscriber via the audited
+   `sealSubscriberSeedEnvelope` + atomic `POST /v1/channels/:id/rotate` fanout
+   (the rotation-cron path, but WITHOUT a second `rotate()` — the Add already
+   advanced the epoch), else existing subscribers would break. `tsc` clean.
+   **Residual:** the joiner-side request-to-join-a-channel flow + the iOS /
+   Android mirrors + a live 2-publisher e2e of the reseal (no deployed channels
+   env, the same gate every other live-channel path carries).
 
 ## References
 

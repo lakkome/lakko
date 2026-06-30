@@ -60,7 +60,17 @@ import {
   utf8Decode,
   utf8Encode,
   verifyAndDecryptPost,
+  type WasmIdentity,
 } from "../channels/composer";
+import {
+  approveCoPublisher,
+  createCoPublisherLink,
+  openPublisherGroup,
+  pendingCoPublishers,
+  pollCoPublisherJournal,
+  rejectCoPublisher,
+} from "../channels/copublisher";
+import { DsClient } from "../ds/client";
 import { useAuth } from "../auth/AuthContext";
 import { channelsActions, channelsState } from "../state/channels-state";
 import { loadWasm } from "../wasm";
@@ -666,6 +676,7 @@ const ChannelView: Component = () => {
         </form>
 
         <SubscribersPanel channelIdHex={params.id} />
+        <CoPublishersPanel channelIdHex={params.id} />
       </Show>
 
       <h2 style={{ margin: "0 0 12px 0", "font-size": "16px" }}>Posts</h2>
@@ -754,6 +765,288 @@ const ChannelView: Component = () => {
             )}
           </For>
         </ul>
+      </Show>
+    </div>
+  );
+};
+
+// ============================================================================
+// CoPublishersPanel — owner-side co-publisher management (ADR-0028 OQ3)
+// (lives inside ChannelView when the user holds publisher keys)
+// ============================================================================
+
+/** Poll cadence for the PublisherGroup DS journal — same 5 s trade-off as the
+ *  subscriber fan-out. */
+const COPUBLISHER_POLL_INTERVAL_MS = 5_000;
+
+const CoPublishersPanel: Component<{ readonly channelIdHex: string }> = (
+  props,
+) => {
+  const auth = useAuth();
+  const [link, setLink] = createSignal<string | null>(null);
+  const [pending, setPending] = createSignal<Uint8Array[]>([]);
+  const [busy, setBusy] = createSignal(false);
+  const [error, setError] = createSignal<string | null>(null);
+
+  const ds = new DsClient();
+  // Long-lived wasm handles for the panel's lifetime; freed on cleanup.
+  let identity: WasmIdentity | null = null;
+  let pg: Awaited<ReturnType<typeof openPublisherGroup>> | null = null;
+  let stopped = false;
+
+  function hexOf(b: Uint8Array): string {
+    let s = "";
+    for (const x of b) s += x.toString(16).padStart(2, "0");
+    return s;
+  }
+
+  async function ensureHandles(): Promise<boolean> {
+    if (pg !== null && identity !== null) return true;
+    const secrets = auth.identitySecrets();
+    if (secrets === null) return false;
+    const wasm = await loadWasm();
+    identity = wasm.Identity.fromSeed(secrets.accountIdentitySeed);
+    pg = await openPublisherGroup(identity, props.channelIdHex);
+    return true;
+  }
+
+  async function refreshPending(): Promise<void> {
+    if (!(await ensureHandles()) || pg === null || identity === null) return;
+    try {
+      await pollCoPublisherJournal(ds, identity, pg);
+      setPending(pendingCoPublishers(pg));
+    } catch (err) {
+      setError(`Co-publisher poll failed: ${String(err)}`);
+    }
+  }
+
+  async function onCreateLink(): Promise<void> {
+    setError(null);
+    setBusy(true);
+    try {
+      if (!(await ensureHandles()) || pg === null || identity === null) {
+        setError("Log in to create a co-publisher link.");
+        return;
+      }
+      setLink(await createCoPublisherLink(identity, pg, window.location.origin));
+    } catch (err) {
+      setError(`Create link failed: ${String(err)}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function onApprove(ref: Uint8Array): Promise<void> {
+    setError(null);
+    setBusy(true);
+    try {
+      if (pg === null || identity === null) return;
+      await approveCoPublisher(ds, identity, pg, ref, props.channelIdHex);
+      setPending(pendingCoPublishers(pg));
+    } catch (err) {
+      setError(`Approve failed: ${String(err)}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function onReject(ref: Uint8Array): void {
+    setError(null);
+    try {
+      if (pg === null) return;
+      rejectCoPublisher(pg, ref);
+      setPending(pendingCoPublishers(pg));
+    } catch (err) {
+      setError(`Reject failed: ${String(err)}`);
+    }
+  }
+
+  // First poll + periodic loop. Cancelled on cleanup.
+  void refreshPending();
+  const handle = setInterval(() => {
+    if (!stopped) void refreshPending();
+  }, COPUBLISHER_POLL_INTERVAL_MS);
+
+  onCleanup(() => {
+    stopped = true;
+    clearInterval(handle);
+    try {
+      pg?.free();
+    } catch {
+      /* ignore */
+    }
+    try {
+      identity?.free();
+    } catch {
+      /* ignore */
+    }
+  });
+
+  return (
+    <div
+      style={{
+        margin: "0.6rem 0 0 0",
+        padding: "0.5rem",
+        border: "1px dashed var(--surface-border)",
+        "border-radius": "var(--radius-sm)",
+        background: "var(--surface-bg)",
+      }}
+    >
+      <h3
+        style={{
+          "font-size": "0.8rem",
+          "text-transform": "uppercase",
+          "letter-spacing": "0.04em",
+          color: "var(--surface-muted)",
+          margin: "0 0 0.4rem 0",
+        }}
+      >
+        Co-publishers
+      </h3>
+      <button
+        type="button"
+        disabled={busy()}
+        onClick={() => void onCreateLink()}
+        style={{
+          "font-size": "0.78rem",
+          padding: "0.25rem 0.5rem",
+          "border-radius": "var(--radius-sm)",
+          border: "1px solid var(--surface-border)",
+          background: "var(--surface-bg)",
+          color: "var(--surface-fg)",
+          cursor: "pointer",
+        }}
+      >
+        Create co-publisher link
+      </button>
+      <Show when={link() !== null}>
+        <div
+          style={{
+            display: "flex",
+            gap: "0.3rem",
+            "align-items": "center",
+            "margin-top": "0.4rem",
+          }}
+        >
+          <input
+            type="text"
+            readonly
+            value={link() ?? ""}
+            style={{
+              flex: "1",
+              "font-size": "0.72rem",
+              "font-family": "monospace",
+              padding: "0.2rem 0.35rem",
+              "border-radius": "var(--radius-sm)",
+              border: "1px solid var(--surface-border)",
+              background: "var(--surface)",
+              color: "var(--surface-fg)",
+              "min-width": "0",
+            }}
+          />
+          <button
+            type="button"
+            onClick={() => {
+              const l = link();
+              if (l) void navigator.clipboard?.writeText(l);
+            }}
+            style={{
+              "font-size": "0.72rem",
+              padding: "0.2rem 0.45rem",
+              "border-radius": "var(--radius-sm)",
+              border: "1px solid var(--accent)",
+              background: "var(--accent)",
+              color: "var(--accent-fg)",
+              cursor: "pointer",
+            }}
+          >
+            Copy
+          </button>
+        </div>
+      </Show>
+      <Show when={pending().length > 0}>
+        <ul
+          style={{
+            "list-style": "none",
+            padding: 0,
+            margin: "0.4rem 0 0 0",
+            display: "flex",
+            "flex-direction": "column",
+            gap: "0.3rem",
+          }}
+        >
+          <For each={pending()}>
+            {(ref) => (
+              <li
+                style={{
+                  display: "flex",
+                  "align-items": "center",
+                  "justify-content": "space-between",
+                  gap: "0.5rem",
+                }}
+              >
+                <span
+                  title={hexOf(ref)}
+                  style={{
+                    "font-family": "monospace",
+                    "font-size": "0.75rem",
+                    color: "var(--surface-fg)",
+                    overflow: "hidden",
+                    "text-overflow": "ellipsis",
+                    "white-space": "nowrap",
+                  }}
+                >
+                  {hexOf(ref).slice(0, 16)}…
+                </span>
+                <span style={{ display: "flex", gap: "0.3rem" }}>
+                  <button
+                    type="button"
+                    disabled={busy()}
+                    onClick={() => void onApprove(ref)}
+                    style={{
+                      "font-size": "0.75rem",
+                      padding: "0.2rem 0.45rem",
+                      "border-radius": "var(--radius-sm)",
+                      border: "1px solid var(--accent)",
+                      background: "var(--accent)",
+                      color: "var(--accent-fg)",
+                      cursor: "pointer",
+                    }}
+                  >
+                    Approve
+                  </button>
+                  <button
+                    type="button"
+                    disabled={busy()}
+                    onClick={() => onReject(ref)}
+                    style={{
+                      "font-size": "0.75rem",
+                      padding: "0.2rem 0.45rem",
+                      "border-radius": "var(--radius-sm)",
+                      border: "1px solid var(--surface-border)",
+                      background: "transparent",
+                      color: "var(--surface-fg)",
+                      cursor: "pointer",
+                    }}
+                  >
+                    Reject
+                  </button>
+                </span>
+              </li>
+            )}
+          </For>
+        </ul>
+      </Show>
+      <Show when={error() !== null}>
+        <p
+          style={{
+            "font-size": "0.72rem",
+            color: "var(--danger, #c0392b)",
+            margin: "0.4rem 0 0 0",
+          }}
+        >
+          {error()}
+        </p>
       </Show>
     </div>
   );
