@@ -101,6 +101,17 @@ struct ChannelsListScreen: View {
         }
         .navigationTitle("Channels")
         .toolbar {
+            ToolbarItem(placement: .topBarLeading) {
+                NavigationLink {
+                    JoinCoPublisherScreen(
+                        state: state,
+                        accountIdentitySeed: accountIdentitySeed
+                    )
+                } label: {
+                    Image(systemName: "person.badge.plus")
+                        .foregroundStyle(Theme.accent)
+                }
+            }
             ToolbarItem(placement: .topBarTrailing) {
                 NavigationLink {
                     NewChannelScreen(
@@ -1238,5 +1249,128 @@ struct CoPublishersPanelView: View {
 
     private static func shortHex(_ data: Data) -> String {
         data.prefix(8).map { String(format: "%02x", $0) }.joined() + "…"
+    }
+}
+
+// ============================================================================
+// JoinCoPublisherScreen — joiner-side route
+// ============================================================================
+
+/// ADR-0028 OQ3 — joiner side: paste a `/g/` co-publisher link, request to
+/// join, poll until the owner approves, then mint local publisher keys + open
+/// the channel. Mirror of the web `onJoinAsCoPublisher` flow
+/// (`apps/web/src/routes/Channels.tsx`).
+struct JoinCoPublisherScreen: View {
+    @ObservedObject var state: ChannelsUiState
+    let accountIdentitySeed: Data
+    @Environment(\.dismiss) private var dismiss
+
+    @State private var link: String = ""
+    @State private var localName: String = ""
+    @State private var busy = false
+    @State private var status: String?
+    @State private var errorMessage: String?
+
+    private let ds = DsClient()
+
+    /// Number of poll attempts (every 3 s) before giving up — mirrors the web
+    /// 60 x 3 s window.
+    private static let pollAttempts = 60
+    private static let pollIntervalNs: UInt64 = 3 * 1_000_000_000
+
+    var body: some View {
+        ZStack {
+            Theme.background.ignoresSafeArea()
+            Form {
+                Section {
+                    TextField("Paste a /g/ co-publisher link", text: $link, axis: .vertical)
+                        .lineLimit(2...4)
+                        .listRowBackground(Theme.surface)
+                        .foregroundStyle(Theme.textPrimary)
+                        .autocorrectionDisabled()
+                        .textInputAutocapitalization(.never)
+                    TextField("Local name (optional)", text: $localName)
+                        .listRowBackground(Theme.surface)
+                        .foregroundStyle(Theme.textPrimary)
+                } footer: {
+                    Text(
+                        "The channel owner shares a co-publisher link. After they approve your request, this device can publish to the channel."
+                    )
+                    .foregroundStyle(Theme.textSecondary)
+                }
+                if let status {
+                    Section {
+                        Text(status)
+                            .foregroundStyle(Theme.textSecondary)
+                            .listRowBackground(Theme.surface)
+                    }
+                }
+                if let errorMessage {
+                    Section {
+                        Text(errorMessage)
+                            .foregroundStyle(.white)
+                            .listRowBackground(Theme.destructive)
+                    }
+                }
+            }
+            .scrollContentBackground(.hidden)
+        }
+        .navigationTitle("Join as co-publisher")
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button(busy ? "Requesting…" : "Request") {
+                    Task { await join() }
+                }
+                .disabled(busy || link.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+    }
+
+    private func join() async {
+        if busy { return }
+        let trimmed = link.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty { return }
+        busy = true
+        errorMessage = nil
+        status = "Requesting…"
+        defer {
+            busy = false
+            status = nil
+        }
+        do {
+            let identity = try Identity.fromSeed(seed: accountIdentitySeed)
+            let request = try await CoPublisher.requestToCoPublish(
+                ds: ds, identity: identity, link: trimmed)
+            status = "Waiting for the channel owner to approve…"
+            var keys: ChannelPublisherKeys?
+            for _ in 0..<Self.pollAttempts where keys == nil {
+                keys = try await CoPublisher.pollForCoPublishWelcome(
+                    ds: ds,
+                    identity: identity,
+                    groupId: request.groupId,
+                    joinerKey: request.joinerKey,
+                    channelIdHex: request.channelIdHex
+                )
+                if keys == nil {
+                    try? await Task.sleep(nanoseconds: Self.pollIntervalNs)
+                }
+            }
+            guard let keys else {
+                errorMessage =
+                    "Timed out waiting for approval — try again once the owner has approved."
+                return
+            }
+            let name = localName.trimmingCharacters(in: .whitespaces)
+            state.addChannel(.init(
+                id: request.channelIdHex,
+                localName: name.isEmpty ? "Co-published channel" : name,
+                localDescription: "",
+                addedAtMs: UInt64(Date().timeIntervalSince1970 * 1000)
+            ))
+            state.setKeys(channelId: request.channelIdHex, keys: keys)
+            dismiss()
+        } catch {
+            errorMessage = "Co-publish failed: \(error.localizedDescription)"
+        }
     }
 }

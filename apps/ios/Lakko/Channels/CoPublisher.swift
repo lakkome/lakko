@@ -127,6 +127,100 @@ public enum CoPublisher {
         try publisherGroup.rejectExternalJoin(proposalRef: proposalRef)
     }
 
+    // MARK: - Joiner side — a prospective co-publisher requests + joins
+
+    /// Handles a `requestToCoPublish` returns so the caller can drive the poll
+    /// loop (`pollForCoPublishWelcome`).
+    public struct CoPublishRequest {
+        /// The PublisherGroup's MLS `group_id` (the journal channel to poll).
+        public let groupId: Data
+        /// The 32-char lowercase-hex channel id recovered from the `group_id`.
+        public let channelIdHex: String
+        /// This device's leaf signature key — matches the `WelcomeRendezvous`
+        /// the owner posts after approving.
+        public let joinerKey: Data
+    }
+
+    /// ADR-0028 OQ3 — joiner side: request to become a co-publisher of a channel
+    /// from a `/g/` co-publisher link. Decodes + verifies the capability,
+    /// recovers the channel id from the PublisherGroup `group_id` (the link
+    /// conveys only the `group_id`), reads the group's current epoch from its DS
+    /// journal head's public framing (`epochOfMessage`, no group secret), crafts
+    /// an external-join proposal (ADR-0027), and posts it + a self-signed
+    /// join-attribution (OQ2) to the journal. The caller then polls with
+    /// `pollForCoPublishWelcome`.
+    public static func requestToCoPublish(
+        ds: DsClient,
+        identity: Identity,
+        link: String
+    ) async throws -> CoPublishRequest {
+        guard let idx = link.range(of: urlPrefix, options: .backwards) else {
+            throw CoPublisherError.notACoPublisherLink(link)
+        }
+        let slug = String(link[idx.upperBound...])
+        guard let wire = Self.base64UrlDecode(slug) else {
+            throw CoPublisherError.notACoPublisherLink(link)
+        }
+        let cap = try GroupInviteCapability.decodeAndVerify(wire: wire)
+        let groupId = cap.groupId()
+        guard let channelIdBytes = channelIdFromPublisherGroupId(groupId: groupId) else {
+            throw CoPublisherError.notAChannelGroup
+        }
+        let channelIdHex = ChannelsComposer.bytesToHex(channelIdBytes)
+        // Read the current epoch from the journal head (public framing; a
+        // non-member can do this). Empty / unreachable journal => epoch 0.
+        var epoch: UInt64 = 0
+        if let raw = try? await ds.fetchGroup(groupId: groupId, after: 0, waitSecs: 0) {
+            for m in raw.messages {
+                if let e = epochOfMessage(bytes: m.payload) { epoch = e }
+            }
+        }
+        let proposal = try identity.createExternalJoinProposal(groupId: groupId, epoch: epoch)
+        _ = try await ds.publishGroup(groupId: groupId, payload: proposal)
+        // Self-signed join attribution (OQ2) — advisory; best-effort.
+        if let attribution = try? composeGroupJoinAttribution(
+            joinerSigningSeed: identity.ed25519Seed(),
+            capabilityBytes: wire
+        ) {
+            _ = try? await ds.publishGroup(groupId: groupId, payload: attribution)
+        }
+        return CoPublishRequest(
+            groupId: groupId,
+            channelIdHex: channelIdHex,
+            joinerKey: identity.signaturePublicKey()
+        )
+    }
+
+    /// ADR-0028 OQ3 — joiner side: poll the PublisherGroup journal for the
+    /// Welcome the owner posted after approving, join from it, and mint local
+    /// publisher keys so this device can now publish to the channel. The joined
+    /// group lands at the post-approve epoch — the same one the subscribers were
+    /// resealed to — so the derived `channelSeed` matches. Returns the keys on
+    /// success, or `nil` if no Welcome has arrived yet (keep polling).
+    public static func pollForCoPublishWelcome(
+        ds: DsClient,
+        identity: Identity,
+        groupId: Data,
+        joinerKey: Data,
+        channelIdHex: String
+    ) async throws -> ChannelPublisherKeys? {
+        let raw = try await ds.fetchGroup(groupId: groupId, after: 0, waitSecs: 0)
+        for m in raw.messages {
+            guard let rendezvous = try? parseWelcomeRendezvous(bytes: m.payload) else { continue }
+            guard rendezvous.joinerSignatureKey == joinerKey else { continue }
+            // Join the PublisherGroup from the Welcome — this persists the joined
+            // MLS state under the deterministic PublisherGroup `group_id` in the
+            // identity's provider. The handle itself is throwaway (ARC frees it);
+            // `freshPublisherKeys` re-opens the now-joined PublisherGroup by
+            // channel id and derives the shared content-key seed + a fresh
+            // per-device signing key so this device can publish.
+            _ = try Group.joinFromWelcome(welcome: rendezvous.welcome, identity: identity)
+            return try ChannelsComposer.freshPublisherKeys(
+                identity: identity, channelIdHex: channelIdHex)
+        }
+        return nil
+    }
+
     /// Reseal the CURRENT (post-approve) channel seed to all subscribers — the
     /// `RotationCron` fanout WITHOUT advancing the MLS epoch (the Add already
     /// did). Binds the envelopes to the new server epoch the `/rotate` endpoint
@@ -189,6 +283,17 @@ public enum CoPublisher {
             .replacingOccurrences(of: "/", with: "_")
             .replacingOccurrences(of: "=", with: "")
     }
+
+    static func base64UrlDecode(_ slug: String) -> Data? {
+        var s = slug
+            .replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/")
+        let remainder = s.count % 4
+        if remainder != 0 {
+            s.append(String(repeating: "=", count: 4 - remainder))
+        }
+        return Data(base64Encoded: s)
+    }
 }
 
 /// Errors surfaced by the co-publisher owner flow.
@@ -196,6 +301,8 @@ public enum CoPublisherError: Error, LocalizedError {
     case badChannelId(String)
     case unexpectedServerEpoch(UInt32)
     case malformedSubscriberHex(String)
+    case notACoPublisherLink(String)
+    case notAChannelGroup
 
     public var errorDescription: String? {
         switch self {
@@ -205,6 +312,10 @@ public enum CoPublisherError: Error, LocalizedError {
             return "unexpected server epoch \(epoch) — cannot reseal"
         case .malformedSubscriberHex(let hex):
             return "subscriber pubkey hex is not valid: \(hex)"
+        case .notACoPublisherLink(let link):
+            return "not a /g/ co-publisher link: \(link)"
+        case .notAChannelGroup:
+            return "co-publisher link does not target a channel PublisherGroup"
         }
     }
 }
