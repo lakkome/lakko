@@ -1,18 +1,26 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
-//! RFC 9605 §4.3 SFrame frame-header encoder + decoder.
+//! Lakko custom SFrame-style frame-header encoder + decoder.
 //!
-//! Closes the wire-format half of **G-26** (see
-//! [`docs/security/known-gaps.md`](../../../docs/security/known-gaps.md)).
-//! The keying math half lives in [`crate::sframe`] and was
-//! already RFC 9605 §4.4 conformant; this module adds the
-//! `Config|KID|CTR` bit-packed layout that lets a Lakko
-//! frame be interoperable byte-for-byte with any other
-//! RFC 9605 implementation (browser-native SFrame transform,
-//! mlspp, the spec's reference vectors).
+//! **Not RFC 9605 §4.3 wire-compatible.** This is a Lakko-internal
+//! header layout that conveys the same `(KID, CTR)` pair an SFrame
+//! header carries and is bound as the AEAD AAD per ADR-0013, but its
+//! byte packing differs from RFC 9605 §4.3 (see "Divergence from
+//! RFC 9605 §4.3" below). Every Lakko stack — the Rust core, the
+//! `lakko-sframe-native` C ABI, the web wasm worker, iOS, Android —
+//! pins the same golden vector and agrees byte-for-byte, so
+//! Lakko-to-Lakko calls interoperate by proven equality. A non-Lakko
+//! RFC 9605 stack (mlspp, Cisco libsframe, a browser-native SFrame
+//! transform) would compute a DIFFERENT header, and because the header
+//! IS the AEAD AAD it would fail to open a Lakko frame and vice versa.
+//! External-stack interop is therefore broken by design — tracked as
+//! **G-26 / GA-2** (see
+//! [`docs/security/known-gaps.md`](../../../docs/security/known-gaps.md));
+//! a true §4.3 rewrite is a deliberate future arc gated on an external
+//! SFrame stack becoming a deployment target, not a current gap.
 //!
-//! ## Layout (RFC 9605 §4.3)
+//! ## Layout (Lakko custom)
 //!
 //! The header is variable-length. The first byte is laid
 //! out in big-endian bit order (bit 7 = MSB, bit 0 = LSB):
@@ -25,7 +33,8 @@
 //! - **R** (bit 7) — reserved, MUST be 0. The decoder
 //!   rejects frames with R=1.
 //! - **L** (bits 6-4) — counter length minus 1. Range
-//!   `0..=7`, encoding counter widths `1..=8` bytes.
+//!   `0..=7`, encoding counter widths `1..=8` bytes. There is
+//!   no inline-CTR form: even `CTR=0` emits one trailing byte.
 //! - **X** (bit 3) — extended-KID flag.
 //! - **K** (bits 2-0) —
 //!     * if X=0: the KID itself (range `0..=7`); the KID
@@ -39,15 +48,26 @@
 //!   follow.
 //! - finally, `LEN+1` bytes of counter, big-endian.
 //!
+//! ## Divergence from RFC 9605 §4.3
+//!
+//! RFC 9605 §4.3 packs the first byte as `X(bit7) | K(bits6-4) |
+//! Y(bit3) | C(bits2-0)`, where `Y` is an extended-CTR flag and a
+//! `CTR<=7` is carried INLINE in `C` with no trailing CTR byte (and a
+//! `KID<=7` inline in `K`). Lakko's layout instead puts the reserved
+//! bit at the MSB, the CTR length in bits 6-4, has no inline-CTR form,
+//! and the extended-KID flag at bit 3. The two produce different bytes
+//! on every input — e.g. `(kid=0, ctr=0)` is `0x00 0x00` here versus
+//! the single byte `0x00` under §4.3. The fields conveyed are the same
+//! `(KID, CTR)`; only the wire packing differs.
+//!
 //! ## Why a u64 for both fields
 //!
-//! RFC 9605 caps the KID + CTR at `2^64 − 1`. The Lakko
-//! call-keying layer uses a `u32` per-leaf counter
-//! ([`crate::sframe`]'s `ParticipantKey`), but the wire
-//! format is intentionally wider — leaving the 64-bit
-//! ceiling intact keeps the encoder usable by future
-//! schemes (channel sender-keys, cross-call key
-//! rotations) without a wire-format break.
+//! RFC 9605 caps the KID + CTR at `2^64 − 1` and Lakko keeps the same
+//! 64-bit ceiling. The Lakko call-keying layer uses a `u32` per-leaf
+//! counter ([`crate::sframe`]'s `ParticipantKey`), but the wire
+//! format is intentionally wider — leaving the 64-bit ceiling intact
+//! keeps the encoder usable by future schemes (channel sender-keys,
+//! cross-call key rotations) without a wire-format break.
 //!
 //! ## What is NOT in this module
 //!
@@ -58,14 +78,13 @@
 //!   bytes to route by participant without decrypting. The
 //!   raw `(frame_counter, ciphertext)` `seal` / `open` pair
 //!   stays available for callers that supply their own AAD.
-//! - External interop verification against mlspp / browser
-//!   native — still deferred (known gap G-26): it needs two
-//!   independent implementations exchanging real frames over
-//!   a deployed SFU. The self-consistency tests in this
-//!   module cover the entire wire shape against the spec;
-//!   the remaining "do two non-Lakko stacks agree with us
-//!   byte-for-byte?" question becomes answerable only when at
-//!   least one external stack is in the loop.
+//! - External interop with a non-Lakko RFC 9605 stack — broken by
+//!   design (different first-byte layout, no inline CTR), see
+//!   "Divergence from RFC 9605 §4.3" above + G-26 / GA-2. The
+//!   self-consistency tests in this module pin Lakko's OWN wire shape
+//!   (round-trip + bit-packing), which is what guarantees
+//!   Lakko-to-Lakko byte-equality; they do NOT assert RFC 9605 §4.3
+//!   conformance.
 
 use thiserror::Error;
 
@@ -82,9 +101,11 @@ pub enum HeaderError {
         had: usize,
     },
 
-    /// Reserved bit (R) was set in the first byte. RFC 9605
-    /// §4.3 mandates R=0; we treat any other value as a
-    /// version-drift signal and refuse to decode.
+    /// Reserved bit (R) was set in the first byte. Lakko's
+    /// custom header reserves bit 7; we treat any non-zero
+    /// value as a version-drift signal and refuse to decode.
+    /// (Note: RFC 9605 §4.3 has no reserved bit here — its
+    /// bit 7 is the extended-KID flag; see the module docs.)
     #[error("reserved bit set in first header byte")]
     ReservedBitSet,
 }
@@ -110,8 +131,10 @@ pub struct SframeHeader {
 
 impl SframeHeader {
     /// Number of bytes needed to encode `n` as a big-endian
-    /// integer, minimum 1 (matching RFC 9605's encoding —
-    /// CTR=0 still uses one byte).
+    /// integer, minimum 1. Lakko's custom header always uses
+    /// at least one CTR byte (even `CTR=0`); it has no inline
+    /// form. (RFC 9605 §4.3, by contrast, carries `CTR<=7`
+    /// inline in the config byte with zero trailing bytes.)
     fn bytes_needed(n: u64) -> usize {
         if n == 0 {
             return 1;

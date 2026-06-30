@@ -1328,9 +1328,10 @@ Phase 3a5's SFrame primitive
 implements **the keying half of RFC 9605** — the layers
 between the MLS exporter and the per-frame AEAD operation
 — end-to-end. The wire-level frame header serialization
-(RFC 9605 §4.3 compact `Config|KID|CTR` layout) is
-explicitly out of scope for the current implementation
-and tracked as G-26.
+(the compact `Config|KID|CTR` SFrame header layout — a
+Lakko-custom packing, NOT RFC 9605 §4.3; see C-38) was
+out of scope for this primitive and tracked as G-26; it
+has since landed in `lakko_calls::header`.
 
 **Pinned invariants** the test suite asserts:
 
@@ -1419,24 +1420,34 @@ each MLS state transition — the keying math contract
 holds across single-joiner, multi-party, and committer-
 leave-handover scenarios.
 
-### C-38: RFC 9605 §4.3 wire-header round-trip pinned
+### C-38: SFrame wire-header round-trip pinned (Lakko-custom layout, NOT RFC 9605 §4.3)
 
 The companion of C-37. SFrame's keying math (C-37) lives in
 [`lakko_calls::sframe`]; the wire-header layout — the
-compact `R|LEN|X|KID|CTR` packing that an RFC 9605
-implementation prepends to each AEAD ciphertext — lives in
+compact `R|LEN|X|KID|CTR` packing Lakko prepends to each AEAD
+ciphertext — lives in
 [`lakko_calls::header`](../../crates/lakko-calls/src/header.rs).
-This is the byte-level surface a non-Lakko SFrame stack
-(browser-native, mlspp) needs to interoperate; the audit
-gap **G-26** is now partially closed (serializer + 12
-tests; the keying-pipeline integration + external-stack
-verification stay deferred — see
-[`known-gaps.md`](./known-gaps.md) G-26).
+**Correction (2026-06-30, `lakko-security` APPROVE-WITH-NOTES):**
+this packing is a **Lakko-custom** format, NOT RFC 9605 §4.3 —
+the RFC packs the first byte as `X|K|Y|C` with inline `KID<=7` /
+`CTR<=7`, while Lakko uses `R|LEN|X|KID` with an always-trailing
+CTR byte, so the bytes differ on every input (e.g. `(0,0)` is
+`00 00` here vs `00` under §4.3). Since the header IS the AEAD
+AAD (ADR-0013), a non-Lakko RFC-9605 stack (browser-native,
+mlspp, Cisco libsframe) does **not** interoperate — external
+interop is broken by design, tracked under **G-26 / GA-2** (a
+true §4.3 rewrite is a deferred follow-up gated on an external
+SFrame stack becoming a deployment target — see
+[`known-gaps.md`](./known-gaps.md) G-26). What this invariant
+pins is Lakko's OWN wire shape, which is what guarantees the
+five Lakko stacks agree byte-for-byte (C-55).
 
 **Pinned invariants** the test suite asserts:
 
-1. **First-byte bit packing follows RFC 9605 §4.3
-   verbatim** (network bit order, MSB first):
+1. **First-byte bit packing is the Lakko-custom layout**
+   (network bit order, MSB first) — NOT RFC 9605 §4.3,
+   which packs `X|K|Y|C` with inline CTR (see the
+   Correction above):
 
    ```
    Bit:   7 6 5 4 3 2 1 0
@@ -1458,7 +1469,7 @@ verification stay deferred — see
    Test: `first_byte_bit_packing_pinned` walks every LEN
    ∈ 0..=7, inline KID ∈ 0..=7, and extended-KID KLEN ∈
    0..=7 and asserts the packed byte equals the
-   spec-derived constant.
+   Lakko-format constant.
 
 2. **Round-trip stability across the full numeric range.**
    `SframeHeader { kid, ctr }.encode().pipe(decode)` is
@@ -2502,14 +2513,16 @@ The SFU multi-party call arc wires three independent clients
 makes their media interoperable while keeping the SFU blind
 ([invariant #2](../../CLAUDE.md)) is a single keying contract,
 [ADR-0013](../adr/0013-sframe-cross-platform-aad.md): the
-SFrame AEAD **additional authenticated data is the RFC 9605
-§4.3 wire header bytes (KID + CTR), never any host-stack RTP
+SFrame AEAD **additional authenticated data is the SFrame
+wire header bytes (KID + CTR) — a Lakko-custom layout, NOT
+RFC 9605 §4.3 (see C-38) — never any host-stack RTP
 `additional_data`**. Host RTP metadata is not reconstructible
 across libwebrtc (native) and `RTCRtpScriptTransform` (web),
 so binding it would make a frame sealed on one platform fail
 to open on another; binding only the wire header — which every
-platform produces identically — is what lets a frame cross
-stacks. This is the same `lakko_calls::sframe`
+**Lakko** platform produces identically — is what lets a frame
+cross Lakko stacks. (A non-Lakko RFC-9605 stack produces a
+different header → external interop is broken by design, G-26.) This is the same `lakko_calls::sframe`
 `seal_framed` / `open_framed` core pinned by C-37 / C-38;
 C-55 records that all three SFU clients now reach it.
 

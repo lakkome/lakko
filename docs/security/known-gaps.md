@@ -1149,20 +1149,48 @@ plumbing only.
 MLS suites pin classical curves today. PQ migration
 follows the WG.
 
-### G-26: RFC 9605 §4.3 wire frame — serializer + framed pipeline + cross-platform AAD **landed**, live RTP interop verification pending
+### G-26: SFrame wire frame — Lakko-custom header (NOT RFC 9605 §4.3) + framed pipeline + cross-platform AAD; Lakko-internal interop proven, external RFC-9605-stack interop broken by design
 
-**Status (2026-06-02):** nearly closed; only the live
-cross-platform verification step remains. Progress since
+**Correction (2026-06-30) — the header is NOT RFC 9605 §4.3 wire-compatible**
+(verified against the RFC text + its Appendix C.1 header test vectors;
+`lakko-security` APPROVE-WITH-NOTES). Lakko's `SframeHeader` packs the first
+byte as `R | LEN | X | KID` and ALWAYS emits a trailing CTR byte; RFC 9605 §4.3
+packs it as `X | K | Y | C` with inline `KID<=7` / `CTR<=7`. The two produce
+different bytes on every input — e.g. `(kid=0, ctr=0)` is `00 00` in Lakko vs
+the single byte `00` under §4.3. Because the header IS the AEAD AAD (ADR-0013),
+a non-Lakko RFC-9605 stack (mlspp, Cisco libsframe, a browser-native SFrame
+transform) would compute a different AAD and FAIL to open a Lakko frame and
+vice versa — so external-stack interop is **broken by design, not merely
+unverified**. Everything below about cross-RUNTIME byte interop remains TRUE and
+refers to Lakko's OWN five stacks agreeing byte-for-byte (the golden vector),
+which is what makes Lakko-to-Lakko calls work; it is NOT evidence of RFC
+conformance. The Lakko-internal soundness (injective encoding, AAD = the literal
+on-wire header bytes, reserved-bit refusal, bounded truncation handling) is
+intact — `lakko-security` Q1 PASS, no confidentiality/integrity weakness.
+**Follow-up (deferred, deliberate):** a true §4.3 rewrite — re-pack
+`encode`/`decode` to `X|K|Y|C` + inline CTR, re-pin the golden vector across all
+six surfaces (core, web wasm, iOS, Android, the `lakko-sframe-native` C ABI, the
+C++ bridge) and update ADR-0013 — is gated on an external SFrame stack becoming
+an actual deployment target. There is no external consumer today, and doing it
+now would spend a wide golden re-pin + a heterogeneous-deploy fail-closed window
+for zero current benefit (per the project's "do not bake in future features"
+rule). The change carries no cryptographic risk when taken (encode + decode flip
+together; the nonce derives from the counter, not the header layout).
+
+**Status (2026-06-02):** the framed pipeline + cross-platform AAD landed; the
+Lakko-internal cross-runtime interop is proven (golden vector); the live
+deployed-SFU RTP smoke is the only deploy-gated residual. Progress since
 the 2026-05-25 entry:
 
 1. **Wire serializer.**
    [`crates/lakko-calls/src/header.rs`](../../crates/lakko-calls/src/header.rs)
    ships `SframeHeader::encode` / `SframeHeader::decode`
-   (12 unit tests; RFC 9605 §4.3 conformant by
-   construction — round trip + pinned wire layouts +
-   reserved-bit refusal + truncation handling +
-   bit-packing first-byte invariants for every LEN / KID
-   / KLEN value in `0..=7`).
+   (12 unit tests pinning the Lakko-custom wire shape —
+   round trip + pinned wire layouts + reserved-bit refusal
+   + truncation handling + bit-packing first-byte invariants
+   for every LEN / KID / KLEN value in `0..=7`). The tests
+   pin Lakko's OWN format, NOT RFC 9605 §4.3 conformance —
+   see the Correction above.
 2. **Framed seal/open pipeline — DONE.**
    [`lakko_calls::sframe`](../../crates/lakko-calls/src/sframe.rs)
    now exposes `ParticipantKey::seal_framed` (peeks the
@@ -1217,7 +1245,7 @@ seals a frame with the real `lakko_calls::sframe`
 `spawn_media_task` over a real `str0m` ICE + DTLS handshake +
 the cross-fanout renegotiation, and the subscriber
 `open_framed`s the forwarded bytes back to the exact
-plaintext — so the RFC 9605 header (the AAD) and the
+plaintext — so the Lakko custom header (the AAD) and the
 ciphertext provably survive the SFU forward intact, and the
 SFU stays SFrame-opaque (`lakko-calls` is a **dev-only** dep
 of `services/sfu`; the production binary never links it,

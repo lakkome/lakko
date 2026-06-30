@@ -3,11 +3,27 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 SPDX-FileCopyrightText: 2026 Lakko Contributors
 -->
 
-# ADR-0013: Cross-platform SFrame AEAD AAD = the RFC 9605 SFrame header
+# ADR-0013: Cross-platform SFrame AEAD AAD = the SFrame header (not host RTP metadata)
 
 - **Status:** Accepted
 - **Date:** 2026-06-02
 - **Context:** SFU multi-party arc — making web (RTCRtpScriptTransform) and native (libwebrtc FrameEncryptorInterface) clients decrypt each other's SFrame media on the same SFU call.
+
+> **Correction (2026-06-30, `lakko-security` APPROVE-WITH-NOTES).** This ADR's
+> decision — bind the **SFrame header bytes** as the AEAD AAD, never the host
+> WebRTC stack's RTP `additional_data` — is sound and unaffected. But the header
+> that `SframeHeader::encode` produces is a **Lakko-custom layout, NOT RFC 9605
+> §4.3 wire-compatible**: Lakko packs the first byte as `R|LEN|X|KID` with an
+> always-trailing CTR, whereas RFC 9605 §4.3 packs `X|K|Y|C` with inline
+> `KID<=7` / `CTR<=7`, so the bytes differ on every input. All Lakko stacks pin
+> the same header (the golden vector), so the cross-platform-AAD guarantee this
+> ADR establishes holds **within the Lakko ecosystem**. A non-Lakko RFC-9605
+> stack would compute a different header → different AAD → fail to interop;
+> that external-stack interop is broken by design and tracked under
+> [G-26 / GA-2](../security/known-gaps.md#g-26) (a true §4.3 rewrite is a
+> deferred follow-up gated on an external SFrame stack becoming a deployment
+> target). Read every "RFC 9605 SFrame header" mention below as "the (Lakko-custom)
+> SFrame header".
 
 ## Context
 
@@ -44,8 +60,9 @@ Consequence: a web sender and a native receiver (or vice versa) would
 feed **different AAD** into the same AEAD and every cross-platform
 frame would fail to decrypt — silently. This is the unresolved half
 of the long-tracked interop gap
-[G-26](../security/known-gaps.md#g-26) (RFC 9605 wire-frame header:
-serializer landed, end-to-end interop pending).
+[G-26](../security/known-gaps.md#g-26) (the SFrame wire-frame header —
+Lakko-custom, not RFC 9605 §4.3; Lakko-internal interop landed, external
+interop broken by design — see the Correction above).
 
 How the field solves this: every shipping E2EE-over-SFU client
 (Google Meet client-side encryption, Jitsi e2ee, Matrix Element Call,
@@ -55,10 +72,11 @@ RTP descriptor (which they can't share across web ⇄ native anyway).
 
 ## Decision
 
-**The SFrame AEAD AAD is the RFC 9605 SFrame header bytes — the exact
+**The SFrame AEAD AAD is the SFrame header bytes — the exact
 output of [`SframeHeader::encode`](../../crates/lakko-calls/src/header.rs)
-(KID = sender leaf index, CTR = per-frame counter) — and nothing
-else. No host RTP `additional_data` is bound.**
+(a Lakko-custom layout, see the Correction above; KID = sender leaf index,
+CTR = per-frame counter) — and nothing else. No host RTP `additional_data`
+is bound.**
 
 Concretely, on every platform, for each frame:
 
