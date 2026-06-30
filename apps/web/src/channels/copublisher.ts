@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 /**
- * ADR-0028 OQ3 — channel co-publisher management (owner side, web).
+ * ADR-0028 OQ3 — channel co-publisher management (owner + joiner side, web).
  *
  * A channel's PublisherGroup ([ADR-0010](../../../docs/adr/0010-channels-two-tier-broadcast.md)
  * Tier 1) is a vanilla MLS group, so adding a *co-publisher* reuses the group
@@ -46,6 +46,12 @@ import {
   rotateChannel,
   type RotateBatchEntry,
 } from "./api";
+import {
+  base64UrlToBytes,
+  bytesToHex,
+  freshPublisherKeys,
+  type ChannelPublisherKeys,
+} from "./composer";
 
 type Identity = InstanceType<Wasm["Identity"]>;
 type PublisherGroup = InstanceType<Wasm["PublisherGroup"]>;
@@ -146,6 +152,92 @@ export function rejectCoPublisher(
   proposalRef: Uint8Array,
 ): void {
   publisherGroup.rejectExternalJoin(proposalRef);
+}
+
+// ---------------------------------------------------------
+// Joiner side — a prospective co-publisher requests + joins
+// ---------------------------------------------------------
+
+/** ADR-0028 OQ3 — joiner side: request to become a co-publisher of a channel
+ *  from a `/g/` co-publisher link. Decodes + verifies the capability, recovers
+ *  the channel id from the PublisherGroup `group_id` (the link conveys only the
+ *  `group_id`), reads the group's current epoch from its DS journal, crafts an
+ *  external-join proposal (ADR-0027), and posts it + a self-signed
+ *  join-attribution (OQ2) to the journal. Returns the handles the caller polls
+ *  with via `pollForCoPublishWelcome`. */
+export async function requestToCoPublish(
+  ds: DsClient,
+  identity: Identity,
+  link: string,
+): Promise<{ groupId: Uint8Array; channelIdHex: string; joinerKey: Uint8Array }> {
+  const wasm = await loadWasm();
+  const idx = link.lastIndexOf(GROUP_INVITE_URL_PREFIX);
+  if (idx < 0) throw new Error("not a /g/ co-publisher link");
+  const slug = link.slice(idx + GROUP_INVITE_URL_PREFIX.length);
+  const wire = base64UrlToBytes(slug);
+  const cap = wasm.GroupInviteCapability.decodeAndVerify(wire);
+  let groupId: Uint8Array;
+  try {
+    groupId = cap.groupId;
+  } finally {
+    cap.free();
+  }
+  const channelIdBytes = wasm.channelIdFromPublisherGroupId(groupId);
+  if (channelIdBytes === undefined) {
+    throw new Error("co-publisher link does not target a channel PublisherGroup");
+  }
+  const channelIdHex = bytesToHex(channelIdBytes);
+  // Read the current epoch from the PublisherGroup journal head (public framing;
+  // a non-member can do this). Empty / unreachable journal => epoch 0.
+  let epoch = 0n;
+  try {
+    const raw = await ds.fetchGroup(groupId, { after: 0, waitSecs: 0 });
+    for (const m of raw.messages) {
+      const e = wasm.epochOfMessage(m.payload);
+      if (e !== undefined) epoch = e;
+    }
+  } catch {
+    // keep epoch 0
+  }
+  const proposal = identity.createExternalJoinProposal(groupId, epoch);
+  await ds.publishGroup(groupId, proposal);
+  // Self-signed join attribution (OQ2) — advisory; best-effort.
+  try {
+    const attribution = wasm.composeGroupJoinAttribution(identity.ed25519Seed, wire);
+    await ds.publishGroup(groupId, attribution);
+  } catch {
+    // advisory only — ignore
+  }
+  return { groupId, channelIdHex, joinerKey: identity.signaturePublicKey };
+}
+
+/** ADR-0028 OQ3 — joiner side: poll the PublisherGroup journal for the Welcome
+ *  the owner posted after approving, join from it, and mint local publisher keys
+ *  so this device can now publish to the channel. The joined group lands at the
+ *  post-approve epoch — the same one the subscribers were resealed to — so the
+ *  derived `channelSeed` matches. Returns the keys on success, or `null` if no
+ *  Welcome has arrived yet (keep polling). */
+export async function pollForCoPublishWelcome(
+  ds: DsClient,
+  identity: Identity,
+  groupId: Uint8Array,
+  joinerKey: Uint8Array,
+  channelIdHex: string,
+): Promise<ChannelPublisherKeys | null> {
+  const wasm = await loadWasm();
+  const raw = await ds.fetchGroup(groupId, { after: 0, waitSecs: 0 });
+  for (const m of raw.messages) {
+    const welcome = wasm.welcomeRendezvousFor(m.payload, joinerKey);
+    if (welcome !== undefined) {
+      const group = wasm.Group.joinFromWelcome(welcome, identity);
+      group.free();
+      // Now an MLS member of the PublisherGroup — `freshPublisherKeys` opens the
+      // (now-joined) group, derives the shared content-key seed, and mints a
+      // fresh per-device signing key so this device can publish.
+      return await freshPublisherKeys(identity, channelIdHex);
+    }
+  }
+  return null;
 }
 
 /**

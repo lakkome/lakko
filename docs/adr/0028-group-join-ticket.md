@@ -277,9 +277,19 @@ shipped** (ADR-0027). This ADR adds: the `GroupInviteCapability` codec + FFI;
    `sealSubscriberSeedEnvelope` + atomic `POST /v1/channels/:id/rotate` fanout
    (the rotation-cron path, but WITHOUT a second `rotate()` — the Add already
    advanced the epoch), else existing subscribers would break. `tsc` clean.
-   **Residual:** the joiner-side request-to-join-a-channel flow + the iOS /
-   Android mirrors + a live 2-publisher e2e of the reseal (no deployed channels
-   env, the same gate every other live-channel path carries).
+   **Joiner-side web landed** — `copublisher.ts` `requestToCoPublish` (decode the
+   `/g/` capability → `channelIdFromPublisherGroupId` recovers the channel id
+   from the PublisherGroup `group_id` → read the epoch from the journal →
+   `createExternalJoinProposal` + post + self-signed attribution) +
+   `pollForCoPublishWelcome` (poll → `welcomeRendezvousFor` → `joinFromWelcome` →
+   `freshPublisherKeys` mints local publisher keys at the post-approve epoch, the
+   same the subscribers were resealed to); a "Join as co-publisher" affordance on
+   the New-channel screen drives request → poll → open the channel. The
+   `channel_id_from_group_id` inverse derivation landed in `lakko-mls` (+ a
+   round-trip/reject unit test) and on the FFI (`channelIdFromPublisherGroupId`,
+   UniFFI + wasm). `tsc` clean, web vitest 222 green. **Residual:** the iOS /
+   Android mirrors (owner + joiner) + a live 2-publisher e2e of the reseal (no
+   deployed channels env, the same gate every other live-channel path carries).
 
 ## References
 

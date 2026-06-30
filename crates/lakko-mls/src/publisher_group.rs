@@ -154,6 +154,24 @@ fn publisher_group_id_bytes(channel_id: &ChannelId) -> Vec<u8> {
     id
 }
 
+/// Recover the [`ChannelId`] from a PublisherGroup `group_id` — the inverse of
+/// [`publisher_group_id_bytes`]. Returns `None` unless the bytes carry the
+/// publisher-group prefix followed by exactly a [`CHANNEL_ID_LEN`]-byte channel
+/// id.
+///
+/// ADR-0028 OQ3: a co-publisher learns a PublisherGroup's `group_id` from a
+/// `/g/` ticket (the capability conveys only the `group_id`), so after the
+/// external join completes it uses this to recover the channel id and
+/// reconstruct the [`PublisherGroup`] / derive the channel content-key seed.
+#[must_use]
+pub fn channel_id_from_group_id(group_id: &[u8]) -> Option<ChannelId> {
+    let prefix = PUBLISHER_GROUP_ID_PREFIX;
+    if group_id.len() != prefix.len() + CHANNEL_ID_LEN || &group_id[..prefix.len()] != prefix {
+        return None;
+    }
+    ChannelId::try_from_slice(&group_id[prefix.len()..]).ok()
+}
+
 /// Persistent MLS-group wrapper for one Lakko channel's
 /// publisher tier (G4-2-mls-persistence).
 pub struct PublisherGroup {
@@ -645,5 +663,19 @@ mod tests {
             alice_seed, bob_seed,
             "a ticket-joined co-publisher must share the channel seed"
         );
+    }
+
+    #[test]
+    fn channel_id_from_group_id_round_trips_and_rejects_junk() {
+        let cid = ChannelId([0x9Au8; CHANNEL_ID_LEN]);
+        let gid = publisher_group_id_bytes(&cid);
+        assert_eq!(channel_id_from_group_id(&gid), Some(cid));
+        // Wrong length.
+        assert_eq!(channel_id_from_group_id(&gid[..gid.len() - 1]), None);
+        assert_eq!(channel_id_from_group_id(&[]), None);
+        // Right length, wrong prefix — a chat group_id must not decode.
+        let mut wrong_prefix = gid.clone();
+        wrong_prefix[0] ^= 0xFF;
+        assert_eq!(channel_id_from_group_id(&wrong_prefix), None);
     }
 }

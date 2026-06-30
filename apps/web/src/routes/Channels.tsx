@@ -68,7 +68,9 @@ import {
   openPublisherGroup,
   pendingCoPublishers,
   pollCoPublisherJournal,
+  pollForCoPublishWelcome,
   rejectCoPublisher,
+  requestToCoPublish,
 } from "../channels/copublisher";
 import { DsClient } from "../ds/client";
 import { useAuth } from "../auth/AuthContext";
@@ -273,6 +275,65 @@ const NewChannel: Component = () => {
     }
   }
 
+  // ADR-0028 OQ3 — joiner side: become a co-publisher of an existing channel
+  // from a `/g/` co-publisher link the owner shared. Posts an external-join
+  // proposal to the PublisherGroup journal, polls until the owner approves,
+  // joins, mints local publisher keys, and opens the channel.
+  const [coLink, setCoLink] = createSignal("");
+  const [coBusy, setCoBusy] = createSignal(false);
+  const [coError, setCoError] = createSignal<string | null>(null);
+  const [coStatus, setCoStatus] = createSignal<string | null>(null);
+
+  async function onJoinAsCoPublisher(): Promise<void> {
+    const link = coLink().trim();
+    if (link.length === 0) return;
+    const secrets = auth.identitySecrets();
+    if (secrets === null) {
+      setCoError("Not signed in.");
+      return;
+    }
+    setCoBusy(true);
+    setCoError(null);
+    setCoStatus("Requesting…");
+    try {
+      const wasm = await loadWasm();
+      const identity = wasm.Identity.fromSeed(secrets.accountIdentitySeed);
+      try {
+        const ds = new DsClient();
+        const { groupId, channelIdHex, joinerKey } = await requestToCoPublish(
+          ds,
+          identity,
+          link,
+        );
+        setCoStatus("Waiting for the channel owner to approve…");
+        let keys: Awaited<ReturnType<typeof pollForCoPublishWelcome>> = null;
+        for (let i = 0; i < 60 && keys === null; ++i) {
+          keys = await pollForCoPublishWelcome(ds, identity, groupId, joinerKey, channelIdHex);
+          if (keys === null) await new Promise((r) => setTimeout(r, 3000));
+        }
+        if (keys === null) {
+          setCoError("Timed out waiting for approval — try again once the owner has approved.");
+          return;
+        }
+        channelsActions.addChannel({
+          id: channelIdHex,
+          localName: name().trim() || "Co-published channel",
+          localDescription: "",
+          addedAtMs: Date.now(),
+        });
+        channelsActions.setKeys(channelIdHex, keys);
+        navigate(paths.channel(channelIdHex));
+      } finally {
+        identity.free();
+      }
+    } catch (err) {
+      setCoError(`Co-publish failed: ${String(err)}`);
+    } finally {
+      setCoBusy(false);
+      setCoStatus(null);
+    }
+  }
+
   return (
     <div
       style={{
@@ -387,6 +448,75 @@ const NewChannel: Component = () => {
           </button>
         </div>
       </form>
+
+      <div
+        style={{
+          "margin-top": "28px",
+          "padding-top": "20px",
+          "border-top": `1px solid ${COLOURS.border}`,
+          display: "flex",
+          "flex-direction": "column",
+          gap: "10px",
+        }}
+      >
+        <h2 style={{ margin: 0, "font-size": "16px" }}>Join as co-publisher</h2>
+        <span style={{ "font-size": "13px", color: COLOURS.textSecondary }}>
+          Paste a co-publisher link a channel owner shared. You'll request to
+          join; once they approve, this device can publish to the channel.
+        </span>
+        <input
+          type="text"
+          placeholder="https://…/g/…"
+          value={coLink()}
+          onInput={(e): void => {
+            setCoLink(e.currentTarget.value);
+          }}
+          style={{
+            padding: "9px 12px",
+            "background-color": COLOURS.surface,
+            color: COLOURS.textPrimary,
+            border: `1px solid ${COLOURS.border}`,
+            "border-radius": "8px",
+            "font-size": "13px",
+            "font-family": "monospace",
+          }}
+        />
+        <Show when={coStatus() !== null}>
+          <div style={{ "font-size": "13px", color: COLOURS.textSecondary }}>
+            {coStatus()}
+          </div>
+        </Show>
+        <Show when={coError() !== null}>
+          <div
+            style={{
+              padding: "10px 12px",
+              "background-color": COLOURS.destructive,
+              color: "#fff",
+              "border-radius": "8px",
+              "font-size": "13px",
+            }}
+          >
+            {coError()}
+          </div>
+        </Show>
+        <button
+          type="button"
+          disabled={coBusy() || coLink().trim().length === 0}
+          onClick={(): void => void onJoinAsCoPublisher()}
+          style={{
+            "align-self": "flex-start",
+            padding: "9px 16px",
+            "background-color": "transparent",
+            color: COLOURS.textPrimary,
+            border: `1px solid ${COLOURS.border}`,
+            "border-radius": "8px",
+            cursor: coBusy() ? "wait" : "pointer",
+            "font-size": "14px",
+          }}
+        >
+          {coBusy() ? "Requesting…" : "Request to co-publish"}
+        </button>
+      </div>
     </div>
   );
 };

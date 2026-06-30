@@ -930,6 +930,16 @@ impl PublisherGroup {
     }
 }
 
+/// ADR-0028 OQ3 — recover the 16-byte channel id from a PublisherGroup
+/// `group_id` (the inverse of the deterministic derivation). Returns
+/// `undefined` for bytes that do not carry the publisher-group prefix. A
+/// co-publisher uses this after joining via a `/g/` ticket — which conveys only
+/// the `group_id` — to reconstruct the channel + derive its content-key seed.
+#[wasm_bindgen(js_name = channelIdFromPublisherGroupId)]
+pub fn channel_id_from_publisher_group_id(group_id: &[u8]) -> Option<Vec<u8>> {
+    lakko_mls::channel_id_from_group_id(group_id).map(|c| c.as_bytes().to_vec())
+}
+
 // ============================================================================
 // DeviceGroup (Phase 2a3b1d)
 // ============================================================================
