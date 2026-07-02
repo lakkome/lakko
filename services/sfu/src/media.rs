@@ -106,7 +106,7 @@ use std::collections::HashMap;
 use str0m::change::{SdpAnswer, SdpOffer, SdpPendingOffer};
 
 use str0m::bwe::{Bitrate, BweKind};
-use str0m::media::{Direction, MediaData, MediaKind, Mid, Rid};
+use str0m::media::{Direction, KeyframeRequestKind, MediaData, MediaKind, Mid, Rid};
 use str0m::net::{Protocol, Receive, Transmit};
 use str0m::{Candidate, Event, Input, Output, Rtc};
 use thiserror::Error;
@@ -854,6 +854,19 @@ impl MediaPeer {
         out.sort_by_key(|(_, bps)| *bps);
         out
     }
+
+    /// Request a keyframe (PLI) from THIS (publishing) peer for the simulcast
+    /// layer `(mid, rid)`. Called when a subscriber switches to this layer so
+    /// the new layer starts on a decodable frame instead of showing corruption
+    /// until the next natural keyframe. Best-effort: a not-yet-established
+    /// stream (no `StreamRx` for the midrid) is a benign no-op. The SFU only
+    /// asks for a keyframe on the plaintext RTP layer — it never touches the
+    /// SFrame-encrypted payload (C-39).
+    pub fn request_layer_keyframe(&mut self, mid: Mid, rid: Rid) {
+        if let Some(stream_rx) = self.rtc.direct_api().stream_rx_by_mid(mid, Some(rid)) {
+            stream_rx.request_keyframe(KeyframeRequestKind::Pli);
+        }
+    }
 }
 
 /// Simulcast layer gate for one downstream track.
@@ -1505,9 +1518,11 @@ async fn run_media_loop(
         drive_renegotiations(&mut router, &peers).await;
         fanout_media_data(&mut router, &summary.pending);
         // Per-receiver simulcast layer selection: match each subscriber's
-        // egress bandwidth estimate against the measured per-layer bitrates and
-        // (re)select the best-fitting layer for the next tick.
-        drive_layer_selection(&mut router);
+        // egress bandwidth estimate against the measured per-layer bitrates,
+        // (re)select the best-fitting layer, and request a keyframe on any
+        // switch for the next tick.
+        let layer_switches = drive_layer_selection(&mut router);
+        record_layer_selection_metrics(&layer_switches);
         let sleep_for = summary
             .earliest_deadline
             .saturating_duration_since(now)
@@ -1854,6 +1869,35 @@ pub(crate) fn fanout_media_data(
     outcome
 }
 
+/// Tally of the simulcast layer switches [`drive_layer_selection`] made this
+/// tick. Returned so the media task + tests observe the policy's decisions
+/// without scraping the global metrics registry; the driver also mirrors it into
+/// the `lakko_sfu_simulcast_layer_switches_total` counter. Only counts a genuine
+/// bandwidth-driven flip (a track that already had a chosen layer) — the initial
+/// latch of a track's first layer is not a "switch".
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct LayerSelectionSummary {
+    /// Switches to a higher-bitrate layer (recovery).
+    pub(crate) upgrades: u64,
+    /// Switches to a lower-bitrate layer (congestion).
+    pub(crate) downgrades: u64,
+}
+
+/// Mirror a [`LayerSelectionSummary`] into the
+/// `lakko_sfu_simulcast_layer_switches_total` counter, labelled `direction`.
+/// Each bucket is only touched when non-zero so an idle tick creates no series.
+fn record_layer_selection_metrics(summary: &LayerSelectionSummary) {
+    use crate::prom::names::SIMULCAST_LAYER_SWITCHES_TOTAL;
+    if summary.upgrades > 0 {
+        metrics::counter!(SIMULCAST_LAYER_SWITCHES_TOTAL, "direction" => "up")
+            .increment(summary.upgrades);
+    }
+    if summary.downgrades > 0 {
+        metrics::counter!(SIMULCAST_LAYER_SWITCHES_TOTAL, "direction" => "down")
+            .increment(summary.downgrades);
+    }
+}
+
 /// Per-tick simulcast layer selection driver (G3-3).
 ///
 /// For each subscriber peer with a converged egress bandwidth estimate, and for
@@ -1863,9 +1907,13 @@ pub(crate) fn fanout_media_data(
 /// immediately, recovery upgrades with headroom hysteresis. A no-op for a peer
 /// without an estimate yet, or a track with fewer than two measured layers
 /// (audio / non-simulcast video). The two-pass shape (snapshot every
-/// publisher's per-layer bitrates, then mutate each subscriber) avoids a
-/// cross-peer borrow conflict.
-pub(crate) fn drive_layer_selection(router: &mut MediaRouter) {
+/// publisher's per-layer bitrates, then mutate each subscriber, then request a
+/// keyframe from each publisher whose layer changed) avoids a cross-peer borrow
+/// conflict. On every switch the SFU asks the publisher for a keyframe (PLI) for
+/// the newly-selected layer so the switch starts on a decodable frame instead of
+/// corruption until the next natural keyframe. Returns a
+/// [`LayerSelectionSummary`] of the up/down switches made.
+pub(crate) fn drive_layer_selection(router: &mut MediaRouter) -> LayerSelectionSummary {
     // Pass 1 (immutable): snapshot each publishing peer's per-`mid` layer
     // bitrates, keyed by the source peer id.
     let snapshot: HashMap<MediaPeerId, HashMap<Mid, Vec<(Rid, u64)>>> = router
@@ -1886,7 +1934,11 @@ pub(crate) fn drive_layer_selection(router: &mut MediaRouter) {
         })
         .collect();
 
-    // Pass 2 (mutable): choose + apply per subscriber.
+    // Pass 2 (mutable): choose + apply per subscriber; collect the keyframe
+    // requests to issue in pass 3 (the publisher borrow is disjoint from this
+    // subscriber borrow, so it cannot be done inline).
+    let mut summary = LayerSelectionSummary::default();
+    let mut keyframe_reqs: Vec<(MediaPeerId, Mid, Rid)> = Vec::new();
     for sub in router.peers_mut() {
         let Some(budget) = sub.egress_estimate_bps else {
             continue;
@@ -1906,11 +1958,43 @@ pub(crate) fn drive_layer_selection(router: &mut MediaRouter) {
                 continue; // not simulcast — nothing to choose
             }
             let chosen = choose_layer_for_budget(layers, budget, current);
-            if chosen != current {
-                sub.select_layer(&src_peer, src_mid, chosen);
+            if chosen == current {
+                continue;
+            }
+            sub.select_layer(&src_peer, src_mid, chosen);
+            let Some(new_rid) = chosen else {
+                continue;
+            };
+            // Queue a keyframe request for the newly-selected layer.
+            keyframe_reqs.push((src_peer.clone(), src_mid, new_rid));
+            // Count the switch direction — but only a genuine bandwidth-driven
+            // flip (a track that already had a chosen layer); the initial latch
+            // (`current == None`) is not a switch.
+            if let Some(cur) = current {
+                let bps_of = |rid: Rid| -> u64 {
+                    layers
+                        .iter()
+                        .find(|(r, _)| *r == rid)
+                        .map_or(0, |(_, b)| *b)
+                };
+                if bps_of(new_rid) > bps_of(cur) {
+                    summary.upgrades += 1;
+                } else {
+                    summary.downgrades += 1;
+                }
             }
         }
     }
+
+    // Pass 3 (mutable, publishers): request a keyframe from each publisher for
+    // the layer a subscriber just switched to, so the switch is clean.
+    for (src_peer, mid, rid) in keyframe_reqs {
+        if let Some(publisher) = router.peers_mut().iter_mut().find(|p| *p.id() == src_peer) {
+            publisher.request_layer_keyframe(mid, rid);
+        }
+    }
+
+    summary
 }
 
 /// Walk `new_tracks` and push a matching
@@ -2982,7 +3066,15 @@ mod tests {
         router.add_peer(publisher);
         router.add_peer(subscriber);
 
-        drive_layer_selection(&mut router);
+        let summary = drive_layer_selection(&mut router);
+        assert_eq!(
+            summary,
+            LayerSelectionSummary {
+                upgrades: 0,
+                downgrades: 1
+            },
+            "the high->low move is counted as exactly one downgrade"
+        );
 
         let sub = router
             .peers()
@@ -2994,6 +3086,53 @@ mod tests {
             Some(rid_l),
             "a 500 kbps budget must downgrade the subscriber from high to low"
         );
+    }
+
+    #[test]
+    fn drive_layer_selection_counts_a_recovery_as_an_upgrade() {
+        let mid = Mid::new();
+        let rid_l = Rid::from("l");
+        let rid_h = Rid::from("h");
+
+        let mut publisher = MediaPeer::new(pid("pub2"), Instant::now());
+        let pub_id = publisher.id().clone();
+        publisher
+            .layer_meters
+            .insert((mid, rid_l), meter_with_bps(300_000));
+        publisher
+            .layer_meters
+            .insert((mid, rid_h), meter_with_bps(1_000_000));
+
+        // On the LOW layer with a generous 2 Mbps estimate — clears the upgrade
+        // headroom for the 1 Mbps high layer.
+        let mut subscriber = MediaPeer::new(pid("sub2"), Instant::now());
+        subscriber.set_egress_estimate_bps(2_000_000);
+        subscriber.tracks_out.push(TrackOutEntry {
+            source_peer: pub_id,
+            source_mid: mid,
+            kind: MediaKind::Video,
+            state: TrackOutState::Open(Mid::new()),
+            chosen_rid: Some(rid_l),
+        });
+
+        let mut router = MediaRouter::new();
+        router.add_peer(publisher);
+        router.add_peer(subscriber);
+
+        let summary = drive_layer_selection(&mut router);
+        assert_eq!(
+            summary,
+            LayerSelectionSummary {
+                upgrades: 1,
+                downgrades: 0
+            }
+        );
+        let sub = router
+            .peers()
+            .iter()
+            .find(|p| *p.id() == pid("sub2"))
+            .unwrap();
+        assert_eq!(sub.tracks_out[0].chosen_rid, Some(rid_h));
     }
 
     /// A [`LayerBitrateMeter`] whose completed-window rate is a fixed `bps`.

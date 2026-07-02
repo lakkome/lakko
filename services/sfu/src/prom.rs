@@ -71,6 +71,11 @@ pub mod names {
     /// fanout-fairness alarm; `wrong_layer` is expected traffic
     /// for a simulcast publisher, not an alarm.
     pub const MEDIA_FRAMES_DROPPED_TOTAL: &str = "lakko_sfu_media_frames_dropped_total";
+    /// Cumulative count of simulcast layer switches the bandwidth policy made,
+    /// labelled `direction` (`up` — recovery / `down` — congestion). A high
+    /// `down` rate signals subscribers are frequently bandwidth-constrained; a
+    /// churny up/down ratio near 1 hints the hysteresis window is too tight.
+    pub const SIMULCAST_LAYER_SWITCHES_TOTAL: &str = "lakko_sfu_simulcast_layer_switches_total";
 }
 
 /// Failures while installing the recorder. The exporter
@@ -146,6 +151,11 @@ impl MetricsExporter {
         metrics::describe_counter!(
             names::MEDIA_FRAMES_DROPPED_TOTAL,
             "Fanout attempts that did not reach the wire, labelled by reason"
+        );
+        metrics::describe_counter!(
+            names::SIMULCAST_LAYER_SWITCHES_TOTAL,
+            "Simulcast layer switches the bandwidth policy made, labelled by \
+             `direction` (up = recovery / down = congestion)"
         );
         // Initialise each counter / gauge so it ships a zero
         // sample at the first scrape.
