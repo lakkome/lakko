@@ -75,7 +75,9 @@ use lakko_svc_sfu::media::{spawn_media_task, MediaTaskHandle};
 use lakko_svc_sfu::peer::{Peer, PeerId, PeerRegistry};
 use lakko_svc_sfu::protocol::ServerFrame;
 use str0m::change::{SdpAnswer, SdpOffer, SdpPendingOffer};
-use str0m::media::{Direction, Frequency, MediaKind, MediaTime, Mid};
+use str0m::media::{
+    Direction, Frequency, MediaKind, MediaTime, Mid, Rid, Simulcast, SimulcastLayer,
+};
 use str0m::net::{Protocol, Receive};
 use str0m::{Candidate, Event, Input, Output, Rtc};
 use tokio::net::UdpSocket;
@@ -204,6 +206,64 @@ impl SyntheticClient {
         let rtp_time = MediaTime::new(frame_idx * 960, Frequency::FORTY_EIGHT_KHZ);
         writer
             .write(pt, wallclock, rtp_time, payload.to_vec())
+            .is_ok()
+    }
+
+    /// Build a SendOnly **video simulcast** publisher offer announcing the given
+    /// `rids` (e.g. `["l", "h"]`). str0m sends each layer on its own SSRC; the
+    /// SFU surfaces each frame's originating rid on `Event::MediaData`, which is
+    /// exactly what the simulcast layer gate keys on.
+    fn create_video_simulcast_publisher_offer(
+        &mut self,
+        rids: &[&str],
+    ) -> (String, SdpPendingOffer, Mid) {
+        let simulcast = Simulcast {
+            send: rids
+                .iter()
+                .map(|r| SimulcastLayer {
+                    rid: Rid::from(*r),
+                    attributes: None,
+                })
+                .collect(),
+            recv: Vec::new(),
+        };
+        let mut change = self.rtc.sdp_api();
+        let mid = change.add_media(
+            MediaKind::Video,
+            Direction::SendOnly,
+            Some("simulcast-publisher".to_owned()),
+            None,
+            Some(simulcast),
+        );
+        let (offer, pending) = change.apply().expect("at least one change → Some(offer)");
+        (offer.to_sdp_string(), pending, mid)
+    }
+
+    /// Write one video frame on a specific simulcast layer `rid`. Picks the
+    /// first negotiated video payload type. No-op (`false`) if the writer / PT
+    /// is not ready or the rid is not negotiated — the caller retries.
+    fn write_video_frame_on_rid(
+        &mut self,
+        mid: Mid,
+        rid: &str,
+        payload: &[u8],
+        frame_idx: u64,
+    ) -> bool {
+        let Some(pt) = self.rtc.writer(mid).and_then(|w| {
+            w.payload_params()
+                .next()
+                .map(str0m::format::PayloadParams::pt)
+        }) else {
+            return false;
+        };
+        let Some(writer) = self.rtc.writer(mid) else {
+            return false;
+        };
+        // 90 kHz video clock; advance ~one 30 fps frame (3000 ticks) per call.
+        let rtp_time = MediaTime::new(frame_idx * 3000, Frequency::NINETY_KHZ);
+        writer
+            .rid(Rid::from(rid))
+            .write(pt, Instant::now(), rtp_time, payload.to_vec())
             .is_ok()
     }
 
@@ -679,6 +739,157 @@ async fn two_clients_cross_fanout_forwards_media_verbatim() {
         "the SFU-initiated renegotiation toward B must have been answered"
     );
     assert!(a.is_alive() && b.is_alive(), "both Rtc must stay alive");
+}
+
+/// **G3-3 simulcast, live leg** — a real `str0m` publisher sending a
+/// **two-layer video simulcast** track (rids `l` + `h`) negotiates with the
+/// production media task and the SFU forwards a layer to a subscriber over the
+/// live ICE + DTLS + renegotiation path.
+///
+/// This closes the "needs a simulcast-capable test client" gap: the publisher
+/// announces `a=simulcast:send` with two rids via `add_media(.., Some(Simulcast
+/// { send: [l, h], .. }))` and writes frames on BOTH layers (`Writer::rid`).
+/// The SFU receives the multi-rid track, and its per-subscriber layer gate
+/// (`layer_gate_allows`, unit-proven to latch one rid and drop the rest) forwards
+/// a single layer to B. The assertion here is the LIVE-path property the unit
+/// tests cannot cover: that str0m's simulcast-SEND SDP negotiation is accepted
+/// by `MediaPeer::accept_offer`, the SFU surfaces per-rid `Event::MediaData`,
+/// and the fanout delivers a forwarded video frame to the subscriber. The
+/// one-layer-only gating itself is asserted by
+/// `media::tests::layer_gate_latches_the_first_layer_and_drops_the_others` +
+/// `forward_drops_a_non_selected_simulcast_layer_as_wrong_layer`.
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn simulcast_publisher_negotiates_and_forwards_a_layer_over_the_live_sfu() {
+    let peers = PeerRegistry::new();
+    let b_id = PeerId::fresh();
+    let (b_tx, mut b_rx) = mpsc::channel::<ServerFrame>(64);
+    assert!(
+        peers
+            .register(Peer {
+                id: b_id.clone(),
+                call_id: "simulcast-test".to_owned(),
+                account_id: "subscriber-b".to_owned(),
+                outbound: Some(b_tx),
+            })
+            .await,
+        "fresh PeerId registers"
+    );
+
+    let (media, sfu_addr) = spawn_media_task("127.0.0.1:0".parse().unwrap(), peers)
+        .await
+        .expect("UDP bind on loopback:0 succeeds");
+
+    let mut a = SyntheticClient::new().await;
+    let mut b = SyntheticClient::new().await;
+    let a_id = PeerId::fresh();
+
+    // B subscribes first (RecvOnly) — establishes transport; the SFU adds the
+    // downstream video track by renegotiation.
+    let (b_offer, b_pending) = b.create_subscriber_offer();
+    let b_answer = media
+        .accept_offer(b_id.clone(), "simulcast-test-call".to_owned(), b_offer)
+        .await
+        .expect("SFU accepts B's RecvOnly subscriber offer");
+    b.accept_answer(b_pending, &b_answer)
+        .expect("B applies the SFU's answer");
+
+    // A publishes a two-layer video simulcast track.
+    let (a_offer, a_pending, pub_mid) = a.create_video_simulcast_publisher_offer(&["l", "h"]);
+    let a_answer = media
+        .accept_offer(a_id.clone(), "simulcast-test-call".to_owned(), a_offer)
+        .await
+        .expect("SFU accepts A's simulcast-send video offer");
+    a.accept_answer(a_pending, &a_answer)
+        .expect("A applies the SFU's answer");
+
+    // Distinguishable per-layer markers (first byte) so, IF the payload survives
+    // video (de)packetisation, we can additionally check no two layers mix.
+    let low: Vec<u8> = std::iter::once(0xAAu8).chain(0u8..40).collect();
+    let high: Vec<u8> = std::iter::once(0xBBu8).chain(0u8..40).collect();
+
+    let deadline = Instant::now() + Duration::from_secs(12);
+    let mut reneg_answered = false;
+    let mut pending_reneg: Option<String> = None;
+    let mut frame_idx: u64 = 0;
+    let mut b_frames = 0usize;
+    let mut markers = std::collections::BTreeSet::new();
+
+    while Instant::now() < deadline && b_frames == 0 {
+        let _ = a.drain().await;
+        for p in b.drain().await {
+            b_frames += 1;
+            if let Some(&first) = p.first() {
+                if first == 0xAA || first == 0xBB {
+                    markers.insert(first);
+                }
+            }
+        }
+
+        while let Ok(ServerFrame::SdpOffer { sdp }) = b_rx.try_recv() {
+            pending_reneg = Some(sdp);
+        }
+        if !reneg_answered && b.is_connected() {
+            if let Some(sdp) = pending_reneg.take() {
+                if let Ok(answer) = b.answer_renegotiation(&sdp) {
+                    reneg_answered = media
+                        .accept_renegotiation_answer(b_id.clone(), answer)
+                        .await
+                        .is_ok();
+                }
+            }
+        }
+
+        // Once the downstream track exists, publish on BOTH layers each tick.
+        if a.is_connected() && b.is_connected() && reneg_answered {
+            a.write_video_frame_on_rid(pub_mid, "l", &low, frame_idx);
+            a.write_video_frame_on_rid(pub_mid, "h", &high, frame_idx);
+            frame_idx += 1;
+        }
+
+        let a_sock = a.socket.clone();
+        let b_sock = b.socket.clone();
+        let mut abuf = [0u8; 2048];
+        let mut bbuf = [0u8; 2048];
+        tokio::select! {
+            r = a_sock.recv_from(&mut abuf) => {
+                if let Ok((n, src)) = r { a.feed_receive(&abuf[..n], src, sfu_addr); }
+            }
+            r = b_sock.recv_from(&mut bbuf) => {
+                if let Ok((n, src)) = r { b.feed_receive(&bbuf[..n], src, sfu_addr); }
+            }
+            () = tokio::time::sleep(Duration::from_millis(5)) => {
+                a.feed_timeout();
+                b.feed_timeout();
+            }
+        }
+    }
+
+    assert!(
+        a.is_connected(),
+        "simulcast publisher A must reach Connected"
+    );
+    assert!(b.is_connected(), "subscriber B must reach Connected");
+    assert!(
+        reneg_answered,
+        "the SFU-initiated renegotiation toward B must have been answered"
+    );
+    assert!(
+        b_frames > 0,
+        "the SFU must forward at least one simulcast video frame to B \
+         (a_connected={} b_connected={} reneg={})",
+        a.is_connected(),
+        b.is_connected(),
+        reneg_answered
+    );
+    // Best-effort layer-gate cross-check: if the markers survived packetisation,
+    // B must have seen frames from AT MOST ONE layer (the gate forwards one rid,
+    // drops the rest). An empty marker set (payload mangled by the video
+    // depacketiser) does not fail — the one-layer gate is unit-proven.
+    assert!(
+        markers.len() <= 1,
+        "the SFU forwarded frames from more than one simulcast layer: {markers:?}"
+    );
 }
 
 /// G-26 (the last open SFrame interop gate, headless slice) — a frame
