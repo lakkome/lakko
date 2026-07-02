@@ -5,9 +5,11 @@
 # from clean and diffs the artifact hashes. Worth ~20-25 quota
 # minutes per invocation, so it lives on a weekly cron + manual
 # dispatch instead of per-push (Phase-1, where it's
-# `continue-on-error: true` anyway). Promote to gating + per-push
-# once byte-identicality is stable across the workspace
-# (tracked in `~/.claude/plans/1-nested-wreath.md` §8).
+# `continue-on-error: true` anyway). The one documented blocker (the
+# uniffi rlib flake) is resolved under uniffi 0.31 (known-gaps G-25 /
+# GA-4); promote the Rust `repro` job to gating + re-enable the cron
+# after one green dispatch confirms the full artifact set on the ubuntu
+# runners (tracked in `~/.claude/plans/1-nested-wreath.md` §8).
 
 name: Reproducible build
 
@@ -34,10 +36,19 @@ jobs:
     name: reproducible build verifier
     runs-on: ubuntu-latest
     # Best-effort job — verifies the workspace builds reproducibly
-    # (byte-identical between two independent clean builds). Full
-    # Rust reproducibility needs careful flag tuning; for now the
-    # job is advisory — failures do not block. Drop
-    # `continue-on-error` once byte-identicality is stable.
+    # (byte-identical between two independent clean builds). The one
+    # historically-flaky artifact (`liblakko_ffi_uniffi.rlib` under
+    # uniffi 0.28's bincode-serialised proc-macro output) became
+    # reproducible under the uniffi 0.28 -> 0.31 bump (known-gaps G-25) —
+    # verified firsthand same-runner (2026-06-30, see
+    # ci/repro/compare-build-hashes.sh) — so the known-flaky filter is
+    # now empty and every artifact is compared. This job STAYS advisory
+    # only pending ONE green dispatch confirming the full workspace
+    # artifact set (all `lakko-svc-*` binaries + rlibs) is byte-identical
+    # on the ubuntu runners; drop `continue-on-error` after that run is
+    # green (the documented blocker is resolved — the svc binaries were
+    # never individually flagged flaky, so this is the last confirming
+    # step, not a rebuild of the analysis).
     continue-on-error: true
     env:
       # Pin the path prefix so absolute paths in debuginfo do not
@@ -68,9 +79,11 @@ jobs:
           echo "===== Build B hashes =====" && cat /tmp/build-b-hashes.txt
       - name: Compare hashes
         run: |
-          # Single source of truth for the diff + known-flaky filter
-          # (liblakko_ffi_uniffi.rlib — uniffi 0.28 proc-macros embed
-          # non-deterministic state). See ci/repro/compare-build-hashes.sh.
+          # Single source of truth for the diff. The known-flaky filter
+          # is now EMPTY (the historical liblakko_ffi_uniffi.rlib flake
+          # was fixed by the uniffi 0.28 -> 0.31 bump; see
+          # ci/repro/compare-build-hashes.sh), so every artifact is
+          # compared.
           bash "$GITHUB_WORKSPACE/ci/repro/compare-build-hashes.sh" \
             /tmp/build-a-hashes.txt /tmp/build-b-hashes.txt "release artifacts (same runner)"
 
@@ -88,10 +101,10 @@ jobs:
     #     regression here is exactly what this job catches).
     #
     # Empirically reproducible at 1.17b: two clean local builds
-    # produce a byte-identical `apps/web/dist/`. Unlike the Rust
-    # job above (where uniffi 0.28's proc-macros leave one flaky
-    # rlib), the Vite + wasm-pack pipeline has no known
-    # non-determinism today. Ship it as a real gate; if a future
+    # produce a byte-identical `apps/web/dist/`. The Vite + wasm-pack
+    # pipeline has no known non-determinism today (and the Rust job
+    # above no longer has one either — the uniffi rlib flake was fixed
+    # by the 0.28 -> 0.31 bump). Ship it as a real gate; if a future
     # dep bump or Vite reshape drifts the output, the weekly cron
     # surfaces it within a week and we either fix the regression
     # or add a `KNOWN_FLAKY` filter (mirroring the Rust pattern).

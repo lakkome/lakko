@@ -16,11 +16,18 @@
 # known-non-reproducible artifacts; exit 1 (printing the diff) otherwise.
 #
 # Known-flaky filter:
-#   liblakko_ffi_uniffi.rlib — uniffi 0.28's proc-macros embed
-#   non-deterministic state across independent builds (tracked upstream).
-#   Override the set with LAKKO_REPRO_KNOWN_FLAKY (an extended-regex
-#   alternation) if a new upstream flake appears; pass an empty string to
-#   compare every artifact.
+#   EMPTY by default (no filtered artifacts). The historical entry
+#   `liblakko_ffi_uniffi.rlib` was non-reproducible under uniffi 0.28, whose
+#   proc-macros serialised macro output via bincode (embedding
+#   non-deterministic HashMap-ordering state). The uniffi 0.28 -> 0.31 bump
+#   dropped bincode (see known-gaps G-25), and the rlib is now byte-identical
+#   across two clean same-runner builds — verified firsthand (2026-06-30):
+#   two `cargo build -p lakko-ffi-uniffi --release --locked` runs into the
+#   SAME target dir with `cargo clean` between (the CI repro methodology) +
+#   the repro RUSTFLAGS / SOURCE_DATE_EPOCH produced the identical SHA-256.
+#   So the default is now empty — every artifact is compared. Override with
+#   LAKKO_REPRO_KNOWN_FLAKY (an extended-regex alternation) if a new upstream
+#   flake appears.
 
 set -euo pipefail
 
@@ -40,8 +47,10 @@ for f in "$a" "$b"; do
   fi
 done
 
-# Default known-flaky set; override via env (empty string = filter nothing).
-known_flaky="${LAKKO_REPRO_KNOWN_FLAKY-liblakko_ffi_uniffi\.rlib}"
+# Default known-flaky set is now EMPTY (the uniffi rlib became reproducible
+# under uniffi 0.31 — see the header note). Override via env if a new upstream
+# flake appears; empty string = filter nothing.
+known_flaky="${LAKKO_REPRO_KNOWN_FLAKY-}"
 
 a_filtered="$(mktemp)"
 b_filtered="$(mktemp)"

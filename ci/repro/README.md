@@ -34,11 +34,20 @@ Both the CI jobs and the local verify set:
 
 ## Known flaky
 
-`liblakko_ffi_uniffi.rlib` — uniffi 0.28's proc-macros embed non-deterministic
-state across independent builds (tracked upstream). It is the only filtered
-artifact; every other `.rlib` + every `lakko-svc-*` binary must match
-byte-for-byte. Override with `LAKKO_REPRO_KNOWN_FLAKY` (an extended-regex
-alternation); pass an empty string to compare every artifact.
+**None — the default filter is empty; every artifact is compared.**
+
+Historically `liblakko_ffi_uniffi.rlib` was the one filtered artifact: under
+uniffi 0.28 its proc-macros serialised macro output via bincode, embedding
+non-deterministic HashMap-ordering state across independent builds. The uniffi
+0.28 -> 0.31 bump dropped bincode (see [known-gaps](../../docs/security/known-gaps.md)
+G-25), and the rlib is now byte-identical across two clean same-runner builds —
+verified firsthand (2026-06-30): two `cargo build -p lakko-ffi-uniffi --release
+--locked` runs into the SAME target dir with `cargo clean` between (the CI repro
+methodology) under the repro `RUSTFLAGS` / `SOURCE_DATE_EPOCH` produced the
+identical SHA-256. Every `.rlib` + every `lakko-svc-*` binary is now expected to
+match byte-for-byte. If a new upstream flake appears, override with
+`LAKKO_REPRO_KNOWN_FLAKY` (an extended-regex alternation); pass an empty string
+to compare every artifact (now the default).
 
 ## Run it locally
 
