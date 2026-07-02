@@ -102,7 +102,10 @@
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
+use std::collections::HashMap;
 use str0m::change::{SdpAnswer, SdpOffer, SdpPendingOffer};
+
+use str0m::bwe::{Bitrate, BweKind};
 use str0m::media::{Direction, MediaData, MediaKind, Mid, Rid};
 use str0m::net::{Protocol, Receive, Transmit};
 use str0m::{Candidate, Event, Input, Output, Rtc};
@@ -313,6 +316,16 @@ pub struct MediaPeer {
     /// concurrent change without applying the first
     /// would tangle str0m's internal SDP state.
     pending_offer: Option<SdpPendingOffer>,
+    /// Latest egress bandwidth estimate (bits/second) str0m produced for
+    /// SENDING to this peer, from `Event::EgressBitrateEstimate`. `None` until
+    /// BWE converges. Read by [`drive_layer_selection`] as this subscriber's
+    /// per-receiver budget for choosing a simulcast layer.
+    egress_estimate_bps: Option<u64>,
+    /// Per-incoming-layer bitrate meters, keyed on `(source mid, rid)`. Only
+    /// populated for simulcast tracks THIS peer publishes (frames carrying a
+    /// rid). [`drive_layer_selection`] reads these to learn each layer's cost
+    /// so it can fit a subscriber's budget.
+    layer_meters: HashMap<(Mid, Rid), LayerBitrateMeter>,
 }
 
 impl MediaPeer {
@@ -327,13 +340,23 @@ impl MediaPeer {
     /// `crate::peer::PeerRegistry`.
     #[must_use]
     pub fn new(id: MediaPeerId, now: Instant) -> Self {
+        // Enable BWE so str0m emits `Event::EgressBitrateEstimate` for this
+        // peer — the per-receiver bandwidth signal the simulcast layer policy
+        // ([`drive_layer_selection`]) uses. The initial estimate is a
+        // conservative 600 kbps; str0m refines it from TWCC/REMB feedback. BWE
+        // is passive for the SFrame-passthrough path (it never rewrites media).
+        let rtc = Rtc::builder()
+            .enable_bwe(Some(Bitrate::kbps(600)))
+            .build(now);
         Self {
             id,
             call_id: String::new(),
-            rtc: Rtc::new(now),
+            rtc,
             tracks_in: Vec::new(),
             tracks_out: Vec::new(),
             pending_offer: None,
+            egress_estimate_bps: None,
+            layer_meters: HashMap::new(),
         }
     }
 
@@ -790,6 +813,47 @@ impl MediaPeer {
         }
         false
     }
+
+    /// Record one incoming simulcast frame into this (publishing) peer's
+    /// per-layer bitrate meters. No-op for a non-simulcast frame (`rid == None`)
+    /// — only simulcast layers need per-layer accounting.
+    pub fn record_layer_frame(&mut self, data: &MediaData, now: Instant) {
+        let Some(rid) = data.rid else {
+            return;
+        };
+        self.layer_meters
+            .entry((data.mid, rid))
+            .or_insert_with(|| LayerBitrateMeter::new(now))
+            .record(data.data.len(), now);
+    }
+
+    /// Update this peer's egress bandwidth estimate (bits/second) from a
+    /// `Event::EgressBitrateEstimate`.
+    pub fn set_egress_estimate_bps(&mut self, bps: u64) {
+        self.egress_estimate_bps = Some(bps);
+    }
+
+    /// This peer's latest egress estimate (bits/second), if BWE has converged.
+    #[must_use]
+    pub fn egress_estimate_bps(&self) -> Option<u64> {
+        self.egress_estimate_bps
+    }
+
+    /// The measured per-layer bitrates for the track `source_mid` this peer
+    /// publishes, as `(rid, bits/second)` pairs sorted ASCENDING by bitrate —
+    /// the shape [`choose_layer_for_budget`] consumes. Empty when the track is
+    /// not simulcast or no window has completed yet.
+    #[must_use]
+    pub fn layer_bitrates_for(&self, source_mid: Mid) -> Vec<(Rid, u64)> {
+        let mut out: Vec<(Rid, u64)> = self
+            .layer_meters
+            .iter()
+            .filter(|((mid, _rid), _)| *mid == source_mid)
+            .map(|((_mid, rid), meter)| (*rid, meter.bitrate_bps()))
+            .collect();
+        out.sort_by_key(|(_, bps)| *bps);
+        out
+    }
 }
 
 /// Simulcast layer gate for one downstream track.
@@ -815,7 +879,138 @@ fn layer_gate_allows(chosen: &mut Option<Rid>, frame_rid: Option<Rid>) -> bool {
                 *chosen = Some(rid);
             }
             *chosen == Some(rid)
+        },
+    }
+}
+
+/// Extract the estimate in bits/second from a str0m [`BweKind`]. Returns `None`
+/// for an unrecognised (`#[non_exhaustive]`) future kind — the caller keeps its
+/// last known estimate rather than treating the unknown as zero bandwidth.
+fn bwe_kind_bps(kind: &BweKind) -> Option<u64> {
+    match kind {
+        BweKind::Twcc(b) => Some(bitrate_bps(*b)),
+        BweKind::Remb(_mid, b) => Some(bitrate_bps(*b)),
+        _ => None,
+    }
+}
+
+/// str0m's `Bitrate` as bits/second (its internal unit; `Bitrate::bps` / `kbps`
+/// / `mbps` constructors). Clamped `>= 0` so the policy arithmetic is total.
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn bitrate_bps(bitrate: Bitrate) -> u64 {
+    // The clamp rules out a negative estimate; a real bandwidth fits u64 with
+    // room to spare, so the cast is an exact truncation to whole bits/second.
+    let bps = bitrate.as_f64().max(0.0);
+    bps as u64
+}
+
+/// Windowed bitrate meter for one simulcast layer. Accumulates payload bytes
+/// over a fixed window and, when the window rolls over, publishes the completed
+/// window's rate in bits/second. Cheap + allocation-free; one instance lives
+/// per `(source mid, rid)` on the upstream peer.
+#[derive(Debug, Clone)]
+struct LayerBitrateMeter {
+    /// Measurement window length.
+    window: Duration,
+    /// Start of the in-progress window.
+    window_start: Instant,
+    /// Payload bytes seen in the in-progress window.
+    bytes: u64,
+    /// Rate of the last COMPLETED window (bits/second). `0` until the first
+    /// window rolls over.
+    last_bps: u64,
+}
+
+impl LayerBitrateMeter {
+    /// One-second window — long enough to smooth per-frame jitter, short enough
+    /// that a layer starting / stopping is reflected within a second.
+    const WINDOW: Duration = Duration::from_secs(1);
+
+    fn new(now: Instant) -> Self {
+        Self {
+            window: Self::WINDOW,
+            window_start: now,
+            bytes: 0,
+            last_bps: 0,
         }
+    }
+
+    /// Record `len` payload bytes observed at `now`.
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss
+    )]
+    fn record(&mut self, len: usize, now: Instant) {
+        let elapsed = now.saturating_duration_since(self.window_start);
+        if elapsed >= self.window {
+            let secs = elapsed.as_secs_f64().max(1e-3);
+            // Byte counts + bitrates are well within f64's exact-integer range
+            // for any realistic media stream; the cast is a truncation to whole
+            // bits/second.
+            self.last_bps = ((self.bytes as f64 * 8.0) / secs) as u64;
+            self.window_start = now;
+            self.bytes = 0;
+        }
+        self.bytes = self.bytes.saturating_add(len as u64);
+    }
+
+    /// Rate of the most recently completed window (bits/second).
+    fn bitrate_bps(&self) -> u64 {
+        self.last_bps
+    }
+}
+
+/// Fraction of headroom a HIGHER layer must fit under the budget before the
+/// policy upgrades to it. Hysteresis: switching up needs margin (so a
+/// borderline estimate does not flap), switching down is immediate.
+const UPGRADE_HEADROOM_NUM: u64 = 1;
+const UPGRADE_HEADROOM_DEN: u64 = 5; // 20 % headroom to upgrade
+
+/// Choose the simulcast layer to send a subscriber, given the measured bitrate
+/// of each available layer and the subscriber's egress bandwidth `budget_bps`.
+///
+/// `layers` MUST be sorted ascending by bitrate. Returns the highest layer that
+/// fits the budget — but an UPGRADE past `current` requires the target layer to
+/// fit with [`UPGRADE_HEADROOM_NUM`]/[`UPGRADE_HEADROOM_DEN`] headroom, while a
+/// DOWNGRADE (or staying) applies immediately (congestion relief must not wait).
+/// If no layer fits, the lowest is chosen (better a degraded stream than none).
+/// With `layers` empty, `current` is preserved.
+fn choose_layer_for_budget(
+    layers: &[(Rid, u64)],
+    budget_bps: u64,
+    current: Option<Rid>,
+) -> Option<Rid> {
+    if layers.is_empty() {
+        return current;
+    }
+    // Highest layer whose plain bitrate fits the budget (fall back to the
+    // lowest layer if even that does not fit).
+    let mut best = layers[0].0;
+    let mut best_bps = layers[0].1;
+    for &(rid, bps) in layers {
+        if bps <= budget_bps {
+            best = rid;
+            best_bps = bps;
+        }
+    }
+    let Some(cur) = current else {
+        return Some(best);
+    };
+    let cur_bps = layers.iter().find(|(r, _)| *r == cur).map(|(_, b)| *b);
+    match cur_bps {
+        // Upgrading to a higher-bitrate layer than the current one: require
+        // headroom so a marginal estimate does not oscillate.
+        Some(cb) if best_bps > cb => {
+            let needed = best_bps + best_bps * UPGRADE_HEADROOM_NUM / UPGRADE_HEADROOM_DEN;
+            if needed <= budget_bps {
+                Some(best)
+            } else {
+                Some(cur)
+            }
+        },
+        // Downgrade or no change — apply immediately.
+        _ => Some(best),
     }
 }
 
@@ -1309,6 +1504,10 @@ async fn run_media_loop(
         // PeerRegistry the signaling layer owns.
         drive_renegotiations(&mut router, &peers).await;
         fanout_media_data(&mut router, &summary.pending);
+        // Per-receiver simulcast layer selection: match each subscriber's
+        // egress bandwidth estimate against the measured per-layer bitrates and
+        // (re)select the best-fitting layer for the next tick.
+        drive_layer_selection(&mut router);
         let sleep_for = summary
             .earliest_deadline
             .saturating_duration_since(now)
@@ -1439,10 +1638,21 @@ async fn drain_outputs(
                 },
                 Ok(Output::Event(event)) => match event {
                     Event::MediaData(data) => {
+                        // Meter this layer's bitrate (simulcast frames only)
+                        // before the frame moves into the fanout queue — the
+                        // per-receiver policy reads these rates.
+                        peer.record_layer_frame(&data, now);
                         pending.push(PendingFanout {
                             origin: origin.clone(),
                             data,
                         });
+                    },
+                    Event::EgressBitrateEstimate(kind) => {
+                        // Per-receiver bandwidth signal for the simulcast layer
+                        // policy — this is the estimate for SENDING to `peer`.
+                        if let Some(bps) = bwe_kind_bps(&kind) {
+                            peer.set_egress_estimate_bps(bps);
+                        }
                     },
                     Event::MediaAdded(added) => {
                         // Register the track on the
@@ -1642,6 +1852,65 @@ pub(crate) fn fanout_media_data(
     }
     record_fanout_metrics(&outcome);
     outcome
+}
+
+/// Per-tick simulcast layer selection driver (G3-3).
+///
+/// For each subscriber peer with a converged egress bandwidth estimate, and for
+/// each downstream simulcast track it receives, choose the best-fitting layer
+/// via [`choose_layer_for_budget`] and apply it through
+/// [`MediaPeer::select_layer`] when it changes — congestion downgrades
+/// immediately, recovery upgrades with headroom hysteresis. A no-op for a peer
+/// without an estimate yet, or a track with fewer than two measured layers
+/// (audio / non-simulcast video). The two-pass shape (snapshot every
+/// publisher's per-layer bitrates, then mutate each subscriber) avoids a
+/// cross-peer borrow conflict.
+pub(crate) fn drive_layer_selection(router: &mut MediaRouter) {
+    // Pass 1 (immutable): snapshot each publishing peer's per-`mid` layer
+    // bitrates, keyed by the source peer id.
+    let snapshot: HashMap<MediaPeerId, HashMap<Mid, Vec<(Rid, u64)>>> = router
+        .peers()
+        .iter()
+        .map(|p| {
+            let mut per_mid: HashMap<Mid, Vec<(Rid, u64)>> = HashMap::new();
+            for ((mid, rid), meter) in &p.layer_meters {
+                per_mid
+                    .entry(*mid)
+                    .or_default()
+                    .push((*rid, meter.bitrate_bps()));
+            }
+            for layers in per_mid.values_mut() {
+                layers.sort_by_key(|(_, bps)| *bps);
+            }
+            (p.id().clone(), per_mid)
+        })
+        .collect();
+
+    // Pass 2 (mutable): choose + apply per subscriber.
+    for sub in router.peers_mut() {
+        let Some(budget) = sub.egress_estimate_bps else {
+            continue;
+        };
+        // Collect the decisions first so the `tracks_out` borrow is released
+        // before `select_layer` mutates it.
+        let decisions: Vec<(MediaPeerId, Mid, Option<Rid>)> = sub
+            .tracks_out
+            .iter()
+            .map(|e| (e.source_peer.clone(), e.source_mid, e.chosen_rid))
+            .collect();
+        for (src_peer, src_mid, current) in decisions {
+            let Some(layers) = snapshot.get(&src_peer).and_then(|m| m.get(&src_mid)) else {
+                continue;
+            };
+            if layers.len() < 2 {
+                continue; // not simulcast — nothing to choose
+            }
+            let chosen = choose_layer_for_budget(layers, budget, current);
+            if chosen != current {
+                sub.select_layer(&src_peer, src_mid, chosen);
+            }
+        }
+    }
 }
 
 /// Walk `new_tracks` and push a matching
@@ -2555,8 +2824,14 @@ mod tests {
         let l = Rid::from("l");
         // A bandwidth policy pre-selected the low layer.
         let mut chosen = Some(l);
-        assert!(!layer_gate_allows(&mut chosen, Some(h)), "high layer dropped");
-        assert!(layer_gate_allows(&mut chosen, Some(l)), "low layer forwarded");
+        assert!(
+            !layer_gate_allows(&mut chosen, Some(h)),
+            "high layer dropped"
+        );
+        assert!(
+            layer_gate_allows(&mut chosen, Some(l)),
+            "low layer forwarded"
+        );
         assert_eq!(chosen, Some(l), "the selection is not overwritten");
     }
 
@@ -2575,7 +2850,10 @@ mod tests {
         assert_eq!(p.tracks_out[0].chosen_rid, None, "starts un-latched");
 
         let h = Rid::from("h");
-        assert!(p.select_layer(&source, src_mid, Some(h)), "matching track set");
+        assert!(
+            p.select_layer(&source, src_mid, Some(h)),
+            "matching track set"
+        );
         assert_eq!(p.tracks_out[0].chosen_rid, Some(h));
 
         // A non-matching source is a no-op returning false.
@@ -2608,5 +2886,123 @@ mod tests {
             MediaForward::WrongLayer,
             "a frame for the non-selected layer is dropped as WrongLayer"
         );
+    }
+
+    // ============================================================
+    // Simulcast BANDWIDTH policy (G3-3)
+    // ============================================================
+
+    #[test]
+    fn layer_bitrate_meter_reports_the_completed_window_rate() {
+        let t0 = Instant::now();
+        let mut m = LayerBitrateMeter::new(t0);
+        assert_eq!(m.bitrate_bps(), 0, "no completed window yet");
+        // 100_000 payload bytes accumulate in the first ~1 s window.
+        m.record(100_000, t0);
+        // A record just past the window boundary publishes the window's rate.
+        m.record(0, t0 + Duration::from_secs(1));
+        // 100_000 bytes * 8 / 1.0 s ≈ 800 kbps.
+        let bps = m.bitrate_bps();
+        assert!((700_000..900_000).contains(&bps), "≈800 kbps, got {bps}");
+    }
+
+    #[test]
+    fn choose_layer_empty_preserves_current() {
+        let h = Rid::from("h");
+        assert_eq!(choose_layer_for_budget(&[], 1_000_000, Some(h)), Some(h));
+        assert_eq!(choose_layer_for_budget(&[], 1_000_000, None), None);
+    }
+
+    #[test]
+    fn choose_layer_downgrades_immediately_under_congestion() {
+        let l = Rid::from("l");
+        let h = Rid::from("h");
+        let layers = [(l, 300_000u64), (h, 2_000_000u64)];
+        // On high; the budget collapses to 500 kbps → drop to low AT ONCE.
+        assert_eq!(choose_layer_for_budget(&layers, 500_000, Some(h)), Some(l));
+    }
+
+    #[test]
+    fn choose_layer_upgrades_only_with_headroom() {
+        let l = Rid::from("l");
+        let h = Rid::from("h");
+        let layers = [(l, 300_000u64), (h, 1_000_000u64)];
+        // On low; a 1.05 Mbps budget fits high's plain 1 Mbps but NOT the 20 %
+        // upgrade headroom (needs 1.2 Mbps) → hold at low to avoid flapping.
+        assert_eq!(
+            choose_layer_for_budget(&layers, 1_050_000, Some(l)),
+            Some(l)
+        );
+        // A 1.3 Mbps budget clears the headroom → upgrade to high.
+        assert_eq!(
+            choose_layer_for_budget(&layers, 1_300_000, Some(l)),
+            Some(h)
+        );
+    }
+
+    #[test]
+    fn choose_layer_picks_lowest_when_none_fit() {
+        let l = Rid::from("l");
+        let h = Rid::from("h");
+        let layers = [(l, 300_000u64), (h, 2_000_000u64)];
+        // Budget below even the low layer → still choose the lowest (a degraded
+        // stream beats no stream).
+        assert_eq!(choose_layer_for_budget(&layers, 100_000, None), Some(l));
+    }
+
+    #[test]
+    fn drive_layer_selection_downgrades_a_starved_subscriber() {
+        let mid = Mid::new();
+        let rid_l = Rid::from("l");
+        let rid_h = Rid::from("h");
+
+        // Publisher P with two measured layers on `mid`.
+        let mut publisher = MediaPeer::new(pid("pub"), Instant::now());
+        let pub_id = publisher.id().clone();
+        publisher
+            .layer_meters
+            .insert((mid, rid_l), meter_with_bps(300_000));
+        publisher
+            .layer_meters
+            .insert((mid, rid_h), meter_with_bps(2_000_000));
+
+        // Subscriber S receiving P's track, currently on the HIGH layer, with a
+        // 500 kbps egress estimate.
+        let mut subscriber = MediaPeer::new(pid("sub"), Instant::now());
+        subscriber.set_egress_estimate_bps(500_000);
+        subscriber.tracks_out.push(TrackOutEntry {
+            source_peer: pub_id.clone(),
+            source_mid: mid,
+            kind: MediaKind::Video,
+            state: TrackOutState::Open(Mid::new()),
+            chosen_rid: Some(rid_h),
+        });
+
+        let mut router = MediaRouter::new();
+        router.add_peer(publisher);
+        router.add_peer(subscriber);
+
+        drive_layer_selection(&mut router);
+
+        let sub = router
+            .peers()
+            .iter()
+            .find(|p| *p.id() == pid("sub"))
+            .unwrap();
+        assert_eq!(
+            sub.tracks_out[0].chosen_rid,
+            Some(rid_l),
+            "a 500 kbps budget must downgrade the subscriber from high to low"
+        );
+    }
+
+    /// A [`LayerBitrateMeter`] whose completed-window rate is a fixed `bps`.
+    fn meter_with_bps(bps: u64) -> LayerBitrateMeter {
+        LayerBitrateMeter {
+            window: LayerBitrateMeter::WINDOW,
+            window_start: Instant::now(),
+            bytes: 0,
+            last_bps: bps,
+        }
     }
 }
