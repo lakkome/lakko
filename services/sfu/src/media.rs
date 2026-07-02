@@ -103,7 +103,7 @@ use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use str0m::change::{SdpAnswer, SdpOffer, SdpPendingOffer};
-use str0m::media::{Direction, MediaData, MediaKind, Mid};
+use str0m::media::{Direction, MediaData, MediaKind, Mid, Rid};
 use str0m::net::{Protocol, Receive, Transmit};
 use str0m::{Candidate, Event, Input, Output, Rtc};
 use thiserror::Error;
@@ -166,6 +166,13 @@ pub enum MediaForward {
     NoCodecMatch,
     /// str0m's `Writer::write` returned an error.
     WriteFailed(String),
+    /// Simulcast: the frame belongs to a layer this
+    /// downstream track is not currently forwarding. The
+    /// SFU sends exactly one simulcast layer per subscriber
+    /// (the one selected by [`MediaPeer::select_layer`], or
+    /// the first layer observed), so frames of the other
+    /// layers are dropped here by design — not a fault.
+    WrongLayer,
 }
 
 /// One incoming track on a [`MediaPeer`]. Produced from
@@ -243,6 +250,19 @@ pub struct TrackOutEntry {
     pub kind: MediaKind,
     /// Lifecycle phase. See [`TrackOutState`].
     pub state: TrackOutState,
+    /// Simulcast layer this downstream track forwards.
+    ///
+    /// - `None` — no layer chosen yet. A non-simulcast
+    ///   source (every frame carries `rid == None`) forwards
+    ///   verbatim. For a simulcast source, the FIRST layer
+    ///   observed is auto-latched here (see
+    ///   [`layer_gate_allows`]).
+    /// - `Some(rid)` — forward only this layer's frames;
+    ///   frames of every other layer are dropped
+    ///   ([`MediaForward::WrongLayer`]). A bandwidth policy
+    ///   overrides the latch via
+    ///   [`MediaPeer::select_layer`].
+    pub chosen_rid: Option<Rid>,
 }
 
 /// One media-routing peer.
@@ -396,6 +416,7 @@ impl MediaPeer {
             source_mid: source.mid,
             kind: source.kind,
             state: TrackOutState::ToOpen,
+            chosen_rid: None,
         });
         true
     }
@@ -714,17 +735,29 @@ impl MediaPeer {
         // `ToOpen` / `Negotiating` mean the SDP
         // renegotiation is in flight and the destination
         // writer is not yet live.
-        let local_mid = self.tracks_out.iter().find_map(|entry| {
-            if entry.source_peer == *source_peer && entry.source_mid == data.mid {
-                if let TrackOutState::Open(local) = entry.state {
-                    return Some(local);
-                }
-            }
-            None
+        // Find the matching Open entry MUTABLY — the simulcast gate latches
+        // the chosen layer in place on the first frame it sees.
+        let entry = self.tracks_out.iter_mut().find(|entry| {
+            entry.source_peer == *source_peer
+                && entry.source_mid == data.mid
+                && matches!(entry.state, TrackOutState::Open(_))
         });
-        let Some(local_mid) = local_mid else {
+        let Some(entry) = entry else {
             return MediaForward::NoWriter;
         };
+        // Simulcast layer selection: forward only this downstream track's chosen
+        // layer (auto-latching the first layer observed; a bandwidth policy may
+        // override via `select_layer`). A non-simulcast frame (`rid == None`)
+        // always passes.
+        if !layer_gate_allows(&mut entry.chosen_rid, data.rid) {
+            return MediaForward::WrongLayer;
+        }
+        let TrackOutState::Open(local_mid) = entry.state else {
+            // Unreachable — the `matches!` filter above kept only Open entries.
+            return MediaForward::NoWriter;
+        };
+        // `entry` is no longer used, so its `&mut self.tracks_out` borrow ends
+        // and we can take the writer off `self.rtc`.
         let Some(writer) = self.rtc.writer(local_mid) else {
             return MediaForward::NoWriter;
         };
@@ -735,6 +768,54 @@ impl MediaPeer {
             return MediaForward::WriteFailed(e.to_string());
         }
         MediaForward::Sent
+    }
+
+    /// Choose which simulcast layer this peer receives for the downstream track
+    /// mirroring `(source_peer, source_mid)`. A bandwidth / quality policy calls
+    /// this to override the auto-latched first layer — e.g. downgrade to a lower
+    /// layer when the subscriber's egress estimate drops. `None` re-arms the
+    /// auto-latch (the next observed layer is chosen). Returns `true` if a
+    /// matching downstream track exists.
+    pub fn select_layer(
+        &mut self,
+        source_peer: &MediaPeerId,
+        source_mid: Mid,
+        rid: Option<Rid>,
+    ) -> bool {
+        for entry in &mut self.tracks_out {
+            if entry.source_peer == *source_peer && entry.source_mid == source_mid {
+                entry.chosen_rid = rid;
+                return true;
+            }
+        }
+        false
+    }
+}
+
+/// Simulcast layer gate for one downstream track.
+///
+/// Decides whether a frame with `frame_rid` should be forwarded, given the
+/// track's currently-chosen layer `chosen` (mutated in place to auto-latch):
+///
+/// - `frame_rid == None` — the source is not simulcast (every frame carries no
+///   rid), so always forward. `chosen` is left untouched.
+/// - `frame_rid == Some(rid)` and `chosen == None` — first simulcast layer seen;
+///   latch it (`*chosen = Some(rid)`) and forward.
+/// - `frame_rid == Some(rid)` and `chosen == Some(sel)` — forward iff
+///   `rid == sel`; otherwise this is a different layer and is dropped.
+///
+/// A policy overrides the latch by setting `chosen` via
+/// [`MediaPeer::select_layer`]; the next non-matching frame is then dropped and
+/// only the chosen layer flows.
+fn layer_gate_allows(chosen: &mut Option<Rid>, frame_rid: Option<Rid>) -> bool {
+    match frame_rid {
+        None => true,
+        Some(rid) => {
+            if chosen.is_none() {
+                *chosen = Some(rid);
+            }
+            *chosen == Some(rid)
+        }
     }
 }
 
@@ -1429,13 +1510,20 @@ pub(crate) struct FanoutOutcome {
     pub(crate) no_codec_match: u64,
     /// str0m refused the write.
     pub(crate) write_failed: u64,
+    /// Simulcast: frames dropped because they belong to a
+    /// layer this subscriber is not currently receiving. This
+    /// is the SFU doing its job (one layer per subscriber),
+    /// not a fault — but a spike is worth seeing (e.g. a
+    /// publisher sending three layers to an audience that all
+    /// picked the lowest).
+    pub(crate) wrong_layer: u64,
 }
 
 impl FanoutOutcome {
     /// Total forward attempts this pass = sum of all
     /// outcome buckets = `frames × non-origin peers`.
     pub(crate) fn attempted(&self) -> u64 {
-        self.sent + self.no_writer + self.no_codec_match + self.write_failed
+        self.sent + self.no_writer + self.no_codec_match + self.write_failed + self.wrong_layer
     }
 }
 
@@ -1461,6 +1549,10 @@ fn record_fanout_metrics(outcome: &FanoutOutcome) {
     if outcome.write_failed > 0 {
         metrics::counter!(MEDIA_FRAMES_DROPPED_TOTAL, "reason" => "write_failed")
             .increment(outcome.write_failed);
+    }
+    if outcome.wrong_layer > 0 {
+        metrics::counter!(MEDIA_FRAMES_DROPPED_TOTAL, "reason" => "wrong_layer")
+            .increment(outcome.wrong_layer);
     }
     // `no_writer` is the expected pre-negotiation transient, so it
     // is not worth a log line. A write failure or codec mismatch is
@@ -1536,6 +1628,7 @@ pub(crate) fn fanout_media_data(
                 MediaForward::Sent => outcome.sent += 1,
                 MediaForward::NoWriter => outcome.no_writer += 1,
                 MediaForward::NoCodecMatch => outcome.no_codec_match += 1,
+                MediaForward::WrongLayer => outcome.wrong_layer += 1,
                 MediaForward::WriteFailed(detail) => {
                     outcome.write_failed += 1;
                     tracing::warn!(
@@ -2427,5 +2520,93 @@ mod tests {
             .accept_renegotiation_answer("v=0\r\n")
             .expect_err("no pending offer → error");
         assert!(matches!(err, MediaError::Str0m(_)));
+    }
+
+    // ============================================================
+    // Simulcast layer selection (G3-3)
+    // ============================================================
+
+    #[test]
+    fn layer_gate_non_simulcast_frame_always_forwards_and_never_latches() {
+        let mut chosen = None;
+        assert!(layer_gate_allows(&mut chosen, None));
+        assert!(layer_gate_allows(&mut chosen, None));
+        assert_eq!(chosen, None, "a rid-less frame must not latch a layer");
+    }
+
+    #[test]
+    fn layer_gate_latches_the_first_layer_and_drops_the_others() {
+        let h = Rid::from("h");
+        let l = Rid::from("l");
+        let mut chosen = None;
+        // First simulcast frame latches its layer and forwards.
+        assert!(layer_gate_allows(&mut chosen, Some(h)));
+        assert_eq!(chosen, Some(h));
+        // Same layer keeps flowing.
+        assert!(layer_gate_allows(&mut chosen, Some(h)));
+        // A different layer is dropped — and does NOT move the latch.
+        assert!(!layer_gate_allows(&mut chosen, Some(l)));
+        assert_eq!(chosen, Some(h));
+    }
+
+    #[test]
+    fn layer_gate_honours_an_explicit_policy_selection() {
+        let h = Rid::from("h");
+        let l = Rid::from("l");
+        // A bandwidth policy pre-selected the low layer.
+        let mut chosen = Some(l);
+        assert!(!layer_gate_allows(&mut chosen, Some(h)), "high layer dropped");
+        assert!(layer_gate_allows(&mut chosen, Some(l)), "low layer forwarded");
+        assert_eq!(chosen, Some(l), "the selection is not overwritten");
+    }
+
+    #[test]
+    fn select_layer_sets_chosen_rid_on_the_matching_track_only() {
+        let mut p = MediaPeer::new(pid("alice"), Instant::now());
+        let source = pid("bob");
+        let src_mid = Mid::new();
+        p.observe_remote_track_in(
+            source.clone(),
+            TrackIn {
+                mid: src_mid,
+                kind: MediaKind::Video,
+            },
+        );
+        assert_eq!(p.tracks_out[0].chosen_rid, None, "starts un-latched");
+
+        let h = Rid::from("h");
+        assert!(p.select_layer(&source, src_mid, Some(h)), "matching track set");
+        assert_eq!(p.tracks_out[0].chosen_rid, Some(h));
+
+        // A non-matching source is a no-op returning false.
+        assert!(!p.select_layer(&pid("carol"), src_mid, Some(Rid::from("l"))));
+        assert_eq!(p.tracks_out[0].chosen_rid, Some(h), "unchanged");
+
+        // `None` re-arms the auto-latch.
+        assert!(p.select_layer(&source, src_mid, None));
+        assert_eq!(p.tracks_out[0].chosen_rid, None);
+    }
+
+    #[test]
+    fn forward_drops_a_non_selected_simulcast_layer_as_wrong_layer() {
+        let mut p = MediaPeer::new(pid("alice"), Instant::now());
+        let source = pid("bob");
+        let mut frame = synthetic_media_data();
+        frame.rid = Some(Rid::from("h"));
+        // Manually stage an Open downstream entry that has already selected the
+        // LOW layer — the high-layer frame above must be dropped as WrongLayer
+        // BEFORE any writer lookup (so no real str0m session is needed).
+        p.tracks_out.push(TrackOutEntry {
+            source_peer: source.clone(),
+            source_mid: frame.mid,
+            kind: MediaKind::Video,
+            state: TrackOutState::Open(Mid::new()),
+            chosen_rid: Some(Rid::from("l")),
+        });
+        assert_eq!(
+            p.forward_media_data(&source, &frame),
+            MediaForward::WrongLayer,
+            "a frame for the non-selected layer is dropped as WrongLayer"
+        );
     }
 }

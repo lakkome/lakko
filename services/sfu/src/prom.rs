@@ -63,10 +63,13 @@ pub mod names {
     /// the wire, labelled `reason` (`no_writer` —
     /// renegotiation not yet open / peer torn down;
     /// `no_codec_match` — destination codec set excludes the
-    /// PT; `write_failed` — str0m refused the write). A spike
+    /// PT; `write_failed` — str0m refused the write;
+    /// `wrong_layer` — a simulcast frame for a layer this
+    /// subscriber is not receiving, dropped by design). A spike
     /// in `no_writer` is the signal that subscribers are
     /// starved (renegotiation stuck), which is the
-    /// fanout-fairness alarm.
+    /// fanout-fairness alarm; `wrong_layer` is expected traffic
+    /// for a simulcast publisher, not an alarm.
     pub const MEDIA_FRAMES_DROPPED_TOTAL: &str = "lakko_sfu_media_frames_dropped_total";
 }
 
