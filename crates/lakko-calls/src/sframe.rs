@@ -805,4 +805,45 @@ mod tests {
             "stateless open opens a replayed wire again — replay guard is app-layer"
         );
     }
+
+    #[test]
+    fn frame_sealed_under_one_call_key_does_not_open_under_another() {
+        // Cross-call (and cross-epoch) crypto isolation: two DIFFERENT per-call
+        // seeds derive different ParticipantKeys for the SAME leaf, so a frame
+        // sealed on call A cannot be opened by a receiver holding call B's key —
+        // even at the same leaf + counter. A different seed models either a
+        // different call OR a different MLS epoch of one call (each re-export
+        // yields a fresh CallKey). This is the crypto backstop behind the SFU's
+        // routing-level cross-call isolation: a mis-routed frame is
+        // undecryptable, not merely undelivered (invariant #4).
+        let leaf = 3;
+        let mut sender_a = CallKey::from_seed([0xA1; CALL_KEY_LEN])
+            .participant_key(leaf)
+            .unwrap();
+        let receiver_b = CallKey::from_seed([0xB2; CALL_KEY_LEN])
+            .participant_key(leaf)
+            .unwrap();
+
+        let wire = sender_a.seal_framed(b"call A media").expect("seal_framed");
+        // The wire is well-formed — the header parses and carries A's leaf — so
+        // the rejection is the AEAD key, not a malformed frame.
+        let (header, _) = SframeHeader::decode(&wire).expect("header parses");
+        assert_eq!(header.kid, u64::from(leaf));
+        assert!(
+            receiver_b.open_framed(&wire).is_err(),
+            "a frame sealed under call A must not open under call B's key"
+        );
+
+        // Sanity: call A's own receiver DOES open it — the failure above is the
+        // seed, not the frame.
+        let receiver_a = CallKey::from_seed([0xA1; CALL_KEY_LEN])
+            .participant_key(leaf)
+            .unwrap();
+        assert_eq!(
+            receiver_a
+                .open_framed(&wire)
+                .expect("A's key opens A's frame"),
+            b"call A media"
+        );
+    }
 }
