@@ -973,9 +973,10 @@ mod tests {
         }
     }
 
-    /// Empty wire → WireParse; reserved-bit-set first byte →
-    /// WireParse. These pin the loud-fail surface for the C++
-    /// shim N-3 / Obj-C++ shim N-4 / JNI shim N-5.
+    /// Empty wire → WireParse; a truncated header (an extended
+    /// field declaring bytes that are not present) → WireParse.
+    /// These pin the loud-fail surface for the C++ shim N-3 /
+    /// Obj-C++ shim N-4 / JNI shim N-5.
     #[test]
     fn unwrap_loud_fails_on_malformed_wire() {
         let mut leaf = 0_u32;
@@ -997,7 +998,9 @@ mod tests {
             LakkoSframeStatus::WireParse
         );
 
-        let bad = [0x80_u8, 0x00, 0x00];
+        // 0x0B = RFC 9605 §4.3 X=0 K=0 Y=1 C=3 → declares a 4-byte CTR with
+        // none present → the header decode fails as truncated.
+        let bad = [0x0B_u8];
         assert_eq!(
             unsafe {
                 lakko_sframe_unwrap_frame(

@@ -311,7 +311,8 @@ pub fn wrap_sframe_frame(sender_leaf: u32, counter: u32, ciphertext: Vec<u8>) ->
 /// # Errors
 ///
 /// - [`FfiError::Call`] when the header parse fails
-///   (truncated, reserved bit set).
+///   (a truncated header — an extended field declaring
+///   bytes that are not present).
 /// - [`FfiError::Call`] when the parsed `kid` does not
 ///   fit in `u32`. Lakko's call-keying layer pins
 ///   `sender_leaf` to `u32` (see
@@ -526,13 +527,14 @@ mod tests {
         }
     }
 
-    /// `unwrap_sframe_frame` refuses a reserved-bit-set
-    /// first byte — that's the forward-compatibility
-    /// schema marker the encoder will never emit.
+    /// `unwrap_sframe_frame` refuses a truncated header — an
+    /// extended field declaring trailing bytes that are not
+    /// present.
     #[test]
-    fn unwrap_refuses_reserved_bit_set() {
-        // First byte 0b1000_0000 → R=1, reserved-set.
-        match unwrap_sframe_frame(vec![0x80, 0x00, 0x00]) {
+    fn unwrap_refuses_a_truncated_header() {
+        // 0x0B = RFC 9605 §4.3 X=0 K=0 Y=1 C=3 → declares a 4-byte CTR with
+        // none present → the header decode fails as truncated.
+        match unwrap_sframe_frame(vec![0x0B]) {
             Err(FfiError::Call(msg)) => assert!(msg.contains("decode")),
             other => panic!("expected decode error, got {other:?}"),
         }
