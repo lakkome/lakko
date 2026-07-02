@@ -744,4 +744,65 @@ mod tests {
             "counter must not advance on exhaustion"
         );
     }
+
+    #[test]
+    fn open_framed_rejects_a_header_spliced_onto_another_frames_body() {
+        // Audit-pack C-7, at the framed layer: the counter is bound into BOTH
+        // the AAD (the on-wire header bytes) and the nonce, so a valid header
+        // from one frame cannot be reused on a DIFFERENT frame's ciphertext
+        // body — the receiver rejects the splice. Complements
+        // `wrong_counter_rejects_open` (the raw counter-vs-nonce binding) and
+        // `open_framed_rejects_tampered_header` (a single mutated byte).
+        let key = CallKey::from_seed([0x13; CALL_KEY_LEN]);
+        let mut sender = key.participant_key(0).unwrap();
+        let receiver = key.participant_key(0).unwrap();
+
+        let wire1 = sender.seal_framed(b"frame body A").expect("seal_framed A");
+        let wire2 = sender.seal_framed(b"frame body B").expect("seal_framed B");
+        let (_h1, consumed1) = SframeHeader::decode(&wire1).expect("decode A");
+        let (_h2, consumed2) = SframeHeader::decode(&wire2).expect("decode B");
+        // B's header (counter 2) onto A's ciphertext body.
+        let mut spliced = wire2[..consumed2].to_vec();
+        spliced.extend_from_slice(&wire1[consumed1..]);
+        assert!(
+            receiver.open_framed(&spliced).is_err(),
+            "a header spliced onto a different frame's body must not open"
+        );
+        // Sanity: each intact frame still opens on its own.
+        assert_eq!(
+            receiver.open_framed(&wire1).expect("A opens"),
+            b"frame body A"
+        );
+        assert_eq!(
+            receiver.open_framed(&wire2).expect("B opens"),
+            b"frame body B"
+        );
+    }
+
+    #[test]
+    fn open_framed_is_stateless_so_replay_is_an_app_layer_concern() {
+        // The `ParticipantKey` open path is deliberately STATELESS: it derives
+        // the nonce from the header counter and AEAD-opens, without tracking a
+        // receive high-water. So the SAME sealed wire opens repeatedly — the
+        // sframe layer does NOT provide replay protection. Dropping a replayed
+        // or out-of-order counter is an APP-LAYER responsibility (the receiver
+        // tracks the monotone header counter, like the SFU's per-sender state).
+        // This test PINS that boundary: if a future change makes open stateful,
+        // it breaks here and forces a conscious decision.
+        let key = CallKey::from_seed([0x13; CALL_KEY_LEN]);
+        let mut sender = key.participant_key(0).unwrap();
+        let receiver = key.participant_key(0).unwrap();
+        let wire = sender.seal_framed(b"replayed frame").expect("seal_framed");
+        assert_eq!(
+            receiver.open_framed(&wire).expect("first open"),
+            b"replayed frame"
+        );
+        assert_eq!(
+            receiver
+                .open_framed(&wire)
+                .expect("replayed open still succeeds"),
+            b"replayed frame",
+            "stateless open opens a replayed wire again — replay guard is app-layer"
+        );
+    }
 }
