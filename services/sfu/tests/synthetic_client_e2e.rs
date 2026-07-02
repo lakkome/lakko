@@ -1078,3 +1078,270 @@ async fn fanout_never_crosses_calls_over_the_live_sfu() {
         "cross-call isolation breach: a peer in call BETA received media from a publisher in call ALPHA"
     );
 }
+
+/// Final state of a [`run_multi_frame_fanout`] drive. `received_order` is the
+/// order in which B first observed each frame index, so a failure message can
+/// show which frames landed and which stalled.
+#[allow(clippy::struct_excessive_bools)]
+struct MultiFanoutOutcome {
+    a_connected: bool,
+    b_connected: bool,
+    reneg_answered: bool,
+    /// Index of each `frames[i]` in the order B first received it.
+    received_order: Vec<usize>,
+}
+
+/// Drive publisher A + subscriber B + the SFU media task until subscriber B has
+/// received EVERY distinct frame in `frames` (or the deadline elapses). The
+/// generalisation of [`run_cross_fanout`] from one payload to N: each tick, A
+/// writes the next not-yet-received frame (round-robin over the outstanding
+/// set, so a single loopback drop of one frame does not stall the others), and
+/// B's drained `MediaData` payloads are matched back to their frame index.
+#[allow(clippy::too_many_arguments)]
+async fn run_multi_frame_fanout(
+    a: &mut SyntheticClient,
+    b: &mut SyntheticClient,
+    sfu_addr: SocketAddr,
+    handle: &MediaTaskHandle,
+    b_id: PeerId,
+    b_outbound_rx: &mut mpsc::Receiver<ServerFrame>,
+    a_publisher_mid: Mid,
+    frames: &[Vec<u8>],
+) -> MultiFanoutOutcome {
+    let deadline = Instant::now() + CROSS_FANOUT_DEADLINE;
+    let mut reneg_answered = false;
+    let mut pending_reneg: Option<String> = None;
+    let mut frame_idx: u64 = 0;
+    // Round-robin cursor over `frames` (a `usize` so no u64->usize cast).
+    let mut cursor: usize = 0;
+    let mut received = vec![false; frames.len()];
+    let mut received_order: Vec<usize> = Vec::new();
+
+    while Instant::now() < deadline {
+        // 1 + 2. Pump both sides; classify B's received payloads by frame index.
+        let _ = a.drain().await;
+        for p in b.drain().await {
+            if let Some(idx) = frames.iter().position(|f| f.as_slice() == p.as_slice()) {
+                if !received[idx] {
+                    received[idx] = true;
+                    received_order.push(idx);
+                }
+            }
+        }
+        if received.iter().all(|&r| r) {
+            break;
+        }
+
+        // 3. Answer the SFU-initiated renegotiation for B (same as cross_fanout).
+        while let Ok(frame) = b_outbound_rx.try_recv() {
+            if let ServerFrame::SdpOffer { sdp } = frame {
+                pending_reneg = Some(sdp);
+            }
+        }
+        if !reneg_answered && b.is_connected() {
+            if let Some(sdp) = pending_reneg.take() {
+                if let Ok(answer) = b.answer_renegotiation(&sdp) {
+                    if handle
+                        .accept_renegotiation_answer(b_id.clone(), answer)
+                        .await
+                        .is_ok()
+                    {
+                        reneg_answered = true;
+                    }
+                }
+            }
+        }
+
+        // 4. Publish the next OUTSTANDING frame, round-robin from a rotating
+        //    cursor so one persistently-dropped frame cannot starve the rest.
+        if a.is_connected() && b.is_connected() && reneg_answered {
+            if let Some(off) = (0..frames.len()).find(|k| !received[(cursor + k) % frames.len()]) {
+                let idx = (cursor + off) % frames.len();
+                a.write_audio_frame(a_publisher_mid, &frames[idx], frame_idx);
+            }
+            cursor = (cursor + 1) % frames.len();
+            frame_idx += 1;
+        }
+
+        // 5. Wait for socket activity or a short tick.
+        let a_sock = a.socket.clone();
+        let b_sock = b.socket.clone();
+        let mut abuf = [0u8; 2048];
+        let mut bbuf = [0u8; 2048];
+        tokio::select! {
+            r = a_sock.recv_from(&mut abuf) => {
+                if let Ok((n, src)) = r {
+                    a.feed_receive(&abuf[..n], src, sfu_addr);
+                }
+            }
+            r = b_sock.recv_from(&mut bbuf) => {
+                if let Ok((n, src)) = r {
+                    b.feed_receive(&bbuf[..n], src, sfu_addr);
+                }
+            }
+            () = tokio::time::sleep(Duration::from_millis(5)) => {
+                a.feed_timeout();
+                b.feed_timeout();
+            }
+        }
+    }
+
+    MultiFanoutOutcome {
+        a_connected: a.is_connected(),
+        b_connected: b.is_connected(),
+        reneg_answered,
+        received_order,
+    }
+}
+
+/// G-26 / G3-4 — a SUSTAINED SFrame stream (not just one frame) round-trips the
+/// live SFU between two synthetic peers.
+///
+/// [`sframe_sealed_frame_round_trips_through_the_live_sfu`] proves a SINGLE
+/// sealed frame (counter 0) survives the SFU media path. This closes the "≥ K
+/// SFrame-decrypted frames" leg: publisher A seals `N` DISTINCT frames with the
+/// real `lakko_calls::sframe` core — the participant key auto-advances the
+/// per-frame counter (pre-incremented, so the wire carries counters `1..N`,
+/// audit-pack C-5, monotone per sender per epoch) — every frame is forwarded
+/// through the
+/// production `str0m` media task over a real ICE + DTLS + cross-fanout
+/// renegotiation, and subscriber B `open_framed`s EACH forwarded frame back to
+/// its exact plaintext. A pass proves the SFrame layer (ciphertext + the
+/// header-as-AAD, ADR-0013) survives sustained forwarding, not just a one-shot,
+/// while the SFU stays SFrame-opaque (`lakko-calls` is a dev-only dep of
+/// `services/sfu`; the production binary never links it — C-39).
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn multi_frame_sframe_stream_round_trips_through_the_live_sfu() {
+    use lakko_calls::sframe::CALL_KEY_LEN;
+    use lakko_calls::{CallKey, SframeHeader};
+
+    // Number of distinct frames in the stream. Small enough to complete well
+    // within CROSS_FANOUT_DEADLINE on a loaded CI runner, large enough that the
+    // counter progression + sustained forwarding are genuinely exercised.
+    const STREAM_LEN: usize = 5;
+
+    // 1. Media task + registry (B is the subscriber with an intercept channel).
+    let peers = PeerRegistry::new();
+    let b_id = PeerId::fresh();
+    let (b_tx, mut b_rx) = mpsc::channel::<ServerFrame>(64);
+    let registered = peers
+        .register(Peer {
+            id: b_id.clone(),
+            call_id: "sframe-stream-test".to_owned(),
+            account_id: "subscriber-b".to_owned(),
+            outbound: Some(b_tx),
+        })
+        .await;
+    assert!(registered, "fresh PeerId must register cleanly");
+
+    let (media, sfu_addr) = spawn_media_task("127.0.0.1:0".parse().unwrap(), peers)
+        .await
+        .expect("UDP bind on loopback:0 succeeds");
+
+    let mut a = SyntheticClient::new().await;
+    let mut b = SyntheticClient::new().await;
+    let a_id = PeerId::fresh();
+
+    let (b_offer, b_pending) = b.create_subscriber_offer();
+    let b_answer = media
+        .accept_offer(b_id.clone(), "stream-test-call".to_owned(), b_offer)
+        .await
+        .expect("SFU accepts B's RecvOnly subscriber offer");
+    b.accept_answer(b_pending, &b_answer)
+        .expect("B applies the SFU's answer");
+
+    let (a_offer, a_pending, publisher_mid) = a.create_audio_publisher_offer();
+    let a_answer = media
+        .accept_offer(a_id.clone(), "stream-test-call".to_owned(), a_offer)
+        .await
+        .expect("SFU accepts A's SendOnly publisher offer");
+    a.accept_answer(a_pending, &a_answer)
+        .expect("A applies the SFU's answer");
+
+    // 2. Derive the SAME per-call key on both ends and seal N DISTINCT frames.
+    //    `seal_framed` advances the counter internally, so the sealed wires
+    //    carry counters 0..N-1.
+    let seed = [0x5a_u8; CALL_KEY_LEN];
+    let a_leaf: u32 = 7;
+    let mut a_sender = CallKey::from_seed(seed)
+        .participant_key(a_leaf)
+        .expect("A derives its sender participant key");
+    let b_receiver = CallKey::from_seed(seed)
+        .participant_key(a_leaf)
+        .expect("B derives the receiver participant key for A's leaf");
+
+    let mut plaintexts: Vec<Vec<u8>> = Vec::with_capacity(STREAM_LEN);
+    let mut sealed_frames: Vec<Vec<u8>> = Vec::with_capacity(STREAM_LEN);
+    for i in 0..STREAM_LEN {
+        let pt = format!("lakko media frame #{i} -- sustained sframe stream").into_bytes();
+        let sealed = a_sender.seal_framed(&pt).expect("A seals frame");
+        assert_ne!(sealed.as_slice(), pt.as_slice(), "each wire is ciphertext");
+        plaintexts.push(pt);
+        sealed_frames.push(sealed);
+    }
+
+    // Pre-SFU: the sealed wires carry strictly-increasing counters 1..N — the
+    // participant key PRE-increments the counter inside `seal`, so the first
+    // frame is counter 1 (audit-pack C-5, monotone per sender per epoch) —
+    // asserted on the seal side, independent of the SFU.
+    for (i, wire) in sealed_frames.iter().enumerate() {
+        let expected_ctr = (i + 1) as u64;
+        let (header, _consumed) = SframeHeader::decode(wire).expect("sealed wire has a header");
+        assert_eq!(
+            u64::from(a_leaf),
+            header.kid,
+            "KID is A's leaf on every frame"
+        );
+        assert_eq!(
+            expected_ctr, header.ctr,
+            "frame {i} must carry counter {expected_ctr} (C-5 monotone, 1-based)"
+        );
+    }
+
+    // 3. Forward the whole stream through the live SFU.
+    let outcome = run_multi_frame_fanout(
+        &mut a,
+        &mut b,
+        sfu_addr,
+        &media,
+        b_id.clone(),
+        &mut b_rx,
+        publisher_mid,
+        &sealed_frames,
+    )
+    .await;
+
+    assert_eq!(
+        outcome.received_order.len(),
+        STREAM_LEN,
+        "subscriber B must receive all {STREAM_LEN} distinct sealed frames within \
+         {CROSS_FANOUT_DEADLINE:?}; got {} (order {:?}); a_connected={} b_connected={} \
+         reneg_answered={} a_alive={} b_alive={}",
+        outcome.received_order.len(),
+        outcome.received_order,
+        outcome.a_connected,
+        outcome.b_connected,
+        outcome.reneg_answered,
+        a.is_alive(),
+        b.is_alive(),
+    );
+    assert!(
+        outcome.a_connected && outcome.b_connected,
+        "both peers must connect"
+    );
+    assert!(a.is_alive() && b.is_alive(), "both Rtc must stay alive");
+
+    // 4. Every forwarded frame OPENS back to its exact plaintext — so the
+    //    SFrame ciphertext + the header-as-AAD survived the SFU forward for the
+    //    WHOLE stream, not just one frame.
+    for i in 0..STREAM_LEN {
+        let opened = b_receiver
+            .open_framed(&sealed_frames[i])
+            .unwrap_or_else(|_| panic!("B opens forwarded frame {i}"));
+        assert_eq!(
+            opened, plaintexts[i],
+            "B must recover frame {i}'s exact plaintext after the SFU relayed it"
+        );
+    }
+}
