@@ -27,7 +27,7 @@ const GOLDEN_SEED = new Uint8Array(32).fill(0x42);
 const GOLDEN_LEAF = 3;
 const GOLDEN_PLAINTEXT = "lakko sframe golden vector v1";
 const GOLDEN_WIRE_HEX =
-  "0301a6d1fee0dd6f091a0071e56d66a889f734a5b2fa6ef8f079d2e6b3e9b27adc41071764928ce5d6d0747fb7fd7c";
+  "31a6d1fee0dd6f091a0071e56d66a889f734a5b2fa6ef8f079d2e6b3e9b256e41ff55ca0102c28b8b697c526be59";
 
 function hexToBytes(hex: string): Uint8Array {
   const out = new Uint8Array(hex.length / 2);

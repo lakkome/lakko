@@ -588,8 +588,8 @@ void test_cross_stack_golden_vector() {
       kGoldenPlaintextStr,
       kGoldenPlaintextStr + std::strlen(kGoldenPlaintextStr));
   const std::vector<uint8_t> golden_wire = hex_decode(
-      "0301a6d1fee0dd6f091a0071e56d66a889f734a5b2fa6ef8f079d2e6b3e9b27a"
-      "dc41071764928ce5d6d0747fb7fd7c");
+      "31a6d1fee0dd6f091a0071e56d66a889f734a5b2fa6ef8f079d2e6b3e9b256e4"
+      "1ff55ca0102c28b8b697c526be59");
 
   auto* enc = lakko::sframe::LakkoFrameEncryptor::Create(
       golden_seed.data(), golden_seed.size(), kGoldenLeaf);

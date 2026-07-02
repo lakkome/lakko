@@ -601,7 +601,7 @@ mod tests {
     const GOLDEN_LEAF: u32 = 3;
     const GOLDEN_PLAINTEXT: &[u8] = b"lakko sframe golden vector v1";
     const GOLDEN_WIRE_HEX: &str =
-        "0301a6d1fee0dd6f091a0071e56d66a889f734a5b2fa6ef8f079d2e6b3e9b27adc41071764928ce5d6d0747fb7fd7c";
+        "31a6d1fee0dd6f091a0071e56d66a889f734a5b2fa6ef8f079d2e6b3e9b256e41ff55ca0102c28b8b697c526be59";
 
     fn golden_wire() -> Vec<u8> {
         (0..GOLDEN_WIRE_HEX.len() / 2)
@@ -722,8 +722,9 @@ mod tests {
     fn open_framed_rejects_truncated_wire() {
         let key = CallKey::from_seed([0x13; CALL_KEY_LEN]);
         let receiver = key.participant_key(0).unwrap();
-        // Header declares LEN=3 (4 counter bytes) with none present.
-        match receiver.open_framed(&[0x30]) {
+        // Config 0x0B (RFC 9605 §4.3: X=0 K=0 Y=1 C=3) declares a 4-byte CTR
+        // with no bytes present → the header decode fails as truncated.
+        match receiver.open_framed(&[0x0B]) {
             Err(Error::Crypto(msg)) => assert!(msg.contains("header decode"), "got {msg}"),
             other => panic!("expected header-decode Crypto error, got {other:?}"),
         }

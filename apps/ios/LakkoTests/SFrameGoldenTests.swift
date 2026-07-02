@@ -22,7 +22,7 @@ final class SFrameGoldenTests: XCTestCase {
     private static let goldenLeaf: UInt32 = 3
     private static let goldenPlaintext = "lakko sframe golden vector v1"
     private static let goldenWireHex =
-        "0301a6d1fee0dd6f091a0071e56d66a889f734a5b2fa6ef8f079d2e6b3e9b27adc41071764928ce5d6d0747fb7fd7c"
+        "31a6d1fee0dd6f091a0071e56d66a889f734a5b2fa6ef8f079d2e6b3e9b256e41ff55ca0102c28b8b697c526be59"
 
     func testSealsToTheCanonicalCrossStackWire() throws {
         let pk = try CallKey
