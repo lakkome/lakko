@@ -1,0 +1,32 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+[package]
+name = "lakko-calls-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+# Opt out of the parent workspace.
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+lakko-calls = { path = ".." }
+
+# The SFrame header (RFC 9605 §4.3) is the on-wire prefix of every
+# sealed media frame AND the AEAD AAD (ADR-0013). A receiver parses it
+# with `SframeHeader::decode` on bytes that arrive from an untrusted
+# SFU / peer BEFORE the AEAD authenticates the frame, so the parser is
+# fully attacker-touchable — any panic / overflow / runaway allocation
+# on arbitrary input is a DoS on the call receive path.
+
+[[bin]]
+name = "header_decode"
+path = "fuzz_targets/header_decode.rs"
+test = false
+doc = false
+bench = false

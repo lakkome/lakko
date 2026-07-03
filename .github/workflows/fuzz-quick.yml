@@ -66,6 +66,8 @@ jobs:
             manifest: crates/lakko-contacts/fuzz/Cargo.toml
           - crate: lakko-channels
             manifest: crates/lakko-channels/fuzz/Cargo.toml
+          - crate: lakko-calls
+            manifest: crates/lakko-calls/fuzz/Cargo.toml
           - crate: lakko-transport
             manifest: crates/lakko-transport/fuzz/Cargo.toml
           - crate: lakko-tuf

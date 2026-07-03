@@ -82,6 +82,7 @@ fuzz-check:
     cargo check --manifest-path crates/lakko-proto/fuzz/Cargo.toml
     cargo check --manifest-path crates/lakko-contacts/fuzz/Cargo.toml
     cargo check --manifest-path crates/lakko-channels/fuzz/Cargo.toml
+    cargo check --manifest-path crates/lakko-calls/fuzz/Cargo.toml
     cargo check --manifest-path crates/lakko-transport/fuzz/Cargo.toml
     cargo check --manifest-path crates/lakko-tuf/fuzz/Cargo.toml
     cargo check --manifest-path crates/lakko-transparency/fuzz/Cargo.toml
