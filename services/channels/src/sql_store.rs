@@ -31,6 +31,7 @@ use async_trait::async_trait;
 use sqlx::MySqlPool;
 use sqlx::Row;
 
+use crate::config::DEFAULT_ENVELOPE_RETENTION_EPOCHS;
 use crate::storage::{ChannelId, ChannelStore, StorageError, StoredPost, SubscriberId};
 
 /// MariaDB-backed `ChannelStore`. Construct with a pool
@@ -39,6 +40,11 @@ use crate::storage::{ChannelId, ChannelStore, StorageError, StoredPost, Subscrib
 #[derive(Clone)]
 pub struct SqlChannelStore {
     pool: MySqlPool,
+    /// The most-recent N seed envelopes retained per
+    /// `(channel, subscriber)` (ADR-0031). Always `>= 1` —
+    /// [`SqlChannelStore::with_envelope_retention`] clamps it
+    /// and the default is [`DEFAULT_ENVELOPE_RETENTION_EPOCHS`].
+    envelope_retention_epochs: usize,
 }
 
 impl SqlChannelStore {
@@ -46,10 +52,65 @@ impl SqlChannelStore {
     /// responsible for running migrations before any
     /// handler hits this store; the binary's `main()`
     /// does so via `sqlx::migrate!("./migrations").run(&pool)`.
+    ///
+    /// Envelope retention defaults to
+    /// [`DEFAULT_ENVELOPE_RETENTION_EPOCHS`] (4).
     #[must_use]
     pub fn new(pool: MySqlPool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            envelope_retention_epochs: DEFAULT_ENVELOPE_RETENTION_EPOCHS,
+        }
     }
+
+    /// Override the per-subscriber envelope retention window
+    /// (ADR-0031). `n` is clamped to `>= 1` — a retention of 0
+    /// would prune every envelope on the next write.
+    #[must_use]
+    pub fn with_envelope_retention(mut self, n: usize) -> Self {
+        self.envelope_retention_epochs = n.max(1);
+        self
+    }
+}
+
+/// Prune a subscriber's retained envelopes down to the
+/// highest `keep_n` epochs, deleting the lower epochs
+/// (ADR-0031). Runs inside the caller's transaction so the
+/// insert + prune are atomic (C-42). The derived-table
+/// wrapper is required because MariaDB refuses to modify a
+/// table that also appears in the `NOT IN` subquery directly.
+async fn prune_envelopes<'e, E>(
+    executor: E,
+    channel: ChannelId,
+    subscriber: SubscriberId,
+    keep_n: usize,
+) -> Result<(), StorageError>
+where
+    E: sqlx::Executor<'e, Database = sqlx::MySql>,
+{
+    // `keep_n` is `>= 1` (builder-clamped); the `.max(1)` is
+    // belt-and-braces so a stray 0 never deletes everything.
+    let keep = i64::try_from(keep_n).unwrap_or(i64::MAX).max(1);
+    sqlx::query(
+        "DELETE FROM channel_envelopes \
+         WHERE channel_id = ? AND subscriber_id = ? \
+           AND epoch NOT IN ( \
+               SELECT epoch FROM ( \
+                   SELECT epoch FROM channel_envelopes \
+                   WHERE channel_id = ? AND subscriber_id = ? \
+                   ORDER BY epoch DESC LIMIT ? \
+               ) t \
+           )",
+    )
+    .bind(channel.as_bytes().as_slice())
+    .bind(subscriber.as_bytes().as_slice())
+    .bind(channel.as_bytes().as_slice())
+    .bind(subscriber.as_bytes().as_slice())
+    .bind(keep)
+    .execute(executor)
+    .await
+    .map_err(db_err)?;
+    Ok(())
 }
 
 /// Map any `sqlx::Error` into the storage layer's domain
@@ -326,6 +387,7 @@ impl ChannelStore for SqlChannelStore {
         &self,
         channel: ChannelId,
         subscriber: SubscriberId,
+        epoch: Option<u32>,
         envelope: Vec<u8>,
         expected_len: usize,
     ) -> Result<(), StorageError> {
@@ -335,27 +397,63 @@ impl ChannelStore for SqlChannelStore {
                 got: envelope.len(),
             });
         }
-        if !self.exists(channel).await {
+        // Transaction: lock the channel row, resolve the
+        // target epoch, refuse a future epoch, UPSERT at that
+        // epoch, then prune to the retained N — all atomic so
+        // a concurrent rotation can't interleave (C-42).
+        let mut tx = self.pool.begin().await.map_err(db_err)?;
+        let existing: Option<(u32,)> = sqlx::query_as(
+            "SELECT current_epoch FROM channels \
+             WHERE id = ? FOR UPDATE",
+        )
+        .bind(channel.as_bytes().as_slice())
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(db_err)?;
+        let Some((current,)) = existing else {
             return Err(StorageError::UnknownChannel);
-        }
-        if !self.is_subscribed(channel, subscriber).await {
+        };
+        let registered: Option<(i64,)> = sqlx::query_as(
+            "SELECT 1 FROM channel_subscribers \
+             WHERE channel_id = ? AND subscriber_id = ? \
+             LIMIT 1",
+        )
+        .bind(channel.as_bytes().as_slice())
+        .bind(subscriber.as_bytes().as_slice())
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(db_err)?;
+        if registered.is_none() {
             return Err(StorageError::UnknownSubscriber);
         }
-        // UPSERT — latest-wins per ADR-0010 N=1 retention.
+        let ep = epoch.unwrap_or(current);
+        if ep > current {
+            return Err(StorageError::EnvelopeEpochInFuture { current, got: ep });
+        }
+        // UPSERT at the concrete epoch (ADR-0031).
         sqlx::query(
             "INSERT INTO channel_envelopes \
-                 (channel_id, subscriber_id, envelope) \
-             VALUES (?, ?, ?) \
+                 (channel_id, subscriber_id, epoch, envelope) \
+             VALUES (?, ?, ?, ?) \
              ON DUPLICATE KEY UPDATE \
                  envelope = VALUES(envelope), \
                  delivered_at = CURRENT_TIMESTAMP(3)",
         )
         .bind(channel.as_bytes().as_slice())
         .bind(subscriber.as_bytes().as_slice())
+        .bind(ep)
         .bind(&envelope)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(db_err)?;
+        prune_envelopes(
+            &mut *tx,
+            channel,
+            subscriber,
+            self.envelope_retention_epochs,
+        )
+        .await?;
+        tx.commit().await.map_err(db_err)?;
         Ok(())
     }
 
@@ -370,10 +468,11 @@ impl ChannelStore for SqlChannelStore {
         if !self.is_subscribed(channel, subscriber).await {
             return Err(StorageError::UnknownSubscriber);
         }
+        // Highest retained epoch — the current seed (ADR-0031).
         let row: Option<(Vec<u8>,)> = sqlx::query_as(
             "SELECT envelope FROM channel_envelopes \
              WHERE channel_id = ? AND subscriber_id = ? \
-             LIMIT 1",
+             ORDER BY epoch DESC LIMIT 1",
         )
         .bind(channel.as_bytes().as_slice())
         .bind(subscriber.as_bytes().as_slice())
@@ -381,6 +480,31 @@ impl ChannelStore for SqlChannelStore {
         .await
         .map_err(db_err)?;
         Ok(row.map(|(b,)| b))
+    }
+
+    async fn fetch_envelopes(
+        &self,
+        channel: ChannelId,
+        subscriber: SubscriberId,
+    ) -> Result<Vec<(u32, Vec<u8>)>, StorageError> {
+        if !self.exists(channel).await {
+            return Err(StorageError::UnknownChannel);
+        }
+        if !self.is_subscribed(channel, subscriber).await {
+            return Err(StorageError::UnknownSubscriber);
+        }
+        // The whole retained set, ascending by epoch (ADR-0031).
+        let rows: Vec<(u32, Vec<u8>)> = sqlx::query_as(
+            "SELECT epoch, envelope FROM channel_envelopes \
+             WHERE channel_id = ? AND subscriber_id = ? \
+             ORDER BY epoch ASC",
+        )
+        .bind(channel.as_bytes().as_slice())
+        .bind(subscriber.as_bytes().as_slice())
+        .fetch_all(&self.pool)
+        .await
+        .map_err(db_err)?;
+        Ok(rows)
     }
 
     async fn total_subscribers(&self) -> usize {
@@ -454,25 +578,29 @@ impl ChannelStore for SqlChannelStore {
             }
         }
 
-        // Validations passed — commit the envelope
-        // upserts + bump the epoch.
+        // Validations passed — file each envelope at the new
+        // epoch, prune the subscriber to the retained N, and
+        // bump the epoch, all in this one transaction (C-42 +
+        // ADR-0031).
+        let new_epoch = current.saturating_add(1);
         for (sub, env) in batch {
             sqlx::query(
                 "INSERT INTO channel_envelopes \
-                     (channel_id, subscriber_id, envelope) \
-                 VALUES (?, ?, ?) \
+                     (channel_id, subscriber_id, epoch, envelope) \
+                 VALUES (?, ?, ?, ?) \
                  ON DUPLICATE KEY UPDATE \
                      envelope = VALUES(envelope), \
                      delivered_at = CURRENT_TIMESTAMP(3)",
             )
             .bind(channel.as_bytes().as_slice())
             .bind(sub.as_bytes().as_slice())
+            .bind(new_epoch)
             .bind(&env)
             .execute(&mut *tx)
             .await
             .map_err(db_err)?;
+            prune_envelopes(&mut *tx, channel, sub, self.envelope_retention_epochs).await?;
         }
-        let new_epoch = current.saturating_add(1);
         sqlx::query("UPDATE channels SET current_epoch = ? WHERE id = ?")
             .bind(new_epoch)
             .bind(channel.as_bytes().as_slice())
@@ -598,17 +726,30 @@ impl ChannelStore for SqlChannelStore {
             });
         }
 
+        // Snapshot the staged subscribers for this target so
+        // we can prune each after promotion (ADR-0031). Read
+        // before the promote/delete so the ids survive.
+        let staged_subs: Vec<(Vec<u8>,)> = sqlx::query_as(
+            "SELECT subscriber_id FROM channel_staged_envelopes \
+             WHERE channel_id = ? AND target_epoch = ?",
+        )
+        .bind(channel.as_bytes().as_slice())
+        .bind(target_epoch)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(db_err)?;
+
         // Promote the staged rows for this target into the
-        // live set — but only for subscribers that are still
-        // registered (partial-coverage policy; also honours
-        // the composite FK on channel_envelopes so a
-        // pruned-mid-prepare subscriber cannot abort the
+        // live set at `target_epoch` — but only for subscribers
+        // that are still registered (partial-coverage policy;
+        // also honours the composite FK on channel_envelopes so
+        // a pruned-mid-prepare subscriber cannot abort the
         // commit). A registered subscriber with no staged row
         // keeps their prior-epoch envelope.
         sqlx::query(
             "INSERT INTO channel_envelopes \
-                 (channel_id, subscriber_id, envelope) \
-             SELECT s.channel_id, s.subscriber_id, s.envelope \
+                 (channel_id, subscriber_id, epoch, envelope) \
+             SELECT s.channel_id, s.subscriber_id, ?, s.envelope \
              FROM channel_staged_envelopes s \
              WHERE s.channel_id = ? AND s.target_epoch = ? \
                AND EXISTS ( \
@@ -620,11 +761,21 @@ impl ChannelStore for SqlChannelStore {
                  envelope = VALUES(envelope), \
                  delivered_at = CURRENT_TIMESTAMP(3)",
         )
+        .bind(target_epoch)
         .bind(channel.as_bytes().as_slice())
         .bind(target_epoch)
         .execute(&mut *tx)
         .await
         .map_err(db_err)?;
+
+        // Prune each promoted subscriber to the retained N,
+        // inside this same transaction (C-42 + ADR-0031).
+        // Pruning a staged-but-unregistered subscriber whose
+        // envelope was not promoted is a harmless no-op.
+        for (bytes,) in &staged_subs {
+            let sub = SubscriberId::from_bytes(bytes)?;
+            prune_envelopes(&mut *tx, channel, sub, self.envelope_retention_epochs).await?;
+        }
 
         // Single atomic transition: bump the epoch to the
         // target, then clear every staged row for the channel

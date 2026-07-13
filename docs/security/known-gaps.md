@@ -17,7 +17,7 @@ Items here are either:
 
 ## MLS state machine
 
-### G-1: Channel two-tier flow (>50k subscribers) — **crypto + service + UI substantially BUILT; residual is nav wiring + RotationCron activation + fanout scale-out (audit 2026-07)**
+### G-1: Channel two-tier flow (>50k subscribers) — **crypto + service + UI + nav + RotationCron + batched fanout + multi-epoch retention BUILT (Sprints A/C/D, 2026-07); residual is `@channel` client discovery + deploy-gated scale proof**
 
 Phase 4 (ADR-0010, two-tier PublisherGroup + sender-key broadcast). A 2026-07
 code audit found the prior "nothing is shipped" note **badly stale** — the crypto
@@ -41,34 +41,41 @@ co-publisher UI on all three clients are built. What is built vs the real residu
   with real MLS-backed crypto.
 - `services/discovery`: `@channel` OPRF `register` / `lookup` (server side).
 
-**Genuine residual (for a real >50k end-to-end flow a user can actually use):**
+**Landed since the 2026-07 audit (Sprints A / C / D):**
 
-1. **Navigation gap (top blocker).** Channels is **not reachable from app
-   navigation** on iOS/Android (`ChannelsRootScreen` is defined but never
-   presented — no call site in `LakkoApp`/`SessionRoot`/`MainActivity`) and has
-   **no nav entry** on web (the `/channels` routes exist but are URL-only). A real
-   user cannot open the feature on mobile.
-2. **RotationCron built but never wired to run** on any client (zero call sites)
-   → ADR-0010's aggressive-rotation backward-secrecy mitigation is **inert**, and
-   there is no "Rotate now" affordance. (NB: the co-publisher-approve path DOES
-   reseal via `/rotate`, but the scheduled 24h/N-post cron does not run. The
+1. **Navigation (Sprint A).** Channels is now reachable from app navigation — a
+   nav entry on web (`AppShell`) + a Home call site presenting the channels screen
+   on iOS (`HomeScreen`/`LakkoApp`) and Android (`HomeScreen`/`MainActivity`). No
+   longer built-but-unreachable.
+2. **RotationCron activation (Sprint A).** Wired to run on all three clients
+   (heartbeat-driven scheduled rotation + a "Rotate now" affordance + persistence)
+   — ADR-0010's aggressive-rotation backward-secrecy mitigation is live. The
    ROADMAP-PHASE3-CLOSEOUT G-27 "rotation wired via RotationCron on all three"
-   claim is corrected accordingly.)
-3. **`@channel` discovery not wired into clients** (server done) — users must
-   paste a raw hex `channel_id`.
-4. Envelope retention is **N=1 latest-wins** (ADR wanted N≈4); no multi-epoch
-   backfill / dedicated re-subscribe catch-up → posts published under an epoch
-   whose seed the subscriber missed render `[unreadable]`.
-5. Rotation fanout is a **single unbounded `POST /rotate`** request — unfit for
-   50k–1M subscribers at runtime; needs a chunked / streaming / per-receiver
-   worker (a ROADMAP-admitted follow-up).
+   wording is now accurate.
+4. **Multi-epoch envelope retention (Sprint C, [ADR-0031](../adr/0031-multi-epoch-envelope-retention.md)).**
+   N=1 → N=4: `channel_envelopes` keyed `(channel, subscriber, epoch)` + a
+   prune-to-N on every write path; a client-side `epoch → seed` map + a
+   `fetch_envelopes` catch-up + decrypt-by-epoch (a missing-epoch post renders an
+   "older key window" placeholder and is **skipped**, never force-decrypted, #4) +
+   a re-subscribe on offline-past-N. Posts made under a missed rotation are
+   readable again within the retention window; only pre-window posts stay
+   unreadable (an availability cost, not a confidentiality break).
+5. **Batched rotation fanout (Sprint D, [ADR-0030](../adr/0030-batched-rotation-fanout.md)).**
+   The single unbounded `POST /rotate` is joined by a chunked, resumable, idempotent
+   staged prepare (`/rotate/stage`, ≤5000/chunk, `channel_staged_envelopes` never
+   served) + an atomic `/rotate/commit` — C-42 preserved. Fit for the 50k–1M
+   fanout the single request could not carry.
+
+**Remaining residual:**
+
+3. **`@channel` discovery not wired into clients** (server side done) — users must
+   paste a raw hex `channel_id` (Sprint B).
 6. >50k **operational scale** (dedicated HPKE-envelope bandwidth allowance, load
    test p95 < 5 s) — deploy-gated, not yet exercised.
 
-**Recommended next sprint:** wire Channels into app navigation (3 clients) +
-activate RotationCron (items 1+2) — this flips the feature from
-built-but-unreachable/inert to usable end-to-end; batched fanout (item 5) is the
-immediate scale follow-on.
+**Recommended next sprint:** wire `@channel` discovery into the three clients
+(item 3, Sprint B) — the last usability gap before the deploy-gated scale proof
+(item 6).
 
 ### G-2: MLS-2 / quantum-hybrid suites pinned for later
 

@@ -164,6 +164,42 @@ pub struct EnvelopeView {
     pub envelope_b64: String,
 }
 
+/// Query string for
+/// `POST /v1/channels/:id/subscribers/:pk/envelope` — the
+/// optional epoch the publisher files this envelope under
+/// (ADR-0031). Omitted defaults to the channel's current
+/// epoch; a value greater than the current epoch is refused
+/// with `409 envelope-epoch-in-future`.
+#[derive(Deserialize)]
+pub struct DeliverEnvelopeQuery {
+    /// Epoch to file the envelope under. `None` -> current.
+    #[serde(default)]
+    pub epoch: Option<u32>,
+}
+
+/// One `(epoch, envelope)` entry in the plural
+/// `GET .../envelopes` response (ADR-0031).
+#[derive(Serialize)]
+pub struct EnvelopeAtEpoch {
+    /// The epoch this seed envelope belongs to.
+    pub epoch: u32,
+    /// Opaque HPKE-sealed seed envelope, base64url
+    /// (no padding).
+    pub envelope_b64: String,
+}
+
+/// Response for
+/// `GET /v1/channels/:id/subscribers/:pk/envelopes` — the
+/// whole retained set, ascending by epoch (ADR-0031). A
+/// catching-up subscriber opens each into its `epoch -> seed`
+/// map and decrypts each post with the seed matching its
+/// `epoch_id`.
+#[derive(Serialize)]
+pub struct FetchEnvelopesResponse {
+    /// Retained envelopes, ascending by epoch.
+    pub envelopes: Vec<EnvelopeAtEpoch>,
+}
+
 /// One entry in a rotation batch.
 #[derive(Deserialize)]
 pub struct RotateBatchEntry {
@@ -473,9 +509,13 @@ async fn list_subscribers(
 }
 
 /// `POST /v1/channels/:channel_id/subscribers/:pubkey_hex/envelope` — publisher delivers.
+/// An optional `?epoch=<u32>` files the envelope under a
+/// concrete epoch (ADR-0031); omitted defaults to the
+/// channel's current epoch, and a future epoch is refused.
 async fn deliver_envelope(
     State(state): State<Arc<AppState>>,
     Path((channel_id, pubkey_hex)): Path<(String, String)>,
+    Query(q): Query<DeliverEnvelopeQuery>,
     body: Bytes,
 ) -> Response {
     let Ok(channel) = ChannelId::from_hex(&channel_id) else {
@@ -497,7 +537,7 @@ async fn deliver_envelope(
     };
     match state
         .store
-        .deliver_envelope(channel, sub, body.to_vec(), EXPECTED_ENVELOPE_LEN)
+        .deliver_envelope(channel, sub, q.epoch, body.to_vec(), EXPECTED_ENVELOPE_LEN)
         .await
     {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
@@ -519,6 +559,14 @@ async fn deliver_envelope(
             Json(err(
                 "bad-envelope-len",
                 format!("envelope must be {expected} bytes (got {got})"),
+            )),
+        )
+            .into_response(),
+        Err(StorageError::EnvelopeEpochInFuture { current, got }) => (
+            StatusCode::CONFLICT,
+            Json(err(
+                "envelope-epoch-in-future",
+                format!("epoch {got} exceeds the channel's current epoch {current}"),
             )),
         )
             .into_response(),
@@ -599,6 +647,70 @@ async fn fetch_envelope(
                 )),
             )
                 .into_response()
+        },
+        Err(StorageError::UnknownChannel) => (
+            StatusCode::NOT_FOUND,
+            Json(err("unknown-channel", "no such channel")),
+        )
+            .into_response(),
+        Err(StorageError::UnknownSubscriber) => (
+            StatusCode::NOT_FOUND,
+            Json(err(
+                "unknown-subscriber",
+                "subscriber has not registered against this channel",
+            )),
+        )
+            .into_response(),
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(err("internal", "unexpected error")),
+        )
+            .into_response(),
+    }
+}
+
+/// `GET /v1/channels/:channel_id/subscribers/:pubkey_hex/envelopes` —
+/// the whole retained `[(epoch, envelope)]` set for a
+/// catching-up subscriber (ADR-0031), ascending by epoch.
+async fn fetch_envelopes(
+    State(state): State<Arc<AppState>>,
+    Path((channel_id, pubkey_hex)): Path<(String, String)>,
+) -> Response {
+    let Ok(channel) = ChannelId::from_hex(&channel_id) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(err("bad-channel-id", "channel_id must be 32 hex chars")),
+        )
+            .into_response();
+    };
+    let Ok(sub) = SubscriberId::from_hex(&pubkey_hex) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(err(
+                "bad-subscriber-id",
+                "subscriber pubkey must be 64 hex chars",
+            )),
+        )
+            .into_response();
+    };
+    match state.store.fetch_envelopes(channel, sub).await {
+        Ok(list) => {
+            // A plural fetch is the catch-up poll — count it as
+            // subscriber activity so the pruner does not GC
+            // them, mirroring the singular fetch. Errors are
+            // swallowed: a failed touch only delays GC.
+            let _ = state
+                .store
+                .touch_subscriber_activity(channel, sub, unix_ms())
+                .await;
+            let envelopes = list
+                .into_iter()
+                .map(|(epoch, env)| EnvelopeAtEpoch {
+                    epoch,
+                    envelope_b64: URL_SAFE_NO_PAD.encode(&env),
+                })
+                .collect();
+            (StatusCode::OK, Json(FetchEnvelopesResponse { envelopes })).into_response()
         },
         Err(StorageError::UnknownChannel) => (
             StatusCode::NOT_FOUND,
@@ -914,6 +1026,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route(
             "/v1/channels/{channel_id}/subscribers/{pubkey_hex}/envelope",
             post(deliver_envelope).get(fetch_envelope),
+        )
+        .route(
+            "/v1/channels/{channel_id}/subscribers/{pubkey_hex}/envelopes",
+            get(fetch_envelopes),
         )
         .route("/v1/channels/{channel_id}/rotate", post(rotate_channel))
         .route("/v1/channels/{channel_id}/rotate/stage", post(rotate_stage))

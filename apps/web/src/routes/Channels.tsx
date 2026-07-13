@@ -42,7 +42,7 @@ import {
   apiError,
   createChannel,
   deliverEnvelope,
-  fetchEnvelope,
+  fetchEnvelopes,
   fetchEpoch,
   fetchPosts,
   listSubscribers,
@@ -51,16 +51,16 @@ import {
   type ChannelPostView,
 } from "../channels/api";
 import {
-  base64UrlToBytes,
   bytesToHex,
   composePost,
+  decodeAndDecryptPost,
   freshPublisherKeys,
   freshSubscriberKeys,
   openSubscriberSeedEnvelope,
   sealSubscriberSeedEnvelope,
   utf8Decode,
   utf8Encode,
-  verifyAndDecryptPost,
+  type DecodedPostResult,
   type WasmIdentity,
 } from "../channels/composer";
 import {
@@ -116,6 +116,80 @@ const COLOURS = {
   accentBlue: "#3B82F6",
   destructive: "#DC2626",
 } as const;
+
+// ============================================================================
+// Per-post decode result (ADR-0031 decrypt-by-epoch)
+// ============================================================================
+
+/** The three post-render outcomes:
+ *  - `text`       — decrypted plaintext.
+ *  - `unreadable` — a seed for the post's epoch was present but the
+ *                   AEAD open failed (wrong seed / tampered / foreign signer).
+ *  - `older-key`  — no seed exists for the post's epoch (older than the
+ *                   retained window, or a gap). NOT force-decrypted with a
+ *                   wrong-epoch seed (invariant #4). */
+type PostDecode =
+  | { readonly kind: "text"; readonly text: string }
+  | { readonly kind: "unreadable" }
+  | { readonly kind: "older-key" };
+
+/** Map the composer's low-level decode result onto a render outcome. */
+function toPostDecode(res: DecodedPostResult): PostDecode {
+  if (res.plaintext !== null) {
+    return { kind: "text", text: utf8Decode(res.plaintext) };
+  }
+  return res.hadSeed ? { kind: "unreadable" } : { kind: "older-key" };
+}
+
+/** Italic secondary-colour placeholder bubble (unreadable / older-key). */
+function placeholderBubble(text: string): JSX.Element {
+  return (
+    <div
+      style={{
+        "font-size": "13px",
+        color: COLOURS.textSecondary,
+        "font-style": "italic",
+      }}
+    >
+      {text}
+    </div>
+  );
+}
+
+/** Primary-colour plaintext bubble. */
+function textBubble(text: string): JSX.Element {
+  return (
+    <div
+      style={{
+        "font-size": "14px",
+        color: COLOURS.textPrimary,
+        "white-space": "pre-wrap",
+        "word-break": "break-word",
+      }}
+    >
+      {text}
+    </div>
+  );
+}
+
+/** Render one post body from its decode outcome. `undefined` means the
+ *  decode has not completed yet ("Decoding…"). */
+function renderPostBody(decoded: PostDecode | undefined): JSX.Element {
+  if (decoded === undefined) {
+    return placeholderBubble("Decoding…");
+  }
+  if (decoded.kind === "text") {
+    return textBubble(decoded.text);
+  }
+  if (decoded.kind === "older-key") {
+    return placeholderBubble(
+      "message from an older key window — no longer available",
+    );
+  }
+  return placeholderBubble(
+    "[unreadable — wrong seed, tampered ciphertext, or a different signing key]",
+  );
+}
 
 // ============================================================================
 // ChannelsList — `/channels`
@@ -636,15 +710,15 @@ const ChannelView: Component = () => {
    *  means the decode failed (wrong seed, wrong channel,
    *  tampered ciphertext) — UI surfaces "[unreadable]". */
   const [decodedByCursor, setDecodedByCursor] = createSignal<
-    ReadonlyMap<number, string | null>
+    ReadonlyMap<number, PostDecode>
   >(new Map());
 
-  // Decode every post in the latest fetch into plaintext
-  // text. Runs whenever the post list or the channel
-  // changes. We only have the seed for channels we
-  // publish to ourselves — for someone else's channel
-  // the subscriber path supplies the seed via HPKE
-  // envelope, but that wiring is a follow-up sub-sprint.
+  // Decode every post in the latest fetch. Runs whenever the
+  // post list or the channel changes. The publisher holds a
+  // single content-key seed (its PublisherGroup exporter
+  // output) which it applies to every post it can read; a post
+  // it cannot open surfaces as [unreadable]. (The subscriber
+  // path below uses the ADR-0031 epoch -> seed map instead.)
   createEffect(() => {
     const d = data();
     const keys = channelsState.keysByChannel().get(params.id);
@@ -652,18 +726,15 @@ const ChannelView: Component = () => {
       setDecodedByCursor(new Map());
       return;
     }
+    const seed = keys.seed;
     void Promise.all(
       d.posts.map(async (p) => {
-        try {
-          const plaintext = await verifyAndDecryptPost(
-            keys.seed,
-            params.id,
-            p.payloadB64,
-          );
-          return [p.cursor, utf8Decode(plaintext)] as const;
-        } catch {
-          return [p.cursor, null] as const;
-        }
+        const res = await decodeAndDecryptPost(
+          params.id,
+          p.payloadB64,
+          () => seed,
+        );
+        return [p.cursor, toPostDecode(res)] as const;
       }),
     ).then((entries) => {
       setDecodedByCursor(new Map(entries));
@@ -869,51 +940,7 @@ const ChannelView: Component = () => {
                   <span>cursor {p.cursor}</span>
                   <span>{new Date(p.serverTsMs).toISOString()}</span>
                 </div>
-                <Show
-                  when={decodedByCursor().has(p.cursor)}
-                  fallback={
-                    <div
-                      style={{
-                        "font-size": "13px",
-                        color: COLOURS.textSecondary,
-                        "font-style": "italic",
-                      }}
-                    >
-                      Decoding…
-                    </div>
-                  }
-                >
-                  {(() => {
-                    const decoded = decodedByCursor().get(p.cursor) ?? null;
-                    if (decoded === null) {
-                      return (
-                        <div
-                          style={{
-                            "font-size": "13px",
-                            color: COLOURS.textSecondary,
-                            "font-style": "italic",
-                          }}
-                        >
-                          [unreadable — wrong seed, tampered ciphertext, or
-                          posted by another publisher with a different
-                          signing key]
-                        </div>
-                      );
-                    }
-                    return (
-                      <div
-                        style={{
-                          "font-size": "14px",
-                          color: COLOURS.textPrimary,
-                          "white-space": "pre-wrap",
-                          "word-break": "break-word",
-                        }}
-                      >
-                        {decoded}
-                      </div>
-                    );
-                  })()}
-                </Show>
+                {renderPostBody(decodedByCursor().get(p.cursor))}
               </li>
             )}
           </For>
@@ -1578,7 +1605,17 @@ const SubscribersPanel: Component<{ readonly channelIdHex: string }> = (
         epoch,
         keys.seed,
       );
-      await deliverEnvelope(props.channelIdHex, pubkeyHex, wire);
+      // ADR-0031 — file the envelope under the concrete epoch it
+      // was sealed for so the server retains it per-epoch (and
+      // prunes to the last N). Absent → the server would default
+      // to its current epoch, which matches here anyway.
+      await deliverEnvelope(
+        props.channelIdHex,
+        pubkeyHex,
+        wire,
+        undefined,
+        epoch,
+      );
       setStatusByPk((m) =>
         new Map(m).set(pubkeyHex, trigger === "auto" ? "auto" : "delivered"),
       );
@@ -1814,7 +1851,7 @@ const ChannelSubscribe: Component = () => {
   const [bootstrapError, setBootstrapError] = createSignal<string | null>(null);
   const [posts, setPosts] = createSignal<ReadonlyArray<ChannelPostView>>([]);
   const [decodedByCursor, setDecodedByCursor] = createSignal<
-    ReadonlyMap<number, string | null>
+    ReadonlyMap<number, PostDecode>
   >(new Map());
 
   // Persisted keypair lookup. If none exists on first
@@ -1832,10 +1869,10 @@ const ChannelSubscribe: Component = () => {
     return fresh;
   }
 
-  /** Drive the registration + poll-for-envelope dance.
-   *  Idempotent — the server treats a re-register of the
-   *  same pubkey as a no-op, and a re-poll just finds
-   *  whatever envelope is current. */
+  /** Drive the registration + catch-up dance.
+   *  Idempotent — the server treats a re-register of the same
+   *  pubkey as a no-op, and re-running the catch-up just
+   *  re-opens whatever the retained set currently is. */
   async function bootstrap_(): Promise<void> {
     setBootstrap("registering");
     setBootstrapError(null);
@@ -1844,22 +1881,15 @@ const ChannelSubscribe: Component = () => {
       const pubHex = bytesToHex(kp.public);
       await subscribe(params.id, pubHex);
 
-      // If we already have a recovered seed cached in
-      // memory, skip the poll and go straight to active.
-      if (channelsState.subscribedSeedByChannel().get(params.id) !== undefined) {
-        setBootstrap("active");
-        return;
-      }
-
       setBootstrap("polling");
-      // First-attempt fetch in case the publisher has
-      // already fanned out.
-      const b64 = await fetchEnvelope(params.id, pubHex);
-      if (b64 !== null) {
-        await openAndCacheSeed(b64);
+      // First-attempt catch-up in case the publisher has
+      // already fanned out. If it recovers at least one epoch's
+      // seed we can read; otherwise the polling effect below
+      // keeps trying.
+      const opened = await catchUpSeeds(pubHex);
+      if (opened > 0) {
         setBootstrap("active");
       }
-      // Otherwise the polling effect below will pick it up.
     } catch (err) {
       if (apiError.is(err)) {
         setBootstrapError(`${err.code} — ${err.detail}`);
@@ -1870,30 +1900,70 @@ const ChannelSubscribe: Component = () => {
     }
   }
 
-  async function openAndCacheSeed(envelopeB64: string): Promise<void> {
+  /**
+   * ADR-0031 catch-up: fetch the server's retained seed-envelope
+   * set (up to N=4 most-recent epochs), open EACH under its own
+   * epoch into the per-channel `epoch -> seed` map, and detect a
+   * re-sync. Returns the number of epoch seeds now recovered for
+   * this channel (0 => nothing to read yet, keep polling).
+   *
+   * Re-sync (offline past retention): if the map has no seed for
+   * the server's CURRENT epoch after opening the retained set, we
+   * re-register (idempotent) so the publisher reseals the current
+   * seed on its next fanout. Posts older than the retained window
+   * stay unreadable (older-key placeholder) — an availability
+   * cost, never a wrong-seed decrypt (invariant #4).
+   */
+  async function catchUpSeeds(pubHex: string): Promise<number> {
     const kp = channelsState.subscriberKeysByChannel().get(params.id);
-    if (kp === undefined) {
-      throw new Error("missing subscriber keypair");
-    }
-    const wire = base64UrlToBytes(envelopeB64);
+    if (kp === undefined) return 0;
+
+    // Track the server's current epoch (for re-sync detection and
+    // so the epoch shown in the UI stays live).
     const epochView = await fetchEpoch(params.id);
-    const seed = await openSubscriberSeedEnvelope(
-      kp.secret,
-      params.id,
-      epochView.epoch,
-      wire,
-    );
-    channelsActions.setSubscribedSeed(params.id, seed);
     channelsActions.setEpoch(params.id, epochView.epoch);
+
+    // Retained set (plural) — the authoritative, epoch-tagged
+    // source. Each entry is opened under ITS epoch; one bad
+    // envelope does not abort the whole catch-up.
+    const retained = await fetchEnvelopes(params.id, pubHex);
+    for (const { epoch, envelope } of retained) {
+      try {
+        const seed = await openSubscriberSeedEnvelope(
+          kp.secret,
+          params.id,
+          epoch,
+          envelope,
+        );
+        channelsActions.setSubscribedSeedForEpoch(params.id, epoch, seed);
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn(`seed envelope open failed for epoch ${epoch}`, err);
+      }
+    }
+
+    const map = channelsState.subscribedSeedsByChannel().get(params.id);
+    if (map === undefined || !map.has(epochView.epoch)) {
+      // Missing the current epoch's seed — re-register so the
+      // next rotation fanout reseals us. Idempotent; a failure
+      // here is non-fatal (we still read whatever we recovered).
+      try {
+        await subscribe(params.id, pubHex);
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn("re-subscribe (re-sync) failed", err);
+      }
+    }
+    return map?.size ?? 0;
   }
 
   // First-load: drive the bootstrap.
   void bootstrap_();
 
   // Polling loop — runs while `bootstrap === "polling"`.
-  // 3-second cadence; cancels itself once the envelope
-  // arrives. A future sprint adds server-push (long-poll
-  // or SSE) so this becomes event-driven.
+  // 3-second cadence; cancels itself once at least one epoch's
+  // seed is recovered. A future sprint adds server-push (long-
+  // poll or SSE) so this becomes event-driven.
   createEffect(() => {
     if (bootstrap() !== "polling") return;
     const kp = channelsState.subscriberKeysByChannel().get(params.id);
@@ -1902,10 +1972,9 @@ const ChannelSubscribe: Component = () => {
     const handle = setInterval(() => {
       void (async (): Promise<void> => {
         try {
-          const b64 = await fetchEnvelope(params.id, pubHex);
-          if (b64 !== null) {
+          const opened = await catchUpSeeds(pubHex);
+          if (opened > 0) {
             clearInterval(handle);
-            await openAndCacheSeed(b64);
             setBootstrap("active");
           }
         } catch (err) {
@@ -1922,37 +1991,46 @@ const ChannelSubscribe: Component = () => {
     });
   });
 
-  // Posts loader — runs once the seed is cached. Same
-  // shape as ChannelView's load + decode pipeline, but
-  // keyed off the recovered subscriber seed.
+  // Posts loader — fetch the page once we go active.
   createEffect(() => {
     if (bootstrap() !== "active") return;
-    const seed = channelsState.subscribedSeedByChannel().get(params.id);
-    if (seed === undefined) return;
     void (async (): Promise<void> => {
       try {
         const page = await fetchPosts(params.id, 0);
         setPosts(page.posts);
-        const entries = await Promise.all(
-          page.posts.map(async (p) => {
-            try {
-              const plaintext = await verifyAndDecryptPost(
-                seed,
-                params.id,
-                p.payloadB64,
-              );
-              return [p.cursor, utf8Decode(plaintext)] as const;
-            } catch {
-              return [p.cursor, null] as const;
-            }
-          }),
-        );
-        setDecodedByCursor(new Map(entries));
       } catch (err) {
         // eslint-disable-next-line no-console
         console.error("subscribe post-load error", err);
       }
     })();
+  });
+
+  // Decode-by-epoch — re-runs whenever the post list OR the
+  // recovered seed map changes, so a seed that arrives later
+  // (e.g. a re-sync reseal) upgrades an older-key placeholder to
+  // plaintext without a reload. Each post is opened under the
+  // seed for ITS epoch (ADR-0031); a post whose epoch has no seed
+  // renders as an unreadable/older-key placeholder — never
+  // force-decrypted with a wrong-epoch seed (invariant #4).
+  createEffect(() => {
+    const ps = posts();
+    const seedMap = channelsState.subscribedSeedsByChannel().get(params.id);
+    if (ps.length === 0) {
+      setDecodedByCursor(new Map());
+      return;
+    }
+    void Promise.all(
+      ps.map(async (p) => {
+        const res = await decodeAndDecryptPost(
+          params.id,
+          p.payloadB64,
+          (epoch) => seedMap?.get(epoch),
+        );
+        return [p.cursor, toPostDecode(res)] as const;
+      }),
+    ).then((entries) => {
+      setDecodedByCursor(new Map(entries));
+    });
   });
 
   const myKeypair = (): { readonly public: Uint8Array } | undefined =>
@@ -2097,49 +2175,7 @@ const ChannelSubscribe: Component = () => {
                   <span>cursor {p.cursor}</span>
                   <span>{new Date(p.serverTsMs).toISOString()}</span>
                 </div>
-                <Show
-                  when={decodedByCursor().has(p.cursor)}
-                  fallback={
-                    <div
-                      style={{
-                        "font-size": "13px",
-                        color: COLOURS.textSecondary,
-                        "font-style": "italic",
-                      }}
-                    >
-                      Decoding…
-                    </div>
-                  }
-                >
-                  {(() => {
-                    const decoded = decodedByCursor().get(p.cursor) ?? null;
-                    if (decoded === null) {
-                      return (
-                        <div
-                          style={{
-                            "font-size": "13px",
-                            color: COLOURS.textSecondary,
-                            "font-style": "italic",
-                          }}
-                        >
-                          [unreadable — wrong seed or tampered ciphertext]
-                        </div>
-                      );
-                    }
-                    return (
-                      <div
-                        style={{
-                          "font-size": "14px",
-                          color: COLOURS.textPrimary,
-                          "white-space": "pre-wrap",
-                          "word-break": "break-word",
-                        }}
-                      >
-                        {decoded}
-                      </div>
-                    );
-                  })()}
-                </Show>
+                {renderPostBody(decodedByCursor().get(p.cursor))}
               </li>
             )}
           </For>

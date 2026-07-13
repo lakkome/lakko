@@ -41,13 +41,13 @@ async fn main() -> anyhow::Result<()> {
             .connect(url)
             .await?;
         MIGRATIONS.run(&pool).await?;
-        Arc::new(SqlChannelStore::new(pool))
+        Arc::new(SqlChannelStore::new(pool).with_envelope_retention(cfg.envelope_retention_epochs))
     } else {
         warn!(
             "storage: in-memory (no LAKKO_CHANNELS_DATABASE_URL) — \
                  state is lost on restart, set the env var for production"
         );
-        Arc::new(InMemoryChannelStore::new())
+        Arc::new(InMemoryChannelStore::new().with_envelope_retention(cfg.envelope_retention_epochs))
     };
     // Spawn the background prune loop before handing
     // `store` into AppState — both halves share the same

@@ -56,12 +56,21 @@ interface ChannelsStateInternal {
   readonly subscriberKeysByChannel: Accessor<
     ReadonlyMap<string, ChannelSubscriberKeys>
   >;
-  /** Per-channel recovered content-key seed, once the
-   *  subscriber has unwrapped a seed envelope delivered
-   *  by the publisher. `undefined` before the envelope
-   *  arrives — the UI shows a "waiting for seed
-   *  delivery" state until then. */
-  readonly subscribedSeedByChannel: Accessor<ReadonlyMap<string, Uint8Array>>;
+  /** Per-channel recovered content-key seeds, keyed by
+   *  MLS epoch (ADR-0031 multi-epoch retention). The
+   *  subscriber opens the server's retained set (up to
+   *  N=4 most-recent epochs) into this `epoch -> seed`
+   *  map, then decrypts each post with the seed matching
+   *  the post's own `epoch_id`. An empty / absent inner
+   *  map means no seed has been recovered yet — the UI
+   *  shows a "waiting for seed delivery" state; a post
+   *  whose epoch has no seed renders as an unreadable
+   *  placeholder and is NEVER force-decrypted with a
+   *  wrong-epoch seed (invariant #4). In-memory only —
+   *  never persisted, never sent off-device. */
+  readonly subscribedSeedsByChannel: Accessor<
+    ReadonlyMap<string, ReadonlyMap<number, Uint8Array>>
+  >;
 }
 
 const [channels, setChannels] = createSignal<ReadonlyArray<ChannelHandle>>([]);
@@ -80,8 +89,8 @@ const [counterByChannel, setCounterByChannel] = createSignal<
 const [subscriberKeysByChannel, setSubscriberKeysByChannel] = createSignal<
   ReadonlyMap<string, ChannelSubscriberKeys>
 >(loadSubscriberKeysFromStorage());
-const [subscribedSeedByChannel, setSubscribedSeedByChannel] = createSignal<
-  ReadonlyMap<string, Uint8Array>
+const [subscribedSeedsByChannel, setSubscribedSeedsByChannel] = createSignal<
+  ReadonlyMap<string, ReadonlyMap<number, Uint8Array>>
 >(new Map());
 
 export const channelsState: ChannelsStateInternal = {
@@ -91,7 +100,7 @@ export const channelsState: ChannelsStateInternal = {
   keysByChannel,
   counterByChannel,
   subscriberKeysByChannel,
-  subscribedSeedByChannel,
+  subscribedSeedsByChannel,
 };
 
 export const channelsActions = {
@@ -217,22 +226,45 @@ export const channelsActions = {
       persistSubscriberKeys(next);
       return next;
     });
-    setSubscribedSeedByChannel((map) => {
+    setSubscribedSeedsByChannel((map) => {
       const next = new Map(map);
       next.delete(channelId);
       return next;
     });
   },
-  /** Cache the recovered content-key seed after the
-   *  subscriber successfully opened a seed envelope. The
-   *  seed is in-memory only — never persisted, never
-   *  sent off-device. */
-  setSubscribedSeed(channelId: string, seed: Uint8Array): void {
-    setSubscribedSeedByChannel((map) => {
+  /** Record the recovered content-key seed for a specific
+   *  epoch after the subscriber opened that epoch's seed
+   *  envelope (ADR-0031 multi-epoch retention). Idempotent
+   *  per `(channelId, epoch)`. In-memory only — never
+   *  persisted, never sent off-device. */
+  setSubscribedSeedForEpoch(
+    channelId: string,
+    epoch: number,
+    seed: Uint8Array,
+  ): void {
+    setSubscribedSeedsByChannel((map) => {
       const next = new Map(map);
-      next.set(channelId, seed);
+      const inner = new Map(next.get(channelId) ?? []);
+      inner.set(epoch, seed);
+      next.set(channelId, inner);
       return next;
     });
+  },
+  /** Look up the recovered seed for a channel. With an
+   *  `epoch` returns the seed for exactly that epoch (used
+   *  by the decrypt-by-epoch path); without one returns the
+   *  seed for the highest recovered epoch — the "current"
+   *  seed a fresh publish/read expects. `undefined` when no
+   *  seed (for that epoch) has been recovered. */
+  currentSeed(channelId: string, epoch?: number): Uint8Array | undefined {
+    const inner = subscribedSeedsByChannel().get(channelId);
+    if (inner === undefined) return undefined;
+    if (epoch !== undefined) return inner.get(epoch);
+    let bestEpoch: number | undefined;
+    for (const e of inner.keys()) {
+      if (bestEpoch === undefined || e > bestEpoch) bestEpoch = e;
+    }
+    return bestEpoch === undefined ? undefined : inner.get(bestEpoch);
   },
   /** Wipe everything — used on logout. Drops subscriber
    *  keypairs from localStorage as well. */
@@ -243,7 +275,7 @@ export const channelsActions = {
     setKeysByChannel(new Map());
     setCounterByChannel(new Map());
     setSubscriberKeysByChannel(new Map());
-    setSubscribedSeedByChannel(new Map());
+    setSubscribedSeedsByChannel(new Map());
     persistSubscriberKeys(new Map());
   },
 };

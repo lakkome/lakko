@@ -45,12 +45,17 @@ public final class ChannelsUiState: ObservableObject {
     @Published public private(set)
     var subscriberKeysByChannel: [String: ChannelSubscriberKeys] = [:]
 
-    /// Per-channel recovered content-key seed (Phase 4b
-    /// G4-3c). In-memory only — never persisted, never
-    /// sent off-device. UI shows a "waiting for seed
-    /// delivery" state until a value lands here.
+    /// Per-channel recovered content-key seeds, keyed by
+    /// epoch (ADR-0031). A subscriber retains the most-recent
+    /// N epochs' seeds so it can decrypt a post made under a
+    /// rotation it missed — each `ChannelPost` carries its
+    /// `epoch_id`, and the reader selects the seed matching
+    /// that epoch. In-memory only — never persisted, never
+    /// sent off-device (same posture as the single-seed cache
+    /// it replaces). UI shows a "waiting for seed delivery"
+    /// state until the map has an entry for the channel.
     @Published public private(set)
-    var subscribedSeedByChannel: [String: Data] = [:]
+    var subscribedSeedsByChannel: [String: [UInt32: Data]] = [:]
 
     /// **Legacy** `UserDefaults` key — the pre-G-29 plaintext
     /// storage location, now read only by ``loadSubscriberKeys()`` for
@@ -138,17 +143,27 @@ public final class ChannelsUiState: ObservableObject {
 
     /// Forget the subscriber-side keypair for
     /// `channelId` — used on un-follow. Clears the cached
-    /// recovered seed too.
+    /// recovered seed map too.
     public func clearSubscriberKeys(_ channelId: String) {
         subscriberKeysByChannel[channelId] = nil
-        subscribedSeedByChannel[channelId] = nil
+        subscribedSeedsByChannel[channelId] = nil
         persistSubscriberKeys()
     }
 
-    /// Cache the recovered content-key seed after the
-    /// subscriber successfully opened a seed envelope.
-    public func setSubscribedSeed(channelId: String, seed: Data) {
-        subscribedSeedByChannel[channelId] = seed
+    /// Cache the recovered content-key seed for one epoch
+    /// after the subscriber successfully opened that epoch's
+    /// seed envelope (ADR-0031). Merges into the channel's
+    /// `epoch -> seed` map so multiple retained epochs coexist.
+    public func setSubscribedSeed(channelId: String, epoch: UInt32, seed: Data) {
+        var byEpoch = subscribedSeedsByChannel[channelId] ?? [:]
+        byEpoch[epoch] = seed
+        subscribedSeedsByChannel[channelId] = byEpoch
+    }
+
+    /// The recovered `epoch -> seed` map for `channelId`
+    /// (empty when no envelope has been opened yet).
+    public func subscribedSeeds(channelId: String) -> [UInt32: Data] {
+        subscribedSeedsByChannel[channelId] ?? [:]
     }
 
     public func reset() {
@@ -158,7 +173,7 @@ public final class ChannelsUiState: ObservableObject {
         keysByChannel = [:]
         counterByChannel = [:]
         subscriberKeysByChannel = [:]
-        subscribedSeedByChannel = [:]
+        subscribedSeedsByChannel = [:]
         persistSubscriberKeys()
     }
 

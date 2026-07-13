@@ -122,6 +122,23 @@ async function parseError(resp: Response): Promise<ChannelApiError> {
   }
 }
 
+/** Decode a base64url-no-pad string to raw bytes. The server
+ *  emits opaque seed-envelope ciphertext as base64url; the wasm
+ *  opener wants the raw bytes. Kept local to the REST layer so
+ *  `api.ts` stays free of the wasm-backed `composer` module. */
+function base64UrlDecode(b64: string): Uint8Array {
+  const std = b64
+    .replace(/-/g, "+")
+    .replace(/_/g, "/")
+    .padEnd(b64.length + ((4 - (b64.length % 4)) % 4), "=");
+  const binary = atob(std);
+  const out = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) {
+    out[i] = binary.charCodeAt(i);
+  }
+  return out;
+}
+
 async function fetchJson<T>(
   url: string,
   init: RequestInit = {},
@@ -259,7 +276,11 @@ export async function listSubscribers(
 /** Fetch the latest seed envelope delivered to `pubkey`.
  *  Returns `null` if the subscriber is registered but no
  *  envelope has been delivered yet (server returns 404
- *  `envelope-not-ready` which we map to null). */
+ *  `envelope-not-ready` which we map to null).
+ *
+ *  This returns only the HIGHEST-epoch (current) envelope and
+ *  carries no epoch tag. Use {@link fetchEnvelopes} to open the
+ *  whole retained set into an `epoch -> seed` map (ADR-0031). */
 export async function fetchEnvelope(
   channelIdHex: string,
   subscriberPubkeyHex: string,
@@ -277,6 +298,45 @@ export async function fetchEnvelope(
   }
 }
 
+/** One retained `(epoch, envelope)` entry from the multi-epoch
+ *  retained set (ADR-0031). `envelope` is the raw sealed-HPKE
+ *  wire bytes (already base64url-decoded from the server's
+ *  `envelope_b64`) ready for the wasm subscriber-seed opener. */
+export interface RetainedEnvelope {
+  readonly epoch: number;
+  readonly envelope: Uint8Array;
+}
+
+/** Fetch the whole retained seed-envelope set for `pubkey`
+ *  (ADR-0031, up to N=4 most-recent epochs), ascending by epoch.
+ *  The catching-up subscriber opens each entry under ITS epoch
+ *  into the per-channel `epoch -> seed` map, then decrypts each
+ *  post with the seed matching the post's own `epoch_id`.
+ *
+ *  An empty retained set (subscriber registered, nothing
+ *  delivered yet) is a valid `[]`. A 404 `unknown-subscriber`
+ *  (pubkey not registered) surfaces as a thrown `ChannelApiError`
+ *  — same posture the singular `fetchEnvelope` gives on that
+ *  error (only `envelope-not-ready` is mapped to a soft null). */
+export async function fetchEnvelopes(
+  channelIdHex: string,
+  subscriberPubkeyHex: string,
+  base: string = DEFAULT_BASE,
+): Promise<ReadonlyArray<RetainedEnvelope>> {
+  const url = `${base}/v1/channels/${channelIdHex}/subscribers/${subscriberPubkeyHex}/envelopes`;
+  const body = await fetchJson<{
+    envelopes: ReadonlyArray<{ epoch: number; envelope_b64: string }>;
+  }>(url);
+  // The server already sorts ascending by epoch; decode each
+  // opaque base64url envelope to the raw bytes the wasm opener
+  // wants. The opacity contract is unchanged — these are sealed
+  // HPKE ciphertexts the client never inspects beyond opening.
+  return body.envelopes.map((e) => ({
+    epoch: e.epoch,
+    envelope: base64UrlDecode(e.envelope_b64),
+  }));
+}
+
 /** Deliver an HPKE-sealed seed envelope to a registered
  *  subscriber. Called by the publisher side of the UI for
  *  each subscriber after a fan-out (initial join or
@@ -284,18 +344,28 @@ export async function fetchEnvelope(
  *  as the request body — same opacity contract the publish
  *  endpoint uses.
  *
+ *  `epoch` (ADR-0031) — when the publisher knows the concrete
+ *  epoch it sealed this envelope for, it passes it so the server
+ *  files the envelope under that epoch (and prunes to the last N).
+ *  Absent → the server files at the channel's current epoch. A
+ *  future epoch is refused server-side with 409
+ *  `envelope-epoch-in-future`.
+ *
  *  Throws `ChannelApiError`:
  *  - `unknown-subscriber` (404) — pubkey is not registered
  *  - `bad-envelope-len`   (400) — wrong wire length
  *  - `bad-channel-id`     (400) — wrong channel-id shape
- *  - `bad-subscriber-id`  (400) — wrong pubkey-hex shape */
+ *  - `bad-subscriber-id`  (400) — wrong pubkey-hex shape
+ *  - `envelope-epoch-in-future` (409) — epoch > current epoch */
 export async function deliverEnvelope(
   channelIdHex: string,
   subscriberPubkeyHex: string,
   envelope: Uint8Array,
   base: string = DEFAULT_BASE,
+  epoch?: number,
 ): Promise<void> {
-  const url = `${base}/v1/channels/${channelIdHex}/subscribers/${subscriberPubkeyHex}/envelope`;
+  const query = epoch !== undefined ? `?epoch=${epoch}` : "";
+  const url = `${base}/v1/channels/${channelIdHex}/subscribers/${subscriberPubkeyHex}/envelope${query}`;
   // Octet-stream body so the server reads raw `Bytes` —
   // matches `services/channels::api::deliver_envelope`. Same
   // buffer-slice pattern as `publishPost` to narrow

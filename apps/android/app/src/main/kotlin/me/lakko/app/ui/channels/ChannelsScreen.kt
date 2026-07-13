@@ -460,7 +460,7 @@ private fun ChannelDetailScreen(
     var publishBusy by remember { mutableStateOf(false) }
     var publishError by remember { mutableStateOf<String?>(null) }
     var loading by remember { mutableStateOf(true) }
-    val decodedByCursor = remember { mutableStateMapOf<ULong, String?>() }
+    val decodedByCursor = remember { mutableStateMapOf<ULong, PostRender>() }
     val scope = rememberCoroutineScope()
 
     suspend fun refresh() {
@@ -470,19 +470,26 @@ private fun ChannelDetailScreen(
             val ep = client.fetchEpoch(channelId)
             state.setPosts(channelId, fetched.posts)
             state.setEpoch(channelId, ep)
-            // Decode every post we now have keys for.
+            // Decode every post we now have keys for. The
+            // publisher holds the current-epoch content seed
+            // (`keys.seed` from the PublisherGroup exporter), so
+            // a post it published under an earlier epoch shows
+            // as unreadable here — the subscriber-side
+            // epoch->seed map (ADR-0031) is what recovers older
+            // windows; the publisher does not retain old seeds.
             decodedByCursor.clear()
             keys?.let { k ->
                 for (p in fetched.posts) {
-                    try {
-                        val pt = ChannelsComposer.verifyAndDecrypt(
-                            seed = k.seed,
-                            channelIdHex = channelId,
-                            postWireB64Url = p.payloadB64,
+                    decodedByCursor[p.cursor] = try {
+                        PostRender.Plain(
+                            ChannelsComposer.verifyAndDecrypt(
+                                seed = k.seed,
+                                channelIdHex = channelId,
+                                postWireB64Url = p.payloadB64,
+                            ).toString(Charsets.UTF_8)
                         )
-                        decodedByCursor[p.cursor] = pt.toString(Charsets.UTF_8)
                     } catch (_: Throwable) {
-                        decodedByCursor[p.cursor] = null
+                        PostRender.Unreadable
                     }
                 }
             }
@@ -639,7 +646,7 @@ private fun ChannelDetailScreen(
                 )
             } else {
                 for (post in posts) {
-                    PostRow(post, decoded = decodedByCursor[post.cursor])
+                    PostRow(post, render = decodedByCursor[post.cursor])
                 }
             }
             Spacer(Modifier.height(16.dp))
@@ -712,8 +719,26 @@ private fun SubscriberPlaceholderSection(onOpenSubscribe: () -> Unit) {
     }
 }
 
+/**
+ * Per-post render state (ADR-0031). `null` means "still
+ * decoding"; the three variants distinguish a decoded post
+ * from the two non-readable cases the UI must show
+ * differently.
+ */
+private sealed interface PostRender {
+    /** Verified + decrypted text. */
+    data class Plain(val value: String) : PostRender
+    /** Seed present but verify / AEAD-open failed. */
+    object Unreadable : PostRender
+    /** ADR-0031 — the post's epoch seed is not in the
+     *  retained window (older than N rotations, or a gap),
+     *  so it can no longer be read. Never force-decrypted
+     *  with a wrong-epoch seed (invariant #4). */
+    object OlderKeyWindow : PostRender
+}
+
 @Composable
-private fun PostRow(post: PostView, decoded: String?) {
+private fun PostRow(post: PostView, render: PostRender?) {
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(containerColor = Theme.surface),
@@ -738,21 +763,27 @@ private fun PostRow(post: PostView, decoded: String?) {
                 )
             }
             Spacer(Modifier.height(6.dp))
-            when {
-                decoded == null -> Text(
+            when (render) {
+                null -> Text(
                     "Decoding…",
                     color = Theme.textSecondary,
                     fontStyle = FontStyle.Italic,
                     fontSize = 13.sp,
                 )
-                decoded.isEmpty() -> Text(
+                PostRender.Unreadable -> Text(
                     "[unreadable — wrong seed, tampered ciphertext, or another publisher's signing key]",
                     color = Theme.textSecondary,
                     fontStyle = FontStyle.Italic,
                     fontSize = 13.sp,
                 )
-                else -> Text(
-                    decoded,
+                PostRender.OlderKeyWindow -> Text(
+                    "[message from an older key window — no longer available]",
+                    color = Theme.textSecondary,
+                    fontStyle = FontStyle.Italic,
+                    fontSize = 13.sp,
+                )
+                is PostRender.Plain -> Text(
+                    render.value,
                     color = Theme.textPrimary,
                     fontSize = 14.sp,
                 )
@@ -838,7 +869,12 @@ private fun SubscribersPanel(
                 epochId = epoch,
                 seed = keys.seed,
             )
-            client.deliverEnvelope(channelId, pubkeyHex, wire)
+            // ADR-0031 — file the envelope at the exact epoch we
+            // sealed it under, so the server retains it under
+            // that epoch and the subscriber opens it with the
+            // matching seed. `epoch` is the current server epoch
+            // (never a future one), so the server accepts it.
+            client.deliverEnvelope(channelId, pubkeyHex, wire, epoch = epoch.toInt())
             statusByPk[pubkeyHex] = if (trigger == "auto") "auto" else "delivered"
         } catch (e: ChannelsApiException) {
             if (trigger == "manual") error = "Deliver failed: ${e.code} — ${e.detail}"
@@ -1037,11 +1073,12 @@ private fun ChannelSubscribeScreen(
     onBack: () -> Unit,
 ) {
     val subscriberKeysByChannel by state.subscriberKeysByChannel.collectAsState()
-    // subscribedSeedByChannel collected to trigger
-    // recomposition on seed installation; the helpers below
-    // read the latest value off `state` directly to keep the
-    // read-modify-write under the StateFlow update barrier.
-    state.subscribedSeedByChannel.collectAsState()
+    // subscribedSeedsByChannel collected to trigger
+    // recomposition when a seed lands for a new epoch; the
+    // helpers below read the latest value off `state` directly
+    // to keep the read-modify-write under the StateFlow update
+    // barrier.
+    state.subscribedSeedsByChannel.collectAsState()
     val postsByChannel by state.postsByChannel.collectAsState()
 
     val keys = subscriberKeysByChannel[channelId]
@@ -1049,42 +1086,127 @@ private fun ChannelSubscribeScreen(
 
     var bootstrap by remember { mutableStateOf(SubscribeBootstrap.Idle) }
     var bootstrapError by remember { mutableStateOf<String?>(null) }
-    val decodedByCursor = remember { mutableStateMapOf<ULong, String?>() }
+    val decodedByCursor = remember { mutableStateMapOf<ULong, PostRender>() }
     val scope = rememberCoroutineScope()
     var pollJob by remember { mutableStateOf<Job?>(null) }
 
-    suspend fun openAndCacheSeed(envelopeB64: String) {
+    // ADR-0031 — open one epoch's seed envelope into the
+    // per-channel epoch->seed map. `epoch` MUST be the epoch
+    // the publisher sealed the envelope under (the plural
+    // endpoint reports it per entry); a wrong epoch makes the
+    // HPKE open fail (AAD mismatch) and is skipped by the
+    // caller — never a wrong seed.
+    suspend fun openEnvelopeIntoMap(epoch: UInt, wire: ByteArray) {
         val kp = state.subscriberKeysByChannel.value[channelId]
             ?: throw ChannelsComposerException.Ffi("missing subscriber keypair")
-        val wire = ChannelsComposer.base64UrlDecodeOrNull(envelopeB64)
-            ?: throw ChannelsComposerException.BadBase64(envelopeB64)
-        val epoch = client.fetchEpoch(channelId)
         val recovered = ChannelsComposer.openSubscriberSeedEnvelope(
             keys = kp,
             channelIdHex = channelId,
             epochId = epoch,
             wire = wire,
         )
-        state.setSubscribedSeed(channelId, recovered)
-        state.setEpoch(channelId, epoch)
+        state.setSubscribedSeed(channelId, epoch, recovered)
+    }
+
+    // ADR-0031 catch-up + re-sync. Fetch the server's retained
+    // set (up to N=4 epochs) and open each into the epoch->seed
+    // map; fall back to the singular latest-envelope endpoint to
+    // guarantee the current seed is present; and if we still
+    // lack a seed for the current epoch (offline past the
+    // retention window), re-subscribe (idempotent) so the
+    // publisher reseals us on its next fanout. Returns true once
+    // at least one epoch seed is available. Best-effort per
+    // step — a transient failure on one endpoint never aborts
+    // the others.
+    suspend fun catchUp(pubHex: String): Boolean {
+        // 1. The retained set (plural) — the authoritative
+        //    (epoch, envelope) pairs.
+        val retained = try {
+            client.fetchEnvelopes(channelId, pubHex)
+        } catch (_: Throwable) {
+            emptyList()
+        }
+        for ((epoch, wire) in retained) {
+            try {
+                openEnvelopeIntoMap(epoch, wire)
+            } catch (_: Throwable) {
+                // Skip a single bad / wrong-epoch envelope.
+            }
+        }
+
+        val currentEpoch = try {
+            client.fetchEpoch(channelId)
+        } catch (_: Throwable) {
+            null
+        }
+        if (currentEpoch != null) {
+            state.setEpoch(channelId, currentEpoch)
+            // 2. Singular fallback — guarantees the current
+            //    seed is present even if the plural endpoint is
+            //    unavailable. The latest envelope is the
+            //    highest retained epoch (== current after a
+            //    reseal); a wrong-epoch guess just fails to open
+            //    and is skipped (fail-closed).
+            if (state.subscribedSeeds(channelId)[currentEpoch] == null) {
+                val latest = try {
+                    client.fetchEnvelope(channelId, pubHex)
+                } catch (_: Throwable) {
+                    null
+                }
+                val wire = latest?.let { ChannelsComposer.base64UrlDecodeOrNull(it) }
+                if (wire != null) {
+                    try {
+                        openEnvelopeIntoMap(currentEpoch, wire)
+                    } catch (_: Throwable) {
+                        // Wrong-epoch guess — skip, never a wrong seed.
+                    }
+                }
+            }
+            // 3. Re-sync — still no seed for the current epoch
+            //    (offline past retention). Re-subscribe so the
+            //    publisher reseals us next fanout; older posts
+            //    stay unreadable (the "older key window"
+            //    placeholder).
+            if (state.subscribedSeeds(channelId)[currentEpoch] == null) {
+                try {
+                    client.subscribe(channelId, pubHex)
+                } catch (_: Throwable) {
+                    // Best-effort; the poll loop retries.
+                }
+            }
+        }
+        return state.subscribedSeeds(channelId).isNotEmpty()
     }
 
     suspend fun loadAndDecodePosts() {
-        val s = state.subscribedSeedByChannel.value[channelId] ?: return
+        val seeds = state.subscribedSeeds(channelId)
+        if (seeds.isEmpty()) return
         try {
             val page = client.fetchPosts(channelId, 0u)
             state.setPosts(channelId, page.posts)
             decodedByCursor.clear()
             for (p in page.posts) {
-                try {
-                    val pt = ChannelsComposer.verifyAndDecrypt(
-                        seed = s,
-                        channelIdHex = channelId,
-                        postWireB64Url = p.payloadB64,
-                    )
-                    decodedByCursor[p.cursor] = pt.toString(Charsets.UTF_8)
+                // ADR-0031 — decrypt each post with the seed
+                // matching ITS epoch; a post whose epoch is not
+                // in the retained map renders as an "older key
+                // window" placeholder, never force-decrypted.
+                decodedByCursor[p.cursor] = try {
+                    when (
+                        val r = ChannelsComposer.verifyAndDecryptForEpochs(
+                            seedByEpoch = seeds,
+                            channelIdHex = channelId,
+                            postWireB64Url = p.payloadB64,
+                        )
+                    ) {
+                        is ChannelsComposer.SubscriberPostResult.Decoded ->
+                            PostRender.Plain(r.plaintext.toString(Charsets.UTF_8))
+                        is ChannelsComposer.SubscriberPostResult.MissingEpochSeed ->
+                            PostRender.OlderKeyWindow
+                        ChannelsComposer.SubscriberPostResult.Unreadable ->
+                            PostRender.Unreadable
+                    }
                 } catch (_: Throwable) {
-                    decodedByCursor[p.cursor] = null
+                    PostRender.Unreadable
                 }
             }
         } catch (_: Throwable) {
@@ -1105,31 +1227,37 @@ private fun ChannelSubscribeScreen(
             val pubHex = ChannelsComposer.bytesToHex(kp.publicKey)
             client.subscribe(channelId, pubHex)
 
-            if (state.subscribedSeedByChannel.value[channelId] != null) {
+            // Cached seeds from a previous open? Show posts
+            // immediately, then still catch up in case a
+            // rotation added a newer epoch since.
+            if (state.subscribedSeeds(channelId).isNotEmpty()) {
+                bootstrap = SubscribeBootstrap.Active
+                loadAndDecodePosts()
+            }
+
+            bootstrap = if (state.subscribedSeeds(channelId).isNotEmpty()) {
+                SubscribeBootstrap.Active
+            } else {
+                SubscribeBootstrap.Polling
+            }
+
+            // ADR-0031 — first catch-up: open the retained set
+            // (plural), the singular latest, and re-sync if
+            // needed. Covers the "publisher already fanned out
+            // before this screen opened" case.
+            if (catchUp(pubHex)) {
                 bootstrap = SubscribeBootstrap.Active
                 loadAndDecodePosts()
                 return@LaunchedEffect
             }
 
-            bootstrap = SubscribeBootstrap.Polling
-            // First-attempt fetch — publisher may have
-            // already fanned out before this screen opened.
-            val firstTry = client.fetchEnvelope(channelId, pubHex)
-            if (firstTry != null) {
-                openAndCacheSeed(firstTry)
-                bootstrap = SubscribeBootstrap.Active
-                loadAndDecodePosts()
-                return@LaunchedEffect
-            }
-
-            // 3-second poll loop on the envelope endpoint.
+            // 3-second poll loop — retry catch-up until a seed
+            // arrives.
             pollJob = scope.launch {
                 while (true) {
                     delay(3_000L)
                     try {
-                        val env = client.fetchEnvelope(channelId, pubHex)
-                        if (env != null) {
-                            openAndCacheSeed(env)
+                        if (catchUp(pubHex)) {
                             bootstrap = SubscribeBootstrap.Active
                             loadAndDecodePosts()
                             break
@@ -1240,7 +1368,7 @@ private fun ChannelSubscribeScreen(
             when {
                 bootstrap == SubscribeBootstrap.Active && posts.isNotEmpty() -> {
                     for (post in posts) {
-                        PostRow(post, decoded = decodedByCursor[post.cursor])
+                        PostRow(post, render = decodedByCursor[post.cursor])
                     }
                 }
                 bootstrap == SubscribeBootstrap.Active -> Text(

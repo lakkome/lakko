@@ -209,6 +209,61 @@ export async function verifyAndDecryptPost(
   }
 }
 
+/** Result of {@link decodeAndDecryptPost}. */
+export interface DecodedPostResult {
+  /** The post's `epoch_id`, read from its clear wire header. */
+  readonly epochId: number;
+  /** Recovered plaintext, or `null` when no seed was available
+   *  for `epochId` OR the AEAD open failed. */
+  readonly plaintext: Uint8Array | null;
+  /** `true` when a seed for `epochId` was supplied — so a `null`
+   *  `plaintext` means a genuine decrypt failure (wrong seed,
+   *  tampered ciphertext, or a foreign signer). `false` when no
+   *  seed existed for this epoch (older-than-retention window, or
+   *  a gap): the post is not decryptable on this device and was
+   *  NOT force-decrypted with a wrong-epoch seed (invariant #4). */
+  readonly hadSeed: boolean;
+}
+
+/**
+ * Decode a base64url ChannelPost once, read its `epoch_id`, pick
+ * the matching seed via `seedForEpoch`, and — only when a seed
+ * exists — verify + AEAD-open under it (ADR-0031 multi-epoch
+ * retention). A subscriber keeps an `epoch -> seed` map and each
+ * post is opened under the seed for ITS epoch. A post whose epoch
+ * has no seed comes back `{ plaintext: null, hadSeed: false }` and
+ * is never decrypted with a different epoch's seed.
+ *
+ * The single decode (vs. `verifyAndDecryptPost`, which re-decodes
+ * internally) lets the caller branch on the epoch before spending
+ * an AEAD open — and surfaces the older-key placeholder cleanly.
+ */
+export async function decodeAndDecryptPost(
+  channelIdHex: string,
+  postWireB64Url: string,
+  seedForEpoch: (epoch: number) => Uint8Array | undefined,
+): Promise<DecodedPostResult> {
+  const wasm = await loadWasm();
+  const channelId = channelIdFromHex(channelIdHex);
+  const wire = base64UrlToBytes(postWireB64Url);
+  const post = wasm.decodeChannelPost(wire);
+  try {
+    const epochId = post.epochId;
+    const seed = seedForEpoch(epochId);
+    if (seed === undefined) {
+      return { epochId, plaintext: null, hadSeed: false };
+    }
+    try {
+      const plaintext = wasm.verifyAndDecryptChannelPost(seed, channelId, post);
+      return { epochId, plaintext, hadSeed: true };
+    } catch {
+      return { epochId, plaintext: null, hadSeed: true };
+    }
+  } finally {
+    post.free();
+  }
+}
+
 // ---------------------------------------------------------
 // Subscriber-side surface (G4-3c-web)
 // ---------------------------------------------------------

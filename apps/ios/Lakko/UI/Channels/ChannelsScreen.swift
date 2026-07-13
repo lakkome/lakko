@@ -742,10 +742,14 @@ struct SubscribersPanelView: View {
                 epochId: epoch,
                 seed: keys.seed
             )
+            // ADR-0031: file the envelope under the exact epoch we
+            // sealed it for, so a catching-up subscriber lands it at
+            // the right key in its `epoch -> seed` map.
             try await client.deliverEnvelope(
                 channelIdHex: channelId,
                 subscriberPubkeyHex: pubkeyHex,
-                envelope: wire
+                envelope: wire,
+                epoch: epoch
             )
             statusByPk[pubkeyHex] = trigger == .auto ? .auto : .delivered
         } catch let err as ChannelsApiError {
@@ -811,10 +815,25 @@ struct ChannelSubscribeScreen: View {
     private enum Bootstrap {
         case idle, registering, polling, active, errorState
     }
+    /// Per-post render state after the decrypt-by-epoch pass
+    /// (ADR-0031). An absent entry means "still decoding".
+    private enum PostDecodeState {
+        /// Recovered plaintext.
+        case text(String)
+        /// Present epoch seed but AEAD/verify failed — wrong
+        /// seed, tampered ciphertext, or another publisher's
+        /// signing key.
+        case unreadable
+        /// The post's epoch is not in the retained `epoch ->
+        /// seed` map (older than the retention window, or a
+        /// gap). Never force-decrypted with a wrong seed
+        /// (invariant #4) — surfaced as a placeholder + skipped.
+        case olderKeyWindow
+    }
     @State private var bootstrap: Bootstrap = .idle
     @State private var bootstrapError: String?
     @State private var posts: [PostView] = []
-    @State private var decodedByCursor: [UInt64: String?] = [:]
+    @State private var decodedByCursor: [UInt64: PostDecodeState] = [:]
     @State private var pollTask: Task<Void, Never>?
 
     var body: some View {
@@ -921,17 +940,21 @@ struct ChannelSubscribeScreen: View {
             .font(.caption.monospaced())
             .foregroundStyle(Theme.textSecondary)
 
-            if let entry = decodedByCursor[post.cursor] {
-                if let text = entry {
-                    Text(text)
-                        .foregroundStyle(Theme.textPrimary)
-                } else {
-                    Text("[unreadable — wrong seed or tampered ciphertext]")
-                        .font(.footnote)
-                        .italic()
-                        .foregroundStyle(Theme.textSecondary)
-                }
-            } else {
+            switch decodedByCursor[post.cursor] {
+            case .text(let text):
+                Text(text)
+                    .foregroundStyle(Theme.textPrimary)
+            case .olderKeyWindow:
+                Text("[message from an older key window — no longer available]")
+                    .font(.footnote)
+                    .italic()
+                    .foregroundStyle(Theme.textSecondary)
+            case .unreadable:
+                Text("[unreadable — wrong seed or tampered ciphertext]")
+                    .font(.footnote)
+                    .italic()
+                    .foregroundStyle(Theme.textSecondary)
+            case .none:
                 Text("Decoding…")
                     .font(.footnote)
                     .italic()
@@ -965,101 +988,178 @@ struct ChannelSubscribeScreen: View {
                 channelIdHex: channelId,
                 subscriberPubkeyHex: pubHex
             )
-
-            // If a seed is already cached in memory, jump
-            // straight to active.
-            if state.subscribedSeedByChannel[channelId] != nil {
-                bootstrap = .active
-                await loadAndDecodePosts()
-                return
-            }
-
-            bootstrap = .polling
-            // First-attempt fetch in case the publisher
-            // has already fanned out.
-            if let b64 = try await client.fetchEnvelope(
-                channelIdHex: channelId,
-                subscriberPubkeyHex: pubHex
-            ) {
-                try await openAndCacheSeed(envelopeB64: b64)
-                bootstrap = .active
-                await loadAndDecodePosts()
-                return
-            }
-            startPollingTask(pubHex: pubHex)
         } catch let err as ChannelsApiError {
             bootstrapError = "\(err.code) — \(err.detail)"
             bootstrap = .errorState
+            return
         } catch {
             bootstrapError = error.localizedDescription
             bootstrap = .errorState
+            return
+        }
+
+        // Catch-up (ADR-0031): pull the whole retained envelope
+        // set and open each `(epoch, envelope)` into the
+        // per-channel `epoch -> seed` map, so posts made under a
+        // rotation this device missed are still decryptable.
+        await catchUp(pubHex: pubHex)
+
+        let seeds = state.subscribedSeeds(channelId: channelId)
+        let currentEpoch = state.epochByChannel[channelId]
+        let haveCurrent = currentEpoch.map { seeds[$0] != nil } ?? false
+
+        // Re-sync: if the CURRENT epoch's seed is missing (offline
+        // past the retention window, or nothing fanned out yet), a
+        // re-subscribe is idempotent and makes the publisher
+        // reseal this device on its next fanout. Beyond-retention
+        // posts stay the "older key window" placeholder.
+        if !haveCurrent {
+            _ = try? await client.subscribe(
+                channelIdHex: channelId,
+                subscriberPubkeyHex: pubHex
+            )
+        }
+
+        if seeds.isEmpty {
+            // No seed at any epoch yet — wait for the first fanout.
+            bootstrap = .polling
+            startPollingTask(pubHex: pubHex)
+        } else {
+            // We can read at least one epoch's posts now.
+            bootstrap = .active
+            await loadAndDecodePosts()
+            // Keep polling until the current epoch's seed lands so
+            // brand-new posts become readable too.
+            if !haveCurrent {
+                startPollingTask(pubHex: pubHex)
+            }
         }
     }
 
     private func startPollingTask(pubHex: String) {
         pollTask?.cancel()
-        pollTask = Task { [client] in
+        pollTask = Task {
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 3_000_000_000)
                 if Task.isCancelled { return }
-                do {
-                    if let b64 = try await client.fetchEnvelope(
-                        channelIdHex: channelId,
-                        subscriberPubkeyHex: pubHex
-                    ) {
-                        try await openAndCacheSeed(envelopeB64: b64)
-                        bootstrap = .active
-                        await loadAndDecodePosts()
-                        return
-                    }
-                } catch {
-                    // Transient — keep polling. A permanent
-                    // failure (unknown-channel etc.) would
-                    // have come from the initial register.
+                await catchUp(pubHex: pubHex)
+                let seeds = state.subscribedSeeds(channelId: channelId)
+                if !seeds.isEmpty {
+                    bootstrap = .active
+                    await loadAndDecodePosts()
+                }
+                // Stop once we hold the current epoch's seed — new
+                // posts are now readable; older ones stay the
+                // placeholder. A permanent failure (unknown-channel
+                // etc.) would already have surfaced from register.
+                if let cur = state.epochByChannel[channelId],
+                    seeds[cur] != nil {
+                    return
                 }
             }
         }
     }
 
-    private func openAndCacheSeed(envelopeB64: String) async throws {
-        guard let kp = state.subscriberKeysByChannel[channelId] else {
-            throw ChannelsComposerError.ffi("missing subscriber keypair")
+    /// ADR-0031 catch-up: refresh the current epoch, pull the
+    /// whole retained envelope set, and open each into the
+    /// per-channel `epoch -> seed` map. Best-effort — a transient
+    /// network failure leaves the existing map intact so the poll
+    /// loop retries. The singular `fetchEnvelope` is kept as a
+    /// fallback to guarantee the current seed lands even if the
+    /// plural set momentarily lags a just-committed reseal.
+    private func catchUp(pubHex: String) async {
+        guard let kp = state.subscriberKeysByChannel[channelId] else { return }
+
+        // Current epoch first — the map key the re-sync check
+        // + the singular fallback need.
+        if let cur = try? await client.fetchEpoch(channelIdHex: channelId) {
+            state.setEpoch(channelId: channelId, epoch: cur)
         }
-        guard let wire = Data(base64URLNoPadSubscriber: envelopeB64) else {
-            throw ChannelsComposerError.badBase64(envelopeB64)
-        }
-        let epoch = try await client.fetchEpoch(channelIdHex: channelId)
-        let seed = try ChannelsComposer.openSubscriberSeedEnvelope(
-            keys: kp,
+
+        // Plural: the retained `[(epoch, envelope)]` set, each with
+        // its concrete epoch. Open any epoch not already held.
+        if let set = try? await client.fetchEnvelopes(
             channelIdHex: channelId,
-            epochId: epoch,
-            wire: wire
-        )
-        state.setSubscribedSeed(channelId: channelId, seed: seed)
-        state.setEpoch(channelId: channelId, epoch: epoch)
+            subscriberPubkeyHex: pubHex
+        ) {
+            for (epoch, wire) in set {
+                if state.subscribedSeeds(channelId: channelId)[epoch] != nil {
+                    continue
+                }
+                if let seed = try? ChannelsComposer.openSubscriberSeedEnvelope(
+                    keys: kp,
+                    channelIdHex: channelId,
+                    epochId: epoch,
+                    wire: wire
+                ) {
+                    state.setSubscribedSeed(
+                        channelId: channelId, epoch: epoch, seed: seed
+                    )
+                }
+            }
+        }
+
+        // Singular fallback: guarantee the current-epoch seed is
+        // present (the plural set may lag a just-committed reseal).
+        if let cur = state.epochByChannel[channelId],
+            state.subscribedSeeds(channelId: channelId)[cur] == nil {
+            if let b64 = (try? await client.fetchEnvelope(
+                channelIdHex: channelId,
+                subscriberPubkeyHex: pubHex
+            )) ?? nil,
+                let wire = Data(base64URLNoPadSubscriber: b64),
+                let seed = try? ChannelsComposer.openSubscriberSeedEnvelope(
+                    keys: kp,
+                    channelIdHex: channelId,
+                    epochId: cur,
+                    wire: wire
+                ) {
+                state.setSubscribedSeed(
+                    channelId: channelId, epoch: cur, seed: seed
+                )
+            }
+        }
     }
 
     private func loadAndDecodePosts() async {
-        guard let seed = state.subscribedSeedByChannel[channelId] else {
-            return
-        }
+        let seeds = state.subscribedSeeds(channelId: channelId)
+        if seeds.isEmpty { return }
         do {
             let page = try await client.fetchPosts(
                 channelIdHex: channelId,
                 after: 0
             )
             posts = page.posts
-            var next: [UInt64: String?] = [:]
+            var next: [UInt64: PostDecodeState] = [:]
             for post in page.posts {
+                // Decode the clear header to learn the post's epoch,
+                // then pick the seed matching THAT epoch (ADR-0031).
+                guard let epoch = try? ChannelsComposer.postEpoch(
+                    postWireB64Url: post.payloadB64
+                ) else {
+                    next[post.cursor] = .unreadable  // malformed wire
+                    continue
+                }
+                guard let seed = seeds[epoch] else {
+                    // No seed for this epoch — older than retention
+                    // or a gap. Skip; never force-decrypt with a
+                    // wrong seed (invariant #4).
+                    next[post.cursor] = .olderKeyWindow
+                    continue
+                }
                 do {
                     let plain = try ChannelsComposer.verifyAndDecrypt(
                         seed: seed,
                         channelIdHex: channelId,
                         postWireB64Url: post.payloadB64
                     )
-                    next[post.cursor] = String(data: plain, encoding: .utf8)
+                    if let text = String(data: plain, encoding: .utf8) {
+                        next[post.cursor] = .text(text)
+                    } else {
+                        next[post.cursor] = .unreadable
+                    }
                 } catch {
-                    next[post.cursor] = nil as String?
+                    next[post.cursor] = .unreadable
                 }
             }
             decodedByCursor = next

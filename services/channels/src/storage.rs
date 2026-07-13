@@ -28,11 +28,25 @@
 //! impl: every `payload` / `envelope` column is opaque
 //! bytes on the way in and on the way out.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use tokio::sync::RwLock;
+
+use crate::config::DEFAULT_ENVELOPE_RETENTION_EPOCHS;
+
+/// Prune a per-subscriber `epoch -> envelope` map down to its
+/// highest `keep_n` epochs, dropping the lowest first
+/// (ADR-0031 N-epoch retention). `keep_n` is always `>= 1`
+/// (the store's builder clamps it), so the map never drains
+/// to empty here.
+fn prune_envelope_map_to_n(map: &mut BTreeMap<u32, Vec<u8>>, keep_n: usize) {
+    while map.len() > keep_n {
+        // `pop_first` removes the lowest-epoch entry.
+        map.pop_first();
+    }
+}
 
 /// 32-byte subscriber X25519 public key, used as the
 /// subscriber's identifier on the wire. Stored as 64-char
@@ -205,6 +219,19 @@ pub enum StorageError {
         /// The target the caller actually supplied.
         got: u32,
     },
+    /// `deliver_envelope` was asked to file an envelope at an
+    /// epoch greater than the channel's `current_epoch`
+    /// (ADR-0031). A publisher must not pre-seed a future
+    /// epoch outside the staged / commit rotation path — this
+    /// preserves C-42, so `channel_envelopes` only ever holds
+    /// epochs `<= current_epoch`.
+    #[error("envelope epoch {got} is in the future (current epoch is {current})")]
+    EnvelopeEpochInFuture {
+        /// The channel's live epoch at refusal time.
+        current: u32,
+        /// The future epoch the caller supplied.
+        got: u32,
+    },
     /// Database-level failure — connection lost, query
     /// timeout, constraint violation, anything sqlx
     /// surfaces. The string carries the underlying
@@ -313,24 +340,55 @@ pub trait ChannelStore: Send + Sync {
         -> Result<Vec<SubscriberId>, StorageError>;
 
     /// Store the publisher-supplied HPKE seed envelope for
-    /// `(channel, subscriber)`. Envelope is opaque.
+    /// `(channel, subscriber)` at a concrete epoch, then prune
+    /// that subscriber's retained set to the store's highest-N
+    /// epochs (ADR-0031). Envelope is opaque.
+    ///
+    /// `epoch` selects the epoch the envelope is filed under;
+    /// `None` defaults to the channel's `current_epoch`. An
+    /// epoch **greater than** `current_epoch` is refused with
+    /// [`StorageError::EnvelopeEpochInFuture`] — a publisher
+    /// cannot pre-seed a future epoch outside the staged /
+    /// commit rotation path (C-42).
     async fn deliver_envelope(
         &self,
         channel: ChannelId,
         subscriber: SubscriberId,
+        epoch: Option<u32>,
         envelope: Vec<u8>,
         expected_len: usize,
     ) -> Result<(), StorageError>;
 
-    /// Fetch the latest HPKE seed envelope for
-    /// `(channel, subscriber)`. Returns `Ok(None)` when
-    /// the subscriber is registered but no envelope has
-    /// been delivered yet.
+    /// Fetch the HPKE seed envelope at the **highest** retained
+    /// epoch for `(channel, subscriber)` — the current seed a
+    /// fresh subscriber needs. Returns `Ok(None)` when the
+    /// subscriber is registered but no envelope has been
+    /// delivered yet.
+    ///
+    /// The highest retained epoch is always `<= current_epoch`
+    /// (the future-epoch refusal in [`Self::deliver_envelope`]
+    /// plus the atomic rotate/commit guarantee that), so this
+    /// wire is backward-compatible with the pre-ADR-0031 N=1
+    /// behaviour.
     async fn fetch_envelope(
         &self,
         channel: ChannelId,
         subscriber: SubscriberId,
     ) -> Result<Option<Vec<u8>>, StorageError>;
+
+    /// Fetch the whole retained `[(epoch, envelope)]` set for
+    /// `(channel, subscriber)`, ascending by epoch (ADR-0031) —
+    /// what a catching-up subscriber opens into its
+    /// `epoch -> seed` map. Empty when the subscriber is
+    /// registered but no envelope has been delivered yet.
+    ///
+    /// Gated exactly like [`Self::fetch_envelope`]: unknown
+    /// channel / unregistered subscriber surface as errors.
+    async fn fetch_envelopes(
+        &self,
+        channel: ChannelId,
+        subscriber: SubscriberId,
+    ) -> Result<Vec<(u32, Vec<u8>)>, StorageError>;
 
     /// Total number of subscribers across every channel.
     async fn total_subscribers(&self) -> usize;
@@ -396,9 +454,28 @@ pub trait ChannelStore: Send + Sync {
 
 /// In-memory state container. Cheap to clone — the inner
 /// state is behind an `Arc<RwLock<…>>`.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct InMemoryChannelStore {
     inner: Arc<RwLock<Inner>>,
+    /// The most-recent N seed envelopes retained per
+    /// `(channel, subscriber)` (ADR-0031). Always `>= 1` —
+    /// [`InMemoryChannelStore::with_envelope_retention`]
+    /// clamps it and the default is
+    /// [`DEFAULT_ENVELOPE_RETENTION_EPOCHS`].
+    envelope_retention_epochs: usize,
+}
+
+impl Default for InMemoryChannelStore {
+    /// The default retains [`DEFAULT_ENVELOPE_RETENTION_EPOCHS`]
+    /// (4) epochs per subscriber — never 0, so a `#[derive]`d
+    /// `Default` (which would zero the field and prune every
+    /// envelope) is deliberately avoided.
+    fn default() -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(Inner::default())),
+            envelope_retention_epochs: DEFAULT_ENVELOPE_RETENTION_EPOCHS,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -418,14 +495,16 @@ struct Inner {
     /// and re-bumped to the registration time on each
     /// idempotent re-subscribe.
     subscribers: HashMap<ChannelId, HashMap<SubscriberId, u64>>,
-    /// (Channel, Subscriber) → latest HPKE-sealed seed
-    /// envelope the publisher delivered. Latest-wins;
-    /// the previous envelope is replaced on every
-    /// publish, matching ADR-0010's "the most recent N
-    /// seed envelopes per subscriber" retention model
-    /// (N=1 in this MVP — multi-epoch retention is a
-    /// follow-up).
-    envelopes: HashMap<(ChannelId, SubscriberId), Vec<u8>>,
+    /// (Channel, Subscriber) → `epoch -> HPKE-sealed seed
+    /// envelope` map (ADR-0031). The most-recent N epochs are
+    /// retained per subscriber (`envelope_retention_epochs`,
+    /// default 4); each write files at a concrete epoch and
+    /// prunes the lowest epochs beyond N. A `BTreeMap` keeps
+    /// the epochs sorted so "highest retained" (the current
+    /// seed) and "whole set ascending" (the catch-up set) are
+    /// both cheap. The server never opens or parses a seed —
+    /// the `epoch` key is bookkeeping alongside opaque bytes.
+    envelopes: HashMap<(ChannelId, SubscriberId), BTreeMap<u32, Vec<u8>>>,
     /// Channel id → current epoch id. Server-side bookkeeping
     /// only; the authoritative epoch lives in each
     /// `ChannelPost`'s header on the client. Surfaced via
@@ -445,10 +524,20 @@ struct Inner {
 }
 
 impl InMemoryChannelStore {
-    /// Construct an empty store.
+    /// Construct an empty store with the default envelope
+    /// retention ([`DEFAULT_ENVELOPE_RETENTION_EPOCHS`], 4).
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Override the per-subscriber envelope retention window
+    /// (ADR-0031). `n` is clamped to `>= 1` — a retention of 0
+    /// would prune every envelope on the next write.
+    #[must_use]
+    pub fn with_envelope_retention(mut self, n: usize) -> Self {
+        self.envelope_retention_epochs = n.max(1);
+        self
     }
 }
 
@@ -659,9 +748,14 @@ impl ChannelStore for InMemoryChannelStore {
     }
 
     /// Store the publisher-supplied HPKE seed envelope for
-    /// a specific (channel, subscriber). The server never
-    /// inspects `envelope` — it stores opaque bytes and
-    /// hands them back unchanged on the matching GET.
+    /// a specific (channel, subscriber) at a concrete epoch,
+    /// then prune that subscriber to the highest-N retained
+    /// epochs (ADR-0031). The server never inspects
+    /// `envelope` — it stores opaque bytes and hands them back
+    /// unchanged on the matching GET.
+    ///
+    /// `epoch` defaults to the channel's `current_epoch`; an
+    /// epoch greater than `current_epoch` is refused (C-42).
     ///
     /// # Errors
     ///
@@ -673,10 +767,13 @@ impl ChannelStore for InMemoryChannelStore {
     ///   length does not match `expected`. Callers pass
     ///   `lakko_channels::subscribe::SEED_ENVELOPE_LEN`
     ///   here.
+    /// - [`StorageError::EnvelopeEpochInFuture`] — the
+    ///   supplied epoch exceeds the channel's current epoch.
     async fn deliver_envelope(
         &self,
         channel: ChannelId,
         subscriber: SubscriberId,
+        epoch: Option<u32>,
         envelope: Vec<u8>,
         expected_len: usize,
     ) -> Result<(), StorageError> {
@@ -697,15 +794,24 @@ impl ChannelStore for InMemoryChannelStore {
         if !registered {
             return Err(StorageError::UnknownSubscriber);
         }
-        guard.envelopes.insert((channel, subscriber), envelope);
+        let current = guard.current_epoch.get(&channel).copied().unwrap_or(0);
+        let ep = epoch.unwrap_or(current);
+        if ep > current {
+            return Err(StorageError::EnvelopeEpochInFuture { current, got: ep });
+        }
+        let retention = self.envelope_retention_epochs;
+        let map = guard.envelopes.entry((channel, subscriber)).or_default();
+        map.insert(ep, envelope);
+        prune_envelope_map_to_n(map, retention);
         Ok(())
     }
 
-    /// Fetch the most-recent HPKE seed envelope for the
-    /// (channel, subscriber) pair. Returns `Ok(None)` if
-    /// the subscriber is registered but no envelope has
-    /// been delivered yet (e.g. the subscriber registered
-    /// faster than the publisher's fan-out completed).
+    /// Fetch the HPKE seed envelope at the highest retained
+    /// epoch for the (channel, subscriber) pair. Returns
+    /// `Ok(None)` if the subscriber is registered but no
+    /// envelope has been delivered yet (e.g. the subscriber
+    /// registered faster than the publisher's fan-out
+    /// completed).
     ///
     /// # Errors
     ///
@@ -729,7 +835,48 @@ impl ChannelStore for InMemoryChannelStore {
         if !registered {
             return Err(StorageError::UnknownSubscriber);
         }
-        Ok(guard.envelopes.get(&(channel, subscriber)).cloned())
+        Ok(guard
+            .envelopes
+            .get(&(channel, subscriber))
+            .and_then(|map| map.last_key_value().map(|(_, env)| env.clone())))
+    }
+
+    /// Fetch the whole retained `[(epoch, envelope)]` set for
+    /// the (channel, subscriber) pair, ascending by epoch
+    /// (ADR-0031). Empty when the subscriber is registered but
+    /// no envelope has been delivered yet.
+    ///
+    /// # Errors
+    ///
+    /// - [`StorageError::UnknownChannel`] — channel is
+    ///   unknown.
+    /// - [`StorageError::UnknownSubscriber`] — subscriber
+    ///   has not registered against this channel.
+    async fn fetch_envelopes(
+        &self,
+        channel: ChannelId,
+        subscriber: SubscriberId,
+    ) -> Result<Vec<(u32, Vec<u8>)>, StorageError> {
+        let guard = self.inner.read().await;
+        if !guard.posts.contains_key(&channel) {
+            return Err(StorageError::UnknownChannel);
+        }
+        let registered = guard
+            .subscribers
+            .get(&channel)
+            .is_some_and(|set| set.contains_key(&subscriber));
+        if !registered {
+            return Err(StorageError::UnknownSubscriber);
+        }
+        Ok(guard
+            .envelopes
+            .get(&(channel, subscriber))
+            .map(|map| {
+                map.iter()
+                    .map(|(epoch, env)| (*epoch, env.clone()))
+                    .collect()
+            })
+            .unwrap_or_default())
     }
 
     /// Total number of subscribers across every channel
@@ -810,16 +957,22 @@ impl ChannelStore for InMemoryChannelStore {
                 return Err(StorageError::UnknownSubscriber);
             }
         }
-        // Validations passed — commit.
-        for (sub, env) in batch {
-            guard.envelopes.insert((channel, sub), env);
-        }
+        // Validations passed — file each envelope at the new
+        // epoch and prune the subscriber to the retained N
+        // (ADR-0031). Same write lock, so a reader never
+        // observes a torn rotation.
         let next = guard
             .current_epoch
             .get(&channel)
             .copied()
             .unwrap_or(0)
             .saturating_add(1);
+        let retention = self.envelope_retention_epochs;
+        for (sub, env) in batch {
+            let map = guard.envelopes.entry((channel, sub)).or_default();
+            map.insert(next, env);
+            prune_envelope_map_to_n(map, retention);
+        }
         guard.current_epoch.insert(channel, next);
         Ok(next)
     }
@@ -943,10 +1096,15 @@ impl ChannelStore for InMemoryChannelStore {
         // registered (partial-coverage policy — a subscriber
         // pruned between stage and commit is skipped, not an
         // abort). A registered subscriber with no staged row
-        // simply keeps their prior-epoch envelope.
+        // simply keeps their prior-epoch envelope. Each
+        // promoted envelope is filed at `target_epoch` and the
+        // subscriber is pruned to the retained N (ADR-0031).
+        let retention = self.envelope_retention_epochs;
         for (sub, env) in staged {
             if registered.contains_key(&sub) {
-                guard.envelopes.insert((channel, sub), env);
+                let map = guard.envelopes.entry((channel, sub)).or_default();
+                map.insert(target_epoch, env);
+                prune_envelope_map_to_n(map, retention);
             }
         }
         // Single atomic transition: bump the epoch, then
@@ -1108,7 +1266,7 @@ mod tests {
         s.create(c).await.unwrap();
         s.subscribe(c, sub, 0).await.unwrap();
         let envelope = vec![0xAAu8; 80]; // SEED_ENVELOPE_LEN
-        s.deliver_envelope(c, sub, envelope.clone(), 80)
+        s.deliver_envelope(c, sub, None, envelope.clone(), 80)
             .await
             .unwrap();
         let fetched = s.fetch_envelope(c, sub).await.unwrap().unwrap();
@@ -1123,7 +1281,7 @@ mod tests {
         s.create(c).await.unwrap();
         s.subscribe(c, sub, 0).await.unwrap();
         let err = s
-            .deliver_envelope(c, sub, vec![0u8; 79], 80)
+            .deliver_envelope(c, sub, None, vec![0u8; 79], 80)
             .await
             .unwrap_err();
         assert!(matches!(
@@ -1141,7 +1299,7 @@ mod tests {
         let c = cid(0x90);
         s.create(c).await.unwrap();
         let err = s
-            .deliver_envelope(c, sid(0xA0), vec![0u8; 80], 80)
+            .deliver_envelope(c, sid(0xA0), None, vec![0u8; 80], 80)
             .await
             .unwrap_err();
         assert!(matches!(err, StorageError::UnknownSubscriber));
@@ -1164,10 +1322,10 @@ mod tests {
         let sub = sid(0xE0);
         s.create(c).await.unwrap();
         s.subscribe(c, sub, 0).await.unwrap();
-        s.deliver_envelope(c, sub, vec![0x11; 80], 80)
+        s.deliver_envelope(c, sub, None, vec![0x11; 80], 80)
             .await
             .unwrap();
-        s.deliver_envelope(c, sub, vec![0x22; 80], 80)
+        s.deliver_envelope(c, sub, None, vec![0x22; 80], 80)
             .await
             .unwrap();
         let fetched = s.fetch_envelope(c, sub).await.unwrap().unwrap();
@@ -1215,8 +1373,12 @@ mod tests {
         s.subscribe(c, b, 0).await.unwrap();
         // Pre-rotation: deliver an "epoch 0" envelope for
         // each (so we can prove they get replaced).
-        s.deliver_envelope(c, a, vec![0x00; 80], 80).await.unwrap();
-        s.deliver_envelope(c, b, vec![0x00; 80], 80).await.unwrap();
+        s.deliver_envelope(c, a, None, vec![0x00; 80], 80)
+            .await
+            .unwrap();
+        s.deliver_envelope(c, b, None, vec![0x00; 80], 80)
+            .await
+            .unwrap();
         // Rotate.
         let new_epoch = s
             .rotate(c, vec![(a, vec![0xAA; 80]), (b, vec![0xBB; 80])], 80)
@@ -1241,7 +1403,9 @@ mod tests {
         let a = sid(0x05);
         s.create(c).await.unwrap();
         s.subscribe(c, a, 0).await.unwrap();
-        s.deliver_envelope(c, a, vec![0x00; 80], 80).await.unwrap();
+        s.deliver_envelope(c, a, None, vec![0x00; 80], 80)
+            .await
+            .unwrap();
         // Second batch entry is wrong length — entire
         // rotation must abort without touching the
         // envelope or bumping the epoch.
@@ -1451,7 +1615,7 @@ mod tests {
         let sub = sid(0xE2);
         s.create(c).await.unwrap();
         s.subscribe(c, sub, 100).await.unwrap();
-        s.deliver_envelope(c, sub, vec![0xAB; 80], 80)
+        s.deliver_envelope(c, sub, None, vec![0xAB; 80], 80)
             .await
             .unwrap();
         // Pre-prune: envelope is fetchable.
@@ -1512,8 +1676,12 @@ mod tests {
         s.subscribe(c, b, 0).await.unwrap();
         // Pre-rotation "epoch 0" envelopes so we can prove
         // they get replaced only after commit.
-        s.deliver_envelope(c, a, vec![0x00; 80], 80).await.unwrap();
-        s.deliver_envelope(c, b, vec![0x00; 80], 80).await.unwrap();
+        s.deliver_envelope(c, a, None, vec![0x00; 80], 80)
+            .await
+            .unwrap();
+        s.deliver_envelope(c, b, None, vec![0x00; 80], 80)
+            .await
+            .unwrap();
         // Stage target epoch 1 for both.
         s.stage_envelopes(c, 1, vec![(a, vec![0xAA; 80]), (b, vec![0xBB; 80])], 80)
             .await
@@ -1541,7 +1709,9 @@ mod tests {
         let a = sid(0x05);
         s.create(c).await.unwrap();
         s.subscribe(c, a, 0).await.unwrap();
-        s.deliver_envelope(c, a, vec![0x11; 80], 80).await.unwrap();
+        s.deliver_envelope(c, a, None, vec![0x11; 80], 80)
+            .await
+            .unwrap();
         // Stage a new envelope but do NOT commit.
         s.stage_envelopes(c, 1, vec![(a, vec![0x22; 80])], 80)
             .await
@@ -1616,7 +1786,9 @@ mod tests {
         let a = sid(0x0B);
         s.create(c).await.unwrap();
         s.subscribe(c, a, 0).await.unwrap();
-        s.deliver_envelope(c, a, vec![0x33; 80], 80).await.unwrap();
+        s.deliver_envelope(c, a, None, vec![0x33; 80], 80)
+            .await
+            .unwrap();
         s.stage_envelopes(c, 1, vec![(a, vec![0x44; 80])], 80)
             .await
             .unwrap();
@@ -1713,10 +1885,10 @@ mod tests {
         s.create(c).await.unwrap();
         s.subscribe(c, staged_sub, 0).await.unwrap();
         s.subscribe(c, untouched_sub, 0).await.unwrap();
-        s.deliver_envelope(c, staged_sub, vec![0x00; 80], 80)
+        s.deliver_envelope(c, staged_sub, None, vec![0x00; 80], 80)
             .await
             .unwrap();
-        s.deliver_envelope(c, untouched_sub, vec![0x99; 80], 80)
+        s.deliver_envelope(c, untouched_sub, None, vec![0x99; 80], 80)
             .await
             .unwrap();
         // Only stage the first subscriber.
@@ -1782,5 +1954,196 @@ mod tests {
         assert!(matches!(stage_err, StorageError::UnknownChannel));
         let commit_err = s.commit_rotation(c, 1).await.unwrap_err();
         assert!(matches!(commit_err, StorageError::UnknownChannel));
+    }
+
+    // -----------------------------------------------------
+    // Multi-epoch envelope retention (ADR-0031)
+    // -----------------------------------------------------
+
+    fn env80(byte: u8) -> Vec<u8> {
+        vec![byte; 80]
+    }
+
+    #[tokio::test]
+    async fn deliver_retains_highest_n_epochs_and_prunes_oldest() {
+        // Default retention is 4. Deliver at epochs 1..=5
+        // (driving `current_epoch` up with empty rotations so
+        // each deliver files at the live epoch), then assert
+        // only the highest 4 survive — epoch 1 is pruned.
+        let s = InMemoryChannelStore::new();
+        let c = cid(0x20);
+        let sub = sid(0x21);
+        s.create(c).await.unwrap();
+        s.subscribe(c, sub, 0).await.unwrap();
+        for e in 1u32..=5 {
+            // Empty rotation bumps `current_epoch` to `e`.
+            assert_eq!(s.rotate(c, vec![], 80).await.unwrap(), e);
+            // Deliver at the live epoch (None -> current).
+            let byte = u8::try_from(e).unwrap();
+            s.deliver_envelope(c, sub, None, env80(byte), 80)
+                .await
+                .unwrap();
+        }
+        // The whole retained set: highest 4 epochs, ascending.
+        let all = s.fetch_envelopes(c, sub).await.unwrap();
+        let epochs: Vec<u32> = all.iter().map(|(e, _)| *e).collect();
+        assert_eq!(epochs, vec![2, 3, 4, 5], "epoch 1 must be pruned");
+        assert_eq!(all.len(), 4);
+        // Singular fetch returns the highest retained epoch.
+        assert_eq!(s.fetch_envelope(c, sub).await.unwrap().unwrap(), env80(5));
+        // The pruned epoch-1 envelope is gone from the set.
+        assert!(all.iter().all(|(e, _)| *e != 1));
+    }
+
+    #[tokio::test]
+    async fn deliver_future_epoch_is_refused() {
+        // A deliver at an epoch greater than `current_epoch`
+        // is refused (C-42 — no future pre-seed).
+        let s = InMemoryChannelStore::new();
+        let c = cid(0x22);
+        let sub = sid(0x23);
+        s.create(c).await.unwrap();
+        s.subscribe(c, sub, 0).await.unwrap();
+        // current_epoch is 0; ask to file at epoch 3.
+        let err = s
+            .deliver_envelope(c, sub, Some(3), env80(0xAA), 80)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            StorageError::EnvelopeEpochInFuture { current: 0, got: 3 }
+        ));
+        // Nothing was filed.
+        assert!(s.fetch_envelope(c, sub).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn deliver_at_explicit_past_epoch_is_accepted() {
+        // A deliver at an explicit epoch <= current is filed
+        // there (a re-syncing subscriber back-filling a gap).
+        let s = InMemoryChannelStore::new();
+        let c = cid(0x24);
+        let sub = sid(0x25);
+        s.create(c).await.unwrap();
+        s.subscribe(c, sub, 0).await.unwrap();
+        // Raise current_epoch to 3 with empty rotations.
+        for _ in 0..3 {
+            s.rotate(c, vec![], 80).await.unwrap();
+        }
+        assert_eq!(s.current_epoch(c).await.unwrap(), 3);
+        // File explicitly at epoch 2 (< current).
+        s.deliver_envelope(c, sub, Some(2), env80(0x2A), 80)
+            .await
+            .unwrap();
+        let all = s.fetch_envelopes(c, sub).await.unwrap();
+        assert_eq!(all, vec![(2u32, env80(0x2A))]);
+    }
+
+    #[tokio::test]
+    async fn commit_rotation_retains_n_across_many_rotations() {
+        // Drive six stage+commit rotations for one subscriber
+        // and assert the retained set is the last N=4 epochs.
+        let s = InMemoryChannelStore::new();
+        let c = cid(0x26);
+        let sub = sid(0x27);
+        s.create(c).await.unwrap();
+        s.subscribe(c, sub, 0).await.unwrap();
+        for e in 1u32..=6 {
+            let byte = u8::try_from(e).unwrap();
+            s.stage_envelopes(c, e, vec![(sub, env80(byte))], 80)
+                .await
+                .unwrap();
+            assert_eq!(s.commit_rotation(c, e).await.unwrap(), e);
+        }
+        let all = s.fetch_envelopes(c, sub).await.unwrap();
+        let epochs: Vec<u32> = all.iter().map(|(e, _)| *e).collect();
+        assert_eq!(epochs, vec![3, 4, 5, 6], "only the last N=4 remain");
+        assert_eq!(s.fetch_envelope(c, sub).await.unwrap().unwrap(), env80(6));
+    }
+
+    #[tokio::test]
+    async fn rotate_retains_n_across_many_rotations() {
+        // Same as above but via the single-shot `rotate` path.
+        let s = InMemoryChannelStore::new();
+        let c = cid(0x28);
+        let sub = sid(0x29);
+        s.create(c).await.unwrap();
+        s.subscribe(c, sub, 0).await.unwrap();
+        for e in 1u32..=6 {
+            let byte = u8::try_from(e).unwrap();
+            assert_eq!(s.rotate(c, vec![(sub, env80(byte))], 80).await.unwrap(), e);
+        }
+        let epochs: Vec<u32> = s
+            .fetch_envelopes(c, sub)
+            .await
+            .unwrap()
+            .iter()
+            .map(|(e, _)| *e)
+            .collect();
+        assert_eq!(epochs, vec![3, 4, 5, 6]);
+    }
+
+    #[tokio::test]
+    async fn fetch_envelopes_empty_when_none_delivered() {
+        let s = InMemoryChannelStore::new();
+        let c = cid(0x2A);
+        let sub = sid(0x2B);
+        s.create(c).await.unwrap();
+        s.subscribe(c, sub, 0).await.unwrap();
+        assert_eq!(s.fetch_envelopes(c, sub).await.unwrap(), Vec::new());
+    }
+
+    #[tokio::test]
+    async fn fetch_envelopes_gates_unknown_channel_and_subscriber() {
+        let s = InMemoryChannelStore::new();
+        let c = cid(0x2C);
+        // Unknown channel.
+        let err = s.fetch_envelopes(c, sid(0x2D)).await.unwrap_err();
+        assert!(matches!(err, StorageError::UnknownChannel));
+        // Known channel, unregistered subscriber.
+        s.create(c).await.unwrap();
+        let err = s.fetch_envelopes(c, sid(0x2D)).await.unwrap_err();
+        assert!(matches!(err, StorageError::UnknownSubscriber));
+    }
+
+    #[tokio::test]
+    async fn with_envelope_retention_controls_window_and_floors_at_one() {
+        // A custom retention of 2 keeps only the highest 2.
+        let s = InMemoryChannelStore::new().with_envelope_retention(2);
+        let c = cid(0x2E);
+        let sub = sid(0x2F);
+        s.create(c).await.unwrap();
+        s.subscribe(c, sub, 0).await.unwrap();
+        for e in 1u32..=4 {
+            let byte = u8::try_from(e).unwrap();
+            s.rotate(c, vec![(sub, env80(byte))], 80).await.unwrap();
+        }
+        let epochs: Vec<u32> = s
+            .fetch_envelopes(c, sub)
+            .await
+            .unwrap()
+            .iter()
+            .map(|(e, _)| *e)
+            .collect();
+        assert_eq!(epochs, vec![3, 4], "retention 2 keeps the highest 2");
+
+        // A retention of 0 is clamped to 1 (keep only latest).
+        let s1 = InMemoryChannelStore::new().with_envelope_retention(0);
+        let c1 = cid(0x30);
+        let sub1 = sid(0x31);
+        s1.create(c1).await.unwrap();
+        s1.subscribe(c1, sub1, 0).await.unwrap();
+        for e in 1u32..=3 {
+            let byte = u8::try_from(e).unwrap();
+            s1.rotate(c1, vec![(sub1, env80(byte))], 80).await.unwrap();
+        }
+        let epochs1: Vec<u32> = s1
+            .fetch_envelopes(c1, sub1)
+            .await
+            .unwrap()
+            .iter()
+            .map(|(e, _)| *e)
+            .collect();
+        assert_eq!(epochs1, vec![3], "retention 0 floors to 1");
     }
 }

@@ -29,12 +29,17 @@ fn test_config() -> Config {
         // periodic loop is disabled (0 = no background
         // task spawned).
         prune_interval_secs: 0,
+        // Match the production default (ADR-0031) so the
+        // retention tests below exercise the real window.
+        envelope_retention_epochs: 4,
     }
 }
 
 async fn spawn() -> SocketAddr {
     let cfg = test_config();
-    let store = Arc::new(InMemoryChannelStore::new());
+    let store = Arc::new(
+        InMemoryChannelStore::new().with_envelope_retention(cfg.envelope_retention_epochs),
+    );
     let state = AppState::new(cfg, store);
     let app = router(state);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -835,4 +840,185 @@ async fn stage_to_unsubscribed_recipient_is_409() {
     assert_eq!(resp.status(), 409);
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["code"].as_str().unwrap(), "unknown-subscriber");
+}
+
+// ---------------------------------------------------------
+// ADR-0031 — multi-epoch envelope retention + catch-up
+// ---------------------------------------------------------
+
+/// Create the channel + subscribe one subscriber (SUB_HEX).
+async fn create_channel_with_one_sub(client: &reqwest::Client, addr: SocketAddr) {
+    client
+        .post(format!("http://{addr}/v1/channels"))
+        .json(&json!({ "channel_id": CHANNEL_HEX }))
+        .send()
+        .await
+        .unwrap();
+    client
+        .post(format!(
+            "http://{addr}/v1/channels/{CHANNEL_HEX}/subscribers"
+        ))
+        .json(&json!({ "subscriber_pubkey_hex": SUB_HEX }))
+        .send()
+        .await
+        .unwrap();
+}
+
+/// Drive `rotations` single-shot rotations, each delivering a
+/// distinct 80-byte envelope to SUB_HEX; returns the epoch
+/// after the last rotation.
+async fn rotate_sub_n_times(client: &reqwest::Client, addr: SocketAddr, rotations: u8) {
+    for e in 1..=rotations {
+        let env: Vec<u8> = vec![e; 80];
+        let resp = client
+            .post(format!("http://{addr}/v1/channels/{CHANNEL_HEX}/rotate"))
+            .json(&json!({
+                "envelopes": [
+                    { "subscriber_id": SUB_HEX, "envelope_b64": URL_SAFE_NO_PAD.encode(&env) },
+                ]
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+    }
+}
+
+#[tokio::test]
+async fn fetch_envelopes_returns_retained_set_ascending() {
+    let addr = spawn().await;
+    let client = reqwest::Client::new();
+    create_channel_with_one_sub(&client, addr).await;
+    // Five rotations -> envelopes filed at epochs 1..=5.
+    // Default retention is 4, so epoch 1 is pruned.
+    rotate_sub_n_times(&client, addr, 5).await;
+
+    let resp = client
+        .get(format!(
+            "http://{addr}/v1/channels/{CHANNEL_HEX}/subscribers/{SUB_HEX}/envelopes"
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let envs = body["envelopes"].as_array().unwrap();
+    // Highest 4 epochs, ascending.
+    assert_eq!(envs.len(), 4);
+    let epochs: Vec<u64> = envs.iter().map(|e| e["epoch"].as_u64().unwrap()).collect();
+    assert_eq!(epochs, vec![2, 3, 4, 5], "epoch 1 must be pruned");
+    // Each entry decodes to its epoch's marker byte.
+    for entry in envs {
+        let epoch = u8::try_from(entry["epoch"].as_u64().unwrap()).unwrap();
+        let decoded = URL_SAFE_NO_PAD
+            .decode(entry["envelope_b64"].as_str().unwrap())
+            .unwrap();
+        assert_eq!(decoded, vec![epoch; 80]);
+    }
+
+    // The singular fetch returns the highest retained epoch.
+    let single = envelope_for(addr, &client, SUB_HEX).await;
+    assert_eq!(single, vec![5u8; 80]);
+}
+
+#[tokio::test]
+async fn fetch_envelopes_empty_when_none_delivered() {
+    let addr = spawn().await;
+    let client = reqwest::Client::new();
+    create_channel_with_one_sub(&client, addr).await;
+    let resp = client
+        .get(format!(
+            "http://{addr}/v1/channels/{CHANNEL_HEX}/subscribers/{SUB_HEX}/envelopes"
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["envelopes"].as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn fetch_envelopes_unknown_subscriber_is_404() {
+    let addr = spawn().await;
+    let client = reqwest::Client::new();
+    client
+        .post(format!("http://{addr}/v1/channels"))
+        .json(&json!({ "channel_id": CHANNEL_HEX }))
+        .send()
+        .await
+        .unwrap();
+    // Channel exists but the subscriber never registered.
+    let resp = client
+        .get(format!(
+            "http://{addr}/v1/channels/{CHANNEL_HEX}/subscribers/{SUB_HEX}/envelopes"
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["code"].as_str().unwrap(), "unknown-subscriber");
+}
+
+#[tokio::test]
+async fn deliver_with_explicit_epoch_files_there() {
+    let addr = spawn().await;
+    let client = reqwest::Client::new();
+    create_channel_with_one_sub(&client, addr).await;
+    // Raise the current epoch to 3 with three empty rotations.
+    for _ in 0..3 {
+        client
+            .post(format!("http://{addr}/v1/channels/{CHANNEL_HEX}/rotate"))
+            .json(&json!({ "envelopes": [] }))
+            .send()
+            .await
+            .unwrap();
+    }
+    // Deliver at explicit epoch 2 (<= current 3) -> 204.
+    let env: Vec<u8> = (0..80u8).collect();
+    let resp = client
+        .post(format!(
+            "http://{addr}/v1/channels/{CHANNEL_HEX}/subscribers/{SUB_HEX}/envelope?epoch=2"
+        ))
+        .body(env.clone())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 204);
+    // The plural fetch shows exactly epoch 2.
+    let resp = client
+        .get(format!(
+            "http://{addr}/v1/channels/{CHANNEL_HEX}/subscribers/{SUB_HEX}/envelopes"
+        ))
+        .send()
+        .await
+        .unwrap();
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let envs = body["envelopes"].as_array().unwrap();
+    assert_eq!(envs.len(), 1);
+    assert_eq!(envs[0]["epoch"].as_u64().unwrap(), 2);
+    let decoded = URL_SAFE_NO_PAD
+        .decode(envs[0]["envelope_b64"].as_str().unwrap())
+        .unwrap();
+    assert_eq!(decoded, env);
+}
+
+#[tokio::test]
+async fn deliver_with_future_epoch_is_409() {
+    let addr = spawn().await;
+    let client = reqwest::Client::new();
+    create_channel_with_one_sub(&client, addr).await;
+    // current_epoch is 0; asking to file at epoch 99 is refused.
+    let resp = client
+        .post(format!(
+            "http://{addr}/v1/channels/{CHANNEL_HEX}/subscribers/{SUB_HEX}/envelope?epoch=99"
+        ))
+        .body(vec![0u8; 80])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 409);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["code"].as_str().unwrap(), "envelope-epoch-in-future");
 }

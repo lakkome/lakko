@@ -191,6 +191,29 @@ public enum ChannelsComposer {
         }
     }
 
+    /// Decode a base64url-encoded ChannelPost wire and return
+    /// the epoch it was sealed under — its clear-header
+    /// `epoch_id` (ADR-0031). A catching-up subscriber reads
+    /// this to pick the seed matching the post's epoch out of
+    /// its per-channel `epoch -> seed` map; a post whose epoch
+    /// has no seed is skipped, never force-decrypted (invariant
+    /// #4).
+    ///
+    /// Reads only the clear header — no seed needed, and no
+    /// AEAD authentication happens here (that is
+    /// ``verifyAndDecrypt(seed:channelIdHex:postWireB64Url:)``).
+    public static func postEpoch(postWireB64Url: String) throws -> UInt32 {
+        guard let wire = Data(base64URLNoPad: postWireB64Url) else {
+            throw ChannelsComposerError.badBase64(postWireB64Url)
+        }
+        do {
+            let post = try LakkoCore.decodeChannelPost(wire: wire)
+            return post.epochId()
+        } catch let FfiError.Channels(msg) {
+            throw ChannelsComposerError.ffi(msg)
+        }
+    }
+
     /// Verify + decrypt a base64url-encoded ChannelPost
     /// (the form `ChannelsClient.fetchPosts` returns).
     /// Returns the recovered plaintext bytes.

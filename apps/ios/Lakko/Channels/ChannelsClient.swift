@@ -192,24 +192,78 @@ public final class ChannelsClient {
         }
     }
 
+    /// `GET /v1/channels/:id/subscribers/:pk/envelopes` —
+    /// fetch the whole RETAINED SET of seed envelopes for
+    /// this subscriber (ADR-0031), ascending by epoch. A
+    /// catching-up subscriber opens each `(epoch, envelope)`
+    /// into its per-channel `epoch -> seed` map and decrypts
+    /// every post with the seed matching its `epoch_id`.
+    ///
+    /// The server retains the most-recent N epochs (default
+    /// N = 4); a subscriber offline for longer re-syncs to the
+    /// current seed and accepts older posts as unreadable.
+    ///
+    /// Each entry's `envelope_b64` is base64url (no padding),
+    /// decoded here to raw wire bytes. Returns an empty array
+    /// when the subscriber is registered but has no envelope
+    /// yet (server maps that to an empty retained set, not a
+    /// 404).
+    public func fetchEnvelopes(
+        channelIdHex: String,
+        subscriberPubkeyHex: String
+    ) async throws -> [(epoch: UInt32, envelope: Data)] {
+        struct Entry: Decodable {
+            let epoch: UInt32
+            let envelope_b64: String
+        }
+        struct Resp: Decodable { let envelopes: [Entry] }
+        do {
+            let resp: Resp = try await getJson(
+                endpoint: "/v1/channels/\(channelIdHex)/subscribers/\(subscriberPubkeyHex)/envelopes"
+            )
+            return resp.envelopes.compactMap { entry in
+                guard let wire = Data(base64URLNoPadChannels: entry.envelope_b64)
+                else { return nil }
+                return (epoch: entry.epoch, envelope: wire)
+            }
+        } catch let err as ChannelsApiError where err.code == "envelope-not-ready" {
+            // Registered but nothing fanned out yet — treat as
+            // an empty retained set so the caller can branch on
+            // `.isEmpty` cleanly (mirrors `fetchEnvelope` → nil).
+            return []
+        }
+    }
+
     /// `POST /v1/channels/:id/subscribers/:pk/envelope` —
     /// publisher delivers a per-subscriber HPKE-sealed seed
     /// envelope. The server takes raw `Bytes` — same opacity
     /// contract as the publish endpoint.
     ///
+    /// `epoch` (ADR-0031) is the concrete epoch the publisher
+    /// sealed this envelope for; when supplied it rides as the
+    /// `?epoch=<Int>` query so the server files the envelope
+    /// under that epoch (a future epoch is refused with 409
+    /// `envelope-epoch-in-future`). Omitted → the server files
+    /// it under the channel's current epoch.
+    ///
     /// Throws `ChannelsApiError`:
-    /// - `unknown-subscriber` (404) — pubkey not registered
-    /// - `bad-envelope-len`   (400) — wrong wire length
-    /// - `bad-channel-id`     (400) — wrong channel-id shape
-    /// - `bad-subscriber-id`  (400) — wrong pubkey-hex shape
+    /// - `unknown-subscriber`        (404) — pubkey not registered
+    /// - `envelope-epoch-in-future`  (409) — epoch > current
+    /// - `bad-envelope-len`          (400) — wrong wire length
+    /// - `bad-channel-id`            (400) — wrong channel-id shape
+    /// - `bad-subscriber-id`         (400) — wrong pubkey-hex shape
     public func deliverEnvelope(
         channelIdHex: String,
         subscriberPubkeyHex: String,
-        envelope: Data
+        envelope: Data,
+        epoch: UInt32? = nil
     ) async throws {
-        let url = try buildURL(
-            endpoint: "/v1/channels/\(channelIdHex)/subscribers/\(subscriberPubkeyHex)/envelope"
-        )
+        var endpoint =
+            "/v1/channels/\(channelIdHex)/subscribers/\(subscriberPubkeyHex)/envelope"
+        if let epoch {
+            endpoint += "?epoch=\(epoch)"
+        }
+        let url = try buildURL(endpoint: endpoint)
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
@@ -453,4 +507,21 @@ public struct ChannelsApiError: Error, Equatable, Sendable {
 fileprivate struct ChannelsErrEnvelope: Decodable {
     let code: String
     let detail: String
+}
+
+private extension Data {
+    /// Decode a base64url-no-pad string (the
+    /// `envelope_b64` wire form the plural `/envelopes`
+    /// endpoint ships) into raw `Data`. Returns `nil` on any
+    /// parse failure so the caller can skip a malformed entry
+    /// rather than fail the whole retained set.
+    init?(base64URLNoPadChannels s: String) {
+        var std = s
+            .replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/")
+        let pad = (4 - (std.count % 4)) % 4
+        std.append(String(repeating: "=", count: pad))
+        guard let data = Data(base64Encoded: std) else { return nil }
+        self = data
+    }
 }

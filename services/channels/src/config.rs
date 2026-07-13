@@ -46,6 +46,15 @@ const DEFAULT_SUBSCRIBER_RETENTION_SECS: u64 = 90 * 24 * 3600;
 /// an hour. Hot path is a single bulk DELETE on the SQL
 /// impl; a tighter cadence buys nothing.
 const DEFAULT_PRUNE_INTERVAL_SECS: u64 = 3600;
+/// Default number of seed envelopes retained per subscriber
+/// (ADR-0031, N-epoch retention). N = 4 covers ~96h at the
+/// 24h rotation cadence ADR-0010 targets, so a subscriber
+/// offline for up to four days can still catch up on every
+/// post it missed. Floored to 1 at parse time — a retention
+/// of 0 would prune every envelope on the next write and
+/// strand every subscriber. Shared with the store impls as
+/// their construction-time default.
+pub(crate) const DEFAULT_ENVELOPE_RETENTION_EPOCHS: usize = 4;
 
 /// Failure modes when loading the runtime config.
 #[derive(Debug, Error)]
@@ -104,6 +113,17 @@ pub struct Config {
     /// integration tests that want to drive prune
     /// manually.
     pub prune_interval_secs: u64,
+    /// Number of seed envelopes retained per subscriber
+    /// (ADR-0031). Each channel-rotation write files the
+    /// envelope at a concrete epoch and prunes that
+    /// `(channel, subscriber)` to its highest N epochs, so
+    /// a subscriber offline for up to N rotations can still
+    /// catch up. Parsed from
+    /// `LAKKO_CHANNELS_ENVELOPE_RETENTION_EPOCHS` (default
+    /// [`DEFAULT_ENVELOPE_RETENTION_EPOCHS`]); a parsed `0`
+    /// is floored to 1 so a rotation cannot strand every
+    /// subscriber.
+    pub envelope_retention_epochs: usize,
 }
 
 impl Config {
@@ -139,6 +159,14 @@ impl Config {
             "LAKKO_CHANNELS_PRUNE_INTERVAL_SECS",
             DEFAULT_PRUNE_INTERVAL_SECS,
         )?;
+        // Floor of 1: a retention of 0 would prune every
+        // envelope on the next write and strand every
+        // subscriber, so we clamp a parsed 0 up to 1.
+        let envelope_retention_epochs = parse_usize(
+            "LAKKO_CHANNELS_ENVELOPE_RETENTION_EPOCHS",
+            DEFAULT_ENVELOPE_RETENTION_EPOCHS,
+        )?
+        .max(1);
         Ok(Self {
             bind,
             max_post_bytes,
@@ -148,6 +176,7 @@ impl Config {
             retention_secs,
             subscriber_retention_secs,
             prune_interval_secs,
+            envelope_retention_epochs,
         })
     }
 }
@@ -198,6 +227,7 @@ mod tests {
             "LAKKO_CHANNELS_MAX_POST_BYTES",
             "LAKKO_CHANNELS_FETCH_LIMIT_DEFAULT",
             "LAKKO_CHANNELS_FETCH_LIMIT_MAX",
+            "LAKKO_CHANNELS_ENVELOPE_RETENTION_EPOCHS",
         ] {
             env::remove_var(key);
         }
@@ -219,6 +249,36 @@ mod tests {
             assert_eq!(cfg.max_post_bytes, DEFAULT_MAX_POST_BYTES);
             assert_eq!(cfg.fetch_limit_default, DEFAULT_FETCH_LIMIT);
             assert_eq!(cfg.fetch_limit_max, DEFAULT_FETCH_LIMIT_MAX);
+            assert_eq!(
+                cfg.envelope_retention_epochs,
+                DEFAULT_ENVELOPE_RETENTION_EPOCHS
+            );
+        });
+    }
+
+    #[test]
+    fn envelope_retention_default_is_four() {
+        with_env(&[], || {
+            let cfg = Config::from_env().unwrap();
+            assert_eq!(cfg.envelope_retention_epochs, 4);
+        });
+    }
+
+    #[test]
+    fn envelope_retention_override_is_parsed() {
+        with_env(&[("LAKKO_CHANNELS_ENVELOPE_RETENTION_EPOCHS", "8")], || {
+            let cfg = Config::from_env().unwrap();
+            assert_eq!(cfg.envelope_retention_epochs, 8);
+        });
+    }
+
+    #[test]
+    fn envelope_retention_zero_is_floored_to_one() {
+        // A retention of 0 would prune every envelope on the
+        // next write; the parser floors it to 1.
+        with_env(&[("LAKKO_CHANNELS_ENVELOPE_RETENTION_EPOCHS", "0")], || {
+            let cfg = Config::from_env().unwrap();
+            assert_eq!(cfg.envelope_retention_epochs, 1);
         });
     }
 

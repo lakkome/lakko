@@ -252,6 +252,75 @@ public object ChannelsComposer {
         }
     }
 
+    /** Outcome of decrypting one subscriber-side post against
+     *  a per-channel `epoch -> seed` map (ADR-0031). */
+    public sealed class SubscriberPostResult {
+        /** Verified + decrypted plaintext. */
+        public class Decoded(public val plaintext: ByteArray) : SubscriberPostResult()
+
+        /** No retained seed for this post's epoch — it predates
+         *  the subscriber's retention window (or a gap). The UI
+         *  renders an "older key window" placeholder and skips
+         *  the post. NEVER decrypted with a wrong-epoch seed
+         *  (security invariant #4). */
+        public class MissingEpochSeed(public val epochId: UInt) : SubscriberPostResult()
+
+        /** The post's epoch seed is present, but verify /
+         *  AEAD-open failed (wrong seed, tampered ciphertext,
+         *  or a foreign publisher's signing key). */
+        public object Unreadable : SubscriberPostResult()
+    }
+
+    /**
+     * Subscriber-side decrypt-by-epoch (ADR-0031). Decode the
+     * base64url ChannelPost wire ONCE, read its `epoch_id`, and
+     * select the seed matching that epoch from [seedByEpoch]:
+     *
+     * - epoch present + verify/open OK → [SubscriberPostResult.Decoded]
+     * - epoch NOT in the map → [SubscriberPostResult.MissingEpochSeed]
+     *   (older than the retained window — skipped, never
+     *   force-decrypted)
+     * - epoch present but verify/open failed →
+     *   [SubscriberPostResult.Unreadable]
+     *
+     * Throws only for a malformed wire (`BadBase64`) or a
+     * decode failure (`Ffi`); a per-post crypto failure is a
+     * result value, never an exception, so one bad post never
+     * fails the whole read loop.
+     */
+    public fun verifyAndDecryptForEpochs(
+        seedByEpoch: Map<UInt, ByteArray>,
+        channelIdHex: String,
+        postWireB64Url: String,
+    ): SubscriberPostResult {
+        val channelId = channelIdFromHex(channelIdHex)
+        val wire = base64UrlDecode(postWireB64Url)
+            ?: throw ChannelsComposerException.BadBase64(postWireB64Url)
+        val post = try {
+            uniffiDecodeChannelPost(wire)
+        } catch (e: FfiException.Channels) {
+            throw ChannelsComposerException.Ffi(e.message ?: "decode failed")
+        }
+        try {
+            val epoch = post.epochId()
+            val seed = seedByEpoch[epoch]
+                ?: return SubscriberPostResult.MissingEpochSeed(epoch)
+            return try {
+                SubscriberPostResult.Decoded(
+                    uniffiVerifyAndDecryptChannelPost(
+                        seed = seed,
+                        channelId = channelId,
+                        post = post,
+                    )
+                )
+            } catch (_: FfiException.Channels) {
+                SubscriberPostResult.Unreadable
+            }
+        } finally {
+            post.close()
+        }
+    }
+
     // -----------------------------------------------------------------
     // Subscriber-side (G4-3c)
     // -----------------------------------------------------------------

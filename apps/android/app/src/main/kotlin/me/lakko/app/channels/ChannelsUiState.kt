@@ -81,13 +81,18 @@ public class ChannelsUiState(
     public val subscriberKeysByChannel: StateFlow<Map<String, ChannelSubscriberKeys>> =
         _subscriberKeysByChannel.asStateFlow()
 
-    private val _subscribedSeedByChannel = MutableStateFlow<Map<String, ByteArray>>(emptyMap())
-    /** Per-channel recovered content-key seed (Phase 4b
-     *  G4-3c). In-memory only — never persisted, never
-     *  sent off-device. UI shows a "waiting for seed
-     *  delivery" state until a value lands here. */
-    public val subscribedSeedByChannel: StateFlow<Map<String, ByteArray>> =
-        _subscribedSeedByChannel.asStateFlow()
+    private val _subscribedSeedsByChannel =
+        MutableStateFlow<Map<String, Map<UInt, ByteArray>>>(emptyMap())
+    /** Per-channel `epoch -> content-key seed` map (Phase 4b
+     *  G4-3c + ADR-0031 multi-epoch retention). In-memory
+     *  only — never persisted, never sent off-device. A
+     *  subscriber that missed a rotation opens the server's
+     *  retained set (up to N=4 epochs) into this map on
+     *  catch-up, then decrypts each post with the seed
+     *  matching ITS `epoch_id`. UI shows a "waiting for seed
+     *  delivery" state until at least one epoch lands here. */
+    public val subscribedSeedsByChannel: StateFlow<Map<String, Map<UInt, ByteArray>>> =
+        _subscribedSeedsByChannel.asStateFlow()
 
     public fun addChannel(handle: ChannelHandle) {
         _channels.update { list ->
@@ -164,15 +169,28 @@ public class ChannelsUiState(
      *  recovered seed too. */
     public fun clearSubscriberKeys(channelId: String) {
         _subscriberKeysByChannel.update { it - channelId }
-        _subscribedSeedByChannel.update { it - channelId }
+        _subscribedSeedsByChannel.update { it - channelId }
         persistSubscriberKeys()
     }
 
-    /** Cache the recovered content-key seed after the
-     *  subscriber successfully opened a seed envelope. */
-    public fun setSubscribedSeed(channelId: String, seed: ByteArray) {
-        _subscribedSeedByChannel.update { it + (channelId to seed) }
+    /** Cache the recovered content-key seed for a specific
+     *  epoch after the subscriber opened that epoch's seed
+     *  envelope (ADR-0031). Idempotent per `(channel, epoch)`
+     *  — re-opening the same epoch overwrites with identical
+     *  bytes. */
+    public fun setSubscribedSeed(channelId: String, epoch: UInt, seed: ByteArray) {
+        _subscribedSeedsByChannel.update { outer ->
+            val inner = outer[channelId] ?: emptyMap()
+            outer + (channelId to (inner + (epoch to seed)))
+        }
     }
+
+    /** Snapshot the `epoch -> seed` map recovered so far for
+     *  `channelId` (empty when nothing has been opened yet).
+     *  The subscriber read loop looks up each post's epoch in
+     *  this map. */
+    public fun subscribedSeeds(channelId: String): Map<UInt, ByteArray> =
+        _subscribedSeedsByChannel.value[channelId] ?: emptyMap()
 
     public fun reset() {
         _channels.value = emptyList()
@@ -181,7 +199,7 @@ public class ChannelsUiState(
         _keysByChannel.value = emptyMap()
         _counterByChannel.value = emptyMap()
         _subscriberKeysByChannel.value = emptyMap()
-        _subscribedSeedByChannel.value = emptyMap()
+        _subscribedSeedsByChannel.value = emptyMap()
         persistSubscriberKeys()
     }
 

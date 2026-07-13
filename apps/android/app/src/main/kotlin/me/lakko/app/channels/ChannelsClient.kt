@@ -169,6 +169,12 @@ public class ChannelsClient(
     @Serializable
     private data class EnvelopeResp(val envelope_b64: String)
 
+    @Serializable
+    private data class EnvelopeEntryJson(val epoch: UInt, val envelope_b64: String)
+
+    @Serializable
+    private data class EnvelopesResp(val envelopes: List<EnvelopeEntryJson>)
+
     /** `POST /v1/channels/:id/subscribers` — register a
      *  subscriber's X25519 public key. */
     public suspend fun subscribe(
@@ -222,6 +228,44 @@ public class ChannelsClient(
         return response.body<EnvelopeResp>().envelope_b64
     }
 
+    /** ADR-0031 — `GET /v1/channels/:id/subscribers/:pk/envelopes`
+     *  (plural). Fetch the **retained set** — the most-recent
+     *  N (default 4) seed envelopes kept for this subscriber,
+     *  ascending by epoch — so a subscriber that missed one or
+     *  more rotations can open every retained epoch's seed and
+     *  decrypt each post with the seed matching ITS epoch.
+     *
+     *  Returns `(epoch, envelope)` pairs with each envelope
+     *  already base64url-decoded to raw wire bytes, ascending
+     *  by epoch. An empty list when the subscriber is
+     *  registered but no envelope has landed yet (server
+     *  returns 404 `envelope-not-ready`, mapped to empty so
+     *  the caller falls back to the singular endpoint / poll).
+     *  An entry whose `envelope_b64` fails to decode is dropped
+     *  rather than aborting the whole set. */
+    public suspend fun fetchEnvelopes(
+        channelIdHex: String,
+        subscriberPubkeyHex: String,
+    ): List<Pair<UInt, ByteArray>> {
+        val response: HttpResponse = client.get(
+            "$baseUrl/v1/channels/$channelIdHex/subscribers/$subscriberPubkeyHex/envelopes"
+        )
+        if (!response.status.isSuccess()) {
+            val err = decodeError(response, "fetch envelopes")
+            if (err.code == "envelope-not-ready") {
+                return emptyList()
+            }
+            throw err
+        }
+        return response.body<EnvelopesResp>().envelopes
+            .sortedBy { it.epoch }
+            .mapNotNull { entry ->
+                val bytes = ChannelsComposer.base64UrlDecodeOrNull(entry.envelope_b64)
+                    ?: return@mapNotNull null
+                entry.epoch to bytes
+            }
+    }
+
     /** `POST /v1/channels/:id/subscribers/:pk/envelope` —
      *  publisher delivers a per-subscriber HPKE-sealed seed
      *  envelope. The server takes raw `Bytes` — same opacity
@@ -231,16 +275,30 @@ public class ChannelsClient(
      *  - `unknown-subscriber` (404) — pubkey not registered
      *  - `bad-envelope-len`   (400) — wrong wire length
      *  - `bad-channel-id`     (400) — wrong channel-id shape
-     *  - `bad-subscriber-id`  (400) — wrong pubkey-hex shape */
+     *  - `bad-subscriber-id`  (400) — wrong pubkey-hex shape
+     *  - `envelope-epoch-in-future` (409) — [epoch] is greater
+     *    than the channel's current epoch (ADR-0031 — a
+     *    publisher may only file at an epoch it has already
+     *    committed to; the staged/commit path handles the next
+     *    epoch)
+     *
+     *  ADR-0031: [epoch] is the concrete epoch the publisher
+     *  sealed this envelope under. When non-null it is appended
+     *  as `?epoch=`; the server files the envelope at that
+     *  epoch and prunes the subscriber to its highest N. Absent
+     *  (null) → the server files at its current epoch (the
+     *  backward-compatible shape). */
     public suspend fun deliverEnvelope(
         channelIdHex: String,
         subscriberPubkeyHex: String,
         envelope: ByteArray,
+        epoch: Int? = null,
     ) {
         val response: HttpResponse = client.post(
             "$baseUrl/v1/channels/$channelIdHex/subscribers/$subscriberPubkeyHex/envelope"
         ) {
             contentType(ContentType.Application.OctetStream)
+            if (epoch != null) parameter("epoch", epoch.toString())
             setBody(envelope)
         }
         if (!response.status.isSuccess()) {
