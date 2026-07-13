@@ -61,6 +61,10 @@ exclude = [
     # bumping libcrux-aead 0.0.7 -> 0.0.8 + libcrux-traits 0.0.6 -> 0.0.7
     # to pull the RUSTSEC-2026-0124 fix; consumed via `[patch.crates-io]`.
     "crates/vendor/hpke-rs-libcrux",
+    # Vendored SHIM (G-25) re-exporting web-time in place of fluvio-wasm-timer
+    # to drop the unmaintained `instant` (RUSTSEC-2024-0384); consumed via
+    # `[patch.crates-io]` below, not a workspace member.
+    "crates/vendor/fluvio-wasm-timer",
 ]
 
 [workspace.package]
@@ -187,3 +191,11 @@ webauthn-rs-core = { path = "crates/vendor/webauthn-rs-core" }
 # impls. No source changes — hpke-rs-libcrux only uses libcrux-traits for
 # the AEAD trait, so ecdh / hkdf staying on libcrux-traits 0.0.6 is fine.
 hpke-rs-libcrux = { path = "crates/vendor/hpke-rs-libcrux" }
+
+# G-25 — RUSTSEC-2024-0384 (`instant` 0.1, unmaintained). The only consumer of
+# `fluvio-wasm-timer` in our graph is openmls 0.8.1, which uses just its
+# `SystemTime` + `UNIX_EPOCH` on wasm. Replace it with a shim re-exporting the
+# maintained `web-time`, so `instant` (which the real crate pulls via
+# parking_lot 0.11) leaves the graph entirely. No openmls source change; remove
+# when openmls 0.9 moves off fluvio-wasm-timer itself.
+fluvio-wasm-timer = { path = "crates/vendor/fluvio-wasm-timer" }

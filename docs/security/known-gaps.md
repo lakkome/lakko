@@ -1545,7 +1545,7 @@ parroted a stale `deny.toml` comment). The real status:
   `deny.toml` stands in the meantime; residual is near-zero per
   the reachability analysis above.
 
-### G-25: Three unmaintained-crate warnings — **two of three CLOSED (Jun 2026); one open (wasm-only, non-CVE; self-serviceable `web-time` shim available, maintainer-deferred 2026-07)**
+### G-25: Unmaintained-crate + advisory warnings — **all CLOSED (2026-07): the three unmaintained warnings + two 2026 transitive advisories (anyhow, crossbeam-epoch); `cargo deny check advisories` is clean**
 
 The `cargo audit` baseline flagged three unmaintained-crate
 advisories. None are vulnerabilities — the maintainers wound
@@ -1580,15 +1580,21 @@ stands until a clean `cargo audit` is required.
   `Removing paste v1.0.15` and `cargo tree -i paste` is now
   empty.
 
-- **`instant 0.1.13`** (RUSTSEC-2024-0384) — **OPEN
-  (accepted; maintainer-deferred 2026-07).** Under
+- **`instant 0.1.13`** (RUSTSEC-2024-0384) — **CLOSED
+  (2026-07) via a `web-time` shim.** Was under
   `parking_lot_core 0.8.6 → parking_lot 0.11.2 →
   fluvio-wasm-timer 0.2.5 → openmls 0.8.1`. A wasm-only
-  timer abstraction — only the wasm target compiles it
-  (`cargo-deny` does not even traverse it on the host
-  target, so it never appears in a `just audit` run here).
-  This is an **unmaintained** advisory, **not a
-  vulnerability** — no known CVE; the crate works.
+  timer abstraction (an **unmaintained** advisory, not a
+  CVE). The self-serviceable fix documented below was
+  **applied**: a vendored `crates/vendor/fluvio-wasm-timer`
+  shim (`pub use web_time::{SystemTime, UNIX_EPOCH};`, AGPL,
+  excluded from the workspace) wired in via `[patch.crates-io]`
+  REPLACES the real crate, so `instant` leaves the graph
+  entirely — `cargo tree -i instant --target all` reports "did
+  not match any packages" and `cargo deny check advisories` no
+  longer lists it. openmls builds + tests green against the shim
+  on host + wasm (the wasm build is the one that actually uses
+  the shim's `SystemTime` / `UNIX_EPOCH`).
 
   **What functionality pulls it (verified 2026-07 against
   the openmls 0.8.1 source):** `fluvio-wasm-timer` is an
@@ -1621,11 +1627,16 @@ stands until a clean `cargo audit` is required.
   empty, incl. under wasm) — the same vendored-patch idiom Lakko
   already uses for `webauthn-rs-core` and `hpke-rs-libcrux`, and
   a net supply-chain improvement (an unmaintained crate replaced
-  by a maintained one). **Trade-off:** it is supply-chain surgery
-  (one more vendored micro-crate) for a **non-CVE** cosmetic-audit
-  win, so the maintainer deferred it (2026-07): stay on the accept
-  posture for now, apply the shim if/when a clean `cargo audit` is
-  required (e.g. an external-audit or launch gate).
+  by a maintained one). **Applied 2026-07** (the maintainer called
+  for the clean-audit posture): the shim landed exactly as described
+  and `instant` is gone. **Two 2026 transitive advisories surfaced in
+  the same audit run and were fixed by patch bumps** (unrelated to the
+  shim — the RustSec DB had published them since the prior audit):
+  `anyhow 1.0.102 → 1.0.103` (RUSTSEC-2026-0190, an `Error::downcast_mut`
+  unsoundness) and `crossbeam-epoch 0.9.18 → 0.9.20` (RUSTSEC-2026-0204,
+  an invalid-pointer-deref in a `fmt::Pointer` impl, via `rayon`), both
+  `cargo update -p` lock bumps with no source change. `cargo deny check
+  advisories` now reports **`advisories ok`**.
 
   The alternative upstream fix — openmls' planned 0.9 (which
   swaps `fluvio-wasm-timer` for `web-time` itself) — is

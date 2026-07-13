@@ -1,0 +1,19 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+# Lakko vendored SHIM for `fluvio-wasm-timer` (G-25 — instant / RUSTSEC-2024-0384).
+#
+# NOT a fork of fluvio-wasm-timer's source: it is a tiny re-export of the
+# maintained `web-time` in its place, consumed via `[patch.crates-io]` in the
+# root Cargo.toml (never a workspace member, never published). Its only reason
+# to exist is to drop the unmaintained `instant` from the dependency graph.
+[package]
+name = "fluvio-wasm-timer"
+version = "0.2.5"
+edition = "2021"
+license = "AGPL-3.0-or-later"
+publish = false
+description = "Lakko vendored shim re-exporting web-time in place of fluvio-wasm-timer, to drop the unmaintained `instant` (RUSTSEC-2024-0384). Consumed via [patch.crates-io]."
+
+[dependencies]
+web-time = "1"
