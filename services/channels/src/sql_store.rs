@@ -482,4 +482,165 @@ impl ChannelStore for SqlChannelStore {
         tx.commit().await.map_err(db_err)?;
         Ok(new_epoch)
     }
+
+    async fn stage_envelopes(
+        &self,
+        channel: ChannelId,
+        target_epoch: u32,
+        batch: Vec<(SubscriberId, Vec<u8>)>,
+        expected_envelope_len: usize,
+    ) -> Result<(), StorageError> {
+        // First pass: validate batch entry lengths before
+        // opening a transaction. Matches the single-shot
+        // rotate's either-all-or-none contract.
+        for (_sub, env) in &batch {
+            if env.len() != expected_envelope_len {
+                return Err(StorageError::BadEnvelopeLen {
+                    expected: expected_envelope_len,
+                    got: env.len(),
+                });
+            }
+        }
+        let mut tx = self.pool.begin().await.map_err(db_err)?;
+
+        // Lock the channel row + read its live epoch. FOR
+        // UPDATE serializes a concurrent stage/commit on the
+        // same channel through the row lock.
+        let existing: Option<(u32,)> = sqlx::query_as(
+            "SELECT current_epoch FROM channels \
+             WHERE id = ? FOR UPDATE",
+        )
+        .bind(channel.as_bytes().as_slice())
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(db_err)?;
+        let Some((current,)) = existing else {
+            return Err(StorageError::UnknownChannel);
+        };
+
+        // Monotone target: refuse anything but current + 1.
+        let expected = current.saturating_add(1);
+        if target_epoch != expected {
+            return Err(StorageError::StaleTargetEpoch {
+                expected,
+                got: target_epoch,
+            });
+        }
+
+        // Cross-check every subscriber id against the
+        // registry before any staged row lands.
+        for (sub, _env) in &batch {
+            let registered: Option<(i64,)> = sqlx::query_as(
+                "SELECT 1 FROM channel_subscribers \
+                 WHERE channel_id = ? AND subscriber_id = ? \
+                 LIMIT 1",
+            )
+            .bind(channel.as_bytes().as_slice())
+            .bind(sub.as_bytes().as_slice())
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(db_err)?;
+            if registered.is_none() {
+                return Err(StorageError::UnknownSubscriber);
+            }
+        }
+
+        // Validations passed — upsert the staged rows. The
+        // (channel, target_epoch, subscriber) primary key
+        // makes a re-sent chunk an idempotent overwrite.
+        for (sub, env) in batch {
+            sqlx::query(
+                "INSERT INTO channel_staged_envelopes \
+                     (channel_id, target_epoch, subscriber_id, envelope) \
+                 VALUES (?, ?, ?, ?) \
+                 ON DUPLICATE KEY UPDATE \
+                     envelope = VALUES(envelope), \
+                     staged_at = CURRENT_TIMESTAMP(3)",
+            )
+            .bind(channel.as_bytes().as_slice())
+            .bind(target_epoch)
+            .bind(sub.as_bytes().as_slice())
+            .bind(&env)
+            .execute(&mut *tx)
+            .await
+            .map_err(db_err)?;
+        }
+        tx.commit().await.map_err(db_err)?;
+        Ok(())
+    }
+
+    async fn commit_rotation(
+        &self,
+        channel: ChannelId,
+        target_epoch: u32,
+    ) -> Result<u32, StorageError> {
+        let mut tx = self.pool.begin().await.map_err(db_err)?;
+
+        // Lock the channel row + read its live epoch.
+        let existing: Option<(u32,)> = sqlx::query_as(
+            "SELECT current_epoch FROM channels \
+             WHERE id = ? FOR UPDATE",
+        )
+        .bind(channel.as_bytes().as_slice())
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(db_err)?;
+        let Some((current,)) = existing else {
+            return Err(StorageError::UnknownChannel);
+        };
+
+        // Monotone target: refuse anything but current + 1.
+        let expected = current.saturating_add(1);
+        if target_epoch != expected {
+            return Err(StorageError::StaleTargetEpoch {
+                expected,
+                got: target_epoch,
+            });
+        }
+
+        // Promote the staged rows for this target into the
+        // live set — but only for subscribers that are still
+        // registered (partial-coverage policy; also honours
+        // the composite FK on channel_envelopes so a
+        // pruned-mid-prepare subscriber cannot abort the
+        // commit). A registered subscriber with no staged row
+        // keeps their prior-epoch envelope.
+        sqlx::query(
+            "INSERT INTO channel_envelopes \
+                 (channel_id, subscriber_id, envelope) \
+             SELECT s.channel_id, s.subscriber_id, s.envelope \
+             FROM channel_staged_envelopes s \
+             WHERE s.channel_id = ? AND s.target_epoch = ? \
+               AND EXISTS ( \
+                   SELECT 1 FROM channel_subscribers cs \
+                   WHERE cs.channel_id = s.channel_id \
+                     AND cs.subscriber_id = s.subscriber_id \
+               ) \
+             ON DUPLICATE KEY UPDATE \
+                 envelope = VALUES(envelope), \
+                 delivered_at = CURRENT_TIMESTAMP(3)",
+        )
+        .bind(channel.as_bytes().as_slice())
+        .bind(target_epoch)
+        .execute(&mut *tx)
+        .await
+        .map_err(db_err)?;
+
+        // Single atomic transition: bump the epoch to the
+        // target, then clear every staged row for the channel
+        // (this target and any abandoned older prepare).
+        sqlx::query("UPDATE channels SET current_epoch = ? WHERE id = ?")
+            .bind(target_epoch)
+            .bind(channel.as_bytes().as_slice())
+            .execute(&mut *tx)
+            .await
+            .map_err(db_err)?;
+        sqlx::query("DELETE FROM channel_staged_envelopes WHERE channel_id = ?")
+            .bind(channel.as_bytes().as_slice())
+            .execute(&mut *tx)
+            .await
+            .map_err(db_err)?;
+        tx.commit().await.map_err(db_err)?;
+        Ok(target_epoch)
+    }
 }

@@ -193,6 +193,18 @@ pub enum StorageError {
         /// Length the caller actually delivered.
         got: usize,
     },
+    /// The `target_epoch` supplied to `stage_envelopes` /
+    /// `commit_rotation` was not exactly `current_epoch + 1`
+    /// (ADR-0030). A stale / replayed / out-of-order phase
+    /// call is refused so a rotation cannot roll the epoch
+    /// back or skip — the monotone-target-epoch property.
+    #[error("target epoch must be current + 1 (expected {expected}, got {got})")]
+    StaleTargetEpoch {
+        /// The only accepted target — `current_epoch + 1`.
+        expected: u32,
+        /// The target the caller actually supplied.
+        got: u32,
+    },
     /// Database-level failure — connection lost, query
     /// timeout, constraint violation, anything sqlx
     /// surfaces. The string carries the underlying
@@ -207,7 +219,7 @@ pub enum StorageError {
 /// `Arc<dyn ChannelStore + Send + Sync>` and dispatch
 /// dynamically between the in-memory and SQL impls.
 ///
-/// All 13 methods are async — even on the in-memory path
+/// All methods are async — even on the in-memory path
 /// the lock is async so a slow `await` elsewhere in the
 /// request handler does not block a tokio worker.
 #[async_trait]
@@ -335,6 +347,51 @@ pub trait ChannelStore: Send + Sync {
         batch: Vec<(SubscriberId, Vec<u8>)>,
         expected_envelope_len: usize,
     ) -> Result<u32, StorageError>;
+
+    /// Stage a chunk of the next epoch's envelopes into the
+    /// staging area (ADR-0030 prepare phase). Does **not**
+    /// bump the epoch and the staged rows are **never**
+    /// served by [`Self::fetch_envelope`] — subscribers keep
+    /// seeing the current live epoch until [`Self::commit_rotation`]
+    /// runs.
+    ///
+    /// Validates like [`Self::rotate`]'s first pass: every
+    /// envelope must be `expected_envelope_len` bytes, the
+    /// channel must exist, `target_epoch` must equal
+    /// `current_epoch + 1`, and every subscriber must be
+    /// registered — any failure aborts the chunk without
+    /// staging anything. On success each `(subscriber →
+    /// envelope)` is an idempotent upsert keyed on
+    /// `(channel, target_epoch, subscriber)`, so a client
+    /// that dropped mid-fanout simply re-sends the missing
+    /// chunks (resumability).
+    async fn stage_envelopes(
+        &self,
+        channel: ChannelId,
+        target_epoch: u32,
+        batch: Vec<(SubscriberId, Vec<u8>)>,
+        expected_envelope_len: usize,
+    ) -> Result<(), StorageError>;
+
+    /// Commit a staged rotation (ADR-0030 commit phase) —
+    /// the single atomic point. In one transaction: re-verify
+    /// `target_epoch == current_epoch + 1`, promote the
+    /// staged envelopes for that `target_epoch` into the live
+    /// set, bump `current_epoch` to `target_epoch`, and clear
+    /// the staged rows for the channel. Returns the new epoch.
+    ///
+    /// Partial coverage is allowed: a registered subscriber
+    /// with no staged row keeps their prior-epoch envelope,
+    /// and a staged row whose subscriber is no longer
+    /// registered (e.g. pruned between stage and commit) is
+    /// skipped rather than aborting the commit. C-42 holds —
+    /// a subscriber observes either the old epoch or the new
+    /// one, never a mix.
+    async fn commit_rotation(
+        &self,
+        channel: ChannelId,
+        target_epoch: u32,
+    ) -> Result<u32, StorageError>;
 }
 
 /// In-memory state container. Cheap to clone — the inner
@@ -376,6 +433,15 @@ struct Inner {
     /// comes back online after weeks can ask "did I miss a
     /// rotation?" before deciding to refresh its envelope.
     current_epoch: HashMap<ChannelId, u32>,
+    /// (Channel, target_epoch) → (Subscriber → staged HPKE
+    /// seed envelope). The ADR-0030 staging area for the
+    /// two-phase rotation fanout. NEVER served by
+    /// `fetch_envelope` — `commit_rotation` is the only path
+    /// that promotes a staged envelope into `envelopes`. So
+    /// the prepare phase is invisible to subscribers (no
+    /// torn rotation is observable mid-stage) and re-staging
+    /// the same key is an idempotent overwrite (resumability).
+    staged_envelopes: HashMap<(ChannelId, u32), HashMap<SubscriberId, Vec<u8>>>,
 }
 
 impl InMemoryChannelStore {
@@ -756,6 +822,136 @@ impl ChannelStore for InMemoryChannelStore {
             .saturating_add(1);
         guard.current_epoch.insert(channel, next);
         Ok(next)
+    }
+
+    /// Stage a chunk of the next epoch's envelopes (ADR-0030
+    /// prepare phase). Validates like [`Self::rotate`] then
+    /// upserts each entry into the staging area under a
+    /// single write lock. The epoch is not bumped and the
+    /// staged rows are invisible to [`Self::fetch_envelope`].
+    ///
+    /// # Errors
+    ///
+    /// - [`StorageError::BadEnvelopeLen`] — any entry's
+    ///   envelope is not `expected_envelope_len` bytes.
+    /// - [`StorageError::UnknownChannel`] — channel unknown.
+    /// - [`StorageError::StaleTargetEpoch`] — `target_epoch`
+    ///   is not `current_epoch + 1`.
+    /// - [`StorageError::UnknownSubscriber`] — a subscriber
+    ///   in the chunk is not registered against this channel.
+    async fn stage_envelopes(
+        &self,
+        channel: ChannelId,
+        target_epoch: u32,
+        batch: Vec<(SubscriberId, Vec<u8>)>,
+        expected_envelope_len: usize,
+    ) -> Result<(), StorageError> {
+        // First pass: validate lengths without mutating —
+        // all-or-none, matching the single-shot rotate.
+        for (_sub, env) in &batch {
+            if env.len() != expected_envelope_len {
+                return Err(StorageError::BadEnvelopeLen {
+                    expected: expected_envelope_len,
+                    got: env.len(),
+                });
+            }
+        }
+        let mut guard = self.inner.write().await;
+        if !guard.posts.contains_key(&channel) {
+            return Err(StorageError::UnknownChannel);
+        }
+        // Monotone target: refuse anything but current + 1.
+        let expected = guard
+            .current_epoch
+            .get(&channel)
+            .copied()
+            .unwrap_or(0)
+            .saturating_add(1);
+        if target_epoch != expected {
+            return Err(StorageError::StaleTargetEpoch {
+                expected,
+                got: target_epoch,
+            });
+        }
+        // Cross-check every subscriber id against the
+        // registry before any staged row lands.
+        let subs = guard.subscribers.get(&channel).cloned().unwrap_or_default();
+        for (sub, _env) in &batch {
+            if !subs.contains_key(sub) {
+                return Err(StorageError::UnknownSubscriber);
+            }
+        }
+        // Validations passed — upsert into the staging area.
+        let staged = guard.staged_envelopes.entry((channel, target_epoch)).or_default();
+        for (sub, env) in batch {
+            staged.insert(sub, env);
+        }
+        Ok(())
+    }
+
+    /// Commit a staged rotation (ADR-0030 commit phase) —
+    /// the single atomic point. Runs entirely under the write
+    /// lock so a concurrent reader cannot observe a torn
+    /// rotation.
+    ///
+    /// Re-verifies `target_epoch == current_epoch + 1`,
+    /// promotes every staged row for `target_epoch` whose
+    /// subscriber is still registered into the live envelope
+    /// set, bumps `current_epoch` to `target_epoch`, and
+    /// clears every staged row for the channel. Returns the
+    /// new epoch.
+    ///
+    /// # Errors
+    ///
+    /// - [`StorageError::UnknownChannel`] — channel unknown.
+    /// - [`StorageError::StaleTargetEpoch`] — `target_epoch`
+    ///   is not `current_epoch + 1`.
+    async fn commit_rotation(
+        &self,
+        channel: ChannelId,
+        target_epoch: u32,
+    ) -> Result<u32, StorageError> {
+        let mut guard = self.inner.write().await;
+        if !guard.posts.contains_key(&channel) {
+            return Err(StorageError::UnknownChannel);
+        }
+        let expected = guard
+            .current_epoch
+            .get(&channel)
+            .copied()
+            .unwrap_or(0)
+            .saturating_add(1);
+        if target_epoch != expected {
+            return Err(StorageError::StaleTargetEpoch {
+                expected,
+                got: target_epoch,
+            });
+        }
+        // Snapshot the registered set + the staged rows for
+        // this target so the promotion loop doesn't borrow
+        // `guard` immutably and mutably at once.
+        let registered = guard.subscribers.get(&channel).cloned().unwrap_or_default();
+        let staged = guard
+            .staged_envelopes
+            .get(&(channel, target_epoch))
+            .cloned()
+            .unwrap_or_default();
+        // Promote only staged rows whose subscriber is still
+        // registered (partial-coverage policy — a subscriber
+        // pruned between stage and commit is skipped, not an
+        // abort). A registered subscriber with no staged row
+        // simply keeps their prior-epoch envelope.
+        for (sub, env) in staged {
+            if registered.contains_key(&sub) {
+                guard.envelopes.insert((channel, sub), env);
+            }
+        }
+        // Single atomic transition: bump the epoch, then
+        // clear every staged row for the channel (this
+        // target and any abandoned older prepare).
+        guard.current_epoch.insert(channel, target_epoch);
+        guard.staged_envelopes.retain(|(c, _e), _| *c != channel);
+        Ok(target_epoch)
     }
 }
 
@@ -1294,5 +1490,297 @@ mod tests {
         assert_eq!(removed, 2);
         assert_eq!(s.list_subscribers(c1).await.unwrap().len(), 1);
         assert_eq!(s.list_subscribers(c2).await.unwrap().len(), 1);
+    }
+
+    // -----------------------------------------------------
+    // stage_envelopes + commit_rotation (ADR-0030 — batched
+    // rotation fanout; C-42 atomicity extended to the staged
+    // path)
+    // -----------------------------------------------------
+
+    #[tokio::test]
+    async fn stage_then_commit_promotes_and_bumps_epoch() {
+        let s = InMemoryChannelStore::new();
+        let c = cid(0x01);
+        let a = sid(0x02);
+        let b = sid(0x03);
+        s.create(c).await.unwrap();
+        s.subscribe(c, a, 0).await.unwrap();
+        s.subscribe(c, b, 0).await.unwrap();
+        // Pre-rotation "epoch 0" envelopes so we can prove
+        // they get replaced only after commit.
+        s.deliver_envelope(c, a, vec![0x00; 80], 80).await.unwrap();
+        s.deliver_envelope(c, b, vec![0x00; 80], 80).await.unwrap();
+        // Stage target epoch 1 for both.
+        s.stage_envelopes(c, 1, vec![(a, vec![0xAA; 80]), (b, vec![0xBB; 80])], 80)
+            .await
+            .unwrap();
+        // Commit.
+        let new_epoch = s.commit_rotation(c, 1).await.unwrap();
+        assert_eq!(new_epoch, 1);
+        assert_eq!(s.current_epoch(c).await.unwrap(), 1);
+        assert_eq!(
+            s.fetch_envelope(c, a).await.unwrap().unwrap(),
+            vec![0xAA; 80]
+        );
+        assert_eq!(
+            s.fetch_envelope(c, b).await.unwrap().unwrap(),
+            vec![0xBB; 80]
+        );
+    }
+
+    #[tokio::test]
+    async fn staged_envelopes_are_not_served_before_commit() {
+        // C-42 core: the prepare phase is invisible to
+        // subscribers — the read path never sees a staged row.
+        let s = InMemoryChannelStore::new();
+        let c = cid(0x04);
+        let a = sid(0x05);
+        s.create(c).await.unwrap();
+        s.subscribe(c, a, 0).await.unwrap();
+        s.deliver_envelope(c, a, vec![0x11; 80], 80).await.unwrap();
+        // Stage a new envelope but do NOT commit.
+        s.stage_envelopes(c, 1, vec![(a, vec![0x22; 80])], 80)
+            .await
+            .unwrap();
+        // Read path still returns the OLD (pre-stage)
+        // envelope, and the epoch is untouched.
+        assert_eq!(
+            s.fetch_envelope(c, a).await.unwrap().unwrap(),
+            vec![0x11; 80]
+        );
+        assert_eq!(s.current_epoch(c).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn stage_rejects_wrong_target_epoch() {
+        let s = InMemoryChannelStore::new();
+        let c = cid(0x06);
+        let a = sid(0x07);
+        s.create(c).await.unwrap();
+        s.subscribe(c, a, 0).await.unwrap();
+        // current_epoch is 0, so the only valid target is 1.
+        let err = s
+            .stage_envelopes(c, 2, vec![(a, vec![0xAA; 80])], 80)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            StorageError::StaleTargetEpoch {
+                expected: 1,
+                got: 2
+            }
+        ));
+        // Nothing staged, epoch untouched.
+        assert_eq!(s.current_epoch(c).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn commit_rejects_wrong_target_epoch() {
+        let s = InMemoryChannelStore::new();
+        let c = cid(0x08);
+        let a = sid(0x09);
+        s.create(c).await.unwrap();
+        s.subscribe(c, a, 0).await.unwrap();
+        s.stage_envelopes(c, 1, vec![(a, vec![0xAA; 80])], 80)
+            .await
+            .unwrap();
+        // Commit with the wrong target (2, not 1).
+        let err = s.commit_rotation(c, 2).await.unwrap_err();
+        assert!(matches!(
+            err,
+            StorageError::StaleTargetEpoch {
+                expected: 1,
+                got: 2
+            }
+        ));
+        // Epoch untouched — the staged rows survive for a
+        // correct retry.
+        assert_eq!(s.current_epoch(c).await.unwrap(), 0);
+        assert_eq!(s.commit_rotation(c, 1).await.unwrap(), 1);
+        assert_eq!(
+            s.fetch_envelope(c, a).await.unwrap().unwrap(),
+            vec![0xAA; 80]
+        );
+    }
+
+    #[tokio::test]
+    async fn abandoned_prepare_leaves_epoch_and_envelopes_untouched() {
+        // A stage that is never committed must not alter the
+        // live epoch or the live envelope set.
+        let s = InMemoryChannelStore::new();
+        let c = cid(0x0A);
+        let a = sid(0x0B);
+        s.create(c).await.unwrap();
+        s.subscribe(c, a, 0).await.unwrap();
+        s.deliver_envelope(c, a, vec![0x33; 80], 80).await.unwrap();
+        s.stage_envelopes(c, 1, vec![(a, vec![0x44; 80])], 80)
+            .await
+            .unwrap();
+        // Never commit. Live state is exactly as before.
+        assert_eq!(s.current_epoch(c).await.unwrap(), 0);
+        assert_eq!(
+            s.fetch_envelope(c, a).await.unwrap().unwrap(),
+            vec![0x33; 80]
+        );
+    }
+
+    #[tokio::test]
+    async fn restaging_is_idempotent_and_merges_chunks() {
+        // Re-sending a subscriber for the same target
+        // overwrites (resumability); a second chunk with a
+        // different subscriber merges into the same staged
+        // set. Commit promotes the union.
+        let s = InMemoryChannelStore::new();
+        let c = cid(0x0C);
+        let a = sid(0x0D);
+        let b = sid(0x0E);
+        s.create(c).await.unwrap();
+        s.subscribe(c, a, 0).await.unwrap();
+        s.subscribe(c, b, 0).await.unwrap();
+        // Chunk 1: a with a first value.
+        s.stage_envelopes(c, 1, vec![(a, vec![0x01; 80])], 80)
+            .await
+            .unwrap();
+        // Chunk 1 re-sent with a corrected value (overwrite).
+        s.stage_envelopes(c, 1, vec![(a, vec![0xAA; 80])], 80)
+            .await
+            .unwrap();
+        // Chunk 2: b (merges — does not drop a).
+        s.stage_envelopes(c, 1, vec![(b, vec![0xBB; 80])], 80)
+            .await
+            .unwrap();
+        assert_eq!(s.commit_rotation(c, 1).await.unwrap(), 1);
+        assert_eq!(
+            s.fetch_envelope(c, a).await.unwrap().unwrap(),
+            vec![0xAA; 80]
+        );
+        assert_eq!(
+            s.fetch_envelope(c, b).await.unwrap().unwrap(),
+            vec![0xBB; 80]
+        );
+    }
+
+    #[tokio::test]
+    async fn stage_rejects_unsubscribed_recipient() {
+        let s = InMemoryChannelStore::new();
+        let c = cid(0x0F);
+        s.create(c).await.unwrap();
+        // No subscribe; try to stage to an unknown peer.
+        let err = s
+            .stage_envelopes(c, 1, vec![(sid(0x10), vec![0u8; 80])], 80)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StorageError::UnknownSubscriber));
+        assert_eq!(s.current_epoch(c).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn stage_is_atomic_on_wrong_length() {
+        let s = InMemoryChannelStore::new();
+        let c = cid(0x11);
+        let a = sid(0x12);
+        s.create(c).await.unwrap();
+        s.subscribe(c, a, 0).await.unwrap();
+        let err = s
+            .stage_envelopes(c, 1, vec![(a, vec![0u8; 79])], 80)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            StorageError::BadEnvelopeLen {
+                expected: 80,
+                got: 79
+            }
+        ));
+        // Nothing staged — a follow-up correct commit that
+        // has no staged rows still bumps but promotes nothing.
+        assert_eq!(s.current_epoch(c).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn commit_partial_coverage_keeps_prior_envelope() {
+        // A registered subscriber NOT in the staged set keeps
+        // their prior-epoch envelope after commit (partial
+        // coverage, ADR-0030 open question 3).
+        let s = InMemoryChannelStore::new();
+        let c = cid(0x13);
+        let staged_sub = sid(0x14);
+        let untouched_sub = sid(0x15);
+        s.create(c).await.unwrap();
+        s.subscribe(c, staged_sub, 0).await.unwrap();
+        s.subscribe(c, untouched_sub, 0).await.unwrap();
+        s.deliver_envelope(c, staged_sub, vec![0x00; 80], 80)
+            .await
+            .unwrap();
+        s.deliver_envelope(c, untouched_sub, vec![0x99; 80], 80)
+            .await
+            .unwrap();
+        // Only stage the first subscriber.
+        s.stage_envelopes(c, 1, vec![(staged_sub, vec![0xAA; 80])], 80)
+            .await
+            .unwrap();
+        assert_eq!(s.commit_rotation(c, 1).await.unwrap(), 1);
+        // Staged subscriber got the new envelope.
+        assert_eq!(
+            s.fetch_envelope(c, staged_sub).await.unwrap().unwrap(),
+            vec![0xAA; 80]
+        );
+        // Untouched subscriber keeps their prior envelope.
+        assert_eq!(
+            s.fetch_envelope(c, untouched_sub).await.unwrap().unwrap(),
+            vec![0x99; 80]
+        );
+    }
+
+    #[tokio::test]
+    async fn commit_with_no_staged_rows_still_bumps_epoch() {
+        // A commit with an empty staged set advances the
+        // epoch (parity with rotate_empty_batch_still_bumps).
+        let s = InMemoryChannelStore::new();
+        let c = cid(0x16);
+        s.create(c).await.unwrap();
+        assert_eq!(s.commit_rotation(c, 1).await.unwrap(), 1);
+        assert_eq!(s.current_epoch(c).await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn commit_clears_staged_rows_so_next_rotation_starts_clean() {
+        // After a commit, the staged rows for the channel are
+        // gone — a subsequent stage targets current+1 anew.
+        let s = InMemoryChannelStore::new();
+        let c = cid(0x17);
+        let a = sid(0x18);
+        s.create(c).await.unwrap();
+        s.subscribe(c, a, 0).await.unwrap();
+        s.stage_envelopes(c, 1, vec![(a, vec![0xAA; 80])], 80)
+            .await
+            .unwrap();
+        assert_eq!(s.commit_rotation(c, 1).await.unwrap(), 1);
+        // Committing epoch 1 again is stale.
+        let err = s.commit_rotation(c, 1).await.unwrap_err();
+        assert!(matches!(err, StorageError::StaleTargetEpoch { .. }));
+        // The next rotation stages epoch 2.
+        s.stage_envelopes(c, 2, vec![(a, vec![0xCC; 80])], 80)
+            .await
+            .unwrap();
+        assert_eq!(s.commit_rotation(c, 2).await.unwrap(), 2);
+        assert_eq!(
+            s.fetch_envelope(c, a).await.unwrap().unwrap(),
+            vec![0xCC; 80]
+        );
+    }
+
+    #[tokio::test]
+    async fn stage_and_commit_reject_unknown_channel() {
+        let s = InMemoryChannelStore::new();
+        let c = cid(0x19);
+        let stage_err = s
+            .stage_envelopes(c, 1, vec![], 80)
+            .await
+            .unwrap_err();
+        assert!(matches!(stage_err, StorageError::UnknownChannel));
+        let commit_err = s.commit_rotation(c, 1).await.unwrap_err();
+        assert!(matches!(commit_err, StorageError::UnknownChannel));
     }
 }

@@ -607,3 +607,232 @@ async fn payload_round_trips_byte_identical() {
         "server must forward payload byte-identical"
     );
 }
+
+// ---------------------------------------------------------
+// ADR-0030 — staged prepare + atomic commit rotation fanout
+// ---------------------------------------------------------
+
+async fn envelope_for(addr: SocketAddr, client: &reqwest::Client, sub: &str) -> Vec<u8> {
+    let resp = client
+        .get(format!(
+            "http://{addr}/v1/channels/{CHANNEL_HEX}/subscribers/{sub}/envelope"
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    URL_SAFE_NO_PAD
+        .decode(body["envelope_b64"].as_str().unwrap())
+        .unwrap()
+}
+
+#[tokio::test]
+async fn stage_then_commit_end_to_end() {
+    let addr = spawn().await;
+    let client = reqwest::Client::new();
+    create_channel_with_two_subs(&client, addr).await;
+    let alice: Vec<u8> = (0..80u8).collect();
+    let bob: Vec<u8> = (10..90u8).collect();
+
+    // Stage chunk 1 (alice) — the epoch must NOT move.
+    let resp = client
+        .post(format!(
+            "http://{addr}/v1/channels/{CHANNEL_HEX}/rotate/stage"
+        ))
+        .json(&json!({
+            "target_epoch": 1,
+            "envelopes": [
+                { "subscriber_id": SUB_HEX, "envelope_b64": URL_SAFE_NO_PAD.encode(&alice) },
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["target_epoch"].as_u64().unwrap(), 1);
+    assert_eq!(body["staged"].as_u64().unwrap(), 1);
+
+    // Epoch still 0 mid-stage.
+    let resp = client
+        .get(format!("http://{addr}/v1/channels/{CHANNEL_HEX}/epoch"))
+        .send()
+        .await
+        .unwrap();
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["epoch"].as_u64().unwrap(), 0);
+
+    // Stage chunk 2 (bob) — resumable second chunk.
+    let resp = client
+        .post(format!(
+            "http://{addr}/v1/channels/{CHANNEL_HEX}/rotate/stage"
+        ))
+        .json(&json!({
+            "target_epoch": 1,
+            "envelopes": [
+                { "subscriber_id": SUB_HEX_B, "envelope_b64": URL_SAFE_NO_PAD.encode(&bob) },
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // Commit.
+    let resp = client
+        .post(format!(
+            "http://{addr}/v1/channels/{CHANNEL_HEX}/rotate/commit"
+        ))
+        .json(&json!({ "target_epoch": 1 }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["epoch"].as_u64().unwrap(), 1);
+
+    // Both staged envelopes are now live + byte-identical.
+    assert_eq!(envelope_for(addr, &client, SUB_HEX).await, alice);
+    assert_eq!(envelope_for(addr, &client, SUB_HEX_B).await, bob);
+}
+
+#[tokio::test]
+async fn staged_envelope_is_not_served_before_commit() {
+    let addr = spawn().await;
+    let client = reqwest::Client::new();
+    create_channel_with_two_subs(&client, addr).await;
+    // Deliver an "epoch 0" envelope directly.
+    let old: Vec<u8> = vec![0x11; 80];
+    client
+        .post(format!(
+            "http://{addr}/v1/channels/{CHANNEL_HEX}/subscribers/{SUB_HEX}/envelope"
+        ))
+        .body(old.clone())
+        .send()
+        .await
+        .unwrap();
+    // Stage a NEW envelope for epoch 1 but do not commit.
+    client
+        .post(format!(
+            "http://{addr}/v1/channels/{CHANNEL_HEX}/rotate/stage"
+        ))
+        .json(&json!({
+            "target_epoch": 1,
+            "envelopes": [
+                { "subscriber_id": SUB_HEX, "envelope_b64": URL_SAFE_NO_PAD.encode(vec![0x22u8; 80]) },
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+    // The read path still returns the OLD envelope.
+    assert_eq!(
+        envelope_for(addr, &client, SUB_HEX).await,
+        old,
+        "staged envelope must NOT be served before commit"
+    );
+}
+
+#[tokio::test]
+async fn stage_with_wrong_target_epoch_is_409() {
+    let addr = spawn().await;
+    let client = reqwest::Client::new();
+    create_channel_with_two_subs(&client, addr).await;
+    let resp = client
+        .post(format!(
+            "http://{addr}/v1/channels/{CHANNEL_HEX}/rotate/stage"
+        ))
+        .json(&json!({
+            "target_epoch": 5,
+            "envelopes": [
+                { "subscriber_id": SUB_HEX, "envelope_b64": URL_SAFE_NO_PAD.encode(vec![0u8; 80]) },
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 409);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["code"].as_str().unwrap(), "stale-target-epoch");
+}
+
+#[tokio::test]
+async fn commit_with_wrong_target_epoch_is_409() {
+    let addr = spawn().await;
+    let client = reqwest::Client::new();
+    create_channel_with_two_subs(&client, addr).await;
+    // Commit epoch 2 while current is 0 (valid target is 1).
+    let resp = client
+        .post(format!(
+            "http://{addr}/v1/channels/{CHANNEL_HEX}/rotate/commit"
+        ))
+        .json(&json!({ "target_epoch": 2 }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 409);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["code"].as_str().unwrap(), "stale-target-epoch");
+    // Epoch untouched.
+    let resp = client
+        .get(format!("http://{addr}/v1/channels/{CHANNEL_HEX}/epoch"))
+        .send()
+        .await
+        .unwrap();
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["epoch"].as_u64().unwrap(), 0);
+}
+
+#[tokio::test]
+async fn stage_chunk_over_cap_is_413() {
+    let addr = spawn().await;
+    let client = reqwest::Client::new();
+    create_channel_with_two_subs(&client, addr).await;
+    // One entry over the cap. Entries are cheap dummies —
+    // the cap check runs before any decode / store call.
+    let over = lakko_svc_channels::api::MAX_STAGE_CHUNK_ENTRIES + 1;
+    let envelopes: Vec<serde_json::Value> = (0..over)
+        .map(|_| json!({ "subscriber_id": SUB_HEX, "envelope_b64": "" }))
+        .collect();
+    let resp = client
+        .post(format!(
+            "http://{addr}/v1/channels/{CHANNEL_HEX}/rotate/stage"
+        ))
+        .json(&json!({ "target_epoch": 1, "envelopes": envelopes }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 413);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["code"].as_str().unwrap(), "chunk-too-large");
+}
+
+#[tokio::test]
+async fn stage_to_unsubscribed_recipient_is_409() {
+    let addr = spawn().await;
+    let client = reqwest::Client::new();
+    client
+        .post(format!("http://{addr}/v1/channels"))
+        .json(&json!({ "channel_id": CHANNEL_HEX }))
+        .send()
+        .await
+        .unwrap();
+    // No subscribe at all.
+    let resp = client
+        .post(format!(
+            "http://{addr}/v1/channels/{CHANNEL_HEX}/rotate/stage"
+        ))
+        .json(&json!({
+            "target_epoch": 1,
+            "envelopes": [
+                { "subscriber_id": SUB_HEX, "envelope_b64": URL_SAFE_NO_PAD.encode(vec![0u8; 80]) },
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 409);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["code"].as_str().unwrap(), "unknown-subscriber");
+}

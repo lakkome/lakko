@@ -187,6 +187,50 @@ pub struct RotateRequest {
     pub envelopes: Vec<RotateBatchEntry>,
 }
 
+/// Maximum entries a single `POST /rotate/stage` chunk may
+/// carry (ADR-0030 open question 1 — a conservative entry
+/// cap, tune under load test). A chunk over this is refused
+/// so no single request is unbounded; the publisher simply
+/// splits its fanout into more chunks.
+pub const MAX_STAGE_CHUNK_ENTRIES: usize = 5000;
+
+/// Body for `POST /v1/channels/:id/rotate/stage` (ADR-0030
+/// prepare phase). A bounded, resumable, idempotent chunk of
+/// the next epoch's envelopes.
+#[derive(Deserialize)]
+pub struct StageRotateRequest {
+    /// The epoch these envelopes become live at on commit.
+    /// Must equal `current_epoch + 1`; the server refuses a
+    /// stale / replayed target so a rotation cannot roll the
+    /// epoch back or skip.
+    pub target_epoch: u32,
+    /// This chunk's per-subscriber envelopes. Bounded by
+    /// [`MAX_STAGE_CHUNK_ENTRIES`]. Staged, never served —
+    /// re-sending a chunk is an idempotent upsert.
+    pub envelopes: Vec<RotateBatchEntry>,
+}
+
+/// Response for `POST /v1/channels/:id/rotate/stage`.
+#[derive(Serialize)]
+pub struct StageResponse {
+    /// Echoed target epoch — the epoch this staged set will
+    /// become live at once the publisher commits.
+    pub target_epoch: u32,
+    /// Number of envelopes accepted into the staging area by
+    /// this chunk. Lets the publisher track fanout progress.
+    pub staged: usize,
+}
+
+/// Body for `POST /v1/channels/:id/rotate/commit` (ADR-0030
+/// commit phase — the single atomic point).
+#[derive(Deserialize)]
+pub struct CommitRotateRequest {
+    /// The staged epoch to promote. Must equal
+    /// `current_epoch + 1`; re-verified inside the commit
+    /// transaction.
+    pub target_epoch: u32,
+}
+
 /// Response for `POST /v1/channels/:id/rotate` +
 /// `GET /v1/channels/:id/epoch`.
 #[derive(Serialize)]
@@ -685,6 +729,174 @@ async fn rotate_channel(
     }
 }
 
+/// Decode a rotation batch's wire entries into
+/// `(SubscriberId, raw envelope bytes)` pairs, returning a
+/// ready-to-send 400 [`Response`] on the first malformed
+/// entry. Keeps the "validate every entry before the store
+/// sees anything" property for the ADR-0030 stage path.
+fn decode_rotate_batch(
+    entries: Vec<RotateBatchEntry>,
+) -> Result<Vec<(SubscriberId, Vec<u8>)>, Response> {
+    let mut batch: Vec<(SubscriberId, Vec<u8>)> = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let Ok(sub) = SubscriberId::from_hex(&entry.subscriber_id) else {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(err(
+                    "bad-subscriber-id",
+                    format!(
+                        "subscriber_id {:?} is not 64 hex chars",
+                        entry.subscriber_id
+                    ),
+                )),
+            )
+                .into_response());
+        };
+        let Ok(env_bytes) = URL_SAFE_NO_PAD.decode(&entry.envelope_b64) else {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(err(
+                    "bad-envelope-b64",
+                    "envelope_b64 must be valid base64url (no padding)",
+                )),
+            )
+                .into_response());
+        };
+        batch.push((sub, env_bytes));
+    }
+    Ok(batch)
+}
+
+/// `POST /v1/channels/:channel_id/rotate/stage` — ADR-0030
+/// prepare phase. Stages a bounded, resumable, idempotent
+/// chunk of the next epoch's envelopes WITHOUT bumping the
+/// epoch or serving them to subscribers.
+async fn rotate_stage(
+    State(state): State<Arc<AppState>>,
+    Path(channel_id): Path<String>,
+    Json(req): Json<StageRotateRequest>,
+) -> Response {
+    let Ok(channel) = ChannelId::from_hex(&channel_id) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(err("bad-channel-id", "channel_id must be 32 hex chars")),
+        )
+            .into_response();
+    };
+
+    // Bound the chunk BEFORE decoding — a single request must
+    // never be unbounded (ADR-0030). The publisher splits its
+    // fanout into more chunks instead.
+    if req.envelopes.len() > MAX_STAGE_CHUNK_ENTRIES {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(err(
+                "chunk-too-large",
+                format!(
+                    "a stage chunk may carry at most {MAX_STAGE_CHUNK_ENTRIES} entries (got {})",
+                    req.envelopes.len()
+                ),
+            )),
+        )
+            .into_response();
+    }
+
+    let target_epoch = req.target_epoch;
+    let staged = req.envelopes.len();
+    let batch = match decode_rotate_batch(req.envelopes) {
+        Ok(b) => b,
+        Err(resp) => return resp,
+    };
+
+    match state
+        .store
+        .stage_envelopes(channel, target_epoch, batch, EXPECTED_ENVELOPE_LEN)
+        .await
+    {
+        Ok(()) => (
+            StatusCode::OK,
+            Json(StageResponse {
+                target_epoch,
+                staged,
+            }),
+        )
+            .into_response(),
+        Err(StorageError::UnknownChannel) => (
+            StatusCode::NOT_FOUND,
+            Json(err("unknown-channel", "no such channel")),
+        )
+            .into_response(),
+        Err(StorageError::StaleTargetEpoch { expected, got }) => (
+            StatusCode::CONFLICT,
+            Json(err(
+                "stale-target-epoch",
+                format!("target_epoch must be current + 1 (expected {expected}, got {got})"),
+            )),
+        )
+            .into_response(),
+        Err(StorageError::UnknownSubscriber) => (
+            StatusCode::CONFLICT,
+            Json(err(
+                "unknown-subscriber",
+                "one or more entries reference a subscriber that is not registered against this channel",
+            )),
+        )
+            .into_response(),
+        Err(StorageError::BadEnvelopeLen { expected, got }) => (
+            StatusCode::BAD_REQUEST,
+            Json(err(
+                "bad-envelope-len",
+                format!("each envelope must decode to exactly {expected} bytes (got {got})"),
+            )),
+        )
+            .into_response(),
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(err("internal", "unexpected error")),
+        )
+            .into_response(),
+    }
+}
+
+/// `POST /v1/channels/:channel_id/rotate/commit` — ADR-0030
+/// commit phase, the single atomic point. Promotes the staged
+/// envelopes for `target_epoch` into the live set + bumps the
+/// epoch in one transaction.
+async fn rotate_commit(
+    State(state): State<Arc<AppState>>,
+    Path(channel_id): Path<String>,
+    Json(req): Json<CommitRotateRequest>,
+) -> Response {
+    let Ok(channel) = ChannelId::from_hex(&channel_id) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(err("bad-channel-id", "channel_id must be 32 hex chars")),
+        )
+            .into_response();
+    };
+    match state.store.commit_rotation(channel, req.target_epoch).await {
+        Ok(epoch) => (StatusCode::OK, Json(EpochView { epoch })).into_response(),
+        Err(StorageError::UnknownChannel) => (
+            StatusCode::NOT_FOUND,
+            Json(err("unknown-channel", "no such channel")),
+        )
+            .into_response(),
+        Err(StorageError::StaleTargetEpoch { expected, got }) => (
+            StatusCode::CONFLICT,
+            Json(err(
+                "stale-target-epoch",
+                format!("target_epoch must be current + 1 (expected {expected}, got {got})"),
+            )),
+        )
+            .into_response(),
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(err("internal", "unexpected error")),
+        )
+            .into_response(),
+    }
+}
+
 fn unix_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -711,6 +923,14 @@ pub fn router(state: Arc<AppState>) -> Router {
             post(deliver_envelope).get(fetch_envelope),
         )
         .route("/v1/channels/{channel_id}/rotate", post(rotate_channel))
+        .route(
+            "/v1/channels/{channel_id}/rotate/stage",
+            post(rotate_stage),
+        )
+        .route(
+            "/v1/channels/{channel_id}/rotate/commit",
+            post(rotate_commit),
+        )
         .route("/v1/channels/{channel_id}/epoch", get(fetch_epoch))
         .route("/health", get(health))
         .route("/version", get(version))
