@@ -46,9 +46,12 @@ public data class RotateBatchEntry(
  * function. The orchestrator here decides _how_: it walks
  * the subscriber list, reseals the new content seed for
  * each subscriber via `sealSubscriberSeedEnvelope`, then
- * POSTs the batch to `POST /v1/channels/:id/rotate`
- * (atomic fanout, server commits or rejects the whole
- * batch — see G4-4 / C-42).
+ * fans the batch out via the ADR-0030 chunked
+ * staged-rotation protocol — bounded `POST .../rotate/stage`
+ * chunks (epoch NOT bumped, staged envelopes never served)
+ * followed by a single atomic `POST .../rotate/commit`
+ * (server promotes the staged set + bumps the epoch in one
+ * transaction — see G4-4 / C-42).
  *
  * Two entry points:
  *   - [runOnce] — single-pass; returns the new rotation
@@ -64,14 +67,18 @@ public data class RotateBatchEntry(
  * state unchanged + does no network round-trip.
  *
  * **Failure semantics:**
- *   - If `listSubscribers` / `rotateChannel` throws, the
- *     state is NOT updated (so the next tick retries).
+ *   - If `listSubscribers` / `stageRotation` /
+ *     `commitRotation` throws, the state is NOT updated (so
+ *     the next tick retries). A failed stage chunk aborts
+ *     the whole pass before commit, so the epoch never
+ *     bumps — staging is idempotent, so the retry re-sends
+ *     the chunks and commits (fail-closed, invariant #4).
  *   - If a single envelope seal fails, the WHOLE batch is
  *     aborted — same atomic posture the server enforces.
  *     Partial fanouts would leave some subscribers on the
  *     old seed + some on the new, which is worse than
  *     retrying.
- *   - If `rotateChannel` succeeds but `saveState` throws,
+ *   - If `commitRotation` succeeds but `saveState` throws,
  *     the rotation is committed server-side; the caller's
  *     storage is stale and the next tick will trigger
  *     another rotation. That's the deliberate trade-off:
@@ -172,12 +179,35 @@ public class RotationCron(
             )
         }
 
-        // 4. Post the atomic batch. Empty batch is allowed
-        //    and still bumps the epoch — covers the "no
-        //    subscribers yet" case where the publisher
-        //    wants to keep rotating on schedule before the
-        //    audience grows.
-        val committedEpoch = channelsClient.rotateChannel(channelIdHex, batch)
+        // 4. Fan the batch out via the ADR-0030 chunked
+        //    staged-rotation protocol: upload the sealed
+        //    envelopes in bounded, resumable, idempotent
+        //    chunks to the staging area (epoch NOT bumped,
+        //    staged envelopes never served), then a single
+        //    atomic commit promotes them + bumps the epoch.
+        //    Staging is idempotent (upsert keyed on
+        //    subscriber), so a chunk failure aborts this tick
+        //    and the next tick re-sends only the missing
+        //    chunks; the rotation state advances only after
+        //    commit succeeds (fail-closed, invariant #4 —
+        //    C-42 preserved as "the commit is atomic").
+        //
+        //    Empty batch: no stage chunks, commit still bumps
+        //    the epoch — covers the "no subscribers yet" case
+        //    where the publisher wants to keep rotating on
+        //    schedule before the audience grows.
+        var chunkStart = 0
+        while (chunkStart < batch.size) {
+            val chunkEnd =
+                minOf(chunkStart + ChannelsClient.MAX_STAGE_CHUNK_ENTRIES, batch.size)
+            channelsClient.stageRotation(
+                channelIdHex,
+                newServerEpoch,
+                batch.subList(chunkStart, chunkEnd),
+            )
+            chunkStart = chunkEnd
+        }
+        val committedEpoch = channelsClient.commitRotation(channelIdHex, newServerEpoch)
 
         // 5. Stamp the new state + persist.
         val newState = channelRotationStateAfterRotation(nowMs)

@@ -282,8 +282,81 @@ public class ChannelsClient(
         return view.epoch
     }
 
+    /** ADR-0030 Sprint D2 — staged-rotation PREPARE phase.
+     *  Uploads one bounded chunk of the next epoch's
+     *  envelopes to the staging area WITHOUT bumping the
+     *  epoch or serving them to subscribers. Staged rows are
+     *  keyed on `(channel, target_epoch, subscriber)`, so
+     *  re-posting a chunk is an idempotent upsert — a client
+     *  that dropped mid-fanout simply re-sends the missing
+     *  chunks (resumability).
+     *
+     *  A chunk must carry at most [MAX_STAGE_CHUNK_ENTRIES]
+     *  entries; the server refuses a larger chunk with 413
+     *  `chunk-too-large`, so the caller splits its fanout.
+     *
+     *  Throws `ChannelsApiException`:
+     *  - `chunk-too-large`    (413) — over the entry cap
+     *  - `stale-target-epoch` (409) — targetEpoch != current + 1
+     *  - `unknown-subscriber` (409) — a pubkey is not registered
+     *  - `unknown-channel`    (404) — no such channel
+     *  - `bad-envelope-len`   (400) — wrong wire length
+     *  - `bad-channel-id`     (400) — wrong channel-id shape */
+    public suspend fun stageRotation(
+        channelIdHex: String,
+        targetEpoch: UInt,
+        envelopes: List<RotateBatchEntry>,
+    ) {
+        val response: HttpResponse = client.post(
+            "$baseUrl/v1/channels/$channelIdHex/rotate/stage"
+        ) {
+            contentType(ContentType.Application.Json)
+            setBody(StageRotateRequest(targetEpoch, envelopes))
+        }
+        if (!response.status.isSuccess()) {
+            throw decodeError(response, "stage rotation")
+        }
+    }
+
+    /** ADR-0030 Sprint D2 — staged-rotation COMMIT phase, the
+     *  single atomic point. Promotes the staged envelopes for
+     *  `targetEpoch` into the live set + bumps the epoch in
+     *  one transaction, then returns the new epoch id. C-42 is
+     *  preserved: subscribers see the old epoch until this
+     *  runs, then the new epoch with every staged envelope
+     *  already live.
+     *
+     *  Throws `ChannelsApiException`:
+     *  - `stale-target-epoch` (409) — targetEpoch != current + 1
+     *  - `unknown-channel`    (404) — no such channel
+     *  - `bad-channel-id`     (400) — wrong channel-id shape */
+    public suspend fun commitRotation(
+        channelIdHex: String,
+        targetEpoch: UInt,
+    ): UInt {
+        val response: HttpResponse = client.post(
+            "$baseUrl/v1/channels/$channelIdHex/rotate/commit"
+        ) {
+            contentType(ContentType.Application.Json)
+            setBody(CommitRotateRequest(targetEpoch))
+        }
+        if (!response.status.isSuccess()) {
+            throw decodeError(response, "commit rotation")
+        }
+        return response.body<EpochView>().epoch
+    }
+
     @Serializable
     private data class RotateRequest(val envelopes: List<RotateBatchEntry>)
+
+    @Serializable
+    private data class StageRotateRequest(
+        val target_epoch: UInt,
+        val envelopes: List<RotateBatchEntry>,
+    )
+
+    @Serializable
+    private data class CommitRotateRequest(val target_epoch: UInt)
 
     @Serializable
     private data class EpochView(val epoch: UInt)
@@ -318,6 +391,13 @@ public class ChannelsClient(
 
     public companion object {
         public const val DEFAULT_BASE_URL: String = "http://10.0.2.2:8090"
+
+        /** ADR-0030 — the max entries a single
+         *  `POST /rotate/stage` chunk may carry. Mirrors the
+         *  server's `MAX_STAGE_CHUNK_ENTRIES`; a larger chunk
+         *  is refused with 413 `chunk-too-large`, so the
+         *  publisher splits its fanout into more chunks. */
+        public const val MAX_STAGE_CHUNK_ENTRIES: Int = 5000
     }
 }
 

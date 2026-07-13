@@ -9,10 +9,15 @@
  * `channelShouldRotate(policy, state, nowMs)` function. The
  * orchestrator here decides _how_: it walks the subscriber
  * list, reseals the new content seed for each subscriber via
- * the wasm `sealSubscriberSeedEnvelope` surface, then POSTs
- * the batch to `POST /v1/channels/:id/rotate` (atomic
- * fanout, server commits or rejects the whole batch — see
- * G4-4).
+ * the wasm `sealSubscriberSeedEnvelope` surface, then fans the
+ * envelopes out with the ADR-0030 chunked staged-rotation
+ * protocol — `POST /rotate/stage` in bounded chunks (at most
+ * `MAX_STAGE_CHUNK_ENTRIES` each, resumable + idempotent),
+ * followed by one atomic `POST /rotate/commit` that promotes
+ * the staged set + bumps the epoch. The commit is the single
+ * atomic point (C-42): a subscriber never observes a torn
+ * rotation — it sees the old epoch until commit lands, then the
+ * new epoch with every staged envelope already live.
  *
  * Two entry points:
  *
@@ -29,14 +34,20 @@
  *
  * **Failure semantics:**
  *
- *   - If `listSubscribers` / `rotateChannel` throws, the
- *     state is NOT updated (so the next tick retries).
+ *   - If `listSubscribers` / any `stageRotation` chunk /
+ *     `commitRotation` throws, the state is NOT updated (so the
+ *     next tick retries). Staging is an idempotent upsert, so a
+ *     retry re-stages the already-staged chunks harmlessly
+ *     before reaching the ones that were missed — no torn
+ *     rotation is observable, because the epoch is only bumped
+ *     by the final atomic commit.
  *   - If a single envelope seal fails (e.g. malformed
- *     subscriber pubkey hex), the WHOLE batch is aborted —
- *     same atomic posture the server enforces. Partial
- *     fanouts would leave some subscribers on the old seed
- *     + some on the new, which is worse than retrying.
- *   - If `rotateChannel` succeeds but the local
+ *     subscriber pubkey hex), the WHOLE batch is aborted before
+ *     any chunk is staged — same atomic posture the server
+ *     enforces. Partial fanouts would leave some subscribers on
+ *     the old seed + some on the new, which is worse than
+ *     retrying.
+ *   - If the fanout (stage + commit) succeeds but the local
  *     `saveState` callback throws, the rotation is still
  *     committed server-side; the caller's storage is in a
  *     stale state and the next tick will trigger another
@@ -61,9 +72,12 @@ type ChannelRotationPolicy = ReturnType<Wasm["channelRotationPolicyDefault"]>;
 type ChannelRotationState = ReturnType<Wasm["channelRotationStateNew"]>;
 
 import {
+  commitRotation,
   fetchEpoch,
   listSubscribers,
-  rotateChannel,
+  stageRotation,
+  MAX_STAGE_CHUNK_ENTRIES,
+  type ChannelEpoch,
   type RotateBatchEntry,
 } from "./api";
 
@@ -179,11 +193,23 @@ export async function runRotationOnce(
     });
   }
 
-  // 4. Post the atomic batch. Empty batch is allowed and
-  //    still bumps the epoch — covers the "no subscribers
-  //    yet" case where the publisher wants to keep
-  //    rotating on schedule before the audience grows.
-  const epoch = await rotateChannel(ctx.channelIdHex, batch, ctx.apiBase);
+  // 4. Fan out with the ADR-0030 chunked staged-rotation
+  //    protocol: stage the sealed envelopes in bounded chunks,
+  //    then run one atomic commit that promotes the staged set
+  //    + bumps the epoch. An empty batch stages nothing and
+  //    commits directly — still bumps the epoch, covering the
+  //    "no subscribers yet" case where the publisher keeps
+  //    rotating on schedule before the audience grows. A
+  //    stage/commit failure throws, so `saveState` below never
+  //    runs and the local rotation state is not advanced (the
+  //    next tick retries; staging is idempotent so re-staging
+  //    the already-staged chunks is safe).
+  const epoch = await stageAndCommitRotation(
+    ctx.channelIdHex,
+    newServerEpoch,
+    batch,
+    ctx.apiBase,
+  );
 
   // 5. Stamp the new state + persist.
   const newState = wasm.channelRotationStateAfterRotation(nowMsBig);
@@ -191,6 +217,47 @@ export async function runRotationOnce(
   ctx.onRotated?.(epoch.epoch);
 
   return { rotated: true, newState, newEpoch: epoch.epoch };
+}
+
+/**
+ * ADR-0030 chunked fanout: stage the sealed envelope batch in
+ * bounded chunks (at most `MAX_STAGE_CHUNK_ENTRIES` each), then
+ * run one atomic commit that promotes the staged set + bumps the
+ * epoch. Returns the new epoch.
+ *
+ * Sequencing is deliberate:
+ *
+ *   - Chunks are staged SEQUENTIALLY. Staging is an idempotent
+ *     upsert keyed on `(channel, target_epoch, subscriber)`, so
+ *     a chunk failure throws and the caller does NOT advance its
+ *     local rotation state — the next tick re-runs and re-stages
+ *     the already-staged chunks harmlessly before reaching the
+ *     ones that were missed (resumability).
+ *   - Commit runs only after every chunk has staged. It is the
+ *     single atomic point (C-42): subscribers see the old epoch
+ *     until it lands, then the new epoch with every staged
+ *     envelope already live — no torn rotation is observable,
+ *     because the epoch is bumped nowhere but in the commit.
+ *
+ * An empty batch stages nothing and commits directly — this
+ * still bumps the epoch (the "no subscribers yet" case where the
+ * publisher keeps rotating on schedule before the audience
+ * grows), matching the old single-shot `rotateChannel([])`.
+ */
+export async function stageAndCommitRotation(
+  channelIdHex: string,
+  targetEpoch: number,
+  batch: ReadonlyArray<RotateBatchEntry>,
+  apiBase?: string,
+): Promise<ChannelEpoch> {
+  for (let i = 0; i < batch.length; i += MAX_STAGE_CHUNK_ENTRIES) {
+    const chunk = batch.slice(i, i + MAX_STAGE_CHUNK_ENTRIES);
+    // Sequential await — a chunk failure aborts here and the
+    // caller's `saveState` never runs, so no partial rotation is
+    // committed (commit below is never reached).
+    await stageRotation(channelIdHex, targetEpoch, chunk, apiBase);
+  }
+  return commitRotation(channelIdHex, targetEpoch, apiBase);
 }
 
 /** Handle returned by `startRotationCron` — call `.stop()`

@@ -38,6 +38,14 @@ public final class ChannelsClient {
 
     public static let defaultBaseURL: String = "http://localhost:8090"
 
+    /// ADR-0030 — maximum entries a single `POST /rotate/stage`
+    /// chunk may carry, mirroring the server-side
+    /// `MAX_STAGE_CHUNK_ENTRIES`. The rotation fanout slices its
+    /// sealed envelope batch into chunks of at most this many
+    /// entries; a larger chunk is refused server-side with 413
+    /// `chunk-too-large`.
+    public static let maxStageChunkEntries: Int = 5000
+
     public let baseURL: String
     private let session: URLSession
     private let encoder: JSONEncoder
@@ -258,6 +266,78 @@ public final class ChannelsClient {
         let view: EpochView = try await postJson(
             endpoint: "/v1/channels/\(channelIdHex)/rotate",
             body: body
+        )
+        return view.epoch
+    }
+
+    // MARK: - Staged rotation (ADR-0030)
+
+    /// ADR-0030 (Sprint D2) — prepare phase of the chunked
+    /// staged-rotation fanout. Uploads a bounded chunk of the
+    /// next epoch's per-subscriber envelopes into the staging
+    /// area WITHOUT bumping the live epoch or serving them to
+    /// subscribers. Idempotent: re-posting a chunk is an upsert
+    /// keyed on `(channel, target_epoch, subscriber)`, so a
+    /// client that dropped mid-fanout simply re-sends the
+    /// missing chunks (resumability).
+    ///
+    /// A chunk MUST hold at most
+    /// ``ChannelsClient/maxStageChunkEntries`` entries — the
+    /// server rejects a larger chunk with 413 `chunk-too-large`.
+    /// Returns the number of envelopes accepted into the staging
+    /// area by this chunk (for progress tracking).
+    ///
+    /// Throws `ChannelsApiError`:
+    /// - `chunk-too-large`    (413) — over the entry cap
+    /// - `stale-target-epoch` (409) — target_epoch != current + 1
+    /// - `unknown-subscriber` (409) — a pubkey is not registered
+    /// - `unknown-channel`    (404) — no such channel
+    /// - `bad-envelope-len`   (400) — wrong wire length
+    /// - `bad-channel-id`     (400) — wrong channel-id shape
+    @discardableResult
+    public func stageRotation(
+        channelIdHex: String,
+        targetEpoch: UInt32,
+        batch: [RotateBatchEntry]
+    ) async throws -> Int {
+        struct Body: Encodable {
+            let target_epoch: UInt32
+            let envelopes: [RotateBatchEntry]
+        }
+        struct StageView: Decodable {
+            let target_epoch: UInt32
+            let staged: Int
+        }
+        let view: StageView = try await postJson(
+            endpoint: "/v1/channels/\(channelIdHex)/rotate/stage",
+            body: Body(target_epoch: targetEpoch, envelopes: batch)
+        )
+        return view.staged
+    }
+
+    /// ADR-0030 (Sprint D2) — commit phase, the single atomic
+    /// point. Promotes every envelope staged for `targetEpoch`
+    /// into the live set + bumps the epoch in ONE server
+    /// transaction (C-42 preserved: a subscriber sees the old
+    /// epoch until commit runs, then the new epoch with every
+    /// staged envelope already live — never a torn rotation).
+    /// The server re-verifies `targetEpoch == current + 1`, so a
+    /// replayed / out-of-order commit is refused. Returns the new
+    /// live epoch after the promotion.
+    ///
+    /// Throws `ChannelsApiError`:
+    /// - `stale-target-epoch` (409) — target_epoch != current + 1
+    /// - `unknown-channel`    (404) — no such channel
+    /// - `bad-channel-id`     (400) — wrong channel-id shape
+    public func commitRotation(
+        channelIdHex: String,
+        targetEpoch: UInt32
+    ) async throws -> UInt32 {
+        struct Body: Encodable { let target_epoch: UInt32 }
+        struct EpochView: Decodable { let epoch: UInt32 }
+        let view: EpochView = try await postJson(
+            endpoint: "/v1/channels/\(channelIdHex)/rotate/commit",
+            body: Body(target_epoch: targetEpoch)
         )
         return view.epoch
     }

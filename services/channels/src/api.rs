@@ -730,37 +730,30 @@ async fn rotate_channel(
 }
 
 /// Decode a rotation batch's wire entries into
-/// `(SubscriberId, raw envelope bytes)` pairs, returning a
-/// ready-to-send 400 [`Response`] on the first malformed
-/// entry. Keeps the "validate every entry before the store
-/// sees anything" property for the ADR-0030 stage path.
+/// `(SubscriberId, raw envelope bytes)` pairs, returning the
+/// [`ErrorResponse`] for a 400 on the first malformed entry
+/// (both failure modes are client errors). Keeps the
+/// "validate every entry before the store sees anything"
+/// property for the ADR-0030 stage path.
 fn decode_rotate_batch(
     entries: Vec<RotateBatchEntry>,
-) -> Result<Vec<(SubscriberId, Vec<u8>)>, Response> {
+) -> Result<Vec<(SubscriberId, Vec<u8>)>, ErrorResponse> {
     let mut batch: Vec<(SubscriberId, Vec<u8>)> = Vec::with_capacity(entries.len());
     for entry in entries {
         let Ok(sub) = SubscriberId::from_hex(&entry.subscriber_id) else {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                Json(err(
-                    "bad-subscriber-id",
-                    format!(
-                        "subscriber_id {:?} is not 64 hex chars",
-                        entry.subscriber_id
-                    ),
-                )),
-            )
-                .into_response());
+            return Err(err(
+                "bad-subscriber-id",
+                format!(
+                    "subscriber_id {:?} is not 64 hex chars",
+                    entry.subscriber_id
+                ),
+            ));
         };
         let Ok(env_bytes) = URL_SAFE_NO_PAD.decode(&entry.envelope_b64) else {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                Json(err(
-                    "bad-envelope-b64",
-                    "envelope_b64 must be valid base64url (no padding)",
-                )),
-            )
-                .into_response());
+            return Err(err(
+                "bad-envelope-b64",
+                "envelope_b64 must be valid base64url (no padding)",
+            ));
         };
         batch.push((sub, env_bytes));
     }
@@ -805,7 +798,7 @@ async fn rotate_stage(
     let staged = req.envelopes.len();
     let batch = match decode_rotate_batch(req.envelopes) {
         Ok(b) => b,
-        Err(resp) => return resp,
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(e)).into_response(),
     };
 
     match state
@@ -923,10 +916,7 @@ pub fn router(state: Arc<AppState>) -> Router {
             post(deliver_envelope).get(fetch_envelope),
         )
         .route("/v1/channels/{channel_id}/rotate", post(rotate_channel))
-        .route(
-            "/v1/channels/{channel_id}/rotate/stage",
-            post(rotate_stage),
-        )
+        .route("/v1/channels/{channel_id}/rotate/stage", post(rotate_stage))
         .route(
             "/v1/channels/{channel_id}/rotate/commit",
             post(rotate_commit),

@@ -363,3 +363,88 @@ export async function rotateChannel(
   }
   return (await resp.json()) as ChannelEpoch;
 }
+
+/** ADR-0030 — maximum entries a single `POST /rotate/stage`
+ *  chunk may carry. Kept in lock-step with the server's
+ *  `services/channels::api::MAX_STAGE_CHUNK_ENTRIES`; a chunk
+ *  over this is refused server-side with 413 `chunk-too-large`,
+ *  so the publisher splits its fanout into more chunks. */
+export const MAX_STAGE_CHUNK_ENTRIES = 5000;
+
+/** Response for `POST /v1/channels/:id/rotate/stage` — mirrors
+ *  `services/channels::api::StageResponse`. */
+export interface StageResult {
+  /** Echoed target epoch these staged envelopes become live
+   *  at once the publisher commits. */
+  readonly targetEpoch: number;
+  /** Number of envelopes this chunk accepted into the staging
+   *  area. Lets the publisher track fanout progress. */
+  readonly staged: number;
+}
+
+/** ADR-0030 prepare phase — stage a bounded, resumable,
+ *  idempotent chunk of the next epoch's envelopes WITHOUT
+ *  bumping the epoch or serving them to subscribers. The
+ *  publisher splits its full fanout into chunks of at most
+ *  [`MAX_STAGE_CHUNK_ENTRIES`] and calls this once per chunk;
+ *  re-sending a chunk is an idempotent upsert (keyed on
+ *  `(channel, target_epoch, subscriber)`), so a client that
+ *  dropped mid-fanout simply re-sends the missing chunks.
+ *
+ *  `targetEpoch` MUST equal `current_epoch + 1` — the server
+ *  refuses a stale / replayed target so a rotation cannot roll
+ *  the epoch back or skip.
+ *
+ *  Throws `ChannelApiError`:
+ *  - `chunk-too-large`    (413) — chunk over MAX_STAGE_CHUNK_ENTRIES
+ *  - `stale-target-epoch` (409) — targetEpoch != current + 1
+ *  - `unknown-subscriber` (409) — a pubkey is not registered
+ *  - `bad-envelope-len`   (400) — wrong wire length
+ *  - `unknown-channel`    (404) — no such channel
+ *  - `bad-channel-id`     (400) — wrong channel-id shape */
+export async function stageRotation(
+  channelIdHex: string,
+  targetEpoch: number,
+  envelopes: ReadonlyArray<RotateBatchEntry>,
+  base: string = DEFAULT_BASE,
+): Promise<StageResult> {
+  const url = `${base}/v1/channels/${channelIdHex}/rotate/stage`;
+  const resp = await fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ target_epoch: targetEpoch, envelopes }),
+  });
+  if (!resp.ok) {
+    throw await parseError(resp);
+  }
+  const body = (await resp.json()) as { target_epoch: number; staged: number };
+  return { targetEpoch: body.target_epoch, staged: body.staged };
+}
+
+/** ADR-0030 commit phase — the single atomic point. Once every
+ *  chunk is staged via [`stageRotation`], promote the staged
+ *  envelopes for `targetEpoch` into the live set + bump the
+ *  epoch in one server-side transaction (C-42: subscribers see
+ *  the old epoch until this runs, then the new epoch with every
+ *  staged envelope already live). Returns the new epoch.
+ *
+ *  Throws `ChannelApiError`:
+ *  - `stale-target-epoch` (409) — targetEpoch != current + 1
+ *  - `unknown-channel`    (404) — no such channel
+ *  - `bad-channel-id`     (400) — wrong channel-id shape */
+export async function commitRotation(
+  channelIdHex: string,
+  targetEpoch: number,
+  base: string = DEFAULT_BASE,
+): Promise<ChannelEpoch> {
+  const url = `${base}/v1/channels/${channelIdHex}/rotate/commit`;
+  const resp = await fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ target_epoch: targetEpoch }),
+  });
+  if (!resp.ok) {
+    throw await parseError(resp);
+  }
+  return (await resp.json()) as ChannelEpoch;
+}

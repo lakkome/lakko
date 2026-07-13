@@ -882,7 +882,10 @@ impl ChannelStore for InMemoryChannelStore {
             }
         }
         // Validations passed — upsert into the staging area.
-        let staged = guard.staged_envelopes.entry((channel, target_epoch)).or_default();
+        let staged = guard
+            .staged_envelopes
+            .entry((channel, target_epoch))
+            .or_default();
         for (sub, env) in batch {
             staged.insert(sub, env);
         }
@@ -1775,10 +1778,7 @@ mod tests {
     async fn stage_and_commit_reject_unknown_channel() {
         let s = InMemoryChannelStore::new();
         let c = cid(0x19);
-        let stage_err = s
-            .stage_envelopes(c, 1, vec![], 80)
-            .await
-            .unwrap_err();
+        let stage_err = s.stage_envelopes(c, 1, vec![], 80).await.unwrap_err();
         assert!(matches!(stage_err, StorageError::UnknownChannel));
         let commit_err = s.commit_rotation(c, 1).await.unwrap_err();
         assert!(matches!(commit_err, StorageError::UnknownChannel));

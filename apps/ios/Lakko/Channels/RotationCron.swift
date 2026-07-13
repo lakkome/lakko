@@ -14,9 +14,15 @@ import LakkoCore
 /// function. The orchestrator here decides _how_: it walks
 /// the subscriber list, reseals the new content seed for
 /// each subscriber via `sealSubscriberSeedEnvelope`, then
-/// POSTs the batch to `POST /v1/channels/:id/rotate`
-/// (atomic fanout, server commits or rejects the whole
-/// batch — see G4-4 / C-42).
+/// fans the batch out via the ADR-0030 chunked
+/// staged-rotation protocol: the sealed envelopes are
+/// uploaded in bounded chunks to a staging area
+/// (`POST /v1/channels/:id/rotate/stage`, epoch NOT bumped,
+/// staged rows never served), then a single atomic
+/// `POST /v1/channels/:id/rotate/commit` promotes them and
+/// bumps the epoch (C-42 preserved — the commit is the one
+/// atomic point, so a subscriber never observes a torn
+/// rotation).
 ///
 /// Two entry points:
 ///   - [`runOnce`] — single-pass; returns the new rotation
@@ -32,14 +38,19 @@ import LakkoCore
 /// state unchanged + does no network round-trip.
 ///
 /// **Failure semantics:**
-///   - If `listSubscribers` / `rotateChannel` throws, the
-///     state is NOT updated (so the next tick retries).
+///   - If `listSubscribers` / a `stageRotation` chunk /
+///     `commitRotation` throws, the local rotation state is
+///     NOT updated (so the next tick retries). Staging is
+///     idempotent, so re-running from the same local state
+///     just re-uploads any missing chunks; nothing is served
+///     to subscribers until commit, so a mid-fanout failure
+///     leaves the live epoch untouched (fail-closed, C-42).
 ///   - If a single envelope seal fails, the WHOLE batch is
 ///     aborted — same atomic posture the server enforces.
 ///     Partial fanouts would leave some subscribers on the
 ///     old seed + some on the new, which is worse than
 ///     retrying.
-///   - If `rotateChannel` succeeds but the local
+///   - If `commitRotation` succeeds but the local
 ///     `saveState` closure throws, the rotation is
 ///     committed server-side; the caller's storage is
 ///     stale and the next tick will trigger another
@@ -183,14 +194,35 @@ public actor RotationCron {
             )
         }
 
-        // 4. Post the atomic batch. Empty batch is allowed
-        //    and still bumps the epoch — covers the "no
-        //    subscribers yet" case where the publisher
-        //    wants to keep rotating on schedule before the
-        //    audience grows.
-        let committedEpoch = try await context.channelsClient.rotateChannel(
+        // 4. Fan the sealed batch out via the ADR-0030
+        //    chunked staged-rotation protocol. Stage the
+        //    envelopes in slices of at most
+        //    `maxStageChunkEntries` (the server rejects a
+        //    larger chunk with 413), each an idempotent
+        //    upsert into the staging area — the live epoch is
+        //    NOT bumped and staged rows are never served, so a
+        //    chunk that throws just means the next tick
+        //    re-stages from the same local state. Only after
+        //    every chunk is staged does the single atomic
+        //    commit promote them + bump the epoch (C-42: the
+        //    commit is the one atomic point). An empty batch
+        //    stages nothing and still commits, bumping the
+        //    epoch on schedule for a channel with no
+        //    subscribers yet.
+        let chunkSize = ChannelsClient.maxStageChunkEntries
+        var offset = 0
+        while offset < batch.count {
+            let end = min(offset + chunkSize, batch.count)
+            try await context.channelsClient.stageRotation(
+                channelIdHex: context.channelIdHex,
+                targetEpoch: newServerEpoch,
+                batch: Array(batch[offset..<end])
+            )
+            offset = end
+        }
+        let committedEpoch = try await context.channelsClient.commitRotation(
             channelIdHex: context.channelIdHex,
-            envelopes: batch
+            targetEpoch: newServerEpoch
         )
 
         // 5. Stamp the new state + persist.
