@@ -314,6 +314,7 @@ private struct SessionRoot: View {
                         account: account,
                         onOpenContacts: { destination = .contacts },
                         onOpenChats: { destination = .chats },
+                        onOpenChannels: { destination = .channels },
                         onOpenPasskeys: { destination = .passkeys },
                         onOpenDevices: { destination = .devices },
                         onOpenAntiCensorship: { destination = .antiCensorship },
@@ -336,6 +337,27 @@ private struct SessionRoot: View {
                             destination = .chat(groupIdHex: groupIdHex)
                         }
                     )
+                case .channels:
+                    // ADR-0010 — broadcast channels. `ChannelsRootScreen`
+                    // needs the canonical AccountIdentity (phrase) seed to
+                    // build the MLS PublisherGroup (same seed the chat +
+                    // devices surfaces read from `identitySecrets`). A
+                    // session restored from disk without a re-login has no
+                    // in-memory seed, so we surface a sign-in-again hint
+                    // rather than presenting a screen that cannot publish.
+                    if let seed = authRepository.identitySecrets?.accountIdentitySeed {
+                        ChannelsRootScreen(
+                            accountIdentitySeed: seed,
+                            onBack: { destination = .home }
+                        )
+                    } else {
+                        VStack(spacing: 16) {
+                            Text("Sign in again to use Channels.")
+                                .foregroundStyle(.secondary)
+                            Button("Back") { destination = .home }
+                        }
+                        .padding()
+                    }
                 case .chat(let groupIdHex):
                     NavigationStack {
                         ChatScreen(
@@ -402,6 +424,7 @@ private enum SessionDestination: Equatable {
     case home
     case contacts
     case chats
+    case channels
     case chat(groupIdHex: String)
     case passkeys
     case devices

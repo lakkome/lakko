@@ -70,6 +70,7 @@ export function AppShell(props: { children?: JSX.Element }): JSX.Element {
           Home
         </A>
         <A href={paths.contacts}>Contacts</A>
+        <A href={paths.channels}>Channels</A>
 
         <div class="nav-spacer" />
         <div class="nav-footer">

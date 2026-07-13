@@ -37,6 +37,7 @@ public fun HomeScreen(
     account: SessionAccount,
     onOpenContacts: () -> Unit,
     onOpenChats: () -> Unit,
+    onOpenChannels: () -> Unit,
     onOpenPasskeys: () -> Unit,
     onOpenDevices: () -> Unit,
     onOpenAntiCensorship: () -> Unit,
@@ -83,6 +84,17 @@ public fun HomeScreen(
             modifier = Modifier.fillMaxWidth(),
         ) {
             Text("Open chats")
+        }
+        Spacer(Modifier.height(8.dp))
+        // Phase 4 (ADR-0010) — broadcast channels. Tapping pushes
+        // `ChannelsRootScreen` via the SessionRoot destination
+        // toggle, threading the AccountIdentity (phrase) seed so a
+        // publisher can drive the MLS PublisherGroup.
+        OutlinedButton(
+            onClick = onOpenChannels,
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Text("Channels")
         }
         Spacer(Modifier.height(8.dp))
         // 2a2e — passkey management lives behind its own

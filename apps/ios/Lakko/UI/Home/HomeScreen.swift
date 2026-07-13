@@ -26,6 +26,7 @@ public struct HomeScreen: View {
     public let account: SessionAccount
     public var onOpenContacts: () -> Void
     public var onOpenChats: () -> Void
+    public var onOpenChannels: () -> Void
     public var onOpenPasskeys: () -> Void
     public var onOpenDevices: () -> Void
     public var onOpenAntiCensorship: () -> Void
@@ -36,6 +37,7 @@ public struct HomeScreen: View {
         account: SessionAccount,
         onOpenContacts: @escaping () -> Void = {},
         onOpenChats: @escaping () -> Void = {},
+        onOpenChannels: @escaping () -> Void = {},
         onOpenPasskeys: @escaping () -> Void = {},
         onOpenDevices: @escaping () -> Void = {},
         onOpenAntiCensorship: @escaping () -> Void = {},
@@ -45,6 +47,7 @@ public struct HomeScreen: View {
         self.account = account
         self.onOpenContacts = onOpenContacts
         self.onOpenChats = onOpenChats
+        self.onOpenChannels = onOpenChannels
         self.onOpenPasskeys = onOpenPasskeys
         self.onOpenDevices = onOpenDevices
         self.onOpenAntiCensorship = onOpenAntiCensorship
@@ -79,6 +82,17 @@ public struct HomeScreen: View {
 
             Button(action: onOpenChats) {
                 Text("Open chats")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.large)
+
+            // ADR-0010 — broadcast channels surface. Tapping pushes
+            // `ChannelsRootScreen` via the SessionRoot destination
+            // toggle, threaded with the session's AccountIdentity seed
+            // so the MLS PublisherGroup can be built.
+            Button(action: onOpenChannels) {
+                Text("Open channels")
                     .frame(maxWidth: .infinity)
             }
             .buttonStyle(.bordered)

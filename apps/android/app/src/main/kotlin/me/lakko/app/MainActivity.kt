@@ -44,6 +44,7 @@ import me.lakko.app.ui.auth.SignupViewModel
 import me.lakko.app.ui.chat.ChatListScreen
 import me.lakko.app.ui.chat.ChatScreen
 import me.lakko.app.ui.chat.ChatViewModel
+import me.lakko.app.ui.channels.ChannelsRootScreen
 import me.lakko.app.ui.contacts.ContactsScreen
 import me.lakko.app.ui.contacts.ContactsViewModel
 import me.lakko.app.ui.contacts.InviteLandingScreen
@@ -502,6 +503,7 @@ private fun SessionRoot(
             account = account,
             onOpenContacts = { destination = SessionDestination.Contacts },
             onOpenChats = { destination = SessionDestination.Chats },
+            onOpenChannels = { destination = SessionDestination.Channels },
             onOpenPasskeys = { destination = SessionDestination.Passkeys },
             onOpenDevices = { destination = SessionDestination.Devices },
             onOpenAntiCensorship = { destination = SessionDestination.AntiCensorship },
@@ -593,6 +595,24 @@ private fun SessionRoot(
             )
         }
 
+        SessionDestination.Channels -> {
+            // Phase 4 (ADR-0010) — broadcast channels. Threads the
+            // AccountIdentity (phrase) seed (ADR-0017) from the live
+            // IdentitySecrets so a publisher can rebuild the MLS
+            // PublisherGroup. In a live Session the secrets are always
+            // present (bootstrap ran on entry); the null guard is purely
+            // defensive and recomposes into Channels once they land.
+            val secrets = identitySecrets
+            if (secrets != null) {
+                ChannelsRootScreen(
+                    accountIdentitySeed = secrets.accountIdentitySeed,
+                    onBack = { destination = SessionDestination.Home },
+                )
+            } else {
+                LoadingScreen()
+            }
+        }
+
         SessionDestination.Passkeys -> {
             val passkeysVm: me.lakko.app.webauthn.PasskeysViewModel = viewModel(
                 factory = singletonViewModelFactory {
@@ -666,6 +686,9 @@ private sealed interface SessionDestination {
     data object Home : SessionDestination
     data object Contacts : SessionDestination
     data object Chats : SessionDestination
+
+    /** Phase 4 (ADR-0010) — broadcast channels surface. */
+    data object Channels : SessionDestination
     data class Chat(val groupIdHex: String) : SessionDestination
     data class InviteLanding(val slug: String) : SessionDestination
 

@@ -70,7 +70,13 @@ import me.lakko.app.channels.ChannelsComposerException
 import me.lakko.app.channels.ChannelsUiState
 import me.lakko.app.channels.CoPublisher
 import me.lakko.app.channels.PostView
+import me.lakko.app.channels.RotationCron
 import me.lakko.app.ds.DsClient
+import uniffi.lakko_ffi_uniffi.ChannelRotationState
+import uniffi.lakko_ffi_uniffi.Identity
+import uniffi.lakko_ffi_uniffi.PublisherGroup
+import uniffi.lakko_ffi_uniffi.channelRotationPolicyDefault
+import uniffi.lakko_ffi_uniffi.channelRotationStateAfterRotation
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -136,6 +142,10 @@ public fun ChannelsRootScreen(
      * `ChatRepository` already uses.
      */
     accountIdentitySeed: ByteArray,
+    /** Back to the host (the app Home surface). Wired into the list
+     *  screen's top-bar back arrow, matching the Contacts / Devices
+     *  navigation idiom so the Channels entry is not a dead-end. */
+    onBack: () -> Unit,
     state: ChannelsUiState = rememberChannelsUiState(),
     client: ChannelsClient = remember { ChannelsClient() },
 ) {
@@ -146,6 +156,7 @@ public fun ChannelsRootScreen(
             onCreate = { route = Route.New },
             onOpen = { route = Route.Detail(it) },
             onJoin = { route = Route.JoinCoPublisher },
+            onBack = onBack,
         )
         Route.New -> NewChannelScreen(
             state = state,
@@ -188,12 +199,18 @@ private fun ChannelsListScreen(
     onCreate: () -> Unit,
     onOpen: (String) -> Unit,
     onJoin: () -> Unit,
+    onBack: () -> Unit,
 ) {
     val channels by state.channels.collectAsState()
     Scaffold(
         topBar = {
             TopAppBar(
                 title = { Text("Channels", color = Theme.textPrimary) },
+                navigationIcon = {
+                    IconButton(onClick = onBack) {
+                        Icon(Icons.Default.ArrowBack, "Back", tint = Theme.textPrimary)
+                    }
+                },
                 actions = {
                     TextButton(onClick = onJoin) {
                         Text("Join", color = Theme.accent)
@@ -529,6 +546,28 @@ private fun ChannelDetailScreen(
             }
 
             if (keys != null) {
+                // Shared publisher-group handle for this channel. Rotation
+                // AND co-publisher management both mutate the SAME MLS group
+                // — `rotate()` advances the epoch DURABLY (persisted), so two
+                // live handles would diverge after a rotation. The Rust handle
+                // is Mutex-guarded, so the rotation heartbeat and the
+                // co-publisher poll loop share it safely (serialised). Opened
+                // once per channel; left to the UniFFI cleaner on dispose, the
+                // same posture the rest of this screen uses for MLS handles.
+                var pubIdentity by remember(channelId) { mutableStateOf<Identity?>(null) }
+                var pubGroup by remember(channelId) { mutableStateOf<PublisherGroup?>(null) }
+                var pubOpenError by remember(channelId) { mutableStateOf<String?>(null) }
+                LaunchedEffect(channelId) {
+                    try {
+                        val id = Identity.fromSeed(accountIdentitySeed)
+                        val pg = CoPublisher.openPublisherGroup(id, channelId)
+                        pubIdentity = id
+                        pubGroup = pg
+                    } catch (e: Throwable) {
+                        pubOpenError = "Could not open the channel group: ${e.message}"
+                    }
+                }
+
                 ComposerSection(
                     composeText = composeText,
                     onComposeChange = { composeText = it },
@@ -569,10 +608,19 @@ private fun ChannelDetailScreen(
                     state = state,
                     client = client,
                 )
+                RotationSection(
+                    channelIdHex = channelId,
+                    client = client,
+                    identity = pubIdentity,
+                    publisherGroup = pubGroup,
+                    openError = pubOpenError,
+                )
                 CoPublishersPanel(
                     channelId = channelId,
                     client = client,
-                    accountIdentitySeed = accountIdentitySeed,
+                    identity = pubIdentity,
+                    publisherGroup = pubGroup,
+                    openError = pubOpenError,
                 )
             } else {
                 SubscriberPlaceholderSection(onOpenSubscribe = onSubscribe)
@@ -1224,6 +1272,151 @@ private fun hexToBytesOrNull(hex: String): ByteArray? {
 }
 
 // ============================================================================
+// RotationSection — publisher-side content-key rotation (ADR-0010 / C-54)
+//   Activates the scheduled RotationCron heartbeat for a channel the local
+//   user publishes, plus a manual "Rotate now" control. Both drive the
+//   audited rotate + reseal-subscribers fanout (POST /v1/channels/:id/rotate).
+// ============================================================================
+
+/**
+ * Publisher-side rotation control. Started only when the shared publisher
+ * handle is open (invariant #4 — no rotation without a valid publisher
+ * handle + keys); cancelled when the section leaves the composition.
+ *
+ * The Rust core (`crates/lakko-channels/src/rotation_policy.rs`) owns the
+ * *when* via the pure `channelShouldRotate`; [RotationCron] owns the *how*
+ * (rotate the MLS epoch → reseal every subscriber → atomic `/rotate` fanout).
+ *
+ * **Genesis-state seeding is load-bearing.** The default policy is 24 h /
+ * 1000 posts, and `channelShouldRotate(default, {0,0}, now)` fires
+ * IMMEDIATELY against any real wall-clock now (the Rust doc mandates seeding
+ * with `after_rotation(now)` right after creating the group). We therefore
+ * seed the heartbeat state as "rotated just now", so an opened screen never
+ * triggers a spurious rotation + subscriber-reseal storm. Android has no
+ * persistent rotation-state store yet, so within a single session the
+ * scheduled trigger stays silent and "Rotate now" is the immediate control;
+ * a future persistence layer feeds a real historical last-rotation into
+ * `loadState` to drive true scheduled rotation.
+ */
+@Composable
+private fun RotationSection(
+    channelIdHex: String,
+    client: ChannelsClient,
+    identity: Identity?,
+    publisherGroup: PublisherGroup?,
+    openError: String?,
+) {
+    // Single cross-platform source of truth for the cadence.
+    val policy = remember { channelRotationPolicyDefault() }
+    var state by remember(channelIdHex) {
+        mutableStateOf(channelRotationStateAfterRotation(System.currentTimeMillis().toULong()))
+    }
+    var busy by remember { mutableStateOf(false) }
+    var status by remember { mutableStateOf<String?>(null) }
+    var error by remember { mutableStateOf<String?>(null) }
+    val scope = rememberCoroutineScope()
+
+    // Periodic rotation heartbeat — armed once the shared publisher handle is
+    // open, cancelled when this section leaves the composition. A no-op tick
+    // (policy says no) costs zero network round-trips.
+    DisposableEffect(identity, publisherGroup) {
+        val id = identity
+        val pg = publisherGroup
+        val job: Job? = if (id != null && pg != null) {
+            RotationCron(
+                publisherGroup = pg,
+                identity = id,
+                channelIdHex = channelIdHex,
+                channelsClient = client,
+                saveState = { next -> state = next },
+                onRotated = { epoch -> status = "Scheduled rotation — new server epoch $epoch." },
+            ).start(
+                scope = scope,
+                policy = policy,
+                loadState = { state },
+                onError = { e -> error = "Scheduled rotation failed: ${e.message}" },
+            )
+        } else {
+            null
+        }
+        onDispose { job?.cancel() }
+    }
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = Theme.surface),
+        shape = RoundedCornerShape(8.dp),
+    ) {
+        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Text(
+                "Content-key rotation",
+                color = Theme.textPrimary,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Text(
+                "Rotate the channel content key now — advances the MLS epoch and " +
+                    "reseals the new seed to every subscriber (backward secrecy).",
+                color = Theme.textSecondary,
+                fontSize = 12.sp,
+            )
+            Button(
+                onClick = {
+                    val id = identity
+                    val pg = publisherGroup
+                    if (busy || id == null || pg == null) return@Button
+                    busy = true
+                    error = null
+                    status = "Rotating…"
+                    scope.launch {
+                        try {
+                            val cron = RotationCron(
+                                publisherGroup = pg,
+                                identity = id,
+                                channelIdHex = channelIdHex,
+                                channelsClient = client,
+                                saveState = { next -> state = next },
+                            )
+                            // Force via the run-once path: a genesis {0,0} state
+                            // makes channelShouldRotate fire against any real
+                            // wall-clock now. runOnce rotates + reseals every
+                            // subscriber atomically, then returns a fresh
+                            // after_rotation(now) state we adopt as the new
+                            // heartbeat baseline.
+                            val result = cron.runOnce(
+                                policy = policy,
+                                state = ChannelRotationState(
+                                    lastRotationMs = 0uL,
+                                    postsSinceRotation = 0u,
+                                ),
+                                nowMs = System.currentTimeMillis().toULong(),
+                            )
+                            state = result.newState
+                            status = if (result.rotated) {
+                                "Rotated — new server epoch ${result.newEpoch}."
+                            } else {
+                                "No rotation needed."
+                            }
+                        } catch (e: Throwable) {
+                            error = "Rotate failed: ${e.message}"
+                        } finally {
+                            busy = false
+                        }
+                    }
+                },
+                enabled = !busy && publisherGroup != null,
+                colors = ButtonDefaults.buttonColors(containerColor = Theme.accent),
+            ) {
+                Text(if (busy) "Rotating…" else "Rotate now", color = Color.White)
+            }
+            status?.let { Text(it, color = Theme.textSecondary, fontSize = 12.sp) }
+            (openError ?: error)?.let {
+                Text(it, color = Theme.destructive, fontSize = 12.sp)
+            }
+        }
+    }
+}
+
+// ============================================================================
 // CoPublishersPanel — owner-side co-publisher management (ADR-0028 OQ3)
 // ============================================================================
 
@@ -1238,12 +1431,10 @@ private fun hexToBytesOrNull(hex: String): ByteArray? {
 private fun CoPublishersPanel(
     channelId: String,
     client: ChannelsClient,
-    accountIdentitySeed: ByteArray,
+    identity: Identity?,
+    publisherGroup: PublisherGroup?,
+    openError: String?,
 ) {
-    var identity by remember { mutableStateOf<uniffi.lakko_ffi_uniffi.Identity?>(null) }
-    var publisherGroup by remember {
-        mutableStateOf<uniffi.lakko_ffi_uniffi.PublisherGroup?>(null)
-    }
     var link by remember { mutableStateOf<String?>(null) }
     var pending by remember { mutableStateOf<List<ByteArray>>(emptyList()) }
     var busy by remember { mutableStateOf(false) }
@@ -1251,26 +1442,19 @@ private fun CoPublishersPanel(
     val ds = remember { DsClient() }
     val scope = rememberCoroutineScope()
 
-    LaunchedEffect(channelId) {
-        try {
-            val id = uniffi.lakko_ffi_uniffi.Identity.fromSeed(accountIdentitySeed)
-            val pg = CoPublisher.openPublisherGroup(id, channelId)
-            identity = id
-            publisherGroup = pg
-        } catch (e: Throwable) {
-            error = "Could not open the channel group: ${e.message}"
-            return@LaunchedEffect
-        }
+    // Poll the channel's PublisherGroup journal for incoming co-publisher
+    // external-join requests using the SHARED handle the parent owns (see
+    // ChannelDetailScreen). Runs once the handle is open; re-armed if the
+    // handle re-opens.
+    LaunchedEffect(publisherGroup) {
+        val id = identity ?: return@LaunchedEffect
+        val pg = publisherGroup ?: return@LaunchedEffect
         while (true) {
-            val id = identity
-            val pg = publisherGroup
-            if (id != null && pg != null) {
-                try {
-                    CoPublisher.pollJournal(ds, id, pg)
-                    pending = CoPublisher.pending(pg)
-                } catch (_: Throwable) {
-                    // best-effort — keep the last good pending list
-                }
+            try {
+                CoPublisher.pollJournal(ds, id, pg)
+                pending = CoPublisher.pending(pg)
+            } catch (_: Throwable) {
+                // best-effort — keep the last good pending list
             }
             delay(5_000L)
         }
@@ -1377,7 +1561,7 @@ private fun CoPublishersPanel(
                 }
             }
 
-            error?.let {
+            (openError ?: error)?.let {
                 Text(it, color = Theme.destructive, fontSize = 12.sp)
             }
         }
