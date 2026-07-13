@@ -85,6 +85,11 @@ export interface SfuCallUiHandle {
   /** Switch the published camera to a specific `deviceId` mid-call (a no-op
    *  while the group call is audio-only). */
   switchVideoInput(deviceId: string): Promise<void>;
+  /** Rotate the call key on a mid-call MLS epoch change (G-18, ADR-0029).
+   *  The caller re-derives the per-call seed at the new epoch and passes it;
+   *  every attached SFrame transform retains its previous key for the overlap
+   *  window so in-flight frames still open, then drops it. No-op if unchanged. */
+  rekey(newSeed: Uint8Array): void;
 }
 
 const PEER_PREFIX = "peer-";
@@ -248,5 +253,6 @@ export function createSfuCallUi(
       session.switchAudioInput(deviceId),
     switchVideoInput: (deviceId): Promise<void> =>
       session.switchVideoInput(deviceId),
+    rekey: (newSeed): void => session.rekey(newSeed),
   };
 }

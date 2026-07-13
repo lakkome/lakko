@@ -49,6 +49,12 @@ export interface SFrameTransformOptions {
   /** `"encrypt"` for a sender stream, `"decrypt"` for a receiver. */
   readonly operation: SFrameOperation;
   /**
+   * Unique id for this transform, assigned by the attach helper. The
+   * worker keys its per-transform state on it so a mid-call `rekey`
+   * message can target the right stream (G-18, ADR-0029).
+   */
+  readonly id: string;
+  /**
    * 32-byte per-call seed — the MLS exporter output
    * `Group.exportSecret("lakko/call/v1", callId, 32)`. Identical on
    * every participant in the same MLS epoch.
@@ -110,14 +116,17 @@ function refuseIfUnsupported(): void {
 export function attachSenderSFrame(
   sender: RTCRtpSender,
   opts: { readonly seed: Uint8Array; readonly localLeaf: number },
-): void {
+): string {
   refuseIfUnsupported();
+  const id = crypto.randomUUID();
   const options: SFrameTransformOptions = {
     operation: "encrypt",
+    id,
     seed: opts.seed,
     localLeaf: opts.localLeaf,
   };
   sender.transform = new RTCRtpScriptTransform(transformWorker(), options);
+  return id;
 }
 
 /**
@@ -131,13 +140,42 @@ export function attachSenderSFrame(
 export function attachReceiverSFrame(
   receiver: RTCRtpReceiver,
   opts: { readonly seed: Uint8Array },
-): void {
+): string {
   refuseIfUnsupported();
+  const id = crypto.randomUUID();
   const options: SFrameTransformOptions = {
     operation: "decrypt",
+    id,
     seed: opts.seed,
   };
   receiver.transform = new RTCRtpScriptTransform(transformWorker(), options);
+  return id;
+}
+
+/** Default SFrame overlap window in ms — mirrors `OVERLAP_DEFAULT_MS` in the
+ *  Rust core (ADR-0008 / ADR-0029). */
+const SFRAME_OVERLAP_MS = 1000;
+
+/**
+ * Rotate a previously-attached transform's call key on a mid-call MLS epoch
+ * change (G-18, ADR-0029). The worker retains the previous key for the overlap
+ * window so in-flight frames sealed under the old epoch still open, then drops
+ * it. `id` is the value returned by `attachSenderSFrame` /
+ * `attachReceiverSFrame`. No-op if the SFrame worker was never started.
+ */
+export function rekeySFrame(
+  id: string,
+  seed: Uint8Array,
+  overlapMs = SFRAME_OVERLAP_MS,
+): void {
+  if (sharedWorker === null) return;
+  sharedWorker.postMessage({
+    type: "rekey",
+    id,
+    seed,
+    nowMs: Date.now(),
+    overlapMs,
+  });
 }
 
 /**

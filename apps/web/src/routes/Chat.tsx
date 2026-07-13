@@ -417,6 +417,11 @@ function ChatView(props: {
   // `sfuActive` gates the in-call overlay (the SFU path leaves the 1×1
   // `callState()` at `idle`).
   const [sfuHandle, setSfuHandle] = createSignal<SfuCallUiHandle | null>(null);
+  // G-18 / ADR-0029 — the active SFU call's per-call id, retained so a mid-call
+  // epoch advance can re-derive the call seed at the NEW epoch. Set when a group
+  // call starts; read only while `sfuHandle()` is live (a stale value after the
+  // call ends is harmless — the rekey effect guards on the live handle).
+  let activeCallId: Uint8Array | null = null;
   const [sfuActive, setSfuActive] = createSignal(false);
   createEffect(() => {
     const el = audioRef();
@@ -842,6 +847,7 @@ function ChatView(props: {
         },
         { localDisplayName: "You", safetyNumber, resolveDisplayName },
       );
+      activeCallId = callIdBytes;
       setSfuHandle(handle);
       setSfuActive(true);
       await handle.connect();
@@ -1077,6 +1083,32 @@ function ChatView(props: {
       }));
     },
   );
+
+  // G-18 / ADR-0029 — mid-call call-key rotation. When the group's MLS epoch
+  // advances during a live SFU call (`membersVersion` bumps after the receive
+  // loop / add / remove / external-join applies a commit), re-derive the
+  // per-call seed at the NEW epoch and rekey every attached SFrame transform.
+  // The worker keeps the previous key for the overlap window so in-flight
+  // frames sealed under the old epoch still open, then drops it (forward
+  // secrecy). Fail-closed: a derivation failure leaves the call on the current
+  // seed — never a downgrade.
+  createEffect(() => {
+    membersVersion(); // reactive dep — fires on every epoch advance
+    const handle = sfuHandle();
+    const id = chats.identity();
+    if (handle === null || activeCallId === null || id === null) return;
+    try {
+      const newSeed = props.entry.group.exportSecret(
+        id,
+        "lakko/call/v1",
+        activeCallId,
+        32,
+      );
+      handle.rekey(newSeed);
+    } catch {
+      // Best-effort — keep the current seed on a re-derivation failure.
+    }
+  });
 
   // ADR-0022 — the local member's role in this group ("owner" / "admin" /
   // "member"), or `null` for an open / legacy group with no role table. Drives

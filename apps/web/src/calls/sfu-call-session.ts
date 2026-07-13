@@ -75,6 +75,7 @@ import {
 import {
   attachReceiverSFrame,
   attachSenderSFrame,
+  rekeySFrame,
   isSFrameTransformSupported,
 } from "./sframe-transform";
 import { trackConstraint } from "./call-session";
@@ -169,6 +170,16 @@ const DEFAULT_ICE_SERVERS: readonly RTCIceServer[] = [
  * One instance per active SFU call. Construct, then `connect()`. Tear
  * down with `hangUp()` (idempotent).
  */
+/** Constant-time-agnostic byte compare — used only to skip a no-op rekey
+ *  (identical seeds), never on a secret-vs-attacker path. */
+function seedsEqual(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i += 1) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
+}
+
 export class SfuCallSession {
   private state: SfuCallState = "idle";
   private pc: RTCPeerConnection | null = null;
@@ -181,10 +192,36 @@ export class SfuCallSession {
   private offerQueue: string[] = [];
   private drainingOffers = false;
 
+  /** Ids of every attached SFrame transform (senders + receivers), so a
+   *  mid-call rekey can target them all (G-18, ADR-0029). */
+  private readonly transformIds = new Set<string>();
+  /** Call-key seed of the CURRENT MLS epoch. Starts at `config.seed` and
+   *  advances on `rekey` so a late-arriving receiver attaches at the current
+   *  epoch. */
+  private activeSeed: Uint8Array;
+
   constructor(
     private readonly config: SfuCallConfig,
     private readonly callbacks: SfuCallCallbacks = {},
-  ) {}
+  ) {
+    this.activeSeed = config.seed;
+  }
+
+  /**
+   * Rotate the call key on a mid-call MLS epoch change (G-18, ADR-0029). The
+   * caller re-derives `newSeed = group.exportSecret("lakko/call/v1", callId,
+   * 32)` after processing a commit that advanced the epoch and passes it here;
+   * every attached transform retains its previous key for the overlap window
+   * so in-flight frames still open, then drops it. Late-arriving receivers
+   * attach at the new epoch. No-op if the seed is unchanged.
+   */
+  rekey(newSeed: Uint8Array): void {
+    if (seedsEqual(this.activeSeed, newSeed)) return;
+    this.activeSeed = newSeed;
+    for (const id of this.transformIds) {
+      rekeySFrame(id, newSeed);
+    }
+  }
 
   /** Current lifecycle phase. */
   getState(): SfuCallState {
@@ -374,6 +411,7 @@ export class SfuCallSession {
       this.localStream = null;
     }
     this.offerQueue = [];
+    this.transformIds.clear();
   }
 
   // -----------------------------------------------------------------
@@ -407,10 +445,12 @@ export class SfuCallSession {
     // built (the same sequencing the native shim follows).
     for (const track of stream.getTracks()) {
       const sender = pc.addTrack(track, stream);
-      attachSenderSFrame(sender, {
-        seed: this.config.seed,
-        localLeaf: this.config.localLeaf,
-      });
+      this.transformIds.add(
+        attachSenderSFrame(sender, {
+          seed: this.activeSeed,
+          localLeaf: this.config.localLeaf,
+        }),
+      );
     }
 
     pc.onicecandidate = (ev): void => {
@@ -428,7 +468,9 @@ export class SfuCallSession {
       const remoteStream = stream0 ?? new MediaStream([ev.track]);
       // Decrypt incoming media; the worker reads the per-frame KID to
       // pick the right per-sender key, so one seed serves every sender.
-      attachReceiverSFrame(ev.receiver, { seed: this.config.seed });
+      this.transformIds.add(
+        attachReceiverSFrame(ev.receiver, { seed: this.activeSeed }),
+      );
       this.callbacks.onRemoteTrack?.({
         streamId: remoteStream.id,
         track: ev.track,
