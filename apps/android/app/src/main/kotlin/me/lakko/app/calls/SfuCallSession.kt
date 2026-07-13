@@ -5,6 +5,7 @@ package me.lakko.app.calls
 
 import android.content.Context
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import me.lakko.sframe.SFrameAvailability
 import org.webrtc.PeerConnection
@@ -110,6 +111,16 @@ class SfuCallSession(
     private var drainingOffers = false
 
     /**
+     * Call-key seed of the CURRENT MLS epoch (G-18, ADR-0029). Starts at
+     * [Config.seed] and advances on [rekey], so a late-arriving receiver
+     * arms its SFrame decryptor at the current epoch. `@Volatile` because
+     * [rekey] writes it on [scope] while [peerDelegate]'s `onRemoteReceiver`
+     * reads it on a libwebrtc thread.
+     */
+    @Volatile
+    private var activeSeed: ByteArray = config.seed
+
+    /**
      * Open the SFU connection, publish the local audio (SFrame-sealed),
      * and start subscribing. Throws before any media capture if the
      * SFrame shim is unavailable (invariant #4).
@@ -146,6 +157,37 @@ class SfuCallSession(
     /** Mute / unmute the local microphone (local-only track gate). */
     fun setMicrophoneEnabled(on: Boolean) {
         pc?.setMicrophoneEnabled(on)
+    }
+
+    /**
+     * Rotate the call key on a mid-call MLS epoch change (G-18, ADR-0029).
+     * The caller re-derives `newSeed = group.exportSecret("lakko/call/v1",
+     * callId, 32)` after processing a commit that advanced the epoch and
+     * passes it here; every installed SFrame encryptor swaps its seal key
+     * and every decryptor retains its previous epoch's key for the overlap
+     * window so in-flight frames still open, then the window is pruned.
+     * Late-arriving receivers arm at the new epoch ([activeSeed]).
+     *
+     * No-op if the seed is unchanged (the common per-poll case) or the call
+     * is torn down. Fail-closed: a rekey failure keeps the current key —
+     * never plaintext (security invariant #4).
+     */
+    fun rekey(newSeed: ByteArray) {
+        if (newSeed.contentEquals(activeSeed)) return
+        val connection = pc ?: return
+        // Advance the active epoch BEFORE fanning out so a receiver that
+        // arrives concurrently arms at the new epoch.
+        activeSeed = newSeed
+        connection.rekeySFrame(newSeed, System.currentTimeMillis(), OVERLAP_MS)
+        // Close the overlap window once it has elapsed (drop the previous
+        // key -> full seed-boundary forward secrecy, C-9 / C-10). Mirrors
+        // the web worker's `overlapMs + 200` prune schedule. A second rekey
+        // inside the window schedules its own prune; the ring only ever
+        // retains the most-recent previous key, so an early prune is safe.
+        scope.launch {
+            delay(OVERLAP_MS + PRUNE_MARGIN_MS)
+            pc?.pruneSFrameDecryptors(System.currentTimeMillis())
+        }
     }
 
     /** Tear down. Idempotent. */
@@ -339,8 +381,11 @@ class SfuCallSession(
                 // Arm the SFrame decryptor on every incoming track
                 // (audio + video) — invariant #4. Synchronous so the
                 // first frames are not dropped while a hop is pending;
-                // `pc` is set before any track can arrive.
-                pc?.armSFrameDecryptor(receiver, config.seed)
+                // `pc` is set before any track can arrive. Arms at the
+                // CURRENT epoch (`activeSeed`, G-18/ADR-0029) so a receiver
+                // that arrives after a mid-call rekey opens frames sealed
+                // under the new epoch.
+                pc?.armSFrameDecryptor(receiver, activeSeed)
             },
         )
 
@@ -367,5 +412,15 @@ class SfuCallSession(
         if (state == State.FAILED || state == State.CLOSED) return
         setState(State.FAILED)
         hangUp()
+    }
+
+    private companion object {
+        /** SFrame overlap window in ms — mirrors the web `SFRAME_OVERLAP_MS`
+         *  and the Rust core `OVERLAP_DEFAULT_MS` (ADR-0008 / ADR-0029). */
+        const val OVERLAP_MS = 1000L
+
+        /** Extra margin before pruning so the window fully elapses on the
+         *  media threads (mirrors the web worker's `overlapMs + 200`). */
+        const val PRUNE_MARGIN_MS = 200L
     }
 }

@@ -115,6 +115,27 @@ public class ChatViewModel(
                     scheduleReadReceipt(highestMessageIdFor(repoState))
                 }
         }
+        // G-18 / ADR-0029 — mid-call call-key rotation. While an SFU group
+        // call is live, re-derive the per-call seed on each repo emission
+        // (an emission follows every poll that may have applied an
+        // epoch-advancing commit — add / remove / update) and rekey the
+        // call. `SfuCallUi.rekey` no-ops when the seed is unchanged, so this
+        // only rotates on an actual epoch advance; the decryptors keep the
+        // previous key for the overlap window so in-flight frames still
+        // open, then drop it (forward secrecy). Fail-closed: a null
+        // derivation keeps the current seed — never a downgrade (invariant
+        // #4). The body returns immediately when no SFU call is live, so
+        // there is no exporter cost outside a call.
+        viewModelScope.launch {
+            repo.state.collect {
+                val handle = mutableActiveSfuCall.value ?: return@collect
+                val callId = activeSfuCallId ?: return@collect
+                val key = repo.deriveCallKey(groupIdHex = groupIdHex, callId = callId)
+                if (key != null) {
+                    handle.rekey(key.seed)
+                }
+            }
+        }
         // Phase 3a10 — attach a call-signaling sink to the
         // repository. The closure runs on whatever
         // dispatcher the per-record poll loop uses; we hop
@@ -226,6 +247,13 @@ public class ChatViewModel(
      *  E2EE). The Compose overlay observes this while [activeSfuCall] is
      *  non-null. Reused across calls. */
     public val sfuCallUiState: CallUiState = CallUiState()
+
+    /** G-18 / ADR-0029 — the raw call-id of the active SFU group call, held
+     *  so the mid-call rekey trigger can re-derive the per-call seed at the
+     *  new MLS epoch (`exportSecret("lakko/call/v1", callId, 32)`). `null`
+     *  when no SFU call is live. Read only while [activeSfuCall] is
+     *  non-null. */
+    private var activeSfuCallId: ByteArray? = null
 
     /** `true` when this chat has >2 MLS members — the call button then
      *  routes through the SFU group-call path; a 2-member chat stays on
@@ -626,12 +654,18 @@ public class ChatViewModel(
                     ui = sfuCallUiState,
                     resolveDisplayName = resolveDisplayName,
                 )
+                // G-18 / ADR-0029 — retain the call-id BEFORE the handle
+                // goes live so the mid-call rekey collector (which guards on
+                // `activeSfuCall != null`) can re-derive the seed at a new
+                // epoch.
+                activeSfuCallId = callIdBytes
                 mutableActiveSfuCall.value = handle
                 handle.connect()
             } catch (cause: Throwable) {
                 android.util.Log.w("ChatViewModel", "startGroupCall failed", cause)
                 mutableActiveSfuCall.value?.hangUp()
                 mutableActiveSfuCall.value = null
+                activeSfuCallId = null
                 sfuCallUiState.setPhase(CallUiState.CallPhase.Ended(System.currentTimeMillis()))
             } finally {
                 jwt.close()
@@ -643,6 +677,7 @@ public class ChatViewModel(
     public fun hangUpGroupCall() {
         mutableActiveSfuCall.value?.hangUp()
         mutableActiveSfuCall.value = null
+        activeSfuCallId = null
     }
 
     private fun makeSession(callId: ByteArray): CallSession =

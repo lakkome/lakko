@@ -104,6 +104,37 @@ Java_me_lakko_sframe_LakkoFrameEncryptor_00024Companion_nativeRelease(
     enc->Release();
 }
 
+// Mid-call rekey (G-18, ADR-0029). Swap the encryptor's seal key to the
+// new MLS epoch's `seed`, keeping the same local leaf. Returns JNI_FALSE
+// on a bad seed length / HKDF failure or a null pointer — the C++ side
+// then retains the current key (the caller keeps sealing under it, never
+// plaintext, invariant #4). Thread-safe against a concurrent Encrypt on
+// the codec thread (the bridge guards the seal key with a mutex).
+JNIEXPORT jboolean JNICALL
+Java_me_lakko_sframe_LakkoFrameEncryptor_00024Companion_nativeRekey(
+    JNIEnv* env,
+    jobject /*thiz*/,
+    jlong native_ptr,
+    jbyteArray seed) {
+    if (native_ptr == 0 || seed == nullptr) {
+        return JNI_FALSE;
+    }
+    const jsize seed_len = env->GetArrayLength(seed);
+    if (seed_len <= 0) {
+        return JNI_FALSE;
+    }
+    jbyte* seed_bytes = env->GetByteArrayElements(seed, /*isCopy=*/nullptr);
+    if (seed_bytes == nullptr) {
+        return JNI_FALSE;
+    }
+    auto* enc = reinterpret_cast<lakko::sframe::LakkoFrameEncryptor*>(native_ptr);
+    const bool ok = enc->Rekey(
+        reinterpret_cast<const uint8_t*>(seed_bytes),
+        static_cast<std::size_t>(seed_len));
+    env->ReleaseByteArrayElements(seed, seed_bytes, JNI_ABORT);
+    return ok ? JNI_TRUE : JNI_FALSE;
+}
+
 // ---------------------------------------------------------------
 // LakkoFrameDecryptor
 // ---------------------------------------------------------------
@@ -149,6 +180,57 @@ Java_me_lakko_sframe_LakkoFrameDecryptor_00024Companion_nativeRelease(
     }
     auto* dec = reinterpret_cast<lakko::sframe::LakkoFrameDecryptor*>(native_ptr);
     dec->Release();
+}
+
+// Mid-call rekey (G-18, ADR-0029). Rotate the decryptor's call-key ring
+// to the new MLS epoch's `seed`, retaining the previous epoch's key until
+// `now_ms + clamp(overlap_ms)` so in-flight frames sealed under the old
+// epoch still open. Returns JNI_FALSE on a bad seed length / null pointer
+// (the ring keeps its current + previous keys). Thread-safe (the Rust
+// ring is Mutex-guarded internally).
+JNIEXPORT jboolean JNICALL
+Java_me_lakko_sframe_LakkoFrameDecryptor_00024Companion_nativeRekey(
+    JNIEnv* env,
+    jobject /*thiz*/,
+    jlong native_ptr,
+    jbyteArray seed,
+    jlong now_ms,
+    jlong overlap_ms) {
+    if (native_ptr == 0 || seed == nullptr) {
+        return JNI_FALSE;
+    }
+    const jsize seed_len = env->GetArrayLength(seed);
+    if (seed_len <= 0) {
+        return JNI_FALSE;
+    }
+    jbyte* seed_bytes = env->GetByteArrayElements(seed, /*isCopy=*/nullptr);
+    if (seed_bytes == nullptr) {
+        return JNI_FALSE;
+    }
+    auto* dec = reinterpret_cast<lakko::sframe::LakkoFrameDecryptor*>(native_ptr);
+    const bool ok = dec->Rekey(
+        reinterpret_cast<const uint8_t*>(seed_bytes),
+        static_cast<std::size_t>(seed_len),
+        static_cast<uint64_t>(now_ms),
+        static_cast<uint64_t>(overlap_ms));
+    env->ReleaseByteArrayElements(seed, seed_bytes, JNI_ABORT);
+    return ok ? JNI_TRUE : JNI_FALSE;
+}
+
+// Close the overlap window (G-18, ADR-0029): drop the retained previous
+// key once it has expired at `now_ms`, restoring seed-boundary forward
+// secrecy. A null pointer is a no-op.
+JNIEXPORT void JNICALL
+Java_me_lakko_sframe_LakkoFrameDecryptor_00024Companion_nativePrune(
+    JNIEnv* /*env*/,
+    jobject /*thiz*/,
+    jlong native_ptr,
+    jlong now_ms) {
+    if (native_ptr == 0) {
+        return;
+    }
+    auto* dec = reinterpret_cast<lakko::sframe::LakkoFrameDecryptor*>(native_ptr);
+    dec->Prune(static_cast<uint64_t>(now_ms));
 }
 
 }  // extern "C"

@@ -371,6 +371,12 @@ public final class ChatViewModel: ObservableObject {
     /// `CallUiState` are app-module types consumed by `ChatScreen`.
     let sfuCallUiState = CallUiState()
 
+    /// G-18 / ADR-0029 — the `call_id` of the active SFU group call,
+    /// retained so a mid-call MLS epoch change can re-derive the per-call
+    /// seed with the SAME call_id (the exporter context) at the new
+    /// epoch. Set in `startGroupCall`, cleared in `hangUpGroupCall`.
+    private var activeGroupCallId: Data?
+
     /// `true` when this chat has >2 MLS members — the call button then
     /// routes through the SFU group-call path; a 2-member chat stays on
     /// the 1×1 P2P `CallSession`. `nil` member count (no handle) reads
@@ -400,6 +406,9 @@ public final class ChatViewModel: ObservableObject {
             NSLog("startGroupCall: call-key derivation failed — refusing per invariant #4")
             return
         }
+        // G-18 / ADR-0029 — retain the call_id so a mid-call epoch change
+        // re-derives the seed with the same exporter context.
+        activeGroupCallId = callIdBytes
         let jwt = CallJwtClient()
         jwt.setSessionToken(token)
         Task { @MainActor in
@@ -453,6 +462,7 @@ public final class ChatViewModel: ObservableObject {
                 NSLog("startGroupCall failed: %@", error.localizedDescription)
                 activeSfuCall?.hangUp()
                 activeSfuCall = nil
+                activeGroupCallId = nil
             }
         }
     }
@@ -461,6 +471,31 @@ public final class ChatViewModel: ObservableObject {
     func hangUpGroupCall() {
         activeSfuCall?.hangUp()
         activeSfuCall = nil
+        activeGroupCallId = nil
+    }
+
+    /// G-18 / ADR-0029 — mid-call call-key rotation. When the group's MLS
+    /// epoch advances during a live SFU group call (a member added /
+    /// removed, or an Update commit), the per-call SFrame seed changes;
+    /// re-derive it at the NEW epoch (same call_id) and rekey every
+    /// attached SFrame transform. The decryptor keeps the previous key
+    /// for the overlap window so in-flight frames sealed under the old
+    /// epoch still open, then drops it (forward secrecy). The rekey
+    /// itself is a no-op when the seed is unchanged (`SfuCallSession`
+    /// guards on it), so this is cheap to call after every poll / roster
+    /// refresh. Fail-closed: a derivation failure keeps the current seed
+    /// — never a downgrade to plaintext (invariant #4). Mirrors the web
+    /// `membersVersion`-driven rekey effect in `routes/Chat.tsx`.
+    private func maybeRekeyActiveGroupCall() {
+        guard let handle = activeSfuCall, let callId = activeGroupCallId else {
+            return
+        }
+        guard let key = repository.deriveCallKey(groupIdHex: groupIdHex, callId: callId) else {
+            // Best-effort — keep the current seed on a re-derivation
+            // failure (fail-closed, invariant #4).
+            return
+        }
+        handle.rekey(newSeed: key.seed)
     }
 
     // MARK: - Group membership actions (A4)
@@ -485,6 +520,11 @@ public final class ChatViewModel: ObservableObject {
         // roster (the retained set is the source of truth).
         pendingJoins = repository.pendingExternalJoins(groupIdHex: groupIdHex)
         refreshJoinAttributions()
+        // G-18 / ADR-0029 — a roster refresh follows every local
+        // membership commit (add / remove / role / approve), any of which
+        // advances the epoch. Rekey the active SFU call to the new epoch
+        // (a no-op when the seed is unchanged, e.g. a panel-open refresh).
+        maybeRekeyActiveGroupCall()
     }
 
     /// ADR-0028 OQ2 (G-3) — refresh the advisory join-attribution map for the
@@ -1328,6 +1368,11 @@ public final class ChatViewModel: ObservableObject {
         } catch {
             // best-effort
         }
+        // G-18 / ADR-0029 — a poll may have applied a REMOTE commit that
+        // advanced the epoch during a live SFU call. Re-derive + rekey to
+        // the current epoch (a no-op when the seed is unchanged). This is
+        // the iOS analog of the web `membersVersion`-driven rekey effect.
+        maybeRekeyActiveGroupCall()
     }
 
     /// DS long-poll budget — same value as

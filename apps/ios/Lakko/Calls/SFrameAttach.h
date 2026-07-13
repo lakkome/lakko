@@ -121,6 +121,46 @@ typedef NS_ENUM(NSInteger, LakkoSFrameAttachStatus) {
                                                   seed:(NSData *_Nullable)seed
     NS_SWIFT_NAME(attachDecryptor(toReceiver:seed:));
 
+/// Mid-call rekey (G-18, ADR-0029) — rotate the encryptor attached to
+/// `sender` to the new MLS epoch's 32-byte `seed`, keeping the SAME
+/// local leaf. The encryptor seals only under the CURRENT epoch, so a
+/// rekey is a straight key swap (no overlap on the send side — already-
+/// sealed frames are already bytes in libwebrtc's pipeline).
+///
+/// Returns `YES` on success, and also `YES` when the sender was never
+/// SFrame-armed (a benign no-op). Returns `NO` only when the encryptor
+/// is present but the rotation failed (bad seed length / HKDF): the
+/// bridge then RETAINS the current epoch's key, so media stays E2EE —
+/// never plaintext (invariant #4). The caller keeps the call up and
+/// logs; a rekey failure is an availability event, not a downgrade.
++ (BOOL)rekeyEncryptorOnSender:(RTCRtpSender * _Nullable)sender
+                          seed:(NSData * _Nullable)seed
+    NS_SWIFT_NAME(rekeyEncryptor(onSender:seed:));
+
+/// Mid-call rekey (G-18, ADR-0029) — rotate the decryptor attached to
+/// `receiver` to the new MLS epoch's 32-byte `seed`, retaining the
+/// PREVIOUS key until `nowMs + clamp(overlapMs)` so in-flight frames
+/// sealed under the old epoch still open. `pruneDecryptorOnReceiver:`
+/// drops the retained key once the window elapses.
+///
+/// Same return contract as [+rekeyEncryptorOnSender:seed:]: `YES` on
+/// success or a no-op (receiver never armed); `NO` only when a present
+/// decryptor's rotation failed (the ring keeps its current + previous
+/// keys — still E2EE).
++ (BOOL)rekeyDecryptorOnReceiver:(RTCRtpReceiver * _Nullable)receiver
+                            seed:(NSData * _Nullable)seed
+                           nowMs:(uint64_t)nowMs
+                       overlapMs:(uint64_t)overlapMs
+    NS_SWIFT_NAME(rekeyDecryptor(onReceiver:seed:nowMs:overlapMs:));
+
+/// Mid-call rekey (G-18, ADR-0029) — close the overlap window: drop the
+/// decryptor's retained previous key once it has expired at `nowMs`
+/// (seed-boundary forward secrecy). No-op if the receiver was never
+/// armed or the window has not yet elapsed.
++ (void)pruneDecryptorOnReceiver:(RTCRtpReceiver * _Nullable)receiver
+                           nowMs:(uint64_t)nowMs
+    NS_SWIFT_NAME(pruneDecryptor(onReceiver:nowMs:));
+
 /// Drop the encryptor that was attached to `sender` by
 /// [+attachEncryptorToSender:seed:localLeaf:]. No-op if the
 /// sender was never attached.

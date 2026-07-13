@@ -647,6 +647,94 @@ void test_cross_stack_golden_vector() {
   std::printf("ok\n");
 }
 
+// G-18 / ADR-0029: a mid-call rekey rotates the encryptor's seal key + the
+// decryptor's ring. A frame sealed under the OLD epoch still opens through the
+// decryptor's overlap window; a fresh frame opens under the NEW epoch; and
+// pruning the expired window closes the fall-back (seed-boundary forward
+// secrecy, C-9 / C-10).
+void test_mid_call_rekey_overlap() {
+  std::printf("test_mid_call_rekey_overlap ... ");
+
+  constexpr uint32_t kLeaf = 5;
+  std::array<uint8_t, kSeedLen> seed_b = kTestSeed;
+  seed_b[0] ^= 0xFF;  // a distinct epoch-B seed
+
+  auto* enc = lakko::sframe::LakkoFrameEncryptor::Create(
+      kTestSeed.data(), kTestSeed.size(), kLeaf);
+  assert(enc != nullptr);
+  enc->AddRef();
+  auto* dec = lakko::sframe::LakkoFrameDecryptor::Create(kTestSeed.data(),
+                                                         kTestSeed.size());
+  assert(dec != nullptr);
+  dec->AddRef();
+
+  const std::vector<uint8_t> pt_old = {'o', 'l', 'd'};
+  const std::vector<uint8_t> pt_new = {'n', 'e', 'w'};
+  const std::vector<uint8_t> aad = {0x01, 0x02};
+
+  auto seal = [&](const std::vector<uint8_t>& pt, std::size_t* out_len) {
+    std::vector<uint8_t> wire(
+        enc->GetMaxCiphertextByteSize(cricket::MEDIA_TYPE_AUDIO, pt.size()));
+    int rc = enc->Encrypt(cricket::MEDIA_TYPE_AUDIO, 0,
+                          rtc::MakeArrayView(aad.data(), aad.size()),
+                          rtc::MakeArrayView(pt.data(), pt.size()),
+                          rtc::MakeArrayView(wire.data(), wire.size()), out_len);
+    assert(rc == 0 && "seal failed");
+    return wire;
+  };
+  auto open = [&](const std::vector<uint8_t>& wire, std::size_t wire_len) {
+    std::vector<uint8_t> rec(
+        dec->GetMaxPlaintextByteSize(cricket::MEDIA_TYPE_AUDIO, wire_len));
+    auto r = dec->Decrypt(cricket::MEDIA_TYPE_AUDIO, std::vector<uint32_t>{},
+                          rtc::MakeArrayView(aad.data(), aad.size()),
+                          rtc::MakeArrayView(wire.data(), wire_len),
+                          rtc::MakeArrayView(rec.data(), rec.size()));
+    rec.resize(r.status == webrtc::FrameDecryptorInterface::Status::kOk
+                   ? r.bytes_written
+                   : 0);
+    return std::make_pair(r.status, rec);
+  };
+
+  // Seal an epoch-A frame, still in flight when the rotation lands.
+  std::size_t old_len = 0;
+  std::vector<uint8_t> old_wire = seal(pt_old, &old_len);
+
+  // Rekey both sides to epoch B, 1 s overlap window at t=1000 (expires 2000).
+  assert(enc->Rekey(seed_b.data(), seed_b.size()) && "encryptor rekey failed");
+  assert(dec->Rekey(seed_b.data(), seed_b.size(), 1000, 1000) &&
+         "decryptor rekey failed");
+
+  // A fresh epoch-B frame.
+  std::size_t new_len = 0;
+  std::vector<uint8_t> new_wire = seal(pt_new, &new_len);
+
+  // The old frame still opens via the decryptor's overlap window...
+  auto old_opened = open(old_wire, old_len);
+  assert(old_opened.first == webrtc::FrameDecryptorInterface::Status::kOk &&
+         "old-epoch frame did not open through the overlap window");
+  assert(old_opened.second == pt_old);
+
+  // ...and the new frame opens under the current epoch.
+  auto new_opened = open(new_wire, new_len);
+  assert(new_opened.first == webrtc::FrameDecryptorInterface::Status::kOk &&
+         "new-epoch frame did not open under the current key");
+  assert(new_opened.second == pt_new);
+
+  // Prune past the window → the old frame no longer opens.
+  dec->Prune(2000);
+  auto old_after_prune = open(old_wire, old_len);
+  assert(old_after_prune.first ==
+             webrtc::FrameDecryptorInterface::Status::kFailedToDecrypt &&
+         "old-epoch frame opened after the overlap window was pruned");
+  // The new frame still opens under the current key.
+  assert(open(new_wire, new_len).first ==
+         webrtc::FrameDecryptorInterface::Status::kOk);
+
+  enc->Release();
+  dec->Release();
+  std::printf("ok\n");
+}
+
 }  // namespace
 
 int main() {
@@ -659,6 +747,7 @@ int main() {
   test_per_call_key_isolation();
   test_payload_size_extremes();
   test_cross_stack_golden_vector();
+  test_mid_call_rekey_overlap();
   std::printf("all sframe-bridge tests passed\n");
   return 0;
 }

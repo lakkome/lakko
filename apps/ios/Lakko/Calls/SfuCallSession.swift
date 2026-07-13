@@ -78,6 +78,11 @@ final class SfuCallSession {
 
     private let config: Config
     private let callbacks: Callbacks
+    /// Call-key seed of the CURRENT MLS epoch (G-18, ADR-0029). Starts
+    /// at `config.seed` and advances on `rekey`, so a late-arriving
+    /// receiver is armed at the current epoch (not the start-of-call
+    /// one). Mirrors the web `SfuCallSession.activeSeed`.
+    private var activeSeed: Data
     private var signaling: SfuSignalingClient?
     private var pc: WebRTCPeerConnection?
     /// Local camera capturer — held for the call's lifetime so it
@@ -94,6 +99,22 @@ final class SfuCallSession {
     init(config: Config, callbacks: Callbacks) {
         self.config = config
         self.callbacks = callbacks
+        self.activeSeed = config.seed
+    }
+
+    /// Rotate the call key on a mid-call MLS epoch change (G-18,
+    /// ADR-0029). The caller re-derives `newSeed =
+    /// group.exportSecret("lakko/call/v1", callId, 32)` after processing
+    /// a commit that advanced the epoch and passes it here; every
+    /// installed encryptor + decryptor rotates, retaining the previous
+    /// key for the overlap window so in-flight frames still open, then
+    /// dropping it. A late-arriving receiver is then armed at the new
+    /// epoch (`activeSeed`). No-op if the seed is unchanged. Mirrors the
+    /// web `SfuCallSession.rekey`.
+    func rekey(newSeed: Data) {
+        guard newSeed != activeSeed else { return }
+        activeSeed = newSeed
+        pc?.rekeySFrame(seed: newSeed)
     }
 
     /// Open the SFU connection, publish the local audio (SFrame-sealed),
@@ -176,7 +197,7 @@ final class SfuCallSession {
         if config.video {
             startLocalCameraCapture(on: connection)
         }
-        guard connection.armSFrameEncryptors(seed: config.seed, localLeaf: config.localLeaf) else {
+        guard connection.armSFrameEncryptors(seed: activeSeed, localLeaf: config.localLeaf) else {
             // A failed arm is fail-closed (invariant #4).
             throw SfuCallError.sframeUnavailable
         }
@@ -307,9 +328,11 @@ final class SfuCallSession {
             },
             onRemoteReceiver: { [weak self] receiver, _ in
                 // Arm the SFrame decryptor on every incoming track
-                // (audio + video) — invariant #4.
+                // (audio + video) — invariant #4. Use the CURRENT epoch
+                // seed (`activeSeed`), so a receiver that arrives after a
+                // mid-call rekey is armed at the new epoch (G-18).
                 guard let self = self else { return }
-                _ = self.pc?.armSFrameDecryptor(for: receiver, seed: self.config.seed)
+                _ = self.pc?.armSFrameDecryptor(for: receiver, seed: self.activeSeed)
             }
         )
     }

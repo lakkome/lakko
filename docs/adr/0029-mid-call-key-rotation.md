@@ -5,7 +5,7 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 # ADR-0029: Mid-call call-key rotation (overlap keyring)
 
-- **Status:** Proposed
+- **Status:** Accepted (maintainer chose Variant 2; implemented end-to-end on web + iOS + Android, 2026-07)
 - **Date:** 2026-07-04
 - **Context:** Phase 3 closeout — G-18 (overlap-window timer / mid-call rekey)
 

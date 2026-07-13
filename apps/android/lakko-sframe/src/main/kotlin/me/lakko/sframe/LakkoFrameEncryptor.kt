@@ -62,6 +62,25 @@ public class LakkoFrameEncryptor private constructor(
         }
     }
 
+    /**
+     * Mid-call rekey (G-18, ADR-0029): swap the seal key to the new MLS
+     * epoch's [seed], keeping the same local leaf. The encryptor seals
+     * only under the current epoch, so this is a straight key swap —
+     * already-sealed frames are already bytes in libwebrtc's pipeline and
+     * need no overlap.
+     *
+     * Returns `false` on a bad seed length (must be 32), an HKDF failure,
+     * or if [release] already ran — in which case the encryptor keeps
+     * sealing under the current key (never plaintext, security invariant
+     * #4). Thread-safe against a concurrent seal on the codec thread.
+     */
+    public fun rekey(seed: ByteArray): Boolean {
+        val ptr = nativePtr
+        if (ptr == 0L) return false
+        if (seed.size != 32) return false
+        return nativeRekey(ptr, seed)
+    }
+
     @Suppress("ProtectedInFinal")
     protected fun finalize() {
         // Safety net for the case where the consumer forgot to
@@ -102,5 +121,8 @@ public class LakkoFrameEncryptor private constructor(
 
         @JvmStatic
         private external fun nativeRelease(nativePtr: Long)
+
+        @JvmStatic
+        private external fun nativeRekey(nativePtr: Long, seed: ByteArray): Boolean
     }
 }

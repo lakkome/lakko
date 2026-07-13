@@ -454,6 +454,75 @@ public final class WebRTCPeerConnection: NSObject {
         return status == .OK
     }
 
+    /// Default SFrame overlap window in ms (G-18, ADR-0029) — mirrors
+    /// the web `SFRAME_OVERLAP_MS` + the Rust core `OVERLAP_DEFAULT_MS`.
+    /// The decryptor keeps the previous epoch's key this long after a
+    /// rekey so in-flight frames sealed under the old epoch still open.
+    private static let sframeOverlapMs: UInt64 = 1000
+
+    /// Mid-call rekey (G-18, ADR-0029) — rotate the SFrame key on every
+    /// installed encryptor + decryptor to the new MLS epoch's `seed`,
+    /// then close the overlap window after `sframeOverlapMs` by pruning
+    /// the decryptors' retained previous key.
+    ///
+    /// Called by `SfuCallSession.rekey(newSeed:)` when a commit advances
+    /// the group's epoch during a live call. Enumerates the live senders
+    /// / receivers off the peer connection, so a receiver added by a
+    /// later renegotiation is covered too; a sender / receiver that was
+    /// never SFrame-armed is a benign skip.
+    ///
+    /// A rekey never downgrades to plaintext: if the rotation itself
+    /// fails (bad seed), the bridge retains the current key (still
+    /// E2EE, invariant #4). The `Bool` return is for observability only
+    /// — `false` means at least one present transform's rotation failed;
+    /// the caller keeps the call up.
+    @discardableResult
+    public func rekeySFrame(seed: Data) -> Bool {
+        guard SFrameAvailability.shared.isCallingAvailable else {
+            return false
+        }
+        guard let peer = peer else { return false }
+        let now = UInt64(Date().timeIntervalSince1970 * 1000)
+        let overlapMs = Self.sframeOverlapMs
+        var allOk = true
+        for sender in peer.senders {
+            if !LakkoSFrameAttach.rekeyEncryptor(onSender: sender, seed: seed) {
+                allOk = false
+            }
+        }
+        for receiver in peer.receivers {
+            if !LakkoSFrameAttach.rekeyDecryptor(
+                onReceiver: receiver,
+                seed: seed,
+                nowMs: now,
+                overlapMs: overlapMs
+            ) {
+                allOk = false
+            }
+        }
+        // Close the overlap window: after `overlapMs`, drop the retained
+        // previous key so seed-boundary forward secrecy takes full effect.
+        // `Task {}` (not detached) inherits this @MainActor isolation, so
+        // the prune runs back on the main actor.
+        let overlapNs = overlapMs * 1_000_000
+        Task { [weak self] in
+            try? await Task.sleep(nanoseconds: overlapNs)
+            self?.pruneSFrameDecryptors()
+        }
+        return allOk
+    }
+
+    /// Drop each decryptor's retained previous key once the overlap
+    /// window has elapsed (G-18, ADR-0029). Re-enumerates the live
+    /// receivers so the set reflects any mid-window renegotiation.
+    private func pruneSFrameDecryptors() {
+        guard let peer = peer else { return }
+        let now = UInt64(Date().timeIntervalSince1970 * 1000)
+        for receiver in peer.receivers {
+            LakkoSFrameAttach.pruneDecryptor(onReceiver: receiver, nowMs: now)
+        }
+    }
+
     // MARK: - SDP exchange
 
     /// Build the SDP offer that goes into

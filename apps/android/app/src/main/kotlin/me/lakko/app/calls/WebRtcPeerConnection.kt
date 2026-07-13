@@ -470,6 +470,46 @@ public class WebRtcPeerConnection(
         return true
     }
 
+    /**
+     * Mid-call SFrame rekey (G-18, ADR-0029). Rotate every installed
+     * encryptor + decryptor to the new MLS epoch's [seed]. Each encryptor
+     * swaps its seal key (it seals only under the current epoch); each
+     * decryptor rotates its call-key ring, retaining the previous epoch's
+     * key until `nowMs + overlapMs` so in-flight frames sealed under the
+     * old epoch still open. Call [pruneSFrameDecryptors] after the window
+     * to close it.
+     *
+     * Returns `true` only when every installed encryptor + decryptor
+     * adopted the new key. A `false` return means at least one seal / open
+     * path could not — the caller keeps the current seed (never plaintext,
+     * security invariant #4). Iterates snapshots so a concurrent
+     * [armSFrameDecryptor] on a libwebrtc thread cannot fault the walk.
+     */
+    public fun rekeySFrame(seed: ByteArray, nowMs: Long, overlapMs: Long): Boolean {
+        if (!me.lakko.sframe.SFrameAvailability.isCallingAvailable) {
+            return false
+        }
+        var allOk = true
+        for (enc in attachedEncryptors.toList()) {
+            if (!enc.rekey(seed)) allOk = false
+        }
+        for (dec in attachedDecryptors.toList()) {
+            if (!dec.rekey(seed, nowMs, overlapMs)) allOk = false
+        }
+        return allOk
+    }
+
+    /**
+     * Drop each decryptor's retained previous key once the overlap window
+     * has elapsed at [nowMs] (G-18, ADR-0029) — closes the window for
+     * seed-boundary forward secrecy (C-9 / C-10). Idempotent.
+     */
+    public fun pruneSFrameDecryptors(nowMs: Long) {
+        for (dec in attachedDecryptors.toList()) {
+            dec.prune(nowMs)
+        }
+    }
+
     // ----------------------------------------------------------------
     // SDP exchange
     // ----------------------------------------------------------------

@@ -19,9 +19,9 @@
 //   2. Bridge libwebrtc's `rtc::ArrayView<const uint8_t>` /
 //      `rtc::ArrayView<uint8_t>` to the `(const uint8_t*, size_t)`
 //      shape the C ABI expects.
-//   3. Maintain a tiny per-sender_leaf ParticipantKey cache on the
-//      decryptor side (libwebrtc may call Decrypt from multiple
-//      threads; std::mutex guards the map).
+//   3. Own the per-call keying state and expose a mid-call `Rekey`
+//      (G-18, ADR-0029) so an MLS epoch change during a live call
+//      rotates the SFrame key with an overlap window.
 //
 // All Rust-side errors collapse to libwebrtc's documented failure
 // shapes:
@@ -46,18 +46,34 @@
 // pattern (`rtc::FinalRefCountedObject<T>` does the same — we
 // inline the machinery to avoid pulling in one more header).
 //
+// ## Mid-call rekey (G-18, ADR-0029)
+//
+// When the group's MLS epoch advances during a live call, the
+// per-call seed changes. The platform shim re-derives it and calls
+// `Rekey` on the encryptor + decryptor for that call:
+//
+//   - Encryptor: seals only under the CURRENT epoch, so a rekey is a
+//     straight swap of the seal key — already-sealed frames are
+//     already bytes in libwebrtc's pipeline and need no overlap. No
+//     ring is retained on the send side.
+//   - Decryptor: holds a `lakko_sframe_call_key_ring_t` (current +
+//     previous key). A rekey rotates the ring, retaining the previous
+//     key for the overlap window so in-flight frames sealed under the
+//     old epoch still open; `Prune` drops it once the window elapses.
+//
 // ## Threading
 //
 // libwebrtc calls Encrypt() on the codec thread (one per outgoing
-// track; serialised per encryptor). Decrypt() is called on the
-// network or decoder thread (one per incoming track; serialised
-// per decryptor). The encryptor's seal path is therefore single-
-// threaded against any one LakkoFrameEncryptor; we do NOT need a
-// mutex around `participant_key_`. The decryptor's per-sender
-// ParticipantKey map IS shared across multiple sender_leaf values
-// arriving on the same incoming track (e.g. when an SFU forwards
-// frames from N senders into one receiver); `lookup_or_derive` is
-// guarded by `cache_mutex_`.
+// track; serialised per encryptor) and Decrypt() on the network /
+// decoder thread (one per incoming track; serialised per decryptor).
+// `Rekey` / `Prune` are called from the signaling thread, i.e.
+// CONCURRENTLY with Encrypt / Decrypt:
+//
+//   - The encryptor guards `participant_key_` with `seal_mutex_`
+//     (Encrypt reads it while Rekey swaps it).
+//   - The decryptor needs no C++ mutex — the Rust `CallKeyRing` is
+//     `Mutex`-guarded internally, so open / rekey / prune all
+//     serialise on the Rust side.
 
 #ifndef LAKKO_SFRAME_BRIDGE_H_
 #define LAKKO_SFRAME_BRIDGE_H_
@@ -66,7 +82,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <mutex>
-#include <unordered_map>
 
 #include "api/crypto/frame_decryptor_interface.h"
 #include "api/crypto/frame_encryptor_interface.h"
@@ -113,20 +128,30 @@ class LakkoFrameEncryptor : public webrtc::FrameEncryptorInterface {
   std::size_t GetMaxCiphertextByteSize(cricket::MediaType media_type,
                                        std::size_t frame_size) override;
 
+  // Mid-call rekey (G-18, ADR-0029): swap the seal key to the new MLS
+  // epoch's `seed`, keeping the SAME local leaf. Returns false on a bad
+  // seed length or HKDF failure, in which case the current key is
+  // retained (the caller keeps sealing under it — never plaintext).
+  // Thread-safe against a concurrent Encrypt.
+  bool Rekey(const uint8_t* seed, std::size_t seed_len);
+
   // RefCountInterface
   void AddRef() const override;
   rtc::RefCountReleaseStatus Release() const override;
 
  private:
-  LakkoFrameEncryptor(lakko_sframe_call_key_t* call_key,
-                      lakko_sframe_participant_key_t* participant_key);
+  LakkoFrameEncryptor(lakko_sframe_participant_key_t* participant_key,
+                      uint32_t local_leaf);
 
-  // Owned. Freed in the destructor via the matching `_free` symbol.
-  // The local leaf index is not stored separately — it is baked into
-  // `participant_key_` at derivation, and `seal_framed` re-emits it
-  // into the SFrame header (KID) internally (ADR-0013).
-  lakko_sframe_call_key_t* call_key_;
+  // Owned. The seal key for the CURRENT epoch; `seal_framed` re-emits
+  // the local leaf into the SFrame header (KID) internally (ADR-0013).
+  // Guarded by `seal_mutex_` because Encrypt (codec thread) reads it
+  // while Rekey (signaling thread) swaps it.
   lakko_sframe_participant_key_t* participant_key_;
+  // The local leaf index, kept so Rekey can re-derive the seal key for
+  // the same leaf under the new epoch.
+  uint32_t local_leaf_;
+  mutable std::mutex seal_mutex_;
 
   mutable std::atomic<int> refcount_{0};
 };
@@ -139,10 +164,10 @@ class LakkoFrameDecryptor : public webrtc::FrameDecryptorInterface {
  public:
   // Construct from the same 32-byte per-call seed the encryptor
   // uses on every other participant. Returns nullptr on bad seed
-  // length. The decryptor lazily derives per-sender ParticipantKey
-  // entries as frames arrive — the first frame from each new
-  // `sender_leaf` triggers one HKDF derivation; subsequent frames
-  // from the same sender hit the cache.
+  // length. The decryptor opens each frame through the call-key
+  // ring, which derives the per-sender key internally and, during a
+  // mid-call rekey overlap window, tries the previous epoch's key on
+  // an AEAD failure (ADR-0029).
   static LakkoFrameDecryptor* Create(const uint8_t* seed,
                                      std::size_t seed_len);
 
@@ -158,27 +183,29 @@ class LakkoFrameDecryptor : public webrtc::FrameDecryptorInterface {
   std::size_t GetMaxPlaintextByteSize(cricket::MediaType media_type,
                                       std::size_t encrypted_frame_size) override;
 
+  // Mid-call rekey (G-18, ADR-0029): rotate the ring to the new MLS
+  // epoch's `seed`, retaining the previous key until `now_ms +
+  // clamp(overlap_ms)` so in-flight frames sealed under the old epoch
+  // still open. Returns false on a bad seed length (the ring keeps its
+  // current + previous keys). Thread-safe (the Rust ring is
+  // `Mutex`-guarded internally).
+  bool Rekey(const uint8_t* seed, std::size_t seed_len, uint64_t now_ms,
+             uint64_t overlap_ms);
+
+  // Drop the retained previous key once it has expired at `now_ms`
+  // (closes the overlap window; seed-boundary forward secrecy).
+  void Prune(uint64_t now_ms);
+
   // RefCountInterface
   void AddRef() const override;
   rtc::RefCountReleaseStatus Release() const override;
 
  private:
-  explicit LakkoFrameDecryptor(lakko_sframe_call_key_t* call_key);
+  explicit LakkoFrameDecryptor(lakko_sframe_call_key_ring_t* ring);
 
-  // Returns a non-owning pointer to the cached ParticipantKey for
-  // `sender_leaf`, deriving it if absent. Returns nullptr only on
-  // HKDF failure (practically unreachable; the underlying lakko-
-  // sframe-native call only fails on null call_key). Thread-safe.
-  lakko_sframe_participant_key_t* lookup_or_derive(uint32_t sender_leaf);
-
-  // Owned. Freed in the destructor.
-  lakko_sframe_call_key_t* call_key_;
-
-  // Owned. Map values are freed in the destructor (one
-  // `lakko_sframe_participant_key_free` per entry).
-  mutable std::mutex cache_mutex_;
-  std::unordered_map<uint32_t, lakko_sframe_participant_key_t*>
-      participant_keys_;
+  // Owned. The overlap keyer (current + previous call key); ADR-0029.
+  // Its internal Rust `Mutex` makes open / rekey / prune thread-safe.
+  lakko_sframe_call_key_ring_t* ring_;
 
   mutable std::atomic<int> refcount_{0};
 };

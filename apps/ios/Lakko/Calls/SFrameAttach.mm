@@ -283,6 +283,81 @@ using SetFrameDecryptorIMP = void (*)(id, SEL, void *);
     return LakkoSFrameAttachStatusOK;
 }
 
+// MARK: - Mid-call rekey (G-18, ADR-0029)
+
++ (BOOL)rekeyEncryptorOnSender:(RTCRtpSender * _Nullable)sender
+                          seed:(NSData * _Nullable)seed {
+    if (sender == nil) {
+        return NO;
+    }
+    if (seed == nil || seed.length != 32) {
+        return NO;
+    }
+    // Read the encryptor we installed on this sender at attach time. A
+    // sender that was never SFrame-armed carries no association — a
+    // benign no-op, not a failure.
+    id obj = objc_getAssociatedObject(
+        sender, (__bridge const void *)kEncryptorAssociationKey);
+    LakkoSFrameEncryptorWrapper *wrapper = (LakkoSFrameEncryptorWrapper *)obj;
+    if (wrapper == nil || wrapper->_cppEncryptor == nullptr) {
+        return YES;
+    }
+    // Rekey is thread-safe against a concurrent Encrypt on the codec
+    // thread (the bridge guards the seal key with `seal_mutex_`).
+    const bool ok = wrapper->_cppEncryptor->Rekey(
+        static_cast<const uint8_t *>(seed.bytes),
+        static_cast<std::size_t>(seed.length));
+    if (!ok) {
+        NSLog(@"[lakko.sframe] encryptor Rekey failed — retaining the "
+              @"current epoch key (media stays E2EE, invariant #4).");
+    }
+    return ok ? YES : NO;
+}
+
++ (BOOL)rekeyDecryptorOnReceiver:(RTCRtpReceiver * _Nullable)receiver
+                            seed:(NSData * _Nullable)seed
+                           nowMs:(uint64_t)nowMs
+                       overlapMs:(uint64_t)overlapMs {
+    if (receiver == nil) {
+        return NO;
+    }
+    if (seed == nil || seed.length != 32) {
+        return NO;
+    }
+    id obj = objc_getAssociatedObject(
+        receiver, (__bridge const void *)kDecryptorAssociationKey);
+    LakkoSFrameDecryptorWrapper *wrapper = (LakkoSFrameDecryptorWrapper *)obj;
+    if (wrapper == nil || wrapper->_cppDecryptor == nullptr) {
+        return YES;
+    }
+    // The ring rotates the call key and retains the previous one for the
+    // overlap window; thread-safe (the Rust ring is `Mutex`-guarded).
+    const bool ok = wrapper->_cppDecryptor->Rekey(
+        static_cast<const uint8_t *>(seed.bytes),
+        static_cast<std::size_t>(seed.length),
+        static_cast<uint64_t>(nowMs),
+        static_cast<uint64_t>(overlapMs));
+    if (!ok) {
+        NSLog(@"[lakko.sframe] decryptor Rekey failed — retaining the "
+              @"current ring (media stays E2EE, invariant #4).");
+    }
+    return ok ? YES : NO;
+}
+
++ (void)pruneDecryptorOnReceiver:(RTCRtpReceiver * _Nullable)receiver
+                           nowMs:(uint64_t)nowMs {
+    if (receiver == nil) {
+        return;
+    }
+    id obj = objc_getAssociatedObject(
+        receiver, (__bridge const void *)kDecryptorAssociationKey);
+    LakkoSFrameDecryptorWrapper *wrapper = (LakkoSFrameDecryptorWrapper *)obj;
+    if (wrapper == nil || wrapper->_cppDecryptor == nullptr) {
+        return;
+    }
+    wrapper->_cppDecryptor->Prune(static_cast<uint64_t>(nowMs));
+}
+
 + (void)detachFromSender:(RTCRtpSender * _Nullable)sender {
     if (sender == nil) {
         return;

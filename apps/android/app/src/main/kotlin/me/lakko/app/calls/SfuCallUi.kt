@@ -136,6 +136,16 @@ class SfuCallUi(
         session.hangUp()
     }
 
+    /**
+     * Rotate the call key on a mid-call MLS epoch change (G-18, ADR-0029).
+     * The caller re-derives the per-call seed at the new epoch and passes
+     * it; every installed SFrame encryptor / decryptor rotates with an
+     * overlap window so in-flight frames still open. No-op if unchanged.
+     */
+    fun rekey(newSeed: ByteArray) {
+        session.rekey(newSeed)
+    }
+
     /** Mute / unmute the local mic — drives the real track + mirrors the
      *  store's local-participant flag. */
     fun setMicrophoneEnabled(on: Boolean) {

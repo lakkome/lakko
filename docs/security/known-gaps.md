@@ -782,7 +782,7 @@ The test-only accessor is compiled out of the release
 crate via `cfg(test)` so no production caller can reset
 the counter and re-use an AEAD nonce.
 
-### G-18: Overlap-window 1-second timer lives in platform code, not in the Rust core
+### G-18: Overlap-window / mid-call rekey — **CLOSED (2026-07, [ADR-0029](../adr/0029-mid-call-key-rotation.md)); only the deployed-SFU live-rekey e2e deferred (like G-26)**
 
 `GroupCallSession::drop_previous_call_key` is invoked by
 the platform's own timer (iOS `Task.sleep` / Android
@@ -837,6 +837,34 @@ their own timer. **The duplicated-logic part of G-18 is now
 closed; the residual is just wiring the platforms onto
 `refresh_call_key_at` + a clock-tick `prune_expired_previous`
 when the live SFU call flow lands (3b).**
+
+**CLOSED (2026-07, [ADR-0029](../adr/0029-mid-call-key-rotation.md)).** Mid-call
+rekey is now wired end-to-end. A code reconciliation for this gap found the
+overlap mechanism was **dormant** — no client instantiated `GroupCallSession`;
+the clients seal/open at the raw-seed level, off-thread, without the MLS group.
+So the fix was not "wire an existing timer" but to expose the overlap keyer at
+the level the clients run at. The overlap logic was extracted into a seed-based
+`lakko_calls::CallKeyRing` (current + previous key; `try_open_framed_with_overlap`
+tries the current key then, during the window, the previous; `rekey_from_seed_at`
+/ `prune_expired` / `has_live_previous`), which `GroupCallSession` **delegates**
+to (its 5 property tests stay green, no behaviour change) and which is FFI-exposed
+(uniffi + wasm) **and** surfaced in the lean `lakko-sframe-native` C ABI
+(`lakko_sframe_call_key_ring_*`, Mutex-guarded) so the native SFrame media shim
+can drive it. All three clients now rotate on a mid-call MLS epoch advance: the
+chat receive loop re-derives `group.export_secret("lakko/call/v1", call_id, 32)`
+at the new epoch and calls the live SFU call's `rekey(newSeed)`, which fans out to
+every attached transform — the web `RTCRtpScriptTransform` worker (a `CallKeyRing`
+per transform + a `rekey` postMessage + a self-prune timer), and the iOS / Android
+native `LakkoFrameEncryptor::Rekey` (a seal-key swap — the send side keeps no
+overlap) + `LakkoFrameDecryptor::Rekey` / `Prune` (the ring's overlap open, via
+the C++ bridge). Fail-closed throughout: a re-derivation failure keeps the current
+key, never plaintext (invariant #4). Verified headless on every stack — `cargo
+test` (core `CallKeyRing` 6 property tests + the C-ABI overlap round-trip), the
+uniffi (3) + wasm (3) overlap round-trips, the C++ bridge `test_mid_call_rekey_overlap`
+(`just test-sframe-bridge`), web `vitest` (`call-key-ring.test.ts`), iOS
+`xcodebuild`, Android `:app:compileDebugKotlin`. The only residual is a live
+two-peer mid-call-rekey proof over a **deployed** SFU (a runtime gate, deferred
+like G-26).
 
 ### G-19: SFU-side call-admission JWT validation — **CLOSED** (Rust SFU; LiveKit-fork plan superseded)
 
