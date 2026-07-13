@@ -1860,6 +1860,52 @@ and the previous envelopes survive.
    the client side matches the server's view from the
    first byte of a channel's life.
 
+6. **Batched fanout preserves atomicity (ADR-0030).** For
+   the >50k-subscriber scale-out, rotation splits into a
+   chunked, resumable **stage** phase
+   (`POST /v1/channels/:id/rotate/stage`,
+   `ChannelStore::stage_envelopes`) followed by a single
+   atomic **commit**
+   (`POST /v1/channels/:id/rotate/commit`,
+   `ChannelStore::commit_rotation`). C-42 survives as
+   "the commit is atomic" rather than "the one giant
+   request is atomic":
+   - **Staged ≠ served.** Staged envelopes live in a
+     separate table (`channel_staged_envelopes`) / map that
+     the read path (`fetch_envelope`) never consults — only
+     `commit_rotation` promotes them — so the prepare phase
+     is invisible to subscribers and no torn rotation is
+     observable mid-stage
+     (`staged_envelopes_are_not_served_before_commit`,
+     `staged_envelope_is_not_served_before_commit`).
+   - **Monotone target epoch.** Both stage and commit refuse
+     unless `target_epoch == current_epoch + 1`
+     (`StorageError::StaleTargetEpoch` → 409), so a replayed
+     or out-of-order phase call cannot roll the epoch back
+     or skip (`stage_rejects_wrong_target_epoch`,
+     `commit_rejects_wrong_target_epoch`,
+     `stage_with_wrong_target_epoch_is_409`,
+     `commit_with_wrong_target_epoch_is_409`).
+   - **Atomic commit.** The in-memory impl promotes +
+     bumps + clears under a single write lock; the SQL impl
+     does it in one `FOR UPDATE` transaction. An abandoned
+     prepare leaves the live epoch + envelopes untouched
+     (`abandoned_prepare_leaves_epoch_and_envelopes_untouched`).
+   - **Idempotent + resumable.** Stage upserts keyed on
+     `(channel, target_epoch, subscriber)`, so a dropped
+     client re-sends missing chunks
+     (`restaging_is_idempotent_and_merges_chunks`); the
+     chunk is bounded (`MAX_STAGE_CHUNK_ENTRIES`, over-cap →
+     413 `chunk-too-large`, `stage_chunk_over_cap_is_413`).
+   - **Partial coverage (ADR-0030 OQ3).** A registered
+     subscriber with no staged row keeps their prior-epoch
+     envelope; a staged row whose subscriber was pruned
+     mid-prepare is skipped, not an abort
+     (`commit_partial_coverage_keeps_prior_envelope`).
+   - **Opacity (invariant #2).** The staging table is
+     ciphertext-only, exactly like `channel_envelopes`; the
+     server never seals, opens, or parses a seed.
+
 ### C-43: FFI subscriber-side surface preserves the in-Rust opacity contract
 
 The Phase 4b subscriber path is reachable from Swift /
