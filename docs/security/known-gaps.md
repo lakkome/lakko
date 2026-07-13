@@ -17,11 +17,58 @@ Items here are either:
 
 ## MLS state machine
 
-### G-1: Channel two-tier flow (>50k subscribers) not implemented
+### G-1: Channel two-tier flow (>50k subscribers) — **crypto + service + UI substantially BUILT; residual is nav wiring + RotationCron activation + fanout scale-out (audit 2026-07)**
 
-Phase 4 scope. The wire shape (PublisherGroup + sender-key)
-is settled in `docs/adr/0001-mls-only.md`; nothing is
-shipped against it yet.
+Phase 4 (ADR-0010, two-tier PublisherGroup + sender-key broadcast). A 2026-07
+code audit found the prior "nothing is shipped" note **badly stale** — the crypto
+substrate, backend, both FFI surfaces, discovery, and publisher / subscriber /
+co-publisher UI on all three clients are built. What is built vs the real residual:
+
+**Built:**
+
+- `crates/lakko-channels` (4a/4b): `seed` (MLS-exporter content-key seed), `post`
+  (per-message AEAD off the seed + Ed25519 signature — `compose_post` /
+  `verify_and_decrypt`), `subscribe` (HPKE-equivalent seed envelope
+  `seal_seed`/`open_seed`, 80-byte wire, AAD-bound to `channel_id‖epoch`),
+  `rotation_policy` (`should_rotate`), 4 fuzz targets.
+- `services/channels` (4c): register / posts (publish + cursor fetch) /
+  subscribers / envelope-deliver+pull / atomic `POST /rotate` fanout / epoch
+  routes; in-memory + MariaDB `ChannelStore`; retention prune; opacity-preserving
+  (crate is dev-dep only).
+- FFI (uniffi + wasm): full channel + subscriber + `PublisherGroup` surface.
+- Clients (web / iOS / Android): create+publish, co-publisher (ADR-0028 OQ3),
+  subscribe-to-another's-channel, and a read-posts feed are all **real screens**
+  with real MLS-backed crypto.
+- `services/discovery`: `@channel` OPRF `register` / `lookup` (server side).
+
+**Genuine residual (for a real >50k end-to-end flow a user can actually use):**
+
+1. **Navigation gap (top blocker).** Channels is **not reachable from app
+   navigation** on iOS/Android (`ChannelsRootScreen` is defined but never
+   presented — no call site in `LakkoApp`/`SessionRoot`/`MainActivity`) and has
+   **no nav entry** on web (the `/channels` routes exist but are URL-only). A real
+   user cannot open the feature on mobile.
+2. **RotationCron built but never wired to run** on any client (zero call sites)
+   → ADR-0010's aggressive-rotation backward-secrecy mitigation is **inert**, and
+   there is no "Rotate now" affordance. (NB: the co-publisher-approve path DOES
+   reseal via `/rotate`, but the scheduled 24h/N-post cron does not run. The
+   ROADMAP-PHASE3-CLOSEOUT G-27 "rotation wired via RotationCron on all three"
+   claim is corrected accordingly.)
+3. **`@channel` discovery not wired into clients** (server done) — users must
+   paste a raw hex `channel_id`.
+4. Envelope retention is **N=1 latest-wins** (ADR wanted N≈4); no multi-epoch
+   backfill / dedicated re-subscribe catch-up → posts published under an epoch
+   whose seed the subscriber missed render `[unreadable]`.
+5. Rotation fanout is a **single unbounded `POST /rotate`** request — unfit for
+   50k–1M subscribers at runtime; needs a chunked / streaming / per-receiver
+   worker (a ROADMAP-admitted follow-up).
+6. >50k **operational scale** (dedicated HPKE-envelope bandwidth allowance, load
+   test p95 < 5 s) — deploy-gated, not yet exercised.
+
+**Recommended next sprint:** wire Channels into app navigation (3 clients) +
+activate RotationCron (items 1+2) — this flips the feature from
+built-but-unreachable/inert to usable end-to-end; batched fanout (item 5) is the
+immediate scale follow-on.
 
 ### G-2: MLS-2 / quantum-hybrid suites pinned for later
 
