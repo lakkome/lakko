@@ -31,6 +31,7 @@ import {
   createSignal,
   For,
   onCleanup,
+  onMount,
   Show,
   type Component,
   type JSX,
@@ -72,11 +73,33 @@ import {
   rejectCoPublisher,
   requestToCoPublish,
 } from "../channels/copublisher";
+import {
+  runRotationOnce,
+  startRotationCron,
+  type RotationContext,
+  type RotationCronHandle,
+} from "../channels/rotation-cron";
+import {
+  loadRotationState,
+  saveRotationState,
+  type ChannelRotationState,
+} from "../channels/rotation-state-store";
 import { DsClient } from "../ds/client";
 import { useAuth } from "../auth/AuthContext";
 import { channelsActions, channelsState } from "../state/channels-state";
-import { loadWasm } from "../wasm";
+import { loadWasm, type Wasm } from "../wasm";
 import { paths } from "./paths";
+
+// ============================================================================
+// Shared handle / policy types for the publisher-tools panels
+// ============================================================================
+
+/** The wasm `PublisherGroup` handle `openPublisherGroup` returns. Shared by
+ *  the rotation cron AND the co-publisher panel so a `rotate()` on one is
+ *  seen by the other — two handles would commit divergent epochs. */
+type PublisherGroupHandle = Awaited<ReturnType<typeof openPublisherGroup>>;
+/** wasm-bindgen rotation policy — `{ intervalMs: bigint, maxPosts: number }`. */
+type ChannelRotationPolicy = ReturnType<Wasm["channelRotationPolicyDefault"]>;
 
 // ============================================================================
 // Theme tokens — mirror Call.tsx's palette so the channels
@@ -806,7 +829,7 @@ const ChannelView: Component = () => {
         </form>
 
         <SubscribersPanel channelIdHex={params.id} />
-        <CoPublishersPanel channelIdHex={params.id} />
+        <PublisherToolsPanel channelIdHex={params.id} />
       </Show>
 
       <h2 style={{ margin: "0 0 12px 0", "font-size": "16px" }}>Posts</h2>
@@ -901,6 +924,322 @@ const ChannelView: Component = () => {
 };
 
 // ============================================================================
+// PublisherToolsPanel — opens the ONE shared PublisherGroup handle
+//   (ADR-0010 / ADR-0028 OQ3) and threads it into both the rotation cron
+//   and the co-publisher panel.
+// ============================================================================
+
+/**
+ * Opens the channel's persistent `PublisherGroup` **once** and shares the
+ * single handle (plus the `Identity`) with `RotationPanel` and
+ * `CoPublishersPanel`.
+ *
+ * **Why one handle (load-bearing).** `PublisherGroup.rotate()` +
+ * `approveExternalJoin()` both advance the MLS epoch **durably** (persisted
+ * in the OpenMLS provider). Two independent `openPublisherGroup` handles held
+ * in the same screen would each cache a stale in-memory epoch — a rotation on
+ * one would leave the other believing it is still at epoch N, and the next
+ * commit on that stale handle would fork the group (both commit N+1 with
+ * divergent content). Sharing one handle (the wasm object is internally safe
+ * to share) keeps every commit path on the same epoch.
+ *
+ * **Fail-closed (invariant #4).** The panels only render once the handle is
+ * open; a failed open surfaces the error and renders nothing — the cron never
+ * starts and no "Rotate now" / "Create link" affordance appears, so there is
+ * never a plaintext or bad-key path.
+ */
+const PublisherToolsPanel: Component<{ readonly channelIdHex: string }> = (
+  props,
+) => {
+  const auth = useAuth();
+  const [identity, setIdentity] = createSignal<WasmIdentity | null>(null);
+  const [group, setGroup] = createSignal<PublisherGroupHandle | null>(null);
+  const [openError, setOpenError] = createSignal<string | null>(null);
+
+  onMount(() => {
+    const secrets = auth.identitySecrets();
+    if (secrets === null) {
+      setOpenError(
+        "Log in to manage this channel's key rotation and co-publishers.",
+      );
+      return;
+    }
+    void (async (): Promise<void> => {
+      try {
+        const wasm = await loadWasm();
+        const id = wasm.Identity.fromSeed(secrets.accountIdentitySeed);
+        const pg = await openPublisherGroup(id, props.channelIdHex);
+        setIdentity(id);
+        setGroup(pg);
+      } catch (err) {
+        setOpenError(`Could not open the channel group: ${String(err)}`);
+      }
+    })();
+  });
+
+  // Own the shared handles' lifetime. The child panels stop their timers on
+  // their own cleanup (which runs before this parent cleanup), so no
+  // in-flight callback touches a freed handle on unmount.
+  onCleanup(() => {
+    try {
+      group()?.free();
+    } catch {
+      /* ignore */
+    }
+    try {
+      identity()?.free();
+    } catch {
+      /* ignore */
+    }
+  });
+
+  return (
+    <Show
+      when={group() !== null && identity() !== null}
+      fallback={
+        <Show when={openError() !== null}>
+          <div
+            style={{
+              "margin-bottom": "20px",
+              padding: "10px 12px",
+              "background-color": COLOURS.surface,
+              color: COLOURS.textSecondary,
+              "border-radius": "8px",
+              "font-size": "13px",
+            }}
+          >
+            {openError()}
+          </div>
+        </Show>
+      }
+    >
+      <RotationPanel
+        channelIdHex={props.channelIdHex}
+        publisherGroup={group()!}
+        identity={identity()!}
+      />
+      <CoPublishersPanel
+        channelIdHex={props.channelIdHex}
+        publisherGroup={group()!}
+        identity={identity()!}
+      />
+    </Show>
+  );
+};
+
+// ============================================================================
+// RotationPanel — scheduled content-key rotation (ADR-0010 / C-54)
+//   Embedded inside ChannelView when the user holds publisher keys.
+//   Drives the `RotationCron` heartbeat while visible + a manual
+//   "Rotate now" button. Uses the SHARED PublisherGroup handle.
+// ============================================================================
+
+/**
+ * The *scheduled* half of content-key rotation (the membership-change half
+ * advances automatically on every MLS epoch bump). The pure
+ * `channelShouldRotate` policy (default 24 h / 1000 posts) decides *when*;
+ * `runRotationOnce` / `startRotationCron` do *how* — advance the shared
+ * PublisherGroup epoch, derive the new seed, and reseal it to every
+ * subscriber via the atomic `POST /v1/channels/:id/rotate` fanout.
+ *
+ * **Genesis-seed, not {0,0}.** `channelShouldRotate(default, {0,0}, now)`
+ * fires immediately against real wall-clock (`lastRotationMs = 0` reads as
+ * "last rotated at the epoch, i.e. forever ago"). Seeding the heartbeat with
+ * a `{0,0}` state would therefore rotate + reseal every subscriber the instant
+ * the screen opens. So the first open seeds `channelRotationStateAfterRotation(now)`
+ * (i.e. "just rotated"), landing the first scheduled rotation ~one interval
+ * later. The **"Rotate now"** button, by contrast, deliberately forces a
+ * rotation by feeding a fresh `channelRotationStateNew()` ({0,0}) through
+ * `runRotationOnce`, then adopts the returned post-rotation state as the new
+ * heartbeat baseline (via the context's `saveState`, which both paths share).
+ *
+ * **Fail-closed (invariant #4).** A rotation that fails part-way never exposes
+ * plaintext or a bad key: the reseal batch is atomic server-side, a single
+ * seal failure aborts the whole batch, and a failed fanout only leaves
+ * subscribers unable to decrypt the *next* post until the next successful
+ * reseal — an availability effect, never a downgrade.
+ */
+const RotationPanel: Component<{
+  readonly channelIdHex: string;
+  readonly publisherGroup: PublisherGroupHandle;
+  readonly identity: WasmIdentity;
+}> = (props) => {
+  const [status, setStatus] = createSignal("Loading rotation state…");
+  const [busy, setBusy] = createSignal(false);
+  const [error, setError] = createSignal<string | null>(null);
+
+  let cron: RotationCronHandle | null = null;
+  let policy: ChannelRotationPolicy | null = null;
+
+  /** Build a fresh rotation context bound to the SHARED handle. Both the
+   *  heartbeat and the manual button call this so their `saveState` writes
+   *  land in the same localStorage key. */
+  function context(): RotationContext {
+    return {
+      publisherGroup: props.publisherGroup,
+      identity: props.identity,
+      channelIdHex: props.channelIdHex,
+      saveState: (next: ChannelRotationState): void => {
+        saveRotationState(props.channelIdHex, next);
+      },
+      onRotated: (): void => {
+        refreshStatus();
+      },
+    };
+  }
+
+  /** Load the persisted state, or genesis-seed `after_rotation(now)` on first
+   *  open so the heartbeat does not fire an immediate rotation. */
+  async function loadOrSeedState(): Promise<ChannelRotationState> {
+    const existing = loadRotationState(props.channelIdHex);
+    if (existing !== null) return existing;
+    const wasm = await loadWasm();
+    const seeded = wasm.channelRotationStateAfterRotation(BigInt(Date.now()));
+    saveRotationState(props.channelIdHex, seeded);
+    return seeded;
+  }
+
+  function refreshStatus(): void {
+    const cadence = "auto every 24 h or 1000 posts";
+    const state = loadRotationState(props.channelIdHex);
+    if (state === null || state.lastRotationMs <= 0n) {
+      setStatus(`Not rotated yet · ${cadence}`);
+      return;
+    }
+    setStatus(
+      `Last rotated ${relativeAgo(state.lastRotationMs)} · ` +
+        `${state.postsSinceRotation} posts since · ${cadence}`,
+    );
+  }
+
+  /** Force a rotation regardless of the schedule (e.g. after suspecting a
+   *  subscriber compromise). Feeds a fresh `{0,0}` state so the policy gate
+   *  always fires; `runRotationOnce` stamps + persists a fresh
+   *  post-rotation state via the context's `saveState`. */
+  async function onRotateNow(): Promise<void> {
+    if (busy()) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const wasm = await loadWasm();
+      const forcePolicy = policy ?? wasm.channelRotationPolicyDefault();
+      await runRotationOnce(
+        context(),
+        forcePolicy,
+        wasm.channelRotationStateNew(),
+      );
+      refreshStatus();
+    } catch (err) {
+      setError(`Rotate failed: ${String(err)}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  onMount(() => {
+    void (async (): Promise<void> => {
+      const wasm = await loadWasm();
+      const defaultPolicy = wasm.channelRotationPolicyDefault();
+      policy = defaultPolicy;
+      await loadOrSeedState();
+      refreshStatus();
+      cron = startRotationCron({
+        context: context(),
+        policy: defaultPolicy,
+        loadState: (): Promise<ChannelRotationState> => loadOrSeedState(),
+        onError: (err: unknown): void => {
+          setError(`Rotation check failed: ${String(err)}`);
+        },
+      });
+    })();
+  });
+
+  onCleanup(() => {
+    cron?.stop();
+    cron = null;
+  });
+
+  return (
+    <div
+      style={{
+        "margin-bottom": "20px",
+        padding: "12px",
+        "background-color": COLOURS.surface,
+        "border-radius": "8px",
+      }}
+    >
+      <h2 style={{ margin: "0 0 6px 0", "font-size": "15px" }}>Key rotation</h2>
+      <p
+        style={{
+          margin: "0 0 8px 0",
+          "font-size": "12px",
+          color: COLOURS.textSecondary,
+          "line-height": "1.6",
+        }}
+      >
+        Rotates the channel content key on a schedule (every 24 h or 1000
+        posts) and reseals it to every subscriber — backward secrecy for past
+        keys.
+      </p>
+      <div
+        style={{
+          "font-size": "12px",
+          color: COLOURS.textSecondary,
+          "font-family": "monospace",
+          "margin-bottom": "10px",
+        }}
+      >
+        {status()}
+      </div>
+      <button
+        type="button"
+        disabled={busy()}
+        onClick={(): void => {
+          void onRotateNow();
+        }}
+        style={{
+          "background-color": COLOURS.accentBlue,
+          color: "#fff",
+          border: "none",
+          "border-radius": "6px",
+          padding: "6px 12px",
+          "font-size": "13px",
+          "font-weight": "500",
+          cursor: busy() ? "wait" : "pointer",
+          opacity: busy() ? "0.6" : "1",
+        }}
+      >
+        {busy() ? "Rotating…" : "Rotate now"}
+      </button>
+      <Show when={error() !== null}>
+        <div
+          style={{
+            "margin-top": "8px",
+            padding: "8px 10px",
+            "background-color": COLOURS.destructive,
+            color: "#fff",
+            "border-radius": "6px",
+            "font-size": "12px",
+          }}
+        >
+          {error()}
+        </div>
+      </Show>
+    </div>
+  );
+};
+
+/** Human-readable "N ago" for a bigint Unix-ms timestamp. */
+function relativeAgo(sinceMs: bigint): string {
+  const nowMs = BigInt(Date.now());
+  const deltaS = nowMs >= sinceMs ? Number((nowMs - sinceMs) / 1000n) : 0;
+  if (deltaS < 60) return "just now";
+  if (deltaS < 3600) return `${Math.floor(deltaS / 60)}m ago`;
+  if (deltaS < 86_400) return `${Math.floor(deltaS / 3600)}h ago`;
+  return `${Math.floor(deltaS / 86_400)}d ago`;
+}
+
+// ============================================================================
 // CoPublishersPanel — owner-side co-publisher management (ADR-0028 OQ3)
 // (lives inside ChannelView when the user holds publisher keys)
 // ============================================================================
@@ -909,19 +1248,20 @@ const ChannelView: Component = () => {
  *  subscriber fan-out. */
 const COPUBLISHER_POLL_INTERVAL_MS = 5_000;
 
-const CoPublishersPanel: Component<{ readonly channelIdHex: string }> = (
-  props,
-) => {
-  const auth = useAuth();
+const CoPublishersPanel: Component<{
+  readonly channelIdHex: string;
+  readonly publisherGroup: PublisherGroupHandle;
+  readonly identity: WasmIdentity;
+}> = (props) => {
   const [link, setLink] = createSignal<string | null>(null);
   const [pending, setPending] = createSignal<Uint8Array[]>([]);
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
 
+  // Shared handles come from `PublisherToolsPanel` (props); this panel does
+  // NOT open or free them — a second handle would fork the MLS epoch. `ds` is
+  // a stateless HTTP client, so a per-panel instance is fine.
   const ds = new DsClient();
-  // Long-lived wasm handles for the panel's lifetime; freed on cleanup.
-  let identity: WasmIdentity | null = null;
-  let pg: Awaited<ReturnType<typeof openPublisherGroup>> | null = null;
   let stopped = false;
 
   function hexOf(b: Uint8Array): string {
@@ -930,21 +1270,10 @@ const CoPublishersPanel: Component<{ readonly channelIdHex: string }> = (
     return s;
   }
 
-  async function ensureHandles(): Promise<boolean> {
-    if (pg !== null && identity !== null) return true;
-    const secrets = auth.identitySecrets();
-    if (secrets === null) return false;
-    const wasm = await loadWasm();
-    identity = wasm.Identity.fromSeed(secrets.accountIdentitySeed);
-    pg = await openPublisherGroup(identity, props.channelIdHex);
-    return true;
-  }
-
   async function refreshPending(): Promise<void> {
-    if (!(await ensureHandles()) || pg === null || identity === null) return;
     try {
-      await pollCoPublisherJournal(ds, identity, pg);
-      setPending(pendingCoPublishers(pg));
+      await pollCoPublisherJournal(ds, props.identity, props.publisherGroup);
+      setPending(pendingCoPublishers(props.publisherGroup));
     } catch (err) {
       setError(`Co-publisher poll failed: ${String(err)}`);
     }
@@ -954,11 +1283,13 @@ const CoPublishersPanel: Component<{ readonly channelIdHex: string }> = (
     setError(null);
     setBusy(true);
     try {
-      if (!(await ensureHandles()) || pg === null || identity === null) {
-        setError("Log in to create a co-publisher link.");
-        return;
-      }
-      setLink(await createCoPublisherLink(identity, pg, window.location.origin));
+      setLink(
+        await createCoPublisherLink(
+          props.identity,
+          props.publisherGroup,
+          window.location.origin,
+        ),
+      );
     } catch (err) {
       setError(`Create link failed: ${String(err)}`);
     } finally {
@@ -970,9 +1301,14 @@ const CoPublishersPanel: Component<{ readonly channelIdHex: string }> = (
     setError(null);
     setBusy(true);
     try {
-      if (pg === null || identity === null) return;
-      await approveCoPublisher(ds, identity, pg, ref, props.channelIdHex);
-      setPending(pendingCoPublishers(pg));
+      await approveCoPublisher(
+        ds,
+        props.identity,
+        props.publisherGroup,
+        ref,
+        props.channelIdHex,
+      );
+      setPending(pendingCoPublishers(props.publisherGroup));
     } catch (err) {
       setError(`Approve failed: ${String(err)}`);
     } finally {
@@ -983,9 +1319,8 @@ const CoPublishersPanel: Component<{ readonly channelIdHex: string }> = (
   function onReject(ref: Uint8Array): void {
     setError(null);
     try {
-      if (pg === null) return;
-      rejectCoPublisher(pg, ref);
-      setPending(pendingCoPublishers(pg));
+      rejectCoPublisher(props.publisherGroup, ref);
+      setPending(pendingCoPublishers(props.publisherGroup));
     } catch (err) {
       setError(`Reject failed: ${String(err)}`);
     }
@@ -1000,16 +1335,6 @@ const CoPublishersPanel: Component<{ readonly channelIdHex: string }> = (
   onCleanup(() => {
     stopped = true;
     clearInterval(handle);
-    try {
-      pg?.free();
-    } catch {
-      /* ignore */
-    }
-    try {
-      identity?.free();
-    } catch {
-      /* ignore */
-    }
   });
 
   return (
