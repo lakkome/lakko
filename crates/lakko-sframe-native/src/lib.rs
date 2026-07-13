@@ -83,8 +83,10 @@
 // contract we want, not the lint's suggested alternative.
 #![allow(clippy::same_length_and_capacity)]
 
+use std::sync::Mutex;
+
 use lakko_calls::sframe as core;
-use lakko_calls::{Error as CallsError, SframeHeader};
+use lakko_calls::{CallKeyRing as CoreRing, Error as CallsError, SframeHeader};
 
 // ---------------------------------------------------------------------
 // Status codes
@@ -556,6 +558,206 @@ pub unsafe extern "C" fn lakko_sframe_open_framed(
 }
 
 // ---------------------------------------------------------------------
+// CallKeyRing — mid-call overlap keyer (G-18, ADR-0029)
+// ---------------------------------------------------------------------
+
+/// Opaque overlap-window call-key ring — the current call key plus, during a
+/// mid-call rotation, the previous one retained for the overlap window so
+/// in-flight frames sealed under the old MLS epoch still open (ADR-0029). The
+/// per-frame open runs on libwebrtc's codec thread while a rekey / prune comes
+/// from the signaling thread, so the ring is `Mutex`-guarded internally — the
+/// bridge does not need its own lock.
+///
+/// Construct via [`lakko_sframe_call_key_ring_new`]; free via
+/// [`lakko_sframe_call_key_ring_free`].
+pub struct CallKeyRing {
+    inner: Mutex<CoreRing>,
+}
+
+/// Lock the ring, recovering the guard even if a prior holder panicked (the
+/// ring data stays valid — this crate has no panicking paths, so poison is a
+/// belt-and-braces case, never surfaced as a status).
+fn lock_ring(ring: &CallKeyRing) -> std::sync::MutexGuard<'_, CoreRing> {
+    ring.inner
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Construct a [`CallKeyRing`] from a 32-byte seed (the current epoch).
+///
+/// # Safety
+///
+/// - `seed_ptr` must point to at least `seed_len` valid bytes.
+/// - `out_ring` must be a writable `*mut CallKeyRing` storage cell.
+#[no_mangle]
+pub unsafe extern "C" fn lakko_sframe_call_key_ring_new(
+    seed_ptr: *const u8,
+    seed_len: usize,
+    out_ring: *mut *mut CallKeyRing,
+) -> LakkoSframeStatus {
+    if seed_ptr.is_null() || out_ring.is_null() {
+        return LakkoSframeStatus::NullPointer;
+    }
+    if seed_len != core::CALL_KEY_LEN {
+        return LakkoSframeStatus::BadSeedLength;
+    }
+    // SAFETY: pointer + length guarded above.
+    let seed_slice = unsafe { std::slice::from_raw_parts(seed_ptr, seed_len) };
+    let mut seed = [0_u8; core::CALL_KEY_LEN];
+    seed.copy_from_slice(seed_slice);
+    let boxed = Box::new(CallKeyRing {
+        inner: Mutex::new(CoreRing::from_seed(seed)),
+    });
+    // SAFETY: `out_ring` non-null + writable per the caller's contract.
+    unsafe {
+        *out_ring = Box::into_raw(boxed);
+    }
+    LakkoSframeStatus::Ok
+}
+
+/// Free a [`CallKeyRing`] from [`lakko_sframe_call_key_ring_new`]. Null is a
+/// no-op.
+///
+/// # Safety
+///
+/// Same matched-pair contract as [`lakko_sframe_call_key_free`].
+#[no_mangle]
+pub unsafe extern "C" fn lakko_sframe_call_key_ring_free(ring: *mut CallKeyRing) {
+    if ring.is_null() {
+        return;
+    }
+    // SAFETY: caller upheld the matched-pair contract.
+    let _ = unsafe { Box::from_raw(ring) };
+}
+
+/// Rotate the ring to a new-epoch 32-byte seed on a mid-call MLS epoch change,
+/// retaining the previous key until `now_ms + clamp(overlap_ms)` (ADR-0029).
+///
+/// # Safety
+///
+/// - `ring` must be a live pointer from [`lakko_sframe_call_key_ring_new`].
+/// - `seed_ptr` must point to at least `seed_len` valid bytes.
+#[no_mangle]
+pub unsafe extern "C" fn lakko_sframe_call_key_ring_rekey(
+    ring: *const CallKeyRing,
+    seed_ptr: *const u8,
+    seed_len: usize,
+    now_ms: u64,
+    overlap_ms: u64,
+) -> LakkoSframeStatus {
+    if ring.is_null() || seed_ptr.is_null() {
+        return LakkoSframeStatus::NullPointer;
+    }
+    if seed_len != core::CALL_KEY_LEN {
+        return LakkoSframeStatus::BadSeedLength;
+    }
+    // SAFETY: pointer + length guarded above.
+    let seed_slice = unsafe { std::slice::from_raw_parts(seed_ptr, seed_len) };
+    let mut seed = [0_u8; core::CALL_KEY_LEN];
+    seed.copy_from_slice(seed_slice);
+    // SAFETY: caller upheld the live-pointer contract.
+    let ring = unsafe { &*ring };
+    lock_ring(ring).rekey_from_seed_at(seed, now_ms, overlap_ms);
+    LakkoSframeStatus::Ok
+}
+
+/// Drop the retained previous key once it has expired at `now_ms`. Null is a
+/// no-op.
+///
+/// # Safety
+///
+/// `ring` must be null or a live pointer from
+/// [`lakko_sframe_call_key_ring_new`].
+#[no_mangle]
+pub unsafe extern "C" fn lakko_sframe_call_key_ring_prune(ring: *const CallKeyRing, now_ms: u64) {
+    if ring.is_null() {
+        return;
+    }
+    // SAFETY: caller upheld the live-pointer contract.
+    let ring = unsafe { &*ring };
+    lock_ring(ring).prune_expired(now_ms);
+}
+
+/// Derive the seal-side [`ParticipantKey`] for `sender_leaf` from the ring's
+/// CURRENT epoch. The bridge re-fetches this after a rekey to seal under the
+/// new key. On success `*out_pk` is a freshly-allocated pointer the caller owns
+/// (free via [`lakko_sframe_participant_key_free`]).
+///
+/// # Safety
+///
+/// - `ring` must be a live pointer from [`lakko_sframe_call_key_ring_new`].
+/// - `out_pk` must be a writable `*mut ParticipantKey` cell.
+#[no_mangle]
+pub unsafe extern "C" fn lakko_sframe_call_key_ring_participant_key(
+    ring: *const CallKeyRing,
+    sender_leaf: u32,
+    out_pk: *mut *mut ParticipantKey,
+) -> LakkoSframeStatus {
+    if ring.is_null() || out_pk.is_null() {
+        return LakkoSframeStatus::NullPointer;
+    }
+    // SAFETY: caller upheld the live-pointer contract.
+    let ring = unsafe { &*ring };
+    let Ok(pk) = lock_ring(ring).participant_key(sender_leaf) else {
+        return LakkoSframeStatus::KeyDerivation;
+    };
+    let boxed = Box::new(ParticipantKey { inner: pk });
+    // SAFETY: `out_pk` non-null + writable per the caller's contract.
+    unsafe {
+        *out_pk = Box::into_raw(boxed);
+    }
+    LakkoSframeStatus::Ok
+}
+
+/// Open an RFC 9605 framed wire frame with the overlap fall-back: try the
+/// current epoch's key for `sender_leaf`, and on an AEAD failure fall back to
+/// the retained previous key while its window is live (ADR-0029). Writes the
+/// recovered plaintext into a freshly-allocated buffer the caller MUST free via
+/// [`lakko_sframe_buffer_free`]. Any failure (malformed header, or AEAD failure
+/// under both keys) collapses to [`LakkoSframeStatus::AeadFailed`] — the shim
+/// drops the frame.
+///
+/// # Safety
+///
+/// - `ring` must be a live pointer from [`lakko_sframe_call_key_ring_new`].
+/// - `wire_ptr` may be null only when `wire_len == 0`.
+/// - `out_plaintext_ptr` / `out_plaintext_len` must be writable.
+#[no_mangle]
+pub unsafe extern "C" fn lakko_sframe_call_key_ring_open_framed_with_overlap(
+    ring: *const CallKeyRing,
+    sender_leaf: u32,
+    wire_ptr: *const u8,
+    wire_len: usize,
+    out_plaintext_ptr: *mut *mut u8,
+    out_plaintext_len: *mut usize,
+) -> LakkoSframeStatus {
+    if ring.is_null() || out_plaintext_ptr.is_null() || out_plaintext_len.is_null() {
+        return LakkoSframeStatus::NullPointer;
+    }
+    if wire_ptr.is_null() && wire_len != 0 {
+        return LakkoSframeStatus::NullPointer;
+    }
+    // SAFETY: pointer + length guarded above.
+    let wire = if wire_len == 0 {
+        &[]
+    } else {
+        unsafe { std::slice::from_raw_parts(wire_ptr, wire_len) }
+    };
+    // SAFETY: caller upheld the live-pointer contract.
+    let ring = unsafe { &*ring };
+    let Ok(plaintext) = lock_ring(ring).try_open_framed_with_overlap(sender_leaf, wire) else {
+        return LakkoSframeStatus::AeadFailed;
+    };
+    let (ptr, len) = vec_into_raw(plaintext);
+    // SAFETY: out-pointers non-null per the guard above.
+    unsafe {
+        *out_plaintext_ptr = ptr;
+        *out_plaintext_len = len;
+    }
+    LakkoSframeStatus::Ok
+}
+
+// ---------------------------------------------------------------------
 // Wire frame wrap / unwrap (RFC 9605 §4)
 // ---------------------------------------------------------------------
 
@@ -897,6 +1099,117 @@ mod tests {
             lakko_sframe_participant_key_free(receiver_ptr);
             lakko_sframe_call_key_free(ck_ptr);
         }
+    }
+
+    /// Seal `plaintext` for `leaf` through the ring's current participant key.
+    fn seal_via_ring(ring: *mut CallKeyRing, leaf: u32, plaintext: &[u8]) -> Vec<u8> {
+        let mut pk: *mut ParticipantKey = std::ptr::null_mut();
+        assert_eq!(
+            unsafe { lakko_sframe_call_key_ring_participant_key(ring, leaf, &mut pk) },
+            LakkoSframeStatus::Ok
+        );
+        let mut wire_ptr: *mut u8 = std::ptr::null_mut();
+        let mut wire_len: usize = 0;
+        assert_eq!(
+            unsafe {
+                lakko_sframe_seal_framed(
+                    pk,
+                    plaintext.as_ptr(),
+                    plaintext.len(),
+                    &mut wire_ptr,
+                    &mut wire_len,
+                )
+            },
+            LakkoSframeStatus::Ok
+        );
+        let wire = unsafe { std::slice::from_raw_parts(wire_ptr, wire_len) }.to_vec();
+        unsafe {
+            lakko_sframe_buffer_free(wire_ptr, wire_len);
+            lakko_sframe_participant_key_free(pk);
+        }
+        wire
+    }
+
+    /// Open `wire` for `leaf` through the ring's overlap fall-back. `None` on
+    /// any non-`Ok` status (the frame would be dropped).
+    fn open_via_ring(ring: *mut CallKeyRing, leaf: u32, wire: &[u8]) -> Option<Vec<u8>> {
+        let mut pt_ptr: *mut u8 = std::ptr::null_mut();
+        let mut pt_len: usize = 0;
+        let status = unsafe {
+            lakko_sframe_call_key_ring_open_framed_with_overlap(
+                ring,
+                leaf,
+                wire.as_ptr(),
+                wire.len(),
+                &mut pt_ptr,
+                &mut pt_len,
+            )
+        };
+        if status != LakkoSframeStatus::Ok {
+            return None;
+        }
+        let pt = unsafe { std::slice::from_raw_parts(pt_ptr, pt_len) }.to_vec();
+        unsafe { lakko_sframe_buffer_free(pt_ptr, pt_len) };
+        Some(pt)
+    }
+
+    /// The C ABI CallKeyRing overlap path (G-18, ADR-0029): a frame sealed under
+    /// epoch A still opens through the ring after a rekey to epoch B (overlap
+    /// window), a fresh epoch-B frame opens under the current key, and pruning
+    /// the expired window closes the fall-back.
+    #[test]
+    fn call_key_ring_overlap_round_trip() {
+        let seed_a = [0x11_u8; core::CALL_KEY_LEN];
+        let seed_b = [0x22_u8; core::CALL_KEY_LEN];
+        let leaf = 3_u32;
+
+        let mut ring: *mut CallKeyRing = std::ptr::null_mut();
+        assert_eq!(
+            unsafe { lakko_sframe_call_key_ring_new(seed_a.as_ptr(), seed_a.len(), &mut ring) },
+            LakkoSframeStatus::Ok
+        );
+
+        // Seal an epoch-A frame, still in flight when the rotation lands.
+        let old_wire = seal_via_ring(ring, leaf, b"old-epoch");
+
+        // Rotate to epoch B with a 1 s overlap window at t=1000 (expires 2000).
+        assert_eq!(
+            unsafe {
+                lakko_sframe_call_key_ring_rekey(ring, seed_b.as_ptr(), seed_b.len(), 1_000, 1_000)
+            },
+            LakkoSframeStatus::Ok
+        );
+
+        // A fresh epoch-B frame.
+        let new_wire = seal_via_ring(ring, leaf, b"new-epoch");
+
+        // Both open through the ring's overlap fall-back inside the window.
+        assert_eq!(
+            open_via_ring(ring, leaf, &old_wire),
+            Some(b"old-epoch".to_vec())
+        );
+        assert_eq!(
+            open_via_ring(ring, leaf, &new_wire),
+            Some(b"new-epoch".to_vec())
+        );
+
+        // Prune past the window → the old frame no longer opens; the new one does.
+        unsafe { lakko_sframe_call_key_ring_prune(ring, 2_000) };
+        assert_eq!(open_via_ring(ring, leaf, &old_wire), None);
+        assert_eq!(
+            open_via_ring(ring, leaf, &new_wire),
+            Some(b"new-epoch".to_vec())
+        );
+
+        // A wrong-length seed is refused.
+        let mut bad: *mut CallKeyRing = std::ptr::null_mut();
+        let short = [0u8; 31];
+        assert_eq!(
+            unsafe { lakko_sframe_call_key_ring_new(short.as_ptr(), short.len(), &mut bad) },
+            LakkoSframeStatus::BadSeedLength
+        );
+
+        unsafe { lakko_sframe_call_key_ring_free(ring) };
     }
 
     /// `sender_leaf` + `counter` getters return sentinel `u32::MAX`
