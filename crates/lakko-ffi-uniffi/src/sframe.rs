@@ -357,6 +357,126 @@ pub struct UnwrappedFrame {
     pub ciphertext: Vec<u8>,
 }
 
+/// FFI wrapper over [`lakko_calls::CallKeyRing`] — the mid-call SFrame overlap
+/// keyer (ADR-0029, G-18). Holds the current call key plus, during a rotation,
+/// the previous one for the overlap window. Wrapped in a `Mutex` because a
+/// mid-call rekey / prune mutates the ring while the platform's frame-decryptor
+/// delegate may concurrently open frames.
+#[derive(uniffi::Object)]
+pub struct CallKeyRing {
+    inner: Mutex<lakko_calls::CallKeyRing>,
+}
+
+#[uniffi::export]
+impl CallKeyRing {
+    /// Build a ring from a 32-byte call-key seed (the current epoch).
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::Call`] if `seed` is not exactly 32 bytes.
+    #[uniffi::constructor]
+    pub fn from_seed(seed: Vec<u8>) -> Result<std::sync::Arc<Self>, FfiError> {
+        let arr: [u8; core::CALL_KEY_LEN] = seed
+            .as_slice()
+            .try_into()
+            .map_err(|_| FfiError::Call("call-key ring seed must be exactly 32 bytes".into()))?;
+        Ok(std::sync::Arc::new(Self {
+            inner: Mutex::new(lakko_calls::CallKeyRing::from_seed(arr)),
+        }))
+    }
+
+    /// Rotate to a new-epoch seed on a mid-call MLS epoch change, retaining the
+    /// previous key until `now_ms + clamp(overlap_ms)` so in-flight frames
+    /// sealed under it still open (ADR-0008; C-8 / C-9 / C-10). `overlap_ms` is
+    /// clamped to `[OVERLAP_MIN_MS, OVERLAP_MAX_MS]`.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::Call`] if `seed` is not exactly 32 bytes.
+    #[uniffi::method]
+    pub fn rekey_from_seed_at(
+        &self,
+        seed: Vec<u8>,
+        now_ms: u64,
+        overlap_ms: u64,
+    ) -> Result<(), FfiError> {
+        let arr: [u8; core::CALL_KEY_LEN] = seed
+            .as_slice()
+            .try_into()
+            .map_err(|_| FfiError::Call("call-key ring seed must be exactly 32 bytes".into()))?;
+        self.inner
+            .lock()
+            .expect("call-key ring lock")
+            .rekey_from_seed_at(arr, now_ms, overlap_ms);
+        Ok(())
+    }
+
+    /// Drop the retained previous key once it has expired at `now_ms`. The
+    /// platform ticks this on its clock so the core owns the 1-second decision.
+    #[uniffi::method]
+    pub fn prune_expired(&self, now_ms: u64) {
+        self.inner
+            .lock()
+            .expect("call-key ring lock")
+            .prune_expired(now_ms);
+    }
+
+    /// `true` when a previous key is retained AND still inside its overlap
+    /// window at `now_ms`.
+    #[uniffi::method]
+    #[must_use]
+    pub fn has_live_previous(&self, now_ms: u64) -> bool {
+        self.inner
+            .lock()
+            .expect("call-key ring lock")
+            .has_live_previous(now_ms)
+    }
+
+    /// Derive the seal-side [`ParticipantKey`] for `sender_leaf` from the
+    /// current epoch. The caller re-fetches this after a `rekey_from_seed_at`
+    /// to seal under the new key.
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::Call`] if HKDF rejects the input (practically unreachable).
+    #[uniffi::method]
+    pub fn participant_key(
+        &self,
+        sender_leaf: u32,
+    ) -> Result<std::sync::Arc<ParticipantKey>, FfiError> {
+        let pk = self
+            .inner
+            .lock()
+            .expect("call-key ring lock")
+            .participant_key(sender_leaf)
+            .map_err(|e| FfiError::Call(format!("ring participant_key: {e:?}")))?;
+        Ok(std::sync::Arc::new(ParticipantKey {
+            inner: Mutex::new(pk),
+        }))
+    }
+
+    /// Open an RFC 9605 framed SFrame with the overlap fall-back: try the
+    /// current key for `sender_leaf`, and on an AEAD failure fall back to the
+    /// retained previous key while its window is live (ADR-0029).
+    ///
+    /// # Errors
+    ///
+    /// [`FfiError::Call`] on a malformed header, or AEAD auth failure under both
+    /// the current and previous keys.
+    #[uniffi::method]
+    pub fn open_framed_with_overlap(
+        &self,
+        sender_leaf: u32,
+        wire: Vec<u8>,
+    ) -> Result<Vec<u8>, FfiError> {
+        self.inner
+            .lock()
+            .expect("call-key ring lock")
+            .try_open_framed_with_overlap(sender_leaf, &wire)
+            .map_err(|e| FfiError::Call(format!("ring open_framed_with_overlap: {e:?}")))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -549,5 +669,60 @@ mod tests {
         let out = call_safety_number(vec![0u8; 32]).expect("32-byte seed");
         assert_eq!(out, "6397 5175 0657 3748");
         assert!(call_safety_number(vec![0u8; 31]).is_err());
+    }
+
+    #[test]
+    fn call_key_ring_from_seed_rejects_wrong_length() {
+        assert!(CallKeyRing::from_seed(vec![0u8; 31]).is_err());
+        assert!(CallKeyRing::from_seed(vec![0u8; 33]).is_err());
+        assert!(CallKeyRing::from_seed(vec![0u8; 32]).is_ok());
+    }
+
+    #[test]
+    fn call_key_ring_rekey_opens_both_epochs() {
+        let ring = CallKeyRing::from_seed(vec![0x11u8; 32]).expect("ring a");
+        let leaf = 3u32;
+        // Seal an old-epoch frame under seed A.
+        let pk_old = ring.participant_key(leaf).expect("pk old");
+        let old_wire = pk_old.seal_framed(b"old".to_vec()).expect("seal old");
+
+        // Rotate to epoch B with the default overlap window at t=1000.
+        ring.rekey_from_seed_at(vec![0x22u8; 32], 1_000, 1_000)
+            .expect("rekey");
+        assert!(ring.has_live_previous(1_500));
+
+        // Seal a new-epoch frame under seed B.
+        let pk_new = ring.participant_key(leaf).expect("pk new");
+        let new_wire = pk_new.seal_framed(b"new".to_vec()).expect("seal new");
+
+        // Both open through the ring's overlap fall-back.
+        assert_eq!(
+            ring.open_framed_with_overlap(leaf, old_wire).expect("old"),
+            b"old".to_vec()
+        );
+        assert_eq!(
+            ring.open_framed_with_overlap(leaf, new_wire).expect("new"),
+            b"new".to_vec()
+        );
+    }
+
+    #[test]
+    fn call_key_ring_prune_closes_the_overlap_window() {
+        let ring = CallKeyRing::from_seed(vec![0x11u8; 32]).expect("ring");
+        let leaf = 3u32;
+        let pk_old = ring.participant_key(leaf).expect("pk");
+        let old_wire = pk_old.seal_framed(b"old".to_vec()).expect("seal");
+        ring.rekey_from_seed_at(vec![0x22u8; 32], 1_000, 1_000)
+            .expect("rekey"); // expires at 2000
+
+        // Inside the window the old frame still opens.
+        assert!(ring
+            .open_framed_with_overlap(leaf, old_wire.clone())
+            .is_ok());
+
+        // At/after expiry, prune closes the window and the old frame is refused.
+        assert!(!ring.has_live_previous(2_000));
+        ring.prune_expired(2_000);
+        assert!(ring.open_framed_with_overlap(leaf, old_wire).is_err());
     }
 }

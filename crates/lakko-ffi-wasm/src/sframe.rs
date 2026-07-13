@@ -217,6 +217,126 @@ impl WasmParticipantKey {
     }
 }
 
+/// FFI wrapper over [`lakko_calls::CallKeyRing`] — the mid-call SFrame overlap
+/// keyer (ADR-0029, G-18). Holds the current call key plus, during a rotation,
+/// the previous one for the overlap window. `Mutex` because a mid-call rekey /
+/// prune mutates the ring while the receive-side worker may open frames.
+#[wasm_bindgen(js_name = "CallKeyRing")]
+pub struct WasmCallKeyRing {
+    inner: Mutex<lakko_calls::CallKeyRing>,
+}
+
+#[wasm_bindgen(js_class = "CallKeyRing")]
+impl WasmCallKeyRing {
+    /// Build a ring from a 32-byte call-key seed (the current epoch).
+    ///
+    /// # Errors
+    ///
+    /// `JsError` if `seed` is not exactly 32 bytes.
+    #[wasm_bindgen(constructor)]
+    pub fn new(seed: &[u8]) -> Result<WasmCallKeyRing, JsError> {
+        let arr: [u8; core::CALL_KEY_LEN] = seed
+            .try_into()
+            .map_err(|_| JsError::new("call-key ring seed must be exactly 32 bytes"))?;
+        Ok(WasmCallKeyRing {
+            inner: Mutex::new(lakko_calls::CallKeyRing::from_seed(arr)),
+        })
+    }
+
+    /// Rotate to a new-epoch seed on a mid-call MLS epoch change, retaining the
+    /// previous key until `now_ms + clamp(overlap_ms)` so in-flight frames
+    /// sealed under it still open (ADR-0008; C-8 / C-9 / C-10). `now_ms` +
+    /// `overlap_ms` cross to JS as `BigInt`.
+    ///
+    /// # Errors
+    ///
+    /// `JsError` if `seed` is not exactly 32 bytes.
+    #[wasm_bindgen(js_name = "rekeyFromSeedAt")]
+    pub fn rekey_from_seed_at(
+        &self,
+        seed: &[u8],
+        now_ms: u64,
+        overlap_ms: u64,
+    ) -> Result<(), JsError> {
+        let arr: [u8; core::CALL_KEY_LEN] = seed
+            .try_into()
+            .map_err(|_| JsError::new("call-key ring seed must be exactly 32 bytes"))?;
+        self.inner
+            .lock()
+            .expect("call-key ring lock")
+            .rekey_from_seed_at(arr, now_ms, overlap_ms);
+        Ok(())
+    }
+
+    /// Drop the retained previous key once it has expired at `now_ms`.
+    #[wasm_bindgen(js_name = "pruneExpired")]
+    pub fn prune_expired(&self, now_ms: u64) {
+        self.inner
+            .lock()
+            .expect("call-key ring lock")
+            .prune_expired(now_ms);
+    }
+
+    /// `true` when a previous key is retained AND still inside its overlap
+    /// window at `now_ms`.
+    #[wasm_bindgen(js_name = "hasLivePrevious")]
+    #[must_use]
+    pub fn has_live_previous(&self, now_ms: u64) -> bool {
+        self.inner
+            .lock()
+            .expect("call-key ring lock")
+            .has_live_previous(now_ms)
+    }
+
+    /// Derive the seal-side [`WasmParticipantKey`] for `sender_leaf` from the
+    /// current epoch. Re-fetched after a `rekeyFromSeedAt` to seal under the
+    /// new key.
+    ///
+    /// # Errors
+    ///
+    /// `JsError` on HKDF failure (practically unreachable).
+    #[wasm_bindgen(js_name = "participantKey")]
+    pub fn participant_key(&self, sender_leaf: u32) -> Result<WasmParticipantKey, JsError> {
+        let pk = self
+            .inner
+            .lock()
+            .expect("call-key ring lock")
+            .participant_key(sender_leaf)
+            .map_err(|e| {
+                JsError::new(&format!("call crypto error: ring participant_key: {e:?}"))
+            })?;
+        Ok(WasmParticipantKey {
+            inner: Mutex::new(pk),
+        })
+    }
+
+    /// Open an RFC 9605 framed SFrame with the overlap fall-back: try the
+    /// current key for `sender_leaf`, and on an AEAD failure fall back to the
+    /// retained previous key while its window is live (ADR-0029). The
+    /// receive-side path for the web worker across a mid-call rekey.
+    ///
+    /// # Errors
+    ///
+    /// `JsError` on a malformed header, or AEAD auth failure under both the
+    /// current and previous keys.
+    #[wasm_bindgen(js_name = "openFramedWithOverlap")]
+    pub fn open_framed_with_overlap(
+        &self,
+        sender_leaf: u32,
+        wire: &[u8],
+    ) -> Result<Vec<u8>, JsError> {
+        self.inner
+            .lock()
+            .expect("call-key ring lock")
+            .try_open_framed_with_overlap(sender_leaf, wire)
+            .map_err(|e| {
+                JsError::new(&format!(
+                    "call crypto error: ring open_framed_with_overlap: {e:?}"
+                ))
+            })
+    }
+}
+
 /// Output of [`WasmParticipantKey::seal`] — paired
 /// counter + ciphertext so the JS transformer can embed
 /// the counter in the SFrame wire header alongside the
