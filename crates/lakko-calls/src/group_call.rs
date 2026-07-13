@@ -60,7 +60,7 @@
 //! expiry **decision** lives here, not in three per-platform
 //! timers (G-18). [`GroupCallSession::refresh_call_key_at`]
 //! stamps the retained previous key with `now_ms + clamp(
-//! overlap_ms)` (default [`OVERLAP_DEFAULT_MS`] ≈ 1 s), and
+//! overlap_ms)` (default [`crate::OVERLAP_DEFAULT_MS`] ≈ 1 s), and
 //! [`GroupCallSession::prune_expired_previous`] drops it once
 //! the caller's clock passes that instant — so the platform
 //! only supplies `now`, while the bounds + the 1-second policy
@@ -77,6 +77,7 @@ use std::collections::BTreeMap;
 use lakko_mls::identity::Identity;
 use lakko_mls::Group;
 
+use crate::call_key_ring::{clamp_overlap, CallKeyRing};
 use crate::error::Result;
 use crate::sframe::{CallKey, ParticipantKey};
 use crate::signaling::{CallId, SignalingBody};
@@ -141,18 +142,12 @@ pub struct GroupCallSession {
     /// `participant_key(own_leaf_index)` is the SEAL side
     /// of every outbound frame.
     pub own_leaf_index: u32,
-    /// 32-byte call-key seed. Re-derived from the MLS
-    /// exporter at every epoch change.
-    call_key: CallKey,
-    /// Previous-epoch seed retained for the 1-second
-    /// overlap window (Phase 3c5). [`Self::refresh_call_key`]
-    /// moves the current seed here; the receive path falls
-    /// back to it for frames sealed under the OLD key that
-    /// land after rotation. The caller invokes
-    /// [`Self::drop_previous_call_key`] when its overlap
-    /// timer fires, or — preferred — [`Self::prune_expired_previous`]
-    /// on its clock tick, letting the core own the expiry (G-18).
-    previous_call_key: Option<RetainedCallKey>,
+    /// The overlap-window call-key ring — the current [`CallKey`] plus, during
+    /// a rotation, the previous one retained for the 1-second overlap window.
+    /// The overlap logic (retain-until-expiry, clamp, try-current-then-previous)
+    /// lives once in [`CallKeyRing`] and is shared with the FFI-exposed client
+    /// media layers (G-18, ADR-0029).
+    ring: CallKeyRing,
     /// Participant ledger. `BTreeMap` over `HashMap` so
     /// the iter order is stable for snapshot helpers + so
     /// integration tests can pattern-match the layout.
@@ -160,34 +155,6 @@ pub struct GroupCallSession {
     /// Set to `true` on every membership change. The
     /// caller resets it after rekeying.
     needs_rekey: bool,
-}
-
-/// Default SFrame epoch-overlap window — the previous-epoch key is retained
-/// this long after a rotation so in-flight frames sealed under it still decode
-/// (ADR-0008; C-8 / C-9).
-pub const OVERLAP_DEFAULT_MS: u64 = 1_000;
-/// Lower clamp on the overlap window. Below this the retention is too brief to
-/// absorb in-flight frames.
-pub const OVERLAP_MIN_MS: u64 = 50;
-/// Upper clamp on the overlap window. Beyond this the previous key lingers long
-/// enough to weaken seed-boundary forward secrecy (C-9 / C-10).
-pub const OVERLAP_MAX_MS: u64 = 10_000;
-
-/// Clamp a caller-supplied overlap to `[OVERLAP_MIN_MS, OVERLAP_MAX_MS]`.
-#[must_use]
-fn clamp_overlap(overlap_ms: u64) -> u64 {
-    overlap_ms.clamp(OVERLAP_MIN_MS, OVERLAP_MAX_MS)
-}
-
-/// A previous-epoch [`CallKey`] retained for the overlap window, tagged with
-/// the wall-clock instant (the caller's millisecond clock) it expires at.
-///
-/// The core stays time-source-free: the caller supplies `now_ms`; the expiry
-/// **decision** (the 1-second window) lives here, not duplicated across three
-/// platform timers (G-18).
-struct RetainedCallKey {
-    key: CallKey,
-    expires_at_ms: u64,
 }
 
 impl GroupCallSession {
@@ -215,8 +182,7 @@ impl GroupCallSession {
             scope,
             call_id,
             own_leaf_index,
-            call_key,
-            previous_call_key: None,
+            ring: CallKeyRing::new(call_key),
             participants: BTreeMap::new(),
             needs_rekey: false,
         })
@@ -256,7 +222,7 @@ impl GroupCallSession {
     /// previous-epoch key until `now_ms + clamp(overlap_ms)`, so the 1-second
     /// overlap **decision** lives in the core rather than in three per-platform
     /// timers. `overlap_ms` is clamped to `[OVERLAP_MIN_MS, OVERLAP_MAX_MS]`
-    /// (pass [`OVERLAP_DEFAULT_MS`] for the ADR-0008 default). The caller still
+    /// (pass [`crate::OVERLAP_DEFAULT_MS`] for the ADR-0008 default). The caller still
     /// owns the wall clock — the core stays time-source-free.
     ///
     /// # Errors
@@ -280,13 +246,9 @@ impl GroupCallSession {
         expires_at_ms: u64,
     ) -> Result<()> {
         let next = CallKey::derive(group, identity, &self.call_id)?;
-        // C-10: overwrite any earlier stash — only the most-recent previous
-        // epoch is retained.
-        let prior = std::mem::replace(&mut self.call_key, next);
-        self.previous_call_key = Some(RetainedCallKey {
-            key: prior,
-            expires_at_ms,
-        });
+        // C-10: the ring overwrites any earlier stash — only the most-recent
+        // previous epoch is retained.
+        self.ring.rekey(next, expires_at_ms);
         self.own_leaf_index = group.own_leaf_index().u32();
         self.needs_rekey = true;
         Ok(())
@@ -427,7 +389,7 @@ impl GroupCallSession {
     /// Surfaces the same `Error::Crypto` shapes as
     /// [`CallKey::participant_key`].
     pub fn own_participant_key(&self) -> Result<ParticipantKey> {
-        self.call_key.participant_key(self.own_leaf_index)
+        self.ring.participant_key(self.own_leaf_index)
     }
 
     /// Re-derive a remote participant's OPEN key. The
@@ -444,7 +406,7 @@ impl GroupCallSession {
     ///
     /// See [`CallKey::participant_key`].
     pub fn remote_participant_key(&self, leaf_index: u32) -> Result<ParticipantKey> {
-        self.call_key.participant_key(leaf_index)
+        self.ring.participant_key(leaf_index)
     }
 
     /// `true` when the platform should re-derive every
@@ -469,7 +431,7 @@ impl GroupCallSession {
     /// the ledger (e.g. a passive observer mode).
     #[must_use]
     pub fn call_key(&self) -> &CallKey {
-        &self.call_key
+        self.ring.current()
     }
 
     /// Borrow the previous-epoch seed retained for the
@@ -482,7 +444,7 @@ impl GroupCallSession {
     /// rather than re-deriving from this directly.
     #[must_use]
     pub fn previous_call_key(&self) -> Option<&CallKey> {
-        self.previous_call_key.as_ref().map(|r| &r.key)
+        self.ring.previous()
     }
 
     /// Open a received SFrame with the 1-second overlap
@@ -521,26 +483,8 @@ impl GroupCallSession {
         ciphertext: &[u8],
         frame_counter: u32,
     ) -> Result<Vec<u8>> {
-        // Path 1 — current seed.
-        let current = self.call_key.participant_key(sender_leaf)?;
-        match current.open(aad, ciphertext, frame_counter) {
-            Ok(pt) => return Ok(pt),
-            Err(crate::Error::Crypto(_)) => {
-                // Fall through to the overlap-window path.
-            },
-            Err(other) => return Err(other),
-        }
-
-        // Path 2 — previous seed, if any. Outside an overlap
-        // window this collapses to a propagated AEAD
-        // rejection from path 1.
-        if let Some(prev) = self.previous_call_key.as_ref() {
-            let prev_key = prev.key.participant_key(sender_leaf)?;
-            return prev_key.open(aad, ciphertext, frame_counter);
-        }
-        Err(crate::Error::Crypto(
-            "frame failed authentication under current key (no overlap window active)".into(),
-        ))
+        self.ring
+            .try_open_with_overlap(sender_leaf, aad, ciphertext, frame_counter)
     }
 
     /// Drop the previous-epoch seed. Caller invokes this
@@ -552,7 +496,7 @@ impl GroupCallSession {
     /// Idempotent — calling without a stashed previous
     /// seed is a no-op.
     pub fn drop_previous_call_key(&mut self) {
-        self.previous_call_key = None;
+        self.ring.drop_previous();
     }
 
     /// Drop the previous-epoch key once it has expired at `now_ms` (G-18). The
@@ -561,11 +505,7 @@ impl GroupCallSession {
     /// a no-op when there is no previous key, or it is still inside its window,
     /// or it was retained with no expiry (via [`Self::refresh_call_key`]).
     pub fn prune_expired_previous(&mut self, now_ms: u64) {
-        if let Some(prev) = self.previous_call_key.as_ref() {
-            if now_ms >= prev.expires_at_ms {
-                self.previous_call_key = None;
-            }
-        }
+        self.ring.prune_expired(now_ms);
     }
 
     /// `true` when a previous-epoch key is retained AND still inside its
@@ -573,9 +513,7 @@ impl GroupCallSession {
     /// [`Self::refresh_call_key`]) is always live until dropped.
     #[must_use]
     pub fn has_live_previous(&self, now_ms: u64) -> bool {
-        self.previous_call_key
-            .as_ref()
-            .is_some_and(|prev| now_ms < prev.expires_at_ms)
+        self.ring.has_live_previous(now_ms)
     }
 }
 
@@ -609,6 +547,7 @@ pub enum SignalingOutcome {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::call_key_ring::{OVERLAP_DEFAULT_MS, OVERLAP_MAX_MS, OVERLAP_MIN_MS};
     use lakko_mls::Identity as MlsIdentity;
 
     fn make_pair() -> (Identity, Identity, Group) {

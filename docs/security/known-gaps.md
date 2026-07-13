@@ -1517,16 +1517,22 @@ parroted a stale `deny.toml` comment). The real status:
   `deny.toml` stands in the meantime; residual is near-zero per
   the reachability analysis above.
 
-### G-25: Three unmaintained-crate warnings — **two of three CLOSED (Jun 2026); one open (wasm-only, waits on openmls)**
+### G-25: Three unmaintained-crate warnings — **two of three CLOSED (Jun 2026); one open (wasm-only, non-CVE; self-serviceable `web-time` shim available, maintainer-deferred 2026-07)**
 
 The `cargo audit` baseline flagged three unmaintained-crate
 advisories. None are vulnerabilities — the maintainers wound
 down support, but the code works. Two were transitive through
 `uniffi 0.28.x` and **closed** by the `uniffi 0.28 → 0.31` bump
 (the same "major upstream bump drops the dep" remediation that
-closed G-24's `rsa` via sqlx 0.9). The third reaches us only on
-the wasm target via `openmls` and stays an accepted accept until
-openmls ships a release dropping `fluvio-wasm-timer`.
+closed G-24's `rsa` via sqlx 0.9). The third (`instant`) reaches
+us only on the wasm target via `openmls`'s `js` feature and is a
+non-CVE unmaintained advisory. It has a **self-serviceable fix
+that does not wait on openmls** — a `[patch.crates-io]` shim
+re-exporting the maintained `web-time` in place of
+`fluvio-wasm-timer` (detailed in the `instant` bullet below) —
+but the maintainer deferred it (2026-07) as supply-chain surgery
+disproportionate to a cosmetic-audit win; the accept posture
+stands until a clean `cargo audit` is required.
 
 - **`bincode 1.3.3`** (RUSTSEC-2025-0141) — **CLOSED
   (Jun 2026).** Was under `uniffi_macros 0.28.3 →
@@ -1547,17 +1553,58 @@ openmls ships a release dropping `fluvio-wasm-timer`.
   empty.
 
 - **`instant 0.1.13`** (RUSTSEC-2024-0384) — **OPEN
-  (accepted).** Under `parking_lot_core 0.8.6 →
-  parking_lot 0.11.2 → fluvio-wasm-timer 0.2.5 →
-  openmls 0.8.1`. A wasm-only timer abstraction — only the
-  wasm target compiles it (`cargo-deny` does not even
-  traverse it on the host target, so it never appears in a
-  `just audit` run here). Runtime impact: low. Not fixable
-  yet: openmls' latest release is **0.8.1** as of
-  2026-06-23 — the planned 0.9 (which drops
-  `fluvio-wasm-timer` for `web-time`) is unreleased. Re-check
-  on each openmls release; the openmls bump is an MLS-core
-  change requiring an ADR + property tests when it lands.
+  (accepted; maintainer-deferred 2026-07).** Under
+  `parking_lot_core 0.8.6 → parking_lot 0.11.2 →
+  fluvio-wasm-timer 0.2.5 → openmls 0.8.1`. A wasm-only
+  timer abstraction — only the wasm target compiles it
+  (`cargo-deny` does not even traverse it on the host
+  target, so it never appears in a `just audit` run here).
+  This is an **unmaintained** advisory, **not a
+  vulnerability** — no known CVE; the crate works.
+
+  **What functionality pulls it (verified 2026-07 against
+  the openmls 0.8.1 source):** `fluvio-wasm-timer` is an
+  optional openmls dependency gated behind openmls' `js`
+  feature, which Lakko enables in
+  [`crates/lakko-ffi-wasm/Cargo.toml`](../../crates/lakko-ffi-wasm/Cargo.toml)
+  (`openmls = { features = ["js"] }`). The `js` feature also
+  carries `getrandom/wasm_js` — mandatory (no RNG, hence no
+  MLS, on wasm without it) — so the feature itself cannot be
+  dropped. openmls `use`s the timer in exactly one place,
+  `src/key_packages/lifetime.rs`, under
+  `#[cfg(target_arch = "wasm32")]`, to read `SystemTime::now()`
+  for **KeyPackage lifetime (expiry) validation** — checking
+  a KeyPackage's `not_before` / `not_after` window when a
+  member is added or a group is joined on the web client. On
+  wasm `std::time::SystemTime::now()` panics (no OS clock), so
+  openmls substitutes `fluvio-wasm-timer`'s `SystemTime`
+  (backed by JS `Date.now()`). The functionality is genuine
+  and security-relevant (an expired KeyPackage must be
+  rejected), so the code path cannot simply be removed.
+
+  **A self-serviceable fix exists (deferred, not blocked on
+  openmls):** openmls consumes only `fluvio_wasm_timer::{SystemTime,
+  UNIX_EPOCH}`, and the maintained replacement `web-time`
+  exposes the same std-compatible surface. A `[patch.crates-io]`
+  entry pointing `fluvio-wasm-timer` at a tiny vendored shim
+  crate whose body is `pub use web_time::{SystemTime, UNIX_EPOCH};`
+  would satisfy openmls with **zero openmls source change** and
+  drop `instant` from the graph entirely (`cargo tree -i instant`
+  empty, incl. under wasm) — the same vendored-patch idiom Lakko
+  already uses for `webauthn-rs-core` and `hpke-rs-libcrux`, and
+  a net supply-chain improvement (an unmaintained crate replaced
+  by a maintained one). **Trade-off:** it is supply-chain surgery
+  (one more vendored micro-crate) for a **non-CVE** cosmetic-audit
+  win, so the maintainer deferred it (2026-07): stay on the accept
+  posture for now, apply the shim if/when a clean `cargo audit` is
+  required (e.g. an external-audit or launch gate).
+
+  The alternative upstream fix — openmls' planned 0.9 (which
+  swaps `fluvio-wasm-timer` for `web-time` itself) — is
+  unreleased and its timeline / scope are not guaranteed; when it
+  does land, the bump is an MLS-core change requiring an ADR +
+  property tests regardless. The shim above does **not** wait on
+  it.
 
 **The uniffi 0.28 → 0.31 bump cost zero source changes** —
 `lakko-ffi-uniffi` uses proc-macro mode (`setup_scaffolding!`)

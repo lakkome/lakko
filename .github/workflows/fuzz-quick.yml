@@ -78,6 +78,20 @@ jobs:
             manifest: crates/lakko-backup/fuzz/Cargo.toml
           - crate: lakko-transparency
             manifest: crates/lakko-transparency/fuzz/Cargo.toml
+          - crate: lakko-attest
+            manifest: crates/lakko-attest/fuzz/Cargo.toml
+          - crate: lakko-sync
+            manifest: crates/lakko-sync/fuzz/Cargo.toml
+          - crate: lakko-push
+            manifest: crates/lakko-push/fuzz/Cargo.toml
+          - crate: lakko-attachments
+            manifest: crates/lakko-attachments/fuzz/Cargo.toml
+          - crate: lakko-auth-token
+            manifest: crates/lakko-auth-token/fuzz/Cargo.toml
+          - crate: lakko-shamir
+            manifest: crates/lakko-shamir/fuzz/Cargo.toml
+          - crate: lakko-mnemonic
+            manifest: crates/lakko-mnemonic/fuzz/Cargo.toml
           - crate: lakko-svc-sfu
             manifest: services/sfu/fuzz/Cargo.toml
 

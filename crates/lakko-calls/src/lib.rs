@@ -47,6 +47,7 @@
 #![forbid(unsafe_code)]
 
 pub mod bandwidth;
+pub mod call_key_ring;
 pub mod codec_audio;
 pub mod codec_video;
 pub mod error;
@@ -60,13 +61,11 @@ pub mod sframe;
 pub mod signaling;
 
 pub use bandwidth::{BandwidthController, LayerSwitch, SimulcastLayer, CONFIRMATION_STREAK};
+pub use call_key_ring::{CallKeyRing, OVERLAP_DEFAULT_MS, OVERLAP_MAX_MS, OVERLAP_MIN_MS};
 pub use codec_audio::{OpusConfig, OpusProfile, OPUS_MAX_BITRATE_KBPS, OPUS_MIN_BITRATE_KBPS};
 pub use codec_video::{VideoCapability, VideoCodec};
 pub use error::{Error, Result};
-pub use group_call::{
-    GroupCallScope, GroupCallSession, Participant, SignalingOutcome, OVERLAP_DEFAULT_MS,
-    OVERLAP_MAX_MS, OVERLAP_MIN_MS,
-};
+pub use group_call::{GroupCallScope, GroupCallSession, Participant, SignalingOutcome};
 pub use header::{HeaderError, SframeHeader, MAX_HEADER_LEN};
 pub use link_invite::{accept_call_invite, AcceptedCallInvite};
 pub use quality::{
