@@ -138,6 +138,10 @@ export default function JoinCall() {
   // SaveFreshPhrasePrompt acknowledgement). `null` on the logged-in path.
   const [pendingJoin, setPendingJoin] = createSignal<DecodedCall | null>(null);
   let call: MultiJoinerCall | null = null;
+  // FINDING 5: synchronous double-tap latches (set BEFORE any await), so a
+  // rapid second tap can't mint a SECOND guest account or start a second call.
+  let mintingGuest = false;
+  let beginning = false;
 
   onCleanup(() => {
     call?.hangUp();
@@ -170,13 +174,17 @@ export default function JoinCall() {
     }
     // No session — mint a guest account. This flips auth to `save-fresh-phrase`
     // (the SaveFreshPhrasePrompt renders); the resume effect above continues
-    // the join once the session lands.
+    // the join once the session lands. The synchronous latch (set BEFORE the
+    // await) makes a rapid double-tap idempotent — never two guest accounts.
+    if (mintingGuest) return;
+    mintingGuest = true;
     setError(null);
     setPhase("starting");
     setPendingJoin(d);
     try {
       await auth.signupGuest();
     } catch (err) {
+      mintingGuest = false; // allow a retry after a failed mint
       setPendingJoin(null);
       setError(err instanceof Error ? err.message : String(err));
       setPhase("error");
@@ -185,16 +193,21 @@ export default function JoinCall() {
 
   /** Run the actual ADR-0032 host/join now that a live session exists. */
   async function beginJoin(d: DecodedCall): Promise<void> {
-    if (call !== null) return;
+    // Synchronous latch (FINDING 5): guard against a rapid double-tap starting
+    // two SFU sessions before `call` is assigned past the first `await`.
+    if (call !== null || beginning) return;
+    beginning = true;
     const identity = chats.identity();
     const secrets = auth.identitySecrets();
     const base = sfuBaseUrl();
     if (identity === null || secrets === null) {
+      beginning = false;
       setError("Re-authenticate to join this call (no live session).");
       setPhase("error");
       return;
     }
     if (base === null) {
+      beginning = false;
       setError(
         "This client has no SFU endpoint — set VITE_LAKKO_SFU_URL and rebuild.",
       );
@@ -240,6 +253,7 @@ export default function JoinCall() {
         if (phase() === "starting") setPhase("waiting");
       }
     } catch (err) {
+      beginning = false; // start failed (call unset) — allow a retry
       setError(err instanceof Error ? err.message : String(err));
       setPhase("error");
     }

@@ -163,9 +163,15 @@ export class MultiJoinerCall {
   private localLeaf: number | null = null;
   private joined = false;
 
-  /** G-22 dedup: KeyPackage dedup-key → wrapped Welcome. A re-sent KP is
-   *  idempotent (add-once) and re-serves the stored Welcome. */
-  private readonly admitted = new Map<string, Uint8Array>();
+  /** G-22 dedup (FINDING 4). Keyed on the relay `from` SFU peer id → wrapped
+   *  Welcome, so ONE SFU-admitted peer is admitted at most once per call —
+   *  even if it re-mints FRESH KeyPackages — and a retry re-serves the stored
+   *  Welcome. Plus an exact-KP-bytes guard for an identical re-send.
+   *  TODO(ADR-0032/G-22): the ideal is per-joiner-SIGNATURE-KEY dedup, but the
+   *  wasm exposes no KeyPackage signature-key reader yet — switch to it once an
+   *  FFI helper (e.g. `keyPackageSignatureKey`) lands. */
+  private readonly admittedByPeer = new Map<string, Uint8Array>();
+  private readonly admittedByKp = new Set<string>();
   /** The joiner's wrapped KeyPackage, (re)broadcast until it has joined. */
   private pendingKeyPackage: Uint8Array | null = null;
   /** Joiner admission-timeout handle; `null` once cleared (joined / dead). */
@@ -479,11 +485,15 @@ export class MultiJoinerCall {
     if (this.group === null || this.localLeaf === null) return;
     if (!this.isActingCommitter()) return;
 
-    const dedupKey = hexKey(kpEnvelope);
-    const existing = this.admitted.get(dedupKey);
-    if (existing !== undefined) {
-      // Idempotent: re-serve the stored Welcome (a joiner that lost it).
-      this.session.sendSignalRelayToPeer(from, existing);
+    // FINDING 4: dedup on the SFU `from` peer id (and the exact KP bytes) so a
+    // peer minting fresh KeyPackages is not added as multiple leaves.
+    const kpKey = hexKey(kpEnvelope);
+    const priorWelcome = this.admittedByPeer.get(from);
+    if (priorWelcome !== undefined || this.admittedByKp.has(kpKey)) {
+      // Idempotent: re-serve the stored Welcome (a peer that lost it).
+      if (priorWelcome !== undefined) {
+        this.session.sendSignalRelayToPeer(from, priorWelcome);
+      }
       return;
     }
 
@@ -504,7 +514,8 @@ export class MultiJoinerCall {
       console.warn("multi-joiner: addMember failed", err);
       return;
     }
-    this.admitted.set(dedupKey, welcomeWrapped);
+    this.admittedByPeer.set(from, welcomeWrapped);
+    this.admittedByKp.add(kpKey);
     // Bind the new joiner's peer → its member key for presence.
     for (const m of this.groupMembers()) {
       if (!beforeKeys.has(m.signatureKeyHex)) {
@@ -530,6 +541,32 @@ export class MultiJoinerCall {
       console.warn("multi-joiner: joinFromWelcome failed", err);
       return;
     }
+
+    // FINDING 2 (defence-in-depth vs the successor-redirect residual): confirm
+    // the JOINED group actually contains the OWNER whose signature the SIGNED
+    // capability carried. The owner key comes from the capability (not from any
+    // peer), so a Welcome that lands us in an impostor's isolated group — no
+    // owner leaf — is a redirect. Refuse it fail-closed (invariant #4): never
+    // publish media, tear down, surface a clear error. A guest gets this check
+    // too (the owner key is in the signed capability, not peer-asserted).
+    const joinedKeys = (group.members() as WasmGroupMember[]).map((m) =>
+      hexKey(m.signaturePublicKey),
+    );
+    if (!joinedKeys.includes(this.ownerKeyHex)) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        "multi-joiner: joined a group without the capability owner — redirect refused",
+      );
+      this.timedOut = true;
+      this.pendingKeyPackage = null;
+      this.clearAdmissionTimer();
+      this.session.hangUp();
+      this.opts.onError?.(
+        new Error("Joined the wrong call — the owner is not in this group."),
+      );
+      return;
+    }
+
     this.group = group;
     this.localLeaf = group.ownLeafIndex;
     this.joined = true;
