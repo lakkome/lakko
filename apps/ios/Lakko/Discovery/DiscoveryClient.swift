@@ -332,7 +332,7 @@ public final class DiscoveryClient {
                 "channelId must be \(Self.channelIdLength) bytes"
             )
         }
-        let blinder = try OprfBlinder.blind(username: handle)
+        let blinder = try OprfBlinder.blindChannel(handle: handle)
 
         let challenge1 = try await powChallenge()
         let pow1 = try await solvePow(
@@ -371,7 +371,7 @@ public final class DiscoveryClient {
     /// not-found path is folded into a `nil` return so a not-found is
     /// visible in the type rather than an exception.
     public func lookupChannel(handle: String) async throws -> String? {
-        let blinder = try OprfBlinder.blind(username: handle)
+        let blinder = try OprfBlinder.blindChannel(handle: handle)
 
         let challenge1 = try await powChallenge()
         let pow1 = try await solvePow(

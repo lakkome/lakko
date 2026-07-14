@@ -102,6 +102,27 @@ impl OprfBlinder {
         })
     }
 
+    /// Domain-separated `@channel` variant of [`Self::blind`]. Blinds
+    /// the channel namespace's OPRF input (`CHANNEL_OPRF_DOMAIN ‖
+    /// normalise(handle)`), so a channel handle never produces the same
+    /// OPRF hash as the identical string used as a `@username`
+    /// (lakko-security channels review, Finding 2). Both the channel
+    /// register and lookup paths MUST blind with this method so their
+    /// hashes agree.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::blind`] — throws on an empty-after-normalisation
+    /// handle or an OPRF blinding failure.
+    #[wasm_bindgen(js_name = blindChannel)]
+    pub fn blind_channel(handle: &str) -> Result<OprfBlinder, JsError> {
+        let (blinder, blinded_b64) = InnerBlinder::blind_channel(handle).map_err(discovery_err)?;
+        Ok(Self {
+            inner: Mutex::new(Some(blinder)),
+            blinded_b64,
+        })
+    }
+
     /// Base64-encoded blinded element — the `blinded` field of
     /// `/discovery/oprf`'s request body.
     #[wasm_bindgen(getter, js_name = blindedB64)]

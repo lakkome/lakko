@@ -1709,7 +1709,7 @@ export class DiscoveryClient {
       throw new DiscoveryClientArgError("channelId must be 16 bytes");
     }
     const wasm = await loadWasm();
-    const blinder = wasm.OprfBlinder.blind(handle);
+    const blinder = wasm.OprfBlinder.blindChannel(handle);
     const normalisedHandle = blinder.normalizedUsername;
 
     // PoW₁ for /discovery/oprf.
@@ -1752,7 +1752,7 @@ export class DiscoveryClient {
    */
   async lookupChannel(handle: string): Promise<ChannelLookupResult> {
     const wasm = await loadWasm();
-    const blinder = wasm.OprfBlinder.blind(handle);
+    const blinder = wasm.OprfBlinder.blindChannel(handle);
     const normalisedHandle = blinder.normalizedUsername;
 
     const challenge1 = await this.fetchChallenge();

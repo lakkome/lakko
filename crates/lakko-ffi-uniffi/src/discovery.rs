@@ -108,6 +108,27 @@ impl OprfBlinder {
         })
     }
 
+    /// Domain-separated `@channel` variant of [`Self::blind`]. Blinds
+    /// the channel-namespace OPRF input (`CHANNEL_OPRF_DOMAIN ‖
+    /// normalise(handle)`), so a channel handle never produces the same
+    /// OPRF hash as the identical string used as a `@username`
+    /// (lakko-security channels review, Finding 2). Both the channel
+    /// register and lookup paths MUST use this constructor so their
+    /// hashes agree.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::blind`] — an empty-after-normalisation handle or
+    /// an OPRF blind failure.
+    #[uniffi::constructor]
+    pub fn blind_channel(handle: String) -> Result<Self, FfiError> {
+        let (blinder, blinded_b64) = InnerBlinder::blind_channel(&handle)?;
+        Ok(Self {
+            inner: Mutex::new(Some(blinder)),
+            blinded_b64,
+        })
+    }
+
     /// Base64-encoded blinded element. Goes into the `blinded`
     /// field of the `/discovery/oprf` request body. Cheap to
     /// read; the cached string is cloned per call.

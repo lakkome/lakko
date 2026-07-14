@@ -617,7 +617,7 @@ public class DiscoveryClient(
         if (channelId.size != CHANNEL_ID_LEN) {
             throw DiscoveryClientArgError("channelId must be $CHANNEL_ID_LEN bytes")
         }
-        return OprfBlinder.blind(handle).use { blinder ->
+        return OprfBlinder.blindChannel(handle).use { blinder ->
             val challenge1 = powChallenge()
             val pow1 = solvePow(challenge1.seed, challenge1.effort_bits, powDispatcher)
             val oprfResp = oprfEvaluate(
@@ -657,7 +657,7 @@ public class DiscoveryClient(
      * Unauthenticated (the lookup path is open); anonymous-safe.
      */
     public suspend fun lookupChannel(handle: String): String? {
-        return OprfBlinder.blind(handle).use { blinder ->
+        return OprfBlinder.blindChannel(handle).use { blinder ->
             val challenge1 = powChallenge()
             val pow1 = solvePow(challenge1.seed, challenge1.effort_bits, powDispatcher)
             val oprfResp = oprfEvaluate(
