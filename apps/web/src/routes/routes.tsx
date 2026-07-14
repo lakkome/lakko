@@ -43,8 +43,10 @@ import DevProbe from "./DevProbe";
 import Devices from "./Devices";
 import Invite from "./Invite";
 import JoinGroup from "./JoinGroup";
+import JoinCall from "./JoinCall";
 import NotFound from "./NotFound";
 import {
+  callJoinRoutePattern,
   callRoutePattern,
   channelRoutePattern,
   channelSubscribeRoutePattern,
@@ -96,6 +98,13 @@ export const routes: RouteDefinition[] = [
   // component decodes + verifies the capability and drives the request-to-join
   // flow, prompting anonymous visitors to log in first.
   { path: groupJoinRoutePattern, component: JoinGroup },
+
+  // Multi-joiner call-invite landing (ADR-0032, G-21/G-22) — same public
+  // posture: whoever opens a `/c/<slug>` call link lands here; the component
+  // decodes + verifies the CallInviteCapability and drives the join (or, when
+  // the visitor is the owner, the host) flow, prompting anon visitors to log
+  // in first.
+  { path: callJoinRoutePattern, component: JoinCall },
 
   // Protected pages — every child renders inside <AppShell />.
   {

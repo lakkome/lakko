@@ -331,8 +331,9 @@ This repo ships domain-specialist skills under `.claude/skills/`. They carry the
 | Reviewing security-sensitive changes (crypto / MLS / transport / auth) | `lakko-security` (run ONLY on explicit maintainer request — never auto-gate) |
 
 Rules:
+- **UX-first for any user-facing feature.** If a feature involves user interaction — a new screen, a changed flow, a new interaction, anything a user sees or touches — designing the UX via `ux-ui` is one of the FIRST steps, BEFORE the architecture/schema/core implementation. The UX spec (states, flow, controls, empty/loading/error cases, cross-platform shape) shapes the contract; discovering a needed state after the core is built is a rework loop. This applies whether the work goes through `lakko-dev` or you handle it directly. Skip only for a purely non-user-facing change (backend / crypto / infra with no UI surface).
 - **Single-domain task** → invoke the one owning skill, then do the work.
-- **Cross-cutting task** (e.g. a Rust change wired through FFI to all 3 clients) → invoke `lakko-dev` and let it sequence the work (schema → Rust core → FFI → parallel client fan-out → verify) via sub-agents.
+- **Cross-cutting task** (e.g. a Rust change wired through FFI to all 3 clients) → invoke `lakko-dev` and let it sequence the work (UX design first for user-facing work → schema → Rust core → FFI → parallel client fan-out → verify) via sub-agents.
 - The background skills (`rust-core`, `ios-client`, `android-client`, `web-client`, `sfu-media`, `infra-deploy`) are model-invocation only — YOU must call them; they do not self-trigger by path. Skipping the routing step is a process violation.
 - `lakko-security` is an explicit-request gate. You MAY remind the maintainer it is available when crypto/MLS/transport/auth is touched, but do NOT run it unprompted.
 

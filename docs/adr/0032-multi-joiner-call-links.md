@@ -165,6 +165,43 @@ founding) is a possible future hardening, out of scope for V1.
   succession); a v2 slimmer capability dropping the embedded owner-KP; a live
   deployed-SFU N-joiner + failover e2e (runtime-gated, like G-26).
 
+## UX (V1)
+
+The protocol above serves a **live, ad-hoc** call — not a persistent room:
+
+- **Owner hosts live; an empty call is dead.** The owner founds the group and
+  hosts it live; if the owner shares the link then leaves *before anyone has
+  joined*, the call is simply over (no live committer → nothing to found/admit
+  into). A joiner whose relayed KeyPackage gets no committer response within a
+  short window (~18 s) surfaces "this call has ended or isn't active" rather than
+  waiting forever. Once ≥1 other member is present, the deterministic election
+  keeps the call alive across the owner leaving (failover) as above.
+- **Guest join (no account required).** A joiner who opens `/c/<slug>` with **no
+  Lakko session** must still be able to join — so a full account is auto-created
+  on the "Join" tap via `signupGuest` (web `AuthContext`): it reuses the audited
+  `signup` machinery verbatim (OPAQUE registration under a random never-shown
+  password, device-key bootstrap, first-ever identity-bundle publish with the
+  G-30 genesis leaf-auth) but **skips `registerUsername`** — yielding a
+  **username-less full account** with phrase-only recovery. It lands via the
+  existing `save-fresh-phrase` state so the guest saves their recovery phrase;
+  **claiming a username is the later onboarding step** (a random `guest-xxxx`
+  handle is deliberately NOT minted — usernames are first-come immutable, so
+  auto-squatting would block the user's real choice). `signupGuest` adds no new
+  crypto; it is a new *entry point* to the existing account-creation path,
+  reachable pre-ACCESS from a public link — offered to `lakko-security`.
+- **Account-creation-spam mitigation (deferred backend sprint).** Auto-minting an
+  account per anonymous link visit is an account-creation-spam surface. The
+  mitigation is an **intelligent throttle at the call-admission / auth layer**
+  (which sees `(account_id, call_id)` + account age per JWT mint): a burst of
+  new-account joins on one link → **end the call + throttle further new joins on
+  that link**. An automatic **owner-suspension** on such a burst is gated on a
+  hard-to-forge abuse signal (App Attest / Play Integrity / device / a PoW cost
+  on the guest mint), NOT the raw "many new accounts on `call_id`" counter —
+  otherwise it is weaponisable (flood a victim's link → suspend the victim); the
+  residual is low for privately-shared links (the attacker needs the link, which
+  the owner hands only to intended people). This throttle is a separate backend
+  arc; the client flow functions without it.
+
 ## References
 
 - [ADR-0009](0009-link-based-call-invitations.md) — the link-based call-invite

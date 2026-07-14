@@ -82,6 +82,17 @@ export const paths = {
     return `/call/${callIdB64Url}`;
   },
   /**
+   * Multi-joiner call-invite landing (ADR-0032, G-21/G-22). `slug` is the
+   * base64url-no-pad of a `CallInviteCapability` blob_id (pointer form) or
+   * the inline capability bytes — the same `/c/<slug>` link
+   * `calls/invite.ts::composeCallInviteUrl` mints. The landing screen
+   * decodes + verifies the capability and drives the joiner (or, when the
+   * visitor is the owner, the host) flow.
+   */
+  joinCall(slug: string): string {
+    return `/c/${slug}`;
+  },
+  /**
    * Channel list — Phase 4 G4-2. Shows the user's
    * registered channels with a + entry point that goes to
    * `paths.channelNew()`.
@@ -135,6 +146,14 @@ export const groupJoinRoutePattern = "/g/:slug" as const;
  * table.
  */
 export const callRoutePattern = "/call/:id" as const;
+
+/**
+ * The matchable pattern for the multi-joiner call-invite landing route
+ * (ADR-0032, G-21/G-22) — must stay in sync with `paths.joinCall(...)`.
+ * `slug` is the base64url-no-pad of a `CallInviteCapability` blob_id or the
+ * inline capability bytes.
+ */
+export const callJoinRoutePattern = "/c/:slug" as const;
 
 /**
  * The matchable pattern for the dynamic channel view route

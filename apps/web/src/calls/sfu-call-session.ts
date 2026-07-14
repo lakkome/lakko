@@ -70,8 +70,10 @@ import {
   type SfuPeerSnapshot,
   type SfuSdpAnswer,
   type SfuSdpOffer,
+  type SfuSignalRelay,
   type SfuWelcome,
 } from "./sfu-signaling-client";
+import { loadWasm } from "../wasm";
 import {
   attachReceiverSFrame,
   attachSenderSFrame,
@@ -110,14 +112,21 @@ export interface SfuCallConfig {
    * 32-byte per-call SFrame seed — the MLS exporter output
    * `Group.exportSecret("lakko/call/v1", callId, 32)`. Identical for
    * every participant in the same MLS epoch.
+   *
+   * Optional to support the ADR-0032 multi-joiner path: a link joiner
+   * connects signaling-only (`deferPublish`) and does NOT know the seed
+   * until it has joined the MLS group via the committer's Welcome. It
+   * then calls {@link SfuCallSession.publish} with the derived seed. On
+   * the normal group-call path the seed is present at construction.
    */
-  readonly seed: Uint8Array;
+  readonly seed?: Uint8Array;
   /**
    * This client's MLS leaf index — the KID it stamps into every SFrame
    * it seals. Remote receivers read it off the header to pick the
-   * matching per-sender key.
+   * matching per-sender key. Optional for the same reason as
+   * {@link seed} (a link joiner learns it only after joining).
    */
-  readonly localLeaf: number;
+  readonly localLeaf?: number;
   /** Mic / camera request. */
   readonly media: SfuCallMedia;
   /**
@@ -126,6 +135,16 @@ export interface SfuCallConfig {
    * `services/auth` `POST /call/turn-credential`.
    */
   readonly iceServers?: readonly RTCIceServer[];
+  /**
+   * ADR-0032: when `true`, {@link SfuCallSession.connect} opens the SFU
+   * signaling socket (so the peer can relay + receive the KeyPackage /
+   * Welcome handshake and appear on the roster) but does NOT capture or
+   * publish media. The caller drives media on later via
+   * {@link SfuCallSession.publish} once it holds a valid seed — the
+   * fail-closed "join media only after the Welcome" posture (invariant
+   * #4). Defaults to `false` (publish immediately, the normal path).
+   */
+  readonly deferPublish?: boolean;
 }
 
 /** A remote participant's media surfaced to the caller. */
@@ -159,6 +178,14 @@ export interface SfuCallCallbacks {
   onRemoteTrack?(remote: SfuRemoteTrack): void;
   /** The SFU reported a protocol-level error. */
   onServerError?(frame: SfuErrorFrame): void;
+  /**
+   * ADR-0032: an opaque peer-to-peer relay payload arrived over the SFU
+   * `signal-relay` frame. `from` is the sending peer's SFU peer id;
+   * `payload` is the decoded bytes (the SFU never inspects them —
+   * invariant #2). The multi-joiner orchestrator classifies these with
+   * `dispatchIncomingEnvelope` (CallKeyPackage / CallWelcome / commit).
+   */
+  onSignalRelay?(from: string, payload: Uint8Array): void;
 }
 
 const DEFAULT_ICE_SERVERS: readonly RTCIceServer[] = [
@@ -195,16 +222,21 @@ export class SfuCallSession {
   /** Ids of every attached SFrame transform (senders + receivers), so a
    *  mid-call rekey can target them all (G-18, ADR-0029). */
   private readonly transformIds = new Set<string>();
-  /** Call-key seed of the CURRENT MLS epoch. Starts at `config.seed` and
-   *  advances on `rekey` so a late-arriving receiver attaches at the current
-   *  epoch. */
-  private activeSeed: Uint8Array;
+  /** Call-key seed of the CURRENT MLS epoch. Starts at `config.seed` (or
+   *  `null` on the ADR-0032 deferred-publish path, set later by
+   *  {@link publish}) and advances on `rekey` so a late-arriving receiver
+   *  attaches at the current epoch. */
+  private activeSeed: Uint8Array | null;
+  /** This client's SFrame KID (MLS leaf). From `config.localLeaf`, or set
+   *  by {@link publish} on the deferred-publish path. */
+  private publishLeaf: number;
 
   constructor(
     private readonly config: SfuCallConfig,
     private readonly callbacks: SfuCallCallbacks = {},
   ) {
-    this.activeSeed = config.seed;
+    this.activeSeed = config.seed ?? null;
+    this.publishLeaf = config.localLeaf ?? 0;
   }
 
   /**
@@ -216,7 +248,7 @@ export class SfuCallSession {
    * attach at the new epoch. No-op if the seed is unchanged.
    */
   rekey(newSeed: Uint8Array): void {
-    if (seedsEqual(this.activeSeed, newSeed)) return;
+    if (this.activeSeed !== null && seedsEqual(this.activeSeed, newSeed)) return;
     this.activeSeed = newSeed;
     for (const id of this.transformIds) {
       rekeySFrame(id, newSeed);
@@ -263,6 +295,7 @@ export class SfuCallSession {
         onWelcome: (f): void => this.onWelcome(f),
         onPeerJoined: (f): void => this.onPeerJoined(f),
         onPeerLeft: (f): void => this.onPeerLeft(f),
+        onSignalRelay: (f): void => this.onSignalRelayFrame(f),
         onSdpAnswer: (f): void => void this.onSdpAnswer(f),
         onSdpOffer: (f): void => this.onSdpOffer(f),
         onServerError: (f): void => this.callbacks.onServerError?.(f),
@@ -277,13 +310,56 @@ export class SfuCallSession {
       throw err;
     }
 
-    // 2. Build the peer connection + capture + publish.
+    // 2. Build the peer connection + capture + publish — UNLESS the caller
+    //    asked to defer (ADR-0032 link joiner: stay signaling-only until it
+    //    holds a Welcome + a derived seed, then call `publish()`).
+    if (this.config.deferPublish === true) return;
     try {
       await this.openPeerConnectionAndPublish();
     } catch (err) {
       this.fail();
       throw err;
     }
+  }
+
+  /**
+   * ADR-0032: publish local media over the already-open signaling socket,
+   * arming SFrame on the supplied (or previously-set) seed + leaf. Used by
+   * the deferred-publish path once the client has joined the MLS group and
+   * derived the per-call seed — media only ever starts AFTER a valid seed
+   * is in hand (invariant #4, no plaintext-media fallback). Idempotent:
+   * a second call while a peer connection already exists is a no-op.
+   *
+   * @throws if no seed is available (never publishes unencrypted).
+   */
+  async publish(seed?: Uint8Array, localLeaf?: number): Promise<void> {
+    if (this.pc !== null) return;
+    if (seed !== undefined) this.activeSeed = seed;
+    if (localLeaf !== undefined) this.publishLeaf = localLeaf;
+    if (this.activeSeed === null) {
+      throw new Error(
+        "SfuCallSession.publish() called without a seed — refusing to " +
+          "publish media without SFrame encryption (security invariant #4)",
+      );
+    }
+    try {
+      await this.openPeerConnectionAndPublish();
+    } catch (err) {
+      this.fail();
+      throw err;
+    }
+  }
+
+  /** ADR-0032: relay an opaque payload to one peer (the KeyPackage / Welcome
+   *  handshake). No-op if signaling is not open. */
+  sendSignalRelayToPeer(peerId: string, payload: Uint8Array): void {
+    this.signaling?.sendSignalRelayToPeer(peerId, payload);
+  }
+
+  /** ADR-0032: relay an opaque payload to every other peer in the call (a
+   *  broadcast KeyPackage request or an MLS commit). No-op if not open. */
+  sendSignalRelayToCall(payload: Uint8Array): void {
+    this.signaling?.sendSignalRelayToCall(payload);
   }
 
   /** Mute / unmute the local microphone (local-only gate, no
@@ -419,6 +495,13 @@ export class SfuCallSession {
   // -----------------------------------------------------------------
 
   private async openPeerConnectionAndPublish(): Promise<void> {
+    if (this.activeSeed === null) {
+      throw new Error(
+        "openPeerConnectionAndPublish without a seed — refusing to publish " +
+          "media without SFrame encryption (security invariant #4)",
+      );
+    }
+    const seed = this.activeSeed;
     // Honour the picker-selected device at publish time (an `{ exact }`
     // deviceId constraint, else the OS default).
     const stream = await navigator.mediaDevices.getUserMedia({
@@ -447,8 +530,8 @@ export class SfuCallSession {
       const sender = pc.addTrack(track, stream);
       this.transformIds.add(
         attachSenderSFrame(sender, {
-          seed: this.activeSeed,
-          localLeaf: this.config.localLeaf,
+          seed,
+          localLeaf: this.publishLeaf,
         }),
       );
     }
@@ -469,7 +552,7 @@ export class SfuCallSession {
       // Decrypt incoming media; the worker reads the per-frame KID to
       // pick the right per-sender key, so one seed serves every sender.
       this.transformIds.add(
-        attachReceiverSFrame(ev.receiver, { seed: this.activeSeed }),
+        attachReceiverSFrame(ev.receiver, { seed }),
       );
       this.callbacks.onRemoteTrack?.({
         streamId: remoteStream.id,
@@ -515,6 +598,26 @@ export class SfuCallSession {
 
   private onPeerLeft(frame: SfuPeerLeft): void {
     this.callbacks.onPeerLeft?.(frame.peer_id);
+  }
+
+  /** ADR-0032: decode the opaque relay payload and hand it to the caller.
+   *  The SFU payload is base64; `sfuDecodePayload` (wasm) recovers the raw
+   *  bytes. wasm is already loaded (connect() awaited signaling.connect),
+   *  so the cached module resolves immediately. */
+  private onSignalRelayFrame(frame: SfuSignalRelay): void {
+    const cb = this.callbacks.onSignalRelay;
+    if (cb === undefined) return;
+    void (async (): Promise<void> => {
+      let payload: Uint8Array;
+      try {
+        const wasm = await loadWasm();
+        payload = wasm.sfuDecodePayload(frame.payload_b64);
+      } catch {
+        // A malformed relay payload is dropped, not fatal.
+        return;
+      }
+      cb(frame.from, payload);
+    })();
   }
 
   /** SFU's answer to our publish offer. */

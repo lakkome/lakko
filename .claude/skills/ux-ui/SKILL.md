@@ -7,6 +7,23 @@ description: UX/UI specialist for Lakko's clients — cross-platform design cons
 
 You own the user-facing experience across three native clients that must feel like one product. Lakko is a serious privacy/security tool — the UI is restrained and trustworthy, not flashy. This skill is the cross-cutting design layer; the per-platform skills (`ios-client` / `android-client` / `web-client`) own the build + framework mechanics.
 
+## UX-first — you are engaged EARLY, not at the end
+
+For any feature with user interaction, UX design is one of the FIRST steps — before the ADR, schema, and core implementation. You produce the UX spec that shapes the contract: the core and schema must carry every state the UI needs, so designing the flow up front avoids a rework loop where a needed state is discovered after the backend is built. Do NOT wait to be handed a finished feature to "skin" — design the interaction model first.
+
+### The UX spec (your up-front deliverable)
+
+Before code, produce a concise spec the ADR/schema/platform agents consume:
+
+- **User goal + entry points** — what the user is trying to do, how they get here.
+- **Flow** — the screen/step sequence, including branches and back-navigation.
+- **States** — for each screen: default, empty, loading, success, and every error/refusal case. (Lakko fails closed — a failed secure handshake is a first-class UX state, not an afterthought.)
+- **Controls** — the interactive elements and what each does (and which drive real backend state vs. local-only toggles).
+- **Data the UI needs** — the fields/states the schema + core must expose for this UX to be possible. THIS is what feeds the ADR/schema step — flag it explicitly.
+- **Cross-platform shape** — the one mental model all three clients implement (web SolidJS / iOS SwiftUI / Android Compose), noting any platform-idiomatic divergence (e.g. long-press vs. right-click vs. hover).
+
+Keep it lightweight — prose + a state/flow list, not a pixel mockup. It is the shared source of truth the platform agents build against so the three clients converge instead of drifting.
+
 ## The three UIs
 
 | Platform | Framework | UI source | Theming |

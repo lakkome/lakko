@@ -1,0 +1,686 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+/**
+ * ADR-0032 multi-joiner call-link orchestrator (web reference).
+ *
+ * Drives the "owner-founds + deterministic committer election" protocol on
+ * top of the EXISTING SFU signal-relay — no server change. This is the web
+ * reference the iOS + Android clients mirror.
+ *
+ * ## Roles
+ *
+ *   * **Owner** ({@link MultiJoinerCall.host}) — the sole founder. Calls
+ *     `new Group(identity)`, derives the SFrame seed, joins the SFU room,
+ *     and admits joiners (it is the acting committer while present).
+ *   * **Joiner** ({@link MultiJoinerCall.join}) — never founds a group.
+ *     Mints a fresh KeyPackage, connects to the SFU room signaling-only,
+ *     relays `wrapCallKeyPackage(kp)` to the room, waits for the committer's
+ *     `wrapCallWelcome(welcome)`, then `Group.joinFromWelcome` + derives the
+ *     same seed. Media publishes ONLY after the group is joined (invariant
+ *     #4 — no plaintext / half-open media).
+ *
+ * ## Committer election (survives the owner leaving)
+ *
+ * On every SFU roster change the acting committer is recomputed as a pure
+ * function of public state (`electCommitter`, via {@link electActingCommitterLeaf}):
+ * the owner if present, else the lowest-leaf present member. Only the member
+ * that IS the acting committer processes an inbound KeyPackage — everyone
+ * else drops it. Failover + reclaim fall out with no election protocol.
+ *
+ * ## Transport (reuse, no new SFU frame)
+ *
+ * The KeyPackage / Welcome / commit ride the existing opaque SFU
+ * `signal-relay` (`sendSignalRelayToCall` / `...ToPeer`). The committer
+ * classifies each inbound payload with `dispatchIncomingEnvelope`
+ * (CallKeyPackage / CallWelcome / IntroMessage). An MLS `Commit` that must
+ * reach existing members is broadcast raw; a receiver's dispatch classifies
+ * it as `IntroMessage` (fallback = verbatim bytes) and feeds it to
+ * `Group.processIncoming` inside a try/catch — a real intro / junk simply
+ * fails to apply and is ignored.
+ *
+ * ## Per-admission epoch advance + rekey
+ *
+ * Adding a member advances the MLS epoch, so the per-call SFrame seed
+ * changes. The committer (after `addMember`) and every existing member
+ * (after applying the broadcast commit) re-derive the seed and `rekey`
+ * their SFrame (G-18 / ADR-0029 overlap keyer); the new joiner starts at
+ * the post-add epoch. All participants converge on one seed per epoch.
+ *
+ * ## Deferred / stubbed (honest)
+ *
+ *   * **Admission** is AUTO for the reference — the acting committer adds
+ *     any valid KeyPackage. The ADR-0027 approve-toggle UI is a follow-up.
+ *   * **Non-owner presence** binding is best-effort (see `CallPresence`) —
+ *     the successor election among stranger joiners is the ADR-0032
+ *     low-severity residual.
+ *   * **Cold start** (owner not in a live room) via the stranger-inbox
+ *     welcome-ferry is not wired here — the reference covers the live path.
+ *   * A **live deployed-SFU** N-joiner + failover media round-trip is the
+ *     deferred runtime gate (like G-26).
+ */
+
+import { createSignal, type Accessor } from "solid-js";
+
+import { callActions, type Participant } from "../state/call-state";
+import { loadWasm } from "../wasm";
+import { groupIdHex } from "../devices/sync/state";
+import { CallJwtClient } from "./call-jwt-client";
+import { SfuCallSession } from "./sfu-call-session";
+import type { SfuPeerSnapshot } from "./sfu-signaling-client";
+import {
+  CallPresence,
+  electActingCommitterLeaf,
+  hexKey,
+  type ElectionMember,
+} from "./multi-joiner-election";
+import type {
+  Group as WasmGroup,
+  Identity as WasmIdentity,
+} from "../../wasm/lakko_ffi_wasm";
+
+/** MLS exporter label for the per-call SFrame seed (audit-pack C-1). Must
+ *  match every other client. */
+const CALL_SEED_LABEL = "lakko/call/v1";
+const CALL_SEED_LEN = 32;
+const PEER_PREFIX = "peer-";
+/**
+ * How long a joiner keeps relaying its KeyPackage before giving up. In the
+ * owner-founds model a call with no live committer is simply dead — the
+ * owner shared the link then left before anyone joined, or the call ended.
+ * After this window the joiner stops rebroadcasting and surfaces "this call
+ * has ended or isn't active" rather than waiting forever.
+ */
+const JOINER_ADMISSION_TIMEOUT_MS = 18_000;
+
+/** Runtime view of the loaded wasm namespace. */
+type WasmModule = Awaited<ReturnType<typeof loadWasm>>;
+/** Runtime shape of a `Group.members()` element. */
+interface WasmGroupMember {
+  readonly leafIndex: number;
+  readonly signaturePublicKey: Uint8Array;
+}
+
+/** Inputs shared by both roles. */
+export interface MultiJoinerCallOptions {
+  /** The canonical device `Identity` (`chats.identity()`). */
+  readonly identity: WasmIdentity;
+  /** 16-byte `call_id` from the capability. */
+  readonly callId: Uint8Array;
+  /** Owner's 16-byte `account_id` from the capability (for the owner's
+   *  per-call peer_tag → presence match). */
+  readonly ownerAccountId: Uint8Array;
+  /** Owner's 32-byte Ed25519 signature key from the capability (identifies
+   *  the owner's MLS leaf + is the election's `is_owner` anchor). */
+  readonly ownerSignatureKey: Uint8Array;
+  /** SFU WebSocket origin (`VITE_LAKKO_SFU_URL`). */
+  readonly sfuBaseUrl: string;
+  /** Live session token — mints the call-admission JWT. */
+  readonly sessionToken: string;
+  /** Mic / camera request. */
+  readonly media: { readonly audio: boolean; readonly video: boolean };
+  /** `services/auth` base URL for the JWT mint (default `/api/auth`). */
+  readonly authBaseUrl?: string;
+  /** ICE servers (default public STUN; TURN is a follow-up). */
+  readonly iceServers?: readonly RTCIceServer[];
+  /** Resolve a peer to a contact name (ADR-0021 peer_tag lookup). */
+  readonly resolveDisplayName?: (
+    peerId: string,
+    accountPseudonym: string,
+    peerTag: string | undefined,
+  ) => string;
+  /** Fired once this client has an MLS group + derived seed (owner: at
+   *  founding; joiner: on the Welcome). The landing page switches from
+   *  "waiting for owner" to the in-call view. */
+  readonly onJoined?: () => void;
+  /** Fired on the first `connected` SFU transition (media flowing). */
+  readonly onLive?: () => void;
+  /** Fired on a terminal (`closed` / `failed`) transition. */
+  readonly onEnded?: () => void;
+  /** Joiner only: no committer admitted this client within
+   *  {@link JOINER_ADMISSION_TIMEOUT_MS} — the call has no live committer
+   *  (owner left before anyone joined, or the call ended). The screen
+   *  surfaces "this call has ended or isn't active" instead of waiting. */
+  readonly onNoCommitter?: () => void;
+  /** Fired on a fatal setup error. */
+  readonly onError?: (err: unknown) => void;
+}
+
+/** The orchestrator instance IS the caller's handle. */
+export class MultiJoinerCall {
+  private readonly session: SfuCallSession;
+  private readonly presence: CallPresence;
+
+  /** Remote MSID stream id → live `MediaStream` (for the Call.tsx tiles). */
+  private readonly setRemoteStreams: (
+    fn: (prev: ReadonlyMap<string, MediaStream>) => ReadonlyMap<string, MediaStream>,
+  ) => void;
+  readonly remoteStreams: Accessor<ReadonlyMap<string, MediaStream>>;
+
+  /** The call MLS group (owner: founded; joiner: after the Welcome). */
+  private group: WasmGroup | null = null;
+  /** This client's MLS leaf once it has a group. */
+  private localLeaf: number | null = null;
+  private joined = false;
+
+  /** G-22 dedup: KeyPackage dedup-key → wrapped Welcome. A re-sent KP is
+   *  idempotent (add-once) and re-serves the stored Welcome. */
+  private readonly admitted = new Map<string, Uint8Array>();
+  /** The joiner's wrapped KeyPackage, (re)broadcast until it has joined. */
+  private pendingKeyPackage: Uint8Array | null = null;
+  /** Joiner admission-timeout handle; `null` once cleared (joined / dead). */
+  private admissionTimer: ReturnType<typeof setTimeout> | null = null;
+  /** `true` once the admission timeout fired — stops any further rebroadcast. */
+  private timedOut = false;
+  /** Canonical safety number of the CURRENT epoch (owner: from founding;
+   *  joiner: on join; both: refreshed on rekey). */
+  private safetyNumber: string | undefined;
+  private firedLive = false;
+
+  private constructor(
+    private readonly wasm: WasmModule,
+    private readonly opts: MultiJoinerCallOptions,
+    private readonly role: "owner" | "joiner",
+    jwt: string,
+    private readonly ownerKeyHex: string,
+    ownerPeerTag: string | null,
+    initialSeed: Uint8Array | undefined,
+    initialLeaf: number | undefined,
+  ) {
+    const [remoteStreams, setRemoteStreams] = createSignal<
+      ReadonlyMap<string, MediaStream>
+    >(new Map());
+    this.remoteStreams = remoteStreams;
+    this.setRemoteStreams = setRemoteStreams;
+    this.localLeaf = initialLeaf ?? null;
+
+    this.presence = new CallPresence(
+      hexKey(opts.identity.signaturePublicKey),
+      this.ownerKeyHex,
+      ownerPeerTag,
+    );
+
+    this.session = new SfuCallSession(
+      {
+        sfuBaseUrl: opts.sfuBaseUrl,
+        jwt,
+        media: opts.media,
+        // The joiner defers media until it holds a Welcome + seed; the owner
+        // has its seed at founding and publishes immediately.
+        deferPublish: role === "joiner",
+        // Omit undefined optionals (exactOptionalPropertyTypes).
+        ...(initialSeed !== undefined ? { seed: initialSeed } : {}),
+        ...(initialLeaf !== undefined ? { localLeaf: initialLeaf } : {}),
+        ...(opts.iceServers !== undefined
+          ? { iceServers: opts.iceServers }
+          : {}),
+      },
+      {
+        onStateChange: (s): void => this.onSessionState(s),
+        onWelcome: (self, roster): void => this.onSfuWelcome(self, roster),
+        onPeerJoined: (peerId, pseudo, tag): void =>
+          this.onSfuPeerJoined(peerId, pseudo, tag),
+        onPeerLeft: (peerId): void => this.onSfuPeerLeft(peerId),
+        onRemoteTrack: (rt): void => this.onRemoteTrack(rt.streamId, rt.stream),
+        onSignalRelay: (from, payload): void => this.onRelay(from, payload),
+      },
+    );
+  }
+
+  // -----------------------------------------------------------------
+  // Factories
+  // -----------------------------------------------------------------
+
+  /** Owner: found the call MLS group, derive the seed, connect + publish,
+   *  and start admitting joiners. */
+  static async host(opts: MultiJoinerCallOptions): Promise<MultiJoinerCall> {
+    const wasm = await loadWasm();
+    const callIdHex = groupIdHex(opts.callId);
+    const jwt = await mintJwt(wasm, opts, callIdHex);
+    const ownerKeyHex = hexKey(opts.ownerSignatureKey);
+
+    // Found the group (sole-founder — no race).
+    const group = new wasm.Group(opts.identity);
+    const seed = group.exportSecret(
+      opts.identity,
+      CALL_SEED_LABEL,
+      opts.callId,
+      CALL_SEED_LEN,
+    );
+    // Owner-presence rides `self` (ownerPeerTag = null on the owner's client).
+    const call = new MultiJoinerCall(
+      wasm,
+      opts,
+      "owner",
+      jwt,
+      ownerKeyHex,
+      null,
+      seed,
+      group.ownLeafIndex,
+    );
+    call.group = group;
+    call.safetyNumber = safeSafetyNumber(wasm, seed);
+    call.joined = true;
+    opts.onJoined?.();
+    await call.start();
+    return call;
+  }
+
+  /** Joiner: mint a fresh KeyPackage, connect signaling-only, relay the KP,
+   *  and wait for the committer's Welcome. */
+  static async join(opts: MultiJoinerCallOptions): Promise<MultiJoinerCall> {
+    const wasm = await loadWasm();
+    const callIdHex = groupIdHex(opts.callId);
+    const jwt = await mintJwt(wasm, opts, callIdHex);
+    const ownerKeyHex = hexKey(opts.ownerSignatureKey);
+    // The owner's per-call peer_tag lets a joiner detect owner presence on
+    // the SFU roster (ADR-0021 + ADR-0032 election).
+    const ownerPeerTag = wasm.sfuPeerTag(callIdHex, groupIdHex(opts.ownerAccountId));
+
+    const call = new MultiJoinerCall(
+      wasm,
+      opts,
+      "joiner",
+      jwt,
+      ownerKeyHex,
+      ownerPeerTag,
+      undefined,
+      undefined,
+    );
+    // Mint a fresh KeyPackage whose private keys persist in this identity's
+    // provider (so the SAME identity opens the Welcome later).
+    const kp = opts.identity.createKeyPackage();
+    call.pendingKeyPackage = wasm.wrapCallKeyPackage(kp);
+    await call.start();
+    // Start the admission clock only once signaling is open + the first
+    // broadcast is on its way (a call with no live committer is dead).
+    call.admissionTimer = setTimeout(
+      () => call.onAdmissionTimeout(),
+      JOINER_ADMISSION_TIMEOUT_MS,
+    );
+    return call;
+  }
+
+  private async start(): Promise<void> {
+    try {
+      await this.session.connect();
+    } catch (err) {
+      this.opts.onError?.(err);
+      throw err;
+    }
+  }
+
+  // -----------------------------------------------------------------
+  // Public handle
+  // -----------------------------------------------------------------
+
+  /** Look up a roster participant id (`peer-<id>`) to its live stream. */
+  remoteStreamFor(participantId: string): MediaStream | undefined {
+    const peerId = participantId.startsWith(PEER_PREFIX)
+      ? participantId.slice(PEER_PREFIX.length)
+      : participantId;
+    return this.remoteStreams().get(peerId);
+  }
+
+  /** Tear down the call. Idempotent. */
+  hangUp(): void {
+    this.clearAdmissionTimer();
+    this.session.hangUp();
+    this.setRemoteStreams(() => new Map());
+    callActions.reset();
+  }
+
+  private clearAdmissionTimer(): void {
+    if (this.admissionTimer !== null) {
+      clearTimeout(this.admissionTimer);
+      this.admissionTimer = null;
+    }
+  }
+
+  /** Joiner admission window elapsed with no Welcome — the call has no live
+   *  committer. Stop rebroadcasting, tear down signaling, surface the state. */
+  private onAdmissionTimeout(): void {
+    this.admissionTimer = null;
+    if (this.joined) return;
+    this.timedOut = true;
+    this.pendingKeyPackage = null;
+    this.session.hangUp();
+    this.opts.onNoCommitter?.();
+  }
+
+  /** Mute / unmute the local mic. */
+  setMicrophoneEnabled(on: boolean): void {
+    this.session.setMicrophoneEnabled(on);
+  }
+
+  /** Enable / disable the local camera. */
+  setCameraEnabled(on: boolean): void {
+    this.session.setCameraEnabled(on);
+  }
+
+  // -----------------------------------------------------------------
+  // SFU session callbacks → store + presence
+  // -----------------------------------------------------------------
+
+  private onSessionState(state: string): void {
+    switch (state) {
+      case "connecting":
+        callActions.setPhase({ kind: "connecting" });
+        break;
+      case "connected":
+        callActions.setPhase({ kind: "connected" });
+        callActions.setE2ee({
+          active: true,
+          shortFingerprint: this.safetyNumber ?? null,
+        });
+        if (!this.firedLive) {
+          this.firedLive = true;
+          this.opts.onLive?.();
+        }
+        break;
+      case "failed":
+      case "closed":
+        callActions.setPhase({ kind: "ended", endedAt: Date.now() });
+        this.opts.onEnded?.();
+        break;
+      default:
+        break;
+    }
+  }
+
+  private onSfuWelcome(
+    selfPeerId: string,
+    roster: readonly SfuPeerSnapshot[],
+  ): void {
+    this.presence.setRoster(
+      roster.map((p) => ({ peerId: p.peer_id, peerTag: p.peer_tag })),
+    );
+    const remotes = roster
+      .filter((p) => p.peer_id !== selfPeerId)
+      .map((p) =>
+        this.remoteParticipant(
+          this.nameOf(p.peer_id, p.account_pseudonym, p.peer_tag),
+          p.peer_id,
+        ),
+      );
+    callActions.setParticipants([this.localParticipant(), ...remotes]);
+    this.broadcastKeyPackage();
+  }
+
+  private onSfuPeerJoined(
+    peerId: string,
+    accountPseudonym: string,
+    peerTag: string | undefined,
+  ): void {
+    this.presence.addPeer(peerId, peerTag);
+    callActions.participantJoined(
+      this.remoteParticipant(
+        this.nameOf(peerId, accountPseudonym, peerTag),
+        peerId,
+      ),
+    );
+    // A newly-present peer may be a freshly-elected committer (owner
+    // reclaim / a successor); re-broadcast so it sees a still-pending join.
+    this.broadcastKeyPackage();
+  }
+
+  private onSfuPeerLeft(peerId: string): void {
+    this.presence.removePeer(peerId);
+    callActions.participantLeft(`${PEER_PREFIX}${peerId}`);
+    // The committer may have left → recompute (this client might now be it).
+    // No action needed beyond keeping presence current; the next inbound KP
+    // is evaluated against the fresh election.
+  }
+
+  private onRemoteTrack(streamId: string, stream: MediaStream): void {
+    this.setRemoteStreams((prev) => {
+      const next = new Map(prev);
+      next.set(streamId, stream);
+      return next;
+    });
+    const participantId = `${PEER_PREFIX}${streamId}`;
+    if (stream.getVideoTracks().length > 0) {
+      callActions.setParticipantCamera(participantId, true);
+    }
+  }
+
+  // -----------------------------------------------------------------
+  // ADR-0032 handshake dispatch
+  // -----------------------------------------------------------------
+
+  private onRelay(from: string, payload: Uint8Array): void {
+    let env: { kind: number; payload: Uint8Array };
+    try {
+      env = this.wasm.dispatchIncomingEnvelope(payload);
+    } catch {
+      return; // malformed relay payload — drop
+    }
+    const K = this.wasm.IncomingEnvelopeKind;
+    switch (env.kind) {
+      case K.CallKeyPackage:
+        this.onIncomingKeyPackage(from, env.payload);
+        break;
+      case K.CallWelcome:
+        this.onIncomingWelcome(from, env.payload);
+        break;
+      case K.IntroMessage:
+        // Not a call envelope — the fallback carries verbatim bytes, which
+        // for us is a broadcast MLS commit an existing member must apply.
+        this.onMaybeCommit(env.payload);
+        break;
+      default:
+        break;
+    }
+  }
+
+  /** Committer side: admit a joiner's KeyPackage (auto-admit for the
+   *  reference). Only the ACTING committer acts; everyone else drops it. */
+  private onIncomingKeyPackage(from: string, kpEnvelope: Uint8Array): void {
+    if (this.group === null || this.localLeaf === null) return;
+    if (!this.isActingCommitter()) return;
+
+    const dedupKey = hexKey(kpEnvelope);
+    const existing = this.admitted.get(dedupKey);
+    if (existing !== undefined) {
+      // Idempotent: re-serve the stored Welcome (a joiner that lost it).
+      this.session.sendSignalRelayToPeer(from, existing);
+      return;
+    }
+
+    // The joiner sends `wrapCallKeyPackage(kp)`; dispatch already stripped
+    // the domain separator, so `kpEnvelope` is the raw TLS KeyPackage.
+    const beforeKeys = new Set(
+      this.groupMembers().map((m) => m.signatureKeyHex),
+    );
+    let welcomeWrapped: Uint8Array;
+    let commit: Uint8Array;
+    try {
+      const added = this.group.addMember(this.opts.identity, kpEnvelope);
+      commit = added.commit;
+      welcomeWrapped = this.wasm.wrapCallWelcome(added.welcome);
+    } catch (err) {
+      // A malformed / already-used KeyPackage — refuse, do not advance.
+      // eslint-disable-next-line no-console
+      console.warn("multi-joiner: addMember failed", err);
+      return;
+    }
+    this.admitted.set(dedupKey, welcomeWrapped);
+    // Bind the new joiner's peer → its member key for presence.
+    for (const m of this.groupMembers()) {
+      if (!beforeKeys.has(m.signatureKeyHex)) {
+        this.presence.bindPeerToMember(from, m.signatureKeyHex);
+      }
+    }
+    // Deliver the Welcome to the joiner + broadcast the commit to the rest.
+    this.session.sendSignalRelayToPeer(from, welcomeWrapped);
+    this.session.sendSignalRelayToCall(commit);
+    // The add advanced our epoch → rekey to the new seed.
+    this.rekeyToCurrentEpoch();
+    this.refreshRoster();
+  }
+
+  /** Joiner side: open the committer's Welcome and go live. */
+  private onIncomingWelcome(from: string, welcomeEnvelope: Uint8Array): void {
+    if (this.role !== "joiner" || this.joined) return;
+    let group: WasmGroup;
+    try {
+      group = this.wasm.Group.joinFromWelcome(welcomeEnvelope, this.opts.identity);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("multi-joiner: joinFromWelcome failed", err);
+      return;
+    }
+    this.group = group;
+    this.localLeaf = group.ownLeafIndex;
+    this.joined = true;
+    this.pendingKeyPackage = null;
+    this.clearAdmissionTimer();
+
+    const seed = this.deriveSeed(group);
+    this.safetyNumber = safeSafetyNumber(this.wasm, seed);
+    // The committer (during the happy path, the owner) admitted us; bind its
+    // peer for presence when we can identify it as the owner.
+    if (this.presence.ownerPresent()) {
+      this.presence.bindPeerToMember(from, this.ownerKeyHex);
+    }
+    this.opts.onJoined?.();
+    // Publish media ONLY now — after joining + deriving the seed (invariant #4).
+    void this.session.publish(seed, this.localLeaf).catch((err) => {
+      this.opts.onError?.(err);
+    });
+    this.refreshRoster();
+  }
+
+  /** Existing member: apply a broadcast commit (epoch advance) + rekey. */
+  private onMaybeCommit(bytes: Uint8Array): void {
+    if (this.group === null) return;
+    try {
+      // The call group has no ADR-0022 role table — plain apply (the call
+      // path caveat). A non-commit / wrong-epoch / junk payload throws and
+      // is ignored.
+      this.group.processIncoming(this.opts.identity, bytes);
+    } catch {
+      return;
+    }
+    this.rekeyToCurrentEpoch();
+    this.refreshRoster();
+  }
+
+  // -----------------------------------------------------------------
+  // Election + epoch helpers
+  // -----------------------------------------------------------------
+
+  private isActingCommitter(): boolean {
+    if (this.group === null || this.localLeaf === null) return false;
+    const leaf = electActingCommitterLeaf(
+      this.wasm,
+      this.groupMembers(),
+      this.ownerKeyHex,
+      this.presence.presentKeySet(),
+    );
+    return leaf === this.localLeaf;
+  }
+
+  private groupMembers(): ElectionMember[] {
+    if (this.group === null) return [];
+    return (this.group.members() as WasmGroupMember[]).map((m) => ({
+      leafIndex: m.leafIndex,
+      signatureKeyHex: hexKey(m.signaturePublicKey),
+    }));
+  }
+
+  private deriveSeed(group: WasmGroup): Uint8Array {
+    return group.exportSecret(
+      this.opts.identity,
+      CALL_SEED_LABEL,
+      this.opts.callId,
+      CALL_SEED_LEN,
+    );
+  }
+
+  /** Re-derive the seed at the current epoch and rekey SFrame + the pill. */
+  private rekeyToCurrentEpoch(): void {
+    if (this.group === null) return;
+    const seed = this.deriveSeed(this.group);
+    this.session.rekey(seed);
+    this.safetyNumber = safeSafetyNumber(this.wasm, seed);
+    callActions.setE2ee({ active: true, shortFingerprint: this.safetyNumber ?? null });
+  }
+
+  /** Re-derive the store roster after a membership change (mostly a no-op —
+   *  the SFU roster drives the visible tiles; this keeps E2EE fresh). */
+  private refreshRoster(): void {
+    // Presence set drives the election on the next inbound KP; nothing to
+    // push to the store here (the SFU peer-joined/left events own the tiles).
+  }
+
+  private broadcastKeyPackage(): void {
+    if (this.joined || this.timedOut || this.pendingKeyPackage === null) return;
+    this.session.sendSignalRelayToCall(this.pendingKeyPackage);
+  }
+
+  // -----------------------------------------------------------------
+  // Store-participant helpers (ported from sfu-call-ui.ts)
+  // -----------------------------------------------------------------
+
+  private nameOf(
+    peerId: string,
+    pseudonym: string,
+    peerTag: string | undefined,
+  ): string {
+    return (
+      this.opts.resolveDisplayName?.(peerId, pseudonym, peerTag) ??
+      (pseudonym.length > 0 ? pseudonym.slice(0, 8) : "Peer")
+    );
+  }
+
+  private localParticipant(): Participant {
+    return {
+      id: "local",
+      displayName: "You",
+      isLocal: true,
+      micOn: this.opts.media.audio,
+      camOn: this.opts.media.video,
+      handRaised: false,
+      quality: "good",
+      speaking: false,
+      screenSharing: false,
+    };
+  }
+
+  private remoteParticipant(displayName: string, peerId: string): Participant {
+    return {
+      id: `${PEER_PREFIX}${peerId}`,
+      displayName,
+      isLocal: false,
+      micOn: true,
+      camOn: false,
+      handRaised: false,
+      quality: "good",
+      speaking: false,
+      screenSharing: false,
+    };
+  }
+}
+
+// ---- module helpers ------------------------------------------------
+
+async function mintJwt(
+  wasm: WasmModule,
+  opts: MultiJoinerCallOptions,
+  callIdHex: string,
+): Promise<string> {
+  const client = new CallJwtClient(wasm, opts.authBaseUrl);
+  client.setSessionToken(opts.sessionToken);
+  const minted = await client.mint(callIdHex, "participant");
+  return minted.jwt;
+}
+
+/** Safety number is display-only — a derivation failure must never abort. */
+function safeSafetyNumber(wasm: WasmModule, seed: Uint8Array): string | undefined {
+  try {
+    return wasm.callSafetyNumber(seed);
+  } catch {
+    return undefined;
+  }
+}

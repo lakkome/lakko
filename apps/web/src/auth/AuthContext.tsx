@@ -281,6 +281,19 @@ export interface AuthApi {
    *  carries the BIP39 recovery phrase that the UI MUST display
    *  exactly once. */
   signup(username: string, password: string): Promise<SignupOutcome>;
+  /** ADR-0032 guest join — create a FULL account with NO username and no
+   *  user-chosen password, so an anonymous `/c/<slug>` visitor can join a
+   *  call without a login. Reuses the `signup` machinery verbatim: OPAQUE
+   *  registration with a RANDOM 32-byte password (never shown to the user;
+   *  recovery is phrase-only) + device-root-key derivation + the first-ever
+   *  identity-bundle publish (with the genesis `leafAuth`) — but SKIPS
+   *  `registerUsername`, yielding a username-less account. Lands in the
+   *  `save-fresh-phrase` state (mirroring `mintFreshIdentity`) so the
+   *  existing `SaveFreshPhrasePrompt` shows the recovery phrase;
+   *  `confirmFreshPhraseSaved` then lands the session. Claiming a username
+   *  (`registerUsername`) is a later onboarding step. Returns the recovery
+   *  phrase (the caller shows it / it is surfaced by the prompt). */
+  signupGuest(): Promise<SignupOutcome>;
   /** Run the OPAQUE-PAKE login flow.
    *
    *  Resolves the typed `username` to an account_id from the local
@@ -1098,6 +1111,130 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
       void subscribeToPush().catch((err) => {
         // eslint-disable-next-line no-console
         console.warn("push subscribe (signup) failed", err);
+      });
+      return { recoveryPhrase: result.recoveryPhrase };
+    },
+    async signupGuest() {
+      // ADR-0032 guest join. This is the `signup` flow VERBATIM up to (but
+      // NOT including) the username claim: OPAQUE registration under a
+      // RANDOM password, a device root key derived from the resulting
+      // export key, the first-ever identity-bundle publish, and the
+      // AccountIdentity-seed cache. It then parks the recovery phrase and
+      // flips to `save-fresh-phrase` (like `mintFreshIdentity`) instead of
+      // landing the session directly, so the existing `SaveFreshPhrasePrompt`
+      // + `confirmFreshPhraseSaved` render + land it unchanged.
+      //
+      // The password is 32 random bytes the user NEVER sees — recovery is
+      // phrase-only, matching the ACCESS-only convention the recovery
+      // cascade already uses. No username is claimed; the account is
+      // username-less until the onboarding step below.
+      const randomPassword = base64Encode(
+        crypto.getRandomValues(new Uint8Array(32)),
+      );
+      const result = await client.signup(utf8(randomPassword));
+      const accountIdB64 = base64Encode(result.accountId);
+      // Install the fresh bearer token for the protected writes below.
+      discovery.setSessionToken(result.sessionToken);
+
+      // TODO(ADR-0032 onboarding): claiming a username is a LATER step —
+      // the user calls `discovery.registerUsername(accountId, chosenName)`
+      // (via a future "claim your username" UI) once they want to be
+      // discoverable / recover cross-device. We intentionally SKIP
+      // `registerUsername` here so the guest account stays username-less
+      // and the user can claim their preferred (immutable) handle later.
+
+      if (result.recoveryPhrase === undefined) {
+        throw new Error(
+          "internal: guest signup completed without a recovery phrase",
+        );
+      }
+
+      // Device root key from the OPAQUE export key (the guest HAS a real,
+      // random password, so this is the normal signup derivation) + persist
+      // the key / session token / export key, exactly as `signup` does.
+      const deviceKey = await deriveDeviceRootKey(result.exportKey, accountIdB64);
+      await putDeviceKey(accountIdB64, deviceKey);
+      try {
+        await putSessionToken(
+          accountIdB64,
+          result.sessionToken,
+          result.sessionExpiresAtMs,
+          deviceKey,
+        );
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn("session-token persist (signupGuest) failed", err);
+      }
+      try {
+        await putExportKey(accountIdB64, result.exportKey, deviceKey);
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn("export-key persist (signupGuest) failed", err);
+      }
+      try {
+        await ensureDeviceIdentitySeed(accountIdB64, deviceKey);
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn("device-identity ensure (signupGuest) failed", err);
+      }
+
+      // ADR-0017: derive the canonical AccountIdentity seed from the phrase
+      // + cache it under the device key (same as signup).
+      const wasm = await loadWasm();
+      const mnemonic = wasm.RecoveryMnemonic.fromPhrase(result.recoveryPhrase);
+      const accountIdentitySeed = mnemonic.toSeed();
+      mnemonic.free();
+      try {
+        await putAccountIdentitySeed(
+          accountIdB64,
+          accountIdentitySeed,
+          deviceKey,
+        );
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn("account-identity-seed persist (signupGuest) failed", err);
+      }
+
+      // Persist the localStorage account marker — username EMPTY (unclaimed).
+      savePersisted({ v: 1, accountIdB64, username: "" });
+
+      // G-30 #2 (ADR-0019): publish the FIRST-EVER bundle WITH the genesis
+      // leaf self-signature so the transparency-log append accepts the new
+      // binding — identical to `signup`. Fail-loud: a mint / upload failure
+      // rejects the guest signup rather than parking an unverifiable identity.
+      const canonical = wasm.Identity.fromSeed(accountIdentitySeed);
+      try {
+        const guestLeafAuth = await mintLeafGenesisAuth(
+          canonical,
+          result.accountId,
+        );
+        await uploadIdentityBundle(
+          discovery,
+          result.accountId,
+          canonical,
+          undefined,
+          guestLeafAuth,
+        );
+      } finally {
+        canonical.free();
+      }
+
+      // Park the completion context + flip to `save-fresh-phrase` so the UI
+      // shows the recovery phrase before the session lands (the
+      // `SaveFreshPhrasePrompt` → `confirmFreshPhraseSaved` path builds the
+      // canonical Identity, uploads the KeyPackage, and lands the session).
+      setPendingFreshPhrase({
+        seed: accountIdentitySeed,
+        accountIdBytes: result.accountId,
+        accountIdB64,
+        sessionToken: result.sessionToken,
+        sessionExpiresAtMs: result.sessionExpiresAtMs,
+        username: "",
+        phrase: result.recoveryPhrase,
+      });
+      setState({
+        kind: "save-fresh-phrase",
+        account: { accountId: accountIdB64, username: "" },
       });
       return { recoveryPhrase: result.recoveryPhrase };
     },
