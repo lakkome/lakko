@@ -84,6 +84,11 @@ import {
   saveRotationState,
   type ChannelRotationState,
 } from "../channels/rotation-state-store";
+import {
+  DiscoveryHttpError,
+  registerChannelHandle,
+  resolveChannelIdOrHandle,
+} from "../channels/channel-discovery";
 import { DsClient } from "../ds/client";
 import { useAuth } from "../auth/AuthContext";
 import { channelsActions, channelsState } from "../state/channels-state";
@@ -197,6 +202,37 @@ function renderPostBody(decoded: PostDecode | undefined): JSX.Element {
 
 const ChannelsList: Component = () => {
   const navigate = useNavigate();
+
+  // G4-5: subscribe entry point. Accepts EITHER a typed `@handle`
+  // (resolved to a channel id via OPRF discovery) OR a pasted
+  // 32-char hex channel id (used verbatim). Both land on the same
+  // subscribe page.
+  const [findInput, setFindInput] = createSignal("");
+  const [findBusy, setFindBusy] = createSignal(false);
+  const [findError, setFindError] = createSignal<string | null>(null);
+
+  async function onFind(): Promise<void> {
+    if (findBusy()) return;
+    const raw = findInput().trim();
+    if (raw.length === 0) return;
+    setFindBusy(true);
+    setFindError(null);
+    try {
+      const idHex = await resolveChannelIdOrHandle(raw);
+      if (idHex === null) {
+        setFindError(
+          `No channel found for ${raw.startsWith("@") ? raw : `@${raw}`}.`,
+        );
+        setFindBusy(false);
+        return;
+      }
+      navigate(paths.channelSubscribe(idHex));
+    } catch (err) {
+      setFindError(`Lookup failed: ${String(err)}`);
+      setFindBusy(false);
+    }
+  }
+
   return (
     <div
       style={{
@@ -236,6 +272,68 @@ const ChannelsList: Component = () => {
           + New channel
         </button>
       </header>
+
+      <form
+        onSubmit={(e): void => {
+          e.preventDefault();
+          void onFind();
+        }}
+        style={{
+          display: "flex",
+          "flex-direction": "column",
+          gap: "8px",
+          "margin-bottom": "20px",
+        }}
+      >
+        <div style={{ display: "flex", gap: "8px" }}>
+          <input
+            type="text"
+            value={findInput()}
+            placeholder="@handle or channel id"
+            autocapitalize="none"
+            autocomplete="off"
+            spellcheck={false}
+            onInput={(e): void => {
+              setFindInput(e.currentTarget.value);
+            }}
+            style={{
+              flex: "1",
+              padding: "9px 12px",
+              "background-color": COLOURS.surface,
+              color: COLOURS.textPrimary,
+              border: `1px solid ${COLOURS.border}`,
+              "border-radius": "8px",
+              "font-size": "14px",
+            }}
+          />
+          <button
+            type="submit"
+            disabled={findBusy() || findInput().trim().length === 0}
+            style={{
+              "background-color": COLOURS.surface,
+              color: COLOURS.textPrimary,
+              border: `1px solid ${COLOURS.border}`,
+              "border-radius": "8px",
+              padding: "9px 14px",
+              "font-size": "14px",
+              cursor: findBusy() ? "wait" : "pointer",
+              "white-space": "nowrap",
+            }}
+          >
+            {findBusy() ? "Finding…" : "Find & subscribe"}
+          </button>
+        </div>
+        <Show when={findError() !== null}>
+          <div
+            style={{
+              "font-size": "13px",
+              color: COLOURS.destructive,
+            }}
+          >
+            {findError()}
+          </div>
+        </Show>
+      </form>
 
       <Show
         when={channelsState.channels().length > 0}
@@ -302,6 +400,9 @@ const NewChannel: Component = () => {
   const auth = useAuth();
   const [name, setName] = createSignal("");
   const [description, setDescription] = createSignal("");
+  // Optional `@handle` claimed via OPRF discovery (G4-5) so others
+  // can subscribe by handle instead of the raw hex channel id.
+  const [handle, setHandle] = createSignal("");
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
 
@@ -335,6 +436,29 @@ const NewChannel: Component = () => {
     setError(null);
     const id = freshChannelIdHex();
     try {
+      // G4-5: claim the optional `@handle` FIRST (before the channel
+      // exists on the channels service) so a first-come-first-served
+      // collision (409) aborts cleanly without leaving a half-created
+      // channel. An empty handle skips discovery entirely — the raw
+      // hex channel id still works. The mapping is `@handle ->
+      // channel_id`; the OPRF hash is all the server ever sees.
+      const wantedHandle = handle().trim();
+      if (wantedHandle.length > 0) {
+        try {
+          await registerChannelHandle(wantedHandle, id, secrets.sessionToken);
+        } catch (err) {
+          if (err instanceof DiscoveryHttpError && err.status === 409) {
+            setError(
+              `The handle @${wantedHandle.replace(/^@/, "")} is already taken — pick another (or leave it blank).`,
+            );
+          } else {
+            setError(`Could not register the handle: ${String(err)}`);
+          }
+          setBusy(false);
+          return;
+        }
+      }
+
       await createChannel(id);
       // Mint local publisher keys — the content-key seed
       // comes from an MLS PublisherGroup exporter
@@ -496,6 +620,32 @@ const NewChannel: Component = () => {
               "font-size": "14px",
               "font-family": "inherit",
               resize: "vertical",
+            }}
+          />
+        </label>
+        <label style={{ display: "flex", "flex-direction": "column", gap: "6px" }}>
+          <span style={{ "font-size": "13px", color: COLOURS.textSecondary }}>
+            Public @handle (optional — others can subscribe by it
+            instead of the raw id; only its OPRF hash reaches the
+            server)
+          </span>
+          <input
+            type="text"
+            value={handle()}
+            placeholder="@my-channel"
+            autocapitalize="none"
+            autocomplete="off"
+            spellcheck={false}
+            onInput={(e): void => {
+              setHandle(e.currentTarget.value);
+            }}
+            style={{
+              padding: "9px 12px",
+              "background-color": COLOURS.surface,
+              color: COLOURS.textPrimary,
+              border: `1px solid ${COLOURS.border}`,
+              "border-radius": "8px",
+              "font-size": "14px",
             }}
           />
         </label>

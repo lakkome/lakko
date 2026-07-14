@@ -314,3 +314,48 @@ export interface InviteOwnerListEntry {
 export interface InviteOwnerListResponse {
   invites: InviteOwnerListEntry[];
 }
+
+// ----------------------------------------------------------------------------
+// /discovery/channel/{register,lookup}
+//   (services/discovery/src/channel_names.rs — G4-5, ADR-0010)
+// ----------------------------------------------------------------------------
+
+/** Body of `POST /discovery/channel/register`. Binds an OPRF-
+ *  hashed `@channelname` to a 16-byte `channel_id` pseudonym.
+ *  Same OPRF ciphersuite + wire shape as `RegisterRequest`
+ *  (Ristretto255-SHA512, 64-byte hash) — the `/discovery/oprf`
+ *  evaluate endpoint is namespace-agnostic, so the client reuses
+ *  `OprfBlinder.blind(handle)` verbatim. First-come-first-served
+ *  via a UNIQUE on `oprf_hash`; a repeat of the same hash with a
+ *  different channel id is 409 Conflict. */
+export interface ChannelRegisterRequest {
+  pow: PowProofPayload;
+  /** base64(VOPRF output) — exactly 64 bytes, from
+   *  `blinder.finalize`. */
+  oprf_hash: string;
+  /** base64(channel_id) — raw 16 bytes (ADR-0010 §"Wire
+   *  surfaces"). */
+  channel_id: string;
+}
+
+/** Response body of `POST /discovery/channel/register`. Returns
+ *  409 on collision; the type is only for the 200-OK path. */
+export interface ChannelRegisterResponse {
+  ok: boolean;
+}
+
+/** Body of `POST /discovery/channel/lookup`. Resolves an OPRF-
+ *  hashed `@channelname` to its `channel_id`. */
+export interface ChannelLookupRequest {
+  pow: PowProofPayload;
+  /** Same shape as `ChannelRegisterRequest.oprf_hash`. */
+  oprf_hash: string;
+}
+
+/** Response body of `POST /discovery/channel/lookup`. The server
+ *  returns 404 for an unknown `@channelname` — the high-level
+ *  client surfaces that as a `null` rather than an error class. */
+export interface ChannelLookupResponse {
+  /** base64(channel_id) — raw 16 bytes. */
+  channel_id: string;
+}

@@ -34,6 +34,10 @@ import {
 } from "../auth/account-id";
 import { solvePow } from "../auth/pow";
 import type {
+  ChannelLookupRequest,
+  ChannelLookupResponse,
+  ChannelRegisterRequest,
+  ChannelRegisterResponse,
   IdentityFetchResponse,
   IdentityUploadRequest,
   IdentityUploadResponse,
@@ -78,6 +82,28 @@ export interface LookupResult {
   /** Raw 16-byte account_id, or `null` if the username is not
    *  registered. */
   account: Uint8Array | null;
+}
+
+/** Result of `DiscoveryClient.registerChannelName` (G4-5,
+ *  ADR-0010). Mirror of [`RegisterResult`] for the channel
+ *  namespace. */
+export interface ChannelRegisterResult {
+  /** The canonical `@channelname` actually claimed (after the
+   *  same NFKC + lowercase + trim + leading-`@` strip the
+   *  username path applies via `OprfBlinder.blind`). */
+  normalisedHandle: string;
+}
+
+/** Result of `DiscoveryClient.lookupChannel` (G4-5, ADR-0010).
+ *  The server returns 404 for an unknown `@channelname`; the
+ *  high-level orchestrator surfaces that as `channel: null`
+ *  rather than an exception, so a not-found is visible in the
+ *  type — same shape as [`LookupResult`]. */
+export interface ChannelLookupResult {
+  normalisedHandle: string;
+  /** Raw 16-byte `channel_id`, or `null` when the handle is not
+   *  registered. */
+  channel: Uint8Array | null;
 }
 
 /** Result of `DiscoveryClient.consumeInvite` (Phase 1.18d2a +
@@ -514,6 +540,50 @@ export class DiscoveryClient {
       );
     }
     return (await response.json()) as LookupResponse;
+  }
+
+  /** `POST /discovery/channel/register` — bind an OPRF-hashed
+   *  `@channelname` to a `channel_id`. Session-token-gated write
+   *  (DoS rate-limit role); the low-level POST threads the bearer
+   *  token via `this.post`. */
+  async channelRegister(
+    req: ChannelRegisterRequest,
+  ): Promise<ChannelRegisterResponse> {
+    return this.post("/discovery/channel/register", req);
+  }
+
+  /**
+   * `POST /discovery/channel/lookup`. Returns the raw response on
+   * 200, `null` on 404 (the typed not-found path), throws on any
+   * other non-2xx. Mirror of [`lookupRaw`] for the channel
+   * namespace — unauthenticated, so no bearer header.
+   */
+  async channelLookupRaw(
+    req: ChannelLookupRequest,
+  ): Promise<ChannelLookupResponse | null> {
+    const url = `${this.baseUrl}/discovery/channel/lookup`;
+    let response: Response;
+    try {
+      response = await fetch(url, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(req),
+      });
+    } catch (err) {
+      throw new DiscoveryNetworkError("/discovery/channel/lookup", err);
+    }
+    if (response.status === 404) {
+      return null;
+    }
+    if (!response.ok) {
+      const text = await safeReadBody(response);
+      throw new DiscoveryHttpError(
+        response.status,
+        "/discovery/channel/lookup",
+        text,
+      );
+    }
+    return (await response.json()) as ChannelLookupResponse;
   }
 
   // -----------------------------------------------------------------
@@ -1600,6 +1670,114 @@ export class DiscoveryClient {
     return {
       normalisedUsername,
       account: base64Decode(lookupResp.account_id),
+    };
+  }
+
+  // -----------------------------------------------------------------
+  // High-level: @channel discovery (G4-5, ADR-0010)
+  //
+  // The channel namespace reuses the SAME OPRF flow as @username
+  // (the `/discovery/oprf` evaluate endpoint is namespace-agnostic
+  // — one static key over the blinded handle). Only the second
+  // endpoint differs: `/discovery/channel/{register,lookup}`
+  // instead of `/discovery/{register,lookup}`, and the id type is
+  // a 16-byte channel_id pseudonym rather than a 16-byte account
+  // UUIDv7.
+  // -----------------------------------------------------------------
+
+  /**
+   * Bind `@channelname` to a 16-byte `channel_id`.
+   *
+   * Flow: PoW₁ → OPRF blind → POST `/discovery/oprf` → finalize →
+   * PoW₂ → POST `/discovery/channel/register`. Identical to
+   * [`registerUsername`] modulo the id type + second endpoint.
+   *
+   * Handle normalisation (NFKC + lowercase + trim + leading-`@`
+   * strip) happens inside `OprfBlinder.blind`; the canonical form
+   * is surfaced back via `ChannelRegisterResult.normalisedHandle`.
+   *
+   * The write is session-token-gated (a DoS rate-limit role, not
+   * an ownership proof — see `services/discovery/src/channel_names.rs`).
+   * Throws `DiscoveryHttpError` with `status === 409` when the
+   * handle is already registered (first-come-first-served).
+   */
+  async registerChannelName(
+    channelId: Uint8Array,
+    handle: string,
+  ): Promise<ChannelRegisterResult> {
+    if (channelId.length !== 16) {
+      throw new DiscoveryClientArgError("channelId must be 16 bytes");
+    }
+    const wasm = await loadWasm();
+    const blinder = wasm.OprfBlinder.blind(handle);
+    const normalisedHandle = blinder.normalizedUsername;
+
+    // PoW₁ for /discovery/oprf.
+    const challenge1 = await this.fetchChallenge();
+    const pow1 = await solvePow(challenge1.seed, challenge1.effort_bits);
+    const oprfResp = await this.oprfEvaluate({
+      pow: pow1,
+      blinded: blinder.blindedB64,
+    });
+
+    const oprfHashBytes = blinder.finalize(oprfResp.evaluated);
+    const oprfHashB64 = base64Encode(oprfHashBytes);
+
+    // PoW₂ for /discovery/channel/register.
+    const challenge2 = await this.fetchChallenge();
+    const pow2 = await solvePow(challenge2.seed, challenge2.effort_bits);
+
+    const registerResp = await this.channelRegister({
+      pow: pow2,
+      oprf_hash: oprfHashB64,
+      channel_id: base64Encode(channelId),
+    });
+    if (!registerResp.ok) {
+      throw new DiscoveryHttpError(
+        200,
+        "/discovery/channel/register",
+        "server reported ok=false",
+      );
+    }
+    return { normalisedHandle };
+  }
+
+  /**
+   * Resolve `@channelname` to its raw 16-byte `channel_id`, or
+   * `null` when the handle is not registered.
+   *
+   * Same flow as [`registerChannelName`] modulo the second
+   * endpoint: PoW₁ → OPRF → PoW₂ → POST `/discovery/channel/lookup`.
+   * Exact-match only (the server does no prefix search).
+   */
+  async lookupChannel(handle: string): Promise<ChannelLookupResult> {
+    const wasm = await loadWasm();
+    const blinder = wasm.OprfBlinder.blind(handle);
+    const normalisedHandle = blinder.normalizedUsername;
+
+    const challenge1 = await this.fetchChallenge();
+    const pow1 = await solvePow(challenge1.seed, challenge1.effort_bits);
+    const oprfResp = await this.oprfEvaluate({
+      pow: pow1,
+      blinded: blinder.blindedB64,
+    });
+
+    const oprfHashBytes = blinder.finalize(oprfResp.evaluated);
+    const oprfHashB64 = base64Encode(oprfHashBytes);
+
+    const challenge2 = await this.fetchChallenge();
+    const pow2 = await solvePow(challenge2.seed, challenge2.effort_bits);
+
+    const lookupResp = await this.channelLookupRaw({
+      pow: pow2,
+      oprf_hash: oprfHashB64,
+    });
+    if (lookupResp === null) {
+      return { normalisedHandle, channel: null };
+    }
+    return {
+      normalisedHandle,
+      channel: base64Decode(lookupResp.channel_id),
     };
   }
 
