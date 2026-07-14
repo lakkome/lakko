@@ -57,6 +57,14 @@ public struct ChannelsRootScreen: View {
     /// from `AuthRepository`'s in-memory `IdentitySecrets` — same shape
     /// `ChatRepository.bootstrap` already uses.
     private let accountIdentitySeed: Data
+    /// G4-5 — bearer token provider for the session-token-gated
+    /// `@handle` registration on channel create (`/discovery/channel/register`).
+    /// Read lazily per call (the host supplies
+    /// `{ authRepository.identitySecrets?.sessionToken }`) so a token
+    /// refresh is picked up without rebuilding the view. Defaults to a
+    /// `nil`-returning closure so a preview / standalone host that never
+    /// claims a handle still compiles.
+    private let sessionTokenProvider: () -> String?
     /// Return to the caller's prior destination (Home). Wired by the
     /// session router; a `Back` toolbar button in
     /// [`ChannelsListScreen`] invokes it. Defaults to a no-op so a
@@ -66,10 +74,12 @@ public struct ChannelsRootScreen: View {
     public init(
         client: ChannelsClient = ChannelsClient(),
         accountIdentitySeed: Data,
+        sessionTokenProvider: @escaping () -> String? = { nil },
         onBack: @escaping () -> Void = {}
     ) {
         self.client = client
         self.accountIdentitySeed = accountIdentitySeed
+        self.sessionTokenProvider = sessionTokenProvider
         self.onBack = onBack
     }
 
@@ -79,6 +89,7 @@ public struct ChannelsRootScreen: View {
                 state: state,
                 client: client,
                 accountIdentitySeed: accountIdentitySeed,
+                sessionTokenProvider: sessionTokenProvider,
                 onBack: onBack
             )
         }
@@ -97,22 +108,48 @@ struct ChannelsListScreen: View {
     /// create-action can build the MLS PublisherGroup
     /// identity. See [`ChannelsRootScreen.accountIdentitySeed`].
     let accountIdentitySeed: Data
+    /// G4-5 — forwarded to [`NewChannelScreen`] for the
+    /// session-token-gated `@handle` registration on create.
+    var sessionTokenProvider: () -> String? = { nil }
     /// Return to Home — the session router owns the destination
     /// toggle; this screen is presented in place of Home, so it
     /// carries its own back affordance (same idiom as
     /// `DevicesScreen` / `ContactsScreen`).
     var onBack: () -> Void = {}
 
+    // G4-5: subscribe entry point. Accepts EITHER a typed `@handle`
+    // (resolved to a channel id via OPRF discovery) OR a pasted 32-char
+    // hex channel id (used verbatim). Both land on the same subscribe
+    // screen. Mirror of the web `ChannelsList` "Find & subscribe" box.
+    @State private var findInput: String = ""
+    @State private var findBusy = false
+    @State private var findError: String?
+    /// Non-`nil` after a successful resolve → drives the push to
+    /// [`ChannelSubscribeScreen`] via `navigationDestination(item:)`
+    /// (iOS 17). Set back to `nil` by SwiftUI when the user pops back.
+    @State private var subscribeTarget: String?
+
     var body: some View {
         ZStack {
             Theme.background.ignoresSafeArea()
-            if state.channels.isEmpty {
-                emptyState
-            } else {
-                listContent
+            VStack(spacing: 0) {
+                findSubscribeBar
+                if state.channels.isEmpty {
+                    emptyState
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    listContent
+                }
             }
         }
         .navigationTitle("Channels")
+        .navigationDestination(item: $subscribeTarget) { idHex in
+            ChannelSubscribeScreen(
+                channelId: idHex,
+                state: state,
+                client: client
+            )
+        }
         .toolbar {
             ToolbarItem(placement: .topBarLeading) {
                 Button("Back", action: onBack)
@@ -134,13 +171,69 @@ struct ChannelsListScreen: View {
                     NewChannelScreen(
                         state: state,
                         client: client,
-                        accountIdentitySeed: accountIdentitySeed
+                        accountIdentitySeed: accountIdentitySeed,
+                        sessionTokenProvider: sessionTokenProvider
                     )
                 } label: {
                     Image(systemName: "plus")
                         .foregroundStyle(Theme.accent)
                 }
             }
+        }
+    }
+
+    // G4-5: "Find & subscribe" — one field accepting a `@handle` OR a
+    // pasted hex channel id. On submit it resolves the input and pushes
+    // the subscribe screen for the resolved id.
+    private var findSubscribeBar: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                TextField("@handle or channel id", text: $findInput)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled(true)
+                    .foregroundStyle(Theme.textPrimary)
+                    .padding(9)
+                    .background(Theme.surface)
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                    .onSubmit { Task { await onFind() } }
+                Button(findBusy ? "Finding…" : "Find") {
+                    Task { await onFind() }
+                }
+                .disabled(
+                    findBusy
+                        || findInput.trimmingCharacters(in: .whitespaces).isEmpty
+                )
+                .padding(.horizontal, 14)
+                .padding(.vertical, 9)
+                .background(Theme.surface)
+                .foregroundStyle(Theme.textPrimary)
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+            }
+            if let findError {
+                Text(findError)
+                    .font(.footnote)
+                    .foregroundStyle(Theme.destructive)
+            }
+        }
+        .padding(12)
+    }
+
+    private func onFind() async {
+        if findBusy { return }
+        let raw = findInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        if raw.isEmpty { return }
+        findBusy = true
+        findError = nil
+        defer { findBusy = false }
+        do {
+            if let idHex = try await ChannelDiscovery.resolveChannelIdOrHandle(raw) {
+                subscribeTarget = idHex
+            } else {
+                let shown = raw.hasPrefix("@") ? raw : "@\(raw)"
+                findError = "No channel found for \(shown)."
+            }
+        } catch {
+            findError = "Lookup failed: \(error.localizedDescription)"
         }
     }
 
@@ -209,10 +302,19 @@ struct NewChannelScreen: View {
     /// [`create`] — the MLS PublisherGroup founding member. Was the
     /// OPAQUE export key pre-ADR-0017.
     let accountIdentitySeed: Data
+    /// G4-5 — bearer token provider for the session-token-gated
+    /// `@handle` registration (`/discovery/channel/register`). Read
+    /// lazily so a token refresh is picked up; `nil` → cannot claim a
+    /// handle (an empty handle skips discovery entirely, so create still
+    /// works).
+    var sessionTokenProvider: () -> String? = { nil }
     @Environment(\.dismiss) private var dismiss
 
     @State private var name: String = ""
     @State private var description: String = ""
+    /// Optional `@handle` claimed via OPRF discovery (G4-5) so others
+    /// can subscribe by handle instead of the raw hex channel id.
+    @State private var handle: String = ""
     @State private var busy = false
     @State private var errorMessage: String?
 
@@ -230,6 +332,16 @@ struct NewChannelScreen: View {
                         .foregroundStyle(Theme.textPrimary)
                 } footer: {
                     Text("Name + description are local-only — never sent to the server.")
+                        .foregroundStyle(Theme.textSecondary)
+                }
+                Section {
+                    TextField("@handle (optional)", text: $handle)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled(true)
+                        .listRowBackground(Theme.surface)
+                        .foregroundStyle(Theme.textPrimary)
+                } footer: {
+                    Text("Public @handle — others can find + subscribe to this channel by @handle instead of the raw id. First-come-first-served; leave blank to skip.")
                         .foregroundStyle(Theme.textSecondary)
                 }
                 if let error = errorMessage {
@@ -260,6 +372,40 @@ struct NewChannelScreen: View {
         errorMessage = nil
         let id = ChannelsComposer.freshChannelIdHex()
         do {
+            // G4-5: claim the optional `@handle` FIRST (before the
+            // channel exists on the channels service) so a
+            // first-come-first-served collision (409) aborts cleanly
+            // without leaving a half-created channel. An empty handle
+            // skips discovery entirely — the raw hex channel id still
+            // works. The mapping is `@handle -> channel_id`; the OPRF
+            // hash is all the server ever sees.
+            let wantedHandle = handle.trimmingCharacters(in: .whitespaces)
+            if !wantedHandle.isEmpty {
+                guard let token = sessionTokenProvider() else {
+                    errorMessage =
+                        "Sign in again to claim a @handle (or leave it blank)."
+                    return
+                }
+                do {
+                    _ = try await ChannelDiscovery.registerChannelHandle(
+                        handle: wantedHandle,
+                        channelIdHex: id,
+                        sessionToken: token
+                    )
+                } catch let DiscoveryClientError.http(status, _, _) where status == 409 {
+                    let clean = wantedHandle.hasPrefix("@")
+                        ? String(wantedHandle.dropFirst())
+                        : wantedHandle
+                    errorMessage =
+                        "The handle @\(clean) is already taken — pick another (or leave it blank)."
+                    return
+                } catch {
+                    errorMessage =
+                        "Could not register the handle: \(error.localizedDescription)"
+                    return
+                }
+            }
+
             _ = try await client.createChannel(channelIdHex: id)
             // G-27: build a transient `Identity` from the
             // canonical AccountIdentity (phrase) seed (ADR-0017 —

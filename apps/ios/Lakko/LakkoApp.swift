@@ -348,6 +348,9 @@ private struct SessionRoot: View {
                     if let seed = authRepository.identitySecrets?.accountIdentitySeed {
                         ChannelsRootScreen(
                             accountIdentitySeed: seed,
+                            sessionTokenProvider: {
+                                authRepository.identitySecrets?.sessionToken
+                            },
                             onBack: { destination = .home }
                         )
                     } else {

@@ -164,6 +164,28 @@ public class DiscoveryClient(
             setBody(req)
         }
 
+    /** `POST /discovery/channel/register` — bind an OPRF-hashed
+     *  `@channelname` to a `channel_id` (G4-5, ADR-0010).
+     *  Session-token-gated write; the high-level
+     *  [registerChannelName] drives the PoW + OPRF flow. */
+    public suspend fun channelRegister(req: ChannelRegisterRequest): ChannelRegisterResponse =
+        doPost("/discovery/channel/register") {
+            contentType(ContentType.Application.Json)
+            setBody(req)
+        }
+
+    /**
+     * `POST /discovery/channel/lookup`. Returns the typed response
+     * on 200, `null` on 404 (unknown `@channelname`), throws on
+     * any other non-2xx. Mirror of [lookupRaw] for the channel
+     * namespace (G4-5, ADR-0010).
+     */
+    public suspend fun channelLookupRaw(req: ChannelLookupRequest): ChannelLookupResponse? =
+        doPostNullableOn404("/discovery/channel/lookup") {
+            contentType(ContentType.Application.Json)
+            setBody(req)
+        }
+
     /** `POST /discovery/identity` — upsert the identity bundle. */
     public suspend fun identityUpload(req: IdentityUploadRequest): IdentityUploadResponse =
         doPost("/discovery/identity") {
@@ -556,6 +578,101 @@ public class DiscoveryClient(
                     account = base64Decode(resp.account_id),
                 )
             }
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // High-level: @channel discovery (G4-5, ADR-0010)
+    //
+    // The channel namespace reuses the SAME OPRF flow as @username
+    // (the `/discovery/oprf` evaluate endpoint is namespace-agnostic
+    // — one static key over the blinded handle). Only the second
+    // endpoint differs: `/discovery/channel/{register,lookup}`, and
+    // the id type is a 16-byte channel_id pseudonym rather than a
+    // 16-byte account UUIDv7.
+    // -----------------------------------------------------------------
+
+    /**
+     * Bind `@channelname` to a 16-byte `channel_id`.
+     *
+     * Flow: PoW₁ → OPRF blind → `POST /discovery/oprf` → finalize →
+     * PoW₂ → `POST /discovery/channel/register`. Identical to
+     * [registerUsername] modulo the id type + second endpoint.
+     *
+     * Handle normalisation (NFKC + lowercase + trim + leading-`@`
+     * strip) happens inside [OprfBlinder.blind]. The write is
+     * session-token-gated (a DoS rate-limit role, NOT an ownership
+     * proof — see `services/discovery/src/channel_names.rs`); the
+     * caller must have set the bearer via [setSessionToken].
+     *
+     * @return `true` once the server bound the handle. A `!ok` reply
+     *   or any non-2xx status throws [DiscoveryHttpError] instead —
+     *   in particular `status == 409` on a handle collision
+     *   (first-come-first-served).
+     */
+    public suspend fun registerChannelName(
+        channelId: ByteArray,
+        handle: String,
+    ): Boolean {
+        if (channelId.size != CHANNEL_ID_LEN) {
+            throw DiscoveryClientArgError("channelId must be $CHANNEL_ID_LEN bytes")
+        }
+        return OprfBlinder.blind(handle).use { blinder ->
+            val challenge1 = powChallenge()
+            val pow1 = solvePow(challenge1.seed, challenge1.effort_bits, powDispatcher)
+            val oprfResp = oprfEvaluate(
+                OprfRequest(pow = pow1, blinded = blinder.blindedB64()),
+            )
+
+            val oprfHashB64 = base64Encode(blinder.finalize(oprfResp.evaluated))
+
+            val challenge2 = powChallenge()
+            val pow2 = solvePow(challenge2.seed, challenge2.effort_bits, powDispatcher)
+
+            val resp = channelRegister(
+                ChannelRegisterRequest(
+                    pow = pow2,
+                    oprf_hash = oprfHashB64,
+                    channel_id = base64Encode(channelId),
+                ),
+            )
+            if (!resp.ok) {
+                throw DiscoveryHttpError(
+                    status = 200,
+                    endpoint = "/discovery/channel/register",
+                    body = "server reported ok=false",
+                )
+            }
+            true
+        }
+    }
+
+    /**
+     * Resolve `@channelname` to its `channel_id` as a 32-char
+     * lowercase hex string, or `null` when no channel has claimed
+     * the handle (the server's 404 not-found path).
+     *
+     * Same flow as [registerChannelName] modulo the second
+     * endpoint: PoW₁ → OPRF → PoW₂ → `POST /discovery/channel/lookup`.
+     * Unauthenticated (the lookup path is open); anonymous-safe.
+     */
+    public suspend fun lookupChannel(handle: String): String? {
+        return OprfBlinder.blind(handle).use { blinder ->
+            val challenge1 = powChallenge()
+            val pow1 = solvePow(challenge1.seed, challenge1.effort_bits, powDispatcher)
+            val oprfResp = oprfEvaluate(
+                OprfRequest(pow = pow1, blinded = blinder.blindedB64()),
+            )
+
+            val oprfHashB64 = base64Encode(blinder.finalize(oprfResp.evaluated))
+
+            val challenge2 = powChallenge()
+            val pow2 = solvePow(challenge2.seed, challenge2.effort_bits, powDispatcher)
+
+            val resp = channelLookupRaw(
+                ChannelLookupRequest(pow = pow2, oprf_hash = oprfHashB64),
+            ) ?: return@use null
+            bytesToHexLower(base64Decode(resp.channel_id))
         }
     }
 
@@ -1457,6 +1574,9 @@ public class DiscoveryClient(
         /** Raw 16-byte UUIDv7. */
         private const val ACCOUNT_ID_LEN: Int = 16
 
+        /** Raw 16-byte channel_id pseudonym (G4-5, ADR-0010). */
+        private const val CHANNEL_ID_LEN: Int = 16
+
         /** Ed25519 + X25519 both use 32-byte public keys. */
         private const val PUBKEY_LEN: Int = 32
 
@@ -1493,6 +1613,19 @@ public class DiscoveryClient(
          *  `me.lakko.app.auth` constants. */
         private const val SIGNING_SEED_LEN: Int = 32
     }
+}
+
+/** Lowercase hex-encode (no separators). Used to render a
+ *  resolved `channel_id` for the channels UI, which speaks hex on
+ *  every `services/channels` REST route (G4-5, ADR-0010). */
+private fun bytesToHexLower(bytes: ByteArray): String {
+    val sb = StringBuilder(bytes.size * 2)
+    for (b in bytes) {
+        val v = b.toInt() and 0xFF
+        sb.append(Character.forDigit(v ushr 4, 16))
+        sb.append(Character.forDigit(v and 0x0F, 16))
+    }
+    return sb.toString()
 }
 
 private suspend fun HttpResponse.safeReadBody(): String {

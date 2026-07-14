@@ -606,6 +606,7 @@ private fun SessionRoot(
             if (secrets != null) {
                 ChannelsRootScreen(
                     accountIdentitySeed = secrets.accountIdentitySeed,
+                    sessionToken = secrets.sessionToken,
                     onBack = { destination = SessionDestination.Home },
                 )
             } else {

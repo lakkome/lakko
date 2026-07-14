@@ -492,3 +492,85 @@ public struct InviteOwnerListResponse: Codable, Equatable {
         self.invites = invites
     }
 }
+
+// ----------------------------------------------------------------------------
+// /discovery/channel/{register,lookup}
+//   (services/discovery/src/channel_names.rs — G4-5, ADR-0010)
+// ----------------------------------------------------------------------------
+// Mirror of `apps/web/src/discovery/wire.ts` (channel section). Same OPRF
+// ciphersuite + wire shape as the username `RegisterRequest` / `LookupRequest`
+// (Ristretto255-SHA512, 64-byte hash) — the `/discovery/oprf` evaluate endpoint
+// is namespace-agnostic, so the client reuses `OprfBlinder.blind(handle)`
+// verbatim. Only the second endpoint + the id type (a 16-byte channel_id
+// pseudonym rather than a 16-byte account UUIDv7) differ.
+
+/// Body of `POST /discovery/channel/register`. Binds an OPRF-hashed
+/// `@channelname` to a 16-byte `channel_id` pseudonym. First-come-
+/// first-served via a UNIQUE on `oprf_hash`; a repeat of the same hash
+/// with a different channel id is 409 Conflict.
+public struct ChannelRegisterRequest: Codable, Equatable {
+    public let pow: PowProofPayload
+    /// base64(VOPRF output) — exactly 64 bytes, from `blinder.finalize`.
+    public let oprfHash: String
+    /// base64(channel_id) — raw 16 bytes (ADR-0010 §"Wire surfaces").
+    public let channelId: String
+
+    public init(pow: PowProofPayload, oprfHash: String, channelId: String) {
+        self.pow = pow
+        self.oprfHash = oprfHash
+        self.channelId = channelId
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case pow
+        case oprfHash = "oprf_hash"
+        case channelId = "channel_id"
+    }
+}
+
+/// Response body of `POST /discovery/channel/register`. Server returns
+/// 409 on handle collision; that surfaces as
+/// ``DiscoveryClientError/http(status:endpoint:body:)`` with
+/// `status == 409`. The type only describes the 200-OK path.
+public struct ChannelRegisterResponse: Codable, Equatable {
+    public let ok: Bool
+
+    public init(ok: Bool) {
+        self.ok = ok
+    }
+}
+
+/// Body of `POST /discovery/channel/lookup`. Resolves an OPRF-hashed
+/// `@channelname` to its `channel_id`. Exact-match only.
+public struct ChannelLookupRequest: Codable, Equatable {
+    public let pow: PowProofPayload
+    /// Same shape as ``ChannelRegisterRequest/oprfHash``.
+    public let oprfHash: String
+
+    public init(pow: PowProofPayload, oprfHash: String) {
+        self.pow = pow
+        self.oprfHash = oprfHash
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case pow
+        case oprfHash = "oprf_hash"
+    }
+}
+
+/// Response body of `POST /discovery/channel/lookup`. The server
+/// returns 404 for an unknown `@channelname`; the high-level client
+/// surfaces that as a `nil` rather than an error class. This type only
+/// describes the 200-OK path.
+public struct ChannelLookupResponse: Codable, Equatable {
+    /// base64(channel_id) — raw 16 bytes.
+    public let channelId: String
+
+    public init(channelId: String) {
+        self.channelId = channelId
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case channelId = "channel_id"
+    }
+}

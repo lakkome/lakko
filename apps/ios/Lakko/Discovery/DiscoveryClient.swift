@@ -122,6 +122,28 @@ public final class DiscoveryClient {
         try await postNullableOn404(endpoint: "/discovery/lookup", body: request)
     }
 
+    /// `POST /discovery/channel/register` (G4-5, ADR-0010) — bind an
+    /// OPRF-hashed `@channelname` to a `channel_id`. Session-token-gated
+    /// write (a DoS rate-limit role — the token's account is NOT compared
+    /// against the channel; ownership lives at the PublisherGroup layer).
+    /// The low-level POST threads the bearer token via
+    /// ``post(endpoint:body:)``.
+    public func channelRegister(
+        _ request: ChannelRegisterRequest
+    ) async throws -> ChannelRegisterResponse {
+        try await post(endpoint: "/discovery/channel/register", body: request)
+    }
+
+    /// `POST /discovery/channel/lookup` (G4-5, ADR-0010). Returns the
+    /// typed response on 200, `nil` on 404 (the typed not-found path),
+    /// throws on any other non-2xx. Mirror of ``lookupRaw(_:)`` for the
+    /// channel namespace — unauthenticated, so no bearer header.
+    public func channelLookupRaw(
+        _ request: ChannelLookupRequest
+    ) async throws -> ChannelLookupResponse? {
+        try await postNullableOn404(endpoint: "/discovery/channel/lookup", body: request)
+    }
+
     /// `POST /discovery/identity` — upsert the identity bundle.
     public func identityUpload(
         _ request: IdentityUploadRequest
@@ -275,6 +297,114 @@ public final class DiscoveryClient {
             normalisedUsername: normalisedUsername,
             account: base64Decode(resp.accountId)
         )
+    }
+
+    // MARK: - Channel discovery (G4-5, ADR-0010)
+    //
+    // The `@channelname` namespace reuses the SAME OPRF mechanism as
+    // `@username` (the `/discovery/oprf` evaluate endpoint is
+    // namespace-agnostic — one static key over the blinded handle). Only
+    // the second endpoint differs: `/discovery/channel/{register,lookup}`
+    // instead of `/discovery/{register,lookup}`, and the id is a 16-byte
+    // channel_id pseudonym rather than a 16-byte account UUIDv7.
+    // Mirror of `apps/web/src/discovery/client.ts`
+    // `registerChannelName` / `lookupChannel`.
+
+    /// Bind `@channelname` to a 16-byte `channel_id`.
+    ///
+    /// Flow: PoW₁ → OPRF blind → `POST /discovery/oprf` → finalize →
+    /// PoW₂ → `POST /discovery/channel/register`. Identical to
+    /// ``registerUsername(accountId:username:)`` modulo the id type +
+    /// the second endpoint. Handle normalisation (NFKC + lowercase +
+    /// trim + leading-`@` strip) happens inside `OprfBlinder.blind`.
+    ///
+    /// The write is session-token-gated (a DoS rate-limit role, not an
+    /// ownership proof). Throws
+    /// ``DiscoveryClientError/http(status:endpoint:body:)`` with
+    /// `status == 409` when the handle is already registered
+    /// (first-come-first-served). Returns the server `ok` flag.
+    public func registerChannelName(
+        channelId: Data,
+        handle: String
+    ) async throws -> Bool {
+        guard channelId.count == Self.channelIdLength else {
+            throw DiscoveryClientError.argument(
+                "channelId must be \(Self.channelIdLength) bytes"
+            )
+        }
+        let blinder = try OprfBlinder.blind(username: handle)
+
+        let challenge1 = try await powChallenge()
+        let pow1 = try await solvePow(
+            seedB64: challenge1.seed,
+            effortBits: challenge1.effortBits
+        )
+        let oprfResp = try await oprfEvaluate(
+            OprfRequest(pow: pow1, blinded: blinder.blindedB64())
+        )
+
+        let oprfHashBytes = try blinder.finalize(evaluatedB64: oprfResp.evaluated)
+        let oprfHashB64 = base64Encode(oprfHashBytes)
+
+        let challenge2 = try await powChallenge()
+        let pow2 = try await solvePow(
+            seedB64: challenge2.seed,
+            effortBits: challenge2.effortBits
+        )
+
+        let resp = try await channelRegister(
+            ChannelRegisterRequest(
+                pow: pow2,
+                oprfHash: oprfHashB64,
+                channelId: base64Encode(channelId)
+            )
+        )
+        return resp.ok
+    }
+
+    /// Resolve `@channelname` to its 32-char hex `channel_id`, or `nil`
+    /// when the handle is not registered.
+    ///
+    /// Same flow as ``registerChannelName(channelId:handle:)`` modulo the
+    /// second endpoint: PoW₁ → OPRF → PoW₂ → `POST /discovery/channel/lookup`.
+    /// Exact-match only (the server does no prefix search). The 404
+    /// not-found path is folded into a `nil` return so a not-found is
+    /// visible in the type rather than an exception.
+    public func lookupChannel(handle: String) async throws -> String? {
+        let blinder = try OprfBlinder.blind(username: handle)
+
+        let challenge1 = try await powChallenge()
+        let pow1 = try await solvePow(
+            seedB64: challenge1.seed,
+            effortBits: challenge1.effortBits
+        )
+        let oprfResp = try await oprfEvaluate(
+            OprfRequest(pow: pow1, blinded: blinder.blindedB64())
+        )
+
+        let oprfHashBytes = try blinder.finalize(evaluatedB64: oprfResp.evaluated)
+        let oprfHashB64 = base64Encode(oprfHashBytes)
+
+        let challenge2 = try await powChallenge()
+        let pow2 = try await solvePow(
+            seedB64: challenge2.seed,
+            effortBits: challenge2.effortBits
+        )
+
+        guard let resp = try await channelLookupRaw(
+            ChannelLookupRequest(pow: pow2, oprfHash: oprfHashB64)
+        ) else {
+            return nil
+        }
+        guard let channelBytes = base64Decode(resp.channelId),
+              channelBytes.count == Self.channelIdLength else {
+            throw DiscoveryClientError.http(
+                status: 200,
+                endpoint: "/discovery/channel/lookup",
+                body: "server returned malformed channel_id"
+            )
+        }
+        return Self.hexEncode(channelBytes)
     }
 
     /// Upload (or replace) the user's MLS KeyPackage. Drives one
@@ -1677,10 +1807,22 @@ public final class DiscoveryClient {
         return s
     }
 
+    /// Lowercase hex, no separators — the 32-char wire form the
+    /// `services/channels` REST routes accept. Local to this client so
+    /// ``lookupChannel(handle:)`` can return a channel-id hex without
+    /// coupling the discovery module to `ChannelsComposer.bytesToHex`.
+    fileprivate static func hexEncode(_ data: Data) -> String {
+        data.map { String(format: "%02x", $0) }.joined()
+    }
+
     // MARK: - Constants
 
     /// Raw 16-byte UUIDv7.
     fileprivate static let accountIdLength: Int = 16
+
+    /// Raw 16-byte channel_id pseudonym (ADR-0010) — same length as an
+    /// account_id but a distinct namespace.
+    fileprivate static let channelIdLength: Int = 16
 
     /// Ed25519 + X25519 both use 32-byte public keys.
     fileprivate static let pubkeyLength: Int = 32

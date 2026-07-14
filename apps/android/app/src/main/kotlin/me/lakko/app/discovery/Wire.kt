@@ -96,6 +96,56 @@ data class LookupResponse(
 )
 
 // ----------------------------------------------------------------------------
+// /discovery/channel/{register,lookup}
+//   (services/discovery/src/channel_names.rs — G4-5, ADR-0010)
+// ----------------------------------------------------------------------------
+
+/** Body of `POST /discovery/channel/register`. Binds an OPRF-
+ *  hashed `@channelname` to a 16-byte `channel_id` pseudonym.
+ *  Same OPRF ciphersuite + wire shape as [RegisterRequest]
+ *  (Ristretto255-SHA512, 64-byte hash) — the `/discovery/oprf`
+ *  evaluate endpoint is namespace-agnostic, so the client reuses
+ *  `OprfBlinder.blind(handle)` verbatim. First-come-first-served
+ *  via a UNIQUE on `oprf_hash`; a repeat of the same hash with a
+ *  different channel id is 409 Conflict. */
+@Serializable
+data class ChannelRegisterRequest(
+    val pow: PowProofPayload,
+    /** base64(VOPRF output) — exactly 64 bytes, from
+     *  `blinder.finalize`. */
+    val oprf_hash: String,
+    /** base64(channel_id) — raw 16 bytes (ADR-0010 §"Wire
+     *  surfaces"). */
+    val channel_id: String,
+)
+
+/** Response body of `POST /discovery/channel/register`. Returns
+ *  409 on collision; that surfaces as [DiscoveryHttpError] with
+ *  `status = 409`. This type only describes the 200-OK path. */
+@Serializable
+data class ChannelRegisterResponse(
+    val ok: Boolean,
+)
+
+/** Body of `POST /discovery/channel/lookup`. Resolves an OPRF-
+ *  hashed `@channelname` to its `channel_id`. */
+@Serializable
+data class ChannelLookupRequest(
+    val pow: PowProofPayload,
+    /** Same shape as [ChannelRegisterRequest.oprf_hash]. */
+    val oprf_hash: String,
+)
+
+/** Response body of `POST /discovery/channel/lookup`. The server
+ *  returns 404 for an unknown `@channelname` — the high-level
+ *  [DiscoveryClient.channelLookupRaw] folds that into a `null`. */
+@Serializable
+data class ChannelLookupResponse(
+    /** base64(channel_id) — raw 16 bytes. */
+    val channel_id: String,
+)
+
+// ----------------------------------------------------------------------------
 // /discovery/identity   (services/discovery/src/identity_bundle.rs — 1.16d3a)
 // ----------------------------------------------------------------------------
 

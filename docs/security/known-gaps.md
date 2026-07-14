@@ -17,7 +17,7 @@ Items here are either:
 
 ## MLS state machine
 
-### G-1: Channel two-tier flow (>50k subscribers) — **crypto + service + UI + nav + RotationCron + batched fanout + multi-epoch retention BUILT (Sprints A/C/D, 2026-07); residual is `@channel` client discovery + deploy-gated scale proof**
+### G-1: Channel two-tier flow (>50k subscribers) — **crypto + service + UI + nav + RotationCron + batched fanout + multi-epoch retention + `@channel` client discovery BUILT (Sprints A–D, 2026-07); residual is the deploy-gated >50k scale proof only**
 
 Phase 4 (ADR-0010, two-tier PublisherGroup + sender-key broadcast). A 2026-07
 code audit found the prior "nothing is shipped" note **badly stale** — the crypto
@@ -41,7 +41,7 @@ co-publisher UI on all three clients are built. What is built vs the real residu
   with real MLS-backed crypto.
 - `services/discovery`: `@channel` OPRF `register` / `lookup` (server side).
 
-**Landed since the 2026-07 audit (Sprints A / C / D):**
+**Landed since the 2026-07 audit (Sprints A–D):**
 
 1. **Navigation (Sprint A).** Channels is now reachable from app navigation — a
    nav entry on web (`AppShell`) + a Home call site presenting the channels screen
@@ -65,11 +65,16 @@ co-publisher UI on all three clients are built. What is built vs the real residu
    staged prepare (`/rotate/stage`, ≤5000/chunk, `channel_staged_envelopes` never
    served) + an atomic `/rotate/commit` — C-42 preserved. Fit for the 50k–1M
    fanout the single request could not carry.
+3. **`@channel` discovery (Sprint B).** DONE on web + iOS + Android — clients
+   register a `@handle` at channel-create + resolve `@handle` → `channel_id` via
+   the OPRF discovery (`registerChannelName` / `lookupChannel`, reusing the
+   `@username` OPRF plumbing), so a user subscribes by `@handle` instead of a raw
+   hex id (the hex-paste path is preserved). The server side
+   (`/discovery/channel/{register,lookup}`) was already done; this is client
+   wiring only, no FFI change.
 
 **Remaining residual:**
 
-3. **`@channel` discovery not wired into clients** (server side done) — users must
-   paste a raw hex `channel_id` (Sprint B).
 6. >50k **operational scale** (dedicated HPKE-envelope bandwidth allowance, load
    test p95 < 5 s) — deploy-gated, not yet exercised.
 

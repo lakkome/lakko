@@ -61,6 +61,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import androidx.compose.foundation.text.selection.SelectionContainer
+import me.lakko.app.channels.ChannelDiscovery
 import me.lakko.app.channels.ChannelHandle
 import me.lakko.app.channels.ChannelPublisherKeys
 import me.lakko.app.channels.ChannelsApiException
@@ -71,6 +72,7 @@ import me.lakko.app.channels.ChannelsUiState
 import me.lakko.app.channels.CoPublisher
 import me.lakko.app.channels.PostView
 import me.lakko.app.channels.RotationCron
+import me.lakko.app.discovery.DiscoveryHttpError
 import me.lakko.app.ds.DsClient
 import uniffi.lakko_ffi_uniffi.ChannelRotationState
 import uniffi.lakko_ffi_uniffi.Identity
@@ -142,6 +144,12 @@ public fun ChannelsRootScreen(
      * `ChatRepository` already uses.
      */
     accountIdentitySeed: ByteArray,
+    /** Phase 1.5b bearer token for the active session
+     *  (`IdentitySecrets.sessionToken`). Threaded into
+     *  [NewChannelScreen] so the optional `@handle` registration
+     *  (G4-5, ADR-0010) can drive the session-token-gated
+     *  `POST /discovery/channel/register`. */
+    sessionToken: String,
     /** Back to the host (the app Home surface). Wired into the list
      *  screen's top-bar back arrow, matching the Contacts / Devices
      *  navigation idiom so the Channels entry is not a dead-end. */
@@ -156,12 +164,17 @@ public fun ChannelsRootScreen(
             onCreate = { route = Route.New },
             onOpen = { route = Route.Detail(it) },
             onJoin = { route = Route.JoinCoPublisher },
+            // G4-5: a resolved `@handle` OR pasted hex id lands on the
+            // subscriber route for that channel id (mirrors the web
+            // `ChannelsList` find-and-navigate).
+            onFindSubscribe = { hex -> route = Route.Subscribe(hex) },
             onBack = onBack,
         )
         Route.New -> NewChannelScreen(
             state = state,
             client = client,
             accountIdentitySeed = accountIdentitySeed,
+            sessionToken = sessionToken,
             onClose = { route = Route.List },
             onCreated = { id -> route = Route.Detail(id) },
         )
@@ -199,9 +212,44 @@ private fun ChannelsListScreen(
     onCreate: () -> Unit,
     onOpen: (String) -> Unit,
     onJoin: () -> Unit,
+    /** G4-5: navigate to the subscriber route for a resolved 32-char
+     *  hex channel id (from a typed `@handle` or a pasted raw id). */
+    onFindSubscribe: (String) -> Unit,
     onBack: () -> Unit,
 ) {
     val channels by state.channels.collectAsState()
+    // G4-5: subscribe entry point. Accepts EITHER a typed `@handle`
+    // (OPRF-resolved to a channel id) OR a pasted 32-char hex channel
+    // id (used verbatim). Both land on the subscriber route.
+    var findInput by remember { mutableStateOf("") }
+    var findBusy by remember { mutableStateOf(false) }
+    var findError by remember { mutableStateOf<String?>(null) }
+    val scope = rememberCoroutineScope()
+
+    fun runFind() {
+        if (findBusy) return
+        val raw = findInput.trim()
+        if (raw.isEmpty()) return
+        findBusy = true
+        findError = null
+        scope.launch {
+            try {
+                val idHex = ChannelDiscovery.resolveChannelIdOrHandle(raw)
+                if (idHex == null) {
+                    val shown = if (raw.startsWith("@")) raw else "@$raw"
+                    findError = "No channel found for $shown."
+                    findBusy = false
+                    return@launch
+                }
+                findBusy = false
+                onFindSubscribe(idHex)
+            } catch (e: Throwable) {
+                findError = "Lookup failed: ${e.message}"
+                findBusy = false
+            }
+        }
+    }
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -231,37 +279,75 @@ private fun ChannelsListScreen(
         },
         containerColor = Theme.background,
     ) { inner ->
-        if (channels.isEmpty()) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(inner),
+        ) {
+            // G4-5 subscribe entry: @handle OR pasted hex channel id.
             Column(
                 modifier = Modifier
-                    .fillMaxSize()
-                    .padding(inner)
-                    .padding(24.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.Center,
-            ) {
-                Text(
-                    "No channels yet.",
-                    color = Theme.textSecondary,
-                    fontSize = 16.sp,
-                )
-                Spacer(Modifier.height(6.dp))
-                Text(
-                    "Tap + to create one.",
-                    color = Theme.textSecondary,
-                    fontSize = 14.sp,
-                )
-            }
-        } else {
-            LazyColumn(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(inner)
-                    .padding(horizontal = 12.dp),
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp)
+                    .padding(top = 8.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                items(channels, key = { it.id }) { channel ->
-                    ChannelRow(channel, onClick = { onOpen(channel.id) })
+                OutlinedTextField(
+                    value = findInput,
+                    onValueChange = {
+                        findInput = it
+                        findError = null
+                    },
+                    label = { Text("Find a channel — @handle or id") },
+                    enabled = !findBusy,
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                findError?.let { msg ->
+                    Text(msg, color = Theme.destructive, fontSize = 13.sp)
+                }
+                Button(
+                    onClick = { runFind() },
+                    enabled = !findBusy && findInput.trim().isNotEmpty(),
+                    colors = ButtonDefaults.buttonColors(containerColor = Theme.accent),
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text(if (findBusy) "Finding…" else "Find & subscribe")
+                }
+            }
+            Spacer(Modifier.height(8.dp))
+            if (channels.isEmpty()) {
+                Column(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth()
+                        .padding(24.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center,
+                ) {
+                    Text(
+                        "No channels yet.",
+                        color = Theme.textSecondary,
+                        fontSize = 16.sp,
+                    )
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        "Tap + to create one, or find one above.",
+                        color = Theme.textSecondary,
+                        fontSize = 14.sp,
+                    )
+                }
+            } else {
+                LazyColumn(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    items(channels, key = { it.id }) { channel ->
+                        ChannelRow(channel, onClick = { onOpen(channel.id) })
+                    }
                 }
             }
         }
@@ -317,11 +403,15 @@ private fun NewChannelScreen(
     state: ChannelsUiState,
     client: ChannelsClient,
     accountIdentitySeed: ByteArray,
+    sessionToken: String,
     onClose: () -> Unit,
     onCreated: (String) -> Unit,
 ) {
     var name by remember { mutableStateOf("") }
     var description by remember { mutableStateOf("") }
+    // G4-5: optional public `@handle` (OPRF-discoverable). Empty →
+    // discovery is skipped; the raw hex channel id still works.
+    var handle by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
@@ -364,6 +454,20 @@ private fun NewChannelScreen(
                 modifier = Modifier.fillMaxWidth(),
                 keyboardOptions = KeyboardOptions.Default,
             )
+            OutlinedTextField(
+                value = handle,
+                onValueChange = { handle = it },
+                label = { Text("@handle (optional, public)") },
+                enabled = !busy,
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Text(
+                "A public handle lets others find this channel by @name. " +
+                    "Leave blank to share the channel id only.",
+                color = Theme.textSecondary,
+                fontSize = 12.sp,
+            )
             error?.let { msg ->
                 Card(
                     colors = CardDefaults.cardColors(containerColor = Theme.destructive),
@@ -382,8 +486,34 @@ private fun NewChannelScreen(
                     busy = true
                     error = null
                     val id = ChannelsComposer.freshChannelIdHex()
+                    val wantedHandle = handle.trim()
                     scope.launch {
                         try {
+                            // G4-5: claim the optional `@handle` FIRST (before
+                            // the channel exists on the channels service) so a
+                            // first-come-first-served collision (409) aborts
+                            // cleanly without leaving a half-created channel. An
+                            // empty handle skips discovery entirely — the raw hex
+                            // channel id still works. The mapping is `@handle ->
+                            // channel_id`; the OPRF hash is all the server sees.
+                            if (wantedHandle.isNotEmpty()) {
+                                try {
+                                    ChannelDiscovery.registerChannelHandle(
+                                        handle = wantedHandle,
+                                        channelIdHex = id,
+                                        sessionToken = sessionToken,
+                                    )
+                                } catch (e: DiscoveryHttpError) {
+                                    error = if (e.status == 409) {
+                                        "The handle @${wantedHandle.removePrefix("@")} is " +
+                                            "already taken — pick another (or leave it blank)."
+                                    } else {
+                                        "Could not register the handle: ${e.message}"
+                                    }
+                                    busy = false
+                                    return@launch
+                                }
+                            }
                             client.createChannel(id)
                             // G-27 / ADR-0017: build a transient
                             // `Identity` from the canonical
