@@ -30,6 +30,9 @@
 
 use std::sync::Mutex;
 
+use lakko_calls::link_invite::{
+    elect_committer as core_elect_committer, CommitterCandidate as CoreCommitterCandidate,
+};
 use lakko_calls::sframe as core;
 use wasm_bindgen::prelude::*;
 
@@ -106,6 +109,34 @@ pub fn call_safety_number(seed: &[u8]) -> Result<String, JsError> {
         .try_into()
         .map_err(|_| JsError::new("call safety-number seed must be exactly 32 bytes"))?;
     Ok(lakko_calls::safety_number::call_safety_number(&arr))
+}
+
+/// Deterministically elect the committer-of-record for a multi-joiner link call
+/// (ADR-0032): the owner if present, otherwise the present member with the
+/// lowest MLS leaf index. Returns the elected leaf index, or `undefined` when no
+/// member is present.
+///
+/// Candidates are passed as three parallel arrays (leaf index, owner flag,
+/// presence flag) — the wasm-friendly shape for a small struct array. A length
+/// mismatch yields `undefined` (defensive). This is the one canonical
+/// implementation every platform shares, so failover + reclaim cannot split-brain.
+#[wasm_bindgen(js_name = "electCommitter")]
+#[must_use]
+pub fn elect_committer(leaf_indices: &[u32], is_owner: &[u8], is_present: &[u8]) -> Option<u32> {
+    if is_owner.len() != leaf_indices.len() || is_present.len() != leaf_indices.len() {
+        return None;
+    }
+    let candidates: Vec<CoreCommitterCandidate> = leaf_indices
+        .iter()
+        .zip(is_owner.iter())
+        .zip(is_present.iter())
+        .map(|((&leaf, &owner), &present)| CoreCommitterCandidate {
+            leaf_index: leaf,
+            is_owner: owner != 0,
+            is_present: present != 0,
+        })
+        .collect();
+    core_elect_committer(&candidates)
 }
 
 /// Per-participant AEAD key + per-participant nonce salt

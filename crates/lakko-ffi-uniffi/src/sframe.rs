@@ -53,6 +53,9 @@
 
 use std::sync::Mutex;
 
+use lakko_calls::link_invite::{
+    elect_committer as core_elect_committer, CommitterCandidate as CoreCommitterCandidate,
+};
 use lakko_calls::sframe as core;
 
 use crate::FfiError;
@@ -142,6 +145,41 @@ pub fn call_safety_number(seed: Vec<u8>) -> Result<String, FfiError> {
         .try_into()
         .map_err(|_| FfiError::Call("call safety-number seed must be exactly 32 bytes".into()))?;
     Ok(lakko_calls::safety_number::call_safety_number(&arr))
+}
+
+/// One candidate committer for the ADR-0032 deterministic election — an MLS
+/// group member as the client observes it: its leaf index, whether it is the
+/// call's owner (its account matches the capability `owner_account_id`), and
+/// whether it is currently present (connected to the SFU room).
+#[derive(uniffi::Record, Clone, Debug)]
+pub struct CommitterCandidate {
+    /// The member's MLS leaf index in the call group.
+    pub leaf_index: u32,
+    /// `true` if this member is the call's owner.
+    pub is_owner: bool,
+    /// `true` if this member is currently present (SFU-connected).
+    pub is_present: bool,
+}
+
+/// Deterministically elect the committer-of-record for a multi-joiner link call
+/// (ADR-0032): the owner if present, otherwise the present member with the
+/// lowest MLS leaf index. Returns the elected leaf index, or `None` when no
+/// member is present.
+///
+/// Pure + total over the `(roster, presence)` snapshot, so every platform
+/// computes the same committer from the same view — the single canonical
+/// implementation that keeps failover + reclaim split-brain-free.
+#[uniffi::export]
+pub fn elect_committer(candidates: Vec<CommitterCandidate>) -> Option<u32> {
+    let core: Vec<CoreCommitterCandidate> = candidates
+        .into_iter()
+        .map(|c| CoreCommitterCandidate {
+            leaf_index: c.leaf_index,
+            is_owner: c.is_owner,
+            is_present: c.is_present,
+        })
+        .collect();
+    core_elect_committer(&core)
 }
 
 /// Per-participant AEAD key + per-participant nonce salt
