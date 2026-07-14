@@ -47,28 +47,35 @@
 //!      │ (3a4 / 3c4 invariants C-1, C-2)    │
 //! ```
 //!
-//! ## V1 scope: single joiner
+//! ## Two topologies
 //!
-//! `CallInviteCapability` embeds **one** one-time
-//! `KeyPackage`. The first call to `accept_call_invite`
-//! consumes it; a second joiner trying to use the same
-//! capability would create a separate MLS group (because
-//! both would call `Group::create` as the founder). The
-//! ledger would still derive the same `CallKey` seed from
-//! the same `call_id` exporter context, but the joiners
-//! wouldn't share a group view — the call wouldn't
-//! actually connect.
+//! **1×1 fast-path (ADR-0009), [`accept_call_invite`].** The
+//! joiner founds the group and adds the owner via the
+//! capability's embedded one-time `KeyPackage`. Single-use by
+//! construction — a second joiner reusing the same capability
+//! would call `Group::create` on its own side and land in a
+//! separate MLS group (same `CallKey` seed from the same
+//! `call_id`, but a different epoch → the call would not
+//! connect). Retained for the 1×1 case.
 //!
-//! Reusing **one** capability for many joiners (the
-//! single-link, multiple-strangers topology) still requires a
-//! server-side rendezvous (`/call-invite/{blob_id}` discovery
-//! endpoint + KP refresh) and is deferred to a 3c3-multi-use
-//! sprint — that endpoint does not exist yet. Multi-party
-//! calls themselves are already supported through a different
-//! topology: the owner ferries each later joiner's KeyPackage
-//! into the group via [`lakko_contacts::wrap_call_kp_forward`]
-//! / [`lakko_contacts::wrap_call_welcome`] (exercised end to
-//! end in this module's integration tests).
+//! **Multi-joiner shareable links (ADR-0032), owner-founds.**
+//! For a link many strangers join, the **owner is the sole
+//! founder** ([`found_call`]); joiners never `Group::create`,
+//! so there is exactly one group and no founding race (the
+//! G-21 two-groups bug is closed by design). Each joiner mints
+//! its own fresh `KeyPackage` ([`request_call_join`]), the
+//! acting committer adds it ([`admit_joiner`]), and the joiner
+//! enters via the returned Welcome ([`join_call_from_welcome`]).
+//! The committer of record is [`elect_committer`] — the owner
+//! while present, else the lowest-leaf present member — so the
+//! call survives the owner leaving mid-call (failover) and
+//! reverts to the owner on return (reclaim), with no election
+//! protocol. The capability's embedded one-time owner-KP is
+//! unused on this path, so the one-time-KP-in-a-shared-link
+//! problem disappears. Transport for the KeyPackage / Welcome
+//! exchange is the SFU `signal-relay` (live call) or the
+//! stranger-inbox [`lakko_contacts::wrap_call_kp_forward`] /
+//! [`lakko_contacts::wrap_call_welcome`] ferry (cold start).
 //!
 //! ## What this module does NOT do
 //!
@@ -80,9 +87,10 @@
 //! - Deliver the Welcome to Alice. That's the platform's
 //!   transport layer (stranger-inbox / DS journal /
 //!   QR-mediated paste).
-//! - Track `max_uses` — V1 treats every capability as
-//!   single-use at the orchestration layer. The wire-side
-//!   `max_uses` hint is informational.
+//! - Enforce `max_uses` / per-joiner dedup — the discovery
+//!   `/c/<blob_id>` blob enforces `max_uses`, and the acting
+//!   committer dedups joins by `(call_id, joiner leaf key)`
+//!   (ADR-0032 G-22). This module just founds / admits / joins.
 
 use lakko_contacts::CallInviteCapability;
 use lakko_mls::group::encode_message;
@@ -182,6 +190,208 @@ pub fn accept_call_invite(
     })
 }
 
+/// A candidate committer in a link-based call, as a client observes it by
+/// joining the MLS membership (leaf index) with the SFU roster (presence) and
+/// the capability (`owner_account_id`).
+///
+/// The mapping from an MLS leaf to an account / presence is app-level (the SFU
+/// per-call peer tag + the signed capability), so this type carries the already
+/// resolved facts rather than reaching into MLS internals.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CommitterCandidate {
+    /// The member's MLS leaf index in the call group.
+    pub leaf_index: u32,
+    /// `true` if this member is the call's owner — its account matches the
+    /// capability's `owner_account_id`.
+    pub is_owner: bool,
+    /// `true` if this member is currently present (connected to the SFU room).
+    pub is_present: bool,
+}
+
+/// Deterministically elect the committer-of-record for a link-based call
+/// ([ADR-0032](../../../docs/adr/0032-multi-joiner-call-links.md)).
+///
+/// The committer is the **owner if the owner is present**, otherwise the
+/// **present member with the lowest leaf index**. Returns the elected leaf
+/// index, or `None` when no member is present (a transient state with no
+/// committer — e.g. everyone momentarily disconnected).
+///
+/// The election is a **pure, total function of the `(roster, presence)`
+/// snapshot**: every member computes the same answer from the same snapshot, so
+/// failover (the owner drops → the lowest-leaf successor takes over) and reclaim
+/// (the owner returns → the rule reverts to the owner) need no election protocol
+/// and cannot split-brain. It reads only public state (leaf index, ownership,
+/// presence) — no key material, no MLS mutation.
+///
+/// Among present owners (there should be exactly one; a mis-flagging caller is
+/// tolerated) the lowest leaf wins, so the result is deterministic regardless of
+/// candidate ordering.
+#[must_use]
+pub fn elect_committer(candidates: &[CommitterCandidate]) -> Option<u32> {
+    // Owner-if-present wins outright. Take the lowest-leaf present owner so a
+    // caller that mis-flags two owners still gets a deterministic answer.
+    let owner_leaf = candidates
+        .iter()
+        .filter(|c| c.is_owner && c.is_present)
+        .map(|c| c.leaf_index)
+        .min();
+    if owner_leaf.is_some() {
+        return owner_leaf;
+    }
+    // No present owner → the lowest-leaf present member is the acting committer.
+    candidates
+        .iter()
+        .filter(|c| c.is_present)
+        .map(|c| c.leaf_index)
+        .min()
+}
+
+// =============================================================================
+// Owner-founds orchestration (ADR-0032, multi-joiner shareable links)
+// =============================================================================
+//
+// Unlike `accept_call_invite` (the ADR-0009 1×1 fast-path, where the joiner
+// founds the group and adds the owner via the capability's embedded one-time
+// KeyPackage), the multi-joiner path makes the OWNER the sole founder. Joiners
+// never call `Group::create`, so there is exactly one MLS group and no founding
+// race (the G-21 two-groups bug). Each joiner mints its own fresh KeyPackage
+// (`request_call_join`), the acting committer adds it (`admit_joiner`), and the
+// joiner enters via the returned Welcome (`join_call_from_welcome`). The
+// committer of record is `elect_committer` above, so the flow survives the owner
+// leaving mid-call.
+
+/// The owner's freshly-founded link call — the MLS group (owner at leaf 0) plus
+/// its [`GroupCallSession`] ledger keyed by `call_id`.
+pub struct FoundedCall {
+    /// Fresh MLS group with the owner as the sole founder (leaf 0).
+    pub group: Group,
+    /// `GroupCallSession` for the link-based call.
+    pub session: GroupCallSession,
+}
+
+/// Found the owner side of a multi-joiner link call ([ADR-0032]).
+///
+/// The owner creates a fresh MLS group (it is leaf 0, the sole founder) and the
+/// `GroupCallSession` keyed by `call_id`. Joiners are added later via
+/// [`admit_joiner`]; no joiner ever founds, so there is only ever one group.
+///
+/// # Errors
+///
+/// [`Error::Crypto`] if `Group::create` fails; [`Error::Exporter`] if the
+/// call-key derivation is rejected.
+///
+/// [ADR-0032]: ../../../docs/adr/0032-multi-joiner-call-links.md
+pub fn found_call(owner_identity: &Identity, call_id: [u8; 16]) -> Result<FoundedCall> {
+    let group = Group::create(owner_identity)
+        .map_err(|e| Error::Crypto(format!("found_call Group::create: {e}")))?;
+    let session =
+        GroupCallSession::create(GroupCallScope::LinkBased, call_id, &group, owner_identity)?;
+    Ok(FoundedCall { group, session })
+}
+
+/// Mint the joiner's request to join a multi-joiner link call ([ADR-0032]).
+///
+/// Produces a fresh serialized `KeyPackage` for `joiner_identity` (its private
+/// half persists in the identity's own provider, so the same identity can later
+/// open the Welcome in [`join_call_from_welcome`]). The caller ferries these
+/// bytes to the acting committer — over the SFU `signal-relay` for a live call,
+/// or the stranger-inbox `wrap_call_kp_forward` for a cold start. The joiner
+/// never founds a group.
+///
+/// # Errors
+///
+/// [`Error::Crypto`] if the KeyPackage cannot be minted or serialized.
+///
+/// [ADR-0032]: ../../../docs/adr/0032-multi-joiner-call-links.md
+pub fn request_call_join(joiner_identity: &Identity) -> Result<Vec<u8>> {
+    let kp = joiner_identity
+        .create_key_package()
+        .map_err(|e| Error::Crypto(format!("request_call_join create_key_package: {e}")))?;
+    lakko_mls::key_package::serialize(&kp)
+        .map_err(|e| Error::Crypto(format!("request_call_join serialize KeyPackage: {e}")))
+}
+
+/// Result of [`admit_joiner`] — the two MLS messages a committer produces when
+/// adding a joiner: the commit for the existing members, and the Welcome for the
+/// new joiner.
+pub struct AdmittedJoiner {
+    /// Commit bytes (MLS wire format) to broadcast to the EXISTING members; each
+    /// runs `Group::process_incoming` on it to advance to the new epoch.
+    pub commit_for_members: Vec<u8>,
+    /// Welcome bytes (MLS wire format) to deliver to the NEW joiner; it runs
+    /// [`join_call_from_welcome`] on it to enter the call group.
+    pub welcome_for_joiner: Vec<u8>,
+}
+
+/// The acting committer admits a joiner into a multi-joiner link call
+/// ([ADR-0032]).
+///
+/// Adds `joiner_key_package` (the bytes from [`request_call_join`]) to `group`,
+/// advancing `group` to the new epoch, and returns the commit (for the existing
+/// members) + the Welcome (for the joiner). The caller MUST already be the
+/// [`elect_committer`]-designated committer — a redundant commit from a
+/// non-committer would fork the epoch; the deterministic election is what keeps
+/// exactly one committer active.
+///
+/// # Errors
+///
+/// [`Error::Crypto`] if the KeyPackage is malformed or the MLS add fails.
+///
+/// [ADR-0032]: ../../../docs/adr/0032-multi-joiner-call-links.md
+pub fn admit_joiner(
+    group: &mut Group,
+    committer_identity: &Identity,
+    joiner_key_package: &[u8],
+) -> Result<AdmittedJoiner> {
+    let addition = group
+        .add_member_from_wire(committer_identity, joiner_key_package)
+        .map_err(|e| Error::Crypto(format!("admit_joiner add_member_from_wire: {e}")))?;
+    let commit_for_members = encode_message(&addition.commit)
+        .map_err(|e| Error::Crypto(format!("admit_joiner encode commit: {e}")))?;
+    let welcome_for_joiner = encode_message(&addition.welcome)
+        .map_err(|e| Error::Crypto(format!("admit_joiner encode Welcome: {e}")))?;
+    Ok(AdmittedJoiner {
+        commit_for_members,
+        welcome_for_joiner,
+    })
+}
+
+/// A joiner that has entered a multi-joiner link call via a Welcome — the MLS
+/// group plus its [`GroupCallSession`] keyed by `call_id`.
+pub struct JoinedCall {
+    /// The joined MLS group (the joiner is now a member).
+    pub group: Group,
+    /// `GroupCallSession` for the link-based call, agreeing on the same
+    /// `CallKey` seed as every other member at this epoch.
+    pub session: GroupCallSession,
+}
+
+/// The joiner enters a multi-joiner link call from the committer's Welcome
+/// ([ADR-0032]).
+///
+/// Runs `Group::join_from_welcome` (using the private half persisted by the
+/// earlier [`request_call_join`] under the SAME `joiner_identity`) and builds
+/// the `GroupCallSession` keyed by `call_id`. On success the joiner shares the
+/// group view + derives the same `CallKey` seed as every other member.
+///
+/// # Errors
+///
+/// [`Error::Crypto`] if the Welcome is malformed or references a KeyPackage the
+/// joiner's provider does not hold; [`Error::Exporter`] on call-key derivation.
+///
+/// [ADR-0032]: ../../../docs/adr/0032-multi-joiner-call-links.md
+pub fn join_call_from_welcome(
+    welcome_bytes: &[u8],
+    joiner_identity: &Identity,
+    call_id: [u8; 16],
+) -> Result<JoinedCall> {
+    let group = Group::join_from_welcome(welcome_bytes, joiner_identity)
+        .map_err(|e| Error::Crypto(format!("join_call_from_welcome join_from_welcome: {e}")))?;
+    let session =
+        GroupCallSession::create(GroupCallScope::LinkBased, call_id, &group, joiner_identity)?;
+    Ok(JoinedCall { group, session })
+}
+
 // =============================================================================
 // Tests
 // =============================================================================
@@ -209,6 +419,194 @@ mod tests {
         id[0] = 0x10;
         id[15] = 0x10;
         id
+    }
+
+    // -------------------------------------------------------------------------
+    // elect_committer (ADR-0032 deterministic committer election)
+    // -------------------------------------------------------------------------
+
+    fn cand(leaf: u32, is_owner: bool, is_present: bool) -> CommitterCandidate {
+        CommitterCandidate {
+            leaf_index: leaf,
+            is_owner,
+            is_present,
+        }
+    }
+
+    #[test]
+    fn elect_owner_when_owner_present() {
+        // Owner is leaf 3 (not the lowest) but present → owner wins.
+        let c = [
+            cand(0, false, true),
+            cand(3, true, true),
+            cand(5, false, true),
+        ];
+        assert_eq!(elect_committer(&c), Some(3));
+    }
+
+    #[test]
+    fn elect_lowest_leaf_when_owner_absent() {
+        // Owner (leaf 3) absent → lowest present leaf (1) is committer.
+        let c = [
+            cand(1, false, true),
+            cand(3, true, false),
+            cand(5, false, true),
+        ];
+        assert_eq!(elect_committer(&c), Some(1));
+    }
+
+    #[test]
+    fn elect_reclaim_reverts_to_owner_on_return() {
+        // Owner absent → successor leaf 1; owner returns → back to owner (leaf 2).
+        let absent = [cand(1, false, true), cand(2, true, false)];
+        assert_eq!(elect_committer(&absent), Some(1));
+        let present = [cand(1, false, true), cand(2, true, true)];
+        assert_eq!(elect_committer(&present), Some(2));
+    }
+
+    #[test]
+    fn elect_none_when_no_one_present() {
+        let c = [cand(0, true, false), cand(1, false, false)];
+        assert_eq!(elect_committer(&c), None);
+    }
+
+    #[test]
+    fn elect_ignores_absent_lower_leaf() {
+        // Leaf 0 is absent; the lowest PRESENT leaf (2) wins, not 0.
+        let c = [
+            cand(0, false, false),
+            cand(2, false, true),
+            cand(4, false, true),
+        ];
+        assert_eq!(elect_committer(&c), Some(2));
+    }
+
+    #[test]
+    fn elect_deterministic_with_mis_flagged_double_owner() {
+        // Defensive: two present owners → lowest leaf, order-independent.
+        let a = [
+            cand(5, true, true),
+            cand(2, true, true),
+            cand(9, false, true),
+        ];
+        let b = [
+            cand(9, false, true),
+            cand(2, true, true),
+            cand(5, true, true),
+        ];
+        assert_eq!(elect_committer(&a), Some(2));
+        assert_eq!(elect_committer(&b), Some(2));
+    }
+
+    #[test]
+    fn elect_empty_is_none() {
+        assert_eq!(elect_committer(&[]), None);
+    }
+
+    // -------------------------------------------------------------------------
+    // Owner-founds multi-joiner orchestration E2E (ADR-0032)
+    // -------------------------------------------------------------------------
+
+    /// Full owner-founds flow with failover + reclaim. Alice (owner) founds;
+    /// Bob + Carol join via `request_call_join` / `admit_joiner` /
+    /// `join_call_from_welcome`; every active member agrees on the epoch +
+    /// `CallKey` seed. Alice then drops → `elect_committer` picks Bob (the
+    /// lowest present leaf) → Bob admits Dave as the acting committer. Alice
+    /// returns, catches up on the missed commit, and the election reclaims the
+    /// committer role to her (owner present). Closes the ADR-0032 core loop.
+    #[test]
+    #[allow(clippy::too_many_lines)] // E2E walkthrough by design.
+    fn owner_founds_multi_joiner_with_failover_and_reclaim() {
+        let alice = MlsIdentity::generate("alice").unwrap();
+        let bob = MlsIdentity::generate("bob").unwrap();
+        let carol = MlsIdentity::generate("carol").unwrap();
+        let dave = MlsIdentity::generate("dave").unwrap();
+        let call_id = fixture_call_id();
+
+        // Fresh CallKey seed for a member's CURRENT group state — the session
+        // must be rebuilt after each commit to read the seed at the new epoch.
+        let seed = |g: &Group, id: &MlsIdentity| {
+            GroupCallSession::create(GroupCallScope::LinkBased, call_id, g, id)
+                .unwrap()
+                .call_key()
+                .as_bytes()
+                .to_vec()
+        };
+
+        // --- Alice founds; she is the sole founder at leaf 0.
+        let mut alice_call = found_call(&alice, call_id).unwrap();
+        assert_eq!(alice_call.group.own_leaf_index().u32(), 0);
+
+        // --- Bob requests → Alice (committer) admits → Bob joins. Only Alice
+        //     was a member, so her group already advanced via the add; there is
+        //     no other existing member to process the commit.
+        let bob_kp = request_call_join(&bob).unwrap();
+        let admit_bob = admit_joiner(&mut alice_call.group, &alice, &bob_kp).unwrap();
+        let mut bob_call =
+            join_call_from_welcome(&admit_bob.welcome_for_joiner, &bob, call_id).unwrap();
+        assert_eq!(alice_call.group.epoch(), bob_call.group.epoch());
+        assert_eq!(seed(&alice_call.group, &alice), seed(&bob_call.group, &bob));
+
+        // --- Carol requests → Alice admits → Carol joins; Bob (existing
+        //     member) processes the commit to advance to the same epoch.
+        let carol_kp = request_call_join(&carol).unwrap();
+        let admit_carol = admit_joiner(&mut alice_call.group, &alice, &carol_kp).unwrap();
+        bob_call
+            .group
+            .process_incoming(&bob, &admit_carol.commit_for_members)
+            .unwrap();
+        let mut carol_call =
+            join_call_from_welcome(&admit_carol.welcome_for_joiner, &carol, call_id).unwrap();
+        assert_eq!(alice_call.group.epoch(), bob_call.group.epoch());
+        assert_eq!(alice_call.group.epoch(), carol_call.group.epoch());
+        assert_eq!(
+            seed(&alice_call.group, &alice),
+            seed(&carol_call.group, &carol)
+        );
+
+        // --- FAILOVER: Alice (owner, leaf 0) drops. The remaining members'
+        //     roster → election picks Bob (leaf 1, the lowest PRESENT leaf).
+        let roster_owner_absent = [
+            cand(0, true, false), // Alice: owner, absent
+            cand(1, false, true), // Bob:   present
+            cand(2, false, true), // Carol: present
+        ];
+        assert_eq!(elect_committer(&roster_owner_absent), Some(1));
+
+        // --- Bob (acting committer) admits Dave; Carol (existing member)
+        //     processes the commit. Alice is offline — her local view stays
+        //     behind at the post-Carol epoch until she returns and catches up.
+        let dave_kp = request_call_join(&dave).unwrap();
+        let admit_dave = admit_joiner(&mut bob_call.group, &bob, &dave_kp).unwrap();
+        carol_call
+            .group
+            .process_incoming(&carol, &admit_dave.commit_for_members)
+            .unwrap();
+        let dave_call =
+            join_call_from_welcome(&admit_dave.welcome_for_joiner, &dave, call_id).unwrap();
+        assert_eq!(bob_call.group.epoch(), carol_call.group.epoch());
+        assert_eq!(bob_call.group.epoch(), dave_call.group.epoch());
+        assert_eq!(seed(&bob_call.group, &bob), seed(&dave_call.group, &dave));
+
+        // --- RECLAIM: Alice returns. She admitted Bob + Carol herself, so she
+        //     missed only Dave's commit; processing it catches her up to the
+        //     post-Dave epoch, and the election reverts the committer to her.
+        alice_call
+            .group
+            .process_incoming(&alice, &admit_dave.commit_for_members)
+            .unwrap();
+        assert_eq!(alice_call.group.epoch(), dave_call.group.epoch());
+        assert_eq!(
+            seed(&alice_call.group, &alice),
+            seed(&dave_call.group, &dave)
+        );
+        let roster_owner_back = [
+            cand(0, true, true),  // Alice: owner, back
+            cand(1, false, true), // Bob
+            cand(2, false, true), // Carol
+            cand(3, false, true), // Dave
+        ];
+        assert_eq!(elect_committer(&roster_owner_back), Some(0));
     }
 
     /// Owner Alice mints a capability; joiner Bob accepts;
