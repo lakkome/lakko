@@ -932,6 +932,20 @@ pub fn load_group(identity: &Identity, group_id: Vec<u8>) -> Result<Option<Arc<G
     }))
 }
 
+/// Extract the 32-byte leaf (Ed25519 signature) public key from a wire-form
+/// KeyPackage — the stable per-identity key that distinct KeyPackages minted by
+/// the same identity share (only the HPKE init key is fresh per KP). Used by the
+/// call-admission dedup (ADR-0032 / G-22) so a peer re-minting fresh KeyPackages
+/// under one identity is admitted at most once.
+///
+/// # Errors
+///
+/// [`FfiError`] on a KeyPackage parse failure.
+#[uniffi::export]
+pub fn key_package_signature_key(key_package: Vec<u8>) -> Result<Vec<u8>, FfiError> {
+    Ok(key_package::signature_key(&key_package)?)
+}
+
 // ============================================================================
 // PublisherGroup (G4-2-mls-persistence step 2 — FFI surface for the persistent
 // Tier-1 MLS group that owns the channel content-key rotation authority. See

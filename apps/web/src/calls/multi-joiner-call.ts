@@ -172,6 +172,10 @@ export class MultiJoinerCall {
    *  FFI helper (e.g. `keyPackageSignatureKey`) lands. */
   private readonly admittedByPeer = new Map<string, Uint8Array>();
   private readonly admittedByKp = new Set<string>();
+  /** G-22: the PRIMARY admission dedup — the joiner's stable MLS signature
+   *  (leaf) key, so a peer re-minting FRESH KeyPackages under one identity is
+   *  admitted at most once. Maps signature-key hex → the stored wrapped Welcome. */
+  private readonly admittedBySigKey = new Map<string, Uint8Array>();
   /** The joiner's wrapped KeyPackage, (re)broadcast until it has joined. */
   private pendingKeyPackage: Uint8Array | null = null;
   /** Joiner admission-timeout handle; `null` once cleared (joined / dead). */
@@ -485,10 +489,19 @@ export class MultiJoinerCall {
     if (this.group === null || this.localLeaf === null) return;
     if (!this.isActingCommitter()) return;
 
-    // FINDING 4: dedup on the SFU `from` peer id (and the exact KP bytes) so a
-    // peer minting fresh KeyPackages is not added as multiple leaves.
+    // G-22: dedup PRIMARILY on the joiner's stable MLS signature (leaf) key so a
+    // peer re-minting FRESH KeyPackages under one identity is added at most once;
+    // the per-`from`-peer + exact-KP-bytes guards stay as fast-path fallbacks.
+    let sigKeyHex: string | null = null;
+    try {
+      sigKeyHex = hexKey(this.wasm.keyPackageSignatureKey(kpEnvelope));
+    } catch {
+      // Malformed KeyPackage — addMember below refuses too; leave sigKeyHex null.
+    }
     const kpKey = hexKey(kpEnvelope);
-    const priorWelcome = this.admittedByPeer.get(from);
+    const priorWelcome =
+      (sigKeyHex !== null ? this.admittedBySigKey.get(sigKeyHex) : undefined) ??
+      this.admittedByPeer.get(from);
     if (priorWelcome !== undefined || this.admittedByKp.has(kpKey)) {
       // Idempotent: re-serve the stored Welcome (a peer that lost it).
       if (priorWelcome !== undefined) {
@@ -514,6 +527,7 @@ export class MultiJoinerCall {
       console.warn("multi-joiner: addMember failed", err);
       return;
     }
+    if (sigKeyHex !== null) this.admittedBySigKey.set(sigKeyHex, welcomeWrapped);
     this.admittedByPeer.set(from, welcomeWrapped);
     this.admittedByKp.add(kpKey);
     // Bind the new joiner's peer → its member key for presence.

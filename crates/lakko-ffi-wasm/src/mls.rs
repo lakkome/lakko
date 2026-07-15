@@ -161,6 +161,20 @@ impl Identity {
     }
 }
 
+/// Extract the 32-byte leaf Ed25519 signature key from a wire-form KeyPackage —
+/// the stable per-identity key distinct KeyPackages minted by the same identity
+/// share (only the HPKE init key is fresh per KP). Used by the call-admission
+/// dedup (ADR-0032 / G-22) so a peer re-minting fresh KeyPackages under one
+/// identity is admitted at most once.
+///
+/// # Errors
+///
+/// `JsError` on a KeyPackage parse failure.
+#[wasm_bindgen(js_name = keyPackageSignatureKey)]
+pub fn key_package_signature_key(key_package: &[u8]) -> Result<Vec<u8>, JsError> {
+    key_package::signature_key(key_package).map_err(mls_err)
+}
+
 // ============================================================================
 // AddMember (record)
 // ============================================================================

@@ -1170,16 +1170,20 @@ page, polling-loop integration with
 contracts the UI work depends on are all fixed and
 fuzz-covered.
 
-### G-22: Per-joiner dedup for call invites — **CLOSED (client-side committer dedup on all 3 clients, [ADR-0032](../adr/0032-multi-joiner-call-links.md)); per-signature-key dedup is a follow-up pending a `keyPackageSignatureKey` FFI helper**
+### G-22: Per-joiner dedup for call invites — **fully CLOSED ([ADR-0032](../adr/0032-multi-joiner-call-links.md)): committer-side per-signature-key admission dedup on all 3 clients via the `keyPackageSignatureKey` FFI helper**
 
 **Landed with the ADR-0032 multi-joiner flow (2026-07)** — the acting committer
 dedups admissions on `(relay from-peer-id)` + exact-KeyPackage-bytes, so one
 SFU-admitted peer is added at most once even if it re-mints fresh KeyPackages
 (a retry re-serves the stored Welcome); the server `max_uses` on the
-`/c/<blob_id>` blob is the orthogonal ceiling. The ideal per-signature-key dedup
-(so a peer cannot be added as multiple leaves under one identity) needs a wasm
-`keyPackageSignatureKey` reader that does not yet exist — a marked follow-up.
-The historical note below is the pre-ADR-0032 baseline.
+`/c/<blob_id>` blob is the orthogonal ceiling. **Per-signature-key dedup landed
+(2026-07):** `lakko_mls::key_package::signature_key` extracts the stable leaf
+(Ed25519) key from a wire KeyPackage (via `KeyPackageIn::unverified_credential`)
++ FFI `keyPackageSignatureKey` (uniffi + wasm); all three clients now dedup
+**primarily** on that stable identity key — so a peer re-minting FRESH
+KeyPackages under one identity is added at most once (the two are distinct KP
+bytes but share the leaf key) — with the per-`from`-peer + exact-KP-bytes guards
+kept as fallbacks. The historical note below is the pre-ADR-0032 baseline.
 
 
 

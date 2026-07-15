@@ -16,6 +16,7 @@ import uniffi.lakko_ffi_uniffi.Identity
 import uniffi.lakko_ffi_uniffi.SfuPeerSnapshot
 import uniffi.lakko_ffi_uniffi.callSafetyNumber
 import uniffi.lakko_ffi_uniffi.dispatchIncomingEnvelope
+import uniffi.lakko_ffi_uniffi.keyPackageSignatureKey
 import uniffi.lakko_ffi_uniffi.sfuPeerTag
 import uniffi.lakko_ffi_uniffi.wrapCallKeyPackage
 import uniffi.lakko_ffi_uniffi.wrapCallWelcome
@@ -146,6 +147,11 @@ class MultiJoinerCall private constructor(
      *  re-send. */
     private val admittedByPeer = HashMap<String, ByteArray>()
     private val admittedByKp = HashSet<String>()
+
+    /** G-22: PRIMARY admission dedup — the joiner's stable MLS signature (leaf)
+     *  key, so a peer re-minting FRESH KeyPackages under one identity is admitted
+     *  at most once. Maps signature-key hex -> the stored wrapped Welcome. */
+    private val admittedBySigKey = HashMap<String, ByteArray>()
 
     /** The joiner's wrapped KeyPackage, (re)broadcast until it has joined. */
     private var pendingKeyPackage: ByteArray? = null
@@ -418,10 +424,16 @@ class MultiJoinerCall private constructor(
         if (localLeaf == null) return
         if (!isActingCommitter()) return
 
-        // FINDING 4: dedup on the SFU `from` peer id (and the exact KP bytes)
-        // so a peer minting fresh KeyPackages is not added as multiple leaves.
+        // G-22: dedup PRIMARILY on the joiner's stable MLS signature (leaf) key
+        // so a peer re-minting FRESH KeyPackages under one identity is added at
+        // most once; the per-`from`-peer + exact-KP-bytes guards stay as fallbacks.
+        val sigKeyHex = try {
+            hexKey(keyPackageSignatureKey(kpEnvelope))
+        } catch (e: Throwable) {
+            null
+        }
         val kpKey = hexKey(kpEnvelope)
-        val priorWelcome = admittedByPeer[from]
+        val priorWelcome = (sigKeyHex?.let { admittedBySigKey[it] }) ?: admittedByPeer[from]
         if (priorWelcome != null || admittedByKp.contains(kpKey)) {
             // Idempotent: re-serve the stored Welcome (a peer that lost it).
             if (priorWelcome != null) {
@@ -445,6 +457,7 @@ class MultiJoinerCall private constructor(
             Log.w("MultiJoinerCall", "addMemberFromWire failed", err)
             return
         }
+        if (sigKeyHex != null) admittedBySigKey[sigKeyHex] = welcomeWrapped
         admittedByPeer[from] = welcomeWrapped
         admittedByKp.add(kpKey)
         // Bind the new joiner's peer -> its member key for presence.

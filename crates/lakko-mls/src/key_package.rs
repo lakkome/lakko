@@ -107,6 +107,24 @@ pub fn deserialize(bytes: &[u8]) -> Result<KeyPackageIn> {
     KeyPackageIn::tls_deserialize(&mut slice).map_err(|e| Error::Codec(format!("{e:?}")))
 }
 
+/// Extract the leaf (Ed25519 signature) public key from a wire-form KeyPackage,
+/// without validating it against the active ciphersuite.
+///
+/// The 32-byte signature key is the **stable per-identity leaf key**: distinct
+/// KeyPackages minted by the same identity share it (only the HPKE init key is
+/// fresh per KP). Used by the call-admission dedup (ADR-0032 / G-22) to reject a
+/// peer re-minting fresh KeyPackages under one identity, where deduping on the
+/// KeyPackage bytes alone would let each fresh KP through.
+///
+/// # Errors
+///
+/// Returns [`Error::Codec`] on parse failure.
+pub fn signature_key(bytes: &[u8]) -> Result<Vec<u8>> {
+    let kp_in = deserialize(bytes)?;
+    let cwk = kp_in.unverified_credential();
+    Ok(cwk.signature_key.as_slice().to_vec())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -130,6 +148,29 @@ mod tests {
                 openmls::versions::ProtocolVersion::Mls10,
             )
             .expect("validate kpi");
+    }
+
+    #[test]
+    fn signature_key_is_stable_across_fresh_key_packages() {
+        let alice = Identity::generate("alice").unwrap();
+        // Two FRESH KeyPackages from the same identity: different wire bytes
+        // (fresh HPKE init key) but the SAME leaf signature key.
+        let kp1 = serialize(&alice.create_key_package().unwrap()).unwrap();
+        let kp2 = serialize(&alice.create_key_package().unwrap()).unwrap();
+        assert_ne!(kp1, kp2, "fresh KeyPackages must differ on the wire");
+        let sk1 = signature_key(&kp1).unwrap();
+        let sk2 = signature_key(&kp2).unwrap();
+        assert_eq!(sk1, sk2, "same identity → same leaf signature key");
+        assert_eq!(sk1.len(), 32);
+        // A different identity has a different signature key.
+        let bob = Identity::generate("bob").unwrap();
+        let bob_kp = serialize(&bob.create_key_package().unwrap()).unwrap();
+        assert_ne!(signature_key(&bob_kp).unwrap(), sk1);
+    }
+
+    #[test]
+    fn signature_key_rejects_garbage() {
+        assert!(signature_key(&[0u8; 8]).is_err());
     }
 
     #[test]

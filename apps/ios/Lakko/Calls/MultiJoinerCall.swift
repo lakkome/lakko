@@ -132,6 +132,10 @@ final class MultiJoinerCall {
     /// exact-KP-bytes guard for an identical re-send.
     private var admittedByPeer: [String: Data] = [:]
     private var admittedByKp: Set<String> = []
+    /// G-22: PRIMARY admission dedup — the joiner's stable MLS signature (leaf)
+    /// key, so a peer re-minting FRESH KeyPackages under one identity is admitted
+    /// at most once. Maps signature-key hex → the stored wrapped Welcome.
+    private var admittedBySigKey: [String: Data] = [:]
     /// The joiner's wrapped KeyPackage, (re)broadcast until it has joined.
     private var pendingKeyPackage: Data?
     /// Joiner admission-timeout handle; `nil` once cleared (joined / dead).
@@ -411,11 +415,12 @@ final class MultiJoinerCall {
         guard let group, localLeaf != nil else { return }
         guard isActingCommitter() else { return }
 
-        // Hardening 2 (G-22 dedup): dedup on the SFU `from` peer id (and the
-        // exact KP bytes) so a peer minting fresh KeyPackages is not added as
-        // multiple leaves.
+        // G-22: dedup PRIMARILY on the joiner's stable MLS signature (leaf) key
+        // so a peer re-minting FRESH KeyPackages under one identity is added at
+        // most once; the per-`from`-peer + exact-KP-bytes guards stay as fallbacks.
+        let sigKeyHex = (try? keyPackageSignatureKey(keyPackage: kpEnvelope)).map { hexEncode($0) }
         let kpKey = hexEncode(kpEnvelope)
-        let priorWelcome = admittedByPeer[from]
+        let priorWelcome = sigKeyHex.flatMap { admittedBySigKey[$0] } ?? admittedByPeer[from]
         if priorWelcome != nil || admittedByKp.contains(kpKey) {
             // Idempotent: re-serve the stored Welcome (a peer that lost it).
             if let priorWelcome {
@@ -438,6 +443,7 @@ final class MultiJoinerCall {
             NSLog("multi-joiner: addMember failed: %@", String(describing: error))
             return
         }
+        if let sigKeyHex { admittedBySigKey[sigKeyHex] = welcomeWrapped }
         admittedByPeer[from] = welcomeWrapped
         admittedByKp.insert(kpKey)
         // Bind the new joiner's peer → its member key for presence.
