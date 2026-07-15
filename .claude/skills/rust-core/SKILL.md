@@ -79,11 +79,14 @@ You are working in a security-critical E2EE messenger. Every change to `crates/`
 
 Run these before considering work done:
 ```
-just fmt       # cargo fmt
-just lint      # clippy with -D warnings
-just test      # cargo test --workspace
-just reuse     # SPDX headers
+just fmt         # cargo fmt
+just lint        # clippy with -D warnings
+just test        # cargo test --workspace
+just reuse       # SPDX headers
+just spec-check  # codespeak spec-drift gate
 ```
+
+If you changed a module that has a sibling `<module>.sc.md` spec, update the spec in the SAME change (see the `spec` skill) — `just spec-check` fails otherwise. New covered modules get a `.sc.md`; trivial files (error enums, re-export `lib.rs`, tests) are not covered.
 
 ## Fuzz targets
 

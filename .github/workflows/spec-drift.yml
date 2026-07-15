@@ -1,0 +1,33 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 Lakko Contributors
+
+# Codespeak spec-drift gate. A covered module `X.<ext>` has a sibling
+# behavioral spec `X.sc.md` (see .claude/skills/spec). This gate fails a
+# PR when a covered source file changes without its `.sc.md` changing in
+# the same PR — so a reviewer's spec-diff never falls out of lock-step
+# with the code. It only inspects modules that already have a spec, so
+# coverage grows one module at a time (an uncovered module is never
+# checked, so this is safe to gate from day one).
+
+name: Spec drift
+
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  spec-drift:
+    name: codespeak spec-drift gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # Need the base branch to compute the PR's change range.
+          fetch-depth: 0
+      - name: Check spec drift over the PR range
+        run: |
+          base="origin/${{ github.base_ref }}"
+          git fetch --no-tags --depth=0 origin "${{ github.base_ref }}" || git fetch origin "${{ github.base_ref }}"
+          range="$(git merge-base "$base" HEAD)...HEAD"
+          echo "spec-drift range: $range"
+          ./tools/spec-drift-check.sh "$range"

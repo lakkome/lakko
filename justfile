@@ -167,6 +167,15 @@ fuzz-list:
 audit-index-check:
     ./tools/audit-index-check
 
+# Codespeak spec-drift gate — a covered module `X.<ext>` has a
+# sibling behavioral spec `X.sc.md` (see the `spec` skill); this
+# fails when a covered source file changes without its spec.
+# Only inspects modules that already have a `.sc.md`, so coverage
+# grows one module at a time. Pass a git range in CI:
+#   just spec-check origin/main...HEAD
+spec-check range='':
+    ./tools/spec-drift-check.sh {{range}}
+
 # Host-side validation of the SFrame native shim — runs the
 # `apps/shared/sframe-bridge/build.sh` round-trip suite on the
 # dev box. Builds the lakko-sframe-native staticlib + compiles
@@ -181,7 +190,7 @@ test-sframe-bridge:
     apps/shared/sframe-bridge/build.sh
 
 # Everything CI does — run locally before pushing.
-ci: fmt-check lint test audit reuse fuzz-check audit-index-check
+ci: fmt-check lint test audit reuse fuzz-check audit-index-check spec-check
 
 # Build for all release targets (host platform only here; cross-builds via Nix).
 build:
