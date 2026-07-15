@@ -159,6 +159,21 @@ export interface SfuRemoteTrack {
   readonly stream: MediaStream;
 }
 
+/**
+ * Lifecycle of a mid-call camera-on (ADR-0032 arc, piece B). A group call
+ * started audio-only has no video sender; turning the camera on ACQUIRES the
+ * camera and renegotiates (adds a track after the initial offer):
+ *   * `off`      — no video published (the default; also after a failure).
+ *   * `starting` — `getUserMedia` + the addTrack/renegotiation are in flight.
+ *   * `live`     — the local video track is captured + attached (self-preview
+ *                  renders; the SDP renegotiation continues in the background
+ *                  via `onnegotiationneeded`).
+ *   * `failed`   — permission denied / no camera / capture error; the caller
+ *                  reverts the toggle + surfaces a message. The call stays up
+ *                  audio-only (invariant #4 — no half-added sender left behind).
+ */
+export type VideoPublishState = "off" | "starting" | "live" | "failed";
+
 /** Callbacks the caller wires in. */
 export interface SfuCallCallbacks {
   /** Lifecycle tick. */
@@ -182,6 +197,9 @@ export interface SfuCallCallbacks {
    *  video; the tile shows the camera-off placeholder until a video track
    *  is live. */
   onLocalStream?(stream: MediaStream): void;
+  /** Mid-call camera-on lifecycle (piece B). Drives the camera button's
+   *  spinner + the fail-safe revert in the UI. */
+  onVideoPublishState?(state: VideoPublishState): void;
   /** The SFU reported a protocol-level error. */
   onServerError?(frame: SfuErrorFrame): void;
   /**
@@ -236,6 +254,20 @@ export class SfuCallSession {
   /** This client's SFrame KID (MLS leaf). From `config.localLeaf`, or set
    *  by {@link publish} on the deferred-publish path. */
   private publishLeaf: number;
+
+  // ---- Perfect-negotiation state (piece B: mid-call add-track) ----------
+  // The client is the POLITE peer relative to the SFU: on an offer glare it
+  // rolls back its own offer and accepts the SFU's, then `onnegotiationneeded`
+  // re-fires to re-send its pending change. `negotiationReady` gates the
+  // `onnegotiationneeded` handler off during the manual initial publish (so
+  // the first offer is not sent twice); it flips true once the initial offer
+  // is answered.
+  private readonly polite = true;
+  private makingOffer = false;
+  private isSettingRemoteAnswerPending = false;
+  private negotiationReady = false;
+  /** Mid-call camera-on lifecycle. */
+  private videoPublishState: VideoPublishState = "off";
 
   constructor(
     private readonly config: SfuCallConfig,
@@ -385,6 +417,94 @@ export class SfuCallSession {
     }
   }
 
+  /** Current mid-call camera-on lifecycle state (piece B). */
+  getVideoPublishState(): VideoPublishState {
+    return this.videoPublishState;
+  }
+
+  private setVideoPublishState(state: VideoPublishState): void {
+    if (this.videoPublishState === state) return;
+    this.videoPublishState = state;
+    this.callbacks.onVideoPublishState?.(state);
+  }
+
+  /**
+   * Turn the camera ON mid-call (piece B). When the call started audio-only
+   * there is no video sender, so this ACQUIRES the camera, adds the track
+   * (SFrame-sealed like the audio sender), and renegotiates via
+   * `onnegotiationneeded`. Idempotent + re-entrant-safe:
+   *   * a live video sender already exists -> just re-enable its track;
+   *   * a capture is already in flight      -> no-op (do not double-acquire).
+   * Fail-safe (invariant #4): on a getUserMedia / attach failure the capture
+   * is torn down (never a half-added sender) and the state goes `failed`, so
+   * the caller reverts the toggle + surfaces a message; the call stays up
+   * audio-only.
+   *
+   * @throws on capture failure (permission denied / no camera / attach error),
+   *         so the caller can distinguish it from "already publishing".
+   */
+  async publishVideo(): Promise<void> {
+    const pc = this.pc;
+    if (pc === null || this.localStream === null || this.activeSeed === null) {
+      return;
+    }
+    // A live video sender already exists (a call started as video, or a prior
+    // publishVideo): just re-enable — no capture, no renegotiation.
+    const existing = pc.getSenders().find((s) => s.track?.kind === "video");
+    if (existing?.track != null && existing.track.readyState === "live") {
+      existing.track.enabled = true;
+      this.setVideoPublishState("live");
+      return;
+    }
+    // A capture is already in flight — do not double-acquire.
+    if (this.videoPublishState === "starting") return;
+
+    this.setVideoPublishState("starting");
+    let captured: MediaStream;
+    try {
+      captured = await navigator.mediaDevices.getUserMedia({
+        video: trackConstraint(true, this.config.media.videoDeviceId),
+      });
+    } catch (err) {
+      this.setVideoPublishState("failed");
+      throw err instanceof Error ? err : new Error(String(err));
+    }
+    const track = captured.getVideoTracks()[0];
+    if (track === undefined) {
+      this.setVideoPublishState("failed");
+      throw new Error("no camera track captured");
+    }
+    try {
+      // Re-read state after the await — the call may have been torn down or
+      // rekeyed while getUserMedia was in flight; attach at the CURRENT seed.
+      const localStream = this.localStream;
+      const pc2 = this.pc;
+      const seed = this.activeSeed;
+      if (localStream === null || pc2 === null || seed === null) {
+        track.stop();
+        this.setVideoPublishState("off");
+        return;
+      }
+      localStream.addTrack(track);
+      const sender = pc2.addTrack(track, localStream);
+      this.transformIds.add(
+        attachSenderSFrame(sender, { seed, localLeaf: this.publishLeaf }),
+      );
+      // addTrack fired onnegotiationneeded -> the SDP renegotiation runs in the
+      // background. The self-preview is live now (the local track is live), so
+      // report `live`; a background renegotiation failure only affects what
+      // REMOTE peers see, not the local preview.
+      this.setVideoPublishState("live");
+      // Refresh the self-preview stream (it now carries a video track).
+      this.callbacks.onLocalStream?.(localStream);
+    } catch (err) {
+      // Never leave a half-added sender: release the capture.
+      track.stop();
+      this.setVideoPublishState("failed");
+      throw err instanceof Error ? err : new Error(String(err));
+    }
+  }
+
   /**
    * Switch the published microphone to a specific `deviceId` mid-call (from
    * the in-call device picker). Re-captures that one kind with the picked
@@ -494,6 +614,12 @@ export class SfuCallSession {
     }
     this.offerQueue = [];
     this.transformIds.clear();
+    // Reset perfect-negotiation + video-publish state so a reused instance
+    // (or a late callback after teardown) starts clean.
+    this.makingOffer = false;
+    this.isSettingRemoteAnswerPending = false;
+    this.negotiationReady = false;
+    this.setVideoPublishState("off");
   }
 
   // -----------------------------------------------------------------
@@ -531,6 +657,14 @@ export class SfuCallSession {
       rtcpMuxPolicy: "require",
     });
     this.pc = pc;
+
+    // Renegotiate on any future local track change (piece B: mid-call
+    // `publishVideo` adds a camera track after the initial offer). Gated by
+    // `negotiationReady` so the manual initial publish offer below is not
+    // duplicated; it flips true once that offer is answered.
+    pc.onnegotiationneeded = (): void => {
+      void this.onNegotiationNeeded();
+    };
 
     // Publish each local track; SFrame-seal it before it reaches the
     // SFU. Attach the transform AFTER addTrack and BEFORE the offer is
@@ -629,14 +763,48 @@ export class SfuCallSession {
     })();
   }
 
-  /** SFU's answer to our publish offer. */
+  /** SFU's answer to our publish offer (initial or a mid-call renegotiation). */
   private async onSdpAnswer(frame: SfuSdpAnswer): Promise<void> {
     const pc = this.pc;
     if (pc === null) return;
     try {
+      this.isSettingRemoteAnswerPending = true;
       await pc.setRemoteDescription({ type: "answer", sdp: frame.sdp });
+      this.isSettingRemoteAnswerPending = false;
+      // The initial publish (or a mid-call renegotiation) is now answered —
+      // arm `onnegotiationneeded` for future local track changes (piece B).
+      this.negotiationReady = true;
     } catch {
+      this.isSettingRemoteAnswerPending = false;
       this.fail();
+    }
+  }
+
+  /**
+   * Renegotiate on a local track change (piece B: publishVideo added a
+   * camera track). The POLITE offer initiator: gated so it only fires after
+   * the initial publish is answered (`negotiationReady`) and never overlaps an
+   * in-flight offer or a mid-drain answer. If the state is not `stable` this
+   * defers — the browser re-fires `onnegotiationneeded` on the next stable
+   * transition while the change is still pending, so it is not lost (that is
+   * also how a glare-rolled-back offer gets re-sent).
+   */
+  private async onNegotiationNeeded(): Promise<void> {
+    if (!this.negotiationReady) return;
+    const pc = this.pc;
+    const signaling = this.signaling;
+    if (pc === null || signaling === null) return;
+    if (this.makingOffer || pc.signalingState !== "stable") return;
+    try {
+      this.makingOffer = true;
+      await pc.setLocalDescription(); // implicit createOffer
+      const sdp = pc.localDescription?.sdp;
+      if (sdp !== undefined) signaling.sendSdpOffer(sdp);
+    } catch {
+      // A failed renegotiation leaves the call up as-is; the publishVideo
+      // caller already surfaced the local self-preview.
+    } finally {
+      this.makingOffer = false;
     }
   }
 
@@ -657,14 +825,28 @@ export class SfuCallSession {
         const pc = this.pc;
         const signaling = this.signaling;
         if (pc === null || signaling === null) break;
+        // Canonical perfect-negotiation collision check. The client is the
+        // POLITE peer relative to the SFU, so `ignoreOffer` is always false —
+        // it never drops a colliding offer, it yields: applying the remote
+        // offer while we have a local offer pending (piece B's publishVideo)
+        // implicitly rolls OUR offer back first, then we answer, and
+        // `onnegotiationneeded` re-fires afterward to re-send the rolled-back
+        // local change. The branch is kept for the textbook shape.
+        const readyForOffer =
+          !this.makingOffer &&
+          (pc.signalingState === "stable" || this.isSettingRemoteAnswerPending);
+        const ignoreOffer = !this.polite && !readyForOffer;
+        if (ignoreOffer) continue;
         try {
+          // No-arg setLocalDescription() so the (polite) rollback + answer is
+          // atomic.
           await pc.setRemoteDescription({ type: "offer", sdp });
-          const answer = await pc.createAnswer();
-          await pc.setLocalDescription(answer);
-          if (answer.sdp === undefined) {
-            throw new Error("createAnswer produced no SDP body");
+          await pc.setLocalDescription();
+          const answerSdp = pc.localDescription?.sdp;
+          if (answerSdp === undefined) {
+            throw new Error("setLocalDescription produced no answer SDP");
           }
-          signaling.sendSdpAnswer(answer.sdp);
+          signaling.sendSdpAnswer(answerSdp);
         } catch {
           // A single bad renegotiation drops that subscription; the
           // call stays up. Continue draining the rest.

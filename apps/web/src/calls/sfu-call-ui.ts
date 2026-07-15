@@ -40,6 +40,7 @@ import {
   SfuCallSession,
   type SfuCallConfig,
   type SfuRemoteTrack,
+  type VideoPublishState,
 } from "./sfu-call-session";
 import type { SfuPeerSnapshot } from "./sfu-signaling-client";
 
@@ -74,6 +75,10 @@ export interface SfuCallUiHandle {
    *  to the local self-preview tile (mirrored), the group analog of the
    *  1×1 `localStream`. */
   readonly localStream: Accessor<MediaStream | null>;
+  /** Reactive mid-call camera-on lifecycle (piece B) — `off` / `starting` /
+   *  `live` / `failed`. Drives the camera button spinner + the fail-safe
+   *  revert in the view. */
+  readonly videoPublishState: Accessor<VideoPublishState>;
   /** Open the SFU connection + publish (delegates to the session). */
   connect(): Promise<void>;
   /** Tear down + reset the call-UI store. Idempotent. */
@@ -83,6 +88,11 @@ export interface SfuCallUiHandle {
   /** Enable / disable the local camera (drives the real track + the
    *  store). */
   setCameraEnabled(on: boolean): void;
+  /** Turn the camera ON mid-call (piece B): acquire + add a video track +
+   *  renegotiate when the call started audio-only; re-enable an existing
+   *  sender otherwise. Throws on capture failure so the caller reverts the
+   *  toggle + surfaces a message. */
+  publishVideo(): Promise<void>;
   /** Switch the published mic to a specific `deviceId` mid-call (in-call
    *  device picker). `replaceTrack` on the live sender — SFrame stays armed. */
   switchAudioInput(deviceId: string): Promise<void>;
@@ -132,6 +142,8 @@ export function createSfuCallUi(
     ReadonlyMap<string, MediaStream>
   >(new Map());
   const [localStream, setLocalStream] = createSignal<MediaStream | null>(null);
+  const [videoPublishState, setVideoPublishState] =
+    createSignal<VideoPublishState>("off");
 
   const localName = options.localDisplayName ?? "You";
   const nameOf = (
@@ -240,17 +252,22 @@ export function createSfuCallUi(
     onLocalStream: (stream): void => {
       setLocalStream(stream);
     },
+    onVideoPublishState: (state): void => {
+      setVideoPublishState(state);
+    },
   });
 
   return {
     session,
     remoteStreams,
     localStream,
+    videoPublishState,
     connect: (): Promise<void> => session.connect(),
     hangUp: (): void => {
       session.hangUp();
       setRemoteStreams(new Map());
       setLocalStream(null);
+      setVideoPublishState("off");
       callActions.reset();
     },
     // Track-only gates — the store's local-participant micOn / camOn is
@@ -259,6 +276,7 @@ export function createSfuCallUi(
     // that reads the store and calls these). Mirrors the 1×1 path.
     setMicrophoneEnabled: (on): void => session.setMicrophoneEnabled(on),
     setCameraEnabled: (on): void => session.setCameraEnabled(on),
+    publishVideo: (): Promise<void> => session.publishVideo(),
     switchAudioInput: (deviceId): Promise<void> =>
       session.switchAudioInput(deviceId),
     switchVideoInput: (deviceId): Promise<void> =>

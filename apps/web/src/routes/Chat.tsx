@@ -640,7 +640,24 @@ function ChatView(props: {
     }
     const h = sfuHandle();
     if (h !== null) {
-      h.setCameraEnabled(local.camOn);
+      if (local.camOn) {
+        // Group mid-call camera-on (piece B): publishVideo acquires the camera
+        // + renegotiates the first time (a call started audio-only), and
+        // re-enables an existing sender after. Idempotent + in-flight-guarded,
+        // so a redundant reactive tick is a cheap no-op. On a capture failure
+        // (permission denied / no camera) revert the toggle + surface a
+        // message — fail-safe, the call stays up audio-only (invariant #4).
+        void h.publishVideo().catch((err: unknown) => {
+          callActions.setCamera(false);
+          setError(
+            `Could not start the camera: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          );
+        });
+      } else {
+        h.setCameraEnabled(false);
+      }
     }
   });
 
