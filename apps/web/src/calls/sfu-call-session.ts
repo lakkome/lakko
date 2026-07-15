@@ -176,6 +176,12 @@ export interface SfuCallCallbacks {
   onPeerLeft?(peerId: string): void;
   /** A remote media track arrived (already SFrame-decrypting). */
   onRemoteTrack?(remote: SfuRemoteTrack): void;
+  /** The local capture stream is ready (fired once, at publish time). The
+   *  UI mirrors this into the local self-preview tile — the group analog of
+   *  the 1×1 `onLocalStream`. Present whether the call is audio-only or
+   *  video; the tile shows the camera-off placeholder until a video track
+   *  is live. */
+  onLocalStream?(stream: MediaStream): void;
   /** The SFU reported a protocol-level error. */
   onServerError?(frame: SfuErrorFrame): void;
   /**
@@ -515,6 +521,9 @@ export class SfuCallSession {
       ),
     });
     this.localStream = stream;
+    // Surface the capture to the UI (group self-preview tile), mirroring the
+    // 1×1 `onLocalStream`. Fired once, before the offer is built.
+    this.callbacks.onLocalStream?.(stream);
 
     const pc = new RTCPeerConnection({
       iceServers: [...(this.config.iceServers ?? DEFAULT_ICE_SERVERS)],

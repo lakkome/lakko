@@ -70,6 +70,10 @@ export interface SfuCallUiHandle {
   /** Reactive map: remote MSID stream id → its `MediaStream`. The view
    *  mounts a sink per entry. */
   readonly remoteStreams: Accessor<ReadonlyMap<string, MediaStream>>;
+  /** Reactive local capture stream (null until publish). The view binds it
+   *  to the local self-preview tile (mirrored), the group analog of the
+   *  1×1 `localStream`. */
+  readonly localStream: Accessor<MediaStream | null>;
   /** Open the SFU connection + publish (delegates to the session). */
   connect(): Promise<void>;
   /** Tear down + reset the call-UI store. Idempotent. */
@@ -127,6 +131,7 @@ export function createSfuCallUi(
   const [remoteStreams, setRemoteStreams] = createSignal<
     ReadonlyMap<string, MediaStream>
   >(new Map());
+  const [localStream, setLocalStream] = createSignal<MediaStream | null>(null);
 
   const localName = options.localDisplayName ?? "You";
   const nameOf = (
@@ -232,15 +237,20 @@ export function createSfuCallUi(
     onRemoteTrack: (rt): void => {
       addStream(rt);
     },
+    onLocalStream: (stream): void => {
+      setLocalStream(stream);
+    },
   });
 
   return {
     session,
     remoteStreams,
+    localStream,
     connect: (): Promise<void> => session.connect(),
     hangUp: (): void => {
       session.hangUp();
       setRemoteStreams(new Map());
+      setLocalStream(null);
       callActions.reset();
     },
     // Track-only gates — the store's local-participant micOn / camOn is

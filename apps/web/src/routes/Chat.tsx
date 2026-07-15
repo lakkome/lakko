@@ -458,11 +458,11 @@ function ChatView(props: {
     );
   };
 
-  /** Synthesised local participant. Web 1×1 is audio-only, so
-   *  `camOn` is false. `micOn` seeds true; the live mic state is
-   *  driven through `callActions.setMic` ↔ `setMicrophoneEnabled`
-   *  (see the effect below). Quality dot tracks the live RTT
-   *  sample. */
+  /** Synthesised local participant. `camOn` seeds from whether this is a
+   *  video call (`videoCall()`); `micOn` seeds true. The live mic + camera
+   *  state is thereafter driven through `callActions.setMic` / `setCamera`
+   *  ↔ `setMicrophoneEnabled` / `setCameraEnabled` (see the effects below).
+   *  Quality dot tracks the live RTT sample. */
   const localParticipant = (): Participant => ({
     id: "local",
     displayName: "You",
@@ -580,9 +580,8 @@ function ChatView(props: {
   // store's local-participant `micOn` flag. The Call.tsx mic button
   // toggles `callActions.setMic`; this mirrors it onto the live
   // session (idempotent — `track.enabled = on` is cheap, so the
-  // redundant calls on each quality patch are harmless). Web 1×1 is
-  // audio-only, so this is the only real in-call control; the camera
-  // button stays UI-only until web video calls land.
+  // redundant calls on each quality patch are harmless). Drives whichever
+  // call kind is live — the 1×1 `activeCall` or the SFU group `sfuHandle`.
   createEffect(() => {
     const local = callUi.participants().find((p) => p.isLocal);
     if (local === undefined) return;
@@ -626,16 +625,22 @@ function ChatView(props: {
     }
   });
 
-  // Web 1×1 camera control. The Call.tsx camera button toggles
+  // In-call camera control. The Call.tsx camera button toggles
   // `callActions.setCamera`; this mirrors the store's local `camOn`
   // onto the live session (local-only `track.enabled` gate, no
-  // renegotiation). SFU group calls drive video through their own
-  // adapter, so this is the 1×1 P2P path only.
+  // renegotiation). Drives whichever call kind is live — the 1×1
+  // `activeCall` or the SFU group `sfuHandle` (a no-op on the group path
+  // while the call is audio-only; a group video call publishes the camera
+  // at connect, so the toggle gates the live video track).
   createEffect(() => {
     const local = callUi.participants().find((p) => p.isLocal);
     if (local === undefined) return;
     if (activeCall !== null) {
       activeCall.setCameraEnabled(local.camOn);
+    }
+    const h = sfuHandle();
+    if (h !== null) {
+      h.setCameraEnabled(local.camOn);
     }
   });
 
@@ -757,7 +762,7 @@ function ChatView(props: {
   // bound to the live session token, and drives the shared call-UI
   // store through `createSfuCallUi`. Fail-closed throughout: any missing
   // prerequisite (SFU URL / session / seed) aborts before media.
-  async function startGroupCall(): Promise<void> {
+  async function startGroupCall(withVideo: boolean): Promise<void> {
     if (sfuHandle() !== null || activeCall !== null) return;
     const base = sfuBaseUrl();
     if (base === null) {
@@ -838,9 +843,12 @@ function ChatView(props: {
           localLeaf,
           media: {
             audio: true,
-            video: false,
-            // Honour the in-call device picker's current mic selection at
-            // publish time (the group call is audio-only for now).
+            // A group video call publishes the camera at connect (the session
+            // SFrame-seals the video sender like the audio one); an audio call
+            // leaves it off. The in-call camera toggle gates the live track.
+            video: withVideo,
+            // Honour the in-call device picker's current selections at publish
+            // time (an `{ exact }` deviceId constraint, else the OS default).
             audioDeviceId: callUi.settings().selectedAudioInput,
             videoDeviceId: callUi.settings().selectedVideoInput,
           },
@@ -2462,7 +2470,7 @@ function ChatView(props: {
               onClick={() => {
                 // Group chat (>2 members) → SFU + SFrame; 1×1 → P2P.
                 if (memberCount() > 2) {
-                  void startGroupCall();
+                  void startGroupCall(false);
                 } else {
                   void onCallClicked();
                 }
@@ -2471,17 +2479,22 @@ function ChatView(props: {
             >
               📞 Call
             </button>
-            {/* 1×1 video call (P2P). Group video routes through the SFU
-                and is a separate path. */}
-            <Show when={memberCount() <= 2}>
-              <button
-                type="button"
-                onClick={() => void onVideoCallClicked()}
-                disabled={busy()}
-              >
-                📹 Video
-              </button>
-            </Show>
+            {/* Video call. Group (>2) routes through the SFU with the camera
+                SFrame-sealed like the audio track; 1×1 is P2P DTLS-SRTP. Same
+                memberCount branch as the audio button above. */}
+            <button
+              type="button"
+              onClick={() => {
+                if (memberCount() > 2) {
+                  void startGroupCall(true);
+                } else {
+                  void onVideoCallClicked();
+                }
+              }}
+              disabled={busy()}
+            >
+              📹 Video
+            </button>
           </Show>
           <button type="button" onClick={props.onLeave}>
             Back to Contacts
@@ -2512,7 +2525,9 @@ function ChatView(props: {
             return sfuHandle()?.remoteStreams().get(peerId);
           }}
           localStream={(): MediaStream | undefined =>
-            localCallStream() ?? undefined
+            // Self-preview: the SFU group capture when a group call is live,
+            // else the 1×1 P2P capture. Only one kind is live at a time.
+            sfuHandle()?.localStream() ?? localCallStream() ?? undefined
           }
         />
       </Show>
