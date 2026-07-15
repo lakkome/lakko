@@ -199,6 +199,17 @@ export class CallSession {
   private pc: RTCPeerConnection | null = null;
   private pendingCandidates: RTCIceCandidateInit[] = [];
 
+  // Perfect-negotiation state (piece B2b: 1×1 mid-call add-track). The OFFERER
+  // (caller) is the impolite peer, the ANSWERER (callee) is polite
+  // (`polite = !isOfferer`). `negotiationReady` gates `onnegotiationneeded` off
+  // during the manual initial offer/answer so it is not duplicated; it flips
+  // true once that initial exchange is applied.
+  private makingOffer = false;
+  private isSettingRemoteAnswerPending = false;
+  private negotiationReady = false;
+  /** In-flight guard for {@link addLocalVideo} (no double-acquire). */
+  private addingVideo = false;
+
   /** G3-3-conn-quality — `getStats()` poll loop handle, armed on
    *  the first `connected` transition, cleared in `dispose()`. */
   private statsTimer: ReturnType<typeof setInterval> | null = null;
@@ -260,13 +271,14 @@ export class CallSession {
   async applyIncomingSignaling(parsed: ParsedCallSignaling): Promise<void> {
     switch (parsed.kind) {
       case "offer":
-        // We're the answerer — fresh inbound call.
         if (this.state !== "idle") {
-          // Reject double-offer; the caller's session-
-          // registry layer is responsible for not routing
-          // an offer to an already-active session.
+          // Mid-call renegotiation offer (piece B2b: the peer added a video
+          // track). NOT a fresh call — apply it with the perfect-negotiation
+          // glare guard and answer, keeping the call up.
+          await this.applyRenegotiationOffer(parsed.sdp);
           return;
         }
+        // Fresh inbound call — we're the answerer.
         this.isOfferer = false;
         this.setState("ringing");
         await this.openPeerConnection({
@@ -288,19 +300,37 @@ export class CallSession {
         break;
 
       case "answer":
-        if (this.state !== "outgoing") return;
         if (this.pc === null) return;
-        try {
-          await this.pc.setRemoteDescription({
-            type: "answer",
-            sdp: parsed.sdp,
-          });
-          await this.applyQueuedCandidates();
-          this.setState("connecting");
-        } catch (err) {
-          // eslint-disable-next-line no-console
-          console.warn("setRemoteDescription(answer) failed", err);
-          this.endLocal("error");
+        if (this.state === "outgoing") {
+          // Initial answer to our dial.
+          try {
+            await this.pc.setRemoteDescription({
+              type: "answer",
+              sdp: parsed.sdp,
+            });
+            await this.applyQueuedCandidates();
+            this.setState("connecting");
+            // Arm onnegotiationneeded for future local track changes (B2b).
+            this.negotiationReady = true;
+          } catch (err) {
+            // eslint-disable-next-line no-console
+            console.warn("setRemoteDescription(answer) failed", err);
+            this.endLocal("error");
+          }
+        } else {
+          // Mid-call renegotiation answer (to a reneg offer we sent).
+          try {
+            this.isSettingRemoteAnswerPending = true;
+            await this.pc.setRemoteDescription({
+              type: "answer",
+              sdp: parsed.sdp,
+            });
+            this.isSettingRemoteAnswerPending = false;
+          } catch (err) {
+            this.isSettingRemoteAnswerPending = false;
+            // eslint-disable-next-line no-console
+            console.warn("setRemoteDescription(reneg answer) failed", err);
+          }
         }
         break;
 
@@ -356,6 +386,10 @@ export class CallSession {
       const bytes = wasm.composeCallAnswerSignaling(this.callId, answer.sdp);
       this.callbacks.onOutboundSignaling(bytes);
       this.setState("connecting");
+      // Arm onnegotiationneeded for future local track changes (B2b): the
+      // answer is sent + our local description is set, so the initial
+      // negotiation is applied on our side.
+      this.negotiationReady = true;
     } catch (err) {
       // eslint-disable-next-line no-console
       console.warn("accept failed", err);
@@ -401,6 +435,63 @@ export class CallSession {
     for (const track of this.localStream.getVideoTracks()) {
       track.enabled = on;
     }
+  }
+
+  /**
+   * Turn the camera ON mid-call (piece B2b) when the 1×1 call started
+   * audio-only. Acquires the camera, adds the track, and renegotiates via
+   * `onnegotiationneeded` (the 1×1 path is P2P DTLS-SRTP — no SFrame).
+   * Idempotent (re-enables an existing sender) + in-flight-guarded. Fail-safe:
+   * on a capture / attach failure the capture is torn down (never a half-added
+   * sender) and it throws, so the caller reverts the toggle + surfaces a
+   * message; the call stays up audio-only.
+   *
+   * @throws on capture failure (permission denied / no camera / attach error).
+   */
+  async addLocalVideo(): Promise<void> {
+    const pc = this.pc;
+    if (pc === null || this.localStream === null) return;
+    // A live video sender already exists (a call started as video, or a prior
+    // addLocalVideo): just re-enable — no capture, no renegotiation.
+    const existing = pc.getSenders().find((s) => s.track?.kind === "video");
+    if (existing?.track != null && existing.track.readyState === "live") {
+      existing.track.enabled = true;
+      return;
+    }
+    if (this.addingVideo) return; // capture in flight — do not double-acquire
+    this.addingVideo = true;
+    let captured: MediaStream;
+    try {
+      captured = await navigator.mediaDevices.getUserMedia({ video: true });
+    } catch (err) {
+      this.addingVideo = false;
+      throw err instanceof Error ? err : new Error(String(err));
+    }
+    const track = captured.getVideoTracks()[0];
+    if (track === undefined) {
+      this.addingVideo = false;
+      throw new Error("no camera track captured");
+    }
+    try {
+      // Re-read state after the await — the call may have ended while
+      // getUserMedia was in flight.
+      const localStream = this.localStream;
+      const pc2 = this.pc;
+      if (localStream === null || pc2 === null) {
+        track.stop();
+        this.addingVideo = false;
+        return;
+      }
+      localStream.addTrack(track);
+      pc2.addTrack(track, localStream); // fires onnegotiationneeded -> reneg
+      // Refresh the self-preview stream (it now carries a video track).
+      this.callbacks.onLocalStream?.(localStream);
+    } catch (err) {
+      track.stop();
+      this.addingVideo = false;
+      throw err instanceof Error ? err : new Error(String(err));
+    }
+    this.addingVideo = false;
   }
 
   /**
@@ -501,6 +592,12 @@ export class CallSession {
       }
       this.localStream = null;
     }
+    // Reset perfect-negotiation state so a late onnegotiationneeded after
+    // teardown no-ops (piece B2b).
+    this.negotiationReady = false;
+    this.makingOffer = false;
+    this.isSettingRemoteAnswerPending = false;
+    this.addingVideo = false;
     if (this.state !== "done") {
       this.setState("done");
     }
@@ -540,6 +637,13 @@ export class CallSession {
       rtcpMuxPolicy: "require",
     });
     this.pc = pc;
+
+    // Renegotiate on a future local track change (piece B2b: addLocalVideo).
+    // Gated by `negotiationReady` so the manual initial offer/answer is not
+    // duplicated; it flips true once the initial exchange is applied.
+    pc.onnegotiationneeded = (): void => {
+      void this.onNegotiationNeeded();
+    };
 
     for (const track of stream.getTracks()) {
       pc.addTrack(track, stream);
@@ -594,6 +698,71 @@ export class CallSession {
       }
     }
     this.pendingCandidates = [];
+  }
+
+  /**
+   * Renegotiate on a local track change (piece B2b: addLocalVideo added a
+   * camera track). The offer initiator, gated so it only fires after the
+   * initial exchange (`negotiationReady`) and never overlaps an in-flight
+   * offer. If the state is not `stable` this defers — the browser re-fires
+   * `onnegotiationneeded` on the next stable transition while the change is
+   * still pending (also how a glare-rolled-back offer gets re-sent).
+   */
+  private async onNegotiationNeeded(): Promise<void> {
+    if (!this.negotiationReady) return;
+    const pc = this.pc;
+    if (pc === null) return;
+    if (this.makingOffer || pc.signalingState !== "stable") return;
+    try {
+      this.makingOffer = true;
+      await pc.setLocalDescription(); // implicit createOffer
+      const sdp = pc.localDescription?.sdp;
+      if (sdp === undefined) return;
+      const wasm = await loadWasm();
+      const bytes = wasm.composeCallOfferSignaling(
+        this.callId,
+        sdp,
+        BigInt(Date.now()),
+        true,
+        true,
+      );
+      this.callbacks.onOutboundSignaling(bytes);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("renegotiation offer failed", err);
+    } finally {
+      this.makingOffer = false;
+    }
+  }
+
+  /**
+   * Apply a mid-call renegotiation offer from the peer (piece B2b). Canonical
+   * perfect-negotiation glare guard: the OFFERER (caller) is impolite, the
+   * ANSWERER (callee) is polite (`polite = !isOfferer`). A polite peer yields
+   * on a collision (implicit rollback via setRemoteDescription) and answers;
+   * an impolite peer drops the colliding offer.
+   */
+  private async applyRenegotiationOffer(sdp: string): Promise<void> {
+    const pc = this.pc;
+    if (pc === null) return;
+    const polite = !this.isOfferer;
+    const readyForOffer =
+      !this.makingOffer &&
+      (pc.signalingState === "stable" || this.isSettingRemoteAnswerPending);
+    const ignoreOffer = !polite && !readyForOffer;
+    if (ignoreOffer) return;
+    try {
+      await pc.setRemoteDescription({ type: "offer", sdp });
+      await pc.setLocalDescription(); // implicit createAnswer
+      const answerSdp = pc.localDescription?.sdp;
+      if (answerSdp === undefined) return;
+      const wasm = await loadWasm();
+      const bytes = wasm.composeCallAnswerSignaling(this.callId, answerSdp);
+      this.callbacks.onOutboundSignaling(bytes);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("renegotiation offer apply failed", err);
+    }
   }
 
   private async endLocal(reason: WebCallEndReason): Promise<void> {

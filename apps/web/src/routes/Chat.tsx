@@ -493,7 +493,11 @@ function ChatView(props: {
     micOn: true,
     // Lights up the remote video tile once the peer's video track
     // arrives (the effect below keeps it in sync after connect).
-    camOn: videoCall() && remoteHasVideo(),
+    // The remote tile shows video whenever the peer has a live video track —
+    // NOT gated on whether WE started a video call, so a peer that turns their
+    // camera on mid-call (piece B2b) renders even in a call we started
+    // audio-only. In a pure-audio call `remoteHasVideo()` is false anyway.
+    camOn: remoteHasVideo(),
     handRaised: false,
     quality: "good",
     speaking: false,
@@ -636,7 +640,24 @@ function ChatView(props: {
     const local = callUi.participants().find((p) => p.isLocal);
     if (local === undefined) return;
     if (activeCall !== null) {
-      activeCall.setCameraEnabled(local.camOn);
+      if (local.camOn) {
+        // 1×1 mid-call camera-on (piece B2b): addLocalVideo acquires + adds a
+        // video track + renegotiates the first time (a call started
+        // audio-only), and re-enables an existing sender after. Idempotent +
+        // in-flight-guarded, so a redundant reactive tick is a cheap no-op. On
+        // a capture failure revert the toggle + surface a message — fail-safe,
+        // the call stays up audio-only.
+        void activeCall.addLocalVideo().catch((err: unknown) => {
+          callActions.setCamera(false);
+          setError(
+            `Could not start the camera: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          );
+        });
+      } else {
+        activeCall.setCameraEnabled(false);
+      }
     }
     const h = sfuHandle();
     if (h !== null) {
@@ -667,7 +688,7 @@ function ChatView(props: {
   // `remoteHasVideo` flips, patch just the remote participant.
   createEffect(() => {
     if (callState() !== "connected") return;
-    callActions.setParticipantCamera("peer", videoCall() && remoteHasVideo());
+    callActions.setParticipantCamera("peer", remoteHasVideo());
   });
 
   /** Build outbound-signaling callback that PUTs raw
