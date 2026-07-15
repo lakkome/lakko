@@ -13,6 +13,7 @@ import org.webrtc.RtpReceiver
 import org.webrtc.VideoTrack
 import uniffi.lakko_ffi_uniffi.SfuErrorCode
 import uniffi.lakko_ffi_uniffi.SfuPeerSnapshot
+import uniffi.lakko_ffi_uniffi.sfuDecodePayload
 
 /**
  * Multi-party SFU-backed call session on Android — the Kotlin twin of
@@ -72,12 +73,31 @@ class SfuCallSession(
     data class Config(
         val sfuBaseUrl: String,
         val jwt: String,
-        /** 32-byte MLS exporter seed (`Group.exportSecret("lakko/call/v1", callId, 32)`). */
-        val seed: ByteArray,
-        /** This device's MLS leaf index — the SFrame KID it stamps. */
+        /**
+         * 32-byte MLS exporter seed (`Group.exportSecret("lakko/call/v1",
+         * callId, 32)`).
+         *
+         * Nullable for the ADR-0032 multi-joiner deferred-publish path: a
+         * link joiner connects signaling-only ([deferPublish]) and does NOT
+         * know the seed until it has joined the MLS group via the committer's
+         * Welcome, then calls [publish] with the derived seed. Non-null on the
+         * normal in-chat group-call path (media publishes immediately).
+         */
+        val seed: ByteArray?,
+        /** This device's MLS leaf index — the SFrame KID it stamps. On the
+         *  deferred-publish path the joiner supplies it to [publish]. */
         val localLeaf: Int,
         val audio: Boolean,
         val video: Boolean,
+        /**
+         * ADR-0032 — when `true`, [connect] opens the SFU signaling socket
+         * (so the peer can relay + receive the KeyPackage / Welcome handshake
+         * and appear on the roster) but does NOT capture or publish media. The
+         * caller drives media on later via [publish] once it holds a valid
+         * seed — the fail-closed "join media only after the Welcome" posture
+         * (invariant #4). Defaults to `false` (publish immediately).
+         */
+        val deferPublish: Boolean = false,
     )
 
     /** Lifecycle + roster callbacks. */
@@ -92,6 +112,12 @@ class SfuCallSession(
          *  publish) or was torn down (`null`). Drives the self-preview
          *  tile. */
         val onLocalVideoTrack: (track: VideoTrack?) -> Unit = {},
+        /** ADR-0032 — an opaque peer-to-peer relay payload arrived over the
+         *  SFU `signal-relay` frame. `from` is the sending peer's SFU peer id;
+         *  `payload` is the decoded bytes (the SFU never inspects them —
+         *  invariant #2). The multi-joiner orchestrator classifies these with
+         *  `dispatchIncomingEnvelope` (CallKeyPackage / CallWelcome / commit). */
+        val onSignalRelay: (from: String, payload: ByteArray) -> Unit = { _, _ -> },
         val onServerError: (code: SfuErrorCode, detail: String) -> Unit = { _, _ -> },
     )
 
@@ -118,7 +144,14 @@ class SfuCallSession(
      * reads it on a libwebrtc thread.
      */
     @Volatile
-    private var activeSeed: ByteArray = config.seed
+    private var activeSeed: ByteArray? = config.seed
+
+    /**
+     * This client's SFrame KID (MLS leaf). From [Config.localLeaf], or set by
+     * [publish] on the ADR-0032 deferred-publish path (a link joiner learns
+     * its leaf only after joining the MLS group).
+     */
+    private var publishLeaf: Int = config.localLeaf
 
     /**
      * Open the SFU connection, publish the local audio (SFrame-sealed),
@@ -146,12 +179,57 @@ class SfuCallSession(
             throw e
         }
 
+        // ADR-0032 deferred publish — a link joiner stays signaling-only
+        // until it holds a Welcome + a derived seed, then calls [publish].
+        if (config.deferPublish) return
+
         try {
             openPeerConnectionAndPublish()
         } catch (e: Throwable) {
             fail()
             throw e
         }
+    }
+
+    /**
+     * ADR-0032 — publish local media over the already-open signaling socket,
+     * arming SFrame on the supplied (or previously-set) seed + leaf. Used by
+     * the deferred-publish path once the client has joined the MLS group and
+     * derived the per-call seed — media only ever starts AFTER a valid seed is
+     * in hand (invariant #4, no plaintext-media fallback). Idempotent: a second
+     * call while a peer connection already exists is a no-op.
+     *
+     * @throws SfuCallException if no seed is available (never publishes
+     *         unencrypted).
+     */
+    suspend fun publish(seed: ByteArray? = null, localLeaf: Int? = null) {
+        if (pc != null) return
+        if (seed != null) activeSeed = seed
+        if (localLeaf != null) publishLeaf = localLeaf
+        if (activeSeed == null) {
+            throw SfuCallException(
+                "publish() called without a seed — refusing to publish media " +
+                    "without SFrame encryption (invariant #4)",
+            )
+        }
+        try {
+            openPeerConnectionAndPublish()
+        } catch (e: Throwable) {
+            fail()
+            throw e
+        }
+    }
+
+    /** ADR-0032 — relay an opaque payload to one peer (the KeyPackage /
+     *  Welcome handshake). No-op if signaling is not open. */
+    fun sendSignalRelayToPeer(peerId: String, payload: ByteArray) {
+        signaling?.sendSignalRelayToPeer(peerId, payload)
+    }
+
+    /** ADR-0032 — relay an opaque payload to every other peer in the call (a
+     *  broadcast KeyPackage request or an MLS commit). No-op if not open. */
+    fun sendSignalRelayToCall(payload: ByteArray) {
+        signaling?.sendSignalRelayToCall(payload)
     }
 
     /** Mute / unmute the local microphone (local-only track gate). */
@@ -173,7 +251,7 @@ class SfuCallSession(
      * never plaintext (security invariant #4).
      */
     fun rekey(newSeed: ByteArray) {
-        if (newSeed.contentEquals(activeSeed)) return
+        if (activeSeed?.contentEquals(newSeed) == true) return
         val connection = pc ?: return
         // Advance the active epoch BEFORE fanning out so a receiver that
         // arrives concurrently arms at the new epoch.
@@ -213,6 +291,13 @@ class SfuCallSession(
     // ---- Peer connection + publish ----------------------------------
 
     private suspend fun openPeerConnectionAndPublish() {
+        // Fail-closed: never open the media path without an SFrame seed
+        // (invariant #4). On the normal path `config.seed` is non-null; on
+        // the ADR-0032 deferred path [publish] has already set `activeSeed`.
+        val seed = activeSeed
+            ?: throw SfuCallException(
+                "no SFrame seed — refusing to publish media (invariant #4)",
+            )
         // The pod's ctor defaults `iceServers` to its own
         // `defaultIceServers()` (STUN; TURN arrives via the rendezvous
         // bootstrap config), so we don't pass it explicitly.
@@ -231,7 +316,7 @@ class SfuCallSession(
         if (config.video) {
             startLocalCameraCapture(connection)
         }
-        if (!connection.armSFrameEncryptors(config.seed, config.localLeaf)) {
+        if (!connection.armSFrameEncryptors(seed, publishLeaf)) {
             throw SfuCallException("SFrame encryptor arm failed — refusing call (invariant #4)")
         }
         val offer = connection.createOffer(audio = config.audio, video = config.video)
@@ -310,6 +395,19 @@ class SfuCallSession(
                 callbacks.onPeerLeft(peerId)
             }
 
+            override fun onSignalRelay(from: String, payloadB64: String) {
+                // ADR-0032 — base64url-decode the opaque relay payload and
+                // hand the raw bytes to the orchestrator on [scope] (it
+                // touches MLS group state). A malformed payload is dropped,
+                // not fatal.
+                val bytes = try {
+                    sfuDecodePayload(payloadB64)
+                } catch (e: Throwable) {
+                    return
+                }
+                scope.launch { callbacks.onSignalRelay(from, bytes) }
+            }
+
             override fun onSdpAnswer(sdp: String) {
                 scope.launch { applyRemoteAnswer(sdp) }
             }
@@ -384,8 +482,10 @@ class SfuCallSession(
                 // `pc` is set before any track can arrive. Arms at the
                 // CURRENT epoch (`activeSeed`, G-18/ADR-0029) so a receiver
                 // that arrives after a mid-call rekey opens frames sealed
-                // under the new epoch.
-                pc?.armSFrameDecryptor(receiver, activeSeed)
+                // under the new epoch. Guarded on a non-null seed — on the
+                // ADR-0032 deferred path no remote track arrives before
+                // publish sets the seed.
+                activeSeed?.let { pc?.armSFrameDecryptor(receiver, it) }
             },
         )
 

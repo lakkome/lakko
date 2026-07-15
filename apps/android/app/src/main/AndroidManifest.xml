@@ -116,6 +116,8 @@
                 <data android:pathPrefix="/i/" />
                 <!-- ADR-0028 (G-3) — group join-ticket deep links. -->
                 <data android:pathPrefix="/g/" />
+                <!-- ADR-0032 (G-21/G-22) — multi-joiner call-invite links. -->
+                <data android:pathPrefix="/c/" />
             </intent-filter>
         </activity>
 

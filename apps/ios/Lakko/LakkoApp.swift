@@ -159,15 +159,32 @@ struct AppRoot: View {
             Color(.systemBackground)
                 .ignoresSafeArea()
         case .anon(let cachedUsername):
-            AnonRoot(
-                repository: authRepository,
-                cachedUsername: cachedUsername
-            )
-            // Pending invites land in `InviteIntake.pendingSlug`
-            // but cannot consume in the anon state — the
-            // ``acceptInviteLink`` flow needs `identitySecrets`.
-            // We leave the slug parked; once the user signs in,
-            // the session-state branch picks it up.
+            Group {
+                if let callSlug = inviteIntake.pendingCallJoinSlug {
+                    // ADR-0032 (G-21/G-22) — a tapped `/c/<slug>` multi-joiner
+                    // call link from an anonymous visitor. Guest join
+                    // (`signupGuest`) is offered inline; no login required.
+                    JoinCallLandingScreen(
+                        viewModel: JoinCallLandingViewModel(
+                            slug: callSlug,
+                            authRepository: authRepository,
+                            intake: inviteIntake
+                        ),
+                        onDone: {}
+                    )
+                } else {
+                    AnonRoot(
+                        repository: authRepository,
+                        cachedUsername: cachedUsername
+                    )
+                }
+            }
+            // Pending contact / group invites land in
+            // `InviteIntake` but cannot consume in the anon state —
+            // those flows need `identitySecrets`. We leave the slug
+            // parked; once the user signs in, the session-state
+            // branch picks it up. (A `/c/` call link is the
+            // exception — it offers a guest signup inline, above.)
             .onAppear {
                 // Defensive: returning to anon (logout /
                 // forgetDevice) tears down the cross-device sync
@@ -303,6 +320,19 @@ private struct SessionRoot: View {
                     viewModel: JoinGroupLandingViewModel(
                         slug: groupSlug,
                         repository: chatRepository,
+                        intake: inviteIntake
+                    ),
+                    onDone: {}
+                )
+            } else if let callSlug = inviteIntake.pendingCallJoinSlug {
+                // ADR-0032 (G-21/G-22) — a tapped `/c/<slug>` multi-joiner call
+                // link while signed in. The landing decodes the capability then
+                // hosts (owner) or joins (relays its KeyPackage + waits for the
+                // committer's Welcome); dismiss() clears the parked slug.
+                JoinCallLandingScreen(
+                    viewModel: JoinCallLandingViewModel(
+                        slug: callSlug,
+                        authRepository: authRepository,
                         intake: inviteIntake
                     ),
                     onDone: {}

@@ -303,6 +303,118 @@ public final class AuthRepository: ObservableObject {
         return SignupOutcome(recoveryPhrase: phrase)
     }
 
+    /// ADR-0032 guest join — create a FULL account with NO username and no
+    /// user-chosen password, so an anonymous `/c/<slug>` visitor can join a
+    /// call without a login.
+    ///
+    /// Reuses the audited ``signup(username:password:)`` machinery VERBATIM
+    /// minus the username claim: the SAME PoW-gated OPAQUE registration
+    /// (``AuthClient/signup(password:enrolRecovery:)``) — under a RANDOM
+    /// 32-byte password the user NEVER sees (recovery is phrase-only, the
+    /// ACCESS-only convention the recovery cascade already uses) — plus the
+    /// device-root-key / export-key / device-identity / account-identity-seed
+    /// derivation, and the first-ever identity-bundle publish (with the genesis
+    /// `leaf_auth`, G-30 #2). SECURITY: guest creation MUST route through this
+    /// same PoW-gated signup — there is no bypass.
+    ///
+    /// It then parks the recovery phrase + flips to ``AuthState/saveFreshPhrase(_:)``
+    /// (mirroring ``mintFreshIdentity()``) instead of landing the session
+    /// directly, so the existing `SaveFreshPhraseScreen` + ``confirmFreshPhraseSaved()``
+    /// render + land it unchanged. Claiming a username (`registerUsername`) is a
+    /// later onboarding step; the account is full from the start, just
+    /// username-less. Returns the recovery phrase.
+    public func signupGuest() async throws -> SignupOutcome {
+        // A 32-byte random password the user never sees — the guest HAS a real,
+        // random password, so the normal signup derivations apply. `SystemRandom-
+        // NumberGenerator` is the OS CSPRNG on Apple platforms.
+        var rng = SystemRandomNumberGenerator()
+        let randomBytes = (0..<32).map { _ in UInt8.random(in: UInt8.min...UInt8.max, using: &rng) }
+        let randomPassword = Data(Data(randomBytes).base64EncodedString().utf8)
+
+        // The SAME PoW-gated OPAQUE registration `signup` uses — no bypass.
+        let client = authClientFactory()
+        let result = try await client.signup(password: randomPassword, enrolRecovery: true)
+        let accountIdB64 = base64Encode(result.accountId)
+
+        // NOTE: no username claim — the account stays username-less until a
+        // later "claim your username" onboarding step (`registerUsername`).
+
+        guard let phrase = result.recoveryPhrase else {
+            throw AuthClientError.argument(
+                "internal: guest signup completed without a recovery phrase"
+            )
+        }
+        let accountIdentitySeed = try RecoveryMnemonic
+            .fromPhrase(phrase: phrase)
+            .toSeed()
+
+        // Device root key from the OPAQUE export key + persist the key /
+        // export key / device-identity / account-identity seed, exactly as
+        // `signup` does. Best-effort mirrors (a persistence failure just
+        // degrades a future warm resume on this device).
+        let deviceRootKey = deriveDeviceRootKey(
+            exportKey: result.exportKey,
+            accountIdB64: accountIdB64
+        )
+        try DeviceKeyStore.putDeviceKey(
+            accountIdB64: accountIdB64,
+            rootKey: deviceRootKey
+        )
+        do {
+            try ExportKeyStore.putExportKey(
+                accountIdB64: accountIdB64,
+                exportKey: result.exportKey
+            )
+        } catch {
+            NSLog("export-key persist (signupGuest) failed: \(error)")
+        }
+        do {
+            _ = try DeviceIdentityStore.ensureDeviceIdentitySeed(
+                accountIdB64: accountIdB64
+            )
+        } catch {
+            NSLog("device-identity ensure (signupGuest) failed: \(error)")
+        }
+        do {
+            try AccountIdentitySeedStore.putAccountIdentitySeed(
+                accountIdB64: accountIdB64,
+                seed: accountIdentitySeed
+            )
+        } catch {
+            NSLog("account-identity-seed persist (signupGuest) failed: \(error)")
+        }
+
+        // G-30 #2 (ADR-0019): publish the FIRST-EVER bundle WITH the genesis
+        // leaf self-signature so the transparency-log append accepts the new
+        // binding — identical to the web `signupGuest`. Fail-loud: a publish
+        // failure rejects the guest signup rather than parking an unverifiable
+        // identity (mirrors `mintFreshIdentity`, which publishes before any
+        // local state flip).
+        try await publishFreshIdentityBundle(
+            accountId: result.accountId,
+            sessionToken: result.sessionToken,
+            seed: accountIdentitySeed
+        )
+
+        // Park the completion context + flip to `.saveFreshPhrase` so the UI
+        // shows the recovery phrase before the session lands (mirroring
+        // `mintFreshIdentity`); `confirmFreshPhraseSaved` builds the canonical
+        // session from the stash. Username EMPTY (unclaimed).
+        pendingFreshPhrase = PendingFreshPhrase(
+            seed: accountIdentitySeed,
+            accountIdBytes: result.accountId,
+            accountIdB64: accountIdB64,
+            sessionToken: result.sessionToken,
+            sessionExpiresAtMs: result.sessionExpiresAtMs,
+            username: "",
+            phrase: phrase
+        )
+        state = .saveFreshPhrase(
+            SessionAccount(accountIdB64: accountIdB64, username: "")
+        )
+        return SignupOutcome(recoveryPhrase: phrase)
+    }
+
     /// Drive the full OPAQUE-PAKE login flow.
     ///
     /// Mirror of `apps/android`'s `AuthRepository.login`. Steps:

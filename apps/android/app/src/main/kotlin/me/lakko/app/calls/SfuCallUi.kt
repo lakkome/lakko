@@ -53,10 +53,12 @@ class SfuCallUi(
         // non-critical: a derivation failure (only on a wrong-length seed,
         // which the MLS exporter never emits) must never break the call.
         val safetyNumber: String? =
-            try {
-                callSafetyNumber(config.seed)
-            } catch (e: Exception) {
-                null
+            config.seed?.let { seed ->
+                try {
+                    callSafetyNumber(seed)
+                } catch (e: Exception) {
+                    null
+                }
             }
 
         val callbacks = SfuCallSession.Callbacks(

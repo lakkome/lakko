@@ -48,6 +48,17 @@ public final class InviteIntake: ObservableObject {
     /// group-join is pending. Drives ``JoinGroupLandingScreen``.
     @Published public private(set) var pendingGroupJoinSlug: String?
 
+    /// ADR-0032 (G-21/G-22) — the slug from the most recent
+    /// `lakko.me/c/<slug>` multi-joiner call-invite link tap. `nil` when no
+    /// call-join is pending. Drives ``JoinCallLandingScreen``.
+    @Published public private(set) var pendingCallJoinSlug: String?
+
+    /// ADR-0032 — set when a guest signup is kicked off from the `/c/` landing,
+    /// so that once the session lands and the landing re-mounts, the join
+    /// resumes automatically (mirror of the web `pendingJoin` + resume effect).
+    /// Consumed one-shot by ``consumeCallJoinAutoResume()``.
+    public private(set) var callJoinAutoResume = false
+
     public init() {}
 
     /// Extract the slug from a URL and stash it. No-op if the URL
@@ -68,6 +79,8 @@ public final class InviteIntake: ObservableObject {
             pendingSlug = slug
         } else if let slug = Self.slug(from: path, prefix: "/g/") {
             pendingGroupJoinSlug = slug
+        } else if let slug = Self.slug(from: path, prefix: "/c/") {
+            pendingCallJoinSlug = slug
         }
     }
 
@@ -93,5 +106,25 @@ public final class InviteIntake: ObservableObject {
     /// ``JoinGroupLandingScreen`` on dismiss.
     public func clearGroupJoin() {
         pendingGroupJoinSlug = nil
+    }
+
+    /// ADR-0032 — consume the pending call-join slug + auto-resume flag, called
+    /// by ``JoinCallLandingScreen`` on dismiss.
+    public func clearCallJoin() {
+        pendingCallJoinSlug = nil
+        callJoinAutoResume = false
+    }
+
+    /// ADR-0032 — arm the auto-resume flag before a guest signup, so the
+    /// re-mounted landing continues the join once the session lands.
+    public func armCallJoinAutoResume() {
+        callJoinAutoResume = true
+    }
+
+    /// ADR-0032 — read + clear the auto-resume flag (one-shot).
+    public func consumeCallJoinAutoResume() -> Bool {
+        let value = callJoinAutoResume
+        callJoinAutoResume = false
+        return value
     }
 }

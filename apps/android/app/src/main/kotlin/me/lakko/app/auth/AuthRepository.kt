@@ -20,6 +20,7 @@ import uniffi.lakko_ffi_uniffi.Identity
 import uniffi.lakko_ffi_uniffi.RecoveryMnemonic
 import uniffi.lakko_ffi_uniffi.signLeafGenesis
 import uniffi.lakko_ffi_uniffi.transparencyAccountKey
+import java.security.SecureRandom
 import java.util.concurrent.atomic.AtomicReference
 
 /**
@@ -363,6 +364,117 @@ public class AuthRepository(
                 // of scope here. We already cloned it into
                 // `mutableIdentitySecrets` above; the wipe here
                 // affects the AuthClient's buffer only.
+                result.exportKey.fill(0)
+            }
+        }
+    }
+
+    /**
+     * ADR-0032 guest join — create a FULL account with NO username and no
+     * user-chosen password, so an anonymous `/c/<slug>` visitor can join a
+     * call without a login. Mirror of `apps/web/src/auth/AuthContext.tsx::signupGuest`.
+     *
+     * Reuses the [signup] machinery VERBATIM: the SAME PoW-gated OPAQUE
+     * registration ([AuthClient.signup] with a RANDOM 32-byte password the
+     * user never sees) + device-root-key derivation + the AccountIdentity-seed
+     * cache + the first-ever identity-bundle publish (with the genesis
+     * `leafAuth`) — but SKIPS the username claim, yielding a username-less
+     * account. It then parks the recovery phrase and flips to
+     * [AuthState.SaveFreshPhrase] (like [mintFreshIdentity]) instead of landing
+     * the session directly, so the existing SaveFreshPhraseScreen +
+     * [confirmFreshPhraseSaved] render + land it unchanged.
+     *
+     * SECURITY: guest creation routes through the SAME PoW-gated signup — no
+     * bypass. The password is 32 random bytes; recovery is phrase-only,
+     * matching the ACCESS-only convention the recovery cascade already uses.
+     * No username is claimed; the account is username-less until a later
+     * "claim your username" onboarding step.
+     *
+     * @return the 24-word recovery phrase (also surfaced by [freshPhrase]).
+     */
+    public suspend fun signupGuest(): SignupOutcome {
+        // 32 random bytes the user NEVER sees — recovery is phrase-only.
+        val randomPassword = ByteArray(32).also { SecureRandom().nextBytes(it) }
+        return authClientFactory().use { client ->
+            // Same PoW-gated OPAQUE registration signup uses — no bypass.
+            val result = client.signup(randomPassword, enrolRecovery = true)
+            try {
+                val accountIdB64 = base64Encode(result.accountId)
+                // ADR-0032: NO username claim — the account stays username-less
+                // until a later onboarding step.
+                val phrase = result.recoveryPhrase ?: throw IllegalStateException(
+                    "internal: guest signup completed without a recovery phrase",
+                )
+                // ADR-0017: the canonical AccountIdentity (phrase) seed.
+                val accountIdentitySeed = RecoveryMnemonic.fromPhrase(phrase).use {
+                    it.toSeed()
+                }
+                // Device root key from the OPAQUE export key (the guest HAS a
+                // real, random password, so this is the normal signup
+                // derivation) + persist key / export key / device-identity /
+                // account-identity seed, exactly as signup does.
+                val deviceRootKey = deriveDeviceRootKey(result.exportKey, accountIdB64)
+                try {
+                    deviceKeyStore.putDeviceKey(
+                        context = applicationContext,
+                        accountIdB64 = accountIdB64,
+                        rootKey = deviceRootKey,
+                    )
+                } finally {
+                    deviceRootKey.fill(0)
+                }
+                try {
+                    ExportKeyStore.putExportKey(applicationContext, accountIdB64, result.exportKey)
+                } catch (cause: Throwable) {
+                    Log.w("lakko-auth", "export-key persist (signupGuest) failed", cause)
+                }
+                try {
+                    DeviceIdentityStore.ensureDeviceIdentitySeed(applicationContext, accountIdB64)
+                } catch (cause: Throwable) {
+                    Log.w("lakko-auth", "device-identity ensure (signupGuest) failed", cause)
+                }
+                try {
+                    AccountIdentitySeedStore.putAccountIdentitySeed(
+                        applicationContext,
+                        accountIdB64,
+                        accountIdentitySeed,
+                    )
+                } catch (cause: Throwable) {
+                    Log.w("lakko-auth", "account-identity-seed persist (signupGuest) failed", cause)
+                }
+                // Persist the account marker — username EMPTY (unclaimed).
+                sessionStore.save(PersistedSession(accountIdB64 = accountIdB64, username = ""))
+                // G-30 #2 (ADR-0019): publish the FIRST-EVER bundle WITH the
+                // genesis leaf self-signature so the transparency-log append
+                // accepts the new binding — identical to signup. Fail-loud: a
+                // mint / upload failure rejects the guest signup rather than
+                // parking an unverifiable identity.
+                publishFreshIdentityBundle(
+                    accountId = result.accountId,
+                    sessionToken = result.sessionToken,
+                    seed = accountIdentitySeed,
+                )
+                // Park the completion context + flip to SaveFreshPhrase so the
+                // UI shows the recovery phrase before the session lands (the
+                // SaveFreshPhraseScreen -> confirmFreshPhraseSaved path lands
+                // the canonical session; the seed is owned by the pending
+                // record thereafter, so it is not wiped here).
+                pendingFreshPhrase.set(
+                    PendingFreshPhrase(
+                        seed = accountIdentitySeed,
+                        accountIdBytes = result.accountId,
+                        accountIdB64 = accountIdB64,
+                        sessionToken = result.sessionToken,
+                        sessionExpiresAtMs = result.sessionExpiresAtMs,
+                        username = "",
+                        phrase = phrase,
+                    ),
+                )
+                mutableState.value = AuthState.SaveFreshPhrase(
+                    account = SessionAccount(accountIdB64 = accountIdB64, username = ""),
+                )
+                SignupOutcome(recoveryPhrase = phrase)
+            } finally {
                 result.exportKey.fill(0)
             }
         }

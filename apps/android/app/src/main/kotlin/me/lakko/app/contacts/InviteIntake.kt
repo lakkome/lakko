@@ -78,4 +78,25 @@ public class InviteIntake {
     public fun consumeGroupJoin() {
         mutableGroupJoinSlug.value = null
     }
+
+    private val mutableCallJoinSlug: MutableStateFlow<String?> = MutableStateFlow(null)
+
+    /** ADR-0032 (G-21/G-22) — slug from the most recent unconsumed
+     *  `https://lakko.me/c/<slug>` multi-joiner call-invite deep-link, or
+     *  `null`. The router surfaces the public `JoinCall` landing when non-null.
+     *  Unlike the `/i/` + `/g/` slots this one is honoured in ANY auth state
+     *  (an anonymous visitor gets the ADR-0032 guest-join path). */
+    public val pendingCallJoinSlug: StateFlow<String?> = mutableCallJoinSlug.asStateFlow()
+
+    /** ADR-0032 — publish a call-invite slug, called from
+     *  [me.lakko.app.MainActivity.handleCallJoinIntent]. */
+    public fun publishCallJoin(slug: String) {
+        mutableCallJoinSlug.value = slug
+    }
+
+    /** ADR-0032 — clear the call-join slot once the landing screen has been
+     *  dismissed (on exit). */
+    public fun consumeCallJoin() {
+        mutableCallJoinSlug.value = null
+    }
 }

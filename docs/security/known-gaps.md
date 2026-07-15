@@ -969,7 +969,22 @@ break to call-side invariants C-1..C-10 in
 [`calls.md`](./calls.md). The recorded stream is
 end-to-end encrypted just like any other consumer's view.
 
-### G-21: Link-based call invites are single-joiner in V1
+### G-21: Link-based call invites — **multi-joiner CLOSED end-to-end on web + iOS + Android ([ADR-0032](../adr/0032-multi-joiner-call-links.md): owner-founds + deterministic committer election + guest-account join); residuals are the account-creation-spam throttle (deferred backend arc) + a live deployed-SFU N-joiner/failover e2e (G-26-class)**
+
+**Multi-joiner (ADR-0032) landed 2026-07** — the owner is the sole founder (no
+founding race → the original two-groups bug closed by design); joiners mint
+their own KeyPackage and are admitted by the `elect_committer`-designated
+committer (owner-if-present-else-lowest-leaf, so failover + reclaim are
+automatic + split-brain-free); the KeyPackage/Welcome ride the SFU `signal-relay`
+in-band (live) or the stranger-inbox welcome-ferry (cold start); an anonymous
+`/c/<slug>` visitor joins as a **guest** (a username-less OPAQUE account minted
+via the audited PoW-gated `signup` path); an empty owner-founds call is dead
+(~18 s timeout). Fail-closed throughout (no media before a valid Welcome + join;
+a post-join owner-membership check refuses a redirect into an impostor group).
+`lakko-security` **APPROVE-WITH-NOTES**. The single-joiner V1 note below is the
+historical baseline this superseded.
+
+
 
 `CallInviteCapability` embeds one one-time `KeyPackage`
 (see C-26 in [`calls.md`](./calls.md)). The first joiner
@@ -1155,7 +1170,18 @@ page, polling-loop integration with
 contracts the UI work depends on are all fixed and
 fuzz-covered.
 
-### G-22: Per-joiner dedup for call invites lands with multi-use orchestration
+### G-22: Per-joiner dedup for call invites — **CLOSED (client-side committer dedup on all 3 clients, [ADR-0032](../adr/0032-multi-joiner-call-links.md)); per-signature-key dedup is a follow-up pending a `keyPackageSignatureKey` FFI helper**
+
+**Landed with the ADR-0032 multi-joiner flow (2026-07)** — the acting committer
+dedups admissions on `(relay from-peer-id)` + exact-KeyPackage-bytes, so one
+SFU-admitted peer is added at most once even if it re-mints fresh KeyPackages
+(a retry re-serves the stored Welcome); the server `max_uses` on the
+`/c/<blob_id>` blob is the orthogonal ceiling. The ideal per-signature-key dedup
+(so a peer cannot be added as multiple leaves under one identity) needs a wasm
+`keyPackageSignatureKey` reader that does not yet exist — a marked follow-up.
+The historical note below is the pre-ADR-0032 baseline.
+
+
 
 **Atomic `max_uses` enforcement shipped in 3c3-server**
 via `services/discovery/src/call_invite.rs::consume` —

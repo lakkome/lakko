@@ -21,6 +21,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
@@ -160,6 +161,7 @@ class MainActivity : ComponentActivity() {
         // below handles the warm-start variants of both.
         handleInviteIntent(intent)
         handleGroupJoinIntent(intent)
+        handleCallJoinIntent(intent)
         handleWakeIntent(intent)
 
         setContent {
@@ -192,6 +194,7 @@ class MainActivity : ComponentActivity() {
         // drives the re-render.
         handleInviteIntent(intent)
         handleGroupJoinIntent(intent)
+        handleCallJoinIntent(intent)
         handleWakeIntent(intent)
     }
 
@@ -245,6 +248,24 @@ class MainActivity : ComponentActivity() {
     }
 
     /**
+     * ADR-0032 (G-21/G-22) — extract a multi-joiner call-invite slug from
+     * [intent]'s `data` URI when the URL matches `https?://lakko.me/c/<slug>`,
+     * then hand it to [InviteIntake.publishCallJoin]. Mirror of
+     * [handleInviteIntent] for the `/c/` deep-link. Unlike the other two, the
+     * call-join landing is a PUBLIC route honoured in any auth state (an
+     * anonymous visitor gets the ADR-0032 guest-join path).
+     */
+    private fun handleCallJoinIntent(intent: Intent) {
+        if (intent.action != Intent.ACTION_VIEW) return
+        val uri = intent.data ?: return
+        val path = uri.path ?: return
+        if (!path.startsWith("/c/")) return
+        val slug = path.removePrefix("/c/").trim().removeSuffix("/")
+        if (slug.isEmpty()) return
+        inviteIntake.publishCallJoin(slug)
+    }
+
+    /**
      * Extract a push-wake hint from [intent]'s extras when the
      * notification tap from
      * [LakkoMessagingService.showWakeNotification] landed here
@@ -290,6 +311,24 @@ private fun AppRoot(
     antiCensorship: AntiCensorshipManager,
 ) {
     val state by authRepository.state.collectAsStateWithLifecycle()
+
+    // ADR-0032 (G-21/G-22) — a tapped `https://lakko.me/c/<slug>` multi-joiner
+    // call-invite link takes over the whole screen with the PUBLIC JoinCall
+    // landing, in ANY auth state (an anonymous visitor gets the guest-join
+    // path). This gates before the auth-state router so a guest mid-onboarding
+    // (auth flips to SaveFreshPhrase) stays inside the JoinCall context instead
+    // of falling into the top-level SaveFreshPhraseRoot.
+    val pendingCallJoinSlug by inviteIntake.pendingCallJoinSlug.collectAsStateWithLifecycle()
+    val callSlug = pendingCallJoinSlug
+    if (callSlug != null) {
+        me.lakko.app.ui.call.JoinCallRoot(
+            authRepository = authRepository,
+            slug = callSlug,
+            applicationContext = LocalContext.current.applicationContext,
+            onExit = { inviteIntake.consumeCallJoin() },
+        )
+        return
+    }
 
     // Phase 2a3e2b-Android — tear down the cross-device sync
     // runtime when we leave the session entirely (logout /

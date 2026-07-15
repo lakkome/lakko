@@ -48,7 +48,7 @@ final class SfuCallUi {
         // non-critical: a derivation failure (only on a wrong-length seed,
         // which the MLS exporter never emits) must never break the call,
         // so it degrades to no fingerprint.
-        let safetyNumber = try? callSafetyNumber(seed: config.seed)
+        let safetyNumber = config.seed.flatMap { try? callSafetyNumber(seed: $0) }
 
         let callbacks = SfuCallSession.Callbacks(
             onStateChange: { state in

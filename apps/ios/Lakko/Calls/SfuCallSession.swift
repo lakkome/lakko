@@ -54,11 +54,27 @@ final class SfuCallSession {
         let sfuBaseUrl: String
         let jwt: String
         /// 32-byte MLS exporter seed (`Group.exportSecret("lakko/call/v1", callId, 32)`).
-        let seed: Data
-        /// This device's MLS leaf index — the SFrame KID it stamps.
-        let localLeaf: UInt32
+        ///
+        /// Optional to support the ADR-0032 multi-joiner path: a link joiner
+        /// connects signaling-only (`deferPublish`) and does NOT know the seed
+        /// until it has joined the MLS group via the committer's Welcome. It
+        /// then calls ``publish(seed:localLeaf:)`` with the derived seed. On the
+        /// normal in-chat group-call path the seed is present at construction.
+        let seed: Data?
+        /// This device's MLS leaf index — the SFrame KID it stamps. Optional
+        /// for the same ADR-0032 reason as ``seed`` (a link joiner learns it
+        /// only after joining).
+        let localLeaf: UInt32?
         let audio: Bool
         let video: Bool
+        /// ADR-0032: when `true`, ``connect()`` opens the SFU signaling socket
+        /// (so the peer can relay + receive the KeyPackage / Welcome handshake
+        /// and appear on the roster) but does NOT capture or publish media. The
+        /// caller publishes later via ``publish(seed:localLeaf:)`` once it holds
+        /// a valid seed — the fail-closed "join media only after the Welcome"
+        /// posture (invariant #4). Defaults to `false` (publish immediately, the
+        /// normal in-chat path — byte-unchanged).
+        var deferPublish: Bool = false
     }
 
     struct Callbacks {
@@ -74,15 +90,28 @@ final class SfuCallSession {
         /// tile.
         var onLocalVideoTrack: ((RTCVideoTrack?) -> Void)?
         var onServerError: ((SfuErrorCode, String) -> Void)?
+        /// ADR-0032: an opaque peer-to-peer relay payload arrived over the SFU
+        /// `signal-relay` frame. `from` is the sending peer's SFU peer id;
+        /// `payload` is the decoded bytes (the SFU never inspects them —
+        /// invariant #2). The multi-joiner orchestrator classifies these with
+        /// `dispatchIncomingEnvelope` (CallKeyPackage / CallWelcome / commit).
+        /// Defaulted so the in-chat group-call callers (which don't use the
+        /// relay handshake) keep their shorter memberwise initialiser.
+        var onSignalRelay: ((_ from: String, _ payload: Data) -> Void)? = nil
     }
 
     private let config: Config
     private let callbacks: Callbacks
     /// Call-key seed of the CURRENT MLS epoch (G-18, ADR-0029). Starts
-    /// at `config.seed` and advances on `rekey`, so a late-arriving
-    /// receiver is armed at the current epoch (not the start-of-call
-    /// one). Mirrors the web `SfuCallSession.activeSeed`.
-    private var activeSeed: Data
+    /// at `config.seed` (or `nil` on the ADR-0032 deferred-publish path,
+    /// set later by ``publish(seed:localLeaf:)``) and advances on
+    /// `rekey`, so a late-arriving receiver is armed at the current epoch
+    /// (not the start-of-call one). Mirrors the web
+    /// `SfuCallSession.activeSeed`.
+    private var activeSeed: Data?
+    /// This device's SFrame KID (MLS leaf). From `config.localLeaf`, or
+    /// set by ``publish(seed:localLeaf:)`` on the deferred-publish path.
+    private var publishLeaf: UInt32
     private var signaling: SfuSignalingClient?
     private var pc: WebRTCPeerConnection?
     /// Local camera capturer — held for the call's lifetime so it
@@ -100,6 +129,7 @@ final class SfuCallSession {
         self.config = config
         self.callbacks = callbacks
         self.activeSeed = config.seed
+        self.publishLeaf = config.localLeaf ?? 0
     }
 
     /// Rotate the call key on a mid-call MLS epoch change (G-18,
@@ -112,7 +142,7 @@ final class SfuCallSession {
     /// epoch (`activeSeed`). No-op if the seed is unchanged. Mirrors the
     /// web `SfuCallSession.rekey`.
     func rekey(newSeed: Data) {
-        guard newSeed != activeSeed else { return }
+        if let current = activeSeed, current == newSeed { return }
         activeSeed = newSeed
         pc?.rekeySFrame(seed: newSeed)
     }
@@ -142,13 +172,50 @@ final class SfuCallSession {
             throw error
         }
 
-        // 2. Build the peer connection + publish.
+        // 2. Build the peer connection + publish — UNLESS the caller asked to
+        //    defer (ADR-0032 link joiner: stay signaling-only until it holds a
+        //    Welcome + a derived seed, then call `publish()`).
+        if config.deferPublish { return }
         do {
             try await openPeerConnectionAndPublish()
         } catch {
             fail()
             throw error
         }
+    }
+
+    /// ADR-0032: publish local media over the already-open signaling socket,
+    /// arming SFrame on the supplied (or previously-set) seed + leaf. Used by
+    /// the deferred-publish path once the client has joined the MLS group and
+    /// derived the per-call seed — media only ever starts AFTER a valid seed is
+    /// in hand (invariant #4, no plaintext-media fallback). Idempotent: a no-op
+    /// if a peer connection already exists.
+    ///
+    /// - Throws: `SfuCallError.sframeUnavailable` if no seed is available (never
+    ///   publishes unencrypted).
+    func publish(seed: Data?, localLeaf: UInt32?) async throws {
+        guard pc == nil else { return }
+        if let seed { activeSeed = seed }
+        if let localLeaf { publishLeaf = localLeaf }
+        guard activeSeed != nil else { throw SfuCallError.sframeUnavailable }
+        do {
+            try await openPeerConnectionAndPublish()
+        } catch {
+            fail()
+            throw error
+        }
+    }
+
+    /// ADR-0032: relay an opaque payload to one peer (the KeyPackage / Welcome
+    /// handshake). No-op if signaling is not open.
+    func sendSignalRelay(toPeer peerId: String, payload: Data) {
+        signaling?.sendSignalRelay(toPeer: peerId, payload: payload)
+    }
+
+    /// ADR-0032: relay an opaque payload to every other peer in the call (a
+    /// broadcast KeyPackage request or an MLS commit). No-op if not open.
+    func sendSignalRelayToCall(payload: Data) {
+        signaling?.sendSignalRelayToCall(payload: payload)
     }
 
     /// Mute / unmute the local microphone (local-only track gate).
@@ -179,6 +246,10 @@ final class SfuCallSession {
     // MARK: - Peer connection + publish
 
     private func openPeerConnectionAndPublish() async throws {
+        guard let seed = activeSeed else {
+            // Never publish media without a seed (invariant #4).
+            throw SfuCallError.sframeUnavailable
+        }
         let connection = WebRTCPeerConnection(
             iceServers: WebRTCPeerConnection.defaultIceServers()
         )
@@ -197,7 +268,7 @@ final class SfuCallSession {
         if config.video {
             startLocalCameraCapture(on: connection)
         }
-        guard connection.armSFrameEncryptors(seed: activeSeed, localLeaf: config.localLeaf) else {
+        guard connection.armSFrameEncryptors(seed: seed, localLeaf: publishLeaf) else {
             // A failed arm is fail-closed (invariant #4).
             throw SfuCallError.sframeUnavailable
         }
@@ -271,10 +342,22 @@ final class SfuCallSession {
         cb.onServerError = { [weak self] code, detail in
             Task { @MainActor in self?.callbacks.onServerError?(code, detail) }
         }
+        cb.onSignalRelay = { [weak self] from, payloadB64 in
+            Task { @MainActor in self?.dispatchSignalRelay(from: from, payloadB64: payloadB64) }
+        }
         cb.onClosed = { [weak self] in
             Task { @MainActor in self?.onSignalingClosed() }
         }
         return cb
+    }
+
+    /// ADR-0032: decode the opaque relay payload (base64url) and hand it to the
+    /// caller. A malformed relay payload is dropped, never fatal (mirror of the
+    /// web `onSignalRelayFrame`, which uses the same `sfuDecodePayload`).
+    private func dispatchSignalRelay(from: String, payloadB64: String) {
+        guard let cb = callbacks.onSignalRelay else { return }
+        guard let payload = try? sfuDecodePayload(payloadB64: payloadB64) else { return }
+        cb(from, payload)
     }
 
     private func applyRemoteAnswer(_ sdp: String) async {
@@ -330,9 +413,11 @@ final class SfuCallSession {
                 // Arm the SFrame decryptor on every incoming track
                 // (audio + video) — invariant #4. Use the CURRENT epoch
                 // seed (`activeSeed`), so a receiver that arrives after a
-                // mid-call rekey is armed at the new epoch (G-18).
-                guard let self = self else { return }
-                _ = self.pc?.armSFrameDecryptor(for: receiver, seed: self.activeSeed)
+                // mid-call rekey is armed at the new epoch (G-18). A remote
+                // track only arrives after this client published (it has a
+                // peer connection), so the seed is always set here.
+                guard let self = self, let seed = self.activeSeed else { return }
+                _ = self.pc?.armSFrameDecryptor(for: receiver, seed: seed)
             }
         )
     }
