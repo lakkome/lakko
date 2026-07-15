@@ -740,6 +740,7 @@ mod totp_e2e_tests {
             totp_enc_key: with_totp_key.then(|| Arc::new(TOTP_KEY)),
             recovery_contact_pepper: None,
             otp_sender: Arc::new(crate::otp_sender::LogOnlyOtpSender),
+            throttle: crate::throttle::ThrottleConfig::disabled(),
         };
         (state, token_secret)
     }

@@ -406,6 +406,7 @@ mod device_authorize_e2e_tests {
             totp_enc_key: None,
             recovery_contact_pepper: None,
             otp_sender: Arc::new(crate::otp_sender::LogOnlyOtpSender),
+            throttle: crate::throttle::ThrottleConfig::disabled(),
         };
         (state, token_secret)
     }

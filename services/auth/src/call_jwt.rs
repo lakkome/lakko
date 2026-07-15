@@ -147,6 +147,21 @@ pub(crate) async fn issue_call_jwt(
     }
     let call_id_lower = req.call_id.to_ascii_lowercase();
 
+    // ADR-0033 — call-admission anti-spam throttle. Runs AFTER call_id
+    // validation, BEFORE minting. Disabled by default; fails OPEN on a store
+    // error (see `throttle::check_admission`). The 32-hex string is already
+    // validated above, so the decode is a defence-in-depth guard.
+    let call_id_bytes = crate::throttle::decode_call_id(&call_id_lower)
+        .ok_or((StatusCode::BAD_REQUEST, "call_id must be hex"))?;
+    if crate::throttle::check_admission(&state.db, state.throttle, &call_id_bytes, &auth.0).await
+        == crate::throttle::ThrottleDecision::Throttled
+    {
+        return Err((
+            StatusCode::TOO_MANY_REQUESTS,
+            "this call is not accepting new participants — try later",
+        ));
+    }
+
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "clock before epoch"))?
@@ -289,6 +304,7 @@ mod tests {
             totp_enc_key: None,
             recovery_contact_pepper: None,
             otp_sender: Arc::new(crate::otp_sender::LogOnlyOtpSender),
+            throttle: crate::throttle::ThrottleConfig::disabled(),
         }
     }
 

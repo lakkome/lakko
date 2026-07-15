@@ -36,6 +36,14 @@
 //!   authenticator UI. Default: `Lakko`.
 //! - `LAKKO_WEBAUTHN_RP_ORIGIN` — full origin including scheme,
 //!   e.g. `https://lakko.me`. Required when `RP_ID` is set.
+//! - `LAKKO_AUTH_GUEST_ACCOUNT_AGE_SECS` — an account younger than this counts
+//!   as fresh/guest for the ADR-0033 call-admission throttle (default 3600).
+//! - `LAKKO_AUTH_CALL_ADMISSION_WINDOW_SECS` — the throttle's sliding window
+//!   (default 60).
+//! - `LAKKO_AUTH_CALL_ADMISSION_BURST_LIMIT` — max distinct fresh accounts per
+//!   `call_id` per window before throttling (default 8; **0 = disabled**).
+//! - `LAKKO_AUTH_CALL_THROTTLE_SECS` — how long a call stays throttled once
+//!   tripped (default 300).
 //!
 //! Endpoints:
 //!
@@ -68,6 +76,7 @@ mod opaque;
 mod otp_sender;
 mod pow;
 mod recovery_contact;
+mod throttle;
 mod totp;
 mod turn;
 mod webauthn;
@@ -177,6 +186,13 @@ pub(crate) struct AppState {
     /// when no real adapter is armed (the `services/push-gw` posture). The
     /// contact plaintext is supplied transiently and never persisted/logged.
     pub(crate) otp_sender: Arc<dyn otp_sender::OtpSender>,
+    /// ADR-0033 — call-admission anti-spam throttle config. Loaded from the
+    /// environment at startup and consulted by `issue_call_jwt` before minting.
+    /// `burst_limit == 0` (the default when
+    /// `LAKKO_AUTH_CALL_ADMISSION_BURST_LIMIT` is unset / 0) disables it. The
+    /// throttle sees only admission bookkeeping (call_id, account_id,
+    /// timestamps) and fails OPEN on a store error — no E2EE / invariant impact.
+    pub(crate) throttle: throttle::ThrottleConfig,
 }
 
 #[tokio::main]
@@ -314,6 +330,23 @@ async fn main() -> Result<()> {
     // senders armed.
     let otp_sender: Arc<dyn otp_sender::OtpSender> = Arc::new(otp_sender::build_otp_sender());
 
+    // ADR-0033 — call-admission anti-spam throttle. Loaded from the environment;
+    // disabled by default (burst_limit 0 / unset).
+    let throttle_config = throttle::ThrottleConfig::from_env();
+    if throttle_config.enabled() {
+        tracing::info!(
+            burst_limit = throttle_config.burst_limit,
+            window_secs = throttle_config.window_secs,
+            guest_age_secs = throttle_config.guest_age_secs,
+            throttle_secs = throttle_config.throttle_secs,
+            "call-admission throttle enabled"
+        );
+    } else {
+        tracing::info!(
+            "call-admission throttle disabled (LAKKO_AUTH_CALL_ADMISSION_BURST_LIMIT unset / 0)"
+        );
+    }
+
     let state = AppState {
         db: pool.clone(),
         opaque_setup: Arc::new(opaque_setup),
@@ -327,6 +360,7 @@ async fn main() -> Result<()> {
         totp_enc_key: totp_enc_key.map(Arc::new),
         recovery_contact_pepper: recovery_contact_pepper.map(Arc::new),
         otp_sender,
+        throttle: throttle_config,
     };
 
     // Background tasks: periodically delete expired rows from the
@@ -335,6 +369,8 @@ async fn main() -> Result<()> {
     let _login_pruner = opaque::spawn_login_state_pruner(pool.clone());
     let _pow_pruner = pow::spawn_pruner(pool.clone());
     let _webauthn_pruner = webauthn::spawn_state_pruner(pool.clone());
+    // ADR-0033 — prune expired call-admission events + throttled-call rows.
+    let _throttle_pruner = throttle::spawn_pruner(pool.clone(), throttle_config);
 
     let app = build_app(state);
 
