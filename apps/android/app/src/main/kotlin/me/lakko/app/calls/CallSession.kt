@@ -89,6 +89,38 @@ public class CallSession(
 
     private var isOfferer: Boolean = false
 
+    // ---- Perfect-negotiation state (piece B2b: 1×1 mid-call camera-on) ----
+    // The 1×1 P2P path is SYMMETRIC, so glare (both peers renegotiating at
+    // once) is possible. Canonical perfect-negotiation: the OFFERER (caller) is
+    // the IMPOLITE peer, the ANSWERER (callee) is POLITE (`polite = !isOfferer`)
+    // — the polite peer yields on a collision. Unlike the browser (implicit
+    // rollback inside `setRemoteDescription`), native libwebrtc needs an
+    // EXPLICIT rollback ([WebRtcPeerConnection.rollbackLocalDescription]), so
+    // the polite peer rolls its own in-flight offer back before answering a
+    // colliding one. Every flag here is read / written only on [scope]
+    // (single-threaded), so no synchronisation is needed.
+    //
+    //   * makingOffer                  — our own reneg offer is in flight
+    //                                    (createOffer .. its answer arrives).
+    //   * isSettingRemoteAnswerPending — guards the reneg-answer apply window
+    //                                    (part of the glare `readyForOffer`
+    //                                    predicate, mirroring the web).
+    //   * negotiationReady             — false during the manual initial
+    //                                    offer/answer; armed once that exchange
+    //                                    lands, from when on a mid-call
+    //                                    renegotiation may fire.
+    //   * pendingRenegotiation         — a camera-on / rolled-back offer that
+    //                                    must be re-driven once the current
+    //                                    exchange settles (native has no
+    //                                    `onnegotiationneeded` auto re-fire).
+    private var makingOffer = false
+    private var isSettingRemoteAnswerPending = false
+    private var negotiationReady = false
+    private var pendingRenegotiation = false
+
+    /** In-flight guard for [addLocalVideo] (no double camera acquire). */
+    private var addingVideo = false
+
     /**
      * Stored remote SDP offer between `Ringing` →
      * `Connecting`. [acceptCall] reads it to build the
@@ -380,6 +412,122 @@ public class CallSession(
         mutableCameraEnabled.value = on
     }
 
+    /**
+     * ADR-0032 piece B2b — turn the camera ON mid-call when the 1×1 call
+     * started audio-only. Mirror of the web `CallSession.addLocalVideo`.
+     *
+     * When there is no video sender yet this ACQUIRES the camera (front /
+     * 720p / 30 via [CameraVideoCapture]), adds the track to the peer
+     * connection, arms SFrame on the NEW video sender, and drives a
+     * renegotiation offer directly ([driveRenegotiationOffer]).
+     *
+     * The native 1×1 path is SFrame-sealed (unlike the web 1×1, which is
+     * plain DTLS-SRTP): [attachSFrame] arms an encryptor on every sender at
+     * connect using the [setCallKey] seed. The mid-call video sender must be
+     * sealed the SAME way, or (a) the peer's SFrame decryptor cannot open the
+     * video, and (b) an unsealed m-line would leak plaintext media — a break
+     * of invariant #4. So this arms the video sender with the same
+     * `callKeySeed` + `localLeaf` [attachSFrame] uses. Idempotent +
+     * re-entrant-safe:
+     *   * a live video sender already exists (a video call, or a prior
+     *     addLocalVideo) -> just re-enable its track; no capture, no reneg;
+     *   * a capture is already in flight ([addingVideo]) -> no-op.
+     *
+     * Fail-closed (invariant #4): on a no-camera / capture failure, or if the
+     * SFrame keying material is unavailable, or the SFrame arm on the new
+     * video sender fails, the just-added sender (if any) is removed and the
+     * capture torn down — NEVER a half-added, plaintext video m-line — and it
+     * THROWS, so the caller reverts the camera toggle; the call stays up
+     * audio-only. Because the UI's camera state is driven from
+     * [cameraEnabled], the flag is only flipped true on success, so a failure
+     * leaves the button reverted automatically.
+     *
+     * Runs on [scope]'s dispatcher via the caller's coroutine; the
+     * perfect-negotiation flags it touches need no synchronisation.
+     *
+     * @throws WebRtcException on a no-camera / capture / SFrame-arm failure.
+     */
+    public suspend fun addLocalVideo() {
+        val connection = rtc ?: return
+        // 1. A live video sender already exists -> just re-enable it. No
+        //    capture, no renegotiation (the track was negotiated already, and
+        //    its SFrame encryptor is still armed).
+        if (connection.hasLiveLocalVideoSender()) {
+            connection.setCameraEnabled(true)
+            mutableLocalVideoTrack.value = connection.currentLocalVideoTrack()
+            mutableCameraEnabled.value = true
+            return
+        }
+        // 2. A capture is already in flight -> do not double-acquire.
+        if (addingVideo) return
+        // No SFrame keying -> cannot seal the video, so cannot publish it
+        // (invariant #4). The 1×1 call already refused at dial/accept if the
+        // seed was unset, so this is defence-in-depth; throw so the toggle
+        // reverts.
+        val seed = callKeySeed
+        val leaf = localLeaf
+        if (seed == null || leaf == null ||
+            !me.lakko.sframe.SFrameAvailability.isCallingAvailable
+        ) {
+            throw WebRtcException(
+                "SFrame keying unavailable — refusing mid-call video (invariant #4)",
+            )
+        }
+        addingVideo = true
+        try {
+            // 3. Capture the camera. On any failure -> throw; no sender has
+            //    been added yet, so there is nothing half-added to clean up.
+            if (!CameraVideoCapture.hasUsableCamera(applicationContext)) {
+                throw WebRtcException("no camera available")
+            }
+            val source = WebRtcPeerConnection.newVideoSource(applicationContext)
+            val eglContext = WebRtcPeerConnection.sharedEglContext()
+            if (source == null || eglContext == null) {
+                throw WebRtcException("could not create a video source")
+            }
+            val capture = CameraVideoCapture.create(applicationContext, source, eglContext)
+                ?: throw WebRtcException("could not create the camera capture")
+            try {
+                capture.start()
+            } catch (cause: CameraVideoCapture.CaptureError) {
+                capture.dispose()
+                throw WebRtcException("camera start failed: ${cause.message}")
+            }
+
+            // 4. Re-read the pc AFTER the (blocking) capture start — a teardown
+            //    may have interleaved. If it went away, abandon cleanly.
+            val connection2 = rtc
+            if (connection2 == null) {
+                capture.stop()
+                capture.dispose()
+                return
+            }
+
+            // 5. Add the video track, then arm SFrame on ONLY the NEW video
+            //    sender (the audio encryptor from attachSFrame is left
+            //    untouched). Fail-closed: if the arm fails, remove the
+            //    just-added sender + tear the capture down so a plaintext
+            //    m-line is NEVER offered to the peer (invariant #4) — the call
+            //    stays audio-only. Mirrors the SFU publishVideo path.
+            connection2.addLocalVideoTrack(source)
+            if (!connection2.armSFrameEncryptorForVideoSender(seed, leaf)) {
+                connection2.removeLocalVideoTrack()
+                capture.stop()
+                capture.dispose()
+                throw WebRtcException("SFrame arm on the video sender failed (invariant #4)")
+            }
+            localCameraCapture = capture
+            mutableLocalVideoTrack.value = connection2.currentLocalVideoTrack()
+            mutableCameraEnabled.value = true
+
+            // 6. Renegotiate so the peer learns about the new (sealed) video
+            //    m-line.
+            driveRenegotiationOffer()
+        } finally {
+            addingVideo = false
+        }
+    }
+
     /** Outbound or active call teardown. */
     public fun hangUp(reason: WebCallEndReason = WebCallEndReason.HungUp) {
         endLocal(reason)
@@ -441,6 +589,12 @@ public class CallSession(
                     ),
                 )
                 onOutboundSignaling(bytes)
+                // ADR-0032 piece B2b — the initial answer is sent + our local
+                // description is set, so the initial negotiation is applied on
+                // our side: arm renegotiation for a future mid-call camera-on,
+                // and drive one that queued before this point.
+                negotiationReady = true
+                if (pendingRenegotiation) driveRenegotiationOffer()
                 // Don't synthesise Connected here — wait for
                 // the real PeerConnection state transition.
             } catch (cause: Throwable) {
@@ -465,22 +619,45 @@ public class CallSession(
     public fun applyIncomingSignaling(body: FfiCallSignalingBody) {
         when (body) {
             is FfiCallSignalingBody.Offer -> {
-                if (mutableState.value != WebCallState.Idle) return
-                isOfferer = false
-                pendingRemoteOfferSdp = body.sdp
-                mutableState.value = WebCallState.Ringing
+                if (mutableState.value == WebCallState.Idle) {
+                    // Fresh inbound call — we're the answerer. Store the offer
+                    // + ring; the PeerConnection is built later in [acceptCall].
+                    isOfferer = false
+                    pendingRemoteOfferSdp = body.sdp
+                    mutableState.value = WebCallState.Ringing
+                } else {
+                    // ADR-0032 piece B2b — a mid-call renegotiation offer (the
+                    // peer turned their camera on). NOT a fresh call: apply it
+                    // with the perfect-negotiation glare guard + explicit
+                    // rollback, keeping the call up. `rtc == null` (answerer
+                    // still Ringing, no PC yet) drops it.
+                    if (this.rtc == null) return
+                    scope.launch { applyRenegotiationOffer(body.sdp) }
+                }
             }
             is FfiCallSignalingBody.Answer -> {
-                if (mutableState.value != WebCallState.Outgoing) return
-                mutableState.value = WebCallState.Connecting
                 val rtc = this.rtc ?: return
-                scope.launch {
-                    try {
-                        rtc.applyRemoteAnswer(body.sdp)
-                    } catch (cause: Throwable) {
-                        android.util.Log.w("CallSession", "applyRemoteAnswer failed", cause)
-                        endLocal(WebCallEndReason.Error)
+                if (mutableState.value == WebCallState.Outgoing) {
+                    // Initial answer to our dial.
+                    mutableState.value = WebCallState.Connecting
+                    scope.launch {
+                        try {
+                            rtc.applyRemoteAnswer(body.sdp)
+                            // ADR-0032 piece B2b — arm renegotiation for future
+                            // local track changes; drive a camera-on that was
+                            // queued before the initial answer landed.
+                            negotiationReady = true
+                            if (pendingRenegotiation) driveRenegotiationOffer()
+                        } catch (cause: Throwable) {
+                            android.util.Log.w("CallSession", "applyRemoteAnswer failed", cause)
+                            endLocal(WebCallEndReason.Error)
+                        }
                     }
+                } else {
+                    // ADR-0032 piece B2b — a mid-call renegotiation answer (to a
+                    // reneg offer WE sent). Plain apply, guarded by
+                    // [isSettingRemoteAnswerPending] for the glare predicate.
+                    scope.launch { applyRenegotiationAnswer(rtc, body.sdp) }
                 }
             }
             is FfiCallSignalingBody.IceCandidate -> {
@@ -573,6 +750,21 @@ public class CallSession(
                     // dispatcher before touching the StateFlow.
                     scope.launch { mutableRemoteVideoTrack.value = track }
                 },
+                onRemoteReceiver = { receiver, _ ->
+                    // The native 1×1 media is SFrame-sealed on the send side
+                    // (attachSFrame -> armSFrameEncryptors), so the receive
+                    // side must arm a decryptor on EVERY incoming track — the
+                    // peer's audio at connect AND the peer's video if they turn
+                    // their camera on mid-call (ADR-0032 piece B2b). Without
+                    // this the sealed frames never open. Synchronous (not
+                    // hopped to [scope]) so the first frames are not dropped
+                    // while a dispatch is pending; `callKeySeed` is set via
+                    // [setCallKey] before dial/accept, so it is non-null before
+                    // any track can arrive. Best-effort like the SFU path — a
+                    // failed arm affects media availability, not the fail-closed
+                    // send gate.
+                    callKeySeed?.let { seed -> rtc.armSFrameDecryptor(receiver, seed) }
+                },
             )
         )
     }
@@ -631,6 +823,115 @@ public class CallSession(
             PeerConnection.PeerConnectionState.CONNECTING,
             -> Unit
         }
+    }
+
+    // ----------------------------------------------------------------
+    // Internal — perfect negotiation (ADR-0032 piece B2b, 1×1 camera-on)
+    // ----------------------------------------------------------------
+
+    /**
+     * Drive a mid-call renegotiation offer (the offerer role of perfect
+     * negotiation). Mirror of the web `onNegotiationNeeded`. Gated so it only
+     * fires once the initial exchange has landed ([negotiationReady]), never
+     * overlaps an in-flight offer ([makingOffer]), and only while the SDP state
+     * is `STABLE`. If it is not ready it marks [pendingRenegotiation] and
+     * returns — the [applyRenegotiationOffer] / [applyRenegotiationAnswer] tail
+     * re-drives it once the call settles (native has no `onnegotiationneeded`
+     * auto re-fire). [makingOffer] stays set until the reneg answer arrives.
+     */
+    private suspend fun driveRenegotiationOffer() {
+        val connection = rtc ?: return
+        if (!negotiationReady ||
+            makingOffer ||
+            connection.signalingState() != PeerConnection.SignalingState.STABLE
+        ) {
+            pendingRenegotiation = true
+            return
+        }
+        pendingRenegotiation = false
+        makingOffer = true
+        try {
+            val offerSdp = connection.createRenegotiationOffer()
+            val bytes = composeCallSignaling(
+                FfiCallSignalingBody.Offer(
+                    callId = callId,
+                    sdp = offerSdp,
+                    createdAtMs = System.currentTimeMillis().toULong(),
+                    media = FfiCallMediaFlags(audio = true, video = true),
+                ),
+            )
+            onOutboundSignaling(bytes)
+            // makingOffer stays true until applyRenegotiationAnswer clears it.
+        } catch (cause: Throwable) {
+            makingOffer = false
+            android.util.Log.w("CallSession", "renegotiation offer failed", cause)
+            // A failed renegotiation leaves the call up as-is; the local
+            // self-preview is already live.
+        }
+    }
+
+    /**
+     * Apply a mid-call renegotiation offer from the peer (the answerer role of
+     * perfect negotiation). Mirror of the web `applyRenegotiationOffer`.
+     *
+     * Canonical glare guard: the OFFERER (caller) is IMPOLITE, the ANSWERER
+     * (callee) is POLITE (`polite = !isOfferer`). An impolite peer DROPS a
+     * colliding offer; a polite peer YIELDS — it rolls its own in-flight offer
+     * back (native has no implicit rollback) and answers. Only rolls back when
+     * the SDP state is not `STABLE` (i.e. it actually holds a local offer);
+     * calling rollback in `stable` is a libwebrtc error. If it rolled back its
+     * own offer, that offer is re-driven after this answer settles
+     * ([pendingRenegotiation]).
+     */
+    private suspend fun applyRenegotiationOffer(sdp: String) {
+        val connection = rtc ?: return
+        val polite = !isOfferer
+        val stable = connection.signalingState() == PeerConnection.SignalingState.STABLE
+        val readyForOffer = !makingOffer && (stable || isSettingRemoteAnswerPending)
+        val ignoreOffer = !polite && !readyForOffer
+        if (ignoreOffer) return
+        try {
+            if (!stable) {
+                // Polite peer yields: discard our own in-flight offer, then
+                // apply the peer's. Re-drive ours once this answer settles.
+                connection.rollbackLocalDescription()
+                makingOffer = false
+                pendingRenegotiation = true
+            }
+            // createAnswer sets the remote offer, builds + sets the answer.
+            val answerSdp = connection.createAnswer(sdp)
+            val bytes = composeCallSignaling(
+                FfiCallSignalingBody.Answer(callId = callId, sdp = answerSdp),
+            )
+            onOutboundSignaling(bytes)
+        } catch (cause: Throwable) {
+            android.util.Log.w("CallSession", "renegotiation offer apply failed", cause)
+            return
+        }
+        if (pendingRenegotiation) driveRenegotiationOffer()
+    }
+
+    /**
+     * Apply a mid-call renegotiation answer (to a reneg offer WE sent). Mirror
+     * of the web `applyIncomingSignaling` "answer" reneg branch:
+     * [isSettingRemoteAnswerPending] brackets `setRemoteDescription` (it feeds
+     * the glare `readyForOffer` predicate), then [makingOffer] clears + any
+     * queued renegotiation is re-driven.
+     */
+    private suspend fun applyRenegotiationAnswer(
+        connection: WebRtcPeerConnection,
+        sdp: String,
+    ) {
+        try {
+            isSettingRemoteAnswerPending = true
+            connection.applyRemoteAnswer(sdp)
+            isSettingRemoteAnswerPending = false
+        } catch (cause: Throwable) {
+            isSettingRemoteAnswerPending = false
+            android.util.Log.w("CallSession", "renegotiation answer apply failed", cause)
+        }
+        makingOffer = false
+        if (pendingRenegotiation) driveRenegotiationOffer()
     }
 
     private fun endLocal(reason: WebCallEndReason) {
@@ -698,6 +999,13 @@ public class CallSession(
         mutableDownBps.value = null
         mutableUpBps.value = null
         prevStatsBytes = null
+        // ADR-0032 piece B2b — reset perfect-negotiation state so a late
+        // callback after teardown starts clean.
+        makingOffer = false
+        isSettingRemoteAnswerPending = false
+        negotiationReady = false
+        pendingRenegotiation = false
+        addingVideo = false
     }
 
     /** G3-2-conn-quality — start the connection-stats poll loop

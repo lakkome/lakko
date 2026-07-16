@@ -29,7 +29,8 @@ Phase ordering is monotonically forward; the only backward-looking edges are the
 - **Outgoing + `LocalOfferReady`** → emits `SendOffer` (state stays `Outgoing`).
 - **Outgoing + `RemoteAnswered`** → `Connecting`, emits `ApplyRemoteDescription`.
 - **Outgoing + `IceCandidate`** → emits `SendIceCandidate` (local candidate trickles out).
-- **Outgoing + `LocalEnds` / `RemoteEnded`** → `Ended` directly (no `Ending` hop, since no media is up yet).
+- **Outgoing + `LocalEnds`** → `Ended` directly (no `Ending` hop, no media up yet), emits `SendEnd` + `NotifyEnded`.
+- **Outgoing + `RemoteEnded`** → `Ended` directly, emits a single `NotifyEnded` (peer already gone, nothing to send). Pinned by `remote_end_during_outgoing_emits_single_notify` / `local_end_during_outgoing_sends_then_notifies`.
 - **Ringing + `LocalAccepts`** → emits `HideRinger`, **stays `Ringing`** until `LocalAnswerReady` supplies the SDP the platform minted.
 - **Ringing + `LocalAnswerReady`** → `Connecting`, emits `SendAnswer`.
 - **Ringing + `LocalDeclines`** → `Ended`, emits `HideRinger` + `SendEnd(Declined)` + `NotifyEnded(Declined)`.
@@ -71,8 +72,9 @@ This module consumes events that a platform dispatcher synthesises from wire `Si
 
 ## Notable code observations (findings)
 
-- **Duplicate `NotifyEnded` on the Outgoing `RemoteEnded` path.** In the `(Outgoing, LocalEnds | RemoteEnded)` arm, the `else` branch emits `NotifyEnded` and the arm then unconditionally appends a second `NotifyEnded`. For `RemoteEnded` this produces `[NotifyEnded, NotifyEnded]` (the same reason twice); for `LocalEnds` it correctly produces `[SendEnd, NotifyEnded]`. The duplicate is benign if the UI notify is idempotent, but it is an inconsistency a reviewer should note — no test asserts the exact length/contents of this Outgoing-teardown vec.
 - **Teardown asymmetry.** `LocalEnds` from `Outgoing` goes straight to `Ended`, whereas from `Ringing`/`Connecting`/`Connected` it goes to the intermediate `Ending` state first. Deliberate (no media handshake to drain pre-connect), but the two teardown shapes differ.
+
+(A previously-noted duplicate `NotifyEnded` on the Outgoing `RemoteEnded` path was fixed: the combined `(Outgoing, LocalEnds | RemoteEnded)` arm was split into two arms, so `RemoteEnded` now emits a single `NotifyEnded`. Regression-pinned by the two tests named in the state-transition list above.)
 
 ## References
 

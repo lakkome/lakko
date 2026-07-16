@@ -660,6 +660,32 @@ public class WebRtcPeerConnection(
         setRemoteDescriptionSuspend(peer, remoteAnswer)
     }
 
+    /**
+     * ADR-0032 piece B2b — explicitly roll back the pending local
+     * description (`SessionDescription.Type.ROLLBACK`).
+     *
+     * The 1×1 P2P renegotiation path is SYMMETRIC, so a glare collision (both
+     * peers renegotiating at once) is possible. Canonical perfect-negotiation
+     * has the POLITE peer yield: it discards its own in-flight offer, applies
+     * the peer's offer, and answers. Unlike the browser — where
+     * `setRemoteDescription({type:"offer"})` performs an IMPLICIT rollback —
+     * native libwebrtc has no implicit rollback, so the caller must roll back
+     * explicitly before applying the colliding remote offer.
+     *
+     * Only valid while the peer holds a local offer (`have-local-offer`);
+     * calling it in the `stable` state is a libwebrtc error, so the caller
+     * ([CallSession.applyRenegotiationOffer]) guards on the signaling state.
+     * Throws [WebRtcException] on failure.
+     *
+     * (The SFU session takes a different tack — it SERIALIZES its own offer to
+     * completion before applying any SFU offer, so it never needs a rollback.
+     * The symmetric 1×1 glare is why this path does.)
+     */
+    public suspend fun rollbackLocalDescription() {
+        val peer = peer ?: throw WebRtcException("PeerConnection is not allocated")
+        setLocalDescriptionSuspend(peer, SessionDescription(SessionDescription.Type.ROLLBACK, ""))
+    }
+
     // ----------------------------------------------------------------
     // ICE
     // ----------------------------------------------------------------

@@ -57,6 +57,25 @@ public final class CallSession: ObservableObject {
     private let onOutboundSignaling: (Data) -> Void
     private var isOfferer = false
 
+    /// Perfect-negotiation state (mid-call 1×1 add-track, piece
+    /// B2b — the web `call-session.ts` mirror). The OFFERER
+    /// (caller) is the impolite peer, the ANSWERER (callee) is
+    /// polite (`polite = !isOfferer`). `negotiationReady` gates
+    /// the mid-call renegotiation drive off until the initial
+    /// offer/answer has been applied (it flips true after the
+    /// initial answer on the offerer side / after the initial
+    /// answer is sent on the answerer side), so the manual
+    /// initial exchange is never duplicated. `makingOffer` is
+    /// true only while a local renegotiation offer is being
+    /// built + shipped; `isSettingRemoteAnswerPending` bridges
+    /// the window while a mid-call answer is being applied — both
+    /// feed the glare guard in `applyRenegotiationOffer`.
+    /// `addingVideo` is the in-flight guard for `addLocalVideo`.
+    private var makingOffer = false
+    private var isSettingRemoteAnswerPending = false
+    private var negotiationReady = false
+    private var addingVideo = false
+
     /// Stored remote SDP offer between `.ringing` → `.connecting`.
     /// `acceptCall` reads it to build the answer.
     private var pendingRemoteOfferSdp: String?
@@ -413,6 +432,110 @@ public final class CallSession: ObservableObject {
         cameraEnabled = on
     }
 
+    /// Turn the camera ON mid-call (piece B2b) when the 1×1 call
+    /// started audio-only. Mirror of the web
+    /// `CallSession.addLocalVideo`.
+    ///
+    /// Re-enables an existing live video sender (a call that
+    /// started as video, or a prior `addLocalVideo`) — no capture,
+    /// no renegotiation; else captures the front camera (720p/30),
+    /// adds the track, SFrame-seals the new video sender, and drives
+    /// a renegotiation offer directly (like the SFU mirror — NOT via
+    /// a negotiation-needed callback). The 1×1 media IS SFrame-sealed
+    /// (the audio sender is armed at connect via `attachSFrame`), so
+    /// the mid-call video sender must be sealed with the SAME per-call
+    /// seed + leaf, or the peer's decryptors — which expect it sealed
+    /// — would fail. Only the NEW video sender is armed
+    /// (`armSFrameVideoEncryptor`); re-running the full
+    /// `armSFrameEncryptors` would reset the audio encryptor's counter
+    /// (nonce reuse).
+    ///
+    /// Idempotent + in-flight-guarded, so a redundant reactive tick
+    /// is a cheap no-op. Fail-closed (invariant #4): on a no-camera /
+    /// camera-start failure — OR when the SFrame arm cannot complete
+    /// (missing seed/leaf, calling unavailable, or the attach fails)
+    /// — the just-added video sender is removed, the capture is torn
+    /// down, the local-video state is reset, and it throws BEFORE any
+    /// renegotiation, so an UNSEALED video m-line is never offered to
+    /// the peer. The caller reverts the toggle + surfaces a message;
+    /// the call stays up audio-only.
+    ///
+    /// - Throws: ``CallSessionError/noCamera`` when the host has no
+    ///   camera, ``CallSessionError/sframeUnavailable`` when the
+    ///   video sender cannot be SFrame-sealed, or the underlying
+    ///   `LocalCameraCapture.start` error on a camera-start failure.
+    public func addLocalVideo() async throws {
+        guard let rtc = rtc else { return }
+        // A live video sender already exists — just re-enable it.
+        if rtc.currentLocalVideoTrack() != nil {
+            rtc.setCameraEnabled(true)
+            cameraEnabled = true
+            return
+        }
+        if addingVideo { return } // capture in flight — do not double-acquire
+        addingVideo = true
+
+        // Acquire the camera FIRST, before adding any track, so a
+        // capture failure never leaves a half-added sender on the
+        // peer connection.
+        guard LocalCameraCapture.hasUsableCamera() else {
+            addingVideo = false
+            throw CallSessionError.noCamera
+        }
+        let source = WebRTCPeerConnection.newVideoSource()
+        guard let capture = LocalCameraCapture(source: source) else {
+            addingVideo = false
+            throw CallSessionError.noCamera
+        }
+        do {
+            try await capture.start()
+        } catch {
+            addingVideo = false
+            throw error
+        }
+
+        // Re-read the pod AFTER the async capture — the call may
+        // have ended while the camera was starting.
+        guard let liveRtc = self.rtc else {
+            await capture.stop()
+            addingVideo = false
+            return
+        }
+        liveRtc.addLocalVideoTrack(source)
+        // Seal the mid-call video sender with SFrame using the SAME
+        // per-call seed + leaf the audio sender was armed with at
+        // connect (invariant #4). Fail-closed: on any inability to
+        // seal, remove the sender + tear the capture down + reset
+        // state + throw BEFORE renegotiating, so an unsealed video
+        // m-line never reaches the peer. Mirrors the SFU
+        // `publishVideo` fail-closed arm.
+        let sealed: Bool
+        if let seed = callKeySeed, let leaf = localLeaf,
+            SFrameAvailability.shared.isCallingAvailable {
+            sealed = liveRtc.armSFrameVideoEncryptor(seed: seed, localLeaf: leaf)
+        } else {
+            sealed = false
+        }
+        guard sealed else {
+            liveRtc.removeLocalVideoTrack()
+            await capture.stop()
+            self.localCameraCapture = nil
+            self.localVideoTrack = nil
+            self.cameraEnabled = false
+            addingVideo = false
+            throw CallSessionError.sframeUnavailable
+        }
+        self.localCameraCapture = capture
+        self.localVideoTrack = liveRtc.currentLocalVideoTrack()
+        // The camera is now live; the in-call toggle + the local
+        // tile reflect this via the published `cameraEnabled` /
+        // `localVideoTrack` (mapped in `CallUiState.driveFrom`).
+        self.cameraEnabled = true
+        addingVideo = false
+        // Renegotiate so the peer learns the new (sealed) video m-line.
+        await driveRenegotiationOffer(rtc: liveRtc)
+    }
+
     /// Outbound side: tear down a call we initiated or
     /// inbound side: tear down an active call.
     public func hangUp(reason: WebCallEndReason = .hungUp) {
@@ -502,6 +625,10 @@ public final class CallSession: ObservableObject {
                 )
             )
             onOutboundSignaling(bytes)
+            // Arm the mid-call renegotiation drive (B2b): the initial
+            // answer is sent + our local description is set, so the
+            // initial negotiation is applied on the answerer side.
+            negotiationReady = true
             // Don't synthesise `.connected` here — wait for
             // the RTCPeerConnection's real connectionState
             // transition. The delegate hook below drives it.
@@ -525,26 +652,61 @@ public final class CallSession: ObservableObject {
     public func applyIncomingSignaling(_ body: FfiCallSignalingBody) {
         switch body {
         case .offer(let cid, let sdp, _, _):
-            guard cid == callId, state == .idle else { return }
-            isOfferer = false
-            pendingRemoteOfferSdp = sdp
-            state = .ringing
+            guard cid == callId else { return }
+            if state == .idle {
+                // Fresh inbound call — we're the answerer.
+                isOfferer = false
+                pendingRemoteOfferSdp = sdp
+                state = .ringing
+                return
+            }
+            // Mid-call renegotiation offer (the peer turned its
+            // camera on, piece B2b) — NOT a fresh call. Apply with
+            // the perfect-negotiation glare guard + answer, keeping
+            // the call up. Only meaningful once the live peer
+            // connection exists (an active call).
+            guard rtc != nil, state == .connecting || state == .connected else {
+                return
+            }
+            Task { [weak self] in await self?.applyRenegotiationOffer(sdp) }
         case .answer(let cid, let sdp):
-            guard cid == callId, state == .outgoing else { return }
-            state = .connecting
-            // Apply the remote answer asynchronously; the
-            // real `.connected` transition fires from the
-            // RTCPeerConnection state delegate.
+            guard cid == callId else { return }
             guard let rtc = rtc else { return }
-            Task { [weak self] in
-                do {
-                    try await rtc.applyRemoteAnswer(sdp)
-                } catch {
-                    NSLog(
-                        "applyRemoteAnswer failed: %@",
-                        String(describing: error)
-                    )
-                    self?.endLocal(reason: .error)
+            if state == .outgoing {
+                // Initial answer to our dial. Apply the remote
+                // answer asynchronously; the real `.connected`
+                // transition fires from the RTCPeerConnection state
+                // delegate.
+                state = .connecting
+                Task { [weak self] in
+                    do {
+                        try await rtc.applyRemoteAnswer(sdp)
+                        // Arm the mid-call renegotiation drive now the
+                        // initial exchange is applied on our side (B2b).
+                        self?.negotiationReady = true
+                    } catch {
+                        NSLog(
+                            "applyRemoteAnswer failed: %@",
+                            String(describing: error)
+                        )
+                        self?.endLocal(reason: .error)
+                    }
+                }
+            } else {
+                // Mid-call renegotiation answer (to a reneg offer we
+                // sent). `isSettingRemoteAnswerPending` bridges the
+                // apply window for the glare guard.
+                Task { [weak self] in
+                    self?.isSettingRemoteAnswerPending = true
+                    do {
+                        try await rtc.applyRemoteAnswer(sdp)
+                    } catch {
+                        NSLog(
+                            "reneg applyRemoteAnswer failed: %@",
+                            String(describing: error)
+                        )
+                    }
+                    self?.isSettingRemoteAnswerPending = false
                 }
             }
         case .iceCandidate(let cid, let candidate, let sdpMid, let sdpMLineIndex):
@@ -605,6 +767,78 @@ public final class CallSession: ObservableObject {
         state = .done
     }
 
+    /// Drive a client-initiated renegotiation offer (piece B2b: a
+    /// camera track was added mid-call by `addLocalVideo`). Mirror
+    /// of the web `onNegotiationNeeded`: only start an offer from a
+    /// clean `.stable` state with no in-flight offer, and only
+    /// after the initial exchange (`negotiationReady`). The common
+    /// audio-only-then-add-video case is always `.stable`, so it is
+    /// covered; a rare simultaneous glare is resolved by the peer's
+    /// polite rollback in `applyRenegotiationOffer`. `makingOffer`
+    /// is true only while the offer is built + shipped (MDN
+    /// perfect-negotiation shape); the pending video m-line then
+    /// lives in the `have-local-offer` signaling state until the
+    /// answer drains it.
+    private func driveRenegotiationOffer(rtc: WebRTCPeerConnection) async {
+        guard negotiationReady, !makingOffer,
+            rtc.signalingState == .stable else { return }
+        makingOffer = true
+        do {
+            let offerSdp = try await rtc.createRenegotiationOffer()
+            let bytes = try composeCallSignaling(
+                body: .offer(
+                    callId: callId,
+                    sdp: offerSdp,
+                    createdAtMs: UInt64(Date().timeIntervalSince1970 * 1000),
+                    media: FfiCallMediaFlags(audio: dialAudio, video: true)
+                )
+            )
+            onOutboundSignaling(bytes)
+        } catch {
+            NSLog(
+                "driveRenegotiationOffer failed: %@",
+                String(describing: error)
+            )
+        }
+        makingOffer = false
+    }
+
+    /// Apply a mid-call renegotiation offer from the peer (piece
+    /// B2b — the peer turned its camera on). Canonical perfect-
+    /// negotiation glare guard: the OFFERER (caller) is impolite,
+    /// the ANSWERER (callee) is polite (`polite = !isOfferer`). On
+    /// a collision an impolite peer DROPS the offer; a polite peer
+    /// YIELDS — since native WebRTC has no implicit rollback (unlike
+    /// the browser), it rolls its own in-flight offer back to
+    /// `.stable` explicitly, then applies + answers the remote
+    /// offer.
+    private func applyRenegotiationOffer(_ sdp: String) async {
+        guard let rtc = rtc else { return }
+        let polite = !isOfferer
+        let readyForOffer = !makingOffer
+            && (rtc.signalingState == .stable || isSettingRemoteAnswerPending)
+        let ignoreOffer = !polite && !readyForOffer
+        if ignoreOffer { return }
+        do {
+            // Explicit rollback of our own in-flight offer (glare):
+            // `createAnswer` sets the remote offer, which is illegal
+            // from `have-local-offer` — roll back to `.stable` first.
+            if rtc.signalingState != .stable {
+                try await rtc.rollbackLocalDescription()
+            }
+            let answerSdp = try await rtc.createAnswer(remoteOfferSdp: sdp)
+            let bytes = try composeCallSignaling(
+                body: .answer(callId: callId, sdp: answerSdp)
+            )
+            onOutboundSignaling(bytes)
+        } catch {
+            NSLog(
+                "applyRenegotiationOffer failed: %@",
+                String(describing: error)
+            )
+        }
+    }
+
     /// G3-1-video-ui — common teardown for the WebRTC pod
     /// + camera capture. Called from both `endLocal` and
     /// `endRemote` so a hung-up or remote-end-of-call
@@ -637,6 +871,12 @@ public final class CallSession: ObservableObject {
         self.downBps = nil
         self.upBps = nil
         self.prevStatsBytes = nil
+        // Reset perfect-negotiation state (B2b) so a late
+        // renegotiation tick after teardown no-ops.
+        self.negotiationReady = false
+        self.makingOffer = false
+        self.isSettingRemoteAnswerPending = false
+        self.addingVideo = false
     }
 
     /// G3-1-conn-quality — start the connection-stats poll loop
@@ -706,6 +946,21 @@ public final class CallSession: ObservableObject {
                 // path will key on it to map the track to a
                 // specific participant leaf.
                 self?.remoteVideoTrack = track
+            },
+            onRemoteReceiver: { [weak self] receiver, _ in
+                // Arm the SFrame decryptor on EVERY incoming track
+                // (audio + video) using the per-call seed injected via
+                // `setCallKey` — the 1×1 media is SFrame-sealed
+                // (invariant #4), so the receive side must open what the
+                // peer's encryptors sealed. Fires for the initial audio
+                // (+ any initial video) track at connect AND for a
+                // mid-call video track the peer adds (piece B2b), so the
+                // peer's mid-call camera-on decrypts without extra
+                // wiring. A nil seed (setCallKey never ran → the call
+                // refuses at attach) is a safe skip.
+                guard let self, let rtc = self.rtc,
+                    let seed = self.callKeySeed else { return }
+                _ = rtc.armSFrameDecryptor(for: receiver, seed: seed)
             }
         ))
     }
@@ -791,6 +1046,33 @@ public final class CallSession: ObservableObject {
         case .declined: return .declined
         case .timedOut: return .timedOut
         case .error: return .error
+        }
+    }
+}
+
+// MARK: - Errors
+
+/// Errors the 1×1 `CallSession` surfaces to the caller (mid-call
+/// camera-on, piece B2b). A camera-start failure rethrows the
+/// underlying `LocalCameraCapture.CaptureError` instead.
+public enum CallSessionError: Error, CustomStringConvertible {
+    /// The host has no usable camera (gate on
+    /// `LocalCameraCapture.hasUsableCamera()` before calling
+    /// `addLocalVideo`).
+    case noCamera
+    /// The mid-call video sender could not be SFrame-sealed
+    /// (missing per-call seed / leaf, calling unavailable, or the
+    /// attach failed). Fail-closed per invariant #4 — the call
+    /// stays up audio-only rather than offering an unsealed video
+    /// m-line.
+    case sframeUnavailable
+
+    public var description: String {
+        switch self {
+        case .noCamera:
+            return "No camera is available on this device"
+        case .sframeUnavailable:
+            return "The camera could not be end-to-end encrypted"
         }
     }
 }

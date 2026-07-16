@@ -56,7 +56,7 @@ Proto-encoded `CallSignalingPayload { body: oneof }`; this module never hand-rol
 
 `parse_signaling_payload` runs on bytes that arrive as `Incoming::Application` from the zero-trust DS journal after MLS decrypt/auth — so the sender is an authenticated group member, but a **malicious or compromised member can craft arbitrary payload bytes** for a call in a shared chat group. The bound is: parse must stay panic-free and reject malformed input as a typed `Error`, which C-14 (length) and the prost decoder together provide. The forward-compat folds (C-13, missing-body) keep a hostile or stale payload from tearing down an unrelated call.
 
-**Gap (finding): this wire parser has no fuzz target.** Sibling parsers in the crate are fuzzed (`crates/lakko-calls/fuzz/fuzz_targets/header_decode.rs` covers `SframeHeader::decode`), but `parse_signaling_payload` is not among them. The hand-written surface is small (one length-checked fixed-array copy over a prost-decoded struct), so the residual risk is low, but the asymmetry is worth closing.
+Fuzzed by `crates/lakko-calls/fuzz/fuzz_targets/signaling_payload_decode.rs` (asserts no-panic on arbitrary bytes + round-trip stability of every accepted body, which transitively exercises the 16-byte `call_id` invariant). The hand-written surface is small — one length-checked fixed-array copy over a prost-decoded struct plus the `MediaFlags`/`EndReason` folds.
 
 ## References
 

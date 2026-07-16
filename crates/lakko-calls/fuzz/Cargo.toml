@@ -30,3 +30,16 @@ path = "fuzz_targets/header_decode.rs"
 test = false
 doc = false
 bench = false
+
+# `parse_signaling_payload` decodes the plaintext call-signaling body that
+# falls out of an `Incoming::Application` frame. The bytes are E2EE-decrypted
+# but sender-crafted by any group member, so the prost decode + oneof gate +
+# 16-byte call_id length check + MediaFlags/EndReason mapping are all
+# attacker-touchable before any field is trusted.
+
+[[bin]]
+name = "signaling_payload_decode"
+path = "fuzz_targets/signaling_payload_decode.rs"
+test = false
+doc = false
+bench = false

@@ -415,6 +415,22 @@ public final class WebRTCPeerConnection: NSObject {
         localVideoTrack
     }
 
+    /// Remove the local video track + its sender from the peer
+    /// connection (mid-call add-video fail-closed cleanup, piece
+    /// B2b). Called when the SFrame arm on a just-added video
+    /// sender fails: the sender must not remain on the connection,
+    /// so a subsequent renegotiation can never advertise an
+    /// UNSEALED video m-line (invariant #4). Idempotent — a no-op
+    /// when there is no video sender.
+    public func removeLocalVideoTrack() {
+        guard let peer = peer else { return }
+        if let sender = localVideoSender {
+            _ = peer.removeTrack(sender)
+        }
+        localVideoSender = nil
+        localVideoTrack = nil
+    }
+
     // MARK: - SFrame (G3-sframe-native N-4)
 
     /// Arm SFrame for every outgoing RTCRtpSender on this peer.
@@ -694,6 +710,33 @@ public final class WebRTCPeerConnection: NSObject {
         let remoteAnswer = RTCSessionDescription(type: .answer, sdp: remoteAnswerSdp)
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
             peer.setRemoteDescription(remoteAnswer) { err in
+                if let err = err {
+                    cont.resume(throwing: err)
+                } else {
+                    cont.resume()
+                }
+            }
+        }
+    }
+
+    /// Explicit SDP rollback for the 1×1 P2P perfect-negotiation
+    /// glare path (piece B2b). Native WebRTC has NO implicit
+    /// rollback on `setRemoteDescription` (unlike the browser,
+    /// where a colliding renegotiation offer is rolled back
+    /// transparently). The POLITE peer (the answerer) drives it
+    /// explicitly: when a mid-call renegotiation offer arrives
+    /// while it has an offer of its own in flight, it rolls its
+    /// local offer back to `.stable`, then applies + answers the
+    /// remote offer. The SFU mirror (`createRenegotiationOffer`)
+    /// does NOT need this — it serialises offers so glare can't
+    /// occur — but 1×1 glare is symmetric, so rollback is required.
+    public func rollbackLocalDescription() async throws {
+        guard let peer = peer else {
+            throw WebRTCError.peerUnavailable
+        }
+        let rollback = RTCSessionDescription(type: .rollback, sdp: "")
+        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+            peer.setLocalDescription(rollback) { err in
                 if let err = err {
                     cont.resume(throwing: err)
                 } else {

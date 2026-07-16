@@ -330,16 +330,19 @@ impl CallSession {
                 // `onicecandidate` callback.
                 vec![Transition::SendIceCandidate(c.clone())]
             },
-            (CallState::Outgoing, Event::LocalEnds { reason } | Event::RemoteEnded { reason }) => {
+            (CallState::Outgoing, Event::LocalEnds { reason }) => {
+                // Local hangup while dialing: tell the peer, then the UI.
                 self.state = CallState::Ended;
                 vec![
-                    if matches!(event, Event::LocalEnds { .. }) {
-                        Transition::SendEnd { reason: *reason }
-                    } else {
-                        Transition::NotifyEnded { reason: *reason }
-                    },
+                    Transition::SendEnd { reason: *reason },
                     Transition::NotifyEnded { reason: *reason },
                 ]
+            },
+            (CallState::Outgoing, Event::RemoteEnded { reason }) => {
+                // Peer ended (declined / hung up) while we were dialing:
+                // notify the UI exactly once, send nothing (the peer is gone).
+                self.state = CallState::Ended;
+                vec![Transition::NotifyEnded { reason: *reason }]
             },
 
             // ---------- Ringing (answerer waiting for local pickup) ----------
@@ -667,6 +670,59 @@ mod tests {
         assert!(t.is_empty());
         let t = s.on_event(Event::RemoteAnswered(answer_sdp()));
         assert!(t.is_empty());
+    }
+
+    #[test]
+    fn remote_end_during_outgoing_emits_single_notify() {
+        // Regression: the (Outgoing, RemoteEnded) arm previously emitted
+        // NotifyEnded TWICE. A remote end while dialing must notify the UI
+        // exactly once and send nothing on the wire (the peer already ended).
+        let mut s = CallSession::idle(fixture_call_id());
+        s.on_event(Event::LocalDials {
+            media: MediaKind::Audio,
+        });
+        assert_eq!(s.state, CallState::Outgoing);
+        let t = s.on_event(Event::RemoteEnded {
+            reason: EndReason::Declined,
+        });
+        assert!(
+            matches!(
+                t.as_slice(),
+                [Transition::NotifyEnded {
+                    reason: EndReason::Declined
+                }]
+            ),
+            "expected exactly one NotifyEnded, got {t:?}"
+        );
+        assert_eq!(s.state, CallState::Ended);
+    }
+
+    #[test]
+    fn local_end_during_outgoing_sends_then_notifies() {
+        // Sibling arm: a local hangup while dialing sends End on the wire
+        // then notifies the UI — exactly once each, in that order.
+        let mut s = CallSession::idle(fixture_call_id());
+        s.on_event(Event::LocalDials {
+            media: MediaKind::Audio,
+        });
+        let t = s.on_event(Event::LocalEnds {
+            reason: EndReason::HungUp,
+        });
+        assert!(
+            matches!(
+                t.as_slice(),
+                [
+                    Transition::SendEnd {
+                        reason: EndReason::HungUp
+                    },
+                    Transition::NotifyEnded {
+                        reason: EndReason::HungUp
+                    }
+                ]
+            ),
+            "expected [SendEnd, NotifyEnded], got {t:?}"
+        );
+        assert_eq!(s.state, CallState::Ended);
     }
 
     #[test]

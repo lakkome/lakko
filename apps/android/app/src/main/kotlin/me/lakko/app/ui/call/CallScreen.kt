@@ -73,6 +73,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -90,6 +91,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import androidx.compose.ui.platform.LocalContext
 import me.lakko.app.calls.CallSession
 import me.lakko.app.calls.CallSoundController
@@ -168,6 +170,11 @@ public fun CallScreen(
     // their AudioTrack resources when the user navigates away.
     val context = LocalContext.current
     val sounds = remember(context) { CallSoundController(context) }
+    // ADR-0032 piece B2b — scope for the mid-call camera-on
+    // (`session.addLocalVideo()` is a suspend function launched from the
+    // camera button's callback). Tied to this composition; torn down with
+    // the screen.
+    val cameraScope = rememberCoroutineScope()
     DisposableEffect(Unit) {
         onDispose {
             sounds.release()
@@ -254,7 +261,31 @@ public fun CallScreen(
             // otherwise.
             onEndCall = { if (session != null) session.hangUp() else state.endCall() },
             onSetMic = { on -> if (session != null) session.setMicrophoneEnabled(on) else state.setMic(on) },
-            onSetCamera = { on -> if (session != null) session.setCameraEnabled(on) else state.setCamera(on) },
+            // G3-2-call-controls + ADR-0032 piece B2b — camera routing. With a
+            // real session, turning the camera ON runs `addLocalVideo()`
+            // (acquire + add a video track + renegotiate the first time on a
+            // call started audio-only; re-enable an existing sender after) and
+            // turning it OFF is the local-only `setCameraEnabled(false)` gate.
+            // A capture failure leaves `session.cameraEnabled` false, so the
+            // driven store auto-reverts the button; we log the reason and the
+            // call stays audio-only (fail-safe). Mock-state fallback otherwise.
+            onSetCamera = { on ->
+                if (session != null) {
+                    if (on) {
+                        cameraScope.launch {
+                            try {
+                                session.addLocalVideo()
+                            } catch (cause: Throwable) {
+                                android.util.Log.w("CallScreen", "addLocalVideo failed", cause)
+                            }
+                        }
+                    } else {
+                        session.setCameraEnabled(false)
+                    }
+                } else {
+                    state.setCamera(on)
+                }
+            },
         )
     }
 }

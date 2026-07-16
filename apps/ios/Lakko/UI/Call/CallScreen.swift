@@ -1039,7 +1039,30 @@ public struct CallScreen: View {
                     },
                     onSetCamera: { on in
                         if let session {
-                            session.setCameraEnabled(on)
+                            if on {
+                                // 1×1 mid-call camera-on (piece B2b):
+                                // addLocalVideo acquires + adds a video track +
+                                // renegotiates the first time (a call started
+                                // audio-only), and re-enables an existing sender
+                                // after. Idempotent + in-flight-guarded. On a
+                                // capture failure revert the toggle + log the
+                                // reason — fail-safe, the call stays up
+                                // audio-only (invariant #4). Mirror of the web
+                                // Chat.tsx camera effect.
+                                Task {
+                                    do {
+                                        try await session.addLocalVideo()
+                                    } catch {
+                                        state.setCamera(false)
+                                        NSLog(
+                                            "CallScreen: addLocalVideo failed: %@",
+                                            String(describing: error)
+                                        )
+                                    }
+                                }
+                            } else {
+                                session.setCameraEnabled(false)
+                            }
                         } else {
                             state.setCamera(on)
                         }
