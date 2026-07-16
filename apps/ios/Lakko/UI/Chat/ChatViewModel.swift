@@ -377,6 +377,14 @@ public final class ChatViewModel: ObservableObject {
     /// epoch. Set in `startGroupCall`, cleared in `hangUpGroupCall`.
     private var activeGroupCallId: Data?
 
+    /// Piece B — observes the SFU call's local `camOn` flag on
+    /// `sfuCallUiState` and drives the mid-call camera-on onto the session
+    /// (the SFU `CallScreen` is presented UI-only, so the camera button
+    /// only flips the store; this bridges that to `publishVideo` /
+    /// `setCameraEnabled`). Set up in `startGroupCall`, cancelled in
+    /// `hangUpGroupCall`. Mirror of the web `Chat.tsx` camera effect.
+    private var sfuCameraCancellable: AnyCancellable?
+
     /// `true` when this chat has >2 MLS members — the call button then
     /// routes through the SFU group-call path; a 2-member chat stays on
     /// the 1×1 P2P `CallSession`. `nil` member count (no handle) reads
@@ -457,9 +465,12 @@ public final class ChatViewModel: ObservableObject {
                     resolveDisplayName: resolveDisplayName
                 )
                 activeSfuCall = handle
+                observeSfuCameraToggle()
                 try await handle.connect()
             } catch {
                 NSLog("startGroupCall failed: %@", error.localizedDescription)
+                sfuCameraCancellable?.cancel()
+                sfuCameraCancellable = nil
                 activeSfuCall?.hangUp()
                 activeSfuCall = nil
                 activeGroupCallId = nil
@@ -469,9 +480,54 @@ public final class ChatViewModel: ObservableObject {
 
     /// Hang up the active SFU group call + clear it.
     func hangUpGroupCall() {
+        sfuCameraCancellable?.cancel()
+        sfuCameraCancellable = nil
         activeSfuCall?.hangUp()
         activeSfuCall = nil
         activeGroupCallId = nil
+    }
+
+    /// Piece B — bridge the SFU call's local `camOn` (flipped by the in-call
+    /// camera button, which only drives `sfuCallUiState` because the SFU
+    /// `CallScreen` is presented UI-only) onto the live session. Mirrors the
+    /// web `Chat.tsx` camera effect: `camOn == true` -> `publishVideo()`
+    /// (acquire + SFrame-seal + renegotiate, idempotent + in-flight-guarded);
+    /// `false` -> `setCameraEnabled(false)` (local track gate). `removeDuplicates`
+    /// so an unrelated `participants` re-emission doesn't re-fire.
+    private func observeSfuCameraToggle() {
+        sfuCameraCancellable = sfuCallUiState.$participants
+            .map { $0.first(where: { $0.isLocal })?.camOn ?? false }
+            .removeDuplicates()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] camOn in
+                MainActor.assumeIsolated {
+                    self?.applySfuCameraToggle(camOn)
+                }
+            }
+    }
+
+    private func applySfuCameraToggle(_ camOn: Bool) {
+        guard let handle = activeSfuCall else { return }
+        if camOn {
+            Task { @MainActor [weak self] in
+                do {
+                    try await handle.publishVideo()
+                } catch {
+                    guard let self else { return }
+                    // Fail-safe (invariant #4): the camera could not start —
+                    // revert the toggle so the button snaps back, and surface
+                    // the reason in the in-call log. The call stays up
+                    // audio-only.
+                    self.sfuCallUiState.setCamera(false)
+                    self.sfuCallUiState.addSystemEvent(
+                        "Could not start the camera: \(error.localizedDescription)"
+                    )
+                    NSLog("SFU group call: publishVideo failed: %@", String(describing: error))
+                }
+            }
+        } else {
+            handle.setCameraEnabled(false)
+        }
     }
 
     /// G-18 / ADR-0029 — mid-call call-key rotation. When the group's MLS

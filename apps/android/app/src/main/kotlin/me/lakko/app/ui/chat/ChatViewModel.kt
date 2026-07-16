@@ -11,6 +11,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import me.lakko.app.chat.AttachmentBridge
@@ -135,6 +136,38 @@ public class ChatViewModel(
                     handle.rekey(key.seed)
                 }
             }
+        }
+        // ADR-0032 piece B — mid-call camera-on bridge for the SFU group call.
+        // The store-driven `CallScreen` is presented WITHOUT a session (only
+        // `sfuCallUiState`), so the camera button only flips the store's local
+        // `camOn`; mirror it onto the live SFU session here (the analog of the
+        // web `Chat.tsx` camera effect). camOn TRUE -> `publishVideo` (acquire
+        // the camera + SFrame-seal + renegotiate); FALSE -> disable the track.
+        // On a publishVideo failure revert the toggle — fail-safe, the call
+        // stays up audio-only (invariant #4; publishVideo never leaves a
+        // half-added plaintext sender behind). `publishVideo` is idempotent +
+        // in-flight-guarded, so a redundant emission is a cheap no-op.
+        viewModelScope.launch {
+            sfuCallUiState.participants
+                .map { list -> list.firstOrNull { it.isLocal }?.camOn ?: false }
+                .distinctUntilChanged()
+                .collect { camOn ->
+                    val handle = mutableActiveSfuCall.value ?: return@collect
+                    if (camOn) {
+                        try {
+                            handle.publishVideo()
+                        } catch (err: Throwable) {
+                            sfuCallUiState.setCamera(false)
+                            android.util.Log.w(
+                                "ChatViewModel",
+                                "SFU mid-call publishVideo failed — reverting camera",
+                                err,
+                            )
+                        }
+                    } else {
+                        handle.setCameraEnabled(false)
+                    }
+                }
         }
         // Phase 3a10 — attach a call-signaling sink to the
         // repository. The closure runs on whatever

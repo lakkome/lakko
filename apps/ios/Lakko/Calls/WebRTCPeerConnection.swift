@@ -241,6 +241,14 @@ public final class WebRTCPeerConnection: NSObject {
     /// above.
     public var isReady: Bool { peer != nil }
 
+    /// The underlying `RTCPeerConnection`'s current SDP
+    /// signaling state (`nil` after `close()`). The SFU
+    /// session's serialized mid-call renegotiation (piece B:
+    /// `publishVideo`) only starts an offer while this is
+    /// `.stable`, so its offer never overlaps an in-flight
+    /// offer / answer.
+    public var signalingState: RTCSignalingState? { peer?.signalingState }
+
     /// Idempotent teardown. Releases the AV capture
     /// resources, fires `onConnectionState(.closed)` exactly
     /// once. Safe to call multiple times.
@@ -378,10 +386,15 @@ public final class WebRTCPeerConnection: NSObject {
     /// owns the capturer + drives frames into the source; this
     /// class only owns the track + sender pair.
     ///
-    /// MUST be called BEFORE the first SDP offer is built so
-    /// the resulting offer advertises a video m-line. Adding a
-    /// track post-offer triggers libwebrtc's renegotiation
-    /// path, which the call surface does not drive today.
+    /// On the initial-publish path this is called BEFORE the
+    /// first SDP offer is built so that offer advertises a
+    /// video m-line. It is ALSO valid mid-call (piece B:
+    /// `SfuCallSession.publishVideo` adds a camera track to a
+    /// call that started audio-only) — adding a track post-offer
+    /// makes the offerer's next offer advertise the new m-line,
+    /// which the SFU session then drives explicitly via
+    /// `createRenegotiationOffer()` (not via
+    /// `onnegotiationneeded`).
     public func addLocalVideoTrack(_ source: RTCVideoSource) {
         guard let peer = peer else { return }
         let track = Self.sharedFactory.videoTrack(
@@ -434,6 +447,33 @@ public final class WebRTCPeerConnection: NSObject {
             }
         }
         return allOk
+    }
+
+    /// Arm SFrame on ONLY the local VIDEO sender (mid-call
+    /// camera-on, piece B). The audio sender is SFrame-armed
+    /// once at connect; re-running `armSFrameEncryptors` would
+    /// attach a FRESH `LakkoFrameEncryptor` to it, resetting
+    /// that sender's SFrame counter to 0 → nonce reuse under the
+    /// same key. So the mid-call add-video path arms just the
+    /// newly-added video sender and leaves the audio encryptor
+    /// untouched.
+    ///
+    /// Returns `true` only when the video sender attached
+    /// successfully; `false` when there is no video sender (a
+    /// wiring bug — the caller must `addLocalVideoTrack(_:)`
+    /// first) or the attach itself failed. A `false` return is
+    /// fail-closed (invariant #4): the caller MUST NOT
+    /// renegotiate an unsealed video m-line.
+    public func armSFrameVideoEncryptor(seed: Data, localLeaf: UInt32) -> Bool {
+        guard SFrameAvailability.shared.isCallingAvailable else {
+            return false
+        }
+        guard let sender = localVideoSender else { return false }
+        return LakkoSFrameAttach.attachEncryptor(
+            toSender: sender,
+            seed: seed,
+            localLeaf: localLeaf
+        ) == .OK
     }
 
     /// Arm SFrame for a freshly-arrived remote `RTCRtpReceiver`.
@@ -544,6 +584,45 @@ public final class WebRTCPeerConnection: NSObject {
                 "OfferToReceiveAudio": audio ? "true" : "false",
                 "OfferToReceiveVideo": video ? "true" : "false",
             ],
+            optionalConstraints: nil
+        )
+        let offer: RTCSessionDescription = try await withCheckedThrowingContinuation { cont in
+            peer.offer(for: constraints) { sdp, err in
+                if let err = err { cont.resume(throwing: err); return }
+                guard let sdp = sdp else {
+                    cont.resume(throwing: WebRTCError.emptySdp); return
+                }
+                cont.resume(returning: sdp)
+            }
+        }
+        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+            peer.setLocalDescription(offer) { err in
+                if let err = err {
+                    cont.resume(throwing: err)
+                } else {
+                    cont.resume()
+                }
+            }
+        }
+        return offer.sdp
+    }
+
+    /// Build a renegotiation SDP offer that reflects the CURRENT
+    /// senders (mid-call add-track, piece B). Unlike
+    /// `createOffer(audio:video:)` this does NOT force
+    /// `OfferToReceiveAudio` / `OfferToReceiveVideo` — a mid-call
+    /// offer just advertises whatever transceivers are now present
+    /// (e.g. a video m-line added by `addLocalVideoTrack(_:)`
+    /// after the initial publish). Sets the local description as a
+    /// side effect. No rollback / glare handling here — the SFU
+    /// session serializes so this only runs from a `.stable`
+    /// state.
+    public func createRenegotiationOffer() async throws -> String {
+        guard let peer = peer else {
+            throw WebRTCError.peerUnavailable
+        }
+        let constraints = RTCMediaConstraints(
+            mandatoryConstraints: nil,
             optionalConstraints: nil
         )
         let offer: RTCSessionDescription = try await withCheckedThrowingContinuation { cont in

@@ -310,6 +310,15 @@ final class MultiJoinerCall {
         ui.setCamera(on)
     }
 
+    /// Turn the camera ON mid-call (piece B) — delegates to the SFU session.
+    /// A joiner defers publish until it has joined the group, so this is a
+    /// no-op until then (the session guards on having a peer connection).
+    /// Throws on a capture / attach failure so the landing screen can revert
+    /// the toggle (the call stays up audio-only — invariant #4).
+    func publishVideo() async throws {
+        try await session.publishVideo()
+    }
+
     // MARK: - Admission timer
 
     private func startAdmissionTimer() {

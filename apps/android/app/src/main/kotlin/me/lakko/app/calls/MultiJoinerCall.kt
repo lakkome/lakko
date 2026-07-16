@@ -327,6 +327,18 @@ class MultiJoinerCall private constructor(
         ui.setCamera(on)
     }
 
+    /**
+     * ADR-0032 piece B — turn the camera ON mid-call (a link call that started
+     * audio-only). Acquires the camera, SFrame-seals the new sender, and
+     * renegotiates over the SFU. Idempotent + in-flight-guarded; throws on a
+     * capture / arm failure so the caller reverts the toggle (fail-safe; the
+     * call stays up audio-only, invariant #4). Delegates to the underlying
+     * [SfuCallSession.publishVideo].
+     */
+    suspend fun publishVideo() {
+        session.publishVideo()
+    }
+
     private fun clearAdmissionTimer() {
         admissionTimer?.cancel()
         admissionTimer = null

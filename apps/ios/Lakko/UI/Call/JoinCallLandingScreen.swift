@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Lakko Contributors
 
+import Combine
 import LakkoCore
 import SwiftUI
 
@@ -70,6 +71,10 @@ public final class JoinCallLandingViewModel: ObservableObject {
     private let intake: InviteIntake
     private var call: MultiJoinerCall?
     private var didDecode = false
+    /// Piece B — observes the call's local `camOn` on `ui` and drives the
+    /// mid-call camera-on onto the `MultiJoinerCall` (the SFU `CallScreen` is
+    /// presented UI-only here too). Mirror of the ChatViewModel bridge.
+    private var cameraCancellable: AnyCancellable?
     // Synchronous double-tap latches (set BEFORE any await), so a rapid second
     // tap can't mint a SECOND guest account or start a second call (Hardening 3).
     private var mintingGuest = false
@@ -132,6 +137,8 @@ public final class JoinCallLandingViewModel: ObservableObject {
     /// Dismiss / exit the landing — tear down the call + drop the parked slug so
     /// AppRoot returns to the prior destination.
     public func exit() {
+        cameraCancellable?.cancel()
+        cameraCancellable = nil
         call?.hangUp()
         call = nil
         intake.clearCallJoin()
@@ -242,9 +249,52 @@ public final class JoinCallLandingViewModel: ObservableObject {
                 call = try await MultiJoinerCall.join(options: options, ui: ui, callbacks: callbacks)
                 if phase == .starting { phase = .waiting }
             }
+            // Piece B — bridge the mid-call camera toggle onto the call now that
+            // it exists (a no-op for a joiner until it has joined + published).
+            observeCameraToggle()
         } catch {
             beginning = false // start failed (call unset) — allow a retry
             phase = .error(error.localizedDescription)
+        }
+    }
+
+    // MARK: - Mid-call camera-on bridge (piece B)
+
+    /// Bridge the call's local `camOn` (flipped by the in-call camera button,
+    /// which only drives `ui` because the SFU `CallScreen` is presented
+    /// UI-only) onto the `MultiJoinerCall`. Mirror of the ChatViewModel +
+    /// web `Chat.tsx` camera effect.
+    private func observeCameraToggle() {
+        cameraCancellable = ui.$participants
+            .map { $0.first(where: { $0.isLocal })?.camOn ?? false }
+            .removeDuplicates()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] camOn in
+                MainActor.assumeIsolated {
+                    self?.applyCameraToggle(camOn)
+                }
+            }
+    }
+
+    private func applyCameraToggle(_ camOn: Bool) {
+        guard let call else { return }
+        if camOn {
+            Task { @MainActor [weak self] in
+                do {
+                    try await call.publishVideo()
+                } catch {
+                    guard let self else { return }
+                    // Fail-safe (invariant #4): revert the toggle + surface the
+                    // reason; the call stays up audio-only.
+                    self.ui.setCamera(false)
+                    self.ui.addSystemEvent(
+                        "Could not start the camera: \(error.localizedDescription)"
+                    )
+                    NSLog("multi-joiner call: publishVideo failed: %@", String(describing: error))
+                }
+            }
+        } else {
+            call.setCameraEnabled(false)
         }
     }
 }

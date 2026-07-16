@@ -5,6 +5,9 @@ package me.lakko.app.calls
 
 import android.content.Context
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import org.webrtc.VideoTrack
 import uniffi.lakko_ffi_uniffi.callSafetyNumber
 
@@ -45,6 +48,15 @@ class SfuCallUi(
 ) {
     /** The underlying session (for direct control if needed). */
     val session: SfuCallSession
+
+    private val _videoPublishState =
+        MutableStateFlow(SfuCallSession.VideoPublishState.OFF)
+
+    /** ADR-0032 piece B — mid-call camera-on lifecycle, mirrored from the
+     *  session's `onVideoPublishState`. The UI can observe it for a spinner /
+     *  failure surface; the primary fail-safe is [publishVideo] throwing. */
+    val videoPublishState: StateFlow<SfuCallSession.VideoPublishState> =
+        _videoPublishState.asStateFlow()
 
     init {
         // Canonical call safety number derived from the shared seed — the
@@ -114,8 +126,13 @@ class SfuCallUi(
                 ui.setRemoteVideoTrack(track)
             },
             onLocalVideoTrack = { track ->
-                // Local camera (video call) -> self-preview tile.
+                // Local camera (video call, or a mid-call publishVideo) ->
+                // self-preview tile.
                 ui.setLocalVideoTrack(track)
+            },
+            onVideoPublishState = { s ->
+                // Mirror the mid-call camera-on lifecycle (piece B).
+                _videoPublishState.value = s
             },
             onServerError = { _, _ -> },
         )
@@ -156,11 +173,22 @@ class SfuCallUi(
     }
 
     /** Enable / disable the local camera — drives the real track + mirrors
-     *  the store's local-participant flag. Only meaningful for a video
-     *  call (the video track is added at connect when `config.video`). */
+     *  the store's local-participant flag. Only meaningful once a video track
+     *  exists (a video call, or after a mid-call [publishVideo]). */
     fun setCameraEnabled(on: Boolean) {
         session.setCameraEnabled(on)
         ui.setCamera(on)
+    }
+
+    /**
+     * ADR-0032 piece B — turn the camera ON mid-call (a group call that
+     * started audio-only). Acquires the camera, SFrame-seals the new sender,
+     * and renegotiates. Idempotent + in-flight-guarded. Throws on a capture /
+     * arm failure so the caller reverts the toggle (fail-safe; the call stays
+     * up audio-only, invariant #4). Delegates to [SfuCallSession.publishVideo].
+     */
+    suspend fun publishVideo() {
+        session.publishVideo()
     }
 
     private companion object {

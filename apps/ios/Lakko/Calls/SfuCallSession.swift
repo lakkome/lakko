@@ -48,7 +48,38 @@ final class SfuCallSession {
 
     enum State { case idle, connecting, connected, failed, closed }
 
-    enum SfuCallError: Error { case alreadyConnected, sframeUnavailable }
+    enum SfuCallError: Error, LocalizedError {
+        case alreadyConnected
+        case sframeUnavailable
+        /// Mid-call camera-on (piece B): no usable camera on this device.
+        case noCamera
+
+        var errorDescription: String? {
+            switch self {
+            case .alreadyConnected:
+                return "The call is already connected."
+            case .sframeUnavailable:
+                return "Media encryption is unavailable on this build."
+            case .noCamera:
+                return "No camera is available on this device."
+            }
+        }
+    }
+
+    /// Lifecycle of a mid-call camera-on (ADR-0032 arc, piece B) — the native
+    /// analog of the web `VideoPublishState`. A group call started audio-only
+    /// has no video sender; turning the camera on ACQUIRES the camera and
+    /// renegotiates (adds a track after the initial offer):
+    ///   * `off`      — no video published (the default; also after a failure).
+    ///   * `starting` — camera capture + the addTrack/renegotiation are in flight.
+    ///   * `live`     — the local video track is captured, SFrame-sealed, and
+    ///                  added (self-preview renders; the SDP renegotiation runs
+    ///                  in the background).
+    ///   * `failed`   — permission denied / no camera / capture error; the caller
+    ///                  reverts the toggle + surfaces a message. The call stays up
+    ///                  audio-only (invariant #4 — no half-added / unsealed sender
+    ///                  is ever offered to the SFU).
+    enum VideoPublishState { case off, starting, live, failed }
 
     struct Config {
         let sfuBaseUrl: String
@@ -89,6 +120,10 @@ final class SfuCallSession {
         /// publish) or was torn down (`nil`). Drives the self-preview
         /// tile.
         var onLocalVideoTrack: ((RTCVideoTrack?) -> Void)?
+        /// Mid-call camera-on lifecycle (piece B). Mirrors the web
+        /// `onVideoPublishState`; drives a camera-button spinner. Defaulted
+        /// so existing memberwise callers keep their shorter initialiser.
+        var onVideoPublishState: ((VideoPublishState) -> Void)? = nil
         var onServerError: ((SfuErrorCode, String) -> Void)?
         /// ADR-0032: an opaque peer-to-peer relay payload arrived over the SFU
         /// `signal-relay` frame. `from` is the sending peer's SFU peer id;
@@ -124,6 +159,25 @@ final class SfuCallSession {
     /// never overlap.
     private var offerQueue: [String] = []
     private var drainingOffers = false
+
+    // ---- Serialized mid-call renegotiation (piece B: camera-on) -----------
+    // Unlike the web (POLITE peer + implicit rollback glare handling), the
+    // native path SERIALIZES: our own publish / renegotiation offer completes
+    // fully (offer -> answer) BEFORE any SFU subscribe-offer is processed. A
+    // colliding SFU offer simply waits in `offerQueue` until our negotiation
+    // finishes — no rollback, no `onnegotiationneeded`.
+    //
+    // `makingOffer` — true from when we send an offer until its answer lands.
+    // `negotiationReady` — flips true once the FIRST publish offer is answered,
+    //   so a mid-call renegotiation is never attempted before the initial
+    //   publish completes.
+    // `pendingRenegotiation` — a camera-on that raced an in-flight offer / a
+    //   non-stable state; the completing answer / drain re-drives it.
+    private var makingOffer = false
+    private var negotiationReady = false
+    private var pendingRenegotiation = false
+    /// Mid-call camera-on lifecycle (piece B).
+    private var videoPublishState: VideoPublishState = .off
 
     init(config: Config, callbacks: Callbacks) {
         self.config = config
@@ -238,6 +292,12 @@ final class SfuCallSession {
         pc?.close()
         pc = nil
         offerQueue.removeAll()
+        // Reset the serialized-renegotiation + video-publish state so a late
+        // callback after teardown starts clean.
+        makingOffer = false
+        negotiationReady = false
+        pendingRenegotiation = false
+        setVideoPublishState(.off)
         if state != .failed, state != .closed {
             setState(.closed)
         }
@@ -273,6 +333,12 @@ final class SfuCallSession {
             throw SfuCallError.sframeUnavailable
         }
         let offer = try await connection.createOffer(audio: config.audio, video: config.video)
+        // Mark our initial publish offer in flight so an SFU subscribe-offer
+        // that arrives before the answer waits in `offerQueue`
+        // (`drainServerOffers` guards on `makingOffer`). The first
+        // `applyRemoteAnswer` clears it + arms `negotiationReady` for a
+        // mid-call renegotiation (piece B: `publishVideo`).
+        makingOffer = true
         signaling?.sendSdpOffer(offer)
     }
 
@@ -312,12 +378,128 @@ final class SfuCallSession {
         }
     }
 
-    /// Enable / disable the local camera track (local-only gate — only
-    /// meaningful when the call was started with `config.video`, since the
-    /// video track is added at connect; toggling without a track is a
-    /// no-op).
+    /// Enable / disable the local camera track (local-only gate). Meaningful
+    /// once a video sender exists — either a `config.video` call (added at
+    /// connect) or after a mid-call ``publishVideo()``. Toggling without a
+    /// track is a no-op.
     func setCameraEnabled(_ on: Bool) {
         pc?.setCameraEnabled(on)
+    }
+
+    /// Current mid-call camera-on lifecycle state (piece B).
+    func currentVideoPublishState() -> VideoPublishState { videoPublishState }
+
+    /// Turn the camera ON mid-call (piece B). When the call started audio-only
+    /// there is no video sender, so this ACQUIRES the camera, adds the track
+    /// (SFrame-sealed like the audio sender), and renegotiates. Idempotent +
+    /// re-entrant-safe:
+    ///   * a live video sender already exists -> just re-enable its track;
+    ///   * a capture is already in flight       -> no-op (do not double-acquire).
+    /// Fail-safe (invariant #4): on a camera / attach failure the capture is
+    /// torn down (never a half-added / unsealed sender reaches the SFU) and the
+    /// state goes `.failed`, so the caller reverts the toggle + surfaces a
+    /// message; the call stays up audio-only.
+    ///
+    /// - Throws: on capture failure (no camera / start failure) or an SFrame
+    ///   arm failure, so the caller can distinguish it from "already publishing".
+    func publishVideo() async throws {
+        guard let connection = pc, activeSeed != nil else {
+            // No peer connection yet (a deferred-publish joiner that has not
+            // joined). Nothing to publish — not an error.
+            return
+        }
+        // Idempotent: a live video sender already exists (a video-from-start
+        // call, or a prior publishVideo) — just re-enable. No capture, no
+        // renegotiation.
+        if connection.currentLocalVideoTrack() != nil {
+            connection.setCameraEnabled(true)
+            setVideoPublishState(.live)
+            return
+        }
+        // In-flight guard — a capture is already running; do not double-acquire.
+        if videoPublishState == .starting { return }
+        setVideoPublishState(.starting)
+
+        // Acquire the camera FIRST, before adding any track, so a capture
+        // failure never leaves a half-added sender on the peer connection.
+        guard LocalCameraCapture.hasUsableCamera() else {
+            setVideoPublishState(.failed)
+            throw SfuCallError.noCamera
+        }
+        let source = WebRTCPeerConnection.newVideoSource()
+        guard let capture = LocalCameraCapture(source: source) else {
+            setVideoPublishState(.failed)
+            throw SfuCallError.noCamera
+        }
+        do {
+            try await capture.start()
+        } catch {
+            setVideoPublishState(.failed)
+            throw error
+        }
+
+        // Re-read the peer connection + seed AFTER the async capture — a rekey
+        // or teardown may have happened while the camera was starting; arm at
+        // the CURRENT epoch seed on the CURRENT peer connection.
+        guard let liveConn = pc, let seed = activeSeed else {
+            await capture.stop()
+            setVideoPublishState(.off)
+            return
+        }
+        // Add the video track, then arm SFrame on ONLY the new video sender
+        // (invariant #4 — the mid-call video sender is SFrame-sealed exactly
+        // like the audio sender; `armSFrameVideoEncryptor` does NOT touch the
+        // already-armed audio encryptor). On an arm failure tear the camera
+        // down and do NOT renegotiate, so an unsealed video m-line is never
+        // offered to the SFU (fail-closed).
+        liveConn.addLocalVideoTrack(source)
+        localCameraCapture = capture
+        guard liveConn.armSFrameVideoEncryptor(seed: seed, localLeaf: publishLeaf) else {
+            await capture.stop()
+            localCameraCapture = nil
+            callbacks.onLocalVideoTrack?(nil)
+            setVideoPublishState(.failed)
+            throw SfuCallError.sframeUnavailable
+        }
+        // Self-preview tile.
+        callbacks.onLocalVideoTrack?(liveConn.currentLocalVideoTrack())
+        setVideoPublishState(.live)
+        // Renegotiate so the SFU (and thus other peers) learn the new video
+        // m-line. Serialized behind any in-flight offer.
+        await driveRenegotiationOffer()
+    }
+
+    private func setVideoPublishState(_ next: VideoPublishState) {
+        guard videoPublishState != next else { return }
+        videoPublishState = next
+        callbacks.onVideoPublishState?(next)
+    }
+
+    /// Send a client-initiated renegotiation offer (piece B: a camera track was
+    /// added mid-call). Serialized — no glare rollback: only start an offer
+    /// from a clean `.stable` state with no in-flight offer / mid-drain answer.
+    /// Otherwise DEFER (`pendingRenegotiation`) — the completing
+    /// `applyRemoteAnswer` / `drainServerOffers` re-drives us. `makingOffer`
+    /// stays true until the SFU's answer arrives.
+    private func driveRenegotiationOffer() async {
+        guard let connection = pc, let signaling = signaling else { return }
+        if !negotiationReady || makingOffer || drainingOffers
+            || connection.signalingState != .stable {
+            pendingRenegotiation = true
+            return
+        }
+        pendingRenegotiation = false
+        makingOffer = true
+        do {
+            let offer = try await connection.createRenegotiationOffer()
+            signaling.sendSdpOffer(offer)
+            // `makingOffer` stays true until `applyRemoteAnswer` clears it.
+        } catch {
+            makingOffer = false
+            // A failed renegotiation leaves the call up as-is; the local
+            // self-preview is already live. A later stable transition re-drives
+            // any still-pending change.
+        }
     }
 
     // MARK: - Signaling
@@ -366,6 +548,18 @@ final class SfuCallSession {
             try await pc.applyRemoteAnswer(sdp)
         } catch {
             fail()
+            return
+        }
+        // The initial publish (or a mid-call renegotiation) is now answered:
+        // clear the in-flight flag + arm renegotiation for future track
+        // changes (piece B). Then either drive a camera-on that queued while we
+        // were mid-offer, or drain any SFU subscribe-offers that waited.
+        makingOffer = false
+        negotiationReady = true
+        if pendingRenegotiation {
+            await driveRenegotiationOffer()
+        } else {
+            await drainServerOffers()
         }
     }
 
@@ -376,8 +570,12 @@ final class SfuCallSession {
 
     private func drainServerOffers() async {
         if drainingOffers { return }
+        // Our own publish / renegotiation offer is in flight — leave SFU offers
+        // queued; `applyRemoteAnswer` re-drains once the answer clears
+        // `makingOffer` (serialize: our offer completes before we answer an
+        // SFU offer, so two `setRemoteDescription` cycles never overlap).
+        if makingOffer { return }
         drainingOffers = true
-        defer { drainingOffers = false }
         while !offerQueue.isEmpty {
             let sdp = offerQueue.removeFirst()
             guard let pc = pc, let signaling = signaling else { break }
@@ -388,6 +586,12 @@ final class SfuCallSession {
                 // A single bad renegotiation drops that subscription;
                 // the call stays up. Continue draining.
             }
+        }
+        drainingOffers = false
+        // A camera-on that raced an SFU offer queued itself as pending — drive
+        // it now that the queue is drained + the state is back to stable.
+        if pendingRenegotiation {
+            await driveRenegotiationOffer()
         }
     }
 

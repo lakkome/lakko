@@ -395,6 +395,13 @@ public class WebRtcPeerConnection(
      * Called from `CallSession.startLocalCameraCapture`
      * (1×1) and `SfuCallSession` (group) on a video-enabled
      * call; audio-only calls skip it.
+     *
+     * Adding the track fires `onnegotiationneeded` in a
+     * generic WebRTC app; the SFU session drives the offer
+     * explicitly instead (no `onRenegotiationNeeded` handler),
+     * so this is safe to call BOTH at connect time (before the
+     * first offer) AND mid-call for the ADR-0032 "camera-on"
+     * renegotiation path (`SfuCallSession.publishVideo`).
      */
     public fun addLocalVideoTrack(source: VideoSource) {
         val factory = sharedFactory ?: return
@@ -413,6 +420,44 @@ public class WebRtcPeerConnection(
      * call, or pre-`startLocalCameraCapture`).
      */
     public fun currentLocalVideoTrack(): VideoTrack? = localVideoTrack
+
+    /**
+     * ADR-0032 piece B — `true` when a local video sender with a
+     * still-`LIVE` track is already attached (a call started as
+     * video, or a prior mid-call `publishVideo`). The SFU session
+     * uses this to make `publishVideo` idempotent: rather than
+     * acquire a second camera it just re-enables the existing
+     * track. A disabled-but-live track (camera toggled off) still
+     * reads `true` here, so re-enabling it is a plain
+     * `setCameraEnabled(true)`.
+     */
+    public fun hasLiveLocalVideoSender(): Boolean =
+        localVideoSender != null &&
+            localVideoTrack?.state() == org.webrtc.MediaStreamTrack.State.LIVE
+
+    /**
+     * ADR-0032 piece B — fail-closed removal of the local video
+     * sender + track. Called when the mid-call `publishVideo`
+     * path added a video sender but then could NOT arm SFrame on
+     * it: rather than ship a plaintext video m-line to the SFU
+     * (invariant #4), the sender is torn down and the call
+     * continues audio-only. No encryptor is released here — this
+     * only runs on the arm-FAILED path, where none was attached.
+     */
+    public fun removeLocalVideoTrack() {
+        val peer = peer
+        val sender = localVideoSender
+        if (peer != null && sender != null) {
+            try {
+                peer.removeTrack(sender)
+            } catch (cause: Throwable) {
+                Log.w(TAG, "removeLocalVideoTrack: removeTrack failed", cause)
+            }
+        }
+        localVideoTrack?.dispose()
+        localVideoTrack = null
+        localVideoSender = null
+    }
 
     // ----------------------------------------------------------------
     // SFrame (G3-sframe-native N-5)
@@ -450,6 +495,37 @@ public class WebRtcPeerConnection(
             attachedEncryptors += enc
         }
         return allOk
+    }
+
+    /**
+     * ADR-0032 piece B — arm SFrame on ONLY the local **video**
+     * sender (the one just added by [addLocalVideoTrack] on the
+     * mid-call camera-on path), leaving the already-armed audio
+     * encryptor untouched.
+     *
+     * Unlike [armSFrameEncryptors] (which releases + re-creates
+     * every sender's encryptor, and is the connect-time / rekey
+     * path), this targets the new video sender only — so the
+     * audio encryptor is neither released-without-detach nor
+     * needlessly re-derived. The new encryptor is appended to
+     * [attachedEncryptors] so the mid-call rekey
+     * ([rekeySFrame]) and teardown ([close]) cover it too.
+     *
+     * Returns `false` on a missing video sender, HKDF failure,
+     * or if the SFrame shim is unavailable. A `false` return is
+     * the caller's signal to tear the just-added video sender
+     * down ([removeLocalVideoTrack]) rather than let it flow
+     * plaintext — security invariant #4.
+     */
+    public fun armSFrameEncryptorForVideoSender(seed: ByteArray, localLeaf: Int): Boolean {
+        if (!me.lakko.sframe.SFrameAvailability.isCallingAvailable) {
+            return false
+        }
+        val sender = localVideoSender ?: return false
+        val enc = me.lakko.sframe.LakkoFrameEncryptor.create(seed, localLeaf) ?: return false
+        sender.setFrameEncryptor(enc)
+        attachedEncryptors += enc
+        return true
     }
 
     /**
@@ -539,6 +615,28 @@ public class WebRtcPeerConnection(
         setLocalDescriptionSuspend(peer, offer)
         return offer.description
     }
+
+    /**
+     * ADR-0032 piece B — build a RENEGOTIATION offer for a
+     * mid-call track change (a camera-on added a video sender
+     * after the initial publish). Unlike [createOffer] it uses
+     * DEFAULT `MediaConstraints` — no forced
+     * `OfferToReceive{Audio,Video}` — so the offer simply
+     * reflects the transceivers currently on the peer connection
+     * (the audio sender plus the freshly-added video sender).
+     * Sets the local description as a side-effect.
+     */
+    public suspend fun createRenegotiationOffer(): String {
+        val peer = peer ?: throw WebRtcException("PeerConnection is not allocated")
+        val offer = createOfferSuspend(peer, MediaConstraints())
+        setLocalDescriptionSuspend(peer, offer)
+        return offer.description
+    }
+
+    /** ADR-0032 piece B — the current SDP signaling state, so the
+     *  SFU session only fires a renegotiation offer while `STABLE`
+     *  (no in-flight offer / answer). `null` once [close] has run. */
+    public fun signalingState(): PeerConnection.SignalingState? = peer?.signalingState()
 
     /**
      * Apply the remote SDP offer + build the answer that goes

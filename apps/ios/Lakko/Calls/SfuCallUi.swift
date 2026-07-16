@@ -25,11 +25,29 @@ import WebRTC
 /// The closures capture the `CallUiState` + the name resolver directly
 /// (not `self`), so there is no init-order chicken-and-egg and no retain
 /// cycle through the session.
+/// Relay so the session's `onVideoPublishState` callback (built at
+/// construction, before `self` is fully initialised) can forward into a
+/// mutable observer the caller sets later — mirrors the pattern
+/// `MultiJoinerCall` uses to capture a value (not `self`) in its callbacks.
+private final class VideoPublishStateRelay {
+    var handler: ((SfuCallSession.VideoPublishState) -> Void)?
+}
+
 @MainActor
 final class SfuCallUi {
     /// The underlying session (for direct control if needed).
     let session: SfuCallSession
     private let ui: CallUiState
+    private let videoStateRelay: VideoPublishStateRelay
+
+    /// Optional observer for the mid-call camera-on lifecycle (piece B) —
+    /// the analog of the web `onVideoPublishState`. Set it to drive a
+    /// camera-button spinner. The fail-safe revert itself is driven by
+    /// ``publishVideo()``'s throw (the ChatViewModel catches it), not by this.
+    var onVideoPublishState: ((SfuCallSession.VideoPublishState) -> Void)? {
+        get { videoStateRelay.handler }
+        set { videoStateRelay.handler = newValue }
+    }
 
     init(
         config: SfuCallSession.Config,
@@ -40,6 +58,8 @@ final class SfuCallUi {
         }
     ) {
         self.ui = ui
+        let relay = VideoPublishStateRelay()
+        self.videoStateRelay = relay
         let audio = config.audio
         let video = config.video
         // Canonical call safety number derived from the shared seed — the
@@ -98,8 +118,14 @@ final class SfuCallUi {
                 ui.setRemoteVideoTrack(track)
             },
             onLocalVideoTrack: { track in
-                // Local camera (video call) -> self-preview tile.
+                // Local camera (video call or a mid-call publishVideo) ->
+                // self-preview tile.
                 ui.setLocalVideoTrack(track)
+            },
+            onVideoPublishState: { state in
+                // Forward into the caller-set observer (captured `relay`, not
+                // `self`, so this is safe to build before `session` is assigned).
+                relay.handler?(state)
             },
             onServerError: { _, _ in }
         )
@@ -135,11 +161,21 @@ final class SfuCallUi {
     }
 
     /// Enable / disable the local camera — drives the real track + mirrors
-    /// the store's local-participant flag. Only meaningful for a video
-    /// call (the video track is added at connect when `config.video`).
+    /// the store's local-participant flag. Meaningful once a video sender
+    /// exists (a video call, or after a mid-call ``publishVideo()``).
     func setCameraEnabled(_ on: Bool) {
         session.setCameraEnabled(on)
         ui.setCamera(on)
+    }
+
+    /// Turn the camera ON mid-call (piece B) — delegates to the session, which
+    /// acquires the camera, SFrame-seals the new video sender, and
+    /// renegotiates the first time (a call that started audio-only), or just
+    /// re-enables an existing sender after. Idempotent + in-flight-guarded.
+    /// Throws on a capture / attach failure so the caller can revert the
+    /// toggle (fail-safe; the call stays up audio-only — invariant #4).
+    func publishVideo() async throws {
+        try await session.publishVideo()
     }
 
     // MARK: - Roster helpers

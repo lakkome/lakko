@@ -28,6 +28,8 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import me.lakko.app.auth.AuthRepository
 import me.lakko.app.auth.AuthState
@@ -152,6 +154,31 @@ class JoinCallViewModel(
         viewModelScope.launch {
             val d = decode(slug)
             _uiState.value = _uiState.value.copy(loading = false, decoded = d)
+        }
+        // ADR-0032 piece B — mid-call camera-on bridge. The in-call
+        // [CallScreen] is presented WITHOUT a session (only [callUiState]), so
+        // the camera button only flips the store's local `camOn`; mirror it
+        // onto the live [MultiJoinerCall] here (the analog of the web camera
+        // effect). camOn TRUE -> `publishVideo` (acquire + SFrame-seal +
+        // renegotiate); FALSE -> disable the track. On a failure revert the
+        // toggle — fail-safe, the call stays up audio-only (invariant #4).
+        viewModelScope.launch {
+            callUiState.participants
+                .map { list -> list.firstOrNull { it.isLocal }?.camOn ?: false }
+                .distinctUntilChanged()
+                .collect { camOn ->
+                    val c = call ?: return@collect
+                    if (camOn) {
+                        try {
+                            c.publishVideo()
+                        } catch (err: Throwable) {
+                            callUiState.setCamera(false)
+                            Log.w("JoinCall", "mid-call publishVideo failed — reverting camera", err)
+                        }
+                    } else {
+                        c.setCameraEnabled(false)
+                    }
+                }
         }
     }
 
