@@ -451,12 +451,21 @@ public final class WebRTCPeerConnection: NSObject {
             return false
         }
         var allOk = true
-        for sender in [localAudioSender, localVideoSender] {
-            guard let sender = sender else { continue }
+        // Each sender is bound to its own media-type key space
+        // (ADR-0034): the audio sender seals on the audio space, the
+        // video sender on the video space, so a frame counter shared
+        // across the two streams of this leaf no longer reuses a nonce.
+        let armSet: [(RTCRtpSender?, LakkoSFrameMediaType)] = [
+            (localAudioSender, .audio),
+            (localVideoSender, .video),
+        ]
+        for (maybeSender, mediaType) in armSet {
+            guard let sender = maybeSender else { continue }
             let status = LakkoSFrameAttach.attachEncryptor(
                 toSender: sender,
                 seed: seed,
-                localLeaf: localLeaf
+                localLeaf: localLeaf,
+                mediaType: mediaType
             )
             if status != .OK {
                 allOk = false
@@ -488,7 +497,8 @@ public final class WebRTCPeerConnection: NSObject {
         return LakkoSFrameAttach.attachEncryptor(
             toSender: sender,
             seed: seed,
-            localLeaf: localLeaf
+            localLeaf: localLeaf,
+            mediaType: .video
         ) == .OK
     }
 
@@ -503,9 +513,18 @@ public final class WebRTCPeerConnection: NSObject {
         guard SFrameAvailability.shared.isCallingAvailable else {
             return false
         }
+        // Bind the decryptor to the receive track's kind (ADR-0034) so
+        // it derives each per-sender key on the same audio-or-video key
+        // space the far-side encryptor sealed on. A wrong-space guess
+        // fails closed (the frame will not open) rather than silently
+        // opening on the wrong key — the audio track is the default only
+        // because every receiver carries an audio or a video track.
+        let mediaType: LakkoSFrameMediaType =
+            (receiver.track is RTCVideoTrack) ? .video : .audio
         let status = LakkoSFrameAttach.attachDecryptor(
             toReceiver: receiver,
-            seed: seed
+            seed: seed,
+            mediaType: mediaType
         )
         return status == .OK
     }

@@ -8,6 +8,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Test
 import org.junit.runner.RunWith
 import uniffi.lakko_ffi_uniffi.CallKey
+import uniffi.lakko_ffi_uniffi.FfiMediaType
 
 /**
  * G-26 cross-stack SFrame interop — the Android leg.
@@ -31,20 +32,21 @@ class SframeGoldenTest {
 
     private val goldenSeed = ByteArray(32) { 0x42 }
     private val goldenLeaf = 3u
+    private val goldenMedia = FfiMediaType.AUDIO
     private val goldenPlaintext = "lakko sframe golden vector v1"
     private val goldenWireHex =
-        "31a6d1fee0dd6f091a0071e56d66a889f734a5b2fa6ef8f079d2e6b3e9b256e41ff55ca0102c28b8b697c526be59"
+        "31093c4f19a3b815c0a17a8ad09d2df18c6971987eb1c214484e9ebcc4f92b4c04e5c80bc145a9f23e1c60e2faa4"
 
     @Test
     fun sealsToTheCanonicalCrossStackWire() {
-        val pk = CallKey.fromSeed(goldenSeed).participantKey(goldenLeaf)
+        val pk = CallKey.fromSeed(goldenSeed).participantKey(goldenLeaf, goldenMedia)
         val wire = pk.sealFramed(goldenPlaintext.toByteArray(Charsets.UTF_8))
         assertEquals(goldenWireHex, wire.toHex())
     }
 
     @Test
     fun opensTheCanonicalWireToThePlaintext() {
-        val pk = CallKey.fromSeed(goldenSeed).participantKey(goldenLeaf)
+        val pk = CallKey.fromSeed(goldenSeed).participantKey(goldenLeaf, goldenMedia)
         val opened = pk.openFramed(goldenWireHex.hexToBytes())
         assertEquals(goldenPlaintext, String(opened, Charsets.UTF_8))
     }

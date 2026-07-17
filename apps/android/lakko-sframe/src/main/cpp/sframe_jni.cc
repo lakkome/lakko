@@ -55,7 +55,8 @@ Java_me_lakko_sframe_LakkoFrameEncryptor_00024Companion_nativeCreate(
     JNIEnv* env,
     jobject /*thiz*/,
     jbyteArray seed,
-    jint local_leaf) {
+    jint local_leaf,
+    jint media_type) {
     if (seed == nullptr) {
         return 0;
     }
@@ -74,11 +75,16 @@ Java_me_lakko_sframe_LakkoFrameEncryptor_00024Companion_nativeCreate(
         return 0;
     }
 
+    // `media_type` (ADR-0034) is the local send track's stream kind
+    // (LAKKO_SFRAME_MEDIA_TYPE_AUDIO / _VIDEO). The Kotlin side sources
+    // it from the SFrameMediaType enum, so it is always 1 or 2; the C++
+    // Create refuses (returns nullptr) any other value fail-closed.
     lakko::sframe::LakkoFrameEncryptor* enc =
         lakko::sframe::LakkoFrameEncryptor::Create(
             reinterpret_cast<const uint8_t*>(seed_bytes),
             static_cast<std::size_t>(seed_len),
-            static_cast<uint32_t>(local_leaf));
+            static_cast<uint32_t>(local_leaf),
+            static_cast<uint8_t>(media_type));
 
     // JNI_ABORT skips copying back; we never modified the
     // bytes so the abort path is the right choice.
@@ -143,7 +149,8 @@ JNIEXPORT jlong JNICALL
 Java_me_lakko_sframe_LakkoFrameDecryptor_00024Companion_nativeCreate(
     JNIEnv* env,
     jobject /*thiz*/,
-    jbyteArray seed) {
+    jbyteArray seed,
+    jint media_type) {
     if (seed == nullptr) {
         return 0;
     }
@@ -156,10 +163,15 @@ Java_me_lakko_sframe_LakkoFrameDecryptor_00024Companion_nativeCreate(
         return 0;
     }
 
+    // `media_type` (ADR-0034) is the remote receive track's stream kind
+    // (LAKKO_SFRAME_MEDIA_TYPE_AUDIO / _VIDEO), sourced from the Kotlin
+    // SFrameMediaType enum (always 1 or 2); the C++ Create refuses any
+    // other value fail-closed.
     lakko::sframe::LakkoFrameDecryptor* dec =
         lakko::sframe::LakkoFrameDecryptor::Create(
             reinterpret_cast<const uint8_t*>(seed_bytes),
-            static_cast<std::size_t>(seed_len));
+            static_cast<std::size_t>(seed_len),
+            static_cast<uint8_t>(media_type));
 
     env->ReleaseByteArrayElements(seed, seed_bytes, JNI_ABORT);
 

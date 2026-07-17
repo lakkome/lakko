@@ -484,9 +484,15 @@ public class WebRtcPeerConnection(
         attachedEncryptors.clear()
 
         var allOk = true
-        for (sender in listOf(localAudioSender, localVideoSender)) {
+        // Each sender is bound to its own media-type key space (ADR-0034):
+        // the audio sender seals on AUDIO, the video sender on VIDEO, so a
+        // participant never reuses one (key, nonce) across the two streams.
+        for ((sender, mediaType) in listOf(
+            localAudioSender to me.lakko.sframe.SFrameMediaType.AUDIO,
+            localVideoSender to me.lakko.sframe.SFrameMediaType.VIDEO,
+        )) {
             sender ?: continue
-            val enc = me.lakko.sframe.LakkoFrameEncryptor.create(seed, localLeaf)
+            val enc = me.lakko.sframe.LakkoFrameEncryptor.create(seed, localLeaf, mediaType)
             if (enc == null) {
                 allOk = false
                 continue
@@ -522,7 +528,13 @@ public class WebRtcPeerConnection(
             return false
         }
         val sender = localVideoSender ?: return false
-        val enc = me.lakko.sframe.LakkoFrameEncryptor.create(seed, localLeaf) ?: return false
+        // This arm targets the video sender only, so it seals on the VIDEO
+        // media-type key space (ADR-0034).
+        val enc = me.lakko.sframe.LakkoFrameEncryptor.create(
+            seed,
+            localLeaf,
+            me.lakko.sframe.SFrameMediaType.VIDEO,
+        ) ?: return false
         sender.setFrameEncryptor(enc)
         attachedEncryptors += enc
         return true
@@ -532,6 +544,12 @@ public class WebRtcPeerConnection(
      * Arm SFrame on a freshly-arrived remote `RtpReceiver`.
      * Called by the `onAddTrack` / `onTrack` delegate path when
      * libwebrtc hands us a new incoming track.
+     *
+     * The decryptor is bound to the receive track's media type
+     * (ADR-0034), read from `receiver.track().kind()` — every open
+     * derives the per-sender key on that one key space, matching the
+     * far-side encryptor. An unknown / absent kind is refused
+     * (fail-closed, invariant #4) rather than guessed.
      */
     public fun armSFrameDecryptor(
         receiver: org.webrtc.RtpReceiver,
@@ -540,7 +558,14 @@ public class WebRtcPeerConnection(
         if (!me.lakko.sframe.SFrameAvailability.isCallingAvailable) {
             return false
         }
-        val dec = me.lakko.sframe.LakkoFrameDecryptor.create(seed) ?: return false
+        val mediaType = when (receiver.track()?.kind()) {
+            org.webrtc.MediaStreamTrack.AUDIO_TRACK_KIND ->
+                me.lakko.sframe.SFrameMediaType.AUDIO
+            org.webrtc.MediaStreamTrack.VIDEO_TRACK_KIND ->
+                me.lakko.sframe.SFrameMediaType.VIDEO
+            else -> return false
+        }
+        val dec = me.lakko.sframe.LakkoFrameDecryptor.create(seed, mediaType) ?: return false
         receiver.setFrameDecryptor(dec)
         attachedDecryptors += dec
         return true

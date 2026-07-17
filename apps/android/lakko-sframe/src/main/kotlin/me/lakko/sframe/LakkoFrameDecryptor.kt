@@ -74,22 +74,29 @@ public class LakkoFrameDecryptor private constructor(
 
         /**
          * Build a fresh decryptor for the per-call MLS exporter
-         * seed (32 bytes). Same constraints as [LakkoFrame
-         * Encryptor.create]. Per-sender ParticipantKey
+         * seed (32 bytes) + the remote receive track's [mediaType]
+         * (ADR-0034 — every open on this decryptor derives the
+         * per-sender key on that one media-type space; the far-side
+         * encryptor must have sealed on the same media type or the
+         * frame will not open, fail-closed). Same seed constraints
+         * as [LakkoFrameEncryptor.create]. Per-sender ParticipantKey
          * derivation is lazy — the first frame from each new
          * `sender_leaf` triggers one HKDF derivation; subsequent
          * frames hit the per-sender cache inside the C++ side.
          */
         @JvmStatic
-        public fun create(seed: ByteArray): LakkoFrameDecryptor? {
+        public fun create(
+            seed: ByteArray,
+            mediaType: SFrameMediaType,
+        ): LakkoFrameDecryptor? {
             if (!SFrameAvailability.isCallingAvailable) return null
             if (seed.size != 32) return null
-            val ptr = nativeCreate(seed)
+            val ptr = nativeCreate(seed, mediaType.abiValue)
             return if (ptr == 0L) null else LakkoFrameDecryptor(ptr)
         }
 
         @JvmStatic
-        private external fun nativeCreate(seed: ByteArray): Long
+        private external fun nativeCreate(seed: ByteArray, mediaType: Int): Long
 
         @JvmStatic
         private external fun nativeRelease(nativePtr: Long)

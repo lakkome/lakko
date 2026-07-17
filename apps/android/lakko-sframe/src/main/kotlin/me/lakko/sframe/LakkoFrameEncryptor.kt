@@ -104,20 +104,31 @@ public class LakkoFrameEncryptor private constructor(
         /**
          * Build a fresh encryptor for the per-call MLS exporter
          * seed (32 bytes — `Group.export_secret("lakko/call/v1",
-         * call_id, 32)`) + this device's leaf index. Returns
-         * `null` on any failure (bad seed length, HKDF failure,
-         * boot-probe negative).
+         * call_id, 32)`) + this device's leaf index + the local
+         * send track's [mediaType] (ADR-0034 — audio and video from
+         * the same leaf derive on distinct key spaces, so the
+         * encryptor is bound to one media type for its lifetime).
+         * Returns `null` on any failure (bad seed length, HKDF
+         * failure, unknown media type, boot-probe negative).
          */
         @JvmStatic
-        public fun create(seed: ByteArray, localLeaf: Int): LakkoFrameEncryptor? {
+        public fun create(
+            seed: ByteArray,
+            localLeaf: Int,
+            mediaType: SFrameMediaType,
+        ): LakkoFrameEncryptor? {
             if (!SFrameAvailability.isCallingAvailable) return null
             if (seed.size != 32) return null
-            val ptr = nativeCreate(seed, localLeaf)
+            val ptr = nativeCreate(seed, localLeaf, mediaType.abiValue)
             return if (ptr == 0L) null else LakkoFrameEncryptor(ptr)
         }
 
         @JvmStatic
-        private external fun nativeCreate(seed: ByteArray, localLeaf: Int): Long
+        private external fun nativeCreate(
+            seed: ByteArray,
+            localLeaf: Int,
+            mediaType: Int,
+        ): Long
 
         @JvmStatic
         private external fun nativeRelease(nativePtr: Long)
