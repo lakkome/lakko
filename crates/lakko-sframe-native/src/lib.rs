@@ -245,7 +245,13 @@ pub unsafe extern "C" fn lakko_sframe_participant_key_new(
     // SAFETY: caller passed a live pointer from `_call_key_new`; we
     // borrow it for the duration of `participant_key`.
     let ck = unsafe { &*call_key };
-    let Ok(pk) = ck.inner.participant_key(sender_leaf) else {
+    // ADR-0034 Sprint 1: the audio key space is pinned here so the C ABI shape
+    // stays stable; Sprint 3 threads the real per-stream media type through this
+    // surface (the C++ bridge + platform seal/open call sites).
+    let Ok(pk) = ck
+        .inner
+        .participant_key(sender_leaf, core::MediaType::Audio)
+    else {
         return LakkoSframeStatus::KeyDerivation;
     };
     let boxed = Box::new(ParticipantKey { inner: pk });
@@ -698,7 +704,9 @@ pub unsafe extern "C" fn lakko_sframe_call_key_ring_participant_key(
     }
     // SAFETY: caller upheld the live-pointer contract.
     let ring = unsafe { &*ring };
-    let Ok(pk) = lock_ring(ring).participant_key(sender_leaf) else {
+    // ADR-0034 Sprint 1: audio key space pinned (see the note on
+    // `lakko_sframe_participant_key_new`); Sprint 3 threads the real media type.
+    let Ok(pk) = lock_ring(ring).participant_key(sender_leaf, core::MediaType::Audio) else {
         return LakkoSframeStatus::KeyDerivation;
     };
     let boxed = Box::new(ParticipantKey { inner: pk });
@@ -745,7 +753,11 @@ pub unsafe extern "C" fn lakko_sframe_call_key_ring_open_framed_with_overlap(
     };
     // SAFETY: caller upheld the live-pointer contract.
     let ring = unsafe { &*ring };
-    let Ok(plaintext) = lock_ring(ring).try_open_framed_with_overlap(sender_leaf, wire) else {
+    // ADR-0034 Sprint 1: audio key space pinned (see the note on
+    // `lakko_sframe_participant_key_new`); Sprint 3 threads the real media type.
+    let Ok(plaintext) =
+        lock_ring(ring).try_open_framed_with_overlap(sender_leaf, core::MediaType::Audio, wire)
+    else {
         return LakkoSframeStatus::AeadFailed;
     };
     let (ptr, len) = vec_into_raw(plaintext);

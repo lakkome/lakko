@@ -58,7 +58,7 @@ use lakko_calls::link_invite::{
 };
 use lakko_calls::sframe as core;
 
-use crate::FfiError;
+use crate::{FfiError, FfiMediaType};
 
 /// Per-call shared key — the 32-byte seed each
 /// participant derives via the MLS exporter.
@@ -91,10 +91,12 @@ impl CallKey {
     }
 
     /// Derive the [`ParticipantKey`] for the supplied
-    /// leaf index. Each participant on the call holds
+    /// leaf index + media stream. Each participant on the call holds
     /// their own [`ParticipantKey`] for sealing (`leaf`
     /// = the local participant's leaf index) and one
-    /// per remote sender for opening.
+    /// per remote sender for opening. `media_type` (ADR-0034) keeps a
+    /// participant's audio and video streams on distinct key + nonce-salt
+    /// spaces so their independent counters cannot reuse a `(key, nonce)` pair.
     ///
     /// # Errors
     ///
@@ -104,10 +106,11 @@ impl CallKey {
     pub fn participant_key(
         &self,
         sender_leaf: u32,
+        media_type: FfiMediaType,
     ) -> Result<std::sync::Arc<ParticipantKey>, FfiError> {
         let pk = self
             .inner
-            .participant_key(sender_leaf)
+            .participant_key(sender_leaf, media_type.to_inner())
             .map_err(|e| FfiError::Call(format!("participant_key: {e:?}")))?;
         Ok(std::sync::Arc::new(ParticipantKey {
             inner: Mutex::new(pk),
@@ -470,9 +473,12 @@ impl CallKeyRing {
             .has_live_previous(now_ms)
     }
 
-    /// Derive the seal-side [`ParticipantKey`] for `sender_leaf` from the
-    /// current epoch. The caller re-fetches this after a `rekey_from_seed_at`
-    /// to seal under the new key.
+    /// Derive the seal-side [`ParticipantKey`] for `sender_leaf` + media stream
+    /// from the current epoch. The caller re-fetches this after a
+    /// `rekey_from_seed_at` to seal under the new key. `media_type` (ADR-0034)
+    /// keeps a participant's audio and video streams on distinct key +
+    /// nonce-salt spaces so their independent counters cannot reuse a
+    /// `(key, nonce)` pair.
     ///
     /// # Errors
     ///
@@ -481,12 +487,13 @@ impl CallKeyRing {
     pub fn participant_key(
         &self,
         sender_leaf: u32,
+        media_type: FfiMediaType,
     ) -> Result<std::sync::Arc<ParticipantKey>, FfiError> {
         let pk = self
             .inner
             .lock()
             .expect("call-key ring lock")
-            .participant_key(sender_leaf)
+            .participant_key(sender_leaf, media_type.to_inner())
             .map_err(|e| FfiError::Call(format!("ring participant_key: {e:?}")))?;
         Ok(std::sync::Arc::new(ParticipantKey {
             inner: Mutex::new(pk),
@@ -494,8 +501,9 @@ impl CallKeyRing {
     }
 
     /// Open an RFC 9605 framed SFrame with the overlap fall-back: try the
-    /// current key for `sender_leaf`, and on an AEAD failure fall back to the
-    /// retained previous key while its window is live (ADR-0029).
+    /// current key for `sender_leaf` + media stream, and on an AEAD failure fall
+    /// back to the retained previous key while its window is live (ADR-0029).
+    /// `media_type` (ADR-0034) selects the audio-or-video key space.
     ///
     /// # Errors
     ///
@@ -505,12 +513,13 @@ impl CallKeyRing {
     pub fn open_framed_with_overlap(
         &self,
         sender_leaf: u32,
+        media_type: FfiMediaType,
         wire: Vec<u8>,
     ) -> Result<Vec<u8>, FfiError> {
         self.inner
             .lock()
             .expect("call-key ring lock")
-            .try_open_framed_with_overlap(sender_leaf, &wire)
+            .try_open_framed_with_overlap(sender_leaf, media_type.to_inner(), &wire)
             .map_err(|e| FfiError::Call(format!("ring open_framed_with_overlap: {e:?}")))
     }
 }
@@ -544,7 +553,7 @@ mod tests {
     #[test]
     fn seal_open_round_trip_under_same_participant_key() {
         let ck = CallKey::from_seed(fixture_seed()).unwrap();
-        let pk = ck.participant_key(0).unwrap();
+        let pk = ck.participant_key(0, FfiMediaType::Audio).unwrap();
         let aad = b"meta".to_vec();
         let plaintext = b"hello sframe".to_vec();
 
@@ -558,7 +567,7 @@ mod tests {
     #[test]
     fn seal_increments_counter_across_calls() {
         let ck = CallKey::from_seed(fixture_seed()).unwrap();
-        let pk = ck.participant_key(0).unwrap();
+        let pk = ck.participant_key(0, FfiMediaType::Audio).unwrap();
 
         let first = pk.seal(vec![], b"a".to_vec()).unwrap();
         let second = pk.seal(vec![], b"b".to_vec()).unwrap();
@@ -576,8 +585,8 @@ mod tests {
     #[test]
     fn distinct_participants_produce_distinct_ciphertext() {
         let ck = CallKey::from_seed(fixture_seed()).unwrap();
-        let alice = ck.participant_key(0).unwrap();
-        let bob = ck.participant_key(1).unwrap();
+        let alice = ck.participant_key(0, FfiMediaType::Audio).unwrap();
+        let bob = ck.participant_key(1, FfiMediaType::Audio).unwrap();
         let aad = b"shared".to_vec();
         let pt = b"hello".to_vec();
         let a_sealed = alice.seal(aad.clone(), pt.clone()).unwrap();
@@ -598,7 +607,7 @@ mod tests {
     #[test]
     fn open_with_wrong_counter_fails() {
         let ck = CallKey::from_seed(fixture_seed()).unwrap();
-        let pk = ck.participant_key(0).unwrap();
+        let pk = ck.participant_key(0, FfiMediaType::Audio).unwrap();
         let sealed = pk.seal(vec![], b"hello".to_vec()).unwrap();
         let err = pk
             .open(vec![], sealed.ciphertext, sealed.counter + 1)
@@ -618,13 +627,13 @@ mod tests {
     #[test]
     fn receiver_can_open_with_freshly_derived_participant_key() {
         let ck = CallKey::from_seed(fixture_seed()).unwrap();
-        let alice_send = ck.participant_key(0).unwrap();
+        let alice_send = ck.participant_key(0, FfiMediaType::Audio).unwrap();
         let sealed = alice_send.seal(vec![], b"hi from alice".to_vec()).unwrap();
 
         // Bob's side reconstructs Alice's participant
         // key off the shared CallKey + alice's
         // sender_leaf.
-        let alice_recv = ck.participant_key(0).unwrap();
+        let alice_recv = ck.participant_key(0, FfiMediaType::Audio).unwrap();
         let opened = alice_recv
             .open(vec![], sealed.ciphertext, sealed.counter)
             .unwrap();
@@ -657,7 +666,7 @@ mod tests {
     #[test]
     fn send_then_receive_full_pipeline() {
         let ck = CallKey::from_seed(fixture_seed()).unwrap();
-        let alice_send = ck.participant_key(0).unwrap();
+        let alice_send = ck.participant_key(0, FfiMediaType::Audio).unwrap();
         let aad = b"call-id".to_vec();
         let plaintext = b"voice frame".to_vec();
         let sealed = alice_send.seal(aad.clone(), plaintext.clone()).unwrap();
@@ -668,7 +677,9 @@ mod tests {
         // sender_leaf, opens.
         let unwrapped = unwrap_sframe_frame(wire).unwrap();
         assert_eq!(unwrapped.sender_leaf, 0);
-        let alice_recv = ck.participant_key(unwrapped.sender_leaf).unwrap();
+        let alice_recv = ck
+            .participant_key(unwrapped.sender_leaf, FfiMediaType::Audio)
+            .unwrap();
         let opened = alice_recv
             .open(aad, unwrapped.ciphertext, unwrapped.counter)
             .unwrap();
@@ -721,7 +732,9 @@ mod tests {
         let ring = CallKeyRing::from_seed(vec![0x11u8; 32]).expect("ring a");
         let leaf = 3u32;
         // Seal an old-epoch frame under seed A.
-        let pk_old = ring.participant_key(leaf).expect("pk old");
+        let pk_old = ring
+            .participant_key(leaf, FfiMediaType::Audio)
+            .expect("pk old");
         let old_wire = pk_old.seal_framed(b"old".to_vec()).expect("seal old");
 
         // Rotate to epoch B with the default overlap window at t=1000.
@@ -730,16 +743,20 @@ mod tests {
         assert!(ring.has_live_previous(1_500));
 
         // Seal a new-epoch frame under seed B.
-        let pk_new = ring.participant_key(leaf).expect("pk new");
+        let pk_new = ring
+            .participant_key(leaf, FfiMediaType::Audio)
+            .expect("pk new");
         let new_wire = pk_new.seal_framed(b"new".to_vec()).expect("seal new");
 
         // Both open through the ring's overlap fall-back.
         assert_eq!(
-            ring.open_framed_with_overlap(leaf, old_wire).expect("old"),
+            ring.open_framed_with_overlap(leaf, FfiMediaType::Audio, old_wire)
+                .expect("old"),
             b"old".to_vec()
         );
         assert_eq!(
-            ring.open_framed_with_overlap(leaf, new_wire).expect("new"),
+            ring.open_framed_with_overlap(leaf, FfiMediaType::Audio, new_wire)
+                .expect("new"),
             b"new".to_vec()
         );
     }
@@ -748,19 +765,21 @@ mod tests {
     fn call_key_ring_prune_closes_the_overlap_window() {
         let ring = CallKeyRing::from_seed(vec![0x11u8; 32]).expect("ring");
         let leaf = 3u32;
-        let pk_old = ring.participant_key(leaf).expect("pk");
+        let pk_old = ring.participant_key(leaf, FfiMediaType::Audio).expect("pk");
         let old_wire = pk_old.seal_framed(b"old".to_vec()).expect("seal");
         ring.rekey_from_seed_at(vec![0x22u8; 32], 1_000, 1_000)
             .expect("rekey"); // expires at 2000
 
         // Inside the window the old frame still opens.
         assert!(ring
-            .open_framed_with_overlap(leaf, old_wire.clone())
+            .open_framed_with_overlap(leaf, FfiMediaType::Audio, old_wire.clone())
             .is_ok());
 
         // At/after expiry, prune closes the window and the old frame is refused.
         assert!(!ring.has_live_previous(2_000));
         ring.prune_expired(2_000);
-        assert!(ring.open_framed_with_overlap(leaf, old_wire).is_err());
+        assert!(ring
+            .open_framed_with_overlap(leaf, FfiMediaType::Audio, old_wire)
+            .is_err());
     }
 }

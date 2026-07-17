@@ -2644,20 +2644,24 @@ pub fn sframe_derive_call_key(
     Ok(key.as_bytes().to_vec())
 }
 
-/// Derive a per-participant SFrame key + nonce salt
-/// (Phase 3a4).
+/// Derive a per-participant SFrame key + nonce salt for a given media stream
+/// (Phase 3a4; `media_type` per ADR-0034 — `0 = audio`, `1 = video`). Audio and
+/// video from the same leaf derive distinct keys + nonce salts, so their
+/// independent counters cannot reuse a `(key, nonce)` pair.
 #[wasm_bindgen(js_name = sframeDeriveParticipantKey)]
 pub fn sframe_derive_participant_key(
     call_key_seed: &[u8],
     sender_leaf: u32,
+    media_type: u8,
 ) -> Result<SframeParticipantKey, JsError> {
     if call_key_seed.len() != 32 {
         return Err(JsError::new("call_key_seed must be 32 bytes"));
     }
+    let media = crate::sframe::media_type_from_u8(media_type)?;
     let mut seed = [0u8; 32];
     seed.copy_from_slice(call_key_seed);
     let ck = lakko_calls::CallKey::from_seed(seed);
-    let pk = ck.participant_key(sender_leaf).map_err(calls_err)?;
+    let pk = ck.participant_key(sender_leaf, media).map_err(calls_err)?;
     Ok(SframeParticipantKey {
         key_bytes_val: pk.key_bytes().to_vec(),
         nonce_salt_val: pk.nonce_salt().to_vec(),
@@ -2678,10 +2682,12 @@ pub fn sframe_open_with_overlap(
     current_call_key_seed: &[u8],
     previous_call_key_seed: Option<Vec<u8>>,
     sender_leaf: u32,
+    media_type: u8,
     aad: &[u8],
     ciphertext: &[u8],
     frame_counter: u32,
 ) -> Result<Vec<u8>, JsError> {
+    let media = crate::sframe::media_type_from_u8(media_type)?;
     let take_seed = |bytes: &[u8]| -> Result<[u8; 32], JsError> {
         if bytes.len() != 32 {
             return Err(JsError::new(&format!(
@@ -2696,7 +2702,9 @@ pub fn sframe_open_with_overlap(
 
     let current_seed = take_seed(current_call_key_seed)?;
     let current = lakko_calls::CallKey::from_seed(current_seed);
-    let current_key = current.participant_key(sender_leaf).map_err(calls_err)?;
+    let current_key = current
+        .participant_key(sender_leaf, media)
+        .map_err(calls_err)?;
     match current_key.open(aad, ciphertext, frame_counter) {
         Ok(pt) => return Ok(pt),
         Err(lakko_calls::Error::Crypto(_)) => {
@@ -2708,7 +2716,9 @@ pub fn sframe_open_with_overlap(
     if let Some(prev_bytes) = previous_call_key_seed {
         let prev_seed = take_seed(&prev_bytes)?;
         let previous = lakko_calls::CallKey::from_seed(prev_seed);
-        let prev_key = previous.participant_key(sender_leaf).map_err(calls_err)?;
+        let prev_key = previous
+            .participant_key(sender_leaf, media)
+            .map_err(calls_err)?;
         return prev_key
             .open(aad, ciphertext, frame_counter)
             .map_err(calls_err);

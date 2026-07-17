@@ -30,13 +30,13 @@ ParticipantKey  — per-sender key + salt + counter
 sealed frame
 ```
 
-The two HKDF info strings are domain-separated so a context-confusion attacker (key-as-nonce, nonce-as-key) lands on a distinct label. Both the key and the salt fold the sender leaf in, so distinct leaves get distinct key material (see C-3).
+The two HKDF info strings are domain-separated so a context-confusion attacker (key-as-nonce, nonce-as-key) lands on a distinct label. Both the key and the salt fold the sender leaf **and the media type** in, so distinct leaves — and a single leaf's distinct media streams (audio vs video) — get distinct key material (see C-3). The media-type byte (ADR-0034) is what keeps a participant's audio and video streams, which share one leaf, off a shared `(key, nonce)` space.
 
 ## Public contract
 
 - `CallKey::derive(group, identity, call_id)` — pulls the per-call seed from the live MLS exporter. Deterministic per epoch: two parties in the same group at the same epoch reach the same 32 bytes (C-1), so no shared-secret exchange is needed. Fails with `Error::Exporter` only if the MLS group rejects the label/length.
 - `CallKey::from_seed(seed)` — construct from a known seed; documented test-only/FFI-only, production goes through `derive`.
-- `CallKey::participant_key(sender_leaf)` — derive the per-sender `ParticipantKey`. A sender calls it for its own leaf to seal; a receiver calls it for the *sender's* leaf (read from the SFrame header) to open. Fresh counter = 0.
+- `CallKey::participant_key(sender_leaf, media_type)` — derive the per-sender, per-media-stream `ParticipantKey`. A sender calls it for its own leaf to seal; a receiver calls it for the *sender's* leaf (read from the SFrame header) + the media type of the track the frame arrived on to open. `media_type` (ADR-0034; `MediaType::{Audio, Video}`) is local context — it never travels on the wire (the header KID stays `= sender_leaf`), yet both endpoints reach the same discriminator. Fresh counter = 0.
 - `ParticipantKey::seal(aad, plaintext)` — pre-increments the counter, then AEAD-seals; returns `(frame_counter, ciphertext_with_tag)`. The caller must embed `frame_counter` in the header so the receiver can rebuild the nonce.
 - `ParticipantKey::open(aad, ciphertext, frame_counter)` — stateless AEAD-open under the caller-supplied counter. Any authentication failure (wrong key / AAD / counter / tamper) is `Error::Crypto`.
 - `ParticipantKey::seal_framed(plaintext)` / `open_framed(wire)` — the ADR-0013 wire contract: seal produces `SframeHeader(kid=sender_leaf, ctr) || ciphertext` with the **encoded header bytes bound as the AEAD AAD**; open parses the header, checks the KID against this key's leaf, and AEAD-opens. Because the AAD is derived from `(kid, ctr)` alone (never host RTP metadata), a web transform and a native shim feed identical AAD and interop byte-for-byte.
@@ -46,6 +46,7 @@ The two HKDF info strings are domain-separated so a context-confusion attacker (
 
 - **C-1 / C-2 (seed agreement + cross-party seal/open):** the seed is a deterministic MLS-exporter output; a receiver re-derives the sender's `ParticipantKey` from its own group view and opens.
 - **C-3 (per-leaf key separation):** distinct `sender_leaf` values yield distinct AEAD keys AND distinct nonce salts (the leaf is folded into both HKDF derivations). Test `participant_keys_differ_across_leaves`.
+- **ADR-0034 (per-media-stream key separation):** a single leaf's audio and video streams derive distinct AEAD keys AND distinct nonce salts (the media type is folded into both HKDF derivations), so their independent per-stream counters can never reuse a `(key, nonce)` pair — sealing the same plaintext at the same counter on the two streams yields different ciphertext. Test `audio_and_video_from_one_leaf_get_distinct_key_and_nonce`.
 - **C-5 (strictly monotone counter, no nonce reuse):** `seal` increments once per frame and never reuses a `(key, nonce)` pair. At `u32::MAX` the seal path returns `Error::CounterExhausted` — checked *before* any state mutation, so the key stays usable for a re-keyed retry, and the refusal is idempotent (never wraps to 0, which would replay the first frame's nonce). Tests `counter_increments_strictly`, `counter_exhaustion_returns_typed_error`, `counter_exhaustion_is_idempotent`, `counter_max_frame_still_opens_on_receiver`.
 - **C-6 (AAD binding):** the SFrame header bytes are the AAD; a wrong-AAD open fails authentication. Test `wrong_aad_rejects_open`.
 - **C-7 (counter binding):** the counter feeds the nonce, so a wrong counter yields a wrong nonce and the AEAD rejects. Test `wrong_counter_rejects_open`; and at the framed layer a header spliced onto another frame's body is rejected (`open_framed_rejects_a_header_spliced_onto_another_frames_body`).
@@ -72,7 +73,7 @@ The two HKDF info strings are domain-separated so a context-confusion attacker (
 
 ## References
 
-- ADR-0013 (cross-platform SFrame AEAD AAD = the header bytes), ADR-0001 (MLS exporter for call media keys), ADR-0029 (mid-call rekey — the `CallKeyRing` that drives this module's rotation)
+- ADR-0013 (cross-platform SFrame AEAD AAD = the header bytes), ADR-0001 (MLS exporter for call media keys), ADR-0029 (mid-call rekey — the `CallKeyRing` that drives this module's rotation), ADR-0034 (per-media-stream key separation — the `media_type` folded into `participant_key`)
 - Invariants C-1, C-2, C-3, C-5, C-6, C-7, C-55 (`docs/security/calls.md`); security invariant #4 (no plaintext fallback)
 - Sibling spec: `crates/lakko-calls/src/header.sc.md` (the header codec this module seals over)
-- Key tests (in-module `#[cfg(test)]`): `participant_key_round_trips`, `participant_keys_differ_across_leaves`, `counter_increments_strictly`, `counter_exhaustion_returns_typed_error`, `wrong_aad_rejects_open`, `wrong_counter_rejects_open`, `golden_vector_seals_to_the_canonical_cross_stack_wire`, `open_framed_rejects_wrong_leaf_key`, `open_framed_rejects_a_header_spliced_onto_another_frames_body`, `open_framed_is_stateless_so_replay_is_an_app_layer_concern`, `frame_sealed_under_one_call_key_does_not_open_under_another`
+- Key tests (in-module `#[cfg(test)]`): `participant_key_round_trips`, `participant_keys_differ_across_leaves`, `audio_and_video_from_one_leaf_get_distinct_key_and_nonce`, `counter_increments_strictly`, `counter_exhaustion_returns_typed_error`, `wrong_aad_rejects_open`, `wrong_counter_rejects_open`, `golden_vector_seals_to_the_canonical_cross_stack_wire`, `open_framed_rejects_wrong_leaf_key`, `open_framed_rejects_a_header_spliced_onto_another_frames_body`, `open_framed_is_stateless_so_replay_is_an_app_layer_concern`, `frame_sealed_under_one_call_key_does_not_open_under_another`

@@ -78,6 +78,40 @@ const FRAME_NONCE_INFO: &[u8] = b"lakko/sframe/v1/nonce";
 /// ParticipantKey → counter resets to 0).
 const MAX_FRAME_COUNTER: u32 = u32::MAX;
 
+/// Media-stream discriminator folded into the per-participant key derivation
+/// (ADR-0034). A participant's audio and video streams share one MLS leaf (the
+/// SFrame header KID), so without this discriminator they would derive the
+/// SAME `(key, nonce_salt)` and — with an independent per-stream counter each —
+/// reuse the identical `(key, nonce)` pair across the two streams on different
+/// plaintexts (ChaCha20 keystream reuse + Poly1305 tag forgery). Mixing the
+/// media type into the HKDF `info` gives audio and video **distinct** key +
+/// salt spaces, so the two counters can never collide.
+///
+/// The tag rides ONLY in the local derivation — the on-wire SFrame header KID
+/// stays `= sender_leaf`. The media type is unambiguous local context (a
+/// `FrameDecryptor` is bound to exactly one audio-or-video receiver), so both
+/// endpoints reach the same discriminator without it travelling on the wire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MediaType {
+    /// Audio stream.
+    Audio,
+    /// Video stream (the camera track; a future second video stream — e.g.
+    /// screen-share — needs a further discriminator, see ADR-0034).
+    Video,
+}
+
+impl MediaType {
+    /// The 1-byte tag mixed into the HKDF `info`. `0x00` is reserved so a
+    /// future third stream kind cannot collide with these two.
+    #[must_use]
+    const fn tag(self) -> u8 {
+        match self {
+            Self::Audio => 0x01,
+            Self::Video => 0x02,
+        }
+    }
+}
+
 // =============================================================================
 // CallKey
 // =============================================================================
@@ -134,27 +168,36 @@ impl CallKey {
     /// [`ParticipantKey`] for sealing and re-derives every
     /// peer's [`ParticipantKey`] for opening.
     ///
-    /// HKDF-SHA-256 over `(seed, info = "lakko/sframe/v1/key"
-    /// || sender_leaf_be)` — receivers reach the same value
-    /// because they see the same `sender_leaf` in the SFrame
-    /// header.
+    /// HKDF-SHA-256 over `(seed, info = "lakko/sframe/v1/key" ||
+    /// sender_leaf_be || media_type_tag)` — receivers reach the same value
+    /// because they see the same `sender_leaf` in the SFrame header and know
+    /// the same `media_type` from the receiver the frame arrived on. The
+    /// `media_type` byte (ADR-0034) keeps a participant's audio and video
+    /// keys + nonce salts distinct so their independent counters cannot reuse
+    /// a `(key, nonce)` pair.
     ///
     /// # Errors
     ///
     /// Returns [`Error::Crypto`] when HKDF rejects the input
     /// length (practically unreachable with valid inputs).
-    pub fn participant_key(&self, sender_leaf: u32) -> Result<ParticipantKey> {
-        let mut info = Vec::with_capacity(PARTICIPANT_KEY_INFO.len() + 4);
+    pub fn participant_key(
+        &self,
+        sender_leaf: u32,
+        media_type: MediaType,
+    ) -> Result<ParticipantKey> {
+        let mut info = Vec::with_capacity(PARTICIPANT_KEY_INFO.len() + 5);
         info.extend_from_slice(PARTICIPANT_KEY_INFO);
         info.extend_from_slice(&sender_leaf.to_be_bytes());
+        info.push(media_type.tag());
         let key_secret = kdf::hkdf_sha256::<CALL_KEY_LEN>(self.seed.as_bytes(), b"", &info)
             .map_err(|e| Error::Crypto(format!("hkdf: {e:?}")))?;
         // Also derive the per-participant nonce salt so the
         // 12-byte AEAD nonce is uniformly random over the
         // counter space, not just the counter byte itself.
-        let mut nonce_info = Vec::with_capacity(FRAME_NONCE_INFO.len() + 4);
+        let mut nonce_info = Vec::with_capacity(FRAME_NONCE_INFO.len() + 5);
         nonce_info.extend_from_slice(FRAME_NONCE_INFO);
         nonce_info.extend_from_slice(&sender_leaf.to_be_bytes());
+        nonce_info.push(media_type.tag());
         let nonce_secret = kdf::hkdf_sha256::<32>(self.seed.as_bytes(), b"", &nonce_info)
             .map_err(|e| Error::Crypto(format!("hkdf: {e:?}")))?;
         let mut nonce_salt = [0u8; NONCE_LEN];
@@ -431,8 +474,8 @@ mod tests {
         // agreement property is covered by lakko-mls's tests.
         let key_b = CallKey::from_seed(*key_a.as_bytes());
 
-        let mut sender = key_a.participant_key(/* sender_leaf */ 0).unwrap();
-        let receiver = key_b.participant_key(/* sender_leaf */ 0).unwrap();
+        let mut sender = key_a.participant_key(0, MediaType::Audio).unwrap();
+        let receiver = key_b.participant_key(0, MediaType::Audio).unwrap();
 
         let aad = b"sframe-header-bytes";
         let pt = b"hello, p2p audio frame";
@@ -447,16 +490,74 @@ mod tests {
     fn participant_keys_differ_across_leaves() {
         let (id_a, _id_b, group_a) = make_pair();
         let key = CallKey::derive(&group_a, &id_a, b"call/x").unwrap();
-        let k0 = key.participant_key(0).unwrap();
-        let k1 = key.participant_key(1).unwrap();
+        let k0 = key.participant_key(0, MediaType::Audio).unwrap();
+        let k1 = key.participant_key(1, MediaType::Audio).unwrap();
         assert_ne!(k0.key_bytes(), k1.key_bytes());
         assert_ne!(k0.nonce_salt(), k1.nonce_salt());
+    }
+
+    /// ADR-0034 security property: a participant's audio and video streams
+    /// share ONE MLS leaf (the on-wire SFrame header KID), but must derive
+    /// **distinct** `(key, nonce_salt)` spaces — otherwise their two
+    /// independent per-stream counters would eventually reuse the identical
+    /// `(key, nonce)` pair on different plaintexts (ChaCha20 keystream reuse +
+    /// Poly1305 tag forgery). The `media_type` byte folded into BOTH HKDF
+    /// derivations is what prevents that.
+    #[test]
+    fn audio_and_video_from_one_leaf_get_distinct_key_and_nonce() {
+        let leaf = 4;
+        let key = CallKey::from_seed([0x5A; CALL_KEY_LEN]);
+        let pk_audio = key.participant_key(leaf, MediaType::Audio).unwrap();
+        let pk_video = key.participant_key(leaf, MediaType::Video).unwrap();
+
+        // (a) distinct AEAD keys, (b) distinct nonce salts — the two streams
+        // key into separate spaces despite sharing the leaf.
+        assert_ne!(
+            pk_audio.key_bytes(),
+            pk_video.key_bytes(),
+            "audio + video from one leaf must not share an AEAD key"
+        );
+        assert_ne!(
+            pk_audio.nonce_salt(),
+            pk_video.nonce_salt(),
+            "audio + video from one leaf must not share a nonce salt"
+        );
+
+        // (c) the whole point: sealing the SAME plaintext at the SAME counter
+        // value (both at counter 1 — the first sealed frame on each fresh key)
+        // yields DIFFERENT ciphertext, proving the `(key, nonce)` pair differs
+        // so a cross-stream keystream/nonce reuse cannot happen.
+        let mut audio = key.participant_key(leaf, MediaType::Audio).unwrap();
+        let mut video = key.participant_key(leaf, MediaType::Video).unwrap();
+        let aad = b"same-header";
+        let pt = b"identical media plaintext";
+        let (audio_counter, audio_cipher) = audio.seal(aad, pt).unwrap();
+        let (video_counter, video_cipher) = video.seal(aad, pt).unwrap();
+        assert_eq!(audio_counter, 1, "first audio frame is counter 1");
+        assert_eq!(video_counter, 1, "first video frame is counter 1");
+        assert_ne!(
+            audio_cipher, video_cipher,
+            "same plaintext at the same counter must not seal to the same \
+             ciphertext across the two streams (no (key, nonce) reuse)"
+        );
+
+        // Regression: the pre-existing per-leaf separation still holds WITHIN a
+        // single media type — audio-vs-audio and video-vs-video across two
+        // leaves still differ.
+        let a_leaf4 = key.participant_key(4, MediaType::Audio).unwrap();
+        let a_leaf7 = key.participant_key(7, MediaType::Audio).unwrap();
+        assert_ne!(a_leaf4.key_bytes(), a_leaf7.key_bytes());
+        assert_ne!(a_leaf4.nonce_salt(), a_leaf7.nonce_salt());
+        let v_leaf4 = key.participant_key(4, MediaType::Video).unwrap();
+        let v_leaf7 = key.participant_key(7, MediaType::Video).unwrap();
+        assert_ne!(v_leaf4.key_bytes(), v_leaf7.key_bytes());
+        assert_ne!(v_leaf4.nonce_salt(), v_leaf7.nonce_salt());
     }
 
     #[test]
     fn counter_increments_strictly() {
         let key = CallKey::from_seed([0x42; CALL_KEY_LEN]);
-        let mut p = key.participant_key(0).unwrap();
+        let mut p = key.participant_key(0, MediaType::Audio).unwrap();
         let (c1, _) = p.seal(b"aad", b"f1").unwrap();
         let (c2, _) = p.seal(b"aad", b"f2").unwrap();
         let (c3, _) = p.seal(b"aad", b"f3").unwrap();
@@ -468,8 +569,8 @@ mod tests {
     #[test]
     fn wrong_counter_rejects_open() {
         let key = CallKey::from_seed([0x42; CALL_KEY_LEN]);
-        let mut sender = key.participant_key(0).unwrap();
-        let receiver = key.participant_key(0).unwrap();
+        let mut sender = key.participant_key(0, MediaType::Audio).unwrap();
+        let receiver = key.participant_key(0, MediaType::Audio).unwrap();
         let (ctr, ct) = sender.seal(b"aad", b"frame").unwrap();
         // Bump the counter by one → wrong nonce → AEAD
         // rejects.
@@ -483,8 +584,8 @@ mod tests {
     #[test]
     fn wrong_aad_rejects_open() {
         let key = CallKey::from_seed([0x42; CALL_KEY_LEN]);
-        let mut sender = key.participant_key(0).unwrap();
-        let receiver = key.participant_key(0).unwrap();
+        let mut sender = key.participant_key(0, MediaType::Audio).unwrap();
+        let receiver = key.participant_key(0, MediaType::Audio).unwrap();
         let (ctr, ct) = sender.seal(b"aad-A", b"frame").unwrap();
         match receiver.open(b"aad-B", &ct, ctr) {
             Ok(_) => panic!("wrong AAD must fail authentication"),
@@ -517,7 +618,7 @@ mod tests {
     #[test]
     fn counter_exhaustion_returns_typed_error() {
         let key = CallKey::from_seed([0xCC; CALL_KEY_LEN]);
-        let mut p = key.participant_key(0).unwrap();
+        let mut p = key.participant_key(0, MediaType::Audio).unwrap();
         // Land at u32::MAX - 2 — two seals must still
         // succeed (counter increments to MAX - 1 then MAX),
         // the third must refuse.
@@ -547,8 +648,8 @@ mod tests {
         // it — no off-by-one at the nonce-composition
         // boundary.
         let key = CallKey::from_seed([0xCD; CALL_KEY_LEN]);
-        let mut sender = key.participant_key(0).unwrap();
-        let receiver = key.participant_key(0).unwrap();
+        let mut sender = key.participant_key(0, MediaType::Audio).unwrap();
+        let receiver = key.participant_key(0, MediaType::Audio).unwrap();
         sender.set_counter_for_test(u32::MAX - 1);
         let (ctr, ct) = sender
             .seal(b"aad-edge", b"last-frame")
@@ -568,7 +669,7 @@ mod tests {
         // re-use the salt-XOR-0 nonce already consumed by
         // the very first seal in this key's lifetime).
         let key = CallKey::from_seed([0xCE; CALL_KEY_LEN]);
-        let mut p = key.participant_key(0).unwrap();
+        let mut p = key.participant_key(0, MediaType::Audio).unwrap();
         p.set_counter_for_test(u32::MAX);
         for attempt in 0..16 {
             match p.seal(b"aad", b"junk") {
@@ -594,14 +695,17 @@ mod tests {
     /// SFU forwards the wire verbatim, which the live str0m e2e already
     /// shows). A drift on any platform fails its test loudly.
     ///
+    /// The golden is the AUDIO-stream vector (ADR-0034 folds the media type
+    /// into the participant-key derivation; the video vector differs).
+    ///
     /// To regenerate after an intentional wire change: seal `(seed=[0x42;32],
-    /// leaf=3, plaintext=b"lakko sframe golden vector v1")` on a fresh
-    /// `ParticipantKey` (counter 0) and update the hex on all four stacks.
+    /// leaf=3, media=Audio, plaintext=b"lakko sframe golden vector v1")` on a
+    /// fresh `ParticipantKey` (counter 0) and update the hex on all four stacks.
     const GOLDEN_SEED: [u8; CALL_KEY_LEN] = [0x42; CALL_KEY_LEN];
     const GOLDEN_LEAF: u32 = 3;
     const GOLDEN_PLAINTEXT: &[u8] = b"lakko sframe golden vector v1";
     const GOLDEN_WIRE_HEX: &str =
-        "31a6d1fee0dd6f091a0071e56d66a889f734a5b2fa6ef8f079d2e6b3e9b256e41ff55ca0102c28b8b697c526be59";
+        "31093c4f19a3b815c0a17a8ad09d2df18c6971987eb1c214484e9ebcc4f92b4c04e5c80bc145a9f23e1c60e2faa4";
 
     fn golden_wire() -> Vec<u8> {
         (0..GOLDEN_WIRE_HEX.len() / 2)
@@ -612,7 +716,9 @@ mod tests {
     #[test]
     fn golden_vector_seals_to_the_canonical_cross_stack_wire() {
         let mut sender = CallKey::from_seed(GOLDEN_SEED)
-            .participant_key(GOLDEN_LEAF)
+            // The golden vector is the AUDIO-stream wire vector (ADR-0034); the
+            // media type is now folded into the participant-key derivation.
+            .participant_key(GOLDEN_LEAF, MediaType::Audio)
             .unwrap();
         let wire = sender.seal_framed(GOLDEN_PLAINTEXT).expect("seal_framed");
         assert_eq!(
@@ -627,7 +733,9 @@ mod tests {
     #[test]
     fn golden_vector_opens_to_the_plaintext() {
         let receiver = CallKey::from_seed(GOLDEN_SEED)
-            .participant_key(GOLDEN_LEAF)
+            // The golden vector is the AUDIO-stream wire vector (ADR-0034); the
+            // media type is now folded into the participant-key derivation.
+            .participant_key(GOLDEN_LEAF, MediaType::Audio)
             .unwrap();
         let opened = receiver.open_framed(&golden_wire()).expect("open_framed");
         assert_eq!(opened.as_slice(), GOLDEN_PLAINTEXT);
@@ -636,10 +744,10 @@ mod tests {
     #[test]
     fn seal_framed_round_trips_through_open_framed() {
         let key = CallKey::from_seed([0x13; CALL_KEY_LEN]);
-        let mut sender = key.participant_key(5).unwrap();
+        let mut sender = key.participant_key(5, MediaType::Audio).unwrap();
         // Receiver re-derives the SENDER's key by the same leaf —
         // exactly the cross-participant open path.
-        let receiver = key.participant_key(5).unwrap();
+        let receiver = key.participant_key(5, MediaType::Audio).unwrap();
         let pt = b"e2ee media frame";
         let wire = sender.seal_framed(pt).expect("seal_framed");
         let opened = receiver.open_framed(&wire).expect("open_framed");
@@ -649,7 +757,7 @@ mod tests {
     #[test]
     fn seal_framed_wire_starts_with_the_canonical_header() {
         let key = CallKey::from_seed([0x13; CALL_KEY_LEN]);
-        let mut sender = key.participant_key(5).unwrap();
+        let mut sender = key.participant_key(5, MediaType::Audio).unwrap();
         let wire = sender.seal_framed(b"x").expect("seal_framed");
         // First frame → counter 1; header decodes to (kid=5, ctr=1)
         // and is the minimal canonical encoding.
@@ -665,8 +773,8 @@ mod tests {
     #[test]
     fn seal_framed_counters_advance_monotonically() {
         let key = CallKey::from_seed([0x13; CALL_KEY_LEN]);
-        let mut sender = key.participant_key(0).unwrap();
-        let receiver = key.participant_key(0).unwrap();
+        let mut sender = key.participant_key(0, MediaType::Audio).unwrap();
+        let receiver = key.participant_key(0, MediaType::Audio).unwrap();
         for expected_ctr in 1..=4u64 {
             let wire = sender.seal_framed(b"frame").expect("seal_framed");
             let (header, _) = SframeHeader::decode(&wire).expect("decode");
@@ -682,11 +790,11 @@ mod tests {
     #[test]
     fn open_framed_rejects_wrong_leaf_key() {
         let key = CallKey::from_seed([0x13; CALL_KEY_LEN]);
-        let mut sender = key.participant_key(5).unwrap();
+        let mut sender = key.participant_key(5, MediaType::Audio).unwrap();
         let wire = sender.seal_framed(b"frame").expect("seal_framed");
         // A key derived for a DIFFERENT leaf must refuse — the kid
         // guard fires before any AEAD work.
-        let wrong = key.participant_key(6).unwrap();
+        let wrong = key.participant_key(6, MediaType::Audio).unwrap();
         match wrong.open_framed(&wire) {
             Err(Error::Crypto(msg)) => assert!(msg.contains("kid"), "got {msg}"),
             other => panic!("expected kid-mismatch Crypto error, got {other:?}"),
@@ -696,8 +804,8 @@ mod tests {
     #[test]
     fn open_framed_rejects_tampered_header() {
         let key = CallKey::from_seed([0x13; CALL_KEY_LEN]);
-        let mut sender = key.participant_key(0).unwrap();
-        let receiver = key.participant_key(0).unwrap();
+        let mut sender = key.participant_key(0, MediaType::Audio).unwrap();
+        let receiver = key.participant_key(0, MediaType::Audio).unwrap();
         let mut wire = sender.seal_framed(b"frame").expect("seal_framed");
         // Flip the counter byte in the header (kid=0,ctr=1 → header
         // is [0x00, 0x01]; bump ctr to 2). The AEAD AAD no longer
@@ -709,8 +817,8 @@ mod tests {
     #[test]
     fn open_framed_rejects_tampered_ciphertext() {
         let key = CallKey::from_seed([0x13; CALL_KEY_LEN]);
-        let mut sender = key.participant_key(0).unwrap();
-        let receiver = key.participant_key(0).unwrap();
+        let mut sender = key.participant_key(0, MediaType::Audio).unwrap();
+        let receiver = key.participant_key(0, MediaType::Audio).unwrap();
         let mut wire = sender.seal_framed(b"frame").expect("seal_framed");
         // Flip the last ciphertext byte (inside the AEAD tag region).
         let last = wire.len() - 1;
@@ -721,7 +829,7 @@ mod tests {
     #[test]
     fn open_framed_rejects_truncated_wire() {
         let key = CallKey::from_seed([0x13; CALL_KEY_LEN]);
-        let receiver = key.participant_key(0).unwrap();
+        let receiver = key.participant_key(0, MediaType::Audio).unwrap();
         // Config 0x0B (RFC 9605 §4.3: X=0 K=0 Y=1 C=3) declares a 4-byte CTR
         // with no bytes present → the header decode fails as truncated.
         match receiver.open_framed(&[0x0B]) {
@@ -733,7 +841,7 @@ mod tests {
     #[test]
     fn seal_framed_honours_counter_exhaustion() {
         let key = CallKey::from_seed([0x13; CALL_KEY_LEN]);
-        let mut p = key.participant_key(0).unwrap();
+        let mut p = key.participant_key(0, MediaType::Audio).unwrap();
         p.set_counter_for_test(u32::MAX);
         match p.seal_framed(b"junk") {
             Err(Error::CounterExhausted) => {},
@@ -755,8 +863,8 @@ mod tests {
         // `wrong_counter_rejects_open` (the raw counter-vs-nonce binding) and
         // `open_framed_rejects_tampered_header` (a single mutated byte).
         let key = CallKey::from_seed([0x13; CALL_KEY_LEN]);
-        let mut sender = key.participant_key(0).unwrap();
-        let receiver = key.participant_key(0).unwrap();
+        let mut sender = key.participant_key(0, MediaType::Audio).unwrap();
+        let receiver = key.participant_key(0, MediaType::Audio).unwrap();
 
         let wire1 = sender.seal_framed(b"frame body A").expect("seal_framed A");
         let wire2 = sender.seal_framed(b"frame body B").expect("seal_framed B");
@@ -791,8 +899,8 @@ mod tests {
         // This test PINS that boundary: if a future change makes open stateful,
         // it breaks here and forces a conscious decision.
         let key = CallKey::from_seed([0x13; CALL_KEY_LEN]);
-        let mut sender = key.participant_key(0).unwrap();
-        let receiver = key.participant_key(0).unwrap();
+        let mut sender = key.participant_key(0, MediaType::Audio).unwrap();
+        let receiver = key.participant_key(0, MediaType::Audio).unwrap();
         let wire = sender.seal_framed(b"replayed frame").expect("seal_framed");
         assert_eq!(
             receiver.open_framed(&wire).expect("first open"),
@@ -819,10 +927,10 @@ mod tests {
         // undecryptable, not merely undelivered (invariant #4).
         let leaf = 3;
         let mut sender_a = CallKey::from_seed([0xA1; CALL_KEY_LEN])
-            .participant_key(leaf)
+            .participant_key(leaf, MediaType::Audio)
             .unwrap();
         let receiver_b = CallKey::from_seed([0xB2; CALL_KEY_LEN])
-            .participant_key(leaf)
+            .participant_key(leaf, MediaType::Audio)
             .unwrap();
 
         let wire = sender_a.seal_framed(b"call A media").expect("seal_framed");
@@ -838,7 +946,7 @@ mod tests {
         // Sanity: call A's own receiver DOES open it — the failure above is the
         // seed, not the frame.
         let receiver_a = CallKey::from_seed([0xA1; CALL_KEY_LEN])
-            .participant_key(leaf)
+            .participant_key(leaf, MediaType::Audio)
             .unwrap();
         assert_eq!(
             receiver_a
