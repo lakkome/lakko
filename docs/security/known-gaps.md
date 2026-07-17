@@ -1244,6 +1244,52 @@ forward chain cleanly: an already-consumed
 "already joined" UI branch without re-bootstrapping
 the MLS group.
 
+### G-31: Cross-stream SFrame AEAD nonce reuse (audio + video under one leaf) — **CLOSED (2026-07, [ADR-0034](../adr/0034-sframe-per-media-stream-key.md))**
+
+A `lakko-security` review of the mid-call camera-on arc
+([ADR-0032](../adr/0032-multi-joiner-call-links.md) piece B)
+surfaced a pre-existing, system-wide **HIGH**. The SFrame
+header KID is `= sender_leaf`, and a participant sends both
+audio and video under that one leaf. `CallKey::participant_key`
+derived a single `(key, nonce_salt)` from `(seed, sender_leaf)`
+alone, so the audio and video `ParticipantKey` instances — each
+running an **independent** counter from 0 — sealed audio frame
+`N` and video frame `N` under an **identical** `(key, nonce)`
+pair on different plaintexts:
+
+- ChaCha20 keystream reuse: `C_audio(n) XOR C_video(n) =
+  P_audio(n) XOR P_video(n)` (leaks the XOR of the two streams).
+- Poly1305 one-time-key reuse across two messages (tag forgery).
+
+For an **SFU group video call** the zero-trust SFU relays and
+holds both ciphertext streams — exactly the adversary invariant
+#2 targets — so it is a real confidentiality + integrity break
+(**HIGH**). A **1×1 native** call sits behind P2P DTLS-SRTP (no
+server in the media path), so the reuse is defence-in-depth only
+(low); **web 1×1** has no SFrame and is unaffected. Violates RFC
+9605 §9 `(key, CTR)` uniqueness.
+
+**Closure.** ADR-0034 folds a 1-byte `MediaType` discriminator
+(`0x01` audio / `0x02` video) into **both** HKDF `info` strings of
+`participant_key(sender_leaf, media_type)`, so a leaf's audio and
+video derive **disjoint** `(key, nonce_salt)` spaces and their
+counters can never collide. The media type is local context — the
+on-wire header KID stays `= sender_leaf`, so the `SframeHeader`
+codec, the `header_decode` fuzz target, the ADR-0013 AAD, and
+every `leaf == KID` roster/cache assumption are all unchanged. The
+fix landed and is **cross-stack-verified** on all five SFrame
+stacks (core, wasm, uniffi, native C-ABI, C++ bridge), each
+producing the same canonical golden wire vector
+`31093c4f19a3b815c0a17a8ad09d2df18c6971987eb1c214484e9ebcc4f92b4c04e5c80bc145a9f23e1c60e2faa4`,
+plus the iOS Obj-C++ shim, the Android JNI module, and the web
+Encoded-Transform worker (each deriving the discriminator from the
+track kind). The native C ABI fails **closed** on an unknown
+`media_type` byte (`BadMediaType`). Property test:
+`sframe::tests::audio_and_video_from_one_leaf_get_distinct_key_and_nonce`.
+This re-words **C-5** (`docs/security/calls.md`), which previously
+assumed one stream per participant. Residual: the same G-26 live
+deployed-SFU RTP interop proof that governs every SFrame stack.
+
 ## Out-of-protocol
 
 ### G-14: Hostile-OS / hostile-browser threats

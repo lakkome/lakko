@@ -100,11 +100,13 @@ through `remote_participant_key(0)`).
 
 ### C-3: Per-participant keys differ across leaves
 
-`participant_key(leaf_index)` MUST produce distinct key
-bytes AND distinct nonce salts for distinct `leaf_index`
-values. Otherwise an attacker who compromised a single
-participant's key could trivially impersonate any other
-participant.
+`participant_key(leaf_index, media_type)` MUST produce
+distinct key bytes AND distinct nonce salts for distinct
+`leaf_index` values. Otherwise an attacker who compromised a
+single participant's key could trivially impersonate any
+other participant. (The `media_type` argument additionally
+separates a single participant's audio and video streams —
+see C-5 / [ADR-0034](../adr/0034-sframe-per-media-stream-key.md).)
 
 Test:
 [`sframe::tests::participant_keys_differ_across_leaves`](../../crates/lakko-calls/src/sframe.rs)
@@ -124,21 +126,51 @@ Test:
 — A, B, C each seal one frame; the other two open via the
 sender's leaf index.
 
-### C-5: Frame counter is strictly monotonic per sender per epoch
+### C-5: Frame counter is strictly monotonic per (sender, media-type) per epoch — no cross-stream `(key, nonce)` reuse
 
 RFC 9605 §4.4 pins the counter to 32 bits. The sender-side
 `ParticipantKey::seal` increments the counter once per
-sealed frame and never reuses a `(key, nonce)` pair. After
-counter exhaustion (2^32 frames ≈ 4 billion at any frame
-rate this is years of continuous calling, but the bound is
-honoured) the seal path returns `Error::CounterExhausted`
-and the caller MUST trigger a fresh MLS commit on the
-keying group → fresh CallKey → fresh ParticipantKey →
-counter resets.
+sealed frame and never reuses a `(key, nonce)` pair
+**within** a `ParticipantKey`.
 
-Test:
+A single monotonic counter is only sufficient when each
+`(key, nonce_salt)` pair is used by exactly one stream. A
+participant who sends audio **and** video shares one MLS
+leaf — and the SFrame header KID is `= sender_leaf` — so
+before [ADR-0034](../adr/0034-sframe-per-media-stream-key.md)
+both streams derived the **same** `(key, nonce_salt)` and,
+running **independent** counters each from 0, sealed
+different plaintexts under an identical `(key, nonce)` pair
+(ChaCha20 keystream reuse + Poly1305 tag forgery — a HIGH
+break for an SFU group video call, where the zero-trust SFU
+relays both ciphertext streams). The key is now derived
+per-`(leaf, media-type)`: `CallKey::participant_key(sender_leaf,
+media_type)` folds a 1-byte media-type tag (`0x01` audio /
+`0x02` video) into **both** HKDF `info` strings, so a leaf's
+audio and video key into **disjoint** `(key, nonce_salt)`
+spaces and their per-stream counters can never collide. The
+media type is local context (the header KID is unchanged, so
+the wire format and AAD are identical — see C-6 /
+[ADR-0013](../adr/0013-sframe-cross-platform-aad.md)); a
+`FrameDecryptor` is bound to one track kind,
+so both endpoints reach the same discriminator without it
+travelling on the wire.
+
+After counter exhaustion (2^32 frames ≈ 4 billion at any
+frame rate this is years of continuous calling, but the
+bound is honoured) the seal path returns
+`Error::CounterExhausted` and the caller MUST trigger a
+fresh MLS commit on the keying group → fresh CallKey →
+fresh ParticipantKey → counter resets.
+
+Tests:
 [`sframe::tests::counter_increments_strictly`](../../crates/lakko-calls/src/sframe.rs)
 covers the monotonic increment;
+[`sframe::tests::audio_and_video_from_one_leaf_get_distinct_key_and_nonce`](../../crates/lakko-calls/src/sframe.rs)
+proves audio and video from one leaf derive distinct keys
+AND distinct nonce salts and never seal the same plaintext
+at the same counter to the same ciphertext (no cross-stream
+reuse);
 [`sframe.rs`](../../crates/lakko-calls/src/sframe.rs)
 documents the exhaustion path. A dedicated exhaustion test
 is gap [G-17](./known-gaps.md#g-17) — too expensive to run

@@ -5,7 +5,7 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 # ADR-0034: Per-(leaf, media-type) SFrame key derivation — close the cross-stream AEAD nonce reuse
 
-- **Status:** Accepted (Approach A — the maintainer chose media-type-in-derivation over per-stream-KID)
+- **Status:** Accepted → **Implemented** (2026-07; Approach A — the maintainer chose media-type-in-derivation over per-stream-KID). Landed and cross-stack-verified across all five SFrame stacks against one canonical golden vector — see [Implementation](#implementation-landed-2026-07).
 - **Date:** 2026-07-17
 - **Context:** Phase 3 (calls / SFrame media encryption) — security fix
 
@@ -223,6 +223,63 @@ through 2–4.
    per-leaf); mark the new **known-gap** entry CLOSED with this ADR; update the
    `lakko-calls` module-map row + the invariant index; add the ADR-0034 row to
    the CLAUDE.md table.
+
+## Implementation (landed 2026-07)
+
+The fix shipped end-to-end and is cross-stack-verified: all five SFrame stacks
+(core, wasm, uniffi, native C-ABI, C++ bridge) now derive the per-`(leaf,
+media-type)` key and produce the **same** canonical golden wire vector
+`31093c4f19a3b815c0a17a8ad09d2df18c6971987eb1c214484e9ebcc4f92b4c04e5c80bc145a9f23e1c60e2faa4`
+(audio, seed `0x42`×32, leaf 3, plaintext `"lakko sframe golden vector v1"`),
+pinned identically in the core, native-cross-stack, web, and Android golden
+tests.
+
+- **Core (`lakko-calls`)** — `MediaType { Audio, Video }` (HKDF tags `0x01` /
+  `0x02`; `0x00` reserved for a future third stream kind) folded into **both**
+  HKDF `info` strings of `CallKey::participant_key(sender_leaf, media_type)`, so
+  a leaf's audio and video derive disjoint `(key, nonce_salt)` spaces; threaded
+  through `CallKeyRing::participant_key` / `try_open_framed_with_overlap` and
+  `GroupCallSession`. New property test
+  `audio_and_video_from_one_leaf_get_distinct_key_and_nonce` proves distinct key
+  + distinct nonce salt + no cross-stream ciphertext collision when both streams
+  seal the same plaintext at the same counter. Core `GOLDEN_WIRE_HEX`
+  regenerated.
+- **FFI (`lakko-ffi-uniffi` + `lakko-ffi-wasm`)** — `FfiMediaType { Audio, Video }`
+  uniffi enum + a `media_type: u8` argument on the wasm surface
+  (`0 = audio`, `1 = video`), both mapping onto the core `MediaType`; the uniffi
+  + wasm golden tests pin the canonical vector.
+- **Native C ABI + C++ bridge (`lakko-sframe-native` + `apps/shared/sframe-bridge/`)**
+  — the participant-key / open-framed entry points take `media_type: u8`
+  (`LAKKO_SFRAME_MEDIA_TYPE_AUDIO = 1` / `_VIDEO = 2`, matching the core HKDF
+  tag); an unknown byte returns `LakkoSframeStatus::BadMediaType` (**fail-closed**,
+  no silent fallback to a default stream kind). `LakkoFrameEncryptor::Create` /
+  `LakkoFrameDecryptor::Create` take the media type (the previously-`/*ignored*/`
+  `cricket::MediaType` is now mapped through). `cargo test -p lakko-sframe-native`
+  + `just test-sframe-bridge` (10/10) green; `tests/golden_cross_stack.rs` pins
+  the canonical vector.
+- **iOS (`apps/ios/Lakko/Calls/`)** — `SFrameAttach.{h,mm}` gained a
+  `LakkoSFrameMediaType` + a `mediaType` parameter into `Create`;
+  `WebRTCPeerConnection.swift` arms each sender on its own space and each
+  decryptor derives the discriminator from the receiver track's kind.
+  `xcodebuild` BUILD SUCCEEDED.
+- **Android (`apps/android/lakko-sframe/` + app)** — `sframe_jni.cc`
+  `nativeCreate` takes a `jint media_type` mapped to `Create`; `SFrameMediaType.kt`
+  + `WebRtcPeerConnection.kt` thread the track kind; `libsframe_jni.so` rebuilt;
+  the Android `SframeGoldenTest` pins the canonical vector.
+  `:app:compileDebugKotlin` BUILD SUCCESSFUL.
+- **Web (`apps/web/src/calls/`)** — `sframe-transform.ts` /
+  `sframe-transform-worker.ts` thread the `mediaType` derived from the track kind
+  (`RTCEncodedAudioFrame` → audio, `RTCEncodedVideoFrame` → video) into
+  `participantKey` (seal) and `openFramedWithOverlap` (open); the per-leaf open
+  cache key becomes `(senderLeaf, mediaType)`; `sframe-golden.test.ts` pins the
+  canonical vector. `tsc` + `vitest` + `vite build` green.
+
+The SFrame wire header, the `SframeHeader` codec, and the `header_decode` fuzz
+target are untouched — the wire header still stamps `KID = sender_leaf` and the
+ADR-0013 AAD is unchanged, so this is a pure key-derivation change with no
+on-wire ripple. The remaining residual is the same one that governs every
+SFrame stack (G-26): a live cross-platform RTP interop verification over a
+deployed SFU.
 
 ## Open questions
 
