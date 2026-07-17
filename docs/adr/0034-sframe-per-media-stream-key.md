@@ -5,7 +5,7 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 # ADR-0034: Per-(leaf, media-type) SFrame key derivation — close the cross-stream AEAD nonce reuse
 
-- **Status:** Proposed
+- **Status:** Accepted (Approach A — the maintainer chose media-type-in-derivation over per-stream-KID)
 - **Date:** 2026-07-17
 - **Context:** Phase 3 (calls / SFrame media encryption) — security fix
 
