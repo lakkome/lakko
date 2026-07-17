@@ -2645,7 +2645,7 @@ pub fn sframe_derive_call_key(
 }
 
 /// Derive a per-participant SFrame key + nonce salt for a given media stream
-/// (Phase 3a4; `media_type` per ADR-0034 — `0 = audio`, `1 = video`). Audio and
+/// (Phase 3a4; `media_type` per ADR-0034 — `1 = audio`, `2 = video`). Audio and
 /// video from the same leaf derive distinct keys + nonce salts, so their
 /// independent counters cannot reuse a `(key, nonce)` pair.
 #[wasm_bindgen(js_name = sframeDeriveParticipantKey)]

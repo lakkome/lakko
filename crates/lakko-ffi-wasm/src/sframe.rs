@@ -9,7 +9,7 @@
 //!
 //! - [`WasmCallKey`] (JS `CallKey`) — `new(seed: Uint8Array)`
 //!   + `participantKey(sender_leaf: u32, media_type: u8) → ParticipantKey`
-//!     (`media_type`: `0 = audio`, `1 = video`, per ADR-0034)
+//!     (`media_type`: `1 = audio`, `2 = video`, per ADR-0034)
 //!   + `seedBytes() → Uint8Array`.
 //! - [`WasmParticipantKey`] (JS `ParticipantKey`) — `seal(aad,
 //!   plaintext) → SealedFrame`, `open(aad, ciphertext,
@@ -37,18 +37,25 @@ use lakko_calls::link_invite::{
 use lakko_calls::sframe as core;
 use wasm_bindgen::prelude::*;
 
-/// Map the JS-side media-type tag (`0 = audio`, `1 = video`) to the core
-/// [`core::MediaType`] (ADR-0034). wasm-bindgen has no first-class enum-with-no-
-/// data ergonomics across the boundary, so the discriminator crosses as a `u8`;
-/// any other value is a hard error (no silent default — the caller must be
-/// explicit so a participant's audio and video streams never collapse onto one
-/// key space).
+/// Map the JS-side media-type tag (`1 = audio`, `2 = video`) to the core
+/// [`core::MediaType`] (ADR-0034). This is the **canonical** convention: it
+/// matches `lakko_calls::sframe::MediaType::tag()` (0x01 / 0x02) and the
+/// `lakko-sframe-native` C ABI (`LAKKO_SFRAME_MEDIA_TYPE_{AUDIO=1,VIDEO=2}`), so
+/// every FFI layer speaks one byte convention. wasm-bindgen has no first-class
+/// enum-with-no-data ergonomics across the boundary, so the discriminator
+/// crosses as a `u8`; `0` is reserved and any other value is a hard error (no
+/// silent default — matching the native `BadMediaType` refusal — so a
+/// participant's audio and video streams never collapse onto one key space).
+///
+// ADR-0034: media_type byte convention is 1=audio/2=video across ALL FFI layers
+// (core tag, native C ABI, wasm); it is LOCAL — never on the wire (the SFrame
+// header carries KID = sender_leaf, not media_type).
 pub(crate) fn media_type_from_u8(tag: u8) -> Result<core::MediaType, JsError> {
     match tag {
-        0 => Ok(core::MediaType::Audio),
-        1 => Ok(core::MediaType::Video),
+        1 => Ok(core::MediaType::Audio),
+        2 => Ok(core::MediaType::Video),
         other => Err(JsError::new(&format!(
-            "media_type must be 0 (audio) or 1 (video), got {other}"
+            "media_type must be 1 (audio) or 2 (video), got {other}"
         ))),
     }
 }
@@ -82,13 +89,13 @@ impl WasmCallKey {
     }
 
     /// Derive the [`WasmParticipantKey`] for the supplied
-    /// leaf index + media stream (`media_type`: `0 = audio`, `1 = video`, per
+    /// leaf index + media stream (`media_type`: `1 = audio`, `2 = video`, per
     /// ADR-0034 — audio and video from one leaf get distinct key + nonce-salt
     /// spaces so their independent counters cannot reuse a `(key, nonce)` pair).
     ///
     /// # Errors
     ///
-    /// `JsError` if `media_type` is not `0` or `1`, or on HKDF failure
+    /// `JsError` if `media_type` is not `1` or `2`, or on HKDF failure
     /// (practically unreachable with valid inputs).
     #[wasm_bindgen(js_name = "participantKey")]
     pub fn participant_key(
@@ -344,13 +351,13 @@ impl WasmCallKeyRing {
     }
 
     /// Derive the seal-side [`WasmParticipantKey`] for `sender_leaf` + media
-    /// stream (`media_type`: `0 = audio`, `1 = video`, per ADR-0034) from the
+    /// stream (`media_type`: `1 = audio`, `2 = video`, per ADR-0034) from the
     /// current epoch. Re-fetched after a `rekeyFromSeedAt` to seal under the
     /// new key.
     ///
     /// # Errors
     ///
-    /// `JsError` if `media_type` is not `0` or `1`, or on HKDF failure
+    /// `JsError` if `media_type` is not `1` or `2`, or on HKDF failure
     /// (practically unreachable).
     #[wasm_bindgen(js_name = "participantKey")]
     pub fn participant_key(
@@ -373,14 +380,14 @@ impl WasmCallKeyRing {
     }
 
     /// Open an RFC 9605 framed SFrame with the overlap fall-back: try the
-    /// current key for `sender_leaf` + media stream (`media_type`: `0 = audio`,
-    /// `1 = video`, per ADR-0034), and on an AEAD failure fall back to the
+    /// current key for `sender_leaf` + media stream (`media_type`: `1 = audio`,
+    /// `2 = video`, per ADR-0034), and on an AEAD failure fall back to the
     /// retained previous key while its window is live (ADR-0029). The
     /// receive-side path for the web worker across a mid-call rekey.
     ///
     /// # Errors
     ///
-    /// `JsError` if `media_type` is not `0` or `1`, on a malformed header, or on
+    /// `JsError` if `media_type` is not `1` or `2`, on a malformed header, or on
     /// AEAD auth failure under both the current and previous keys.
     #[wasm_bindgen(js_name = "openFramedWithOverlap")]
     pub fn open_framed_with_overlap(

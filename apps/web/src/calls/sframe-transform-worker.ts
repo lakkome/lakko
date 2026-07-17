@@ -71,7 +71,7 @@ interface RTCTransformEvent extends Event {
 interface TransformState {
   readonly operation: SFrameOperation;
   readonly localLeaf: number | undefined;
-  /** ADR-0034 media type of this transform's stream (`0 = audio`, `1 = video`),
+  /** ADR-0034 media type of this transform's stream (`1 = audio`, `2 = video`),
    *  fixed for the transform's lifetime and folded into every per-(leaf, media)
    *  key derivation on both the seal and open paths. */
   readonly mediaType: SFrameMediaType;

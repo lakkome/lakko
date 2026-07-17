@@ -11,7 +11,8 @@
  * `(seed=[0x42;32], leaf=3, media=audio, plaintext="lakko sframe golden vector
  * v1")` on a fresh `ParticipantKey` (counter 0) MUST produce these EXACT bytes
  * via the wasm `sealFramed`, and the wasm `openFramed` MUST recover the
- * plaintext from them. The AUDIO media-type byte (`0`) is now part of the
+ * plaintext from them. The AUDIO media-type byte (`1`, the canonical ADR-0034
+ * convention shared with the core tag + native C ABI) is part of the
  * per-participant key derivation (ADR-0034), so this vector is the canonical
  * audio wire — a video seal of the same inputs derives a different key and
  * different bytes. Because all four stacks pin the identical wire, a frame
@@ -28,8 +29,9 @@ import init, { CallKey } from "../../wasm/lakko_ffi_wasm";
 
 const GOLDEN_SEED = new Uint8Array(32).fill(0x42);
 const GOLDEN_LEAF = 3;
-/** ADR-0034 media-type byte for the canonical vector: 0 = audio. */
-const GOLDEN_MEDIA_AUDIO = 0;
+/** ADR-0034 media-type byte for the canonical vector: 1 = audio (canonical,
+ *  matches the core tag + native C ABI). */
+const GOLDEN_MEDIA_AUDIO = 1;
 const GOLDEN_PLAINTEXT = "lakko sframe golden vector v1";
 const GOLDEN_WIRE_HEX =
   "31093c4f19a3b815c0a17a8ad09d2df18c6971987eb1c214484e9ebcc4f92b4c04e5c80bc145a9f23e1c60e2faa4";

@@ -42,18 +42,22 @@ export type SFrameOperation = "encrypt" | "decrypt";
 
 /**
  * ADR-0034 media-type discriminator crossing the wasm boundary as the FFI's
- * `media_type` byte: `0 = audio`, `1 = video`. The core folds it into the
+ * `media_type` byte: `1 = audio`, `2 = video`. This is the canonical convention
+ * shared with the core HKDF tag (`MediaType::tag()` = 0x01 / 0x02) and the
+ * native `lakko-sframe-native` C ABI (`AUDIO = 1`, `VIDEO = 2`) — `0` is
+ * reserved and rejected FFI-side. The core folds the byte into the
  * per-participant HKDF so a single leaf's audio and video streams occupy
  * disjoint key + nonce-salt spaces — their independent frame counters can then
- * never collide on a `(key, nonce)` pair.
+ * never collide on a `(key, nonce)` pair. The byte is LOCAL — never on the wire
+ * (the SFrame header carries the KID = sender_leaf, not the media type).
  */
-export type SFrameMediaType = 0 | 1;
+export type SFrameMediaType = 1 | 2;
 
 /** Map an `RTCRtpSender`/`RTCRtpReceiver` track `kind` to the ADR-0034
- *  media-type byte. Anything that is not `"video"` seals as audio (`0`); a
+ *  media-type byte. Anything that is not `"video"` seals as audio (`1`); a
  *  WebRTC track kind is only ever `"audio"` or `"video"`. */
 function mediaTypeOfKind(kind: string): SFrameMediaType {
-  return kind === "video" ? 1 : 0;
+  return kind === "video" ? 2 : 1;
 }
 
 /**
@@ -84,8 +88,8 @@ export interface SFrameTransformOptions {
    */
   readonly localLeaf?: number;
   /**
-   * ADR-0034 media-type of this transform's RTP stream — `0 = audio`,
-   * `1 = video`. Fixed for the transform's whole lifetime (each
+   * ADR-0034 media-type of this transform's RTP stream — `1 = audio`,
+   * `2 = video`. Fixed for the transform's whole lifetime (each
    * `RTCRtpScriptTransform` carries exactly one track, hence one kind), so the
    * worker reads it once and passes it into every per-(leaf, media) key
    * derivation — seal and open alike — keeping a leaf's audio and video keys

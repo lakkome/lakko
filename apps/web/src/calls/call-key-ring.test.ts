@@ -18,9 +18,10 @@ import init, { CallKeyRing } from "../../wasm/lakko_ffi_wasm";
 const SEED_A = new Uint8Array(32).fill(0x11);
 const SEED_B = new Uint8Array(32).fill(0x22);
 const LEAF = 3;
-/** ADR-0034 media-type byte: 0 = audio. The overlap mechanism is media-type
- *  agnostic — seal and open just have to agree, so audio is used throughout. */
-const AUDIO = 0;
+/** ADR-0034 media-type byte: 1 = audio (canonical, matches the core tag +
+ *  native C ABI). The overlap mechanism is media-type agnostic — seal and open
+ *  just have to agree, so audio is used throughout. */
+const AUDIO = 1;
 const enc = new TextEncoder();
 const dec = new TextDecoder();
 
