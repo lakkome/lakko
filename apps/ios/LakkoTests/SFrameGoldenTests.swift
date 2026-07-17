@@ -22,12 +22,12 @@ final class SFrameGoldenTests: XCTestCase {
     private static let goldenLeaf: UInt32 = 3
     private static let goldenPlaintext = "lakko sframe golden vector v1"
     private static let goldenWireHex =
-        "31a6d1fee0dd6f091a0071e56d66a889f734a5b2fa6ef8f079d2e6b3e9b256e41ff55ca0102c28b8b697c526be59"
+        "31093c4f19a3b815c0a17a8ad09d2df18c6971987eb1c214484e9ebcc4f92b4c04e5c80bc145a9f23e1c60e2faa4"
 
     func testSealsToTheCanonicalCrossStackWire() throws {
         let pk = try CallKey
             .fromSeed(seed: Self.goldenSeed)
-            .participantKey(senderLeaf: Self.goldenLeaf)
+            .participantKey(senderLeaf: Self.goldenLeaf, mediaType: .audio)
         let wire = try pk.sealFramed(plaintext: Data(Self.goldenPlaintext.utf8))
         let hex = wire.map { String(format: "%02x", $0) }.joined()
         XCTAssertEqual(hex, Self.goldenWireHex)
@@ -36,7 +36,7 @@ final class SFrameGoldenTests: XCTestCase {
     func testOpensTheCanonicalWireToThePlaintext() throws {
         let pk = try CallKey
             .fromSeed(seed: Self.goldenSeed)
-            .participantKey(senderLeaf: Self.goldenLeaf)
+            .participantKey(senderLeaf: Self.goldenLeaf, mediaType: .audio)
         let opened = try pk.openFramed(wire: Self.hexToData(Self.goldenWireHex))
         XCTAssertEqual(String(data: opened, encoding: .utf8), Self.goldenPlaintext)
     }

@@ -962,10 +962,10 @@ async fn sframe_sealed_frame_round_trips_through_the_live_sfu() {
     let seed = [0x5a_u8; CALL_KEY_LEN];
     let a_leaf: u32 = 7;
     let mut a_sender = CallKey::from_seed(seed)
-        .participant_key(a_leaf)
+        .participant_key(a_leaf, lakko_calls::sframe::MediaType::Audio)
         .expect("A derives its sender participant key");
     let b_receiver = CallKey::from_seed(seed)
-        .participant_key(a_leaf)
+        .participant_key(a_leaf, lakko_calls::sframe::MediaType::Audio)
         .expect("B derives the receiver participant key for A's leaf");
 
     let plaintext: &[u8] = b"lakko encrypted media plane -- G-26 round-trip";
@@ -1066,7 +1066,7 @@ async fn golden_vector_round_trips_through_the_live_sfu() {
     const GOLDEN_LEAF: u32 = 3;
     const GOLDEN_PLAINTEXT: &[u8] = b"lakko sframe golden vector v1";
     const GOLDEN_WIRE_HEX: &str =
-        "31a6d1fee0dd6f091a0071e56d66a889f734a5b2fa6ef8f079d2e6b3e9b256e41ff55ca0102c28b8b697c526be59";
+        "31093c4f19a3b815c0a17a8ad09d2df18c6971987eb1c214484e9ebcc4f92b4c04e5c80bc145a9f23e1c60e2faa4";
     let golden_wire: Vec<u8> = (0..GOLDEN_WIRE_HEX.len() / 2)
         .map(|i| u8::from_str_radix(&GOLDEN_WIRE_HEX[i * 2..i * 2 + 2], 16).expect("golden hex"))
         .collect();
@@ -1115,10 +1115,10 @@ async fn golden_vector_round_trips_through_the_live_sfu() {
     //    produce + consume. This is what links the live-SFU forward to the
     //    cross-runtime golden equality.
     let mut a_sender = CallKey::from_seed(GOLDEN_SEED)
-        .participant_key(GOLDEN_LEAF)
+        .participant_key(GOLDEN_LEAF, lakko_calls::sframe::MediaType::Audio)
         .expect("A derives the golden sender participant key");
     let b_receiver = CallKey::from_seed(GOLDEN_SEED)
-        .participant_key(GOLDEN_LEAF)
+        .participant_key(GOLDEN_LEAF, lakko_calls::sframe::MediaType::Audio)
         .expect("B derives the golden receiver participant key");
     let sealed = a_sender
         .seal_framed(GOLDEN_PLAINTEXT)
@@ -1476,10 +1476,10 @@ async fn multi_frame_sframe_stream_round_trips_through_the_live_sfu() {
     let seed = [0x5a_u8; CALL_KEY_LEN];
     let a_leaf: u32 = 7;
     let mut a_sender = CallKey::from_seed(seed)
-        .participant_key(a_leaf)
+        .participant_key(a_leaf, lakko_calls::sframe::MediaType::Audio)
         .expect("A derives its sender participant key");
     let b_receiver = CallKey::from_seed(seed)
-        .participant_key(a_leaf)
+        .participant_key(a_leaf, lakko_calls::sframe::MediaType::Audio)
         .expect("B derives the receiver participant key for A's leaf");
 
     let mut plaintexts: Vec<Vec<u8>> = Vec::with_capacity(STREAM_LEN);
