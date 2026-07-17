@@ -47,6 +47,7 @@ use lakko_sframe_native::{
     lakko_sframe_buffer_free, lakko_sframe_call_key_free, lakko_sframe_call_key_new,
     lakko_sframe_open_framed, lakko_sframe_participant_key_free, lakko_sframe_participant_key_new,
     lakko_sframe_seal_framed, CallKey, LakkoSframeStatus, ParticipantKey,
+    LAKKO_SFRAME_MEDIA_TYPE_AUDIO,
 };
 
 /// The canonical cross-stack golden vector — byte-identical to the constants
@@ -57,7 +58,7 @@ const GOLDEN_SEED: [u8; 32] = [0x42; 32];
 const GOLDEN_LEAF: u32 = 3;
 const GOLDEN_PLAINTEXT: &[u8] = b"lakko sframe golden vector v1";
 const GOLDEN_WIRE_HEX: &str =
-    "31a6d1fee0dd6f091a0071e56d66a889f734a5b2fa6ef8f079d2e6b3e9b256e41ff55ca0102c28b8b697c526be59";
+    "31093c4f19a3b815c0a17a8ad09d2df18c6971987eb1c214484e9ebcc4f92b4c04e5c80bc145a9f23e1c60e2faa4";
 
 /// Decode the golden wire hex into bytes.
 fn golden_wire() -> Vec<u8> {
@@ -89,8 +90,16 @@ unsafe fn golden_participant_key() -> (*mut CallKey, *mut ParticipantKey) {
 
     let mut pk: *mut ParticipantKey = ptr::null_mut();
     // SAFETY: `call_key` is the live pointer just constructed; `pk` out-pointer
-    // is a writable local.
-    let status = unsafe { lakko_sframe_participant_key_new(call_key, GOLDEN_LEAF, &mut pk) };
+    // is a writable local. The canonical golden is sealed on the AUDIO stream
+    // (ADR-0034), matching the core / web / iOS / Android golden vectors.
+    let status = unsafe {
+        lakko_sframe_participant_key_new(
+            call_key,
+            GOLDEN_LEAF,
+            LAKKO_SFRAME_MEDIA_TYPE_AUDIO,
+            &mut pk,
+        )
+    };
     assert_eq!(
         status,
         LakkoSframeStatus::Ok,

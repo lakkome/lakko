@@ -34,7 +34,8 @@ constexpr std::size_t kAeadTagBytes = 16;
 // static
 LakkoFrameEncryptor* LakkoFrameEncryptor::Create(const uint8_t* seed,
                                                  std::size_t seed_len,
-                                                 uint32_t local_leaf) {
+                                                 uint32_t local_leaf,
+                                                 uint8_t media_type) {
   lakko_sframe_call_key_t* call_key = nullptr;
   lakko_sframe_status_t status =
       lakko_sframe_call_key_new(seed, seed_len, &call_key);
@@ -42,8 +43,12 @@ LakkoFrameEncryptor* LakkoFrameEncryptor::Create(const uint8_t* seed,
     return nullptr;
   }
 
+  // Derive the seal key on this encryptor's fixed media-type space
+  // (ADR-0034). An unknown media_type is refused (BAD_MEDIA_TYPE) →
+  // nullptr, which the boot probe treats like any other Create failure
+  // (invariant #4: no non-E2EE fallback).
   lakko_sframe_participant_key_t* participant_key = nullptr;
-  status = lakko_sframe_participant_key_new(call_key, local_leaf,
+  status = lakko_sframe_participant_key_new(call_key, local_leaf, media_type,
                                             &participant_key);
   // The call key is only needed to derive the seal key; drop it either way.
   lakko_sframe_call_key_free(call_key);
@@ -51,13 +56,16 @@ LakkoFrameEncryptor* LakkoFrameEncryptor::Create(const uint8_t* seed,
     return nullptr;
   }
 
-  return new LakkoFrameEncryptor(participant_key, local_leaf);
+  return new LakkoFrameEncryptor(participant_key, local_leaf, media_type);
 }
 
 LakkoFrameEncryptor::LakkoFrameEncryptor(
     lakko_sframe_participant_key_t* participant_key,
-    uint32_t local_leaf)
-    : participant_key_(participant_key), local_leaf_(local_leaf) {}
+    uint32_t local_leaf,
+    uint8_t media_type)
+    : participant_key_(participant_key),
+      local_leaf_(local_leaf),
+      media_type_(media_type) {}
 
 LakkoFrameEncryptor::~LakkoFrameEncryptor() {
   // The free routine tolerates null pointers (per the C ABI contract
@@ -124,9 +132,11 @@ bool LakkoFrameEncryptor::Rekey(const uint8_t* seed, std::size_t seed_len) {
       call_key == nullptr) {
     return false;
   }
+  // Re-derive on the SAME media-type space this encryptor was created
+  // with (ADR-0034) — a rekey changes only the epoch, never the stream.
   lakko_sframe_participant_key_t* fresh = nullptr;
-  lakko_sframe_status_t status =
-      lakko_sframe_participant_key_new(call_key, local_leaf_, &fresh);
+  lakko_sframe_status_t status = lakko_sframe_participant_key_new(
+      call_key, local_leaf_, media_type_, &fresh);
   lakko_sframe_call_key_free(call_key);
   if (status != LAKKO_SFRAME_STATUS_T_OK || fresh == nullptr) {
     // Keep sealing under the current key — never emit plaintext (invariant #4).
@@ -171,18 +181,27 @@ rtc::RefCountReleaseStatus LakkoFrameEncryptor::Release() const {
 
 // static
 LakkoFrameDecryptor* LakkoFrameDecryptor::Create(const uint8_t* seed,
-                                                 std::size_t seed_len) {
+                                                 std::size_t seed_len,
+                                                 uint8_t media_type) {
+  // Refuse an unknown media_type up front (invariant #4) so the boot
+  // probe never installs a decryptor that would fail every open. The
+  // ring itself carries no media type — it is supplied per open.
+  if (media_type != LAKKO_SFRAME_MEDIA_TYPE_AUDIO &&
+      media_type != LAKKO_SFRAME_MEDIA_TYPE_VIDEO) {
+    return nullptr;
+  }
   lakko_sframe_call_key_ring_t* ring = nullptr;
   lakko_sframe_status_t status =
       lakko_sframe_call_key_ring_new(seed, seed_len, &ring);
   if (status != LAKKO_SFRAME_STATUS_T_OK || ring == nullptr) {
     return nullptr;
   }
-  return new LakkoFrameDecryptor(ring);
+  return new LakkoFrameDecryptor(ring, media_type);
 }
 
-LakkoFrameDecryptor::LakkoFrameDecryptor(lakko_sframe_call_key_ring_t* ring)
-    : ring_(ring) {}
+LakkoFrameDecryptor::LakkoFrameDecryptor(lakko_sframe_call_key_ring_t* ring,
+                                         uint8_t media_type)
+    : ring_(ring), media_type_(media_type) {}
 
 LakkoFrameDecryptor::~LakkoFrameDecryptor() {
   // Callers must have released their refcount before letting us
@@ -222,8 +241,8 @@ webrtc::FrameDecryptorInterface::Result LakkoFrameDecryptor::Decrypt(
   std::size_t pt_len = 0;
   lakko_sframe_status_t open_status =
       lakko_sframe_call_key_ring_open_framed_with_overlap(
-          ring_, sender_leaf, encrypted_frame.data(), encrypted_frame.size(),
-          &pt_ptr, &pt_len);
+          ring_, sender_leaf, media_type_, encrypted_frame.data(),
+          encrypted_frame.size(), &pt_ptr, &pt_len);
   if (open_status != LAKKO_SFRAME_STATUS_T_OK) {
     return Result(Status::kFailedToDecrypt, 0);
   }

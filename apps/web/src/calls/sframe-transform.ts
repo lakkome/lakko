@@ -41,6 +41,22 @@
 export type SFrameOperation = "encrypt" | "decrypt";
 
 /**
+ * ADR-0034 media-type discriminator crossing the wasm boundary as the FFI's
+ * `media_type` byte: `0 = audio`, `1 = video`. The core folds it into the
+ * per-participant HKDF so a single leaf's audio and video streams occupy
+ * disjoint key + nonce-salt spaces — their independent frame counters can then
+ * never collide on a `(key, nonce)` pair.
+ */
+export type SFrameMediaType = 0 | 1;
+
+/** Map an `RTCRtpSender`/`RTCRtpReceiver` track `kind` to the ADR-0034
+ *  media-type byte. Anything that is not `"video"` seals as audio (`0`); a
+ *  WebRTC track kind is only ever `"audio"` or `"video"`. */
+function mediaTypeOfKind(kind: string): SFrameMediaType {
+  return kind === "video" ? 1 : 0;
+}
+
+/**
  * Options handed to the worker via the `RTCRtpScriptTransform`
  * constructor. Structured-cloned across the thread boundary, so every
  * field must be cloneable (a `Uint8Array` is).
@@ -67,6 +83,15 @@ export interface SFrameTransformOptions {
    * the matching per-sender key lazily).
    */
   readonly localLeaf?: number;
+  /**
+   * ADR-0034 media-type of this transform's RTP stream — `0 = audio`,
+   * `1 = video`. Fixed for the transform's whole lifetime (each
+   * `RTCRtpScriptTransform` carries exactly one track, hence one kind), so the
+   * worker reads it once and passes it into every per-(leaf, media) key
+   * derivation — seal and open alike — keeping a leaf's audio and video keys
+   * disjoint.
+   */
+  readonly mediaType: SFrameMediaType;
 }
 
 /**
@@ -124,6 +149,10 @@ export function attachSenderSFrame(
     id,
     seed: opts.seed,
     localLeaf: opts.localLeaf,
+    // The sender's track is set by the caller's `addTrack` before this attach
+    // (the native-shim sequencing), so its kind is the authoritative media
+    // type for every frame this transform seals (ADR-0034).
+    mediaType: mediaTypeOfKind(sender.track?.kind ?? "audio"),
   };
   sender.transform = new RTCRtpScriptTransform(transformWorker(), options);
   return id;
@@ -147,6 +176,11 @@ export function attachReceiverSFrame(
     operation: "decrypt",
     id,
     seed: opts.seed,
+    // The receiver's inbound track kind matches the sender's (the SFU forwards
+    // audio→audio and video→video verbatim), so it selects the same ADR-0034
+    // media type the far end sealed under — the frame opens under the right
+    // per-(leaf, media) key.
+    mediaType: mediaTypeOfKind(receiver.track?.kind ?? "audio"),
   };
   receiver.transform = new RTCRtpScriptTransform(transformWorker(), options);
   return id;

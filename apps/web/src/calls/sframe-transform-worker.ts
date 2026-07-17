@@ -36,7 +36,11 @@
  */
 
 import { loadWasm } from "../wasm";
-import type { SFrameOperation, SFrameTransformOptions } from "./sframe-transform";
+import type {
+  SFrameMediaType,
+  SFrameOperation,
+  SFrameTransformOptions,
+} from "./sframe-transform";
 import type { CallKeyRing, ParticipantKey } from "../../wasm/lakko_ffi_wasm";
 
 /** A single encoded media frame the transform rewrites in place.
@@ -67,6 +71,10 @@ interface RTCTransformEvent extends Event {
 interface TransformState {
   readonly operation: SFrameOperation;
   readonly localLeaf: number | undefined;
+  /** ADR-0034 media type of this transform's stream (`0 = audio`, `1 = video`),
+   *  fixed for the transform's lifetime and folded into every per-(leaf, media)
+   *  key derivation on both the seal and open paths. */
+  readonly mediaType: SFrameMediaType;
   readonly ring: CallKeyRing;
   /** Encrypt side only: the current epoch's seal key, re-derived on rekey. */
   sealKey: ParticipantKey | null;
@@ -123,7 +131,14 @@ function decryptStream(
       if (senderLeaf === null) return; // malformed header — drop
       let plaintext: Uint8Array;
       try {
-        plaintext = state.ring.openFramedWithOverlap(senderLeaf, wire);
+        // (senderLeaf, mediaType) together select the per-(leaf, media) key —
+        // this transform's fixed media type keeps a leaf's audio and video
+        // frames on distinct keys (ADR-0034).
+        plaintext = state.ring.openFramedWithOverlap(
+          senderLeaf,
+          state.mediaType,
+          wire,
+        );
       } catch {
         // Wrong key / tampered / replayed counter, under BOTH the current
         // and the overlap-window previous key — drop, never forward
@@ -147,6 +162,7 @@ async function runTransform(
   const state: TransformState = {
     operation: opts.operation,
     localLeaf: opts.localLeaf,
+    mediaType: opts.mediaType,
     ring,
     sealKey: null,
   };
@@ -159,7 +175,7 @@ async function runTransform(
       return;
     }
     try {
-      state.sealKey = ring.participantKey(opts.localLeaf);
+      state.sealKey = ring.participantKey(opts.localLeaf, opts.mediaType);
     } catch {
       return; // derivation failed — refuse rather than emit plaintext
     }
@@ -218,7 +234,7 @@ addEventListener("message", (event: MessageEvent): void => {
   }
   if (state.operation === "encrypt" && state.localLeaf !== undefined) {
     try {
-      state.sealKey = state.ring.participantKey(state.localLeaf);
+      state.sealKey = state.ring.participantKey(state.localLeaf, state.mediaType);
     } catch {
       state.sealKey = null; // refuse to seal under a bad key rather than plaintext
     }
