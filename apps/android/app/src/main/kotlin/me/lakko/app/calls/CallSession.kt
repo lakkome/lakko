@@ -81,6 +81,23 @@ public class CallSession(
     /** Reason carried in the terminal transition. */
     public enum class WebCallEndReason { HungUp, Busy, Declined, TimedOut, Error }
 
+    /**
+     * ADR-0032 piece B2a — mid-call camera-on lifecycle. The Kotlin twin of
+     * the iOS `CallSession.VideoPublishState` and the SFU session's
+     * [SfuCallSession.VideoPublishState]. A 1×1 call started audio-only has no
+     * video sender; turning the camera on ACQUIRES the camera + renegotiates
+     * (async), so the UI shows a camera-button spinner + a self-tile "Starting
+     * camera…" hint while [Starting]:
+     *   * [Off]      — no camera-on in flight (default; also after a failure).
+     *   * [Starting] — the camera acquire + [addLocalVideo] renegotiation are
+     *                  in flight.
+     *   * [Live]     — the local camera is captured, SFrame-sealed, and added.
+     *   * [Failed]   — no camera / capture / SFrame-arm failure; the caller
+     *                  reverts the toggle. The call stays up audio-only
+     *                  (invariant #4 — no half-added plaintext sender).
+     */
+    public enum class VideoPublishState { Off, Starting, Live, Failed }
+
     private val mutableState: MutableStateFlow<WebCallState> = MutableStateFlow(WebCallState.Idle)
     public val state: StateFlow<WebCallState> = mutableState.asStateFlow()
 
@@ -183,6 +200,18 @@ public class CallSession(
     public val micEnabled: StateFlow<Boolean> = mutableMicEnabled.asStateFlow()
     private val mutableCameraEnabled: MutableStateFlow<Boolean> = MutableStateFlow(false)
     public val cameraEnabled: StateFlow<Boolean> = mutableCameraEnabled.asStateFlow()
+
+    /** ADR-0032 piece B2a — mid-call camera-on lifecycle (see
+     *  [VideoPublishState]). [addLocalVideo] sets [VideoPublishState.Starting]
+     *  before the async camera acquire, [VideoPublishState.Live] on success,
+     *  [VideoPublishState.Failed] on any thrown error, and
+     *  [teardownMediaPipeline] resets it to [VideoPublishState.Off].
+     *  `CallUiState.driveFrom` maps it onto the shared UI surface the
+     *  `CallScreen` reads for the camera-button spinner + the self-tile hint. */
+    private val mutableVideoPublishState: MutableStateFlow<VideoPublishState> =
+        MutableStateFlow(VideoPublishState.Off)
+    public val videoPublishState: StateFlow<VideoPublishState> =
+        mutableVideoPublishState.asStateFlow()
 
     /** G3-2-e2ee-active — `true` once [setCallKey] has armed the
      *  SFrame seed (the call's media is end-to-end encrypted).
@@ -456,6 +485,7 @@ public class CallSession(
             connection.setCameraEnabled(true)
             mutableLocalVideoTrack.value = connection.currentLocalVideoTrack()
             mutableCameraEnabled.value = true
+            mutableVideoPublishState.value = VideoPublishState.Live
             return
         }
         // 2. A capture is already in flight -> do not double-acquire.
@@ -469,11 +499,16 @@ public class CallSession(
         if (seed == null || leaf == null ||
             !me.lakko.sframe.SFrameAvailability.isCallingAvailable
         ) {
+            mutableVideoPublishState.value = VideoPublishState.Failed
             throw WebRtcException(
                 "SFrame keying unavailable — refusing mid-call video (invariant #4)",
             )
         }
         addingVideo = true
+        // ADR-0032 piece B2a — the camera acquire + renegotiation are now in
+        // flight; the UI shows the camera-button spinner + the self-tile
+        // "Starting camera…" hint until this resolves to Live / Failed.
+        mutableVideoPublishState.value = VideoPublishState.Starting
         try {
             // 3. Capture the camera. On any failure -> throw; no sender has
             //    been added yet, so there is nothing half-added to clean up.
@@ -495,11 +530,15 @@ public class CallSession(
             }
 
             // 4. Re-read the pc AFTER the (blocking) capture start — a teardown
-            //    may have interleaved. If it went away, abandon cleanly.
+            //    may have interleaved. If it went away, abandon cleanly (not a
+            //    user error — the call is going away).
             val connection2 = rtc
             if (connection2 == null) {
                 capture.stop()
                 capture.dispose()
+                // The call went away mid-acquire — teardown already reset (or
+                // is about to reset) the state; do not surface a failure.
+                mutableVideoPublishState.value = VideoPublishState.Off
                 return
             }
 
@@ -519,10 +558,20 @@ public class CallSession(
             localCameraCapture = capture
             mutableLocalVideoTrack.value = connection2.currentLocalVideoTrack()
             mutableCameraEnabled.value = true
+            // Live: the camera is published + sealed; the spinner clears (the
+            // UI shows it only while Starting).
+            mutableVideoPublishState.value = VideoPublishState.Live
 
             // 6. Renegotiate so the peer learns about the new (sealed) video
             //    m-line.
             driveRenegotiationOffer()
+        } catch (cause: Throwable) {
+            // Fail-safe (invariant #4): any thrown error leaves the call up
+            // audio-only. Failed drives the caller's toggle revert (the button
+            // reverts automatically — cameraEnabled stays false). Rethrow so
+            // the caller can log / surface it.
+            mutableVideoPublishState.value = VideoPublishState.Failed
+            throw cause
         } finally {
             addingVideo = false
         }
@@ -1006,6 +1055,9 @@ public class CallSession(
         negotiationReady = false
         pendingRenegotiation = false
         addingVideo = false
+        // ADR-0032 piece B2a — no camera-on in flight once the media pipeline
+        // is torn down.
+        mutableVideoPublishState.value = VideoPublishState.Off
     }
 
     /** G3-2-conn-quality — start the connection-stats poll loop

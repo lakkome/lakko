@@ -38,6 +38,7 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Divider
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -1210,6 +1211,11 @@ private fun ParticipantTile(
     val participants by state.participants.collectAsState()
     val settings by state.settings.collectAsState()
     val soleRemoteId = remember(participants) { state.soleRemoteParticipantId }
+    // ADR-0032 piece B2a — the local self-tile shows a "Starting camera…"
+    // hint while the mid-call camera-on acquire is in flight.
+    val videoPublishState by state.videoPublishState.collectAsState()
+    val cameraStarting = participant.isLocal &&
+        videoPublishState == CallUiState.VideoPublishState.Starting
 
     Box(
         modifier = Modifier
@@ -1290,6 +1296,35 @@ private fun ParticipantTile(
                     fontSize = if (large) 80.sp else 40.sp,
                     fontWeight = FontWeight.SemiBold,
                 )
+            }
+        }
+
+        // ADR-0032 piece B2a — mid-call camera-on loading hint on the local
+        // self-tile only (a spinner + "Starting camera…" while the acquire +
+        // renegotiation are in flight). Clears on Live / Failed.
+        if (cameraStarting) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(8.dp))
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(14.dp),
+                        color = CallTheme.textPrimary,
+                        strokeWidth = 2.dp,
+                    )
+                    Text(
+                        "Starting camera…",
+                        color = CallTheme.textPrimary,
+                        fontSize = 12.sp,
+                    )
+                }
             }
         }
 
@@ -1398,6 +1433,11 @@ private fun ControlsBar(
     val local = participants.firstOrNull { it.isLocal }
     val drawerOpen by state.participantListOpen.collectAsState()
     val settingsOpen by state.settingsOpen.collectAsState()
+    // ADR-0032 piece B2a — while the mid-call camera-on acquire + renegotiation
+    // are in flight, the camera button spins + disables (the session already
+    // in-flight-guards; this is the visual half).
+    val videoPublishState by state.videoPublishState.collectAsState()
+    val cameraStarting = videoPublishState == CallUiState.VideoPublishState.Starting
 
     Row(
         modifier = Modifier
@@ -1417,8 +1457,14 @@ private fun ControlsBar(
         CircleButton(
             icon = if (local?.camOn == true) Icons.Filled.Videocam else Icons.Filled.VideocamOff,
             active = local?.camOn == false,
-            description = if (local?.camOn == true) "Stop camera" else "Start camera",
+            description = when {
+                cameraStarting -> "Starting camera…"
+                local?.camOn == true -> "Stop camera"
+                else -> "Start camera"
+            },
             onClick = { onSetCamera(local?.camOn != true) },
+            busy = cameraStarting,
+            enabled = !cameraStarting,
         )
         if (hasMultipleCams && local?.camOn == true) {
             CircleButton(
@@ -1470,6 +1516,10 @@ private fun CircleButton(
     description: String,
     onClick: () -> Unit,
     destructive: Boolean = false,
+    // ADR-0032 piece B2a — while an async action is in flight (mid-call
+    // camera-on), render a spinner in place of the icon and disable the tap.
+    busy: Boolean = false,
+    enabled: Boolean = true,
 ) {
     val bg = when {
         destructive -> CallTheme.endCallRed
@@ -1478,12 +1528,21 @@ private fun CircleButton(
     }
     IconButton(
         onClick = onClick,
+        enabled = enabled,
         modifier = Modifier
             .size(52.dp)
             .background(bg, CircleShape)
             .shadow(4.dp, CircleShape),
     ) {
-        Icon(icon, contentDescription = description, tint = CallTheme.textPrimary)
+        if (busy) {
+            CircularProgressIndicator(
+                modifier = Modifier.size(20.dp),
+                color = CallTheme.textPrimary,
+                strokeWidth = 2.dp,
+            )
+        } else {
+            Icon(icon, contentDescription = description, tint = CallTheme.textPrimary)
+        }
     }
 }
 

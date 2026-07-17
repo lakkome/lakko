@@ -403,6 +403,39 @@ const ParticipantTile: Component<TileProps> = (props) => {
         </Show>
       </Show>
 
+      {/* B2a — mid-call camera-on hint on the LOCAL tile. While the
+          camera is being acquired (getUserMedia + renegotiation in
+          flight) the tile is present but the video track is not live
+          yet, so overlay a spinner + "Starting camera…" so the user
+          knows the black tile is loading, not broken. */}
+      <Show
+        when={
+          props.participant.isLocal &&
+          callState.videoPublishState() === "starting"
+        }
+      >
+        <div
+          role="status"
+          aria-live="polite"
+          style={{
+            position: "absolute",
+            inset: "0",
+            display: "flex",
+            "flex-direction": "column",
+            "align-items": "center",
+            "justify-content": "center",
+            gap: "8px",
+            "background-color": "rgba(0,0,0,0.45)",
+            color: COLOURS.textPrimary,
+            "font-size": props.large ? "0.95rem" : "0.8rem",
+            "z-index": "2",
+          }}
+        >
+          <Spinner size={props.large ? 30 : 24} />
+          <span>Starting camera…</span>
+        </div>
+      </Show>
+
       {/* Large mute overlay — central icon when the remote is
           muted, so the listener immediately knows their audio
           input is off (matches lakko_me's `.mute-indicator` on
@@ -755,44 +788,104 @@ const WaitingMessage: Component = () => (
 // ControlsBar — bottom action bar
 // ============================================================================
 
+/** Indeterminate spinner glyph. Self-contained SVG (SMIL rotation — no
+ *  global @keyframes needed), themed from the call screen's COLOURS
+ *  vocabulary so it reads on any control-bar surface. */
+const Spinner: Component<{ size?: number; colour?: string }> = (props) => {
+  const size = (): number => props.size ?? 22;
+  const colour = (): string => props.colour ?? COLOURS.textPrimary;
+  return (
+    <svg
+      width={size()}
+      height={size()}
+      viewBox="0 0 24 24"
+      fill="none"
+      aria-hidden="true"
+      style={{ display: "block" }}
+    >
+      <circle
+        cx="12"
+        cy="12"
+        r="9"
+        stroke={colour()}
+        stroke-width="3"
+        stroke-linecap="round"
+        stroke-dasharray="40 60"
+      >
+        <animateTransform
+          attributeName="transform"
+          attributeType="XML"
+          type="rotate"
+          from="0 12 12"
+          to="360 12 12"
+          dur="0.8s"
+          repeatCount="indefinite"
+        />
+      </circle>
+    </svg>
+  );
+};
+
 interface ButtonProps {
   label: string;
   glyph: string;
   active: boolean;
   destructive?: boolean;
+  /** Show a spinner in place of the glyph + make the button
+   *  non-interactive — an async action is in flight (e.g. mid-call
+   *  camera acquisition). */
+  busy?: boolean;
+  /** Dim + disable the button without a spinner. */
+  disabled?: boolean;
   onClick: () => void;
 }
 
-const CircleButton: Component<ButtonProps> = (props) => (
-  <button
-    type="button"
-    aria-label={props.label}
-    title={props.label}
-    onClick={props.onClick}
-    style={{
-      width: "52px",
-      height: "52px",
-      "border-radius": "50%",
-      border: "none",
-      cursor: "pointer",
-      "font-size": "1.25rem",
-      "background-color":
-        props.destructive === true
-          ? COLOURS.endCallRed
-          : props.active
-            ? COLOURS.accentBlue
-            : COLOURS.surface,
-      color: COLOURS.textPrimary,
-      "box-shadow":
-        props.destructive === true
-          ? "0 2px 8px rgba(220, 38, 38, 0.4)"
-          : "0 1px 3px rgba(0,0,0,0.5)",
-      transition: "background-color 120ms ease",
-    }}
-  >
-    {props.glyph}
-  </button>
-);
+const CircleButton: Component<ButtonProps> = (props) => {
+  const inert = (): boolean => props.busy === true || props.disabled === true;
+  return (
+    <button
+      type="button"
+      aria-label={props.label}
+      aria-busy={props.busy === true ? "true" : undefined}
+      title={props.label}
+      disabled={inert()}
+      onClick={(): void => {
+        if (inert()) return;
+        props.onClick();
+      }}
+      style={{
+        width: "52px",
+        height: "52px",
+        "border-radius": "50%",
+        border: "none",
+        cursor: inert() ? "default" : "pointer",
+        // A busy button keeps full opacity (the spinner conveys activity);
+        // a plainly-disabled one dims to signal it is unavailable.
+        opacity: props.disabled === true && props.busy !== true ? "0.55" : "1",
+        display: "flex",
+        "align-items": "center",
+        "justify-content": "center",
+        "font-size": "1.25rem",
+        "background-color":
+          props.destructive === true
+            ? COLOURS.endCallRed
+            : props.active
+              ? COLOURS.accentBlue
+              : COLOURS.surface,
+        color: COLOURS.textPrimary,
+        "box-shadow":
+          props.destructive === true
+            ? "0 2px 8px rgba(220, 38, 38, 0.4)"
+            : "0 1px 3px rgba(0,0,0,0.5)",
+        transition: "background-color 120ms ease",
+      }}
+    >
+      <Show when={props.busy === true} fallback={props.glyph}>
+        <Spinner />
+      </Show>
+    </button>
+  );
+};
 
 const ControlsBar: Component = () => {
   const local = (): Participant | null =>
@@ -819,9 +912,18 @@ const ControlsBar: Component = () => {
         onClick={(): void => callActions.setMic(local()?.micOn !== true)}
       />
       <CircleButton
-        label={local()?.camOn === true ? "Stop camera" : "Start camera"}
+        label={
+          callState.videoPublishState() === "starting"
+            ? "Starting camera…"
+            : local()?.camOn === true
+              ? "Stop camera"
+              : "Start camera"
+        }
         glyph={local()?.camOn === true ? "🎥" : "📷"}
         active={local()?.camOn === false}
+        // B2a — the acquire+renegotiate is async; show a spinner + disable
+        // (prevents a spam-tap while the session in-flight-guards).
+        busy={callState.videoPublishState() === "starting"}
         onClick={(): void => callActions.setCamera(local()?.camOn !== true)}
       />
       {/* Switch front/back camera — mobile only. Surfaces only

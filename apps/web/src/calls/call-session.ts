@@ -74,6 +74,23 @@ export type WebCallEndReason =
   | "error";
 
 /**
+ * Lifecycle of a mid-call camera-on (piece B). A call started audio-only has
+ * no video sender; turning the camera on ACQUIRES the camera and renegotiates
+ * (adds a track after the initial offer):
+ *   * `off`      — no video published (the default; also after a failure).
+ *   * `starting` — `getUserMedia` + the addTrack/renegotiation are in flight.
+ *   * `live`     — the local video track is captured + attached (self-preview
+ *                  renders; the SDP renegotiation continues in the background).
+ *   * `failed`   — permission denied / no camera / capture error; the caller
+ *                  reverts the toggle + surfaces a message. The call stays up
+ *                  audio-only.
+ *
+ * Defined here as the canonical home so the 1×1 (`CallSession`) and SFU
+ * (`SfuCallSession`, which re-exports this) paths share ONE type + one
+ * videoPublishState surface driving one spinner. */
+export type VideoPublishState = "off" | "starting" | "live" | "failed";
+
+/**
  * G3-3-conn-quality — live connection-quality sample derived
  * from the active ICE candidate-pair (the web mirror of the
  * iOS/Android `ConnectionStatsSnapshot`).
@@ -130,6 +147,12 @@ export interface CallSessionCallbacks {
    *  the call is connected (every 2 s). Optional: callers that
    *  render no quality indicator can omit it and skip the poll. */
   onConnectionStats?(stats: WebConnectionStats): void;
+  /** Mid-call camera-on lifecycle (piece B). Drives the camera
+   *  button's spinner + the fail-safe revert in the UI. Optional —
+   *  an audio-only caller that renders no camera feedback can omit
+   *  it. Fires on every transition (`off` → `starting` → `live` /
+   *  `failed`, and back to `off` at teardown). */
+  onVideoPublishState?(state: VideoPublishState): void;
 }
 
 /** Audio / video request flags. Phase 3a8 MVP is audio-only
@@ -209,6 +232,8 @@ export class CallSession {
   private negotiationReady = false;
   /** In-flight guard for {@link addLocalVideo} (no double-acquire). */
   private addingVideo = false;
+  /** Mid-call camera-on lifecycle (piece B). */
+  private videoPublishState: VideoPublishState = "off";
 
   /** G3-3-conn-quality — `getStats()` poll loop handle, armed on
    *  the first `connected` transition, cleared in `dispose()`. */
@@ -231,6 +256,17 @@ export class CallSession {
   /** Current state — UI re-reads after every callback. */
   getState(): WebCallState {
     return this.state;
+  }
+
+  /** Current mid-call camera-on lifecycle state (piece B). */
+  getVideoPublishState(): VideoPublishState {
+    return this.videoPublishState;
+  }
+
+  private setVideoPublishState(state: VideoPublishState): void {
+    if (this.videoPublishState === state) return;
+    this.videoPublishState = state;
+    this.callbacks.onVideoPublishState?.(state);
   }
 
   /**
@@ -456,20 +492,26 @@ export class CallSession {
     const existing = pc.getSenders().find((s) => s.track?.kind === "video");
     if (existing?.track != null && existing.track.readyState === "live") {
       existing.track.enabled = true;
+      this.setVideoPublishState("live");
       return;
     }
     if (this.addingVideo) return; // capture in flight — do not double-acquire
     this.addingVideo = true;
+    // The acquire + renegotiation is async (permission prompt + capture + SDP);
+    // report `starting` so the camera button shows a spinner + disables.
+    this.setVideoPublishState("starting");
     let captured: MediaStream;
     try {
       captured = await navigator.mediaDevices.getUserMedia({ video: true });
     } catch (err) {
       this.addingVideo = false;
+      this.setVideoPublishState("failed");
       throw err instanceof Error ? err : new Error(String(err));
     }
     const track = captured.getVideoTracks()[0];
     if (track === undefined) {
       this.addingVideo = false;
+      this.setVideoPublishState("failed");
       throw new Error("no camera track captured");
     }
     try {
@@ -480,15 +522,20 @@ export class CallSession {
       if (localStream === null || pc2 === null) {
         track.stop();
         this.addingVideo = false;
+        this.setVideoPublishState("off");
         return;
       }
       localStream.addTrack(track);
       pc2.addTrack(track, localStream); // fires onnegotiationneeded -> reneg
       // Refresh the self-preview stream (it now carries a video track).
       this.callbacks.onLocalStream?.(localStream);
+      // The local self-preview is live now (the track is captured + attached);
+      // the SDP renegotiation continues in the background.
+      this.setVideoPublishState("live");
     } catch (err) {
       track.stop();
       this.addingVideo = false;
+      this.setVideoPublishState("failed");
       throw err instanceof Error ? err : new Error(String(err));
     }
     this.addingVideo = false;
@@ -598,6 +645,9 @@ export class CallSession {
     this.makingOffer = false;
     this.isSettingRemoteAnswerPending = false;
     this.addingVideo = false;
+    // Back to `off` so a reused instance (or the UI after teardown) starts
+    // clean — the camera button drops any spinner.
+    this.setVideoPublishState("off");
     if (this.state !== "done") {
       this.setState("done");
     }

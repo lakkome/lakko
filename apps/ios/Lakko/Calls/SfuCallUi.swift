@@ -123,6 +123,10 @@ final class SfuCallUi {
                 ui.setLocalVideoTrack(track)
             },
             onVideoPublishState: { state in
+                // B2a — drive the one UI surface `CallScreen` reads (the
+                // camera-button spinner + the self-tile "Starting camera…"
+                // hint), so the SFU path matches the 1×1 `driveFrom` path.
+                ui.setVideoPublishState(Self.mapVideoPublishState(state))
                 // Forward into the caller-set observer (captured `relay`, not
                 // `self`, so this is safe to build before `session` is assigned).
                 relay.handler?(state)
@@ -179,6 +183,20 @@ final class SfuCallUi {
     }
 
     // MARK: - Roster helpers
+
+    /// B2a — map the SFU session's camera-on lifecycle onto the shared UI
+    /// enum. Identity mapping (same cases); the explicit switch catches a
+    /// future divergence at compile time.
+    private static func mapVideoPublishState(
+        _ s: SfuCallSession.VideoPublishState
+    ) -> CallUiState.VideoPublishState {
+        switch s {
+        case .off: return .off
+        case .starting: return .starting
+        case .live: return .live
+        case .failed: return .failed
+        }
+    }
 
     /// Stable roster id for a remote peer.
     private static func participantId(forPeer peerId: String) -> String {

@@ -21,6 +21,8 @@
 
 import { createSignal, createMemo, type Accessor } from "solid-js";
 
+import type { VideoPublishState } from "../calls/call-session";
+
 // ============================================================================
 // Types
 // ============================================================================
@@ -279,6 +281,14 @@ interface CallStateInternal {
    *  towards unread — they are background context, not a
    *  reason to draw the user's attention. */
   readonly chatUnreadCount: Accessor<number>;
+  /** Mid-call camera-on lifecycle (piece B) — `off` / `starting` /
+   *  `live` / `failed`. Driven by the active call session's
+   *  `videoPublishState` (the 1×1 `CallSession` or the SFU group
+   *  handle); stays `off` on the standalone mock design route. The
+   *  camera button reads this to show a spinner + disable while
+   *  `starting`, and the local self-tile shows a "Starting camera…"
+   *  hint. */
+  readonly videoPublishState: Accessor<VideoPublishState>;
 }
 
 // ============================================================================
@@ -307,6 +317,8 @@ const [chatOpen, setChatOpen] = createSignal(false);
 const [chatMessages, setChatMessages] = createSignal<readonly ChatMessage[]>([]);
 const [composeText, setComposeText] = createSignal("");
 const [chatUnreadCount, setChatUnreadCount] = createSignal(0);
+const [videoPublishState, setVideoPublishState] =
+  createSignal<VideoPublishState>("off");
 
 /** Monotone counter for client-side chat-message ids when
  *  the message has not yet been ack'd by the MLS application-
@@ -360,6 +372,7 @@ export const callState: CallStateInternal = {
   chatMessages,
   composeText,
   chatUnreadCount,
+  videoPublishState,
 };
 
 /** Derived: the participant whose tile should be in the big
@@ -442,6 +455,13 @@ export const callActions = {
     const local = localParticipant();
     if (local !== null) patchParticipant(local.id, { camOn: on });
   },
+  /** Reflect the active call session's mid-call camera-on lifecycle
+   *  (piece B). Called by the Chat.tsx effect that mirrors the live
+   *  session's `videoPublishState` (the 1×1 `CallSession` or the SFU
+   *  group handle). Stays `off` on the standalone mock design route. */
+  setVideoPublishState(state: VideoPublishState): void {
+    setVideoPublishState(state);
+  },
   /** Toggle local raise-hand. */
   setHandRaised(raised: boolean): void {
     const local = localParticipant();
@@ -498,6 +518,9 @@ export const callActions = {
     setChatMessages([]);
     setComposeText("");
     setChatUnreadCount(0);
+    // Mid-call camera-on lifecycle — back to `off` so a fresh call
+    // screen starts without a stale spinner.
+    setVideoPublishState("off");
   },
   /** Transition from prejoin → connecting. Called when the user
    *  clicks Join on the prejoin screen. The WebRTC pod takes

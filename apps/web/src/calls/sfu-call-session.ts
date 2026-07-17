@@ -80,7 +80,7 @@ import {
   rekeySFrame,
   isSFrameTransformSupported,
 } from "./sframe-transform";
-import { trackConstraint } from "./call-session";
+import { trackConstraint, type VideoPublishState } from "./call-session";
 
 /** Lifecycle phases the SFU session can be in. */
 export type SfuCallState =
@@ -159,20 +159,11 @@ export interface SfuRemoteTrack {
   readonly stream: MediaStream;
 }
 
-/**
- * Lifecycle of a mid-call camera-on (ADR-0032 arc, piece B). A group call
- * started audio-only has no video sender; turning the camera on ACQUIRES the
- * camera and renegotiates (adds a track after the initial offer):
- *   * `off`      — no video published (the default; also after a failure).
- *   * `starting` — `getUserMedia` + the addTrack/renegotiation are in flight.
- *   * `live`     — the local video track is captured + attached (self-preview
- *                  renders; the SDP renegotiation continues in the background
- *                  via `onnegotiationneeded`).
- *   * `failed`   — permission denied / no camera / capture error; the caller
- *                  reverts the toggle + surfaces a message. The call stays up
- *                  audio-only (invariant #4 — no half-added sender left behind).
- */
-export type VideoPublishState = "off" | "starting" | "live" | "failed";
+// Mid-call camera-on lifecycle (piece B) — `off` / `starting` / `live` /
+// `failed`. Defined canonically in `call-session.ts` so the 1×1 and SFU paths
+// share ONE type + one videoPublishState surface; re-exported here for existing
+// importers (`sfu-call-ui.ts`).
+export type { VideoPublishState };
 
 /** Callbacks the caller wires in. */
 export interface SfuCallCallbacks {

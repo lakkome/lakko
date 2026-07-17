@@ -51,6 +51,7 @@ import {
   type WebCallState,
   type WebCallEndReason,
   type WebConnectionStats,
+  type VideoPublishState,
 } from "../calls/call-session";
 import {
   callActions,
@@ -410,6 +411,12 @@ function ChatView(props: {
     null,
   );
   const [remoteHasVideo, setRemoteHasVideo] = createSignal(false);
+  // B2a — mid-call camera-on lifecycle for the 1×1 path (off / starting /
+  // live / failed), fed by the CallSession's `onVideoPublishState`. The SFU
+  // path exposes the same via `sfuHandle().videoPublishState()`; the effect
+  // below mirrors whichever is active into the shared store.
+  const [oneToOneVideoState, setOneToOneVideoState] =
+    createSignal<VideoPublishState>("off");
   // SFU multi-party (group) call. Distinct from the 1×1 `activeCall`
   // above — a group chat (>2 members) routes through the Rust SFU with
   // SFrame, while a 1×1 chat stays P2P DTLS-SRTP. `sfuHandle` is held in
@@ -682,6 +689,18 @@ function ChatView(props: {
     }
   });
 
+  // B2a — mirror the ACTIVE call's mid-call camera-on lifecycle into the
+  // shared store, so one videoPublishState surface drives the camera-button
+  // spinner + the self-tile "Starting camera…" hint regardless of call kind.
+  // Reads the SFU group handle's state when a group call is live, else the
+  // 1×1 CallSession's; both re-establish reactively when `sfuHandle()` flips.
+  createEffect(() => {
+    const h = sfuHandle();
+    const state: VideoPublishState =
+      h !== null ? h.videoPublishState() : oneToOneVideoState();
+    callActions.setVideoPublishState(state);
+  });
+
   // Keep the remote tile's camera state in sync after connect: the
   // 1×1 roster is set on the state transition, but the peer's video
   // track can arrive a beat later (a separate `ontrack`). When
@@ -726,6 +745,9 @@ function ChatView(props: {
         setRemoteHasVideo(s.getVideoTracks().length > 0);
       },
       onLocalStream: (s) => setLocalCallStream(s),
+      // B2a — mid-call camera-on lifecycle. The effect below mirrors this
+      // into the shared store (camera-button spinner + self-tile hint).
+      onVideoPublishState: (s) => setOneToOneVideoState(s),
       onOutboundSignaling: publishSignalingFor(props.entry),
       onStateChange: (s, reason) => {
         setCallState(s);
@@ -738,6 +760,7 @@ function ChatView(props: {
           setLocalCallStream(null);
           setVideoCall(false);
           setRemoteHasVideo(false);
+          setOneToOneVideoState("off");
           // G3-3-conn-quality — drop the stale sample so the
           // next call doesn't briefly flash the previous one.
           setCallConnStats(null);

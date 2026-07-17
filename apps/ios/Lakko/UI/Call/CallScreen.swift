@@ -194,6 +194,24 @@ private struct ParticipantTile: View {
     var body: some View {
         ZStack {
             videoSurface
+            // B2a — local self-tile hint while the mid-call camera
+            // acquire + renegotiation is in flight (`.starting`). Local
+            // tile only; the button spinner is the paired affordance in
+            // the controls bar.
+            if participant.isLocal && state.videoPublishState == .starting {
+                HStack(spacing: 8) {
+                    ProgressView()
+                        .progressViewStyle(.circular)
+                        .tint(CallTheme.textPrimary)
+                    Text("Starting camera…")
+                        .font(.caption)
+                        .foregroundColor(CallTheme.textPrimary)
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+                .background(Color.black.opacity(0.55))
+                .clipShape(Capsule())
+            }
             // Large mute overlay (centre) for muted remotes.
             if !participant.micOn && !participant.isLocal {
                 Image(systemName: "mic.slash.fill")
@@ -362,6 +380,10 @@ private struct CircleButton: View {
     let systemImage: String
     let active: Bool
     let destructive: Bool
+    /// B2a — busy state: swaps the glyph for a spinner and disables
+    /// the button while an async action (e.g. the mid-call camera
+    /// acquire) is in flight.
+    let busy: Bool
     let onTap: () -> Void
 
     init(
@@ -369,31 +391,42 @@ private struct CircleButton: View {
         systemImage: String,
         active: Bool,
         destructive: Bool = false,
+        busy: Bool = false,
         onTap: @escaping () -> Void
     ) {
         self.label = label
         self.systemImage = systemImage
         self.active = active
         self.destructive = destructive
+        self.busy = busy
         self.onTap = onTap
     }
 
     var body: some View {
         Button(action: onTap) {
-            Image(systemName: systemImage)
-                .font(.body)
-                .foregroundColor(CallTheme.textPrimary)
-                .frame(width: 52, height: 52)
-                .background(bg)
-                .clipShape(Circle())
-                .shadow(
-                    color: destructive
-                        ? CallTheme.endCallRed.opacity(0.5)
-                        : .black.opacity(0.4),
-                    radius: 4
-                )
+            Group {
+                if busy {
+                    ProgressView()
+                        .progressViewStyle(.circular)
+                        .tint(CallTheme.textPrimary)
+                } else {
+                    Image(systemName: systemImage)
+                        .font(.body)
+                        .foregroundColor(CallTheme.textPrimary)
+                }
+            }
+            .frame(width: 52, height: 52)
+            .background(bg)
+            .clipShape(Circle())
+            .shadow(
+                color: destructive
+                    ? CallTheme.endCallRed.opacity(0.5)
+                    : .black.opacity(0.4),
+                radius: 4
+            )
         }
-        .accessibilityLabel(label)
+        .disabled(busy)
+        .accessibilityLabel(busy ? "\(label), starting" : label)
     }
 
     private var bg: Color {
@@ -464,6 +497,10 @@ private struct ControlsBar: View {
                 label: local?.camOn == true ? "Stop camera" : "Start camera",
                 systemImage: local?.camOn == true ? "video.fill" : "video.slash.fill",
                 active: local?.camOn == false,
+                // B2a — while the mid-call camera acquire is in flight the
+                // button shows a spinner + is disabled (the session already
+                // in-flight-guards the acquire; this is the visual half).
+                busy: state.videoPublishState == .starting,
                 onTap: { onSetCamera(!(local?.camOn ?? true)) }
             )
             if state.hasMultipleCameras && local?.camOn == true {

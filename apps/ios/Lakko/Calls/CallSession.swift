@@ -48,6 +48,27 @@ public final class CallSession: ObservableObject {
         case hungUp, busy, declined, timedOut, error
     }
 
+    /// Lifecycle of a mid-call camera-on (piece B2a) — the 1×1 analog of
+    /// `SfuCallSession.VideoPublishState`. A 1×1 call started audio-only has
+    /// no video sender, so ``addLocalVideo()`` ACQUIRES the camera + adds a
+    /// track + renegotiates; that acquire is async, so the UI shows a
+    /// camera-button spinner + a self-tile "Starting camera…" hint while it
+    /// is in flight:
+    ///   * `off`      — no video published (the default; also after a
+    ///                  failure the caller reverted, and at teardown).
+    ///   * `starting` — camera capture + the addTrack/renegotiation are in
+    ///                  flight.
+    ///   * `live`     — the local video track is captured, SFrame-sealed,
+    ///                  and added.
+    ///   * `failed`   — no camera / permission denied / capture error / the
+    ///                  SFrame arm failed; the caller reverts the toggle +
+    ///                  surfaces a message. The call stays up audio-only
+    ///                  (invariant #4 — no half-added / unsealed sender is
+    ///                  ever offered to the peer).
+    public enum VideoPublishState: String, Equatable {
+        case off, starting, live, failed
+    }
+
     /// 16-byte call_id minted by the offerer.
     public let callId: Data
 
@@ -125,6 +146,15 @@ public final class CallSession: ObservableObject {
     /// local participant's `micOn` / `camOn`.
     @Published public private(set) var micEnabled: Bool = true
     @Published public private(set) var cameraEnabled: Bool = false
+
+    /// B2a — mid-call camera-on lifecycle. Starts `.off`;
+    /// ``addLocalVideo()`` flips it `.starting` while the camera
+    /// acquire + renegotiation is in flight, then `.live` on
+    /// success or `.failed` on any thrown error; teardown resets
+    /// it `.off`. `CallUiState.driveFrom` mirrors it so the
+    /// camera button shows a spinner (+ disables) and the local
+    /// self-tile shows a "Starting camera…" hint while `.starting`.
+    @Published public private(set) var videoPublishState: VideoPublishState = .off
 
     /// G3-1-e2ee-active — `true` once `setCallKey` has armed the
     /// SFrame seed (the call's media is end-to-end encrypted).
@@ -470,27 +500,35 @@ public final class CallSession: ObservableObject {
         if rtc.currentLocalVideoTrack() != nil {
             rtc.setCameraEnabled(true)
             cameraEnabled = true
+            setVideoPublishState(.live)
             return
         }
         if addingVideo { return } // capture in flight — do not double-acquire
         addingVideo = true
+        // B2a — the camera acquire + renegotiation is now in flight; the UI
+        // shows the camera-button spinner + the self-tile hint until this
+        // resolves to `.live` / `.failed`.
+        setVideoPublishState(.starting)
 
         // Acquire the camera FIRST, before adding any track, so a
         // capture failure never leaves a half-added sender on the
         // peer connection.
         guard LocalCameraCapture.hasUsableCamera() else {
             addingVideo = false
+            setVideoPublishState(.failed)
             throw CallSessionError.noCamera
         }
         let source = WebRTCPeerConnection.newVideoSource()
         guard let capture = LocalCameraCapture(source: source) else {
             addingVideo = false
+            setVideoPublishState(.failed)
             throw CallSessionError.noCamera
         }
         do {
             try await capture.start()
         } catch {
             addingVideo = false
+            setVideoPublishState(.failed)
             throw error
         }
 
@@ -499,6 +537,9 @@ public final class CallSession: ObservableObject {
         guard let liveRtc = self.rtc else {
             await capture.stop()
             addingVideo = false
+            // The call went away mid-acquire — not a failure to surface;
+            // teardown already reset the state (or is about to).
+            setVideoPublishState(.off)
             return
         }
         liveRtc.addLocalVideoTrack(source)
@@ -523,6 +564,7 @@ public final class CallSession: ObservableObject {
             self.localVideoTrack = nil
             self.cameraEnabled = false
             addingVideo = false
+            setVideoPublishState(.failed)
             throw CallSessionError.sframeUnavailable
         }
         self.localCameraCapture = capture
@@ -532,8 +574,18 @@ public final class CallSession: ObservableObject {
         // `localVideoTrack` (mapped in `CallUiState.driveFrom`).
         self.cameraEnabled = true
         addingVideo = false
+        // B2a — camera is live; the spinner clears (the UI only shows it
+        // while `.starting`).
+        setVideoPublishState(.live)
         // Renegotiate so the peer learns the new (sealed) video m-line.
         await driveRenegotiationOffer(rtc: liveRtc)
+    }
+
+    /// B2a — publish the mid-call camera-on lifecycle. Guards a redundant
+    /// re-publish so `@Published` doesn't fire on an unchanged value.
+    private func setVideoPublishState(_ next: VideoPublishState) {
+        guard videoPublishState != next else { return }
+        videoPublishState = next
     }
 
     /// Outbound side: tear down a call we initiated or
@@ -877,6 +929,8 @@ public final class CallSession: ObservableObject {
         self.makingOffer = false
         self.isSettingRemoteAnswerPending = false
         self.addingVideo = false
+        // B2a — a fresh call starts with no camera-on in flight.
+        setVideoPublishState(.off)
     }
 
     /// G3-1-conn-quality — start the connection-stats poll loop

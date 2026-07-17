@@ -131,8 +131,23 @@ class SfuCallUi(
                 ui.setLocalVideoTrack(track)
             },
             onVideoPublishState = { s ->
-                // Mirror the mid-call camera-on lifecycle (piece B).
+                // Mirror the mid-call camera-on lifecycle (piece B) onto both
+                // the adapter's own flow AND the shared CallUiState, so the
+                // CallScreen collects ONE surface for the camera-button spinner
+                // + the self-tile hint (piece B2a).
                 _videoPublishState.value = s
+                ui.setVideoPublishState(
+                    when (s) {
+                        SfuCallSession.VideoPublishState.OFF ->
+                            CallUiState.VideoPublishState.Off
+                        SfuCallSession.VideoPublishState.STARTING ->
+                            CallUiState.VideoPublishState.Starting
+                        SfuCallSession.VideoPublishState.LIVE ->
+                            CallUiState.VideoPublishState.Live
+                        SfuCallSession.VideoPublishState.FAILED ->
+                            CallUiState.VideoPublishState.Failed
+                    }
+                )
             },
             onServerError = { _, _ -> },
         )

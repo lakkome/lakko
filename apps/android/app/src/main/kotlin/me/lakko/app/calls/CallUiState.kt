@@ -41,6 +41,16 @@ public class CallUiState(
         Excellent, Good, Fair, Poor, Bad,
     }
 
+    /**
+     * ADR-0032 piece B2a — mid-call camera-on lifecycle, mirrored from
+     * whichever session drives the screen (the 1×1 [CallSession] via
+     * [driveFrom], or the SFU [SfuCallSession] via [SfuCallUi]). One surface
+     * the `CallScreen` reads for the camera-button spinner + the self-tile
+     * "Starting camera…" hint. [Starting] is the only value the UI reacts to;
+     * the rest are terminal.
+     */
+    public enum class VideoPublishState { Off, Starting, Live, Failed }
+
     public data class Participant(
         val id: String,
         val displayName: String,
@@ -161,6 +171,15 @@ public class CallUiState(
 
     private val _hasMultipleCameras = MutableStateFlow(false)
     public val hasMultipleCameras: StateFlow<Boolean> = _hasMultipleCameras.asStateFlow()
+
+    /** ADR-0032 piece B2a — mid-call camera-on lifecycle (see
+     *  [VideoPublishState]). Driven from the bound session; `CallScreen`
+     *  reads it for the camera-button spinner + the self-tile "Starting
+     *  camera…" hint. Untouched by [seedMockState] (the mock design path
+     *  never spins). */
+    private val _videoPublishState = MutableStateFlow(VideoPublishState.Off)
+    public val videoPublishState: StateFlow<VideoPublishState> =
+        _videoPublishState.asStateFlow()
 
     /** Gear-menu open / closed (S-3-A-settings). */
     private val _settingsOpen = MutableStateFlow(false)
@@ -332,6 +351,14 @@ public class CallUiState(
 
     public fun setHasMultipleCameras(many: Boolean) {
         _hasMultipleCameras.value = many
+    }
+
+    /** ADR-0032 piece B2a — push the mid-call camera-on lifecycle. Driven by
+     *  the bound session ([driveFrom] for the 1×1 path, [SfuCallUi] for the
+     *  SFU path); exposed as a setter so both callers converge on the one UI
+     *  surface `CallScreen` reads. */
+    public fun setVideoPublishState(s: VideoPublishState) {
+        _videoPublishState.value = s
     }
 
     // ----------------------------------------------------------
@@ -546,6 +573,7 @@ public class CallUiState(
             launch { session.connectionRelayed.collect { rebuildFromSession(session) } }
             launch { session.downBps.collect { rebuildFromSession(session) } }
             launch { session.upBps.collect { rebuildFromSession(session) } }
+            launch { session.videoPublishState.collect { rebuildFromSession(session) } }
         }
     }
 
@@ -610,6 +638,14 @@ public class CallUiState(
                 else -> ConnectionDetail.ConnectionType.Unknown
             },
         )
+        // ADR-0032 piece B2a — mid-call camera-on lifecycle from the 1×1
+        // session, mapped onto the shared UI surface.
+        _videoPublishState.value = when (session.videoPublishState.value) {
+            CallSession.VideoPublishState.Off -> VideoPublishState.Off
+            CallSession.VideoPublishState.Starting -> VideoPublishState.Starting
+            CallSession.VideoPublishState.Live -> VideoPublishState.Live
+            CallSession.VideoPublishState.Failed -> VideoPublishState.Failed
+        }
     }
 
     /**
@@ -672,6 +708,8 @@ public class CallUiState(
         bindJob = null
         _localVideoTrack.value = null
         _remoteVideoTrack.value = null
+        // ADR-0032 piece B2a — no camera-on in flight for a fresh call.
+        _videoPublishState.value = VideoPublishState.Off
     }
 
     /** Mock seed — same shape as the web `seedMockParticipants` /

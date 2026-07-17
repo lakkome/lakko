@@ -64,6 +64,16 @@ public final class CallUiState: ObservableObject {
         case ended(endedAt: Date)
     }
 
+    /// B2a — mid-call camera-on lifecycle, mirrored from whichever
+    /// session drives the screen (the 1×1 `CallSession` via
+    /// `driveFrom`, or the SFU `SfuCallSession` via `SfuCallUi`). One
+    /// surface the `CallScreen` reads for the camera-button spinner +
+    /// the self-tile "Starting camera…" hint. `.starting` is the only
+    /// value the UI reacts to; the rest are terminal.
+    public enum VideoPublishState: String, Equatable {
+        case off, starting, live, failed
+    }
+
     /// E2EE indicator state.
     public struct E2eeState: Equatable {
         public let active: Bool
@@ -237,6 +247,13 @@ public final class CallUiState: ObservableObject {
     /// keeps the legacy placeholder; the N-way SFU path will
     /// replace this with a per-participant track map.
     @Published public private(set) var remoteVideoTrack: RTCVideoTrack?
+
+    /// B2a — mid-call camera-on lifecycle, driven by the bound session
+    /// (1×1 `CallSession.videoPublishState` via `driveFrom`; SFU via
+    /// `SfuCallUi`). `CallScreen` reads this for the camera-button
+    /// spinner (+ disable) and the local self-tile "Starting camera…"
+    /// hint while `.starting`. Untouched by `seedMockState()`.
+    @Published public private(set) var videoPublishState: VideoPublishState = .off
 
     /// Monotone counter for client-side chat-message ids;
     /// the WebRTC pod replaces this with MLS application-
@@ -540,6 +557,14 @@ public final class CallUiState: ObservableObject {
         self.remoteVideoTrack = track
     }
 
+    /// B2a — push the mid-call camera-on lifecycle. Driven by the
+    /// bound session (`driveFrom` for 1×1, `SfuCallUi` for the SFU
+    /// path); exposed as a setter so both callers converge on the one
+    /// UI surface `CallScreen` reads.
+    public func setVideoPublishState(_ s: VideoPublishState) {
+        self.videoPublishState = s
+    }
+
     /// The id of the only remote participant, when exactly one
     /// exists (the 1×1 case). `nil` when alone or in an N-way
     /// call. `CallScreen` gates remote-video rendering on
@@ -578,6 +603,8 @@ public final class CallUiState: ObservableObject {
         // re-binds against a fresh CallSession.
         self.localVideoTrack = nil
         self.remoteVideoTrack = nil
+        // B2a — no camera-on in flight for a fresh call.
+        self.videoPublishState = .off
     }
 
     /// Seed mock state — same shape as the web `seedMockParticipants`.
@@ -722,6 +749,12 @@ extension CallUiState {
             self.setParticipants(roster)
             self.setLocalVideoTrack(session.localVideoTrack)
             self.setRemoteVideoTrack(remoteTrack)
+            // B2a — mirror the 1×1 mid-call camera-on lifecycle so the
+            // camera button spins (+ disables) and the self-tile shows
+            // the "Starting camera…" hint while it is `.starting`.
+            self.setVideoPublishState(
+                Self.mapVideoPublishState(session.videoPublishState)
+            )
             // G3-1-e2ee-active — the pill reflects real SFrame
             // keying; the safety number (canonical hash of the same
             // seed, set alongside `e2eeActive` in `setCallKey`) is the
@@ -774,10 +807,31 @@ extension CallUiState {
         let up = session.$upBps
             .receive(on: DispatchQueue.main)
             .sink { _ in onMain(rebuild) }
+        let videoPublish = session.$videoPublishState
+            .receive(on: DispatchQueue.main)
+            .sink { _ in onMain(rebuild) }
         // Seed once synchronously so the first frame is correct
         // before any publisher fires.
         rebuild()
-        return [state, localTrack, remoteTrack, mic, camera, e2ee, rtt, relay, down, up]
+        return [
+            state, localTrack, remoteTrack, mic, camera, e2ee,
+            rtt, relay, down, up, videoPublish,
+        ]
+    }
+
+    /// B2a — map the 1×1 `CallSession` camera-on lifecycle onto the UI
+    /// enum. Identity mapping (the two enums share the same cases); kept
+    /// as an explicit switch so a future divergence is caught by the
+    /// compiler rather than silently mis-mapped.
+    private static func mapVideoPublishState(
+        _ s: CallSession.VideoPublishState
+    ) -> VideoPublishState {
+        switch s {
+        case .off: return .off
+        case .starting: return .starting
+        case .live: return .live
+        case .failed: return .failed
+        }
     }
 
     /// G3-1-conn-quality — bucket a measured round-trip time
