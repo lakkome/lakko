@@ -77,12 +77,34 @@ pub enum HeaderError {
         /// Bytes actually available.
         had: usize,
     },
+
+    /// A per-sender stream ordinal did not fit the 8-bit stream field of the
+    /// composite KID ([`SframeHeader::kid_for`], ADR-0035).
+    #[error("stream index {stream_index} exceeds the maximum {max}")]
+    StreamIndexOverflow {
+        /// The out-of-range stream index the caller supplied.
+        stream_index: u32,
+        /// The largest permitted stream index ([`MAX_STREAM_INDEX`]).
+        max: u32,
+    },
 }
 
 /// Maximum encoded header length: 1 byte first + 8 bytes
 /// KID + 8 bytes CTR. Useful for callers that pre-allocate
 /// a scratch buffer.
 pub const MAX_HEADER_LEN: usize = 1 + 8 + 8;
+
+/// Number of low bits of an SFrame KID reserved for the per-sender stream
+/// ordinal (ADR-0035). The high bits carry the MLS sender leaf; the low
+/// [`STREAM_INDEX_BITS`] bits carry a small per-sender stream index (0 for the
+/// first stream, 1..N for additional streams a single leaf publishes — e.g.
+/// camera + screen-share).
+pub const STREAM_INDEX_BITS: u32 = 8;
+
+/// Largest per-sender stream ordinal — the KID's low byte holds `0..=255`
+/// (ADR-0035). 8 bits of stream space is ample for any realistic per-leaf
+/// stream count; the sender assigns these ordinals in a stable local order.
+pub const MAX_STREAM_INDEX: u32 = (1 << STREAM_INDEX_BITS) - 1;
 
 /// Parsed SFrame header — the (KID, CTR) pair plus the
 /// number of bytes the encoded form consumed. Returning the
@@ -210,6 +232,56 @@ impl SframeHeader {
         };
 
         Ok((Self { kid, ctr }, offset))
+    }
+
+    /// Compose a per-`(sender_leaf, stream)` SFrame KID (ADR-0035):
+    /// `(sender_leaf << STREAM_INDEX_BITS) | stream_index`.
+    ///
+    /// The KID is the ONLY per-stream discriminator that survives an SFU — the
+    /// SFU forwards the RFC 9605 header verbatim (invariant #2), so a receiver
+    /// re-derives the sender's key from the KID with no local media-type or
+    /// transceiver-MID signal (a sender-side MID differs from the subscriber-side
+    /// MID through an SFU, and audio/video track-kind cannot tell two same-kind
+    /// streams apart). Folding the FULL KID into the key derivation
+    /// ([`crate::sframe::CallKey::participant_key`]) gives every `(leaf, stream)`
+    /// a disjoint `(key, nonce_salt)` space — so two video streams from one leaf
+    /// (camera + screen-share) can never reuse a `(key, nonce)` pair, which the
+    /// per-media-TYPE scheme of ADR-0034 could not guarantee.
+    ///
+    /// # Errors
+    ///
+    /// - [`HeaderError::StreamIndexOverflow`] when `stream_index >
+    ///   MAX_STREAM_INDEX` (the ordinal would not fit the KID's 8-bit stream
+    ///   field).
+    pub fn kid_for(sender_leaf: u32, stream_index: u32) -> Result<u64, HeaderError> {
+        if stream_index > MAX_STREAM_INDEX {
+            return Err(HeaderError::StreamIndexOverflow {
+                stream_index,
+                max: MAX_STREAM_INDEX,
+            });
+        }
+        Ok((u64::from(sender_leaf) << STREAM_INDEX_BITS) | u64::from(stream_index))
+    }
+
+    /// Recover the MLS sender leaf from a composite KID (ADR-0035): `kid >> 8`.
+    ///
+    /// A well-formed KID is `(u32 leaf << 8) | u8 stream`, so `kid >> 8` fits a
+    /// `u32`. A malformed wire KID with bits set above the leaf range yields an
+    /// advisory leaf whose derived key will not match the sender's — so the frame
+    /// fails to open — meaning this split is roster/diagnostic-only and never a
+    /// security gate (the key derivation binds the FULL KID, not the split leaf).
+    #[must_use]
+    #[allow(clippy::cast_possible_truncation)]
+    pub const fn leaf_of(kid: u64) -> u32 {
+        (kid >> STREAM_INDEX_BITS) as u32
+    }
+
+    /// Recover the per-sender stream ordinal from a composite KID (ADR-0035):
+    /// `kid & 0xFF`. Always in `0..=MAX_STREAM_INDEX`.
+    #[must_use]
+    #[allow(clippy::cast_possible_truncation)]
+    pub const fn stream_of(kid: u64) -> u8 {
+        (kid & MAX_STREAM_INDEX as u64) as u8
     }
 }
 
@@ -453,5 +525,84 @@ mod tests {
             assert_eq!(bytes[0] & 0x08, 0x08, "Y=1 for an extended ctr");
             assert_eq!(u64::from(bytes[0] & 0x07), clen);
         }
+    }
+
+    // -- ADR-0035: KID = (sender_leaf << 8) | stream_index ------------------
+
+    /// `kid_for` packs the leaf into the high bits and the stream ordinal into
+    /// the low byte, and `leaf_of` / `stream_of` split it back out exactly.
+    #[test]
+    fn kid_compose_split_round_trips() {
+        for (leaf, stream) in [
+            (0u32, 0u32),
+            (0, 1),
+            (0, 255),
+            (3, 0),
+            (3, 1),
+            (3, 2),
+            (1, 255),
+            (u32::MAX, 0),
+            (u32::MAX, 255),
+            (0x00AB_CDEF, 0x7F),
+        ] {
+            let kid = SframeHeader::kid_for(leaf, stream).expect("in range");
+            assert_eq!(kid, (u64::from(leaf) << 8) | u64::from(stream));
+            assert_eq!(SframeHeader::leaf_of(kid), leaf, "leaf round-trips");
+            assert_eq!(
+                u32::from(SframeHeader::stream_of(kid)),
+                stream,
+                "stream round-trips"
+            );
+        }
+    }
+
+    /// A leaf's distinct streams (0, 1, 2) map to distinct KIDs — the whole
+    /// point of the discriminator (ADR-0035).
+    #[test]
+    fn distinct_streams_of_one_leaf_get_distinct_kids() {
+        let a = SframeHeader::kid_for(4, 0).unwrap();
+        let b = SframeHeader::kid_for(4, 1).unwrap();
+        let c = SframeHeader::kid_for(4, 2).unwrap();
+        assert_ne!(a, b);
+        assert_ne!(b, c);
+        assert_ne!(a, c);
+        // …and they all share the same leaf.
+        assert_eq!(SframeHeader::leaf_of(a), 4);
+        assert_eq!(SframeHeader::leaf_of(b), 4);
+        assert_eq!(SframeHeader::leaf_of(c), 4);
+    }
+
+    /// `kid_for` rejects a stream ordinal that does not fit the 8-bit field
+    /// (fail-closed, no silent truncation into another leaf's space).
+    #[test]
+    fn kid_for_rejects_stream_index_over_255() {
+        assert_eq!(SframeHeader::kid_for(1, 255), Ok((1u64 << 8) | 255));
+        assert_eq!(
+            SframeHeader::kid_for(1, 256),
+            Err(HeaderError::StreamIndexOverflow {
+                stream_index: 256,
+                max: MAX_STREAM_INDEX,
+            })
+        );
+        assert_eq!(
+            SframeHeader::kid_for(0, u32::MAX),
+            Err(HeaderError::StreamIndexOverflow {
+                stream_index: u32::MAX,
+                max: MAX_STREAM_INDEX,
+            })
+        );
+    }
+
+    /// A composed KID survives an encode/decode wire round-trip unchanged — so
+    /// the discriminator the sender folded into its key is exactly what the
+    /// receiver reads back from the header.
+    #[test]
+    fn composed_kid_survives_wire_round_trip() {
+        let kid = SframeHeader::kid_for(3, 2).unwrap(); // 0x0302
+        let wire = SframeHeader { kid, ctr: 1 }.encode();
+        let (parsed, _) = SframeHeader::decode(&wire).unwrap();
+        assert_eq!(parsed.kid, kid);
+        assert_eq!(SframeHeader::leaf_of(parsed.kid), 3);
+        assert_eq!(SframeHeader::stream_of(parsed.kid), 2);
     }
 }

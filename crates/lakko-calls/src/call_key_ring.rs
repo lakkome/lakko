@@ -29,7 +29,7 @@
 //! The core stays **time-source-free**: the caller supplies `now_ms` on rekey +
 //! prune; the ring never reads a clock.
 
-use crate::sframe::{CallKey, MediaType, ParticipantKey, CALL_KEY_LEN};
+use crate::sframe::{CallKey, ParticipantKey, CALL_KEY_LEN};
 use crate::{Error, Result};
 
 /// Default SFrame epoch-overlap window — the previous-epoch key is retained this
@@ -135,27 +135,23 @@ impl CallKeyRing {
         self.previous.as_ref().map(|r| &r.key)
     }
 
-    /// Derive the seal-side [`ParticipantKey`] for `sender_leaf` + `media_type`
-    /// from the **current** key. Seal always uses the current epoch. The
-    /// `media_type` (ADR-0034) keeps a participant's audio and video streams on
-    /// distinct key + nonce-salt spaces so their independent counters cannot
-    /// reuse a `(key, nonce)` pair.
+    /// Derive the seal-side [`ParticipantKey`] for a composite SFrame `kid`
+    /// (ADR-0035: `(sender_leaf << 8) | stream_index`) from the **current** key.
+    /// Seal always uses the current epoch. Keying on the full KID keeps every
+    /// one of a participant's concurrent streams on a distinct key + nonce-salt
+    /// space, so their independent counters cannot reuse a `(key, nonce)` pair.
     ///
     /// # Errors
     ///
     /// See [`CallKey::participant_key`].
-    pub fn participant_key(
-        &self,
-        sender_leaf: u32,
-        media_type: MediaType,
-    ) -> Result<ParticipantKey> {
-        self.current.participant_key(sender_leaf, media_type)
+    pub fn participant_key(&self, kid: u64) -> Result<ParticipantKey> {
+        self.current.participant_key(kid)
     }
 
     /// Open a raw `(aad, ciphertext, frame_counter)` SFrame with the overlap
-    /// behaviour: try the current key's per-participant key for
-    /// `(sender_leaf, media_type)` first; on AEAD failure fall back to the
-    /// previous key while one is retained. Returns the plaintext on either path.
+    /// behaviour: try the current key's per-stream key for `kid` (ADR-0035)
+    /// first; on AEAD failure fall back to the previous key while one is
+    /// retained. Returns the plaintext on either path.
     ///
     /// Outside an overlap window (no rotation yet, or the previous key was
     /// dropped / pruned) this collapses to "current key only".
@@ -167,20 +163,19 @@ impl CallKeyRing {
     ///   immediately (it is not an overlap-fall-back case).
     pub fn try_open_with_overlap(
         &self,
-        sender_leaf: u32,
-        media_type: MediaType,
+        kid: u64,
         aad: &[u8],
         ciphertext: &[u8],
         frame_counter: u32,
     ) -> Result<Vec<u8>> {
-        let current = self.current.participant_key(sender_leaf, media_type)?;
+        let current = self.current.participant_key(kid)?;
         match current.open(aad, ciphertext, frame_counter) {
             Ok(pt) => return Ok(pt),
             Err(Error::Crypto(_)) => {},
             Err(other) => return Err(other),
         }
         if let Some(prev) = self.previous.as_ref() {
-            let prev_key = prev.key.participant_key(sender_leaf, media_type)?;
+            let prev_key = prev.key.participant_key(kid)?;
             return prev_key.open(aad, ciphertext, frame_counter);
         }
         Err(Error::Crypto(
@@ -190,30 +185,26 @@ impl CallKeyRing {
 
     /// Open an RFC 9605 framed SFrame (`open_framed` — the wire carries its own
     /// KID + counter header) with the same overlap behaviour as
-    /// [`Self::try_open_with_overlap`]. The header is identical regardless of
-    /// which seed sealed the frame (it is derived from the sender leaf +
-    /// counter, not the seed), so the previous key parses the same header and
-    /// opens a late frame from the old epoch.
+    /// [`Self::try_open_with_overlap`]. `kid` is the composite `(leaf, stream)`
+    /// key identifier the caller read from the frame's header (ADR-0035). The
+    /// header is identical regardless of which seed sealed the frame (it is
+    /// derived from the KID + counter, not the seed), so the previous key parses
+    /// the same header and opens a late frame from the old epoch.
     ///
     /// # Errors
     ///
     /// - [`Error::Crypto`] when the frame authenticates under **neither** key.
     /// - A header-parse error (malformed wire) is propagated immediately — it is
     ///   not an overlap-fall-back case.
-    pub fn try_open_framed_with_overlap(
-        &self,
-        sender_leaf: u32,
-        media_type: MediaType,
-        wire: &[u8],
-    ) -> Result<Vec<u8>> {
-        let current = self.current.participant_key(sender_leaf, media_type)?;
+    pub fn try_open_framed_with_overlap(&self, kid: u64, wire: &[u8]) -> Result<Vec<u8>> {
+        let current = self.current.participant_key(kid)?;
         match current.open_framed(wire) {
             Ok(pt) => return Ok(pt),
             Err(Error::Crypto(_)) => {},
             Err(other) => return Err(other),
         }
         if let Some(prev) = self.previous.as_ref() {
-            let prev_key = prev.key.participant_key(sender_leaf, media_type)?;
+            let prev_key = prev.key.participant_key(kid)?;
             return prev_key.open_framed(wire);
         }
         Err(Error::Crypto(
@@ -252,16 +243,21 @@ impl CallKeyRing {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::header::SframeHeader;
 
     const SEED_A: [u8; CALL_KEY_LEN] = [0x11; CALL_KEY_LEN];
     const SEED_B: [u8; CALL_KEY_LEN] = [0x22; CALL_KEY_LEN];
     const LEAF: u32 = 3;
 
+    /// The composite KID for a leaf's first (stream-0) SFrame stream (ADR-0035).
+    /// The ring is media-type-agnostic; these tests exercise one stream per leaf.
+    fn kid_of(leaf: u32) -> u64 {
+        SframeHeader::kid_for(leaf, 0).expect("stream 0 fits")
+    }
+
     /// Seal under a ring's current key and return the framed wire.
     fn seal_framed(ring: &CallKeyRing, leaf: u32, plaintext: &[u8]) -> Vec<u8> {
-        let mut pk = ring
-            .participant_key(leaf, MediaType::Audio)
-            .expect("participant key");
+        let mut pk = ring.participant_key(kid_of(leaf)).expect("participant key");
         pk.seal_framed(plaintext).expect("seal_framed")
     }
 
@@ -270,7 +266,7 @@ mod tests {
         let ring = CallKeyRing::from_seed(SEED_A);
         let wire = seal_framed(&ring, LEAF, b"hello");
         let opened = ring
-            .try_open_framed_with_overlap(LEAF, MediaType::Audio, &wire)
+            .try_open_framed_with_overlap(kid_of(LEAF), &wire)
             .expect("open");
         assert_eq!(opened, b"hello");
         // No rotation yet → no previous key retained.
@@ -293,13 +289,13 @@ mod tests {
 
         // The old frame opens via the retained previous key…
         assert_eq!(
-            ring.try_open_framed_with_overlap(LEAF, MediaType::Audio, &old_wire)
+            ring.try_open_framed_with_overlap(kid_of(LEAF), &old_wire)
                 .expect("old opens via overlap"),
             b"old-epoch"
         );
         // …and the new frame opens via the current key.
         assert_eq!(
-            ring.try_open_framed_with_overlap(LEAF, MediaType::Audio, &new_wire)
+            ring.try_open_framed_with_overlap(kid_of(LEAF), &new_wire)
                 .expect("new opens via current"),
             b"new-epoch"
         );
@@ -315,7 +311,7 @@ mod tests {
         ring.prune_expired(1_500);
         assert!(ring.has_live_previous(1_500));
         assert_eq!(
-            ring.try_open_framed_with_overlap(LEAF, MediaType::Audio, &old_wire)
+            ring.try_open_framed_with_overlap(kid_of(LEAF), &old_wire)
                 .expect("still inside window"),
             b"old-epoch"
         );
@@ -326,7 +322,7 @@ mod tests {
         ring.prune_expired(2_000);
         assert!(ring.previous().is_none());
         assert!(ring
-            .try_open_framed_with_overlap(LEAF, MediaType::Audio, &old_wire)
+            .try_open_framed_with_overlap(kid_of(LEAF), &old_wire)
             .is_err());
     }
 
@@ -348,24 +344,20 @@ mod tests {
     #[test]
     fn raw_open_with_overlap_round_trips_current_and_previous() {
         let mut ring = CallKeyRing::from_seed(SEED_A);
-        let mut pk_old = ring
-            .participant_key(LEAF, MediaType::Audio)
-            .expect("pk old");
+        let mut pk_old = ring.participant_key(kid_of(LEAF)).expect("pk old");
         let (counter_old, cipher_old) = pk_old.seal(b"aad", b"raw-old").expect("seal old");
 
         ring.rekey_from_seed_at(SEED_B, 1_000, OVERLAP_DEFAULT_MS);
-        let mut pk_new = ring
-            .participant_key(LEAF, MediaType::Audio)
-            .expect("pk new");
+        let mut pk_new = ring.participant_key(kid_of(LEAF)).expect("pk new");
         let (counter_new, cipher_new) = pk_new.seal(b"aad", b"raw-new").expect("seal new");
 
         assert_eq!(
-            ring.try_open_with_overlap(LEAF, MediaType::Audio, b"aad", &cipher_old, counter_old)
+            ring.try_open_with_overlap(kid_of(LEAF), b"aad", &cipher_old, counter_old)
                 .expect("old via overlap"),
             b"raw-old"
         );
         assert_eq!(
-            ring.try_open_with_overlap(LEAF, MediaType::Audio, b"aad", &cipher_new, counter_new)
+            ring.try_open_with_overlap(kid_of(LEAF), b"aad", &cipher_new, counter_new)
                 .expect("new via current"),
             b"raw-new"
         );
@@ -384,7 +376,7 @@ mod tests {
         ring.prune_expired(far_future);
         assert!(ring.has_live_previous(far_future));
         assert_eq!(
-            ring.try_open_framed_with_overlap(LEAF, MediaType::Audio, &old_wire)
+            ring.try_open_framed_with_overlap(kid_of(LEAF), &old_wire)
                 .expect("still retained"),
             b"old-epoch"
         );
@@ -393,7 +385,7 @@ mod tests {
         ring.drop_previous();
         assert!(ring.previous().is_none());
         assert!(ring
-            .try_open_framed_with_overlap(LEAF, MediaType::Audio, &old_wire)
+            .try_open_framed_with_overlap(kid_of(LEAF), &old_wire)
             .is_err());
     }
 }

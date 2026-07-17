@@ -5,9 +5,11 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 # ADR-0034: Per-(leaf, media-type) SFrame key derivation — close the cross-stream AEAD nonce reuse
 
-- **Status:** Accepted → **Implemented** (2026-07; Approach A — the maintainer chose media-type-in-derivation over per-stream-KID). Landed and cross-stack-verified across all five SFrame stacks against one canonical golden vector — see [Implementation](#implementation-landed-2026-07).
+- **Status:** Accepted → Implemented (2026-07; Approach A). **Discriminator superseded by [ADR-0035](0035-sframe-per-stream-kid-key.md)** — the per-media-TYPE (Audio/Video) tag defined here fixes the audio-vs-video collision but NOT two same-kind streams from one leaf (camera + screen-share both map to `Video` and re-collide the exact `(key, nonce)` reuse this ADR set out to fix). ADR-0035 replaces the tag with a per-`(sender_leaf, stream)` **KID** discriminator that closes the reuse for any number of concurrent streams. **This ADR's Context, root-cause analysis, threat model, and severity below remain in force** — only the *discriminator mechanism* (the `MediaType` byte) is replaced.
 - **Date:** 2026-07-17
 - **Context:** Phase 3 (calls / SFrame media encryption) — security fix
+
+> **Note (superseded discriminator):** the sections below describe the per-media-TYPE tag as implemented in the 2026-07 landing. That derivation and its golden vector were subsequently replaced by [ADR-0035](0035-sframe-per-stream-kid-key.md)'s per-`(leaf, stream)` KID. The description here is retained as the historical record and because its Context / finding / threat analysis still hold; for the current derivation see ADR-0035.
 
 ## Context
 

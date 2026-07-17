@@ -399,13 +399,19 @@ pub fn join_call_from_welcome(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sframe::MediaType;
+    use crate::header::SframeHeader;
     use lakko_contacts::call_invite::{compose, CallInviteMedia};
     use lakko_crypto::signing::SigningKey;
     use lakko_mls::Identity as MlsIdentity;
 
     fn signing_for(identity: &MlsIdentity) -> SigningKey {
         SigningKey::from_seed(&identity.ed25519_seed_bytes())
+    }
+
+    /// The composite KID a receiver reads from the header for a sender leaf's
+    /// first (stream-0) SFrame stream (ADR-0035).
+    fn kid(sender_leaf: u32) -> u64 {
+        SframeHeader::kid_for(sender_leaf, 0).expect("stream 0 fits")
     }
 
     fn fixture_account_id() -> [u8; 16] {
@@ -664,12 +670,9 @@ mod tests {
         // Alice and Bob can also seal / open frames to
         // each other (full 3c4 invariant C-2 holds across
         // this bootstrap path).
-        let mut send_bob = accepted
-            .session
-            .own_participant_key(MediaType::Audio)
-            .unwrap();
+        let mut send_bob = accepted.session.own_participant_key(0).unwrap();
         let recv_bob_on_alice = alice_session
-            .remote_participant_key(accepted.session.own_leaf_index, MediaType::Audio)
+            .remote_participant_key(kid(accepted.session.own_leaf_index))
             .unwrap();
         let aad = b"sframe-header";
         let pt = b"hello from Bob over a link-based call";
@@ -887,22 +890,19 @@ mod tests {
 
         // (7) Bidirectional SFrame round-trip.
         let aad = b"sframe-header";
-        let mut bob_send = accepted
-            .session
-            .own_participant_key(MediaType::Audio)
-            .unwrap();
+        let mut bob_send = accepted.session.own_participant_key(0).unwrap();
         let alice_recv_bob = alice_session
-            .remote_participant_key(accepted.session.own_leaf_index, MediaType::Audio)
+            .remote_participant_key(kid(accepted.session.own_leaf_index))
             .unwrap();
         let bob_to_alice = b"hello from Bob through the full wire chain";
         let (ctr, ct) = bob_send.seal(aad, bob_to_alice).unwrap();
         let opened = alice_recv_bob.open(aad, &ct, ctr).unwrap();
         assert_eq!(opened.as_slice(), bob_to_alice.as_ref());
 
-        let mut alice_send = alice_session.own_participant_key(MediaType::Audio).unwrap();
+        let mut alice_send = alice_session.own_participant_key(0).unwrap();
         let bob_recv_alice = accepted
             .session
-            .remote_participant_key(alice_session.own_leaf_index, MediaType::Audio)
+            .remote_participant_key(kid(alice_session.own_leaf_index))
             .unwrap();
         let alice_to_bob = b"hello from Alice over the same call key";
         let (alice_counter, alice_cipher) = alice_send.seal(aad, alice_to_bob).unwrap();

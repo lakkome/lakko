@@ -77,7 +77,7 @@ pub use session::{
     CallSession, CallState, Event, IceCandidate, MediaKind, Role, SdpDescription, SdpKind,
     Transition,
 };
-pub use sframe::{CallKey, MediaType, ParticipantKey, SFRAME_EXPORT_LABEL};
+pub use sframe::{CallKey, ParticipantKey, SFRAME_EXPORT_LABEL};
 pub use signaling::{
     compose_signaling_payload, parse_signaling_payload, CallId, EndReason, MediaFlags,
     SignalingBody,

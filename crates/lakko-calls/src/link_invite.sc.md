@@ -39,7 +39,7 @@ Because every member computes the same answer from the same snapshot, **failover
 
 ## Invariants upheld
 
-- **Cross-party `CallKey` seed agreement (C-27).** Every path builds the session against the same `call_id` and the same MLS epoch, so the exporter yields the identical SFrame seed for all participants — asserted end-to-end across the 1×1 accept boundary and the multi-party / failover / handover flows (tests seal-and-open real frames both directions, deriving per-participant keys via `own_participant_key(media_type)` / `remote_participant_key(leaf, media_type)` on the audio stream per ADR-0034).
+- **Cross-party `CallKey` seed agreement (C-27).** Every path builds the session against the same `call_id` and the same MLS epoch, so the exporter yields the identical SFrame seed for all participants — asserted end-to-end across the 1×1 accept boundary and the multi-party / failover / handover flows (tests seal-and-open real frames both directions, deriving per-`(leaf, stream)` keys via `own_participant_key(stream_index)` / `remote_participant_key(kid)` on stream 0 per ADR-0035).
 - **Single group, no founding race (ADR-0032, G-21).** On the owner-founds path only the owner ever calls `Group::create`; joiners only mint KPs and join via Welcome, so exactly one MLS group exists.
 - **Deterministic, protocol-free committer transition (ADR-0032).** `elect_committer` is total and order-independent; failover and reclaim fall out of re-evaluating the snapshot.
 - **Forward secrecy across committer changes.** Each Add / Remove commit advances the epoch, so a member's pre-leave seed never matches the post-handover seed (pinned in the owner-handover test).
@@ -64,6 +64,6 @@ The bytes crossing this module are the embedded owner `KeyPackage` (from a signe
 
 ## References
 
-- ADR-0009 (link-based call invitations — the 1×1 fast-path), ADR-0032 (multi-joiner shareable call links — owner-founds + committer election), ADR-0034 (per-media-stream SFrame key separation — the `media_type` on the session's participant-key derivation)
+- ADR-0009 (link-based call invitations — the 1×1 fast-path), ADR-0032 (multi-joiner shareable call links — owner-founds + committer election), ADR-0035 (per-`(leaf, stream)` KID SFrame key separation — the `stream_index` / `kid` on the session's participant-key derivation; supersedes the ADR-0034 per-media-TYPE param)
 - Invariants C-27 (cross-party CallKey seed agreement), C-32 / C-33 (Welcome + KP-forward envelopes), C-34 (owner-side dispatch order), C-35 (full link-call wire chain, 1×1 + multi-party), C-36 (owner-handover preserves the call-key chain across a mid-call committer leave); known gaps G-21 (multi-joiner, closed) and G-22 (per-joiner dedup, closed)
 - Key tests (in-module `#[cfg(test)]`): `elect_owner_when_owner_present`, `elect_lowest_leaf_when_owner_absent`, `elect_reclaim_reverts_to_owner_on_return`, `owner_founds_multi_joiner_with_failover_and_reclaim`, `accept_invite_round_trips_via_welcome`, `accept_invite_with_corrupted_kp_rejects`, `link_call_full_e2e_via_welcome_envelope`, `link_call_multi_party_e2e_via_kp_forward_envelope`, `link_call_owner_handover_after_committer_leaves`

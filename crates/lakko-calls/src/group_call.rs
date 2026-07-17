@@ -11,12 +11,12 @@
 //! changes is who-is-on-the-call bookkeeping:
 //!
 //!   * 1×1 — two leaves in the conversation MLS group; both
-//!     derive participant_key(0, media_type) and
-//!     participant_key(1, media_type).
+//!     derive participant keys per `(leaf, stream)` KID.
 //!   * Group — N leaves (1 ≤ N ≤ 50). Each derives its own
-//!     participant_key + every other leaf's key for the
-//!     receive path (per media stream — audio + video split
-//!     by the ADR-0034 media_type). The ledger tracks which leaves are
+//!     participant_key per stream + every other leaf's key
+//!     for the receive path (per stream — the ADR-0035 KID
+//!     `(leaf << 8) | stream_index` splits a leaf's concurrent
+//!     streams). The ledger tracks which leaves are
 //!     currently **on the call** (a subset of the MLS
 //!     group's full membership — chat members may decline
 //!     or never join a call).
@@ -81,7 +81,7 @@ use lakko_mls::Group;
 
 use crate::call_key_ring::{clamp_overlap, CallKeyRing};
 use crate::error::Result;
-use crate::sframe::{CallKey, MediaType, ParticipantKey};
+use crate::sframe::{CallKey, ParticipantKey};
 use crate::signaling::{CallId, SignalingBody};
 
 /// Which MLS group keys the call.
@@ -383,42 +383,46 @@ impl GroupCallSession {
         self.participants.values().filter(|p| p.joined).count()
     }
 
-    /// Re-derive the local participant's SEAL key for `media_type`. Called
-    /// after every `needs_rekey()` returns `true`. The `media_type` (ADR-0034)
-    /// keeps the local participant's audio and video streams on distinct key +
-    /// nonce-salt spaces so their independent counters cannot reuse a
+    /// Re-derive the local participant's SEAL key for one of its outbound
+    /// streams. Called after every `needs_rekey()` returns `true`. The sender
+    /// assigns `stream_index` in a stable local order (0 for the first stream,
+    /// 1..N for additional ones — e.g. camera + screen-share); folding the
+    /// resulting KID `(own_leaf << 8) | stream_index` into the derivation
+    /// (ADR-0035) keeps each of the local participant's streams on a distinct
+    /// key + nonce-salt space so their independent counters cannot reuse a
     /// `(key, nonce)` pair.
     ///
     /// # Errors
     ///
-    /// Surfaces the same `Error::Crypto` shapes as
-    /// [`CallKey::participant_key`].
-    pub fn own_participant_key(&self, media_type: MediaType) -> Result<ParticipantKey> {
-        self.ring.participant_key(self.own_leaf_index, media_type)
+    /// - `Error::Crypto` when `stream_index` does not fit the KID's 8-bit stream
+    ///   field, or on an HKDF failure (practically unreachable). See
+    ///   [`CallKey::participant_key_for`].
+    pub fn own_participant_key(&self, stream_index: u32) -> Result<ParticipantKey> {
+        self.ring
+            .current()
+            .participant_key_for(self.own_leaf_index, stream_index)
     }
 
-    /// Re-derive a remote participant's OPEN key. The
-    /// platform side caches one per active leaf and feeds
-    /// the corresponding key to its
-    /// `RTCRtpReceiver.transform` insertable-streams hook.
+    /// Re-derive a remote sender's OPEN key from the composite `kid` the SFrame
+    /// header carries (ADR-0035: `(sender_leaf << 8) | stream_index`). The
+    /// platform side caches one key per active `(leaf, stream)` and feeds it to
+    /// its `RTCRtpReceiver.transform` insertable-streams hook.
     ///
-    /// Returns the key regardless of whether the
-    /// participant is currently joined — the caller may
-    /// pre-warm keys before the join event lands. The
-    /// `joined` filter is purely a UI / dispatch concern.
+    /// The receiver needs NO local media-type or track-kind signal — the KID it
+    /// read from the header (forwarded verbatim by the SFU) IS the discriminator.
+    /// Recover the leaf/stream for roster/diagnostic use with
+    /// [`SframeHeader::leaf_of`](crate::header::SframeHeader::leaf_of) /
+    /// [`SframeHeader::stream_of`](crate::header::SframeHeader::stream_of).
     ///
-    /// `media_type` (ADR-0034) selects the sender's audio-or-video key space;
-    /// the receiver knows which one from the track the frame arrived on.
+    /// Returns the key regardless of whether the participant is currently joined
+    /// — the caller may pre-warm keys before the join event lands. The `joined`
+    /// filter is purely a UI / dispatch concern.
     ///
     /// # Errors
     ///
     /// See [`CallKey::participant_key`].
-    pub fn remote_participant_key(
-        &self,
-        leaf_index: u32,
-        media_type: MediaType,
-    ) -> Result<ParticipantKey> {
-        self.ring.participant_key(leaf_index, media_type)
+    pub fn remote_participant_key(&self, kid: u64) -> Result<ParticipantKey> {
+        self.ring.participant_key(kid)
     }
 
     /// `true` when the platform should re-derive every
@@ -460,8 +464,8 @@ impl GroupCallSession {
     }
 
     /// Open a received SFrame with the 1-second overlap
-    /// behaviour: try the current seed's per-participant
-    /// key for `(sender_leaf, media_type)` first; on AEAD failure (the
+    /// behaviour: try the current seed's per-stream
+    /// key for `kid` (ADR-0035) first; on AEAD failure (the
     /// frame was sealed under the OLD seed but landed late),
     /// fall back to the previous seed's key. Returns the
     /// plaintext on either path.
@@ -490,14 +494,13 @@ impl GroupCallSession {
     ///   valid leaf indices).
     pub fn try_open_with_overlap(
         &self,
-        sender_leaf: u32,
-        media_type: MediaType,
+        kid: u64,
         aad: &[u8],
         ciphertext: &[u8],
         frame_counter: u32,
     ) -> Result<Vec<u8>> {
         self.ring
-            .try_open_with_overlap(sender_leaf, media_type, aad, ciphertext, frame_counter)
+            .try_open_with_overlap(kid, aad, ciphertext, frame_counter)
     }
 
     /// Drop the previous-epoch seed. Caller invokes this
@@ -561,7 +564,15 @@ pub enum SignalingOutcome {
 mod tests {
     use super::*;
     use crate::call_key_ring::{OVERLAP_DEFAULT_MS, OVERLAP_MAX_MS, OVERLAP_MIN_MS};
+    use crate::header::SframeHeader;
     use lakko_mls::Identity as MlsIdentity;
+
+    /// The composite KID a receiver reads from the header for a sender leaf's
+    /// first (stream-0) SFrame stream (ADR-0035). These tests exercise one
+    /// stream per leaf; the sender assigns stream 0 to its own `own_participant_key(0)`.
+    fn kid(sender_leaf: u32) -> u64 {
+        SframeHeader::kid_for(sender_leaf, 0).expect("stream 0 fits")
+    }
 
     fn make_pair() -> (Identity, Identity, Group) {
         let id_a = MlsIdentity::generate("device-A").unwrap();
@@ -756,8 +767,8 @@ mod tests {
         let session =
             GroupCallSession::create(GroupCallScope::InChat, fixture_call_id(), &group_a, &id_a)
                 .unwrap();
-        let k_self = session.own_participant_key(MediaType::Audio).unwrap();
-        let k_remote = session.remote_participant_key(1, MediaType::Audio).unwrap();
+        let k_self = session.own_participant_key(0).unwrap();
+        let k_remote = session.remote_participant_key(kid(1)).unwrap();
         assert_ne!(k_self.key_bytes(), k_remote.key_bytes());
         assert_ne!(k_self.nonce_salt(), k_remote.nonce_salt());
     }
@@ -939,10 +950,8 @@ mod tests {
         // A → B: A seals with its own key (sender_leaf = 0);
         // B re-derives A's key from B's side via
         // remote_participant_key(0) and opens.
-        let mut send_a = session_a.own_participant_key(MediaType::Audio).unwrap();
-        let recv_a_on_b = session_b
-            .remote_participant_key(0, MediaType::Audio)
-            .unwrap();
+        let mut send_a = session_a.own_participant_key(0).unwrap();
+        let recv_a_on_b = session_b.remote_participant_key(kid(0)).unwrap();
         let aad = b"sframe-header-A";
         let pt = b"hello from A";
         let (ctr, ct) = send_a.seal(aad, pt).unwrap();
@@ -951,10 +960,8 @@ mod tests {
 
         // B → A: symmetric path. Confirms the per-leaf
         // derivation is not biased toward leaf 0.
-        let mut send_b = session_b.own_participant_key(MediaType::Audio).unwrap();
-        let recv_b_on_a = session_a
-            .remote_participant_key(1, MediaType::Audio)
-            .unwrap();
+        let mut send_b = session_b.own_participant_key(0).unwrap();
+        let recv_b_on_a = session_a.remote_participant_key(kid(1)).unwrap();
         let aad = b"sframe-header-B";
         let pt = b"hello from B";
         let (ctr, ct) = send_b.seal(aad, pt).unwrap();
@@ -995,7 +1002,7 @@ mod tests {
         // Snapshot a stale ciphertext under the OLD key, AAD,
         // and counter. We'll try to open it after rotation
         // and expect AEAD authentication failure.
-        let mut send_a_pre = session_a.own_participant_key(MediaType::Audio).unwrap();
+        let mut send_a_pre = session_a.own_participant_key(0).unwrap();
         let stale_aad = b"sframe-header-pre";
         let stale_plain = b"stale frame";
         let (stale_counter, stale_cipher) = send_a_pre.seal(stale_aad, stale_plain).unwrap();
@@ -1018,10 +1025,8 @@ mod tests {
         session_b.ack_rekey();
 
         // Cross-party seal/open under the NEW seed: works.
-        let mut send_a_post = session_a.own_participant_key(MediaType::Audio).unwrap();
-        let recv_a_on_b = session_b
-            .remote_participant_key(0, MediaType::Audio)
-            .unwrap();
+        let mut send_a_post = session_a.own_participant_key(0).unwrap();
+        let recv_a_on_b = session_b.remote_participant_key(kid(0)).unwrap();
         let fresh_aad = b"sframe-header-post";
         let fresh_plain = b"fresh frame";
         let (fresh_counter, fresh_cipher) = send_a_post.seal(fresh_aad, fresh_plain).unwrap();
@@ -1036,9 +1041,7 @@ mod tests {
         // re-key buys before the 1s overlap window even
         // applies (the overlap holds the old key briefly on
         // the wire; here we're past that).
-        let recv_a_stale = session_b
-            .remote_participant_key(0, MediaType::Audio)
-            .unwrap();
+        let recv_a_stale = session_b.remote_participant_key(kid(0)).unwrap();
         match recv_a_stale.open(stale_aad, &stale_cipher, stale_counter) {
             Ok(_) => panic!("stale frame must not decode under new key"),
             Err(crate::Error::Crypto(_)) => {},
@@ -1100,9 +1103,7 @@ mod tests {
         let receivers: [&GroupCallSession; 3] = [&session_a, &session_b, &session_c];
 
         for (sender_leaf, sender_session) in senders {
-            let mut send_key = sender_session
-                .own_participant_key(MediaType::Audio)
-                .unwrap();
+            let mut send_key = sender_session.own_participant_key(0).unwrap();
             let aad = format!("sframe/leaf={sender_leaf}");
             let pt = format!("frame-from-{sender_leaf}");
             let (ctr, ct) = send_key.seal(aad.as_bytes(), pt.as_bytes()).unwrap();
@@ -1117,9 +1118,7 @@ mod tests {
                     // observed counter per sender).
                     continue;
                 }
-                let recv_key = receiver
-                    .remote_participant_key(sender_leaf, MediaType::Audio)
-                    .unwrap();
+                let recv_key = receiver.remote_participant_key(kid(sender_leaf)).unwrap();
                 let opened = recv_key.open(aad.as_bytes(), &ct, ctr).unwrap();
                 assert_eq!(opened.as_slice(), pt.as_bytes());
             }
@@ -1160,7 +1159,7 @@ mod tests {
             GroupCallSession::create(GroupCallScope::InChat, call_id, &group_b, &id_b).unwrap();
 
         // Pre-rotation frame from A → B (sealed under epoch-0 key).
-        let mut send_a_pre = session_a.own_participant_key(MediaType::Audio).unwrap();
+        let mut send_a_pre = session_a.own_participant_key(0).unwrap();
         let stale_aad = b"sframe-header-pre";
         let stale_plain = b"in-flight frame";
         let (stale_counter, stale_cipher) = send_a_pre.seal(stale_aad, stale_plain).unwrap();
@@ -1178,18 +1177,18 @@ mod tests {
         // Overlap path on the B side: stale frame still
         // decodes via the previous-key fallback.
         let opened = session_b
-            .try_open_with_overlap(0, MediaType::Audio, stale_aad, &stale_cipher, stale_counter)
+            .try_open_with_overlap(kid(0), stale_aad, &stale_cipher, stale_counter)
             .unwrap();
         assert_eq!(opened.as_slice(), stale_plain.as_ref());
 
         // Fresh frame under the NEW seed also decodes via
         // the current-key path.
-        let mut send_a_post = session_a.own_participant_key(MediaType::Audio).unwrap();
+        let mut send_a_post = session_a.own_participant_key(0).unwrap();
         let fresh_aad = b"sframe-header-post";
         let fresh_plain = b"post-rotation frame";
         let (fresh_counter, fresh_cipher) = send_a_post.seal(fresh_aad, fresh_plain).unwrap();
         let opened = session_b
-            .try_open_with_overlap(0, MediaType::Audio, fresh_aad, &fresh_cipher, fresh_counter)
+            .try_open_with_overlap(kid(0), fresh_aad, &fresh_cipher, fresh_counter)
             .unwrap();
         assert_eq!(opened.as_slice(), fresh_plain.as_ref());
 
@@ -1199,13 +1198,7 @@ mod tests {
 
         // Stale frame now rejects — seed-boundary forward
         // secrecy fully in effect.
-        match session_b.try_open_with_overlap(
-            0,
-            MediaType::Audio,
-            stale_aad,
-            &stale_cipher,
-            stale_counter,
-        ) {
+        match session_b.try_open_with_overlap(kid(0), stale_aad, &stale_cipher, stale_counter) {
             Ok(_) => panic!("stale frame must not decode after overlap drop"),
             Err(crate::Error::Crypto(_)) => {},
             Err(other) => panic!("expected Crypto error, got {other:?}"),
@@ -1216,13 +1209,7 @@ mod tests {
         // prior seal mutated the sender's counter).
         let (fresh_counter2, fresh_cipher2) = send_a_post.seal(fresh_aad, fresh_plain).unwrap();
         let opened = session_b
-            .try_open_with_overlap(
-                0,
-                MediaType::Audio,
-                fresh_aad,
-                &fresh_cipher2,
-                fresh_counter2,
-            )
+            .try_open_with_overlap(kid(0), fresh_aad, &fresh_cipher2, fresh_counter2)
             .unwrap();
         assert_eq!(opened.as_slice(), fresh_plain.as_ref());
     }
@@ -1244,12 +1231,12 @@ mod tests {
             "no overlap initially"
         );
 
-        let mut send_a = session_a.own_participant_key(MediaType::Audio).unwrap();
+        let mut send_a = session_a.own_participant_key(0).unwrap();
         let aad = b"sframe-header";
         let plain = b"frame";
         let (counter, cipher) = send_a.seal(aad, plain).unwrap();
         let opened = session_b
-            .try_open_with_overlap(0, MediaType::Audio, aad, &cipher, counter)
+            .try_open_with_overlap(kid(0), aad, &cipher, counter)
             .unwrap();
         assert_eq!(opened.as_slice(), plain.as_ref());
 
@@ -1259,7 +1246,7 @@ mod tests {
         // missed a rotation" from "the wire is corrupted").
         let mut bad_cipher = cipher.clone();
         bad_cipher[0] ^= 0xFF;
-        match session_b.try_open_with_overlap(0, MediaType::Audio, aad, &bad_cipher, counter) {
+        match session_b.try_open_with_overlap(kid(0), aad, &bad_cipher, counter) {
             Ok(_) => panic!("tampered frame must not decode"),
             Err(crate::Error::Crypto(msg)) => {
                 assert!(
@@ -1299,7 +1286,7 @@ mod tests {
             GroupCallSession::create(GroupCallScope::InChat, call_id, &group_b, &id_b).unwrap();
 
         // Frame F0 sealed under epoch-0 key.
-        let mut send_a_e0 = session_a.own_participant_key(MediaType::Audio).unwrap();
+        let mut send_a_e0 = session_a.own_participant_key(0).unwrap();
         let aad_e0 = b"epoch-0";
         let plain_e0 = b"frame from epoch 0";
         let (counter_e0, cipher_e0) = send_a_e0.seal(aad_e0, plain_e0).unwrap();
@@ -1314,12 +1301,12 @@ mod tests {
 
         // F0 still decodes (epoch-1 overlap covers epoch-0).
         let opened = session_b
-            .try_open_with_overlap(0, MediaType::Audio, aad_e0, &cipher_e0, counter_e0)
+            .try_open_with_overlap(kid(0), aad_e0, &cipher_e0, counter_e0)
             .unwrap();
         assert_eq!(opened.as_slice(), plain_e0.as_ref());
 
         // Frame F1 sealed under epoch-1 key.
-        let mut send_a_e1 = session_a.own_participant_key(MediaType::Audio).unwrap();
+        let mut send_a_e1 = session_a.own_participant_key(0).unwrap();
         let aad_e1 = b"epoch-1";
         let plain_e1 = b"frame from epoch 1";
         let (counter_e1, cipher_e1) = send_a_e1.seal(aad_e1, plain_e1).unwrap();
@@ -1336,7 +1323,7 @@ mod tests {
 
         // F1 still decodes (epoch-2 overlap covers epoch-1).
         let opened = session_b
-            .try_open_with_overlap(0, MediaType::Audio, aad_e1, &cipher_e1, counter_e1)
+            .try_open_with_overlap(kid(0), aad_e1, &cipher_e1, counter_e1)
             .unwrap();
         assert_eq!(opened.as_slice(), plain_e1.as_ref());
 
@@ -1344,7 +1331,7 @@ mod tests {
         // the single overlap slot. Per the doc-comment
         // contract, only the most-recent previous epoch is
         // retained.
-        match session_b.try_open_with_overlap(0, MediaType::Audio, aad_e0, &cipher_e0, counter_e0) {
+        match session_b.try_open_with_overlap(kid(0), aad_e0, &cipher_e0, counter_e0) {
             Ok(_) => panic!("epoch-0 frame must not decode in epoch-2 overlap"),
             Err(crate::Error::Crypto(_)) => {},
             Err(other) => panic!("expected Crypto error, got {other:?}"),
@@ -1381,10 +1368,8 @@ mod tests {
         let session_b =
             GroupCallSession::create(GroupCallScope::InChat, call_id, &group_b, &id_b).unwrap();
 
-        let mut send_a = session_a.own_participant_key(MediaType::Audio).unwrap();
-        let recv_a_on_b = session_b
-            .remote_participant_key(0, MediaType::Audio)
-            .unwrap();
+        let mut send_a = session_a.own_participant_key(0).unwrap();
+        let recv_a_on_b = session_b.remote_participant_key(kid(0)).unwrap();
         let (ctr, ct) = send_a.seal(b"aad-A", b"frame").unwrap();
         match recv_a_on_b.open(b"aad-B", &ct, ctr) {
             Ok(_) => panic!("wrong AAD must fail authentication"),
