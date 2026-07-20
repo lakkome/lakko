@@ -5,7 +5,7 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 # ADR-0036: Auth-attested KT-log genesis (prevent first-entry squatting)
 
-- **Status:** Proposed
+- **Status:** Accepted (maintainer accepted the client-supplied-pubkey attestation semantics; implementation deferred to a follow-up session — the 7-sprint decomposition below is the plan)
 - **Date:** 2026-07-20
 - **Context:** Phase 2 — key transparency. Closes the G-30 finding-2 residual
   (first-entry squatting) that ADR-0019's genesis self-signature only DETECTS.
