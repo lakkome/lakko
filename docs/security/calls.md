@@ -100,13 +100,15 @@ through `remote_participant_key(0)`).
 
 ### C-3: Per-participant keys differ across leaves
 
-`participant_key(leaf_index, media_type)` MUST produce
-distinct key bytes AND distinct nonce salts for distinct
-`leaf_index` values. Otherwise an attacker who compromised a
-single participant's key could trivially impersonate any
-other participant. (The `media_type` argument additionally
-separates a single participant's audio and video streams —
-see C-5 / [ADR-0034](../adr/0034-sframe-per-media-stream-key.md).)
+`participant_key(kid)` MUST produce distinct key bytes AND
+distinct nonce salts for distinct `sender_leaf` values (the
+KID's high bits, `KID = (sender_leaf << 8) | stream_index`).
+Otherwise an attacker who compromised a single participant's
+key could trivially impersonate any other participant. (The
+`stream_index` low byte of the KID additionally separates a
+single participant's concurrent streams — audio, camera,
+screen-share — into disjoint key spaces; see C-5 /
+[ADR-0035](../adr/0035-sframe-per-stream-kid-key.md).)
 
 Test:
 [`sframe::tests::participant_keys_differ_across_leaves`](../../crates/lakko-calls/src/sframe.rs)
@@ -116,17 +118,19 @@ Test:
 
 Every participant in an N-party call must be able to derive
 every other participant's `ParticipantKey` from the shared
-`CallKey` seed + the other's `leaf_index`. The SFU
+`CallKey` seed + the KID carried in the SFrame header
+(`KID = (sender_leaf << 8) | stream_index`). The SFU
 forwarding path depends on the receiver re-deriving the
-sender's key from the leaf index carried in the SFrame
-header.
+sender's per-stream key straight from the KID the header
+carries — the SFU forwards that header verbatim and never
+derives a key (ADR-0035).
 
 Test:
 [`group_call::tests::three_party_full_mesh_seal_open`](../../crates/lakko-calls/src/group_call.rs)
 — A, B, C each seal one frame; the other two open via the
 sender's leaf index.
 
-### C-5: Frame counter is strictly monotonic per (sender, media-type) per epoch — no cross-stream `(key, nonce)` reuse
+### C-5: Frame counter is strictly monotonic per (sender, stream) per epoch — no cross-stream `(key, nonce)` reuse
 
 RFC 9605 §4.4 pins the counter to 32 bits. The sender-side
 `ParticipantKey::seal` increments the counter once per
@@ -135,26 +139,44 @@ sealed frame and never reuses a `(key, nonce)` pair
 
 A single monotonic counter is only sufficient when each
 `(key, nonce_salt)` pair is used by exactly one stream. A
-participant who sends audio **and** video shares one MLS
-leaf — and the SFrame header KID is `= sender_leaf` — so
-before [ADR-0034](../adr/0034-sframe-per-media-stream-key.md)
-both streams derived the **same** `(key, nonce_salt)` and,
-running **independent** counters each from 0, sealed
-different plaintexts under an identical `(key, nonce)` pair
-(ChaCha20 keystream reuse + Poly1305 tag forgery — a HIGH
-break for an SFU group video call, where the zero-trust SFU
-relays both ciphertext streams). The key is now derived
-per-`(leaf, media-type)`: `CallKey::participant_key(sender_leaf,
-media_type)` folds a 1-byte media-type tag (`0x01` audio /
-`0x02` video) into **both** HKDF `info` strings, so a leaf's
-audio and video key into **disjoint** `(key, nonce_salt)`
-spaces and their per-stream counters can never collide. The
-media type is local context (the header KID is unchanged, so
-the wire format and AAD are identical — see C-6 /
-[ADR-0013](../adr/0013-sframe-cross-platform-aad.md)); a
-`FrameDecryptor` is bound to one track kind,
-so both endpoints reach the same discriminator without it
-travelling on the wire.
+participant who sends more than one media stream shares one
+MLS leaf, so the discriminator that separates their streams
+must ride in the SFrame header KID — the **only** per-stream
+signal both endpoints agree on through the zero-trust SFU,
+which forwards the RFC 9605 header verbatim and cannot read
+the media. Two intermediate designs fell short:
+
+- **Original (pre-ADR-0034):** the KID was `= sender_leaf`
+  alone, so a participant's audio + video derived the **same**
+  `(key, nonce_salt)` and their **independent** counters (each
+  from 0) sealed different plaintexts under an identical
+  `(key, nonce)` pair — ChaCha20 keystream reuse + Poly1305 tag
+  forgery, a HIGH break for an SFU group video call.
+- **ADR-0034 (superseded discriminator):** folded a 1-byte
+  Audio/Video **media-type** tag into the derivation. This
+  closed the audio-vs-video pair but **re-collided two video
+  streams** from one leaf (camera + screen-share both map to
+  `Video`), and a local media-type/track-kind cannot tell two
+  same-kind streams apart, nor can a transceiver MID (it
+  differs on the sender and subscriber sides of the SFU).
+
+The key is now derived per-`(leaf, stream)` via the header
+KID ([ADR-0035](../adr/0035-sframe-per-stream-kid-key.md)):
+`KID = (sender_leaf << 8) | stream_index` (`stream_index` a
+per-sender `u8` ordinal — audio 0, camera 1, screen-share 2,
+…), and `CallKey::participant_key(kid)` folds the **FULL KID**
+into **both** HKDF `info` strings. Distinct KID ⇒ distinct
+`(key, nonce_salt)` space automatically, so **every**
+concurrent stream of a leaf keys into its own space — the
+reuse is closed for **any** number of streams per leaf, not
+just audio + one video. The receiver reads the KID off each
+frame's header and derives `participant_key(KID)` with **no**
+local media context; roster consumers recover
+`sender_leaf = KID >> 8` (`SframeHeader::leaf_of`). The
+`SframeHeader` codec and the AAD are unchanged — RFC 9605 §4.3
+already encodes an arbitrary `u64` KID in an extended form, so
+the header is still the AAD (see C-6 /
+[ADR-0013](../adr/0013-sframe-cross-platform-aad.md)).
 
 After counter exhaustion (2^32 frames ≈ 4 billion at any
 frame rate this is years of continuous calling, but the
@@ -166,11 +188,12 @@ fresh ParticipantKey → counter resets.
 Tests:
 [`sframe::tests::counter_increments_strictly`](../../crates/lakko-calls/src/sframe.rs)
 covers the monotonic increment;
-[`sframe::tests::audio_and_video_from_one_leaf_get_distinct_key_and_nonce`](../../crates/lakko-calls/src/sframe.rs)
-proves audio and video from one leaf derive distinct keys
-AND distinct nonce salts and never seal the same plaintext
-at the same counter to the same ciphertext (no cross-stream
-reuse);
+[`sframe::tests::three_streams_of_one_leaf_get_distinct_keys_and_nonces`](../../crates/lakko-calls/src/sframe.rs)
+proves three streams from one leaf (audio + camera + screen-share)
+derive pairwise-distinct keys AND distinct nonce salts and
+never seal the same plaintext at the same counter to the same
+ciphertext (no cross-stream reuse — including the two-video-stream
+pair ADR-0034 missed);
 [`sframe.rs`](../../crates/lakko-calls/src/sframe.rs)
 documents the exhaustion path. A dedicated exhaustion test
 is gap [G-17](./known-gaps.md#g-17) — too expensive to run

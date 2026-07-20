@@ -644,6 +644,63 @@ fn blob_id_for(capability_bytes: &[u8]) -> [u8; BLOB_ID_LEN] {
 }
 
 // ============================================================================
+// Background expiry pruner (ADR-0028, G-3)
+// ============================================================================
+
+/// How often the group-invite-expiry pruner wakes up. Matches the
+/// `invite::spawn_pruner` cadence (1 h) — a group-invite link lives about as
+/// long as a contact invite, so the same asymmetry versus the 60 s PoW-challenge
+/// prune applies.
+const PRUNE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+
+/// Spawn a background task that periodically deletes expired group-invite blobs.
+///
+/// This closes the storage-bloat side of the `group_invites` table: without it,
+/// an expired row lingers until an issuer-signed revoke ([`revoke`]) DELETEs it,
+/// even though [`fetch`] / [`consume`] already fold an expired row into 404 (so
+/// the accumulation is a bloat concern, not a security one). The
+/// `idx_group_invite_expiry` index from `migrations/0014_group_invites.sql` is
+/// the load-bearing piece — without it the recurring
+/// `WHERE expiry_ms != 0 AND expiry_ms < ?` scan would do a full-table seq each
+/// tick. The FK CASCADE on `group_invite_consumers.blob_id`
+/// (`migrations/0015_group_invite_consumers.sql`) reaps the per-joiner dedup
+/// children of a deleted parent for free.
+///
+/// `expiry_ms = 0` is the `GROUP_INVITE_NEVER_EXPIRES` sentinel (matching the
+/// [`fetch`] / [`consume`] read-path check) — those rows are deliberately
+/// preserved.
+///
+/// Mirror of [`crate::invite::spawn_pruner`] — the same interval / loop / log /
+/// carry-on shape. Aborted when the service stops; the `_group_invite_pruner`
+/// handle in `main.rs` owns the abort.
+pub(crate) fn spawn_pruner(pool: sqlx::MySqlPool) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(PRUNE_INTERVAL);
+        // The first tick fires immediately — skip it so a startup-time prune
+        // doesn't race with the first upload.
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            let now_ms = current_unix_ms();
+            // `expiry_ms` is `BIGINT UNSIGNED` — matching the `u64` binds
+            // elsewhere in this module (upload / fetch / consume).
+            let result =
+                sqlx::query("DELETE FROM group_invites WHERE expiry_ms != 0 AND expiry_ms < ?")
+                    .bind(now_ms)
+                    .execute(&pool)
+                    .await;
+            match result {
+                Ok(r) if r.rows_affected() > 0 => {
+                    tracing::debug!(rows = r.rows_affected(), "pruned expired group-invites");
+                },
+                Ok(_) => {},
+                Err(e) => tracing::warn!(error = %e, "group-invites prune failed"),
+            }
+        }
+    })
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 //
@@ -673,6 +730,15 @@ mod tests {
     fn same_bytes_yield_same_blob_id() {
         let bytes = vec![0xAAu8; 200];
         assert_eq!(blob_id_for(&bytes), blob_id_for(&bytes));
+    }
+
+    /// Pruner cadence pin — mirrors `invite::prune_interval_is_one_hour`. The
+    /// constant is also named in the `spawn_pruner` doc; pin it in code so a
+    /// future bump (e.g. shortening on a hot table) is a deliberate choice, not
+    /// a silent edit.
+    #[test]
+    fn prune_interval_is_one_hour() {
+        assert_eq!(PRUNE_INTERVAL, std::time::Duration::from_secs(3600));
     }
 
     #[test]

@@ -272,6 +272,12 @@ async fn main() -> Result<()> {
     // the stalking-risk warning, the storage layer doesn't
     // second-guess.
     let _invite_pruner = invite::spawn_pruner(pool.clone());
+    // ADR-0028 (G-3) — hourly sweep of expired group-invite blobs.
+    // The `idx_group_invite_expiry` index from migration 0014 keeps
+    // the recurring DELETE cheap; `expiry_ms = 0`
+    // (GROUP_INVITE_NEVER_EXPIRES) rows are preserved by design, and
+    // the FK CASCADE on `group_invite_consumers` reaps the children.
+    let _group_invite_pruner = group_invite::spawn_pruner(pool.clone());
     // G-discovery-ratelimit: drop idle per-IP buckets so
     // the limiter's memory ceiling stays bounded.
     let _rate_pruner = rate_limit::spawn_pruner((*rate_limiter).clone());

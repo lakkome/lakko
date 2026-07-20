@@ -88,7 +88,7 @@ The IETF MLS WG is still landing hybrid PQ cipher suite
 identifiers. We pin classical suites today and migrate
 once the draft stabilises.
 
-### G-3: External-join proposal approval — **CLOSED end-to-end on web + iOS + Android ([ADR-0027](../adr/0027-external-join-approval.md) admin approval + [ADR-0028](../adr/0028-group-join-ticket.md) join-ticket invite-link); residuals are a deployed-env e2e + optional anti-abuse hardenings**
+### G-3: External-join proposal approval — **CLOSED end-to-end on web + iOS + Android ([ADR-0027](../adr/0027-external-join-approval.md) admin approval + [ADR-0028](../adr/0028-group-join-ticket.md) join-ticket invite-link); the only residual is a deployed-env live-admin-approval e2e**
 
 Was: `Group::process_incoming` returned a data-less
 `Incoming::ExternalJoinProposal` unit variant and the
@@ -240,11 +240,17 @@ SUCCESSFUL.
 **G-3 is now implemented end-to-end on web + iOS + Android**
 — the admin approval (ADR-0027) + the join-ticket invite-link
 (ADR-0028) form a complete joiner-initiated external-join
-flow. Residuals (deferred, not gaps in the protocol): a live
-admin-approval e2e on a deployed environment, and the
-optional anti-abuse hardenings in ADR-0028's open questions
-(single-use / max-uses tickets via a server blob ledger;
-issuer-in-roster enforcement at the admin UI).
+flow. ADR-0028's anti-abuse hardenings shipped: OQ1 (single-use
+/ max-uses tickets via a server blob ledger + per-joiner
+consume dedup — `services/discovery/src/group_invite.rs`,
+migrations 0014/0015, wired on all 3 clients) and OQ2 (surface
+"via &lt;issuer&gt; · member / not a current member" per pending
+request from
+`crates/lakko-contacts/src/group_join_attribution.rs` in the
+members panel — advisory only, since the ADR-0027 role gate,
+not roster membership, is the boundary). The only remaining
+residual (deferred, not a gap in the protocol) is a live
+admin-approval e2e on a deployed environment.
 
 ## Multi-device
 
@@ -1244,7 +1250,7 @@ forward chain cleanly: an already-consumed
 "already joined" UI branch without re-bootstrapping
 the MLS group.
 
-### G-31: Cross-stream SFrame AEAD nonce reuse (audio + video under one leaf) — **CLOSED (2026-07, [ADR-0034](../adr/0034-sframe-per-media-stream-key.md))**
+### G-31: Cross-stream SFrame AEAD nonce reuse (multiple streams under one leaf) — **CLOSED (2026-07, [ADR-0035](../adr/0035-sframe-per-stream-kid-key.md); [ADR-0034](../adr/0034-sframe-per-media-stream-key.md) was an incomplete first attempt, superseded)**
 
 A `lakko-security` review of the mid-call camera-on arc
 ([ADR-0032](../adr/0032-multi-joiner-call-links.md) piece B)
@@ -1269,26 +1275,48 @@ server in the media path), so the reuse is defence-in-depth only
 (low); **web 1×1** has no SFrame and is unaffected. Violates RFC
 9605 §9 `(key, CTR)` uniqueness.
 
-**Closure.** ADR-0034 folds a 1-byte `MediaType` discriminator
-(`0x01` audio / `0x02` video) into **both** HKDF `info` strings of
-`participant_key(sender_leaf, media_type)`, so a leaf's audio and
-video derive **disjoint** `(key, nonce_salt)` spaces and their
-counters can never collide. The media type is local context — the
-on-wire header KID stays `= sender_leaf`, so the `SframeHeader`
-codec, the `header_decode` fuzz target, the ADR-0013 AAD, and
-every `leaf == KID` roster/cache assumption are all unchanged. The
-fix landed and is **cross-stack-verified** on all five SFrame
-stacks (core, wasm, uniffi, native C-ABI, C++ bridge), each
-producing the same canonical golden wire vector
-`31093c4f19a3b815c0a17a8ad09d2df18c6971987eb1c214484e9ebcc4f92b4c04e5c80bc145a9f23e1c60e2faa4`,
-plus the iOS Obj-C++ shim, the Android JNI module, and the web
-Encoded-Transform worker (each deriving the discriminator from the
-track kind). The native C ABI fails **closed** on an unknown
-`media_type` byte (`BadMediaType`). Property test:
-`sframe::tests::audio_and_video_from_one_leaf_get_distinct_key_and_nonce`.
-This re-words **C-5** (`docs/security/calls.md`), which previously
-assumed one stream per participant. Residual: the same G-26 live
-deployed-SFU RTP interop proof that governs every SFrame stack.
+**First attempt (ADR-0034, incomplete — superseded).** ADR-0034
+folded a 1-byte Audio/Video `MediaType` tag into `participant_key`.
+That closed the audio-vs-video pair but **re-collided two video
+streams** from one leaf: a participant publishing camera + screen-share
+sends **two** `Video` streams, both mapping to the tag `0x02`, so they
+re-derived the identical `(key, nonce_salt)` and their independent
+counters reopened the exact HIGH reuse. A local media-type/track-kind
+cannot distinguish two same-kind streams, and a transceiver MID differs
+across the SFU — neither is a discriminator both endpoints share.
+
+**Closure (ADR-0035).** The SFrame header KID becomes a
+per-`(sender_leaf, stream)` identifier `KID = (sender_leaf << 8) |
+stream_index` (`stream_index` a per-sender `u8` ordinal — audio 0,
+camera 1, screen-share 2, …), and `CallKey::participant_key(kid)` folds
+the **FULL KID** into **both** HKDF `info` strings. Distinct KID ⇒
+disjoint `(key, nonce_salt)` space, so **every** concurrent stream of a
+leaf keys into its own space — the reuse is closed for **any** number
+of streams per leaf, fully covering the multi-video (camera +
+screen-share) case ADR-0034's per-media-type fix did **not**. The KID
+is the only per-stream signal both endpoints share through the SFU,
+which forwards the RFC 9605 header verbatim (invariant #2); the receiver
+reads the KID off each frame's header and derives `participant_key(KID)`
+with **no** local media context. The `SframeHeader` codec, the
+`header_decode` fuzz target, and the ADR-0013 AAD are unchanged (RFC
+9605 §4.3 already encodes an arbitrary `u64` KID in an extended form).
+The fix landed and is **cross-stack-verified** on all six SFrame stacks
+(core, uniffi FFI, wasm FFI, native C-ABI, C++ bridge, web worker — plus
+the iOS Obj-C++ shim and the Android JNI module, whose `SFrameMediaType`
+mapping was deleted), each producing the same canonical golden wire
+vector
+`910300fe2c2af65799594a4c693ff4c9e0d49b0565756ddd7299b0945fc8adb1c9c12fced57c6937f372e6b94bdae40a`
+(seed `0x42`×32, leaf 3, `stream_index 0` ⇒ KID `0x0300`). The
+`MediaType` discriminator + the native `BadMediaType` status are
+removed; the core fails **closed** on `stream_index > 255`
+(`StreamIndexOverflow`). Property test:
+`sframe::tests::three_streams_of_one_leaf_get_distinct_keys_and_nonces`
+(audio + camera + screen-share). This re-words **C-5**
+(`docs/security/calls.md`) to per-`(leaf, stream)`. The only remaining
+care item is the sender's stable-distinct-`stream_index`-per-stream
+discipline (an engineering invariant, not a crypto gap). Residual: the
+same G-26 live deployed-SFU RTP interop proof that governs every SFrame
+stack.
 
 ## Out-of-protocol
 

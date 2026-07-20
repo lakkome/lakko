@@ -5,7 +5,7 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 # ADR-0035: Per-(leaf, stream) SFrame key derivation via the header KID — close the cross-stream AEAD nonce reuse for ANY number of streams
 
-- **Status:** Proposed (the maintainer accepts). **Supersedes the discriminator of [ADR-0034](0034-sframe-per-media-stream-key.md)** — ADR-0034's Context/finding/threat analysis stand; its per-media-TYPE (Audio/Video) discriminator is replaced by the per-`(leaf, stream)` KID defined here.
+- **Status:** Implemented (2026-07). **Supersedes the discriminator of [ADR-0034](0034-sframe-per-media-stream-key.md)** — ADR-0034's Context/finding/threat analysis stand; its per-media-TYPE (Audio/Video) discriminator is replaced by the per-`(leaf, stream)` KID defined here. Landed + cross-stack-verified on all six SFrame stacks (see [Implementation](#implementation-landed-2026-07)).
 - **Date:** 2026-07-17
 - **Context:** Phase 3 (calls / SFrame media encryption) — security fix, closing the residual ADR-0034 left open
 
@@ -110,10 +110,88 @@ The new cross-stack golden — seal on a fresh `ParticipantKey` (counter → 1) 
 
 Header prefix `91 03 00` = extended 2-byte KID `0x0300` (X=1, K=1) + inline CTR `1` (Y=0, C=1); the remaining 45 bytes are the 29-byte plaintext + 16-byte Poly1305 tag. All five stacks pin this exact hex.
 
+## Implementation (landed 2026-07)
+
+The fix shipped end-to-end and is cross-stack-verified: all **six** SFrame
+stacks (core, uniffi FFI, wasm FFI, native C-ABI, C++ bridge, web worker — plus
+the iOS and Android shims that wrap the native path) now key on the composite
+KID and produce the **same** canonical golden wire vector
+
+```
+910300fe2c2af65799594a4c693ff4c9e0d49b0565756ddd7299b0945fc8adb1c9c12fced57c6937f372e6b94bdae40a
+```
+
+(seed `0x42`×32, `sender_leaf = 3`, `stream_index = 0` ⇒ `KID = 0x0300`,
+plaintext `"lakko sframe golden vector v1"`), pinned identically in the core,
+native-cross-stack, C++ bridge, web, iOS, and Android golden tests. `MediaType`
+is removed everywhere.
+
+- **Core (`lakko-calls`)** — `SframeHeader::kid_for(sender_leaf, stream_index)`
+  (fail-closed `HeaderError::StreamIndexOverflow` when `stream_index >
+  MAX_STREAM_INDEX = 255`) + the pure split helpers `leaf_of` / `stream_of` +
+  `STREAM_INDEX_BITS = 8` (`header.rs`, codec untouched — RFC 9605 §4.3 already
+  encodes an arbitrary `u64` KID). `CallKey::participant_key(kid: u64)` folds the
+  FULL KID into **both** HKDF `info` strings (`participant_key_for(leaf, stream)`
+  is the sender convenience over `kid_for`); `ParticipantKey` carries the `kid`
+  with `sender_leaf()` / `stream_index()` accessors; `seal_framed` stamps
+  `self.kid`, `open_framed` checks `header.kid == self.kid`. Threaded through
+  `CallKeyRing` + `GroupCallSession`. `MediaType` removed. New property test
+  `three_streams_of_one_leaf_get_distinct_keys_and_nonces` proves audio (0) +
+  camera (1) + screen-share (2) from one leaf derive pairwise-distinct keys AND
+  nonce salts AND never seal one plaintext at one counter to the same ciphertext
+  — the camera-vs-screen (both video) pair is exactly the one ADR-0034 missed;
+  plus `kid_for` round-trip / `stream > 255` rejection tests. Core
+  `GOLDEN_WIRE_HEX` regenerated.
+- **FFI (`lakko-ffi-uniffi` + `lakko-ffi-wasm`)** — `CallKey.participantKey` /
+  `CallKeyRing.participantKey` take `(sender_leaf, stream_index)` (uniffi
+  `stream_index: u8`; wasm `stream_index: u32`, fail-closed `> 255`) and compose
+  the KID via `kid_for`; the open path (`openFramedWithOverlap`) takes the KID
+  read off the wire. `FfiMediaType` / the wasm `media_type: u8` argument are
+  removed. `just regen-bindings` + wasm rebuild; the uniffi + wasm golden tests
+  pin the canonical vector.
+- **Native C ABI + C++ bridge (`lakko-sframe-native` + `apps/shared/sframe-bridge/`)**
+  — the participant-key entry point takes `stream_index: u8` and composes
+  `kid_for(sender_leaf, stream_index)` internally; the open-framed entry reads
+  the KID off the header (`open_framed_with_overlap(header.kid, …)`) with **no**
+  media argument. The `LakkoSframeStatus::BadMediaType` variant and the
+  `LAKKO_SFRAME_MEDIA_TYPE_*` constants are removed (status enum ends at
+  `CtrOverflow = 8`). `LakkoFrameEncryptor::Create` takes the `stream_index`
+  (stamped into the seal-side KID); `LakkoFrameDecryptor` **drops** the
+  `cricket::MediaType` argument entirely and reads the KID from each frame's own
+  header. `tests/golden_cross_stack.rs` + `test_bridge.cc` regenerated to the new
+  vector.
+- **Web worker (`apps/web/src/calls/`)** — `sframe-transform.ts`
+  `streamIndexOfKind(track.kind)` maps audio → 0, video → 1; `sframe-transform-worker.ts`
+  composes the seal-side KID `(localLeaf << 8) | streamIndex` via
+  `ring.participantKey(localLeaf, streamIndex)` and, on decrypt, reads the whole
+  KID off the inbound header and selects the per-`(leaf, stream)` key with it (no
+  local media context). The `mediaType` thread is gone. `sframe-golden.test.ts`
+  pins the canonical vector.
+- **Android (`apps/android/lakko-sframe/` + app)** — `SFrameMediaType.kt`
+  **deleted**; `sframe_jni.cc` `nativeCreate` takes the `stream_index`;
+  `LakkoFrameEncryptor.kt` / `LakkoFrameDecryptor.kt` + `WebRtcPeerConnection.kt`
+  thread the per-track stream index (decryptor reads the KID from the header);
+  `libsframe_jni.so` rebuilt; `SframeGoldenTest` pins the canonical vector.
+- **iOS (`apps/ios/Lakko/Calls/`)** — `SFrameAttach.{h,mm}` gained a
+  `streamIndex` parameter on the encryptor attach; the decryptor drops the media
+  argument and reads the KID from the header; `WebRTCPeerConnection.swift` arms
+  each sender on its own stream index. `SFrameGoldenTests.swift` pins the
+  canonical vector.
+
+Verification observed this session: core property + golden tests, the FFI golden
+tests, `cargo test -p lakko-sframe-native` + `just test-sframe-bridge`, web
+`vitest`, Android `:app:compileDebugKotlin` + `androidTest`, and iOS `xcodebuild
+build-for-testing` were run green by the implementation sprints; all six golden
+tests pin the one canonical vector above. The `SframeHeader` codec and the
+`header_decode` fuzz target are untouched (the KID rides the existing extended-KID
+form). The remaining residual is the same one that governs every SFrame stack
+(G-26): a live cross-platform RTP interop verification over a deployed SFU.
+
 ## Open questions
 
 - **Simulcast RID interaction.** When a single logical video stream is sent as multiple simulcast layers (RIDs), each layer is a distinct RTP stream but the same *logical* stream. Whether each simulcast layer needs its own `stream_index` (so a layer switch does not reuse a counter across layers) or the layers share one `(leaf, stream)` key with the SFU's layer selection staying opaque to keying is deferred to the simulcast-layer-selection follow-up (already deferred in `services/sfu`). The 8-bit stream space leaves ample room to give each layer its own ordinal if that is the chosen answer.
-- **`stream_index` assignment discipline on the sender.** The sender must assign a stable ordinal per local track for the track's life and never re-use a retired ordinal within an epoch on a *different* track without a rekey (re-using an ordinal on a fresh track at counter 0 under the same seed would reuse `(key, nonce)`). In practice each fresh `ParticipantKey` starts at counter 0, so a new track must take a new `stream_index` OR ride an epoch that rotated the seed. The FFI/client sprints own encoding this discipline (assign at arm time, keep for the track's life).
+- **ADR-0034's LOW screen-share finding is RESOLVED BY DESIGN.** ADR-0034 flagged a second video stream (camera + screen-share) as a residual because both map to the `Video` tag and re-collide. Under this ADR a screen-share is simply a third stream that takes `stream_index = 2` (audio 0, camera 1, screen-share 2, …) and keys into its own disjoint `(key, nonce_salt)` space — **no per-track special-casing, no crypto gap**. The only remaining care item is the sender's assignment discipline below; it is an engineering invariant, not a cryptographic hole.
+- **`stream_index` assignment discipline on the sender.** The sender must assign a stable distinct ordinal per concurrent local stream for the track's life and never re-use a retired ordinal within an epoch on a *different* track without a rekey (re-using an ordinal on a fresh track at counter 0 under the same seed would reuse `(key, nonce)`). In practice each fresh `ParticipantKey` starts at counter 0, so a new track must take a new `stream_index` OR ride an epoch that rotated the seed. The FFI/client sprints own encoding this discipline (assign at arm time, keep for the track's life).
 - **Leaf renumber across an MLS commit.** As today, a membership change can renumber leaves; the KID is re-derived per epoch from the current leaf, and the overlap keyring (ADR-0029) already handles in-flight frames across the boundary. No new interaction expected.
 
 ## References
@@ -121,4 +199,4 @@ Header prefix `91 03 00` = extended 2-byte KID `0x0300` (X=1, K=1) + inline CTR 
 - Related ADRs: [0034](0034-sframe-per-media-stream-key.md) (per-media-TYPE discriminator — this ADR supersedes its discriminator), [0013](0013-sframe-cross-platform-aad.md) (SFrame AAD = the header bytes — unchanged), [0029](0029-mid-call-key-rotation.md) (overlap keyring that calls `participant_key`), [0011](0011-rust-sfu.md) (closed ecosystem — flag-day acceptable).
 - RFC 9605 (SFrame) §4.3 (header / KID wire format), §4.4 (nonce construction), §9 (`(key, CTR)` uniqueness requirement).
 - RFC 8439 (ChaCha20-Poly1305) — nonce-reuse consequences.
-- `docs/security/calls.md` C-5 (to be re-worded to per-`(leaf, stream)`).
+- `docs/security/calls.md` C-5 (re-worded to per-`(leaf, stream)` via the header KID) + `docs/security/known-gaps.md` / `invariant-index.md` G-31 (CLOSED by this ADR).
