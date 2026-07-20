@@ -451,21 +451,23 @@ public final class WebRTCPeerConnection: NSObject {
             return false
         }
         var allOk = true
-        // Each sender is bound to its own media-type key space
-        // (ADR-0034): the audio sender seals on the audio space, the
-        // video sender on the video space, so a frame counter shared
-        // across the two streams of this leaf no longer reuses a nonce.
-        let armSet: [(RTCRtpSender?, LakkoSFrameMediaType)] = [
-            (localAudioSender, .audio),
-            (localVideoSender, .video),
+        // Each sender is bound to its own per-sender stream ordinal
+        // (ADR-0035): the audio sender seals under stream 0, the video
+        // sender under stream 1. The seal KID is
+        // `(localLeaf << 8) | streamIndex`, so a frame counter shared
+        // across the two streams of this leaf keys into disjoint
+        // `(key, nonce_salt)` spaces and no longer reuses a nonce.
+        let armSet: [(RTCRtpSender?, UInt8)] = [
+            (localAudioSender, 0),
+            (localVideoSender, 1),
         ]
-        for (maybeSender, mediaType) in armSet {
+        for (maybeSender, streamIndex) in armSet {
             guard let sender = maybeSender else { continue }
             let status = LakkoSFrameAttach.attachEncryptor(
                 toSender: sender,
                 seed: seed,
                 localLeaf: localLeaf,
-                mediaType: mediaType
+                streamIndex: streamIndex
             )
             if status != .OK {
                 allOk = false
@@ -494,11 +496,13 @@ public final class WebRTCPeerConnection: NSObject {
             return false
         }
         guard let sender = localVideoSender else { return false }
+        // Stream 1 (ADR-0035): v1 carries at most one video track; a
+        // future second video / screen-share would use stream 2.
         return LakkoSFrameAttach.attachEncryptor(
             toSender: sender,
             seed: seed,
             localLeaf: localLeaf,
-            mediaType: .video
+            streamIndex: 1
         ) == .OK
     }
 
@@ -513,18 +517,14 @@ public final class WebRTCPeerConnection: NSObject {
         guard SFrameAvailability.shared.isCallingAvailable else {
             return false
         }
-        // Bind the decryptor to the receive track's kind (ADR-0034) so
-        // it derives each per-sender key on the same audio-or-video key
-        // space the far-side encryptor sealed on. A wrong-space guess
-        // fails closed (the frame will not open) rather than silently
-        // opening on the wrong key — the audio track is the default only
-        // because every receiver carries an audio or a video track.
-        let mediaType: LakkoSFrameMediaType =
-            (receiver.track is RTCVideoTrack) ? .video : .audio
+        // No media/stream argument (ADR-0035): a single decryptor bound
+        // to this remote receive track opens every frame on it by
+        // reading the composite KID (`(senderLeaf << 8) | streamIndex`)
+        // from each frame's own SFrame header, so audio and either video
+        // stream are each keyed correctly with no local track-kind signal.
         let status = LakkoSFrameAttach.attachDecryptor(
             toReceiver: receiver,
-            seed: seed,
-            mediaType: mediaType
+            seed: seed
         )
         return status == .OK
     }

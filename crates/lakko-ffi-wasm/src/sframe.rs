@@ -8,8 +8,9 @@
 //! Mirrors the UniFFI shape:
 //!
 //! - [`WasmCallKey`] (JS `CallKey`) — `new(seed: Uint8Array)`
-//!   + `participantKey(sender_leaf: u32, media_type: u8) → ParticipantKey`
-//!     (`media_type`: `1 = audio`, `2 = video`, per ADR-0034)
+//!   + `participantKey(sender_leaf: u32, stream_index: u32) → ParticipantKey`
+//!     (the seal side; keyed on the composite SFrame KID
+//!     `(sender_leaf << 8) | stream_index`, per ADR-0035)
 //!   + `seedBytes() → Uint8Array`.
 //! - [`WasmParticipantKey`] (JS `ParticipantKey`) — `seal(aad,
 //!   plaintext) → SealedFrame`, `open(aad, ciphertext,
@@ -36,29 +37,6 @@ use lakko_calls::link_invite::{
 };
 use lakko_calls::sframe as core;
 use wasm_bindgen::prelude::*;
-
-/// Map the JS-side media-type tag (`1 = audio`, `2 = video`) to the core
-/// [`core::MediaType`] (ADR-0034). This is the **canonical** convention: it
-/// matches `lakko_calls::sframe::MediaType::tag()` (0x01 / 0x02) and the
-/// `lakko-sframe-native` C ABI (`LAKKO_SFRAME_MEDIA_TYPE_{AUDIO=1,VIDEO=2}`), so
-/// every FFI layer speaks one byte convention. wasm-bindgen has no first-class
-/// enum-with-no-data ergonomics across the boundary, so the discriminator
-/// crosses as a `u8`; `0` is reserved and any other value is a hard error (no
-/// silent default — matching the native `BadMediaType` refusal — so a
-/// participant's audio and video streams never collapse onto one key space).
-///
-// ADR-0034: media_type byte convention is 1=audio/2=video across ALL FFI layers
-// (core tag, native C ABI, wasm); it is LOCAL — never on the wire (the SFrame
-// header carries KID = sender_leaf, not media_type).
-pub(crate) fn media_type_from_u8(tag: u8) -> Result<core::MediaType, JsError> {
-    match tag {
-        1 => Ok(core::MediaType::Audio),
-        2 => Ok(core::MediaType::Video),
-        other => Err(JsError::new(&format!(
-            "media_type must be 1 (audio) or 2 (video), got {other}"
-        ))),
-    }
-}
 
 /// Per-call shared key — the 32-byte seed each participant
 /// derives via the MLS exporter.
@@ -88,25 +66,30 @@ impl WasmCallKey {
         })
     }
 
-    /// Derive the [`WasmParticipantKey`] for the supplied
-    /// leaf index + media stream (`media_type`: `1 = audio`, `2 = video`, per
-    /// ADR-0034 — audio and video from one leaf get distinct key + nonce-salt
-    /// spaces so their independent counters cannot reuse a `(key, nonce)` pair).
+    /// Derive the seal-side [`WasmParticipantKey`] for the supplied
+    /// `(sender_leaf, stream_index)` stream (ADR-0035). Keying on the composite
+    /// SFrame KID `(sender_leaf << 8) | stream_index` gives every one of a
+    /// participant's concurrent streams (audio, camera, screen-share, …) a
+    /// distinct key + nonce-salt space, so their independent counters cannot
+    /// reuse a `(key, nonce)` pair — the gap the ADR-0034 per-media-TYPE tag
+    /// left open for two same-kind streams.
+    ///
+    /// `stream_index` crosses as a `u32`; a value `> 255` fails closed (it would
+    /// overflow the KID's 8-bit stream field) rather than silently truncating.
     ///
     /// # Errors
     ///
-    /// `JsError` if `media_type` is not `1` or `2`, or on HKDF failure
-    /// (practically unreachable with valid inputs).
+    /// `JsError` if `stream_index > 255`, or on HKDF failure (practically
+    /// unreachable with valid inputs).
     #[wasm_bindgen(js_name = "participantKey")]
     pub fn participant_key(
         &self,
         sender_leaf: u32,
-        media_type: u8,
+        stream_index: u32,
     ) -> Result<WasmParticipantKey, JsError> {
-        let media = media_type_from_u8(media_type)?;
         let pk = self
             .inner
-            .participant_key(sender_leaf, media)
+            .participant_key_for(sender_leaf, stream_index)
             .map_err(|e| JsError::new(&format!("call crypto error: participant_key: {e:?}")))?;
         Ok(WasmParticipantKey {
             inner: Mutex::new(pk),
@@ -350,27 +333,34 @@ impl WasmCallKeyRing {
             .has_live_previous(now_ms)
     }
 
-    /// Derive the seal-side [`WasmParticipantKey`] for `sender_leaf` + media
-    /// stream (`media_type`: `1 = audio`, `2 = video`, per ADR-0034) from the
-    /// current epoch. Re-fetched after a `rekeyFromSeedAt` to seal under the
-    /// new key.
+    /// Derive the seal-side [`WasmParticipantKey`] for a `(sender_leaf,
+    /// stream_index)` stream from the current epoch (ADR-0035). Re-fetched after
+    /// a `rekeyFromSeedAt` to seal under the new key. Keying on the composite
+    /// SFrame KID `(sender_leaf << 8) | stream_index` keeps every one of a
+    /// participant's concurrent streams on a distinct key + nonce-salt space.
+    /// `stream_index` crosses as a `u32`; a value `> 255` fails closed rather
+    /// than silently truncating.
     ///
     /// # Errors
     ///
-    /// `JsError` if `media_type` is not `1` or `2`, or on HKDF failure
-    /// (practically unreachable).
+    /// `JsError` if `stream_index > 255`, or on HKDF failure (practically
+    /// unreachable).
     #[wasm_bindgen(js_name = "participantKey")]
     pub fn participant_key(
         &self,
         sender_leaf: u32,
-        media_type: u8,
+        stream_index: u32,
     ) -> Result<WasmParticipantKey, JsError> {
-        let media = media_type_from_u8(media_type)?;
+        let kid = lakko_calls::SframeHeader::kid_for(sender_leaf, stream_index).map_err(|e| {
+            JsError::new(&format!(
+                "call crypto error: ring participant_key kid compose: {e}"
+            ))
+        })?;
         let pk = self
             .inner
             .lock()
             .expect("call-key ring lock")
-            .participant_key(sender_leaf, media)
+            .participant_key(kid)
             .map_err(|e| {
                 JsError::new(&format!("call crypto error: ring participant_key: {e:?}"))
             })?;
@@ -380,27 +370,23 @@ impl WasmCallKeyRing {
     }
 
     /// Open an RFC 9605 framed SFrame with the overlap fall-back: try the
-    /// current key for `sender_leaf` + media stream (`media_type`: `1 = audio`,
-    /// `2 = video`, per ADR-0034), and on an AEAD failure fall back to the
-    /// retained previous key while its window is live (ADR-0029). The
-    /// receive-side path for the web worker across a mid-call rekey.
+    /// current key for `kid` (ADR-0035; the composite `(sender_leaf,
+    /// stream_index)` identifier the worker read from the frame header), and on
+    /// an AEAD failure fall back to the retained previous key while its window
+    /// is live (ADR-0029). The receive-side path for the web worker across a
+    /// mid-call rekey. `kid` crosses to JS as a `BigInt`; the decryptor takes it
+    /// straight from the wire — no separate media discriminator.
     ///
     /// # Errors
     ///
-    /// `JsError` if `media_type` is not `1` or `2`, on a malformed header, or on
-    /// AEAD auth failure under both the current and previous keys.
+    /// `JsError` on a malformed header, or on AEAD auth failure under both the
+    /// current and previous keys.
     #[wasm_bindgen(js_name = "openFramedWithOverlap")]
-    pub fn open_framed_with_overlap(
-        &self,
-        sender_leaf: u32,
-        media_type: u8,
-        wire: &[u8],
-    ) -> Result<Vec<u8>, JsError> {
-        let media = media_type_from_u8(media_type)?;
+    pub fn open_framed_with_overlap(&self, kid: u64, wire: &[u8]) -> Result<Vec<u8>, JsError> {
         self.inner
             .lock()
             .expect("call-key ring lock")
-            .try_open_framed_with_overlap(sender_leaf, media, wire)
+            .try_open_framed_with_overlap(kid, wire)
             .map_err(|e| {
                 JsError::new(&format!(
                     "call crypto error: ring open_framed_with_overlap: {e:?}"

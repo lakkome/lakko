@@ -80,27 +80,6 @@ typedef NS_ENUM(NSInteger, LakkoSFrameAttachStatus) {
     LakkoSFrameAttachStatusNullArgument = 4,
 };
 
-/// Stream kind folded into the SFrame per-participant key
-/// derivation (ADR-0034). A participant's audio and video streams
-/// derive on distinct key + nonce-salt spaces, so a frame counter
-/// (nonce) reused across the two streams of one leaf no longer
-/// collides — the cross-stream nonce-reuse bug ADR-0034 closes.
-///
-/// An encryptor is bound to exactly one local SEND track's kind,
-/// and a decryptor to exactly one remote RECEIVE track's kind, for
-/// its whole lifetime; the far-side encryptor must have sealed on
-/// the same media type or the frame will not open (fail-closed).
-///
-/// The raw values are pinned to the `lakko-sframe-native` C ABI
-/// convention (`LAKKO_SFRAME_MEDIA_TYPE_AUDIO` = 1 / `_VIDEO` = 2);
-/// `0` is reserved and refused fail-closed by the bridge.
-typedef NS_ENUM(uint8_t, LakkoSFrameMediaType) {
-    /// Audio send / receive track.
-    LakkoSFrameMediaTypeAudio = 1,
-    /// Video send / receive track.
-    LakkoSFrameMediaTypeVideo = 2,
-};
-
 @interface LakkoSFrameAttach : NSObject
 
 /// One-shot capability probe — runs once at app startup
@@ -124,18 +103,24 @@ typedef NS_ENUM(uint8_t, LakkoSFrameMediaType) {
 /// wrapper for the lifetime of the sender; detaching is the
 /// caller's job at call-end via [-detachFromSender:].
 ///
-/// `mediaType` is the kind of the local send track being armed
-/// (ADR-0034) — the audio sender passes `Audio`, the video sender
-/// `Video`. The encryptor derives + seals on that one media-type
-/// key space for its whole lifetime.
+/// `streamIndex` is the local send track's per-sender stream
+/// ordinal (ADR-0035) — 0 = audio, 1 = first video, 2 = second
+/// video / screen-share, … The seal KID is composed
+/// `(localLeaf << 8) | streamIndex` and folded whole into the key
+/// derivation, so every one of a participant's concurrent streams
+/// keys into a disjoint `(key, nonce_salt)` space and a frame
+/// counter (nonce) reused across two streams of one leaf no longer
+/// collides. The encryptor is bound to this one stream for its
+/// whole lifetime. Every `uint8_t` is a valid stream index — there
+/// is no fail-closed rejection on this argument.
 ///
 /// Returns `LakkoSFrameAttachStatusOK` on success.
 + (LakkoSFrameAttachStatus)attachEncryptorToSender:
                               (RTCRtpSender * _Nullable)sender
                                                 seed:(NSData *_Nullable)seed
                                            localLeaf:(uint32_t)localLeaf
-                                           mediaType:(LakkoSFrameMediaType)mediaType
-    NS_SWIFT_NAME(attachEncryptor(toSender:seed:localLeaf:mediaType:));
+                                         streamIndex:(uint8_t)streamIndex
+    NS_SWIFT_NAME(attachEncryptor(toSender:seed:localLeaf:streamIndex:));
 
 /// Build a fresh `LakkoFrameDecryptor` for `seed`, then attach
 /// it to `receiver` via the non-public `setFrameDecryptor:`
@@ -144,17 +129,18 @@ typedef NS_ENUM(uint8_t, LakkoSFrameMediaType) {
 /// `apps/shared/sframe-bridge/sframe-bridge.cc`'s
 /// `lookup_or_derive`).
 ///
-/// `mediaType` is the kind of the remote receive track being armed
-/// (ADR-0034) — the Swift caller reads `RTCRtpReceiver.track`'s
-/// kind and passes `Audio` / `Video`. The decryptor derives every
-/// per-sender key on that one media-type space; a mismatch with the
-/// far-side encryptor's space fails closed (the frame will not
-/// open) rather than opening on the wrong key.
+/// The decryptor takes NO stream argument (ADR-0035): a single
+/// decryptor bound to one remote receive track opens every frame
+/// on it by reading the composite KID
+/// (`(senderLeaf << 8) | streamIndex`) from each frame's own
+/// SFrame header — the per-stream discriminator that survives the
+/// SFU — and derives that sender+stream's key internally, so audio
+/// and either video stream are each keyed correctly with no local
+/// media-type or MID signal.
 + (LakkoSFrameAttachStatus)attachDecryptorToReceiver:
                               (RTCRtpReceiver * _Nullable)receiver
                                                   seed:(NSData *_Nullable)seed
-                                             mediaType:(LakkoSFrameMediaType)mediaType
-    NS_SWIFT_NAME(attachDecryptor(toReceiver:seed:mediaType:));
+    NS_SWIFT_NAME(attachDecryptor(toReceiver:seed:));
 
 /// Mid-call rekey (G-18, ADR-0029) — rotate the encryptor attached to
 /// `sender` to the new MLS epoch's 32-byte `seed`, keeping the SAME

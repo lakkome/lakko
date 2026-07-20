@@ -41,23 +41,27 @@
 export type SFrameOperation = "encrypt" | "decrypt";
 
 /**
- * ADR-0034 media-type discriminator crossing the wasm boundary as the FFI's
- * `media_type` byte: `1 = audio`, `2 = video`. This is the canonical convention
- * shared with the core HKDF tag (`MediaType::tag()` = 0x01 / 0x02) and the
- * native `lakko-sframe-native` C ABI (`AUDIO = 1`, `VIDEO = 2`) — `0` is
- * reserved and rejected FFI-side. The core folds the byte into the
- * per-participant HKDF so a single leaf's audio and video streams occupy
- * disjoint key + nonce-salt spaces — their independent frame counters can then
- * never collide on a `(key, nonce)` pair. The byte is LOCAL — never on the wire
- * (the SFrame header carries the KID = sender_leaf, not the media type).
+ * ADR-0035 per-stream index — the low 8 bits of the SFrame KID
+ * `(sender_leaf << 8) | stream_index`. Unlike ADR-0034's local media-type
+ * byte, this rides ON the wire (it is part of the KID) so the receiver reads
+ * the whole KID off each frame's header and never needs a separate
+ * discriminator. v1 has at most one video stream per participant, so:
+ *   * `0` = the participant's audio stream,
+ *   * `1` = the participant's (single) camera / video stream.
+ * A second video / screen-share would take `2`, but v1 does not publish one.
+ * Each `(sender_leaf, stream_index)` pair derives a distinct per-participant
+ * key + nonce-salt space, so two concurrent streams from one leaf can never
+ * collide on a `(key, nonce)` pair — the gap ADR-0034's per-media-TYPE tag left
+ * open for two same-kind streams.
  */
-export type SFrameMediaType = 1 | 2;
+export type SFrameStreamIndex = number;
 
-/** Map an `RTCRtpSender`/`RTCRtpReceiver` track `kind` to the ADR-0034
- *  media-type byte. Anything that is not `"video"` seals as audio (`1`); a
- *  WebRTC track kind is only ever `"audio"` or `"video"`. */
-function mediaTypeOfKind(kind: string): SFrameMediaType {
-  return kind === "video" ? 2 : 1;
+/** Map an `RTCRtpSender` track `kind` to the ADR-0035 stream index. Anything
+ *  that is not `"video"` seals as the audio stream (`0`); a WebRTC track kind is
+ *  only ever `"audio"` or `"video"`. v1 publishes at most one video track per
+ *  participant, so `"video" -> 1` is unambiguous. */
+function streamIndexOfKind(kind: string): SFrameStreamIndex {
+  return kind === "video" ? 1 : 0;
 }
 
 /**
@@ -81,21 +85,21 @@ export interface SFrameTransformOptions {
    */
   readonly seed: Uint8Array;
   /**
-   * Local leaf index — the KID this client stamps into every frame it
-   * seals. Required for `"encrypt"`; ignored for `"decrypt"` (the
-   * receiver reads the KID off each inbound frame's header and derives
-   * the matching per-sender key lazily).
+   * Local leaf index — the high bits of the KID this client stamps into every
+   * frame it seals. Required for `"encrypt"`; ignored for `"decrypt"` (the
+   * receiver reads the whole KID off each inbound frame's header and derives
+   * the matching per-stream key lazily).
    */
   readonly localLeaf?: number;
   /**
-   * ADR-0034 media-type of this transform's RTP stream — `1 = audio`,
-   * `2 = video`. Fixed for the transform's whole lifetime (each
+   * ADR-0035 stream index of this transform's RTP stream — `0 = audio`,
+   * `1 = video`. Fixed for the transform's whole lifetime (each
    * `RTCRtpScriptTransform` carries exactly one track, hence one kind), so the
-   * worker reads it once and passes it into every per-(leaf, media) key
-   * derivation — seal and open alike — keeping a leaf's audio and video keys
-   * disjoint.
+   * worker reads it once and composes the seal-side KID
+   * `(localLeaf << 8) | streamIndex` from it. Required for `"encrypt"`; unset
+   * for `"decrypt"` (the receiver takes the whole KID straight off the wire).
    */
-  readonly mediaType: SFrameMediaType;
+  readonly streamIndex?: SFrameStreamIndex;
 }
 
 /**
@@ -136,8 +140,8 @@ function refuseIfUnsupported(): void {
 /**
  * Attach the encrypting SFrame transform to an outgoing RTP sender.
  * Every frame the sender emits is sealed into an RFC 9605 wire frame
- * (`SframeHeader(kid=localLeaf, ctr) || ciphertext`) before it reaches
- * the SFU.
+ * (`SframeHeader(kid=(localLeaf << 8) | streamIndex, ctr) || ciphertext`)
+ * before it reaches the SFU (ADR-0035).
  *
  * Throws if the browser lacks `RTCRtpScriptTransform` (invariant #4)
  * or if `localLeaf` is omitted.
@@ -154,9 +158,9 @@ export function attachSenderSFrame(
     seed: opts.seed,
     localLeaf: opts.localLeaf,
     // The sender's track is set by the caller's `addTrack` before this attach
-    // (the native-shim sequencing), so its kind is the authoritative media
-    // type for every frame this transform seals (ADR-0034).
-    mediaType: mediaTypeOfKind(sender.track?.kind ?? "audio"),
+    // (the native-shim sequencing), so its kind is the authoritative stream
+    // for every frame this transform seals: audio -> 0, video -> 1 (ADR-0035).
+    streamIndex: streamIndexOfKind(sender.track?.kind ?? "audio"),
   };
   sender.transform = new RTCRtpScriptTransform(transformWorker(), options);
   return id;
@@ -164,9 +168,9 @@ export function attachSenderSFrame(
 
 /**
  * Attach the decrypting SFrame transform to an incoming RTP receiver.
- * Each inbound frame's header KID selects (and lazily derives) the
- * per-sender key; frames that fail the AEAD open are dropped, never
- * forwarded as plaintext.
+ * Each inbound frame's header KID `(sender_leaf << 8) | stream_index`
+ * selects (and lazily derives) the per-stream key; frames that fail the
+ * AEAD open are dropped, never forwarded as plaintext.
  *
  * Throws if the browser lacks `RTCRtpScriptTransform` (invariant #4).
  */
@@ -180,11 +184,10 @@ export function attachReceiverSFrame(
     operation: "decrypt",
     id,
     seed: opts.seed,
-    // The receiver's inbound track kind matches the sender's (the SFU forwards
-    // audio→audio and video→video verbatim), so it selects the same ADR-0034
-    // media type the far end sealed under — the frame opens under the right
-    // per-(leaf, media) key.
-    mediaType: mediaTypeOfKind(receiver.track?.kind ?? "audio"),
+    // No stream index on the receive side: each inbound frame's header carries
+    // the whole KID `(sender_leaf << 8) | stream_index`, which the worker reads
+    // per frame to select (and lazily derive) the right per-stream key. One
+    // decrypt transform therefore serves every sender + every stream (ADR-0035).
   };
   receiver.transform = new RTCRtpScriptTransform(transformWorker(), options);
   return id;

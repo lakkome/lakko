@@ -62,13 +62,13 @@ void test_round_trip_single_sender() {
   auto* enc =
       lakko::sframe::LakkoFrameEncryptor::Create(kTestSeed.data(),
                                                  kTestSeed.size(),
-                                                 kAliceLeaf, LAKKO_SFRAME_MEDIA_TYPE_AUDIO);
+                                                 kAliceLeaf, /*stream_index=*/0);
   assert(enc != nullptr && "Encryptor::Create returned nullptr");
   enc->AddRef();  // refcount: 0 -> 1
 
   auto* dec =
       lakko::sframe::LakkoFrameDecryptor::Create(kTestSeed.data(),
-                                                 kTestSeed.size(), LAKKO_SFRAME_MEDIA_TYPE_AUDIO);
+                                                 kTestSeed.size());
   assert(dec != nullptr && "Decryptor::Create returned nullptr");
   dec->AddRef();
 
@@ -130,10 +130,10 @@ void test_additional_data_ignored_header_is_aad() {
   auto* enc =
       lakko::sframe::LakkoFrameEncryptor::Create(kTestSeed.data(),
                                                  kTestSeed.size(),
-                                                 kAliceLeaf, LAKKO_SFRAME_MEDIA_TYPE_AUDIO);
+                                                 kAliceLeaf, /*stream_index=*/0);
   auto* dec =
       lakko::sframe::LakkoFrameDecryptor::Create(kTestSeed.data(),
-                                                 kTestSeed.size(), LAKKO_SFRAME_MEDIA_TYPE_AUDIO);
+                                                 kTestSeed.size());
   enc->AddRef();
   dec->AddRef();
 
@@ -205,20 +205,20 @@ void test_multi_sender_into_one_receiver() {
   auto* enc_alice =
       lakko::sframe::LakkoFrameEncryptor::Create(kTestSeed.data(),
                                                  kTestSeed.size(),
-                                                 kAliceLeaf, LAKKO_SFRAME_MEDIA_TYPE_AUDIO);
+                                                 kAliceLeaf, /*stream_index=*/0);
   auto* enc_bob =
       lakko::sframe::LakkoFrameEncryptor::Create(kTestSeed.data(),
                                                  kTestSeed.size(),
-                                                 kBobLeaf, LAKKO_SFRAME_MEDIA_TYPE_AUDIO);
+                                                 kBobLeaf, /*stream_index=*/0);
   auto* enc_carol =
       lakko::sframe::LakkoFrameEncryptor::Create(kTestSeed.data(),
                                                  kTestSeed.size(),
-                                                 kCarolLeaf, LAKKO_SFRAME_MEDIA_TYPE_AUDIO);
+                                                 kCarolLeaf, /*stream_index=*/0);
 
   // One decryptor receives forwarded frames from all three.
   auto* dec =
       lakko::sframe::LakkoFrameDecryptor::Create(kTestSeed.data(),
-                                                 kTestSeed.size(), LAKKO_SFRAME_MEDIA_TYPE_AUDIO);
+                                                 kTestSeed.size());
 
   enc_alice->AddRef();
   enc_bob->AddRef();
@@ -282,12 +282,12 @@ void test_bad_seed_length() {
   auto* enc =
       lakko::sframe::LakkoFrameEncryptor::Create(short_seed.data(),
                                                  short_seed.size(),
-                                                 0, LAKKO_SFRAME_MEDIA_TYPE_AUDIO);
+                                                 0, /*stream_index=*/0);
   assert(enc == nullptr && "Encryptor::Create should reject short seed");
 
   auto* dec =
       lakko::sframe::LakkoFrameDecryptor::Create(short_seed.data(),
-                                                 short_seed.size(), LAKKO_SFRAME_MEDIA_TYPE_AUDIO);
+                                                 short_seed.size());
   assert(dec == nullptr && "Decryptor::Create should reject short seed");
 
   std::printf("ok\n");
@@ -305,10 +305,10 @@ void test_ciphertext_tamper() {
   auto* enc =
       lakko::sframe::LakkoFrameEncryptor::Create(kTestSeed.data(),
                                                  kTestSeed.size(),
-                                                 kAliceLeaf, LAKKO_SFRAME_MEDIA_TYPE_AUDIO);
+                                                 kAliceLeaf, /*stream_index=*/0);
   auto* dec =
       lakko::sframe::LakkoFrameDecryptor::Create(kTestSeed.data(),
-                                                 kTestSeed.size(), LAKKO_SFRAME_MEDIA_TYPE_AUDIO);
+                                                 kTestSeed.size());
   enc->AddRef();
   dec->AddRef();
 
@@ -377,10 +377,10 @@ void test_counter_monotonicity_and_out_of_order() {
   auto* enc =
       lakko::sframe::LakkoFrameEncryptor::Create(kTestSeed.data(),
                                                  kTestSeed.size(),
-                                                 kAliceLeaf, LAKKO_SFRAME_MEDIA_TYPE_AUDIO);
+                                                 kAliceLeaf, /*stream_index=*/0);
   auto* dec =
       lakko::sframe::LakkoFrameDecryptor::Create(kTestSeed.data(),
-                                                 kTestSeed.size(), LAKKO_SFRAME_MEDIA_TYPE_AUDIO);
+                                                 kTestSeed.size());
   enc->AddRef();
   dec->AddRef();
 
@@ -466,10 +466,10 @@ void test_per_call_key_isolation() {
   auto* enc_a =
       lakko::sframe::LakkoFrameEncryptor::Create(kTestSeed.data(),
                                                  kTestSeed.size(),
-                                                 kAliceLeaf, LAKKO_SFRAME_MEDIA_TYPE_AUDIO);
+                                                 kAliceLeaf, /*stream_index=*/0);
   auto* dec_b =
       lakko::sframe::LakkoFrameDecryptor::Create(seed_b.data(),
-                                                 seed_b.size(), LAKKO_SFRAME_MEDIA_TYPE_AUDIO);
+                                                 seed_b.size());
   enc_a->AddRef();
   dec_b->AddRef();
 
@@ -515,10 +515,10 @@ void test_payload_size_extremes() {
   auto* enc =
       lakko::sframe::LakkoFrameEncryptor::Create(kTestSeed.data(),
                                                  kTestSeed.size(),
-                                                 kAliceLeaf, LAKKO_SFRAME_MEDIA_TYPE_AUDIO);
+                                                 kAliceLeaf, /*stream_index=*/0);
   auto* dec =
       lakko::sframe::LakkoFrameDecryptor::Create(kTestSeed.data(),
-                                                 kTestSeed.size(), LAKKO_SFRAME_MEDIA_TYPE_AUDIO);
+                                                 kTestSeed.size());
   enc->AddRef();
   dec->AddRef();
 
@@ -587,12 +587,14 @@ void test_cross_stack_golden_vector() {
   const std::vector<uint8_t> golden_plaintext(
       kGoldenPlaintextStr,
       kGoldenPlaintextStr + std::strlen(kGoldenPlaintextStr));
+  // Stream 0 (audio) for leaf 3 → composite KID 0x0300 (ADR-0035); the header
+  // carries the extended 2-byte KID `0x03 0x00`, so the wire begins `910300…`.
   const std::vector<uint8_t> golden_wire = hex_decode(
-      "31093c4f19a3b815c0a17a8ad09d2df18c6971987eb1c214484e9ebcc4f92b4c"
-      "04e5c80bc145a9f23e1c60e2faa4");
+      "910300fe2c2af65799594a4c693ff4c9e0d49b0565756ddd7299b0945fc8adb1"
+      "c9c12fced57c6937f372e6b94bdae40a");
 
   auto* enc = lakko::sframe::LakkoFrameEncryptor::Create(
-      golden_seed.data(), golden_seed.size(), kGoldenLeaf, LAKKO_SFRAME_MEDIA_TYPE_AUDIO);
+      golden_seed.data(), golden_seed.size(), kGoldenLeaf, /*stream_index=*/0);
   assert(enc != nullptr && "golden Encryptor::Create returned nullptr");
   enc->AddRef();
 
@@ -623,7 +625,7 @@ void test_cross_stack_golden_vector() {
   // The decryptor opens the canonical golden wire back to the golden plaintext
   // — a frame any other stack seals opens on the native media path.
   auto* dec = lakko::sframe::LakkoFrameDecryptor::Create(
-      golden_seed.data(), golden_seed.size(), LAKKO_SFRAME_MEDIA_TYPE_AUDIO);
+      golden_seed.data(), golden_seed.size());
   assert(dec != nullptr && "golden Decryptor::Create returned nullptr");
   dec->AddRef();
 
@@ -660,11 +662,11 @@ void test_mid_call_rekey_overlap() {
   seed_b[0] ^= 0xFF;  // a distinct epoch-B seed
 
   auto* enc = lakko::sframe::LakkoFrameEncryptor::Create(
-      kTestSeed.data(), kTestSeed.size(), kLeaf, LAKKO_SFRAME_MEDIA_TYPE_AUDIO);
+      kTestSeed.data(), kTestSeed.size(), kLeaf, /*stream_index=*/0);
   assert(enc != nullptr);
   enc->AddRef();
   auto* dec = lakko::sframe::LakkoFrameDecryptor::Create(kTestSeed.data(),
-                                                         kTestSeed.size(), LAKKO_SFRAME_MEDIA_TYPE_AUDIO);
+                                                         kTestSeed.size());
   assert(dec != nullptr);
   dec->AddRef();
 

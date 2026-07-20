@@ -112,16 +112,19 @@ class LakkoFrameEncryptor : public webrtc::FrameEncryptorInterface {
   // must refuse to install the encryptor (security invariant #4:
   // no fallback to non-E2EE).
   //
-  // `media_type` is the local send track's stream kind
-  // (`LAKKO_SFRAME_MEDIA_TYPE_AUDIO` / `_VIDEO`, ADR-0034). A
-  // participant's audio and video keys derive on distinct spaces, so
-  // an encryptor is bound to exactly one media type for its lifetime;
-  // Create refuses (nullptr) an unknown value. The platform shim
-  // passes the track kind it is attaching to.
+  // `stream_index` is the local send track's per-sender stream ordinal
+  // (0 = audio, 1 = first video, 2 = second video / screen-share, …;
+  // ADR-0035). The seal KID is composed `(local_leaf << 8) |
+  // stream_index` and folded whole into the key derivation, so every
+  // one of a participant's concurrent streams keys into a disjoint
+  // `(key, nonce_salt)` space. An encryptor is bound to exactly one
+  // stream for its lifetime; the platform shim passes the ordinal of
+  // the track it is attaching to. Every `uint8_t` is a valid stream
+  // index, so there is no fail-closed rejection on this argument.
   static LakkoFrameEncryptor* Create(const uint8_t* seed,
                                      std::size_t seed_len,
                                      uint32_t local_leaf,
-                                     uint8_t media_type);
+                                     uint8_t stream_index);
 
   ~LakkoFrameEncryptor() override;
 
@@ -150,19 +153,21 @@ class LakkoFrameEncryptor : public webrtc::FrameEncryptorInterface {
  private:
   LakkoFrameEncryptor(lakko_sframe_participant_key_t* participant_key,
                       uint32_t local_leaf,
-                      uint8_t media_type);
+                      uint8_t stream_index);
 
   // Owned. The seal key for the CURRENT epoch; `seal_framed` re-emits
-  // the local leaf into the SFrame header (KID) internally (ADR-0013).
-  // Guarded by `seal_mutex_` because Encrypt (codec thread) reads it
-  // while Rekey (signaling thread) swaps it.
+  // the composite KID (`(local_leaf << 8) | stream_index`) into the
+  // SFrame header internally (ADR-0013 / ADR-0035). Guarded by
+  // `seal_mutex_` because Encrypt (codec thread) reads it while Rekey
+  // (signaling thread) swaps it.
   lakko_sframe_participant_key_t* participant_key_;
   // The local leaf index, kept so Rekey can re-derive the seal key for
   // the same leaf under the new epoch.
   uint32_t local_leaf_;
-  // The send track's stream kind (ADR-0034), kept so Rekey re-derives
-  // the seal key on the SAME media-type space under the new epoch.
-  uint8_t media_type_;
+  // The send track's per-sender stream ordinal (ADR-0035), kept so
+  // Rekey re-derives the seal key on the SAME stream under the new
+  // epoch.
+  uint8_t stream_index_;
   mutable std::mutex seal_mutex_;
 
   mutable std::atomic<int> refcount_{0};
@@ -177,19 +182,18 @@ class LakkoFrameDecryptor : public webrtc::FrameDecryptorInterface {
   // Construct from the same 32-byte per-call seed the encryptor
   // uses on every other participant. Returns nullptr on bad seed
   // length. The decryptor opens each frame through the call-key
-  // ring, which derives the per-sender key internally and, during a
-  // mid-call rekey overlap window, tries the previous epoch's key on
-  // an AEAD failure (ADR-0029).
+  // ring, which reads the composite KID from the frame's own SFrame
+  // header (ADR-0035) — the single per-stream discriminator that
+  // survives the SFU — derives that sender+stream's key internally,
+  // and, during a mid-call rekey overlap window, tries the previous
+  // epoch's key on an AEAD failure (ADR-0029).
   //
-  // `media_type` is the remote receive track's stream kind
-  // (`LAKKO_SFRAME_MEDIA_TYPE_AUDIO` / `_VIDEO`, ADR-0034). A receiver
-  // is bound to exactly one media type, so every open on this
-  // decryptor derives the per-sender key on that one space; the
-  // encryptor on the far side must have sealed on the same media type
-  // or the frame will not open (fail-closed).
+  // The decryptor takes NO stream argument: a single decryptor bound
+  // to one remote receive track opens every frame on it by reading the
+  // KID per frame, so audio and either video stream are each keyed
+  // correctly with no local media-type or MID signal.
   static LakkoFrameDecryptor* Create(const uint8_t* seed,
-                                     std::size_t seed_len,
-                                     uint8_t media_type);
+                                     std::size_t seed_len);
 
   ~LakkoFrameDecryptor() override;
 
@@ -221,14 +225,13 @@ class LakkoFrameDecryptor : public webrtc::FrameDecryptorInterface {
   rtc::RefCountReleaseStatus Release() const override;
 
  private:
-  LakkoFrameDecryptor(lakko_sframe_call_key_ring_t* ring, uint8_t media_type);
+  explicit LakkoFrameDecryptor(lakko_sframe_call_key_ring_t* ring);
 
   // Owned. The overlap keyer (current + previous call key); ADR-0029.
   // Its internal Rust `Mutex` makes open / rekey / prune thread-safe.
+  // The per-frame open reads the composite KID from the frame's header
+  // (ADR-0035), so the decryptor holds no per-stream state.
   lakko_sframe_call_key_ring_t* ring_;
-  // The receive track's stream kind (ADR-0034); every open derives the
-  // per-sender key on this one space.
-  uint8_t media_type_;
 
   mutable std::atomic<int> refcount_{0};
 };

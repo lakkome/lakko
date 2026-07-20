@@ -37,8 +37,8 @@
 
 import { loadWasm } from "../wasm";
 import type {
-  SFrameMediaType,
   SFrameOperation,
+  SFrameStreamIndex,
   SFrameTransformOptions,
 } from "./sframe-transform";
 import type { CallKeyRing, ParticipantKey } from "../../wasm/lakko_ffi_wasm";
@@ -71,10 +71,11 @@ interface RTCTransformEvent extends Event {
 interface TransformState {
   readonly operation: SFrameOperation;
   readonly localLeaf: number | undefined;
-  /** ADR-0034 media type of this transform's stream (`1 = audio`, `2 = video`),
-   *  fixed for the transform's lifetime and folded into every per-(leaf, media)
-   *  key derivation on both the seal and open paths. */
-  readonly mediaType: SFrameMediaType;
+  /** ADR-0035 stream index of this transform's stream (`0 = audio`,
+   *  `1 = video`), fixed for the transform's lifetime. Encrypt side only: the
+   *  worker composes the seal-side KID `(localLeaf << 8) | streamIndex` from it.
+   *  Unset on the decrypt side (the receiver reads the whole KID off the wire). */
+  readonly streamIndex: SFrameStreamIndex | undefined;
   readonly ring: CallKeyRing;
   /** Encrypt side only: the current epoch's seal key, re-derived on rekey. */
   sealKey: ParticipantKey | null;
@@ -117,28 +118,25 @@ function encryptStream(
   });
 }
 
-/** Build the decrypting `TransformStream`: read each frame's header KID
- *  and open through the ring's overlap fall-back (current then, during a
- *  rekey window, previous). */
+/** Build the decrypting `TransformStream`: read each frame's whole header
+ *  KID `(sender_leaf << 8) | stream_index` and open through the ring's overlap
+ *  fall-back (current then, during a rekey window, previous). */
 function decryptStream(
   state: TransformState,
-  unwrapSenderLeaf: (wire: Uint8Array) => number | null,
+  unwrapKid: (wire: Uint8Array) => bigint | null,
 ): TransformStream<EncodedFrame, EncodedFrame> {
   return new TransformStream<EncodedFrame, EncodedFrame>({
     transform(frame, controller): void {
       const wire = new Uint8Array(frame.data);
-      const senderLeaf = unwrapSenderLeaf(wire);
-      if (senderLeaf === null) return; // malformed header — drop
+      const kid = unwrapKid(wire);
+      if (kid === null) return; // malformed header — drop
       let plaintext: Uint8Array;
       try {
-        // (senderLeaf, mediaType) together select the per-(leaf, media) key —
-        // this transform's fixed media type keeps a leaf's audio and video
-        // frames on distinct keys (ADR-0034).
-        plaintext = state.ring.openFramedWithOverlap(
-          senderLeaf,
-          state.mediaType,
-          wire,
-        );
+        // The whole KID selects the per-(leaf, stream) key straight off the
+        // wire — no separate media discriminator. Each of a participant's
+        // streams (audio, video, …) carries a distinct KID, so their keys
+        // never collide (ADR-0035).
+        plaintext = state.ring.openFramedWithOverlap(kid, wire);
       } catch {
         // Wrong key / tampered / replayed counter, under BOTH the current
         // and the overlap-window previous key — drop, never forward
@@ -162,7 +160,7 @@ async function runTransform(
   const state: TransformState = {
     operation: opts.operation,
     localLeaf: opts.localLeaf,
-    mediaType: opts.mediaType,
+    streamIndex: opts.streamIndex,
     ring,
     sealKey: null,
   };
@@ -175,7 +173,10 @@ async function runTransform(
       return;
     }
     try {
-      state.sealKey = ring.participantKey(opts.localLeaf, opts.mediaType);
+      // Compose the seal-side KID `(localLeaf << 8) | streamIndex` (audio -> 0,
+      // video -> 1). The ring's `participantKey` does the composition; a stream
+      // index > 255 fails closed FFI-side (ADR-0035).
+      state.sealKey = ring.participantKey(opts.localLeaf, opts.streamIndex ?? 0);
     } catch {
       return; // derivation failed — refuse rather than emit plaintext
     }
@@ -183,7 +184,11 @@ async function runTransform(
   } else {
     stream = decryptStream(state, (wire) => {
       try {
-        return wasm.unwrapSframeFrame(wire).senderLeaf;
+        // The FFI `unwrapSframeFrame` reads the whole SFrame header KID; its
+        // `senderLeaf` getter now carries the full composite KID
+        // `(sender_leaf << 8) | stream_index` (ADR-0035), which the ring uses to
+        // derive the per-stream key. Cross to a BigInt for the u64 FFI param.
+        return BigInt(wasm.unwrapSframeFrame(wire).senderLeaf);
       } catch {
         return null;
       }
@@ -234,7 +239,10 @@ addEventListener("message", (event: MessageEvent): void => {
   }
   if (state.operation === "encrypt" && state.localLeaf !== undefined) {
     try {
-      state.sealKey = state.ring.participantKey(state.localLeaf, state.mediaType);
+      state.sealKey = state.ring.participantKey(
+        state.localLeaf,
+        state.streamIndex ?? 0,
+      );
     } catch {
       state.sealKey = null; // refuse to seal under a bad key rather than plaintext
     }

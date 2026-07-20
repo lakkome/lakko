@@ -85,26 +85,6 @@ NSString * const kDecryptorAssociationKey = @"lakko.sframe.decryptor.wrapper";
 using SetFrameEncryptorIMP = void (*)(id, SEL, void *);
 using SetFrameDecryptorIMP = void (*)(id, SEL, void *);
 
-// Map the Obj-C `LakkoSFrameMediaType` enum to the flat
-// `lakko-sframe-native` C ABI `media_type` byte (ADR-0034). The
-// enum's raw values are pinned to the C ABI constants; anything
-// outside the known set maps to `0` (reserved), which
-// `LakkoFrameEncryptor::Create` / `LakkoFrameDecryptor::Create`
-// refuse fail-closed (nullptr → BridgeCreateFailed) rather than
-// silently deriving a key on the wrong media-type space
-// (invariant #4). The `LAKKO_SFRAME_MEDIA_TYPE_*` constants come in
-// via `sframe-bridge.h`'s `extern "C"` include of the generated
-// `lakko_sframe_native.h`.
-uint8_t CAbiMediaType(LakkoSFrameMediaType mediaType) {
-    switch (mediaType) {
-        case LakkoSFrameMediaTypeAudio:
-            return LAKKO_SFRAME_MEDIA_TYPE_AUDIO;
-        case LakkoSFrameMediaTypeVideo:
-            return LAKKO_SFRAME_MEDIA_TYPE_VIDEO;
-    }
-    return 0;  // reserved — Create fail-closes (invariant #4)
-}
-
 }  // namespace
 
 // MARK: - Obj-C wrapper for the C++ encryptor / decryptor.
@@ -195,7 +175,7 @@ uint8_t CAbiMediaType(LakkoSFrameMediaType mediaType) {
                                 (RTCRtpSender * _Nullable)sender
                                                   seed:(NSData *_Nullable)seed
                                              localLeaf:(uint32_t)localLeaf
-                                             mediaType:(LakkoSFrameMediaType)mediaType {
+                                           streamIndex:(uint8_t)streamIndex {
     if (sender == nil) {
         return LakkoSFrameAttachStatusNullArgument;
     }
@@ -211,7 +191,7 @@ uint8_t CAbiMediaType(LakkoSFrameMediaType mediaType) {
             static_cast<const uint8_t *>(seed.bytes),
             static_cast<size_t>(seed.length),
             localLeaf,
-            CAbiMediaType(mediaType));
+            streamIndex);
     if (enc == nullptr) {
         return LakkoSFrameAttachStatusBridgeCreateFailed;
     }
@@ -262,8 +242,7 @@ uint8_t CAbiMediaType(LakkoSFrameMediaType mediaType) {
 
 + (LakkoSFrameAttachStatus)attachDecryptorToReceiver:
                                 (RTCRtpReceiver * _Nullable)receiver
-                                                    seed:(NSData *_Nullable)seed
-                                               mediaType:(LakkoSFrameMediaType)mediaType {
+                                                    seed:(NSData *_Nullable)seed {
     if (receiver == nil) {
         return LakkoSFrameAttachStatusNullArgument;
     }
@@ -277,8 +256,7 @@ uint8_t CAbiMediaType(LakkoSFrameMediaType mediaType) {
     lakko::sframe::LakkoFrameDecryptor *dec =
         lakko::sframe::LakkoFrameDecryptor::Create(
             static_cast<const uint8_t *>(seed.bytes),
-            static_cast<size_t>(seed.length),
-            CAbiMediaType(mediaType));
+            static_cast<size_t>(seed.length));
     if (dec == nullptr) {
         return LakkoSFrameAttachStatusBridgeCreateFailed;
     }

@@ -8,7 +8,6 @@ import org.junit.Assert.assertEquals
 import org.junit.Test
 import org.junit.runner.RunWith
 import uniffi.lakko_ffi_uniffi.CallKey
-import uniffi.lakko_ffi_uniffi.FfiMediaType
 
 /**
  * G-26 cross-stack SFrame interop — the Android leg.
@@ -17,12 +16,13 @@ import uniffi.lakko_ffi_uniffi.FfiMediaType
  * (`crates/lakko-calls/src/sframe.rs::golden_vector_*`), the wasm/web
  * (`apps/web/src/calls/sframe-golden.test.ts`), and the iOS FFI
  * (`apps/ios/LakkoTests/SFrameGoldenTests.swift`) pin: sealing
- * `(seed=[0x42;32], leaf=3, plaintext="lakko sframe golden vector v1")` on a
- * fresh `ParticipantKey` (counter 0) MUST produce these EXACT bytes via the
- * UniFFI `sealFramed`, and `openFramed` MUST recover the plaintext. Because all
- * four stacks pin the identical wire, a frame sealed on any one opens on any
- * other (the cross-runtime half of G-26), no live SFU needed. Any drift in the
- * Android SFrame stack fails here.
+ * `(seed=[0x42;32], leaf=3, stream_index=0 ⇒ KID=0x0300,
+ * plaintext="lakko sframe golden vector v1")` on a fresh `ParticipantKey`
+ * (counter 0) MUST produce these EXACT bytes via the UniFFI `sealFramed`, and
+ * `openFramed` MUST recover the plaintext. Because all four stacks pin the
+ * identical wire, a frame sealed on any one opens on any other (the
+ * cross-runtime half of G-26), no live SFU needed. Any drift in the Android
+ * SFrame stack fails here.
  *
  * Instrumented (runs on a device/emulator) because the UniFFI core is backed by
  * the native `liblakko_ffi_uniffi` library.
@@ -32,21 +32,21 @@ class SframeGoldenTest {
 
     private val goldenSeed = ByteArray(32) { 0x42 }
     private val goldenLeaf = 3u
-    private val goldenMedia = FfiMediaType.AUDIO
+    private val goldenStreamIndex: UByte = 0u
     private val goldenPlaintext = "lakko sframe golden vector v1"
     private val goldenWireHex =
-        "31093c4f19a3b815c0a17a8ad09d2df18c6971987eb1c214484e9ebcc4f92b4c04e5c80bc145a9f23e1c60e2faa4"
+        "910300fe2c2af65799594a4c693ff4c9e0d49b0565756ddd7299b0945fc8adb1c9c12fced57c6937f372e6b94bdae40a"
 
     @Test
     fun sealsToTheCanonicalCrossStackWire() {
-        val pk = CallKey.fromSeed(goldenSeed).participantKey(goldenLeaf, goldenMedia)
+        val pk = CallKey.fromSeed(goldenSeed).participantKey(goldenLeaf, goldenStreamIndex)
         val wire = pk.sealFramed(goldenPlaintext.toByteArray(Charsets.UTF_8))
         assertEquals(goldenWireHex, wire.toHex())
     }
 
     @Test
     fun opensTheCanonicalWireToThePlaintext() {
-        val pk = CallKey.fromSeed(goldenSeed).participantKey(goldenLeaf, goldenMedia)
+        val pk = CallKey.fromSeed(goldenSeed).participantKey(goldenLeaf, goldenStreamIndex)
         val opened = pk.openFramed(goldenWireHex.hexToBytes())
         assertEquals(goldenPlaintext, String(opened, Charsets.UTF_8))
     }

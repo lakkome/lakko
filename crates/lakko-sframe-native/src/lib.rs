@@ -127,45 +127,6 @@ pub enum LakkoSframeStatus {
     /// Parsed `ctr` exceeds `u32::MAX`. Same reasoning as
     /// [`Self::KidOverflow`].
     CtrOverflow = 8,
-    /// The `media_type` byte was not a known stream kind
-    /// ([`LAKKO_SFRAME_MEDIA_TYPE_AUDIO`] or
-    /// [`LAKKO_SFRAME_MEDIA_TYPE_VIDEO`]). The C ABI refuses rather
-    /// than silently defaulting to audio — a mis-wired shim must not
-    /// quietly derive a key on the wrong media-type space (ADR-0034).
-    BadMediaType = 9,
-}
-
-// ---------------------------------------------------------------------
-// Media-type convention (ADR-0034)
-// ---------------------------------------------------------------------
-
-/// C ABI `media_type` byte — audio stream. Matches the core HKDF tag
-/// (`lakko_calls::sframe::MediaType::Audio` → `0x01`), so the value
-/// crossing the FFI equals the value mixed into the per-participant
-/// key derivation. `0x00` is reserved (never a valid stream kind).
-pub const LAKKO_SFRAME_MEDIA_TYPE_AUDIO: u8 = 1;
-
-/// C ABI `media_type` byte — video stream. Matches the core HKDF tag
-/// (`lakko_calls::sframe::MediaType::Video` → `0x02`).
-pub const LAKKO_SFRAME_MEDIA_TYPE_VIDEO: u8 = 2;
-
-/// Map the C ABI `media_type` byte to the core [`core::MediaType`].
-///
-/// The audio and video streams of one participant derive on distinct
-/// key + nonce-salt spaces (ADR-0034), so the caller — a
-/// `FrameEncryptor` bound to one local send track, or a
-/// `FrameDecryptor` bound to one remote receive track — passes the
-/// stream kind at key-derivation time. An unknown byte is rejected
-/// (fail-closed, invariant #4): there is no silent default, because
-/// picking the wrong space would derive a key that cannot open the
-/// peer's frames — a call that silently fails rather than one that
-/// refuses loudly.
-fn media_type_from_u8(raw: u8) -> Option<core::MediaType> {
-    match raw {
-        LAKKO_SFRAME_MEDIA_TYPE_AUDIO => Some(core::MediaType::Audio),
-        LAKKO_SFRAME_MEDIA_TYPE_VIDEO => Some(core::MediaType::Video),
-        _ => None,
-    }
 }
 
 // ---------------------------------------------------------------------
@@ -264,12 +225,19 @@ pub unsafe extern "C" fn lakko_sframe_call_key_free(call_key: *mut CallKey) {
 // ParticipantKey lifecycle
 // ---------------------------------------------------------------------
 
-/// Derive the [`ParticipantKey`] for `sender_leaf` on the
-/// `media_type` stream from `call_key`. `media_type` is
-/// [`LAKKO_SFRAME_MEDIA_TYPE_AUDIO`] or
-/// [`LAKKO_SFRAME_MEDIA_TYPE_VIDEO`] (ADR-0034) — an encryptor passes
-/// its local send track's kind, a decryptor its remote receive
-/// track's; an unknown value returns [`LakkoSframeStatus::BadMediaType`].
+/// Derive the seal-side [`ParticipantKey`] for `sender_leaf`'s
+/// `stream_index` stream from `call_key` (ADR-0035). The KID is
+/// composed `(sender_leaf << 8) | stream_index` and folded whole into
+/// the HKDF, so every one of a participant's concurrent streams
+/// (`0` = audio, `1` = first video, `2` = second video / screen-share,
+/// …) keys into a disjoint `(key, nonce_salt)` space. This is the
+/// ENCRYPTOR path — a `FrameEncryptor` bound to one local send track
+/// passes that track's stream ordinal; the DECRYPTOR reads the KID
+/// from each frame's header instead (see
+/// [`lakko_sframe_call_key_ring_open_framed_with_overlap`]) and needs
+/// no stream argument. A `stream_index` is a `u8`, so every value is
+/// valid (`0..=255` fits the KID's 8-bit stream field) — there is no
+/// fail-closed rejection here.
 ///
 /// # Safety
 ///
@@ -281,19 +249,19 @@ pub unsafe extern "C" fn lakko_sframe_call_key_free(call_key: *mut CallKey) {
 pub unsafe extern "C" fn lakko_sframe_participant_key_new(
     call_key: *const CallKey,
     sender_leaf: u32,
-    media_type: u8,
+    stream_index: u8,
     out_participant_key: *mut *mut ParticipantKey,
 ) -> LakkoSframeStatus {
     if call_key.is_null() || out_participant_key.is_null() {
         return LakkoSframeStatus::NullPointer;
     }
-    let Some(media_type) = media_type_from_u8(media_type) else {
-        return LakkoSframeStatus::BadMediaType;
-    };
     // SAFETY: caller passed a live pointer from `_call_key_new`; we
-    // borrow it for the duration of `participant_key`.
+    // borrow it for the duration of `participant_key_for`.
     let ck = unsafe { &*call_key };
-    let Ok(pk) = ck.inner.participant_key(sender_leaf, media_type) else {
+    let Ok(pk) = ck
+        .inner
+        .participant_key_for(sender_leaf, u32::from(stream_index))
+    else {
         return LakkoSframeStatus::KeyDerivation;
     };
     let boxed = Box::new(ParticipantKey { inner: pk });
@@ -726,14 +694,14 @@ pub unsafe extern "C" fn lakko_sframe_call_key_ring_prune(ring: *const CallKeyRi
     lock_ring(ring).prune_expired(now_ms);
 }
 
-/// Derive the seal-side [`ParticipantKey`] for `sender_leaf` on the
-/// `media_type` stream ([`LAKKO_SFRAME_MEDIA_TYPE_AUDIO`] /
-/// [`LAKKO_SFRAME_MEDIA_TYPE_VIDEO`], ADR-0034) from the ring's
-/// CURRENT epoch. The bridge re-fetches this after a rekey to seal
-/// under the new key. On success `*out_pk` is a freshly-allocated
-/// pointer the caller owns (free via
-/// [`lakko_sframe_participant_key_free`]); an unknown `media_type`
-/// returns [`LakkoSframeStatus::BadMediaType`].
+/// Derive the seal-side [`ParticipantKey`] for `sender_leaf`'s
+/// `stream_index` stream (ADR-0035: KID = `(sender_leaf << 8) |
+/// stream_index`) from the ring's CURRENT epoch. The bridge re-fetches
+/// this after a rekey to seal under the new key. On success `*out_pk`
+/// is a freshly-allocated pointer the caller owns (free via
+/// [`lakko_sframe_participant_key_free`]). A `stream_index` is a `u8`,
+/// so every value composes a valid KID — there is no fail-closed
+/// rejection here.
 ///
 /// # Safety
 ///
@@ -743,18 +711,20 @@ pub unsafe extern "C" fn lakko_sframe_call_key_ring_prune(ring: *const CallKeyRi
 pub unsafe extern "C" fn lakko_sframe_call_key_ring_participant_key(
     ring: *const CallKeyRing,
     sender_leaf: u32,
-    media_type: u8,
+    stream_index: u8,
     out_pk: *mut *mut ParticipantKey,
 ) -> LakkoSframeStatus {
     if ring.is_null() || out_pk.is_null() {
         return LakkoSframeStatus::NullPointer;
     }
-    let Some(media_type) = media_type_from_u8(media_type) else {
-        return LakkoSframeStatus::BadMediaType;
+    // Compose the KID from `(leaf, stream)`; a `u8` stream always fits the
+    // KID's 8-bit field, so this never overflows.
+    let Ok(kid) = SframeHeader::kid_for(sender_leaf, u32::from(stream_index)) else {
+        return LakkoSframeStatus::KeyDerivation;
     };
     // SAFETY: caller upheld the live-pointer contract.
     let ring = unsafe { &*ring };
-    let Ok(pk) = lock_ring(ring).participant_key(sender_leaf, media_type) else {
+    let Ok(pk) = lock_ring(ring).participant_key(kid) else {
         return LakkoSframeStatus::KeyDerivation;
     };
     let boxed = Box::new(ParticipantKey { inner: pk });
@@ -765,16 +735,20 @@ pub unsafe extern "C" fn lakko_sframe_call_key_ring_participant_key(
     LakkoSframeStatus::Ok
 }
 
-/// Open an RFC 9605 framed wire frame on the `media_type` stream
-/// ([`LAKKO_SFRAME_MEDIA_TYPE_AUDIO`] / [`LAKKO_SFRAME_MEDIA_TYPE_VIDEO`],
-/// ADR-0034) with the overlap fall-back: try the current epoch's key
-/// for `sender_leaf`, and on an AEAD failure fall back to the retained
-/// previous key while its window is live (ADR-0029). Writes the
-/// recovered plaintext into a freshly-allocated buffer the caller MUST
-/// free via [`lakko_sframe_buffer_free`]. An unknown `media_type`
-/// returns [`LakkoSframeStatus::BadMediaType`]; any other failure
-/// (malformed header, or AEAD failure under both keys) collapses to
-/// [`LakkoSframeStatus::AeadFailed`] — the shim drops the frame.
+/// Open an RFC 9605 framed wire frame with the overlap fall-back
+/// (ADR-0029, ADR-0035). The KID — `(sender_leaf << 8) | stream_index`
+/// — is read from the frame's own SFrame header, so the DECRYPTOR
+/// needs NO leaf / stream argument: the header is the single
+/// per-stream discriminator that survives an SFU (the SFU forwards it
+/// verbatim, invariant #2), and the ring derives the sender's per-KID
+/// key from it. The current epoch's key is tried first, and on an AEAD
+/// failure the retained previous key is tried while its overlap window
+/// is live. Writes the recovered plaintext into a freshly-allocated
+/// buffer the caller MUST free via [`lakko_sframe_buffer_free`]. A
+/// malformed header returns [`LakkoSframeStatus::WireParse`]; an AEAD
+/// failure under both keys collapses to
+/// [`LakkoSframeStatus::AeadFailed`] — the shim drops the frame on
+/// either.
 ///
 /// # Safety
 ///
@@ -784,8 +758,6 @@ pub unsafe extern "C" fn lakko_sframe_call_key_ring_participant_key(
 #[no_mangle]
 pub unsafe extern "C" fn lakko_sframe_call_key_ring_open_framed_with_overlap(
     ring: *const CallKeyRing,
-    sender_leaf: u32,
-    media_type: u8,
     wire_ptr: *const u8,
     wire_len: usize,
     out_plaintext_ptr: *mut *mut u8,
@@ -797,19 +769,20 @@ pub unsafe extern "C" fn lakko_sframe_call_key_ring_open_framed_with_overlap(
     if wire_ptr.is_null() && wire_len != 0 {
         return LakkoSframeStatus::NullPointer;
     }
-    let Some(media_type) = media_type_from_u8(media_type) else {
-        return LakkoSframeStatus::BadMediaType;
-    };
     // SAFETY: pointer + length guarded above.
     let wire = if wire_len == 0 {
         &[]
     } else {
         unsafe { std::slice::from_raw_parts(wire_ptr, wire_len) }
     };
+    // Read the composite KID from the frame's own header — the receiver
+    // derives the sender's per-stream key from it (ADR-0035).
+    let Ok((header, _consumed)) = SframeHeader::decode(wire) else {
+        return LakkoSframeStatus::WireParse;
+    };
     // SAFETY: caller upheld the live-pointer contract.
     let ring = unsafe { &*ring };
-    let Ok(plaintext) = lock_ring(ring).try_open_framed_with_overlap(sender_leaf, media_type, wire)
-    else {
+    let Ok(plaintext) = lock_ring(ring).try_open_framed_with_overlap(header.kid, wire) else {
         return LakkoSframeStatus::AeadFailed;
     };
     let (ptr, len) = vec_into_raw(plaintext);
@@ -1029,14 +1002,8 @@ mod tests {
         );
         let mut pk_ptr: *mut ParticipantKey = std::ptr::null_mut();
         assert_eq!(
-            unsafe {
-                lakko_sframe_participant_key_new(
-                    ck_ptr,
-                    7,
-                    LAKKO_SFRAME_MEDIA_TYPE_AUDIO,
-                    &mut pk_ptr,
-                )
-            },
+            // stream_index 0 = audio (ADR-0035).
+            unsafe { lakko_sframe_participant_key_new(ck_ptr, 7, 0, &mut pk_ptr) },
             LakkoSframeStatus::Ok
         );
 
@@ -1106,22 +1073,12 @@ mod tests {
             unsafe { lakko_sframe_call_key_new(seed.as_ptr(), seed.len(), &mut ck_ptr) },
             LakkoSframeStatus::Ok
         );
-        // Sender + receiver keys, both derived for leaf 7 on the audio stream.
+        // Sender + receiver keys, both derived for leaf 7 on stream 0 (audio).
         let mut sender_ptr: *mut ParticipantKey = std::ptr::null_mut();
         let mut receiver_ptr: *mut ParticipantKey = std::ptr::null_mut();
         unsafe {
-            lakko_sframe_participant_key_new(
-                ck_ptr,
-                7,
-                LAKKO_SFRAME_MEDIA_TYPE_AUDIO,
-                &mut sender_ptr,
-            );
-            lakko_sframe_participant_key_new(
-                ck_ptr,
-                7,
-                LAKKO_SFRAME_MEDIA_TYPE_AUDIO,
-                &mut receiver_ptr,
-            );
+            lakko_sframe_participant_key_new(ck_ptr, 7, 0, &mut sender_ptr);
+            lakko_sframe_participant_key_new(ck_ptr, 7, 0, &mut receiver_ptr);
         }
 
         // seal_framed → header || ciphertext (no AAD argument).
@@ -1182,133 +1139,105 @@ mod tests {
         }
     }
 
-    /// An unknown `media_type` byte is refused fail-closed
-    /// (`BadMediaType`) at every derivation site — the C ABI never
-    /// silently defaults to audio (ADR-0034, invariant #4).
+    /// Three streams of one leaf — audio (stream 0) + two video streams
+    /// (stream 1 camera, stream 2 screen-share) — derive DISTINCT key
+    /// spaces (ADR-0035, mirroring the core's
+    /// `three_streams_of_one_leaf_get_distinct_keys_and_nonces`). A frame
+    /// sealed under one stream's key does NOT open under either of the
+    /// other two for the same seed + leaf, and the two VIDEO streams are
+    /// pairwise-distinct too — the pair the ADR-0034 per-media-TYPE tag
+    /// re-collided. So the `stream_index` byte genuinely reaches the HKDF
+    /// via the full composite KID, it is not decorative.
     #[test]
-    fn media_type_unknown_byte_is_refused() {
-        let seed = fixture_seed();
-        let mut ck_ptr: *mut CallKey = std::ptr::null_mut();
-        assert_eq!(
-            unsafe { lakko_sframe_call_key_new(seed.as_ptr(), seed.len(), &mut ck_ptr) },
-            LakkoSframeStatus::Ok
-        );
-        let mut pk_ptr: *mut ParticipantKey = std::ptr::null_mut();
-        // 0x00 is reserved; 0x03 is not yet a stream kind — both refused.
-        for bad in [0_u8, 3, 255] {
-            assert_eq!(
-                unsafe { lakko_sframe_participant_key_new(ck_ptr, 7, bad, &mut pk_ptr) },
-                LakkoSframeStatus::BadMediaType
-            );
-            assert!(pk_ptr.is_null(), "out-ptr untouched on BadMediaType");
-        }
-
-        let mut ring: *mut CallKeyRing = std::ptr::null_mut();
-        assert_eq!(
-            unsafe { lakko_sframe_call_key_ring_new(seed.as_ptr(), seed.len(), &mut ring) },
-            LakkoSframeStatus::Ok
-        );
-        assert_eq!(
-            unsafe { lakko_sframe_call_key_ring_participant_key(ring, 7, 0, &mut pk_ptr) },
-            LakkoSframeStatus::BadMediaType
-        );
-        let mut pt_ptr: *mut u8 = std::ptr::null_mut();
-        let mut pt_len: usize = 0;
-        assert_eq!(
-            unsafe {
-                lakko_sframe_call_key_ring_open_framed_with_overlap(
-                    ring,
-                    7,
-                    9,
-                    [1_u8, 2, 3].as_ptr(),
-                    3,
-                    &mut pt_ptr,
-                    &mut pt_len,
-                )
-            },
-            LakkoSframeStatus::BadMediaType
-        );
-
-        unsafe {
-            lakko_sframe_call_key_ring_free(ring);
-            lakko_sframe_call_key_free(ck_ptr);
-        }
-    }
-
-    /// The audio and video streams derive distinct key spaces (ADR-0034):
-    /// a frame sealed under the audio participant key does NOT open under
-    /// the video key for the same seed + leaf — so the `media_type` byte
-    /// genuinely reaches the HKDF, it is not decorative.
-    #[test]
-    fn audio_and_video_keys_are_distinct() {
+    fn audio_and_two_video_streams_are_distinct() {
         let seed = fixture_seed();
         let plaintext = b"stream-scoped media".to_vec();
+        let leaf = 4;
 
         let mut ck_ptr: *mut CallKey = std::ptr::null_mut();
         assert_eq!(
             unsafe { lakko_sframe_call_key_new(seed.as_ptr(), seed.len(), &mut ck_ptr) },
             LakkoSframeStatus::Ok
         );
-        let mut audio_ptr: *mut ParticipantKey = std::ptr::null_mut();
-        let mut video_ptr: *mut ParticipantKey = std::ptr::null_mut();
-        unsafe {
-            lakko_sframe_participant_key_new(
-                ck_ptr,
-                4,
-                LAKKO_SFRAME_MEDIA_TYPE_AUDIO,
-                &mut audio_ptr,
-            );
-            lakko_sframe_participant_key_new(
-                ck_ptr,
-                4,
-                LAKKO_SFRAME_MEDIA_TYPE_VIDEO,
-                &mut video_ptr,
-            );
-        }
 
-        // Seal under the audio key.
-        let mut wire_ptr: *mut u8 = std::ptr::null_mut();
-        let mut wire_len: usize = 0;
-        assert_eq!(
+        // Seal the same plaintext under each of the three streams.
+        let seal_on_stream = |stream_index: u8| -> Vec<u8> {
+            let mut pk: *mut ParticipantKey = std::ptr::null_mut();
+            assert_eq!(
+                unsafe { lakko_sframe_participant_key_new(ck_ptr, leaf, stream_index, &mut pk) },
+                LakkoSframeStatus::Ok
+            );
+            let mut wire_ptr: *mut u8 = std::ptr::null_mut();
+            let mut wire_len: usize = 0;
+            assert_eq!(
+                unsafe {
+                    lakko_sframe_seal_framed(
+                        pk,
+                        plaintext.as_ptr(),
+                        plaintext.len(),
+                        &mut wire_ptr,
+                        &mut wire_len,
+                    )
+                },
+                LakkoSframeStatus::Ok
+            );
+            let wire = unsafe { std::slice::from_raw_parts(wire_ptr, wire_len) }.to_vec();
             unsafe {
-                lakko_sframe_seal_framed(
-                    audio_ptr,
-                    plaintext.as_ptr(),
-                    plaintext.len(),
-                    &mut wire_ptr,
-                    &mut wire_len,
-                )
-            },
-            LakkoSframeStatus::Ok
+                lakko_sframe_buffer_free(wire_ptr, wire_len);
+                lakko_sframe_participant_key_free(pk);
+            }
+            wire
+        };
+        let audio_wire = seal_on_stream(0);
+        let cam_wire = seal_on_stream(1);
+        let screen_wire = seal_on_stream(2);
+
+        // The three wires are pairwise distinct — same plaintext at the same
+        // counter (first frame on each fresh key) MUST NOT collide, proving no
+        // two streams share a `(key, nonce)` pair.
+        assert_ne!(audio_wire, cam_wire);
+        assert_ne!(audio_wire, screen_wire);
+        assert_ne!(
+            cam_wire, screen_wire,
+            "two video streams from one leaf must not seal identically (the ADR-0034 gap)"
         );
-        let wire = unsafe { std::slice::from_raw_parts(wire_ptr, wire_len) }.to_vec();
 
-        // The video key (same seed + leaf, different media type) must NOT open it.
-        let mut bad_ptr: *mut u8 = std::ptr::null_mut();
-        let mut bad_len: usize = 0;
+        // A key for stream 2 (screen) must NOT open a stream-1 (camera) frame,
+        // and vice versa — cross-stream isolation, the exact pair ADR-0034
+        // missed.
+        let open_on_stream = |stream_index: u8, wire: &[u8]| -> LakkoSframeStatus {
+            let mut pk: *mut ParticipantKey = std::ptr::null_mut();
+            assert_eq!(
+                unsafe { lakko_sframe_participant_key_new(ck_ptr, leaf, stream_index, &mut pk) },
+                LakkoSframeStatus::Ok
+            );
+            let mut pt_ptr: *mut u8 = std::ptr::null_mut();
+            let mut pt_len: usize = 0;
+            let status = unsafe {
+                lakko_sframe_open_framed(pk, wire.as_ptr(), wire.len(), &mut pt_ptr, &mut pt_len)
+            };
+            if status == LakkoSframeStatus::Ok {
+                unsafe { lakko_sframe_buffer_free(pt_ptr, pt_len) };
+            }
+            unsafe { lakko_sframe_participant_key_free(pk) };
+            status
+        };
+        assert_eq!(open_on_stream(2, &cam_wire), LakkoSframeStatus::AeadFailed);
         assert_eq!(
-            unsafe {
-                lakko_sframe_open_framed(
-                    video_ptr,
-                    wire.as_ptr(),
-                    wire.len(),
-                    &mut bad_ptr,
-                    &mut bad_len,
-                )
-            },
+            open_on_stream(1, &screen_wire),
+            LakkoSframeStatus::AeadFailed
+        );
+        assert_eq!(
+            open_on_stream(1, &audio_wire),
             LakkoSframeStatus::AeadFailed
         );
 
-        // A second audio key opens it (same media-type space round-trips).
+        // A matching stream-0 key opens the audio frame (same stream round-trips).
         let mut audio_rx: *mut ParticipantKey = std::ptr::null_mut();
         unsafe {
-            lakko_sframe_participant_key_new(
-                ck_ptr,
-                4,
-                LAKKO_SFRAME_MEDIA_TYPE_AUDIO,
-                &mut audio_rx,
-            );
+            lakko_sframe_participant_key_new(ck_ptr, leaf, 0, &mut audio_rx);
         }
+        let wire = audio_wire;
         let mut pt_ptr: *mut u8 = std::ptr::null_mut();
         let mut pt_len: usize = 0;
         assert_eq!(
@@ -1329,27 +1258,18 @@ mod tests {
         );
 
         unsafe {
-            lakko_sframe_buffer_free(wire_ptr, wire_len);
             lakko_sframe_buffer_free(pt_ptr, pt_len);
-            lakko_sframe_participant_key_free(audio_ptr);
-            lakko_sframe_participant_key_free(video_ptr);
             lakko_sframe_participant_key_free(audio_rx);
             lakko_sframe_call_key_free(ck_ptr);
         }
     }
 
-    /// Seal `plaintext` for `leaf` through the ring's current participant key.
+    /// Seal `plaintext` for `leaf` through the ring's current participant key
+    /// (stream 0 = audio).
     fn seal_via_ring(ring: *mut CallKeyRing, leaf: u32, plaintext: &[u8]) -> Vec<u8> {
         let mut pk: *mut ParticipantKey = std::ptr::null_mut();
         assert_eq!(
-            unsafe {
-                lakko_sframe_call_key_ring_participant_key(
-                    ring,
-                    leaf,
-                    LAKKO_SFRAME_MEDIA_TYPE_AUDIO,
-                    &mut pk,
-                )
-            },
+            unsafe { lakko_sframe_call_key_ring_participant_key(ring, leaf, 0, &mut pk) },
             LakkoSframeStatus::Ok
         );
         let mut wire_ptr: *mut u8 = std::ptr::null_mut();
@@ -1374,16 +1294,16 @@ mod tests {
         wire
     }
 
-    /// Open `wire` for `leaf` through the ring's overlap fall-back. `None` on
-    /// any non-`Ok` status (the frame would be dropped).
-    fn open_via_ring(ring: *mut CallKeyRing, leaf: u32, wire: &[u8]) -> Option<Vec<u8>> {
+    /// Open `wire` through the ring's overlap fall-back — the KID (and thus the
+    /// sender leaf + stream) is read from the frame's own header (ADR-0035), so
+    /// no leaf / stream argument is passed. `None` on any non-`Ok` status (the
+    /// frame would be dropped).
+    fn open_via_ring(ring: *mut CallKeyRing, wire: &[u8]) -> Option<Vec<u8>> {
         let mut pt_ptr: *mut u8 = std::ptr::null_mut();
         let mut pt_len: usize = 0;
         let status = unsafe {
             lakko_sframe_call_key_ring_open_framed_with_overlap(
                 ring,
-                leaf,
-                LAKKO_SFRAME_MEDIA_TYPE_AUDIO,
                 wire.as_ptr(),
                 wire.len(),
                 &mut pt_ptr,
@@ -1429,22 +1349,13 @@ mod tests {
         let new_wire = seal_via_ring(ring, leaf, b"new-epoch");
 
         // Both open through the ring's overlap fall-back inside the window.
-        assert_eq!(
-            open_via_ring(ring, leaf, &old_wire),
-            Some(b"old-epoch".to_vec())
-        );
-        assert_eq!(
-            open_via_ring(ring, leaf, &new_wire),
-            Some(b"new-epoch".to_vec())
-        );
+        assert_eq!(open_via_ring(ring, &old_wire), Some(b"old-epoch".to_vec()));
+        assert_eq!(open_via_ring(ring, &new_wire), Some(b"new-epoch".to_vec()));
 
         // Prune past the window → the old frame no longer opens; the new one does.
         unsafe { lakko_sframe_call_key_ring_prune(ring, 2_000) };
-        assert_eq!(open_via_ring(ring, leaf, &old_wire), None);
-        assert_eq!(
-            open_via_ring(ring, leaf, &new_wire),
-            Some(b"new-epoch".to_vec())
-        );
+        assert_eq!(open_via_ring(ring, &old_wire), None);
+        assert_eq!(open_via_ring(ring, &new_wire), Some(b"new-epoch".to_vec()));
 
         // A wrong-length seed is refused.
         let mut bad: *mut CallKeyRing = std::ptr::null_mut();
@@ -1477,7 +1388,8 @@ mod tests {
         }
         let mut pk_ptr: *mut ParticipantKey = std::ptr::null_mut();
         unsafe {
-            lakko_sframe_participant_key_new(ck_ptr, 9, LAKKO_SFRAME_MEDIA_TYPE_AUDIO, &mut pk_ptr);
+            // stream 0 = audio (ADR-0035).
+            lakko_sframe_participant_key_new(ck_ptr, 9, 0, &mut pk_ptr);
         }
         assert_eq!(
             unsafe { lakko_sframe_participant_key_sender_leaf(pk_ptr) },

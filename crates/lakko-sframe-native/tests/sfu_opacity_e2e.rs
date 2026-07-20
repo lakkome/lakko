@@ -56,7 +56,7 @@
 
 use std::collections::HashMap;
 
-use lakko_calls::sframe::{CallKey, MediaType, ParticipantKey, CALL_KEY_LEN};
+use lakko_calls::sframe::{CallKey, ParticipantKey, CALL_KEY_LEN};
 use lakko_calls::SframeHeader;
 
 /// Build a deterministic per-call seed. Mirror of how
@@ -68,11 +68,12 @@ fn deterministic_seed(byte: u8) -> [u8; CALL_KEY_LEN] {
 
 /// Encrypt a frame the way the N-3 LakkoFrameEncryptor::Encrypt
 /// path does: seal + wrap_frame. Returns the wire bytes the SFU
-/// would forward.
+/// would forward. The header carries the participant key's FULL
+/// composite KID `(sender_leaf << 8) | stream_index` (ADR-0035).
 fn encrypt_frame(pk: &mut ParticipantKey, aad: &[u8], plaintext: &[u8]) -> Vec<u8> {
     let (counter, ciphertext) = pk.seal(aad, plaintext).expect("seal");
     let header = SframeHeader {
-        kid: u64::from(pk.sender_leaf()),
+        kid: pk.kid(),
         ctr: u64::from(counter),
     };
     let mut wire = header.encode();
@@ -81,27 +82,28 @@ fn encrypt_frame(pk: &mut ParticipantKey, aad: &[u8], plaintext: &[u8]) -> Vec<u
 }
 
 /// Decrypt the SFU-forwarded wire frame: parse the SFrame
-/// header, look up (or derive) the per-sender ParticipantKey,
+/// header, look up (or derive) the per-KID ParticipantKey,
 /// open the AEAD payload. Returns `Err(())` on any failure —
 /// real shim collapses every error to `kFailedToDecrypt` (N-3
-/// LakkoFrameDecryptor::Decrypt path).
+/// LakkoFrameDecryptor::Decrypt path). The KID — the single
+/// per-stream discriminator that survives the SFU (ADR-0035) —
+/// is read straight from the header, so the receiver never needs
+/// a local leaf / stream signal.
 fn decrypt_frame(
     call_key: &CallKey,
-    cache: &mut HashMap<u32, ParticipantKey>,
+    cache: &mut HashMap<u64, ParticipantKey>,
     aad: &[u8],
     wire: &[u8],
 ) -> Result<Vec<u8>, ()> {
     let (header, consumed) = SframeHeader::decode(wire).map_err(|_| ())?;
-    let sender_leaf: u32 = u32::try_from(header.kid).map_err(|_| ())?;
+    let kid: u64 = header.kid;
     let counter: u32 = u32::try_from(header.ctr).map_err(|_| ())?;
     let ciphertext = &wire[consumed..];
 
-    let pk = match cache.entry(sender_leaf) {
+    let pk = match cache.entry(kid) {
         std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
         std::collections::hash_map::Entry::Vacant(e) => {
-            let pk = call_key
-                .participant_key(sender_leaf, MediaType::Audio)
-                .map_err(|_| ())?;
+            let pk = call_key.participant_key(kid).map_err(|_| ())?;
             e.insert(pk)
         },
     };
@@ -118,11 +120,9 @@ fn sfu_opacity_forward_without_inspection() {
     let seed = deterministic_seed(0xA1);
 
     let call_key = CallKey::from_seed(seed);
-    let mut alice = call_key
-        .participant_key(1, MediaType::Audio)
-        .expect("alice pk");
+    let mut alice = call_key.participant_key_for(1, 0).expect("alice pk");
     let bob_key = CallKey::from_seed(seed);
-    let mut bob_cache: HashMap<u32, ParticipantKey> = HashMap::new();
+    let mut bob_cache: HashMap<u64, ParticipantKey> = HashMap::new();
 
     let aad = b"rtp-additional-data";
     let plaintext = b"alice speaks";
@@ -148,11 +148,9 @@ fn aad_tampering_at_sfu_hop_is_detected() {
     let seed = deterministic_seed(0xB2);
 
     let call_key = CallKey::from_seed(seed);
-    let mut alice = call_key
-        .participant_key(2, MediaType::Audio)
-        .expect("alice pk");
+    let mut alice = call_key.participant_key_for(2, 0).expect("alice pk");
     let bob_key = CallKey::from_seed(seed);
-    let mut bob_cache: HashMap<u32, ParticipantKey> = HashMap::new();
+    let mut bob_cache: HashMap<u64, ParticipantKey> = HashMap::new();
 
     let original_aad = b"correct-rtp-header";
     let tampered_aad = b"tampered-rtp-hdr!"; // same length, different content
@@ -179,15 +177,13 @@ fn wrong_call_key_cannot_open() {
     let mallory_seed = deterministic_seed(0xC4); // different call
 
     let alice_key = CallKey::from_seed(alice_seed);
-    let mut alice = alice_key
-        .participant_key(3, MediaType::Audio)
-        .expect("alice pk");
+    let mut alice = alice_key.participant_key_for(3, 0).expect("alice pk");
 
     // Mallory is in a different call but somehow received the
     // wire bytes (e.g. SFU mis-routed them). Her decryptor was
     // built with a different seed.
     let mallory_key = CallKey::from_seed(mallory_seed);
-    let mut mallory_cache: HashMap<u32, ParticipantKey> = HashMap::new();
+    let mut mallory_cache: HashMap<u64, ParticipantKey> = HashMap::new();
 
     let aad = b"rtp";
     let plaintext = b"alice speaks privately";
@@ -210,20 +206,14 @@ fn multi_party_fanin_through_per_sender_cache() {
 
     // Three senders with distinct leaf indices — mirrors the
     // multi-party MLS call topology (each device is one leaf).
-    let mut alice = call_key
-        .participant_key(10, MediaType::Audio)
-        .expect("alice pk");
-    let mut bob = call_key
-        .participant_key(20, MediaType::Audio)
-        .expect("bob pk");
-    let mut carol = call_key
-        .participant_key(30, MediaType::Audio)
-        .expect("carol pk");
+    let mut alice = call_key.participant_key_for(10, 0).expect("alice pk");
+    let mut bob = call_key.participant_key_for(20, 0).expect("bob pk");
+    let mut carol = call_key.participant_key_for(30, 0).expect("carol pk");
 
     // One receiver — say it's a single audio mixer endpoint.
     // Worst case for the ParticipantKey-cache pattern.
     let recv_key = CallKey::from_seed(seed);
-    let mut recv_cache: HashMap<u32, ParticipantKey> = HashMap::new();
+    let mut recv_cache: HashMap<u64, ParticipantKey> = HashMap::new();
 
     let aad = b"rtp";
 
@@ -273,9 +263,7 @@ fn cross_call_isolation_refuses_wrong_call_traffic() {
     let seed_b = deterministic_seed(0xE6);
 
     let call_a = CallKey::from_seed(seed_a);
-    let mut alice = call_a
-        .participant_key(1, MediaType::Audio)
-        .expect("alice pk");
+    let mut alice = call_a.participant_key_for(1, 0).expect("alice pk");
 
     // Receiver in call B — different MLS group, different
     // exporter output. A correctly-configured SFU does NOT
@@ -283,7 +271,7 @@ fn cross_call_isolation_refuses_wrong_call_traffic() {
     // signaling-layer cross-call isolation), but if it does,
     // SFrame is the second gate.
     let call_b_recv = CallKey::from_seed(seed_b);
-    let mut call_b_cache: HashMap<u32, ParticipantKey> = HashMap::new();
+    let mut call_b_cache: HashMap<u64, ParticipantKey> = HashMap::new();
 
     let aad = b"rtp";
     let wire = encrypt_frame(&mut alice, aad, b"call A traffic");
@@ -304,9 +292,7 @@ fn counter_advances_monotonically_per_sender() {
     let seed = deterministic_seed(0xF7);
 
     let call_key = CallKey::from_seed(seed);
-    let mut alice = call_key
-        .participant_key(7, MediaType::Audio)
-        .expect("alice pk");
+    let mut alice = call_key.participant_key_for(7, 0).expect("alice pk");
 
     let aad = b"rtp";
 
@@ -327,9 +313,7 @@ fn counter_advances_monotonically_per_sender() {
     // so out-of-order delivery works as long as the counter
     // matches what was sealed.
     let recv_key = CallKey::from_seed(seed);
-    let recv_pk = recv_key
-        .participant_key(7, MediaType::Audio)
-        .expect("recv pk");
+    let recv_pk = recv_key.participant_key_for(7, 0).expect("recv pk");
 
     let rec_3 = recv_pk.open(aad, &ct_3, counter_3).expect("open 3");
     let rec_1 = recv_pk.open(aad, &ct_1, counter_1).expect("open 1");

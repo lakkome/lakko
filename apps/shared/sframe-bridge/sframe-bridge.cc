@@ -35,7 +35,7 @@ constexpr std::size_t kAeadTagBytes = 16;
 LakkoFrameEncryptor* LakkoFrameEncryptor::Create(const uint8_t* seed,
                                                  std::size_t seed_len,
                                                  uint32_t local_leaf,
-                                                 uint8_t media_type) {
+                                                 uint8_t stream_index) {
   lakko_sframe_call_key_t* call_key = nullptr;
   lakko_sframe_status_t status =
       lakko_sframe_call_key_new(seed, seed_len, &call_key);
@@ -43,12 +43,13 @@ LakkoFrameEncryptor* LakkoFrameEncryptor::Create(const uint8_t* seed,
     return nullptr;
   }
 
-  // Derive the seal key on this encryptor's fixed media-type space
-  // (ADR-0034). An unknown media_type is refused (BAD_MEDIA_TYPE) →
+  // Derive the seal key on this encryptor's fixed stream (ADR-0035):
+  // KID = (local_leaf << 8) | stream_index. Every uint8_t stream_index
+  // is valid, so this only fails on an (unreachable) HKDF error →
   // nullptr, which the boot probe treats like any other Create failure
   // (invariant #4: no non-E2EE fallback).
   lakko_sframe_participant_key_t* participant_key = nullptr;
-  status = lakko_sframe_participant_key_new(call_key, local_leaf, media_type,
+  status = lakko_sframe_participant_key_new(call_key, local_leaf, stream_index,
                                             &participant_key);
   // The call key is only needed to derive the seal key; drop it either way.
   lakko_sframe_call_key_free(call_key);
@@ -56,16 +57,16 @@ LakkoFrameEncryptor* LakkoFrameEncryptor::Create(const uint8_t* seed,
     return nullptr;
   }
 
-  return new LakkoFrameEncryptor(participant_key, local_leaf, media_type);
+  return new LakkoFrameEncryptor(participant_key, local_leaf, stream_index);
 }
 
 LakkoFrameEncryptor::LakkoFrameEncryptor(
     lakko_sframe_participant_key_t* participant_key,
     uint32_t local_leaf,
-    uint8_t media_type)
+    uint8_t stream_index)
     : participant_key_(participant_key),
       local_leaf_(local_leaf),
-      media_type_(media_type) {}
+      stream_index_(stream_index) {}
 
 LakkoFrameEncryptor::~LakkoFrameEncryptor() {
   // The free routine tolerates null pointers (per the C ABI contract
@@ -87,7 +88,8 @@ int LakkoFrameEncryptor::Encrypt(cricket::MediaType /*media_type*/,
 
   // Seal the plaintext into a complete SFrame wire frame
   // (header || ciphertext) in one call, with the SFrame header
-  // (KID = local_leaf, CTR) bound as the AEAD AAD — per ADR-0013.
+  // (KID = (local_leaf << 8) | stream_index, CTR) bound as the AEAD
+  // AAD — per ADR-0013 / ADR-0035.
   //
   // The host RTP `additional_data` is intentionally NOT bound: that
   // byte string is not reconstructible on the web
@@ -132,11 +134,11 @@ bool LakkoFrameEncryptor::Rekey(const uint8_t* seed, std::size_t seed_len) {
       call_key == nullptr) {
     return false;
   }
-  // Re-derive on the SAME media-type space this encryptor was created
-  // with (ADR-0034) — a rekey changes only the epoch, never the stream.
+  // Re-derive on the SAME stream this encryptor was created with
+  // (ADR-0035) — a rekey changes only the epoch, never the stream.
   lakko_sframe_participant_key_t* fresh = nullptr;
   lakko_sframe_status_t status = lakko_sframe_participant_key_new(
-      call_key, local_leaf_, media_type_, &fresh);
+      call_key, local_leaf_, stream_index_, &fresh);
   lakko_sframe_call_key_free(call_key);
   if (status != LAKKO_SFRAME_STATUS_T_OK || fresh == nullptr) {
     // Keep sealing under the current key — never emit plaintext (invariant #4).
@@ -181,27 +183,22 @@ rtc::RefCountReleaseStatus LakkoFrameEncryptor::Release() const {
 
 // static
 LakkoFrameDecryptor* LakkoFrameDecryptor::Create(const uint8_t* seed,
-                                                 std::size_t seed_len,
-                                                 uint8_t media_type) {
-  // Refuse an unknown media_type up front (invariant #4) so the boot
-  // probe never installs a decryptor that would fail every open. The
-  // ring itself carries no media type — it is supplied per open.
-  if (media_type != LAKKO_SFRAME_MEDIA_TYPE_AUDIO &&
-      media_type != LAKKO_SFRAME_MEDIA_TYPE_VIDEO) {
-    return nullptr;
-  }
+                                                 std::size_t seed_len) {
+  // The decryptor reads the composite KID from each frame's header
+  // (ADR-0035), so it carries no per-stream state — a bad seed length
+  // is the only Create-time failure, surfaced as nullptr (invariant
+  // #4: the boot probe refuses to install a decryptor that cannot key).
   lakko_sframe_call_key_ring_t* ring = nullptr;
   lakko_sframe_status_t status =
       lakko_sframe_call_key_ring_new(seed, seed_len, &ring);
   if (status != LAKKO_SFRAME_STATUS_T_OK || ring == nullptr) {
     return nullptr;
   }
-  return new LakkoFrameDecryptor(ring, media_type);
+  return new LakkoFrameDecryptor(ring);
 }
 
-LakkoFrameDecryptor::LakkoFrameDecryptor(lakko_sframe_call_key_ring_t* ring,
-                                         uint8_t media_type)
-    : ring_(ring), media_type_(media_type) {}
+LakkoFrameDecryptor::LakkoFrameDecryptor(lakko_sframe_call_key_ring_t* ring)
+    : ring_(ring) {}
 
 LakkoFrameDecryptor::~LakkoFrameDecryptor() {
   // Callers must have released their refcount before letting us
@@ -215,39 +212,27 @@ webrtc::FrameDecryptorInterface::Result LakkoFrameDecryptor::Decrypt(
     rtc::ArrayView<const uint8_t> /*additional_data*/,
     rtc::ArrayView<const uint8_t> encrypted_frame,
     rtc::ArrayView<uint8_t> frame) {
-  // 1. Peek the SFrame header to resolve sender_leaf (KID) for key
-  //    selection. The bare ciphertext `unwrap_frame` also returns is
-  //    unused here — the ring re-parses the full wire and binds the
-  //    on-wire header as the AEAD AAD (ADR-0013) — so we free it.
-  uint32_t sender_leaf = 0;
-  uint32_t counter = 0;
-  uint8_t* ct_ptr = nullptr;
-  std::size_t ct_len = 0;
-  lakko_sframe_status_t unwrap_status = lakko_sframe_unwrap_frame(
-      encrypted_frame.data(), encrypted_frame.size(),
-      &sender_leaf, &counter, &ct_ptr, &ct_len);
-  if (unwrap_status != LAKKO_SFRAME_STATUS_T_OK) {
-    return Result(Status::kFailedToDecrypt, 0);
-  }
-  lakko_sframe_buffer_free(ct_ptr, ct_len);
-  (void)counter;  // CTR is read again inside the ring open from the wire.
-
-  // 2. Open through the ring's overlap fall-back: the current epoch's
-  //    per-sender key, and — during a mid-call rekey window — the
-  //    previous epoch's key on an AEAD failure (ADR-0029). The on-wire
-  //    SFrame header is the AEAD AAD; the host `additional_data` is
-  //    intentionally NOT used (mirrors Encrypt; web <-> native interop).
+  // Open through the ring's overlap fall-back. The ring reads the
+  // composite KID — `(sender_leaf << 8) | stream_index` — from the
+  // frame's own SFrame header (ADR-0035), derives that sender+stream's
+  // key, and — during a mid-call rekey window — tries the previous
+  // epoch's key on an AEAD failure (ADR-0029). So the decryptor needs
+  // no leaf / stream argument. The on-wire SFrame header is the AEAD
+  // AAD; the host `additional_data` is intentionally NOT used (mirrors
+  // Encrypt; web <-> native interop). A malformed header or an AEAD
+  // failure under both keys both surface as a non-OK status → the frame
+  // is dropped (kFailedToDecrypt), never recovered as plaintext.
   uint8_t* pt_ptr = nullptr;
   std::size_t pt_len = 0;
   lakko_sframe_status_t open_status =
       lakko_sframe_call_key_ring_open_framed_with_overlap(
-          ring_, sender_leaf, media_type_, encrypted_frame.data(),
-          encrypted_frame.size(), &pt_ptr, &pt_len);
+          ring_, encrypted_frame.data(), encrypted_frame.size(), &pt_ptr,
+          &pt_len);
   if (open_status != LAKKO_SFRAME_STATUS_T_OK) {
     return Result(Status::kFailedToDecrypt, 0);
   }
 
-  // 3. Copy into libwebrtc's output buffer.
+  // Copy into libwebrtc's output buffer.
   if (pt_len > frame.size()) {
     // GetMaxPlaintextByteSize undercounted — bug in this file.
     lakko_sframe_buffer_free(pt_ptr, pt_len);

@@ -484,15 +484,17 @@ public class WebRtcPeerConnection(
         attachedEncryptors.clear()
 
         var allOk = true
-        // Each sender is bound to its own media-type key space (ADR-0034):
-        // the audio sender seals on AUDIO, the video sender on VIDEO, so a
-        // participant never reuses one (key, nonce) across the two streams.
-        for ((sender, mediaType) in listOf(
-            localAudioSender to me.lakko.sframe.SFrameMediaType.AUDIO,
-            localVideoSender to me.lakko.sframe.SFrameMediaType.VIDEO,
+        // Each sender is bound to its own per-sender stream ordinal (ADR-0035):
+        // audio = 0, the (single, v1) video = 1. The seal KID is
+        // `(localLeaf << 8) | streamIndex`, so a participant never reuses one
+        // (key, nonce) across the two streams. A future second video / screen-
+        // share would take stream index 2.
+        for ((sender, streamIndex) in listOf(
+            localAudioSender to 0,
+            localVideoSender to 1,
         )) {
             sender ?: continue
-            val enc = me.lakko.sframe.LakkoFrameEncryptor.create(seed, localLeaf, mediaType)
+            val enc = me.lakko.sframe.LakkoFrameEncryptor.create(seed, localLeaf, streamIndex)
             if (enc == null) {
                 allOk = false
                 continue
@@ -528,12 +530,12 @@ public class WebRtcPeerConnection(
             return false
         }
         val sender = localVideoSender ?: return false
-        // This arm targets the video sender only, so it seals on the VIDEO
-        // media-type key space (ADR-0034).
+        // This arm targets the video sender only, so it seals on stream
+        // index 1 — the (single, v1) video stream's key space (ADR-0035).
         val enc = me.lakko.sframe.LakkoFrameEncryptor.create(
             seed,
             localLeaf,
-            me.lakko.sframe.SFrameMediaType.VIDEO,
+            1,
         ) ?: return false
         sender.setFrameEncryptor(enc)
         attachedEncryptors += enc
@@ -545,11 +547,12 @@ public class WebRtcPeerConnection(
      * Called by the `onAddTrack` / `onTrack` delegate path when
      * libwebrtc hands us a new incoming track.
      *
-     * The decryptor is bound to the receive track's media type
-     * (ADR-0034), read from `receiver.track().kind()` — every open
-     * derives the per-sender key on that one key space, matching the
-     * far-side encryptor. An unknown / absent kind is refused
-     * (fail-closed, invariant #4) rather than guessed.
+     * The decryptor takes NO media/stream argument (ADR-0035): every
+     * open reads the composite KID `(sender_leaf << 8) | stream_index`
+     * from the frame's own SFrame header and derives that sender+stream's
+     * key internally, so one decryptor on a receive track opens audio and
+     * every video stream on it. No `receiver.track().kind()` derivation is
+     * needed — the per-stream discriminator survives the SFU in the header.
      */
     public fun armSFrameDecryptor(
         receiver: org.webrtc.RtpReceiver,
@@ -558,14 +561,7 @@ public class WebRtcPeerConnection(
         if (!me.lakko.sframe.SFrameAvailability.isCallingAvailable) {
             return false
         }
-        val mediaType = when (receiver.track()?.kind()) {
-            org.webrtc.MediaStreamTrack.AUDIO_TRACK_KIND ->
-                me.lakko.sframe.SFrameMediaType.AUDIO
-            org.webrtc.MediaStreamTrack.VIDEO_TRACK_KIND ->
-                me.lakko.sframe.SFrameMediaType.VIDEO
-            else -> return false
-        }
-        val dec = me.lakko.sframe.LakkoFrameDecryptor.create(seed, mediaType) ?: return false
+        val dec = me.lakko.sframe.LakkoFrameDecryptor.create(seed) ?: return false
         receiver.setFrameDecryptor(dec)
         attachedDecryptors += dec
         return true

@@ -105,21 +105,25 @@ public class LakkoFrameEncryptor private constructor(
          * Build a fresh encryptor for the per-call MLS exporter
          * seed (32 bytes — `Group.export_secret("lakko/call/v1",
          * call_id, 32)`) + this device's leaf index + the local
-         * send track's [mediaType] (ADR-0034 — audio and video from
-         * the same leaf derive on distinct key spaces, so the
-         * encryptor is bound to one media type for its lifetime).
-         * Returns `null` on any failure (bad seed length, HKDF
-         * failure, unknown media type, boot-probe negative).
+         * send track's [streamIndex] (ADR-0035 — the per-sender
+         * stream ordinal: 0 = audio, 1 = first video, 2 = screen-
+         * share …). The seal KID is composed `(localLeaf << 8) |
+         * streamIndex`, so every one of a participant's concurrent
+         * streams keys into a disjoint `(key, nonce_salt)` space; the
+         * encryptor is bound to one stream for its lifetime. Every
+         * `0..=255` value is a valid stream index, so there is no
+         * fail-closed rejection on it. Returns `null` on any failure
+         * (bad seed length, HKDF failure, boot-probe negative).
          */
         @JvmStatic
         public fun create(
             seed: ByteArray,
             localLeaf: Int,
-            mediaType: SFrameMediaType,
+            streamIndex: Int,
         ): LakkoFrameEncryptor? {
             if (!SFrameAvailability.isCallingAvailable) return null
             if (seed.size != 32) return null
-            val ptr = nativeCreate(seed, localLeaf, mediaType.abiValue)
+            val ptr = nativeCreate(seed, localLeaf, streamIndex)
             return if (ptr == 0L) null else LakkoFrameEncryptor(ptr)
         }
 
@@ -127,7 +131,7 @@ public class LakkoFrameEncryptor private constructor(
         private external fun nativeCreate(
             seed: ByteArray,
             localLeaf: Int,
-            mediaType: Int,
+            streamIndex: Int,
         ): Long
 
         @JvmStatic

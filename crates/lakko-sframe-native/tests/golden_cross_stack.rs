@@ -47,18 +47,22 @@ use lakko_sframe_native::{
     lakko_sframe_buffer_free, lakko_sframe_call_key_free, lakko_sframe_call_key_new,
     lakko_sframe_open_framed, lakko_sframe_participant_key_free, lakko_sframe_participant_key_new,
     lakko_sframe_seal_framed, CallKey, LakkoSframeStatus, ParticipantKey,
-    LAKKO_SFRAME_MEDIA_TYPE_AUDIO,
 };
 
 /// The canonical cross-stack golden vector — byte-identical to the constants
 /// pinned in the Rust core, web, iOS, and Android golden tests. If the C ABI
 /// (the path the native media shims call) produced different bytes, a frame
 /// sealed natively would not open on web / the core, breaking ADR-0013 / C-55.
+///
+/// The golden seals on stream 0 (audio) for leaf 3, so the composite KID is
+/// `(3 << 8) | 0 = 0x0300` (ADR-0035) and the header carries the extended
+/// 2-byte KID `0x03 0x00`.
 const GOLDEN_SEED: [u8; 32] = [0x42; 32];
 const GOLDEN_LEAF: u32 = 3;
+const GOLDEN_STREAM: u8 = 0;
 const GOLDEN_PLAINTEXT: &[u8] = b"lakko sframe golden vector v1";
 const GOLDEN_WIRE_HEX: &str =
-    "31093c4f19a3b815c0a17a8ad09d2df18c6971987eb1c214484e9ebcc4f92b4c04e5c80bc145a9f23e1c60e2faa4";
+    "910300fe2c2af65799594a4c693ff4c9e0d49b0565756ddd7299b0945fc8adb1c9c12fced57c6937f372e6b94bdae40a";
 
 /// Decode the golden wire hex into bytes.
 fn golden_wire() -> Vec<u8> {
@@ -90,16 +94,10 @@ unsafe fn golden_participant_key() -> (*mut CallKey, *mut ParticipantKey) {
 
     let mut pk: *mut ParticipantKey = ptr::null_mut();
     // SAFETY: `call_key` is the live pointer just constructed; `pk` out-pointer
-    // is a writable local. The canonical golden is sealed on the AUDIO stream
-    // (ADR-0034), matching the core / web / iOS / Android golden vectors.
-    let status = unsafe {
-        lakko_sframe_participant_key_new(
-            call_key,
-            GOLDEN_LEAF,
-            LAKKO_SFRAME_MEDIA_TYPE_AUDIO,
-            &mut pk,
-        )
-    };
+    // is a writable local. The canonical golden is sealed on stream 0 (audio,
+    // ADR-0035), matching the core / web / iOS / Android golden vectors.
+    let status =
+        unsafe { lakko_sframe_participant_key_new(call_key, GOLDEN_LEAF, GOLDEN_STREAM, &mut pk) };
     assert_eq!(
         status,
         LakkoSframeStatus::Ok,

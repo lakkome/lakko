@@ -74,29 +74,29 @@ public class LakkoFrameDecryptor private constructor(
 
         /**
          * Build a fresh decryptor for the per-call MLS exporter
-         * seed (32 bytes) + the remote receive track's [mediaType]
-         * (ADR-0034 — every open on this decryptor derives the
-         * per-sender key on that one media-type space; the far-side
-         * encryptor must have sealed on the same media type or the
-         * frame will not open, fail-closed). Same seed constraints
-         * as [LakkoFrameEncryptor.create]. Per-sender ParticipantKey
-         * derivation is lazy — the first frame from each new
-         * `sender_leaf` triggers one HKDF derivation; subsequent
-         * frames hit the per-sender cache inside the C++ side.
+         * seed (32 bytes). The decryptor takes NO stream argument
+         * (ADR-0035): every open reads the composite KID `(sender_leaf
+         * << 8) | stream_index` from the frame's own SFrame header and
+         * derives that sender+stream's key internally, so one decryptor
+         * bound to a remote receive track opens audio and every video
+         * stream on it. Same seed constraints as
+         * [LakkoFrameEncryptor.create]. Per-(sender, stream)
+         * ParticipantKey derivation is lazy — the first frame carrying a
+         * new KID triggers one HKDF derivation; subsequent frames hit
+         * the per-KID cache inside the C++ side.
          */
         @JvmStatic
         public fun create(
             seed: ByteArray,
-            mediaType: SFrameMediaType,
         ): LakkoFrameDecryptor? {
             if (!SFrameAvailability.isCallingAvailable) return null
             if (seed.size != 32) return null
-            val ptr = nativeCreate(seed, mediaType.abiValue)
+            val ptr = nativeCreate(seed)
             return if (ptr == 0L) null else LakkoFrameDecryptor(ptr)
         }
 
         @JvmStatic
-        private external fun nativeCreate(seed: ByteArray, mediaType: Int): Long
+        private external fun nativeCreate(seed: ByteArray): Long
 
         @JvmStatic
         private external fun nativeRelease(nativePtr: Long)

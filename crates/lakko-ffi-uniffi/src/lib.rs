@@ -2352,31 +2352,6 @@ pub fn sframe_derive_call_key(
     Ok(key.as_bytes().to_vec())
 }
 
-/// Media-stream discriminator folded into the per-participant SFrame key
-/// derivation (ADR-0034). A participant's audio and video streams share one MLS
-/// leaf (the SFrame header KID), so without this the two streams would derive
-/// the SAME `(key, nonce_salt)` and — each with an independent per-stream
-/// counter — reuse the identical `(key, nonce)` pair across the two streams on
-/// different plaintexts. Mixing the media type into the HKDF `info` keeps the
-/// audio and video key + salt spaces distinct. Mirror of
-/// [`lakko_calls::MediaType`].
-#[derive(uniffi::Enum)]
-pub enum FfiMediaType {
-    /// Audio stream.
-    Audio,
-    /// Video stream (the camera track).
-    Video,
-}
-
-impl FfiMediaType {
-    pub(crate) fn to_inner(&self) -> lakko_calls::MediaType {
-        match self {
-            FfiMediaType::Audio => lakko_calls::MediaType::Audio,
-            FfiMediaType::Video => lakko_calls::MediaType::Video,
-        }
-    }
-}
-
 /// Per-participant SFrame key + nonce salt derived from the
 /// 32-byte call key + sender leaf index. Caller maintains
 /// the frame counter on the platform side.
@@ -2388,15 +2363,19 @@ pub struct FfiSframeParticipantKey {
     pub nonce_salt: Vec<u8>,
 }
 
-/// Derive a per-participant SFrame key + nonce salt for a given media stream
-/// (Phase 3a4; `media_type` per ADR-0034). Audio and video from the same leaf
-/// derive distinct keys + nonce salts, so their independent counters cannot
-/// reuse a `(key, nonce)` pair.
+/// Derive a per-participant SFrame key + nonce salt for a given
+/// `(sender_leaf, stream_index)` stream (ADR-0035). The seal-side derivation:
+/// each of a leaf's concurrent streams (audio, camera, screen-share, …) gets a
+/// distinct key + nonce salt keyed on the composite KID
+/// `(sender_leaf << 8) | stream_index`, so their independent counters cannot
+/// reuse a `(key, nonce)` pair — the guarantee the ADR-0034 per-media-TYPE tag
+/// could not give two same-kind streams. `stream_index` is a `u8`, so the full
+/// `0..=255` range is valid and cannot overflow the KID's 8-bit stream field.
 #[uniffi::export]
 pub fn sframe_derive_participant_key(
     call_key_seed: Vec<u8>,
     sender_leaf: u32,
-    media_type: FfiMediaType,
+    stream_index: u8,
 ) -> Result<FfiSframeParticipantKey, FfiError> {
     if call_key_seed.len() != 32 {
         return Err(FfiError::Codec("call_key_seed must be 32 bytes".into()));
@@ -2404,7 +2383,7 @@ pub fn sframe_derive_participant_key(
     let mut seed = [0u8; 32];
     seed.copy_from_slice(&call_key_seed);
     let ck = lakko_calls::CallKey::from_seed(seed);
-    let pk = ck.participant_key(sender_leaf, media_type.to_inner())?;
+    let pk = ck.participant_key_for(sender_leaf, u32::from(stream_index))?;
     Ok(FfiSframeParticipantKey {
         key_bytes: pk.key_bytes().to_vec(),
         nonce_salt: pk.nonce_salt().to_vec(),
@@ -2421,17 +2400,20 @@ pub fn sframe_derive_participant_key(
 /// FFI surface is seed-flat so platform code can hold the
 /// 32-byte seeds in its own keychain-backed store rather
 /// than ferrying a Rust handle.
+///
+/// `kid` is the composite SFrame key identifier
+/// `(sender_leaf << 8) | stream_index` (ADR-0035) the receiver read from the
+/// frame's header — the decryptor never needs a separate media discriminator,
+/// it re-derives the exact sender-stream key straight from the KID.
 #[uniffi::export]
 pub fn sframe_open_with_overlap(
     current_call_key_seed: Vec<u8>,
     previous_call_key_seed: Option<Vec<u8>>,
-    sender_leaf: u32,
-    media_type: FfiMediaType,
+    kid: u64,
     aad: Vec<u8>,
     ciphertext: Vec<u8>,
     frame_counter: u32,
 ) -> Result<Vec<u8>, FfiError> {
-    let media = media_type.to_inner();
     let take_seed = |bytes: Vec<u8>| -> Result<[u8; 32], FfiError> {
         if bytes.len() != 32 {
             return Err(FfiError::Codec(format!(
@@ -2446,7 +2428,7 @@ pub fn sframe_open_with_overlap(
 
     let current_seed = take_seed(current_call_key_seed)?;
     let current = lakko_calls::CallKey::from_seed(current_seed);
-    let current_key = current.participant_key(sender_leaf, media)?;
+    let current_key = current.participant_key(kid)?;
     match current_key.open(&aad, &ciphertext, frame_counter) {
         Ok(pt) => return Ok(pt),
         Err(lakko_calls::Error::Crypto(_)) => {
@@ -2458,7 +2440,7 @@ pub fn sframe_open_with_overlap(
     if let Some(prev_bytes) = previous_call_key_seed {
         let prev_seed = take_seed(prev_bytes)?;
         let previous = lakko_calls::CallKey::from_seed(prev_seed);
-        let prev_key = previous.participant_key(sender_leaf, media)?;
+        let prev_key = previous.participant_key(kid)?;
         return prev_key
             .open(&aad, &ciphertext, frame_counter)
             .map_err(Into::into);
