@@ -347,3 +347,27 @@ export interface RecoveryContactRecoverFinishResponse {
   session_token: string;
   session_expires_at_ms: number;
 }
+
+// ----------------------------------------------------------------------------
+// /auth/genesis/attest   (ADR-0036, G-30 finding 2 — auth-attested genesis)
+// ----------------------------------------------------------------------------
+
+/** `POST /auth/genesis/attest` request body. Bearer-authenticated: the
+ *  live session token (on the `Authorization` header, not the body) is
+ *  proof the caller OPAQUE-authenticated as `account_id`, which is the
+ *  whole security basis — auth then binds THAT account to the
+ *  client-supplied genesis pubkey. */
+export interface GenesisAttestRequest {
+  /** URL-safe base64 (no pad) of the client's 32-byte Ed25519 genesis
+   *  identity pubkey. */
+  pubkey_b64: string;
+}
+
+/** `POST /auth/genesis/attest` response body. */
+export interface GenesisAttestResponse {
+  /** URL-safe base64 (no pad) of the signed 153-byte `GenesisAttestation`
+   *  (`version ‖ account_id ‖ username_hash ‖ pubkey ‖ expires_at ‖ sig`).
+   *  The client uploads it verbatim alongside the identity bundle; a peer
+   *  verifies it on a first observation against the pinned attest key. */
+  genesis_attest_b64: string;
+}

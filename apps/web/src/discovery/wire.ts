@@ -103,6 +103,14 @@ export interface IdentityUploadRequest {
    *  `supersession_proof`. Omit on a routine same-key re-upload — the
    *  log append is idempotent there, so no authorisation is needed. */
   leaf_auth?: string;
+  /** ADR-0036 (G-30 finding 2): base64 of an optional auth-attested
+   *  genesis attestation (the 153-byte `GenesisAttestation` minted via
+   *  `POST /auth/genesis/attest`). Sent ONLY on a first publish / genesis
+   *  (and an ADR-0017 reset) alongside the `leaf_auth` self-signature; a
+   *  rotation carries none. Discovery stores it opaque and forwards it
+   *  verbatim to the transparency append (invariant #2); a peer verifies
+   *  it on a first observation against the pinned auth attest key. */
+  genesis_attest?: string;
 }
 
 /** Response body of `POST /discovery/identity`. */

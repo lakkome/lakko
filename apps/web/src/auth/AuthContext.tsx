@@ -1052,12 +1052,21 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         canonical,
         result.accountId,
       );
+      // ADR-0036: also mint the auth-attested genesis (anti-squatting).
+      // Soft-fail — the append accepts the self-sig alone while the
+      // operator flag is default-OFF, so this never blocks signup.
+      const signupGenesisAttest = await mintGenesisAttestation(
+        client,
+        result.sessionToken,
+        canonical,
+      );
       await uploadIdentityBundle(
         discovery,
         result.accountId,
         canonical,
         undefined,
         signupLeafAuth,
+        signupGenesisAttest,
       );
 
       // 1.16e6c1: persist the freshly-built provider state
@@ -1208,12 +1217,20 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
           canonical,
           result.accountId,
         );
+        // ADR-0036: auth-attested genesis alongside the self-sig
+        // (soft-fail — never blocks the guest signup).
+        const guestGenesisAttest = await mintGenesisAttestation(
+          client,
+          result.sessionToken,
+          canonical,
+        );
         await uploadIdentityBundle(
           discovery,
           result.accountId,
           canonical,
           undefined,
           guestLeafAuth,
+          guestGenesisAttest,
         );
       } finally {
         canonical.free();
@@ -1948,12 +1965,21 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
           canonical,
           pending.accountIdBytes,
         );
+        // ADR-0036: auth-attested genesis for the fresh-start reset. The
+        // reset still holds a session token (it OPAQUE-authenticated), so
+        // it CAN mint one. Soft-fail — never blocks the mint flow.
+        const freshGenesisAttest = await mintGenesisAttestation(
+          client,
+          pending.sessionToken,
+          canonical,
+        );
         await uploadIdentityBundle(
           discovery,
           pending.accountIdBytes,
           canonical,
           undefined,
           freshLeafAuth,
+          freshGenesisAttest,
         );
       } finally {
         canonical.free();
@@ -2745,6 +2771,13 @@ async function hydrateFromStorage(): Promise<{
  * signup and the lost-everything `mintFreshIdentity` fresh-start. The
  * routine same-key paths (login / passkey / recover) omit it: the log
  * append is idempotent there, so no authorisation is needed.
+ *
+ * ADR-0036 (G-30 finding 2): `genesisAttest`, when present, is the
+ * auth-attested genesis attestation (from `AuthClient.genesisAttest`)
+ * riding alongside `leafAuth` on those same genesis publish sites — the
+ * proof that only the OPAQUE-authenticated account could have published
+ * this genesis key (closes the first-entry-squatting residual the
+ * self-signature only DETECTS). Omitted on every non-genesis path.
  */
 async function uploadIdentityBundle(
   discovery: DiscoveryClient,
@@ -2752,6 +2785,7 @@ async function uploadIdentityBundle(
   identity: WasmIdentity,
   supersessionProof?: Uint8Array | string,
   leafAuth?: Uint8Array | string,
+  genesisAttest?: Uint8Array | string,
 ): Promise<void> {
   // 1.16e2: generate a fresh KeyPackage. RFC 9420 forward
   // secrecy on new groups argues for one-shot init_keys; in
@@ -2772,6 +2806,7 @@ async function uploadIdentityBundle(
       identity.x25519PublicKey,
       supersessionProof,
       leafAuth,
+      genesisAttest,
     ),
     discovery.uploadKeyPackage(accountId, keyPackageBytes),
   ]);
@@ -2809,6 +2844,41 @@ async function mintLeafGenesisAuth(
   return Uint8Array.from(
     wasm.signLeafGenesis(identity.ed25519Seed, usernameHash),
   );
+}
+
+/**
+ * ADR-0036 (G-30 finding 2): mint the AUTH-attested genesis attestation
+ * — the anti-squatting proof that only the OPAQUE-authenticated account
+ * could have published this genesis key.
+ *
+ * Where `mintLeafGenesisAuth` self-signs the binding with the leaf's own
+ * key (honest TOFU that only DETECTS squatting), this asks the auth
+ * service — bound to the live `sessionToken`, which is proof the caller
+ * OPAQUE-authenticated as `account_id` — to sign a
+ * `(account_id, username_hash, pubkey, expiry)` binding, so a squatter
+ * who cannot authenticate as the victim can never obtain one. It rides
+ * alongside the self-signature on the same genesis publish.
+ *
+ * SOFT-FAIL by design (unlike `mintLeafGenesisAuth`, which is fail-loud):
+ * per ADR-0036 the transparency append still accepts the genesis leaf on
+ * the self-signature alone while the operator-side
+ * `LAKKO_TRANSPARENCY_REQUIRE_GENESIS_ATTEST` flag is default-OFF, so a
+ * mint failure must NOT block signup. We log and return `undefined` — the
+ * attestation is attached only when successfully minted. The flag flips on
+ * once all three clients mint (ADR-0036 §"Consequences").
+ */
+async function mintGenesisAttestation(
+  client: AuthClient,
+  sessionToken: string,
+  identity: WasmIdentity,
+): Promise<Uint8Array | undefined> {
+  try {
+    return await client.genesisAttest(sessionToken, identity.signaturePublicKey);
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.warn("genesis-attest mint failed — publishing on self-sig alone", err);
+    return undefined;
+  }
 }
 
 /**

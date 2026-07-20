@@ -149,6 +149,14 @@ public struct IdentityUploadRequest: Codable, Equatable {
     /// append is idempotent and needs no authorisation). Opaque to the
     /// server.
     public let leafAuth: String?
+    /// ADR-0036 (G-30 finding 2): base64 of an optional auth-attested genesis
+    /// proof (`POST /auth/genesis/attest`), binding the OPAQUE-authenticated
+    /// `account_id` to THIS identity pubkey so the transparency genesis entry
+    /// is account-authenticated (anti-squatting), not merely self-consistent.
+    /// `nil` for a non-genesis re-publish (the absence is `COALESCE`-preserved
+    /// server-side, never stripping a still-valid stored value). Opaque to the
+    /// server — verified operator-side + by the peer on a first observation.
+    public let genesisAttest: String?
 
     public init(
         pow: PowProofPayload,
@@ -156,7 +164,8 @@ public struct IdentityUploadRequest: Codable, Equatable {
         signaturePubkey: String,
         x25519Pubkey: String,
         supersessionProof: String? = nil,
-        leafAuth: String? = nil
+        leafAuth: String? = nil,
+        genesisAttest: String? = nil
     ) {
         self.pow = pow
         self.accountId = accountId
@@ -164,6 +173,7 @@ public struct IdentityUploadRequest: Codable, Equatable {
         self.x25519Pubkey = x25519Pubkey
         self.supersessionProof = supersessionProof
         self.leafAuth = leafAuth
+        self.genesisAttest = genesisAttest
     }
 
     enum CodingKeys: String, CodingKey {
@@ -173,6 +183,7 @@ public struct IdentityUploadRequest: Codable, Equatable {
         case x25519Pubkey = "x25519_pubkey"
         case supersessionProof = "supersession_proof"
         case leafAuth = "leaf_auth"
+        case genesisAttest = "genesis_attest"
     }
 }
 

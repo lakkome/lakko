@@ -1411,6 +1411,14 @@ public class DiscoveryClient(
      * non-rotation re-upload. Non-rotation callers (signup / login /
      * passkey) pass `null` — a normal upload clears any stale
      * server-side proof.
+     *
+     * ADR-0036 (G-30 finding 2): [genesisAttest], when non-null, is the
+     * raw auth-attested genesis attestation minted for a genesis /
+     * fresh-start publish. It rides onto [IdentityUploadRequest.genesis_attest]
+     * (standard base64) alongside [leafAuth]; the server forwards it
+     * opaquely to the transparency append gate, which prevents first-entry
+     * squatting. `null` on a same-key re-publish (or when the mint was
+     * unavailable during rollout — additive, flag-gated server-side).
      */
     public suspend fun uploadIdentityBundle(
         accountId: ByteArray,
@@ -1418,6 +1426,7 @@ public class DiscoveryClient(
         x25519Pubkey: ByteArray,
         supersessionProofB64: String? = null,
         leafAuth: ByteArray? = null,
+        genesisAttest: ByteArray? = null,
     ) {
         if (accountId.size != ACCOUNT_ID_LEN) {
             throw DiscoveryClientArgError("accountId must be $ACCOUNT_ID_LEN bytes")
@@ -1444,6 +1453,9 @@ public class DiscoveryClient(
                 x25519_pubkey = base64Encode(x25519Pubkey),
                 supersession_proof = supersessionProofB64,
                 leaf_auth = leafAuth?.let { base64Encode(it) },
+                // ADR-0036 — standard-alphabet base64 (mirrors `leaf_auth`;
+                // the discovery upload decodes it with the STANDARD engine).
+                genesis_attest = genesisAttest?.let { base64Encode(it) },
             ),
         )
         if (!resp.ok) {

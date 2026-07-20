@@ -38,6 +38,8 @@ import type {
   DeviceAuthorizeRedeemResponse,
   DeviceAuthorizeStartRequest,
   DeviceAuthorizeStartResponse,
+  GenesisAttestRequest,
+  GenesisAttestResponse,
   LoginFinishRequest,
   LoginFinishResponse,
   LoginStartRequest,
@@ -338,6 +340,50 @@ export class AuthClient {
       sessionToken: resp.session_token,
       sessionExpiresAtMs: resp.session_expires_at_ms,
     };
+  }
+
+  // -----------------------------------------------------------------
+  // Genesis attestation — ADR-0036, G-30 finding 2 (anti-squatting)
+  // -----------------------------------------------------------------
+
+  /**
+   * `POST /auth/genesis/attest` — mint an auth-attested genesis
+   * attestation for this account's client-generated identity pubkey
+   * (ADR-0036, closes the G-30 finding-2 squatting residual).
+   *
+   * Bearer-authenticated (NO PoW): holding a valid session token *is*
+   * proof the caller OPAQUE-authenticated as `account_id`, which is the
+   * entire security basis — only the account holder can mint a genesis
+   * attestation for their own key, so a squatter cannot fabricate one
+   * for a victim's account. The server derives `username_hash` from the
+   * AUTHENTICATED account id (never from the body) and signs a
+   * `(account_id, username_hash, pubkey, expiry)` binding with the
+   * shared attestation key.
+   *
+   * Returns the raw 153-byte `GenesisAttestation` bytes (decoded from the
+   * server's URL-safe-no-pad base64) so the caller threads them straight
+   * into the discovery identity-bundle upload alongside the ADR-0019
+   * genesis self-signature.
+   *
+   * @param sessionToken the live bearer token proving the OPAQUE auth.
+   * @param pubkey       the client's 32-byte Ed25519 genesis identity key.
+   */
+  async genesisAttest(
+    sessionToken: string,
+    pubkey: Uint8Array,
+  ): Promise<Uint8Array> {
+    if (sessionToken.length === 0) {
+      throw new AuthClientArgError("sessionToken must be non-empty");
+    }
+    if (pubkey.length !== 32) {
+      throw new AuthClientArgError("pubkey must be 32 bytes (Ed25519)");
+    }
+    const resp = await this.post<GenesisAttestRequest, GenesisAttestResponse>(
+      "/auth/genesis/attest",
+      { pubkey_b64: base64UrlEncodeNoPad(pubkey) },
+      sessionToken,
+    );
+    return base64UrlDecodeNoPad(resp.genesis_attest_b64);
   }
 
   // -----------------------------------------------------------------

@@ -61,6 +61,15 @@ const MAX_SUPERSESSION_PROOF_LEN: usize = 150;
 /// operator-side in `services/transparency` and by the client rotation chain.
 const MAX_LEAF_AUTH_LEN: usize = 200;
 
+/// Maximum genesis-attestation length discovery will store (ADR-0036). The
+/// `GenesisAttestation` is a 153-byte fixed-layout Ed25519 blob; the cap
+/// leaves headroom and matches the `VARBINARY(256)` column (and the
+/// transparency-side `log_entries.genesis_attest` column). Discovery caps the
+/// length only to bound storage — it never parses the bytes (invariant #2);
+/// the attestation is verified operator-side in `services/transparency` and by
+/// the client on a first observation.
+const MAX_GENESIS_ATTEST_LEN: usize = 256;
+
 /// A fetched `identity_bundles` row: `(signature_pubkey, x25519_pubkey,
 /// supersession_proof?)` — the proof column is nullable (G-4, ADR-0016).
 type IdentityBundleRow = (Vec<u8>, Vec<u8>, Option<Vec<u8>>);
@@ -139,6 +148,36 @@ fn decode_optional_leaf_auth(b64: Option<&str>) -> Result<Option<Vec<u8>>, (Stat
     Ok(Some(bytes))
 }
 
+/// Decode the optional ADR-0036 genesis attestation. Mirrors
+/// [`decode_optional_leaf_auth`] exactly: `None` (the field absent) stays
+/// `None` and the upsert PRESERVES any already-stored value (via `COALESCE`),
+/// so a non-rotation re-upload does not strip a still-valid attestation before
+/// it has been forwarded to the transparency log. A present value is
+/// base64-decoded and length-capped to [`MAX_GENESIS_ATTEST_LEN`] — discovery
+/// does NOT parse or verify the bytes (invariant #2); the attestation is
+/// verified operator-side in `services/transparency` and by the client on a
+/// first observation.
+fn decode_optional_genesis_attest(
+    b64: Option<&str>,
+) -> Result<Option<Vec<u8>>, (StatusCode, String)> {
+    let Some(b64) = b64 else {
+        return Ok(None);
+    };
+    let bytes = B64.decode(b64).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("invalid genesis_attest base64: {e}"),
+        )
+    })?;
+    if bytes.len() > MAX_GENESIS_ATTEST_LEN {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("genesis_attest exceeds {MAX_GENESIS_ATTEST_LEN} bytes"),
+        ));
+    }
+    Ok(Some(bytes))
+}
+
 // ============================================================================
 // POST /discovery/identity   — upsert
 // ============================================================================
@@ -169,6 +208,14 @@ pub(crate) struct UploadRequest {
     /// (invariant #2); it is forwarded verbatim to the transparency append.
     #[serde(default)]
     pub(crate) leaf_auth: Option<String>,
+    /// ADR-0036: base64 of an optional auth-attested genesis attestation, sent
+    /// on a first publish (or an ADR-0017 reset) alongside the `leaf_auth`
+    /// self-signature. Absent for a rotation or a non-rotation re-upload,
+    /// which PRESERVES any stored value (the upsert uses `COALESCE`).
+    /// Discovery stores it opaque and never parses it (invariant #2); it is
+    /// forwarded verbatim to the transparency append as `genesis_attest_b64`.
+    #[serde(default)]
+    pub(crate) genesis_attest: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -211,6 +258,15 @@ pub(crate) async fn upload(
     // and, definitively, the client rotation chain's.
     let leaf_auth = decode_optional_leaf_auth(payload.leaf_auth.as_deref())?;
 
+    // ADR-0036: decode the optional genesis attestation (opaque to
+    // discovery). Mirrors `leaf_auth`: `None` PRESERVES any stored value (the
+    // `COALESCE` in the upsert), so a routine non-rotation re-upload does not
+    // strip a still-valid attestation before it has been forwarded to the
+    // transparency log. Discovery NEVER parses these bytes (invariant #2);
+    // verification is the transparency service's job and, definitively, the
+    // client's on a first observation.
+    let genesis_attest = decode_optional_genesis_attest(payload.genesis_attest.as_deref())?;
+
     // Phase 1.5b anti-impersonation: only the account_id's owner
     // can upload its identity bundle. Same check shape as
     // `registry::register`.
@@ -237,6 +293,7 @@ pub(crate) async fn upload(
         &x25519_pubkey,
         supersession_proof.as_deref(),
         leaf_auth.as_deref(),
+        genesis_attest.as_deref(),
     )
     .await?;
 
@@ -266,12 +323,19 @@ pub(crate) async fn upload(
         // pass-through — discovery never parses these bytes (invariant #2).
         // A missed append here is closed by the S2.5 reconciler, which reads
         // the persisted `leaf_auth` from the row.
+        //
+        // ADR-0036: forward the genesis attestation alongside it (opaque,
+        // `genesis_attest_b64`). Present only for a genesis / reset upload; a
+        // rotation carries `None` and the transparency append gate consults it
+        // only on the genesis/reset arm anyway. Same fail-open + S2.5-backfill
+        // posture as `leaf_auth`.
         let confirmed = client
             .append_key_change(
                 &account_id,
                 &signature_pubkey,
                 is_reset,
                 leaf_auth.as_deref(),
+                genesis_attest.as_deref(),
             )
             .await;
         if confirmed {
@@ -366,6 +430,7 @@ async fn apply_identity_upload_gated(
     x25519_pubkey: &[u8],
     supersession_proof: Option<&[u8]>,
     leaf_auth: Option<&[u8]>,
+    genesis_attest: Option<&[u8]>,
 ) -> Result<LogAppendDecision, (StatusCode, String)> {
     const MAX_ATTEMPTS: u32 = 3;
     for _ in 0..MAX_ATTEMPTS {
@@ -377,6 +442,7 @@ async fn apply_identity_upload_gated(
             x25519_pubkey,
             supersession_proof,
             leaf_auth,
+            genesis_attest,
         )
         .await?
         {
@@ -420,6 +486,7 @@ async fn try_apply_identity_once(
     x25519_pubkey: &[u8],
     supersession_proof: Option<&[u8]>,
     leaf_auth: Option<&[u8]>,
+    genesis_attest: Option<&[u8]>,
 ) -> Result<ApplyAttempt, (StatusCode, String)> {
     let mut tx = db.begin().await.map_err(cooldown_db_err)?;
 
@@ -447,14 +514,16 @@ async fn try_apply_identity_once(
             // First publish for this account — nothing to gate.
             let inserted = sqlx::query(
                 "INSERT INTO identity_bundles \
-                    (account_id, signature_pubkey, x25519_pubkey, supersession_proof, leaf_auth) \
-                 VALUES (?, ?, ?, ?, ?)",
+                    (account_id, signature_pubkey, x25519_pubkey, supersession_proof, \
+                     leaf_auth, genesis_attest) \
+                 VALUES (?, ?, ?, ?, ?, ?)",
             )
             .bind(account_id)
             .bind(signature_pubkey)
             .bind(x25519_pubkey)
             .bind(supersession_proof)
             .bind(leaf_auth)
+            .bind(genesis_attest)
             .execute(&mut *tx)
             .await;
             match inserted {
@@ -517,6 +586,7 @@ async fn try_apply_identity_once(
                     x25519_pubkey               = ?, \
                     supersession_proof          = COALESCE(?, supersession_proof), \
                     leaf_auth                   = COALESCE(?, leaf_auth), \
+                    genesis_attest              = COALESCE(?, genesis_attest), \
                     previous_signature_pubkey   = ?, \
                     last_unproven_key_change_at = IF(?, NOW(3), last_unproven_key_change_at) \
                  WHERE account_id = ?",
@@ -525,6 +595,7 @@ async fn try_apply_identity_once(
             .bind(x25519_pubkey)
             .bind(supersession_proof)
             .bind(leaf_auth)
+            .bind(genesis_attest)
             .bind(new_previous)
             .bind(bump_marker_i)
             .bind(account_id)
@@ -961,6 +1032,38 @@ mod tests {
     }
 
     #[test]
+    fn decode_optional_genesis_attest_handles_absent_present_and_oversized() {
+        // Absent -> None (the upsert then PRESERVES any stored genesis_attest).
+        assert!(decode_optional_genesis_attest(None).unwrap().is_none());
+
+        // Present, the 153-byte GenesisAttestation -> decoded.
+        let att = B64.encode([9u8; 153]);
+        let decoded = decode_optional_genesis_attest(Some(&att)).unwrap().unwrap();
+        assert_eq!(decoded.len(), 153);
+        assert!(decoded.iter().all(|&b| b == 9));
+
+        // Boundary: exactly the cap is accepted.
+        let at_cap = B64.encode([0u8; MAX_GENESIS_ATTEST_LEN]);
+        assert_eq!(
+            decode_optional_genesis_attest(Some(&at_cap))
+                .unwrap()
+                .unwrap()
+                .len(),
+            MAX_GENESIS_ATTEST_LEN
+        );
+
+        // Over the cap -> 400 (bounds storage; not a crypto check —
+        // discovery never parses genesis_attest, invariant #2).
+        let oversized = B64.encode([0u8; MAX_GENESIS_ATTEST_LEN + 1]);
+        let err = decode_optional_genesis_attest(Some(&oversized)).unwrap_err();
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+
+        // Non-base64 -> 400.
+        let err = decode_optional_genesis_attest(Some("not-base64!!!")).unwrap_err();
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
     fn fetch_path_validates_base64url() {
         // The fetch handler decodes its `Path<String>` via
         // base64url-without-padding because axum rejects `/` and
@@ -977,5 +1080,134 @@ mod tests {
         let decoded = B64URL.decode(&encoded).unwrap();
         assert_eq!(decoded.len(), ACCOUNT_ID_LEN);
         assert_eq!(decoded.as_slice(), &id[..]);
+    }
+
+    /// ADR-0036: the genesis attestation is STORED on a first publish and
+    /// PRESERVED across a non-rotation re-upload (the upsert `COALESCE`), then
+    /// REPLACED when a fresh value is supplied — exactly `leaf_auth`'s
+    /// treatment. Driven through the production `try_apply_identity_once` so it
+    /// pins the real INSERT + UPDATE SQL, not a hand-rolled query. DB-gated on
+    /// `LAKKO_DISCOVERY_TEST_DATABASE_URL` (skips, does not fail, when unset).
+    #[tokio::test]
+    async fn genesis_attest_stored_preserved_and_replaced() {
+        use sqlx::mysql::MySqlPoolOptions;
+
+        // A generous cool-down: the first publish never sets the marker, so a
+        // later unproven new key is still not gated (verified below).
+        const COOLDOWN: i64 = 3600;
+
+        // Read the stored genesis_attest back (nullable column -> Option).
+        async fn stored_attest(pool: &sqlx::MySqlPool, acct: &[u8]) -> Option<Vec<u8>> {
+            sqlx::query_scalar("SELECT genesis_attest FROM identity_bundles WHERE account_id = ?")
+                .bind(acct)
+                .fetch_one(pool)
+                .await
+                .expect("read genesis_attest")
+        }
+
+        let Ok(url) = std::env::var("LAKKO_DISCOVERY_TEST_DATABASE_URL") else {
+            eprintln!(
+                "skipping genesis_attest_stored_preserved_and_replaced: \
+                 LAKKO_DISCOVERY_TEST_DATABASE_URL unset"
+            );
+            return;
+        };
+
+        let pool = MySqlPoolOptions::new()
+            .max_connections(4)
+            .connect(&url)
+            .await
+            .expect("connect test DB");
+        crate::MIGRATIONS.run(&pool).await.expect("run migrations");
+
+        // An isolated account so the test never collides with other rows.
+        let acct = [0xB0u8; ACCOUNT_ID_LEN];
+        let key1 = [0x11u8; SIGNATURE_PUBKEY_LEN];
+        let key2 = [0x22u8; SIGNATURE_PUBKEY_LEN];
+        let x25519 = [0x33u8; X25519_PUBKEY_LEN];
+        let self_sig = [0x44u8; 64]; // a genesis leaf_auth self-sig
+        let att1 = [0x55u8; 153]; // the first GenesisAttestation
+        let att2 = [0x66u8; 153]; // a replacement attestation
+
+        sqlx::query("DELETE FROM identity_bundles WHERE account_id = ?")
+            .bind(&acct[..])
+            .execute(&pool)
+            .await
+            .expect("clear pre-existing row");
+
+        // 1. First publish WITH a genesis attestation -> Append + stored.
+        match try_apply_identity_once(
+            &pool,
+            COOLDOWN,
+            &acct,
+            &key1,
+            &x25519,
+            None,
+            Some(&self_sig),
+            Some(&att1),
+        )
+        .await
+        .expect("first publish")
+        {
+            ApplyAttempt::Done(d) => {
+                assert_eq!(d, LogAppendDecision::Append { is_reset: false });
+            },
+            ApplyAttempt::RetryRace => panic!("unexpected INSERT race on an isolated account"),
+        }
+        assert_eq!(
+            stored_attest(&pool, &acct).await.as_deref(),
+            Some(&att1[..]),
+            "genesis_attest stored on first publish"
+        );
+
+        // 2. Non-rotation re-upload (SAME key, NO genesis_attest) -> Skip, and
+        //    the stored attestation is PRESERVED (COALESCE), exactly like
+        //    leaf_auth.
+        match try_apply_identity_once(&pool, COOLDOWN, &acct, &key1, &x25519, None, None, None)
+            .await
+            .expect("non-rotation re-upload")
+        {
+            ApplyAttempt::Done(d) => assert_eq!(d, LogAppendDecision::Skip),
+            ApplyAttempt::RetryRace => panic!("unexpected race"),
+        }
+        assert_eq!(
+            stored_attest(&pool, &acct).await.as_deref(),
+            Some(&att1[..]),
+            "genesis_attest PRESERVED across a non-rotation re-upload (COALESCE)"
+        );
+
+        // 3. A fresh unproven key change WITH a new attestation -> Append and
+        //    the stored attestation is REPLACED. (Not gated: the first publish
+        //    never armed the cool-down marker.)
+        match try_apply_identity_once(
+            &pool,
+            COOLDOWN,
+            &acct,
+            &key2,
+            &x25519,
+            None,
+            Some(&self_sig),
+            Some(&att2),
+        )
+        .await
+        .expect("reset with a fresh attestation")
+        {
+            ApplyAttempt::Done(d) => {
+                assert_eq!(d, LogAppendDecision::Append { is_reset: true });
+            },
+            ApplyAttempt::RetryRace => panic!("unexpected race"),
+        }
+        assert_eq!(
+            stored_attest(&pool, &acct).await.as_deref(),
+            Some(&att2[..]),
+            "genesis_attest REPLACED when a fresh value is supplied"
+        );
+
+        sqlx::query("DELETE FROM identity_bundles WHERE account_id = ?")
+            .bind(&acct[..])
+            .execute(&pool)
+            .await
+            .expect("cleanup row");
+        pool.close().await;
     }
 }

@@ -107,6 +107,7 @@ public class TransparencyClient(
             identityPubkey = base64Decode(wire.identity_pubkey_b64),
             isReset = wire.is_reset,
             leafAuth = wire.leaf_auth_b64?.let { base64Decode(it) },
+            genesisAttest = wire.genesis_attest_b64?.let { base64Decode(it) },
         )
     }
 
@@ -254,6 +255,13 @@ public data class LatestEntry(
      *  pre-Sprint-2 / unauthenticated row. A client verifies a genesis
      *  self-sig against the served key on a first observation. */
     val leafAuth: ByteArray? = null,
+    /** ADR-0036 (G-30 finding 2): the entry's opaque auth-attested genesis
+     *  attestation (a 153-byte `GenesisAttestation`), or `null` for a
+     *  genesis leaf minted before ADR-0036 / a rotation entry. When present,
+     *  a client verifies it against the pinned auth attest verifying key on a
+     *  first observation — this PREVENTS first-entry squatting where the
+     *  self-sig only detects it. */
+    val genesisAttest: ByteArray? = null,
 ) {
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
@@ -264,8 +272,15 @@ public data class LatestEntry(
         if (isReset != other.isReset) return false
         val a = leafAuth
         val b = other.leafAuth
-        if (a == null) return b == null
-        return b != null && a.contentEquals(b)
+        if (a == null) {
+            if (b != null) return false
+        } else if (b == null || !a.contentEquals(b)) {
+            return false
+        }
+        val ga = genesisAttest
+        val gb = other.genesisAttest
+        if (ga == null) return gb == null
+        return gb != null && ga.contentEquals(gb)
     }
 
     override fun hashCode(): Int {
@@ -274,6 +289,7 @@ public data class LatestEntry(
         result = 31 * result + identityPubkey.contentHashCode()
         result = 31 * result + isReset.hashCode()
         result = 31 * result + (leafAuth?.contentHashCode() ?: 0)
+        result = 31 * result + (genesisAttest?.contentHashCode() ?: 0)
         return result
     }
 }
@@ -355,6 +371,10 @@ private data class LatestResWire(
     // G-30 #2 (ADR-0019): base64 of the entry's leaf authorisation, or
     // absent for a pre-Sprint-2 / unauthenticated row.
     val leaf_auth_b64: String? = null,
+    // ADR-0036 (G-30 finding 2): standard base64 of the entry's
+    // auth-attested genesis attestation, or absent for a genesis leaf
+    // minted before ADR-0036 / a rotation entry.
+    val genesis_attest_b64: String? = null,
 )
 
 /** Wire shape of `GET /transparency/proof/:idx` (Rust `ProofRes`). */

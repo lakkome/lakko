@@ -46,29 +46,8 @@ use std::time::Duration;
 
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
+use lakko_transparency::account_username_hash;
 use serde::Serialize;
-
-/// Domain-separation string for the account-key derivation (decision C).
-/// Both discovery (append) and the client (verify) MUST use this exact
-/// string so the derived `username_hash` matches. Changing it is a wire
-/// break.
-pub(crate) const ACCOUNT_KEY_DOMAIN: &str = "lakko/transparency/account/v1";
-
-/// Derive the transparency-log `username_hash` for an account:
-/// `BLAKE3("lakko/transparency/account/v1" || account_id)`.
-///
-/// The domain string is PREPENDED to the raw `account_id` bytes and the
-/// concatenation is hashed with plain (un-keyed) BLAKE3 — `account_id`
-/// is public, so the result reveals nothing new; the domain separator
-/// only stops this hash from colliding with any other BLAKE3 use of the
-/// same `account_id`.
-#[must_use]
-pub(crate) fn account_key(account_id: &[u8]) -> [u8; 32] {
-    let mut input = Vec::with_capacity(ACCOUNT_KEY_DOMAIN.len() + account_id.len());
-    input.extend_from_slice(ACCOUNT_KEY_DOMAIN.as_bytes());
-    input.extend_from_slice(account_id);
-    lakko_crypto::hash::blake3(&input)
-}
 
 /// Configuration + HTTP client for the transparency append integration.
 /// `None` in `AppState` when `LAKKO_TRANSPARENCY_URL` is unset (the
@@ -101,6 +80,16 @@ struct AppendReq<'a> {
     /// transparency-side `LAKKO_TRANSPARENCY_REQUIRE_LEAF_AUTH` policy.
     #[serde(skip_serializing_if = "Option::is_none")]
     leaf_auth_b64: Option<&'a str>,
+    /// ADR-0036: the auth-attested genesis attestation, base64-standard.
+    /// Opaque to discovery — forwarded verbatim, never parsed (invariant #2);
+    /// the transparency service verifies it operator-side. Omitted from the
+    /// JSON when the bundle row has no genesis_attest (a null value — every
+    /// rotation, and any pre-ADR-0036 genesis leaf), so a missing attestation
+    /// is governed by the transparency-side
+    /// `LAKKO_TRANSPARENCY_REQUIRE_GENESIS_ATTEST` policy (which consults it
+    /// only on the genesis/reset arm).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    genesis_attest_b64: Option<&'a str>,
 }
 
 impl TransparencyClient {
@@ -144,17 +133,22 @@ impl TransparencyClient {
         signature_pubkey: &[u8],
         is_reset: bool,
         leaf_auth: Option<&[u8]>,
+        genesis_attest: Option<&[u8]>,
     ) -> bool {
-        let username_hash = account_key(account_id);
+        let username_hash = account_username_hash(account_id);
         // G-30 #2 (ADR-0019): re-encode the stored leaf authorisation as
         // base64-standard for the append body. Opaque pass-through — the
         // bytes are never parsed here (invariant #2).
         let leaf_auth_b64 = leaf_auth.map(|a| B64.encode(a));
+        // ADR-0036: re-encode the stored genesis attestation the same way.
+        // Opaque pass-through — never parsed here (invariant #2).
+        let genesis_attest_b64 = genesis_attest.map(|a| B64.encode(a));
         let body = AppendReq {
             username_hash_b64: &B64.encode(username_hash),
             identity_pubkey_b64: &B64.encode(signature_pubkey),
             is_reset,
             leaf_auth_b64: leaf_auth_b64.as_deref(),
+            genesis_attest_b64: genesis_attest_b64.as_deref(),
         };
         let url = format!("{}/transparency/append", self.base_url);
 
@@ -204,10 +198,11 @@ impl TransparencyClient {
 /// transparency service un-flooded.
 const RECONCILE_BATCH: i64 = 256;
 
-/// One reconciler scan row: `(account_id, signature_pubkey, leaf_auth?)`.
-/// `leaf_auth` (G-30 #2, ADR-0019) is nullable and carried verbatim into the
-/// backfill append — opaque to discovery (invariant #2).
-type ReconcileRow = (Vec<u8>, Vec<u8>, Option<Vec<u8>>);
+/// One reconciler scan row: `(account_id, signature_pubkey, leaf_auth?,
+/// genesis_attest?)`. `leaf_auth` (G-30 #2, ADR-0019) and `genesis_attest`
+/// (ADR-0036) are nullable and carried verbatim into the backfill append —
+/// opaque to discovery (invariant #2).
+type ReconcileRow = (Vec<u8>, Vec<u8>, Option<Vec<u8>>, Option<Vec<u8>>);
 
 /// Spawn the KT-log S2.5 reconciliation sweep — a background task that
 /// eventually appends every account's CURRENT published identity to the
@@ -221,18 +216,19 @@ type ReconcileRow = (Vec<u8>, Vec<u8>, Option<Vec<u8>>);
 /// ## Each sweep
 ///
 /// 1. SELECT up to [`RECONCILE_BATCH`] `(account_id, signature_pubkey,
-///    leaf_auth)` rows where
+///    leaf_auth, genesis_attest)` rows where
 ///    `logged_pubkey IS NULL OR logged_pubkey <> signature_pubkey` — the
 ///    un-logged / stale accounts. (On a huge table this is a cheap scan but
 ///    not index-backed; a follow-up could add a cursor / partial index.
 ///    Noted, out of scope here.) The row's `leaf_auth` (G-30 #2, ADR-0019)
-///    is carried verbatim into the append so a backfilled entry keeps its
-///    leaf authorisation; a NULL `leaf_auth` forwards `None` (governed by the
-///    transparency-side presence policy).
+///    and `genesis_attest` (ADR-0036) are carried verbatim into the append so
+///    a backfilled entry keeps its leaf authorisation + genesis attestation; a
+///    NULL value forwards `None` (governed by the transparency-side presence
+///    policy).
 /// 2. For each row, call
 ///    [`TransparencyClient::append_key_change`]`(account_id,
-///    signature_pubkey, is_reset = false, leaf_auth)`. **`is_reset` is
-///    conservatively
+///    signature_pubkey, is_reset = false, leaf_auth, genesis_attest)`.
+///    **`is_reset` is conservatively
 ///    `false`** on a reconciled backfill: the reconciler runs for entries
 ///    whose hot-path append failed and it does NOT know whether the current
 ///    identity was published as an unproven reset. Logging a reset as a
@@ -273,10 +269,11 @@ pub(crate) fn spawn_transparency_reconciler(
 async fn reconcile_once(pool: &sqlx::MySqlPool, client: &TransparencyClient) {
     // The un-logged / stale accounts: never-confirmed (NULL) or whose
     // current key differs from the last confirmed one. `leaf_auth` (G-30 #2,
-    // ADR-0019) is carried verbatim so a backfilled entry keeps its leaf
-    // authorisation; opaque to discovery (invariant #2).
+    // ADR-0019) and `genesis_attest` (ADR-0036) are carried verbatim so a
+    // backfilled entry keeps its leaf authorisation + genesis attestation;
+    // opaque to discovery (invariant #2).
     let rows: Vec<ReconcileRow> = match sqlx::query_as(
-        "SELECT account_id, signature_pubkey, leaf_auth FROM identity_bundles \
+        "SELECT account_id, signature_pubkey, leaf_auth, genesis_attest FROM identity_bundles \
          WHERE logged_pubkey IS NULL OR logged_pubkey <> signature_pubkey \
          LIMIT ?",
     )
@@ -297,12 +294,19 @@ async fn reconcile_once(pool: &sqlx::MySqlPool, client: &TransparencyClient) {
 
     let mut reconciled: u64 = 0;
     let mut append_failures: u64 = 0;
-    for (account_id, signature_pubkey, leaf_auth) in &rows {
+    for (account_id, signature_pubkey, leaf_auth, genesis_attest) in &rows {
         // is_reset = false: conservative backfill (see fn docs) — a lost
         // reset-marker makes a client re-verify out-of-band (fail-SAFE).
-        // leaf_auth (G-30 #2) is forwarded verbatim, NULL -> None.
+        // leaf_auth (G-30 #2) + genesis_attest (ADR-0036) are forwarded
+        // verbatim, NULL -> None.
         let confirmed = client
-            .append_key_change(account_id, signature_pubkey, false, leaf_auth.as_deref())
+            .append_key_change(
+                account_id,
+                signature_pubkey,
+                false,
+                leaf_auth.as_deref(),
+                genesis_attest.as_deref(),
+            )
             .await;
         if !confirmed {
             append_failures += 1;
@@ -349,36 +353,10 @@ async fn reconcile_once(pool: &sqlx::MySqlPool, client: &TransparencyClient) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
-    #[test]
-    fn account_key_is_domain_separated_and_deterministic() {
-        let id = [0xABu8; 16];
-        let k1 = account_key(&id);
-        let k2 = account_key(&id);
-        // Deterministic.
-        assert_eq!(k1, k2);
-
-        // Domain-separated: hashing the bare account_id (no domain
-        // prefix) must NOT collide with the derived key.
-        let bare = lakko_crypto::hash::blake3(&id);
-        assert_ne!(k1, bare);
-
-        // Pinned domain string — a change here is a wire break with the
-        // client verifier.
-        assert_eq!(ACCOUNT_KEY_DOMAIN, "lakko/transparency/account/v1");
-
-        // Sanity: matches an explicit "domain || id" hash.
-        let mut expected_input = Vec::new();
-        expected_input.extend_from_slice(b"lakko/transparency/account/v1");
-        expected_input.extend_from_slice(&id);
-        assert_eq!(k1, lakko_crypto::hash::blake3(&expected_input));
-    }
-
-    #[test]
-    fn distinct_accounts_derive_distinct_keys() {
-        assert_ne!(account_key(&[0u8; 16]), account_key(&[1u8; 16]));
-    }
+    // The `username_hash` derivation itself (domain separation, determinism,
+    // the drift-pin golden) now lives in `lakko_transparency::account` — the
+    // single shared definition (ADR-0036). Its tests cover those properties;
+    // this module keeps only the discovery-specific reconciler-scan test.
 
     /// KT-log S2.5 — the reconciler scan SELECT returns exactly the
     /// un-logged (NULL marker) and stale (marker != current key) accounts,

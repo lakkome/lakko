@@ -36,6 +36,7 @@
 //! API hands the index out only on append, so first-write-to-DB is not
 //! possible without duplicating the index-allocation logic here.
 
+use lakko_attest::verify_genesis_fresh;
 use lakko_transparency::{
     verify_leaf_genesis, verify_supersession, InMemoryLog, InclusionProof, LogEntry, SignedRoot,
     TreeHash,
@@ -79,9 +80,31 @@ pub(crate) enum StoreError {
 type LeafRow = (u64, Vec<u8>, Vec<u8>, u64, i8);
 
 /// One `latest`-query row: `(idx, identity_pubkey, version, is_reset,
-/// leaf_auth)`. `is_reset` → `i8`; `leaf_auth` VARBINARY NULL →
-/// `Option<Vec<u8>>` (G-30 #2).
-type LatestRow = (u64, Vec<u8>, u64, i8, Option<Vec<u8>>);
+/// leaf_auth, genesis_attest)`. `is_reset` → `i8`; `leaf_auth` +
+/// `genesis_attest` VARBINARY NULL → `Option<Vec<u8>>` (G-30 #2 / ADR-0036).
+type LatestRow = (u64, Vec<u8>, u64, i8, Option<Vec<u8>>, Option<Vec<u8>>);
+
+/// The inputs to the ADR-0036 S4 auth-attested genesis gate, bundled so the
+/// [`LogStore::append`] argument list stays within bounds.
+///
+/// A genesis/reset leaf (no prior entry, or an ADR-0017 `is_reset` mint) may
+/// carry an account-authenticated `GenesisAttestation` proving the party that
+/// OPAQUE-authenticated as the account presented THIS pubkey as its genesis
+/// key. When [`required`](Self::required) is set the gate REFUSES such a leaf
+/// unless a valid attestation is present (fail-closed, invariant #4); rotation
+/// leaves are unaffected (their supersession proof already binds them).
+#[derive(Clone, Copy, Default)]
+pub(crate) struct GenesisAttestGate<'a> {
+    /// The opaque genesis-attestation blob supplied with the append, if any.
+    /// Stored verbatim in the `genesis_attest` sidecar regardless of the gate.
+    pub(crate) attestation: Option<&'a [u8]>,
+    /// The pinned auth attest verifying key
+    /// (`LAKKO_TRANSPARENCY_GENESIS_ATTEST_KEY`), or `None` when unconfigured.
+    pub(crate) key: Option<&'a signing::VerifyingKey>,
+    /// `LAKKO_TRANSPARENCY_REQUIRE_GENESIS_ATTEST` — when `true`, a genesis/reset
+    /// leaf without a valid attestation is refused.
+    pub(crate) required: bool,
+}
 
 /// The outcome of a successful [`LogStore::append`] — the assigned leaf
 /// index and the server-assigned per-username version (KT-log S2
@@ -117,6 +140,11 @@ pub(crate) struct LatestEntry {
     /// `None` for a pre-Sprint-2 / unauthenticated row. Served so a client
     /// can verify the genesis self-sig on a first observation.
     pub(crate) leaf_auth: Option<Vec<u8>>,
+    /// ADR-0036 S4: the opaque auth-attested genesis attestation stored with
+    /// this entry, or `None` for a rotation / a pre-ADR-0036 row. Served so a
+    /// client can verify the account-authenticated genesis binding on a first
+    /// observation (`verify_genesis_binding`).
+    pub(crate) genesis_attest: Option<Vec<u8>>,
 }
 
 /// The last witness-co-signed root (ADR-0020 Sprint 4). Only the
@@ -241,7 +269,8 @@ impl LogStore {
     /// # Errors
     ///
     /// Returns [`StoreError::Db`] if the latest-entry query, the
-    /// `MAX`-query, or the INSERT fails.
+    /// `MAX`-query, or the INSERT fails, or [`StoreError::Unauthorised`] if the
+    /// leaf authorisation or (ADR-0036 S4) the genesis attestation is rejected.
     pub(crate) async fn append(
         &self,
         pool: &MySqlPool,
@@ -249,6 +278,7 @@ impl LogStore {
         identity_pubkey: Vec<u8>,
         is_reset: bool,
         leaf_auth: Option<&[u8]>,
+        genesis: GenesisAttestGate<'_>,
         now_unix_secs: i64,
     ) -> Result<AppendResult, StoreError> {
         let mut log = self.inner.lock().await;
@@ -323,6 +353,34 @@ impl LogStore {
             }
         }
 
+        // ADR-0036 S4: auth-attested genesis gate (defence-in-depth, flag-gated).
+        // A genesis (no prior entry) or fresh-start reset leaf must — when the
+        // flag is ON — carry a valid `GenesisAttestation` minted by the account's
+        // OPAQUE-authenticated session, binding the served `(username_hash,
+        // pubkey)` and still fresh. Only the account holder can mint one, so this
+        // turns first-entry squatting from DETECTED (ADR-0019's self-sig above,
+        // which STAYS as the independent belt-and-suspenders proof) into
+        // PREVENTED. A rotation is untouched — its supersession proof already
+        // binds the predecessor key. Fail-closed (invariant #4): under the flag,
+        // an absent attestation, an unconfigured pin key, a non-32-byte pubkey, or
+        // an invalid / expired attestation all refuse the append.
+        let is_genesis_or_reset = latest.is_none() || is_reset;
+        if genesis.required && is_genesis_or_reset {
+            let attestation = genesis
+                .attestation
+                .ok_or(StoreError::Unauthorised("genesis attestation required"))?;
+            let key = genesis.key.ok_or(StoreError::Unauthorised(
+                "genesis attestation verifying key not configured",
+            ))?;
+            let pubkey: [u8; 32] = identity_pubkey.as_slice().try_into().map_err(|_| {
+                StoreError::Unauthorised(
+                    "identity pubkey is not 32 bytes for a genesis attestation",
+                )
+            })?;
+            verify_genesis_fresh(attestation, key, &username_hash, &pubkey, now_unix_secs)
+                .map_err(|_| StoreError::Unauthorised("genesis attestation did not verify"))?;
+        }
+
         // Assign the version: latest existing for this username_hash, + 1.
         // We already hold the latest row above; `latest_version + 1` (or 1
         // for a brand-new username) is the next version. Run under the lock
@@ -343,8 +401,8 @@ impl LogStore {
         // leaf the DB does not — fatal-ish, see module docs.
         let insert = sqlx::query(
             "INSERT INTO log_entries \
-             (idx, username_hash, identity_pubkey, version, is_reset, leaf_auth) \
-             VALUES (?, ?, ?, ?, ?, ?)",
+             (idx, username_hash, identity_pubkey, version, is_reset, leaf_auth, genesis_attest) \
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(idx)
         .bind(&entry.username_hash[..])
@@ -352,6 +410,7 @@ impl LogStore {
         .bind(entry.version)
         .bind(is_reset)
         .bind(leaf_auth)
+        .bind(genesis.attestation)
         .execute(pool)
         .await;
 
@@ -473,21 +532,23 @@ impl LogStore {
         username_hash: [u8; 32],
     ) -> Result<Option<LatestEntry>, StoreError> {
         // `is_reset` BOOLEAN comes back as MariaDB `TINYINT(1)` → `i8`;
-        // `leaf_auth` VARBINARY NULL → `Option<Vec<u8>>` (G-30 #2).
+        // `leaf_auth` + `genesis_attest` VARBINARY NULL → `Option<Vec<u8>>`
+        // (G-30 #2 / ADR-0036 S4).
         let row: Option<LatestRow> = sqlx::query_as(
-            "SELECT idx, identity_pubkey, version, is_reset, leaf_auth FROM log_entries \
-             WHERE username_hash = ? ORDER BY version DESC LIMIT 1",
+            "SELECT idx, identity_pubkey, version, is_reset, leaf_auth, genesis_attest \
+             FROM log_entries WHERE username_hash = ? ORDER BY version DESC LIMIT 1",
         )
         .bind(&username_hash[..])
         .fetch_optional(pool)
         .await?;
         Ok(row.map(
-            |(idx, identity_pubkey, version, is_reset, leaf_auth)| LatestEntry {
+            |(idx, identity_pubkey, version, is_reset, leaf_auth, genesis_attest)| LatestEntry {
                 idx,
                 version,
                 identity_pubkey,
                 is_reset: is_reset != 0,
                 leaf_auth,
+                genesis_attest,
             },
         ))
     }
@@ -649,12 +710,28 @@ mod tests {
 
         // Two appends for alice -> versions 1, 2; indices 0, 1.
         let r0 = store
-            .append(&pool, alice, vec![0x01; 32], false, None, 0)
+            .append(
+                &pool,
+                alice,
+                vec![0x01; 32],
+                false,
+                None,
+                GenesisAttestGate::default(),
+                0,
+            )
             .await
             .expect("append alice v1");
         assert_eq!((r0.idx, r0.version), (0, 1));
         let r1 = store
-            .append(&pool, alice, vec![0x02; 32], false, None, 0)
+            .append(
+                &pool,
+                alice,
+                vec![0x02; 32],
+                false,
+                None,
+                GenesisAttestGate::default(),
+                0,
+            )
             .await
             .expect("append alice v2");
         assert_eq!((r1.idx, r1.version), (1, 2));
@@ -662,7 +739,15 @@ mod tests {
         // First append for bob -> version 1 (a different username_hash
         // restarts the version counter), index 2.
         let r2 = store
-            .append(&pool, bob, vec![0x03; 32], true, None, 0)
+            .append(
+                &pool,
+                bob,
+                vec![0x03; 32],
+                true,
+                None,
+                GenesisAttestGate::default(),
+                0,
+            )
             .await
             .expect("append bob v1");
         assert_eq!((r2.idx, r2.version), (2, 1));
@@ -708,7 +793,15 @@ mod tests {
 
         // First append for alice -> idx 0, version 1, size 1.
         let r0 = store
-            .append(&pool, alice, vec![0x01; 32], false, None, 0)
+            .append(
+                &pool,
+                alice,
+                vec![0x01; 32],
+                false,
+                None,
+                GenesisAttestGate::default(),
+                0,
+            )
             .await
             .expect("append alice v1");
         assert_eq!((r0.idx, r0.version), (0, 1));
@@ -717,7 +810,15 @@ mod tests {
         // Re-append the SAME pubkey -> no-op: identical coordinates, size
         // unchanged (no duplicate leaf written).
         let r0_again = store
-            .append(&pool, alice, vec![0x01; 32], false, None, 0)
+            .append(
+                &pool,
+                alice,
+                vec![0x01; 32],
+                false,
+                None,
+                GenesisAttestGate::default(),
+                0,
+            )
             .await
             .expect("re-append alice same pubkey");
         assert_eq!((r0_again.idx, r0_again.version), (0, 1));
@@ -730,7 +831,15 @@ mod tests {
         // A reset-flagged re-append of the SAME pubkey is STILL a no-op
         // (the dedup keys on the pubkey, not the is_reset flag).
         let r0_reset = store
-            .append(&pool, alice, vec![0x01; 32], true, None, 0)
+            .append(
+                &pool,
+                alice,
+                vec![0x01; 32],
+                true,
+                None,
+                GenesisAttestGate::default(),
+                0,
+            )
             .await
             .expect("re-append alice same pubkey is_reset=true");
         assert_eq!((r0_reset.idx, r0_reset.version), (0, 1));
@@ -738,7 +847,15 @@ mod tests {
 
         // A DIFFERENT pubkey for the same username -> version+1, new leaf.
         let r1 = store
-            .append(&pool, alice, vec![0x02; 32], false, None, 0)
+            .append(
+                &pool,
+                alice,
+                vec![0x02; 32],
+                false,
+                None,
+                GenesisAttestGate::default(),
+                0,
+            )
             .await
             .expect("append alice v2 (different pubkey)");
         assert_eq!((r1.idx, r1.version), (1, 2));
@@ -758,6 +875,7 @@ mod tests {
     /// is governed by the handler's presence policy, not the store.) DB-gated
     /// on `LAKKO_TRANSPARENCY_TEST_DATABASE_URL`.
     #[tokio::test]
+    #[allow(clippy::too_many_lines)] // DB-gated multi-case gate walkthrough reads best whole
     async fn append_verifies_leaf_authorisation() {
         use lakko_transparency::{sign_leaf_genesis, SupersessionProof};
         use sqlx::mysql::MySqlPoolOptions;
@@ -790,7 +908,15 @@ mod tests {
         let pk1 = k1.verifying_key().to_bytes().to_vec();
         let genesis = sign_leaf_genesis(&k1, &alice, &pk1).to_vec();
         let r0 = store
-            .append(&pool, alice, pk1.clone(), false, Some(&genesis), now)
+            .append(
+                &pool,
+                alice,
+                pk1.clone(),
+                false,
+                Some(&genesis),
+                GenesisAttestGate::default(),
+                now,
+            )
             .await
             .expect("genesis self-sig accepted");
         assert_eq!(r0.version, 1);
@@ -799,7 +925,15 @@ mod tests {
         let k_bad = signing::SigningKey::from_seed(&[0x55; 32]);
         let pk_bad = k_bad.verifying_key().to_bytes().to_vec();
         let bad = store
-            .append(&pool, alice, pk_bad, false, Some(&[0u8; 64]), now)
+            .append(
+                &pool,
+                alice,
+                pk_bad,
+                false,
+                Some(&[0u8; 64]),
+                GenesisAttestGate::default(),
+                now,
+            )
             .await;
         assert!(
             matches!(bad, Err(StoreError::Unauthorised(_))),
@@ -819,7 +953,15 @@ mod tests {
         .sign(&k1)
         .to_vec();
         let r1 = store
-            .append(&pool, alice, pk2, false, Some(&proof), now + 10)
+            .append(
+                &pool,
+                alice,
+                pk2,
+                false,
+                Some(&proof),
+                GenesisAttestGate::default(),
+                now + 10,
+            )
             .await
             .expect("rotation proof accepted");
         assert_eq!(r1.version, 2);
@@ -838,12 +980,185 @@ mod tests {
         .sign(&k2)
         .to_vec();
         let mismatch = store
-            .append(&pool, alice, pk4, false, Some(&proof2), now + 10)
+            .append(
+                &pool,
+                alice,
+                pk4,
+                false,
+                Some(&proof2),
+                GenesisAttestGate::default(),
+                now + 10,
+            )
             .await;
         assert!(
             matches!(mismatch, Err(StoreError::Unauthorised(_))),
             "a proof authorising a different key must be refused"
         );
+
+        sqlx::query("DELETE FROM log_entries")
+            .execute(&pool)
+            .await
+            .expect("clear log_entries");
+        pool.close().await;
+    }
+
+    /// ADR-0036 S4 — the store's append-side auth-attested genesis gate.
+    /// With the flag ON (`required: true` + a pinned attest key), a genesis leaf
+    /// carrying a VALID `GenesisAttestation` (bound to the served
+    /// `(username_hash, pubkey)` + still fresh) is accepted; a MISSING, an
+    /// INVALID (garbage), and an EXPIRED attestation are each refused with
+    /// `Unauthorised`. With the flag OFF the attestation is ignored (back-compat)
+    /// and the genesis leaf appends. Distinct usernames keep every case a genesis
+    /// (a rotation would bypass the gate by design). DB-gated on
+    /// `LAKKO_TRANSPARENCY_TEST_DATABASE_URL`.
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)] // DB-gated multi-case gate walkthrough reads best whole
+    async fn append_verifies_genesis_attestation() {
+        use lakko_attest::GenesisAttestation;
+        use sqlx::mysql::MySqlPoolOptions;
+
+        let Ok(url) = std::env::var("LAKKO_TRANSPARENCY_TEST_DATABASE_URL") else {
+            eprintln!(
+                "skipping append_verifies_genesis_attestation: \
+                 LAKKO_TRANSPARENCY_TEST_DATABASE_URL unset"
+            );
+            return;
+        };
+
+        let pool = MySqlPoolOptions::new()
+            .max_connections(4)
+            .connect(&url)
+            .await
+            .expect("connect test DB");
+        crate::MIGRATIONS.run(&pool).await.expect("run migrations");
+        sqlx::query("DELETE FROM log_entries")
+            .execute(&pool)
+            .await
+            .expect("clear log_entries");
+
+        let store = LogStore::from_log(InMemoryLog::new(signing::SigningKey::generate()));
+        let now = 1_700_000_000_i64;
+
+        // The auth attest key: the store verifies the attestation against its
+        // VERIFYING half (which the operator pins from auth's JWKS).
+        let attest_signer = signing::SigningKey::from_seed(&[0xE1; 32]);
+        let attest_key = attest_signer.verifying_key();
+        let account_id = [0x09u8; 16];
+
+        // Valid: a genesis attestation bound to (alice, pkA), still fresh.
+        let alice = lakko_crypto::hash::blake3(b"alice-genesis-attest");
+        let pk_a = [0xA1u8; 32];
+        let att_ok =
+            GenesisAttestation::new(account_id, alice, pk_a, now + 300).sign(&attest_signer);
+        let gate_ok = GenesisAttestGate {
+            attestation: Some(&att_ok),
+            key: Some(&attest_key),
+            required: true,
+        };
+        let r0 = store
+            .append(&pool, alice, pk_a.to_vec(), false, None, gate_ok, now)
+            .await
+            .expect("valid genesis attestation accepted");
+        assert_eq!(r0.version, 1);
+        assert_eq!(store.size().await, 1);
+        // The blob is persisted opaque and served back on `latest`.
+        let latest = store
+            .latest(&pool, alice)
+            .await
+            .expect("latest alice")
+            .expect("alice has an entry");
+        assert_eq!(latest.genesis_attest.as_deref(), Some(&att_ok[..]));
+
+        // Missing: the flag is ON but no attestation is supplied — refused.
+        let bob = lakko_crypto::hash::blake3(b"bob-genesis-attest");
+        let pk_b = [0xB2u8; 32];
+        let gate_missing = GenesisAttestGate {
+            attestation: None,
+            key: Some(&attest_key),
+            required: true,
+        };
+        let missing = store
+            .append(&pool, bob, pk_b.to_vec(), false, None, gate_missing, now)
+            .await;
+        assert!(
+            matches!(missing, Err(StoreError::Unauthorised(_))),
+            "a genesis leaf with no attestation must be refused under the flag"
+        );
+
+        // Invalid: a garbage blob of the right length does not verify — refused.
+        let carol = lakko_crypto::hash::blake3(b"carol-genesis-attest");
+        let pk_c = [0xC3u8; 32];
+        let garbage = [0u8; lakko_attest::GENESIS_ATTESTATION_LEN];
+        let gate_garbage = GenesisAttestGate {
+            attestation: Some(&garbage),
+            key: Some(&attest_key),
+            required: true,
+        };
+        let invalid = store
+            .append(&pool, carol, pk_c.to_vec(), false, None, gate_garbage, now)
+            .await;
+        assert!(
+            matches!(invalid, Err(StoreError::Unauthorised(_))),
+            "a garbage attestation must be refused"
+        );
+
+        // Expired: a validly-signed attestation past its expiry — refused.
+        let dave = lakko_crypto::hash::blake3(b"dave-genesis-attest");
+        let pk_d = [0xD4u8; 32];
+        let att_expired =
+            GenesisAttestation::new(account_id, dave, pk_d, now - 1).sign(&attest_signer);
+        let gate_expired = GenesisAttestGate {
+            attestation: Some(&att_expired),
+            key: Some(&attest_key),
+            required: true,
+        };
+        let expired = store
+            .append(&pool, dave, pk_d.to_vec(), false, None, gate_expired, now)
+            .await;
+        assert!(
+            matches!(expired, Err(StoreError::Unauthorised(_))),
+            "an expired attestation must be refused"
+        );
+
+        // A wrong-pubkey attestation (bound to pkA but appending pkE) is refused.
+        let erin = lakko_crypto::hash::blake3(b"erin-genesis-attest");
+        let pk_e = [0xE5u8; 32];
+        let att_wrong_pk =
+            GenesisAttestation::new(account_id, erin, pk_a, now + 300).sign(&attest_signer);
+        let gate_wrong_pk = GenesisAttestGate {
+            attestation: Some(&att_wrong_pk),
+            key: Some(&attest_key),
+            required: true,
+        };
+        let wrong_pk = store
+            .append(&pool, erin, pk_e.to_vec(), false, None, gate_wrong_pk, now)
+            .await;
+        assert!(
+            matches!(wrong_pk, Err(StoreError::Unauthorised(_))),
+            "an attestation bound to a different pubkey must be refused"
+        );
+
+        // Only the one valid append wrote a row.
+        assert_eq!(
+            store.size().await,
+            1,
+            "refused appends must not grow the log"
+        );
+
+        // Flag OFF: a genesis leaf with no attestation appends (back-compat).
+        let frank = lakko_crypto::hash::blake3(b"frank-genesis-attest");
+        let pk_f = [0xF6u8; 32];
+        let gate_off = GenesisAttestGate {
+            attestation: None,
+            key: None,
+            required: false,
+        };
+        let r_off = store
+            .append(&pool, frank, pk_f.to_vec(), false, None, gate_off, now)
+            .await
+            .expect("flag OFF ignores a missing attestation");
+        assert_eq!(r_off.version, 1);
+        assert_eq!(store.size().await, 2);
 
         sqlx::query("DELETE FROM log_entries")
             .execute(&pool)
@@ -889,16 +1204,40 @@ mod tests {
 
         // alice v1 (idx 0), then alice v2 (idx 1, is_reset=true).
         store
-            .append(&pool, alice, vec![0x01; 32], false, None, 0)
+            .append(
+                &pool,
+                alice,
+                vec![0x01; 32],
+                false,
+                None,
+                GenesisAttestGate::default(),
+                0,
+            )
             .await
             .expect("append alice v1");
         store
-            .append(&pool, alice, vec![0x02; 32], true, None, 0)
+            .append(
+                &pool,
+                alice,
+                vec![0x02; 32],
+                true,
+                None,
+                GenesisAttestGate::default(),
+                0,
+            )
             .await
             .expect("append alice v2");
         // bob v1 (idx 2) — a different account-key in between.
         store
-            .append(&pool, bob, vec![0x03; 32], false, None, 0)
+            .append(
+                &pool,
+                bob,
+                vec![0x03; 32],
+                false,
+                None,
+                GenesisAttestGate::default(),
+                0,
+            )
             .await
             .expect("append bob v1");
 
@@ -916,6 +1255,7 @@ mod tests {
                 identity_pubkey: vec![0x02; 32],
                 is_reset: true,
                 leaf_auth: None,
+                genesis_attest: None,
             }
         );
 
@@ -933,6 +1273,7 @@ mod tests {
                 identity_pubkey: vec![0x03; 32],
                 is_reset: false,
                 leaf_auth: None,
+                genesis_attest: None,
             }
         );
 

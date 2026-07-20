@@ -82,6 +82,15 @@ pub(crate) struct AppendReq {
     /// governed by `LAKKO_TRANSPARENCY_REQUIRE_LEAF_AUTH`. Opaque otherwise.
     #[serde(default)]
     pub leaf_auth_b64: Option<String>,
+    /// ADR-0036 S4: the auth-attested genesis attestation, base64-standard
+    /// (153 bytes, minted by `services/auth` on `POST /auth/genesis/attest`,
+    /// binding the OPAQUE-authenticated account to the genesis pubkey). Stored
+    /// opaque next to `leaf_auth`; for a genesis/reset leaf the store verifies
+    /// it against the pinned auth key when
+    /// `LAKKO_TRANSPARENCY_REQUIRE_GENESIS_ATTEST` is on (an absent / invalid one
+    /// is then refused — the anti-squatting gate). Ignored for rotations.
+    #[serde(default)]
+    pub genesis_attest_b64: Option<String>,
 }
 
 /// `POST /transparency/append` response body.
@@ -160,6 +169,20 @@ pub(crate) async fn append(
         return Err((StatusCode::FORBIDDEN, "leaf authorisation required"));
     }
 
+    // ADR-0036 S4: decode the optional auth-attested genesis attestation. Its
+    // presence policy (`require_genesis_attest`, applied only to genesis/reset
+    // leaves) lives in the store — it is the store that knows whether an append
+    // is a genesis or a rotation.
+    let genesis_attest: Option<Vec<u8>> = match req.genesis_attest_b64.as_deref() {
+        Some(s) => Some(B64.decode(s.as_bytes()).map_err(|_| {
+            (
+                StatusCode::BAD_REQUEST,
+                "genesis_attest_b64 not valid base64",
+            )
+        })?),
+        None => None,
+    };
+
     let result = state
         .store
         .append(
@@ -168,6 +191,11 @@ pub(crate) async fn append(
             identity_pubkey,
             req.is_reset,
             leaf_auth.as_deref(),
+            crate::store::GenesisAttestGate {
+                attestation: genesis_attest.as_deref(),
+                key: state.genesis_attest_key.as_ref(),
+                required: state.require_genesis_attest,
+            },
             now_unix_secs_i64(),
         )
         .await
@@ -335,6 +363,12 @@ pub(crate) struct LatestRes {
     /// genesis self-sig on a first observation against the served pubkey.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub leaf_auth_b64: Option<String>,
+    /// ADR-0036 S4: the opaque auth-attested genesis attestation stored with
+    /// this entry, base64, or absent for a rotation / a pre-ADR-0036 row. A
+    /// client verifies it (`verify_genesis_binding`) against the pinned auth key
+    /// on a first observation to confirm the account authorised the genesis key.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub genesis_attest_b64: Option<String>,
 }
 
 /// Return the latest entry for the account-key carried in the path
@@ -376,6 +410,7 @@ pub(crate) async fn latest(
         identity_pubkey_b64: B64.encode(entry.identity_pubkey),
         is_reset: entry.is_reset,
         leaf_auth_b64: entry.leaf_auth.map(|a| B64.encode(a)),
+        genesis_attest_b64: entry.genesis_attest.map(|a| B64.encode(a)),
     }))
 }
 
@@ -543,11 +578,27 @@ mod tests {
 
         // alice v1 then v2 (a rotation), v2 is_reset=false.
         store
-            .append(&pool, alice, vec![0x01; 32], false, None, 0)
+            .append(
+                &pool,
+                alice,
+                vec![0x01; 32],
+                false,
+                None,
+                crate::store::GenesisAttestGate::default(),
+                0,
+            )
             .await
             .expect("append alice v1");
         store
-            .append(&pool, alice, vec![0x02; 32], false, None, 0)
+            .append(
+                &pool,
+                alice,
+                vec![0x02; 32],
+                false,
+                None,
+                crate::store::GenesisAttestGate::default(),
+                0,
+            )
             .await
             .expect("append alice v2");
 
@@ -556,6 +607,8 @@ mod tests {
             store,
             append_secret: None,
             require_leaf_auth: false,
+            genesis_attest_key: None,
+            require_genesis_attest: false,
             witness: None,
         };
         let app = crate::build_app(state);

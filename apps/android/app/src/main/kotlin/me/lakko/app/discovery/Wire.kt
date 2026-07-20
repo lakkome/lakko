@@ -169,6 +169,15 @@ data class IdentityUploadRequest(
      *  append is idempotent and needs no authorisation). Opaque to the
      *  server. */
     val leaf_auth: String? = null,
+    /** ADR-0036 (G-30 finding 2): base64 of an optional auth-attested
+     *  genesis attestation (from `POST /auth/genesis/attest`) minted for a
+     *  genesis / fresh-start publish. Rides alongside [leaf_auth]; discovery
+     *  forwards it opaquely (invariant #2) to the transparency append, which
+     *  prevents first-entry squatting. `null` for a same-key re-publish (or
+     *  when the mint was unavailable during rollout — the require-genesis-
+     *  attest flag defaults OFF, so the leaf still appends). Preserved across
+     *  non-rotation re-uploads server-side via `COALESCE`, like [leaf_auth]. */
+    val genesis_attest: String? = null,
 )
 
 /** Response body of `POST /discovery/identity`. */

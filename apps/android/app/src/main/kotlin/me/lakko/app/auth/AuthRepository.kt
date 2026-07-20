@@ -1645,6 +1645,36 @@ public class AuthRepository(
     }
 
     /**
+     * ADR-0036 S6 (G-30 finding 2) — mint an auth-attested genesis
+     * attestation for [pubkey] (bearer = [sessionToken]) via
+     * `POST /auth/genesis/attest`, additive to the ADR-0019 self-signature.
+     *
+     * BEST-EFFORT: returns `null` on any failure so a genesis publish is
+     * NEVER blocked. During rollout the transparency require-genesis-attest
+     * flag defaults OFF — a genesis leaf without an attestation still
+     * appends (the self-sig authorises it), and the attestation is attached
+     * when the mint succeeds. Once every client mints, the operator can flip
+     * the flag on. The bytes ride onto the identity-bundle upload next to the
+     * self-sig.
+     */
+    private suspend fun mintGenesisAttestBestEffort(
+        sessionToken: String,
+        pubkey: ByteArray,
+    ): ByteArray? =
+        try {
+            authClientFactory().use { it.genesisAttest(sessionToken, pubkey) }
+        } catch (cause: Throwable) {
+            Log.w(
+                "lakko-auth",
+                "ADR-0036: genesis attestation mint failed; publishing the " +
+                    "genesis bundle WITHOUT it (additive — the transparency " +
+                    "require-genesis-attest flag defaults OFF during rollout)",
+                cause,
+            )
+            null
+        }
+
+    /**
      * Publish the fresh-identity bundle (+ KeyPackage) for [accountId]
      * WITHOUT a supersession proof (ADR-0017 lost-everything). THROWS on
      * failure — the caller publishes before any local mutation, so a throw
@@ -1659,6 +1689,7 @@ public class AuthRepository(
         try {
             discovery.setSessionToken(sessionToken)
             Identity.fromSeed(seed).use { identity ->
+                val signaturePubkey = identity.signaturePublicKey()
                 // G-30 #2 (ADR-0019): a fresh-start mint publishes a NEW key
                 // with no supersession proof, so authorise the log entry with a
                 // genesis self-signature over the (account_key, pubkey) binding.
@@ -1666,12 +1697,16 @@ public class AuthRepository(
                     identity.ed25519Seed(),
                     transparencyAccountKey(accountId),
                 )
+                // ADR-0036 — additionally mint an auth-attested genesis so the
+                // transparency append can PREVENT (not merely detect) squatting.
+                val genesisAttest = mintGenesisAttestBestEffort(sessionToken, signaturePubkey)
                 discovery.uploadIdentityBundle(
                     accountId = accountId,
-                    signaturePubkey = identity.signaturePublicKey(),
+                    signaturePubkey = signaturePubkey,
                     x25519Pubkey = identity.x25519PublicKey(),
                     supersessionProofB64 = null,
                     leafAuth = leafAuth,
+                    genesisAttest = genesisAttest,
                 )
                 discovery.uploadKeyPackage(accountId, identity.createKeyPackage())
             }
@@ -2487,6 +2522,11 @@ public class AuthRepository(
                         identity.ed25519Seed(),
                         transparencyAccountKey(accountId),
                     )
+                    // ADR-0036 — mint an auth-attested genesis (best-effort)
+                    // so the FIRST-time-discovery-sees-the-account case (see
+                    // the leaf_auth note above) prevents squatting, not just
+                    // detects it. Ignored on a TRUE re-publish (already logged).
+                    val genesisAttest = mintGenesisAttestBestEffort(sessionToken, signaturePubkey)
                     // Proof-less re-publish (account key unchanged).
                     // Refreshes the KeyPackage + clears any stale server
                     // proof column.
@@ -2496,6 +2536,7 @@ public class AuthRepository(
                         x25519Pubkey = x25519Pubkey,
                         supersessionProofB64 = null,
                         leafAuth = leafAuth,
+                        genesisAttest = genesisAttest,
                     )
                     discovery.uploadKeyPackage(accountId, keyPackageBytes)
                 }

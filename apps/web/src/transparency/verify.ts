@@ -46,6 +46,7 @@ import { accountKey } from "./account-key";
 import { checkAndAdvance, loadLastSeenLogSize } from "./last-seen-root";
 import { pinnedOperatorKey, pinnedWitnessKey } from "./config";
 import { base64Decode } from "../auth/account-id";
+import { fetchDeviceAttestKey } from "../auth/device-attest-key";
 import { loadWasm } from "../wasm";
 
 /** The verdict of a log-inclusion check for one fetched identity. */
@@ -160,6 +161,30 @@ export interface VerifyDeps {
   verifyGenesis?: (args: {
     sig: Uint8Array;
     accountKey: Uint8Array;
+    servedPubkey: Uint8Array;
+  }) => void;
+  /**
+   * ADR-0036 (G-30 finding 2) — the pinned AUTH-ATTEST verifying key (32
+   * bytes) used for the genesis-attestation gate, or `null` for "not
+   * available" (no build-time pin and the JWKS is unreachable → the gate
+   * cannot run and is skipped). When omitted, resolved best-effort via
+   * `fetchDeviceAttestKey()` (the SAME key the client pins for device
+   * attestations; ADR-0036 §3 reuses the signing key). Production callers
+   * never pass this.
+   */
+  attestKey?: Uint8Array | null;
+  /**
+   * Genesis-ATTESTATION gate override (TEST SEAM ONLY) — ADR-0036. When
+   * supplied, replaces the real wasm `accountUsernameHash` +
+   * `verifyGenesisAttestation` calls: it should THROW to simulate a failed
+   * attestation verification and RETURN to simulate success — exactly the
+   * wasm contract. Only consulted when a non-null `attestKey` is available
+   * (mirroring the witness-gate seam). Production callers never pass this.
+   */
+  verifyGenesisAttest?: (args: {
+    attestation: Uint8Array;
+    attestKey: Uint8Array;
+    accountId: Uint8Array;
     servedPubkey: Uint8Array;
   }) => void;
 }
@@ -298,6 +323,52 @@ export async function verifyIdentityInLog(
         }
       } catch {
         return { status: "mismatch", isReset };
+      }
+    }
+
+    // 6. ADR-0036 (G-30 finding 2) — first-observation AUTH-ATTESTED
+    //    genesis check, ADDITIVE to the self-sig above. When the entry
+    //    carries an auth-attested `genesis_attest`, verify it against the
+    //    pinned auth attest key: it proves only the OPAQUE-authenticated
+    //    account could have published this genesis key (the self-sig alone
+    //    only DETECTS squatting; this PREVENTS it). The attest key is the
+    //    SAME one the client already pins for device attestations
+    //    (ADR-0036 §3 reuses the signing key), resolved best-effort. When
+    //    it is not available (no build-time pin + JWKS unreachable) we
+    //    cannot run the check, so we SKIP it — the self-sig + inclusion
+    //    gates still stand. But a PRESENT attestation that FAILS to verify
+    //    against an AVAILABLE key is fail-closed → mismatch, exactly like
+    //    the self-sig gate (never blind-TOFU).
+    if (latest.genesisAttest !== null) {
+      const attestKey =
+        deps.attestKey !== undefined ? deps.attestKey : await resolveAttestKey();
+      if (attestKey !== null) {
+        try {
+          if (deps.verifyGenesisAttest !== undefined) {
+            deps.verifyGenesisAttest({
+              attestation: latest.genesisAttest,
+              attestKey,
+              accountId,
+              servedPubkey: publishedSignaturePubkey,
+            });
+          } else {
+            const wasm = await loadWasm();
+            const usernameHash = wasm.accountUsernameHash(accountId);
+            wasm.verifyGenesisAttestation(
+              latest.genesisAttest,
+              attestKey,
+              accountId,
+              usernameHash,
+              publishedSignaturePubkey,
+            );
+          }
+        } catch {
+          // A present genesis attestation did not verify against the
+          // pinned auth key over (account_id, username_hash, served
+          // pubkey) → the account did NOT authorise this genesis key.
+          // Fail-closed, like the self-sig gate.
+          return { status: "mismatch", isReset };
+        }
       }
     }
     return { status: "confirmed", isReset };
@@ -553,6 +624,23 @@ export async function lookupServedKeyReset(
     return latest.isReset;
   } catch {
     // Best-effort enrichment — any fault is "unknown".
+    return null;
+  }
+}
+
+/**
+ * ADR-0036 — resolve the pinned auth-attest verifying key best-effort for
+ * the genesis-attestation gate. Returns the build-time pin (no network)
+ * when `VITE_LAKKO_DEVICE_ATTEST_KEY` is set, else the cached JWKS key,
+ * else `null` when it cannot be obtained (unpinned + unreachable). NEVER
+ * throws — an unavailable key means the additive gate simply skips (the
+ * self-sig + inclusion gates still stand), matching the best-effort
+ * posture of the whole verify layer.
+ */
+async function resolveAttestKey(): Promise<Uint8Array | null> {
+  try {
+    return await fetchDeviceAttestKey();
+  } catch {
     return null;
   }
 }

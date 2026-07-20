@@ -258,6 +258,36 @@ data class DeviceAuthorizeRedeemResponse(
 )
 
 // ----------------------------------------------------------------------------
+// Auth-attested KT-log genesis (services/auth/src/genesis_attest.rs —
+// ADR-0036, G-30 finding 2)
+// ----------------------------------------------------------------------------
+
+/** `POST /auth/genesis/attest` request body. Bearer-authenticated
+ *  (the OPAQUE-authenticated account's session token rides the
+ *  `Authorization` header, not the body); the body carries ONLY the
+ *  client's genesis identity pubkey. No `pow` — the bearer is the
+ *  anti-abuse gate. */
+@Serializable
+data class GenesisAttestRequest(
+    /** URL-safe base64 (no pad) of the client's 32-byte Ed25519 genesis
+     *  identity pubkey. The server binds it to the authenticated account
+     *  under `lakko/genesis-attest/v1`; it does NOT independently verify
+     *  the key is "correct" (it cannot — invariant #2). */
+    val pubkey_b64: String,
+)
+
+/** `POST /auth/genesis/attest` response body. */
+@Serializable
+data class GenesisAttestResponse(
+    /** URL-safe base64 (no pad) of the signed 153-byte
+     *  `GenesisAttestation`. The client uploads it alongside the identity
+     *  bundle (next to the ADR-0019 self-sig); discovery forwards it
+     *  opaquely to the transparency append gate, which prevents first-entry
+     *  squatting (only the account holder could have minted it). */
+    val genesis_attest_b64: String,
+)
+
+// ----------------------------------------------------------------------------
 // TOTP (services/auth/src/totp.rs — ADR-0018 factor (c),
 // authenticator-code recovery)
 // ----------------------------------------------------------------------------

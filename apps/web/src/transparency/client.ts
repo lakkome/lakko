@@ -66,6 +66,12 @@ export interface LatestEntry {
    *  verifies a genesis self-sig against the served key on a first
    *  observation. */
   readonly leafAuth: Uint8Array | null;
+  /** ADR-0036 (G-30 finding 2): the opaque auth-attested genesis
+   *  attestation stored with this entry, or `null` for a rotation / a
+   *  pre-ADR-0036 row. A client verifies it against the pinned auth attest
+   *  key on a first observation (beside the self-sig) to confirm the
+   *  account authorised the genesis key — the anti-squatting gate. */
+  readonly genesisAttest: Uint8Array | null;
 }
 
 /** Decoded `GET /transparency/proof/:idx` response — bytes, not base64.
@@ -125,6 +131,9 @@ interface LatestResWire {
   /** G-30 #2 (ADR-0019): base64 of the entry's leaf authorisation, or
    *  absent for a pre-Sprint-2 / unauthenticated row. */
   leaf_auth_b64?: string;
+  /** ADR-0036 (G-30 finding 2): base64 of the entry's auth-attested
+   *  genesis attestation, or absent for a rotation / a pre-ADR-0036 row. */
+  genesis_attest_b64?: string;
 }
 
 /** Wire shape of `GET /transparency/proof/:idx` (Rust `ProofRes`). */
@@ -184,6 +193,11 @@ export class TransparencyClient {
       leafAuth:
         wire.leaf_auth_b64 !== undefined && wire.leaf_auth_b64.length > 0
           ? base64Decode(wire.leaf_auth_b64)
+          : null,
+      genesisAttest:
+        wire.genesis_attest_b64 !== undefined &&
+        wire.genesis_attest_b64.length > 0
+          ? base64Decode(wire.genesis_attest_b64)
           : null,
     };
   }

@@ -5,7 +5,10 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 # ADR-0036: Auth-attested KT-log genesis (prevent first-entry squatting)
 
-- **Status:** Accepted (maintainer accepted the client-supplied-pubkey attestation semantics; implementation deferred to a follow-up session — the 7-sprint decomposition below is the plan)
+- **Status:** Implemented (2026-07) — all 7 sprints below landed and were verified
+  against the code this session; see the Implementation section. Flag-gated
+  rollout (`LAKKO_TRANSPARENCY_REQUIRE_GENESIS_ATTEST`) ships default-OFF, so
+  flipping the gate on is the remaining deploy step.
 - **Date:** 2026-07-20
 - **Context:** Phase 2 — key transparency. Closes the G-30 finding-2 residual
   (first-entry squatting) that ADR-0019's genesis self-signature only DETECTS.
@@ -458,6 +461,70 @@ Each step names the ADR-0015 / ADR-0019 file it mirrors.
   ADR-0019 cross-reference + the CLAUDE.md ADR table row + module map
   (`lakko-attest` gains the genesis attestation, `services/auth` gains the mint
   endpoint) after landing.
+
+## Implementation
+
+**Status: Implemented (2026-07).** All seven sprints landed; each was verified
+against the code this session. Deviations from the plan are noted inline.
+
+- **S1 — `GenesisAttestation` primitive + fuzz.** Landed in a dedicated
+  `crates/lakko-attest/src/genesis.rs` module (not inlined into `lib.rs` as the
+  sprint sketch suggested — same crate, re-exported from `lib.rs`, cleaner
+  separation from `ActionAttestation`). The 153-byte fixed layout, domain
+  `lakko/genesis-attest/v1`, `sign` / `open` / `is_expired` / `verify_genesis_binding`
+  (no freshness) / `verify_genesis_fresh` (freshness) are all present, with
+  `GENESIS_ATTESTATION_LEN == 153` asserted. 8 unit tests including
+  `domains_do_not_cross_between_action_and_genesis`, which proves action↔genesis
+  non-interchangeability by BOTH distinct total length AND the domain-prefixed
+  signing input under a shared signing key. Fuzz target `genesis_attestation_open`
+  registered in `crates/lakko-attest/fuzz`.
+- **S2 — auth mint endpoint + shared derivation.** `POST /auth/genesis/attest`
+  in `services/auth/src/genesis_attest.rs` — bearer-authed via the
+  `AuthenticatedAccount` extractor, stateless (no DB row), reuses `state.attest_key`
+  (the device-attest signing key, §3), `GENESIS_ATTEST_TTL_SECS = 3600`. It
+  derives `username_hash` from the AUTHENTICATED `account_id` (never the request
+  body) via the promoted shared definition `lakko_transparency::account_username_hash`
+  (`crates/lakko-transparency/src/account.rs`, `ACCOUNT_KEY_DOMAIN =
+  "lakko/transparency/account/v1"`), pinned by the drift test
+  `golden_pins_the_account_username_hash`
+  (`a5c9754b6ee1c04e65d76b50f1e68a61951ccb250d482c6016fdd5fa78b89229`).
+- **S3 — FFI verify.** `verify_genesis_attestation` + `account_username_hash` on
+  UniFFI (`crates/lakko-ffi-uniffi/src/lib.rs`); `verifyGenesisAttestation` +
+  `accountUsernameHash` on wasm (`crates/lakko-ffi-wasm/src/supersession.rs`).
+- **S4 — transparency append gate + migration + flag.** Migration
+  `services/transparency/migrations/0004_genesis_attest.sql` (nullable
+  `genesis_attest VARBINARY(256)` sidecar, opaque to the Merkle tree — never in
+  `canonical_bytes`). The genesis/reset arm of the append gate
+  (`services/transparency/src/store.rs`) additionally runs `verify_genesis_fresh`
+  (fail-closed) when `require_genesis_attest` is on; the ADR-0019 self-sig gate
+  STAYS as the independent belt-and-suspenders proof. Flag
+  `LAKKO_TRANSPARENCY_REQUIRE_GENESIS_ATTEST` (default OFF) + pinned key
+  `LAKKO_TRANSPARENCY_GENESIS_ATTEST_KEY` (`operator_key.rs`), with loud startup
+  diagnostics for every flag×key combination (`main.rs`).
+- **S5 — discovery threading + migration.** Migration
+  `services/discovery/migrations/0016_identity_bundle_genesis_attest.sql`
+  (nullable `genesis_attest` sidecar); `identity_bundle.rs` stores + forwards it
+  opaquely, COALESCE-preserved across non-rotation re-uploads (invariant #2); the
+  `AppendReq` in `transparency_log.rs` carries `genesis_attest_b64`.
+- **S6 — 3-client mint + verify.** Web (`auth/client.ts` `genesisAttest`,
+  `transparency/verify.ts` first-observation gate, `discovery/wire.ts`
+  `genesis_attest`), iOS (`AuthClient` / `AuthRepository` / `TransparencyVerify`
+  + `DiscoveryWire`), and Android (the Kotlin twins) mint on the genesis publish
+  (soft-fail) and verify a served attestation on first observation beside the
+  self-sig (fail-closed `mismatch`), each reusing the pinned DeviceAttestKey.
+- **S7 — docs reconcile.** This section; the ADR status flip; the CLAUDE.md ADR
+  table row + module map + fuzz list; the G-30 finding-2 transition + the C-56
+  extension in the security docs.
+
+### Rollout residual
+
+The gate ships default-OFF, which is additive and non-breaking for existing
+genesis leaves (they carry no attestation). Flipping
+`LAKKO_TRANSPARENCY_REQUIRE_GENESIS_ATTEST` on — sequenced AFTER the three clients
+mint (S6, done) — plus a live cross-service end-to-end (mint → publish →
+append-gate → first-observation verify) on a deployed environment are the
+remaining steps. Operator+auth collusion stays out of scope (a compromised attest
+signing key already co-signs the root — the same trust tier).
 
 ## References
 

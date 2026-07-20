@@ -3171,6 +3171,72 @@ pub fn verify_witness_cosig(
     .map_err(|e| FfiError::Identity(format!("witness co-sig verify: {e}")))
 }
 
+/// Verify an auth-attested genesis attestation's full account / username_hash /
+/// pubkey binding against the CLIENT-PINNED auth attest verifying key (ADR-0036,
+/// closes the G-30 finding-2 squatting residual). A pass proves the party that
+/// OPAQUE-authenticated as `expected_account_id` presented `expected_pubkey` as
+/// its genesis identity key (bridged to the KT-log leaf by
+/// `expected_username_hash`) — so only the account holder could have minted it.
+///
+/// This is the CLIENT first-observation path: it checks the signature plus all
+/// four bindings but deliberately does NOT enforce freshness (the attestation is
+/// a permanent historical artifact; the transparency append gate is the side that
+/// bounds the mint→append window). Verify beside the ADR-0019 self-signature.
+///
+/// # Errors
+///
+/// [`FfiError::Identity`] if `attest_verifying_key` is not a valid Ed25519 key,
+/// `expected_account_id` is not 16 bytes, `expected_username_hash` /
+/// `expected_pubkey` are not 32 bytes, the attestation is malformed / the wrong
+/// length or version, the signature does not verify, or any of the account /
+/// username_hash / pubkey bindings mismatch.
+#[uniffi::export]
+pub fn verify_genesis_attestation(
+    attestation: Vec<u8>,
+    attest_verifying_key: Vec<u8>,
+    expected_account_id: Vec<u8>,
+    expected_username_hash: Vec<u8>,
+    expected_pubkey: Vec<u8>,
+) -> Result<(), FfiError> {
+    let verifying = lakko_crypto::signing::VerifyingKey::from_bytes(&attest_verifying_key)
+        .map_err(|_| {
+            FfiError::Identity("attest verifying key is not a valid Ed25519 key".to_string())
+        })?;
+    let expected_account: [u8; 16] = expected_account_id
+        .as_slice()
+        .try_into()
+        .map_err(|_| FfiError::Identity("expected_account_id must be 16 bytes".to_string()))?;
+    let expected_username_hash: [u8; 32] = expected_username_hash
+        .as_slice()
+        .try_into()
+        .map_err(|_| FfiError::Identity("expected_username_hash must be 32 bytes".to_string()))?;
+    let expected_pubkey: [u8; 32] = expected_pubkey
+        .as_slice()
+        .try_into()
+        .map_err(|_| FfiError::Identity("expected_pubkey must be 32 bytes".to_string()))?;
+    lakko_attest::verify_genesis_binding(
+        &attestation,
+        &verifying,
+        &expected_account,
+        &expected_username_hash,
+        &expected_pubkey,
+    )
+    .map(|_| ())
+    .map_err(|e| FfiError::Identity(format!("genesis attestation verify: {e}")))
+}
+
+/// Derive the transparency `username_hash` for an `account_id`
+/// (`BLAKE3("lakko/transparency/account/v1" ‖ account_id)`) — the same
+/// derivation discovery uses on append. A client computes the
+/// `expected_username_hash` it feeds to [`verify_genesis_attestation`] from the
+/// target's `account_id` (obtained via the `username → account_id` discovery
+/// lookup) without re-implementing BLAKE3. Returns the 32-byte hash.
+#[uniffi::export]
+#[must_use]
+pub fn account_username_hash(account_id: Vec<u8>) -> Vec<u8> {
+    lakko_transparency::account_username_hash(&account_id).to_vec()
+}
+
 // ---------------------------------------------------------------------------
 // Key-transparency inclusion verifier (KT-log S3b).
 //
@@ -4112,5 +4178,113 @@ mod tests {
     #[test]
     fn leaf_genesis_sign_rejects_bad_seed() {
         assert!(sign_leaf_genesis(vec![0u8; 31], vec![0u8; 32]).is_err());
+    }
+
+    // -- ADR-0036: verify_genesis_attestation / account_username_hash --
+
+    fn signed_genesis_attestation(
+        signing: &lakko_crypto::signing::SigningKey,
+        account: &[u8; 16],
+        username_hash: &[u8; 32],
+        pubkey: &[u8; 32],
+    ) -> Vec<u8> {
+        // Expiry is ignored by the binding (client) path; use the far future.
+        lakko_attest::GenesisAttestation::new(*account, *username_hash, *pubkey, i64::MAX)
+            .sign(signing)
+            .to_vec()
+    }
+
+    #[test]
+    fn genesis_attestation_verify_roundtrips() {
+        let signing = lakko_crypto::signing::SigningKey::from_seed(&[0x11; 32]);
+        let verifying = signing.verifying_key().to_bytes().to_vec();
+        let account = [0xAA; 16];
+        let username_hash = [0xBB; 32];
+        let pubkey = [0xCC; 32];
+        let wire = signed_genesis_attestation(&signing, &account, &username_hash, &pubkey);
+        verify_genesis_attestation(
+            wire,
+            verifying,
+            account.to_vec(),
+            username_hash.to_vec(),
+            pubkey.to_vec(),
+        )
+        .expect("genesis attestation verifies");
+    }
+
+    #[test]
+    fn genesis_attestation_wrong_pubkey_fails() {
+        let signing = lakko_crypto::signing::SigningKey::from_seed(&[0x11; 32]);
+        let verifying = signing.verifying_key().to_bytes().to_vec();
+        let account = [0xAA; 16];
+        let username_hash = [0xBB; 32];
+        let pubkey = [0xCC; 32];
+        let wire = signed_genesis_attestation(&signing, &account, &username_hash, &pubkey);
+        // A different expected pubkey → the binding check fails.
+        assert!(verify_genesis_attestation(
+            wire,
+            verifying,
+            account.to_vec(),
+            username_hash.to_vec(),
+            vec![0x00; 32],
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn genesis_attestation_wrong_verifying_key_fails() {
+        let signing = lakko_crypto::signing::SigningKey::from_seed(&[0x11; 32]);
+        let account = [0xAA; 16];
+        let username_hash = [0xBB; 32];
+        let pubkey = [0xCC; 32];
+        let wire = signed_genesis_attestation(&signing, &account, &username_hash, &pubkey);
+        let other = lakko_crypto::signing::SigningKey::from_seed(&[0x22; 32])
+            .verifying_key()
+            .to_bytes()
+            .to_vec();
+        // Signed by another key → signature does not verify under the pinned key.
+        assert!(verify_genesis_attestation(
+            wire,
+            other,
+            account.to_vec(),
+            username_hash.to_vec(),
+            pubkey.to_vec(),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn genesis_attestation_rejects_malformed_and_bad_lengths() {
+        let verifying = lakko_crypto::signing::SigningKey::from_seed(&[0x11; 32])
+            .verifying_key()
+            .to_bytes()
+            .to_vec();
+        // Too-short attestation blob.
+        assert!(verify_genesis_attestation(
+            vec![0u8; 10],
+            verifying.clone(),
+            vec![0xAA; 16],
+            vec![0xBB; 32],
+            vec![0xCC; 32],
+        )
+        .is_err());
+        // Wrong-length expected fields.
+        assert!(verify_genesis_attestation(
+            vec![0u8; 153],
+            verifying,
+            vec![0xAA; 15],
+            vec![0xBB; 32],
+            vec![0xCC; 32],
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn account_username_hash_matches_transparency() {
+        let account_id = vec![0x07; 16];
+        assert_eq!(
+            account_username_hash(account_id.clone()),
+            lakko_transparency::account_username_hash(&account_id).to_vec()
+        );
     }
 }

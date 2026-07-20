@@ -74,7 +74,16 @@ lakko-crypto.workspace = true
 # Device-removal attestation (G-13, ADR-0015) — the auth service signs an
 # `ActionAttestation` on `/auth/action/finish`; the peer devices that
 # verify a removal share the same crate (sign here, verify in lakko-mls).
+# ADR-0036 adds the `GenesisAttestation` the `/auth/genesis/attest` endpoint
+# signs (same crate, distinct domain separator).
 lakko-attest.workspace = true
+
+# KT-log account-key derivation (ADR-0036) — the ONE shared definition of
+# `username_hash = BLAKE3("lakko/transparency/account/v1" || account_id)`,
+# so the genesis-attestation mint here derives byte-identical bytes to the
+# discovery log-append side. Lightweight (thiserror + lakko-crypto only, both
+# already in this service's tree — zero new transitive deps).
+lakko-transparency.workspace = true
 
 # Session-token issuance — Phase 1.5b. Stateless HMAC-SHA256 tokens
 # shared with `services/discovery`'s verifier middleware via the

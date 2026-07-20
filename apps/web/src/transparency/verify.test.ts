@@ -113,12 +113,15 @@ function rootAt(
 }
 
 /** Build a `LatestEntry` fixture serving `pubkey` with an optional
- *  `is_reset` marker (default `false`) and an optional `leafAuth`
- *  (G-30 #2; default `null` — no genesis self-sig to check). */
+ *  `is_reset` marker (default `false`), an optional `leafAuth`
+ *  (G-30 #2; default `null` — no genesis self-sig to check), and an
+ *  optional `genesisAttest` (ADR-0036; default `null` — no auth-attested
+ *  genesis to check). */
 function latestWith(
   pubkey: Uint8Array,
   isReset = false,
   leafAuth: Uint8Array | null = null,
+  genesisAttest: Uint8Array | null = null,
 ): LatestEntry {
   return {
     idx: 3n,
@@ -126,6 +129,7 @@ function latestWith(
     identityPubkey: pubkey,
     isReset,
     leafAuth,
+    genesisAttest,
   };
 }
 
@@ -467,6 +471,7 @@ describe("verifyRotationChain (G-30 #2, ADR-0019)", () => {
         identityPubkey: SERVED_PUBKEY,
         isReset: false,
         leafAuth: null,
+        genesisAttest: null,
       })),
     });
     const r = await runChain(client);
@@ -625,6 +630,94 @@ describe("verifyIdentityInLog — G-30 #2 genesis self-sig", () => {
     const r = await runFull(client, { verifyGenesis });
     expect(r.status).toBe("confirmed");
     expect(verifyGenesis).not.toHaveBeenCalled();
+  });
+});
+
+describe("verifyIdentityInLog — ADR-0036 auth-attested genesis", () => {
+  const GENESIS_SIG = new Uint8Array(64).fill(0x47);
+  const GENESIS_ATTEST = new Uint8Array(153).fill(0x36);
+  const ATTEST_KEY = new Uint8Array(32).fill(0x5a);
+
+  it("confirmed when a present genesis_attest verifies (additive to self-sig)", async () => {
+    const client = mockClient({
+      fetchLatest: vi.fn(async () =>
+        latestWith(SERVED_PUBKEY, false, GENESIS_SIG, GENESIS_ATTEST),
+      ),
+    });
+    const verifyGenesisAttest = vi.fn(() => {
+      /* pass */
+    });
+    const r = await runFull(client, {
+      // the self-sig gate must also pass so we reach the attest gate.
+      verifyGenesis: () => {
+        /* pass */
+      },
+      attestKey: ATTEST_KEY,
+      verifyGenesisAttest,
+    });
+    expect(r.status).toBe("confirmed");
+    expect(verifyGenesisAttest).toHaveBeenCalledTimes(1);
+  });
+
+  it("mismatch when a present genesis_attest FAILS to verify (fail-closed)", async () => {
+    const client = mockClient({
+      fetchLatest: vi.fn(async () =>
+        latestWith(SERVED_PUBKEY, false, GENESIS_SIG, GENESIS_ATTEST),
+      ),
+    });
+    const r = await runFull(client, {
+      verifyGenesis: () => {
+        /* pass */
+      },
+      attestKey: ATTEST_KEY,
+      verifyGenesisAttest: () => {
+        throw new Error("bad genesis attestation");
+      },
+    });
+    expect(r.status).toBe("mismatch");
+  });
+
+  it("confirmed (attest check skipped) when genesis_attest is null", async () => {
+    const client = mockClient({
+      fetchLatest: vi.fn(async () =>
+        latestWith(SERVED_PUBKEY, false, GENESIS_SIG, null),
+      ),
+    });
+    const verifyGenesisAttest = vi.fn(() => {
+      throw new Error("attest check must NOT run for a null genesis_attest");
+    });
+    const r = await runFull(client, {
+      verifyGenesis: () => {
+        /* pass */
+      },
+      attestKey: ATTEST_KEY,
+      verifyGenesisAttest,
+    });
+    expect(r.status).toBe("confirmed");
+    expect(verifyGenesisAttest).not.toHaveBeenCalled();
+  });
+
+  it("confirmed (attest check skipped) when the attest key is unavailable", async () => {
+    // A present attestation the client cannot verify (no pin + JWKS
+    // unreachable → attestKey null) is SKIPPED, not failed — the self-sig
+    // + inclusion gates still stand (best-effort posture).
+    const client = mockClient({
+      fetchLatest: vi.fn(async () =>
+        latestWith(SERVED_PUBKEY, false, GENESIS_SIG, GENESIS_ATTEST),
+      ),
+    });
+    const verifyGenesisAttest = vi.fn(() => {
+      throw new Error("attest check must NOT run when the key is null");
+    });
+    const r = await runFull(client, {
+      verifyGenesis: () => {
+        /* pass */
+      },
+      attestKey: null,
+      verifyGenesisAttest,
+    });
+    expect(r.status).toBe("confirmed");
+    expect(verifyGenesisAttest).not.toHaveBeenCalled();
   });
 });
 

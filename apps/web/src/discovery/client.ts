@@ -673,6 +673,14 @@ export class DiscoveryClient {
    *        binding. Supplied by the signup + fresh-start-mint callers
    *        (where a new key is published). Omit on a routine same-key
    *        re-upload — the log append is idempotent there.
+   * @param genesisAttest  ADR-0036 (G-30 finding 2): raw 153-byte
+   *        `GenesisAttestation` bytes (from `AuthClient.genesisAttest`) or a
+   *        pre-base64'd string, the auth-attested proof that only the
+   *        OPAQUE-authenticated account could have published this genesis
+   *        key. Supplied ONLY by the genesis publish sites (first-ever signup
+   *        + the lost-everything fresh-start mint) alongside `leafAuth`. Omit
+   *        on a rotation / routine re-upload — the server `COALESCE`-preserves
+   *        any stored value there.
    */
   async uploadIdentityBundle(
     accountId: Uint8Array,
@@ -680,6 +688,7 @@ export class DiscoveryClient {
     x25519Pubkey: Uint8Array,
     supersessionProof?: Uint8Array | string,
     leafAuth?: Uint8Array | string,
+    genesisAttest?: Uint8Array | string,
   ): Promise<void> {
     if (accountId.length !== 16) {
       throw new DiscoveryClientArgError("accountId must be 16 bytes");
@@ -718,6 +727,18 @@ export class DiscoveryClient {
         typeof leafAuth === "string" ? leafAuth : base64Encode(leafAuth);
     }
 
+    // ADR-0036: normalise the optional genesis attestation to base64 for
+    // the wire (`genesis_attest?: string`), mirroring the `leafAuth`
+    // handling above. `undefined` stays omitted — a rotation / re-upload
+    // sends none and the server preserves any stored value via `COALESCE`.
+    let genesisAttestB64: string | undefined;
+    if (genesisAttest !== undefined) {
+      genesisAttestB64 =
+        typeof genesisAttest === "string"
+          ? genesisAttest
+          : base64Encode(genesisAttest);
+    }
+
     const challenge = await this.fetchChallenge();
     const pow = await solvePow(challenge.seed, challenge.effort_bits);
 
@@ -728,6 +749,9 @@ export class DiscoveryClient {
       x25519_pubkey: base64Encode(x25519Pubkey),
       ...(proofB64 !== undefined ? { supersession_proof: proofB64 } : {}),
       ...(leafAuthB64 !== undefined ? { leaf_auth: leafAuthB64 } : {}),
+      ...(genesisAttestB64 !== undefined
+        ? { genesis_attest: genesisAttestB64 }
+        : {}),
     });
     if (!resp.ok) {
       throw new DiscoveryHttpError(

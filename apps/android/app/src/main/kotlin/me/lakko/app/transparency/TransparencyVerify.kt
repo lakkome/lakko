@@ -5,6 +5,7 @@ package me.lakko.app.transparency
 
 import uniffi.lakko_ffi_uniffi.FfiException
 import uniffi.lakko_ffi_uniffi.transparencyAccountKey
+import uniffi.lakko_ffi_uniffi.verifyGenesisAttestation
 import uniffi.lakko_ffi_uniffi.verifyLeafGenesis
 import uniffi.lakko_ffi_uniffi.verifyLogInclusion
 import uniffi.lakko_ffi_uniffi.verifySupersessionChain
@@ -167,6 +168,54 @@ public object NativeGenesisGate : GenesisGate {
     override fun verify(sig: ByteArray, usernameHash: ByteArray, servedPubkey: ByteArray) {
         // Throws FfiException on a failed check; the caller maps it to MISMATCH.
         verifyLeafGenesis(sig, usernameHash, servedPubkey)
+    }
+}
+
+/**
+ * Genesis-ATTEST-gate seam (ADR-0036, G-30 finding 2) — abstracts the native
+ * `verifyGenesisAttestation` call so the first-observation genesis-attest
+ * decision in [verifyIdentityInLog] is unit-testable on the host JVM without
+ * the native lib + a real auth-signed attestation. The production
+ * [NativeGenesisAttestGate] calls the real FFI, which THROWS [FfiException] on
+ * a failed check (bad length / version / signature / any of the account /
+ * username_hash / pubkey bindings mismatching); a test double can THROW (fail)
+ * or RETURN (pass) — exactly that contract.
+ */
+public fun interface GenesisAttestGate {
+    /**
+     * Verify that [attestation] is a valid auth-attested genesis attestation
+     * binding [expectedAccountId] / [expectedUsernameHash] / [expectedPubkey],
+     * signed by [attestVerifyingKey] (the pinned auth attest key). No freshness
+     * check (client first-observation path — the attestation is a permanent
+     * historical artifact). MUST throw to signal a failure; returning normally
+     * means all four bindings + the signature verified.
+     */
+    public fun verify(
+        attestation: ByteArray,
+        attestVerifyingKey: ByteArray,
+        expectedAccountId: ByteArray,
+        expectedUsernameHash: ByteArray,
+        expectedPubkey: ByteArray,
+    )
+}
+
+/** Production [GenesisAttestGate] — the real native `verifyGenesisAttestation`. */
+public object NativeGenesisAttestGate : GenesisAttestGate {
+    override fun verify(
+        attestation: ByteArray,
+        attestVerifyingKey: ByteArray,
+        expectedAccountId: ByteArray,
+        expectedUsernameHash: ByteArray,
+        expectedPubkey: ByteArray,
+    ) {
+        // Throws FfiException on a failed check; the caller maps it to MISMATCH.
+        verifyGenesisAttestation(
+            attestation,
+            attestVerifyingKey,
+            expectedAccountId,
+            expectedUsernameHash,
+            expectedPubkey,
+        )
     }
 }
 
@@ -356,6 +405,14 @@ public object NativeAccountKeyDeriver : AccountKeyDeriver {
  *                                 account_id (native by default).
  * @param inclusionGate            the inclusion-proof verifier (native by
  *                                 default; a test seam otherwise).
+ * @param genesisAttestKey         ADR-0036 — the pinned auth attest
+ *                                 verifying key (32 bytes; reuses the
+ *                                 device-attest key per ADR-0036 §3), or
+ *                                 `null` to skip the genesis-attest check
+ *                                 (the key is unresolved / unpinned). When
+ *                                 present AND the latest entry carries a
+ *                                 served attestation, an invalid attestation
+ *                                 is fail-closed to MISMATCH.
  */
 public suspend fun verifyIdentityInLog(
     accountId: ByteArray,
@@ -364,9 +421,11 @@ public suspend fun verifyIdentityInLog(
     operatorKey: ByteArray?,
     lastSeenRoot: LastSeenRootStore,
     witnessKey: ByteArray?,
+    genesisAttestKey: ByteArray? = null,
     accountKeyDeriver: AccountKeyDeriver = NativeAccountKeyDeriver,
     inclusionGate: InclusionGate = NativeInclusionGate,
     genesisGate: GenesisGate = NativeGenesisGate,
+    genesisAttestGate: GenesisAttestGate = NativeGenesisAttestGate,
     witnessGate: WitnessGate = NativeWitnessGate,
 ): LogVerifyResult {
     // OFF — the integration is unconfigured. Skip entirely. No latest
@@ -452,6 +511,32 @@ public suspend fun verifyIdentityInLog(
         if (leafAuth != null && leafAuth.size == 64) {
             try {
                 genesisGate.verify(leafAuth, usernameHash, publishedSignaturePubkey)
+            } catch (_: FfiException) {
+                return LogVerifyResult(LogVerifyStatus.MISMATCH, isReset = isReset)
+            }
+        }
+
+        // 5b. ADR-0036 (G-30 finding 2) — first-observation genesis-ATTEST
+        //     check, ADDITIVE to the self-sig above. If the latest entry
+        //     carries an auth-attested genesis (the S4-served genesis_attest)
+        //     AND we hold the pinned auth attest verifying key, verify all
+        //     four bindings (account_id, username_hash, served pubkey,
+        //     signature). The self-sig only DETECTS squatting (its own key
+        //     can self-sign a fabricated binding); this PREVENTS it — only the
+        //     OPAQUE-authenticated account could have minted the attestation.
+        //     Fail-closed: a served attestation that does not verify → MISMATCH
+        //     (never blind-trust). Skipped when the key is unpinned/unresolved
+        //     or no attestation is served (additive, flag-gated server-side).
+        val genesisAttest = latest.genesisAttest
+        if (genesisAttest != null && genesisAttestKey != null) {
+            try {
+                genesisAttestGate.verify(
+                    attestation = genesisAttest,
+                    attestVerifyingKey = genesisAttestKey,
+                    expectedAccountId = accountId,
+                    expectedUsernameHash = usernameHash,
+                    expectedPubkey = publishedSignaturePubkey,
+                )
             } catch (_: FfiException) {
                 return LogVerifyResult(LogVerifyStatus.MISMATCH, isReset = isReset)
             }

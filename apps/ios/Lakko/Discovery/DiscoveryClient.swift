@@ -496,12 +496,20 @@ public final class DiscoveryClient {
     /// emit). Normal (non-rotation) callers pass `nil` — its absence
     /// clears any stale server-side proof. The server stores the
     /// bytes opaquely and never parses them (invariant #2).
+    ///
+    /// ADR-0036 (G-30 finding 2): `genesisAttest`, when non-`nil`, is the RAW
+    /// bytes of an auth-attested genesis proof (`POST /auth/genesis/attest`).
+    /// It ships alongside the genesis leaf-auth self-sig so the transparency
+    /// genesis entry is account-authenticated (anti-squatting). Standard-base64
+    /// encoded into `IdentityUploadRequest.genesisAttest`; `nil` on a
+    /// non-genesis re-publish (absence is `COALESCE`-preserved server-side).
     public func uploadIdentityBundle(
         accountId: Data,
         signaturePubkey: Data,
         x25519Pubkey: Data,
         supersessionProofB64: String? = nil,
-        leafAuth: Data? = nil
+        leafAuth: Data? = nil,
+        genesisAttest: Data? = nil
     ) async throws {
         guard accountId.count == Self.accountIdLength else {
             throw DiscoveryClientError.argument(
@@ -532,7 +540,8 @@ public final class DiscoveryClient {
                 signaturePubkey: base64Encode(signaturePubkey),
                 x25519Pubkey: base64Encode(x25519Pubkey),
                 supersessionProof: supersessionProofB64,
-                leafAuth: leafAuth.map { base64Encode($0) }
+                leafAuth: leafAuth.map { base64Encode($0) },
+                genesisAttest: genesisAttest.map { base64Encode($0) }
             )
         )
         guard resp.ok else {

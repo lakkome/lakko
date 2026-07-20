@@ -30,8 +30,27 @@
 //! checks the signature, then the account / action binding, then freshness.
 //!
 //! [ADR-0015]: ../../../docs/adr/0015-device-removal-authorization.md
+//!
+//! # Genesis attestation
+//!
+//! The crate also hosts a second attestation format, [`GenesisAttestation`]
+//! (see the [`genesis`] module, [ADR-0036]): an auth-signed proof that binds an
+//! OPAQUE-authenticated account to the identity pubkey it presented as its
+//! genesis KT-log key, preventing first-entry squatting. It shares this crate's
+//! fixed-layout binary discipline but carries its own distinct domain separator
+//! so the two attestation kinds are cryptographically non-interchangeable even
+//! under a shared signing key.
+//!
+//! [ADR-0036]: ../../../docs/adr/0036-auth-attested-genesis.md
 
 #![forbid(unsafe_code)]
+
+pub mod genesis;
+
+pub use genesis::{
+    verify_genesis_binding, verify_genesis_fresh, GenesisAttestError, GenesisAttestation,
+    GENESIS_ATTESTATION_LEN,
+};
 
 use lakko_crypto::signing::{Signature, SigningKey, VerifyingKey, SIGNATURE_LEN};
 use thiserror::Error;
@@ -228,7 +247,7 @@ pub fn verify_bound(
 /// of its own.
 #[doc(hidden)]
 pub mod fuzz_api {
-    use super::{ActionAttestation, SigningKey};
+    use super::{ActionAttestation, GenesisAttestation, SigningKey};
 
     /// Try to [`ActionAttestation::open`] the bytes against a FIXED verifying
     /// key. The bytes are attacker-controlled — an attestation rides alongside a
@@ -242,6 +261,20 @@ pub mod fuzz_api {
     pub fn open_attestation(bytes: &[u8]) -> bool {
         let vk = SigningKey::from_seed(&[0x11; 32]).verifying_key();
         ActionAttestation::open(bytes, &vk).is_ok()
+    }
+
+    /// Try to [`GenesisAttestation::open`] the bytes against a FIXED verifying
+    /// key. The bytes are attacker-controlled — the genesis attestation is a
+    /// served bundle field a malicious discovery / Delivery Service can craft
+    /// (ADR-0036), reaching this bounded parser before any state is consulted —
+    /// and the parser must stay panic-free on any input. The fuzzer cannot forge
+    /// a valid signature against the fixed key, so it exercises the length /
+    /// version / field-slicing / signature-parse / verify-fail path. Returns
+    /// `true` on a (vanishingly rare) success.
+    #[must_use]
+    pub fn open_genesis_attestation(bytes: &[u8]) -> bool {
+        let vk = SigningKey::from_seed(&[0x11; 32]).verifying_key();
+        GenesisAttestation::open(bytes, &vk).is_ok()
     }
 }
 

@@ -60,6 +60,11 @@ lakko-transparency.workspace = true
 # 32-byte seed, rebuilt at every process start. The derived verifying
 # key is the trust anchor clients pin out-of-band.
 lakko-crypto.workspace = true
+# ADR-0036 S4 — the genesis-attestation verifier. The append gate verifies a
+# genesis/reset leaf carries a valid auth-minted `GenesisAttestation` (bound to
+# the served `username_hash` + `pubkey` + freshness) via `verify_genesis_fresh`,
+# preventing first-entry squatting. The blob is stored opaque otherwise.
+lakko-attest.workspace = true
 
 # ADR-0020 Sprint 4 — the witness-cosign client (transparency -> witness
 # /witness/cosign). Same rustls posture as the discovery service's reqwest.

@@ -71,6 +71,9 @@ lakko-crypto.workspace = true
 # G-4 (ADR-0007 §6) — identity supersession proof surface (sign on
 # rotation, verify on a peer's pubkey change).
 lakko-transparency.workspace = true
+# ADR-0036 — genesis-attestation client verify (`verify_genesis_binding`)
+# for the first-observation anti-squatting gate (G-30 finding 2).
+lakko-attest.workspace = true
 # Phase 2a3d8 — `HistoryBundle` / `SealedBundle` generated types
 # + prost runtime for the inner-bytes re-encode in
 # `sealHistoryBundle` / `openHistoryBundle`.

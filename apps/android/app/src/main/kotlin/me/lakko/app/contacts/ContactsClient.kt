@@ -11,6 +11,7 @@ import me.lakko.app.discovery.DiscoveryClientArgError
 import me.lakko.app.discovery.DiscoveryHttpError
 import me.lakko.app.discovery.DiscoveryNetworkError
 import me.lakko.app.discovery.IdentityFetchResponse
+import me.lakko.app.devices.DeviceAttestKey
 import me.lakko.app.ds.DsClient
 import me.lakko.app.ds.DsClientArgError
 import me.lakko.app.ds.DsHttpError
@@ -669,6 +670,25 @@ public class ContactsClient(
                     )
                     Triple(result.status, result.isReset, result.version)
                 } else {
+                    // ADR-0036 — resolve the pinned auth attest verifying key
+                    // (reused for genesis-attest per §3) best-effort. A
+                    // resolution failure simply skips the additive
+                    // genesis-attest check; the self-sig + supersession/pin gate
+                    // remain the primary trust. A build-time pin
+                    // (BuildConfig.LAKKO_DEVICE_ATTEST_KEY) short-circuits the
+                    // fetch, so this is a no-network path in the pinned posture.
+                    val genesisAttestKey = try {
+                        DeviceAttestKey.fetch()
+                    } catch (cause: Throwable) {
+                        Log.w(
+                            "lakko-contacts",
+                            "transparency: could not resolve the pinned auth " +
+                                "attest key; skipping the additive ADR-0036 " +
+                                "genesis-attest check (self-sig + pin gate stand)",
+                            cause,
+                        )
+                        null
+                    }
                     val result = verifyIdentityInLog(
                         accountId = accountId,
                         publishedSignaturePubkey = servedPubkey,
@@ -676,6 +696,7 @@ public class ContactsClient(
                         operatorKey = TransparencyConfig.pinnedOperatorKey(),
                         lastSeenRoot = lastSeenRoot,
                         witnessKey = TransparencyConfig.pinnedWitnessKey(),
+                        genesisAttestKey = genesisAttestKey,
                     )
                     Triple(result.status, result.isReset, null)
                 }

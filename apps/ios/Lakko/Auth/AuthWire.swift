@@ -423,6 +423,46 @@ public struct DeviceAuthorizeRedeemRequest: Codable, Equatable {
     }
 }
 
+// ----------------------------------------------------------------------------
+// Genesis attestation (ADR-0036, G-30 finding 2 — anti-squatting)
+// ----------------------------------------------------------------------------
+
+/// `POST /auth/genesis/attest` request body. Bearer-authenticated (the
+/// account's session token rides the `Authorization` header, not the body —
+/// holding a valid token IS the proof the caller OPAQUE-authenticated as
+/// `account_id`, the whole security basis). No PoW.
+public struct GenesisAttestRequest: Codable, Equatable {
+    /// URL-safe base64 (no pad) of the client's 32-byte genesis identity
+    /// (Ed25519) public key. The server binds THIS key to the authenticated
+    /// account inside the signed attestation.
+    public let pubkeyB64: String
+
+    public init(pubkeyB64: String) {
+        self.pubkeyB64 = pubkeyB64
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case pubkeyB64 = "pubkey_b64"
+    }
+}
+
+/// `POST /auth/genesis/attest` response body — the signed 153-byte
+/// `GenesisAttestation`. The client uploads it alongside the identity bundle
+/// (as `genesis_attest`) so the transparency genesis entry is
+/// account-authenticated.
+public struct GenesisAttestResponse: Codable, Equatable {
+    /// URL-safe base64 (no pad) of the signed `GenesisAttestation`.
+    public let genesisAttestB64: String
+
+    public init(genesisAttestB64: String) {
+        self.genesisAttestB64 = genesisAttestB64
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case genesisAttestB64 = "genesis_attest_b64"
+    }
+}
+
 /// `POST /device/authorize/redeem` response body — the same
 /// `(account_id, session_token, expiry)` triple every other login
 /// flow returns.

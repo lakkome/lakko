@@ -72,6 +72,7 @@
 
 mod call_jwt;
 mod device_authorize;
+mod genesis_attest;
 mod opaque;
 mod otp_sender;
 mod pow;
@@ -480,6 +481,19 @@ fn build_app(state: AppState) -> Router {
             webauthn::require_session,
         ));
 
+    // G-30 finding 2 (ADR-0036) — `POST /auth/genesis/attest` mints a signed
+    // genesis attestation binding the OPAQUE-authenticated account to its
+    // client-supplied genesis identity pubkey (anti KT-log first-entry
+    // squatting). Bearer-auth ONLY (the same session-token middleware) — NOT
+    // the passkey-ceremony path, so it works for OPAQUE-only accounts with no
+    // registered passkey.
+    let genesis_routes = Router::new()
+        .route("/auth/genesis/attest", post(genesis_attest::genesis_attest))
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            webauthn::require_session,
+        ));
+
     Router::new()
         .route("/health", get(health))
         .route("/ready", get(ready))
@@ -541,6 +555,7 @@ fn build_app(state: AppState) -> Router {
         .merge(webauthn_routes)
         .merge(call_jwt_routes)
         .merge(turn_routes)
+        .merge(genesis_routes)
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }

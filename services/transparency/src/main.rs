@@ -61,6 +61,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use lakko_crypto::signing;
+
 use axum::extract::{DefaultBodyLimit, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json};
@@ -108,6 +110,17 @@ pub(crate) struct AppState {
     /// A PRESENT-but-invalid `leaf_auth` is always refused regardless. Read
     /// from `LAKKO_TRANSPARENCY_REQUIRE_LEAF_AUTH` (default `true`).
     pub(crate) require_leaf_auth: bool,
+    /// ADR-0036 S4: the pinned auth genesis-attestation VERIFYING key
+    /// (`LAKKO_TRANSPARENCY_GENESIS_ATTEST_KEY`, base64 Ed25519 pubkey), or
+    /// `None` when unconfigured. The append gate verifies a genesis/reset leaf's
+    /// attestation against it; the clients pin the same auth attest key.
+    pub(crate) genesis_attest_key: Option<signing::VerifyingKey>,
+    /// ADR-0036 S4: when `true`, `POST /transparency/append` REFUSES a
+    /// genesis/reset leaf that lacks a valid genesis attestation (the
+    /// anti-squatting gate). Defence-in-depth behind a flag — read from
+    /// `LAKKO_TRANSPARENCY_REQUIRE_GENESIS_ATTEST` (default `false`, a deploy
+    /// rollout sequenced after the three clients mint). A rotation is unaffected.
+    pub(crate) require_genesis_attest: bool,
     /// ADR-0020 Sprint 4: the witness cosign client, or `None` when the
     /// integration is unconfigured (`GET /transparency/root` then serves the
     /// root WITHOUT a witness co-signature — the transition fallback). Built
@@ -203,6 +216,11 @@ async fn main() -> Result<()> {
         );
     }
 
+    // ADR-0036 S4: pin the auth genesis-attestation verifying key + read the
+    // anti-squatting gate flag (default OFF). A SET-but-malformed pinned key
+    // fails fast at startup.
+    let (genesis_attest_key, require_genesis_attest) = load_genesis_attest_policy()?;
+
     // ADR-0020 Sprint 4: the witness cosign client (off when unconfigured).
     let witness = witness_client::WitnessClient::from_env().map(Arc::new);
     if witness.is_some() {
@@ -219,6 +237,8 @@ async fn main() -> Result<()> {
         store: Arc::new(store),
         append_secret,
         require_leaf_auth,
+        genesis_attest_key,
+        require_genesis_attest,
         witness,
     };
 
@@ -237,6 +257,47 @@ async fn main() -> Result<()> {
     pool.close().await;
     tracing::info!("transparency service stopped cleanly");
     Ok(())
+}
+
+/// ADR-0036 S4: pin the auth genesis-attestation verifying key and read the
+/// anti-squatting gate flag (`LAKKO_TRANSPARENCY_REQUIRE_GENESIS_ATTEST`,
+/// default OFF — additive, non-breaking; a deploy rollout flipped ON only after
+/// the three clients mint, else every genesis/reset append fails closed),
+/// logging the resulting posture. Extracted from `main` to keep it small.
+///
+/// # Errors
+///
+/// Fails loud when `LAKKO_TRANSPARENCY_GENESIS_ATTEST_KEY` is set but not a
+/// valid base64 32-byte Ed25519 public key.
+fn load_genesis_attest_policy() -> Result<(Option<signing::VerifyingKey>, bool)> {
+    let genesis_attest_key = operator_key::genesis_attest_key_from_env()
+        .context("load LAKKO_TRANSPARENCY_GENESIS_ATTEST_KEY")?;
+    let require_genesis_attest = std::env::var("LAKKO_TRANSPARENCY_REQUIRE_GENESIS_ATTEST")
+        .is_ok_and(|v| matches!(v.trim(), "1" | "true" | "TRUE" | "yes" | "on"));
+
+    if require_genesis_attest {
+        if genesis_attest_key.is_some() {
+            tracing::info!(
+                "genesis-attest policy ON (ADR-0036) — append refuses a genesis/reset leaf \
+                 without a valid genesis attestation"
+            );
+        } else {
+            tracing::warn!(
+                "LAKKO_TRANSPARENCY_REQUIRE_GENESIS_ATTEST is ON but \
+                 LAKKO_TRANSPARENCY_GENESIS_ATTEST_KEY is unset — every genesis/reset append \
+                 will be REFUSED (fail-closed). Pin the auth attest key before enabling the gate."
+            );
+        }
+    } else if genesis_attest_key.is_some() {
+        tracing::info!(
+            "genesis-attest key pinned; policy OFF (ADR-0036) — attestations accepted opaquely \
+             but a genesis/reset leaf without one is still permitted (rollout stage)"
+        );
+    } else {
+        tracing::info!("genesis-attest gate OFF (ADR-0036) — no pinned key, not required");
+    }
+
+    Ok((genesis_attest_key, require_genesis_attest))
 }
 
 /// Build the public router. Extracted so tests can drive it directly

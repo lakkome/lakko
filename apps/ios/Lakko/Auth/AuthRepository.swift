@@ -1751,6 +1751,35 @@ public final class AuthRepository: ObservableObject {
         )
     }
 
+    /// ADR-0036 (S6) — mint an auth-attested genesis proof binding the
+    /// OPAQUE-authenticated account to `identityPubkey`, so the KT-log genesis
+    /// entry is account-authenticated (anti-squatting), not merely
+    /// self-consistent. `POST /auth/genesis/attest`, bearer-authed with the
+    /// live session token.
+    ///
+    /// FAIL-SAFE: a mint failure logs + returns `nil` so the caller still
+    /// publishes the (self-signed) genesis bundle — the transparency operator
+    /// gate is default-OFF, so an un-attested genesis is accepted; the
+    /// attestation is attached only when the mint succeeds.
+    private static func mintGenesisAttestation(
+        accountId: Data,
+        identityPubkey: Data,
+        sessionToken: String
+    ) async -> Data? {
+        do {
+            return try await AuthClient().mintGenesisAttestation(
+                sessionToken: sessionToken,
+                identityPubkey: identityPubkey
+            )
+        } catch {
+            NSLog(
+                "genesis-attest (ADR-0036): mint failed, publishing bundle " +
+                "without attestation: \(error)"
+            )
+            return nil
+        }
+    }
+
     /// Publish the fresh-identity bundle (+ KeyPackage) for `accountId`
     /// WITHOUT a supersession proof (ADR-0017 lost-everything). THROWS on
     /// failure — the caller publishes before any local mutation, so a throw
@@ -1769,11 +1798,19 @@ public final class AuthRepository: ObservableObject {
             ed25519Seed: identity.ed25519Seed(),
             usernameHash: transparencyAccountKey(accountId: accountId)
         )
+        // ADR-0036: additionally attest the genesis binding via auth (fail-safe
+        // — a mint failure attaches nothing, never blocks the reset publish).
+        let genesisAttest = await Self.mintGenesisAttestation(
+            accountId: accountId,
+            identityPubkey: identity.signaturePublicKey(),
+            sessionToken: sessionToken
+        )
         try await discovery.uploadIdentityBundle(
             accountId: accountId,
             signaturePubkey: identity.signaturePublicKey(),
             x25519Pubkey: identity.x25519PublicKey(),
-            leafAuth: leafAuth
+            leafAuth: leafAuth,
+            genesisAttest: genesisAttest
         )
         try await discovery.uploadKeyPackage(
             accountId: accountId,
@@ -2012,13 +2049,24 @@ public final class AuthRepository: ObservableObject {
                 ed25519Seed: identity.ed25519Seed(),
                 usernameHash: transparencyAccountKey(accountId: accountId)
             )
+            // ADR-0036: attest the genesis binding via auth when this recover is
+            // the FIRST time discovery sees the account (fail-safe — a mint
+            // failure attaches nothing, never blocks the re-publish). On a TRUE
+            // re-publish (already logged) discovery skips the append + the
+            // attestation is ignored.
+            let genesisAttest = await mintGenesisAttestation(
+                accountId: accountId,
+                identityPubkey: identity.signaturePublicKey(),
+                sessionToken: sessionToken
+            )
             // Proof-less re-publish (account key unchanged). Refreshes
             // the KeyPackage + clears any stale server proof column.
             try await discovery.uploadIdentityBundle(
                 accountId: accountId,
                 signaturePubkey: identity.signaturePublicKey(),
                 x25519Pubkey: identity.x25519PublicKey(),
-                leafAuth: leafAuth
+                leafAuth: leafAuth,
+                genesisAttest: genesisAttest
             )
         } catch {
             NSLog("supersession (ADR-0017): proof-less bundle re-publish (recover) failed: \(error)")

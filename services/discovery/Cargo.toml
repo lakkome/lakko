@@ -99,6 +99,14 @@ reqwest = { version = "0.12", default-features = false, features = [
     "rustls-tls",
 ] }
 
+# KT-log account-key derivation (ADR-0036) — the ONE shared definition of
+# `username_hash = BLAKE3("lakko/transparency/account/v1" || account_id)`,
+# promoted out of this crate's local copy so auth (genesis-attestation mint)
+# and discovery (log append) cannot drift. Lightweight (thiserror +
+# lakko-crypto only, both already in-tree). Was a dev-dep (recovery e2e); now
+# a regular dep for the derivation.
+lakko-transparency.workspace = true
+
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
@@ -112,4 +120,3 @@ http-body-util = "0.1"
 # genesis / chain against the live transparency log — all client-side crypto.
 lakko-pow.workspace = true
 lakko-mls.workspace = true
-lakko-transparency.workspace = true

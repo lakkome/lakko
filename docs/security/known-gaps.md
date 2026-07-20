@@ -2389,7 +2389,7 @@ breaks):**
   first appears once traffic flows). `cargo test -p lakko-sfu-proto`
   (21 passed) + `-p lakko-svc-sfu` green; clippy `-D warnings` clean.
 
-### G-30: KT-log (S1-S3) deployed-verifier scope + append-binding trust + equivocation residual — **#2 closed (ADR-0019), #1 closed (ADR-0020)**
+### G-30: KT-log (S1-S3) deployed-verifier scope + append-binding trust + equivocation residual — **#2 closed (ADR-0019) + genesis squatting PREVENTED (ADR-0036, flag-gated), #1 closed (ADR-0020)**
 
 **Status (2026-06-12):** the key-transparency log is built end-to-end —
 `services/transparency` (operator-signed append-only CONIKS log: S1), discovery
@@ -2477,11 +2477,13 @@ Finding 2 is CLOSED and finding 1's rotation case is materially addressed:
   parsed (invariant #2). All three clients mint the genesis self-sig on a
   new-key publish and verify a served genesis self-sig against the served key on
   a first observation. A leaked append secret can no longer fabricate a keyless
-  leaf. **Residual: genesis is TOFU** — a self-sig does not PREVENT first-entry
-  squatting (an attacker with the append secret can self-sign their OWN key for a
-  victim's never-used account_key); it is detected via CONIKS self-monitoring +
-  the ADR-0016 fail-closed peer gate. The auth-attested-genesis hardening (which
-  PREVENTS squatting) is recorded as the elective alternative in ADR-0019.
+  leaf. **Residual (at the time of ADR-0019): genesis is TOFU** — a self-sig does
+  not PREVENT first-entry squatting (an attacker with the append secret can
+  self-sign their OWN key for a victim's never-used account_key); it is detected
+  via CONIKS self-monitoring + the ADR-0016 fail-closed peer gate. The
+  auth-attested-genesis hardening (which PREVENTS squatting) was recorded as the
+  elective alternative in ADR-0019 — **now implemented by ADR-0036, see the update
+  below.**
 
 - Finding 3 (mismatch / absent posture) is UNCHANGED — still surface-not-block
   (a chain contradiction maps to `mismatch`, not a block; only `rollback`
@@ -2525,3 +2527,43 @@ CLOSED for the single-witness model:
 `lakko-security` reviewed the full arc (Sprints 1-6): **APPROVE-WITH-NOTES**
 (invariants #2/#4/#6 hold or strengthened; one trivial hygiene finding —
 `#![forbid(unsafe_code)]` on the witness service — applied). See ADR-0020.
+
+**Update — G-30 finding 2: genesis squatting PREVENTED (not just detected) by
+ADR-0036 (auth-attested genesis), 2026-07-20.** The ADR-0019 genesis self-sig
+above only DETECTS first-entry squatting; ADR-0036 adds an **auth-attested
+genesis** proof that PREVENTS it, additive to (never replacing) the self-sig.
+
+- **The attestation.** A 153-byte fixed-layout Ed25519 blob
+  (`crates/lakko-attest/src/genesis.rs`, domain `lakko/genesis-attest/v1`,
+  distinct from device-attest) binding `(account_id, username_hash, pubkey,
+  expiry)`. Auth mints it at `POST /auth/genesis/attest` — bearer-authed only, so
+  holding a valid session token (proof of OPAQUE authentication) is the entire
+  basis; **only the account holder can mint a genesis attestation for their own
+  account.** A squatter cannot OPAQUE-authenticate as the victim's `account_id`,
+  so cannot obtain auth's signature over the victim's fields. Stated plainly: this
+  is a binding of the OPAQUE-authenticated account to a client-ASSERTED key, not
+  an independent proof the key is "right" (auth has no such ground truth under
+  invariant #2) — which is exactly sufficient, because squatting is precisely the
+  case the binding rules out.
+- **The bridge derivation.** Transparency never learns `account_id`, so the
+  attestation carries `username_hash = BLAKE3("lakko/transparency/account/v1" ‖
+  account_id)`, promoted to the one shared `lakko_transparency::account_username_hash`
+  + a golden drift test (a one-byte domain drift would silently fail-close the
+  gate).
+- **The append gate (defence-in-depth, fail-closed).** The genesis/reset arm of
+  `services/transparency/src/store.rs` runs `verify_genesis_fresh` (bind
+  `username_hash`+`pubkey` + freshness) behind default-OFF
+  `LAKKO_TRANSPARENCY_REQUIRE_GENESIS_ATTEST` + pinned
+  `LAKKO_TRANSPARENCY_GENESIS_ATTEST_KEY`; under the flag an absent, unpinned-key,
+  or invalid/expired attestation refuses the append (invariant #4). Discovery
+  threads `genesis_attest` opaquely (migration `0016`, `COALESCE`-preserved,
+  invariant #2). All three clients mint on the genesis publish (soft-fail) and
+  verify a served attestation on first observation beside the self-sig
+  (`verify_genesis_binding`, no freshness — a permanent artifact — fail-closed
+  `mismatch`), reusing the pinned DeviceAttestKey. New fuzz target:
+  `genesis_attestation_open`.
+- **Residual.** Now the DEPLOY ROLLOUT — flip the flag to on once all three
+  clients mint (S6, done) — plus a live cross-service end-to-end (mint → publish →
+  append-gate → first-observation verify) on a deployed environment. Operator+auth
+  collusion stays out of scope (a compromised attest signing key already co-signs
+  the root — the same trust tier). See ADR-0036.

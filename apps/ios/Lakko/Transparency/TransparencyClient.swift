@@ -117,7 +117,8 @@ public final class TransparencyClient: TransparencyFetching {
             version: wire.version,
             identityPubkey: identityPubkey,
             isReset: wire.isReset,
-            leafAuth: wire.leafAuthB64.flatMap { base64Decode($0) }
+            leafAuth: wire.leafAuthB64.flatMap { base64Decode($0) },
+            genesisAttest: wire.genesisAttestB64.flatMap { base64Decode($0) }
         )
     }
 
@@ -277,19 +278,28 @@ public struct LatestEntry: Equatable {
     /// pre-Sprint-2 / unauthenticated row. A client verifies a genesis
     /// self-sig against the served key on a first observation.
     public let leafAuth: Data?
+    /// ADR-0036 (G-30 finding 2): the entry's opaque auth-attested genesis
+    /// proof (a 153-byte `GenesisAttestation`), or `nil` for a rotation / a
+    /// pre-ADR-0036 / un-attested genesis row. When present on a first
+    /// observation the client verifies it against the pinned auth attest key
+    /// (anti-squatting) BESIDE the self-sig — fail-closed on a present-but-
+    /// invalid value.
+    public let genesisAttest: Data?
 
     public init(
         idx: UInt64,
         version: UInt64,
         identityPubkey: Data,
         isReset: Bool,
-        leafAuth: Data? = nil
+        leafAuth: Data? = nil,
+        genesisAttest: Data? = nil
     ) {
         self.idx = idx
         self.version = version
         self.identityPubkey = identityPubkey
         self.isReset = isReset
         self.leafAuth = leafAuth
+        self.genesisAttest = genesisAttest
     }
 }
 
@@ -343,6 +353,9 @@ private struct LatestResWire: Decodable {
     /// G-30 #2 (ADR-0019): base64 of the entry's leaf authorisation, or
     /// absent for a pre-Sprint-2 / unauthenticated row.
     let leafAuthB64: String?
+    /// ADR-0036 (G-30 finding 2): base64 of the entry's auth-attested genesis
+    /// proof, or absent for a rotation / pre-ADR-0036 / un-attested row.
+    let genesisAttestB64: String?
 
     enum CodingKeys: String, CodingKey {
         case idx
@@ -350,6 +363,7 @@ private struct LatestResWire: Decodable {
         case identityPubkeyB64 = "identity_pubkey_b64"
         case isReset = "is_reset"
         case leafAuthB64 = "leaf_auth_b64"
+        case genesisAttestB64 = "genesis_attest_b64"
     }
 }
 

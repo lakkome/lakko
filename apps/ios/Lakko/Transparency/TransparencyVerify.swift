@@ -199,6 +199,14 @@ public struct TransparencyVerify {
     /// `nil`; minting a real co-sig needs the `services/witness` signer
     /// (not FFI-exposed), so tests stub this seam.
     private let verifyWitness: ((WitnessArgs) throws -> Void)?
+    /// Genesis-attest verifying-key source (ADR-0036, G-30 finding 2). The
+    /// pinned auth attest key (the SAME key as device-attest) used to verify a
+    /// served `genesis_attest` on a first observation. Production callers pass
+    /// `nil` → the key comes from ``DeviceAttestKey/fetch(baseURL:now:)`` (a
+    /// build-time pin, else the JWKS discovery path). Tests inject a fixed key
+    /// (or `nil` to simulate "key unobtainable"). Returning `nil` means the
+    /// key could not be obtained; a served attestation then fails closed.
+    private let genesisAttestKey: (() async -> Data?)?
 
     /// Build a verifier from the build-time config (production path) or
     /// from injected dependencies (tests).
@@ -220,6 +228,8 @@ public struct TransparencyVerify {
     ///     above).
     ///   - verifyWitness: the test-only witness-co-sig seam (ADR-0020;
     ///     see above).
+    ///   - genesisAttestKey: the genesis-attest verifying-key source
+    ///     (ADR-0036; see above). `nil` → production ``DeviceAttestKey``.
     public init(
         client: TransparencyFetching? = TransparencyClient.forOptionalConfig(),
         operatorKey: Data? = TransparencyConfig.pinnedOperatorKey,
@@ -227,7 +237,8 @@ public struct TransparencyVerify {
         lastSeenRoot: LastSeenRoot = LastSeenRoot(),
         verifyInclusion: ((InclusionArgs) throws -> Void)? = nil,
         verifyChain: ((ChainArgs) throws -> Data)? = nil,
-        verifyWitness: ((WitnessArgs) throws -> Void)? = nil
+        verifyWitness: ((WitnessArgs) throws -> Void)? = nil,
+        genesisAttestKey: (() async -> Data?)? = nil
     ) {
         self.client = client
         self.operatorKey = operatorKey
@@ -236,6 +247,7 @@ public struct TransparencyVerify {
         self.verifyInclusion = verifyInclusion
         self.verifyChain = verifyChain
         self.verifyWitness = verifyWitness
+        self.genesisAttestKey = genesisAttestKey
     }
 
     /// ADR-0020 — the witness co-signature gate over a fetched root.
@@ -405,6 +417,43 @@ public struct TransparencyVerify {
                         sig: leafAuth,
                         usernameHash: accountKey,
                         identityPubkey: publishedSignaturePubkey
+                    )
+                } catch {
+                    return LogVerifyResult(status: .mismatch, isReset: isReset)
+                }
+            }
+
+            // ADR-0036 (G-30 finding 2) — first-observation AUTH-attested
+            // genesis check, additive to the self-sig above. When the entry
+            // carries a genesis attestation, it must prove the account that
+            // OPAQUE-authenticated as `accountId` presented EXACTLY the served
+            // key as its genesis identity (anti-squatting). We verify it
+            // against the PINNED auth attest key (the same key device-attest
+            // pins). Fail-closed: a served-but-unverifiable attestation (bad
+            // signature/binding, OR the pinned key cannot be obtained) is a
+            // mismatch — never a silent skip. Absent (the common additive case)
+            // → nothing to check. No freshness check client-side (the
+            // attestation is a permanent historical artifact; the mint→append
+            // expiry is enforced only operator-side).
+            if let genesisAttest = latest.genesisAttest {
+                let attestKey: Data?
+                if let seam = genesisAttestKey {
+                    attestKey = await seam()
+                } else {
+                    attestKey = try? await DeviceAttestKey.fetch()
+                }
+                guard let attestKey = attestKey else {
+                    // A genesis attestation was served but we cannot obtain the
+                    // pinned verifying key to check it → fail closed.
+                    return LogVerifyResult(status: .mismatch, isReset: isReset)
+                }
+                do {
+                    try verifyGenesisAttestation(
+                        attestation: genesisAttest,
+                        attestVerifyingKey: attestKey,
+                        expectedAccountId: accountId,
+                        expectedUsernameHash: accountUsernameHash(accountId: accountId),
+                        expectedPubkey: publishedSignaturePubkey
                     )
                 } catch {
                     return LogVerifyResult(status: .mismatch, isReset: isReset)

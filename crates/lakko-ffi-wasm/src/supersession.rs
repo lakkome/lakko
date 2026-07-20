@@ -138,3 +138,150 @@ pub fn verify_witness_cosig(
     )
     .map_err(|e| JsError::new(&format!("witness co-sig verify: {e}")))
 }
+
+/// Verify an auth-attested genesis attestation's full account / usernameHash /
+/// pubkey binding against the CLIENT-PINNED auth attest verifying key (ADR-0036,
+/// closes the G-30 finding-2 squatting residual). A pass proves the party that
+/// OPAQUE-authenticated as `expectedAccountId` presented `expectedPubkey` as its
+/// genesis identity key (bridged to the KT-log leaf by `expectedUsernameHash`) —
+/// so only the account holder could have minted it.
+///
+/// This is the CLIENT first-observation path: it checks the signature plus all
+/// four bindings but deliberately does NOT enforce freshness (the attestation is
+/// a permanent historical artifact). Verify beside the ADR-0019 self-signature.
+///
+/// Throws if `attestVerifyingKey` is not a valid Ed25519 key, `expectedAccountId`
+/// is not 16 bytes, `expectedUsernameHash` / `expectedPubkey` are not 32 bytes,
+/// the attestation is malformed / the wrong length or version, the signature does
+/// not verify, or any of the account / usernameHash / pubkey bindings mismatch.
+#[wasm_bindgen(js_name = verifyGenesisAttestation)]
+pub fn verify_genesis_attestation(
+    attestation: &[u8],
+    attest_verifying_key: &[u8],
+    expected_account_id: &[u8],
+    expected_username_hash: &[u8],
+    expected_pubkey: &[u8],
+) -> Result<(), JsError> {
+    // The verdict lives in the `JsError`-free `_inner` (a plain `String` error so
+    // the negative paths are host-testable — `JsError::new` panics on a non-wasm
+    // target per wasm-bindgen-0.2's "non-wasm targets" rule). This thin wrapper
+    // only maps that error to a `JsError` for the JS boundary.
+    verify_genesis_attestation_inner(
+        attestation,
+        attest_verifying_key,
+        expected_account_id,
+        expected_username_hash,
+        expected_pubkey,
+    )
+    .map_err(|msg| JsError::new(&msg))
+}
+
+/// The `JsError`-free core of [`verify_genesis_attestation`]. Returns
+/// `Err(String)` on any failure so the negative paths are exercisable on the host
+/// target (the `#[wasm_bindgen]` wrapper maps `String` → `JsError`).
+fn verify_genesis_attestation_inner(
+    attestation: &[u8],
+    attest_verifying_key: &[u8],
+    expected_account_id: &[u8],
+    expected_username_hash: &[u8],
+    expected_pubkey: &[u8],
+) -> Result<(), String> {
+    let verifying = lakko_crypto::signing::VerifyingKey::from_bytes(attest_verifying_key)
+        .map_err(|_| "attest verifying key is not a valid Ed25519 key".to_string())?;
+    let expected_account: [u8; 16] = expected_account_id
+        .try_into()
+        .map_err(|_| "expected_account_id must be 16 bytes".to_string())?;
+    let expected_username_hash: [u8; 32] = expected_username_hash
+        .try_into()
+        .map_err(|_| "expected_username_hash must be 32 bytes".to_string())?;
+    let expected_pubkey: [u8; 32] = expected_pubkey
+        .try_into()
+        .map_err(|_| "expected_pubkey must be 32 bytes".to_string())?;
+    lakko_attest::verify_genesis_binding(
+        attestation,
+        &verifying,
+        &expected_account,
+        &expected_username_hash,
+        &expected_pubkey,
+    )
+    .map(|_| ())
+    .map_err(|e| format!("genesis attestation verify: {e}"))
+}
+
+/// Derive the transparency `usernameHash` for an `accountId`
+/// (`BLAKE3("lakko/transparency/account/v1" ‖ accountId)`) — the same derivation
+/// discovery uses on append. A client computes the `expectedUsernameHash` it
+/// feeds to `verifyGenesisAttestation` from the target's `accountId` (obtained
+/// via the `username → accountId` discovery lookup) without re-implementing
+/// BLAKE3. Returns the 32-byte hash.
+#[wasm_bindgen(js_name = accountUsernameHash)]
+#[must_use]
+pub fn account_username_hash(account_id: &[u8]) -> Vec<u8> {
+    lakko_transparency::account_username_hash(account_id).to_vec()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lakko_crypto::signing::SigningKey;
+
+    fn signed_genesis(
+        signing: &SigningKey,
+        account: &[u8; 16],
+        username_hash: &[u8; 32],
+        pubkey: &[u8; 32],
+    ) -> Vec<u8> {
+        lakko_attest::GenesisAttestation::new(*account, *username_hash, *pubkey, i64::MAX)
+            .sign(signing)
+            .to_vec()
+    }
+
+    // Exercise the `JsError`-free core so the negative paths run on the host
+    // (`JsError::new` panics on a non-wasm target).
+    #[test]
+    fn genesis_attestation_verify_roundtrips() {
+        let signing = SigningKey::from_seed(&[0x11; 32]);
+        let verifying = signing.verifying_key().to_bytes();
+        let account = [0xAA; 16];
+        let username_hash = [0xBB; 32];
+        let pubkey = [0xCC; 32];
+        let wire = signed_genesis(&signing, &account, &username_hash, &pubkey);
+        verify_genesis_attestation_inner(&wire, &verifying, &account, &username_hash, &pubkey)
+            .expect("genesis attestation verifies");
+        // Wrong expected pubkey → binding fails.
+        assert!(verify_genesis_attestation_inner(
+            &wire,
+            &verifying,
+            &account,
+            &username_hash,
+            &[0x00; 32]
+        )
+        .is_err());
+        // Signed by another key → signature does not verify under the pinned key.
+        let other = SigningKey::from_seed(&[0x22; 32])
+            .verifying_key()
+            .to_bytes();
+        assert!(
+            verify_genesis_attestation_inner(&wire, &other, &account, &username_hash, &pubkey)
+                .is_err()
+        );
+        // Malformed / bad-length blob.
+        assert!(verify_genesis_attestation_inner(
+            &[0u8; 10],
+            &verifying,
+            &account,
+            &username_hash,
+            &pubkey
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn account_username_hash_matches_transparency() {
+        let account_id = [0x07u8; 16];
+        assert_eq!(
+            account_username_hash(&account_id),
+            lakko_transparency::account_username_hash(&account_id).to_vec()
+        );
+    }
+}

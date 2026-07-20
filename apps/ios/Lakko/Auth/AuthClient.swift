@@ -248,6 +248,47 @@ public final class AuthClient {
         )
     }
 
+    // MARK: - Genesis attestation — ADR-0036 (G-30 finding 2, anti-squatting)
+
+    /// `POST /auth/genesis/attest` — mint a signed `GenesisAttestation`
+    /// binding the OPAQUE-authenticated account to `identityPubkey` (ADR-0036).
+    /// Mirror of the web / Android `AuthClient.mintGenesisAttestation`.
+    ///
+    /// Bearer-authenticated (the session token is the proof the caller
+    /// OPAQUE-authenticated as its `account_id` — the whole security basis for
+    /// anti-squatting: only the account holder can mint for their own account).
+    /// NO PoW. The client uploads the returned bytes alongside the identity
+    /// bundle so the transparency genesis entry is account-authenticated.
+    ///
+    /// Returns the RAW 153-byte attestation (URL-safe-no-pad decoded from the
+    /// response), ready to hand to `DiscoveryClient.uploadIdentityBundle`.
+    public func mintGenesisAttestation(
+        sessionToken: String,
+        identityPubkey: Data
+    ) async throws -> Data {
+        guard !sessionToken.isEmpty else {
+            throw AuthClientError.argument("sessionToken must be non-empty")
+        }
+        guard identityPubkey.count == 32 else {
+            throw AuthClientError.argument("identityPubkey must be 32 bytes (Ed25519)")
+        }
+        let resp: GenesisAttestResponse = try await post(
+            endpoint: "/auth/genesis/attest",
+            body: GenesisAttestRequest(
+                pubkeyB64: base64UrlEncodeNoPad(identityPubkey)
+            ),
+            bearer: sessionToken
+        )
+        guard let attestation = base64UrlDecodeNoPad(resp.genesisAttestB64) else {
+            throw AuthClientError.http(
+                status: 200,
+                endpoint: "/auth/genesis/attest",
+                body: "malformed genesis_attest_b64 in response"
+            )
+        }
+        return attestation
+    }
+
     // MARK: - TOTP — ADR-0018 factor (c), authenticator-code recovery
 
     /// `POST /totp/enroll/start` — mint + store an (unconfirmed) TOTP

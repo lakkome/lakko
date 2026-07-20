@@ -245,6 +245,39 @@ public class AuthClient(
     }
 
     // -----------------------------------------------------------------
+    // Auth-attested KT-log genesis — ADR-0036 (G-30 finding 2)
+    // -----------------------------------------------------------------
+
+    /**
+     * `POST /auth/genesis/attest` — mint an auth-attested genesis
+     * attestation binding the OPAQUE-authenticated account (proven by
+     * [sessionToken]) to its client-supplied genesis identity [pubkey]
+     * (ADR-0036, G-30 finding 2). Mirror of the web / iOS mint.
+     *
+     * Bearer-authenticated, NO PoW — holding a valid session token IS the
+     * proof the caller OPAQUE-authenticated as the account, which is the
+     * whole security basis: only the account holder can mint an attestation
+     * for their own account, so a squatter cannot obtain one for a victim's
+     * account. Returns the RAW 153-byte `GenesisAttestation` (decoded from
+     * the server's URL-safe base64), ready to ride onto the identity-bundle
+     * upload alongside the ADR-0019 genesis self-signature.
+     */
+    public suspend fun genesisAttest(sessionToken: String, pubkey: ByteArray): ByteArray {
+        if (sessionToken.isEmpty()) {
+            throw AuthClientArgError("sessionToken must be non-empty")
+        }
+        if (pubkey.size != PUBKEY_LEN) {
+            throw AuthClientArgError("pubkey must be $PUBKEY_LEN bytes (Ed25519)")
+        }
+        val resp: GenesisAttestResponse = post(
+            "/auth/genesis/attest",
+            GenesisAttestRequest(pubkey_b64 = base64UrlEncodeNoPad(pubkey)),
+            bearer = sessionToken,
+        )
+        return base64UrlDecodeNoPad(resp.genesis_attest_b64)
+    }
+
+    // -----------------------------------------------------------------
     // TOTP — ADR-0018 factor (c), authenticator-code recovery
     // -----------------------------------------------------------------
 
@@ -903,6 +936,9 @@ public class AuthClient(
         public const val DEFAULT_BASE_URL: String = "http://10.0.2.2:8081"
 
         private const val ACCOUNT_ID_LEN: Int = 16
+
+        /** Ed25519 identity pubkey length (ADR-0036 genesis-attest mint). */
+        private const val PUBKEY_LEN: Int = 32
     }
 }
 

@@ -20,6 +20,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod account;
 pub mod error;
 pub mod leaf_auth;
 pub mod log;
@@ -27,6 +28,7 @@ pub mod merkle;
 pub mod supersession;
 pub mod witness;
 
+pub use account::{account_username_hash, ACCOUNT_KEY_DOMAIN};
 pub use error::{Error, Result};
 pub use leaf_auth::{sign_leaf_genesis, verify_leaf_genesis};
 pub use log::{
