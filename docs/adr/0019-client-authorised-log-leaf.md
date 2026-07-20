@@ -117,7 +117,11 @@ party that authenticated the account at OPAQUE signup) co-signs
 squatting is *prevented*. Rejected for now: it couples transparency<->auth and
 adds an attestation key + endpoint (the `lakko-attest` / ADR-0015 shape). It is
 recorded here as the hardening to elect if first-entry squatting becomes a real
-concern.
+concern. **Elected + designed in ADR-0036** (auth-attested KT-log genesis,
+Proposed) — the `lakko-attest` `GenesisAttestation` primitive + a bearer-authed
+`POST /auth/genesis/attest` mint + an operator-side append gate behind
+`LAKKO_TRANSPARENCY_REQUIRE_GENESIS_ATTEST`, additive to (not replacing) the
+genesis self-signature above. See ADR-0036.
 
 ## Consequences
 
