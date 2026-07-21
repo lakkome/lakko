@@ -9,7 +9,7 @@ import uniffi.lakko_ffi_uniffi.verifyGenesisAttestation
 import uniffi.lakko_ffi_uniffi.verifyLeafGenesis
 import uniffi.lakko_ffi_uniffi.verifyLogInclusion
 import uniffi.lakko_ffi_uniffi.verifySupersessionChain
-import uniffi.lakko_ffi_uniffi.verifyWitnessCosig
+import uniffi.lakko_ffi_uniffi.verifyWitnessQuorum
 
 /**
  * Transparency-log inclusion verification (KT-log S3e) — the Android
@@ -297,70 +297,101 @@ public object NativeChainGate : ChainGate {
 }
 
 /**
- * Witness-co-sig-gate seam (ADR-0020) — abstracts the native
- * `verifyWitnessCosig` call so the witness-gate decision in
- * [verifyIdentityInLog] / [verifyRotationChain] is unit-testable on the
- * host JVM without `liblakko_ffi_uniffi.so` + a real Ed25519 co-sig.
+ * Witness-QUORUM-gate seam (ADR-0039, G-30 finding-1) — abstracts the native
+ * `verifyWitnessQuorum` call so the witness-gate decision in
+ * [verifyIdentityInLog] / [verifyRotationChain] is unit-testable on the host
+ * JVM without `liblakko_ffi_uniffi.so` + real Ed25519 co-sigs.
  *
  * The production [NativeWitnessGate] calls the real UniFFI
- * `verifyWitnessCosig`, which THROWS [FfiException] on an invalid co-sig
- * (bad length / version / binding / signature) and RETURNS on a valid one.
- * A test double can THROW (fail) or RETURN (pass) — exactly that contract.
+ * `verifyWitnessQuorum`, which THROWS [FfiException] when fewer than
+ * `threshold` DISTINCT pinned witnesses each produced a valid co-signature
+ * over the served root (or on a bad-length root / zero threshold) and RETURNS
+ * when the K-of-N quorum is satisfied. A test double can THROW (sub-threshold
+ * / invalid) or RETURN (satisfied) — exactly that contract. Generalises the
+ * pre-ADR-0039 single-witness [verify] shape.
  */
 public fun interface WitnessGate {
     /**
-     * Verify that [cosig] is a valid witness co-signature by [witnessKey]
-     * over the served `(treeRoot, logSize)`. MUST throw to signal an
-     * invalid co-sig; returning normally means it verified.
+     * Verify that at least [threshold] DISTINCT keys in [witnessKeys] each
+     * co-signed the served `(treeRoot, logSize)` among [cosigs]. MUST throw to
+     * signal a sub-threshold / invalid quorum; returning normally means the
+     * quorum verified.
      */
     public fun verify(
-        cosig: ByteArray,
-        witnessKey: ByteArray,
+        cosigs: List<ByteArray>,
+        witnessKeys: List<ByteArray>,
+        threshold: Int,
         treeRoot: ByteArray,
         logSize: ULong,
     )
 }
 
-/** Production [WitnessGate] — the real native `verifyWitnessCosig`. */
+/** Production [WitnessGate] — the real native `verifyWitnessQuorum`. */
 public object NativeWitnessGate : WitnessGate {
     override fun verify(
-        cosig: ByteArray,
-        witnessKey: ByteArray,
+        cosigs: List<ByteArray>,
+        witnessKeys: List<ByteArray>,
+        threshold: Int,
         treeRoot: ByteArray,
         logSize: ULong,
     ) {
-        // Throws FfiException on any invalid co-sig (length / version /
-        // binding-to-served-root / Ed25519). The caller maps a throw to a
-        // fail-closed refusal of the root.
-        verifyWitnessCosig(cosig, witnessKey, treeRoot, logSize)
+        // Throws FfiException when fewer than `threshold` distinct pinned
+        // witnesses produced a valid co-sig over the served root (or on a
+        // bad-length root / zero threshold). The caller maps a throw to a
+        // fail-closed refusal of the root. The tally counts DISTINCT pinned
+        // keys, so a foreign / replayed co-sig never inflates it.
+        verifyWitnessQuorum(
+            cosigs = cosigs,
+            pinnedKeys = witnessKeys,
+            threshold = threshold.toUInt(),
+            expectedTreeRoot = treeRoot,
+            expectedLogSize = logSize,
+        )
     }
 }
 
+/** RFC-fixed byte length of one witness co-signature wire blob
+ *  (`version ‖ tree_root(32) ‖ log_size(8) ‖ sig(64)`, ADR-0020). A
+ *  malformed-length wire entry is dropped before the gate so one bad entry
+ *  cannot sink an otherwise-valid quorum (the quorum verifier re-checks each
+ *  entry's length anyway, but pre-filtering is fail-safe). */
+private const val WITNESS_COSIG_LEN: Int = 105
+
 /**
- * ADR-0020 — the witness co-signature gate over a fetched root. Returns
+ * ADR-0039 (G-30 finding-1) — the K-of-N witness-QUORUM gate over a fetched
+ * root, generalising the single-witness co-sig gate of ADR-0020. Returns
  * `true` when the gate REFUSES the root (the caller then fails closed →
- * MISMATCH), `false` when it passes (or the gate is off). Mirror of the
- * web `witnessGateRefuses`:
- *   * `witnessKey == null` → gate OFF, never refuses (transition posture).
- *   * pinned key + a root with NO co-sig → REFUSE (fail-closed).
- *   * pinned key + a co-sig that does not verify → REFUSE.
- *   * pinned key + a valid co-sig → pass.
+ * MISMATCH), `false` when it passes (or the gate is off). Mirror of the web
+ * `witnessGateRefuses`:
+ *   * empty [witnessKeys] set → gate OFF, never refuses (the operator-only
+ *     transition posture — subsumes the old `witnessKey == null` case).
+ *   * pinned key set + fewer than [threshold] DISTINCT pinned witnesses with a
+ *     valid co-sig over the served `(treeRoot, logSize)` → REFUSE. This
+ *     subsumes the old "no co-sig at all" case (0 valid < threshold) and any
+ *     bad-length / zero-threshold input (the quorum verifier throws → refuse).
+ *   * pinned key set + a quorum of ≥ [threshold] distinct valid co-sigs →
+ *     pass. Foreign / garbage / replayed co-sigs never inflate the tally.
  */
 private fun witnessGateRefuses(
     root: SignedRoot,
-    witnessKey: ByteArray?,
+    witnessKeys: List<ByteArray>,
+    threshold: Int,
     witnessGate: WitnessGate,
 ): Boolean {
-    // Gate off — operator-only transition posture.
-    if (witnessKey == null) return false
-    // A witness key is pinned: a root WITHOUT a co-sig is refused.
-    val cosig = root.witnessCosig ?: return true
+    // Gate off — no witnesses pinned (operator-only transition posture).
+    if (witnessKeys.isEmpty()) return false
     return try {
-        witnessGate.verify(cosig, witnessKey, root.treeRoot, root.logSize)
+        // Drop any wire cosig that is not exactly one blob — a malformed-length
+        // entry can never be a valid witness co-sig, and dropping it keeps one
+        // bad entry from sinking an otherwise-valid quorum (fail-safe). The
+        // keys are already 32 bytes each (config drops off-length pins).
+        val cosigs = root.witnessCosigs.filter { it.size == WITNESS_COSIG_LEN }
+        witnessGate.verify(cosigs, witnessKeys, threshold, root.treeRoot, root.logSize)
         false
     } catch (_: FfiException) {
-        // The co-sig did not verify against the pinned witness key over
-        // the served root → fail closed.
+        // Fewer than `threshold` distinct pinned witnesses produced a valid
+        // co-signature over the served root (or a bad-length / zero-threshold
+        // input) → fail closed.
         true
     }
 }
@@ -401,6 +432,21 @@ public object NativeAccountKeyDeriver : AccountKeyDeriver {
  *                                 omitted, [TransparencyConfig.pinnedOperatorKey]
  *                                 is used.
  * @param lastSeenRoot             the no-rollback high-water-mark store.
+ * @param witnessKeys              ADR-0039 (G-30 finding-1) — the pinned
+ *                                 WITNESS verifying key SET (each 32 bytes),
+ *                                 or `[]` for "no witness gate" (the
+ *                                 operator-only transition posture). When
+ *                                 non-empty, a fetched root MUST carry a
+ *                                 K-of-N QUORUM of valid witness co-signatures
+ *                                 over its `(tree_root, log_size)` — at least
+ *                                 [witnessThreshold] DISTINCT pinned witnesses
+ *                                 — or the verify fails closed (MISMATCH).
+ * @param witnessThreshold         ADR-0039 — the K-of-N quorum threshold (the
+ *                                 minimum number of DISTINCT pinned witnesses
+ *                                 that must have co-signed). Only consulted
+ *                                 when [witnessKeys] is non-empty; a threshold
+ *                                 above the pinned-key count makes the gate
+ *                                 refuse every root (fail-closed).
  * @param accountKeyDeriver        derives the `username_hash` from the
  *                                 account_id (native by default).
  * @param inclusionGate            the inclusion-proof verifier (native by
@@ -420,7 +466,8 @@ public suspend fun verifyIdentityInLog(
     client: TransparencyClient?,
     operatorKey: ByteArray?,
     lastSeenRoot: LastSeenRootStore,
-    witnessKey: ByteArray?,
+    witnessKeys: List<ByteArray>,
+    witnessThreshold: Int = 1,
     genesisAttestKey: ByteArray? = null,
     accountKeyDeriver: AccountKeyDeriver = NativeAccountKeyDeriver,
     inclusionGate: InclusionGate = NativeInclusionGate,
@@ -447,13 +494,15 @@ public suspend fun verifyIdentityInLog(
             return LogVerifyResult(LogVerifyStatus.ROLLBACK, isReset = null)
         }
 
-        // 1b. ADR-0020 — the witness co-signature gate. When a witness key
-        //     is pinned, the root must carry a valid co-sig over its
-        //     (tree_root, log_size) or we fail closed: an operator that
-        //     forks cannot get both forks witness-co-signed (the split-view
-        //     defence). Surfaced as MISMATCH (the root is untrusted, so any
+        // 1b. ADR-0039 — the K-of-N witness-quorum gate. When a witness key
+        //     SET is pinned, the root must carry a QUORUM of valid co-sigs
+        //     over its (tree_root, log_size) — at least `witnessThreshold`
+        //     DISTINCT pinned witnesses — or we fail closed: an operator that
+        //     forks cannot get both forks co-signed by K independent witnesses
+        //     (the split-view defence, now requiring K corrupt witnesses, not
+        //     one). Surfaced as MISMATCH (the root is untrusted, so any
         //     inclusion proof against it is meaningless). No latest read yet.
-        if (witnessGateRefuses(root, witnessKey, witnessGate)) {
+        if (witnessGateRefuses(root, witnessKeys, witnessThreshold, witnessGate)) {
             return LogVerifyResult(LogVerifyStatus.MISMATCH, isReset = null)
         }
 
@@ -631,6 +680,13 @@ public data class RotationChainResult(
  * @param operatorKey        the pinned operator verifying key, or `null` for
  *                           "off".
  * @param lastSeenRoot       the no-rollback high-water-mark store.
+ * @param witnessKeys        ADR-0039 (G-30 finding-1) — the pinned WITNESS
+ *                           verifying key SET (each 32 bytes), or `[]` for "no
+ *                           witness gate". When non-empty, a fetched root
+ *                           lacking a K-of-N quorum of valid co-sigs is
+ *                           refused (fail-closed → MISMATCH).
+ * @param witnessThreshold   ADR-0039 — the K-of-N quorum threshold. Only
+ *                           consulted when [witnessKeys] is non-empty.
  * @param accountKeyDeriver  derives the `username_hash` (native by default).
  * @param chainGate          the chain verifier (native by default; a test
  *                           seam otherwise).
@@ -644,7 +700,8 @@ public suspend fun verifyRotationChain(
     client: TransparencyClient?,
     operatorKey: ByteArray?,
     lastSeenRoot: LastSeenRootStore,
-    witnessKey: ByteArray?,
+    witnessKeys: List<ByteArray>,
+    witnessThreshold: Int = 1,
     accountKeyDeriver: AccountKeyDeriver = NativeAccountKeyDeriver,
     chainGate: ChainGate = NativeChainGate,
     witnessGate: WitnessGate = NativeWitnessGate,
@@ -662,11 +719,11 @@ public suspend fun verifyRotationChain(
             return RotationChainResult(LogVerifyStatus.ROLLBACK, isReset = null, version = null)
         }
 
-        // 1b. ADR-0020 — the witness co-signature gate (see
-        //     `witnessGateRefuses`). When a witness key is pinned, a root
-        //     lacking a valid co-sig is refused (the split-view defence,
-        //     fail-closed); surfaced as MISMATCH.
-        if (witnessGateRefuses(root, witnessKey, witnessGate)) {
+        // 1b. ADR-0039 — the K-of-N witness-quorum gate (see
+        //     `witnessGateRefuses`). When a witness key SET is pinned, a root
+        //     lacking a quorum of valid co-sigs is refused (the split-view
+        //     defence, fail-closed); surfaced as MISMATCH. No latest read yet.
+        if (witnessGateRefuses(root, witnessKeys, witnessThreshold, witnessGate)) {
             return RotationChainResult(LogVerifyStatus.MISMATCH, isReset = null, version = null)
         }
 

@@ -11,14 +11,18 @@
 #     (`LAKKO_TRANSPARENCY_REQUIRE_LEAF_AUTH=1`, G-30 #2 / ADR-0019).
 #   - `discovery` — fronts the identity-bundle upload; on a key change it
 #     best-effort appends to `transparency` (+ a fast reconciler sweep).
+#   - `witness` / `witness2` / `witness3` — the ADR-0039 K-of-N witness QUORUM:
+#     three independent instances of `services/witness`, each its own DB + its
+#     own cosign secret, all pinning the SAME operator key. transparency fans
+#     out to all three; the driver pins the 3 keys + a threshold of 2.
 #
 # NO auth service: discovery's upload is gated by a shared-secret session
 # token, so the driver mints it directly (see the test's `session_secret()`).
 #
 # The driver runs on the HOST and connects to the published ports
-# (127.0.0.1:8084 discovery, 127.0.0.1:8087 transparency). The build context
-# is the workspace root (`../..`) so each Dockerfile's `COPY . .` sees every
-# workspace crate.
+# (127.0.0.1:8084 discovery, 127.0.0.1:8087 transparency, 127.0.0.1:8088 /
+# :8089 / :8090 the three witnesses). The build context is the workspace root
+# (`../..`) so each Dockerfile's `COPY . .` sees every workspace crate.
 
 services:
   transparency-db:
@@ -53,10 +57,16 @@ services:
       retries: 20
       start_period: 5s
 
-  # ADR-0020 — the independent witness co-signer. Its own DB; pins the
-  # operator key (the fixed-seed fixture below); shares the cosign secret with
-  # transparency. In production the witness MUST run in a separate trust domain;
-  # here it is co-located for the test.
+  # ADR-0020 + ADR-0039 — the independent witness co-signers, a 2-of-3 K-of-N
+  # QUORUM. Three instances of the SAME `services/witness` binary (K-of-N needs
+  # no witness-service code change — the fan-out + threshold live in transparency
+  # + the client). Each has its OWN DB + its OWN cosign secret, but all pin the
+  # SAME operator key (the fixed-seed fixture below). transparency fans out to
+  # all three via the LIST vars (LAKKO_TRANSPARENCY_WITNESS_URLS +
+  # _COSIGN_SECRETS) and serves the bundle; the driver pins the 3 keys + demands
+  # a threshold of 2 (`verify_witness_quorum`). In production the witnesses MUST
+  # run in SEPARATE trust domains (the collusion-resistance is a deploy property,
+  # ADR-0039 caveat); here they are co-located for the test.
   witness-db:
     image: mariadb:11
     container_name: lakko-recovery-e2e-witness-db
@@ -102,6 +112,92 @@ services:
     ports:
       - "127.0.0.1:8088:8088"
 
+  witness2-db:
+    image: mariadb:11
+    container_name: lakko-recovery-e2e-witness2-db
+    restart: "no"
+    environment:
+      MARIADB_ROOT_PASSWORD: rootpw
+      MARIADB_DATABASE: lakko_witness2
+      MARIADB_USER: lakko
+      MARIADB_PASSWORD: devpass
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+
+  witness2:
+    build:
+      context: ../..
+      dockerfile: services/witness/Dockerfile
+    container_name: lakko-recovery-e2e-witness2
+    restart: "no"
+    depends_on:
+      witness2-db:
+        condition: service_healthy
+    environment:
+      LAKKO_BIND: "0.0.0.0:8088"
+      LAKKO_WITNESS_DATABASE_URL: "mysql://lakko:devpass@witness2-db:3306/lakko_witness2"
+      # The SAME pinned operator key as witness (base64 of the Ed25519 verifying
+      # key derived from the transparency container's fixed seed, 0xAB x 32).
+      LAKKO_WITNESS_OPERATOR_PUBKEY: "JIrL26+eBQGW3nBL6i1odw5RkVDRA7WH2uLZytU92TA="
+      # base64(16x 0x88) — DISTINCT per witness. The i-th of transparency's
+      # LAKKO_TRANSPARENCY_WITNESS_COSIGN_SECRETS.
+      LAKKO_WITNESS_COSIGN_SECRET: "iIiIiIiIiIiIiIiIiIiIiA=="
+      RUST_LOG: "info,lakko_svc_witness=debug"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8088/ready || exit 1"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+      start_period: 3s
+    ports:
+      - "127.0.0.1:8089:8088"
+
+  witness3-db:
+    image: mariadb:11
+    container_name: lakko-recovery-e2e-witness3-db
+    restart: "no"
+    environment:
+      MARIADB_ROOT_PASSWORD: rootpw
+      MARIADB_DATABASE: lakko_witness3
+      MARIADB_USER: lakko
+      MARIADB_PASSWORD: devpass
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+
+  witness3:
+    build:
+      context: ../..
+      dockerfile: services/witness/Dockerfile
+    container_name: lakko-recovery-e2e-witness3
+    restart: "no"
+    depends_on:
+      witness3-db:
+        condition: service_healthy
+    environment:
+      LAKKO_BIND: "0.0.0.0:8088"
+      LAKKO_WITNESS_DATABASE_URL: "mysql://lakko:devpass@witness3-db:3306/lakko_witness3"
+      # The SAME pinned operator key as witness (0xAB x 32 derived).
+      LAKKO_WITNESS_OPERATOR_PUBKEY: "JIrL26+eBQGW3nBL6i1odw5RkVDRA7WH2uLZytU92TA="
+      # base64(16x 0x99) — DISTINCT per witness.
+      LAKKO_WITNESS_COSIGN_SECRET: "mZmZmZmZmZmZmZmZmZmZmQ=="
+      RUST_LOG: "info,lakko_svc_witness=debug"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8088/ready || exit 1"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+      start_period: 3s
+    ports:
+      - "127.0.0.1:8090:8088"
+
   transparency:
     build:
       context: ../..
@@ -112,6 +208,10 @@ services:
       transparency-db:
         condition: service_healthy
       witness:
+        condition: service_healthy
+      witness2:
+        condition: service_healthy
+      witness3:
         condition: service_healthy
     environment:
       LAKKO_BIND: "0.0.0.0:8087"
@@ -125,9 +225,11 @@ services:
       # ADR-0020: a FIXED operator seed (0xAB x 32) so the witness can pin the
       # derived verifying key (dev / e2e only).
       LAKKO_TRANSPARENCY_OPERATOR_SEED_HEX: "abababababababababababababababababababababababababababababababab"
-      # Arm witness co-signing toward the witness container.
-      LAKKO_TRANSPARENCY_WITNESS_URL: "http://witness:8088"
-      LAKKO_TRANSPARENCY_WITNESS_COSIGN_SECRET: "d3d3d3d3d3d3d3d3d3d3dw=="
+      # ADR-0039 — arm the K-of-N witness fan-out toward all THREE witnesses via
+      # the LIST vars (comma-separated, 1:1 positional: the i-th URL is
+      # bearer-authed with the i-th secret). base64(16x 0x77 / 0x88 / 0x99).
+      LAKKO_TRANSPARENCY_WITNESS_URLS: "http://witness:8088,http://witness2:8088,http://witness3:8088"
+      LAKKO_TRANSPARENCY_WITNESS_COSIGN_SECRETS: "d3d3d3d3d3d3d3d3d3d3dw==,iIiIiIiIiIiIiIiIiIiIiA==,mZmZmZmZmZmZmZmZmZmZmQ=="
       RUST_LOG: "info,lakko_svc_transparency=debug"
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8087/ready || exit 1"]

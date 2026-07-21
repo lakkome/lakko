@@ -40,8 +40,8 @@ use lakko_mls::Identity;
 use lakko_pow::solve;
 use lakko_transparency::{
     sign_leaf_genesis, verify_inclusion, verify_leaf_genesis, verify_supersession_chain,
-    verify_witness_cosig, InclusionProof, LogEntry, PinnedIdentity, RotationEvidence, SignedRoot,
-    SupersessionProof, TreeHash,
+    verify_witness_cosig, verify_witness_quorum, InclusionProof, LogEntry, PinnedIdentity,
+    RotationEvidence, SignedRoot, SupersessionProof, TreeHash,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -63,6 +63,18 @@ fn transparency_url() -> String {
 fn witness_url() -> String {
     std::env::var("LAKKO_RECOVERY_E2E_WITNESS_URL")
         .unwrap_or_else(|_| "http://127.0.0.1:8088".to_owned())
+}
+
+/// The 2nd + 3rd witnesses of the ADR-0039 2-of-3 quorum (published host ports
+/// 8089 / 8090 in the committed compose).
+fn witness2_url() -> String {
+    std::env::var("LAKKO_RECOVERY_E2E_WITNESS2_URL")
+        .unwrap_or_else(|_| "http://127.0.0.1:8089".to_owned())
+}
+
+fn witness3_url() -> String {
+    std::env::var("LAKKO_RECOVERY_E2E_WITNESS3_URL")
+        .unwrap_or_else(|_| "http://127.0.0.1:8090".to_owned())
 }
 
 /// The witness cosign shared secret (base64), presented as `Bearer <b64>` on
@@ -128,10 +140,11 @@ struct RootRes {
     log_size: u64,
     timestamp_unix: u64,
     signature_b64: String,
-    /// ADR-0020: the witness co-signature, present when the witness
-    /// integration is on.
+    /// ADR-0020 + ADR-0039: the K-of-N witness co-signature BUNDLE (0..N
+    /// entries), present when the witness integration is on. The clean-replace
+    /// of the pre-ADR-0039 singular `witness_cosig_b64`.
     #[serde(default)]
-    witness_cosig_b64: Option<String>,
+    witness_cosigs_b64: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -252,11 +265,12 @@ async fn poll_latest(
 }
 
 async fn fetch_root(client: &reqwest::Client) -> SignedRoot {
-    fetch_root_with_cosig(client).await.0
+    fetch_root_with_cosigs(client).await.0
 }
 
-/// Fetch the signed root AND its optional witness co-signature (ADR-0020).
-async fn fetch_root_with_cosig(client: &reqwest::Client) -> (SignedRoot, Option<Vec<u8>>) {
+/// Fetch the signed root AND its K-of-N witness co-signature BUNDLE
+/// (ADR-0020 + ADR-0039). The bundle is 0..N base64 cosigs decoded to bytes.
+async fn fetch_root_with_cosigs(client: &reqwest::Client) -> (SignedRoot, Vec<Vec<u8>>) {
     let r: RootRes = client
         .get(format!("{}/transparency/root", transparency_url()))
         .send()
@@ -277,10 +291,11 @@ async fn fetch_root_with_cosig(client: &reqwest::Client) -> (SignedRoot, Option<
         &B64.decode(r.signature_b64.as_bytes()).expect("sig b64"),
     )
     .expect("signature is 64 bytes");
-    let cosig = r
-        .witness_cosig_b64
-        .as_ref()
-        .map(|c| B64.decode(c.as_bytes()).expect("witness cosig b64"));
+    let cosigs: Vec<Vec<u8>> = r
+        .witness_cosigs_b64
+        .iter()
+        .map(|c| B64.decode(c.as_bytes()).expect("witness cosig b64"))
+        .collect();
     (
         SignedRoot {
             tree_root,
@@ -288,14 +303,14 @@ async fn fetch_root_with_cosig(client: &reqwest::Client) -> (SignedRoot, Option<
             timestamp_unix: r.timestamp_unix,
             signature,
         },
-        cosig,
+        cosigs,
     )
 }
 
-/// Fetch the witness's published verifying key (ADR-0020).
-async fn fetch_witness_key(client: &reqwest::Client) -> Vec<u8> {
+/// Fetch a witness's published verifying key (ADR-0020) from `base_url`.
+async fn fetch_witness_key(client: &reqwest::Client, base_url: &str) -> Vec<u8> {
     let r: WitnessKeyRes = client
-        .get(format!("{}/witness/key", witness_url()))
+        .get(format!("{base_url}/witness/key"))
         .send()
         .await
         .expect("witness key request")
@@ -306,6 +321,17 @@ async fn fetch_witness_key(client: &reqwest::Client) -> Vec<u8> {
         .expect("witness key body");
     B64.decode(r.witness_pubkey_b64.as_bytes())
         .expect("witness pubkey b64")
+}
+
+/// Fetch all THREE witnesses' published verifying keys — the ADR-0039 K-of-N
+/// pinned set. In this e2e the "pin" is each witness's live-published key
+/// (a real deployment would hard-pin them build-time).
+async fn fetch_all_witness_keys(client: &reqwest::Client) -> Vec<Vec<u8>> {
+    let mut keys = Vec::with_capacity(3);
+    for base in [witness_url(), witness2_url(), witness3_url()] {
+        keys.push(fetch_witness_key(client, &base).await);
+    }
+    keys
 }
 
 /// Fetch + flatten the audit path for a leaf index.
@@ -551,25 +577,64 @@ async fn recovery_kt_pipeline_publish_log_fetch_verify_rotate() {
         "a keyless (no leaf_auth) binding must never enter the log"
     );
 
-    // Step 6 — ADR-0020 witness co-signing: the served root carries a witness
-    // co-signature that verifies against the witness's published key over the
-    // served (tree_root, log_size), AND the operator signature verifies too.
-    // This proves the transparency -> witness cosign round-trip live — the
-    // operator cannot serve a root the independent witness has not co-signed
-    // (the split-view defence).
-    let witness_key = fetch_witness_key(&client).await;
-    let (served_root, cosig) = fetch_root_with_cosig(&client).await;
-    let cosig = cosig.expect("the served root carries a witness co-signature");
+    // Step 6 — ADR-0020 + ADR-0039 K-of-N witness quorum. The served root now
+    // carries a BUNDLE of witness co-signatures (`witness_cosigs_b64`). Pin all
+    // THREE witness keys, assert the bundle carries >= K=2 cosigs each verifying
+    // against a pinned key, and that the 2-of-3 quorum verifies over the served
+    // (tree_root, log_size), AND the operator signature verifies too. This
+    // proves the transparency -> N-witness fan-out round-trip live: the operator
+    // cannot serve a root that fewer than K independent witnesses have co-signed
+    // (the K-of-N split-view defence). K=2 tolerates one witness momentarily
+    // absent from the best-effort bundle.
+    let witness_keys = fetch_all_witness_keys(&client).await;
+    assert_eq!(witness_keys.len(), 3, "three witnesses are configured");
+    let (served_root, cosigs) = fetch_root_with_cosigs(&client).await;
     served_root
         .verify(&operator_vk)
         .expect("operator signature on the served root verifies");
-    verify_witness_cosig(
-        &cosig,
-        &witness_key,
+    assert!(
+        cosigs.len() >= 2,
+        "the served bundle must carry at least K=2 witness cosigs; got {}",
+        cosigs.len()
+    );
+    // Every served cosig verifies against exactly one of the pinned witness keys.
+    for cosig in &cosigs {
+        let matches = witness_keys.iter().any(|k| {
+            verify_witness_cosig(cosig, k, &served_root.tree_root, served_root.log_size).is_ok()
+        });
+        assert!(
+            matches,
+            "every bundle cosig must verify against a pinned witness key"
+        );
+    }
+    let cosig_refs: Vec<&[u8]> = cosigs.iter().map(Vec::as_slice).collect();
+    let key_refs: Vec<&[u8]> = witness_keys.iter().map(Vec::as_slice).collect();
+    // POSITIVE: the 2-of-3 quorum is satisfied over the served root.
+    verify_witness_quorum(
+        &cosig_refs,
+        &key_refs,
+        2,
         &served_root.tree_root,
         served_root.log_size,
     )
-    .expect("the witness co-signature verifies over the served root");
+    .expect("the 2-of-3 K-of-N witness quorum verifies over the served root");
+
+    // Step 6b — the meaningful NEGATIVE: a client that pins only ONE of the
+    // three witness keys but demands a threshold of 2 can NEVER meet the quorum
+    // (at most one distinct pinned key is satisfiable), so `verify_witness_quorum`
+    // fails closed — a single witness's cosig(s) cannot fake a 2-of-N quorum.
+    let one_key: [&[u8]; 1] = [key_refs[0]];
+    assert!(
+        verify_witness_quorum(
+            &cosig_refs,
+            &one_key,
+            2,
+            &served_root.tree_root,
+            served_root.log_size,
+        )
+        .is_err(),
+        "a threshold of 2 with only ONE pinned witness key must fail closed"
+    );
 
     // Step 7 — ADR-0020 split-view defence, LIVE fork-refusal. A validly
     // operator-signed but FORKED root (the SAME log_size as the witness's

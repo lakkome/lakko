@@ -130,6 +130,27 @@ pub enum Error {
     /// root (ADR-0020).
     #[error("witness co-signature is bound to a different root")]
     WitnessCosigBindingMismatch,
+
+    /// A witness-quorum verification was requested with a zero threshold — a
+    /// misconfiguration that would let an empty quorum trivially pass. Rejected
+    /// fail-closed before any co-signature is examined (ADR-0039, G-30
+    /// finding-1, invariant #4).
+    #[error("witness quorum threshold must be non-zero")]
+    WitnessQuorumBadThreshold,
+
+    /// Fewer distinct pinned witness keys produced a valid co-signature over the
+    /// expected root than the quorum threshold requires (ADR-0039, G-30
+    /// finding-1).
+    #[error(
+        "witness quorum not met: {achieved} distinct valid co-signatures, {required} required"
+    )]
+    WitnessQuorumNotMet {
+        /// The number of distinct pinned witness keys that produced at least one
+        /// valid co-signature over the expected root.
+        achieved: usize,
+        /// The quorum threshold the caller required.
+        required: usize,
+    },
 }
 
 /// Convenience alias.

@@ -2610,10 +2610,21 @@ CLOSED for the single-witness model:
   bind-mismatch a client.
 - Two new fuzz targets: `verify_consistency` (the RFC 6962 verifier, a fork must
   fail) + `verify_witness_cosig` (the 105-byte cosig blob parse + bind + verify).
-- **Residual:** operator+witness COLLUSION (single witness — K-of-N is a config
-  slot for later) and the witness's INDEPENDENCE is a deploy property (a different
-  trust domain), not code-enforced. The deferred client-gossip layer would remove
-  the collusion residual entirely.
+- **Residual:** operator+witness COLLUSION — the single-witness case. **The
+  K-of-N witness quorum that raises this bar is now implemented
+  ([ADR-0039](../adr/0039-kt-log-witness-quorum.md), 2026-07-21):** the root gate
+  now needs the operator signature AND ≥ K valid co-signatures from DISTINCT keys
+  in a build-time-pinned witness key set of size N
+  (`crates/lakko-transparency/src/witness.rs` `verify_witness_quorum`,
+  dedup-by-distinct-key so a replayed / duplicated cosig can never inflate the
+  quorum; the transparency service fans out to N witnesses best-effort and serves
+  `witness_cosigs_b64: Vec<String>`, the clients enforce the threshold
+  fail-closed; N=1/K=1 is the single-witness gate). So a fork now requires
+  corrupting K witnesses, not one. The residual is now operator + K COLLUDING
+  witnesses, closed in practice ONLY under INDEPENDENT witness operation (the N
+  witnesses in distinct trust domains; a deploy/ops property, not code-enforced —
+  a single operator running all N witnesses gains nothing). The deferred
+  client-gossip layer would remove the witness-collusion residual entirely.
 
 `lakko-security` reviewed the full arc (Sprints 1-6): **APPROVE-WITH-NOTES**
 (invariants #2/#4/#6 hold or strengthened; one trivial hygiene finding —

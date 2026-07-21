@@ -43,10 +43,12 @@ export interface SignedRoot {
   readonly timestampUnix: bigint;
   /** 64-byte Ed25519 signature over the canonical root pre-image. */
   readonly signature: Uint8Array;
-  /** ADR-0020: the witness co-signature wire blob over `(treeRoot, logSize)`,
-   *  or `null` when the server serves no witness co-signature. A client that
-   *  pins a witness key requires a valid one (the split-view defence). */
-  readonly witnessCosig: Uint8Array | null;
+  /** ADR-0039 (G-30 finding-1): the witness co-signature wire blobs over
+   *  `(treeRoot, logSize)` — a LIST, one per co-signing witness (empty `[]`
+   *  when the server serves none). A client that pins a witness key SET
+   *  requires a K-of-N quorum of valid ones (the split-view defence). Replaces
+   *  the pre-ADR-0039 singular `witnessCosig`. */
+  readonly witnessCosigs: Uint8Array[];
 }
 
 /** Decoded `GET /transparency/latest/:account_key` response. */
@@ -118,8 +120,10 @@ interface RootResWire {
   log_size: number;
   timestamp_unix: number;
   signature_b64: string;
-  /** ADR-0020: base64 witness co-signature, absent when unconfigured. */
-  witness_cosig_b64?: string;
+  /** ADR-0039 (S3): base64 witness co-signatures, a JSON array — OMITTED when
+   *  the server has no cosigs. Replaces the pre-ADR-0039 singular
+   *  `witness_cosig_b64`. */
+  witness_cosigs_b64?: string[];
 }
 
 /** Wire shape of `GET /transparency/latest/:key` (Rust `LatestRes`). */
@@ -167,10 +171,11 @@ export class TransparencyClient {
       logSize: BigInt(wire.log_size),
       timestampUnix: BigInt(wire.timestamp_unix),
       signature: base64Decode(wire.signature_b64),
-      witnessCosig:
-        wire.witness_cosig_b64 !== undefined && wire.witness_cosig_b64.length > 0
-          ? base64Decode(wire.witness_cosig_b64)
-          : null,
+      witnessCosigs: Array.isArray(wire.witness_cosigs_b64)
+        ? wire.witness_cosigs_b64
+            .filter((s) => typeof s === "string" && s.length > 0)
+            .map(base64Decode)
+        : [],
     };
   }
 

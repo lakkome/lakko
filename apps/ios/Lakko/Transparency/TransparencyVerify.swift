@@ -158,20 +158,39 @@ public struct TransparencyVerify {
         public let pinnedLogVersion: UInt64
     }
 
-    /// The pinned-witness-key + co-sig + served-root bundle handed to the
-    /// witness-gate seam (ADR-0020). Lets a test drive the gate's
-    /// pass/fail branches without a real Ed25519 co-sig (the witness
-    /// signer is the `services/witness` service, not FFI-exposed).
+    /// The pinned-witness-key SET + co-sig LIST + threshold + served-root
+    /// bundle handed to the witness-QUORUM-gate seam (ADR-0039, G-30
+    /// finding-1). Lets a test drive the gate's pass/fail branches without a
+    /// real Ed25519 co-sig (the witness signer is the `services/witness`
+    /// service, not FFI-exposed). Mirror of the web `verifyWitness` seam args.
     public struct WitnessArgs {
-        public let cosig: Data
-        public let witnessKey: Data
+        /// The served root's witness co-signature blobs (the WHOLE list — the
+        /// seam receives it raw, garbage entries included; the quorum tally
+        /// counts only DISTINCT pinned keys that verify, so garbage never
+        /// inflates or sinks it).
+        public let cosigs: [Data]
+        /// The client-pinned witness verifying key set (each 32 bytes).
+        public let witnessKeys: [Data]
+        /// The K-of-N quorum threshold (minimum DISTINCT pinned witnesses).
+        public let threshold: Int
         public let treeRoot: Data
         public let logSize: UInt64
     }
 
     private let client: TransparencyFetching?
     private let operatorKey: Data?
-    private let witnessKey: Data?
+    /// ADR-0039 (G-30 finding-1) — the pinned WITNESS verifying key SET (each
+    /// 32 bytes), or `[]` for "no witness gate" (the operator-only transition
+    /// posture). When non-empty, a fetched root MUST carry a K-of-N QUORUM of
+    /// valid witness co-signatures over its `(tree_root, log_size)` — at least
+    /// ``witnessThreshold`` DISTINCT pinned witnesses each co-signing it — or
+    /// the verify fails closed (surfaced as `.mismatch`).
+    private let witnessKeys: [Data]
+    /// ADR-0039 — the K-of-N quorum threshold (the minimum number of DISTINCT
+    /// pinned witnesses that must have co-signed). Only consulted when
+    /// ``witnessKeys`` is non-empty; a threshold above the pinned-key count
+    /// makes the gate refuse every root (fail-closed).
+    private let witnessThreshold: Int
     private let lastSeenRoot: LastSeenRoot
     /// Inclusion-gate override (TEST SEAM ONLY). When supplied, this
     /// replaces the real `verifyLogInclusion` FFI call: it THROWS to
@@ -192,11 +211,11 @@ public struct TransparencyVerify {
     /// FFI-exposed), so tests stub this seam to cover the `confirmed` /
     /// chain-fail `mismatch` branches.
     private let verifyChain: ((ChainArgs) throws -> Data)?
-    /// Witness-co-sig-gate override (TEST SEAM ONLY) — ADR-0020. When
-    /// supplied, this REPLACES the real `verifyWitnessCosig` FFI call: it
-    /// THROWS to simulate an invalid co-sig and RETURNS to simulate a
-    /// valid one — exactly the FFI contract. Production callers pass
-    /// `nil`; minting a real co-sig needs the `services/witness` signer
+    /// Witness-QUORUM-gate override (TEST SEAM ONLY) — ADR-0039. When
+    /// supplied, this REPLACES the real `verifyWitnessQuorum` FFI call: it
+    /// THROWS to simulate a sub-threshold / invalid quorum and RETURNS to
+    /// simulate a satisfied one — exactly the FFI contract. Production callers
+    /// pass `nil`; minting a real co-sig needs the `services/witness` signer
     /// (not FFI-exposed), so tests stub this seam.
     private let verifyWitness: ((WitnessArgs) throws -> Void)?
     /// Genesis-attest verifying-key source (ADR-0036, G-30 finding 2). The
@@ -218,22 +237,27 @@ public struct TransparencyVerify {
     ///   - operatorKey: the pinned operator verifying key (32 bytes),
     ///     or `nil` for "off". Defaults to
     ///     ``TransparencyConfig/pinnedOperatorKey``.
-    ///   - witnessKey: the pinned WITNESS verifying key (32 bytes), or
-    ///     `nil` for "no witness gate" (the operator-only transition
-    ///     posture). Defaults to ``TransparencyConfig/pinnedWitnessKey``.
+    ///   - witnessKeys: the pinned WITNESS verifying key SET (each 32
+    ///     bytes), or `[]` for "no witness gate" (the operator-only
+    ///     transition posture). Defaults to
+    ///     ``TransparencyConfig/pinnedWitnessKeys``.
+    ///   - witnessThreshold: the K-of-N quorum threshold (the minimum
+    ///     number of DISTINCT pinned witnesses that must have co-signed).
+    ///     Defaults to ``TransparencyConfig/witnessThreshold``.
     ///   - lastSeenRoot: the no-rollback high-water store. Defaults to
     ///     a `.standard`-backed ``LastSeenRoot``.
     ///   - verifyInclusion: the test-only inclusion seam (see above).
     ///   - verifyChain: the test-only rotation-chain seam (G-30 #2; see
     ///     above).
-    ///   - verifyWitness: the test-only witness-co-sig seam (ADR-0020;
+    ///   - verifyWitness: the test-only witness-quorum seam (ADR-0039;
     ///     see above).
     ///   - genesisAttestKey: the genesis-attest verifying-key source
     ///     (ADR-0036; see above). `nil` → production ``DeviceAttestKey``.
     public init(
         client: TransparencyFetching? = TransparencyClient.forOptionalConfig(),
         operatorKey: Data? = TransparencyConfig.pinnedOperatorKey,
-        witnessKey: Data? = TransparencyConfig.pinnedWitnessKey,
+        witnessKeys: [Data] = TransparencyConfig.pinnedWitnessKeys,
+        witnessThreshold: Int = TransparencyConfig.witnessThreshold,
         lastSeenRoot: LastSeenRoot = LastSeenRoot(),
         verifyInclusion: ((InclusionArgs) throws -> Void)? = nil,
         verifyChain: ((ChainArgs) throws -> Data)? = nil,
@@ -242,7 +266,8 @@ public struct TransparencyVerify {
     ) {
         self.client = client
         self.operatorKey = operatorKey
-        self.witnessKey = witnessKey
+        self.witnessKeys = witnessKeys
+        self.witnessThreshold = witnessThreshold
         self.lastSeenRoot = lastSeenRoot
         self.verifyInclusion = verifyInclusion
         self.verifyChain = verifyChain
@@ -250,42 +275,67 @@ public struct TransparencyVerify {
         self.genesisAttestKey = genesisAttestKey
     }
 
-    /// ADR-0020 — the witness co-signature gate over a fetched root.
-    /// Returns `true` when the gate REFUSES the root (the caller then
-    /// fails closed → `.mismatch`), `false` when it passes (or the gate
-    /// is off). See the web `witnessGateRefuses` for the full posture:
-    ///   * no pinned witness key → gate OFF, never refuses (transition).
-    ///   * pinned key + a root with NO co-sig → REFUSE (fail-closed).
-    ///   * pinned key + a co-sig that does not verify → REFUSE.
-    ///   * pinned key + a valid co-sig → pass.
+    /// RFC-fixed byte length of one witness co-signature wire blob
+    /// (`version ‖ tree_root(32) ‖ log_size(8) ‖ sig(64)`, ADR-0020). A
+    /// malformed-length entry can never be a valid co-sig, so the real quorum
+    /// path drops anything that is not exactly this size.
+    private static let witnessCosigLen = 105
+
+    /// ADR-0039 (G-30 finding-1) — the K-of-N witness-QUORUM gate over a
+    /// fetched root, generalising the single-witness co-sig gate of ADR-0020.
+    /// Returns `true` when the gate REFUSES the root (the caller then fails
+    /// closed → `.mismatch`), `false` when it passes (or the gate is off).
+    /// The gate is the split-view defence: each independent witness co-signs a
+    /// root only after verifying it append-only-extends its last-co-signed
+    /// root, so an operator that forks the log cannot get BOTH forks co-signed
+    /// by a QUORUM of independent witnesses — it must now corrupt `K`
+    /// witnesses, not one. See the web `witnessGateRefuses` for the full
+    /// posture:
+    ///   * no pinned witness keys (empty set) → gate OFF, never refuses (the
+    ///     operator-only transition fallback).
+    ///   * pinned key set + fewer than `threshold` DISTINCT pinned witnesses
+    ///     with a valid co-sig over the served `(tree_root, log_size)` →
+    ///     REFUSE. This subsumes the old "no co-sig at all" case (0 valid <
+    ///     threshold) and any bad-length / zero-threshold input (the FFI
+    ///     throws → we refuse).
+    ///   * pinned key set + a quorum of ≥ `threshold` distinct valid co-sigs →
+    ///     pass. Foreign / garbage / replayed co-sigs never inflate the tally
+    ///     (the FFI counts DISTINCT pinned keys, never co-signatures).
     private func witnessGateRefuses(_ root: SignedRoot) -> Bool {
-        // Gate off — operator-only transition posture.
-        guard let witnessKey = witnessKey else { return false }
-        // A witness key is pinned: a root WITHOUT a co-sig is refused.
-        guard let cosig = root.witnessCosig else { return true }
+        // Gate off — no witnesses pinned (operator-only transition posture).
+        guard !witnessKeys.isEmpty else { return false }
         do {
-            let args = WitnessArgs(
-                cosig: cosig,
-                witnessKey: witnessKey,
-                treeRoot: root.treeRoot,
-                logSize: root.logSize
-            )
             if let seam = verifyWitness {
-                try seam(args)
+                // The seam receives the WHOLE served list (garbage included) —
+                // it decides pass/fail exactly like the FFI.
+                try seam(WitnessArgs(
+                    cosigs: root.witnessCosigs,
+                    witnessKeys: witnessKeys,
+                    threshold: witnessThreshold,
+                    treeRoot: root.treeRoot,
+                    logSize: root.logSize
+                ))
             } else {
-                // Production — the audited Rust core verifies the co-sig
-                // against the pinned witness key over the served root.
-                try verifyWitnessCosig(
-                    cosig: cosig,
-                    witnessKey: witnessKey,
+                // Production — drop any wire cosig that is not exactly one blob
+                // (a malformed-length entry can never be a valid co-sig, and
+                // dropping it keeps the list clean so one bad entry cannot sink
+                // an otherwise-valid quorum — fail-safe). The pinned keys are
+                // already 32 bytes each (config drops off-length pins). The
+                // audited Rust core counts DISTINCT pinned keys that verify.
+                let cosigs = root.witnessCosigs.filter { $0.count == Self.witnessCosigLen }
+                try verifyWitnessQuorum(
+                    cosigs: cosigs,
+                    pinnedKeys: witnessKeys,
+                    threshold: UInt32(clamping: witnessThreshold),
                     expectedTreeRoot: root.treeRoot,
                     expectedLogSize: root.logSize
                 )
             }
             return false
         } catch {
-            // The co-sig did not verify against the pinned witness key
-            // over the served root → fail closed.
+            // Fewer than `threshold` distinct pinned witnesses produced a valid
+            // co-signature over the served root (or a bad-length / zero-
+            // threshold input) → fail closed.
             return true
         }
     }
@@ -324,13 +374,15 @@ public struct TransparencyVerify {
                 return LogVerifyResult(status: .rollback, isReset: nil)
             }
 
-            // 1b. ADR-0020 — the witness co-signature gate. When a
-            //     witness key is pinned, the root must carry a valid
-            //     co-sig over its (tree_root, log_size) or we fail
-            //     closed: an operator that forks cannot get both forks
-            //     witness-co-signed (the split-view defence). Surfaced as
-            //     `.mismatch` (the root is untrusted, so any inclusion
-            //     proof against it is meaningless). No latest read yet.
+            // 1b. ADR-0039 — the K-of-N witness-quorum gate. When a witness
+            //     key SET is pinned, the root must carry a QUORUM of valid
+            //     co-sigs over its (tree_root, log_size) — at least
+            //     `threshold` DISTINCT pinned witnesses — or we fail closed:
+            //     an operator that forks cannot get both forks co-signed by K
+            //     independent witnesses (the split-view defence, now requiring
+            //     K corrupt witnesses, not one). Surfaced as `.mismatch` (the
+            //     root is untrusted, so any inclusion proof against it is
+            //     meaningless). No latest read yet.
             if witnessGateRefuses(root) {
                 return LogVerifyResult(status: .mismatch, isReset: nil)
             }
@@ -539,10 +591,10 @@ public struct TransparencyVerify {
                 return RotationChainResult(status: .rollback, isReset: nil, version: nil)
             }
 
-            // 1b. ADR-0020 — the witness co-signature gate (see
-            //     `witnessGateRefuses`). When a witness key is pinned, a
-            //     root lacking a valid co-sig is refused (the split-view
-            //     defence, fail-closed); surfaced as `.mismatch`.
+            // 1b. ADR-0039 — the K-of-N witness-quorum gate (see
+            //     `witnessGateRefuses`). When a witness key SET is pinned, a
+            //     root lacking a quorum of valid co-sigs is refused (the
+            //     split-view defence, fail-closed); surfaced as `.mismatch`.
             if witnessGateRefuses(root) {
                 return RotationChainResult(status: .mismatch, isReset: nil, version: nil)
             }

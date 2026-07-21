@@ -44,7 +44,7 @@ import {
 import type { SignedRoot, InclusionProof } from "./client";
 import { accountKey } from "./account-key";
 import { checkAndAdvance, loadLastSeenLogSize } from "./last-seen-root";
-import { pinnedOperatorKey, pinnedWitnessKey } from "./config";
+import { pinnedOperatorKey, pinnedWitnessKeys, witnessThreshold } from "./config";
 import { base64Decode } from "../auth/account-id";
 import { fetchDeviceAttestKey } from "../auth/device-attest-key";
 import { loadWasm } from "../wasm";
@@ -95,21 +95,31 @@ export interface VerifyDeps {
   /** The pinned operator verifying key (32 bytes), or `null` for
    *  "off". When omitted, `pinnedOperatorKey()` is used. */
   operatorKey?: Uint8Array | null;
-  /** ADR-0020 — the pinned WITNESS verifying key (32 bytes), or `null`
-   *  for "no witness gate" (the operator-only transition posture). When
-   *  omitted, `pinnedWitnessKey()` is used. When non-null, a fetched root
-   *  MUST carry a valid witness co-signature over its `(tree_root,
-   *  log_size)` or the verify fails closed (surfaced as a `mismatch`). */
-  witnessKey?: Uint8Array | null;
+  /** ADR-0039 (G-30 finding-1) — the pinned WITNESS verifying key SET (each
+   *  32 bytes), or `[]` for "no witness gate" (the operator-only transition
+   *  posture). When omitted, `pinnedWitnessKeys()` is used. When non-empty, a
+   *  fetched root MUST carry a K-of-N QUORUM of valid witness co-signatures
+   *  over its `(tree_root, log_size)` — at least `witnessThreshold` DISTINCT
+   *  pinned witnesses each co-signing it — or the verify fails closed
+   *  (surfaced as a `mismatch`). */
+  witnessKeys?: Uint8Array[];
+  /** ADR-0039 — the K-of-N quorum threshold (the minimum number of DISTINCT
+   *  pinned witnesses that must have co-signed). When omitted,
+   *  `witnessThreshold()` is used. Only consulted when `witnessKeys` is
+   *  non-empty; a threshold above the pinned-key count makes the gate refuse
+   *  every root (fail-closed). */
+  witnessThreshold?: number;
   /**
-   * Witness co-sig gate override (TEST SEAM ONLY) — ADR-0020. When
-   * supplied, replaces the real wasm `verifyWitnessCosig` call: it should
-   * THROW to simulate an invalid co-sig and RETURN to simulate a valid
-   * one — exactly the wasm contract. Production callers never pass this.
+   * Witness QUORUM gate override (TEST SEAM ONLY) — ADR-0039. When supplied,
+   * replaces the real wasm `verifyWitnessQuorum` call: it should THROW to
+   * simulate a sub-threshold / invalid quorum and RETURN to simulate a
+   * satisfied one — exactly the wasm contract. Production callers never pass
+   * this.
    */
   verifyWitness?: (args: {
-    cosig: Uint8Array;
-    witnessKey: Uint8Array;
+    cosigs: Uint8Array[];
+    witnessKeys: Uint8Array[];
+    threshold: number;
     treeRoot: Uint8Array;
     logSize: bigint;
   }) => void;
@@ -229,13 +239,14 @@ export async function verifyIdentityInLog(
       return { status: "rollback", isReset: null };
     }
 
-    // 1b. ADR-0020 — the witness co-signature gate. When a witness key is
-    //     pinned, the root must carry a valid co-sig over its
-    //     `(tree_root, log_size)` or we fail closed: an operator that
-    //     forks cannot get both forks witness-co-signed (the split-view
-    //     defence). Surfaced as a `mismatch` (the root is untrusted, so
-    //     any inclusion proof against it is meaningless). No latest read
-    //     yet → no `isReset`.
+    // 1b. ADR-0039 — the K-of-N witness-quorum gate. When a witness key SET
+    //     is pinned, the root must carry a QUORUM of valid co-sigs over its
+    //     `(tree_root, log_size)` — at least `threshold` DISTINCT pinned
+    //     witnesses — or we fail closed: an operator that forks cannot get
+    //     both forks co-signed by K independent witnesses (the split-view
+    //     defence, now requiring K corrupt witnesses, not one). Surfaced as a
+    //     `mismatch` (the root is untrusted, so any inclusion proof against it
+    //     is meaningless). No latest read yet → no `isReset`.
     if (await witnessGateRefuses(root, deps)) {
       return { status: "mismatch", isReset: null };
     }
@@ -481,10 +492,10 @@ export async function verifyRotationChain(
       return { status: "rollback", isReset: null, version: null };
     }
 
-    // 1b. ADR-0020 — the witness co-signature gate (see
-    //     `witnessGateRefuses`). When a witness key is pinned, a root
-    //     lacking a valid co-sig is refused (the split-view defence,
-    //     fail-closed); surfaced as a `mismatch`. No latest read yet.
+    // 1b. ADR-0039 — the K-of-N witness-quorum gate (see
+    //     `witnessGateRefuses`). When a witness key SET is pinned, a root
+    //     lacking a quorum of valid co-sigs is refused (the split-view
+    //     defence, fail-closed); surfaced as a `mismatch`. No latest read yet.
     if (await witnessGateRefuses(root, deps)) {
       return { status: "mismatch", isReset: null, version: null };
     }
@@ -655,57 +666,93 @@ function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
   return true;
 }
 
+/** RFC-fixed byte length of one witness co-signature wire blob
+ *  (`version ‖ tree_root(32) ‖ log_size(8) ‖ sig(64)`, ADR-0020). The wasm
+ *  quorum verifier slices `cosigsFlat` into chunks of exactly this size. */
+const WITNESS_COSIG_LEN = 105;
+
+/** Flat-concatenate equal-length byte chunks into one buffer (the role-table
+ *  FFI convention the wasm quorum verifier expects — it re-slices on the Rust
+ *  side and enforces the length invariant, refusing a malformed buffer). */
+function flatConcat(chunks: readonly Uint8Array[]): Uint8Array {
+  let total = 0;
+  for (const c of chunks) total += c.length;
+  const out = new Uint8Array(total);
+  let off = 0;
+  for (const c of chunks) {
+    out.set(c, off);
+    off += c.length;
+  }
+  return out;
+}
+
 /**
- * ADR-0020 — the witness co-signature gate over a fetched root.
+ * ADR-0039 (G-30 finding-1) — the K-of-N witness-QUORUM gate over a fetched
+ * root, generalising the single-witness co-sig gate of ADR-0020.
  *
- * Returns `true` when the gate REFUSES the root (the caller then fails
- * closed → `mismatch`), `false` when the root passes (or the gate is
- * off). The witness gate is the split-view defence: an independent
- * witness co-signs a root only after verifying it append-only-extends
- * its last-co-signed root, so an operator that forks cannot get BOTH
- * forks co-signed.
+ * Returns `true` when the gate REFUSES the root (the caller then fails closed
+ * → `mismatch`), `false` when the root passes (or the gate is off). The gate
+ * is the split-view defence: each independent witness co-signs a root only
+ * after verifying it append-only-extends its last-co-signed root, so an
+ * operator that forks the log cannot get BOTH forks co-signed by a QUORUM of
+ * independent witnesses — it must now corrupt `K` witnesses, not one.
  *
  * Posture:
- *   * no pinned witness key (unconfigured) → gate OFF, never refuses
- *     (the operator-only transition fallback).
- *   * pinned key + a root with NO co-sig → REFUSE (the operator is not
- *     serving witnessed roots; we required one, so fail closed).
- *   * pinned key + a co-sig that does not verify against the pinned key
- *     over the served `(tree_root, log_size)` → REFUSE.
- *   * pinned key + a valid co-sig → pass.
+ *   * no pinned witness keys (empty set / unconfigured) → gate OFF, never
+ *     refuses (the operator-only transition fallback, exactly as today).
+ *   * pinned key set + fewer than `threshold` DISTINCT pinned witnesses with
+ *     a valid co-sig over the served `(tree_root, log_size)` → REFUSE. This
+ *     subsumes the old "no co-sig at all" case (0 valid < threshold) and any
+ *     bad-length / zero-threshold input (the wasm throws → we refuse).
+ *   * pinned key set + a quorum of ≥ `threshold` distinct valid co-sigs →
+ *     pass. Foreign / garbage / replayed co-sigs never inflate the tally (the
+ *     wasm counts DISTINCT pinned keys, never co-signatures).
  */
 async function witnessGateRefuses(
   root: SignedRoot,
   deps: VerifyDeps,
 ): Promise<boolean> {
-  const witnessKey =
-    deps.witnessKey !== undefined ? deps.witnessKey : pinnedWitnessKey();
-  // Gate off — operator-only transition posture.
-  if (witnessKey === null) return false;
-  // A witness key is pinned: a root WITHOUT a co-sig is refused (we
-  // required the witness's attestation and the server served none).
-  if (root.witnessCosig === null) return true;
+  const witnessKeys =
+    deps.witnessKeys !== undefined ? deps.witnessKeys : pinnedWitnessKeys();
+  // Gate off — no witnesses pinned (operator-only transition posture).
+  if (witnessKeys.length === 0) return false;
+  const threshold =
+    deps.witnessThreshold !== undefined
+      ? deps.witnessThreshold
+      : witnessThreshold();
   try {
     if (deps.verifyWitness !== undefined) {
       deps.verifyWitness({
-        cosig: root.witnessCosig,
-        witnessKey,
+        cosigs: root.witnessCosigs,
+        witnessKeys,
+        threshold,
         treeRoot: root.treeRoot,
         logSize: root.logSize,
       });
     } else {
       const wasm = await loadWasm();
-      wasm.verifyWitnessCosig(
-        root.witnessCosig,
-        witnessKey,
+      // Drop any wire cosig that is not exactly one blob — a malformed-length
+      // entry can never be a valid witness co-sig, and dropping it keeps the
+      // flat buffer a clean multiple of WITNESS_COSIG_LEN so one bad entry
+      // cannot sink an otherwise-valid quorum (fail-safe). The keys are
+      // already 32 bytes each (config drops off-length pins).
+      const cosigsFlat = flatConcat(
+        root.witnessCosigs.filter((c) => c.length === WITNESS_COSIG_LEN),
+      );
+      const keysFlat = flatConcat(witnessKeys);
+      wasm.verifyWitnessQuorum(
+        cosigsFlat,
+        keysFlat,
+        threshold,
         root.treeRoot,
         root.logSize,
       );
     }
     return false;
   } catch {
-    // The co-sig did not verify against the pinned witness key over the
-    // served root → fail closed.
+    // Fewer than `threshold` distinct pinned witnesses produced a valid
+    // co-signature over the served root (or a bad-length / zero-threshold
+    // input) → fail closed.
     return true;
   }
 }

@@ -90,12 +90,25 @@ targets:
         #     `/transparency/operator-key` endpoint for verification.
         #   * LakkoTransparencyWitnessKey — base64 of the witness's
         #     32-byte Ed25519 verifying key (ADR-0020 split-view defence),
-        #     pinned out-of-band like the operator key. When set, a root
-        #     without a valid witness co-sig is refused (fail-closed);
-        #     blank → the witness gate is OFF (operator-only transition).
+        #     pinned out-of-band like the operator key. Retained as the
+        #     BACKWARD-COMPAT single-witness source for the ADR-0039 key
+        #     set; blank → the witness gate is OFF (operator-only
+        #     transition).
+        #   * LakkoTransparencyWitnessKeys — ADR-0039 (G-30 finding-1) the
+        #     K-of-N witness key SET: a comma-separated list of base64url
+        #     (standard alphabet also accepted) 32-byte Ed25519 verifying
+        #     keys. When non-empty, a root must carry a QUORUM of valid
+        #     co-sigs (>= LakkoTransparencyWitnessThreshold distinct pinned
+        #     witnesses) or it is refused (fail-closed). Blank falls back to
+        #     the singular LakkoTransparencyWitnessKey; both blank → OFF.
+        #   * LakkoTransparencyWitnessThreshold — the K-of-N threshold
+        #     (default 1). Only consulted when the key set is non-empty; a
+        #     threshold above the pinned-key count refuses every root.
         LakkoTransparencyUrl: ""
         LakkoTransparencyOperatorKey: ""
         LakkoTransparencyWitnessKey: ""
+        LakkoTransparencyWitnessKeys: ""
+        LakkoTransparencyWitnessThreshold: ""
         # ADR-0026 Phase 4 — anti-censorship bootstrap pin. All default
         # to EMPTY so the build cannot arm (BootstrapPin returns nil →
         # AntiCensorshipManager stays disarmed) until a deployment

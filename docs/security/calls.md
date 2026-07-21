@@ -2779,11 +2779,41 @@ Four sub-invariants:
 
 Strengthens invariant #4 (the root gate now needs operator AND
 witness) + invariant #6 (a rotation is anchored to a non-forkable
-root). Residual: operator+witness collusion (a K-of-N witness
-threshold is a config slot for later) + independence-as-deploy-
-property (the witness must run in a different trust domain). Two
-fuzz targets cover the new surfaces (`verify_consistency`,
-`verify_witness_cosig`). `lakko-security`: **APPROVE-WITH-NOTES**.
+root).
+
+**K-of-N witness quorum ([ADR-0039](../adr/0039-kt-log-witness-quorum.md),
+2026-07-21).** The single-witness residual above — operator+witness
+collusion — is now raised to a **K-of-N witness quorum**: a client
+trusts an operator root only when it carries the operator signature
+AND **≥ K valid co-signatures from DISTINCT keys in a
+build-time-pinned witness key set of size N**
+(`crates/lakko-transparency/src/witness.rs` `verify_witness_quorum`).
+The count is over **distinct pinned keys satisfied, never cosigs** —
+the cosig list is attacker-influenceable, so a replayed / duplicated
+cosig (or a duplicate pinned key) satisfies at most the one key it is
+signed by and contributes exactly one, and a single compromised
+witness can never flood the list to fake a quorum. It reuses
+`verify_witness_cosig` per (key × cosig), inheriting the
+`(tree_root, log_size)` binding + the domain separation verbatim, and
+fails closed on `threshold == 0` / `threshold > N`; N=1/K=1 is
+byte-for-byte the single-witness gate. `services/transparency` fans
+out to the N witnesses best-effort (`witness_client.rs`
+`list_from_env`) and serves the bundle `witness_cosigs_b64:
+Vec<String>` (a down / refusing witness is absent, never a stale
+per-witness cosig; migration `0005` widens the cosig cache to a bundle
++ a per-witness high-water for anti-stranding auto-rejoin); the
+**client** is the enforcement point and fails closed below K.
+`services/witness` is unchanged — N witnesses are N independent
+instances of the same binary.
+
+Residual: operator + K COLLUDING witnesses — closed in practice ONLY
+under INDEPENDENT witness operation (the N witnesses in distinct trust
+domains; a deploy/ops property, not code — a single operator running
+all N witnesses gains nothing against this threat) + the deferred
+client-gossip / cross-check layer (the witness-trust-free split-view
+defence, a separate future ADR). Three fuzz targets cover the
+surfaces (`verify_consistency`, `verify_witness_cosig`,
+`verify_witness_quorum`). `lakko-security`: **APPROVE-WITH-NOTES**.
 
 ### C-58: A backup rollback is detected by an auth-signed backup-head commitment
 

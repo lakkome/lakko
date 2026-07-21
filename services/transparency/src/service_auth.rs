@@ -166,7 +166,7 @@ mod tests {
             require_leaf_auth: false,
             genesis_attest_key: None,
             require_genesis_attest: false,
-            witness: None,
+            witness: Arc::new(Vec::new()),
         }
     }
 

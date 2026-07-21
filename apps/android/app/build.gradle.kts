@@ -162,10 +162,38 @@ android {
         // set, the client REQUIRES a valid witness co-signature over every
         // fetched root (fail-closed); blank → the witness gate is OFF and
         // the client keeps the operator-only posture (transition fallback).
+        // Retained as the BACKWARD-COMPAT source for the K-of-N key SET
+        // below (folded into a one-element set at threshold 1).
         buildConfigField(
             "String",
             "LAKKO_TRANSPARENCY_WITNESS_KEY",
             "\"${project.findProperty("lakko.transparency.witness.key") as String? ?: ""}\"",
+        )
+        // `LAKKO_TRANSPARENCY_WITNESS_KEYS` (ADR-0039 K-of-N witness QUORUM,
+        // G-30 finding-1) — a COMMA-SEPARATED list of base64 (url-safe or
+        // standard alphabet, padding optional) 32-byte Ed25519 witness
+        // verifying keys, all pinned out-of-band. When non-empty, the client
+        // requires a K-of-N QUORUM: at least `..._WITNESS_THRESHOLD` DISTINCT
+        // pinned witnesses must each have co-signed the served root, or the
+        // gate fails closed. Blank / all-malformed → falls back to the
+        // singular key above, else the witness gate is OFF (transition
+        // posture). Sourced from a gradle property so it never lands in
+        // version control; empty when unset.
+        buildConfigField(
+            "String",
+            "LAKKO_TRANSPARENCY_WITNESS_KEYS",
+            "\"${project.findProperty("lakko.transparency.witness.keys") as String? ?: ""}\"",
+        )
+        // `LAKKO_TRANSPARENCY_WITNESS_THRESHOLD` (ADR-0039) — the K-of-N
+        // quorum threshold (the minimum number of DISTINCT pinned witnesses
+        // that must have co-signed). Defaults to "1" (unset / unparseable /
+        // non-positive). Only consulted when the key SET above is non-empty;
+        // a threshold LARGER than the pinned-key count makes the quorum
+        // unsatisfiable → the gate fails closed (the correct posture).
+        buildConfigField(
+            "String",
+            "LAKKO_TRANSPARENCY_WITNESS_THRESHOLD",
+            "\"${project.findProperty("lakko.transparency.witness.threshold") as String? ?: "1"}\"",
         )
 
         // ADR-0026 Phase 4 — anti-censorship bootstrap pin. All three

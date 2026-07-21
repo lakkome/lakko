@@ -27,12 +27,17 @@ The driver is `services/discovery/tests/recovery_kt_e2e.rs` (`#[ignore]`-gated).
 5. **Negative (C-56)** — a new-key binding with NO `leaf_auth` is refused at the
    transparency append (`LAKKO_TRANSPARENCY_REQUIRE_LEAF_AUTH=1`), so it never
    enters the log.
-6. **Witness co-signing (ADR-0020)** — `GET /transparency/root` carries a
-   witness co-signature; it verifies (`verify_witness_cosig`) against the
-   witness's published key over the served `(tree_root, log_size)`, and the
-   operator signature verifies too. This proves the transparency -> witness
-   cosign round-trip live: the operator cannot serve a root the independent
-   witness has not co-signed (the split-view defence).
+6. **K-of-N witness quorum (ADR-0020 + ADR-0039)** — `GET /transparency/root`
+   carries a BUNDLE of witness co-signatures (`witness_cosigs_b64`) from the
+   three independent witnesses (`witness` / `witness2` / `witness3`). The driver
+   pins all three keys, asserts the bundle carries >= K=2 cosigs (each verifying
+   via `verify_witness_cosig` against a pinned key), and that the **2-of-3
+   quorum** verifies (`verify_witness_quorum`) over the served
+   `(tree_root, log_size)`; the operator signature verifies too. The NEGATIVE:
+   pinning only ONE of the three keys but demanding a threshold of 2 fails closed
+   (a single witness cannot fake a quorum). This proves the transparency ->
+   N-witness fan-out round-trip live: the operator cannot serve a root fewer than
+   K independent witnesses have co-signed (the K-of-N split-view defence).
 7. **Live fork-refusal (ADR-0020 split-view defence)** — the driver reconstructs
    the operator SIGNING key from the container's fixed seed
    (`LAKKO_TRANSPARENCY_OPERATOR_SEED_HEX`), mints a VALIDLY operator-signed but
@@ -62,9 +67,13 @@ The driver is `services/discovery/tests/recovery_kt_e2e.rs` (`#[ignore]`-gated).
   witness can PIN the derived verifying key via `LAKKO_WITNESS_OPERATOR_PUBKEY`
   (the `fixed_seed_env_override_derives_deterministic_key` test pins the value);
   this mirrors the sfu-e2e fixture-seed pattern.
-- **The witness is co-located here; production needs a separate trust domain.**
-  ADR-0020's split-view guarantee holds only when the witness runs in a
-  different trust domain from the operator. The e2e co-locates it for testing.
+- **The witnesses are co-located here; production needs separate trust domains.**
+  ADR-0020's split-view guarantee — and ADR-0039's K-of-N collusion-resistance —
+  hold only when the witnesses run in trust domains DISTINCT from the operator
+  and from each other. The e2e co-locates all three (`witness` / `witness2` /
+  `witness3`, each its own DB + cosign secret, all pinning the same operator key)
+  for testing; a single operator running all N gains nothing against
+  operator+witness collusion (ADR-0039 caveat).
 
 ## Run it locally
 
@@ -95,7 +104,9 @@ at a non-default stack:
 |---|---|---|
 | `LAKKO_RECOVERY_E2E_DISCOVERY_URL` | `http://127.0.0.1:8084` | discovery base URL |
 | `LAKKO_RECOVERY_E2E_TRANSPARENCY_URL` | `http://127.0.0.1:8087` | transparency base URL |
-| `LAKKO_RECOVERY_E2E_WITNESS_URL` | `http://127.0.0.1:8088` | witness base URL (ADR-0020) |
+| `LAKKO_RECOVERY_E2E_WITNESS_URL` | `http://127.0.0.1:8088` | witness 1 base URL (ADR-0020) |
+| `LAKKO_RECOVERY_E2E_WITNESS2_URL` | `http://127.0.0.1:8089` | witness 2 base URL (ADR-0039 quorum) |
+| `LAKKO_RECOVERY_E2E_WITNESS3_URL` | `http://127.0.0.1:8090` | witness 3 base URL (ADR-0039 quorum) |
 | `LAKKO_RECOVERY_E2E_SESSION_SECRET` | `base64(32× 0x5e)` | session-token secret (must match the discovery container's `LAKKO_SESSION_TOKEN_SECRET`) |
 
 The compose sets the discovery container's PoW difficulty to `0`

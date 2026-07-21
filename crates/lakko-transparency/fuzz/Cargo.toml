@@ -71,6 +71,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "verify_witness_quorum"
+path = "fuzz_targets/verify_witness_quorum.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "verify_leaf_genesis"
 path = "fuzz_targets/verify_leaf_genesis.rs"
 test = false

@@ -83,12 +83,15 @@ public class TransparencyClient(
             logSize = wire.log_size,
             timestampUnix = wire.timestamp_unix,
             signature = base64Decode(wire.signature_b64),
-            // ADR-0020: optional witness co-signature (absent when the
-            // operator runs without a witness). The witness gate fails
-            // closed when a witness key is pinned and this is null.
-            witnessCosig = wire.witness_cosig_b64
-                ?.takeIf { it.isNotEmpty() }
-                ?.let { base64Decode(it) },
+            // ADR-0039 (G-30 finding-1): the witness co-signature wire blobs
+            // over `(treeRoot, logSize)`, one per co-signing witness (empty
+            // when the operator serves none). A client that pins a witness
+            // key SET requires a K-of-N quorum of valid ones. Replaces the
+            // pre-ADR-0039 singular `witness_cosig_b64`.
+            witnessCosigs = wire.witness_cosigs_b64
+                ?.filter { it.isNotEmpty() }
+                ?.map { base64Decode(it) }
+                ?: emptyList(),
         )
     }
 
@@ -210,11 +213,12 @@ public data class SignedRoot(
     val timestampUnix: ULong,
     /** 64-byte Ed25519 signature over the canonical root pre-image. */
     val signature: ByteArray,
-    /** ADR-0020: the witness co-signature wire blob over `(treeRoot,
-     *  logSize)`, or `null` when the server serves no witness
-     *  co-signature. A client that pins a witness key requires a valid one
-     *  (the split-view defence). */
-    val witnessCosig: ByteArray? = null,
+    /** ADR-0039 (G-30 finding-1): the witness co-signature wire blobs over
+     *  `(treeRoot, logSize)` — a LIST, one per co-signing witness (empty when
+     *  the server serves none). A client that pins a witness key SET requires
+     *  a K-of-N quorum of valid ones (the split-view defence). Replaces the
+     *  pre-ADR-0039 singular `witnessCosig`. */
+    val witnessCosigs: List<ByteArray> = emptyList(),
 ) {
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
@@ -223,10 +227,11 @@ public data class SignedRoot(
         if (logSize != other.logSize) return false
         if (timestampUnix != other.timestampUnix) return false
         if (!signature.contentEquals(other.signature)) return false
-        val a = witnessCosig
-        val b = other.witnessCosig
-        if (a == null) return b == null
-        return b != null && a.contentEquals(b)
+        if (witnessCosigs.size != other.witnessCosigs.size) return false
+        for (i in witnessCosigs.indices) {
+            if (!witnessCosigs[i].contentEquals(other.witnessCosigs[i])) return false
+        }
+        return true
     }
 
     override fun hashCode(): Int {
@@ -234,7 +239,7 @@ public data class SignedRoot(
         result = 31 * result + logSize.hashCode()
         result = 31 * result + timestampUnix.hashCode()
         result = 31 * result + signature.contentHashCode()
-        result = 31 * result + (witnessCosig?.contentHashCode() ?: 0)
+        for (c in witnessCosigs) result = 31 * result + c.contentHashCode()
         return result
     }
 }
@@ -357,8 +362,10 @@ private data class RootResWire(
     val log_size: ULong,
     val timestamp_unix: ULong,
     val signature_b64: String,
-    // ADR-0020: base64 witness co-signature, absent when unconfigured.
-    val witness_cosig_b64: String? = null,
+    // ADR-0039 (G-30 finding-1): base64 witness co-signatures, a JSON array —
+    // OMITTED when the server has no cosigs. Replaces the pre-ADR-0039
+    // singular `witness_cosig_b64`.
+    val witness_cosigs_b64: List<String>? = null,
 )
 
 /** Wire shape of `GET /transparency/latest/:key` (Rust `LatestRes`). */

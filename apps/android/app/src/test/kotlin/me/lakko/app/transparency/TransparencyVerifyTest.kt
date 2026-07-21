@@ -82,18 +82,32 @@ class TransparencyVerifyTest {
     private val supersessionProof = ByteArray(145) { 0x07 }
     private val pinnedOldPubkey = ByteArray(32) { 0x42 }
 
-    /** ADR-0020 — a pinned witness key + a co-sig blob fixture. The bytes
-     *  never reach a real verifier (the [WitnessGate] seam is stubbed). */
+    /** ADR-0039 — a pinned witness key SET + co-sig blob fixtures. The bytes
+     *  never reach a real verifier (the [WitnessGate] seam is stubbed; the real
+     *  K-of-N quorum verify is covered by the Rust `witness.rs` + FFI-crate
+     *  `verify_witness_quorum` tests). */
     private val witnessKey = ByteArray(32) { 0x5A }
+    private val witnessKey2 = ByteArray(32) { 0x5B }
+    private val witnessKey3 = ByteArray(32) { 0x5C }
+    /** A witness co-sig blob fixture — exactly 105 bytes (`version ‖
+     *  tree_root(32) ‖ log_size(8) ‖ sig(64)`), so it survives the gate's
+     *  length pre-filter. */
     private val cosigB64 = base64Encode(ByteArray(105) { 0x6C })
+    /** A distinct 105-byte foreign/garbage co-sig blob — never inflates or
+     *  sinks the distinct-valid tally in the real verifier; here it just rides
+     *  the list handed to the gate. */
+    private val garbageCosigB64 = base64Encode(ByteArray(105) { 0x99.toByte() })
+    /** A malformed-LENGTH (not 105-byte) wire entry — the gate must DROP it
+     *  before handing the cosigs to the quorum verifier (fail-safe). */
+    private val shortCosigB64 = base64Encode(ByteArray(10) { 0x01 })
 
-    /** Witness gate that always succeeds (returns normally). */
-    private val witnessPass = WitnessGate { _, _, _, _ -> }
+    /** Witness quorum gate that always succeeds (returns normally). */
+    private val witnessPass = WitnessGate { _, _, _, _, _ -> }
 
-    /** Witness gate that always fails (throws as the native verifier would
-     *  on an invalid co-sig). */
-    private val witnessFail = WitnessGate { _, _, _, _ ->
-        throw FfiException.Identity("simulated witness co-sig failure")
+    /** Witness quorum gate that always fails (throws as the native verifier
+     *  would on a sub-threshold / invalid quorum). */
+    private val witnessFail = WitnessGate { _, _, _, _, _ ->
+        throw FfiException.Identity("simulated sub-threshold / invalid witness quorum")
     }
 
     // -----------------------------------------------------------------
@@ -102,11 +116,16 @@ class TransparencyVerifyTest {
 
     private val jsonHeaders = headersOf("Content-Type", "application/json")
 
-    private fun rootJson(logSize: Long, witnessCosigB64: String? = null): String =
+    private fun rootJson(logSize: Long, witnessCosigsB64: List<String> = emptyList()): String =
         """{"tree_root_b64":"${base64Encode(ByteArray(32))}",""" +
             """"log_size":$logSize,"timestamp_unix":1700000000,""" +
             """"signature_b64":"${base64Encode(ByteArray(64))}"""" +
-            (witnessCosigB64?.let { ""","witness_cosig_b64":"$it"""" } ?: "") +
+            (if (witnessCosigsB64.isEmpty()) {
+                ""
+            } else {
+                ""","witness_cosigs_b64":[""" +
+                    witnessCosigsB64.joinToString(",") { "\"$it\"" } + "]"
+            }) +
             "}"
 
     private fun latestJson(
@@ -138,7 +157,7 @@ class TransparencyVerifyTest {
         rootServerError: Boolean = false,
         latestIsReset: Boolean = false,
         latestLeafAuthB64: String? = null,
-        rootWitnessCosigB64: String? = null,
+        rootWitnessCosigsB64: List<String> = emptyList(),
     ): TransparencyClient {
         val engine = MockEngine { request ->
             val path = request.url.encodedPath
@@ -148,7 +167,7 @@ class TransparencyVerifyTest {
                         respond("boom", HttpStatusCode.InternalServerError, jsonHeaders)
                     } else {
                         respond(
-                            rootJson(rootLogSize, witnessCosigB64 = rootWitnessCosigB64),
+                            rootJson(rootLogSize, witnessCosigsB64 = rootWitnessCosigsB64),
                             HttpStatusCode.OK,
                             jsonHeaders,
                         )
@@ -182,7 +201,8 @@ class TransparencyVerifyTest {
         pubkey: ByteArray = servedPubkey,
         gate: InclusionGate = gatePass,
         genesisGate: GenesisGate = genesisPass,
-        witnessKey: ByteArray? = null,
+        witnessKeys: List<ByteArray> = emptyList(),
+        witnessThreshold: Int = 1,
         witnessGate: WitnessGate = witnessPass,
     ): LogVerifyResult = verifyIdentityInLog(
         accountId = accountId,
@@ -190,7 +210,8 @@ class TransparencyVerifyTest {
         client = client,
         operatorKey = operatorKey,
         lastSeenRoot = lastSeen,
-        witnessKey = witnessKey,
+        witnessKeys = witnessKeys,
+        witnessThreshold = witnessThreshold,
         accountKeyDeriver = deriver,
         inclusionGate = gate,
         genesisGate = genesisGate,
@@ -502,7 +523,8 @@ class TransparencyVerifyTest {
         pubkey: ByteArray = servedPubkey,
         gate: ChainGate = chainPass,
         pinnedLogVersion: Long = 0L,
-        witnessKey: ByteArray? = null,
+        witnessKeys: List<ByteArray> = emptyList(),
+        witnessThreshold: Int = 1,
         witnessGate: WitnessGate = witnessPass,
     ): RotationChainResult = verifyRotationChain(
         accountId = accountId,
@@ -513,7 +535,8 @@ class TransparencyVerifyTest {
         client = client,
         operatorKey = operatorKey,
         lastSeenRoot = lastSeen,
-        witnessKey = witnessKey,
+        witnessKeys = witnessKeys,
+        witnessThreshold = witnessThreshold,
         accountKeyDeriver = deriver,
         chainGate = gate,
         witnessGate = witnessGate,
@@ -618,48 +641,84 @@ class TransparencyVerifyTest {
     }
 
     // -----------------------------------------------------------------
-    // ADR-0020 — witness co-sig gate
+    // ADR-0039 (G-30 finding-1) — K-of-N witness-quorum gate
     // -----------------------------------------------------------------
 
+    /** Captured [WitnessGate] args, so a test can assert the whole cosig
+     *  LIST + the pinned key SET + the threshold are threaded through. */
+    private class CapturedWitness(
+        val cosigs: List<ByteArray>,
+        val keys: List<ByteArray>,
+        val threshold: Int,
+        val logSize: ULong,
+    )
+
     @Test
-    fun `witness gate off confirms a root without a co-sig`() = runTest {
-        // No pinned witness key → operator-only transition posture.
+    fun `witness gate off (empty key set) confirms a root without a co-sig`() = runTest {
+        // No pinned witness keys → operator-only transition posture.
         val result = verifyResult(
-            client = mockClient(rootWitnessCosigB64 = null),
+            client = mockClient(rootWitnessCosigsB64 = emptyList()),
             operatorKey = operatorKey,
-            witnessKey = null,
+            witnessKeys = emptyList(),
         )
         assertEquals(LogVerifyStatus.CONFIRMED, result.status)
     }
 
     @Test
-    fun `witness gate proceeds on a valid co-sig`() = runTest {
+    fun `1-of-1 confirms and hands the gate the cosig LIST plus key SET plus threshold`() =
+        runTest {
+            var captured: CapturedWitness? = null
+            val capturing = WitnessGate { cosigs, keys, threshold, _, logSize ->
+                captured = CapturedWitness(cosigs, keys, threshold, logSize)
+            }
+            val result = verifyResult(
+                client = mockClient(rootLogSize = 6, rootWitnessCosigsB64 = listOf(cosigB64)),
+                operatorKey = operatorKey,
+                witnessKeys = listOf(witnessKey),
+                // threshold omitted → the helper default of 1
+                witnessGate = capturing,
+            )
+            assertEquals(LogVerifyStatus.CONFIRMED, result.status)
+            val c = captured!!
+            assertEquals(1, c.cosigs.size)
+            assertEquals(listOf(witnessKey.toList()), c.keys.map { it.toList() })
+            assertEquals(1, c.threshold)
+            assertEquals(6UL, c.logSize)
+        }
+
+    @Test
+    fun `K-of-N quorum satisfied (at least K distinct valid) confirms`() = runTest {
+        // 3 pinned witnesses, threshold 2, 3 co-sigs served. The seam simulates
+        // a satisfied quorum (returns). Assert the threshold + full key set are
+        // threaded through.
+        var captured: CapturedWitness? = null
+        val capturing = WitnessGate { cosigs, keys, threshold, _, logSize ->
+            captured = CapturedWitness(cosigs, keys, threshold, logSize)
+        }
         val result = verifyResult(
-            client = mockClient(rootWitnessCosigB64 = cosigB64),
+            client = mockClient(
+                rootWitnessCosigsB64 = listOf(cosigB64, cosigB64, cosigB64),
+            ),
             operatorKey = operatorKey,
-            witnessKey = witnessKey,
-            witnessGate = witnessPass,
+            witnessKeys = listOf(witnessKey, witnessKey2, witnessKey3),
+            witnessThreshold = 2,
+            witnessGate = capturing,
         )
         assertEquals(LogVerifyStatus.CONFIRMED, result.status)
+        val c = captured!!
+        assertEquals(3, c.keys.size)
+        assertEquals(2, c.threshold)
     }
 
     @Test
-    fun `witness gate fails closed when a pinned key but no co-sig`() = runTest {
+    fun `K-of-N sub-threshold fails closed (mismatch)`() = runTest {
+        // The seam THROWS to simulate the native sub-threshold refusal
+        // (K-1 valid < K). The gate must fail closed.
         val result = verifyResult(
-            client = mockClient(rootWitnessCosigB64 = null),
+            client = mockClient(rootWitnessCosigsB64 = listOf(cosigB64)),
             operatorKey = operatorKey,
-            witnessKey = witnessKey,
-        )
-        assertEquals(LogVerifyStatus.MISMATCH, result.status)
-        assertNull(result.isReset)
-    }
-
-    @Test
-    fun `witness gate fails closed when the co-sig does not verify`() = runTest {
-        val result = verifyResult(
-            client = mockClient(rootWitnessCosigB64 = cosigB64),
-            operatorKey = operatorKey,
-            witnessKey = witnessKey,
+            witnessKeys = listOf(witnessKey, witnessKey2, witnessKey3),
+            witnessThreshold = 2,
             witnessGate = witnessFail,
         )
         assertEquals(LogVerifyStatus.MISMATCH, result.status)
@@ -667,27 +726,112 @@ class TransparencyVerifyTest {
     }
 
     @Test
-    fun `witness gate runs after the rollback gate`() = runTest {
-        // A shrunk root is rollback regardless of the witness co-sig.
+    fun `K-of-N garbage among valid still confirms (whole 105-byte list handed to gate)`() =
+        runTest {
+            // A foreign/garbage 105-byte co-sig rides BESIDE the valid ones. It
+            // survives the length pre-filter (it is 105 bytes) so the whole list
+            // is handed to the gate; the real verifier tallies DISTINCT pinned
+            // keys, so garbage never sinks an otherwise-valid quorum.
+            var captured: CapturedWitness? = null
+            val capturing = WitnessGate { cosigs, _, _, _, _ ->
+                captured = CapturedWitness(cosigs, emptyList(), 0, 0UL)
+            }
+            val result = verifyResult(
+                client = mockClient(
+                    rootWitnessCosigsB64 = listOf(garbageCosigB64, cosigB64, cosigB64),
+                ),
+                operatorKey = operatorKey,
+                witnessKeys = listOf(witnessKey, witnessKey2),
+                witnessThreshold = 2,
+                witnessGate = capturing,
+            )
+            assertEquals(LogVerifyStatus.CONFIRMED, result.status)
+            // All three 105-byte blobs (garbage included) reach the gate.
+            assertEquals(3, captured!!.cosigs.size)
+        }
+
+    @Test
+    fun `the gate DROPS a non-105-byte wire entry before the quorum verifier`() = runTest {
+        // A malformed-length entry can never be a valid co-sig; the gate
+        // pre-filters it out so it cannot sink an otherwise-valid quorum.
+        var captured: CapturedWitness? = null
+        val capturing = WitnessGate { cosigs, _, _, _, _ ->
+            captured = CapturedWitness(cosigs, emptyList(), 0, 0UL)
+        }
+        val result = verifyResult(
+            client = mockClient(
+                rootWitnessCosigsB64 = listOf(shortCosigB64, cosigB64),
+            ),
+            operatorKey = operatorKey,
+            witnessKeys = listOf(witnessKey),
+            witnessGate = capturing,
+        )
+        assertEquals(LogVerifyStatus.CONFIRMED, result.status)
+        // Only the exactly-105-byte entry survives the pre-filter.
+        assertEquals(1, captured!!.cosigs.size)
+        assertEquals(WITNESS_COSIG_BYTES, captured!!.cosigs[0].size)
+    }
+
+    @Test
+    fun `witness gate fails closed when a pinned key set but no co-sig`() = runTest {
+        // No co-sig served (0 distinct valid < threshold 1) → the native
+        // verifier throws; the gate maps it to a fail-closed refusal.
+        val result = verifyResult(
+            client = mockClient(rootWitnessCosigsB64 = emptyList()),
+            operatorKey = operatorKey,
+            witnessKeys = listOf(witnessKey),
+            witnessGate = witnessFail,
+        )
+        assertEquals(LogVerifyStatus.MISMATCH, result.status)
+        assertNull(result.isReset)
+    }
+
+    @Test
+    fun `witness gate fails closed when the quorum does not verify`() = runTest {
+        val result = verifyResult(
+            client = mockClient(rootWitnessCosigsB64 = listOf(cosigB64)),
+            operatorKey = operatorKey,
+            witnessKeys = listOf(witnessKey),
+            witnessGate = witnessFail,
+        )
+        assertEquals(LogVerifyStatus.MISMATCH, result.status)
+        assertNull(result.isReset)
+    }
+
+    @Test
+    fun `witness quorum gate runs after the rollback gate`() = runTest {
+        // A shrunk root is rollback regardless of the witness quorum.
         val lastSeen = InMemoryLastSeenRoot()
         lastSeen.checkAndAdvance(100L)
         val result = verifyResult(
-            client = mockClient(rootLogSize = 6, rootWitnessCosigB64 = cosigB64),
+            client = mockClient(rootLogSize = 6, rootWitnessCosigsB64 = listOf(cosigB64)),
             operatorKey = operatorKey,
             lastSeen = lastSeen,
-            witnessKey = witnessKey,
+            witnessKeys = listOf(witnessKey),
             witnessGate = witnessFail, // would refuse, but must not be reached
         )
         assertEquals(LogVerifyStatus.ROLLBACK, result.status)
     }
 
     @Test
-    fun `rotation witness gate proceeds on a valid co-sig`() = runTest {
+    fun `rotation quorum satisfied proceeds (confirmed)`() = runTest {
         val r = rotation(
-            client = mockClient(rootWitnessCosigB64 = cosigB64),
+            client = mockClient(rootWitnessCosigsB64 = listOf(cosigB64, cosigB64)),
             operatorKey = operatorKey,
-            witnessKey = witnessKey,
+            witnessKeys = listOf(witnessKey, witnessKey2),
+            witnessThreshold = 2,
             witnessGate = witnessPass,
+        )
+        assertEquals(LogVerifyStatus.CONFIRMED, r.status)
+        assertEquals(2L, r.version)
+    }
+
+    @Test
+    fun `rotation no pinned keys (empty set) leaves rotation behaviour unchanged`() = runTest {
+        val r = rotation(
+            client = mockClient(rootWitnessCosigsB64 = emptyList()),
+            operatorKey = operatorKey,
+            witnessKeys = emptyList(),
         )
         assertEquals(LogVerifyStatus.CONFIRMED, r.status)
         assertEquals(2L, r.version)
@@ -696,23 +840,31 @@ class TransparencyVerifyTest {
     @Test
     fun `rotation witness gate fails closed without a co-sig`() = runTest {
         val r = rotation(
-            client = mockClient(rootWitnessCosigB64 = null),
+            client = mockClient(rootWitnessCosigsB64 = emptyList()),
             operatorKey = operatorKey,
-            witnessKey = witnessKey,
+            witnessKeys = listOf(witnessKey),
+            witnessGate = witnessFail,
         )
         assertEquals(LogVerifyStatus.MISMATCH, r.status)
         assertNull(r.version)
     }
 
     @Test
-    fun `rotation witness gate fails closed when the co-sig does not verify`() = runTest {
+    fun `rotation witness gate fails closed on a sub-threshold quorum`() = runTest {
         val r = rotation(
-            client = mockClient(rootWitnessCosigB64 = cosigB64),
+            client = mockClient(rootWitnessCosigsB64 = listOf(cosigB64)),
             operatorKey = operatorKey,
-            witnessKey = witnessKey,
+            witnessKeys = listOf(witnessKey, witnessKey2),
+            witnessThreshold = 2,
             witnessGate = witnessFail,
         )
         assertEquals(LogVerifyStatus.MISMATCH, r.status)
         assertNull(r.version)
+    }
+
+    private companion object {
+        /** RFC-fixed witness co-sig blob length (mirror of the gate's
+         *  `WITNESS_COSIG_LEN`). */
+        private const val WITNESS_COSIG_BYTES: Int = 105
     }
 }

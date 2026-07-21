@@ -237,29 +237,32 @@ pub(crate) struct RootRes {
     /// base64. See `SignedRoot::signing_payload` for the canonical
     /// pre-image.
     pub signature_b64: String,
-    /// ADR-0020: the witness co-signature over `(tree_root, log_size)`, base64,
-    /// or absent when the witness integration is unconfigured / the witness is
-    /// unreachable. A client that pins a witness key REQUIRES this (the
-    /// split-view defence) and refuses a root without a valid one.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub witness_cosig_b64: Option<String>,
+    /// ADR-0020 + ADR-0039 S3 (K-of-N): the witness co-signature BUNDLE over
+    /// `(tree_root, log_size)` — one base64 blob per witness that co-signed the
+    /// served root. Empty (the field is OMITTED) when the witness integration is
+    /// unconfigured or every witness was unreachable this round. A client that
+    /// pins witness keys enforces the K-of-N threshold over this bundle (the
+    /// split-view defence) and refuses a root that does not meet it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub witness_cosigs_b64: Vec<String>,
 }
 
-/// Return the current signed root + (ADR-0020) its witness co-signature.
-/// Anonymous. Signs the current tree state with `now` as the timestamp and,
-/// when the witness integration is on, attaches a valid co-signature.
+/// Return the current signed root + (ADR-0020 / ADR-0039 S3) its witness
+/// co-signature BUNDLE. Anonymous. Signs the current tree state with `now` as
+/// the timestamp and fans out to every configured witness, attaching the
+/// collected K-of-N co-signature bundle.
 pub(crate) async fn root(State(state): State<AppState>) -> Json<RootRes> {
     let now = now_unix_secs();
-    let (signed, cosig) = state
+    let (signed, cosigs) = state
         .store
-        .root_with_cosig(&state.db, state.witness.as_deref(), now)
+        .root_with_cosig(&state.db, &state.witness, now)
         .await;
     Json(RootRes {
         tree_root_b64: B64.encode(signed.tree_root),
         log_size: signed.log_size,
         timestamp_unix: signed.timestamp_unix,
         signature_b64: B64.encode(signed.signature.to_bytes()),
-        witness_cosig_b64: cosig.map(|c| B64.encode(c)),
+        witness_cosigs_b64: cosigs.into_iter().map(|c| B64.encode(c)).collect(),
     })
 }
 
@@ -479,7 +482,7 @@ mod tests {
             log_size: signed.log_size,
             timestamp_unix: signed.timestamp_unix,
             signature_b64: B64.encode(signed.signature.to_bytes()),
-            witness_cosig_b64: None,
+            witness_cosigs_b64: Vec::new(),
         };
 
         // Build the wire ProofRes for idx=3 (mirrors `proof` handler).
@@ -609,7 +612,7 @@ mod tests {
             require_leaf_auth: false,
             genesis_attest_key: None,
             require_genesis_attest: false,
-            witness: None,
+            witness: Arc::new(Vec::new()),
         };
         let app = crate::build_app(state);
 

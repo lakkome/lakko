@@ -79,11 +79,13 @@ public final class TransparencyClient: TransparencyFetching {
                 detail: "tree_root_b64 / signature_b64 not valid base64"
             )
         }
-        // ADR-0020: the witness co-signature is optional on the wire
-        // (absent when the operator runs without a witness). A present-
-        // but-undecodable value is treated as absent — the witness gate
-        // then fails closed when a witness key is pinned.
-        let witnessCosig: Data? = wire.witnessCosigB64.flatMap { b64 in
+        // ADR-0039: the witness co-signatures are a LIST on the wire (one
+        // per co-signing witness), OMITTED when the operator runs without a
+        // witness. Each entry is decoded independently; a blank / undecodable
+        // entry is dropped (the K-of-N quorum gate ignores it — and refuses
+        // the whole root when fewer than `threshold` distinct pinned witnesses
+        // remain). Replaces the pre-ADR-0039 singular `witness_cosig_b64`.
+        let witnessCosigs: [Data] = (wire.witnessCosigsB64 ?? []).compactMap { b64 in
             b64.isEmpty ? nil : base64Decode(b64)
         }
         return SignedRoot(
@@ -91,7 +93,7 @@ public final class TransparencyClient: TransparencyFetching {
             logSize: wire.logSize,
             timestampUnix: wire.timestampUnix,
             signature: signature,
-            witnessCosig: witnessCosig
+            witnessCosigs: witnessCosigs
         )
     }
 
@@ -241,24 +243,25 @@ public struct SignedRoot: Equatable {
     public let timestampUnix: UInt64
     /// 64-byte Ed25519 signature over the canonical root pre-image.
     public let signature: Data
-    /// ADR-0020: the witness co-signature wire blob over `(treeRoot,
-    /// logSize)`, or `nil` when the server serves no witness
-    /// co-signature. A client that pins a witness key requires a valid
-    /// one (the split-view defence).
-    public let witnessCosig: Data?
+    /// ADR-0039 (G-30 finding-1): the witness co-signature wire blobs over
+    /// `(treeRoot, logSize)` — a LIST, one per co-signing witness (empty `[]`
+    /// when the server serves none). A client that pins a witness key SET
+    /// requires a K-of-N quorum of valid ones (the split-view defence).
+    /// Replaces the pre-ADR-0039 singular `witnessCosig`.
+    public let witnessCosigs: [Data]
 
     public init(
         treeRoot: Data,
         logSize: UInt64,
         timestampUnix: UInt64,
         signature: Data,
-        witnessCosig: Data? = nil
+        witnessCosigs: [Data] = []
     ) {
         self.treeRoot = treeRoot
         self.logSize = logSize
         self.timestampUnix = timestampUnix
         self.signature = signature
-        self.witnessCosig = witnessCosig
+        self.witnessCosigs = witnessCosigs
     }
 }
 
@@ -333,15 +336,17 @@ private struct RootResWire: Decodable {
     let logSize: UInt64
     let timestampUnix: UInt64
     let signatureB64: String
-    /// ADR-0020: base64 witness co-signature, absent when unconfigured.
-    let witnessCosigB64: String?
+    /// ADR-0039: base64 witness co-signatures, a JSON array — absent when the
+    /// server has no cosigs. Replaces the pre-ADR-0039 singular
+    /// `witness_cosig_b64`.
+    let witnessCosigsB64: [String]?
 
     enum CodingKeys: String, CodingKey {
         case treeRootB64 = "tree_root_b64"
         case logSize = "log_size"
         case timestampUnix = "timestamp_unix"
         case signatureB64 = "signature_b64"
-        case witnessCosigB64 = "witness_cosig_b64"
+        case witnessCosigsB64 = "witness_cosigs_b64"
     }
 }
 

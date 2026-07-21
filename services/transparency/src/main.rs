@@ -121,11 +121,15 @@ pub(crate) struct AppState {
     /// `LAKKO_TRANSPARENCY_REQUIRE_GENESIS_ATTEST` (default `false`, a deploy
     /// rollout sequenced after the three clients mint). A rotation is unaffected.
     pub(crate) require_genesis_attest: bool,
-    /// ADR-0020 Sprint 4: the witness cosign client, or `None` when the
-    /// integration is unconfigured (`GET /transparency/root` then serves the
-    /// root WITHOUT a witness co-signature — the transition fallback). Built
-    /// from `LAKKO_TRANSPARENCY_WITNESS_URL` + `…_WITNESS_COSIGN_SECRET`.
-    pub(crate) witness: Option<Arc<witness_client::WitnessClient>>,
+    /// ADR-0020 Sprint 4 + ADR-0039 S3 (K-of-N): the configured witness cosign
+    /// clients. `GET /transparency/root` fans out to EVERY entry and serves the
+    /// collected co-signature bundle. An EMPTY list = the integration is
+    /// unconfigured (the root is served WITHOUT a co-signature bundle — the
+    /// transition fallback). Built from `LAKKO_TRANSPARENCY_WITNESS_URLS` +
+    /// `…_WITNESS_COSIGN_SECRETS` (comma-separated, 1:1), falling back to the
+    /// singular `…_WITNESS_URL` + `…_WITNESS_COSIGN_SECRET` pair. `Arc` so
+    /// cloning the state for axum is free.
+    pub(crate) witness: Arc<Vec<witness_client::WitnessClient>>,
 }
 
 #[tokio::main]
@@ -221,16 +225,24 @@ async fn main() -> Result<()> {
     // fails fast at startup.
     let (genesis_attest_key, require_genesis_attest) = load_genesis_attest_policy()?;
 
-    // ADR-0020 Sprint 4: the witness cosign client (off when unconfigured).
-    let witness = witness_client::WitnessClient::from_env().map(Arc::new);
-    if witness.is_some() {
-        tracing::info!("witness co-signing ON — /transparency/root serves a witness co-signature");
-    } else {
+    // ADR-0020 Sprint 4 + ADR-0039 S3 (K-of-N): the configured witness cosign
+    // clients (empty when unconfigured). A malformed / mismatched witness config
+    // fails fast at startup (fail-closed config).
+    let witnesses = witness_client::WitnessClient::list_from_env()
+        .context("configure transparency witnesses")?;
+    if witnesses.is_empty() {
         tracing::warn!(
-            "witness co-signing OFF (LAKKO_TRANSPARENCY_WITNESS_URL / _COSIGN_SECRET unset) — \
-             roots served without a co-signature (split-view resistance disabled)"
+            "witness co-signing OFF (no LAKKO_TRANSPARENCY_WITNESS_URLS / _URL configured) — \
+             roots served without a co-signature bundle (split-view resistance disabled)"
+        );
+    } else {
+        tracing::info!(
+            witness_count = witnesses.len(),
+            "witness co-signing ON — /transparency/root fans out to N witnesses and serves a \
+             K-of-N co-signature bundle"
         );
     }
+    let witness = Arc::new(witnesses);
 
     let state = AppState {
         db: pool.clone(),

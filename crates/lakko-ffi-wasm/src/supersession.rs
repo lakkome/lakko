@@ -139,6 +139,81 @@ pub fn verify_witness_cosig(
     .map_err(|e| JsError::new(&format!("witness co-sig verify: {e}")))
 }
 
+/// Verify a K-of-N witness QUORUM (ADR-0039, G-30 finding-1) over a transparency
+/// root's `(treeRoot, logSize)`: at least `threshold` DISTINCT client-pinned
+/// witnesses must each have co-signed the SAME root. The K-of-N generalisation of
+/// `verifyWitnessCosig` — the client pins `N` witness keys and requires `K` of
+/// them, so an operator can no longer fork the log by colluding with a single
+/// witness (it must corrupt `K`).
+///
+/// The two lists cross the boundary FLAT-CONCATENATED (the role-table FFI
+/// convention): `cosigsFlat` is `N` co-signature blobs each exactly
+/// `WITNESS_COSIG_LEN` (105) bytes, `pinnedKeysFlat` is `M` witness verifying keys
+/// each 32 bytes; both are sliced into fixed-length chunks on the Rust side. The
+/// quorum counts DISTINCT pinned keys, never co-signatures, so a replayed
+/// co-signature cannot inflate the tally (`cosigsFlat` is attacker-controlled).
+///
+/// Throws if `expectedTreeRoot` is not 32 bytes, `cosigsFlat` is not a multiple of
+/// 105 bytes, `pinnedKeysFlat` is not a multiple of 32 bytes, `threshold` is `0`
+/// (rejected fail-closed — invariant #4), or fewer than `threshold` distinct
+/// pinned keys produced a valid co-signature over the expected root.
+#[wasm_bindgen(js_name = verifyWitnessQuorum)]
+pub fn verify_witness_quorum(
+    cosigs_flat: &[u8],
+    pinned_keys_flat: &[u8],
+    threshold: u32,
+    expected_tree_root: &[u8],
+    expected_log_size: u64,
+) -> Result<(), JsError> {
+    // The verdict lives in the `JsError`-free `_inner` (a plain `String` error so
+    // the negative paths are host-testable — `JsError::new` panics on a non-wasm
+    // target). This thin wrapper only maps that error to a `JsError`.
+    verify_witness_quorum_inner(
+        cosigs_flat,
+        pinned_keys_flat,
+        threshold,
+        expected_tree_root,
+        expected_log_size,
+    )
+    .map_err(|msg| JsError::new(&msg))
+}
+
+/// The `JsError`-free core of [`verify_witness_quorum`]. Returns `Err(String)` on
+/// any failure so the negative paths run on the host target (the
+/// `#[wasm_bindgen]` wrapper maps `String` → `JsError`).
+fn verify_witness_quorum_inner(
+    cosigs_flat: &[u8],
+    pinned_keys_flat: &[u8],
+    threshold: u32,
+    expected_tree_root: &[u8],
+    expected_log_size: u64,
+) -> Result<(), String> {
+    let expected_tree_root: [u8; 32] = expected_tree_root
+        .try_into()
+        .map_err(|_| "expected_tree_root must be 32 bytes".to_string())?;
+    if cosigs_flat.len() % lakko_transparency::WITNESS_COSIG_LEN != 0 {
+        return Err(format!(
+            "cosigs must be a multiple of {} bytes",
+            lakko_transparency::WITNESS_COSIG_LEN
+        ));
+    }
+    if pinned_keys_flat.len() % 32 != 0 {
+        return Err("pinned keys must be a multiple of 32 bytes".to_string());
+    }
+    let cosig_refs: Vec<&[u8]> = cosigs_flat
+        .chunks_exact(lakko_transparency::WITNESS_COSIG_LEN)
+        .collect();
+    let key_refs: Vec<&[u8]> = pinned_keys_flat.chunks_exact(32).collect();
+    lakko_transparency::verify_witness_quorum(
+        &cosig_refs,
+        &key_refs,
+        threshold as usize,
+        &expected_tree_root,
+        expected_log_size,
+    )
+    .map_err(|e| format!("witness quorum verify: {e}"))
+}
+
 /// Verify an auth-attested genesis attestation's full account / usernameHash /
 /// pubkey binding against the CLIENT-PINNED auth attest verifying key (ADR-0036,
 /// closes the G-30 finding-2 squatting residual). A pass proves the party that
@@ -283,5 +358,71 @@ mod tests {
             account_username_hash(&account_id),
             lakko_transparency::account_username_hash(&account_id).to_vec()
         );
+    }
+
+    // Exercise the `JsError`-free quorum core on the host (ADR-0039, G-30
+    // finding-1). Signs real witness co-sigs via `lakko_transparency` and drives
+    // them through the flat-concatenated FFI split.
+    #[test]
+    fn witness_quorum_k_of_n_flat_concat() {
+        let tree_root = [0xABu8; 32];
+        let log_size = 7u64;
+        let sks: Vec<SigningKey> = [1u8, 2, 3]
+            .iter()
+            .map(|s| SigningKey::from_seed(&[*s; 32]))
+            .collect();
+        let pinned_flat: Vec<u8> = sks
+            .iter()
+            .flat_map(|sk| sk.verifying_key().to_bytes())
+            .collect();
+        let cosigs_flat: Vec<u8> = sks
+            .iter()
+            .flat_map(|sk| lakko_transparency::sign_witness_cosig(sk, &tree_root, log_size))
+            .collect();
+
+        // 3-of-3 and 1-of-3 both met by three distinct valid co-sigs.
+        verify_witness_quorum_inner(&cosigs_flat, &pinned_flat, 3, &tree_root, log_size)
+            .expect("3-of-3 met");
+        verify_witness_quorum_inner(&cosigs_flat, &pinned_flat, 1, &tree_root, log_size)
+            .expect("1-of-3 met");
+
+        // Only two witnesses actually co-signed (K-1) → threshold 3 not met.
+        let two = &cosigs_flat[..2 * lakko_transparency::WITNESS_COSIG_LEN];
+        assert!(verify_witness_quorum_inner(two, &pinned_flat, 3, &tree_root, log_size).is_err());
+
+        // Zero threshold is rejected fail-closed even with valid co-sigs present.
+        assert!(
+            verify_witness_quorum_inner(&cosigs_flat, &pinned_flat, 0, &tree_root, log_size)
+                .is_err()
+        );
+
+        // A non-multiple-of-105 cosig buffer and a non-multiple-of-32 key buffer
+        // are both rejected before any signature check.
+        assert!(verify_witness_quorum_inner(
+            &cosigs_flat[..cosigs_flat.len() - 1],
+            &pinned_flat,
+            1,
+            &tree_root,
+            log_size
+        )
+        .is_err());
+        assert!(verify_witness_quorum_inner(
+            &cosigs_flat,
+            &pinned_flat[..pinned_flat.len() - 1],
+            1,
+            &tree_root,
+            log_size
+        )
+        .is_err());
+
+        // Wrong expected tree_root → no co-sig binds, quorum not met.
+        assert!(verify_witness_quorum_inner(
+            &cosigs_flat,
+            &pinned_flat,
+            1,
+            &[0xCDu8; 32],
+            log_size
+        )
+        .is_err());
     }
 }

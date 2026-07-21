@@ -56,7 +56,9 @@ proof per co-sign — light).
 - **Single witness first; K-of-N a config slot for later.** The residual is
   operator+witness collusion — documented; a witness threshold + the deferred
   client-gossip layer (the other carrier from the G-30 #1 design) are the later
-  hardenings.
+  hardenings. **(The witness threshold is now realised in
+  [ADR-0039](0039-kt-log-witness-quorum.md) — K-of-N co-signing; the
+  client-gossip layer remains deferred.)**
 - **Independence is an OPS property, not code-enforced.** The codebase ships the
   witness as a separate `services/witness`; running it in a DIFFERENT trust
   domain (host + operator) is the deployment requirement for the guarantee. The

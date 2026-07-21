@@ -3204,6 +3204,57 @@ pub fn verify_witness_cosig(
     .map_err(|e| FfiError::Identity(format!("witness co-sig verify: {e}")))
 }
 
+/// Verify a K-of-N witness QUORUM (ADR-0039, G-30 finding-1) over a transparency
+/// root's `(tree_root, log_size)`: at least `threshold` DISTINCT client-pinned
+/// witnesses must each have co-signed the SAME root. This is the K-of-N
+/// generalisation of [`verify_witness_cosig`] — the client pins `N` witness keys
+/// (`pinned_keys`) and requires `threshold` (`K`) of them, so an operator can no
+/// longer fork the log by colluding with a single witness (it must corrupt `K`).
+///
+/// The tally counts DISTINCT pinned keys, never co-signatures: each pinned key
+/// contributes at most one to the quorum no matter how many supplied `cosigs`
+/// verify under it, and a duplicated pinned key is counted once. Since `cosigs`
+/// is attacker-controlled (a malicious operator serves them), this defeats
+/// replaying one witness's co-signature `K` times. A `cosigs` entry bound to a
+/// different root, signed by a non-pinned key, or malformed simply does not count
+/// (it is never fatal), reusing every [`verify_witness_cosig`] gate.
+///
+/// A `threshold` of `0` is a misconfiguration and is rejected fail-closed before
+/// any co-signature is examined, so a config bug can never silently disable the
+/// split-view defence (invariant #4).
+///
+/// # Errors
+///
+/// [`FfiError::Identity`] if `expected_tree_root` is not 32 bytes, `threshold` is
+/// `0`, or fewer than `threshold` distinct pinned keys produced a valid
+/// co-signature over the expected root.
+#[uniffi::export]
+pub fn verify_witness_quorum(
+    cosigs: Vec<Vec<u8>>,
+    pinned_keys: Vec<Vec<u8>>,
+    threshold: u32,
+    expected_tree_root: Vec<u8>,
+    expected_log_size: u64,
+) -> Result<(), FfiError> {
+    let expected_tree_root: [u8; 32] = expected_tree_root
+        .as_slice()
+        .try_into()
+        .map_err(|_| FfiError::Identity("expected_tree_root must be 32 bytes".to_string()))?;
+    // Borrow each owned buffer as a slice; `verify_witness_quorum` re-verifies
+    // each cosig's length / version / binding, so no length pre-check is needed
+    // here (a malformed entry is ignored, never fatal).
+    let cosig_refs: Vec<&[u8]> = cosigs.iter().map(Vec::as_slice).collect();
+    let key_refs: Vec<&[u8]> = pinned_keys.iter().map(Vec::as_slice).collect();
+    lakko_transparency::verify_witness_quorum(
+        &cosig_refs,
+        &key_refs,
+        threshold as usize,
+        &expected_tree_root,
+        expected_log_size,
+    )
+    .map_err(|e| FfiError::Identity(format!("witness quorum verify: {e}")))
+}
+
 /// Verify an auth-attested genesis attestation's full account / username_hash /
 /// pubkey binding against the CLIENT-PINNED auth attest verifying key (ADR-0036,
 /// closes the G-30 finding-2 squatting residual). A pass proves the party that
@@ -3856,6 +3907,65 @@ mod tests {
     fn supersession_sign_rejects_bad_seed_length() {
         let new = Identity::new("super-new-4".into()).unwrap();
         assert!(sign_supersession_proof(vec![0u8; 31], new.ed25519_seed(), 0, 60).is_err());
+    }
+
+    // -- K-of-N witness quorum: verify_witness_quorum (ADR-0039, G-30 finding-1) --
+
+    #[test]
+    fn witness_quorum_k_of_n_through_ffi() {
+        let tree_root = vec![0xABu8; 32];
+        let tree_root_arr = [0xABu8; 32];
+        let log_size = 7u64;
+        let sks: Vec<lakko_crypto::signing::SigningKey> = [1u8, 2, 3]
+            .iter()
+            .map(|s| lakko_crypto::signing::SigningKey::from_seed(&[*s; 32]))
+            .collect();
+        let pinned: Vec<Vec<u8>> = sks
+            .iter()
+            .map(|sk| sk.verifying_key().to_bytes().to_vec())
+            .collect();
+        let all_cosigs: Vec<Vec<u8>> = sks
+            .iter()
+            .map(|sk| lakko_transparency::sign_witness_cosig(sk, &tree_root_arr, log_size).to_vec())
+            .collect();
+
+        // Three distinct valid co-sigs satisfy both a 3-of-3 and a 1-of-3 quorum.
+        verify_witness_quorum(
+            all_cosigs.clone(),
+            pinned.clone(),
+            3,
+            tree_root.clone(),
+            log_size,
+        )
+        .expect("3-of-3 met");
+        verify_witness_quorum(
+            all_cosigs.clone(),
+            pinned.clone(),
+            1,
+            tree_root.clone(),
+            log_size,
+        )
+        .expect("1-of-3 met");
+
+        // Only two witnesses actually co-signed (K-1) → a threshold of 3 is unmet.
+        let two_cosigs = all_cosigs[..2].to_vec();
+        assert!(
+            verify_witness_quorum(two_cosigs, pinned.clone(), 3, tree_root.clone(), log_size)
+                .is_err()
+        );
+
+        // Zero threshold is rejected fail-closed even with valid co-sigs present.
+        assert!(verify_witness_quorum(
+            all_cosigs.clone(),
+            pinned.clone(),
+            0,
+            tree_root.clone(),
+            log_size
+        )
+        .is_err());
+
+        // A short (31-byte) expected_tree_root is refused before any check.
+        assert!(verify_witness_quorum(all_cosigs, pinned, 1, vec![0u8; 31], log_size).is_err());
     }
 
     // -- KT-log S3b: verify_log_inclusion --

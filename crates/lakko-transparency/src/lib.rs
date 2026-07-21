@@ -40,4 +40,6 @@ pub use supersession::{
     verify_supersession, verify_supersession_chain, PinnedIdentity, RotatedIdentity,
     RotationEvidence, SupersessionProof, MAX_VALIDITY_SECS, SUPERSESSION_PROOF_LEN,
 };
-pub use witness::{sign_witness_cosig, verify_witness_cosig, WITNESS_COSIG_LEN};
+pub use witness::{
+    sign_witness_cosig, verify_witness_cosig, verify_witness_quorum, WITNESS_COSIG_LEN,
+};

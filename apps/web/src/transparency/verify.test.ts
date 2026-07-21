@@ -28,7 +28,7 @@ import {
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
-import init from "../../wasm/lakko_ffi_wasm";
+import init, { verifyWitnessQuorum } from "../../wasm/lakko_ffi_wasm";
 import {
   verifyIdentityInLog,
   verifyRotationChain,
@@ -93,22 +93,25 @@ const SERVED_PUBKEY = new Uint8Array(32).fill(0xab);
 const OTHER_PUBKEY = new Uint8Array(32).fill(0xcd);
 const OPERATOR_KEY = new Uint8Array(32).fill(0x07);
 const WITNESS_KEY = new Uint8Array(32).fill(0x5a);
+/** A second + third pinned witness key, for K-of-N quorum tests (ADR-0039). */
+const WITNESS_KEY_2 = new Uint8Array(32).fill(0x5b);
+const WITNESS_KEY_3 = new Uint8Array(32).fill(0x5c);
 /** A witness co-sig blob fixture (105 bytes — the gate stub ignores the
  *  contents; the real verify is covered by the Rust `witness.rs` tests). */
 const COSIG_FIXTURE = new Uint8Array(105).fill(0x6c);
 
 /** Build a `SignedRoot` fixture at the given log size, optionally with a
- *  witness co-sig (ADR-0020; default `null` — no co-sig served). */
+ *  list of witness co-sigs (ADR-0039; default `[]` — no co-sig served). */
 function rootAt(
   logSize: bigint,
-  witnessCosig: Uint8Array | null = null,
+  witnessCosigs: Uint8Array[] = [],
 ): SignedRoot {
   return {
     treeRoot: new Uint8Array(32).fill(0x11),
     logSize,
     timestampUnix: 1_700_000_000n,
     signature: new Uint8Array(64).fill(0x22),
-    witnessCosig,
+    witnessCosigs,
   };
 }
 
@@ -721,39 +724,45 @@ describe("verifyIdentityInLog — ADR-0036 auth-attested genesis", () => {
   });
 });
 
-describe("witness co-sig gate (ADR-0020)", () => {
+describe("witness quorum gate (ADR-0039, G-30 finding-1)", () => {
   const ROTATION_CTX = {
     supersessionProofB64: btoa("fake-supersession-proof-bytes"),
     pinnedOldPubkey: new Uint8Array(32).fill(0x99),
     pinnedLogVersion: 1,
   };
+  /** A distinct 105-byte foreign/garbage co-sig blob (not from a pinned
+   *  witness — never inflates or sinks the distinct-valid tally). */
+  const GARBAGE_COSIG = new Uint8Array(105).fill(0x99);
 
-  describe("verifyIdentityInLog", () => {
-    it("no pinned witness key → gate OFF, a root with no co-sig still confirms", async () => {
-      // The transition posture: with no witness key pinned, the operator-only
-      // path is unchanged — a root without a co-sig is fine.
+  describe("verifyIdentityInLog — gate posture", () => {
+    it("no pinned witness keys (empty set) → gate OFF, a root with no co-sig still confirms", async () => {
+      // The transition posture: with no witness keys pinned, the operator-only
+      // path is unchanged — a root without any co-sig is fine.
       const client = mockClient({
-        fetchRoot: vi.fn(async () => rootAt(10n, null)),
+        fetchRoot: vi.fn(async () => rootAt(10n, [])),
       });
-      const r = await runFull(client, { witnessKey: null });
+      const r = await runFull(client, { witnessKeys: [] });
       expect(r.status).toBe("confirmed");
     });
 
-    it("pinned witness key + valid co-sig → proceeds (confirmed)", async () => {
-      // Capture the gate args directly (the gate is handed the served
-      // root's (tree_root, log_size) + co-sig + the pinned witness key).
+    it("1-of-1: pinned key + valid co-sig → confirmed; gate handed the cosig LIST + key SET + threshold", async () => {
+      // Capture the gate args (the quorum gate is handed the served root's
+      // (tree_root, log_size) + the WHOLE cosig list + the pinned key SET +
+      // the threshold).
       let captured: {
-        cosig: Uint8Array;
-        witnessKey: Uint8Array;
+        cosigs: Uint8Array[];
+        witnessKeys: Uint8Array[];
+        threshold: number;
         treeRoot: Uint8Array;
         logSize: bigint;
       } | null = null;
       let calls = 0;
       const client = mockClient({
-        fetchRoot: vi.fn(async () => rootAt(10n, COSIG_FIXTURE)),
+        fetchRoot: vi.fn(async () => rootAt(10n, [COSIG_FIXTURE])),
       });
       const r = await runFull(client, {
-        witnessKey: WITNESS_KEY,
+        witnessKeys: [WITNESS_KEY],
+        // threshold omitted → defaults to 1 via witnessThreshold()
         verifyWitness: (args) => {
           calls += 1;
           captured = args;
@@ -762,30 +771,108 @@ describe("witness co-sig gate (ADR-0020)", () => {
       expect(r.status).toBe("confirmed");
       expect(calls).toBe(1);
       expect(captured).not.toBeNull();
-      expect(captured!.cosig).toBe(COSIG_FIXTURE);
-      expect(captured!.witnessKey).toBe(WITNESS_KEY);
+      expect(captured!.cosigs).toEqual([COSIG_FIXTURE]);
+      expect(captured!.witnessKeys).toEqual([WITNESS_KEY]);
+      expect(captured!.threshold).toBe(1);
       expect(captured!.logSize).toBe(10n);
     });
 
-    it("pinned witness key + NO co-sig on the root → mismatch (fail-closed)", async () => {
+    it("K-of-N: ≥K distinct valid co-sigs (quorum satisfied) → confirmed", async () => {
+      // 3 pinned witnesses, threshold 2, 3 co-sigs served. The seam simulates
+      // a satisfied quorum (returns). Assert the threshold + full key set are
+      // threaded through.
+      let captured: { witnessKeys: Uint8Array[]; threshold: number } | null =
+        null;
       const client = mockClient({
-        fetchRoot: vi.fn(async () => rootAt(10n, null)),
-        // The latest lookup must never run — the witness gate short-circuits.
-        fetchLatest: vi.fn(async () => latestWith(SERVED_PUBKEY)),
+        fetchRoot: vi.fn(async () =>
+          rootAt(10n, [COSIG_FIXTURE, COSIG_FIXTURE, COSIG_FIXTURE]),
+        ),
       });
-      const fetchLatest = client.fetchLatest as ReturnType<typeof vi.fn>;
-      const r = await runFull(client, { witnessKey: WITNESS_KEY });
+      const r = await runFull(client, {
+        witnessKeys: [WITNESS_KEY, WITNESS_KEY_2, WITNESS_KEY_3],
+        witnessThreshold: 2,
+        verifyWitness: (args) => {
+          captured = args;
+        },
+      });
+      expect(r.status).toBe("confirmed");
+      expect(captured!.witnessKeys).toHaveLength(3);
+      expect(captured!.threshold).toBe(2);
+    });
+
+    it("K-of-N: fewer than K distinct valid (sub-threshold) → mismatch (fail-closed)", async () => {
+      // The seam THROWS to simulate the wasm's sub-threshold refusal (K-1
+      // valid < K). The gate must fail closed.
+      const client = mockClient({
+        fetchRoot: vi.fn(async () => rootAt(10n, [COSIG_FIXTURE])),
+      });
+      const r = await runFull(client, {
+        witnessKeys: [WITNESS_KEY, WITNESS_KEY_2, WITNESS_KEY_3],
+        witnessThreshold: 2,
+        verifyWitness: () => {
+          throw new Error("only 1 distinct valid witness < threshold 2");
+        },
+      });
+      expect(r.status).toBe("mismatch");
+      expect(r.isReset).toBeNull();
+    });
+
+    it("K-of-N: a foreign/garbage co-sig alongside ≥K distinct valid → confirmed (garbage never sinks the quorum)", async () => {
+      // The served bundle carries a foreign/garbage co-sig BESIDE the valid
+      // ones. A garbage co-sig contributes 0 to the distinct-pinned-key tally
+      // (never inflates it) and, being a well-formed 105-byte blob, never
+      // sinks an otherwise-valid quorum. The whole list (garbage included) is
+      // handed to the gate.
+      let captured: { cosigs: Uint8Array[] } | null = null;
+      const client = mockClient({
+        fetchRoot: vi.fn(async () =>
+          rootAt(10n, [GARBAGE_COSIG, COSIG_FIXTURE, COSIG_FIXTURE]),
+        ),
+      });
+      const r = await runFull(client, {
+        witnessKeys: [WITNESS_KEY, WITNESS_KEY_2],
+        witnessThreshold: 2,
+        verifyWitness: (args) => {
+          captured = args;
+        },
+      });
+      expect(r.status).toBe("confirmed");
+      expect(captured!.cosigs).toContain(GARBAGE_COSIG);
+      expect(captured!.cosigs).toHaveLength(3);
+    });
+
+    it("pinned key + NO co-sig on the root → mismatch (fail-closed, REAL wasm)", async () => {
+      // No seam → drives the real wasm verifyWitnessQuorum. An empty cosig
+      // bundle is 0 distinct valid < threshold 1 → the wasm throws → refuse.
+      // The latest lookup must never run — the quorum gate short-circuits.
+      const fetchLatest = vi.fn(async () => latestWith(SERVED_PUBKEY));
+      const client = mockClient({
+        fetchRoot: vi.fn(async () => rootAt(10n, [])),
+        fetchLatest,
+      });
+      const r = await runFull(client, { witnessKeys: [WITNESS_KEY] });
       expect(r.status).toBe("mismatch");
       expect(r.isReset).toBeNull();
       expect(fetchLatest).not.toHaveBeenCalled();
     });
 
-    it("pinned witness key + co-sig that FAILS to verify → mismatch (fail-closed)", async () => {
+    it("pinned key + a well-formed but non-witness co-sig → mismatch (fail-closed, REAL wasm)", async () => {
+      // A single 105-byte garbage co-sig cannot verify under the pinned key →
+      // 0 distinct valid < threshold 1 → the real wasm throws → refuse.
       const client = mockClient({
-        fetchRoot: vi.fn(async () => rootAt(10n, COSIG_FIXTURE)),
+        fetchRoot: vi.fn(async () => rootAt(10n, [GARBAGE_COSIG])),
+      });
+      const r = await runFull(client, { witnessKeys: [WITNESS_KEY] });
+      expect(r.status).toBe("mismatch");
+      expect(r.isReset).toBeNull();
+    });
+
+    it("pinned key + co-sig that FAILS to verify → mismatch (seam fail-closed)", async () => {
+      const client = mockClient({
+        fetchRoot: vi.fn(async () => rootAt(10n, [COSIG_FIXTURE])),
       });
       const r = await runFull(client, {
-        witnessKey: WITNESS_KEY,
+        witnessKeys: [WITNESS_KEY],
         verifyWitness: () => {
           throw new Error("witness co-sig does not verify");
         },
@@ -794,48 +881,55 @@ describe("witness co-sig gate (ADR-0020)", () => {
       expect(r.isReset).toBeNull();
     });
 
-    it("witness gate runs AFTER the rollback gate (a shrink is still rollback)", async () => {
-      // A shrunk root is rollback regardless of the witness co-sig.
+    it("quorum gate runs AFTER the rollback gate (a shrink is still rollback)", async () => {
+      // A shrunk root is rollback regardless of the witness quorum.
       checkAndAdvance(20n);
       const verifyWitness = vi.fn(() => {
         /* would pass, but must not even be consulted */
       });
       const client = mockClient({
-        fetchRoot: vi.fn(async () => rootAt(10n, COSIG_FIXTURE)),
+        fetchRoot: vi.fn(async () => rootAt(10n, [COSIG_FIXTURE])),
       });
-      const r = await runFull(client, { witnessKey: WITNESS_KEY, verifyWitness });
+      const r = await runFull(client, {
+        witnessKeys: [WITNESS_KEY],
+        verifyWitness,
+      });
       expect(r.status).toBe("rollback");
       expect(verifyWitness).not.toHaveBeenCalled();
     });
   });
 
-  describe("verifyRotationChain", () => {
-    it("pinned witness key + valid co-sig → proceeds (confirmed)", async () => {
+  describe("verifyRotationChain — gate posture", () => {
+    it("quorum satisfied (seam passes) → proceeds (confirmed)", async () => {
       const client = mockClient({
-        fetchRoot: vi.fn(async () => rootAt(10n, COSIG_FIXTURE)),
+        fetchRoot: vi.fn(async () =>
+          rootAt(10n, [COSIG_FIXTURE, COSIG_FIXTURE]),
+        ),
       });
       const r = await verifyRotationChain(ACCOUNT_ID, SERVED_PUBKEY, ROTATION_CTX, {
         client,
         operatorKey: OPERATOR_KEY,
-        witnessKey: WITNESS_KEY,
+        witnessKeys: [WITNESS_KEY, WITNESS_KEY_2],
+        witnessThreshold: 2,
         verifyWitness: () => {
-          /* valid */
+          /* satisfied */
         },
         verifyChain: () => SERVED_PUBKEY,
       });
       expect(r.status).toBe("confirmed");
     });
 
-    it("pinned witness key + NO co-sig → mismatch (fail-closed)", async () => {
+    it("pinned keys + NO co-sig → mismatch (fail-closed, REAL wasm)", async () => {
       const fetchLatest = vi.fn(async () => latestWith(SERVED_PUBKEY));
       const client = mockClient({
-        fetchRoot: vi.fn(async () => rootAt(10n, null)),
+        fetchRoot: vi.fn(async () => rootAt(10n, [])),
         fetchLatest,
       });
       const r = await verifyRotationChain(ACCOUNT_ID, SERVED_PUBKEY, ROTATION_CTX, {
         client,
         operatorKey: OPERATOR_KEY,
-        witnessKey: WITNESS_KEY,
+        witnessKeys: [WITNESS_KEY, WITNESS_KEY_2],
+        witnessThreshold: 2,
         verifyChain: () => SERVED_PUBKEY,
       });
       expect(r.status).toBe("mismatch");
@@ -843,16 +937,17 @@ describe("witness co-sig gate (ADR-0020)", () => {
       expect(fetchLatest).not.toHaveBeenCalled();
     });
 
-    it("pinned witness key + co-sig that FAILS → mismatch (fail-closed)", async () => {
+    it("sub-threshold quorum (seam throws) → mismatch (fail-closed)", async () => {
       const client = mockClient({
-        fetchRoot: vi.fn(async () => rootAt(10n, COSIG_FIXTURE)),
+        fetchRoot: vi.fn(async () => rootAt(10n, [COSIG_FIXTURE])),
       });
       const r = await verifyRotationChain(ACCOUNT_ID, SERVED_PUBKEY, ROTATION_CTX, {
         client,
         operatorKey: OPERATOR_KEY,
-        witnessKey: WITNESS_KEY,
+        witnessKeys: [WITNESS_KEY, WITNESS_KEY_2],
+        witnessThreshold: 2,
         verifyWitness: () => {
-          throw new Error("witness co-sig does not verify");
+          throw new Error("only 1 distinct valid witness < threshold 2");
         },
         verifyChain: () => SERVED_PUBKEY,
       });
@@ -860,17 +955,90 @@ describe("witness co-sig gate (ADR-0020)", () => {
       expect(r.version).toBeNull();
     });
 
-    it("no pinned witness key → gate OFF, unchanged rotation behaviour", async () => {
+    it("no pinned witness keys (empty set) → gate OFF, unchanged rotation behaviour", async () => {
       const client = mockClient({
-        fetchRoot: vi.fn(async () => rootAt(10n, null)),
+        fetchRoot: vi.fn(async () => rootAt(10n, [])),
       });
       const r = await verifyRotationChain(ACCOUNT_ID, SERVED_PUBKEY, ROTATION_CTX, {
         client,
         operatorKey: OPERATOR_KEY,
-        witnessKey: null,
+        witnessKeys: [],
         verifyChain: () => SERVED_PUBKEY,
       });
       expect(r.status).toBe("confirmed");
+    });
+  });
+
+  // Direct REAL-wasm coverage of the verifyWitnessQuorum fail-closed contract
+  // with fixed vectors. A valid quorum needs Ed25519 witness signatures that
+  // only the (server-side) witness signer can mint — the wasm is verify-only
+  // (ADR-0020) — so the pass path is covered above via the gate seam; here we
+  // pin the REFUSAL contract end-to-end through the real symbol.
+  describe("real wasm verifyWitnessQuorum — fail-closed contract (fixed vectors)", () => {
+    const TREE_ROOT = new Uint8Array(32).fill(0x11);
+    const LOG_SIZE = 10n;
+    const ONE_KEY = new Uint8Array(32).fill(0x5a);
+    const ONE_COSIG = new Uint8Array(105).fill(0x6c);
+
+    it("throws when threshold is 0 (rejected fail-closed, invariant #4)", () => {
+      expect(() =>
+        verifyWitnessQuorum(ONE_COSIG, ONE_KEY, 0, TREE_ROOT, LOG_SIZE),
+      ).toThrow();
+    });
+
+    it("throws when cosigsFlat is not a multiple of 105 bytes", () => {
+      expect(() =>
+        verifyWitnessQuorum(
+          new Uint8Array(104),
+          ONE_KEY,
+          1,
+          TREE_ROOT,
+          LOG_SIZE,
+        ),
+      ).toThrow();
+    });
+
+    it("throws when pinnedKeysFlat is not a multiple of 32 bytes", () => {
+      expect(() =>
+        verifyWitnessQuorum(
+          ONE_COSIG,
+          new Uint8Array(31),
+          1,
+          TREE_ROOT,
+          LOG_SIZE,
+        ),
+      ).toThrow();
+    });
+
+    it("throws when the expected tree root is not 32 bytes", () => {
+      expect(() =>
+        verifyWitnessQuorum(
+          ONE_COSIG,
+          ONE_KEY,
+          1,
+          new Uint8Array(31),
+          LOG_SIZE,
+        ),
+      ).toThrow();
+    });
+
+    it("throws when 0 distinct valid co-sigs < threshold 1 (garbage never verifies)", () => {
+      // A well-formed-length garbage co-sig cannot verify under the pinned key.
+      expect(() =>
+        verifyWitnessQuorum(ONE_COSIG, ONE_KEY, 1, TREE_ROOT, LOG_SIZE),
+      ).toThrow();
+    });
+
+    it("throws on an empty cosig bundle (0 < threshold 1)", () => {
+      expect(() =>
+        verifyWitnessQuorum(
+          new Uint8Array(0),
+          ONE_KEY,
+          1,
+          TREE_ROOT,
+          LOG_SIZE,
+        ),
+      ).toThrow();
     });
   });
 });

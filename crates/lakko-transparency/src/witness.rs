@@ -22,6 +22,13 @@
 //! blob the witness signs and a client verifies. It is domain-separated from
 //! the operator's root signature and from every other Lakko Ed25519 use, so a
 //! signature of one kind can never verify as another.
+//!
+//! ADR-0020 shipped with a single pinned witness — collusion of the operator
+//! with that one witness re-opens the fork. [`verify_witness_quorum`] is the
+//! K-of-N generalisation (ADR-0039, G-30 finding-1): the client pins `N`
+//! witness keys and requires at least `K` DISTINCT witnesses to have co-signed
+//! the same root, so the operator must now corrupt `K` independent witnesses,
+//! not one.
 
 use lakko_crypto::signing::{Signature, SigningKey, VerifyingKey, SIGNATURE_LEN};
 
@@ -132,6 +139,91 @@ pub fn verify_witness_cosig(
         &signature,
     )
     .map_err(|_| Error::WitnessCosigInvalid)
+}
+
+/// Verify that a **quorum** of `threshold` DISTINCT pinned witnesses each
+/// co-signed the `(expected_tree_root, expected_log_size)` (ADR-0039, G-30
+/// finding-1).
+///
+/// This is the K-of-N generalisation of [`verify_witness_cosig`]: instead of a
+/// single pinned witness, the caller pins `N` witness keys (`pinned_keys`) and
+/// requires at least `threshold` (`K`) of them to have co-signed the SAME root.
+/// Requiring `K` independent witnesses raises the split-view bar from "one
+/// honest witness" to "at least `N − K + 1` of the `N` are honest", so the
+/// operator can no longer fork the log by colluding with (or compromising) a
+/// single witness.
+///
+/// # Dedup-by-distinct-key (the security crux)
+///
+/// The tally counts **distinct pinned keys**, never co-signatures. Each pinned
+/// key contributes AT MOST ONE to the quorum, no matter how many of the
+/// supplied `cosigs` verify under it, and a duplicated entry in `pinned_keys` is
+/// likewise counted once. This is load-bearing: `cosigs` is attacker-controlled
+/// (a malicious operator serves them to the client), so without per-key dedup an
+/// attacker could reach any threshold by replaying one honest witness's
+/// co-signature `K` times, or by presenting `K` distinct-but-valid signatures
+/// all produced by a single witness. Counting distinct KEYS — not signatures —
+/// defeats both: `K` genuinely different pinned witnesses must each have signed
+/// the root.
+///
+/// # Fail-closed on a zero threshold
+///
+/// A `threshold` of `0` is a misconfiguration — a zero quorum would accept ANY
+/// root, including one no witness signed. It is rejected fail-closed with
+/// [`Error::WitnessQuorumBadThreshold`] BEFORE any co-signature is examined, so
+/// a config bug can never silently disable the split-view defence
+/// (invariant #4).
+///
+/// Each candidate co-signature is checked with [`verify_witness_cosig`], so its
+/// length / version / `(tree_root, log_size)` binding / signature gates all
+/// apply — a co-sig bound to a different root, signed by a non-pinned key, or
+/// malformed simply does not count toward the quorum (it is never fatal). The
+/// work is bounded by `pinned_keys.len() * cosigs.len()` signature checks, both
+/// caller-supplied; nothing is allocated proportional to attacker input beyond
+/// the caller's own slices.
+///
+/// # Errors
+///
+/// - [`Error::WitnessQuorumBadThreshold`] if `threshold == 0`.
+/// - [`Error::WitnessQuorumNotMet`] if fewer than `threshold` distinct pinned
+///   keys produced a valid co-signature over the expected root; it carries the
+///   achieved and required counts.
+pub fn verify_witness_quorum(
+    cosigs: &[&[u8]],
+    pinned_keys: &[&[u8]],
+    threshold: usize,
+    expected_tree_root: &TreeHash,
+    expected_log_size: u64,
+) -> Result<()> {
+    if threshold == 0 {
+        return Err(Error::WitnessQuorumBadThreshold);
+    }
+
+    // Distinct pinned keys that produced at least one valid co-signature over
+    // the expected root. Storing the keys (not merely a count) lets us skip a
+    // duplicate pinned-key entry so it can never be double-counted — the
+    // dedup-by-distinct-key property.
+    let mut satisfied: Vec<&[u8]> = Vec::new();
+    for &key in pinned_keys {
+        if satisfied.contains(&key) {
+            // This exact key already contributed; a duplicate entry adds nothing.
+            continue;
+        }
+        let key_has_valid_cosig = cosigs.iter().any(|&cosig| {
+            verify_witness_cosig(cosig, key, expected_tree_root, expected_log_size).is_ok()
+        });
+        if key_has_valid_cosig {
+            satisfied.push(key);
+            if satisfied.len() >= threshold {
+                return Ok(());
+            }
+        }
+    }
+
+    Err(Error::WitnessQuorumNotMet {
+        achieved: satisfied.len(),
+        required: threshold,
+    })
 }
 
 #[cfg(test)]
@@ -246,5 +338,210 @@ mod tests {
         let input = cosig_signing_input(&tr, 42);
         assert!(input.starts_with(WITNESS_DOMAIN));
         assert_ne!(input.len(), 32 + 8); // not the operator's bare payload
+    }
+
+    // --- K-of-N witness quorum (ADR-0039, G-30 finding-1) ---
+
+    /// Mint N witnesses from the given seeds; return their signing keys and the
+    /// matching 32-byte verifying-key bytes (the pinned-key form).
+    fn witnesses(seeds: &[u8]) -> (Vec<SigningKey>, Vec<[u8; 32]>) {
+        let sks: Vec<SigningKey> = seeds
+            .iter()
+            .map(|s| SigningKey::from_seed(&[*s; 32]))
+            .collect();
+        let vks: Vec<[u8; 32]> = sks.iter().map(|sk| sk.verifying_key().to_bytes()).collect();
+        (sks, vks)
+    }
+
+    fn as_refs<T: AsRef<[u8]>>(items: &[T]) -> Vec<&[u8]> {
+        items.iter().map(AsRef::as_ref).collect()
+    }
+
+    #[test]
+    fn quorum_met_with_k_distinct_valid() {
+        let tr = root_at(0xAB);
+        let (sks, vks) = witnesses(&[1, 2, 3]);
+        let cosigs: Vec<[u8; WITNESS_COSIG_LEN]> = sks
+            .iter()
+            .map(|sk| sign_witness_cosig(sk, &tr, 7))
+            .collect();
+        let cosig_refs = as_refs(&cosigs);
+        let key_refs = as_refs(&vks);
+        // 3-of-3 and 2-of-3 both satisfied by three distinct valid co-sigs.
+        verify_witness_quorum(&cosig_refs, &key_refs, 3, &tr, 7).expect("3-of-3 met");
+        verify_witness_quorum(&cosig_refs, &key_refs, 2, &tr, 7).expect("2-of-3 met");
+    }
+
+    #[test]
+    fn quorum_not_met_with_k_minus_one_distinct() {
+        let tr = root_at(0xAB);
+        let (sks, vks) = witnesses(&[1, 2, 3]);
+        // Only two of the three pinned witnesses actually co-signed.
+        let cosigs = [
+            sign_witness_cosig(&sks[0], &tr, 7),
+            sign_witness_cosig(&sks[1], &tr, 7),
+        ];
+        let cosig_refs = as_refs(&cosigs);
+        let key_refs = as_refs(&vks);
+        assert!(matches!(
+            verify_witness_quorum(&cosig_refs, &key_refs, 3, &tr, 7),
+            Err(Error::WitnessQuorumNotMet {
+                achieved: 2,
+                required: 3
+            })
+        ));
+    }
+
+    #[test]
+    fn duplicate_cosig_under_one_key_counts_once() {
+        // The anti-double-count crux: the SAME key's valid co-sig supplied
+        // twice (2 cosigs, 1 pinned key) can only ever tally 1 — a replayed
+        // co-sig cannot inflate the quorum to 2.
+        let tr = root_at(0xAB);
+        let (sks, vks) = witnesses(&[9]);
+        let c = sign_witness_cosig(&sks[0], &tr, 7);
+        let cosigs = [c, c]; // same witness's co-sig, twice
+        let cosig_refs = as_refs(&cosigs);
+        let key_refs = as_refs(&vks);
+        assert!(matches!(
+            verify_witness_quorum(&cosig_refs, &key_refs, 2, &tr, 7),
+            Err(Error::WitnessQuorumNotMet {
+                achieved: 1,
+                required: 2
+            })
+        ));
+        // The same single distinct key does satisfy a threshold of 1.
+        verify_witness_quorum(&cosig_refs, &key_refs, 1, &tr, 7).expect("1-of-1 met");
+    }
+
+    #[test]
+    fn duplicate_pinned_key_counts_once() {
+        // A key listed twice in `pinned_keys` (a config duplicate) still counts
+        // once — distinctness is over keys, not slots.
+        let tr = root_at(0xAB);
+        let (sks, vks) = witnesses(&[9]);
+        let c = sign_witness_cosig(&sks[0], &tr, 7);
+        let cosigs = [c];
+        let cosig_refs = as_refs(&cosigs);
+        let key = vks[0];
+        let pinned: [&[u8]; 2] = [&key, &key]; // same key twice
+        assert!(matches!(
+            verify_witness_quorum(&cosig_refs, &pinned, 2, &tr, 7),
+            Err(Error::WitnessQuorumNotMet {
+                achieved: 1,
+                required: 2
+            })
+        ));
+    }
+
+    #[test]
+    fn garbage_cosig_among_valid_is_ignored() {
+        // A malformed / bad co-sig does not block an otherwise-met quorum.
+        let tr = root_at(0xAB);
+        let (sks, vks) = witnesses(&[1, 2, 3]);
+        let c1 = sign_witness_cosig(&sks[0], &tr, 7);
+        let c2 = sign_witness_cosig(&sks[1], &tr, 7);
+        let c3 = sign_witness_cosig(&sks[2], &tr, 7);
+        let garbage = [0xAAu8; WITNESS_COSIG_LEN];
+        let short = [0x00u8; 3];
+        let cosigs: [&[u8]; 5] = [&garbage, &c1, &short, &c2, &c3];
+        let key_refs = as_refs(&vks);
+        verify_witness_quorum(&cosigs, &key_refs, 3, &tr, 7)
+            .expect("3 distinct valid despite two junk co-sigs");
+    }
+
+    #[test]
+    fn cosig_over_different_root_does_not_count() {
+        // A valid co-sig bound to a DIFFERENT (tree_root, log_size) fails the
+        // binding gate inside verify_witness_cosig, so it never counts.
+        let tr = root_at(0xAB);
+        let other = root_at(0xCD);
+        let (sks, vks) = witnesses(&[1]);
+        let c = sign_witness_cosig(&sks[0], &other, 7); // signed over `other`
+        let cosigs = [c];
+        let cosig_refs = as_refs(&cosigs);
+        let key_refs = as_refs(&vks);
+        assert!(matches!(
+            verify_witness_quorum(&cosig_refs, &key_refs, 1, &tr, 7),
+            Err(Error::WitnessQuorumNotMet {
+                achieved: 0,
+                required: 1
+            })
+        ));
+        // Same witness, right root but a different log_size — also excluded.
+        let c_size = sign_witness_cosig(&sks[0], &tr, 8);
+        let cosigs2 = [c_size];
+        let cosig_refs2 = as_refs(&cosigs2);
+        assert!(matches!(
+            verify_witness_quorum(&cosig_refs2, &key_refs, 1, &tr, 7),
+            Err(Error::WitnessQuorumNotMet { achieved: 0, .. })
+        ));
+    }
+
+    #[test]
+    fn cosig_from_non_pinned_key_does_not_count() {
+        let tr = root_at(0xAB);
+        let (_pinned_sks, vks) = witnesses(&[1]); // pin witness 1
+        let intruder = SigningKey::from_seed(&[0x77; 32]); // not pinned
+        let c = sign_witness_cosig(&intruder, &tr, 7);
+        let cosigs = [c];
+        let cosig_refs = as_refs(&cosigs);
+        let key_refs = as_refs(&vks);
+        assert!(matches!(
+            verify_witness_quorum(&cosig_refs, &key_refs, 1, &tr, 7),
+            Err(Error::WitnessQuorumNotMet {
+                achieved: 0,
+                required: 1
+            })
+        ));
+    }
+
+    #[test]
+    fn zero_threshold_fails_closed() {
+        let tr = root_at(0xAB);
+        let (sks, vks) = witnesses(&[1]);
+        let c = sign_witness_cosig(&sks[0], &tr, 7);
+        let cosigs = [c];
+        let cosig_refs = as_refs(&cosigs);
+        let key_refs = as_refs(&vks);
+        // A zero quorum must NOT trivially pass even with a valid co-sig present.
+        assert!(matches!(
+            verify_witness_quorum(&cosig_refs, &key_refs, 0, &tr, 7),
+            Err(Error::WitnessQuorumBadThreshold)
+        ));
+    }
+
+    #[test]
+    fn threshold_above_pinned_count_is_unsatisfiable() {
+        let tr = root_at(0xAB);
+        let (sks, vks) = witnesses(&[1, 2]);
+        let cosigs = [
+            sign_witness_cosig(&sks[0], &tr, 7),
+            sign_witness_cosig(&sks[1], &tr, 7),
+        ];
+        let cosig_refs = as_refs(&cosigs);
+        let key_refs = as_refs(&vks);
+        // Only two pinned keys exist; a threshold of 3 can never be reached.
+        assert!(matches!(
+            verify_witness_quorum(&cosig_refs, &key_refs, 3, &tr, 7),
+            Err(Error::WitnessQuorumNotMet {
+                achieved: 2,
+                required: 3
+            })
+        ));
+    }
+
+    #[test]
+    fn one_of_one_matches_single_witness_path() {
+        // Backward-compat: N=1, K=1 accepts exactly when verify_witness_cosig
+        // would, proving the quorum generalises the single-witness primitive.
+        let tr = root_at(0xAB);
+        let (sks, vks) = witnesses(&[5]);
+        let c = sign_witness_cosig(&sks[0], &tr, 7);
+        let cosigs = [c];
+        let cosig_refs = as_refs(&cosigs);
+        let key_refs = as_refs(&vks);
+        verify_witness_quorum(&cosig_refs, &key_refs, 1, &tr, 7).expect("1-of-1 met");
+        verify_witness_cosig(&c, &vks[0], &tr, 7).expect("single-witness path also verifies");
     }
 }

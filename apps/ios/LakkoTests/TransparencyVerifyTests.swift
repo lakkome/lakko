@@ -41,18 +41,25 @@ final class TransparencyVerifyTests: XCTestCase {
     private let otherPubkey = Data(repeating: 0xCD, count: 32)
     private let operatorKey = Data(repeating: 0x07, count: 32)
     private let witnessKey = Data(repeating: 0x5A, count: 32)
+    /// A second + third pinned witness key, for K-of-N quorum tests
+    /// (ADR-0039).
+    private let witnessKey2 = Data(repeating: 0x5B, count: 32)
+    private let witnessKey3 = Data(repeating: 0x5C, count: 32)
     /// A witness co-sig blob fixture (105 bytes — the gate seam ignores
     /// the contents; the real verify is covered by the Rust `witness.rs`
     /// tests).
     private let cosigFixture = Data(repeating: 0x6C, count: 105)
+    /// A distinct 105-byte foreign/garbage co-sig blob (not from a pinned
+    /// witness — never inflates or sinks the distinct-valid tally).
+    private let garbageCosig = Data(repeating: 0x99, count: 105)
 
-    private func rootAt(_ logSize: UInt64, witnessCosig: Data? = nil) -> SignedRoot {
+    private func rootAt(_ logSize: UInt64, witnessCosigs: [Data] = []) -> SignedRoot {
         SignedRoot(
             treeRoot: Data(repeating: 0x11, count: 32),
             logSize: logSize,
             timestampUnix: 1_700_000_000,
             signature: Data(repeating: 0x22, count: 64),
-            witnessCosig: witnessCosig
+            witnessCosigs: witnessCosigs
         )
     }
 
@@ -1170,19 +1177,30 @@ final class TransparencyVerifyTests: XCTestCase {
         XCTAssertEqual(result.status, .confirmed)
     }
 
-    // MARK: - ADR-0020: witness co-sig gate
+    // MARK: - ADR-0039 (G-30 finding-1): K-of-N witness-quorum gate
+    //
+    // Mirror of the web `verify.test.ts` "witness quorum gate" block. The
+    // gate seam (`verifyWitness`) receives the WHOLE served cosig list + the
+    // pinned key SET + the threshold, and it decides pass/fail exactly like
+    // the FFI. The no-seam tests drive the REAL `verifyWitnessQuorum` FFI for
+    // the fail-closed contract (a satisfied quorum needs Ed25519 co-sigs only
+    // the server-side witness signer can mint, so the pass path is covered
+    // via the seam; the refusal path is pinned end-to-end through the real
+    // symbol).
+
+    // --- verifyIdentityInLog — gate posture -------------------------------
 
     func testWitnessGateOffConfirmsRootWithoutCosig() async {
-        // No pinned witness key → operator-only transition posture: a
-        // root with no co-sig still confirms.
+        // No pinned witness keys (empty set) → operator-only transition
+        // posture: a root with no co-sig still confirms.
         let v = TransparencyVerify(
             client: FakeFetcher(
-                root: rootAt(10, witnessCosig: nil),
+                root: rootAt(10, witnessCosigs: []),
                 latest: latestWith(servedPubkey),
                 proof: proofFixture
             ),
             operatorKey: operatorKey,
-            witnessKey: nil,
+            witnessKeys: [],
             lastSeenRoot: LastSeenRoot(defaults: freshDefaults()),
             verifyInclusion: { _ in }
         )
@@ -1190,57 +1208,68 @@ final class TransparencyVerifyTests: XCTestCase {
         XCTAssertEqual(status, .confirmed)
     }
 
-    func testWitnessGateValidCosigProceeds() async {
+    func testWitnessQuorum1of1ProceedsAndThreadsArgs() async {
+        // 1-of-1: pinned key + valid co-sig → confirmed; the gate is handed
+        // the cosig LIST + the key SET + the threshold (default 1).
         var captured: TransparencyVerify.WitnessArgs?
+        var calls = 0
         let v = TransparencyVerify(
             client: FakeFetcher(
-                root: rootAt(10, witnessCosig: cosigFixture),
+                root: rootAt(10, witnessCosigs: [cosigFixture]),
                 latest: latestWith(servedPubkey),
                 proof: proofFixture
             ),
             operatorKey: operatorKey,
-            witnessKey: witnessKey,
+            witnessKeys: [witnessKey],
+            lastSeenRoot: LastSeenRoot(defaults: freshDefaults()),
+            verifyInclusion: { _ in },
+            verifyWitness: { args in calls += 1; captured = args }
+        )
+        let status = await runStatus(v)
+        XCTAssertEqual(status, .confirmed)
+        XCTAssertEqual(calls, 1)
+        XCTAssertEqual(captured?.cosigs, [cosigFixture])
+        XCTAssertEqual(captured?.witnessKeys, [witnessKey])
+        XCTAssertEqual(captured?.threshold, 1)
+        XCTAssertEqual(captured?.logSize, 10)
+    }
+
+    func testWitnessQuorumKofNSatisfiedProceeds() async {
+        // 3 pinned witnesses, threshold 2, 3 co-sigs served. The seam
+        // simulates a satisfied quorum (returns). Assert the threshold + full
+        // key set thread through.
+        var captured: TransparencyVerify.WitnessArgs?
+        let v = TransparencyVerify(
+            client: FakeFetcher(
+                root: rootAt(10, witnessCosigs: [cosigFixture, cosigFixture, cosigFixture]),
+                latest: latestWith(servedPubkey),
+                proof: proofFixture
+            ),
+            operatorKey: operatorKey,
+            witnessKeys: [witnessKey, witnessKey2, witnessKey3],
+            witnessThreshold: 2,
             lastSeenRoot: LastSeenRoot(defaults: freshDefaults()),
             verifyInclusion: { _ in },
             verifyWitness: { args in captured = args }
         )
         let status = await runStatus(v)
         XCTAssertEqual(status, .confirmed)
-        XCTAssertEqual(captured?.cosig, cosigFixture)
-        XCTAssertEqual(captured?.witnessKey, witnessKey)
-        XCTAssertEqual(captured?.logSize, 10)
+        XCTAssertEqual(captured?.witnessKeys.count, 3)
+        XCTAssertEqual(captured?.threshold, 2)
     }
 
-    func testWitnessGateNoCosigFailsClosed() async {
-        // Pinned witness key + a root with NO co-sig → mismatch, and the
-        // latest lookup must not run (the gate short-circuits).
-        let fake = FakeFetcher(
-            root: rootAt(10, witnessCosig: nil),
-            latest: latestWith(servedPubkey),
-            proof: proofFixture
-        )
-        let v = TransparencyVerify(
-            client: fake,
-            operatorKey: operatorKey,
-            witnessKey: witnessKey,
-            lastSeenRoot: LastSeenRoot(defaults: freshDefaults()),
-            verifyInclusion: { _ in }
-        )
-        let result = await run(v)
-        XCTAssertEqual(result.status, .mismatch)
-        XCTAssertNil(result.isReset)
-        XCTAssertEqual(fake.fetchLatestCalls, 0)
-    }
-
-    func testWitnessGateInvalidCosigFailsClosed() async {
+    func testWitnessQuorumSubThresholdFailsClosed() async {
+        // The seam THROWS to simulate the FFI's sub-threshold refusal (K-1
+        // distinct valid < K). The gate must fail closed → mismatch.
         let v = TransparencyVerify(
             client: FakeFetcher(
-                root: rootAt(10, witnessCosig: cosigFixture),
+                root: rootAt(10, witnessCosigs: [cosigFixture]),
                 latest: latestWith(servedPubkey),
                 proof: proofFixture
             ),
             operatorKey: operatorKey,
-            witnessKey: witnessKey,
+            witnessKeys: [witnessKey, witnessKey2, witnessKey3],
+            witnessThreshold: 2,
             lastSeenRoot: LastSeenRoot(defaults: freshDefaults()),
             verifyInclusion: { _ in },
             verifyWitness: { _ in throw FakeError.inclusionFailed }
@@ -1250,20 +1279,105 @@ final class TransparencyVerifyTests: XCTestCase {
         XCTAssertNil(result.isReset)
     }
 
-    func testWitnessGateRunsAfterRollback() async {
-        // A shrunk root is rollback regardless of the witness co-sig; the
+    func testWitnessQuorumGarbageDoesNotSinkQuorum() async {
+        // A foreign/garbage co-sig BESIDE the valid ones: it contributes 0 to
+        // the distinct-pinned-key tally (never inflates it) and, being a
+        // well-formed 105-byte blob, never sinks an otherwise-valid quorum.
+        // The whole list (garbage included) is handed to the gate.
+        var captured: TransparencyVerify.WitnessArgs?
+        let v = TransparencyVerify(
+            client: FakeFetcher(
+                root: rootAt(10, witnessCosigs: [garbageCosig, cosigFixture, cosigFixture]),
+                latest: latestWith(servedPubkey),
+                proof: proofFixture
+            ),
+            operatorKey: operatorKey,
+            witnessKeys: [witnessKey, witnessKey2],
+            witnessThreshold: 2,
+            lastSeenRoot: LastSeenRoot(defaults: freshDefaults()),
+            verifyInclusion: { _ in },
+            verifyWitness: { args in captured = args }
+        )
+        let status = await runStatus(v)
+        XCTAssertEqual(status, .confirmed)
+        XCTAssertEqual(captured?.cosigs.count, 3)
+        XCTAssertTrue(captured?.cosigs.contains(garbageCosig) ?? false)
+    }
+
+    func testWitnessQuorumNoCosigFailsClosedRealFfi() async {
+        // No seam → drives the REAL `verifyWitnessQuorum`. An empty cosig
+        // bundle is 0 distinct valid < threshold 1 → the FFI throws → refuse.
+        // The latest lookup must never run (the quorum gate short-circuits).
+        let fake = FakeFetcher(
+            root: rootAt(10, witnessCosigs: []),
+            latest: latestWith(servedPubkey),
+            proof: proofFixture
+        )
+        let v = TransparencyVerify(
+            client: fake,
+            operatorKey: operatorKey,
+            witnessKeys: [witnessKey],
+            lastSeenRoot: LastSeenRoot(defaults: freshDefaults()),
+            verifyInclusion: { _ in }
+        )
+        let result = await run(v)
+        XCTAssertEqual(result.status, .mismatch)
+        XCTAssertNil(result.isReset)
+        XCTAssertEqual(fake.fetchLatestCalls, 0)
+    }
+
+    func testWitnessQuorumNonWitnessCosigFailsClosedRealFfi() async {
+        // A single well-formed-length garbage co-sig cannot verify under the
+        // pinned key → 0 distinct valid < threshold 1 → the REAL FFI throws
+        // → refuse.
+        let v = TransparencyVerify(
+            client: FakeFetcher(
+                root: rootAt(10, witnessCosigs: [garbageCosig]),
+                latest: latestWith(servedPubkey),
+                proof: proofFixture
+            ),
+            operatorKey: operatorKey,
+            witnessKeys: [witnessKey],
+            lastSeenRoot: LastSeenRoot(defaults: freshDefaults()),
+            verifyInclusion: { _ in }
+        )
+        let result = await run(v)
+        XCTAssertEqual(result.status, .mismatch)
+        XCTAssertNil(result.isReset)
+    }
+
+    func testWitnessQuorumInvalidCosigFailsClosedSeam() async {
+        let v = TransparencyVerify(
+            client: FakeFetcher(
+                root: rootAt(10, witnessCosigs: [cosigFixture]),
+                latest: latestWith(servedPubkey),
+                proof: proofFixture
+            ),
+            operatorKey: operatorKey,
+            witnessKeys: [witnessKey],
+            lastSeenRoot: LastSeenRoot(defaults: freshDefaults()),
+            verifyInclusion: { _ in },
+            verifyWitness: { _ in throw FakeError.inclusionFailed }
+        )
+        let result = await run(v)
+        XCTAssertEqual(result.status, .mismatch)
+        XCTAssertNil(result.isReset)
+    }
+
+    func testWitnessQuorumRunsAfterRollback() async {
+        // A shrunk root is rollback regardless of the witness quorum; the
         // witness seam must not even be consulted.
         let store = LastSeenRoot(defaults: freshDefaults())
         XCTAssertEqual(store.checkAndAdvance(20), .ok)
         var witnessConsulted = false
         let v = TransparencyVerify(
             client: FakeFetcher(
-                root: rootAt(10, witnessCosig: cosigFixture),
+                root: rootAt(10, witnessCosigs: [cosigFixture]),
                 latest: latestWith(servedPubkey),
                 proof: proofFixture
             ),
             operatorKey: operatorKey,
-            witnessKey: witnessKey,
+            witnessKeys: [witnessKey],
             lastSeenRoot: store,
             verifyInclusion: { _ in },
             verifyWitness: { _ in witnessConsulted = true }
@@ -1273,36 +1387,59 @@ final class TransparencyVerifyTests: XCTestCase {
         XCTAssertFalse(witnessConsulted)
     }
 
-    func testChainWitnessGateValidCosigProceeds() async {
+    // --- verifyRotationChain — gate posture -------------------------------
+
+    func testChainWitnessQuorumSatisfiedProceeds() async {
         let v = TransparencyVerify(
             client: FakeFetcher(
-                root: rootAt(10, witnessCosig: cosigFixture),
+                root: rootAt(10, witnessCosigs: [cosigFixture, cosigFixture]),
                 latest: LatestEntry(
                     idx: 3, version: 7, identityPubkey: servedPubkey, isReset: false
                 ),
                 proof: proofFixture
             ),
             operatorKey: operatorKey,
-            witnessKey: witnessKey,
+            witnessKeys: [witnessKey, witnessKey2],
+            witnessThreshold: 2,
             lastSeenRoot: LastSeenRoot(defaults: freshDefaults()),
             verifyChain: { _ in self.servedPubkey },
-            verifyWitness: { _ in /* valid */ }
+            verifyWitness: { _ in /* satisfied */ }
         )
         let result = await runChain(v)
         XCTAssertEqual(result.status, .confirmed)
         XCTAssertEqual(result.version, 7)
     }
 
-    func testChainWitnessGateNoCosigFailsClosed() async {
+    func testChainWitnessQuorumSubThresholdFailsClosed() async {
+        let v = TransparencyVerify(
+            client: FakeFetcher(
+                root: rootAt(10, witnessCosigs: [cosigFixture]),
+                latest: latestWith(servedPubkey),
+                proof: proofFixture
+            ),
+            operatorKey: operatorKey,
+            witnessKeys: [witnessKey, witnessKey2],
+            witnessThreshold: 2,
+            lastSeenRoot: LastSeenRoot(defaults: freshDefaults()),
+            verifyChain: { _ in self.servedPubkey },
+            verifyWitness: { _ in throw FakeError.inclusionFailed }
+        )
+        let result = await runChain(v)
+        XCTAssertEqual(result.status, .mismatch)
+        XCTAssertNil(result.version)
+    }
+
+    func testChainWitnessQuorumNoCosigFailsClosedRealFfi() async {
         let fake = FakeFetcher(
-            root: rootAt(10, witnessCosig: nil),
+            root: rootAt(10, witnessCosigs: []),
             latest: latestWith(servedPubkey),
             proof: proofFixture
         )
         let v = TransparencyVerify(
             client: fake,
             operatorKey: operatorKey,
-            witnessKey: witnessKey,
+            witnessKeys: [witnessKey, witnessKey2],
+            witnessThreshold: 2,
             lastSeenRoot: LastSeenRoot(defaults: freshDefaults()),
             verifyChain: { _ in self.servedPubkey }
         )
@@ -1310,6 +1447,82 @@ final class TransparencyVerifyTests: XCTestCase {
         XCTAssertEqual(result.status, .mismatch)
         XCTAssertNil(result.version)
         XCTAssertEqual(fake.fetchLatestCalls, 0)
+    }
+
+    func testChainWitnessGateOffProceeds() async {
+        // Empty key set → gate OFF, unchanged rotation behaviour.
+        let v = TransparencyVerify(
+            client: FakeFetcher(
+                root: rootAt(10, witnessCosigs: []),
+                latest: latestWith(servedPubkey),
+                proof: proofFixture
+            ),
+            operatorKey: operatorKey,
+            witnessKeys: [],
+            lastSeenRoot: LastSeenRoot(defaults: freshDefaults()),
+            verifyChain: { _ in self.servedPubkey }
+        )
+        let result = await runChain(v)
+        XCTAssertEqual(result.status, .confirmed)
+    }
+
+    // --- Direct REAL-FFI fail-closed contract (fixed vectors) -------------
+    //
+    // A valid quorum needs Ed25519 witness signatures only the server-side
+    // witness signer can mint (the FFI is verify-only), so the pass path is
+    // covered above via the seam; here we pin the REFUSAL contract
+    // end-to-end through the real `verifyWitnessQuorum` symbol.
+
+    func testRealQuorumThrowsOnZeroThreshold() {
+        // threshold 0 is a misconfiguration → rejected fail-closed
+        // (invariant #4) before any co-signature is examined.
+        XCTAssertThrowsError(
+            try verifyWitnessQuorum(
+                cosigs: [cosigFixture],
+                pinnedKeys: [witnessKey],
+                threshold: 0,
+                expectedTreeRoot: Data(repeating: 0x11, count: 32),
+                expectedLogSize: 10
+            )
+        )
+    }
+
+    func testRealQuorumThrowsOnWrongLengthTreeRoot() {
+        XCTAssertThrowsError(
+            try verifyWitnessQuorum(
+                cosigs: [cosigFixture],
+                pinnedKeys: [witnessKey],
+                threshold: 1,
+                expectedTreeRoot: Data(repeating: 0x11, count: 31),
+                expectedLogSize: 10
+            )
+        )
+    }
+
+    func testRealQuorumThrowsWhenZeroDistinctValidBelowThreshold() {
+        // A well-formed-length garbage co-sig cannot verify under the pinned
+        // key → 0 distinct valid < threshold 1 → throws.
+        XCTAssertThrowsError(
+            try verifyWitnessQuorum(
+                cosigs: [garbageCosig],
+                pinnedKeys: [witnessKey],
+                threshold: 1,
+                expectedTreeRoot: Data(repeating: 0x11, count: 32),
+                expectedLogSize: 10
+            )
+        )
+    }
+
+    func testRealQuorumThrowsOnEmptyCosigBundle() {
+        XCTAssertThrowsError(
+            try verifyWitnessQuorum(
+                cosigs: [],
+                pinnedKeys: [witnessKey],
+                threshold: 1,
+                expectedTreeRoot: Data(repeating: 0x11, count: 32),
+                expectedLogSize: 10
+            )
+        )
     }
 }
 

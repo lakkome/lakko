@@ -39,7 +39,7 @@
 use lakko_attest::verify_genesis_fresh;
 use lakko_transparency::{
     verify_leaf_genesis, verify_supersession, InMemoryLog, InclusionProof, LogEntry, SignedRoot,
-    TreeHash,
+    TreeHash, WITNESS_COSIG_LEN,
 };
 use sqlx::MySqlPool;
 use tokio::sync::Mutex;
@@ -147,15 +147,17 @@ pub(crate) struct LatestEntry {
     pub(crate) genesis_attest: Option<Vec<u8>>,
 }
 
-/// The last witness-co-signed root (ADR-0020 Sprint 4). Only the
-/// `(tree_root, log_size)` bind the co-signature (the served root is re-signed
-/// fresh each request — the operator signature carries a timestamp, the
-/// co-signature does not), so that pair + the opaque co-sig blob is all we keep.
+/// The last witness-co-signed root + its co-signature BUNDLE (ADR-0020 Sprint 4;
+/// ADR-0039 S3 K-of-N). Only the `(tree_root, log_size)` bind the bundle (the
+/// served root is re-signed fresh each request — the operator signature carries
+/// a timestamp, the co-signatures do not), so that pair + the opaque co-sig
+/// blobs (one per witness that co-signed this `(tree_root, log_size)`) is all we
+/// keep. Each blob is a fixed [`WITNESS_COSIG_LEN`] bytes.
 #[derive(Clone)]
 struct Witnessed {
     tree_root: TreeHash,
     log_size: u64,
-    cosig: Vec<u8>,
+    cosigs: Vec<Vec<u8>>,
 }
 
 /// Persistent append-only transparency log.
@@ -215,7 +217,8 @@ impl LogStore {
         if let Some(w) = &witnessed {
             tracing::info!(
                 log_size = w.log_size,
-                "restored witnessed root co-signature"
+                cosig_count = w.cosigs.len(),
+                "restored witnessed root co-signature bundle"
             );
         }
 
@@ -434,70 +437,176 @@ impl LogStore {
     }
 
     /// Sign the current head root and (when the witness integration is on)
-    /// attach a valid witness co-signature (ADR-0020 Sprint 4).
+    /// attach the witness co-signature BUNDLE (ADR-0020 Sprint 4; ADR-0039 S3
+    /// K-of-N; ADR-0039 S3b per-witness catch-up).
     ///
-    /// Lazy co-signing: when the head has grown past the last-co-signed size it
-    /// calls the witness with a consistency proof + caches the result; otherwise
-    /// it reuses the cached co-signature, which binds the same
-    /// `(tree_root, log_size)` and so stays valid for the freshly-signed root.
-    /// Returns `(signed_root, Some(cosig))`, or `(signed_root, None)` when the
-    /// witness integration is off or the witness is unreachable / refuses (a
-    /// stale co-sig would bind-mismatch the client, so `None` is the honest
-    /// fail-closed signal — the client retries once co-signing catches up).
+    /// Lazy co-signing: an UNCHANGED head serves the cached bundle straight back
+    /// (it binds the same `(tree_root, log_size)` and so stays valid for the
+    /// freshly-signed root — no DB, no network). On a GROWTH round it fans out to
+    /// EVERY configured witness and caches the collected bundle.
+    ///
+    /// ## Per-witness catch-up (ADR-0039 S3b — anti-stranding)
+    ///
+    /// Each witness is handed a consistency proof from ITS OWN last-co-signed
+    /// high-water (`witness_high_water`), NEVER a single shared base. A witness
+    /// that was DOWN during a partial-success round keeps its old high-water, so
+    /// the NEXT growth re-sends it a proof from that still-old position and it
+    /// auto-rejoins — the S3 shared-base fan-out would instead have advanced the
+    /// one base past the down witness on the first partial success, permanently
+    /// stranding it (its own high-water forever behind the base it was proved
+    /// from). Only a witness that successfully co-signs this round advances its
+    /// row (to the current head). A fresh witness (no row) starts from the
+    /// genesis base `0`, exactly the pre-S3 first-cosig posture.
+    ///
+    /// Each `cosign` is BEST-EFFORT — a failure (unreachable, a 409 fork-refusal,
+    /// a decode error, or a wrong-length blob) means that witness contributes
+    /// NOTHING this round (logged at `warn`, witness index + kind only) and the
+    /// fan-out continues to the next.
+    ///
+    /// Returns `(signed_root, cosigs)` — a `Vec` of 0..N co-signatures. An EMPTY
+    /// bundle (no witness configured, all witnesses down/refused this round, or a
+    /// high-water load failure) is served as-is: the CLIENT enforces the K-of-N
+    /// threshold and fails closed (ADR-0039), the server never blocks/waits and
+    /// never serves a STALE bundle (a partial/empty round is not cached against a
+    /// mismatched head, so the fan-out is re-run on the next growth).
     pub(crate) async fn root_with_cosig(
         &self,
         pool: &MySqlPool,
-        witness: Option<&WitnessClient>,
+        witnesses: &[WitnessClient],
         timestamp_unix: u64,
-    ) -> (SignedRoot, Option<Vec<u8>>) {
+    ) -> (SignedRoot, Vec<Vec<u8>>) {
         let cached = self.witnessed.lock().await.clone();
-        let witnessed_size = cached.as_ref().map_or(0, |w| w.log_size);
 
-        // Snapshot the head under the inner lock, then DROP it before any
-        // witness network call so appends never block on the round-trip.
-        let (head_root, head_size, proof) = {
+        // Cheap head snapshot for the cache-hit fast path — no DB, no network.
+        let (head_root, head_size) = {
             let log = self.inner.lock().await;
-            let head_root = log.sign_current_root(timestamp_unix);
-            let head_size = log.size();
-            let proof = if head_size > witnessed_size {
-                log.consistency_proof(witnessed_size)
-            } else {
-                Vec::new()
-            };
-            (head_root, head_size, proof)
+            (log.sign_current_root(timestamp_unix), log.size())
         };
 
-        // The head is still at the witnessed size + root → the cached co-sig
-        // binds the same `(tree_root, log_size)`, valid for the fresh root.
+        // The head is still at the cached size + root → the cached bundle binds
+        // the same `(tree_root, log_size)`, valid for the fresh root. Serve it
+        // without touching the DB or any witness (the pre-S3 cache-hit posture,
+        // generalised over the bundle).
         if let Some(w) = &cached {
             if w.log_size == head_size && w.tree_root == head_root.tree_root {
-                return (head_root, Some(w.cosig.clone()));
+                return (head_root, w.cosigs.clone());
             }
         }
 
-        // The head grew (or nothing co-signed yet) — co-sign it.
-        let Some(witness) = witness else {
-            return (head_root, None);
-        };
-        match witness.cosign(&head_root, &proof).await {
-            Ok(cosig) => {
-                if let Err(e) =
-                    persist_witnessed(pool, &head_root.tree_root, head_size, &cosig).await
-                {
-                    tracing::error!(error = %e, "persist witnessed root failed (cached in-memory)");
-                }
-                *self.witnessed.lock().await = Some(Witnessed {
-                    tree_root: head_root.tree_root,
-                    log_size: head_size,
-                    cosig: cosig.clone(),
-                });
-                (head_root, Some(cosig))
-            },
-            Err(e) => {
-                tracing::warn!(error = %e, head_size, "witness cosign failed — serving uncosigned");
-                (head_root, None)
-            },
+        // The head grew (or nothing co-signed yet) — fan out to every witness,
+        // best-effort. No witness configured → the dormant (empty-bundle) path.
+        if witnesses.is_empty() {
+            return (head_root, Vec::new());
         }
+
+        // ADR-0039 S3b — load each witness's own catch-up base. If the load fails
+        // we cannot build correct per-witness proofs, so serve an empty bundle
+        // this round (fail-safe — the client fails closed on the threshold, the
+        // next request retries) rather than fan out proofs from a wrong base.
+        let bases = match load_witness_high_water_sizes(pool, witnesses.len()).await {
+            Ok(bases) => bases,
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    "load witness high-waters failed — serving an empty co-signature bundle this round"
+                );
+                return (head_root, Vec::new());
+            },
+        };
+
+        // Snapshot the head + build every per-witness proof under ONE lock so the
+        // signed root and all proofs agree on the same head size, then DROP it
+        // before any witness round-trip (appends never block on the network).
+        let (head_root, head_size, proofs) = {
+            let log = self.inner.lock().await;
+            let head_root = log.sign_current_root(timestamp_unix);
+            let head_size = log.size();
+            let proofs: Vec<Vec<TreeHash>> = bases
+                .iter()
+                .map(|&base| {
+                    if head_size > base {
+                        log.consistency_proof(base)
+                    } else {
+                        Vec::new()
+                    }
+                })
+                .collect();
+            (head_root, head_size, proofs)
+        };
+
+        let mut cosigs: Vec<Vec<u8>> = Vec::with_capacity(witnesses.len());
+        for (witness_index, witness) in witnesses.iter().enumerate() {
+            match witness.cosign(&head_root, &proofs[witness_index]).await {
+                Ok(cosig) if cosig.len() == WITNESS_COSIG_LEN => {
+                    cosigs.push(cosig);
+                    // This witness co-signed the current head → advance ITS
+                    // high-water so its next proof starts from here. A persist
+                    // failure only means the next round re-proves from the OLD
+                    // base (a redundant-but-valid catch-up), never a strand.
+                    if let Err(e) = persist_witness_high_water(
+                        pool,
+                        u32::try_from(witness_index).unwrap_or(u32::MAX),
+                        &head_root.tree_root,
+                        head_size,
+                    )
+                    .await
+                    {
+                        tracing::error!(
+                            witness_index,
+                            error = %e,
+                            "persist witness high-water failed (advance deferred to the next round)"
+                        );
+                    }
+                },
+                Ok(cosig) => {
+                    // A wrong-length blob would break the fixed-chunk bundle
+                    // framing (and a client would reject it anyway) — drop it.
+                    // Left the high-water untouched → the witness re-proves next
+                    // round.
+                    tracing::warn!(
+                        witness_index,
+                        cosig_len = cosig.len(),
+                        "witness returned a wrong-length co-signature — dropping it from the bundle"
+                    );
+                },
+                Err(e) => {
+                    // Left this witness's high-water untouched → the next growth
+                    // re-sends a proof from its own (still-old) base and it
+                    // auto-rejoins. No permanent stranding (ADR-0039 S3b).
+                    tracing::warn!(
+                        witness_index,
+                        error = %e,
+                        head_size,
+                        "witness cosign failed — this witness contributes no co-signature this round"
+                    );
+                },
+            }
+        }
+
+        if cosigs.is_empty() {
+            // Every witness was down/refused — serve an empty bundle (the client
+            // fails closed on the threshold). Do NOT cache: no witnessed row is
+            // written so the next request re-runs the fan-out.
+            tracing::warn!(
+                head_size,
+                witness_count = witnesses.len(),
+                "no witness co-signed the head — serving an empty co-signature bundle"
+            );
+            return (head_root, Vec::new());
+        }
+
+        // Cache + persist the (partial or full) bundle at the head. A partial
+        // bundle is reused until the next growth (a cache-hit reuse, matching the
+        // pre-S3 single-witness behaviour); the missing witnesses re-run then.
+        if let Err(e) = persist_witnessed(pool, &head_root.tree_root, head_size, &cosigs).await {
+            tracing::error!(error = %e, "persist witnessed bundle failed (cached in-memory)");
+        }
+        *self.witnessed.lock().await = Some(Witnessed {
+            tree_root: head_root.tree_root,
+            log_size: head_size,
+            cosigs: cosigs.clone(),
+        });
+        (head_root, cosigs)
     }
 
     /// Build an inclusion proof for the entry at `idx`, returning the
@@ -579,37 +688,120 @@ fn clamp_hash(bytes: &[u8]) -> [u8; 32] {
 }
 
 /// UPSERT the single `witnessed_root` row with the last co-signed
-/// `(tree_root, log_size, cosig)` (ADR-0020 Sprint 4).
+/// `(tree_root, log_size, cosigs)` (ADR-0020 Sprint 4; ADR-0039 S3 K-of-N).
+///
+/// The bundle is stored as the concatenation of its fixed [`WITNESS_COSIG_LEN`]
+/// co-signatures (the caller guarantees each is exactly that length), which
+/// [`chunk_cosigs`] splits back unambiguously on load.
 async fn persist_witnessed(
     pool: &MySqlPool,
     tree_root: &TreeHash,
     log_size: u64,
-    cosig: &[u8],
+    cosigs: &[Vec<u8>],
 ) -> Result<(), sqlx::Error> {
+    let blob: Vec<u8> = cosigs.concat();
     sqlx::query(
-        "INSERT INTO witnessed_root (id, tree_root, log_size, cosig) VALUES (1, ?, ?, ?) \
+        "INSERT INTO witnessed_root (id, tree_root, log_size, cosigs) VALUES (1, ?, ?, ?) \
          ON DUPLICATE KEY UPDATE tree_root = VALUES(tree_root), \
-         log_size = VALUES(log_size), cosig = VALUES(cosig)",
+         log_size = VALUES(log_size), cosigs = VALUES(cosigs)",
     )
     .bind(&tree_root[..])
     .bind(log_size)
-    .bind(cosig)
+    .bind(blob)
     .execute(pool)
     .await
     .map(|_| ())
 }
 
-/// Load the persisted witnessed root, if any (ADR-0020 Sprint 4).
+/// Load the persisted witnessed root bundle, if any (ADR-0020 Sprint 4;
+/// ADR-0039 S3 K-of-N). A pre-S3 single-cosig row (105 bytes) chunks to a
+/// one-element bundle, so an existing DB restores transparently.
 async fn load_witnessed(pool: &MySqlPool) -> Result<Option<Witnessed>, StoreError> {
     let row: Option<(Vec<u8>, u64, Vec<u8>)> =
-        sqlx::query_as("SELECT tree_root, log_size, cosig FROM witnessed_root WHERE id = 1")
+        sqlx::query_as("SELECT tree_root, log_size, cosigs FROM witnessed_root WHERE id = 1")
             .fetch_optional(pool)
             .await?;
-    Ok(row.map(|(tree_root, log_size, cosig)| Witnessed {
-        tree_root: clamp_hash(&tree_root),
-        log_size,
-        cosig,
+    Ok(row.map(|(tree_root, log_size, blob)| {
+        if blob.len() % WITNESS_COSIG_LEN != 0 {
+            // We only ever write whole multiples; a remainder is DB corruption.
+            tracing::warn!(
+                blob_len = blob.len(),
+                "persisted witness cosig bundle length is not a multiple of the cosig size — \
+                 trailing bytes ignored"
+            );
+        }
+        Witnessed {
+            tree_root: clamp_hash(&tree_root),
+            log_size,
+            cosigs: chunk_cosigs(&blob),
+        }
     }))
+}
+
+/// Split a persisted concatenated cosig bundle back into individual fixed
+/// [`WITNESS_COSIG_LEN`] co-signatures. A trailing partial chunk (only possible
+/// under DB corruption — we only ever write whole multiples) is dropped.
+fn chunk_cosigs(blob: &[u8]) -> Vec<Vec<u8>> {
+    blob.chunks_exact(WITNESS_COSIG_LEN)
+        .map(<[u8]>::to_vec)
+        .collect()
+}
+
+/// Map the loaded `witness_high_water` rows to a positional base vector of length
+/// `n` — index `i` is witness `i`'s last-co-signed `log_size`, `0` (the genesis
+/// base, exactly the pre-S3 first-cosig posture) for a witness with no row. A row
+/// whose `witness_index >= n` (the configured witness list shrank) is ignored.
+///
+/// This base is the per-witness catch-up start (ADR-0039 S3b): witness `i`'s
+/// consistency proof is built from `bases[i]`, NEVER a single shared base, so a
+/// witness that fell behind during a partial-success round is caught up from its
+/// OWN position and is never permanently stranded.
+fn high_water_bases(rows: &[(u32, u64)], n: usize) -> Vec<u64> {
+    let mut bases = vec![0u64; n];
+    for &(idx, size) in rows {
+        if let Some(slot) = usize::try_from(idx).ok().and_then(|i| bases.get_mut(i)) {
+            *slot = size;
+        }
+    }
+    bases
+}
+
+/// Load the per-witness catch-up bases (ADR-0039 S3b): a positional `Vec<u64>` of
+/// length `witness_count`, index `i` = witness `i`'s last-co-signed `log_size`
+/// (`0` for a witness with no row). Reads only `(witness_index, log_size)` — the
+/// `tree_root` is persisted for completeness but the proof base needs only the
+/// size (the sub-tree root at that size is recomputed from the current tree).
+async fn load_witness_high_water_sizes(
+    pool: &MySqlPool,
+    witness_count: usize,
+) -> Result<Vec<u64>, sqlx::Error> {
+    let rows: Vec<(u32, u64)> =
+        sqlx::query_as("SELECT witness_index, log_size FROM witness_high_water")
+            .fetch_all(pool)
+            .await?;
+    Ok(high_water_bases(&rows, witness_count))
+}
+
+/// UPSERT witness `witness_index`'s high-water to `(tree_root, log_size)` — the
+/// head it just successfully co-signed (ADR-0039 S3b). Called ONLY on a
+/// successful cosign; a failed witness's row is left untouched so its next proof
+/// is built from its own still-old base and it auto-rejoins.
+async fn persist_witness_high_water(
+    pool: &MySqlPool,
+    witness_index: u32,
+    tree_root: &TreeHash,
+    log_size: u64,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO witness_high_water (witness_index, tree_root, log_size) VALUES (?, ?, ?) \
+         ON DUPLICATE KEY UPDATE tree_root = VALUES(tree_root), log_size = VALUES(log_size)",
+    )
+    .bind(witness_index)
+    .bind(&tree_root[..])
+    .bind(log_size)
+    .execute(pool)
+    .await
+    .map(|_| ())
 }
 
 #[cfg(test)]
@@ -671,6 +863,245 @@ mod tests {
     async fn proof_out_of_bounds_errors() {
         let store = LogStore::from_log(InMemoryLog::new(signing::SigningKey::generate()));
         assert!(matches!(store.proof(0).await, Err(StoreError::Log(_))));
+    }
+
+    /// ADR-0039 S3 — the fixed-`WITNESS_COSIG_LEN` bundle persistence framing
+    /// round-trips: concatenating a K-cosig bundle and chunking it back yields
+    /// the same K co-signatures (this is the exact `persist_witnessed` /
+    /// `load_witnessed` blob encoding, tested without a DB).
+    #[test]
+    fn cosig_bundle_concat_chunk_round_trips() {
+        // Zero, one, and several fixed-length cosigs.
+        for k in [0usize, 1, 3, 7] {
+            let bundle: Vec<Vec<u8>> = (0..k)
+                .map(|i| vec![u8::try_from(i).unwrap_or(0); WITNESS_COSIG_LEN])
+                .collect();
+            let blob = bundle.concat();
+            assert_eq!(blob.len(), k * WITNESS_COSIG_LEN);
+            assert_eq!(chunk_cosigs(&blob), bundle, "k={k}");
+        }
+    }
+
+    /// ADR-0039 S3 — a trailing partial chunk (only reachable under DB
+    /// corruption) is dropped rather than panicking or mis-framing.
+    #[test]
+    fn chunk_cosigs_drops_a_trailing_partial() {
+        let mut blob = vec![0xABu8; WITNESS_COSIG_LEN];
+        blob.extend_from_slice(&[0xCD; 5]); // a stray partial chunk
+        let got = chunk_cosigs(&blob);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].len(), WITNESS_COSIG_LEN);
+    }
+
+    /// ADR-0039 S3 — the dormant (no-witness) fan-out path serves an EMPTY
+    /// bundle and never touches the DB. Uses a lazy pool (never connected)
+    /// because the empty-witness branch returns before any query.
+    #[tokio::test]
+    async fn root_with_cosig_dormant_returns_empty_bundle() {
+        use sqlx::mysql::MySqlPoolOptions;
+
+        let mut log = InMemoryLog::new(signing::SigningKey::generate());
+        for i in 0..4 {
+            log.append(make_entry(&format!("u{i}"), 1));
+        }
+        let store = LogStore::from_log(log);
+
+        // `connect_lazy` does not open a connection; the empty-witness path
+        // returns before any query, so no live DB is needed.
+        let pool = MySqlPoolOptions::new()
+            .connect_lazy("mysql://unused:unused@127.0.0.1:1/unused")
+            .expect("lazy pool from a well-formed URL");
+
+        let (root, cosigs) = store.root_with_cosig(&pool, &[], 1_700_000_000).await;
+        assert!(cosigs.is_empty(), "no witness configured -> empty bundle");
+        root.verify(&store.operator_verifying_key().await)
+            .expect("root still verifies under the operator key");
+    }
+
+    /// ADR-0039 S3b — `high_water_bases` maps `witness_high_water` rows to a
+    /// positional catch-up base vector. A witness with no row starts at the
+    /// genesis base 0 (the pre-S3 first-cosig posture); an out-of-range index (a
+    /// shrunk witness list) is ignored. When NO witness is behind — the
+    /// N=1-unchanged and all-witnesses-up cases — every base equals the common
+    /// last-co-signed size, so the fan-out behaves exactly like the pre-S3 single
+    /// shared base (backward-compat).
+    #[test]
+    fn high_water_bases_maps_rows_positionally() {
+        // Empty table -> all bases at the genesis base 0 (fresh witnesses).
+        assert_eq!(high_water_bases(&[], 3), vec![0, 0, 0]);
+
+        // N=1 unchanged: the single witness's base is its own high-water — the
+        // same value the pre-S3 shared base held. A fresh single witness starts
+        // at the genesis base 0 (the pre-S3 first-cosig posture).
+        assert_eq!(high_water_bases(&[(0, 7)], 1), vec![7]);
+        assert_eq!(high_water_bases(&[], 1), vec![0]);
+
+        // All-up happy path: every witness advanced together to the same head,
+        // so every base is identical (== a single shared base).
+        assert_eq!(
+            high_water_bases(&[(0, 10), (1, 10), (2, 10)], 3),
+            vec![10, 10, 10]
+        );
+
+        // A witness that fell behind keeps its OWN lower base while the others
+        // are ahead — exactly the anti-stranding state.
+        assert_eq!(high_water_bases(&[(0, 7), (1, 4)], 2), vec![7, 4]);
+
+        // A missing row defaults to 0; an out-of-range index (list shrank) is
+        // ignored.
+        assert_eq!(high_water_bases(&[(2, 9)], 3), vec![0, 0, 9]);
+        assert_eq!(high_water_bases(&[(5, 9)], 3), vec![0, 0, 0]);
+    }
+
+    /// ADR-0039 S3b — the anti-stranding regression proof (pure, real merkle).
+    ///
+    /// The S3 shared-base fan-out advanced ONE base whenever ANY witness
+    /// co-signed, permanently stranding a witness that was down during a
+    /// partial-success round (its own high-water fell behind the shared base it
+    /// was thereafter proved from, so `verify_consistency` could never pass
+    /// again). The per-witness catch-up sends EACH witness a proof from ITS OWN
+    /// high-water, so a previously-down witness rejoins.
+    ///
+    /// Model: witness A + witness B both co-sign at size 4 (round 0). Round 1
+    /// grows to 7 with B DOWN — A advances to 7, B stays at 4. Round 2 grows to
+    /// 11 with both up. The per-witness bases are then `[7, 4]`
+    /// (`high_water_bases` confirms), and B is handed a proof from ITS OWN base 4
+    /// → it verifies. The contrast: the OLD shared base (7, advanced past B by A)
+    /// would hand B a proof from 7, which B — still at high-water 4 — REJECTS.
+    #[test]
+    fn per_witness_catch_up_does_not_strand_a_down_witness() {
+        use lakko_transparency::verify_consistency;
+
+        let ts = 1_700_000_000;
+        let mut log = InMemoryLog::new(signing::SigningKey::generate());
+
+        // Grow to size 4 and capture root@4 (the round-0 base both witnesses
+        // co-signed).
+        for i in 0..4 {
+            log.append(make_entry(&format!("u{i}"), 1));
+        }
+        let root_at_4 = log.sign_current_root(ts).tree_root;
+
+        // Grow to size 7 and capture root@7 (round 1: A advances here, B is down).
+        for i in 4..7 {
+            log.append(make_entry(&format!("u{i}"), 1));
+        }
+        let root_at_7 = log.sign_current_root(ts).tree_root;
+
+        // Grow to size 11 and capture root@11 (round 2 head).
+        for i in 7..11 {
+            log.append(make_entry(&format!("u{i}"), 1));
+        }
+        let root_at_11 = log.sign_current_root(ts).tree_root;
+
+        // After round 1: A advanced to 7, B (down) still at 4. The per-witness
+        // bases the fan-out uses in round 2 are exactly [7, 4].
+        let bases = high_water_bases(&[(0, 7), (1, 4)], 2);
+        assert_eq!(bases, vec![7, 4]);
+
+        // Round 2 per-witness proofs, each from that witness's OWN base.
+        let proof_a = log.consistency_proof(bases[0]); // 7 -> 11
+        let proof_b = log.consistency_proof(bases[1]); // 4 -> 11
+
+        // A (high-water 7) accepts its 7 -> 11 proof.
+        assert!(
+            verify_consistency(7, &root_at_7, 11, &root_at_11, &proof_a),
+            "witness A catches up from its own base"
+        );
+        // B (high-water 4) accepts its 4 -> 11 proof — it is NOT stranded.
+        assert!(
+            verify_consistency(4, &root_at_4, 11, &root_at_11, &proof_b),
+            "the previously-down witness rejoins from its OWN base"
+        );
+
+        // The bug the fix avoids: the S3 shared base (7) would prove B from 7,
+        // but B is still at high-water 4 — `verify_consistency` against B's real
+        // (root@4, size 4) high-water with a proof built from 7 REJECTS, i.e. B
+        // would be permanently stranded.
+        assert!(
+            !verify_consistency(4, &root_at_4, 11, &root_at_11, &proof_a),
+            "a proof from the SHARED base strands the witness that stayed behind"
+        );
+    }
+
+    /// ADR-0039 S3b — the per-witness high-water persist/load round-trip. Upsert
+    /// witness rows, reload the positional base vector, and assert a re-upsert
+    /// advances only that witness (leaving a down witness's base behind). DB-gated
+    /// on `LAKKO_TRANSPARENCY_TEST_DATABASE_URL` (skips, does not fail, when
+    /// unset).
+    #[tokio::test]
+    async fn witness_high_water_persist_load_round_trips() {
+        use sqlx::mysql::MySqlPoolOptions;
+
+        let Ok(url) = std::env::var("LAKKO_TRANSPARENCY_TEST_DATABASE_URL") else {
+            eprintln!(
+                "skipping witness_high_water_persist_load_round_trips: \
+                 LAKKO_TRANSPARENCY_TEST_DATABASE_URL unset"
+            );
+            return;
+        };
+
+        let pool = MySqlPoolOptions::new()
+            .max_connections(4)
+            .connect(&url)
+            .await
+            .expect("connect test DB");
+        crate::MIGRATIONS.run(&pool).await.expect("run migrations");
+        sqlx::query("DELETE FROM witness_high_water")
+            .execute(&pool)
+            .await
+            .expect("clear witness_high_water");
+
+        let root_a = [0xA1u8; 32];
+        let root_b = [0xB2u8; 32];
+
+        // No rows yet -> all bases at the genesis base 0.
+        assert_eq!(
+            load_witness_high_water_sizes(&pool, 3)
+                .await
+                .expect("load empty"),
+            vec![0, 0, 0]
+        );
+
+        // Advance witness 0 -> 5 and witness 2 -> 8; witness 1 stays behind.
+        persist_witness_high_water(&pool, 0, &root_a, 5)
+            .await
+            .expect("persist w0");
+        persist_witness_high_water(&pool, 2, &root_a, 8)
+            .await
+            .expect("persist w2");
+        assert_eq!(
+            load_witness_high_water_sizes(&pool, 3)
+                .await
+                .expect("load partial"),
+            vec![5, 0, 8]
+        );
+
+        // A re-upsert advances only witness 0 (to 9), leaving the others.
+        persist_witness_high_water(&pool, 0, &root_b, 9)
+            .await
+            .expect("re-upsert w0");
+        assert_eq!(
+            load_witness_high_water_sizes(&pool, 3)
+                .await
+                .expect("load advanced"),
+            vec![9, 0, 8]
+        );
+
+        // A shorter witness_count truncates the vector (an out-of-range row is
+        // ignored on load).
+        assert_eq!(
+            load_witness_high_water_sizes(&pool, 1)
+                .await
+                .expect("load n=1"),
+            vec![9]
+        );
+
+        sqlx::query("DELETE FROM witness_high_water")
+            .execute(&pool)
+            .await
+            .expect("clear witness_high_water");
+        pool.close().await;
     }
 
     /// KT-log S2 decision B — the store ASSIGNS the version monotonically
