@@ -418,10 +418,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "lakko-attest"
+version = "0.0.0"
+dependencies = [
+ "lakko-crypto",
+ "thiserror",
+]
+
+[[package]]
 name = "lakko-backup"
 version = "0.0.0"
 dependencies = [
  "getrandom 0.2.17",
+ "lakko-attest",
  "lakko-crypto",
  "rand",
  "thiserror",

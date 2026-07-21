@@ -166,8 +166,29 @@ pub enum FfiError {
     /// elision posture as the rest: wrong recovery phrase,
     /// tampered envelope bytes, malformed payload, wrong-length
     /// account_id / ed25519_seed inputs — all collapse here.
+    /// Also carries the **hard fail-closed** class of backup-head
+    /// verify failures (ADR-0037): a malformed / bad-length /
+    /// bad-version head, a signature that does not verify, an
+    /// `account_id` mismatch, or an `envelope_hash` mismatch —
+    /// all unambiguous tamper / corruption signals with no
+    /// legitimate cause, so no user override.
     #[error("backup error: {0}")]
     Backup(String),
+
+    /// A backup head verified *authentically* but its `signed_at`
+    /// falls outside the client's freshness window (ADR-0037 §6,
+    /// G-11). Kept DISTINCT from [`FfiError::Backup`] so a
+    /// restoring client can treat staleness as a
+    /// **user-acknowledged override** ("this backup is older than
+    /// expected — restore anyway?") rather than a hard
+    /// fail-closed refusal: a stale head is indistinguishable from
+    /// a rollback replay (so the default is refuse, invariant #4)
+    /// but a genuinely long-dormant user holds a real stale latest
+    /// head, so the downgrade is offered behind deliberate human
+    /// consent. Every other backup-head failure stays
+    /// [`FfiError::Backup`] (hard fail-closed).
+    #[error("backup head is stale (signed_at outside the freshness window)")]
+    BackupHeadStale,
 
     /// Channel post / subscribe envelope error (Phase 4 G4-2-
     /// crypto). Same elision posture: wrong-length seed,

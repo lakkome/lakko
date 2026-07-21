@@ -63,6 +63,7 @@
 pub mod chain;
 pub mod envelope;
 pub mod error;
+pub mod head_frame;
 pub mod payload;
 
 pub use chain::{
@@ -71,4 +72,7 @@ pub use chain::{
 };
 pub use envelope::{open, seal, ENVELOPE_DOMAIN_V1, SALT_LEN, SCHEMA_VERSION};
 pub use error::{BackupError, Result};
+pub use head_frame::{
+    frame_backup_blob, parse_backup_blob, BackupBlob, HeadFrameError, BACKUP_CONTAINER_TAG,
+};
 pub use payload::{AcceptedContactRecord, BackupPayload, PAYLOAD_VERSION};

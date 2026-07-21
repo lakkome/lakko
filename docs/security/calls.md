@@ -2785,6 +2785,84 @@ property (the witness must run in a different trust domain). Two
 fuzz targets cover the new surfaces (`verify_consistency`,
 `verify_witness_cosig`). `lakko-security`: **APPROVE-WITH-NOTES**.
 
+### C-58: A backup rollback is detected by an auth-signed backup-head commitment
+
+G-11 ([ADR-0037](../adr/0037-backup-head-rollback-commitment.md))
+closes the backup-rollback gap: an active attacker who controls the
+storage tier could hand a restoring client an *older* backup blob,
+which opens cleanly under the same recovery phrase, so nothing a
+client ran authenticated "this blob is the current head". An
+auth-signed **backup head** minted on every upload and verified on
+every restore now does.
+
+Five sub-invariants:
+
+1. **The head is a domain-separated, fixed-layout commitment.**
+   `BackupHead` (`crates/lakko-attest/src/backup_head.rs`) is a
+   129-byte Ed25519 blob binding
+   `(account_id, backup_version, envelope_hash, signed_at)`, domain
+   `lakko/backup-head/v1`. A shared-key three-way domain-crossing
+   test proves it is cryptographically non-interchangeable with the
+   `device-attest/v1` and `genesis-attest/v1` kinds even under the
+   ONE attest signing key it reuses (ADR-0037 §3).
+
+2. **A signature proves authentic, not current — two mechanisms
+   bridge the gap.** (a) The **`backup_version`** is an
+   auth-assigned, per-account, strictly-monotone counter, minted at
+   `POST /auth/backup/head` (bearer-authed + STATEFUL — the
+   `backup_head_versions` table, migration `0015`, read-bumped in
+   one transaction). It is never client-supplied, so a regression is
+   structurally impossible; a **returning client** refuses any head
+   below a device-key-encrypted `last_known_version` floor (HARD, no
+   window). (b) The signed **`signed_at`** mint timestamp (Unix
+   millis) lets a **zero-anchor fresh install** — which has no floor
+   — fall back to a client-side staleness window (default 30 days).
+
+3. **The head + envelope swap atomically.** The head rides as a
+   `0xB1` container-tag prefix of the single storage blob
+   (`crates/lakko-backup/src/head_frame.rs` `frame_backup_blob` /
+   `parse_backup_blob`, byte-0 discriminator), so one atomic `PUT`
+   swaps head and envelope together — a separate head object could
+   not be swapped atomically over HTTP and would leave a torn window
+   that bricks a legitimate restore. `services/storage` is untouched
+   (invariant #2 — the tag + head are more opaque bytes).
+
+4. **The restore gate is a three-case fail-open/closed policy.**
+   `verify_backup_head` (full: signature + `account_id` +
+   `envelope_hash` + freshness) / `verify_backup_head_binding`
+   (binding only) are FFI-exposed with a discriminable
+   `BackupHeadStale` vs `Backup` / `invalid:` error; the three
+   clients (`head-gate.ts` / `BackupHeadGate.swift` / `HeadGate.kt`,
+   12 gate tests each) apply: **absent** (byte 0 ≠ `0xB1`, legacy /
+   stripped) → **fail-open**; **invalid** (bad signature / account /
+   envelope-hash, or a framed-but-truncated blob) → **hard
+   fail-closed**; **stale** (below floor or over window) →
+   **fail-closed with an explicit user-acknowledged override**.
+
+5. **The absent-head fail-open is scoped to rollback-detection.**
+   It is the deliberate availability exception (mirroring the
+   ADR-0033 throttle) so a legacy / pre-rollout blob still restores;
+   crucially it is on the rollback-detection layer only — the
+   envelope is AEAD-sealed under the recovery phrase regardless of
+   the head, so invariant #4 (no silent downgrade to non-E2EE) is
+   untouched (confidentiality + content integrity never depend on
+   the head).
+
+Invariants: #1 (the head carries only `account_id`, a `BLAKE3` of
+ciphertext, a monotone integer, a timestamp; the counter table
+stores only `(account_id, version)` — no PII), #2 (storage + auth
+both opaque to key material — auth persists only a counter), #4
+(fail-closed, scoped as above). Residual: a within-window replay of
+a genuine old head is uncaught for a **true zero-anchor fresh
+install only** (any client that ever persisted a floor is
+hard-protected); the tightening path (auth serving a trusted
+current-version marker on restore) is declined for single-fetch
+simplicity, and the dormant v2 chain stays out of scope. Two fuzz
+targets cover the new attacker surfaces
+(`lakko-attest/backup_head_open` — the head bytes are a prefix of a
+storage blob a hostile tier crafts; `lakko-backup/backup_blob_parse`
+— the container framing). Closes G-11 in practice.
+
 ## Exporter labels (call-side)
 
 | Label | Length | Context | Source | Used for |

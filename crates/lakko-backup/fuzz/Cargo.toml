@@ -38,3 +38,16 @@ path = "fuzz_targets/envelope_v2_open.rs"
 test = false
 doc = false
 bench = false
+
+# The ADR-0037 §4 container-framing discriminator. A malicious
+# storage tier crafts the whole backup blob, so `parse_backup_blob`
+# peeks fully attacker-controlled bytes on the restore path before
+# any head verification or AEAD-open. A panic / overflow on a
+# hostile length is a vulnerability on the fresh-install
+# rollback-defence path.
+[[bin]]
+name = "backup_blob_parse"
+path = "fuzz_targets/backup_blob_parse.rs"
+test = false
+doc = false
+bench = false

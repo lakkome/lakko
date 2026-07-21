@@ -111,6 +111,7 @@ import { rehydrateMlsState } from "../chat/rehydrate";
 import { subscribeToPush, unsubscribeFromPush } from "../push/subscribe";
 import { bootstrapBackupFromPhraseString } from "../backup/bootstrap";
 import { deletePhrase } from "../backup/phrase-store";
+import { deleteFloor } from "../backup/floor-store";
 import { restoreFromServerBackupFromPhraseString } from "../backup/restore";
 import type { Identity as WasmIdentity } from "../../wasm/lakko_ffi_wasm";
 
@@ -2293,10 +2294,49 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
           let restoredSnapshot: Uint8Array = new Uint8Array(0);
           try {
             const restored = await restoreFromServerBackupFromPhraseString(
-              { sessionToken: result.sessionToken },
+              {
+                sessionToken: result.sessionToken,
+                // ADR-0037 §6: arm the rollback gate — verify the auth-signed
+                // backup head against the pinned attest key before trusting
+                // the served envelope. Fresh install (no floor) → freshness
+                // window; a returning device with a persisted floor → hard
+                // monotonic floor. A stale head prompts the user; a tampered
+                // head refuses outright.
+                gate: {
+                  accountId: accountIdBytes,
+                  accountIdB64,
+                  deviceKey,
+                },
+              },
               mnemonicPhrase,
             );
-            if (restored.kind === "restored") {
+            if (restored.kind === "rollback-blocked") {
+              // ADR-0037 §6: refuse + alarm. `hard` = an unambiguous tamper /
+              // corruption; non-hard = the user was offered the stale override
+              // and declined. Either way we do NOT load the served state.
+              if (restored.hard) {
+                // eslint-disable-next-line no-console
+                console.error(
+                  "restoreFromServerBackup BLOCKED a rolled-back / tampered " +
+                    "backup (recover):",
+                  restored.reason,
+                );
+                if (typeof window !== "undefined" && typeof window.alert === "function") {
+                  window.alert(
+                    "We could not safely restore your backup — the server " +
+                      "returned an altered or outdated backup. Your account " +
+                      "is safe; continuing without restoring the older data.",
+                  );
+                }
+              } else {
+                // eslint-disable-next-line no-console
+                console.warn(
+                  "restoreFromServerBackup: user declined a stale backup " +
+                    "(recover):",
+                  restored.reason,
+                );
+              }
+            } else if (restored.kind === "restored") {
               if (restored.wholeStorageSnapshot.length > 0) {
                 // Apply to the freshly-derived canonical Identity
                 // so the new device lands with the same MLS group
@@ -2585,6 +2625,14 @@ export function AuthProvider(props: { children: JSX.Element }): JSX.Element {
         // "leave nothing per-account behind" contract.
         try {
           await deletePhrase(cached.accountIdB64);
+        } catch {
+          // best-effort
+        }
+        // ADR-0037: drop the cached backup-head version floor. Wrapped under
+        // the same device-root key that's now gone, so a stale row would
+        // confuse a future returning-client restore on the same accountId.
+        try {
+          await deleteFloor(cached.accountIdB64);
         } catch {
           // best-effort
         }

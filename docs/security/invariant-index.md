@@ -13,10 +13,10 @@ section that describes it.
 | Class | Count | Range | Source file |
 |---|---|---|---|
 | **I-** | 8   | I-1..I-8   | [`mls-state-machine.md`](./mls-state-machine.md) |
-| **C-** | 57  | C-1..C-57  | [`calls.md`](./calls.md) |
+| **C-** | 58  | C-1..C-58  | [`calls.md`](./calls.md) |
 | **T-** | 15  | T-1..T-15  | [`transport.md`](./transport.md) |
 | **G-** | 27  | G-1..G-27 (G-28 closed via the G3-sframe-native arc N-1..N-6) | [`known-gaps.md`](./known-gaps.md) — open / deferred |
-| Total invariants  | 80  | (I + C + T) | live properties |
+| Total invariants  | 81  | (I + C + T) | live properties |
 | Total open gaps   | 27  | (G)         | tracked + scoped |
 
 ## MLS state machine invariants (I-1..I-8)
@@ -37,7 +37,7 @@ in `crates/lakko-mls/`.
 | I-7 | Opening a `SealedBundle` with an unknown `algorithm` discriminator is rejected before AEAD-open is attempted | Forward-compat ratchet |
 | I-8 | `create_devicegroup_message` round-trips through `parse_devicegroup_payload` losslessly for every typed body variant | Wire-format byte-stability |
 
-## Call-side invariants (C-1..C-57)
+## Call-side invariants (C-1..C-58)
 
 Source: [`calls.md`](./calls.md). Five sub-sections —
 media-key pipeline (C-1..C-14), call-admission JWT
@@ -171,6 +171,12 @@ SFU multi-party client SFrame coverage).
 |---|---|
 | C-57 | An operator root is trusted by a client only when it carries BOTH the operator signature AND a valid co-signature from a build-time-pinned, independent witness. The witness (`services/witness`) co-signs a root ONLY after verifying a Merkle consistency proof (RFC 6962 §2.1.2, `crates/lakko-transparency/src/merkle.rs` `verify_consistency` — reconstructs both roots) that it append-only-extends the witness's last-co-signed root; two divergent forks cannot both extend one root, so the operator cannot fork alone (the honest witness refuses → 409). The cosig is a 105-byte blob (`version ‖ tree_root(32) ‖ log_size(8 BE) ‖ sig(64)`, domain `lakko/transparency/witness/v1`, distinct from the operator root sig); the FFI is verify-only (`verify_witness_cosig` — signing stays server-side). All three clients run `witnessGateRefuses` immediately after the no-rollback gate in `verifyIdentityInLog` + `verifyRotationChain`: missing/invalid cosig → `mismatch` (fail-closed, invariant #4); no pinned witness key → operator-only transition posture. `services/transparency` co-signs-on-read (fresh head-root sig, cached cosig keyed on `(tree_root, log_size)`, re-obtained only on growth; witness unreachable → serve None, never stale). Strengthens invariant #4 (root gate needs operator AND witness) + #6 (rotation anchored to a non-forkable root). The cosig + consistency proof are public artefacts over public roots (invariant #2); the witness persists only roots/sizes, never accounts (invariant #5). Closes G-30 finding 1 for the single-witness model. Residual: operator+witness collusion (K-of-N a config slot for later) + independence-as-deploy-property. Fuzz: `verify_consistency` + `verify_witness_cosig`. `lakko-security` APPROVE-WITH-NOTES |
 
+### C-58 — Auth-signed backup-head rollback commitment (G-11, ADR-0037)
+
+| ID   | Title |
+|---|---|
+| C-58 | A storage-tier backup **rollback** (serving a restoring client an older, cleanly-opening envelope) is detected by an auth-signed **backup head** committed atomically inside the one opaque storage blob. `BackupHead` (`crates/lakko-attest/src/backup_head.rs`) is a 129-byte fixed-layout Ed25519 blob binding `(account_id, backup_version, envelope_hash, signed_at)`, domain `lakko/backup-head/v1` (distinct from `device-attest/v1` + `genesis-attest/v1`; a three-way domain-crossing test proves the kinds are non-interchangeable even under the shared attest signing key). A signature proves the head **authentic**, not **current** — two mechanisms turn authenticity into a rollback defence: (a) an **auth-assigned, per-account, strictly-monotone `backup_version`** minted at `POST /auth/backup/head` (bearer-authed + STATEFUL — the `backup_head_versions` counter table, migration `0015`, read-bumped in one transaction via the MariaDB `LAST_INSERT_ID` idiom; never client-supplied, so a regression is structurally impossible) that a **returning client** refuses to go below via a device-key-encrypted `last_known_version` floor (HARD, no window); and (b) a signed **`signed_at`** mint timestamp (Unix millis) a **zero-anchor fresh install** bounds with a client-side staleness window (default 30 days). The head rides as a `0xB1` container-tag prefix of the single storage blob (`crates/lakko-backup/src/head_frame.rs` `frame_backup_blob` / `parse_backup_blob`), so head + envelope swap together in one atomic `PUT` — no torn-state window, no `services/storage` change (invariant #2: the tag + head are more opaque bytes below the storage tier). The three-client restore gate (`verify_backup_head` full / `verify_backup_head_binding`, FFI-exposed with a discriminable `BackupHeadStale` vs `Backup` / `invalid:` error) applies a three-case policy: **absent** (byte 0 ≠ `0xB1` — legacy / stripped) → **fail-open** (rollback-detection availability only — the envelope stays phrase-AEAD sealed regardless, so invariant #4's no-silent-downgrade-to-non-E2EE never depends on the head); **invalid** (bad signature / account / envelope-hash, or a framed-but-truncated blob) → **hard fail-closed**; **stale** (below the floor, or over the window) → **fail-closed with an explicit user-acknowledged override**. Invariants: #1 (the head carries only `account_id`, a `BLAKE3` of ciphertext, a monotone integer, a timestamp; the counter table stores only `(account_id, version)` — no PII), #2 (storage + auth both opaque to key material — auth persists only a counter), #4 (fail-closed, scoped to the rollback-detection layer). Residual: a within-window replay of a genuine old head is uncaught for a **true zero-anchor fresh install only** (any client that ever persisted a floor is hard-protected); the tightening path (auth serving a trusted current-version marker on restore) is declined for single-fetch simplicity; the dormant v2 chain (`lakko-backup::chain`) stays out of scope. Closes G-11 in practice. Fuzz: `backup_head_open` (`lakko-attest`) + `backup_blob_parse` (`lakko-backup`) |
+
 ## Transport-layer invariants (T-1..T-11)
 
 Source: [`transport.md`](./transport.md). Anti-censorship
@@ -229,7 +235,7 @@ should not re-discover them.
 | ID   | Title |
 |---|---|
 | G-10 | Backup envelope rotation on password change happens on the next baseline write, not the recover round-trip itself |
-| G-11 | No tamper-evident chain across backup versions — **client-with-state case CLOSED** by `lakko-backup::chain` v2 envelope; fresh-install case still open (needs KT-log anchor) |
+| G-11 | No tamper-evident chain across backup versions — **CLOSED IN PRACTICE (ADR-0037)** by the auth-signed backup head (C-58): returning-client rollback HARD-closed by the monotone version floor, fresh-install BOUNDED by the freshness window; the v2 chain the prior claim credited was dormant. Residual: within-window zero-anchor replay |
 
 ### Auth
 

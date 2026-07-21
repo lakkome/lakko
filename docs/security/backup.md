@@ -74,7 +74,7 @@ successful PUT. A future sprint adds versioning / history
 if rolling back to a prior backup turns out to be a real
 need.
 
-### Tamper-evident chain (v2 envelopes — G-11 partial close)
+### Tamper-evident chain (v2 envelopes — dormant; G-11 closed by ADR-0037)
 
 [`crates/lakko-backup/src/chain.rs`](../../crates/lakko-backup/src/chain.rs)
 adds an opt-in **v2 envelope shape** that carries a
@@ -95,23 +95,33 @@ public commitment. The header is AAD-bound so a server
 trying to edit either field hits a clean AEAD-open
 failure on the next `open_v2`.
 
-**What this defends against.** A client that persisted
-`(last_known_version, last_known_envelope_hash)` in its
-device-key-encrypted local storage catches any
-server-side rollback (server returns v(N-5) instead of
-v(N)) on the next restore: the returned version is too
-low OR the chain audit fails against the local anchor.
+**What this defends against (in principle).** A client
+that persisted `(last_known_version,
+last_known_envelope_hash)` in its device-key-encrypted
+local storage would catch any server-side rollback
+(server returns v(N-5) instead of v(N)) on the next
+restore: the returned version is too low OR the chain
+audit fails against the local anchor.
 
-**What this does NOT defend against.** A fresh install
-restoring from scratch with only the recovery phrase
-has no way to tell whether the returned envelope is the
-latest — both phrase-derived KEKs verify cleanly, the
-chain header binds only to the *previous* envelope, not
-to a global "is this the head" commitment. Closing the
-fresh-install case requires a separate out-of-band
-signed timestamp (e.g., a KT-log entry). Tracked in
-[`known-gaps.md`](./known-gaps.md) G-11 as "still open
-for the fresh-install case".
+**Status: dormant, superseded for rollback by
+[ADR-0037](../adr/0037-backup-head-rollback-commitment.md).**
+The v2 chain is exposed on no FFI surface, and no client
+persists the anchor or calls `verify_chain`, so it never
+closed the rollback gap on a deployed path. The rollback
+defence that actually ships is the **auth-signed
+backup-head commitment** (ADR-0037): an auth-assigned,
+per-account, strictly-monotone `backup_version` a
+returning client refuses to go below (a HARD floor — the
+client-with-state case, closed) plus a signed `signed_at`
+mint timestamp a true zero-anchor fresh install bounds
+with a client-side staleness window (the fresh-install
+case, bounded). Both cases are now closed **in practice**;
+the residual is a within-window replay of a genuine old
+head for a true zero-anchor fresh install only. The v2
+chain stays dormant — its distinct sequence-audit
+(forensics) role is a separate concern. Tracked in
+[`known-gaps.md`](./known-gaps.md) G-11 (closed in
+practice) + C-58 in the invariant index.
 
 ### Recover
 

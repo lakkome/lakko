@@ -5,6 +5,7 @@ package me.lakko.app.auth
 
 import android.content.Context
 import android.util.Log
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -131,6 +132,37 @@ public class AuthRepository(
 
     public val identitySecrets: StateFlow<IdentitySecrets?> =
         mutableIdentitySecrets.asStateFlow()
+
+    /**
+     * ADR-0037 §6 (G-11) — non-null while a restore is BLOCKED on the user
+     * deciding whether to accept a STALE backup head (a possible rollback
+     * replay). The restore coroutine (in the recover flow) suspends on
+     * [awaitStaleOverride]; the UI observes this StateFlow, shows a destructive
+     * confirm dialog, and resolves it via [resolveStaleOverride]. NEVER
+     * auto-accepted (invariant #4).
+     */
+    private val mutableStaleOverridePrompt: MutableStateFlow<StaleOverridePrompt?> =
+        MutableStateFlow(null)
+
+    public val staleOverridePrompt: StateFlow<StaleOverridePrompt?> =
+        mutableStaleOverridePrompt.asStateFlow()
+
+    /** The in-flight stale-override decision channel — one at a time (a restore
+     *  is a serial flow). */
+    private val staleOverrideDeferred: AtomicReference<CompletableDeferred<Boolean>?> =
+        AtomicReference(null)
+
+    /**
+     * ADR-0037 §6 (G-11) — non-null when a restore was HARD-refused by the
+     * rollback gate (an unambiguous tamper / corruption of the served backup
+     * head). Surfaced as a dismissible security alarm banner. `null` in the
+     * normal case; the restore proceeds with no backup applied.
+     */
+    private val mutableRollbackAlert: MutableStateFlow<BackupRollbackAlert?> =
+        MutableStateFlow(null)
+
+    public val rollbackAlert: StateFlow<BackupRollbackAlert?> =
+        mutableRollbackAlert.asStateFlow()
 
     /**
      * ADR-0017 fresh-device fail-safe: when a password / passkey
@@ -893,6 +925,8 @@ public class AuthRepository(
                     // persistence sub-sprint.
                     val restoredSnapshot = restoreFromServerBackupBestEffort(
                         sessionToken = result.sessionToken,
+                        accountId = accountIdBytes,
+                        accountIdB64 = accountIdB64,
                         phrase = mnemonicPhrase,
                         context = "recover",
                     )
@@ -1577,6 +1611,44 @@ public class AuthRepository(
     }
 
     /**
+     * ADR-0037 §6 (G-11) — suspend until the user decides whether to accept a
+     * STALE backup head. Publishes the prompt on [staleOverridePrompt] and awaits
+     * the UI's [resolveStaleOverride]. Returns `true` only on an explicit accept.
+     * The `finally` clears the prompt so a cancelled coroutine never leaves a
+     * dangling dialog. Mirror of the web `defaultStaleConfirm` seam — but never a
+     * silent default: with no UI wired the deferred never completes, so the
+     * restore stays blocked rather than auto-accepting (invariant #4).
+     */
+    private suspend fun awaitStaleOverride(reason: String): Boolean {
+        val deferred = CompletableDeferred<Boolean>()
+        staleOverrideDeferred.set(deferred)
+        mutableStaleOverridePrompt.value = StaleOverridePrompt(reason)
+        return try {
+            deferred.await()
+        } finally {
+            mutableStaleOverridePrompt.value = null
+            staleOverrideDeferred.compareAndSet(deferred, null)
+        }
+    }
+
+    /**
+     * ADR-0037 §6 (G-11) — resolve the pending stale-override decision from the
+     * UI's destructive confirm dialog. `accepted = true` proceeds with the older
+     * (verified-authentic) backup; `false` aborts the restore. No-op when no
+     * decision is pending.
+     */
+    public fun resolveStaleOverride(accepted: Boolean) {
+        val deferred = staleOverrideDeferred.getAndSet(null) ?: return
+        mutableStaleOverridePrompt.value = null
+        deferred.complete(accepted)
+    }
+
+    /** Dismiss the backup-rollback hard-refusal alarm banner (ADR-0037 §6). */
+    public fun dismissRollbackAlert() {
+        mutableRollbackAlert.value = null
+    }
+
+    /**
      * ADR-0017 defence-in-depth (lakko-security Phase-3A follow-up (i)) —
      * fire-and-forget self-check kicked off from a warm-login completion:
      * is the account's published AccountIdentity still OURS? A mismatch
@@ -2184,6 +2256,18 @@ public class AuthRepository(
             } catch (_: Throwable) {
                 // best-effort
             }
+            // ADR-0037 (G-11) — drop the backup-head version floor. Its
+            // EncryptedSharedPreferences row is independent of the phrase / key
+            // above; a stale floor would confuse a future signup on the same
+            // accountId. Best-effort.
+            try {
+                me.lakko.app.backup.FloorStore.deleteFloor(
+                    applicationContext,
+                    cached.accountIdB64,
+                )
+            } catch (_: Throwable) {
+                // best-effort
+            }
             // Phase 2a2c2 — drop the cached export key too. Same
             // clean-wipe rationale as the phrase + device-key
             // rows above.
@@ -2277,6 +2361,8 @@ public class AuthRepository(
      */
     private suspend fun restoreFromServerBackupBestEffort(
         sessionToken: String,
+        accountId: ByteArray,
+        accountIdB64: String,
         phrase: String,
         context: String,
     ): ByteArray {
@@ -2284,18 +2370,49 @@ public class AuthRepository(
         val client = me.lakko.app.backup.BackupClient()
         try {
             client.setSessionToken(sessionToken)
-            val parsed = try {
-                client.restore(phraseBytes)
-            } catch (cause: Throwable) {
-                // Wrong phrase / tampered blob / transport failure —
-                // fold into a single log line. The user can still
-                // continue; the bootstrap step will overwrite.
-                Log.w("lakko-auth", "backup restore ($context) failed", cause)
-                return ByteArray(0)
-            }
-            if (parsed == null) {
-                Log.i("lakko-auth", "backup restore ($context): no prior backup")
-                return ByteArray(0)
+            // ADR-0037 §6 (G-11): arm the rollback gate. A HARD refusal alarms +
+            // applies no backup; a STALE head suspends on the user's destructive
+            // confirm (never silent-accept, invariant #4); a clean proceed /
+            // fail-open opens the envelope + advances the monotone floor.
+            val gate = me.lakko.app.backup.RestoreGateContext(
+                accountId = accountId,
+                accountIdB64 = accountIdB64,
+                confirmStaleOverride = { reason -> awaitStaleOverride(reason) },
+            )
+            val parsed = when (
+                val outcome = client.restore(applicationContext, phraseBytes, gate)
+            ) {
+                is me.lakko.app.backup.GatedRestoreOutcome.Restored -> outcome.payload
+                is me.lakko.app.backup.GatedRestoreOutcome.NoBackup -> {
+                    Log.i("lakko-auth", "backup restore ($context): no prior backup")
+                    return ByteArray(0)
+                }
+                is me.lakko.app.backup.GatedRestoreOutcome.WrongPhraseOrTampered -> {
+                    Log.w("lakko-auth", "backup restore ($context): wrong phrase or tampered")
+                    return ByteArray(0)
+                }
+                is me.lakko.app.backup.GatedRestoreOutcome.RollbackBlocked -> {
+                    if (outcome.hard) {
+                        // Unambiguous tamper / corruption — alarm + refuse (no
+                        // backup applied). Raise the dismissible security banner.
+                        Log.e(
+                            "lakko-auth",
+                            "backup restore ($context): ROLLBACK BLOCKED (hard) - ${outcome.reason}",
+                        )
+                        mutableRollbackAlert.value = BackupRollbackAlert(outcome.reason)
+                    } else {
+                        // Stale head the user DECLINED to override.
+                        Log.w(
+                            "lakko-auth",
+                            "backup restore ($context): stale head override declined - ${outcome.reason}",
+                        )
+                    }
+                    return ByteArray(0)
+                }
+                is me.lakko.app.backup.GatedRestoreOutcome.TransportFailed -> {
+                    Log.w("lakko-auth", "backup restore ($context) failed", outcome.cause)
+                    return ByteArray(0)
+                }
             }
             Log.i(
                 "lakko-auth",
@@ -2415,6 +2532,10 @@ public class AuthRepository(
                     phraseBytes = phraseBytes,
                     contacts = contactRecords,
                     wholeStorageSnapshot = wholeStorageSnapshot,
+                    // ADR-0037 (G-11): mint the auth-signed head + persist the
+                    // monotonic version floor under the Keystore-backed store.
+                    context = applicationContext,
+                    accountIdB64 = accountIdB64,
                 )
             } catch (cause: Throwable) {
                 Log.w("lakko-auth", "backup baseline upload ($context) failed", cause)
@@ -2667,6 +2788,27 @@ public enum class IdentityAlert {
      *  the lost-everything path). */
     PublishedIdentityChanged,
 }
+
+/**
+ * ADR-0037 §6 (G-11) — the pending stale-backup-head override request. Surfaced
+ * on [AuthRepository.staleOverridePrompt] while a restore is blocked awaiting the
+ * user's decision; resolved via [AuthRepository.resolveStaleOverride].
+ */
+public data class StaleOverridePrompt(
+    /** Human-readable reason the head was flagged stale, shown in the dialog. */
+    val reason: String,
+)
+
+/**
+ * ADR-0037 §6 (G-11) — a security alarm raised when a restore was HARD-refused
+ * by the rollback gate (an unambiguous tamper / corruption of the served backup
+ * head). Surfaced on [AuthRepository.rollbackAlert] as a dismissible banner; no
+ * backup was applied.
+ */
+public data class BackupRollbackAlert(
+    /** Human-readable reason the head was rejected, shown in the banner. */
+    val reason: String,
+)
 
 /** Account record exposed to the UI when a session is active.
  *  Mirror of `apps/web`'s `SessionAccount`. */

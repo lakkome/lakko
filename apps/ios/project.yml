@@ -111,6 +111,13 @@ targets:
         LakkoBootstrapTrustAnchor: ""
         LakkoBootstrapDohDomain: ""
         LakkoBootstrapConfigPath: ""
+        # ADR-0037 (G-11) — backup-head freshness window in SECONDS. A
+        # fresh-install restore refuses an authentic head older than this
+        # (stale-override). Empty / absent → the 30-day (2_592_000 s) default
+        # in `backupHeadStalenessSecs()`. Tune to the observed auto-backup
+        # cadence; too tight → false stale refusals, too loose → a wider
+        # within-window fresh-install replay residual.
+        LakkoBackupHeadStalenessSecs: ""
         # G-29 — background contact-inbox refresh. `BGAppRefreshTask`
         # (registered on the scene via `.backgroundTask(.appRefresh(_:))`
         # in LakkoApp, scheduled by `ContactBackgroundRefresh`) needs the

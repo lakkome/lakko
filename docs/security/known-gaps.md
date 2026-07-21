@@ -549,28 +549,85 @@ Android already awaited it (a direct `suspend` call in the
 `recover` coroutine), so it needed no change. Verified: web
 `tsc --noEmit` + iOS `xcodebuild` green.
 
-### G-11: No tamper-evident chain across backup versions — **partial: client-with-state case CLOSED**
+### G-11: No tamper-evident chain across backup versions — **CLOSED IN PRACTICE (2026-07, [ADR-0037](../adr/0037-backup-head-rollback-commitment.md))**
 
-**Closed for the client-with-state case** by
-[`crates/lakko-backup/src/chain.rs`](../../crates/lakko-backup/src/chain.rs):
-v2 envelopes carry a plaintext `(version, prev_hash)`
-chain header bound into the AEAD AAD; `verify_chain`
-walks an ordered sequence and rejects any non-sequential
-version OR broken `prev_hash` link. A client that
-persisted `(last_known_version, last_known_envelope_hash)`
-in its device-key-encrypted local storage catches any
-server-side rollback on the next restore.
+**Closed (2026-07, [ADR-0037](../adr/0037-backup-head-rollback-commitment.md)).**
+Both the returning-client and the fresh-install rollback
+cases are closed in practice by one auth-signed
+**backup-head** commitment minted on every upload and
+verified on every restore.
 
-**Still open: fresh-install rollback.** A user who lost
-all local state and is restoring from scratch with only
-the recovery phrase has no way to tell whether the
-server returned the latest envelope or an older one —
-both verify cleanly against the same Argon2id-derived
-KEK, and the chain header binds only to the *previous*
-envelope, not to a global "is this the head". Closing
-this requires a separate out-of-band commitment (e.g.,
-a KT-log entry "latest backup envelope hash for account
-X is h, signed at time t").
+**Correction to the prior claim.** This entry used to
+credit the "client-with-state case" as CLOSED via the v2
+chain ([`crates/lakko-backup/src/chain.rs`](../../crates/lakko-backup/src/chain.rs)).
+That closure was only *crate-level*: the v2 chain is
+**dormant** — it is exposed on neither FFI surface, no
+client persists a `last_known_version` anchor, and no
+client calls `verify_chain`, so it closed nothing on any
+deployed path. ADR-0037 is what closes the case in
+practice, via the head — not the chain. The v2 chain
+stays **dormant / out of scope**; its distinct
+sequence-audit role (walking a *served sequence* of
+multiple versions, checking each `prev_hash` link) is a
+separate forensics concern this gap does not need.
+
+**How each case is closed.** A `BackupHead` is a compact,
+domain-separated, Ed25519-signed blob committing
+`(account_id, backup_version, envelope_hash, signed_at)`,
+where `backup_version` is an **auth-assigned, per-account,
+strictly-monotone** counter (never client-supplied, so a
+regression is structurally impossible):
+
+- **Returning client (ever persisted a floor) — HARD-closed.**
+  The client stores `last_known_version` in
+  device-key-encrypted local storage and refuses any head
+  below it — a hard monotonic floor, no window. Auth
+  guarantees the version never regresses, so the storage
+  tier cannot serve an old head with a spuriously-high
+  version to defeat the floor.
+- **True zero-anchor fresh install — BOUNDED by freshness.**
+  With no floor to compare against, the client falls back
+  to the head's signed `signed_at` and a client-side
+  staleness window (default 30 days): a rollback to a head
+  older than the window is caught; a replay *within* the
+  window is not.
+
+**Residual, stated plainly.** A rollback that replays a
+genuine *older* head whose `signed_at` falls **inside** the
+window is **not** caught — but **only for a true
+zero-anchor fresh install** (a genuine lost-everything
+recovery). Any client that ever persisted a version floor
+is hard-protected regardless of the window. Fully closing
+the fresh-install window would require the client to read a
+*trusted* current-version marker on restore (e.g. auth
+serving its counter over the authenticated channel), a
+second trusted round-trip ADR-0037's single-fetch design
+deliberately declines. The fail-open on an **absent** head
+(a legacy / pre-rollout blob) is a rollback-detection
+availability choice only; the envelope stays phrase-AEAD
+sealed regardless of the head, so invariant #4 (no silent
+downgrade to non-E2EE) is untouched.
+
+Touchpoints: `crates/lakko-attest/src/backup_head.rs`
+(`BackupHead` primitive, 129-byte layout, domain
+`lakko/backup-head/v1`);
+[`services/auth`](../../services/auth/src/backup_head.rs)
+`POST /auth/backup/head` (stateful mint) + the
+`backup_head_versions` monotone-counter table (migration
+`0015`); `crates/lakko-backup/src/head_frame.rs` (the
+`0xB1` container-tag framing embedding the head in the one
+opaque storage blob — `services/storage` untouched); the
+three-client restore gate (web
+[`head-gate.ts`](../../apps/web/src/backup/head-gate.ts),
+iOS `BackupHeadGate.swift`, Android `HeadGate.kt`) applying
+the absent → fail-open / invalid → hard-fail / stale →
+user-acknowledged-override policy. Fuzz:
+`lakko-attest/backup_head_open` +
+`lakko-backup/backup_blob_parse`. See C-58 in the
+invariant index. Residual for a full close: the deferred
+auth-served current-version marker (above) + a live
+recovery e2e (mint → framed PUT → restore gate) on a
+deployed environment.
 
 ## Auth
 

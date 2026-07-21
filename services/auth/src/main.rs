@@ -70,6 +70,7 @@
 
 #![forbid(unsafe_code)]
 
+mod backup_head;
 mod call_jwt;
 mod device_authorize;
 mod genesis_attest;
@@ -392,6 +393,7 @@ async fn main() -> Result<()> {
 
 /// Build the public router. Extracted so tests can drive it directly without
 /// binding a TCP listener.
+#[allow(clippy::too_many_lines)] // flat route-registration table reads best whole
 fn build_app(state: AppState) -> Router {
     // Phase 2a2 — the four `/webauthn/*` routes are gated by the
     // session-token middleware so only an already-authenticated
@@ -494,6 +496,18 @@ fn build_app(state: AppState) -> Router {
             webauthn::require_session,
         ));
 
+    // G-11 (ADR-0037) — `POST /auth/backup/head` mints a signed backup-head
+    // commitment carrying an auth-assigned monotone `backup_version` (anti
+    // storage-tier rollback). Bearer-auth ONLY (the same session-token
+    // middleware) — holding a valid session token IS proof the caller
+    // OPAQUE-authenticated as `account_id`.
+    let backup_head_routes = Router::new()
+        .route("/auth/backup/head", post(backup_head::backup_head))
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            webauthn::require_session,
+        ));
+
     Router::new()
         .route("/health", get(health))
         .route("/ready", get(ready))
@@ -556,6 +570,7 @@ fn build_app(state: AppState) -> Router {
         .merge(call_jwt_routes)
         .merge(turn_routes)
         .merge(genesis_routes)
+        .merge(backup_head_routes)
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }

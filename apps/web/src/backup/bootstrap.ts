@@ -86,6 +86,9 @@ export async function bootstrapBackup(inputs: BackupBootstrapInputs): Promise<vo
       inputs.ed25519Seed,
       inputs.phraseBytes,
       inputs.wholeStorageSnapshot ?? new Uint8Array(0),
+      // ADR-0037: hand the device key so a successful mint persists the
+      // `backup_version` floor for future returning-client restores.
+      inputs.deviceKey,
     );
     if (result.kind !== "uploaded") {
       // eslint-disable-next-line no-console

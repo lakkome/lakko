@@ -116,6 +116,19 @@ android {
             "\"${project.findProperty("lakko.device.attest.key") as String? ?: ""}\"",
         )
 
+        // ADR-0037 (G-11) — backup-head staleness window in SECONDS (the Android
+        // mirror of the web `VITE_LAKKO_BACKUP_HEAD_STALENESS_SECS`). A restore
+        // freshness gate for a fresh-install (no floor) restore: a head whose
+        // `signed_at` is older than this is flagged stale (user-acknowledged
+        // override). Empty when unset → `backupHeadStalenessSecs()` falls back to
+        // the 30-day default. Sourced from a gradle property
+        // (`-P lakko.backup.head.staleness.secs=...` or `local.properties`).
+        buildConfigField(
+            "String",
+            "LAKKO_BACKUP_HEAD_STALENESS_SECS",
+            "\"${project.findProperty("lakko.backup.head.staleness.secs") as String? ?: ""}\"",
+        )
+
         // KT-log S3e — transparency-log verification config (the Android
         // mirror of the web `VITE_LAKKO_TRANSPARENCY_*` env vars). Both
         // sourced from gradle properties (set via

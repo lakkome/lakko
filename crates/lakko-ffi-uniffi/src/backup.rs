@@ -22,16 +22,50 @@
 //! (every byte field crosses the boundary as `Vec<u8>` →
 //! `Data` / `ByteArray`).
 
-use lakko_backup::{
-    open as inner_open, payload::AcceptedContactRecord, seal as inner_seal, BackupError,
-    BackupPayload,
+use lakko_attest::{
+    verify_backup_head as inner_verify_backup_head,
+    verify_backup_head_binding as inner_verify_backup_head_binding, BackupHeadError,
 };
+use lakko_backup::{
+    frame_backup_blob as inner_frame_backup_blob, open as inner_open,
+    parse_backup_blob as inner_parse_backup_blob, payload::AcceptedContactRecord,
+    seal as inner_seal, BackupBlob, BackupError, BackupPayload, HeadFrameError,
+};
+use lakko_crypto::signing::VerifyingKey;
 
 use crate::FfiError;
 
 impl From<BackupError> for FfiError {
     fn from(e: BackupError) -> Self {
         FfiError::Backup(e.to_string())
+    }
+}
+
+impl From<HeadFrameError> for FfiError {
+    fn from(e: HeadFrameError) -> Self {
+        // Both framing failures (a wrong-length head on frame, a truncated
+        // framed blob on parse) are hard fail-closed signals (ADR-0037 §6
+        // "Invalid") with no legitimate cause, so they fold into the generic
+        // hard-fail Backup class — no user override.
+        FfiError::Backup(e.to_string())
+    }
+}
+
+impl From<BackupHeadError> for FfiError {
+    fn from(e: BackupHeadError) -> Self {
+        match e {
+            // Staleness (ADR-0037 §6) is a policy signal, not a tamper signal:
+            // the head verified authentically but sits outside the freshness
+            // window, so the caller MAY offer a user-acknowledged override.
+            // Kept a distinct variant so Swift / Kotlin branch on the enum,
+            // not on a message string.
+            BackupHeadError::Stale => FfiError::BackupHeadStale,
+            // Every other variant (bad length / version / signature, account or
+            // envelope-hash mismatch) is an unambiguous tamper / corruption
+            // signal with no legitimate cause — hard fail-closed, folded into
+            // the generic Backup class.
+            other => FfiError::Backup(other.to_string()),
+        }
     }
 }
 
@@ -229,6 +263,226 @@ pub fn open_backup(phrase: Vec<u8>, wire: Vec<u8>) -> Result<Vec<u8>, FfiError> 
     Ok(inner_open(&phrase, &wire)?)
 }
 
+// ============================================================================
+// Backup-head verify + envelope-hash helper (ADR-0037, G-11)
+// ============================================================================
+//
+// The rollback defence for a fresh-install restore. An auth-signed `BackupHead`
+// commits an account's LATEST backup envelope (highest monotone
+// `backup_version`); the client verifies it against the CLIENT-PINNED auth
+// attest verifying key (the same `DeviceAttestKey` it already pins for device /
+// genesis attestations — ADR-0037 §3 reuses the key across all three roles,
+// kept safe by distinct domain separators). Verify only — signing is auth-only,
+// server-side (same posture as `verify_genesis_attestation`).
+//
+// The error split is load-bearing for the §6 restore policy: `BackupHeadStale`
+// (the freshness gate) is a user-acknowledged override, every other failure is
+// `Backup` (hard fail-closed). The success record carries `backup_version` so
+// the caller applies its own persisted monotonic floor (that check needs
+// client-persisted state, so it stays with the caller — ADR-0037 §6).
+
+/// The authenticated commitment a verified backup head carries — the UniFFI
+/// projection of `lakko_attest::BackupHead`. Returned by [`verify_backup_head`]
+/// and [`verify_backup_head_binding`] on success. `Debug` is safe: every field
+/// is a public commitment (no secret / key material).
+#[derive(uniffi::Record, Clone, Debug)]
+pub struct VerifiedBackupHead {
+    /// The auth-assigned monotone backup version. Strictly increasing per
+    /// account; the caller refuses any head below its persisted floor
+    /// (`last_known_version`) as a user-acknowledged rollback override.
+    pub backup_version: u64,
+    /// Raw 32-byte `BLAKE3` of the envelope portion the head commits to. Binds
+    /// the head to exactly the served envelope.
+    pub envelope_hash: Vec<u8>,
+    /// The mint timestamp, Unix **milliseconds**. The client applies its own
+    /// staleness window against this (it is not an expiry).
+    pub signed_at_millis: i64,
+}
+
+impl From<lakko_attest::BackupHead> for VerifiedBackupHead {
+    fn from(h: lakko_attest::BackupHead) -> Self {
+        Self {
+            backup_version: h.backup_version,
+            envelope_hash: h.envelope_hash.to_vec(),
+            signed_at_millis: h.signed_at_unix_millis,
+        }
+    }
+}
+
+/// Parse the auth attest verifying-key bytes into a [`VerifyingKey`], mapping a
+/// bad key to the hard-fail-closed [`FfiError::Backup`] class.
+fn parse_attest_key(bytes: &[u8]) -> Result<VerifyingKey, FfiError> {
+    VerifyingKey::from_bytes(bytes)
+        .map_err(|_| FfiError::Backup("attest verifying key is not a valid Ed25519 key".into()))
+}
+
+/// Verify a backup head's signature, `account_id` binding, `envelope_hash`
+/// binding, AND freshness — the full check a client applies on restore
+/// (ADR-0037 §6). Returns the parsed [`VerifiedBackupHead`] so the caller reads
+/// `backup_version` for its own monotonic-floor comparison against its persisted
+/// `last_known_version`.
+///
+/// `head` is the raw backup-head bytes (the container prefix of the served
+/// backup blob). `attest_verifying_key` is the 32-byte client-pinned auth
+/// attest key. `expected_account_id` is the client's authenticated 16-byte
+/// account id; `expected_envelope_hash` is the 32-byte [`backup_envelope_hash`]
+/// of the served envelope. `now_millis` and `max_staleness_millis` are Unix
+/// milliseconds — the staleness window is a client policy tracking the
+/// auto-backup cadence.
+///
+/// # Errors
+///
+/// [`FfiError::BackupHeadStale`] — the head verified authentically but its
+/// `signed_at` falls outside the freshness window (user-acknowledged override).
+/// [`FfiError::Backup`] — hard fail-closed: a malformed / wrong-length /
+/// wrong-version head, a signature that does not verify, or an `account_id` /
+/// `envelope_hash` mismatch, or a bad verifying key / wrong-length
+/// `expected_account_id` (≠ 16) / `expected_envelope_hash` (≠ 32).
+#[uniffi::export]
+pub fn verify_backup_head(
+    head: Vec<u8>,
+    attest_verifying_key: Vec<u8>,
+    expected_account_id: Vec<u8>,
+    expected_envelope_hash: Vec<u8>,
+    now_millis: i64,
+    max_staleness_millis: i64,
+) -> Result<VerifiedBackupHead, FfiError> {
+    let verifying = parse_attest_key(&attest_verifying_key)?;
+    let expected_account: [u8; 16] = expected_account_id
+        .as_slice()
+        .try_into()
+        .map_err(|_| FfiError::Backup("expected_account_id must be 16 bytes".into()))?;
+    let expected_envelope_hash: [u8; 32] = expected_envelope_hash
+        .as_slice()
+        .try_into()
+        .map_err(|_| FfiError::Backup("expected_envelope_hash must be 32 bytes".into()))?;
+    let head = inner_verify_backup_head(
+        &head,
+        &verifying,
+        &expected_account,
+        &expected_envelope_hash,
+        now_millis,
+        max_staleness_millis,
+    )?;
+    Ok(head.into())
+}
+
+/// Verify a backup head's signature and `account_id` binding ONLY — no
+/// `envelope_hash` or freshness check (ADR-0037 §6). For a caller that applies
+/// its own freshness and monotonic-floor policy (e.g. one that wants the parsed
+/// `backup_version` before it has hashed the served envelope). Returns the
+/// parsed [`VerifiedBackupHead`].
+///
+/// # Errors
+///
+/// [`FfiError::Backup`] — hard fail-closed: a malformed / wrong-length /
+/// wrong-version head, a signature that does not verify, an `account_id`
+/// mismatch, or a bad verifying key / wrong-length `expected_account_id` (≠ 16).
+/// This entry point performs no freshness check, so it never returns
+/// [`FfiError::BackupHeadStale`].
+#[uniffi::export]
+pub fn verify_backup_head_binding(
+    head: Vec<u8>,
+    attest_verifying_key: Vec<u8>,
+    expected_account_id: Vec<u8>,
+) -> Result<VerifiedBackupHead, FfiError> {
+    let verifying = parse_attest_key(&attest_verifying_key)?;
+    let expected_account: [u8; 16] = expected_account_id
+        .as_slice()
+        .try_into()
+        .map_err(|_| FfiError::Backup("expected_account_id must be 16 bytes".into()))?;
+    let head = inner_verify_backup_head_binding(&head, &verifying, &expected_account)?;
+    Ok(head.into())
+}
+
+/// Compute the `BLAKE3` envelope hash (`lakko_backup::chain::envelope_hash`)
+/// over the served backup envelope bytes — the 32-byte value the client feeds as
+/// `expected_envelope_hash` to [`verify_backup_head`] at restore, and posts to
+/// `POST /auth/backup/head` at mint. Exposed so all three clients compute the
+/// identical hash without re-implementing BLAKE3. Returns the 32-byte hash.
+#[uniffi::export]
+#[must_use]
+pub fn backup_envelope_hash(envelope_bytes: Vec<u8>) -> Vec<u8> {
+    lakko_backup::chain::envelope_hash(&envelope_bytes).to_vec()
+}
+
+// ============================================================================
+// Container-blob framing (ADR-0037 §4 / S4, G-11)
+// ============================================================================
+//
+// The auth-signed backup head rides INSIDE the one storage backup blob so the
+// head and the envelope it commits swap together in a single atomic PUT:
+// `CONTAINER_TAG(0xB1) ‖ head(129) ‖ envelope`. The client frames on upload and
+// peeks byte 0 on restore to tell a framed blob from a legacy raw envelope.
+// `services/storage` is untouched — the blob stays opaque (invariant #2). This
+// surface is FRAMING ONLY; the caller verifies a framed head via
+// `verify_backup_head` and applies the §6 fail-open / fail-closed policy.
+
+/// Structured view of a parsed backup blob — what [`parse_backup_blob`] returns.
+/// The UniFFI projection of `lakko_backup::BackupBlob`. `Debug` is safe: the
+/// head is a public auth-signed commitment and the envelope is opaque
+/// AEAD-sealed ciphertext (no secret / key material either way).
+#[derive(uniffi::Record, Clone, Debug)]
+pub struct ParsedBackupBlob {
+    /// `true` when the blob carried the `0xB1` container tag and a full head
+    /// (`Framed`); `false` for a legacy raw envelope with no head (`Legacy`).
+    pub framed: bool,
+    /// The raw backup-head bytes when `framed` is `true`, else `None`. Still
+    /// **unverified** — feed to [`verify_backup_head`] against the pinned auth
+    /// attest key.
+    pub head: Option<Vec<u8>>,
+    /// The envelope portion (the whole blob when `framed` is `false`; the tail
+    /// after the tag + head when `framed` is `true`). Feed to [`open_backup`].
+    pub envelope: Vec<u8>,
+}
+
+impl From<BackupBlob> for ParsedBackupBlob {
+    fn from(b: BackupBlob) -> Self {
+        match b {
+            BackupBlob::Framed { head, envelope } => Self {
+                framed: true,
+                head: Some(head.to_vec()),
+                envelope,
+            },
+            BackupBlob::Legacy(envelope) => Self {
+                framed: false,
+                head: None,
+                envelope,
+            },
+        }
+    }
+}
+
+/// Frame an auth-signed backup head and its envelope into the single storage
+/// blob `CONTAINER_TAG ‖ head ‖ envelope` to PUT to `services/storage` on the
+/// mint / upload path (ADR-0037 §4). `head` must be the raw
+/// `lakko_attest::BACKUP_HEAD_LEN`-byte head bytes.
+///
+/// # Errors
+///
+/// [`FfiError::Backup`] (hard fail-closed) if `head` is the wrong length.
+#[uniffi::export]
+pub fn frame_backup_blob(head: Vec<u8>, envelope: Vec<u8>) -> Result<Vec<u8>, FfiError> {
+    Ok(inner_frame_backup_blob(&head, &envelope)?)
+}
+
+/// Peek a stored backup blob's container framing on the restore path, before any
+/// head verification or AEAD-open (ADR-0037 §4). Returns a [`ParsedBackupBlob`]
+/// carrying the framed-vs-legacy kind, the (unverified) head bytes when framed,
+/// and the envelope bytes.
+///
+/// # Errors
+///
+/// [`FfiError::Backup`] (hard fail-closed) when the blob carries the `0xB1`
+/// container tag but is too short to hold a full head — active tamper /
+/// corruption of a framed blob (ADR-0037 §6 "Invalid"). A legacy (non-`0xB1`)
+/// or empty blob is **not** an error: it returns a `Legacy` [`ParsedBackupBlob`]
+/// (the §6 "Absent → fail-open" lane).
+#[uniffi::export]
+pub fn parse_backup_blob(blob: Vec<u8>) -> Result<ParsedBackupBlob, FfiError> {
+    Ok(inner_parse_backup_blob(&blob)?.into())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -349,5 +603,178 @@ mod tests {
             FfiError::Backup(msg) => assert!(msg.contains("16 bytes")),
             other => panic!("expected Backup variant, got {other:?}"),
         }
+    }
+
+    // ------------------------------------------------------------------------
+    // Backup-head verify (ADR-0037)
+    // ------------------------------------------------------------------------
+
+    use lakko_crypto::signing::SigningKey;
+
+    fn signed_head(
+        signing: &SigningKey,
+        account: [u8; 16],
+        version: u64,
+        env_hash: [u8; 32],
+        signed_at_millis: i64,
+    ) -> Vec<u8> {
+        lakko_attest::BackupHead::new(account, version, env_hash, signed_at_millis)
+            .sign(signing)
+            .to_vec()
+    }
+
+    #[test]
+    fn backup_head_verify_round_trips_through_ffi() {
+        let signing = SigningKey::from_seed(&[0x11; 32]);
+        let key = signing.verifying_key().to_bytes().to_vec();
+        let account = [0xAA; 16];
+        let env_hash = [0xBB; 32];
+        let wire = signed_head(&signing, account, 7, env_hash, 1_000_000);
+        let head = verify_backup_head(
+            wire,
+            key,
+            account.to_vec(),
+            env_hash.to_vec(),
+            1_000_000, // now == signed_at → fresh
+            10_000,
+        )
+        .expect("valid backup head verifies");
+        assert_eq!(head.backup_version, 7);
+        assert_eq!(head.envelope_hash, env_hash.to_vec());
+        assert_eq!(head.signed_at_millis, 1_000_000);
+    }
+
+    #[test]
+    fn backup_head_stale_maps_to_distinct_override_variant() {
+        // A head that verifies authentically but is outside the freshness window
+        // must surface as BackupHeadStale (override), NOT the hard-fail Backup
+        // class — the load-bearing discriminability for the §6 restore policy.
+        let signing = SigningKey::from_seed(&[0x11; 32]);
+        let key = signing.verifying_key().to_bytes().to_vec();
+        let account = [0xAA; 16];
+        let env_hash = [0xBB; 32];
+        let wire = signed_head(&signing, account, 7, env_hash, 1_000_000);
+        let err = verify_backup_head(
+            wire,
+            key,
+            account.to_vec(),
+            env_hash.to_vec(),
+            9_000_000, // far past signed_at + window
+            10_000,
+        )
+        .expect_err("stale head is rejected");
+        assert!(
+            matches!(err, FfiError::BackupHeadStale),
+            "stale must be the distinct override variant, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn backup_head_invalid_maps_to_hard_fail_closed_variant() {
+        let signing = SigningKey::from_seed(&[0x11; 32]);
+        let account = [0xAA; 16];
+        let env_hash = [0xBB; 32];
+        let wire = signed_head(&signing, account, 7, env_hash, 1_000_000);
+
+        // Wrong verifying key → signature does not verify → hard fail-closed.
+        let other_key = SigningKey::from_seed(&[0x22; 32])
+            .verifying_key()
+            .to_bytes()
+            .to_vec();
+        let err = verify_backup_head(
+            wire.clone(),
+            other_key,
+            account.to_vec(),
+            env_hash.to_vec(),
+            1_000_000,
+            10_000,
+        )
+        .expect_err("wrong key is rejected");
+        assert!(
+            matches!(err, FfiError::Backup(_)),
+            "a bad signature must be the hard-fail Backup class, got {err:?}"
+        );
+
+        // Envelope-hash mismatch → hard fail-closed (a tamper signal), NOT stale.
+        let key = signing.verifying_key().to_bytes().to_vec();
+        let err = verify_backup_head(
+            wire,
+            key,
+            account.to_vec(),
+            [0x00; 32].to_vec(),
+            1_000_000,
+            10_000,
+        )
+        .expect_err("envelope-hash mismatch is rejected");
+        assert!(
+            matches!(err, FfiError::Backup(_)),
+            "an envelope-hash mismatch must be the hard-fail Backup class, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn backup_head_binding_ignores_freshness_and_envelope_hash() {
+        // The binding-only entry point performs no freshness / hash check, so a
+        // head verify_backup_head would reject as stale still passes here.
+        let signing = SigningKey::from_seed(&[0x11; 32]);
+        let key = signing.verifying_key().to_bytes().to_vec();
+        let account = [0xAA; 16];
+        let wire = signed_head(&signing, account, 42, [0xBB; 32], 1_000_000);
+        let head = verify_backup_head_binding(wire, key, account.to_vec())
+            .expect("binding check ignores freshness");
+        assert_eq!(head.backup_version, 42);
+    }
+
+    #[test]
+    fn backup_envelope_hash_matches_core() {
+        let bytes = vec![0x5Au8; 128];
+        assert_eq!(
+            backup_envelope_hash(bytes.clone()),
+            lakko_backup::chain::envelope_hash(&bytes).to_vec()
+        );
+    }
+
+    // ------------------------------------------------------------------------
+    // Container-blob framing (ADR-0037 §4)
+    // ------------------------------------------------------------------------
+
+    #[test]
+    fn frame_then_parse_round_trips_through_ffi() {
+        let head = vec![0xABu8; 129];
+        let envelope = vec![0xCDu8; 64];
+        let blob = frame_backup_blob(head.clone(), envelope.clone()).expect("frame");
+        assert_eq!(blob[0], 0xB1);
+        let parsed = parse_backup_blob(blob).expect("parse");
+        assert!(parsed.framed);
+        assert_eq!(parsed.head, Some(head));
+        assert_eq!(parsed.envelope, envelope);
+    }
+
+    #[test]
+    fn legacy_envelope_parses_as_unframed_through_ffi() {
+        // A v1 envelope begins with schema byte 0x01 — not the container tag.
+        let raw = vec![0x01u8, 0x02, 0x03];
+        let parsed = parse_backup_blob(raw.clone()).expect("parse");
+        assert!(!parsed.framed);
+        assert_eq!(parsed.head, None);
+        assert_eq!(parsed.envelope, raw);
+    }
+
+    #[test]
+    fn truncated_framed_blob_is_hard_fail_closed_through_ffi() {
+        // Tag present but too short to hold a head → hard-fail Backup class.
+        let mut blob = vec![0xB1u8];
+        blob.extend_from_slice(&[0u8; 10]);
+        let err = parse_backup_blob(blob).expect_err("truncated framed blob is rejected");
+        assert!(
+            matches!(err, FfiError::Backup(_)),
+            "a truncated framed blob must be the hard-fail Backup class, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn frame_rejects_wrong_length_head_through_ffi() {
+        let err = frame_backup_blob(vec![0u8; 128], vec![]).expect_err("wrong-length head");
+        assert!(matches!(err, FfiError::Backup(_)), "got {err:?}");
     }
 }

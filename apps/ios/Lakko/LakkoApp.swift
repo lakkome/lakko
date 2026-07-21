@@ -151,6 +151,56 @@ struct AppRoot: View {
     @EnvironmentObject private var inviteIntake: InviteIntake
 
     var body: some View {
+        content
+            // ADR-0037 §6 (G-11) — a rolled-back / tampered backup was refused
+            // at restore. User-visible alarm; the served (older / altered) state
+            // was NOT loaded.
+            .alert(
+                "Backup could not be restored safely",
+                isPresented: Binding(
+                    get: { authRepository.backupRollbackAlarm != nil },
+                    set: { if !$0 { authRepository.dismissBackupRollbackAlarm() } }
+                ),
+                presenting: authRepository.backupRollbackAlarm
+            ) { _ in
+                Button("OK", role: .cancel) {
+                    authRepository.dismissBackupRollbackAlarm()
+                }
+            } message: { _ in
+                Text(
+                    "The server returned an altered or outdated backup. Your "
+                    + "account is safe; we continued without restoring the older "
+                    + "data."
+                )
+            }
+            // ADR-0037 §6 (G-11) — a stale but authentic backup needs an
+            // explicit override. The restore flow suspends until the user
+            // decides; Cancel (or dismiss) aborts the restore (fail-closed).
+            .confirmationDialog(
+                "Restore an older backup?",
+                isPresented: Binding(
+                    get: { authRepository.pendingStaleBackupOverride != nil },
+                    set: { if !$0 { authRepository.resolveStaleBackupOverride(false) } }
+                ),
+                titleVisibility: .visible,
+                presenting: authRepository.pendingStaleBackupOverride
+            ) { _ in
+                Button("Restore anyway", role: .destructive) {
+                    authRepository.resolveStaleBackupOverride(true)
+                }
+                Button("Cancel", role: .cancel) {
+                    authRepository.resolveStaleBackupOverride(false)
+                }
+            } message: { request in
+                Text(
+                    "This backup is older than expected (\(request.reason)). "
+                    + "Restoring it will roll your account back to older state — "
+                    + "older messages, and devices you removed may reappear."
+                )
+            }
+    }
+
+    @ViewBuilder private var content: some View {
         switch authRepository.state {
         case .loading:
             // Practically invisible — rehydrate is synchronous. We

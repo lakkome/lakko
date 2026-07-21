@@ -54,6 +54,9 @@ import {
   type AcceptedContact,
 } from "../contacts/local-store";
 import { getPhrase } from "./phrase-store";
+import { mintBackupHead } from "./head-mint";
+import { evaluateRestoreBlob } from "./head-restore";
+import { putFloor, type BackupFloor } from "./floor-store";
 import type { BackupContact as WasmBackupContact } from "../../wasm/lakko_ffi_wasm";
 
 /** Canonical account_id length (UUIDv7) the backup format round-trips. */
@@ -107,7 +110,50 @@ export type RestoreResult =
     }
   | { readonly kind: "no-backup" }
   | { readonly kind: "wrong-phrase-or-tampered" }
+  /** ADR-0037 §6 rollback gate refused the served blob. `hard` = an
+   *  unambiguous tamper / corruption (no override); `hard: false` = a stale
+   *  head the user was offered and DECLINED to override. Either way no
+   *  restore happened — the caller alarms (hard) or notes (declined). */
+  | { readonly kind: "rollback-blocked"; readonly hard: boolean; readonly reason: string }
   | { readonly kind: "transport-failed"; readonly cause: unknown };
+
+/**
+ * Context the restore seam threads into [`BackupClient.restore`] to arm the
+ * ADR-0037 §6 rollback gate. Absent → legacy behaviour (strip any head, no
+ * verification). Present → the full three-case fail-open/closed policy.
+ */
+export interface RestoreGateContext {
+  /** The 16-byte account_id the client OPAQUE-authenticated as (head binding). */
+  readonly accountId: Uint8Array;
+  /** Base64 account id — the floor-store key. */
+  readonly accountIdB64: string;
+  /** Non-extractable device root key for the version-floor store. */
+  readonly deviceKey: CryptoKey;
+  /** Auth base for the attest-key fetch (default the shared `/api/auth`). */
+  readonly authBaseUrl?: string;
+  /** Injectable clock in ms (default `Date.now()`). */
+  readonly now?: number;
+  /** Injectable staleness window in ms (default from the env knob). */
+  readonly stalenessMillis?: bigint;
+  /** Blocking confirmation for a stale head — MUST NOT auto-accept. Default is
+   *  `window.confirm`; a headless env with no `window.confirm` returns `false`
+   *  (fail-closed — never a silent downgrade). */
+  readonly confirmStaleOverride?: (reason: string) => boolean | Promise<boolean>;
+}
+
+/** Default stale-override confirmation — a blocking `window.confirm`, matching
+ *  the app's destructive-action pattern (passkey / member removal). Fail-closed
+ *  when there is no `window.confirm` to ask. */
+function defaultStaleConfirm(reason: string): boolean {
+  if (typeof window === "undefined" || typeof window.confirm !== "function") {
+    return false;
+  }
+  return window.confirm(
+    `This backup is older than expected (${reason}).\n\n` +
+      "Restoring it will roll your account back to older state — older " +
+      "messages, and devices you removed may reappear.\n\nRestore anyway?",
+  );
+}
 
 /**
  * `BackupClient` carries the storage client + the
@@ -115,13 +161,19 @@ export type RestoreResult =
  * — same shape as `ContactsClient` / `ChatClient`.
  */
 export class BackupClient {
+  /** Bearer token for both the storage `/backup` routes and the
+   *  `/auth/backup/head` mint (ADR-0037). Set via [`setSessionToken`]. */
+  private sessionToken: string | null = null;
+
   constructor(
     private readonly storage: StorageClient = new StorageClient(),
   ) {}
 
   /** Bind / rebind the bearer token used for the `/backup`
-   *  routes. Mirrors `ContactsClient.setSessionToken`. */
+   *  routes AND the `/auth/backup/head` mint (ADR-0037). Mirrors
+   *  `ContactsClient.setSessionToken`. */
   setSessionToken(token: string | null): void {
+    this.sessionToken = token;
     this.storage.setSessionToken(token);
   }
 
@@ -147,6 +199,12 @@ export class BackupClient {
      *  yet. Recover-time + scheduled auto-backup paths pass
      *  the current snapshot here. */
     wholeStorageSnapshot: Uint8Array = new Uint8Array(0),
+    /** ADR-0037: the non-extractable device root key. When present, the
+     *  auth-assigned `backup_version` floor is persisted into the device-key-
+     *  encrypted store on a successful mint. Omitted → no floor persisted
+     *  (the mint + framing still happen; a future restore falls back to the
+     *  freshness window). */
+    deviceKey?: CryptoKey,
   ): Promise<UploadResult> {
     try {
       const envelope = await this.composeEnvelope(
@@ -155,10 +213,51 @@ export class BackupClient {
         phraseBytes,
         wholeStorageSnapshot,
       );
-      await this.storage.putBackup(envelope);
-      return { kind: "uploaded", bytes: envelope.length, at: new Date() };
+      // ADR-0037: mint the auth-signed head, frame `TAG ‖ head ‖ envelope`,
+      // and PUT the framed blob. Soft-fail — a mint failure writes the legacy
+      // unframed envelope rather than failing the whole backup.
+      const { blob, floor } = await this.frameWithHead(envelope);
+      await this.storage.putBackup(blob);
+      // Persist the floor ONLY on a successful mint (ADR-0037 §6) — this is
+      // the monotonic anchor a future returning-client restore refuses to go
+      // below. `putFloor` never lowers an existing floor.
+      if (floor !== null && deviceKey !== undefined) {
+        try {
+          await putFloor(base64Encode(accountId), floor, deviceKey);
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.warn("BackupClient: floor persist failed", err);
+        }
+      }
+      return { kind: "uploaded", bytes: blob.length, at: new Date() };
     } catch (err) {
       return { kind: "transport-failed", cause: err };
+    }
+  }
+
+  /**
+   * Mint the auth-signed backup head for `envelope`, then frame
+   * `TAG ‖ head ‖ envelope` (ADR-0037 §5). Soft-fail: a mint / framing
+   * failure (network, 5xx, no session token) falls back to the UNFRAMED
+   * legacy envelope so a backup never fails because the head could not be
+   * minted — the mirror image of the restore-side fail-open on an absent head.
+   */
+  private async frameWithHead(
+    envelope: Uint8Array,
+  ): Promise<{ blob: Uint8Array; floor: BackupFloor | null }> {
+    const wasm = await loadWasm();
+    try {
+      const hash = wasm.backupEnvelopeHash(envelope);
+      const { head, version } = await mintBackupHead(this.sessionToken, hash);
+      const blob = wasm.frameBackupBlob(head, envelope);
+      return { blob, floor: { version, envelopeHash: hash } };
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        "BackupClient: backup-head mint failed, writing legacy envelope",
+        err,
+      );
+      return { blob: envelope, floor: null };
     }
   }
 
@@ -192,7 +291,13 @@ export class BackupClient {
       return { kind: "no-cached-phrase" };
     }
     try {
-      return await this.uploadNow(accountId, ed25519Seed, cached.phrase);
+      return await this.uploadNow(
+        accountId,
+        ed25519Seed,
+        cached.phrase,
+        new Uint8Array(0),
+        deviceKey,
+      );
     } finally {
       // Best-effort scrub — JS doesn't give us guaranteed zeroize
       // but we can at least clear the Uint8Array contents.
@@ -206,16 +311,71 @@ export class BackupClient {
    * directly — restore is always interactive (user has just
    * gone through recovery), so there is no phrase-cache hop.
    */
-  async restore(phraseBytes: Uint8Array): Promise<RestoreResult> {
-    let envelope: Uint8Array | null;
+  async restore(
+    phraseBytes: Uint8Array,
+    gate?: RestoreGateContext,
+  ): Promise<RestoreResult> {
+    let blob: Uint8Array | null;
     try {
-      envelope = await this.storage.getBackup();
+      blob = await this.storage.getBackup();
     } catch (err) {
       return { kind: "transport-failed", cause: err };
     }
-    if (envelope === null) return { kind: "no-backup" };
+    if (blob === null) return { kind: "no-backup" };
 
     const wasm = await loadWasm();
+
+    // ADR-0037 §6: apply the rollback gate to peel `TAG ‖ head` and decide
+    // proceed / fail-open / hard-fail / stale-override BEFORE opening the
+    // envelope. Absent gate → legacy behaviour (strip any head, no verify).
+    let envelope: Uint8Array = blob;
+    let cleanProceed: BackupFloor | null = null;
+    if (gate !== undefined) {
+      const evaluation = await evaluateRestoreBlob({
+        blob,
+        accountId: gate.accountId,
+        accountIdB64: gate.accountIdB64,
+        deviceKey: gate.deviceKey,
+        authBaseUrl: gate.authBaseUrl,
+        now: gate.now,
+        stalenessMillis: gate.stalenessMillis,
+      });
+      const verdict = evaluation.verdict;
+      if (verdict.kind === "hard-fail") {
+        // Refuse + alarm, no override (invariant #4 — no silent downgrade).
+        return { kind: "rollback-blocked", hard: true, reason: verdict.reason };
+      }
+      if (verdict.kind === "stale-override") {
+        // Never silent-accept a stale head — require an explicit user ack.
+        const confirmFn = gate.confirmStaleOverride ?? defaultStaleConfirm;
+        const accepted = await confirmFn(verdict.reason);
+        if (!accepted) {
+          return { kind: "rollback-blocked", hard: false, reason: verdict.reason };
+        }
+        // Accepted: proceed with the (older) envelope, but DO NOT advance the
+        // floor down — `putFloor` is monotone, so a deliberate downgrade never
+        // lowers this device's future protection.
+      }
+      envelope = evaluation.envelope;
+      if (
+        verdict.kind === "proceed" &&
+        evaluation.verifiedVersion !== null &&
+        evaluation.envelopeHash !== null
+      ) {
+        cleanProceed = {
+          version: evaluation.verifiedVersion,
+          envelopeHash: evaluation.envelopeHash,
+        };
+      }
+    } else {
+      // Ungated caller: still strip a head defensively so a framed blob opens.
+      try {
+        envelope = wasm.parseBackupBlob(blob).envelope;
+      } catch {
+        envelope = blob;
+      }
+    }
+
     let payloadBytes: Uint8Array;
     try {
       payloadBytes = wasm.openBackup(phraseBytes, envelope);
@@ -250,6 +410,19 @@ export class BackupClient {
           : {}),
       });
     }
+    // ADR-0037 §6: on a clean verified proceed, advance the monotone floor so
+    // subsequent restores on this device are hard-protected (returning-client
+    // path). Skipped on fail-open (no verified head) and stale-override
+    // (never lower the floor).
+    if (gate !== undefined && cleanProceed !== null) {
+      try {
+        await putFloor(gate.accountIdB64, cleanProceed, gate.deviceKey);
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn("BackupClient: floor persist (restore) failed", err);
+      }
+    }
+
     return {
       kind: "restored",
       accountId: parsed.accountId,

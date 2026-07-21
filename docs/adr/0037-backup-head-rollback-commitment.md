@@ -5,7 +5,7 @@ SPDX-FileCopyrightText: 2026 Lakko Contributors
 
 # ADR-0037: Auth-signed backup-head commitment (prevent fresh-install rollback)
 
-- **Status:** Proposed
+- **Status:** Accepted — implemented S1–S6 (2026-07) (maintainer accepted Option C + the resolved sub-decisions; the 6-sprint decomposition below landed end-to-end — primitive + fuzz, stateful auth mint + migration, FFI verify + hash helper, `0xB1` blob framing, 3-client mint/restore gate — with S6 the docs/security reconcile)
 - **Date:** 2026-07-20
 - **Context:** Phase 2 — encrypted backup / account recovery. Closes the G-11
   fresh-install rollback residual and corrects the stale
@@ -151,7 +151,7 @@ A fixed-layout, domain-separated, Ed25519-signed blob, mirroring
 
 ```text
 wire          = format_version(1) ‖ account_id(16) ‖ backup_version(8, big-endian u64)
-                ‖ envelope_hash(32) ‖ signed_at_unix_secs(8, big-endian i64)
+                ‖ envelope_hash(32) ‖ signed_at_unix_millis(8, big-endian i64)
                 ‖ Ed25519_sig(64)                                     = 129 bytes
 signing input = DOMAIN ‖ format_version ‖ account_id ‖ backup_version
                 ‖ envelope_hash ‖ signed_at
@@ -164,24 +164,30 @@ DOMAIN        = b"lakko/backup-head/v1"   (NEW — distinct from genesis-attest/
   the field names.
 - `envelope_hash` = `BLAKE3(envelope_bytes)` over the envelope portion **only**
   (not the head prefix — no self-reference), reusing `lakko_backup::chain::envelope_hash`.
-- `signed_at` is the **mint timestamp**, not an expiry. The genesis attestation
-  carried `expires_at` because the transparency gate enforces a server-fixed TTL;
-  here the staleness window is a **client policy** (it tracks the client's own
-  backup cadence), so the head carries the raw mint time and the client applies its
-  own window. This is a deliberate deviation from the genesis template.
+- `signed_at` is the **mint timestamp**, not an expiry, carried in **Unix
+  milliseconds** (`signed_at_unix_millis`; the freshness `now` + staleness/skew
+  windows are all milliseconds too — the clients work in milliseconds natively, and
+  the field/parameter names carry `_millis` so the unit is unambiguous and the auth
+  mint + clients cannot introduce a 1000× drift). This is a second deliberate
+  deviation from the genesis template, whose `expires_at` is in seconds. The genesis
+  attestation carried `expires_at` because the transparency gate enforces a
+  server-fixed TTL; here the staleness window is a **client policy** (it tracks the
+  client's own backup cadence), so the head carries the raw mint time and the client
+  applies its own window.
 
 Two verify entry points, mirroring the genesis freshness split:
 
-- `verify_backup_head(bytes, verifying, expected_account_id) -> BackupHeadClaims{
-  backup_version, envelope_hash, signed_at }` — signature + `account_id` binding,
-  **no** freshness / hash / floor check. The caller (client) applies the
-  `envelope_hash == BLAKE3(envelope)`, freshness-window, and version-floor policy,
-  because the window and floor are per-client config + state, not crate invariants.
-- `verify_backup_head_fresh(bytes, verifying, expected_account_id,
-  expected_envelope_hash, max_staleness_secs, now)` — a convenience that folds
-  signature + `account_id` + `envelope_hash` + freshness into one call for the
-  fresh-install path, leaving the version-floor (which needs client state) to the
-  caller.
+- `verify_backup_head(bytes, verifying, expected_account_id, expected_envelope_hash,
+  now_millis, max_staleness_millis) -> BackupHead` — the **full** client restore-path
+  check: signature + `account_id` binding + `envelope_hash` binding + freshness,
+  returning the parsed `BackupHead` so the caller reads `backup_version` for its own
+  version-floor comparison against its persisted `last_known_version` (the floor
+  needs client-persisted state, so it stays with the caller). All timestamps are Unix
+  milliseconds.
+- `verify_backup_head_binding(bytes, verifying, expected_account_id) -> BackupHead` —
+  signature + `account_id` binding only, **no** hash / freshness check, for a caller
+  that applies its own freshness and floor policy (e.g. against the served envelope it
+  has not yet hashed).
 
 `#![forbid(unsafe_code)]`, bounded fail-closed parser, unit/property tests
 mirroring the `lakko-attest` suite, plus a `backup_head_open` fuzz target (§7).
@@ -329,7 +335,7 @@ Torn states:
 
 ### 7. FFI verify surface + envelope-hash helper + fuzz
 
-- Expose `verify_backup_head` (+ `verify_backup_head_fresh`) on UniFFI (Swift/
+- Expose `verify_backup_head` (+ `verify_backup_head_binding`) on UniFFI (Swift/
   Kotlin) + wasm (web), mirroring the `verify_genesis_attestation` FFI exposure
   (`crates/lakko-ffi-uniffi/src/lib.rs`, `crates/lakko-ffi-wasm/src/supersession.rs`).
   **No sign on the FFI** — signing is auth-only, server-side; the client only
@@ -496,8 +502,8 @@ Each step names the ADR-0036 / ADR-0015 file it mirrors.
 
 - **S1 — `BackupHead` primitive + fuzz.** New `crates/lakko-attest/src/backup_head.rs`
   (mirror `genesis.rs`): the 129-byte fixed layout, domain `lakko/backup-head/v1`,
-  `sign` / `open` / `verify_backup_head` (no freshness) / `verify_backup_head_fresh`
-  (freshness); re-export from `lib.rs`. A `domains_do_not_cross` test proving
+  `sign` / `open` / `verify_backup_head` (full: signature + account + envelope-hash +
+  freshness) / `verify_backup_head_binding` (binding only); re-export from `lib.rs`. A `domains_do_not_cross` test proving
   backup-head ↔ genesis ↔ device non-interchangeability under a shared signing key.
   Fuzz target `backup_head_open` in `crates/lakko-attest/fuzz` mirroring
   `genesis_attestation_open`.
@@ -509,7 +515,7 @@ Each step names the ADR-0036 / ADR-0015 file it mirrors.
   counter) + the transactional read-bump-sign. Route wiring in `main.rs` mirroring
   the `genesis_attest` registration.
 - **S3 — FFI verify + hash helper.** Expose `verify_backup_head` /
-  `verify_backup_head_fresh` + `backup_envelope_hash` on UniFFI + wasm, mirroring
+  `verify_backup_head_binding` + `backup_envelope_hash` on UniFFI + wasm, mirroring
   the `verify_genesis_attestation` / `account_username_hash` exposure in
   `crates/lakko-ffi-uniffi/src/lib.rs` + `crates/lakko-ffi-wasm/src/supersession.rs`.
 - **S4 — storage-blob framing (client-side, no storage change).** Define the

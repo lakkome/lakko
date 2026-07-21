@@ -61,6 +61,23 @@ public final class AuthRepository: ObservableObject {
     /// it; the ACCESS-hijack signature). Surfaced as a dismissible banner.
     @Published public private(set) var identityAlert: IdentityAlert?
 
+    /// ADR-0037 §6 (G-11) — non-nil when a rolled-back / tampered backup was
+    /// REFUSED at restore. An unambiguous tamper the user must be told about
+    /// (distinct from a stale-and-declined outcome, which is only logged).
+    /// Surfaced as a user-visible alert.
+    @Published public private(set) var backupRollbackAlarm: BackupRollbackAlarm?
+
+    /// ADR-0037 §6 (G-11) — non-nil when a stale (older-than-expected) but
+    /// authentic backup is pending the user's explicit override decision. Drives
+    /// a blocking confirmation dialog; the restore flow suspends until
+    /// ``resolveStaleBackupOverride(_:)`` is called from the dialog buttons.
+    @Published public private(set) var pendingStaleBackupOverride: StaleBackupOverrideRequest?
+
+    /// The continuation the restore flow parks on while
+    /// ``pendingStaleBackupOverride`` awaits the user's decision. Resolved
+    /// exactly once by ``resolveStaleBackupOverride(_:)``.
+    private var staleOverrideContinuation: CheckedContinuation<Bool, Never>?
+
     /// In-memory identity secrets — the OPAQUE export key + the raw
     /// account id bytes for the active session.
     ///
@@ -882,7 +899,9 @@ public final class AuthRepository: ObservableObject {
         // upsert into (mirror of the Android situation). For
         // now restore logs the outcome; the merge layer lands
         // alongside the iOS contact-persistence sub-sprint.
-        let restoredSnapshot = await Self.restoreFromServerBackupBestEffort(
+        let restoredSnapshot = await restoreFromServerBackupBestEffort(
+            accountId: accountIdBytes,
+            accountIdB64: accountIdB64,
             sessionToken: result.sessionToken,
             phrase: trimmedPhrase,
             context: "recover"
@@ -982,6 +1001,10 @@ public final class AuthRepository: ObservableObject {
             // `forgetDevice`'s "leave nothing per-account behind"
             // contract).
             try? PhraseStore().deletePhrase(accountIdB64: cached.accountIdB64)
+            // ADR-0037 (G-11) — drop the backup-head version floor. Same
+            // clean-wipe rationale; the next recover starts from the
+            // zero-anchor freshness-window path.
+            BackupFloorStore.deleteFloor(accountIdB64: cached.accountIdB64)
             // Phase 2a2c2 — drop the cached export key too. Same
             // clean-wipe rationale.
             ExportKeyStore.deleteExportKey(accountIdB64: cached.accountIdB64)
@@ -1181,6 +1204,39 @@ public final class AuthRepository: ObservableObject {
     /// Dismiss the identity-changed security banner.
     public func dismissIdentityAlert() {
         identityAlert = nil
+    }
+
+    // MARK: - ADR-0037 backup-rollback gate (G-11)
+
+    /// Dismiss the backup-rollback alarm. Idempotent.
+    public func dismissBackupRollbackAlarm() {
+        backupRollbackAlarm = nil
+    }
+
+    /// Resolve a pending stale-backup override from the confirmation dialog's
+    /// buttons — `true` = "Restore anyway", `false` = "Cancel". Idempotent: a
+    /// second call after the continuation has already been resumed (e.g. the
+    /// dialog's dismiss binding firing after a button) is a no-op.
+    public func resolveStaleBackupOverride(_ accepted: Bool) {
+        pendingStaleBackupOverride = nil
+        let cont = staleOverrideContinuation
+        staleOverrideContinuation = nil
+        cont?.resume(returning: accepted)
+    }
+
+    /// The async confirmation the restore gate awaits. Publishes the request
+    /// (which drives the SwiftUI confirmation dialog) and suspends until
+    /// ``resolveStaleBackupOverride(_:)`` resumes it. Fail-closed: if a request
+    /// is already in flight (should not happen — restore is serialized), returns
+    /// `false` (never a silent downgrade).
+    private func awaitStaleBackupOverride(reason: String) async -> Bool {
+        if staleOverrideContinuation != nil {
+            return false
+        }
+        return await withCheckedContinuation { cont in
+            staleOverrideContinuation = cont
+            pendingStaleBackupOverride = StaleBackupOverrideRequest(reason: reason)
+        }
     }
 
     /// ADR-0017 fresh-device fail-safe completion. Called only while
@@ -2094,7 +2150,16 @@ public final class AuthRepository: ObservableObject {
     /// the server-side snapshot with an empty one. Empty `Data`
     /// when there is no prior backup or the prior backup
     /// pre-dates 2a3d.
-    private static func restoreFromServerBackupBestEffort(
+    ///
+    /// ADR-0037 §6 (G-11): the restore runs behind the rollback gate — a
+    /// tampered / rolled-back head refuses outright and raises
+    /// ``backupRollbackAlarm``; a stale head prompts the user via
+    /// ``pendingStaleBackupOverride`` (fail-closed on decline). An instance
+    /// method (was `static`) so it can arm the gate's confirmation callback +
+    /// set the published alarm.
+    private func restoreFromServerBackupBestEffort(
+        accountId: Data,
+        accountIdB64: String,
         sessionToken: String,
         phrase: String,
         context: String
@@ -2102,20 +2167,48 @@ public final class AuthRepository: ObservableObject {
         let phraseBytes = Data(phrase.utf8)
         let client = BackupClient()
         client.setSessionToken(sessionToken)
-        let parsed: ParsedBackupPayload?
-        do {
-            parsed = try await client.restore(phraseBytes: phraseBytes)
-        } catch {
-            // Wrong phrase / tampered blob / transport failure —
-            // fold into a single log line. The user can still
-            // continue; the bootstrap step will overwrite.
-            NSLog("backup restore (\(context)) failed: \(error)")
+
+        // ADR-0037 §6: arm the rollback gate — verify the auth-signed backup
+        // head against the pinned attest key before trusting the served
+        // envelope. A stale head suspends on the confirmation dialog; declining
+        // aborts the restore (fail-closed — never a silent downgrade).
+        let gate = RestoreGateContext(
+            accountId: accountId,
+            accountIdB64: accountIdB64,
+            confirmStaleOverride: { [weak self] reason in
+                guard let self else { return false }
+                return await self.awaitStaleBackupOverride(reason: reason)
+            }
+        )
+        let outcome = await client.restore(phraseBytes: phraseBytes, gate: gate)
+
+        let parsed: ParsedBackupPayload
+        switch outcome {
+        case .rollbackBlocked(let hard, let reason):
+            if hard {
+                // Refuse + alarm. We do NOT load the served state (invariant #4).
+                NSLog(
+                    "backup restore (\(context)) BLOCKED a rolled-back / tampered "
+                    + "backup: \(reason)"
+                )
+                backupRollbackAlarm = BackupRollbackAlarm(reason: reason)
+            } else {
+                NSLog("backup restore (\(context)): user declined a stale backup: \(reason)")
+            }
             return Data()
-        }
-        guard let parsed else {
+        case .noBackup:
             NSLog("backup restore (\(context)): no prior backup")
             return Data()
+        case .wrongPhraseOrTampered:
+            NSLog("backup restore (\(context)) failed: wrong phrase or tampered blob")
+            return Data()
+        case .transportFailed(let error):
+            NSLog("backup restore (\(context)) failed: \(error)")
+            return Data()
+        case .restored(let payload):
+            parsed = payload
         }
+
         NSLog(
             "backup restore (\(context)): restored \(parsed.acceptedContacts.count) contact(s) "
             + "from snapshot at \(parsed.createdAtMs), "
@@ -2216,6 +2309,7 @@ public final class AuthRepository: ObservableObject {
         do {
             try await backupClient.uploadNow(
                 accountId: accountId,
+                accountIdB64: accountIdB64,
                 ed25519Seed: seedBytes,
                 phraseBytes: phraseBytes,
                 contacts: contactRecords,
@@ -2267,6 +2361,31 @@ public enum IdentityAlert: Equatable {
     /// ACCESS-hijack signature — an attacker minted a fresh identity via
     /// the lost-everything path).
     case publishedIdentityChanged
+}
+
+/// ADR-0037 §6 (G-11) — a rolled-back / tampered backup was REFUSED at restore.
+/// Carries the human-readable reason from the ``restoreVerdict(_:)`` hard-fail.
+/// Surfaced as a user-visible alert; the served (older / altered) state is NOT
+/// loaded.
+public struct BackupRollbackAlarm: Equatable {
+    public let reason: String
+
+    public init(reason: String) {
+        self.reason = reason
+    }
+}
+
+/// ADR-0037 §6 (G-11) — a stale (older-than-expected) but authentic backup is
+/// pending the user's explicit override decision. Drives the blocking
+/// confirmation dialog; `Identifiable` so the SwiftUI dialog can key on it.
+public struct StaleBackupOverrideRequest: Equatable, Identifiable {
+    public let id: UUID
+    public let reason: String
+
+    public init(reason: String) {
+        self.id = UUID()
+        self.reason = reason
+    }
 }
 
 /// Account record exposed to the UI when a session is active.

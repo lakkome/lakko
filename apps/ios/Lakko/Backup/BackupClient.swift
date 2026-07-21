@@ -30,17 +30,31 @@ public final class BackupClient {
 
     private let storage: StorageClient
     private let phraseStore: PhraseStore
+    /// Auth-service base for the `POST /auth/backup/head` mint (ADR-0037). The
+    /// storage `/backup` routes live on ``StorageClient/baseURL`` (a different
+    /// service); the head mint is an auth-service call, so it carries its own
+    /// base — same split the web keeps between the storage + auth clients.
+    private let authBaseURL: String
+    /// Bearer token for BOTH the storage `/backup` routes AND the
+    /// `/auth/backup/head` mint (ADR-0037). Set via ``setSessionToken(_:)``.
+    private var sessionToken: String?
 
     public init(
         storage: StorageClient = StorageClient(),
-        phraseStore: PhraseStore = PhraseStore()
+        phraseStore: PhraseStore = PhraseStore(),
+        authBaseURL: String = AuthClient.defaultBaseURL
     ) {
         self.storage = storage
         self.phraseStore = phraseStore
+        self.authBaseURL = authBaseURL
+        self.sessionToken = nil
     }
 
-    /// Bind / rebind the bearer token for `/backup` routes.
+    /// Bind / rebind the bearer token used for the `/backup` routes AND the
+    /// `/auth/backup/head` mint (ADR-0037). Mirror of the web
+    /// `BackupClient.setSessionToken`.
     public func setSessionToken(_ token: String?) {
+        self.sessionToken = token
         storage.setSessionToken(token)
     }
 
@@ -49,8 +63,16 @@ public final class BackupClient {
     /// Compose + seal + PUT in one step. Caller has the phrase on
     /// hand right now (signup just minted it, recover just
     /// consumed it). No phrase-cache hop.
+    ///
+    /// ADR-0037 (G-11): after sealing the envelope, mint the auth-signed head,
+    /// frame `TAG ‖ head ‖ envelope`, and PUT the framed blob. Soft-fail — a
+    /// mint / framing failure writes the legacy unframed envelope rather than
+    /// failing the whole backup. On a successful mint the auth-assigned
+    /// `backup_version` floor is persisted into the ``BackupFloorStore`` — the
+    /// monotonic anchor a future returning-client restore refuses to go below.
     public func uploadNow(
         accountId: Data,
+        accountIdB64: String,
         ed25519Seed: Data,
         phraseBytes: Data,
         contacts: [BackupContactRecord],
@@ -67,7 +89,38 @@ public final class BackupClient {
             wholeStorageSnapshot: wholeStorageSnapshot
         )
         let envelope = try sealBackup(phrase: phraseBytes, payloadBytes: payloadBytes)
-        try await storage.putBackup(envelopeBytes: envelope)
+        let (blob, floor) = await frameWithHead(envelope: envelope)
+        try await storage.putBackup(envelopeBytes: blob)
+        // Persist the floor ONLY on a successful mint (ADR-0037 §6).
+        // `putFloor` never lowers an existing floor.
+        if let floor {
+            do {
+                try BackupFloorStore.putFloor(accountIdB64: accountIdB64, floor: floor)
+            } catch {
+                NSLog("backup floor persist failed: \(error)")
+            }
+        }
+    }
+
+    /// Mint the auth-signed backup head for `envelope`, then frame
+    /// `TAG ‖ head ‖ envelope` (ADR-0037 §5). Soft-fail: a mint / framing
+    /// failure (network, 5xx, no session token) falls back to the UNFRAMED
+    /// legacy envelope so a backup never fails because the head could not be
+    /// minted — the mirror image of the restore-side fail-open on an absent head.
+    private func frameWithHead(envelope: Data) async -> (blob: Data, floor: BackupFloor?) {
+        do {
+            let hash = backupEnvelopeHash(envelopeBytes: envelope)
+            let minted = try await mintBackupHead(
+                sessionToken: sessionToken,
+                envelopeHash: hash,
+                baseURL: authBaseURL
+            )
+            let blob = try frameBackupBlob(head: minted.head, envelope: envelope)
+            return (blob, BackupFloor(version: minted.version, envelopeHash: hash))
+        } catch {
+            NSLog("backup-head mint failed, writing legacy envelope: \(error)")
+            return (envelope, nil)
+        }
     }
 
     /// Read the phrase from the Keychain cache and run
@@ -101,6 +154,7 @@ public final class BackupClient {
         do {
             try await uploadNow(
                 accountId: accountId,
+                accountIdB64: accountIdB64,
                 ed25519Seed: ed25519Seed,
                 phraseBytes: phraseBytes,
                 contacts: contacts,
@@ -114,16 +168,104 @@ public final class BackupClient {
 
     // MARK: - Restore
 
-    /// Fetch + decrypt + parse the server-stored backup. Returns
-    /// `nil` when no blob has ever been uploaded; throws on
-    /// transport / wrong-phrase / decode failures (caller
-    /// distinguishes via the error type).
-    public func restore(phraseBytes: Data) async throws -> ParsedBackupPayload? {
-        guard let envelope = try await storage.getBackup() else {
-            return nil
+    /// Fetch + decrypt + parse the server-stored backup, applying the ADR-0037
+    /// §6 rollback gate (G-11) when a ``RestoreGateContext`` is supplied.
+    ///
+    /// Mirror of the web `BackupClient.restore(phraseBytes, gate)`. Absent gate →
+    /// legacy behaviour (strip any head, no verification). Present gate → the
+    /// full three-case fail-open / fail-closed policy: `hardFail` → refuse +
+    /// alarm; `staleOverride` → ask the user (never silent); `failOpen` /
+    /// `proceed` → open the envelope (and, on a clean `proceed`, advance the
+    /// monotone floor).
+    public func restore(
+        phraseBytes: Data,
+        gate: RestoreGateContext? = nil
+    ) async -> RestoreOutcome {
+        let blob: Data?
+        do {
+            blob = try await storage.getBackup()
+        } catch {
+            return .transportFailed(error)
         }
-        let payloadBytes = try openBackup(phrase: phraseBytes, wire: envelope)
-        return try parseBackupPayload(wire: payloadBytes)
+        guard let blob else { return .noBackup }
+
+        // ADR-0037 §6: apply the rollback gate to peel `TAG ‖ head` and decide
+        // proceed / fail-open / hard-fail / stale-override BEFORE opening the
+        // envelope. Absent gate → legacy behaviour (strip any head, no verify).
+        var envelope: Data = blob
+        var cleanProceed: BackupFloor?
+        if let gate {
+            let evaluation = await evaluateRestoreBlob(
+                RestoreEvaluationInput(
+                    blob: blob,
+                    accountId: gate.accountId,
+                    accountIdB64: gate.accountIdB64,
+                    authBaseUrl: gate.authBaseUrl,
+                    nowMillis: gate.nowMillis,
+                    stalenessMillis: gate.stalenessMillis
+                )
+            )
+            switch evaluation.verdict {
+            case .hardFail(let reason):
+                // Refuse + alarm, no override (invariant #4 — no silent downgrade).
+                return .rollbackBlocked(hard: true, reason: reason)
+            case .staleOverride(let reason):
+                // Never silent-accept a stale head — require an explicit user ack.
+                let accepted = await gate.confirmStaleOverride(reason)
+                if !accepted {
+                    return .rollbackBlocked(hard: false, reason: reason)
+                }
+                // Accepted: proceed with the (older) envelope, but DO NOT advance
+                // the floor down — `putFloor` is monotone, so a deliberate
+                // downgrade never lowers this device's future protection.
+            case .failOpen, .proceed:
+                break
+            }
+            envelope = evaluation.envelope
+            if evaluation.verdict == .proceed,
+                let version = evaluation.verifiedVersion,
+                let hash = evaluation.envelopeHash {
+                cleanProceed = BackupFloor(version: version, envelopeHash: hash)
+            }
+        } else {
+            // Ungated caller: still strip a head defensively so a framed blob opens.
+            if let parsed = try? parseBackupBlob(blob: blob) {
+                envelope = parsed.envelope
+            }
+        }
+
+        let payloadBytes: Data
+        do {
+            payloadBytes = try openBackup(phrase: phraseBytes, wire: envelope)
+        } catch {
+            // Wrong phrase or tampered blob — the core folds both into one error.
+            NSLog("BackupClient: openBackup failed: \(error)")
+            return .wrongPhraseOrTampered
+        }
+        let parsed: ParsedBackupPayload
+        do {
+            parsed = try parseBackupPayload(wire: payloadBytes)
+        } catch {
+            NSLog("BackupClient: parseBackupPayload failed: \(error)")
+            return .wrongPhraseOrTampered
+        }
+
+        // ADR-0037 §6: on a clean verified proceed, advance the monotone floor so
+        // subsequent restores on this device are hard-protected (returning-client
+        // path). Skipped on fail-open (no verified head) and stale-override
+        // (never lower the floor).
+        if let cleanProceed, let gate {
+            do {
+                try BackupFloorStore.putFloor(
+                    accountIdB64: gate.accountIdB64,
+                    floor: cleanProceed
+                )
+            } catch {
+                NSLog("BackupClient: floor persist (restore) failed: \(error)")
+            }
+        }
+
+        return .restored(parsed)
     }
 
     /// Cache the phrase under the Keychain. Called from the
@@ -147,5 +289,60 @@ public enum UploadResult {
     case uploaded
     case cacheMiss
     case keychainFailed(Error)
+    case transportFailed(Error)
+}
+
+/// Context the restore seam threads into ``BackupClient/restore(phraseBytes:gate:)``
+/// to arm the ADR-0037 §6 rollback gate (G-11). Absent → legacy behaviour (strip
+/// any head, no verification). Present → the full three-case fail-open / closed
+/// policy. Mirror of the web `RestoreGateContext`.
+public struct RestoreGateContext {
+    /// The 16-byte account_id the client OPAQUE-authenticated as (head binding).
+    public let accountId: Data
+    /// Base64 account id — the floor-store key.
+    public let accountIdB64: String
+    /// Auth base for the attest-key fetch (default the DeviceAttestKey base).
+    public let authBaseUrl: String
+    /// Clock in ms (default now).
+    public let nowMillis: Int64
+    /// Staleness window in ms (default from the Info.plist knob).
+    public let stalenessMillis: Int64
+    /// Blocking confirmation for a stale head — MUST NOT auto-accept. A caller
+    /// with no UI (headless / tests) passes a closure returning `false`
+    /// (fail-closed — never a silent downgrade).
+    public let confirmStaleOverride: (String) async -> Bool
+
+    public init(
+        accountId: Data,
+        accountIdB64: String,
+        authBaseUrl: String = WebauthnClient.defaultBaseURL,
+        nowMillis: Int64 = Int64(Date().timeIntervalSince1970 * 1000),
+        stalenessMillis: Int64 = backupHeadStalenessMillis(),
+        confirmStaleOverride: @escaping (String) async -> Bool
+    ) {
+        self.accountId = accountId
+        self.accountIdB64 = accountIdB64
+        self.authBaseUrl = authBaseUrl
+        self.nowMillis = nowMillis
+        self.stalenessMillis = stalenessMillis
+        self.confirmStaleOverride = confirmStaleOverride
+    }
+}
+
+/// Discriminated restore-flow outcome (ADR-0037 §6). Mirror of the web
+/// `RestoreResult`.
+public enum RestoreOutcome {
+    /// Envelope opened + parsed. Load the payload.
+    case restored(ParsedBackupPayload)
+    /// No blob has ever been uploaded.
+    case noBackup
+    /// Wrong phrase or tampered blob (the core folds both into one).
+    case wrongPhraseOrTampered
+    /// The §6 rollback gate refused the served blob. `hard == true` = an
+    /// unambiguous tamper / corruption (no override); `hard == false` = a stale
+    /// head the user was offered and DECLINED to override. Either way no restore
+    /// happened — the caller alarms (hard) or notes (declined).
+    case rollbackBlocked(hard: Bool, reason: String)
+    /// Transport failure fetching the blob.
     case transportFailed(Error)
 }

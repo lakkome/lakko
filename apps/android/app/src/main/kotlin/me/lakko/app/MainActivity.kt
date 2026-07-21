@@ -384,6 +384,25 @@ private fun AppRoot(
             }
         }
     }
+
+    // ADR-0037 (G-11) — rollback-gate overlays, shown OVER any auth state (the
+    // recover flow can trigger them while still on the Anon screen). Both are
+    // window-hosted dialogs, so they float above whatever the router rendered.
+    val staleOverride by authRepository.staleOverridePrompt.collectAsState()
+    staleOverride?.let { prompt ->
+        me.lakko.app.ui.auth.StaleBackupOverrideDialog(
+            reason = prompt.reason,
+            onConfirm = { authRepository.resolveStaleOverride(true) },
+            onCancel = { authRepository.resolveStaleOverride(false) },
+        )
+    }
+    val rollbackAlert by authRepository.rollbackAlert.collectAsState()
+    rollbackAlert?.let { alert ->
+        me.lakko.app.ui.auth.BackupRollbackAlertDialog(
+            reason = alert.reason,
+            onDismiss = { authRepository.dismissRollbackAlert() },
+        )
+    }
 }
 
 /**

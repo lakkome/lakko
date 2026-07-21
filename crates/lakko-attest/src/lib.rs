@@ -42,11 +42,29 @@
 //! under a shared signing key.
 //!
 //! [ADR-0036]: ../../../docs/adr/0036-auth-attested-genesis.md
+//!
+//! # Backup-head commitment
+//!
+//! The crate also hosts a third attestation format, [`BackupHead`] (see the
+//! [`backup_head`] module, [ADR-0037]): an auth-signed commitment that a given
+//! encrypted backup envelope is the account's latest (highest monotonic
+//! `backup_version`), closing the fresh-install rollback residual. Like the
+//! other two it is a fixed-layout binary blob with its own distinct domain
+//! separator, so all three attestation kinds are cryptographically
+//! non-interchangeable even under a shared signing key. Unlike the genesis
+//! attestation it is auth-mint + client-verify only (no transparency / operator
+//! gate) and binds `account_id` directly.
+//!
+//! [ADR-0037]: ../../../docs/adr/0037-backup-head-rollback-commitment.md
 
 #![forbid(unsafe_code)]
 
+pub mod backup_head;
 pub mod genesis;
 
+pub use backup_head::{
+    verify_backup_head, verify_backup_head_binding, BackupHead, BackupHeadError, BACKUP_HEAD_LEN,
+};
 pub use genesis::{
     verify_genesis_binding, verify_genesis_fresh, GenesisAttestError, GenesisAttestation,
     GENESIS_ATTESTATION_LEN,
@@ -247,7 +265,7 @@ pub fn verify_bound(
 /// of its own.
 #[doc(hidden)]
 pub mod fuzz_api {
-    use super::{ActionAttestation, GenesisAttestation, SigningKey};
+    use super::{ActionAttestation, BackupHead, GenesisAttestation, SigningKey};
 
     /// Try to [`ActionAttestation::open`] the bytes against a FIXED verifying
     /// key. The bytes are attacker-controlled — an attestation rides alongside a
@@ -275,6 +293,20 @@ pub mod fuzz_api {
     pub fn open_genesis_attestation(bytes: &[u8]) -> bool {
         let vk = SigningKey::from_seed(&[0x11; 32]).verifying_key();
         GenesisAttestation::open(bytes, &vk).is_ok()
+    }
+
+    /// Try to [`BackupHead::open`] the bytes against a FIXED verifying key. The
+    /// bytes are attacker-controlled — the backup head is a prefix of the
+    /// storage backup blob (`CONTAINER_TAG ‖ head ‖ envelope`) a malicious
+    /// storage tier crafts (ADR-0037), reaching this bounded parser before any
+    /// state is consulted — and the parser must stay panic-free on any input.
+    /// The fuzzer cannot forge a valid signature against the fixed key, so it
+    /// exercises the length / version / field-slicing / signature-parse /
+    /// verify-fail path. Returns `true` on a (vanishingly rare) success.
+    #[must_use]
+    pub fn open_backup_head(bytes: &[u8]) -> bool {
+        let vk = SigningKey::from_seed(&[0x11; 32]).verifying_key();
+        BackupHead::open(bytes, &vk).is_ok()
     }
 }
 

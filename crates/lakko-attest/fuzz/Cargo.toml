@@ -41,3 +41,16 @@ path = "fuzz_targets/genesis_attestation_open.rs"
 test = false
 doc = false
 bench = false
+
+# `BackupHead::open` is the auth-signed backup-head parser (ADR-0037): a
+# fixed-layout 129-byte Ed25519-signed blob that rides as a prefix of the storage
+# backup blob (CONTAINER_TAG | head | envelope), which a malicious storage tier
+# can craft, so a malformed envelope is fully attacker-controlled and reaches this
+# bounded parser before any state is consulted. Any panic / overflow /
+# slice-out-of-bounds here is a vulnerability.
+[[bin]]
+name = "backup_head_open"
+path = "fuzz_targets/backup_head_open.rs"
+test = false
+doc = false
+bench = false

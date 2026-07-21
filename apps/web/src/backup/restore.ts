@@ -25,12 +25,22 @@
  * the user can still continue, just without their prior contacts.
  * Network failures are logged and the bootstrap continues.
  */
-import { applyRestoredContacts, BackupClient, type RestoreResult } from "./client";
+import {
+  applyRestoredContacts,
+  BackupClient,
+  type RestoreGateContext,
+  type RestoreResult,
+} from "./client";
 
 export interface BackupRestoreInputs {
   /** Bearer token to authorise the `/backup` GET. The session
    *  token bound by the recover flow. */
   readonly sessionToken: string;
+  /** ADR-0037 §6 rollback gate: verify the auth-signed backup head before
+   *  opening the envelope. When present the returning-client hard floor +
+   *  fresh-install freshness policy applies; when absent, legacy behaviour
+   *  (strip any head, no verification). The recover flow always supplies it. */
+  readonly gate?: RestoreGateContext;
 }
 
 /**
@@ -51,7 +61,7 @@ export async function restoreFromServerBackup(
 ): Promise<RestoreResult> {
   const client = new BackupClient();
   client.setSessionToken(inputs.sessionToken);
-  const result = await client.restore(phraseBytes);
+  const result = await client.restore(phraseBytes, inputs.gate);
   if (result.kind === "restored") {
     applyRestoredContacts(result.acceptedContacts);
   }

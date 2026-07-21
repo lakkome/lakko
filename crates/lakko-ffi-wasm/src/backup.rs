@@ -26,9 +26,12 @@
 //! shape. Web callers can sequence them at the JS layer without
 //! the wasm boundary hiding the layering.
 
+use lakko_attest::BackupHeadError;
 use lakko_backup::{
-    open as inner_open, payload::AcceptedContactRecord, seal as inner_seal, BackupPayload,
+    open as inner_open, payload::AcceptedContactRecord, seal as inner_seal, BackupBlob,
+    BackupPayload,
 };
+use lakko_crypto::signing::VerifyingKey;
 use wasm_bindgen::prelude::*;
 
 fn err_to_js(e: lakko_backup::BackupError) -> JsError {
@@ -312,6 +315,320 @@ pub fn open_backup(phrase: &[u8], wire: &[u8]) -> Result<Vec<u8>, JsError> {
     inner_open(phrase, wire).map_err(err_to_js)
 }
 
+// ============================================================================
+// Backup-head verify + envelope-hash helper (ADR-0037, G-11)
+// ============================================================================
+//
+// The rollback defence for a fresh-install restore. An auth-signed `BackupHead`
+// commits an account's LATEST backup envelope (highest monotone
+// `backup_version`); the web client verifies it against the CLIENT-PINNED auth
+// attest verifying key (the same `DeviceAttestKey` it already pins for device /
+// genesis attestations — ADR-0037 §3 reuses the key across all three roles,
+// kept safe by distinct domain separators). Verify only — signing is auth-only,
+// server-side (same posture as `verifyGenesisAttestation`).
+//
+// **Error discriminability (ADR-0037 §6).** `JsError` carries only a message
+// string — there is no structured discriminant on the JS boundary — but the
+// restore policy MUST tell a `Stale` head (user-acknowledged override) from an
+// `Invalid` one (hard fail-closed). So each thrown error message is prefixed
+// with a STABLE machine-readable code — `stale: …` or `invalid: …` — and the
+// web S5 client branches on that code (`err.message.startsWith("stale:")`),
+// never on the fragile human-readable detail. This is a documented convention
+// on the thrown message, not a new error channel.
+
+/// Stable code prefixed onto a thrown backup-head verify error when the head
+/// verified authentically but sits outside the freshness window — the
+/// user-acknowledged override class (ADR-0037 §6).
+const STALE_CODE: &str = "stale";
+
+/// Stable code prefixed onto a thrown backup-head verify error for every
+/// hard-fail-closed cause (malformed head, bad signature, account or
+/// envelope-hash mismatch, bad key / wrong-length input).
+const INVALID_CODE: &str = "invalid";
+
+/// Build a hard-fail-closed (`invalid`) coded error message.
+fn invalid(msg: &str) -> String {
+    format!("{INVALID_CODE}: {msg}")
+}
+
+/// Map a `BackupHeadError` onto a coded message: `Stale` → the override class,
+/// everything else → the hard-fail-closed class.
+fn map_head_err(e: &BackupHeadError) -> String {
+    match e {
+        BackupHeadError::Stale => format!("{STALE_CODE}: {e}"),
+        other => format!("{INVALID_CODE}: {other}"),
+    }
+}
+
+/// Parse the auth attest verifying-key bytes into a [`VerifyingKey`], mapping a
+/// bad key to the hard-fail-closed (`invalid`) class.
+fn parse_attest_key(bytes: &[u8]) -> Result<VerifyingKey, String> {
+    VerifyingKey::from_bytes(bytes)
+        .map_err(|_| invalid("attest verifying key is not a valid Ed25519 key"))
+}
+
+/// Structured view of a verified backup head — the wasm projection of
+/// `lakko_attest::BackupHead`. Returned by [`verify_backup_head`] and
+/// [`verify_backup_head_binding`] on success.
+#[wasm_bindgen]
+pub struct VerifiedBackupHead {
+    inner: lakko_attest::BackupHead,
+}
+
+impl From<lakko_attest::BackupHead> for VerifiedBackupHead {
+    fn from(inner: lakko_attest::BackupHead) -> Self {
+        Self { inner }
+    }
+}
+
+#[wasm_bindgen]
+impl VerifiedBackupHead {
+    /// The auth-assigned monotone backup version. Strictly increasing per
+    /// account; the caller refuses any head below its persisted floor
+    /// (`lastKnownVersion`) as a user-acknowledged rollback override.
+    #[wasm_bindgen(getter, js_name = backupVersion)]
+    pub fn backup_version(&self) -> u64 {
+        self.inner.backup_version
+    }
+
+    /// Raw 32-byte `BLAKE3` of the envelope portion the head commits to. Binds
+    /// the head to exactly the served envelope.
+    #[wasm_bindgen(getter, js_name = envelopeHash)]
+    pub fn envelope_hash(&self) -> Vec<u8> {
+        self.inner.envelope_hash.to_vec()
+    }
+
+    /// The mint timestamp, Unix **milliseconds** (BigInt on the JS side). The
+    /// client applies its own staleness window against this (it is not an
+    /// expiry).
+    #[wasm_bindgen(getter, js_name = signedAtMillis)]
+    pub fn signed_at_millis(&self) -> i64 {
+        self.inner.signed_at_unix_millis
+    }
+}
+
+/// Verify a backup head's signature, `accountId` binding, `envelopeHash`
+/// binding, AND freshness — the full check the web client applies on restore
+/// (ADR-0037 §6). Returns the parsed [`VerifiedBackupHead`] so the caller reads
+/// `backupVersion` for its own monotonic-floor comparison against its persisted
+/// `lastKnownVersion`.
+///
+/// `head` is the raw backup-head bytes (the container prefix of the served
+/// backup blob). `attestVerifyingKey` is the 32-byte client-pinned auth attest
+/// key. `expectedAccountId` is the client's authenticated 16-byte account id;
+/// `expectedEnvelopeHash` is the 32-byte [`backup_envelope_hash`] of the served
+/// envelope. `nowMillis` and `maxStalenessMillis` are Unix milliseconds.
+///
+/// Throws a coded `JsError`: `stale: …` when the head verified authentically but
+/// is outside the freshness window (the caller may offer a user-acknowledged
+/// override); `invalid: …` for every hard fail-closed cause (a malformed /
+/// wrong-length / wrong-version head, a signature that does not verify, an
+/// `accountId` / `envelopeHash` mismatch, or a bad key / wrong-length
+/// `expectedAccountId` / `expectedEnvelopeHash`). Branch on the code prefix.
+#[wasm_bindgen(js_name = verifyBackupHead)]
+pub fn verify_backup_head(
+    head: &[u8],
+    attest_verifying_key: &[u8],
+    expected_account_id: &[u8],
+    expected_envelope_hash: &[u8],
+    now_millis: i64,
+    max_staleness_millis: i64,
+) -> Result<VerifiedBackupHead, JsError> {
+    verify_backup_head_inner(
+        head,
+        attest_verifying_key,
+        expected_account_id,
+        expected_envelope_hash,
+        now_millis,
+        max_staleness_millis,
+    )
+    .map(VerifiedBackupHead::from)
+    .map_err(|msg| JsError::new(&msg))
+}
+
+/// The `JsError`-free core of [`verify_backup_head`]. Returns `Err(coded_msg)`
+/// on any failure so the negative paths — including the `stale` vs `invalid`
+/// code split — are exercisable on the host target (`JsError::new` panics on a
+/// non-wasm target per wasm-bindgen-0.2's "non-wasm targets" rule).
+fn verify_backup_head_inner(
+    head: &[u8],
+    attest_verifying_key: &[u8],
+    expected_account_id: &[u8],
+    expected_envelope_hash: &[u8],
+    now_millis: i64,
+    max_staleness_millis: i64,
+) -> Result<lakko_attest::BackupHead, String> {
+    let verifying = parse_attest_key(attest_verifying_key)?;
+    let expected_account: [u8; 16] = expected_account_id
+        .try_into()
+        .map_err(|_| invalid("expected_account_id must be 16 bytes"))?;
+    let expected_envelope_hash: [u8; 32] = expected_envelope_hash
+        .try_into()
+        .map_err(|_| invalid("expected_envelope_hash must be 32 bytes"))?;
+    lakko_attest::verify_backup_head(
+        head,
+        &verifying,
+        &expected_account,
+        &expected_envelope_hash,
+        now_millis,
+        max_staleness_millis,
+    )
+    .map_err(|e| map_head_err(&e))
+}
+
+/// Verify a backup head's signature and `accountId` binding ONLY — no
+/// `envelopeHash` or freshness check (ADR-0037 §6). For a caller that applies
+/// its own freshness and monotonic-floor policy (e.g. one that wants the parsed
+/// `backupVersion` before it has hashed the served envelope). Returns the parsed
+/// [`VerifiedBackupHead`].
+///
+/// Throws a coded `invalid: …` `JsError` on a malformed / wrong-length /
+/// wrong-version head, a signature that does not verify, an `accountId`
+/// mismatch, or a bad key / wrong-length `expectedAccountId`. This entry point
+/// performs no freshness check, so it never throws the `stale: …` code.
+#[wasm_bindgen(js_name = verifyBackupHeadBinding)]
+pub fn verify_backup_head_binding(
+    head: &[u8],
+    attest_verifying_key: &[u8],
+    expected_account_id: &[u8],
+) -> Result<VerifiedBackupHead, JsError> {
+    verify_backup_head_binding_inner(head, attest_verifying_key, expected_account_id)
+        .map(VerifiedBackupHead::from)
+        .map_err(|msg| JsError::new(&msg))
+}
+
+/// The `JsError`-free core of [`verify_backup_head_binding`] — host-testable,
+/// same rationale as [`verify_backup_head_inner`].
+fn verify_backup_head_binding_inner(
+    head: &[u8],
+    attest_verifying_key: &[u8],
+    expected_account_id: &[u8],
+) -> Result<lakko_attest::BackupHead, String> {
+    let verifying = parse_attest_key(attest_verifying_key)?;
+    let expected_account: [u8; 16] = expected_account_id
+        .try_into()
+        .map_err(|_| invalid("expected_account_id must be 16 bytes"))?;
+    lakko_attest::verify_backup_head_binding(head, &verifying, &expected_account)
+        .map_err(|e| map_head_err(&e))
+}
+
+/// Compute the `BLAKE3` envelope hash (`lakko_backup::chain::envelope_hash`)
+/// over the served backup envelope bytes — the 32-byte value the web client
+/// feeds as `expectedEnvelopeHash` to [`verify_backup_head`] at restore, and
+/// posts to `POST /auth/backup/head` at mint. Exposed so all three clients
+/// compute the identical hash without re-implementing BLAKE3. Returns the
+/// 32-byte hash.
+#[wasm_bindgen(js_name = backupEnvelopeHash)]
+#[must_use]
+pub fn backup_envelope_hash(envelope_bytes: &[u8]) -> Vec<u8> {
+    lakko_backup::chain::envelope_hash(envelope_bytes).to_vec()
+}
+
+// ============================================================================
+// Container-blob framing (ADR-0037 §4 / S4, G-11)
+// ============================================================================
+//
+// The auth-signed backup head rides INSIDE the one storage backup blob so the
+// head and the envelope it commits swap together in a single atomic PUT:
+// `CONTAINER_TAG(0xB1) ‖ head(129) ‖ envelope`. The web client frames on upload
+// and peeks byte 0 on restore to tell a framed blob from a legacy raw envelope.
+// `services/storage` is untouched — the blob stays opaque (invariant #2). This
+// surface is FRAMING ONLY; the caller verifies a framed head via
+// `verifyBackupHead` and applies the §6 fail-open / fail-closed policy.
+//
+// A truncated framed blob (tag present but too short for a head) throws the
+// `invalid: …` coded `JsError` — the hard fail-closed "Invalid" case (§6),
+// consistent with the backup-head verify error convention above.
+
+/// Structured view of a parsed backup blob — the wasm projection of
+/// `lakko_backup::BackupBlob`. Returned by [`parse_backup_blob`].
+#[wasm_bindgen]
+#[derive(Debug)]
+pub struct ParsedBackupBlob {
+    framed: bool,
+    head: Option<Vec<u8>>,
+    envelope: Vec<u8>,
+}
+
+#[wasm_bindgen]
+impl ParsedBackupBlob {
+    /// `true` when the blob carried the `0xB1` container tag and a full head;
+    /// `false` for a legacy raw envelope with no head.
+    #[wasm_bindgen(getter)]
+    pub fn framed(&self) -> bool {
+        self.framed
+    }
+
+    /// The raw backup-head bytes when `framed` is `true`, else `undefined`.
+    /// Still **unverified** — feed to [`verify_backup_head`] against the pinned
+    /// auth attest key.
+    #[wasm_bindgen(getter)]
+    pub fn head(&self) -> Option<Vec<u8>> {
+        self.head.clone()
+    }
+
+    /// The envelope portion (the whole blob when `framed` is `false`; the tail
+    /// after the tag + head when `framed` is `true`). Feed to [`open_backup`].
+    #[wasm_bindgen(getter)]
+    pub fn envelope(&self) -> Vec<u8> {
+        self.envelope.clone()
+    }
+}
+
+/// Frame an auth-signed backup head and its envelope into the single storage
+/// blob `CONTAINER_TAG ‖ head ‖ envelope` to PUT to `services/storage` on the
+/// mint / upload path (ADR-0037 §4). `head` must be the raw
+/// `lakko_attest::BACKUP_HEAD_LEN`-byte head bytes.
+///
+/// # Errors
+///
+/// Throws a coded `invalid: …` `JsError` if `head` is the wrong length (hard
+/// fail-closed).
+#[wasm_bindgen(js_name = frameBackupBlob)]
+pub fn frame_backup_blob(head: &[u8], envelope: &[u8]) -> Result<Vec<u8>, JsError> {
+    frame_backup_blob_inner(head, envelope).map_err(|m| JsError::new(&m))
+}
+
+/// The `JsError`-free core of [`frame_backup_blob`] — host-testable, same
+/// rationale as [`verify_backup_head_inner`].
+fn frame_backup_blob_inner(head: &[u8], envelope: &[u8]) -> Result<Vec<u8>, String> {
+    lakko_backup::frame_backup_blob(head, envelope).map_err(|e| invalid(&e.to_string()))
+}
+
+/// Peek a stored backup blob's container framing on the restore path, before any
+/// head verification or AEAD-open (ADR-0037 §4). Returns a [`ParsedBackupBlob`]
+/// carrying the framed-vs-legacy kind, the (unverified) head bytes when framed,
+/// and the envelope bytes.
+///
+/// # Errors
+///
+/// Throws a coded `invalid: …` `JsError` when the blob carries the `0xB1`
+/// container tag but is too short to hold a full head — active tamper /
+/// corruption of a framed blob (ADR-0037 §6 "Invalid"). A legacy (non-`0xB1`)
+/// or empty blob is **not** an error: it returns a `Legacy` [`ParsedBackupBlob`]
+/// (the §6 "Absent → fail-open" lane).
+#[wasm_bindgen(js_name = parseBackupBlob)]
+pub fn parse_backup_blob(blob: &[u8]) -> Result<ParsedBackupBlob, JsError> {
+    parse_backup_blob_inner(blob).map_err(|m| JsError::new(&m))
+}
+
+/// The `JsError`-free core of [`parse_backup_blob`] — host-testable, same
+/// rationale as [`verify_backup_head_inner`].
+fn parse_backup_blob_inner(blob: &[u8]) -> Result<ParsedBackupBlob, String> {
+    match lakko_backup::parse_backup_blob(blob).map_err(|e| invalid(&e.to_string()))? {
+        BackupBlob::Framed { head, envelope } => Ok(ParsedBackupBlob {
+            framed: true,
+            head: Some(head.to_vec()),
+            envelope,
+        }),
+        BackupBlob::Legacy(envelope) => Ok(ParsedBackupBlob {
+            framed: false,
+            head: None,
+            envelope,
+        }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -392,4 +709,147 @@ mod tests {
     // `lakko-backup` crate's own unit tests. The
     // `wasm-pack test --node` runner exercises the JS-boundary
     // error paths.
+
+    // ------------------------------------------------------------------------
+    // Backup-head verify (ADR-0037). Exercised through the `JsError`-free
+    // `_inner` cores so the `stale` vs `invalid` code split runs on the host.
+    // ------------------------------------------------------------------------
+
+    use lakko_crypto::signing::SigningKey;
+
+    fn signed_head(
+        signing: &SigningKey,
+        account: [u8; 16],
+        version: u64,
+        env_hash: [u8; 32],
+        signed_at_millis: i64,
+    ) -> Vec<u8> {
+        lakko_attest::BackupHead::new(account, version, env_hash, signed_at_millis)
+            .sign(signing)
+            .to_vec()
+    }
+
+    #[test]
+    fn backup_head_verify_round_trips() {
+        let signing = SigningKey::from_seed(&[0x11; 32]);
+        let key = signing.verifying_key().to_bytes();
+        let account = [0xAA; 16];
+        let env_hash = [0xBB; 32];
+        let wire = signed_head(&signing, account, 7, env_hash, 1_000_000);
+        let head =
+            verify_backup_head_inner(&wire, &key, &account, &env_hash, 1_000_000, 10_000).unwrap();
+        assert_eq!(head.backup_version, 7);
+        // Also exercise the wasm struct projection getters on the host.
+        let view = VerifiedBackupHead::from(head);
+        assert_eq!(view.backup_version(), 7);
+        assert_eq!(view.envelope_hash(), env_hash.to_vec());
+        assert_eq!(view.signed_at_millis(), 1_000_000);
+    }
+
+    #[test]
+    fn backup_head_stale_carries_the_stale_code() {
+        let signing = SigningKey::from_seed(&[0x11; 32]);
+        let key = signing.verifying_key().to_bytes();
+        let account = [0xAA; 16];
+        let env_hash = [0xBB; 32];
+        let wire = signed_head(&signing, account, 7, env_hash, 1_000_000);
+        let err = verify_backup_head_inner(&wire, &key, &account, &env_hash, 9_000_000, 10_000)
+            .expect_err("stale head is rejected");
+        assert!(
+            err.starts_with("stale:"),
+            "a stale head must carry the `stale` code, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn backup_head_invalid_causes_carry_the_invalid_code() {
+        let signing = SigningKey::from_seed(&[0x11; 32]);
+        let key = signing.verifying_key().to_bytes();
+        let account = [0xAA; 16];
+        let env_hash = [0xBB; 32];
+        let wire = signed_head(&signing, account, 7, env_hash, 1_000_000);
+
+        // Wrong verifying key → signature does not verify → invalid.
+        let other = SigningKey::from_seed(&[0x22; 32])
+            .verifying_key()
+            .to_bytes();
+        let err = verify_backup_head_inner(&wire, &other, &account, &env_hash, 1_000_000, 10_000)
+            .expect_err("wrong key is rejected");
+        assert!(err.starts_with("invalid:"), "got {err:?}");
+
+        // Envelope-hash mismatch → tamper signal → invalid, NOT stale.
+        let err = verify_backup_head_inner(&wire, &key, &account, &[0x00; 32], 1_000_000, 10_000)
+            .expect_err("envelope-hash mismatch is rejected");
+        assert!(err.starts_with("invalid:"), "got {err:?}");
+
+        // Bad-length expected account → invalid.
+        let err = verify_backup_head_inner(&wire, &key, &[0u8; 8], &env_hash, 1_000_000, 10_000)
+            .expect_err("bad account length is rejected");
+        assert!(err.starts_with("invalid:"), "got {err:?}");
+    }
+
+    #[test]
+    fn backup_head_binding_inner_ignores_freshness() {
+        let signing = SigningKey::from_seed(&[0x11; 32]);
+        let key = signing.verifying_key().to_bytes();
+        let account = [0xAA; 16];
+        let wire = signed_head(&signing, account, 42, [0xBB; 32], 1_000_000);
+        let head = verify_backup_head_binding_inner(&wire, &key, &account)
+            .expect("binding check ignores freshness");
+        assert_eq!(head.backup_version, 42);
+    }
+
+    #[test]
+    fn backup_envelope_hash_matches_core() {
+        let bytes = vec![0x5Au8; 128];
+        assert_eq!(
+            backup_envelope_hash(&bytes),
+            lakko_backup::chain::envelope_hash(&bytes).to_vec()
+        );
+    }
+
+    // ------------------------------------------------------------------------
+    // Container-blob framing (ADR-0037 §4). Exercised through the `JsError`-free
+    // `_inner` cores so the `invalid` error path runs on the host.
+    // ------------------------------------------------------------------------
+
+    #[test]
+    fn frame_then_parse_round_trips() {
+        let head = vec![0xABu8; 129];
+        let envelope = vec![0xCDu8; 64];
+        let blob = frame_backup_blob_inner(&head, &envelope).expect("frame");
+        assert_eq!(blob[0], 0xB1);
+        let parsed = parse_backup_blob_inner(&blob).expect("parse");
+        assert!(parsed.framed());
+        assert_eq!(parsed.head(), Some(head));
+        assert_eq!(parsed.envelope(), envelope);
+    }
+
+    #[test]
+    fn legacy_envelope_parses_as_unframed() {
+        // A v1 envelope begins with schema byte 0x01 — not the container tag.
+        let raw = vec![0x01u8, 0x02, 0x03];
+        let parsed = parse_backup_blob_inner(&raw).expect("parse");
+        assert!(!parsed.framed());
+        assert_eq!(parsed.head(), None);
+        assert_eq!(parsed.envelope(), raw);
+    }
+
+    #[test]
+    fn truncated_framed_blob_carries_the_invalid_code() {
+        // Tag present but too short to hold a head → hard fail-closed `invalid`.
+        let mut blob = vec![0xB1u8];
+        blob.extend_from_slice(&[0u8; 10]);
+        let err = parse_backup_blob_inner(&blob).expect_err("truncated framed blob is rejected");
+        assert!(
+            err.starts_with("invalid:"),
+            "a truncated framed blob must carry the `invalid` code, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn frame_rejects_wrong_length_head_with_invalid_code() {
+        let err = frame_backup_blob_inner(&[0u8; 128], &[]).expect_err("wrong-length head");
+        assert!(err.starts_with("invalid:"), "got {err:?}");
+    }
 }

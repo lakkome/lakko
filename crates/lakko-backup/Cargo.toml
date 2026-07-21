@@ -23,6 +23,13 @@ thiserror.workspace = true
 # envelope is a thin assembler: KDF → AEAD → wire layout.
 lakko-crypto.workspace = true
 
+# `BACKUP_HEAD_LEN` (ADR-0037): the container-tagged blob framing
+# (`head_frame`) wraps a `lakko-attest` backup head, so it reuses
+# the authoritative head-length const rather than pinning its own
+# copy. `lakko-attest` depends only on `lakko-crypto`, so this
+# introduces no dependency cycle.
+lakko-attest.workspace = true
+
 # CSPRNG for the Argon2 salt + AEAD nonce. Same `rand` major as
 # `lakko-attachments` so the workspace pulls one version.
 rand = "0.8"
