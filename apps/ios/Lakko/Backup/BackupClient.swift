@@ -169,17 +169,17 @@ public final class BackupClient {
     // MARK: - Restore
 
     /// Fetch + decrypt + parse the server-stored backup, applying the ADR-0037
-    /// §6 rollback gate (G-11) when a ``RestoreGateContext`` is supplied.
+    /// §6 rollback gate (G-11).
     ///
-    /// Mirror of the web `BackupClient.restore(phraseBytes, gate)`. Absent gate →
-    /// legacy behaviour (strip any head, no verification). Present gate → the
-    /// full three-case fail-open / fail-closed policy: `hardFail` → refuse +
-    /// alarm; `staleOverride` → ask the user (never silent); `failOpen` /
-    /// `proceed` → open the envelope (and, on a clean `proceed`, advance the
-    /// monotone floor).
+    /// Mirror of the web `BackupClient.restore(phraseBytes, gate)`. The gate is
+    /// **mandatory** (F2) — there is no ungated restore path: a served blob is
+    /// always run through the fail-open / fail-closed policy before its envelope
+    /// is opened. `hardFail` → refuse + alarm; `staleOverride` → ask the user
+    /// (never silent); `failOpen` / `proceed` → open the envelope (and, on a
+    /// clean `proceed`, advance the monotone floor).
     public func restore(
         phraseBytes: Data,
-        gate: RestoreGateContext? = nil
+        gate: RestoreGateContext
     ) async -> RestoreOutcome {
         let blob: Data?
         do {
@@ -189,49 +189,43 @@ public final class BackupClient {
         }
         guard let blob else { return .noBackup }
 
-        // ADR-0037 §6: apply the rollback gate to peel `TAG ‖ head` and decide
-        // proceed / fail-open / hard-fail / stale-override BEFORE opening the
-        // envelope. Absent gate → legacy behaviour (strip any head, no verify).
+        // ADR-0037 §6 (F2): the rollback gate is MANDATORY — always peel
+        // `TAG ‖ head` and decide proceed / fail-open / hard-fail / stale-override
+        // BEFORE opening the envelope. There is no ungated bypass that could strip
+        // a head unchecked.
         var envelope: Data = blob
         var cleanProceed: BackupFloor?
-        if let gate {
-            let evaluation = await evaluateRestoreBlob(
-                RestoreEvaluationInput(
-                    blob: blob,
-                    accountId: gate.accountId,
-                    accountIdB64: gate.accountIdB64,
-                    authBaseUrl: gate.authBaseUrl,
-                    nowMillis: gate.nowMillis,
-                    stalenessMillis: gate.stalenessMillis
-                )
+        let evaluation = await evaluateRestoreBlob(
+            RestoreEvaluationInput(
+                blob: blob,
+                accountId: gate.accountId,
+                accountIdB64: gate.accountIdB64,
+                authBaseUrl: gate.authBaseUrl,
+                nowMillis: gate.nowMillis,
+                stalenessMillis: gate.stalenessMillis
             )
-            switch evaluation.verdict {
-            case .hardFail(let reason):
-                // Refuse + alarm, no override (invariant #4 — no silent downgrade).
-                return .rollbackBlocked(hard: true, reason: reason)
-            case .staleOverride(let reason):
-                // Never silent-accept a stale head — require an explicit user ack.
-                let accepted = await gate.confirmStaleOverride(reason)
-                if !accepted {
-                    return .rollbackBlocked(hard: false, reason: reason)
-                }
-                // Accepted: proceed with the (older) envelope, but DO NOT advance
-                // the floor down — `putFloor` is monotone, so a deliberate
-                // downgrade never lowers this device's future protection.
-            case .failOpen, .proceed:
-                break
+        )
+        switch evaluation.verdict {
+        case .hardFail(let reason):
+            // Refuse + alarm, no override (invariant #4 — no silent downgrade).
+            return .rollbackBlocked(hard: true, reason: reason)
+        case .staleOverride(let reason):
+            // Never silent-accept a stale head — require an explicit user ack.
+            let accepted = await gate.confirmStaleOverride(reason)
+            if !accepted {
+                return .rollbackBlocked(hard: false, reason: reason)
             }
-            envelope = evaluation.envelope
-            if evaluation.verdict == .proceed,
-                let version = evaluation.verifiedVersion,
-                let hash = evaluation.envelopeHash {
-                cleanProceed = BackupFloor(version: version, envelopeHash: hash)
-            }
-        } else {
-            // Ungated caller: still strip a head defensively so a framed blob opens.
-            if let parsed = try? parseBackupBlob(blob: blob) {
-                envelope = parsed.envelope
-            }
+            // Accepted: proceed with the (older) envelope, but DO NOT advance the
+            // floor down — `putFloor` is monotone, so a deliberate downgrade never
+            // lowers this device's future protection.
+        case .failOpen, .proceed:
+            break
+        }
+        envelope = evaluation.envelope
+        if evaluation.verdict == .proceed,
+            let version = evaluation.verifiedVersion,
+            let hash = evaluation.envelopeHash {
+            cleanProceed = BackupFloor(version: version, envelopeHash: hash)
         }
 
         let payloadBytes: Data
@@ -254,7 +248,7 @@ public final class BackupClient {
         // subsequent restores on this device are hard-protected (returning-client
         // path). Skipped on fail-open (no verified head) and stale-override
         // (never lower the floor).
-        if let cleanProceed, let gate {
+        if let cleanProceed {
             do {
                 try BackupFloorStore.putFloor(
                     accountIdB64: gate.accountIdB64,
@@ -293,9 +287,10 @@ public enum UploadResult {
 }
 
 /// Context the restore seam threads into ``BackupClient/restore(phraseBytes:gate:)``
-/// to arm the ADR-0037 §6 rollback gate (G-11). Absent → legacy behaviour (strip
-/// any head, no verification). Present → the full three-case fail-open / closed
-/// policy. Mirror of the web `RestoreGateContext`.
+/// to arm the ADR-0037 §6 rollback gate (G-11). **Required** (F2) — there is no
+/// ungated restore path: a caller cannot omit it, so a served blob is always run
+/// through the fail-open / fail-closed policy before its envelope is opened.
+/// Mirror of the web `RestoreGateContext`.
 public struct RestoreGateContext {
     /// The 16-byte account_id the client OPAQUE-authenticated as (head binding).
     public let accountId: Data

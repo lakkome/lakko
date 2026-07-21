@@ -16,6 +16,19 @@
 //! > hash at backup version `N`, where `N` is auth's monotone counter's next
 //! > value for the account, at the mint timestamp.
 //!
+//! ## Rate-limit (ADR-0037 F5b)
+//!
+//! The mint is bearer-authed and own-account only, but a token holder can call
+//! it repeatedly for their own account — harmless to others, but unbounded DB
+//! writes. A generous, fail-open per-account cap ([`check_mint_rate`]) bounds it
+//! as defence-in-depth: "at most N mints per account per window W". It ships
+//! DISABLED (default limit `0`, the repo's default-OFF convention for a new
+//! gated feature) — an operator arms it with a positive
+//! `LAKKO_BACKUP_HEAD_MINT_RATE_LIMIT` (a generous `60`/`60s` is well above any
+//! legitimate auto-backup cadence) after verifying the window-reset upsert
+//! against a live MariaDB. It fails OPEN on a store error — a rate-limit is an
+//! availability gate, not a security invariant.
+//!
 //! The signature proves the head is **authentic**, not that it is **current** —
 //! two mechanisms turn authenticity into a rollback defence ([ADR-0037]): the
 //! **auth-assigned monotone `backup_version`** (a regression is structurally
@@ -62,6 +75,178 @@ use crate::AppState;
 
 /// Length of the `BLAKE3` envelope hash the head commits to.
 const ENVELOPE_HASH_LEN: usize = 32;
+
+// ----------------------------------------------------------------
+// Mint rate-limit (ADR-0037 F5b)
+// ----------------------------------------------------------------
+
+/// Env var — max mints per account per window. `0` disables the limit.
+const MINT_RATE_LIMIT_VAR: &str = "LAKKO_BACKUP_HEAD_MINT_RATE_LIMIT";
+/// Env var — the fixed rate-limit window in seconds.
+const MINT_RATE_WINDOW_VAR: &str = "LAKKO_BACKUP_HEAD_MINT_RATE_WINDOW_SECS";
+
+/// Default limit — `0`, i.e. the rate-limit ships DISABLED (unbounded), the
+/// repo's default-OFF convention for a new gated feature. An operator enables it
+/// by setting `LAKKO_BACKUP_HEAD_MINT_RATE_LIMIT` to a positive value AFTER
+/// verifying the window-reset upsert against a live MariaDB (the DB-backed tests
+/// here are `LAKKO_AUTH_TEST_DATABASE_URL`-gated and have not run live yet). A
+/// GENEROUS operational value is 60 mints/account/window: far above any
+/// legitimate auto-backup cadence (a client uploads its whole sealed state blob
+/// on significant events, coalesced — nowhere near one per second sustained), so
+/// a legitimate client never trips it. It is a pure abuse cap on unbounded
+/// own-account DB writes, not a security gate.
+const DEFAULT_MINT_RATE_LIMIT: u64 = 0;
+/// Default window — 60 seconds (only consulted once a positive limit is set).
+const DEFAULT_MINT_RATE_WINDOW_SECS: u64 = 60;
+
+/// Configuration for the per-account backup-head mint rate-limit. Loaded once at
+/// startup from the environment (see [`MintRateConfig::from_env`]) and carried
+/// on `AppState`. All-`Copy` — no allocation.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct MintRateConfig {
+    /// Max mints per account per window. `0` disables the limit entirely
+    /// (unbounded — the pre-ADR-0037-F5b behaviour).
+    pub(crate) limit: u64,
+    /// The fixed window (seconds) over which mints are counted per account.
+    pub(crate) window_secs: u64,
+}
+
+impl MintRateConfig {
+    /// Load the mint rate-limit configuration from the environment. Defaults to
+    /// DISABLED (limit `0`, unbounded) for any unset / unparseable var — set
+    /// `LAKKO_BACKUP_HEAD_MINT_RATE_LIMIT` to a positive value (e.g. 60) to arm
+    /// it, over `LAKKO_BACKUP_HEAD_MINT_RATE_WINDOW_SECS` (default 60).
+    pub(crate) fn from_env() -> Self {
+        Self {
+            limit: parse_env_u64(MINT_RATE_LIMIT_VAR, DEFAULT_MINT_RATE_LIMIT),
+            window_secs: parse_env_u64(MINT_RATE_WINDOW_VAR, DEFAULT_MINT_RATE_WINDOW_SECS),
+        }
+    }
+
+    /// A disabled configuration (`limit == 0`). Used by the test `AppState`
+    /// builders + as the safe value where a real config is not wired.
+    #[cfg(test)]
+    pub(crate) const fn disabled() -> Self {
+        Self {
+            limit: 0,
+            window_secs: DEFAULT_MINT_RATE_WINDOW_SECS,
+        }
+    }
+
+    /// Whether the limit is armed (`limit != 0`).
+    pub(crate) const fn enabled(self) -> bool {
+        self.limit != 0
+    }
+}
+
+/// Read a `u64` env var, falling back to `default` when unset or unparseable.
+fn parse_env_u64(name: &str, default: u64) -> u64 {
+    std::env::var(name)
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(default)
+}
+
+/// The outcome of the mint rate-limit gate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MintRateDecision {
+    /// Proceed to mint. Returned when the limit is disabled, the account is
+    /// under its per-window cap, or the store errored (fail-open).
+    Allow,
+    /// Refuse the mint — the account is over its per-window cap (`429`).
+    Limited,
+}
+
+/// Run the per-account mint rate-limit gate.
+///
+/// **Fails OPEN**: any store error returns [`MintRateDecision::Allow`] (logged),
+/// so a DB blip can never block a legitimate backup. The limit is anti-abuse
+/// defence-in-depth on unbounded own-account DB writes, not a security gate;
+/// failing closed would self-DoS legitimate backups. This is the deliberate
+/// exception to the fail-closed default (invariant #4), which governs the E2EE
+/// handshake path — not this availability gate, which never touches key material
+/// or ciphertext (invariant #2: only per-account mint bookkeeping is stored).
+pub(crate) async fn check_mint_rate(
+    pool: &MySqlPool,
+    cfg: MintRateConfig,
+    account_id: &[u8; 16],
+) -> MintRateDecision {
+    // Disabled — never touch the DB.
+    if !cfg.enabled() {
+        return MintRateDecision::Allow;
+    }
+
+    match record_and_count(pool, account_id, cfg.window_secs).await {
+        Ok(count) => {
+            if count > cfg.limit {
+                tracing::warn!(
+                    count,
+                    limit = cfg.limit,
+                    "backup-head mint rate-limit tripped — refusing mint"
+                );
+                MintRateDecision::Limited
+            } else {
+                MintRateDecision::Allow
+            }
+        },
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "backup-head mint rate-limit store error — failing OPEN (minting)"
+            );
+            MintRateDecision::Allow
+        },
+    }
+}
+
+/// Record this mint attempt against the account's fixed window and return the
+/// resulting in-window count.
+///
+/// A single atomic upsert per account: on the duplicate-key branch, `mint_count`
+/// resets to `1` when the prior window has elapsed (else increments) and
+/// `window_start` resets to now in the same case (else stays). Both branch
+/// conditions read the PRE-update `window_start`: MySQL evaluates
+/// `ON DUPLICATE KEY UPDATE` assignments left-to-right and `window_start` is not
+/// referenced by an earlier assignment, so both `IF`s see the old value. The
+/// row is then read back for the count. One row per account — bounded by
+/// construction (no event rows, no pruner needed).
+///
+/// # Errors
+///
+/// Any `sqlx::Error` from the transaction (begin / upsert / select / commit).
+async fn record_and_count(
+    pool: &MySqlPool,
+    account_id: &[u8; 16],
+    window_secs: u64,
+) -> Result<u64, sqlx::Error> {
+    // A pathological env value saturates rather than wrapping. The `INTERVAL ?
+    // SECOND` bind wants a signed integer.
+    let window = i64::try_from(window_secs).unwrap_or(i64::MAX);
+
+    let mut tx = pool.begin().await?;
+
+    sqlx::query(
+        "INSERT INTO backup_head_mint_limits (account_id, window_start, mint_count) \
+         VALUES (?, NOW(3), 1) \
+         ON DUPLICATE KEY UPDATE \
+           mint_count = IF(window_start <= NOW(3) - INTERVAL ? SECOND, 1, mint_count + 1), \
+           window_start = IF(window_start <= NOW(3) - INTERVAL ? SECOND, NOW(3), window_start)",
+    )
+    .bind(&account_id[..])
+    .bind(window)
+    .bind(window)
+    .execute(&mut *tx)
+    .await?;
+
+    let count: u64 =
+        sqlx::query_scalar("SELECT mint_count FROM backup_head_mint_limits WHERE account_id = ?")
+            .bind(&account_id[..])
+            .fetch_one(&mut *tx)
+            .await?;
+
+    tx.commit().await?;
+    Ok(count)
+}
 
 /// Decode the URL-safe base64 32-byte envelope hash from the wire.
 fn decode_envelope_hash(b64: &str) -> Result<[u8; ENVELOPE_HASH_LEN], ApiError> {
@@ -143,6 +328,17 @@ pub(crate) async fn backup_head(
     Json(req): Json<BackupHeadReq>,
 ) -> Result<Json<BackupHeadRes>, ApiError> {
     let envelope_hash = decode_envelope_hash(&req.envelope_hash_b64)?;
+
+    // ADR-0037 F5b — generous, fail-open per-account mint rate-limit. Runs AFTER
+    // cheap input validation, BEFORE the counter bump + signing, so a limited
+    // request does not consume a monotone version or do the mint write. Disabled
+    // by default only when `LAKKO_BACKUP_HEAD_MINT_RATE_LIMIT=0`; fails OPEN on a
+    // store error (see `check_mint_rate`).
+    if check_mint_rate(&state.db, state.backup_head_mint_rate, &auth.0).await
+        == MintRateDecision::Limited
+    {
+        return Err(ApiError::RateLimited);
+    }
 
     // STATEFUL: the auth-assigned version is the monotone counter's next value —
     // never client-supplied, so a regression is structurally impossible.
@@ -249,6 +445,72 @@ mod tests {
         assert_ne!(got.backup_version, got8.backup_version);
     }
 
+    // ---- mint rate-limit: pure (no DB) --------------------------------------
+
+    #[test]
+    fn mint_rate_config_defaults_and_disabled() {
+        let disabled = MintRateConfig::disabled();
+        assert_eq!(disabled.limit, 0);
+        assert!(!disabled.enabled());
+
+        let armed = MintRateConfig {
+            limit: 60,
+            window_secs: 60,
+        };
+        assert!(armed.enabled());
+    }
+
+    /// A disabled limit short-circuits BEFORE any DB access — proven by passing
+    /// a pool that could never connect (port 1) and still getting `Allow`
+    /// without an error / hang.
+    #[tokio::test]
+    async fn disabled_mint_rate_never_touches_db() {
+        use sqlx::mysql::{MySqlConnectOptions, MySqlPoolOptions};
+        use std::time::Duration;
+        let pool = MySqlPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(Duration::from_millis(200))
+            .connect_lazy_with(
+                MySqlConnectOptions::new()
+                    .host("127.0.0.1")
+                    .port(1)
+                    .username("nobody")
+                    .database("nodb"),
+            );
+        let decision = check_mint_rate(&pool, MintRateConfig::disabled(), &[1u8; 16]).await;
+        assert_eq!(decision, MintRateDecision::Allow);
+    }
+
+    /// The fail-open branch. An ARMED limit whose store errors (unreachable DB)
+    /// must return `Allow` (mint), never `Limited` — a store blip can never
+    /// block a legitimate backup.
+    #[tokio::test]
+    async fn armed_mint_rate_fails_open_on_store_error() {
+        use sqlx::mysql::{MySqlConnectOptions, MySqlPoolOptions};
+        use std::time::Duration;
+        let pool = MySqlPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(Duration::from_millis(200))
+            .connect_lazy_with(
+                MySqlConnectOptions::new()
+                    .host("127.0.0.1")
+                    .port(1) // connection refused -> sqlx error -> fail-open
+                    .username("nobody")
+                    .database("nodb"),
+            );
+        let cfg = MintRateConfig {
+            limit: 3,
+            window_secs: 60,
+        };
+        assert!(cfg.enabled());
+        let decision = check_mint_rate(&pool, cfg, &[1u8; 16]).await;
+        assert_eq!(
+            decision,
+            MintRateDecision::Allow,
+            "an armed mint rate-limit must FAIL OPEN when the store is unreachable"
+        );
+    }
+
     #[test]
     fn rejects_a_malformed_envelope_hash() {
         // 31 bytes — one short of the 32-byte BLAKE3.
@@ -326,5 +588,143 @@ mod tests {
             bump_backup_version(&pool, &acct_a).await.expect("bump a4"),
             4
         );
+    }
+
+    // ---- mint rate-limit: DB-backed ------------------------------------------
+    //
+    // Same `LAKKO_AUTH_TEST_DATABASE_URL` gating as above — skip when unset.
+
+    /// Under-limit mints are all allowed; the (limit+1)-th mint within the same
+    /// window is `Limited`, and every further mint stays `Limited` until the
+    /// window elapses.
+    #[tokio::test]
+    async fn mint_rate_allows_under_limit_then_refuses_the_rest_of_the_window() {
+        let Some(pool) =
+            test_pool("mint_rate_allows_under_limit_then_refuses_the_rest_of_the_window").await
+        else {
+            return;
+        };
+        // A long window so the test never rolls over mid-run.
+        let cfg = MintRateConfig {
+            limit: 3,
+            window_secs: 3_600,
+        };
+        let acct: [u8; 16] = uuid::Uuid::now_v7().into_bytes();
+
+        // Counts 1, 2, 3 are all <= limit -> Allow.
+        for _ in 0..3 {
+            assert_eq!(
+                check_mint_rate(&pool, cfg, &acct).await,
+                MintRateDecision::Allow
+            );
+        }
+        // Count 4 > limit -> Limited.
+        assert_eq!(
+            check_mint_rate(&pool, cfg, &acct).await,
+            MintRateDecision::Limited
+        );
+        // Still Limited for the rest of the window.
+        assert_eq!(
+            check_mint_rate(&pool, cfg, &acct).await,
+            MintRateDecision::Limited
+        );
+    }
+
+    /// The window is per-account: one account tripping its cap never affects a
+    /// different account, which starts its own count fresh.
+    #[tokio::test]
+    async fn mint_rate_is_per_account_isolated() {
+        let Some(pool) = test_pool("mint_rate_is_per_account_isolated").await else {
+            return;
+        };
+        let cfg = MintRateConfig {
+            limit: 2,
+            window_secs: 3_600,
+        };
+        let acct_a: [u8; 16] = uuid::Uuid::now_v7().into_bytes();
+        let acct_b: [u8; 16] = uuid::Uuid::now_v7().into_bytes();
+
+        // Trip account A (counts 1, 2 allowed; 3 limited).
+        assert_eq!(
+            check_mint_rate(&pool, cfg, &acct_a).await,
+            MintRateDecision::Allow
+        );
+        assert_eq!(
+            check_mint_rate(&pool, cfg, &acct_a).await,
+            MintRateDecision::Allow
+        );
+        assert_eq!(
+            check_mint_rate(&pool, cfg, &acct_a).await,
+            MintRateDecision::Limited
+        );
+
+        // Account B is unaffected — its own window starts fresh.
+        assert_eq!(
+            check_mint_rate(&pool, cfg, &acct_b).await,
+            MintRateDecision::Allow
+        );
+        assert_eq!(
+            check_mint_rate(&pool, cfg, &acct_b).await,
+            MintRateDecision::Allow
+        );
+    }
+
+    /// An elapsed window resets the counter: with a sub-second window a short
+    /// sleep rolls it over and the next mint is `Allow` again (count back to 1).
+    #[tokio::test]
+    async fn mint_rate_window_resets_after_it_elapses() {
+        let Some(pool) = test_pool("mint_rate_window_resets_after_it_elapses").await else {
+            return;
+        };
+        // 1-second window (the smallest whole-second window). Trip it, wait for
+        // it to elapse, and confirm the next mint is allowed (reset to count 1).
+        let cfg = MintRateConfig {
+            limit: 1,
+            window_secs: 1,
+        };
+        let acct: [u8; 16] = uuid::Uuid::now_v7().into_bytes();
+
+        // Count 1 -> Allow; count 2 in the same window -> Limited.
+        assert_eq!(
+            check_mint_rate(&pool, cfg, &acct).await,
+            MintRateDecision::Allow
+        );
+        assert_eq!(
+            check_mint_rate(&pool, cfg, &acct).await,
+            MintRateDecision::Limited
+        );
+
+        // Wait for the window to elapse (INTERVAL 1 SECOND is inclusive via
+        // `<=`, plus margin), then the next mint resets to count 1 -> Allow.
+        tokio::time::sleep(std::time::Duration::from_millis(1_200)).await;
+        assert_eq!(
+            check_mint_rate(&pool, cfg, &acct).await,
+            MintRateDecision::Allow
+        );
+    }
+
+    /// With `limit == 0` the gate is fully disabled — an unbounded burst on one
+    /// account is all allowed and nothing is written.
+    #[tokio::test]
+    async fn mint_rate_disabled_allows_unbounded_burst() {
+        let Some(pool) = test_pool("mint_rate_disabled_allows_unbounded_burst").await else {
+            return;
+        };
+        let cfg = MintRateConfig::disabled();
+        let acct: [u8; 16] = uuid::Uuid::now_v7().into_bytes();
+        for _ in 0..12 {
+            assert_eq!(
+                check_mint_rate(&pool, cfg, &acct).await,
+                MintRateDecision::Allow
+            );
+        }
+        // The disabled path never touches the table.
+        let rows: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM backup_head_mint_limits WHERE account_id = ?")
+                .bind(&acct[..])
+                .fetch_one(&pool)
+                .await
+                .expect("count rows");
+        assert_eq!(rows, 0);
     }
 }

@@ -608,6 +608,40 @@ availability choice only; the envelope stays phrase-AEAD
 sealed regardless of the head, so invariant #4 (no silent
 downgrade to non-E2EE) is untouched.
 
+**Post-ADR-0037 `lakko-security` pass (APPROVE-WITH-NOTES).**
+The review found no CRITICAL / HIGH and no invariant-#4 break
+on the live path; the F1–F5b hardenings that landed from it
+tighten the gate so the code now matches the residual wording
+above rather than being looser than it. **F4** (all three
+clients): the restore gate's ABSENT-head case no longer
+silently fail-opens for a *returning* client. New policy —
+absent head + no floor → fail-open (a true zero-anchor fresh
+install, unchanged); absent head + a persisted floor +
+`BLAKE3(legacy envelope) == floor.envelope_hash` → proceed
+(the head was stripped benignly in transit, byte-identical to
+the last known one); absent head + a floor + a **different**
+envelope → user-acknowledged stale-override (a head-stripping
+downgrade against head-protected history). So the earlier code,
+in which the absent path bypassed the floor, is corrected — the
+within-window fail-open residual is now genuinely confined to a
+**true zero-anchor fresh install**, exactly as this entry's
+"any client that ever persisted a floor is hard-protected"
+claim already stated. **F5a** (all three clients): the floor
+read distinguishes absent vs present vs **corrupt** — a
+present-but-undecryptable / tampered floor routes to
+stale-override, never a silent demote to the weaker
+fresh-window path. **F2** (all three clients): the restore gate
+is now mandatory (the ungated no-verification restore path was
+removed). **F1** (all three clients): a loud warning when the
+head is verified against an unpinned (JWKS-served) attest key.
+**F3** (Android only): the `parseBackupBlob` catch widened to
+`Throwable` — a clean hard-fail, not an uncaught escape. **F5b**
+(auth): a per-account, **fail-open** rate-limit on
+`POST /auth/backup/head` (`backup_head_mint_limits`, migration
+`0016`), shipped **DEFAULT-OFF** (`LAKKO_BACKUP_HEAD_MINT_RATE_LIMIT`
+default `0`; armed with a positive value only after live-DB
+verification of the window-reset upsert).
+
 Touchpoints: `crates/lakko-attest/src/backup_head.rs`
 (`BackupHead` primitive, 129-byte layout, domain
 `lakko/backup-head/v1`);

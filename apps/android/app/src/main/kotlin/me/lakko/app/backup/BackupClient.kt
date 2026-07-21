@@ -13,7 +13,6 @@ import uniffi.lakko_ffi_uniffi.backupEnvelopeHash
 import uniffi.lakko_ffi_uniffi.buildBackupPayload
 import uniffi.lakko_ffi_uniffi.frameBackupBlob
 import uniffi.lakko_ffi_uniffi.openBackup
-import uniffi.lakko_ffi_uniffi.parseBackupBlob
 import uniffi.lakko_ffi_uniffi.parseBackupPayload
 import uniffi.lakko_ffi_uniffi.sealBackup
 
@@ -176,24 +175,6 @@ public class BackupClient(
     // -----------------------------------------------------------------
     // Restore
     // -----------------------------------------------------------------
-
-    /** Fetch + decrypt + parse the server-stored backup, UNGATED. Returns
-     *  `null` when no blob has been uploaded yet; throws on transport /
-     *  wrong-phrase / decode failures (caller distinguishes via the thrown
-     *  type). Defensively strips any ADR-0037 framed head so a framed blob
-     *  still opens; use [restore] with a gate for the rollback defence. */
-    public suspend fun restore(phraseBytes: ByteArray): ParsedBackupPayload? {
-        val blob = storage.getBackup() ?: return null
-        // Defensively strip a framed head (no verification) so a framed blob
-        // opens under the phrase; a legacy blob is returned whole.
-        val envelope = try {
-            parseBackupBlob(blob).envelope
-        } catch (_: Throwable) {
-            blob
-        }
-        val payloadBytes = openBackup(phrase = phraseBytes, wire = envelope)
-        return parseBackupPayload(payloadBytes)
-    }
 
     /**
      * Fetch + verify + decrypt + parse the server-stored backup with the

@@ -52,8 +52,12 @@ object DeviceAttestKey {
     @Volatile private var cachedAtMs: Long = 0
 
     /** The build-time pinned key (`BuildConfig.LAKKO_DEVICE_ATTEST_KEY`,
-     *  base64url of 32 bytes), or `null` when unset / malformed. */
-    private fun pinnedKey(): ByteArray? {
+     *  base64url of 32 bytes), or `null` when unset / malformed. Exposed so the
+     *  backup-head restore gate (ADR-0037 F1) can detect a JWKS-sourced (unpinned)
+     *  key and warn about the weakened rollback posture — a `null` here (after a
+     *  successful [fetch]) means the key was JWKS-served, since a pinned key wins
+     *  outright in [fetch] before the endpoint is ever consulted. */
+    fun pinnedKey(): ByteArray? {
         val raw = BuildConfig.LAKKO_DEVICE_ATTEST_KEY.trim()
         if (raw.isEmpty()) return null
         return try {

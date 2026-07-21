@@ -119,8 +119,9 @@ export type RestoreResult =
 
 /**
  * Context the restore seam threads into [`BackupClient.restore`] to arm the
- * ADR-0037 §6 rollback gate. Absent → legacy behaviour (strip any head, no
- * verification). Present → the full three-case fail-open/closed policy.
+ * ADR-0037 §6 rollback gate. **Required** (F2) — there is no ungated restore
+ * path: a caller cannot omit it, so a served blob is always run through the
+ * fail-open/closed policy before its envelope is opened.
  */
 export interface RestoreGateContext {
   /** The 16-byte account_id the client OPAQUE-authenticated as (head binding). */
@@ -313,7 +314,7 @@ export class BackupClient {
    */
   async restore(
     phraseBytes: Uint8Array,
-    gate?: RestoreGateContext,
+    gate: RestoreGateContext,
   ): Promise<RestoreResult> {
     let blob: Uint8Array | null;
     try {
@@ -325,12 +326,12 @@ export class BackupClient {
 
     const wasm = await loadWasm();
 
-    // ADR-0037 §6: apply the rollback gate to peel `TAG ‖ head` and decide
-    // proceed / fail-open / hard-fail / stale-override BEFORE opening the
-    // envelope. Absent gate → legacy behaviour (strip any head, no verify).
-    let envelope: Uint8Array = blob;
+    // ADR-0037 §6 (F2): the rollback gate is MANDATORY — always peel `TAG ‖ head`
+    // and decide proceed / fail-open / hard-fail / stale-override BEFORE opening
+    // the envelope. There is no ungated bypass that could strip a head unchecked.
+    let envelope: Uint8Array;
     let cleanProceed: BackupFloor | null = null;
-    if (gate !== undefined) {
+    {
       const evaluation = await evaluateRestoreBlob({
         blob,
         accountId: gate.accountId,
@@ -366,13 +367,6 @@ export class BackupClient {
           version: evaluation.verifiedVersion,
           envelopeHash: evaluation.envelopeHash,
         };
-      }
-    } else {
-      // Ungated caller: still strip a head defensively so a framed blob opens.
-      try {
-        envelope = wasm.parseBackupBlob(blob).envelope;
-      } catch {
-        envelope = blob;
       }
     }
 
@@ -414,7 +408,7 @@ export class BackupClient {
     // subsequent restores on this device are hard-protected (returning-client
     // path). Skipped on fail-open (no verified head) and stale-override
     // (never lower the floor).
-    if (gate !== undefined && cleanProceed !== null) {
+    if (cleanProceed !== null) {
       try {
         await putFloor(gate.accountIdB64, cleanProceed, gate.deviceKey);
       } catch (err) {

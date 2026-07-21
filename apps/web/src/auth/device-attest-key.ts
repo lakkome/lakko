@@ -46,9 +46,17 @@ interface CacheEntry {
 
 let cache: CacheEntry | null = null;
 
-/** The build-time pinned key (`VITE_LAKKO_DEVICE_ATTEST_KEY`, base64url of
- *  32 bytes), or `null` when unset / malformed. */
-function pinnedKey(): Uint8Array | null {
+/**
+ * The build-time pinned key (`VITE_LAKKO_DEVICE_ATTEST_KEY`, base64url of
+ * 32 bytes), or `null` when unset / malformed.
+ *
+ * Exported so a caller can tell whether [`fetchDeviceAttestKey`] returned the
+ * build-time pin (strong posture) or fell back to the JWKS endpoint (weaker —
+ * the auth origin is trusted to serve the key). The pin wins outright in
+ * `fetchDeviceAttestKey`, so `pinnedDeviceAttestKey() !== null` is an exact,
+ * race-free indicator that the fetched key was the pin.
+ */
+export function pinnedDeviceAttestKey(): Uint8Array | null {
   const env = import.meta.env as Record<string, string | undefined>;
   const raw = env["VITE_LAKKO_DEVICE_ATTEST_KEY"];
   if (typeof raw !== "string" || raw.trim().length === 0) return null;
@@ -73,7 +81,7 @@ export async function fetchDeviceAttestKey(
   nowMs: number = Date.now(),
 ): Promise<Uint8Array> {
   // A build-time pinned key wins outright — never consult the JWKS endpoint.
-  const pinned = pinnedKey();
+  const pinned = pinnedDeviceAttestKey();
   if (pinned !== null) return pinned;
 
   if (cache && nowMs - cache.fetchedAtMs < DEFAULT_TTL_MS) {

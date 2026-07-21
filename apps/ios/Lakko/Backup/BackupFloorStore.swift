@@ -67,8 +67,10 @@ public enum BackupFloorStore {
             )
         }
 
-        // Never lower an existing floor.
-        if let existing = getFloor(accountIdB64: accountIdB64),
+        // Never lower an existing (readable) floor. A corrupt / absent existing
+        // floor is overwritten by this fresh, valid one — the write heals the
+        // anchor (only a `.present` floor at or above the new version no-ops).
+        if case .present(let existing) = getFloor(accountIdB64: accountIdB64),
             existing.version >= floor.version {
             return
         }
@@ -95,12 +97,17 @@ public enum BackupFloorStore {
 
     /// Read the version floor for `accountIdB64`.
     ///
-    /// Returns `nil` when no floor exists (fresh device — the zero-anchor path)
-    /// OR when the stored row cannot be read / parsed. Treating a broken floor as
-    /// "absent" is fail-safe: the restore then falls back to the freshness-window
-    /// path rather than throwing — the floor is a rollback OPTIMISATION, never
-    /// the confidentiality boundary.
-    public static func getFloor(accountIdB64: String) -> BackupFloor? {
+    /// Returns a discriminated ``FloorRead`` (F5a):
+    /// - `.absent` — no Keychain item (`errSecItemNotFound`): a fresh device, the
+    ///   zero-anchor path. **Fail-safe:** a first-ever restore is NEVER `.corrupt`.
+    /// - `.present(floor)` — a Keychain item exists and decodes to the fixed
+    ///   40-byte `version(8 BE) ‖ envelopeHash(32)` layout.
+    /// - `.corrupt` — a Keychain item EXISTS but its bytes are the wrong length /
+    ///   undecodable (a corrupt write or an active tamper). Distinct from
+    ///   `.absent`: the anchor once existed and is now untrustworthy, so the
+    ///   restore gate must NOT silently fall to the weaker freshness path — it
+    ///   routes a corrupt anchor to `staleOverride`.
+    public static func getFloor(accountIdB64: String) -> FloorRead {
         let query: [CFString: Any] = [
             kSecClass: kSecClassGenericPassword,
             kSecAttrService: serviceTag,
@@ -110,9 +117,19 @@ public enum BackupFloorStore {
         ]
         var item: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &item)
-        guard status == errSecSuccess, let data = item as? Data,
-            data.count == recordLength else {
-            return nil
+        // No row at all → genuinely absent (fresh device). Any OTHER non-success
+        // status leaves us unable to read a row we cannot prove absent; treat it
+        // fail-safe as absent too (only a PRESENT-but-broken row is corrupt).
+        if status == errSecItemNotFound {
+            return .absent
+        }
+        guard status == errSecSuccess, let data = item as? Data else {
+            return .absent
+        }
+        // The item is present. A wrong-length payload is an untrustworthy anchor,
+        // NOT an absent one — surface it as corrupt so the gate fails closed.
+        guard data.count == recordLength else {
+            return .corrupt
         }
         let versionBytes = data.prefix(8)
         var version: UInt64 = 0
@@ -120,7 +137,7 @@ public enum BackupFloorStore {
             version = (version << 8) | UInt64(byte)
         }
         let hash = Data(data.suffix(from: data.startIndex + 8))
-        return BackupFloor(version: version, envelopeHash: hash)
+        return .present(BackupFloor(version: version, envelopeHash: hash))
     }
 
     /// Erase the floor for `accountIdB64`. No-op when absent — used by
@@ -151,6 +168,21 @@ public struct BackupFloor: Equatable {
         self.version = version
         self.envelopeHash = envelopeHash
     }
+}
+
+/// The outcome of reading the floor (F5a). Distinguishes a genuinely absent
+/// anchor (fresh device) from an anchor that EXISTS but is untrustworthy (a
+/// present-but-undecodable Keychain row — a corrupt write or an active tamper).
+/// The restore gate must never silently demote a corrupt anchor to the weaker
+/// fresh-install path — it routes it to `staleOverride` instead. Mirror of the
+/// web `FloorRead`.
+public enum FloorRead: Equatable {
+    /// No Keychain item — a first-ever restore on this device (zero-anchor path).
+    case absent
+    /// A valid, decoded floor.
+    case present(BackupFloor)
+    /// A Keychain item EXISTS but its bytes are the wrong length / undecodable.
+    case corrupt
 }
 
 /// Error vocabulary for ``BackupFloorStore``.

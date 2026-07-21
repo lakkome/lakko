@@ -89,20 +89,73 @@ public func evaluateRestoreBlob(_ input: RestoreEvaluationInput) async -> Restor
 
     let envelope = parsed.envelope
 
-    // 2. Absent head → fail-open (availability exception; the phrase-AEAD still
-    //    protects the content — invariant #4 untouched).
-    guard parsed.framed, let head = parsed.head else {
+    // 2. Read the persisted floor as a discriminated absent / present / corrupt
+    //    (F5a). A CORRUPT anchor dominates every framing case below — the local
+    //    anchor once existed and is now untrustworthy, so the classifier routes
+    //    it to stale-override, never silently demoting to the weaker fresh path.
+    let floorRead = BackupFloorStore.getFloor(accountIdB64: input.accountIdB64)
+    let hasFloor: Bool
+    let floor: BackupFloor?
+    let floorCorrupt: Bool
+    switch floorRead {
+    case .present(let value):
+        hasFloor = true
+        floor = value
+        floorCorrupt = false
+    case .absent:
+        hasFloor = false
+        floor = nil
+        floorCorrupt = false
+    case .corrupt:
+        hasFloor = false
+        floor = nil
+        floorCorrupt = true
+    }
+
+    if floorCorrupt {
         return RestoreEvaluation(
-            verdict: restoreVerdict(RestoreGateFacts(framed: false)),
+            verdict: restoreVerdict(
+                RestoreGateFacts(framed: parsed.framed, floorCorrupt: true)
+            ),
             envelope: envelope,
             envelopeHash: nil,
             verifiedVersion: nil
         )
     }
 
+    // 3. Absent head (F4). Split on the floor: no floor → fail-open (true
+    //    zero-anchor fresh install); floor + byte-identical envelope → proceed;
+    //    floor + a DIFFERENT headless envelope → stale-override (head-stripping
+    //    downgrade against head-protected history). The phrase-AEAD still
+    //    protects the content in every case — invariant #4 untouched.
+    guard parsed.framed, let head = parsed.head else {
+        if !hasFloor {
+            return RestoreEvaluation(
+                verdict: restoreVerdict(RestoreGateFacts(framed: false, hasFloor: false)),
+                envelope: envelope,
+                envelopeHash: nil,
+                verifiedVersion: nil
+            )
+        }
+        let envelopeHash = backupEnvelopeHash(envelopeBytes: envelope)
+        let absentHashMatchesFloor = floor.map { $0.envelopeHash == envelopeHash } ?? false
+        return RestoreEvaluation(
+            verdict: restoreVerdict(
+                RestoreGateFacts(
+                    framed: false,
+                    hasFloor: true,
+                    absentHashMatchesFloor: absentHashMatchesFloor
+                )
+            ),
+            envelope: envelope,
+            envelopeHash: envelopeHash,
+            verifiedVersion: nil
+        )
+    }
+
     let envelopeHash = backupEnvelopeHash(envelopeBytes: envelope)
 
-    // 3. A framed head we cannot verify (no pinned + no reachable JWKS attest
+    // 4. A framed head we cannot verify (no pinned + no reachable JWKS attest
     //    key) is a misconfig, NOT an absent head — fail-closed (hard), never
     //    silently accept an unverified framed head (ADR-0037 §6).
     let attestKey: Data
@@ -117,9 +170,23 @@ public func evaluateRestoreBlob(_ input: RestoreEvaluationInput) async -> Restor
         )
     }
 
-    // 4. Read the persisted floor. Present → returning client (hard monotonic
+    // F1: the rollback guarantee is only as strong as the verifying key. When the
+    //     key came from the JWKS endpoint (pin unset) rather than the build-time
+    //     pin, a compromised auth origin could serve a forged key + head — surface
+    //     the weakened posture loudly. Do NOT hard-fail (that would brick unpinned
+    //     rollouts); the head is still verified, just against a less-trusted key.
+    //     The pin wins outright inside `fetch`, so a nil pin here means the key
+    //     came from JWKS (race-free).
+    if DeviceAttestKey.pinnedKey() == nil {
+        NSLog(
+            "[backup] backup-head verified against an UNPINNED (JWKS-served) attest "
+            + "key — set Info.plist LakkoDeviceAttestKey for full rollback protection"
+        )
+    }
+
+    // 5. Framed + valid floor state. Present → returning client (hard monotonic
     //    floor); absent → zero-anchor fresh install (freshness window).
-    if let floor = BackupFloorStore.getFloor(accountIdB64: input.accountIdB64) {
+    if hasFloor, let floor {
         // Returning client: signature + account binding only, then hash + floor.
         do {
             let verified = try verifyBackupHeadBinding(

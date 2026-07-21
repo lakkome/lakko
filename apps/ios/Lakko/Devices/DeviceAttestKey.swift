@@ -35,7 +35,14 @@ enum DeviceAttestKey {
 
     /// The build-time pinned key (`Info.plist` `LakkoDeviceAttestKey`,
     /// base64url of 32 bytes), or `nil` when unset / malformed.
-    private static func pinnedKey() -> Data? {
+    ///
+    /// Internal (not `private`) so a caller can tell whether ``fetch(baseURL:now:)``
+    /// returned the build-time pin (strong posture) or fell back to the JWKS
+    /// endpoint (weaker — the auth origin is trusted to serve the key). The pin
+    /// wins outright in ``fetch(baseURL:now:)``, so `pinnedKey() == nil` is an
+    /// exact, race-free indicator that a fetched key came from the JWKS endpoint.
+    /// Mirror of the web `pinnedDeviceAttestKey`.
+    static func pinnedKey() -> Data? {
         guard
             let raw = Bundle.main.object(forInfoDictionaryKey: "LakkoDeviceAttestKey") as? String
         else {

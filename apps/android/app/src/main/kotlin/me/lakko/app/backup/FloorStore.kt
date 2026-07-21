@@ -62,8 +62,10 @@ public object FloorStore {
         floor: BackupFloor,
     ): Boolean {
         val existing = getFloor(context, accountIdB64)
-        // Never lower an existing floor (ULong comparison).
-        if (existing != null && existing.version >= floor.version) {
+        // Never lower an existing, cleanly-read floor (ULong comparison). A
+        // corrupt / absent existing floor is overwritten by this fresh, valid one
+        // — the write heals the anchor.
+        if (existing is FloorRead.Present && existing.floor.version >= floor.version) {
             return false
         }
         val value = "${floor.version}|" +
@@ -78,25 +80,56 @@ public object FloorStore {
     /**
      * Read the version floor for `accountIdB64`.
      *
-     * Returns `null` when no floor exists (fresh device — the zero-anchor path)
-     * OR when the stored row is malformed. Treating a broken floor as "absent"
-     * is fail-safe here: the restore then falls back to the freshness-window
-     * path rather than throwing — the floor is a rollback OPTIMISATION, never
-     * the confidentiality boundary.
+     * Returns a discriminated [FloorRead] (F5a):
+     * - [FloorRead.Absent] — no stored entry (fresh device — the zero-anchor
+     *   path). Genuine absence stays fail-safe: a first-ever restore is NEVER
+     *   [FloorRead.Corrupt].
+     * - [FloorRead.Present] — a valid, parsed floor.
+     * - [FloorRead.Corrupt] — an entry EXISTS but is undecryptable / wrong shape
+     *   / bad base64 (a device-key rotation, keystore loss, or an attacker who
+     *   tampered the row). Distinct from [FloorRead.Absent]: the anchor once
+     *   existed and is now untrustworthy, so the restore gate must NOT silently
+     *   fall to the weaker freshness path — it routes a corrupt anchor to
+     *   [RestoreVerdict.StaleOverride].
+     *
+     * Total — never throws. A store that cannot even be opened (e.g. an
+     * unrecoverable master-key rotation) means an anchor that once existed is now
+     * unreadable, so it is surfaced as [FloorRead.Corrupt], never [FloorRead.Absent].
      */
-    public fun getFloor(context: Context, accountIdB64: String): BackupFloor? {
-        val raw = openPrefs(context).getString(KEY_PREFIX + accountIdB64, null)
-            ?: return null
+    public fun getFloor(context: Context, accountIdB64: String): FloorRead {
+        val storageKey = KEY_PREFIX + accountIdB64
+        // `contains` answers "is there a stored entry" WITHOUT decrypting the
+        // value (EncryptedSharedPreferences encrypts the key deterministically via
+        // AES-SIV), so an undecryptable value does not masquerade as absent. A
+        // store that fails to open at all is treated as a corrupt anchor.
+        val prefs = try {
+            openPrefs(context)
+        } catch (_: Throwable) {
+            return FloorRead.Corrupt
+        }
+        val present = try {
+            prefs.contains(storageKey)
+        } catch (_: Throwable) {
+            return FloorRead.Corrupt
+        }
+        if (!present) return FloorRead.Absent
+        // The entry exists → any read / parse failure below is a CORRUPT anchor,
+        // never Absent.
+        val raw = try {
+            prefs.getString(storageKey, null)
+        } catch (_: Throwable) {
+            return FloorRead.Corrupt
+        } ?: return FloorRead.Corrupt
         val parts = raw.split('|', limit = 2)
-        if (parts.size != 2) return null
-        val version = parts[0].toULongOrNull() ?: return null
+        if (parts.size != 2) return FloorRead.Corrupt
+        val version = parts[0].toULongOrNull() ?: return FloorRead.Corrupt
         val hash = try {
             Base64.decode(parts[1], Base64.NO_WRAP)
         } catch (_: IllegalArgumentException) {
-            return null
+            return FloorRead.Corrupt
         }
-        if (hash.size != ENVELOPE_HASH_LEN) return null
-        return BackupFloor(version = version, envelopeHash = hash)
+        if (hash.size != ENVELOPE_HASH_LEN) return FloorRead.Corrupt
+        return FloorRead.Present(BackupFloor(version = version, envelopeHash = hash))
     }
 
     /**
@@ -123,6 +156,25 @@ public object FloorStore {
             EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM,
         )
     }
+}
+
+/**
+ * The outcome of reading the floor (F5a). Distinguishes a genuinely absent
+ * anchor (fresh device) from an anchor that EXISTS but is untrustworthy (a
+ * device-key rotation or an attacker who tampered the stored row). The restore
+ * gate must never silently demote a corrupt anchor to the weaker fresh-install
+ * path — it routes it to [RestoreVerdict.StaleOverride] instead. Mirror of the
+ * web `FloorRead` discriminated union.
+ */
+public sealed interface FloorRead {
+    /** No stored entry — a first-ever restore on this device (zero-anchor path). */
+    public data object Absent : FloorRead
+
+    /** A valid, parsed floor. */
+    public data class Present(val floor: BackupFloor) : FloorRead
+
+    /** An entry exists but decrypt / parse / shape-check failed. */
+    public data object Corrupt : FloorRead
 }
 
 /** The decrypted floor a returning client compares against (ADR-0037 §6). */

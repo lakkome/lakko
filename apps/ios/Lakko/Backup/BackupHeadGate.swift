@@ -16,19 +16,26 @@ import Foundation
 /// fetch + floor read + UniFFI verify) lives in ``evaluateRestoreBlob(_:)`` in
 /// `BackupHeadRestore.swift`.
 ///
-/// ## The three-case policy (ADR-0037 §6 table)
+/// ## The policy (ADR-0037 §6 table)
 ///
 /// | Case | Condition | Verdict |
 /// |---|---|---|
-/// | **Absent**  | byte 0 != `0xB1` (legacy blob / head stripped) | `failOpen` — warn, restore proceeds. |
+/// | **Absent, no floor**    | byte 0 != `0xB1` **and** no persisted floor — a true zero-anchor fresh install | `failOpen` — warn, restore proceeds. |
+/// | **Absent, floor, hash==**   | headless but `BLAKE3(envelope) == floor.envelopeHash` — byte-identical to the last known head, stripped benignly in transit | `proceed`. |
+/// | **Absent, floor, hash!=**   | a *different* headless envelope while we hold head-protected history — a head-stripping downgrade | `staleOverride` — user-acknowledged, fail-closed. |
+/// | **Corrupt floor**       | the local anchor exists but is undecodable / tampered (F5a) | `staleOverride` — the anchor is untrustworthy; never silently fall to the weaker fresh path. |
 /// | **Invalid** | framed but sig / `account_id` / `envelope_hash` bad, or a truncated framed blob | `hardFail` — refuse + alarm, no override. |
 /// | **Stale**   | framed + valid but `version < floor` (returning) or `signed_at` too old (fresh) | `staleOverride` — user-acknowledged override, never silent. |
 ///
-/// The `failOpen` on an **absent** head is the deliberate availability
-/// exception: the envelope stays AEAD-sealed under the recovery phrase
-/// regardless of the head, so invariant #4 (no silent downgrade to non-E2EE) is
-/// untouched — only rollback-detection is skipped, and a head-stripping attacker
-/// gains only the pre-ADR-0037 status-quo rollback surface.
+/// The `failOpen` case is narrowed to **exactly** the true zero-anchor fresh
+/// install (no floor). A **returning** client (any persisted floor) is
+/// hard-protected: an attacker who strips the `0xB1` head to bypass the monotone
+/// floor no longer wins — a headless envelope that does not byte-match the floor
+/// routes to `staleOverride`, not `failOpen`. The `failOpen` that remains is the
+/// deliberate availability exception for the legacy rollout: the envelope stays
+/// AEAD-sealed under the recovery phrase regardless of the head, so invariant #4
+/// (no silent downgrade to non-E2EE) is untouched — only rollback-detection is
+/// skipped, and only for a client with no anchor to defend.
 
 /// The four terminal restore verdicts (ADR-0037 §6).
 public enum RestoreVerdict: Equatable {
@@ -52,9 +59,21 @@ public struct RestoreGateFacts: Equatable {
     public var parseError: Bool
     /// byte 0 == `0xB1` — the blob carried a container tag + head.
     public var framed: Bool
-    /// A version floor was persisted for this account (returning client). When
-    /// `false` the client is a zero-anchor fresh install → freshness window.
+    /// A version floor was persisted AND read cleanly for this account (returning
+    /// client). When `false` the client is a zero-anchor fresh install OR the
+    /// floor was unreadable (see `floorCorrupt`).
     public var hasFloor: Bool
+    /// F5a: the local anchor exists in the Keychain but could not be decoded /
+    /// parsed (present-but-wrong-length row or an active tamper). Distinct from a
+    /// genuinely absent floor — the anchor is untrustworthy, so we never silently
+    /// demote to the weaker fresh-install path. Only meaningful with
+    /// `hasFloor == false`.
+    public var floorCorrupt: Bool
+    /// F4: `!framed && hasFloor` and `backupEnvelopeHash(served envelope) ==
+    /// floor.envelopeHash` — a headless blob byte-identical to the last known
+    /// (head stripped benignly in transit). Only meaningful when
+    /// `!framed && hasFloor`.
+    public var absentHashMatchesFloor: Bool
     /// Returning path: `verifyBackupHeadBinding` threw (bad sig / account bind).
     public var bindingInvalid: Bool
     /// Returning path: `verified.envelopeHash != backupEnvelopeHash(envelope)`.
@@ -70,6 +89,8 @@ public struct RestoreGateFacts: Equatable {
         parseError: Bool = false,
         framed: Bool = false,
         hasFloor: Bool = false,
+        floorCorrupt: Bool = false,
+        absentHashMatchesFloor: Bool = false,
         bindingInvalid: Bool = false,
         hashMismatch: Bool = false,
         versionBelowFloor: Bool = false,
@@ -79,6 +100,8 @@ public struct RestoreGateFacts: Equatable {
         self.parseError = parseError
         self.framed = framed
         self.hasFloor = hasFloor
+        self.floorCorrupt = floorCorrupt
+        self.absentHashMatchesFloor = absentHashMatchesFloor
         self.bindingInvalid = bindingInvalid
         self.hashMismatch = hashMismatch
         self.versionBelowFloor = versionBelowFloor
@@ -94,18 +117,47 @@ public struct RestoreGateFacts: Equatable {
 ///
 /// Branch order is load-bearing:
 ///   1. a parse error (truncated framed blob) is a hard tamper regardless;
-///   2. an absent head fails open (availability exception);
-///   3. a returning client (has floor) uses the hard monotonic floor — no
+///   2. a CORRUPT floor (F5a) — the local anchor exists but is untrustworthy —
+///      routes to `staleOverride` before anything else, so we never demote to
+///      the weaker fresh path on a tampered anchor;
+///   3. an absent head splits on the floor (F4): no floor → `failOpen` (true
+///      zero-anchor fresh install, unchanged); floor + byte-identical envelope →
+///      `proceed`; floor + a DIFFERENT headless envelope → `staleOverride` (a
+///      head-stripping downgrade against head-protected history);
+///   4. a returning client (has floor) uses the hard monotonic floor — no
 ///      window — refusing an invalid signature / hash (hard) or a below-floor
 ///      version (stale-override);
-///   4. a fresh install (no floor) falls back to the freshness window —
+///   5. a fresh install (no floor) falls back to the freshness window —
 ///      refusing an invalid head (hard) or an over-window one (stale-override).
 public func restoreVerdict(_ facts: RestoreGateFacts) -> RestoreVerdict {
     if facts.parseError {
         return .hardFail(reason: "backup head is present but truncated or corrupt")
     }
+    if facts.floorCorrupt {
+        // F5a: the persisted anchor exists but could not be decoded / parsed. It
+        // once anchored this device, so a genuine floor-below rollback and a
+        // maliciously-corrupted floor are indistinguishable here — never silently
+        // fall to the weaker fresh path; require an explicit acknowledgement.
+        return .staleOverride(
+            reason: "the local rollback anchor is unreadable or was tampered"
+        )
+    }
     if !facts.framed {
-        return .failOpen(reason: "no backup head (legacy blob or head stripped)")
+        // F4: an absent head is only a benign legacy / stripped-in-transit case
+        // for a TRUE zero-anchor fresh install. A returning client (has floor)
+        // refuses a head-stripping downgrade unless the headless envelope is
+        // byte-identical to the last known one.
+        if !facts.hasFloor {
+            return .failOpen(
+                reason: "no backup head (legacy blob or head stripped), no anchor"
+            )
+        }
+        if facts.absentHashMatchesFloor {
+            return .proceed
+        }
+        return .staleOverride(
+            reason: "backup head stripped and the envelope differs from the last known one"
+        )
     }
     if facts.hasFloor {
         // Returning client — hard monotonic floor, no freshness window involved.

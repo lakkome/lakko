@@ -2863,6 +2863,29 @@ targets cover the new attacker surfaces
 storage blob a hostile tier crafts; `lakko-backup/backup_blob_parse`
 — the container framing). Closes G-11 in practice.
 
+**Post-landing `lakko-security` pass (APPROVE-WITH-NOTES).**
+No CRITICAL / HIGH and no invariant-#4 break on the live path;
+the F1–F5b hardenings from it tighten the gate. **F4** (all
+three clients): sub-invariant 4's **absent** case no longer
+unconditionally fail-opens — an absent head with a persisted
+floor now compares `BLAKE3(served envelope)` against the
+floor's `envelope_hash` and proceeds only on a byte-identical
+match, else routes to the user-acknowledged stale-override, so
+the fail-open is scoped to a **true zero-anchor fresh install**
+(a returning client is hard-protected against a head-stripping
+downgrade — closing the gap between the shipped code and this
+entry's residual). **F5a**: a present-but-corrupt version floor
+(undecryptable / tampered) routes to stale-override, never a
+silent demote to the weaker fresh-window path. **F2**: the
+restore gate is now mandatory (the ungated no-verification
+restore path was removed). **F1**: a loud warning on
+verification against an unpinned (JWKS-served) attest key.
+**F3** (Android): the `parseBackupBlob` catch widened to
+`Throwable` (a clean hard-fail). **F5b** (auth): a per-account,
+**fail-open** rate-limit on `POST /auth/backup/head`
+(`backup_head_mint_limits`, migration `0016`), shipped
+DEFAULT-OFF (`LAKKO_BACKUP_HEAD_MINT_RATE_LIMIT` default `0`).
+
 ## Exporter labels (call-side)
 
 | Label | Length | Context | Source | Used for |

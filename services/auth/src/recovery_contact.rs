@@ -864,6 +864,7 @@ mod recovery_contact_e2e_tests {
             recovery_contact_pepper: with_pepper.then(|| Arc::new(PEPPER)),
             otp_sender: sender,
             throttle: crate::throttle::ThrottleConfig::disabled(),
+            backup_head_mint_rate: crate::backup_head::MintRateConfig::disabled(),
         };
         (state, token_secret)
     }

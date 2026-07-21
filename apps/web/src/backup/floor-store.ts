@@ -48,6 +48,21 @@ export interface BackupFloor {
   readonly envelopeHash: Uint8Array;
 }
 
+/**
+ * The outcome of reading the floor (F5a). Distinguishes a genuinely absent
+ * anchor (fresh device) from an anchor that EXISTS but is untrustworthy (a
+ * device-key rotation or an attacker who tampered the IDB row). The restore
+ * gate must never silently demote a corrupt anchor to the weaker fresh-install
+ * path — it routes it to `stale-override` instead.
+ */
+export type FloorRead =
+  /** No IDB entry — a first-ever restore on this device (zero-anchor path). */
+  | { readonly kind: "absent" }
+  /** A valid, decrypted floor. */
+  | { readonly kind: "present"; readonly floor: BackupFloor }
+  /** An IDB entry exists but AES-GCM decrypt / JSON parse / shape-check failed. */
+  | { readonly kind: "corrupt" };
+
 /** Sealed-plaintext JSON shape. `version` is a decimal string so a u64 never
  *  loses precision through JSON. */
 interface FloorJson {
@@ -87,9 +102,10 @@ export async function putFloor(
   floor: BackupFloor,
   deviceKey: CryptoKey,
 ): Promise<void> {
-  // Never lower an existing floor.
+  // Never lower an existing (readable) floor. A corrupt / absent existing floor
+  // is overwritten by this fresh, valid one — the write heals the anchor.
   const existing = await getFloor(accountIdB64, deviceKey);
-  if (existing !== null && existing.version >= floor.version) {
+  if (existing.kind === "present" && existing.floor.version >= floor.version) {
     return;
   }
 
@@ -127,16 +143,22 @@ export async function putFloor(
 /**
  * Read + decrypt the version floor for `accountIdB64`.
  *
- * Returns `null` when no floor exists (fresh device — the zero-anchor path) OR
- * when the stored row cannot be decrypted / parsed (a device-key rotation or
- * corruption). Treating a broken floor as "absent" is fail-safe here: the
- * restore then falls back to the freshness-window path rather than throwing —
- * the floor is a rollback OPTIMISATION, never the confidentiality boundary.
+ * Returns a discriminated [`FloorRead`] (F5a):
+ * - `{ kind: "absent" }` — no IDB entry (fresh device — the zero-anchor path).
+ * - `{ kind: "present", floor }` — a valid, decrypted floor.
+ * - `{ kind: "corrupt" }` — an IDB entry EXISTS but AES-GCM decrypt / JSON parse
+ *   / shape-check failed (a device-key rotation or an attacker who tampered the
+ *   row). Distinct from "absent": the anchor once existed and is now
+ *   untrustworthy, so the restore gate must NOT silently fall to the weaker
+ *   freshness path — it routes a corrupt anchor to `stale-override`.
+ *
+ * Genuine absence stays fail-safe: a first-ever restore (no row) is `absent`,
+ * never `corrupt`. Only a present-but-undecryptable row is `corrupt`.
  */
 export async function getFloor(
   accountIdB64: string,
   deviceKey: CryptoKey,
-): Promise<BackupFloor | null> {
+): Promise<FloorRead> {
   const db = await openDb();
   try {
     const row: FloorRecord | undefined = await new Promise((resolve, reject) => {
@@ -147,7 +169,7 @@ export async function getFloor(
       req.onerror = (): void =>
         reject(req.error ?? new Error("IDB floor get error"));
     });
-    if (row === undefined) return null;
+    if (row === undefined) return { kind: "absent" };
 
     try {
       const iv = row.ciphertext.slice(0, 12);
@@ -156,12 +178,18 @@ export async function getFloor(
         await crypto.subtle.decrypt({ name: "AES-GCM", iv }, deviceKey, ct),
       );
       const json = JSON.parse(new TextDecoder().decode(plaintext)) as FloorJson;
-      if (typeof json.v !== "string" || typeof json.h !== "string") return null;
-      return { version: BigInt(json.v), envelopeHash: base64Decode(json.h) };
+      if (typeof json.v !== "string" || typeof json.h !== "string") {
+        return { kind: "corrupt" };
+      }
+      return {
+        kind: "present",
+        floor: { version: BigInt(json.v), envelopeHash: base64Decode(json.h) },
+      };
     } catch {
-      // Broken wrap (device-key rotation) — treat as absent (fall back to the
-      // freshness path), never throw.
-      return null;
+      // Entry exists but the wrap is broken (device-key rotation or tampering).
+      // NOT absent — the anchor once existed, so surface it as corrupt so the
+      // gate fails closed (stale-override) rather than demoting to fresh.
+      return { kind: "corrupt" };
     }
   } finally {
     db.close();

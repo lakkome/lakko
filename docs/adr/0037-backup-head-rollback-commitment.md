@@ -305,21 +305,44 @@ Torn states:
 
   | Case | Condition | Policy |
   |---|---|---|
-  | **Absent** | byte 0 ≠ `0xB1` (legacy blob, or storage stripped the head) | **FAIL-OPEN** — warn, restore proceeds. |
+  | **Absent, no floor** | byte 0 ≠ `0xB1` **and** no persisted floor — a true zero-anchor fresh install | **FAIL-OPEN** — warn, restore proceeds. |
+  | **Absent, floor, hash ==** | byte 0 ≠ `0xB1`, a floor exists, and `BLAKE3(envelope) == floor.envelope_hash` — byte-identical to the last known head, stripped benignly in transit | **PROCEED**. |
+  | **Absent, floor, hash !=** | byte 0 ≠ `0xB1`, a floor exists, and `BLAKE3(envelope) != floor.envelope_hash` — a *different* headless envelope while the device holds head-protected history | **FAIL-CLOSED with explicit user-acknowledged override** + alarm. |
+  | **Corrupt floor** | the persisted floor row EXISTS but is undecryptable / tampered (device-key rotation or an attacker who mangled the IDB row) | **FAIL-CLOSED with explicit user-acknowledged override** + alarm. |
   | **Invalid** | framed, but the signature fails, `account_id` mismatches, or `envelope_hash != BLAKE3(envelope)` | **FAIL-CLOSED, hard** — refuse + alarm, no override. |
   | **Stale** | framed + valid, but `backup_version < last_known_version` (returning client) **or** `signed_at` older than the staleness window (fresh install) | **FAIL-CLOSED with explicit user-acknowledged override** + alarm. |
 
   Rationale for each:
-  - **Absent → fail-open** is the deliberate availability exception, exactly like
-    the ADR-0033 admission throttle's fail-open. Failing closed on absence would
-    brick every pre-ADR-0037 legacy backup and every restore during the rollout
-    window before all clients embed heads — a self-inflicted DoS strictly worse
-    than the residual, since a head-stripping attacker gains only the *status-quo*
-    rollback surface (the posture before this ADR), never more. Crucially, this
-    fail-open is on the **rollback-detection** layer, **not** on E2EE: the envelope
-    is AEAD-sealed under the recovery phrase regardless of the head, so invariant #4
-    (no silent downgrade to non-E2EE) is untouched — confidentiality + content
-    integrity never depend on the head.
+  - **Absent → fail-open only for a true zero-anchor fresh install.** The
+    fail-open is the deliberate availability exception, exactly like the ADR-0033
+    admission throttle's fail-open — but it is scoped to **exactly** the case that
+    needs it: a client with **no persisted floor**. Failing closed on absence for
+    *that* client would brick every pre-ADR-0037 legacy backup and every restore
+    during the rollout window before all clients embed heads — a self-inflicted
+    DoS. A **returning** client (any persisted floor) is a different matter: an
+    attacker who *strips* the `0xB1` head and serves an older legacy envelope was,
+    under the original single "Absent → fail-open" rule, able to bypass the
+    monotone floor even for a returning client. That contradicts this ADR's own
+    "any client that ever persisted a floor is hard-protected" claim, so the
+    absent case is split: a headless envelope that **byte-matches** the floor's
+    committed `envelope_hash` is the benign stripped-in-transit case and
+    **proceeds**; a headless envelope that **differs** is a head-stripping
+    downgrade and routes to the **user-acknowledged override** (never a silent
+    fail-open). This tightens the fail-open residual to **exactly** the true
+    zero-anchor fresh install — matching this ADR's existing framing that the
+    within-window replay residual is confined to that one case. Crucially, the
+    fail-open (and every case here) is on the **rollback-detection** layer,
+    **not** on E2EE: the envelope is AEAD-sealed under the recovery phrase
+    regardless of the head, so invariant #4 (no silent downgrade to non-E2EE) is
+    untouched — confidentiality + content integrity never depend on the head.
+  - **Corrupt floor → fail-closed with override.** A floor row that exists but
+    cannot be decrypted / parsed is distinct from a genuinely absent one: the
+    local anchor once existed and is now untrustworthy (a device-key rotation, or
+    an attacker who tampered the IDB row precisely to demote the client to the
+    weaker fresh-install path). The gate therefore never silently falls back to
+    the freshness window on a corrupt anchor — it routes to the same
+    user-acknowledged override, so a deliberate downgrade always requires human
+    consent.
   - **Invalid → hard fail-closed** is an unambiguous active tamper or corruption (a
     signature that does not verify, or a head that does not match the served
     envelope). There is no legitimate cause, so refuse with no escape hatch.

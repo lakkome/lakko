@@ -305,6 +305,7 @@ mod tests {
             recovery_contact_pepper: None,
             otp_sender: Arc::new(crate::otp_sender::LogOnlyOtpSender),
             throttle: crate::throttle::ThrottleConfig::disabled(),
+            backup_head_mint_rate: crate::backup_head::MintRateConfig::disabled(),
         }
     }
 

@@ -44,6 +44,11 @@
 //!   `call_id` per window before throttling (default 8; **0 = disabled**).
 //! - `LAKKO_AUTH_CALL_THROTTLE_SECS` — how long a call stays throttled once
 //!   tripped (default 300).
+//! - `LAKKO_BACKUP_HEAD_MINT_RATE_LIMIT` — max backup-head mints per account per
+//!   window before `429` (ADR-0037 F5b; **default 0 = disabled**; set a positive
+//!   value, e.g. 60, to arm it — fails OPEN on a store error).
+//! - `LAKKO_BACKUP_HEAD_MINT_RATE_WINDOW_SECS` — the mint rate-limit's fixed
+//!   window (default 60; only consulted once a positive limit is set).
 //!
 //! Endpoints:
 //!
@@ -195,6 +200,13 @@ pub(crate) struct AppState {
     /// throttle sees only admission bookkeeping (call_id, account_id,
     /// timestamps) and fails OPEN on a store error — no E2EE / invariant impact.
     pub(crate) throttle: throttle::ThrottleConfig,
+    /// ADR-0037 F5b — generous, fail-open per-account rate-limit on the
+    /// backup-head mint (`POST /auth/backup/head`). Loaded from the environment
+    /// at startup and consulted by `backup_head` before the counter bump.
+    /// `limit == 0` (`LAKKO_BACKUP_HEAD_MINT_RATE_LIMIT=0`) disables it. Sees
+    /// only per-account mint bookkeeping and fails OPEN on a store error — no
+    /// E2EE / invariant impact.
+    pub(crate) backup_head_mint_rate: backup_head::MintRateConfig,
 }
 
 #[tokio::main]
@@ -349,6 +361,22 @@ async fn main() -> Result<()> {
         );
     }
 
+    // ADR-0037 F5b — generous, fail-open per-account backup-head mint
+    // rate-limit. Loaded from the environment; enabled by default at a generous
+    // cap (`LAKKO_BACKUP_HEAD_MINT_RATE_LIMIT=0` disables it).
+    let backup_head_mint_rate = backup_head::MintRateConfig::from_env();
+    if backup_head_mint_rate.enabled() {
+        tracing::info!(
+            limit = backup_head_mint_rate.limit,
+            window_secs = backup_head_mint_rate.window_secs,
+            "backup-head mint rate-limit enabled"
+        );
+    } else {
+        tracing::info!(
+            "backup-head mint rate-limit disabled (LAKKO_BACKUP_HEAD_MINT_RATE_LIMIT=0)"
+        );
+    }
+
     let state = AppState {
         db: pool.clone(),
         opaque_setup: Arc::new(opaque_setup),
@@ -363,6 +391,7 @@ async fn main() -> Result<()> {
         recovery_contact_pepper: recovery_contact_pepper.map(Arc::new),
         otp_sender,
         throttle: throttle_config,
+        backup_head_mint_rate,
     };
 
     // Background tasks: periodically delete expired rows from the

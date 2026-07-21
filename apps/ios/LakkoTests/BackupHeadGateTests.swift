@@ -11,13 +11,57 @@ import XCTest
 /// below-floor; fresh install → hard on invalid, stale-override on over-window.
 final class BackupHeadGateTests: XCTestCase {
 
-    // MARK: - Absent head → fail-open (availability exception)
+    // MARK: - Absent head (F4) — floor-split
 
-    func testAbsentHeadFailsOpen() {
-        // No framing (legacy blob / head stripped) — restore proceeds, warn.
-        let verdict = restoreVerdict(RestoreGateFacts(framed: false))
+    func testAbsentHeadNoFloorFailsOpen() {
+        // A true zero-anchor fresh install: no framing (legacy blob / head
+        // stripped) AND no persisted floor — restore proceeds, warn.
+        let verdict = restoreVerdict(RestoreGateFacts(framed: false, hasFloor: false))
         guard case .failOpen = verdict else {
-            return XCTFail("absent head must fail-open, got \(verdict)")
+            return XCTFail("absent head + no floor must fail-open, got \(verdict)")
+        }
+    }
+
+    func testAbsentHeadFloorHashMatchProceeds() {
+        // F4: a returning client whose head was benignly stripped in transit but
+        // the envelope byte-matches the last known one — safe to proceed.
+        let verdict = restoreVerdict(
+            RestoreGateFacts(framed: false, hasFloor: true, absentHashMatchesFloor: true)
+        )
+        XCTAssertEqual(verdict, .proceed)
+    }
+
+    func testAbsentHeadFloorHashMismatchStaleOverride() {
+        // F4: a head-stripping downgrade against head-protected history — refuse
+        // unless the user explicitly acknowledges (never fail-open for a returning
+        // client with a mismatching headless envelope).
+        let verdict = restoreVerdict(
+            RestoreGateFacts(framed: false, hasFloor: true, absentHashMatchesFloor: false)
+        )
+        guard case .staleOverride = verdict else {
+            return XCTFail("absent head + floor + mismatch must stale-override, got \(verdict)")
+        }
+    }
+
+    // MARK: - Corrupt floor (F5a) — untrustworthy anchor → stale-override
+
+    func testCorruptFloorStaleOverride() {
+        // The local anchor exists but is undecodable — never demote to the weaker
+        // fresh path; require an explicit acknowledgement.
+        let verdict = restoreVerdict(RestoreGateFacts(floorCorrupt: true))
+        guard case .staleOverride = verdict else {
+            return XCTFail("corrupt floor must stale-override, got \(verdict)")
+        }
+    }
+
+    func testCorruptFloorFramedStaleOverride() {
+        // A corrupt anchor dominates even a framed blob — F5a short-circuits
+        // before the framed hard-fail checks.
+        let verdict = restoreVerdict(
+            RestoreGateFacts(framed: true, hasFloor: false, floorCorrupt: true)
+        )
+        guard case .staleOverride = verdict else {
+            return XCTFail("corrupt floor + framed must stale-override, got \(verdict)")
         }
     }
 
@@ -115,6 +159,34 @@ final class BackupHeadGateTests: XCTestCase {
         )
         guard case .hardFail = verdict else {
             return XCTFail("bad binding must beat below-floor, got \(verdict)")
+        }
+    }
+
+    func testParseErrorBeatsFloorCorrupt() {
+        // A truncated framed blob is a hard tamper regardless of the anchor state
+        // — branch 1 (parseError) wins over branch 2 (floorCorrupt).
+        let verdict = restoreVerdict(
+            RestoreGateFacts(parseError: true, framed: true, floorCorrupt: true)
+        )
+        guard case .hardFail = verdict else {
+            return XCTFail("parseError must beat floorCorrupt, got \(verdict)")
+        }
+    }
+
+    func testFloorCorruptBeatsRest() {
+        // floorCorrupt short-circuits before the framed hard-fail / absent checks;
+        // a corrupt anchor is always the user-acknowledged stale path (fail-closed).
+        let verdict = restoreVerdict(
+            RestoreGateFacts(
+                framed: true,
+                hasFloor: false,
+                floorCorrupt: true,
+                bindingInvalid: true,
+                versionBelowFloor: true
+            )
+        )
+        guard case .staleOverride = verdict else {
+            return XCTFail("floorCorrupt must beat the framed / absent branches, got \(verdict)")
         }
     }
 

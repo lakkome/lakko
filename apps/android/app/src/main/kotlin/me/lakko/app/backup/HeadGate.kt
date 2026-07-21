@@ -18,19 +18,27 @@ import me.lakko.app.BuildConfig
  * verdicts; the IO that resolves those facts (parse + hash + attest-key fetch +
  * floor read + FFI verify) lives in [evaluateRestoreBlob] (`HeadRestore.kt`).
  *
- * ## The three-case policy (ADR-0037 §6 table)
+ * ## The policy (ADR-0037 §6 table)
  *
  * | Case | Condition | Verdict |
  * |---|---|---|
- * | **Absent**  | byte 0 != `0xB1` (legacy blob / head stripped) | [RestoreVerdict.FailOpen] — warn, restore proceeds. |
+ * | **Absent, no floor**  | byte 0 != `0xB1` **and** no persisted floor — a true zero-anchor fresh install | [RestoreVerdict.FailOpen] — warn, restore proceeds. |
+ * | **Absent, floor, hash==** | headless but `BLAKE3(envelope) == floor.envelopeHash` — byte-identical to the last known head, stripped benignly in transit | [RestoreVerdict.Proceed]. |
+ * | **Absent, floor, hash!=** | a *different* headless envelope while we hold head-protected history — a head-stripping downgrade | [RestoreVerdict.StaleOverride] — user-acknowledged, fail-closed. |
+ * | **Corrupt floor** | the local anchor exists but is undecryptable / tampered (F5a) | [RestoreVerdict.StaleOverride] — the anchor is untrustworthy; never silently fall to the weaker fresh path. |
  * | **Invalid** | framed but sig / `account_id` / `envelope_hash` bad, or a truncated framed blob | [RestoreVerdict.HardFail] — refuse + alarm, no override. |
  * | **Stale**   | framed + valid but `version < floor` (returning) or `signed_at` too old (fresh) | [RestoreVerdict.StaleOverride] — user-acknowledged override, never silent. |
  *
- * The fail-open on an **absent** head is the deliberate availability exception:
- * the envelope stays AEAD-sealed under the recovery phrase regardless of the
- * head, so invariant #4 (no silent downgrade to non-E2EE) is untouched — only
- * rollback-detection is skipped, and a head-stripping attacker gains only the
- * pre-ADR-0037 status-quo rollback surface.
+ * The fail-open case is narrowed to **exactly** the true zero-anchor fresh
+ * install (no floor). A **returning** client (any persisted floor) is
+ * hard-protected: an attacker who strips the `0xB1` head to bypass the monotone
+ * floor no longer wins — a headless envelope that does not byte-match the floor
+ * routes to [RestoreVerdict.StaleOverride], not [RestoreVerdict.FailOpen]. The
+ * fail-open that remains is the deliberate availability exception for the legacy
+ * rollout: the envelope stays AEAD-sealed under the recovery phrase regardless
+ * of the head, so invariant #4 (no silent downgrade to non-E2EE) is untouched —
+ * only rollback-detection is skipped, and only for a client with no anchor to
+ * defend.
  */
 
 /** The four terminal restore verdicts (ADR-0037 §6). Mirror of the web
@@ -62,9 +70,20 @@ public data class RestoreGateFacts(
     val parseError: Boolean = false,
     /** byte 0 == `0xB1` — the blob carried a container tag + head. */
     val framed: Boolean = false,
-    /** A version floor was persisted for this account (returning client). When
-     *  `false` the client is a zero-anchor fresh install → freshness window. */
+    /** A version floor was persisted AND read cleanly for this account (returning
+     *  client). When `false` the client is a zero-anchor fresh install OR the
+     *  floor was unreadable (see [floorCorrupt]). */
     val hasFloor: Boolean = false,
+    /** F5a: the local anchor exists in the store but could not be decrypted /
+     *  parsed (device-key rotation or active tampering). Distinct from a
+     *  genuinely absent floor — the anchor is untrustworthy, so we never silently
+     *  demote to the weaker fresh-install path. Only meaningful with
+     *  `hasFloor == false`. */
+    val floorCorrupt: Boolean = false,
+    /** F4: `!framed && hasFloor` and `BLAKE3(served envelope) == floor.envelopeHash`
+     *  — a headless blob byte-identical to the last known one (head stripped
+     *  benignly in transit). Only meaningful when `!framed && hasFloor`. */
+    val absentHashMatchesFloor: Boolean = false,
     /** Returning path: `verifyBackupHeadBinding` threw `FfiException.Backup`. */
     val bindingInvalid: Boolean = false,
     /** Returning path: `verified.envelopeHash != backupEnvelopeHash(envelope)`. */
@@ -84,11 +103,17 @@ public data class RestoreGateFacts(
  *
  * Branch order is load-bearing:
  *   1. a parse error (truncated framed blob) is a hard tamper regardless;
- *   2. an absent head fails open (availability exception);
- *   3. a returning client (has floor) uses the hard monotonic floor — no
+ *   2. a CORRUPT floor (F5a) — the local anchor exists but is untrustworthy —
+ *      routes to stale-override before anything else, so we never demote to the
+ *      weaker fresh path on a tampered anchor;
+ *   3. an absent head splits on the floor (F4): no floor → fail-open (true
+ *      zero-anchor fresh install, unchanged); floor + byte-identical envelope →
+ *      proceed; floor + a DIFFERENT headless envelope → stale-override (a
+ *      head-stripping downgrade against head-protected history);
+ *   4. a returning client (has floor) uses the hard monotonic floor — no
  *      window — refusing an invalid signature / hash (hard) or a below-floor
  *      version (stale-override);
- *   4. a fresh install (no floor) falls back to the freshness window —
+ *   5. a fresh install (no floor) falls back to the freshness window —
  *      refusing an invalid head (hard) or an over-window one (stale-override).
  */
 public fun restoreVerdict(facts: RestoreGateFacts): RestoreVerdict {
@@ -97,9 +122,30 @@ public fun restoreVerdict(facts: RestoreGateFacts): RestoreVerdict {
             "backup head is present but truncated or corrupt",
         )
     }
+    if (facts.floorCorrupt) {
+        // F5a: the persisted anchor exists but could not be decrypted / parsed.
+        // It once anchored this device, so a genuine floor-below rollback and a
+        // maliciously-corrupted floor are indistinguishable here — never silently
+        // fall to the weaker fresh path; require an explicit acknowledgement.
+        return RestoreVerdict.StaleOverride(
+            "the local rollback anchor is unreadable or was tampered",
+        )
+    }
     if (!facts.framed) {
-        return RestoreVerdict.FailOpen(
-            "no backup head (legacy blob or head stripped)",
+        // F4: an absent head is only a benign legacy / stripped-in-transit case
+        // for a TRUE zero-anchor fresh install. A returning client (has floor)
+        // refuses a head-stripping downgrade unless the headless envelope is
+        // byte-identical to the last known one.
+        if (!facts.hasFloor) {
+            return RestoreVerdict.FailOpen(
+                "no backup head (legacy blob or head stripped), no anchor",
+            )
+        }
+        if (facts.absentHashMatchesFloor) {
+            return RestoreVerdict.Proceed
+        }
+        return RestoreVerdict.StaleOverride(
+            "backup head stripped and the envelope differs from the last known one",
         )
     }
     if (facts.hasFloor) {

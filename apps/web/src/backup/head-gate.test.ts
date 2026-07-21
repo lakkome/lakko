@@ -19,9 +19,39 @@ const facts = (over: Partial<RestoreGateFacts>): RestoreGateFacts => ({
 });
 
 describe("restoreVerdict — the ADR-0037 §6 three-case policy", () => {
-  it("absent head (byte 0 != 0xB1) → fail-open", () => {
-    const v = restoreVerdict(facts({ framed: false }));
+  it("absent head + NO floor (zero-anchor fresh install) → fail-open", () => {
+    const v = restoreVerdict(facts({ framed: false, hasFloor: false }));
     expect(v.kind).toBe("fail-open");
+  });
+
+  it("F4: absent head + floor + byte-identical envelope → proceed", () => {
+    // A returning client whose head was benignly stripped in transit but the
+    // envelope byte-matches the last known one — safe to proceed.
+    const v = restoreVerdict(
+      facts({ framed: false, hasFloor: true, absentHashMatchesFloor: true }),
+    );
+    expect(v.kind).toBe("proceed");
+  });
+
+  it("F4: absent head + floor + DIFFERENT envelope → stale-override", () => {
+    // Head-stripping downgrade against head-protected history — refuse unless
+    // the user explicitly acknowledges (never fail-open for a returning client).
+    const v = restoreVerdict(
+      facts({ framed: false, hasFloor: true, absentHashMatchesFloor: false }),
+    );
+    expect(v.kind).toBe("stale-override");
+  });
+
+  it("F5a: corrupt floor → stale-override (never demote to the fresh path)", () => {
+    const v = restoreVerdict(facts({ floorCorrupt: true }));
+    expect(v.kind).toBe("stale-override");
+  });
+
+  it("F5a: corrupt floor dominates even a framed blob → stale-override", () => {
+    const v = restoreVerdict(
+      facts({ floorCorrupt: true, framed: true, hasFloor: false }),
+    );
+    expect(v.kind).toBe("stale-override");
   });
 
   it("truncated / corrupt framed blob (parse error) → hard-fail", () => {
@@ -73,6 +103,29 @@ describe("restoreVerdict — the ADR-0037 §6 three-case policy", () => {
   it("fresh install: valid + fresh head → proceed", () => {
     const v = restoreVerdict(facts({ framed: true, hasFloor: false }));
     expect(v.kind).toBe("proceed");
+  });
+
+  it("branch order: parseError beats floorCorrupt → hard-fail", () => {
+    // A truncated framed blob is a hard tamper regardless of the anchor state.
+    const v = restoreVerdict(
+      facts({ parseError: true, floorCorrupt: true, framed: true }),
+    );
+    expect(v.kind).toBe("hard-fail");
+  });
+
+  it("branch order: floorCorrupt beats the framed / absent branches → stale-override", () => {
+    // floorCorrupt short-circuits before the framed hard-fail checks; a
+    // corrupt anchor is always the user-acknowledged stale path (fail-closed).
+    const v = restoreVerdict(
+      facts({
+        floorCorrupt: true,
+        framed: true,
+        hasFloor: false,
+        bindingInvalid: true,
+        versionBelowFloor: true,
+      }),
+    );
+    expect(v.kind).toBe("stale-override");
   });
 
   it("hard-fail dominates a returning invalid+stale head (fail-closed order)", () => {

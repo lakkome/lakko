@@ -37,10 +37,9 @@ export interface BackupRestoreInputs {
    *  token bound by the recover flow. */
   readonly sessionToken: string;
   /** ADR-0037 §6 rollback gate: verify the auth-signed backup head before
-   *  opening the envelope. When present the returning-client hard floor +
-   *  fresh-install freshness policy applies; when absent, legacy behaviour
-   *  (strip any head, no verification). The recover flow always supplies it. */
-  readonly gate?: RestoreGateContext;
+   *  opening the envelope. **Required** (F2) — the returning-client hard floor +
+   *  fresh-install freshness policy always applies; there is no ungated bypass. */
+  readonly gate: RestoreGateContext;
 }
 
 /**

@@ -112,6 +112,95 @@ class HeadGateTest {
         assertTrue("expected HardFail, got $v", v is RestoreVerdict.HardFail)
     }
 
+    // ---------------------------------------------------------------------
+    // F4 — absent head split on the floor (returning client, head stripped).
+    // ---------------------------------------------------------------------
+
+    @Test
+    fun `absent head with no floor fails open`() {
+        // A true zero-anchor fresh install with a headless blob — the only
+        // remaining fail-open case.
+        val v = restoreVerdict(RestoreGateFacts(framed = false, hasFloor = false))
+        assertTrue("expected FailOpen, got $v", v is RestoreVerdict.FailOpen)
+    }
+
+    @Test
+    fun `absent head byte-identical to floor proceeds`() {
+        // F4: headless but BLAKE3(envelope) == floor.envelopeHash — stripped
+        // benignly in transit, byte-identical to the last known head → proceed.
+        val v = restoreVerdict(
+            RestoreGateFacts(
+                framed = false,
+                hasFloor = true,
+                absentHashMatchesFloor = true,
+            ),
+        )
+        assertEquals(RestoreVerdict.Proceed, v)
+    }
+
+    @Test
+    fun `absent head differing from floor is stale override`() {
+        // F4: a returning client with head-protected history gets a DIFFERENT
+        // headless envelope — a head-stripping downgrade → stale-override, never
+        // fail-open.
+        val v = restoreVerdict(
+            RestoreGateFacts(
+                framed = false,
+                hasFloor = true,
+                absentHashMatchesFloor = false,
+            ),
+        )
+        assertTrue("expected StaleOverride, got $v", v is RestoreVerdict.StaleOverride)
+    }
+
+    // ---------------------------------------------------------------------
+    // F5a — corrupt floor dominates (untrustworthy local anchor).
+    // ---------------------------------------------------------------------
+
+    @Test
+    fun `corrupt floor with absent head is stale override`() {
+        // The persisted anchor exists but is undecryptable — never demote to the
+        // weaker fresh path; require an explicit acknowledgement.
+        val v = restoreVerdict(RestoreGateFacts(framed = false, floorCorrupt = true))
+        assertTrue("expected StaleOverride, got $v", v is RestoreVerdict.StaleOverride)
+    }
+
+    @Test
+    fun `corrupt floor with framed head is stale override`() {
+        // A framed head is still not trusted over a corrupt anchor — the corrupt
+        // floor routes to stale-override before the framed verify path runs.
+        val v = restoreVerdict(RestoreGateFacts(framed = true, floorCorrupt = true))
+        assertTrue("expected StaleOverride, got $v", v is RestoreVerdict.StaleOverride)
+    }
+
+    @Test
+    fun `parse error wins over corrupt floor`() {
+        // Branch order: a truncated framed blob is a hard tamper even with a
+        // corrupt floor present.
+        val v = restoreVerdict(
+            RestoreGateFacts(parseError = true, floorCorrupt = true),
+        )
+        assertTrue("expected HardFail, got $v", v is RestoreVerdict.HardFail)
+    }
+
+    @Test
+    fun `corrupt floor wins over the framed returning path`() {
+        // Branch order: floorCorrupt dominates a framed + hasFloor state that
+        // would otherwise HardFail on the bad binding — the anchor is judged
+        // untrustworthy first.
+        val v = restoreVerdict(
+            RestoreGateFacts(
+                framed = true,
+                floorCorrupt = true,
+                hasFloor = true,
+                bindingInvalid = true,
+                hashMismatch = true,
+                versionBelowFloor = true,
+            ),
+        )
+        assertTrue("expected StaleOverride, got $v", v is RestoreVerdict.StaleOverride)
+    }
+
     @Test
     fun `staleness millis is seconds times 1000`() {
         // The default (no BuildConfig override in unit tests) is 30 days.
